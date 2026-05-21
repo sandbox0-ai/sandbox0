@@ -13,6 +13,7 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/httpclient"
 	"golang.org/x/oauth2"
 )
 
@@ -54,9 +55,12 @@ type Provider struct {
 	deviceVerifier              *oidc.IDTokenVerifier
 	deviceAuthorizationEndpoint string
 	endSessionEndpoint          string
+	httpClient                  *http.Client
 }
 
 const wellKnownOIDCConfigPath = "/.well-known/openid-configuration"
+
+const defaultHTTPTimeout = 10 * time.Second
 
 type discoveryMetadata struct {
 	Issuer                      string `json:"issuer"`
@@ -66,13 +70,20 @@ type discoveryMetadata struct {
 
 // NewProvider creates a new OIDC provider
 func NewProvider(ctx context.Context, cfg *config.OIDCProviderConfig, baseURL string) (*Provider, error) {
+	return newProvider(ctx, cfg, baseURL, nil)
+}
+
+func newProvider(ctx context.Context, cfg *config.OIDCProviderConfig, baseURL string, httpClient *http.Client) (*Provider, error) {
+	httpClient = resolveHTTPClient(httpClient)
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
+
 	// go-oidc expects an issuer URL here. Accept either the issuer URL itself
 	// or a full discovery document URL and normalize to the issuer form.
 	// When a provider publishes an issuer that differs only by a trailing slash,
 	// prefer the discovery document's issuer exactly so initialization remains
 	// compatible across OIDC providers and custom domains.
 	issuerURL := normalizeOIDCIssuerURL(cfg.DiscoveryURL)
-	metadata, err := fetchDiscoveryMetadata(ctx, cfg.DiscoveryURL)
+	metadata, err := fetchDiscoveryMetadata(ctx, cfg.DiscoveryURL, httpClient)
 	if err == nil && strings.TrimSpace(metadata.Issuer) != "" {
 		issuerURL = strings.TrimSpace(metadata.Issuer)
 	}
@@ -129,7 +140,12 @@ func NewProvider(ctx context.Context, cfg *config.OIDCProviderConfig, baseURL st
 		deviceVerifier:              deviceVerifier,
 		deviceAuthorizationEndpoint: strings.TrimSpace(metadata.DeviceAuthorizationEndpoint),
 		endSessionEndpoint:          strings.TrimSpace(metadata.EndSessionEndpoint),
+		httpClient:                  httpClient,
 	}, nil
+}
+
+func resolveHTTPClient(httpClient *http.Client) *http.Client {
+	return httpclient.Resolve(httpClient, defaultHTTPTimeout)
 }
 
 func normalizeOIDCIssuerURL(value string) string {
@@ -148,18 +164,19 @@ func resolveOIDCDiscoveryURL(value string) string {
 	return strings.TrimRight(trimmed, "/") + wellKnownOIDCConfigPath
 }
 
-func fetchDiscoveryMetadata(ctx context.Context, value string) (discoveryMetadata, error) {
+func fetchDiscoveryMetadata(ctx context.Context, value string, httpClient *http.Client) (discoveryMetadata, error) {
 	discoveryURL := resolveOIDCDiscoveryURL(value)
 	if discoveryURL == "" {
 		return discoveryMetadata{}, errors.New("missing discovery URL")
 	}
+	httpClient = resolveHTTPClient(httpClient)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, discoveryURL, nil)
 	if err != nil {
 		return discoveryMetadata{}, fmt.Errorf("build discovery request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return discoveryMetadata{}, fmt.Errorf("fetch discovery document: %w", err)
 	}
@@ -215,6 +232,7 @@ func (p *Provider) AuthURL(state, verifier string) string {
 
 // Exchange exchanges an authorization code for tokens
 func (p *Provider) Exchange(ctx context.Context, code, verifier string) (*oauth2.Token, error) {
+	ctx = p.withHTTPClient(ctx)
 	token, err := p.oauth2Config.Exchange(ctx, code, oauth2.VerifierOption(verifier))
 	if err != nil {
 		return nil, fmt.Errorf("exchange code: %w", err)
@@ -283,6 +301,7 @@ func (p *Provider) LogoutURL(returnURL string) (string, error) {
 }
 
 func (p *Provider) verifyIDToken(ctx context.Context, rawIDToken string) (*oidc.IDToken, error) {
+	ctx = p.withHTTPClient(ctx)
 	idToken, err := p.verifier.Verify(ctx, rawIDToken)
 	if err == nil {
 		return idToken, nil
@@ -300,6 +319,7 @@ func (p *Provider) fetchUserInfo(ctx context.Context, token *oauth2.Token) (*Use
 	if strings.TrimSpace(token.AccessToken) == "" {
 		return nil, errors.New("no access_token in response")
 	}
+	ctx = p.withHTTPClient(ctx)
 	userInfo, err := p.oidcProvider.UserInfo(ctx, oauth2.StaticTokenSource(token))
 	if err != nil {
 		return nil, fmt.Errorf("fetch userinfo: %w", err)
@@ -386,7 +406,7 @@ func (p *Provider) StartDeviceAuthorization(ctx context.Context) (*DeviceAuthori
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := p.httpClientOrDefault().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("start device authorization: %w", err)
 	}
@@ -460,7 +480,7 @@ func (p *Provider) ExchangeDeviceCode(ctx context.Context, deviceCode string) (*
 		}
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := p.httpClientOrDefault().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("exchange device code: %w", err)
 	}
@@ -527,6 +547,17 @@ func (p *Provider) ExchangeDeviceCode(ctx context.Context, deviceCode string) (*
 		token = token.WithExtra(extra)
 	}
 	return token, nil
+}
+
+func (p *Provider) withHTTPClient(ctx context.Context) context.Context {
+	return context.WithValue(ctx, oauth2.HTTPClient, p.httpClientOrDefault())
+}
+
+func (p *Provider) httpClientOrDefault() *http.Client {
+	if p != nil && p.httpClient != nil {
+		return p.httpClient
+	}
+	return resolveHTTPClient(nil)
 }
 
 // ValidateEmailDomain checks if the email domain matches the configured domain

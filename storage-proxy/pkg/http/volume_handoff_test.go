@@ -14,6 +14,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
@@ -154,7 +155,7 @@ func TestExecutePortalBindHandoffCompletesAndCleansRow(t *testing.T) {
 		MountOptions: mustMountOptionsRaw(t, volume.MountOptions{AccessMode: volume.AccessModeRWO, OwnerKind: volume.OwnerKindCtld, OwnerPort: sourcePort}),
 	}
 
-	err := server.executePortalBindHandoff(context.Background(), repo.volumes["vol-1"], sourceMount, preparePortalBindRequest{
+	err := server.executePortalBindHandoff(context.Background(), repo.volumes["vol-1"], sourceMount, volumeportal.PrepareBindRequest{
 		TargetClusterID: "cluster-b",
 		TargetCtldAddr:  target.URL,
 		Namespace:       "default",
@@ -225,7 +226,7 @@ func TestExecutePortalBindHandoffAbortsOnBindFailure(t *testing.T) {
 		MountOptions: mustMountOptionsRaw(t, volume.MountOptions{AccessMode: volume.AccessModeRWO, OwnerKind: volume.OwnerKindCtld, OwnerPort: sourcePort}),
 	}
 
-	err := server.executePortalBindHandoff(context.Background(), repo.volumes["vol-1"], sourceMount, preparePortalBindRequest{
+	err := server.executePortalBindHandoff(context.Background(), repo.volumes["vol-1"], sourceMount, volumeportal.PrepareBindRequest{
 		TargetClusterID: "cluster-b",
 		TargetCtldAddr:  target.URL,
 		Namespace:       "default",
@@ -298,7 +299,7 @@ func TestExecutePortalBindHandoffAbortsWhenPrepareDoesNotComplete(t *testing.T) 
 		MountOptions: mustMountOptionsRaw(t, volume.MountOptions{AccessMode: volume.AccessModeRWO, OwnerKind: volume.OwnerKindCtld, OwnerPort: sourcePort}),
 	}
 
-	err := server.executePortalBindHandoff(context.Background(), repo.volumes["vol-1"], sourceMount, preparePortalBindRequest{
+	err := server.executePortalBindHandoff(context.Background(), repo.volumes["vol-1"], sourceMount, volumeportal.PrepareBindRequest{
 		TargetClusterID: "cluster-b",
 		TargetCtldAddr:  target.URL,
 		Namespace:       "default",
@@ -356,7 +357,7 @@ func TestExecutePortalBindHandoffMapsPrepareConflictToDBConflict(t *testing.T) {
 		MountOptions: mustMountOptionsRaw(t, volume.MountOptions{AccessMode: volume.AccessModeRWO, OwnerKind: volume.OwnerKindCtld, OwnerPort: sourcePort}),
 	}
 
-	err := server.executePortalBindHandoff(context.Background(), repo.volumes["vol-1"], sourceMount, preparePortalBindRequest{
+	err := server.executePortalBindHandoff(context.Background(), repo.volumes["vol-1"], sourceMount, volumeportal.PrepareBindRequest{
 		TargetClusterID: "cluster-b",
 		TargetCtldAddr:  "http://127.0.0.1:65535",
 		Namespace:       "default",

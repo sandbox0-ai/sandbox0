@@ -98,11 +98,7 @@ func (c *ClusterGatewayClient) GetClusterSummary(ctx context.Context, baseURL st
 	// Check status code
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		_, apiErr, err := spec.DecodeResponse[map[string]any](bytes.NewReader(body))
-		if err == nil && apiErr != nil {
-			return nil, fmt.Errorf("cluster-gateway error: %s", apiErr.Message)
-		}
-		return nil, fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, string(body))
+		return nil, clusterGatewayStatusError(resp.StatusCode, body)
 	}
 
 	// Parse response
@@ -150,11 +146,7 @@ func (c *ClusterGatewayClient) GetTemplateStats(ctx context.Context, baseURL str
 	// Check status code
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		_, apiErr, err := spec.DecodeResponse[map[string]any](bytes.NewReader(body))
-		if err == nil && apiErr != nil {
-			return nil, fmt.Errorf("cluster-gateway error: %s", apiErr.Message)
-		}
-		return nil, fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, string(body))
+		return nil, clusterGatewayStatusError(resp.StatusCode, body)
 	}
 
 	// Parse response
@@ -235,11 +227,7 @@ func (c *ClusterGatewayClient) CreateOrUpdateTemplate(ctx context.Context, baseU
 	// Check status code
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		respBody, _ := io.ReadAll(resp.Body)
-		_, apiErr, err := spec.DecodeResponse[map[string]any](bytes.NewReader(respBody))
-		if err == nil && apiErr != nil {
-			return fmt.Errorf("cluster-gateway error: %s", apiErr.Message)
-		}
-		return fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, string(respBody))
+		return clusterGatewayStatusError(resp.StatusCode, respBody)
 	}
 
 	c.logger.Debug("Template synced to cluster",
@@ -284,11 +272,7 @@ func (c *ClusterGatewayClient) DeleteTemplate(ctx context.Context, baseURL strin
 	// Check status code (404 is OK, means already deleted)
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
 		body, _ := io.ReadAll(resp.Body)
-		_, apiErr, err := spec.DecodeResponse[map[string]any](bytes.NewReader(body))
-		if err == nil && apiErr != nil {
-			return fmt.Errorf("cluster-gateway error: %s", apiErr.Message)
-		}
-		return fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, string(body))
+		return clusterGatewayStatusError(resp.StatusCode, body)
 	}
 
 	c.logger.Debug("Template deleted from cluster",
@@ -334,11 +318,7 @@ func (c *ClusterGatewayClient) ListSandboxes(ctx context.Context, baseURL, teamI
 	// Check status code
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		_, apiErr, err := spec.DecodeResponse[map[string]any](bytes.NewReader(body))
-		if err == nil && apiErr != nil {
-			return nil, fmt.Errorf("cluster-gateway error: %s", apiErr.Message)
-		}
-		return nil, fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, string(body))
+		return nil, clusterGatewayStatusError(resp.StatusCode, body)
 	}
 
 	var result apispec.SuccessSandboxListResponse
@@ -353,4 +333,11 @@ func (c *ClusterGatewayClient) ListSandboxes(ctx context.Context, baseURL, teamI
 	}
 
 	return &result, nil
+}
+
+func clusterGatewayStatusError(statusCode int, body []byte) error {
+	if message, ok := spec.DecodeErrorMessage(body); ok {
+		return fmt.Errorf("cluster-gateway error: %s", message)
+	}
+	return fmt.Errorf("unexpected status code %d: %s", statusCode, string(body))
 }

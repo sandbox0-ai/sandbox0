@@ -91,11 +91,7 @@ func (c *ManagerClient) GetSandbox(ctx context.Context, sandboxID, userID, teamI
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		_, apiErr, err := spec.DecodeResponse[map[string]any](bytes.NewReader(body))
-		if err == nil && apiErr != nil {
-			return nil, fmt.Errorf("%w: %s", ErrManagerUnavailable, apiErr.Message)
-		}
-		return nil, fmt.Errorf("%w: unexpected status code %d: %s", ErrManagerUnavailable, resp.StatusCode, string(body))
+		return nil, managerUnavailableStatusError(resp.StatusCode, body)
 	}
 
 	// Parse response
@@ -141,7 +137,7 @@ func (c *ManagerClient) GetSandboxInternal(ctx context.Context, sandboxID string
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("%w: unexpected status code %d: %s", ErrManagerUnavailable, resp.StatusCode, string(body))
+		return nil, managerUnavailableStatusError(resp.StatusCode, body)
 	}
 
 	sandbox, apiErr, err := spec.DecodeResponse[mgr.Sandbox](resp.Body)
@@ -183,11 +179,7 @@ func (c *ManagerClient) TerminateSandbox(ctx context.Context, sandboxID, userID,
 		return nil
 	}
 	body, _ := io.ReadAll(resp.Body)
-	_, apiErr, err := spec.DecodeResponse[map[string]any](bytes.NewReader(body))
-	if err == nil && apiErr != nil {
-		return fmt.Errorf("%w: %s", ErrManagerUnavailable, apiErr.Message)
-	}
-	return fmt.Errorf("%w: unexpected status code %d: %s", ErrManagerUnavailable, resp.StatusCode, string(body))
+	return managerUnavailableStatusError(resp.StatusCode, body)
 }
 
 // ResumeSandbox asks manager to resume a paused sandbox and waits for it to become active.
@@ -224,4 +216,11 @@ func (c *ManagerClient) ResumeSandbox(ctx context.Context, sandboxID, userID, te
 		return fmt.Errorf("%w: unexpected status code %d", ErrManagerUnavailable, resp.StatusCode)
 	}
 	return nil
+}
+
+func managerUnavailableStatusError(statusCode int, body []byte) error {
+	if message, ok := spec.DecodeErrorMessage(body); ok {
+		return fmt.Errorf("%w: %s", ErrManagerUnavailable, message)
+	}
+	return fmt.Errorf("%w: unexpected status code %d: %s", ErrManagerUnavailable, statusCode, string(body))
 }

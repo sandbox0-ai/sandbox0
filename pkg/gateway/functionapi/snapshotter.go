@@ -39,16 +39,13 @@ type sandboxVolumeResponse struct {
 }
 
 func NewHTTPVolumeSnapshotter(resolve ClusterGatewayURLResolver, internalAuthGen *internalauth.Generator, httpClient *http.Client, logger *zap.Logger) *HTTPVolumeSnapshotter {
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 	return &HTTPVolumeSnapshotter{
 		resolveClusterGatewayURL: resolve,
 		internalAuthGen:          internalAuthGen,
-		httpClient:               httpClient,
+		httpClient:               resolveHTTPClient(httpClient),
 		targetService:            internalauth.ServiceClusterGateway,
 		pathPrefix:               "/api/v1",
 		logger:                   logger,

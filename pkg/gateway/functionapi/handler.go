@@ -109,9 +109,7 @@ func NewClusterGatewaySandboxLookup(clusterGatewayURL string, internalAuthGen *i
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
+	httpClient = resolveHTTPClient(httpClient)
 	return func(ctx context.Context, sandboxID string) (*mgr.Sandbox, error) {
 		clusterGatewayURL := strings.TrimRight(strings.TrimSpace(clusterGatewayURL), "/")
 		if clusterGatewayURL == "" {

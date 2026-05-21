@@ -20,13 +20,10 @@ type HTTPRuntimeController struct {
 }
 
 func NewHTTPRuntimeController(resolve ClusterGatewayURLResolver, internalAuthGen *internalauth.Generator, httpClient *http.Client) *HTTPRuntimeController {
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
 	return &HTTPRuntimeController{
 		resolveClusterGatewayURL: resolve,
 		internalAuthGen:          internalAuthGen,
-		httpClient:               httpClient,
+		httpClient:               resolveHTTPClient(httpClient),
 	}
 }
 

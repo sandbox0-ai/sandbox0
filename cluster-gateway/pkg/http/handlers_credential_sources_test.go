@@ -124,8 +124,8 @@ func newCredentialSourceRouteTestServer(t *testing.T) (string, *internalauth.Gen
 	v1.Use(server.authMiddleware.Authenticate())
 	credentialSources := v1.Group("/credential-sources")
 	credentialSources.Use(server.managerUpstreamMiddleware())
-	credentialSources.GET("/:name", server.authMiddleware.RequirePermission(gatewayauthn.PermCredentialSourceRead), server.getCredentialSource)
-	credentialSources.DELETE("/:name", server.authMiddleware.RequirePermission(gatewayauthn.PermCredentialSourceDelete), server.deleteCredentialSource)
+	credentialSources.GET("/:name", server.authMiddleware.RequirePermission(gatewayauthn.PermCredentialSourceRead), server.proxyToManager)
+	credentialSources.DELETE("/:name", server.authMiddleware.RequirePermission(gatewayauthn.PermCredentialSourceDelete), server.proxyToManager)
 	gateway := httptest.NewServer(server.router)
 
 	cleanup := func() {

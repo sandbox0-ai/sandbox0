@@ -845,61 +845,11 @@ func validateFunctionWarmProcessContext(ctx *functionContextResponse, warmProces
 }
 
 func decodeFunctionContextResponse(r io.Reader) (*functionContextResponse, error) {
-	body, err := io.ReadAll(r)
-	if err != nil {
-		return nil, err
-	}
-	var envelope struct {
-		Success bool                     `json:"success"`
-		Data    *functionContextResponse `json:"data,omitempty"`
-		Error   *spec.Error              `json:"error,omitempty"`
-	}
-	if err := json.Unmarshal(body, &envelope); err == nil && (envelope.Success || envelope.Data != nil || envelope.Error != nil) {
-		if envelope.Error != nil {
-			return nil, errors.New(envelope.Error.Message)
-		}
-		if !envelope.Success {
-			return nil, fmt.Errorf("context response was not successful")
-		}
-		if envelope.Data == nil {
-			return nil, fmt.Errorf("context response missing data")
-		}
-		return envelope.Data, nil
-	}
-	var out functionContextResponse
-	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
+	return spec.DecodeResponseOrRaw[functionContextResponse](r)
 }
 
 func decodeFunctionContextListResponse(r io.Reader) (*functionContextListResponse, error) {
-	body, err := io.ReadAll(r)
-	if err != nil {
-		return nil, err
-	}
-	var envelope struct {
-		Success bool                         `json:"success"`
-		Data    *functionContextListResponse `json:"data,omitempty"`
-		Error   *spec.Error                  `json:"error,omitempty"`
-	}
-	if err := json.Unmarshal(body, &envelope); err == nil && (envelope.Success || envelope.Data != nil || envelope.Error != nil) {
-		if envelope.Error != nil {
-			return nil, errors.New(envelope.Error.Message)
-		}
-		if !envelope.Success {
-			return nil, fmt.Errorf("context list response was not successful")
-		}
-		if envelope.Data == nil {
-			return nil, fmt.Errorf("context list response missing data")
-		}
-		return envelope.Data, nil
-	}
-	var out functionContextListResponse
-	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
+	return spec.DecodeResponseOrRaw[functionContextListResponse](r)
 }
 
 func (s *Server) doFunctionRuntimeContextRequest(ctx context.Context, method, sandboxID, teamID, userID, contextID string, body io.Reader) (*nethttp.Response, error) {

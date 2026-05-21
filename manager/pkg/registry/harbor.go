@@ -25,22 +25,14 @@ func (p *harborProvider) GetPushCredentials(ctx context.Context, req PushCredent
 		if strings.TrimSpace(p.cfg.CredentialsSecret) == "" {
 			return nil, fmt.Errorf("harbor credentials secret is required")
 		}
-		usernameKey := strings.TrimSpace(p.cfg.UsernameKey)
-		if usernameKey == "" {
-			usernameKey = "username"
-		}
-		passwordKey := strings.TrimSpace(p.cfg.PasswordKey)
-		if passwordKey == "" {
-			passwordKey = "password"
-		}
 		var err error
-		username, err = p.secrets.read(ctx, p.cfg.CredentialsSecret, usernameKey)
+		username, err = p.secrets.readRequired(ctx, p.cfg.CredentialsSecret, p.cfg.UsernameKey, "username", "harbor username")
 		if err != nil {
-			return nil, fmt.Errorf("read harbor username: %w", err)
+			return nil, err
 		}
-		password, err = p.secrets.read(ctx, p.cfg.CredentialsSecret, passwordKey)
+		password, err = p.secrets.readRequired(ctx, p.cfg.CredentialsSecret, p.cfg.PasswordKey, "password", "harbor password")
 		if err != nil {
-			return nil, fmt.Errorf("read harbor password: %w", err)
+			return nil, err
 		}
 	}
 	// Harbor credentials are static credentials sourced from Kubernetes secret.

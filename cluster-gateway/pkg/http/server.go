@@ -24,6 +24,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functionapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
 	gatewayhandlers "github.com/sandbox0-ai/sandbox0/pkg/gateway/http/handlers"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/httpclient"
 	gatewayidentity "github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/public"
@@ -326,10 +327,14 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) outboundHTTPClient() *http.Client {
-	if s != nil && s.httpClient != nil {
-		return s.httpClient
+	if s != nil {
+		timeout := httpclient.DefaultTimeout
+		if s.cfg != nil && s.cfg.ProxyTimeout.Duration > 0 {
+			timeout = s.cfg.ProxyTimeout.Duration
+		}
+		return httpclient.Resolve(s.httpClient, timeout)
 	}
-	return &http.Client{}
+	return httpclient.Resolve(nil, 0)
 }
 
 // setupRoutes configures all HTTP routes
@@ -392,11 +397,11 @@ func (s *Server) setupRoutes() {
 			sandboxes.POST("/:id/refresh", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.refreshSandbox)
 
 			// === Network Policy (→ Manager) ===
-			sandboxes.GET("/:id/network", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.getNetworkPolicy)
-			sandboxes.PUT("/:id/network", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.updateNetworkPolicy)
+			sandboxes.GET("/:id/network", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.proxySandboxManagerSubresource("network"))
+			sandboxes.PUT("/:id/network", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.proxySandboxManagerSubresource("network"))
 
-			sandboxes.GET("/:id/services", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.listSandboxServices)
-			sandboxes.PUT("/:id/services", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.updateSandboxServices)
+			sandboxes.GET("/:id/services", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.proxySandboxManagerSubresource("services"))
+			sandboxes.PUT("/:id/services", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.proxySandboxManagerSubresource("services"))
 
 			// === Process/Context Management (→ Procd) ===
 			contexts := sandboxes.Group("/:id/contexts")
@@ -431,18 +436,18 @@ func (s *Server) setupRoutes() {
 		templates := v1.Group("/templates")
 		templates.Use(s.managerUpstreamMiddleware())
 		{
-			templates.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateRead), s.listTemplates)
-			templates.GET("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateRead), s.getTemplate)
-			templates.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateCreate), s.createTemplate)
-			templates.PUT("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateWrite), s.updateTemplate)
-			templates.DELETE("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateDelete), s.deleteTemplate)
+			templates.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateRead), s.proxyManagerPath("/api/v1/templates"))
+			templates.GET("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateRead), s.proxyManagerPathParam("/api/v1/templates/", "id", "template_id"))
+			templates.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateCreate), s.proxyManagerPath("/api/v1/templates"))
+			templates.PUT("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateWrite), s.proxyManagerPathParam("/api/v1/templates/", "id", "template_id"))
+			templates.DELETE("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateDelete), s.proxyManagerPathParam("/api/v1/templates/", "id", "template_id"))
 		}
 
 		// === Registry Credentials (→ Manager) ===
 		registry := v1.Group("/registry")
 		registry.Use(s.managerUpstreamMiddleware())
 		{
-			registry.POST("/credentials", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateWrite), s.getRegistryCredentials)
+			registry.POST("/credentials", s.authMiddleware.RequirePermission(gatewayauthn.PermRegistryWrite), s.proxyToManager)
 		}
 
 		functionRoutes := v1.Group("/functions")
@@ -453,11 +458,11 @@ func (s *Server) setupRoutes() {
 		credentialSources := v1.Group("/credential-sources")
 		credentialSources.Use(s.managerUpstreamMiddleware())
 		{
-			credentialSources.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermCredentialSourceRead), s.listCredentialSources)
-			credentialSources.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermCredentialSourceWrite), s.createCredentialSource)
-			credentialSources.GET("/:name", s.authMiddleware.RequirePermission(gatewayauthn.PermCredentialSourceRead), s.getCredentialSource)
-			credentialSources.PUT("/:name", s.authMiddleware.RequirePermission(gatewayauthn.PermCredentialSourceWrite), s.updateCredentialSource)
-			credentialSources.DELETE("/:name", s.authMiddleware.RequirePermission(gatewayauthn.PermCredentialSourceDelete), s.deleteCredentialSource)
+			credentialSources.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermCredentialSourceRead), s.proxyToManager)
+			credentialSources.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermCredentialSourceWrite), s.proxyToManager)
+			credentialSources.GET("/:name", s.authMiddleware.RequirePermission(gatewayauthn.PermCredentialSourceRead), s.proxyToManager)
+			credentialSources.PUT("/:name", s.authMiddleware.RequirePermission(gatewayauthn.PermCredentialSourceWrite), s.proxyToManager)
+			credentialSources.DELETE("/:name", s.authMiddleware.RequirePermission(gatewayauthn.PermCredentialSourceDelete), s.proxyToManager)
 		}
 
 		// === SandboxVolume Management (→ Storage Proxy) ===

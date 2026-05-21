@@ -33,22 +33,14 @@ func (p *aliyunProvider) GetPushCredentials(ctx context.Context, req PushCredent
 		if strings.TrimSpace(p.cfg.CredentialsSecret) == "" {
 			return nil, fmt.Errorf("aliyun credentials secret is required")
 		}
-		accessKeyKey := strings.TrimSpace(p.cfg.AccessKeyKey)
-		if accessKeyKey == "" {
-			accessKeyKey = "accessKeyId"
-		}
-		secretKeyKey := strings.TrimSpace(p.cfg.SecretKeyKey)
-		if secretKeyKey == "" {
-			secretKeyKey = "accessKeySecret"
-		}
 		var err error
-		accessKey, err = p.secrets.read(ctx, p.cfg.CredentialsSecret, accessKeyKey)
+		accessKey, err = p.secrets.readRequired(ctx, p.cfg.CredentialsSecret, p.cfg.AccessKeyKey, "accessKeyId", "aliyun access key")
 		if err != nil {
-			return nil, fmt.Errorf("read aliyun access key: %w", err)
+			return nil, err
 		}
-		secretKey, err = p.secrets.read(ctx, p.cfg.CredentialsSecret, secretKeyKey)
+		secretKey, err = p.secrets.readRequired(ctx, p.cfg.CredentialsSecret, p.cfg.SecretKeyKey, "accessKeySecret", "aliyun secret key")
 		if err != nil {
-			return nil, fmt.Errorf("read aliyun secret key: %w", err)
+			return nil, err
 		}
 	}
 

@@ -183,7 +183,7 @@ func newRegistryRouteTestServer(t *testing.T) (string, *internalauth.Generator, 
 	v1.Use(server.authMiddleware.Authenticate())
 	registry := v1.Group("/registry")
 	registry.Use(server.managerUpstreamMiddleware())
-	registry.POST("/credentials", server.authMiddleware.RequirePermission(gatewayauthn.PermRegistryWrite), server.getRegistryCredentials)
+	registry.POST("/credentials", server.authMiddleware.RequirePermission(gatewayauthn.PermRegistryWrite), server.proxyToManager)
 	gateway := httptest.NewServer(server.router)
 
 	cleanup := func() {

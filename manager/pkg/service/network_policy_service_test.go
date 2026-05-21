@@ -224,6 +224,52 @@ func TestBuildNetworkPolicyStateMergesNamedTrafficRules(t *testing.T) {
 	}
 }
 
+func TestBuildNetworkPolicyStateMergesNamedProtocolRules(t *testing.T) {
+	svc := NewNetworkPolicyService(zap.NewNop())
+	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
+		SandboxID: "sb-1",
+		TeamID:    "team-1",
+		TemplateSpec: &v1alpha1.SandboxNetworkPolicy{
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				ProtocolRules: []v1alpha1.ProtocolRule{{
+					Name:     "docs-mcp",
+					Protocol: v1alpha1.ProtocolRuleProtocolMCP,
+					Domains:  []string{"old.example.com"},
+					MCP: &v1alpha1.MCPProtocolRule{
+						Tools: &v1alpha1.MCPToolPolicy{Allowed: []string{"read_file"}},
+					},
+				}},
+			},
+		},
+		RequestSpec: &v1alpha1.SandboxNetworkPolicy{
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				ProtocolRules: []v1alpha1.ProtocolRule{{
+					Name:     "docs-mcp",
+					Protocol: v1alpha1.ProtocolRuleProtocolMCP,
+					Domains:  []string{"mcp.example.com"},
+					MCP: &v1alpha1.MCPProtocolRule{
+						Tools: &v1alpha1.MCPToolPolicy{Denied: []string{"run_command"}},
+					},
+				}},
+			},
+		},
+	})
+
+	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
+		t.Fatalf("expected egress policy")
+	}
+	if len(result.PolicySpec.Egress.ProtocolRules) != 1 {
+		t.Fatalf("protocol rule count = %d, want 1", len(result.PolicySpec.Egress.ProtocolRules))
+	}
+	rule := result.PolicySpec.Egress.ProtocolRules[0]
+	if len(rule.Domains) != 1 || rule.Domains[0] != "mcp.example.com" {
+		t.Fatalf("domains = %#v, want request override", rule.Domains)
+	}
+	if rule.MCP == nil || rule.MCP.Tools == nil || len(rule.MCP.Tools.Denied) != 1 || rule.MCP.Tools.Denied[0] != "run_command" {
+		t.Fatalf("unexpected mcp tool policy: %#v", rule.MCP)
+	}
+}
+
 func TestBuildNetworkPolicyStateRejectsMixedLegacyAndTrafficRules(t *testing.T) {
 	svc := NewNetworkPolicyService(zap.NewNop())
 	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
@@ -268,6 +314,29 @@ func TestBuildNetworkPolicyStateRejectsUnsupportedTrafficRuleAppProtocol(t *test
 	}
 	if len(result.PolicySpec.Egress.TrafficRules) != 0 {
 		t.Fatalf("expected invalid traffic rules to be dropped, got %#v", result.PolicySpec.Egress.TrafficRules)
+	}
+}
+
+func TestBuildNetworkPolicyStateRejectsInvalidProtocolRules(t *testing.T) {
+	svc := NewNetworkPolicyService(zap.NewNop())
+	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
+		SandboxID: "sb-1",
+		TeamID:    "team-1",
+		RequestSpec: &v1alpha1.SandboxNetworkPolicy{
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				ProtocolRules: []v1alpha1.ProtocolRule{{
+					Name:     "invalid-mcp",
+					Protocol: v1alpha1.ProtocolRuleProtocolMCP,
+				}},
+			},
+		},
+	})
+
+	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
+		t.Fatalf("expected egress policy")
+	}
+	if len(result.PolicySpec.Egress.ProtocolRules) != 0 {
+		t.Fatalf("expected invalid protocol rules to be dropped, got %#v", result.PolicySpec.Egress.ProtocolRules)
 	}
 }
 

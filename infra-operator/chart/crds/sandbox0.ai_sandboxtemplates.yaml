@@ -407,6 +407,143 @@ spec:
                           - port
                           type: object
                         type: array
+                      protocolRules:
+                        items:
+                          description: ProtocolRule defines protocol-aware controls
+                            applied after traffic is allowed.
+                          properties:
+                            domains:
+                              description: Domains matches outbound destinations by
+                                DNS name or wildcard suffix.
+                              items:
+                                type: string
+                              type: array
+                            httpMatch:
+                              description: HTTPMatch constrains HTTP-carried protocol
+                                rules to request attributes.
+                              properties:
+                                headers:
+                                  description: Headers matches HTTP request headers.
+                                  items:
+                                    description: HTTPValueMatch defines one header
+                                      or query parameter matcher.
+                                    properties:
+                                      name:
+                                        description: Name is the header or query parameter
+                                          name.
+                                        type: string
+                                      present:
+                                        description: Present controls presence-only
+                                          matching when Values is empty.
+                                        type: boolean
+                                      values:
+                                        description: Values matches any one value.
+                                          Empty with Present=true only requires presence.
+                                        items:
+                                          type: string
+                                        type: array
+                                    required:
+                                    - name
+                                    type: object
+                                  type: array
+                                methods:
+                                  description: Methods matches HTTP methods. Values
+                                    are normalized to uppercase.
+                                  items:
+                                    type: string
+                                  type: array
+                                pathPrefixes:
+                                  description: PathPrefixes matches URL path prefixes.
+                                  items:
+                                    type: string
+                                  type: array
+                                paths:
+                                  description: Paths matches exact URL paths.
+                                  items:
+                                    type: string
+                                  type: array
+                                query:
+                                  description: Query matches decoded query parameters.
+                                  items:
+                                    description: HTTPValueMatch defines one header
+                                      or query parameter matcher.
+                                    properties:
+                                      name:
+                                        description: Name is the header or query parameter
+                                          name.
+                                        type: string
+                                      present:
+                                        description: Present controls presence-only
+                                          matching when Values is empty.
+                                        type: boolean
+                                      values:
+                                        description: Values matches any one value.
+                                          Empty with Present=true only requires presence.
+                                        items:
+                                          type: string
+                                        type: array
+                                    required:
+                                    - name
+                                    type: object
+                                  type: array
+                              type: object
+                            mcp:
+                              description: MCP configures Model Context Protocol operation
+                                policy.
+                              properties:
+                                tools:
+                                  description: Tools controls MCP tools/call requests.
+                                  properties:
+                                    allowed:
+                                      description: Allowed permits only listed tools
+                                        when non-empty.
+                                      items:
+                                        type: string
+                                      type: array
+                                    denied:
+                                      description: Denied blocks listed tools before
+                                        evaluating Allowed.
+                                      items:
+                                        type: string
+                                      type: array
+                                  type: object
+                              type: object
+                            name:
+                              description: Name is an optional stable identifier used
+                                for merge and replacement.
+                              type: string
+                            ports:
+                              description: Ports constrains the rule to specific ports/protocols.
+                              items:
+                                description: PortSpec defines a port specification
+                                properties:
+                                  endPort:
+                                    description: EndPort for port ranges (optional)
+                                    format: int32
+                                    type: integer
+                                  port:
+                                    description: Port number
+                                    format: int32
+                                    type: integer
+                                  protocol:
+                                    description: Protocol (tcp or udp)
+                                    type: string
+                                required:
+                                - port
+                                type: object
+                              type: array
+                            protocol:
+                              description: Protocol selects the protocol adapter for
+                                this rule.
+                              type: string
+                            tlsMode:
+                              description: TLSMode controls whether netd must terminate
+                                TLS to inspect this protocol.
+                              type: string
+                          required:
+                          - protocol
+                          type: object
+                        type: array
                       proxy:
                         description: EgressProxyPolicy configures a transparent egress
                           proxy for allowed TCP traffic.

@@ -663,6 +663,7 @@ func networkPolicyFromSpec(spec *v1alpha1.NetworkPolicySpec) *v1alpha1.SandboxNe
 		egressAllowedPorts    []v1alpha1.PortSpec
 		egressDeniedPorts     []v1alpha1.PortSpec
 		egressTrafficRules    []v1alpha1.TrafficRule
+		egressProtocolRules   []v1alpha1.ProtocolRule
 		egressCredentialRules []v1alpha1.EgressCredentialRule
 		egressProxy           *v1alpha1.EgressProxyPolicy
 	)
@@ -674,6 +675,7 @@ func networkPolicyFromSpec(spec *v1alpha1.NetworkPolicySpec) *v1alpha1.SandboxNe
 		egressAllowedPorts = append(egressAllowedPorts, spec.Egress.AllowedPorts...)
 		egressDeniedPorts = append(egressDeniedPorts, spec.Egress.DeniedPorts...)
 		egressTrafficRules = append(egressTrafficRules, spec.Egress.TrafficRules...)
+		egressProtocolRules = append(egressProtocolRules, spec.Egress.ProtocolRules...)
 		egressCredentialRules = append(egressCredentialRules, spec.Egress.CredentialRules...)
 		if spec.Egress.Proxy != nil {
 			egressProxy = cloneEgressProxyPolicy(spec.Egress.Proxy)
@@ -688,7 +690,7 @@ func networkPolicyFromSpec(spec *v1alpha1.NetworkPolicySpec) *v1alpha1.SandboxNe
 	policy := &v1alpha1.SandboxNetworkPolicy{
 		Mode: mode,
 	}
-	if len(egressAllowedCIDRs)+len(egressDeniedCIDRs)+len(egressAllowedDomains)+len(egressDeniedDomains)+len(egressAllowedPorts)+len(egressDeniedPorts)+len(egressTrafficRules)+len(egressCredentialRules) > 0 || egressProxy != nil {
+	if len(egressAllowedCIDRs)+len(egressDeniedCIDRs)+len(egressAllowedDomains)+len(egressDeniedDomains)+len(egressAllowedPorts)+len(egressDeniedPorts)+len(egressTrafficRules)+len(egressProtocolRules)+len(egressCredentialRules) > 0 || egressProxy != nil {
 		policy.Egress = &v1alpha1.NetworkEgressPolicy{
 			AllowedCIDRs:    egressAllowedCIDRs,
 			DeniedCIDRs:     egressDeniedCIDRs,
@@ -697,6 +699,7 @@ func networkPolicyFromSpec(spec *v1alpha1.NetworkPolicySpec) *v1alpha1.SandboxNe
 			AllowedPorts:    egressAllowedPorts,
 			DeniedPorts:     egressDeniedPorts,
 			TrafficRules:    egressTrafficRules,
+			ProtocolRules:   egressProtocolRules,
 			CredentialRules: egressCredentialRules,
 			Proxy:           egressProxy,
 		}

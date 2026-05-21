@@ -58,12 +58,12 @@ Claim a sandbox from a template. The sandbox is created from a pre-warmed pool f
 | `env_vars` | object | Environment variables |
 | `ttl` | integer | Time to live in seconds (soft limit, triggers auto-pause; default: `0`, disabled) |
 | `hard_ttl` | integer | Maximum lifetime in seconds (hard limit, triggers deletion; default: `0`, disabled) |
-| `network` | object | `SandboxNetworkPolicy`. Controls traffic rules, credential bindings, and destination-scoped egress auth |
+| `network` | object | `SandboxNetworkPolicy`. Controls traffic rules, protocol controls, credential bindings, and destination-scoped egress auth |
 | `webhook` | object | Webhook configuration |
 | `auto_resume` | boolean | Auto-resume when accessed (default: true) |
 | `services` | array | Sandbox Services for public HTTP routes and function publishing |
 
-See [Network](/docs/sandbox/network) for traffic control, [Sandbox Services](/docs/sandbox/services) for public HTTP controls, and [Credential](/docs/credential) for outbound auth and secret handling.
+See [Network](/docs/sandbox/network) and [Protocol Controls](/docs/sandbox/protocol-controls) for outbound control, [Sandbox Services](/docs/sandbox/services) for public HTTP controls, and [Credential](/docs/credential) for outbound auth and secret handling.
 
 ### TTL vs Hard TTL
 

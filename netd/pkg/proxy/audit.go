@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -20,35 +21,36 @@ type auditLogger struct {
 }
 
 type auditEvent struct {
-	Timestamp         time.Time `json:"timestamp"`
-	FlowID            string    `json:"flow_id,omitempty"`
-	SandboxID         string    `json:"sandbox_id,omitempty"`
-	TeamID            string    `json:"team_id,omitempty"`
-	SrcIP             string    `json:"src_ip,omitempty"`
-	DestIP            string    `json:"dest_ip,omitempty"`
-	DestPort          int       `json:"dest_port,omitempty"`
-	Transport         string    `json:"transport,omitempty"`
-	Protocol          string    `json:"protocol,omitempty"`
-	Host              string    `json:"host,omitempty"`
-	ClassifierResult  string    `json:"classifier_result,omitempty"`
-	Action            string    `json:"action,omitempty"`
-	Reason            string    `json:"reason,omitempty"`
-	Outcome           string    `json:"outcome,omitempty"`
-	DurationMS        int64     `json:"duration_ms,omitempty"`
-	EgressBytes       int64     `json:"egress_bytes,omitempty"`
-	IngressBytes      int64     `json:"ingress_bytes,omitempty"`
-	Adapter           string    `json:"adapter,omitempty"`
-	AdapterCapability string    `json:"adapter_capability,omitempty"`
-	AuthRuleName      string    `json:"auth_rule_name,omitempty"`
-	AuthRef           string    `json:"auth_ref,omitempty"`
-	AuthFailurePolicy string    `json:"auth_failure_policy,omitempty"`
-	AuthBypassed      bool      `json:"auth_bypassed,omitempty"`
-	AuthBypassReason  string    `json:"auth_bypass_reason,omitempty"`
-	AuthEnforcement   string    `json:"auth_enforcement,omitempty"`
-	AuthResolved      bool      `json:"auth_resolved,omitempty"`
-	AuthCacheHit      bool      `json:"auth_cache_hit,omitempty"`
-	AuthResolveError  string    `json:"auth_resolve_error,omitempty"`
-	Error             string    `json:"error,omitempty"`
+	Timestamp          time.Time                `json:"timestamp"`
+	FlowID             string                   `json:"flow_id,omitempty"`
+	SandboxID          string                   `json:"sandbox_id,omitempty"`
+	TeamID             string                   `json:"team_id,omitempty"`
+	SrcIP              string                   `json:"src_ip,omitempty"`
+	DestIP             string                   `json:"dest_ip,omitempty"`
+	DestPort           int                      `json:"dest_port,omitempty"`
+	Transport          string                   `json:"transport,omitempty"`
+	Protocol           string                   `json:"protocol,omitempty"`
+	Host               string                   `json:"host,omitempty"`
+	ClassifierResult   string                   `json:"classifier_result,omitempty"`
+	Action             string                   `json:"action,omitempty"`
+	Reason             string                   `json:"reason,omitempty"`
+	Outcome            string                   `json:"outcome,omitempty"`
+	DurationMS         int64                    `json:"duration_ms,omitempty"`
+	EgressBytes        int64                    `json:"egress_bytes,omitempty"`
+	IngressBytes       int64                    `json:"ingress_bytes,omitempty"`
+	Adapter            string                   `json:"adapter,omitempty"`
+	AdapterCapability  string                   `json:"adapter_capability,omitempty"`
+	AuthRuleName       string                   `json:"auth_rule_name,omitempty"`
+	AuthRef            string                   `json:"auth_ref,omitempty"`
+	AuthFailurePolicy  string                   `json:"auth_failure_policy,omitempty"`
+	AuthBypassed       bool                     `json:"auth_bypassed,omitempty"`
+	AuthBypassReason   string                   `json:"auth_bypass_reason,omitempty"`
+	AuthEnforcement    string                   `json:"auth_enforcement,omitempty"`
+	AuthResolved       bool                     `json:"auth_resolved,omitempty"`
+	AuthCacheHit       bool                     `json:"auth_cache_hit,omitempty"`
+	AuthResolveError   string                   `json:"auth_resolve_error,omitempty"`
+	ProtocolOperations []protocolOperationAudit `json:"protocol_operations,omitempty"`
+	Error              string                   `json:"error,omitempty"`
 }
 
 type flowAudit struct {
@@ -144,6 +146,9 @@ func (l *auditLogger) Record(req *adapterRequest, decision trafficDecision, adap
 				event.AuthResolveError = req.EgressAuth.ResolveError.Error()
 			}
 		}
+		if len(req.ProtocolAudit) > 0 {
+			event.ProtocolOperations = append(event.ProtocolOperations, req.ProtocolAudit...)
+		}
 	}
 	if err != nil {
 		event.Error = err.Error()
@@ -194,6 +199,9 @@ func (a *flowAudit) IngressBytes() int64 {
 
 func auditOutcome(decision trafficDecision, err error) string {
 	if err != nil {
+		if errors.Is(err, errProtocolPolicyDenied) {
+			return "denied"
+		}
 		return "error"
 	}
 	if decision.Action == decisionActionDeny {

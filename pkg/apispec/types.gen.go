@@ -150,6 +150,11 @@ const (
 	ProcessTypeRepl ProcessType = "repl"
 )
 
+// Defines values for ProtocolRuleProtocol.
+const (
+	ProtocolRuleProtocolMcp ProtocolRuleProtocol = "mcp"
+)
+
 // Defines values for REPLReadyMode.
 const (
 	PromptToken  REPLReadyMode = "prompt_token"
@@ -1324,6 +1329,21 @@ type LoginResponse struct {
 	User         User   `json:"user"`
 }
 
+// MCPProtocolRule Model Context Protocol operation policy.
+type MCPProtocolRule struct {
+	// Tools Tool-name allow and deny lists for MCP tools/call requests.
+	Tools *MCPToolPolicy `json:"tools,omitempty"`
+}
+
+// MCPToolPolicy Tool-name allow and deny lists for MCP tools/call requests.
+type MCPToolPolicy struct {
+	// Allowed When non-empty, only listed tool names are allowed.
+	Allowed *[]string `json:"allowed,omitempty"`
+
+	// Denied Tool names denied before the allowed list is evaluated.
+	Denied *[]string `json:"denied,omitempty"`
+}
+
 // MountStatus defines model for MountStatus.
 type MountStatus struct {
 	ErrorCode          *string          `json:"error_code,omitempty"`
@@ -1378,6 +1398,10 @@ type NetworkEgressPolicy struct {
 	// DeniedPorts Legacy port/protocol denylist used only when mode is `allow-all`. Use `trafficRules` instead.
 	// Deprecated:
 	DeniedPorts *[]PortSpec `json:"deniedPorts,omitempty"`
+
+	// ProtocolRules Protocol-aware controls applied after traffic is allowed by
+	// `trafficRules` or legacy allow/deny fields.
+	ProtocolRules *[]ProtocolRule `json:"protocolRules,omitempty"`
 
 	// Proxy Customer-managed transparent egress proxy for allowed TCP traffic.
 	Proxy *EgressProxyPolicy `json:"proxy,omitempty"`
@@ -1505,6 +1529,29 @@ type ProjectionSpec struct {
 	// UsernamePassword Username/password projection used for SOCKS5 and MQTT auth handshakes.
 	UsernamePassword *UsernamePasswordProjection `json:"usernamePassword,omitempty"`
 }
+
+// ProtocolRule Protocol-aware egress controls applied after destination traffic is allowed.
+type ProtocolRule struct {
+	// Domains Domain match list for the rule.
+	Domains *[]string `json:"domains,omitempty"`
+
+	// HttpMatch Request-level matcher for HTTP-family egress credential rules.
+	HttpMatch *HTTPMatch `json:"httpMatch,omitempty"`
+
+	// Mcp Model Context Protocol operation policy.
+	Mcp *MCPProtocolRule `json:"mcp,omitempty"`
+
+	// Name Optional stable identifier used for merge and replacement.
+	Name *string `json:"name,omitempty"`
+
+	// Ports Port/protocol constraints for the rule.
+	Ports    *[]PortSpec          `json:"ports,omitempty"`
+	Protocol ProtocolRuleProtocol `json:"protocol"`
+	TlsMode  *EgressTLSMode       `json:"tlsMode,omitempty"`
+}
+
+// ProtocolRuleProtocol defines model for ProtocolRuleProtocol.
+type ProtocolRuleProtocol string
 
 // REPLConfig defines model for REPLConfig.
 type REPLConfig struct {

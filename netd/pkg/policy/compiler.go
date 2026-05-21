@@ -44,6 +44,7 @@ type CompiledRuleSet struct {
 	AllowedDomains []DomainRule
 	DeniedDomains  []DomainRule
 	TrafficRules   []CompiledTrafficRule
+	ProtocolRules  []CompiledProtocolRule
 	AuthRules      []CompiledEgressAuthRule
 	Proxy          *CompiledEgressProxy
 }
@@ -54,6 +55,21 @@ type CompiledEgressProxy struct {
 	Host          string
 	Port          int
 	CredentialRef string
+}
+
+type CompiledProtocolRule struct {
+	Name      string
+	Protocol  string
+	Domains   []DomainRule
+	Ports     []PortRange
+	TLSMode   v1alpha1.EgressTLSMode
+	HTTPMatch *CompiledHTTPMatch
+	MCP       *CompiledMCPProtocolRule
+}
+
+type CompiledMCPProtocolRule struct {
+	AllowedTools []string
+	DeniedTools  []string
 }
 
 type CompiledEgressAuthRule struct {
@@ -123,6 +139,10 @@ func CompileNetworkPolicy(spec *v1alpha1.NetworkPolicySpec) (*CompiledPolicy, er
 				return nil, fmt.Errorf("compile legacy egress rules: %w", err)
 			}
 		}
+		protocolRules, err := compileProtocolRules(spec.Egress.ProtocolRules)
+		if err != nil {
+			return nil, fmt.Errorf("compile protocol rules: %w", err)
+		}
 		authRules, err := compileEgressAuthRules(spec.Egress.CredentialRules)
 		if err != nil {
 			return nil, fmt.Errorf("compile egress auth rules: %w", err)
@@ -132,9 +152,10 @@ func CompileNetworkPolicy(spec *v1alpha1.NetworkPolicySpec) (*CompiledPolicy, er
 			return nil, fmt.Errorf("compile egress proxy: %w", err)
 		}
 		compiled.Egress = CompiledRuleSet{
-			TrafficRules: trafficRules,
-			AuthRules:    authRules,
-			Proxy:        egressProxy,
+			TrafficRules:  trafficRules,
+			ProtocolRules: protocolRules,
+			AuthRules:     authRules,
+			Proxy:         egressProxy,
 		}
 	}
 
@@ -257,6 +278,62 @@ func parseDomains(values []string) ([]DomainRule, error) {
 		out = append(out, DomainRule{Pattern: value, Type: DomainMatchExact})
 	}
 	return out, nil
+}
+
+func compileProtocolRules(values []v1alpha1.ProtocolRule) ([]CompiledProtocolRule, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	out := make([]CompiledProtocolRule, 0, len(values))
+	for _, value := range values {
+		protocol := strings.ToLower(strings.TrimSpace(string(value.Protocol)))
+		switch protocol {
+		case string(v1alpha1.ProtocolRuleProtocolMCP):
+		default:
+			return nil, fmt.Errorf("unsupported protocol %q", value.Protocol)
+		}
+		domains, err := parseDomains(value.Domains)
+		if err != nil {
+			return nil, fmt.Errorf("parse protocol rule domains for %q: %w", value.Name, err)
+		}
+		ports, err := parsePorts(value.Ports)
+		if err != nil {
+			return nil, fmt.Errorf("parse protocol rule ports for %q: %w", value.Name, err)
+		}
+		switch value.TLSMode {
+		case "", v1alpha1.EgressTLSModeTerminateReoriginate:
+		default:
+			return nil, fmt.Errorf("unsupported protocol rule tls mode %q", value.TLSMode)
+		}
+		rule := CompiledProtocolRule{
+			Name:      strings.TrimSpace(value.Name),
+			Protocol:  protocol,
+			Domains:   domains,
+			Ports:     ports,
+			TLSMode:   value.TLSMode,
+			HTTPMatch: compileHTTPMatch(value.HTTPMatch),
+		}
+		if value.MCP != nil {
+			rule.MCP = compileMCPProtocolRule(value.MCP)
+		}
+		if protocol == string(v1alpha1.ProtocolRuleProtocolMCP) && rule.MCP == nil {
+			return nil, fmt.Errorf("protocol rule %q requires mcp config", value.Name)
+		}
+		out = append(out, rule)
+	}
+	return out, nil
+}
+
+func compileMCPProtocolRule(value *v1alpha1.MCPProtocolRule) *CompiledMCPProtocolRule {
+	if value == nil {
+		return nil
+	}
+	rule := &CompiledMCPProtocolRule{}
+	if value.Tools != nil {
+		rule.AllowedTools = normalizeNonEmptyStrings(value.Tools.Allowed)
+		rule.DeniedTools = normalizeNonEmptyStrings(value.Tools.Denied)
+	}
+	return rule
 }
 
 func compileEgressAuthRules(values []v1alpha1.EgressCredentialRule) ([]CompiledEgressAuthRule, error) {

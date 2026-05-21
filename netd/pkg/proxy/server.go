@@ -764,6 +764,11 @@ func (s *Server) proxyHTTPRequest(req *adapterRequest) error {
 	if req.EgressAuth != nil && len(req.EgressAuth.ResolvedHeaders) > 0 {
 		injectHTTPHeaders(httpReq, req.EgressAuth.ResolvedHeaders)
 	}
+	if err := s.enforceMCPPolicyForHTTPRequest(req, httpReq, func(status int, body []byte) error {
+		return writeMCPPolicyHTTPResponse(req.Conn, status, body)
+	}); err != nil {
+		return err
+	}
 
 	upstream, err := net.DialTimeout("tcp", net.JoinHostPort(req.DestIP.String(), fmt.Sprintf("%d", req.DestPort)), s.cfg.ProxyUpstreamTimeout.Duration)
 	if err != nil {

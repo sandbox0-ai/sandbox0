@@ -10,6 +10,7 @@ import (
 	"net/http"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 )
 
 func (s *Server) proxyHTTPSRequest(req *adapterRequest) error {
@@ -146,17 +147,23 @@ func downstreamTLSNextProtos(req *adapterRequest) []string {
 	if req != nil && req.EgressAuth != nil && req.EgressAuth.Rule != nil && req.EgressAuth.Rule.Protocol == v1alpha1.EgressAuthProtocolGRPC {
 		return []string{"h2"}
 	}
+	if req != nil && policy.RequiresProtocolTLSTermination(req.Compiled, req.Host, req.DestPort, "mcp") {
+		return []string{"h2", "http/1.1"}
+	}
 	return []string{"http/1.1"}
 }
 
 func shouldProxyHTTP2(req *adapterRequest, state tls.ConnectionState) bool {
-	if req == nil || req.EgressAuth == nil || req.EgressAuth.Rule == nil {
+	if req == nil {
 		return false
 	}
 	if state.NegotiatedProtocol == "h2" {
-		return true
+		if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
+			return true
+		}
+		return policy.RequiresProtocolTLSTermination(req.Compiled, req.Host, req.DestPort, "mcp")
 	}
-	return req.EgressAuth.Rule.Protocol == v1alpha1.EgressAuthProtocolGRPC
+	return req.EgressAuth != nil && req.EgressAuth.Rule != nil && req.EgressAuth.Rule.Protocol == v1alpha1.EgressAuthProtocolGRPC
 }
 
 func (s *Server) dialUpstreamTLS(req *adapterRequest) (net.Conn, error) {
@@ -221,6 +228,11 @@ func (s *Server) proxyHTTPFromConn(downstream net.Conn, req *adapterRequest, ups
 	if req.EgressAuth != nil && len(req.EgressAuth.ResolvedHeaders) > 0 {
 		injectHTTPHeaders(httpReq, req.EgressAuth.ResolvedHeaders)
 	}
+	if err := s.enforceMCPPolicyForHTTPRequest(req, httpReq, func(status int, body []byte) error {
+		return writeMCPPolicyHTTPResponse(downstream, status, body)
+	}); err != nil {
+		return err
+	}
 	if err := httpReq.Write(upstream); err != nil {
 		if counter, ok := upstream.(*countingConn); ok {
 			s.recordEgressBytes(req.Compiled, counter.WrittenBytes(), req.Audit)
@@ -244,8 +256,11 @@ func readPrefixBytes(prefix io.Reader) ([]byte, error) {
 }
 
 func tlsTerminationRequired(req *adapterRequest) bool {
-	if req == nil || req.EgressAuth == nil || req.EgressAuth.Rule == nil {
+	if req == nil {
 		return false
 	}
-	return req.EgressAuth.Rule.TLSMode == "terminate-reoriginate"
+	if req.EgressAuth != nil && req.EgressAuth.Rule != nil && req.EgressAuth.Rule.TLSMode == "terminate-reoriginate" {
+		return true
+	}
+	return policy.RequiresProtocolTLSTermination(req.Compiled, req.Host, req.DestPort, "mcp")
 }

@@ -47,6 +47,14 @@ type adapterRequest struct {
 	UDPConn        *net.UDPConn
 	UDPSource      *net.UDPAddr
 	UDPPayload     []byte
+	ProtocolAudit  []protocolOperationAudit
+}
+
+func (r *adapterRequest) appendProtocolAudit(entries ...protocolOperationAudit) {
+	if r == nil || len(entries) == 0 {
+		return
+	}
+	r.ProtocolAudit = append(r.ProtocolAudit, entries...)
 }
 
 type httpAdapter struct{}
@@ -89,6 +97,9 @@ func (a *httpAdapter) Handle(req *adapterRequest) error {
 			_ = writeHTTPProxyError(req.Conn, http.StatusServiceUnavailable, "egress auth material unavailable")
 			return fmt.Errorf("egress auth material missing for %q", req.EgressAuth.Rule.AuthRef)
 		}
+		return req.Server.proxyHTTPRequest(req)
+	}
+	if policy.HasProtocolRules(req.Compiled, "mcp") {
 		return req.Server.proxyHTTPRequest(req)
 	}
 	return req.Server.relayTCPRequest(req)

@@ -156,11 +156,12 @@ Template-level default network policy. Templates now use the same public `Sandbo
 |-------|------|---------|-------------|
 | `mode` | string | — | Required when `network` is set. Allowed values: `allow-all`, `block-all`. This is the fallback for unmatched traffic. |
 | `egress.trafficRules` | array | — | Ordered allow/deny rules. First matching rule wins. Recommended for new policies. |
+| `egress.protocolRules` | array | — | Protocol-aware controls for allowed traffic, such as MCP tool allowlists. |
 | `network.credentialBindings` | array | — | Credential bindings scoped under the same `network` object. Use this for outbound auth setup. |
 | `egress.credentialRules` | array | — | Destination-scoped auth injection rules that reference `network.credentialBindings[*].ref`. |
 | `egress.allowed*` / `egress.denied*` | array | — | Legacy compatibility fields. Prefer `trafficRules` instead. |
 
-See [Network](/docs/sandbox/network) for traffic behavior and [Credential](/docs/credential) for bindings and egress auth.
+See [Network](/docs/sandbox/network) and [Protocol Controls](/docs/sandbox/protocol-controls) for traffic behavior, and [Credential](/docs/credential) for bindings and egress auth.
 
 ---
 

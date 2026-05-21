@@ -44,6 +44,10 @@
           "title": "Network"
         },
         {
+          "slug": "protocol-controls",
+          "title": "Protocol Controls"
+        },
+        {
           "slug": "proxy",
           "title": "Egress Proxy"
         },

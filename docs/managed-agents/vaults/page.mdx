@@ -100,7 +100,7 @@ Sandbox0 injects credentials through egress auth and compatibility environment v
 
 The environment variables may contain placeholders. The real token is projected by Sandbox0-managed credential policy when the sandbox contacts the configured host.
 
-For `openai-agents`, the runtime expects an OpenAI Responses-compatible base URL. If the provider exposes an Anthropic-compatible endpoint, use [LLMProxy](/docs/managed-agents/llmproxy) and store the LLMProxy URL in `sandbox0.managed_agents.llm_base_url`.
+For `openai-agents`, the runtime expects an OpenAI Responses-compatible base URL. If the provider exposes a different API shape, use an external AI gateway that presents an OpenAI Responses-compatible endpoint and store the gateway base URL in `sandbox0.managed_agents.llm_base_url`.
 
 ## Next Steps
 
@@ -109,7 +109,7 @@ For `openai-agents`, the runtime expects an OpenAI Responses-compatible base URL
     Choose the runtime adapter that should execute each managed session.
   </Card>
 
-  <Card title="LLMProxy" href="/docs/managed-agents/llmproxy" cta="Continue">
-    Translate Anthropic-compatible model providers for OpenAI-compatible engines.
+  <Card title="Compatibility" href="/docs/managed-agents/compatibility" cta="Continue">
+    Review supported behavior and current compatibility boundaries.
   </Card>
 </CardGroup>

@@ -4110,6 +4110,29 @@ components:
               required: [sandbox_id, services]
     FunctionSourceRequest:
       type: object
+      description: >
+        Source used to create a function revision. Omitting type with sandbox_id
+        and service_id keeps the sandbox-service shortcut shape; internally it
+        is compiled into an immutable FunctionRevisionSpec.
+      properties:
+        type:
+          $ref: "#/components/schemas/FunctionRevisionInputSourceType"
+        sandbox_id:
+          type: string
+          description: Compatibility shortcut for type=sandbox_service.
+        service_id:
+          type: string
+          description: Compatibility shortcut for type=sandbox_service.
+        sandbox_service:
+          $ref: "#/components/schemas/FunctionSandboxServiceSource"
+        revision_spec:
+          $ref: "#/components/schemas/FunctionRevisionSpec"
+        provenance:
+          type: object
+          additionalProperties: true
+          description: Optional non-execution metadata describing how the revision spec was produced.
+    FunctionSandboxServiceSource:
+      type: object
       properties:
         sandbox_id:
           type: string
@@ -4238,15 +4261,26 @@ components:
         revision_number:
           type: integer
           format: int32
+        source_type:
+          $ref: "#/components/schemas/FunctionRevisionSourceType"
+        revision_spec:
+          $ref: "#/components/schemas/FunctionRevisionSpec"
+        provenance:
+          type: object
+          additionalProperties: true
+          description: Non-execution metadata describing how the revision spec was produced.
         source_sandbox_id:
           type: string
+          description: Compatibility mirror for sandbox-service revisions.
         source_service_id:
           type: string
+          description: Compatibility mirror for sandbox-service revisions.
         source_template_id:
           type: string
+          description: Compatibility mirror of revision_spec.template_id.
         restore_mounts:
           type: array
-          description: SandboxVolume mounts captured from the source sandbox and reused when the function runtime sandbox is restored.
+          description: Compatibility mirror of revision_spec.mounts for prepared SandboxVolume mounts.
           items:
             $ref: "#/components/schemas/FunctionRestoreMount"
         service_snapshot:
@@ -4266,7 +4300,94 @@ components:
         created_at:
           type: string
           format: date-time
-      required: [id, function_id, team_id, revision_number, source_sandbox_id, source_service_id, source_template_id, service_snapshot, created_at]
+      required: [id, function_id, team_id, revision_number, source_type, revision_spec, created_at]
+    FunctionRevisionSourceType:
+      type: string
+      enum: [sandbox_service, revision_spec, artifact]
+    FunctionRevisionInputSourceType:
+      type: string
+      enum: [sandbox_service, revision_spec]
+    FunctionRevisionSpec:
+      type: object
+      description: Immutable execution contract used by Function Gateway to serve a revision.
+      properties:
+        template_id:
+          type: string
+          description: SandboxTemplate ID used to claim runtime sandboxes for this revision.
+        runtime_service:
+          $ref: "#/components/schemas/SandboxAppService"
+        mounts:
+          type: array
+          description: Volume or artifact mounts attached when runtime sandboxes are claimed.
+          items:
+            $ref: "#/components/schemas/FunctionRevisionMount"
+        static_assets:
+          type: array
+          description: Static asset artifacts associated with the revision for future direct serving paths.
+          items:
+            $ref: "#/components/schemas/FunctionStaticAsset"
+        env_refs:
+          type: array
+          description: Environment references resolved by future deployment flows.
+          items:
+            $ref: "#/components/schemas/FunctionEnvRef"
+      required: [template_id, runtime_service]
+    FunctionRevisionMount:
+      type: object
+      properties:
+        name:
+          type: string
+        mount_point:
+          type: string
+        mode:
+          type: string
+          enum: [read_only, read_write]
+        materialization:
+          type: string
+          description: Optional materialization policy such as fork_per_runtime for future artifact/volume flows.
+        source:
+          $ref: "#/components/schemas/FunctionRevisionMountSource"
+      required: [mount_point, source]
+    FunctionRevisionMountSource:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [sandbox_volume, artifact, volume_snapshot]
+        sandboxvolume_id:
+          type: string
+          description: Prepared SandboxVolume ID available to the runtime claim path.
+        source_sandboxvolume_id:
+          type: string
+          description: Source SandboxVolume captured by a sandbox-service publish.
+        snapshot_id:
+          type: string
+          description: Immutable snapshot used to materialize this mount.
+        artifact_id:
+          type: string
+          description: Future first-class Function artifact ID.
+        digest:
+          type: string
+          description: Content digest for artifact-backed sources.
+      required: [type]
+    FunctionStaticAsset:
+      type: object
+      properties:
+        artifact_id:
+          type: string
+        route_prefix:
+          type: string
+        digest:
+          type: string
+      required: [artifact_id, route_prefix]
+    FunctionEnvRef:
+      type: object
+      properties:
+        name:
+          type: string
+        source_ref:
+          type: string
+      required: [name, source_ref]
     FunctionRestoreMount:
       type: object
       properties:

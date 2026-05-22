@@ -96,6 +96,32 @@ const (
 	Symlink FileInfoType = "symlink"
 )
 
+// Defines values for FunctionRevisionInputSourceType.
+const (
+	FunctionRevisionInputSourceTypeRevisionSpec   FunctionRevisionInputSourceType = "revision_spec"
+	FunctionRevisionInputSourceTypeSandboxService FunctionRevisionInputSourceType = "sandbox_service"
+)
+
+// Defines values for FunctionRevisionMountMode.
+const (
+	ReadOnly  FunctionRevisionMountMode = "read_only"
+	ReadWrite FunctionRevisionMountMode = "read_write"
+)
+
+// Defines values for FunctionRevisionMountSourceType.
+const (
+	FunctionRevisionMountSourceTypeArtifact       FunctionRevisionMountSourceType = "artifact"
+	FunctionRevisionMountSourceTypeSandboxVolume  FunctionRevisionMountSourceType = "sandbox_volume"
+	FunctionRevisionMountSourceTypeVolumeSnapshot FunctionRevisionMountSourceType = "volume_snapshot"
+)
+
+// Defines values for FunctionRevisionSourceType.
+const (
+	FunctionRevisionSourceTypeArtifact       FunctionRevisionSourceType = "artifact"
+	FunctionRevisionSourceTypeRevisionSpec   FunctionRevisionSourceType = "revision_spec"
+	FunctionRevisionSourceTypeSandboxService FunctionRevisionSourceType = "sandbox_service"
+)
+
 // Defines values for FunctionRuntimeInstanceState.
 const (
 	FunctionRuntimeInstanceStateDraining FunctionRuntimeInstanceState = "draining"
@@ -1058,8 +1084,16 @@ type FunctionCreateRequest struct {
 	Autoscaling *FunctionAutoscaling `json:"autoscaling,omitempty"`
 
 	// Name Function display name. Defaults to the source service name or ID when omitted.
-	Name   *string               `json:"name,omitempty"`
+	Name *string `json:"name,omitempty"`
+
+	// Source Source used to create a function revision. Omitting type with sandbox_id and service_id keeps the sandbox-service shortcut shape; internally it is compiled into an immutable FunctionRevisionSpec.
 	Source FunctionSourceRequest `json:"source"`
+}
+
+// FunctionEnvRef defines model for FunctionEnvRef.
+type FunctionEnvRef struct {
+	Name      string `json:"name"`
+	SourceRef string `json:"source_ref"`
 }
 
 // FunctionRecord defines model for FunctionRecord.
@@ -1105,9 +1139,15 @@ type FunctionRevision struct {
 	FunctionId string    `json:"function_id"`
 	Id         string    `json:"id"`
 
-	// RestoreMounts SandboxVolume mounts captured from the source sandbox and reused when the function runtime sandbox is restored.
+	// Provenance Non-execution metadata describing how the revision spec was produced.
+	Provenance *map[string]interface{} `json:"provenance,omitempty"`
+
+	// RestoreMounts Compatibility mirror of revision_spec.mounts for prepared SandboxVolume mounts.
 	RestoreMounts  *[]FunctionRestoreMount `json:"restore_mounts,omitempty"`
 	RevisionNumber int32                   `json:"revision_number"`
+
+	// RevisionSpec Immutable execution contract used by Function Gateway to serve a revision.
+	RevisionSpec FunctionRevisionSpec `json:"revision_spec"`
 
 	// RuntimeContextId Current runtime process context inside the restored runtime sandbox.
 	RuntimeContextId *string `json:"runtime_context_id,omitempty"`
@@ -1119,18 +1159,86 @@ type FunctionRevision struct {
 	RuntimeUpdatedAt *time.Time `json:"runtime_updated_at,omitempty"`
 
 	// ServiceSnapshot Canonical service model for sandbox exposure and function publishing.
-	ServiceSnapshot  SandboxAppService `json:"service_snapshot"`
-	SourceSandboxId  string            `json:"source_sandbox_id"`
-	SourceServiceId  string            `json:"source_service_id"`
-	SourceTemplateId string            `json:"source_template_id"`
-	TeamId           string            `json:"team_id"`
+	ServiceSnapshot *SandboxAppService `json:"service_snapshot,omitempty"`
+
+	// SourceSandboxId Compatibility mirror for sandbox-service revisions.
+	SourceSandboxId *string `json:"source_sandbox_id,omitempty"`
+
+	// SourceServiceId Compatibility mirror for sandbox-service revisions.
+	SourceServiceId *string `json:"source_service_id,omitempty"`
+
+	// SourceTemplateId Compatibility mirror of revision_spec.template_id.
+	SourceTemplateId *string                    `json:"source_template_id,omitempty"`
+	SourceType       FunctionRevisionSourceType `json:"source_type"`
+	TeamId           string                     `json:"team_id"`
 }
 
 // FunctionRevisionCreateRequest defines model for FunctionRevisionCreateRequest.
 type FunctionRevisionCreateRequest struct {
 	// Promote Whether to move the production alias to the new revision.
-	Promote *bool                 `json:"promote,omitempty"`
-	Source  FunctionSourceRequest `json:"source"`
+	Promote *bool `json:"promote,omitempty"`
+
+	// Source Source used to create a function revision. Omitting type with sandbox_id and service_id keeps the sandbox-service shortcut shape; internally it is compiled into an immutable FunctionRevisionSpec.
+	Source FunctionSourceRequest `json:"source"`
+}
+
+// FunctionRevisionInputSourceType defines model for FunctionRevisionInputSourceType.
+type FunctionRevisionInputSourceType string
+
+// FunctionRevisionMount defines model for FunctionRevisionMount.
+type FunctionRevisionMount struct {
+	// Materialization Optional materialization policy such as fork_per_runtime for future artifact/volume flows.
+	Materialization *string                     `json:"materialization,omitempty"`
+	Mode            *FunctionRevisionMountMode  `json:"mode,omitempty"`
+	MountPoint      string                      `json:"mount_point"`
+	Name            *string                     `json:"name,omitempty"`
+	Source          FunctionRevisionMountSource `json:"source"`
+}
+
+// FunctionRevisionMountMode defines model for FunctionRevisionMount.Mode.
+type FunctionRevisionMountMode string
+
+// FunctionRevisionMountSource defines model for FunctionRevisionMountSource.
+type FunctionRevisionMountSource struct {
+	// ArtifactId Future first-class Function artifact ID.
+	ArtifactId *string `json:"artifact_id,omitempty"`
+
+	// Digest Content digest for artifact-backed sources.
+	Digest *string `json:"digest,omitempty"`
+
+	// SandboxvolumeId Prepared SandboxVolume ID available to the runtime claim path.
+	SandboxvolumeId *string `json:"sandboxvolume_id,omitempty"`
+
+	// SnapshotId Immutable snapshot used to materialize this mount.
+	SnapshotId *string `json:"snapshot_id,omitempty"`
+
+	// SourceSandboxvolumeId Source SandboxVolume captured by a sandbox-service publish.
+	SourceSandboxvolumeId *string                         `json:"source_sandboxvolume_id,omitempty"`
+	Type                  FunctionRevisionMountSourceType `json:"type"`
+}
+
+// FunctionRevisionMountSourceType defines model for FunctionRevisionMountSource.Type.
+type FunctionRevisionMountSourceType string
+
+// FunctionRevisionSourceType defines model for FunctionRevisionSourceType.
+type FunctionRevisionSourceType string
+
+// FunctionRevisionSpec Immutable execution contract used by Function Gateway to serve a revision.
+type FunctionRevisionSpec struct {
+	// EnvRefs Environment references resolved by future deployment flows.
+	EnvRefs *[]FunctionEnvRef `json:"env_refs,omitempty"`
+
+	// Mounts Volume or artifact mounts attached when runtime sandboxes are claimed.
+	Mounts *[]FunctionRevisionMount `json:"mounts,omitempty"`
+
+	// RuntimeService Canonical service model for sandbox exposure and function publishing.
+	RuntimeService SandboxAppService `json:"runtime_service"`
+
+	// StaticAssets Static asset artifacts associated with the revision for future direct serving paths.
+	StaticAssets *[]FunctionStaticAsset `json:"static_assets,omitempty"`
+
+	// TemplateId SandboxTemplate ID used to claim runtime sandboxes for this revision.
+	TemplateId string `json:"template_id"`
 }
 
 // FunctionRuntimeEvent defines model for FunctionRuntimeEvent.
@@ -1209,10 +1317,34 @@ type FunctionRuntimeStatus struct {
 	State             FunctionRuntimeState `json:"state"`
 }
 
-// FunctionSourceRequest defines model for FunctionSourceRequest.
-type FunctionSourceRequest struct {
+// FunctionSandboxServiceSource defines model for FunctionSandboxServiceSource.
+type FunctionSandboxServiceSource struct {
 	SandboxId string `json:"sandbox_id"`
 	ServiceId string `json:"service_id"`
+}
+
+// FunctionSourceRequest Source used to create a function revision. Omitting type with sandbox_id and service_id keeps the sandbox-service shortcut shape; internally it is compiled into an immutable FunctionRevisionSpec.
+type FunctionSourceRequest struct {
+	// Provenance Optional non-execution metadata describing how the revision spec was produced.
+	Provenance *map[string]interface{} `json:"provenance,omitempty"`
+
+	// RevisionSpec Immutable execution contract used by Function Gateway to serve a revision.
+	RevisionSpec *FunctionRevisionSpec `json:"revision_spec,omitempty"`
+
+	// SandboxId Compatibility shortcut for type=sandbox_service.
+	SandboxId      *string                       `json:"sandbox_id,omitempty"`
+	SandboxService *FunctionSandboxServiceSource `json:"sandbox_service,omitempty"`
+
+	// ServiceId Compatibility shortcut for type=sandbox_service.
+	ServiceId *string                          `json:"service_id,omitempty"`
+	Type      *FunctionRevisionInputSourceType `json:"type,omitempty"`
+}
+
+// FunctionStaticAsset defines model for FunctionStaticAsset.
+type FunctionStaticAsset struct {
+	ArtifactId  string  `json:"artifact_id"`
+	Digest      *string `json:"digest,omitempty"`
+	RoutePrefix string  `json:"route_prefix"`
 }
 
 // FunctionUpdateRequest defines model for FunctionUpdateRequest.

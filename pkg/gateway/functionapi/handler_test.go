@@ -2,10 +2,12 @@ package functionapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
 
+	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
 	"go.uber.org/zap"
@@ -36,6 +38,65 @@ func TestTryLockFunctionRevisionPublishSerializesFunction(t *testing.T) {
 		t.Fatal("publish lock was not reusable after release")
 	}
 	reacquired()
+}
+
+func TestPrepareRevisionFromSourceAcceptsRevisionSpec(t *testing.T) {
+	service := mgr.SandboxAppService{
+		ID:          "api",
+		DisplayName: "API",
+		Port:        3000,
+		Runtime: &mgr.SandboxAppServiceRuntime{
+			Type:    mgr.SandboxAppServiceRuntimeCMD,
+			Command: []string{"node", "server.js"},
+		},
+		Ingress: mgr.SandboxAppServiceIngress{
+			Public: true,
+			Routes: []mgr.SandboxAppServiceRoute{{
+				ID:     "root",
+				Resume: true,
+			}},
+		},
+	}
+	serviceBytes, err := json.Marshal(service)
+	if err != nil {
+		t.Fatalf("marshal service: %v", err)
+	}
+
+	rev, name, cleanup, err := (&Handler{}).prepareRevisionFromSource(context.Background(), &authn.AuthContext{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}, functionSourceRequest{
+		Type: functions.RevisionSourceTypeRevisionSpec,
+		RevisionSpec: &functions.FunctionRevisionSpec{
+			TemplateID:     "node-template",
+			RuntimeService: serviceBytes,
+			Mounts: []functions.FunctionRevisionMount{{
+				MountPoint: "/workspace/app",
+				Source: functions.FunctionRevisionMountSource{
+					Type:            functions.FunctionRevisionMountSourceSandboxVolume,
+					SandboxVolumeID: "revision-volume",
+				},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("prepareRevisionFromSource() error = %v", err)
+	}
+	if cleanup != nil {
+		t.Fatal("revision_spec source should not return sandbox restore cleanup")
+	}
+	if name != "API" {
+		t.Fatalf("name = %q, want API", name)
+	}
+	if rev.SourceType != functions.RevisionSourceTypeRevisionSpec {
+		t.Fatalf("source_type = %q, want revision_spec", rev.SourceType)
+	}
+	if rev.Spec.TemplateID != "node-template" || len(rev.Spec.Mounts) != 1 {
+		t.Fatalf("revision spec = %+v, want template and mount", rev.Spec)
+	}
+	if len(rev.ServiceSnapshot) == 0 {
+		t.Fatal("service snapshot compatibility mirror is empty")
+	}
 }
 
 func TestRuntimeStatusReportsFailedInstance(t *testing.T) {

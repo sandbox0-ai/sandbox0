@@ -22,6 +22,12 @@ type Repository struct {
 	pool *pgxpool.Pool
 }
 
+const revisionSelectColumns = `
+	id, function_id, team_id, revision_number, source_sandbox_id, source_service_id,
+	source_template_id, restore_mounts, service_snapshot, runtime_sandbox_id, runtime_context_id,
+	runtime_updated_at, created_by, created_at, source_type, revision_spec, provenance
+`
+
 func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
 }
@@ -205,9 +211,7 @@ func (r *Repository) GetActiveRevision(ctx context.Context, fn *Function) (*Revi
 		return nil, ErrNotFound
 	}
 	row := r.pool.QueryRow(ctx, `
-		SELECT id, function_id, team_id, revision_number, source_sandbox_id, source_service_id,
-			source_template_id, restore_mounts, service_snapshot, runtime_sandbox_id, runtime_context_id,
-			runtime_updated_at, created_by, created_at
+		SELECT `+revisionSelectColumns+`
 		FROM functions_revisions
 		WHERE function_id = $1 AND id = $2
 	`, fn.ID, *fn.ActiveRevisionID)
@@ -224,9 +228,7 @@ func (r *Repository) ListRevisions(ctx context.Context, teamID, functionRef stri
 		return nil, err
 	}
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, function_id, team_id, revision_number, source_sandbox_id, source_service_id,
-			source_template_id, restore_mounts, service_snapshot, runtime_sandbox_id, runtime_context_id,
-			runtime_updated_at, created_by, created_at
+		SELECT `+revisionSelectColumns+`
 		FROM functions_revisions
 		WHERE function_id = $1
 		ORDER BY revision_number DESC
@@ -251,9 +253,7 @@ func (r *Repository) GetRevision(ctx context.Context, teamID, functionID, revisi
 		return nil, fmt.Errorf("function repository is not configured")
 	}
 	row := r.pool.QueryRow(ctx, `
-		SELECT id, function_id, team_id, revision_number, source_sandbox_id, source_service_id,
-			source_template_id, restore_mounts, service_snapshot, runtime_sandbox_id, runtime_context_id,
-			runtime_updated_at, created_by, created_at
+		SELECT `+revisionSelectColumns+`
 		FROM functions_revisions
 		WHERE team_id = $1 AND function_id = $2 AND id = $3
 	`, teamID, functionID, revisionID)
@@ -273,9 +273,7 @@ func (r *Repository) GetRevisionByNumber(ctx context.Context, teamID, functionRe
 		return nil, err
 	}
 	row := r.pool.QueryRow(ctx, `
-		SELECT id, function_id, team_id, revision_number, source_sandbox_id, source_service_id,
-			source_template_id, restore_mounts, service_snapshot, runtime_sandbox_id, runtime_context_id,
-			runtime_updated_at, created_by, created_at
+		SELECT `+revisionSelectColumns+`
 		FROM functions_revisions
 		WHERE function_id = $1 AND revision_number = $2
 	`, fn.ID, revisionNumber)
@@ -294,9 +292,7 @@ func (r *Repository) SetRevisionRuntime(ctx context.Context, teamID, functionID,
 		UPDATE functions_revisions
 		SET runtime_sandbox_id = $4, runtime_context_id = $5, runtime_updated_at = NOW()
 		WHERE team_id = $1 AND function_id = $2 AND id = $3
-		RETURNING id, function_id, team_id, revision_number, source_sandbox_id, source_service_id,
-			source_template_id, restore_mounts, service_snapshot, runtime_sandbox_id, runtime_context_id,
-			runtime_updated_at, created_by, created_at
+		RETURNING `+revisionSelectColumns+`
 	`, teamID, functionID, revisionID, sandboxID, contextID)
 	rev, err := scanRevision(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -911,13 +907,59 @@ func NewRevision(teamID, sandboxID, serviceID, templateID string, snapshot any, 
 	if err != nil {
 		return nil, err
 	}
+	spec, err := NewSandboxServiceRevisionSpec(templateID, snapshot, mounts)
+	if err != nil {
+		return nil, err
+	}
+	provenance, err := json.Marshal(RevisionProvenance{
+		Type: RevisionSourceTypeSandboxService,
+		SandboxService: &SandboxServiceProvenance{
+			SandboxID:  strings.TrimSpace(sandboxID),
+			ServiceID:  strings.TrimSpace(serviceID),
+			TemplateID: strings.TrimSpace(templateID),
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
 	return &Revision{
+		SourceType:       RevisionSourceTypeSandboxService,
+		Spec:             spec,
+		Provenance:       provenance,
 		TeamID:           teamID,
 		SourceSandboxID:  sandboxID,
 		SourceServiceID:  serviceID,
 		SourceTemplateID: templateID,
 		RestoreMounts:    append([]RestoreMount(nil), mounts...),
 		ServiceSnapshot:  data,
+		CreatedBy:        userID,
+	}, nil
+}
+
+func NewRevisionFromSpec(teamID string, sourceType RevisionSourceType, spec FunctionRevisionSpec, provenance any, userID string) (*Revision, error) {
+	if sourceType == "" {
+		sourceType = RevisionSourceTypeRevisionSpec
+	}
+	if err := spec.Validate(); err != nil {
+		return nil, err
+	}
+	serviceSnapshot := append(json.RawMessage(nil), spec.RuntimeService...)
+	restoreMounts := RestoreMountsFromRevisionMounts(spec.Mounts)
+	provenanceBytes, err := json.Marshal(provenance)
+	if err != nil {
+		return nil, err
+	}
+	if string(provenanceBytes) == "null" {
+		provenanceBytes = nil
+	}
+	return &Revision{
+		TeamID:           teamID,
+		SourceType:       sourceType,
+		Spec:             spec,
+		Provenance:       provenanceBytes,
+		SourceTemplateID: spec.TemplateID,
+		RestoreMounts:    restoreMounts,
+		ServiceSnapshot:  serviceSnapshot,
 		CreatedBy:        userID,
 	}, nil
 }
@@ -937,20 +979,60 @@ func insertFunction(ctx context.Context, tx pgx.Tx, fn *Function) error {
 }
 
 func insertRevision(ctx context.Context, tx pgx.Tx, rev *Revision) error {
+	if err := normalizeRevisionForStorage(rev); err != nil {
+		return err
+	}
 	restoreMounts, err := json.Marshal(rev.RestoreMounts)
 	if err != nil {
 		return err
+	}
+	specBytes, err := json.Marshal(rev.Spec)
+	if err != nil {
+		return err
+	}
+	provenanceBytes := rev.Provenance
+	if len(provenanceBytes) == 0 {
+		provenanceBytes = []byte(`{}`)
 	}
 	_, err = tx.Exec(ctx, `
 		INSERT INTO functions_revisions (
 			id, function_id, team_id, revision_number, source_sandbox_id, source_service_id,
 			source_template_id, restore_mounts, service_snapshot, runtime_sandbox_id, runtime_context_id,
-			runtime_updated_at, created_by, created_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+			runtime_updated_at, created_by, created_at, source_type, revision_spec, provenance
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
 	`, rev.ID, rev.FunctionID, rev.TeamID, rev.RevisionNumber, rev.SourceSandboxID, rev.SourceServiceID,
 		rev.SourceTemplateID, restoreMounts, rev.ServiceSnapshot, rev.RuntimeSandboxID, rev.RuntimeContextID,
-		rev.RuntimeUpdatedAt, rev.CreatedBy, rev.CreatedAt)
+		rev.RuntimeUpdatedAt, rev.CreatedBy, rev.CreatedAt, rev.SourceType, specBytes, provenanceBytes)
 	return err
+}
+
+func normalizeRevisionForStorage(rev *Revision) error {
+	if rev == nil {
+		return fmt.Errorf("revision is nil")
+	}
+	if rev.SourceType == "" {
+		rev.SourceType = RevisionSourceTypeSandboxService
+	}
+	if rev.Spec.TemplateID == "" && len(rev.ServiceSnapshot) > 0 {
+		spec, err := NewSandboxServiceRevisionSpec(rev.SourceTemplateID, rev.ServiceSnapshot, rev.RestoreMounts)
+		if err != nil {
+			return err
+		}
+		rev.Spec = spec
+	}
+	if err := rev.Spec.Validate(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(rev.SourceTemplateID) == "" {
+		rev.SourceTemplateID = rev.Spec.TemplateID
+	}
+	if len(rev.ServiceSnapshot) == 0 {
+		rev.ServiceSnapshot = append(json.RawMessage(nil), rev.Spec.RuntimeService...)
+	}
+	if len(rev.RestoreMounts) == 0 {
+		rev.RestoreMounts = RestoreMountsFromRevisionMounts(rev.Spec.Mounts)
+	}
+	return nil
 }
 
 func upsertAlias(ctx context.Context, tx pgx.Tx, functionID, alias, revisionID, updatedBy string, updatedAt time.Time) error {
@@ -1029,13 +1111,22 @@ func normalizeRuntimeReadinessState(value RuntimeReadinessState, state RuntimeIn
 func scanRevision(row rowScanner) (*Revision, error) {
 	var rev Revision
 	var restoreMounts []byte
-	if err := row.Scan(&rev.ID, &rev.FunctionID, &rev.TeamID, &rev.RevisionNumber, &rev.SourceSandboxID, &rev.SourceServiceID, &rev.SourceTemplateID, &restoreMounts, &rev.ServiceSnapshot, &rev.RuntimeSandboxID, &rev.RuntimeContextID, &rev.RuntimeUpdatedAt, &rev.CreatedBy, &rev.CreatedAt); err != nil {
+	var specBytes []byte
+	if err := row.Scan(&rev.ID, &rev.FunctionID, &rev.TeamID, &rev.RevisionNumber, &rev.SourceSandboxID, &rev.SourceServiceID, &rev.SourceTemplateID, &restoreMounts, &rev.ServiceSnapshot, &rev.RuntimeSandboxID, &rev.RuntimeContextID, &rev.RuntimeUpdatedAt, &rev.CreatedBy, &rev.CreatedAt, &rev.SourceType, &specBytes, &rev.Provenance); err != nil {
 		return nil, err
 	}
 	if len(restoreMounts) > 0 {
 		if err := json.Unmarshal(restoreMounts, &rev.RestoreMounts); err != nil {
 			return nil, err
 		}
+	}
+	if len(specBytes) > 0 {
+		if err := json.Unmarshal(specBytes, &rev.Spec); err != nil {
+			return nil, err
+		}
+	}
+	if rev.SourceType == "" {
+		rev.SourceType = RevisionSourceTypeSandboxService
 	}
 	return &rev, nil
 }

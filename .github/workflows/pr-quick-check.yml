@@ -71,13 +71,13 @@ jobs:
         run: helm lint infra-operator/chart
 
       - name: Run golangci-lint
-        run: golangci-lint run ./...
+        run: GOFLAGS=-buildvcs=false golangci-lint run ./...
 
       - name: Run unit tests
         shell: bash
         run: |
-          packages="$(go list ./... | grep -Ev '/tests/(e2e|integration)(/|$)')"
-          GOTOOLCHAIN=go1.25.0+auto go test -race -count=1 $packages
+          packages="$(go list -buildvcs=false ./... | grep -Ev '/tests/(e2e|integration)(/|$)')"
+          GOTOOLCHAIN=go1.25.0+auto go test -buildvcs=false -race -count=1 $packages
 
       - name: Show git diff on failure
         if: failure()

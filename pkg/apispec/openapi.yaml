@@ -1661,8 +1661,8 @@ paths:
                 $ref: "#/components/schemas/SuccessFunctionListResponse"
     post:
       tags: [functions]
-      summary: Create a function from a sandbox service
-      description: Creates a function, revision 1, and the production alias from an existing sandbox service.
+      summary: Create a function
+      description: Creates a function, revision 1, and the production alias from a sandbox-service shortcut or an explicit FunctionRevisionSpec.
       security:
         - bearerAuth: []
       requestBody:
@@ -1679,7 +1679,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/SuccessFunctionCreateResponse"
         "400":
-          description: Source service is invalid or not publishable
+          description: Function source is invalid or not publishable
           content:
             application/json:
               schema:
@@ -1791,7 +1791,8 @@ paths:
                 $ref: "#/components/schemas/SuccessFunctionRevisionListResponse"
     post:
       tags: [functions]
-      summary: Create function revision from a sandbox service
+      summary: Create function revision
+      description: Creates a function revision from a sandbox-service shortcut or an explicit FunctionRevisionSpec.
       security:
         - bearerAuth: []
       parameters:

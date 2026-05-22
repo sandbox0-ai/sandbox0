@@ -2,7 +2,7 @@
 
 Sandbox Services expose named ports inside a sandbox. Use them when a sandbox needs public HTTP routes with method filtering, auth, CORS, rate limits, upstream timeout, path rewrite, and route-level resume behavior.
 
-Services are also the source model for Sandbox0 Functions. A publishable service is public and has a restartable runtime.
+Services are also the shortcut source model for Sandbox0 Functions. A publishable service is public and has a restartable runtime; publishing it compiles the service into the `FunctionRevisionSpec` used at serve time.
 
 ## Service Model
 

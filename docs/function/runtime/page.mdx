@@ -1,6 +1,6 @@
 # Function Runtime
 
-Function runtime state describes the restored sandbox pool serving a function revision. Function Gateway serves production traffic from revision runtime sandboxes, not from the mutable source sandbox. When no reusable runtime exists, Function Gateway restores a runtime sandbox from the revision's template and revision-owned volumes.
+Function runtime state describes the restored sandbox pool serving a function revision. Function Gateway serves production traffic from revision runtime sandboxes, not from a mutable source sandbox. When no reusable runtime exists, Function Gateway restores a runtime sandbox from the revision spec's template and mounts.
 
 Runtime pool size and scale-out behavior are configured on the function's autoscaling policy. See [Function Autoscaling](/docs/function/autoscaling) for defaults, limits, and update examples.
 

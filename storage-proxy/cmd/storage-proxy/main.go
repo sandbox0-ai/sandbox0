@@ -232,8 +232,15 @@ func main() {
 		zapLogger.Fatal("Failed to initialize snapshot manager", zap.Error(err))
 	}
 	snapshotMgr.SetMeteringRepository(meteringRepo)
+	volMgr.SetStorageObserver(snapshotMgr)
 	if eventBroadcaster != nil {
 		snapshotMgr.SetEventPublisher(eventBroadcaster)
+	}
+
+	storageMeteringCtx, storageMeteringCancel := context.WithCancel(context.Background())
+	defer storageMeteringCancel()
+	if meteringRepo != nil {
+		go runStorageMeteringFlushLoop(storageMeteringCtx, meteringRepo, cfg.RegionID, zapLogger)
 	}
 
 	// Set coordinator for snapshot manager (for distributed flush)
@@ -373,6 +380,37 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, logge
 
 	logger.Info("Database migrations completed successfully")
 	return nil
+}
+
+func runStorageMeteringFlushLoop(ctx context.Context, repo *metering.Repository, regionID string, logger *zap.Logger) {
+	const (
+		flushInterval = time.Minute
+		flushBatch    = 500
+	)
+	ticker := time.NewTicker(flushInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			before := time.Now().UTC()
+			for {
+				processed, err := repo.FlushStorageProjectionWindows(ctx, before, flushBatch)
+				if err != nil {
+					logger.Warn("Failed to flush storage metering windows", zap.Error(err))
+					break
+				}
+				if err := repo.UpsertProducerWatermark(ctx, metering.ProducerStorage, regionID, before); err != nil {
+					logger.Warn("Failed to update storage metering watermark", zap.Error(err))
+					break
+				}
+				if processed < flushBatch {
+					break
+				}
+			}
+		}
+	}
 }
 
 // zapLogger adapts zap.Logger to migrate.Logger interface

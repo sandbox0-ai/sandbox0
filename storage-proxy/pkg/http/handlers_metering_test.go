@@ -213,12 +213,24 @@ func (r *fakeHTTPRepo) MarkOwnedSandboxVolumeCleanupAttempt(ctx context.Context,
 }
 
 type fakeHTTPMeteringWriter struct {
-	events     []*metering.Event
-	watermarks []metering.ProducerWatermark
+	events              []*metering.Event
+	storageObservations []*metering.StorageObservation
+	closedStorage       []*metering.StorageObservation
+	watermarks          []metering.ProducerWatermark
 }
 
 func (f *fakeHTTPMeteringWriter) AppendEventTx(ctx context.Context, tx pgx.Tx, event *metering.Event) error {
 	f.events = append(f.events, event)
+	return nil
+}
+
+func (f *fakeHTTPMeteringWriter) RecordStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *metering.StorageObservation) error {
+	f.storageObservations = append(f.storageObservations, observation)
+	return nil
+}
+
+func (f *fakeHTTPMeteringWriter) CloseStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *metering.StorageObservation) error {
+	f.closedStorage = append(f.closedStorage, observation)
 	return nil
 }
 
@@ -360,11 +372,21 @@ func TestCreateSandboxVolumeRecordsMetering(t *testing.T) {
 	if event.RegionID != "aws-us-east-1" {
 		t.Fatalf("region_id = %q, want %q", event.RegionID, "aws-us-east-1")
 	}
-	if len(meteringWriter.watermarks) != 1 {
-		t.Fatalf("watermark count = %d, want 1", len(meteringWriter.watermarks))
+	if len(meteringWriter.storageObservations) != 1 {
+		t.Fatalf("storage observation count = %d, want 1", len(meteringWriter.storageObservations))
 	}
-	if !meteringWriter.watermarks[0].CompleteBefore.Equal(event.OccurredAt) {
-		t.Fatalf("watermark complete_before = %v, want %v", meteringWriter.watermarks[0].CompleteBefore, event.OccurredAt)
+	storageObservation := meteringWriter.storageObservations[0]
+	if storageObservation.SubjectType != metering.SubjectTypeVolume || storageObservation.SizeBytes != 0 {
+		t.Fatalf("unexpected storage observation: %+v", storageObservation)
+	}
+	if len(meteringWriter.watermarks) != 2 {
+		t.Fatalf("watermark count = %d, want 2", len(meteringWriter.watermarks))
+	}
+	if meteringWriter.watermarks[0].Producer != metering.ProducerStorage {
+		t.Fatalf("first watermark producer = %q, want %q", meteringWriter.watermarks[0].Producer, metering.ProducerStorage)
+	}
+	if !meteringWriter.watermarks[1].CompleteBefore.Equal(event.OccurredAt) {
+		t.Fatalf("event watermark complete_before = %v, want %v", meteringWriter.watermarks[1].CompleteBefore, event.OccurredAt)
 	}
 
 	resp, apiErr, err := spec.DecodeResponse[db.SandboxVolume](recorder.Body)
@@ -434,8 +456,14 @@ func TestDeleteSandboxVolumeForceRecordsMetering(t *testing.T) {
 	if event.RegionID != "aws-us-east-1" {
 		t.Fatalf("region_id = %q, want %q", event.RegionID, "aws-us-east-1")
 	}
-	if len(meteringWriter.watermarks) != 1 {
-		t.Fatalf("watermark count = %d, want 1", len(meteringWriter.watermarks))
+	if len(meteringWriter.closedStorage) != 1 {
+		t.Fatalf("closed storage count = %d, want 1", len(meteringWriter.closedStorage))
+	}
+	if meteringWriter.closedStorage[0].SubjectID != "vol-1" {
+		t.Fatalf("closed storage subject = %q, want vol-1", meteringWriter.closedStorage[0].SubjectID)
+	}
+	if len(meteringWriter.watermarks) != 2 {
+		t.Fatalf("watermark count = %d, want 2", len(meteringWriter.watermarks))
 	}
 }
 

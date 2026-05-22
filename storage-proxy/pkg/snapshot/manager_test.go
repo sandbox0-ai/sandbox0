@@ -55,6 +55,7 @@ func seedS0FSSnapshot(t *testing.T, mgr *Manager, teamID, volumeID, snapshotID s
 
 type fakeRepo struct {
 	volumes      map[string]*db.SandboxVolume
+	owners       map[string]*db.SandboxVolumeOwner
 	snapshots    map[string]*db.Snapshot
 	heads        map[string]*db.S0FSCommittedHead
 	activeMounts map[string][]*db.VolumeMount
@@ -65,6 +66,7 @@ type fakeRepo struct {
 func newFakeRepo() *fakeRepo {
 	return &fakeRepo{
 		volumes:      make(map[string]*db.SandboxVolume),
+		owners:       make(map[string]*db.SandboxVolumeOwner),
 		snapshots:    make(map[string]*db.Snapshot),
 		heads:        make(map[string]*db.S0FSCommittedHead),
 		activeMounts: make(map[string][]*db.VolumeMount),
@@ -77,6 +79,14 @@ func (r *fakeRepo) GetSandboxVolume(ctx context.Context, id string) (*db.Sandbox
 		return nil, db.ErrNotFound
 	}
 	return v, nil
+}
+
+func (r *fakeRepo) GetSandboxVolumeOwner(ctx context.Context, id string) (*db.SandboxVolumeOwner, error) {
+	owner, ok := r.owners[id]
+	if !ok {
+		return nil, db.ErrNotFound
+	}
+	return owner, nil
 }
 
 func (r *fakeRepo) CreateSandboxVolume(ctx context.Context, volume *db.SandboxVolume) error {
@@ -326,8 +336,10 @@ func (f *fakeArchiveReader) ReadFile(ctx context.Context, inode fsmeta.Ino, size
 }
 
 type fakeMeteringRecorder struct {
-	events     []*metering.Event
-	watermarks []metering.ProducerWatermark
+	events              []*metering.Event
+	storageObservations []*metering.StorageObservation
+	closedStorage       []*metering.StorageObservation
+	watermarks          []metering.ProducerWatermark
 }
 
 func (f *fakeMeteringRecorder) AppendEvent(_ context.Context, event *metering.Event) error {
@@ -337,6 +349,26 @@ func (f *fakeMeteringRecorder) AppendEvent(_ context.Context, event *metering.Ev
 
 func (f *fakeMeteringRecorder) AppendEventTx(_ context.Context, _ pgx.Tx, event *metering.Event) error {
 	f.events = append(f.events, event)
+	return nil
+}
+
+func (f *fakeMeteringRecorder) RecordStorageObservation(_ context.Context, observation *metering.StorageObservation) error {
+	f.storageObservations = append(f.storageObservations, observation)
+	return nil
+}
+
+func (f *fakeMeteringRecorder) RecordStorageObservationTx(_ context.Context, _ pgx.Tx, observation *metering.StorageObservation) error {
+	f.storageObservations = append(f.storageObservations, observation)
+	return nil
+}
+
+func (f *fakeMeteringRecorder) CloseStorageObservation(_ context.Context, observation *metering.StorageObservation) error {
+	f.closedStorage = append(f.closedStorage, observation)
+	return nil
+}
+
+func (f *fakeMeteringRecorder) CloseStorageObservationTx(_ context.Context, _ pgx.Tx, observation *metering.StorageObservation) error {
+	f.closedStorage = append(f.closedStorage, observation)
 	return nil
 }
 
@@ -465,8 +497,11 @@ func TestCreateSnapshot_CreatesVolumePathWhenMissing(t *testing.T) {
 	if meteringRecorder.events[0].RegionID != "aws-us-east-1" {
 		t.Fatalf("region_id = %q, want %q", meteringRecorder.events[0].RegionID, "aws-us-east-1")
 	}
-	if len(meteringRecorder.watermarks) != 1 {
-		t.Fatalf("expected one watermark, got %d", len(meteringRecorder.watermarks))
+	if len(meteringRecorder.storageObservations) != 2 {
+		t.Fatalf("expected two storage observations, got %d", len(meteringRecorder.storageObservations))
+	}
+	if len(meteringRecorder.watermarks) != 3 {
+		t.Fatalf("expected three watermarks, got %d", len(meteringRecorder.watermarks))
 	}
 }
 
@@ -590,8 +625,11 @@ func TestDeleteSnapshotRecordsMetering(t *testing.T) {
 	if meteringRecorder.events[0].EventType != metering.EventTypeSnapshotDeleted {
 		t.Fatalf("event type = %q, want %q", meteringRecorder.events[0].EventType, metering.EventTypeSnapshotDeleted)
 	}
-	if len(meteringRecorder.watermarks) != 1 {
-		t.Fatalf("expected one watermark, got %d", len(meteringRecorder.watermarks))
+	if len(meteringRecorder.closedStorage) != 1 {
+		t.Fatalf("expected one closed storage observation, got %d", len(meteringRecorder.closedStorage))
+	}
+	if len(meteringRecorder.watermarks) != 2 {
+		t.Fatalf("expected two watermarks, got %d", len(meteringRecorder.watermarks))
 	}
 }
 

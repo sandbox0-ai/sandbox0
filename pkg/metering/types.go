@@ -13,6 +13,8 @@ const (
 	ProductFunction     = "function"
 	ProductManagedAgent = "managed_agent"
 
+	ProducerStorage = "storage-proxy.storage"
+
 	EventTypeSandboxClaimed    = "sandbox.claimed"
 	EventTypeSandboxPaused     = "sandbox.paused"
 	EventTypeSandboxResumed    = "sandbox.resumed"
@@ -140,6 +142,45 @@ type SandboxProjectionState struct {
 	TerminatedAt              *time.Time `json:"terminated_at,omitempty"`
 	LastObservedAt            time.Time  `json:"last_observed_at"`
 	LastResourceVer           string     `json:"last_resource_version,omitempty"`
+}
+
+type StorageProjectionState struct {
+	SubjectType               string    `json:"subject_type"`
+	SubjectID                 string    `json:"subject_id"`
+	Product                   string    `json:"product,omitempty"`
+	OwnerKind                 string    `json:"owner_kind,omitempty"`
+	FunctionID                string    `json:"function_id,omitempty"`
+	FunctionRevisionID        string    `json:"function_revision_id,omitempty"`
+	FunctionRuntimeInstanceID string    `json:"function_runtime_instance_id,omitempty"`
+	TeamID                    string    `json:"team_id,omitempty"`
+	UserID                    string    `json:"user_id,omitempty"`
+	SandboxID                 string    `json:"sandbox_id,omitempty"`
+	VolumeID                  string    `json:"volume_id,omitempty"`
+	SnapshotID                string    `json:"snapshot_id,omitempty"`
+	ClusterID                 string    `json:"cluster_id,omitempty"`
+	RegionID                  string    `json:"region_id,omitempty"`
+	SizeBytes                 int64     `json:"size_bytes"`
+	ObservedAt                time.Time `json:"observed_at"`
+}
+
+type StorageObservation struct {
+	SubjectType               string    `json:"subject_type"`
+	SubjectID                 string    `json:"subject_id"`
+	Product                   string    `json:"product,omitempty"`
+	OwnerKind                 string    `json:"owner_kind,omitempty"`
+	FunctionID                string    `json:"function_id,omitempty"`
+	FunctionRevisionID        string    `json:"function_revision_id,omitempty"`
+	FunctionRuntimeInstanceID string    `json:"function_runtime_instance_id,omitempty"`
+	TeamID                    string    `json:"team_id,omitempty"`
+	UserID                    string    `json:"user_id,omitempty"`
+	SandboxID                 string    `json:"sandbox_id,omitempty"`
+	VolumeID                  string    `json:"volume_id,omitempty"`
+	SnapshotID                string    `json:"snapshot_id,omitempty"`
+	ClusterID                 string    `json:"cluster_id,omitempty"`
+	RegionID                  string    `json:"region_id,omitempty"`
+	SizeBytes                 int64     `json:"size_bytes"`
+	ResourceCreatedAt         time.Time `json:"resource_created_at,omitempty"`
+	ObservedAt                time.Time `json:"observed_at"`
 }
 
 type EventRecorder interface {

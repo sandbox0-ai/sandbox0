@@ -6,6 +6,7 @@ import (
 	"time"
 
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 )
 
 const (
@@ -24,14 +25,19 @@ type Backend interface {
 	UnmountVolume(ctx context.Context, volCtx *VolumeContext) error
 }
 
+type StorageObserver interface {
+	ObserveVolumeState(ctx context.Context, volumeID, teamID string, state *s0fs.SnapshotState, observedAt time.Time) error
+}
+
 // BackendMountRequest is the storage-engine input for mounting a volume.
 type BackendMountRequest struct {
-	S3Prefix   string
-	VolumeID   string
-	TeamID     string
-	AccessMode AccessMode
-	MountedAt  time.Time
-	Metrics    *obsmetrics.StorageProxyMetrics
+	S3Prefix        string
+	VolumeID        string
+	TeamID          string
+	AccessMode      AccessMode
+	MountedAt       time.Time
+	Metrics         *obsmetrics.StorageProxyMetrics
+	StorageObserver StorageObserver
 }
 
 // FlushAll flushes dirty data for the mounted volume.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -339,5 +340,132 @@ func TestListWindowsAfterReturnsOrderedWindows(t *testing.T) {
 	}
 	if windows[0].Sequence != 7 || windows[0].Value != 300 || windows[0].SandboxID != "sb-1" {
 		t.Fatalf("unexpected window: %+v", windows[0])
+	}
+}
+
+func TestStorageWindowFromStateBuildsFunctionSnapshotByteHours(t *testing.T) {
+	start := time.Date(2026, 3, 12, 12, 0, 0, 0, time.UTC)
+	end := start.Add(2 * time.Hour)
+	window := storageWindowFromState(&StorageProjectionState{
+		SubjectType: SubjectTypeSnapshot,
+		SubjectID:   "snap-1",
+		Product:     ProductFunction,
+		FunctionID:  "fn-1",
+		TeamID:      "team-1",
+		UserID:      "user-1",
+		VolumeID:    "vol-1",
+		SnapshotID:  "snap-1",
+		RegionID:    "aws-us-east-1",
+		SizeBytes:   1024,
+		ObservedAt:  start,
+	}, end)
+	if window == nil {
+		t.Fatal("expected storage window")
+	}
+	if window.WindowType != WindowTypeFunctionSnapshotByteHours {
+		t.Fatalf("window_type = %q, want %q", window.WindowType, WindowTypeFunctionSnapshotByteHours)
+	}
+	if window.Value != 2048 {
+		t.Fatalf("value = %d, want 2048", window.Value)
+	}
+	if window.Unit != WindowUnitByteHours {
+		t.Fatalf("unit = %q, want %q", window.Unit, WindowUnitByteHours)
+	}
+
+	var data map[string]any
+	if err := json.Unmarshal(window.Data, &data); err != nil {
+		t.Fatalf("unmarshal window data: %v", err)
+	}
+	if data["function_id"] != "fn-1" || data["product"] != ProductFunction {
+		t.Fatalf("unexpected window data: %v", data)
+	}
+}
+
+func TestStorageWindowFromStateSkipsSubByteHour(t *testing.T) {
+	start := time.Date(2026, 3, 12, 12, 0, 0, 0, time.UTC)
+	window := storageWindowFromState(&StorageProjectionState{
+		SubjectType: SubjectTypeVolume,
+		SubjectID:   "vol-1",
+		Product:     ProductSandbox,
+		SizeBytes:   1,
+		ObservedAt:  start,
+	}, start.Add(time.Millisecond))
+	if window != nil {
+		t.Fatalf("expected nil window for sub-byte-hour usage, got %+v", window)
+	}
+}
+
+func TestRecordStorageObservationClosesPreviousWindow(t *testing.T) {
+	start := time.Date(2026, 3, 12, 12, 0, 0, 0, time.UTC)
+	end := start.Add(2 * time.Hour)
+	var insertedWindow bool
+	var upsertedState bool
+	repo := &Repository{
+		db: &fakeDB{
+			queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
+				if !strings.Contains(sql, "storage_projection_state") {
+					return fakeRow{err: errors.New("unexpected query")}
+				}
+				return fakeRow{values: []any{
+					SubjectTypeVolume,
+					"vol-1",
+					ProductSandbox,
+					"",
+					"",
+					"",
+					"",
+					"team-1",
+					"user-1",
+					"",
+					"vol-1",
+					"",
+					"cluster-a",
+					"aws-us-east-1",
+					int64(1024),
+					start,
+				}}
+			},
+			execFn: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+				switch {
+				case strings.Contains(sql, "usage_windows"):
+					insertedWindow = true
+					if args[3] != WindowTypeSandboxVolumeByteHours {
+						t.Fatalf("window_type arg = %v, want %s", args[3], WindowTypeSandboxVolumeByteHours)
+					}
+					if args[15] != int64(2048) {
+						t.Fatalf("window value arg = %v, want 2048", args[15])
+					}
+				case strings.Contains(sql, "storage_projection_state"):
+					upsertedState = true
+					if args[14] != int64(2048) {
+						t.Fatalf("state size arg = %v, want 2048", args[14])
+					}
+				default:
+					t.Fatalf("unexpected exec: %s", sql)
+				}
+				return pgconn.CommandTag{}, nil
+			},
+		},
+	}
+
+	err := repo.recordStorageObservation(context.Background(), repo.db, &StorageObservation{
+		SubjectType: SubjectTypeVolume,
+		SubjectID:   "vol-1",
+		TeamID:      "team-1",
+		UserID:      "user-1",
+		VolumeID:    "vol-1",
+		RegionID:    "aws-us-east-1",
+		ClusterID:   "cluster-a",
+		SizeBytes:   2048,
+		ObservedAt:  end,
+	})
+	if err != nil {
+		t.Fatalf("recordStorageObservation: %v", err)
+	}
+	if !insertedWindow {
+		t.Fatal("expected usage window insert")
+	}
+	if !upsertedState {
+		t.Fatal("expected projection state upsert")
 	}
 }

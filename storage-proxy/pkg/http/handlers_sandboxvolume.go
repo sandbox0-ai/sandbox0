@@ -161,6 +161,9 @@ func (s *Server) createSandboxVolume(w http.ResponseWriter, r *http.Request) {
 		if err := s.repo.CreateSandboxVolumeTx(r.Context(), tx, vol); err != nil {
 			return err
 		}
+		if err := s.appendStorageObservationTx(r.Context(), tx, s.volumeStorageObservation(vol, nil, 0, vol.CreatedAt)); err != nil {
+			return err
+		}
 		if err := s.appendMeteringEventTx(r.Context(), tx, volumeCreatedEvent(s.regionID, vol)); err != nil {
 			return err
 		}
@@ -336,7 +339,11 @@ func (s *Server) deleteSandboxVolume(w http.ResponseWriter, r *http.Request) {
 		if err := s.repo.DeleteSandboxVolumeTx(r.Context(), tx, id); err != nil {
 			return err
 		}
-		if err := s.appendMeteringEventTx(r.Context(), tx, volumeDeletedEvent(s.regionID, vol)); err != nil {
+		deletedEvent := volumeDeletedEvent(s.regionID, vol)
+		if err := s.closeStorageObservationTx(r.Context(), tx, s.volumeStorageObservation(vol, nil, 0, deletedEvent.OccurredAt)); err != nil {
+			return err
+		}
+		if err := s.appendMeteringEventTx(r.Context(), tx, deletedEvent); err != nil {
 			return err
 		}
 		return nil
@@ -396,7 +403,11 @@ func (s *Server) deleteSandboxVolumeRecord(ctx context.Context, id string, force
 		if err := s.repo.DeleteSandboxVolumeTx(ctx, tx, id); err != nil {
 			return err
 		}
-		if err := s.appendMeteringEventTx(ctx, tx, volumeDeletedEvent(s.regionID, vol)); err != nil {
+		deletedEvent := volumeDeletedEvent(s.regionID, vol)
+		if err := s.closeStorageObservationTx(ctx, tx, s.volumeStorageObservation(vol, nil, 0, deletedEvent.OccurredAt)); err != nil {
+			return err
+		}
+		if err := s.appendMeteringEventTx(ctx, tx, deletedEvent); err != nil {
 			return err
 		}
 		return nil
@@ -521,6 +532,9 @@ func (s *Server) createOwnedSandboxVolume(w http.ResponseWriter, r *http.Request
 			return err
 		}
 		if err := s.repo.CreateSandboxVolumeOwnerTx(r.Context(), tx, owner); err != nil {
+			return err
+		}
+		if err := s.appendStorageObservationTx(r.Context(), tx, s.volumeStorageObservation(vol, owner, 0, vol.CreatedAt)); err != nil {
 			return err
 		}
 		if err := s.appendMeteringEventTx(r.Context(), tx, volumeCreatedEvent(s.regionID, vol)); err != nil {
@@ -878,4 +892,31 @@ func volumeDeletedEvent(regionID string, vol *db.SandboxVolume) *meteringpkg.Eve
 		VolumeID:    vol.ID,
 		OccurredAt:  now,
 	}
+}
+
+func (s *Server) volumeStorageObservation(vol *db.SandboxVolume, owner *db.SandboxVolumeOwner, sizeBytes int64, observedAt time.Time) *meteringpkg.StorageObservation {
+	if vol == nil {
+		return nil
+	}
+	if observedAt.IsZero() {
+		observedAt = time.Now().UTC()
+	}
+	obs := &meteringpkg.StorageObservation{
+		SubjectType:       meteringpkg.SubjectTypeVolume,
+		SubjectID:         vol.ID,
+		Product:           meteringpkg.ProductSandbox,
+		TeamID:            vol.TeamID,
+		UserID:            vol.UserID,
+		VolumeID:          vol.ID,
+		RegionID:          s.regionID,
+		SizeBytes:         sizeBytes,
+		ResourceCreatedAt: vol.CreatedAt,
+		ObservedAt:        observedAt,
+	}
+	if owner != nil {
+		obs.OwnerKind = owner.OwnerKind
+		obs.SandboxID = owner.OwnerSandboxID
+		obs.ClusterID = owner.OwnerClusterID
+	}
+	return obs
 }

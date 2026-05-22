@@ -109,6 +109,49 @@ const session = await client.beta.sessions.create({
 
 If no LLM vault selects an engine, Sandbox0 defaults to `claude`.
 
+## AI Gateway Integration
+
+Managed Agents does not require Sandbox0 to own model-provider routing. You can put a third-party AI gateway between the selected agent engine and the model provider when you need protocol normalization, request logs, caching, retry policy, rate limits, budget controls, or bring-your-own-key storage.
+
+Choose the gateway endpoint that matches the selected engine:
+
+| Engine | Gateway endpoint must expose |
+|--------|------------------------------|
+| `claude` | Anthropic Messages-compatible API |
+| `codex` | OpenAI-compatible API |
+| `openai-agents` | OpenAI Responses-compatible API |
+
+The gateway can route to whichever upstream providers it supports. For example, Cloudflare AI Gateway, LiteLLM Proxy, Portkey, Helicone, Kong AI Gateway, Envoy AI Gateway, TrueFoundry, and similar products can sit behind an LLM vault as long as the configured gateway endpoint speaks the API shape required by the engine.
+
+In this setup, the LLM vault stores the gateway base URL and the gateway API token. Provider keys should usually live in the AI gateway through BYOK, virtual keys, or gateway-managed billing. Sandbox0 still owns the Managed Agents API, session truth, sandbox lifecycle, workspace state, network policy, and runtime credential projection.
+
+```typescript
+const cloudflareAccountId = process.env.CLOUDFLARE_ACCOUNT_ID!;
+
+const cloudflareGatewayVault = await client.beta.vaults.create({
+    display_name: "OpenAI Agents through Cloudflare AI Gateway",
+    metadata: {
+        "sandbox0.managed_agents.role": "llm",
+        "sandbox0.managed_agents.engine": "openai-agents",
+        "sandbox0.managed_agents.llm_base_url": `https://api.cloudflare.com/client/v4/accounts/${cloudflareAccountId}/ai/v1`,
+    },
+});
+
+await client.beta.vaults.credentials.create(cloudflareGatewayVault.id, {
+    display_name: "Cloudflare AI Gateway token",
+    auth: {
+        type: "static_bearer",
+        token: process.env.CLOUDFLARE_API_TOKEN!,
+    } as any,
+});
+```
+
+Configure the agent model to the gateway's model identifier, such as `anthropic/claude-sonnet-4` on Cloudflare AI Gateway or the model alias configured in LiteLLM, Portkey, or another gateway.
+
+<Callout variant="warning">
+Do not point an engine at a gateway endpoint with the wrong API shape. For example, the `openai-agents` engine needs an OpenAI Responses-compatible endpoint even if the gateway routes the request to an Anthropic model upstream.
+</Callout>
+
 ## Claude Engine
 
 The Claude engine runs the Claude Agent SDK wrapper inside the session sandbox. It expects an Anthropic-compatible API. Use it when the provider already exposes the Anthropic Messages API shape and you want Claude Code style behavior.
@@ -127,18 +170,7 @@ The `openai-agents` engine uses a resident Python runtime service built on the o
 
 This is the sandbox as tool model. The session still has durable Managed Agents event history, but the agent process is not the same process as the sandbox. The sandbox is an isolated tool target for commands and workspace work.
 
-The engine expects an OpenAI Responses-compatible endpoint. For Anthropic-compatible providers, place [LLMProxy](/docs/managed-agents/llmproxy) in front of the provider and store the proxy URL as the LLM vault base URL.
-
-```typescript
-const zaiViaLLMProxyVault = await client.beta.vaults.create({
-    display_name: "Z.ai through LLMProxy",
-    metadata: {
-        "sandbox0.managed_agents.role": "llm",
-        "sandbox0.managed_agents.engine": "openai-agents",
-        "sandbox0.managed_agents.llm_base_url": "https://llmproxy.sandbox0.ai/claude2codex/https://api.z.ai/api/anthropic",
-    },
-});
-```
+The engine expects an OpenAI Responses-compatible endpoint. If the target provider does not expose that API shape directly, use an AI gateway that provides an OpenAI Responses-compatible surface and routes to the provider upstream.
 
 <Callout variant="info">
 For self-hosted deployments, configure the OpenAI Agents runtime callback base URL to an internal gateway URL when possible. The runtime sends session events back to the Managed Agents gateway; routing that callback through a public edge can introduce avoidable policy and timeout failures.
@@ -155,8 +187,8 @@ Do not use `sandbox0.managed_agents.engine` as session metadata. Reserved `sandb
 ## Next Steps
 
 <CardGroup>
-  <Card title="LLMProxy" href="/docs/managed-agents/llmproxy" cta="Continue">
-    Translate Anthropic-compatible model providers for OpenAI-compatible engines.
+  <Card title="Vaults" href="/docs/managed-agents/vaults" cta="Continue">
+    Store the selected engine, model gateway URL, and credential material.
   </Card>
 
   <Card title="Compatibility" href="/docs/managed-agents/compatibility" cta="Continue">

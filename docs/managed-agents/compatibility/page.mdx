@@ -20,7 +20,7 @@ Official reference: [Claude Managed Agents quickstart](https://platform.claude.c
 | MCP servers | Supported for URL MCP servers and vault-backed credentials |
 | GitHub repository resources | Supported at session creation |
 | Agent engines | Supported for `claude`, `codex`, and `openai-agents` |
-| LLMProxy | Supported as an optional protocol translator for OpenAI-compatible engines |
+| External AI gateways | Supported when the gateway exposes the API shape required by the selected agent engine |
 
 ## Current Differences
 
@@ -35,7 +35,7 @@ Official reference: [Claude Managed Agents quickstart](https://platform.claude.c
 | Codex engine | Requires an OpenAI-compatible endpoint. |
 | OpenAI Agents engine | Requires an OpenAI Responses-compatible endpoint and uses Sandbox0 as a tool target. |
 | Retry state | Automatic retries are exposed as `session.status_rescheduled` plus `retry_status.type = "retrying"` errors when the selected engine provides a retry signal. |
-| LLMProxy | Optional. Use it when an OpenAI-compatible engine needs to call an Anthropic-compatible provider. |
+| External AI gateway | Optional. Use one when provider API shape, provider credentials, logging, caching, or rate limits should be managed outside Sandbox0. |
 | Anthropic pre-built skills | Not supported. Use Sandbox0 custom skills. |
 | Multi-agent threads | Not implemented in the current backend surface. |
 | Outcomes and memory research preview | Not implemented in the current backend surface. |

@@ -21,7 +21,7 @@ Managed Agents sit above raw sandboxes. A sandbox gives an agent processes, file
 | Vault | Credential container attached to a session |
 | Resource | File or repository materialized into the session workspace |
 | Agent engine | Runtime adapter that runs the session as agent in sandbox or sandbox as tool |
-| LLMProxy | Optional protocol translator for model providers with a different API shape |
+| AI gateway | Optional external gateway that normalizes model provider APIs, logs usage, enforces policy, or stores provider credentials |
 
 ## Engine Models
 
@@ -48,8 +48,8 @@ flowchart TD
     resident --> callbacks
     callbacks --> gateway
     wrapper --> llm[model provider API]
-    resident --> llmproxy[optional LLMProxy]
-    llmproxy --> llm
+    resident --> aigateway[optional AI gateway]
+    aigateway --> llm
     gateway --> credentials[credential sources and network policy]
     credentials --> runtime
 ```

@@ -12,6 +12,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	gatewaymigrations "github.com/sandbox0-ai/sandbox0/pkg/gateway/migrations"
+	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	"go.uber.org/zap"
@@ -154,6 +155,9 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) 
 		migrate.WithSchema("shared_gateway"),
 	); err != nil {
 		return fmt.Errorf("migrate up: %w", err)
+	}
+	if err := metering.RunMigrations(ctx, pool, &zapLogger{logger: logger}); err != nil {
+		return err
 	}
 
 	logger.Info("Database migrations completed successfully")

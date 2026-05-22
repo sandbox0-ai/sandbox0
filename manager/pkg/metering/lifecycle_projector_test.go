@@ -11,6 +11,7 @@ import (
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -185,6 +186,47 @@ func TestLifecycleProjectorRecordsErrorsInMetrics(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected manager_metering_errors_total{operation=\"load_state\"} to be incremented")
+	}
+}
+
+func TestLifecycleProjectorRecordsSandboxComputeWindows(t *testing.T) {
+	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
+	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
+
+	now := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
+	projector.now = func() time.Time { return now }
+	claimedAt := now.Add(-2 * time.Second)
+	pod := buildSandboxPod(claimedAt, false, "", "1")
+	pod.Spec.Containers = []corev1.Container{{
+		Name: "procd",
+		Resources: corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("2"),
+				corev1.ResourceMemory: resource.MustParse("1Gi"),
+			},
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("100m"),
+				corev1.ResourceMemory: resource.MustParse("256Mi"),
+			},
+		},
+	}}
+
+	projector.handleDelete(pod)
+
+	if len(recorder.windows) != 3 {
+		t.Fatalf("window count = %d, want 3", len(recorder.windows))
+	}
+	if recorder.windows[1].WindowType != meteringpkg.WindowTypeSandboxComputeMillicpuMilliseconds {
+		t.Fatalf("second window type = %q, want %q", recorder.windows[1].WindowType, meteringpkg.WindowTypeSandboxComputeMillicpuMilliseconds)
+	}
+	if recorder.windows[1].Value != 4_000_000 {
+		t.Fatalf("compute value = %d, want 4000000", recorder.windows[1].Value)
+	}
+	if recorder.windows[2].WindowType != meteringpkg.WindowTypeSandboxMemoryMiBMilliseconds {
+		t.Fatalf("third window type = %q, want %q", recorder.windows[2].WindowType, meteringpkg.WindowTypeSandboxMemoryMiBMilliseconds)
+	}
+	if recorder.windows[2].Value != 2_048_000 {
+		t.Fatalf("memory value = %d, want 2048000", recorder.windows[2].Value)
 	}
 }
 

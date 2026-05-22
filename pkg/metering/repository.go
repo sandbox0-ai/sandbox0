@@ -360,12 +360,16 @@ func (r *Repository) GetSandboxProjectionState(ctx context.Context, sandboxID st
 	err := r.db.QueryRow(ctx, `
 		SELECT
 			sandbox_id, namespace, team_id, user_id, template_id, cluster_id,
+			owner_kind, function_id, function_revision_id, function_runtime_instance_id,
+			resource_millicpu, resource_memory_mib,
 			claimed_at, active_since, paused, paused_at, terminated_at,
 			last_observed_at, last_resource_version
 		FROM metering.manager_sandbox_projection_state
 		WHERE sandbox_id = $1
 	`, sandboxID).Scan(
 		&state.SandboxID, &state.Namespace, &state.TeamID, &state.UserID, &state.TemplateID, &state.ClusterID,
+		&state.OwnerKind, &state.FunctionID, &state.FunctionRevisionID, &state.FunctionRuntimeInstanceID,
+		&state.ResourceMillicpu, &state.ResourceMemoryMiB,
 		&state.ClaimedAt, &state.ActiveSince, &state.Paused, &state.PausedAt, &state.TerminatedAt,
 		&state.LastObservedAt, &state.LastResourceVer,
 	)
@@ -403,12 +407,16 @@ func (r *Repository) upsertSandboxProjectionState(ctx context.Context, db DB, st
 	_, err := db.Exec(ctx, `
 			INSERT INTO metering.manager_sandbox_projection_state (
 				sandbox_id, namespace, team_id, user_id, template_id, cluster_id,
+				owner_kind, function_id, function_revision_id, function_runtime_instance_id,
+				resource_millicpu, resource_memory_mib,
 				claimed_at, active_since, paused, paused_at, terminated_at,
 			last_observed_at, last_resource_version
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
-			$7, $8, $9, $10, $11,
-			$12, $13
+			$7, $8, $9, $10,
+			$11, $12,
+			$13, $14, $15, $16, $17,
+			$18, $19
 		)
 		ON CONFLICT (sandbox_id) DO UPDATE
 		SET namespace = EXCLUDED.namespace,
@@ -416,6 +424,12 @@ func (r *Repository) upsertSandboxProjectionState(ctx context.Context, db DB, st
 			user_id = EXCLUDED.user_id,
 			template_id = EXCLUDED.template_id,
 			cluster_id = EXCLUDED.cluster_id,
+			owner_kind = EXCLUDED.owner_kind,
+			function_id = EXCLUDED.function_id,
+			function_revision_id = EXCLUDED.function_revision_id,
+			function_runtime_instance_id = EXCLUDED.function_runtime_instance_id,
+			resource_millicpu = EXCLUDED.resource_millicpu,
+			resource_memory_mib = EXCLUDED.resource_memory_mib,
 			claimed_at = EXCLUDED.claimed_at,
 			active_since = EXCLUDED.active_since,
 			paused = EXCLUDED.paused,
@@ -424,6 +438,8 @@ func (r *Repository) upsertSandboxProjectionState(ctx context.Context, db DB, st
 			last_observed_at = EXCLUDED.last_observed_at,
 			last_resource_version = EXCLUDED.last_resource_version
 	`, state.SandboxID, state.Namespace, state.TeamID, state.UserID, state.TemplateID, state.ClusterID,
+		state.OwnerKind, state.FunctionID, state.FunctionRevisionID, state.FunctionRuntimeInstanceID,
+		state.ResourceMillicpu, state.ResourceMemoryMiB,
 		state.ClaimedAt, state.ActiveSince, state.Paused, state.PausedAt, state.TerminatedAt,
 		state.LastObservedAt, state.LastResourceVer,
 	)

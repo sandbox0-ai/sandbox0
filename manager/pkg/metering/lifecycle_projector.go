@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/functionruntime"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"go.uber.org/zap"
@@ -138,6 +139,7 @@ func (p *LifecycleProjector) handleUpsert(obj any) {
 	teamID := pod.Annotations[controller.AnnotationTeamID]
 	userID := pod.Annotations[controller.AnnotationUserID]
 	templateID := pod.Labels[controller.LabelTemplateID]
+	podUsage := sandboxUsageFromPod(pod)
 	observedAt := p.now()
 	paused := pod.Annotations[controller.AnnotationPaused] == "true"
 	pausedAt, pausedAtSet := parseRFC3339(pod.Annotations[controller.AnnotationPausedAt])
@@ -147,16 +149,22 @@ func (p *LifecycleProjector) handleUpsert(obj any) {
 	if state == nil {
 		pendingEvents = append(pendingEvents, p.buildSandboxEvent(pod.Name, teamID, userID, templateID, claimedAt, meteringpkg.EventTypeSandboxClaimed, claimedEventID(pod.Name, claimedAt), claimEventData(pod)))
 		state = &meteringpkg.SandboxProjectionState{
-			SandboxID:       pod.Name,
-			Namespace:       pod.Namespace,
-			TeamID:          teamID,
-			UserID:          userID,
-			TemplateID:      templateID,
-			ClusterID:       p.clusterID,
-			ClaimedAt:       &claimedAt,
-			ActiveSince:     &claimedAt,
-			LastObservedAt:  observedAt,
-			LastResourceVer: pod.ResourceVersion,
+			SandboxID:                 pod.Name,
+			Namespace:                 pod.Namespace,
+			TeamID:                    teamID,
+			UserID:                    userID,
+			TemplateID:                templateID,
+			ClusterID:                 p.clusterID,
+			OwnerKind:                 podUsage.OwnerKind,
+			FunctionID:                podUsage.FunctionID,
+			FunctionRevisionID:        podUsage.FunctionRevisionID,
+			FunctionRuntimeInstanceID: podUsage.FunctionRuntimeInstanceID,
+			ResourceMillicpu:          podUsage.ResourceMillicpu,
+			ResourceMemoryMiB:         podUsage.ResourceMemoryMiB,
+			ClaimedAt:                 &claimedAt,
+			ActiveSince:               &claimedAt,
+			LastObservedAt:            observedAt,
+			LastResourceVer:           pod.ResourceVersion,
 		}
 	}
 
@@ -167,21 +175,18 @@ func (p *LifecycleProjector) handleUpsert(obj any) {
 		}
 		if !state.Paused {
 			pendingEvents = append(pendingEvents, p.buildSandboxEvent(pod.Name, teamID, userID, templateID, eventTime, meteringpkg.EventTypeSandboxPaused, pauseEventID(pod.Name, eventTime), nil))
-			if window := p.buildSandboxWindow(state, teamID, userID, templateID, meteringpkg.WindowTypeSandboxActiveSeconds, state.ActiveSince, eventTime); window != nil {
-				pendingWindows = append(pendingWindows, window)
-			}
+			pendingWindows = append(pendingWindows, p.buildSandboxWindows(state, teamID, userID, templateID, meteringpkg.WindowTypeSandboxActiveSeconds, state.ActiveSince, eventTime)...)
 		}
 		state.Paused = true
 		state.PausedAt = &eventTime
 		state.ActiveSince = nil
 	} else if state.Paused {
-		if window := p.buildSandboxWindow(state, teamID, userID, templateID, meteringpkg.WindowTypeSandboxPausedSeconds, state.PausedAt, observedAt); window != nil {
-			pendingWindows = append(pendingWindows, window)
-		}
+		pendingWindows = append(pendingWindows, p.buildSandboxWindows(state, teamID, userID, templateID, meteringpkg.WindowTypeSandboxPausedSeconds, state.PausedAt, observedAt)...)
 		pendingEvents = append(pendingEvents, p.buildSandboxEvent(pod.Name, teamID, userID, templateID, observedAt, meteringpkg.EventTypeSandboxResumed, resumeEventID(pod.Name, pod.ResourceVersion), nil))
 		state.Paused = false
 		state.PausedAt = nil
 		state.ActiveSince = ptrTime(observedAt)
+		applySandboxUsage(state, podUsage)
 	}
 
 	state.Namespace = pod.Namespace
@@ -189,6 +194,9 @@ func (p *LifecycleProjector) handleUpsert(obj any) {
 	state.UserID = userID
 	state.TemplateID = templateID
 	state.ClusterID = p.clusterID
+	if !paused && !state.Paused {
+		applySandboxUsage(state, podUsage)
+	}
 	state.ClaimedAt = &claimedAt
 	state.TerminatedAt = nil
 	state.LastObservedAt = observedAt
@@ -215,19 +223,26 @@ func (p *LifecycleProjector) handleDelete(obj any) {
 	teamID := pod.Annotations[controller.AnnotationTeamID]
 	userID := pod.Annotations[controller.AnnotationUserID]
 	templateID := pod.Labels[controller.LabelTemplateID]
+	podUsage := sandboxUsageFromPod(pod)
 	claimedAt, claimedAtSet := parseRFC3339(pod.Annotations[controller.AnnotationClaimedAt])
 	pendingEvents := make([]*meteringpkg.Event, 0, 3)
 	pendingWindows := make([]*meteringpkg.Window, 0, 2)
 	if state == nil {
 		state = &meteringpkg.SandboxProjectionState{
-			SandboxID:       pod.Name,
-			Namespace:       pod.Namespace,
-			TeamID:          teamID,
-			UserID:          userID,
-			TemplateID:      templateID,
-			ClusterID:       p.clusterID,
-			LastObservedAt:  observedAt,
-			LastResourceVer: pod.ResourceVersion,
+			SandboxID:                 pod.Name,
+			Namespace:                 pod.Namespace,
+			TeamID:                    teamID,
+			UserID:                    userID,
+			TemplateID:                templateID,
+			ClusterID:                 p.clusterID,
+			OwnerKind:                 podUsage.OwnerKind,
+			FunctionID:                podUsage.FunctionID,
+			FunctionRevisionID:        podUsage.FunctionRevisionID,
+			FunctionRuntimeInstanceID: podUsage.FunctionRuntimeInstanceID,
+			ResourceMillicpu:          podUsage.ResourceMillicpu,
+			ResourceMemoryMiB:         podUsage.ResourceMemoryMiB,
+			LastObservedAt:            observedAt,
+			LastResourceVer:           pod.ResourceVersion,
 		}
 		if claimedAtSet {
 			pendingEvents = append(pendingEvents, p.buildSandboxEvent(pod.Name, teamID, userID, templateID, claimedAt, meteringpkg.EventTypeSandboxClaimed, claimedEventID(pod.Name, claimedAt), claimEventData(pod)))
@@ -240,9 +255,7 @@ func (p *LifecycleProjector) handleDelete(obj any) {
 				pausedAt = parsedPausedAt
 			}
 			pendingEvents = append(pendingEvents, p.buildSandboxEvent(pod.Name, teamID, userID, templateID, pausedAt, meteringpkg.EventTypeSandboxPaused, pauseEventID(pod.Name, pausedAt), nil))
-			if window := p.buildSandboxWindow(state, teamID, userID, templateID, meteringpkg.WindowTypeSandboxActiveSeconds, state.ActiveSince, pausedAt); window != nil {
-				pendingWindows = append(pendingWindows, window)
-			}
+			pendingWindows = append(pendingWindows, p.buildSandboxWindows(state, teamID, userID, templateID, meteringpkg.WindowTypeSandboxActiveSeconds, state.ActiveSince, pausedAt)...)
 			state.Paused = true
 			state.PausedAt = &pausedAt
 			state.ActiveSince = nil
@@ -250,13 +263,9 @@ func (p *LifecycleProjector) handleDelete(obj any) {
 	}
 	if state.TerminatedAt == nil {
 		if state.Paused {
-			if window := p.buildSandboxWindow(state, teamID, userID, templateID, meteringpkg.WindowTypeSandboxPausedSeconds, state.PausedAt, observedAt); window != nil {
-				pendingWindows = append(pendingWindows, window)
-			}
+			pendingWindows = append(pendingWindows, p.buildSandboxWindows(state, teamID, userID, templateID, meteringpkg.WindowTypeSandboxPausedSeconds, state.PausedAt, observedAt)...)
 		} else {
-			if window := p.buildSandboxWindow(state, teamID, userID, templateID, meteringpkg.WindowTypeSandboxActiveSeconds, state.ActiveSince, observedAt); window != nil {
-				pendingWindows = append(pendingWindows, window)
-			}
+			pendingWindows = append(pendingWindows, p.buildSandboxWindows(state, teamID, userID, templateID, meteringpkg.WindowTypeSandboxActiveSeconds, state.ActiveSince, observedAt)...)
 		}
 		pendingEvents = append(pendingEvents, p.buildSandboxEvent(pod.Name, teamID, userID, templateID, observedAt, meteringpkg.EventTypeSandboxTerminated, terminateEventID(pod.Name, pod.ResourceVersion), nil))
 	}
@@ -377,6 +386,10 @@ func (p *LifecycleProjector) buildSandboxWindow(state *meteringpkg.SandboxProjec
 	if state == nil || start == nil || start.IsZero() || end.IsZero() || !end.After(*start) {
 		return nil
 	}
+	product := meteringpkg.ProductSandbox
+	if state.OwnerKind == functionruntime.OwnerKind {
+		product = meteringpkg.ProductFunction
+	}
 	return &meteringpkg.Window{
 		WindowID:    sandboxWindowID(state.SandboxID, windowType, *start, end),
 		Producer:    sandboxLifecycleProducer,
@@ -394,9 +407,72 @@ func (p *LifecycleProjector) buildSandboxWindow(state *meteringpkg.SandboxProjec
 		Value:       int64(end.Sub(*start) / time.Second),
 		Unit:        meteringpkg.WindowUnitSeconds,
 		Data: mustJSON(map[string]any{
-			"state_transition": windowType,
+			"state_transition":             windowType,
+			"product":                      product,
+			"owner_kind":                   state.OwnerKind,
+			"function_id":                  state.FunctionID,
+			"function_revision_id":         state.FunctionRevisionID,
+			"function_runtime_instance_id": state.FunctionRuntimeInstanceID,
+			"resource_millicpu":            state.ResourceMillicpu,
+			"resource_memory_mib":          state.ResourceMemoryMiB,
 		}),
 	}
+}
+
+func (p *LifecycleProjector) buildSandboxWindows(state *meteringpkg.SandboxProjectionState, teamID, userID, templateID, windowType string, start *time.Time, end time.Time) []*meteringpkg.Window {
+	base := p.buildSandboxWindow(state, teamID, userID, templateID, windowType, start, end)
+	if base == nil {
+		return nil
+	}
+	windows := []*meteringpkg.Window{base}
+	if windowType != meteringpkg.WindowTypeSandboxActiveSeconds || state.OwnerKind == functionruntime.OwnerKind {
+		return windows
+	}
+	durationMS := end.Sub(*start).Milliseconds()
+	if durationMS <= 0 {
+		return windows
+	}
+	if state.ResourceMillicpu > 0 {
+		windows = append(windows, &meteringpkg.Window{
+			WindowID:    sandboxWindowID(state.SandboxID, meteringpkg.WindowTypeSandboxComputeMillicpuMilliseconds, *start, end),
+			Producer:    sandboxLifecycleProducer,
+			RegionID:    p.regionID,
+			WindowType:  meteringpkg.WindowTypeSandboxComputeMillicpuMilliseconds,
+			SubjectType: meteringpkg.SubjectTypeSandbox,
+			SubjectID:   state.SandboxID,
+			TeamID:      teamID,
+			UserID:      userID,
+			SandboxID:   state.SandboxID,
+			TemplateID:  templateID,
+			ClusterID:   p.clusterID,
+			WindowStart: *start,
+			WindowEnd:   end,
+			Value:       state.ResourceMillicpu * durationMS,
+			Unit:        meteringpkg.WindowUnitMillicpuMilliseconds,
+			Data:        resourceWindowData(state),
+		})
+	}
+	if state.ResourceMemoryMiB > 0 {
+		windows = append(windows, &meteringpkg.Window{
+			WindowID:    sandboxWindowID(state.SandboxID, meteringpkg.WindowTypeSandboxMemoryMiBMilliseconds, *start, end),
+			Producer:    sandboxLifecycleProducer,
+			RegionID:    p.regionID,
+			WindowType:  meteringpkg.WindowTypeSandboxMemoryMiBMilliseconds,
+			SubjectType: meteringpkg.SubjectTypeSandbox,
+			SubjectID:   state.SandboxID,
+			TeamID:      teamID,
+			UserID:      userID,
+			SandboxID:   state.SandboxID,
+			TemplateID:  templateID,
+			ClusterID:   p.clusterID,
+			WindowStart: *start,
+			WindowEnd:   end,
+			Value:       state.ResourceMemoryMiB * durationMS,
+			Unit:        meteringpkg.WindowUnitMiBMilliseconds,
+			Data:        resourceWindowData(state),
+		})
+	}
+	return windows
 }
 
 func isClaimedActiveSandbox(pod *corev1.Pod) bool {
@@ -459,6 +535,91 @@ func claimEventData(pod *corev1.Pod) map[string]any {
 		"expires_at":      pod.Annotations[controller.AnnotationExpiresAt],
 		"hard_expires_at": pod.Annotations[controller.AnnotationHardExpiresAt],
 	}
+}
+
+type sandboxUsageMetadata struct {
+	OwnerKind                 string
+	FunctionID                string
+	FunctionRevisionID        string
+	FunctionRuntimeInstanceID string
+	ResourceMillicpu          int64
+	ResourceMemoryMiB         int64
+}
+
+func sandboxUsageFromPod(pod *corev1.Pod) sandboxUsageMetadata {
+	if pod == nil {
+		return sandboxUsageMetadata{}
+	}
+	cpu, memory := podResourceAllocation(pod)
+	return sandboxUsageMetadata{
+		OwnerKind:                 pod.Annotations[controller.AnnotationOwnerKind],
+		FunctionID:                pod.Annotations[controller.AnnotationFunctionID],
+		FunctionRevisionID:        pod.Annotations[controller.AnnotationFunctionRevisionID],
+		FunctionRuntimeInstanceID: pod.Annotations[controller.AnnotationFunctionRuntimeInstanceID],
+		ResourceMillicpu:          cpu,
+		ResourceMemoryMiB:         memory,
+	}
+}
+
+func applySandboxUsage(state *meteringpkg.SandboxProjectionState, usage sandboxUsageMetadata) {
+	if state == nil {
+		return
+	}
+	state.OwnerKind = usage.OwnerKind
+	state.FunctionID = usage.FunctionID
+	state.FunctionRevisionID = usage.FunctionRevisionID
+	state.FunctionRuntimeInstanceID = usage.FunctionRuntimeInstanceID
+	state.ResourceMillicpu = usage.ResourceMillicpu
+	state.ResourceMemoryMiB = usage.ResourceMemoryMiB
+}
+
+func podResourceAllocation(pod *corev1.Pod) (int64, int64) {
+	if pod == nil {
+		return 0, 0
+	}
+	var cpuMillis int64
+	var memoryBytes int64
+	for _, container := range pod.Spec.Containers {
+		cpuMillis += resourceMillicpu(container.Resources.Requests, container.Resources.Limits)
+		memoryBytes += resourceBytes(container.Resources.Requests, container.Resources.Limits)
+	}
+	return cpuMillis, bytesToMiBRoundUp(memoryBytes)
+}
+
+func resourceMillicpu(requests, limits corev1.ResourceList) int64 {
+	if quantity, ok := limits[corev1.ResourceCPU]; ok && !quantity.IsZero() {
+		return quantity.MilliValue()
+	}
+	if quantity, ok := requests[corev1.ResourceCPU]; ok && !quantity.IsZero() {
+		return quantity.MilliValue()
+	}
+	return 0
+}
+
+func resourceBytes(requests, limits corev1.ResourceList) int64 {
+	if quantity, ok := limits[corev1.ResourceMemory]; ok && !quantity.IsZero() {
+		return quantity.Value()
+	}
+	if quantity, ok := requests[corev1.ResourceMemory]; ok && !quantity.IsZero() {
+		return quantity.Value()
+	}
+	return 0
+}
+
+func bytesToMiBRoundUp(value int64) int64 {
+	if value <= 0 {
+		return 0
+	}
+	const mib = int64(1024 * 1024)
+	return (value + mib - 1) / mib
+}
+
+func resourceWindowData(state *meteringpkg.SandboxProjectionState) json.RawMessage {
+	return mustJSON(map[string]any{
+		"product":             meteringpkg.ProductSandbox,
+		"resource_millicpu":   state.ResourceMillicpu,
+		"resource_memory_mib": state.ResourceMemoryMiB,
+	})
 }
 
 func claimedEventID(sandboxID string, claimedAt time.Time) string {

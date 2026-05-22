@@ -1,18 +1,19 @@
 # Functions
 
-Sandbox0 Functions publish a Sandbox Service behind a stable function domain. A function keeps its identity, slug, and host across revisions, so callers can keep using the same URL while you publish new sandbox-backed code.
+Sandbox0 Functions serve immutable revisions behind a stable function domain. A function keeps its identity, slug, and host across revisions, so callers can keep using the same URL while you publish new sandbox-backed code.
 
 <Callout variant="info">
-Functions are created from Sandbox Services, not from uploaded ZIP files or container images. Publish starts from a `sandbox_id` and `service_id`; Sandbox0 snapshots the service configuration and restore mounts into an immutable revision.
+The canonical revision contract is `FunctionRevisionSpec`: the template used to claim runtime sandboxes, the runtime service to start, and the mounts or assets attached to that runtime. Publishing from a Sandbox Service is a shortcut; `sandbox_id` and `service_id` are compiled into the same immutable revision spec.
 </Callout>
 
 ## Model
 
 | Object | Description |
 |--------|-------------|
-| Sandbox Service | A named port, ingress routes, and restartable runtime inside a sandbox |
+| Sandbox Service | A named port, ingress routes, and restartable runtime inside a sandbox; it can be used as a publishing shortcut |
+| FunctionRevisionSpec | Immutable execution contract for a revision, including `template_id`, `runtime_service`, mounts, static assets, and environment references |
 | Function | Stable function identity, slug, and host under the configured function domain |
-| Revision | Immutable snapshot of the source service plus the SandboxVolume restore mounts needed to restore it |
+| Revision | Immutable stored spec plus source and provenance metadata |
 | Alias | Mutable pointer from a name such as `production` to a revision |
 | Runtime | Restored sandbox and process context currently serving a function revision |
 
@@ -22,7 +23,7 @@ The `production` alias is the serving pointer used by the function host. Creatin
 
 Function traffic is handled by `function-gateway`. The gateway resolves the host to a function, loads the `production` revision, enforces the revision's service route policy, then proxies through the owning `cluster-gateway` to the runtime sandbox service port. `function-gateway` is regional and does not rely on direct access to cluster-internal sandbox IPs.
 
-Function serving is revision-first. The gateway does not proxy production traffic to the mutable source sandbox. When no reusable runtime exists, the gateway claims a new runtime sandbox from the revision's template, mounts the revision-owned volumes, starts the service runtime command or binds to the referenced warm process, and reuses runtime instances for later requests. The runtime pool scales out up to the function's `max_active` setting when local in-flight requests reach the soft `target_concurrency` target. Changes made to the source sandbox after publishing require a new revision before they affect the function host.
+Function serving is revision-first. The gateway does not proxy production traffic to the mutable source sandbox. When no reusable runtime exists, the gateway claims a new runtime sandbox from the revision spec's template, attaches the revision mounts, starts the runtime service command or binds to the referenced warm process, and reuses runtime instances for later requests. The runtime pool scales out up to the function's `max_active` setting when local in-flight requests reach the soft `target_concurrency` target. Changes made to a source sandbox after publishing require a new revision before they affect the function host.
 
 ## Public Ingress Security
 
@@ -34,7 +35,7 @@ Inbound route policy controls how callers enter the Function. Outbound calls mad
 
 ## Publishable Services
 
-Only publishable Sandbox Services can become function revisions. A service is publishable when it is public and has a restartable runtime:
+When you publish through the Sandbox Service shortcut, only publishable services can become function revisions. A service is publishable when it is public and has a restartable runtime:
 
 | Blocker | Meaning |
 |---------|---------|
@@ -46,13 +47,13 @@ Only publishable Sandbox Services can become function revisions. A service is pu
 
 For Functions, a `warm_process` runtime must reference an existing `cmd` warm process alias or context ID. REPL warm processes are interactive execution contexts and cannot serve HTTP traffic.
 
-Use Sandbox Services route policy for path matching, allowed methods, bearer/header auth, CORS, rate limits, path rewrite, and upstream timeout. Functions reuse the same route model.
+Direct `revision_spec` publishing uses the same service schema in `runtime_service`, so the same route policy model controls path matching, allowed methods, bearer/header auth, CORS, rate limits, path rewrite, and upstream timeout.
 
 ## Next Steps
 
 <CardGroup>
   <Card title="Publish Functions" href="/docs/function/publish" cta="Continue">
-    Configure a publishable service and create a function from it.
+    Create a function from a publishable service shortcut or from a revision spec.
   </Card>
 
   <Card title="Revisions And Aliases" href="/docs/function/revisions" cta="Continue">

@@ -1,6 +1,6 @@
 # Publish Functions
 
-Publish a Function by first configuring a Sandbox Service with public ingress and a restartable runtime, then creating a function from that service.
+Publish a Function from either a publishable Sandbox Service shortcut or an explicit `FunctionRevisionSpec`. Both paths create the stable function record, revision 1, and the `production` alias.
 
 ## Configure a Publishable Service
 
@@ -182,13 +182,13 @@ for (const service of services.services) {
   ]}
 />
 
-## Create a Function
+## Create From A Sandbox Service
 
 <Endpoint method="POST">
 /api/v1/functions
 </Endpoint>
 
-Creating a function creates the stable function record, revision 1, and the `production` alias. Autoscaling settings are optional; omitted values use the defaults documented in [Function Autoscaling](/docs/function/autoscaling).
+The Sandbox Service shortcut is the fastest path from a running sandbox to a function. Sandbox0 reads the source service, validates that it is publishable, captures the needed restore mounts, and stores the result as an immutable `FunctionRevisionSpec`. Autoscaling settings are optional; omitted values use the defaults documented in [Function Autoscaling](/docs/function/autoscaling).
 
 <Tabs
   tabs={[
@@ -255,6 +255,190 @@ console.log('function URL:', result.function.url);`
     }
   ]}
 />
+
+## Create From A Revision Spec
+
+Use `revision_spec` when a deployment system already has the template, runtime service, and mount contract it wants to publish. The same service validation applies to `runtime_service`: it must expose public ingress and use a restartable runtime.
+
+<Tabs
+  tabs={[
+    {
+      label: "API",
+      language: "json",
+      code: `{
+    "name": "my-api",
+    "source": {
+        "type": "revision_spec",
+        "revision_spec": {
+            "template_id": "default",
+            "runtime_service": {
+                "id": "api",
+                "port": 8080,
+                "runtime": {
+                    "type": "cmd",
+                    "command": ["python3", "-m", "http.server", "8080", "--bind", "0.0.0.0", "-d", "/workspace/public"],
+                    "cwd": "/workspace"
+                },
+                "ingress": {
+                    "public": true,
+                    "routes": [
+                        {
+                            "id": "api",
+                            "path_prefix": "/",
+                            "methods": ["GET"],
+                            "resume": true
+                        }
+                    ]
+                },
+                "health_check": {
+                    "path": "/"
+                }
+            }
+        }
+    }
+}`
+    },
+    {
+      label: "Go",
+      language: "go",
+      code: `spec := apispec.FunctionRevisionSpec{
+    TemplateID: "default",
+    RuntimeService: apispec.SandboxAppService{
+        ID:   "api",
+        Port: 8080,
+        Runtime: apispec.NewOptSandboxAppServiceRuntime(apispec.SandboxAppServiceRuntime{
+            Type:    apispec.SandboxAppServiceRuntimeTypeCmd,
+            Command: []string{"python3", "-m", "http.server", "8080", "--bind", "0.0.0.0", "-d", "/workspace/public"},
+            Cwd:     apispec.NewOptString("/workspace"),
+        }),
+        Ingress: apispec.SandboxAppServiceIngress{
+            Public: true,
+            Routes: []apispec.SandboxAppServiceRoute{
+                {
+                    ID:         "api",
+                    PathPrefix: apispec.NewOptString("/"),
+                    Methods:    []string{"GET"},
+                    Resume:     true,
+                },
+            },
+        },
+        HealthCheck: apispec.NewOptSandboxAppServiceHealth(apispec.SandboxAppServiceHealth{
+            Path: apispec.NewOptString("/"),
+        }),
+    },
+}
+
+result, err := client.CreateFunctionFromRevisionSpec(
+    ctx,
+    spec,
+    sandbox0.WithFunctionName("my-api"),
+)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("function URL: %s\\n", result.Function.URL)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.apispec.models.function_revision_spec import FunctionRevisionSpec
+from sandbox0.apispec.models.sandbox_app_service import SandboxAppService
+from sandbox0.apispec.models.sandbox_app_service_health import SandboxAppServiceHealth
+from sandbox0.apispec.models.sandbox_app_service_ingress import SandboxAppServiceIngress
+from sandbox0.apispec.models.sandbox_app_service_route import SandboxAppServiceRoute
+from sandbox0.apispec.models.sandbox_app_service_runtime import SandboxAppServiceRuntime
+from sandbox0.apispec.models.sandbox_app_service_runtime_type import SandboxAppServiceRuntimeType
+
+spec = FunctionRevisionSpec(
+    template_id="default",
+    runtime_service=SandboxAppService(
+        id="api",
+        port=8080,
+        runtime=SandboxAppServiceRuntime(
+            type_=SandboxAppServiceRuntimeType.CMD,
+            command=["python3", "-m", "http.server", "8080", "--bind", "0.0.0.0", "-d", "/workspace/public"],
+            cwd="/workspace",
+        ),
+        ingress=SandboxAppServiceIngress(
+            public=True,
+            routes=[
+                SandboxAppServiceRoute(
+                    id="api",
+                    path_prefix="/",
+                    methods=["GET"],
+                    resume=True,
+                ),
+            ],
+        ),
+        health_check=SandboxAppServiceHealth(path="/"),
+    ),
+)
+
+result = client.functions.create_from_revision_spec(spec, name="my-api")
+print(f"function URL: {result.function.url}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const spec = {
+    templateId: 'default',
+    runtimeService: {
+        id: 'api',
+        port: 8080,
+        runtime: {
+            type: 'cmd',
+            command: ['python3', '-m', 'http.server', '8080', '--bind', '0.0.0.0', '-d', '/workspace/public'],
+            cwd: '/workspace',
+        },
+        ingress: {
+            _public: true,
+            routes: [
+                {
+                    id: 'api',
+                    pathPrefix: '/',
+                    methods: ['GET'],
+                    resume: true,
+                },
+            ],
+        },
+        healthCheck: { path: '/' },
+    },
+};
+
+const result = await client.functions.createFromRevisionSpec(spec, {
+    name: 'my-api',
+});
+console.log('function URL:', result.function.url);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `cat > function-spec.yaml <<EOF
+template_id: default
+runtime_service:
+  id: api
+  port: 8080
+  runtime:
+    type: cmd
+    command: ["python3", "-m", "http.server", "8080", "--bind", "0.0.0.0", "-d", "/workspace/public"]
+    cwd: /workspace
+  ingress:
+    public: true
+    routes:
+      - id: api
+        path_prefix: /
+        methods: [GET]
+        resume: true
+  health_check:
+    path: /
+EOF
+
+s0 function create --spec-file function-spec.yaml --name my-api`
+    }
+  ]}
+/>
+
+The response revision includes `source_type: "revision_spec"` and the stored `revision_spec`. Functions created from `sandbox_id` and `service_id` include `source_type: "sandbox_service"` and compatibility mirrors such as `source_sandbox_id` and `source_service_id`.
 
 ## Invoke the Function
 

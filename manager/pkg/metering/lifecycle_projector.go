@@ -175,13 +175,12 @@ func (p *LifecycleProjector) handleUpsert(obj any) {
 		}
 		if !state.Paused {
 			pendingEvents = append(pendingEvents, p.buildSandboxEvent(pod.Name, teamID, userID, templateID, eventTime, meteringpkg.EventTypeSandboxPaused, pauseEventID(pod.Name, eventTime), nil))
-			pendingWindows = append(pendingWindows, p.buildSandboxWindows(state, teamID, userID, templateID, meteringpkg.WindowTypeSandboxActiveSeconds, state.ActiveSince, eventTime)...)
+			pendingWindows = append(pendingWindows, p.buildSandboxResourceWindows(state, teamID, userID, templateID, state.ActiveSince, eventTime)...)
 		}
 		state.Paused = true
 		state.PausedAt = &eventTime
 		state.ActiveSince = nil
 	} else if state.Paused {
-		pendingWindows = append(pendingWindows, p.buildSandboxWindows(state, teamID, userID, templateID, meteringpkg.WindowTypeSandboxPausedSeconds, state.PausedAt, observedAt)...)
 		pendingEvents = append(pendingEvents, p.buildSandboxEvent(pod.Name, teamID, userID, templateID, observedAt, meteringpkg.EventTypeSandboxResumed, resumeEventID(pod.Name, pod.ResourceVersion), nil))
 		state.Paused = false
 		state.PausedAt = nil
@@ -255,17 +254,15 @@ func (p *LifecycleProjector) handleDelete(obj any) {
 				pausedAt = parsedPausedAt
 			}
 			pendingEvents = append(pendingEvents, p.buildSandboxEvent(pod.Name, teamID, userID, templateID, pausedAt, meteringpkg.EventTypeSandboxPaused, pauseEventID(pod.Name, pausedAt), nil))
-			pendingWindows = append(pendingWindows, p.buildSandboxWindows(state, teamID, userID, templateID, meteringpkg.WindowTypeSandboxActiveSeconds, state.ActiveSince, pausedAt)...)
+			pendingWindows = append(pendingWindows, p.buildSandboxResourceWindows(state, teamID, userID, templateID, state.ActiveSince, pausedAt)...)
 			state.Paused = true
 			state.PausedAt = &pausedAt
 			state.ActiveSince = nil
 		}
 	}
 	if state.TerminatedAt == nil {
-		if state.Paused {
-			pendingWindows = append(pendingWindows, p.buildSandboxWindows(state, teamID, userID, templateID, meteringpkg.WindowTypeSandboxPausedSeconds, state.PausedAt, observedAt)...)
-		} else {
-			pendingWindows = append(pendingWindows, p.buildSandboxWindows(state, teamID, userID, templateID, meteringpkg.WindowTypeSandboxActiveSeconds, state.ActiveSince, observedAt)...)
+		if !state.Paused {
+			pendingWindows = append(pendingWindows, p.buildSandboxResourceWindows(state, teamID, userID, templateID, state.ActiveSince, observedAt)...)
 		}
 		pendingEvents = append(pendingEvents, p.buildSandboxEvent(pod.Name, teamID, userID, templateID, observedAt, meteringpkg.EventTypeSandboxTerminated, terminateEventID(pod.Name, pod.ResourceVersion), nil))
 	}
@@ -382,52 +379,11 @@ func (p *LifecycleProjector) buildSandboxEvent(sandboxID, teamID, userID, templa
 	}
 }
 
-func (p *LifecycleProjector) buildSandboxWindow(state *meteringpkg.SandboxProjectionState, teamID, userID, templateID, windowType string, start *time.Time, end time.Time) *meteringpkg.Window {
-	if state == nil || start == nil || start.IsZero() || end.IsZero() || !end.After(*start) {
+func (p *LifecycleProjector) buildSandboxResourceWindows(state *meteringpkg.SandboxProjectionState, teamID, userID, templateID string, start *time.Time, end time.Time) []*meteringpkg.Window {
+	if state == nil || start == nil || start.IsZero() || end.IsZero() || !end.After(*start) || state.OwnerKind == functionruntime.OwnerKind {
 		return nil
 	}
-	product := meteringpkg.ProductSandbox
-	if state.OwnerKind == functionruntime.OwnerKind {
-		product = meteringpkg.ProductFunction
-	}
-	return &meteringpkg.Window{
-		WindowID:    sandboxWindowID(state.SandboxID, windowType, *start, end),
-		Producer:    sandboxLifecycleProducer,
-		RegionID:    p.regionID,
-		WindowType:  windowType,
-		SubjectType: meteringpkg.SubjectTypeSandbox,
-		SubjectID:   state.SandboxID,
-		TeamID:      teamID,
-		UserID:      userID,
-		SandboxID:   state.SandboxID,
-		TemplateID:  templateID,
-		ClusterID:   p.clusterID,
-		WindowStart: *start,
-		WindowEnd:   end,
-		Value:       int64(end.Sub(*start) / time.Second),
-		Unit:        meteringpkg.WindowUnitSeconds,
-		Data: mustJSON(map[string]any{
-			"state_transition":             windowType,
-			"product":                      product,
-			"owner_kind":                   state.OwnerKind,
-			"function_id":                  state.FunctionID,
-			"function_revision_id":         state.FunctionRevisionID,
-			"function_runtime_instance_id": state.FunctionRuntimeInstanceID,
-			"resource_millicpu":            state.ResourceMillicpu,
-			"resource_memory_mib":          state.ResourceMemoryMiB,
-		}),
-	}
-}
-
-func (p *LifecycleProjector) buildSandboxWindows(state *meteringpkg.SandboxProjectionState, teamID, userID, templateID, windowType string, start *time.Time, end time.Time) []*meteringpkg.Window {
-	base := p.buildSandboxWindow(state, teamID, userID, templateID, windowType, start, end)
-	if base == nil {
-		return nil
-	}
-	windows := []*meteringpkg.Window{base}
-	if windowType != meteringpkg.WindowTypeSandboxActiveSeconds || state.OwnerKind == functionruntime.OwnerKind {
-		return windows
-	}
+	windows := make([]*meteringpkg.Window, 0, 2)
 	durationMS := end.Sub(*start).Milliseconds()
 	if durationMS <= 0 {
 		return windows

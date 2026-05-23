@@ -189,13 +189,13 @@ func TestAppendWindowUsesDefaultPayload(t *testing.T) {
 	err := repo.AppendWindow(context.Background(), &Window{
 		WindowID:    "win-1",
 		Producer:    "manager.sandbox_lifecycle",
-		WindowType:  WindowTypeSandboxActiveSeconds,
+		WindowType:  WindowTypeSandboxComputeMillicpuMilliseconds,
 		SubjectType: SubjectTypeSandbox,
 		SubjectID:   "sb-1",
 		WindowStart: time.Date(2026, 3, 12, 12, 0, 0, 0, time.UTC),
 		WindowEnd:   time.Date(2026, 3, 12, 12, 5, 0, 0, time.UTC),
-		Value:       300,
-		Unit:        WindowUnitSeconds,
+		Value:       300_000,
+		Unit:        WindowUnitMillicpuMilliseconds,
 	})
 	if err != nil {
 		t.Fatalf("AppendWindow: %v", err)
@@ -308,7 +308,7 @@ func TestListWindowsAfterReturnsOrderedWindows(t *testing.T) {
 							"window-7",
 							"manager.sandbox_lifecycle",
 							"aws-us-east-1",
-							WindowTypeSandboxActiveSeconds,
+							WindowTypeSandboxComputeMillicpuMilliseconds,
 							SubjectTypeSandbox,
 							"sb-1",
 							"team-1",
@@ -320,8 +320,8 @@ func TestListWindowsAfterReturnsOrderedWindows(t *testing.T) {
 							"cluster-a",
 							windowStart,
 							windowEnd,
-							int64(300),
-							WindowUnitSeconds,
+							int64(300_000),
+							WindowUnitMillicpuMilliseconds,
 							recordedAt,
 							json.RawMessage(`{"source":"test"}`),
 						},
@@ -338,7 +338,7 @@ func TestListWindowsAfterReturnsOrderedWindows(t *testing.T) {
 	if len(windows) != 1 {
 		t.Fatalf("window count = %d, want 1", len(windows))
 	}
-	if windows[0].Sequence != 7 || windows[0].Value != 300 || windows[0].SandboxID != "sb-1" {
+	if windows[0].Sequence != 7 || windows[0].Value != 300_000 || windows[0].SandboxID != "sb-1" {
 		t.Fatalf("unexpected window: %+v", windows[0])
 	}
 }

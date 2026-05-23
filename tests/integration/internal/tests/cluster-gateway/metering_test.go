@@ -60,10 +60,10 @@ func TestClusterGatewayIntegration_MeteringExportContract(t *testing.T) {
 		t.Fatalf("append second event: %v", err)
 	}
 	if err := repo.AppendWindow(ctx, &metering.Window{
-		WindowID:    "sandbox/sb-1/active/1",
+		WindowID:    "sandbox/sb-1/compute/1",
 		Producer:    "manager.sandbox_lifecycle",
 		RegionID:    "aws-us-east-1",
-		WindowType:  metering.WindowTypeSandboxActiveSeconds,
+		WindowType:  metering.WindowTypeSandboxComputeMillicpuMilliseconds,
 		SubjectType: metering.SubjectTypeSandbox,
 		SubjectID:   "sb-1",
 		TeamID:      "team-1",
@@ -73,16 +73,16 @@ func TestClusterGatewayIntegration_MeteringExportContract(t *testing.T) {
 		ClusterID:   "cluster-a",
 		WindowStart: baseTime,
 		WindowEnd:   baseTime.Add(5 * time.Minute),
-		Value:       300,
-		Unit:        metering.WindowUnitSeconds,
+		Value:       300_000,
+		Unit:        metering.WindowUnitMillicpuMilliseconds,
 	}); err != nil {
 		t.Fatalf("append first window: %v", err)
 	}
 	if err := repo.AppendWindow(ctx, &metering.Window{
-		WindowID:    "sandbox/sb-1/paused/2",
+		WindowID:    "sandbox/sb-1/memory/2",
 		Producer:    "manager.sandbox_lifecycle",
 		RegionID:    "aws-us-east-1",
-		WindowType:  metering.WindowTypeSandboxPausedSeconds,
+		WindowType:  metering.WindowTypeSandboxMemoryMiBMilliseconds,
 		SubjectType: metering.SubjectTypeSandbox,
 		SubjectID:   "sb-1",
 		TeamID:      "team-1",
@@ -92,8 +92,8 @@ func TestClusterGatewayIntegration_MeteringExportContract(t *testing.T) {
 		ClusterID:   "cluster-a",
 		WindowStart: baseTime.Add(5 * time.Minute),
 		WindowEnd:   baseTime.Add(7 * time.Minute),
-		Value:       120,
-		Unit:        metering.WindowUnitSeconds,
+		Value:       120_000,
+		Unit:        metering.WindowUnitMiBMilliseconds,
 	}); err != nil {
 		t.Fatalf("append second window: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestClusterGatewayIntegration_MeteringExportContract(t *testing.T) {
 	if len(windowsResp.Windows) != 1 {
 		t.Fatalf("window count = %d, want 1", len(windowsResp.Windows))
 	}
-	if windowsResp.Windows[0].Sequence != 2 || windowsResp.Windows[0].WindowType != metering.WindowTypeSandboxPausedSeconds {
+	if windowsResp.Windows[0].Sequence != 2 || windowsResp.Windows[0].WindowType != metering.WindowTypeSandboxMemoryMiBMilliseconds {
 		t.Fatalf("unexpected window: %+v", windowsResp.Windows[0])
 	}
 }

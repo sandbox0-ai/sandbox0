@@ -27,10 +27,8 @@ const (
 	EventTypeSnapshotDeleted  = "snapshot.deleted"
 	EventTypeSnapshotRestored = "snapshot.restored"
 
-	WindowTypeSandboxActiveSeconds = "sandbox.active_seconds"
-	WindowTypeSandboxPausedSeconds = "sandbox.paused_seconds"
-	WindowTypeSandboxIngressBytes  = "sandbox.ingress_bytes"
-	WindowTypeSandboxEgressBytes   = "sandbox.egress_bytes"
+	WindowTypeSandboxIngressBytes = "sandbox.ingress_bytes"
+	WindowTypeSandboxEgressBytes  = "sandbox.egress_bytes"
 
 	WindowTypeSandboxComputeMillicpuMilliseconds = "sandbox.compute_mcpu_milliseconds"
 	WindowTypeSandboxMemoryMiBMilliseconds       = "sandbox.memory_mib_milliseconds"
@@ -49,7 +47,6 @@ const (
 
 	WindowTypeManagedAgentSessionRunningMilliseconds = "managed_agent.session_running_milliseconds"
 
-	WindowUnitSeconds              = "seconds"
 	WindowUnitMilliseconds         = "milliseconds"
 	WindowUnitBytes                = "bytes"
 	WindowUnitByteHours            = "byte_hours"

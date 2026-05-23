@@ -41,10 +41,6 @@ func (m *Manager) recordVolumeStorageStateWithMetadata(ctx context.Context, vol 
 	))
 }
 
-func (m *Manager) recordSnapshotStorage(ctx context.Context, snapshot *db.Snapshot) error {
-	return m.recordSnapshotStorageWithMetadata(ctx, snapshot, nil)
-}
-
 func (m *Manager) recordSnapshotStorageWithMetadata(ctx context.Context, snapshot *db.Snapshot, metadata *meteringpkg.StorageObservation) error {
 	if snapshot == nil {
 		return nil

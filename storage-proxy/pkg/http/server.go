@@ -50,6 +50,8 @@ type volumeRepository interface {
 
 type meteringWriter interface {
 	AppendEventTx(ctx context.Context, tx pgx.Tx, event *meteringpkg.Event) error
+	RecordStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *meteringpkg.StorageObservation) error
+	CloseStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *meteringpkg.StorageObservation) error
 	UpsertProducerWatermarkTx(ctx context.Context, tx pgx.Tx, producer string, regionID string, completeBefore time.Time) error
 }
 
@@ -291,4 +293,24 @@ func (s *Server) appendMeteringEventTx(ctx context.Context, tx pgx.Tx, event *me
 		return err
 	}
 	return s.meteringRepo.UpsertProducerWatermarkTx(ctx, tx, event.Producer, event.RegionID, event.OccurredAt)
+}
+
+func (s *Server) appendStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *meteringpkg.StorageObservation) error {
+	if s.meteringRepo == nil || observation == nil {
+		return nil
+	}
+	if err := s.meteringRepo.RecordStorageObservationTx(ctx, tx, observation); err != nil {
+		return err
+	}
+	return s.meteringRepo.UpsertProducerWatermarkTx(ctx, tx, meteringpkg.ProducerStorage, observation.RegionID, observation.ObservedAt)
+}
+
+func (s *Server) closeStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *meteringpkg.StorageObservation) error {
+	if s.meteringRepo == nil || observation == nil {
+		return nil
+	}
+	if err := s.meteringRepo.CloseStorageObservationTx(ctx, tx, observation); err != nil {
+		return err
+	}
+	return s.meteringRepo.UpsertProducerWatermarkTx(ctx, tx, meteringpkg.ProducerStorage, observation.RegionID, observation.ObservedAt)
 }

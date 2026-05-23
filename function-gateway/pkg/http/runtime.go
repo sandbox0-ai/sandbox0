@@ -157,6 +157,10 @@ func (s *Server) serveFunctionRevision(c *gin.Context, fn *functions.Function, r
 		attribute.Int("sandbox0.service_port", service.Port),
 	)
 	c.Request = c.Request.WithContext(proxyCtx)
+	finishUsage := s.beginFunctionRequestMetering(c.Request.Context(), fn, rev, lease, routeID, requestStarted)
+	defer func() {
+		finishUsage(c.Writer.Status())
+	}()
 	s.proxyFunctionRequestToRuntime(c, fn, rev, sandbox, service, match.route)
 	status := c.Writer.Status()
 	proxySpan.SetAttributes(attribute.Int("http.status_code", status))
@@ -164,6 +168,13 @@ func (s *Server) serveFunctionRevision(c *gin.Context, fn *functions.Function, r
 		proxySpan.SetStatus(codes.Error, nethttp.StatusText(status))
 	}
 	proxySpan.End()
+}
+
+func (s *Server) beginFunctionRequestMetering(ctx context.Context, fn *functions.Function, rev *functions.Revision, lease *functionRuntimeLease, routeID string, requestStarted time.Time) func(int) {
+	if s == nil || s.functionUsageMeter == nil {
+		return func(int) {}
+	}
+	return s.functionUsageMeter.Begin(ctx, fn, rev, lease, routeID, requestStarted)
 }
 
 func matchFunctionRoute(service mgr.SandboxAppService, path string, method string) functionRouteMatch {

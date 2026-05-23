@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/sandbox0-ai/sandbox0/pkg/functionruntime"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/metering"
@@ -213,12 +214,24 @@ func (r *fakeHTTPRepo) MarkOwnedSandboxVolumeCleanupAttempt(ctx context.Context,
 }
 
 type fakeHTTPMeteringWriter struct {
-	events     []*metering.Event
-	watermarks []metering.ProducerWatermark
+	events              []*metering.Event
+	storageObservations []*metering.StorageObservation
+	closedStorage       []*metering.StorageObservation
+	watermarks          []metering.ProducerWatermark
 }
 
 func (f *fakeHTTPMeteringWriter) AppendEventTx(ctx context.Context, tx pgx.Tx, event *metering.Event) error {
 	f.events = append(f.events, event)
+	return nil
+}
+
+func (f *fakeHTTPMeteringWriter) RecordStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *metering.StorageObservation) error {
+	f.storageObservations = append(f.storageObservations, observation)
+	return nil
+}
+
+func (f *fakeHTTPMeteringWriter) CloseStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *metering.StorageObservation) error {
+	f.closedStorage = append(f.closedStorage, observation)
 	return nil
 }
 
@@ -323,6 +336,72 @@ func (f *fakeHTTPSnapshotManager) CreateVolumeFromSnapshot(ctx context.Context, 
 	}, nil
 }
 
+func TestCreateSnapshotForwardsFunctionStorageMetadata(t *testing.T) {
+	snapshotMgr := &fakeHTTPSnapshotManager{}
+	server := &Server{
+		logger:      logrus.New(),
+		snapshotMgr: snapshotMgr,
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/snapshots", bytes.NewBufferString(`{"name":"snap-1"}`))
+	req.SetPathValue("volume_id", "vol-1")
+	functionruntime.SetHeaders(req.Header, functionruntime.Metadata{
+		FunctionID:         "fn-1",
+		FunctionRevisionID: "rev-1",
+	})
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.createSnapshot(recorder, req)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusCreated)
+	}
+	if snapshotMgr.lastCreate == nil || snapshotMgr.lastCreate.StorageMetadata == nil {
+		t.Fatalf("storage metadata was not forwarded")
+	}
+	metadata := snapshotMgr.lastCreate.StorageMetadata
+	if metadata.Product != metering.ProductFunction || metadata.FunctionID != "fn-1" || metadata.FunctionRevisionID != "rev-1" {
+		t.Fatalf("storage metadata = %+v, want function metadata", metadata)
+	}
+}
+
+func TestCreateSandboxVolumeFromSnapshotForwardsFunctionStorageMetadata(t *testing.T) {
+	snapshotMgr := &fakeHTTPSnapshotManager{}
+	server := &Server{
+		logger:      logrus.New(),
+		repo:        newFakeHTTPRepo(),
+		snapshotMgr: snapshotMgr,
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes", bytes.NewBufferString(`{"snapshot_id":"snap-1"}`))
+	functionruntime.SetHeaders(req.Header, functionruntime.Metadata{
+		FunctionID:         "fn-1",
+		FunctionRevisionID: "rev-1",
+	})
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.createSandboxVolume(recorder, req)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusCreated)
+	}
+	if snapshotMgr.lastCreateVolume == nil || snapshotMgr.lastCreateVolume.StorageMetadata == nil {
+		t.Fatalf("storage metadata was not forwarded")
+	}
+	metadata := snapshotMgr.lastCreateVolume.StorageMetadata
+	if metadata.Product != metering.ProductFunction || metadata.FunctionID != "fn-1" || metadata.FunctionRevisionID != "rev-1" {
+		t.Fatalf("storage metadata = %+v, want function metadata", metadata)
+	}
+}
+
 func TestCreateSandboxVolumeRecordsMetering(t *testing.T) {
 	repo := newFakeHTTPRepo()
 	meteringWriter := &fakeHTTPMeteringWriter{}
@@ -360,11 +439,21 @@ func TestCreateSandboxVolumeRecordsMetering(t *testing.T) {
 	if event.RegionID != "aws-us-east-1" {
 		t.Fatalf("region_id = %q, want %q", event.RegionID, "aws-us-east-1")
 	}
-	if len(meteringWriter.watermarks) != 1 {
-		t.Fatalf("watermark count = %d, want 1", len(meteringWriter.watermarks))
+	if len(meteringWriter.storageObservations) != 1 {
+		t.Fatalf("storage observation count = %d, want 1", len(meteringWriter.storageObservations))
 	}
-	if !meteringWriter.watermarks[0].CompleteBefore.Equal(event.OccurredAt) {
-		t.Fatalf("watermark complete_before = %v, want %v", meteringWriter.watermarks[0].CompleteBefore, event.OccurredAt)
+	storageObservation := meteringWriter.storageObservations[0]
+	if storageObservation.SubjectType != metering.SubjectTypeVolume || storageObservation.SizeBytes != 0 {
+		t.Fatalf("unexpected storage observation: %+v", storageObservation)
+	}
+	if len(meteringWriter.watermarks) != 2 {
+		t.Fatalf("watermark count = %d, want 2", len(meteringWriter.watermarks))
+	}
+	if meteringWriter.watermarks[0].Producer != metering.ProducerStorage {
+		t.Fatalf("first watermark producer = %q, want %q", meteringWriter.watermarks[0].Producer, metering.ProducerStorage)
+	}
+	if !meteringWriter.watermarks[1].CompleteBefore.Equal(event.OccurredAt) {
+		t.Fatalf("event watermark complete_before = %v, want %v", meteringWriter.watermarks[1].CompleteBefore, event.OccurredAt)
 	}
 
 	resp, apiErr, err := spec.DecodeResponse[db.SandboxVolume](recorder.Body)
@@ -434,8 +523,14 @@ func TestDeleteSandboxVolumeForceRecordsMetering(t *testing.T) {
 	if event.RegionID != "aws-us-east-1" {
 		t.Fatalf("region_id = %q, want %q", event.RegionID, "aws-us-east-1")
 	}
-	if len(meteringWriter.watermarks) != 1 {
-		t.Fatalf("watermark count = %d, want 1", len(meteringWriter.watermarks))
+	if len(meteringWriter.closedStorage) != 1 {
+		t.Fatalf("closed storage count = %d, want 1", len(meteringWriter.closedStorage))
+	}
+	if meteringWriter.closedStorage[0].SubjectID != "vol-1" {
+		t.Fatalf("closed storage subject = %q, want vol-1", meteringWriter.closedStorage[0].SubjectID)
+	}
+	if len(meteringWriter.watermarks) != 2 {
+		t.Fatalf("watermark count = %d, want 2", len(meteringWriter.watermarks))
 	}
 }
 

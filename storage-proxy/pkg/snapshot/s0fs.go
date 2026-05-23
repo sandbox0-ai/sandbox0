@@ -293,14 +293,7 @@ func cleanupS0FSVolume(volumeID string, cfg *config.StorageProxyConfig) error {
 }
 
 func snapshotSizeBytes(state *s0fs.SnapshotState) int64 {
-	if state == nil {
-		return 0
-	}
-	var size int64
-	for _, payload := range state.Data {
-		size += int64(len(payload))
-	}
-	return size
+	return s0fs.StateStorageBytes(state)
 }
 
 func (m *Manager) resolveS0FSForkState(ctx context.Context, teamID, sourceVolumeID string) (*s0fs.SnapshotState, error) {
@@ -397,6 +390,12 @@ func (m *Manager) createS0FSSnapshot(ctx context.Context, req *CreateSnapshotReq
 		_ = engine.DeleteSnapshot(snapshotID)
 		return nil, err
 	}
+	if err := m.recordVolumeStorageState(ctx, vol, state, snapshot.CreatedAt); err != nil {
+		return nil, err
+	}
+	if err := m.recordSnapshotStorageWithMetadata(ctx, snapshot, req.StorageMetadata); err != nil {
+		return nil, err
+	}
 	if err := m.appendMeteringEvent(ctx, snapshotCreatedEvent(m.regionID(), m.clusterID, snapshot)); err != nil {
 		return nil, err
 	}
@@ -429,8 +428,14 @@ func (m *Manager) forkS0FSVolume(ctx context.Context, req *ForkVolumeRequest) (*
 		if volCtx, getErr := m.volMgr.GetVolume(req.SourceVolumeID); getErr == nil && volCtx != nil {
 			_ = volCtx.FlushAll("")
 			if volCtx.IsS0FS() {
-				if _, err := volCtx.S0FS.SyncMaterialize(ctx); err != nil {
+				manifest, err := volCtx.S0FS.SyncMaterialize(ctx)
+				if err != nil {
 					return nil, err
+				}
+				if manifest != nil && manifest.State != nil {
+					if err := m.recordVolumeStorageState(ctx, sourceVol, manifest.State, time.Now().UTC()); err != nil {
+						return nil, err
+					}
 				}
 			}
 		}
@@ -476,6 +481,9 @@ func (m *Manager) forkS0FSVolume(ctx context.Context, req *ForkVolumeRequest) (*
 		if err := m.repo.CreateSandboxVolumeTx(ctx, tx, newVol); err != nil {
 			return err
 		}
+		if err := m.appendStorageObservationTx(ctx, tx, m.volumeStorageObservation(ctx, newVol, 0, newVol.CreatedAt)); err != nil {
+			return err
+		}
 		return nil
 	}); err != nil {
 		return nil, err
@@ -485,6 +493,7 @@ func (m *Manager) forkS0FSVolume(ctx context.Context, req *ForkVolumeRequest) (*
 		if success {
 			return
 		}
+		_ = m.closeStorageObservation(context.Background(), m.volumeStorageObservation(context.Background(), newVol, 0, time.Now().UTC()))
 		_ = cleanupS0FSVolume(newVolumeID, m.config)
 		_ = m.repo.WithTx(context.Background(), func(tx pgx.Tx) error {
 			err := m.repo.DeleteSandboxVolumeTx(context.Background(), tx, newVolumeID)
@@ -503,9 +512,16 @@ func (m *Manager) forkS0FSVolume(ctx context.Context, req *ForkVolumeRequest) (*
 		closeTarget()
 		return nil, err
 	}
-	if _, err := targetEngine.SyncMaterialize(ctx); err != nil {
+	manifest, err := targetEngine.SyncMaterialize(ctx)
+	if err != nil {
 		closeTarget()
 		return nil, err
+	}
+	if manifest != nil && manifest.State != nil {
+		if err := m.recordVolumeStorageState(ctx, newVol, manifest.State, time.Now().UTC()); err != nil {
+			closeTarget()
+			return nil, err
+		}
 	}
 	_ = closeTarget()
 
@@ -577,7 +593,13 @@ func (m *Manager) createS0FSVolumeFromSnapshot(ctx context.Context, req *CreateV
 	}
 
 	if err := m.repo.WithTx(ctx, func(tx pgx.Tx) error {
-		return m.repo.CreateSandboxVolumeTx(ctx, tx, newVol)
+		if err := m.repo.CreateSandboxVolumeTx(ctx, tx, newVol); err != nil {
+			return err
+		}
+		return m.appendStorageObservationTx(ctx, tx, applyStorageObservationMetadata(
+			m.volumeStorageObservation(ctx, newVol, 0, newVol.CreatedAt),
+			req.StorageMetadata,
+		))
 	}); err != nil {
 		return nil, err
 	}
@@ -586,6 +608,10 @@ func (m *Manager) createS0FSVolumeFromSnapshot(ctx context.Context, req *CreateV
 		if success {
 			return
 		}
+		_ = m.closeStorageObservation(context.Background(), applyStorageObservationMetadata(
+			m.volumeStorageObservation(context.Background(), newVol, 0, time.Now().UTC()),
+			req.StorageMetadata,
+		))
 		_ = cleanupS0FSVolume(newVolumeID, m.config)
 		_ = m.repo.WithTx(context.Background(), func(tx pgx.Tx) error {
 			err := m.repo.DeleteSandboxVolumeTx(context.Background(), tx, newVolumeID)
@@ -604,9 +630,16 @@ func (m *Manager) createS0FSVolumeFromSnapshot(ctx context.Context, req *CreateV
 		closeTarget()
 		return nil, err
 	}
-	if _, err := targetEngine.SyncMaterialize(ctx); err != nil {
+	manifest, err := targetEngine.SyncMaterialize(ctx)
+	if err != nil {
 		closeTarget()
 		return nil, err
+	}
+	if manifest != nil && manifest.State != nil {
+		if err := m.recordVolumeStorageStateWithMetadata(ctx, newVol, manifest.State, time.Now().UTC(), req.StorageMetadata); err != nil {
+			closeTarget()
+			return nil, err
+		}
 	}
 	_ = closeTarget()
 
@@ -627,8 +660,23 @@ func (m *Manager) restoreS0FSSnapshot(ctx context.Context, req *RestoreSnapshotR
 	if err := engine.RestoreSnapshot(req.SnapshotID); err != nil {
 		return err
 	}
-	if _, err := engine.SyncMaterialize(ctx); err != nil {
+	manifest, err := engine.SyncMaterialize(ctx)
+	if err != nil {
 		return err
+	}
+	if manifest != nil && manifest.State != nil {
+		vol := &db.SandboxVolume{
+			ID:        req.VolumeID,
+			TeamID:    snapshot.TeamID,
+			UserID:    req.UserID,
+			CreatedAt: snapshot.CreatedAt,
+		}
+		if volumeRecord, getErr := m.repo.GetSandboxVolume(ctx, req.VolumeID); getErr == nil {
+			vol = volumeRecord
+		}
+		if err := m.recordVolumeStorageState(ctx, vol, manifest.State, time.Now().UTC()); err != nil {
+			return err
+		}
 	}
 	if m.volMgr != nil {
 		if volCtx, getErr := m.volMgr.GetVolume(req.VolumeID); getErr == nil && volCtx != nil {

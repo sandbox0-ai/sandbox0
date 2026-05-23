@@ -67,6 +67,7 @@ func (s *Store) UpsertFromSandbox(info *watcher.SandboxInfo) (bool, string) {
 		s.logger.Warn("Failed to compile network policy", zap.Error(err), zap.String("pod_ip", info.PodIP))
 		return false, ""
 	}
+	applySandboxOwner(compiled, info)
 	key := info.Namespace + "/" + info.Name
 	changed := false
 	prevHash := ""
@@ -122,6 +123,7 @@ func (s *Store) ReconcileSandboxes(sandboxes []*watcher.SandboxInfo) SandboxPoli
 			s.logger.Warn("Failed to compile network policy", zap.Error(err), zap.String("pod_ip", info.PodIP))
 			continue
 		}
+		applySandboxOwner(compiled, info)
 		desired[key] = &policyEntry{
 			compiled:   compiled,
 			policyHash: info.NetworkPolicyHash,
@@ -177,6 +179,16 @@ func (s *Store) ReconcileSandboxes(sandboxes []*watcher.SandboxInfo) SandboxPoli
 		)
 	}
 	return result
+}
+
+func applySandboxOwner(compiled *CompiledPolicy, info *watcher.SandboxInfo) {
+	if compiled == nil || info == nil {
+		return
+	}
+	compiled.OwnerKind = info.OwnerKind
+	compiled.FunctionID = info.FunctionID
+	compiled.FunctionRevisionID = info.FunctionRevisionID
+	compiled.FunctionRuntimeInstanceID = info.FunctionRuntimeInstanceID
 }
 
 func (s *Store) DeleteByKey(namespace, name string) {

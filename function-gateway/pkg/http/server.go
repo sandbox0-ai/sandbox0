@@ -22,6 +22,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/ratelimit"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
@@ -50,6 +51,7 @@ type Server struct {
 	runtimeLocks        sync.Map
 	runtimeRestoreLocks runtimeRestoreLocker
 	autoscaler          *functionAutoscaler
+	functionUsageMeter  *functionUsageMeter
 	logger              *zap.Logger
 }
 
@@ -127,6 +129,9 @@ func NewServer(
 		routeLimiter:        routeLimiter,
 		runtimeRestoreLocks: pglock.New(pool),
 		logger:              logger,
+	}
+	if pool != nil {
+		server.functionUsageMeter = newFunctionUsageMeter(metering.NewRepository(pool), cfg.RegionID, "", logger)
 	}
 	server.autoscaler = newFunctionAutoscaler(server)
 

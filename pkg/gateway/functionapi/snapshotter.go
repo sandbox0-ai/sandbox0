@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/functionruntime"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
@@ -69,7 +70,7 @@ func StaticClusterGatewayURLResolver(clusterGatewayURL string) ClusterGatewayURL
 	}
 }
 
-func (s *HTTPVolumeSnapshotter) PrepareRestoreMounts(ctx context.Context, authCtx *authn.AuthContext, sandbox *mgr.Sandbox) ([]functions.RestoreMount, error) {
+func (s *HTTPVolumeSnapshotter) PrepareRestoreMounts(ctx context.Context, authCtx *authn.AuthContext, sandbox *mgr.Sandbox, metadata functionruntime.Metadata) ([]functions.RestoreMount, error) {
 	if sandbox == nil || len(sandbox.Mounts) == 0 {
 		return nil, nil
 	}
@@ -87,12 +88,12 @@ func (s *HTTPVolumeSnapshotter) PrepareRestoreMounts(ctx context.Context, authCt
 		if volumeID == "" || mountPoint == "" {
 			continue
 		}
-		snapshotID, err := s.createSnapshot(ctx, clusterGatewayURL, authCtx, volumeID, sandbox.ID)
+		snapshotID, err := s.createSnapshot(ctx, clusterGatewayURL, authCtx, volumeID, sandbox.ID, metadata)
 		if err != nil {
 			_ = s.DeleteRestoreMounts(context.Background(), authCtx, sandbox, out)
 			return nil, err
 		}
-		revisionVolumeID, err := s.createVolumeFromSnapshot(ctx, clusterGatewayURL, authCtx, snapshotID)
+		revisionVolumeID, err := s.createVolumeFromSnapshot(ctx, clusterGatewayURL, authCtx, snapshotID, metadata)
 		if err != nil {
 			_ = s.DeleteRestoreMounts(context.Background(), authCtx, sandbox, out)
 			return nil, err
@@ -141,7 +142,7 @@ func (s *HTTPVolumeSnapshotter) DeleteRestoreMounts(ctx context.Context, authCtx
 	return firstErr
 }
 
-func (s *HTTPVolumeSnapshotter) createSnapshot(ctx context.Context, clusterGatewayURL string, authCtx *authn.AuthContext, volumeID, sandboxID string) (string, error) {
+func (s *HTTPVolumeSnapshotter) createSnapshot(ctx context.Context, clusterGatewayURL string, authCtx *authn.AuthContext, volumeID, sandboxID string, metadata functionruntime.Metadata) (string, error) {
 	if s.internalAuthGen == nil {
 		return "", fmt.Errorf("internal auth generator is not configured")
 	}
@@ -174,6 +175,7 @@ func (s *HTTPVolumeSnapshotter) createSnapshot(ctx context.Context, clusterGatew
 	}
 	req.Header.Set(internalauth.DefaultTokenHeader, token)
 	req.Header.Set("Content-Type", "application/json")
+	functionruntime.SetHeaders(req.Header, metadata)
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return "", err
@@ -201,7 +203,7 @@ func (s *HTTPVolumeSnapshotter) createSnapshot(ctx context.Context, clusterGatew
 	return strings.TrimSpace(snapshot.ID), nil
 }
 
-func (s *HTTPVolumeSnapshotter) createVolumeFromSnapshot(ctx context.Context, clusterGatewayURL string, authCtx *authn.AuthContext, snapshotID string) (string, error) {
+func (s *HTTPVolumeSnapshotter) createVolumeFromSnapshot(ctx context.Context, clusterGatewayURL string, authCtx *authn.AuthContext, snapshotID string, metadata functionruntime.Metadata) (string, error) {
 	if s.internalAuthGen == nil {
 		return "", fmt.Errorf("internal auth generator is not configured")
 	}
@@ -234,6 +236,7 @@ func (s *HTTPVolumeSnapshotter) createVolumeFromSnapshot(ctx context.Context, cl
 	}
 	req.Header.Set(internalauth.DefaultTokenHeader, token)
 	req.Header.Set("Content-Type", "application/json")
+	functionruntime.SetHeaders(req.Header, metadata)
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return "", err

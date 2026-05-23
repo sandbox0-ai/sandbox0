@@ -70,6 +70,7 @@ func (b *S0FSBackend) MountVolume(ctx context.Context, req BackendMountRequest) 
 		RootInode: 1,
 		RootPath:  "/",
 		CacheDir:  cacheDir,
+		Observer:  req.StorageObserver,
 	}
 	b.startMaterializer(volCtx)
 	return volCtx, nil
@@ -85,9 +86,11 @@ func (b *S0FSBackend) UnmountVolume(ctx context.Context, volCtx *VolumeContext) 
 			<-volCtx.materializeDone
 		}
 	}
-	if _, err := volCtx.S0FS.SyncMaterialize(ctx); err != nil {
+	manifest, err := volCtx.S0FS.SyncMaterialize(ctx)
+	if err != nil {
 		return fmt.Errorf("materialize s0fs volume: %w", err)
 	}
+	b.observeMaterializedManifest(ctx, volCtx, manifest)
 	return volCtx.S0FS.Close()
 }
 
@@ -144,10 +147,22 @@ func (b *S0FSBackend) startMaterializer(volCtx *VolumeContext) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if _, err := volCtx.S0FS.SyncMaterialize(ctx); err != nil {
+				manifest, err := volCtx.S0FS.SyncMaterialize(ctx)
+				if err != nil {
 					b.logger.WithError(err).WithField("volume_id", volCtx.VolumeID).Warn("Failed to materialize s0fs volume")
+					continue
 				}
+				b.observeMaterializedManifest(ctx, volCtx, manifest)
 			}
 		}
 	}()
+}
+
+func (b *S0FSBackend) observeMaterializedManifest(ctx context.Context, volCtx *VolumeContext, manifest *s0fs.Manifest) {
+	if volCtx == nil || volCtx.Observer == nil || manifest == nil || manifest.State == nil {
+		return
+	}
+	if err := volCtx.Observer.ObserveVolumeState(ctx, volCtx.VolumeID, volCtx.TeamID, manifest.State, time.Now().UTC()); err != nil {
+		b.logger.WithError(err).WithField("volume_id", volCtx.VolumeID).Warn("Failed to record volume storage observation")
+	}
 }

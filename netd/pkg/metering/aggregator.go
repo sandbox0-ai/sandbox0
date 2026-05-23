@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	policypkg "github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
+	"github.com/sandbox0-ai/sandbox0/pkg/functionruntime"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"go.uber.org/zap"
 )
@@ -55,10 +56,14 @@ func (r *repositoryTxAdapter) UpsertProducerWatermark(ctx context.Context, produ
 }
 
 type usageTotals struct {
-	sandboxID string
-	teamID    string
-	egress    int64
-	ingress   int64
+	sandboxID                 string
+	teamID                    string
+	ownerKind                 string
+	functionID                string
+	functionRevisionID        string
+	functionRuntimeInstanceID string
+	egress                    int64
+	ingress                   int64
 }
 
 type Aggregator struct {
@@ -112,10 +117,26 @@ func (a *Aggregator) record(compiled *policypkg.CompiledPolicy, bytes int64, egr
 	entry := a.usage[compiled.SandboxID]
 	if entry == nil {
 		entry = &usageTotals{
-			sandboxID: compiled.SandboxID,
-			teamID:    compiled.TeamID,
+			sandboxID:                 compiled.SandboxID,
+			teamID:                    compiled.TeamID,
+			ownerKind:                 compiled.OwnerKind,
+			functionID:                compiled.FunctionID,
+			functionRevisionID:        compiled.FunctionRevisionID,
+			functionRuntimeInstanceID: compiled.FunctionRuntimeInstanceID,
 		}
 		a.usage[compiled.SandboxID] = entry
+	}
+	if entry.ownerKind == "" {
+		entry.ownerKind = compiled.OwnerKind
+	}
+	if entry.functionID == "" {
+		entry.functionID = compiled.FunctionID
+	}
+	if entry.functionRevisionID == "" {
+		entry.functionRevisionID = compiled.FunctionRevisionID
+	}
+	if entry.functionRuntimeInstanceID == "" {
+		entry.functionRuntimeInstanceID = compiled.FunctionRuntimeInstanceID
 	}
 	if egress {
 		entry.egress += bytes
@@ -189,13 +210,25 @@ func (a *Aggregator) Flush(ctx context.Context) error {
 }
 
 func (a *Aggregator) buildWindow(usage *usageTotals, windowType string, start, end time.Time, value int64) *meteringpkg.Window {
+	subjectType := meteringpkg.SubjectTypeSandbox
+	subjectID := usage.sandboxID
+	if usage.ownerKind == functionruntime.OwnerKind && usage.functionID != "" {
+		subjectType = meteringpkg.SubjectTypeFunction
+		subjectID = usage.functionID
+		switch windowType {
+		case meteringpkg.WindowTypeSandboxEgressBytes:
+			windowType = meteringpkg.WindowTypeFunctionEgressBytes
+		case meteringpkg.WindowTypeSandboxIngressBytes:
+			windowType = meteringpkg.WindowTypeFunctionIngressBytes
+		}
+	}
 	return &meteringpkg.Window{
 		WindowID:    windowID(a.producer, usage.sandboxID, windowType, start, end),
 		Producer:    a.producer,
 		RegionID:    a.regionID,
 		WindowType:  windowType,
-		SubjectType: meteringpkg.SubjectTypeSandbox,
-		SubjectID:   usage.sandboxID,
+		SubjectType: subjectType,
+		SubjectID:   subjectID,
 		TeamID:      usage.teamID,
 		SandboxID:   usage.sandboxID,
 		ClusterID:   a.clusterID,
@@ -204,9 +237,21 @@ func (a *Aggregator) buildWindow(usage *usageTotals, windowType string, start, e
 		Value:       value,
 		Unit:        meteringpkg.WindowUnitBytes,
 		Data: mustJSON(map[string]any{
-			"node_name": a.nodeName,
+			"node_name":                    a.nodeName,
+			"product":                      usageProduct(usage),
+			"owner_kind":                   usage.ownerKind,
+			"function_id":                  usage.functionID,
+			"function_revision_id":         usage.functionRevisionID,
+			"function_runtime_instance_id": usage.functionRuntimeInstanceID,
 		}),
 	}
+}
+
+func usageProduct(usage *usageTotals) string {
+	if usage != nil && usage.ownerKind == functionruntime.OwnerKind {
+		return meteringpkg.ProductFunction
+	}
+	return meteringpkg.ProductSandbox
 }
 
 func producerName(nodeName string) string {

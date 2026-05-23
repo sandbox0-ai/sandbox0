@@ -30,6 +30,7 @@ type volumeProvider interface {
 
 type repository interface {
 	GetSandboxVolume(context.Context, string) (*db.SandboxVolume, error)
+	GetSandboxVolumeOwner(context.Context, string) (*db.SandboxVolumeOwner, error)
 	CreateSandboxVolume(context.Context, *db.SandboxVolume) error
 	CreateSandboxVolumeTx(context.Context, pgx.Tx, *db.SandboxVolume) error
 	ListSnapshotsByVolume(context.Context, string) ([]*db.Snapshot, error)
@@ -49,6 +50,10 @@ type repository interface {
 type meteringRecorder interface {
 	AppendEvent(context.Context, *meteringpkg.Event) error
 	AppendEventTx(context.Context, pgx.Tx, *meteringpkg.Event) error
+	RecordStorageObservation(context.Context, *meteringpkg.StorageObservation) error
+	RecordStorageObservationTx(context.Context, pgx.Tx, *meteringpkg.StorageObservation) error
+	CloseStorageObservation(context.Context, *meteringpkg.StorageObservation) error
+	CloseStorageObservationTx(context.Context, pgx.Tx, *meteringpkg.StorageObservation) error
 	UpsertProducerWatermark(context.Context, string, string, time.Time) error
 	UpsertProducerWatermarkTx(context.Context, pgx.Tx, string, string, time.Time) error
 }
@@ -144,6 +149,46 @@ func (m *Manager) appendMeteringEventTx(ctx context.Context, tx pgx.Tx, event *m
 	return m.meteringRepo.UpsertProducerWatermarkTx(ctx, tx, event.Producer, event.RegionID, event.OccurredAt)
 }
 
+func (m *Manager) appendStorageObservation(ctx context.Context, observation *meteringpkg.StorageObservation) error {
+	if m.meteringRepo == nil || observation == nil {
+		return nil
+	}
+	if err := m.meteringRepo.RecordStorageObservation(ctx, observation); err != nil {
+		return err
+	}
+	return m.meteringRepo.UpsertProducerWatermark(ctx, meteringpkg.ProducerStorage, observation.RegionID, observation.ObservedAt)
+}
+
+func (m *Manager) appendStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *meteringpkg.StorageObservation) error {
+	if m.meteringRepo == nil || observation == nil {
+		return nil
+	}
+	if err := m.meteringRepo.RecordStorageObservationTx(ctx, tx, observation); err != nil {
+		return err
+	}
+	return m.meteringRepo.UpsertProducerWatermarkTx(ctx, tx, meteringpkg.ProducerStorage, observation.RegionID, observation.ObservedAt)
+}
+
+func (m *Manager) closeStorageObservation(ctx context.Context, observation *meteringpkg.StorageObservation) error {
+	if m.meteringRepo == nil || observation == nil {
+		return nil
+	}
+	if err := m.meteringRepo.CloseStorageObservation(ctx, observation); err != nil {
+		return err
+	}
+	return m.meteringRepo.UpsertProducerWatermark(ctx, meteringpkg.ProducerStorage, observation.RegionID, observation.ObservedAt)
+}
+
+func (m *Manager) closeStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *meteringpkg.StorageObservation) error {
+	if m.meteringRepo == nil || observation == nil {
+		return nil
+	}
+	if err := m.meteringRepo.CloseStorageObservationTx(ctx, tx, observation); err != nil {
+		return err
+	}
+	return m.meteringRepo.UpsertProducerWatermarkTx(ctx, tx, meteringpkg.ProducerStorage, observation.RegionID, observation.ObservedAt)
+}
+
 func (m *Manager) regionID() string {
 	if m.config == nil {
 		return ""
@@ -161,11 +206,12 @@ func (m *Manager) SetFlushCoordinator(coordinator FlushCoordinator) {
 
 // CreateSnapshotRequest contains parameters for creating a snapshot
 type CreateSnapshotRequest struct {
-	VolumeID    string
-	Name        string
-	Description string
-	TeamID      string
-	UserID      string
+	VolumeID        string
+	Name            string
+	Description     string
+	TeamID          string
+	UserID          string
+	StorageMetadata *meteringpkg.StorageObservation
 }
 
 // ForkVolumeRequest contains parameters for forking a volume.
@@ -187,6 +233,7 @@ type CreateVolumeFromSnapshotRequest struct {
 	AccessMode      string
 	DefaultPosixUID *int64
 	DefaultPosixGID *int64
+	StorageMetadata *meteringpkg.StorageObservation
 }
 
 // CreateSnapshot creates a new snapshot of a volume using the s0fs snapshot engine.
@@ -429,13 +476,17 @@ func (m *Manager) DeleteSnapshot(ctx context.Context, volumeID, snapshotID, team
 		if snapshot.VolumeID != volumeID || snapshot.TeamID != teamID {
 			return ErrSnapshotNotBelongToVolume
 		}
+		deletedEvent := snapshotDeletedEvent(m.regionID(), m.clusterID, snapshot)
 
 		// 2. Delete database record first within the transaction
 		// This ensures that even if S0FS cleanup fails, the snapshot is marked as deleted
 		if err := m.repo.DeleteSnapshotTx(ctx, tx, snapshotID); err != nil {
 			return fmt.Errorf("delete snapshot record: %w", err)
 		}
-		if err := m.appendMeteringEventTx(ctx, tx, snapshotDeletedEvent(m.regionID(), m.clusterID, snapshot)); err != nil {
+		if err := m.closeStorageObservationTx(ctx, tx, m.snapshotStorageObservation(ctx, snapshot, deletedEvent.OccurredAt)); err != nil {
+			return fmt.Errorf("close snapshot storage observation: %w", err)
+		}
+		if err := m.appendMeteringEventTx(ctx, tx, deletedEvent); err != nil {
 			return fmt.Errorf("append metering event: %w", err)
 		}
 

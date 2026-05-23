@@ -33,6 +33,7 @@ type VolumeContext struct {
 	RootInode fsmeta.Ino
 	RootPath  string
 	CacheDir  string
+	Observer  StorageObserver
 
 	handleMu      sync.Mutex
 	nextHandleID  uint64
@@ -85,6 +86,7 @@ type Manager struct {
 	backends       map[string]Backend
 	defaultBackend string
 	registrar      MountRegistrar // Optional: for distributed coordination
+	observer       StorageObserver
 }
 
 // NewManager creates a new volume manager
@@ -124,6 +126,12 @@ func (m *Manager) SetMountRegistrar(registrar MountRegistrar) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.registrar = registrar
+}
+
+func (m *Manager) SetStorageObserver(observer StorageObserver) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.observer = observer
 }
 
 func (m *Manager) SetMetrics(metrics *obsmetrics.StorageProxyMetrics) {
@@ -186,12 +194,13 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 	}
 
 	volCtx, err := backend.MountVolume(ctx, BackendMountRequest{
-		S3Prefix:   s3Prefix,
-		VolumeID:   volumeID,
-		TeamID:     teamID,
-		AccessMode: accessMode,
-		MountedAt:  sessionTime,
-		Metrics:    m.metrics,
+		S3Prefix:        s3Prefix,
+		VolumeID:        volumeID,
+		TeamID:          teamID,
+		AccessMode:      accessMode,
+		MountedAt:       sessionTime,
+		Metrics:         m.metrics,
+		StorageObserver: m.observer,
 	})
 	if err != nil {
 		if registeredMount {
@@ -542,8 +551,21 @@ func (m *Manager) SyncDirectVolumeFileMount(ctx context.Context, volumeID string
 	if err != nil || volCtx == nil || volCtx.S0FS == nil {
 		return err
 	}
-	_, err = volCtx.S0FS.SyncMaterialize(ctx)
-	return err
+	manifest, err := volCtx.S0FS.SyncMaterialize(ctx)
+	if err != nil {
+		return err
+	}
+	m.observeMaterializedManifest(ctx, volCtx, manifest)
+	return nil
+}
+
+func (m *Manager) observeMaterializedManifest(ctx context.Context, volCtx *VolumeContext, manifest *s0fs.Manifest) {
+	if volCtx == nil || volCtx.Observer == nil || manifest == nil || manifest.State == nil {
+		return
+	}
+	if err := volCtx.Observer.ObserveVolumeState(ctx, volCtx.VolumeID, volCtx.TeamID, manifest.State, time.Now().UTC()); err != nil {
+		m.logger.WithError(err).WithField("volume_id", volCtx.VolumeID).Warn("Failed to record volume storage observation")
+	}
 }
 
 func (m *Manager) releaseDirectVolumeFileMount(volumeID, sessionID string) func() {

@@ -121,6 +121,14 @@ Choose the gateway endpoint that matches the selected engine:
 | `codex` | OpenAI-compatible API |
 | `openai-agents` | OpenAI Responses-compatible API |
 
+If you only need to bridge a Claude Code-compatible provider into an OpenAI-style engine, LLMProxy is the simplest option. The hosted tool does not require a Sandbox0 account, an LLMProxy login, or gateway-side setup. Use the LLMProxy URL as the LLM vault base URL, keep the upstream provider token in the vault credential, and let the selected runtime call it directly.
+
+<CardGroup>
+  <Card title="LLMProxy" href="/docs/managed-agents/llmproxy" cta="Open docs">
+    Use the free no-login protocol bridge for Claude-compatible providers and OpenAI-style engines.
+  </Card>
+</CardGroup>
+
 The gateway can route to whichever upstream providers it supports. For example, Cloudflare AI Gateway, LiteLLM Proxy, Portkey, Helicone, Kong AI Gateway, Envoy AI Gateway, TrueFoundry, and similar products can sit behind an LLM vault as long as the configured gateway endpoint speaks the API shape required by the engine.
 
 In this setup, the LLM vault stores the gateway base URL and the gateway API token. Provider keys should usually live in the AI gateway through BYOK, virtual keys, or gateway-managed billing. Sandbox0 still owns the Managed Agents API, session truth, sandbox lifecycle, workspace state, network policy, and runtime credential projection.

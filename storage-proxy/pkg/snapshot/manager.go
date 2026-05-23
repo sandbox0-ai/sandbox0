@@ -206,11 +206,12 @@ func (m *Manager) SetFlushCoordinator(coordinator FlushCoordinator) {
 
 // CreateSnapshotRequest contains parameters for creating a snapshot
 type CreateSnapshotRequest struct {
-	VolumeID    string
-	Name        string
-	Description string
-	TeamID      string
-	UserID      string
+	VolumeID        string
+	Name            string
+	Description     string
+	TeamID          string
+	UserID          string
+	StorageMetadata *meteringpkg.StorageObservation
 }
 
 // ForkVolumeRequest contains parameters for forking a volume.
@@ -232,6 +233,7 @@ type CreateVolumeFromSnapshotRequest struct {
 	AccessMode      string
 	DefaultPosixUID *int64
 	DefaultPosixGID *int64
+	StorageMetadata *meteringpkg.StorageObservation
 }
 
 // CreateSnapshot creates a new snapshot of a volume using the s0fs snapshot engine.

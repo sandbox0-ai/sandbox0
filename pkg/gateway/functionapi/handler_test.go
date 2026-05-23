@@ -8,6 +8,7 @@ import (
 	"time"
 
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/functionruntime"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
 	"go.uber.org/zap"
@@ -78,7 +79,7 @@ func TestPrepareRevisionFromSourceAcceptsRevisionSpec(t *testing.T) {
 				},
 			}},
 		},
-	})
+	}, functionruntime.Metadata{})
 	if err != nil {
 		t.Fatalf("prepareRevisionFromSource() error = %v", err)
 	}

@@ -393,7 +393,7 @@ func (m *Manager) createS0FSSnapshot(ctx context.Context, req *CreateSnapshotReq
 	if err := m.recordVolumeStorageState(ctx, vol, state, snapshot.CreatedAt); err != nil {
 		return nil, err
 	}
-	if err := m.recordSnapshotStorage(ctx, snapshot); err != nil {
+	if err := m.recordSnapshotStorageWithMetadata(ctx, snapshot, req.StorageMetadata); err != nil {
 		return nil, err
 	}
 	if err := m.appendMeteringEvent(ctx, snapshotCreatedEvent(m.regionID(), m.clusterID, snapshot)); err != nil {
@@ -596,7 +596,10 @@ func (m *Manager) createS0FSVolumeFromSnapshot(ctx context.Context, req *CreateV
 		if err := m.repo.CreateSandboxVolumeTx(ctx, tx, newVol); err != nil {
 			return err
 		}
-		return m.appendStorageObservationTx(ctx, tx, m.volumeStorageObservation(ctx, newVol, 0, newVol.CreatedAt))
+		return m.appendStorageObservationTx(ctx, tx, applyStorageObservationMetadata(
+			m.volumeStorageObservation(ctx, newVol, 0, newVol.CreatedAt),
+			req.StorageMetadata,
+		))
 	}); err != nil {
 		return nil, err
 	}
@@ -605,7 +608,10 @@ func (m *Manager) createS0FSVolumeFromSnapshot(ctx context.Context, req *CreateV
 		if success {
 			return
 		}
-		_ = m.closeStorageObservation(context.Background(), m.volumeStorageObservation(context.Background(), newVol, 0, time.Now().UTC()))
+		_ = m.closeStorageObservation(context.Background(), applyStorageObservationMetadata(
+			m.volumeStorageObservation(context.Background(), newVol, 0, time.Now().UTC()),
+			req.StorageMetadata,
+		))
 		_ = cleanupS0FSVolume(newVolumeID, m.config)
 		_ = m.repo.WithTx(context.Background(), func(tx pgx.Tx) error {
 			err := m.repo.DeleteSandboxVolumeTx(context.Background(), tx, newVolumeID)
@@ -630,7 +636,7 @@ func (m *Manager) createS0FSVolumeFromSnapshot(ctx context.Context, req *CreateV
 		return nil, err
 	}
 	if manifest != nil && manifest.State != nil {
-		if err := m.recordVolumeStorageState(ctx, newVol, manifest.State, time.Now().UTC()); err != nil {
+		if err := m.recordVolumeStorageStateWithMetadata(ctx, newVol, manifest.State, time.Now().UTC(), req.StorageMetadata); err != nil {
 			closeTarget()
 			return nil, err
 		}

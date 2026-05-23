@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/functionruntime"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
@@ -36,7 +38,7 @@ type Config struct {
 type SandboxLookup func(ctx context.Context, sandboxID string) (*mgr.Sandbox, error)
 
 type RevisionVolumeStore interface {
-	PrepareRestoreMounts(ctx context.Context, authCtx *authn.AuthContext, sandbox *mgr.Sandbox) ([]functions.RestoreMount, error)
+	PrepareRestoreMounts(ctx context.Context, authCtx *authn.AuthContext, sandbox *mgr.Sandbox, metadata functionruntime.Metadata) ([]functions.RestoreMount, error)
 	DeleteRestoreMounts(ctx context.Context, authCtx *authn.AuthContext, sandbox *mgr.Sandbox, mounts []functions.RestoreMount) error
 }
 
@@ -240,7 +242,12 @@ func (h *Handler) createFunction(c *gin.Context) {
 		return
 	}
 
-	rev, defaultName, cleanupRevision, err := h.prepareRevisionFromSource(c.Request.Context(), authCtx, req.Source)
+	functionID := uuid.NewString()
+	revisionID := uuid.NewString()
+	rev, defaultName, cleanupRevision, err := h.prepareRevisionFromSource(c.Request.Context(), authCtx, req.Source, functionruntime.Metadata{
+		FunctionID:         functionID,
+		FunctionRevisionID: revisionID,
+	})
 	if err != nil {
 		h.writePublishError(c, err)
 		return
@@ -261,9 +268,12 @@ func (h *Handler) createFunction(c *gin.Context) {
 
 	userID := principalID(authCtx)
 	fn := functions.NewFunction(authCtx.TeamID, name, userID)
+	fn.ID = functionID
 	if req.Autoscaling != nil {
 		fn.Autoscaling = functions.NormalizeAutoscaling(*req.Autoscaling)
 	}
+	rev.ID = revisionID
+	rev.FunctionID = functionID
 
 	fn, rev, err = h.repo.CreateFunctionWithRevision(c.Request.Context(), fn, rev, userID)
 	if err != nil {
@@ -396,7 +406,11 @@ func (h *Handler) createFunctionRevision(c *gin.Context) {
 	}
 	defer unlockRevisionPublish()
 
-	rev, _, cleanupRevision, err := h.prepareRevisionFromSource(c.Request.Context(), authCtx, req.Source)
+	revisionID := uuid.NewString()
+	rev, _, cleanupRevision, err := h.prepareRevisionFromSource(c.Request.Context(), authCtx, req.Source, functionruntime.Metadata{
+		FunctionID:         fn.ID,
+		FunctionRevisionID: revisionID,
+	})
 	if err != nil {
 		h.writePublishError(c, err)
 		return
@@ -415,6 +429,8 @@ func (h *Handler) createFunctionRevision(c *gin.Context) {
 	if req.Promote != nil {
 		promote = *req.Promote
 	}
+	rev.ID = revisionID
+	rev.FunctionID = fn.ID
 
 	rev, err = h.repo.CreateRevision(c.Request.Context(), authCtx.TeamID, fn.ID, rev, promote, userID)
 	if err != nil {
@@ -592,7 +608,7 @@ func (h *Handler) clearFunctionRuntime(c *gin.Context) {
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"runtime": runtimeStatus(fn, rev, nil, nil)})
 }
 
-func (h *Handler) prepareRevisionFromSource(ctx context.Context, authCtx *authn.AuthContext, source functionSourceRequest) (*functions.Revision, string, func(), error) {
+func (h *Handler) prepareRevisionFromSource(ctx context.Context, authCtx *authn.AuthContext, source functionSourceRequest, storageMetadata functionruntime.Metadata) (*functions.Revision, string, func(), error) {
 	sourceType := normalizeFunctionSourceType(source)
 	switch sourceType {
 	case functions.RevisionSourceTypeSandboxService:
@@ -601,7 +617,7 @@ func (h *Handler) prepareRevisionFromSource(ctx context.Context, authCtx *authn.
 		if err != nil {
 			return nil, "", nil, err
 		}
-		restoreMounts, err := h.prepareRestoreMounts(ctx, authCtx, sandbox)
+		restoreMounts, err := h.prepareRestoreMounts(ctx, authCtx, sandbox, storageMetadata)
 		if err != nil {
 			return nil, "", nil, err
 		}
@@ -747,14 +763,14 @@ func findSandboxService(sandbox *mgr.Sandbox, serviceID string) (mgr.SandboxAppS
 	return mgr.SandboxAppService{}, false
 }
 
-func (h *Handler) prepareRestoreMounts(ctx context.Context, authCtx *authn.AuthContext, sandbox *mgr.Sandbox) ([]functions.RestoreMount, error) {
+func (h *Handler) prepareRestoreMounts(ctx context.Context, authCtx *authn.AuthContext, sandbox *mgr.Sandbox, storageMetadata functionruntime.Metadata) ([]functions.RestoreMount, error) {
 	if sandbox == nil || len(sandbox.Mounts) == 0 {
 		return nil, nil
 	}
 	if h.volumeStore == nil {
 		return nil, publishError{status: http.StatusServiceUnavailable, code: spec.CodeUnavailable, message: "function revision volume store is not configured"}
 	}
-	mounts, err := h.volumeStore.PrepareRestoreMounts(ctx, authCtx, sandbox)
+	mounts, err := h.volumeStore.PrepareRestoreMounts(ctx, authCtx, sandbox, storageMetadata)
 	if err != nil {
 		h.logger.Warn("Failed to prepare function restore mounts",
 			zap.String("sandbox_id", sandbox.ID),

@@ -129,6 +129,7 @@ func (s *Server) createSandboxVolume(w http.ResponseWriter, r *http.Request) {
 			AccessMode:      string(accessMode),
 			DefaultPosixUID: req.DefaultPosixUID,
 			DefaultPosixGID: req.DefaultPosixGID,
+			StorageMetadata: storageObservationMetadataFromHeaders(r.Header),
 		})
 		if err != nil {
 			switch {

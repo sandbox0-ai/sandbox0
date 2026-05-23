@@ -54,11 +54,12 @@ func (s *Server) createSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	snap, err := s.snapshotMgr.CreateSnapshotSimple(r.Context(), &snapshot.CreateSnapshotRequest{
-		VolumeID:    volumeID,
-		Name:        req.Name,
-		Description: req.Description,
-		TeamID:      claims.TeamID,
-		UserID:      claims.UserID,
+		VolumeID:        volumeID,
+		Name:            req.Name,
+		Description:     req.Description,
+		TeamID:          claims.TeamID,
+		UserID:          claims.UserID,
+		StorageMetadata: storageObservationMetadataFromHeaders(r.Header),
 	})
 
 	if err != nil {

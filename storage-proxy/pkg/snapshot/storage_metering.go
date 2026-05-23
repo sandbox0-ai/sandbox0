@@ -28,17 +28,31 @@ func (m *Manager) ObserveVolumeState(ctx context.Context, volumeID, teamID strin
 }
 
 func (m *Manager) recordVolumeStorageState(ctx context.Context, vol *db.SandboxVolume, state *s0fs.SnapshotState, observedAt time.Time) error {
+	return m.recordVolumeStorageStateWithMetadata(ctx, vol, state, observedAt, nil)
+}
+
+func (m *Manager) recordVolumeStorageStateWithMetadata(ctx context.Context, vol *db.SandboxVolume, state *s0fs.SnapshotState, observedAt time.Time, metadata *meteringpkg.StorageObservation) error {
 	if vol == nil || state == nil {
 		return nil
 	}
-	return m.appendStorageObservation(ctx, m.volumeStorageObservation(ctx, vol, s0fs.StateStorageBytes(state), observedAt))
+	return m.appendStorageObservation(ctx, applyStorageObservationMetadata(
+		m.volumeStorageObservation(ctx, vol, s0fs.StateStorageBytes(state), observedAt),
+		metadata,
+	))
 }
 
 func (m *Manager) recordSnapshotStorage(ctx context.Context, snapshot *db.Snapshot) error {
+	return m.recordSnapshotStorageWithMetadata(ctx, snapshot, nil)
+}
+
+func (m *Manager) recordSnapshotStorageWithMetadata(ctx context.Context, snapshot *db.Snapshot, metadata *meteringpkg.StorageObservation) error {
 	if snapshot == nil {
 		return nil
 	}
-	return m.appendStorageObservation(ctx, m.snapshotStorageObservation(ctx, snapshot, snapshot.CreatedAt))
+	return m.appendStorageObservation(ctx, applyStorageObservationMetadata(
+		m.snapshotStorageObservation(ctx, snapshot, snapshot.CreatedAt),
+		metadata,
+	))
 }
 
 func (m *Manager) volumeStorageObservation(ctx context.Context, vol *db.SandboxVolume, sizeBytes int64, observedAt time.Time) *meteringpkg.StorageObservation {
@@ -64,6 +78,30 @@ func (m *Manager) volumeStorageObservation(ctx context.Context, vol *db.SandboxV
 		if owner.OwnerClusterID != "" {
 			obs.ClusterID = owner.OwnerClusterID
 		}
+	}
+	return obs
+}
+
+func applyStorageObservationMetadata(obs *meteringpkg.StorageObservation, metadata *meteringpkg.StorageObservation) *meteringpkg.StorageObservation {
+	if obs == nil || metadata == nil {
+		return obs
+	}
+	if metadata.Product != "" {
+		obs.Product = metadata.Product
+	} else if metadata.FunctionID != "" || metadata.FunctionRevisionID != "" || metadata.FunctionRuntimeInstanceID != "" {
+		obs.Product = meteringpkg.ProductFunction
+	}
+	if metadata.OwnerKind != "" {
+		obs.OwnerKind = metadata.OwnerKind
+	}
+	if metadata.FunctionID != "" {
+		obs.FunctionID = metadata.FunctionID
+	}
+	if metadata.FunctionRevisionID != "" {
+		obs.FunctionRevisionID = metadata.FunctionRevisionID
+	}
+	if metadata.FunctionRuntimeInstanceID != "" {
+		obs.FunctionRuntimeInstanceID = metadata.FunctionRuntimeInstanceID
 	}
 	return obs
 }

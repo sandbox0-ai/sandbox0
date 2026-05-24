@@ -728,12 +728,22 @@ func (s *Server) ensureFunctionServiceRuntime(ctx context.Context, fn *functions
 	if err != nil {
 		return "", err
 	}
+	if !functionServiceRequiresReadiness(service) {
+		return contextID, nil
+	}
 	startCtx, cancel := context.WithTimeout(ctx, defaultFunctionRuntimeStartTimeout)
 	defer cancel()
 	if err := s.waitForFunctionServiceReadiness(startCtx, sandbox.ID, fn.TeamID, rev.CreatedBy, service); err != nil {
 		return "", err
 	}
 	return contextID, nil
+}
+
+func functionServiceRequiresReadiness(service mgr.SandboxAppService) bool {
+	if service.Runtime != nil && service.Runtime.Type == mgr.SandboxAppServiceRuntimeWarmProcess {
+		return false
+	}
+	return true
 }
 
 func (s *Server) getFunctionRuntimeContext(ctx context.Context, sandboxID, teamID, userID, contextID string) (*functionContextResponse, error) {

@@ -535,9 +535,14 @@ const (
 	SuccessUserResponseSuccessTrue SuccessUserResponseSuccess = true
 )
 
+// Defines values for SuccessVolumeFileArchiveImportResponseSuccess.
+const (
+	SuccessVolumeFileArchiveImportResponseSuccessTrue SuccessVolumeFileArchiveImportResponseSuccess = true
+)
+
 // Defines values for SuccessWrittenResponseSuccess.
 const (
-	True SuccessWrittenResponseSuccess = true
+	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
 )
 
 // Defines values for TrafficRuleAction.
@@ -2811,6 +2816,15 @@ type SuccessUserResponse struct {
 // SuccessUserResponseSuccess defines model for SuccessUserResponse.Success.
 type SuccessUserResponseSuccess bool
 
+// SuccessVolumeFileArchiveImportResponse defines model for SuccessVolumeFileArchiveImportResponse.
+type SuccessVolumeFileArchiveImportResponse struct {
+	Data    *VolumeFileArchiveImportResponse              `json:"data,omitempty"`
+	Success SuccessVolumeFileArchiveImportResponseSuccess `json:"success"`
+}
+
+// SuccessVolumeFileArchiveImportResponseSuccess defines model for SuccessVolumeFileArchiveImportResponse.Success.
+type SuccessVolumeFileArchiveImportResponseSuccess bool
+
 // SuccessWrittenResponse defines model for SuccessWrittenResponse.
 type SuccessWrittenResponse struct {
 	Data *struct {
@@ -2953,6 +2967,14 @@ type UsernamePasswordProjection = map[string]interface{}
 
 // VolumeAccessMode Access mode for sandbox volumes. Enforcement is scoped to storage-proxy instances. RWO allows read-write mounts on a single instance; ROX allows read-only mounts across instances; RWX allows read-write mounts across instances.
 type VolumeAccessMode string
+
+// VolumeFileArchiveImportResponse defines model for VolumeFileArchiveImportResponse.
+type VolumeFileArchiveImportResponse struct {
+	Bytes       int64 `json:"bytes"`
+	Directories int64 `json:"directories"`
+	Files       int64 `json:"files"`
+	Symlinks    int64 `json:"symlinks"`
+}
 
 // VolumeMountSpec defines model for VolumeMountSpec.
 type VolumeMountSpec struct {
@@ -3137,6 +3159,11 @@ type PostApiV1SandboxvolumesIdFilesParams struct {
 	Path      FilePath        `form:"path" json:"path"`
 	Mkdir     *QueryMkdir     `form:"mkdir,omitempty" json:"mkdir,omitempty"`
 	Recursive *QueryRecursive `form:"recursive,omitempty" json:"recursive,omitempty"`
+}
+
+// PutApiV1SandboxvolumesIdFilesArchiveParams defines parameters for PutApiV1SandboxvolumesIdFilesArchive.
+type PutApiV1SandboxvolumesIdFilesArchiveParams struct {
+	Path FilePath `form:"path" json:"path"`
 }
 
 // GetApiV1SandboxvolumesIdFilesListParams defines parameters for GetApiV1SandboxvolumesIdFilesList.

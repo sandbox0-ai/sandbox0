@@ -1,6 +1,7 @@
 package http
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -138,6 +139,7 @@ type fakeHTTPVolumeFileRPC struct {
 	writeFunc      func(context.Context, *pb.WriteRequest) (*pb.WriteResponse, error)
 	createFunc     func(context.Context, *pb.CreateRequest) (*pb.NodeResponse, error)
 	mkdirFunc      func(context.Context, *pb.MkdirRequest) (*pb.NodeResponse, error)
+	symlinkFunc    func(context.Context, *pb.SymlinkRequest) (*pb.NodeResponse, error)
 	unlinkFunc     func(context.Context, *pb.UnlinkRequest) (*pb.Empty, error)
 	rmdirFunc      func(context.Context, *pb.RmdirRequest) (*pb.Empty, error)
 	readDirFunc    func(context.Context, *pb.ReadDirRequest) (*pb.ReadDirResponse, error)
@@ -211,6 +213,13 @@ func (f *fakeHTTPVolumeFileRPC) Create(ctx context.Context, req *pb.CreateReques
 func (f *fakeHTTPVolumeFileRPC) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb.NodeResponse, error) {
 	if f.mkdirFunc != nil {
 		return f.mkdirFunc(ctx, req)
+	}
+	return nil, nil
+}
+
+func (f *fakeHTTPVolumeFileRPC) Symlink(ctx context.Context, req *pb.SymlinkRequest) (*pb.NodeResponse, error) {
+	if f.symlinkFunc != nil {
+		return f.symlinkFunc(ctx, req)
 	}
 	return nil, nil
 }
@@ -304,6 +313,44 @@ func volumeFileAttr(size int) *pb.GetAttrResponse {
 		MtimeSec:  1710000000,
 		MtimeNsec: 123,
 	}
+}
+
+type tarEntry struct {
+	name     string
+	body     []byte
+	linkname string
+	mode     int64
+	typeflag byte
+}
+
+func tarArchive(t *testing.T, entries []tarEntry) *bytes.Reader {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, entry := range entries {
+		header := &tar.Header{
+			Name:     entry.name,
+			Mode:     entry.mode,
+			Typeflag: entry.typeflag,
+			Size:     int64(len(entry.body)),
+			Linkname: entry.linkname,
+		}
+		if entry.typeflag == tar.TypeDir || entry.typeflag == tar.TypeSymlink {
+			header.Size = 0
+		}
+		if err := tw.WriteHeader(header); err != nil {
+			t.Fatalf("WriteHeader(%q): %v", entry.name, err)
+		}
+		if len(entry.body) > 0 {
+			if _, err := tw.Write(entry.body); err != nil {
+				t.Fatalf("Write(%q): %v", entry.name, err)
+			}
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("Close tar writer: %v", err)
+	}
+	return bytes.NewReader(buf.Bytes())
 }
 
 func TestReadVolumeFileUsesSharedBarrier(t *testing.T) {
@@ -597,6 +644,99 @@ func TestWriteVolumeFileSkipsSyncWhenContentUnchanged(t *testing.T) {
 	}
 	if wrote != nil {
 		t.Fatalf("unexpected write request: %+v", wrote)
+	}
+	if volMgr.syncCalls != 0 {
+		t.Fatalf("SyncDirectVolumeFileMount() calls = %d, want 0", volMgr.syncCalls)
+	}
+}
+
+func TestHandleVolumeFileArchiveImportExtractsTarAndSyncsOnce(t *testing.T) {
+	type node struct {
+		inode uint64
+		attr  *pb.GetAttrResponse
+	}
+	nodes := map[string]node{}
+	nextInode := uint64(2)
+	var writes [][]byte
+	var symlink *pb.SymlinkRequest
+	fileRPC := &fakeHTTPVolumeFileRPC{
+		lookupFunc: func(_ context.Context, req *pb.LookupRequest) (*pb.NodeResponse, error) {
+			if n, ok := nodes[strconv.FormatUint(req.Parent, 10)+"/"+req.Name]; ok {
+				return &pb.NodeResponse{Inode: n.inode, Attr: n.attr}, nil
+			}
+			return nil, fserror.New(fserror.NotFound, "missing")
+		},
+		mkdirFunc: func(_ context.Context, req *pb.MkdirRequest) (*pb.NodeResponse, error) {
+			inode := nextInode
+			nextInode++
+			nodes[strconv.FormatUint(req.Parent, 10)+"/"+req.Name] = node{inode: inode, attr: volumeDirAttr()}
+			return &pb.NodeResponse{Inode: inode, Attr: volumeDirAttr()}, nil
+		},
+		createFunc: func(_ context.Context, req *pb.CreateRequest) (*pb.NodeResponse, error) {
+			inode := nextInode
+			nextInode++
+			nodes[strconv.FormatUint(req.Parent, 10)+"/"+req.Name] = node{inode: inode, attr: volumeFileAttr(0)}
+			return &pb.NodeResponse{Inode: inode, Attr: volumeFileAttr(0), HandleId: 99}, nil
+		},
+		writeFunc: func(_ context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
+			writes = append(writes, append([]byte(nil), req.Data...))
+			return &pb.WriteResponse{BytesWritten: int64(len(req.Data))}, nil
+		},
+		symlinkFunc: func(_ context.Context, req *pb.SymlinkRequest) (*pb.NodeResponse, error) {
+			symlink = req
+			return &pb.NodeResponse{Inode: nextInode, Attr: &pb.GetAttrResponse{Mode: uint32(syscall.S_IFLNK | 0o777)}}, nil
+		},
+	}
+	server, volMgr := newVolumeFileTestServer(fileRPC)
+
+	req := httptest.NewRequest(http.MethodPut, "/sandboxvolumes/vol-1/files/archive?path=/", tarArchive(t, []tarEntry{
+		{name: "dir/", mode: 0o755, typeflag: tar.TypeDir},
+		{name: "dir/hello.txt", body: []byte("hello archive"), mode: 0o644, typeflag: tar.TypeReg},
+		{name: "dir/link.txt", linkname: "hello.txt", mode: 0o777, typeflag: tar.TypeSymlink},
+	}))
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-a"}))
+	recorder := httptest.NewRecorder()
+
+	server.handleVolumeFileArchiveImport(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if len(writes) != 1 || string(writes[0]) != "hello archive" {
+		t.Fatalf("writes = %q, want one archive file write", writes)
+	}
+	if symlink == nil || symlink.Name != "link.txt" || symlink.Target != "hello.txt" {
+		t.Fatalf("symlink = %+v, want link.txt -> hello.txt", symlink)
+	}
+	if volMgr.syncCalls != 1 || volMgr.lastSyncVolume != "vol-1" {
+		t.Fatalf("SyncDirectVolumeFileMount() got calls=%d volume=%q, want 1 vol-1", volMgr.syncCalls, volMgr.lastSyncVolume)
+	}
+	var envelope struct {
+		Data volumeFileArchiveImportResponse `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Data.Files != 1 || envelope.Data.Directories != 1 || envelope.Data.Symlinks != 1 || envelope.Data.Bytes != int64(len("hello archive")) {
+		t.Fatalf("archive result = %+v, want counts for dir/file/symlink", envelope.Data)
+	}
+}
+
+func TestHandleVolumeFileArchiveImportRejectsTraversal(t *testing.T) {
+	server, volMgr := newVolumeFileTestServer(&fakeHTTPVolumeFileRPC{})
+
+	req := httptest.NewRequest(http.MethodPut, "/sandboxvolumes/vol-1/files/archive?path=/", tarArchive(t, []tarEntry{
+		{name: "../escape.txt", body: []byte("nope"), mode: 0o644, typeflag: tar.TypeReg},
+	}))
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-a"}))
+	recorder := httptest.NewRecorder()
+
+	server.handleVolumeFileArchiveImport(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
 	}
 	if volMgr.syncCalls != 0 {
 		t.Fatalf("SyncDirectVolumeFileMount() calls = %d, want 0", volMgr.syncCalls)

@@ -744,6 +744,65 @@ func TestStartFunctionServiceRuntimeWarmProcessUsesExistingCMDContext(t *testing
 	}
 }
 
+func TestEnsureFunctionServiceRuntimeWarmProcessSkipsReadiness(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate ed25519 keypair: %v", err)
+	}
+
+	var readinessRequests int32
+	clusterGateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sandboxes/sb_test/contexts":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"contexts":[{"id":"ctx-api","type":"cmd","alias":"api","running":true}]}`))
+		case strings.HasPrefix(r.URL.Path, "/internal/v1/functions/runtime/sandboxes/sb_test/services/api/readiness"):
+			atomic.AddInt32(&readinessRequests, 1)
+			http.Error(w, "readiness should not be checked for warm_process", http.StatusInternalServerError)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer clusterGateway.Close()
+
+	server := &Server{
+		cfg: &config.FunctionGatewayConfig{
+			DefaultClusterGatewayURL: clusterGateway.URL,
+		},
+		internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{
+			Caller:     internalauth.ServiceFunctionGateway,
+			PrivateKey: privateKey,
+			TTL:        time.Minute,
+		}),
+		httpClient: clusterGateway.Client(),
+		logger:     zap.NewNop(),
+	}
+	contextID, err := server.ensureFunctionServiceRuntime(
+		context.Background(),
+		&functions.Function{ID: "fn_test", TeamID: "team-1"},
+		&functions.Revision{ID: "rev_test", CreatedBy: "user-1"},
+		&mgr.Sandbox{ID: "sb_test", TeamID: "team-1"},
+		mgr.SandboxAppService{
+			ID:   "api",
+			Port: 3000,
+			Runtime: &mgr.SandboxAppServiceRuntime{
+				Type:            mgr.SandboxAppServiceRuntimeWarmProcess,
+				WarmProcessName: "api",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("ensureFunctionServiceRuntime() error = %v", err)
+	}
+	if contextID != "ctx-api" {
+		t.Fatalf("contextID = %q, want ctx-api", contextID)
+	}
+	if got := atomic.LoadInt32(&readinessRequests); got != 0 {
+		t.Fatalf("readiness requests = %d, want 0", got)
+	}
+}
+
 func TestClaimMountsFromRevisionUsesPreparedVolume(t *testing.T) {
 	server := &Server{}
 	mounts, err := server.claimMountsFromRevision(&functions.Revision{

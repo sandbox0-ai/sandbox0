@@ -875,6 +875,7 @@ func (s *Server) importVolumeTarArchive(ctx context.Context, volumeID, basePath 
 		return nil, false, err
 	}
 	tarReader := tar.NewReader(reader)
+	importer := newVolumeArchiveImporter(s, volumeID)
 	result := &volumeFileArchiveImportResponse{}
 	var changed bool
 	var entries int64
@@ -905,7 +906,7 @@ func (s *Server) importVolumeTarArchive(ctx context.Context, volumeID, basePath 
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			didChange, err := s.mkdirVolumePath(ctx, volumeID, targetPath, true)
+			_, didChange, err := importer.ensureDir(ctx, targetPath, true)
 			if err != nil {
 				return nil, false, err
 			}
@@ -918,7 +919,7 @@ func (s *Server) importVolumeTarArchive(ctx context.Context, volumeID, basePath 
 			if result.Bytes+header.Size > maxVolumeArchiveBytes {
 				return nil, false, errFileTooLarge
 			}
-			didChange, written, err := s.writeVolumePathFromReader(ctx, volumeID, targetPath, tarReader, header.Size)
+			didChange, written, err := importer.writeFileFromReader(ctx, targetPath, tarReader, header.Size)
 			if err != nil {
 				return nil, false, err
 			}
@@ -926,7 +927,7 @@ func (s *Server) importVolumeTarArchive(ctx context.Context, volumeID, basePath 
 			result.Files++
 			result.Bytes += written
 		case tar.TypeSymlink:
-			didChange, err := s.createVolumeSymlinkPath(ctx, volumeID, targetPath, header.Linkname)
+			didChange, err := importer.createSymlink(ctx, targetPath, header.Linkname)
 			if err != nil {
 				return nil, false, err
 			}
@@ -941,11 +942,111 @@ func (s *Server) importVolumeTarArchive(ctx context.Context, volumeID, basePath 
 	return result, changed, nil
 }
 
-func (s *Server) writeVolumePathFromReader(ctx context.Context, volumeID, raw string, reader io.Reader, size int64) (bool, int64, error) {
+type volumeArchiveImporter struct {
+	server   *Server
+	volumeID string
+	dirs     map[string]uint64
+}
+
+func newVolumeArchiveImporter(server *Server, volumeID string) *volumeArchiveImporter {
+	return &volumeArchiveImporter{
+		server:   server,
+		volumeID: volumeID,
+		dirs: map[string]uint64{
+			"/": 1,
+		},
+	}
+}
+
+func (i *volumeArchiveImporter) ensureDir(ctx context.Context, raw string, recursive bool) (uint64, bool, error) {
+	cleaned, err := cleanVolumePath(raw, true)
+	if err != nil {
+		return 0, false, err
+	}
+	if inode, ok := i.dirs[cleaned]; ok {
+		return inode, false, nil
+	}
+	if cleaned == "/" {
+		return 1, false, nil
+	}
+
+	parentPath := pathpkg.Dir(cleaned)
+	base := pathpkg.Base(cleaned)
+	parent, parentChanged, err := i.ensureDir(ctx, parentPath, recursive)
+	if err != nil {
+		return 0, false, err
+	}
+
+	node, err := i.server.fileRPC.Lookup(ctx, &pb.LookupRequest{
+		VolumeId: i.volumeID,
+		Parent:   parent,
+		Name:     base,
+		Actor:    volumeFileActor(ctx),
+	})
+	if err == nil {
+		if node.Attr != nil && !attrModeIsDir(node.Attr.Mode) {
+			return 0, parentChanged, errPathNotDir
+		}
+		i.dirs[cleaned] = node.Inode
+		return node.Inode, parentChanged, nil
+	}
+	if fserror.CodeOf(err) != fserror.NotFound {
+		return 0, parentChanged, translateVolumeRPCError(err)
+	}
+	if !recursive {
+		return 0, parentChanged, errDirNotFound
+	}
+
+	node, err = i.server.fileRPC.Mkdir(ctx, &pb.MkdirRequest{
+		VolumeId: i.volumeID,
+		Parent:   parent,
+		Name:     base,
+		Mode:     0o755,
+		Umask:    0,
+		Actor:    volumeFileActor(ctx),
+	})
+	if err != nil {
+		if fserror.CodeOf(err) != fserror.AlreadyExists {
+			return 0, parentChanged, translateVolumeRPCError(err)
+		}
+		node, err = i.server.fileRPC.Lookup(ctx, &pb.LookupRequest{
+			VolumeId: i.volumeID,
+			Parent:   parent,
+			Name:     base,
+			Actor:    volumeFileActor(ctx),
+		})
+		if err != nil {
+			return 0, parentChanged, translateVolumeRPCError(err)
+		}
+		if node.Attr != nil && !attrModeIsDir(node.Attr.Mode) {
+			return 0, parentChanged, errPathNotDir
+		}
+		i.dirs[cleaned] = node.Inode
+		return node.Inode, parentChanged, nil
+	}
+	i.dirs[cleaned] = node.Inode
+	return node.Inode, true, nil
+}
+
+func (i *volumeArchiveImporter) resolveParent(ctx context.Context, raw string, recursive bool) (uint64, string, string, error) {
+	cleaned, err := cleanVolumePath(raw, false)
+	if err != nil {
+		return 0, "", "", err
+	}
+	parentPath := pathpkg.Dir(cleaned)
+	base := pathpkg.Base(cleaned)
+	parent, _, err := i.ensureDir(ctx, parentPath, recursive)
+	if err != nil {
+		return 0, "", "", err
+	}
+	return parent, base, cleaned, nil
+}
+
+func (i *volumeArchiveImporter) writeFileFromReader(ctx context.Context, raw string, reader io.Reader, size int64) (bool, int64, error) {
 	if size > maxVolumeArchiveFileSize {
 		return false, 0, errFileTooLarge
 	}
-	resolved, err := s.lookupVolumePath(ctx, volumeID, raw, false)
+	parent, base, _, err := i.resolveParent(ctx, raw, true)
 	if err != nil {
 		return false, 0, err
 	}
@@ -954,28 +1055,33 @@ func (s *Server) writeVolumePathFromReader(ctx context.Context, volumeID, raw st
 		inode    uint64
 		handleID uint64
 	)
-	if resolved.Exists {
-		if attrModeIsDir(resolved.Attr.Mode) {
+	node, err := i.server.fileRPC.Lookup(ctx, &pb.LookupRequest{
+		VolumeId: i.volumeID,
+		Parent:   parent,
+		Name:     base,
+		Actor:    volumeFileActor(ctx),
+	})
+	if err == nil {
+		if node.Attr != nil && attrModeIsDir(node.Attr.Mode) {
 			return false, 0, errPathNotDir
 		}
-		openResp, err := s.fileRPC.Open(ctx, &pb.OpenRequest{
-			VolumeId: volumeID,
-			Inode:    resolved.Inode,
+		openResp, err := i.server.fileRPC.Open(ctx, &pb.OpenRequest{
+			VolumeId: i.volumeID,
+			Inode:    node.Inode,
 			Flags:    uint32(syscall.O_WRONLY | syscall.O_TRUNC),
 			Actor:    volumeFileActor(ctx),
 		})
 		if err != nil {
 			return false, 0, translateVolumeRPCError(err)
 		}
-		inode = resolved.Inode
+		inode = node.Inode
 		handleID = openResp.HandleId
 	} else {
-		parent, base, err := s.ensureVolumeParent(ctx, volumeID, raw, true)
-		if err != nil {
-			return false, 0, err
+		if fserror.CodeOf(err) != fserror.NotFound {
+			return false, 0, translateVolumeRPCError(err)
 		}
-		nodeResp, err := s.fileRPC.Create(ctx, &pb.CreateRequest{
-			VolumeId: volumeID,
+		nodeResp, err := i.server.fileRPC.Create(ctx, &pb.CreateRequest{
+			VolumeId: i.volumeID,
 			Parent:   parent,
 			Name:     base,
 			Mode:     0o644,
@@ -993,8 +1099,8 @@ func (s *Server) writeVolumePathFromReader(ctx context.Context, volumeID, raw st
 		if handleID == 0 {
 			return
 		}
-		_, _ = s.fileRPC.Release(ctx, &pb.ReleaseRequest{
-			VolumeId: volumeID,
+		_, _ = i.server.fileRPC.Release(ctx, &pb.ReleaseRequest{
+			VolumeId: i.volumeID,
 			Inode:    inode,
 			HandleId: handleID,
 			Actor:    volumeFileActor(ctx),
@@ -1010,8 +1116,8 @@ func (s *Server) writeVolumePathFromReader(ctx context.Context, volumeID, raw st
 			if written > size || written > maxVolumeArchiveFileSize {
 				return false, written, errFileTooLarge
 			}
-			resp, err := s.fileRPC.Write(ctx, &pb.WriteRequest{
-				VolumeId: volumeID,
+			resp, err := i.server.fileRPC.Write(ctx, &pb.WriteRequest{
+				VolumeId: i.volumeID,
 				Inode:    inode,
 				Offset:   written - int64(n),
 				Data:     buf[:n],
@@ -1038,29 +1144,41 @@ func (s *Server) writeVolumePathFromReader(ctx context.Context, volumeID, raw st
 	return true, written, nil
 }
 
-func (s *Server) createVolumeSymlinkPath(ctx context.Context, volumeID, raw, target string) (bool, error) {
+func (i *volumeArchiveImporter) createSymlink(ctx context.Context, raw, target string) (bool, error) {
 	target = strings.TrimSpace(target)
 	if target == "" || strings.HasPrefix(target, "/") {
 		return false, fmt.Errorf("%w: invalid symlink target", errInvalidArchive)
 	}
-	resolved, err := s.lookupVolumePath(ctx, volumeID, raw, false)
+	parent, base, cleaned, err := i.resolveParent(ctx, raw, true)
 	if err != nil {
 		return false, err
 	}
-	if resolved.Exists {
-		if attrModeIsDir(resolved.Attr.Mode) {
+	node, err := i.server.fileRPC.Lookup(ctx, &pb.LookupRequest{
+		VolumeId: i.volumeID,
+		Parent:   parent,
+		Name:     base,
+		Actor:    volumeFileActor(ctx),
+	})
+	if err == nil {
+		if node.Attr != nil && attrModeIsDir(node.Attr.Mode) {
 			return false, errPathNotDir
 		}
-		if err := s.removeVolumePath(ctx, volumeID, resolved); err != nil {
+		if err := i.server.removeVolumePath(ctx, i.volumeID, &volumeResolvedPath{
+			Clean:  cleaned,
+			Parent: parent,
+			Inode:  node.Inode,
+			Base:   base,
+			Attr:   node.Attr,
+			Exists: true,
+		}); err != nil {
 			return false, err
 		}
+	} else if fserror.CodeOf(err) != fserror.NotFound {
+		return false, translateVolumeRPCError(err)
 	}
-	parent, base, err := s.ensureVolumeParent(ctx, volumeID, raw, true)
-	if err != nil {
-		return false, err
-	}
-	_, err = s.fileRPC.Symlink(ctx, &pb.SymlinkRequest{
-		VolumeId: volumeID,
+
+	_, err = i.server.fileRPC.Symlink(ctx, &pb.SymlinkRequest{
+		VolumeId: i.volumeID,
 		Parent:   parent,
 		Name:     base,
 		Target:   target,

@@ -230,3 +230,20 @@ func TestAggregatorAllowEgressIncludesUnflushedUsage(t *testing.T) {
 		t.Fatalf("AllowEgress error = %v, want quota exceeded", err)
 	}
 }
+
+func TestAggregatorAllowIngressRejectsAtQuotaLimit(t *testing.T) {
+	agg := NewAggregator(&fakeRecorder{}, "aws-us-east-1", "cluster-a", "node-1", nil)
+	agg.SetQuotaStore(&fakeQuotaStore{
+		limit: &quota.Limit{
+			TeamID:     "team-1",
+			Dimension:  quota.DimensionIngress,
+			LimitValue: 10,
+		},
+		current: 10,
+	})
+
+	err := agg.AllowIngress(&policypkg.CompiledPolicy{SandboxID: "sb-1", TeamID: "team-1"})
+	if !quota.IsExceeded(err) {
+		t.Fatalf("AllowIngress error = %v, want quota exceeded", err)
+	}
+}

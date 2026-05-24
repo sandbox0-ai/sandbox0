@@ -263,6 +263,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertEgressQuota(env, session, sandboxID)
 				})
 
+				It("enforces ingress quota", func() {
+					assertIngressQuota(env, session, sandboxID)
+				})
+
 				It("proxies SSH egress auth without exposing upstream private keys to the sandbox", func() {
 					assertSSHTransparentEgressAuthProxy(env, session, sandboxID, sshFixtureState)
 				})
@@ -1504,6 +1508,26 @@ func assertEgressQuota(env *framework.ScenarioEnv, session *e2eutils.Session, sa
 	Expect(status).To(Equal(http.StatusOK))
 	DeferCleanup(func() {
 		_, _ = session.DeleteTeamQuota(env.TestCtx.Context, quota.DimensionEgress)
+	})
+
+	_, err = execInSandboxPod(env, templateNamespace, sandbox.PodName, "curl -fsS --max-time 5 http://example.com/")
+	Expect(err).To(HaveOccurred())
+}
+
+func assertIngressQuota(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {
+	sandbox, status, err := session.GetSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(sandbox).NotTo(BeNil())
+	templateNamespace, err := naming.TemplateNamespaceForTeam(sandbox.TeamId)
+	Expect(err).NotTo(HaveOccurred())
+	waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
+
+	_, status, err = session.PutTeamQuota(env.TestCtx.Context, quota.DimensionIngress, 0)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	DeferCleanup(func() {
+		_, _ = session.DeleteTeamQuota(env.TestCtx.Context, quota.DimensionIngress)
 	})
 
 	_, err = execInSandboxPod(env, templateNamespace, sandbox.PodName, "curl -fsS --max-time 5 http://example.com/")

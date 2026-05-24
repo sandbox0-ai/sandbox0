@@ -119,6 +119,10 @@ func (a *Aggregator) AllowEgress(compiled *policypkg.CompiledPolicy) error {
 	return a.allowNetworkUsage(context.Background(), compiled, quota.DimensionEgress)
 }
 
+func (a *Aggregator) AllowIngress(compiled *policypkg.CompiledPolicy) error {
+	return a.allowNetworkUsage(context.Background(), compiled, quota.DimensionIngress)
+}
+
 func (a *Aggregator) RecordEgress(compiled *policypkg.CompiledPolicy, bytes int64) {
 	a.record(compiled, bytes, true)
 }
@@ -202,6 +206,8 @@ func (a *Aggregator) localNetworkUsageLocked(teamID string, dimension quota.Dime
 		switch dimension {
 		case quota.DimensionEgress:
 			total += usage.egress
+		case quota.DimensionIngress:
+			total += usage.ingress
 		}
 	}
 	return total

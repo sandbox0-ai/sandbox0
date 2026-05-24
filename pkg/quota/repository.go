@@ -119,6 +119,8 @@ func (r *Repository) CurrentUsage(ctx context.Context, teamID string, dimension 
 			return 0, err
 		}
 		return BytesToGBRoundUp(current), nil
+	case DimensionEgress:
+		return r.currentNetworkUsage(ctx, teamID, metering.WindowTypeSandboxEgressBytes, metering.WindowTypeFunctionEgressBytes)
 	default:
 		return 0, fmt.Errorf("unsupported quota usage dimension %q", dimension)
 	}
@@ -185,6 +187,29 @@ func (r *Repository) currentStorageUsageBytes(ctx context.Context, teamID, subje
 			AND subject_type = $2
 	`, teamID, subjectType).Scan(&current); err != nil {
 		return 0, fmt.Errorf("query storage quota usage: %w", err)
+	}
+	return current, nil
+}
+
+func (r *Repository) currentNetworkUsage(ctx context.Context, teamID string, windowTypes ...string) (int64, error) {
+	if len(windowTypes) == 0 {
+		return 0, fmt.Errorf("window type is required")
+	}
+	args := make([]any, 0, len(windowTypes)+1)
+	args = append(args, teamID)
+	placeholders := make([]string, 0, len(windowTypes))
+	for i, windowType := range windowTypes {
+		args = append(args, windowType)
+		placeholders = append(placeholders, fmt.Sprintf("$%d", i+2))
+	}
+	var current int64
+	if err := r.db.QueryRow(ctx, fmt.Sprintf(`
+		SELECT COALESCE(SUM(value), 0)
+		FROM metering.usage_windows
+		WHERE team_id = $1
+			AND window_type IN (%s)
+	`, strings.Join(placeholders, ", ")), args...).Scan(&current); err != nil {
+		return 0, fmt.Errorf("query network quota usage: %w", err)
 	}
 	return current, nil
 }

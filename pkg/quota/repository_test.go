@@ -116,3 +116,27 @@ func TestProjectedStorageUsageGBExcludesCurrentSubject(t *testing.T) {
 		t.Fatalf("ProjectedStorageUsageGB = %d, want 2", got)
 	}
 }
+
+func TestCurrentUsageReturnsEgressBytes(t *testing.T) {
+	repo := NewRepositoryWithDB(&fakeDB{
+		queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
+			if !strings.Contains(sql, "usage_windows") {
+				t.Fatalf("sql = %s, want usage windows query", sql)
+			}
+			if args[0] != "team-1" ||
+				args[1] != metering.WindowTypeSandboxEgressBytes ||
+				args[2] != metering.WindowTypeFunctionEgressBytes {
+				t.Fatalf("args = %#v, want team and egress window types", args)
+			}
+			return fakeRow{values: []any{int64(1024)}}
+		},
+	})
+
+	got, err := repo.CurrentUsage(context.Background(), "team-1", DimensionEgress)
+	if err != nil {
+		t.Fatalf("CurrentUsage: %v", err)
+	}
+	if got != 1024 {
+		t.Fatalf("CurrentUsage = %d, want 1024", got)
+	}
+}

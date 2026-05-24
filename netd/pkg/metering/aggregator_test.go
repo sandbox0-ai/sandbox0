@@ -10,6 +10,7 @@ import (
 	policypkg "github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 	"github.com/sandbox0-ai/sandbox0/pkg/functionruntime"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
+	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 )
 
 type fakeTxRecorder struct {
@@ -43,6 +44,19 @@ type fakeRecorder struct {
 	tx       *fakeTxRecorder
 	runCalls int
 	runErr   error
+}
+
+type fakeQuotaStore struct {
+	limit   *quota.Limit
+	current int64
+}
+
+func (f *fakeQuotaStore) GetLimit(context.Context, string, quota.Dimension) (*quota.Limit, error) {
+	return f.limit, nil
+}
+
+func (f *fakeQuotaStore) CurrentUsage(context.Context, string, quota.Dimension) (int64, error) {
+	return f.current, nil
 }
 
 func (f *fakeRecorder) RunInTx(ctx context.Context, fn func(tx txRecorder) error) error {
@@ -178,5 +192,41 @@ func TestAggregatorFlushFailureRetainsUsage(t *testing.T) {
 	}
 	if !agg.windowStart.Equal(start) {
 		t.Fatalf("window start advanced on failure: %v", agg.windowStart)
+	}
+}
+
+func TestAggregatorAllowEgressRejectsAtQuotaLimit(t *testing.T) {
+	agg := NewAggregator(&fakeRecorder{}, "aws-us-east-1", "cluster-a", "node-1", nil)
+	agg.SetQuotaStore(&fakeQuotaStore{
+		limit: &quota.Limit{
+			TeamID:     "team-1",
+			Dimension:  quota.DimensionEgress,
+			LimitValue: 10,
+		},
+		current: 10,
+	})
+
+	err := agg.AllowEgress(&policypkg.CompiledPolicy{SandboxID: "sb-1", TeamID: "team-1"})
+	if !quota.IsExceeded(err) {
+		t.Fatalf("AllowEgress error = %v, want quota exceeded", err)
+	}
+}
+
+func TestAggregatorAllowEgressIncludesUnflushedUsage(t *testing.T) {
+	agg := NewAggregator(&fakeRecorder{}, "aws-us-east-1", "cluster-a", "node-1", nil)
+	agg.SetQuotaStore(&fakeQuotaStore{
+		limit: &quota.Limit{
+			TeamID:     "team-1",
+			Dimension:  quota.DimensionEgress,
+			LimitValue: 10,
+		},
+		current: 8,
+	})
+	compiled := &policypkg.CompiledPolicy{SandboxID: "sb-1", TeamID: "team-1"}
+	agg.RecordEgress(compiled, 2)
+
+	err := agg.AllowEgress(compiled)
+	if !quota.IsExceeded(err) {
+		t.Fatalf("AllowEgress error = %v, want quota exceeded", err)
 	}
 }

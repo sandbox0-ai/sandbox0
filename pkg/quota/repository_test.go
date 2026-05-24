@@ -61,25 +61,37 @@ func (r fakeRow) Scan(dest ...any) error {
 	return nil
 }
 
-func TestCurrentUsageReturnsVolumeStorageGB(t *testing.T) {
-	repo := NewRepositoryWithDB(&fakeDB{
-		queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
-			if !strings.Contains(sql, "storage_projection_state") {
-				t.Fatalf("sql = %s, want storage projection query", sql)
-			}
-			if args[0] != "team-1" || args[1] != metering.SubjectTypeVolume {
-				t.Fatalf("args = %#v, want team and volume subject", args)
-			}
-			return fakeRow{values: []any{BytesPerGB + 1}}
-		},
-	})
-
-	got, err := repo.CurrentUsage(context.Background(), "team-1", DimensionVolumeStorageGB)
-	if err != nil {
-		t.Fatalf("CurrentUsage: %v", err)
+func TestCurrentUsageReturnsStorageGB(t *testing.T) {
+	tests := []struct {
+		name        string
+		dimension   Dimension
+		subjectType string
+	}{
+		{name: "volume", dimension: DimensionVolumeStorageGB, subjectType: metering.SubjectTypeVolume},
+		{name: "snapshot", dimension: DimensionSnapshotGB, subjectType: metering.SubjectTypeSnapshot},
 	}
-	if got != 2 {
-		t.Fatalf("CurrentUsage = %d, want 2", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := NewRepositoryWithDB(&fakeDB{
+				queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
+					if !strings.Contains(sql, "storage_projection_state") {
+						t.Fatalf("sql = %s, want storage projection query", sql)
+					}
+					if args[0] != "team-1" || args[1] != tt.subjectType {
+						t.Fatalf("args = %#v, want team and storage subject", args)
+					}
+					return fakeRow{values: []any{BytesPerGB + 1}}
+				},
+			})
+
+			got, err := repo.CurrentUsage(context.Background(), "team-1", tt.dimension)
+			if err != nil {
+				t.Fatalf("CurrentUsage: %v", err)
+			}
+			if got != 2 {
+				t.Fatalf("CurrentUsage = %d, want 2", got)
+			}
+		})
 	}
 }
 

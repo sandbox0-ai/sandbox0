@@ -23,6 +23,8 @@ func storageQuotaDimension(subjectType string) (quota.Dimension, bool) {
 	switch subjectType {
 	case meteringpkg.SubjectTypeVolume:
 		return quota.DimensionVolumeStorageGB, true
+	case meteringpkg.SubjectTypeSnapshot:
+		return quota.DimensionSnapshotGB, true
 	default:
 		return "", false
 	}

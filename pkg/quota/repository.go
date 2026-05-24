@@ -113,6 +113,12 @@ func (r *Repository) CurrentUsage(ctx context.Context, teamID string, dimension 
 			return 0, err
 		}
 		return BytesToGBRoundUp(current), nil
+	case DimensionSnapshotGB:
+		current, err := r.currentStorageUsageBytes(ctx, teamID, metering.SubjectTypeSnapshot)
+		if err != nil {
+			return 0, err
+		}
+		return BytesToGBRoundUp(current), nil
 	default:
 		return 0, fmt.Errorf("unsupported quota usage dimension %q", dimension)
 	}
@@ -187,6 +193,8 @@ func storageDimensionMatchesSubjectType(dimension Dimension, subjectType string)
 	switch dimension {
 	case DimensionVolumeStorageGB:
 		return subjectType == metering.SubjectTypeVolume
+	case DimensionSnapshotGB:
+		return subjectType == metering.SubjectTypeSnapshot
 	default:
 		return false
 	}

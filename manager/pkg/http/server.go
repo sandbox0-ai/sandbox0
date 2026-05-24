@@ -16,6 +16,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
+	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	templatehttp "github.com/sandbox0-ai/sandbox0/pkg/template/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"go.opentelemetry.io/otel/trace"
@@ -35,6 +36,7 @@ type Server struct {
 	templateStoreEnabled    bool
 	templateHandler         *templatehttp.Handler
 	clusterService          *service.ClusterService
+	quotaRepo               *quota.Repository
 	authValidator           *internalauth.Validator
 	logger                  *zap.Logger
 	port                    int
@@ -187,6 +189,13 @@ func (s *Server) setupRoutes() {
 			credentialSources.PUT("/:name", s.updateCredentialSource)
 			credentialSources.DELETE("/:name", s.deleteCredentialSource)
 		}
+
+		quotas := v1.Group("/quotas")
+		{
+			quotas.GET("/:dimension", s.getTeamQuota)
+			quotas.PUT("/:dimension", s.putTeamQuota)
+			quotas.DELETE("/:dimension", s.deleteTeamQuota)
+		}
 	}
 
 	// Internal API v1 (for scheduler)
@@ -220,6 +229,10 @@ func (s *Server) setupRoutes() {
 			internalEgressAuth.POST("/resolve", s.resolveEgressAuth)
 		}
 	}
+}
+
+func (s *Server) SetQuotaRepository(repo *quota.Repository) {
+	s.quotaRepo = repo
 }
 
 // Start starts the HTTP server

@@ -465,6 +465,14 @@ func (s *Server) setupRoutes() {
 			credentialSources.DELETE("/:name", s.authMiddleware.RequirePermission(gatewayauthn.PermCredentialSourceDelete), s.proxyToManager)
 		}
 
+		quotas := v1.Group("/quotas")
+		quotas.Use(s.managerUpstreamMiddleware())
+		{
+			quotas.GET("/:dimension", s.authMiddleware.RequirePermission(gatewayauthn.PermQuotaRead), s.proxyToManager)
+			quotas.PUT("/:dimension", s.authMiddleware.RequirePermission(gatewayauthn.PermQuotaWrite), s.proxyToManager)
+			quotas.DELETE("/:dimension", s.authMiddleware.RequirePermission(gatewayauthn.PermQuotaWrite), s.proxyToManager)
+		}
+
 		// === SandboxVolume Management (→ Storage Proxy) ===
 		sandboxvolumes := v1.Group("/sandboxvolumes")
 		sandboxvolumes.Use(s.storageProxyUpstreamMiddleware())

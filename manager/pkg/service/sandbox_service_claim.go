@@ -286,6 +286,12 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		}
 	}
 	s.observeClaimPhase(req.Template, "unknown", "validate_claim_mounts", phaseStarted, nil)
+	phaseStarted = time.Now()
+	if err := s.enforceActiveSandboxQuota(ctx, req.TeamID); err != nil {
+		s.observeClaimPhase(req.Template, "unknown", "enforce_active_sandbox_quota", phaseStarted, err)
+		return nil, err
+	}
+	s.observeClaimPhase(req.Template, "unknown", "enforce_active_sandbox_quota", phaseStarted, nil)
 	s.logger.Info("Claiming sandbox",
 		zap.String("template", req.Template),
 		zap.String("teamID", req.TeamID),

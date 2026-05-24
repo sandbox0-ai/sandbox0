@@ -16,6 +16,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/framework"
 	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	e2eutils "github.com/sandbox0-ai/sandbox0/tests/e2e/utils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
@@ -147,6 +148,19 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 		})
 
 		Context("sandbox lifecycle", func() {
+			It("enforces active sandbox quota", func() {
+				_, status, err := session.PutTeamQuota(env.TestCtx.Context, quota.DimensionActiveSandboxes, 1)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(status).To(Equal(http.StatusOK))
+				defer func() {
+					_, _ = session.DeleteTeamQuota(env.TestCtx.Context, quota.DimensionActiveSandboxes)
+				}()
+
+				_, status, err = session.ClaimSandboxDetailed(env.TestCtx.Context, GinkgoT(), apispec.ClaimRequest{Template: ptr("default")})
+				Expect(err).To(HaveOccurred())
+				Expect(status).To(Equal(http.StatusTooManyRequests))
+			})
+
 			It("fetches status and refreshes sandboxes", func() {
 				Expect(sandboxID).NotTo(BeEmpty())
 

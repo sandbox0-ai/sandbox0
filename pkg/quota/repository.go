@@ -82,6 +82,18 @@ func (r *Repository) CurrentUsage(ctx context.Context, teamID string, dimension 
 			return 0, fmt.Errorf("query active sandbox usage: %w", err)
 		}
 		return current, nil
+	case DimensionCPU:
+		var current int64
+		if err := r.db.QueryRow(ctx, `
+			SELECT COALESCE(SUM(resource_millicpu), 0)
+			FROM metering.manager_sandbox_projection_state
+			WHERE team_id = $1
+				AND claimed_at IS NOT NULL
+				AND terminated_at IS NULL
+		`, teamID).Scan(&current); err != nil {
+			return 0, fmt.Errorf("query cpu quota usage: %w", err)
+		}
+		return current, nil
 	default:
 		return 0, fmt.Errorf("unsupported quota usage dimension %q", dimension)
 	}

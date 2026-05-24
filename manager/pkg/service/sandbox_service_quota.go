@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 )
 
@@ -29,4 +30,39 @@ func (s *SandboxService) enforceActiveSandboxQuota(ctx context.Context, teamID s
 		return nil
 	}
 	return fmt.Errorf("%w: %s", ErrQuotaExceeded, decision.Err())
+}
+
+func (s *SandboxService) enforceSandboxCPUQuota(ctx context.Context, teamID string, template *v1alpha1.SandboxTemplate) error {
+	requested := templateCPUMillicpu(template)
+	return s.enforceQuota(ctx, teamID, quota.DimensionCPU, requested)
+}
+
+func (s *SandboxService) enforceQuota(ctx context.Context, teamID string, dimension quota.Dimension, requested int64) error {
+	teamID = strings.TrimSpace(teamID)
+	if s == nil || s.quotaStore == nil || teamID == "" {
+		return nil
+	}
+	limit, err := s.quotaStore.GetLimit(ctx, teamID, dimension)
+	if err != nil {
+		return fmt.Errorf("load %s quota: %w", dimension, err)
+	}
+	if limit == nil {
+		return nil
+	}
+	current, err := s.quotaStore.CurrentUsage(ctx, teamID, dimension)
+	if err != nil {
+		return fmt.Errorf("load %s usage: %w", dimension, err)
+	}
+	decision := quota.Check(teamID, dimension, current, requested, limit)
+	if decision.Allowed {
+		return nil
+	}
+	return fmt.Errorf("%w: %s", ErrQuotaExceeded, decision.Err())
+}
+
+func templateCPUMillicpu(template *v1alpha1.SandboxTemplate) int64 {
+	if template == nil {
+		return 0
+	}
+	return template.Spec.MainContainer.Resources.CPU.MilliValue()
 }

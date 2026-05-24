@@ -348,6 +348,13 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	s.observeClaimPhase(req.Template, "unknown", "resolve_template", phaseStarted, nil)
 
 	phaseStarted = time.Now()
+	if err := s.enforceSandboxCPUQuota(ctx, req.TeamID, template); err != nil {
+		s.observeClaimPhase(req.Template, "unknown", "enforce_cpu_quota", phaseStarted, err)
+		return nil, err
+	}
+	s.observeClaimPhase(req.Template, "unknown", "enforce_cpu_quota", phaseStarted, nil)
+
+	phaseStarted = time.Now()
 	if err := validateClaimMountsForTemplate(req, template); err != nil {
 		s.observeClaimPhase(req.Template, "unknown", "validate_template_mounts", phaseStarted, err)
 		return nil, err

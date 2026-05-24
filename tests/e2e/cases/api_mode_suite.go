@@ -161,6 +161,19 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 				Expect(status).To(Equal(http.StatusTooManyRequests))
 			})
 
+			It("enforces CPU quota", func() {
+				_, status, err := session.PutTeamQuota(env.TestCtx.Context, quota.DimensionCPU, 0)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(status).To(Equal(http.StatusOK))
+				defer func() {
+					_, _ = session.DeleteTeamQuota(env.TestCtx.Context, quota.DimensionCPU)
+				}()
+
+				_, status, err = session.ClaimSandboxDetailed(env.TestCtx.Context, GinkgoT(), apispec.ClaimRequest{Template: ptr("default")})
+				Expect(err).To(HaveOccurred())
+				Expect(status).To(Equal(http.StatusTooManyRequests))
+			})
+
 			It("fetches status and refreshes sandboxes", func() {
 				Expect(sandboxID).NotTo(BeEmpty())
 

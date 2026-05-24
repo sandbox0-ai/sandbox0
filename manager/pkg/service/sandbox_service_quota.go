@@ -37,6 +37,11 @@ func (s *SandboxService) enforceSandboxCPUQuota(ctx context.Context, teamID stri
 	return s.enforceQuota(ctx, teamID, quota.DimensionCPU, requested)
 }
 
+func (s *SandboxService) enforceSandboxMemoryQuota(ctx context.Context, teamID string, template *v1alpha1.SandboxTemplate) error {
+	requested := templateMemoryMiB(template)
+	return s.enforceQuota(ctx, teamID, quota.DimensionMemory, requested)
+}
+
 func (s *SandboxService) enforceQuota(ctx context.Context, teamID string, dimension quota.Dimension, requested int64) error {
 	teamID = strings.TrimSpace(teamID)
 	if s == nil || s.quotaStore == nil || teamID == "" {
@@ -65,4 +70,19 @@ func templateCPUMillicpu(template *v1alpha1.SandboxTemplate) int64 {
 		return 0
 	}
 	return template.Spec.MainContainer.Resources.CPU.MilliValue()
+}
+
+func templateMemoryMiB(template *v1alpha1.SandboxTemplate) int64 {
+	if template == nil {
+		return 0
+	}
+	return bytesToMiBRoundUp(template.Spec.MainContainer.Resources.Memory.Value())
+}
+
+func bytesToMiBRoundUp(value int64) int64 {
+	if value <= 0 {
+		return 0
+	}
+	const mib = int64(1024 * 1024)
+	return (value + mib - 1) / mib
 }

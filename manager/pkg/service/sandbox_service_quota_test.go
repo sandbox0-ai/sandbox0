@@ -88,6 +88,35 @@ func TestEnforceSandboxCPUQuotaAllowsBelowLimit(t *testing.T) {
 	}
 }
 
+func TestEnforceSandboxMemoryQuotaRejectsWhenRequestedWouldExceedLimit(t *testing.T) {
+	svc := &SandboxService{
+		quotaStore: fakeQuotaLimitStore{
+			limit: &quota.Limit{TeamID: "team-1", Dimension: quota.DimensionMemory, LimitValue: 1024},
+			usage: 768,
+		},
+	}
+	template := newQuotaTestTemplate("default", "500m", "512Mi")
+
+	err := svc.enforceSandboxMemoryQuota(context.Background(), "team-1", template)
+	if !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("enforceSandboxMemoryQuota() error = %v, want ErrQuotaExceeded", err)
+	}
+}
+
+func TestEnforceSandboxMemoryQuotaAllowsBelowLimit(t *testing.T) {
+	svc := &SandboxService{
+		quotaStore: fakeQuotaLimitStore{
+			limit: &quota.Limit{TeamID: "team-1", Dimension: quota.DimensionMemory, LimitValue: 2048},
+			usage: 768,
+		},
+	}
+	template := newQuotaTestTemplate("default", "500m", "512Mi")
+
+	if err := svc.enforceSandboxMemoryQuota(context.Background(), "team-1", template); err != nil {
+		t.Fatalf("enforceSandboxMemoryQuota() error = %v, want nil", err)
+	}
+}
+
 func newQuotaTestTemplate(name, cpu, memory string) *v1alpha1.SandboxTemplate {
 	return &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},

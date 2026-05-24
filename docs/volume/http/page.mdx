@@ -321,6 +321,37 @@ Query parameters:
 
 The archive may contain directories, regular files, and symlinks. Absolute paths and `..` path traversal entries are rejected.
 
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `file, err := os.Open("bundle.tar.gz")
+if err != nil {
+    log.Fatal(err)
+}
+defer file.Close()
+
+result, err := client.UploadVolumeArchive(ctx, volumeID, file, &sandbox0.VolumeArchiveUploadOptions{
+    Path:      "/workspace",
+    Format:    apispec.QueryArchiveFormatTarGz,
+    Overwrite: true,
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("imported %d files\\n", result.Files)`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 volume files upload-archive vol_abc123 bundle.tar.gz /workspace \\
+    --format tar.gz \\
+    --overwrite`
+    }
+  ]}
+/>
+
 Example response:
 
 ```json

@@ -99,6 +99,43 @@ Artifacts are immutable, team-owned bundles backed by a Volume snapshot. Use the
 
 Creating an artifact snapshots the source Volume. Materializing an artifact creates a new SandboxVolume from that snapshot; it defaults to `ROX` and POSIX UID/GID `0` unless the request overrides them.
 
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `artifact, err := client.CreateArtifactFromVolume(
+    ctx,
+    volumeID,
+    sandbox0.WithArtifactName("nextjs-bundle"),
+    sandbox0.WithArtifactKind("nextjs"),
+    sandbox0.WithArtifactMediaType("application/vnd.sandbox0.volume"),
+)
+if err != nil {
+    log.Fatal(err)
+}
+
+volume, err := client.MaterializeArtifactVolume(ctx, artifact.ID, &apispec.CreateArtifactVolumeRequest{
+    AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeROX),
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("materialized volume: %s\\n", volume.ID)`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 artifact create vol_abc123 \\
+    --name nextjs-bundle \\
+    --kind nextjs \\
+    --media-type application/vnd.sandbox0.volume
+
+s0 artifact materialize artifact_abc123 --access-mode ROX`
+    }
+  ]}
+/>
+
 ---
 
 ## Create Volume

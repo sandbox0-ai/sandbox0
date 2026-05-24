@@ -310,6 +310,97 @@ For warm-process runtimes that initialize from mounted revision data, add a `pos
 <Tabs
   tabs={[
     {
+      label: "Go Artifact Mount",
+      language: "go",
+      code: `spec := apispec.FunctionRevisionSpec{
+    TemplateID: "nextjs-runtime",
+    Mounts: []apispec.FunctionRevisionMount{
+        sandbox0.FunctionArtifactMount(
+            "app",
+            "/workspace/app",
+            artifactID,
+            apispec.FunctionRevisionMountModeReadOnly,
+        ),
+    },
+    RuntimeService: apispec.SandboxAppService{
+        ID:   "web",
+        Port: 3000,
+        Runtime: apispec.NewOptSandboxAppServiceRuntime(apispec.SandboxAppServiceRuntime{
+            Type:               apispec.SandboxAppServiceRuntimeTypeWarmProcess,
+            WarmProcessName:    apispec.NewOptString("runner"),
+            SkipReadinessCheck: apispec.NewOptBool(true),
+            Hooks: []apispec.SandboxAppServiceRuntimeHook{
+                sandbox0.FunctionPostClaimHTTPHook("init", "POST", "/__sandbox0/init", 30),
+            },
+        }),
+        Ingress: apispec.SandboxAppServiceIngress{
+            Public: true,
+            Routes: []apispec.SandboxAppServiceRoute{
+                {
+                    ID:         "root",
+                    PathPrefix: apispec.NewOptString("/"),
+                    Resume:     true,
+                },
+            },
+        },
+    },
+}
+
+result, err := client.CreateFunctionFromRevisionSpec(
+    ctx,
+    spec,
+    sandbox0.WithFunctionName("nextjs-app"),
+)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("function URL: %s\\n", result.Function.URL)`
+    },
+    {
+      label: "CLI Artifact Mount",
+      language: "bash",
+      code: `s0 volume files upload-archive vol_build bundle.tar.gz /workspace/app --format tar.gz --overwrite
+s0 artifact create vol_build --name nextjs-bundle --kind nextjs --media-type application/vnd.sandbox0.volume
+
+cat > function-spec.yaml <<EOF
+template_id: nextjs-runtime
+mounts:
+  - name: app
+    mount_point: /workspace/app
+    mode: read_only
+    source:
+      type: artifact
+      artifact_id: artifact_abc123
+runtime_service:
+  id: web
+  port: 3000
+  runtime:
+    type: warm_process
+    warm_process_name: runner
+    skip_readiness_check: true
+    hooks:
+      - name: init
+        phase: post_claim
+        http:
+          method: POST
+          path: /__sandbox0/init
+          timeout_seconds: 30
+  ingress:
+    public: true
+    routes:
+      - id: root
+        path_prefix: /
+        resume: true
+EOF
+
+s0 function create --spec-file function-spec.yaml --name nextjs-app`
+    }
+  ]}
+/>
+
+<Tabs
+  tabs={[
+    {
       label: "API",
       language: "json",
       code: `{

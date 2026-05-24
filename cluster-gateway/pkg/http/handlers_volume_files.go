@@ -49,6 +49,18 @@ func (s *Server) handleVolumeFileMove(c *gin.Context) {
 	s.proxyToStorageProxy(c)
 }
 
+// handleVolumeFileArchiveUpload handles bulk volume archive upload.
+// Route: /api/v1/sandboxvolumes/:id/files/archive
+func (s *Server) handleVolumeFileArchiveUpload(c *gin.Context) {
+	id, ok := requireVolumeID(c)
+	if !ok {
+		return
+	}
+
+	c.Request.URL.Path = "/sandboxvolumes/" + id + "/files/archive"
+	s.proxyToStorageProxy(c)
+}
+
 // handleVolumeFileStat handles volume file stat operations.
 // Route: /api/v1/sandboxvolumes/:id/files/stat
 func (s *Server) handleVolumeFileStat(c *gin.Context) {

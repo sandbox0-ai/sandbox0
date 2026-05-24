@@ -3001,10 +3001,10 @@ spec:
                             default: 8081
                             type: integer
                           httpReadTimeout:
-                            default: 15s
+                            default: 5m
                             type: string
                           httpWriteTimeout:
-                            default: 15s
+                            default: 5m
                             type: string
                           kubeconfigPath:
                             type: string

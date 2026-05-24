@@ -260,6 +260,53 @@ console.log('function URL:', result.function.url);`
 
 Use `revision_spec` when a deployment system already has the template, runtime service, and mount contract it wants to publish. The same service validation applies to `runtime_service`: it must expose public ingress and use a restartable runtime.
 
+Revision specs can mount either prepared SandboxVolumes or Artifacts. An artifact mount uses `source.type: "artifact"` and `source.artifact_id`; Sandbox0 materializes it into a revision-owned SandboxVolume during publish. `mode: "read_only"` materializes as `ROX`, while `mode: "read_write"` materializes as `RWX`.
+
+For warm-process runtimes that initialize from mounted revision data, add a `post_claim` runtime hook and set `skip_readiness_check` when that hook is the readiness boundary.
+
+```json
+{
+    "mounts": [
+        {
+            "mount_point": "/workspace/app",
+            "mode": "read_only",
+            "source": {
+                "type": "artifact",
+                "artifact_id": "artifact_abc123"
+            }
+        }
+    ],
+    "runtime_service": {
+        "id": "api",
+        "port": 3000,
+        "runtime": {
+            "type": "warm_process",
+            "warm_process_name": "runner",
+            "skip_readiness_check": true,
+            "hooks": [
+                {
+                    "phase": "post_claim",
+                    "http": {
+                        "path": "/__sandbox0/init",
+                        "timeout_seconds": 30
+                    }
+                }
+            ]
+        },
+        "ingress": {
+            "public": true,
+            "routes": [
+                {
+                    "id": "root",
+                    "path_prefix": "/",
+                    "resume": true
+                }
+            ]
+        }
+    }
+}
+```
+
 <Tabs
   tabs={[
     {

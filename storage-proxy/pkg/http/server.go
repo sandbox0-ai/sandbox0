@@ -37,6 +37,10 @@ type volumeRepository interface {
 	GetSandboxVolume(ctx context.Context, id string) (*db.SandboxVolume, error)
 	GetSandboxVolumeOwner(ctx context.Context, volumeID string) (*db.SandboxVolumeOwner, error)
 	GetOwnedSandboxVolumeByOwner(ctx context.Context, clusterID, sandboxID, purpose string) (*db.OwnedSandboxVolume, error)
+	CreateArtifactTx(ctx context.Context, tx pgx.Tx, artifact *db.Artifact) error
+	ListArtifactsByTeam(ctx context.Context, teamID string) ([]*db.Artifact, error)
+	GetArtifact(ctx context.Context, id string) (*db.Artifact, error)
+	DeleteArtifactTx(ctx context.Context, tx pgx.Tx, id string) error
 	GetActiveMounts(ctx context.Context, volumeID string, heartbeatTimeout int) ([]*db.VolumeMount, error)
 	DeleteMount(ctx context.Context, volumeID, clusterID, podID string) error
 	TransferMount(ctx context.Context, volumeID, sourceClusterID, sourcePodID string, target *db.VolumeMount, heartbeatTimeout int) error
@@ -94,6 +98,7 @@ type volumeFileRPC interface {
 	Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error)
 	Create(ctx context.Context, req *pb.CreateRequest) (*pb.NodeResponse, error)
 	Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb.NodeResponse, error)
+	Symlink(ctx context.Context, req *pb.SymlinkRequest) (*pb.NodeResponse, error)
 	Unlink(ctx context.Context, req *pb.UnlinkRequest) (*pb.Empty, error)
 	Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb.Empty, error)
 	ReadDir(ctx context.Context, req *pb.ReadDirRequest) (*pb.ReadDirResponse, error)
@@ -176,7 +181,15 @@ func NewServer(logger *logrus.Logger, cfg *config.StorageProxyConfig, k8sClient 
 	s.mux.HandleFunc("GET /sandboxvolumes/{id}/files/stat", s.handleVolumeFileStat)
 	s.mux.HandleFunc("GET /sandboxvolumes/{id}/files/list", s.handleVolumeFileList)
 	s.mux.HandleFunc("POST /sandboxvolumes/{id}/files/move", s.handleVolumeFileMove)
+	s.mux.HandleFunc("POST /sandboxvolumes/{id}/files/archive", s.handleVolumeFileArchiveUpload)
 	s.mux.HandleFunc("GET /sandboxvolumes/{id}/files/watch", s.handleVolumeFileWatch)
+
+	// Artifact handlers
+	s.mux.HandleFunc("POST /artifacts", s.createArtifact)
+	s.mux.HandleFunc("GET /artifacts", s.listArtifacts)
+	s.mux.HandleFunc("GET /artifacts/{id}", s.getArtifact)
+	s.mux.HandleFunc("DELETE /artifacts/{id}", s.deleteArtifact)
+	s.mux.HandleFunc("POST /artifacts/{id}/volume", s.createVolumeFromArtifact)
 
 	// Internal manager-owned SandboxVolume lifecycle handlers.
 	s.mux.HandleFunc("POST /internal/v1/sandboxvolumes/owned", s.createOwnedSandboxVolume)

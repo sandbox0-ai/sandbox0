@@ -15,9 +15,12 @@ const (
 )
 
 const (
-	maxSandboxServiceRoutes        = 32
-	maxSandboxServiceMethods       = 16
-	maxSandboxServiceAllowedValues = 32
+	maxSandboxServiceRoutes              = 32
+	maxSandboxServiceMethods             = 16
+	maxSandboxServiceAllowedValues       = 32
+	maxSandboxServiceRuntimeHooks        = 16
+	defaultSandboxServiceHookTimeoutSecs = 30
+	maxSandboxServiceHookTimeoutSecs     = 300
 )
 
 var sandboxServiceRouteIDPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -53,6 +56,10 @@ const (
 	SandboxAppServiceRuntimeManual      = "manual"
 )
 
+const (
+	SandboxAppServiceRuntimeHookPhasePostClaim = "post_claim"
+)
+
 // SandboxAppService describes an application service running inside a sandbox.
 type SandboxAppService struct {
 	ID          string                    `json:"id"`
@@ -65,11 +72,28 @@ type SandboxAppService struct {
 
 // SandboxAppServiceRuntime captures the restartable command for a sandbox service.
 type SandboxAppServiceRuntime struct {
-	Type            string            `json:"type"`
-	Command         []string          `json:"command,omitempty"`
-	CWD             string            `json:"cwd,omitempty"`
-	EnvVars         map[string]string `json:"env_vars,omitempty"`
-	WarmProcessName string            `json:"warm_process_name,omitempty"`
+	Type               string                         `json:"type"`
+	Command            []string                       `json:"command,omitempty"`
+	CWD                string                         `json:"cwd,omitempty"`
+	EnvVars            map[string]string              `json:"env_vars,omitempty"`
+	WarmProcessName    string                         `json:"warm_process_name,omitempty"`
+	Hooks              []SandboxAppServiceRuntimeHook `json:"hooks,omitempty"`
+	SkipReadinessCheck bool                           `json:"skip_readiness_check,omitempty"`
+}
+
+// SandboxAppServiceRuntimeHook describes a blocking runtime lifecycle callback.
+type SandboxAppServiceRuntimeHook struct {
+	Name  string                            `json:"name,omitempty"`
+	Phase string                            `json:"phase"`
+	HTTP  *SandboxAppServiceRuntimeHTTPHook `json:"http,omitempty"`
+}
+
+// SandboxAppServiceRuntimeHTTPHook describes an HTTP callback served by the runtime service.
+type SandboxAppServiceRuntimeHTTPHook struct {
+	Method         string            `json:"method,omitempty"`
+	Path           string            `json:"path"`
+	Headers        map[string]string `json:"headers,omitempty"`
+	TimeoutSeconds int               `json:"timeout_seconds,omitempty"`
 }
 
 // SandboxAppServiceIngress captures how traffic enters a sandbox service.
@@ -154,6 +178,11 @@ func normalizeSandboxAppService(service SandboxAppService) (SandboxAppService, e
 		}
 		runtime.CWD = strings.TrimSpace(runtime.CWD)
 		runtime.WarmProcessName = strings.TrimSpace(runtime.WarmProcessName)
+		hooks, err := normalizeSandboxAppServiceRuntimeHooks(runtime.Hooks)
+		if err != nil {
+			return service, fmt.Errorf("runtime.hooks: %w", err)
+		}
+		runtime.Hooks = hooks
 		if runtime.Type == "" {
 			runtime.Type = SandboxAppServiceRuntimeManual
 		}
@@ -189,6 +218,69 @@ func normalizeSandboxAppService(service SandboxAppService) (SandboxAppService, e
 		service.HealthCheck = &health
 	}
 	return service, nil
+}
+
+func normalizeSandboxAppServiceRuntimeHooks(hooks []SandboxAppServiceRuntimeHook) ([]SandboxAppServiceRuntimeHook, error) {
+	if len(hooks) == 0 {
+		return nil, nil
+	}
+	if len(hooks) > maxSandboxServiceRuntimeHooks {
+		return nil, fmt.Errorf("exceeds limit %d", maxSandboxServiceRuntimeHooks)
+	}
+	out := make([]SandboxAppServiceRuntimeHook, 0, len(hooks))
+	for i, hook := range hooks {
+		normalized, err := normalizeSandboxAppServiceRuntimeHook(hook)
+		if err != nil {
+			return nil, fmt.Errorf("[%d]: %w", i, err)
+		}
+		out = append(out, normalized)
+	}
+	return out, nil
+}
+
+func normalizeSandboxAppServiceRuntimeHook(hook SandboxAppServiceRuntimeHook) (SandboxAppServiceRuntimeHook, error) {
+	hook.Name = strings.TrimSpace(hook.Name)
+	hook.Phase = strings.ToLower(strings.TrimSpace(hook.Phase))
+	if hook.Phase == "" {
+		return hook, fmt.Errorf("phase is required")
+	}
+	if hook.Phase != SandboxAppServiceRuntimeHookPhasePostClaim {
+		return hook, fmt.Errorf("phase must be post_claim")
+	}
+	if hook.HTTP == nil {
+		return hook, fmt.Errorf("http is required")
+	}
+	httpHook := *hook.HTTP
+	httpHook.Method = strings.ToUpper(strings.TrimSpace(httpHook.Method))
+	if httpHook.Method == "" {
+		httpHook.Method = http.MethodPost
+	}
+	if !httpMethodPattern.MatchString(httpHook.Method) {
+		return hook, fmt.Errorf("http.method is invalid")
+	}
+	httpHook.Path = normalizeGatewayPathPrefix(httpHook.Path)
+	if len(httpHook.Headers) > maxSandboxServiceAllowedValues {
+		return hook, fmt.Errorf("http.headers exceeds limit %d", maxSandboxServiceAllowedValues)
+	}
+	if len(httpHook.Headers) > 0 {
+		headers := make(map[string]string, len(httpHook.Headers))
+		for name, value := range httpHook.Headers {
+			name = http.CanonicalHeaderKey(strings.TrimSpace(name))
+			if name == "" {
+				return hook, fmt.Errorf("http.headers contains an empty name")
+			}
+			headers[name] = strings.TrimSpace(value)
+		}
+		httpHook.Headers = headers
+	}
+	if httpHook.TimeoutSeconds == 0 {
+		httpHook.TimeoutSeconds = defaultSandboxServiceHookTimeoutSecs
+	}
+	if httpHook.TimeoutSeconds < 0 || httpHook.TimeoutSeconds > maxSandboxServiceHookTimeoutSecs {
+		return hook, fmt.Errorf("http.timeout_seconds must be between 0 and %d", maxSandboxServiceHookTimeoutSecs)
+	}
+	hook.HTTP = &httpHook
+	return hook, nil
 }
 
 func SandboxAppServiceViews(services []SandboxAppService) []SandboxAppServiceView {

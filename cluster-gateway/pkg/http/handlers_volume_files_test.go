@@ -97,9 +97,19 @@ func newVolumeFileRouteTestServer(t *testing.T) (string, *internalauth.Generator
 			files.DELETE("", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), server.handleVolumeFileOperation)
 			files.GET("/watch", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), server.handleVolumeFileWatch)
 			files.POST("/move", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), server.handleVolumeFileMove)
+			files.POST("/archive", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), server.handleVolumeFileArchiveUpload)
 			files.GET("/stat", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), server.handleVolumeFileStat)
 			files.GET("/list", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), server.handleVolumeFileList)
 		}
+	}
+	artifacts := v1.Group("/artifacts")
+	artifacts.Use(server.storageProxyUpstreamMiddleware())
+	{
+		artifacts.POST("", server.authMiddleware.RequirePermission(gatewayauthn.PermArtifactCreate), server.createArtifact)
+		artifacts.GET("", server.authMiddleware.RequirePermission(gatewayauthn.PermArtifactRead), server.listArtifacts)
+		artifacts.GET("/:id", server.authMiddleware.RequirePermission(gatewayauthn.PermArtifactRead), server.getArtifact)
+		artifacts.DELETE("/:id", server.authMiddleware.RequirePermission(gatewayauthn.PermArtifactDelete), server.deleteArtifact)
+		artifacts.POST("/:id/volume", server.authMiddleware.RequirePermission(gatewayauthn.PermArtifactRead), server.createArtifactVolume)
 	}
 
 	gateway := httptest.NewServer(server.router)
@@ -108,6 +118,86 @@ func newVolumeFileRouteTestServer(t *testing.T) (string, *internalauth.Generator
 		storageProxy.Close()
 	}
 	return gateway.URL, incomingGen, storageSpy, cleanup
+}
+
+func TestArtifactRoutesProxyToStorageProxy(t *testing.T) {
+	gatewayURL, incomingGen, storageSpy, cleanup := newVolumeFileRouteTestServer(t)
+	defer cleanup()
+
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		body       string
+		permission string
+		wantPath   string
+	}{
+		{
+			name:       "create artifact",
+			method:     http.MethodPost,
+			path:       "/api/v1/artifacts",
+			body:       `{"name":"bundle"}`,
+			permission: gatewayauthn.PermArtifactCreate,
+			wantPath:   "/artifacts",
+		},
+		{
+			name:       "list artifacts",
+			method:     http.MethodGet,
+			path:       "/api/v1/artifacts",
+			permission: gatewayauthn.PermArtifactRead,
+			wantPath:   "/artifacts",
+		},
+		{
+			name:       "get artifact",
+			method:     http.MethodGet,
+			path:       "/api/v1/artifacts/artifact-1",
+			permission: gatewayauthn.PermArtifactRead,
+			wantPath:   "/artifacts/artifact-1",
+		},
+		{
+			name:       "delete artifact",
+			method:     http.MethodDelete,
+			path:       "/api/v1/artifacts/artifact-1",
+			permission: gatewayauthn.PermArtifactDelete,
+			wantPath:   "/artifacts/artifact-1",
+		},
+		{
+			name:       "create artifact volume",
+			method:     http.MethodPost,
+			path:       "/api/v1/artifacts/artifact-1/volume",
+			body:       `{"access_mode":"ROX"}`,
+			permission: gatewayauthn.PermArtifactRead,
+			wantPath:   "/artifacts/artifact-1/volume",
+		},
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequest(tt.method, gatewayURL+tt.path, strings.NewReader(tt.body))
+			if err != nil {
+				t.Fatalf("new request: %v", err)
+			}
+			req.Header.Set(internalauth.DefaultTokenHeader, newStorageProxyRouteInternalToken(t, incomingGen, tt.permission))
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("do request: %v", err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+			}
+			if storageSpy.method != tt.method {
+				t.Fatalf("method = %s, want %s", storageSpy.method, tt.method)
+			}
+			if storageSpy.path != tt.wantPath {
+				t.Fatalf("path = %s, want %s", storageSpy.path, tt.wantPath)
+			}
+			if storageSpy.token == "" {
+				t.Fatal("expected internal storage-proxy token")
+			}
+		})
+	}
 }
 
 func newStorageProxyRouteInternalToken(t *testing.T, gen *internalauth.Generator, permissions ...string) string {
@@ -170,6 +260,16 @@ func TestVolumeFileRoutesProxyToStorageProxy(t *testing.T) {
 			permission:   gatewayauthn.PermSandboxVolumeFileWrite,
 			wantPath:     "/sandboxvolumes/vol-1/files/move",
 			wantBodyPart: "/b.txt",
+		},
+		{
+			name:         "archive upload proxies body",
+			method:       http.MethodPost,
+			path:         "/api/v1/sandboxvolumes/vol-1/files/archive?path=/workspace&overwrite=true",
+			body:         "archive-body",
+			permission:   gatewayauthn.PermSandboxVolumeFileWrite,
+			wantPath:     "/sandboxvolumes/vol-1/files/archive",
+			wantQuery:    "path=/workspace&overwrite=true",
+			wantBodyPart: "archive-body",
 		},
 		{
 			name:       "stat preserves query",

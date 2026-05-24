@@ -184,7 +184,7 @@ func RestoreMountsFromRevisionMounts(mounts []FunctionRevisionMount) []RestoreMo
 	}
 	out := make([]RestoreMount, 0, len(mounts))
 	for _, mount := range mounts {
-		if mount.Source.Type != FunctionRevisionMountSourceSandboxVolume || strings.TrimSpace(mount.Source.SandboxVolumeID) == "" {
+		if strings.TrimSpace(mount.Source.SandboxVolumeID) == "" {
 			continue
 		}
 		out = append(out, RestoreMount{
@@ -214,8 +214,8 @@ func (s FunctionRevisionSpec) Validate() error {
 				return fmt.Errorf("revision_spec.mounts[%d].source.sandboxvolume_id is required", i)
 			}
 		case FunctionRevisionMountSourceArtifact:
-			if strings.TrimSpace(mount.Source.SandboxVolumeID) == "" {
-				return fmt.Errorf("revision_spec.mounts[%d].source.sandboxvolume_id is required for artifact mounts", i)
+			if strings.TrimSpace(mount.Source.ArtifactID) == "" {
+				return fmt.Errorf("revision_spec.mounts[%d].source.artifact_id is required", i)
 			}
 		case FunctionRevisionMountSourceVolumeSnapshot:
 			if strings.TrimSpace(mount.Source.SnapshotID) == "" {

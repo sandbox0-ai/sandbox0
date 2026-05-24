@@ -21,6 +21,7 @@ tags:
   - name: templates
   - name: registry
   - name: sandbox-volumes
+  - name: artifacts
   - name: snapshots
 paths:
   /healthz:
@@ -2759,6 +2760,103 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/artifacts:
+    post:
+      tags: [artifacts]
+      summary: Create artifact from a sandbox volume
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /artifacts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateArtifactRequest"
+      responses:
+        "201":
+          description: Artifact created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessArtifactResponse"
+    get:
+      tags: [artifacts]
+      summary: List artifacts
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /artifacts
+      responses:
+        "200":
+          description: Artifact list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessArtifactListResponse"
+  /api/v1/artifacts/{id}:
+    get:
+      tags: [artifacts]
+      summary: Get artifact
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /artifacts/{id}
+      parameters:
+        - $ref: "#/components/parameters/ArtifactID"
+      responses:
+        "200":
+          description: Artifact
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessArtifactResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+    delete:
+      tags: [artifacts]
+      summary: Delete artifact
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /artifacts/{id}
+      parameters:
+        - $ref: "#/components/parameters/ArtifactID"
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessDeletedResponse"
+  /api/v1/artifacts/{id}/volume:
+    post:
+      tags: [artifacts]
+      summary: Create a sandbox volume from artifact contents
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /artifacts/{id}/volume
+      parameters:
+        - $ref: "#/components/parameters/ArtifactID"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateArtifactVolumeRequest"
+      responses:
+        "201":
+          description: Volume created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessSandboxVolumeResponse"
   /api/v1/sandboxvolumes/{id}/files/move:
     post:
       tags: [files]
@@ -2782,6 +2880,46 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessMovedResponse"
+  /api/v1/sandboxvolumes/{id}/files/archive:
+    post:
+      tags: [files]
+      summary: Upload a tar archive into a sandbox volume
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /sandboxvolumes/{id}/files/archive
+      parameters:
+        - $ref: "#/components/parameters/SandboxVolumeID"
+        - name: path
+          in: query
+          required: false
+          schema:
+            type: string
+            default: /
+        - $ref: "#/components/parameters/QueryArchiveFormat"
+        - $ref: "#/components/parameters/QueryOverwrite"
+      requestBody:
+        required: true
+        content:
+          application/gzip:
+            schema:
+              type: string
+              format: binary
+          application/x-tar:
+            schema:
+              type: string
+              format: binary
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "201":
+          description: Archive imported
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessVolumeArchiveUploadResponse"
   /api/v1/sandboxvolumes/{id}/files/watch:
     get:
       tags: [files]
@@ -3092,6 +3230,12 @@ components:
       required: true
       schema:
         type: string
+    ArtifactID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
     SnapshotID:
       name: snapshot_id
       in: path
@@ -3134,6 +3278,21 @@ components:
       required: false
       schema:
         type: boolean
+    QueryOverwrite:
+      name: overwrite
+      in: query
+      required: false
+      schema:
+        type: boolean
+        default: false
+    QueryArchiveFormat:
+      name: format
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [tar.gz, tar]
+        default: tar.gz
   schemas:
     Error:
       type: object
@@ -4030,7 +4189,45 @@ components:
         warm_process_name:
           type: string
           description: Warm process alias or context ID used when type is warm_process. Function runtimes require this to reference an existing cmd warm process.
+        hooks:
+          type: array
+          description: Blocking runtime lifecycle hooks executed by Function Gateway.
+          items:
+            $ref: "#/components/schemas/SandboxAppServiceRuntimeHook"
+        skip_readiness_check:
+          type: boolean
+          default: false
+          description: Skip Function Gateway runtime readiness probing after runtime hooks complete.
       required: [type]
+    SandboxAppServiceRuntimeHook:
+      type: object
+      properties:
+        name:
+          type: string
+        phase:
+          type: string
+          enum: [post_claim]
+        http:
+          $ref: "#/components/schemas/SandboxAppServiceRuntimeHTTPHook"
+      required: [phase, http]
+    SandboxAppServiceRuntimeHTTPHook:
+      type: object
+      properties:
+        method:
+          type: string
+          default: POST
+        path:
+          type: string
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        timeout_seconds:
+          type: integer
+          format: int32
+          default: 30
+          maximum: 300
+      required: [path]
     SandboxAppServiceIngress:
       type: object
       properties:
@@ -4366,7 +4563,7 @@ components:
           description: Immutable snapshot used to materialize this mount.
         artifact_id:
           type: string
-          description: Future first-class Function artifact ID.
+          description: Artifact ID used to materialize this mount during revision publish.
         digest:
           type: string
           description: Content digest for artifact-backed sources.
@@ -5374,6 +5571,32 @@ components:
                   type: array
                   items:
                     $ref: "#/components/schemas/FileInfo"
+    VolumeArchiveUploadResult:
+      type: object
+      properties:
+        files:
+          type: integer
+          format: int32
+        dirs:
+          type: integer
+          format: int32
+        symlinks:
+          type: integer
+          format: int32
+        bytes:
+          type: integer
+          format: int64
+        overwrote:
+          type: integer
+          format: int32
+      required: [files, dirs, symlinks, bytes, overwrote]
+    SuccessVolumeArchiveUploadResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/VolumeArchiveUploadResult"
     MoveFileRequest:
       type: object
       properties:
@@ -5588,6 +5811,108 @@ components:
         access_mode:
           $ref: "#/components/schemas/VolumeAccessMode"
           description: Access mode for the volume. Defaults to RWO when omitted.
+    CreateArtifactRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Human-readable artifact name. Defaults to the generated artifact ID when omitted.
+        kind:
+          type: string
+          default: generic
+          description: Application-defined artifact kind.
+        media_type:
+          type: string
+          default: application/octet-stream
+        digest:
+          type: string
+          description: Optional content digest supplied by the caller.
+        source:
+          $ref: "#/components/schemas/CreateArtifactSource"
+        metadata:
+          type: object
+          additionalProperties: true
+      required: [source]
+    CreateArtifactSource:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [sandbox_volume]
+          default: sandbox_volume
+        sandboxvolume_id:
+          type: string
+      required: [type, sandboxvolume_id]
+    CreateArtifactVolumeRequest:
+      type: object
+      properties:
+        access_mode:
+          $ref: "#/components/schemas/VolumeAccessMode"
+          description: Access mode for the materialized volume. Defaults to ROX when omitted.
+        default_posix_uid:
+          type: integer
+          format: int64
+          minimum: 0
+          default: 0
+        default_posix_gid:
+          type: integer
+          format: int64
+          minimum: 0
+          default: 0
+    Artifact:
+      type: object
+      properties:
+        id:
+          type: string
+        team_id:
+          type: string
+        user_id:
+          type: string
+        name:
+          type: string
+        kind:
+          type: string
+        media_type:
+          type: string
+        digest:
+          type: string
+        source_volume_id:
+          type: string
+        snapshot_id:
+          type: string
+        size_bytes:
+          type: integer
+          format: int64
+        metadata:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required: [id, team_id, user_id, name, kind, media_type, source_volume_id, snapshot_id, size_bytes, created_at, updated_at]
+    SuccessArtifactResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/Artifact"
+    SuccessArtifactListResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                artifacts:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Artifact"
+              required: [artifacts]
     SandboxVolume:
       type: object
       properties:

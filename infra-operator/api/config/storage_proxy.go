@@ -123,10 +123,10 @@ type StorageProxyConfig struct {
 
 	// Timeouts
 	// +optional
-	// +kubebuilder:default="15s"
+	// +kubebuilder:default="5m"
 	HTTPReadTimeout string `yaml:"http_read_timeout" json:"httpReadTimeout"`
 	// +optional
-	// +kubebuilder:default="15s"
+	// +kubebuilder:default="5m"
 	HTTPWriteTimeout string `yaml:"http_write_timeout" json:"httpWriteTimeout"`
 	// +optional
 	// +kubebuilder:default="60s"

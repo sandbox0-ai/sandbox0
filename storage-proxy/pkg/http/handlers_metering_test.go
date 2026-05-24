@@ -24,6 +24,7 @@ import (
 type fakeHTTPRepo struct {
 	mu             sync.RWMutex
 	volumes        map[string]*db.SandboxVolume
+	artifacts      map[string]*db.Artifact
 	owners         map[string]*db.SandboxVolumeOwner
 	activeMounts   map[string][]*db.VolumeMount
 	handoffs       map[string]*db.VolumeHandoff
@@ -36,6 +37,7 @@ type fakeHTTPRepo struct {
 func newFakeHTTPRepo() *fakeHTTPRepo {
 	return &fakeHTTPRepo{
 		volumes:      make(map[string]*db.SandboxVolume),
+		artifacts:    make(map[string]*db.Artifact),
 		owners:       make(map[string]*db.SandboxVolumeOwner),
 		activeMounts: make(map[string][]*db.VolumeMount),
 		handoffs:     make(map[string]*db.VolumeHandoff),
@@ -112,6 +114,48 @@ func (r *fakeHTTPRepo) GetOwnedSandboxVolumeByOwner(ctx context.Context, cluster
 		}
 	}
 	return nil, db.ErrNotFound
+}
+
+func (r *fakeHTTPRepo) CreateArtifactTx(ctx context.Context, tx pgx.Tx, artifact *db.Artifact) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	copy := *artifact
+	r.artifacts[artifact.ID] = &copy
+	return nil
+}
+
+func (r *fakeHTTPRepo) ListArtifactsByTeam(ctx context.Context, teamID string) ([]*db.Artifact, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var artifacts []*db.Artifact
+	for _, artifact := range r.artifacts {
+		if artifact.TeamID == teamID {
+			copy := *artifact
+			artifacts = append(artifacts, &copy)
+		}
+	}
+	return artifacts, nil
+}
+
+func (r *fakeHTTPRepo) GetArtifact(ctx context.Context, id string) (*db.Artifact, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	artifact := r.artifacts[id]
+	if artifact == nil {
+		return nil, db.ErrNotFound
+	}
+	copy := *artifact
+	return &copy, nil
+}
+
+func (r *fakeHTTPRepo) DeleteArtifactTx(ctx context.Context, tx pgx.Tx, id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.artifacts[id] == nil {
+		return db.ErrNotFound
+	}
+	delete(r.artifacts, id)
+	return nil
 }
 
 func (r *fakeHTTPRepo) GetActiveMounts(ctx context.Context, volumeID string, heartbeatTimeout int) ([]*db.VolumeMount, error) {

@@ -481,6 +481,7 @@ func (s *Server) setupRoutes() {
 				files.DELETE("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), s.handleVolumeFileOperation)
 				files.GET("/watch", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), s.handleVolumeFileWatch)
 				files.POST("/move", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), s.handleVolumeFileMove)
+				files.POST("/archive", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), s.handleVolumeFileArchiveUpload)
 				files.GET("/stat", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), s.handleVolumeFileStat)
 				files.GET("/list", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), s.handleVolumeFileList)
 			}
@@ -494,6 +495,17 @@ func (s *Server) setupRoutes() {
 				snapshots.DELETE("/:snapshot_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeDelete), s.deleteSandboxVolumeSnapshot)
 			}
 
+		}
+
+		// === Artifact Management (→ Storage Proxy) ===
+		artifacts := v1.Group("/artifacts")
+		artifacts.Use(s.storageProxyUpstreamMiddleware())
+		{
+			artifacts.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermArtifactCreate), s.createArtifact)
+			artifacts.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermArtifactRead), s.listArtifacts)
+			artifacts.GET("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermArtifactRead), s.getArtifact)
+			artifacts.DELETE("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermArtifactDelete), s.deleteArtifact)
+			artifacts.POST("/:id/volume", s.authMiddleware.RequirePermission(gatewayauthn.PermArtifactRead), s.createArtifactVolume)
 		}
 	}
 

@@ -138,6 +138,7 @@ type fakeHTTPVolumeFileRPC struct {
 	writeFunc      func(context.Context, *pb.WriteRequest) (*pb.WriteResponse, error)
 	createFunc     func(context.Context, *pb.CreateRequest) (*pb.NodeResponse, error)
 	mkdirFunc      func(context.Context, *pb.MkdirRequest) (*pb.NodeResponse, error)
+	symlinkFunc    func(context.Context, *pb.SymlinkRequest) (*pb.NodeResponse, error)
 	unlinkFunc     func(context.Context, *pb.UnlinkRequest) (*pb.Empty, error)
 	rmdirFunc      func(context.Context, *pb.RmdirRequest) (*pb.Empty, error)
 	readDirFunc    func(context.Context, *pb.ReadDirRequest) (*pb.ReadDirResponse, error)
@@ -211,6 +212,13 @@ func (f *fakeHTTPVolumeFileRPC) Create(ctx context.Context, req *pb.CreateReques
 func (f *fakeHTTPVolumeFileRPC) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb.NodeResponse, error) {
 	if f.mkdirFunc != nil {
 		return f.mkdirFunc(ctx, req)
+	}
+	return nil, nil
+}
+
+func (f *fakeHTTPVolumeFileRPC) Symlink(ctx context.Context, req *pb.SymlinkRequest) (*pb.NodeResponse, error) {
+	if f.symlinkFunc != nil {
+		return f.symlinkFunc(ctx, req)
 	}
 	return nil, nil
 }

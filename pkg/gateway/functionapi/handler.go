@@ -42,6 +42,10 @@ type RevisionVolumeStore interface {
 	DeleteRestoreMounts(ctx context.Context, authCtx *authn.AuthContext, sandbox *mgr.Sandbox, mounts []functions.RestoreMount) error
 }
 
+type RevisionArtifactStore interface {
+	PrepareArtifactMounts(ctx context.Context, authCtx *authn.AuthContext, revisionSpec functions.FunctionRevisionSpec, metadata functionruntime.Metadata) ([]functions.FunctionRevisionMount, []functions.RestoreMount, error)
+}
+
 type RuntimeController interface {
 	DeleteRuntimeSandbox(ctx context.Context, authCtx *authn.AuthContext, sandboxID string) error
 }
@@ -637,19 +641,40 @@ func (h *Handler) prepareRevisionFromSource(ctx context.Context, authCtx *authn.
 		if source.RevisionSpec == nil {
 			return nil, "", nil, publishError{status: http.StatusBadRequest, code: spec.CodeBadRequest, message: "source.revision_spec is required"}
 		}
-		serviceSnapshot, err := validatePublishableRevisionSpec(*source.RevisionSpec)
+		revisionSpec := *source.RevisionSpec
+		var preparedMounts []functions.RestoreMount
+		if artifactStore, ok := h.volumeStore.(RevisionArtifactStore); ok {
+			mounts, cleanupMounts, err := artifactStore.PrepareArtifactMounts(ctx, authCtx, revisionSpec, storageMetadata)
+			if err != nil {
+				h.logger.Warn("Failed to prepare function artifact mounts", zap.Error(err))
+				return nil, "", nil, publishError{status: http.StatusServiceUnavailable, code: spec.CodeUnavailable, message: "failed to prepare function artifact mounts"}
+			}
+			revisionSpec.Mounts = mounts
+			preparedMounts = cleanupMounts
+		} else if revisionSpecHasArtifactMount(revisionSpec) {
+			return nil, "", nil, publishError{status: http.StatusServiceUnavailable, code: spec.CodeUnavailable, message: "function artifact volume store is not configured"}
+		}
+		cleanup := func() {
+			h.deletePreparedRestoreMounts(context.Background(), authCtx, nil, preparedMounts, "revision create failed")
+		}
+		serviceSnapshot, err := validatePublishableRevisionSpec(revisionSpec)
 		if err != nil {
+			cleanup()
 			return nil, "", nil, err
 		}
 		provenance := any(functions.RevisionProvenance{Type: functions.RevisionSourceTypeRevisionSpec})
 		if len(source.Provenance) > 0 {
 			provenance = source.Provenance
 		}
-		rev, err := functions.NewRevisionFromSpec(authCtx.TeamID, functions.RevisionSourceTypeRevisionSpec, *source.RevisionSpec, provenance, principalID(authCtx))
+		rev, err := functions.NewRevisionFromSpec(authCtx.TeamID, functions.RevisionSourceTypeRevisionSpec, revisionSpec, provenance, principalID(authCtx))
 		if err != nil {
+			cleanup()
 			return nil, "", nil, publishError{status: http.StatusBadRequest, code: spec.CodeBadRequest, message: err.Error()}
 		}
-		return rev, defaultFunctionName(serviceSnapshot), nil, nil
+		if len(preparedMounts) == 0 {
+			return rev, defaultFunctionName(serviceSnapshot), nil, nil
+		}
+		return rev, defaultFunctionName(serviceSnapshot), cleanup, nil
 	default:
 		return nil, "", nil, publishError{status: http.StatusBadRequest, code: spec.CodeBadRequest, message: "source.type is invalid"}
 	}
@@ -679,6 +704,15 @@ func normalizeSandboxServiceSource(source functionSourceRequest) sandboxServiceS
 		}
 	}
 	return out
+}
+
+func revisionSpecHasArtifactMount(revisionSpec functions.FunctionRevisionSpec) bool {
+	for _, mount := range revisionSpec.Mounts {
+		if mount.Source.Type == functions.FunctionRevisionMountSourceArtifact {
+			return true
+		}
+	}
+	return false
 }
 
 func validatePublishableRevisionSpec(revisionSpec functions.FunctionRevisionSpec) (mgr.SandboxAppService, error) {
@@ -786,8 +820,12 @@ func (h *Handler) deletePreparedRestoreMounts(ctx context.Context, authCtx *auth
 		return
 	}
 	if err := h.volumeStore.DeleteRestoreMounts(ctx, authCtx, sandbox, mounts); err != nil {
+		sandboxID := ""
+		if sandbox != nil {
+			sandboxID = sandbox.ID
+		}
 		h.logger.Warn("Failed to clean up prepared function restore mounts",
-			zap.String("sandbox_id", sandbox.ID),
+			zap.String("sandbox_id", sandboxID),
 			zap.String("reason", reason),
 			zap.Error(err),
 		)

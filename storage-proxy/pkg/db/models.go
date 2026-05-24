@@ -77,6 +77,23 @@ type Snapshot struct {
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
+// Artifact is an immutable, team-owned deployable or data bundle.
+type Artifact struct {
+	ID             string          `json:"id"`
+	TeamID         string          `json:"team_id"`
+	UserID         string          `json:"user_id"`
+	Name           string          `json:"name"`
+	Kind           string          `json:"kind"`
+	MediaType      string          `json:"media_type"`
+	Digest         string          `json:"digest,omitempty"`
+	SourceVolumeID string          `json:"source_volume_id"`
+	SnapshotID     string          `json:"snapshot_id"`
+	SizeBytes      int64           `json:"size_bytes"`
+	Metadata       json.RawMessage `json:"metadata,omitempty"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+}
+
 // VolumeMount represents a volume mount point for cross-cluster coordination
 type VolumeMount struct {
 	ID        string `json:"id"`

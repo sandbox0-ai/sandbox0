@@ -744,6 +744,151 @@ func TestStartFunctionServiceRuntimeWarmProcessUsesExistingCMDContext(t *testing
 	}
 }
 
+func TestEnsureFunctionServiceRuntimeRunsPostClaimHookAndSkipsReadiness(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate keypair: %v", err)
+	}
+	var startCalled atomic.Bool
+	var hookCalled atomic.Bool
+	clusterGateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/sandboxes/sb_test/contexts":
+			if r.Method != http.MethodPost {
+				t.Errorf("start method = %s, want POST", r.Method)
+			}
+			startCalled.Store(true)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"ctx-new","type":"cmd","running":true}`))
+		case "/internal/v1/functions/runtime/sandboxes/sb_test/services/api/proxy/runtime/init":
+			if r.Method != http.MethodPost {
+				t.Errorf("hook method = %s, want POST", r.Method)
+			}
+			if got := r.Header.Get("X-Hook"); got != "init" {
+				t.Errorf("X-Hook = %q, want init", got)
+			}
+			var payload functionRuntimeHookPayload
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Errorf("decode hook payload: %v", err)
+			}
+			if payload.Phase != mgr.SandboxAppServiceRuntimeHookPhasePostClaim || payload.FunctionID != "fn-1" || payload.FunctionRevision != "rev-1" || payload.RuntimeContextID != "ctx-new" {
+				t.Errorf("hook payload = %+v, want runtime metadata", payload)
+			}
+			hookCalled.Store(true)
+			w.WriteHeader(http.StatusNoContent)
+		case "/internal/v1/functions/runtime/sandboxes/sb_test/services/api/readiness":
+			t.Error("readiness should not be called when skip_readiness_check is true")
+			http.Error(w, "unexpected readiness", http.StatusInternalServerError)
+		default:
+			t.Errorf("unexpected path = %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer clusterGateway.Close()
+	server := &Server{
+		cfg: &config.FunctionGatewayConfig{
+			DefaultClusterGatewayURL: clusterGateway.URL,
+		},
+		internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{
+			Caller:     internalauth.ServiceFunctionGateway,
+			PrivateKey: privateKey,
+			TTL:        time.Minute,
+		}),
+		httpClient: clusterGateway.Client(),
+		logger:     zap.NewNop(),
+	}
+
+	contextID, err := server.ensureFunctionServiceRuntime(context.Background(),
+		&functions.Function{ID: "fn-1", TeamID: "team-1"},
+		&functions.Revision{ID: "rev-1", TeamID: "team-1", CreatedBy: "user-1"},
+		&mgr.Sandbox{ID: "sb_test"},
+		mgr.SandboxAppService{
+			ID: "api",
+			Runtime: &mgr.SandboxAppServiceRuntime{
+				Type:               mgr.SandboxAppServiceRuntimeCMD,
+				Command:            []string{"node", "server.js"},
+				SkipReadinessCheck: true,
+				Hooks: []mgr.SandboxAppServiceRuntimeHook{{
+					Name:  "init",
+					Phase: mgr.SandboxAppServiceRuntimeHookPhasePostClaim,
+					HTTP: &mgr.SandboxAppServiceRuntimeHTTPHook{
+						Method:         http.MethodPost,
+						Path:           "/runtime/init",
+						Headers:        map[string]string{"X-Hook": "init"},
+						TimeoutSeconds: 1,
+					},
+				}},
+			},
+		})
+	if err != nil {
+		t.Fatalf("ensureFunctionServiceRuntime() error = %v", err)
+	}
+	if contextID != "ctx-new" {
+		t.Fatalf("contextID = %q, want ctx-new", contextID)
+	}
+	if !startCalled.Load() || !hookCalled.Load() {
+		t.Fatalf("startCalled=%v hookCalled=%v, want both", startCalled.Load(), hookCalled.Load())
+	}
+}
+
+func TestRunFunctionRuntimeHTTPHookRetriesUpstreamUnavailable(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate keypair: %v", err)
+	}
+	var attempts atomic.Int32
+	clusterGateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/v1/functions/runtime/sandboxes/sb_test/services/api/proxy/runtime/init" {
+			t.Errorf("unexpected path = %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		if got := attempts.Add(1); got == 1 {
+			http.Error(w, `{"error":"upstream service unavailable"}`, http.StatusBadGateway)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer clusterGateway.Close()
+	server := &Server{
+		cfg: &config.FunctionGatewayConfig{
+			DefaultClusterGatewayURL: clusterGateway.URL,
+		},
+		internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{
+			Caller:     internalauth.ServiceFunctionGateway,
+			PrivateKey: privateKey,
+			TTL:        time.Minute,
+		}),
+		httpClient: clusterGateway.Client(),
+		logger:     zap.NewNop(),
+	}
+
+	err = server.runFunctionRuntimeHTTPHook(context.Background(),
+		&functions.Function{ID: "fn-1", TeamID: "team-1"},
+		&functions.Revision{ID: "rev-1", TeamID: "team-1", CreatedBy: "user-1"},
+		"sb_test",
+		mgr.SandboxAppService{
+			ID: "api",
+		},
+		"ctx-new",
+		mgr.SandboxAppServiceRuntimeHook{
+			Name:  "init",
+			Phase: mgr.SandboxAppServiceRuntimeHookPhasePostClaim,
+			HTTP: &mgr.SandboxAppServiceRuntimeHTTPHook{
+				Method:         http.MethodPost,
+				Path:           "/runtime/init",
+				TimeoutSeconds: 2,
+			},
+		})
+	if err != nil {
+		t.Fatalf("runFunctionRuntimeHTTPHook() error = %v", err)
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("attempts = %d, want 2", got)
+	}
+}
+
 func TestClaimMountsFromRevisionUsesPreparedVolume(t *testing.T) {
 	server := &Server{}
 	mounts, err := server.claimMountsFromRevision(&functions.Revision{

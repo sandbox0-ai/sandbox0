@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -18,6 +19,13 @@ import (
 func (s *Server) resolveFunctionClusterGatewayURL(ctx context.Context, sandboxID string) (string, error) {
 	if s.schedulerRouter == nil {
 		return strings.TrimRight(strings.TrimSpace(s.cfg.DefaultClusterGatewayURL), "/"), nil
+	}
+	if strings.TrimSpace(sandboxID) == "" {
+		clusterGatewayURL := strings.TrimRight(strings.TrimSpace(s.cfg.DefaultClusterGatewayURL), "/")
+		if clusterGatewayURL == "" {
+			return "", fmt.Errorf("cluster gateway is not configured")
+		}
+		return clusterGatewayURL, nil
 	}
 	parsed, err := naming.ParseSandboxName(sandboxID)
 	if err != nil {

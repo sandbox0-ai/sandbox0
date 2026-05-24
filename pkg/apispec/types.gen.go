@@ -21,6 +21,11 @@ const (
 	AddTeamMemberRequestRoleViewer    AddTeamMemberRequestRole = "viewer"
 )
 
+// Defines values for CreateArtifactSourceType.
+const (
+	CreateArtifactSourceTypeSandboxVolume CreateArtifactSourceType = "sandbox_volume"
+)
+
 // Defines values for CredentialProjectionType.
 const (
 	HttpHeaders          CredentialProjectionType = "http_headers"
@@ -201,6 +206,11 @@ const (
 	SandboxAppServiceRuntimeTypeWarmProcess SandboxAppServiceRuntimeType = "warm_process"
 )
 
+// Defines values for SandboxAppServiceRuntimeHookPhase.
+const (
+	PostClaim SandboxAppServiceRuntimeHookPhase = "post_claim"
+)
+
 // Defines values for SandboxNetworkPolicyMode.
 const (
 	AllowAll SandboxNetworkPolicyMode = "allow-all"
@@ -238,6 +248,16 @@ const (
 // Defines values for SuccessAPIKeyListResponseSuccess.
 const (
 	SuccessAPIKeyListResponseSuccessTrue SuccessAPIKeyListResponseSuccess = true
+)
+
+// Defines values for SuccessArtifactListResponseSuccess.
+const (
+	SuccessArtifactListResponseSuccessTrue SuccessArtifactListResponseSuccess = true
+)
+
+// Defines values for SuccessArtifactResponseSuccess.
+const (
+	SuccessArtifactResponseSuccessTrue SuccessArtifactResponseSuccess = true
 )
 
 // Defines values for SuccessAuthProvidersResponseSuccess.
@@ -535,9 +555,14 @@ const (
 	SuccessUserResponseSuccessTrue SuccessUserResponseSuccess = true
 )
 
+// Defines values for SuccessVolumeArchiveUploadResponseSuccess.
+const (
+	SuccessVolumeArchiveUploadResponseSuccessTrue SuccessVolumeArchiveUploadResponseSuccess = true
+)
+
 // Defines values for SuccessWrittenResponseSuccess.
 const (
-	True SuccessWrittenResponseSuccess = true
+	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
 )
 
 // Defines values for TrafficRuleAction.
@@ -581,6 +606,12 @@ const (
 	WarmProcessSpecTypeRepl WarmProcessSpecType = "repl"
 )
 
+// Defines values for QueryArchiveFormat.
+const (
+	QueryArchiveFormatTar   QueryArchiveFormat = "tar"
+	QueryArchiveFormatTarGz QueryArchiveFormat = "tar.gz"
+)
+
 // Defines values for GetApiV1SandboxesParamsStatus.
 const (
 	GetApiV1SandboxesParamsStatusCompleted   GetApiV1SandboxesParamsStatus = "completed"
@@ -588,6 +619,12 @@ const (
 	GetApiV1SandboxesParamsStatusRunning     GetApiV1SandboxesParamsStatus = "running"
 	GetApiV1SandboxesParamsStatusStarting    GetApiV1SandboxesParamsStatus = "starting"
 	GetApiV1SandboxesParamsStatusTerminating GetApiV1SandboxesParamsStatus = "terminating"
+)
+
+// Defines values for PostApiV1SandboxvolumesIdFilesArchiveParamsFormat.
+const (
+	PostApiV1SandboxvolumesIdFilesArchiveParamsFormatTar   PostApiV1SandboxvolumesIdFilesArchiveParamsFormat = "tar"
+	PostApiV1SandboxvolumesIdFilesArchiveParamsFormatTarGz PostApiV1SandboxvolumesIdFilesArchiveParamsFormat = "tar.gz"
 )
 
 // APIKey defines model for APIKey.
@@ -623,6 +660,23 @@ type AddTeamMemberRequestRole string
 type Affinity struct {
 	NodeAffinity *NodeAffinity `json:"nodeAffinity,omitempty"`
 	PodAffinity  *PodAffinity  `json:"podAffinity,omitempty"`
+}
+
+// Artifact defines model for Artifact.
+type Artifact struct {
+	CreatedAt      time.Time               `json:"created_at"`
+	Digest         *string                 `json:"digest,omitempty"`
+	Id             string                  `json:"id"`
+	Kind           string                  `json:"kind"`
+	MediaType      string                  `json:"media_type"`
+	Metadata       *map[string]interface{} `json:"metadata,omitempty"`
+	Name           string                  `json:"name"`
+	SizeBytes      int64                   `json:"size_bytes"`
+	SnapshotId     string                  `json:"snapshot_id"`
+	SourceVolumeId string                  `json:"source_volume_id"`
+	TeamId         string                  `json:"team_id"`
+	UpdatedAt      time.Time               `json:"updated_at"`
+	UserId         string                  `json:"user_id"`
 }
 
 // AuthProvider defines model for AuthProvider.
@@ -759,6 +813,38 @@ type CreateAPIKeyResponse struct {
 	Roles     []string  `json:"roles"`
 	Scope     string    `json:"scope"`
 	TeamId    string    `json:"team_id"`
+}
+
+// CreateArtifactRequest defines model for CreateArtifactRequest.
+type CreateArtifactRequest struct {
+	// Digest Optional content digest supplied by the caller.
+	Digest *string `json:"digest,omitempty"`
+
+	// Kind Application-defined artifact kind.
+	Kind      *string                 `json:"kind,omitempty"`
+	MediaType *string                 `json:"media_type,omitempty"`
+	Metadata  *map[string]interface{} `json:"metadata,omitempty"`
+
+	// Name Human-readable artifact name. Defaults to the generated artifact ID when omitted.
+	Name   *string              `json:"name,omitempty"`
+	Source CreateArtifactSource `json:"source"`
+}
+
+// CreateArtifactSource defines model for CreateArtifactSource.
+type CreateArtifactSource struct {
+	SandboxvolumeId string                   `json:"sandboxvolume_id"`
+	Type            CreateArtifactSourceType `json:"type"`
+}
+
+// CreateArtifactSourceType defines model for CreateArtifactSource.Type.
+type CreateArtifactSourceType string
+
+// CreateArtifactVolumeRequest defines model for CreateArtifactVolumeRequest.
+type CreateArtifactVolumeRequest struct {
+	// AccessMode Access mode for sandbox volumes. Enforcement is scoped to storage-proxy instances. RWO allows read-write mounts on a single instance; ROX allows read-only mounts across instances; RWX allows read-write mounts across instances.
+	AccessMode      *VolumeAccessMode `json:"access_mode,omitempty"`
+	DefaultPosixGid *int64            `json:"default_posix_gid,omitempty"`
+	DefaultPosixUid *int64            `json:"default_posix_uid,omitempty"`
 }
 
 // CreateCMDContextRequest defines model for CreateCMDContextRequest.
@@ -1200,7 +1286,7 @@ type FunctionRevisionMountMode string
 
 // FunctionRevisionMountSource defines model for FunctionRevisionMountSource.
 type FunctionRevisionMountSource struct {
-	// ArtifactId Future first-class Function artifact ID.
+	// ArtifactId Artifact ID used to materialize this mount during revision publish.
 	ArtifactId *string `json:"artifact_id,omitempty"`
 
 	// Digest Content digest for artifact-backed sources.
@@ -1926,6 +2012,12 @@ type SandboxAppServiceRuntime struct {
 	Cwd     *string            `json:"cwd,omitempty"`
 	EnvVars *map[string]string `json:"env_vars,omitempty"`
 
+	// Hooks Blocking runtime lifecycle hooks executed by Function Gateway.
+	Hooks *[]SandboxAppServiceRuntimeHook `json:"hooks,omitempty"`
+
+	// SkipReadinessCheck Skip Function Gateway runtime readiness probing after runtime hooks complete.
+	SkipReadinessCheck *bool `json:"skip_readiness_check,omitempty"`
+
 	// Type Runtime strategy for restarting a service when it is restored as a function runtime.
 	Type SandboxAppServiceRuntimeType `json:"type"`
 
@@ -1935,6 +2027,24 @@ type SandboxAppServiceRuntime struct {
 
 // SandboxAppServiceRuntimeType Runtime strategy for restarting a service when it is restored as a function runtime.
 type SandboxAppServiceRuntimeType string
+
+// SandboxAppServiceRuntimeHTTPHook defines model for SandboxAppServiceRuntimeHTTPHook.
+type SandboxAppServiceRuntimeHTTPHook struct {
+	Headers        *map[string]string `json:"headers,omitempty"`
+	Method         *string            `json:"method,omitempty"`
+	Path           string             `json:"path"`
+	TimeoutSeconds *int32             `json:"timeout_seconds,omitempty"`
+}
+
+// SandboxAppServiceRuntimeHook defines model for SandboxAppServiceRuntimeHook.
+type SandboxAppServiceRuntimeHook struct {
+	Http  SandboxAppServiceRuntimeHTTPHook  `json:"http"`
+	Name  *string                           `json:"name,omitempty"`
+	Phase SandboxAppServiceRuntimeHookPhase `json:"phase"`
+}
+
+// SandboxAppServiceRuntimeHookPhase defines model for SandboxAppServiceRuntimeHook.Phase.
+type SandboxAppServiceRuntimeHookPhase string
 
 // SandboxAppServiceView defines model for SandboxAppServiceView.
 type SandboxAppServiceView struct {
@@ -2209,6 +2319,26 @@ type SuccessAPIKeyListResponse struct {
 
 // SuccessAPIKeyListResponseSuccess defines model for SuccessAPIKeyListResponse.Success.
 type SuccessAPIKeyListResponseSuccess bool
+
+// SuccessArtifactListResponse defines model for SuccessArtifactListResponse.
+type SuccessArtifactListResponse struct {
+	Data *struct {
+		Artifacts []Artifact `json:"artifacts"`
+	} `json:"data,omitempty"`
+	Success SuccessArtifactListResponseSuccess `json:"success"`
+}
+
+// SuccessArtifactListResponseSuccess defines model for SuccessArtifactListResponse.Success.
+type SuccessArtifactListResponseSuccess bool
+
+// SuccessArtifactResponse defines model for SuccessArtifactResponse.
+type SuccessArtifactResponse struct {
+	Data    *Artifact                      `json:"data,omitempty"`
+	Success SuccessArtifactResponseSuccess `json:"success"`
+}
+
+// SuccessArtifactResponseSuccess defines model for SuccessArtifactResponse.Success.
+type SuccessArtifactResponseSuccess bool
 
 // SuccessAuthProvidersResponse defines model for SuccessAuthProvidersResponse.
 type SuccessAuthProvidersResponse struct {
@@ -2811,6 +2941,15 @@ type SuccessUserResponse struct {
 // SuccessUserResponseSuccess defines model for SuccessUserResponse.Success.
 type SuccessUserResponseSuccess bool
 
+// SuccessVolumeArchiveUploadResponse defines model for SuccessVolumeArchiveUploadResponse.
+type SuccessVolumeArchiveUploadResponse struct {
+	Data    *VolumeArchiveUploadResult                `json:"data,omitempty"`
+	Success SuccessVolumeArchiveUploadResponseSuccess `json:"success"`
+}
+
+// SuccessVolumeArchiveUploadResponseSuccess defines model for SuccessVolumeArchiveUploadResponse.Success.
+type SuccessVolumeArchiveUploadResponseSuccess bool
+
 // SuccessWrittenResponse defines model for SuccessWrittenResponse.
 type SuccessWrittenResponse struct {
 	Data *struct {
@@ -2954,6 +3093,15 @@ type UsernamePasswordProjection = map[string]interface{}
 // VolumeAccessMode Access mode for sandbox volumes. Enforcement is scoped to storage-proxy instances. RWO allows read-write mounts on a single instance; ROX allows read-only mounts across instances; RWX allows read-write mounts across instances.
 type VolumeAccessMode string
 
+// VolumeArchiveUploadResult defines model for VolumeArchiveUploadResult.
+type VolumeArchiveUploadResult struct {
+	Bytes     int64 `json:"bytes"`
+	Dirs      int32 `json:"dirs"`
+	Files     int32 `json:"files"`
+	Overwrote int32 `json:"overwrote"`
+	Symlinks  int32 `json:"symlinks"`
+}
+
 // VolumeMountSpec defines model for VolumeMountSpec.
 type VolumeMountSpec struct {
 	MountPath string `json:"mountPath"`
@@ -3005,6 +3153,9 @@ type WeightedPodAffinityTerm struct {
 // APIKeyID defines model for APIKeyID.
 type APIKeyID = string
 
+// ArtifactID defines model for ArtifactID.
+type ArtifactID = string
+
 // ContextID defines model for ContextID.
 type ContextID = string
 
@@ -3017,8 +3168,14 @@ type IdentityID = string
 // OIDCProvider defines model for OIDCProvider.
 type OIDCProvider = string
 
+// QueryArchiveFormat defines model for QueryArchiveFormat.
+type QueryArchiveFormat string
+
 // QueryMkdir defines model for QueryMkdir.
 type QueryMkdir = bool
+
+// QueryOverwrite defines model for QueryOverwrite.
+type QueryOverwrite = bool
 
 // QueryRecursive defines model for QueryRecursive.
 type QueryRecursive = bool
@@ -3139,6 +3296,16 @@ type PostApiV1SandboxvolumesIdFilesParams struct {
 	Recursive *QueryRecursive `form:"recursive,omitempty" json:"recursive,omitempty"`
 }
 
+// PostApiV1SandboxvolumesIdFilesArchiveParams defines parameters for PostApiV1SandboxvolumesIdFilesArchive.
+type PostApiV1SandboxvolumesIdFilesArchiveParams struct {
+	Path      *string                                            `form:"path,omitempty" json:"path,omitempty"`
+	Format    *PostApiV1SandboxvolumesIdFilesArchiveParamsFormat `form:"format,omitempty" json:"format,omitempty"`
+	Overwrite *QueryOverwrite                                    `form:"overwrite,omitempty" json:"overwrite,omitempty"`
+}
+
+// PostApiV1SandboxvolumesIdFilesArchiveParamsFormat defines parameters for PostApiV1SandboxvolumesIdFilesArchive.
+type PostApiV1SandboxvolumesIdFilesArchiveParamsFormat string
+
 // GetApiV1SandboxvolumesIdFilesListParams defines parameters for GetApiV1SandboxvolumesIdFilesList.
 type GetApiV1SandboxvolumesIdFilesListParams struct {
 	Path FilePath `form:"path" json:"path"`
@@ -3165,6 +3332,12 @@ type GetAuthOidcProviderLoginParams struct {
 
 // PostApiKeysJSONRequestBody defines body for PostApiKeys for application/json ContentType.
 type PostApiKeysJSONRequestBody = CreateAPIKeyRequest
+
+// PostApiV1ArtifactsJSONRequestBody defines body for PostApiV1Artifacts for application/json ContentType.
+type PostApiV1ArtifactsJSONRequestBody = CreateArtifactRequest
+
+// PostApiV1ArtifactsIdVolumeJSONRequestBody defines body for PostApiV1ArtifactsIdVolume for application/json ContentType.
+type PostApiV1ArtifactsIdVolumeJSONRequestBody = CreateArtifactVolumeRequest
 
 // PostApiV1CredentialSourcesJSONRequestBody defines body for PostApiV1CredentialSources for application/json ContentType.
 type PostApiV1CredentialSourcesJSONRequestBody = CredentialSourceWriteRequest

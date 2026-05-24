@@ -78,11 +78,26 @@ The direct file API surface mirrors the Sandbox file API:
 | Stat | `GET /api/v1/sandboxvolumes/{'{id}'}/files/stat?path=...` |
 | List directory | `GET /api/v1/sandboxvolumes/{'{id}'}/files/list?path=...` |
 | Move / Rename | `POST /api/v1/sandboxvolumes/{'{id}'}/files/move` |
+| Upload archive | `POST /api/v1/sandboxvolumes/{'{id}'}/files/archive?path=...` |
 | Watch | `GET /api/v1/sandboxvolumes/{'{id}'}/files/watch` |
 
 Paths are always resolved relative to the root of the Volume namespace.
 
 For SDK, CLI, and direct HTTP file workflows, see the dedicated [Volume HTTP](./http) page.
+
+## Artifacts
+
+Artifacts are immutable, team-owned bundles backed by a Volume snapshot. Use them when a build or packaging step should produce a stable deployable input that can later be materialized as a read-only Volume for sandbox or function runtime use.
+
+| Operation | Endpoint |
+|-----------|----------|
+| Create from Volume | `POST /api/v1/artifacts` |
+| List | `GET /api/v1/artifacts` |
+| Get | `GET /api/v1/artifacts/{'{id}'}` |
+| Delete | `DELETE /api/v1/artifacts/{'{id}'}` |
+| Materialize Volume | `POST /api/v1/artifacts/{'{id}'}/volume` |
+
+Creating an artifact snapshots the source Volume. Materializing an artifact creates a new SandboxVolume from that snapshot; it defaults to `ROX` and POSIX UID/GID `0` unless the request overrides them.
 
 ---
 

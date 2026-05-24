@@ -100,6 +100,118 @@ func TestPrepareRevisionFromSourceAcceptsRevisionSpec(t *testing.T) {
 	}
 }
 
+func TestPrepareRevisionFromSourceMaterializesArtifactMount(t *testing.T) {
+	service := mgr.SandboxAppService{
+		ID:   "api",
+		Port: 3000,
+		Runtime: &mgr.SandboxAppServiceRuntime{
+			Type:    mgr.SandboxAppServiceRuntimeCMD,
+			Command: []string{"node", "server.js"},
+		},
+		Ingress: mgr.SandboxAppServiceIngress{
+			Public: true,
+			Routes: []mgr.SandboxAppServiceRoute{{ID: "root", Resume: true}},
+		},
+	}
+	serviceBytes, err := json.Marshal(service)
+	if err != nil {
+		t.Fatalf("marshal service: %v", err)
+	}
+	volumeStore := &recordingRevisionVolumeStore{
+		artifactMounts: []functions.FunctionRevisionMount{{
+			MountPoint: "/workspace/app",
+			Mode:       functions.FunctionRevisionMountModeReadOnly,
+			Source: functions.FunctionRevisionMountSource{
+				Type:            functions.FunctionRevisionMountSourceArtifact,
+				ArtifactID:      "artifact-1",
+				SandboxVolumeID: "prepared-volume",
+			},
+		}},
+		artifactCleanup: []functions.RestoreMount{{
+			SandboxVolumeID: "prepared-volume",
+			MountPoint:      "/workspace/app",
+		}},
+	}
+	handler := &Handler{volumeStore: volumeStore, logger: zap.NewNop()}
+
+	rev, _, cleanup, err := handler.prepareRevisionFromSource(context.Background(), &authn.AuthContext{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}, functionSourceRequest{
+		Type: functions.RevisionSourceTypeRevisionSpec,
+		RevisionSpec: &functions.FunctionRevisionSpec{
+			TemplateID:     "node-template",
+			RuntimeService: serviceBytes,
+			Mounts: []functions.FunctionRevisionMount{{
+				MountPoint: "/workspace/app",
+				Source: functions.FunctionRevisionMountSource{
+					Type:       functions.FunctionRevisionMountSourceArtifact,
+					ArtifactID: "artifact-1",
+				},
+			}},
+		},
+	}, functionruntime.Metadata{FunctionID: "fn-1", FunctionRevisionID: "rev-1"})
+	if err != nil {
+		t.Fatalf("prepareRevisionFromSource() error = %v", err)
+	}
+	if cleanup == nil {
+		t.Fatal("cleanup = nil, want prepared artifact cleanup")
+	}
+	if !volumeStore.prepareArtifactCalled {
+		t.Fatal("PrepareArtifactMounts was not called")
+	}
+	if len(rev.Spec.Mounts) != 1 || rev.Spec.Mounts[0].Source.SandboxVolumeID != "prepared-volume" {
+		t.Fatalf("revision mounts = %+v, want prepared volume", rev.Spec.Mounts)
+	}
+	if len(rev.RestoreMounts) != 1 || rev.RestoreMounts[0].SandboxVolumeID != "prepared-volume" {
+		t.Fatalf("restore mounts = %+v, want prepared artifact cleanup mount", rev.RestoreMounts)
+	}
+	cleanup()
+	if len(volumeStore.deletedMounts) != 1 || volumeStore.deletedMounts[0].SandboxVolumeID != "prepared-volume" {
+		t.Fatalf("deleted mounts = %+v, want prepared volume cleanup", volumeStore.deletedMounts)
+	}
+}
+
+func TestPrepareRevisionFromSourceRejectsArtifactMountWithoutStore(t *testing.T) {
+	service := mgr.SandboxAppService{
+		ID:   "api",
+		Port: 3000,
+		Runtime: &mgr.SandboxAppServiceRuntime{
+			Type:    mgr.SandboxAppServiceRuntimeCMD,
+			Command: []string{"node", "server.js"},
+		},
+		Ingress: mgr.SandboxAppServiceIngress{
+			Public: true,
+			Routes: []mgr.SandboxAppServiceRoute{{ID: "root", Resume: true}},
+		},
+	}
+	serviceBytes, err := json.Marshal(service)
+	if err != nil {
+		t.Fatalf("marshal service: %v", err)
+	}
+
+	_, _, _, err = (&Handler{}).prepareRevisionFromSource(context.Background(), &authn.AuthContext{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}, functionSourceRequest{
+		Type: functions.RevisionSourceTypeRevisionSpec,
+		RevisionSpec: &functions.FunctionRevisionSpec{
+			TemplateID:     "node-template",
+			RuntimeService: serviceBytes,
+			Mounts: []functions.FunctionRevisionMount{{
+				MountPoint: "/workspace/app",
+				Source: functions.FunctionRevisionMountSource{
+					Type:       functions.FunctionRevisionMountSourceArtifact,
+					ArtifactID: "artifact-1",
+				},
+			}},
+		},
+	}, functionruntime.Metadata{})
+	if err == nil {
+		t.Fatal("prepareRevisionFromSource() error = nil, want missing artifact store")
+	}
+}
+
 func TestRuntimeStatusReportsFailedInstance(t *testing.T) {
 	now := time.Now().UTC()
 	message := "health check returned HTTP 500"
@@ -246,6 +358,27 @@ func TestDeleteRuntimeSandboxesForRevisionCompletesWhenDeletesSucceed(t *testing
 type recordingRuntimeController struct {
 	deleted map[string]bool
 	errors  map[string]error
+}
+
+type recordingRevisionVolumeStore struct {
+	prepareArtifactCalled bool
+	artifactMounts        []functions.FunctionRevisionMount
+	artifactCleanup       []functions.RestoreMount
+	deletedMounts         []functions.RestoreMount
+}
+
+func (r *recordingRevisionVolumeStore) PrepareRestoreMounts(ctx context.Context, authCtx *authn.AuthContext, sandbox *mgr.Sandbox, metadata functionruntime.Metadata) ([]functions.RestoreMount, error) {
+	return nil, nil
+}
+
+func (r *recordingRevisionVolumeStore) DeleteRestoreMounts(ctx context.Context, authCtx *authn.AuthContext, sandbox *mgr.Sandbox, mounts []functions.RestoreMount) error {
+	r.deletedMounts = append(r.deletedMounts, mounts...)
+	return nil
+}
+
+func (r *recordingRevisionVolumeStore) PrepareArtifactMounts(ctx context.Context, authCtx *authn.AuthContext, revisionSpec functions.FunctionRevisionSpec, metadata functionruntime.Metadata) ([]functions.FunctionRevisionMount, []functions.RestoreMount, error) {
+	r.prepareArtifactCalled = true
+	return r.artifactMounts, r.artifactCleanup, nil
 }
 
 func (r *recordingRuntimeController) DeleteRuntimeSandbox(_ context.Context, _ *authn.AuthContext, sandboxID string) error {

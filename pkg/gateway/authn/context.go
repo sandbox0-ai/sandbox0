@@ -75,6 +75,10 @@ const (
 	PermFunctionWrite  = "function:write"
 	PermFunctionDelete = "function:delete"
 
+	PermArtifactCreate = "artifact:create"
+	PermArtifactRead   = "artifact:read"
+	PermArtifactDelete = "artifact:delete"
+
 	PermRegistryWrite = "registry:write"
 
 	PermCredentialSourceRead   = "credentialsource:read"
@@ -105,6 +109,9 @@ var RolePermissions = map[string][]string{
 		PermFunctionRead,
 		PermFunctionWrite,
 		PermFunctionDelete,
+		PermArtifactCreate,
+		PermArtifactRead,
+		PermArtifactDelete,
 		PermRegistryWrite,
 		PermCredentialSourceRead,
 		PermCredentialSourceWrite,
@@ -126,6 +133,9 @@ var RolePermissions = map[string][]string{
 		PermFunctionRead,
 		PermFunctionWrite,
 		PermFunctionDelete,
+		PermArtifactCreate,
+		PermArtifactRead,
+		PermArtifactDelete,
 		PermRegistryWrite,
 		PermCredentialSourceRead,
 		PermCredentialSourceWrite,
@@ -140,12 +150,14 @@ var RolePermissions = map[string][]string{
 	"builder": {
 		PermTemplateRead,
 		PermFunctionRead,
+		PermArtifactRead,
 		PermRegistryWrite,
 	},
 	"viewer": {
 		PermSandboxRead,
 		PermTemplateRead,
 		PermFunctionRead,
+		PermArtifactRead,
 		PermCredentialSourceRead,
 		PermSandboxVolumeRead,
 		PermSandboxVolumeFileRead,

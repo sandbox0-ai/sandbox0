@@ -303,6 +303,41 @@ For SDK and CLI usage, see the delete-path row in the method mapping above.
 
 ---
 
+## Upload Archive
+
+Import a `tar.gz` or raw `tar` archive into a Volume. This is the fastest direct API path for build outputs with many files because it avoids one HTTP request per file.
+
+<Endpoint method="POST">
+/api/v1/sandboxvolumes/{'{id}'}/files/archive?path=/workspace&format=tar.gz&overwrite=false
+</Endpoint>
+
+Query parameters:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `path` | string | Destination directory. Defaults to `/` |
+| `format` | string | `tar.gz` or `tar`. Defaults to `tar.gz` |
+| `overwrite` | boolean | Replace existing paths when true. Defaults to false |
+
+The archive may contain directories, regular files, and symlinks. Absolute paths and `..` path traversal entries are rejected.
+
+Example response:
+
+```json
+{
+    "success": true,
+    "data": {
+        "files": 42,
+        "dirs": 8,
+        "symlinks": 2,
+        "bytes": 1048576,
+        "overwrote": 0
+    }
+}
+```
+
+---
+
 ## Watch for Changes
 
 Watch a path for file events over WebSocket.

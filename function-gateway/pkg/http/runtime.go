@@ -35,6 +35,7 @@ const defaultFunctionAutoResumeTimeout = 30 * time.Second
 const defaultFunctionRuntimeStartTimeout = 30 * time.Second
 const functionRuntimeRestoreLockPrefix = "function-runtime-restore:"
 const functionServiceReadinessProbeInterval = 200 * time.Millisecond
+const functionRuntimeHookRetryInterval = 100 * time.Millisecond
 const defaultFunctionMaxRequestBodyBytes int64 = 32 << 20
 
 type functionRouteMatch struct {
@@ -65,6 +66,16 @@ type functionRuntimeHTTPError struct {
 
 func (e functionRuntimeHTTPError) Error() string {
 	return fmt.Sprintf("cluster gateway returned status %d: %s", e.status, e.body)
+}
+
+type functionRuntimeHookHTTPError struct {
+	name   string
+	status int
+	body   string
+}
+
+func (e functionRuntimeHookHTTPError) Error() string {
+	return fmt.Sprintf("function runtime hook %q returned HTTP %d: %s", e.name, e.status, e.body)
 }
 
 func (s *Server) serveFunctionRevision(c *gin.Context, fn *functions.Function, rev *functions.Revision) {
@@ -691,7 +702,7 @@ func (s *Server) claimMountsFromRevision(rev *functions.Revision) ([]mgr.ClaimMo
 		volumeID := strings.TrimSpace(mount.Source.SandboxVolumeID)
 		mountPoint := strings.TrimSpace(mount.MountPoint)
 		if volumeID == "" {
-			return nil, fmt.Errorf("function revision restore mount is missing sandbox volume id")
+			return nil, fmt.Errorf("function revision mount is missing prepared sandbox volume id")
 		}
 		if mountPoint == "" {
 			return nil, fmt.Errorf("function revision restore mount is missing mount point")
@@ -730,10 +741,156 @@ func (s *Server) ensureFunctionServiceRuntime(ctx context.Context, fn *functions
 	}
 	startCtx, cancel := context.WithTimeout(ctx, defaultFunctionRuntimeStartTimeout)
 	defer cancel()
+	if err := s.runFunctionRuntimeHooks(startCtx, fn, rev, sandbox.ID, service, contextID, mgr.SandboxAppServiceRuntimeHookPhasePostClaim); err != nil {
+		return "", err
+	}
+	if functionServiceSkipsReadiness(service) {
+		return contextID, nil
+	}
 	if err := s.waitForFunctionServiceReadiness(startCtx, sandbox.ID, fn.TeamID, rev.CreatedBy, service); err != nil {
 		return "", err
 	}
 	return contextID, nil
+}
+
+type functionRuntimeHookPayload struct {
+	Phase            string                            `json:"phase"`
+	FunctionID       string                            `json:"function_id"`
+	FunctionRevision string                            `json:"function_revision_id"`
+	SandboxID        string                            `json:"sandbox_id"`
+	RuntimeContextID string                            `json:"runtime_context_id"`
+	Mounts           []functions.FunctionRevisionMount `json:"mounts,omitempty"`
+}
+
+func (s *Server) runFunctionRuntimeHooks(ctx context.Context, fn *functions.Function, rev *functions.Revision, sandboxID string, service mgr.SandboxAppService, runtimeContextID, phase string) error {
+	if service.Runtime == nil || len(service.Runtime.Hooks) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(service.ID) == "" {
+		return fmt.Errorf("function service id is required for runtime hooks")
+	}
+	for _, hook := range service.Runtime.Hooks {
+		if hook.Phase != phase {
+			continue
+		}
+		if hook.HTTP == nil {
+			return fmt.Errorf("function runtime hook %q is missing http configuration", hook.Name)
+		}
+		if err := s.runFunctionRuntimeHTTPHook(ctx, fn, rev, sandboxID, service, runtimeContextID, hook); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) runFunctionRuntimeHTTPHook(ctx context.Context, fn *functions.Function, rev *functions.Revision, sandboxID string, service mgr.SandboxAppService, runtimeContextID string, hook mgr.SandboxAppServiceRuntimeHook) error {
+	clusterGatewayURL, err := s.clusterGatewayURLForSandbox(ctx, sandboxID)
+	if err != nil || clusterGatewayURL == "" {
+		return fmt.Errorf("cluster gateway is not configured")
+	}
+	if s.internalAuthGen == nil {
+		return fmt.Errorf("internal auth generator is not configured")
+	}
+	method := nethttp.MethodPost
+	path := "/"
+	timeout := 30 * time.Second
+	headers := map[string]string(nil)
+	if hook.HTTP != nil {
+		if strings.TrimSpace(hook.HTTP.Method) != "" {
+			method = strings.TrimSpace(hook.HTTP.Method)
+		}
+		if strings.TrimSpace(hook.HTTP.Path) != "" {
+			path = strings.TrimSpace(hook.HTTP.Path)
+		}
+		if hook.HTTP.TimeoutSeconds > 0 {
+			timeout = time.Duration(hook.HTTP.TimeoutSeconds) * time.Second
+		}
+		headers = hook.HTTP.Headers
+	}
+	hookCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	body, err := json.Marshal(functionRuntimeHookPayload{
+		Phase:            hook.Phase,
+		FunctionID:       fn.ID,
+		FunctionRevision: rev.ID,
+		SandboxID:        sandboxID,
+		RuntimeContextID: runtimeContextID,
+		Mounts:           rev.Spec.Mounts,
+	})
+	if err != nil {
+		return err
+	}
+	token, err := s.internalAuthGen.Generate(internalauth.ServiceClusterGateway, fn.TeamID, rev.CreatedBy, internalauth.GenerateOptions{
+		Permissions: []string{authn.PermSandboxRead},
+	})
+	if err != nil {
+		return fmt.Errorf("generate internal token: %w", err)
+	}
+	hookURL := strings.TrimRight(clusterGatewayURL, "/") + functionRuntimeProxyPath(sandboxID, service.ID, path)
+	var lastErr error
+	for {
+		req, err := nethttp.NewRequestWithContext(hookCtx, method, hookURL, bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		for name, value := range headers {
+			req.Header.Set(name, value)
+		}
+		req.Header.Set(internalauth.DefaultTokenHeader, token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := s.outboundHTTPClient().Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("function runtime hook %q failed: %w", hook.Name, err)
+			if hookCtx.Err() != nil {
+				return lastErr
+			}
+			if err := waitForFunctionRuntimeHookRetry(hookCtx); err != nil {
+				return lastErr
+			}
+			continue
+		}
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			_ = resp.Body.Close()
+			return nil
+		}
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		lastErr = functionRuntimeHookHTTPError{
+			name:   hook.Name,
+			status: resp.StatusCode,
+			body:   strings.TrimSpace(string(respBody)),
+		}
+		if !functionRuntimeHookStatusRetryable(resp.StatusCode) {
+			return lastErr
+		}
+		if err := waitForFunctionRuntimeHookRetry(hookCtx); err != nil {
+			return lastErr
+		}
+	}
+}
+
+func waitForFunctionRuntimeHookRetry(ctx context.Context) error {
+	timer := time.NewTimer(functionRuntimeHookRetryInterval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func functionRuntimeHookStatusRetryable(status int) bool {
+	switch status {
+	case nethttp.StatusBadGateway, nethttp.StatusServiceUnavailable, nethttp.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func functionServiceSkipsReadiness(service mgr.SandboxAppService) bool {
+	return service.Runtime != nil && service.Runtime.SkipReadinessCheck
 }
 
 func (s *Server) getFunctionRuntimeContext(ctx context.Context, sandboxID, teamID, userID, contextID string) (*functionContextResponse, error) {

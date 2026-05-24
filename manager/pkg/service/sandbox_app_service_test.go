@@ -79,3 +79,54 @@ func TestSandboxAppServicePublishBlockersRequirePublicRestartableRuntime(t *test
 		t.Fatalf("blockers = %#v, want none", blockers)
 	}
 }
+
+func TestNormalizeSandboxAppServicesCanonicalizesRuntimeHooks(t *testing.T) {
+	services, err := NormalizeSandboxAppServices([]SandboxAppService{{
+		ID:   "api",
+		Port: 3000,
+		Runtime: &SandboxAppServiceRuntime{
+			Type: SandboxAppServiceRuntimeWarmProcess,
+			Hooks: []SandboxAppServiceRuntimeHook{{
+				Name:  " init ",
+				Phase: "POST_CLAIM",
+				HTTP: &SandboxAppServiceRuntimeHTTPHook{
+					Path:    "runtime/init",
+					Headers: map[string]string{"x-hook": " ready "},
+				},
+			}},
+		},
+	}})
+	if err != nil {
+		t.Fatalf("NormalizeSandboxAppServices: %v", err)
+	}
+	hook := services[0].Runtime.Hooks[0]
+	if hook.Name != "init" || hook.Phase != SandboxAppServiceRuntimeHookPhasePostClaim {
+		t.Fatalf("hook = %+v, want normalized name and phase", hook)
+	}
+	if hook.HTTP.Method != "POST" || hook.HTTP.Path != "/runtime/init" || hook.HTTP.TimeoutSeconds != defaultSandboxServiceHookTimeoutSecs {
+		t.Fatalf("http hook = %+v, want defaults", hook.HTTP)
+	}
+	if hook.HTTP.Headers["X-Hook"] != "ready" {
+		t.Fatalf("headers = %+v, want canonical trimmed header", hook.HTTP.Headers)
+	}
+}
+
+func TestNormalizeSandboxAppServicesRejectsInvalidRuntimeHook(t *testing.T) {
+	_, err := NormalizeSandboxAppServices([]SandboxAppService{{
+		ID:   "api",
+		Port: 3000,
+		Runtime: &SandboxAppServiceRuntime{
+			Type: SandboxAppServiceRuntimeCMD,
+			Command: []string{
+				"/bin/server",
+			},
+			Hooks: []SandboxAppServiceRuntimeHook{{
+				Phase: "pre_start",
+				HTTP:  &SandboxAppServiceRuntimeHTTPHook{Path: "/init"},
+			}},
+		},
+	}})
+	if err == nil {
+		t.Fatal("NormalizeSandboxAppServices error = nil, want invalid hook phase")
+	}
+}

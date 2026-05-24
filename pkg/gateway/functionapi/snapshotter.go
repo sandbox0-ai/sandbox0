@@ -39,6 +39,12 @@ type sandboxVolumeResponse struct {
 	ID string `json:"id"`
 }
 
+type createArtifactVolumeRequest struct {
+	AccessMode      string `json:"access_mode,omitempty"`
+	DefaultPosixUID int64  `json:"default_posix_uid"`
+	DefaultPosixGID int64  `json:"default_posix_gid"`
+}
+
 func NewHTTPVolumeSnapshotter(resolve ClusterGatewayURLResolver, internalAuthGen *internalauth.Generator, httpClient *http.Client, logger *zap.Logger) *HTTPVolumeSnapshotter {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -106,6 +112,52 @@ func (s *HTTPVolumeSnapshotter) PrepareRestoreMounts(ctx context.Context, authCt
 		})
 	}
 	return out, nil
+}
+
+func (s *HTTPVolumeSnapshotter) PrepareArtifactMounts(ctx context.Context, authCtx *authn.AuthContext, revisionSpec functions.FunctionRevisionSpec, metadata functionruntime.Metadata) ([]functions.FunctionRevisionMount, []functions.RestoreMount, error) {
+	if len(revisionSpec.Mounts) == 0 {
+		return nil, nil, nil
+	}
+	if s == nil || s.resolveClusterGatewayURL == nil {
+		return nil, nil, fmt.Errorf("volume snapshotter is not configured")
+	}
+	mounts := append([]functions.FunctionRevisionMount(nil), revisionSpec.Mounts...)
+	cleanupMounts := make([]functions.RestoreMount, 0)
+	clusterGatewayURL := ""
+	for i := range mounts {
+		mount := &mounts[i]
+		if mount.Source.Type != functions.FunctionRevisionMountSourceArtifact || strings.TrimSpace(mount.Source.SandboxVolumeID) != "" {
+			continue
+		}
+		if clusterGatewayURL == "" {
+			var err error
+			clusterGatewayURL, err = s.resolveClusterGatewayURL(ctx, "")
+			if err != nil {
+				_ = s.DeleteRestoreMounts(context.Background(), authCtx, nil, cleanupMounts)
+				return nil, nil, err
+			}
+		}
+		artifactID := strings.TrimSpace(mount.Source.ArtifactID)
+		if artifactID == "" {
+			_ = s.DeleteRestoreMounts(context.Background(), authCtx, nil, cleanupMounts)
+			return nil, nil, fmt.Errorf("artifact mount %d is missing artifact id", i)
+		}
+		accessMode := "ROX"
+		if mount.Mode == functions.FunctionRevisionMountModeReadWrite {
+			accessMode = "RWX"
+		}
+		volumeID, err := s.createVolumeFromArtifact(ctx, clusterGatewayURL, authCtx, artifactID, accessMode, metadata)
+		if err != nil {
+			_ = s.DeleteRestoreMounts(context.Background(), authCtx, nil, cleanupMounts)
+			return nil, nil, err
+		}
+		mount.Source.SandboxVolumeID = volumeID
+		cleanupMounts = append(cleanupMounts, functions.RestoreMount{
+			SandboxVolumeID: volumeID,
+			MountPoint:      strings.TrimSpace(mount.MountPoint),
+		})
+	}
+	return mounts, cleanupMounts, nil
 }
 
 func (s *HTTPVolumeSnapshotter) DeleteRestoreMounts(ctx context.Context, authCtx *authn.AuthContext, sandbox *mgr.Sandbox, mounts []functions.RestoreMount) error {
@@ -260,6 +312,69 @@ func (s *HTTPVolumeSnapshotter) createVolumeFromSnapshot(ctx context.Context, cl
 	}
 	if volume == nil || strings.TrimSpace(volume.ID) == "" {
 		return "", fmt.Errorf("create volume from snapshot %s: empty volume id", snapshotID)
+	}
+	return strings.TrimSpace(volume.ID), nil
+}
+
+func (s *HTTPVolumeSnapshotter) createVolumeFromArtifact(ctx context.Context, clusterGatewayURL string, authCtx *authn.AuthContext, artifactID, accessMode string, metadata functionruntime.Metadata) (string, error) {
+	if s.internalAuthGen == nil {
+		return "", fmt.Errorf("internal auth generator is not configured")
+	}
+	teamID := ""
+	userID := ""
+	if authCtx != nil {
+		teamID = authCtx.TeamID
+		userID = principalID(authCtx)
+	}
+	payload, err := json.Marshal(createArtifactVolumeRequest{
+		AccessMode:      accessMode,
+		DefaultPosixUID: 0,
+		DefaultPosixGID: 0,
+	})
+	if err != nil {
+		return "", err
+	}
+	targetService := s.targetService
+	if targetService == "" {
+		targetService = internalauth.ServiceClusterGateway
+	}
+	token, err := s.internalAuthGen.Generate(targetService, teamID, userID, internalauth.GenerateOptions{
+		Permissions: []string{authn.PermArtifactRead, authn.PermSandboxVolumeCreate, authn.PermSandboxVolumeRead},
+	})
+	if err != nil {
+		return "", fmt.Errorf("generate internal token: %w", err)
+	}
+	pathPrefix := strings.TrimRight(s.pathPrefix, "/")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(clusterGatewayURL, "/")+pathPrefix+"/artifacts/"+url.PathEscape(strings.TrimSpace(artifactID))+"/volume", bytes.NewReader(payload))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set(internalauth.DefaultTokenHeader, token)
+	req.Header.Set("Content-Type", "application/json")
+	functionruntime.SetHeaders(req.Header, metadata)
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		s.logger.Warn("Function artifact volume materialization failed",
+			zap.String("artifact_id", artifactID),
+			zap.Int("status", resp.StatusCode),
+			zap.String("body", strings.TrimSpace(string(body))),
+		)
+		return "", fmt.Errorf("create volume from artifact %s: %s", artifactID, resp.Status)
+	}
+	volume, apiErr, err := spec.DecodeResponse[sandboxVolumeResponse](resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if apiErr != nil {
+		return "", fmt.Errorf("create volume from artifact %s: %s", artifactID, apiErr.Message)
+	}
+	if volume == nil || strings.TrimSpace(volume.ID) == "" {
+		return "", fmt.Errorf("create volume from artifact %s: empty volume id", artifactID)
 	}
 	return strings.TrimSpace(volume.ID), nil
 }

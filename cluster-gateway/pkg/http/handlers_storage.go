@@ -44,6 +44,15 @@ func requireVolumeID(c *gin.Context) (string, bool) {
 	return id, true
 }
 
+func requireArtifactID(c *gin.Context) (string, bool) {
+	id := c.Param("id")
+	if id == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "artifact id is required")
+		return "", false
+	}
+	return id, true
+}
+
 // createSandboxVolume creates a new sandbox volume
 func (s *Server) createSandboxVolume(c *gin.Context) {
 	c.Request.URL.Path = "/sandboxvolumes"
@@ -151,5 +160,42 @@ func (s *Server) deleteSandboxVolumeSnapshot(c *gin.Context) {
 		return
 	}
 	c.Request.URL.Path = "/sandboxvolumes/" + id + "/snapshots/" + snapshotID
+	s.proxyToStorageProxy(c)
+}
+
+func (s *Server) createArtifact(c *gin.Context) {
+	c.Request.URL.Path = "/artifacts"
+	s.proxyToStorageProxy(c)
+}
+
+func (s *Server) listArtifacts(c *gin.Context) {
+	c.Request.URL.Path = "/artifacts"
+	s.proxyToStorageProxy(c)
+}
+
+func (s *Server) getArtifact(c *gin.Context) {
+	id, ok := requireArtifactID(c)
+	if !ok {
+		return
+	}
+	c.Request.URL.Path = "/artifacts/" + id
+	s.proxyToStorageProxy(c)
+}
+
+func (s *Server) deleteArtifact(c *gin.Context) {
+	id, ok := requireArtifactID(c)
+	if !ok {
+		return
+	}
+	c.Request.URL.Path = "/artifacts/" + id
+	s.proxyToStorageProxy(c)
+}
+
+func (s *Server) createArtifactVolume(c *gin.Context) {
+	id, ok := requireArtifactID(c)
+	if !ok {
+		return
+	}
+	c.Request.URL.Path = "/artifacts/" + id + "/volume"
 	s.proxyToStorageProxy(c)
 }

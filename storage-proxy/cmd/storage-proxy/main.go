@@ -254,11 +254,11 @@ func main() {
 
 	readTimeout, _ := time.ParseDuration(cfg.HTTPReadTimeout)
 	if readTimeout == 0 {
-		readTimeout = 15 * time.Second
+		readTimeout = 5 * time.Minute
 	}
 	writeTimeout, _ := time.ParseDuration(cfg.HTTPWriteTimeout)
 	if writeTimeout == 0 {
-		writeTimeout = 15 * time.Second
+		writeTimeout = 5 * time.Minute
 	}
 	idleTimeout, _ := time.ParseDuration(cfg.HTTPIdleTimeout)
 	if idleTimeout == 0 {

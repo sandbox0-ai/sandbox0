@@ -615,10 +615,10 @@ type StorageProxyConfig struct {
 	// +kubebuilder:default="/var/log/storage-proxy/audit.log"
 	AuditFile string `json:"auditFile,omitempty"`
 	// +optional
-	// +kubebuilder:default="15s"
+	// +kubebuilder:default="5m"
 	HTTPReadTimeout string `json:"httpReadTimeout,omitempty"`
 	// +optional
-	// +kubebuilder:default="15s"
+	// +kubebuilder:default="5m"
 	HTTPWriteTimeout string `json:"httpWriteTimeout,omitempty"`
 	// +optional
 	// +kubebuilder:default="60s"

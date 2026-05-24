@@ -19,6 +19,10 @@ Services are also the shortcut source model for Sandbox0 Functions. A publishabl
 
 Service runtime supports `cmd`, `warm_process`, and `manual`. Use `cmd` when Function Gateway should create a new command context for a restored function runtime. Use `warm_process` when the template already starts a long-lived process and the service should bind to that existing context. For Functions, `warm_process_name` must reference a `cmd` warm process alias or context ID; REPL warm processes are not valid HTTP service runtimes.
 
+Runtime hooks are optional blocking callbacks executed by Function Gateway after a runtime sandbox is claimed and the service runtime context is available. The first supported phase is `post_claim`; it sends a JSON metadata payload to an HTTP path on the service through the internal function runtime proxy. Use it for generic runtime initialization that depends on mounted Volumes or revision metadata.
+
+Set `runtime.skip_readiness_check` when the hook is the readiness boundary and the runtime should serve without an extra HTTP or TCP readiness probe. This is intended for long-lived warm processes that already exist in the template pod and perform initialization through a post-claim hook.
+
 ### Health Check
 
 `health_check.path` is the service readiness path. For restored Function runtimes, Function Gateway polls this path with `GET` and waits for HTTP `2xx` before proxying traffic. Services without `health_check.path` use TCP listen readiness as a fallback.

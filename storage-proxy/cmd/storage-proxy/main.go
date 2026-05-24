@@ -20,6 +20,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	spmigrations "github.com/sandbox0-ai/sandbox0/storage-proxy/migrations"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/auth"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/coordinator"
@@ -93,6 +94,7 @@ func main() {
 	// Initialize database connection pool
 	var repo *db.Repository
 	var meteringRepo *metering.Repository
+	var quotaRepo *quota.Repository
 	var pool *pgxpool.Pool
 	var sharedClock *clock.Clock
 	if cfg.DatabaseURL != "" {
@@ -117,9 +119,13 @@ func main() {
 		if err := metering.RunMigrations(context.Background(), pool, &zapLoggerAdapter{logger: zapLogger}); err != nil {
 			zapLogger.Fatal("Failed to run metering migrations", zap.Error(err))
 		}
+		if err := quota.RunMigrations(context.Background(), pool, &zapLoggerAdapter{logger: zapLogger}); err != nil {
+			zapLogger.Fatal("Failed to run quota migrations", zap.Error(err))
+		}
 
 		repo = db.NewRepository(pool)
 		meteringRepo = metering.NewRepository(pool)
+		quotaRepo = quota.NewRepository(pool)
 	} else {
 		zapLogger.Warn("DATABASE_URL not set, running without database persistence")
 	}
@@ -232,6 +238,7 @@ func main() {
 		zapLogger.Fatal("Failed to initialize snapshot manager", zap.Error(err))
 	}
 	snapshotMgr.SetMeteringRepository(meteringRepo)
+	snapshotMgr.SetQuotaRepository(quotaRepo)
 	volMgr.SetStorageObserver(snapshotMgr)
 	if eventBroadcaster != nil {
 		snapshotMgr.SetEventPublisher(eventBroadcaster)
@@ -250,6 +257,7 @@ func main() {
 
 	// Create HTTP server
 	httpSrv := httpserver.NewServer(logrusLogger, cfg, k8sClient, repo, meteringRepo, cfg.RegionID, httpAuthenticator, snapshotMgr, volumeBarrier, volMgr, fsServer, eventHub)
+	httpSrv.SetQuotaRepository(quotaRepo)
 	httpAddr := fmt.Sprintf("%s:%d", cfg.HTTPAddr, cfg.HTTPPort)
 
 	readTimeout, _ := time.ParseDuration(cfg.HTTPReadTimeout)

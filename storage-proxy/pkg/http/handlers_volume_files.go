@@ -20,6 +20,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	httpproxy "github.com/sandbox0-ai/sandbox0/pkg/proxy"
+	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
@@ -1488,6 +1489,8 @@ func (s *Server) writeVolumeFileError(w http.ResponseWriter, err error) {
 		_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, err.Error())
 	case errors.Is(err, errInvalidPath), errors.Is(err, errInvalidArchive):
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+	case quota.IsExceeded(err):
+		_ = spec.WriteError(w, http.StatusTooManyRequests, "quota_exceeded", err.Error())
 	default:
 		_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, err.Error())
 	}

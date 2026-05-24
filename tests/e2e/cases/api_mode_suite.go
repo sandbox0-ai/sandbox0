@@ -283,6 +283,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertVolumeLifecycle(env, session)
 				})
 
+				It("enforces volume storage quota", func() {
+					assertVolumeStorageQuota(env, session)
+				})
+
 				It("bootstraps an existing volume during claim", func() {
 					assertClaimBootstrapMountLifecycle(env, session)
 				})
@@ -2258,6 +2262,28 @@ func assertVolumeLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session
 	status, err = session.DeleteSnapshot(env.TestCtx.Context, GinkgoT(), snapshotVolumeID, snapshot.Id)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
+}
+
+func assertVolumeStorageQuota(env *framework.ScenarioEnv, session *e2eutils.Session) {
+	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(volume).NotTo(BeNil())
+	volumeID := expectStringPtr(volume.Id, "quota volume id")
+	DeferCleanup(func() {
+		deleteSandboxVolumeForCleanup(env, session, volumeID)
+	})
+
+	_, status, err = session.PutTeamQuota(env.TestCtx.Context, quota.DimensionVolumeStorageGB, 0)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	DeferCleanup(func() {
+		_, _ = session.DeleteTeamQuota(env.TestCtx.Context, quota.DimensionVolumeStorageGB)
+	})
+
+	status, err = session.WriteVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, "/quota.txt", []byte("quota"), "")
+	Expect(err).To(HaveOccurred())
+	Expect(status).To(Equal(http.StatusTooManyRequests))
 }
 
 func assertObjectEncryptionLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session) {

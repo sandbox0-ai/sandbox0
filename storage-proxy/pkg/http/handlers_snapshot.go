@@ -8,6 +8,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
 )
 
@@ -239,6 +240,8 @@ func (s *Server) deleteSnapshot(w http.ResponseWriter, r *http.Request) {
 // handleSnapshotError maps snapshot errors to HTTP responses
 func (s *Server) handleSnapshotError(w http.ResponseWriter, err error) {
 	switch {
+	case quota.IsExceeded(err):
+		_ = spec.WriteError(w, http.StatusTooManyRequests, "quota_exceeded", err.Error())
 	case errors.Is(err, snapshot.ErrVolumeNotFound):
 		_ = spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "volume not found")
 	case errors.Is(err, snapshot.ErrSnapshotNotFound):

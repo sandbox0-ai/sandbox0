@@ -555,17 +555,18 @@ func (m *Manager) SyncDirectVolumeFileMount(ctx context.Context, volumeID string
 	if err != nil {
 		return err
 	}
-	m.observeMaterializedManifest(ctx, volCtx, manifest)
-	return nil
+	return m.observeMaterializedManifest(ctx, volCtx, manifest)
 }
 
-func (m *Manager) observeMaterializedManifest(ctx context.Context, volCtx *VolumeContext, manifest *s0fs.Manifest) {
+func (m *Manager) observeMaterializedManifest(ctx context.Context, volCtx *VolumeContext, manifest *s0fs.Manifest) error {
 	if volCtx == nil || volCtx.Observer == nil || manifest == nil || manifest.State == nil {
-		return
+		return nil
 	}
 	if err := volCtx.Observer.ObserveVolumeState(ctx, volCtx.VolumeID, volCtx.TeamID, manifest.State, time.Now().UTC()); err != nil {
 		m.logger.WithError(err).WithField("volume_id", volCtx.VolumeID).Warn("Failed to record volume storage observation")
+		return err
 	}
+	return nil
 }
 
 func (m *Manager) releaseDirectVolumeFileMount(volumeID, sessionID string) func() {

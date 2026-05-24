@@ -1,6 +1,11 @@
 package quota
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+const BytesPerGB int64 = 1_000_000_000
 
 type Dimension string
 
@@ -61,6 +66,18 @@ func (e *ExceededError) Error() string {
 	}
 	d := e.Decision
 	return fmt.Sprintf("quota exceeded for %s: current %d + requested %d exceeds limit %d", d.Dimension, d.Current, d.Requested, d.LimitValue)
+}
+
+func IsExceeded(err error) bool {
+	var exceeded *ExceededError
+	return errors.As(err, &exceeded)
+}
+
+func BytesToGBRoundUp(value int64) int64 {
+	if value <= 0 {
+		return 0
+	}
+	return (value + BytesPerGB - 1) / BytesPerGB
 }
 
 func Check(teamID string, dimension Dimension, current, requested int64, limit *Limit) Decision {

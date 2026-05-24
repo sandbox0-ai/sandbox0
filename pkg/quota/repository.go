@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 )
 
 type DB interface {
@@ -106,8 +107,88 @@ func (r *Repository) CurrentUsage(ctx context.Context, teamID string, dimension 
 			return 0, fmt.Errorf("query memory quota usage: %w", err)
 		}
 		return current, nil
+	case DimensionVolumeStorageGB:
+		current, err := r.currentStorageUsageBytes(ctx, teamID, metering.SubjectTypeVolume)
+		if err != nil {
+			return 0, err
+		}
+		return BytesToGBRoundUp(current), nil
 	default:
 		return 0, fmt.Errorf("unsupported quota usage dimension %q", dimension)
+	}
+}
+
+func (r *Repository) CheckProjectedStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType, subjectID string, sizeBytes int64) (Decision, error) {
+	teamID = strings.TrimSpace(teamID)
+	if teamID == "" {
+		return Decision{}, fmt.Errorf("team_id is required")
+	}
+	limit, err := r.GetLimit(ctx, teamID, dimension)
+	if err != nil {
+		return Decision{}, err
+	}
+	if limit == nil {
+		return Check(teamID, dimension, 0, 0, nil), nil
+	}
+	projected, err := r.ProjectedStorageUsageGB(ctx, teamID, dimension, subjectType, subjectID, sizeBytes)
+	if err != nil {
+		return Decision{}, err
+	}
+	decision := Check(teamID, dimension, projected, 0, limit)
+	return decision, decision.Err()
+}
+
+func (r *Repository) ProjectedStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType, subjectID string, sizeBytes int64) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, nil
+	}
+	teamID = strings.TrimSpace(teamID)
+	subjectID = strings.TrimSpace(subjectID)
+	if teamID == "" {
+		return 0, fmt.Errorf("team_id is required")
+	}
+	if subjectID == "" {
+		return 0, fmt.Errorf("subject_id is required")
+	}
+	if sizeBytes < 0 {
+		return 0, fmt.Errorf("size_bytes must be non-negative")
+	}
+	if !storageDimensionMatchesSubjectType(dimension, subjectType) {
+		return 0, fmt.Errorf("quota dimension %q does not match storage subject_type %q", dimension, subjectType)
+	}
+
+	var otherBytes int64
+	if err := r.db.QueryRow(ctx, `
+		SELECT COALESCE(SUM(size_bytes), 0)
+		FROM metering.storage_projection_state
+		WHERE team_id = $1
+			AND subject_type = $2
+			AND subject_id <> $3
+	`, teamID, subjectType, subjectID).Scan(&otherBytes); err != nil {
+		return 0, fmt.Errorf("query projected storage quota usage: %w", err)
+	}
+	return BytesToGBRoundUp(otherBytes + sizeBytes), nil
+}
+
+func (r *Repository) currentStorageUsageBytes(ctx context.Context, teamID, subjectType string) (int64, error) {
+	var current int64
+	if err := r.db.QueryRow(ctx, `
+		SELECT COALESCE(SUM(size_bytes), 0)
+		FROM metering.storage_projection_state
+		WHERE team_id = $1
+			AND subject_type = $2
+	`, teamID, subjectType).Scan(&current); err != nil {
+		return 0, fmt.Errorf("query storage quota usage: %w", err)
+	}
+	return current, nil
+}
+
+func storageDimensionMatchesSubjectType(dimension Dimension, subjectType string) bool {
+	switch dimension {
+	case DimensionVolumeStorageGB:
+		return subjectType == metering.SubjectTypeVolume
+	default:
+		return false
 	}
 }
 

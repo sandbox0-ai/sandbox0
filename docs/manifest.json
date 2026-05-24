@@ -120,8 +120,9 @@
           "title": "Vaults"
         },
         {
-          "slug": "agent-engines",
-          "title": "Agent Engines"
+          "slug": "agent-harnesses",
+          "title": "Agent Harnesses",
+          "aliases": ["agent-engines"]
         },
         {
           "slug": "llmproxy",

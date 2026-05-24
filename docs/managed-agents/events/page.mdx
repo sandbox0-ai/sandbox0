@@ -53,7 +53,7 @@ for await (const event of stream) {
 | `user.tool_confirmation` | Allow or deny a tool that requires confirmation |
 | `user.custom_tool_result` | Result for a custom tool call |
 | `session.status_running` | A run is active |
-| `session.status_rescheduled` | The active run is waiting for an automatic engine retry after a retriable error |
+| `session.status_rescheduled` | The active run is waiting for an automatic harness retry after a retriable error |
 | `session.status_idle` | The turn ended or the agent requires action |
 | `session.error` | Session-level error |
 
@@ -65,7 +65,7 @@ Sandbox0 exposes automatic model retries through the normal event stream:
 
 | Sequence | Meaning |
 |----------|---------|
-| `session.error` with `error.retry_status.type = "retrying"` | The engine observed a retriable model or transport error and will retry the same run automatically |
+| `session.error` with `error.retry_status.type = "retrying"` | The harness observed a retriable model or transport error and will retry the same run automatically |
 | `session.status_rescheduled` | The session is in the transient `rescheduling` state while the retry is pending |
 | `session.status_running` | The same run resumed and is producing output or completion events again |
 | `session.status_idle` with `stop_reason.type = "retries_exhausted"` | The retry budget was exhausted and the turn ended without success |
@@ -106,7 +106,7 @@ await client.beta.sessions.events.send(session.id, {
     Store model and external service credentials outside agent code.
   </Card>
 
-  <Card title="Agent Engines" href="/docs/managed-agents/agent-engines" cta="Continue">
+  <Card title="Agent Harnesses" href="/docs/managed-agents/agent-harnesses" cta="Continue">
     Choose the runtime adapter that should execute each managed session.
   </Card>
 </CardGroup>

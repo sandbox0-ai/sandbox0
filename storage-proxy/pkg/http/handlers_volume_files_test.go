@@ -11,13 +11,17 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
@@ -49,6 +53,56 @@ type fakeHTTPSharedVolumeBarrier struct {
 	sharedCalls    int
 	exclusiveCalls int
 	lastVolumeID   string
+}
+
+type fakeQuotaDB struct {
+	limit        *quota.Limit
+	currentBytes int64
+}
+
+type fakeQuotaRow struct {
+	values []any
+	err    error
+}
+
+func (db *fakeQuotaDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, nil
+}
+
+func (db *fakeQuotaDB) QueryRow(_ context.Context, sql string, _ ...any) pgx.Row {
+	switch {
+	case strings.Contains(sql, "quota.team_quota_limits"):
+		if db.limit == nil {
+			return fakeQuotaRow{err: pgx.ErrNoRows}
+		}
+		return fakeQuotaRow{values: []any{db.limit.TeamID, db.limit.Dimension, db.limit.LimitValue}}
+	case strings.Contains(sql, "metering.storage_projection_state"):
+		return fakeQuotaRow{values: []any{db.currentBytes}}
+	default:
+		return fakeQuotaRow{err: errors.New("unexpected quota query")}
+	}
+}
+
+func (r fakeQuotaRow) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	if len(dest) != len(r.values) {
+		return errors.New("unexpected scan destination count")
+	}
+	for i, value := range r.values {
+		switch target := dest[i].(type) {
+		case *string:
+			*target = value.(string)
+		case *quota.Dimension:
+			*target = value.(quota.Dimension)
+		case *int64:
+			*target = value.(int64)
+		default:
+			return errors.New("unexpected scan destination type")
+		}
+	}
+	return nil
 }
 
 func mustMountOptionsRaw(t *testing.T, opts volume.MountOptions) *json.RawMessage {
@@ -647,6 +701,59 @@ func TestWriteVolumeFileSkipsSyncWhenContentUnchanged(t *testing.T) {
 	}
 	if volMgr.syncCalls != 0 {
 		t.Fatalf("SyncDirectVolumeFileMount() calls = %d, want 0", volMgr.syncCalls)
+	}
+}
+
+func TestWriteVolumeFileChecksQuotaBeforeProxyingToOwner(t *testing.T) {
+	remoteSeen := make(chan struct{}, 1)
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case remoteSeen <- struct{}{}:
+		default:
+		}
+		_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"written": true})
+	}))
+	defer remote.Close()
+
+	fileRPC := &fakeHTTPVolumeFileRPC{}
+	server, volMgr := newVolumeFileTestServer(fileRPC)
+	server.quotaRepo = quota.NewRepositoryWithDB(&fakeQuotaDB{
+		limit: &quota.Limit{
+			TeamID:     "team-a",
+			Dimension:  quota.DimensionVolumeStorageGB,
+			LimitValue: 0,
+		},
+	})
+	repo := server.repo.(*fakeHTTPRepo)
+	repo.activeMounts["vol-1"] = []*db.VolumeMount{
+		{
+			VolumeID:  "vol-1",
+			ClusterID: "cluster-a",
+			PodID:     "remote-pod",
+			MountedAt: time.Unix(10, 0),
+		},
+	}
+	server.podResolver = &fakeVolumeFilePodResolver{
+		urls: map[string]string{"remote-pod": remote.URL},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/files?path=/quota.txt", bytes.NewReader([]byte("quota")))
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-a"}))
+	recorder := httptest.NewRecorder()
+
+	server.handleVolumeFileOperation(recorder, req)
+
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
+	}
+	if volMgr.acquireCalls != 0 {
+		t.Fatalf("AcquireDirectVolumeFileMount() calls = %d, want 0", volMgr.acquireCalls)
+	}
+	select {
+	case <-remoteSeen:
+		t.Fatal("quota exceeded write was proxied to owner")
+	default:
 	}
 }
 

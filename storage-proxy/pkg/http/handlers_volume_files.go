@@ -523,13 +523,13 @@ func (s *Server) readVolumeFile(w http.ResponseWriter, r *http.Request, volumeID
 
 func (s *Server) writeVolumeFile(w http.ResponseWriter, r *http.Request, volumeID, logicalPath string) {
 	s.withSharedVolumeFileRequest(w, r, volumeID, func(lockedReq *http.Request) {
-		ctx, volumeRecord, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, lockedReq, volumeID)
-		if handled {
-			return
-		}
-		defer cleanup()
-
 		if lockedReq.URL.Query().Get("mkdir") == "true" {
+			ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, lockedReq, volumeID)
+			if handled {
+				return
+			}
+			defer cleanup()
+
 			changed, err := s.mkdirVolumePath(ctx, volumeID, logicalPath, lockedReq.URL.Query().Get("recursive") == "true")
 			if err != nil {
 				s.writeVolumeFileError(w, err)
@@ -554,10 +554,24 @@ func (s *Server) writeVolumeFile(w http.ResponseWriter, r *http.Request, volumeI
 			s.writeVolumeFileError(w, errFileTooLarge)
 			return
 		}
-		if err := s.enforceVolumeStorageAdditionalQuota(ctx, volumeRecord, int64(len(data))); err != nil {
+
+		volumeRecord, err := s.loadAuthorizedVolume(lockedReq.Context(), volumeID)
+		if err != nil {
 			s.writeVolumeFileError(w, err)
 			return
 		}
+		if err := s.enforceVolumeStorageAdditionalQuota(lockedReq.Context(), volumeRecord, int64(len(data))); err != nil {
+			s.writeVolumeFileError(w, err)
+			return
+		}
+		lockedReq.Body = io.NopCloser(bytes.NewReader(data))
+		lockedReq.ContentLength = int64(len(data))
+
+		ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, lockedReq, volumeID)
+		if handled {
+			return
+		}
+		defer cleanup()
 
 		changed, err := s.writeVolumePath(ctx, volumeID, logicalPath, data)
 		if err != nil {

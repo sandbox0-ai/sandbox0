@@ -479,6 +479,7 @@ func (s *Server) setupRoutes() {
 				files.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), s.handleVolumeFileOperation)
 				files.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), s.handleVolumeFileOperation)
 				files.DELETE("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), s.handleVolumeFileOperation)
+				files.PUT("/archive", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), s.handleVolumeFileArchiveImport)
 				files.GET("/watch", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), s.handleVolumeFileWatch)
 				files.POST("/move", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), s.handleVolumeFileMove)
 				files.GET("/stat", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), s.handleVolumeFileStat)

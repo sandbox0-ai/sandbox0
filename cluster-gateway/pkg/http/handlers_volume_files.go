@@ -37,6 +37,22 @@ func (s *Server) handleVolumeFileWatch(c *gin.Context) {
 	s.proxyToStorageProxy(c)
 }
 
+// handleVolumeFileArchiveImport handles volume tar archive imports.
+// Route: /api/v1/sandboxvolumes/:id/files/archive
+func (s *Server) handleVolumeFileArchiveImport(c *gin.Context) {
+	id, ok := requireVolumeID(c)
+	if !ok {
+		return
+	}
+	if c.Query("path") == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "path is required")
+		return
+	}
+
+	c.Request.URL.Path = "/sandboxvolumes/" + id + "/files/archive"
+	s.proxyToStorageProxy(c)
+}
+
 // handleVolumeFileMove handles volume file move operations.
 // Route: /api/v1/sandboxvolumes/:id/files/move
 func (s *Server) handleVolumeFileMove(c *gin.Context) {

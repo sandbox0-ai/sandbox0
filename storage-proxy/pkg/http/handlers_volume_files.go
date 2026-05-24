@@ -1,6 +1,7 @@
 package http
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -25,6 +26,10 @@ import (
 )
 
 const maxVolumeFileSize = 100 * 1024 * 1024
+const maxVolumeArchiveFileSize = 100 * 1024 * 1024
+const maxVolumeArchiveBytes = 2 * 1024 * 1024 * 1024
+const maxVolumeArchiveEntries = 100000
+const volumeArchiveWriteChunkSize = 4 * 1024 * 1024
 
 const maxPOSIXID = int64(^uint32(0))
 
@@ -41,7 +46,15 @@ var (
 	errPathNotDir            = errors.New("path is not a directory")
 	errDirectoryNotEmpty     = errors.New("directory not empty")
 	errInvalidPath           = errors.New("invalid path")
+	errInvalidArchive        = errors.New("invalid archive")
 )
+
+type volumeFileArchiveImportResponse struct {
+	Files       int64 `json:"files"`
+	Directories int64 `json:"directories"`
+	Symlinks    int64 `json:"symlinks"`
+	Bytes       int64 `json:"bytes"`
+}
 
 type volumeFileInfo struct {
 	Name       string    `json:"name"`
@@ -120,6 +133,40 @@ func (s *Server) handleVolumeFileOperation(w http.ResponseWriter, r *http.Reques
 	default:
 		_ = spec.WriteError(w, http.StatusMethodNotAllowed, spec.CodeBadRequest, "method not allowed")
 	}
+}
+
+func (s *Server) handleVolumeFileArchiveImport(w http.ResponseWriter, r *http.Request) {
+	volumeID := r.PathValue("id")
+	if volumeID == "" {
+		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "volume id is required")
+		return
+	}
+	basePath := r.URL.Query().Get("path")
+	if basePath == "" {
+		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "path is required")
+		return
+	}
+
+	s.withSharedVolumeFileRequest(w, r, volumeID, func(lockedReq *http.Request) {
+		ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, lockedReq, volumeID)
+		if handled {
+			return
+		}
+		defer cleanup()
+
+		result, changed, err := s.importVolumeTarArchive(ctx, volumeID, basePath, lockedReq.Body)
+		if err != nil {
+			s.writeVolumeFileError(w, err)
+			return
+		}
+		if changed {
+			if err := s.finalizeVolumeFileMutation(ctx, volumeID); err != nil {
+				s.writeVolumeFileError(w, err)
+				return
+			}
+		}
+		_ = spec.WriteSuccess(w, http.StatusOK, result)
+	})
 }
 
 func (s *Server) withSharedVolumeFileRequest(w http.ResponseWriter, r *http.Request, volumeID string, fn func(*http.Request)) bool {
@@ -822,6 +869,227 @@ func (s *Server) writeVolumePath(ctx context.Context, volumeID, raw string, data
 	return true, nil
 }
 
+func (s *Server) importVolumeTarArchive(ctx context.Context, volumeID, basePath string, reader io.Reader) (*volumeFileArchiveImportResponse, bool, error) {
+	base, err := cleanVolumePath(basePath, true)
+	if err != nil {
+		return nil, false, err
+	}
+	tarReader := tar.NewReader(reader)
+	result := &volumeFileArchiveImportResponse{}
+	var changed bool
+	var entries int64
+
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, false, fmt.Errorf("%w: %v", errInvalidArchive, err)
+		}
+		if header == nil {
+			continue
+		}
+		entries++
+		if entries > maxVolumeArchiveEntries {
+			return nil, false, fmt.Errorf("%w: too many entries", errInvalidArchive)
+		}
+		relPath, skip, err := cleanVolumeArchiveEntryName(header.Name)
+		if err != nil {
+			return nil, false, err
+		}
+		if skip {
+			continue
+		}
+		targetPath := joinVolumePath(base, relPath)
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			didChange, err := s.mkdirVolumePath(ctx, volumeID, targetPath, true)
+			if err != nil {
+				return nil, false, err
+			}
+			changed = changed || didChange
+			result.Directories++
+		case tar.TypeReg, tar.TypeRegA:
+			if header.Size < 0 {
+				return nil, false, fmt.Errorf("%w: negative file size for %s", errInvalidArchive, header.Name)
+			}
+			if result.Bytes+header.Size > maxVolumeArchiveBytes {
+				return nil, false, errFileTooLarge
+			}
+			didChange, written, err := s.writeVolumePathFromReader(ctx, volumeID, targetPath, tarReader, header.Size)
+			if err != nil {
+				return nil, false, err
+			}
+			changed = changed || didChange
+			result.Files++
+			result.Bytes += written
+		case tar.TypeSymlink:
+			didChange, err := s.createVolumeSymlinkPath(ctx, volumeID, targetPath, header.Linkname)
+			if err != nil {
+				return nil, false, err
+			}
+			changed = changed || didChange
+			result.Symlinks++
+		case tar.TypeXHeader, tar.TypeXGlobalHeader:
+			continue
+		default:
+			return nil, false, fmt.Errorf("%w: unsupported entry type %q for %s", errInvalidArchive, string(header.Typeflag), header.Name)
+		}
+	}
+	return result, changed, nil
+}
+
+func (s *Server) writeVolumePathFromReader(ctx context.Context, volumeID, raw string, reader io.Reader, size int64) (bool, int64, error) {
+	if size > maxVolumeArchiveFileSize {
+		return false, 0, errFileTooLarge
+	}
+	resolved, err := s.lookupVolumePath(ctx, volumeID, raw, false)
+	if err != nil {
+		return false, 0, err
+	}
+
+	var (
+		inode    uint64
+		handleID uint64
+	)
+	if resolved.Exists {
+		if attrModeIsDir(resolved.Attr.Mode) {
+			return false, 0, errPathNotDir
+		}
+		openResp, err := s.fileRPC.Open(ctx, &pb.OpenRequest{
+			VolumeId: volumeID,
+			Inode:    resolved.Inode,
+			Flags:    uint32(syscall.O_WRONLY | syscall.O_TRUNC),
+			Actor:    volumeFileActor(ctx),
+		})
+		if err != nil {
+			return false, 0, translateVolumeRPCError(err)
+		}
+		inode = resolved.Inode
+		handleID = openResp.HandleId
+	} else {
+		parent, base, err := s.ensureVolumeParent(ctx, volumeID, raw, true)
+		if err != nil {
+			return false, 0, err
+		}
+		nodeResp, err := s.fileRPC.Create(ctx, &pb.CreateRequest{
+			VolumeId: volumeID,
+			Parent:   parent,
+			Name:     base,
+			Mode:     0o644,
+			Flags:    uint32(syscall.O_WRONLY),
+			Umask:    0,
+			Actor:    volumeFileActor(ctx),
+		})
+		if err != nil {
+			return false, 0, translateVolumeRPCError(err)
+		}
+		inode = nodeResp.Inode
+		handleID = nodeResp.HandleId
+	}
+	defer func() {
+		if handleID == 0 {
+			return
+		}
+		_, _ = s.fileRPC.Release(ctx, &pb.ReleaseRequest{
+			VolumeId: volumeID,
+			Inode:    inode,
+			HandleId: handleID,
+			Actor:    volumeFileActor(ctx),
+		})
+	}()
+
+	buf := make([]byte, volumeArchiveWriteChunkSize)
+	var written int64
+	for {
+		n, readErr := reader.Read(buf)
+		if n > 0 {
+			written += int64(n)
+			if written > size || written > maxVolumeArchiveFileSize {
+				return false, written, errFileTooLarge
+			}
+			resp, err := s.fileRPC.Write(ctx, &pb.WriteRequest{
+				VolumeId: volumeID,
+				Inode:    inode,
+				Offset:   written - int64(n),
+				Data:     buf[:n],
+				HandleId: handleID,
+				Actor:    volumeFileActor(ctx),
+			})
+			if err != nil {
+				return false, written, translateVolumeRPCError(err)
+			}
+			if resp != nil && resp.BytesWritten != int64(n) {
+				return false, written, io.ErrShortWrite
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return false, written, readErr
+		}
+	}
+	if written != size {
+		return false, written, fmt.Errorf("%w: short file %s", errInvalidArchive, raw)
+	}
+	return true, written, nil
+}
+
+func (s *Server) createVolumeSymlinkPath(ctx context.Context, volumeID, raw, target string) (bool, error) {
+	target = strings.TrimSpace(target)
+	if target == "" || strings.HasPrefix(target, "/") {
+		return false, fmt.Errorf("%w: invalid symlink target", errInvalidArchive)
+	}
+	resolved, err := s.lookupVolumePath(ctx, volumeID, raw, false)
+	if err != nil {
+		return false, err
+	}
+	if resolved.Exists {
+		if attrModeIsDir(resolved.Attr.Mode) {
+			return false, errPathNotDir
+		}
+		if err := s.removeVolumePath(ctx, volumeID, resolved); err != nil {
+			return false, err
+		}
+	}
+	parent, base, err := s.ensureVolumeParent(ctx, volumeID, raw, true)
+	if err != nil {
+		return false, err
+	}
+	_, err = s.fileRPC.Symlink(ctx, &pb.SymlinkRequest{
+		VolumeId: volumeID,
+		Parent:   parent,
+		Name:     base,
+		Target:   target,
+		Actor:    volumeFileActor(ctx),
+	})
+	if err != nil {
+		return false, translateVolumeRPCError(err)
+	}
+	return true, nil
+}
+
+func cleanVolumeArchiveEntryName(raw string) (string, bool, error) {
+	name := strings.ReplaceAll(strings.TrimSpace(raw), "\\", "/")
+	if name == "" {
+		return "", true, nil
+	}
+	if strings.HasPrefix(name, "/") {
+		return "", false, fmt.Errorf("%w: absolute archive path %q", errInvalidArchive, raw)
+	}
+	cleaned := pathpkg.Clean(name)
+	if cleaned == "." {
+		return "", true, nil
+	}
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", false, fmt.Errorf("%w: archive path escapes destination %q", errInvalidArchive, raw)
+	}
+	return cleaned, false, nil
+}
+
 func (s *Server) moveVolumePath(ctx context.Context, volumeID, src, dst string) error {
 	source, err := s.lookupVolumePath(ctx, volumeID, src, false)
 	if err != nil {
@@ -1100,7 +1368,7 @@ func (s *Server) writeVolumeFileError(w http.ResponseWriter, err error) {
 		_ = spec.WriteError(w, http.StatusForbidden, spec.CodeForbidden, err.Error())
 	case errors.Is(err, errPathAlreadyExists), errors.Is(err, errPathNotDir), errors.Is(err, errDirectoryNotEmpty):
 		_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, err.Error())
-	case errors.Is(err, errInvalidPath):
+	case errors.Is(err, errInvalidPath), errors.Is(err, errInvalidArchive):
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 	default:
 		_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, err.Error())

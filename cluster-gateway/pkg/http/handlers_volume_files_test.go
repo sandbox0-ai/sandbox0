@@ -95,6 +95,7 @@ func newVolumeFileRouteTestServer(t *testing.T) (string, *internalauth.Generator
 			files.GET("", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), server.handleVolumeFileOperation)
 			files.POST("", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), server.handleVolumeFileOperation)
 			files.DELETE("", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), server.handleVolumeFileOperation)
+			files.PUT("/archive", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), server.handleVolumeFileArchiveImport)
 			files.GET("/watch", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), server.handleVolumeFileWatch)
 			files.POST("/move", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), server.handleVolumeFileMove)
 			files.GET("/stat", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), server.handleVolumeFileStat)
@@ -193,6 +194,16 @@ func TestVolumeFileRoutesProxyToStorageProxy(t *testing.T) {
 			path:       "/api/v1/sandboxvolumes/vol-1/files/watch",
 			permission: gatewayauthn.PermSandboxVolumeFileRead,
 			wantPath:   "/sandboxvolumes/vol-1/files/watch",
+		},
+		{
+			name:         "archive import preserves tar body",
+			method:       http.MethodPut,
+			path:         "/api/v1/sandboxvolumes/vol-1/files/archive?path=/workspace",
+			body:         "tar-data",
+			permission:   gatewayauthn.PermSandboxVolumeFileWrite,
+			wantPath:     "/sandboxvolumes/vol-1/files/archive",
+			wantQuery:    "path=/workspace",
+			wantBodyPart: "tar-data",
 		},
 	}
 

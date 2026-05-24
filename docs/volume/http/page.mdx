@@ -41,6 +41,12 @@ if err != nil {
     log.Fatal(err)
 }
 
+summary, err := client.UploadVolumeDirectory(ctx, volumeID, "./dist", "/apps/current")
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("uploaded files=%d bytes=%d\\n", summary.Files, summary.Bytes)
+
 data, err := client.ReadVolumeFile(ctx, volumeID, "/docs/readme.txt")
 if err != nil {
     log.Fatal(err)
@@ -77,6 +83,9 @@ if err != nil {
 client.volumes.mkdir(volume_id, "/docs", recursive=True)
 client.volumes.write_file(volume_id, "/docs/readme.txt", b"Hello from Volume HTTP")
 
+summary = client.volumes.upload_directory(volume_id, "./dist", "/apps/current")
+print(f"uploaded files={summary.files} bytes={summary.bytes_}")
+
 data = client.volumes.read_file(volume_id, "/docs/readme.txt")
 print(data.decode())
 
@@ -92,10 +101,16 @@ client.volumes.delete_file(volume_id, "/docs/readme-old.txt")`
     {
       label: "TypeScript",
       language: "typescript",
-      code: `const volumeId = "vol_abc123";
+      code: `import { readFile } from "node:fs/promises";
+
+const volumeId = "vol_abc123";
 
 await client.volumes.mkdir(volumeId, "/docs", true);
 await client.volumes.writeFile(volumeId, "/docs/readme.txt", "Hello from Volume HTTP");
+
+const archive = await readFile("dist.tar");
+const summary = await client.volumes.importArchive(volumeId, "/apps/current", archive);
+console.log("uploaded files=", summary.files, "bytes=", summary.bytes);
 
 const data = await client.volumes.readFile(volumeId, "/docs/readme.txt");
 console.log(Buffer.from(data).toString("utf8"));
@@ -114,6 +129,7 @@ await client.volumes.deleteFile(volumeId, "/docs/readme-old.txt");`
       language: "bash",
       code: `s0 volume files mkdir vol_abc123 /docs --parents
 s0 volume files write vol_abc123 /docs/readme.txt --data "Hello from Volume HTTP"
+s0 volume files upload vol_abc123 ./dist /apps/current --recursive
 s0 volume files cat vol_abc123 /docs/readme.txt
 s0 volume files stat vol_abc123 /docs/readme.txt
 s0 volume files ls vol_abc123 /docs
@@ -135,8 +151,60 @@ s0 volume files rm vol_abc123 /docs/readme-old.txt`
 | Move or rename | `MoveVolumeFile` | `client.volumes.move_file` | `client.volumes.moveFile` | `s0 volume files mv` |
 | Delete path | `DeleteVolumeFile` | `client.volumes.delete_file` | `client.volumes.deleteFile` | `s0 volume files rm` |
 | Upload local file | manual local read + `WriteVolumeFile` | `client.volumes.write_file` | `client.volumes.writeFile` | `s0 volume files upload` |
+| Upload directory/archive | `UploadVolumeDirectory` / `ImportVolumeArchive` | `client.volumes.upload_directory` / `client.volumes.import_archive` | `client.volumes.importArchive` | `s0 volume files upload --recursive` |
 | Download to local file | manual local write + `ReadVolumeFile` | `client.volumes.read_file` | `client.volumes.readFile` | `s0 volume files download` |
 | Watch path | `WatchVolumeFiles` | `client.volumes.watch_files` | `client.volumes.watchFiles` | `s0 volume files watch` |
+
+### Directory Upload
+
+Use directory upload for build artifacts, framework bundles, and other multi-file trees.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `summary, err := client.UploadVolumeDirectory(ctx, volumeID, "./dist", "/apps/current")
+if err != nil {
+    log.Fatal(err)
+}
+
+fmt.Printf("uploaded files=%d dirs=%d symlinks=%d bytes=%d\\n",
+    summary.Files,
+    summary.Directories,
+    summary.Symlinks,
+    summary.Bytes,
+)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `summary = client.volumes.upload_directory(volume_id, "./dist", "/apps/current")
+
+print(
+    f"uploaded files={summary.files} "
+    f"dirs={summary.directories} "
+    f"symlinks={summary.symlinks} "
+    f"bytes={summary.bytes_}"
+)`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `import { readFile } from "node:fs/promises";
+
+const archive = await readFile("dist.tar");
+const summary = await client.volumes.importArchive(volumeId, "/apps/current", archive);
+
+console.log("uploaded files=", summary.files, "bytes=", summary.bytes);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 volume files upload vol_abc123 ./dist /apps/current --recursive`
+    }
+  ]}
+/>
 
 ### FileInfo
 
@@ -150,8 +218,6 @@ s0 volume files rm vol_abc123 /docs/readme-old.txt`
 | `mod_time` | string | Last modification time |
 | `is_link` | boolean | Whether the entry is a symlink |
 | `link_target` | string | Symlink target when available |
-
----
 
 ## Write File
 
@@ -416,6 +482,7 @@ try {
 
 - `GET /files`, `GET /stat`, and `GET /list` require a `path` query parameter.
 - `POST /files` with `mkdir=true` creates directories instead of writing file content.
+- Directory uploads use a tar stream internally and are not atomic. Deployment flows that require rollback should import into a fresh Volume or snapshot before switching traffic.
 - `DELETE /files` is recursive for directories.
 - File size is currently capped by the direct HTTP handler. Large transfer workflows should prefer snapshots when appropriate.
 

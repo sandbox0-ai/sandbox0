@@ -523,7 +523,7 @@ func (s *Server) readVolumeFile(w http.ResponseWriter, r *http.Request, volumeID
 
 func (s *Server) writeVolumeFile(w http.ResponseWriter, r *http.Request, volumeID, logicalPath string) {
 	s.withSharedVolumeFileRequest(w, r, volumeID, func(lockedReq *http.Request) {
-		ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, lockedReq, volumeID)
+		ctx, volumeRecord, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, lockedReq, volumeID)
 		if handled {
 			return
 		}
@@ -552,6 +552,10 @@ func (s *Server) writeVolumeFile(w http.ResponseWriter, r *http.Request, volumeI
 		}
 		if len(data) > maxVolumeFileSize {
 			s.writeVolumeFileError(w, errFileTooLarge)
+			return
+		}
+		if err := s.enforceVolumeStorageAdditionalQuota(ctx, volumeRecord, int64(len(data))); err != nil {
+			s.writeVolumeFileError(w, err)
 			return
 		}
 

@@ -1499,7 +1499,7 @@ func assertEgressQuota(env *framework.ScenarioEnv, session *e2eutils.Session, sa
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 	Expect(sandbox).NotTo(BeNil())
-	templateNamespace, err := naming.TemplateNamespaceForTeam(sandbox.TeamId)
+	templateNamespace, err := naming.TemplateNamespaceForBuiltin(sandbox.TemplateId)
 	Expect(err).NotTo(HaveOccurred())
 	waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
 
@@ -1519,7 +1519,7 @@ func assertIngressQuota(env *framework.ScenarioEnv, session *e2eutils.Session, s
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 	Expect(sandbox).NotTo(BeNil())
-	templateNamespace, err := naming.TemplateNamespaceForTeam(sandbox.TeamId)
+	templateNamespace, err := naming.TemplateNamespaceForBuiltin(sandbox.TemplateId)
 	Expect(err).NotTo(HaveOccurred())
 	waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
 

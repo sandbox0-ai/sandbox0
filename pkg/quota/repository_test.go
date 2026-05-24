@@ -117,6 +117,25 @@ func TestProjectedStorageUsageGBExcludesCurrentSubject(t *testing.T) {
 	}
 }
 
+func TestAdditionalStorageUsageGBAddsToCurrentTeamStorage(t *testing.T) {
+	repo := NewRepositoryWithDB(&fakeDB{
+		queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
+			if !strings.Contains(sql, "storage_projection_state") {
+				t.Fatalf("sql = %s, want storage projection query", sql)
+			}
+			return fakeRow{values: []any{BytesPerGB}}
+		},
+	})
+
+	got, err := repo.AdditionalStorageUsageGB(context.Background(), "team-1", DimensionVolumeStorageGB, metering.SubjectTypeVolume, 1)
+	if err != nil {
+		t.Fatalf("AdditionalStorageUsageGB: %v", err)
+	}
+	if got != 2 {
+		t.Fatalf("AdditionalStorageUsageGB = %d, want 2", got)
+	}
+}
+
 func TestCurrentUsageReturnsNetworkBytes(t *testing.T) {
 	tests := []struct {
 		name        string

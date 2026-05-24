@@ -148,6 +148,29 @@ func (r *Repository) CheckProjectedStorageUsageGB(ctx context.Context, teamID st
 	return decision, decision.Err()
 }
 
+func (r *Repository) CheckAdditionalStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType string, additionalBytes int64) (Decision, error) {
+	teamID = strings.TrimSpace(teamID)
+	if teamID == "" {
+		return Decision{}, fmt.Errorf("team_id is required")
+	}
+	if additionalBytes <= 0 {
+		return Check(teamID, dimension, 0, 0, nil), nil
+	}
+	limit, err := r.GetLimit(ctx, teamID, dimension)
+	if err != nil {
+		return Decision{}, err
+	}
+	if limit == nil {
+		return Check(teamID, dimension, 0, 0, nil), nil
+	}
+	projected, err := r.AdditionalStorageUsageGB(ctx, teamID, dimension, subjectType, additionalBytes)
+	if err != nil {
+		return Decision{}, err
+	}
+	decision := Check(teamID, dimension, projected, 0, limit)
+	return decision, decision.Err()
+}
+
 func (r *Repository) ProjectedStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType, subjectID string, sizeBytes int64) (int64, error) {
 	if r == nil || r.db == nil {
 		return 0, nil
@@ -178,6 +201,27 @@ func (r *Repository) ProjectedStorageUsageGB(ctx context.Context, teamID string,
 		return 0, fmt.Errorf("query projected storage quota usage: %w", err)
 	}
 	return BytesToGBRoundUp(otherBytes + sizeBytes), nil
+}
+
+func (r *Repository) AdditionalStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType string, additionalBytes int64) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, nil
+	}
+	teamID = strings.TrimSpace(teamID)
+	if teamID == "" {
+		return 0, fmt.Errorf("team_id is required")
+	}
+	if additionalBytes < 0 {
+		return 0, fmt.Errorf("additional_bytes must be non-negative")
+	}
+	if !storageDimensionMatchesSubjectType(dimension, subjectType) {
+		return 0, fmt.Errorf("quota dimension %q does not match storage subject_type %q", dimension, subjectType)
+	}
+	current, err := r.currentStorageUsageBytes(ctx, teamID, subjectType)
+	if err != nil {
+		return 0, err
+	}
+	return BytesToGBRoundUp(current + additionalBytes), nil
 }
 
 func (r *Repository) currentStorageUsageBytes(ctx context.Context, teamID, subjectType string) (int64, error) {

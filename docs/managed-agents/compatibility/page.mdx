@@ -19,8 +19,8 @@ Official reference: [Claude Managed Agents quickstart](https://platform.claude.c
 | Custom skills | Supported through uploaded skill versions |
 | MCP servers | Supported for URL MCP servers and vault-backed credentials |
 | GitHub repository resources | Supported at session creation |
-| Agent engines | Supported for `claude`, `codex`, and `openai-agents` |
-| External AI gateways | Supported when the gateway exposes the API shape required by the selected agent engine |
+| Agent harnesses | Supported for `claude`, `codex`, and `openai-agents` |
+| External AI gateways | Supported when the gateway exposes the API shape required by the selected agent harness |
 
 ## Current Differences
 
@@ -29,12 +29,12 @@ Official reference: [Claude Managed Agents quickstart](https://platform.claude.c
 | SDK ownership | Sandbox0 does not ship a Managed Agents SDK. Use the official Anthropic SDK. |
 | API token | SDK `apiKey` is a Sandbox0 API key, not the Anthropic LLM token. |
 | LLM token | Stored in an LLM vault and projected by Sandbox0 credential policy. |
-| Agent engine | Selected by `sandbox0.managed_agents.engine` on the LLM vault. |
+| Agent harness | Selected by the compatibility key `sandbox0.managed_agents.engine` on the LLM vault. |
 | Sandbox claim | Runtime setup claims or resumes a Sandbox0 sandbox and mounts a persistent workspace volume. |
-| Claude engine | Requires an Anthropic-compatible endpoint. |
-| Codex engine | Requires an OpenAI-compatible endpoint. |
-| OpenAI Agents engine | Requires an OpenAI Responses-compatible endpoint and uses Sandbox0 as a tool target. |
-| Retry state | Automatic retries are exposed as `session.status_rescheduled` plus `retry_status.type = "retrying"` errors when the selected engine provides a retry signal. |
+| Claude harness | Requires an Anthropic-compatible endpoint. |
+| Codex harness | Requires an OpenAI-compatible endpoint. |
+| OpenAI Agents harness | Requires an OpenAI Responses-compatible endpoint and uses Sandbox0 as a tool target. |
+| Retry state | Automatic retries are exposed as `session.status_rescheduled` plus `retry_status.type = "retrying"` errors when the selected harness provides a retry signal. |
 | External AI gateway | Optional. Use one when provider API shape, provider credentials, logging, caching, or rate limits should be managed outside Sandbox0. |
 | Anthropic pre-built skills | Not supported. Use Sandbox0 custom skills. |
 | Multi-agent threads | Not implemented in the current backend surface. |
@@ -47,7 +47,7 @@ The Claude wrapper maps Managed Agents tool definitions to Claude Agent SDK opti
 
 | Tool type | Status | Notes |
 |-----------|--------|-------|
-| `agent_toolset_20260401` | Supported | Enables built-in tools such as bash, file operations, grep/glob, web fetch, and web search through the selected engine wrapper |
+| `agent_toolset_20260401` | Supported | Enables built-in tools such as bash, file operations, grep/glob, web fetch, and web search through the selected harness wrapper |
 | `mcp_toolset` | Supported | Requires matching `mcp_servers` entries and vault credentials when the server needs auth |
 | Custom tools | Supported | The wrapper emits `agent.custom_tool_use` and waits for `user.custom_tool_result` |
 

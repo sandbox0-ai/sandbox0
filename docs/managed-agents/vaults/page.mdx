@@ -10,7 +10,7 @@ Managed Agents stores vault credential secret payloads as encrypted opaque secre
 
 ## LLM Vaults
 
-Every running session should attach exactly one LLM vault. The LLM vault selects the agent engine and model provider endpoint.
+Every running session should attach exactly one LLM vault. The LLM vault selects the agent harness and model provider endpoint.
 
 ```typescript
 const llmVault = await client.beta.vaults.create({
@@ -92,11 +92,11 @@ await client.beta.vaults.credentials.create(vault.id, {
 
 Sandbox0 injects credentials through egress auth and compatibility environment variables:
 
-| Engine | Compatibility environment |
+| Harness | Compatibility environment |
 |--------|---------------------------|
 | `claude` | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL` |
-| `codex` | `CODEX_API_KEY`, `OPENAI_API_KEY`, and `openai_base_url` engine config |
-| `openai-agents` | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `openai_base_url` engine config |
+| `codex` | `CODEX_API_KEY`, `OPENAI_API_KEY`, and `openai_base_url` harness config |
+| `openai-agents` | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `openai_base_url` harness config |
 
 The environment variables may contain placeholders. The real token is projected by Sandbox0-managed credential policy when the sandbox contacts the configured host.
 
@@ -105,7 +105,7 @@ For `openai-agents`, the runtime expects an OpenAI Responses-compatible base URL
 ## Next Steps
 
 <CardGroup>
-  <Card title="Agent Engines" href="/docs/managed-agents/agent-engines" cta="Continue">
+  <Card title="Agent Harnesses" href="/docs/managed-agents/agent-harnesses" cta="Continue">
     Choose the runtime adapter that should execute each managed session.
   </Card>
 

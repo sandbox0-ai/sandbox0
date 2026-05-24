@@ -47,7 +47,7 @@ const agent = await client.beta.agents.create({
 
 | Tool type | Status in Sandbox0 |
 |-----------|--------------------|
-| `agent_toolset_20260401` | Supported through the selected agent engine |
+| `agent_toolset_20260401` | Supported through the selected agent harness |
 | `mcp_toolset` | Supported for URL MCP servers |
 | `custom` | Supported through `agent.custom_tool_use` and `user.custom_tool_result` events |
 
@@ -76,7 +76,7 @@ If the MCP server needs credentials, attach a vault to the session. The agent de
 ## Sandbox0 Notes
 
 - Reserved `sandbox0.managed_agents.*` metadata keys are not accepted on agents.
-- The agent model defaults to the Claude engine unless a session attaches an LLM vault that selects another supported engine.
+- The agent model defaults to the Claude harness unless a session attaches an LLM vault that selects another supported harness.
 - The agent object is copied into the session snapshot. Later agent updates do not mutate existing sessions.
 
 ## Next Steps

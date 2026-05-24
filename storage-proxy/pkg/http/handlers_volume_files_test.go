@@ -723,6 +723,65 @@ func TestHandleVolumeFileArchiveImportExtractsTarAndSyncsOnce(t *testing.T) {
 	}
 }
 
+func TestHandleVolumeFileArchiveImportCachesDirectoryLookups(t *testing.T) {
+	type node struct {
+		inode uint64
+		attr  *pb.GetAttrResponse
+	}
+	nodes := map[string]node{}
+	lookupCalls := map[string]int{}
+	nextInode := uint64(2)
+	fileRPC := &fakeHTTPVolumeFileRPC{
+		lookupFunc: func(_ context.Context, req *pb.LookupRequest) (*pb.NodeResponse, error) {
+			key := strconv.FormatUint(req.Parent, 10) + "/" + req.Name
+			lookupCalls[key]++
+			if n, ok := nodes[key]; ok {
+				return &pb.NodeResponse{Inode: n.inode, Attr: n.attr}, nil
+			}
+			return nil, fserror.New(fserror.NotFound, "missing")
+		},
+		mkdirFunc: func(_ context.Context, req *pb.MkdirRequest) (*pb.NodeResponse, error) {
+			inode := nextInode
+			nextInode++
+			nodes[strconv.FormatUint(req.Parent, 10)+"/"+req.Name] = node{inode: inode, attr: volumeDirAttr()}
+			return &pb.NodeResponse{Inode: inode, Attr: volumeDirAttr()}, nil
+		},
+		createFunc: func(_ context.Context, req *pb.CreateRequest) (*pb.NodeResponse, error) {
+			inode := nextInode
+			nextInode++
+			nodes[strconv.FormatUint(req.Parent, 10)+"/"+req.Name] = node{inode: inode, attr: volumeFileAttr(0)}
+			return &pb.NodeResponse{Inode: inode, Attr: volumeFileAttr(0), HandleId: inode + 100}, nil
+		},
+		writeFunc: func(_ context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
+			return &pb.WriteResponse{BytesWritten: int64(len(req.Data))}, nil
+		},
+	}
+	server, _ := newVolumeFileTestServer(fileRPC)
+
+	req := httptest.NewRequest(http.MethodPut, "/sandboxvolumes/vol-1/files/archive?path=/", tarArchive(t, []tarEntry{
+		{name: "assets/chunks/a.js", body: []byte("a"), mode: 0o644, typeflag: tar.TypeReg},
+		{name: "assets/chunks/b.js", body: []byte("b"), mode: 0o644, typeflag: tar.TypeReg},
+		{name: "assets/chunks/c.js", body: []byte("c"), mode: 0o644, typeflag: tar.TypeReg},
+	}))
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-a"}))
+	recorder := httptest.NewRecorder()
+
+	server.handleVolumeFileArchiveImport(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if lookupCalls["1/assets"] != 1 {
+		t.Fatalf("assets lookup calls = %d, want 1", lookupCalls["1/assets"])
+	}
+	assets := nodes["1/assets"].inode
+	chunksKey := strconv.FormatUint(assets, 10) + "/chunks"
+	if lookupCalls[chunksKey] != 1 {
+		t.Fatalf("chunks lookup calls = %d, want 1", lookupCalls[chunksKey])
+	}
+}
+
 func TestHandleVolumeFileArchiveImportRejectsTraversal(t *testing.T) {
 	server, volMgr := newVolumeFileTestServer(&fakeHTTPVolumeFileRPC{})
 

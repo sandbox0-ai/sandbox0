@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	servicemigrations "github.com/sandbox0-ai/sandbox0/manager/pkg/service/migrations"
@@ -63,12 +62,6 @@ type SandboxStore interface {
 type SandboxStoreTx interface {
 	SaveRuntime(ctx context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time) error
 	MarkRuntimeCleaned(ctx context.Context, sandboxID string, generation int64, cleanedAt time.Time) error
-}
-
-type sandboxStoreDB interface {
-	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
 type PGSandboxStore struct {

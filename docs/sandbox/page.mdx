@@ -61,7 +61,7 @@ Claim a sandbox from a template. The sandbox is created from a pre-warmed pool f
 | `network` | object | `SandboxNetworkPolicy`. Controls traffic rules, protocol controls, credential bindings, and destination-scoped egress auth |
 | `webhook` | object | Webhook configuration |
 | `auto_resume` | boolean | Auto-resume when accessed (default: true) |
-| `services` | array | Sandbox Services for public HTTP routes and function publishing |
+| `services` | array | Sandbox Services for public HTTP routes |
 
 See [Network](/docs/sandbox/network) and [Protocol Controls](/docs/sandbox/protocol-controls) for outbound control, [Sandbox Services](/docs/sandbox/services) for public HTTP controls, and [Credential](/docs/credential) for outbound auth and secret handling.
 
@@ -406,7 +406,7 @@ Only the following fields can be updated at runtime:
 | `hard_ttl` | integer | Maximum lifetime in seconds (hard limit) |
 | `network` | object | Network policy configuration |
 | `auto_resume` | boolean | Auto-resume when accessed |
-| `services` | array | Sandbox Services for public HTTP routes and function publishing |
+| `services` | array | Sandbox Services for public HTTP routes |
 
 <Callout variant="warning">
 <code>env_vars</code> and <code>webhook</code> cannot be updated at runtime. These fields only take effect when the sandbox is created. To use different environment variables, create a new sandbox.

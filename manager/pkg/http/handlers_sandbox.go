@@ -10,7 +10,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
-	"github.com/sandbox0-ai/sandbox0/pkg/functionruntime"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
@@ -37,9 +36,6 @@ func (s *Server) claimSandbox(c *gin.Context) {
 	}
 	req.TeamID = claims.TeamID
 	req.UserID = claims.UserID
-	if functionRuntimeClaimMetadataAllowed(claims) {
-		req.Metadata = functionruntime.FromHeaders(c.Request.Header)
-	}
 
 	if req.Template == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "template is required")
@@ -75,18 +71,6 @@ func (s *Server) claimSandbox(c *gin.Context) {
 	}
 
 	spec.JSONSuccess(c, http.StatusCreated, resp)
-}
-
-func functionRuntimeClaimMetadataAllowed(claims *internalauth.Claims) bool {
-	if claims == nil {
-		return false
-	}
-	switch claims.Caller {
-	case internalauth.ServiceClusterGateway, internalauth.ServiceFunctionGateway:
-		return true
-	default:
-		return false
-	}
 }
 
 // listSandboxes lists all sandboxes for the authenticated team

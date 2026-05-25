@@ -57,11 +57,6 @@ func TestLookupTracksCrossServiceDerivedFields(t *testing.T) {
 			consumers: []string{"manager", "netd"},
 		},
 		{
-			path:      "spec.services.functionGateway.service.port",
-			owner:     "plan",
-			consumers: []string{"function-gateway", "regional-gateway"},
-		},
-		{
 			path:      "spec.publicExposure.rootDomain",
 			owner:     "plan",
 			consumers: []string{"global-gateway", "cluster-gateway", "manager"},

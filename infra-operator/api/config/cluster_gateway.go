@@ -32,9 +32,9 @@ type ClusterGatewayConfig struct {
 	// +kubebuilder:default="internal"
 	AuthMode string `yaml:"auth_mode" json:"authMode"`
 	// AllowedCallers is the list of services allowed to call cluster-gateway.
-	// Default: ["regional-gateway","scheduler","function-gateway"].
+	// Default: ["regional-gateway","scheduler"].
 	// +optional
-	// +kubebuilder:default={"regional-gateway","scheduler","function-gateway"}
+	// +kubebuilder:default={"regional-gateway","scheduler"}
 	AllowedCallers []string `yaml:"allowed_callers" json:"allowedCallers"`
 
 	// Timeouts
@@ -52,14 +52,6 @@ type ClusterGatewayConfig struct {
 
 	// Public gateway (external auth) configuration
 	DatabaseURL string `yaml:"database_url" json:"-"`
-	// FunctionRootDomain is the DNS root for function hosts when cluster-gateway
-	// serves single-cluster Function management APIs.
-	// +optional
-	// +kubebuilder:default="sandbox0.site"
-	FunctionRootDomain string `yaml:"function_root_domain" json:"functionRootDomain"`
-	// FunctionRegionID is the DNS-safe region label placed under FunctionRootDomain.
-	// +optional
-	FunctionRegionID string `yaml:"function_region_id" json:"functionRegionId"`
 	// License file path used to unlock enterprise SSO features.
 	// Required when OIDC providers are configured.
 	// +optional

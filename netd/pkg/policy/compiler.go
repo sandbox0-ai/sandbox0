@@ -99,15 +99,12 @@ type CompiledHTTPValueMatch struct {
 }
 
 type CompiledPolicy struct {
-	SandboxID                 string
-	TeamID                    string
-	OwnerKind                 string
-	FunctionID                string
-	FunctionRevisionID        string
-	FunctionRuntimeInstanceID string
-	Mode                      v1alpha1.NetworkPolicyMode
-	Egress                    CompiledRuleSet
-	Platform                  *PlatformPolicy
+	SandboxID string
+	TeamID    string
+	OwnerKind string
+	Mode      v1alpha1.NetworkPolicyMode
+	Egress    CompiledRuleSet
+	Platform  *PlatformPolicy
 }
 
 func CompileNetworkPolicy(spec *v1alpha1.NetworkPolicySpec) (*CompiledPolicy, error) {

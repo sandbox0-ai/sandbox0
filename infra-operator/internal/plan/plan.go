@@ -21,7 +21,6 @@ const (
 	defaultClusterGatewayHTTPPort  = 8443
 	defaultClusterGatewayAuthMode  = "internal"
 	defaultRegionalGatewayAuthMode = "self_hosted"
-	defaultFunctionGatewayHTTPPort = 8080
 	defaultSSHGatewayPort          = 2222
 	defaultStorageProxyHTTPPort    = 8081
 	registryCredentialsPath        = "/etc/sandbox0/registry/.dockerconfigjson"
@@ -35,7 +34,6 @@ type InfraPlan struct {
 	Manager         ManagerPlan
 	Netd            NetdPlan
 	RegionalGateway RegionalGatewayPlan
-	FunctionGateway FunctionGatewayPlan
 	Enterprise      EnterpriseLicensePlan
 	Validation      ValidationPlan
 	Cleanup         CleanupPlan
@@ -49,7 +47,6 @@ type ComponentPlan struct {
 	HasControlPlane           bool
 	HasDataPlane              bool
 	EnableRegionalGateway     bool
-	EnableFunctionGateway     bool
 	EnableSSHGateway          bool
 	EnableScheduler           bool
 	EnableClusterGateway      bool
@@ -87,11 +84,10 @@ type ResourceRef struct {
 }
 
 type ServicePlan struct {
-	Manager         ServiceReference
-	Scheduler       ServiceReference
-	FunctionGateway ServiceReference
-	ClusterGateway  ServiceReference
-	StorageProxy    ServiceReference
+	Manager        ServiceReference
+	Scheduler      ServiceReference
+	ClusterGateway ServiceReference
+	StorageProxy   ServiceReference
 }
 
 type ServiceReference struct {
@@ -141,17 +137,6 @@ type RegionalGatewayPlan struct {
 	IngressConfig            *infrav1alpha1.IngressConfig
 	Config                   *apiconfig.RegionalGatewayConfig
 	DefaultClusterGatewayURL string
-	FunctionGatewayURL       string
-}
-
-type FunctionGatewayPlan struct {
-	Enabled                  bool
-	Replicas                 int32
-	Resources                *corev1.ResourceRequirements
-	ServiceConfig            *infrav1alpha1.ServiceNetworkConfig
-	IngressConfig            *infrav1alpha1.IngressConfig
-	Config                   *apiconfig.FunctionGatewayConfig
-	DefaultClusterGatewayURL string
 }
 
 type EnterpriseLicensePlan struct {
@@ -172,7 +157,6 @@ type EndpointStatusPlan struct {
 	GlobalGateway           string
 	RegionalGateway         string
 	RegionalGatewayInternal string
-	FunctionGateway         string
 	ClusterGateway          string
 }
 
@@ -202,7 +186,6 @@ func Compile(infra *infrav1alpha1.Sandbox0Infra) *InfraPlan {
 	compiled.Manager = compileManagerPlan(infra, compiled)
 	compiled.Netd = compileNetdPlan(infra, compiled)
 	compiled.RegionalGateway = compileRegionalGatewayPlan(infra, compiled)
-	compiled.FunctionGateway = compileFunctionGatewayPlan(infra, compiled)
 	compiled.Enterprise = compileEnterpriseLicensePlan(infra, compiled)
 	compiled.Validation = compileValidationPlan(infra, compiled)
 	compiled.Cleanup = compileCleanupPlan(infra, compiled)
@@ -214,7 +197,6 @@ func Compile(infra *infrav1alpha1.Sandbox0Infra) *InfraPlan {
 func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 	enableGlobalGateway := infrav1alpha1.IsGlobalGatewayEnabled(infra)
 	enableRegionalGateway := infrav1alpha1.IsRegionalGatewayEnabled(infra)
-	enableFunctionGateway := infrav1alpha1.IsFunctionGatewayEnabled(infra)
 	enableSSHGateway := infrav1alpha1.IsSSHGatewayEnabled(infra)
 	enableScheduler := infrav1alpha1.IsSchedulerEnabled(infra)
 	enableClusterGateway := infrav1alpha1.IsClusterGatewayEnabled(infra)
@@ -223,7 +205,7 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 	enableDatabase := infrav1alpha1.IsDatabaseEnabled(infra)
 	enableRedis := infrav1alpha1.IsRedisEnabled(infra)
 
-	hasControlPlane := enableRegionalGateway || enableFunctionGateway || enableSSHGateway || enableScheduler
+	hasControlPlane := enableRegionalGateway || enableSSHGateway || enableScheduler
 	hasDataPlane := enableClusterGateway || enableManager || enableStorageProxy
 
 	return ComponentPlan{
@@ -231,7 +213,6 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 		HasControlPlane:           hasControlPlane,
 		HasDataPlane:              hasDataPlane,
 		EnableRegionalGateway:     enableRegionalGateway,
-		EnableFunctionGateway:     enableFunctionGateway,
 		EnableSSHGateway:          enableSSHGateway,
 		EnableScheduler:           enableScheduler,
 		EnableClusterGateway:      enableClusterGateway,
@@ -251,11 +232,10 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 
 func compileServices(infra *infrav1alpha1.Sandbox0Infra) ServicePlan {
 	return ServicePlan{
-		Manager:         compileManagerServiceReference(infra),
-		Scheduler:       compileSchedulerServiceReference(infra),
-		FunctionGateway: compileFunctionGatewayServiceReference(infra),
-		ClusterGateway:  compileClusterGatewayServiceReference(infra),
-		StorageProxy:    compileStorageProxyServiceReference(infra),
+		Manager:        compileManagerServiceReference(infra),
+		Scheduler:      compileSchedulerServiceReference(infra),
+		ClusterGateway: compileClusterGatewayServiceReference(infra),
+		StorageProxy:   compileStorageProxyServiceReference(infra),
 	}
 }
 
@@ -301,21 +281,6 @@ func compileClusterGatewayServiceReference(infra *infrav1alpha1.Sandbox0Infra) S
 		Name: name,
 		Port: port,
 		URL:  fmt.Sprintf("http://%s:%d", name, port),
-	}
-}
-
-func compileFunctionGatewayServiceReference(infra *infrav1alpha1.Sandbox0Infra) ServiceReference {
-	if infra == nil || infra.Name == "" || infra.Namespace == "" || !infrav1alpha1.IsFunctionGatewayEnabled(infra) {
-		return ServiceReference{}
-	}
-
-	port := common.ResolveServicePort(functionGatewayServiceConfig(infra), int32(functionGatewayHTTPPort(infra)))
-	name := fmt.Sprintf("%s-function-gateway", infra.Name)
-
-	return ServiceReference{
-		Name: name,
-		Port: port,
-		URL:  fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", name, infra.Namespace, port),
 	}
 }
 
@@ -605,7 +570,6 @@ func compileRegionalGatewayPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *In
 	}
 	if compiled != nil {
 		plan.DefaultClusterGatewayURL = compiled.Services.ClusterGateway.URL
-		plan.FunctionGatewayURL = compiled.Services.FunctionGateway.URL
 	}
 	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.RegionalGateway == nil {
 		return plan
@@ -640,24 +604,12 @@ func compileRegionalGatewayRuntimeConfig(plan *RegionalGatewayPlan, infra *infra
 	}
 
 	cfg.DefaultClusterGatewayURL = plan.DefaultClusterGatewayURL
-	cfg.FunctionGatewayURL = plan.FunctionGatewayURL
 	if cfg.HTTPPort == 0 {
 		cfg.HTTPPort = int(regionalGatewayHTTPPort(infra))
 	}
 	if compiled != nil {
 		cfg.SchedulerEnabled = compiled.Components.EnableScheduler
 		cfg.SchedulerURL = compiled.Services.Scheduler.URL
-		if compiled.FunctionGateway.Config != nil {
-			if strings.TrimSpace(cfg.FunctionRootDomain) == "" {
-				cfg.FunctionRootDomain = compiled.FunctionGateway.Config.FunctionRootDomain
-			}
-			if strings.TrimSpace(cfg.FunctionRegionID) == "" {
-				cfg.FunctionRegionID = compiled.FunctionGateway.Config.FunctionRegionID
-			}
-		}
-	}
-	if strings.TrimSpace(cfg.FunctionRootDomain) == "" {
-		cfg.FunctionRootDomain = apiconfig.DefaultFunctionRootDomain
 	}
 
 	sshPort := int32(defaultSSHGatewayPort)
@@ -675,69 +627,6 @@ func compileRegionalGatewayRuntimeConfig(plan *RegionalGatewayPlan, infra *infra
 		cfg.PublicExposureEnabled = infra.Spec.PublicExposure.Enabled
 		cfg.PublicRootDomain = infra.Spec.PublicExposure.RootDomain
 		cfg.PublicRegionID = infra.Spec.PublicExposure.RegionID
-	}
-}
-
-func compileFunctionGatewayPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) FunctionGatewayPlan {
-	plan := FunctionGatewayPlan{
-		Enabled: infrav1alpha1.IsFunctionGatewayEnabled(infra),
-		Config:  &apiconfig.FunctionGatewayConfig{},
-	}
-	if compiled != nil {
-		plan.DefaultClusterGatewayURL = compiled.Services.ClusterGateway.URL
-	}
-	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.FunctionGateway == nil {
-		return plan
-	}
-
-	svc := infra.Spec.Services.FunctionGateway
-	plan.Replicas = svc.Replicas
-	if svc.Resources != nil {
-		plan.Resources = svc.Resources.DeepCopy()
-	}
-	if svc.Service != nil {
-		plan.ServiceConfig = svc.Service.DeepCopy()
-	}
-	if svc.Ingress != nil {
-		plan.IngressConfig = svc.Ingress.DeepCopy()
-	}
-	if svc.Config != nil {
-		plan.Config = runtimeconfig.ToFunctionGateway(svc.Config)
-	}
-	compileFunctionGatewayRuntimeConfig(&plan, infra, compiled)
-	return plan
-}
-
-func compileFunctionGatewayRuntimeConfig(plan *FunctionGatewayPlan, infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) {
-	if plan == nil || infra == nil {
-		return
-	}
-	cfg := plan.Config
-	if cfg == nil {
-		cfg = &apiconfig.FunctionGatewayConfig{}
-		plan.Config = cfg
-	}
-	cfg.DefaultClusterGatewayURL = plan.DefaultClusterGatewayURL
-	if compiled != nil && compiled.Components.EnableScheduler {
-		cfg.SchedulerURL = compiled.Services.Scheduler.URL
-	}
-	if cfg.HTTPPort == 0 {
-		cfg.HTTPPort = functionGatewayHTTPPort(infra)
-	}
-	if strings.TrimSpace(infra.Spec.Region) != "" {
-		cfg.RegionID = infra.Spec.Region
-	}
-	if strings.TrimSpace(cfg.FunctionRootDomain) == "" {
-		cfg.FunctionRootDomain = apiconfig.DefaultFunctionRootDomain
-	}
-	if infra.Spec.PublicExposure != nil {
-		cfg.PublicRegionID = infra.Spec.PublicExposure.RegionID
-		if strings.TrimSpace(cfg.FunctionRegionID) == "" {
-			cfg.FunctionRegionID = infra.Spec.PublicExposure.RegionID
-		}
-	}
-	if strings.TrimSpace(cfg.FunctionRegionID) == "" {
-		cfg.FunctionRegionID = infra.Spec.Region
 	}
 }
 
@@ -767,12 +656,6 @@ func compileValidationPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPl
 	}
 	if compiled != nil && compiled.Components.EnableSSHGateway && !compiled.Components.EnableDatabase {
 		plan.FatalErrors = append(plan.FatalErrors, "sshGateway requires database to be enabled")
-	}
-	if compiled != nil && compiled.Components.EnableFunctionGateway && !compiled.Components.EnableDatabase {
-		plan.FatalErrors = append(plan.FatalErrors, "functionGateway requires database to be enabled")
-	}
-	if compiled != nil && compiled.Components.EnableFunctionGateway && !compiled.Components.EnableClusterGateway {
-		plan.FatalErrors = append(plan.FatalErrors, "functionGateway requires clusterGateway to be enabled")
 	}
 	if compiled != nil && compiled.Components.EnableSSHGateway && !compiled.Components.EnableRegionalGateway {
 		plan.FatalErrors = append(plan.FatalErrors, "sshGateway requires regionalGateway to be enabled")
@@ -826,14 +709,12 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 			namespacedRef("Ingress", infra.Namespace, fmt.Sprintf("%s-regional-gateway", infra.Name)),
 		)
 	}
-	if !compiled.Components.EnableFunctionGateway {
-		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
-			namespacedRef("Deployment", infra.Namespace, fmt.Sprintf("%s-function-gateway", infra.Name)),
-			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-function-gateway", infra.Name)),
-			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-function-gateway", infra.Name)),
-			namespacedRef("Ingress", infra.Namespace, fmt.Sprintf("%s-function-gateway", infra.Name)),
-		)
-	}
+	cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
+		namespacedRef("Deployment", infra.Namespace, fmt.Sprintf("%s-function-gateway", infra.Name)),
+		namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-function-gateway", infra.Name)),
+		namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-function-gateway", infra.Name)),
+		namespacedRef("Ingress", infra.Namespace, fmt.Sprintf("%s-function-gateway", infra.Name)),
+	)
 	if !compiled.Components.EnableSSHGateway {
 		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
 			namespacedRef("Deployment", infra.Namespace, fmt.Sprintf("%s-ssh-gateway", infra.Name)),
@@ -968,9 +849,6 @@ func compileStatusPlan(compiled *InfraPlan) StatusPlan {
 	if components.EnableRegionalGateway {
 		expected = append(expected, infrav1alpha1.ConditionTypeRegionalGatewayReady)
 	}
-	if components.EnableFunctionGateway {
-		expected = append(expected, infrav1alpha1.ConditionTypeFunctionGatewayReady)
-	}
 	if components.EnableSSHGateway {
 		expected = append(expected, infrav1alpha1.ConditionTypeSSHGatewayReady)
 	}
@@ -1061,9 +939,6 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 	if compiled.Components.EnableRegionalGateway {
 		appendSuccessStep("regional-gateway", infrav1alpha1.ConditionTypeRegionalGatewayReady, "RegionalGatewayReady", "Edge gateway is ready", "RegionalGatewayFailed")
 	}
-	if compiled.Components.EnableFunctionGateway {
-		appendSuccessStep("function-gateway", infrav1alpha1.ConditionTypeFunctionGatewayReady, "FunctionGatewayReady", "Function gateway is ready", "FunctionGatewayFailed")
-	}
 	if compiled.Components.EnableSSHGateway {
 		appendSuccessStep("ssh-gateway", infrav1alpha1.ConditionTypeSSHGatewayReady, "SSHGatewayReady", "SSH gateway is ready", "SSHGatewayFailed")
 	}
@@ -1118,9 +993,6 @@ func compileEndpointStatusPlan(compiled *InfraPlan) EndpointStatusPlan {
 	if compiled.Components.EnableRegionalGateway {
 		endpoints.RegionalGatewayInternal = regionalGatewayInternalStatusURL(compiled)
 		endpoints.RegionalGateway = regionalGatewayExternalStatusURL(compiled)
-	}
-	if compiled.Components.EnableFunctionGateway {
-		endpoints.FunctionGateway = functionGatewayStatusURL(compiled)
 	}
 	if compiled.Components.EnableClusterGateway {
 		endpoints.ClusterGateway = compiled.Services.ClusterGateway.URL
@@ -1249,28 +1121,6 @@ func regionalGatewayServiceConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1al
 	return nil
 }
 
-func functionGatewayServiceConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alpha1.ServiceNetworkConfig {
-	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.FunctionGateway != nil {
-		return infra.Spec.Services.FunctionGateway.Service
-	}
-	return nil
-}
-
-func functionGatewayHTTPPort(infra *infrav1alpha1.Sandbox0Infra) int {
-	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.FunctionGateway != nil &&
-		infra.Spec.Services.FunctionGateway.Config != nil && infra.Spec.Services.FunctionGateway.Config.HTTPPort > 0 {
-		return infra.Spec.Services.FunctionGateway.Config.HTTPPort
-	}
-	return defaultFunctionGatewayHTTPPort
-}
-
-func functionGatewayIngressConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alpha1.IngressConfig {
-	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.FunctionGateway != nil {
-		return infra.Spec.Services.FunctionGateway.Ingress
-	}
-	return nil
-}
-
 func regionalGatewayHTTPPort(infra *infrav1alpha1.Sandbox0Infra) int32 {
 	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.RegionalGateway != nil &&
 		infra.Spec.Services.RegionalGateway.Config != nil && infra.Spec.Services.RegionalGateway.Config.HTTPPort > 0 {
@@ -1302,14 +1152,6 @@ func regionalGatewayConfiguredBaseURL(infra *infrav1alpha1.Sandbox0Infra) string
 	return ""
 }
 
-func functionGatewayConfiguredBaseURL(infra *infrav1alpha1.Sandbox0Infra) string {
-	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.FunctionGateway != nil &&
-		infra.Spec.Services.FunctionGateway.Config != nil {
-		return strings.TrimSpace(infra.Spec.Services.FunctionGateway.Config.BaseURL)
-	}
-	return ""
-}
-
 func globalGatewayStatusURL(compiled *InfraPlan) string {
 	infra := compiledInfra(compiled)
 	if infra == nil || infra.Name == "" {
@@ -1321,27 +1163,6 @@ func globalGatewayStatusURL(compiled *InfraPlan) string {
 	serviceName := fmt.Sprintf("%s-global-gateway", infra.Name)
 	servicePort := common.ResolveServicePort(globalGatewayServiceConfig(infra), globalGatewayHTTPPort(infra))
 	return fmt.Sprintf("http://%s:%d", serviceName, servicePort)
-}
-
-func functionGatewayStatusURL(compiled *InfraPlan) string {
-	infra := compiledInfra(compiled)
-	if infra == nil {
-		return ""
-	}
-	if baseURL := functionGatewayConfiguredBaseURL(infra); baseURL != "" {
-		return baseURL
-	}
-	ingress := functionGatewayIngressConfig(infra)
-	if ingress == nil || !ingress.Enabled || strings.TrimSpace(ingress.Host) == "" {
-		serviceName := fmt.Sprintf("%s-function-gateway", infra.Name)
-		servicePort := common.ResolveServicePort(functionGatewayServiceConfig(infra), int32(functionGatewayHTTPPort(infra)))
-		return fmt.Sprintf("http://%s:%d", serviceName, servicePort)
-	}
-	scheme := "http"
-	if ingress.TLSSecret != "" {
-		scheme = "https"
-	}
-	return fmt.Sprintf("%s://%s", scheme, ingress.Host)
 }
 
 func regionalGatewayInternalStatusURL(compiled *InfraPlan) string {

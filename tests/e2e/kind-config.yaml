@@ -14,7 +14,7 @@ nodes:
   # cluster-gateway HTTP port
   - containerPort: 30080
     hostPort: 30080
-  # function-gateway HTTP port
+  # reserved test HTTP port
   - containerPort: 30081
     hostPort: 30081
   # ssh-gateway SSH port

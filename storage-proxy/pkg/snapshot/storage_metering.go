@@ -84,20 +84,9 @@ func applyStorageObservationMetadata(obs *meteringpkg.StorageObservation, metada
 	}
 	if metadata.Product != "" {
 		obs.Product = metadata.Product
-	} else if metadata.FunctionID != "" || metadata.FunctionRevisionID != "" || metadata.FunctionRuntimeInstanceID != "" {
-		obs.Product = meteringpkg.ProductFunction
 	}
 	if metadata.OwnerKind != "" {
 		obs.OwnerKind = metadata.OwnerKind
-	}
-	if metadata.FunctionID != "" {
-		obs.FunctionID = metadata.FunctionID
-	}
-	if metadata.FunctionRevisionID != "" {
-		obs.FunctionRevisionID = metadata.FunctionRevisionID
-	}
-	if metadata.FunctionRuntimeInstanceID != "" {
-		obs.FunctionRuntimeInstanceID = metadata.FunctionRuntimeInstanceID
 	}
 	return obs
 }

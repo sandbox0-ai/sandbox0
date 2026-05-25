@@ -8,7 +8,6 @@ import (
 	"time"
 
 	policypkg "github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
-	"github.com/sandbox0-ai/sandbox0/pkg/functionruntime"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 )
@@ -127,47 +126,6 @@ func TestAggregatorFlushWithoutUsageStillAdvancesWatermark(t *testing.T) {
 	}
 	if !recorder.tx.watermarkTime.Equal(end) {
 		t.Fatalf("watermark = %v, want %v", recorder.tx.watermarkTime, end)
-	}
-}
-
-func TestAggregatorClassifiesFunctionRuntimeNetworkWindows(t *testing.T) {
-	recorder := &fakeRecorder{tx: &fakeTxRecorder{}}
-	agg := NewAggregator(recorder, "aws-us-east-1", "cluster-a", "node-1", nil)
-	start := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
-	end := start.Add(10 * time.Second)
-	agg.now = func() time.Time { return end }
-	agg.windowStart = start
-
-	compiled := &policypkg.CompiledPolicy{
-		SandboxID:                 "sb-1",
-		TeamID:                    "team-1",
-		OwnerKind:                 functionruntime.OwnerKind,
-		FunctionID:                "fn-1",
-		FunctionRevisionID:        "rev-1",
-		FunctionRuntimeInstanceID: "inst-1",
-	}
-	agg.RecordEgress(compiled, 120)
-
-	if err := agg.Flush(context.Background()); err != nil {
-		t.Fatalf("Flush: %v", err)
-	}
-	if len(recorder.tx.windows) != 1 {
-		t.Fatalf("window count = %d, want 1", len(recorder.tx.windows))
-	}
-	window := recorder.tx.windows[0]
-	if window.WindowType != meteringpkg.WindowTypeFunctionEgressBytes {
-		t.Fatalf("window type = %q, want %q", window.WindowType, meteringpkg.WindowTypeFunctionEgressBytes)
-	}
-	if window.SubjectType != meteringpkg.SubjectTypeFunction || window.SubjectID != "fn-1" {
-		t.Fatalf("subject = %s/%s, want function/fn-1", window.SubjectType, window.SubjectID)
-	}
-
-	payload := map[string]any{}
-	if err := json.Unmarshal(window.Data, &payload); err != nil {
-		t.Fatalf("unmarshal window payload: %v", err)
-	}
-	if payload["product"] != meteringpkg.ProductFunction {
-		t.Fatalf("product = %v, want %s", payload["product"], meteringpkg.ProductFunction)
 	}
 }
 

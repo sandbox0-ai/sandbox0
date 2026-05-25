@@ -331,20 +331,6 @@ func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.In
 				resolvedRegionID = strings.TrimSpace(owner.Spec.PublicExposure.RegionID)
 			}
 		}
-		if owner.Spec.Services != nil && owner.Spec.Services.FunctionGateway != nil && owner.Spec.Services.FunctionGateway.Config != nil {
-			if strings.TrimSpace(cfg.FunctionRootDomain) == "" {
-				cfg.FunctionRootDomain = owner.Spec.Services.FunctionGateway.Config.FunctionRootDomain
-			}
-			if strings.TrimSpace(cfg.FunctionRegionID) == "" {
-				cfg.FunctionRegionID = owner.Spec.Services.FunctionGateway.Config.FunctionRegionID
-			}
-		}
-	}
-	if strings.TrimSpace(cfg.FunctionRootDomain) == "" {
-		cfg.FunctionRootDomain = apiconfig.DefaultFunctionRootDomain
-	}
-	if strings.TrimSpace(cfg.FunctionRegionID) == "" {
-		cfg.FunctionRegionID = strings.TrimSpace(cfg.PublicRegionID)
 	}
 
 	cfg.RegionID = resolvedRegionID
@@ -365,7 +351,7 @@ func deriveClusterGatewayAuthMode(mode string, compiledPlan *infraplan.InfraPlan
 	if normalized == "" {
 		normalized = "internal"
 	}
-	if normalized == "public" && compiledPlan != nil && (compiledPlan.RegionalGateway.Enabled || compiledPlan.FunctionGateway.Enabled) {
+	if normalized == "public" && compiledPlan != nil && compiledPlan.RegionalGateway.Enabled {
 		return "both"
 	}
 	return normalized

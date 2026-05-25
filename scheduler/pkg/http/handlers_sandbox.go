@@ -14,7 +14,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
-	"github.com/sandbox0-ai/sandbox0/pkg/functionruntime"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -95,7 +94,6 @@ func (s *Server) createSandbox(c *gin.Context) {
 	if claims.UserID != "" {
 		c.Request.Header.Set("X-User-ID", claims.UserID)
 	}
-	sanitizeFunctionRuntimeClaimHeaders(c.Request.Header, claims)
 
 	c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
@@ -112,12 +110,6 @@ func (s *Server) createSandbox(c *gin.Context) {
 	)
 
 	router.ProxyToTarget(c)
-}
-
-func sanitizeFunctionRuntimeClaimHeaders(header http.Header, claims *internalauth.Claims) {
-	if claims == nil || claims.Caller != internalauth.ServiceFunctionGateway {
-		functionruntime.ClearHeaders(header)
-	}
 }
 
 // proxySandbox routes sandbox operations to the correct cluster-gateway based on sandbox ID.

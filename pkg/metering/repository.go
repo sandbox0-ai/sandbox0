@@ -329,7 +329,6 @@ func (r *Repository) FlushStorageProjectionWindows(ctx context.Context, before t
 		rows, err := tx.Query(ctx, `
 			SELECT
 				subject_type, subject_id, product, owner_kind,
-				function_id, function_revision_id, function_runtime_instance_id,
 				team_id, user_id, COALESCE(sandbox_id, ''), COALESCE(volume_id, ''),
 				COALESCE(snapshot_id, ''), COALESCE(cluster_id, ''), region_id,
 				size_bytes, observed_at
@@ -349,7 +348,6 @@ func (r *Repository) FlushStorageProjectionWindows(ctx context.Context, before t
 			state := &StorageProjectionState{}
 			if err := rows.Scan(
 				&state.SubjectType, &state.SubjectID, &state.Product, &state.OwnerKind,
-				&state.FunctionID, &state.FunctionRevisionID, &state.FunctionRuntimeInstanceID,
 				&state.TeamID, &state.UserID, &state.SandboxID, &state.VolumeID,
 				&state.SnapshotID, &state.ClusterID, &state.RegionID,
 				&state.SizeBytes, &state.ObservedAt,
@@ -518,16 +516,14 @@ func (r *Repository) GetSandboxProjectionState(ctx context.Context, sandboxID st
 	err := r.db.QueryRow(ctx, `
 		SELECT
 			sandbox_id, namespace, team_id, user_id, template_id, cluster_id,
-			owner_kind, function_id, function_revision_id, function_runtime_instance_id,
-			resource_millicpu, resource_memory_mib,
+			owner_kind, resource_millicpu, resource_memory_mib,
 			claimed_at, active_since, paused, paused_at, terminated_at,
 			last_observed_at, last_resource_version
 		FROM metering.manager_sandbox_projection_state
 		WHERE sandbox_id = $1
 	`, sandboxID).Scan(
 		&state.SandboxID, &state.Namespace, &state.TeamID, &state.UserID, &state.TemplateID, &state.ClusterID,
-		&state.OwnerKind, &state.FunctionID, &state.FunctionRevisionID, &state.FunctionRuntimeInstanceID,
-		&state.ResourceMillicpu, &state.ResourceMemoryMiB,
+		&state.OwnerKind, &state.ResourceMillicpu, &state.ResourceMemoryMiB,
 		&state.ClaimedAt, &state.ActiveSince, &state.Paused, &state.PausedAt, &state.TerminatedAt,
 		&state.LastObservedAt, &state.LastResourceVer,
 	)
@@ -565,16 +561,14 @@ func (r *Repository) upsertSandboxProjectionState(ctx context.Context, db DB, st
 	_, err := db.Exec(ctx, `
 			INSERT INTO metering.manager_sandbox_projection_state (
 				sandbox_id, namespace, team_id, user_id, template_id, cluster_id,
-				owner_kind, function_id, function_revision_id, function_runtime_instance_id,
-				resource_millicpu, resource_memory_mib,
+				owner_kind, resource_millicpu, resource_memory_mib,
 				claimed_at, active_since, paused, paused_at, terminated_at,
 			last_observed_at, last_resource_version
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
-			$7, $8, $9, $10,
-			$11, $12,
-			$13, $14, $15, $16, $17,
-			$18, $19
+			$7, $8, $9,
+			$10, $11, $12, $13, $14,
+			$15, $16
 		)
 		ON CONFLICT (sandbox_id) DO UPDATE
 		SET namespace = EXCLUDED.namespace,
@@ -583,9 +577,6 @@ func (r *Repository) upsertSandboxProjectionState(ctx context.Context, db DB, st
 			template_id = EXCLUDED.template_id,
 			cluster_id = EXCLUDED.cluster_id,
 			owner_kind = EXCLUDED.owner_kind,
-			function_id = EXCLUDED.function_id,
-			function_revision_id = EXCLUDED.function_revision_id,
-			function_runtime_instance_id = EXCLUDED.function_runtime_instance_id,
 			resource_millicpu = EXCLUDED.resource_millicpu,
 			resource_memory_mib = EXCLUDED.resource_memory_mib,
 			claimed_at = EXCLUDED.claimed_at,
@@ -596,8 +587,7 @@ func (r *Repository) upsertSandboxProjectionState(ctx context.Context, db DB, st
 			last_observed_at = EXCLUDED.last_observed_at,
 			last_resource_version = EXCLUDED.last_resource_version
 	`, state.SandboxID, state.Namespace, state.TeamID, state.UserID, state.TemplateID, state.ClusterID,
-		state.OwnerKind, state.FunctionID, state.FunctionRevisionID, state.FunctionRuntimeInstanceID,
-		state.ResourceMillicpu, state.ResourceMemoryMiB,
+		state.OwnerKind, state.ResourceMillicpu, state.ResourceMemoryMiB,
 		state.ClaimedAt, state.ActiveSince, state.Paused, state.PausedAt, state.TerminatedAt,
 		state.LastObservedAt, state.LastResourceVer,
 	)
@@ -632,22 +622,19 @@ func (r *Repository) normalizeStorageObservation(ctx context.Context, db DB, obs
 		product = ProductSandbox
 	}
 	state := &StorageProjectionState{
-		SubjectType:               observation.SubjectType,
-		SubjectID:                 observation.SubjectID,
-		Product:                   product,
-		OwnerKind:                 observation.OwnerKind,
-		FunctionID:                observation.FunctionID,
-		FunctionRevisionID:        observation.FunctionRevisionID,
-		FunctionRuntimeInstanceID: observation.FunctionRuntimeInstanceID,
-		TeamID:                    observation.TeamID,
-		UserID:                    observation.UserID,
-		SandboxID:                 observation.SandboxID,
-		VolumeID:                  observation.VolumeID,
-		SnapshotID:                observation.SnapshotID,
-		ClusterID:                 observation.ClusterID,
-		RegionID:                  observation.RegionID,
-		SizeBytes:                 observation.SizeBytes,
-		ObservedAt:                observedAt,
+		SubjectType: observation.SubjectType,
+		SubjectID:   observation.SubjectID,
+		Product:     product,
+		OwnerKind:   observation.OwnerKind,
+		TeamID:      observation.TeamID,
+		UserID:      observation.UserID,
+		SandboxID:   observation.SandboxID,
+		VolumeID:    observation.VolumeID,
+		SnapshotID:  observation.SnapshotID,
+		ClusterID:   observation.ClusterID,
+		RegionID:    observation.RegionID,
+		SizeBytes:   observation.SizeBytes,
+		ObservedAt:  observedAt,
 	}
 	if state.SandboxID != "" {
 		if err := r.applySandboxStorageProduct(ctx, db, state); err != nil {
@@ -658,12 +645,12 @@ func (r *Repository) normalizeStorageObservation(ctx context.Context, db DB, obs
 }
 
 func (r *Repository) applySandboxStorageProduct(ctx context.Context, db DB, state *StorageProjectionState) error {
-	var ownerKind, functionID, revisionID, runtimeInstanceID string
+	var ownerKind string
 	err := db.QueryRow(ctx, `
-		SELECT owner_kind, function_id, function_revision_id, function_runtime_instance_id
+		SELECT owner_kind
 		FROM metering.manager_sandbox_projection_state
 		WHERE sandbox_id = $1
-	`, state.SandboxID).Scan(&ownerKind, &functionID, &revisionID, &runtimeInstanceID)
+	`, state.SandboxID).Scan(&ownerKind)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil
@@ -673,18 +660,6 @@ func (r *Repository) applySandboxStorageProduct(ctx context.Context, db DB, stat
 	if state.OwnerKind == "" {
 		state.OwnerKind = ownerKind
 	}
-	if state.FunctionID == "" {
-		state.FunctionID = functionID
-	}
-	if state.FunctionRevisionID == "" {
-		state.FunctionRevisionID = revisionID
-	}
-	if state.FunctionRuntimeInstanceID == "" {
-		state.FunctionRuntimeInstanceID = runtimeInstanceID
-	}
-	if ownerKind == "function-runtime" || functionID != "" {
-		state.Product = ProductFunction
-	}
 	return nil
 }
 
@@ -693,7 +668,6 @@ func (r *Repository) getStorageProjectionStateForUpdate(ctx context.Context, db 
 	err := db.QueryRow(ctx, `
 		SELECT
 			subject_type, subject_id, product, owner_kind,
-			function_id, function_revision_id, function_runtime_instance_id,
 			team_id, user_id, COALESCE(sandbox_id, ''), COALESCE(volume_id, ''),
 			COALESCE(snapshot_id, ''), COALESCE(cluster_id, ''), region_id,
 			size_bytes, observed_at
@@ -702,7 +676,6 @@ func (r *Repository) getStorageProjectionStateForUpdate(ctx context.Context, db 
 		FOR UPDATE
 	`, subjectType, subjectID).Scan(
 		&state.SubjectType, &state.SubjectID, &state.Product, &state.OwnerKind,
-		&state.FunctionID, &state.FunctionRevisionID, &state.FunctionRuntimeInstanceID,
 		&state.TeamID, &state.UserID, &state.SandboxID, &state.VolumeID,
 		&state.SnapshotID, &state.ClusterID, &state.RegionID,
 		&state.SizeBytes, &state.ObservedAt,
@@ -720,21 +693,16 @@ func (r *Repository) upsertStorageProjectionState(ctx context.Context, db DB, st
 	_, err := db.Exec(ctx, `
 		INSERT INTO metering.storage_projection_state (
 			subject_type, subject_id, product, owner_kind,
-			function_id, function_revision_id, function_runtime_instance_id,
 			team_id, user_id, sandbox_id, volume_id, snapshot_id,
 			cluster_id, region_id, size_bytes, observed_at
 		) VALUES (
 			$1, $2, $3, $4,
-			$5, $6, $7,
-			$8, $9, $10, $11, $12,
-			$13, $14, $15, $16
+			$5, $6, $7, $8, $9,
+			$10, $11, $12, $13
 		)
 		ON CONFLICT (subject_type, subject_id) DO UPDATE
 		SET product = EXCLUDED.product,
 			owner_kind = EXCLUDED.owner_kind,
-			function_id = EXCLUDED.function_id,
-			function_revision_id = EXCLUDED.function_revision_id,
-			function_runtime_instance_id = EXCLUDED.function_runtime_instance_id,
 			team_id = EXCLUDED.team_id,
 			user_id = EXCLUDED.user_id,
 			sandbox_id = EXCLUDED.sandbox_id,
@@ -746,7 +714,6 @@ func (r *Repository) upsertStorageProjectionState(ctx context.Context, db DB, st
 			observed_at = EXCLUDED.observed_at,
 			updated_at = NOW()
 	`, state.SubjectType, state.SubjectID, state.Product, state.OwnerKind,
-		state.FunctionID, state.FunctionRevisionID, state.FunctionRuntimeInstanceID,
 		state.TeamID, state.UserID, nullableString(state.SandboxID), nullableString(state.VolumeID), nullableString(state.SnapshotID),
 		nullableString(state.ClusterID), state.RegionID, state.SizeBytes, state.ObservedAt,
 	)
@@ -783,13 +750,6 @@ func storageWindowFromState(state *StorageProjectionState, end time.Time) *Windo
 	windowType := WindowTypeSandboxVolumeByteHours
 	if state.SubjectType == SubjectTypeSnapshot {
 		windowType = WindowTypeSandboxSnapshotByteHours
-	}
-	if state.Product == ProductFunction {
-		if state.SubjectType == SubjectTypeSnapshot {
-			windowType = WindowTypeFunctionSnapshotByteHours
-		} else {
-			windowType = WindowTypeFunctionVolumeByteHours
-		}
 	}
 	return &Window{
 		WindowID:    fmt.Sprintf("storage/%s/%s/%d/%d", state.SubjectType, state.SubjectID, start.UnixNano(), end.UnixNano()),
@@ -833,15 +793,6 @@ func storageWindowData(state *StorageProjectionState, duration time.Duration) js
 	}
 	if state.OwnerKind != "" {
 		data["owner_kind"] = state.OwnerKind
-	}
-	if state.FunctionID != "" {
-		data["function_id"] = state.FunctionID
-	}
-	if state.FunctionRevisionID != "" {
-		data["function_revision_id"] = state.FunctionRevisionID
-	}
-	if state.FunctionRuntimeInstanceID != "" {
-		data["function_runtime_instance_id"] = state.FunctionRuntimeInstanceID
 	}
 	raw, err := json.Marshal(data)
 	if err != nil {

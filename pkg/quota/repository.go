@@ -120,9 +120,9 @@ func (r *Repository) CurrentUsage(ctx context.Context, teamID string, dimension 
 		}
 		return BytesToGBRoundUp(current), nil
 	case DimensionEgress:
-		return r.currentNetworkUsage(ctx, teamID, metering.WindowTypeSandboxEgressBytes, metering.WindowTypeFunctionEgressBytes)
+		return r.currentNetworkUsage(ctx, teamID, metering.WindowTypeSandboxEgressBytes)
 	case DimensionIngress:
-		return r.currentNetworkUsage(ctx, teamID, metering.WindowTypeSandboxIngressBytes, metering.WindowTypeFunctionIngressBytes)
+		return r.currentNetworkUsage(ctx, teamID, metering.WindowTypeSandboxIngressBytes)
 	default:
 		return 0, fmt.Errorf("unsupported quota usage dimension %q", dimension)
 	}

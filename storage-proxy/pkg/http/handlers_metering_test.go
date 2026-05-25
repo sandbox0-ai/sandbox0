@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/sandbox0-ai/sandbox0/pkg/functionruntime"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/metering"
@@ -334,72 +333,6 @@ func (f *fakeHTTPSnapshotManager) CreateVolumeFromSnapshot(ctx context.Context, 
 		AccessMode:      req.AccessMode,
 		CreatedAt:       time.Date(2026, 3, 25, 3, 30, 0, 0, time.UTC),
 	}, nil
-}
-
-func TestCreateSnapshotForwardsFunctionStorageMetadata(t *testing.T) {
-	snapshotMgr := &fakeHTTPSnapshotManager{}
-	server := &Server{
-		logger:      logrus.New(),
-		snapshotMgr: snapshotMgr,
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/snapshots", bytes.NewBufferString(`{"name":"snap-1"}`))
-	req.SetPathValue("volume_id", "vol-1")
-	functionruntime.SetHeaders(req.Header, functionruntime.Metadata{
-		FunctionID:         "fn-1",
-		FunctionRevisionID: "rev-1",
-	})
-	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
-		TeamID: "team-1",
-		UserID: "user-1",
-	}))
-	recorder := httptest.NewRecorder()
-
-	server.createSnapshot(recorder, req)
-
-	if recorder.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusCreated)
-	}
-	if snapshotMgr.lastCreate == nil || snapshotMgr.lastCreate.StorageMetadata == nil {
-		t.Fatalf("storage metadata was not forwarded")
-	}
-	metadata := snapshotMgr.lastCreate.StorageMetadata
-	if metadata.Product != metering.ProductFunction || metadata.FunctionID != "fn-1" || metadata.FunctionRevisionID != "rev-1" {
-		t.Fatalf("storage metadata = %+v, want function metadata", metadata)
-	}
-}
-
-func TestCreateSandboxVolumeFromSnapshotForwardsFunctionStorageMetadata(t *testing.T) {
-	snapshotMgr := &fakeHTTPSnapshotManager{}
-	server := &Server{
-		logger:      logrus.New(),
-		repo:        newFakeHTTPRepo(),
-		snapshotMgr: snapshotMgr,
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes", bytes.NewBufferString(`{"snapshot_id":"snap-1"}`))
-	functionruntime.SetHeaders(req.Header, functionruntime.Metadata{
-		FunctionID:         "fn-1",
-		FunctionRevisionID: "rev-1",
-	})
-	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
-		TeamID: "team-1",
-		UserID: "user-1",
-	}))
-	recorder := httptest.NewRecorder()
-
-	server.createSandboxVolume(recorder, req)
-
-	if recorder.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusCreated)
-	}
-	if snapshotMgr.lastCreateVolume == nil || snapshotMgr.lastCreateVolume.StorageMetadata == nil {
-		t.Fatalf("storage metadata was not forwarded")
-	}
-	metadata := snapshotMgr.lastCreateVolume.StorageMetadata
-	if metadata.Product != metering.ProductFunction || metadata.FunctionID != "fn-1" || metadata.FunctionRevisionID != "rev-1" {
-		t.Fatalf("storage metadata = %+v, want function metadata", metadata)
-	}
 }
 
 func TestCreateSandboxVolumeRecordsMetering(t *testing.T) {

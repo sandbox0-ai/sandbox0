@@ -38,34 +38,9 @@ func ToRegionalGateway(spec *infrav1alpha1.RegionalGatewayConfig) *apiconfig.Reg
 	cfg.DatabaseMinConns = spec.DatabaseMinConns
 	cfg.SchedulerEnabled = spec.SchedulerEnabled
 	cfg.SchedulerURL = spec.SchedulerURL
-	cfg.FunctionRootDomain = spec.FunctionRootDomain
-	cfg.FunctionRegionID = spec.FunctionRegionID
 	cfg.InternalAuthTTL = spec.InternalAuthTTL
 	cfg.InternalAuthCaller = spec.InternalAuthCaller
 	cfg.ClusterCacheTTL = spec.ClusterCacheTTL
-	cfg.ProxyTimeout = spec.ProxyTimeout
-	cfg.ShutdownTimeout = spec.ShutdownTimeout
-	cfg.ServerReadTimeout = spec.ServerReadTimeout
-	cfg.ServerWriteTimeout = spec.ServerWriteTimeout
-	cfg.ServerIdleTimeout = spec.ServerIdleTimeout
-	applyGatewayConfig(&cfg.GatewayConfig, spec.GatewayConfig)
-	return cfg
-}
-
-func ToFunctionGateway(spec *infrav1alpha1.FunctionGatewayConfig) *apiconfig.FunctionGatewayConfig {
-	cfg := &apiconfig.FunctionGatewayConfig{}
-	if spec == nil {
-		return cfg
-	}
-
-	cfg.HTTPPort = spec.HTTPPort
-	cfg.LogLevel = spec.LogLevel
-	cfg.DatabaseMaxConns = spec.DatabaseMaxConns
-	cfg.DatabaseMinConns = spec.DatabaseMinConns
-	cfg.FunctionRootDomain = spec.FunctionRootDomain
-	cfg.FunctionRegionID = spec.FunctionRegionID
-	cfg.InternalAuthTTL = spec.InternalAuthTTL
-	cfg.InternalAuthCaller = spec.InternalAuthCaller
 	cfg.ProxyTimeout = spec.ProxyTimeout
 	cfg.ShutdownTimeout = spec.ShutdownTimeout
 	cfg.ServerReadTimeout = spec.ServerReadTimeout
@@ -132,8 +107,6 @@ func ToClusterGateway(spec *infrav1alpha1.ClusterGatewayConfig) *apiconfig.Clust
 	cfg.ProxyTimeout = spec.ProxyTimeout
 	cfg.DatabaseMaxConns = spec.DatabaseMaxConns
 	cfg.DatabaseMinConns = spec.DatabaseMinConns
-	cfg.FunctionRootDomain = spec.FunctionRootDomain
-	cfg.FunctionRegionID = spec.FunctionRegionID
 	cfg.SchedulerPermissions = cloneStrings(spec.SchedulerPermissions)
 	applyGatewayConfig(&cfg.GatewayConfig, spec.GatewayConfig)
 	return cfg

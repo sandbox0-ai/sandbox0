@@ -3,7 +3,6 @@ package internalauth
 const (
 	ServiceClusterGateway  = "cluster-gateway"
 	ServiceCtld            = "ctld"
-	ServiceFunctionGateway = "function-gateway"
 	ServiceGlobalGateway   = "global-gateway"
 	ServiceManager         = "manager"
 	ServiceNetd            = "netd"

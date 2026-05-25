@@ -343,44 +343,6 @@ func TestListWindowsAfterReturnsOrderedWindows(t *testing.T) {
 	}
 }
 
-func TestStorageWindowFromStateBuildsFunctionSnapshotByteHours(t *testing.T) {
-	start := time.Date(2026, 3, 12, 12, 0, 0, 0, time.UTC)
-	end := start.Add(2 * time.Hour)
-	window := storageWindowFromState(&StorageProjectionState{
-		SubjectType: SubjectTypeSnapshot,
-		SubjectID:   "snap-1",
-		Product:     ProductFunction,
-		FunctionID:  "fn-1",
-		TeamID:      "team-1",
-		UserID:      "user-1",
-		VolumeID:    "vol-1",
-		SnapshotID:  "snap-1",
-		RegionID:    "aws-us-east-1",
-		SizeBytes:   1024,
-		ObservedAt:  start,
-	}, end)
-	if window == nil {
-		t.Fatal("expected storage window")
-	}
-	if window.WindowType != WindowTypeFunctionSnapshotByteHours {
-		t.Fatalf("window_type = %q, want %q", window.WindowType, WindowTypeFunctionSnapshotByteHours)
-	}
-	if window.Value != 2048 {
-		t.Fatalf("value = %d, want 2048", window.Value)
-	}
-	if window.Unit != WindowUnitByteHours {
-		t.Fatalf("unit = %q, want %q", window.Unit, WindowUnitByteHours)
-	}
-
-	var data map[string]any
-	if err := json.Unmarshal(window.Data, &data); err != nil {
-		t.Fatalf("unmarshal window data: %v", err)
-	}
-	if data["function_id"] != "fn-1" || data["product"] != ProductFunction {
-		t.Fatalf("unexpected window data: %v", data)
-	}
-}
-
 func TestStorageWindowFromStateSkipsSubByteHour(t *testing.T) {
 	start := time.Date(2026, 3, 12, 12, 0, 0, 0, time.UTC)
 	window := storageWindowFromState(&StorageProjectionState{
@@ -411,9 +373,6 @@ func TestRecordStorageObservationClosesPreviousWindow(t *testing.T) {
 					"vol-1",
 					ProductSandbox,
 					"",
-					"",
-					"",
-					"",
 					"team-1",
 					"user-1",
 					"",
@@ -437,8 +396,8 @@ func TestRecordStorageObservationClosesPreviousWindow(t *testing.T) {
 					}
 				case strings.Contains(sql, "storage_projection_state"):
 					upsertedState = true
-					if args[14] != int64(2048) {
-						t.Fatalf("state size arg = %v, want 2048", args[14])
+					if args[11] != int64(2048) {
+						t.Fatalf("state size arg = %v, want 2048", args[11])
 					}
 				default:
 					t.Fatalf("unexpected exec: %s", sql)

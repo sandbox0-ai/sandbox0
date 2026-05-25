@@ -213,8 +213,8 @@ func TestLifecycleProjectorRecordsSandboxComputeWindows(t *testing.T) {
 
 	projector.handleDelete(pod)
 
-	if len(recorder.windows) != 2 {
-		t.Fatalf("window count = %d, want 2", len(recorder.windows))
+	if len(recorder.windows) != 3 {
+		t.Fatalf("window count = %d, want 3", len(recorder.windows))
 	}
 	if recorder.windows[0].WindowType != meteringpkg.WindowTypeSandboxComputeMillicpuMilliseconds {
 		t.Fatalf("first window type = %q, want %q", recorder.windows[0].WindowType, meteringpkg.WindowTypeSandboxComputeMillicpuMilliseconds)
@@ -227,6 +227,63 @@ func TestLifecycleProjectorRecordsSandboxComputeWindows(t *testing.T) {
 	}
 	if recorder.windows[1].Value != 2_048_000 {
 		t.Fatalf("memory value = %d, want 2048000", recorder.windows[1].Value)
+	}
+	if recorder.windows[2].WindowType != meteringpkg.WindowTypeSandboxExecutionGBSeconds {
+		t.Fatalf("third window type = %q, want %q", recorder.windows[2].WindowType, meteringpkg.WindowTypeSandboxExecutionGBSeconds)
+	}
+	if recorder.windows[2].Unit != meteringpkg.WindowUnitMicroGBSeconds {
+		t.Fatalf("execution unit = %q, want %q", recorder.windows[2].Unit, meteringpkg.WindowUnitMicroGBSeconds)
+	}
+	if recorder.windows[2].Value != 2_000_000 {
+		t.Fatalf("execution value = %d, want 2000000", recorder.windows[2].Value)
+	}
+}
+
+func TestSandboxExecutionMicroGBSeconds(t *testing.T) {
+	tests := []struct {
+		name        string
+		memoryMiB   int64
+		durationMS  int64
+		wantMicroGB int64
+	}{
+		{
+			name:        "one gib one second",
+			memoryMiB:   1024,
+			durationMS:  1000,
+			wantMicroGB: 1_000_000,
+		},
+		{
+			name:        "half gib one second",
+			memoryMiB:   512,
+			durationMS:  1000,
+			wantMicroGB: 500_000,
+		},
+		{
+			name:        "rounds tiny windows up",
+			memoryMiB:   1,
+			durationMS:  1,
+			wantMicroGB: 1,
+		},
+		{
+			name:        "skips zero memory",
+			memoryMiB:   0,
+			durationMS:  1000,
+			wantMicroGB: 0,
+		},
+		{
+			name:        "skips zero duration",
+			memoryMiB:   1024,
+			durationMS:  0,
+			wantMicroGB: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sandboxExecutionMicroGBSeconds(tt.memoryMiB, tt.durationMS)
+			if got != tt.wantMicroGB {
+				t.Fatalf("sandboxExecutionMicroGBSeconds(%d, %d) = %d, want %d", tt.memoryMiB, tt.durationMS, got, tt.wantMicroGB)
+			}
+		})
 	}
 }
 

@@ -453,6 +453,9 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 						if !hasMeteringWindow(windows, metering.WindowTypeSandboxMemoryMiBMilliseconds, pausedResp.SandboxId) {
 							return fmt.Errorf("missing sandbox.memory_mib_milliseconds window")
 						}
+						if !hasMeteringWindow(windows, metering.WindowTypeSandboxExecutionGBSeconds, pausedResp.SandboxId) {
+							return fmt.Errorf("missing sandbox.execution_gb_seconds window")
+						}
 
 						return nil
 					}).WithTimeout(90 * time.Second).WithPolling(3 * time.Second).Should(Succeed())

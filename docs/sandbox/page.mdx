@@ -79,6 +79,12 @@ The relationship: <code>ttl {'<='} hard_ttl</code>. When <code>ttl</code> expire
 When <code>hard_ttl</code> expires, sandbox compute is cleaned and the sandbox can be restored by resume-capable access. Both can be extended via the refresh API.
 </Callout>
 
+### Metering
+
+Sandbox runtime metering follows a serverless-style execution model. Active sandbox windows emit `sandbox.execution_gb_seconds`, calculated from the sandbox memory allocation and active runtime duration. The raw metering window stores fixed-point `micro_gb_seconds` so short active windows do not truncate to zero before billing systems aggregate them.
+
+`sandbox.compute_mcpu_milliseconds` and `sandbox.memory_mib_milliseconds` remain available for quota, showback, and cost analysis. Network and storage stay separate: `sandbox.ingress_bytes`, `sandbox.egress_bytes`, `sandbox.volume_byte_hours`, and `sandbox.snapshot_byte_hours` are not averaged into execution usage.
+
 **Example timeline (sandbox created with `ttl=300` and `hard_ttl=3600`):**
 - `t=0`: Sandbox created
 - `t=300`: TTL expires → sandbox auto-pauses

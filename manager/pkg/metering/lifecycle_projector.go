@@ -144,7 +144,7 @@ func (p *LifecycleProjector) handleUpsert(obj any) {
 	paused := pod.Annotations[controller.AnnotationPaused] == "true"
 	pausedAt, pausedAtSet := parseRFC3339(pod.Annotations[controller.AnnotationPausedAt])
 	pendingEvents := make([]*meteringpkg.Event, 0, 2)
-	pendingWindows := make([]*meteringpkg.Window, 0, 2)
+	pendingWindows := make([]*meteringpkg.Window, 0, 3)
 
 	if state == nil {
 		pendingEvents = append(pendingEvents, p.buildSandboxEvent(sandboxID, teamID, userID, templateID, claimedAt, meteringpkg.EventTypeSandboxClaimed, claimedEventID(sandboxID, claimedAt), claimEventData(pod)))
@@ -223,7 +223,7 @@ func (p *LifecycleProjector) handleDelete(obj any) {
 	podUsage := sandboxUsageFromPod(pod)
 	claimedAt, claimedAtSet := parseRFC3339(pod.Annotations[controller.AnnotationClaimedAt])
 	pendingEvents := make([]*meteringpkg.Event, 0, 3)
-	pendingWindows := make([]*meteringpkg.Window, 0, 2)
+	pendingWindows := make([]*meteringpkg.Window, 0, 3)
 	if state == nil {
 		state = &meteringpkg.SandboxProjectionState{
 			SandboxID:         sandboxID,
@@ -378,7 +378,7 @@ func (p *LifecycleProjector) buildSandboxResourceWindows(state *meteringpkg.Sand
 	if state == nil || start == nil || start.IsZero() || end.IsZero() || !end.After(*start) {
 		return nil
 	}
-	windows := make([]*meteringpkg.Window, 0, 2)
+	windows := make([]*meteringpkg.Window, 0, 3)
 	durationMS := end.Sub(*start).Milliseconds()
 	if durationMS <= 0 {
 		return windows
@@ -422,8 +422,42 @@ func (p *LifecycleProjector) buildSandboxResourceWindows(state *meteringpkg.Sand
 			Unit:        meteringpkg.WindowUnitMiBMilliseconds,
 			Data:        resourceWindowData(state),
 		})
+		executionMicroGBSeconds := sandboxExecutionMicroGBSeconds(state.ResourceMemoryMiB, durationMS)
+		if executionMicroGBSeconds > 0 {
+			windows = append(windows, &meteringpkg.Window{
+				WindowID:    sandboxWindowID(state.SandboxID, meteringpkg.WindowTypeSandboxExecutionGBSeconds, *start, end),
+				Producer:    sandboxLifecycleProducer,
+				RegionID:    p.regionID,
+				WindowType:  meteringpkg.WindowTypeSandboxExecutionGBSeconds,
+				SubjectType: meteringpkg.SubjectTypeSandbox,
+				SubjectID:   state.SandboxID,
+				TeamID:      teamID,
+				UserID:      userID,
+				SandboxID:   state.SandboxID,
+				TemplateID:  templateID,
+				ClusterID:   p.clusterID,
+				WindowStart: *start,
+				WindowEnd:   end,
+				Value:       executionMicroGBSeconds,
+				Unit:        meteringpkg.WindowUnitMicroGBSeconds,
+				Data:        resourceWindowData(state),
+			})
+		}
 	}
 	return windows
+}
+
+func sandboxExecutionMicroGBSeconds(memoryMiB int64, durationMS int64) int64 {
+	if memoryMiB <= 0 || durationMS <= 0 {
+		return 0
+	}
+	// Store fixed-point GB-seconds so sub-second Lambda-style usage does not truncate to zero.
+	const (
+		microGBSecondsPerMiBMillisecondNumerator   = int64(125)
+		microGBSecondsPerMiBMillisecondDenominator = int64(128)
+	)
+	value := memoryMiB * durationMS * microGBSecondsPerMiBMillisecondNumerator
+	return (value + microGBSecondsPerMiBMillisecondDenominator - 1) / microGBSecondsPerMiBMillisecondDenominator
 }
 
 func isClaimedActiveSandbox(pod *corev1.Pod) bool {

@@ -1527,9 +1527,12 @@ type SandboxAppServiceView struct {
 	HealthCheck *SandboxAppServiceHealth `json:"health_check,omitempty"`
 
 	// Id Stable service ID. Must be a DNS label.
-	Id              string                    `json:"id"`
-	Ingress         SandboxAppServiceIngress  `json:"ingress"`
-	Port            int32                     `json:"port"`
+	Id      string                   `json:"id"`
+	Ingress SandboxAppServiceIngress `json:"ingress"`
+	Port    int32                    `json:"port"`
+
+	// PublicUrl Public HTTPS URL for this service when public exposure is enabled.
+	PublicUrl       *string                   `json:"public_url,omitempty"`
 	PublishBlockers *[]string                 `json:"publish_blockers,omitempty"`
 	Publishable     bool                      `json:"publishable"`
 	Runtime         *SandboxAppServiceRuntime `json:"runtime,omitempty"`

@@ -45,6 +45,35 @@ func TestSandboxAppServiceViewsReturnsEmptySlice(t *testing.T) {
 	}
 }
 
+func TestSandboxAppServiceViewsForExposureAddsPublicURL(t *testing.T) {
+	views := SandboxAppServiceViewsForExposure("rs-default-api-abcde", "us.sandbox0.app", []SandboxAppService{
+		{
+			ID:   "api",
+			Port: 8080,
+			Ingress: SandboxAppServiceIngress{
+				Public: true,
+				Routes: []SandboxAppServiceRoute{{ID: "api", PathPrefix: "/", Resume: true}},
+			},
+		},
+		{
+			ID:   "worker",
+			Port: 9000,
+			Ingress: SandboxAppServiceIngress{
+				Public: false,
+			},
+		},
+	})
+	if len(views) != 2 {
+		t.Fatalf("views length = %d, want 2", len(views))
+	}
+	if got, want := views[0].PublicURL, "https://rs-default-api-abcde--p8080.us.sandbox0.app"; got != want {
+		t.Fatalf("PublicURL = %q, want %q", got, want)
+	}
+	if views[1].PublicURL != "" {
+		t.Fatalf("private service PublicURL = %q, want empty", views[1].PublicURL)
+	}
+}
+
 func TestSandboxAppServicePublishBlockersRequirePublicRestartableRuntime(t *testing.T) {
 	service := SandboxAppService{
 		ID:   "api",

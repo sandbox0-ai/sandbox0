@@ -44,6 +44,15 @@ When `public` is true and `routes` is empty, Sandbox0 creates a default route us
 | `timeout_seconds` | integer | Optional upstream timeout in seconds |
 | `resume` | boolean | Whether this route may resume a paused sandbox when `auto_resume` is enabled |
 
+### Resume Gates
+
+Public service auto-resume uses two gates:
+
+- sandbox `auto_resume` is the sandbox-level gate. When it is `false`, inbound access must not auto-resume the sandbox.
+- route `resume` is the route-level gate. Only matching public routes with `resume: true` may wake the sandbox.
+
+Both gates must be enabled for a public URL request to resume a paused or cleaned sandbox. For a cleaned sandbox, Sandbox0 creates a new runtime pod for the same sandbox identity, so the `sandbox_id` and service `public_url` stay unchanged.
+
 <Callout>
 Route rate limits use the gateway rate limit backend. Self-hosted deployments default to process-local memory for simple onboarding. Configure `Sandbox0Infra.spec.redis` when multiple gateway replicas need shared Redis-backed limits.
 </Callout>
@@ -67,7 +76,7 @@ Route auth stores SHA-256 digests, not plaintext tokens. Hash secret values befo
 /api/v1/sandboxes/{'{id}'}/services
 </Endpoint>
 
-The response includes `publishable`, `publish_blockers`, and `exposure_domain`.
+The response includes `publishable`, `publish_blockers`, `public_url`, and `exposure_domain`.
 
 <Tabs
   tabs={[
@@ -80,7 +89,7 @@ if err != nil {
 }
 fmt.Printf("services: %d\\n", len(resp.Services))
 for _, service := range resp.Services {
-    fmt.Printf("%s -> port %d\\n", service.ID, service.Port)
+    fmt.Printf("%s -> port %d url=%s\\n", service.ID, service.Port, service.PublicURL.Or(""))
 }`
     },
     {
@@ -397,9 +406,9 @@ if err != nil {
 
 - Public HTTP traffic must match a route on a public service.
 - If `methods` is empty, every HTTP method is allowed for that route.
-- `resume` is evaluated with sandbox `auto_resume`. A route with `resume: false` will not resume a paused or cleaned sandbox.
-- Public URLs are derived from the deployment exposure domain as `{sandbox_id}--p{port}.{exposure_domain}`.
-- Public URLs remain reserved for a `cleaned` sandbox and become unavailable only after explicit sandbox deletion.
+- Public URL auto-resume requires both sandbox `auto_resume: true` and route `resume: true`.
+- Public service responses include `public_url`, derived from the deployment exposure domain as `https://{sandbox_id}--p{port}.{exposure_domain}`.
+- Public URLs remain reserved for a `cleaned` sandbox. A later request can start a new runtime pod without changing the URL, and the URL becomes unavailable only after explicit sandbox deletion.
 
 ## Next Steps
 

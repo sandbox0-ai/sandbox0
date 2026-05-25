@@ -138,15 +138,17 @@ console.log("powerState=", sb.powerState);`
 | `ttl` | Soft timeout. When it expires, Sandbox0 pauses the sandbox. |
 | `hard_ttl` | Hard runtime timeout. When it expires, Sandbox0 cleans the runtime pod and keeps the sandbox identity for later resume. |
 
-`auto_resume` controls whether inbound access can wake a paused sandbox:
+`auto_resume` is the sandbox-level gate for whether inbound access can wake a paused or cleaned sandbox:
 
 - when `auto_resume` is `true`, supported access paths can resume the sandbox automatically
 - when `auto_resume` is `false`, you must call resume explicitly
 
 Common auto-resume entrypoints:
 
-- service routes configured with `resume: true`
+- service routes configured with `resume: true`; public service requests require both sandbox `auto_resume: true` and route `resume: true`
 - SSH access through Sandbox0 SSH Gateway
+
+For a cleaned sandbox, auto-resume creates a new runtime pod for the same sandbox identity. Public service URLs remain stable until the sandbox is explicitly deleted.
 
 See [Sandbox Services](/docs/sandbox/services) and [SSH](/docs/sandbox/ssh) for the user-facing flows.
 

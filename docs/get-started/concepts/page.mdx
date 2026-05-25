@@ -36,7 +36,7 @@ Design for restartability: assume any sandbox can be replaced, and your agent sh
 Sandbox0 uses lifecycle controls to balance responsiveness and cost:
 
 - `ttl`: soft timeout, typically leading to auto-pause.
-- `hard_ttl`: hard deadline, leading to deletion.
+- `hard_ttl`: hard runtime deadline, leading to runtime cleanup while preserving the sandbox identity.
 
 For agents, this means:
 - Keep short `ttl` for bursty workloads.

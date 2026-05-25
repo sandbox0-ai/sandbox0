@@ -265,6 +265,48 @@ func TestSandboxServiceCleanupDeletedSandboxEmitsWebhookAndMarksStateVolumeForCl
 	}
 }
 
+func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForCleanedRuntime(t *testing.T) {
+	removed := make([]string, 0, 1)
+	store := &deleteRecordingBindingStore{}
+	volumeClient := &recordingSystemVolumeClient{}
+	emitter := &recordingDeletionWebhookEmitter{}
+	svc := &SandboxService{
+		networkProvider: &assertingNetworkProvider{removeFunc: func(namespace, sandboxID string) {
+			removed = append(removed, namespace+"/"+sandboxID)
+		}},
+		credentialStore:        store,
+		webhookStateVolumes:    volumeClient,
+		deletionWebhookEmitter: emitter,
+		logger:                 zap.NewNop(),
+	}
+
+	err := svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
+		Namespace:             "ns-a",
+		PodName:               "pod-a",
+		SandboxID:             "sandbox-a",
+		TeamID:                "team-a",
+		UserID:                "user-a",
+		WebhookURL:            "https://example.test/webhook",
+		WebhookStateVolumeID:  "volume-a",
+		RuntimeDeletionReason: runtimeDeletionReasonCleaned,
+	})
+	if err != nil {
+		t.Fatalf("CleanupDeletedSandbox() error = %v", err)
+	}
+	if len(removed) != 1 || removed[0] != "ns-a/sandbox-a" {
+		t.Fatalf("network removals = %#v, want ns-a/sandbox-a", removed)
+	}
+	if store.deleteCalls != 0 {
+		t.Fatalf("DeleteBindings calls = %d, want 0", store.deleteCalls)
+	}
+	if len(emitter.calls) != 0 {
+		t.Fatalf("webhook calls = %d, want 0", len(emitter.calls))
+	}
+	if len(volumeClient.marked) != 0 {
+		t.Fatalf("marked volumes = %#v, want none", volumeClient.marked)
+	}
+}
+
 func TestSandboxServiceCleanupDeletedSandboxUnbindsVolumePortals(t *testing.T) {
 	var got ctldapi.UnbindVolumePortalRequest
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

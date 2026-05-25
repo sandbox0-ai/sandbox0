@@ -133,6 +133,9 @@ func main() {
 	if err := runEgressAuthMigrations(ctx, pool, logger); err != nil {
 		logger.Fatal("Failed to run egress auth migrations", zap.Error(err))
 	}
+	if err := runSandboxStoreMigrations(ctx, pool, logger); err != nil {
+		logger.Fatal("Failed to run sandbox store migrations", zap.Error(err))
+	}
 	credentialStore := egressauth.NewRepository(pool)
 
 	// Initialize clock for cross-cluster time synchronization
@@ -305,6 +308,7 @@ func main() {
 	)
 	sandboxService.SetCredentialStore(credentialStore)
 	sandboxService.SetQuotaStore(quota.NewRepository(pool))
+	sandboxService.SetSandboxStore(service.NewPGSandboxStore(pool))
 	if cfg.StorageProxyBaseURL != "" && cfg.StorageProxyHTTPPort > 0 && storageProxyAdminTokenGenerator != nil {
 		storageProxyBaseURL := fmt.Sprintf("http://%s:%d", strings.TrimSpace(cfg.StorageProxyBaseURL), cfg.StorageProxyHTTPPort)
 		sandboxService.SetWebhookStateVolumeClient(service.NewStorageProxyVolumeClient(service.StorageProxyVolumeClientConfig{
@@ -594,6 +598,18 @@ func runEgressAuthMigrations(ctx context.Context, pool *pgxpool.Pool, logger *za
 	}
 
 	logger.Info("Egress auth migrations completed successfully")
+	return nil
+}
+
+func runSandboxStoreMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {
+	logger.Info("Running sandbox store migrations")
+
+	migrateLogger := &zapMigrateLogger{logger: logger}
+	if err := service.RunSandboxStoreMigrations(ctx, pool, migrateLogger); err != nil {
+		return fmt.Errorf("sandbox store migrations: %w", err)
+	}
+
+	logger.Info("Sandbox store migrations completed successfully")
 	return nil
 }
 

@@ -28,7 +28,7 @@ func SandboxToAPI(sandbox *mgr.Sandbox, sshInfo *ConnectionInfo) *apispec.Sandbo
 			ObservedGeneration: sandbox.PowerState.ObservedGeneration,
 			Phase:              apispec.SandboxPowerStatePhase(sandbox.PowerState.Phase),
 		},
-		Status:     sandbox.Status,
+		Status:     apispec.SandboxLifecycleStatus(sandbox.Status),
 		TeamId:     sandbox.TeamID,
 		TemplateId: sandbox.TemplateID,
 	}

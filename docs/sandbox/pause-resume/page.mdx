@@ -136,7 +136,7 @@ console.log("powerState=", sb.powerState);`
 | Field | Behavior |
 |-------|----------|
 | `ttl` | Soft timeout. When it expires, Sandbox0 pauses the sandbox. |
-| `hard_ttl` | Hard timeout. When it expires, Sandbox0 deletes the sandbox. |
+| `hard_ttl` | Hard runtime timeout. When it expires, Sandbox0 cleans the runtime pod and keeps the sandbox identity for later resume. |
 
 `auto_resume` controls whether inbound access can wake a paused sandbox:
 

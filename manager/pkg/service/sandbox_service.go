@@ -131,6 +131,7 @@ type SandboxService struct {
 	volumeMetadata         SandboxVolumeMetadataClient
 	deletionWebhookEmitter SandboxDeletionWebhookEmitter
 	quotaStore             TeamQuotaLimitStore
+	sandboxStore           SandboxStore
 	powerStateLocks        sync.Map
 	powerStateReconcilers  sync.Map
 }
@@ -288,6 +289,11 @@ func (s *SandboxService) SetDeletionWebhookEmitter(emitter SandboxDeletionWebhoo
 // SetQuotaStore injects the team quota limit store. Nil disables quota checks.
 func (s *SandboxService) SetQuotaStore(store TeamQuotaLimitStore) {
 	s.quotaStore = store
+}
+
+// SetSandboxStore injects durable sandbox identity storage.
+func (s *SandboxService) SetSandboxStore(store SandboxStore) {
+	s.sandboxStore = store
 }
 
 func (s *SandboxService) sandboxPowerExecutor() SandboxPowerExecutor {

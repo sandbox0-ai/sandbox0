@@ -10,6 +10,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
@@ -533,6 +534,19 @@ func (s *SandboxService) RequestResumeSandbox(ctx context.Context, sandboxID str
 func (s *SandboxService) ResumeSandboxAndWait(ctx context.Context, sandboxID string) (*ResumeSandboxResponse, error) {
 	resp, err := s.RequestResumeSandbox(ctx, sandboxID)
 	if err != nil {
+		if k8serrors.IsNotFound(err) && s.sandboxStore != nil {
+			waitCtx, cancel := sandboxRestoreContext(ctx)
+			defer cancel()
+			sandbox, restoreErr := s.RestoreCleanedSandboxRuntime(waitCtx, sandboxID)
+			if restoreErr != nil {
+				return nil, restoreErr
+			}
+			generation := int64(0)
+			if sandbox != nil {
+				generation = sandbox.PowerState.DesiredGeneration
+			}
+			return cleanedSandboxResumeResponse(sandboxID, generation), nil
+		}
 		return nil, err
 	}
 	if resp.PowerState.Desired == SandboxPowerStateActive && resp.PowerState.Observed == SandboxPowerStateActive && resp.PowerState.Phase == SandboxPowerPhaseStable {

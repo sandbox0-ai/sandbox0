@@ -45,6 +45,16 @@ func (r *recordingSandboxTerminator) TerminateSandboxByID(_ context.Context, san
 	return nil
 }
 
+type recordingRuntimeCleaner struct {
+	recordingSandboxTerminator
+	cleanCalls []string
+}
+
+func (r *recordingRuntimeCleaner) CleanSandboxRuntimeByID(_ context.Context, sandboxID string) error {
+	r.cleanCalls = append(r.cleanCalls, sandboxID)
+	return nil
+}
+
 func TestCleanupExpiredRequestsPauseDesiredState(t *testing.T) {
 	now := time.Date(2026, time.April, 15, 19, 31, 0, 0, time.UTC)
 	template := &v1alpha1.SandboxTemplate{
@@ -145,6 +155,59 @@ func TestCleanupExpiredSkipsDeletingPod(t *testing.T) {
 	case event := <-recorder.Events:
 		t.Fatalf("unexpected event: %s", event)
 	default:
+	}
+}
+
+func TestCleanupExpiredCleansHardExpiredRuntime(t *testing.T) {
+	now := time.Date(2026, time.April, 15, 19, 31, 0, 0, time.UTC)
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "default",
+			Namespace: "tpl-default",
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "runtime-pod-1",
+			Namespace: "tpl-default",
+			Labels: map[string]string{
+				LabelTemplateID: "default",
+				LabelPoolType:   PoolTypeActive,
+				LabelSandboxID:  "sandbox-1",
+			},
+			Annotations: map[string]string{
+				AnnotationHardExpiresAt: now.Add(-time.Minute).Format(time.RFC3339),
+			},
+		},
+	}
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
+		cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
+	})
+	require.NoError(t, indexer.Add(pod))
+
+	cleaner := &recordingRuntimeCleaner{}
+	recorder := record.NewFakeRecorder(1)
+	controller := NewCleanupController(
+		nil,
+		corelisters.NewPodLister(indexer),
+		nil,
+		recorder,
+		staticCleanupClock{now: now},
+		nil,
+		cleaner,
+		zap.NewNop(),
+		time.Minute,
+	)
+
+	require.NoError(t, controller.cleanupExpired(context.Background(), template))
+
+	assert.Equal(t, []string{"sandbox-1"}, cleaner.cleanCalls)
+	assert.Empty(t, cleaner.calls)
+	select {
+	case event := <-recorder.Events:
+		assert.Contains(t, event, "HardExpiredPodDeleted")
+	default:
+		t.Fatal("expected hard-expired event")
 	}
 }
 

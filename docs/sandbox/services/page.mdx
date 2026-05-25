@@ -397,8 +397,9 @@ if err != nil {
 
 - Public HTTP traffic must match a route on a public service.
 - If `methods` is empty, every HTTP method is allowed for that route.
-- `resume` is evaluated with sandbox `auto_resume`. A route with `resume: false` will not resume a paused sandbox.
+- `resume` is evaluated with sandbox `auto_resume`. A route with `resume: false` will not resume a paused or cleaned sandbox.
 - Public URLs are derived from the deployment exposure domain as `{sandbox_id}--p{port}.{exposure_domain}`.
+- Public URLs remain reserved for a `cleaned` sandbox and become unavailable only after explicit sandbox deletion.
 
 ## Next Steps
 

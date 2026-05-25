@@ -1,9 +1,10 @@
 package apispec
 
 const (
-	Completed   = GetApiV1SandboxesParamsStatusCompleted
-	Failed      = GetApiV1SandboxesParamsStatusFailed
-	Running     = GetApiV1SandboxesParamsStatusRunning
-	Starting    = GetApiV1SandboxesParamsStatusStarting
-	Terminating = GetApiV1SandboxesParamsStatusTerminating
+	Cleaned     = SandboxLifecycleStatusCleaned
+	Completed   = SandboxLifecycleStatusCompleted
+	Failed      = SandboxLifecycleStatusFailed
+	Running     = SandboxLifecycleStatusRunning
+	Starting    = SandboxLifecycleStatusStarting
+	Terminating = SandboxLifecycleStatusTerminating
 )

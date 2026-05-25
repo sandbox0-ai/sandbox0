@@ -2,25 +2,32 @@ package service
 
 import (
 	"sort"
+	"strings"
 	"sync"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/cache"
 )
+
+type SandboxPodRef struct {
+	Namespace string
+	Name      string
+}
 
 // SandboxIndex keeps an in-memory index of sandbox IDs by namespace.
 // All methods are safe for concurrent use.
 type SandboxIndex struct {
 	mu          sync.RWMutex
 	byNamespace map[string]map[string]struct{}
-	bySandboxID map[string]string
+	bySandboxID map[string]map[SandboxPodRef]struct{}
 }
 
 // NewSandboxIndex creates a new SandboxIndex instance.
 func NewSandboxIndex() *SandboxIndex {
 	return &SandboxIndex{
 		byNamespace: make(map[string]map[string]struct{}),
-		bySandboxID: make(map[string]string),
+		bySandboxID: make(map[string]map[SandboxPodRef]struct{}),
 	}
 }
 
@@ -35,10 +42,38 @@ func (s *SandboxIndex) ResourceEventHandler() cache.ResourceEventHandlerFuncs {
 
 // GetNamespace returns the namespace of a sandbox ID if present.
 func (s *SandboxIndex) GetNamespace(sandboxID string) (string, bool) {
+	ref, ok := s.GetPodRef(sandboxID)
+	return ref.Namespace, ok
+}
+
+// GetPodRef returns the current runtime pod reference for a sandbox ID if present.
+func (s *SandboxIndex) GetPodRef(sandboxID string) (SandboxPodRef, bool) {
+	refs := s.GetPodRefs(sandboxID)
+	if len(refs) == 0 {
+		return SandboxPodRef{}, false
+	}
+	return refs[0], true
+}
+
+// GetPodRefs returns all known runtime pod references for a sandbox ID.
+func (s *SandboxIndex) GetPodRefs(sandboxID string) []SandboxPodRef {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	namespace, ok := s.bySandboxID[sandboxID]
-	return namespace, ok
+	set := s.bySandboxID[sandboxID]
+	if len(set) == 0 {
+		return nil
+	}
+	refs := make([]SandboxPodRef, 0, len(set))
+	for ref := range set {
+		refs = append(refs, ref)
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		if refs[i].Namespace == refs[j].Namespace {
+			return refs[i].Name < refs[j].Name
+		}
+		return refs[i].Namespace < refs[j].Namespace
+	})
+	return refs
 }
 
 // ListSandboxIDs returns sandbox IDs in the given namespace.
@@ -86,7 +121,7 @@ func (s *SandboxIndex) refreshPodIndex(oldPod, newPod *corev1.Pod) {
 				newNamespace = newPod.Namespace
 			}
 			if newID != oldID || oldPod.Namespace != newNamespace {
-				s.removeBySandboxID(oldID)
+				s.removePodRef(oldID, SandboxPodRef{Namespace: oldPod.Namespace, Name: oldPod.Name})
 			}
 		}
 	}
@@ -104,17 +139,18 @@ func (s *SandboxIndex) upsertPod(pod *corev1.Pod) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if oldNamespace, ok := s.bySandboxID[sandboxID]; ok && oldNamespace != pod.Namespace {
-		s.removeBySandboxIDLocked(sandboxID, oldNamespace)
-	}
-
 	set, ok := s.byNamespace[pod.Namespace]
 	if !ok {
 		set = make(map[string]struct{})
 		s.byNamespace[pod.Namespace] = set
 	}
 	set[sandboxID] = struct{}{}
-	s.bySandboxID[sandboxID] = pod.Namespace
+	refSet, ok := s.bySandboxID[sandboxID]
+	if !ok {
+		refSet = make(map[SandboxPodRef]struct{})
+		s.bySandboxID[sandboxID] = refSet
+	}
+	refSet[SandboxPodRef{Namespace: pod.Namespace, Name: pod.Name}] = struct{}{}
 }
 
 func (s *SandboxIndex) deletePod(pod *corev1.Pod) {
@@ -122,25 +158,36 @@ func (s *SandboxIndex) deletePod(pod *corev1.Pod) {
 	if sandboxID == "" {
 		return
 	}
-	s.removeBySandboxID(sandboxID)
+	s.removePodRef(sandboxID, SandboxPodRef{Namespace: pod.Namespace, Name: pod.Name})
 }
 
-func (s *SandboxIndex) removeBySandboxID(sandboxID string) {
+func (s *SandboxIndex) removePodRef(sandboxID string, ref SandboxPodRef) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	namespace, ok := s.bySandboxID[sandboxID]
-	if !ok {
-		return
-	}
-	s.removeBySandboxIDLocked(sandboxID, namespace)
+	s.removeBySandboxIDLocked(sandboxID, ref)
 }
 
-func (s *SandboxIndex) removeBySandboxIDLocked(sandboxID, namespace string) {
-	delete(s.bySandboxID, sandboxID)
-	if set, ok := s.byNamespace[namespace]; ok {
+func (s *SandboxIndex) removeBySandboxIDLocked(sandboxID string, ref SandboxPodRef) {
+	refStillInNamespace := false
+	if refSet, ok := s.bySandboxID[sandboxID]; ok {
+		delete(refSet, ref)
+		for remaining := range refSet {
+			if remaining.Namespace == ref.Namespace {
+				refStillInNamespace = true
+				break
+			}
+		}
+		if len(refSet) == 0 {
+			delete(s.bySandboxID, sandboxID)
+		}
+	}
+	if refStillInNamespace {
+		return
+	}
+	if set, ok := s.byNamespace[ref.Namespace]; ok {
 		delete(set, sandboxID)
 		if len(set) == 0 {
-			delete(s.byNamespace, namespace)
+			delete(s.byNamespace, ref.Namespace)
 		}
 	}
 }
@@ -148,6 +195,16 @@ func (s *SandboxIndex) removeBySandboxIDLocked(sandboxID, namespace string) {
 func sandboxIDFromPod(pod *corev1.Pod) string {
 	if pod == nil {
 		return ""
+	}
+	if pod.Labels != nil {
+		if sandboxID := strings.TrimSpace(pod.Labels[controller.LabelSandboxID]); sandboxID != "" {
+			return sandboxID
+		}
+	}
+	if pod.Annotations != nil {
+		if sandboxID := strings.TrimSpace(pod.Annotations[controller.AnnotationSandboxID]); sandboxID != "" {
+			return sandboxID
+		}
 	}
 	return pod.Name
 }

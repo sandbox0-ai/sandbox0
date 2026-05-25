@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,6 +39,10 @@ type ClaimRequest struct {
 	Config   *SandboxConfig `json:"config,omitempty"`
 	Mounts   []ClaimMount   `json:"mounts,omitempty"`
 	Metadata *ClaimMetadata `json:"-"`
+	// SandboxID is an internal stable ID used when recreating an existing sandbox.
+	SandboxID string `json:"-"`
+	// RuntimeGeneration identifies the current runtime pod incarnation.
+	RuntimeGeneration int64 `json:"-"`
 }
 
 type ClaimMount struct {
@@ -333,6 +338,16 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		}
 	}
 	s.observeClaimPhase(req.Template, "unknown", "resolve_template", phaseStarted, nil)
+	if strings.TrimSpace(req.SandboxID) == "" {
+		req.SandboxID, err = s.generateStableSandboxID(template)
+		if err != nil {
+			s.observeClaimPhase(req.Template, "unknown", "generate_sandbox_id", phaseStarted, err)
+			return nil, err
+		}
+	}
+	if req.RuntimeGeneration <= 0 {
+		req.RuntimeGeneration = 1
+	}
 
 	phaseStarted = time.Now()
 	if err := s.enforceSandboxCPUQuota(ctx, req.TeamID, template); err != nil {
@@ -475,13 +490,24 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	}
 	s.observeClaimPhase(req.Template, claimType, "initialize_procd", phaseStarted, nil)
 
+	phaseStarted = time.Now()
+	if err := s.persistClaimedSandbox(ctx, pod, template, req); err != nil {
+		s.observeClaimPhase(req.Template, claimType, "persist_sandbox", phaseStarted, err)
+		s.requestSandboxDeletionAfterClaimFailure(pod, "sandbox persistence failed")
+		if metrics != nil {
+			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+		}
+		return nil, fmt.Errorf("persist sandbox: %w", err)
+	}
+	s.observeClaimPhase(req.Template, claimType, "persist_sandbox", phaseStarted, nil)
+
 	if metrics != nil {
 		metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "success").Inc()
 		metrics.SandboxClaimDuration.WithLabelValues(req.Template, claimType).Observe(time.Since(start).Seconds())
 	}
 
 	return &ClaimResponse{
-		SandboxID:       pod.Name,
+		SandboxID:       req.SandboxID,
 		Status:          "starting",
 		ProcdAddress:    procdAddress,
 		PodName:         pod.Name,
@@ -489,6 +515,64 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		ClusterId:       template.Spec.ClusterId,
 		BootstrapMounts: portalMounts,
 	}, nil
+}
+
+func (s *SandboxService) persistClaimedSandbox(ctx context.Context, pod *corev1.Pod, template *v1alpha1.SandboxTemplate, req *ClaimRequest) error {
+	if s == nil || s.sandboxStore == nil || pod == nil || template == nil || req == nil {
+		return nil
+	}
+	sandboxID := sandboxIDFromPod(pod)
+	if sandboxID == "" {
+		sandboxID = req.SandboxID
+	}
+	if sandboxID == "" {
+		return fmt.Errorf("sandbox_id is required")
+	}
+	cfg := parseSandboxConfig(pod.Annotations[controller.AnnotationConfig])
+	mounts := parseClaimMounts(pod.Annotations[controller.AnnotationMounts])
+	return s.sandboxStore.UpsertSandbox(ctx, &SandboxRecord{
+		ID:                  sandboxID,
+		TeamID:              req.TeamID,
+		UserID:              req.UserID,
+		TemplateID:          controller.TemplateLogicalID(template),
+		TemplateName:        template.Name,
+		TemplateNamespace:   template.Namespace,
+		ClusterID:           naming.ClusterIDOrDefault(template.Spec.ClusterId),
+		Status:              s.podToSandboxStatus(pod),
+		Config:              cfg,
+		Mounts:              mounts,
+		TemplateSpec:        template.Spec,
+		CurrentPodName:      pod.Name,
+		CurrentPodNamespace: pod.Namespace,
+		RuntimeGeneration:   runtimeGenerationFromPod(pod),
+		ClaimedAt:           parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationClaimedAt),
+		ExpiresAt:           parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt),
+		HardExpiresAt:       parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt),
+		CreatedAt:           s.clock.Now(),
+	})
+}
+
+func runtimeGenerationFromPod(pod *corev1.Pod) int64 {
+	if pod == nil || pod.Annotations == nil {
+		return 0
+	}
+	raw := strings.TrimSpace(pod.Annotations[controller.AnnotationRuntimeGeneration])
+	if raw == "" {
+		return 0
+	}
+	generation, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || generation < 0 {
+		return 0
+	}
+	return generation
+}
+
+func (s *SandboxService) generateStableSandboxID(template *v1alpha1.SandboxTemplate) (string, error) {
+	if template == nil {
+		return "", fmt.Errorf("template is required")
+	}
+	clusterID := naming.ClusterIDOrDefault(template.Spec.ClusterId)
+	return naming.SandboxName(clusterID, template.Name, utilrand.String(5))
 }
 
 func (s *SandboxService) observeClaimPhase(template, claimType, phase string, started time.Time, err error) {
@@ -621,6 +705,10 @@ func (s *SandboxService) bindVolumePortal(ctx context.Context, pod *corev1.Pod, 
 	if pod == nil {
 		return nil, fmt.Errorf("pod is nil")
 	}
+	sandboxID := sandboxIDFromPod(pod)
+	if sandboxID == "" {
+		sandboxID = pod.Name
+	}
 	ctldAddress, err := s.ctldAddressForPod(ctx, pod)
 	if err != nil {
 		return nil, err
@@ -635,7 +723,7 @@ func (s *SandboxService) bindVolumePortal(ctx context.Context, pod *corev1.Pod, 
 		PodUID:         string(pod.UID),
 		PortalName:     volumeportal.NormalizePortalName(portalName, mountPoint),
 		MountPath:      mountPoint,
-		SandboxID:      pod.Name,
+		SandboxID:      sandboxID,
 		OwnerTeamID:    ownerTeamID,
 	}); err != nil {
 		if errors.Is(err, ErrVolumePortalBindConflict) {
@@ -649,7 +737,7 @@ func (s *SandboxService) bindVolumePortal(ctx context.Context, pod *corev1.Pod, 
 		PodUID:          string(pod.UID),
 		PortalName:      volumeportal.NormalizePortalName(portalName, mountPoint),
 		MountPath:       mountPoint,
-		SandboxID:       pod.Name,
+		SandboxID:       sandboxID,
 		TeamID:          ownerTeamID,
 		SandboxVolumeID: volumeID,
 	})
@@ -658,7 +746,7 @@ func (s *SandboxService) bindVolumePortal(ctx context.Context, pod *corev1.Pod, 
 	}
 	if s.logger != nil {
 		s.logger.Info("Bound sandbox volume portal",
-			zap.String("sandboxID", pod.Name),
+			zap.String("sandboxID", sandboxID),
 			zap.String("teamID", teamID),
 			zap.String("userID", userID),
 			zap.String("volumeID", volumeID),
@@ -765,12 +853,16 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		// Claim an available pod
 		pod := readyPods[rand.Intn(len(readyPods))]
 
+		sandboxID := strings.TrimSpace(req.SandboxID)
+		if sandboxID == "" {
+			sandboxID = pod.Name
+		}
 		s.logger.Info("Claiming idle pod",
 			zap.String("pod", pod.Name),
-			zap.String("sandboxID", pod.Name),
+			zap.String("sandboxID", sandboxID),
 		)
 
-		stateVolume, err := s.prepareWebhookStateVolume(ctx, req, pod.Name)
+		stateVolume, err := s.prepareWebhookStateVolume(ctx, req, sandboxID)
 		if err != nil {
 			return fmt.Errorf("prepare webhook state volume: %w", err)
 		}
@@ -780,9 +872,9 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			}
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			if err := s.webhookStateVolumes.Delete(cleanupCtx, req.TeamID, req.UserID, pod.Name, stateVolume.VolumeID); err != nil && s.logger != nil {
+			if err := s.webhookStateVolumes.Delete(cleanupCtx, req.TeamID, req.UserID, sandboxID, stateVolume.VolumeID); err != nil && s.logger != nil {
 				s.logger.Warn("Failed to roll back webhook state volume",
-					zap.String("sandboxID", pod.Name),
+					zap.String("sandboxID", sandboxID),
 					zap.String("volumeID", stateVolume.VolumeID),
 					zap.Error(err),
 				)
@@ -794,7 +886,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 
 		// Change pool type from idle to active
 		pod.Labels[controller.LabelPoolType] = controller.PoolTypeActive
-		pod.Labels[controller.LabelSandboxID] = pod.Name
+		pod.Labels[controller.LabelSandboxID] = sandboxID
 		ensureSandboxCleanupFinalizer(pod)
 
 		// Remove owner reference (so it's no longer managed by ReplicaSet)
@@ -805,7 +897,8 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			pod.Annotations = make(map[string]string)
 		}
 		pod.Annotations = controller.ClaimedSandboxPodAnnotations(pod.Annotations)
-		pod.Annotations[controller.AnnotationSandboxID] = pod.Name
+		pod.Annotations[controller.AnnotationSandboxID] = sandboxID
+		pod.Annotations[controller.AnnotationRuntimeGeneration] = strconv.FormatInt(req.RuntimeGeneration, 10)
 		pod.Annotations[controller.AnnotationTeamID] = req.TeamID
 		pod.Annotations[controller.AnnotationUserID] = req.UserID
 		pod.Annotations[controller.AnnotationClaimedAt] = s.clock.Now().Format(time.RFC3339)
@@ -852,7 +945,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			rollbackStateVolume()
 			if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
 				s.logger.Warn("Failed to roll back credential bindings after hot-claim update failure",
-					zap.String("sandboxID", pod.Name),
+					zap.String("sandboxID", sandboxID),
 					zap.Error(rollbackErr),
 				)
 			}
@@ -869,7 +962,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 
 		s.logger.Info("Successfully claimed idle pod",
 			zap.String("pod", updatedPod.Name),
-			zap.String("sandboxID", updatedPod.Name),
+			zap.String("sandboxID", sandboxID),
 			zap.String("expiresAt", updatedPod.Annotations[controller.AnnotationExpiresAt]),
 		)
 
@@ -922,7 +1015,11 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	if err := s.ensureDataPlaneReadyCapacity(spec); err != nil {
 		return nil, err
 	}
-	stateVolume, err := s.prepareWebhookStateVolume(ctx, req, podName)
+	sandboxID := strings.TrimSpace(req.SandboxID)
+	if sandboxID == "" {
+		sandboxID = podName
+	}
+	stateVolume, err := s.prepareWebhookStateVolume(ctx, req, sandboxID)
 	if err != nil {
 		return nil, fmt.Errorf("prepare webhook state volume: %w", err)
 	}
@@ -932,9 +1029,9 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := s.webhookStateVolumes.Delete(cleanupCtx, req.TeamID, req.UserID, podName, stateVolume.VolumeID); err != nil && s.logger != nil {
+		if err := s.webhookStateVolumes.Delete(cleanupCtx, req.TeamID, req.UserID, sandboxID, stateVolume.VolumeID); err != nil && s.logger != nil {
 			s.logger.Warn("Failed to roll back webhook state volume",
-				zap.String("sandboxID", podName),
+				zap.String("sandboxID", sandboxID),
 				zap.String("volumeID", stateVolume.VolumeID),
 				zap.Error(err),
 			)
@@ -949,11 +1046,12 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	}
 
 	annotations := controller.ClaimedSandboxPodAnnotations(map[string]string{
-		controller.AnnotationSandboxID: podName,
-		controller.AnnotationTeamID:    req.TeamID,
-		controller.AnnotationUserID:    req.UserID,
-		controller.AnnotationClaimedAt: s.clock.Now().Format(time.RFC3339),
-		controller.AnnotationClaimType: "cold",
+		controller.AnnotationSandboxID:         sandboxID,
+		controller.AnnotationRuntimeGeneration: strconv.FormatInt(req.RuntimeGeneration, 10),
+		controller.AnnotationTeamID:            req.TeamID,
+		controller.AnnotationUserID:            req.UserID,
+		controller.AnnotationClaimedAt:         s.clock.Now().Format(time.RFC3339),
+		controller.AnnotationClaimType:         "cold",
 	})
 	if stateVolume != nil {
 		annotations[controller.AnnotationWebhookStateVolumeID] = stateVolume.VolumeID
@@ -969,7 +1067,7 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 				controller.LabelTemplateID:        template.Name,
 				controller.LabelTemplateLogicalID: controller.TemplateLogicalID(template),
 				controller.LabelPoolType:          controller.PoolTypeActive,
-				controller.LabelSandboxID:         podName,
+				controller.LabelSandboxID:         sandboxID,
 			},
 			Annotations: annotations,
 		},
@@ -1012,7 +1110,7 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		rollbackStateVolume()
 		if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
 			s.logger.Warn("Failed to clean up staged credential bindings after create failure",
-				zap.String("sandboxID", pod.Name),
+				zap.String("sandboxID", sandboxID),
 				zap.Error(rollbackErr),
 			)
 		}
@@ -1026,7 +1124,7 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 
 	s.logger.Info("Created new pod for cold start",
 		zap.String("pod", createdPod.Name),
-		zap.String("sandboxID", createdPod.Name),
+		zap.String("sandboxID", sandboxID),
 		zap.String("expiresAt", createdPod.Annotations[controller.AnnotationExpiresAt]),
 	)
 
@@ -1047,7 +1145,7 @@ func (s *SandboxService) requestSandboxDeletionAfterClaimFailure(pod *corev1.Pod
 	if !hasSandboxCleanupFinalizer(pod) {
 		if _, err := s.ensureSandboxDeletionFinalizer(cleanupCtx, pod); err != nil {
 			logger.Warn("Failed to ensure sandbox cleanup finalizer after claim failure",
-				zap.String("sandboxID", pod.Name),
+				zap.String("sandboxID", sandboxIDFromPod(pod)),
 				zap.String("namespace", pod.Namespace),
 				zap.String("reason", reason),
 				zap.Error(err),
@@ -1057,7 +1155,7 @@ func (s *SandboxService) requestSandboxDeletionAfterClaimFailure(pod *corev1.Pod
 
 	if err := s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(cleanupCtx, pod.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 		logger.Warn("Delete pod failed after claim failure",
-			zap.String("sandboxID", pod.Name),
+			zap.String("sandboxID", sandboxIDFromPod(pod)),
 			zap.String("namespace", pod.Namespace),
 			zap.String("reason", reason),
 			zap.Error(err),
@@ -1115,7 +1213,13 @@ func (s *SandboxService) initializeProcd(
 
 	teamID := req.TeamID
 	userID := req.UserID
-	sandboxID := pod.Name
+	sandboxID := sandboxIDFromPod(pod)
+	if sandboxID == "" {
+		sandboxID = req.SandboxID
+	}
+	if sandboxID == "" {
+		sandboxID = pod.Name
+	}
 
 	internalToken, err := s.internalTokenGenerator.GenerateToken(teamID, userID, sandboxID)
 	if err != nil {

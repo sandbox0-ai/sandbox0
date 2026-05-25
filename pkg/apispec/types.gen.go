@@ -181,6 +181,17 @@ const (
 	ProtocolRuleProtocolMcp ProtocolRuleProtocol = "mcp"
 )
 
+// Defines values for QuotaDimension.
+const (
+	ActiveSandboxes   QuotaDimension = "active_sandboxes"
+	CpuMillicpu       QuotaDimension = "cpu_millicpu"
+	Egress            QuotaDimension = "egress"
+	Ingress           QuotaDimension = "ingress"
+	MemoryMib         QuotaDimension = "memory_mib"
+	SnapshotStorageGb QuotaDimension = "snapshot_storage_gb"
+	VolumeStorageGb   QuotaDimension = "volume_storage_gb"
+)
+
 // Defines values for REPLReadyMode.
 const (
 	PromptToken  REPLReadyMode = "prompt_token"
@@ -515,6 +526,11 @@ const (
 	SuccessTeamMemberResponseSuccessTrue SuccessTeamMemberResponseSuccess = true
 )
 
+// Defines values for SuccessTeamQuotaResponseSuccess.
+const (
+	SuccessTeamQuotaResponseSuccessTrue SuccessTeamQuotaResponseSuccess = true
+)
+
 // Defines values for SuccessTeamResponseSuccess.
 const (
 	SuccessTeamResponseSuccessTrue SuccessTeamResponseSuccess = true
@@ -542,7 +558,7 @@ const (
 
 // Defines values for SuccessWrittenResponseSuccess.
 const (
-	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
+	True SuccessWrittenResponseSuccess = true
 )
 
 // Defines values for TrafficRuleAction.
@@ -1690,6 +1706,14 @@ type ProtocolRule struct {
 // ProtocolRuleProtocol defines model for ProtocolRuleProtocol.
 type ProtocolRuleProtocol string
 
+// PutTeamQuotaRequest defines model for PutTeamQuotaRequest.
+type PutTeamQuotaRequest struct {
+	LimitValue int64 `json:"limit_value"`
+}
+
+// QuotaDimension defines model for QuotaDimension.
+type QuotaDimension string
+
 // REPLConfig defines model for REPLConfig.
 type REPLConfig struct {
 	Candidates  []ExecCandidate   `json:"candidates"`
@@ -2777,6 +2801,15 @@ type SuccessTeamMemberResponse struct {
 // SuccessTeamMemberResponseSuccess defines model for SuccessTeamMemberResponse.Success.
 type SuccessTeamMemberResponseSuccess bool
 
+// SuccessTeamQuotaResponse defines model for SuccessTeamQuotaResponse.
+type SuccessTeamQuotaResponse struct {
+	Data    *TeamQuota                      `json:"data,omitempty"`
+	Success SuccessTeamQuotaResponseSuccess `json:"success"`
+}
+
+// SuccessTeamQuotaResponseSuccess defines model for SuccessTeamQuotaResponse.Success.
+type SuccessTeamQuotaResponseSuccess bool
+
 // SuccessTeamResponse defines model for SuccessTeamResponse.
 type SuccessTeamResponse struct {
 	Data    *Team                      `json:"data,omitempty"`
@@ -2863,6 +2896,13 @@ type TeamMember struct {
 	Role     string    `json:"role"`
 	TeamId   string    `json:"team_id"`
 	UserId   string    `json:"user_id"`
+}
+
+// TeamQuota defines model for TeamQuota.
+type TeamQuota struct {
+	Dimension  QuotaDimension `json:"dimension"`
+	LimitValue *int64         `json:"limit_value"`
+	TeamId     string         `json:"team_id"`
 }
 
 // Template defines model for Template.
@@ -3210,6 +3250,9 @@ type PutApiV1FunctionsIdAliasesAliasJSONRequestBody = FunctionAliasUpdateRequest
 
 // PostApiV1FunctionsIdRevisionsJSONRequestBody defines body for PostApiV1FunctionsIdRevisions for application/json ContentType.
 type PostApiV1FunctionsIdRevisionsJSONRequestBody = FunctionRevisionCreateRequest
+
+// PutApiV1QuotasDimensionJSONRequestBody defines body for PutApiV1QuotasDimension for application/json ContentType.
+type PutApiV1QuotasDimensionJSONRequestBody = PutTeamQuotaRequest
 
 // PostApiV1RegistryCredentialsJSONRequestBody defines body for PostApiV1RegistryCredentials for application/json ContentType.
 type PostApiV1RegistryCredentialsJSONRequestBody = RegistryCredentialsRequest

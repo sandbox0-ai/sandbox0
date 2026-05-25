@@ -12,6 +12,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
 	egressauth "github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
@@ -67,6 +68,7 @@ var errNoIdlePod = errors.New("no idle pod available")
 var ErrInvalidClaimRequest = errors.New("invalid claim request")
 var ErrClaimConflict = errors.New("claim conflict")
 var ErrDataPlaneNotReady = errors.New("data plane not ready")
+var ErrQuotaExceeded = errors.New("quota exceeded")
 var errSandboxPowerStateStale = errors.New("sandbox power state changed during execution")
 
 // ErrSandboxPowerTransitionSuperseded is returned when a newer pause/resume request replaces the requested transition.
@@ -128,8 +130,14 @@ type SandboxService struct {
 	webhookStateVolumes    SandboxSystemVolumeClient
 	volumeMetadata         SandboxVolumeMetadataClient
 	deletionWebhookEmitter SandboxDeletionWebhookEmitter
+	quotaStore             TeamQuotaLimitStore
 	powerStateLocks        sync.Map
 	powerStateReconcilers  sync.Map
+}
+
+type TeamQuotaLimitStore interface {
+	GetLimit(ctx context.Context, teamID string, dimension quota.Dimension) (*quota.Limit, error)
+	CurrentUsage(ctx context.Context, teamID string, dimension quota.Dimension) (int64, error)
 }
 
 // AutoScalerInterface defines the interface for auto scaling.
@@ -275,6 +283,11 @@ func (s *SandboxService) SetVolumeMetadataClient(client SandboxVolumeMetadataCli
 // SetDeletionWebhookEmitter injects the emitter for manager-owned sandbox deletion events.
 func (s *SandboxService) SetDeletionWebhookEmitter(emitter SandboxDeletionWebhookEmitter) {
 	s.deletionWebhookEmitter = emitter
+}
+
+// SetQuotaStore injects the team quota limit store. Nil disables quota checks.
+func (s *SandboxService) SetQuotaStore(store TeamQuotaLimitStore) {
+	s.quotaStore = store
 }
 
 func (s *SandboxService) sandboxPowerExecutor() SandboxPowerExecutor {

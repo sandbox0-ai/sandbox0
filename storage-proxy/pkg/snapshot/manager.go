@@ -13,6 +13,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
@@ -93,6 +94,7 @@ type Manager struct {
 	podID             string
 	eventPublisher    eventPublisher
 	meteringRepo      meteringRecorder
+	quotaRepo         *quota.Repository
 	metrics           *obsmetrics.StorageProxyMetrics
 }
 
@@ -129,6 +131,12 @@ func (m *Manager) SetMeteringRepository(repo meteringRecorder) {
 	m.meteringRepo = repo
 }
 
+func (m *Manager) SetQuotaRepository(repo *quota.Repository) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.quotaRepo = repo
+}
+
 func (m *Manager) appendMeteringEvent(ctx context.Context, event *meteringpkg.Event) error {
 	if m.meteringRepo == nil || event == nil {
 		return nil
@@ -153,6 +161,9 @@ func (m *Manager) appendStorageObservation(ctx context.Context, observation *met
 	if m.meteringRepo == nil || observation == nil {
 		return nil
 	}
+	if err := m.enforceStorageObservationQuota(ctx, observation); err != nil {
+		return err
+	}
 	if err := m.meteringRepo.RecordStorageObservation(ctx, observation); err != nil {
 		return err
 	}
@@ -162,6 +173,9 @@ func (m *Manager) appendStorageObservation(ctx context.Context, observation *met
 func (m *Manager) appendStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *meteringpkg.StorageObservation) error {
 	if m.meteringRepo == nil || observation == nil {
 		return nil
+	}
+	if err := m.enforceStorageObservationQuota(ctx, observation); err != nil {
+		return err
 	}
 	if err := m.meteringRepo.RecordStorageObservationTx(ctx, tx, observation); err != nil {
 		return err

@@ -386,6 +386,13 @@ func (m *Manager) createS0FSSnapshot(ctx context.Context, req *CreateSnapshotReq
 		SizeBytes:   snapshotSizeBytes(state),
 		CreatedAt:   time.Now(),
 	}
+	if err := m.enforceStorageObservationQuota(ctx, applyStorageObservationMetadata(
+		m.snapshotStorageObservation(ctx, snapshot, snapshot.CreatedAt),
+		req.StorageMetadata,
+	)); err != nil {
+		_ = engine.DeleteSnapshot(snapshotID)
+		return nil, err
+	}
 	if err := m.repo.CreateSnapshot(ctx, snapshot); err != nil {
 		_ = engine.DeleteSnapshot(snapshotID)
 		return nil, err

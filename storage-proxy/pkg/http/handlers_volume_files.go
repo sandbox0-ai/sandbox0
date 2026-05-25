@@ -20,6 +20,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	httpproxy "github.com/sandbox0-ai/sandbox0/pkg/proxy"
+	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
@@ -522,13 +523,13 @@ func (s *Server) readVolumeFile(w http.ResponseWriter, r *http.Request, volumeID
 
 func (s *Server) writeVolumeFile(w http.ResponseWriter, r *http.Request, volumeID, logicalPath string) {
 	s.withSharedVolumeFileRequest(w, r, volumeID, func(lockedReq *http.Request) {
-		ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, lockedReq, volumeID)
-		if handled {
-			return
-		}
-		defer cleanup()
-
 		if lockedReq.URL.Query().Get("mkdir") == "true" {
+			ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, lockedReq, volumeID)
+			if handled {
+				return
+			}
+			defer cleanup()
+
 			changed, err := s.mkdirVolumePath(ctx, volumeID, logicalPath, lockedReq.URL.Query().Get("recursive") == "true")
 			if err != nil {
 				s.writeVolumeFileError(w, err)
@@ -553,6 +554,24 @@ func (s *Server) writeVolumeFile(w http.ResponseWriter, r *http.Request, volumeI
 			s.writeVolumeFileError(w, errFileTooLarge)
 			return
 		}
+
+		volumeRecord, err := s.loadAuthorizedVolume(lockedReq.Context(), volumeID)
+		if err != nil {
+			s.writeVolumeFileError(w, err)
+			return
+		}
+		if err := s.enforceVolumeStorageAdditionalQuota(lockedReq.Context(), volumeRecord, int64(len(data))); err != nil {
+			s.writeVolumeFileError(w, err)
+			return
+		}
+		lockedReq.Body = io.NopCloser(bytes.NewReader(data))
+		lockedReq.ContentLength = int64(len(data))
+
+		ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, lockedReq, volumeID)
+		if handled {
+			return
+		}
+		defer cleanup()
 
 		changed, err := s.writeVolumePath(ctx, volumeID, logicalPath, data)
 		if err != nil {
@@ -1488,6 +1507,8 @@ func (s *Server) writeVolumeFileError(w http.ResponseWriter, err error) {
 		_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, err.Error())
 	case errors.Is(err, errInvalidPath), errors.Is(err, errInvalidArchive):
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+	case quota.IsExceeded(err):
+		_ = spec.WriteError(w, http.StatusTooManyRequests, "quota_exceeded", err.Error())
 	default:
 		_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, err.Error())
 	}

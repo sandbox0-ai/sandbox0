@@ -16,6 +16,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/auth"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
@@ -115,6 +116,7 @@ type Server struct {
 	cfg            *config.StorageProxyConfig
 	repo           volumeRepository
 	meteringRepo   meteringWriter
+	quotaRepo      *quota.Repository
 	regionID       string
 	authenticator  *auth.HTTPAuthenticator
 	snapshotMgr    snapshotManager
@@ -127,6 +129,10 @@ type Server struct {
 	ctldHTTPClient *http.Client
 	selfPodID      string
 	selfClusterID  string
+}
+
+func (s *Server) SetQuotaRepository(repo *quota.Repository) {
+	s.quotaRepo = repo
 }
 
 // NewServer creates a new HTTP server
@@ -300,6 +306,9 @@ func (s *Server) appendMeteringEventTx(ctx context.Context, tx pgx.Tx, event *me
 func (s *Server) appendStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *meteringpkg.StorageObservation) error {
 	if s.meteringRepo == nil || observation == nil {
 		return nil
+	}
+	if err := s.enforceStorageObservationQuota(ctx, observation); err != nil {
+		return err
 	}
 	if err := s.meteringRepo.RecordStorageObservationTx(ctx, tx, observation); err != nil {
 		return err

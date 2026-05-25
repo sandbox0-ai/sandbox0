@@ -15,6 +15,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
+	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
@@ -133,6 +134,8 @@ func (s *Server) createSandboxVolume(w http.ResponseWriter, r *http.Request) {
 		})
 		if err != nil {
 			switch {
+			case quota.IsExceeded(err):
+				_ = spec.WriteError(w, http.StatusTooManyRequests, "quota_exceeded", err.Error())
 			case errors.Is(err, snapshot.ErrSnapshotNotFound), errors.Is(err, snapshot.ErrVolumeNotFound):
 				_ = spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "snapshot not found")
 			case errors.Is(err, snapshot.ErrInvalidAccessMode):
@@ -170,6 +173,10 @@ func (s *Server) createSandboxVolume(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	}); err != nil {
+		if quota.IsExceeded(err) {
+			_ = spec.WriteError(w, http.StatusTooManyRequests, "quota_exceeded", err.Error())
+			return
+		}
 		s.logger.WithError(err).Error("Failed to create sandbox volume")
 		_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "internal server error")
 		return
@@ -846,6 +853,8 @@ func (s *Server) forkVolume(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		switch {
+		case quota.IsExceeded(err):
+			_ = spec.WriteError(w, http.StatusTooManyRequests, "quota_exceeded", err.Error())
 		case errors.Is(err, snapshot.ErrVolumeNotFound):
 			_ = spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "volume not found")
 		case errors.Is(err, snapshot.ErrInvalidAccessMode):

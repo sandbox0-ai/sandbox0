@@ -25,6 +25,7 @@ import (
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
+	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"go.uber.org/zap"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -150,6 +151,9 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 		if err := meteringpkg.RunMigrations(ctx, meteringPool, &zapLoggerAdapter{logger: d.logger}); err != nil {
 			return fmt.Errorf("run metering migrations: %w", err)
 		}
+		if err := quota.RunMigrations(ctx, meteringPool, &zapLoggerAdapter{logger: d.logger}); err != nil {
+			return fmt.Errorf("run quota migrations: %w", err)
+		}
 		usageAggregator = netdmetering.NewAggregator(
 			netdmetering.NewRecorder(meteringpkg.NewRepository(meteringPool)),
 			d.cfg.RegionID,
@@ -157,6 +161,7 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 			d.cfg.NodeName,
 			d.logger,
 		)
+		usageAggregator.SetQuotaStore(quota.NewRepository(meteringPool))
 	}
 	syncTrigger := make(chan struct{}, 1)
 	triggerSync := func() {

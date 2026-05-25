@@ -34,6 +34,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	templmigrations "github.com/sandbox0-ai/sandbox0/pkg/template/migrations"
 	templreconciler "github.com/sandbox0-ai/sandbox0/pkg/template/reconciler"
 	templstorepg "github.com/sandbox0-ai/sandbox0/pkg/template/store/pg"
@@ -125,6 +126,9 @@ func main() {
 	}
 	if err := runMeteringMigrations(ctx, pool, logger); err != nil {
 		logger.Fatal("Failed to run metering migrations", zap.Error(err))
+	}
+	if err := runQuotaMigrations(ctx, pool, logger); err != nil {
+		logger.Fatal("Failed to run quota migrations", zap.Error(err))
 	}
 	if err := runEgressAuthMigrations(ctx, pool, logger); err != nil {
 		logger.Fatal("Failed to run egress auth migrations", zap.Error(err))
@@ -300,6 +304,7 @@ func main() {
 		managerMetrics,
 	)
 	sandboxService.SetCredentialStore(credentialStore)
+	sandboxService.SetQuotaStore(quota.NewRepository(pool))
 	if cfg.StorageProxyBaseURL != "" && cfg.StorageProxyHTTPPort > 0 && storageProxyAdminTokenGenerator != nil {
 		storageProxyBaseURL := fmt.Sprintf("http://%s:%d", strings.TrimSpace(cfg.StorageProxyBaseURL), cfg.StorageProxyHTTPPort)
 		sandboxService.SetWebhookStateVolumeClient(service.NewStorageProxyVolumeClient(service.StorageProxyVolumeClientConfig{
@@ -427,6 +432,7 @@ func main() {
 		cfg.PublicRootDomain,
 		cfg.PublicRegionID,
 	)
+	httpServer.SetQuotaRepository(quota.NewRepository(pool))
 
 	// Start metrics server
 	go startMetricsServer(cfg.MetricsPort, logger)
@@ -564,6 +570,18 @@ func runMeteringMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.
 	}
 
 	logger.Info("Metering migrations completed successfully")
+	return nil
+}
+
+func runQuotaMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {
+	logger.Info("Running quota migrations")
+
+	migrateLogger := &zapMigrateLogger{logger: logger}
+	if err := quota.RunMigrations(ctx, pool, migrateLogger); err != nil {
+		return fmt.Errorf("quota migrations: %w", err)
+	}
+
+	logger.Info("Quota migrations completed successfully")
 	return nil
 }
 

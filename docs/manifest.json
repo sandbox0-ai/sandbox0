@@ -62,32 +62,6 @@
       ]
     },
     {
-      "label": "FUNCTION",
-      "slug": "function",
-      "pages": [
-        {
-          "slug": "",
-          "title": "Overview"
-        },
-        {
-          "slug": "publish",
-          "title": "Publish Functions"
-        },
-        {
-          "slug": "revisions",
-          "title": "Revisions And Aliases"
-        },
-        {
-          "slug": "autoscaling",
-          "title": "Autoscaling"
-        },
-        {
-          "slug": "runtime",
-          "title": "Runtime"
-        }
-      ]
-    },
-    {
       "label": "MANAGED AGENTS",
       "slug": "managed-agents",
       "pages": [
@@ -122,7 +96,9 @@
         {
           "slug": "agent-harnesses",
           "title": "Agent Harnesses",
-          "aliases": ["agent-engines"]
+          "aliases": [
+            "agent-engines"
+          ]
         },
         {
           "slug": "llmproxy",

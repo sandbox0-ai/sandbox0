@@ -96,66 +96,6 @@ const (
 	Symlink FileInfoType = "symlink"
 )
 
-// Defines values for FunctionRevisionInputSourceType.
-const (
-	FunctionRevisionInputSourceTypeRevisionSpec   FunctionRevisionInputSourceType = "revision_spec"
-	FunctionRevisionInputSourceTypeSandboxService FunctionRevisionInputSourceType = "sandbox_service"
-)
-
-// Defines values for FunctionRevisionMountMode.
-const (
-	ReadOnly  FunctionRevisionMountMode = "read_only"
-	ReadWrite FunctionRevisionMountMode = "read_write"
-)
-
-// Defines values for FunctionRevisionMountSourceType.
-const (
-	FunctionRevisionMountSourceTypeArtifact       FunctionRevisionMountSourceType = "artifact"
-	FunctionRevisionMountSourceTypeSandboxVolume  FunctionRevisionMountSourceType = "sandbox_volume"
-	FunctionRevisionMountSourceTypeVolumeSnapshot FunctionRevisionMountSourceType = "volume_snapshot"
-)
-
-// Defines values for FunctionRevisionSourceType.
-const (
-	FunctionRevisionSourceTypeArtifact       FunctionRevisionSourceType = "artifact"
-	FunctionRevisionSourceTypeRevisionSpec   FunctionRevisionSourceType = "revision_spec"
-	FunctionRevisionSourceTypeSandboxService FunctionRevisionSourceType = "sandbox_service"
-)
-
-// Defines values for FunctionRuntimeInstanceState.
-const (
-	FunctionRuntimeInstanceStateDraining FunctionRuntimeInstanceState = "draining"
-	FunctionRuntimeInstanceStateFailed   FunctionRuntimeInstanceState = "failed"
-	FunctionRuntimeInstanceStateReady    FunctionRuntimeInstanceState = "ready"
-	FunctionRuntimeInstanceStateStarting FunctionRuntimeInstanceState = "starting"
-)
-
-// Defines values for FunctionRuntimePhase.
-const (
-	FunctionRuntimePhaseDisabled     FunctionRuntimePhase = "disabled"
-	FunctionRuntimePhaseDraining     FunctionRuntimePhase = "draining"
-	FunctionRuntimePhaseFailed       FunctionRuntimePhase = "failed"
-	FunctionRuntimePhaseIdle         FunctionRuntimePhase = "idle"
-	FunctionRuntimePhaseProvisioning FunctionRuntimePhase = "provisioning"
-	FunctionRuntimePhaseReady        FunctionRuntimePhase = "ready"
-	FunctionRuntimePhaseStarting     FunctionRuntimePhase = "starting"
-)
-
-// Defines values for FunctionRuntimeReadinessState.
-const (
-	FunctionRuntimeReadinessStateChecking FunctionRuntimeReadinessState = "checking"
-	FunctionRuntimeReadinessStateFailed   FunctionRuntimeReadinessState = "failed"
-	FunctionRuntimeReadinessStateReady    FunctionRuntimeReadinessState = "ready"
-	FunctionRuntimeReadinessStateUnknown  FunctionRuntimeReadinessState = "unknown"
-)
-
-// Defines values for FunctionRuntimeState.
-const (
-	FunctionRuntimeStateActive   FunctionRuntimeState = "active"
-	FunctionRuntimeStateDisabled FunctionRuntimeState = "disabled"
-	FunctionRuntimeStateIdle     FunctionRuntimeState = "idle"
-)
-
 // Defines values for GatewayMetadataGatewayMode.
 const (
 	Direct GatewayMetadataGatewayMode = "direct"
@@ -220,8 +160,8 @@ const (
 
 // Defines values for SandboxPowerStateDesired.
 const (
-	SandboxPowerStateDesiredActive SandboxPowerStateDesired = "active"
-	SandboxPowerStateDesiredPaused SandboxPowerStateDesired = "paused"
+	Active SandboxPowerStateDesired = "active"
+	Paused SandboxPowerStateDesired = "paused"
 )
 
 // Defines values for SandboxPowerStateObserved.
@@ -334,51 +274,6 @@ const (
 // Defines values for SuccessFileStatResponseSuccess.
 const (
 	SuccessFileStatResponseSuccessTrue SuccessFileStatResponseSuccess = true
-)
-
-// Defines values for SuccessFunctionAliasListResponseSuccess.
-const (
-	SuccessFunctionAliasListResponseSuccessTrue SuccessFunctionAliasListResponseSuccess = true
-)
-
-// Defines values for SuccessFunctionAliasResponseSuccess.
-const (
-	SuccessFunctionAliasResponseSuccessTrue SuccessFunctionAliasResponseSuccess = true
-)
-
-// Defines values for SuccessFunctionCreateResponseSuccess.
-const (
-	SuccessFunctionCreateResponseSuccessTrue SuccessFunctionCreateResponseSuccess = true
-)
-
-// Defines values for SuccessFunctionListResponseSuccess.
-const (
-	SuccessFunctionListResponseSuccessTrue SuccessFunctionListResponseSuccess = true
-)
-
-// Defines values for SuccessFunctionResponseSuccess.
-const (
-	SuccessFunctionResponseSuccessTrue SuccessFunctionResponseSuccess = true
-)
-
-// Defines values for SuccessFunctionRevisionCreateResponseSuccess.
-const (
-	SuccessFunctionRevisionCreateResponseSuccessTrue SuccessFunctionRevisionCreateResponseSuccess = true
-)
-
-// Defines values for SuccessFunctionRevisionListResponseSuccess.
-const (
-	SuccessFunctionRevisionListResponseSuccessTrue SuccessFunctionRevisionListResponseSuccess = true
-)
-
-// Defines values for SuccessFunctionRevisionResponseSuccess.
-const (
-	SuccessFunctionRevisionResponseSuccessTrue SuccessFunctionRevisionResponseSuccess = true
-)
-
-// Defines values for SuccessFunctionRuntimeResponseSuccess.
-const (
-	SuccessFunctionRuntimeResponseSuccessTrue SuccessFunctionRuntimeResponseSuccess = true
 )
 
 // Defines values for SuccessGatewayMetadataResponseSuccess.
@@ -558,7 +453,7 @@ const (
 
 // Defines values for SuccessWrittenResponseSuccess.
 const (
-	True SuccessWrittenResponseSuccess = true
+	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
 )
 
 // Defines values for TrafficRuleAction.
@@ -1047,337 +942,6 @@ type ForkVolumeRequest struct {
 
 	// DefaultPosixUid Override the default POSIX UID for external volume access paths. Inherits from the source volume when omitted.
 	DefaultPosixUid *int64 `json:"default_posix_uid,omitempty"`
-}
-
-// Function defines model for Function.
-type Function struct {
-	ActiveRevisionId *string `json:"active_revision_id,omitempty"`
-
-	// Autoscaling Function runtime pool autoscaling settings. target_concurrency is a soft routing and scale-out signal; it is not a strong distributed per-instance concurrency semaphore.
-	Autoscaling FunctionAutoscaling `json:"autoscaling"`
-	CreatedAt   time.Time           `json:"created_at"`
-	CreatedBy   *string             `json:"created_by,omitempty"`
-
-	// DeletedAt Set when the function has been soft-deleted. Deleted functions are hidden from normal list/get APIs and do not serve traffic.
-	DeletedAt   *time.Time `json:"deleted_at,omitempty"`
-	DomainLabel string     `json:"domain_label"`
-	Enabled     bool       `json:"enabled"`
-	Id          string     `json:"id"`
-	Name        string     `json:"name"`
-	Slug        string     `json:"slug"`
-	TeamId      string     `json:"team_id"`
-	UpdatedAt   time.Time  `json:"updated_at"`
-}
-
-// FunctionAlias defines model for FunctionAlias.
-type FunctionAlias struct {
-	Alias          string    `json:"alias"`
-	FunctionId     string    `json:"function_id"`
-	RevisionId     string    `json:"revision_id"`
-	RevisionNumber int32     `json:"revision_number"`
-	UpdatedAt      time.Time `json:"updated_at"`
-	UpdatedBy      *string   `json:"updated_by,omitempty"`
-}
-
-// FunctionAliasUpdateRequest defines model for FunctionAliasUpdateRequest.
-type FunctionAliasUpdateRequest struct {
-	RevisionNumber int32 `json:"revision_number"`
-}
-
-// FunctionAutoscaling Function runtime pool autoscaling settings. target_concurrency is a soft routing and scale-out signal; it is not a strong distributed per-instance concurrency semaphore.
-type FunctionAutoscaling struct {
-	// MaxActive Hard upper bound for active runtime sandboxes for the function.
-	MaxActive int32 `json:"max_active"`
-
-	// MinWarm Minimum ready runtime sandboxes the autoscaler keeps after traffic has created capacity.
-	MinWarm int32 `json:"min_warm"`
-
-	// ScaleDownAfterSeconds Idle time before the autoscaler removes extra runtime sandboxes above min_warm.
-	ScaleDownAfterSeconds int32 `json:"scale_down_after_seconds"`
-
-	// TargetConcurrency Soft per-runtime in-flight request target used for routing and scale-out.
-	TargetConcurrency int32 `json:"target_concurrency"`
-}
-
-// FunctionCreateRequest defines model for FunctionCreateRequest.
-type FunctionCreateRequest struct {
-	// Autoscaling Function runtime pool autoscaling settings. target_concurrency is a soft routing and scale-out signal; it is not a strong distributed per-instance concurrency semaphore.
-	Autoscaling *FunctionAutoscaling `json:"autoscaling,omitempty"`
-
-	// Name Function display name. Defaults to the source service name or ID when omitted.
-	Name *string `json:"name,omitempty"`
-
-	// Source Source used to create a function revision. Omitting type with sandbox_id and service_id keeps the sandbox-service shortcut shape; internally it is compiled into an immutable FunctionRevisionSpec.
-	Source FunctionSourceRequest `json:"source"`
-}
-
-// FunctionEnvRef defines model for FunctionEnvRef.
-type FunctionEnvRef struct {
-	Name      string `json:"name"`
-	SourceRef string `json:"source_ref"`
-}
-
-// FunctionRecord defines model for FunctionRecord.
-type FunctionRecord struct {
-	ActiveRevisionId *string `json:"active_revision_id,omitempty"`
-
-	// Autoscaling Function runtime pool autoscaling settings. target_concurrency is a soft routing and scale-out signal; it is not a strong distributed per-instance concurrency semaphore.
-	Autoscaling FunctionAutoscaling `json:"autoscaling"`
-	CreatedAt   time.Time           `json:"created_at"`
-	CreatedBy   *string             `json:"created_by,omitempty"`
-
-	// DeletedAt Set when the function has been soft-deleted. Deleted functions are hidden from normal list/get APIs and do not serve traffic.
-	DeletedAt   *time.Time `json:"deleted_at,omitempty"`
-	DomainLabel string     `json:"domain_label"`
-	Enabled     bool       `json:"enabled"`
-	Host        string     `json:"host"`
-	Id          string     `json:"id"`
-	Name        string     `json:"name"`
-	Slug        string     `json:"slug"`
-	TeamId      string     `json:"team_id"`
-	UpdatedAt   time.Time  `json:"updated_at"`
-	Url         string     `json:"url"`
-}
-
-// FunctionRestoreMount defines model for FunctionRestoreMount.
-type FunctionRestoreMount struct {
-	MountPoint string `json:"mount_point"`
-
-	// SandboxvolumeId Revision-owned SandboxVolume prepared when the function revision was published.
-	SandboxvolumeId string `json:"sandboxvolume_id"`
-
-	// SnapshotId Immutable source volume snapshot captured for this function revision.
-	SnapshotId *string `json:"snapshot_id,omitempty"`
-
-	// SourceSandboxvolumeId Source SandboxVolume captured when the function revision was published.
-	SourceSandboxvolumeId *string `json:"source_sandboxvolume_id,omitempty"`
-}
-
-// FunctionRevision defines model for FunctionRevision.
-type FunctionRevision struct {
-	CreatedAt  time.Time `json:"created_at"`
-	CreatedBy  *string   `json:"created_by,omitempty"`
-	FunctionId string    `json:"function_id"`
-	Id         string    `json:"id"`
-
-	// Provenance Non-execution metadata describing how the revision spec was produced.
-	Provenance *map[string]interface{} `json:"provenance,omitempty"`
-
-	// RestoreMounts Compatibility mirror of revision_spec.mounts for prepared SandboxVolume mounts.
-	RestoreMounts  *[]FunctionRestoreMount `json:"restore_mounts,omitempty"`
-	RevisionNumber int32                   `json:"revision_number"`
-
-	// RevisionSpec Immutable execution contract used by Function Gateway to serve a revision.
-	RevisionSpec FunctionRevisionSpec `json:"revision_spec"`
-
-	// RuntimeContextId Current runtime process context inside the restored runtime sandbox.
-	RuntimeContextId *string `json:"runtime_context_id,omitempty"`
-
-	// RuntimeSandboxId Current restored runtime sandbox serving the revision, if one exists.
-	RuntimeSandboxId *string `json:"runtime_sandbox_id,omitempty"`
-
-	// RuntimeUpdatedAt Last time the restored runtime sandbox mapping was updated.
-	RuntimeUpdatedAt *time.Time `json:"runtime_updated_at,omitempty"`
-
-	// ServiceSnapshot Canonical service model for sandbox exposure and function publishing.
-	ServiceSnapshot *SandboxAppService `json:"service_snapshot,omitempty"`
-
-	// SourceSandboxId Compatibility mirror for sandbox-service revisions.
-	SourceSandboxId *string `json:"source_sandbox_id,omitempty"`
-
-	// SourceServiceId Compatibility mirror for sandbox-service revisions.
-	SourceServiceId *string `json:"source_service_id,omitempty"`
-
-	// SourceTemplateId Compatibility mirror of revision_spec.template_id.
-	SourceTemplateId *string                    `json:"source_template_id,omitempty"`
-	SourceType       FunctionRevisionSourceType `json:"source_type"`
-	TeamId           string                     `json:"team_id"`
-}
-
-// FunctionRevisionCreateRequest defines model for FunctionRevisionCreateRequest.
-type FunctionRevisionCreateRequest struct {
-	// Promote Whether to move the production alias to the new revision.
-	Promote *bool `json:"promote,omitempty"`
-
-	// Source Source used to create a function revision. Omitting type with sandbox_id and service_id keeps the sandbox-service shortcut shape; internally it is compiled into an immutable FunctionRevisionSpec.
-	Source FunctionSourceRequest `json:"source"`
-}
-
-// FunctionRevisionInputSourceType defines model for FunctionRevisionInputSourceType.
-type FunctionRevisionInputSourceType string
-
-// FunctionRevisionMount defines model for FunctionRevisionMount.
-type FunctionRevisionMount struct {
-	// Materialization Optional materialization policy such as fork_per_runtime for future artifact/volume flows.
-	Materialization *string                     `json:"materialization,omitempty"`
-	Mode            *FunctionRevisionMountMode  `json:"mode,omitempty"`
-	MountPoint      string                      `json:"mount_point"`
-	Name            *string                     `json:"name,omitempty"`
-	Source          FunctionRevisionMountSource `json:"source"`
-}
-
-// FunctionRevisionMountMode defines model for FunctionRevisionMount.Mode.
-type FunctionRevisionMountMode string
-
-// FunctionRevisionMountSource defines model for FunctionRevisionMountSource.
-type FunctionRevisionMountSource struct {
-	// ArtifactId Future first-class Function artifact ID.
-	ArtifactId *string `json:"artifact_id,omitempty"`
-
-	// Digest Content digest for artifact-backed sources.
-	Digest *string `json:"digest,omitempty"`
-
-	// SandboxvolumeId Prepared SandboxVolume ID available to the runtime claim path.
-	SandboxvolumeId *string `json:"sandboxvolume_id,omitempty"`
-
-	// SnapshotId Immutable snapshot used to materialize this mount.
-	SnapshotId *string `json:"snapshot_id,omitempty"`
-
-	// SourceSandboxvolumeId Source SandboxVolume captured by a sandbox-service publish.
-	SourceSandboxvolumeId *string                         `json:"source_sandboxvolume_id,omitempty"`
-	Type                  FunctionRevisionMountSourceType `json:"type"`
-}
-
-// FunctionRevisionMountSourceType defines model for FunctionRevisionMountSource.Type.
-type FunctionRevisionMountSourceType string
-
-// FunctionRevisionSourceType defines model for FunctionRevisionSourceType.
-type FunctionRevisionSourceType string
-
-// FunctionRevisionSpec Immutable execution contract used by Function Gateway to serve a revision.
-type FunctionRevisionSpec struct {
-	// EnvRefs Environment references resolved by future deployment flows.
-	EnvRefs *[]FunctionEnvRef `json:"env_refs,omitempty"`
-
-	// Mounts Volume or artifact mounts attached when runtime sandboxes are claimed.
-	Mounts *[]FunctionRevisionMount `json:"mounts,omitempty"`
-
-	// RuntimeService Canonical service model for sandbox exposure and function publishing.
-	RuntimeService SandboxAppService `json:"runtime_service"`
-
-	// StaticAssets Static asset artifacts associated with the revision for future direct serving paths.
-	StaticAssets *[]FunctionStaticAsset `json:"static_assets,omitempty"`
-
-	// TemplateId SandboxTemplate ID used to claim runtime sandboxes for this revision.
-	TemplateId string `json:"template_id"`
-}
-
-// FunctionRuntimeEvent defines model for FunctionRuntimeEvent.
-type FunctionRuntimeEvent struct {
-	CreatedAt         time.Time                     `json:"created_at"`
-	FunctionId        string                        `json:"function_id"`
-	Id                string                        `json:"id"`
-	Message           *string                       `json:"message,omitempty"`
-	Phase             FunctionRuntimePhase          `json:"phase"`
-	ReadinessState    FunctionRuntimeReadinessState `json:"readiness_state"`
-	Reason            *string                       `json:"reason,omitempty"`
-	RevisionId        string                        `json:"revision_id"`
-	RuntimeContextId  *string                       `json:"runtime_context_id,omitempty"`
-	RuntimeInstanceId *string                       `json:"runtime_instance_id,omitempty"`
-	RuntimeSandboxId  *string                       `json:"runtime_sandbox_id,omitempty"`
-	StartupDurationMs *int32                        `json:"startup_duration_ms,omitempty"`
-	TeamId            string                        `json:"team_id"`
-}
-
-// FunctionRuntimeInstance defines model for FunctionRuntimeInstance.
-type FunctionRuntimeInstance struct {
-	ContextId         *string                       `json:"context_id,omitempty"`
-	CreatedAt         time.Time                     `json:"created_at"`
-	DrainingAt        *time.Time                    `json:"draining_at,omitempty"`
-	FailedAt          *time.Time                    `json:"failed_at,omitempty"`
-	FunctionId        string                        `json:"function_id"`
-	Id                string                        `json:"id"`
-	LastError         *string                       `json:"last_error,omitempty"`
-	LastErrorAt       *time.Time                    `json:"last_error_at,omitempty"`
-	LastUsedAt        *time.Time                    `json:"last_used_at,omitempty"`
-	ReadinessState    FunctionRuntimeReadinessState `json:"readiness_state"`
-	ReadyAt           *time.Time                    `json:"ready_at,omitempty"`
-	RevisionId        string                        `json:"revision_id"`
-	SandboxId         string                        `json:"sandbox_id"`
-	StartupDurationMs *int32                        `json:"startup_duration_ms,omitempty"`
-	State             FunctionRuntimeInstanceState  `json:"state"`
-	TeamId            string                        `json:"team_id"`
-	UpdatedAt         time.Time                     `json:"updated_at"`
-}
-
-// FunctionRuntimeInstanceState defines model for FunctionRuntimeInstanceState.
-type FunctionRuntimeInstanceState string
-
-// FunctionRuntimePhase defines model for FunctionRuntimePhase.
-type FunctionRuntimePhase string
-
-// FunctionRuntimeReadinessState defines model for FunctionRuntimeReadinessState.
-type FunctionRuntimeReadinessState string
-
-// FunctionRuntimeState defines model for FunctionRuntimeState.
-type FunctionRuntimeState string
-
-// FunctionRuntimeStatus defines model for FunctionRuntimeStatus.
-type FunctionRuntimeStatus struct {
-	// Autoscaling Function runtime pool autoscaling settings. target_concurrency is a soft routing and scale-out signal; it is not a strong distributed per-instance concurrency semaphore.
-	Autoscaling    FunctionAutoscaling           `json:"autoscaling"`
-	FunctionId     string                        `json:"function_id"`
-	Instances      *[]FunctionRuntimeInstance    `json:"instances,omitempty"`
-	LastError      *string                       `json:"last_error,omitempty"`
-	LastErrorAt    *time.Time                    `json:"last_error_at,omitempty"`
-	Phase          FunctionRuntimePhase          `json:"phase"`
-	ReadinessState FunctionRuntimeReadinessState `json:"readiness_state"`
-	RecentEvents   *[]FunctionRuntimeEvent       `json:"recent_events,omitempty"`
-	RevisionId     string                        `json:"revision_id"`
-	RevisionNumber int32                         `json:"revision_number"`
-
-	// RuntimeContextId Compatibility summary for one current runtime process context, if one exists. Use instances for the full runtime pool.
-	RuntimeContextId *string `json:"runtime_context_id,omitempty"`
-
-	// RuntimeSandboxId Compatibility summary for one current restored runtime sandbox, if one exists. Use instances for the full runtime pool.
-	RuntimeSandboxId *string `json:"runtime_sandbox_id,omitempty"`
-
-	// RuntimeUpdatedAt Last time the runtime mapping was updated.
-	RuntimeUpdatedAt  *time.Time           `json:"runtime_updated_at,omitempty"`
-	StartupDurationMs *int32               `json:"startup_duration_ms,omitempty"`
-	State             FunctionRuntimeState `json:"state"`
-}
-
-// FunctionSandboxServiceSource defines model for FunctionSandboxServiceSource.
-type FunctionSandboxServiceSource struct {
-	SandboxId string `json:"sandbox_id"`
-	ServiceId string `json:"service_id"`
-}
-
-// FunctionSourceRequest Source used to create a function revision. Omitting type with sandbox_id and service_id keeps the sandbox-service shortcut shape; internally it is compiled into an immutable FunctionRevisionSpec.
-type FunctionSourceRequest struct {
-	// Provenance Optional non-execution metadata describing how the revision spec was produced.
-	Provenance *map[string]interface{} `json:"provenance,omitempty"`
-
-	// RevisionSpec Immutable execution contract used by Function Gateway to serve a revision.
-	RevisionSpec *FunctionRevisionSpec `json:"revision_spec,omitempty"`
-
-	// SandboxId Compatibility shortcut for type=sandbox_service.
-	SandboxId      *string                       `json:"sandbox_id,omitempty"`
-	SandboxService *FunctionSandboxServiceSource `json:"sandbox_service,omitempty"`
-
-	// ServiceId Compatibility shortcut for type=sandbox_service.
-	ServiceId *string                          `json:"service_id,omitempty"`
-	Type      *FunctionRevisionInputSourceType `json:"type,omitempty"`
-}
-
-// FunctionStaticAsset defines model for FunctionStaticAsset.
-type FunctionStaticAsset struct {
-	ArtifactId  string  `json:"artifact_id"`
-	Digest      *string `json:"digest,omitempty"`
-	RoutePrefix string  `json:"route_prefix"`
-}
-
-// FunctionUpdateRequest defines model for FunctionUpdateRequest.
-type FunctionUpdateRequest struct {
-	// Autoscaling Function runtime pool autoscaling settings. target_concurrency is a soft routing and scale-out signal; it is not a strong distributed per-instance concurrency semaphore.
-	Autoscaling *FunctionAutoscaling `json:"autoscaling,omitempty"`
-
-	// Enabled Whether the function host should serve traffic. Disabled functions do not restore runtime sandboxes.
-	Enabled *bool `json:"enabled,omitempty"`
-
-	// Name Mutable function display name. Slug and domain label stay stable.
-	Name *string `json:"name,omitempty"`
 }
 
 // GatewayMetadata defines model for GatewayMetadata.
@@ -1880,7 +1444,7 @@ type Sandbox struct {
 	UserId        *string               `json:"user_id,omitempty"`
 }
 
-// SandboxAppService Canonical service model for sandbox exposure and function publishing.
+// SandboxAppService Canonical service model for sandbox exposure.
 type SandboxAppService struct {
 	DisplayName *string                  `json:"display_name,omitempty"`
 	HealthCheck *SandboxAppServiceHealth `json:"health_check,omitempty"`
@@ -1955,14 +1519,14 @@ type SandboxAppServiceRuntime struct {
 	Cwd     *string            `json:"cwd,omitempty"`
 	EnvVars *map[string]string `json:"env_vars,omitempty"`
 
-	// Type Runtime strategy for restarting a service when it is restored as a function runtime.
+	// Type Runtime strategy for restarting a service process.
 	Type SandboxAppServiceRuntimeType `json:"type"`
 
-	// WarmProcessName Warm process alias or context ID used when type is warm_process. Function runtimes require this to reference an existing cmd warm process.
+	// WarmProcessName Warm process alias or context ID used when type is warm_process.
 	WarmProcessName *string `json:"warm_process_name,omitempty"`
 }
 
-// SandboxAppServiceRuntimeType Runtime strategy for restarting a service when it is restored as a function runtime.
+// SandboxAppServiceRuntimeType Runtime strategy for restarting a service process.
 type SandboxAppServiceRuntimeType string
 
 // SandboxAppServiceView defines model for SandboxAppServiceView.
@@ -2403,108 +1967,6 @@ type SuccessFileStatResponse struct {
 
 // SuccessFileStatResponseSuccess defines model for SuccessFileStatResponse.Success.
 type SuccessFileStatResponseSuccess bool
-
-// SuccessFunctionAliasListResponse defines model for SuccessFunctionAliasListResponse.
-type SuccessFunctionAliasListResponse struct {
-	Data *struct {
-		Aliases []FunctionAlias `json:"aliases"`
-	} `json:"data,omitempty"`
-	Success SuccessFunctionAliasListResponseSuccess `json:"success"`
-}
-
-// SuccessFunctionAliasListResponseSuccess defines model for SuccessFunctionAliasListResponse.Success.
-type SuccessFunctionAliasListResponseSuccess bool
-
-// SuccessFunctionAliasResponse defines model for SuccessFunctionAliasResponse.
-type SuccessFunctionAliasResponse struct {
-	Data *struct {
-		Alias FunctionAlias `json:"alias"`
-	} `json:"data,omitempty"`
-	Success SuccessFunctionAliasResponseSuccess `json:"success"`
-}
-
-// SuccessFunctionAliasResponseSuccess defines model for SuccessFunctionAliasResponse.Success.
-type SuccessFunctionAliasResponseSuccess bool
-
-// SuccessFunctionCreateResponse defines model for SuccessFunctionCreateResponse.
-type SuccessFunctionCreateResponse struct {
-	Data *struct {
-		Alias    FunctionAlias    `json:"alias"`
-		Function FunctionRecord   `json:"function"`
-		Revision FunctionRevision `json:"revision"`
-	} `json:"data,omitempty"`
-	Success SuccessFunctionCreateResponseSuccess `json:"success"`
-}
-
-// SuccessFunctionCreateResponseSuccess defines model for SuccessFunctionCreateResponse.Success.
-type SuccessFunctionCreateResponseSuccess bool
-
-// SuccessFunctionListResponse defines model for SuccessFunctionListResponse.
-type SuccessFunctionListResponse struct {
-	Data *struct {
-		Functions []FunctionRecord `json:"functions"`
-	} `json:"data,omitempty"`
-	Success SuccessFunctionListResponseSuccess `json:"success"`
-}
-
-// SuccessFunctionListResponseSuccess defines model for SuccessFunctionListResponse.Success.
-type SuccessFunctionListResponseSuccess bool
-
-// SuccessFunctionResponse defines model for SuccessFunctionResponse.
-type SuccessFunctionResponse struct {
-	Data *struct {
-		Function FunctionRecord `json:"function"`
-	} `json:"data,omitempty"`
-	Success SuccessFunctionResponseSuccess `json:"success"`
-}
-
-// SuccessFunctionResponseSuccess defines model for SuccessFunctionResponse.Success.
-type SuccessFunctionResponseSuccess bool
-
-// SuccessFunctionRevisionCreateResponse defines model for SuccessFunctionRevisionCreateResponse.
-type SuccessFunctionRevisionCreateResponse struct {
-	Data *struct {
-		Promoted bool             `json:"promoted"`
-		Revision FunctionRevision `json:"revision"`
-	} `json:"data,omitempty"`
-	Success SuccessFunctionRevisionCreateResponseSuccess `json:"success"`
-}
-
-// SuccessFunctionRevisionCreateResponseSuccess defines model for SuccessFunctionRevisionCreateResponse.Success.
-type SuccessFunctionRevisionCreateResponseSuccess bool
-
-// SuccessFunctionRevisionListResponse defines model for SuccessFunctionRevisionListResponse.
-type SuccessFunctionRevisionListResponse struct {
-	Data *struct {
-		Revisions []FunctionRevision `json:"revisions"`
-	} `json:"data,omitempty"`
-	Success SuccessFunctionRevisionListResponseSuccess `json:"success"`
-}
-
-// SuccessFunctionRevisionListResponseSuccess defines model for SuccessFunctionRevisionListResponse.Success.
-type SuccessFunctionRevisionListResponseSuccess bool
-
-// SuccessFunctionRevisionResponse defines model for SuccessFunctionRevisionResponse.
-type SuccessFunctionRevisionResponse struct {
-	Data *struct {
-		Revision FunctionRevision `json:"revision"`
-	} `json:"data,omitempty"`
-	Success SuccessFunctionRevisionResponseSuccess `json:"success"`
-}
-
-// SuccessFunctionRevisionResponseSuccess defines model for SuccessFunctionRevisionResponse.Success.
-type SuccessFunctionRevisionResponseSuccess bool
-
-// SuccessFunctionRuntimeResponse defines model for SuccessFunctionRuntimeResponse.
-type SuccessFunctionRuntimeResponse struct {
-	Data *struct {
-		Runtime FunctionRuntimeStatus `json:"runtime"`
-	} `json:"data,omitempty"`
-	Success SuccessFunctionRuntimeResponseSuccess `json:"success"`
-}
-
-// SuccessFunctionRuntimeResponseSuccess defines model for SuccessFunctionRuntimeResponse.Success.
-type SuccessFunctionRuntimeResponseSuccess bool
 
 // SuccessGatewayMetadataResponse defines model for SuccessGatewayMetadataResponse.
 type SuccessGatewayMetadataResponse struct {
@@ -3238,18 +2700,6 @@ type PostApiV1CredentialSourcesJSONRequestBody = CredentialSourceWriteRequest
 
 // PutApiV1CredentialSourcesNameJSONRequestBody defines body for PutApiV1CredentialSourcesName for application/json ContentType.
 type PutApiV1CredentialSourcesNameJSONRequestBody = CredentialSourceWriteRequest
-
-// PostApiV1FunctionsJSONRequestBody defines body for PostApiV1Functions for application/json ContentType.
-type PostApiV1FunctionsJSONRequestBody = FunctionCreateRequest
-
-// PutApiV1FunctionsIdJSONRequestBody defines body for PutApiV1FunctionsId for application/json ContentType.
-type PutApiV1FunctionsIdJSONRequestBody = FunctionUpdateRequest
-
-// PutApiV1FunctionsIdAliasesAliasJSONRequestBody defines body for PutApiV1FunctionsIdAliasesAlias for application/json ContentType.
-type PutApiV1FunctionsIdAliasesAliasJSONRequestBody = FunctionAliasUpdateRequest
-
-// PostApiV1FunctionsIdRevisionsJSONRequestBody defines body for PostApiV1FunctionsIdRevisions for application/json ContentType.
-type PostApiV1FunctionsIdRevisionsJSONRequestBody = FunctionRevisionCreateRequest
 
 // PutApiV1QuotasDimensionJSONRequestBody defines body for PutApiV1QuotasDimension for application/json ContentType.
 type PutApiV1QuotasDimensionJSONRequestBody = PutTeamQuotaRequest

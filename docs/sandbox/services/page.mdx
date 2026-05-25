@@ -2,8 +2,6 @@
 
 Sandbox Services expose named ports inside a sandbox. Use them when a sandbox needs public HTTP routes with method filtering, auth, CORS, rate limits, upstream timeout, path rewrite, and route-level resume behavior.
 
-Services are also the shortcut source model for Sandbox0 Functions. A publishable service is public and has a restartable runtime; publishing it compiles the service into the `FunctionRevisionSpec` used at serve time.
-
 ## Service Model
 
 | Field | Type | Description |
@@ -11,17 +9,17 @@ Services are also the shortcut source model for Sandbox0 Functions. A publishabl
 | `id` | string | Stable service ID. Must be unique in the sandbox |
 | `display_name` | string | Optional human-readable label |
 | `port` | integer | Sandbox port to proxy to |
-| `runtime` | object | Optional restartable runtime for functions |
+| `runtime` | object | Optional restartable service process configuration |
 | `ingress` | object | Public exposure and route policy |
 | `health_check` | object | Optional readiness path |
 
 ### Runtime
 
-Service runtime supports `cmd`, `warm_process`, and `manual`. Use `cmd` when Function Gateway should create a new command context for a restored function runtime. Use `warm_process` when the template already starts a long-lived process and the service should bind to that existing context. For Functions, `warm_process_name` must reference a `cmd` warm process alias or context ID; REPL warm processes are not valid HTTP service runtimes.
+Service runtime supports `cmd`, `warm_process`, and `manual`. Use `cmd` when Sandbox0 should create a new command context for the service. Use `warm_process` when the template already starts a long-lived process and the service should bind to that existing context.
 
 ### Health Check
 
-`health_check.path` is the service readiness path. For restored Function runtimes, Function Gateway polls this path with `GET` and waits for HTTP `2xx` before proxying traffic. Services without `health_check.path` use TCP listen readiness as a fallback.
+`health_check.path` is the service readiness path. Services without `health_check.path` use TCP listen readiness as a fallback.
 
 ### Ingress
 
@@ -49,8 +47,6 @@ When `public` is true and `routes` is empty, Sandbox0 creates a default route us
 <Callout>
 Route rate limits use the gateway rate limit backend. Self-hosted deployments default to process-local memory for simple onboarding. Configure `Sandbox0Infra.spec.redis` when multiple gateway replicas need shared Redis-backed limits.
 </Callout>
-
-For Functions, the public ingress path also normalizes forwarding headers and applies the Function request body limit before traffic reaches the runtime sandbox. Route auth, CORS, methods, rate limits, rewrites, and timeouts are ingress controls only; outbound traffic from the runtime is governed by the sandbox network policy and egress auth rules.
 
 ### Auth
 
@@ -411,7 +407,7 @@ if err != nil {
     Receive signed sandbox lifecycle, service, and file-related events.
   </Card>
 
-  <Card title="Overview" href="/docs/function" cta="Continue">
-    Package sandbox services into versioned callable functions and manage runtime revisions.
+  <Card title="Overview" href="/docs/sandbox" cta="Continue">
+    Review sandbox configuration, lifecycle, and runtime controls.
   </Card>
 </CardGroup>

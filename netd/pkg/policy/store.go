@@ -186,9 +186,6 @@ func applySandboxOwner(compiled *CompiledPolicy, info *watcher.SandboxInfo) {
 		return
 	}
 	compiled.OwnerKind = info.OwnerKind
-	compiled.FunctionID = info.FunctionID
-	compiled.FunctionRevisionID = info.FunctionRevisionID
-	compiled.FunctionRuntimeInstanceID = info.FunctionRuntimeInstanceID
 }
 
 func (s *Store) DeleteByKey(namespace, name string) {

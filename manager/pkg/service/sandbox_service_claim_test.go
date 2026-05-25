@@ -110,10 +110,7 @@ func TestClaimRequestDoesNotAcceptRuntimeMetadataFromJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{
 		"template":"template-a",
 		"metadata":{
-			"owner_kind":"function-runtime",
-			"function_id":"fn-1",
-			"function_revision_id":"rev-1",
-			"function_runtime_instance_id":"inst-1"
+			"owner_kind":"managed-agent"
 		}
 	}`), &req); err != nil {
 		t.Fatalf("Unmarshal() error = %v", err)
@@ -144,16 +141,13 @@ func TestClaimIdlePodAppliesRuntimeOwnerMetadata(t *testing.T) {
 		TeamID: "team-a",
 		UserID: "user-a",
 		Metadata: &ClaimMetadata{
-			OwnerKind:                 "function-runtime",
-			FunctionID:                "fn-1",
-			FunctionRevisionID:        "rev-1",
-			FunctionRuntimeInstanceID: "inst-1",
+			OwnerKind: "managed-agent",
 		},
 	})
 	if err != nil {
 		t.Fatalf("claimIdlePod() error = %v", err)
 	}
-	assertClaimRuntimeMetadata(t, pod)
+	assertClaimOwnerMetadata(t, pod)
 }
 
 func TestClaimIdlePodRequiresCurrentTemplateHash(t *testing.T) {
@@ -460,16 +454,13 @@ func TestCreateNewPodAppliesRuntimeOwnerMetadata(t *testing.T) {
 		TeamID: "team-a",
 		UserID: "user-a",
 		Metadata: &ClaimMetadata{
-			OwnerKind:                 "function-runtime",
-			FunctionID:                "fn-1",
-			FunctionRevisionID:        "rev-1",
-			FunctionRuntimeInstanceID: "inst-1",
+			OwnerKind: "managed-agent",
 		},
 	})
 	if err != nil {
 		t.Fatalf("createNewPod() error = %v", err)
 	}
-	assertClaimRuntimeMetadata(t, pod)
+	assertClaimOwnerMetadata(t, pod)
 }
 
 func TestCreateNewPodFailsBeforeCreateWhenDataPlaneNotReady(t *testing.T) {
@@ -1141,31 +1132,16 @@ func newClaimTestPod(namespace, name, templateID string, ready bool) *corev1.Pod
 	}
 }
 
-func assertClaimRuntimeMetadata(t *testing.T, pod *corev1.Pod) {
+func assertClaimOwnerMetadata(t *testing.T, pod *corev1.Pod) {
 	t.Helper()
 	if pod == nil {
 		t.Fatal("pod is nil")
 	}
-	if got := pod.Labels[controller.LabelOwnerKind]; got != "function-runtime" {
-		t.Fatalf("owner kind label = %q, want function-runtime", got)
+	if got := pod.Labels[controller.LabelOwnerKind]; got != "managed-agent" {
+		t.Fatalf("owner kind label = %q, want managed-agent", got)
 	}
-	if got := pod.Labels[controller.LabelFunctionID]; got != "fn-1" {
-		t.Fatalf("function id label = %q, want fn-1", got)
-	}
-	if got := pod.Labels[controller.LabelFunctionRevisionID]; got != "rev-1" {
-		t.Fatalf("function revision id label = %q, want rev-1", got)
-	}
-	if got := pod.Annotations[controller.AnnotationOwnerKind]; got != "function-runtime" {
-		t.Fatalf("owner kind annotation = %q, want function-runtime", got)
-	}
-	if got := pod.Annotations[controller.AnnotationFunctionID]; got != "fn-1" {
-		t.Fatalf("function id annotation = %q, want fn-1", got)
-	}
-	if got := pod.Annotations[controller.AnnotationFunctionRevisionID]; got != "rev-1" {
-		t.Fatalf("function revision id annotation = %q, want rev-1", got)
-	}
-	if got := pod.Annotations[controller.AnnotationFunctionRuntimeInstanceID]; got != "inst-1" {
-		t.Fatalf("function runtime instance id annotation = %q, want inst-1", got)
+	if got := pod.Annotations[controller.AnnotationOwnerKind]; got != "managed-agent" {
+		t.Fatalf("owner kind annotation = %q, want managed-agent", got)
 	}
 }
 

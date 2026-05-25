@@ -18,8 +18,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/oidc"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
-	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functionapi"
-	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
 	gatewayhandlers "github.com/sandbox0-ai/sandbox0/pkg/gateway/http/handlers"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/httpclient"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
@@ -34,8 +32,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
 )
-
-const functionVolumeSnapshotTimeout = 2 * time.Minute
 
 // Server represents the HTTP server for regional-gateway
 type Server struct {
@@ -274,13 +270,6 @@ func (s *Server) outboundHTTPClient() *http.Client {
 	return httpclient.Resolve(nil, 0)
 }
 
-func (s *Server) functionSnapshotHTTPClient() *http.Client {
-	if s != nil && s.obsProvider != nil {
-		return s.obsProvider.HTTP.NewClient(httpobs.Config{Timeout: functionVolumeSnapshotTimeout})
-	}
-	return &http.Client{Timeout: functionVolumeSnapshotTimeout}
-}
-
 // setupRoutes configures all HTTP routes
 func (s *Server) setupRoutes() {
 	// Global middleware (order matters)
@@ -303,7 +292,7 @@ func (s *Server) setupRoutes() {
 	s.setupInternalSSHRoutes()
 
 	// ===== API Proxy Routes =====
-	// These routes proxy to cluster-gateway, scheduler, or function-gateway after authentication.
+	// These routes proxy to cluster-gateway or scheduler after authentication.
 	api := s.router.Group("/api")
 	{
 		// Apply auth and rate limiting to all API routes
@@ -342,26 +331,6 @@ func (s *Server) setupRoutes() {
 		registry := api.Group("/v1/registry")
 		{
 			registry.POST("/credentials", s.authMiddleware.RequirePermission(authn.PermRegistryWrite), s.getRegistryCredentials)
-		}
-
-		functionRoutes := api.Group("/v1/functions")
-		functionRoutes.Use(s.requireTeamContextForTeamScopedAPI())
-		{
-			functionHandler := functionapi.New(
-				functions.NewRepository(s.pool),
-				functionapi.Config{
-					DefaultClusterGatewayURL: s.cfg.DefaultClusterGatewayURL,
-					FunctionRegionID:         s.cfg.FunctionRegionID,
-					FunctionRootDomain:       s.cfg.FunctionRootDomain,
-					PublicRegionID:           s.cfg.PublicRegionID,
-					RegionID:                 s.cfg.RegionID,
-				},
-				s.functionSandboxLookup,
-				functionapi.NewHTTPVolumeSnapshotter(s.resolveFunctionClusterGatewayURL, s.internalAuthGen, s.functionSnapshotHTTPClient(), s.logger),
-				functionapi.NewHTTPRuntimeController(s.resolveFunctionClusterGatewayURL, s.internalAuthGen, s.functionSnapshotHTTPClient()),
-				s.logger,
-			)
-			functionHandler.RegisterRoutes(functionRoutes, s.authMiddleware.RequirePermission)
 		}
 
 		credentialSources := api.Group("/v1/credential-sources")

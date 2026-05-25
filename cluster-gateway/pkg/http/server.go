@@ -3,7 +3,6 @@ package http
 import (
 	"context"
 	"crypto/ed25519"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -21,8 +20,6 @@ import (
 	gatewaybuiltin "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
 	gatewayoidc "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/oidc"
 	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
-	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functionapi"
-	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
 	gatewayhandlers "github.com/sandbox0-ai/sandbox0/pkg/gateway/http/handlers"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/httpclient"
 	gatewayidentity "github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
@@ -38,8 +35,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
 )
-
-const functionVolumeSnapshotTimeout = 2 * time.Minute
 
 // Server represents the HTTP server for cluster-gateway
 type Server struct {
@@ -61,7 +56,6 @@ type Server struct {
 	requestLogger         *middleware.RequestLogger
 	logger                *zap.Logger
 	meteringHandler       *gatewayhandlers.MeteringHandler
-	functionHandler       *functionapi.Handler
 	internalAuthGen       *internalauth.Generator
 	entitlements          licensing.Entitlements
 	obsProvider           *observability.Provider
@@ -143,7 +137,7 @@ func NewServer(
 	// Create internal auth validator (for validating tokens from regional-gateway and optionally scheduler)
 	allowedCallers := cfg.AllowedCallers
 	if len(allowedCallers) == 0 {
-		allowedCallers = []string{"regional-gateway", "scheduler", "function-gateway", "cluster-gateway"}
+		allowedCallers = []string{"regional-gateway", "scheduler", "cluster-gateway"}
 	}
 	var validator *internalauth.Validator
 	if authModeEnabled(cfg.AuthMode, authModeInternal) {
@@ -250,35 +244,6 @@ func NewServer(
 		meteringRepo = metering.NewRepository(pool)
 	}
 	meteringHandler := gatewayhandlers.NewMeteringHandler(meteringRepo, cfg.RegionID, logger)
-	snapshotHTTPClient := obsProvider.HTTP.NewClient(httpobs.Config{
-		Timeout: functionVolumeSnapshotTimeout,
-	})
-	functionHandler := functionapi.New(
-		functions.NewRepository(pool),
-		functionapi.Config{
-			FunctionRegionID:   cfg.FunctionRegionID,
-			FunctionRootDomain: cfg.FunctionRootDomain,
-			PublicRegionID:     cfg.PublicRegionID,
-			RegionID:           cfg.RegionID,
-		},
-		func(ctx context.Context, sandboxID string) (*mgr.Sandbox, error) {
-			if managerClient == nil {
-				return nil, functionapi.SandboxUnavailableError("manager is not configured")
-			}
-			sandbox, err := managerClient.GetSandboxInternal(ctx, sandboxID)
-			if err != nil {
-				if errors.Is(err, client.ErrSandboxNotFound) {
-					return nil, functionapi.SandboxNotFoundError()
-				}
-				return nil, functionapi.SandboxUnavailableError("sandbox unavailable")
-			}
-			return sandbox, nil
-		},
-		functionapi.NewHTTPStorageProxyVolumeSnapshotter(cfg.StorageProxyURL, internalAuthGen, snapshotHTTPClient, logger),
-		newLocalRuntimeController(managerClient),
-		logger,
-	)
-
 	sandboxServiceLimiter, err := ratelimit.New(context.Background(), gatewaymiddleware.RateLimitConfigFromGatewayConfig(cfg.GatewayConfig))
 	if err != nil {
 		return nil, fmt.Errorf("create sandbox service rate limiter: %w", err)
@@ -303,7 +268,6 @@ func NewServer(
 		requestLogger:      requestLogger,
 		logger:             logger,
 		meteringHandler:    meteringHandler,
-		functionHandler:    functionHandler,
 		internalAuthGen:    internalAuthGen,
 		entitlements:       entitlements,
 		obsProvider:        obsProvider,
@@ -450,11 +414,6 @@ func (s *Server) setupRoutes() {
 			registry.POST("/credentials", s.authMiddleware.RequirePermission(gatewayauthn.PermRegistryWrite), s.proxyToManager)
 		}
 
-		functionRoutes := v1.Group("/functions")
-		{
-			s.functionHandler.RegisterRoutes(functionRoutes, s.authMiddleware.RequirePermission)
-		}
-
 		credentialSources := v1.Group("/credential-sources")
 		credentialSources.Use(s.managerUpstreamMiddleware())
 		{
@@ -532,9 +491,6 @@ func (s *Server) setupInternalControlPlaneRoutes() {
 		internal.GET("/sandboxes/:id", s.getInternalSandbox)
 		internal.DELETE("/sandboxes/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxDelete), s.deleteInternalSandbox)
 		internal.POST("/sandboxes/:id/resume", s.resumeInternalSandbox)
-		internal.Any("/functions/runtime/sandboxes/:id/services/:service_id/proxy/*path", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.proxyInternalFunctionRuntime)
-		internal.GET("/functions/runtime/sandboxes/:id/services/:service_id/readiness", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.checkInternalFunctionRuntimeReadiness)
-
 		// Template management (→ Manager)
 		internal.GET("/templates", s.proxyInternalTemplateRequest)
 		internal.GET("/templates/:id", s.proxyInternalTemplateRequest)

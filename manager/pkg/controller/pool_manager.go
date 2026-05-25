@@ -26,13 +26,11 @@ import (
 
 const (
 	// Labels
-	LabelTemplateID         = "sandbox0.ai/template-id"
-	LabelTemplateLogicalID  = "sandbox0.ai/template-logical-id"
-	LabelPoolType           = "sandbox0.ai/pool-type"
-	LabelSandboxID          = "sandbox0.ai/sandbox-id"
-	LabelOwnerKind          = "sandbox0.ai/owner-kind"
-	LabelFunctionID         = "sandbox0.ai/function-id"
-	LabelFunctionRevisionID = "sandbox0.ai/function-revision-id"
+	LabelTemplateID        = "sandbox0.ai/template-id"
+	LabelTemplateLogicalID = "sandbox0.ai/template-logical-id"
+	LabelPoolType          = "sandbox0.ai/pool-type"
+	LabelSandboxID         = "sandbox0.ai/sandbox-id"
+	LabelOwnerKind         = "sandbox0.ai/owner-kind"
 
 	// Pool types
 	PoolTypeIdle   = "idle"
@@ -63,9 +61,6 @@ const (
 	AnnotationTemplateSpecHash             = "sandbox0.ai/template-spec-hash"
 	AnnotationClusterAutoscalerSafeToEvict = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 	AnnotationOwnerKind                    = "sandbox0.ai/owner-kind"
-	AnnotationFunctionID                   = "sandbox0.ai/function-id"
-	AnnotationFunctionRevisionID           = "sandbox0.ai/function-revision-id"
-	AnnotationFunctionRuntimeInstanceID    = "sandbox0.ai/function-runtime-instance-id"
 
 	unhealthyIdlePodRepairGracePeriod = 2 * time.Minute
 )

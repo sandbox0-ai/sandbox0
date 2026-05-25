@@ -8,7 +8,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
-	"github.com/sandbox0-ai/sandbox0/pkg/functionruntime"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"go.uber.org/zap"
@@ -149,22 +148,19 @@ func (p *LifecycleProjector) handleUpsert(obj any) {
 	if state == nil {
 		pendingEvents = append(pendingEvents, p.buildSandboxEvent(pod.Name, teamID, userID, templateID, claimedAt, meteringpkg.EventTypeSandboxClaimed, claimedEventID(pod.Name, claimedAt), claimEventData(pod)))
 		state = &meteringpkg.SandboxProjectionState{
-			SandboxID:                 pod.Name,
-			Namespace:                 pod.Namespace,
-			TeamID:                    teamID,
-			UserID:                    userID,
-			TemplateID:                templateID,
-			ClusterID:                 p.clusterID,
-			OwnerKind:                 podUsage.OwnerKind,
-			FunctionID:                podUsage.FunctionID,
-			FunctionRevisionID:        podUsage.FunctionRevisionID,
-			FunctionRuntimeInstanceID: podUsage.FunctionRuntimeInstanceID,
-			ResourceMillicpu:          podUsage.ResourceMillicpu,
-			ResourceMemoryMiB:         podUsage.ResourceMemoryMiB,
-			ClaimedAt:                 &claimedAt,
-			ActiveSince:               &claimedAt,
-			LastObservedAt:            observedAt,
-			LastResourceVer:           pod.ResourceVersion,
+			SandboxID:         pod.Name,
+			Namespace:         pod.Namespace,
+			TeamID:            teamID,
+			UserID:            userID,
+			TemplateID:        templateID,
+			ClusterID:         p.clusterID,
+			OwnerKind:         podUsage.OwnerKind,
+			ResourceMillicpu:  podUsage.ResourceMillicpu,
+			ResourceMemoryMiB: podUsage.ResourceMemoryMiB,
+			ClaimedAt:         &claimedAt,
+			ActiveSince:       &claimedAt,
+			LastObservedAt:    observedAt,
+			LastResourceVer:   pod.ResourceVersion,
 		}
 	}
 
@@ -228,20 +224,17 @@ func (p *LifecycleProjector) handleDelete(obj any) {
 	pendingWindows := make([]*meteringpkg.Window, 0, 2)
 	if state == nil {
 		state = &meteringpkg.SandboxProjectionState{
-			SandboxID:                 pod.Name,
-			Namespace:                 pod.Namespace,
-			TeamID:                    teamID,
-			UserID:                    userID,
-			TemplateID:                templateID,
-			ClusterID:                 p.clusterID,
-			OwnerKind:                 podUsage.OwnerKind,
-			FunctionID:                podUsage.FunctionID,
-			FunctionRevisionID:        podUsage.FunctionRevisionID,
-			FunctionRuntimeInstanceID: podUsage.FunctionRuntimeInstanceID,
-			ResourceMillicpu:          podUsage.ResourceMillicpu,
-			ResourceMemoryMiB:         podUsage.ResourceMemoryMiB,
-			LastObservedAt:            observedAt,
-			LastResourceVer:           pod.ResourceVersion,
+			SandboxID:         pod.Name,
+			Namespace:         pod.Namespace,
+			TeamID:            teamID,
+			UserID:            userID,
+			TemplateID:        templateID,
+			ClusterID:         p.clusterID,
+			OwnerKind:         podUsage.OwnerKind,
+			ResourceMillicpu:  podUsage.ResourceMillicpu,
+			ResourceMemoryMiB: podUsage.ResourceMemoryMiB,
+			LastObservedAt:    observedAt,
+			LastResourceVer:   pod.ResourceVersion,
 		}
 		if claimedAtSet {
 			pendingEvents = append(pendingEvents, p.buildSandboxEvent(pod.Name, teamID, userID, templateID, claimedAt, meteringpkg.EventTypeSandboxClaimed, claimedEventID(pod.Name, claimedAt), claimEventData(pod)))
@@ -380,7 +373,7 @@ func (p *LifecycleProjector) buildSandboxEvent(sandboxID, teamID, userID, templa
 }
 
 func (p *LifecycleProjector) buildSandboxResourceWindows(state *meteringpkg.SandboxProjectionState, teamID, userID, templateID string, start *time.Time, end time.Time) []*meteringpkg.Window {
-	if state == nil || start == nil || start.IsZero() || end.IsZero() || !end.After(*start) || state.OwnerKind == functionruntime.OwnerKind {
+	if state == nil || start == nil || start.IsZero() || end.IsZero() || !end.After(*start) {
 		return nil
 	}
 	windows := make([]*meteringpkg.Window, 0, 2)
@@ -494,12 +487,9 @@ func claimEventData(pod *corev1.Pod) map[string]any {
 }
 
 type sandboxUsageMetadata struct {
-	OwnerKind                 string
-	FunctionID                string
-	FunctionRevisionID        string
-	FunctionRuntimeInstanceID string
-	ResourceMillicpu          int64
-	ResourceMemoryMiB         int64
+	OwnerKind         string
+	ResourceMillicpu  int64
+	ResourceMemoryMiB int64
 }
 
 func sandboxUsageFromPod(pod *corev1.Pod) sandboxUsageMetadata {
@@ -508,12 +498,9 @@ func sandboxUsageFromPod(pod *corev1.Pod) sandboxUsageMetadata {
 	}
 	cpu, memory := podResourceAllocation(pod)
 	return sandboxUsageMetadata{
-		OwnerKind:                 pod.Annotations[controller.AnnotationOwnerKind],
-		FunctionID:                pod.Annotations[controller.AnnotationFunctionID],
-		FunctionRevisionID:        pod.Annotations[controller.AnnotationFunctionRevisionID],
-		FunctionRuntimeInstanceID: pod.Annotations[controller.AnnotationFunctionRuntimeInstanceID],
-		ResourceMillicpu:          cpu,
-		ResourceMemoryMiB:         memory,
+		OwnerKind:         pod.Annotations[controller.AnnotationOwnerKind],
+		ResourceMillicpu:  cpu,
+		ResourceMemoryMiB: memory,
 	}
 }
 
@@ -522,9 +509,6 @@ func applySandboxUsage(state *meteringpkg.SandboxProjectionState, usage sandboxU
 		return
 	}
 	state.OwnerKind = usage.OwnerKind
-	state.FunctionID = usage.FunctionID
-	state.FunctionRevisionID = usage.FunctionRevisionID
-	state.FunctionRuntimeInstanceID = usage.FunctionRuntimeInstanceID
 	state.ResourceMillicpu = usage.ResourceMillicpu
 	state.ResourceMemoryMiB = usage.ResourceMemoryMiB
 }

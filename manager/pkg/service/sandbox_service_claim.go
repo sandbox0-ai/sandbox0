@@ -14,7 +14,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
-	"github.com/sandbox0-ai/sandbox0/pkg/functionruntime"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
@@ -46,7 +45,9 @@ type ClaimMount struct {
 	MountPoint      string `json:"mount_point"`
 }
 
-type ClaimMetadata = functionruntime.Metadata
+type ClaimMetadata struct {
+	OwnerKind string
+}
 
 type BootstrapMountStatus struct {
 	SandboxVolumeID     string `json:"sandboxvolume_id"`
@@ -155,10 +156,7 @@ func applyClaimMetadata(pod *corev1.Pod, metadata *ClaimMetadata) {
 		return
 	}
 	ownerKind := strings.TrimSpace(metadata.OwnerKind)
-	functionID := strings.TrimSpace(metadata.FunctionID)
-	revisionID := strings.TrimSpace(metadata.FunctionRevisionID)
-	instanceID := strings.TrimSpace(metadata.FunctionRuntimeInstanceID)
-	if ownerKind == "" && functionID == "" && revisionID == "" && instanceID == "" {
+	if ownerKind == "" {
 		return
 	}
 	if pod.Labels == nil {
@@ -170,17 +168,6 @@ func applyClaimMetadata(pod *corev1.Pod, metadata *ClaimMetadata) {
 	if ownerKind != "" {
 		pod.Labels[controller.LabelOwnerKind] = ownerKind
 		pod.Annotations[controller.AnnotationOwnerKind] = ownerKind
-	}
-	if functionID != "" {
-		pod.Labels[controller.LabelFunctionID] = functionID
-		pod.Annotations[controller.AnnotationFunctionID] = functionID
-	}
-	if revisionID != "" {
-		pod.Labels[controller.LabelFunctionRevisionID] = revisionID
-		pod.Annotations[controller.AnnotationFunctionRevisionID] = revisionID
-	}
-	if instanceID != "" {
-		pod.Annotations[controller.AnnotationFunctionRuntimeInstanceID] = instanceID
 	}
 }
 

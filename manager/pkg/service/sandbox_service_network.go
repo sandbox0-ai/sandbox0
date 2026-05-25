@@ -103,8 +103,12 @@ func (s *SandboxService) applyPoliciesForPod(
 		requestNetwork = s.appendWebhookNetworkPolicy(requestNetwork, webhookInfo.URL)
 	}
 
+	sandboxID := sandboxIDFromPod(pod)
+	if sandboxID == "" {
+		sandboxID = pod.Name
+	}
 	networkState := s.NetworkPolicyService.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
-		SandboxID:        pod.Name,
+		SandboxID:        sandboxID,
 		TeamID:           req.TeamID,
 		TemplateSpec:     template.Spec.Network,
 		RequestSpec:      requestNetwork,
@@ -177,7 +181,11 @@ func (s *SandboxService) syncCredentialBindings(
 		return noopCredentialBindingRollback, nil
 	}
 
-	previous, err := s.credentialStore.GetBindings(ctx, teamID, pod.Name)
+	sandboxID := sandboxIDFromPod(pod)
+	if sandboxID == "" {
+		sandboxID = pod.Name
+	}
+	previous, err := s.credentialStore.GetBindings(ctx, teamID, sandboxID)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +193,7 @@ func (s *SandboxService) syncCredentialBindings(
 
 	rollback := func(rollbackCtx context.Context) error {
 		if previous == nil || len(previous.Bindings) == 0 {
-			return s.credentialStore.DeleteBindings(rollbackCtx, teamID, pod.Name)
+			return s.credentialStore.DeleteBindings(rollbackCtx, teamID, sandboxID)
 		}
 		return s.credentialStore.UpsertBindings(rollbackCtx, previous)
 	}
@@ -194,7 +202,7 @@ func (s *SandboxService) syncCredentialBindings(
 		if previous == nil || len(previous.Bindings) == 0 {
 			return rollback, nil
 		}
-		if err := s.credentialStore.DeleteBindings(ctx, teamID, pod.Name); err != nil {
+		if err := s.credentialStore.DeleteBindings(ctx, teamID, sandboxID); err != nil {
 			return nil, err
 		}
 		return rollback, nil
@@ -206,7 +214,7 @@ func (s *SandboxService) syncCredentialBindings(
 	}
 
 	if err := s.credentialStore.UpsertBindings(ctx, &egressauth.BindingRecord{
-		SandboxID: pod.Name,
+		SandboxID: sandboxID,
 		TeamID:    teamID,
 		Bindings:  storeBindings,
 	}); err != nil {
@@ -228,7 +236,11 @@ func (s *SandboxService) loadCredentialBindings(ctx context.Context, pod *corev1
 	if s.credentialStore == nil || pod == nil {
 		return nil, nil
 	}
-	record, err := s.credentialStore.GetBindings(ctx, sandboxTeamID(pod), pod.Name)
+	sandboxID := sandboxIDFromPod(pod)
+	if sandboxID == "" {
+		sandboxID = pod.Name
+	}
+	record, err := s.credentialStore.GetBindings(ctx, sandboxTeamID(pod), sandboxID)
 	if err != nil {
 		return nil, err
 	}
@@ -442,8 +454,12 @@ func (s *SandboxService) applyNetworkProvider(
 		return nil
 	}
 
+	sandboxID := sandboxIDFromPod(pod)
+	if sandboxID == "" {
+		sandboxID = pod.Name
+	}
 	input := network.SandboxPolicyInput{
-		SandboxID:     pod.Name,
+		SandboxID:     sandboxID,
 		Namespace:     pod.Namespace,
 		PodName:       pod.Name,
 		TeamID:        teamID,
@@ -532,8 +548,12 @@ func (s *SandboxService) UpdateNetworkPolicy(
 			}
 		}
 
+		currentSandboxID := sandboxIDFromPod(current)
+		if currentSandboxID == "" {
+			currentSandboxID = current.Name
+		}
 		networkState = s.NetworkPolicyService.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
-			SandboxID:        current.Name,
+			SandboxID:        currentSandboxID,
 			TeamID:           teamID,
 			TemplateSpec:     templateSpec,
 			RequestSpec:      policy,

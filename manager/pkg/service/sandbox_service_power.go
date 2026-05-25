@@ -14,7 +14,6 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 )
@@ -448,8 +447,23 @@ func (s *SandboxService) getSandboxPodForPowerState(ctx context.Context, sandbox
 		return s.getSandboxPod(ctx, sandboxID)
 	}
 	if s.sandboxIndex != nil {
-		if namespace, ok := s.sandboxIndex.GetNamespace(sandboxID); ok {
-			return s.k8sClient.CoreV1().Pods(namespace).Get(ctx, sandboxID, metav1.GetOptions{})
+		refs := s.sandboxIndex.GetPodRefs(sandboxID)
+		if len(refs) > 0 {
+			pods := make([]*corev1.Pod, 0, len(refs))
+			for _, ref := range refs {
+				pod, err := s.k8sClient.CoreV1().Pods(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+				if err != nil {
+					if k8serrors.IsNotFound(err) {
+						continue
+					}
+					return nil, err
+				}
+				pods = append(pods, pod)
+			}
+			pod, err := selectSandboxRuntimePod(sandboxID, pods)
+			if err == nil || !k8serrors.IsNotFound(err) {
+				return pod, err
+			}
 		}
 	}
 	selector := labels.SelectorFromSet(map[string]string{controller.LabelSandboxID: sandboxID}).String()
@@ -457,8 +471,9 @@ func (s *SandboxService) getSandboxPodForPowerState(ctx context.Context, sandbox
 	if err != nil {
 		return nil, err
 	}
-	if len(pods.Items) == 0 {
-		return nil, k8serrors.NewNotFound(schema.GroupResource{Resource: "pod"}, sandboxID)
+	podPtrs := make([]*corev1.Pod, 0, len(pods.Items))
+	for i := range pods.Items {
+		podPtrs = append(podPtrs, pods.Items[i].DeepCopy())
 	}
-	return pods.Items[0].DeepCopy(), nil
+	return selectSandboxRuntimePod(sandboxID, podPtrs)
 }

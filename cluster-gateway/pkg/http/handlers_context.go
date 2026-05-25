@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -238,11 +239,12 @@ func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error)
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox belongs to a different team")
 		return nil, errors.New("sandbox belongs to a different team")
 	}
-	if sandboxWantsPaused(sandbox) && !sandbox.AutoResume {
-		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is paused and auto_resume is disabled")
+	needsRuntimeRefetch := sandboxRuntimeMissing(sandbox)
+	if sandboxNeedsRuntime(sandbox) && !sandbox.AutoResume {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is not running and auto_resume is disabled")
 		return nil, errors.New("sandbox auto_resume is disabled")
 	}
-	if sandboxWantsPaused(sandbox) {
+	if sandboxNeedsRuntime(sandbox) {
 		resumeCtx, cancel := context.WithTimeout(c.Request.Context(), defaultAutoResumeTimeout)
 		defer cancel()
 		if err := s.managerClient.ResumeSandbox(resumeCtx, sandboxID, authCtx.UserID, authCtx.TeamID); err != nil {
@@ -252,6 +254,13 @@ func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error)
 			)
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
 			return nil, err
+		}
+		if needsRuntimeRefetch {
+			sandbox, err = s.managerClient.GetSandbox(c.Request.Context(), sandboxID, authCtx.UserID, authCtx.TeamID)
+			if err != nil {
+				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
+				return nil, err
+			}
 		}
 	}
 
@@ -276,6 +285,20 @@ func sandboxWantsPaused(sandbox *mgr.Sandbox) bool {
 		return true
 	}
 	return sandbox.Paused
+}
+
+func sandboxNeedsRuntime(sandbox *mgr.Sandbox) bool {
+	return sandboxRuntimeMissing(sandbox) || sandboxWantsPaused(sandbox)
+}
+
+func sandboxRuntimeMissing(sandbox *mgr.Sandbox) bool {
+	if sandbox == nil {
+		return false
+	}
+	if sandbox.Status == mgr.SandboxStatusCleaned || strings.TrimSpace(sandbox.InternalAddr) == "" {
+		return true
+	}
+	return false
 }
 
 func (s *Server) buildProcdRequestModifier(c *gin.Context) (proxy.RequestModifier, error) {

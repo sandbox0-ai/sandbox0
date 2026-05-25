@@ -71,13 +71,14 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 	if !s.enforceSandboxServiceRoute(c, sandboxID, sandbox.TeamID, route) {
 		return
 	}
-	if sandboxWantsPaused(sandbox) {
+	needsRuntimeRefetch := sandboxRuntimeMissing(sandbox)
+	if sandboxNeedsRuntime(sandbox) {
 		if !sandbox.AutoResume {
-			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is paused and auto_resume is disabled")
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is not running and auto_resume is disabled")
 			return
 		}
 		if !route.Resume {
-			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is paused and resume is disabled")
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is not running and resume is disabled")
 			return
 		}
 		resumeCtx, cancel := context.WithTimeout(c.Request.Context(), defaultAutoResumeTimeout)
@@ -86,6 +87,16 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 			s.logger.Warn("Auto resume failed", zap.String("sandbox_id", sandboxID), zap.Error(err))
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
 			return
+		}
+		if needsRuntimeRefetch {
+			if s.exposureSandboxCache != nil {
+				s.exposureSandboxCache.Delete(sandboxID)
+			}
+			sandbox, err = s.getSandboxForPublicExposure(c, sandboxID)
+			if err != nil {
+				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
+				return
+			}
 		}
 	}
 

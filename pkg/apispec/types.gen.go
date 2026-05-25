@@ -152,6 +152,16 @@ const (
 	SandboxAppServiceRuntimeTypeWarmProcess SandboxAppServiceRuntimeType = "warm_process"
 )
 
+// Defines values for SandboxLifecycleStatus.
+const (
+	SandboxLifecycleStatusCleaned     SandboxLifecycleStatus = "cleaned"
+	SandboxLifecycleStatusCompleted   SandboxLifecycleStatus = "completed"
+	SandboxLifecycleStatusFailed      SandboxLifecycleStatus = "failed"
+	SandboxLifecycleStatusRunning     SandboxLifecycleStatus = "running"
+	SandboxLifecycleStatusStarting    SandboxLifecycleStatus = "starting"
+	SandboxLifecycleStatusTerminating SandboxLifecycleStatus = "terminating"
+)
+
 // Defines values for SandboxNetworkPolicyMode.
 const (
 	AllowAll SandboxNetworkPolicyMode = "allow-all"
@@ -175,15 +185,6 @@ const (
 	Pausing  SandboxPowerStatePhase = "pausing"
 	Resuming SandboxPowerStatePhase = "resuming"
 	Stable   SandboxPowerStatePhase = "stable"
-)
-
-// Defines values for SandboxSummaryStatus.
-const (
-	SandboxSummaryStatusCompleted   SandboxSummaryStatus = "completed"
-	SandboxSummaryStatusFailed      SandboxSummaryStatus = "failed"
-	SandboxSummaryStatusRunning     SandboxSummaryStatus = "running"
-	SandboxSummaryStatusStarting    SandboxSummaryStatus = "starting"
-	SandboxSummaryStatusTerminating SandboxSummaryStatus = "terminating"
 )
 
 // Defines values for SuccessAPIKeyListResponseSuccess.
@@ -497,15 +498,6 @@ const (
 	WarmProcessSpecTypeRepl WarmProcessSpecType = "repl"
 )
 
-// Defines values for GetApiV1SandboxesParamsStatus.
-const (
-	GetApiV1SandboxesParamsStatusCompleted   GetApiV1SandboxesParamsStatus = "completed"
-	GetApiV1SandboxesParamsStatusFailed      GetApiV1SandboxesParamsStatus = "failed"
-	GetApiV1SandboxesParamsStatusRunning     GetApiV1SandboxesParamsStatus = "running"
-	GetApiV1SandboxesParamsStatusStarting    GetApiV1SandboxesParamsStatus = "starting"
-	GetApiV1SandboxesParamsStatusTerminating GetApiV1SandboxesParamsStatus = "terminating"
-)
-
 // APIKey defines model for APIKey.
 type APIKey struct {
 	CreatedAt  time.Time  `json:"created_at"`
@@ -585,12 +577,12 @@ type ClaimRequest struct {
 
 // ClaimResponse defines model for ClaimResponse.
 type ClaimResponse struct {
-	BootstrapMounts *[]MountStatus `json:"bootstrap_mounts,omitempty"`
-	ClusterId       *string        `json:"cluster_id"`
-	PodName         string         `json:"pod_name"`
-	SandboxId       string         `json:"sandbox_id"`
-	Status          string         `json:"status"`
-	Template        string         `json:"template"`
+	BootstrapMounts *[]MountStatus         `json:"bootstrap_mounts,omitempty"`
+	ClusterId       *string                `json:"cluster_id"`
+	PodName         string                 `json:"pod_name"`
+	SandboxId       string                 `json:"sandbox_id"`
+	Status          SandboxLifecycleStatus `json:"status"`
+	Template        string                 `json:"template"`
 }
 
 // ContainerSpec defines model for ContainerSpec.
@@ -1430,18 +1422,18 @@ type Sandbox struct {
 	ExpiresAt time.Time `json:"expires_at"`
 
 	// HardExpiresAt Hard expiration timestamp. Zero value means not set.
-	HardExpiresAt time.Time             `json:"hard_expires_at"`
-	Id            string                `json:"id"`
-	Mounts        *[]ClaimMountRequest  `json:"mounts,omitempty"`
-	Paused        bool                  `json:"paused"`
-	PodName       string                `json:"pod_name"`
-	PowerState    SandboxPowerState     `json:"power_state"`
-	Services      *[]SandboxAppService  `json:"services,omitempty"`
-	Ssh           *SandboxSSHConnection `json:"ssh,omitempty"`
-	Status        string                `json:"status"`
-	TeamId        string                `json:"team_id"`
-	TemplateId    string                `json:"template_id"`
-	UserId        *string               `json:"user_id,omitempty"`
+	HardExpiresAt time.Time              `json:"hard_expires_at"`
+	Id            string                 `json:"id"`
+	Mounts        *[]ClaimMountRequest   `json:"mounts,omitempty"`
+	Paused        bool                   `json:"paused"`
+	PodName       string                 `json:"pod_name"`
+	PowerState    SandboxPowerState      `json:"power_state"`
+	Services      *[]SandboxAppService   `json:"services,omitempty"`
+	Ssh           *SandboxSSHConnection  `json:"ssh,omitempty"`
+	Status        SandboxLifecycleStatus `json:"status"`
+	TeamId        string                 `json:"team_id"`
+	TemplateId    string                 `json:"template_id"`
+	UserId        *string                `json:"user_id,omitempty"`
 }
 
 // SandboxAppService Canonical service model for sandbox exposure.
@@ -1547,16 +1539,21 @@ type SandboxAppServiceView struct {
 type SandboxConfig struct {
 	// AutoResume Sandbox-level resume gate for paused sandboxes. When false, any inbound request
 	// (API or public exposure) must not auto resume the sandbox.
-	AutoResume *bool                 `json:"auto_resume,omitempty"`
-	EnvVars    *map[string]string    `json:"env_vars,omitempty"`
-	HardTtl    *int32                `json:"hard_ttl,omitempty"`
-	Network    *SandboxNetworkPolicy `json:"network,omitempty"`
-	Services   *[]SandboxAppService  `json:"services,omitempty"`
-	Ttl        *int32                `json:"ttl,omitempty"`
+	AutoResume *bool              `json:"auto_resume,omitempty"`
+	EnvVars    *map[string]string `json:"env_vars,omitempty"`
+
+	// HardTtl Hard time-to-live in seconds. When it expires, Sandbox0 cleans the runtime pod and preserves the sandbox identity, services, and public URLs until the sandbox is explicitly deleted.
+	HardTtl  *int32                `json:"hard_ttl,omitempty"`
+	Network  *SandboxNetworkPolicy `json:"network,omitempty"`
+	Services *[]SandboxAppService  `json:"services,omitempty"`
+	Ttl      *int32                `json:"ttl,omitempty"`
 
 	// Webhook Per-sandbox webhook configuration. Sandbox0 delivers webhook events at least once and consumers should deduplicate by event_id. For sandbox lifecycle events, procd persists signed delivery records to a manager-owned SandboxVolume outside the workspace before dispatch; manager also emits sandbox.deleted during pod deletion cleanup.
 	Webhook *WebhookConfig `json:"webhook,omitempty"`
 }
+
+// SandboxLifecycleStatus defines model for SandboxLifecycleStatus.
+type SandboxLifecycleStatus string
 
 // SandboxNetworkPolicy defines model for SandboxNetworkPolicy.
 type SandboxNetworkPolicy struct {
@@ -1646,16 +1643,16 @@ type SandboxServicesUpdateRequest struct {
 
 // SandboxStatus defines model for SandboxStatus.
 type SandboxStatus struct {
-	ClaimedAt     *string `json:"claimed_at,omitempty"`
-	CreatedAt     *string `json:"created_at,omitempty"`
-	ExpiresAt     *string `json:"expires_at,omitempty"`
-	HardExpiresAt *string `json:"hard_expires_at,omitempty"`
-	PodName       *string `json:"pod_name,omitempty"`
-	SandboxId     *string `json:"sandbox_id,omitempty"`
-	Status        *string `json:"status,omitempty"`
-	TeamId        *string `json:"team_id,omitempty"`
-	TemplateId    *string `json:"template_id,omitempty"`
-	UserId        *string `json:"user_id,omitempty"`
+	ClaimedAt     *string                 `json:"claimed_at,omitempty"`
+	CreatedAt     *string                 `json:"created_at,omitempty"`
+	ExpiresAt     *string                 `json:"expires_at,omitempty"`
+	HardExpiresAt *string                 `json:"hard_expires_at,omitempty"`
+	PodName       *string                 `json:"pod_name,omitempty"`
+	SandboxId     *string                 `json:"sandbox_id,omitempty"`
+	Status        *SandboxLifecycleStatus `json:"status,omitempty"`
+	TeamId        *string                 `json:"team_id,omitempty"`
+	TemplateId    *string                 `json:"template_id,omitempty"`
+	UserId        *string                 `json:"user_id,omitempty"`
 }
 
 // SandboxSummary defines model for SandboxSummary.
@@ -1666,16 +1663,13 @@ type SandboxSummary struct {
 	ExpiresAt time.Time `json:"expires_at"`
 
 	// HardExpiresAt Hard expiration timestamp. Zero value means not set.
-	HardExpiresAt time.Time            `json:"hard_expires_at"`
-	Id            string               `json:"id"`
-	Paused        bool                 `json:"paused"`
-	PowerState    SandboxPowerState    `json:"power_state"`
-	Status        SandboxSummaryStatus `json:"status"`
-	TemplateId    string               `json:"template_id"`
+	HardExpiresAt time.Time              `json:"hard_expires_at"`
+	Id            string                 `json:"id"`
+	Paused        bool                   `json:"paused"`
+	PowerState    SandboxPowerState      `json:"power_state"`
+	Status        SandboxLifecycleStatus `json:"status"`
+	TemplateId    string                 `json:"template_id"`
 }
-
-// SandboxSummaryStatus defines model for SandboxSummary.Status.
-type SandboxSummaryStatus string
 
 // SandboxTemplateCondition defines model for SandboxTemplateCondition.
 type SandboxTemplateCondition struct {
@@ -1717,11 +1711,13 @@ type SandboxTemplateStatus struct {
 type SandboxUpdateConfig struct {
 	// AutoResume Sandbox-level resume gate for paused sandboxes. When false, any inbound request
 	// (API or public exposure) must not auto resume the sandbox.
-	AutoResume *bool                 `json:"auto_resume,omitempty"`
-	HardTtl    *int32                `json:"hard_ttl,omitempty"`
-	Network    *SandboxNetworkPolicy `json:"network,omitempty"`
-	Services   *[]SandboxAppService  `json:"services,omitempty"`
-	Ttl        *int32                `json:"ttl,omitempty"`
+	AutoResume *bool `json:"auto_resume,omitempty"`
+
+	// HardTtl Hard time-to-live in seconds. When it expires, Sandbox0 cleans the runtime pod and preserves the sandbox identity, services, and public URLs until the sandbox is explicitly deleted.
+	HardTtl  *int32                `json:"hard_ttl,omitempty"`
+	Network  *SandboxNetworkPolicy `json:"network,omitempty"`
+	Services *[]SandboxAppService  `json:"services,omitempty"`
+	Ttl      *int32                `json:"ttl,omitempty"`
 }
 
 // SandboxUpdateRequest defines model for SandboxUpdateRequest.
@@ -2571,7 +2567,7 @@ type UserID = string
 // GetApiV1SandboxesParams defines parameters for GetApiV1Sandboxes.
 type GetApiV1SandboxesParams struct {
 	// Status Filter by sandbox status
-	Status *GetApiV1SandboxesParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+	Status *SandboxLifecycleStatus `form:"status,omitempty" json:"status,omitempty"`
 
 	// TemplateId Filter by template ID
 	TemplateId *string `form:"template_id,omitempty" json:"template_id,omitempty"`
@@ -2585,9 +2581,6 @@ type GetApiV1SandboxesParams struct {
 	// Offset Pagination offset
 	Offset *int `form:"offset,omitempty" json:"offset,omitempty"`
 }
-
-// GetApiV1SandboxesParamsStatus defines parameters for GetApiV1Sandboxes.
-type GetApiV1SandboxesParamsStatus string
 
 // DeleteApiV1SandboxesIdFilesParams defines parameters for DeleteApiV1SandboxesIdFiles.
 type DeleteApiV1SandboxesIdFilesParams struct {

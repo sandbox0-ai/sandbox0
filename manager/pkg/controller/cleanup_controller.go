@@ -26,6 +26,11 @@ type SandboxTerminator interface {
 	TerminateSandboxByID(ctx context.Context, sandboxID string) error
 }
 
+// SandboxRuntimeCleaner defines cleanup that frees compute while keeping durable sandbox state.
+type SandboxRuntimeCleaner interface {
+	CleanSandboxRuntimeByID(ctx context.Context, sandboxID string) error
+}
+
 // CleanupController handles cleanup of excess idle pods and expired active pods
 type CleanupController struct {
 	k8sClient         kubernetes.Interface
@@ -34,6 +39,7 @@ type CleanupController struct {
 	recorder          record.EventRecorder
 	clock             TimeProvider
 	pauseRequester    SandboxPauseRequester
+	runtimeCleaner    SandboxRuntimeCleaner
 	sandboxTerminator SandboxTerminator
 	logger            *zap.Logger
 	interval          time.Duration
@@ -76,6 +82,7 @@ func NewCleanupController(
 		clock = systemTime{}
 	}
 
+	runtimeCleaner, _ := sandboxTerminator.(SandboxRuntimeCleaner)
 	return &CleanupController{
 		k8sClient:         k8sClient,
 		podLister:         podLister,
@@ -83,6 +90,7 @@ func NewCleanupController(
 		recorder:          recorder,
 		clock:             clock,
 		pauseRequester:    pauseRequester,
+		runtimeCleaner:    runtimeCleaner,
 		sandboxTerminator: sandboxTerminator,
 		logger:            logger,
 		interval:          interval,
@@ -169,10 +177,21 @@ func (cc *CleanupController) cleanupExpired(ctx context.Context, template *v1alp
 					zap.String("pod", pod.Name),
 					zap.Time("hardExpiresAt", hardExpiresAt),
 				)
-				if cc.sandboxTerminator != nil {
-					if err := cc.sandboxTerminator.TerminateSandboxByID(ctx, pod.Name); err != nil {
+				sandboxID := cleanupSandboxIDFromPod(pod)
+				if cc.runtimeCleaner != nil {
+					if err := cc.runtimeCleaner.CleanSandboxRuntimeByID(ctx, sandboxID); err != nil {
 						cc.logger.Error("Failed to delete hard-expired pod",
 							zap.String("pod", pod.Name),
+							zap.String("sandboxID", sandboxID),
+							zap.Error(err),
+						)
+						continue
+					}
+				} else if cc.sandboxTerminator != nil {
+					if err := cc.sandboxTerminator.TerminateSandboxByID(ctx, sandboxID); err != nil {
+						cc.logger.Error("Failed to delete hard-expired pod",
+							zap.String("pod", pod.Name),
+							zap.String("sandboxID", sandboxID),
 							zap.Error(err),
 						)
 						continue
@@ -225,7 +244,7 @@ func (cc *CleanupController) cleanupExpired(ctx context.Context, template *v1alp
 			)
 
 			if cc.pauseRequester != nil {
-				err := cc.pauseRequester.RequestPauseSandboxByID(ctx, pod.Name)
+				err := cc.pauseRequester.RequestPauseSandboxByID(ctx, cleanupSandboxIDFromPod(pod))
 				if err != nil {
 					cc.logger.Error("Failed to request pause for expired pod",
 						zap.String("pod", pod.Name),
@@ -266,7 +285,7 @@ func (cc *CleanupController) deleteCompletedPod(ctx context.Context, template *v
 	)
 
 	if cc.sandboxTerminator != nil {
-		if err := cc.sandboxTerminator.TerminateSandboxByID(ctx, pod.Name); err != nil {
+		if err := cc.sandboxTerminator.TerminateSandboxByID(ctx, cleanupSandboxIDFromPod(pod)); err != nil {
 			cc.logger.Error("Failed to delete completed sandbox pod",
 				zap.String("pod", pod.Name),
 				zap.Error(err),
@@ -292,6 +311,23 @@ func (cc *CleanupController) deleteCompletedPod(ctx context.Context, template *v
 	cc.recorder.Eventf(template, corev1.EventTypeNormal, "CompletedPodDeleted",
 		"Deleted completed sandbox pod %s", pod.Name)
 	return true
+}
+
+func cleanupSandboxIDFromPod(pod *corev1.Pod) string {
+	if pod == nil {
+		return ""
+	}
+	if pod.Labels != nil {
+		if sandboxID := pod.Labels[LabelSandboxID]; sandboxID != "" {
+			return sandboxID
+		}
+	}
+	if pod.Annotations != nil {
+		if sandboxID := pod.Annotations[AnnotationSandboxID]; sandboxID != "" {
+			return sandboxID
+		}
+	}
+	return pod.Name
 }
 
 func (cc *CleanupController) forceDeleteStaleDeletingPod(ctx context.Context, template *v1alpha1.SandboxTemplate, pod *corev1.Pod, now time.Time) {

@@ -1160,8 +1160,7 @@ paths:
           in: query
           description: Filter by sandbox status
           schema:
-            type: string
-            enum: [starting, running, failed, completed, terminating]
+            $ref: "#/components/schemas/SandboxLifecycleStatus"
         - name: template_id
           in: query
           description: Filter by template ID
@@ -3739,6 +3738,7 @@ components:
         hard_ttl:
           type: integer
           format: int32
+          description: Hard time-to-live in seconds. When it expires, Sandbox0 cleans the runtime pod and preserves the sandbox identity, services, and public URLs until the sandbox is explicitly deleted.
         network:
           $ref: "#/components/schemas/SandboxNetworkPolicy"
         webhook:
@@ -3943,7 +3943,7 @@ components:
         sandbox_id:
           type: string
         status:
-          type: string
+          $ref: "#/components/schemas/SandboxLifecycleStatus"
         pod_name:
           type: string
         template:
@@ -3990,6 +3990,16 @@ components:
         - observed
         - observed_generation
         - phase
+    SandboxLifecycleStatus:
+      type: string
+      enum: [starting, running, failed, completed, terminating, cleaned]
+      x-enum-varnames:
+        - SandboxLifecycleStatusStarting
+        - SandboxLifecycleStatusRunning
+        - SandboxLifecycleStatusFailed
+        - SandboxLifecycleStatusCompleted
+        - SandboxLifecycleStatusTerminating
+        - SandboxLifecycleStatusCleaned
     Sandbox:
       type: object
       properties:
@@ -4002,7 +4012,7 @@ components:
         user_id:
           type: string
         status:
-          type: string
+          $ref: "#/components/schemas/SandboxLifecycleStatus"
         paused:
           type: boolean
         power_state:
@@ -4073,6 +4083,7 @@ components:
         hard_ttl:
           type: integer
           format: int32
+          description: Hard time-to-live in seconds. When it expires, Sandbox0 cleans the runtime pod and preserves the sandbox identity, services, and public URLs until the sandbox is explicitly deleted.
         network:
           $ref: "#/components/schemas/SandboxNetworkPolicy"
         auto_resume:
@@ -4104,7 +4115,7 @@ components:
         pod_name:
           type: string
         status:
-          type: string
+          $ref: "#/components/schemas/SandboxLifecycleStatus"
         claimed_at:
           type: string
         expires_at:
@@ -4135,8 +4146,7 @@ components:
         template_id:
           type: string
         status:
-          type: string
-          enum: [starting, running, failed, completed, terminating]
+          $ref: "#/components/schemas/SandboxLifecycleStatus"
         paused:
           type: boolean
         power_state:

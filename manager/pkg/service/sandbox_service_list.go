@@ -56,6 +56,10 @@ func (s *SandboxService) ListSandboxes(ctx context.Context, req *ListSandboxesRe
 		req.Limit = 200
 	}
 
+	if s.sandboxStore != nil {
+		return s.listSandboxesFromStore(ctx, req)
+	}
+
 	// List all active pods (exclude idle pool)
 	pods, err := s.podLister.List(labels.SelectorFromSet(map[string]string{
 		controller.LabelPoolType: controller.PoolTypeActive,
@@ -98,7 +102,7 @@ func (s *SandboxService) ListSandboxes(ctx context.Context, req *ListSandboxesRe
 		hardExpiresAt := parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt)
 
 		summaries = append(summaries, &SandboxSummary{
-			ID:            pod.Name,
+			ID:            sandboxIDFromPod(pod),
 			TemplateID:    templateID,
 			Status:        status,
 			Paused:        paused,
@@ -143,4 +147,51 @@ func (s *SandboxService) ListSandboxes(ctx context.Context, req *ListSandboxesRe
 		Count:     totalCount,
 		HasMore:   hasMore,
 	}, nil
+}
+
+func (s *SandboxService) listSandboxesFromStore(ctx context.Context, req *ListSandboxesRequest) (*ListSandboxesResponse, error) {
+	records, err := s.sandboxStore.ListSandboxes(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	summaries := make([]*SandboxSummary, 0, len(records))
+	for _, record := range records {
+		sandbox := s.recordToSandbox(record)
+		if record.CurrentPodName != "" {
+			if pod, err := s.getSandboxPod(ctx, record.ID); err == nil {
+				sandbox = s.podToSandbox(ctx, pod, record.ID)
+			}
+		}
+		if req.Paused != nil && sandbox.Paused != *req.Paused {
+			continue
+		}
+		summaries = append(summaries, &SandboxSummary{
+			ID:            sandbox.ID,
+			TemplateID:    sandbox.TemplateID,
+			Status:        sandbox.Status,
+			Paused:        sandbox.Paused,
+			PowerState:    sandbox.PowerState,
+			CreatedAt:     sandbox.CreatedAt,
+			ExpiresAt:     sandbox.ExpiresAt,
+			HardExpiresAt: sandbox.HardExpiresAt,
+		})
+	}
+
+	sort.Slice(summaries, func(i, j int) bool {
+		return summaries[i].CreatedAt.After(summaries[j].CreatedAt)
+	})
+	totalCount := len(summaries)
+	hasMore := false
+	if req.Offset >= totalCount {
+		summaries = []*SandboxSummary{}
+	} else {
+		end := req.Offset + req.Limit
+		if end >= totalCount {
+			end = totalCount
+		} else {
+			hasMore = true
+		}
+		summaries = summaries[req.Offset:end]
+	}
+	return &ListSandboxesResponse{Sandboxes: summaries, Count: totalCount, HasMore: hasMore}, nil
 }

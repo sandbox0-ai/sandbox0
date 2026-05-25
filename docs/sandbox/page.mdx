@@ -57,7 +57,7 @@ Claim a sandbox from a template. The sandbox is created from a pre-warmed pool f
 |-------|------|-------------|
 | `env_vars` | object | Environment variables |
 | `ttl` | integer | Time to live in seconds (soft limit, triggers auto-pause; default: `0`, disabled) |
-| `hard_ttl` | integer | Maximum lifetime in seconds (hard limit, triggers deletion; default: `0`, disabled) |
+| `hard_ttl` | integer | Hard runtime lifetime in seconds (cleans compute while preserving sandbox identity and services; default: `0`, disabled) |
 | `network` | object | `SandboxNetworkPolicy`. Controls traffic rules, protocol controls, credential bindings, and destination-scoped egress auth |
 | `webhook` | object | Webhook configuration |
 | `auto_resume` | boolean | Auto-resume when accessed (default: true) |
@@ -72,11 +72,11 @@ Sandbox0 uses two-tier TTL to balance resource efficiency and flexibility:
 | Field | Behavior | Use Case |
 |-------|----------|----------|
 | `ttl` | **Soft pause**: When expired, sandbox is automatically paused. Processes stop but state is preserved. Can be extended via refresh API. | Keep sandboxes alive during active use while freeing compute resources during idle periods. |
-| `hard_ttl` | **Hard delete**: When expired, sandbox is permanently deleted regardless of pause state. Can also be extended via refresh API. | Enforce maximum lifetime for security or cost control. The difference from `ttl` is the expiration behavior (delete vs pause). |
+| `hard_ttl` | **Hard clean**: When expired, Sandbox0 deletes the runtime pod and marks the sandbox `cleaned`. Identity, configuration, services, and public URLs remain available until explicit delete. | Enforce compute cost limits while keeping a durable sandbox service that can be restored on demand. |
 
 <Callout variant="info">
 The relationship: <code>ttl {'<='} hard_ttl</code>. When <code>ttl</code> expires first, sandbox pauses but can be resumed.
-When <code>hard_ttl</code> expires, sandbox is deleted immediately. Both can be extended via the refresh API.
+When <code>hard_ttl</code> expires, sandbox compute is cleaned and the sandbox can be restored by resume-capable access. Both can be extended via the refresh API.
 </Callout>
 
 **Example timeline (sandbox created with `ttl=300` and `hard_ttl=3600`):**
@@ -84,7 +84,7 @@ When <code>hard_ttl</code> expires, sandbox is deleted immediately. Both can be 
 - `t=300`: TTL expires → sandbox auto-pauses
 - `t=310`: User calls refresh → TTL reset to 300, Hard TTL reset to 3600 (new hard deadline at `t=3910`)
 - `t=610`: TTL expires again → sandbox auto-pauses
-- `t=3910`: Hard TTL expires → sandbox deleted
+- `t=3910`: Hard TTL expires → runtime pod cleaned, sandbox status becomes `cleaned`
 
 <Tabs
   tabs={[
@@ -403,7 +403,7 @@ Only the following fields can be updated at runtime:
 | Field | Type | Description |
 |-------|------|-------------|
 | `ttl` | integer | Time to live in seconds (soft limit) |
-| `hard_ttl` | integer | Maximum lifetime in seconds (hard limit) |
+| `hard_ttl` | integer | Hard runtime lifetime in seconds |
 | `network` | object | Network policy configuration |
 | `auto_resume` | boolean | Auto-resume when accessed |
 | `services` | array | Sandbox Services for public HTTP routes |
@@ -468,7 +468,7 @@ See [Pause And Resume](/docs/sandbox/pause-resume) for explicit pause, state ins
 
 ## Refresh Sandbox TTL
 
-Extend the sandbox time-to-live. This resets both `ttl` and `hard_ttl` (if configured) from the current time.
+Extend the sandbox time-to-live. This resets both `ttl` and `hard_ttl` (if configured) from the current time while the sandbox has a runtime.
 
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/refresh

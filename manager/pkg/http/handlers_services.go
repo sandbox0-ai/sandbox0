@@ -45,10 +45,11 @@ func (s *Server) listSandboxServices(c *gin.Context) {
 		return
 	}
 
+	exposureDomain := s.getExposureDomain()
 	spec.JSONSuccess(c, http.StatusOK, gin.H{
 		"sandbox_id":      sandboxID,
-		"services":        service.SandboxAppServiceViews(sandbox.Services),
-		"exposure_domain": s.getExposureDomain(),
+		"services":        service.SandboxAppServiceViewsForExposure(sandboxID, exposureDomain, sandbox.Services),
+		"exposure_domain": exposureDomain,
 	})
 }
 
@@ -99,9 +100,10 @@ func (s *Server) updateSandboxServices(c *gin.Context) {
 		return
 	}
 
+	exposureDomain := s.getExposureDomain()
 	spec.JSONSuccess(c, http.StatusOK, gin.H{
 		"sandbox_id":      sandboxID,
-		"services":        service.SandboxAppServiceViews(updated.Services),
-		"exposure_domain": s.getExposureDomain(),
+		"services":        service.SandboxAppServiceViewsForExposure(sandboxID, exposureDomain, updated.Services),
+		"exposure_domain": exposureDomain,
 	})
 }

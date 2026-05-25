@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 )
 
 const (
@@ -101,6 +103,7 @@ type SandboxAppServiceView struct {
 	SandboxAppService
 	Publishable     bool     `json:"publishable"`
 	PublishBlockers []string `json:"publish_blockers,omitempty"`
+	PublicURL       string   `json:"public_url,omitempty"`
 }
 
 func SandboxAppServicesHaveResumeRoute(services []SandboxAppService) bool {
@@ -192,6 +195,12 @@ func normalizeSandboxAppService(service SandboxAppService) (SandboxAppService, e
 }
 
 func SandboxAppServiceViews(services []SandboxAppService) []SandboxAppServiceView {
+	return SandboxAppServiceViewsForExposure("", "", services)
+}
+
+// SandboxAppServiceViewsForExposure adds derived fields that depend on the
+// deployment exposure domain.
+func SandboxAppServiceViewsForExposure(sandboxID, exposureDomain string, services []SandboxAppService) []SandboxAppServiceView {
 	if len(services) == 0 {
 		return []SandboxAppServiceView{}
 	}
@@ -202,9 +211,28 @@ func SandboxAppServiceViews(services []SandboxAppService) []SandboxAppServiceVie
 			SandboxAppService: service,
 			Publishable:       len(blockers) == 0,
 			PublishBlockers:   blockers,
+			PublicURL:         SandboxAppServicePublicURL(sandboxID, exposureDomain, service),
 		})
 	}
 	return views
+}
+
+// SandboxAppServicePublicURL returns the public entrypoint for a service when
+// the service is public and the deployment has an exposure domain.
+func SandboxAppServicePublicURL(sandboxID, exposureDomain string, service SandboxAppService) string {
+	if !service.Ingress.Public {
+		return ""
+	}
+	sandboxID = strings.TrimSpace(sandboxID)
+	exposureDomain = strings.Trim(strings.TrimSpace(exposureDomain), ".")
+	if sandboxID == "" || exposureDomain == "" {
+		return ""
+	}
+	label, err := naming.BuildExposureHostLabel(sandboxID, service.Port)
+	if err != nil {
+		return ""
+	}
+	return "https://" + label + "." + exposureDomain
 }
 
 // SandboxAppServicePublishBlockers returns reasons why a service cannot be

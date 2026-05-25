@@ -67,7 +67,7 @@ Route auth stores SHA-256 digests, not plaintext tokens. Hash secret values befo
 /api/v1/sandboxes/{'{id}'}/services
 </Endpoint>
 
-The response includes `publishable`, `publish_blockers`, and `exposure_domain`.
+The response includes `publishable`, `publish_blockers`, `public_url`, and `exposure_domain`.
 
 <Tabs
   tabs={[
@@ -80,7 +80,7 @@ if err != nil {
 }
 fmt.Printf("services: %d\\n", len(resp.Services))
 for _, service := range resp.Services {
-    fmt.Printf("%s -> port %d\\n", service.ID, service.Port)
+    fmt.Printf("%s -> port %d url=%s\\n", service.ID, service.Port, service.PublicURL.Or(""))
 }`
     },
     {
@@ -398,7 +398,7 @@ if err != nil {
 - Public HTTP traffic must match a route on a public service.
 - If `methods` is empty, every HTTP method is allowed for that route.
 - `resume` is evaluated with sandbox `auto_resume`. A route with `resume: false` will not resume a paused or cleaned sandbox.
-- Public URLs are derived from the deployment exposure domain as `{sandbox_id}--p{port}.{exposure_domain}`.
+- Public service responses include `public_url`, derived from the deployment exposure domain as `https://{sandbox_id}--p{port}.{exposure_domain}`.
 - Public URLs remain reserved for a `cleaned` sandbox and become unavailable only after explicit sandbox deletion.
 
 ## Next Steps

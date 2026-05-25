@@ -3897,6 +3897,9 @@ components:
               type: array
               items:
                 type: string
+            public_url:
+              type: string
+              description: Public HTTPS URL for this service when public exposure is enabled.
           required: [publishable]
     SandboxServicesUpdateRequest:
       type: object

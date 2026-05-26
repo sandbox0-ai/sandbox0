@@ -29,6 +29,8 @@ This is the direct SDK and CI path.
 
 Provide a template, one service, and snapshot mounts. Sandbox0 materializes each snapshot as a read-only volume when the function cold-starts.
 
+The template must declare every snapshot mount path as a read-only `volumeMounts` entry. This keeps function revisions immutable after deploy. For sandbox-service promotion, mounted volumes are snapshotted and served read-only in the function runtime, so the promoted service should not require writes to those mount paths while handling production requests.
+
 ## Scale To Zero
 
 Functions have no `minIdle` setting. Every function starts at zero runtime instances and cold-starts on the first request.

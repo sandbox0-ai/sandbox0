@@ -36,6 +36,23 @@ In local-password mode it bootstraps the first admin credentials; in OIDC-only m
 | Multi-cluster control plane | `services.regionalGateway`, `services.scheduler` | You coordinate multiple data-plane clusters in one region |
 | Multi-cluster data plane | `controlPlane`, `cluster`, `services.clusterGateway`, `services.manager`, optional `storageProxy`/`netd` | You attach a cluster to an external control plane |
 
+## Metering Boundary
+
+Sandbox0 records usage truth in the region database and exports it from the region-scoped metering endpoints. Billing systems should rate these exported usage windows outside the open-source data plane.
+
+Sandbox compute uses a serverless-style contract:
+
+| Window type | Unit | Meaning |
+|---|---|---|
+| `sandbox.request_count` | `count` | One claimed active sandbox |
+| `sandbox.runtime_mib_milliseconds` | `mib_milliseconds` | Active sandbox runtime multiplied by allocated memory |
+| `sandbox.egress_bytes` | `bytes` | Egress traffic observed by `netd` |
+| `sandbox.ingress_bytes` | `bytes` | Ingress traffic observed by `netd` |
+| `sandbox.volume_byte_hours` | `byte_hours` | Persisted volume storage over time |
+| `sandbox.snapshot_byte_hours` | `byte_hours` | Persisted snapshot storage over time |
+
+Idle template pool pods are capacity, not billable sandbox runtime. Public template idle pools are platform cost, and team template idle pools should be controlled by plan or entitlement limits rather than usage metering.
+
 Official sample manifests:
 
 - <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/single-cluster/minimal.yaml">single-cluster/minimal.yaml</GitHubRawLink>

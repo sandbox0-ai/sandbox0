@@ -117,10 +117,13 @@ func TestLifecycleProjectorRecordsClaimPauseResumeTerminate(t *testing.T) {
 	projector.now = func() time.Time { return now }
 
 	claimedAt := now.Add(-10 * time.Minute)
-	pod := buildSandboxPod(claimedAt, false, "", "1")
+	pod := withSandboxResources(buildSandboxPod(claimedAt, false, "", "1"), "2", "1Gi")
 	projector.handleUpsert(pod)
 	if len(recorder.events) != 1 || recorder.events[0].EventType != meteringpkg.EventTypeSandboxClaimed {
 		t.Fatalf("expected claim event, got %#v", recorder.events)
+	}
+	if len(recorder.windows) != 1 || recorder.windows[0].WindowType != meteringpkg.WindowTypeSandboxRequestCount {
+		t.Fatalf("expected request count window, got %#v", recorder.windows)
 	}
 
 	pausedAt := now.Add(-2 * time.Minute)
@@ -129,18 +132,21 @@ func TestLifecycleProjectorRecordsClaimPauseResumeTerminate(t *testing.T) {
 	if len(recorder.events) != 2 || recorder.events[1].EventType != meteringpkg.EventTypeSandboxPaused {
 		t.Fatalf("expected pause event, got %#v", recorder.events)
 	}
-	if len(recorder.windows) != 0 {
-		t.Fatalf("expected no legacy lifecycle windows, got %#v", recorder.windows)
+	if len(recorder.windows) != 2 || recorder.windows[1].WindowType != meteringpkg.WindowTypeSandboxRuntimeMiBMilliseconds {
+		t.Fatalf("expected runtime window after pause, got %#v", recorder.windows)
+	}
+	if recorder.windows[1].Value != 491_520_000 {
+		t.Fatalf("paused runtime value = %d, want 491520000", recorder.windows[1].Value)
 	}
 
 	projector.now = func() time.Time { return now.Add(time.Minute) }
-	resumedPod := buildSandboxPod(claimedAt, false, "", "3")
+	resumedPod := withSandboxResources(buildSandboxPod(claimedAt, false, "", "3"), "2", "1Gi")
 	projector.handleUpsert(resumedPod)
 	if len(recorder.events) != 3 || recorder.events[2].EventType != meteringpkg.EventTypeSandboxResumed {
 		t.Fatalf("expected resume event, got %#v", recorder.events)
 	}
-	if len(recorder.windows) != 0 {
-		t.Fatalf("expected no paused seconds window, got %#v", recorder.windows)
+	if len(recorder.windows) != 2 {
+		t.Fatalf("window count after resume = %d, want 2", len(recorder.windows))
 	}
 
 	projector.now = func() time.Time { return now.Add(2 * time.Minute) }
@@ -148,8 +154,11 @@ func TestLifecycleProjectorRecordsClaimPauseResumeTerminate(t *testing.T) {
 	if len(recorder.events) != 4 || recorder.events[3].EventType != meteringpkg.EventTypeSandboxTerminated {
 		t.Fatalf("expected terminate event, got %#v", recorder.events)
 	}
-	if len(recorder.windows) != 0 {
-		t.Fatalf("expected no final active seconds window, got %#v", recorder.windows)
+	if len(recorder.windows) != 3 || recorder.windows[2].WindowType != meteringpkg.WindowTypeSandboxRuntimeMiBMilliseconds {
+		t.Fatalf("expected final runtime window, got %#v", recorder.windows)
+	}
+	if recorder.windows[2].Value != 61_440_000 {
+		t.Fatalf("final runtime value = %d, want 61440000", recorder.windows[2].Value)
 	}
 }
 
@@ -189,44 +198,34 @@ func TestLifecycleProjectorRecordsErrorsInMetrics(t *testing.T) {
 	}
 }
 
-func TestLifecycleProjectorRecordsSandboxComputeWindows(t *testing.T) {
+func TestLifecycleProjectorRecordsSandboxServerlessWindows(t *testing.T) {
 	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
 	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
 
 	now := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
 	projector.now = func() time.Time { return now }
 	claimedAt := now.Add(-2 * time.Second)
-	pod := buildSandboxPod(claimedAt, false, "", "1")
-	pod.Spec.Containers = []corev1.Container{{
-		Name: "procd",
-		Resources: corev1.ResourceRequirements{
-			Limits: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("2"),
-				corev1.ResourceMemory: resource.MustParse("1Gi"),
-			},
-			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("100m"),
-				corev1.ResourceMemory: resource.MustParse("256Mi"),
-			},
-		},
-	}}
+	pod := withSandboxResources(buildSandboxPod(claimedAt, false, "", "1"), "2", "1Gi")
 
 	projector.handleDelete(pod)
 
 	if len(recorder.windows) != 2 {
 		t.Fatalf("window count = %d, want 2", len(recorder.windows))
 	}
-	if recorder.windows[0].WindowType != meteringpkg.WindowTypeSandboxComputeMillicpuMilliseconds {
-		t.Fatalf("first window type = %q, want %q", recorder.windows[0].WindowType, meteringpkg.WindowTypeSandboxComputeMillicpuMilliseconds)
+	if recorder.windows[0].WindowType != meteringpkg.WindowTypeSandboxRequestCount {
+		t.Fatalf("first window type = %q, want %q", recorder.windows[0].WindowType, meteringpkg.WindowTypeSandboxRequestCount)
 	}
-	if recorder.windows[0].Value != 4_000_000 {
-		t.Fatalf("compute value = %d, want 4000000", recorder.windows[0].Value)
+	if recorder.windows[0].Value != 1 || recorder.windows[0].Unit != meteringpkg.WindowUnitCount {
+		t.Fatalf("request window = %+v, want value=1 unit=count", recorder.windows[0])
 	}
-	if recorder.windows[1].WindowType != meteringpkg.WindowTypeSandboxMemoryMiBMilliseconds {
-		t.Fatalf("second window type = %q, want %q", recorder.windows[1].WindowType, meteringpkg.WindowTypeSandboxMemoryMiBMilliseconds)
+	if recorder.windows[1].WindowType != meteringpkg.WindowTypeSandboxRuntimeMiBMilliseconds {
+		t.Fatalf("second window type = %q, want %q", recorder.windows[1].WindowType, meteringpkg.WindowTypeSandboxRuntimeMiBMilliseconds)
 	}
 	if recorder.windows[1].Value != 2_048_000 {
-		t.Fatalf("memory value = %d, want 2048000", recorder.windows[1].Value)
+		t.Fatalf("runtime value = %d, want 2048000", recorder.windows[1].Value)
+	}
+	if recorder.windows[1].Unit != meteringpkg.WindowUnitMiBMilliseconds {
+		t.Fatalf("runtime unit = %q, want %q", recorder.windows[1].Unit, meteringpkg.WindowUnitMiBMilliseconds)
 	}
 }
 
@@ -238,7 +237,7 @@ func TestLifecycleProjectorTerminatesPausedSandboxWithPausedWindow(t *testing.T)
 	pausedAt := time.Date(2026, 3, 12, 10, 3, 0, 0, time.UTC)
 	projector.now = func() time.Time { return time.Date(2026, 3, 12, 10, 5, 0, 0, time.UTC) }
 
-	pod := buildSandboxPod(claimedAt, true, pausedAt.Format(time.RFC3339), "7")
+	pod := withSandboxResources(buildSandboxPod(claimedAt, true, pausedAt.Format(time.RFC3339), "7"), "1", "1Gi")
 	projector.handleDelete(pod)
 
 	if len(recorder.events) != 3 {
@@ -250,8 +249,17 @@ func TestLifecycleProjectorTerminatesPausedSandboxWithPausedWindow(t *testing.T)
 	if recorder.events[2].EventType != meteringpkg.EventTypeSandboxTerminated {
 		t.Fatalf("third event type = %q, want %q", recorder.events[2].EventType, meteringpkg.EventTypeSandboxTerminated)
 	}
-	if len(recorder.windows) != 0 {
-		t.Fatalf("expected no legacy lifecycle windows, got %+v", recorder.windows)
+	if len(recorder.windows) != 2 {
+		t.Fatalf("window count = %d, want 2", len(recorder.windows))
+	}
+	if recorder.windows[0].WindowType != meteringpkg.WindowTypeSandboxRequestCount {
+		t.Fatalf("first window type = %q, want request count", recorder.windows[0].WindowType)
+	}
+	if recorder.windows[1].WindowType != meteringpkg.WindowTypeSandboxRuntimeMiBMilliseconds {
+		t.Fatalf("second window type = %q, want runtime", recorder.windows[1].WindowType)
+	}
+	if recorder.windows[1].Value != 184_320_000 {
+		t.Fatalf("runtime value = %d, want 184320000", recorder.windows[1].Value)
 	}
 }
 
@@ -279,8 +287,8 @@ func TestLifecycleProjectorRetriesCommitWithoutDuplicatingWindows(t *testing.T) 
 	recorder.stateUpsertErr = errors.New("boom")
 	projector.now = func() time.Time { return now.Add(time.Minute) }
 	projector.handleUpsert(buildSandboxPod(claimedAt, false, "", "3"))
-	if len(recorder.windows) != 0 {
-		t.Fatalf("window count after failed resume = %d, want 0", len(recorder.windows))
+	if len(recorder.windows) != 1 {
+		t.Fatalf("window count after failed resume = %d, want 1", len(recorder.windows))
 	}
 
 	recorder.stateUpsertErr = nil
@@ -289,11 +297,29 @@ func TestLifecycleProjectorRetriesCommitWithoutDuplicatingWindows(t *testing.T) 
 	if len(recorder.events) != 3 {
 		t.Fatalf("event count = %d, want 3", len(recorder.events))
 	}
-	if len(recorder.windows) != 0 {
-		t.Fatalf("window count = %d, want 0", len(recorder.windows))
+	if len(recorder.windows) != 1 {
+		t.Fatalf("window count = %d, want 1", len(recorder.windows))
+	}
+	if recorder.windows[0].WindowType != meteringpkg.WindowTypeSandboxRequestCount {
+		t.Fatalf("window type = %q, want request count", recorder.windows[0].WindowType)
 	}
 	if recorder.transactionCalls != 5 {
 		t.Fatalf("transaction_calls = %d, want 5", recorder.transactionCalls)
+	}
+}
+
+func TestLifecycleProjectorIgnoresIdlePoolPods(t *testing.T) {
+	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
+	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
+
+	pod := buildSandboxPod(time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC), false, "", "1")
+	pod.Labels[controller.LabelPoolType] = controller.PoolTypeIdle
+	delete(pod.Labels, controller.LabelSandboxID)
+
+	projector.handleUpsert(pod)
+
+	if len(recorder.events) != 0 || len(recorder.windows) != 0 {
+		t.Fatalf("idle pool pod should not be metered, events=%#v windows=%#v", recorder.events, recorder.windows)
 	}
 }
 
@@ -323,4 +349,21 @@ func buildSandboxPod(claimedAt time.Time, paused bool, pausedAt string, resource
 			Annotations: annotations,
 		},
 	}
+}
+
+func withSandboxResources(pod *corev1.Pod, cpu, memory string) *corev1.Pod {
+	pod.Spec.Containers = []corev1.Container{{
+		Name: "procd",
+		Resources: corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse(cpu),
+				corev1.ResourceMemory: resource.MustParse(memory),
+			},
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("100m"),
+				corev1.ResourceMemory: resource.MustParse("256Mi"),
+			},
+		},
+	}}
+	return pod
 }

@@ -29,19 +29,18 @@ const (
 	WindowTypeSandboxIngressBytes = "sandbox.ingress_bytes"
 	WindowTypeSandboxEgressBytes  = "sandbox.egress_bytes"
 
-	WindowTypeSandboxComputeMillicpuMilliseconds = "sandbox.compute_mcpu_milliseconds"
-	WindowTypeSandboxMemoryMiBMilliseconds       = "sandbox.memory_mib_milliseconds"
-	WindowTypeSandboxVolumeByteHours             = "sandbox.volume_byte_hours"
-	WindowTypeSandboxSnapshotByteHours           = "sandbox.snapshot_byte_hours"
+	WindowTypeSandboxRequestCount           = "sandbox.request_count"
+	WindowTypeSandboxRuntimeMiBMilliseconds = "sandbox.runtime_mib_milliseconds"
+	WindowTypeSandboxVolumeByteHours        = "sandbox.volume_byte_hours"
+	WindowTypeSandboxSnapshotByteHours      = "sandbox.snapshot_byte_hours"
 
 	WindowTypeManagedAgentSessionRunningMilliseconds = "managed_agent.session_running_milliseconds"
 
-	WindowUnitMilliseconds         = "milliseconds"
-	WindowUnitBytes                = "bytes"
-	WindowUnitByteHours            = "byte_hours"
-	WindowUnitCount                = "count"
-	WindowUnitMillicpuMilliseconds = "millicpu_milliseconds"
-	WindowUnitMiBMilliseconds      = "mib_milliseconds"
+	WindowUnitMilliseconds    = "milliseconds"
+	WindowUnitBytes           = "bytes"
+	WindowUnitByteHours       = "byte_hours"
+	WindowUnitCount           = "count"
+	WindowUnitMiBMilliseconds = "mib_milliseconds"
 
 	SubjectTypeSandbox             = "sandbox"
 	SubjectTypeVolume              = "volume"

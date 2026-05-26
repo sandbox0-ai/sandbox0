@@ -96,19 +96,6 @@ const (
 	Symlink FileInfoType = "symlink"
 )
 
-// Defines values for FunctionRevisionStatus.
-const (
-	FunctionRevisionStatusActive  FunctionRevisionStatus = "active"
-	FunctionRevisionStatusCreated FunctionRevisionStatus = "created"
-	FunctionRevisionStatusFailed  FunctionRevisionStatus = "failed"
-)
-
-// Defines values for FunctionSourceType.
-const (
-	FunctionSourceTypeSandboxService FunctionSourceType = "sandbox_service"
-	FunctionSourceTypeSnapshot       FunctionSourceType = "snapshot"
-)
-
 // Defines values for GatewayMetadataGatewayMode.
 const (
 	Direct GatewayMetadataGatewayMode = "direct"
@@ -149,6 +136,19 @@ const (
 const (
 	PromptToken  REPLReadyMode = "prompt_token"
 	StartupDelay REPLReadyMode = "startup_delay"
+)
+
+// Defines values for RunRevisionStatus.
+const (
+	RunRevisionStatusActive  RunRevisionStatus = "active"
+	RunRevisionStatusCreated RunRevisionStatus = "created"
+	RunRevisionStatusFailed  RunRevisionStatus = "failed"
+)
+
+// Defines values for RunSourceType.
+const (
+	RunSourceTypeSandboxService RunSourceType = "sandbox_service"
+	RunSourceTypeSnapshot       RunSourceType = "snapshot"
 )
 
 // Defines values for SandboxAppServiceRouteAuthMode.
@@ -290,26 +290,6 @@ const (
 	SuccessFileStatResponseSuccessTrue SuccessFileStatResponseSuccess = true
 )
 
-// Defines values for SuccessFunctionDeployResultResponseSuccess.
-const (
-	SuccessFunctionDeployResultResponseSuccessTrue SuccessFunctionDeployResultResponseSuccess = true
-)
-
-// Defines values for SuccessFunctionListResponseSuccess.
-const (
-	SuccessFunctionListResponseSuccessTrue SuccessFunctionListResponseSuccess = true
-)
-
-// Defines values for SuccessFunctionResponseSuccess.
-const (
-	SuccessFunctionResponseSuccessTrue SuccessFunctionResponseSuccess = true
-)
-
-// Defines values for SuccessFunctionRevisionListResponseSuccess.
-const (
-	SuccessFunctionRevisionListResponseSuccessTrue SuccessFunctionRevisionListResponseSuccess = true
-)
-
 // Defines values for SuccessGatewayMetadataResponseSuccess.
 const (
 	SuccessGatewayMetadataResponseSuccessTrue SuccessGatewayMetadataResponseSuccess = true
@@ -378,6 +358,26 @@ const (
 // Defines values for SuccessResumeSandboxResponseSuccess.
 const (
 	SuccessResumeSandboxResponseSuccessTrue SuccessResumeSandboxResponseSuccess = true
+)
+
+// Defines values for SuccessRunDeployResultResponseSuccess.
+const (
+	SuccessRunDeployResultResponseSuccessTrue SuccessRunDeployResultResponseSuccess = true
+)
+
+// Defines values for SuccessRunListResponseSuccess.
+const (
+	SuccessRunListResponseSuccessTrue SuccessRunListResponseSuccess = true
+)
+
+// Defines values for SuccessRunResponseSuccess.
+const (
+	SuccessRunResponseSuccessTrue SuccessRunResponseSuccess = true
+)
+
+// Defines values for SuccessRunRevisionListResponseSuccess.
+const (
+	SuccessRunRevisionListResponseSuccessTrue SuccessRunRevisionListResponseSuccess = true
 )
 
 // Defines values for SuccessSSHPublicKeyListResponseSuccess.
@@ -551,8 +551,8 @@ type APIKey struct {
 	UserId     *string   `json:"user_id"`
 }
 
-// ActivateFunctionRevisionRequest defines model for ActivateFunctionRevisionRequest.
-type ActivateFunctionRevisionRequest struct {
+// ActivateRunRevisionRequest defines model for ActivateRunRevisionRequest.
+type ActivateRunRevisionRequest struct {
 	RevisionId string `json:"revision_id"`
 }
 
@@ -972,114 +972,6 @@ type ForkVolumeRequest struct {
 
 	// DefaultPosixUid Override the default POSIX UID for external volume access paths. Inherits from the source volume when omitted.
 	DefaultPosixUid *int64 `json:"default_posix_uid,omitempty"`
-}
-
-// Function defines model for Function.
-type Function struct {
-	ActiveRevisionId *string   `json:"active_revision_id,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
-	CreatedBy        *string   `json:"created_by,omitempty"`
-	DomainLabel      string    `json:"domain_label"`
-	Enabled          bool      `json:"enabled"`
-	Id               string    `json:"id"`
-	Name             string    `json:"name"`
-
-	// Scale Scale-to-zero policy. Functions do not have a minimum idle instance count.
-	Scale     FunctionScalePolicy `json:"scale"`
-	Slug      string              `json:"slug"`
-	TeamId    string              `json:"team_id"`
-	UpdatedAt time.Time           `json:"updated_at"`
-	Url       *string             `json:"url,omitempty"`
-}
-
-// FunctionDeployRequest defines model for FunctionDeployRequest.
-type FunctionDeployRequest struct {
-	Activate *bool   `json:"activate,omitempty"`
-	Name     *string `json:"name,omitempty"`
-
-	// Scale Scale-to-zero policy. Functions do not have a minimum idle instance count.
-	Scale  *FunctionScalePolicy `json:"scale,omitempty"`
-	Slug   *string              `json:"slug,omitempty"`
-	Source *FunctionSource      `json:"source,omitempty"`
-
-	// Spec Canonical runtime contract compiled from every function deploy mode.
-	Spec *FunctionRevisionSpec `json:"spec,omitempty"`
-}
-
-// FunctionDeployResult defines model for FunctionDeployResult.
-type FunctionDeployResult struct {
-	Function Function         `json:"function"`
-	Revision FunctionRevision `json:"revision"`
-}
-
-// FunctionRevision defines model for FunctionRevision.
-type FunctionRevision struct {
-	ActivatedAt      *time.Time     `json:"activated_at,omitempty"`
-	CreatedAt        time.Time      `json:"created_at"`
-	FunctionId       string         `json:"function_id"`
-	Id               string         `json:"id"`
-	Number           int32          `json:"number"`
-	RuntimeClusterId *string        `json:"runtime_cluster_id,omitempty"`
-	RuntimeContextId *string        `json:"runtime_context_id,omitempty"`
-	RuntimeSandboxId *string        `json:"runtime_sandbox_id,omitempty"`
-	Source           FunctionSource `json:"source"`
-
-	// Spec Canonical runtime contract compiled from every function deploy mode.
-	Spec   FunctionRevisionSpec   `json:"spec"`
-	Status FunctionRevisionStatus `json:"status"`
-	TeamId string                 `json:"team_id"`
-}
-
-// FunctionRevisionMount defines model for FunctionRevisionMount.
-type FunctionRevisionMount struct {
-	MountPath string `json:"mount_path"`
-
-	// ReadOnly Function snapshot mounts are immutable and are materialized as read-only volumes at runtime.
-	ReadOnly   *bool  `json:"read_only,omitempty"`
-	SnapshotId string `json:"snapshot_id"`
-}
-
-// FunctionRevisionSpec Canonical runtime contract compiled from every function deploy mode.
-type FunctionRevisionSpec struct {
-	EnvVars *map[string]string       `json:"env_vars,omitempty"`
-	Mounts  *[]FunctionRevisionMount `json:"mounts,omitempty"`
-
-	// Service Canonical service model for sandbox exposure.
-	Service  SandboxAppService `json:"service"`
-	Template string            `json:"template"`
-}
-
-// FunctionRevisionStatus defines model for FunctionRevisionStatus.
-type FunctionRevisionStatus string
-
-// FunctionScalePolicy Scale-to-zero policy. Functions do not have a minimum idle instance count.
-type FunctionScalePolicy struct {
-	// IdleTimeoutSeconds Seconds of inactivity before the runtime sandbox can scale back to zero.
-	IdleTimeoutSeconds *int32 `json:"idle_timeout_seconds,omitempty"`
-	MaxInstances       *int32 `json:"max_instances,omitempty"`
-
-	// StartupTimeoutSeconds Maximum seconds to wait for a cold-started service health check.
-	StartupTimeoutSeconds *int32 `json:"startup_timeout_seconds,omitempty"`
-	TargetConcurrency     *int32 `json:"target_concurrency,omitempty"`
-}
-
-// FunctionSource defines model for FunctionSource.
-type FunctionSource struct {
-	SandboxService *SandboxServiceFunctionSource `json:"sandbox_service,omitempty"`
-	Snapshot       *SnapshotFunctionSource       `json:"snapshot,omitempty"`
-	Type           FunctionSourceType            `json:"type"`
-}
-
-// FunctionSourceType defines model for FunctionSourceType.
-type FunctionSourceType string
-
-// FunctionUpdateRequest defines model for FunctionUpdateRequest.
-type FunctionUpdateRequest struct {
-	Enabled *bool   `json:"enabled,omitempty"`
-	Name    *string `json:"name,omitempty"`
-
-	// Scale Scale-to-zero policy. Functions do not have a minimum idle instance count.
-	Scale *FunctionScalePolicy `json:"scale,omitempty"`
 }
 
 // GatewayMetadata defines model for GatewayMetadata.
@@ -1534,6 +1426,114 @@ type ResumeSandboxResponse struct {
 	SandboxId      string            `json:"sandbox_id"`
 }
 
+// Run defines model for Run.
+type Run struct {
+	ActiveRevisionId *string   `json:"active_revision_id,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	CreatedBy        *string   `json:"created_by,omitempty"`
+	DomainLabel      string    `json:"domain_label"`
+	Enabled          bool      `json:"enabled"`
+	Id               string    `json:"id"`
+	Name             string    `json:"name"`
+
+	// Scale Scale-to-zero policy. Runs do not have a minimum idle instance count.
+	Scale     RunScalePolicy `json:"scale"`
+	Slug      string         `json:"slug"`
+	TeamId    string         `json:"team_id"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	Url       *string        `json:"url,omitempty"`
+}
+
+// RunDeployRequest defines model for RunDeployRequest.
+type RunDeployRequest struct {
+	Activate *bool   `json:"activate,omitempty"`
+	Name     *string `json:"name,omitempty"`
+
+	// Scale Scale-to-zero policy. Runs do not have a minimum idle instance count.
+	Scale  *RunScalePolicy `json:"scale,omitempty"`
+	Slug   *string         `json:"slug,omitempty"`
+	Source *RunSource      `json:"source,omitempty"`
+
+	// Spec Canonical runtime contract compiled from every run deploy mode.
+	Spec *RunRevisionSpec `json:"spec,omitempty"`
+}
+
+// RunDeployResult defines model for RunDeployResult.
+type RunDeployResult struct {
+	Revision RunRevision `json:"revision"`
+	Run      Run         `json:"run"`
+}
+
+// RunRevision defines model for RunRevision.
+type RunRevision struct {
+	ActivatedAt      *time.Time `json:"activated_at,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	Id               string     `json:"id"`
+	Number           int32      `json:"number"`
+	RunId            string     `json:"run_id"`
+	RuntimeClusterId *string    `json:"runtime_cluster_id,omitempty"`
+	RuntimeContextId *string    `json:"runtime_context_id,omitempty"`
+	RuntimeSandboxId *string    `json:"runtime_sandbox_id,omitempty"`
+	Source           RunSource  `json:"source"`
+
+	// Spec Canonical runtime contract compiled from every run deploy mode.
+	Spec   RunRevisionSpec   `json:"spec"`
+	Status RunRevisionStatus `json:"status"`
+	TeamId string            `json:"team_id"`
+}
+
+// RunRevisionMount defines model for RunRevisionMount.
+type RunRevisionMount struct {
+	MountPath string `json:"mount_path"`
+
+	// ReadOnly Run snapshot mounts are immutable and are materialized as read-only volumes at runtime.
+	ReadOnly   *bool  `json:"read_only,omitempty"`
+	SnapshotId string `json:"snapshot_id"`
+}
+
+// RunRevisionSpec Canonical runtime contract compiled from every run deploy mode.
+type RunRevisionSpec struct {
+	EnvVars *map[string]string  `json:"env_vars,omitempty"`
+	Mounts  *[]RunRevisionMount `json:"mounts,omitempty"`
+
+	// Service Canonical service model for sandbox exposure.
+	Service  SandboxAppService `json:"service"`
+	Template string            `json:"template"`
+}
+
+// RunRevisionStatus defines model for RunRevisionStatus.
+type RunRevisionStatus string
+
+// RunScalePolicy Scale-to-zero policy. Runs do not have a minimum idle instance count.
+type RunScalePolicy struct {
+	// IdleTimeoutSeconds Seconds of inactivity before the runtime sandbox can scale back to zero.
+	IdleTimeoutSeconds *int32 `json:"idle_timeout_seconds,omitempty"`
+	MaxInstances       *int32 `json:"max_instances,omitempty"`
+
+	// StartupTimeoutSeconds Maximum seconds to wait for a cold-started service health check.
+	StartupTimeoutSeconds *int32 `json:"startup_timeout_seconds,omitempty"`
+	TargetConcurrency     *int32 `json:"target_concurrency,omitempty"`
+}
+
+// RunSource defines model for RunSource.
+type RunSource struct {
+	SandboxService *SandboxServiceRunSource `json:"sandbox_service,omitempty"`
+	Snapshot       *SnapshotRunSource       `json:"snapshot,omitempty"`
+	Type           RunSourceType            `json:"type"`
+}
+
+// RunSourceType defines model for RunSourceType.
+type RunSourceType string
+
+// RunUpdateRequest defines model for RunUpdateRequest.
+type RunUpdateRequest struct {
+	Enabled *bool   `json:"enabled,omitempty"`
+	Name    *string `json:"name,omitempty"`
+
+	// Scale Scale-to-zero policy. Runs do not have a minimum idle instance count.
+	Scale *RunScalePolicy `json:"scale,omitempty"`
+}
+
 // SSHProxyProjection Transparent SSH proxy projection used for SSH egress re-origination.
 type SSHProxyProjection struct {
 	// KnownHosts OpenSSH known_hosts entries used to verify upstream host keys.
@@ -1785,8 +1785,8 @@ type SandboxSSHConnection struct {
 	Username string `json:"username"`
 }
 
-// SandboxServiceFunctionSource defines model for SandboxServiceFunctionSource.
-type SandboxServiceFunctionSource struct {
+// SandboxServiceRunSource defines model for SandboxServiceRunSource.
+type SandboxServiceRunSource struct {
 	SandboxId string `json:"sandbox_id"`
 	ServiceId string `json:"service_id"`
 }
@@ -1919,8 +1919,8 @@ type Snapshot struct {
 	VolumeId    string  `json:"volume_id"`
 }
 
-// SnapshotFunctionSource defines model for SnapshotFunctionSource.
-type SnapshotFunctionSource struct {
+// SnapshotRunSource defines model for SnapshotRunSource.
+type SnapshotRunSource struct {
 	SnapshotIds *[]string `json:"snapshot_ids,omitempty"`
 }
 
@@ -2124,46 +2124,6 @@ type SuccessFileStatResponse struct {
 // SuccessFileStatResponseSuccess defines model for SuccessFileStatResponse.Success.
 type SuccessFileStatResponseSuccess bool
 
-// SuccessFunctionDeployResultResponse defines model for SuccessFunctionDeployResultResponse.
-type SuccessFunctionDeployResultResponse struct {
-	Data    *FunctionDeployResult                      `json:"data,omitempty"`
-	Success SuccessFunctionDeployResultResponseSuccess `json:"success"`
-}
-
-// SuccessFunctionDeployResultResponseSuccess defines model for SuccessFunctionDeployResultResponse.Success.
-type SuccessFunctionDeployResultResponseSuccess bool
-
-// SuccessFunctionListResponse defines model for SuccessFunctionListResponse.
-type SuccessFunctionListResponse struct {
-	Data *struct {
-		Functions []Function `json:"functions"`
-	} `json:"data,omitempty"`
-	Success SuccessFunctionListResponseSuccess `json:"success"`
-}
-
-// SuccessFunctionListResponseSuccess defines model for SuccessFunctionListResponse.Success.
-type SuccessFunctionListResponseSuccess bool
-
-// SuccessFunctionResponse defines model for SuccessFunctionResponse.
-type SuccessFunctionResponse struct {
-	Data    *Function                      `json:"data,omitempty"`
-	Success SuccessFunctionResponseSuccess `json:"success"`
-}
-
-// SuccessFunctionResponseSuccess defines model for SuccessFunctionResponse.Success.
-type SuccessFunctionResponseSuccess bool
-
-// SuccessFunctionRevisionListResponse defines model for SuccessFunctionRevisionListResponse.
-type SuccessFunctionRevisionListResponse struct {
-	Data *struct {
-		Revisions []FunctionRevision `json:"revisions"`
-	} `json:"data,omitempty"`
-	Success SuccessFunctionRevisionListResponseSuccess `json:"success"`
-}
-
-// SuccessFunctionRevisionListResponseSuccess defines model for SuccessFunctionRevisionListResponse.Success.
-type SuccessFunctionRevisionListResponseSuccess bool
-
 // SuccessGatewayMetadataResponse defines model for SuccessGatewayMetadataResponse.
 type SuccessGatewayMetadataResponse struct {
 	Data    *GatewayMetadata                      `json:"data,omitempty"`
@@ -2304,6 +2264,46 @@ type SuccessResumeSandboxResponse struct {
 
 // SuccessResumeSandboxResponseSuccess defines model for SuccessResumeSandboxResponse.Success.
 type SuccessResumeSandboxResponseSuccess bool
+
+// SuccessRunDeployResultResponse defines model for SuccessRunDeployResultResponse.
+type SuccessRunDeployResultResponse struct {
+	Data    *RunDeployResult                      `json:"data,omitempty"`
+	Success SuccessRunDeployResultResponseSuccess `json:"success"`
+}
+
+// SuccessRunDeployResultResponseSuccess defines model for SuccessRunDeployResultResponse.Success.
+type SuccessRunDeployResultResponseSuccess bool
+
+// SuccessRunListResponse defines model for SuccessRunListResponse.
+type SuccessRunListResponse struct {
+	Data *struct {
+		Runs []Run `json:"runs"`
+	} `json:"data,omitempty"`
+	Success SuccessRunListResponseSuccess `json:"success"`
+}
+
+// SuccessRunListResponseSuccess defines model for SuccessRunListResponse.Success.
+type SuccessRunListResponseSuccess bool
+
+// SuccessRunResponse defines model for SuccessRunResponse.
+type SuccessRunResponse struct {
+	Data    *Run                      `json:"data,omitempty"`
+	Success SuccessRunResponseSuccess `json:"success"`
+}
+
+// SuccessRunResponseSuccess defines model for SuccessRunResponse.Success.
+type SuccessRunResponseSuccess bool
+
+// SuccessRunRevisionListResponse defines model for SuccessRunRevisionListResponse.
+type SuccessRunRevisionListResponse struct {
+	Data *struct {
+		Revisions []RunRevision `json:"revisions"`
+	} `json:"data,omitempty"`
+	Success SuccessRunRevisionListResponseSuccess `json:"success"`
+}
+
+// SuccessRunRevisionListResponseSuccess defines model for SuccessRunRevisionListResponse.Success.
+type SuccessRunRevisionListResponseSuccess bool
 
 // SuccessSSHPublicKeyListResponse defines model for SuccessSSHPublicKeyListResponse.
 type SuccessSSHPublicKeyListResponse struct {
@@ -2731,9 +2731,6 @@ type ContextID = string
 // FilePath defines model for FilePath.
 type FilePath = string
 
-// FunctionID defines model for FunctionID.
-type FunctionID = string
-
 // IdentityID defines model for IdentityID.
 type IdentityID = string
 
@@ -2748,6 +2745,9 @@ type QueryRecursive = bool
 
 // RegionId defines model for RegionId.
 type RegionId = string
+
+// RunID defines model for RunID.
+type RunID = string
 
 // SandboxID defines model for SandboxID.
 type SandboxID = string
@@ -2897,23 +2897,23 @@ type PostApiV1CredentialSourcesJSONRequestBody = CredentialSourceWriteRequest
 // PutApiV1CredentialSourcesNameJSONRequestBody defines body for PutApiV1CredentialSourcesName for application/json ContentType.
 type PutApiV1CredentialSourcesNameJSONRequestBody = CredentialSourceWriteRequest
 
-// PostApiV1FunctionsDeployJSONRequestBody defines body for PostApiV1FunctionsDeploy for application/json ContentType.
-type PostApiV1FunctionsDeployJSONRequestBody = FunctionDeployRequest
-
-// PutApiV1FunctionsIdJSONRequestBody defines body for PutApiV1FunctionsId for application/json ContentType.
-type PutApiV1FunctionsIdJSONRequestBody = FunctionUpdateRequest
-
-// PutApiV1FunctionsIdActiveRevisionJSONRequestBody defines body for PutApiV1FunctionsIdActiveRevision for application/json ContentType.
-type PutApiV1FunctionsIdActiveRevisionJSONRequestBody = ActivateFunctionRevisionRequest
-
-// PostApiV1FunctionsIdDeployJSONRequestBody defines body for PostApiV1FunctionsIdDeploy for application/json ContentType.
-type PostApiV1FunctionsIdDeployJSONRequestBody = FunctionDeployRequest
-
 // PutApiV1QuotasDimensionJSONRequestBody defines body for PutApiV1QuotasDimension for application/json ContentType.
 type PutApiV1QuotasDimensionJSONRequestBody = PutTeamQuotaRequest
 
 // PostApiV1RegistryCredentialsJSONRequestBody defines body for PostApiV1RegistryCredentials for application/json ContentType.
 type PostApiV1RegistryCredentialsJSONRequestBody = RegistryCredentialsRequest
+
+// PostApiV1RunsDeployJSONRequestBody defines body for PostApiV1RunsDeploy for application/json ContentType.
+type PostApiV1RunsDeployJSONRequestBody = RunDeployRequest
+
+// PutApiV1RunsIdJSONRequestBody defines body for PutApiV1RunsId for application/json ContentType.
+type PutApiV1RunsIdJSONRequestBody = RunUpdateRequest
+
+// PutApiV1RunsIdActiveRevisionJSONRequestBody defines body for PutApiV1RunsIdActiveRevision for application/json ContentType.
+type PutApiV1RunsIdActiveRevisionJSONRequestBody = ActivateRunRevisionRequest
+
+// PostApiV1RunsIdDeployJSONRequestBody defines body for PostApiV1RunsIdDeploy for application/json ContentType.
+type PostApiV1RunsIdDeployJSONRequestBody = RunDeployRequest
 
 // PostApiV1SandboxesJSONRequestBody defines body for PostApiV1Sandboxes for application/json ContentType.
 type PostApiV1SandboxesJSONRequestBody = ClaimRequest

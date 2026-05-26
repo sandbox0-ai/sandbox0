@@ -31,6 +31,7 @@ spec:
   publicExposure:
     enabled: true
     rootDomain: sandbox0.app
+    runRootDomain: sandbox0.run
     regionId: aws-us-east-1
   storage:
     # Builtin storage is for quick start; use s3/oss for production scale.

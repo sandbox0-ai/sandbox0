@@ -13,7 +13,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func (s *Server) healthFunctionRuntimeService(c *gin.Context) {
+func (s *Server) healthRunRuntimeService(c *gin.Context) {
 	if s.managerClient == nil {
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "manager client unavailable")
 		return
@@ -57,7 +57,7 @@ func (s *Server) healthFunctionRuntimeService(c *gin.Context) {
 		}
 		resp, err := s.outboundHTTPClient().Do(req)
 		if err != nil {
-			s.logger.Debug("Function runtime health check failed",
+			s.logger.Debug("Run runtime health check failed",
 				zap.String("sandbox_id", sandboxID),
 				zap.String("service_id", serviceID),
 				zap.Error(err),

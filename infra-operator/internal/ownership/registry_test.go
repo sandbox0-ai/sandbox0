@@ -59,7 +59,12 @@ func TestLookupTracksCrossServiceDerivedFields(t *testing.T) {
 		{
 			path:      "spec.publicExposure.rootDomain",
 			owner:     "plan",
-			consumers: []string{"global-gateway", "cluster-gateway", "manager"},
+			consumers: []string{"global-gateway", "regional-gateway", "cluster-gateway", "manager"},
+		},
+		{
+			path:      "spec.publicExposure.runRootDomain",
+			owner:     "plan",
+			consumers: []string{"global-gateway", "regional-gateway", "cluster-gateway"},
 		},
 	}
 

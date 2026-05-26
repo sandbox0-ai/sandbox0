@@ -18,12 +18,12 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/oidc"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
-	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
 	gatewayhandlers "github.com/sandbox0-ai/sandbox0/pkg/gateway/http/handlers"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/httpclient"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/public"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/runs"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
@@ -41,7 +41,7 @@ type Server struct {
 	pool                 *pgxpool.Pool
 	identityRepo         *identity.Repository
 	apiKeyRepo           *apikey.Repository
-	functionRepo         *functions.Repository
+	runRepo              *runs.Repository
 	clusterGatewayRouter *proxy.Router
 	schedulerRouter      *proxy.Router // Optional: proxy to scheduler for templates
 	authMiddleware       *middleware.AuthMiddleware
@@ -92,7 +92,7 @@ func NewServer(
 	// Create repository
 	identityRepo := identity.NewRepository(pool)
 	apiKeyRepo := apikey.NewRepository(pool)
-	functionRepo := functions.NewRepository(pool)
+	runRepo := runs.NewRepository(pool)
 	var meteringRepo *metering.Repository
 	if pool != nil {
 		meteringRepo = metering.NewRepository(pool)
@@ -235,7 +235,7 @@ func NewServer(
 		pool:                  pool,
 		identityRepo:          identityRepo,
 		apiKeyRepo:            apiKeyRepo,
-		functionRepo:          functionRepo,
+		runRepo:               runRepo,
 		clusterGatewayRouter:  clusterGatewayRouter,
 		schedulerRouter:       schedulerRouter,
 		authMiddleware:        authMiddleware,
@@ -331,19 +331,19 @@ func (s *Server) setupRoutes() {
 			sandboxes.Any("/:id/*path", s.proxySandbox)
 		}
 
-		// Function management is region-scoped because production hostnames and
+		// Run management is region-scoped because production hostnames and
 		// active revisions are stable region resources.
-		functions := api.Group("/v1/functions")
-		functions.Use(s.requireTeamContextForTeamScopedAPI())
+		runs := api.Group("/v1/runs")
+		runs.Use(s.requireTeamContextForTeamScopedAPI())
 		{
-			functions.POST("/deploy", s.authMiddleware.RequirePermission(authn.PermFunctionCreate), s.deployFunction)
-			functions.GET("", s.authMiddleware.RequirePermission(authn.PermFunctionRead), s.listFunctions)
-			functions.GET("/:id", s.authMiddleware.RequirePermission(authn.PermFunctionRead), s.getFunction)
-			functions.PUT("/:id", s.authMiddleware.RequirePermission(authn.PermFunctionWrite), s.updateFunction)
-			functions.DELETE("/:id", s.authMiddleware.RequirePermission(authn.PermFunctionDelete), s.deleteFunction)
-			functions.POST("/:id/deploy", s.authMiddleware.RequirePermission(authn.PermFunctionWrite), s.deployFunctionRevision)
-			functions.GET("/:id/revisions", s.authMiddleware.RequirePermission(authn.PermFunctionRead), s.listFunctionRevisions)
-			functions.PUT("/:id/active-revision", s.authMiddleware.RequirePermission(authn.PermFunctionWrite), s.activateFunctionRevision)
+			runs.POST("/deploy", s.authMiddleware.RequirePermission(authn.PermRunCreate), s.deployRun)
+			runs.GET("", s.authMiddleware.RequirePermission(authn.PermRunRead), s.listRuns)
+			runs.GET("/:id", s.authMiddleware.RequirePermission(authn.PermRunRead), s.getRun)
+			runs.PUT("/:id", s.authMiddleware.RequirePermission(authn.PermRunWrite), s.updateRun)
+			runs.DELETE("/:id", s.authMiddleware.RequirePermission(authn.PermRunDelete), s.deleteRun)
+			runs.POST("/:id/deploy", s.authMiddleware.RequirePermission(authn.PermRunWrite), s.deployRunRevision)
+			runs.GET("/:id/revisions", s.authMiddleware.RequirePermission(authn.PermRunRead), s.listRunRevisions)
+			runs.PUT("/:id/active-revision", s.authMiddleware.RequirePermission(authn.PermRunWrite), s.activateRunRevision)
 		}
 
 		// Registry credentials are served by regional-gateway in control plane.
@@ -426,7 +426,7 @@ func (s *Server) handleNoRoute(c *gin.Context) {
 	if s.handleAPINoRoute(c) {
 		return
 	}
-	if s.proxyFunctionNoRoute(c) {
+	if s.proxyRunNoRoute(c) {
 		return
 	}
 	s.proxyPublicExposureNoRoute(c)

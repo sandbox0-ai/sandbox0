@@ -1,4 +1,4 @@
-package functions
+package runs
 
 import (
 	"context"
@@ -23,15 +23,15 @@ type DeployInput struct {
 	UserID   string
 	Name     string
 	Slug     string
-	Scale    FunctionScalePolicy
-	Source   FunctionSource
-	Spec     FunctionRevisionSpec
+	Scale    RunScalePolicy
+	Source   RunSource
+	Spec     RunRevisionSpec
 	Activate bool
 }
 
 type ActiveRevision struct {
-	Function Function
-	Revision FunctionRevision
+	Run      Run
+	Revision RunRevision
 }
 
 func NewRepository(pool *pgxpool.Pool) *Repository {
@@ -41,9 +41,9 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
 }
 
-func (r *Repository) DeployRevision(ctx context.Context, input DeployInput) (*FunctionDeployResult, error) {
+func (r *Repository) DeployRevision(ctx context.Context, input DeployInput) (*RunDeployResult, error) {
 	if r == nil || r.pool == nil {
-		return nil, fmt.Errorf("function repository is not configured")
+		return nil, fmt.Errorf("run repository is not configured")
 	}
 	teamID := strings.TrimSpace(input.TeamID)
 	if teamID == "" {
@@ -69,19 +69,19 @@ func (r *Repository) DeployRevision(ctx context.Context, input DeployInput) (*Fu
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	fn, err := getFunctionBySlugTx(ctx, tx, teamID, slug, true)
+	fn, err := getRunBySlugTx(ctx, tx, teamID, slug, true)
 	if err != nil {
 		return nil, err
 	}
 	if fn == nil {
-		fn, err = createFunctionTx(ctx, tx, teamID, input.UserID, name, slug, scale)
+		fn, err = createRunTx(ctx, tx, teamID, input.UserID, name, slug, scale)
 		if err != nil {
 			return nil, err
 		}
 	} else {
 		fn.Name = name
 		fn.Scale = scale
-		if err := updateFunctionMetadataTx(ctx, tx, fn); err != nil {
+		if err := updateRunMetadataTx(ctx, tx, fn); err != nil {
 			return nil, err
 		}
 	}
@@ -101,50 +101,50 @@ func (r *Repository) DeployRevision(ctx context.Context, input DeployInput) (*Fu
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit deploy transaction: %w", err)
 	}
-	return &FunctionDeployResult{Function: *fn, Revision: *revision}, nil
+	return &RunDeployResult{Run: *fn, Revision: *revision}, nil
 }
 
-func (r *Repository) ListFunctions(ctx context.Context, teamID string) ([]Function, error) {
+func (r *Repository) ListRuns(ctx context.Context, teamID string) ([]Run, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, team_id, created_by, name, slug, domain_label, active_revision_id, enabled, scale_policy, created_at, updated_at
-		FROM functions
+		FROM runs
 		WHERE team_id = $1 AND deleted_at IS NULL
 		ORDER BY created_at DESC
 	`, teamID)
 	if err != nil {
-		return nil, fmt.Errorf("list functions: %w", err)
+		return nil, fmt.Errorf("list runs: %w", err)
 	}
 	defer rows.Close()
-	var out []Function
+	var out []Run
 	for rows.Next() {
-		fn, err := scanFunctionRows(rows)
+		fn, err := scanRunRows(rows)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, *fn)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate functions: %w", err)
+		return nil, fmt.Errorf("iterate runs: %w", err)
 	}
 	return out, nil
 }
 
-func (r *Repository) GetFunction(ctx context.Context, teamID, idOrSlug string) (*Function, error) {
+func (r *Repository) GetRun(ctx context.Context, teamID, idOrSlug string) (*Run, error) {
 	idOrSlug = strings.TrimSpace(idOrSlug)
 	row := r.pool.QueryRow(ctx, `
 		SELECT id, team_id, created_by, name, slug, domain_label, active_revision_id, enabled, scale_policy, created_at, updated_at
-		FROM functions
+		FROM runs
 		WHERE team_id = $1 AND deleted_at IS NULL AND (id::text = $2 OR slug = $2)
 	`, teamID, idOrSlug)
-	fn, err := scanFunction(row)
+	fn, err := scanRun(row)
 	if err != nil {
 		return nil, err
 	}
 	return fn, nil
 }
 
-func (r *Repository) UpdateFunction(ctx context.Context, teamID, idOrSlug string, name string, enabled *bool, scale *FunctionScalePolicy) (*Function, error) {
-	fn, err := r.GetFunction(ctx, teamID, idOrSlug)
+func (r *Repository) UpdateRun(ctx context.Context, teamID, idOrSlug string, name string, enabled *bool, scale *RunScalePolicy) (*Run, error) {
+	fn, err := r.GetRun(ctx, teamID, idOrSlug)
 	if err != nil {
 		return nil, err
 	}
@@ -162,22 +162,22 @@ func (r *Repository) UpdateFunction(ctx context.Context, teamID, idOrSlug string
 		return nil, fmt.Errorf("marshal scale policy: %w", err)
 	}
 	row := r.pool.QueryRow(ctx, `
-		UPDATE functions
+		UPDATE runs
 		SET name = $3, enabled = $4, scale_policy = $5
 		WHERE team_id = $1 AND deleted_at IS NULL AND (id::text = $2 OR slug = $2)
 		RETURNING id, team_id, created_by, name, slug, domain_label, active_revision_id, enabled, scale_policy, created_at, updated_at
 	`, teamID, idOrSlug, fn.Name, fn.Enabled, scaleJSON)
-	return scanFunction(row)
+	return scanRun(row)
 }
 
-func (r *Repository) DeleteFunction(ctx context.Context, teamID, idOrSlug string) error {
+func (r *Repository) DeleteRun(ctx context.Context, teamID, idOrSlug string) error {
 	tag, err := r.pool.Exec(ctx, `
-		UPDATE functions
+		UPDATE runs
 		SET deleted_at = NOW(), enabled = false, active_revision_id = NULL
 		WHERE team_id = $1 AND deleted_at IS NULL AND (id::text = $2 OR slug = $2)
 	`, teamID, strings.TrimSpace(idOrSlug))
 	if err != nil {
-		return fmt.Errorf("delete function: %w", err)
+		return fmt.Errorf("delete run: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
@@ -185,23 +185,23 @@ func (r *Repository) DeleteFunction(ctx context.Context, teamID, idOrSlug string
 	return nil
 }
 
-func (r *Repository) ListRevisions(ctx context.Context, teamID, functionIDOrSlug string) ([]FunctionRevision, error) {
-	fn, err := r.GetFunction(ctx, teamID, functionIDOrSlug)
+func (r *Repository) ListRevisions(ctx context.Context, teamID, runIDOrSlug string) ([]RunRevision, error) {
+	fn, err := r.GetRun(ctx, teamID, runIDOrSlug)
 	if err != nil {
 		return nil, err
 	}
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, function_id, team_id, revision_number, source, spec, status,
+		SELECT id, run_id, team_id, revision_number, source, spec, status,
 		       runtime_sandbox_id, runtime_cluster_id, runtime_context_id, created_at, activated_at
-		FROM function_revisions
-		WHERE team_id = $1 AND function_id = $2
+		FROM run_revisions
+		WHERE team_id = $1 AND run_id = $2
 		ORDER BY revision_number DESC
 	`, teamID, fn.ID)
 	if err != nil {
 		return nil, fmt.Errorf("list revisions: %w", err)
 	}
 	defer rows.Close()
-	var out []FunctionRevision
+	var out []RunRevision
 	for rows.Next() {
 		revision, err := scanRevisionRows(rows)
 		if err != nil {
@@ -215,14 +215,14 @@ func (r *Repository) ListRevisions(ctx context.Context, teamID, functionIDOrSlug
 	return out, nil
 }
 
-func (r *Repository) ActivateRevision(ctx context.Context, teamID, functionIDOrSlug, revisionID string) (*FunctionDeployResult, error) {
+func (r *Repository) ActivateRevision(ctx context.Context, teamID, runIDOrSlug, revisionID string) (*RunDeployResult, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("begin activate transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	fn, err := getFunctionByIDOrSlugTx(ctx, tx, teamID, functionIDOrSlug, true)
+	fn, err := getRunByIDOrSlugTx(ctx, tx, teamID, runIDOrSlug, true)
 	if err != nil {
 		return nil, err
 	}
@@ -238,35 +238,35 @@ func (r *Repository) ActivateRevision(ctx context.Context, teamID, functionIDOrS
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit activate transaction: %w", err)
 	}
-	return &FunctionDeployResult{Function: *fn, Revision: *revision}, nil
+	return &RunDeployResult{Run: *fn, Revision: *revision}, nil
 }
 
 func (r *Repository) GetActiveRevisionByDomainLabel(ctx context.Context, domainLabel string) (*ActiveRevision, error) {
 	row := r.pool.QueryRow(ctx, `
 		SELECT f.id, f.team_id, f.created_by, f.name, f.slug, f.domain_label, f.active_revision_id, f.enabled, f.scale_policy, f.created_at, f.updated_at,
-		       r.id, r.function_id, r.team_id, r.revision_number, r.source, r.spec, r.status,
+		       r.id, r.run_id, r.team_id, r.revision_number, r.source, r.spec, r.status,
 		       r.runtime_sandbox_id, r.runtime_cluster_id, r.runtime_context_id, r.created_at, r.activated_at
-		FROM functions f
-		JOIN function_revisions r ON r.id = f.active_revision_id
+		FROM runs f
+		JOIN run_revisions r ON r.id = f.active_revision_id
 		WHERE f.domain_label = $1 AND f.deleted_at IS NULL
 	`, strings.TrimSpace(domainLabel))
 	fn, revision, err := scanActiveRevision(row)
 	if err != nil {
 		return nil, err
 	}
-	return &ActiveRevision{Function: *fn, Revision: *revision}, nil
+	return &ActiveRevision{Run: *fn, Revision: *revision}, nil
 }
 
-func (r *Repository) WithRevisionLock(ctx context.Context, revisionID string, fn func(context.Context, *FunctionRevision) error) error {
+func (r *Repository) WithRevisionLock(ctx context.Context, revisionID string, fn func(context.Context, *RunRevision) error) error {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("begin revision lock transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	revision, err := scanRevision(tx.QueryRow(ctx, `
-		SELECT id, function_id, team_id, revision_number, source, spec, status,
+		SELECT id, run_id, team_id, revision_number, source, spec, status,
 		       runtime_sandbox_id, runtime_cluster_id, runtime_context_id, created_at, activated_at
-		FROM function_revisions
+		FROM run_revisions
 		WHERE id = $1
 		FOR UPDATE
 	`, revisionID))
@@ -277,7 +277,7 @@ func (r *Repository) WithRevisionLock(ctx context.Context, revisionID string, fn
 		return err
 	}
 	if _, err := tx.Exec(ctx, `
-		UPDATE function_revisions
+		UPDATE run_revisions
 		SET runtime_sandbox_id = $2, runtime_cluster_id = $3, runtime_context_id = $4
 		WHERE id = $1
 	`, revision.ID, nullString(revision.RuntimeSandboxID), nullString(revision.RuntimeClusterID), nullString(revision.RuntimeContextID)); err != nil {
@@ -291,7 +291,7 @@ func (r *Repository) WithRevisionLock(ctx context.Context, revisionID string, fn
 
 func (r *Repository) SetRevisionRuntime(ctx context.Context, revisionID, sandboxID, clusterID, contextID string) error {
 	_, err := r.pool.Exec(ctx, `
-		UPDATE function_revisions
+		UPDATE run_revisions
 		SET runtime_sandbox_id = $2, runtime_cluster_id = $3, runtime_context_id = $4
 		WHERE id = $1
 	`, revisionID, nullString(sandboxID), nullString(clusterID), nullString(contextID))
@@ -303,7 +303,7 @@ func (r *Repository) SetRevisionRuntime(ctx context.Context, revisionID, sandbox
 
 func (r *Repository) ClearRevisionRuntime(ctx context.Context, revisionID string) error {
 	_, err := r.pool.Exec(ctx, `
-		UPDATE function_revisions
+		UPDATE run_revisions
 		SET runtime_sandbox_id = NULL, runtime_cluster_id = NULL, runtime_context_id = NULL
 		WHERE id = $1
 	`, revisionID)
@@ -313,33 +313,33 @@ func (r *Repository) ClearRevisionRuntime(ctx context.Context, revisionID string
 	return nil
 }
 
-func getFunctionBySlugTx(ctx context.Context, tx pgx.Tx, teamID, slug string, lock bool) (*Function, error) {
+func getRunBySlugTx(ctx context.Context, tx pgx.Tx, teamID, slug string, lock bool) (*Run, error) {
 	query := `
 		SELECT id, team_id, created_by, name, slug, domain_label, active_revision_id, enabled, scale_policy, created_at, updated_at
-		FROM functions
+		FROM runs
 		WHERE team_id = $1 AND slug = $2 AND deleted_at IS NULL`
 	if lock {
 		query += " FOR UPDATE"
 	}
-	fn, err := scanFunction(tx.QueryRow(ctx, query, teamID, slug))
+	fn, err := scanRun(tx.QueryRow(ctx, query, teamID, slug))
 	if errors.Is(err, ErrNotFound) {
 		return nil, nil
 	}
 	return fn, err
 }
 
-func getFunctionByIDOrSlugTx(ctx context.Context, tx pgx.Tx, teamID, idOrSlug string, lock bool) (*Function, error) {
+func getRunByIDOrSlugTx(ctx context.Context, tx pgx.Tx, teamID, idOrSlug string, lock bool) (*Run, error) {
 	query := `
 		SELECT id, team_id, created_by, name, slug, domain_label, active_revision_id, enabled, scale_policy, created_at, updated_at
-		FROM functions
+		FROM runs
 		WHERE team_id = $1 AND deleted_at IS NULL AND (id::text = $2 OR slug = $2)`
 	if lock {
 		query += " FOR UPDATE"
 	}
-	return scanFunction(tx.QueryRow(ctx, query, teamID, strings.TrimSpace(idOrSlug)))
+	return scanRun(tx.QueryRow(ctx, query, teamID, strings.TrimSpace(idOrSlug)))
 }
 
-func createFunctionTx(ctx context.Context, tx pgx.Tx, teamID, userID, name, slug string, scale FunctionScalePolicy) (*Function, error) {
+func createRunTx(ctx context.Context, tx pgx.Tx, teamID, userID, name, slug string, scale RunScalePolicy) (*Run, error) {
 	scaleJSON, err := json.Marshal(scale)
 	if err != nil {
 		return nil, fmt.Errorf("marshal scale policy: %w", err)
@@ -350,8 +350,8 @@ func createFunctionTx(ctx context.Context, tx pgx.Tx, teamID, userID, name, slug
 		if err != nil {
 			return nil, err
 		}
-		fn, err := scanFunction(tx.QueryRow(ctx, `
-			INSERT INTO functions (id, team_id, created_by, name, slug, domain_label, enabled, scale_policy)
+		fn, err := scanRun(tx.QueryRow(ctx, `
+			INSERT INTO runs (id, team_id, created_by, name, slug, domain_label, enabled, scale_policy)
 			VALUES ($1, $2, $3, $4, $5, $6, true, $7)
 			RETURNING id, team_id, created_by, name, slug, domain_label, active_revision_id, enabled, scale_policy, created_at, updated_at
 		`, id, teamID, nullString(userID), name, slug, domainLabel, scaleJSON))
@@ -363,26 +363,26 @@ func createFunctionTx(ctx context.Context, tx pgx.Tx, teamID, userID, name, slug
 			return nil, err
 		}
 	}
-	return nil, fmt.Errorf("could not allocate unique function domain")
+	return nil, fmt.Errorf("could not allocate unique run domain")
 }
 
-func updateFunctionMetadataTx(ctx context.Context, tx pgx.Tx, fn *Function) error {
+func updateRunMetadataTx(ctx context.Context, tx pgx.Tx, fn *Run) error {
 	scaleJSON, err := json.Marshal(fn.Scale)
 	if err != nil {
 		return fmt.Errorf("marshal scale policy: %w", err)
 	}
 	_, err = tx.Exec(ctx, `
-		UPDATE functions
+		UPDATE runs
 		SET name = $2, scale_policy = $3
 		WHERE id = $1
 	`, fn.ID, fn.Name, scaleJSON)
 	if err != nil {
-		return fmt.Errorf("update function metadata: %w", err)
+		return fmt.Errorf("update run metadata: %w", err)
 	}
 	return nil
 }
 
-func createRevisionTx(ctx context.Context, tx pgx.Tx, functionID, teamID string, source FunctionSource, spec FunctionRevisionSpec) (*FunctionRevision, error) {
+func createRevisionTx(ctx context.Context, tx pgx.Tx, runID, teamID string, source RunSource, spec RunRevisionSpec) (*RunRevision, error) {
 	sourceJSON, err := json.Marshal(source)
 	if err != nil {
 		return nil, fmt.Errorf("marshal source: %w", err)
@@ -394,34 +394,34 @@ func createRevisionTx(ctx context.Context, tx pgx.Tx, functionID, teamID string,
 	var number int
 	if err := tx.QueryRow(ctx, `
 		SELECT COALESCE(MAX(revision_number), 0) + 1
-		FROM function_revisions
-		WHERE function_id = $1
-	`, functionID).Scan(&number); err != nil {
+		FROM run_revisions
+		WHERE run_id = $1
+	`, runID).Scan(&number); err != nil {
 		return nil, fmt.Errorf("next revision number: %w", err)
 	}
 	return scanRevision(tx.QueryRow(ctx, `
-		INSERT INTO function_revisions (id, function_id, team_id, revision_number, source, spec, status)
+		INSERT INTO run_revisions (id, run_id, team_id, revision_number, source, spec, status)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		RETURNING id, function_id, team_id, revision_number, source, spec, status,
+		RETURNING id, run_id, team_id, revision_number, source, spec, status,
 		          runtime_sandbox_id, runtime_cluster_id, runtime_context_id, created_at, activated_at
-	`, uuid.NewString(), functionID, teamID, number, sourceJSON, specJSON, RevisionStatusCreated))
+	`, uuid.NewString(), runID, teamID, number, sourceJSON, specJSON, RevisionStatusCreated))
 }
 
-func activateRevisionTx(ctx context.Context, tx pgx.Tx, functionID, revisionID string) error {
+func activateRevisionTx(ctx context.Context, tx pgx.Tx, runID, revisionID string) error {
 	_, err := tx.Exec(ctx, `
-		UPDATE function_revisions
+		UPDATE run_revisions
 		SET status = CASE WHEN id = $2 THEN $3 ELSE $4 END,
 		    activated_at = CASE WHEN id = $2 THEN COALESCE(activated_at, NOW()) ELSE activated_at END
-		WHERE function_id = $1
-	`, functionID, revisionID, RevisionStatusActive, RevisionStatusCreated)
+		WHERE run_id = $1
+	`, runID, revisionID, RevisionStatusActive, RevisionStatusCreated)
 	if err != nil {
 		return fmt.Errorf("update revision status: %w", err)
 	}
 	tag, err := tx.Exec(ctx, `
-		UPDATE functions
+		UPDATE runs
 		SET active_revision_id = $2
 		WHERE id = $1 AND deleted_at IS NULL
-	`, functionID, revisionID)
+	`, runID, revisionID)
 	if err != nil {
 		return fmt.Errorf("activate revision: %w", err)
 	}
@@ -431,20 +431,20 @@ func activateRevisionTx(ctx context.Context, tx pgx.Tx, functionID, revisionID s
 	return nil
 }
 
-func getRevisionTx(ctx context.Context, tx pgx.Tx, teamID, functionID, revisionID string, lock bool) (*FunctionRevision, error) {
+func getRevisionTx(ctx context.Context, tx pgx.Tx, teamID, runID, revisionID string, lock bool) (*RunRevision, error) {
 	query := `
-		SELECT id, function_id, team_id, revision_number, source, spec, status,
+		SELECT id, run_id, team_id, revision_number, source, spec, status,
 		       runtime_sandbox_id, runtime_cluster_id, runtime_context_id, created_at, activated_at
-		FROM function_revisions
-		WHERE team_id = $1 AND function_id = $2 AND id::text = $3`
+		FROM run_revisions
+		WHERE team_id = $1 AND run_id = $2 AND id::text = $3`
 	if lock {
 		query += " FOR UPDATE"
 	}
-	return scanRevision(tx.QueryRow(ctx, query, teamID, functionID, strings.TrimSpace(revisionID)))
+	return scanRevision(tx.QueryRow(ctx, query, teamID, runID, strings.TrimSpace(revisionID)))
 }
 
-func scanFunction(row pgx.Row) (*Function, error) {
-	var fn Function
+func scanRun(row pgx.Row) (*Run, error) {
+	var fn Run
 	var createdBy sql.NullString
 	var activeRevision sql.NullString
 	var scaleJSON []byte
@@ -452,7 +452,7 @@ func scanFunction(row pgx.Row) (*Function, error) {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
-		return nil, fmt.Errorf("scan function: %w", err)
+		return nil, fmt.Errorf("scan run: %w", err)
 	}
 	if createdBy.Valid {
 		fn.CreatedBy = createdBy.String
@@ -469,16 +469,16 @@ func scanFunction(row pgx.Row) (*Function, error) {
 	return &fn, nil
 }
 
-func scanFunctionRows(rows pgx.Rows) (*Function, error) {
-	return scanFunction(rows)
+func scanRunRows(rows pgx.Rows) (*Run, error) {
+	return scanRun(rows)
 }
 
-func scanRevision(row pgx.Row) (*FunctionRevision, error) {
-	var revision FunctionRevision
+func scanRevision(row pgx.Row) (*RunRevision, error) {
+	var revision RunRevision
 	var sourceJSON, specJSON []byte
 	var runtimeSandboxID, runtimeClusterID, runtimeContextID sql.NullString
 	if err := row.Scan(
-		&revision.ID, &revision.FunctionID, &revision.TeamID, &revision.Number,
+		&revision.ID, &revision.RunID, &revision.TeamID, &revision.Number,
 		&sourceJSON, &specJSON, &revision.Status,
 		&runtimeSandboxID, &runtimeClusterID, &runtimeContextID,
 		&revision.CreatedAt, &revision.ActivatedAt,
@@ -486,7 +486,7 @@ func scanRevision(row pgx.Row) (*FunctionRevision, error) {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
-		return nil, fmt.Errorf("scan function revision: %w", err)
+		return nil, fmt.Errorf("scan run revision: %w", err)
 	}
 	if len(sourceJSON) > 0 {
 		if err := json.Unmarshal(sourceJSON, &revision.Source); err != nil {
@@ -510,26 +510,26 @@ func scanRevision(row pgx.Row) (*FunctionRevision, error) {
 	return &revision, nil
 }
 
-func scanRevisionRows(rows pgx.Rows) (*FunctionRevision, error) {
+func scanRevisionRows(rows pgx.Rows) (*RunRevision, error) {
 	return scanRevision(rows)
 }
 
-func scanActiveRevision(row pgx.Row) (*Function, *FunctionRevision, error) {
-	var fn Function
-	var revision FunctionRevision
+func scanActiveRevision(row pgx.Row) (*Run, *RunRevision, error) {
+	var fn Run
+	var revision RunRevision
 	var createdBy sql.NullString
 	var activeRevision sql.NullString
 	var scaleJSON, sourceJSON, specJSON []byte
 	var runtimeSandboxID, runtimeClusterID, runtimeContextID sql.NullString
 	if err := row.Scan(
 		&fn.ID, &fn.TeamID, &createdBy, &fn.Name, &fn.Slug, &fn.DomainLabel, &activeRevision, &fn.Enabled, &scaleJSON, &fn.CreatedAt, &fn.UpdatedAt,
-		&revision.ID, &revision.FunctionID, &revision.TeamID, &revision.Number, &sourceJSON, &specJSON, &revision.Status,
+		&revision.ID, &revision.RunID, &revision.TeamID, &revision.Number, &sourceJSON, &specJSON, &revision.Status,
 		&runtimeSandboxID, &runtimeClusterID, &runtimeContextID, &revision.CreatedAt, &revision.ActivatedAt,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil, ErrNotFound
 		}
-		return nil, nil, fmt.Errorf("scan active function revision: %w", err)
+		return nil, nil, fmt.Errorf("scan active run revision: %w", err)
 	}
 	if createdBy.Valid {
 		fn.CreatedBy = createdBy.String

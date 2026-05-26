@@ -62,8 +62,8 @@
       ]
     },
     {
-      "label": "FUNCTION",
-      "slug": "function",
+      "label": "RUN",
+      "slug": "run",
       "pages": [
         {
           "slug": "",

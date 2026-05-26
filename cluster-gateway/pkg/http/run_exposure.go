@@ -11,51 +11,51 @@ import (
 	"github.com/gin-gonic/gin"
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
-	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/runs"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
 )
 
-type functionClaimResponse struct {
+type runClaimResponse struct {
 	SandboxID string  `json:"sandbox_id"`
 	ClusterID *string `json:"cluster_id,omitempty"`
 }
 
-type functionContextResponse struct {
+type runContextResponse struct {
 	ID string `json:"id"`
 }
 
-func (s *Server) proxyFunctionNoRoute(c *gin.Context) bool {
-	if s.functionRepo == nil {
+func (s *Server) proxyRunNoRoute(c *gin.Context) bool {
+	if s.runRepo == nil {
 		return false
 	}
-	label, ok := s.functionLabelFromHost(hostWithoutPort(c.Request.Host))
+	label, ok := s.runLabelFromHost(hostWithoutPort(c.Request.Host))
 	if !ok {
 		return false
 	}
-	active, err := s.functionRepo.GetActiveRevisionByDomainLabel(c.Request.Context(), label)
+	active, err := s.runRepo.GetActiveRevisionByDomainLabel(c.Request.Context(), label)
 	if err != nil {
-		if errors.Is(err, functions.ErrNotFound) {
-			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "function not found")
+		if errors.Is(err, runs.ErrNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "run not found")
 			return true
 		}
-		s.logger.Error("Failed to resolve function host", zap.String("host", c.Request.Host), zap.Error(err))
-		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "function registry unavailable")
+		s.logger.Error("Failed to resolve run host", zap.String("host", c.Request.Host), zap.Error(err))
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "run registry unavailable")
 		return true
 	}
-	if !active.Function.Enabled {
-		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "function is disabled")
+	if !active.Run.Enabled {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "run is disabled")
 		return true
 	}
-	runtime, err := s.ensureFunctionRuntime(c, active)
+	runtime, err := s.ensureRunRuntime(c, active)
 	if err != nil {
-		s.logger.Warn("Failed to prepare function runtime",
-			zap.String("function_id", active.Function.ID),
+		s.logger.Warn("Failed to prepare run runtime",
+			zap.String("run_id", active.Run.ID),
 			zap.String("revision_id", active.Revision.ID),
 			zap.Error(err),
 		)
-		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "function is starting")
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "run is starting")
 		return true
 	}
 	c.Request.Header.Del("X-Sandbox-ID")
@@ -66,16 +66,16 @@ func (s *Server) proxyFunctionNoRoute(c *gin.Context) bool {
 	return true
 }
 
-func (s *Server) functionLabelFromHost(host string) (string, bool) {
-	root := strings.TrimSpace(s.cfg.PublicRootDomain)
+func (s *Server) runLabelFromHost(host string) (string, bool) {
+	root := strings.TrimSpace(s.cfg.PublicRunRootDomain)
 	if root == "" {
-		root = defaultPublicRootDomain
+		root = runs.DefaultPublicRunRootDomain
 	}
 	region := strings.TrimSpace(s.cfg.PublicRegionID)
 	if region == "" {
 		return "", false
 	}
-	suffix := ".fn." + region + "." + root
+	suffix := "." + region + "." + root
 	if !strings.HasSuffix(host, suffix) {
 		return "", false
 	}
@@ -87,17 +87,17 @@ func (s *Server) functionLabelFromHost(host string) (string, bool) {
 	return label, true
 }
 
-func (s *Server) ensureFunctionRuntime(c *gin.Context, active *functions.ActiveRevision) (*functions.FunctionRevision, error) {
+func (s *Server) ensureRunRuntime(c *gin.Context, active *runs.ActiveRevision) (*runs.RunRevision, error) {
 	revision := active.Revision
 	if strings.TrimSpace(revision.RuntimeSandboxID) != "" {
 		return &revision, nil
 	}
-	err := s.functionRepo.WithRevisionLock(c.Request.Context(), revision.ID, func(ctx context.Context, locked *functions.FunctionRevision) error {
+	err := s.runRepo.WithRevisionLock(c.Request.Context(), revision.ID, func(ctx context.Context, locked *runs.RunRevision) error {
 		if strings.TrimSpace(locked.RuntimeSandboxID) != "" {
 			revision = *locked
 			return nil
 		}
-		prepared, err := s.createFunctionRuntime(ctx, active.Function, locked)
+		prepared, err := s.createRunRuntime(ctx, active.Run, locked)
 		if err != nil {
 			return err
 		}
@@ -113,14 +113,14 @@ func (s *Server) ensureFunctionRuntime(c *gin.Context, active *functions.ActiveR
 	return &revision, nil
 }
 
-func (s *Server) createFunctionRuntime(ctx context.Context, fn functions.Function, revision *functions.FunctionRevision) (*functions.FunctionRevision, error) {
+func (s *Server) createRunRuntime(ctx context.Context, fn runs.Run, revision *runs.RunRevision) (*runs.RunRevision, error) {
 	userID := strings.TrimSpace(fn.CreatedBy)
 	if userID == "" {
 		userID = fn.TeamID
 	}
 	claimMounts := make([]map[string]string, 0, len(revision.Spec.Mounts))
 	for _, mount := range revision.Spec.Mounts {
-		volumeID, err := s.materializeFunctionVolume(ctx, fn.TeamID, userID, mount.SnapshotID)
+		volumeID, err := s.materializeRunVolume(ctx, fn.TeamID, userID, mount.SnapshotID)
 		if err != nil {
 			return nil, err
 		}
@@ -133,7 +133,7 @@ func (s *Server) createFunctionRuntime(ctx context.Context, fn functions.Functio
 	}
 	ttl := fn.Scale.IdleTimeoutSeconds
 	if ttl <= 0 {
-		ttl = functions.DefaultScalePolicy().IdleTimeoutSeconds
+		ttl = runs.DefaultScalePolicy().IdleTimeoutSeconds
 	}
 	claimBody := map[string]any{
 		"template": revision.Spec.Template,
@@ -146,12 +146,12 @@ func (s *Server) createFunctionRuntime(ctx context.Context, fn functions.Functio
 		},
 		"mounts": claimMounts,
 	}
-	var claim functionClaimResponse
-	if err := s.doFunctionJSON(ctx, s.cfg.ManagerURL, internalauth.ServiceManager, http.MethodPost, "/api/v1/sandboxes", fn.TeamID, userID, []string{gatewayauthn.PermSandboxCreate, gatewayauthn.PermSandboxVolumeRead}, claimBody, &claim); err != nil {
-		return nil, fmt.Errorf("claim function runtime sandbox: %w", err)
+	var claim runClaimResponse
+	if err := s.doRunJSON(ctx, s.cfg.ManagerURL, internalauth.ServiceManager, http.MethodPost, "/api/v1/sandboxes", fn.TeamID, userID, []string{gatewayauthn.PermSandboxCreate, gatewayauthn.PermSandboxVolumeRead}, claimBody, &claim); err != nil {
+		return nil, fmt.Errorf("claim run runtime sandbox: %w", err)
 	}
 	if claim.SandboxID == "" {
-		return nil, fmt.Errorf("claim function runtime returned empty sandbox_id")
+		return nil, fmt.Errorf("claim run runtime returned empty sandbox_id")
 	}
 	runtime := *revision
 	runtime.RuntimeSandboxID = claim.SandboxID
@@ -162,18 +162,18 @@ func (s *Server) createFunctionRuntime(ctx context.Context, fn functions.Functio
 	if err != nil {
 		return nil, err
 	}
-	contextID, err := s.startFunctionService(ctx, sandbox.InternalAddr, fn.TeamID, userID, serviceSpec)
+	contextID, err := s.startRunService(ctx, sandbox.InternalAddr, fn.TeamID, userID, serviceSpec)
 	if err != nil {
 		return nil, err
 	}
 	runtime.RuntimeContextID = contextID
-	if err := s.waitFunctionServiceReady(ctx, sandbox.InternalAddr, serviceSpec, fn.Scale.StartupTimeoutSeconds); err != nil {
+	if err := s.waitRunServiceReady(ctx, sandbox.InternalAddr, serviceSpec, fn.Scale.StartupTimeoutSeconds); err != nil {
 		return nil, err
 	}
 	return &runtime, nil
 }
 
-func (s *Server) startFunctionService(ctx context.Context, procdURL, teamID, userID string, serviceSpec mgr.SandboxAppService) (string, error) {
+func (s *Server) startRunService(ctx context.Context, procdURL, teamID, userID string, serviceSpec mgr.SandboxAppService) (string, error) {
 	if serviceSpec.Runtime == nil {
 		return "", nil
 	}
@@ -187,24 +187,24 @@ func (s *Server) startFunctionService(ctx context.Context, procdURL, teamID, use
 			"env_vars":        serviceSpec.Runtime.EnvVars,
 			"ttl_sec":         0,
 		}
-		var created functionContextResponse
-		if err := s.doFunctionJSON(ctx, procdURL, internalauth.ServiceProcd, http.MethodPost, "/api/v1/contexts", teamID, userID, []string{gatewayauthn.PermSandboxWrite}, body, &created); err != nil {
-			return "", fmt.Errorf("start function service command: %w", err)
+		var created runContextResponse
+		if err := s.doRunJSON(ctx, procdURL, internalauth.ServiceProcd, http.MethodPost, "/api/v1/contexts", teamID, userID, []string{gatewayauthn.PermSandboxWrite}, body, &created); err != nil {
+			return "", fmt.Errorf("start run service command: %w", err)
 		}
 		return created.ID, nil
 	case mgr.SandboxAppServiceRuntimeWarmProcess:
 		return "", nil
 	default:
-		return "", fmt.Errorf("unsupported function service runtime %q", serviceSpec.Runtime.Type)
+		return "", fmt.Errorf("unsupported run service runtime %q", serviceSpec.Runtime.Type)
 	}
 }
 
-func (s *Server) waitFunctionServiceReady(ctx context.Context, sandboxInternalAddr string, serviceSpec mgr.SandboxAppService, timeoutSeconds int) error {
+func (s *Server) waitRunServiceReady(ctx context.Context, sandboxInternalAddr string, serviceSpec mgr.SandboxAppService, timeoutSeconds int) error {
 	if serviceSpec.HealthCheck == nil || strings.TrimSpace(serviceSpec.HealthCheck.Path) == "" {
 		return nil
 	}
 	if timeoutSeconds <= 0 {
-		timeoutSeconds = functions.DefaultScalePolicy().StartupTimeoutSeconds
+		timeoutSeconds = runs.DefaultScalePolicy().StartupTimeoutSeconds
 	}
 	target, err := withPort(sandboxInternalAddr, serviceSpec.Port)
 	if err != nil {
@@ -234,7 +234,7 @@ func (s *Server) waitFunctionServiceReady(ctx context.Context, sandboxInternalAd
 		}
 		select {
 		case <-deadline.Done():
-			return fmt.Errorf("function service did not become ready: %w", lastErr)
+			return fmt.Errorf("run service did not become ready: %w", lastErr)
 		case <-ticker.C:
 		}
 	}

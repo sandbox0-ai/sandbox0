@@ -326,6 +326,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.In
 		if owner.Spec.PublicExposure != nil {
 			cfg.PublicExposureEnabled = owner.Spec.PublicExposure.Enabled
 			cfg.PublicRootDomain = owner.Spec.PublicExposure.RootDomain
+			cfg.PublicRunRootDomain = owner.Spec.PublicExposure.RunRootDomain
 			cfg.PublicRegionID = owner.Spec.PublicExposure.RegionID
 			if resolvedRegionID == "" {
 				resolvedRegionID = strings.TrimSpace(owner.Spec.PublicExposure.RegionID)

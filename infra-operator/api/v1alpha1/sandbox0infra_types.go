@@ -1271,6 +1271,11 @@ type PublicExposureConfig struct {
 	// +kubebuilder:default="sandbox0.app"
 	RootDomain string `json:"rootDomain,omitempty"`
 
+	// RunRootDomain is the root domain for production Run URLs.
+	// +optional
+	// +kubebuilder:default="sandbox0.run"
+	RunRootDomain string `json:"runRootDomain,omitempty"`
+
 	// RegionID is the DNS-safe region label used in public URLs.
 	// It is not the canonical multi-region tenancy identifier.
 	// +optional

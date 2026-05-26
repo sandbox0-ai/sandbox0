@@ -12,90 +12,90 @@ import (
 	"github.com/gin-gonic/gin"
 	service "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
-	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/runs"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
 )
 
-type functionClaimResponse struct {
+type runClaimResponse struct {
 	SandboxID string  `json:"sandbox_id"`
 	ClusterID *string `json:"cluster_id,omitempty"`
 }
 
-type functionContextResponse struct {
+type runContextResponse struct {
 	ID string `json:"id"`
 }
 
-func (s *Server) proxyFunctionNoRoute(c *gin.Context) bool {
-	if !s.cfg.PublicExposureEnabled || s.functionRepo == nil {
+func (s *Server) proxyRunNoRoute(c *gin.Context) bool {
+	if !s.cfg.PublicExposureEnabled || s.runRepo == nil {
 		return false
 	}
 	host := normalizeHost(c.Request.Host)
-	label, ok := s.functionLabelFromHost(host)
+	label, ok := s.runLabelFromHost(host)
 	if !ok {
 		return false
 	}
-	active, err := s.functionRepo.GetActiveRevisionByDomainLabel(c.Request.Context(), label)
+	active, err := s.runRepo.GetActiveRevisionByDomainLabel(c.Request.Context(), label)
 	if err != nil {
-		if errors.Is(err, functions.ErrNotFound) {
-			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "function not found")
+		if errors.Is(err, runs.ErrNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "run not found")
 			return true
 		}
-		s.logger.Error("Failed to resolve function host", zap.String("host", host), zap.Error(err))
-		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "function registry unavailable")
+		s.logger.Error("Failed to resolve run host", zap.String("host", host), zap.Error(err))
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "run registry unavailable")
 		return true
 	}
-	if !active.Function.Enabled {
-		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "function is disabled")
+	if !active.Run.Enabled {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "run is disabled")
 		return true
 	}
-	runtime, err := s.ensureFunctionRuntime(c, active)
+	runtime, err := s.ensureRunRuntime(c, active)
 	if err != nil {
-		s.logger.Warn("Failed to prepare function runtime",
-			zap.String("function_id", active.Function.ID),
+		s.logger.Warn("Failed to prepare run runtime",
+			zap.String("run_id", active.Run.ID),
 			zap.String("revision_id", active.Revision.ID),
 			zap.Error(err),
 		)
-		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "function is starting")
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "run is starting")
 		return true
 	}
 
 	c.Request.Header.Del("X-Sandbox-ID")
 	c.Request.Header.Del("X-Exposure-Port")
-	c.Request.Header.Del("X-Sandbox0-Function-ID")
+	c.Request.Header.Del("X-Sandbox0-Run-ID")
 	c.Request.Header.Set("X-Sandbox-ID", runtime.RuntimeSandboxID)
 	c.Request.Header.Set("X-Exposure-Port", fmt.Sprintf("%d", runtime.Spec.Service.Port))
-	c.Request.Header.Set("X-Sandbox0-Function-ID", active.Function.ID)
+	c.Request.Header.Set("X-Sandbox0-Run-ID", active.Run.ID)
 	c.Request = proxy.WithUpstreamTimeoutDisabledRequest(c.Request)
 
 	targetURL := s.cfg.DefaultClusterGatewayURL
 	if s.schedulerRouter != nil && strings.TrimSpace(runtime.RuntimeClusterID) != "" {
-		authCtx := &authn.AuthContext{TeamID: active.Function.TeamID, UserID: active.Function.CreatedBy}
+		authCtx := &authn.AuthContext{TeamID: active.Run.TeamID, UserID: active.Run.CreatedBy}
 		if clusterURL, err := s.getClusterGatewayURLForCluster(c.Request.Context(), runtime.RuntimeClusterID, authCtx); err == nil && clusterURL != "" {
 			targetURL = clusterURL
 		}
 	}
 	router, err := s.getClusterGatewayProxy(targetURL)
 	if err != nil {
-		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to route function")
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to route run")
 		return true
 	}
 	router.ProxyToTarget(c)
 	return true
 }
 
-func (s *Server) functionLabelFromHost(host string) (string, bool) {
-	root := strings.TrimSpace(s.cfg.PublicRootDomain)
+func (s *Server) runLabelFromHost(host string) (string, bool) {
+	root := strings.TrimSpace(s.cfg.PublicRunRootDomain)
 	if root == "" {
-		root = "sandbox0.app"
+		root = runs.DefaultPublicRunRootDomain
 	}
 	region := strings.TrimSpace(s.cfg.PublicRegionID)
 	if region == "" {
 		return "", false
 	}
-	suffix := ".fn." + region + "." + root
+	suffix := "." + region + "." + root
 	if !strings.HasSuffix(host, suffix) {
 		return "", false
 	}
@@ -107,17 +107,17 @@ func (s *Server) functionLabelFromHost(host string) (string, bool) {
 	return label, true
 }
 
-func (s *Server) ensureFunctionRuntime(c *gin.Context, active *functions.ActiveRevision) (*functions.FunctionRevision, error) {
+func (s *Server) ensureRunRuntime(c *gin.Context, active *runs.ActiveRevision) (*runs.RunRevision, error) {
 	revision := active.Revision
 	if strings.TrimSpace(revision.RuntimeSandboxID) != "" {
 		return &revision, nil
 	}
-	err := s.functionRepo.WithRevisionLock(c.Request.Context(), revision.ID, func(ctx context.Context, locked *functions.FunctionRevision) error {
+	err := s.runRepo.WithRevisionLock(c.Request.Context(), revision.ID, func(ctx context.Context, locked *runs.RunRevision) error {
 		if strings.TrimSpace(locked.RuntimeSandboxID) != "" {
 			revision = *locked
 			return nil
 		}
-		prepared, err := s.createFunctionRuntime(ctx, active.Function, locked)
+		prepared, err := s.createRunRuntime(ctx, active.Run, locked)
 		if err != nil {
 			return err
 		}
@@ -133,7 +133,7 @@ func (s *Server) ensureFunctionRuntime(c *gin.Context, active *functions.ActiveR
 	return &revision, nil
 }
 
-func (s *Server) createFunctionRuntime(ctx context.Context, fn functions.Function, revision *functions.FunctionRevision) (*functions.FunctionRevision, error) {
+func (s *Server) createRunRuntime(ctx context.Context, fn runs.Run, revision *runs.RunRevision) (*runs.RunRevision, error) {
 	userID := strings.TrimSpace(fn.CreatedBy)
 	if userID == "" {
 		userID = fn.TeamID
@@ -141,7 +141,7 @@ func (s *Server) createFunctionRuntime(ctx context.Context, fn functions.Functio
 
 	claimMounts := make([]map[string]string, 0, len(revision.Spec.Mounts))
 	for _, mount := range revision.Spec.Mounts {
-		volumeID, err := s.materializeFunctionVolume(ctx, fn.TeamID, userID, mount.SnapshotID)
+		volumeID, err := s.materializeRunVolume(ctx, fn.TeamID, userID, mount.SnapshotID)
 		if err != nil {
 			return nil, err
 		}
@@ -159,7 +159,7 @@ func (s *Server) createFunctionRuntime(ctx context.Context, fn functions.Functio
 
 	ttl := fn.Scale.IdleTimeoutSeconds
 	if ttl <= 0 {
-		ttl = functions.DefaultScalePolicy().IdleTimeoutSeconds
+		ttl = runs.DefaultScalePolicy().IdleTimeoutSeconds
 	}
 	claimBody := map[string]any{
 		"template": revision.Spec.Template,
@@ -178,12 +178,12 @@ func (s *Server) createFunctionRuntime(ctx context.Context, fn functions.Functio
 		targetURL = s.cfg.SchedulerURL
 		targetService = internalauth.ServiceScheduler
 	}
-	var claim functionClaimResponse
-	if err := s.doFunctionJSON(ctx, targetURL, targetService, http.MethodPost, "/api/v1/sandboxes", fn.TeamID, userID, []string{authn.PermSandboxCreate, authn.PermSandboxVolumeRead}, claimBody, &claim); err != nil {
-		return nil, fmt.Errorf("claim function runtime sandbox: %w", err)
+	var claim runClaimResponse
+	if err := s.doRunJSON(ctx, targetURL, targetService, http.MethodPost, "/api/v1/sandboxes", fn.TeamID, userID, []string{authn.PermSandboxCreate, authn.PermSandboxVolumeRead}, claimBody, &claim); err != nil {
+		return nil, fmt.Errorf("claim run runtime sandbox: %w", err)
 	}
 	if claim.SandboxID == "" {
-		return nil, fmt.Errorf("claim function runtime returned empty sandbox_id")
+		return nil, fmt.Errorf("claim run runtime returned empty sandbox_id")
 	}
 	runtime := *revision
 	runtime.RuntimeSandboxID = claim.SandboxID
@@ -203,18 +203,18 @@ func (s *Server) createFunctionRuntime(ctx context.Context, fn functions.Functio
 		}
 		clusterURL = resolvedURL
 	}
-	contextID, err := s.startFunctionService(ctx, clusterURL, fn.TeamID, userID, runtime.RuntimeSandboxID, serviceSpec)
+	contextID, err := s.startRunService(ctx, clusterURL, fn.TeamID, userID, runtime.RuntimeSandboxID, serviceSpec)
 	if err != nil {
 		return nil, err
 	}
 	runtime.RuntimeContextID = contextID
-	if err := s.waitFunctionServiceReady(ctx, clusterURL, fn.TeamID, userID, runtime.RuntimeSandboxID, serviceSpec, fn.Scale.StartupTimeoutSeconds); err != nil {
+	if err := s.waitRunServiceReady(ctx, clusterURL, fn.TeamID, userID, runtime.RuntimeSandboxID, serviceSpec, fn.Scale.StartupTimeoutSeconds); err != nil {
 		return nil, err
 	}
 	return &runtime, nil
 }
 
-func (s *Server) startFunctionService(ctx context.Context, clusterURL, teamID, userID, sandboxID string, serviceSpec service.SandboxAppService) (string, error) {
+func (s *Server) startRunService(ctx context.Context, clusterURL, teamID, userID, sandboxID string, serviceSpec service.SandboxAppService) (string, error) {
 	if serviceSpec.Runtime == nil {
 		return "", nil
 	}
@@ -230,42 +230,42 @@ func (s *Server) startFunctionService(ctx context.Context, clusterURL, teamID, u
 			"env_vars": serviceSpec.Runtime.EnvVars,
 			"ttl_sec":  0,
 		}
-		var created functionContextResponse
+		var created runContextResponse
 		path := "/api/v1/sandboxes/" + url.PathEscape(sandboxID) + "/contexts"
-		if err := s.doFunctionJSON(ctx, clusterURL, internalauth.ServiceClusterGateway, http.MethodPost, path, teamID, userID, []string{authn.PermSandboxWrite}, body, &created); err != nil {
-			return "", fmt.Errorf("start function service command: %w", err)
+		if err := s.doRunJSON(ctx, clusterURL, internalauth.ServiceClusterGateway, http.MethodPost, path, teamID, userID, []string{authn.PermSandboxWrite}, body, &created); err != nil {
+			return "", fmt.Errorf("start run service command: %w", err)
 		}
 		return created.ID, nil
 	case service.SandboxAppServiceRuntimeWarmProcess:
 		return "", nil
 	default:
-		return "", fmt.Errorf("unsupported function service runtime %q", serviceSpec.Runtime.Type)
+		return "", fmt.Errorf("unsupported run service runtime %q", serviceSpec.Runtime.Type)
 	}
 }
 
-func (s *Server) waitFunctionServiceReady(ctx context.Context, clusterURL, teamID, userID, sandboxID string, serviceSpec service.SandboxAppService, timeoutSeconds int) error {
+func (s *Server) waitRunServiceReady(ctx context.Context, clusterURL, teamID, userID, sandboxID string, serviceSpec service.SandboxAppService, timeoutSeconds int) error {
 	if serviceSpec.HealthCheck == nil || strings.TrimSpace(serviceSpec.HealthCheck.Path) == "" {
 		return nil
 	}
 	if timeoutSeconds <= 0 {
-		timeoutSeconds = functions.DefaultScalePolicy().StartupTimeoutSeconds
+		timeoutSeconds = runs.DefaultScalePolicy().StartupTimeoutSeconds
 	}
 	deadline, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
-	path := "/internal/v1/functions/runtime/sandboxes/" + url.PathEscape(sandboxID) + "/services/" + url.PathEscape(serviceSpec.ID) + "/health"
+	path := "/internal/v1/runs/runtime/sandboxes/" + url.PathEscape(sandboxID) + "/services/" + url.PathEscape(serviceSpec.ID) + "/health"
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	var lastErr error
 	for {
 		var ready map[string]any
-		err := s.doFunctionJSON(deadline, clusterURL, internalauth.ServiceClusterGateway, http.MethodGet, path, teamID, userID, []string{authn.PermSandboxRead}, nil, &ready)
+		err := s.doRunJSON(deadline, clusterURL, internalauth.ServiceClusterGateway, http.MethodGet, path, teamID, userID, []string{authn.PermSandboxRead}, nil, &ready)
 		if err == nil {
 			return nil
 		}
 		lastErr = err
 		select {
 		case <-deadline.Done():
-			return fmt.Errorf("function service did not become ready: %w", lastErr)
+			return fmt.Errorf("run service did not become ready: %w", lastErr)
 		case <-ticker.C:
 		}
 	}

@@ -15,7 +15,7 @@ tags:
   - name: regions
   - name: api-keys
   - name: sandboxes
-  - name: functions
+  - name: runs
   - name: contexts
   - name: files
   - name: templates
@@ -1724,11 +1724,11 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-  /api/v1/functions/deploy:
+  /api/v1/runs/deploy:
     post:
-      tags: [functions]
-      summary: Deploy a function
-      description: Creates a function or deploys a new revision from a sandbox service or snapshot-backed specification.
+      tags: [runs]
+      summary: Deploy a run
+      description: Creates a run or deploys a new revision from a sandbox service or snapshot-backed specification.
       security:
         - bearerAuth: []
       requestBody:
@@ -1736,14 +1736,14 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/FunctionDeployRequest"
+              $ref: "#/components/schemas/RunDeployRequest"
       responses:
         "201":
-          description: Function revision deployed
+          description: Run revision deployed
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SuccessFunctionDeployResultResponse"
+                $ref: "#/components/schemas/SuccessRunDeployResultResponse"
         "400":
           description: Invalid request
           content:
@@ -1763,25 +1763,25 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "404":
-          description: Source sandbox, service, or function not found
+          description: Source sandbox, service, or run not found
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-  /api/v1/functions:
+  /api/v1/runs:
     get:
-      tags: [functions]
-      summary: List functions
-      description: Lists production function identities for the authenticated team.
+      tags: [runs]
+      summary: List runs
+      description: Lists production run identities for the authenticated team.
       security:
         - bearerAuth: []
       responses:
         "200":
-          description: Functions
+          description: Runs
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SuccessFunctionListResponse"
+                $ref: "#/components/schemas/SuccessRunListResponse"
         "401":
           description: Unauthorized
           content:
@@ -1794,21 +1794,21 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-  /api/v1/functions/{id}:
+  /api/v1/runs/{id}:
     get:
-      tags: [functions]
-      summary: Get a function
+      tags: [runs]
+      summary: Get a run
       security:
         - bearerAuth: []
       parameters:
-        - $ref: "#/components/parameters/FunctionID"
+        - $ref: "#/components/parameters/RunID"
       responses:
         "200":
-          description: Function
+          description: Run
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SuccessFunctionResponse"
+                $ref: "#/components/schemas/SuccessRunResponse"
         "401":
           description: Unauthorized
           content:
@@ -1828,26 +1828,26 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
     put:
-      tags: [functions]
-      summary: Update a function
-      description: Updates mutable function metadata such as name, enabled state, and scale-to-zero policy.
+      tags: [runs]
+      summary: Update a run
+      description: Updates mutable run metadata such as name, enabled state, and scale-to-zero policy.
       security:
         - bearerAuth: []
       parameters:
-        - $ref: "#/components/parameters/FunctionID"
+        - $ref: "#/components/parameters/RunID"
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/FunctionUpdateRequest"
+              $ref: "#/components/schemas/RunUpdateRequest"
       responses:
         "200":
-          description: Function updated
+          description: Run updated
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SuccessFunctionResponse"
+                $ref: "#/components/schemas/SuccessRunResponse"
         "400":
           description: Invalid request
           content:
@@ -1873,15 +1873,15 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
     delete:
-      tags: [functions]
-      summary: Delete a function
+      tags: [runs]
+      summary: Delete a run
       security:
         - bearerAuth: []
       parameters:
-        - $ref: "#/components/parameters/FunctionID"
+        - $ref: "#/components/parameters/RunID"
       responses:
         "200":
-          description: Function deleted
+          description: Run deleted
           content:
             application/json:
               schema:
@@ -1904,28 +1904,28 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-  /api/v1/functions/{id}/deploy:
+  /api/v1/runs/{id}/deploy:
     post:
-      tags: [functions]
-      summary: Deploy a new function revision
-      description: Adds an immutable revision to an existing function. The revision can be activated immediately or left inactive.
+      tags: [runs]
+      summary: Deploy a new run revision
+      description: Adds an immutable revision to an existing run. The revision can be activated immediately or left inactive.
       security:
         - bearerAuth: []
       parameters:
-        - $ref: "#/components/parameters/FunctionID"
+        - $ref: "#/components/parameters/RunID"
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/FunctionDeployRequest"
+              $ref: "#/components/schemas/RunDeployRequest"
       responses:
         "201":
-          description: Function revision deployed
+          description: Run revision deployed
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SuccessFunctionDeployResultResponse"
+                $ref: "#/components/schemas/SuccessRunDeployResultResponse"
         "400":
           description: Invalid request
           content:
@@ -1945,26 +1945,26 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "404":
-          description: Source sandbox, service, or function not found
+          description: Source sandbox, service, or run not found
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-  /api/v1/functions/{id}/revisions:
+  /api/v1/runs/{id}/revisions:
     get:
-      tags: [functions]
-      summary: List function revisions
+      tags: [runs]
+      summary: List run revisions
       security:
         - bearerAuth: []
       parameters:
-        - $ref: "#/components/parameters/FunctionID"
+        - $ref: "#/components/parameters/RunID"
       responses:
         "200":
-          description: Function revisions
+          description: Run revisions
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SuccessFunctionRevisionListResponse"
+                $ref: "#/components/schemas/SuccessRunRevisionListResponse"
         "401":
           description: Unauthorized
           content:
@@ -1983,27 +1983,27 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-  /api/v1/functions/{id}/active-revision:
+  /api/v1/runs/{id}/active-revision:
     put:
-      tags: [functions]
-      summary: Activate a function revision
+      tags: [runs]
+      summary: Activate a run revision
       security:
         - bearerAuth: []
       parameters:
-        - $ref: "#/components/parameters/FunctionID"
+        - $ref: "#/components/parameters/RunID"
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/ActivateFunctionRevisionRequest"
+              $ref: "#/components/schemas/ActivateRunRevisionRequest"
       responses:
         "200":
-          description: Function revision activated
+          description: Run revision activated
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SuccessFunctionDeployResultResponse"
+                $ref: "#/components/schemas/SuccessRunDeployResultResponse"
         "400":
           description: Invalid request
           content:
@@ -3119,11 +3119,11 @@ components:
       required: true
       schema:
         type: string
-    FunctionID:
+    RunID:
       name: id
       in: path
       required: true
-      description: Function ID or slug.
+      description: Run ID or slug.
       schema:
         type: string
     ContextID:
@@ -4238,9 +4238,9 @@ components:
                 exposure_domain:
                   type: string
               required: [sandbox_id, services]
-    FunctionScalePolicy:
+    RunScalePolicy:
       type: object
-      description: Scale-to-zero policy. Functions do not have a minimum idle instance count.
+      description: Scale-to-zero policy. Runs do not have a minimum idle instance count.
       properties:
         max_instances:
           type: integer
@@ -4264,7 +4264,7 @@ components:
           minimum: 1
           default: 90
           description: Maximum seconds to wait for a cold-started service health check.
-    Function:
+    Run:
       type: object
       properties:
         id:
@@ -4286,7 +4286,7 @@ components:
         enabled:
           type: boolean
         scale:
-          $ref: "#/components/schemas/FunctionScalePolicy"
+          $ref: "#/components/schemas/RunScalePolicy"
         created_at:
           type: string
           format: date-time
@@ -4303,15 +4303,15 @@ components:
         - scale
         - created_at
         - updated_at
-    FunctionRevisionStatus:
+    RunRevisionStatus:
       type: string
       enum: [created, active, failed]
-    FunctionRevision:
+    RunRevision:
       type: object
       properties:
         id:
           type: string
-        function_id:
+        run_id:
           type: string
         team_id:
           type: string
@@ -4319,11 +4319,11 @@ components:
           type: integer
           format: int32
         source:
-          $ref: "#/components/schemas/FunctionSource"
+          $ref: "#/components/schemas/RunSource"
         spec:
-          $ref: "#/components/schemas/FunctionRevisionSpec"
+          $ref: "#/components/schemas/RunRevisionSpec"
         status:
-          $ref: "#/components/schemas/FunctionRevisionStatus"
+          $ref: "#/components/schemas/RunRevisionStatus"
         runtime_sandbox_id:
           type: string
         runtime_cluster_id:
@@ -4338,27 +4338,27 @@ components:
           format: date-time
       required:
         - id
-        - function_id
+        - run_id
         - team_id
         - number
         - source
         - spec
         - status
         - created_at
-    FunctionSourceType:
+    RunSourceType:
       type: string
       enum: [sandbox_service, snapshot]
-    FunctionSource:
+    RunSource:
       type: object
       properties:
         type:
-          $ref: "#/components/schemas/FunctionSourceType"
+          $ref: "#/components/schemas/RunSourceType"
         sandbox_service:
-          $ref: "#/components/schemas/SandboxServiceFunctionSource"
+          $ref: "#/components/schemas/SandboxServiceRunSource"
         snapshot:
-          $ref: "#/components/schemas/SnapshotFunctionSource"
+          $ref: "#/components/schemas/SnapshotRunSource"
       required: [type]
-    SandboxServiceFunctionSource:
+    SandboxServiceRunSource:
       type: object
       properties:
         sandbox_id:
@@ -4366,16 +4366,16 @@ components:
         service_id:
           type: string
       required: [sandbox_id, service_id]
-    SnapshotFunctionSource:
+    SnapshotRunSource:
       type: object
       properties:
         snapshot_ids:
           type: array
           items:
             type: string
-    FunctionRevisionSpec:
+    RunRevisionSpec:
       type: object
-      description: Canonical runtime contract compiled from every function deploy mode.
+      description: Canonical runtime contract compiled from every run deploy mode.
       properties:
         template:
           type: string
@@ -4384,13 +4384,13 @@ components:
         mounts:
           type: array
           items:
-            $ref: "#/components/schemas/FunctionRevisionMount"
+            $ref: "#/components/schemas/RunRevisionMount"
         env_vars:
           type: object
           additionalProperties:
             type: string
       required: [template, service]
-    FunctionRevisionMount:
+    RunRevisionMount:
       type: object
       properties:
         snapshot_id:
@@ -4400,9 +4400,9 @@ components:
         read_only:
           type: boolean
           default: true
-          description: Function snapshot mounts are immutable and are materialized as read-only volumes at runtime.
+          description: Run snapshot mounts are immutable and are materialized as read-only volumes at runtime.
       required: [snapshot_id, mount_path]
-    FunctionDeployRequest:
+    RunDeployRequest:
       type: object
       properties:
         name:
@@ -4410,24 +4410,24 @@ components:
         slug:
           type: string
         scale:
-          $ref: "#/components/schemas/FunctionScalePolicy"
+          $ref: "#/components/schemas/RunScalePolicy"
         source:
-          $ref: "#/components/schemas/FunctionSource"
+          $ref: "#/components/schemas/RunSource"
         spec:
-          $ref: "#/components/schemas/FunctionRevisionSpec"
+          $ref: "#/components/schemas/RunRevisionSpec"
         activate:
           type: boolean
           default: true
       required: []
-    FunctionDeployResult:
+    RunDeployResult:
       type: object
       properties:
-        function:
-          $ref: "#/components/schemas/Function"
+        run:
+          $ref: "#/components/schemas/Run"
         revision:
-          $ref: "#/components/schemas/FunctionRevision"
-      required: [function, revision]
-    FunctionUpdateRequest:
+          $ref: "#/components/schemas/RunRevision"
+      required: [run, revision]
+    RunUpdateRequest:
       type: object
       properties:
         name:
@@ -4435,28 +4435,28 @@ components:
         enabled:
           type: boolean
         scale:
-          $ref: "#/components/schemas/FunctionScalePolicy"
-    ActivateFunctionRevisionRequest:
+          $ref: "#/components/schemas/RunScalePolicy"
+    ActivateRunRevisionRequest:
       type: object
       properties:
         revision_id:
           type: string
       required: [revision_id]
-    SuccessFunctionDeployResultResponse:
+    SuccessRunDeployResultResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
           properties:
             data:
-              $ref: "#/components/schemas/FunctionDeployResult"
-    SuccessFunctionResponse:
+              $ref: "#/components/schemas/RunDeployResult"
+    SuccessRunResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
           properties:
             data:
-              $ref: "#/components/schemas/Function"
-    SuccessFunctionListResponse:
+              $ref: "#/components/schemas/Run"
+    SuccessRunListResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
@@ -4464,12 +4464,12 @@ components:
             data:
               type: object
               properties:
-                functions:
+                runs:
                   type: array
                   items:
-                    $ref: "#/components/schemas/Function"
-              required: [functions]
-    SuccessFunctionRevisionListResponse:
+                    $ref: "#/components/schemas/Run"
+              required: [runs]
+    SuccessRunRevisionListResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
@@ -4480,7 +4480,7 @@ components:
                 revisions:
                   type: array
                   items:
-                    $ref: "#/components/schemas/FunctionRevision"
+                    $ref: "#/components/schemas/RunRevision"
               required: [revisions]
     WebhookConfig:
       type: object

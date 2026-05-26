@@ -19,6 +19,7 @@ spec:
   publicExposure:
     enabled: true
     rootDomain: sandbox0.app
+    runRootDomain: sandbox0.run
     regionId: gcp-us-east1
   storage:
     type: builtin

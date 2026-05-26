@@ -1,4 +1,4 @@
-package functions
+package runs
 
 import (
 	"context"
@@ -17,7 +17,7 @@ import (
 )
 
 func TestRepositoryDeployRevisionLifecycle(t *testing.T) {
-	pool, _ := newFunctionRepositoryTestPool(t)
+	pool, _ := newRunRepositoryTestPool(t)
 	if pool == nil {
 		return
 	}
@@ -33,18 +33,18 @@ func TestRepositoryDeployRevisionLifecycle(t *testing.T) {
 		UserID:   userID,
 		Name:     "Echo",
 		Slug:     "Echo API",
-		Source:   FunctionSource{Type: RevisionSourceSnapshot, Snapshot: &SnapshotRevisionSource{}},
+		Source:   RunSource{Type: RevisionSourceSnapshot, Snapshot: &SnapshotRevisionSource{}},
 		Spec:     spec,
 		Activate: true,
 	})
 	if err != nil {
 		t.Fatalf("DeployRevision: %v", err)
 	}
-	if result.Function.Slug != "echo-api" {
-		t.Fatalf("slug = %q, want echo-api", result.Function.Slug)
+	if result.Run.Slug != "echo-api" {
+		t.Fatalf("slug = %q, want echo-api", result.Run.Slug)
 	}
-	if result.Function.ActiveRevisionID != result.Revision.ID {
-		t.Fatalf("active revision = %q, want %q", result.Function.ActiveRevisionID, result.Revision.ID)
+	if result.Run.ActiveRevisionID != result.Revision.ID {
+		t.Fatalf("active revision = %q, want %q", result.Run.ActiveRevisionID, result.Revision.ID)
 	}
 	if result.Revision.Number != 1 {
 		t.Fatalf("revision number = %d, want 1", result.Revision.Number)
@@ -58,7 +58,7 @@ func TestRepositoryDeployRevisionLifecycle(t *testing.T) {
 		UserID:   userID,
 		Name:     "Echo v2",
 		Slug:     "echo-api",
-		Source:   FunctionSource{Type: RevisionSourceSnapshot, Snapshot: &SnapshotRevisionSource{}},
+		Source:   RunSource{Type: RevisionSourceSnapshot, Snapshot: &SnapshotRevisionSource{}},
 		Spec:     testRevisionSpec("echo", []string{"python", "-m", "http.server", "3001"}),
 		Activate: false,
 	})
@@ -68,16 +68,16 @@ func TestRepositoryDeployRevisionLifecycle(t *testing.T) {
 	if second.Revision.Number != 2 {
 		t.Fatalf("second revision number = %d, want 2", second.Revision.Number)
 	}
-	if second.Function.ActiveRevisionID != result.Revision.ID {
-		t.Fatalf("active revision changed to %q, want %q", second.Function.ActiveRevisionID, result.Revision.ID)
+	if second.Run.ActiveRevisionID != result.Revision.ID {
+		t.Fatalf("active revision changed to %q, want %q", second.Run.ActiveRevisionID, result.Revision.ID)
 	}
 
-	functions, err := repo.ListFunctions(ctx, teamID)
+	runs, err := repo.ListRuns(ctx, teamID)
 	if err != nil {
-		t.Fatalf("ListFunctions: %v", err)
+		t.Fatalf("ListRuns: %v", err)
 	}
-	if len(functions) != 1 {
-		t.Fatalf("functions len = %d, want 1", len(functions))
+	if len(runs) != 1 {
+		t.Fatalf("runs len = %d, want 1", len(runs))
 	}
 
 	revisions, err := repo.ListRevisions(ctx, teamID, "echo-api")
@@ -92,14 +92,14 @@ func TestRepositoryDeployRevisionLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ActivateRevision: %v", err)
 	}
-	if activated.Function.ActiveRevisionID != second.Revision.ID {
-		t.Fatalf("active revision = %q, want %q", activated.Function.ActiveRevisionID, second.Revision.ID)
+	if activated.Run.ActiveRevisionID != second.Revision.ID {
+		t.Fatalf("active revision = %q, want %q", activated.Run.ActiveRevisionID, second.Revision.ID)
 	}
 
 	if err := repo.SetRevisionRuntime(ctx, second.Revision.ID, "sb-runtime", "cluster-a", "ctx-1"); err != nil {
 		t.Fatalf("SetRevisionRuntime: %v", err)
 	}
-	active, err := repo.GetActiveRevisionByDomainLabel(ctx, result.Function.DomainLabel)
+	active, err := repo.GetActiveRevisionByDomainLabel(ctx, result.Run.DomainLabel)
 	if err != nil {
 		t.Fatalf("GetActiveRevisionByDomainLabel: %v", err)
 	}
@@ -110,16 +110,16 @@ func TestRepositoryDeployRevisionLifecycle(t *testing.T) {
 		t.Fatalf("ClearRevisionRuntime: %v", err)
 	}
 
-	if err := repo.DeleteFunction(ctx, teamID, "echo-api"); err != nil {
-		t.Fatalf("DeleteFunction: %v", err)
+	if err := repo.DeleteRun(ctx, teamID, "echo-api"); err != nil {
+		t.Fatalf("DeleteRun: %v", err)
 	}
-	if _, err := repo.GetFunction(ctx, teamID, "echo-api"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("GetFunction after delete err = %v, want %v", err, ErrNotFound)
+	if _, err := repo.GetRun(ctx, teamID, "echo-api"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetRun after delete err = %v, want %v", err, ErrNotFound)
 	}
 }
 
-func testRevisionSpec(serviceID string, command []string) FunctionRevisionSpec {
-	return FunctionRevisionSpec{
+func testRevisionSpec(serviceID string, command []string) RunRevisionSpec {
+	return RunRevisionSpec{
 		Template: "python",
 		Service: mgr.SandboxAppService{
 			ID:   serviceID,
@@ -132,7 +132,7 @@ func testRevisionSpec(serviceID string, command []string) FunctionRevisionSpec {
 	}
 }
 
-func newFunctionRepositoryTestPool(t *testing.T) (*pgxpool.Pool, string) {
+func newRunRepositoryTestPool(t *testing.T) (*pgxpool.Pool, string) {
 	t.Helper()
 
 	ctx := context.Background()
@@ -145,7 +145,7 @@ func newFunctionRepositoryTestPool(t *testing.T) (*pgxpool.Pool, string) {
 		return nil, ""
 	}
 
-	schema := fmt.Sprintf("gateway_functions_test_%s", strings.ReplaceAll(uuid.NewString(), "-", ""))
+	schema := fmt.Sprintf("gateway_runs_test_%s", strings.ReplaceAll(uuid.NewString(), "-", ""))
 	adminPool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
 		t.Fatalf("connect test database: %v", err)

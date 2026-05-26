@@ -97,6 +97,10 @@ type GatewayConfig struct {
 	// +optional
 	// +kubebuilder:default="sandbox0.app"
 	PublicRootDomain string `yaml:"public_root_domain" json:"-"`
+	// PublicRunRootDomain is the root domain for production Run URLs.
+	// +optional
+	// +kubebuilder:default="sandbox0.run"
+	PublicRunRootDomain string `yaml:"public_run_root_domain" json:"-"`
 	// PublicRegionID is the region label used in exposure hosts,
 	// for example "aws-us-east-1". It should match RegionID.
 	// +optional

@@ -1,4 +1,4 @@
-package functions
+package runs
 
 import (
 	"crypto/rand"
@@ -20,56 +20,58 @@ const (
 	RevisionStatusCreated = "created"
 	RevisionStatusActive  = "active"
 	RevisionStatusFailed  = "failed"
+
+	DefaultPublicRunRootDomain = "sandbox0.run"
 )
 
 var (
-	ErrNotFound = errors.New("function not found")
+	ErrNotFound = errors.New("run not found")
 
 	slugPartPattern = regexp.MustCompile(`[^a-z0-9-]+`)
 )
 
-// Function is the stable production identity and hostname for immutable revisions.
-type Function struct {
-	ID               string              `json:"id"`
-	TeamID           string              `json:"team_id"`
-	CreatedBy        string              `json:"created_by,omitempty"`
-	Name             string              `json:"name"`
-	Slug             string              `json:"slug"`
-	DomainLabel      string              `json:"domain_label"`
-	URL              string              `json:"url,omitempty"`
-	ActiveRevisionID string              `json:"active_revision_id,omitempty"`
-	Enabled          bool                `json:"enabled"`
-	Scale            FunctionScalePolicy `json:"scale"`
-	CreatedAt        time.Time           `json:"created_at"`
-	UpdatedAt        time.Time           `json:"updated_at"`
+// Run is the stable production identity and hostname for immutable revisions.
+type Run struct {
+	ID               string         `json:"id"`
+	TeamID           string         `json:"team_id"`
+	CreatedBy        string         `json:"created_by,omitempty"`
+	Name             string         `json:"name"`
+	Slug             string         `json:"slug"`
+	DomainLabel      string         `json:"domain_label"`
+	URL              string         `json:"url,omitempty"`
+	ActiveRevisionID string         `json:"active_revision_id,omitempty"`
+	Enabled          bool           `json:"enabled"`
+	Scale            RunScalePolicy `json:"scale"`
+	CreatedAt        time.Time      `json:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at"`
 }
 
-// FunctionScalePolicy controls scale-to-zero runtime behavior. There is no
-// minimum warm count; every function can return to zero instances.
-type FunctionScalePolicy struct {
+// RunScalePolicy controls scale-to-zero runtime behavior. There is no
+// minimum warm count; every run can return to zero instances.
+type RunScalePolicy struct {
 	MaxInstances          int `json:"max_instances,omitempty"`
 	TargetConcurrency     int `json:"target_concurrency,omitempty"`
 	IdleTimeoutSeconds    int `json:"idle_timeout_seconds,omitempty"`
 	StartupTimeoutSeconds int `json:"startup_timeout_seconds,omitempty"`
 }
 
-// FunctionRevision is an immutable deployable version of a function.
-type FunctionRevision struct {
-	ID               string               `json:"id"`
-	FunctionID       string               `json:"function_id"`
-	TeamID           string               `json:"team_id"`
-	Number           int                  `json:"number"`
-	Source           FunctionSource       `json:"source"`
-	Spec             FunctionRevisionSpec `json:"spec"`
-	Status           string               `json:"status"`
-	RuntimeSandboxID string               `json:"runtime_sandbox_id,omitempty"`
-	RuntimeClusterID string               `json:"runtime_cluster_id,omitempty"`
-	RuntimeContextID string               `json:"runtime_context_id,omitempty"`
-	CreatedAt        time.Time            `json:"created_at"`
-	ActivatedAt      *time.Time           `json:"activated_at,omitempty"`
+// RunRevision is an immutable deployable version of a run.
+type RunRevision struct {
+	ID               string          `json:"id"`
+	RunID            string          `json:"run_id"`
+	TeamID           string          `json:"team_id"`
+	Number           int             `json:"number"`
+	Source           RunSource       `json:"source"`
+	Spec             RunRevisionSpec `json:"spec"`
+	Status           string          `json:"status"`
+	RuntimeSandboxID string          `json:"runtime_sandbox_id,omitempty"`
+	RuntimeClusterID string          `json:"runtime_cluster_id,omitempty"`
+	RuntimeContextID string          `json:"runtime_context_id,omitempty"`
+	CreatedAt        time.Time       `json:"created_at"`
+	ActivatedAt      *time.Time      `json:"activated_at,omitempty"`
 }
 
-type FunctionSource struct {
+type RunSource struct {
 	Type           string                  `json:"type"`
 	SandboxService *SandboxServiceSource   `json:"sandbox_service,omitempty"`
 	Snapshot       *SnapshotRevisionSource `json:"snapshot,omitempty"`
@@ -84,37 +86,37 @@ type SnapshotRevisionSource struct {
 	SnapshotIDs []string `json:"snapshot_ids,omitempty"`
 }
 
-// FunctionRevisionSpec is the canonical runtime contract consumed by function
+// RunRevisionSpec is the canonical runtime contract consumed by run
 // execution. Both sandbox-service and snapshot deploys compile to this shape.
-type FunctionRevisionSpec struct {
-	Template string                  `json:"template"`
-	Service  mgr.SandboxAppService   `json:"service"`
-	Mounts   []FunctionRevisionMount `json:"mounts,omitempty"`
-	EnvVars  map[string]string       `json:"env_vars,omitempty"`
+type RunRevisionSpec struct {
+	Template string                `json:"template"`
+	Service  mgr.SandboxAppService `json:"service"`
+	Mounts   []RunRevisionMount    `json:"mounts,omitempty"`
+	EnvVars  map[string]string     `json:"env_vars,omitempty"`
 }
 
-type FunctionRevisionMount struct {
+type RunRevisionMount struct {
 	SnapshotID string `json:"snapshot_id"`
 	MountPath  string `json:"mount_path"`
 	ReadOnly   bool   `json:"read_only,omitempty"`
 }
 
-type FunctionDeployRequest struct {
-	Name     string                `json:"name,omitempty"`
-	Slug     string                `json:"slug,omitempty"`
-	Scale    FunctionScalePolicy   `json:"scale,omitempty"`
-	Source   FunctionSource        `json:"source,omitempty"`
-	Spec     *FunctionRevisionSpec `json:"spec,omitempty"`
-	Activate *bool                 `json:"activate,omitempty"`
+type RunDeployRequest struct {
+	Name     string           `json:"name,omitempty"`
+	Slug     string           `json:"slug,omitempty"`
+	Scale    RunScalePolicy   `json:"scale,omitempty"`
+	Source   RunSource        `json:"source,omitempty"`
+	Spec     *RunRevisionSpec `json:"spec,omitempty"`
+	Activate *bool            `json:"activate,omitempty"`
 }
 
-type FunctionDeployResult struct {
-	Function Function         `json:"function"`
-	Revision FunctionRevision `json:"revision"`
+type RunDeployResult struct {
+	Run      Run         `json:"run"`
+	Revision RunRevision `json:"revision"`
 }
 
-func DefaultScalePolicy() FunctionScalePolicy {
-	return FunctionScalePolicy{
+func DefaultScalePolicy() RunScalePolicy {
+	return RunScalePolicy{
 		MaxInstances:          1,
 		TargetConcurrency:     1,
 		IdleTimeoutSeconds:    300,
@@ -122,7 +124,7 @@ func DefaultScalePolicy() FunctionScalePolicy {
 	}
 }
 
-func NormalizeScalePolicy(policy FunctionScalePolicy) FunctionScalePolicy {
+func NormalizeScalePolicy(policy RunScalePolicy) RunScalePolicy {
 	defaults := DefaultScalePolicy()
 	if policy.MaxInstances <= 0 {
 		policy.MaxInstances = defaults.MaxInstances
@@ -174,19 +176,19 @@ func NewDomainLabel(slug string) (string, error) {
 	return strings.Trim(slug[:prefixLen], "-") + "-" + suffix, nil
 }
 
-func PublicURL(domainLabel, regionID, rootDomain string) string {
-	rootDomain = strings.TrimSpace(rootDomain)
-	if rootDomain == "" {
-		rootDomain = "sandbox0.app"
+func PublicURL(domainLabel, regionID, runRootDomain string) string {
+	runRootDomain = strings.TrimSpace(runRootDomain)
+	if runRootDomain == "" {
+		runRootDomain = DefaultPublicRunRootDomain
 	}
 	regionID = strings.TrimSpace(regionID)
 	if domainLabel == "" || regionID == "" {
 		return ""
 	}
-	return "https://" + domainLabel + ".fn." + regionID + "." + rootDomain
+	return "https://" + domainLabel + "." + regionID + "." + runRootDomain
 }
 
-func NormalizeRevisionSpec(spec FunctionRevisionSpec) (FunctionRevisionSpec, error) {
+func NormalizeRevisionSpec(spec RunRevisionSpec) (RunRevisionSpec, error) {
 	spec.Template = strings.TrimSpace(spec.Template)
 	if spec.Template == "" {
 		return spec, fmt.Errorf("template is required")
@@ -207,7 +209,7 @@ func NormalizeRevisionSpec(spec FunctionRevisionSpec) (FunctionRevisionSpec, err
 	spec.Service = service
 
 	if len(spec.Mounts) > 0 {
-		mounts := make([]FunctionRevisionMount, 0, len(spec.Mounts))
+		mounts := make([]RunRevisionMount, 0, len(spec.Mounts))
 		seenPaths := make(map[string]struct{}, len(spec.Mounts))
 		for i := range spec.Mounts {
 			mount := spec.Mounts[i]

@@ -89,6 +89,7 @@ type globalGatewayConfigYAML struct {
 	RegionID                 string               `yaml:"region_id"`
 	PublicExposureEnabled    bool                 `yaml:"public_exposure_enabled"`
 	PublicRootDomain         string               `yaml:"public_root_domain"`
+	PublicRunRootDomain      string               `yaml:"public_run_root_domain"`
 	PublicRegionID           string               `yaml:"public_region_id"`
 }
 
@@ -190,6 +191,7 @@ func applyGlobalGatewayYAML(cfg *GlobalGatewayConfig, raw globalGatewayConfigYAM
 	cfg.RegionID = raw.RegionID
 	cfg.PublicExposureEnabled = raw.PublicExposureEnabled
 	cfg.PublicRootDomain = raw.PublicRootDomain
+	cfg.PublicRunRootDomain = raw.PublicRunRootDomain
 	cfg.PublicRegionID = raw.PublicRegionID
 
 	if err := applyOptionalDuration(&cfg.ShutdownTimeout, raw.ShutdownTimeout, "shutdown_timeout"); err != nil {

@@ -204,6 +204,9 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		if strings.TrimSpace(infra.Spec.PublicExposure.RootDomain) != "" {
 			cfg.PublicRootDomain = infra.Spec.PublicExposure.RootDomain
 		}
+		if strings.TrimSpace(infra.Spec.PublicExposure.RunRootDomain) != "" {
+			cfg.PublicRunRootDomain = infra.Spec.PublicExposure.RunRootDomain
+		}
 		if strings.TrimSpace(infra.Spec.PublicExposure.RegionID) != "" {
 			cfg.PublicRegionID = infra.Spec.PublicExposure.RegionID
 		}
@@ -441,6 +444,9 @@ func applyConfigDefaults(cfg *apiconfig.GlobalGatewayConfig) {
 	}
 	if strings.TrimSpace(cfg.PublicRootDomain) == "" {
 		cfg.PublicRootDomain = "sandbox0.app"
+	}
+	if strings.TrimSpace(cfg.PublicRunRootDomain) == "" {
+		cfg.PublicRunRootDomain = "sandbox0.run"
 	}
 	if strings.TrimSpace(cfg.PublicRegionID) == "" {
 		cfg.PublicRegionID = "aws-us-east-1"

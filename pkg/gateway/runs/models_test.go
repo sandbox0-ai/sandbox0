@@ -1,4 +1,4 @@
-package functions
+package runs
 
 import (
 	"strings"
@@ -8,7 +8,7 @@ import (
 )
 
 func TestNormalizeScalePolicyDefaultsToScaleToZero(t *testing.T) {
-	got := NormalizeScalePolicy(FunctionScalePolicy{})
+	got := NormalizeScalePolicy(RunScalePolicy{})
 	if got.MaxInstances != 1 {
 		t.Fatalf("MaxInstances = %d, want 1", got.MaxInstances)
 	}
@@ -24,12 +24,12 @@ func TestNormalizeScalePolicyDefaultsToScaleToZero(t *testing.T) {
 }
 
 func TestNormalizeSlug(t *testing.T) {
-	got, err := NormalizeSlug("  My Function_v1!!  ")
+	got, err := NormalizeSlug("  My Run_v1!!  ")
 	if err != nil {
 		t.Fatalf("NormalizeSlug: %v", err)
 	}
-	if got != "my-function-v1" {
-		t.Fatalf("slug = %q, want my-function-v1", got)
+	if got != "my-run-v1" {
+		t.Fatalf("slug = %q, want my-run-v1", got)
 	}
 	if _, err := NormalizeSlug("___"); err == nil {
 		t.Fatal("NormalizeSlug accepted an empty slug")
@@ -52,14 +52,14 @@ func TestNewDomainLabelFitsDNSLabel(t *testing.T) {
 
 func TestPublicURL(t *testing.T) {
 	got := PublicURL("hello-1234", "aws-us-east-1", "sandbox0.example")
-	want := "https://hello-1234.fn.aws-us-east-1.sandbox0.example"
+	want := "https://hello-1234.aws-us-east-1.sandbox0.example"
 	if got != want {
 		t.Fatalf("PublicURL = %q, want %q", got, want)
 	}
 }
 
-func TestNormalizeRevisionSpecDefaultsFunctionIngress(t *testing.T) {
-	spec, err := NormalizeRevisionSpec(FunctionRevisionSpec{
+func TestNormalizeRevisionSpecDefaultsRunIngress(t *testing.T) {
+	spec, err := NormalizeRevisionSpec(RunRevisionSpec{
 		Template: "node",
 		Service: mgr.SandboxAppService{
 			ID:   "web",
@@ -69,7 +69,7 @@ func TestNormalizeRevisionSpecDefaultsFunctionIngress(t *testing.T) {
 				Command: []string{"npm", "start"},
 			},
 		},
-		Mounts: []FunctionRevisionMount{{
+		Mounts: []RunRevisionMount{{
 			SnapshotID: "snap-1",
 			MountPath:  "/app",
 		}},
@@ -84,15 +84,15 @@ func TestNormalizeRevisionSpecDefaultsFunctionIngress(t *testing.T) {
 		t.Fatalf("routes len = %d, want 1", len(spec.Service.Ingress.Routes))
 	}
 	if !spec.Service.Ingress.Routes[0].Resume {
-		t.Fatal("function route should resume runtime sandboxes")
+		t.Fatal("run route should resume runtime sandboxes")
 	}
 	if !spec.Mounts[0].ReadOnly {
-		t.Fatal("function snapshot mount should be read-only")
+		t.Fatal("run snapshot mount should be read-only")
 	}
 }
 
 func TestNormalizeRevisionSpecRejectsUnpublishableService(t *testing.T) {
-	_, err := NormalizeRevisionSpec(FunctionRevisionSpec{
+	_, err := NormalizeRevisionSpec(RunRevisionSpec{
 		Template: "node",
 		Service: mgr.SandboxAppService{
 			ID:   "web",
@@ -108,7 +108,7 @@ func TestNormalizeRevisionSpecRejectsUnpublishableService(t *testing.T) {
 }
 
 func TestNormalizeRevisionSpecRejectsDuplicateMountPaths(t *testing.T) {
-	_, err := NormalizeRevisionSpec(FunctionRevisionSpec{
+	_, err := NormalizeRevisionSpec(RunRevisionSpec{
 		Template: "node",
 		Service: mgr.SandboxAppService{
 			ID:   "web",
@@ -118,7 +118,7 @@ func TestNormalizeRevisionSpecRejectsDuplicateMountPaths(t *testing.T) {
 				Command: []string{"npm", "start"},
 			},
 		},
-		Mounts: []FunctionRevisionMount{
+		Mounts: []RunRevisionMount{
 			{SnapshotID: "snap-1", MountPath: "/app"},
 			{SnapshotID: "snap-2", MountPath: "/app/"},
 		},

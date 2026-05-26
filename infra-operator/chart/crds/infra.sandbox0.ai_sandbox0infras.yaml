@@ -443,6 +443,11 @@ spec:
                     description: RootDomain is the root domain for public exposure
                       URLs
                     type: string
+                  runRootDomain:
+                    default: sandbox0.run
+                    description: RunRootDomain is the root domain for production Run
+                      URLs.
+                    type: string
                 type: object
               redis:
                 description: |-

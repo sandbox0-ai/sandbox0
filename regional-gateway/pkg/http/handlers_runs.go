@@ -17,93 +17,93 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
-	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/runs"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"go.uber.org/zap"
 )
 
-type functionUpdateRequest struct {
-	Name    string                         `json:"name,omitempty"`
-	Enabled *bool                          `json:"enabled,omitempty"`
-	Scale   *functions.FunctionScalePolicy `json:"scale,omitempty"`
+type runUpdateRequest struct {
+	Name    string               `json:"name,omitempty"`
+	Enabled *bool                `json:"enabled,omitempty"`
+	Scale   *runs.RunScalePolicy `json:"scale,omitempty"`
 }
 
-type activateFunctionRevisionRequest struct {
+type activateRunRevisionRequest struct {
 	RevisionID string `json:"revision_id"`
 }
 
-func (s *Server) listFunctions(c *gin.Context) {
+func (s *Server) listRuns(c *gin.Context) {
 	authCtx := authn.FromContext(c.Request.Context())
 	if authCtx == nil || authCtx.TeamID == "" {
 		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
 		return
 	}
-	items, err := s.functionRepo.ListFunctions(c.Request.Context(), authCtx.TeamID)
+	items, err := s.runRepo.ListRuns(c.Request.Context(), authCtx.TeamID)
 	if err != nil {
-		s.logger.Error("Failed to list functions", zap.Error(err))
+		s.logger.Error("Failed to list runs", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "internal server error")
 		return
 	}
 	for i := range items {
-		s.decorateFunction(&items[i])
+		s.decorateRun(&items[i])
 	}
-	spec.JSONSuccess(c, http.StatusOK, gin.H{"functions": items})
+	spec.JSONSuccess(c, http.StatusOK, gin.H{"runs": items})
 }
 
-func (s *Server) getFunction(c *gin.Context) {
+func (s *Server) getRun(c *gin.Context) {
 	authCtx := authn.FromContext(c.Request.Context())
-	fn, err := s.functionRepo.GetFunction(c.Request.Context(), authCtx.TeamID, c.Param("id"))
+	fn, err := s.runRepo.GetRun(c.Request.Context(), authCtx.TeamID, c.Param("id"))
 	if err != nil {
-		writeFunctionError(c, err)
+		writeRunError(c, err)
 		return
 	}
-	s.decorateFunction(fn)
+	s.decorateRun(fn)
 	spec.JSONSuccess(c, http.StatusOK, fn)
 }
 
-func (s *Server) updateFunction(c *gin.Context) {
+func (s *Server) updateRun(c *gin.Context) {
 	authCtx := authn.FromContext(c.Request.Context())
-	var req functionUpdateRequest
+	var req runUpdateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return
 	}
-	fn, err := s.functionRepo.UpdateFunction(c.Request.Context(), authCtx.TeamID, c.Param("id"), req.Name, req.Enabled, req.Scale)
+	fn, err := s.runRepo.UpdateRun(c.Request.Context(), authCtx.TeamID, c.Param("id"), req.Name, req.Enabled, req.Scale)
 	if err != nil {
-		writeFunctionError(c, err)
+		writeRunError(c, err)
 		return
 	}
-	s.decorateFunction(fn)
+	s.decorateRun(fn)
 	spec.JSONSuccess(c, http.StatusOK, fn)
 }
 
-func (s *Server) deleteFunction(c *gin.Context) {
+func (s *Server) deleteRun(c *gin.Context) {
 	authCtx := authn.FromContext(c.Request.Context())
-	if err := s.functionRepo.DeleteFunction(c.Request.Context(), authCtx.TeamID, c.Param("id")); err != nil {
-		writeFunctionError(c, err)
+	if err := s.runRepo.DeleteRun(c.Request.Context(), authCtx.TeamID, c.Param("id")); err != nil {
+		writeRunError(c, err)
 		return
 	}
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"deleted": true})
 }
 
-func (s *Server) deployFunction(c *gin.Context) {
-	s.deployFunctionFromRequest(c, "")
+func (s *Server) deployRun(c *gin.Context) {
+	s.deployRunFromRequest(c, "")
 }
 
-func (s *Server) deployFunctionRevision(c *gin.Context) {
-	s.deployFunctionFromRequest(c, c.Param("id"))
+func (s *Server) deployRunRevision(c *gin.Context) {
+	s.deployRunFromRequest(c, c.Param("id"))
 }
 
-func (s *Server) deployFunctionFromRequest(c *gin.Context, functionIDOrSlug string) {
+func (s *Server) deployRunFromRequest(c *gin.Context, runIDOrSlug string) {
 	authCtx := authn.FromContext(c.Request.Context())
-	var req functions.FunctionDeployRequest
+	var req runs.RunDeployRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return
 	}
-	result, err := s.prepareAndDeployFunction(c.Request.Context(), authCtx, functionIDOrSlug, req)
+	result, err := s.prepareAndDeployRun(c.Request.Context(), authCtx, runIDOrSlug, req)
 	if err != nil {
 		s.writeDeployError(c, err)
 		return
@@ -111,38 +111,38 @@ func (s *Server) deployFunctionFromRequest(c *gin.Context, functionIDOrSlug stri
 	spec.JSONSuccess(c, http.StatusCreated, result)
 }
 
-func (s *Server) listFunctionRevisions(c *gin.Context) {
+func (s *Server) listRunRevisions(c *gin.Context) {
 	authCtx := authn.FromContext(c.Request.Context())
-	revisions, err := s.functionRepo.ListRevisions(c.Request.Context(), authCtx.TeamID, c.Param("id"))
+	revisions, err := s.runRepo.ListRevisions(c.Request.Context(), authCtx.TeamID, c.Param("id"))
 	if err != nil {
-		writeFunctionError(c, err)
+		writeRunError(c, err)
 		return
 	}
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"revisions": revisions})
 }
 
-func (s *Server) activateFunctionRevision(c *gin.Context) {
+func (s *Server) activateRunRevision(c *gin.Context) {
 	authCtx := authn.FromContext(c.Request.Context())
-	var req activateFunctionRevisionRequest
+	var req activateRunRevisionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return
 	}
-	result, err := s.functionRepo.ActivateRevision(c.Request.Context(), authCtx.TeamID, c.Param("id"), req.RevisionID)
+	result, err := s.runRepo.ActivateRevision(c.Request.Context(), authCtx.TeamID, c.Param("id"), req.RevisionID)
 	if err != nil {
-		writeFunctionError(c, err)
+		writeRunError(c, err)
 		return
 	}
 	s.decorateDeployResult(result)
 	spec.JSONSuccess(c, http.StatusOK, result)
 }
 
-func (s *Server) prepareAndDeployFunction(ctx context.Context, authCtx *authn.AuthContext, functionIDOrSlug string, req functions.FunctionDeployRequest) (*functions.FunctionDeployResult, error) {
+func (s *Server) prepareAndDeployRun(ctx context.Context, authCtx *authn.AuthContext, runIDOrSlug string, req runs.RunDeployRequest) (*runs.RunDeployResult, error) {
 	if authCtx == nil || authCtx.TeamID == "" {
-		return nil, errFunctionUnauthorized
+		return nil, errRunUnauthorized
 	}
-	if strings.TrimSpace(functionIDOrSlug) != "" {
-		existing, err := s.functionRepo.GetFunction(ctx, authCtx.TeamID, functionIDOrSlug)
+	if strings.TrimSpace(runIDOrSlug) != "" {
+		existing, err := s.runRepo.GetRun(ctx, authCtx.TeamID, runIDOrSlug)
 		if err != nil {
 			return nil, err
 		}
@@ -157,11 +157,11 @@ func (s *Server) prepareAndDeployFunction(ctx context.Context, authCtx *authn.Au
 	if req.Activate != nil {
 		activate = *req.Activate
 	}
-	specValue, source, err := s.compileFunctionRevision(ctx, authCtx, req)
+	specValue, source, err := s.compileRunRevision(ctx, authCtx, req)
 	if err != nil {
 		return nil, err
 	}
-	result, err := s.functionRepo.DeployRevision(ctx, functions.DeployInput{
+	result, err := s.runRepo.DeployRevision(ctx, runs.DeployInput{
 		TeamID:   authCtx.TeamID,
 		UserID:   authCtx.UserID,
 		Name:     req.Name,
@@ -178,47 +178,47 @@ func (s *Server) prepareAndDeployFunction(ctx context.Context, authCtx *authn.Au
 	return result, nil
 }
 
-func (s *Server) compileFunctionRevision(ctx context.Context, authCtx *authn.AuthContext, req functions.FunctionDeployRequest) (functions.FunctionRevisionSpec, functions.FunctionSource, error) {
+func (s *Server) compileRunRevision(ctx context.Context, authCtx *authn.AuthContext, req runs.RunDeployRequest) (runs.RunRevisionSpec, runs.RunSource, error) {
 	switch strings.TrimSpace(req.Source.Type) {
-	case functions.RevisionSourceSandboxService:
+	case runs.RevisionSourceSandboxService:
 		if req.Source.SandboxService == nil {
-			return functions.FunctionRevisionSpec{}, functions.FunctionSource{}, fmt.Errorf("source.sandbox_service is required")
+			return runs.RunRevisionSpec{}, runs.RunSource{}, fmt.Errorf("source.sandbox_service is required")
 		}
 		specValue, source, err := s.compileSandboxServiceRevision(ctx, authCtx, *req.Source.SandboxService, req.Slug)
 		return specValue, source, err
-	case "", functions.RevisionSourceSnapshot:
+	case "", runs.RevisionSourceSnapshot:
 		if req.Spec == nil {
-			return functions.FunctionRevisionSpec{}, functions.FunctionSource{}, fmt.Errorf("spec is required")
+			return runs.RunRevisionSpec{}, runs.RunSource{}, fmt.Errorf("spec is required")
 		}
-		specValue, err := functions.NormalizeRevisionSpec(*req.Spec)
+		specValue, err := runs.NormalizeRevisionSpec(*req.Spec)
 		if err != nil {
-			return functions.FunctionRevisionSpec{}, functions.FunctionSource{}, err
+			return runs.RunRevisionSpec{}, runs.RunSource{}, err
 		}
 		snapshotIDs := make([]string, 0, len(specValue.Mounts))
 		for _, mount := range specValue.Mounts {
 			snapshotIDs = append(snapshotIDs, mount.SnapshotID)
 		}
-		return specValue, functions.FunctionSource{
-			Type:     functions.RevisionSourceSnapshot,
-			Snapshot: &functions.SnapshotRevisionSource{SnapshotIDs: snapshotIDs},
+		return specValue, runs.RunSource{
+			Type:     runs.RevisionSourceSnapshot,
+			Snapshot: &runs.SnapshotRevisionSource{SnapshotIDs: snapshotIDs},
 		}, nil
 	default:
-		return functions.FunctionRevisionSpec{}, functions.FunctionSource{}, fmt.Errorf("unsupported source type %q", req.Source.Type)
+		return runs.RunRevisionSpec{}, runs.RunSource{}, fmt.Errorf("unsupported source type %q", req.Source.Type)
 	}
 }
 
-func (s *Server) compileSandboxServiceRevision(ctx context.Context, authCtx *authn.AuthContext, source functions.SandboxServiceSource, slug string) (functions.FunctionRevisionSpec, functions.FunctionSource, error) {
+func (s *Server) compileSandboxServiceRevision(ctx context.Context, authCtx *authn.AuthContext, source runs.SandboxServiceSource, slug string) (runs.RunRevisionSpec, runs.RunSource, error) {
 	sandboxID := strings.TrimSpace(source.SandboxID)
 	serviceID := strings.TrimSpace(source.ServiceID)
 	if sandboxID == "" || serviceID == "" {
-		return functions.FunctionRevisionSpec{}, functions.FunctionSource{}, fmt.Errorf("sandbox_id and service_id are required")
+		return runs.RunRevisionSpec{}, runs.RunSource{}, fmt.Errorf("sandbox_id and service_id are required")
 	}
-	sandbox, err := s.getFunctionSourceSandbox(ctx, authCtx, sandboxID)
+	sandbox, err := s.getRunSourceSandbox(ctx, authCtx, sandboxID)
 	if err != nil {
-		return functions.FunctionRevisionSpec{}, functions.FunctionSource{}, err
+		return runs.RunRevisionSpec{}, runs.RunSource{}, err
 	}
 	if sandbox.TeamID != authCtx.TeamID {
-		return functions.FunctionRevisionSpec{}, functions.FunctionSource{}, fmt.Errorf("sandbox belongs to a different team")
+		return runs.RunRevisionSpec{}, runs.RunSource{}, fmt.Errorf("sandbox belongs to a different team")
 	}
 	var selected *service.SandboxAppService
 	for i := range sandbox.Services {
@@ -228,63 +228,63 @@ func (s *Server) compileSandboxServiceRevision(ctx context.Context, authCtx *aut
 		}
 	}
 	if selected == nil {
-		return functions.FunctionRevisionSpec{}, functions.FunctionSource{}, fmt.Errorf("sandbox service %q not found", serviceID)
+		return runs.RunRevisionSpec{}, runs.RunSource{}, fmt.Errorf("sandbox service %q not found", serviceID)
 	}
 	if blockers := service.SandboxAppServicePublishBlockers(*selected); len(blockers) > 0 {
-		return functions.FunctionRevisionSpec{}, functions.FunctionSource{}, fmt.Errorf("service is not publishable: %s", strings.Join(blockers, ", "))
+		return runs.RunRevisionSpec{}, runs.RunSource{}, fmt.Errorf("service is not publishable: %s", strings.Join(blockers, ", "))
 	}
-	mounts := make([]functions.FunctionRevisionMount, 0, len(sandbox.Mounts))
+	mounts := make([]runs.RunRevisionMount, 0, len(sandbox.Mounts))
 	for _, mount := range sandbox.Mounts {
-		snapshot, err := s.createFunctionSourceSnapshot(ctx, authCtx, mount.SandboxVolumeID, snapshotNameForFunction(slug, serviceID, mount.MountPoint))
+		snapshot, err := s.createRunSourceSnapshot(ctx, authCtx, mount.SandboxVolumeID, snapshotNameForRun(slug, serviceID, mount.MountPoint))
 		if err != nil {
-			return functions.FunctionRevisionSpec{}, functions.FunctionSource{}, err
+			return runs.RunRevisionSpec{}, runs.RunSource{}, err
 		}
-		mounts = append(mounts, functions.FunctionRevisionMount{
+		mounts = append(mounts, runs.RunRevisionMount{
 			SnapshotID: snapshot.Id,
 			MountPath:  mount.MountPoint,
 			ReadOnly:   true,
 		})
 	}
-	specValue, err := functions.NormalizeRevisionSpec(functions.FunctionRevisionSpec{
+	specValue, err := runs.NormalizeRevisionSpec(runs.RunRevisionSpec{
 		Template: sandbox.TemplateID,
 		Service:  *selected,
 		Mounts:   mounts,
 	})
 	if err != nil {
-		return functions.FunctionRevisionSpec{}, functions.FunctionSource{}, err
+		return runs.RunRevisionSpec{}, runs.RunSource{}, err
 	}
-	return specValue, functions.FunctionSource{
-		Type: functions.RevisionSourceSandboxService,
-		SandboxService: &functions.SandboxServiceSource{
+	return specValue, runs.RunSource{
+		Type: runs.RevisionSourceSandboxService,
+		SandboxService: &runs.SandboxServiceSource{
 			SandboxID: sandboxID,
 			ServiceID: serviceID,
 		},
 	}, nil
 }
 
-func (s *Server) getFunctionSourceSandbox(ctx context.Context, authCtx *authn.AuthContext, sandboxID string) (*service.Sandbox, error) {
+func (s *Server) getRunSourceSandbox(ctx context.Context, authCtx *authn.AuthContext, sandboxID string) (*service.Sandbox, error) {
 	clusterURL, err := s.clusterGatewayURLForSandbox(ctx, sandboxID, authCtx)
 	if err != nil {
 		return nil, err
 	}
 	var sandbox service.Sandbox
-	if err := s.doFunctionJSON(ctx, clusterURL, internalauth.ServiceClusterGateway, http.MethodGet, "/api/v1/sandboxes/"+url.PathEscape(sandboxID), authCtx.TeamID, authCtx.UserID, authCtx.Permissions, nil, &sandbox); err != nil {
+	if err := s.doRunJSON(ctx, clusterURL, internalauth.ServiceClusterGateway, http.MethodGet, "/api/v1/sandboxes/"+url.PathEscape(sandboxID), authCtx.TeamID, authCtx.UserID, authCtx.Permissions, nil, &sandbox); err != nil {
 		return nil, err
 	}
 	return &sandbox, nil
 }
 
-func (s *Server) createFunctionSourceSnapshot(ctx context.Context, authCtx *authn.AuthContext, volumeID, name string) (*apispec.Snapshot, error) {
+func (s *Server) createRunSourceSnapshot(ctx context.Context, authCtx *authn.AuthContext, volumeID, name string) (*apispec.Snapshot, error) {
 	var snapshot apispec.Snapshot
 	body := map[string]any{"name": name}
 	path := "/api/v1/sandboxvolumes/" + url.PathEscape(volumeID) + "/snapshots"
-	if err := s.doFunctionJSON(ctx, s.cfg.DefaultClusterGatewayURL, internalauth.ServiceClusterGateway, http.MethodPost, path, authCtx.TeamID, authCtx.UserID, append(authCtx.Permissions, authn.PermSandboxVolumeWrite), body, &snapshot); err != nil {
+	if err := s.doRunJSON(ctx, s.cfg.DefaultClusterGatewayURL, internalauth.ServiceClusterGateway, http.MethodPost, path, authCtx.TeamID, authCtx.UserID, append(authCtx.Permissions, authn.PermSandboxVolumeWrite), body, &snapshot); err != nil {
 		return nil, fmt.Errorf("snapshot volume %s: %w", volumeID, err)
 	}
 	return &snapshot, nil
 }
 
-func (s *Server) materializeFunctionVolume(ctx context.Context, teamID, userID string, snapshotID string) (string, error) {
+func (s *Server) materializeRunVolume(ctx context.Context, teamID, userID string, snapshotID string) (string, error) {
 	if userID == "" {
 		userID = teamID
 	}
@@ -293,13 +293,13 @@ func (s *Server) materializeFunctionVolume(ctx context.Context, teamID, userID s
 		"snapshot_id": snapshotID,
 		"access_mode": "ROX",
 	}
-	if err := s.doFunctionJSON(ctx, s.cfg.DefaultClusterGatewayURL, internalauth.ServiceClusterGateway, http.MethodPost, "/api/v1/sandboxvolumes", teamID, userID, []string{authn.PermSandboxVolumeCreate}, body, &volume); err != nil {
+	if err := s.doRunJSON(ctx, s.cfg.DefaultClusterGatewayURL, internalauth.ServiceClusterGateway, http.MethodPost, "/api/v1/sandboxvolumes", teamID, userID, []string{authn.PermSandboxVolumeCreate}, body, &volume); err != nil {
 		return "", fmt.Errorf("materialize snapshot %s: %w", snapshotID, err)
 	}
 	return volume.Id, nil
 }
 
-func (s *Server) doFunctionJSON(ctx context.Context, baseURL, target, method, path, teamID, userID string, permissions []string, body any, out any) error {
+func (s *Server) doRunJSON(ctx context.Context, baseURL, target, method, path, teamID, userID string, permissions []string, body any, out any) error {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if baseURL == "" {
 		return fmt.Errorf("upstream URL is not configured")
@@ -375,24 +375,24 @@ func (s *Server) clusterGatewayURLForSandbox(ctx context.Context, sandboxID stri
 	return clusterURL, nil
 }
 
-func (s *Server) decorateDeployResult(result *functions.FunctionDeployResult) {
+func (s *Server) decorateDeployResult(result *runs.RunDeployResult) {
 	if result == nil {
 		return
 	}
-	s.decorateFunction(&result.Function)
+	s.decorateRun(&result.Run)
 }
 
-func (s *Server) decorateFunction(fn *functions.Function) {
+func (s *Server) decorateRun(fn *runs.Run) {
 	if fn == nil {
 		return
 	}
-	fn.URL = functions.PublicURL(fn.DomainLabel, s.cfg.PublicRegionID, s.cfg.PublicRootDomain)
+	fn.URL = runs.PublicURL(fn.DomainLabel, s.cfg.PublicRegionID, s.cfg.PublicRunRootDomain)
 }
 
-func snapshotNameForFunction(slug, serviceID, mountPath string) string {
-	slug, _ = functions.NormalizeSlug(slug)
+func snapshotNameForRun(slug, serviceID, mountPath string) string {
+	slug, _ = runs.NormalizeSlug(slug)
 	if slug == "" {
-		slug = "function"
+		slug = "run"
 	}
 	mountPath = strings.NewReplacer("/", "-", "_", "-").Replace(strings.Trim(mountPath, "/"))
 	mountPath = strings.Trim(mountPath, "-")
@@ -406,22 +406,22 @@ func snapshotNameForFunction(slug, serviceID, mountPath string) string {
 	return name
 }
 
-var errFunctionUnauthorized = errors.New("missing authentication")
+var errRunUnauthorized = errors.New("missing authentication")
 
 func (s *Server) writeDeployError(c *gin.Context, err error) {
 	switch {
-	case errors.Is(err, errFunctionUnauthorized):
+	case errors.Is(err, errRunUnauthorized):
 		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, err.Error())
-	case errors.Is(err, functions.ErrNotFound):
+	case errors.Is(err, runs.ErrNotFound):
 		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, err.Error())
 	default:
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 	}
 }
 
-func writeFunctionError(c *gin.Context, err error) {
-	if errors.Is(err, functions.ErrNotFound) {
-		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "function not found")
+func writeRunError(c *gin.Context, err error) {
+	if errors.Is(err, runs.ErrNotFound) {
+		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "run not found")
 		return
 	}
 	spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, err.Error())

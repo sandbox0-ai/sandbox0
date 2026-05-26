@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxdevices"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -128,6 +129,33 @@ manager_image: sandbox0/manager:test
 	}
 	if main.SecurityContext.Privileged != nil && *main.SecurityContext.Privileged {
 		t.Fatalf("expected ordinary sandbox to remain non-privileged, got %#v", main.SecurityContext)
+	}
+}
+
+func TestBuildPodSpecRequestsSandboxDevices(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	template := newTestTemplate()
+	template.Spec.MainContainer.Devices = []ContainerDevice{
+		ContainerDeviceFuse,
+		ContainerDeviceNetTun,
+	}
+
+	spec := BuildPodSpec(template)
+	main := spec.Containers[0]
+	for _, resourceName := range []corev1.ResourceName{
+		corev1.ResourceName(sandboxdevices.ResourceFuse),
+		corev1.ResourceName(sandboxdevices.ResourceNetTun),
+	} {
+		if got := main.Resources.Requests[resourceName]; got.Cmp(resource.MustParse("1")) != 0 {
+			t.Fatalf("request %s = %s, want 1", resourceName, got.String())
+		}
+		if got := main.Resources.Limits[resourceName]; got.Cmp(resource.MustParse("1")) != 0 {
+			t.Fatalf("limit %s = %s, want 1", resourceName, got.String())
+		}
 	}
 }
 

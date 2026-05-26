@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	ctlddeviceplugin "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/deviceplugin"
 	ctldportal "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal"
 	ctldpower "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/power"
 	ctldserver "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/server"
@@ -42,6 +43,8 @@ var (
 	defaultSandboxTTL      time.Duration
 	portalRoot             = "/var/lib/sandbox0/ctld"
 	csiSocket              = "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock"
+	devicePluginDir        = "/var/lib/kubelet/device-plugins"
+	devicePluginCapacity   = 256
 	podName                = os.Getenv("POD_NAME")
 	podNamespace           = os.Getenv("POD_NAMESPACE")
 )
@@ -60,6 +63,8 @@ func main() {
 	flag.DurationVar(&defaultSandboxTTL, "default-sandbox-ttl", 0, "default sandbox TTL restored on resume when no original TTL is recorded")
 	flag.StringVar(&portalRoot, "volume-portal-root", "/var/lib/sandbox0/ctld", "host-local root for ctld volume portal WAL and cache")
 	flag.StringVar(&csiSocket, "csi-socket", "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock", "CSI endpoint socket for sandbox volume portals")
+	flag.StringVar(&devicePluginDir, "device-plugin-dir", "/var/lib/kubelet/device-plugins", "kubelet device plugin directory for sandbox device resources")
+	flag.IntVar(&devicePluginCapacity, "device-plugin-capacity", 256, "virtual capacity advertised for each shared sandbox device resource")
 	flag.Parse()
 
 	log.Println("Starting ctld")
@@ -121,6 +126,13 @@ func main() {
 		}
 	}()
 	defer csiServer.Stop()
+
+	devicePluginManager := ctlddeviceplugin.NewManager(ctlddeviceplugin.Config{
+		PluginDir: devicePluginDir,
+		Capacity:  devicePluginCapacity,
+		Logger:    zapLogger,
+	})
+	go devicePluginManager.Run(ctx)
 
 	httpServer := newHTTPServer(httpAddr, combinedController{
 		Controller: buildPowerController(ctx, obsProvider),

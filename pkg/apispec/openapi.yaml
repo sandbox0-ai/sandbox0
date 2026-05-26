@@ -5122,6 +5122,11 @@ components:
           $ref: "#/components/schemas/ResourceQuota"
         securityContext:
           $ref: "#/components/schemas/SecurityContext"
+        devices:
+          type: array
+          items:
+            type: string
+            enum: [fuse, net-tun]
       required: [image, resources]
     VolumeMountSpec:
       type: object

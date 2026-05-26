@@ -11,6 +11,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxdevices"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -26,6 +27,9 @@ func validateTemplateSpecForClaims(spec v1alpha1.SandboxTemplateSpec, claims *in
 	}
 	if spec.MainContainer.SecurityContext != nil {
 		return fmt.Errorf("spec.mainContainer.securityContext requires system identity")
+	}
+	if len(spec.MainContainer.Devices) > 0 {
+		return fmt.Errorf("spec.mainContainer.devices requires system identity")
 	}
 	if strings.TrimSpace(spec.MainContainer.ImagePullPolicy) != "" {
 		return fmt.Errorf("spec.mainContainer.imagePullPolicy requires system identity")
@@ -72,6 +76,9 @@ func validateTemplateSpec(spec v1alpha1.SandboxTemplateSpec) error {
 	if err := validateVolumeMounts(spec.VolumeMounts); err != nil {
 		return err
 	}
+	if err := validateContainerDevices(spec.MainContainer.Devices); err != nil {
+		return err
+	}
 
 	if spec.Pool.MinIdle < 0 {
 		return fmt.Errorf("spec.pool.minIdle must be >= 0")
@@ -103,6 +110,21 @@ func validateTemplateSpec(spec v1alpha1.SandboxTemplateSpec) error {
 		}
 	}
 
+	return nil
+}
+
+func validateContainerDevices(devices []v1alpha1.ContainerDevice) error {
+	seen := make(map[v1alpha1.ContainerDevice]struct{}, len(devices))
+	for i, device := range devices {
+		field := fmt.Sprintf("spec.mainContainer.devices[%d]", i)
+		if _, ok := sandboxdevices.ResourceName(string(device)); !ok {
+			return fmt.Errorf("%s must be one of: %s", field, strings.Join(sandboxdevices.Supported(), ", "))
+		}
+		if _, ok := seen[device]; ok {
+			return fmt.Errorf("%s %q is duplicated", field, device)
+		}
+		seen[device] = struct{}{}
+	}
 	return nil
 }
 

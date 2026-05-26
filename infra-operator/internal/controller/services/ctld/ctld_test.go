@@ -143,6 +143,8 @@ func TestReconcilePassesDefaultPauseConfigToCtld(t *testing.T) {
 	assertContainsArg(t, args, "-pause-memory-buffer-ratio=1.1")
 	assertContainsArg(t, args, "-pause-min-cpu=10m")
 	assertContainsArg(t, args, "-default-sandbox-ttl=0s")
+	assertContainsArg(t, args, "-device-plugin-dir=/var/lib/kubelet/device-plugins")
+	assertContainsArg(t, args, "-device-plugin-capacity=256")
 }
 
 func TestReconcilePassesPauseConfigToCtld(t *testing.T) {

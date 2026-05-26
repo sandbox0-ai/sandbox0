@@ -63,12 +63,21 @@ type SandboxTemplateSpec struct {
 }
 
 type ContainerSpec struct {
-	Image           string           `json:"image"`
-	ImagePullPolicy string           `json:"imagePullPolicy,omitempty"`
-	Env             []EnvVar         `json:"env,omitempty"`
-	Resources       ResourceQuota    `json:"resources"`
-	SecurityContext *SecurityContext `json:"securityContext,omitempty"`
+	Image           string            `json:"image"`
+	ImagePullPolicy string            `json:"imagePullPolicy,omitempty"`
+	Env             []EnvVar          `json:"env,omitempty"`
+	Resources       ResourceQuota     `json:"resources"`
+	SecurityContext *SecurityContext  `json:"securityContext,omitempty"`
+	Devices         []ContainerDevice `json:"devices,omitempty"`
 }
+
+// +kubebuilder:validation:Enum=fuse;net-tun
+type ContainerDevice string
+
+const (
+	ContainerDeviceFuse   ContainerDevice = "fuse"
+	ContainerDeviceNetTun ContainerDevice = "net-tun"
+)
 
 const (
 	SandboxPodStartupConditionType   corev1.PodConditionType = "sandbox0.ai/startup"

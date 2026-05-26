@@ -733,6 +733,21 @@ func TestValidateTemplateSpecForClaims_WildcardPermissionRejected(t *testing.T) 
 	}
 }
 
+func TestValidateTemplateSpecForClaims_RejectsDevicesForRegularTeam(t *testing.T) {
+	t.Parallel()
+
+	spec := validTemplateSpec()
+	spec.MainContainer.Devices = []v1alpha1.ContainerDevice{v1alpha1.ContainerDeviceFuse}
+
+	err := validateTemplateSpecForClaims(spec, &internalauth.Claims{TeamID: "team-1"})
+	if err == nil {
+		t.Fatalf("expected devices to require system identity")
+	}
+	if got := err.Error(); got != "spec.mainContainer.devices requires system identity" {
+		t.Fatalf("unexpected error %q", got)
+	}
+}
+
 func TestValidateTemplateClaimNameBudget_AllowsMaxLengthTemplateID(t *testing.T) {
 	t.Parallel()
 
@@ -875,6 +890,23 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 				}}
 			},
 			wantErr: "spec.warmProcesses[0].probes.startup.httpGet.port must be positive",
+		},
+		{
+			name: "reject invalid device",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				s.MainContainer.Devices = []v1alpha1.ContainerDevice{"gpu"}
+			},
+			wantErr: "spec.mainContainer.devices[0] must be one of: fuse, net-tun",
+		},
+		{
+			name: "reject duplicate device",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				s.MainContainer.Devices = []v1alpha1.ContainerDevice{
+					v1alpha1.ContainerDeviceFuse,
+					v1alpha1.ContainerDeviceFuse,
+				}
+			},
+			wantErr: "spec.mainContainer.devices[1] \"fuse\" is duplicated",
 		},
 	}
 

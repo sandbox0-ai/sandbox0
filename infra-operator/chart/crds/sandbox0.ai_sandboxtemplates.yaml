@@ -56,6 +56,13 @@ spec:
               mainContainer:
                 description: MainContainer configuration (required)
                 properties:
+                  devices:
+                    items:
+                      enum:
+                      - fuse
+                      - net-tun
+                      type: string
+                    type: array
                   env:
                     items:
                       description: EnvVar represents an environment variable

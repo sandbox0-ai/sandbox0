@@ -188,11 +188,16 @@ The following fields require a system-level token. They are not available to reg
 | `pod.tolerations` | Allow pods to be scheduled on tainted nodes. |
 | `pod.serviceAccountName` | Kubernetes service account for sandbox pods. |
 | `mainContainer.securityContext` | Container security context: `runAsUser`, `runAsGroup`, `capabilities.drop`. Capability `add` is not permitted. |
+| `mainContainer.devices` | Sandbox device resources requested from the node-local `ctld` device plugin. Supported values are `fuse` and `net-tun`. |
 | `mainContainer.imagePullPolicy` | Pull policy override for the main container image. Only system administrators/system tokens can set this field. |
 | `clusterId` | Pin the template to a specific cluster in a multi-cluster deployment. |
 
 <Callout variant="warning">
 Attempting to set privileged fields without a system identity returns `403 Forbidden`. Contact your platform administrator if you need access to these fields.
+</Callout>
+
+<Callout variant="warning">
+Device passthrough depends on the configured Kubernetes runtime. These devices do not grant the namespace, seccomp, AppArmor, or privilege settings that container engines may also require. Validate container-engine templates on the target runtimeClass before exposing them to users.
 </Callout>
 
 Regular team-owned templates can declare `warmProcesses` for template-started helpers.

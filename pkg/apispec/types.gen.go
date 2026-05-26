@@ -21,6 +21,12 @@ const (
 	AddTeamMemberRequestRoleViewer    AddTeamMemberRequestRole = "viewer"
 )
 
+// Defines values for ContainerSpecDevices.
+const (
+	Fuse   ContainerSpecDevices = "fuse"
+	NetTun ContainerSpecDevices = "net-tun"
+)
+
 // Defines values for CredentialProjectionType.
 const (
 	HttpHeaders          CredentialProjectionType = "http_headers"
@@ -587,12 +593,16 @@ type ClaimResponse struct {
 
 // ContainerSpec defines model for ContainerSpec.
 type ContainerSpec struct {
-	Env             *[]EnvVar        `json:"env,omitempty"`
-	Image           string           `json:"image"`
-	ImagePullPolicy *string          `json:"imagePullPolicy,omitempty"`
-	Resources       ResourceQuota    `json:"resources"`
-	SecurityContext *SecurityContext `json:"securityContext,omitempty"`
+	Devices         *[]ContainerSpecDevices `json:"devices,omitempty"`
+	Env             *[]EnvVar               `json:"env,omitempty"`
+	Image           string                  `json:"image"`
+	ImagePullPolicy *string                 `json:"imagePullPolicy,omitempty"`
+	Resources       ResourceQuota           `json:"resources"`
+	SecurityContext *SecurityContext        `json:"securityContext,omitempty"`
 }
+
+// ContainerSpecDevices defines model for ContainerSpec.Devices.
+type ContainerSpecDevices string
 
 // ContextExecResponse defines model for ContextExecResponse.
 type ContextExecResponse struct {

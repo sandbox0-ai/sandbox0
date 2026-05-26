@@ -285,6 +285,8 @@ func ctldArgs(infra *infrav1alpha1.Sandbox0Infra) []string {
 		"-cri-endpoint=/host-run/containerd/containerd.sock",
 		"-volume-portal-root=/var/lib/sandbox0/ctld",
 		"-csi-socket=/csi/csi.sock",
+		"-device-plugin-dir=/var/lib/kubelet/device-plugins",
+		"-device-plugin-capacity=256",
 		fmt.Sprintf("-pause-min-memory-request=%s", pauseMinMemoryRequest),
 		fmt.Sprintf("-pause-min-memory-limit=%s", pauseMinMemoryLimit),
 		fmt.Sprintf("-pause-memory-buffer-ratio=%s", pauseMemoryBufferRatio),

@@ -9,6 +9,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxdevices"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -258,6 +259,7 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Resources:       buildResourceRequirements(spec.Resources),
 	}
+	applyContainerDevices(&container.Resources, spec.Devices)
 
 	if spec.ImagePullPolicy != "" {
 		container.ImagePullPolicy = corev1.PullPolicy(spec.ImagePullPolicy)
@@ -338,6 +340,28 @@ func buildResourceRequirements(quota ResourceQuota) corev1.ResourceRequirements 
 		limits = nil
 	}
 	return corev1.ResourceRequirements{Requests: requests, Limits: limits}
+}
+
+func applyContainerDevices(resources *corev1.ResourceRequirements, devices []ContainerDevice) {
+	if resources == nil || len(devices) == 0 {
+		return
+	}
+	if resources.Requests == nil {
+		resources.Requests = corev1.ResourceList{}
+	}
+	if resources.Limits == nil {
+		resources.Limits = corev1.ResourceList{}
+	}
+	one := resource.MustParse("1")
+	for _, device := range devices {
+		resourceName, ok := sandboxdevices.ResourceName(string(device))
+		if !ok {
+			continue
+		}
+		name := corev1.ResourceName(resourceName)
+		resources.Requests[name] = one.DeepCopy()
+		resources.Limits[name] = one.DeepCopy()
+	}
 }
 
 func scaledCPURequest(limit resource.Quantity) resource.Quantity {

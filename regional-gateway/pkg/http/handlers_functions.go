@@ -96,33 +96,6 @@ func (s *Server) deployFunctionRevision(c *gin.Context) {
 	s.deployFunctionFromRequest(c, c.Param("id"))
 }
 
-func (s *Server) publishSandboxServiceFunction(c *gin.Context) {
-	authCtx := authn.FromContext(c.Request.Context())
-	var req functions.FunctionDeployRequest
-	if c.Request.Body != nil {
-		body, _ := io.ReadAll(c.Request.Body)
-		if len(bytes.TrimSpace(body)) > 0 {
-			if err := json.Unmarshal(body, &req); err != nil {
-				spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
-				return
-			}
-		}
-	}
-	req.Source = functions.FunctionSource{
-		Type: functions.RevisionSourceSandboxService,
-		SandboxService: &functions.SandboxServiceSource{
-			SandboxID: c.Param("id"),
-			ServiceID: c.Param("service_id"),
-		},
-	}
-	result, err := s.prepareAndDeployFunction(c.Request.Context(), authCtx, "", req)
-	if err != nil {
-		s.writeDeployError(c, err)
-		return
-	}
-	spec.JSONSuccess(c, http.StatusCreated, result)
-}
-
 func (s *Server) deployFunctionFromRequest(c *gin.Context, functionIDOrSlug string) {
 	authCtx := authn.FromContext(c.Request.Context())
 	var req functions.FunctionDeployRequest

@@ -1,0 +1,242 @@
+# Function
+
+Sandbox0 Functions expose a production HTTP domain backed by the same Sandbox0 primitives used during development: a template, immutable snapshots, mounted volumes, and a sandbox service.
+
+Use Sandbox Services for development and debugging domains. Use Functions when the service should have a stable production domain, immutable revisions, and scale-to-zero behavior.
+
+## Model
+
+| Resource | Role |
+|----------|------|
+| `Function` | Stable production identity, slug, public URL, enabled flag, and scale-to-zero policy |
+| `FunctionRevision` | Immutable deployed version compiled from a source into `template + mounts + service` |
+| `Snapshot` | Immutable source filesystem. At runtime it is materialized as a read-only volume mount |
+| `SandboxService` | HTTP service contract: port, runtime, routes, auth, CORS, rate limits, and health check |
+
+Functions do not introduce an artifact object. A deploy source is either an existing sandbox service or an explicit snapshot-backed spec.
+
+## Deploy Modes
+
+### From Sandbox Service
+
+This is the promotion path from development to production.
+
+Sandbox0 reads the sandbox's service definition, snapshots the sandbox mounts, and creates a function revision from that immutable state. The sandbox service keeps its development URL; the function gets a separate production URL.
+
+### From Snapshots
+
+This is the direct SDK and CI path.
+
+Provide a template, one service, and snapshot mounts. Sandbox0 materializes each snapshot as a read-only volume when the function cold-starts.
+
+## Scale To Zero
+
+Functions have no `minIdle` setting. Every function starts at zero runtime instances and cold-starts on the first request.
+
+| Field | Description |
+|-------|-------------|
+| `max_instances` | Maximum runtime instances for the function |
+| `target_concurrency` | Target request concurrency per runtime instance |
+| `idle_timeout_seconds` | Idle time before runtime can return to zero |
+| `startup_timeout_seconds` | Maximum time to wait for cold-start health |
+
+## Deploy From Snapshots
+
+<Endpoint method="POST">
+/api/v1/functions/deploy
+</Endpoint>
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `result, err := client.DeployFunction(ctx, sandbox0.FunctionDeploySpec{
+    Name:     "api",
+    Slug:     "api",
+    Template: "python",
+    Service: sandbox0.FunctionServiceSpec{
+        ID:         "app",
+        Port:       8080,
+        Command:    []string{"python", "-m", "http.server", "8080"},
+        CWD:        "/workspace",
+        HealthPath: "/healthz",
+    },
+    Mounts: []sandbox0.FunctionSnapshotMount{
+        {SnapshotID: "snap_abc123", MountPath: "/workspace"},
+    },
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(result.Function.URL.Or(""))`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0 import FunctionDeploySpec, FunctionServiceSpec, FunctionSnapshotMount
+
+result = client.functions.deploy(FunctionDeploySpec(
+    name="api",
+    slug="api",
+    template="python",
+    service=FunctionServiceSpec(
+        id="app",
+        port=8080,
+        command=["python", "-m", "http.server", "8080"],
+        cwd="/workspace",
+        health_path="/healthz",
+    ),
+    mounts=[
+        FunctionSnapshotMount(snapshot_id="snap_abc123", mount_path="/workspace"),
+    ],
+))
+print(result.function.url)`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const result = await client.functions.deploy({
+    name: 'api',
+    slug: 'api',
+    template: 'python',
+    service: {
+        id: 'app',
+        port: 8080,
+        command: ['python', '-m', 'http.server', '8080'],
+        cwd: '/workspace',
+        healthPath: '/healthz',
+    },
+    mounts: [
+        { snapshotId: 'snap_abc123', mountPath: '/workspace' },
+    ],
+});
+console.log(result.function.url);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 function deploy \\
+    --name api \\
+    --slug api \\
+    --template python \\
+    --port 8080 \\
+    --cmd "python -m http.server 8080" \\
+    --cwd /workspace \\
+    --health-path /healthz \\
+    --mount snap_abc123:/workspace`
+    }
+  ]}
+/>
+
+## Deploy From Sandbox Service
+
+<Endpoint method="POST">
+/api/v1/functions/deploy
+</Endpoint>
+
+The request source is `sandbox_service`; the SDK and CLI expose it as a dedicated helper.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `result, err := client.DeployFunctionFromSandboxService(
+    ctx,
+    "sb_abc123",
+    "api",
+    sandbox0.WithFunctionName("api"),
+    sandbox0.WithFunctionSlug("api"),
+)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(result.Function.URL.Or(""))`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0 import FunctionDeployOptions
+
+result = client.functions.deploy_from_sandbox_service(
+    "sb_abc123",
+    "api",
+    FunctionDeployOptions(name="api", slug="api"),
+)
+print(result.function.url)`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const result = await client.functions.deployFromSandboxService(
+    'sb_abc123',
+    'api',
+    { name: 'api', slug: 'api' },
+);
+console.log(result.function.url);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 function deploy-service sb_abc123 api --name api --slug api`
+    }
+  ]}
+/>
+
+## Deploy A New Revision
+
+<Endpoint method="POST">
+/api/v1/functions/{'{id}'}/deploy
+</Endpoint>
+
+Deploying to an existing function keeps its production URL stable and creates a new immutable revision.
+
+```bash
+s0 function deploy api \
+    --template python \
+    --port 8080 \
+    --cmd "python -m http.server 8080" \
+    --mount snap_def456:/workspace
+```
+
+Use `--no-activate` when you want to stage the revision before switching traffic.
+
+## Revision Management
+
+| Operation | Endpoint | CLI |
+|-----------|----------|-----|
+| List functions | `GET /api/v1/functions` | `s0 function list` |
+| Get function | `GET /api/v1/functions/{'{id}'}` | `s0 function get api` |
+| Update function | `PUT /api/v1/functions/{'{id}'}` | `s0 function update api --disable` |
+| Delete function | `DELETE /api/v1/functions/{'{id}'}` | `s0 function delete api` |
+| List revisions | `GET /api/v1/functions/{'{id}'}/revisions` | `s0 function revision list api` |
+| Activate revision | `PUT /api/v1/functions/{'{id}'}/active-revision` | `s0 function revision activate api fnrev_abc123` |
+
+## Function File
+
+For CLI automation, keep the deploy spec in YAML:
+
+```yaml
+name: api
+slug: api
+template: python
+service:
+    id: app
+    port: 8080
+    command: ["python", "-m", "http.server", "8080"]
+    cwd: /workspace
+    healthPath: /healthz
+mounts:
+    - snapshotID: snap_abc123
+      mountPath: /workspace
+scale:
+    maxInstances: 4
+    targetConcurrency: 20
+    idleTimeoutSeconds: 300
+    startupTimeoutSeconds: 90
+```
+
+```bash
+s0 function deploy --file function.yaml
+```

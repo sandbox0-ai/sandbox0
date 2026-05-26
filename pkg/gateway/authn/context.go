@@ -72,6 +72,11 @@ const (
 
 	PermRegistryWrite = "registry:write"
 
+	PermFunctionCreate = "function:create"
+	PermFunctionRead   = "function:read"
+	PermFunctionWrite  = "function:write"
+	PermFunctionDelete = "function:delete"
+
 	PermCredentialSourceRead   = "credentialsource:read"
 	PermCredentialSourceWrite  = "credentialsource:write"
 	PermCredentialSourceDelete = "credentialsource:delete"
@@ -100,6 +105,10 @@ var RolePermissions = map[string][]string{
 		PermTemplateWrite,
 		PermTemplateDelete,
 		PermRegistryWrite,
+		PermFunctionCreate,
+		PermFunctionRead,
+		PermFunctionWrite,
+		PermFunctionDelete,
 		PermCredentialSourceRead,
 		PermCredentialSourceWrite,
 		PermCredentialSourceDelete,
@@ -119,6 +128,10 @@ var RolePermissions = map[string][]string{
 		PermSandboxDelete,
 		PermTemplateRead,
 		PermRegistryWrite,
+		PermFunctionCreate,
+		PermFunctionRead,
+		PermFunctionWrite,
+		PermFunctionDelete,
 		PermCredentialSourceRead,
 		PermCredentialSourceWrite,
 		PermCredentialSourceDelete,
@@ -137,6 +150,7 @@ var RolePermissions = map[string][]string{
 	"viewer": {
 		PermSandboxRead,
 		PermTemplateRead,
+		PermFunctionRead,
 		PermCredentialSourceRead,
 		PermSandboxVolumeRead,
 		PermSandboxVolumeFileRead,

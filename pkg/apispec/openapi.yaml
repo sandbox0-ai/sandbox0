@@ -15,6 +15,7 @@ tags:
   - name: regions
   - name: api-keys
   - name: sandboxes
+  - name: functions
   - name: contexts
   - name: files
   - name: templates
@@ -1723,6 +1724,310 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/functions/deploy:
+    post:
+      tags: [functions]
+      summary: Deploy a function
+      description: Creates a function or deploys a new revision from a sandbox service or snapshot-backed specification.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FunctionDeployRequest"
+      responses:
+        "201":
+          description: Function revision deployed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFunctionDeployResultResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Source sandbox, service, or function not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/functions:
+    get:
+      tags: [functions]
+      summary: List functions
+      description: Lists production function identities for the authenticated team.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Functions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFunctionListResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/functions/{id}:
+    get:
+      tags: [functions]
+      summary: Get a function
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/FunctionID"
+      responses:
+        "200":
+          description: Function
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFunctionResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+    put:
+      tags: [functions]
+      summary: Update a function
+      description: Updates mutable function metadata such as name, enabled state, and scale-to-zero policy.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/FunctionID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FunctionUpdateRequest"
+      responses:
+        "200":
+          description: Function updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFunctionResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+    delete:
+      tags: [functions]
+      summary: Delete a function
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/FunctionID"
+      responses:
+        "200":
+          description: Function deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessDeletedResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/functions/{id}/deploy:
+    post:
+      tags: [functions]
+      summary: Deploy a new function revision
+      description: Adds an immutable revision to an existing function. The revision can be activated immediately or left inactive.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/FunctionID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FunctionDeployRequest"
+      responses:
+        "201":
+          description: Function revision deployed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFunctionDeployResultResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Source sandbox, service, or function not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/functions/{id}/revisions:
+    get:
+      tags: [functions]
+      summary: List function revisions
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/FunctionID"
+      responses:
+        "200":
+          description: Function revisions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFunctionRevisionListResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/functions/{id}/active-revision:
+    put:
+      tags: [functions]
+      summary: Activate a function revision
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/FunctionID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActivateFunctionRevisionRequest"
+      responses:
+        "200":
+          description: Function revision activated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFunctionDeployResultResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
   /api/v1/sandboxes/{id}/contexts:
     post:
       tags: [contexts]
@@ -2812,6 +3117,13 @@ components:
       name: id
       in: path
       required: true
+      schema:
+        type: string
+    FunctionID:
+      name: id
+      in: path
+      required: true
+      description: Function ID or slug.
       schema:
         type: string
     ContextID:
@@ -3926,6 +4238,250 @@ components:
                 exposure_domain:
                   type: string
               required: [sandbox_id, services]
+    FunctionScalePolicy:
+      type: object
+      description: Scale-to-zero policy. Functions do not have a minimum idle instance count.
+      properties:
+        max_instances:
+          type: integer
+          format: int32
+          minimum: 1
+          default: 1
+        target_concurrency:
+          type: integer
+          format: int32
+          minimum: 1
+          default: 1
+        idle_timeout_seconds:
+          type: integer
+          format: int32
+          minimum: 1
+          default: 300
+          description: Seconds of inactivity before the runtime sandbox can scale back to zero.
+        startup_timeout_seconds:
+          type: integer
+          format: int32
+          minimum: 1
+          default: 90
+          description: Maximum seconds to wait for a cold-started service health check.
+    Function:
+      type: object
+      properties:
+        id:
+          type: string
+        team_id:
+          type: string
+        created_by:
+          type: string
+        name:
+          type: string
+        slug:
+          type: string
+        domain_label:
+          type: string
+        url:
+          type: string
+        active_revision_id:
+          type: string
+        enabled:
+          type: boolean
+        scale:
+          $ref: "#/components/schemas/FunctionScalePolicy"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - team_id
+        - name
+        - slug
+        - domain_label
+        - enabled
+        - scale
+        - created_at
+        - updated_at
+    FunctionRevisionStatus:
+      type: string
+      enum: [created, active, failed]
+    FunctionRevision:
+      type: object
+      properties:
+        id:
+          type: string
+        function_id:
+          type: string
+        team_id:
+          type: string
+        number:
+          type: integer
+          format: int32
+        source:
+          $ref: "#/components/schemas/FunctionSource"
+        spec:
+          $ref: "#/components/schemas/FunctionRevisionSpec"
+        status:
+          $ref: "#/components/schemas/FunctionRevisionStatus"
+        runtime_sandbox_id:
+          type: string
+        runtime_cluster_id:
+          type: string
+        runtime_context_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        activated_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - function_id
+        - team_id
+        - number
+        - source
+        - spec
+        - status
+        - created_at
+    FunctionSourceType:
+      type: string
+      enum: [sandbox_service, snapshot]
+    FunctionSource:
+      type: object
+      properties:
+        type:
+          $ref: "#/components/schemas/FunctionSourceType"
+        sandbox_service:
+          $ref: "#/components/schemas/SandboxServiceFunctionSource"
+        snapshot:
+          $ref: "#/components/schemas/SnapshotFunctionSource"
+      required: [type]
+    SandboxServiceFunctionSource:
+      type: object
+      properties:
+        sandbox_id:
+          type: string
+        service_id:
+          type: string
+      required: [sandbox_id, service_id]
+    SnapshotFunctionSource:
+      type: object
+      properties:
+        snapshot_ids:
+          type: array
+          items:
+            type: string
+    FunctionRevisionSpec:
+      type: object
+      description: Canonical runtime contract compiled from every function deploy mode.
+      properties:
+        template:
+          type: string
+        service:
+          $ref: "#/components/schemas/SandboxAppService"
+        mounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/FunctionRevisionMount"
+        env_vars:
+          type: object
+          additionalProperties:
+            type: string
+      required: [template, service]
+    FunctionRevisionMount:
+      type: object
+      properties:
+        snapshot_id:
+          type: string
+        mount_path:
+          type: string
+        read_only:
+          type: boolean
+          default: true
+          description: Function snapshot mounts are immutable and are materialized as read-only volumes at runtime.
+      required: [snapshot_id, mount_path]
+    FunctionDeployRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        slug:
+          type: string
+        scale:
+          $ref: "#/components/schemas/FunctionScalePolicy"
+        source:
+          $ref: "#/components/schemas/FunctionSource"
+        spec:
+          $ref: "#/components/schemas/FunctionRevisionSpec"
+        activate:
+          type: boolean
+          default: true
+      required: []
+    FunctionDeployResult:
+      type: object
+      properties:
+        function:
+          $ref: "#/components/schemas/Function"
+        revision:
+          $ref: "#/components/schemas/FunctionRevision"
+      required: [function, revision]
+    FunctionUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        enabled:
+          type: boolean
+        scale:
+          $ref: "#/components/schemas/FunctionScalePolicy"
+    ActivateFunctionRevisionRequest:
+      type: object
+      properties:
+        revision_id:
+          type: string
+      required: [revision_id]
+    SuccessFunctionDeployResultResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/FunctionDeployResult"
+    SuccessFunctionResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/Function"
+    SuccessFunctionListResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                functions:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Function"
+              required: [functions]
+    SuccessFunctionRevisionListResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                revisions:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/FunctionRevision"
+              required: [revisions]
     WebhookConfig:
       type: object
       description: |

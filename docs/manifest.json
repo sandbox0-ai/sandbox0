@@ -62,6 +62,16 @@
       ]
     },
     {
+      "label": "FUNCTION",
+      "slug": "function",
+      "pages": [
+        {
+          "slug": "",
+          "title": "Overview"
+        }
+      ]
+    },
+    {
       "label": "MANAGED AGENTS",
       "slug": "managed-agents",
       "pages": [

@@ -28,6 +28,9 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "not found")
 		return
 	}
+	if strings.TrimSpace(c.GetHeader("X-Sandbox-ID")) == "" && s.proxyFunctionNoRoute(c) {
+		return
+	}
 	if s.managerClient == nil {
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "manager client unavailable")
 		return

@@ -18,6 +18,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/oidc"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
 	gatewayhandlers "github.com/sandbox0-ai/sandbox0/pkg/gateway/http/handlers"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/httpclient"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
@@ -40,6 +41,7 @@ type Server struct {
 	pool                 *pgxpool.Pool
 	identityRepo         *identity.Repository
 	apiKeyRepo           *apikey.Repository
+	functionRepo         *functions.Repository
 	clusterGatewayRouter *proxy.Router
 	schedulerRouter      *proxy.Router // Optional: proxy to scheduler for templates
 	authMiddleware       *middleware.AuthMiddleware
@@ -90,6 +92,7 @@ func NewServer(
 	// Create repository
 	identityRepo := identity.NewRepository(pool)
 	apiKeyRepo := apikey.NewRepository(pool)
+	functionRepo := functions.NewRepository(pool)
 	var meteringRepo *metering.Repository
 	if pool != nil {
 		meteringRepo = metering.NewRepository(pool)
@@ -232,6 +235,7 @@ func NewServer(
 		pool:                  pool,
 		identityRepo:          identityRepo,
 		apiKeyRepo:            apiKeyRepo,
+		functionRepo:          functionRepo,
 		clusterGatewayRouter:  clusterGatewayRouter,
 		schedulerRouter:       schedulerRouter,
 		authMiddleware:        authMiddleware,
@@ -327,6 +331,21 @@ func (s *Server) setupRoutes() {
 			sandboxes.Any("/:id/*path", s.proxySandbox)
 		}
 
+		// Function management is region-scoped because production hostnames and
+		// active revisions are stable region resources.
+		functions := api.Group("/v1/functions")
+		functions.Use(s.requireTeamContextForTeamScopedAPI())
+		{
+			functions.POST("/deploy", s.authMiddleware.RequirePermission(authn.PermFunctionCreate), s.deployFunction)
+			functions.GET("", s.authMiddleware.RequirePermission(authn.PermFunctionRead), s.listFunctions)
+			functions.GET("/:id", s.authMiddleware.RequirePermission(authn.PermFunctionRead), s.getFunction)
+			functions.PUT("/:id", s.authMiddleware.RequirePermission(authn.PermFunctionWrite), s.updateFunction)
+			functions.DELETE("/:id", s.authMiddleware.RequirePermission(authn.PermFunctionDelete), s.deleteFunction)
+			functions.POST("/:id/deploy", s.authMiddleware.RequirePermission(authn.PermFunctionWrite), s.deployFunctionRevision)
+			functions.GET("/:id/revisions", s.authMiddleware.RequirePermission(authn.PermFunctionRead), s.listFunctionRevisions)
+			functions.PUT("/:id/active-revision", s.authMiddleware.RequirePermission(authn.PermFunctionWrite), s.activateFunctionRevision)
+		}
+
 		// Registry credentials are served by regional-gateway in control plane.
 		registry := api.Group("/v1/registry")
 		{
@@ -405,6 +424,9 @@ func (s *Server) setupPublicRoutes() {
 
 func (s *Server) handleNoRoute(c *gin.Context) {
 	if s.handleAPINoRoute(c) {
+		return
+	}
+	if s.proxyFunctionNoRoute(c) {
 		return
 	}
 	s.proxyPublicExposureNoRoute(c)

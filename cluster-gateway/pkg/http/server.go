@@ -20,6 +20,7 @@ import (
 	gatewaybuiltin "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
 	gatewayoidc "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/oidc"
 	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
 	gatewayhandlers "github.com/sandbox0-ai/sandbox0/pkg/gateway/http/handlers"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/httpclient"
 	gatewayidentity "github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
@@ -48,6 +49,7 @@ type Server struct {
 	compositeAuth         *middleware.CompositeAuthMiddleware
 	publicIdentityRepo    *gatewayidentity.Repository
 	publicAPIKeyRepo      *gatewayapikey.Repository
+	functionRepo          *functions.Repository
 	rateLimiter           *gatewaymiddleware.RateLimiter
 	externalLimiter       *middleware.ExternalRateLimiter
 	publicBuiltin         *gatewaybuiltin.Provider
@@ -182,6 +184,7 @@ func NewServer(
 		publicIdentityRepo = gatewayidentity.NewRepository(pool)
 		publicAPIKeyRepo = gatewayapikey.NewRepository(pool)
 	}
+	functionRepo := functions.NewRepository(pool)
 
 	if publicAuthEnabled {
 		if publicIdentityRepo == nil || publicAPIKeyRepo == nil {
@@ -260,6 +263,7 @@ func NewServer(
 		compositeAuth:      compositeAuth,
 		publicIdentityRepo: publicIdentityRepo,
 		publicAPIKeyRepo:   publicAPIKeyRepo,
+		functionRepo:       functionRepo,
 		rateLimiter:        rateLimiter,
 		externalLimiter:    externalLimiter,
 		publicBuiltin:      publicBuiltin,
@@ -432,6 +436,18 @@ func (s *Server) setupRoutes() {
 			quotas.DELETE("/:dimension", s.authMiddleware.RequirePermission(gatewayauthn.PermQuotaWrite), s.proxyToManager)
 		}
 
+		functions := v1.Group("/functions")
+		{
+			functions.POST("/deploy", s.authMiddleware.RequirePermission(gatewayauthn.PermFunctionCreate), s.deployFunction)
+			functions.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermFunctionRead), s.listFunctions)
+			functions.GET("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermFunctionRead), s.getFunction)
+			functions.PUT("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermFunctionWrite), s.updateFunction)
+			functions.DELETE("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermFunctionDelete), s.deleteFunction)
+			functions.POST("/:id/deploy", s.authMiddleware.RequirePermission(gatewayauthn.PermFunctionWrite), s.deployFunctionRevision)
+			functions.GET("/:id/revisions", s.authMiddleware.RequirePermission(gatewayauthn.PermFunctionRead), s.listFunctionRevisions)
+			functions.PUT("/:id/active-revision", s.authMiddleware.RequirePermission(gatewayauthn.PermFunctionWrite), s.activateFunctionRevision)
+		}
+
 		// === SandboxVolume Management (→ Storage Proxy) ===
 		sandboxvolumes := v1.Group("/sandboxvolumes")
 		sandboxvolumes.Use(s.storageProxyUpstreamMiddleware())
@@ -491,6 +507,7 @@ func (s *Server) setupInternalControlPlaneRoutes() {
 		internal.GET("/sandboxes/:id", s.getInternalSandbox)
 		internal.DELETE("/sandboxes/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxDelete), s.deleteInternalSandbox)
 		internal.POST("/sandboxes/:id/resume", s.resumeInternalSandbox)
+		internal.GET("/functions/runtime/sandboxes/:id/services/:service_id/health", s.healthFunctionRuntimeService)
 		// Template management (→ Manager)
 		internal.GET("/templates", s.proxyInternalTemplateRequest)
 		internal.GET("/templates/:id", s.proxyInternalTemplateRequest)

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
@@ -128,6 +129,36 @@ manager_image: sandbox0/manager:test
 	}
 	if main.SecurityContext.Privileged != nil && *main.SecurityContext.Privileged {
 		t.Fatalf("expected ordinary sandbox to remain non-privileged, got %#v", main.SecurityContext)
+	}
+}
+
+func TestBuildPodSpecInjectsProcdRuntimeBinaries(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	spec := BuildPodSpec(newTestTemplate())
+	if len(spec.InitContainers) == 0 {
+		t.Fatal("expected procd init container")
+	}
+	init := spec.InitContainers[0]
+	if init.Name != "procd-init" {
+		t.Fatalf("init container name = %q, want procd-init", init.Name)
+	}
+	if got := strings.Join(init.Command, " "); !strings.Contains(got, "/usr/local/bin/python-runner") || !strings.Contains(got, "/procd/runtimes/python-runner") {
+		t.Fatalf("init command = %q, want python-runner injection", got)
+	}
+	if mount := findVolumeMount(init.VolumeMounts, procdBinVolumeName); mount == nil || mount.MountPath != "/procd" {
+		t.Fatalf("init procd mount = %#v, want /procd", mount)
+	}
+
+	main := spec.Containers[0]
+	if mount := findVolumeMount(main.VolumeMounts, procdBinVolumeName); mount == nil || mount.MountPath != "/procd" {
+		t.Fatalf("main procd mount = %#v, want /procd", mount)
+	}
+	if len(main.Command) != 1 || main.Command[0] != "/procd/bin/procd" {
+		t.Fatalf("main command = %#v, want /procd/bin/procd", main.Command)
 	}
 }
 

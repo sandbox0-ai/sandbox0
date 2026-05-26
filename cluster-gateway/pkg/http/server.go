@@ -383,6 +383,12 @@ func (s *Server) setupRoutes() {
 				contexts.GET("/:ctx_id/ws", s.contextWebSocket)
 			}
 
+			// === Function Invocation (→ Procd) ===
+			functions := sandboxes.Group("/:id/functions")
+			{
+				functions.POST("/:name/invoke", s.invokeFunction)
+			}
+
 			// === File System (→ Procd) ===
 			files := sandboxes.Group("/:id/files")
 			{

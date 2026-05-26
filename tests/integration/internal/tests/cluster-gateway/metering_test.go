@@ -60,10 +60,10 @@ func TestClusterGatewayIntegration_MeteringExportContract(t *testing.T) {
 		t.Fatalf("append second event: %v", err)
 	}
 	if err := repo.AppendWindow(ctx, &metering.Window{
-		WindowID:    "sandbox/sb-1/compute/1",
+		WindowID:    "sandbox/sb-1/request/1",
 		Producer:    "manager.sandbox_lifecycle",
 		RegionID:    "aws-us-east-1",
-		WindowType:  metering.WindowTypeSandboxComputeMillicpuMilliseconds,
+		WindowType:  metering.WindowTypeSandboxRequestCount,
 		SubjectType: metering.SubjectTypeSandbox,
 		SubjectID:   "sb-1",
 		TeamID:      "team-1",
@@ -72,17 +72,17 @@ func TestClusterGatewayIntegration_MeteringExportContract(t *testing.T) {
 		TemplateID:  "tpl-1",
 		ClusterID:   "cluster-a",
 		WindowStart: baseTime,
-		WindowEnd:   baseTime.Add(5 * time.Minute),
-		Value:       300_000,
-		Unit:        metering.WindowUnitMillicpuMilliseconds,
+		WindowEnd:   baseTime,
+		Value:       1,
+		Unit:        metering.WindowUnitCount,
 	}); err != nil {
 		t.Fatalf("append first window: %v", err)
 	}
 	if err := repo.AppendWindow(ctx, &metering.Window{
-		WindowID:    "sandbox/sb-1/memory/2",
+		WindowID:    "sandbox/sb-1/runtime/2",
 		Producer:    "manager.sandbox_lifecycle",
 		RegionID:    "aws-us-east-1",
-		WindowType:  metering.WindowTypeSandboxMemoryMiBMilliseconds,
+		WindowType:  metering.WindowTypeSandboxRuntimeMiBMilliseconds,
 		SubjectType: metering.SubjectTypeSandbox,
 		SubjectID:   "sb-1",
 		TeamID:      "team-1",
@@ -187,7 +187,7 @@ func TestClusterGatewayIntegration_MeteringExportContract(t *testing.T) {
 	if len(windowsResp.Windows) != 1 {
 		t.Fatalf("window count = %d, want 1", len(windowsResp.Windows))
 	}
-	if windowsResp.Windows[0].Sequence != 2 || windowsResp.Windows[0].WindowType != metering.WindowTypeSandboxMemoryMiBMilliseconds {
+	if windowsResp.Windows[0].Sequence != 2 || windowsResp.Windows[0].WindowType != metering.WindowTypeSandboxRuntimeMiBMilliseconds {
 		t.Fatalf("unexpected window: %+v", windowsResp.Windows[0])
 	}
 }

@@ -189,13 +189,13 @@ func TestAppendWindowUsesDefaultPayload(t *testing.T) {
 	err := repo.AppendWindow(context.Background(), &Window{
 		WindowID:    "win-1",
 		Producer:    "manager.sandbox_lifecycle",
-		WindowType:  WindowTypeSandboxComputeMillicpuMilliseconds,
+		WindowType:  WindowTypeSandboxRuntimeMiBMilliseconds,
 		SubjectType: SubjectTypeSandbox,
 		SubjectID:   "sb-1",
 		WindowStart: time.Date(2026, 3, 12, 12, 0, 0, 0, time.UTC),
 		WindowEnd:   time.Date(2026, 3, 12, 12, 5, 0, 0, time.UTC),
 		Value:       300_000,
-		Unit:        WindowUnitMillicpuMilliseconds,
+		Unit:        WindowUnitMiBMilliseconds,
 	})
 	if err != nil {
 		t.Fatalf("AppendWindow: %v", err)
@@ -308,7 +308,7 @@ func TestListWindowsAfterReturnsOrderedWindows(t *testing.T) {
 							"window-7",
 							"manager.sandbox_lifecycle",
 							"aws-us-east-1",
-							WindowTypeSandboxComputeMillicpuMilliseconds,
+							WindowTypeSandboxRuntimeMiBMilliseconds,
 							SubjectTypeSandbox,
 							"sb-1",
 							"team-1",
@@ -321,7 +321,7 @@ func TestListWindowsAfterReturnsOrderedWindows(t *testing.T) {
 							windowStart,
 							windowEnd,
 							int64(300_000),
-							WindowUnitMillicpuMilliseconds,
+							WindowUnitMiBMilliseconds,
 							recordedAt,
 							json.RawMessage(`{"source":"test"}`),
 						},

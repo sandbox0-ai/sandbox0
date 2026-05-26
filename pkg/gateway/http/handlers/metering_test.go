@@ -264,10 +264,10 @@ func TestMeteringHandlerListWindows(t *testing.T) {
 			windows: []*metering.Window{
 				{
 					Sequence:    3,
-					WindowID:    "sandbox/sb-1/compute/2026-03-12T10:00:00Z/2026-03-12T10:05:00Z",
+					WindowID:    "sandbox/sb-1/runtime/2026-03-12T10:00:00Z/2026-03-12T10:05:00Z",
 					Producer:    "manager.lifecycle",
 					RegionID:    "aws-us-east-1",
-					WindowType:  metering.WindowTypeSandboxComputeMillicpuMilliseconds,
+					WindowType:  metering.WindowTypeSandboxRuntimeMiBMilliseconds,
 					SubjectType: metering.SubjectTypeSandbox,
 					SubjectID:   "sb-1",
 					TeamID:      "team-1",
@@ -275,7 +275,7 @@ func TestMeteringHandlerListWindows(t *testing.T) {
 					WindowStart: windowStart,
 					WindowEnd:   windowEnd,
 					Value:       300_000,
-					Unit:        metering.WindowUnitMillicpuMilliseconds,
+					Unit:        metering.WindowUnitMiBMilliseconds,
 					RecordedAt:  recordedAt,
 				},
 			},

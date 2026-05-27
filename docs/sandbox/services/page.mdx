@@ -560,8 +560,8 @@ if err != nil {
       language: "python",
       code: `from sandbox0.apispec.models.sandbox_config import SandboxConfig
 
-sandbox = client.claim_sandbox(
-    template="default",
+sandbox = client.sandboxes.claim(
+    "default",
     config=SandboxConfig.from_dict({
         "auto_resume": True,
         "services": [

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -88,6 +89,9 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 		})
 	}
 
+	if err := ScaleScenarioManagerToZero(testCtx.Context, workingCfg.Kubeconfig, env.Infra); err != nil {
+		fmt.Printf("Failed to scale scenario manager down before setup cleanup: %v\n", err)
+	}
 	if err := CleanupManagerOwnedNamespaces(testCtx.Context, workingCfg.Kubeconfig, managerOwnedNamespaceCleanupTimeout); err != nil {
 		cleanup()
 		return nil, nil, err
@@ -149,9 +153,30 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 		cleanup()
 		return nil, nil, err
 	}
+	for _, rollout := range scenario.Rollouts {
+		resourceID, err := rollout.ResourceID()
+		if err != nil {
+			cleanup()
+			return nil, nil, err
+		}
+		timeout := rollout.Timeout
+		if timeout == "" {
+			timeout = scenario.ReadyTimeout
+		}
+		if timeout == "" {
+			timeout = "5m"
+		}
+		if err := KubectlRolloutStatus(testCtx.Context, workingCfg.Kubeconfig, rollout.Namespace, resourceID, timeout); err != nil {
+			cleanup()
+			return nil, nil, err
+		}
+	}
 	appendCleanup(func() {
 		// Pods can mount sandbox0 CSI volumes. Delete sandbox namespaces before the
 		// infra manifest so storage-proxy is still available for kubelet unpublish.
+		if err := ScaleScenarioManagerToZero(testCtx.Context, workingCfg.Kubeconfig, env.Infra); err != nil {
+			fmt.Printf("Failed to scale scenario manager down before namespace cleanup: %v\n", err)
+		}
 		if err := CleanupManagerOwnedNamespaces(testCtx.Context, workingCfg.Kubeconfig, managerOwnedNamespaceCleanupTimeout); err != nil {
 			preserveInfraForNamespaceCleanup = true
 			fmt.Printf("Failed to clean up manager-owned namespaces: %v\n", err)
@@ -167,6 +192,47 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 	})
 
 	return env, cleanup, nil
+}
+
+// ScaleScenarioManagerToZero stops manager reconciliation while preserving CSI components.
+func ScaleScenarioManagerToZero(ctx context.Context, kubeconfig string, infra InfraConfig) error {
+	if ctx == nil {
+		return fmt.Errorf("context is required")
+	}
+	if infra.Name == "" || infra.Namespace == "" {
+		return fmt.Errorf("infra name and namespace are required")
+	}
+
+	name := infra.Name + "-manager"
+	err := Kubectl(
+		ctx,
+		kubeconfig,
+		"scale",
+		"deployment/"+name,
+		"--replicas=0",
+		"--namespace",
+		infra.Namespace,
+	)
+	if err == nil {
+		return nil
+	}
+
+	output, getErr := KubectlOutput(
+		ctx,
+		kubeconfig,
+		"get",
+		"deployment",
+		name,
+		"--namespace",
+		infra.Namespace,
+		"--ignore-not-found=true",
+		"-o",
+		"name",
+	)
+	if getErr == nil && strings.TrimSpace(output) == "" {
+		return nil
+	}
+	return err
 }
 
 // CleanupManagerOwnedNamespaces removes namespaces created by sandbox managers during e2e scenarios.

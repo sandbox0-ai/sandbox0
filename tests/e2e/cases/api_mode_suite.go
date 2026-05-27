@@ -245,6 +245,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertSandboxEgressProxy(env, session, sandboxID)
 				})
 
+				It("enforces transparent TCP egress through netd", func() {
+					assertNetdTransparentEgressPolicy(env, session, sandboxID)
+				})
+
 				It("enforces egress quota", func() {
 					assertEgressQuota(env, session, sandboxID)
 				})

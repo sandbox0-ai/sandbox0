@@ -1,0 +1,32 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: sandbox0-e2e
+networking:
+  disableDefaultCNI: true
+  podSubnet: 10.244.0.0/16
+nodes:
+- role: control-plane
+  image: kindest/node:v1.35.0
+  kubeadmConfigPatches:
+  - |
+    kind: ClusterConfiguration
+    apiServer:
+      extraArgs:
+        enable-aggregator-routing: "true"
+  extraPortMappings:
+  # cluster-gateway HTTP port
+  - containerPort: 30080
+    hostPort: 30080
+  # reserved test HTTP port
+  - containerPort: 30081
+    hostPort: 30081
+  # ssh-gateway SSH port
+  - containerPort: 30222
+    hostPort: 30222
+  # registry port for template image push
+  - containerPort: 30500
+    hostPort: 30500
+- role: worker
+  image: kindest/node:v1.35.0
+- role: worker
+  image: kindest/node:v1.35.0

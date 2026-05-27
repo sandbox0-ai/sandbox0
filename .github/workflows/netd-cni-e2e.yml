@@ -1,0 +1,98 @@
+name: Netd CNI E2E
+
+on:
+  pull_request:
+    paths:
+      - ".github/actions/**"
+      - ".github/workflows/netd-cni-e2e.yml"
+      - "Dockerfile"
+      - "Dockerfile.local"
+      - "Makefile"
+      - "manager/**"
+      - "netd/**"
+      - "pkg/**"
+      - "tests/e2e/**"
+      - "go.mod"
+      - "go.sum"
+  workflow_dispatch:
+
+concurrency:
+  group: netd-cni-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  netd-cni:
+    name: netd (${{ matrix.cni }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cni: kindnet
+            short: kindnet
+            kind_config: tests/e2e/kind-config.yaml
+            install_cni: "false"
+          - cni: flannel
+            short: flannel
+            kind_config: tests/e2e/kind-config-no-cni.yaml
+            install_cni: "true"
+          - cni: canal
+            short: canal
+            kind_config: tests/e2e/kind-config-no-cni.yaml
+            install_cni: "true"
+          - cni: cilium-native-host-legacy
+            short: cilium
+            kind_config: tests/e2e/kind-config-no-cni.yaml
+            install_cni: "true"
+    env:
+      KIND_CLUSTER_NAME: sandbox0-netd-${{ matrix.short }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare infra environment
+        uses: ./.github/actions/prepare-infra
+        with:
+          infra-dir: .
+          kind-config: ${{ matrix.kind_config }}
+          kind-cluster-name: ${{ env.KIND_CLUSTER_NAME }}
+          cache-key-suffix: netd-cni-${{ matrix.short }}
+
+      - name: Install CNI
+        if: matrix.install_cni == 'true'
+        shell: bash
+        run: bash tests/e2e/cni/install.sh "${{ matrix.cni }}"
+
+      - name: Run netd CNI E2E
+        env:
+          E2E_USE_EXISTING_CLUSTER: "true"
+          E2E_CLUSTER_NAME: ${{ env.KIND_CLUSTER_NAME }}
+        run: make test-e2e-netd-cni
+
+      - name: Dump cluster state on failure
+        if: failure()
+        shell: bash
+        run: |
+          echo "=== nodes ==="
+          kubectl get nodes -o wide || true
+          echo "=== pods ==="
+          kubectl get pods -A -o wide || true
+          echo "=== netd logs ==="
+          kubectl -n sandbox0-system logs -l app.kubernetes.io/name=netd --all-containers --tail=-1 || true
+          echo "=== sandbox0-system events ==="
+          kubectl -n sandbox0-system get events --sort-by=.lastTimestamp || true
+          kind export logs "${RUNNER_TEMP}/kind-logs-${{ matrix.short }}" --name "${KIND_CLUSTER_NAME}" || true
+
+      - name: Upload kind logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: netd-cni-e2e-kind-logs-${{ matrix.short }}
+          path: ${{ runner.temp }}/kind-logs-${{ matrix.short }}
+          if-no-files-found: ignore
+
+      - name: Cleanup Kind cluster
+        if: always()
+        run: kind delete cluster --name "${KIND_CLUSTER_NAME}" || true

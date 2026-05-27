@@ -24,7 +24,18 @@ const (
 type iptablesManager struct {
 	cfg    Config
 	logger *zap.Logger
-	ipt    *iptables.IPTables
+	ipt    iptablesClient
+}
+
+type iptablesClient interface {
+	ChainExists(table, chain string) (bool, error)
+	ClearChain(table, chain string) error
+	DeleteById(table, chain string, id int) error
+	DeleteChain(table, chain string) error
+	DeleteIfExists(table, chain string, rulespec ...string) error
+	Insert(table, chain string, pos int, rulespec ...string) error
+	List(table, chain string) ([]string, error)
+	NewChain(table, chain string) error
 }
 
 func NewManager(cfg Config, logger *zap.Logger) Manager {
@@ -35,10 +46,14 @@ func NewManager(cfg Config, logger *zap.Logger) Manager {
 	if err != nil {
 		logger.Error("Failed to initialize iptables", zap.Error(err))
 	}
+	var iptClient iptablesClient
+	if ipt != nil {
+		iptClient = ipt
+	}
 	return &iptablesManager{
 		cfg:    cfg,
 		logger: logger,
-		ipt:    ipt,
+		ipt:    iptClient,
 	}
 }
 
@@ -65,13 +80,10 @@ func (m *iptablesManager) Sync(ctx context.Context, sandboxIPs []string, bypassC
 	if err := m.ensureJump(ctx); err != nil {
 		return err
 	}
-	if err := m.ensureNATBypassChain(ctx); err != nil {
+	if err := m.ensureNATChain(ctx); err != nil {
 		return err
 	}
-	if err := m.ensureNATBypassJump(ctx); err != nil {
-		return err
-	}
-	if err := m.syncNATBypassChain(ctx); err != nil {
+	if err := m.ensureNATJump(ctx); err != nil {
 		return err
 	}
 	if err := m.syncIPSet(ctx, normalizeIPs(sandboxIPs)); err != nil {
@@ -85,6 +97,12 @@ func (m *iptablesManager) Sync(ctx context.Context, sandboxIPs []string, bypassC
 	cmd.Stdin = strings.NewReader(restoreInput)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("iptables-restore failed: %s: %w", string(out), err)
+	}
+	if err := m.ensureJump(ctx); err != nil {
+		return err
+	}
+	if err := m.ensureNATJump(ctx); err != nil {
+		return err
 	}
 
 	m.logger.Info("Iptables sync complete")
@@ -130,18 +148,10 @@ func (m *iptablesManager) ensureCustomChain(ctx context.Context) error {
 }
 
 func (m *iptablesManager) ensureJump(ctx context.Context) error {
-	_ = ctx
-	exists, err := m.ipt.Exists(mangleTable, "PREROUTING", "-j", chainName)
-	if err != nil {
-		return err
-	}
-	if exists {
-		return nil
-	}
-	return m.ipt.Append(mangleTable, "PREROUTING", "-j", chainName)
+	return m.ensureTopJump(ctx, mangleTable, "PREROUTING", chainName)
 }
 
-func (m *iptablesManager) ensureNATBypassChain(ctx context.Context) error {
+func (m *iptablesManager) ensureNATChain(ctx context.Context) error {
 	_ = ctx
 	exists, err := m.ipt.ChainExists(natTable, natChainName)
 	if err != nil {
@@ -153,18 +163,36 @@ func (m *iptablesManager) ensureNATBypassChain(ctx context.Context) error {
 	return m.ipt.NewChain(natTable, natChainName)
 }
 
-func (m *iptablesManager) ensureNATBypassJump(ctx context.Context) error {
-	_ = ctx
-	_ = m.ipt.DeleteIfExists(natTable, "PREROUTING", "-j", natChainName)
-	return m.ipt.Insert(natTable, "PREROUTING", 1, "-j", natChainName)
+func (m *iptablesManager) ensureNATJump(ctx context.Context) error {
+	return m.ensureTopJump(ctx, natTable, "PREROUTING", natChainName)
 }
 
-func (m *iptablesManager) syncNATBypassChain(ctx context.Context) error {
+func (m *iptablesManager) ensureTopJump(ctx context.Context, table, chain, target string) error {
 	_ = ctx
-	if err := m.ipt.ClearChain(natTable, natChainName); err != nil {
+	rules, err := m.ipt.List(table, chain)
+	if err != nil {
 		return err
 	}
-	return m.ipt.Append(natTable, natChainName, natBypassRuleSpec()...)
+	jumpLines := jumpRuleLineNumbers(rules, chain, target)
+	if len(jumpLines) == 0 || jumpLines[0] != 1 {
+		if err := m.ipt.Insert(table, chain, 1, "-j", target); err != nil {
+			return err
+		}
+		rules, err = m.ipt.List(table, chain)
+		if err != nil {
+			return err
+		}
+		jumpLines = jumpRuleLineNumbers(rules, chain, target)
+	}
+	if len(jumpLines) == 0 || jumpLines[0] != 1 {
+		return fmt.Errorf("ensure %s/%s jump to %s at line 1", table, chain, target)
+	}
+	for i := len(jumpLines) - 1; i >= 1; i-- {
+		if err := m.ipt.DeleteById(table, chain, jumpLines[i]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (m *iptablesManager) flushCustomChain(ctx context.Context) error {
@@ -238,6 +266,32 @@ func localRouteExists(routes []netlink.Route) bool {
 			continue
 		}
 		if route.Dst.String() == "0.0.0.0/0" && route.Type == unix.RTN_LOCAL {
+			return true
+		}
+	}
+	return false
+}
+
+func jumpRuleLineNumbers(rules []string, chain, target string) []int {
+	lines := []int{}
+	ruleLine := 0
+	for _, rule := range rules {
+		fields := strings.Fields(rule)
+		if len(fields) < 4 || fields[0] != "-A" || fields[1] != chain {
+			continue
+		}
+		ruleLine++
+		if !ruleJumpsTo(fields, target) {
+			continue
+		}
+		lines = append(lines, ruleLine)
+	}
+	return lines
+}
+
+func ruleJumpsTo(fields []string, target string) bool {
+	for i := 2; i < len(fields)-1; i++ {
+		if fields[i] == "-j" && fields[i+1] == target {
 			return true
 		}
 	}

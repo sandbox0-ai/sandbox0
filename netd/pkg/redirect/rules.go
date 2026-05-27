@@ -16,34 +16,57 @@ const (
 	tproxyMark        = "0x1/0x1"
 	defaultLoopback   = "127.0.0.0/8"
 	natBypassJumpMark = tproxyMark
+	calicoWorkloadIF  = "cali+"
+	ciliumWorkloadIF  = "lxc+"
 )
 
 func buildIPTablesRestoreInput(cfg Config, bypassCIDRs []string) string {
 	var buf bytes.Buffer
+	bypass := normalizeCIDRs(append([]string{defaultLoopback}, bypassCIDRs...))
+
 	buf.WriteString("*mangle\n")
 	buf.WriteString(fmt.Sprintf("-F %s\n", chainName))
 
-	bypass := append([]string{defaultLoopback}, bypassCIDRs...)
-	for _, cidr := range normalizeCIDRs(bypass) {
+	for _, cidr := range bypass {
 		buf.WriteString(fmt.Sprintf("-A %s -d %s -j RETURN\n", chainName, cidr))
 	}
 
-	appendTPROXYRules(&buf, "tcp", 443, cfg.ProxyHTTPSPort)
-	appendTPROXYRules(&buf, "tcp", 853, cfg.ProxyHTTPSPort)
-	appendTPROXYRules(&buf, "udp", 443, cfg.ProxyHTTPSPort)
-	appendTPROXYRules(&buf, "udp", 853, cfg.ProxyHTTPSPort)
-	appendTPROXYRules(&buf, "tcp", 0, cfg.ProxyHTTPPort)
-	appendTPROXYRules(&buf, "udp", 0, cfg.ProxyHTTPPort)
+	// Calico/Canal and Cilium native mode need TCP TPROXY on their workload
+	// veth interfaces. Bridge CNIs use the NAT REDIRECT fallback below.
+	for _, inputInterface := range []string{calicoWorkloadIF, ciliumWorkloadIF} {
+		appendTPROXYRules(&buf, inputInterface, "tcp", 443, cfg.ProxyHTTPSPort)
+		appendTPROXYRules(&buf, inputInterface, "tcp", 853, cfg.ProxyHTTPSPort)
+		appendTPROXYRules(&buf, inputInterface, "tcp", 0, cfg.ProxyHTTPPort)
+	}
+	appendTPROXYRules(&buf, "", "udp", 443, cfg.ProxyHTTPSPort)
+	appendTPROXYRules(&buf, "", "udp", 853, cfg.ProxyHTTPSPort)
+	appendTPROXYRules(&buf, "", "udp", 0, cfg.ProxyHTTPPort)
 
 	buf.WriteString("COMMIT\n")
+
+	buf.WriteString("*nat\n")
+	buf.WriteString(fmt.Sprintf("-F %s\n", natChainName))
+	buf.WriteString(fmt.Sprintf("-A %s -m mark --mark %s -j ACCEPT\n", natChainName, natBypassJumpMark))
+	for _, cidr := range bypass {
+		buf.WriteString(fmt.Sprintf("-A %s -d %s -j RETURN\n", natChainName, cidr))
+	}
+	appendTCPRedirectRules(&buf, 443, cfg.ProxyHTTPSPort)
+	appendTCPRedirectRules(&buf, 853, cfg.ProxyHTTPSPort)
+	appendTCPRedirectRules(&buf, 0, cfg.ProxyHTTPPort)
+	buf.WriteString("COMMIT\n")
+
 	return buf.String()
 }
 
-func appendTPROXYRules(buf *bytes.Buffer, protocol string, destPort int, proxyPort int) {
+func appendTPROXYRules(buf *bytes.Buffer, inputInterface, protocol string, destPort int, proxyPort int) {
 	if buf == nil || protocol == "" || proxyPort <= 0 {
 		return
 	}
-	base := fmt.Sprintf("-A %s -m set --match-set %s src -p %s", chainName, ipsetName, protocol)
+	base := fmt.Sprintf("-A %s", chainName)
+	if inputInterface != "" {
+		base += fmt.Sprintf(" -i %s", inputInterface)
+	}
+	base += fmt.Sprintf(" -m set --match-set %s src -p %s", ipsetName, protocol)
 	if destPort > 0 {
 		base += fmt.Sprintf(" --dport %d", destPort)
 	}
@@ -57,8 +80,15 @@ func appendTPROXYRules(buf *bytes.Buffer, protocol string, destPort int, proxyPo
 		base, proxyPort, tproxyMark)
 }
 
-func natBypassRuleSpec() []string {
-	return []string{"-m", "mark", "--mark", natBypassJumpMark, "-j", "ACCEPT"}
+func appendTCPRedirectRules(buf *bytes.Buffer, destPort int, proxyPort int) {
+	if buf == nil || proxyPort <= 0 {
+		return
+	}
+	base := fmt.Sprintf("-A %s -m set --match-set %s src -p tcp", natChainName, ipsetName)
+	if destPort > 0 {
+		base += fmt.Sprintf(" --dport %d", destPort)
+	}
+	_, _ = fmt.Fprintf(buf, "%s -j REDIRECT --to-ports %d\n", base, proxyPort)
 }
 
 func buildIPSetRestoreInput(ips []string) string {

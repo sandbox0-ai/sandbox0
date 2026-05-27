@@ -117,7 +117,9 @@ Configure a function service through the SDKs or CLI by replacing the sandbox se
     {
       label: "Go",
       language: "go",
-      code: `functionSource := "def handler(request):\\n    return {'status': 200, 'body': 'ok'}\\n"
+      code: `functionSource := \`def handler(request):
+    return {"status": 200, "body": "ok"}
+\`
 
 resp, err := sandbox.UpdateServices(ctx, []apispec.SandboxAppService{
     {
@@ -139,8 +141,8 @@ resp, err := sandbox.UpdateServices(ctx, []apispec.SandboxAppService{
             Public: true,
             Routes: []apispec.SandboxAppServiceRoute{
                 {
-                    ID:         "handler",
-                    PathPrefix: apispec.NewOptString("/"),
+                    ID:             "handler",
+                    PathPrefix:     apispec.NewOptString("/"),
                     Methods:        []string{"POST"},
                     TimeoutSeconds: apispec.NewOptInt32(30),
                     Resume:         true,
@@ -167,6 +169,10 @@ from sandbox0.apispec.models.sandbox_function_runtime import SandboxFunctionRunt
 from sandbox0.apispec.models.sandbox_function_source import SandboxFunctionSource
 from sandbox0.apispec.models.sandbox_function_source_type import SandboxFunctionSourceType
 
+function_source = """def handler(request):
+    return {"status": 200, "body": "ok"}
+"""
+
 resp = sandbox.update_services([
     SandboxAppService(
         id="handler",
@@ -179,7 +185,7 @@ resp = sandbox.update_services([
                 source=SandboxFunctionSource(
                     type_=SandboxFunctionSourceType.INLINE,
                     filename="main.py",
-                    code="def handler(request):\\n    return {'status': 200, 'body': 'ok'}\\n",
+                    code=function_source,
                 ),
             ),
         ),
@@ -202,7 +208,11 @@ print(f"services: {len(resp.services)}")`
     {
       label: "TypeScript",
       language: "typescript",
-      code: `const resp = await sandbox.updateServices([
+      code: `const functionSource = \`def handler(request):
+    return {"status": 200, "body": "ok"}
+\`;
+
+const resp = await sandbox.updateServices([
     {
         id: 'handler',
         port: 49983,
@@ -214,7 +224,7 @@ print(f"services: {len(resp.services)}")`
                 source: {
                     type: 'inline',
                     filename: 'main.py',
-                    code: "def handler(request):\\n    return {'status': 200, 'body': 'ok'}\\n",
+                    code: functionSource,
                 },
             },
         },

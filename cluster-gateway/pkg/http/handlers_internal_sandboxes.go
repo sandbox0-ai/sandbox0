@@ -20,7 +20,7 @@ func (s *Server) getInternalSandbox(c *gin.Context) {
 		return
 	}
 
-	sandbox, err := s.managerClient.GetSandboxInternal(c.Request.Context(), sandboxID)
+	sandbox, err := s.getSandboxInternalCached(c.Request.Context(), sandboxID)
 	if err != nil {
 		s.logger.Error("Failed to get internal sandbox from manager",
 			zap.String("sandbox_id", sandboxID),
@@ -66,6 +66,7 @@ func (s *Server) deleteInternalSandbox(c *gin.Context) {
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox delete failed")
 		return
 	}
+	s.invalidateSandboxInternalCache(c.Request.Context(), sandboxID)
 
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"message": "sandbox terminated successfully"})
 }
@@ -99,6 +100,7 @@ func (s *Server) resumeInternalSandbox(c *gin.Context) {
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox resume failed")
 		return
 	}
+	s.invalidateSandboxInternalCache(c.Request.Context(), sandboxID)
 
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"message": "sandbox resume requested"})
 }

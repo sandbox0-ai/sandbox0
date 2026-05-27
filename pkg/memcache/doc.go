@@ -1,4 +1,4 @@
-// Package cache provides a thread-safe in-memory cache with TTL and LRU eviction.
+// Package memcache provides a thread-safe in-memory cache with TTL and LRU eviction.
 //
 // # Overview
 //
@@ -13,7 +13,7 @@
 //
 // Create a cache with configuration:
 //
-//	cache := cache.New[string, *MyType](cache.Config{
+//	cache := memcache.New[string, *MyType](memcache.Config{
 //	    MaxSize:         1000,
 //	    TTL:             5 * time.Minute,
 //	    CleanupInterval: time.Minute,
@@ -50,4 +50,4 @@
 // # Examples
 //
 // See the README.md file for detailed examples and usage patterns.
-package cache
+package memcache

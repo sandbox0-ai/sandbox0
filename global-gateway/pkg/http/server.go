@@ -10,7 +10,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	cachepkg "github.com/sandbox0-ai/sandbox0/pkg/cache"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	gatewaybuiltin "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
 	gatewayoidc "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/oidc"
@@ -21,6 +20,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/public"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/tenantdir"
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
+	memcachepkg "github.com/sandbox0-ai/sandbox0/pkg/memcache"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
@@ -51,7 +51,7 @@ type Server struct {
 	httpClient      *stdhttp.Client
 	regionProxies   map[string]*proxy.Router
 	regionProxiesMu sync.RWMutex
-	regionRoutes    *cachepkg.Cache[string, tenantdir.Region]
+	regionRoutes    *memcachepkg.Cache[string, tenantdir.Region]
 }
 
 type regionDirectory interface {
@@ -142,7 +142,7 @@ func NewServer(
 		proxyTimeout:    effectiveProxyTimeout(cfg.ServerWriteTimeout.Duration),
 		httpClient:      obsProvider.HTTP.NewClient(httpobs.Config{Timeout: effectiveProxyTimeout(cfg.ServerWriteTimeout.Duration)}),
 		regionProxies:   make(map[string]*proxy.Router),
-		regionRoutes: cachepkg.New[string, tenantdir.Region](cachepkg.Config{
+		regionRoutes: memcachepkg.New[string, tenantdir.Region](memcachepkg.Config{
 			MaxSize: regionRouteCacheMaxEntries,
 			TTL:     regionRouteCacheTTL,
 		}),

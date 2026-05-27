@@ -32,6 +32,9 @@ func TestApplyGatewayRateLimitConfigUsesMemoryWithoutRedis(t *testing.T) {
 	if cfg.RateLimitRedisURL != "" {
 		t.Fatalf("RateLimitRedisURL = %q, want empty", cfg.RateLimitRedisURL)
 	}
+	if cfg.RedisURL != "" {
+		t.Fatalf("RedisURL = %q, want empty", cfg.RedisURL)
+	}
 }
 
 func TestApplyGatewayRateLimitConfigUsesBuiltinRedis(t *testing.T) {
@@ -56,6 +59,15 @@ func TestApplyGatewayRateLimitConfigUsesBuiltinRedis(t *testing.T) {
 	}
 	if cfg.RateLimitRedisURL != "redis://demo-redis.sandbox0-system.svc:6379/0" {
 		t.Fatalf("RateLimitRedisURL = %q", cfg.RateLimitRedisURL)
+	}
+	if cfg.RedisURL != "redis://demo-redis.sandbox0-system.svc:6379/0" {
+		t.Fatalf("RedisURL = %q", cfg.RedisURL)
+	}
+	if cfg.RedisKeyPrefix != "sandbox0:ratelimit:test" {
+		t.Fatalf("RedisKeyPrefix = %q", cfg.RedisKeyPrefix)
+	}
+	if cfg.RedisTimeout.Duration != 250*time.Millisecond {
+		t.Fatalf("RedisTimeout = %s", cfg.RedisTimeout.Duration)
 	}
 	if cfg.RateLimitRedisKeyPrefix != "sandbox0:ratelimit:test" {
 		t.Fatalf("RateLimitRedisKeyPrefix = %q", cfg.RateLimitRedisKeyPrefix)
@@ -100,6 +112,15 @@ func TestApplyGatewayRateLimitConfigUsesExternalRedisURLSecret(t *testing.T) {
 	if cfg.RateLimitRedisURL != "rediss://:password@redis.example:6379/0" {
 		t.Fatalf("RateLimitRedisURL = %q", cfg.RateLimitRedisURL)
 	}
+	if cfg.RedisURL != "rediss://:password@redis.example:6379/0" {
+		t.Fatalf("RedisURL = %q", cfg.RedisURL)
+	}
+	if cfg.RedisKeyPrefix != "sandbox0" {
+		t.Fatalf("RedisKeyPrefix = %q", cfg.RedisKeyPrefix)
+	}
+	if cfg.RedisTimeout.Duration != 100*time.Millisecond {
+		t.Fatalf("RedisTimeout = %s", cfg.RedisTimeout.Duration)
+	}
 	if cfg.RateLimitRedisKeyPrefix != ratelimit.DefaultRedisKeyPrefix {
 		t.Fatalf("RateLimitRedisKeyPrefix = %q", cfg.RateLimitRedisKeyPrefix)
 	}
@@ -108,6 +129,30 @@ func TestApplyGatewayRateLimitConfigUsesExternalRedisURLSecret(t *testing.T) {
 	}
 	if cfg.RateLimitFailOpen {
 		t.Fatal("RateLimitFailOpen = true, want false")
+	}
+}
+
+func TestApplyGatewayRateLimitConfigNormalizesLegacyDefaultPrefix(t *testing.T) {
+	client := newTestClient(t)
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Redis: &infrav1alpha1.RedisConfig{
+				Type:      infrav1alpha1.RedisTypeBuiltin,
+				KeyPrefix: ratelimit.DefaultRedisKeyPrefix,
+			},
+		},
+	}
+	cfg := &apiconfig.GatewayConfig{}
+
+	if err := ApplyGatewayRateLimitConfig(context.Background(), client, infra, cfg); err != nil {
+		t.Fatalf("ApplyGatewayRateLimitConfig() error = %v", err)
+	}
+	if cfg.RedisKeyPrefix != "sandbox0" {
+		t.Fatalf("RedisKeyPrefix = %q", cfg.RedisKeyPrefix)
+	}
+	if cfg.RateLimitRedisKeyPrefix != ratelimit.DefaultRedisKeyPrefix {
+		t.Fatalf("RateLimitRedisKeyPrefix = %q", cfg.RateLimitRedisKeyPrefix)
 	}
 }
 

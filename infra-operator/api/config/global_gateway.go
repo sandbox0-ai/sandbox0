@@ -72,6 +72,9 @@ type globalGatewayConfigYAML struct {
 	JWTIssuer                string               `yaml:"jwt_issuer"`
 	JWTAccessTokenTTL        durationYAMLValue    `yaml:"jwt_access_token_ttl"`
 	JWTRefreshTokenTTL       durationYAMLValue    `yaml:"jwt_refresh_token_ttl"`
+	RedisURL                 string               `yaml:"redis_url"`
+	RedisKeyPrefix           string               `yaml:"redis_key_prefix"`
+	RedisTimeout             durationYAMLValue    `yaml:"redis_timeout"`
 	RateLimitRPS             int                  `yaml:"rate_limit_rps"`
 	RateLimitBurst           int                  `yaml:"rate_limit_burst"`
 	RateLimitCleanupInterval durationYAMLValue    `yaml:"rate_limit_cleanup_interval"`
@@ -177,6 +180,8 @@ func applyGlobalGatewayYAML(cfg *GlobalGatewayConfig, raw globalGatewayConfigYAM
 	cfg.JWTPrivateKeyFile = raw.JWTPrivateKeyFile
 	cfg.JWTPublicKeyFile = raw.JWTPublicKeyFile
 	cfg.JWTIssuer = raw.JWTIssuer
+	cfg.RedisURL = raw.RedisURL
+	cfg.RedisKeyPrefix = raw.RedisKeyPrefix
 	cfg.RateLimitRPS = raw.RateLimitRPS
 	cfg.RateLimitBurst = raw.RateLimitBurst
 	cfg.RateLimitBackend = raw.RateLimitBackend
@@ -208,6 +213,9 @@ func applyGlobalGatewayYAML(cfg *GlobalGatewayConfig, raw globalGatewayConfigYAM
 		return err
 	}
 	if err := applyOptionalDuration(&cfg.JWTRefreshTokenTTL, raw.JWTRefreshTokenTTL, "jwt_refresh_token_ttl"); err != nil {
+		return err
+	}
+	if err := applyOptionalDuration(&cfg.RedisTimeout, raw.RedisTimeout, "redis_timeout"); err != nil {
 		return err
 	}
 	if err := applyOptionalDuration(&cfg.RateLimitCleanupInterval, raw.RateLimitCleanupInterval, "rate_limit_cleanup_interval"); err != nil {

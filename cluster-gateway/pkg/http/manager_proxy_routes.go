@@ -41,6 +41,10 @@ func (s *Server) proxySandboxManagerSubresource(subresource string) gin.HandlerF
 			)
 		}
 		c.Request.URL.Path = "/api/v1/sandboxes/" + sandboxID + "/" + subresource
+		if c.Request.Method == http.MethodPut && subresource == "services" {
+			s.proxyToManagerAndInvalidateSandbox(c, sandboxID)
+			return
+		}
 		s.proxyToManager(c)
 	}
 }

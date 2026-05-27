@@ -41,6 +41,14 @@ func (s *Server) proxyToManager(c *gin.Context) {
 	s.proxy2Mgr.ProxyToTarget(c)
 }
 
+func (s *Server) proxyToManagerAndInvalidateSandbox(c *gin.Context, sandboxID string) {
+	s.proxyToManager(c)
+	status := c.Writer.Status()
+	if status >= http.StatusOK && status < http.StatusMultipleChoices {
+		s.invalidateSandboxInternalCache(c.Request.Context(), sandboxID)
+	}
+}
+
 // createSandbox creates a new sandbox
 func (s *Server) createSandbox(c *gin.Context) {
 	// Rewrite path for manager
@@ -129,7 +137,7 @@ func (s *Server) updateSandbox(c *gin.Context) {
 		return
 	}
 
-	s.proxyToManager(c)
+	s.proxyToManagerAndInvalidateSandbox(c, sandboxID)
 }
 
 // deleteSandbox deletes a sandbox
@@ -140,7 +148,7 @@ func (s *Server) deleteSandbox(c *gin.Context) {
 		return
 	}
 
-	s.proxyToManager(c)
+	s.proxyToManagerAndInvalidateSandbox(c, sandboxID)
 }
 
 // pauseSandbox pauses a sandbox
@@ -151,7 +159,7 @@ func (s *Server) pauseSandbox(c *gin.Context) {
 		return
 	}
 
-	s.proxyToManager(c)
+	s.proxyToManagerAndInvalidateSandbox(c, sandboxID)
 }
 
 // resumeSandbox resumes a paused sandbox
@@ -162,7 +170,7 @@ func (s *Server) resumeSandbox(c *gin.Context) {
 		return
 	}
 
-	s.proxyToManager(c)
+	s.proxyToManagerAndInvalidateSandbox(c, sandboxID)
 }
 
 // refreshSandbox refreshes sandbox TTL
@@ -173,5 +181,5 @@ func (s *Server) refreshSandbox(c *gin.Context) {
 		return
 	}
 
-	s.proxyToManager(c)
+	s.proxyToManagerAndInvalidateSandbox(c, sandboxID)
 }

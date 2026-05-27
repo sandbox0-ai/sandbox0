@@ -1,4 +1,4 @@
-# Cache Package
+# Memcache Package
 
 Thread-safe in-memory cache with TTL (Time-To-Live) and LRU (Least Recently Used) eviction policy.
 
@@ -16,10 +16,10 @@ Thread-safe in-memory cache with TTL (Time-To-Live) and LRU (Least Recently Used
 ### Basic Example
 
 ```go
-import "github.com/sandbox0-ai/sandbox0/pkg/cache"
+import "github.com/sandbox0-ai/sandbox0/pkg/memcache"
 
 // Create a cache that holds max 1000 entries, with 5-minute TTL
-c := cache.New[string, *MyStruct](cache.Config{
+c := memcache.New[string, *MyStruct](memcache.Config{
     MaxSize:         1000,
     TTL:             5 * time.Minute,
     CleanupInterval: time.Minute, // Optional, defaults to TTL/2
@@ -77,12 +77,12 @@ The cache prevents memory leaks through two mechanisms:
 
 ```go
 type SandboxCache struct {
-    cache *cache.Cache[string, *Sandbox]
+    cache *memcache.Cache[string, *Sandbox]
 }
 
 func NewSandboxCache() *SandboxCache {
     return &SandboxCache{
-        cache: cache.New[string, *Sandbox](cache.Config{
+        cache: memcache.New[string, *Sandbox](memcache.Config{
             MaxSize:         10000,              // Max 10k sandboxes
             TTL:             5 * time.Minute,    // Cache for 5 minutes
             CleanupInterval: 2 * time.Minute,    // Cleanup every 2 minutes

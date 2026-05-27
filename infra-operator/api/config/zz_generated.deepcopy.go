@@ -111,6 +111,7 @@ func (in *GatewayConfig) DeepCopyInto(out *GatewayConfig) {
 	*out = *in
 	out.JWTAccessTokenTTL = in.JWTAccessTokenTTL
 	out.JWTRefreshTokenTTL = in.JWTRefreshTokenTTL
+	out.RedisTimeout = in.RedisTimeout
 	out.RateLimitCleanupInterval = in.RateLimitCleanupInterval
 	out.RateLimitRedisTimeout = in.RateLimitRedisTimeout
 	in.BuiltInAuth.DeepCopyInto(&out.BuiltInAuth)

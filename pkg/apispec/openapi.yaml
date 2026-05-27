@@ -3816,6 +3816,7 @@ components:
         port:
           type: integer
           format: int32
+          description: Public exposure routing port. Function services normally use the sandbox procd port.
         runtime:
           $ref: "#/components/schemas/SandboxAppServiceRuntime"
         ingress:
@@ -3828,7 +3829,7 @@ components:
       properties:
         type:
           type: string
-          enum: [warm_process, cmd, manual]
+          enum: [warm_process, cmd, manual, function]
           description: Runtime strategy for restarting a service process.
         command:
           type: array
@@ -3844,7 +3845,38 @@ components:
         warm_process_name:
           type: string
           description: Warm process alias or context ID used when type is warm_process.
+        function:
+          $ref: "#/components/schemas/SandboxFunction"
       required: [type]
+    SandboxFunction:
+      type: object
+      description: Function code executed by procd for a sandbox service request. cluster-gateway owns public ingress and carries this source to procd.
+      properties:
+        runtime:
+          type: string
+          enum: [python]
+          description: Function runtime. Only python is supported in this version.
+        handler:
+          type: string
+          description: Python callable name. Defaults to handler.
+        source:
+          $ref: "#/components/schemas/SandboxFunctionSource"
+      required: [runtime, source]
+    SandboxFunctionSource:
+      type: object
+      description: Function source code stored in sandbox service config.
+      properties:
+        type:
+          type: string
+          enum: [inline]
+          description: Source transport. Only inline source is supported in this version.
+        filename:
+          type: string
+          description: Relative Python filename used when materializing the source. Defaults to main.py.
+        code:
+          type: string
+          description: Inline source code. Limited to 256 KiB.
+      required: [type, code]
     SandboxAppServiceIngress:
       type: object
       properties:

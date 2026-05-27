@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxfunction"
 )
 
 const (
@@ -24,6 +25,8 @@ const (
 
 var sandboxServiceRouteIDPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 var httpMethodPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_-]*$`)
+var sandboxFunctionHandlerPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`)
+var sandboxFunctionFilenamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
 // SandboxAppServiceRouteAuth controls inbound authentication for one public route.
 type SandboxAppServiceRouteAuth struct {
@@ -53,6 +56,7 @@ const (
 	SandboxAppServiceRuntimeWarmProcess = "warm_process"
 	SandboxAppServiceRuntimeCMD         = "cmd"
 	SandboxAppServiceRuntimeManual      = "manual"
+	SandboxAppServiceRuntimeFunction    = "function"
 )
 
 // SandboxAppService describes an application service running inside a sandbox.
@@ -72,6 +76,21 @@ type SandboxAppServiceRuntime struct {
 	CWD             string            `json:"cwd,omitempty"`
 	EnvVars         map[string]string `json:"env_vars,omitempty"`
 	WarmProcessName string            `json:"warm_process_name,omitempty"`
+	Function        *SandboxFunction  `json:"function,omitempty"`
+}
+
+// SandboxFunction configures code that cluster-gateway sends to procd for execution.
+type SandboxFunction struct {
+	Runtime string                `json:"runtime"`
+	Handler string                `json:"handler,omitempty"`
+	Source  SandboxFunctionSource `json:"source"`
+}
+
+// SandboxFunctionSource carries user function code in sandbox service config.
+type SandboxFunctionSource struct {
+	Type     string `json:"type"`
+	Filename string `json:"filename,omitempty"`
+	Code     string `json:"code,omitempty"`
 }
 
 // SandboxAppServiceIngress captures how traffic enters a sandbox service.
@@ -151,9 +170,9 @@ func normalizeSandboxAppService(service SandboxAppService) (SandboxAppService, e
 		runtime := *service.Runtime
 		runtime.Type = strings.ToLower(strings.TrimSpace(runtime.Type))
 		switch runtime.Type {
-		case "", SandboxAppServiceRuntimeManual, SandboxAppServiceRuntimeCMD, SandboxAppServiceRuntimeWarmProcess:
+		case "", SandboxAppServiceRuntimeManual, SandboxAppServiceRuntimeCMD, SandboxAppServiceRuntimeWarmProcess, SandboxAppServiceRuntimeFunction:
 		default:
-			return service, fmt.Errorf("runtime.type must be one of: warm_process, cmd, manual")
+			return service, fmt.Errorf("runtime.type must be one of: warm_process, cmd, manual, function")
 		}
 		runtime.CWD = strings.TrimSpace(runtime.CWD)
 		runtime.WarmProcessName = strings.TrimSpace(runtime.WarmProcessName)
@@ -162,6 +181,18 @@ func normalizeSandboxAppService(service SandboxAppService) (SandboxAppService, e
 		}
 		if runtime.Type == SandboxAppServiceRuntimeCMD && len(runtime.Command) == 0 {
 			return service, fmt.Errorf("runtime.command is required for cmd services")
+		}
+		if runtime.Type == SandboxAppServiceRuntimeFunction {
+			function, err := normalizeSandboxFunction(runtime.Function)
+			if err != nil {
+				return service, fmt.Errorf("runtime.function: %w", err)
+			}
+			runtime.Command = nil
+			runtime.CWD = ""
+			runtime.WarmProcessName = ""
+			runtime.Function = function
+		} else {
+			runtime.Function = nil
 		}
 		service.Runtime = &runtime
 	}
@@ -250,8 +281,58 @@ func SandboxAppServicePublishBlockers(service SandboxAppService) []string {
 		blockers = append(blockers, "missing_command")
 	} else if service.Runtime.Type == SandboxAppServiceRuntimeWarmProcess && strings.TrimSpace(service.Runtime.WarmProcessName) == "" {
 		blockers = append(blockers, "missing_warm_process_name")
+	} else if service.Runtime.Type == SandboxAppServiceRuntimeFunction && service.Runtime.Function == nil {
+		blockers = append(blockers, "missing_function")
 	}
 	return blockers
+}
+
+func normalizeSandboxFunction(function *SandboxFunction) (*SandboxFunction, error) {
+	if function == nil {
+		return nil, fmt.Errorf("is required for function services")
+	}
+	out := *function
+	out.Runtime = strings.ToLower(strings.TrimSpace(out.Runtime))
+	if out.Runtime == "" {
+		out.Runtime = sandboxfunction.RuntimePython
+	}
+	if out.Runtime != sandboxfunction.RuntimePython {
+		return nil, fmt.Errorf("runtime must be %q", sandboxfunction.RuntimePython)
+	}
+	out.Handler = strings.TrimSpace(out.Handler)
+	if out.Handler == "" {
+		out.Handler = sandboxfunction.DefaultHandler
+	}
+	if !sandboxFunctionHandlerPattern.MatchString(out.Handler) {
+		return nil, fmt.Errorf("handler must match %s", sandboxFunctionHandlerPattern.String())
+	}
+
+	source := out.Source
+	source.Type = strings.ToLower(strings.TrimSpace(source.Type))
+	if source.Type == "" {
+		source.Type = sandboxfunction.SourceTypeInline
+	}
+	if source.Type != sandboxfunction.SourceTypeInline {
+		return nil, fmt.Errorf("source.type must be %q", sandboxfunction.SourceTypeInline)
+	}
+	source.Filename = strings.TrimSpace(source.Filename)
+	if source.Filename == "" {
+		source.Filename = sandboxfunction.DefaultFilename
+	}
+	if strings.Contains(source.Filename, "/") || strings.Contains(source.Filename, "\\") || strings.HasPrefix(source.Filename, ".") {
+		return nil, fmt.Errorf("source.filename must be a relative file name")
+	}
+	if !sandboxFunctionFilenamePattern.MatchString(source.Filename) {
+		return nil, fmt.Errorf("source.filename contains unsupported characters")
+	}
+	if strings.TrimSpace(source.Code) == "" {
+		return nil, fmt.Errorf("source.code is required")
+	}
+	if len([]byte(source.Code)) > sandboxfunction.MaxInlineSourceBytes {
+		return nil, fmt.Errorf("source.code exceeds limit %d bytes", sandboxfunction.MaxInlineSourceBytes)
+	}
+	out.Source = source
+	return &out, nil
 }
 
 func normalizeSandboxAppServiceRoute(route SandboxAppServiceRoute) (SandboxAppServiceRoute, error) {

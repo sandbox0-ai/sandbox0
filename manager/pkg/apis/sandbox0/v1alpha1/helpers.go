@@ -442,7 +442,7 @@ func applyProcdInit(spec *corev1.PodSpec) {
 		Command: []string{
 			"/bin/sh",
 			"-c",
-			"cp /usr/local/bin/procd /procd/bin/procd && chmod 0755 /procd/bin/procd",
+			"cp /usr/local/bin/procd /procd/bin/procd && cp /usr/local/bin/python-runner /procd/bin/python-runner && chmod 0755 /procd/bin/procd /procd/bin/python-runner",
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{

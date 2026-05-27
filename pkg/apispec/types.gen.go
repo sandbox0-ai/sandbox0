@@ -148,8 +148,19 @@ const (
 // Defines values for SandboxAppServiceRuntimeType.
 const (
 	SandboxAppServiceRuntimeTypeCmd         SandboxAppServiceRuntimeType = "cmd"
+	SandboxAppServiceRuntimeTypeFunction    SandboxAppServiceRuntimeType = "function"
 	SandboxAppServiceRuntimeTypeManual      SandboxAppServiceRuntimeType = "manual"
 	SandboxAppServiceRuntimeTypeWarmProcess SandboxAppServiceRuntimeType = "warm_process"
+)
+
+// Defines values for SandboxFunctionRuntime.
+const (
+	Python SandboxFunctionRuntime = "python"
+)
+
+// Defines values for SandboxFunctionSourceType.
+const (
+	Inline SandboxFunctionSourceType = "inline"
 )
 
 // Defines values for SandboxLifecycleStatus.
@@ -1442,8 +1453,10 @@ type SandboxAppService struct {
 	HealthCheck *SandboxAppServiceHealth `json:"health_check,omitempty"`
 
 	// Id Stable service ID. Must be a DNS label.
-	Id      string                    `json:"id"`
-	Ingress SandboxAppServiceIngress  `json:"ingress"`
+	Id      string                   `json:"id"`
+	Ingress SandboxAppServiceIngress `json:"ingress"`
+
+	// Port Public exposure routing port. Function services normally use the sandbox procd port.
 	Port    int32                     `json:"port"`
 	Runtime *SandboxAppServiceRuntime `json:"runtime,omitempty"`
 }
@@ -1511,6 +1524,9 @@ type SandboxAppServiceRuntime struct {
 	Cwd     *string            `json:"cwd,omitempty"`
 	EnvVars *map[string]string `json:"env_vars,omitempty"`
 
+	// Function Function code executed by procd for a sandbox service request. cluster-gateway owns public ingress and carries this source to procd.
+	Function *SandboxFunction `json:"function,omitempty"`
+
 	// Type Runtime strategy for restarting a service process.
 	Type SandboxAppServiceRuntimeType `json:"type"`
 
@@ -1529,7 +1545,9 @@ type SandboxAppServiceView struct {
 	// Id Stable service ID. Must be a DNS label.
 	Id      string                   `json:"id"`
 	Ingress SandboxAppServiceIngress `json:"ingress"`
-	Port    int32                    `json:"port"`
+
+	// Port Public exposure routing port. Function services normally use the sandbox procd port.
+	Port int32 `json:"port"`
 
 	// PublicUrl Public HTTPS URL for this service when public exposure is enabled.
 	PublicUrl       *string                   `json:"public_url,omitempty"`
@@ -1554,6 +1572,36 @@ type SandboxConfig struct {
 	// Webhook Per-sandbox webhook configuration. Sandbox0 delivers webhook events at least once and consumers should deduplicate by event_id. For sandbox lifecycle events, procd persists signed delivery records to a manager-owned SandboxVolume outside the workspace before dispatch; manager also emits sandbox.deleted during pod deletion cleanup.
 	Webhook *WebhookConfig `json:"webhook,omitempty"`
 }
+
+// SandboxFunction Function code executed by procd for a sandbox service request. cluster-gateway owns public ingress and carries this source to procd.
+type SandboxFunction struct {
+	// Handler Python callable name. Defaults to handler.
+	Handler *string `json:"handler,omitempty"`
+
+	// Runtime Function runtime. Only python is supported in this version.
+	Runtime SandboxFunctionRuntime `json:"runtime"`
+
+	// Source Function source code stored in sandbox service config.
+	Source SandboxFunctionSource `json:"source"`
+}
+
+// SandboxFunctionRuntime Function runtime. Only python is supported in this version.
+type SandboxFunctionRuntime string
+
+// SandboxFunctionSource Function source code stored in sandbox service config.
+type SandboxFunctionSource struct {
+	// Code Inline source code. Limited to 256 KiB.
+	Code string `json:"code"`
+
+	// Filename Relative Python filename used when materializing the source. Defaults to main.py.
+	Filename *string `json:"filename,omitempty"`
+
+	// Type Source transport. Only inline source is supported in this version.
+	Type SandboxFunctionSourceType `json:"type"`
+}
+
+// SandboxFunctionSourceType Source transport. Only inline source is supported in this version.
+type SandboxFunctionSourceType string
 
 // SandboxLifecycleStatus defines model for SandboxLifecycleStatus.
 type SandboxLifecycleStatus string

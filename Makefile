@@ -70,6 +70,10 @@ build: manifests proto apispec
 		else \
 			CGO_ENABLED=0 GOOS=$(GOOS) $(GO) build -v -o $$out $$src; \
 		fi || exit 1; \
+		if [ "$$s" = "procd" ]; then \
+			runner_out="$$(dirname $$out)/python-runner"; \
+			CGO_ENABLED=0 GOOS=$(GOOS) $(GO) build -v -o $$runner_out ./manager/cmd/python-runner || exit 1; \
+		fi; \
 	done
 
 docker-build:
@@ -218,7 +222,7 @@ clean:
 	@for service in $(SERVICES); do \
 		printf "$(YELLOW)Cleaning $$service...$(RESET)\n"; \
 		if [ "$$service" = "procd" ]; then \
-			rm -rf manager/bin/procd; \
+			rm -rf manager/bin/procd manager/bin/python-runner; \
 		else \
 			rm -rf $$service/bin; \
 		fi; \

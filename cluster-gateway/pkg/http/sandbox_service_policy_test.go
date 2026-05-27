@@ -3,12 +3,16 @@ package http
 import (
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +23,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/ratelimit"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxfunction"
 	"go.uber.org/zap"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -170,6 +175,104 @@ func TestSandboxServiceHandlesCORSPreflight(t *testing.T) {
 	}
 }
 
+func TestSandboxFunctionServiceExecutesThroughProcdPort(t *testing.T) {
+	var execReq sandboxfunction.ExecuteRequest
+	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/functions/execute" {
+			t.Fatalf("procd path = %q, want /api/v1/functions/execute", r.URL.Path)
+		}
+		if r.Header.Get(internalauth.DefaultTokenHeader) == "" {
+			t.Fatal("missing internal token")
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read procd body: %v", err)
+		}
+		if err := json.Unmarshal(body, &execReq); err != nil {
+			t.Fatalf("decode execute request: %v", err)
+		}
+		_ = spec.WriteSuccess(w, http.StatusOK, sandboxfunction.ExecuteResponse{
+			Status:     http.StatusCreated,
+			Headers:    map[string][]string{"content-type": {"text/plain"}, "x-function": {"ok"}},
+			BodyBase64: "ZnVuY3Rpb24gb2s=",
+		})
+	}))
+	defer procd.Close()
+
+	port := serverPort(t, procd.URL)
+	gateway := newSandboxServiceExposureTestServer(t, &mgr.Sandbox{
+		ID:           "sb-demo",
+		TeamID:       "team-1",
+		UserID:       "user-1",
+		InternalAddr: procd.URL,
+		AutoResume:   true,
+		Services: []mgr.SandboxAppService{{
+			ID:   "webhook",
+			Port: port,
+			Runtime: &mgr.SandboxAppServiceRuntime{
+				Type: mgr.SandboxAppServiceRuntimeFunction,
+				Function: &mgr.SandboxFunction{
+					Runtime: "python",
+					Handler: "handler",
+					Source: mgr.SandboxFunctionSource{
+						Type:     "inline",
+						Filename: "main.py",
+						Code:     "def handler(request):\n    return {'status': 201}\n",
+					},
+				},
+			},
+			Ingress: mgr.SandboxAppServiceIngress{
+				Public: true,
+				Routes: []mgr.SandboxAppServiceRoute{{
+					ID:         "root",
+					PathPrefix: "/events",
+					Methods:    []string{http.MethodPost},
+				}},
+			},
+		}},
+	})
+
+	gatewayServer := httptest.NewServer(gateway)
+	defer gatewayServer.Close()
+	req, err := http.NewRequest(http.MethodPost, gatewayServer.URL+"/events/stripe?source=test", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Host = fmt.Sprintf("sb-demo--p%d.aws-us-east-1.sandbox0.app", port)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway request: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d body=%s", resp.StatusCode, string(body))
+	}
+	if string(body) != "function ok" {
+		t.Fatalf("body = %q, want function ok", string(body))
+	}
+	if resp.Header.Get("x-function") != "ok" {
+		t.Fatalf("x-function = %q, want ok", resp.Header.Get("x-function"))
+	}
+	if execReq.ServiceID != "webhook" || execReq.RouteID != "root" {
+		t.Fatalf("execute service/route = %q/%q, want webhook/root", execReq.ServiceID, execReq.RouteID)
+	}
+	if execReq.Request.Path != "/events/stripe" || execReq.Request.RawQuery != "source=test" {
+		t.Fatalf("execute path/query = %q/%q", execReq.Request.Path, execReq.Request.RawQuery)
+	}
+	decodedBody, err := base64.StdEncoding.DecodeString(execReq.Request.BodyBase64)
+	if err != nil {
+		t.Fatalf("decode request body: %v", err)
+	}
+	if string(decodedBody) != "payload" {
+		t.Fatalf("execute body = %q, want payload", string(decodedBody))
+	}
+}
+
 func newSandboxServiceExposureTestServer(t *testing.T, sandbox *mgr.Sandbox) http.Handler {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
@@ -204,6 +307,7 @@ func newSandboxServiceExposureTestServer(t *testing.T, sandbox *mgr.Sandbox) htt
 		},
 		logger:                zap.NewNop(),
 		managerClient:         client.NewManagerClient(manager.URL, gen, zap.NewNop(), time.Second),
+		internalAuthGen:       gen,
 		sandboxServiceLimiter: ratelimit.NewMemoryLimiter(ratelimit.MemoryConfig{}),
 	}
 	router := gin.New()

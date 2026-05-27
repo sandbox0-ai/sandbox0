@@ -76,7 +76,7 @@ A function service is a sandbox service with `runtime.type: function`. cluster-g
 
 Function services should use the sandbox procd port as the service `port`. The default procd port is `49983`. cluster-gateway only allows that reserved port for function services and never exposes procd management APIs publicly.
 
-Python is the first supported runtime. The sandbox image must include `python3` in `PATH`.
+Python is the first supported runtime. The sandbox image must include `python3` in `PATH`. HTTP request/response, SSE, and WebSocket requests all use the same service config and route policy.
 
 ```yaml
 services:
@@ -131,6 +131,29 @@ def handler(request):
         "headers": {"content-type": "text/plain"},
         "body": "created",
     }
+```
+
+For SSE, clients send `Accept: text/event-stream`. The handler can return a response object whose `body` is a Python iterable or async iterable. Each yielded string or bytes value is streamed and flushed to the client.
+
+```python
+def handler(request):
+    def events():
+        yield "event: ready\n"
+        yield "data: ok\n\n"
+
+    return {
+        "status": 200,
+        "headers": {"content-type": "text/event-stream"},
+        "body": events(),
+    }
+```
+
+For WebSocket requests, define an async handler that accepts `(request, ws)`. The `ws` object supports `receive()`, `send(value)`, `close(reason="")`, and async iteration. Text messages are strings; binary messages are bytes.
+
+```python
+async def handler(request, ws):
+    async for message in ws:
+        await ws.send("echo:" + message)
 ```
 
 ## List Services

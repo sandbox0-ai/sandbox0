@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"os"
@@ -128,5 +130,96 @@ def handler(request):
 	}
 	if len(out) != 0 {
 		t.Fatalf("stdout = %q, want empty stdout on failure", string(out))
+	}
+}
+
+func TestPythonBootstrapStreamsGeneratorBody(t *testing.T) {
+	if _, err := osexec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+
+	modulePath := filepath.Join(t.TempDir(), "main.py")
+	if err := os.WriteFile(modulePath, []byte(`
+def handler(request):
+    def events():
+        yield "data: one\n\n"
+        yield b"data: two\n\n"
+    return {
+        "status": 200,
+        "headers": {"content-type": "text/event-stream"},
+        "body": events(),
+    }
+`), 0o644); err != nil {
+		t.Fatalf("write module: %v", err)
+	}
+
+	cmd := osexec.Command("python3", "-c", pythonBootstrap, "--stream", modulePath, "handler")
+	cmd.Stdin = strings.NewReader(`{"path":"/events"}`)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("run bootstrap: %v", err)
+	}
+
+	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	var frames []map[string]any
+	for scanner.Scan() {
+		var frame map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &frame); err != nil {
+			t.Fatalf("decode frame: %v", err)
+		}
+		frames = append(frames, frame)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan frames: %v", err)
+	}
+	if len(frames) != 3 {
+		t.Fatalf("frames = %d, want 3: %s", len(frames), string(out))
+	}
+	if frames[0]["type"] != "start" {
+		t.Fatalf("first frame = %#v, want start", frames[0])
+	}
+	chunk, err := base64.StdEncoding.DecodeString(frames[1]["body_base64"].(string))
+	if err != nil {
+		t.Fatalf("decode first chunk: %v", err)
+	}
+	if string(chunk) != "data: one\n\n" {
+		t.Fatalf("first chunk = %q, want SSE data", string(chunk))
+	}
+}
+
+func TestPythonBootstrapSupportsWebSocketHandler(t *testing.T) {
+	if _, err := osexec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+
+	modulePath := filepath.Join(t.TempDir(), "main.py")
+	if err := os.WriteFile(modulePath, []byte(`
+async def handler(request, ws):
+    message = await ws.receive()
+    await ws.send("echo:" + message)
+`), 0o644); err != nil {
+		t.Fatalf("write module: %v", err)
+	}
+
+	cmd := osexec.Command("python3", "-c", pythonBootstrap, "--websocket", modulePath, "handler")
+	cmd.Stdin = strings.NewReader(
+		`{"path":"/ws"}` + "\n" +
+			`{"type":"message","message_type":"text","data":"hello"}` + "\n",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("run bootstrap: %v", err)
+	}
+
+	var frame struct {
+		Type        string `json:"type"`
+		MessageType string `json:"message_type"`
+		Data        string `json:"data"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(out), &frame); err != nil {
+		t.Fatalf("decode frame: %v output=%s", err, string(out))
+	}
+	if frame.Type != "message" || frame.MessageType != "text" || frame.Data != "echo:hello" {
+		t.Fatalf("frame = %+v, want echoed text message", frame)
 	}
 }

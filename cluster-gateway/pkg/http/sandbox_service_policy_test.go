@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
@@ -270,6 +271,153 @@ func TestSandboxFunctionServiceExecutesThroughProcdPort(t *testing.T) {
 	}
 	if string(decodedBody) != "payload" {
 		t.Fatalf("execute body = %q, want payload", string(decodedBody))
+	}
+}
+
+func TestSandboxFunctionServiceStreamsSSEThroughProcdPort(t *testing.T) {
+	var execReq sandboxfunction.ExecuteRequest
+	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/functions/stream" {
+			t.Fatalf("procd path = %q, want /api/v1/functions/stream", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&execReq); err != nil {
+			t.Fatalf("decode execute request: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte("data: one\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		_, _ = w.Write([]byte("data: two\n\n"))
+	}))
+	defer procd.Close()
+
+	port := serverPort(t, procd.URL)
+	gateway := newSandboxServiceExposureTestServer(t, newFunctionServiceSandbox(procd.URL, port))
+	gatewayServer := httptest.NewServer(gateway)
+	defer gatewayServer.Close()
+
+	req, err := http.NewRequest(http.MethodGet, gatewayServer.URL+"/events", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Host = fmt.Sprintf("sb-demo--p%d.aws-us-east-1.sandbox0.app", port)
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway request: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d body=%s", resp.StatusCode, string(body))
+	}
+	if got := resp.Header.Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("content-type = %q, want text/event-stream", got)
+	}
+	if string(body) != "data: one\n\ndata: two\n\n" {
+		t.Fatalf("body = %q, want streamed SSE body", string(body))
+	}
+	if execReq.Request.Path != "/events" {
+		t.Fatalf("execute path = %q, want /events", execReq.Request.Path)
+	}
+}
+
+func TestSandboxFunctionServiceProxiesWebSocketThroughProcdPort(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	initCh := make(chan sandboxfunction.ExecuteRequest, 1)
+	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/functions/ws" {
+			t.Fatalf("procd path = %q, want /api/v1/functions/ws", r.URL.Path)
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade procd websocket: %v", err)
+		}
+		defer conn.Close()
+		var initReq sandboxfunction.ExecuteRequest
+		if err := conn.ReadJSON(&initReq); err != nil {
+			t.Fatalf("read init request: %v", err)
+		}
+		initCh <- initReq
+		messageType, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read proxied message: %v", err)
+		}
+		if err := conn.WriteMessage(messageType, []byte("echo:"+string(data))); err != nil {
+			t.Fatalf("write proxied message: %v", err)
+		}
+	}))
+	defer procd.Close()
+
+	port := serverPort(t, procd.URL)
+	gateway := newSandboxServiceExposureTestServer(t, newFunctionServiceSandbox(procd.URL, port))
+	gatewayServer := httptest.NewServer(gateway)
+	defer gatewayServer.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(gatewayServer.URL, "http") + "/events/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, http.Header{
+		"Host": {fmt.Sprintf("sb-demo--p%d.aws-us-east-1.sandbox0.app", port)},
+	})
+	if err != nil {
+		t.Fatalf("dial gateway websocket: %v", err)
+	}
+	defer conn.Close()
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
+		t.Fatalf("write gateway websocket: %v", err)
+	}
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read gateway websocket: %v", err)
+	}
+	if string(data) != "echo:ping" {
+		t.Fatalf("websocket data = %q, want echo:ping", string(data))
+	}
+	select {
+	case initReq := <-initCh:
+		if initReq.Request.Path != "/events/ws" || initReq.ServiceID != "webhook" {
+			t.Fatalf("init request = %+v, want function service path", initReq)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for init request")
+	}
+}
+
+func newFunctionServiceSandbox(internalAddr string, port int) *mgr.Sandbox {
+	return &mgr.Sandbox{
+		ID:           "sb-demo",
+		TeamID:       "team-1",
+		UserID:       "user-1",
+		InternalAddr: internalAddr,
+		AutoResume:   true,
+		Services: []mgr.SandboxAppService{{
+			ID:   "webhook",
+			Port: port,
+			Runtime: &mgr.SandboxAppServiceRuntime{
+				Type: mgr.SandboxAppServiceRuntimeFunction,
+				Function: &mgr.SandboxFunction{
+					Runtime: "python",
+					Handler: "handler",
+					Source: mgr.SandboxFunctionSource{
+						Type:     "inline",
+						Filename: "main.py",
+						Code:     "def handler(request):\n    return {'status': 201}\n",
+					},
+				},
+			},
+			Ingress: mgr.SandboxAppServiceIngress{
+				Public: true,
+				Routes: []mgr.SandboxAppServiceRoute{{
+					ID:         "root",
+					PathPrefix: "/events",
+				}},
+			},
+		}},
 	}
 }
 

@@ -10,6 +10,19 @@ const (
 
 	SourceTypeInline = "inline"
 
+	ProtocolHTTP      = "http"
+	ProtocolStream    = "stream"
+	ProtocolWebSocket = "websocket"
+
+	StreamFrameStart = "start"
+	StreamFrameChunk = "chunk"
+	StreamFrameError = "error"
+
+	WebSocketFrameMessage = "message"
+	WebSocketFrameClose   = "close"
+	WebSocketMessageText  = "text"
+	WebSocketMessageBytes = "binary"
+
 	DefaultFilename = "main.py"
 	DefaultHandler  = "handler"
 
@@ -53,6 +66,24 @@ type ExecuteResponse struct {
 	Status     int                 `json:"status"`
 	Headers    map[string][]string `json:"headers,omitempty"`
 	BodyBase64 string              `json:"body_base64,omitempty"`
+}
+
+// StreamFrame is the line-delimited protocol emitted by function stream runners.
+type StreamFrame struct {
+	Type       string              `json:"type"`
+	Status     int                 `json:"status,omitempty"`
+	Headers    map[string][]string `json:"headers,omitempty"`
+	BodyBase64 string              `json:"body_base64,omitempty"`
+	Error      string              `json:"error,omitempty"`
+}
+
+// WebSocketFrame is the line-delimited protocol between procd and function WebSocket runners.
+type WebSocketFrame struct {
+	Type        string `json:"type"`
+	MessageType string `json:"message_type,omitempty"`
+	Data        string `json:"data,omitempty"`
+	DataBase64  string `json:"data_base64,omitempty"`
+	Reason      string `json:"reason,omitempty"`
 }
 
 func InlineDigest(filename, code string) string {

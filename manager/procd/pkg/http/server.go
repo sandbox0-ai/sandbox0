@@ -121,6 +121,8 @@ func (s *Server) setupRoutes() {
 
 	functionHandler := handlers.NewFunctionHandler(s.logger)
 	api.HandleFunc("/functions/execute", functionHandler.Execute).Methods("POST")
+	api.HandleFunc("/functions/stream", functionHandler.Stream).Methods("POST")
+	api.HandleFunc("/functions/ws", functionHandler.WebSocket).Methods("GET")
 
 	// Initialize handler
 	initializeHandler := handlers.NewInitializeHandler(s.webhookDispatcher, s.fileManager, s.cfg.HTTPPort, s.logger)

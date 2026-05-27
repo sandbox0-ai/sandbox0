@@ -110,6 +110,163 @@ services:
                 resume: true
 ```
 
+Configure a function service through the SDKs or CLI by replacing the sandbox service list. In the TypeScript generated model, the JSON field `function` is exposed as `_function`.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `functionSource := "def handler(request):\\n    return {'status': 200, 'body': 'ok'}\\n"
+
+resp, err := sandbox.UpdateServices(ctx, []apispec.SandboxAppService{
+    {
+        ID:   "handler",
+        Port: 49983,
+        Runtime: apispec.NewOptSandboxAppServiceRuntime(apispec.SandboxAppServiceRuntime{
+            Type: apispec.SandboxAppServiceRuntimeTypeFunction,
+            Function: apispec.NewOptSandboxFunction(apispec.SandboxFunction{
+                Runtime: apispec.SandboxFunctionRuntimePython,
+                Handler: apispec.NewOptString("handler"),
+                Source: apispec.SandboxFunctionSource{
+                    Type:     apispec.SandboxFunctionSourceTypeInline,
+                    Filename: apispec.NewOptString("main.py"),
+                    Code:     functionSource,
+                },
+            }),
+        }),
+        Ingress: apispec.SandboxAppServiceIngress{
+            Public: true,
+            Routes: []apispec.SandboxAppServiceRoute{
+                {
+                    ID:         "handler",
+                    PathPrefix: apispec.NewOptString("/"),
+                    Methods:        []string{"POST"},
+                    TimeoutSeconds: apispec.NewOptInt32(30),
+                    Resume:         true,
+                },
+            },
+        },
+    },
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("services: %d\\n", len(resp.Services))`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.apispec.models.sandbox_app_service import SandboxAppService
+from sandbox0.apispec.models.sandbox_app_service_ingress import SandboxAppServiceIngress
+from sandbox0.apispec.models.sandbox_app_service_route import SandboxAppServiceRoute
+from sandbox0.apispec.models.sandbox_app_service_runtime import SandboxAppServiceRuntime
+from sandbox0.apispec.models.sandbox_app_service_runtime_type import SandboxAppServiceRuntimeType
+from sandbox0.apispec.models.sandbox_function import SandboxFunction
+from sandbox0.apispec.models.sandbox_function_runtime import SandboxFunctionRuntime
+from sandbox0.apispec.models.sandbox_function_source import SandboxFunctionSource
+from sandbox0.apispec.models.sandbox_function_source_type import SandboxFunctionSourceType
+
+resp = sandbox.update_services([
+    SandboxAppService(
+        id="handler",
+        port=49983,
+        runtime=SandboxAppServiceRuntime(
+            type_=SandboxAppServiceRuntimeType.FUNCTION,
+            function=SandboxFunction(
+                runtime=SandboxFunctionRuntime.PYTHON,
+                handler="handler",
+                source=SandboxFunctionSource(
+                    type_=SandboxFunctionSourceType.INLINE,
+                    filename="main.py",
+                    code="def handler(request):\\n    return {'status': 200, 'body': 'ok'}\\n",
+                ),
+            ),
+        ),
+        ingress=SandboxAppServiceIngress(
+            public=True,
+            routes=[
+                SandboxAppServiceRoute(
+                    id="handler",
+                    path_prefix="/",
+                    methods=["POST"],
+                    timeout_seconds=30,
+                    resume=True,
+                ),
+            ],
+        ),
+    ),
+])
+print(f"services: {len(resp.services)}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const resp = await sandbox.updateServices([
+    {
+        id: 'handler',
+        port: 49983,
+        runtime: {
+            type: 'function',
+            _function: {
+                runtime: 'python',
+                handler: 'handler',
+                source: {
+                    type: 'inline',
+                    filename: 'main.py',
+                    code: "def handler(request):\\n    return {'status': 200, 'body': 'ok'}\\n",
+                },
+            },
+        },
+        ingress: {
+            public: true,
+            routes: [
+                {
+                    id: 'handler',
+                    pathPrefix: '/',
+                    methods: ['POST'],
+                    timeoutSeconds: 30,
+                    resume: true,
+                },
+            ],
+        },
+    },
+]);
+console.log('services:', resp.services?.length ?? 0);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `cat > function-services.yaml <<'EOF'
+services:
+  - id: handler
+    port: 49983
+    runtime:
+      type: function
+      function:
+        runtime: python
+        handler: handler
+        source:
+          type: inline
+          filename: main.py
+          code: |
+            def handler(request):
+                return {"status": 200, "body": "ok"}
+    ingress:
+      public: true
+      routes:
+        - id: handler
+          path_prefix: /
+          methods: [POST]
+          timeout_seconds: 30
+          resume: true
+EOF
+
+s0 sandbox service update --services-file function-services.yaml -s sb_abc123`
+    }
+  ]}
+/>
+
 The handler receives a request object with:
 
 | Field | Type | Description |

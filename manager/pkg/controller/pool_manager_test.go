@@ -119,6 +119,103 @@ func TestDrainStaleIdlePodsUsesDeletePreconditions(t *testing.T) {
 	assert.Equal(t, 1, deleteActions)
 }
 
+func TestDrainStaleIdlePodsSkipsAlreadyDeletingPod(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "default",
+		},
+	}
+	deletedAt := metav1.NewTime(time.Now().Add(-30 * time.Minute))
+	stalePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "idle-stale",
+			Namespace:         "default",
+			UID:               types.UID("uid-stale"),
+			ResourceVersion:   "11",
+			DeletionTimestamp: &deletedAt,
+			Labels: map[string]string{
+				LabelTemplateID: "template-a",
+				LabelPoolType:   PoolTypeIdle,
+			},
+			Annotations: map[string]string{
+				AnnotationTemplateSpecHash: "old-hash",
+			},
+		},
+	}
+
+	client := fake.NewSimpleClientset(stalePod)
+	podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	require.NoError(t, podIndexer.Add(stalePod))
+	podLister := corelisters.NewPodLister(podIndexer)
+
+	deleteActions := 0
+	client.PrependReactor("delete", "pods", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
+		deleteActions++
+		return false, nil, nil
+	})
+
+	pm := &PoolManager{
+		k8sClient: client,
+		podLister: podLister,
+		recorder:  record.NewFakeRecorder(10),
+		logger:    zap.NewNop(),
+	}
+
+	err := pm.drainStaleIdlePods(context.Background(), template, "new-hash")
+	require.NoError(t, err)
+	assert.Equal(t, 0, deleteActions)
+}
+
+func TestDrainStaleIdlePodsSkipsPodDeletingAfterList(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "default",
+		},
+	}
+	stalePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "idle-stale",
+			Namespace:       "default",
+			UID:             types.UID("uid-stale"),
+			ResourceVersion: "11",
+			Labels: map[string]string{
+				LabelTemplateID: "template-a",
+				LabelPoolType:   PoolTypeIdle,
+			},
+			Annotations: map[string]string{
+				AnnotationTemplateSpecHash: "old-hash",
+			},
+		},
+	}
+	deletingPod := stalePod.DeepCopy()
+	deletedAt := metav1.NewTime(time.Now().Add(-30 * time.Minute))
+	deletingPod.DeletionTimestamp = &deletedAt
+
+	client := fake.NewSimpleClientset(deletingPod)
+	podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	require.NoError(t, podIndexer.Add(stalePod))
+	podLister := corelisters.NewPodLister(podIndexer)
+
+	deleteActions := 0
+	client.PrependReactor("delete", "pods", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
+		deleteActions++
+		return false, nil, nil
+	})
+
+	pm := &PoolManager{
+		k8sClient: client,
+		podLister: podLister,
+		recorder:  record.NewFakeRecorder(10),
+		logger:    zap.NewNop(),
+	}
+
+	err := pm.drainStaleIdlePods(context.Background(), template, "new-hash")
+	require.NoError(t, err)
+	assert.Equal(t, 0, deleteActions)
+}
+
 func TestDrainStaleIdlePodsSkipsClaimedActivePods(t *testing.T) {
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{

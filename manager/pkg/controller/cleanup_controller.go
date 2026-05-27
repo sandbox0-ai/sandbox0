@@ -138,8 +138,14 @@ func (cc *CleanupController) runCleanup(ctx context.Context) error {
 	return nil
 }
 
-// cleanupExpired cleans up expired active pods
+// cleanupExpired cleans up stale deleting idle pods and expired active pods.
 func (cc *CleanupController) cleanupExpired(ctx context.Context, template *v1alpha1.SandboxTemplate) error {
+	now := cc.clock.Now()
+
+	if err := cc.cleanupStaleDeletingIdlePods(ctx, template, now); err != nil {
+		return err
+	}
+
 	// Get all active pods for this template
 	pods, err := cc.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
 		LabelTemplateID: template.Name,
@@ -149,7 +155,6 @@ func (cc *CleanupController) cleanupExpired(ctx context.Context, template *v1alp
 		return err
 	}
 
-	now := cc.clock.Now()
 	expiredCount := 0
 
 	for _, pod := range pods {
@@ -271,6 +276,23 @@ func (cc *CleanupController) cleanupExpired(ctx context.Context, template *v1alp
 		)
 	}
 
+	return nil
+}
+
+func (cc *CleanupController) cleanupStaleDeletingIdlePods(ctx context.Context, template *v1alpha1.SandboxTemplate, now time.Time) error {
+	pods, err := cc.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
+		LabelTemplateID: template.Name,
+		LabelPoolType:   PoolTypeIdle,
+	}))
+	if err != nil {
+		return err
+	}
+
+	for _, pod := range pods {
+		if pod.DeletionTimestamp != nil {
+			cc.forceDeleteStaleDeletingPod(ctx, template, pod, now)
+		}
+	}
 	return nil
 }
 

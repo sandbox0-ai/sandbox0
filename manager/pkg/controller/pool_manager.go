@@ -370,6 +370,9 @@ func (pm *PoolManager) drainStaleIdlePods(ctx context.Context, template *v1alpha
 
 	drained := 0
 	for _, pod := range pods {
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
 		if pod.Annotations[AnnotationTemplateSpecHash] == desiredTemplateHash {
 			continue
 		}
@@ -500,8 +503,10 @@ func (pm *PoolManager) deleteStaleIdlePodWithRetry(ctx context.Context, namespac
 			return err
 		}
 
-		// If pod has been claimed or already updated to latest hash, skip delete.
-		if pod.Labels[LabelPoolType] != PoolTypeIdle || pod.Annotations[AnnotationTemplateSpecHash] == desiredTemplateHash {
+		// If pod is already deleting, claimed, or already updated to latest hash, skip delete.
+		if pod.DeletionTimestamp != nil ||
+			pod.Labels[LabelPoolType] != PoolTypeIdle ||
+			pod.Annotations[AnnotationTemplateSpecHash] == desiredTemplateHash {
 			return nil
 		}
 

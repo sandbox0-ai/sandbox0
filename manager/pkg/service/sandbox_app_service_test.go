@@ -111,8 +111,7 @@ func TestSandboxAppServicePublishBlockersRequirePublicRestartableRuntime(t *test
 
 func TestNormalizeSandboxAppServicesSupportsFunctionRuntime(t *testing.T) {
 	services, err := NormalizeSandboxAppServices([]SandboxAppService{{
-		ID:   "webhook",
-		Port: 49983,
+		ID: "webhook",
 		Runtime: &SandboxAppServiceRuntime{
 			Type: SandboxAppServiceRuntimeFunction,
 			Function: &SandboxFunction{
@@ -142,8 +141,8 @@ func TestNormalizeSandboxAppServicesSupportsFunctionRuntime(t *testing.T) {
 	if service.Runtime.Function.Source.Type != "inline" {
 		t.Fatalf("function source type = %q, want inline", service.Runtime.Function.Source.Type)
 	}
-	if service.Runtime.Function.Source.Filename != "main.py" {
-		t.Fatalf("function filename = %q, want main.py", service.Runtime.Function.Source.Filename)
+	if service.Port != 49983 {
+		t.Fatalf("function service port = %d, want 49983", service.Port)
 	}
 	if len(service.Runtime.Command) != 0 || service.Runtime.CWD != "" || service.Runtime.WarmProcessName != "" {
 		t.Fatalf("function runtime kept process fields: %#v", service.Runtime)
@@ -164,8 +163,8 @@ func TestNormalizeSandboxAppServicesRejectsInvalidFunctionSource(t *testing.T) {
 			Type: SandboxAppServiceRuntimeFunction,
 			Function: &SandboxFunction{
 				Source: SandboxFunctionSource{
-					Filename: "../main.py",
-					Code:     "def handler(request):\n    return None\n",
+					Type: "git",
+					Code: "def handler(request):\n    return None\n",
 				},
 			},
 		},
@@ -173,5 +172,38 @@ func TestNormalizeSandboxAppServicesRejectsInvalidFunctionSource(t *testing.T) {
 	}})
 	if err == nil {
 		t.Fatal("NormalizeSandboxAppServices succeeded, want error")
+	}
+}
+
+func TestNormalizeSandboxAppServicesRejectsWrongFunctionPort(t *testing.T) {
+	_, err := NormalizeSandboxAppServices([]SandboxAppService{{
+		ID:   "webhook",
+		Port: 8080,
+		Runtime: &SandboxAppServiceRuntime{
+			Type: SandboxAppServiceRuntimeFunction,
+			Function: &SandboxFunction{
+				Source: SandboxFunctionSource{
+					Code: "def handler(request):\n    return None\n",
+				},
+			},
+		},
+		Ingress: SandboxAppServiceIngress{Public: true},
+	}})
+	if err == nil {
+		t.Fatal("NormalizeSandboxAppServices succeeded, want wrong function port error")
+	}
+}
+
+func TestNormalizeSandboxAppServicesRejectsMissingNonFunctionPort(t *testing.T) {
+	_, err := NormalizeSandboxAppServices([]SandboxAppService{{
+		ID: "api",
+		Runtime: &SandboxAppServiceRuntime{
+			Type:    SandboxAppServiceRuntimeCMD,
+			Command: []string{"python3", "-m", "http.server", "8080"},
+		},
+		Ingress: SandboxAppServiceIngress{Public: true},
+	}})
+	if err == nil {
+		t.Fatal("NormalizeSandboxAppServices succeeded, want missing port error")
 	}
 }

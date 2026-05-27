@@ -45,9 +45,8 @@ printf '{"status":202,"headers":{"x-runner":["ok"]},"body_base64":"aGVsbG8="}\n'
 		Runtime:   sandboxfunction.RuntimePython,
 		Handler:   sandboxfunction.DefaultHandler,
 		Source: sandboxfunction.Source{
-			Type:     sandboxfunction.SourceTypeInline,
-			Filename: "main.py",
-			Code:     "def handler(request):\n    return {'status': 204}\n",
+			Type: sandboxfunction.SourceTypeInline,
+			Code: "def handler(request):\n    return {'status': 204}\n",
 		},
 		Request: sandboxfunction.HTTPRequest{
 			Method: "POST",
@@ -93,10 +92,9 @@ func TestFunctionHandlerRejectsMismatchedDigest(t *testing.T) {
 		Runtime: sandboxfunction.RuntimePython,
 		Handler: sandboxfunction.DefaultHandler,
 		Source: sandboxfunction.Source{
-			Type:     sandboxfunction.SourceTypeInline,
-			Filename: "main.py",
-			Code:     "def handler(request):\n    return None\n",
-			Digest:   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			Type:   sandboxfunction.SourceTypeInline,
+			Code:   "def handler(request):\n    return None\n",
+			Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		},
 		Request: sandboxfunction.HTTPRequest{
 			Method: "POST",
@@ -147,9 +145,8 @@ printf '{"type":"chunk","body_base64":"ZGF0YTogdHdvCgo="}\n'
 		Runtime: sandboxfunction.RuntimePython,
 		Handler: sandboxfunction.DefaultHandler,
 		Source: sandboxfunction.Source{
-			Type:     sandboxfunction.SourceTypeInline,
-			Filename: "main.py",
-			Code:     "def handler(request):\n    return None\n",
+			Type: sandboxfunction.SourceTypeInline,
+			Code: "def handler(request):\n    return None\n",
 		},
 		Request: sandboxfunction.HTTPRequest{Method: "GET", Path: "/events"},
 	}
@@ -198,9 +195,8 @@ printf '{"type":"message","message_type":"text","data":"echo"}\n'
 		Runtime: sandboxfunction.RuntimePython,
 		Handler: sandboxfunction.DefaultHandler,
 		Source: sandboxfunction.Source{
-			Type:     sandboxfunction.SourceTypeInline,
-			Filename: "main.py",
-			Code:     "def handler(request):\n    return None\n",
+			Type: sandboxfunction.SourceTypeInline,
+			Code: "def handler(request):\n    return None\n",
 		},
 		Request: sandboxfunction.HTTPRequest{Method: "GET", Path: "/ws"},
 	}

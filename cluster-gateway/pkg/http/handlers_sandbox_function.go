@@ -256,10 +256,9 @@ func buildSandboxFunctionExecuteRequest(r *http.Request, service *mgr.SandboxApp
 	fn := service.Runtime.Function
 	source := sandboxfunction.Source{
 		Type:     fn.Source.Type,
-		Filename: fn.Source.Filename,
+		Filename: sandboxfunction.DefaultFilename,
 		Code:     fn.Source.Code,
 	}
-	source.Digest = sandboxfunction.InlineDigest(source.Filename, source.Code)
 	execReq := sandboxfunction.ExecuteRequest{
 		ServiceID: service.ID,
 		Runtime:   fn.Runtime,

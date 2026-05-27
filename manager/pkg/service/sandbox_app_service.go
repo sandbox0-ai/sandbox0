@@ -26,7 +26,6 @@ const (
 var sandboxServiceRouteIDPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 var httpMethodPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_-]*$`)
 var sandboxFunctionHandlerPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`)
-var sandboxFunctionFilenamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
 // SandboxAppServiceRouteAuth controls inbound authentication for one public route.
 type SandboxAppServiceRouteAuth struct {
@@ -88,9 +87,8 @@ type SandboxFunction struct {
 
 // SandboxFunctionSource carries user function code in sandbox service config.
 type SandboxFunctionSource struct {
-	Type     string `json:"type"`
-	Filename string `json:"filename,omitempty"`
-	Code     string `json:"code,omitempty"`
+	Type string `json:"type"`
+	Code string `json:"code,omitempty"`
 }
 
 // SandboxAppServiceIngress captures how traffic enters a sandbox service.
@@ -163,9 +161,7 @@ func normalizeSandboxAppService(service SandboxAppService) (SandboxAppService, e
 		return service, fmt.Errorf("id must be a DNS label")
 	}
 	service.DisplayName = strings.TrimSpace(service.DisplayName)
-	if service.Port <= 0 || service.Port > 65535 {
-		return service, fmt.Errorf("port must be between 1 and 65535")
-	}
+	runtimeType := SandboxAppServiceRuntimeManual
 	if service.Runtime != nil {
 		runtime := *service.Runtime
 		runtime.Type = strings.ToLower(strings.TrimSpace(runtime.Type))
@@ -179,6 +175,7 @@ func normalizeSandboxAppService(service SandboxAppService) (SandboxAppService, e
 		if runtime.Type == "" {
 			runtime.Type = SandboxAppServiceRuntimeManual
 		}
+		runtimeType = runtime.Type
 		if runtime.Type == SandboxAppServiceRuntimeCMD && len(runtime.Command) == 0 {
 			return service, fmt.Errorf("runtime.command is required for cmd services")
 		}
@@ -195,6 +192,21 @@ func normalizeSandboxAppService(service SandboxAppService) (SandboxAppService, e
 			runtime.Function = nil
 		}
 		service.Runtime = &runtime
+	}
+	if runtimeType == SandboxAppServiceRuntimeFunction {
+		if service.Port == 0 {
+			service.Port = sandboxfunction.DefaultServicePort
+		}
+		if service.Port != sandboxfunction.DefaultServicePort {
+			return service, fmt.Errorf("port must be omitted or %d for function services", sandboxfunction.DefaultServicePort)
+		}
+	} else {
+		if service.Port <= 0 || service.Port > 65535 {
+			return service, fmt.Errorf("port must be between 1 and 65535")
+		}
+		if service.Port == sandboxfunction.DefaultServicePort {
+			return service, fmt.Errorf("port %d is reserved for function services", sandboxfunction.DefaultServicePort)
+		}
 	}
 	if service.Ingress.Public && len(service.Ingress.Routes) == 0 {
 		service.Ingress.Routes = []SandboxAppServiceRoute{{
@@ -314,16 +326,6 @@ func normalizeSandboxFunction(function *SandboxFunction) (*SandboxFunction, erro
 	}
 	if source.Type != sandboxfunction.SourceTypeInline {
 		return nil, fmt.Errorf("source.type must be %q", sandboxfunction.SourceTypeInline)
-	}
-	source.Filename = strings.TrimSpace(source.Filename)
-	if source.Filename == "" {
-		source.Filename = sandboxfunction.DefaultFilename
-	}
-	if strings.Contains(source.Filename, "/") || strings.Contains(source.Filename, "\\") || strings.HasPrefix(source.Filename, ".") {
-		return nil, fmt.Errorf("source.filename must be a relative file name")
-	}
-	if !sandboxFunctionFilenamePattern.MatchString(source.Filename) {
-		return nil, fmt.Errorf("source.filename contains unsupported characters")
 	}
 	if strings.TrimSpace(source.Code) == "" {
 		return nil, fmt.Errorf("source.code is required")

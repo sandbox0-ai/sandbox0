@@ -3816,14 +3816,14 @@ components:
         port:
           type: integer
           format: int32
-          description: Public exposure routing port. Function services normally use the sandbox procd port.
+          description: Public exposure routing port. Required for manual, cmd, and warm_process services. Omit for function services; Sandbox0 assigns the internal function service port.
         runtime:
           $ref: "#/components/schemas/SandboxAppServiceRuntime"
         ingress:
           $ref: "#/components/schemas/SandboxAppServiceIngress"
         health_check:
           $ref: "#/components/schemas/SandboxAppServiceHealth"
-      required: [id, port, ingress]
+      required: [id, ingress]
     SandboxAppServiceRuntime:
       type: object
       properties:
@@ -3870,9 +3870,6 @@ components:
           type: string
           enum: [inline]
           description: Source transport. Only inline source is supported in this version.
-        filename:
-          type: string
-          description: Relative Python filename used when materializing the source. Defaults to main.py.
         code:
           type: string
           description: Inline source code. Limited to 256 KiB.

@@ -1460,7 +1460,7 @@ func assertSandboxNetworkIsolation(env *framework.ScenarioEnv, session *e2eutils
 	}}
 	_, exposureDomain, status, err := session.UpdateSandboxServices(env.TestCtx.Context, GinkgoT(), sandboxBID, []apispec.SandboxAppService{{
 		Id:   "web",
-		Port: exposedPort,
+		Port: ptr(exposedPort),
 		Ingress: apispec.SandboxAppServiceIngress{
 			Public: true,
 			Routes: &routes,

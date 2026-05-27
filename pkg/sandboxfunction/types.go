@@ -30,11 +30,18 @@ const (
 
 	MaxInlineSourceBytes = 256 << 10
 	MaxHTTPRequestBytes  = 8 << 20
+
+	// DefaultServicePort is the internal public-exposure routing port used for
+	// function services. The actual procd address is still resolved from the
+	// sandbox runtime.
+	DefaultServicePort = 49983
 )
 
 // Source describes function code carried by cluster-gateway to procd.
 type Source struct {
-	Type     string `json:"type"`
+	Type string `json:"type"`
+	// Filename is accepted only for gateway/procd rollout compatibility.
+	// Function source is always materialized as DefaultFilename.
 	Filename string `json:"filename,omitempty"`
 	Code     string `json:"code,omitempty"`
 	Digest   string `json:"digest,omitempty"`
@@ -86,7 +93,14 @@ type WebSocketFrame struct {
 	Reason      string `json:"reason,omitempty"`
 }
 
-func InlineDigest(filename, code string) string {
+func InlineDigest(code string) string {
+	sum := sha256.Sum256([]byte(code))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// LegacyInlineDigest returns the digest used by function services before the
+// public filename field was removed. It is kept for rolling-upgrade compatibility.
+func LegacyInlineDigest(filename, code string) string {
 	sum := sha256.Sum256([]byte(filename + "\x00" + code))
 	return "sha256:" + hex.EncodeToString(sum[:])
 }

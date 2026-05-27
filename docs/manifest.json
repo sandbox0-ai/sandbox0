@@ -36,10 +36,6 @@
           "title": "Files"
         },
         {
-          "slug": "function",
-          "title": "Functions"
-        },
-        {
           "slug": "ssh",
           "title": "SSH"
         },

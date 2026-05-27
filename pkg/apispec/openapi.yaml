@@ -16,7 +16,6 @@ tags:
   - name: api-keys
   - name: sandboxes
   - name: contexts
-  - name: functions
   - name: files
   - name: templates
   - name: registry
@@ -1962,49 +1961,6 @@ paths:
       responses:
         "101":
           description: Switching Protocols
-  /api/v1/sandboxes/{id}/functions/{name}/invoke:
-    post:
-      tags: [functions]
-      summary: Invoke a sandbox function
-      description: Invokes /workspace/functions/{name}.py through the Python function runtime. The default handler is `handler`.
-      security:
-        - bearerAuth: []
-      x-upstream-service: procd
-      x-upstream-path: /api/v1/functions/{name}/invoke
-      parameters:
-        - $ref: "#/components/parameters/SandboxID"
-        - $ref: "#/components/parameters/FunctionName"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/FunctionInvokeRequest"
-      responses:
-        "200":
-          description: Function invocation completed
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SuccessFunctionInvokeResponse"
-        "400":
-          description: Invalid invocation request
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
-        "404":
-          description: Function not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
-        "500":
-          description: Function invocation failed
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
   /api/v1/sandboxes/{id}/files/move:
     post:
       tags: [files]
@@ -2864,13 +2820,6 @@ components:
       required: true
       schema:
         type: string
-    FunctionName:
-      name: name
-      in: path
-      required: true
-      schema:
-        type: string
-        pattern: "^[A-Za-z0-9_-]+$"
     TemplateID:
       name: id
       in: path
@@ -4580,54 +4529,6 @@ components:
           type: string
           description: Raw PTY output, may contain terminal control characters (e.g. \r)
       required: [output_raw]
-    FunctionInvokeRequest:
-      type: object
-      properties:
-        method:
-          type: string
-          description: Logical request method passed to the function. Defaults to POST.
-        path:
-          type: string
-          description: Logical request path passed to the function. Defaults to /.
-        query:
-          type: object
-          additionalProperties:
-            type: array
-            items:
-              type: string
-        headers:
-          type: object
-          additionalProperties:
-            type: array
-            items:
-              type: string
-        body_base64:
-          type: string
-          description: Base64-encoded request body passed to the function.
-        handler:
-          type: string
-          description: Python handler name inside the function module. Defaults to handler.
-        timeout_ms:
-          type: integer
-          format: int32
-          description: Per-invocation timeout in milliseconds. Defaults to 30000 and must not exceed 120000.
-    FunctionInvokeResponse:
-      type: object
-      properties:
-        status:
-          type: integer
-          format: int32
-          description: Function-level HTTP-style status code.
-        headers:
-          type: object
-          additionalProperties:
-            type: array
-            items:
-              type: string
-        body_base64:
-          type: string
-          description: Base64-encoded function response body.
-      required: [status]
     ResizeContextRequest:
       type: object
       properties:
@@ -4677,14 +4578,6 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/ContextExecResponse"
-    SuccessFunctionInvokeResponse:
-      type: object
-      properties:
-        success:
-          type: boolean
-        data:
-          $ref: "#/components/schemas/FunctionInvokeResponse"
-      required: [success]
     FileInfo:
       type: object
       properties:

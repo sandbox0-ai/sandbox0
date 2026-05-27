@@ -936,36 +936,6 @@ type ForkVolumeRequest struct {
 	DefaultPosixUid *int64 `json:"default_posix_uid,omitempty"`
 }
 
-// FunctionInvokeRequest defines model for FunctionInvokeRequest.
-type FunctionInvokeRequest struct {
-	// BodyBase64 Base64-encoded request body passed to the function.
-	BodyBase64 *string `json:"body_base64,omitempty"`
-
-	// Handler Python handler name inside the function module. Defaults to handler.
-	Handler *string              `json:"handler,omitempty"`
-	Headers *map[string][]string `json:"headers,omitempty"`
-
-	// Method Logical request method passed to the function. Defaults to POST.
-	Method *string `json:"method,omitempty"`
-
-	// Path Logical request path passed to the function. Defaults to /.
-	Path  *string              `json:"path,omitempty"`
-	Query *map[string][]string `json:"query,omitempty"`
-
-	// TimeoutMs Per-invocation timeout in milliseconds. Defaults to 30000 and must not exceed 120000.
-	TimeoutMs *int32 `json:"timeout_ms,omitempty"`
-}
-
-// FunctionInvokeResponse defines model for FunctionInvokeResponse.
-type FunctionInvokeResponse struct {
-	// BodyBase64 Base64-encoded function response body.
-	BodyBase64 *string              `json:"body_base64,omitempty"`
-	Headers    *map[string][]string `json:"headers,omitempty"`
-
-	// Status Function-level HTTP-style status code.
-	Status int32 `json:"status"`
-}
-
 // GatewayMetadata defines model for GatewayMetadata.
 type GatewayMetadata struct {
 	GatewayMode GatewayMetadataGatewayMode `json:"gateway_mode"`
@@ -1997,12 +1967,6 @@ type SuccessFileStatResponse struct {
 // SuccessFileStatResponseSuccess defines model for SuccessFileStatResponse.Success.
 type SuccessFileStatResponseSuccess bool
 
-// SuccessFunctionInvokeResponse defines model for SuccessFunctionInvokeResponse.
-type SuccessFunctionInvokeResponse struct {
-	Data    *FunctionInvokeResponse `json:"data,omitempty"`
-	Success bool                    `json:"success"`
-}
-
 // SuccessGatewayMetadataResponse defines model for SuccessGatewayMetadataResponse.
 type SuccessGatewayMetadataResponse struct {
 	Data    *GatewayMetadata                      `json:"data,omitempty"`
@@ -2570,9 +2534,6 @@ type ContextID = string
 // FilePath defines model for FilePath.
 type FilePath = string
 
-// FunctionName defines model for FunctionName.
-type FunctionName = string
-
 // IdentityID defines model for IdentityID.
 type IdentityID = string
 
@@ -2765,9 +2726,6 @@ type PostApiV1SandboxesIdContextsCtxIdSignalJSONRequestBody = SignalContextReque
 
 // PostApiV1SandboxesIdFilesMoveJSONRequestBody defines body for PostApiV1SandboxesIdFilesMove for application/json ContentType.
 type PostApiV1SandboxesIdFilesMoveJSONRequestBody = MoveFileRequest
-
-// PostApiV1SandboxesIdFunctionsNameInvokeJSONRequestBody defines body for PostApiV1SandboxesIdFunctionsNameInvoke for application/json ContentType.
-type PostApiV1SandboxesIdFunctionsNameInvokeJSONRequestBody = FunctionInvokeRequest
 
 // PutApiV1SandboxesIdNetworkJSONRequestBody defines body for PutApiV1SandboxesIdNetwork for application/json ContentType.
 type PutApiV1SandboxesIdNetworkJSONRequestBody = SandboxNetworkPolicy

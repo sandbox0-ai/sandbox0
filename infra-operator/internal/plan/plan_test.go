@@ -7,6 +7,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 )
@@ -151,6 +152,35 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 	}
 	if compiled.RegionalGateway.IngressConfig == nil || !compiled.RegionalGateway.IngressConfig.Enabled {
 		t.Fatalf("expected regional gateway ingress config to be compiled, got %#v", compiled.RegionalGateway.IngressConfig)
+	}
+}
+
+func TestCompileProjectsRunStartupTimeoutToRegionalGateway(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			PublicExposure: &infrav1alpha1.PublicExposureConfig{
+				Enabled:                  true,
+				RunStartupTimeoutSeconds: 7,
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+	if got := compiled.RegionalGateway.Config.PublicRunStartupTimeoutSeconds; got != 7 {
+		t.Fatalf("run startup timeout = %d, want 7", got)
+	}
+
+	infra.Spec.PublicExposure.RunStartupTimeoutSeconds = 0
+	compiled = Compile(infra)
+	if got := compiled.RegionalGateway.Config.PublicRunStartupTimeoutSeconds; got != apiconfig.DefaultPublicRunStartupTimeoutSeconds {
+		t.Fatalf("default run startup timeout = %d, want %d", got, apiconfig.DefaultPublicRunStartupTimeoutSeconds)
 	}
 }
 

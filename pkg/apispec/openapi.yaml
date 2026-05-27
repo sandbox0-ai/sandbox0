@@ -4258,12 +4258,6 @@ components:
           minimum: 1
           default: 300
           description: Seconds of inactivity before the runtime sandbox can scale back to zero.
-        startup_timeout_seconds:
-          type: integer
-          format: int32
-          minimum: 1
-          default: 90
-          description: Maximum seconds to wait for a cold-started service health check.
     Run:
       type: object
       properties:

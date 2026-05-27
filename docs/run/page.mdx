@@ -1,4 +1,4 @@
-# Run
+# Sandbox0 Run
 
 Sandbox0 Runs expose a production HTTP domain backed by the same Sandbox0 primitives used during development: a template, immutable snapshots, mounted volumes, and a sandbox service.
 
@@ -40,7 +40,8 @@ Runs have no `minIdle` setting. Every run starts at zero runtime instances and c
 | `max_instances` | Maximum runtime instances for the run |
 | `target_concurrency` | Target request concurrency per runtime instance |
 | `idle_timeout_seconds` | Idle time before runtime can return to zero |
-| `startup_timeout_seconds` | Maximum time to wait for cold-start health |
+
+Cold-start health wait is configured at the infra level with `spec.publicExposure.runStartupTimeoutSeconds`. The default is 10 seconds.
 
 ## Deploy From Snapshots
 
@@ -236,7 +237,6 @@ scale:
     maxInstances: 4
     targetConcurrency: 20
     idleTimeoutSeconds: 300
-    startupTimeoutSeconds: 90
 ```
 
 ```bash

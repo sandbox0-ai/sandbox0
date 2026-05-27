@@ -1509,10 +1509,7 @@ type RunScalePolicy struct {
 	// IdleTimeoutSeconds Seconds of inactivity before the runtime sandbox can scale back to zero.
 	IdleTimeoutSeconds *int32 `json:"idle_timeout_seconds,omitempty"`
 	MaxInstances       *int32 `json:"max_instances,omitempty"`
-
-	// StartupTimeoutSeconds Maximum seconds to wait for a cold-started service health check.
-	StartupTimeoutSeconds *int32 `json:"startup_timeout_seconds,omitempty"`
-	TargetConcurrency     *int32 `json:"target_concurrency,omitempty"`
+	TargetConcurrency  *int32 `json:"target_concurrency,omitempty"`
 }
 
 // RunSource defines model for RunSource.

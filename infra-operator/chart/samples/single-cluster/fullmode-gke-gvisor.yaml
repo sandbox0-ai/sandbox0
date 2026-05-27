@@ -21,6 +21,7 @@ spec:
     rootDomain: sandbox0.app
     runRootDomain: sandbox0.run
     regionId: gcp-us-east1
+    runStartupTimeoutSeconds: 10
   storage:
     type: builtin
     builtin:

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	service "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/runs"
@@ -208,7 +209,7 @@ func (s *Server) createRunRuntime(ctx context.Context, fn runs.Run, revision *ru
 		return nil, err
 	}
 	runtime.RuntimeContextID = contextID
-	if err := s.waitRunServiceReady(ctx, clusterURL, fn.TeamID, userID, runtime.RuntimeSandboxID, serviceSpec, fn.Scale.StartupTimeoutSeconds); err != nil {
+	if err := s.waitRunServiceReady(ctx, clusterURL, fn.TeamID, userID, runtime.RuntimeSandboxID, serviceSpec); err != nil {
 		return nil, err
 	}
 	return &runtime, nil
@@ -243,13 +244,11 @@ func (s *Server) startRunService(ctx context.Context, clusterURL, teamID, userID
 	}
 }
 
-func (s *Server) waitRunServiceReady(ctx context.Context, clusterURL, teamID, userID, sandboxID string, serviceSpec service.SandboxAppService, timeoutSeconds int) error {
+func (s *Server) waitRunServiceReady(ctx context.Context, clusterURL, teamID, userID, sandboxID string, serviceSpec service.SandboxAppService) error {
 	if serviceSpec.HealthCheck == nil || strings.TrimSpace(serviceSpec.HealthCheck.Path) == "" {
 		return nil
 	}
-	if timeoutSeconds <= 0 {
-		timeoutSeconds = runs.DefaultScalePolicy().StartupTimeoutSeconds
-	}
+	timeoutSeconds := s.runStartupTimeoutSeconds()
 	deadline, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
 	path := "/internal/v1/runs/runtime/sandboxes/" + url.PathEscape(sandboxID) + "/services/" + url.PathEscape(serviceSpec.ID) + "/health"
@@ -269,4 +268,11 @@ func (s *Server) waitRunServiceReady(ctx context.Context, clusterURL, teamID, us
 		case <-ticker.C:
 		}
 	}
+}
+
+func (s *Server) runStartupTimeoutSeconds() int {
+	if s == nil || s.cfg == nil {
+		return apiconfig.DefaultPublicRunStartupTimeoutSeconds
+	}
+	return apiconfig.DefaultedPublicRunStartupTimeoutSeconds(s.cfg.PublicRunStartupTimeoutSeconds)
 }

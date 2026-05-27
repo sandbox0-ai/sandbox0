@@ -29,3 +29,15 @@ func TestRunLabelFromHostUsesRunRootDomain(t *testing.T) {
 		t.Fatal("expected sandbox service root domain not to match run host")
 	}
 }
+
+func TestRunStartupTimeoutUsesGatewayConfigDefault(t *testing.T) {
+	s := &Server{cfg: &config.RegionalGatewayConfig{}}
+	if got := s.runStartupTimeoutSeconds(); got != config.DefaultPublicRunStartupTimeoutSeconds {
+		t.Fatalf("startup timeout = %d, want %d", got, config.DefaultPublicRunStartupTimeoutSeconds)
+	}
+
+	s.cfg.PublicRunStartupTimeoutSeconds = 7
+	if got := s.runStartupTimeoutSeconds(); got != 7 {
+		t.Fatalf("startup timeout = %d, want 7", got)
+	}
+}

@@ -628,6 +628,7 @@ func compileRegionalGatewayRuntimeConfig(plan *RegionalGatewayPlan, infra *infra
 		cfg.PublicRootDomain = infra.Spec.PublicExposure.RootDomain
 		cfg.PublicRunRootDomain = infra.Spec.PublicExposure.RunRootDomain
 		cfg.PublicRegionID = infra.Spec.PublicExposure.RegionID
+		cfg.PublicRunStartupTimeoutSeconds = apiconfig.DefaultedPublicRunStartupTimeoutSeconds(int(infra.Spec.PublicExposure.RunStartupTimeoutSeconds))
 	}
 }
 

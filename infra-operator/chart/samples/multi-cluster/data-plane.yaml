@@ -32,6 +32,7 @@ spec:
     rootDomain: sandbox0.app
     runRootDomain: sandbox0.run
     regionId: aws-us-east-1
+    runStartupTimeoutSeconds: 10
   storage:
     # Data plane storage (choose s3 or oss for production).
     type: s3

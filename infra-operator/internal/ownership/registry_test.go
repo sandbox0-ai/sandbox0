@@ -66,6 +66,11 @@ func TestLookupTracksCrossServiceDerivedFields(t *testing.T) {
 			owner:     "plan",
 			consumers: []string{"global-gateway", "regional-gateway", "cluster-gateway"},
 		},
+		{
+			path:      "spec.publicExposure.runStartupTimeoutSeconds",
+			owner:     "plan",
+			consumers: []string{"regional-gateway", "cluster-gateway"},
+		},
 	}
 
 	for _, tc := range cases {

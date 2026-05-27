@@ -448,6 +448,14 @@ spec:
                     description: RunRootDomain is the root domain for production Run
                       URLs.
                     type: string
+                  runStartupTimeoutSeconds:
+                    default: 10
+                    description: |-
+                      RunStartupTimeoutSeconds is the maximum seconds to wait for a
+                      cold-started Run service health check.
+                    format: int32
+                    minimum: 1
+                    type: integer
                 type: object
               redis:
                 description: |-

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/runs"
@@ -167,7 +168,7 @@ func (s *Server) createRunRuntime(ctx context.Context, fn runs.Run, revision *ru
 		return nil, err
 	}
 	runtime.RuntimeContextID = contextID
-	if err := s.waitRunServiceReady(ctx, sandbox.InternalAddr, serviceSpec, fn.Scale.StartupTimeoutSeconds); err != nil {
+	if err := s.waitRunServiceReady(ctx, sandbox.InternalAddr, serviceSpec); err != nil {
 		return nil, err
 	}
 	return &runtime, nil
@@ -199,13 +200,11 @@ func (s *Server) startRunService(ctx context.Context, procdURL, teamID, userID s
 	}
 }
 
-func (s *Server) waitRunServiceReady(ctx context.Context, sandboxInternalAddr string, serviceSpec mgr.SandboxAppService, timeoutSeconds int) error {
+func (s *Server) waitRunServiceReady(ctx context.Context, sandboxInternalAddr string, serviceSpec mgr.SandboxAppService) error {
 	if serviceSpec.HealthCheck == nil || strings.TrimSpace(serviceSpec.HealthCheck.Path) == "" {
 		return nil
 	}
-	if timeoutSeconds <= 0 {
-		timeoutSeconds = runs.DefaultScalePolicy().StartupTimeoutSeconds
-	}
+	timeoutSeconds := s.runStartupTimeoutSeconds()
 	target, err := withPort(sandboxInternalAddr, serviceSpec.Port)
 	if err != nil {
 		return err
@@ -238,4 +237,11 @@ func (s *Server) waitRunServiceReady(ctx context.Context, sandboxInternalAddr st
 		case <-ticker.C:
 		}
 	}
+}
+
+func (s *Server) runStartupTimeoutSeconds() int {
+	if s == nil || s.cfg == nil {
+		return apiconfig.DefaultPublicRunStartupTimeoutSeconds
+	}
+	return apiconfig.DefaultedPublicRunStartupTimeoutSeconds(s.cfg.PublicRunStartupTimeoutSeconds)
 }

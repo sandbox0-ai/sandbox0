@@ -328,6 +328,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.In
 			cfg.PublicRootDomain = owner.Spec.PublicExposure.RootDomain
 			cfg.PublicRunRootDomain = owner.Spec.PublicExposure.RunRootDomain
 			cfg.PublicRegionID = owner.Spec.PublicExposure.RegionID
+			cfg.PublicRunStartupTimeoutSeconds = apiconfig.DefaultedPublicRunStartupTimeoutSeconds(int(owner.Spec.PublicExposure.RunStartupTimeoutSeconds))
 			if resolvedRegionID == "" {
 				resolvedRegionID = strings.TrimSpace(owner.Spec.PublicExposure.RegionID)
 			}

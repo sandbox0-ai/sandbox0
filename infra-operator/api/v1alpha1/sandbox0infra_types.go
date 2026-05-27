@@ -1281,6 +1281,13 @@ type PublicExposureConfig struct {
 	// +optional
 	// +kubebuilder:default="aws-us-east-1"
 	RegionID string `json:"regionId,omitempty"`
+
+	// RunStartupTimeoutSeconds is the maximum seconds to wait for a
+	// cold-started Run service health check.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=10
+	RunStartupTimeoutSeconds int32 `json:"runStartupTimeoutSeconds,omitempty"`
 }
 
 // ClusterConfig defines cluster identification and capacity

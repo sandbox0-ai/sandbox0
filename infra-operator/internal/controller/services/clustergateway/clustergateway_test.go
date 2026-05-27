@@ -13,6 +13,7 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
@@ -741,6 +742,9 @@ func TestBuildConfigDefaultsRegionIDAndInitUserHomeRegionFromPublicExposure(t *t
 	}
 	if cfg.RegionID != "aws-us-east-1" {
 		t.Fatalf("expected region id to default from public exposure, got %q", cfg.RegionID)
+	}
+	if cfg.PublicRunStartupTimeoutSeconds != apiconfig.DefaultPublicRunStartupTimeoutSeconds {
+		t.Fatalf("expected default run startup timeout %d, got %d", apiconfig.DefaultPublicRunStartupTimeoutSeconds, cfg.PublicRunStartupTimeoutSeconds)
 	}
 	if cfg.BuiltInAuth.InitUser == nil {
 		t.Fatal("expected init user config")

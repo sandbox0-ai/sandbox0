@@ -49,10 +49,9 @@ type Run struct {
 // RunScalePolicy controls scale-to-zero runtime behavior. There is no
 // minimum warm count; every run can return to zero instances.
 type RunScalePolicy struct {
-	MaxInstances          int `json:"max_instances,omitempty"`
-	TargetConcurrency     int `json:"target_concurrency,omitempty"`
-	IdleTimeoutSeconds    int `json:"idle_timeout_seconds,omitempty"`
-	StartupTimeoutSeconds int `json:"startup_timeout_seconds,omitempty"`
+	MaxInstances       int `json:"max_instances,omitempty"`
+	TargetConcurrency  int `json:"target_concurrency,omitempty"`
+	IdleTimeoutSeconds int `json:"idle_timeout_seconds,omitempty"`
 }
 
 // RunRevision is an immutable deployable version of a run.
@@ -117,10 +116,9 @@ type RunDeployResult struct {
 
 func DefaultScalePolicy() RunScalePolicy {
 	return RunScalePolicy{
-		MaxInstances:          1,
-		TargetConcurrency:     1,
-		IdleTimeoutSeconds:    300,
-		StartupTimeoutSeconds: 90,
+		MaxInstances:       1,
+		TargetConcurrency:  1,
+		IdleTimeoutSeconds: 300,
 	}
 }
 
@@ -134,9 +132,6 @@ func NormalizeScalePolicy(policy RunScalePolicy) RunScalePolicy {
 	}
 	if policy.IdleTimeoutSeconds <= 0 {
 		policy.IdleTimeoutSeconds = defaults.IdleTimeoutSeconds
-	}
-	if policy.StartupTimeoutSeconds <= 0 {
-		policy.StartupTimeoutSeconds = defaults.StartupTimeoutSeconds
 	}
 	return policy
 }

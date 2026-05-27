@@ -18,9 +18,6 @@ func TestNormalizeScalePolicyDefaultsToScaleToZero(t *testing.T) {
 	if got.IdleTimeoutSeconds != 300 {
 		t.Fatalf("IdleTimeoutSeconds = %d, want 300", got.IdleTimeoutSeconds)
 	}
-	if got.StartupTimeoutSeconds != 90 {
-		t.Fatalf("StartupTimeoutSeconds = %d, want 90", got.StartupTimeoutSeconds)
-	}
 }
 
 func TestNormalizeSlug(t *testing.T) {

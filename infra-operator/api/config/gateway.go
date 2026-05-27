@@ -5,6 +5,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const DefaultPublicRunStartupTimeoutSeconds = 10
+
 // GatewayConfig holds shared gateway configuration used by edge/cluster gateway.
 type GatewayConfig struct {
 	// JWT Configuration
@@ -106,12 +108,24 @@ type GatewayConfig struct {
 	// +optional
 	// +kubebuilder:default="aws-us-east-1"
 	PublicRegionID string `yaml:"public_region_id" json:"-"`
+	// PublicRunStartupTimeoutSeconds is the maximum seconds to wait for a
+	// cold-started Run service health check.
+	// +optional
+	// +kubebuilder:default=10
+	PublicRunStartupTimeoutSeconds int `yaml:"public_run_startup_timeout_seconds" json:"-"`
 
 	// SSH endpoint advertised to users for sandbox detail responses.
 	// +optional
 	SSHEndpointHost string `yaml:"ssh_endpoint_host" json:"-"`
 	// +optional
 	SSHEndpointPort int `yaml:"ssh_endpoint_port" json:"-"`
+}
+
+func DefaultedPublicRunStartupTimeoutSeconds(value int) int {
+	if value <= 0 {
+		return DefaultPublicRunStartupTimeoutSeconds
+	}
+	return value
 }
 
 // BuiltInAuthConfig configures the built-in authentication.

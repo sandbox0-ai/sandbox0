@@ -355,9 +355,7 @@ func externalRequestHeaders(headers http.Header) map[string][]string {
 			continue
 		}
 		copied := make([]string, 0, len(values))
-		for _, value := range values {
-			copied = append(copied, value)
-		}
+		copied = append(copied, values...)
 		out[http.CanonicalHeaderKey(key)] = copied
 	}
 	return out

@@ -24,19 +24,7 @@ type sandboxServiceMatch struct {
 }
 
 func (s *Server) getSandboxForPublicExposure(c *gin.Context, sandboxID string) (*mgr.Sandbox, error) {
-	if s.exposureSandboxCache != nil {
-		if sandbox, ok := s.exposureSandboxCache.Get(sandboxID); ok {
-			return sandbox, nil
-		}
-	}
-	sandbox, err := s.managerClient.GetSandboxInternal(c.Request.Context(), sandboxID)
-	if err != nil {
-		return nil, err
-	}
-	if s.exposureSandboxCache != nil {
-		s.exposureSandboxCache.Set(sandboxID, sandbox)
-	}
-	return sandbox, nil
+	return s.managerClient.GetSandboxInternal(c.Request.Context(), sandboxID)
 }
 
 func matchSandboxServiceRoute(services []mgr.SandboxAppService, port int, path string, method string) sandboxServiceMatch {

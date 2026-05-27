@@ -89,9 +89,6 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 			return
 		}
 		if needsRuntimeRefetch {
-			if s.exposureSandboxCache != nil {
-				s.exposureSandboxCache.Delete(sandboxID)
-			}
 			sandbox, err = s.getSandboxForPublicExposure(c, sandboxID)
 			if err != nil {
 				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
@@ -107,6 +104,16 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 
 	if basePort, parseErr := portFromURL(sandbox.InternalAddr); parseErr == nil && basePort == port {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "reserved port is not exposable")
+		return
+	}
+
+	if err := s.ensureSandboxServiceRuntime(c.Request.Context(), sandbox, match.service, route); err != nil {
+		s.logger.Warn("Sandbox service runtime is not ready",
+			zap.String("sandbox_id", sandboxID),
+			zap.String("service_id", match.service.ID),
+			zap.Error(err),
+		)
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox service runtime unavailable")
 		return
 	}
 

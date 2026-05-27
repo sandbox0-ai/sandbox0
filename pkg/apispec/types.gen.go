@@ -1456,8 +1456,8 @@ type SandboxAppService struct {
 	Id      string                   `json:"id"`
 	Ingress SandboxAppServiceIngress `json:"ingress"`
 
-	// Port Public exposure routing port. Function services normally use the sandbox procd port.
-	Port    int32                     `json:"port"`
+	// Port Public exposure routing port. Required for manual, cmd, and warm_process services. Omit for function services; Sandbox0 assigns the internal function service port.
+	Port    *int32                    `json:"port,omitempty"`
 	Runtime *SandboxAppServiceRuntime `json:"runtime,omitempty"`
 }
 
@@ -1546,8 +1546,8 @@ type SandboxAppServiceView struct {
 	Id      string                   `json:"id"`
 	Ingress SandboxAppServiceIngress `json:"ingress"`
 
-	// Port Public exposure routing port. Function services normally use the sandbox procd port.
-	Port int32 `json:"port"`
+	// Port Public exposure routing port. Required for manual, cmd, and warm_process services. Omit for function services; Sandbox0 assigns the internal function service port.
+	Port *int32 `json:"port,omitempty"`
 
 	// PublicUrl Public HTTPS URL for this service when public exposure is enabled.
 	PublicUrl       *string                   `json:"public_url,omitempty"`
@@ -1592,9 +1592,6 @@ type SandboxFunctionRuntime string
 type SandboxFunctionSource struct {
 	// Code Inline source code. Limited to 256 KiB.
 	Code string `json:"code"`
-
-	// Filename Relative Python filename used when materializing the source. Defaults to main.py.
-	Filename *string `json:"filename,omitempty"`
 
 	// Type Source transport. Only inline source is supported in this version.
 	Type SandboxFunctionSourceType `json:"type"`

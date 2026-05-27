@@ -1,87 +1,121 @@
 # Sandbox Services
 
-Sandbox Services expose named ports inside a sandbox. Use them when a sandbox needs public HTTP routes with method filtering, auth, CORS, rate limits, upstream timeout, path rewrite, and route-level resume behavior.
+Sandbox Services expose public HTTP entrypoints for workloads inside a sandbox. A service can point to a long-running listener on a sandbox port, start a command on first public access, or execute inline function code through procd.
 
-## Service Model
+Use services for:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | string | Stable service ID. Must be unique in the sandbox |
-| `display_name` | string | Optional human-readable label |
-| `port` | integer | Public exposure routing port. Function services normally use the procd port, default `49983` |
-| `runtime` | object | Optional restartable service process configuration |
-| `ingress` | object | Public exposure and route policy |
-| `health_check` | object | Optional readiness path |
+- public HTTP routes into a sandbox
+- route-level method filtering, auth, CORS, rate limits, timeout, and path rewrite
+- public URL auto-resume for paused or cleaned sandboxes
+- function handlers that do not run a long-lived HTTP server
 
-### Runtime
+## Mental Model
 
-Service runtime supports `cmd`, `warm_process`, `manual`, and `function`. Use `cmd` when Sandbox0 should create a new command context for the service. Use `warm_process` when the template already starts a long-lived process and the service should bind to that existing context. Use `function` when cluster-gateway should receive public HTTP traffic and ask procd to execute gateway-provided function source inside the sandbox.
+A sandbox service has three layers:
 
-### Health Check
+| Layer | Purpose |
+|-------|---------|
+| Service | Names the public entrypoint and, for listener-backed services, the sandbox port |
+| Runtime | Describes who owns the backing process: user, warm process, command, or function |
+| Route | Matches public HTTP requests and applies route policy before proxying or executing |
 
-`health_check.path` is the service readiness path. Services without `health_check.path` use TCP listen readiness as a fallback.
+The service response includes a `public_url` when `ingress.public` is true and the deployment has an exposure domain. Treat `public_url` as the service base URL. Append a route path when calling it.
 
-### Ingress
+```bash
+curl "$PUBLIC_URL/api/health"
+```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `public` | boolean | Exposes the service on the deployment exposure domain |
-| `routes` | array | Ordered public HTTP routes for this service |
+## Runtime Behavior
 
-When `public` is true and `routes` is empty, Sandbox0 creates a default route using the service ID and `/`.
+When `runtime` is omitted, Sandbox0 treats the service as `manual`.
 
-### Route
+| Runtime | `port` | Public access behavior |
+|---------|--------|------------------------|
+| `manual` | Required | Sandbox0 proxies traffic to `port`. The template, user, or agent must keep the listener running |
+| `warm_process` | Required | Sandbox0 proxies traffic to `port`. Public access does not create a new process; the template warm process must already provide the listener |
+| `cmd` | Required | On public access, Sandbox0 creates the configured procd `cmd` context when it is missing, waits for readiness, then proxies traffic to `port` |
+| `function` | Omit | Sandbox0 routes the request to procd and executes the configured inline function source. No user-managed listener is required |
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | string | Stable route ID. Must be unique within the service |
-| `path_prefix` | string | Request path prefix to match. Defaults to `/` |
-| `methods` | string array | Allowed HTTP methods. Empty allows every method |
-| `rewrite_prefix` | string or null | Optional path prefix replacement before proxying |
-| `auth` | object | Optional request authentication |
-| `cors` | object | Optional CORS policy |
-| `rate_limit` | object | Optional per-route rate limit |
-| `timeout_seconds` | integer | Optional upstream timeout in seconds |
-| `resume` | boolean | Whether this route may resume a paused sandbox when `auto_resume` is enabled |
+For `cmd` services, `health_check.path` controls readiness. If it is omitted, Sandbox0 falls back to a TCP connect check on the service port.
 
-### Resume Gates
+## Public URL Shape
 
-Public service auto-resume uses two gates:
+For listener-backed services, the public URL is derived from the sandbox ID, service port, region ID, and root domain:
 
-- sandbox `auto_resume` is the sandbox-level gate. When it is `false`, inbound access must not auto-resume the sandbox.
-- route `resume` is the route-level gate. Only matching public routes with `resume: true` may wake the sandbox.
+```text
+https://<sandbox_id>--p<port>.<region_id>.<root_domain>
+```
 
-Both gates must be enabled for a public URL request to resume a paused or cleaned sandbox. For a cleaned sandbox, Sandbox0 creates a new runtime pod for the same sandbox identity, so the `sandbox_id` and service `public_url` stay unchanged.
+For function services, the API still returns a service-level `public_url`, but the service uses Sandbox0's reserved function routing label:
 
-<Callout>
-Route rate limits use the gateway rate limit backend. Self-hosted deployments default to process-local memory for simple onboarding. Configure `Sandbox0Infra.spec.redis` when multiple gateway replicas need shared Redis-backed limits.
-</Callout>
+```text
+https://<sandbox_id>--p49983.<region_id>.<root_domain>
+```
 
-### Auth
+`49983` is an internal routing port for function services. Do not set it in function service config and do not depend on hand-built URLs. Use the `public_url` returned by `GET` or `PUT /api/v1/sandboxes/{'{id}'}/services`.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `mode` | string | `none`, `bearer`, or `header` |
-| `bearer_token_sha256` | string | SHA-256 hex digest for bearer token auth |
-| `header_name` | string | Header name for header auth |
-| `header_value_sha256` | string | SHA-256 hex digest for header value auth |
+The URL itself does not include a route path. If a route has `path_prefix: /webhook`, call:
 
-<Callout variant="warning">
-Route auth stores SHA-256 digests, not plaintext tokens. Hash secret values before sending service configuration.
-</Callout>
+```bash
+curl -X POST "$PUBLIC_URL/webhook/github"
+```
+
+## Routes And Paths
+
+Routes are evaluated before proxying or function execution.
+
+| Field | Behavior |
+|-------|----------|
+| `path_prefix` | Matches request paths. Defaults to `/` |
+| `methods` | Allows only listed HTTP methods. Empty allows all methods |
+| `rewrite_prefix` | Rewrites the matched path prefix before proxying or function execution |
+| `auth` | Applies bearer or header authentication before the request reaches the sandbox |
+| `cors` | Handles CORS preflight and response headers at the gateway |
+| `rate_limit` | Applies per-route rate limiting at the gateway |
+| `timeout_seconds` | Sets the upstream or function execution timeout |
+| `resume` | Allows this route to resume a paused or cleaned sandbox when sandbox `auto_resume` is also true |
+
+`path_prefix` is not stripped automatically. Without `rewrite_prefix`, the upstream service or function handler sees the original request path.
+
+```yaml
+routes:
+    - id: webhook
+      path_prefix: /webhook
+      resume: true
+```
+
+A request to `$PUBLIC_URL/webhook/github` reaches the backing service or function as `/webhook/github`.
+
+To strip `/webhook`, set `rewrite_prefix: /`:
+
+```yaml
+routes:
+    - id: webhook
+      path_prefix: /webhook
+      rewrite_prefix: /
+      resume: true
+```
+
+The same request reaches the backing service or function as `/github`.
 
 ## Function Services
 
-A function service is a sandbox service with `runtime.type: function`. cluster-gateway owns the public URL, route policy, auth, CORS, rate limit, timeout, rewrite, and resume behavior. Function source is stored in the service config and carried by cluster-gateway to procd for execution inside the sandbox.
+A function service has `runtime.type: function`. It stores inline source code in the service config. On each matching public request, cluster-gateway applies route policy, forwards an execution request to procd, and returns the function handler response.
 
-Function services should use the sandbox procd port as the service `port`. The default procd port is `49983`. cluster-gateway only allows that reserved port for function services and never exposes procd management APIs publicly.
+Function services are different from listener-backed services:
 
-Python is the first supported runtime. The sandbox image must include `python3` in `PATH`. HTTP request/response, SSE, and WebSocket requests all use the same service config and route policy.
+- omit `port` in the request
+- do not start or expose a user HTTP listener
+- use the returned `public_url` as the only public entrypoint
+- may return normal HTTP responses, SSE streams, or WebSocket messages
+
+Python is the first supported function runtime. The sandbox image must include `python3` in `PATH`.
+
+### Function Config
 
 ```yaml
 services:
     - id: webhook
-      port: 49983
       runtime:
           type: function
           function:
@@ -89,13 +123,14 @@ services:
               handler: handler
               source:
                   type: inline
-                  filename: main.py
                   code: |
                       def handler(request):
                           return {
                               "status": 200,
                               "headers": {"content-type": "application/json"},
                               "body": {
+                                  "service_id": request["service_id"],
+                                  "route_id": request["route_id"],
                                   "method": request["method"],
                                   "path": request["path"],
                               },
@@ -103,193 +138,122 @@ services:
       ingress:
           public: true
           routes:
-              - id: root
-                path_prefix: /
+              - id: webhook
+                path_prefix: /webhook
                 methods: [POST]
                 timeout_seconds: 30
                 resume: true
 ```
 
-Configure a function service through the SDKs or CLI by replacing the sandbox service list. In the TypeScript generated model, the JSON field `function` is exposed as `_function`.
+Apply it with the CLI:
 
-<Tabs
-  tabs={[
-    {
-      label: "Go",
-      language: "go",
-      code: `functionSource := \`def handler(request):
-    return {"status": 200, "body": "ok"}
-\`
+```bash
+s0 sandbox service update --services-file function-services.yaml -s sb_abc123
+```
 
-resp, err := sandbox.UpdateServices(ctx, []apispec.SandboxAppService{
-    {
-        ID:   "handler",
-        Port: 49983,
-        Runtime: apispec.NewOptSandboxAppServiceRuntime(apispec.SandboxAppServiceRuntime{
-            Type: apispec.SandboxAppServiceRuntimeTypeFunction,
-            Function: apispec.NewOptSandboxFunction(apispec.SandboxFunction{
-                Runtime: apispec.SandboxFunctionRuntimePython,
-                Handler: apispec.NewOptString("handler"),
-                Source: apispec.SandboxFunctionSource{
-                    Type:     apispec.SandboxFunctionSourceTypeInline,
-                    Filename: apispec.NewOptString("main.py"),
-                    Code:     functionSource,
-                },
-            }),
-        }),
-        Ingress: apispec.SandboxAppServiceIngress{
-            Public: true,
-            Routes: []apispec.SandboxAppServiceRoute{
-                {
-                    ID:             "handler",
-                    PathPrefix:     apispec.NewOptString("/"),
-                    Methods:        []string{"POST"},
-                    TimeoutSeconds: apispec.NewOptInt32(30),
-                    Resume:         true,
-                },
+Or with the API:
+
+```json
+{
+    "services": [
+        {
+            "id": "webhook",
+            "runtime": {
+                "type": "function",
+                "function": {
+                    "runtime": "python",
+                    "handler": "handler",
+                    "source": {
+                        "type": "inline",
+                        "code": "def handler(request):\n    return {\n        \"status\": 200,\n        \"headers\": {\"content-type\": \"application/json\"},\n        \"body\": {\n            \"service_id\": request[\"service_id\"],\n            \"route_id\": request[\"route_id\"],\n            \"method\": request[\"method\"],\n            \"path\": request[\"path\"],\n        },\n    }\n"
+                    }
+                }
             },
-        },
-    },
-})
-if err != nil {
-    log.Fatal(err)
+            "ingress": {
+                "public": true,
+                "routes": [
+                    {
+                        "id": "webhook",
+                        "path_prefix": "/webhook",
+                        "methods": ["POST"],
+                        "timeout_seconds": 30,
+                        "resume": true
+                    }
+                ]
+            }
+        }
+    ]
 }
-fmt.Printf("services: %d\\n", len(resp.Services))`
-    },
-    {
-      label: "Python",
-      language: "python",
-      code: `from sandbox0.apispec.models.sandbox_app_service import SandboxAppService
-from sandbox0.apispec.models.sandbox_app_service_ingress import SandboxAppServiceIngress
-from sandbox0.apispec.models.sandbox_app_service_route import SandboxAppServiceRoute
-from sandbox0.apispec.models.sandbox_app_service_runtime import SandboxAppServiceRuntime
-from sandbox0.apispec.models.sandbox_app_service_runtime_type import SandboxAppServiceRuntimeType
-from sandbox0.apispec.models.sandbox_function import SandboxFunction
-from sandbox0.apispec.models.sandbox_function_runtime import SandboxFunctionRuntime
-from sandbox0.apispec.models.sandbox_function_source import SandboxFunctionSource
-from sandbox0.apispec.models.sandbox_function_source_type import SandboxFunctionSourceType
+```
 
-function_source = """def handler(request):
-    return {"status": 200, "body": "ok"}
-"""
+```bash
+curl -X PUT "$SANDBOX0_API_URL/api/v1/sandboxes/$SANDBOX_ID/services" \
+    -H "authorization: Bearer $SANDBOX0_API_TOKEN" \
+    -H "x-team-id: $SANDBOX0_TEAM_ID" \
+    -H "content-type: application/json" \
+    --data-binary @function-services.json
+```
 
-resp = sandbox.update_services([
-    SandboxAppService(
-        id="handler",
-        port=49983,
-        runtime=SandboxAppServiceRuntime(
-            type_=SandboxAppServiceRuntimeType.FUNCTION,
-            function=SandboxFunction(
-                runtime=SandboxFunctionRuntime.PYTHON,
-                handler="handler",
-                source=SandboxFunctionSource(
-                    type_=SandboxFunctionSourceType.INLINE,
-                    filename="main.py",
-                    code=function_source,
-                ),
-            ),
-        ),
-        ingress=SandboxAppServiceIngress(
-            public=True,
-            routes=[
-                SandboxAppServiceRoute(
-                    id="handler",
-                    path_prefix="/",
-                    methods=["POST"],
-                    timeout_seconds=30,
-                    resume=True,
-                ),
-            ],
-        ),
-    ),
-])
-print(f"services: {len(resp.services)}")`
-    },
-    {
-      label: "TypeScript",
-      language: "typescript",
-      code: `const functionSource = \`def handler(request):
-    return {"status": 200, "body": "ok"}
-\`;
+The service response includes a `public_url`:
 
-const resp = await sandbox.updateServices([
-    {
-        id: 'handler',
-        port: 49983,
-        runtime: {
-            type: 'function',
-            _function: {
-                runtime: 'python',
-                handler: 'handler',
-                source: {
-                    type: 'inline',
-                    filename: 'main.py',
-                    code: functionSource,
-                },
-            },
-        },
-        ingress: {
-            public: true,
-            routes: [
-                {
-                    id: 'handler',
-                    pathPrefix: '/',
-                    methods: ['POST'],
-                    timeoutSeconds: 30,
-                    resume: true,
-                },
-            ],
-        },
-    },
-]);
-console.log('services:', resp.services?.length ?? 0);`
-    },
-    {
-      label: "CLI",
-      language: "bash",
-      code: `cat > function-services.yaml <<'EOF'
-services:
-  - id: handler
-    port: 49983
-    runtime:
-      type: function
-      function:
-        runtime: python
-        handler: handler
-        source:
-          type: inline
-          filename: main.py
-          code: |
-            def handler(request):
-                return {"status": 200, "body": "ok"}
-    ingress:
-      public: true
-      routes:
-        - id: handler
-          path_prefix: /
-          methods: [POST]
-          timeout_seconds: 30
-          resume: true
-EOF
-
-s0 sandbox service update --services-file function-services.yaml -s sb_abc123`
+```json
+{
+    "success": true,
+    "data": {
+        "sandbox_id": "rs-example",
+        "exposure_domain": "aws-us-east-1.sandbox0.app",
+        "services": [
+            {
+                "id": "webhook",
+                "port": 49983,
+                "public_url": "https://rs-example--p49983.aws-us-east-1.sandbox0.app"
+            }
+        ]
     }
-  ]}
-/>
+}
+```
 
-The handler receives a request object with:
+The response includes `port: 49983` because Sandbox0 normalizes the service for routing. Do not send `port` when configuring a function service.
+
+### Call A Function
+
+Use the returned `public_url` and append a path that matches the route.
+
+```bash
+curl -X POST "$PUBLIC_URL/webhook/github" \
+    -H "content-type: application/json" \
+    -d '{"event":"ping"}'
+```
+
+With the config above, the function handler receives:
+
+```json
+{
+    "service_id": "webhook",
+    "route_id": "webhook",
+    "method": "POST",
+    "path": "/webhook/github",
+    "body_base64": "eyJldmVudCI6InBpbmcifQ=="
+}
+```
+
+The function response is the HTTP response body and status. The function does not return a URL.
+
+### Function Request Object
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `service_id` | string | Matched service ID |
 | `route_id` | string | Matched route ID |
 | `method` | string | HTTP method |
-| `path` | string | Request path after route rewrite |
+| `path` | string | Request path after any `rewrite_prefix` |
 | `raw_query` | string | Raw query string |
-| `headers` | object | HTTP headers |
+| `headers` | object | Request headers |
 | `body_base64` | string | Base64-encoded request body |
 
-The handler returns either a value or a response object:
+### Function Return Value
+
+Handlers may return any JSON-serializable value, or a response object.
 
 ```python
 def handler(request):
@@ -300,7 +264,7 @@ def handler(request):
     }
 ```
 
-For SSE, clients send `Accept: text/event-stream`. The handler can return a response object whose `body` is a Python iterable or async iterable. Each yielded string or bytes value is streamed and flushed to the client.
+For SSE, clients send `Accept: text/event-stream`. Return an iterable or async iterable body.
 
 ```python
 def handler(request):
@@ -315,7 +279,7 @@ def handler(request):
     }
 ```
 
-For WebSocket requests, define an async handler that accepts `(request, ws)`. The `ws` object supports `receive()`, `send(value)`, `close(reason="")`, and async iteration. Text messages are strings; binary messages are bytes.
+For WebSocket requests, define an async handler that accepts `(request, ws)`.
 
 ```python
 async def handler(request, ws):
@@ -323,13 +287,111 @@ async def handler(request, ws):
         await ws.send("echo:" + message)
 ```
 
-## List Services
+## Cmd Services
+
+A `cmd` service starts a procd command on first matching public access when the service command is not already running. Sandbox0 injects these environment variables into the command:
+
+| Environment variable | Value |
+|----------------------|-------|
+| `SANDBOX0_SERVICE_ID` | Service ID |
+| `SANDBOX0_SERVICE_PORT` | Configured service port |
+| `SANDBOX0_SERVICE_RUNTIME` | `cmd` |
+
+```yaml
+services:
+    - id: api
+      port: 8080
+      runtime:
+          type: cmd
+          command:
+              - python3
+              - -c
+              - |
+                  import http.server
+                  import json
+                  import os
+                  import socketserver
+
+                  port = int(os.environ["SANDBOX0_SERVICE_PORT"])
+
+                  class Handler(http.server.BaseHTTPRequestHandler):
+                      def do_GET(self):
+                          if self.path == "/healthz":
+                              self.send_response(204)
+                              self.end_headers()
+                              return
+                          self.send_response(200)
+                          self.send_header("content-type", "application/json")
+                          self.end_headers()
+                          self.wfile.write(json.dumps({
+                              "service_id": os.environ["SANDBOX0_SERVICE_ID"],
+                              "path": self.path,
+                          }).encode())
+
+                  socketserver.TCPServer(("", port), Handler).serve_forever()
+      health_check:
+          path: /healthz
+      ingress:
+          public: true
+          routes:
+              - id: api
+                path_prefix: /api
+                rewrite_prefix: /
+                methods: [GET]
+                timeout_seconds: 30
+                resume: true
+```
+
+After applying this service, the first request starts the command, waits for `/healthz`, rewrites `/api/hello` to `/hello`, and proxies to the command.
+
+```bash
+curl "$PUBLIC_URL/api/hello"
+```
+
+## Manual And Warm Process Services
+
+Use `manual` when another actor starts and owns the listener.
+
+```yaml
+services:
+    - id: web
+      port: 3000
+      runtime:
+          type: manual
+      ingress:
+          public: true
+          routes:
+              - id: web
+                path_prefix: /
+                resume: true
+```
+
+Use `warm_process` when the template already starts the listener as a warm process. Public access does not create another process.
+
+```yaml
+services:
+    - id: web
+      port: 3000
+      runtime:
+          type: warm_process
+          warm_process_name: web
+      ingress:
+          public: true
+          routes:
+              - id: web
+                path_prefix: /
+                resume: true
+```
+
+## API Reference
+
+### List Services
 
 <Endpoint method="GET">
 /api/v1/sandboxes/{'{id}'}/services
 </Endpoint>
 
-The response includes `publishable`, `publish_blockers`, `public_url`, and `exposure_domain`.
+The response includes the normalized services, `publishable`, `publish_blockers`, `public_url`, and `exposure_domain`.
 
 <Tabs
   tabs={[
@@ -340,27 +402,24 @@ The response includes `publishable`, `publish_blockers`, `public_url`, and `expo
 if err != nil {
     log.Fatal(err)
 }
-fmt.Printf("services: %d\\n", len(resp.Services))
 for _, service := range resp.Services {
-    fmt.Printf("%s -> port %d url=%s\\n", service.ID, service.Port, service.PublicURL.Or(""))
+    fmt.Printf("%s url=%s port=%d\\n", service.ID, service.PublicURL.Or(""), service.Port.Or(0))
+}`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const resp = await sandbox.getServices();
+for (const service of resp.services ?? []) {
+    console.log(\`\${service.id} url=\${service.publicUrl ?? ''} port=\${service.port ?? ''}\`);
 }`
     },
     {
       label: "Python",
       language: "python",
       code: `resp = sandbox.get_services()
-print(f"services: {len(resp.services)}")
 for service in resp.services:
-    print(f"{service.id} -> port {service.port}")`
-    },
-    {
-      label: "TypeScript",
-      language: "typescript",
-      code: `const resp = await sandbox.getServices();
-console.log('services:', resp.services?.length ?? 0);
-for (const service of resp.services ?? []) {
-    console.log(\`\${service.id} -> port \${service.port}\`);
-}`
+    print(f"{service.id} url={service.public_url} port={service.port}")`
     },
     {
       label: "CLI",
@@ -370,13 +429,13 @@ for (const service of resp.services ?? []) {
   ]}
 />
 
-## Replace Services
+### Replace Services
 
 <Endpoint method="PUT">
 /api/v1/sandboxes/{'{id}'}/services
 </Endpoint>
 
-The update replaces the full service list. Include every service that should remain active.
+`PUT` replaces the full service list. Include every service that should remain active.
 
 <Tabs
   tabs={[
@@ -388,7 +447,7 @@ The update replaces the full service list. Include every service that should rem
 resp, err := sandbox.UpdateServices(ctx, []apispec.SandboxAppService{
     {
         ID:   "api",
-        Port: 8080,
+        Port: apispec.NewOptInt32(8080),
         Ingress: apispec.SandboxAppServiceIngress{
             Public: true,
             Routes: []apispec.SandboxAppServiceRoute{
@@ -399,10 +458,6 @@ resp, err := sandbox.UpdateServices(ctx, []apispec.SandboxAppService{
                     Auth: apispec.NewOptSandboxAppServiceRouteAuth(apispec.SandboxAppServiceRouteAuth{
                         Mode:              apispec.SandboxAppServiceRouteAuthModeBearer,
                         BearerTokenSHA256: apispec.NewOptString(hex.EncodeToString(tokenHash[:])),
-                    }),
-                    RateLimit: apispec.NewOptSandboxAppServiceRouteRateLimit(apispec.SandboxAppServiceRouteRateLimit{
-                        Rps:   20,
-                        Burst: 40,
                     }),
                     TimeoutSeconds: apispec.NewOptInt32(30),
                     Resume:         true,
@@ -417,6 +472,39 @@ if err != nil {
 fmt.Printf("services: %d\\n", len(resp.Services))`
     },
     {
+      label: "TypeScript",
+      language: "typescript",
+      code: `import { createHash } from 'node:crypto';
+
+const tokenHash = createHash('sha256')
+    .update(process.env.PUBLIC_API_TOKEN!)
+    .digest('hex');
+
+const resp = await sandbox.updateServices([
+    {
+        id: 'api',
+        port: 8080,
+        ingress: {
+            _public: true,
+            routes: [
+                {
+                    id: 'api',
+                    pathPrefix: '/api',
+                    methods: ['GET', 'POST'],
+                    auth: {
+                        mode: 'bearer',
+                        bearerTokenSha256: tokenHash,
+                    },
+                    timeoutSeconds: 30,
+                    resume: true,
+                },
+            ],
+        },
+    },
+]);
+console.log('services:', resp.services?.length ?? 0);`
+    },
+    {
       label: "Python",
       language: "python",
       code: `import hashlib
@@ -427,7 +515,6 @@ from sandbox0.apispec.models.sandbox_app_service_ingress import SandboxAppServic
 from sandbox0.apispec.models.sandbox_app_service_route import SandboxAppServiceRoute
 from sandbox0.apispec.models.sandbox_app_service_route_auth import SandboxAppServiceRouteAuth
 from sandbox0.apispec.models.sandbox_app_service_route_auth_mode import SandboxAppServiceRouteAuthMode
-from sandbox0.apispec.models.sandbox_app_service_route_rate_limit import SandboxAppServiceRouteRateLimit
 
 token_hash = hashlib.sha256(os.environ["PUBLIC_API_TOKEN"].encode()).hexdigest()
 
@@ -446,7 +533,6 @@ resp = sandbox.update_services([
                         mode=SandboxAppServiceRouteAuthMode.BEARER,
                         bearer_token_sha256=token_hash,
                     ),
-                    rate_limit=SandboxAppServiceRouteRateLimit(rps=20, burst=40),
                     timeout_seconds=30,
                     resume=True,
                 ),
@@ -457,173 +543,14 @@ resp = sandbox.update_services([
 print(f"services: {len(resp.services)}")`
     },
     {
-      label: "TypeScript",
-      language: "typescript",
-      code: `import { createHash } from 'node:crypto';
-
-const tokenHash = createHash('sha256')
-    .update(process.env.PUBLIC_API_TOKEN!)
-    .digest('hex');
-
-const resp = await sandbox.updateServices([
-    {
-        id: 'api',
-        port: 8080,
-        ingress: {
-            public: true,
-            routes: [
-                {
-                    id: 'api',
-                    pathPrefix: '/api',
-                    methods: ['GET', 'POST'],
-                    auth: {
-                        mode: 'bearer',
-                        bearerTokenSha256: tokenHash,
-                    },
-                    rateLimit: {
-                        rps: 20,
-                        burst: 40,
-                    },
-                    timeoutSeconds: 30,
-                    resume: true,
-                },
-            ],
-        },
-    },
-]);
-console.log('services:', resp.services?.length ?? 0);`
-    },
-    {
       label: "CLI",
       language: "bash",
-      code: `TOKEN_HASH="$(printf %s "$PUBLIC_API_TOKEN" | sha256sum | awk '{print $1}')"
-
-cat > services.yaml <<EOF
-services:
-  - id: api
-    port: 8080
-    ingress:
-      public: true
-      routes:
-        - id: api
-          path_prefix: /api
-          methods: [GET, POST]
-          auth:
-            mode: bearer
-            bearer_token_sha256: "$TOKEN_HASH"
-          rate_limit:
-            rps: 20
-            burst: 40
-          timeout_seconds: 30
-          resume: true
-EOF
-
-s0 sandbox service update --services-file services.yaml -s sb_abc123`
+      code: `s0 sandbox service update --services-file services.yaml -s sb_abc123`
     }
   ]}
 />
 
-## Set Services At Claim Time
-
-You can attach services when claiming a sandbox. This is useful when the sandbox starts a known HTTP service during boot.
-
-<Tabs
-  tabs={[
-    {
-      label: "Go",
-      language: "go",
-      code: `sandbox, err := client.ClaimSandbox(ctx, "default",
-    sandbox0.WithSandboxAutoResume(true),
-    sandbox0.WithSandboxServices([]apispec.SandboxAppService{
-        {
-            ID:   "web",
-            Port: 3000,
-            Ingress: apispec.SandboxAppServiceIngress{
-                Public: true,
-                Routes: []apispec.SandboxAppServiceRoute{
-                    {
-                        ID:         "web",
-                        PathPrefix: apispec.NewOptString("/"),
-                        Resume:     true,
-                    },
-                },
-            },
-        },
-    }),
-)
-if err != nil {
-    log.Fatal(err)
-}`
-    },
-    {
-      label: "Python",
-      language: "python",
-      code: `from sandbox0.apispec.models.sandbox_config import SandboxConfig
-
-sandbox = client.sandboxes.claim(
-    "default",
-    config=SandboxConfig.from_dict({
-        "auto_resume": True,
-        "services": [
-            {
-                "id": "web",
-                "port": 3000,
-                "ingress": {
-                    "public": True,
-                    "routes": [
-                        {
-                            "id": "web",
-                            "path_prefix": "/",
-                            "resume": True,
-                        },
-                    ],
-                },
-            },
-        ],
-    }),
-)`
-    },
-    {
-      label: "TypeScript",
-      language: "typescript",
-      code: `const sandbox = await client.sandboxes.claim('default', {
-    autoResume: true,
-    services: [
-        {
-            id: 'web',
-            port: 3000,
-            ingress: {
-                public: true,
-                routes: [{ id: 'web', pathPrefix: '/', resume: true }],
-            },
-        },
-    ],
-});`
-    },
-    {
-      label: "CLI",
-      language: "bash",
-      code: `cat > sandbox.yaml <<EOF
-template: default
-config:
-  auto_resume: true
-  services:
-    - id: web
-      port: 3000
-      ingress:
-        public: true
-        routes:
-          - id: web
-            path_prefix: /
-            resume: true
-EOF
-
-s0 sandbox create -f sandbox.yaml`
-    }
-  ]}
-/>
-
-## Clear Services
+### Clear Services
 
 Clearing services removes public HTTP exposure from the sandbox.
 
@@ -638,14 +565,14 @@ if err != nil {
 }`
     },
     {
-      label: "Python",
-      language: "python",
-      code: `sandbox.clear_services()`
-    },
-    {
       label: "TypeScript",
       language: "typescript",
       code: `await sandbox.clearServices();`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `sandbox.clear_services()`
     },
     {
       label: "CLI",
@@ -655,13 +582,175 @@ if err != nil {
   ]}
 />
 
-## Behavior Notes
+## Set Services At Claim Time
 
-- Public HTTP traffic must match a route on a public service.
-- If `methods` is empty, every HTTP method is allowed for that route.
-- Public URL auto-resume requires both sandbox `auto_resume: true` and route `resume: true`.
-- Public service responses include `public_url`, derived from the deployment exposure domain as `https://{sandbox_id}--p{port}.{exposure_domain}`.
-- Public URLs remain reserved for a `cleaned` sandbox. A later request can start a new runtime pod without changing the URL, and the URL becomes unavailable only after explicit sandbox deletion.
+You can attach services when claiming a sandbox. Function services may omit `port` in claim config just as they do in `PUT /services`.
+
+```yaml
+template: default
+config:
+    auto_resume: true
+    services:
+        - id: webhook
+          runtime:
+              type: function
+              function:
+                  runtime: python
+                  handler: handler
+                  source:
+                      type: inline
+                      code: |
+                          def handler(request):
+                              return {"status": 200, "body": "ok"}
+          ingress:
+              public: true
+              routes:
+                  - id: webhook
+                    path_prefix: /webhook
+                    methods: [POST]
+                    resume: true
+```
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `functionSource := "def handler(request):\\n    return {\\"status\\": 200, \\"body\\": \\"ok\\"}\\n"
+
+sandbox, err := client.ClaimSandbox(ctx, "default",
+    sandbox0.WithSandboxAutoResume(true),
+    sandbox0.WithSandboxServices([]apispec.SandboxAppService{
+        {
+            ID: "webhook",
+            Runtime: apispec.NewOptSandboxAppServiceRuntime(apispec.SandboxAppServiceRuntime{
+                Type: apispec.SandboxAppServiceRuntimeTypeFunction,
+                Function: apispec.NewOptSandboxFunction(apispec.SandboxFunction{
+                    Runtime: apispec.SandboxFunctionRuntimePython,
+                    Handler: apispec.NewOptString("handler"),
+                    Source: apispec.SandboxFunctionSource{
+                        Type: apispec.SandboxFunctionSourceTypeInline,
+                        Code: functionSource,
+                    },
+                }),
+            }),
+            Ingress: apispec.SandboxAppServiceIngress{
+                Public: true,
+                Routes: []apispec.SandboxAppServiceRoute{
+                    {
+                        ID:         "webhook",
+                        PathPrefix: apispec.NewOptString("/webhook"),
+                        Methods:    []string{"POST"},
+                        Resume:     true,
+                    },
+                },
+            },
+        },
+    }),
+)
+if err != nil {
+    log.Fatal(err)
+}`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const sandbox = await client.sandboxes.claim('default', {
+    autoResume: true,
+    services: [
+        {
+            id: 'webhook',
+            runtime: {
+                type: 'function',
+                _function: {
+                    runtime: 'python',
+                    handler: 'handler',
+                    source: {
+                        type: 'inline',
+                        code: 'def handler(request):\\n    return {"status": 200, "body": "ok"}\\n',
+                    },
+                },
+            },
+            ingress: {
+                _public: true,
+                routes: [
+                    {
+                        id: 'webhook',
+                        pathPrefix: '/webhook',
+                        methods: ['POST'],
+                        resume: true,
+                    },
+                ],
+            },
+        },
+    ],
+});`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.apispec.models.sandbox_config import SandboxConfig
+
+sandbox = client.sandboxes.claim(
+    "default",
+    config=SandboxConfig.from_dict({
+        "auto_resume": True,
+        "services": [
+            {
+                "id": "webhook",
+                "runtime": {
+                    "type": "function",
+                    "function": {
+                        "runtime": "python",
+                        "handler": "handler",
+                        "source": {
+                            "type": "inline",
+                            "code": "def handler(request):\\n    return {'status': 200, 'body': 'ok'}\\n",
+                        },
+                    },
+                },
+                "ingress": {
+                    "public": True,
+                    "routes": [
+                        {
+                            "id": "webhook",
+                            "path_prefix": "/webhook",
+                            "methods": ["POST"],
+                            "resume": True,
+                        },
+                    ],
+                },
+            },
+        ],
+    }),
+)`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox create -f sandbox.yaml`
+    }
+  ]}
+/>
+
+## Auto-Resume
+
+Public service auto-resume has two gates:
+
+- sandbox `auto_resume` must be true
+- matched route `resume` must be true
+
+Both gates are required for public URL requests to wake a paused sandbox or a cleaned sandbox.
+
+For a cleaned sandbox, Sandbox0 creates a new runtime pod for the same sandbox identity. The sandbox ID and service `public_url` stay unchanged. For `cmd` services, the command is started again in the new runtime pod. For `function` services, there is still no long-running listener; each request executes the handler after the sandbox runtime is available.
+
+## Notes
+
+- `PUT /services` replaces the entire service list.
+- Public traffic must match a route on a public service.
+- If `methods` is empty, all methods are allowed.
+- Route auth stores SHA-256 digests, not plaintext tokens.
+- Route rate limits use the gateway rate limit backend. Self-hosted deployments default to process-local memory; configure `Sandbox0Infra.spec.redis` for shared Redis-backed limits across gateway replicas.
 
 ## Next Steps
 
@@ -670,7 +759,7 @@ if err != nil {
     Receive signed sandbox lifecycle, service, and file-related events.
   </Card>
 
-  <Card title="Overview" href="/docs/sandbox" cta="Continue">
-    Review sandbox configuration, lifecycle, and runtime controls.
+  <Card title="Contexts" href="/docs/sandbox/contexts" cta="Continue">
+    Create and inspect the command processes that can back services.
   </Card>
 </CardGroup>

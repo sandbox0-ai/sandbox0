@@ -38,9 +38,8 @@ const (
 )
 
 var (
-	functionHandlerPattern  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`)
-	functionFilenamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
-	functionDigestPattern   = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
+	functionHandlerPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`)
+	functionDigestPattern  = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 )
 
 type functionHandlerConfig struct {
@@ -322,13 +321,13 @@ func (h *FunctionHandler) requestTimeout(timeoutMS int) (time.Duration, error) {
 func (h *FunctionHandler) materializeSource(source sandboxfunction.Source) (string, error) {
 	digest := source.Digest
 	if digest == "" {
-		digest = sandboxfunction.InlineDigest(source.Filename, source.Code)
+		digest = sandboxfunction.InlineDigest(source.Code)
 	}
 	if !functionDigestPattern.MatchString(digest) {
 		return "", errors.New("source.digest must be a sha256 digest")
 	}
-	expected := sandboxfunction.InlineDigest(source.Filename, source.Code)
-	if source.Code != "" && digest != expected {
+	expected := sandboxfunction.InlineDigest(source.Code)
+	if source.Code != "" && digest != expected && digest != sandboxfunction.LegacyInlineDigest(source.Filename, source.Code) {
 		return "", errors.New("source.digest does not match source code")
 	}
 	dirName := strings.TrimPrefix(digest, "sha256:")
@@ -336,11 +335,7 @@ func (h *FunctionHandler) materializeSource(source sandboxfunction.Source) (stri
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("prepare function source cache: %w", err)
 	}
-	modulePath := filepath.Join(dir, source.Filename)
-	rel, err := filepath.Rel(dir, modulePath)
-	if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
-		return "", errors.New("source.filename escapes source cache")
-	}
+	modulePath := filepath.Join(dir, sandboxfunction.DefaultFilename)
 	if source.Code != "" {
 		if err := os.WriteFile(modulePath, []byte(source.Code), 0o600); err != nil {
 			return "", fmt.Errorf("write function source: %w", err)
@@ -632,15 +627,6 @@ func validateFunctionExecuteRequest(req sandboxfunction.ExecuteRequest) error {
 	}
 	if req.Source.Type != sandboxfunction.SourceTypeInline {
 		return fmt.Errorf("source.type must be %q", sandboxfunction.SourceTypeInline)
-	}
-	if req.Source.Filename == "" {
-		return errors.New("source.filename is required")
-	}
-	if strings.Contains(req.Source.Filename, "/") || strings.Contains(req.Source.Filename, "\\") || strings.HasPrefix(req.Source.Filename, ".") {
-		return errors.New("source.filename must be a relative file name")
-	}
-	if !functionFilenamePattern.MatchString(req.Source.Filename) {
-		return errors.New("source.filename contains unsupported characters")
 	}
 	if strings.TrimSpace(req.Source.Code) == "" {
 		return errors.New("source.code is required")

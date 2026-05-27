@@ -14,8 +14,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/middleware"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
-	"github.com/sandbox0-ai/sandbox0/pkg/cache"
 	gatewayapikey "github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	gatewaybuiltin "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
 	gatewayoidc "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/oidc"
@@ -60,7 +58,6 @@ type Server struct {
 	entitlements          licensing.Entitlements
 	obsProvider           *observability.Provider
 	httpClient            *http.Client
-	exposureSandboxCache  *cache.Cache[string, *mgr.Sandbox]
 	sandboxServiceLimiter ratelimit.Limiter
 }
 
@@ -250,33 +247,28 @@ func NewServer(
 	}
 
 	server := &Server{
-		router:             router,
-		cfg:                cfg,
-		proxy2Mgr:          proxy2Mgr,
-		proxy2sp:           proxy2sp,
-		managerClient:      managerClient,
-		authMiddleware:     authMiddleware,
-		publicAuth:         publicAuth,
-		compositeAuth:      compositeAuth,
-		publicIdentityRepo: publicIdentityRepo,
-		publicAPIKeyRepo:   publicAPIKeyRepo,
-		rateLimiter:        rateLimiter,
-		externalLimiter:    externalLimiter,
-		publicBuiltin:      publicBuiltin,
-		publicOIDC:         publicOIDC,
-		publicJWT:          publicJWT,
-		requestLogger:      requestLogger,
-		logger:             logger,
-		meteringHandler:    meteringHandler,
-		internalAuthGen:    internalAuthGen,
-		entitlements:       entitlements,
-		obsProvider:        obsProvider,
-		httpClient:         httpClient,
-		exposureSandboxCache: cache.New[string, *mgr.Sandbox](cache.Config{
-			MaxSize:         4096,
-			TTL:             5 * time.Second,
-			CleanupInterval: 5 * time.Second,
-		}),
+		router:                router,
+		cfg:                   cfg,
+		proxy2Mgr:             proxy2Mgr,
+		proxy2sp:              proxy2sp,
+		managerClient:         managerClient,
+		authMiddleware:        authMiddleware,
+		publicAuth:            publicAuth,
+		compositeAuth:         compositeAuth,
+		publicIdentityRepo:    publicIdentityRepo,
+		publicAPIKeyRepo:      publicAPIKeyRepo,
+		rateLimiter:           rateLimiter,
+		externalLimiter:       externalLimiter,
+		publicBuiltin:         publicBuiltin,
+		publicOIDC:            publicOIDC,
+		publicJWT:             publicJWT,
+		requestLogger:         requestLogger,
+		logger:                logger,
+		meteringHandler:       meteringHandler,
+		internalAuthGen:       internalAuthGen,
+		entitlements:          entitlements,
+		obsProvider:           obsProvider,
+		httpClient:            httpClient,
 		sandboxServiceLimiter: sandboxServiceLimiter,
 	}
 

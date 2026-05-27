@@ -108,3 +108,70 @@ func TestSandboxAppServicePublishBlockersRequirePublicRestartableRuntime(t *test
 		t.Fatalf("blockers = %#v, want none", blockers)
 	}
 }
+
+func TestNormalizeSandboxAppServicesSupportsFunctionRuntime(t *testing.T) {
+	services, err := NormalizeSandboxAppServices([]SandboxAppService{{
+		ID:   "webhook",
+		Port: 49983,
+		Runtime: &SandboxAppServiceRuntime{
+			Type: SandboxAppServiceRuntimeFunction,
+			Function: &SandboxFunction{
+				Source: SandboxFunctionSource{
+					Code: "def handler(request):\n    return {'status': 204}\n",
+				},
+			},
+			Command:         []string{"/bin/ignored"},
+			CWD:             "/ignored",
+			WarmProcessName: "ignored",
+		},
+		Ingress: SandboxAppServiceIngress{Public: true},
+	}})
+	if err != nil {
+		t.Fatalf("NormalizeSandboxAppServices: %v", err)
+	}
+	service := services[0]
+	if service.Runtime.Function == nil {
+		t.Fatal("Runtime.Function is nil")
+	}
+	if service.Runtime.Function.Runtime != "python" {
+		t.Fatalf("function runtime = %q, want python", service.Runtime.Function.Runtime)
+	}
+	if service.Runtime.Function.Handler != "handler" {
+		t.Fatalf("function handler = %q, want handler", service.Runtime.Function.Handler)
+	}
+	if service.Runtime.Function.Source.Type != "inline" {
+		t.Fatalf("function source type = %q, want inline", service.Runtime.Function.Source.Type)
+	}
+	if service.Runtime.Function.Source.Filename != "main.py" {
+		t.Fatalf("function filename = %q, want main.py", service.Runtime.Function.Source.Filename)
+	}
+	if len(service.Runtime.Command) != 0 || service.Runtime.CWD != "" || service.Runtime.WarmProcessName != "" {
+		t.Fatalf("function runtime kept process fields: %#v", service.Runtime)
+	}
+	if len(service.Ingress.Routes) != 1 || service.Ingress.Routes[0].ID != "webhook" {
+		t.Fatalf("default route = %#v, want webhook route", service.Ingress.Routes)
+	}
+	if blockers := SandboxAppServicePublishBlockers(service); len(blockers) != 0 {
+		t.Fatalf("blockers = %#v, want none", blockers)
+	}
+}
+
+func TestNormalizeSandboxAppServicesRejectsInvalidFunctionSource(t *testing.T) {
+	_, err := NormalizeSandboxAppServices([]SandboxAppService{{
+		ID:   "webhook",
+		Port: 49983,
+		Runtime: &SandboxAppServiceRuntime{
+			Type: SandboxAppServiceRuntimeFunction,
+			Function: &SandboxFunction{
+				Source: SandboxFunctionSource{
+					Filename: "../main.py",
+					Code:     "def handler(request):\n    return None\n",
+				},
+			},
+		},
+		Ingress: SandboxAppServiceIngress{Public: true},
+	}})
+	if err == nil {
+		t.Fatal("NormalizeSandboxAppServices succeeded, want error")
+	}
+}

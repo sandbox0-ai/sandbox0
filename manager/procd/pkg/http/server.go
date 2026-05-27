@@ -119,9 +119,10 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/contexts/{id}/stats", contextHandler.Stats).Methods("GET")
 	api.HandleFunc("/contexts/{id}/ws", contextHandler.WebSocket).Methods("GET")
 
-	// Function handlers
 	functionHandler := handlers.NewFunctionHandler(s.logger)
-	api.HandleFunc("/functions/{name}/invoke", functionHandler.Invoke).Methods("POST")
+	api.HandleFunc("/functions/execute", functionHandler.Execute).Methods("POST")
+	api.HandleFunc("/functions/stream", functionHandler.Stream).Methods("POST")
+	api.HandleFunc("/functions/ws", functionHandler.WebSocket).Methods("GET")
 
 	// Initialize handler
 	initializeHandler := handlers.NewInitializeHandler(s.webhookDispatcher, s.fileManager, s.cfg.HTTPPort, s.logger)

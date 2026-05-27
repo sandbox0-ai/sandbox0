@@ -17,6 +17,7 @@ import (
 )
 
 type sandboxServiceMatch struct {
+	service       *mgr.SandboxAppService
 	route         *mgr.SandboxAppServiceRoute
 	pathMatched   bool
 	methodAllowed bool
@@ -41,6 +42,7 @@ func (s *Server) getSandboxForPublicExposure(c *gin.Context, sandboxID string) (
 func matchSandboxServiceRoute(services []mgr.SandboxAppService, port int, path string, method string) sandboxServiceMatch {
 	requestMethod := strings.ToUpper(strings.TrimSpace(method))
 	var best *mgr.SandboxAppServiceRoute
+	var bestService *mgr.SandboxAppService
 	bestLen := -1
 	for svcIdx := range services {
 		service := &services[svcIdx]
@@ -58,6 +60,7 @@ func matchSandboxServiceRoute(services []mgr.SandboxAppService, port int, path s
 			}
 			if len(prefix) > bestLen {
 				best = route
+				bestService = service
 				bestLen = len(prefix)
 			}
 		}
@@ -66,6 +69,7 @@ func matchSandboxServiceRoute(services []mgr.SandboxAppService, port int, path s
 		return sandboxServiceMatch{}
 	}
 	return sandboxServiceMatch{
+		service:       bestService,
 		route:         best,
 		pathMatched:   true,
 		methodAllowed: sandboxServiceMethodAllowed(best, requestMethod),

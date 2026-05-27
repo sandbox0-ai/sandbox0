@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -14,64 +15,61 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
-	"github.com/gorilla/mux"
+	"github.com/gorilla/websocket"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxfunction"
 	"go.uber.org/zap"
 )
 
 const (
-	defaultFunctionRoot       = "/workspace/functions"
-	defaultFunctionRunnerPath = "/procd/runtimes/python-runner"
+	defaultFunctionRunnerPath = "/procd/bin/python-runner"
+	defaultFunctionCacheRoot  = "/tmp/sandbox0-functions"
 	defaultFunctionTimeout    = 30 * time.Second
 	maxFunctionTimeout        = 120 * time.Second
-	maxFunctionRequestBytes   = 8 << 20
+	maxFunctionExecuteBytes   = sandboxfunction.MaxHTTPRequestBytes + sandboxfunction.MaxInlineSourceBytes + (1 << 20)
 	maxFunctionStdoutBytes    = 4 << 20
 	maxFunctionStderrBytes    = 64 << 10
+	maxFunctionStreamFrame    = 4 << 20
 )
 
 var (
-	functionNamePattern    = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
-	functionHandlerPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`)
+	functionHandlerPattern  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`)
+	functionFilenamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+	functionDigestPattern   = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 )
 
 type functionHandlerConfig struct {
 	runnerPath     string
-	functionRoot   string
+	cacheRoot      string
 	defaultTimeout time.Duration
 	maxTimeout     time.Duration
 }
 
-// FunctionHandler invokes sandbox functions through platform-provided runtimes.
+// FunctionHandler executes gateway-provided function source inside the sandbox.
 type FunctionHandler struct {
 	logger         *zap.Logger
 	runnerPath     string
-	functionRoot   string
+	cacheRoot      string
 	defaultTimeout time.Duration
 	maxTimeout     time.Duration
+	upgrader       websocket.Upgrader
 }
 
-// FunctionInvokeRequest is passed to the sandbox function handler.
-type FunctionInvokeRequest struct {
+type functionHandlerRequest struct {
+	ServiceID  string              `json:"service_id,omitempty"`
+	RouteID    string              `json:"route_id,omitempty"`
 	Method     string              `json:"method,omitempty"`
 	Path       string              `json:"path,omitempty"`
-	Query      map[string][]string `json:"query,omitempty"`
-	Headers    map[string][]string `json:"headers,omitempty"`
-	BodyBase64 string              `json:"body_base64,omitempty"`
-	Handler    string              `json:"handler,omitempty"`
-	TimeoutMS  int                 `json:"timeout_ms,omitempty"`
-}
-
-// FunctionInvokeResponse is returned by the sandbox function handler.
-type FunctionInvokeResponse struct {
-	Status     int                 `json:"status"`
+	RawQuery   string              `json:"raw_query,omitempty"`
 	Headers    map[string][]string `json:"headers,omitempty"`
 	BodyBase64 string              `json:"body_base64,omitempty"`
 }
 
-// NewFunctionHandler creates a function invocation handler.
 func NewFunctionHandler(logger *zap.Logger) *FunctionHandler {
 	return newFunctionHandler(functionHandlerConfig{}, logger)
 }
@@ -83,8 +81,8 @@ func newFunctionHandler(config functionHandlerConfig, logger *zap.Logger) *Funct
 	if config.runnerPath == "" {
 		config.runnerPath = defaultFunctionRunnerPath
 	}
-	if config.functionRoot == "" {
-		config.functionRoot = defaultFunctionRoot
+	if config.cacheRoot == "" {
+		config.cacheRoot = defaultFunctionCacheRoot
 	}
 	if config.defaultTimeout <= 0 {
 		config.defaultTimeout = defaultFunctionTimeout
@@ -95,26 +93,27 @@ func newFunctionHandler(config functionHandlerConfig, logger *zap.Logger) *Funct
 	return &FunctionHandler{
 		logger:         logger,
 		runnerPath:     config.runnerPath,
-		functionRoot:   filepath.Clean(config.functionRoot),
+		cacheRoot:      filepath.Clean(config.cacheRoot),
 		defaultTimeout: config.defaultTimeout,
 		maxTimeout:     config.maxTimeout,
+		upgrader: websocket.Upgrader{
+			CheckOrigin: func(*http.Request) bool { return true },
+		},
 	}
 }
 
-// Invoke executes /workspace/functions/{name}.py with the requested handler.
-func (h *FunctionHandler) Invoke(w http.ResponseWriter, r *http.Request) {
-	functionName := mux.Vars(r)["name"]
-	modulePath, err := h.modulePath(functionName)
+func (h *FunctionHandler) Execute(w http.ResponseWriter, r *http.Request) {
+	req, err := decodeFunctionExecuteRequest(r.Body)
 	if err != nil {
+		if errors.Is(err, errFunctionRequestTooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "function execution request is too large")
+			return
+		}
 		writeError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
-	if _, err := os.Stat(modulePath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			writeError(w, http.StatusNotFound, spec.CodeNotFound, "function not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, spec.CodeInternal, "function module unavailable")
+	if err := validateFunctionExecuteRequest(req); err != nil {
+		writeError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
 	if _, err := os.Stat(h.runnerPath); err != nil {
@@ -125,29 +124,25 @@ func (h *FunctionHandler) Invoke(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, spec.CodeInternal, "function runtime unavailable")
 		return
 	}
-
-	req, err := decodeFunctionInvokeRequest(r.Body)
-	if err != nil {
-		if errors.Is(err, errFunctionRequestTooLarge) {
-			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "function request is too large")
-			return
-		}
-		writeError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
-		return
-	}
-	h.applyRequestDefaults(&req)
-	if err := validateFunctionRequest(req); err != nil {
-		writeError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
-		return
-	}
-
 	timeout, err := h.requestTimeout(req.TimeoutMS)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
-
-	payload, err := json.Marshal(req)
+	modulePath, err := h.materializeSource(req.Source)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+	payload, err := json.Marshal(functionHandlerRequest{
+		ServiceID:  req.ServiceID,
+		RouteID:    req.RouteID,
+		Method:     req.Request.Method,
+		Path:       req.Request.Path,
+		RawQuery:   req.Request.RawQuery,
+		Headers:    req.Request.Headers,
+		BodyBase64: req.Request.BodyBase64,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, spec.CodeInternal, "failed to encode function request")
 		return
@@ -156,9 +151,9 @@ func (h *FunctionHandler) Invoke(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 
-	stdout, stderr, truncated, err := h.run(ctx, modulePath, req.Handler, payload)
+	stdout, stderr, truncated, err := h.run(ctx, modulePath, req.Handler, req.EnvVars, payload)
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		writeError(w, http.StatusGatewayTimeout, spec.CodeUnavailable, "function invocation timed out")
+		writeError(w, http.StatusGatewayTimeout, spec.CodeUnavailable, "function execution timed out")
 		return
 	}
 	if truncated.stdout {
@@ -166,23 +161,18 @@ func (h *FunctionHandler) Invoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		message := strings.TrimSpace(stderr)
-		if message == "" {
-			message = err.Error()
-		}
-		if truncated.stderr {
-			message += "\n[stderr truncated]"
-		}
-		h.logger.Warn("Function invocation failed",
-			zap.String("function", functionName),
+		h.logger.Warn("Function execution failed",
+			zap.String("service_id", req.ServiceID),
+			zap.String("route_id", req.RouteID),
 			zap.String("handler", req.Handler),
+			zap.String("stderr", trimLoggedStderr(stderr, truncated.stderr)),
 			zap.Error(err),
 		)
-		writeError(w, http.StatusInternalServerError, "function_failed", message)
+		writeError(w, http.StatusInternalServerError, "function_failed", "function execution failed")
 		return
 	}
 
-	response, err := decodeFunctionInvokeResponse(stdout)
+	response, err := decodeFunctionExecuteResponse(stdout)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, spec.CodeUnavailable, err.Error())
 		return
@@ -190,31 +180,128 @@ func (h *FunctionHandler) Invoke(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
-func (h *FunctionHandler) modulePath(name string) (string, error) {
-	if !functionNamePattern.MatchString(name) {
-		return "", fmt.Errorf("function name must match %s", functionNamePattern.String())
+func (h *FunctionHandler) Stream(w http.ResponseWriter, r *http.Request) {
+	req, err := decodeFunctionExecuteRequest(r.Body)
+	if err != nil {
+		if errors.Is(err, errFunctionRequestTooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "function execution request is too large")
+			return
+		}
+		writeError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
 	}
-	root := filepath.Clean(h.functionRoot)
-	modulePath := filepath.Join(root, name+".py")
-	rel, err := filepath.Rel(root, modulePath)
-	if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
-		return "", errors.New("function path escapes function root")
+	if err := validateFunctionExecuteRequest(req); err != nil {
+		writeError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
 	}
-	return modulePath, nil
+	if _, err := os.Stat(h.runnerPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeError(w, http.StatusServiceUnavailable, spec.CodeUnavailable, "function runtime unavailable")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, spec.CodeInternal, "function runtime unavailable")
+		return
+	}
+	modulePath, err := h.materializeSource(req.Source)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+	payload, err := json.Marshal(functionHandlerRequest{
+		ServiceID:  req.ServiceID,
+		RouteID:    req.RouteID,
+		Method:     req.Request.Method,
+		Path:       req.Request.Path,
+		RawQuery:   req.Request.RawQuery,
+		Headers:    req.Request.Headers,
+		BodyBase64: req.Request.BodyBase64,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, spec.CodeInternal, "failed to encode function request")
+		return
+	}
+	if err := proxy.DisableResponseWriteDeadline(w); err != nil {
+		h.logger.Debug("Failed to disable function stream response deadline", zap.Error(err))
+	}
+	ctx := r.Context()
+	if req.TimeoutMS < 0 {
+		writeError(w, http.StatusBadRequest, spec.CodeBadRequest, "timeout_ms must be >= 0")
+		return
+	}
+	if req.TimeoutMS > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(req.TimeoutMS)*time.Millisecond)
+		defer cancel()
+	}
+	tracker := &trackingResponseWriter{ResponseWriter: w}
+	if err := h.runStream(ctx, tracker, modulePath, req.Handler, req.EnvVars, payload); err != nil {
+		if !tracker.written {
+			writeError(w, http.StatusInternalServerError, "function_failed", "function stream failed")
+		}
+		h.logger.Warn("Function stream failed",
+			zap.String("service_id", req.ServiceID),
+			zap.String("route_id", req.RouteID),
+			zap.String("handler", req.Handler),
+			zap.Error(err),
+		)
+	}
 }
 
-func (h *FunctionHandler) applyRequestDefaults(req *FunctionInvokeRequest) {
-	req.Method = strings.ToUpper(strings.TrimSpace(req.Method))
-	if req.Method == "" {
-		req.Method = http.MethodPost
+func (h *FunctionHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
+	if err := proxy.DisableResponseDeadlines(w); err != nil {
+		h.logger.Debug("Failed to disable function websocket response deadlines", zap.Error(err))
 	}
-	req.Path = strings.TrimSpace(req.Path)
-	if req.Path == "" {
-		req.Path = "/"
+	conn, err := h.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		h.logger.Error("Function websocket upgrade failed", zap.Error(err))
+		return
 	}
-	req.Handler = strings.TrimSpace(req.Handler)
-	if req.Handler == "" {
-		req.Handler = "handler"
+	defer conn.Close()
+	if err := proxy.DisableConnectionDeadlines(conn.UnderlyingConn()); err != nil {
+		h.logger.Debug("Failed to clear function websocket connection deadlines", zap.Error(err))
+	}
+
+	_, initData, err := conn.ReadMessage()
+	if err != nil {
+		return
+	}
+	var req sandboxfunction.ExecuteRequest
+	if err := json.Unmarshal(initData, &req); err != nil {
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "invalid function request"), time.Now().Add(time.Second))
+		return
+	}
+	if err := validateFunctionExecuteRequest(req); err != nil {
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, err.Error()), time.Now().Add(time.Second))
+		return
+	}
+	if _, err := os.Stat(h.runnerPath); err != nil {
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "function runtime unavailable"), time.Now().Add(time.Second))
+		return
+	}
+	modulePath, err := h.materializeSource(req.Source)
+	if err != nil {
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, err.Error()), time.Now().Add(time.Second))
+		return
+	}
+	payload, err := json.Marshal(functionHandlerRequest{
+		ServiceID: req.ServiceID,
+		RouteID:   req.RouteID,
+		Method:    req.Request.Method,
+		Path:      req.Request.Path,
+		RawQuery:  req.Request.RawQuery,
+		Headers:   req.Request.Headers,
+	})
+	if err != nil {
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "failed to encode function request"), time.Now().Add(time.Second))
+		return
+	}
+	if err := h.runWebSocket(r.Context(), conn, modulePath, req.Handler, req.EnvVars, payload); err != nil {
+		h.logger.Warn("Function websocket failed",
+			zap.String("service_id", req.ServiceID),
+			zap.String("route_id", req.RouteID),
+			zap.String("handler", req.Handler),
+			zap.Error(err),
+		)
 	}
 }
 
@@ -232,25 +319,43 @@ func (h *FunctionHandler) requestTimeout(timeoutMS int) (time.Duration, error) {
 	return timeout, nil
 }
 
-type functionRunTruncation struct {
-	stdout bool
-	stderr bool
+func (h *FunctionHandler) materializeSource(source sandboxfunction.Source) (string, error) {
+	digest := source.Digest
+	if digest == "" {
+		digest = sandboxfunction.InlineDigest(source.Filename, source.Code)
+	}
+	if !functionDigestPattern.MatchString(digest) {
+		return "", errors.New("source.digest must be a sha256 digest")
+	}
+	expected := sandboxfunction.InlineDigest(source.Filename, source.Code)
+	if source.Code != "" && digest != expected {
+		return "", errors.New("source.digest does not match source code")
+	}
+	dirName := strings.TrimPrefix(digest, "sha256:")
+	dir := filepath.Join(h.cacheRoot, dirName)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("prepare function source cache: %w", err)
+	}
+	modulePath := filepath.Join(dir, source.Filename)
+	rel, err := filepath.Rel(dir, modulePath)
+	if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return "", errors.New("source.filename escapes source cache")
+	}
+	if source.Code != "" {
+		if err := os.WriteFile(modulePath, []byte(source.Code), 0o600); err != nil {
+			return "", fmt.Errorf("write function source: %w", err)
+		}
+	}
+	return modulePath, nil
 }
 
-func (h *FunctionHandler) run(ctx context.Context, modulePath, handler string, payload []byte) ([]byte, string, functionRunTruncation, error) {
+func (h *FunctionHandler) run(ctx context.Context, modulePath, handler string, envVars map[string]string, payload []byte) ([]byte, string, functionRunTruncation, error) {
 	cmd := osexec.CommandContext(ctx, h.runnerPath, modulePath, handler)
-	cmd.Dir = filepath.Dir(h.functionRoot)
+	cmd.Dir = filepath.Dir(modulePath)
 	cmd.Stdin = bytes.NewReader(payload)
+	cmd.Env = mergeFunctionEnv(os.Environ(), envVars)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			return cmd.Process.Kill()
-		}
-		return nil
-	}
+	cmd.Cancel = killFunctionProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 
 	stdout := newLimitedBuffer(maxFunctionStdoutBytes)
@@ -265,67 +370,422 @@ func (h *FunctionHandler) run(ctx context.Context, modulePath, handler string, p
 	}, err
 }
 
-var errFunctionRequestTooLarge = errors.New("function request too large")
-
-func decodeFunctionInvokeRequest(body io.Reader) (FunctionInvokeRequest, error) {
-	limited := io.LimitReader(body, maxFunctionRequestBytes+1)
-	data, err := io.ReadAll(limited)
-	if err != nil {
-		return FunctionInvokeRequest{}, err
+func killFunctionProcessGroup(cmd *osexec.Cmd) func() error {
+	return func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			return cmd.Process.Kill()
+		}
+		return nil
 	}
-	if len(data) > maxFunctionRequestBytes {
-		return FunctionInvokeRequest{}, errFunctionRequestTooLarge
-	}
-	if len(bytes.TrimSpace(data)) == 0 {
-		return FunctionInvokeRequest{}, nil
-	}
-
-	var req FunctionInvokeRequest
-	if err := json.Unmarshal(data, &req); err != nil {
-		return FunctionInvokeRequest{}, fmt.Errorf("invalid request body: %w", err)
-	}
-	return req, nil
 }
 
-func validateFunctionRequest(req FunctionInvokeRequest) error {
-	if req.BodyBase64 != "" {
-		if _, err := base64.StdEncoding.DecodeString(req.BodyBase64); err != nil {
-			return errors.New("body_base64 must be valid base64")
+func (h *FunctionHandler) runStream(ctx context.Context, w http.ResponseWriter, modulePath, handler string, envVars map[string]string, payload []byte) error {
+	cmd := osexec.CommandContext(ctx, h.runnerPath, "--stream", modulePath, handler)
+	cmd.Dir = filepath.Dir(modulePath)
+	cmd.Env = mergeFunctionEnv(os.Environ(), envVars)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = killFunctionProcessGroup(cmd)
+	cmd.WaitDelay = 5 * time.Second
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	_, _ = stdin.Write(payload)
+	_, _ = stdin.Write([]byte("\n"))
+	_ = stdin.Close()
+
+	stderrBuf := newLimitedBuffer(maxFunctionStderrBytes)
+	stderrDone := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(stderrBuf, stderr)
+		close(stderrDone)
+	}()
+
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64*1024), maxFunctionStreamFrame)
+	flusher, _ := w.(http.Flusher)
+	started := false
+	for scanner.Scan() {
+		var frame sandboxfunction.StreamFrame
+		if err := json.Unmarshal(scanner.Bytes(), &frame); err != nil {
+			_ = cmd.Process.Kill()
+			<-stderrDone
+			return fmt.Errorf("decode stream frame: %w", err)
+		}
+		switch frame.Type {
+		case sandboxfunction.StreamFrameStart:
+			if started {
+				continue
+			}
+			for key, values := range frame.Headers {
+				for _, value := range values {
+					w.Header().Add(key, value)
+				}
+			}
+			status := frame.Status
+			if status == 0 {
+				status = http.StatusOK
+			}
+			w.WriteHeader(status)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			started = true
+		case sandboxfunction.StreamFrameChunk:
+			if !started {
+				w.WriteHeader(http.StatusOK)
+				started = true
+			}
+			chunk, err := base64.StdEncoding.DecodeString(frame.BodyBase64)
+			if err != nil {
+				_ = cmd.Process.Kill()
+				<-stderrDone
+				return errors.New("function stream chunk body_base64 must be valid base64")
+			}
+			if len(chunk) > 0 {
+				if _, err := w.Write(chunk); err != nil {
+					_ = cmd.Process.Kill()
+					<-stderrDone
+					return err
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+		case sandboxfunction.StreamFrameError:
+			_ = cmd.Process.Kill()
+			<-stderrDone
+			if frame.Error != "" {
+				return errors.New(frame.Error)
+			}
+			return errors.New("function stream failed")
+		default:
+			_ = cmd.Process.Kill()
+			<-stderrDone
+			return fmt.Errorf("unsupported stream frame type %q", frame.Type)
 		}
 	}
-	if !strings.HasPrefix(req.Path, "/") {
-		return errors.New("path must start with /")
+	if err := scanner.Err(); err != nil {
+		_ = cmd.Process.Kill()
+		<-stderrDone
+		return err
 	}
-	if !functionHandlerPattern.MatchString(req.Handler) {
-		return fmt.Errorf("handler must match %s", functionHandlerPattern.String())
+	err = cmd.Wait()
+	<-stderrDone
+	if err != nil {
+		return fmt.Errorf("function stream process failed: %w: %s", err, trimLoggedStderr(stderrBuf.String(), stderrBuf.Truncated()))
 	}
 	return nil
 }
 
-func decodeFunctionInvokeResponse(data []byte) (FunctionInvokeResponse, error) {
+func (h *FunctionHandler) runWebSocket(ctx context.Context, conn *websocket.Conn, modulePath, handler string, envVars map[string]string, payload []byte) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	cmd := osexec.CommandContext(ctx, h.runnerPath, "--websocket", modulePath, handler)
+	cmd.Dir = filepath.Dir(modulePath)
+	cmd.Env = mergeFunctionEnv(os.Environ(), envVars)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = killFunctionProcessGroup(cmd)
+	cmd.WaitDelay = 5 * time.Second
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	_, _ = stdin.Write(payload)
+	_, _ = stdin.Write([]byte("\n"))
+
+	stderrBuf := newLimitedBuffer(maxFunctionStderrBytes)
+	go func() { _, _ = io.Copy(stderrBuf, stderr) }()
+
+	var writeMu sync.Mutex
+	closeBoth := sync.OnceFunc(func() {
+		cancel()
+		_ = stdin.Close()
+		_ = conn.Close()
+	})
+	errCh := make(chan functionWebSocketResult, 2)
+
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 64*1024), maxFunctionStreamFrame)
+		for scanner.Scan() {
+			var frame sandboxfunction.WebSocketFrame
+			if err := json.Unmarshal(scanner.Bytes(), &frame); err != nil {
+				errCh <- functionWebSocketResult{err: fmt.Errorf("decode websocket frame: %w", err)}
+				return
+			}
+			switch frame.Type {
+			case sandboxfunction.WebSocketFrameMessage:
+				messageType, data, err := decodeWebSocketRunnerMessage(frame)
+				if err != nil {
+					errCh <- functionWebSocketResult{err: err}
+					return
+				}
+				writeMu.Lock()
+				err = conn.WriteMessage(messageType, data)
+				writeMu.Unlock()
+				if err != nil {
+					errCh <- functionWebSocketResult{err: err}
+					return
+				}
+			case sandboxfunction.WebSocketFrameClose:
+				writeMu.Lock()
+				_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, frame.Reason), time.Now().Add(time.Second))
+				writeMu.Unlock()
+				errCh <- functionWebSocketResult{}
+				return
+			default:
+				errCh <- functionWebSocketResult{err: fmt.Errorf("unsupported websocket frame type %q", frame.Type)}
+				return
+			}
+		}
+		errCh <- functionWebSocketResult{err: scanner.Err(), processExited: true}
+	}()
+
+	go func() {
+		encoder := json.NewEncoder(stdin)
+		for {
+			messageType, data, err := conn.ReadMessage()
+			if err != nil {
+				_ = encoder.Encode(sandboxfunction.WebSocketFrame{Type: sandboxfunction.WebSocketFrameClose})
+				errCh <- functionWebSocketResult{}
+				return
+			}
+			frame := encodeWebSocketClientMessage(messageType, data)
+			if err := encoder.Encode(frame); err != nil {
+				errCh <- functionWebSocketResult{err: err}
+				return
+			}
+		}
+	}()
+
+	result := <-errCh
+	err = result.err
+	if result.processExited {
+		waitErr := cmd.Wait()
+		if err == nil {
+			err = waitErr
+		}
+		closeBoth()
+	} else {
+		closeBoth()
+		_ = cmd.Wait()
+	}
+	if err != nil && !errors.Is(err, context.Canceled) {
+		return fmt.Errorf("%w: %s", err, trimLoggedStderr(stderrBuf.String(), stderrBuf.Truncated()))
+	}
+	return nil
+}
+
+var errFunctionRequestTooLarge = errors.New("function execution request too large")
+
+func decodeFunctionExecuteRequest(body io.Reader) (sandboxfunction.ExecuteRequest, error) {
+	limited := io.LimitReader(body, maxFunctionExecuteBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return sandboxfunction.ExecuteRequest{}, err
+	}
+	if len(data) > maxFunctionExecuteBytes {
+		return sandboxfunction.ExecuteRequest{}, errFunctionRequestTooLarge
+	}
+	var req sandboxfunction.ExecuteRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return sandboxfunction.ExecuteRequest{}, fmt.Errorf("invalid request body: %w", err)
+	}
+	return req, nil
+}
+
+func validateFunctionExecuteRequest(req sandboxfunction.ExecuteRequest) error {
+	if req.Runtime != sandboxfunction.RuntimePython {
+		return fmt.Errorf("runtime must be %q", sandboxfunction.RuntimePython)
+	}
+	if !functionHandlerPattern.MatchString(req.Handler) {
+		return fmt.Errorf("handler must match %s", functionHandlerPattern.String())
+	}
+	if req.Source.Type != sandboxfunction.SourceTypeInline {
+		return fmt.Errorf("source.type must be %q", sandboxfunction.SourceTypeInline)
+	}
+	if req.Source.Filename == "" {
+		return errors.New("source.filename is required")
+	}
+	if strings.Contains(req.Source.Filename, "/") || strings.Contains(req.Source.Filename, "\\") || strings.HasPrefix(req.Source.Filename, ".") {
+		return errors.New("source.filename must be a relative file name")
+	}
+	if !functionFilenamePattern.MatchString(req.Source.Filename) {
+		return errors.New("source.filename contains unsupported characters")
+	}
+	if strings.TrimSpace(req.Source.Code) == "" {
+		return errors.New("source.code is required")
+	}
+	if len([]byte(req.Source.Code)) > sandboxfunction.MaxInlineSourceBytes {
+		return fmt.Errorf("source.code exceeds limit %d bytes", sandboxfunction.MaxInlineSourceBytes)
+	}
+	if req.Request.Path == "" {
+		return errors.New("request.path is required")
+	}
+	if !strings.HasPrefix(req.Request.Path, "/") {
+		return errors.New("request.path must start with /")
+	}
+	if req.Request.BodyBase64 != "" {
+		if _, err := base64.StdEncoding.DecodeString(req.Request.BodyBase64); err != nil {
+			return errors.New("request.body_base64 must be valid base64")
+		}
+	}
+	return nil
+}
+
+func decodeFunctionExecuteResponse(data []byte) (sandboxfunction.ExecuteResponse, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
-		return FunctionInvokeResponse{}, errors.New("function returned an empty response")
+		return sandboxfunction.ExecuteResponse{}, errors.New("function returned an empty response")
 	}
 
-	var response FunctionInvokeResponse
+	var response sandboxfunction.ExecuteResponse
 	if err := json.Unmarshal(data, &response); err != nil {
-		return FunctionInvokeResponse{}, fmt.Errorf("function returned invalid JSON: %w", err)
+		return sandboxfunction.ExecuteResponse{}, fmt.Errorf("function returned invalid JSON: %w", err)
 	}
 	if response.Status == 0 {
 		response.Status = http.StatusOK
 	}
 	if response.Status < 100 || response.Status > 599 {
-		return FunctionInvokeResponse{}, errors.New("function response status must be between 100 and 599")
+		return sandboxfunction.ExecuteResponse{}, errors.New("function response status must be between 100 and 599")
 	}
 	if response.BodyBase64 != "" {
 		if _, err := base64.StdEncoding.DecodeString(response.BodyBase64); err != nil {
-			return FunctionInvokeResponse{}, errors.New("function response body_base64 must be valid base64")
+			return sandboxfunction.ExecuteResponse{}, errors.New("function response body_base64 must be valid base64")
 		}
 	}
 	if response.Headers == nil {
 		response.Headers = map[string][]string{}
 	}
 	return response, nil
+}
+
+func encodeWebSocketClientMessage(messageType int, data []byte) sandboxfunction.WebSocketFrame {
+	if messageType == websocket.BinaryMessage {
+		return sandboxfunction.WebSocketFrame{
+			Type:        sandboxfunction.WebSocketFrameMessage,
+			MessageType: sandboxfunction.WebSocketMessageBytes,
+			DataBase64:  base64.StdEncoding.EncodeToString(data),
+		}
+	}
+	return sandboxfunction.WebSocketFrame{
+		Type:        sandboxfunction.WebSocketFrameMessage,
+		MessageType: sandboxfunction.WebSocketMessageText,
+		Data:        string(data),
+	}
+}
+
+func decodeWebSocketRunnerMessage(frame sandboxfunction.WebSocketFrame) (int, []byte, error) {
+	switch frame.MessageType {
+	case "", sandboxfunction.WebSocketMessageText:
+		return websocket.TextMessage, []byte(frame.Data), nil
+	case sandboxfunction.WebSocketMessageBytes:
+		data, err := base64.StdEncoding.DecodeString(frame.DataBase64)
+		if err != nil {
+			return 0, nil, errors.New("websocket data_base64 must be valid base64")
+		}
+		return websocket.BinaryMessage, data, nil
+	default:
+		return 0, nil, fmt.Errorf("unsupported websocket message_type %q", frame.MessageType)
+	}
+}
+
+func mergeFunctionEnv(base []string, envVars map[string]string) []string {
+	if len(envVars) == 0 {
+		return base
+	}
+	out := make([]string, 0, len(base)+len(envVars))
+	overrides := make(map[string]string, len(envVars))
+	for key, value := range envVars {
+		key = strings.TrimSpace(key)
+		if key == "" || strings.Contains(key, "=") {
+			continue
+		}
+		overrides[key] = value
+	}
+	for _, item := range base {
+		key, _, ok := strings.Cut(item, "=")
+		if !ok {
+			continue
+		}
+		if value, exists := overrides[key]; exists {
+			out = append(out, key+"="+value)
+			delete(overrides, key)
+			continue
+		}
+		out = append(out, item)
+	}
+	for key, value := range overrides {
+		out = append(out, key+"="+value)
+	}
+	return out
+}
+
+func trimLoggedStderr(stderr string, truncated bool) string {
+	stderr = strings.TrimSpace(stderr)
+	if truncated {
+		stderr += "\n[stderr truncated]"
+	}
+	return stderr
+}
+
+type functionRunTruncation struct {
+	stdout bool
+	stderr bool
+}
+
+type functionWebSocketResult struct {
+	err           error
+	processExited bool
+}
+
+type trackingResponseWriter struct {
+	http.ResponseWriter
+	written bool
+}
+
+func (w *trackingResponseWriter) WriteHeader(statusCode int) {
+	w.written = true
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *trackingResponseWriter) Write(data []byte) (int, error) {
+	w.written = true
+	return w.ResponseWriter.Write(data)
+}
+
+func (w *trackingResponseWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 type limitedBuffer struct {

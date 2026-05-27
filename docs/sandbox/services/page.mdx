@@ -8,14 +8,14 @@ Sandbox Services expose named ports inside a sandbox. Use them when a sandbox ne
 |-------|------|-------------|
 | `id` | string | Stable service ID. Must be unique in the sandbox |
 | `display_name` | string | Optional human-readable label |
-| `port` | integer | Sandbox port to proxy to |
+| `port` | integer | Public exposure routing port. Function services normally use the procd port, default `49983` |
 | `runtime` | object | Optional restartable service process configuration |
 | `ingress` | object | Public exposure and route policy |
 | `health_check` | object | Optional readiness path |
 
 ### Runtime
 
-Service runtime supports `cmd`, `warm_process`, and `manual`. Use `cmd` when Sandbox0 should create a new command context for the service. Use `warm_process` when the template already starts a long-lived process and the service should bind to that existing context.
+Service runtime supports `cmd`, `warm_process`, `manual`, and `function`. Use `cmd` when Sandbox0 should create a new command context for the service. Use `warm_process` when the template already starts a long-lived process and the service should bind to that existing context. Use `function` when cluster-gateway should receive public HTTP traffic and ask procd to execute gateway-provided function source inside the sandbox.
 
 ### Health Check
 
@@ -69,6 +69,259 @@ Route rate limits use the gateway rate limit backend. Self-hosted deployments de
 <Callout variant="warning">
 Route auth stores SHA-256 digests, not plaintext tokens. Hash secret values before sending service configuration.
 </Callout>
+
+## Function Services
+
+A function service is a sandbox service with `runtime.type: function`. cluster-gateway owns the public URL, route policy, auth, CORS, rate limit, timeout, rewrite, and resume behavior. Function source is stored in the service config and carried by cluster-gateway to procd for execution inside the sandbox.
+
+Function services should use the sandbox procd port as the service `port`. The default procd port is `49983`. cluster-gateway only allows that reserved port for function services and never exposes procd management APIs publicly.
+
+Python is the first supported runtime. The sandbox image must include `python3` in `PATH`. HTTP request/response, SSE, and WebSocket requests all use the same service config and route policy.
+
+```yaml
+services:
+    - id: webhook
+      port: 49983
+      runtime:
+          type: function
+          function:
+              runtime: python
+              handler: handler
+              source:
+                  type: inline
+                  filename: main.py
+                  code: |
+                      def handler(request):
+                          return {
+                              "status": 200,
+                              "headers": {"content-type": "application/json"},
+                              "body": {
+                                  "method": request["method"],
+                                  "path": request["path"],
+                              },
+                          }
+      ingress:
+          public: true
+          routes:
+              - id: root
+                path_prefix: /
+                methods: [POST]
+                timeout_seconds: 30
+                resume: true
+```
+
+Configure a function service through the SDKs or CLI by replacing the sandbox service list. In the TypeScript generated model, the JSON field `function` is exposed as `_function`.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `functionSource := \`def handler(request):
+    return {"status": 200, "body": "ok"}
+\`
+
+resp, err := sandbox.UpdateServices(ctx, []apispec.SandboxAppService{
+    {
+        ID:   "handler",
+        Port: 49983,
+        Runtime: apispec.NewOptSandboxAppServiceRuntime(apispec.SandboxAppServiceRuntime{
+            Type: apispec.SandboxAppServiceRuntimeTypeFunction,
+            Function: apispec.NewOptSandboxFunction(apispec.SandboxFunction{
+                Runtime: apispec.SandboxFunctionRuntimePython,
+                Handler: apispec.NewOptString("handler"),
+                Source: apispec.SandboxFunctionSource{
+                    Type:     apispec.SandboxFunctionSourceTypeInline,
+                    Filename: apispec.NewOptString("main.py"),
+                    Code:     functionSource,
+                },
+            }),
+        }),
+        Ingress: apispec.SandboxAppServiceIngress{
+            Public: true,
+            Routes: []apispec.SandboxAppServiceRoute{
+                {
+                    ID:             "handler",
+                    PathPrefix:     apispec.NewOptString("/"),
+                    Methods:        []string{"POST"},
+                    TimeoutSeconds: apispec.NewOptInt32(30),
+                    Resume:         true,
+                },
+            },
+        },
+    },
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("services: %d\\n", len(resp.Services))`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.apispec.models.sandbox_app_service import SandboxAppService
+from sandbox0.apispec.models.sandbox_app_service_ingress import SandboxAppServiceIngress
+from sandbox0.apispec.models.sandbox_app_service_route import SandboxAppServiceRoute
+from sandbox0.apispec.models.sandbox_app_service_runtime import SandboxAppServiceRuntime
+from sandbox0.apispec.models.sandbox_app_service_runtime_type import SandboxAppServiceRuntimeType
+from sandbox0.apispec.models.sandbox_function import SandboxFunction
+from sandbox0.apispec.models.sandbox_function_runtime import SandboxFunctionRuntime
+from sandbox0.apispec.models.sandbox_function_source import SandboxFunctionSource
+from sandbox0.apispec.models.sandbox_function_source_type import SandboxFunctionSourceType
+
+function_source = """def handler(request):
+    return {"status": 200, "body": "ok"}
+"""
+
+resp = sandbox.update_services([
+    SandboxAppService(
+        id="handler",
+        port=49983,
+        runtime=SandboxAppServiceRuntime(
+            type_=SandboxAppServiceRuntimeType.FUNCTION,
+            function=SandboxFunction(
+                runtime=SandboxFunctionRuntime.PYTHON,
+                handler="handler",
+                source=SandboxFunctionSource(
+                    type_=SandboxFunctionSourceType.INLINE,
+                    filename="main.py",
+                    code=function_source,
+                ),
+            ),
+        ),
+        ingress=SandboxAppServiceIngress(
+            public=True,
+            routes=[
+                SandboxAppServiceRoute(
+                    id="handler",
+                    path_prefix="/",
+                    methods=["POST"],
+                    timeout_seconds=30,
+                    resume=True,
+                ),
+            ],
+        ),
+    ),
+])
+print(f"services: {len(resp.services)}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const functionSource = \`def handler(request):
+    return {"status": 200, "body": "ok"}
+\`;
+
+const resp = await sandbox.updateServices([
+    {
+        id: 'handler',
+        port: 49983,
+        runtime: {
+            type: 'function',
+            _function: {
+                runtime: 'python',
+                handler: 'handler',
+                source: {
+                    type: 'inline',
+                    filename: 'main.py',
+                    code: functionSource,
+                },
+            },
+        },
+        ingress: {
+            public: true,
+            routes: [
+                {
+                    id: 'handler',
+                    pathPrefix: '/',
+                    methods: ['POST'],
+                    timeoutSeconds: 30,
+                    resume: true,
+                },
+            ],
+        },
+    },
+]);
+console.log('services:', resp.services?.length ?? 0);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `cat > function-services.yaml <<'EOF'
+services:
+  - id: handler
+    port: 49983
+    runtime:
+      type: function
+      function:
+        runtime: python
+        handler: handler
+        source:
+          type: inline
+          filename: main.py
+          code: |
+            def handler(request):
+                return {"status": 200, "body": "ok"}
+    ingress:
+      public: true
+      routes:
+        - id: handler
+          path_prefix: /
+          methods: [POST]
+          timeout_seconds: 30
+          resume: true
+EOF
+
+s0 sandbox service update --services-file function-services.yaml -s sb_abc123`
+    }
+  ]}
+/>
+
+The handler receives a request object with:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `service_id` | string | Matched service ID |
+| `route_id` | string | Matched route ID |
+| `method` | string | HTTP method |
+| `path` | string | Request path after route rewrite |
+| `raw_query` | string | Raw query string |
+| `headers` | object | HTTP headers |
+| `body_base64` | string | Base64-encoded request body |
+
+The handler returns either a value or a response object:
+
+```python
+def handler(request):
+    return {
+        "status": 201,
+        "headers": {"content-type": "text/plain"},
+        "body": "created",
+    }
+```
+
+For SSE, clients send `Accept: text/event-stream`. The handler can return a response object whose `body` is a Python iterable or async iterable. Each yielded string or bytes value is streamed and flushed to the client.
+
+```python
+def handler(request):
+    def events():
+        yield "event: ready\n"
+        yield "data: ok\n\n"
+
+    return {
+        "status": 200,
+        "headers": {"content-type": "text/event-stream"},
+        "body": events(),
+    }
+```
+
+For WebSocket requests, define an async handler that accepts `(request, ws)`. The `ws` object supports `receive()`, `send(value)`, `close(reason="")`, and async iteration. Text messages are strings; binary messages are bytes.
+
+```python
+async def handler(request, ws):
+    async for message in ws:
+        await ws.send("echo:" + message)
+```
 
 ## List Services
 
@@ -307,8 +560,8 @@ if err != nil {
       language: "python",
       code: `from sandbox0.apispec.models.sandbox_config import SandboxConfig
 
-sandbox = client.claim_sandbox(
-    template="default",
+sandbox = client.sandboxes.claim(
+    "default",
     config=SandboxConfig.from_dict({
         "auto_resume": True,
         "services": [

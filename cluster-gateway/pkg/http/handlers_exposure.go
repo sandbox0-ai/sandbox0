@@ -100,6 +100,11 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 		}
 	}
 
+	if sandboxServiceIsFunction(match.service) {
+		s.executeSandboxFunctionExposure(c, sandbox, match.service, route)
+		return
+	}
+
 	if basePort, parseErr := portFromURL(sandbox.InternalAddr); parseErr == nil && basePort == port {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "reserved port is not exposable")
 		return

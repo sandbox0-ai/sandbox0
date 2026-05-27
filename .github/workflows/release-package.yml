@@ -119,6 +119,8 @@ jobs:
 
       - name: Setup protoc
         uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
 
       - name: Setup Helm
         uses: azure/setup-helm@v4

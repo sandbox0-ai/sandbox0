@@ -14,7 +14,7 @@ OAPI_CODEGEN_VERSION ?= v2.4.1
 PROTOC ?= protoc
 GO ?= env GOWORK=off go
 
-SERVICES := regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld procd python-runner netd infra-operator
+SERVICES := regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld procd netd infra-operator
 E2E_SSH_FIXTURE_SOURCE_IMAGE := lscr.io/linuxserver/openssh-server@sha256:68b605929e83b2efe000da09269688f6d82a44579e8a18e2d9e8c8d272917cf7
 E2E_SSH_FIXTURE_IMAGE := sandbox0ai/e2e-openssh-server:68b605929e83
 E2E_DEPENDENCY_IMAGES := postgres:16-alpine rustfs/rustfs:1.0.0-alpha.79 registry:2.8.3 sandbox0ai/otemplates:default-v0.1.0 $(E2E_SSH_FIXTURE_IMAGE)
@@ -44,8 +44,8 @@ build: manifests proto apispec
 			echo "Error: Unknown service '$$s'"; exit 1; \
 		fi; \
 		printf "$(GREEN)Building $$s...$(RESET)\n"; \
-		if [ "$$s" = "procd" ] || [ "$$s" = "python-runner" ]; then \
-			dir="manager"; bin="$$s"; src="./manager/cmd/$$s"; \
+		if [ "$$s" = "procd" ]; then \
+			dir="manager"; bin="procd"; src="./manager/cmd/procd"; \
 		elif [ "$$s" = "infra-operator" ]; then \
 			dir="infra-operator"; bin="infra-operator"; src="./infra-operator/cmd/infra-operator"; \
 		elif [ "$$s" = "ctld" ]; then \
@@ -70,6 +70,10 @@ build: manifests proto apispec
 		else \
 			CGO_ENABLED=0 GOOS=$(GOOS) $(GO) build -v -o $$out $$src; \
 		fi || exit 1; \
+		if [ "$$s" = "procd" ]; then \
+			runner_out="$$(dirname $$out)/python-runner"; \
+			CGO_ENABLED=0 GOOS=$(GOOS) $(GO) build -v -o $$runner_out ./manager/cmd/python-runner || exit 1; \
+		fi; \
 	done
 
 docker-build:
@@ -109,9 +113,7 @@ test:
 		elif [ "$$service" = "manager" ]; then \
 			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./manager/...; \
 		elif [ "$$service" = "procd" ]; then \
-			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./manager/procd/... ./manager/cmd/python-runner/...; \
-		elif [ "$$service" = "python-runner" ]; then \
-			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./manager/cmd/python-runner/...; \
+			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./manager/procd/...; \
 		elif [ "$$service" = "netd" ]; then \
 			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./netd/...; \
 		elif [ "$$service" = "scheduler" ]; then \
@@ -204,7 +206,7 @@ test-e2e-specific:
 	unset http_proxy && unset https_proxy && unset all_proxy && $(GO) test -v ./tests/e2e/... -focus="$(SPEC)" -timeout=30m
 
 # Prevent make from treating service names as targets
-regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld procd python-runner netd infra-operator:
+regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld procd netd infra-operator:
 	@:
 
 lint:
@@ -219,8 +221,8 @@ vendor:
 clean:
 	@for service in $(SERVICES); do \
 		printf "$(YELLOW)Cleaning $$service...$(RESET)\n"; \
-		if [ "$$service" = "procd" ] || [ "$$service" = "python-runner" ]; then \
-			rm -rf manager/bin/$$service; \
+		if [ "$$service" = "procd" ]; then \
+			rm -rf manager/bin/procd manager/bin/python-runner; \
 		else \
 			rm -rf $$service/bin; \
 		fi; \

@@ -148,8 +148,19 @@ const (
 // Defines values for SandboxAppServiceRuntimeType.
 const (
 	SandboxAppServiceRuntimeTypeCmd         SandboxAppServiceRuntimeType = "cmd"
+	SandboxAppServiceRuntimeTypeFunction    SandboxAppServiceRuntimeType = "function"
 	SandboxAppServiceRuntimeTypeManual      SandboxAppServiceRuntimeType = "manual"
 	SandboxAppServiceRuntimeTypeWarmProcess SandboxAppServiceRuntimeType = "warm_process"
+)
+
+// Defines values for SandboxFunctionRuntime.
+const (
+	Python SandboxFunctionRuntime = "python"
+)
+
+// Defines values for SandboxFunctionSourceType.
+const (
+	Inline SandboxFunctionSourceType = "inline"
 )
 
 // Defines values for SandboxLifecycleStatus.
@@ -936,36 +947,6 @@ type ForkVolumeRequest struct {
 	DefaultPosixUid *int64 `json:"default_posix_uid,omitempty"`
 }
 
-// FunctionInvokeRequest defines model for FunctionInvokeRequest.
-type FunctionInvokeRequest struct {
-	// BodyBase64 Base64-encoded request body passed to the function.
-	BodyBase64 *string `json:"body_base64,omitempty"`
-
-	// Handler Python handler name inside the function module. Defaults to handler.
-	Handler *string              `json:"handler,omitempty"`
-	Headers *map[string][]string `json:"headers,omitempty"`
-
-	// Method Logical request method passed to the function. Defaults to POST.
-	Method *string `json:"method,omitempty"`
-
-	// Path Logical request path passed to the function. Defaults to /.
-	Path  *string              `json:"path,omitempty"`
-	Query *map[string][]string `json:"query,omitempty"`
-
-	// TimeoutMs Per-invocation timeout in milliseconds. Defaults to 30000 and must not exceed 120000.
-	TimeoutMs *int32 `json:"timeout_ms,omitempty"`
-}
-
-// FunctionInvokeResponse defines model for FunctionInvokeResponse.
-type FunctionInvokeResponse struct {
-	// BodyBase64 Base64-encoded function response body.
-	BodyBase64 *string              `json:"body_base64,omitempty"`
-	Headers    *map[string][]string `json:"headers,omitempty"`
-
-	// Status Function-level HTTP-style status code.
-	Status int32 `json:"status"`
-}
-
 // GatewayMetadata defines model for GatewayMetadata.
 type GatewayMetadata struct {
 	GatewayMode GatewayMetadataGatewayMode `json:"gateway_mode"`
@@ -1472,8 +1453,10 @@ type SandboxAppService struct {
 	HealthCheck *SandboxAppServiceHealth `json:"health_check,omitempty"`
 
 	// Id Stable service ID. Must be a DNS label.
-	Id      string                    `json:"id"`
-	Ingress SandboxAppServiceIngress  `json:"ingress"`
+	Id      string                   `json:"id"`
+	Ingress SandboxAppServiceIngress `json:"ingress"`
+
+	// Port Public exposure routing port. Function services normally use the sandbox procd port.
 	Port    int32                     `json:"port"`
 	Runtime *SandboxAppServiceRuntime `json:"runtime,omitempty"`
 }
@@ -1541,6 +1524,9 @@ type SandboxAppServiceRuntime struct {
 	Cwd     *string            `json:"cwd,omitempty"`
 	EnvVars *map[string]string `json:"env_vars,omitempty"`
 
+	// Function Function code executed by procd for a sandbox service request. cluster-gateway owns public ingress and carries this source to procd.
+	Function *SandboxFunction `json:"function,omitempty"`
+
 	// Type Runtime strategy for restarting a service process.
 	Type SandboxAppServiceRuntimeType `json:"type"`
 
@@ -1559,7 +1545,9 @@ type SandboxAppServiceView struct {
 	// Id Stable service ID. Must be a DNS label.
 	Id      string                   `json:"id"`
 	Ingress SandboxAppServiceIngress `json:"ingress"`
-	Port    int32                    `json:"port"`
+
+	// Port Public exposure routing port. Function services normally use the sandbox procd port.
+	Port int32 `json:"port"`
 
 	// PublicUrl Public HTTPS URL for this service when public exposure is enabled.
 	PublicUrl       *string                   `json:"public_url,omitempty"`
@@ -1584,6 +1572,36 @@ type SandboxConfig struct {
 	// Webhook Per-sandbox webhook configuration. Sandbox0 delivers webhook events at least once and consumers should deduplicate by event_id. For sandbox lifecycle events, procd persists signed delivery records to a manager-owned SandboxVolume outside the workspace before dispatch; manager also emits sandbox.deleted during pod deletion cleanup.
 	Webhook *WebhookConfig `json:"webhook,omitempty"`
 }
+
+// SandboxFunction Function code executed by procd for a sandbox service request. cluster-gateway owns public ingress and carries this source to procd.
+type SandboxFunction struct {
+	// Handler Python callable name. Defaults to handler.
+	Handler *string `json:"handler,omitempty"`
+
+	// Runtime Function runtime. Only python is supported in this version.
+	Runtime SandboxFunctionRuntime `json:"runtime"`
+
+	// Source Function source code stored in sandbox service config.
+	Source SandboxFunctionSource `json:"source"`
+}
+
+// SandboxFunctionRuntime Function runtime. Only python is supported in this version.
+type SandboxFunctionRuntime string
+
+// SandboxFunctionSource Function source code stored in sandbox service config.
+type SandboxFunctionSource struct {
+	// Code Inline source code. Limited to 256 KiB.
+	Code string `json:"code"`
+
+	// Filename Relative Python filename used when materializing the source. Defaults to main.py.
+	Filename *string `json:"filename,omitempty"`
+
+	// Type Source transport. Only inline source is supported in this version.
+	Type SandboxFunctionSourceType `json:"type"`
+}
+
+// SandboxFunctionSourceType Source transport. Only inline source is supported in this version.
+type SandboxFunctionSourceType string
 
 // SandboxLifecycleStatus defines model for SandboxLifecycleStatus.
 type SandboxLifecycleStatus string
@@ -1996,12 +2014,6 @@ type SuccessFileStatResponse struct {
 
 // SuccessFileStatResponseSuccess defines model for SuccessFileStatResponse.Success.
 type SuccessFileStatResponseSuccess bool
-
-// SuccessFunctionInvokeResponse defines model for SuccessFunctionInvokeResponse.
-type SuccessFunctionInvokeResponse struct {
-	Data    *FunctionInvokeResponse `json:"data,omitempty"`
-	Success bool                    `json:"success"`
-}
 
 // SuccessGatewayMetadataResponse defines model for SuccessGatewayMetadataResponse.
 type SuccessGatewayMetadataResponse struct {
@@ -2570,9 +2582,6 @@ type ContextID = string
 // FilePath defines model for FilePath.
 type FilePath = string
 
-// FunctionName defines model for FunctionName.
-type FunctionName = string
-
 // IdentityID defines model for IdentityID.
 type IdentityID = string
 
@@ -2765,9 +2774,6 @@ type PostApiV1SandboxesIdContextsCtxIdSignalJSONRequestBody = SignalContextReque
 
 // PostApiV1SandboxesIdFilesMoveJSONRequestBody defines body for PostApiV1SandboxesIdFilesMove for application/json ContentType.
 type PostApiV1SandboxesIdFilesMoveJSONRequestBody = MoveFileRequest
-
-// PostApiV1SandboxesIdFunctionsNameInvokeJSONRequestBody defines body for PostApiV1SandboxesIdFunctionsNameInvoke for application/json ContentType.
-type PostApiV1SandboxesIdFunctionsNameInvokeJSONRequestBody = FunctionInvokeRequest
 
 // PutApiV1SandboxesIdNetworkJSONRequestBody defines body for PutApiV1SandboxesIdNetwork for application/json ContentType.
 type PutApiV1SandboxesIdNetworkJSONRequestBody = SandboxNetworkPolicy

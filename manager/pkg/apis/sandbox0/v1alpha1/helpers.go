@@ -290,7 +290,7 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 	})
 	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 		Name:      procdBinVolumeName,
-		MountPath: "/procd",
+		MountPath: "/procd/bin",
 	})
 
 	// Security context
@@ -442,12 +442,12 @@ func applyProcdInit(spec *corev1.PodSpec) {
 		Command: []string{
 			"/bin/sh",
 			"-c",
-			"mkdir -p /procd/bin /procd/runtimes && cp /usr/local/bin/procd /procd/bin/procd && cp /usr/local/bin/python-runner /procd/runtimes/python-runner && chmod 0755 /procd/bin/procd /procd/runtimes/python-runner",
+			"cp /usr/local/bin/procd /procd/bin/procd && cp /usr/local/bin/python-runner /procd/bin/python-runner && chmod 0755 /procd/bin/procd /procd/bin/python-runner",
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{
 				Name:      procdBinVolumeName,
-				MountPath: "/procd",
+				MountPath: "/procd/bin",
 			},
 		},
 	})

@@ -28,6 +28,10 @@ flowchart TB
 
 ## Create a Snapshot
 
+<Callout variant="info">
+For active mounted Volumes, snapshot creation is mode-aware. `RWO` mounts are checkpointed before the snapshot is published, `ROX` mounts do not need a writable flush, and active writable `RWX` mounts currently return `409 Conflict`. Unmount or quiesce active `RWX` writers before creating a snapshot.
+</Callout>
+
 <Tabs
   tabs={[
     {
@@ -101,6 +105,53 @@ s0 volume snapshot create vol_abc123xyz \
 
 # For automation scripts, prefer JSON output:
 s0 volume snapshot create vol_abc123xyz --name "v1.2-prod" -o json`
+    }
+  ]}
+/>
+
+## Create a Volume from a Snapshot
+
+Creating a new Volume with `snapshot_id` gives each workflow an isolated writable Volume initialized from immutable snapshot state.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `taskVolume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{
+    SnapshotID: apispec.NewOptString(snapshot.ID),
+    AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWO),
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("Task Volume ID: %s\\n", taskVolume.ID)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.apispec.models.create_sandbox_volume_request import CreateSandboxVolumeRequest
+from sandbox0.apispec.models.volume_access_mode import VolumeAccessMode
+
+task_volume = client.volumes.create(CreateSandboxVolumeRequest(
+    snapshot_id=snapshot.id,
+    access_mode=VolumeAccessMode.RWO,
+))
+print(f"Task Volume ID: {task_volume.id}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const taskVolume = await client.volumes.create({
+    snapshotId: snapshot.id,
+    accessMode: models.VolumeAccessMode.Rwo,
+});
+console.log("Task Volume ID:", taskVolume.id);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 volume create --snapshot-id snap_def456uvw --access-mode RWO`
     }
   ]}
 />

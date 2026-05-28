@@ -316,6 +316,39 @@ func (c combinedController) AbortVolumePortalHandoff(r *http.Request, req ctldap
 	return resp, http.StatusOK
 }
 
+func (c combinedController) PrepareVolumeSnapshotCheckpoint(r *http.Request, req ctldapi.PrepareVolumeSnapshotCheckpointRequest) (ctldapi.PrepareVolumeSnapshotCheckpointResponse, int) {
+	if c.Portal == nil {
+		return ctldapi.PrepareVolumeSnapshotCheckpointResponse{Error: "ctld volume snapshot checkpoint not implemented"}, http.StatusNotImplemented
+	}
+	resp, err := c.Portal.PrepareSnapshotCheckpoint(r.Context(), req)
+	if err != nil {
+		return ctldapi.PrepareVolumeSnapshotCheckpointResponse{Error: err.Error()}, volumePortalErrorStatus(err)
+	}
+	return resp, http.StatusOK
+}
+
+func (c combinedController) CompleteVolumeSnapshotCheckpoint(r *http.Request, req ctldapi.CompleteVolumeSnapshotCheckpointRequest) (ctldapi.CompleteVolumeSnapshotCheckpointResponse, int) {
+	if c.Portal == nil {
+		return ctldapi.CompleteVolumeSnapshotCheckpointResponse{Error: "ctld volume snapshot checkpoint not implemented"}, http.StatusNotImplemented
+	}
+	resp, err := c.Portal.CompleteSnapshotCheckpoint(r.Context(), req)
+	if err != nil {
+		return ctldapi.CompleteVolumeSnapshotCheckpointResponse{Error: err.Error()}, volumePortalErrorStatus(err)
+	}
+	return resp, http.StatusOK
+}
+
+func (c combinedController) AbortVolumeSnapshotCheckpoint(r *http.Request, req ctldapi.AbortVolumeSnapshotCheckpointRequest) (ctldapi.AbortVolumeSnapshotCheckpointResponse, int) {
+	if c.Portal == nil {
+		return ctldapi.AbortVolumeSnapshotCheckpointResponse{Error: "ctld volume snapshot checkpoint not implemented"}, http.StatusNotImplemented
+	}
+	resp, err := c.Portal.AbortSnapshotCheckpoint(r.Context(), req)
+	if err != nil {
+		return ctldapi.AbortVolumeSnapshotCheckpointResponse{Error: err.Error()}, volumePortalErrorStatus(err)
+	}
+	return resp, http.StatusOK
+}
+
 func volumePortalErrorStatus(err error) int {
 	if err == nil {
 		return http.StatusOK
@@ -356,5 +389,8 @@ type volumePortalHandler interface {
 	PrepareHandoff(ctx context.Context, req ctldapi.PrepareVolumePortalHandoffRequest) (ctldapi.PrepareVolumePortalHandoffResponse, error)
 	CompleteHandoff(ctx context.Context, req ctldapi.CompleteVolumePortalHandoffRequest) (ctldapi.CompleteVolumePortalHandoffResponse, error)
 	AbortHandoff(ctx context.Context, req ctldapi.AbortVolumePortalHandoffRequest) (ctldapi.AbortVolumePortalHandoffResponse, error)
+	PrepareSnapshotCheckpoint(ctx context.Context, req ctldapi.PrepareVolumeSnapshotCheckpointRequest) (ctldapi.PrepareVolumeSnapshotCheckpointResponse, error)
+	CompleteSnapshotCheckpoint(ctx context.Context, req ctldapi.CompleteVolumeSnapshotCheckpointRequest) (ctldapi.CompleteVolumeSnapshotCheckpointResponse, error)
+	AbortSnapshotCheckpoint(ctx context.Context, req ctldapi.AbortVolumeSnapshotCheckpointRequest) (ctldapi.AbortVolumeSnapshotCheckpointResponse, error)
 	MountedVolumeHandler() http.Handler
 }

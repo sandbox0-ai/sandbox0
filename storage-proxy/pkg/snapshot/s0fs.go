@@ -108,18 +108,30 @@ func (m *Manager) hasMountedStorageProxyOwner(ctx context.Context, volumeID stri
 	return m.hasMountedOwnerKind(ctx, volumeID, volume.OwnerKindStorageProxy)
 }
 
+func (m *Manager) hasActiveWritableMount(ctx context.Context, volumeID string) (bool, error) {
+	mounts, err := m.activeMounts(ctx, volumeID)
+	if err != nil {
+		return false, err
+	}
+	for _, mount := range mounts {
+		if mount == nil {
+			continue
+		}
+		opts := volume.DecodeMountOptions(mount.MountOptions)
+		if volume.NormalizeAccessMode(string(opts.AccessMode)) != volume.AccessModeROX {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (m *Manager) hasMountedOwnerKind(ctx context.Context, volumeID, ownerKind string) (bool, error) {
-	repo, ok := any(m.repo).(activeMountRepository)
-	if !ok || repo == nil || volumeID == "" || ownerKind == "" {
+	if ownerKind == "" {
 		return false, nil
 	}
-	heartbeatTimeout := 15
-	if m.config != nil && m.config.HeartbeatTimeout > 0 {
-		heartbeatTimeout = m.config.HeartbeatTimeout
-	}
-	mounts, err := repo.GetActiveMounts(ctx, volumeID, heartbeatTimeout)
+	mounts, err := m.activeMounts(ctx, volumeID)
 	if err != nil {
-		return false, fmt.Errorf("get active mounts: %w", err)
+		return false, err
 	}
 	for _, mount := range mounts {
 		if volume.DecodeMountOptions(mount.MountOptions).OwnerKind == ownerKind {
@@ -127,6 +139,22 @@ func (m *Manager) hasMountedOwnerKind(ctx context.Context, volumeID, ownerKind s
 		}
 	}
 	return false, nil
+}
+
+func (m *Manager) activeMounts(ctx context.Context, volumeID string) ([]*db.VolumeMount, error) {
+	repo, ok := any(m.repo).(activeMountRepository)
+	if !ok || repo == nil || volumeID == "" {
+		return nil, nil
+	}
+	heartbeatTimeout := 15
+	if m.config != nil && m.config.HeartbeatTimeout > 0 {
+		heartbeatTimeout = m.config.HeartbeatTimeout
+	}
+	mounts, err := repo.GetActiveMounts(ctx, volumeID, heartbeatTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("get active mounts: %w", err)
+	}
+	return mounts, nil
 }
 
 func (m *Manager) s0fsObjectStore(teamID, volumeID string) (objectstore.Store, error) {

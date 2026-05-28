@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxfunction"
@@ -51,12 +52,13 @@ type functionHandlerConfig struct {
 
 // FunctionHandler executes gateway-provided function source inside the sandbox.
 type FunctionHandler struct {
-	logger         *zap.Logger
-	runnerPath     string
-	cacheRoot      string
-	defaultTimeout time.Duration
-	maxTimeout     time.Duration
-	upgrader       websocket.Upgrader
+	logger             *zap.Logger
+	runnerPath         string
+	cacheRoot          string
+	defaultTimeout     time.Duration
+	maxTimeout         time.Duration
+	upgrader           websocket.Upgrader
+	sandboxEnvProvider func() map[string]string
 }
 
 type functionHandlerRequest struct {
@@ -99,6 +101,18 @@ func newFunctionHandler(config functionHandlerConfig, logger *zap.Logger) *Funct
 			CheckOrigin: func(*http.Request) bool { return true },
 		},
 	}
+}
+
+// SetSandboxEnvVarsProvider sets the provider for sandbox-level default environment variables.
+func (h *FunctionHandler) SetSandboxEnvVarsProvider(provider func() map[string]string) {
+	h.sandboxEnvProvider = provider
+}
+
+func (h *FunctionHandler) sandboxEnvVars() map[string]string {
+	if h.sandboxEnvProvider == nil {
+		return nil
+	}
+	return h.sandboxEnvProvider()
 }
 
 func (h *FunctionHandler) Execute(w http.ResponseWriter, r *http.Request) {
@@ -348,7 +362,7 @@ func (h *FunctionHandler) run(ctx context.Context, modulePath, handler string, e
 	cmd := osexec.CommandContext(ctx, h.runnerPath, modulePath, handler)
 	cmd.Dir = filepath.Dir(modulePath)
 	cmd.Stdin = bytes.NewReader(payload)
-	cmd.Env = mergeFunctionEnv(os.Environ(), envVars)
+	cmd.Env = process.MergeEnvironment(os.Environ(), h.sandboxEnvVars(), envVars)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = killFunctionProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
@@ -380,7 +394,7 @@ func killFunctionProcessGroup(cmd *osexec.Cmd) func() error {
 func (h *FunctionHandler) runStream(ctx context.Context, w http.ResponseWriter, modulePath, handler string, envVars map[string]string, payload []byte) error {
 	cmd := osexec.CommandContext(ctx, h.runnerPath, "--stream", modulePath, handler)
 	cmd.Dir = filepath.Dir(modulePath)
-	cmd.Env = mergeFunctionEnv(os.Environ(), envVars)
+	cmd.Env = process.MergeEnvironment(os.Environ(), h.sandboxEnvVars(), envVars)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = killFunctionProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
@@ -494,7 +508,7 @@ func (h *FunctionHandler) runWebSocket(ctx context.Context, conn *websocket.Conn
 
 	cmd := osexec.CommandContext(ctx, h.runnerPath, "--websocket", modulePath, handler)
 	cmd.Dir = filepath.Dir(modulePath)
-	cmd.Env = mergeFunctionEnv(os.Environ(), envVars)
+	cmd.Env = process.MergeEnvironment(os.Environ(), h.sandboxEnvVars(), envVars)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = killFunctionProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
@@ -702,37 +716,6 @@ func decodeWebSocketRunnerMessage(frame sandboxfunction.WebSocketFrame) (int, []
 	default:
 		return 0, nil, fmt.Errorf("unsupported websocket message_type %q", frame.MessageType)
 	}
-}
-
-func mergeFunctionEnv(base []string, envVars map[string]string) []string {
-	if len(envVars) == 0 {
-		return base
-	}
-	out := make([]string, 0, len(base)+len(envVars))
-	overrides := make(map[string]string, len(envVars))
-	for key, value := range envVars {
-		key = strings.TrimSpace(key)
-		if key == "" || strings.Contains(key, "=") {
-			continue
-		}
-		overrides[key] = value
-	}
-	for _, item := range base {
-		key, _, ok := strings.Cut(item, "=")
-		if !ok {
-			continue
-		}
-		if value, exists := overrides[key]; exists {
-			out = append(out, key+"="+value)
-			delete(overrides, key)
-			continue
-		}
-		out = append(out, item)
-	}
-	for key, value := range overrides {
-		out = append(out, key+"="+value)
-	}
-	return out
 }
 
 func trimLoggedStderr(stderr string, truncated bool) string {

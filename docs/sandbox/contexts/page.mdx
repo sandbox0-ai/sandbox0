@@ -383,7 +383,7 @@ Create a new context in a sandbox.
 | `repl` | object | REPL configuration (optional for `type=repl`; defaults to Python when omitted) |
 | `cmd` | object | Command configuration (`cmd.command` required if `type=cmd`) |
 | `cwd` | string | Working directory |
-| `env_vars` | object | Environment variables |
+| `env_vars` | object | Context environment variables; override sandbox-level `env_vars` for this context |
 | `pty_size` | object | Terminal size `{rows, cols}` |
 | `ttl_sec` | integer | Context time-to-live in seconds |
 | `idle_timeout_sec` | integer | Idle timeout in seconds |

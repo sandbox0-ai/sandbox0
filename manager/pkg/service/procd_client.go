@@ -110,6 +110,7 @@ type StatsResponse struct {
 type InitializeRequest struct {
 	SandboxID string             `json:"sandbox_id"`
 	TeamID    string             `json:"team_id,omitempty"`
+	EnvVars   map[string]string  `json:"env_vars,omitempty"`
 	Webhook   *InitializeWebhook `json:"webhook,omitempty"`
 }
 

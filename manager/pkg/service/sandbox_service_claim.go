@@ -95,10 +95,22 @@ func cloneSandboxConfig(cfg *SandboxConfig) *SandboxConfig {
 		return nil
 	}
 	cloned := *cfg
+	cloned.EnvVars = cloneEnvVars(cfg.EnvVars)
 	if cloned.Network != nil {
 		cloned.Network = sanitizedNetworkPolicyForPersistence(cloned.Network)
 	}
 	return &cloned
+}
+
+func cloneEnvVars(envVars map[string]string) map[string]string {
+	if len(envVars) == 0 {
+		return nil
+	}
+	cloned := make(map[string]string, len(envVars))
+	for key, value := range envVars {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func (s *SandboxService) claimConfigForPersistence(cfg *SandboxConfig) *SandboxConfig {
@@ -1239,6 +1251,7 @@ func (s *SandboxService) initializeProcd(
 	initReq := InitializeRequest{
 		SandboxID: sandboxID,
 		TeamID:    teamID,
+		EnvVars:   sandboxEnvVarsForInitialize(req.Config),
 		Webhook:   webhookConfig,
 	}
 
@@ -1268,4 +1281,11 @@ func (s *SandboxService) initializeProcd(
 			continue
 		}
 	}
+}
+
+func sandboxEnvVarsForInitialize(cfg *SandboxConfig) map[string]string {
+	if cfg == nil {
+		return nil
+	}
+	return cloneEnvVars(cfg.EnvVars)
 }

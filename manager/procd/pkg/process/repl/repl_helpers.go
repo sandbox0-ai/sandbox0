@@ -16,7 +16,7 @@ type execCandidate struct {
 }
 
 // startWithCandidates tries to start a process with the given candidates in order.
-func startWithCandidates(base *process.BaseProcess, runner *process.PTYRunner, config process.ProcessConfig, candidates []execCandidate, extraEnv []string) error {
+func startWithCandidates(base *process.BaseProcess, runner *process.PTYRunner, config process.ProcessConfig, candidates []execCandidate, extraEnv map[string]string) error {
 	if len(candidates) == 0 {
 		if base != nil {
 			base.SetState(process.ProcessStateCrashed)
@@ -49,12 +49,7 @@ func startWithCandidates(base *process.BaseProcess, runner *process.PTYRunner, c
 		// PTY automatically creates a new session and handles terminal control.
 		// Setting Setpgid would conflict with PTY's session management.
 
-		env := os.Environ()
-		for k, v := range config.EnvVars {
-			env = append(env, fmt.Sprintf("%s=%s", k, v))
-		}
-		env = append(env, extraEnv...)
-		cmd.Env = env
+		cmd.Env = process.MergeEnvironment(os.Environ(), config.EnvVars, extraEnv)
 
 		err = runner.Start(cmd, config.PTYSize)
 		if err == nil {

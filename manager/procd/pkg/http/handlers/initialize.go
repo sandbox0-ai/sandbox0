@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/webhook"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -14,23 +15,25 @@ import (
 
 // InitializeHandler handles sandbox initialization requests.
 type InitializeHandler struct {
-	dispatcher  *webhook.Dispatcher
-	fileManager *file.Manager
-	httpPort    int
-	logger      *zap.Logger
-	readyOnce   sync.Once
-	watchMu     sync.Mutex
-	watchPath   string
-	unsubscribe func() error
+	dispatcher     *webhook.Dispatcher
+	fileManager    *file.Manager
+	contextManager *ctxpkg.Manager
+	httpPort       int
+	logger         *zap.Logger
+	readyOnce      sync.Once
+	watchMu        sync.Mutex
+	watchPath      string
+	unsubscribe    func() error
 }
 
 // NewInitializeHandler creates a new initialize handler.
-func NewInitializeHandler(dispatcher *webhook.Dispatcher, fileManager *file.Manager, httpPort int, logger *zap.Logger) *InitializeHandler {
+func NewInitializeHandler(dispatcher *webhook.Dispatcher, fileManager *file.Manager, contextManager *ctxpkg.Manager, httpPort int, logger *zap.Logger) *InitializeHandler {
 	return &InitializeHandler{
-		dispatcher:  dispatcher,
-		fileManager: fileManager,
-		httpPort:    httpPort,
-		logger:      logger,
+		dispatcher:     dispatcher,
+		fileManager:    fileManager,
+		contextManager: contextManager,
+		httpPort:       httpPort,
+		logger:         logger,
 	}
 }
 
@@ -38,6 +41,7 @@ func NewInitializeHandler(dispatcher *webhook.Dispatcher, fileManager *file.Mana
 type InitializeRequest struct {
 	SandboxID string             `json:"sandbox_id"`
 	TeamID    string             `json:"team_id,omitempty"`
+	EnvVars   map[string]string  `json:"env_vars,omitempty"`
 	Webhook   *InitializeWebhook `json:"webhook,omitempty"`
 }
 
@@ -90,6 +94,10 @@ func (h *InitializeHandler) Initialize(w http.ResponseWriter, r *http.Request) {
 		webhookURL = req.Webhook.URL
 		webhookSecret = req.Webhook.Secret
 		webhookWatchDir = req.Webhook.WatchDir
+	}
+
+	if h.contextManager != nil {
+		h.contextManager.SetSandboxEnvVars(req.EnvVars)
 	}
 
 	h.dispatcher.SetConfig(webhookURL, webhookSecret)

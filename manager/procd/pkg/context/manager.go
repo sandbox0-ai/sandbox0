@@ -50,6 +50,7 @@ type SandboxResourceUsage struct {
 type Manager struct {
 	mu                   sync.RWMutex
 	contexts             map[string]*Context
+	sandboxEnvVars       map[string]string
 	onExit               process.ExitHandler
 	onStart              process.StartHandler
 	defaultCleanupPolicy CleanupPolicy
@@ -84,6 +85,20 @@ func (m *Manager) SetDefaultCleanupPolicy(policy CleanupPolicy) {
 	m.defaultCleanupPolicy = policy
 }
 
+// SetSandboxEnvVars sets sandbox-level default environment variables for new contexts.
+func (m *Manager) SetSandboxEnvVars(envVars map[string]string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sandboxEnvVars = process.CloneEnvVars(envVars)
+}
+
+// SandboxEnvVars returns a copy of the sandbox-level default environment variables.
+func (m *Manager) SandboxEnvVars() map[string]string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return process.CloneEnvVars(m.sandboxEnvVars)
+}
+
 // StartCleanup starts a background cleanup loop.
 func (m *Manager) StartCleanup(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
@@ -115,6 +130,7 @@ func (m *Manager) CreateContextWithPolicyAndREPLConfig(config process.ProcessCon
 	m.mu.Lock()
 	startHandler := m.onStart
 	defaultPolicy := m.defaultCleanupPolicy
+	config.EnvVars = process.MergeEnvVars(m.sandboxEnvVars, config.EnvVars)
 	// Define exit handler for the new context
 	exitHandler := func(event process.ExitEvent) {
 		if m.onExit != nil {

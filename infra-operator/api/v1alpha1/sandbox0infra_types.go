@@ -20,6 +20,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/sandbox0-ai/sandbox0/pkg/rediscache"
 )
 
 // DatabaseType defines the type of database
@@ -306,12 +308,12 @@ type RedisConfig struct {
 	// +optional
 	External *ExternalRedisConfig `json:"external,omitempty"`
 
-	// KeyPrefix prefixes keys used by sandbox0 rate limiters.
+	// KeyPrefix prefixes keys used by sandbox0 Redis clients.
 	// +optional
-	// +kubebuilder:default="sandbox0:ratelimit"
+	// +kubebuilder:default="sandbox0"
 	KeyPrefix string `json:"keyPrefix,omitempty"`
 
-	// OperationTimeout bounds each Redis rate limit operation.
+	// OperationTimeout bounds each Redis operation.
 	// +optional
 	// +kubebuilder:default="100ms"
 	OperationTimeout metav1.Duration `json:"operationTimeout,omitempty"`
@@ -1151,17 +1153,11 @@ func IsRedisEnabled(infra *Sandbox0Infra) bool {
 	if infra == nil || infra.Spec.Redis == nil {
 		return false
 	}
-	switch infra.Spec.Redis.Type {
-	case RedisTypeBuiltin:
-		if infra.Spec.Redis.Builtin != nil {
-			return infra.Spec.Redis.Builtin.Enabled
-		}
-		return true
-	case RedisTypeExternal:
-		return true
-	default:
-		return true
+	var builtinEnabled *bool
+	if infra.Spec.Redis.Builtin != nil {
+		builtinEnabled = &infra.Spec.Redis.Builtin.Enabled
 	}
+	return rediscache.SpecEnabled(true, string(infra.Spec.Redis.Type), builtinEnabled)
 }
 
 // IsRegistryEnabled returns true when registry should be reconciled.

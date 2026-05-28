@@ -27,6 +27,16 @@ type GatewayConfig struct {
 	// +kubebuilder:default="168h"
 	JWTRefreshTokenTTL metav1.Duration `yaml:"jwt_refresh_token_ttl" json:"jwtRefreshTokenTTL"`
 
+	// Shared Redis cache backend injected from Sandbox0Infra.spec.redis.
+	// +optional
+	RedisURL string `yaml:"redis_url" json:"-"`
+	// +optional
+	// +kubebuilder:default="sandbox0"
+	RedisKeyPrefix string `yaml:"redis_key_prefix" json:"-"`
+	// +optional
+	// +kubebuilder:default="100ms"
+	RedisTimeout metav1.Duration `yaml:"redis_timeout" json:"-"`
+
 	// Rate limiting
 	// +optional
 	// +kubebuilder:default=100

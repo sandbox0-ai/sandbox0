@@ -497,12 +497,12 @@ spec:
                       unavailable.
                     type: boolean
                   keyPrefix:
-                    default: sandbox0:ratelimit
-                    description: KeyPrefix prefixes keys used by sandbox0 rate limiters.
+                    default: sandbox0
+                    description: KeyPrefix prefixes keys used by sandbox0 Redis clients.
                     type: string
                   operationTimeout:
                     default: 100ms
-                    description: OperationTimeout bounds each Redis rate limit operation.
+                    description: OperationTimeout bounds each Redis operation.
                     type: string
                   type:
                     default: builtin

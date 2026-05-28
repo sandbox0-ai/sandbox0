@@ -10,11 +10,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	cachepkg "github.com/sandbox0-ai/sandbox0/pkg/cache"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/tenantdir"
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
+	memcachepkg "github.com/sandbox0-ai/sandbox0/pkg/memcache"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
@@ -81,7 +81,7 @@ func TestGlobalGatewaySetupRoutesOmitsRegionLocalSSHKeys(t *testing.T) {
 
 func TestGlobalGatewayResolveRoutableRegionCachesLookups(t *testing.T) {
 	dir := &stubRegionDirectory{region: &tenantdir.Region{ID: "aws-us-east-1", Enabled: true, RegionalGatewayURL: "https://regional.example"}}
-	cache := cachepkg.New[string, tenantdir.Region](cachepkg.Config{MaxSize: 16, TTL: time.Hour})
+	cache := memcachepkg.New[string, tenantdir.Region](memcachepkg.Config{MaxSize: 16, TTL: time.Hour})
 	defer cache.Close()
 	server := &Server{
 		logger:       zap.NewNop(),
@@ -115,7 +115,7 @@ func globalHasRoute(router *gin.Engine, method, path string) bool {
 
 func TestGlobalGatewayResolveRoutableRegionExpiresCache(t *testing.T) {
 	dir := &stubRegionDirectory{region: &tenantdir.Region{ID: "aws-us-east-1", Enabled: true, RegionalGatewayURL: "https://regional.example"}}
-	cache := cachepkg.New[string, tenantdir.Region](cachepkg.Config{MaxSize: 16, TTL: 10 * time.Millisecond, CleanupInterval: 5 * time.Millisecond})
+	cache := memcachepkg.New[string, tenantdir.Region](memcachepkg.Config{MaxSize: 16, TTL: 10 * time.Millisecond, CleanupInterval: 5 * time.Millisecond})
 	defer cache.Close()
 	server := &Server{
 		logger:       zap.NewNop(),
@@ -138,7 +138,7 @@ func TestGlobalGatewayResolveRoutableRegionExpiresCache(t *testing.T) {
 
 func TestGlobalGatewayResolveRoutableRegionInvalidationClearsCache(t *testing.T) {
 	dir := &stubRegionDirectory{region: &tenantdir.Region{ID: "aws-us-east-1", Enabled: true, RegionalGatewayURL: "https://regional.example"}}
-	cache := cachepkg.New[string, tenantdir.Region](cachepkg.Config{MaxSize: 16, TTL: time.Hour})
+	cache := memcachepkg.New[string, tenantdir.Region](memcachepkg.Config{MaxSize: 16, TTL: time.Hour})
 	defer cache.Close()
 	server := &Server{
 		logger:       zap.NewNop(),

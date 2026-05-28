@@ -2,14 +2,13 @@ package ratelimit
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"math"
 	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/sandbox0-ai/sandbox0/pkg/rediscache"
 )
 
 type RedisConfig struct {
@@ -65,31 +64,27 @@ func NewRedisLimiter(ctx context.Context, cfg RedisConfig) (*RedisLimiter, error
 	if strings.TrimSpace(cfg.URL) == "" {
 		return nil, fmt.Errorf("redis rate limit backend requires redis URL")
 	}
-	options, err := redis.ParseURL(cfg.URL)
-	if err != nil {
-		return nil, fmt.Errorf("parse redis URL: %w", err)
+	keyPrefix := strings.TrimSpace(cfg.KeyPrefix)
+	if keyPrefix == "" {
+		keyPrefix = DefaultRedisKeyPrefix
 	}
-	client := redis.NewClient(options)
 	timeout := cfg.Timeout
 	if timeout <= 0 {
 		timeout = DefaultRedisTimeout
 	}
-	pingCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	if err := client.Ping(pingCtx).Err(); err != nil {
-		if !cfg.FailOpen {
-			_ = client.Close()
-			return nil, fmt.Errorf("connect redis rate limit backend: %w", err)
-		}
-	}
-	prefix := strings.TrimSpace(cfg.KeyPrefix)
-	if prefix == "" {
-		prefix = DefaultRedisKeyPrefix
+	client, normalized, err := rediscache.NewClient(ctx, rediscache.Config{
+		URL:       cfg.URL,
+		KeyPrefix: keyPrefix,
+		Timeout:   timeout,
+		FailOpen:  cfg.FailOpen,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create redis rate limit backend: %w", err)
 	}
 	return &RedisLimiter{
 		client:    client,
-		keyPrefix: prefix,
-		timeout:   timeout,
+		keyPrefix: normalized.KeyPrefix,
+		timeout:   normalized.Timeout,
 		failOpen:  cfg.FailOpen,
 	}, nil
 }
@@ -103,7 +98,7 @@ func (l *RedisLimiter) Allow(ctx context.Context, key string, limit Limit) (Deci
 		return Decision{}, ErrClosed
 	}
 
-	callCtx, cancel := context.WithTimeout(ctx, l.timeout)
+	callCtx, cancel := rediscache.WithTimeout(ctx, l.timeout)
 	defer cancel()
 	now := time.Now()
 	ttl := redisTTL(limit)
@@ -145,8 +140,7 @@ func (l *RedisLimiter) Close() error {
 }
 
 func (l *RedisLimiter) redisKey(key string) string {
-	sum := sha256.Sum256([]byte(key))
-	return l.keyPrefix + ":" + hex.EncodeToString(sum[:])
+	return rediscache.HashedKey(l.keyPrefix, key)
 }
 
 func redisTTL(limit Limit) time.Duration {

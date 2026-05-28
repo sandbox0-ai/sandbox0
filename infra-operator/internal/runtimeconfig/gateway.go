@@ -124,6 +124,9 @@ func applyGatewayConfig(dst *apiconfig.GatewayConfig, src infrav1alpha1.GatewayC
 	dst.JWTPublicKeyFile = src.JWTPublicKeyFile
 	dst.JWTAccessTokenTTL = src.JWTAccessTokenTTL
 	dst.JWTRefreshTokenTTL = src.JWTRefreshTokenTTL
+	dst.RedisURL = src.RedisURL
+	dst.RedisKeyPrefix = src.RedisKeyPrefix
+	dst.RedisTimeout = src.RedisTimeout
 	dst.RateLimitRPS = src.RateLimitRPS
 	dst.RateLimitBurst = src.RateLimitBurst
 	dst.RateLimitCleanupInterval = src.RateLimitCleanupInterval

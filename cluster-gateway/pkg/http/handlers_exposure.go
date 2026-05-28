@@ -88,6 +88,7 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
 			return
 		}
+		s.invalidateSandboxInternalCache(c.Request.Context(), sandboxID)
 		if needsRuntimeRefetch {
 			sandbox, err = s.getSandboxForPublicExposure(c, sandboxID)
 			if err != nil {

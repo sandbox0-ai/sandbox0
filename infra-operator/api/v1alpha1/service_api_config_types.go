@@ -31,6 +31,10 @@ type GatewayConfig struct {
 	// +kubebuilder:default="168h"
 	JWTRefreshTokenTTL metav1.Duration `json:"jwtRefreshTokenTTL,omitempty"`
 
+	RedisURL       string          `json:"-"`
+	RedisKeyPrefix string          `json:"-"`
+	RedisTimeout   metav1.Duration `json:"-"`
+
 	// Rate limiting
 	// +optional
 	// +kubebuilder:default=100

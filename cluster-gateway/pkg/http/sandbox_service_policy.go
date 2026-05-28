@@ -24,7 +24,7 @@ type sandboxServiceMatch struct {
 }
 
 func (s *Server) getSandboxForPublicExposure(c *gin.Context, sandboxID string) (*mgr.Sandbox, error) {
-	return s.managerClient.GetSandboxInternal(c.Request.Context(), sandboxID)
+	return s.getSandboxInternalCached(c.Request.Context(), sandboxID)
 }
 
 func matchSandboxServiceRoute(services []mgr.SandboxAppService, port int, path string, method string) sandboxServiceMatch {

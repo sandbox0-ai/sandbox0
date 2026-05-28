@@ -22,6 +22,7 @@ import (
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/ratelimit"
+	"github.com/sandbox0-ai/sandbox0/pkg/rediscache"
 )
 
 const (
@@ -34,7 +35,7 @@ type Reconciler struct {
 	Resources *common.ResourceManager
 }
 
-type RateLimitConfig struct {
+type GatewayRedisConfig struct {
 	URL       string
 	KeyPrefix string
 	Timeout   metav1.Duration
@@ -212,32 +213,59 @@ func (r *Reconciler) cleanupBuiltinRedisResources(ctx context.Context, infra *in
 	return nil
 }
 
+func ApplyGatewayRedisConfig(ctx context.Context, c client.Client, infra *infrav1alpha1.Sandbox0Infra, cfg *apiconfig.GatewayConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	redisCfg, ok, err := GetGatewayRedisConfig(ctx, c, infra)
+	if err != nil {
+		return err
+	}
+	applyGatewayRedisConfig(cfg, redisCfg, ok)
+	return nil
+}
+
 // ApplyGatewayRateLimitConfig injects region-level Redis settings into gateway
 // process config. Without spec.redis, gateways keep memory rate limiting.
 func ApplyGatewayRateLimitConfig(ctx context.Context, c client.Client, infra *infrav1alpha1.Sandbox0Infra, cfg *apiconfig.GatewayConfig) error {
 	if cfg == nil {
 		return nil
 	}
-	rl, ok, err := GetRateLimitConfig(ctx, c, infra)
+	redisCfg, ok, err := GetGatewayRedisConfig(ctx, c, infra)
 	if err != nil {
 		return err
 	}
+	applyGatewayRedisConfig(cfg, redisCfg, ok)
 	if !ok {
 		cfg.RateLimitBackend = ratelimit.BackendMemory
 		cfg.RateLimitRedisURL = ""
+		cfg.RateLimitRedisKeyPrefix = ""
+		cfg.RateLimitRedisTimeout = metav1.Duration{}
 		return nil
 	}
 	cfg.RateLimitBackend = ratelimit.BackendRedis
-	cfg.RateLimitRedisURL = rl.URL
-	cfg.RateLimitRedisKeyPrefix = rl.KeyPrefix
-	cfg.RateLimitRedisTimeout = rl.Timeout
-	cfg.RateLimitFailOpen = rl.FailOpen
+	cfg.RateLimitRedisURL = redisCfg.URL
+	cfg.RateLimitRedisKeyPrefix = rateLimitRedisKeyPrefix(infra, redisCfg)
+	cfg.RateLimitRedisTimeout = redisCfg.Timeout
+	cfg.RateLimitFailOpen = redisCfg.FailOpen
 	return nil
 }
 
-func GetRateLimitConfig(ctx context.Context, c client.Client, infra *infrav1alpha1.Sandbox0Infra) (RateLimitConfig, bool, error) {
+func applyGatewayRedisConfig(cfg *apiconfig.GatewayConfig, redisCfg GatewayRedisConfig, ok bool) {
+	if !ok {
+		cfg.RedisURL = ""
+		cfg.RedisKeyPrefix = ""
+		cfg.RedisTimeout = metav1.Duration{}
+		return
+	}
+	cfg.RedisURL = redisCfg.URL
+	cfg.RedisKeyPrefix = redisCfg.KeyPrefix
+	cfg.RedisTimeout = redisCfg.Timeout
+}
+
+func GetGatewayRedisConfig(ctx context.Context, c client.Client, infra *infrav1alpha1.Sandbox0Infra) (GatewayRedisConfig, bool, error) {
 	if infra == nil || !infrav1alpha1.IsRedisEnabled(infra) {
-		return RateLimitConfig{}, false, nil
+		return GatewayRedisConfig{}, false, nil
 	}
 
 	var redisURL string
@@ -248,30 +276,55 @@ func GetRateLimitConfig(ctx context.Context, c client.Client, infra *infrav1alph
 		var err error
 		redisURL, err = externalRedisURL(ctx, c, infra)
 		if err != nil {
-			return RateLimitConfig{}, false, err
+			return GatewayRedisConfig{}, false, err
 		}
 	default:
-		return RateLimitConfig{}, false, fmt.Errorf("unsupported redis type: %s", infra.Spec.Redis.Type)
+		return GatewayRedisConfig{}, false, fmt.Errorf("unsupported redis type: %s", infra.Spec.Redis.Type)
 	}
 
 	keyPrefix := strings.TrimSpace(infra.Spec.Redis.KeyPrefix)
-	if keyPrefix == "" {
-		keyPrefix = ratelimit.DefaultRedisKeyPrefix
+	if keyPrefix == "" || keyPrefix == ratelimit.DefaultRedisKeyPrefix {
+		keyPrefix = rediscache.DefaultKeyPrefix
 	}
 	timeout := infra.Spec.Redis.OperationTimeout
 	if timeout.Duration == 0 {
-		timeout.Duration = ratelimit.DefaultRedisTimeout
+		timeout.Duration = rediscache.DefaultTimeout
 	}
 	failOpen := true
 	if infra.Spec.Redis.FailOpen != nil {
 		failOpen = *infra.Spec.Redis.FailOpen
 	}
-	return RateLimitConfig{
+	return GatewayRedisConfig{
 		URL:       redisURL,
 		KeyPrefix: keyPrefix,
 		Timeout:   timeout,
 		FailOpen:  failOpen,
 	}, true, nil
+}
+
+func GetRateLimitConfig(ctx context.Context, c client.Client, infra *infrav1alpha1.Sandbox0Infra) (GatewayRedisConfig, bool, error) {
+	redisCfg, ok, err := GetGatewayRedisConfig(ctx, c, infra)
+	if !ok || err != nil {
+		return redisCfg, ok, err
+	}
+	redisCfg.KeyPrefix = rateLimitRedisKeyPrefix(infra, redisCfg)
+	return redisCfg, true, nil
+}
+
+func rateLimitRedisKeyPrefix(infra *infrav1alpha1.Sandbox0Infra, redisCfg GatewayRedisConfig) string {
+	rawPrefix := ""
+	if infra != nil && infra.Spec.Redis != nil {
+		rawPrefix = strings.TrimSpace(infra.Spec.Redis.KeyPrefix)
+	}
+	if rawPrefix == "" {
+		return ratelimit.DefaultRedisKeyPrefix
+	}
+	for _, part := range strings.Split(rawPrefix, ":") {
+		if strings.TrimSpace(part) == "ratelimit" {
+			return rawPrefix
+		}
+	}
+	return rediscache.JoinKeyPrefix(redisCfg.KeyPrefix, "ratelimit")
 }
 
 func externalRedisURL(ctx context.Context, c client.Client, infra *infrav1alpha1.Sandbox0Infra) (string, error) {

@@ -59,6 +59,7 @@ type Server struct {
 	obsProvider           *observability.Provider
 	httpClient            *http.Client
 	sandboxServiceLimiter ratelimit.Limiter
+	sandboxInternalCache  sandboxInternalCache
 }
 
 // NewServer creates a new HTTP server
@@ -245,6 +246,10 @@ func NewServer(
 	if err != nil {
 		return nil, fmt.Errorf("create sandbox service rate limiter: %w", err)
 	}
+	sandboxInternalCache, err := newSandboxInternalCache(context.Background(), cfg.GatewayConfig)
+	if err != nil {
+		logger.Warn("Failed to initialize sandbox internal cache", zap.Error(err))
+	}
 
 	server := &Server{
 		router:                router,
@@ -270,6 +275,7 @@ func NewServer(
 		obsProvider:           obsProvider,
 		httpClient:            httpClient,
 		sandboxServiceLimiter: sandboxServiceLimiter,
+		sandboxInternalCache:  sandboxInternalCache,
 	}
 
 	server.setupRoutes()

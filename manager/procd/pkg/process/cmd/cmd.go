@@ -99,14 +99,11 @@ func (c *CMD) prepareExecCmd(ctx context.Context) *exec.Cmd {
 	}
 
 	// Set environment variables
-	env := os.Environ()
-	for k, v := range config.EnvVars {
-		env = append(env, fmt.Sprintf("%s=%s", k, v))
-	}
+	envLayers := []map[string]string{config.EnvVars}
 	if config.PTYSize != nil {
-		env = append(env, fmt.Sprintf("TERM=%s", resolveTerm(config)))
+		envLayers = append(envLayers, map[string]string{"TERM": resolveTerm(config)})
 	}
-	cmd.Env = env
+	cmd.Env = process.MergeEnvironment(os.Environ(), envLayers...)
 
 	return cmd
 }

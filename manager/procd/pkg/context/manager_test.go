@@ -66,6 +66,55 @@ func TestManager_CreateContext(t *testing.T) {
 	m.Cleanup()
 }
 
+func TestManager_CreateContextMergesSandboxEnvVars(t *testing.T) {
+	m := NewManager()
+	m.SetSandboxEnvVars(map[string]string{
+		"SANDBOX_ENV": "sandbox",
+		"OVERRIDE":    "sandbox",
+	})
+
+	ctx, err := m.CreateContext(process.ProcessConfig{
+		Type:    process.ProcessTypeCMD,
+		Command: []string{"/bin/sh", "-c", "true"},
+		EnvVars: map[string]string{
+			"OVERRIDE":    "context",
+			"CONTEXT_ENV": "context",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateContext() failed = %v", err)
+	}
+	t.Cleanup(func() {
+		m.Cleanup()
+	})
+
+	if got := ctx.EnvVars["SANDBOX_ENV"]; got != "sandbox" {
+		t.Fatalf("SANDBOX_ENV = %q, want sandbox", got)
+	}
+	if got := ctx.EnvVars["OVERRIDE"]; got != "context" {
+		t.Fatalf("OVERRIDE = %q, want context", got)
+	}
+	if got := ctx.EnvVars["CONTEXT_ENV"]; got != "context" {
+		t.Fatalf("CONTEXT_ENV = %q, want context", got)
+	}
+}
+
+func TestManagerSandboxEnvVarsReturnsCopy(t *testing.T) {
+	m := NewManager()
+	input := map[string]string{"APP_ENV": "test"}
+	m.SetSandboxEnvVars(input)
+	input["APP_ENV"] = "mutated"
+
+	got := m.SandboxEnvVars()
+	if got["APP_ENV"] != "test" {
+		t.Fatalf("APP_ENV = %q, want test", got["APP_ENV"])
+	}
+	got["APP_ENV"] = "mutated"
+	if again := m.SandboxEnvVars()["APP_ENV"]; again != "test" {
+		t.Fatalf("APP_ENV after returned map mutation = %q, want test", again)
+	}
+}
+
 // TestManager_CreateContextErrors tests error cases for context creation.
 func TestManager_CreateContextErrors(t *testing.T) {
 	m := NewManager()

@@ -96,8 +96,8 @@ func (r *REPL) Start() error {
 }
 
 // buildEnvVars builds the environment variables for the REPL.
-func (r *REPL) buildEnvVars(processConfig process.ProcessConfig) []string {
-	var envVars []string
+func (r *REPL) buildEnvVars(processConfig process.ProcessConfig) map[string]string {
+	envVars := map[string]string{}
 
 	// Get TERM value
 	term := processConfig.Term
@@ -119,10 +119,13 @@ func (r *REPL) buildEnvVars(processConfig process.ProcessConfig) []string {
 			value = env.Value
 		}
 		if value != "" {
-			envVars = append(envVars, fmt.Sprintf("%s=%s", env.Name, value))
+			envVars[env.Name] = value
 		}
 	}
 
+	if len(envVars) == 0 {
+		return nil
+	}
 	return envVars
 }
 

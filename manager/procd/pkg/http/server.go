@@ -120,12 +120,15 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/contexts/{id}/ws", contextHandler.WebSocket).Methods("GET")
 
 	functionHandler := handlers.NewFunctionHandler(s.logger)
+	if s.contextManager != nil {
+		functionHandler.SetSandboxEnvVarsProvider(s.contextManager.SandboxEnvVars)
+	}
 	api.HandleFunc("/functions/execute", functionHandler.Execute).Methods("POST")
 	api.HandleFunc("/functions/stream", functionHandler.Stream).Methods("POST")
 	api.HandleFunc("/functions/ws", functionHandler.WebSocket).Methods("GET")
 
 	// Initialize handler
-	initializeHandler := handlers.NewInitializeHandler(s.webhookDispatcher, s.fileManager, s.cfg.HTTPPort, s.logger)
+	initializeHandler := handlers.NewInitializeHandler(s.webhookDispatcher, s.fileManager, s.contextManager, s.cfg.HTTPPort, s.logger)
 	api.HandleFunc("/initialize", initializeHandler.Initialize).Methods("POST")
 
 	// File handlers

@@ -55,7 +55,7 @@ Claim a sandbox from a template. The sandbox is created from a pre-warmed pool f
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `env_vars` | object | Environment variables |
+| `env_vars` | object | Sandbox-level default environment variables for new procd-managed processes |
 | `ttl` | integer | Time to live in seconds (soft limit, triggers auto-pause; default: `0`, disabled) |
 | `hard_ttl` | integer | Hard runtime lifetime in seconds (cleans compute while preserving sandbox identity and services; default: `0`, disabled) |
 | `network` | object | `SandboxNetworkPolicy`. Controls traffic rules, protocol controls, credential bindings, and destination-scoped egress auth |
@@ -64,6 +64,8 @@ Claim a sandbox from a template. The sandbox is created from a pre-warmed pool f
 | `services` | array | Sandbox Services for public HTTP routes |
 
 See [Network](/docs/sandbox/network) and [Protocol Controls](/docs/sandbox/protocol-controls) for outbound control, [Sandbox Services](/docs/sandbox/services) for public HTTP controls, and [Credential](/docs/credential) for outbound auth and secret handling.
+
+Sandbox `env_vars` override template/container environment variables for new contexts, command services, and function executions. Per-context, per-command, service runtime, and function `env_vars` override sandbox `env_vars` for that narrower scope. Warm processes start before the sandbox is claimed, so they do not receive claim-time sandbox `env_vars`.
 
 ### TTL vs Hard TTL
 
@@ -409,7 +411,7 @@ Only the following fields can be updated at runtime:
 | `services` | array | Sandbox Services for public HTTP routes |
 
 <Callout variant="warning">
-<code>env_vars</code> and <code>webhook</code> cannot be updated at runtime. These fields only take effect when the sandbox is created. To use different environment variables, create a new sandbox.
+<code>env_vars</code> and <code>webhook</code> cannot be updated at runtime. These fields only take effect when the sandbox is created. To use different sandbox-level environment variables, create a new sandbox.
 </Callout>
 
 <Tabs

@@ -83,6 +83,79 @@ printf '{"status":202,"headers":{"x-runner":["ok"]},"body_base64":"aGVsbG8="}\n'
 	}
 }
 
+func TestFunctionHandlerExecuteMergesSandboxEnvVars(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell runner fixture requires POSIX")
+	}
+	dir := t.TempDir()
+	runnerPath := filepath.Join(dir, "runner.sh")
+	if err := os.WriteFile(runnerPath, []byte(`#!/bin/sh
+cat >/dev/null
+if [ "$SANDBOX_ENV" != "sandbox" ]; then
+  echo "missing sandbox env" >&2
+  exit 3
+fi
+if [ "$OVERRIDE_ENV" != "request" ]; then
+  echo "env precedence failed" >&2
+  exit 4
+fi
+printf '{"status":200,"body_base64":"b2s="}\n'
+`), 0o755); err != nil {
+		t.Fatalf("write runner: %v", err)
+	}
+
+	handler := newFunctionHandler(functionHandlerConfig{
+		runnerPath: runnerPath,
+		cacheRoot:  filepath.Join(dir, "cache"),
+	}, zap.NewNop())
+	handler.SetSandboxEnvVarsProvider(func() map[string]string {
+		return map[string]string{
+			"SANDBOX_ENV":  "sandbox",
+			"OVERRIDE_ENV": "sandbox",
+		}
+	})
+	req := sandboxfunction.ExecuteRequest{
+		Runtime: sandboxfunction.RuntimePython,
+		Handler: sandboxfunction.DefaultHandler,
+		EnvVars: map[string]string{
+			"OVERRIDE_ENV": "request",
+		},
+		Source: sandboxfunction.Source{
+			Type: sandboxfunction.SourceTypeInline,
+			Code: "def handler(request):\n    return {'status': 204}\n",
+		},
+		Request: sandboxfunction.HTTPRequest{
+			Method: "POST",
+			Path:   "/events",
+		},
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	httpReq := httptest.NewRequest(http.MethodPost, "/api/v1/functions/execute", bytes.NewReader(body))
+	handler.Execute(rec, httpReq)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var envelope struct {
+		Success bool                            `json:"success"`
+		Data    sandboxfunction.ExecuteResponse `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !envelope.Success {
+		t.Fatalf("response success = false: %s", rec.Body.String())
+	}
+	if envelope.Data.BodyBase64 != "b2s=" {
+		t.Fatalf("body_base64 = %q, want b2s=", envelope.Data.BodyBase64)
+	}
+}
+
 func TestFunctionHandlerRejectsMismatchedDigest(t *testing.T) {
 	handler := newFunctionHandler(functionHandlerConfig{
 		runnerPath: "/bin/false",

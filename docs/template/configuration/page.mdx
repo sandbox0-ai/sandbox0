@@ -82,7 +82,15 @@ envVars:
     APP_ENV: production
 ```
 
-`envVars` are set at the template level and apply to every sandbox created from this template. Users can override or extend them at sandbox creation time via the `env_vars` field in the sandbox config.
+`envVars` are set at the template level and become part of the sandbox container's base environment, alongside `mainContainer.env`. Users can override or extend them at sandbox creation time via the `env_vars` field in the sandbox config.
+
+Environment variable precedence for procd-managed child processes is:
+
+1. Container image, template `envVars`, and `mainContainer.env`
+2. Sandbox creation `config.env_vars`
+3. Context, command, service runtime, or function `env_vars`
+
+Claim-time sandbox `env_vars` are applied to new procd-managed processes after the sandbox is claimed. Template warm processes are started before claim from the warm pool and only receive the template/warm-process environment.
 
 ---
 

@@ -40,6 +40,8 @@ type Server struct {
 	adapters          *adapterRegistry
 	authResolver      egressAuthResolver
 	authCache         egressAuthCache
+	dnsCache          *dnsHostCache
+	udpReplyDialer    udpReplyDialer
 	tlsAuthority      tlsInterceptAuthority
 	upstreamTLSConfig *tls.Config
 	auditor           *auditLogger
@@ -162,6 +164,8 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 		adapters:       adapters,
 		authResolver:   noopEgressAuthResolver{},
 		authCache:      newMemoryEgressAuthCache(),
+		dnsCache:       newDNSHostCache(),
+		udpReplyDialer: dialUDPTransparent,
 		auditor:        auditor,
 		exitCh:         make(chan error, 1),
 	}
@@ -336,14 +340,15 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 	if result.Apply != nil {
 		result.Apply(req)
 	}
-	result.Classification = verifyClassifiedHost(s.hostVerifier, p, result.Classification)
 	result.Classification = s.probeServerFirstSSH(req, result.Classification, ctx)
+	result.Classification = s.applyCachedDNSHost(req, result.Classification)
+	result.Classification = verifyClassifiedHost(s.hostVerifier, p, result.Classification)
 	decision := decideTraffic(p, result.Classification)
 	fields := []zap.Field{}
 	if result.Error != nil {
 		fields = append(fields, zap.Error(result.Error))
 	}
-	s.handleTCPDecision(req, decision, result.Host, fields...)
+	s.handleTCPDecision(req, decision, result.Classification.Host, fields...)
 }
 
 func (s *Server) handleUDP(ctx context.Context, conn *net.UDPConn) {

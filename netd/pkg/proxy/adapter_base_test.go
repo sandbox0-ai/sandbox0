@@ -9,7 +9,7 @@ func TestAdapterCapabilities(t *testing.T) {
 		capability adapterCapability
 	}{
 		{name: "amqp passthrough", adapter: &amqpAdapter{}, capability: adapterCapabilityPassThrough},
-		{name: "dns passthrough", adapter: &dnsAdapter{}, capability: adapterCapabilityPassThrough},
+		{name: "dns inspect", adapter: &dnsAdapter{}, capability: adapterCapabilityInspect},
 		{name: "http inspect", adapter: &httpAdapter{}, capability: adapterCapabilityInspect},
 		{name: "mongodb passthrough", adapter: &mongodbAdapter{}, capability: adapterCapabilityPassThrough},
 		{name: "mqtt inspect", adapter: &mqttAdapter{}, capability: adapterCapabilityInspect},

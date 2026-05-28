@@ -57,6 +57,14 @@ func TestParseUDPSNIFromQUIC(t *testing.T) {
 	}
 }
 
+func TestParseUDPSNIIgnoresMalformedInitial(t *testing.T) {
+	reassembler := newQuicReassembler()
+	malformed := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	if sni := reassembler.ParseSNI(malformed, "10.0.0.2", "10.0.0.53"); sni != "" {
+		t.Fatalf("expected malformed packet to have no SNI, got %q", sni)
+	}
+}
+
 func mustHexDecodeString(s string) []byte {
 	normalized := strings.Map(func(c rune) rune {
 		if unicode.IsSpace(c) {

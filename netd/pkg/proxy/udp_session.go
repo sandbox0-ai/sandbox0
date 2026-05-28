@@ -31,6 +31,7 @@ type udpSession struct {
 	destIP      net.IP
 	destPort    int
 	upstream    *net.UDPConn
+	downstream  udpReplyConn
 	closed      bool
 	auditReq    *adapterRequest
 	decision    trafficDecision
@@ -40,6 +41,13 @@ type udpSession struct {
 	lastSeenUnixNano int64
 	closeOnce        sync.Once
 }
+
+type udpReplyConn interface {
+	Write([]byte) (int, error)
+	Close() error
+}
+
+type udpReplyDialer func(local *net.UDPAddr, remote *net.UDPAddr) (udpReplyConn, error)
 
 func newUDPSessionKey(req *adapterRequest) (udpSessionKey, error) {
 	if req == nil || req.UDPSource == nil || req.DestIP == nil || req.DestPort <= 0 {
@@ -238,27 +246,81 @@ func (session *udpSession) readLoop(conn *net.UDPConn) {
 		}
 		payload := append([]byte(nil), buf[:n]...)
 		session.touch()
-		clientConn, clientAddr, compiled, audit := session.snapshot()
-		if clientConn == nil || clientAddr == nil {
-			continue
+		if session.destinationPort() == 53 {
+			session.server.observeDNSResponse(session.key.SrcIP, payload)
 		}
-		if session.server != nil {
-			session.server.recordIngressBytes(compiled, int64(n), audit)
-		}
-		if _, writeErr := clientConn.WriteToUDP(payload, clientAddr); writeErr != nil {
+		compiled, audit := session.auditSnapshot()
+		written, writeErr := session.replyToClient(payload)
+		if writeErr != nil {
 			if !errors.Is(writeErr, net.ErrClosed) {
 				session.server.logger.Warn("UDP session reply write failed", zap.Error(writeErr))
 			}
 			session.closeWithError(writeErr)
 			return
 		}
+		if session.server != nil && written > 0 {
+			session.server.recordIngressBytes(compiled, int64(written), audit)
+		}
 	}
 }
 
-func (session *udpSession) snapshot() (*net.UDPConn, *net.UDPAddr, *policy.CompiledPolicy, *flowAudit) {
+func (session *udpSession) replyToClient(payload []byte) (int, error) {
+	if session == nil {
+		return 0, fmt.Errorf("udp session is nil")
+	}
+	if len(payload) == 0 {
+		return 0, nil
+	}
+	downstream, err := session.ensureDownstream()
+	if err != nil {
+		return 0, err
+	}
+	return downstream.Write(payload)
+}
+
+func (session *udpSession) ensureDownstream() (udpReplyConn, error) {
+	if session == nil || session.server == nil {
+		return nil, fmt.Errorf("udp session is not configured")
+	}
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	return session.clientConn, cloneUDPAddr(session.clientAddr), session.compiled, session.audit
+	if session.closed {
+		return nil, fmt.Errorf("udp session is closed")
+	}
+	if session.downstream != nil {
+		return session.downstream, nil
+	}
+	if session.destIP == nil || session.destPort <= 0 || session.clientAddr == nil {
+		return nil, fmt.Errorf("udp session reply route is missing")
+	}
+	dialer := session.server.udpReplyDialer
+	if dialer == nil {
+		dialer = dialUDPTransparent
+	}
+	downstream, err := dialer(
+		&net.UDPAddr{IP: cloneIP(session.destIP), Port: session.destPort},
+		cloneUDPAddr(session.clientAddr),
+	)
+	if err != nil {
+		return nil, err
+	}
+	session.downstream = downstream
+	return downstream, nil
+}
+
+func (session *udpSession) auditSnapshot() (*policy.CompiledPolicy, *flowAudit) {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return session.compiled, session.audit
+}
+
+func (session *udpSession) destinationPort() int {
+	if session == nil {
+		return 0
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return session.destPort
 }
 
 func (session *udpSession) touch() {
@@ -300,6 +362,7 @@ func (session *udpSession) closeWithError(err error) {
 		session.mu.Lock()
 		session.closed = true
 		upstream := session.upstream
+		downstream := session.downstream
 		if err != nil && session.terminalErr == nil {
 			session.terminalErr = err
 		}
@@ -309,9 +372,13 @@ func (session *udpSession) closeWithError(err error) {
 		audit := session.audit
 		terminalErr := session.terminalErr
 		session.upstream = nil
+		session.downstream = nil
 		session.mu.Unlock()
 		if upstream != nil {
 			_ = upstream.Close()
+		}
+		if downstream != nil {
+			_ = downstream.Close()
 		}
 		if session.server != nil {
 			session.server.removeUDPSession(session)

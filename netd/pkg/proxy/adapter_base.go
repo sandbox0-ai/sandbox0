@@ -305,15 +305,14 @@ func (a *dnsAdapter) Name() string      { return "dns" }
 func (a *dnsAdapter) Transport() string { return "tcp" }
 func (a *dnsAdapter) Protocol() string  { return "dns" }
 func (a *dnsAdapter) Capability() adapterCapability {
-	return adapterCapabilityPassThrough
+	return adapterCapabilityInspect
 }
 
 func (a *dnsAdapter) Handle(req *adapterRequest) error {
 	if req == nil || req.Server == nil || req.Conn == nil {
 		return fmt.Errorf("dns adapter requires connection")
 	}
-	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
-	return req.Server.relayTCPRequest(req)
+	return req.Server.proxyDNSTCP(req)
 }
 
 type mqttAdapter struct{}

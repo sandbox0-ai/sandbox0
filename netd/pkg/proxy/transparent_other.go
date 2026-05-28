@@ -19,3 +19,7 @@ func listenUDPTransparent(addr string) (*net.UDPConn, error) {
 	}
 	return net.ListenUDP("udp", udpAddr)
 }
+
+func dialUDPTransparent(local *net.UDPAddr, remote *net.UDPAddr) (udpReplyConn, error) {
+	return net.DialUDP("udp", local, remote)
+}

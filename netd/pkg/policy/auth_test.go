@@ -35,6 +35,50 @@ func TestMatchEgressAuthRuleMatchesHTTPRule(t *testing.T) {
 	}
 }
 
+func TestMatchEgressAuthRulesReturnsAllDestinationMatchesInOrder(t *testing.T) {
+	p := &CompiledPolicy{
+		Egress: CompiledRuleSet{
+			AuthRules: []CompiledEgressAuthRule{
+				{
+					Name:     "github-emu-auth",
+					AuthRef:  "github_emu",
+					Protocol: v1alpha1.EgressAuthProtocolHTTPS,
+					Domains: []DomainRule{
+						{Pattern: "github.com", Type: DomainMatchExact},
+					},
+				},
+				{
+					Name:     "github-cloud-auth",
+					AuthRef:  "github_cloud",
+					Protocol: v1alpha1.EgressAuthProtocolHTTPS,
+					Domains: []DomainRule{
+						{Pattern: "github.com", Type: DomainMatchExact},
+					},
+				},
+				{
+					Name:     "other-host-auth",
+					AuthRef:  "other",
+					Protocol: v1alpha1.EgressAuthProtocolHTTPS,
+					Domains: []DomainRule{
+						{Pattern: "gitlab.com", Type: DomainMatchExact},
+					},
+				},
+			},
+		},
+	}
+
+	rules := MatchEgressAuthRules(p, "tcp", "tls", 443, "github.com")
+	if len(rules) != 2 {
+		t.Fatalf("matched rules = %d, want 2", len(rules))
+	}
+	if rules[0].AuthRef != "github_emu" || rules[1].AuthRef != "github_cloud" {
+		t.Fatalf("unexpected rule order: %+v", rules)
+	}
+	if first := MatchEgressAuthRule(p, "tcp", "tls", 443, "github.com"); first == nil || first.AuthRef != "github_emu" {
+		t.Fatalf("unexpected first rule: %+v", first)
+	}
+}
+
 func TestMatchEgressAuthRuleSkipsTLSRuleForHTTPClassifier(t *testing.T) {
 	p := &CompiledPolicy{
 		Egress: CompiledRuleSet{

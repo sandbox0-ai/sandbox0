@@ -420,6 +420,117 @@ func TestHTTPAdapterSkipsResolverWhenRequestMatcherDoesNotMatch(t *testing.T) {
 	}
 }
 
+func TestHTTPAdapterFallsThroughCredentialCandidatesByRequestMatcher(t *testing.T) {
+	requestHeaders := make(chan http.Header, 1)
+	upstream := httptestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		requestHeaders <- r.Header.Clone()
+		_, _ = w.Write([]byte("ok"))
+	})
+	defer upstream.Close()
+
+	addr := upstream.Listener.Addr().(*net.TCPAddr)
+	proxyListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen proxy: %v", err)
+	}
+	defer proxyListener.Close()
+
+	emuRule := &policy.CompiledEgressAuthRule{
+		Name:    "github-emu-auth",
+		AuthRef: "github_emu",
+		HTTPMatch: &policy.CompiledHTTPMatch{
+			PathPrefixes: []string{"/emu-org/"},
+		},
+	}
+	cloudRule := &policy.CompiledEgressAuthRule{
+		Name:    "github-cloud-auth",
+		AuthRef: "github_cloud",
+		HTTPMatch: &policy.CompiledHTTPMatch{
+			PathPrefixes: []string{"/cloud-org/"},
+		},
+	}
+	resolver := &stubEgressAuthResolver{
+		responses: map[string]*egressauth.ResolveResponse{
+			"github_emu": egressauth.NewHTTPHeadersResolveResponse("github_emu", map[string]string{
+				"Authorization": "Bearer emu-token",
+			}, nil),
+			"github_cloud": egressauth.NewHTTPHeadersResolveResponse("github_cloud", map[string]string{
+				"Authorization": "Bearer cloud-token",
+			}, nil),
+		},
+	}
+	server := &Server{
+		cfg: &config.NetdConfig{
+			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
+			EgressAuthEnabled:    true,
+		},
+		authResolver: resolver,
+		authCache:    newMemoryEgressAuthCache(),
+		logger:       zap.NewNop(),
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		conn, acceptErr := proxyListener.Accept()
+		if acceptErr != nil {
+			done <- acceptErr
+			return
+		}
+		defer conn.Close()
+		rawReq := "GET /cloud-org/repo.git/info/refs HTTP/1.1\r\nHost: github.com\r\n\r\n"
+		req := &adapterRequest{
+			Server:   server,
+			Compiled: &policy.CompiledPolicy{SandboxID: "sbx_123", TeamID: "team_123"},
+			SrcIP:    "10.0.0.2",
+			DestIP:   addr.IP,
+			DestPort: addr.Port,
+			Host:     "github.com",
+			Conn:     conn,
+			Prefix:   bytes.NewReader([]byte(rawReq)),
+		}
+		server.attachEgressAuth(req, trafficDecision{
+			Transport:          "tcp",
+			Protocol:           "http",
+			MatchedAuthRule:    emuRule,
+			AuthRuleCandidates: []*policy.CompiledEgressAuthRule{emuRule, cloudRule},
+			NeedsEgressAuth:    true,
+		})
+		done <- (&httpAdapter{}).Handle(req)
+	}()
+
+	clientConn, err := net.Dial("tcp4", proxyListener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer clientConn.Close()
+	resp, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("adapter handle: %v", err)
+	}
+
+	headers := <-requestHeaders
+	if got := headers.Get("Authorization"); got != "Bearer cloud-token" {
+		t.Fatalf("authorization header = %q, want cloud token", got)
+	}
+	if resolver.calls != 1 {
+		t.Fatalf("resolver calls = %d, want 1", resolver.calls)
+	}
+	if len(resolver.requests) != 1 {
+		t.Fatalf("resolver requests = %d, want 1", len(resolver.requests))
+	}
+	if got := resolver.requests[0].AuthRef; got != "github_cloud" {
+		t.Fatalf("resolver auth ref = %q, want github_cloud", got)
+	}
+	if got := resolver.requests[0].RuleName; got != "github-cloud-auth" {
+		t.Fatalf("resolver rule name = %q, want github-cloud-auth", got)
+	}
+}
+
 func TestHTTPAdapterReturns503WhenDirectiveUnsupported(t *testing.T) {
 	server := &Server{
 		cfg: &config.NetdConfig{

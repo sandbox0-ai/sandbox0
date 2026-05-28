@@ -550,6 +550,20 @@ print(f"services: {len(resp.services)}")`
   ]}
 />
 
+### Delete One Service
+
+The public API replaces the full service list; the CLI wraps that flow for deleting one service by ID.
+
+<Tabs
+  tabs={[
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox service delete api -s sb_abc123`
+    }
+  ]}
+/>
+
 ### Clear Services
 
 Clearing services removes public HTTP exposure from the sandbox.

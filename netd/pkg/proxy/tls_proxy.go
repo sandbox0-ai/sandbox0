@@ -69,7 +69,7 @@ func (s *Server) proxyHTTPSRequest(req *adapterRequest) error {
 			return fmt.Errorf("egress auth material missing for %q", req.EgressAuth.Rule.AuthRef)
 		}
 	}
-	if req.EgressAuth != nil && req.EgressAuth.Rule != nil && req.EgressAuth.Rule.Protocol == v1alpha1.EgressAuthProtocolGRPC && downstreamTLS.ConnectionState().NegotiatedProtocol != "h2" {
+	if egressAuthRequiresGRPCH2(req.EgressAuth) && downstreamTLS.ConnectionState().NegotiatedProtocol != "h2" {
 		_ = writeHTTPProxyError(downstreamTLS, http.StatusBadRequest, "grpc interception requires h2 alpn")
 		return fmt.Errorf("grpc interception requires h2 alpn for host %q", req.Host)
 	}
@@ -144,7 +144,10 @@ func downstreamTLSNextProtos(req *adapterRequest) []string {
 	if req != nil && req.EgressAuth != nil && req.EgressAuth.Rule != nil && req.EgressAuth.Rule.Protocol == v1alpha1.EgressAuthProtocolTLS {
 		return nil
 	}
-	if req != nil && req.EgressAuth != nil && req.EgressAuth.Rule != nil && req.EgressAuth.Rule.Protocol == v1alpha1.EgressAuthProtocolGRPC {
+	if req != nil && req.EgressAuth != nil && egressAuthMayUseGRPC(req.EgressAuth) {
+		if egressAuthMayUseHTTP1(req.EgressAuth) {
+			return []string{"h2", "http/1.1"}
+		}
 		return []string{"h2"}
 	}
 	if req != nil && policy.RequiresProtocolTLSTermination(req.Compiled, req.Host, req.DestPort, "mcp") {
@@ -163,7 +166,7 @@ func shouldProxyHTTP2(req *adapterRequest, state tls.ConnectionState) bool {
 		}
 		return policy.RequiresProtocolTLSTermination(req.Compiled, req.Host, req.DestPort, "mcp")
 	}
-	return req.EgressAuth != nil && req.EgressAuth.Rule != nil && req.EgressAuth.Rule.Protocol == v1alpha1.EgressAuthProtocolGRPC
+	return false
 }
 
 func (s *Server) dialUpstreamTLS(req *adapterRequest) (net.Conn, error) {
@@ -259,8 +262,73 @@ func tlsTerminationRequired(req *adapterRequest) bool {
 	if req == nil {
 		return false
 	}
-	if req.EgressAuth != nil && req.EgressAuth.Rule != nil && req.EgressAuth.Rule.TLSMode == "terminate-reoriginate" {
+	if egressAuthRequiresTLSTermination(req.EgressAuth) {
 		return true
 	}
 	return policy.RequiresProtocolTLSTermination(req.Compiled, req.Host, req.DestPort, "mcp")
+}
+
+func egressAuthRequiresTLSTermination(ctx *egressAuthContext) bool {
+	if ctx == nil {
+		return false
+	}
+	if !ctx.RequestMatch {
+		return ctx.Rule != nil && ctx.Rule.TLSMode == v1alpha1.EgressTLSModeTerminateReoriginate
+	}
+	for _, rule := range ctx.CandidateRules {
+		if rule != nil && rule.TLSMode == v1alpha1.EgressTLSModeTerminateReoriginate {
+			return true
+		}
+	}
+	return ctx.Rule != nil && ctx.Rule.TLSMode == v1alpha1.EgressTLSModeTerminateReoriginate
+}
+
+func egressAuthMayUseGRPC(ctx *egressAuthContext) bool {
+	if ctx == nil {
+		return false
+	}
+	if !ctx.RequestMatch {
+		return ctx.Rule != nil && ctx.Rule.Protocol == v1alpha1.EgressAuthProtocolGRPC
+	}
+	for _, rule := range ctx.CandidateRules {
+		if rule != nil && rule.Protocol == v1alpha1.EgressAuthProtocolGRPC {
+			return true
+		}
+	}
+	return ctx.Rule != nil && ctx.Rule.Protocol == v1alpha1.EgressAuthProtocolGRPC
+}
+
+func egressAuthMayUseHTTP1(ctx *egressAuthContext) bool {
+	if ctx == nil {
+		return false
+	}
+	if !ctx.RequestMatch {
+		return ctx.Rule != nil && ctx.Rule.Protocol != v1alpha1.EgressAuthProtocolGRPC && ctx.Rule.Protocol != v1alpha1.EgressAuthProtocolTLS
+	}
+	for _, rule := range ctx.CandidateRules {
+		if rule != nil && rule.Protocol != v1alpha1.EgressAuthProtocolGRPC && rule.Protocol != v1alpha1.EgressAuthProtocolTLS {
+			return true
+		}
+	}
+	return ctx.Rule != nil && ctx.Rule.Protocol != v1alpha1.EgressAuthProtocolGRPC && ctx.Rule.Protocol != v1alpha1.EgressAuthProtocolTLS
+}
+
+func egressAuthRequiresGRPCH2(ctx *egressAuthContext) bool {
+	if ctx == nil {
+		return false
+	}
+	if !ctx.RequestMatch {
+		return ctx.Rule != nil && ctx.Rule.Protocol == v1alpha1.EgressAuthProtocolGRPC
+	}
+	hasGRPC := false
+	for _, rule := range ctx.CandidateRules {
+		if rule == nil {
+			continue
+		}
+		if rule.Protocol != v1alpha1.EgressAuthProtocolGRPC {
+			return false
+		}
+		hasGRPC = true
+	}
+	return hasGRPC || (ctx.Rule != nil && ctx.Rule.Protocol == v1alpha1.EgressAuthProtocolGRPC)
 }

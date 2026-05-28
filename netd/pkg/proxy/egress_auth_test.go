@@ -14,15 +14,24 @@ import (
 )
 
 type stubEgressAuthResolver struct {
-	calls int
-	resp  *egressauth.ResolveResponse
-	err   error
+	calls     int
+	resp      *egressauth.ResolveResponse
+	responses map[string]*egressauth.ResolveResponse
+	requests  []*egressauth.ResolveRequest
+	err       error
 }
 
-func (s *stubEgressAuthResolver) Resolve(_ context.Context, _ *egressauth.ResolveRequest) (*egressauth.ResolveResponse, error) {
+func (s *stubEgressAuthResolver) Resolve(_ context.Context, req *egressauth.ResolveRequest) (*egressauth.ResolveResponse, error) {
 	s.calls++
+	if req != nil {
+		copied := *req
+		s.requests = append(s.requests, &copied)
+	}
 	if s.err != nil {
 		return nil, s.err
+	}
+	if s.responses != nil && req != nil {
+		return cloneResolveResponse(s.responses[req.AuthRef]), nil
 	}
 	return cloneResolveResponse(s.resp), nil
 }

@@ -188,12 +188,21 @@ func HasTrafficRuleAppProtocol(policy *CompiledPolicy, protocol string) bool {
 }
 
 func MatchEgressAuthRule(policy *CompiledPolicy, transport, protocol string, destPort int, host string) *CompiledEgressAuthRule {
+	rules := MatchEgressAuthRules(policy, transport, protocol, destPort, host)
+	if len(rules) == 0 {
+		return nil
+	}
+	return rules[0]
+}
+
+func MatchEgressAuthRules(policy *CompiledPolicy, transport, protocol string, destPort int, host string) []*CompiledEgressAuthRule {
 	if policy == nil || len(policy.Egress.AuthRules) == 0 {
 		return nil
 	}
 	transport = strings.ToLower(strings.TrimSpace(transport))
 	protocol = strings.ToLower(strings.TrimSpace(protocol))
 	host = strings.ToLower(strings.TrimSpace(host))
+	matches := make([]*CompiledEgressAuthRule, 0, len(policy.Egress.AuthRules))
 	for idx := range policy.Egress.AuthRules {
 		rule := &policy.Egress.AuthRules[idx]
 		if rule.Rollout == v1alpha1.EgressAuthRolloutDisabled {
@@ -210,9 +219,9 @@ func MatchEgressAuthRule(policy *CompiledPolicy, transport, protocol string, des
 				continue
 			}
 		}
-		return rule
+		matches = append(matches, rule)
 	}
-	return nil
+	return matches
 }
 
 func matchEgressAuthProtocol(ruleProtocol v1alpha1.EgressAuthProtocol, transport, classifiedProtocol string) bool {

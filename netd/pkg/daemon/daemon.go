@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -175,36 +176,31 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 		if info == nil {
 			return
 		}
-		platformState.OnSandboxUpsert(info)
-		changed, prevHash := policyStore.UpsertFromSandbox(info)
-		if changed && info.PodIP != "" {
-			cleanupDeniedTrackedFlows(ctx, tracker, conntrackManager, policyStore, info.PodIP)
-		}
-		d.logger.Info("Sandbox policy handler triggered",
+		d.logger.Info("Sandbox policy change observed",
 			zap.String("sandbox", info.Namespace+"/"+info.Name),
 			zap.String("pod_ip", info.PodIP),
-			zap.Bool("policy_changed", changed),
 			zap.String("policy_hash", info.NetworkPolicyHash),
-			zap.String("prev_hash", prevHash),
 		)
 		triggerSync()
 	}, func(info *watcher.SandboxInfo) {
 		if info != nil {
-			platformState.OnSandboxDelete(info)
-			policyStore.DeleteByKey(info.Namespace, info.Name)
-			flows := tracker.PopBySrc(info.PodIP)
-			if conntrackManager != nil {
-				conntrackManager.CleanupFlows(ctx, flows)
-			}
-			d.logger.Info("Sandbox delete handler triggered",
+			d.logger.Info("Sandbox policy delete observed",
 				zap.String("sandbox", info.Namespace+"/"+info.Name),
 				zap.String("pod_ip", info.PodIP),
 			)
 		}
 		triggerSync()
 	})
-	netdWatcher.SetServiceHandlers(platformState.OnServiceUpsert, platformState.OnServiceDelete)
-	netdWatcher.SetEndpointsHandlers(platformState.OnEndpointsUpsert, platformState.OnEndpointsDelete)
+	netdWatcher.SetServiceHandlers(func(*watcher.ServiceInfo) {
+		triggerSync()
+	}, func(*watcher.ServiceInfo) {
+		triggerSync()
+	})
+	netdWatcher.SetEndpointsHandlers(func(*watcher.EndpointsInfo) {
+		triggerSync()
+	}, func(*watcher.EndpointsInfo) {
+		triggerSync()
+	})
 	if err := netdWatcher.Start(ctx); err != nil {
 		return err
 	}
@@ -265,7 +261,7 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 			case <-ticker.C:
 			case <-syncTrigger:
 			}
-			if err := d.syncRedirect(ctx, netdWatcher, policyStore, platformState, redirectManager, patcher, tracker, conntrackManager); err != nil {
+			if err := d.syncRedirect(ctx, netdWatcher, policyStore, platformState, redirectManager, patcher, tracker, conntrackManager, proxyServer); err != nil {
 				d.logger.Error("Failed to sync redirect rules", zap.Error(err))
 				if d.cfg.FailClosed {
 					d.ready.Store(false)
@@ -436,6 +432,7 @@ func (d *Daemon) syncRedirect(
 	patcher *apply.Patcher,
 	tracker *conntrack.Tracker,
 	conntrackManager *conntrack.Manager,
+	proxyServer *proxy.Server,
 ) error {
 	if netdWatcher == nil || redirectManager == nil || patcher == nil {
 		return fmt.Errorf("missing watcher or redirect manager or patcher or policy store")
@@ -453,6 +450,9 @@ func (d *Daemon) syncRedirect(
 	if policyStore != nil {
 		result := policyStore.ReconcileSandboxes(sandboxes)
 		for _, podIP := range result.RemovedIPs {
+			if proxyServer != nil {
+				proxyServer.ForgetSandboxDNS(podIP)
+			}
 			cleanupTrackedFlows(ctx, tracker, conntrackManager, podIP)
 		}
 		for _, change := range result.Changed {
@@ -466,15 +466,13 @@ func (d *Daemon) syncRedirect(
 		platformState.Reconcile(sandboxes, services, endpoints)
 	}
 
+	dnsCIDRs := clusterDNSCIDRs(d.cfg.ClusterDNSCIDR, services, endpoints)
 	bypassCIDRs := []string{}
-	if d.cfg.ClusterDNSCIDR != "" {
-		bypassCIDRs = append(bypassCIDRs, d.cfg.ClusterDNSCIDR)
-	}
 	if len(d.cfg.PlatformAllowedCIDRs) > 0 {
-		bypassCIDRs = append(bypassCIDRs, d.cfg.PlatformAllowedCIDRs...)
+		bypassCIDRs = append(bypassCIDRs, excludeCIDRs(d.cfg.PlatformAllowedCIDRs, dnsCIDRs)...)
 	}
 	if policyStore != nil {
-		bypassCIDRs = append(bypassCIDRs, policyStore.AllowedPlatformCIDRs()...)
+		bypassCIDRs = append(bypassCIDRs, excludeCIDRs(policyStore.AllowedPlatformCIDRs(), dnsCIDRs)...)
 	}
 
 	d.logger.Info(
@@ -502,6 +500,69 @@ func (d *Daemon) syncRedirect(
 		zap.Int("sandboxes_total", len(sandboxes)),
 	)
 	return nil
+}
+
+func clusterDNSCIDRs(configured string, services []*watcher.ServiceInfo, endpoints []*watcher.EndpointsInfo) []string {
+	out := []string{}
+	if strings.TrimSpace(configured) != "" {
+		out = append(out, configured)
+	}
+	endpointsByService := make(map[string]*watcher.EndpointsInfo, len(endpoints))
+	for _, endpoint := range endpoints {
+		if endpoint == nil {
+			continue
+		}
+		endpointsByService[endpoint.Namespace+"/"+endpoint.Name] = endpoint
+	}
+	for _, service := range services {
+		if !isClusterDNSService(service) {
+			continue
+		}
+		if service.ClusterIP != "" && strings.ToLower(service.ClusterIP) != "none" {
+			out = append(out, service.ClusterIP)
+		}
+		if endpoint := endpointsByService[service.Namespace+"/"+service.Name]; endpoint != nil {
+			out = append(out, endpoint.Addresses...)
+		}
+	}
+	return out
+}
+
+func excludeCIDRs(values []string, excluded []string) []string {
+	if len(values) == 0 || len(excluded) == 0 {
+		return append([]string(nil), values...)
+	}
+	exclusionSet := make(map[string]struct{}, len(excluded))
+	for _, value := range excluded {
+		if key := cidrKey(value); key != "" {
+			exclusionSet[key] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := exclusionSet[cidrKey(value)]; ok {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
+}
+
+func cidrKey(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if _, network, err := net.ParseCIDR(value); err == nil && network != nil {
+		return network.String()
+	}
+	if ip := net.ParseIP(value); ip != nil {
+		if ip.To4() != nil {
+			return ip.String() + "/32"
+		}
+		return ip.String() + "/128"
+	}
+	return value
 }
 
 func cleanupTrackedFlows(

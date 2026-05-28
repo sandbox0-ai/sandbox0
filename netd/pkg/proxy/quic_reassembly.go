@@ -102,7 +102,19 @@ func buildStreamKey(srcIP, dstIP string, dcid []byte) string {
 	return srcIP + "|" + dstIP + "|" + hex.EncodeToString(dcid)
 }
 
-func unprotectInitial(packet []byte, pnOffset int64, hdr *quicsni.Header) ([]byte, error) {
+func unprotectInitial(packet []byte, pnOffset int64, hdr *quicsni.Header) (out []byte, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			out = nil
+			err = fmt.Errorf("unprotect quic initial: %v", recovered)
+		}
+	}()
+	if len(packet) == 0 || packet[0]&0x80 == 0 {
+		return nil, fmt.Errorf("quic initial packet is not a long-header packet")
+	}
+	if pnOffset < 0 || pnOffset+4+16 > int64(len(packet)) {
+		return nil, fmt.Errorf("quic initial packet is too short")
+	}
 	initialSecret := hkdf.Extract(crypto.SHA256.New, hdr.DestConnectionID, getSalt(hdr.Version))
 	clientSecret := hkdfExpandLabel(crypto.SHA256.New, initialSecret, "client in", []byte{}, crypto.SHA256.Size())
 	key, err := quicsni.NewInitialProtectionKey(clientSecret, hdr.Version)

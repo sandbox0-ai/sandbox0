@@ -21,6 +21,7 @@ type trafficClassification struct {
 	DestIP        net.IP
 	DestPort      int
 	Host          string
+	HostSource    string
 	UnknownReason string
 	Verification  string
 }

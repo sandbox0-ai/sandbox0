@@ -154,10 +154,11 @@ func TestHandleUDPDecisionPassThroughRelaysAndAudits(t *testing.T) {
 		cfg: &config.NetdConfig{
 			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
 		},
-		logger:      zap.NewNop(),
-		udpHTTPConn: proxyConn,
-		adapters:    registry,
-		auditor:     newAuditLoggerFromWriter(nopWriteCloser{Writer: &auditBuf}),
+		logger:         zap.NewNop(),
+		udpHTTPConn:    proxyConn,
+		adapters:       registry,
+		auditor:        newAuditLoggerFromWriter(nopWriteCloser{Writer: &auditBuf}),
+		udpReplyDialer: dialUDPEphemeralForTest,
 	}
 
 	payload := []byte("udp-payload")
@@ -247,10 +248,11 @@ func TestHandleUDPDecisionPassThroughReusesUDPSession(t *testing.T) {
 		cfg: &config.NetdConfig{
 			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
 		},
-		logger:      zap.NewNop(),
-		udpHTTPConn: proxyConn,
-		adapters:    registry,
-		auditor:     newAuditLoggerFromWriter(nopWriteCloser{Writer: &auditBuf}),
+		logger:         zap.NewNop(),
+		udpHTTPConn:    proxyConn,
+		adapters:       registry,
+		auditor:        newAuditLoggerFromWriter(nopWriteCloser{Writer: &auditBuf}),
+		udpReplyDialer: dialUDPEphemeralForTest,
 	}
 	defer server.closeUDPSessions()
 
@@ -305,6 +307,74 @@ func TestHandleUDPDecisionPassThroughReusesUDPSession(t *testing.T) {
 	if events[0].EgressBytes != wantBytes || events[0].IngressBytes != wantBytes {
 		t.Fatalf("unexpected aggregated udp bytes: %+v", events[0])
 	}
+}
+
+func TestUDPSessionReplyUsesOriginalDestination(t *testing.T) {
+	var gotLocal *net.UDPAddr
+	var gotRemote *net.UDPAddr
+	reply := &recordingUDPReplyConn{}
+	server := &Server{
+		logger: zap.NewNop(),
+		udpReplyDialer: func(local *net.UDPAddr, remote *net.UDPAddr) (udpReplyConn, error) {
+			gotLocal = cloneUDPAddr(local)
+			gotRemote = cloneUDPAddr(remote)
+			return reply, nil
+		},
+	}
+	req := &adapterRequest{
+		Server:    server,
+		Compiled:  &policy.CompiledPolicy{Mode: v1alpha1.NetworkModeAllowAll},
+		SrcIP:     "10.244.2.10",
+		DestIP:    net.ParseIP("10.244.1.53"),
+		DestPort:  53,
+		UDPSource: &net.UDPAddr{IP: net.ParseIP("10.244.2.10"), Port: 40000},
+	}
+	session := newUDPSession(server, udpSessionKey{
+		SrcIP:    "10.244.2.10",
+		SrcPort:  40000,
+		DestIP:   "10.244.1.53",
+		DestPort: 53,
+	}, req)
+
+	written, err := session.replyToClient([]byte("dns-response"))
+	if err != nil {
+		t.Fatalf("reply to client: %v", err)
+	}
+	if written != len("dns-response") {
+		t.Fatalf("written = %d", written)
+	}
+	if gotLocal == nil || gotLocal.String() != "10.244.1.53:53" {
+		t.Fatalf("reply local addr = %v", gotLocal)
+	}
+	if gotRemote == nil || gotRemote.String() != "10.244.2.10:40000" {
+		t.Fatalf("reply remote addr = %v", gotRemote)
+	}
+	if !bytes.Equal(reply.payload, []byte("dns-response")) {
+		t.Fatalf("reply payload = %q", reply.payload)
+	}
+	session.close()
+	if !reply.closed {
+		t.Fatal("expected reply connection to close with session")
+	}
+}
+
+func dialUDPEphemeralForTest(_ *net.UDPAddr, remote *net.UDPAddr) (udpReplyConn, error) {
+	return net.DialUDP("udp4", nil, remote)
+}
+
+type recordingUDPReplyConn struct {
+	payload []byte
+	closed  bool
+}
+
+func (c *recordingUDPReplyConn) Write(payload []byte) (int, error) {
+	c.payload = append(c.payload[:0], payload...)
+	return len(payload), nil
+}
+
+func (c *recordingUDPReplyConn) Close() error {
+	c.closed = true
+	return nil
 }
 
 func startTCPEchoServer(t *testing.T, expectedBytes int) (*net.TCPAddr, <-chan []byte) {

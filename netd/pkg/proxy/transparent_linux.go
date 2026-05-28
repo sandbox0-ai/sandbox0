@@ -17,11 +17,7 @@ func transparentListenConfig() net.ListenConfig {
 		Control: func(network, address string, c syscall.RawConn) error {
 			var controlErr error
 			err := c.Control(func(fd uintptr) {
-				if err := unix.SetsockoptInt(int(fd), unix.SOL_IP, unix.IP_TRANSPARENT, 1); err != nil {
-					controlErr = err
-					return
-				}
-				if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
+				if err := setTransparentSocketOptions(fd); err != nil {
 					controlErr = err
 					return
 				}
@@ -44,6 +40,16 @@ func transparentListenConfig() net.ListenConfig {
 	}
 }
 
+func setTransparentSocketOptions(fd uintptr) error {
+	if err := unix.SetsockoptInt(int(fd), unix.SOL_IP, unix.IP_TRANSPARENT, 1); err != nil {
+		return err
+	}
+	if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
+		return err
+	}
+	return nil
+}
+
 func listenTCPTransparent(addr string) (net.Listener, error) {
 	cfg := transparentListenConfig()
 	return cfg.Listen(context.Background(), "tcp4", addr)
@@ -59,6 +65,32 @@ func listenUDPTransparent(addr string) (*net.UDPConn, error) {
 	if !ok {
 		_ = pc.Close()
 		return nil, fmt.Errorf("listen packet is not udp")
+	}
+	return udpConn, nil
+}
+
+func dialUDPTransparent(local *net.UDPAddr, remote *net.UDPAddr) (udpReplyConn, error) {
+	dialer := net.Dialer{
+		LocalAddr: local,
+		Control: func(network, address string, c syscall.RawConn) error {
+			var controlErr error
+			err := c.Control(func(fd uintptr) {
+				controlErr = setTransparentSocketOptions(fd)
+			})
+			if err != nil {
+				return err
+			}
+			return controlErr
+		},
+	}
+	conn, err := dialer.Dial("udp4", remote.String())
+	if err != nil {
+		return nil, err
+	}
+	udpConn, ok := conn.(*net.UDPConn)
+	if !ok {
+		_ = conn.Close()
+		return nil, fmt.Errorf("transparent udp dial returned %T", conn)
 	}
 	return udpConn, nil
 }

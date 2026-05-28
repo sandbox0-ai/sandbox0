@@ -148,6 +148,9 @@ func verifyClassifiedHost(verifier hostVerifier, compiled *policy.CompiledPolicy
 	if verifier == nil || compiled == nil || !policy.HasDomainRules(compiled) {
 		return classification
 	}
+	if classification.HostSource == classificationHostSourceDNSCache {
+		return classification
+	}
 	if classification.UnknownReason != "" || classification.Host == "" || classification.DestIP == nil {
 		return classification
 	}

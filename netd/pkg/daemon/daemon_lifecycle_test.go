@@ -6,6 +6,7 @@ import (
 	"time"
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/netd/pkg/watcher"
 	"go.uber.org/zap"
 )
 
@@ -53,6 +54,55 @@ func TestShutdownClosesRuntimeResourcesAfterMeteringLoopStops(t *testing.T) {
 			}
 		default:
 			t.Fatalf("missing event %q", expected)
+		}
+	}
+}
+
+func TestExcludeCIDRsRemovesClusterDNSCIDR(t *testing.T) {
+	got := excludeCIDRs(
+		[]string{"10.96.0.10/32", "10.96.0.20/32", "192.168.1.1"},
+		[]string{"10.96.0.10"},
+	)
+	want := []string{"10.96.0.20/32", "192.168.1.1"}
+	if len(got) != len(want) {
+		t.Fatalf("cidrs = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("cidrs = %#v, want %#v", got, want)
+		}
+	}
+}
+
+func TestClusterDNSCIDRsIncludesServiceAndEndpointIPs(t *testing.T) {
+	got := clusterDNSCIDRs(
+		"10.96.0.10",
+		[]*watcher.ServiceInfo{{
+			Namespace: "kube-system",
+			Name:      "kube-dns",
+			ClusterIP: "10.96.0.10",
+		}, {
+			Namespace: "sandbox0-system",
+			Name:      "fullmode-manager",
+			ClusterIP: "10.96.0.20",
+		}},
+		[]*watcher.EndpointsInfo{{
+			Namespace: "kube-system",
+			Name:      "kube-dns",
+			Addresses: []string{"10.244.0.53", "10.244.1.53"},
+		}, {
+			Namespace: "sandbox0-system",
+			Name:      "fullmode-manager",
+			Addresses: []string{"10.244.0.20"},
+		}},
+	)
+	want := []string{"10.96.0.10", "10.96.0.10", "10.244.0.53", "10.244.1.53"}
+	if len(got) != len(want) {
+		t.Fatalf("cidrs = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("cidrs = %#v, want %#v", got, want)
 		}
 	}
 }

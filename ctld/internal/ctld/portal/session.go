@@ -150,6 +150,14 @@ func (m *localVolumeManager) abortHandoff(volumeID string) {
 	}
 }
 
+func (m *localVolumeManager) prepareSnapshotCheckpoint(ctx context.Context, volumeID string) error {
+	return m.prepareHandoff(ctx, volumeID)
+}
+
+func (m *localVolumeManager) completeSnapshotCheckpoint(volumeID string) {
+	m.abortHandoff(volumeID)
+}
+
 func (m *localVolumeManager) touch(volumeID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -323,6 +331,13 @@ func (s *localSession) fix(volumeID *string) {
 	}
 }
 
+func (s *localSession) acquireMutating(ctx context.Context, volumeID string) (func(), error) {
+	if s == nil || s.mgr == nil || volumeID == "" {
+		return func() {}, nil
+	}
+	return s.mgr.acquire(ctx, volumeID)
+}
+
 func (s *localSession) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.NodeResponse, error) {
 	s.fix(&req.VolumeId)
 	return s.fs.Lookup(s.ctx(ctx), req)
@@ -333,6 +348,11 @@ func (s *localSession) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb
 }
 func (s *localSession) SetAttr(ctx context.Context, req *pb.SetAttrRequest) (*pb.SetAttrResponse, error) {
 	s.fix(&req.VolumeId)
+	release, err := s.acquireMutating(ctx, req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	resp, err := s.fs.SetAttr(s.ctx(ctx), req)
 	if err != nil {
 		return nil, err
@@ -351,30 +371,65 @@ func (s *localSession) SetAttr(ctx context.Context, req *pb.SetAttrRequest) (*pb
 }
 func (s *localSession) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb.NodeResponse, error) {
 	s.fix(&req.VolumeId)
+	release, err := s.acquireMutating(ctx, req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return s.fs.Mkdir(s.ctx(ctx), req)
 }
 func (s *localSession) Create(ctx context.Context, req *pb.CreateRequest) (*pb.NodeResponse, error) {
 	s.fix(&req.VolumeId)
+	release, err := s.acquireMutating(ctx, req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return s.fs.Create(s.ctx(ctx), req)
 }
 func (s *localSession) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*pb.Empty, error) {
 	s.fix(&req.VolumeId)
+	release, err := s.acquireMutating(ctx, req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return s.fs.Unlink(s.ctx(ctx), req)
 }
 func (s *localSession) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb.Empty, error) {
 	s.fix(&req.VolumeId)
+	release, err := s.acquireMutating(ctx, req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return s.fs.Rmdir(s.ctx(ctx), req)
 }
 func (s *localSession) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.Empty, error) {
 	s.fix(&req.VolumeId)
+	release, err := s.acquireMutating(ctx, req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return s.fs.Rename(s.ctx(ctx), req)
 }
 func (s *localSession) Link(ctx context.Context, req *pb.LinkRequest) (*pb.NodeResponse, error) {
 	s.fix(&req.VolumeId)
+	release, err := s.acquireMutating(ctx, req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return s.fs.Link(s.ctx(ctx), req)
 }
 func (s *localSession) Symlink(ctx context.Context, req *pb.SymlinkRequest) (*pb.NodeResponse, error) {
 	s.fix(&req.VolumeId)
+	release, err := s.acquireMutating(ctx, req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return s.fs.Symlink(s.ctx(ctx), req)
 }
 func (s *localSession) Readlink(ctx context.Context, req *pb.ReadlinkRequest) (*pb.ReadlinkResponse, error) {
@@ -390,6 +445,15 @@ func (s *localSession) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenR
 		return nil, ctx.Err()
 	}
 	s.fix(&req.VolumeId)
+	var release func()
+	if req.Flags&syscall.O_ACCMODE != syscall.O_RDONLY {
+		var err error
+		release, err = s.acquireMutating(ctx, req.VolumeId)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+	}
 	resp, err := s.fs.Open(s.ctx(ctx), req)
 	if err != nil {
 		return nil, err
@@ -443,6 +507,11 @@ func (s *localSession) ReadInto(ctx context.Context, req *pb.ReadRequest, dest [
 }
 func (s *localSession) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
 	s.fix(&req.VolumeId)
+	release, err := s.acquireMutating(ctx, req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	resp, err := s.fs.Write(s.ctx(ctx), req)
 	if err != nil {
 		return nil, err
@@ -457,6 +526,11 @@ func (s *localSession) Write(ctx context.Context, req *pb.WriteRequest) (*pb.Wri
 }
 func (s *localSession) Release(ctx context.Context, req *pb.ReleaseRequest) (*pb.Empty, error) {
 	s.fix(&req.VolumeId)
+	release, err := s.acquireMutating(ctx, req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if s.takeReadOnlyHandle(req.VolumeId, req.HandleId) {
 		if volCtx, err := s.localS0FSVolume(req.VolumeId); err == nil && volCtx != nil {
 			if inode, remaining, unlinked, ok := volCtx.ReleaseFileHandle(req.HandleId); ok && remaining == 0 && unlinked {
@@ -470,14 +544,29 @@ func (s *localSession) Release(ctx context.Context, req *pb.ReleaseRequest) (*pb
 }
 func (s *localSession) Flush(ctx context.Context, req *pb.FlushRequest) (*pb.Empty, error) {
 	s.fix(&req.VolumeId)
+	release, err := s.acquireMutating(ctx, req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return s.fs.Flush(s.ctx(ctx), req)
 }
 func (s *localSession) Fsync(ctx context.Context, req *pb.FsyncRequest) (*pb.Empty, error) {
 	s.fix(&req.VolumeId)
+	release, err := s.acquireMutating(ctx, req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return s.fs.Fsync(s.ctx(ctx), req)
 }
 func (s *localSession) Fallocate(ctx context.Context, req *pb.FallocateRequest) (*pb.Empty, error) {
 	s.fix(&req.VolumeId)
+	release, err := s.acquireMutating(ctx, req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	resp, err := s.fs.Fallocate(s.ctx(ctx), req)
 	if err == nil {
 		if volCtx, volErr := s.localS0FSVolume(req.VolumeId); volErr == nil && volCtx != nil {
@@ -488,6 +577,11 @@ func (s *localSession) Fallocate(ctx context.Context, req *pb.FallocateRequest) 
 }
 func (s *localSession) CopyFileRange(ctx context.Context, req *pb.CopyFileRangeRequest) (*pb.CopyFileRangeResponse, error) {
 	s.fix(&req.VolumeId)
+	release, err := s.acquireMutating(ctx, req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	resp, err := s.fs.CopyFileRange(s.ctx(ctx), req)
 	if err == nil {
 		if volCtx, volErr := s.localS0FSVolume(req.VolumeId); volErr == nil && volCtx != nil {
@@ -518,6 +612,11 @@ func (s *localSession) GetXattr(ctx context.Context, req *pb.GetXattrRequest) (*
 }
 func (s *localSession) SetXattr(ctx context.Context, req *pb.SetXattrRequest) (*pb.Empty, error) {
 	s.fix(&req.VolumeId)
+	release, err := s.acquireMutating(ctx, req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return s.fs.SetXattr(s.ctx(ctx), req)
 }
 func (s *localSession) ListXattr(ctx context.Context, req *pb.ListXattrRequest) (*pb.ListXattrResponse, error) {
@@ -526,10 +625,20 @@ func (s *localSession) ListXattr(ctx context.Context, req *pb.ListXattrRequest) 
 }
 func (s *localSession) RemoveXattr(ctx context.Context, req *pb.RemoveXattrRequest) (*pb.Empty, error) {
 	s.fix(&req.VolumeId)
+	release, err := s.acquireMutating(ctx, req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return s.fs.RemoveXattr(s.ctx(ctx), req)
 }
 func (s *localSession) Mknod(ctx context.Context, req *pb.MknodRequest) (*pb.NodeResponse, error) {
 	s.fix(&req.VolumeId)
+	release, err := s.acquireMutating(ctx, req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return s.fs.Mknod(s.ctx(ctx), req)
 }
 func (s *localSession) GetLk(ctx context.Context, req *pb.GetLkRequest) (*pb.GetLkResponse, error) {
@@ -538,14 +647,29 @@ func (s *localSession) GetLk(ctx context.Context, req *pb.GetLkRequest) (*pb.Get
 }
 func (s *localSession) SetLk(ctx context.Context, req *pb.SetLkRequest) (*pb.Empty, error) {
 	s.fix(&req.VolumeId)
+	release, err := s.acquireMutating(ctx, req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return s.fs.SetLk(s.ctx(ctx), req)
 }
 func (s *localSession) SetLkw(ctx context.Context, req *pb.SetLkRequest) (*pb.Empty, error) {
 	s.fix(&req.VolumeId)
+	release, err := s.acquireMutating(ctx, req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return s.fs.SetLkw(s.ctx(ctx), req)
 }
 func (s *localSession) Flock(ctx context.Context, req *pb.FlockRequest) (*pb.Empty, error) {
 	s.fix(&req.VolumeId)
+	release, err := s.acquireMutating(ctx, req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return s.fs.Flock(s.ctx(ctx), req)
 }
 

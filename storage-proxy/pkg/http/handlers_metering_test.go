@@ -245,6 +245,7 @@ func (f *fakeHTTPMeteringWriter) UpsertProducerWatermarkTx(ctx context.Context, 
 
 type fakeHTTPSnapshotManager struct {
 	exportBody           []byte
+	createErr            error
 	lastCreate           *snapshot.CreateSnapshotRequest
 	lastCreateVolume     *snapshot.CreateVolumeFromSnapshotRequest
 	lastRestore          *snapshot.RestoreSnapshotRequest
@@ -258,6 +259,9 @@ type fakeHTTPSnapshotManager struct {
 
 func (f *fakeHTTPSnapshotManager) CreateSnapshotSimple(ctx context.Context, req *snapshot.CreateSnapshotRequest) (*db.Snapshot, error) {
 	f.lastCreate = req
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
 	return &db.Snapshot{
 		ID:          "snap-1",
 		VolumeID:    req.VolumeID,

@@ -196,6 +196,18 @@ func (f fakeVolumePortalHandler) AbortHandoff(_ context.Context, _ ctldapi.Abort
 	return ctldapi.AbortVolumePortalHandoffResponse{Aborted: true}, nil
 }
 
+func (f fakeVolumePortalHandler) PrepareSnapshotCheckpoint(_ context.Context, _ ctldapi.PrepareVolumeSnapshotCheckpointRequest) (ctldapi.PrepareVolumeSnapshotCheckpointResponse, error) {
+	return ctldapi.PrepareVolumeSnapshotCheckpointResponse{Prepared: true}, nil
+}
+
+func (f fakeVolumePortalHandler) CompleteSnapshotCheckpoint(_ context.Context, _ ctldapi.CompleteVolumeSnapshotCheckpointRequest) (ctldapi.CompleteVolumeSnapshotCheckpointResponse, error) {
+	return ctldapi.CompleteVolumeSnapshotCheckpointResponse{Completed: true}, nil
+}
+
+func (f fakeVolumePortalHandler) AbortSnapshotCheckpoint(_ context.Context, _ ctldapi.AbortVolumeSnapshotCheckpointRequest) (ctldapi.AbortVolumeSnapshotCheckpointResponse, error) {
+	return ctldapi.AbortVolumeSnapshotCheckpointResponse{Aborted: true}, nil
+}
+
 func (f fakeVolumePortalHandler) MountedVolumeHandler() http.Handler {
 	return f.mountedHandler
 }

@@ -227,6 +227,62 @@ func TestLocalVolumeManagerPrepareHandoffDrainsInflightAndBlocksNewAcquires(t *t
 	}
 }
 
+func TestLocalSessionMutationsWaitForSnapshotCheckpoint(t *testing.T) {
+	engine, err := s0fs.Open(context.Background(), s0fs.Config{
+		VolumeID: "vol-1",
+		WALPath:  filepath.Join(t.TempDir(), "volume.wal"),
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	mgr := newLocalVolumeManager()
+	mgr.add(&volume.VolumeContext{
+		VolumeID:  "vol-1",
+		TeamID:    "team-a",
+		Backend:   volume.BackendS0FS,
+		S0FS:      engine,
+		Access:    volume.AccessModeRWO,
+		MountedAt: time.Now().UTC(),
+		RootInode: 1,
+		RootPath:  "/",
+	})
+	session := newLocalSession("vol-1", mgr, nil)
+
+	if err := mgr.prepareSnapshotCheckpoint(context.Background(), "vol-1"); err != nil {
+		t.Fatalf("prepareSnapshotCheckpoint() error = %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := session.Create(context.Background(), &pb.CreateRequest{
+			VolumeId: "ignored-by-local-session",
+			Parent:   s0fs.RootInode,
+			Name:     "blocked.txt",
+			Mode:     0o644,
+		})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("Create() returned during checkpoint: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	mgr.completeSnapshotCheckpoint("vol-1")
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Create() did not resume after checkpoint completed")
+	}
+}
+
 func TestLocalSessionReadCacheTracksSmallWrites(t *testing.T) {
 	engine, err := s0fs.Open(context.Background(), s0fs.Config{
 		VolumeID: "vol-1",

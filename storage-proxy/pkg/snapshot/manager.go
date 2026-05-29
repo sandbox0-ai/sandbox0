@@ -68,16 +68,17 @@ type FlushCoordinator interface {
 
 // Errors
 var (
-	ErrVolumeNotFound            = errors.New("volume not found")
-	ErrSnapshotNotFound          = errors.New("snapshot not found")
-	ErrSnapshotNotBelongToVolume = errors.New("snapshot does not belong to volume")
-	ErrVolumeLocked              = errors.New("volume is locked for restore")
-	ErrFlushFailed               = errors.New("flush failed on one or more nodes")
-	ErrCloneFailed               = errors.New("clone operation failed")
-	ErrVolumeBusy                = errors.New("volume is busy, try again later")
-	ErrRemountTimeout            = errors.New("remount timeout")
-	ErrInvalidAccessMode         = errors.New("invalid access mode")
-	ErrMountedCtldOwner          = errors.New("snapshot operations require ctld-mounted volumes to be unmounted")
+	ErrVolumeNotFound               = errors.New("volume not found")
+	ErrSnapshotNotFound             = errors.New("snapshot not found")
+	ErrSnapshotNotBelongToVolume    = errors.New("snapshot does not belong to volume")
+	ErrVolumeLocked                 = errors.New("volume is locked for restore")
+	ErrFlushFailed                  = errors.New("flush failed on one or more nodes")
+	ErrCloneFailed                  = errors.New("clone operation failed")
+	ErrVolumeBusy                   = errors.New("volume is busy, try again later")
+	ErrRemountTimeout               = errors.New("remount timeout")
+	ErrInvalidAccessMode            = errors.New("invalid access mode")
+	ErrMountedCtldOwner             = errors.New("snapshot operations require ctld-mounted volumes to be unmounted")
+	ErrActiveRWXSnapshotUnsupported = errors.New("active RWX volume snapshots are not supported")
 )
 
 // Manager handles snapshot operations for SandboxVolumes
@@ -220,12 +221,13 @@ func (m *Manager) SetFlushCoordinator(coordinator FlushCoordinator) {
 
 // CreateSnapshotRequest contains parameters for creating a snapshot
 type CreateSnapshotRequest struct {
-	VolumeID        string
-	Name            string
-	Description     string
-	TeamID          string
-	UserID          string
-	StorageMetadata *meteringpkg.StorageObservation
+	VolumeID                 string
+	Name                     string
+	Description              string
+	TeamID                   string
+	UserID                   string
+	ActiveCheckpointPrepared bool
+	StorageMetadata          *meteringpkg.StorageObservation
 }
 
 // ForkVolumeRequest contains parameters for forking a volume.
@@ -258,6 +260,36 @@ func (m *Manager) CreateSnapshot(ctx context.Context, req *CreateSnapshotRequest
 		"volume_id": req.VolumeID,
 		"name":      req.Name,
 	}).Info("Creating snapshot")
+
+	vol, err := m.repo.GetSandboxVolume(ctx, req.VolumeID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return nil, ErrVolumeNotFound
+		}
+		return nil, err
+	}
+	if vol.TeamID != req.TeamID {
+		return nil, ErrVolumeNotFound
+	}
+	accessMode := volume.NormalizeAccessMode(vol.AccessMode)
+	if accessMode == volume.AccessModeRWX {
+		activeWritableMount, err := m.hasActiveWritableMount(ctx, req.VolumeID)
+		if err != nil {
+			return nil, err
+		}
+		if activeWritableMount {
+			return nil, ErrActiveRWXSnapshotUnsupported
+		}
+	}
+	if accessMode != volume.AccessModeROX {
+		ctldMounted, err := m.hasMountedCtldOwner(ctx, req.VolumeID)
+		if err != nil {
+			return nil, err
+		}
+		if ctldMounted && !req.ActiveCheckpointPrepared {
+			return nil, ErrMountedCtldOwner
+		}
+	}
 
 	// 0. Distributed flush coordination (if coordinator is set)
 	// This ensures all storage-proxy instances that have this volume mounted

@@ -680,6 +680,45 @@ func (m *Manager) AbortHandoff(ctx context.Context, req ctldapi.AbortVolumePorta
 	return ctldapi.AbortVolumePortalHandoffResponse{Aborted: true}, nil
 }
 
+func (m *Manager) PrepareSnapshotCheckpoint(ctx context.Context, req ctldapi.PrepareVolumeSnapshotCheckpointRequest) (ctldapi.PrepareVolumeSnapshotCheckpointResponse, error) {
+	volumeID := strings.TrimSpace(req.SandboxVolumeID)
+	if volumeID == "" {
+		return ctldapi.PrepareVolumeSnapshotCheckpointResponse{}, fmt.Errorf("sandboxvolume_id is required")
+	}
+	m.mu.Lock()
+	bound := m.boundVolumes[volumeID]
+	m.mu.Unlock()
+	if bound == nil || bound.volCtx == nil || bound.volCtx.S0FS == nil {
+		return ctldapi.PrepareVolumeSnapshotCheckpointResponse{}, fmt.Errorf("volume %s is not owned by this ctld", volumeID)
+	}
+	if err := m.volumes.prepareSnapshotCheckpoint(ctx, volumeID); err != nil {
+		return ctldapi.PrepareVolumeSnapshotCheckpointResponse{}, err
+	}
+	if _, err := bound.volCtx.S0FS.SyncMaterialize(ctx); err != nil {
+		m.volumes.completeSnapshotCheckpoint(volumeID)
+		return ctldapi.PrepareVolumeSnapshotCheckpointResponse{}, err
+	}
+	return ctldapi.PrepareVolumeSnapshotCheckpointResponse{Prepared: true}, nil
+}
+
+func (m *Manager) CompleteSnapshotCheckpoint(_ context.Context, req ctldapi.CompleteVolumeSnapshotCheckpointRequest) (ctldapi.CompleteVolumeSnapshotCheckpointResponse, error) {
+	volumeID := strings.TrimSpace(req.SandboxVolumeID)
+	if volumeID == "" {
+		return ctldapi.CompleteVolumeSnapshotCheckpointResponse{}, fmt.Errorf("sandboxvolume_id is required")
+	}
+	m.volumes.completeSnapshotCheckpoint(volumeID)
+	return ctldapi.CompleteVolumeSnapshotCheckpointResponse{Completed: true}, nil
+}
+
+func (m *Manager) AbortSnapshotCheckpoint(_ context.Context, req ctldapi.AbortVolumeSnapshotCheckpointRequest) (ctldapi.AbortVolumeSnapshotCheckpointResponse, error) {
+	volumeID := strings.TrimSpace(req.SandboxVolumeID)
+	if volumeID == "" {
+		return ctldapi.AbortVolumeSnapshotCheckpointResponse{}, fmt.Errorf("sandboxvolume_id is required")
+	}
+	m.volumes.completeSnapshotCheckpoint(volumeID)
+	return ctldapi.AbortVolumeSnapshotCheckpointResponse{Aborted: true}, nil
+}
+
 func (m *Manager) cleanupIdleOwnerOnlyVolumes(ctx context.Context) {
 	if m == nil || m.ownerOnlyIdleTTL <= 0 {
 		return

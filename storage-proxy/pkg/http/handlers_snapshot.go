@@ -54,19 +54,40 @@ func (s *Server) createSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	checkpoint, err := s.prepareVolumeSnapshotCheckpoint(r.Context(), volumeID, claims.TeamID)
+	if err != nil {
+		s.handleSnapshotError(w, err)
+		return
+	}
+	checkpointCompleted := false
+	defer func() {
+		if checkpoint != nil && !checkpointCompleted {
+			checkpoint.Abort(context.Background())
+		}
+	}()
+
 	snap, err := s.snapshotMgr.CreateSnapshotSimple(r.Context(), &snapshot.CreateSnapshotRequest{
-		VolumeID:        volumeID,
-		Name:            req.Name,
-		Description:     req.Description,
-		TeamID:          claims.TeamID,
-		UserID:          claims.UserID,
-		StorageMetadata: storageObservationMetadataFromHeaders(r.Header),
+		VolumeID:                 volumeID,
+		Name:                     req.Name,
+		Description:              req.Description,
+		TeamID:                   claims.TeamID,
+		UserID:                   claims.UserID,
+		ActiveCheckpointPrepared: checkpoint.Prepared(),
+		StorageMetadata:          storageObservationMetadataFromHeaders(r.Header),
 	})
 
 	if err != nil {
 		s.handleSnapshotError(w, err)
 		return
 	}
+	if err := checkpoint.Complete(r.Context()); err != nil {
+		if s.logger != nil {
+			s.logger.WithError(err).WithField("volume_id", volumeID).Error("Failed to complete volume snapshot checkpoint")
+		}
+		s.handleSnapshotError(w, err)
+		return
+	}
+	checkpointCompleted = true
 
 	resp := snapshotResponse{
 		ID:          snap.ID,
@@ -250,6 +271,10 @@ func (s *Server) handleSnapshotError(w http.ResponseWriter, err error) {
 		_ = spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "snapshot not found") // Don't reveal existence
 	case errors.Is(err, snapshot.ErrVolumeLocked):
 		_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, "volume is locked for another operation")
+	case errors.Is(err, snapshot.ErrVolumeBusy):
+		_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, "volume is busy, try again later")
+	case errors.Is(err, snapshot.ErrActiveRWXSnapshotUnsupported):
+		_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, "active RWX volume snapshots are not supported")
 	case errors.Is(err, snapshot.ErrFlushFailed):
 		_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "failed to flush data")
 	case errors.Is(err, snapshot.ErrCloneFailed):

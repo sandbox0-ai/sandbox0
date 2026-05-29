@@ -116,6 +116,33 @@ type AbortVolumePortalHandoffResponse struct {
 	Error   string `json:"error,omitempty"`
 }
 
+type PrepareVolumeSnapshotCheckpointRequest struct {
+	SandboxVolumeID string `json:"sandboxvolume_id"`
+}
+
+type PrepareVolumeSnapshotCheckpointResponse struct {
+	Prepared bool   `json:"prepared"`
+	Error    string `json:"error,omitempty"`
+}
+
+type CompleteVolumeSnapshotCheckpointRequest struct {
+	SandboxVolumeID string `json:"sandboxvolume_id"`
+}
+
+type CompleteVolumeSnapshotCheckpointResponse struct {
+	Completed bool   `json:"completed"`
+	Error     string `json:"error,omitempty"`
+}
+
+type AbortVolumeSnapshotCheckpointRequest struct {
+	SandboxVolumeID string `json:"sandboxvolume_id"`
+}
+
+type AbortVolumeSnapshotCheckpointResponse struct {
+	Aborted bool   `json:"aborted"`
+	Error   string `json:"error,omitempty"`
+}
+
 type AttachVolumeOwnerRequest struct {
 	TeamID          string `json:"team_id"`
 	SandboxVolumeID string `json:"sandboxvolume_id"`

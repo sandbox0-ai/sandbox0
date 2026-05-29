@@ -2726,6 +2726,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessSnapshotResponse"
+        "409":
+          description: Volume is busy or active RWX snapshot is unsupported
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
     get:
       tags: [snapshots]
       summary: List snapshots

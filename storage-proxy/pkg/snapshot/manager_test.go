@@ -661,7 +661,27 @@ func TestRestoreSnapshot_BeginInvalidateError(t *testing.T) {
 	}
 }
 
-func TestCreateSnapshot_AllowsMountedCtldOwner(t *testing.T) {
+func TestCreateSnapshot_RejectsMountedCtldOwnerWithoutCheckpoint(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol1"] = &db.SandboxVolume{ID: "vol1", TeamID: "team1"}
+	repo.activeMounts["vol1"] = []*db.VolumeMount{{
+		VolumeID:     "vol1",
+		MountOptions: rawMountOptions(t, volume.MountOptions{AccessMode: volume.AccessModeRWO, OwnerKind: volume.OwnerKindCtld}),
+	}}
+	mgr := newTestManager(repo, nil)
+
+	_, err := mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
+		VolumeID: "vol1",
+		Name:     "snap1",
+		TeamID:   "team1",
+		UserID:   "user1",
+	})
+	if !errors.Is(err, ErrMountedCtldOwner) {
+		t.Fatalf("CreateSnapshot() error = %v, want %v", err, ErrMountedCtldOwner)
+	}
+}
+
+func TestCreateSnapshot_AllowsMountedCtldOwnerWithCheckpoint(t *testing.T) {
 	repo := newFakeRepo()
 	repo.volumes["vol1"] = &db.SandboxVolume{ID: "vol1", TeamID: "team1"}
 	repo.activeMounts["vol1"] = []*db.VolumeMount{{
@@ -673,10 +693,11 @@ func TestCreateSnapshot_AllowsMountedCtldOwner(t *testing.T) {
 	mgr.SetFlushCoordinator(coordinator)
 
 	snapshot, err := mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
-		VolumeID: "vol1",
-		Name:     "snap1",
-		TeamID:   "team1",
-		UserID:   "user1",
+		VolumeID:                 "vol1",
+		Name:                     "snap1",
+		TeamID:                   "team1",
+		UserID:                   "user1",
+		ActiveCheckpointPrepared: true,
 	})
 	if err != nil {
 		t.Fatalf("CreateSnapshot() error = %v", err)
@@ -686,6 +707,26 @@ func TestCreateSnapshot_AllowsMountedCtldOwner(t *testing.T) {
 	}
 	if coordinator.called {
 		t.Fatal("CreateSnapshot called distributed flush coordinator for ctld-owned mount")
+	}
+}
+
+func TestCreateSnapshot_RejectsActiveRWXWritableMount(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol1"] = &db.SandboxVolume{ID: "vol1", TeamID: "team1", AccessMode: string(volume.AccessModeRWX)}
+	repo.activeMounts["vol1"] = []*db.VolumeMount{{
+		VolumeID:     "vol1",
+		MountOptions: rawMountOptions(t, volume.MountOptions{AccessMode: volume.AccessModeRWX, OwnerKind: volume.OwnerKindStorageProxy}),
+	}}
+	mgr := newTestManager(repo, nil)
+
+	_, err := mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
+		VolumeID: "vol1",
+		Name:     "snap1",
+		TeamID:   "team1",
+		UserID:   "user1",
+	})
+	if !errors.Is(err, ErrActiveRWXSnapshotUnsupported) {
+		t.Fatalf("CreateSnapshot() error = %v, want %v", err, ErrActiveRWXSnapshotUnsupported)
 	}
 }
 

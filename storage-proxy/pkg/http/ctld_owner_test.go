@@ -1,6 +1,7 @@
 package http
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
 )
@@ -115,6 +117,110 @@ func TestForkVolumeReleasesCtldOwnerBeforeFork(t *testing.T) {
 	}
 	if snapshotMgr.lastFork == nil || snapshotMgr.lastFork.SourceVolumeID != "vol-1" {
 		t.Fatalf("ForkVolume request = %+v, want source vol-1", snapshotMgr.lastFork)
+	}
+}
+
+func TestCreateSnapshotPreparesCtldCheckpoint(t *testing.T) {
+	checkpointCalls := map[string]int{}
+	ctldServer, ownerPort := newSnapshotCheckpointTestServer(t, checkpointCalls)
+	defer ctldServer.Close()
+
+	repo := newFakeHTTPRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1", UserID: "user-1"}
+	repo.activeMounts["vol-1"] = []*db.VolumeMount{ctldOwnerMount(t, "vol-1", "cluster-a", "sandbox0-system/ctld-a", ownerPort)}
+	snapshotMgr := &fakeHTTPSnapshotManager{}
+	server := &Server{
+		logger:        logrus.New(),
+		repo:          repo,
+		snapshotMgr:   snapshotMgr,
+		podResolver:   &fakeVolumeFilePodResolver{urls: map[string]string{"sandbox0-system/ctld-a": ctldServer.URL}},
+		selfClusterID: "cluster-a",
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/snapshots", bytes.NewReader([]byte(`{"name":"checkpoint"}`)))
+	req.SetPathValue("volume_id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
+	recorder := httptest.NewRecorder()
+
+	server.createSnapshot(recorder, req)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusCreated, recorder.Body.String())
+	}
+	if checkpointCalls["prepare"] != 1 || checkpointCalls["complete"] != 1 || checkpointCalls["abort"] != 0 {
+		t.Fatalf("checkpoint calls = %v, want prepare=1 complete=1 abort=0", checkpointCalls)
+	}
+	if snapshotMgr.lastCreate == nil || !snapshotMgr.lastCreate.ActiveCheckpointPrepared {
+		t.Fatalf("CreateSnapshot request = %+v, want active checkpoint prepared", snapshotMgr.lastCreate)
+	}
+}
+
+func TestCreateSnapshotAbortsCtldCheckpointOnSnapshotError(t *testing.T) {
+	checkpointCalls := map[string]int{}
+	ctldServer, ownerPort := newSnapshotCheckpointTestServer(t, checkpointCalls)
+	defer ctldServer.Close()
+
+	repo := newFakeHTTPRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1", UserID: "user-1"}
+	repo.activeMounts["vol-1"] = []*db.VolumeMount{ctldOwnerMount(t, "vol-1", "cluster-a", "sandbox0-system/ctld-a", ownerPort)}
+	server := &Server{
+		logger:        logrus.New(),
+		repo:          repo,
+		snapshotMgr:   &fakeHTTPSnapshotManager{createErr: snapshot.ErrCloneFailed},
+		podResolver:   &fakeVolumeFilePodResolver{urls: map[string]string{"sandbox0-system/ctld-a": ctldServer.URL}},
+		selfClusterID: "cluster-a",
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/snapshots", bytes.NewReader([]byte(`{"name":"checkpoint"}`)))
+	req.SetPathValue("volume_id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
+	recorder := httptest.NewRecorder()
+
+	server.createSnapshot(recorder, req)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusInternalServerError)
+	}
+	if checkpointCalls["prepare"] != 1 || checkpointCalls["complete"] != 0 || checkpointCalls["abort"] != 1 {
+		t.Fatalf("checkpoint calls = %v, want prepare=1 complete=0 abort=1", checkpointCalls)
+	}
+}
+
+func TestCreateSnapshotRejectsActiveRWXWritableMount(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1", UserID: "user-1", AccessMode: string(volume.AccessModeRWX)}
+	repo.activeMounts["vol-1"] = []*db.VolumeMount{{
+		VolumeID:     "vol-1",
+		ClusterID:    "cluster-a",
+		PodID:        "storage-proxy-a",
+		MountOptions: mustMountOptionsRaw(t, volume.MountOptions{AccessMode: volume.AccessModeRWX, OwnerKind: volume.OwnerKindStorageProxy}),
+	}}
+	snapshotMgr := &fakeHTTPSnapshotManager{}
+	server := &Server{
+		logger:      logrus.New(),
+		repo:        repo,
+		snapshotMgr: snapshotMgr,
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/snapshots", bytes.NewReader([]byte(`{"name":"rwx"}`)))
+	req.SetPathValue("volume_id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
+	recorder := httptest.NewRecorder()
+
+	server.createSnapshot(recorder, req)
+
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusConflict)
+	}
+	if snapshotMgr.lastCreate != nil {
+		t.Fatalf("CreateSnapshot request = %+v, want nil for active RWX", snapshotMgr.lastCreate)
+	}
+	_, apiErr, err := spec.DecodeResponse[map[string]any](recorder.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr == nil || apiErr.Message != "active RWX volume snapshots are not supported" {
+		t.Fatalf("api error = %+v, want active RWX conflict", apiErr)
 	}
 }
 
@@ -221,6 +327,27 @@ func newReleaseOwnerTestServer(t *testing.T, status int, resp ctldapi.ReleaseVol
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	return server, mustHTTPServerPort(t, server)
+}
+
+func newSnapshotCheckpointTestServer(t *testing.T, calls map[string]int) (*httptest.Server, int) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/volume-portals/snapshot-checkpoints/prepare":
+			calls["prepare"]++
+			_ = json.NewEncoder(w).Encode(ctldapi.PrepareVolumeSnapshotCheckpointResponse{Prepared: true})
+		case "/api/v1/volume-portals/snapshot-checkpoints/complete":
+			calls["complete"]++
+			_ = json.NewEncoder(w).Encode(ctldapi.CompleteVolumeSnapshotCheckpointResponse{Completed: true})
+		case "/api/v1/volume-portals/snapshot-checkpoints/abort":
+			calls["abort"]++
+			_ = json.NewEncoder(w).Encode(ctldapi.AbortVolumeSnapshotCheckpointResponse{Aborted: true})
+		default:
+			t.Fatalf("ctld checkpoint path = %q", r.URL.Path)
+		}
 	}))
 	return server, mustHTTPServerPort(t, server)
 }

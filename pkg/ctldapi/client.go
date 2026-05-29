@@ -27,6 +27,9 @@ const (
 	pathVolumePortalHandoffPrepare  = "/api/v1/volume-portals/handoffs/prepare"
 	pathVolumePortalHandoffComplete = "/api/v1/volume-portals/handoffs/complete"
 	pathVolumePortalHandoffAbort    = "/api/v1/volume-portals/handoffs/abort"
+	pathVolumeSnapshotPrepare       = "/api/v1/volume-portals/snapshot-checkpoints/prepare"
+	pathVolumeSnapshotComplete      = "/api/v1/volume-portals/snapshot-checkpoints/complete"
+	pathVolumeSnapshotAbort         = "/api/v1/volume-portals/snapshot-checkpoints/abort"
 )
 
 var defaultHTTPClient = &http.Client{Timeout: DefaultRequestTimeout}
@@ -116,6 +119,18 @@ func (c *Client) AbortVolumePortalHandoff(ctx context.Context, ctldAddress strin
 	return PostJSON[AbortVolumePortalHandoffResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathVolumePortalHandoffAbort, req)
 }
 
+func (c *Client) PrepareVolumeSnapshotCheckpoint(ctx context.Context, ctldAddress string, req PrepareVolumeSnapshotCheckpointRequest) (*PrepareVolumeSnapshotCheckpointResponse, error) {
+	return PostJSON[PrepareVolumeSnapshotCheckpointResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathVolumeSnapshotPrepare, req)
+}
+
+func (c *Client) CompleteVolumeSnapshotCheckpoint(ctx context.Context, ctldAddress string, req CompleteVolumeSnapshotCheckpointRequest) (*CompleteVolumeSnapshotCheckpointResponse, error) {
+	return PostJSON[CompleteVolumeSnapshotCheckpointResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathVolumeSnapshotComplete, req)
+}
+
+func (c *Client) AbortVolumeSnapshotCheckpoint(ctx context.Context, ctldAddress string, req AbortVolumeSnapshotCheckpointRequest) (*AbortVolumeSnapshotCheckpointResponse, error) {
+	return PostJSON[AbortVolumeSnapshotCheckpointResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathVolumeSnapshotAbort, req)
+}
+
 func (c *Client) httpClientOrDefault() *http.Client {
 	if c != nil && c.httpClient != nil {
 		return c.httpClient
@@ -184,6 +199,12 @@ func responseError(resp any) string {
 	case *CompleteVolumePortalHandoffResponse:
 		return strings.TrimSpace(typed.Error)
 	case *AbortVolumePortalHandoffResponse:
+		return strings.TrimSpace(typed.Error)
+	case *PrepareVolumeSnapshotCheckpointResponse:
+		return strings.TrimSpace(typed.Error)
+	case *CompleteVolumeSnapshotCheckpointResponse:
+		return strings.TrimSpace(typed.Error)
+	case *AbortVolumeSnapshotCheckpointResponse:
 		return strings.TrimSpace(typed.Error)
 	case *BindVolumePortalResponse:
 		return strings.TrimSpace(typed.Error)

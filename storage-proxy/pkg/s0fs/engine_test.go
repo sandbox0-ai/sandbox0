@@ -48,6 +48,33 @@ func TestEngineSmallFileReadWriteReplay(t *testing.T) {
 	}
 }
 
+func TestEngineLocalDiskGuardRejectsProjectedCacheGrowth(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(context.Background(), Config{
+		VolumeID: "vol-1",
+		WALPath:  filepath.Join(dir, "volume.wal"),
+		LocalDiskGuard: &LocalDiskGuard{
+			Path:     dir,
+			MaxBytes: 2048,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	node, err := engine.CreateFile(RootInode, "limited.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if _, err := engine.Write(node.Inode, 0, []byte("ok")); err != nil {
+		t.Fatalf("small Write() error = %v", err)
+	}
+	if _, err := engine.Write(node.Inode, 0, bytes.Repeat([]byte("x"), 2048)); !errors.Is(err, ErrNoSpace) {
+		t.Fatalf("large Write() error = %v, want ErrNoSpace", err)
+	}
+}
+
 func TestEngineWriteExtendsWithZeros(t *testing.T) {
 	engine, err := Open(context.Background(), Config{VolumeID: "vol-1", WALPath: filepath.Join(t.TempDir(), "volume.wal")})
 	if err != nil {

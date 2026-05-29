@@ -9,6 +9,7 @@ var (
 	ErrExists                = errors.New("entry already exists")
 	ErrInvalidInput          = errors.New("invalid input")
 	ErrIsDir                 = errors.New("inode is a directory")
+	ErrNoSpace               = errors.New("local s0fs cache has no space")
 	ErrNotEmpty              = errors.New("directory is not empty")
 	ErrNotDir                = errors.New("inode is not a directory")
 	ErrNotFound              = errors.New("entry not found")

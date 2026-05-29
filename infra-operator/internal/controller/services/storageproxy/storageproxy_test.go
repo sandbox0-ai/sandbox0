@@ -196,6 +196,85 @@ func TestReconcileMountsObjectEncryptionKeyWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestReconcileSetsCacheAndLogEmptyDirSizeLimits(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
+					Enabled:  true,
+					Port:     5432,
+					Username: "sandbox0",
+					Database: "sandbox0",
+					SSLMode:  "disable",
+				},
+			},
+			Storage: &infrav1alpha1.StorageConfig{
+				Type: infrav1alpha1.StorageTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinStorageConfig{
+					Enabled: true,
+					Bucket:  "sandbox0",
+					Region:  "us-east-1",
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				StorageProxy: &infrav1alpha1.StorageProxyServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						Replicas:             1,
+					},
+					Config: &infrav1alpha1.StorageProxyConfig{
+						CacheSizeLimit: "512Mi",
+						LogSizeLimit:   "64Mi",
+					},
+				},
+			},
+		},
+	}
+
+	reconciler, client := newStorageProxyTestReconciler(t,
+		infra.DeepCopy(),
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "demo-sandbox0-database-credentials",
+				Namespace: infra.Namespace,
+			},
+			Data: map[string][]byte{
+				"username": []byte("sandbox0"),
+				"password": []byte("db-password"),
+				"database": []byte("sandbox0"),
+				"port":     []byte("5432"),
+			},
+		},
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "demo-sandbox0-rustfs-credentials",
+				Namespace: infra.Namespace,
+			},
+			Data: map[string][]byte{
+				"endpoint":          []byte("http://demo-rustfs.sandbox0-system.svc:9000"),
+				"RUSTFS_ACCESS_KEY": []byte("access-key"),
+				"RUSTFS_SECRET_KEY": []byte("secret-key"),
+			},
+		},
+	)
+
+	if err := reconciler.Reconcile(context.Background(), infra, "sandbox0ai/infra", "latest"); err != nil && !strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("reconcile returned unexpected error: %v", err)
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-storage-proxy", Namespace: infra.Namespace}, deployment); err != nil {
+		t.Fatalf("get storage-proxy deployment: %v", err)
+	}
+	assertEmptyDirSizeLimit(t, deployment.Spec.Template.Spec.Volumes, "cache", "512Mi")
+	assertEmptyDirSizeLimit(t, deployment.Spec.Template.Spec.Volumes, "logs", "64Mi")
+}
+
 func TestBuildConfigMapsBuiltinStorageToS3CompatibleType(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{
@@ -315,6 +394,23 @@ func assertStorageProxyVolume(t *testing.T, volumes []corev1.Volume, name string
 		if volume.Name == name {
 			return
 		}
+	}
+	t.Fatalf("expected volume %q, got %#v", name, volumes)
+}
+
+func assertEmptyDirSizeLimit(t *testing.T, volumes []corev1.Volume, name, want string) {
+	t.Helper()
+	for _, volume := range volumes {
+		if volume.Name != name {
+			continue
+		}
+		if volume.EmptyDir == nil || volume.EmptyDir.SizeLimit == nil {
+			t.Fatalf("expected volume %q to have an emptyDir size limit, got %#v", name, volume)
+		}
+		if got := volume.EmptyDir.SizeLimit.String(); got != want {
+			t.Fatalf("volume %q size limit = %q, want %q", name, got, want)
+		}
+		return
 	}
 	t.Fatalf("expected volume %q, got %#v", name, volumes)
 }

@@ -2,6 +2,7 @@ package portal
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,6 +12,31 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 )
+
+func TestNewManagerConfiguresLocalDiskGuard(t *testing.T) {
+	mgr := NewManager(Config{
+		RootDir: t.TempDir(),
+		StorageConfig: &apiconfig.StorageProxyConfig{
+			VolumePortalCacheSizeLimit: "128Mi",
+			VolumePortalRootMinFree:    "64Mi",
+		},
+	})
+
+	cacheDir := filepath.Join(t.TempDir(), "vol")
+	guard := mgr.localDiskGuard(cacheDir)
+	if guard == nil {
+		t.Fatal("expected local disk guard")
+	}
+	if guard.Path != cacheDir {
+		t.Fatalf("guard path = %q, want %q", guard.Path, cacheDir)
+	}
+	if guard.MaxBytes != 128*1024*1024 {
+		t.Fatalf("guard max bytes = %d, want 128Mi", guard.MaxBytes)
+	}
+	if guard.MinFreeBytes != 64*1024*1024 {
+		t.Fatalf("guard min free bytes = %d, want 64Mi", guard.MinFreeBytes)
+	}
+}
 
 func TestUnbindLockedSnapshotKeepsSharedVolumeUntilLastPortal(t *testing.T) {
 	mgr := &Manager{

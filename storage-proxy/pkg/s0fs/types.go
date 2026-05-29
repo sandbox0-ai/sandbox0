@@ -25,6 +25,7 @@ type Config struct {
 	Encryption           *EncryptionConfig
 	MaterializeInterval  time.Duration
 	WALSyncHook          func()
+	LocalDiskGuard       *LocalDiskGuard
 }
 
 type ObjectStoreResolver func(volumeID string) (objectstore.Store, error)

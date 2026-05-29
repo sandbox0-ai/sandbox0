@@ -1,12 +1,15 @@
 package template
 
+import "github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+
 const (
-	DefaultTemplateImage       = "sandbox0ai/otemplates:default-v0.1.0"
-	DefaultTemplateCPU         = "500m"
-	DefaultTemplateMemory      = "512Mi"
-	DefaultTemplateDisplayName = "Default"
-	DefaultTemplateMinIdle     = int32(1)
-	DefaultTemplateMaxIdle     = int32(5)
+	DefaultTemplateImage            = "sandbox0ai/otemplates:default-v0.1.0"
+	DefaultTemplateCPU              = "500m"
+	DefaultTemplateMemory           = "512Mi"
+	DefaultTemplateEphemeralStorage = v1alpha1.DefaultSandboxEphemeralStorage
+	DefaultTemplateDisplayName      = "Default"
+	DefaultTemplateMinIdle          = int32(1)
+	DefaultTemplateMaxIdle          = int32(5)
 )
 
 // ApplyDefaultPool applies default pool values when not explicitly set.

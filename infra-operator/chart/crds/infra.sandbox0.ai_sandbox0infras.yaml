@@ -1830,6 +1830,12 @@ spec:
                             type: integer
                           auditLogPath:
                             type: string
+                          bandwidthBurstBytes:
+                            description: Token bucket burst in bytes for bandwidth
+                              limiting. Zero uses one second of the configured rate.
+                            format: int64
+                            minimum: 0
+                            type: integer
                           bpfFsPath:
                             type: string
                           bpfPinPath:
@@ -1854,11 +1860,23 @@ spec:
                             type: string
                           egressAuthResolverUrl:
                             type: string
+                          egressBandwidthBytesPerSecond:
+                            description: Per-sandbox egress bandwidth limit in bytes
+                              per second. Zero disables throttling.
+                            format: int64
+                            minimum: 0
+                            type: integer
                           failClosed:
                             default: true
                             type: boolean
                           healthPort:
                             default: 8081
+                            type: integer
+                          ingressBandwidthBytesPerSecond:
+                            description: Per-sandbox ingress bandwidth limit in bytes
+                              per second. Zero disables throttling.
+                            format: int64
+                            minimum: 0
                             type: integer
                           logLevel:
                             default: info
@@ -2614,6 +2632,9 @@ spec:
                           cacheDir:
                             default: /var/lib/storage-proxy/cache
                             type: string
+                          cacheSizeLimit:
+                            default: 20Gi
+                            type: string
                           cleanupInterval:
                             default: 60s
                             type: string
@@ -2685,6 +2706,9 @@ spec:
                           logLevel:
                             default: info
                             type: string
+                          logSizeLimit:
+                            default: 1Gi
+                            type: string
                           maxBytesPerSecond:
                             default: 1073741824
                             format: int64
@@ -2708,6 +2732,12 @@ spec:
                             type: string
                           restoreRemountTimeout:
                             default: 30s
+                            type: string
+                          volumePortalCacheSizeLimit:
+                            default: 20Gi
+                            type: string
+                          volumePortalRootMinFree:
+                            default: 5Gi
                             type: string
                           watchEventQueueSize:
                             default: 256

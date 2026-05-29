@@ -98,7 +98,20 @@ type StorageProxyConfig struct {
 
 	// +optional
 	// +kubebuilder:default="/var/lib/storage-proxy/cache"
-	CacheDir         string `yaml:"cache_dir" json:"cacheDir"`
+	CacheDir string `yaml:"cache_dir" json:"cacheDir"`
+	// +optional
+	// +kubebuilder:default="20Gi"
+	CacheSizeLimit string `yaml:"cache_size_limit" json:"cacheSizeLimit"`
+	// +optional
+	// +kubebuilder:default="1Gi"
+	LogSizeLimit string `yaml:"log_size_limit" json:"logSizeLimit"`
+	// +optional
+	// +kubebuilder:default="20Gi"
+	VolumePortalCacheSizeLimit string `yaml:"volume_portal_cache_size_limit" json:"volumePortalCacheSizeLimit"`
+	// +optional
+	// +kubebuilder:default="5Gi"
+	VolumePortalRootMinFree string `yaml:"volume_portal_root_min_free" json:"volumePortalRootMinFree"`
+
 	DefaultClusterId string `yaml:"default_cluster_id" json:"-"`
 	RegionID         string `yaml:"region_id" json:"-"`
 

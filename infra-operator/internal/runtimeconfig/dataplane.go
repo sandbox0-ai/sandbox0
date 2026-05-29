@@ -89,6 +89,10 @@ func ToStorageProxy(spec *infrav1alpha1.StorageProxyConfig) *apiconfig.StoragePr
 	cfg.CleanupInterval = spec.CleanupInterval
 	cfg.DirectVolumeFileIdleTTL = spec.DirectVolumeFileIdleTTL
 	cfg.CacheDir = spec.CacheDir
+	cfg.CacheSizeLimit = spec.CacheSizeLimit
+	cfg.LogSizeLimit = spec.LogSizeLimit
+	cfg.VolumePortalCacheSizeLimit = spec.VolumePortalCacheSizeLimit
+	cfg.VolumePortalRootMinFree = spec.VolumePortalRootMinFree
 	cfg.MetricsEnabled = spec.MetricsEnabled
 	cfg.MetricsPort = spec.MetricsPort
 	cfg.LogLevel = spec.LogLevel
@@ -130,6 +134,9 @@ func ToNetd(spec *infrav1alpha1.NetdConfig) *apiconfig.NetdConfig {
 	cfg.ProxyHTTPSPort = spec.ProxyHTTPSPort
 	cfg.ProxyHeaderLimit = spec.ProxyHeaderLimit
 	cfg.ProxyUpstreamTimeout = spec.ProxyUpstreamTimeout
+	cfg.EgressBandwidthBytesPerSecond = spec.EgressBandwidthBytesPerSecond
+	cfg.IngressBandwidthBytesPerSecond = spec.IngressBandwidthBytesPerSecond
+	cfg.BandwidthBurstBytes = spec.BandwidthBurstBytes
 	cfg.DNSPort = spec.DNSPort
 	cfg.PlatformAllowedCIDRs = cloneStrings(spec.PlatformAllowedCIDRs)
 	cfg.PlatformDeniedCIDRs = cloneStrings(spec.PlatformDeniedCIDRs)

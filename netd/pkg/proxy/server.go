@@ -45,6 +45,7 @@ type Server struct {
 	tlsAuthority      tlsInterceptAuthority
 	upstreamTLSConfig *tls.Config
 	auditor           *auditLogger
+	bandwidthLimiter  *bandwidthLimiter
 	auditSeq          uint64
 	udpSessionMu      sync.Mutex
 	udpSessions       map[udpSessionKey]*udpSession
@@ -148,26 +149,27 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 		return nil, err
 	}
 	server := &Server{
-		cfg:            cfg,
-		store:          store,
-		tracker:        tracker,
-		usageRecorder:  usageRecorder,
-		logger:         logger,
-		hostVerifier:   newDNSHostVerifier(),
-		httpListener:   httpLn,
-		httpsListener:  httpsLn,
-		udpHTTPConn:    udpHTTPConn,
-		udpHTTPSConn:   udpHTTPSConn,
-		reassembler:    newQuicReassembler(),
-		tcpClassifiers: defaultTCPClassifiers(),
-		udpClassifiers: defaultUDPClassifiers(),
-		adapters:       adapters,
-		authResolver:   noopEgressAuthResolver{},
-		authCache:      newMemoryEgressAuthCache(),
-		dnsCache:       newDNSHostCache(),
-		udpReplyDialer: dialUDPTransparent,
-		auditor:        auditor,
-		exitCh:         make(chan error, 1),
+		cfg:              cfg,
+		store:            store,
+		tracker:          tracker,
+		usageRecorder:    usageRecorder,
+		logger:           logger,
+		hostVerifier:     newDNSHostVerifier(),
+		httpListener:     httpLn,
+		httpsListener:    httpsLn,
+		udpHTTPConn:      udpHTTPConn,
+		udpHTTPSConn:     udpHTTPSConn,
+		reassembler:      newQuicReassembler(),
+		tcpClassifiers:   defaultTCPClassifiers(),
+		udpClassifiers:   defaultUDPClassifiers(),
+		adapters:         adapters,
+		authResolver:     noopEgressAuthResolver{},
+		authCache:        newMemoryEgressAuthCache(),
+		dnsCache:         newDNSHostCache(),
+		udpReplyDialer:   dialUDPTransparent,
+		auditor:          auditor,
+		bandwidthLimiter: newBandwidthLimiter(cfg),
+		exitCh:           make(chan error, 1),
 	}
 	if cfg.EgressAuthResolverURL != "" {
 		server.authResolver = NewHTTPEgressAuthResolver(cfg.EgressAuthResolverURL, cfg.EgressAuthResolverTimeout.Duration, nil)
@@ -425,8 +427,8 @@ func (s *Server) pipeWithReader(client net.Conn, upstream net.Conn, reader io.Re
 }
 
 func (s *Server) pipeWithReaders(client net.Conn, upstream net.Conn, upstreamWriter io.Reader, downstreamWriter io.Reader, compiled *policy.CompiledPolicy, audit *flowAudit) error {
-	upstreamCounter := &countingWriter{writer: upstream}
-	clientCounter := &countingWriter{writer: client}
+	upstreamCounter := &countingWriter{writer: s.bandwidthLimitedWriter(upstream, compiled, bandwidthEgress)}
+	clientCounter := &countingWriter{writer: s.bandwidthLimitedWriter(client, compiled, bandwidthIngress)}
 	errCh := make(chan error, 2)
 	go func() {
 		n, err := io.Copy(upstreamCounter, upstreamWriter)
@@ -796,16 +798,16 @@ func (s *Server) proxyHTTPRequest(req *adapterRequest) error {
 	if err != nil {
 		return err
 	}
-	upstream = &countingConn{Conn: upstream}
 	defer upstream.Close()
 
-	if err := httpReq.Write(upstream); err != nil {
-		s.recordEgressBytes(req.Compiled, upstream.(*countingConn).WrittenBytes(), req.Audit)
+	upstreamCounter := &countingWriter{writer: s.bandwidthLimitedWriter(upstream, req.Compiled, bandwidthEgress)}
+	if err := httpReq.Write(upstreamCounter); err != nil {
+		s.recordEgressBytes(req.Compiled, upstreamCounter.WrittenBytes(), req.Audit)
 		return fmt.Errorf("write upstream http request: %w", err)
 	}
-	s.recordEgressBytes(req.Compiled, upstream.(*countingConn).WrittenBytes(), req.Audit)
+	s.recordEgressBytes(req.Compiled, upstreamCounter.WrittenBytes(), req.Audit)
 
-	clientCounter := &countingWriter{writer: req.Conn}
+	clientCounter := &countingWriter{writer: s.bandwidthLimitedWriter(req.Conn, req.Compiled, bandwidthIngress)}
 	n, err := io.Copy(clientCounter, upstream)
 	s.recordIngressBytes(req.Compiled, n, req.Audit)
 	return normalizeRelayError(err)
@@ -1212,6 +1214,20 @@ func (s *Server) recordIngressBytes(compiled *policy.CompiledPolicy, bytes int64
 	s.usageRecorder.RecordIngress(compiled, bytes)
 }
 
+func (s *Server) bandwidthLimitedWriter(writer io.Writer, compiled *policy.CompiledPolicy, direction bandwidthDirection) io.Writer {
+	if s == nil || s.bandwidthLimiter == nil {
+		return writer
+	}
+	return s.bandwidthLimiter.limitedWriter(writer, compiled, direction)
+}
+
+func (s *Server) waitBandwidth(compiled *policy.CompiledPolicy, direction bandwidthDirection, bytes int) {
+	if s == nil || s.bandwidthLimiter == nil {
+		return
+	}
+	s.bandwidthLimiter.wait(compiled, direction, bytes)
+}
+
 func (s *Server) newFlowAudit(transport string) *flowAudit {
 	if s == nil {
 		return newFlowAudit("flow-0", time.Now())
@@ -1240,26 +1256,46 @@ func (s *Server) closeUDPSessions() {
 }
 
 type countingWriter struct {
-	writer io.Writer
+	writer  io.Writer
+	written int64
 }
 
 func (c *countingWriter) Write(p []byte) (int, error) {
-	return c.writer.Write(p)
+	n, err := c.writer.Write(p)
+	atomic.AddInt64(&c.written, int64(n))
+	return n, err
+}
+
+func (c *countingWriter) WrittenBytes() int64 {
+	if c == nil {
+		return 0
+	}
+	return atomic.LoadInt64(&c.written)
 }
 
 type countingConn struct {
 	net.Conn
-	read    int64
-	written int64
+	read           int64
+	written        int64
+	limiter        *bandwidthLimiter
+	compiled       *policy.CompiledPolicy
+	readDirection  bandwidthDirection
+	writeDirection bandwidthDirection
 }
 
 func (c *countingConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
+	if n > 0 && c.limiter != nil {
+		c.limiter.wait(c.compiled, c.readDirection, n)
+	}
 	atomic.AddInt64(&c.read, int64(n))
 	return n, err
 }
 
 func (c *countingConn) Write(p []byte) (int, error) {
+	if len(p) > 0 && c.limiter != nil {
+		c.limiter.wait(c.compiled, c.writeDirection, len(p))
+	}
 	n, err := c.Conn.Write(p)
 	atomic.AddInt64(&c.written, int64(n))
 	return n, err

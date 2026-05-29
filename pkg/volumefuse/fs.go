@@ -1076,6 +1076,8 @@ func statusToFuse(err error) fuse.Status {
 			return fuse.EPERM
 		case fserror.InvalidArgument:
 			return fuse.EINVAL
+		case fserror.ResourceExhausted:
+			return fuse.Status(syscall.ENOSPC)
 		case fserror.FailedPrecondition:
 			return fuse.EIO
 		case fserror.Unimplemented:

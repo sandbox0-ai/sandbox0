@@ -94,6 +94,15 @@ type NetdConfig struct {
 	// +optional
 	// +kubebuilder:default="30s"
 	ProxyUpstreamTimeout metav1.Duration `yaml:"proxy_upstream_timeout" json:"proxyUpstreamTimeout"`
+	// +optional
+	// Per-sandbox egress bandwidth limit in bytes per second. Zero disables throttling.
+	EgressBandwidthBytesPerSecond int64 `yaml:"egress_bandwidth_bytes_per_second" json:"egressBandwidthBytesPerSecond"`
+	// +optional
+	// Per-sandbox ingress bandwidth limit in bytes per second. Zero disables throttling.
+	IngressBandwidthBytesPerSecond int64 `yaml:"ingress_bandwidth_bytes_per_second" json:"ingressBandwidthBytesPerSecond"`
+	// +optional
+	// Token bucket burst in bytes for bandwidth limiting. Zero uses one second of the configured rate.
+	BandwidthBurstBytes int64 `yaml:"bandwidth_burst_bytes" json:"bandwidthBurstBytes"`
 
 	// Ports and CIDRs
 	// +optional

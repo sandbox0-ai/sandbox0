@@ -28,6 +28,7 @@ type Engine struct {
 
 	materializer            *Materializer
 	encryption              *EncryptionConfig
+	localDiskGuard          *LocalDiskGuard
 	mutationVersion         uint64
 	lastCommittedManifest   uint64
 	lastMaterializedVersion uint64
@@ -97,17 +98,18 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 	}
 
 	e := &Engine{
-		volumeID:     cfg.VolumeID,
-		wal:          walFile,
-		nextSeq:      state.NextSeq,
-		nextInode:    state.NextInode,
-		nodes:        state.Nodes,
-		children:     state.Children,
-		data:         state.Data,
-		coldFiles:    state.ColdFiles,
-		segments:     state.Segments,
-		materializer: materializer,
-		encryption:   cfg.Encryption,
+		volumeID:       cfg.VolumeID,
+		wal:            walFile,
+		nextSeq:        state.NextSeq,
+		nextInode:      state.NextInode,
+		nodes:          state.Nodes,
+		children:       state.Children,
+		data:           state.Data,
+		coldFiles:      state.ColdFiles,
+		segments:       state.Segments,
+		materializer:   materializer,
+		encryption:     cfg.Encryption,
+		localDiskGuard: cfg.LocalDiskGuard,
 	}
 	if latestManifest != nil {
 		e.lastCommittedManifest = latestManifest.ManifestSeq
@@ -147,6 +149,7 @@ func (e *Engine) Close() error {
 	if err := e.wal.reset(); err != nil {
 		return err
 	}
+	e.refreshLocalDiskGuardLocked()
 	e.closed = true
 	return e.wal.close()
 }
@@ -271,13 +274,9 @@ func (e *Engine) Link(inode uint64, newParent uint64, newName string) (*Node, er
 	record.Inode = inode
 	record.NewParent = newParent
 	record.NewName = newName
-	if err := e.wal.append(record); err != nil {
+	if err := e.appendAndApplyLocked(record, estimatedWALRecordBytes(record)); err != nil {
 		return nil, err
 	}
-	if err := e.apply(record); err != nil {
-		return nil, err
-	}
-	e.markDirtyLocked()
 	return cloneNode(e.nodes[inode]), nil
 }
 
@@ -287,20 +286,22 @@ func (e *Engine) Write(inode uint64, offset uint64, payload []byte) (int, error)
 	if err := e.checkOpen(); err != nil {
 		return 0, err
 	}
-	if _, err := e.fileNodeLocked(inode); err != nil {
+	node, err := e.fileNodeLocked(inode)
+	if err != nil {
 		return 0, err
 	}
 	record := e.newRecord("write")
 	record.Inode = inode
 	record.Offset = offset
 	record.Data = slices.Clone(payload)
-	if err := e.wal.append(record); err != nil {
+	projectedBytes := estimatedWALRecordBytes(record)
+	end := offset + uint64(len(payload))
+	if end > node.Size {
+		projectedBytes += int64(end - node.Size)
+	}
+	if err := e.appendAndApplyLocked(record, projectedBytes); err != nil {
 		return 0, err
 	}
-	if err := e.apply(record); err != nil {
-		return 0, err
-	}
-	e.markDirtyLocked()
 	return len(payload), nil
 }
 
@@ -350,13 +351,9 @@ func (e *Engine) Rename(oldParent uint64, oldName string, newParent uint64, newN
 	record.Name = oldName
 	record.NewParent = newParent
 	record.NewName = newName
-	if err := e.wal.append(record); err != nil {
+	if err := e.appendAndApplyLocked(record, estimatedWALRecordBytes(record)); err != nil {
 		return err
 	}
-	if err := e.apply(record); err != nil {
-		return err
-	}
-	e.markDirtyLocked()
 	return nil
 }
 
@@ -383,13 +380,9 @@ func (e *Engine) UnlinkWithInode(parent uint64, name string) (uint64, error) {
 	record := e.newRecord("unlink")
 	record.Parent = parent
 	record.Name = name
-	if err := e.wal.append(record); err != nil {
+	if err := e.appendAndApplyLocked(record, estimatedWALRecordBytes(record)); err != nil {
 		return 0, err
 	}
-	if err := e.apply(record); err != nil {
-		return 0, err
-	}
-	e.markDirtyLocked()
 	return inode, nil
 }
 
@@ -432,13 +425,9 @@ func (e *Engine) RemoveDir(parent uint64, name string) error {
 	record := e.newRecord("rmdir")
 	record.Parent = parent
 	record.Name = name
-	if err := e.wal.append(record); err != nil {
+	if err := e.appendAndApplyLocked(record, estimatedWALRecordBytes(record)); err != nil {
 		return err
 	}
-	if err := e.apply(record); err != nil {
-		return err
-	}
-	e.markDirtyLocked()
 	return nil
 }
 
@@ -454,13 +443,9 @@ func (e *Engine) SetMode(inode uint64, mode uint32) error {
 	record := e.newRecord("chmod")
 	record.Inode = inode
 	record.Mode = mode
-	if err := e.wal.append(record); err != nil {
+	if err := e.appendAndApplyLocked(record, estimatedWALRecordBytes(record)); err != nil {
 		return err
 	}
-	if err := e.apply(record); err != nil {
-		return err
-	}
-	e.markDirtyLocked()
 	return nil
 }
 
@@ -477,13 +462,9 @@ func (e *Engine) SetOwner(inode uint64, uid, gid uint32) error {
 	record.Inode = inode
 	record.Mode = uid
 	record.Offset = uint64(gid)
-	if err := e.wal.append(record); err != nil {
+	if err := e.appendAndApplyLocked(record, estimatedWALRecordBytes(record)); err != nil {
 		return err
 	}
-	if err := e.apply(record); err != nil {
-		return err
-	}
-	e.markDirtyLocked()
 	return nil
 }
 
@@ -493,19 +474,20 @@ func (e *Engine) Truncate(inode uint64, size uint64) error {
 	if err := e.checkOpen(); err != nil {
 		return err
 	}
-	if _, err := e.fileNodeLocked(inode); err != nil {
+	node, err := e.fileNodeLocked(inode)
+	if err != nil {
 		return err
 	}
 	record := e.newRecord("truncate")
 	record.Inode = inode
 	record.Offset = size
-	if err := e.wal.append(record); err != nil {
+	projectedBytes := estimatedWALRecordBytes(record)
+	if size > node.Size {
+		projectedBytes += int64(size - node.Size)
+	}
+	if err := e.appendAndApplyLocked(record, projectedBytes); err != nil {
 		return err
 	}
-	if err := e.apply(record); err != nil {
-		return err
-	}
-	e.markDirtyLocked()
 	return nil
 }
 
@@ -582,6 +564,7 @@ func (e *Engine) syncMaterialize(ctx context.Context, force bool) (*Manifest, er
 		if err := e.wal.reset(); err != nil {
 			return nil, err
 		}
+		e.refreshLocalDiskGuardLocked()
 		e.lastCommittedManifest = manifest.ManifestSeq
 		e.lastMaterializedVersion = version
 		e.dirty = false
@@ -630,6 +613,7 @@ func (e *Engine) RefreshMaterialized(ctx context.Context) (bool, error) {
 	if err := e.wal.reset(); err != nil {
 		return false, err
 	}
+	e.refreshLocalDiskGuardLocked()
 	if manifest != nil {
 		e.lastCommittedManifest = manifest.ManifestSeq
 	}
@@ -646,9 +630,13 @@ func (e *Engine) CreateSnapshot(snapshotID string) (*SnapshotState, error) {
 		return nil, fmt.Errorf("%w: snapshot id is required", ErrInvalidInput)
 	}
 	state := e.snapshotStateLocked()
+	if err := e.reserveLocalDiskLocked(estimatedStateBytes(state)); err != nil {
+		return nil, err
+	}
 	if err := saveSnapshotState(snapshotFilePath(e.wal.path, snapshotID), e.volumeID, "snapshot:"+snapshotID, state, e.encryption); err != nil {
 		return nil, err
 	}
+	e.refreshLocalDiskGuardLocked()
 	return state, nil
 }
 
@@ -669,13 +657,17 @@ func (e *Engine) RestoreSnapshot(snapshotID string) error {
 	if state.NextSeq < minNextSeq {
 		state.NextSeq = minNextSeq
 	}
+	if err := e.reserveLocalDiskLocked(estimatedStateBytes(state)); err != nil {
+		return err
+	}
 	e.replaceStateLocked(state)
-	if err := e.persistCurrentStateLocked(); err != nil {
+	if err := e.persistCurrentStateLockedWithReserve(false); err != nil {
 		return err
 	}
 	if err := e.wal.reset(); err != nil {
 		return err
 	}
+	e.refreshLocalDiskGuardLocked()
 	e.markDirtyLocked()
 	return nil
 }
@@ -686,13 +678,17 @@ func (e *Engine) ReplaceState(state *SnapshotState) error {
 	if err := e.checkOpen(); err != nil {
 		return err
 	}
+	if err := e.reserveLocalDiskLocked(estimatedStateBytes(state)); err != nil {
+		return err
+	}
 	e.replaceStateLocked(cloneState(state))
-	if err := e.persistCurrentStateLocked(); err != nil {
+	if err := e.persistCurrentStateLockedWithReserve(false); err != nil {
 		return err
 	}
 	if err := e.wal.reset(); err != nil {
 		return err
 	}
+	e.refreshLocalDiskGuardLocked()
 	e.markDirtyLocked()
 	return nil
 }
@@ -712,6 +708,7 @@ func (e *Engine) DeleteSnapshot(snapshotID string) error {
 		}
 		return fmt.Errorf("delete snapshot state: %w", err)
 	}
+	e.refreshLocalDiskGuardLocked()
 	return nil
 }
 
@@ -738,13 +735,9 @@ func (e *Engine) create(parent uint64, name string, typ FileType, mode uint32, t
 	record.Type = typ
 	record.Mode = mode
 	record.Target = target
-	if err := e.wal.append(record); err != nil {
+	if err := e.appendAndApplyLocked(record, estimatedWALRecordBytes(record)); err != nil {
 		return nil, err
 	}
-	if err := e.apply(record); err != nil {
-		return nil, err
-	}
-	e.markDirtyLocked()
 	return cloneNode(e.nodes[record.Inode]), nil
 }
 
@@ -756,6 +749,60 @@ func (e *Engine) newRecord(op string) walRecord {
 	}
 	e.nextSeq++
 	return record
+}
+
+func (e *Engine) appendAndApplyLocked(record walRecord, projectedBytes int64) error {
+	if err := e.reserveLocalDiskLocked(projectedBytes); err != nil {
+		return err
+	}
+	if err := e.wal.append(record); err != nil {
+		return err
+	}
+	if err := e.apply(record); err != nil {
+		return err
+	}
+	e.markDirtyLocked()
+	return nil
+}
+
+func (e *Engine) reserveLocalDiskLocked(projectedBytes int64) error {
+	if e == nil || e.localDiskGuard == nil {
+		return nil
+	}
+	return e.localDiskGuard.Reserve(projectedBytes)
+}
+
+func (e *Engine) refreshLocalDiskGuardLocked() {
+	if e != nil && e.localDiskGuard != nil {
+		e.localDiskGuard.Refresh()
+	}
+}
+
+func estimatedWALRecordBytes(record walRecord) int64 {
+	size := int64(512 + len(record.Name) + len(record.NewName) + len(record.Target))
+	if len(record.Data) > 0 {
+		size += int64(len(record.Data) * 2)
+	}
+	return size
+}
+
+func estimatedStateBytes(state *SnapshotState) int64 {
+	if state == nil {
+		return 0
+	}
+	var total int64 = 4096
+	for _, data := range state.Data {
+		total += int64(len(data) * 2)
+	}
+	for _, node := range state.Nodes {
+		if node != nil {
+			total += int64(256 + len(node.Target))
+		}
+	}
+	for _, children := range state.Children {
+		total += int64(128 + len(children)*128)
+	}
+	return total
 }
 
 func (e *Engine) currentStateLocked() *SnapshotState {
@@ -789,7 +836,17 @@ func (e *Engine) replaceStateLocked(state *SnapshotState) {
 }
 
 func (e *Engine) persistCurrentStateLocked() error {
-	return saveSnapshotState(headStatePath(e.wal.path), e.volumeID, "head", cloneState(e.currentStateLocked()), e.encryption)
+	return e.persistCurrentStateLockedWithReserve(true)
+}
+
+func (e *Engine) persistCurrentStateLockedWithReserve(reserve bool) error {
+	state := cloneState(e.currentStateLocked())
+	if reserve {
+		if err := e.reserveLocalDiskLocked(estimatedStateBytes(state)); err != nil {
+			return err
+		}
+	}
+	return saveSnapshotState(headStatePath(e.wal.path), e.volumeID, "head", state, e.encryption)
 }
 
 func loadCurrentState(cfg Config) (*SnapshotState, error) {

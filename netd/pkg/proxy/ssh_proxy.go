@@ -77,7 +77,7 @@ func (s *Server) proxySSHSession(req *adapterRequest) error {
 	}
 	defer upstreamConn.Close()
 
-	return proxySSHChannels(downstreamChannels, upstreamConn)
+	return proxySSHChannels(req, downstreamChannels, upstreamConn)
 }
 
 func (s *Server) dialUpstreamSSH(req *adapterRequest, material *resolvedSSHProxy, signer ssh.Signer) (*ssh.Client, error) {
@@ -118,7 +118,7 @@ func (s *Server) dialUpstreamSSH(req *adapterRequest, material *resolvedSSHProxy
 	return client, nil
 }
 
-func proxySSHChannels(downstreamChannels <-chan ssh.NewChannel, upstream *ssh.Client) error {
+func proxySSHChannels(req *adapterRequest, downstreamChannels <-chan ssh.NewChannel, upstream *ssh.Client) error {
 	if upstream == nil {
 		return fmt.Errorf("upstream ssh client is nil")
 	}
@@ -138,12 +138,12 @@ func proxySSHChannels(downstreamChannels <-chan ssh.NewChannel, upstream *ssh.Cl
 			_ = upstreamChannel.Close()
 			continue
 		}
-		go bridgeSSHChannel(downstreamChannel, downstreamRequests, upstreamChannel, upstreamRequests)
+		go bridgeSSHChannel(req, downstreamChannel, downstreamRequests, upstreamChannel, upstreamRequests)
 	}
 	return nil
 }
 
-func bridgeSSHChannel(downstream ssh.Channel, downstreamRequests <-chan *ssh.Request, upstream ssh.Channel, upstreamRequests <-chan *ssh.Request) {
+func bridgeSSHChannel(req *adapterRequest, downstream ssh.Channel, downstreamRequests <-chan *ssh.Request, upstream ssh.Channel, upstreamRequests <-chan *ssh.Request) {
 	var closeOnce sync.Once
 	closeBoth := func() {
 		closeOnce.Do(func() {
@@ -157,14 +157,14 @@ func bridgeSSHChannel(downstream ssh.Channel, downstreamRequests <-chan *ssh.Req
 	upstreamDone.Add(3)
 	go func() {
 		defer upstreamDone.Done()
-		copySSHStream(&wg, upstream, downstream, closeBoth, false)
+		copySSHStream(&wg, upstream, downstream, closeBoth, false, req, bandwidthEgress)
 	}()
-	go copySSHStream(&wg, downstream, upstream, closeBoth, false)
+	go copySSHStream(&wg, downstream, upstream, closeBoth, false, req, bandwidthIngress)
 	go func() {
 		defer upstreamDone.Done()
-		copySSHStream(&wg, upstream.Stderr(), downstream.Stderr(), closeBoth, false)
+		copySSHStream(&wg, upstream.Stderr(), downstream.Stderr(), closeBoth, false, req, bandwidthEgress)
 	}()
-	go copySSHStream(&wg, downstream.Stderr(), upstream.Stderr(), closeBoth, false)
+	go copySSHStream(&wg, downstream.Stderr(), upstream.Stderr(), closeBoth, false, req, bandwidthIngress)
 	go forwardSSHRequests(&wg, downstreamRequests, upstream, closeBoth, true, false)
 	go func() {
 		defer upstreamDone.Done()
@@ -178,9 +178,13 @@ func bridgeSSHChannel(downstream ssh.Channel, downstreamRequests <-chan *ssh.Req
 	closeBoth()
 }
 
-func copySSHStream(wg *sync.WaitGroup, dst io.Writer, src io.Reader, closeBoth func(), closeOnEOF bool) {
+func copySSHStream(wg *sync.WaitGroup, dst io.Writer, src io.Reader, closeBoth func(), closeOnEOF bool, req *adapterRequest, direction bandwidthDirection) {
 	defer wg.Done()
-	_, _ = io.Copy(dst, src)
+	writer := dst
+	if req != nil && req.Server != nil {
+		writer = req.Server.bandwidthLimitedWriter(dst, req.Compiled, direction)
+	}
+	_, _ = io.Copy(writer, src)
 	if closer, ok := dst.(interface{ CloseWrite() error }); ok {
 		_ = closer.CloseWrite()
 	}

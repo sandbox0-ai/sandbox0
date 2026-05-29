@@ -49,6 +49,7 @@ spec:
         resources:
             cpu: "1"
             memory: 4Gi
+            ephemeralStorage: 512Mi
     pool:
         minIdle: 2
         maxIdle: 10
@@ -63,6 +64,7 @@ spec:
         resources:
             cpu: "1"
             memory: 4Gi
+            ephemeralStorage: 512Mi
     warmProcesses:
         - name: codex
           type: cmd
@@ -92,8 +94,9 @@ Warm processes start during template pod creation, before the pod is claimable f
         MainContainer: apispec.NewOptContainerSpec(apispec.ContainerSpec{
             Image: "ubuntu:24.04",
             Resources: apispec.ResourceQuota{
-                CPU:    apispec.NewOptString("1"),
-                Memory: apispec.NewOptString("4Gi"),
+                CPU:              apispec.NewOptString("1"),
+                Memory:           apispec.NewOptString("4Gi"),
+                EphemeralStorage: apispec.NewOptString("512Mi"),
             },
         }),
         WarmProcesses: []apispec.WarmProcessSpec{
@@ -128,7 +131,7 @@ tpl = client.create_template(TemplateCreateRequest(
     spec=SandboxTemplateSpec.from_dict({
         "mainContainer": {
             "image": "ubuntu:24.04",
-            "resources": {"cpu": "1", "memory": "4Gi"},
+            "resources": {"cpu": "1", "memory": "4Gi", "ephemeralStorage": "512Mi"},
         },
         "warmProcesses": [{
             "name": "codex",
@@ -152,7 +155,7 @@ print(f"Template created: {tpl.template_id}")`
     spec: {
         mainContainer: {
             image: "ubuntu:24.04",
-            resources: { cpu: "1", memory: "4Gi" },
+            resources: { cpu: "1", memory: "4Gi", ephemeralStorage: "512Mi" },
         },
         warmProcesses: [{
             name: "codex",
@@ -178,6 +181,7 @@ spec:
         resources:
             cpu: "1"
             memory: 4Gi
+            ephemeralStorage: 512Mi
     warmProcesses:
         - name: codex
           type: cmd
@@ -210,8 +214,9 @@ s0 template create --id my-codex-env --spec-file template.yaml`
         MainContainer: apispec.NewOptContainerSpec(apispec.ContainerSpec{
             Image: "python:3.12-slim",
             Resources: apispec.ResourceQuota{
-                CPU:    apispec.NewOptString("1"),
-                Memory: apispec.NewOptString("4Gi"),
+                CPU:              apispec.NewOptString("1"),
+                Memory:           apispec.NewOptString("4Gi"),
+                EphemeralStorage: apispec.NewOptString("512Mi"),
             },
         }),
         Pool: apispec.NewOptPoolStrategy(apispec.PoolStrategy{
@@ -236,7 +241,7 @@ tpl = client.create_template(TemplateCreateRequest(
     spec=SandboxTemplateSpec.from_dict({
         "mainContainer": {
             "image": "python:3.12-slim",
-            "resources": {"cpu": "1", "memory": "4Gi"},
+            "resources": {"cpu": "1", "memory": "4Gi", "ephemeralStorage": "512Mi"},
         },
         "pool": {"minIdle": 2, "maxIdle": 10},
     }),
@@ -251,7 +256,7 @@ print(f"Template created: {tpl.template_id}")`
     spec: {
         mainContainer: {
             image: "python:3.12-slim",
-            resources: { cpu: "1", memory: "4Gi" },
+            resources: { cpu: "1", memory: "4Gi", ephemeralStorage: "512Mi" },
         },
         pool: { minIdle: 2, maxIdle: 10 },
     },
@@ -379,8 +384,9 @@ Updating a template does not affect already-running Sandboxes. New Sandboxes cla
         MainContainer: apispec.NewOptContainerSpec(apispec.ContainerSpec{
             Image: "python:3.12-slim",
             Resources: apispec.ResourceQuota{
-                CPU:    apispec.NewOptString("2"),
-                Memory: apispec.NewOptString("8Gi"),
+                CPU:              apispec.NewOptString("2"),
+                Memory:           apispec.NewOptString("8Gi"),
+                EphemeralStorage: apispec.NewOptString("512Mi"),
             },
         }),
         Pool: apispec.NewOptPoolStrategy(apispec.PoolStrategy{
@@ -406,7 +412,7 @@ tpl = client.update_template(
         spec=SandboxTemplateSpec.from_dict({
             "mainContainer": {
                 "image": "python:3.12-slim",
-                "resources": {"cpu": "2", "memory": "8Gi"},
+                "resources": {"cpu": "2", "memory": "8Gi", "ephemeralStorage": "512Mi"},
             },
             "pool": {"minIdle": 3, "maxIdle": 10},
         }),
@@ -421,7 +427,7 @@ print(f"Template updated: {tpl.template_id}")`
     spec: {
         mainContainer: {
             image: "python:3.12-slim",
-            resources: { cpu: "2", memory: "8Gi" },
+            resources: { cpu: "2", memory: "8Gi", ephemeralStorage: "512Mi" },
         },
         pool: { minIdle: 3, maxIdle: 10 },
     },

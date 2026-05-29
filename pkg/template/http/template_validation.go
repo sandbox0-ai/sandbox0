@@ -66,6 +66,9 @@ func validateTemplateSpec(spec v1alpha1.SandboxTemplateSpec) error {
 	if spec.MainContainer.Resources.Memory.Sign() <= 0 {
 		return fmt.Errorf("spec.mainContainer.resources.memory must be > 0")
 	}
+	if spec.MainContainer.Resources.EphemeralStorage.Sign() < 0 {
+		return fmt.Errorf("spec.mainContainer.resources.ephemeralStorage must be >= 0")
+	}
 	if err := validateWarmProcesses(spec.WarmProcesses); err != nil {
 		return err
 	}

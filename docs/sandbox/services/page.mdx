@@ -1,13 +1,13 @@
 # Sandbox Services
 
-Sandbox Services expose public HTTP entrypoints for workloads inside a sandbox. A service can point to a long-running listener on a sandbox port, start a command on first public access, or execute inline function code through procd.
+Sandbox Services expose public HTTP entrypoints for workloads inside a sandbox. A service can point to a long-running listener on a sandbox port, start a command on first public access, or route to a [Sandbox Function](/docs/sandbox/functions).
 
 Use services for:
 
 - public HTTP routes into a sandbox
 - route-level method filtering, auth, CORS, rate limits, timeout, and path rewrite
 - public URL auto-resume for paused or cleaned sandboxes
-- function handlers that do not run a long-lived HTTP server
+- public entrypoints for listeners, command-backed services, and sandbox functions
 
 ## Mental Model
 
@@ -46,13 +46,7 @@ For listener-backed services, the public URL is derived from the sandbox ID, ser
 https://<sandbox_id>--p<port>.<region_id>.<root_domain>
 ```
 
-For function services, the API still returns a service-level `public_url`, but the service uses Sandbox0's reserved function routing label:
-
-```text
-https://<sandbox_id>--p49983.<region_id>.<root_domain>
-```
-
-`49983` is an internal routing port for function services. Do not set it in function service config and do not depend on hand-built URLs. Use the `public_url` returned by `GET` or `PUT /api/v1/sandboxes/{'{id}'}/services`.
+Function services also return a service-level `public_url`, but they use Sandbox0's reserved function routing label. See [Sandbox Functions](/docs/sandbox/functions) for function-specific URL and config details.
 
 The URL itself does not include a route path. If a route has `path_prefix: /webhook`, call:
 
@@ -98,194 +92,11 @@ routes:
 
 The same request reaches the backing service or function as `/github`.
 
-## Function Services
+## Sandbox Functions
 
-A function service has `runtime.type: function`. It stores inline source code in the service config. On each matching public request, cluster-gateway applies route policy, forwards an execution request to procd, and returns the function handler response.
+Use [Sandbox Functions](/docs/sandbox/functions) when you want a public HTTP handler without running a long-lived listener inside the sandbox. A function is still configured as a service with `runtime.type: function`, so it uses the same public URL, route policy, auth, CORS, rate limit, timeout, rewrite, and auto-resume model.
 
-Function services are different from listener-backed services:
-
-- omit `port` in the request
-- do not start or expose a user HTTP listener
-- use the returned `public_url` as the only public entrypoint
-- may return normal HTTP responses, SSE streams, or WebSocket messages
-
-Python is the first supported function runtime. The sandbox image must include `python3` in `PATH`.
-
-### Function Config
-
-```yaml
-services:
-    - id: webhook
-      runtime:
-          type: function
-          function:
-              runtime: python
-              handler: handler
-              source:
-                  type: inline
-                  code: |
-                      def handler(request):
-                          return {
-                              "status": 200,
-                              "headers": {"content-type": "application/json"},
-                              "body": {
-                                  "service_id": request["service_id"],
-                                  "route_id": request["route_id"],
-                                  "method": request["method"],
-                                  "path": request["path"],
-                              },
-                          }
-      ingress:
-          public: true
-          routes:
-              - id: webhook
-                path_prefix: /webhook
-                methods: [POST]
-                timeout_seconds: 30
-                resume: true
-```
-
-Apply it with the CLI:
-
-```bash
-s0 sandbox service update --services-file function-services.yaml -s sb_abc123
-```
-
-Or with the API:
-
-```json
-{
-    "services": [
-        {
-            "id": "webhook",
-            "runtime": {
-                "type": "function",
-                "function": {
-                    "runtime": "python",
-                    "handler": "handler",
-                    "source": {
-                        "type": "inline",
-                        "code": "def handler(request):\n    return {\n        \"status\": 200,\n        \"headers\": {\"content-type\": \"application/json\"},\n        \"body\": {\n            \"service_id\": request[\"service_id\"],\n            \"route_id\": request[\"route_id\"],\n            \"method\": request[\"method\"],\n            \"path\": request[\"path\"],\n        },\n    }\n"
-                    }
-                }
-            },
-            "ingress": {
-                "public": true,
-                "routes": [
-                    {
-                        "id": "webhook",
-                        "path_prefix": "/webhook",
-                        "methods": ["POST"],
-                        "timeout_seconds": 30,
-                        "resume": true
-                    }
-                ]
-            }
-        }
-    ]
-}
-```
-
-```bash
-curl -X PUT "$SANDBOX0_API_URL/api/v1/sandboxes/$SANDBOX_ID/services" \
-    -H "authorization: Bearer $SANDBOX0_API_TOKEN" \
-    -H "x-team-id: $SANDBOX0_TEAM_ID" \
-    -H "content-type: application/json" \
-    --data-binary @function-services.json
-```
-
-The service response includes a `public_url`:
-
-```json
-{
-    "success": true,
-    "data": {
-        "sandbox_id": "rs-example",
-        "exposure_domain": "aws-us-east-1.sandbox0.app",
-        "services": [
-            {
-                "id": "webhook",
-                "port": 49983,
-                "public_url": "https://rs-example--p49983.aws-us-east-1.sandbox0.app"
-            }
-        ]
-    }
-}
-```
-
-The response includes `port: 49983` because Sandbox0 normalizes the service for routing. Do not send `port` when configuring a function service.
-
-### Call A Function
-
-Use the returned `public_url` and append a path that matches the route.
-
-```bash
-curl -X POST "$PUBLIC_URL/webhook/github" \
-    -H "content-type: application/json" \
-    -d '{"event":"ping"}'
-```
-
-With the config above, the function handler receives:
-
-```json
-{
-    "service_id": "webhook",
-    "route_id": "webhook",
-    "method": "POST",
-    "path": "/webhook/github",
-    "body_base64": "eyJldmVudCI6InBpbmcifQ=="
-}
-```
-
-The function response is the HTTP response body and status. The function does not return a URL.
-
-### Function Request Object
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `service_id` | string | Matched service ID |
-| `route_id` | string | Matched route ID |
-| `method` | string | HTTP method |
-| `path` | string | Request path after any `rewrite_prefix` |
-| `raw_query` | string | Raw query string |
-| `headers` | object | Request headers |
-| `body_base64` | string | Base64-encoded request body |
-
-### Function Return Value
-
-Handlers may return any JSON-serializable value, or a response object.
-
-```python
-def handler(request):
-    return {
-        "status": 201,
-        "headers": {"content-type": "text/plain"},
-        "body": "created",
-    }
-```
-
-For SSE, clients send `Accept: text/event-stream`. Return an iterable or async iterable body.
-
-```python
-def handler(request):
-    def events():
-        yield "event: ready\n"
-        yield "data: ok\n\n"
-
-    return {
-        "status": 200,
-        "headers": {"content-type": "text/event-stream"},
-        "body": events(),
-    }
-```
-
-For WebSocket requests, define an async handler that accepts `(request, ws)`.
-
-```python
-async def handler(request, ws):
-    async for message in ws:
-        await ws.send("echo:" + message)
-```
+Function services omit `port`, execute inline source through procd, and can return normal HTTP responses, SSE streams, or WebSocket messages.
 
 ## Cmd Services
 
@@ -598,30 +409,22 @@ if err != nil {
 
 ## Set Services At Claim Time
 
-You can attach services when claiming a sandbox. Function services may omit `port` in claim config just as they do in `PUT /services`.
+You can attach services when claiming a sandbox. The same service schema is accepted at claim time and by `PUT /services`.
 
 ```yaml
 template: default
 config:
     auto_resume: true
     services:
-        - id: webhook
-          runtime:
-              type: function
-              function:
-                  runtime: python
-                  handler: handler
-                  source:
-                      type: inline
-                      code: |
-                          def handler(request):
-                              return {"status": 200, "body": "ok"}
+        - id: api
+          port: 8080
           ingress:
               public: true
               routes:
-                  - id: webhook
-                    path_prefix: /webhook
-                    methods: [POST]
+                  - id: api
+                    path_prefix: /api
+                    rewrite_prefix: /
+                    methods: [GET, POST]
                     resume: true
 ```
 
@@ -630,32 +433,21 @@ config:
     {
       label: "Go",
       language: "go",
-      code: `functionSource := "def handler(request):\\n    return {\\"status\\": 200, \\"body\\": \\"ok\\"}\\n"
-
-sandbox, err := client.ClaimSandbox(ctx, "default",
+      code: `sandbox, err := client.ClaimSandbox(ctx, "default",
     sandbox0.WithSandboxAutoResume(true),
     sandbox0.WithSandboxServices([]apispec.SandboxAppService{
         {
-            ID: "webhook",
-            Runtime: apispec.NewOptSandboxAppServiceRuntime(apispec.SandboxAppServiceRuntime{
-                Type: apispec.SandboxAppServiceRuntimeTypeFunction,
-                Function: apispec.NewOptSandboxFunction(apispec.SandboxFunction{
-                    Runtime: apispec.SandboxFunctionRuntimePython,
-                    Handler: apispec.NewOptString("handler"),
-                    Source: apispec.SandboxFunctionSource{
-                        Type: apispec.SandboxFunctionSourceTypeInline,
-                        Code: functionSource,
-                    },
-                }),
-            }),
+            ID:   "api",
+            Port: apispec.NewOptInt32(8080),
             Ingress: apispec.SandboxAppServiceIngress{
                 Public: true,
                 Routes: []apispec.SandboxAppServiceRoute{
                     {
-                        ID:         "webhook",
-                        PathPrefix: apispec.NewOptString("/webhook"),
-                        Methods:    []string{"POST"},
-                        Resume:     true,
+                        ID:            "api",
+                        PathPrefix:    apispec.NewOptString("/api"),
+                        RewritePrefix: apispec.NewOptString("/"),
+                        Methods:       []string{"GET", "POST"},
+                        Resume:        true,
                     },
                 },
             },
@@ -673,25 +465,16 @@ if err != nil {
     autoResume: true,
     services: [
         {
-            id: 'webhook',
-            runtime: {
-                type: 'function',
-                _function: {
-                    runtime: 'python',
-                    handler: 'handler',
-                    source: {
-                        type: 'inline',
-                        code: 'def handler(request):\\n    return {"status": 200, "body": "ok"}\\n',
-                    },
-                },
-            },
+            id: 'api',
+            port: 8080,
             ingress: {
                 _public: true,
                 routes: [
                     {
-                        id: 'webhook',
-                        pathPrefix: '/webhook',
-                        methods: ['POST'],
+                        id: 'api',
+                        pathPrefix: '/api',
+                        rewritePrefix: '/',
+                        methods: ['GET', 'POST'],
                         resume: true,
                     },
                 ],
@@ -711,25 +494,16 @@ sandbox = client.sandboxes.claim(
         "auto_resume": True,
         "services": [
             {
-                "id": "webhook",
-                "runtime": {
-                    "type": "function",
-                    "function": {
-                        "runtime": "python",
-                        "handler": "handler",
-                        "source": {
-                            "type": "inline",
-                            "code": "def handler(request):\\n    return {'status': 200, 'body': 'ok'}\\n",
-                        },
-                    },
-                },
+                "id": "api",
+                "port": 8080,
                 "ingress": {
                     "public": True,
                     "routes": [
                         {
-                            "id": "webhook",
-                            "path_prefix": "/webhook",
-                            "methods": ["POST"],
+                            "id": "api",
+                            "path_prefix": "/api",
+                            "rewrite_prefix": "/",
+                            "methods": ["GET", "POST"],
                             "resume": True,
                         },
                     ],
@@ -769,8 +543,8 @@ For a cleaned sandbox, Sandbox0 creates a new runtime pod for the same sandbox i
 ## Next Steps
 
 <CardGroup>
-  <Card title="Webhooks" href="/docs/sandbox/webhooks" cta="Continue">
-    Receive signed sandbox lifecycle, service, and file-related events.
+  <Card title="Sandbox Functions" href="/docs/sandbox/functions" cta="Continue">
+    Expose public handlers without running long-lived HTTP listeners.
   </Card>
 
   <Card title="Contexts" href="/docs/sandbox/contexts" cta="Continue">

@@ -166,7 +166,9 @@ The routing model is intentionally simple:
 - SSH username is the target sandbox ID
 - User authentication uses SSH public keys uploaded to the gateway API
 
-In Kubernetes terms, `spec.services.sshGateway.service.port` is the externally exposed Service port and `spec.services.sshGateway.config.sshPort` is the container listen port. You usually keep the internal port at `2222` and expose `22` or a NodePort externally.
+In Kubernetes terms, `spec.services.sshGateway.service.port` is the Kubernetes Service port and `spec.services.sshGateway.config.sshPort` is the container listen port. You usually keep the internal port at `2222` and expose `22` or a NodePort externally.
+
+When an external load balancer listens on a different public port than the Kubernetes Service or NodePort, set `spec.services.sshGateway.endpointPort` to the public port that clients should use.
 
 The operator also manages a persistent Ed25519 host key Secret for the service. As long as that Secret is retained, clients continue to see the same SSH host identity across pod restarts.
 
@@ -194,6 +196,7 @@ spec:
             service:
                 type: NodePort
                 port: 30222
+            endpointPort: 22
 ```
 
 After exposing the service through DNS or a load balancer, users can upload SSH public keys with `POST /api/v1/users/me/ssh-keys` and connect with standard clients. See [SSH](/docs/sandbox/ssh) for the user-facing flow.

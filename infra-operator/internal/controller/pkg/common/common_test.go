@@ -55,6 +55,74 @@ func TestResolveSandboxNodePlacementFallsBackToNetdPlacement(t *testing.T) {
 	}
 }
 
+func TestResolveSSHEndpointUsesEndpointPortOverride(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			PublicExposure: &infrav1alpha1.PublicExposureConfig{
+				RootDomain: "sandbox0.app",
+				RegionID:   "ali-ue1",
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				SSHGateway: &infrav1alpha1.SSHGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					ServiceExposureConfig: infrav1alpha1.ServiceExposureConfig{
+						Service: &infrav1alpha1.ServiceNetworkConfig{
+							Type: corev1.ServiceTypeNodePort,
+							Port: 30222,
+						},
+					},
+					EndpointPort: 22,
+				},
+			},
+		},
+	}
+
+	host, port, ok := ResolveSSHEndpoint(infra, 2222)
+	if !ok {
+		t.Fatal("expected SSH endpoint to resolve")
+	}
+	if host != "ali-ue1.ssh.sandbox0.app" {
+		t.Fatalf("host = %q, want ali-ue1.ssh.sandbox0.app", host)
+	}
+	if port != 22 {
+		t.Fatalf("port = %d, want 22", port)
+	}
+}
+
+func TestResolveSSHEndpointFallsBackToServicePort(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			PublicExposure: &infrav1alpha1.PublicExposureConfig{
+				RootDomain: "sandbox0.app",
+				RegionID:   "ali-ue1",
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				SSHGateway: &infrav1alpha1.SSHGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					ServiceExposureConfig: infrav1alpha1.ServiceExposureConfig{
+						Service: &infrav1alpha1.ServiceNetworkConfig{
+							Type: corev1.ServiceTypeNodePort,
+							Port: 30222,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	_, port, ok := ResolveSSHEndpoint(infra, 2222)
+	if !ok {
+		t.Fatal("expected SSH endpoint to resolve")
+	}
+	if port != 30222 {
+		t.Fatalf("port = %d, want 30222", port)
+	}
+}
+
 func TestResolveSandboxNodePlacementPrefersSharedPlacement(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		Spec: infrav1alpha1.Sandbox0InfraSpec{

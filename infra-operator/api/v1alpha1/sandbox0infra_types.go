@@ -968,6 +968,13 @@ type RegionalGatewayServiceConfig struct {
 type SSHGatewayServiceConfig struct {
 	WorkloadServiceConfig `json:",inline"`
 	ServiceExposureConfig `json:",inline"`
+	// EndpointPort optionally overrides the SSH port advertised by regional and
+	// cluster gateways. Use this when an external load balancer listens on a
+	// different port than the Kubernetes Service or NodePort.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	EndpointPort int32 `json:"endpointPort,omitempty"`
 	// Config contains ssh-gateway specific configuration.
 	// +optional
 	// +kubebuilder:default={}

@@ -465,6 +465,7 @@ func TestBuildConfigPublishesSSHEndpoint(t *testing.T) {
 							Port: 30222,
 						},
 					},
+					EndpointPort: 22,
 					Config: &infrav1alpha1.SSHGatewayConfig{
 						SSHPort: 2222,
 					},
@@ -500,8 +501,8 @@ func TestBuildConfigPublishesSSHEndpoint(t *testing.T) {
 	if cfg.SSHEndpointHost != "aws-us-east-1.ssh.sandbox0.app" {
 		t.Fatalf("ssh endpoint host = %q, want %q", cfg.SSHEndpointHost, "aws-us-east-1.ssh.sandbox0.app")
 	}
-	if cfg.SSHEndpointPort != 30222 {
-		t.Fatalf("ssh endpoint port = %d, want %d", cfg.SSHEndpointPort, 30222)
+	if cfg.SSHEndpointPort != 22 {
+		t.Fatalf("ssh endpoint port = %d, want %d", cfg.SSHEndpointPort, 22)
 	}
 }
 

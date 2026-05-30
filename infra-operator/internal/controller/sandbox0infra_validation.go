@@ -75,6 +75,12 @@ func validateServiceSemantics(infra *infrav1alpha1.Sandbox0Infra) []error {
 	if services.ClusterGateway != nil {
 		errs = append(errs, validateServiceNetworkConfig("spec.services.clusterGateway.service", services.ClusterGateway.Service)...)
 	}
+	if services.SSHGateway != nil {
+		errs = append(errs, validateServiceNetworkConfig("spec.services.sshGateway.service", services.SSHGateway.Service)...)
+		if services.SSHGateway.EndpointPort < 0 || services.SSHGateway.EndpointPort > 65535 {
+			errs = append(errs, fmt.Errorf("spec.services.sshGateway.endpointPort must be within 1-65535 when set"))
+		}
+	}
 	if services.Manager != nil {
 		errs = append(errs, validateServiceNetworkConfig("spec.services.manager.service", services.Manager.Service)...)
 	}

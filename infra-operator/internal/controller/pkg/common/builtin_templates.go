@@ -108,8 +108,9 @@ func EnsureBuiltinTemplates(ctx context.Context, builtins []infrav1alpha1.Builti
 			MainContainer: templatev1alpha1.ContainerSpec{
 				Image: image,
 				Resources: templatev1alpha1.ResourceQuota{
-					CPU:    resource.MustParse(template.DefaultTemplateCPU),
-					Memory: resource.MustParse(template.DefaultTemplateMemory),
+					CPU:              resource.MustParse(template.DefaultTemplateCPU),
+					Memory:           resource.MustParse(template.DefaultTemplateMemory),
+					EphemeralStorage: resource.MustParse(template.DefaultTemplateEphemeralStorage),
 				},
 			},
 			Pool: templatev1alpha1.PoolStrategy{

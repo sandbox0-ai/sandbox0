@@ -30,6 +30,7 @@ const (
 	defaultSandboxMemoryRequestRatioMillis = int64(250)
 	minSandboxCPURequestMilli              = int64(10)
 	minSandboxMemoryRequestBytes           = int64(64 * 1024 * 1024)
+	minSandboxEphemeralStorageRequestBytes = int64(64 * 1024 * 1024)
 )
 
 // buildPodSpec builds a pod spec from a template
@@ -331,6 +332,12 @@ func buildResourceRequirements(quota ResourceQuota) corev1.ResourceRequirements 
 		requests[corev1.ResourceMemory] = scaledMemoryRequest(limit)
 		limits[corev1.ResourceMemory] = limit
 	}
+	ephemeralLimit := quota.EphemeralStorage.DeepCopy()
+	if ephemeralLimit.Sign() <= 0 {
+		ephemeralLimit = resource.MustParse(DefaultSandboxEphemeralStorage)
+	}
+	requests[corev1.ResourceEphemeralStorage] = scaledEphemeralStorageRequest(ephemeralLimit)
+	limits[corev1.ResourceEphemeralStorage] = ephemeralLimit
 	if len(requests) == 0 {
 		requests = nil
 	}
@@ -349,6 +356,12 @@ func scaledCPURequest(limit resource.Quantity) resource.Quantity {
 func scaledMemoryRequest(limit resource.Quantity) resource.Quantity {
 	limitBytes := limit.Value()
 	requestBytes := scaleResource(limitBytes, defaultSandboxMemoryRequestRatioMillis, minSandboxMemoryRequestBytes)
+	return *resource.NewQuantity(requestBytes, resource.BinarySI)
+}
+
+func scaledEphemeralStorageRequest(limit resource.Quantity) resource.Quantity {
+	limitBytes := limit.Value()
+	requestBytes := scaleResource(limitBytes, 1000, minSandboxEphemeralStorageRequestBytes)
 	return *resource.NewQuantity(requestBytes, resource.BinarySI)
 }
 

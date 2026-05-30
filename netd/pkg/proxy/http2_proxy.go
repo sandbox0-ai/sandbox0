@@ -12,23 +12,34 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 )
 
 type countingTLSConn struct {
 	*tls.Conn
-	read    int64
-	written int64
+	read           int64
+	written        int64
+	limiter        *bandwidthLimiter
+	compiled       *policy.CompiledPolicy
+	readDirection  bandwidthDirection
+	writeDirection bandwidthDirection
 }
 
 func (c *countingTLSConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
+	if n > 0 && c.limiter != nil {
+		c.limiter.wait(c.compiled, c.readDirection, n)
+	}
 	atomic.AddInt64(&c.read, int64(n))
 	return n, err
 }
 
 func (c *countingTLSConn) Write(p []byte) (int, error) {
+	if len(p) > 0 && c.limiter != nil {
+		c.limiter.wait(c.compiled, c.writeDirection, len(p))
+	}
 	n, err := c.Conn.Write(p)
 	atomic.AddInt64(&c.written, int64(n))
 	return n, err
@@ -80,7 +91,13 @@ func (s *Server) proxyHTTP2FromConn(downstream *tls.Conn, req *adapterRequest) e
 		return fmt.Errorf("http2 proxy requires downstream connection and request")
 	}
 
-	downstreamCounter := &countingTLSConn{Conn: downstream}
+	downstreamCounter := &countingTLSConn{
+		Conn:           downstream,
+		limiter:        s.bandwidthLimiter,
+		compiled:       req.Compiled,
+		readDirection:  bandwidthEgress,
+		writeDirection: bandwidthIngress,
+	}
 	var upstreamCounter *countingConn
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := s.handleHTTP2ProxyRequest(w, r, req, &upstreamCounter); err != nil {
@@ -186,7 +203,13 @@ func (s *Server) newHTTP2Transport(req *adapterRequest, upstreamCounter **counti
 				_ = rawConn.Close()
 				return nil, fmt.Errorf("handshake upstream http2 tls: %w", err)
 			}
-			wrapped := &countingConn{Conn: conn}
+			wrapped := &countingConn{
+				Conn:           conn,
+				limiter:        s.bandwidthLimiter,
+				compiled:       req.Compiled,
+				readDirection:  bandwidthIngress,
+				writeDirection: bandwidthEgress,
+			}
 			if upstreamCounter != nil && *upstreamCounter == nil {
 				*upstreamCounter = wrapped
 			}

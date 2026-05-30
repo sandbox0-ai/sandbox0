@@ -31,6 +31,7 @@ type testTemplateStore struct {
 	createdTeamID        string
 	updatedScope         string
 	updatedTeamID        string
+	createdOrUpdatedSpec v1alpha1.SandboxTemplateSpec
 }
 
 func (s *testTemplateStore) CreateTemplate(_ context.Context, tpl *template.Template) error {
@@ -38,6 +39,7 @@ func (s *testTemplateStore) CreateTemplate(_ context.Context, tpl *template.Temp
 	s.createdOrUpdatedID = tpl.TemplateID
 	s.createdScope = tpl.Scope
 	s.createdTeamID = tpl.TeamID
+	s.createdOrUpdatedSpec = tpl.Spec
 	return nil
 }
 
@@ -83,6 +85,7 @@ func (s *testTemplateStore) UpdateTemplate(_ context.Context, tpl *template.Temp
 	s.createdOrUpdatedID = tpl.TemplateID
 	s.updatedScope = tpl.Scope
 	s.updatedTeamID = tpl.TeamID
+	s.createdOrUpdatedSpec = tpl.Spec
 	return nil
 }
 
@@ -275,6 +278,47 @@ func TestCreateTemplate_AllowsNetworkForRegularTeam(t *testing.T) {
 	}
 	if !store.createCalled {
 		t.Fatalf("expected create to be called")
+	}
+}
+
+func TestCreateTemplate_PreservesEphemeralStorage(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{
+		getTemplateFn: func(context.Context, string, string, string) (*template.Template, error) {
+			return nil, nil
+		},
+	}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	router.POST("/api/v1/templates", h.CreateTemplate)
+
+	body := []byte(`{
+		"template_id":"demo",
+		"spec":{
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi","ephemeralStorage":"768Mi"}},
+			"pool":{"minIdle":0,"maxIdle":1}
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d", http.StatusCreated, rec.Code)
+	}
+	if !store.createCalled {
+		t.Fatalf("expected create to be called")
+	}
+	got := store.createdOrUpdatedSpec.MainContainer.Resources.EphemeralStorage
+	if got.Cmp(resource.MustParse("768Mi")) != 0 {
+		t.Fatalf("ephemeralStorage = %s, want 768Mi", got.String())
 	}
 }
 
@@ -784,6 +828,13 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 				s.MainContainer.Resources.CPU = resource.MustParse("0")
 			},
 			wantErr: "spec.mainContainer.resources.cpu must be > 0",
+		},
+		{
+			name: "reject negative ephemeral storage",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				s.MainContainer.Resources.EphemeralStorage = resource.MustParse("-1Gi")
+			},
+			wantErr: "spec.mainContainer.resources.ephemeralStorage must be >= 0",
 		},
 		{
 			name: "reject invalid network mode",

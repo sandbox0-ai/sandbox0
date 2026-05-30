@@ -1372,8 +1372,11 @@ type ResizeContextRequest struct {
 
 // ResourceQuota defines model for ResourceQuota.
 type ResourceQuota struct {
-	Cpu    *string `json:"cpu,omitempty"`
-	Memory *string `json:"memory,omitempty"`
+	Cpu *string `json:"cpu,omitempty"`
+
+	// EphemeralStorage Ephemeral storage limit for the sandbox writable layer and container logs. Defaults to 512Mi when omitted.
+	EphemeralStorage *string `json:"ephemeralStorage,omitempty"`
+	Memory           *string `json:"memory,omitempty"`
 }
 
 // ResourceUsage defines model for ResourceUsage.

@@ -248,10 +248,13 @@ type Toleration struct {
 	Effect   string `json:"effect,omitempty"`
 }
 
+const DefaultSandboxEphemeralStorage = "512Mi"
+
 // ResourceQuota defines resource quota (per template)
 type ResourceQuota struct {
-	CPU    resource.Quantity `json:"cpu,omitempty"`    // e.g. "2"
-	Memory resource.Quantity `json:"memory,omitempty"` // e.g. "4Gi"
+	CPU              resource.Quantity `json:"cpu,omitempty"`              // e.g. "2"
+	Memory           resource.Quantity `json:"memory,omitempty"`           // e.g. "4Gi"
+	EphemeralStorage resource.Quantity `json:"ephemeralStorage,omitempty"` // e.g. "8Gi"
 }
 
 // PoolStrategy defines pool strategy

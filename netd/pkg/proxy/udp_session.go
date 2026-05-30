@@ -169,6 +169,9 @@ func (session *udpSession) Forward(payload []byte) error {
 	}
 	session.touch()
 	_ = upstream.SetWriteDeadline(time.Now().Add(session.server.udpSessionIdleTimeout()))
+	if session.server != nil {
+		session.server.waitBandwidth(compiled, bandwidthEgress, len(payload))
+	}
 	n, err := upstream.Write(payload)
 	if n > 0 && session.server != nil {
 		session.server.recordEgressBytes(compiled, int64(n), audit)
@@ -250,6 +253,9 @@ func (session *udpSession) readLoop(conn *net.UDPConn) {
 			session.server.observeDNSResponse(session.key.SrcIP, payload)
 		}
 		compiled, audit := session.auditSnapshot()
+		if session.server != nil {
+			session.server.waitBandwidth(compiled, bandwidthIngress, len(payload))
+		}
 		written, writeErr := session.replyToClient(payload)
 		if writeErr != nil {
 			if !errors.Is(writeErr, net.ErrClosed) {

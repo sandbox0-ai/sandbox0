@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -36,6 +37,8 @@ import (
 
 const (
 	objectStorageTypeS3Compatible = "s3"
+	defaultCacheSizeLimit         = "20Gi"
+	defaultLogSizeLimit           = "1Gi"
 )
 
 type Reconciler struct {
@@ -76,6 +79,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			return err
 		}
 		config.ObjectEncryptionKeyPath = common.ObjectEncryptionKeyPath
+	}
+	cacheSizeLimit, err := parseSizeLimit(config.CacheSizeLimit, defaultCacheSizeLimit, "storage-proxy cache size limit")
+	if err != nil {
+		return err
+	}
+	logSizeLimit, err := parseSizeLimit(config.LogSizeLimit, defaultLogSizeLimit, "storage-proxy log size limit")
+	if err != nil {
+		return err
 	}
 	podAnnotations, err := common.ConfigHashAnnotation(config)
 	if err != nil {
@@ -143,13 +154,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		{
 			Name: "cache",
 			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
+				EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: cacheSizeLimit},
 			},
 		},
 		{
 			Name: "logs",
 			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
+				EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: logSizeLimit},
 			},
 		},
 	}
@@ -293,4 +304,18 @@ func normalizeObjectStorageType(storageType infrav1alpha1.StorageType) string {
 		return objectStorageTypeS3Compatible
 	}
 	return string(storageType)
+}
+
+func parseSizeLimit(value, fallback, field string) (*resource.Quantity, error) {
+	if value == "" {
+		value = fallback
+	}
+	quantity, err := resource.ParseQuantity(value)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", field, err)
+	}
+	if quantity.Sign() <= 0 {
+		return nil, fmt.Errorf("%s must be > 0", field)
+	}
+	return &quantity, nil
 }

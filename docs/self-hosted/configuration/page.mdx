@@ -253,8 +253,26 @@ Examples:
 - `services.clusterGateway.config.authMode` switches between `public`, `internal`, and `both`
 - `services.manager.config.autoscaler.*` tunes pool scale behavior
 - `services.storageProxy.config.filesystem*` tunes filesystem behavior; `services.manager.config.procdConfig.volume*` tunes mounted volume cache sizing
+- `services.storageProxy.config.cacheSizeLimit`, `logSizeLimit`, `volumePortalCacheSizeLimit`, and `volumePortalRootMinFree` cap node-local storage used by storage-proxy cache, logs, and mounted volume portals
 - `services.storageProxy.config.objectEncryptionEnabled` controls application-layer encryption for S0FS object storage and node-local volume cache files; it is enabled by default
-- `services.netd.config.*` controls proxy ports, policy enforcement, and node-level networking behavior
+- `services.netd.config.egressBandwidthBytesPerSecond`, `ingressBandwidthBytesPerSecond`, and `bandwidthBurstBytes` apply per-sandbox bandwidth throttling when set above zero
+- `services.netd.config.*` also controls proxy ports, policy enforcement, and node-level networking behavior
+
+```yaml
+spec:
+    services:
+        storageProxy:
+            config:
+                cacheSizeLimit: 20Gi
+                logSizeLimit: 1Gi
+                volumePortalCacheSizeLimit: 20Gi
+                volumePortalRootMinFree: 5Gi
+        netd:
+            config:
+                egressBandwidthBytesPerSecond: 10485760
+                ingressBandwidthBytesPerSecond: 10485760
+                bandwidthBurstBytes: 10485760
+```
 
 Use `spec.sandboxNodePlacement` for the shared node placement consumed by sandbox template Pods, `netd`, and `ctld`. `infra-operator` owns `sandbox0.ai/data-plane-ready` and adds it to sandbox Pod placement after the required node-local components are Ready. The older `services.netd.nodeSelector` and `services.netd.tolerations` fields remain as compatibility aliases when the shared placement is unset.
 

@@ -548,6 +548,18 @@ type StorageProxyConfig struct {
 	// +kubebuilder:default="/var/lib/storage-proxy/cache"
 	CacheDir string `json:"cacheDir,omitempty"`
 	// +optional
+	// +kubebuilder:default="20Gi"
+	CacheSizeLimit string `json:"cacheSizeLimit,omitempty"`
+	// +optional
+	// +kubebuilder:default="1Gi"
+	LogSizeLimit string `json:"logSizeLimit,omitempty"`
+	// +optional
+	// +kubebuilder:default="20Gi"
+	VolumePortalCacheSizeLimit string `json:"volumePortalCacheSizeLimit,omitempty"`
+	// +optional
+	// +kubebuilder:default="5Gi"
+	VolumePortalRootMinFree string `json:"volumePortalRootMinFree,omitempty"`
+	// +optional
 	// +kubebuilder:default=true
 	MetricsEnabled bool `json:"metricsEnabled,omitempty"`
 	// +optional
@@ -643,6 +655,18 @@ type NetdConfig struct {
 	// +optional
 	// +kubebuilder:default="30s"
 	ProxyUpstreamTimeout metav1.Duration `json:"proxyUpstreamTimeout,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// Per-sandbox egress bandwidth limit in bytes per second. Zero disables throttling.
+	EgressBandwidthBytesPerSecond int64 `json:"egressBandwidthBytesPerSecond,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// Per-sandbox ingress bandwidth limit in bytes per second. Zero disables throttling.
+	IngressBandwidthBytesPerSecond int64 `json:"ingressBandwidthBytesPerSecond,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// Token bucket burst in bytes for bandwidth limiting. Zero uses one second of the configured rate.
+	BandwidthBurstBytes int64 `json:"bandwidthBurstBytes,omitempty"`
 	// +optional
 	// +kubebuilder:default=53
 	DNSPort int `json:"dnsPort,omitempty"`

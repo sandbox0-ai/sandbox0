@@ -253,6 +253,8 @@ manager_image: sandbox0/manager:test
 	assertResourceQuantity(t, resources.Limits[corev1.ResourceCPU], "1")
 	assertResourceQuantity(t, resources.Requests[corev1.ResourceMemory], "256Mi")
 	assertResourceQuantity(t, resources.Limits[corev1.ResourceMemory], "1Gi")
+	assertResourceQuantity(t, resources.Requests[corev1.ResourceEphemeralStorage], "512Mi")
+	assertResourceQuantity(t, resources.Limits[corev1.ResourceEphemeralStorage], "512Mi")
 }
 
 func TestBuildPodSpecClampsReducedRequestsToSmallQuota(t *testing.T) {
@@ -263,8 +265,9 @@ manager_image: sandbox0/manager:test
 
 	template := newTestTemplate()
 	template.Spec.MainContainer.Resources = ResourceQuota{
-		CPU:    resource.MustParse("5m"),
-		Memory: resource.MustParse("32Mi"),
+		CPU:              resource.MustParse("5m"),
+		Memory:           resource.MustParse("32Mi"),
+		EphemeralStorage: resource.MustParse("32Mi"),
 	}
 
 	spec := BuildPodSpec(template)
@@ -274,6 +277,8 @@ manager_image: sandbox0/manager:test
 	assertResourceQuantity(t, resources.Limits[corev1.ResourceCPU], "5m")
 	assertResourceQuantity(t, resources.Requests[corev1.ResourceMemory], "32Mi")
 	assertResourceQuantity(t, resources.Limits[corev1.ResourceMemory], "32Mi")
+	assertResourceQuantity(t, resources.Requests[corev1.ResourceEphemeralStorage], "32Mi")
+	assertResourceQuantity(t, resources.Limits[corev1.ResourceEphemeralStorage], "32Mi")
 }
 
 func TestBuildPodSpecAddsSandboxReadinessGate(t *testing.T) {

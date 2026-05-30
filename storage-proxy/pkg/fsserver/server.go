@@ -1338,6 +1338,8 @@ func mapS0FSError(err error) error {
 		return fserror.New(fserror.FailedPrecondition, err.Error())
 	case errors.Is(err, s0fs.ErrInvalidInput), errors.Is(err, s0fs.ErrNotDir):
 		return fserror.New(fserror.InvalidArgument, err.Error())
+	case errors.Is(err, s0fs.ErrNoSpace):
+		return fserror.New(fserror.ResourceExhausted, err.Error())
 	case errors.Is(err, s0fs.ErrClosed):
 		return fserror.New(fserror.FailedPrecondition, err.Error())
 	default:

@@ -19,3 +19,26 @@ func TestToStorageProxyPreservesExplicitObjectEncryptionDisabled(t *testing.T) {
 		t.Fatal("expected explicit object encryption disabled setting to be preserved")
 	}
 }
+
+func TestToStorageProxyPreservesLocalStorageLimits(t *testing.T) {
+	cfg := ToStorageProxy(&infrav1alpha1.StorageProxyConfig{
+		CacheSizeLimit:             "512Mi",
+		LogSizeLimit:               "64Mi",
+		VolumePortalCacheSizeLimit: "2Gi",
+		VolumePortalRootMinFree:    "1Gi",
+	})
+	if cfg.CacheSizeLimit != "512Mi" || cfg.LogSizeLimit != "64Mi" || cfg.VolumePortalCacheSizeLimit != "2Gi" || cfg.VolumePortalRootMinFree != "1Gi" {
+		t.Fatalf("local storage limits were not preserved: %#v", cfg)
+	}
+}
+
+func TestToNetdPreservesBandwidthLimits(t *testing.T) {
+	cfg := ToNetd(&infrav1alpha1.NetdConfig{
+		EgressBandwidthBytesPerSecond:  1024,
+		IngressBandwidthBytesPerSecond: 2048,
+		BandwidthBurstBytes:            4096,
+	})
+	if cfg.EgressBandwidthBytesPerSecond != 1024 || cfg.IngressBandwidthBytesPerSecond != 2048 || cfg.BandwidthBurstBytes != 4096 {
+		t.Fatalf("bandwidth limits were not preserved: %#v", cfg)
+	}
+}

@@ -531,8 +531,8 @@ func (w *dnsTCPResponseObserver) observe(data []byte) {
 }
 
 func (s *Server) pipeDNSOverTCP(client net.Conn, upstream net.Conn, upstreamWriter io.Reader, downstreamWriter io.Reader, compiled *policy.CompiledPolicy, audit *flowAudit, sandboxIP string) error {
-	upstreamCounter := &countingWriter{writer: upstream}
-	clientCounter := &countingWriter{writer: client}
+	upstreamCounter := &countingWriter{writer: s.bandwidthLimitedWriter(upstream, compiled, bandwidthEgress)}
+	clientCounter := &countingWriter{writer: s.bandwidthLimitedWriter(client, compiled, bandwidthIngress)}
 	dnsObserver := &dnsTCPResponseObserver{
 		writer:    clientCounter,
 		server:    s,

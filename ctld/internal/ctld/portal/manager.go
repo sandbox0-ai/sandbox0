@@ -23,23 +23,28 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
 	"go.uber.org/zap"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 const defaultRootDir = "/var/lib/sandbox0/ctld"
+const defaultVolumePortalCacheSizeLimit = "20Gi"
+const defaultVolumePortalRootMinFree = "5Gi"
 
 type Manager struct {
-	nodeName          string
-	rootDir           string
-	logger            *zap.Logger
-	logrus            *logrus.Logger
-	storage           *apiconfig.StorageProxyConfig
-	repo              *db.Repository
-	clusterID         string
-	podName           string
-	podNamespace      string
-	heartbeatInterval time.Duration
-	ownerOnlyIdleTTL  time.Duration
-	volumeAPI         http.Handler
+	nodeName               string
+	rootDir                string
+	logger                 *zap.Logger
+	logrus                 *logrus.Logger
+	storage                *apiconfig.StorageProxyConfig
+	repo                   *db.Repository
+	clusterID              string
+	podName                string
+	podNamespace           string
+	heartbeatInterval      time.Duration
+	ownerOnlyIdleTTL       time.Duration
+	portalCacheMaxBytes    int64
+	portalRootMinFreeBytes int64
+	volumeAPI              http.Handler
 
 	mu              sync.Mutex
 	portals         map[string]*portalMount
@@ -108,22 +113,26 @@ func NewManager(cfg Config) *Manager {
 		heartbeatInterval = 5 * time.Second
 	}
 	ownerOnlyIdleTTL, _ := time.ParseDuration(storageConfig.DirectVolumeFileIdleTTL)
+	portalCacheMaxBytes := parseQuantityBytesOrDefault(storageConfig.VolumePortalCacheSizeLimit, defaultVolumePortalCacheSizeLimit)
+	portalRootMinFreeBytes := parseQuantityBytesOrDefault(storageConfig.VolumePortalRootMinFree, defaultVolumePortalRootMinFree)
 	manager := &Manager{
-		nodeName:          strings.TrimSpace(cfg.NodeName),
-		rootDir:           rootDir,
-		logger:            logger,
-		logrus:            l,
-		storage:           storageConfig,
-		repo:              cfg.Repository,
-		clusterID:         naming.ClusterIDOrDefault(&storageConfig.DefaultClusterId),
-		podName:           strings.TrimSpace(cfg.PodName),
-		podNamespace:      strings.TrimSpace(cfg.PodNamespace),
-		heartbeatInterval: heartbeatInterval,
-		ownerOnlyIdleTTL:  ownerOnlyIdleTTL,
-		portals:           make(map[string]*portalMount),
-		portalsByTarget:   make(map[string]*portalMount),
-		boundVolumes:      make(map[string]*boundVolume),
-		volumes:           newLocalVolumeManager(),
+		nodeName:               strings.TrimSpace(cfg.NodeName),
+		rootDir:                rootDir,
+		logger:                 logger,
+		logrus:                 l,
+		storage:                storageConfig,
+		repo:                   cfg.Repository,
+		clusterID:              naming.ClusterIDOrDefault(&storageConfig.DefaultClusterId),
+		podName:                strings.TrimSpace(cfg.PodName),
+		podNamespace:           strings.TrimSpace(cfg.PodNamespace),
+		heartbeatInterval:      heartbeatInterval,
+		ownerOnlyIdleTTL:       ownerOnlyIdleTTL,
+		portalCacheMaxBytes:    portalCacheMaxBytes,
+		portalRootMinFreeBytes: portalRootMinFreeBytes,
+		portals:                make(map[string]*portalMount),
+		portalsByTarget:        make(map[string]*portalMount),
+		boundVolumes:           make(map[string]*boundVolume),
+		volumes:                newLocalVolumeManager(),
 	}
 	manager.volumeAPI = newMountedVolumeAPIHandler(storageConfig, cfg.Repository, manager.volumes, l)
 	return manager
@@ -134,6 +143,17 @@ func (m *Manager) MountedVolumeHandler() http.Handler {
 		return nil
 	}
 	return m.volumeAPI
+}
+
+func (m *Manager) localDiskGuard(cacheDir string) *s0fs.LocalDiskGuard {
+	if m == nil || (m.portalCacheMaxBytes <= 0 && m.portalRootMinFreeBytes <= 0) {
+		return nil
+	}
+	return &s0fs.LocalDiskGuard{
+		Path:         cacheDir,
+		MaxBytes:     m.portalCacheMaxBytes,
+		MinFreeBytes: m.portalRootMinFreeBytes,
+	}
 }
 
 func (m *Manager) Run(ctx context.Context) {
@@ -349,8 +369,9 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		ObjectStoreForVolume: func(volumeID string) (objectstore.Store, error) {
 			return m.createObjectStore(req.TeamID, volumeID)
 		},
-		HeadStore:  db.NewS0FSHeadStore(m.repo),
-		Encryption: encryption,
+		HeadStore:      db.NewS0FSHeadStore(m.repo),
+		Encryption:     encryption,
+		LocalDiskGuard: m.localDiskGuard(cacheDir),
 	})
 	if err != nil {
 		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("open local s0fs engine: %w", err)
@@ -535,8 +556,9 @@ func (m *Manager) AttachOwner(ctx context.Context, req ctldapi.AttachVolumeOwner
 		ObjectStoreForVolume: func(volumeID string) (objectstore.Store, error) {
 			return m.createObjectStore(req.TeamID, volumeID)
 		},
-		HeadStore:  db.NewS0FSHeadStore(m.repo),
-		Encryption: encryption,
+		HeadStore:      db.NewS0FSHeadStore(m.repo),
+		Encryption:     encryption,
+		LocalDiskGuard: m.localDiskGuard(cacheDir),
 	})
 	if err != nil {
 		return ctldapi.AttachVolumeOwnerResponse{}, fmt.Errorf("open local s0fs engine: %w", err)
@@ -927,6 +949,24 @@ func safePath(value string) string {
 		return "_"
 	}
 	return strings.NewReplacer("/", "_", "\\", "_", "\x00", "_").Replace(value)
+}
+
+func parseQuantityBytesOrDefault(value, fallback string) int64 {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		value = fallback
+	}
+	quantity, err := resource.ParseQuantity(value)
+	if err != nil || quantity.Sign() <= 0 {
+		if value == fallback {
+			return 0
+		}
+		quantity, err = resource.ParseQuantity(fallback)
+		if err != nil || quantity.Sign() <= 0 {
+			return 0
+		}
+	}
+	return quantity.Value()
 }
 
 func removeSocket(path string) error {

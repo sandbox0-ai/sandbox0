@@ -17,6 +17,7 @@ spec:
         resources:
             cpu: "2"
             memory: 8Gi
+            ephemeralStorage: 512Mi
         env:
             - name: PYTHONPATH
               value: /workspace
@@ -63,10 +64,11 @@ The main sandbox container configuration.
 | `image` | string | — | Container image reference. Use a public image (e.g., `python:3.12-slim`) or the `Template image reference` returned by `s0 template image push` for private images. |
 | `resources.cpu` | string | — | CPU limit for the sandbox (e.g., `"1"`, `"2"`, `"500m"`). |
 | `resources.memory` | string | — | Memory limit for the sandbox (e.g., `"2Gi"`, `"512Mi"`). |
+| `resources.ephemeralStorage` | string | `512Mi` | Temporary writable-layer and container-log storage for the sandbox. Increase this for workloads that write heavily to `/tmp` or image-local paths; use Sandbox Volumes for durable data. |
 | `env` | array | `[]` | Per-container environment variables. Each entry has `name` and `value`. |
 
 <Callout variant="info">
-`mainContainer.image`, `mainContainer.resources.cpu`, and `mainContainer.resources.memory` are strictly validated by the API when creating or updating templates.
+`mainContainer.image`, `mainContainer.resources.cpu`, `mainContainer.resources.memory`, and `mainContainer.resources.ephemeralStorage` are strictly validated by the API when creating or updating templates.
 </Callout>
 
 ---

@@ -880,6 +880,23 @@ spec:
                             type: array
                         type: object
                     type: object
+                  emptyDirMounts:
+                    items:
+                      description: EmptyDirMountSpec declares an ephemeral Kubernetes
+                        emptyDir mount for the main sandbox container.
+                      properties:
+                        mountPath:
+                          type: string
+                        sizeLimit:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                      required:
+                      - mountPath
+                      type: object
+                    type: array
                   nodeSelector:
                     additionalProperties:
                       type: string

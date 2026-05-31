@@ -69,6 +69,9 @@ func validateTemplateSpec(spec v1alpha1.SandboxTemplateSpec) error {
 	if spec.MainContainer.Resources.EphemeralStorage.Sign() < 0 {
 		return fmt.Errorf("spec.mainContainer.resources.ephemeralStorage must be >= 0")
 	}
+	if err := validateSecurityContext(spec.MainContainer.SecurityContext, "spec.mainContainer.securityContext"); err != nil {
+		return err
+	}
 	if err := validateWarmProcesses(spec.WarmProcesses); err != nil {
 		return err
 	}
@@ -106,6 +109,74 @@ func validateTemplateSpec(spec v1alpha1.SandboxTemplateSpec) error {
 		}
 	}
 
+	return nil
+}
+
+func validateSecurityContext(sc *v1alpha1.SecurityContext, field string) error {
+	if sc == nil {
+		return nil
+	}
+	if sc.Capabilities != nil {
+		if err := validateCapabilities(sc.Capabilities.Add, field+".capabilities.add"); err != nil {
+			return err
+		}
+		if err := validateCapabilities(sc.Capabilities.Drop, field+".capabilities.drop"); err != nil {
+			return err
+		}
+	}
+	if err := validateSeccompProfile(sc.SeccompProfile, field+".seccompProfile"); err != nil {
+		return err
+	}
+	if err := validateAppArmorProfile(sc.AppArmorProfile, field+".appArmorProfile"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateCapabilities(caps []string, field string) error {
+	for i, cap := range caps {
+		if strings.TrimSpace(cap) == "" {
+			return fmt.Errorf("%s[%d] is required", field, i)
+		}
+	}
+	return nil
+}
+
+func validateSeccompProfile(profile *v1alpha1.SeccompProfile, field string) error {
+	if profile == nil {
+		return nil
+	}
+	switch profile.Type {
+	case v1alpha1.SeccompProfileTypeUnconfined, v1alpha1.SeccompProfileTypeRuntimeDefault:
+		if profile.LocalhostProfile != nil {
+			return fmt.Errorf("%s.localhostProfile must be omitted unless type is Localhost", field)
+		}
+	case v1alpha1.SeccompProfileTypeLocalhost:
+		if profile.LocalhostProfile == nil || strings.TrimSpace(*profile.LocalhostProfile) == "" {
+			return fmt.Errorf("%s.localhostProfile is required when type is Localhost", field)
+		}
+	default:
+		return fmt.Errorf("%s.type must be one of: Unconfined, RuntimeDefault, Localhost", field)
+	}
+	return nil
+}
+
+func validateAppArmorProfile(profile *v1alpha1.AppArmorProfile, field string) error {
+	if profile == nil {
+		return nil
+	}
+	switch profile.Type {
+	case v1alpha1.AppArmorProfileTypeUnconfined, v1alpha1.AppArmorProfileTypeRuntimeDefault:
+		if profile.LocalhostProfile != nil {
+			return fmt.Errorf("%s.localhostProfile must be omitted unless type is Localhost", field)
+		}
+	case v1alpha1.AppArmorProfileTypeLocalhost:
+		if profile.LocalhostProfile == nil || strings.TrimSpace(*profile.LocalhostProfile) == "" {
+			return fmt.Errorf("%s.localhostProfile is required when type is Localhost", field)
+		}
+	default:
+		return fmt.Errorf("%s.type must be one of: Unconfined, RuntimeDefault, Localhost", field)
+	}
 	return nil
 }
 

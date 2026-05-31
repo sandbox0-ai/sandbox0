@@ -872,6 +872,36 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 			wantErr: "spec.network.egress.allowedPorts[0].endPort must be between port and 65535",
 		},
 		{
+			name: "reject empty added capability",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				s.MainContainer.SecurityContext = &v1alpha1.SecurityContext{
+					Capabilities: &v1alpha1.Capabilities{Add: []string{"SYS_ADMIN", " "}},
+				}
+			},
+			wantErr: "spec.mainContainer.securityContext.capabilities.add[1] is required",
+		},
+		{
+			name: "reject localhost seccomp without profile",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				s.MainContainer.SecurityContext = &v1alpha1.SecurityContext{
+					SeccompProfile: &v1alpha1.SeccompProfile{Type: v1alpha1.SeccompProfileTypeLocalhost},
+				}
+			},
+			wantErr: "spec.mainContainer.securityContext.seccompProfile.localhostProfile is required when type is Localhost",
+		},
+		{
+			name: "reject non-localhost apparmor with profile",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				s.MainContainer.SecurityContext = &v1alpha1.SecurityContext{
+					AppArmorProfile: &v1alpha1.AppArmorProfile{
+						Type:             v1alpha1.AppArmorProfileTypeRuntimeDefault,
+						LocalhostProfile: ptrString("custom-profile"),
+					},
+				}
+			},
+			wantErr: "spec.mainContainer.securityContext.appArmorProfile.localhostProfile must be omitted unless type is Localhost",
+		},
+		{
 			name: "reject cmd warm process without command",
 			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
 				s.WarmProcesses = []v1alpha1.WarmProcessSpec{{Type: v1alpha1.WarmProcessTypeCMD}}
@@ -944,6 +974,37 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 				t.Fatalf("expected error containing %q, got %q", tc.wantErr, got)
 			}
 		})
+	}
+}
+
+func TestValidateTemplateSpec_AllowsExpandedSecurityContext(t *testing.T) {
+	t.Parallel()
+
+	spec := validTemplateSpec()
+	spec.MainContainer.SecurityContext = &v1alpha1.SecurityContext{
+		Privileged:               ptrBool(true),
+		RunAsUser:                ptrInt64(0),
+		RunAsGroup:               ptrInt64(0),
+		RunAsNonRoot:             ptrBool(false),
+		ReadOnlyRootFilesystem:   ptrBool(false),
+		AllowPrivilegeEscalation: ptrBool(true),
+		Capabilities: &v1alpha1.Capabilities{
+			Add:  []string{"SYS_ADMIN", "NET_ADMIN"},
+			Drop: []string{"NET_RAW"},
+		},
+		SeccompProfile: &v1alpha1.SeccompProfile{
+			Type: v1alpha1.SeccompProfileTypeUnconfined,
+		},
+		AppArmorProfile: &v1alpha1.AppArmorProfile{
+			Type: v1alpha1.AppArmorProfileTypeRuntimeDefault,
+		},
+	}
+
+	if err := validateTemplateSpec(spec); err != nil {
+		t.Fatalf("validateTemplateSpec: %v", err)
+	}
+	if err := validateTemplateSpecForClaims(spec, &internalauth.Claims{IsSystem: true}); err != nil {
+		t.Fatalf("expected system token to allow expanded security context, got %v", err)
 	}
 }
 
@@ -1104,6 +1165,14 @@ func validTemplateSpec() v1alpha1.SandboxTemplateSpec {
 }
 
 func ptrInt64(v int64) *int64 {
+	return &v
+}
+
+func ptrBool(v bool) *bool {
+	return &v
+}
+
+func ptrString(v string) *string {
 	return &v
 }
 

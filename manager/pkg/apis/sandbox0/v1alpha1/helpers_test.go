@@ -131,6 +131,72 @@ manager_image: sandbox0/manager:test
 	}
 }
 
+func TestBuildPodSpecAppliesMainContainerSecurityContext(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	template := newTestTemplate()
+	template.Spec.MainContainer.SecurityContext = &SecurityContext{
+		Privileged:               ptrBool(true),
+		RunAsUser:                ptrInt64(0),
+		RunAsGroup:               ptrInt64(0),
+		RunAsNonRoot:             ptrBool(false),
+		ReadOnlyRootFilesystem:   ptrBool(false),
+		AllowPrivilegeEscalation: ptrBool(true),
+		Capabilities: &Capabilities{
+			Add:  []string{"SYS_ADMIN", "NET_ADMIN"},
+			Drop: []string{"NET_RAW"},
+		},
+		SeccompProfile: &SeccompProfile{
+			Type: SeccompProfileTypeUnconfined,
+		},
+		AppArmorProfile: &AppArmorProfile{
+			Type: AppArmorProfileTypeRuntimeDefault,
+		},
+	}
+
+	spec := BuildPodSpec(template)
+	main := spec.Containers[0]
+	if main.SecurityContext == nil {
+		t.Fatal("expected security context")
+	}
+	if main.SecurityContext.Privileged == nil || !*main.SecurityContext.Privileged {
+		t.Fatalf("privileged = %#v, want true", main.SecurityContext.Privileged)
+	}
+	if main.SecurityContext.AllowPrivilegeEscalation == nil || !*main.SecurityContext.AllowPrivilegeEscalation {
+		t.Fatalf("allowPrivilegeEscalation = %#v, want true", main.SecurityContext.AllowPrivilegeEscalation)
+	}
+	if main.SecurityContext.RunAsUser == nil || *main.SecurityContext.RunAsUser != 0 {
+		t.Fatalf("runAsUser = %#v, want 0", main.SecurityContext.RunAsUser)
+	}
+	if main.SecurityContext.RunAsGroup == nil || *main.SecurityContext.RunAsGroup != 0 {
+		t.Fatalf("runAsGroup = %#v, want 0", main.SecurityContext.RunAsGroup)
+	}
+	if main.SecurityContext.RunAsNonRoot == nil || *main.SecurityContext.RunAsNonRoot {
+		t.Fatalf("runAsNonRoot = %#v, want false", main.SecurityContext.RunAsNonRoot)
+	}
+	if main.SecurityContext.ReadOnlyRootFilesystem == nil || *main.SecurityContext.ReadOnlyRootFilesystem {
+		t.Fatalf("readOnlyRootFilesystem = %#v, want false", main.SecurityContext.ReadOnlyRootFilesystem)
+	}
+	if main.SecurityContext.Capabilities == nil {
+		t.Fatal("expected capabilities")
+	}
+	if got := main.SecurityContext.Capabilities.Add; len(got) != 2 || got[0] != corev1.Capability("SYS_ADMIN") || got[1] != corev1.Capability("NET_ADMIN") {
+		t.Fatalf("capabilities.add = %#v", got)
+	}
+	if got := main.SecurityContext.Capabilities.Drop; len(got) != 1 || got[0] != corev1.Capability("NET_RAW") {
+		t.Fatalf("capabilities.drop = %#v", got)
+	}
+	if main.SecurityContext.SeccompProfile == nil || main.SecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeUnconfined {
+		t.Fatalf("seccompProfile = %#v, want Unconfined", main.SecurityContext.SeccompProfile)
+	}
+	if main.SecurityContext.AppArmorProfile == nil || main.SecurityContext.AppArmorProfile.Type != corev1.AppArmorProfileTypeRuntimeDefault {
+		t.Fatalf("appArmorProfile = %#v, want RuntimeDefault", main.SecurityContext.AppArmorProfile)
+	}
+}
+
 func TestBuildPodSpecInjectsVolumePortalMounts(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
@@ -377,6 +443,14 @@ func metav1ObjectMeta(name string) metav1.ObjectMeta {
 		Name:      name,
 		Namespace: "default",
 	}
+}
+
+func ptrBool(v bool) *bool {
+	return &v
+}
+
+func ptrInt64(v int64) *int64 {
+	return &v
 }
 
 func writeManagerConfig(t *testing.T, contents string) string {

@@ -5388,6 +5388,19 @@ components:
             $ref: "#/components/schemas/Toleration"
         serviceAccountName:
           type: string
+        emptyDirMounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/EmptyDirMountSpec"
+    EmptyDirMountSpec:
+      type: object
+      properties:
+        mountPath:
+          type: string
+        sizeLimit:
+          type: string
+          description: Optional size limit for the Kubernetes emptyDir volume.
+      required: [mountPath]
     Affinity:
       type: object
       properties:

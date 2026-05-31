@@ -232,6 +232,39 @@ manager_image: sandbox0/manager:test
 	}
 }
 
+func TestBuildPodSpecInjectsEmptyDirMounts(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	template := newTestTemplate()
+	sizeLimit := resource.MustParse("20Gi")
+	template.Spec.Pod = &PodSpecOverride{
+		EmptyDirMounts: []EmptyDirMountSpec{{
+			MountPath: "/var/lib/docker",
+			SizeLimit: &sizeLimit,
+		}},
+	}
+
+	spec := BuildPodSpec(template)
+	main := spec.Containers[0]
+	mount := findVolumeMountByPath(main.VolumeMounts, "/var/lib/docker")
+	if mount == nil {
+		t.Fatalf("expected emptyDir mount, got %#v", main.VolumeMounts)
+	}
+	volume := findVolume(spec.Volumes, mount.Name)
+	if volume == nil || volume.EmptyDir == nil {
+		t.Fatalf("expected emptyDir volume %q, got %#v", mount.Name, spec.Volumes)
+	}
+	if volume.EmptyDir.Medium != "" {
+		t.Fatalf("emptyDir medium = %q, want default", volume.EmptyDir.Medium)
+	}
+	if volume.EmptyDir.SizeLimit == nil || volume.EmptyDir.SizeLimit.Cmp(sizeLimit) != 0 {
+		t.Fatalf("emptyDir sizeLimit = %#v, want %s", volume.EmptyDir.SizeLimit, sizeLimit.String())
+	}
+}
+
 func TestBuildPodSpecOmitsKubernetesProbes(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
@@ -505,6 +538,15 @@ func findEnvVar(envVars []corev1.EnvVar, name string) *corev1.EnvVar {
 func findVolumeMount(mounts []corev1.VolumeMount, name string) *corev1.VolumeMount {
 	for i := range mounts {
 		if mounts[i].Name == name {
+			return &mounts[i]
+		}
+	}
+	return nil
+}
+
+func findVolumeMountByPath(mounts []corev1.VolumeMount, mountPath string) *corev1.VolumeMount {
+	for i := range mounts {
+		if mounts[i].MountPath == mountPath {
 			return &mounts[i]
 		}
 	}

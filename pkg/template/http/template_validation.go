@@ -78,6 +78,11 @@ func validateTemplateSpec(spec v1alpha1.SandboxTemplateSpec) error {
 	if err := validateVolumeMounts(spec.VolumeMounts); err != nil {
 		return err
 	}
+	if spec.Pod != nil {
+		if err := validateEmptyDirMounts(spec.Pod.EmptyDirMounts, spec.VolumeMounts); err != nil {
+			return err
+		}
+	}
 
 	if spec.Pool.MinIdle < 0 {
 		return fmt.Errorf("spec.pool.minIdle must be >= 0")
@@ -206,6 +211,38 @@ func validateVolumeMounts(mounts []v1alpha1.VolumeMountSpec) error {
 			return fmt.Errorf("%s.mountPath %q is duplicated", field, cleanMountPath)
 		}
 		seenPaths[cleanMountPath] = struct{}{}
+	}
+	return nil
+}
+
+func validateEmptyDirMounts(mounts []v1alpha1.EmptyDirMountSpec, volumeMounts []v1alpha1.VolumeMountSpec) error {
+	seenPaths := make(map[string]string, len(mounts)+len(volumeMounts))
+	for i, mount := range volumeMounts {
+		mountPath := strings.TrimSpace(mount.MountPath)
+		if mountPath == "" {
+			continue
+		}
+		cleanMountPath := filepath.Clean(mountPath)
+		seenPaths[cleanMountPath] = fmt.Sprintf("spec.volumeMounts[%d]", i)
+	}
+
+	for i, mount := range mounts {
+		field := fmt.Sprintf("spec.pod.emptyDirMounts[%d]", i)
+		mountPath := strings.TrimSpace(mount.MountPath)
+		cleanMountPath := filepath.Clean(mountPath)
+		if mountPath == "" || mountPath != cleanMountPath || !filepath.IsAbs(cleanMountPath) || cleanMountPath == string(filepath.Separator) {
+			return fmt.Errorf("%s.mountPath is invalid", field)
+		}
+		if err := validateReservedMountPath(cleanMountPath, field+".mountPath"); err != nil {
+			return err
+		}
+		if existingField, ok := seenPaths[cleanMountPath]; ok {
+			return fmt.Errorf("%s.mountPath %q duplicates %s.mountPath", field, cleanMountPath, existingField)
+		}
+		seenPaths[cleanMountPath] = field
+		if mount.SizeLimit != nil && mount.SizeLimit.Sign() <= 0 {
+			return fmt.Errorf("%s.sizeLimit must be > 0", field)
+		}
 	}
 	return nil
 }

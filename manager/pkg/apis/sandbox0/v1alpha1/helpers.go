@@ -46,6 +46,7 @@ func BuildPodSpec(template *SandboxTemplate) corev1.PodSpec {
 	applyProcdSecretVolume(&spec, template)
 	applyNetdMITMCATrustMaterial(&spec)
 	applyVolumePortals(&spec, template)
+	applyEmptyDirMounts(&spec, template)
 	applyProcdInit(&spec)
 	applyDefaultSandboxPlacement(&spec)
 
@@ -215,6 +216,39 @@ func applyVolumePortals(spec *corev1.PodSpec, template *SandboxTemplate) {
 	}
 }
 
+func applyEmptyDirMounts(spec *corev1.PodSpec, template *SandboxTemplate) {
+	if spec == nil || template == nil || template.Spec.Pod == nil || len(template.Spec.Pod.EmptyDirMounts) == 0 {
+		return
+	}
+	for i, mount := range template.Spec.Pod.EmptyDirMounts {
+		mountPath := path.Clean(strings.TrimSpace(mount.MountPath))
+		if mountPath == "." || !strings.HasPrefix(mountPath, "/") || mountPath == "/" {
+			continue
+		}
+		emptyDir := &corev1.EmptyDirVolumeSource{}
+		if mount.SizeLimit != nil {
+			sizeLimit := mount.SizeLimit.DeepCopy()
+			emptyDir.SizeLimit = &sizeLimit
+		}
+		volumeName := emptyDirVolumeName(i, mountPath)
+		spec.Volumes = append(spec.Volumes, corev1.Volume{
+			Name: volumeName,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: emptyDir,
+			},
+		})
+		for j := range spec.Containers {
+			if spec.Containers[j].Name != "procd" {
+				continue
+			}
+			ensureContainerVolumeMount(&spec.Containers[j], corev1.VolumeMount{
+				Name:      volumeName,
+				MountPath: mountPath,
+			})
+		}
+	}
+}
+
 func volumePortalVolumeName(index int, portalName string) string {
 	name := strings.ToLower(strings.TrimSpace(portalName))
 	var b strings.Builder
@@ -235,6 +269,33 @@ func volumePortalVolumeName(index int, portalName string) string {
 		name = "volume"
 	}
 	prefix := fmt.Sprintf("sandbox0-volume-%d-", index)
+	maxName := 63 - len(prefix)
+	if len(name) > maxName {
+		name = strings.TrimRight(name[:maxName], "-")
+	}
+	return prefix + name
+}
+
+func emptyDirVolumeName(index int, mountPath string) string {
+	name := strings.ToLower(strings.Trim(path.Clean(mountPath), "/"))
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	name = strings.Trim(b.String(), "-")
+	if name == "" {
+		name = "emptydir"
+	}
+	prefix := fmt.Sprintf("sandbox0-emptydir-%d-", index)
 	maxName := 63 - len(prefix)
 	if len(name) > maxName {
 		name = strings.TrimRight(name[:maxName], "-")

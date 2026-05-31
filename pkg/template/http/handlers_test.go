@@ -872,6 +872,44 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 			wantErr: "spec.network.egress.allowedPorts[0].endPort must be between port and 65535",
 		},
 		{
+			name: "reject invalid emptyDir mount path",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				s.Pod = &v1alpha1.PodSpecOverride{
+					EmptyDirMounts: []v1alpha1.EmptyDirMountSpec{{MountPath: "/var/lib/../docker"}},
+				}
+			},
+			wantErr: "spec.pod.emptyDirMounts[0].mountPath is invalid",
+		},
+		{
+			name: "reject reserved emptyDir mount path",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				s.Pod = &v1alpha1.PodSpecOverride{
+					EmptyDirMounts: []v1alpha1.EmptyDirMountSpec{{MountPath: "/config/docker"}},
+				}
+			},
+			wantErr: "spec.pod.emptyDirMounts[0].mountPath uses reserved path \"/config\"",
+		},
+		{
+			name: "reject emptyDir mount colliding with volume mount",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				s.VolumeMounts = []v1alpha1.VolumeMountSpec{{Name: "cache", MountPath: "/cache"}}
+				s.Pod = &v1alpha1.PodSpecOverride{
+					EmptyDirMounts: []v1alpha1.EmptyDirMountSpec{{MountPath: "/cache"}},
+				}
+			},
+			wantErr: "spec.pod.emptyDirMounts[0].mountPath \"/cache\" duplicates spec.volumeMounts[0].mountPath",
+		},
+		{
+			name: "reject non-positive emptyDir size limit",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				sizeLimit := resource.MustParse("0")
+				s.Pod = &v1alpha1.PodSpecOverride{
+					EmptyDirMounts: []v1alpha1.EmptyDirMountSpec{{MountPath: "/var/lib/docker", SizeLimit: &sizeLimit}},
+				}
+			},
+			wantErr: "spec.pod.emptyDirMounts[0].sizeLimit must be > 0",
+		},
+		{
 			name: "reject empty added capability",
 			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
 				s.MainContainer.SecurityContext = &v1alpha1.SecurityContext{
@@ -1008,6 +1046,23 @@ func TestValidateTemplateSpec_AllowsExpandedSecurityContext(t *testing.T) {
 	}
 }
 
+func TestValidateTemplateSpec_AllowsEmptyDirMounts(t *testing.T) {
+	t.Parallel()
+
+	sizeLimit := resource.MustParse("20Gi")
+	spec := validTemplateSpec()
+	spec.Pod = &v1alpha1.PodSpecOverride{
+		EmptyDirMounts: []v1alpha1.EmptyDirMountSpec{{
+			MountPath: "/var/lib/docker",
+			SizeLimit: &sizeLimit,
+		}},
+	}
+
+	if err := validateTemplateSpec(spec); err != nil {
+		t.Fatalf("validateTemplateSpec: %v", err)
+	}
+}
+
 func TestValidateTemplateSpecForClaims_AllowsWarmProcesses(t *testing.T) {
 	t.Parallel()
 
@@ -1031,6 +1086,27 @@ func TestValidateTemplateSpecForClaims_AllowsWarmProcesses(t *testing.T) {
 
 	if err := validateTemplateSpecForClaims(spec, &internalauth.Claims{TeamID: "team-1"}); err != nil {
 		t.Fatalf("expected warm processes to be allowed, got %v", err)
+	}
+}
+
+func TestValidateTemplateSpecForClaims_RequiresSystemIdentityForEmptyDirMounts(t *testing.T) {
+	t.Parallel()
+
+	spec := validTemplateSpec()
+	sizeLimit := resource.MustParse("20Gi")
+	spec.Pod = &v1alpha1.PodSpecOverride{
+		EmptyDirMounts: []v1alpha1.EmptyDirMountSpec{{
+			MountPath: "/var/lib/docker",
+			SizeLimit: &sizeLimit,
+		}},
+	}
+
+	err := validateTemplateSpecForClaims(spec, &internalauth.Claims{TeamID: "team-1"})
+	if err == nil || err.Error() != "spec.pod requires system identity" {
+		t.Fatalf("expected team token to reject pod emptyDir mounts, got %v", err)
+	}
+	if err := validateTemplateSpecForClaims(spec, &internalauth.Claims{IsSystem: true}); err != nil {
+		t.Fatalf("expected system token to allow pod emptyDir mounts, got %v", err)
 	}
 }
 

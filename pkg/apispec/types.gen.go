@@ -902,6 +902,14 @@ type EgressProxyType string
 // EgressTLSMode defines model for EgressTLSMode.
 type EgressTLSMode string
 
+// EmptyDirMountSpec defines model for EmptyDirMountSpec.
+type EmptyDirMountSpec struct {
+	MountPath string `json:"mountPath"`
+
+	// SizeLimit Optional size limit for the Kubernetes emptyDir volume.
+	SizeLimit *string `json:"sizeLimit,omitempty"`
+}
+
 // EnvVar defines model for EnvVar.
 type EnvVar struct {
 	Name  string `json:"name"`
@@ -1210,10 +1218,11 @@ type PodAffinityTerm struct {
 
 // PodSpecOverride defines model for PodSpecOverride.
 type PodSpecOverride struct {
-	Affinity           *Affinity          `json:"affinity,omitempty"`
-	NodeSelector       *map[string]string `json:"nodeSelector,omitempty"`
-	ServiceAccountName *string            `json:"serviceAccountName,omitempty"`
-	Tolerations        *[]Toleration      `json:"tolerations,omitempty"`
+	Affinity           *Affinity            `json:"affinity,omitempty"`
+	EmptyDirMounts     *[]EmptyDirMountSpec `json:"emptyDirMounts,omitempty"`
+	NodeSelector       *map[string]string   `json:"nodeSelector,omitempty"`
+	ServiceAccountName *string              `json:"serviceAccountName,omitempty"`
+	Tolerations        *[]Toleration        `json:"tolerations,omitempty"`
 }
 
 // PoolStrategy defines model for PoolStrategy.

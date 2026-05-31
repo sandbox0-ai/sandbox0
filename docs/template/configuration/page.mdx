@@ -197,6 +197,7 @@ The following fields require a system-level token. They are not available to reg
 | `pod.affinity` | Node and pod affinity/anti-affinity rules. |
 | `pod.tolerations` | Allow pods to be scheduled on tainted nodes. |
 | `pod.serviceAccountName` | Kubernetes service account for sandbox pods. |
+| `pod.emptyDirMounts` | Ephemeral Kubernetes `emptyDir` mounts for system templates, such as `/var/lib/docker` for Docker-in-Docker runtime state. |
 | `mainContainer.securityContext` | Linux container security context for system templates. Supports `privileged`, `allowPrivilegeEscalation`, `runAsUser`, `runAsGroup`, `runAsNonRoot`, `readOnlyRootFilesystem`, `capabilities.add`, `capabilities.drop`, `seccompProfile`, and `appArmorProfile`. |
 | `mainContainer.imagePullPolicy` | Pull policy override for the main container image. Only system administrators/system tokens can set this field. |
 | `clusterId` | Pin the template to a specific cluster in a multi-cluster deployment. |
@@ -206,6 +207,8 @@ Attempting to set privileged fields without a system identity returns `403 Forbi
 </Callout>
 
 Regular team-owned templates can declare `warmProcesses` for template-started helpers.
+
+`pod.emptyDirMounts` is backed by Kubernetes `emptyDir` on the node's default storage medium. Its contents are tied to the sandbox pod lifecycle and are not captured by SandboxVolume snapshots or restore operations. Use it for temporary runtime state and caches, not durable workspace data.
 
 `mainContainer.securityContext` is intended for platform-owned templates that need runtime-specific privileges, such as container-engine templates on gVisor or Kata. It does not expose host devices or hostPath mounts.
 

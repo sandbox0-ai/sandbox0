@@ -200,10 +200,17 @@ const (
 
 // PodSpecOverride allows overriding pod-level settings
 type PodSpecOverride struct {
-	NodeSelector       map[string]string `json:"nodeSelector,omitempty"`
-	Affinity           *Affinity         `json:"affinity,omitempty"`
-	Tolerations        []Toleration      `json:"tolerations,omitempty"`
-	ServiceAccountName string            `json:"serviceAccountName,omitempty"`
+	NodeSelector       map[string]string   `json:"nodeSelector,omitempty"`
+	Affinity           *Affinity           `json:"affinity,omitempty"`
+	Tolerations        []Toleration        `json:"tolerations,omitempty"`
+	ServiceAccountName string              `json:"serviceAccountName,omitempty"`
+	EmptyDirMounts     []EmptyDirMountSpec `json:"emptyDirMounts,omitempty"`
+}
+
+// EmptyDirMountSpec declares an ephemeral Kubernetes emptyDir mount for the main sandbox container.
+type EmptyDirMountSpec struct {
+	MountPath string             `json:"mountPath"`
+	SizeLimit *resource.Quantity `json:"sizeLimit,omitempty"`
 }
 
 // Affinity defines pod affinity rules

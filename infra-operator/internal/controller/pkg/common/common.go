@@ -354,9 +354,13 @@ func ResolveSSHEndpoint(infra *infrav1alpha1.Sandbox0Infra, fallbackPort int32) 
 		return "", 0, false
 	}
 
-	port := ResolveServicePort(infra.Spec.Services.SSHGateway.Service, fallbackPort)
-	if port <= 0 {
+	servicePort := ResolveServicePort(infra.Spec.Services.SSHGateway.Service, fallbackPort)
+	if servicePort <= 0 {
 		return "", 0, false
+	}
+	port := servicePort
+	if infra.Spec.Services.SSHGateway.EndpointPort > 0 {
+		port = infra.Spec.Services.SSHGateway.EndpointPort
 	}
 
 	return fmt.Sprintf("%s.ssh.%s", regionLabel, rootDomain), port, true

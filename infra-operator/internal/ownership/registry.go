@@ -80,6 +80,7 @@ func Registry() []Entry {
 
 		exact("spec.services.clusterGateway.config.authMode", "plan", []string{"cluster-gateway", "manager"}, []string{"InfraPlan.Manager.TemplateStoreEnabled", "InfraPlan.Enterprise.ClusterGateway"}, UpdateSemanticsDeclarative, "Auth mode affects manager template-store behavior and enterprise-license requirements."),
 		exact("spec.services.clusterGateway.config.oidcProviders", "plan", []string{"cluster-gateway"}, []string{"InfraPlan.Enterprise.ClusterGateway"}, UpdateSemanticsDeclarative, "Enabled OIDC providers drive cluster-gateway enterprise-license requirements."),
+		exact("spec.services.sshGateway.endpointPort", "plan", []string{"regional-gateway", "cluster-gateway"}, []string{"ssh endpoint advertisement"}, UpdateSemanticsDeclarative, "Optional public SSH endpoint port advertised by regional-gateway and cluster-gateway."),
 		exact("spec.services.clusterGateway.service.port", "plan", []string{"cluster-gateway", "regional-gateway"}, []string{"InfraPlan.Services.ClusterGateway.Port", "InfraPlan.RegionalGateway.DefaultClusterGatewayURL"}, UpdateSemanticsDeclarative, "Cluster-gateway service port is projected into regional-gateway routing."),
 		exact("spec.services.clusterGateway.service.type", "plan", []string{"cluster-gateway", "regional-gateway"}, []string{"InfraPlan.Services.ClusterGateway.Port", "validation"}, UpdateSemanticsDeclarative, "Service type determines how the cluster-gateway address is projected downstream."),
 

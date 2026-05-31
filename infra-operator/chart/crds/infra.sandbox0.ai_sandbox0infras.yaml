@@ -2524,6 +2524,15 @@ spec:
                         default: false
                         description: Enabled enables or disables the service
                         type: boolean
+                      endpointPort:
+                        description: |-
+                          EndpointPort optionally overrides the SSH port advertised by regional and
+                          cluster gateways. Use this when an external load balancer listens on a
+                          different port than the Kubernetes Service or NodePort.
+                        format: int32
+                        maximum: 65535
+                        minimum: 1
+                        type: integer
                       replicas:
                         default: 1
                         description: Replicas specifies the number of replicas

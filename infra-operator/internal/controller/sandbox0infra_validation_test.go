@@ -359,6 +359,50 @@ func TestValidateSpecSemanticsAcceptsValidNodePortServicePort(t *testing.T) {
 	}
 }
 
+func TestValidateSpecSemanticsAcceptsSSHEndpointPortBelowNodePortRange(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Services: &infrav1alpha1.ServicesConfig{
+				SSHGateway: &infrav1alpha1.SSHGatewayServiceConfig{
+					ServiceExposureConfig: infrav1alpha1.ServiceExposureConfig{
+						Service: &infrav1alpha1.ServiceNetworkConfig{
+							Type: corev1.ServiceTypeNodePort,
+							Port: 30222,
+						},
+					},
+					EndpointPort: 22,
+				},
+			},
+		},
+	}
+
+	if err := validateSpecSemantics(context.Background(), newValidationTestClient(t), infra); err != nil {
+		t.Fatalf("expected valid SSH endpoint port configuration, got: %v", err)
+	}
+}
+
+func TestValidateSpecSemanticsRejectsInvalidSSHEndpointPort(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Services: &infrav1alpha1.ServicesConfig{
+				SSHGateway: &infrav1alpha1.SSHGatewayServiceConfig{
+					EndpointPort: 70000,
+				},
+			},
+		},
+	}
+
+	err := validateSpecSemantics(context.Background(), newValidationTestClient(t), infra)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "spec.services.sshGateway.endpointPort must be within 1-65535 when set") {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+}
+
 func newValidationTestClient(t *testing.T, objects ...ctrlclient.Object) ctrlclient.Client {
 	t.Helper()
 

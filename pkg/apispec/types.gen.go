@@ -21,6 +21,13 @@ const (
 	AddTeamMemberRequestRoleViewer    AddTeamMemberRequestRole = "viewer"
 )
 
+// Defines values for AppArmorProfileType.
+const (
+	AppArmorProfileTypeLocalhost      AppArmorProfileType = "Localhost"
+	AppArmorProfileTypeRuntimeDefault AppArmorProfileType = "RuntimeDefault"
+	AppArmorProfileTypeUnconfined     AppArmorProfileType = "Unconfined"
+)
+
 // Defines values for CredentialProjectionType.
 const (
 	HttpHeaders          CredentialProjectionType = "http_headers"
@@ -196,6 +203,13 @@ const (
 	Pausing  SandboxPowerStatePhase = "pausing"
 	Resuming SandboxPowerStatePhase = "resuming"
 	Stable   SandboxPowerStatePhase = "stable"
+)
+
+// Defines values for SeccompProfileType.
+const (
+	SeccompProfileTypeLocalhost      SeccompProfileType = "Localhost"
+	SeccompProfileTypeRuntimeDefault SeccompProfileType = "RuntimeDefault"
+	SeccompProfileTypeUnconfined     SeccompProfileType = "Unconfined"
 )
 
 // Defines values for SuccessAPIKeyListResponseSuccess.
@@ -544,6 +558,15 @@ type Affinity struct {
 	PodAffinity  *PodAffinity  `json:"podAffinity,omitempty"`
 }
 
+// AppArmorProfile defines model for AppArmorProfile.
+type AppArmorProfile struct {
+	LocalhostProfile *string             `json:"localhostProfile,omitempty"`
+	Type             AppArmorProfileType `json:"type"`
+}
+
+// AppArmorProfileType defines model for AppArmorProfile.Type.
+type AppArmorProfileType string
+
 // AuthProvider defines model for AuthProvider.
 type AuthProvider struct {
 	BrowserLoginEnabled bool `json:"browser_login_enabled"`
@@ -564,6 +587,7 @@ type CachePolicySpec struct {
 
 // Capabilities defines model for Capabilities.
 type Capabilities struct {
+	Add  *[]string `json:"add,omitempty"`
 	Drop *[]string `json:"drop,omitempty"`
 }
 
@@ -1792,11 +1816,26 @@ type SandboxVolume struct {
 	UserId          string            `json:"user_id"`
 }
 
+// SeccompProfile defines model for SeccompProfile.
+type SeccompProfile struct {
+	LocalhostProfile *string            `json:"localhostProfile,omitempty"`
+	Type             SeccompProfileType `json:"type"`
+}
+
+// SeccompProfileType defines model for SeccompProfile.Type.
+type SeccompProfileType string
+
 // SecurityContext defines model for SecurityContext.
 type SecurityContext struct {
-	Capabilities *Capabilities `json:"capabilities,omitempty"`
-	RunAsGroup   *int64        `json:"runAsGroup,omitempty"`
-	RunAsUser    *int64        `json:"runAsUser,omitempty"`
+	AllowPrivilegeEscalation *bool            `json:"allowPrivilegeEscalation,omitempty"`
+	AppArmorProfile          *AppArmorProfile `json:"appArmorProfile,omitempty"`
+	Capabilities             *Capabilities    `json:"capabilities,omitempty"`
+	Privileged               *bool            `json:"privileged,omitempty"`
+	ReadOnlyRootFilesystem   *bool            `json:"readOnlyRootFilesystem,omitempty"`
+	RunAsGroup               *int64           `json:"runAsGroup,omitempty"`
+	RunAsNonRoot             *bool            `json:"runAsNonRoot,omitempty"`
+	RunAsUser                *int64           `json:"runAsUser,omitempty"`
+	SeccompProfile           *SeccompProfile  `json:"seccompProfile,omitempty"`
 }
 
 // SignalContextRequest defines model for SignalContextRequest.

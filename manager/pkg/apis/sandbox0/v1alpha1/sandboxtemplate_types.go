@@ -153,16 +153,50 @@ type ResourceRequirements struct {
 
 // SecurityContext defines security context for containers
 type SecurityContext struct {
-	Capabilities *Capabilities `json:"capabilities,omitempty"`
-	RunAsUser    *int64        `json:"runAsUser,omitempty"`
-	RunAsGroup   *int64        `json:"runAsGroup,omitempty"`
+	Capabilities             *Capabilities    `json:"capabilities,omitempty"`
+	Privileged               *bool            `json:"privileged,omitempty"`
+	RunAsUser                *int64           `json:"runAsUser,omitempty"`
+	RunAsGroup               *int64           `json:"runAsGroup,omitempty"`
+	RunAsNonRoot             *bool            `json:"runAsNonRoot,omitempty"`
+	ReadOnlyRootFilesystem   *bool            `json:"readOnlyRootFilesystem,omitempty"`
+	AllowPrivilegeEscalation *bool            `json:"allowPrivilegeEscalation,omitempty"`
+	SeccompProfile           *SeccompProfile  `json:"seccompProfile,omitempty"`
+	AppArmorProfile          *AppArmorProfile `json:"appArmorProfile,omitempty"`
 }
 
 // Capabilities defines Linux capabilities
 type Capabilities struct {
-	// Add field is removed to prevent privilege escalation
+	Add  []string `json:"add,omitempty"`  // e.g. ["SYS_ADMIN"]
 	Drop []string `json:"drop,omitempty"` // e.g. ["NET_RAW"]
 }
+
+type SeccompProfile struct {
+	Type             SeccompProfileType `json:"type"`
+	LocalhostProfile *string            `json:"localhostProfile,omitempty"`
+}
+
+// +kubebuilder:validation:Enum=Unconfined;RuntimeDefault;Localhost
+type SeccompProfileType string
+
+const (
+	SeccompProfileTypeUnconfined     SeccompProfileType = "Unconfined"
+	SeccompProfileTypeRuntimeDefault SeccompProfileType = "RuntimeDefault"
+	SeccompProfileTypeLocalhost      SeccompProfileType = "Localhost"
+)
+
+type AppArmorProfile struct {
+	Type             AppArmorProfileType `json:"type"`
+	LocalhostProfile *string             `json:"localhostProfile,omitempty"`
+}
+
+// +kubebuilder:validation:Enum=Unconfined;RuntimeDefault;Localhost
+type AppArmorProfileType string
+
+const (
+	AppArmorProfileTypeUnconfined     AppArmorProfileType = "Unconfined"
+	AppArmorProfileTypeRuntimeDefault AppArmorProfileType = "RuntimeDefault"
+	AppArmorProfileTypeLocalhost      AppArmorProfileType = "Localhost"
+)
 
 // PodSpecOverride allows overriding pod-level settings
 type PodSpecOverride struct {

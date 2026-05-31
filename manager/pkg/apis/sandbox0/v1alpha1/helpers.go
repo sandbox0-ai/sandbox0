@@ -296,18 +296,7 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 
 	// Security context
 	if spec.SecurityContext != nil {
-		container.SecurityContext = &corev1.SecurityContext{}
-		if spec.SecurityContext.RunAsUser != nil {
-			container.SecurityContext.RunAsUser = spec.SecurityContext.RunAsUser
-		}
-		if spec.SecurityContext.RunAsGroup != nil {
-			container.SecurityContext.RunAsGroup = spec.SecurityContext.RunAsGroup
-		}
-		if spec.SecurityContext.Capabilities != nil {
-			container.SecurityContext.Capabilities = &corev1.Capabilities{
-				Drop: convertCapabilities(spec.SecurityContext.Capabilities.Drop),
-			}
-		}
+		container.SecurityContext = convertSecurityContext(spec.SecurityContext)
 	}
 	if container.SecurityContext == nil {
 		container.SecurityContext = &corev1.SecurityContext{}
@@ -628,6 +617,39 @@ func applyProcdSecretVolume(spec *corev1.PodSpec, template *SandboxTemplate) boo
 		return changed
 	}
 	return changed
+}
+
+func convertSecurityContext(in *SecurityContext) *corev1.SecurityContext {
+	if in == nil {
+		return nil
+	}
+	out := &corev1.SecurityContext{
+		Privileged:               in.Privileged,
+		RunAsUser:                in.RunAsUser,
+		RunAsGroup:               in.RunAsGroup,
+		RunAsNonRoot:             in.RunAsNonRoot,
+		ReadOnlyRootFilesystem:   in.ReadOnlyRootFilesystem,
+		AllowPrivilegeEscalation: in.AllowPrivilegeEscalation,
+	}
+	if in.Capabilities != nil {
+		out.Capabilities = &corev1.Capabilities{
+			Add:  convertCapabilities(in.Capabilities.Add),
+			Drop: convertCapabilities(in.Capabilities.Drop),
+		}
+	}
+	if in.SeccompProfile != nil {
+		out.SeccompProfile = &corev1.SeccompProfile{
+			Type:             corev1.SeccompProfileType(in.SeccompProfile.Type),
+			LocalhostProfile: in.SeccompProfile.LocalhostProfile,
+		}
+	}
+	if in.AppArmorProfile != nil {
+		out.AppArmorProfile = &corev1.AppArmorProfile{
+			Type:             corev1.AppArmorProfileType(in.AppArmorProfile.Type),
+			LocalhostProfile: in.AppArmorProfile.LocalhostProfile,
+		}
+	}
+	return out
 }
 
 func convertCapabilities(caps []string) []corev1.Capability {

@@ -98,22 +98,58 @@ spec:
                   securityContext:
                     description: SecurityContext defines security context for containers
                     properties:
+                      allowPrivilegeEscalation:
+                        type: boolean
+                      appArmorProfile:
+                        properties:
+                          localhostProfile:
+                            type: string
+                          type:
+                            enum:
+                            - Unconfined
+                            - RuntimeDefault
+                            - Localhost
+                            type: string
+                        required:
+                        - type
+                        type: object
                       capabilities:
                         description: Capabilities defines Linux capabilities
                         properties:
+                          add:
+                            items:
+                              type: string
+                            type: array
                           drop:
-                            description: Add field is removed to prevent privilege
-                              escalation
                             items:
                               type: string
                             type: array
                         type: object
+                      privileged:
+                        type: boolean
+                      readOnlyRootFilesystem:
+                        type: boolean
                       runAsGroup:
                         format: int64
                         type: integer
+                      runAsNonRoot:
+                        type: boolean
                       runAsUser:
                         format: int64
                         type: integer
+                      seccompProfile:
+                        properties:
+                          localhostProfile:
+                            type: string
+                          type:
+                            enum:
+                            - Unconfined
+                            - RuntimeDefault
+                            - Localhost
+                            type: string
+                        required:
+                        - type
+                        type: object
                     type: object
                 required:
                 - image

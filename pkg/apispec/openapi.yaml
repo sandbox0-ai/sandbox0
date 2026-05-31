@@ -5246,19 +5246,53 @@ components:
       properties:
         capabilities:
           $ref: "#/components/schemas/Capabilities"
+        privileged:
+          type: boolean
         runAsUser:
           type: integer
           format: int64
         runAsGroup:
           type: integer
           format: int64
+        runAsNonRoot:
+          type: boolean
+        readOnlyRootFilesystem:
+          type: boolean
+        allowPrivilegeEscalation:
+          type: boolean
+        seccompProfile:
+          $ref: "#/components/schemas/SeccompProfile"
+        appArmorProfile:
+          $ref: "#/components/schemas/AppArmorProfile"
     Capabilities:
       type: object
       properties:
+        add:
+          type: array
+          items:
+            type: string
         drop:
           type: array
           items:
             type: string
+    SeccompProfile:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [Unconfined, RuntimeDefault, Localhost]
+        localhostProfile:
+          type: string
+      required: [type]
+    AppArmorProfile:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [Unconfined, RuntimeDefault, Localhost]
+        localhostProfile:
+          type: string
+      required: [type]
     Probe:
       type: object
       properties:

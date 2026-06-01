@@ -304,7 +304,7 @@ func assertSandboxEgressProxy(env *framework.ScenarioEnv, session *e2eutils.Sess
 	created, err := session.CreateCredentialSource(env.TestCtx.Context, GinkgoT(), apispec.CredentialSourceWriteRequest{
 		Name:         sourceName,
 		ResolverKind: apispec.StaticUsernamePassword,
-		Spec: &apispec.CredentialSourceWriteSpec{
+		Spec: apispec.CredentialSourceWriteSpec{
 			StaticUsernamePassword: &apispec.StaticUsernamePasswordSourceSpec{
 				Username: ptrTo(egressProxyFixtureUsername),
 				Password: ptrTo(egressProxyFixturePassword),

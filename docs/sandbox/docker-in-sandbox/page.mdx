@@ -32,8 +32,8 @@ import (
     "fmt"
     "log"
     "os"
-    "strconv"
     "strings"
+    "time"
 
     sandbox0 "github.com/sandbox0-ai/sdk-go"
 )
@@ -54,31 +54,62 @@ func main() {
     }
     defer client.DeleteSandbox(ctx, sandbox.ID)
 
-    script := strings.Join([]string{
+    if _, err := sandbox.Cmd(ctx, "rm -f /tmp/sandbox0-test-databases.ready"); err != nil {
+        log.Fatal(err)
+    }
+
+    startScript := strings.Join([]string{
         "set -e",
+        "rm -f /tmp/sandbox0-test-databases.ready",
         "docker rm -f test-redis test-postgres >/dev/null 2>&1 || true",
+        "docker pull redis:7-alpine",
+        "docker pull postgres:16-alpine",
         "docker run -d --name test-redis -p 6379:6379 redis:7-alpine",
         "docker run -d --name test-postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=app_test -p 5432:5432 postgres:16-alpine",
         "until docker exec test-redis redis-cli ping | grep -q PONG; do sleep 1; done",
-        "until docker exec test-postgres pg_isready -U postgres; do sleep 1; done",
-        "printf 'REDIS_URL=redis://127.0.0.1:6379\\\\n'",
-        "printf 'DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/app_test?sslmode=disable\\\\n'",
+        "until docker exec test-postgres pg_isready -U postgres >/dev/null; do sleep 1; done",
+        "touch /tmp/sandbox0-test-databases.ready",
     }, "\\n")
 
-    result, err := sandbox.Cmd(ctx, "/bin/sh -lc "+strconv.Quote(script))
+    start, err := sandbox.Cmd(ctx, "sh",
+        sandbox0.WithCommand([]string{"/bin/sh", "-lc", startScript}),
+        sandbox0.WithCmdWait(false),
+        sandbox0.WithCmdTTL(1800),
+    )
     if err != nil {
         log.Fatal(err)
     }
-    fmt.Print(result.OutputRaw)
+    defer sandbox.DeleteContext(ctx, start.ContextID)
+
+    readyCommand := "test -f /tmp/sandbox0-test-databases.ready && printf READY"
+    deadline := time.Now().Add(5 * time.Minute)
+    for {
+        result, err := sandbox.Cmd(ctx, "sh",
+            sandbox0.WithCommand([]string{"/bin/sh", "-lc", readyCommand}),
+        )
+        if err != nil {
+            log.Fatal(err)
+        }
+        if strings.Contains(result.OutputRaw, "READY") {
+            break
+        }
+        if time.Now().After(deadline) {
+            log.Fatal("timed out waiting for test databases")
+        }
+        time.Sleep(2 * time.Second)
+    }
+
+    fmt.Println("REDIS_URL=redis://127.0.0.1:6379")
+    fmt.Println("DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/app_test?sslmode=disable")
 }`
     },
     {
       label: "Python",
       language: "python",
       code: `import os
-import shlex
+import time
 
-from sandbox0 import Client
+from sandbox0 import Client, CmdOptions
 from sandbox0.apispec.models.sandbox_config import SandboxConfig
 
 client = Client(
@@ -92,50 +123,109 @@ sandbox = client.claim_sandbox(
 )
 
 try:
-    script = """
+    sandbox.cmd("rm -f /tmp/sandbox0-test-databases.ready")
+
+    start_script = """
 set -e
+rm -f /tmp/sandbox0-test-databases.ready
 docker rm -f test-redis test-postgres >/dev/null 2>&1 || true
+docker pull redis:7-alpine
+docker pull postgres:16-alpine
 docker run -d --name test-redis -p 6379:6379 redis:7-alpine
 docker run -d --name test-postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=app_test -p 5432:5432 postgres:16-alpine
 until docker exec test-redis redis-cli ping | grep -q PONG; do sleep 1; done
-until docker exec test-postgres pg_isready -U postgres; do sleep 1; done
-printf 'REDIS_URL=redis://127.0.0.1:6379\\n'
-printf 'DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/app_test?sslmode=disable\\n'
+until docker exec test-postgres pg_isready -U postgres >/dev/null; do sleep 1; done
+touch /tmp/sandbox0-test-databases.ready
 """
-    result = sandbox.cmd("/bin/sh -lc " + shlex.quote(script))
-    print(result.output_raw, end="")
+    start = sandbox.cmd(
+        "sh",
+        CmdOptions(command=["/bin/sh", "-lc", start_script], wait=False, ttl_sec=1800),
+    )
+    try:
+        ready_command = "test -f /tmp/sandbox0-test-databases.ready && printf READY"
+        deadline = time.time() + 300
+        while True:
+            result = sandbox.cmd(
+                "sh",
+                CmdOptions(command=["/bin/sh", "-lc", ready_command]),
+            )
+            if "READY" in result.output_raw:
+                break
+            if time.time() > deadline:
+                raise TimeoutError("timed out waiting for test databases")
+            time.sleep(2)
+
+        print("REDIS_URL=redis://127.0.0.1:6379")
+        print("DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/app_test?sslmode=disable")
+    finally:
+        sandbox.delete_context(start.context_id)
 finally:
     client.delete_sandbox(sandbox.id)`
     },
     {
       label: "TypeScript",
       language: "typescript",
-      code: `import { Client } from 'sandbox0';
+      code: `async function main() {
+    const { Client } = await import('sandbox0');
 
-const client = new Client({
-    token: process.env.SANDBOX0_TOKEN!,
-    baseUrl: process.env.SANDBOX0_BASE_URL || 'https://api.sandbox0.ai',
-});
+    const client = new Client({
+        token: process.env.SANDBOX0_TOKEN!,
+        baseUrl: process.env.SANDBOX0_BASE_URL || 'https://api.sandbox0.ai',
+    });
 
-const sandbox = await client.sandboxes.claim('dins', { hardTtl: 1800 });
+    const sandbox = await client.sandboxes.claim('dins', { hardTtl: 1800 });
 
-try {
-    const script = [
-        'set -e',
-        'docker rm -f test-redis test-postgres >/dev/null 2>&1 || true',
-        'docker run -d --name test-redis -p 6379:6379 redis:7-alpine',
-        'docker run -d --name test-postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=app_test -p 5432:5432 postgres:16-alpine',
-        'until docker exec test-redis redis-cli ping | grep -q PONG; do sleep 1; done',
-        'until docker exec test-postgres pg_isready -U postgres; do sleep 1; done',
-        "printf 'REDIS_URL=redis://127.0.0.1:6379\\\\n'",
-        "printf 'DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/app_test?sslmode=disable\\\\n'",
-    ].join('\\n');
+    try {
+        await sandbox.cmd('rm -f /tmp/sandbox0-test-databases.ready');
 
-    const result = await sandbox.cmd('/bin/sh -lc ' + JSON.stringify(script));
-    process.stdout.write(result.outputRaw);
-} finally {
-    await client.sandboxes.delete(sandbox.id);
-}`
+        const startScript = [
+            'set -e',
+            'rm -f /tmp/sandbox0-test-databases.ready',
+            'docker rm -f test-redis test-postgres >/dev/null 2>&1 || true',
+            'docker pull redis:7-alpine',
+            'docker pull postgres:16-alpine',
+            'docker run -d --name test-redis -p 6379:6379 redis:7-alpine',
+            'docker run -d --name test-postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=app_test -p 5432:5432 postgres:16-alpine',
+            'until docker exec test-redis redis-cli ping | grep -q PONG; do sleep 1; done',
+            'until docker exec test-postgres pg_isready -U postgres >/dev/null; do sleep 1; done',
+            'touch /tmp/sandbox0-test-databases.ready',
+        ].join('\\n');
+
+        const start = await sandbox.cmd('sh', {
+            command: ['/bin/sh', '-lc', startScript],
+            wait: false,
+            ttlSec: 1800,
+        });
+        try {
+            const readyCommand = 'test -f /tmp/sandbox0-test-databases.ready && printf READY';
+            const deadline = Date.now() + 300_000;
+            while (true) {
+                const result = await sandbox.cmd('sh', {
+                    command: ['/bin/sh', '-lc', readyCommand],
+                });
+                if (result.outputRaw.includes('READY')) {
+                    break;
+                }
+                if (Date.now() > deadline) {
+                    throw new Error('timed out waiting for test databases');
+                }
+                await new Promise((resolve) => setTimeout(resolve, 2000));
+            }
+
+            console.log('REDIS_URL=redis://127.0.0.1:6379');
+            console.log('DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/app_test?sslmode=disable');
+        } finally {
+            await sandbox.deleteContext(start.contextId);
+        }
+    } finally {
+        await client.sandboxes.delete(sandbox.id);
+    }
+}
+
+main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+});`
     },
     {
       label: "CLI",
@@ -143,9 +233,14 @@ try {
       code: `SANDBOX_ID="$(s0 -o json sandbox create --template dins --hard-ttl 1800 | jq -r '.ID')"
 trap 's0 sandbox delete "$SANDBOX_ID" >/dev/null 2>&1 || true' EXIT
 
-s0 sandbox exec "$SANDBOX_ID" -- /bin/sh -lc '
+s0 sandbox exec "$SANDBOX_ID" -- rm -f /tmp/sandbox0-test-databases.ready
+
+s0 sandbox exec "$SANDBOX_ID" --no-wait --ttl 1800 -- /bin/sh -lc '
 set -e
+rm -f /tmp/sandbox0-test-databases.ready
 docker rm -f test-redis test-postgres >/dev/null 2>&1 || true
+docker pull redis:7-alpine
+docker pull postgres:16-alpine
 docker run -d --name test-redis -p 6379:6379 redis:7-alpine
 docker run -d --name test-postgres \
   -e POSTGRES_PASSWORD=postgres \
@@ -154,9 +249,34 @@ docker run -d --name test-postgres \
   postgres:16-alpine
 until docker exec test-redis redis-cli ping | grep -q PONG; do sleep 1; done
 until docker exec test-postgres pg_isready -U postgres; do sleep 1; done
+touch /tmp/sandbox0-test-databases.ready
+'
+
+ready=0
+for _ in $(seq 1 150); do
+  if [ "$(s0 sandbox exec "$SANDBOX_ID" -- /bin/sh -lc 'test -f /tmp/sandbox0-test-databases.ready && printf READY')" = "READY" ]; then
+    ready=1
+    break
+  fi
+  sleep 2
+done
+if [ "$ready" -ne 1 ]; then
+  echo "Timed out waiting for test databases" >&2
+  exit 1
+fi
+
+db_urls="$(s0 sandbox exec "$SANDBOX_ID" -- /bin/sh -lc '
+set -e
+docker exec test-redis redis-cli ping | grep -q PONG
+docker exec test-postgres pg_isready -U postgres >/dev/null
 printf "REDIS_URL=redis://127.0.0.1:6379\\n"
 printf "DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/app_test?sslmode=disable\\n"
-'`
+')"
+if ! printf "%s" "$db_urls" | grep -q "^REDIS_URL="; then
+  echo "Test databases are not ready" >&2
+  exit 1
+fi
+printf "%s" "$db_urls"`
     }
   ]}
 />
@@ -197,9 +317,14 @@ Docker build cache also lives under `/var/lib/docker`, so this is best for tempo
     "docker run --rm sandbox0-dins-test",
 }, "\\n")
 
-result, err := sandbox.Cmd(ctx, "/bin/sh -lc "+strconv.Quote(script))
+result, err := sandbox.Cmd(ctx, "sh",
+    sandbox0.WithCommand([]string{"/bin/sh", "-lc", script}),
+)
 if err != nil {
     log.Fatal(err)
+}
+if !strings.Contains(result.OutputRaw, "hello from docker in sandbox") {
+    log.Fatalf("docker build test failed:\\n%s", result.OutputRaw)
 }
 fmt.Print(result.OutputRaw)`
     },
@@ -223,7 +348,12 @@ docker build -t sandbox0-dins-test .
 docker run --rm sandbox0-dins-test
 """
 
-result = sandbox.cmd("/bin/sh -lc " + shlex.quote(script))
+result = sandbox.cmd(
+    "sh",
+    CmdOptions(command=["/bin/sh", "-lc", script]),
+)
+if "hello from docker in sandbox" not in result.output_raw:
+    raise RuntimeError("docker build test failed:\\n" + result.output_raw)
 print(result.output_raw, end="")`
     },
     {
@@ -246,13 +376,18 @@ print(result.output_raw, end="")`
     'docker run --rm sandbox0-dins-test',
 ].join('\\n');
 
-const result = await sandbox.cmd('/bin/sh -lc ' + JSON.stringify(script));
+const result = await sandbox.cmd('sh', {
+    command: ['/bin/sh', '-lc', script],
+});
+if (!result.outputRaw.includes('hello from docker in sandbox')) {
+    throw new Error('docker build test failed:\\n' + result.outputRaw);
+}
 process.stdout.write(result.outputRaw);`
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 sandbox exec "$SANDBOX_ID" -- /bin/sh -lc '
+      code: `s0 sandbox exec "$SANDBOX_ID" --stream -- /bin/sh -lc '
 set -e
 cat > main.go <<'"'"'EOF'"'"'
 package main
@@ -279,6 +414,8 @@ docker run --rm sandbox0-dins-test
 - Containers launched by Docker are sandbox-local. Start test dependencies with `-p` and connect to `127.0.0.1` from commands inside the sandbox.
 - Use Sandbox Services when a containerized HTTP service needs to be reachable from outside the sandbox.
 - Docker state is not durable. Use Sandbox Volumes for source, generated files, or database dumps that must survive sandbox cleanup.
+- Pulling images can take longer than a single synchronous command request. Start long Docker setup commands asynchronously, then poll readiness with short commands.
+- Nested Kubernetes tools such as kind can run in a Docker in Sandbox environment, but node images and cluster data consume the sandbox's ephemeral disk.
 - Long-running containers count against the sandbox resource limits. Stop containers when a test run finishes if the sandbox will stay alive.
 
 ---

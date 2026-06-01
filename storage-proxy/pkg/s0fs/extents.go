@@ -9,14 +9,6 @@ func cloneExtents(extents []FileExtent) []FileExtent {
 	return append([]FileExtent(nil), extents...)
 }
 
-func extentsLength(extents []FileExtent) uint64 {
-	var size uint64
-	for _, extent := range extents {
-		size += extent.Length
-	}
-	return size
-}
-
 func sliceExtents(extents []FileExtent, start, end uint64) []FileExtent {
 	if end <= start || len(extents) == 0 {
 		return nil

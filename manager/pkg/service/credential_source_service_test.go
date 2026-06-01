@@ -156,11 +156,11 @@ func TestCredentialSourceServicePutSSHPrivateKeySource(t *testing.T) {
 	}
 }
 
-func TestCredentialSourceServicePutHashiCorpVaultSource(t *testing.T) {
+func TestCredentialSourceServiceRejectsExplicitStorageKind(t *testing.T) {
 	store := newMemorySourceStore()
 	svc := NewCredentialSourceService(store, zap.NewNop())
 
-	record, err := svc.PutSource(context.Background(), "team-1", &egressauth.CredentialSourceWriteRequest{
+	_, err := svc.PutSource(context.Background(), "team-1", &egressauth.CredentialSourceWriteRequest{
 		Name:         "corp-proxy",
 		ResolverKind: "static_username_password",
 		StorageKind:  egressauth.CredentialSourceStorageKindHashiCorpVault,
@@ -171,22 +171,18 @@ func TestCredentialSourceServicePutHashiCorpVaultSource(t *testing.T) {
 			},
 		},
 	})
-	if err != nil {
-		t.Fatalf("put hashicorp vault source: %v", err)
-	}
-	if record.StorageKind != egressauth.CredentialSourceStorageKindHashiCorpVault {
-		t.Fatalf("storage kind = %q, want hashicorp_vault", record.StorageKind)
+	if err == nil {
+		t.Fatal("expected explicit storageKind to be rejected")
 	}
 }
 
-func TestCredentialSourceServicePutHashiCorpVaultExternalRef(t *testing.T) {
+func TestCredentialSourceServiceRejectsExternalRef(t *testing.T) {
 	store := newMemorySourceStore()
 	svc := NewCredentialSourceService(store, zap.NewNop())
 
 	_, err := svc.PutSource(context.Background(), "team-1", &egressauth.CredentialSourceWriteRequest{
 		Name:         "corp-proxy",
 		ResolverKind: "static_username_password",
-		StorageKind:  egressauth.CredentialSourceStorageKindHashiCorpVault,
 		ExternalRef: &egressauth.CredentialSourceExternalRefSpec{
 			Path: "sandbox0/credential-sources/team-1/corp-proxy",
 			Fields: map[string]string{
@@ -195,25 +191,8 @@ func TestCredentialSourceServicePutHashiCorpVaultExternalRef(t *testing.T) {
 			},
 		},
 	})
-	if err != nil {
-		t.Fatalf("put hashicorp vault externalRef: %v", err)
-	}
-}
-
-func TestCredentialSourceServiceRejectsExternalRefStorageKind(t *testing.T) {
-	store := newMemorySourceStore()
-	svc := NewCredentialSourceService(store, zap.NewNop())
-
-	_, err := svc.PutSource(context.Background(), "team-1", &egressauth.CredentialSourceWriteRequest{
-		Name:         "corp-proxy",
-		ResolverKind: "static_username_password",
-		StorageKind:  egressauth.CredentialSourceStorageKindExternalRef,
-		ExternalRef: &egressauth.CredentialSourceExternalRefSpec{
-			Path: "sandbox0/credential-sources/team-1/corp-proxy",
-		},
-	})
 	if err == nil {
-		t.Fatal("expected external_ref storageKind to be rejected")
+		t.Fatal("expected externalRef to be rejected")
 	}
 }
 

@@ -5890,8 +5890,6 @@ components:
           type: string
         resolverKind:
           $ref: "#/components/schemas/CredentialSourceResolverKind"
-        storageKind:
-          $ref: "#/components/schemas/CredentialSourceStorageKind"
         currentVersion:
           type: integer
           format: int64
@@ -5913,20 +5911,12 @@ components:
           type: string
         resolverKind:
           $ref: "#/components/schemas/CredentialSourceResolverKind"
-        storageKind:
-          $ref: "#/components/schemas/CredentialSourceStorageKind"
         spec:
           $ref: "#/components/schemas/CredentialSourceWriteSpec"
-        externalRef:
-          $ref: "#/components/schemas/CredentialSourceExternalRefSpec"
       required: [name, resolverKind]
     CredentialSourceResolverKind:
       type: string
       enum: [static_headers, static_tls_client_certificate, static_username_password, static_ssh_private_key]
-    CredentialSourceStorageKind:
-      type: string
-      enum: [encrypted_pg, hashicorp_vault]
-      description: Secret storage backend. Defaults to encrypted_pg.
     CredentialSourceWriteSpec:
       type: object
       properties:
@@ -5938,32 +5928,6 @@ components:
           $ref: "#/components/schemas/StaticUsernamePasswordSourceSpec"
         staticSSHPrivateKey:
           $ref: "#/components/schemas/StaticSSHPrivateKeySourceSpec"
-    CredentialSourceExternalRefSpec:
-      type: object
-      description: Reference to credential material already stored in HashiCorp Vault or a compatible backend.
-      properties:
-        provider:
-          type: string
-          enum: [hashicorp_vault]
-          default: hashicorp_vault
-        connection:
-          type: string
-          description: Manager Vault connection name. Defaults to default.
-        mount:
-          type: string
-          description: KV v2 mount path. Defaults to the configured connection mount.
-        path:
-          type: string
-          description: KV v2 secret path under the mount.
-        version:
-          type: string
-          description: Optional KV v2 version. Omit or use latest for the current version.
-        fields:
-          type: object
-          description: Maps logical credential fields to Vault data keys when referencing existing secrets.
-          additionalProperties:
-            type: string
-      required: [path]
     StaticHeadersSourceSpec:
       type: object
       properties:

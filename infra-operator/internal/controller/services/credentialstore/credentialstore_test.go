@@ -64,7 +64,7 @@ func TestApplyManagerCredentialStoreConfigForBuiltinVault(t *testing.T) {
 	if err := ApplyManagerCredentialStoreConfig(ctx, resources, common.NewObjectScope(infra), cfg); err != nil {
 		t.Fatalf("apply manager config: %v", err)
 	}
-	if cfg.CredentialStore.DefaultStorageKind != "encrypted_pg" {
+	if cfg.CredentialStore.DefaultStorageKind != "hashicorp_vault" {
 		t.Fatalf("default storage kind = %q", cfg.CredentialStore.DefaultStorageKind)
 	}
 	if cfg.CredentialStore.EncryptedPG.KeyFile != EncryptedPGKeyFilePath {
@@ -87,6 +87,24 @@ func TestApplyManagerCredentialStoreConfigForBuiltinVault(t *testing.T) {
 	mounts, volumes := ManagerCredentialStoreVolumes(common.NewObjectScope(infra), cfg)
 	if len(mounts) != 2 || len(volumes) != 2 {
 		t.Fatalf("mounts=%d volumes=%d, want 2/2", len(mounts), len(volumes))
+	}
+}
+
+func TestApplyManagerCredentialStoreConfigDefaultsToEncryptedPG(t *testing.T) {
+	ctx := context.Background()
+	infra, resources := testCredentialStoreResources(t)
+	cfg := &apiconfig.ManagerConfig{}
+	if err := ApplyManagerCredentialStoreConfig(ctx, resources, common.NewObjectScope(infra), cfg); err != nil {
+		t.Fatalf("apply manager config: %v", err)
+	}
+	if cfg.CredentialStore.DefaultStorageKind != "encrypted_pg" {
+		t.Fatalf("default storage kind = %q", cfg.CredentialStore.DefaultStorageKind)
+	}
+	if cfg.CredentialStore.EncryptedPG.KeyFile != EncryptedPGKeyFilePath {
+		t.Fatalf("key file = %q", cfg.CredentialStore.EncryptedPG.KeyFile)
+	}
+	if len(cfg.CredentialStore.Vault.Connections) != 0 {
+		t.Fatalf("vault connections = %d, want 0", len(cfg.CredentialStore.Vault.Connections))
 	}
 }
 

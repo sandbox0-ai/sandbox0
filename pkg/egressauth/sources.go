@@ -80,7 +80,7 @@ type CredentialSourceWriteRequest struct {
 type CredentialSourceMetadata struct {
 	Name           string    `json:"name"`
 	ResolverKind   string    `json:"resolverKind"`
-	StorageKind    string    `json:"storageKind,omitempty"`
+	StorageKind    string    `json:"-"`
 	CurrentVersion int64     `json:"currentVersion"`
 	Status         string    `json:"status"`
 	CreatedAt      time.Time `json:"createdAt,omitempty"`

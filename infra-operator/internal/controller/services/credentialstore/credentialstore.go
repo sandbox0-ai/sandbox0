@@ -553,11 +553,15 @@ func ApplyManagerCredentialStoreConfig(ctx context.Context, resources *common.Re
 	if cfg == nil {
 		return nil
 	}
+	infra := scope.Owner()
 	keyRef, err := EnsureEncryptedPGKey(ctx, resources, scope)
 	if err != nil {
 		return err
 	}
 	cfg.CredentialStore.DefaultStorageKind = "encrypted_pg"
+	if infrav1alpha1.IsCredentialVaultEnabled(infra) {
+		cfg.CredentialStore.DefaultStorageKind = "hashicorp_vault"
+	}
 	cfg.CredentialStore.EncryptedPG.KeyID = keyRef.KeyID
 	cfg.CredentialStore.EncryptedPG.KeyFile = EncryptedPGKeyFilePath
 	cfg.CredentialStore.EncryptedPG.Key = ""
@@ -566,7 +570,6 @@ func ApplyManagerCredentialStoreConfig(ctx context.Context, resources *common.Re
 		cfg.CredentialStore.EncryptedPG.BackfillOnStart = &backfill
 	}
 
-	infra := scope.Owner()
 	cfg.CredentialStore.Vault.Connections = nil
 	if !infrav1alpha1.IsCredentialVaultEnabled(infra) || infra.Spec.CredentialVault == nil {
 		return nil

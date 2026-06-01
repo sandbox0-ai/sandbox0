@@ -374,7 +374,7 @@ func assertSSHTransparentEgressAuthProxy(env *framework.ScenarioEnv, session *e2
 	created, err := session.CreateCredentialSource(env.TestCtx.Context, GinkgoT(), apispec.CredentialSourceWriteRequest{
 		Name:         sourceName,
 		ResolverKind: apispec.StaticSshPrivateKey,
-		Spec: apispec.CredentialSourceWriteSpec{
+		Spec: &apispec.CredentialSourceWriteSpec{
 			StaticSSHPrivateKey: &apispec.StaticSSHPrivateKeySourceSpec{
 				PrivateKeyPem: ptrTo(sshFixturePrivateKey),
 			},

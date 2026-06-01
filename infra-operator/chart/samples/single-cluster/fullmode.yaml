@@ -86,14 +86,14 @@ spec:
   #       secretKeyKey: secretAccessKey
   builtinTemplates:
     - templateId: default
-      image: sandbox0ai/otemplates:default-v0.1.0
+      image: sandbox0ai/otemplates:default-v0.2.0
       displayName: Default
       description: Builtin template installed by infra-operator.
       pool:
         minIdle: 1
         maxIdle: 5
     - templateId: dins
-      image: sandbox0ai/otemplates:default-v0.1.0
+      image: sandbox0ai/otemplates:default-v0.2.0
       displayName: Docker in Sandbox
       description: Builtin Docker in Sandbox template installed by infra-operator.
       pool:

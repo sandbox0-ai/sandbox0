@@ -70,7 +70,6 @@ jobs:
           kind-config: tests/e2e/kind-config.yaml
           kind-cluster-name: ${{ env.KIND_CLUSTER_NAME }}
           cache-key-suffix: amd64
-          build-local-template-image: "true"
 
       - name: Install infra-operator
         run: |

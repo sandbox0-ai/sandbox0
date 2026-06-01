@@ -2,6 +2,9 @@ package credentialstore
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -107,6 +110,43 @@ func TestValidateExternalCredentialVault(t *testing.T) {
 	}
 	if err := ValidateExternalCredentialVault(ctx, resources.Client, infra); err != nil {
 		t.Fatalf("validate external vault: %v", err)
+	}
+}
+
+func TestEnsureKV2MountCreatesMissingOpenBaoMount(t *testing.T) {
+	ctx := context.Background()
+	var created bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/sys/mounts/secret" && r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"errors":["No secret engine mount at secret/"]}`))
+			return
+		}
+		if r.URL.Path == "/v1/sys/mounts/secret" && r.Method == http.MethodPost {
+			var body struct {
+				Type    string            `json:"type"`
+				Options map[string]string `json:"options"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode mount request: %v", err)
+			}
+			if body.Type != "kv" || body.Options["version"] != "2" {
+				t.Fatalf("unexpected mount body: %#v", body)
+			}
+			created = true
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	api := newOpenBaoAPI(server.URL)
+	if err := api.ensureKV2Mount(ctx, "root-token", "secret"); err != nil {
+		t.Fatalf("ensure mount: %v", err)
+	}
+	if !created {
+		t.Fatal("expected missing mount to be created")
 	}
 }
 

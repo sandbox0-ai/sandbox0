@@ -961,7 +961,7 @@ func (a *openBaoAPI) ensureKV2Mount(ctx context.Context, token, mount string) er
 		Type    string            `json:"type"`
 		Options map[string]string `json:"options"`
 	}
-	status, _, err := a.do(ctx, http.MethodGet, "/v1/sys/mounts/"+mount, token, nil, &existing, http.StatusOK, http.StatusNotFound)
+	status, data, err := a.do(ctx, http.MethodGet, "/v1/sys/mounts/"+mount, token, nil, &existing, http.StatusOK, http.StatusNotFound, http.StatusBadRequest)
 	if err != nil {
 		return fmt.Errorf("read credential vault mount %q: %w", mount, err)
 	}
@@ -970,6 +970,9 @@ func (a *openBaoAPI) ensureKV2Mount(ctx context.Context, token, mount string) er
 			return fmt.Errorf("credential vault mount %q exists but is not kv-v2", mount)
 		}
 		return nil
+	}
+	if status == http.StatusBadRequest && !isMissingCredentialVaultMount(data) {
+		return fmt.Errorf("read credential vault mount %q: %s", mount, strings.TrimSpace(string(data)))
 	}
 	body := map[string]any{
 		"type":    "kv",
@@ -983,6 +986,10 @@ func (a *openBaoAPI) ensureKV2Mount(ctx context.Context, token, mount string) er
 		return fmt.Errorf("enable credential vault kv-v2 mount %q: %s", mount, strings.TrimSpace(string(data)))
 	}
 	return nil
+}
+
+func isMissingCredentialVaultMount(data []byte) bool {
+	return strings.Contains(strings.ToLower(string(data)), "no secret engine mount")
 }
 
 func (a *openBaoAPI) writeManagerPolicy(ctx context.Context, token, mount string) error {

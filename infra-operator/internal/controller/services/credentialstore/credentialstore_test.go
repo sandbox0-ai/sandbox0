@@ -70,9 +70,6 @@ func TestApplyManagerCredentialStoreConfigForBuiltinVault(t *testing.T) {
 	if cfg.CredentialStore.EncryptedPG.KeyFile != EncryptedPGKeyFilePath {
 		t.Fatalf("key file = %q", cfg.CredentialStore.EncryptedPG.KeyFile)
 	}
-	if cfg.CredentialStore.EncryptedPG.BackfillOnStart == nil || !*cfg.CredentialStore.EncryptedPG.BackfillOnStart {
-		t.Fatal("expected backfill_on_start true")
-	}
 	if len(cfg.CredentialStore.Vault.Connections) != 1 {
 		t.Fatalf("vault connections = %d, want 1", len(cfg.CredentialStore.Vault.Connections))
 	}

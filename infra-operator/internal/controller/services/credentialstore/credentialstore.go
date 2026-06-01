@@ -565,10 +565,6 @@ func ApplyManagerCredentialStoreConfig(ctx context.Context, resources *common.Re
 	cfg.CredentialStore.EncryptedPG.KeyID = keyRef.KeyID
 	cfg.CredentialStore.EncryptedPG.KeyFile = EncryptedPGKeyFilePath
 	cfg.CredentialStore.EncryptedPG.Key = ""
-	if cfg.CredentialStore.EncryptedPG.BackfillOnStart == nil {
-		backfill := true
-		cfg.CredentialStore.EncryptedPG.BackfillOnStart = &backfill
-	}
 
 	cfg.CredentialStore.Vault.Connections = nil
 	if !infrav1alpha1.IsCredentialVaultEnabled(infra) || infra.Spec.CredentialVault == nil {

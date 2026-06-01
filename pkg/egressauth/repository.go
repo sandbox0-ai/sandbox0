@@ -627,15 +627,26 @@ func (r *Repository) prepareSourceVersionPayload(ctx context.Context, teamID str
 	}
 }
 
-func (r *Repository) BackfillPlaintextSources(ctx context.Context) (int64, error) {
+// BackfillPlaintextSources rewrites legacy plaintext_pg source versions into the requested backend.
+func (r *Repository) BackfillPlaintextSources(ctx context.Context, targetStorageKind string) (int64, error) {
 	if r == nil || r.pool == nil {
 		return 0, fmt.Errorf("binding repository pool is not configured")
 	}
-	if r.secretCodec == nil {
-		return 0, fmt.Errorf("encrypted_pg credential source storage is not configured")
+	targetStorageKind = normalizeStorageKind(targetStorageKind, CredentialSourceStorageKindEncryptedPG)
+	switch targetStorageKind {
+	case CredentialSourceStorageKindEncryptedPG:
+		if r.secretCodec == nil {
+			return 0, fmt.Errorf("encrypted_pg credential source storage is not configured")
+		}
+	case CredentialSourceStorageKindHashiCorpVault:
+		if r.vaultResolver == nil {
+			return 0, fmt.Errorf("hashicorp_vault credential source storage is not configured")
+		}
+	default:
+		return 0, fmt.Errorf("credential source backfill target %q is not supported", targetStorageKind)
 	}
 	rows, err := r.pool.Query(ctx, `
-		SELECT v.source_id, s.team_id, v.version, s.resolver_kind, v.spec_json
+		SELECT v.source_id, s.team_id, s.name, v.version, s.resolver_kind, v.spec_json
 		FROM credential_source_versions v
 		JOIN credential_sources s ON s.id = v.source_id
 		WHERE v.storage_kind = $1
@@ -649,6 +660,7 @@ func (r *Repository) BackfillPlaintextSources(ctx context.Context) (int64, error
 	type rowData struct {
 		sourceID     int64
 		teamID       string
+		name         string
 		version      int64
 		resolverKind string
 		specJSON     []byte
@@ -656,7 +668,7 @@ func (r *Repository) BackfillPlaintextSources(ctx context.Context) (int64, error
 	var pending []rowData
 	for rows.Next() {
 		var row rowData
-		if err := rows.Scan(&row.sourceID, &row.teamID, &row.version, &row.resolverKind, &row.specJSON); err != nil {
+		if err := rows.Scan(&row.sourceID, &row.teamID, &row.name, &row.version, &row.resolverKind, &row.specJSON); err != nil {
 			return 0, fmt.Errorf("scan plaintext credential source: %w", err)
 		}
 		pending = append(pending, row)
@@ -671,17 +683,22 @@ func (r *Repository) BackfillPlaintextSources(ctx context.Context) (int64, error
 		if err := json.Unmarshal(row.specJSON, &spec); err != nil {
 			return backfilled, fmt.Errorf("unmarshal plaintext credential source %d/%d: %w", row.sourceID, row.version, err)
 		}
-		payload, err := r.secretCodec.Encrypt(ctx, credentialSourceAAD(row.teamID, row.sourceID, row.version, row.resolverKind), spec)
+		record := &CredentialSourceWriteRequest{
+			Name:         row.name,
+			ResolverKind: row.resolverKind,
+			Spec:         spec,
+		}
+		specJSON, storagePayload, err := r.prepareSourceVersionPayload(ctx, row.teamID, row.sourceID, row.version, row.resolverKind, targetStorageKind, record)
 		if err != nil {
-			return backfilled, fmt.Errorf("encrypt credential source %d/%d: %w", row.sourceID, row.version, err)
+			return backfilled, fmt.Errorf("prepare credential source %d/%d backfill payload: %w", row.sourceID, row.version, err)
 		}
 		tag, err := r.pool.Exec(ctx, `
 			UPDATE credential_source_versions
 			SET storage_kind = $1,
 			    storage_payload = $2,
-			    spec_json = '{}'::jsonb
-			WHERE source_id = $3 AND version = $4 AND storage_kind = $5
-		`, CredentialSourceStorageKindEncryptedPG, payload, row.sourceID, row.version, CredentialSourceStorageKindPlaintextPG)
+			    spec_json = $3
+			WHERE source_id = $4 AND version = $5 AND storage_kind = $6
+		`, targetStorageKind, storagePayload, specJSON, row.sourceID, row.version, CredentialSourceStorageKindPlaintextPG)
 		if err != nil {
 			return backfilled, fmt.Errorf("update credential source %d/%d: %w", row.sourceID, row.version, err)
 		}

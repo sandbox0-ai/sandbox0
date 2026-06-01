@@ -59,15 +59,22 @@ func main() {
 	logger := initLogger(cfg.LogLevel)
 	defer logger.Sync()
 
+	// Create context that cancels on signal
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	if len(os.Args) > 1 && os.Args[1] == "credential-store-backfill" {
+		if err := runCredentialStoreBackfillCommand(ctx, cfg, logger, os.Args[2:]); err != nil {
+			logger.Fatal("Failed to backfill credential store", zap.Error(err))
+		}
+		return
+	}
+
 	logger.Info("Starting Manager",
 		zap.String("version", "v0.1.0"),
 		zap.Int("httpPort", cfg.HTTPPort),
 		zap.Int("metricsPort", cfg.MetricsPort),
 	)
-
-	// Create context that cancels on signal
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
 	// Initialize observability provider
 	obsProvider, err := observability.New(observability.Config{
@@ -655,17 +662,44 @@ func buildCredentialStore(ctx context.Context, pool *pgxpool.Pool, cfg *config.M
 		egressauth.WithSecretCodec(codec),
 		egressauth.WithVaultResolver(vaultResolver),
 	)
-	backfillOnStart := storeCfg.EncryptedPG.BackfillOnStart == nil || *storeCfg.EncryptedPG.BackfillOnStart
-	if backfillOnStart {
-		count, err := repo.BackfillPlaintextSources(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("backfill plaintext credential sources: %w", err)
-		}
-		if count > 0 {
-			logger.Info("Backfilled plaintext credential sources", zap.Int64("count", count))
-		}
-	}
 	return repo, nil
+}
+
+func runCredentialStoreBackfillCommand(ctx context.Context, cfg *config.ManagerConfig, logger *zap.Logger, args []string) error {
+	targetStorageKind := egressauth.CredentialSourceStorageKindEncryptedPG
+	if len(args) > 0 {
+		targetStorageKind = strings.TrimSpace(args[0])
+	}
+	if len(args) > 1 || targetStorageKind == "" {
+		return fmt.Errorf("usage: manager credential-store-backfill [encrypted_pg|hashicorp_vault]")
+	}
+	if cfg == nil {
+		cfg = &config.ManagerConfig{}
+	}
+	if cfg.DatabaseURL == "" {
+		return fmt.Errorf("DATABASE_URL is required for credential store backfill")
+	}
+
+	logger.Info("Starting credential source backfill", zap.String("target_storage_kind", targetStorageKind))
+	pool, err := initDatabase(ctx, cfg.DatabaseURL, cfg.DatabaseMaxConns, cfg.DatabaseMinConns, logger, nil)
+	if err != nil {
+		return fmt.Errorf("connect database: %w", err)
+	}
+	defer pool.Close()
+
+	if err := runEgressAuthMigrations(ctx, pool, logger); err != nil {
+		return err
+	}
+	repo, err := buildCredentialStore(ctx, pool, cfg, logger)
+	if err != nil {
+		return err
+	}
+	count, err := repo.BackfillPlaintextSources(ctx, targetStorageKind)
+	if err != nil {
+		return err
+	}
+	logger.Info("Credential source backfill completed", zap.String("target_storage_kind", targetStorageKind), zap.Int64("count", count))
+	return nil
 }
 
 func loadCredentialEncryptionKey(cfg config.CredentialEncryptedPGConfig) ([]byte, error) {
@@ -696,12 +730,16 @@ func runSandboxStoreMigrations(ctx context.Context, pool *pgxpool.Pool, logger *
 
 // initDatabase initializes the database connection pool
 func initDatabase(ctx context.Context, databaseURL string, maxConns, minConns int32, logger *zap.Logger, obsProvider *observability.Provider) (*pgxpool.Pool, error) {
+	var configModifier func(*pgxpool.Config) error
+	if obsProvider != nil {
+		configModifier = obsProvider.Pgx.ConfigModifier()
+	}
 	pool, err := dbpool.New(ctx, dbpool.Options{
 		DatabaseURL:    databaseURL,
 		MaxConns:       maxConns,
 		MinConns:       minConns,
 		Schema:         "scheduler",
-		ConfigModifier: obsProvider.Pgx.ConfigModifier(),
+		ConfigModifier: configModifier,
 	})
 	if err != nil {
 		return nil, err

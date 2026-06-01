@@ -189,10 +189,9 @@ type CredentialStoreConfig struct {
 }
 
 type CredentialEncryptedPGConfig struct {
-	KeyID           string `yaml:"key_id" json:"-"`
-	KeyFile         string `yaml:"key_file" json:"-"`
-	Key             string `yaml:"key" json:"-"`
-	BackfillOnStart *bool  `yaml:"backfill_on_start" json:"-"`
+	KeyID   string `yaml:"key_id" json:"-"`
+	KeyFile string `yaml:"key_file" json:"-"`
+	Key     string `yaml:"key" json:"-"`
 }
 
 type CredentialVaultRuntimeConfig struct {
@@ -430,10 +429,6 @@ func LoadManagerConfig() *ManagerConfig {
 	}
 	if cfg.CredentialStore.DefaultStorageKind == "" {
 		cfg.CredentialStore.DefaultStorageKind = "encrypted_pg"
-	}
-	if cfg.CredentialStore.EncryptedPG.BackfillOnStart == nil {
-		defaultBackfill := true
-		cfg.CredentialStore.EncryptedPG.BackfillOnStart = &defaultBackfill
 	}
 	return cfg
 }

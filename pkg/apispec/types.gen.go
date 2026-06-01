@@ -805,7 +805,7 @@ type CredentialSourceResolverKind string
 type CredentialSourceWriteRequest struct {
 	Name         string                       `json:"name"`
 	ResolverKind CredentialSourceResolverKind `json:"resolverKind"`
-	Spec         *CredentialSourceWriteSpec   `json:"spec,omitempty"`
+	Spec         CredentialSourceWriteSpec    `json:"spec"`
 }
 
 // CredentialSourceWriteSpec defines model for CredentialSourceWriteSpec.

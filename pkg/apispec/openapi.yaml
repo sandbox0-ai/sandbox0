@@ -5913,7 +5913,7 @@ components:
           $ref: "#/components/schemas/CredentialSourceResolverKind"
         spec:
           $ref: "#/components/schemas/CredentialSourceWriteSpec"
-      required: [name, resolverKind]
+      required: [name, resolverKind, spec]
     CredentialSourceResolverKind:
       type: string
       enum: [static_headers, static_tls_client_certificate, static_username_password, static_ssh_private_key]

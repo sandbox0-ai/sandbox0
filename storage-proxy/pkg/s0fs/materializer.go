@@ -23,7 +23,10 @@ const (
 	segmentDir        = "segments"
 )
 
-const defaultSegmentCacheMaxBytes int64 = 64 << 20
+const (
+	DefaultSegmentTargetSizeBytes uint64 = 4 << 20
+	defaultSegmentCacheMaxBytes   int64  = 64 << 20
+)
 
 var segmentCacheMaxBytes int64 = defaultSegmentCacheMaxBytes
 
@@ -45,6 +48,7 @@ type Materializer struct {
 	headStore            HeadStore
 	encryption           *EncryptionConfig
 	cache                *segmentCache
+	segmentTargetSize    uint64
 }
 
 func NewMaterializer(volumeID string, store objectstore.Store, headStore HeadStore, resolvers ...ObjectStoreResolver) *Materializer {
@@ -61,6 +65,7 @@ func NewMaterializer(volumeID string, store objectstore.Store, headStore HeadSto
 		objectStoreForVolume: resolver,
 		headStore:            headStore,
 		cache:                newSegmentCache(segmentCacheMaxBytes),
+		segmentTargetSize:    DefaultSegmentTargetSizeBytes,
 	}
 }
 
@@ -68,6 +73,16 @@ func (m *Materializer) SetEncryption(encryption *EncryptionConfig) {
 	if m != nil {
 		m.encryption = encryption
 	}
+}
+
+func (m *Materializer) SetSegmentTargetSize(size uint64) {
+	if m == nil {
+		return
+	}
+	if size == 0 {
+		size = DefaultSegmentTargetSizeBytes
+	}
+	m.segmentTargetSize = size
 }
 
 func (m *Materializer) Enabled() bool {
@@ -100,20 +115,7 @@ func (m *Materializer) Materialize(ctx context.Context, state *SnapshotState, ex
 		return nil, fmt.Errorf("%w: manifest seq %d must advance beyond %d", ErrCommittedHeadConflict, nextSeq, expectedManifestSeq)
 	}
 
-	segment, fileExtents, err := buildSegment(nextSeq, m.volumeID, inline)
-	if err != nil {
-		return nil, err
-	}
-
-	storedSegmentPayload, segmentEncryption, err := m.encryption.encryptSegment(m.volumeID, segment)
-	if err != nil {
-		return nil, err
-	}
-	if segment != nil {
-		segment.Encryption = segmentEncryption
-	}
-
-	manifestState, err := buildManifestState(inline, segment, fileExtents)
+	manifestState, segments, err := buildMaterializedState(nextSeq, m.volumeID, inline, m.segmentTargetSize)
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +128,15 @@ func (m *Materializer) Materialize(ctx context.Context, state *SnapshotState, ex
 		State:         manifestState,
 	}
 
-	if len(segment.Payload) > 0 {
+	for _, segment := range segments {
+		storedSegmentPayload, segmentEncryption, err := m.encryption.encryptSegment(m.volumeID, segment)
+		if err != nil {
+			return nil, err
+		}
+		segment.Encryption = segmentEncryption
+		if meta := manifest.State.Segments[segment.ID]; meta != nil {
+			meta.Encryption = segmentEncryption
+		}
 		if err := m.putBytes(ctx, segment.Key, storedSegmentPayload); err != nil {
 			return nil, err
 		}
@@ -274,49 +284,7 @@ type materializedSegment struct {
 	Encryption *SegmentEncryption
 }
 
-func buildSegment(manifestSeq uint64, volumeID string, state *SnapshotState) (*materializedSegment, map[uint64][]FileExtent, error) {
-	segmentID := fmt.Sprintf("%020d-0", manifestSeq)
-	segmentKey := fmt.Sprintf("%s/%s.bin", segmentDir, segmentID)
-
-	inodes := make([]uint64, 0, len(state.Data))
-	for inode, payload := range state.Data {
-		if len(payload) == 0 {
-			continue
-		}
-		if node := state.Nodes[inode]; node == nil || node.Type == TypeDirectory {
-			continue
-		}
-		inodes = append(inodes, inode)
-	}
-	sort.Slice(inodes, func(i, j int) bool { return inodes[i] < inodes[j] })
-
-	var buf bytes.Buffer
-	files := make(map[uint64][]FileExtent, len(inodes))
-	for _, inode := range inodes {
-		payload := state.Data[inode]
-		offset := uint64(buf.Len())
-		if _, err := buf.Write(payload); err != nil {
-			return nil, nil, fmt.Errorf("write segment buffer: %w", err)
-		}
-		files[inode] = []FileExtent{{
-			SegmentID: segmentID,
-			Offset:    offset,
-			Length:    uint64(len(payload)),
-		}}
-	}
-
-	sum := sha256.Sum256(buf.Bytes())
-	segment := &materializedSegment{
-		ID:       segmentID,
-		VolumeID: volumeID,
-		Key:      segmentKey,
-		Payload:  buf.Bytes(),
-		SHA256:   hex.EncodeToString(sum[:]),
-	}
-	return segment, files, nil
-}
-
-func buildManifestState(state *SnapshotState, segment *materializedSegment, hotFiles map[uint64][]FileExtent) (*SnapshotState, error) {
+func buildMaterializedState(manifestSeq uint64, volumeID string, state *SnapshotState, targetSize uint64) (*SnapshotState, []*materializedSegment, error) {
 	manifestState := &SnapshotState{
 		NextSeq:   state.NextSeq,
 		NextInode: state.NextInode,
@@ -327,45 +295,179 @@ func buildManifestState(state *SnapshotState, segment *materializedSegment, hotF
 		Segments:  make(map[string]*Segment),
 	}
 
-	hotInodes := make(map[uint64]struct{}, len(state.Data))
+	builder := newSegmentBuilder(manifestSeq, volumeID, targetSize)
+	inodes := make([]uint64, 0, len(state.Data)+len(state.ColdFiles))
+	seen := make(map[uint64]struct{}, len(state.Data)+len(state.ColdFiles))
 	for inode := range state.Data {
-		hotInodes[inode] = struct{}{}
+		seen[inode] = struct{}{}
+		inodes = append(inodes, inode)
 	}
-
 	for inode, extents := range state.ColdFiles {
-		if _, hot := hotInodes[inode]; hot {
+		if len(extents) == 0 {
 			continue
 		}
-		if state.Nodes[inode] == nil {
+		if _, ok := seen[inode]; !ok {
+			seen[inode] = struct{}{}
+			inodes = append(inodes, inode)
+		}
+	}
+	sort.Slice(inodes, func(i, j int) bool { return inodes[i] < inodes[j] })
+
+	for _, inode := range inodes {
+		node := state.Nodes[inode]
+		if node == nil || node.Type == TypeDirectory {
 			continue
 		}
-		manifestState.ColdFiles[inode] = append([]FileExtent(nil), extents...)
-		for _, extent := range extents {
-			existing := state.Segments[extent.SegmentID]
-			if existing == nil {
-				return nil, fmt.Errorf("%w: missing retained segment %s", ErrInvalidInput, extent.SegmentID)
+		var fileExtents []FileExtent
+		if payload, ok := state.Data[inode]; ok && len(payload) > 0 {
+			extents, err := builder.append(payload)
+			if err != nil {
+				return nil, nil, err
 			}
-			manifestState.Segments[extent.SegmentID] = cloneSegment(existing)
+			fileExtents = append(fileExtents, extents...)
+		} else {
+			extents, err := materializeFileExtents(builder, state, manifestState, inode)
+			if err != nil {
+				return nil, nil, err
+			}
+			fileExtents = append(fileExtents, extents...)
+		}
+		fileExtents = coalesceExtents(fileExtents)
+		if len(fileExtents) > 0 {
+			manifestState.ColdFiles[inode] = fileExtents
 		}
 	}
 
-	for inode, extents := range hotFiles {
-		if state.Nodes[inode] == nil {
+	segments := builder.finish()
+	for _, segment := range segments {
+		manifestState.Segments[segment.ID] = &Segment{
+			ID:       segment.ID,
+			VolumeID: segment.VolumeID,
+			Key:      segment.Key,
+			Length:   uint64(len(segment.Payload)),
+			SHA256:   segment.SHA256,
+		}
+	}
+	return manifestState, segments, nil
+}
+
+func buildSegment(manifestSeq uint64, volumeID string, state *SnapshotState) (*materializedSegment, map[uint64][]FileExtent, error) {
+	manifestState, segments, err := buildMaterializedState(manifestSeq, volumeID, state, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	segment := &materializedSegment{
+		ID:       fmt.Sprintf("%020d-0", manifestSeq),
+		VolumeID: volumeID,
+		Key:      fmt.Sprintf("%s/%020d-0.bin", segmentDir, manifestSeq),
+	}
+	if len(segments) > 0 {
+		segment = segments[0]
+	}
+	return segment, manifestState.ColdFiles, nil
+}
+
+func materializeFileExtents(builder *segmentBuilder, state, manifestState *SnapshotState, inode uint64) ([]FileExtent, error) {
+	var out []FileExtent
+	for _, extent := range state.ColdFiles[inode] {
+		if extent.Length == 0 {
 			continue
 		}
-		manifestState.ColdFiles[inode] = append([]FileExtent(nil), extents...)
-	}
-	if segment != nil && len(segment.Payload) > 0 {
-		manifestState.Segments[segment.ID] = &Segment{
-			ID:         segment.ID,
-			VolumeID:   segment.VolumeID,
-			Key:        segment.Key,
-			Length:     uint64(len(segment.Payload)),
-			SHA256:     segment.SHA256,
-			Encryption: segment.Encryption,
+		if extent.SegmentID == "" {
+			out = append(out, extent)
+			continue
 		}
+		existing := state.Segments[extent.SegmentID]
+		if existing == nil {
+			return nil, fmt.Errorf("%w: missing retained segment %s", ErrInvalidInput, extent.SegmentID)
+		}
+		if isInlineSegment(existing) {
+			payload, err := inlineSegmentRange(existing, extent.Offset, extent.Length)
+			if err != nil {
+				return nil, err
+			}
+			extents, err := builder.append(payload)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, extents...)
+			continue
+		}
+		out = append(out, extent)
+		manifestState.Segments[extent.SegmentID] = cloneSegment(existing)
 	}
-	return manifestState, nil
+	return out, nil
+}
+
+type segmentBuilder struct {
+	manifestSeq uint64
+	volumeID    string
+	targetSize  uint64
+	nextIndex   int
+	current     *materializedSegment
+	segments    []*materializedSegment
+}
+
+func newSegmentBuilder(manifestSeq uint64, volumeID string, targetSize uint64) *segmentBuilder {
+	if targetSize == 0 {
+		targetSize = DefaultSegmentTargetSizeBytes
+	}
+	return &segmentBuilder{
+		manifestSeq: manifestSeq,
+		volumeID:    volumeID,
+		targetSize:  targetSize,
+	}
+}
+
+func (b *segmentBuilder) append(payload []byte) ([]FileExtent, error) {
+	if len(payload) == 0 {
+		return nil, nil
+	}
+	var out []FileExtent
+	for len(payload) > 0 {
+		segment := b.ensureCurrent()
+		space := b.targetSize - uint64(len(segment.Payload))
+		if space == 0 {
+			b.current = nil
+			continue
+		}
+		n := len(payload)
+		if uint64(n) > space {
+			n = int(space)
+		}
+		offset := uint64(len(segment.Payload))
+		segment.Payload = append(segment.Payload, payload[:n]...)
+		out = append(out, FileExtent{
+			SegmentID: segment.ID,
+			Offset:    offset,
+			Length:    uint64(n),
+		})
+		payload = payload[n:]
+	}
+	return out, nil
+}
+
+func (b *segmentBuilder) ensureCurrent() *materializedSegment {
+	if b.current != nil && uint64(len(b.current.Payload)) < b.targetSize {
+		return b.current
+	}
+	segmentID := fmt.Sprintf("%020d-%d", b.manifestSeq, b.nextIndex)
+	b.nextIndex++
+	b.current = &materializedSegment{
+		ID:       segmentID,
+		VolumeID: b.volumeID,
+		Key:      fmt.Sprintf("%s/%s.bin", segmentDir, segmentID),
+	}
+	b.segments = append(b.segments, b.current)
+	return b.current
+}
+
+func (b *segmentBuilder) finish() []*materializedSegment {
+	for _, segment := range b.segments {
+		sum := sha256.Sum256(segment.Payload)
+		segment.SHA256 = hex.EncodeToString(sum[:])
+	}
+	return b.segments
 }
 
 func manifestKey(seq uint64) string {
@@ -591,5 +693,6 @@ func cloneSegment(segment *Segment) *Segment {
 		enc.NoncePrefix = append([]byte(nil), segment.Encryption.NoncePrefix...)
 		copy.Encryption = &enc
 	}
+	copy.InlineData = append([]byte(nil), segment.InlineData...)
 	return &copy
 }

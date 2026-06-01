@@ -59,6 +59,18 @@ type StorageProxyConfig struct {
 	// +kubebuilder:default=20
 	FilesystemMaxUpload int `yaml:"filesystem_max_upload" json:"filesystemMaxUpload"`
 	// +optional
+	// +kubebuilder:default="4Mi"
+	S0FSSegmentTargetSize string `yaml:"s0fs_segment_target_size" json:"s0fsSegmentTargetSize"`
+	// +optional
+	// +kubebuilder:default="1m"
+	S0FSCompactionInterval string `yaml:"s0fs_compaction_interval" json:"s0fsCompactionInterval"`
+	// +optional
+	// +kubebuilder:default="0.5"
+	S0FSCompactionMinDeadRatio string `yaml:"s0fs_compaction_min_dead_ratio" json:"s0fsCompactionMinDeadRatio"`
+	// +optional
+	// +kubebuilder:default="1Mi"
+	S0FSCompactionMinReclaimSize string `yaml:"s0fs_compaction_min_reclaim_size" json:"s0fsCompactionMinReclaimSize"`
+	// +optional
 	// +kubebuilder:default=true
 	ObjectEncryptionEnabled bool `yaml:"object_encryption_enabled" json:"objectEncryptionEnabled"`
 	// +optional

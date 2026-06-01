@@ -32,6 +32,21 @@ func TestToStorageProxyPreservesLocalStorageLimits(t *testing.T) {
 	}
 }
 
+func TestToStorageProxyPreservesS0FSLayoutConfig(t *testing.T) {
+	cfg := ToStorageProxy(&infrav1alpha1.StorageProxyConfig{
+		S0FSSegmentTargetSize:        "8Mi",
+		S0FSCompactionInterval:       "30s",
+		S0FSCompactionMinDeadRatio:   "0.25",
+		S0FSCompactionMinReclaimSize: "2Mi",
+	})
+	if cfg.S0FSSegmentTargetSize != "8Mi" ||
+		cfg.S0FSCompactionInterval != "30s" ||
+		cfg.S0FSCompactionMinDeadRatio != "0.25" ||
+		cfg.S0FSCompactionMinReclaimSize != "2Mi" {
+		t.Fatalf("s0fs layout config was not preserved: %#v", cfg)
+	}
+}
+
 func TestToNetdPreservesBandwidthLimits(t *testing.T) {
 	cfg := ToNetd(&infrav1alpha1.NetdConfig{
 		EgressBandwidthBytesPerSecond:  1024,

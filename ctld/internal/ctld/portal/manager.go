@@ -2,6 +2,7 @@ package portal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -362,10 +363,15 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 	if err != nil {
 		return ctldapi.BindVolumePortalResponse{}, err
 	}
+	segmentTargetSize, err := volume.S0FSSegmentTargetSize(m.storage)
+	if err != nil {
+		return ctldapi.BindVolumePortalResponse{}, err
+	}
 	engine, err := s0fs.Open(ctx, s0fs.Config{
-		VolumeID:    req.SandboxVolumeID,
-		WALPath:     filepath.Join(cacheDir, "engine.wal"),
-		ObjectStore: remoteStore,
+		VolumeID:          req.SandboxVolumeID,
+		WALPath:           filepath.Join(cacheDir, "engine.wal"),
+		ObjectStore:       remoteStore,
+		SegmentTargetSize: segmentTargetSize,
 		ObjectStoreForVolume: func(volumeID string) (objectstore.Store, error) {
 			return m.createObjectStore(req.TeamID, volumeID)
 		},
@@ -549,10 +555,15 @@ func (m *Manager) AttachOwner(ctx context.Context, req ctldapi.AttachVolumeOwner
 	if err != nil {
 		return ctldapi.AttachVolumeOwnerResponse{}, err
 	}
+	segmentTargetSize, err := volume.S0FSSegmentTargetSize(m.storage)
+	if err != nil {
+		return ctldapi.AttachVolumeOwnerResponse{}, err
+	}
 	engine, err := s0fs.Open(ctx, s0fs.Config{
-		VolumeID:    req.SandboxVolumeID,
-		WALPath:     filepath.Join(cacheDir, "engine.wal"),
-		ObjectStore: remoteStore,
+		VolumeID:          req.SandboxVolumeID,
+		WALPath:           filepath.Join(cacheDir, "engine.wal"),
+		ObjectStore:       remoteStore,
+		SegmentTargetSize: segmentTargetSize,
 		ObjectStoreForVolume: func(volumeID string) (objectstore.Store, error) {
 			return m.createObjectStore(req.TeamID, volumeID)
 		},
@@ -880,6 +891,23 @@ func (m *Manager) startMaterializer(bound *boundVolume) {
 	if bound == nil || bound.volCtx == nil || bound.volCtx.S0FS == nil {
 		return
 	}
+	compactionInterval, err := volume.S0FSCompactionInterval(m.storage)
+	if err != nil {
+		if m.logger != nil {
+			m.logger.Warn("ctld s0fs compaction disabled due to invalid configuration", zap.String("volume_id", bound.volumeID), zap.Error(err))
+		}
+		compactionInterval = 0
+	}
+	compactionOptions, err := volume.S0FSCompactionOptions(m.storage)
+	if err != nil {
+		if m.logger != nil {
+			m.logger.Warn("ctld s0fs compaction disabled due to invalid options", zap.String("volume_id", bound.volumeID), zap.Error(err))
+		}
+		compactionInterval = 0
+	}
+	if !volume.S0FSBackgroundCompactionEnabled(bound.access) {
+		compactionInterval = 0
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	bound.materializeCancel = cancel
@@ -888,17 +916,156 @@ func (m *Manager) startMaterializer(bound *boundVolume) {
 		defer close(done)
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
+		var compactionTicker *time.Ticker
+		var compactionC <-chan time.Time
+		if compactionInterval > 0 {
+			compactionTicker = time.NewTicker(compactionInterval)
+			compactionC = compactionTicker.C
+			defer compactionTicker.Stop()
+		}
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if _, err := bound.volCtx.S0FS.SyncMaterialize(ctx); err != nil && m.logger != nil {
+				manifest, err := bound.volCtx.S0FS.SyncMaterialize(ctx)
+				if err != nil && m.logger != nil {
 					m.logger.Warn("ctld volume materialize failed", zap.String("volume_id", volumeID), zap.Error(err))
+					continue
 				}
+				m.garbageCollectBoundS0FS(ctx, bound, manifest)
+			case <-compactionC:
+				resultManifest, result, err := bound.volCtx.S0FS.Compact(ctx, compactionOptions)
+				if err != nil && m.logger != nil {
+					m.logger.Warn("ctld volume compaction failed", zap.String("volume_id", volumeID), zap.Error(err))
+					continue
+				}
+				if result != nil && len(result.CompactedSegments) > 0 && m.logger != nil {
+					m.logger.Info("ctld volume compacted",
+						zap.String("volume_id", volumeID),
+						zap.Int("segments", len(result.CompactedSegments)),
+						zap.Uint64("rewritten_bytes", result.RewrittenBytes),
+						zap.Uint64("reclaimable_bytes", result.ReclaimableBytes),
+					)
+				}
+				m.garbageCollectBoundS0FS(ctx, bound, resultManifest)
 			}
 		}
 	}(bound.volumeID)
+}
+
+func (m *Manager) garbageCollectBoundS0FS(ctx context.Context, bound *boundVolume, manifest *s0fs.Manifest) {
+	if m == nil || bound == nil || manifest == nil || manifest.State == nil {
+		return
+	}
+	if !volume.S0FSBackgroundCompactionEnabled(bound.access) {
+		return
+	}
+	result, err := m.garbageCollectBoundS0FSObjects(ctx, bound, manifest)
+	if err != nil {
+		if m.logger != nil {
+			m.logger.Warn("ctld volume garbage collection failed", zap.String("volume_id", bound.volumeID), zap.Error(err))
+		}
+		return
+	}
+	if result != nil && (len(result.DeletedSegments) > 0 || len(result.DeletedManifests) > 0) && m.logger != nil {
+		m.logger.Info("ctld volume garbage collected",
+			zap.String("volume_id", bound.volumeID),
+			zap.Int("segments", len(result.DeletedSegments)),
+			zap.Int("manifests", len(result.DeletedManifests)),
+		)
+	}
+}
+
+func (m *Manager) garbageCollectBoundS0FSObjects(ctx context.Context, bound *boundVolume, manifest *s0fs.Manifest) (*s0fs.GarbageCollectionResult, error) {
+	if m == nil || m.repo == nil || m.volumes == nil || bound == nil || bound.volCtx == nil || manifest == nil || manifest.State == nil {
+		return nil, nil
+	}
+	if !volume.S0FSBackgroundCompactionEnabled(bound.access) || !m.volumes.canGarbageCollectS0FS(bound.volumeID) {
+		return nil, nil
+	}
+	children, err := m.repo.ListSandboxVolumesBySource(ctx, bound.volumeID)
+	if err != nil {
+		return nil, err
+	}
+	if len(children) > 0 {
+		return nil, nil
+	}
+	snapshots, err := m.repo.ListSnapshotsByVolume(ctx, bound.volumeID)
+	if err != nil {
+		return nil, err
+	}
+	if len(snapshots) > 0 {
+		return nil, nil
+	}
+	store, err := m.createObjectStore(bound.teamID, bound.volumeID)
+	if err != nil {
+		return nil, err
+	}
+	encryption, err := volume.S0FSEncryptionConfig(m.storage)
+	if err != nil {
+		return nil, err
+	}
+	headStore := db.NewS0FSHeadStore(m.repo)
+	materializer := s0fs.NewMaterializer(bound.volumeID, store, headStore, func(sourceVolumeID string) (objectstore.Store, error) {
+		return m.createObjectStore(bound.teamID, sourceVolumeID)
+	})
+	if materializer == nil || !materializer.Enabled() {
+		return nil, nil
+	}
+	materializer.SetEncryption(encryption)
+
+	headBefore, err := headStore.LoadCommittedHead(ctx, bound.volumeID)
+	if err != nil && !errors.Is(err, s0fs.ErrCommittedHeadNotFound) {
+		return nil, err
+	}
+	retainedStates := []*s0fs.SnapshotState{manifest.State}
+	cfg := s0fs.Config{
+		VolumeID:    bound.volumeID,
+		WALPath:     filepath.Join(bound.volCtx.CacheDir, "engine.wal"),
+		ObjectStore: store,
+		HeadStore:   headStore,
+		Encryption:  encryption,
+	}
+	localSnapshots, err := s0fs.LoadLocalSnapshots(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	retainedStates = append(retainedStates, localSnapshots...)
+	retainedManifests := map[string]struct{}{
+		"manifests/latest.json": {},
+	}
+	if manifest.ManifestSeq > 0 {
+		retainedManifests[fmt.Sprintf("manifests/%020d.json", manifest.ManifestSeq)] = struct{}{}
+	}
+	if headBefore != nil && strings.TrimSpace(headBefore.ManifestKey) != "" {
+		retainedManifests[headBefore.ManifestKey] = struct{}{}
+	}
+	plan, err := materializer.PlanGarbageCollection(ctx, retainedStates, retainedManifests)
+	if err != nil {
+		return nil, err
+	}
+	if len(plan.Segments) == 0 && len(plan.Manifests) == 0 {
+		return &s0fs.GarbageCollectionResult{}, nil
+	}
+	if !m.volumes.canGarbageCollectS0FS(bound.volumeID) {
+		return nil, nil
+	}
+	headAfter, err := headStore.LoadCommittedHead(ctx, bound.volumeID)
+	if err != nil && !errors.Is(err, s0fs.ErrCommittedHeadNotFound) {
+		return nil, err
+	}
+	if !sameS0FSHeadKey(headBefore, headAfter) {
+		return nil, nil
+	}
+	return plan.Apply(ctx)
+}
+
+func sameS0FSHeadKey(a, b *s0fs.CommittedHead) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return strings.TrimSpace(a.ManifestKey) == strings.TrimSpace(b.ManifestKey)
 }
 
 func (m *Manager) attachPortalLocked(pm *portalMount, volumeID, teamID string, mountedAt time.Time) {

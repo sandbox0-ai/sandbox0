@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sirupsen/logrus"
 )
 
@@ -102,6 +103,56 @@ func TestManagerMountUsesDefaultBackend(t *testing.T) {
 	}
 	if s0fsBackend.mountCalls != 1 {
 		t.Fatalf("s0fs backend mount calls = %d, want 1", s0fsBackend.mountCalls)
+	}
+}
+
+func TestS0FSSegmentTargetSizeDefaultsToFourMiB(t *testing.T) {
+	got, err := S0FSSegmentTargetSize(&config.StorageProxyConfig{})
+	if err != nil {
+		t.Fatalf("S0FSSegmentTargetSize() error = %v", err)
+	}
+	if got != s0fs.DefaultSegmentTargetSizeBytes {
+		t.Fatalf("segment target size = %d, want %d", got, s0fs.DefaultSegmentTargetSizeBytes)
+	}
+}
+
+func TestS0FSSegmentTargetSizeParsesConfig(t *testing.T) {
+	got, err := S0FSSegmentTargetSize(&config.StorageProxyConfig{S0FSSegmentTargetSize: "8Mi"})
+	if err != nil {
+		t.Fatalf("S0FSSegmentTargetSize() error = %v", err)
+	}
+	if want := uint64(8 << 20); got != want {
+		t.Fatalf("segment target size = %d, want %d", got, want)
+	}
+}
+
+func TestS0FSCompactionOptionsParseConfig(t *testing.T) {
+	opts, err := S0FSCompactionOptions(&config.StorageProxyConfig{
+		S0FSSegmentTargetSize:        "8Mi",
+		S0FSCompactionMinDeadRatio:   "0.25",
+		S0FSCompactionMinReclaimSize: "2Mi",
+	})
+	if err != nil {
+		t.Fatalf("S0FSCompactionOptions() error = %v", err)
+	}
+	if opts.SegmentTargetSize != 8<<20 || opts.MinDeadRatio != 0.25 || opts.MinReclaimBytes != 2<<20 {
+		t.Fatalf("unexpected compaction options: %+v", opts)
+	}
+}
+
+func TestS0FSBackgroundCompactionEnabledOnlyForRWO(t *testing.T) {
+	for _, tc := range []struct {
+		access AccessMode
+		want   bool
+	}{
+		{access: AccessModeRWO, want: true},
+		{access: AccessModeROX, want: false},
+		{access: AccessModeRWX, want: false},
+		{access: "", want: true},
+	} {
+		if got := S0FSBackgroundCompactionEnabled(tc.access); got != tc.want {
+			t.Fatalf("S0FSBackgroundCompactionEnabled(%q) = %v, want %v", tc.access, got, tc.want)
+		}
 	}
 }
 

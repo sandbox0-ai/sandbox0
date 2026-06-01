@@ -158,6 +158,13 @@ func (m *localVolumeManager) completeSnapshotCheckpoint(volumeID string) {
 	m.abortHandoff(volumeID)
 }
 
+func (m *localVolumeManager) canGarbageCollectS0FS(volumeID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	state := m.requests[volumeID]
+	return state != nil && !state.transferring
+}
+
 func (m *localVolumeManager) touch(volumeID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

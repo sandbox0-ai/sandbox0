@@ -846,7 +846,7 @@ func (r *Sandbox0InfraReconciler) registerCluster(ctx context.Context, infra *in
 }
 
 func (r *Sandbox0InfraReconciler) waitBuiltinTemplatePodsReady(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan) error {
-	if infra == nil || len(infra.Spec.BuiltinTemplates) == 0 {
+	if infra == nil {
 		return nil
 	}
 	if compiledPlan == nil {
@@ -856,13 +856,17 @@ func (r *Sandbox0InfraReconciler) waitBuiltinTemplatePodsReady(ctx context.Conte
 		return nil
 	}
 
-	for _, builtin := range infra.Spec.BuiltinTemplates {
+	for _, builtin := range compiledPlan.BuiltinTemplates() {
 		templateID, err := naming.CanonicalTemplateID(builtin.TemplateID)
 		if err != nil {
 			return fmt.Errorf("invalid builtin template_id %q: %w", builtin.TemplateID, err)
 		}
 
-		minIdle, _ := template.ApplyDefaultPool(builtin.Pool.MinIdle, builtin.Pool.MaxIdle)
+		minIdle, maxIdle := builtin.Pool.MinIdle, builtin.Pool.MaxIdle
+		if minIdle == 0 && maxIdle == 0 && builtin.Spec != nil {
+			minIdle, maxIdle = builtin.Spec.Pool.MinIdle, builtin.Spec.Pool.MaxIdle
+		}
+		minIdle, _ = template.ApplyDefaultPool(minIdle, maxIdle)
 		if minIdle == 0 {
 			continue
 		}

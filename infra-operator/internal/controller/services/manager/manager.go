@@ -253,6 +253,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		DatabaseMinConns:     config.DatabaseMinConns,
 		TemplateStoreEnabled: config.TemplateStoreEnabled,
 		Owner:                "manager",
+		MemoryPerCPU:         common.TemplateMemoryPerCPUFromManagerConfig(config),
 	}); err != nil {
 		return err
 	}

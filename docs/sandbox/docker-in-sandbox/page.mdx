@@ -1,0 +1,433 @@
+# Docker in Sandbox
+
+Docker in Sandbox lets a sandbox run a Docker daemon inside the sandbox. Use the `dins` template when tests, build steps, or agent tools expect a local Docker socket.
+
+Typical uses:
+
+- Run Redis, PostgreSQL, or other service containers beside application tests.
+- Build a throwaway image from code generated inside the sandbox.
+- Run tools that require `docker build`, `docker run`, or `docker compose` style workflows.
+
+`/var/lib/docker` is ephemeral. Images, containers, layers, and Docker volumes are discarded when the sandbox is deleted. Store source code and durable outputs in Sandbox volumes instead.
+
+<Callout variant="info">
+The examples assume your workspace has a `dins` template. If claiming `dins` returns not found, ask your Sandbox0 operator to enable Docker in Sandbox for your environment.
+</Callout>
+
+---
+
+## Start Test Databases
+
+Claim a `dins` sandbox, start Redis and PostgreSQL with Docker, then run tests against `localhost` from inside the sandbox.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "os"
+    "strings"
+    "time"
+
+    sandbox0 "github.com/sandbox0-ai/sdk-go"
+)
+
+func main() {
+    ctx := context.Background()
+    client, err := sandbox0.NewClient(
+        sandbox0.WithToken(os.Getenv("SANDBOX0_TOKEN")),
+        sandbox0.WithBaseURL(os.Getenv("SANDBOX0_BASE_URL")),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    sandbox, err := client.ClaimSandbox(ctx, "dins", sandbox0.WithSandboxHardTTL(1800))
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer client.DeleteSandbox(ctx, sandbox.ID)
+
+    if _, err := sandbox.Cmd(ctx, "rm -f /tmp/sandbox0-test-databases.ready"); err != nil {
+        log.Fatal(err)
+    }
+
+    startScript := strings.Join([]string{
+        "set -e",
+        "rm -f /tmp/sandbox0-test-databases.ready",
+        "docker rm -f test-redis test-postgres >/dev/null 2>&1 || true",
+        "docker pull redis:7-alpine",
+        "docker pull postgres:16-alpine",
+        "docker run -d --name test-redis -p 6379:6379 redis:7-alpine",
+        "docker run -d --name test-postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=app_test -p 5432:5432 postgres:16-alpine",
+        "until docker exec test-redis redis-cli ping | grep -q PONG; do sleep 1; done",
+        "until docker exec test-postgres pg_isready -U postgres >/dev/null; do sleep 1; done",
+        "touch /tmp/sandbox0-test-databases.ready",
+    }, "\\n")
+
+    start, err := sandbox.Cmd(ctx, "sh",
+        sandbox0.WithCommand([]string{"/bin/sh", "-lc", startScript}),
+        sandbox0.WithCmdWait(false),
+        sandbox0.WithCmdTTL(1800),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer sandbox.DeleteContext(ctx, start.ContextID)
+
+    readyCommand := "test -f /tmp/sandbox0-test-databases.ready && printf READY"
+    deadline := time.Now().Add(5 * time.Minute)
+    for {
+        result, err := sandbox.Cmd(ctx, "sh",
+            sandbox0.WithCommand([]string{"/bin/sh", "-lc", readyCommand}),
+        )
+        if err != nil {
+            log.Fatal(err)
+        }
+        if strings.Contains(result.OutputRaw, "READY") {
+            break
+        }
+        if time.Now().After(deadline) {
+            log.Fatal("timed out waiting for test databases")
+        }
+        time.Sleep(2 * time.Second)
+    }
+
+    fmt.Println("REDIS_URL=redis://127.0.0.1:6379")
+    fmt.Println("DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/app_test?sslmode=disable")
+}`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `import os
+import time
+
+from sandbox0 import Client, CmdOptions
+from sandbox0.apispec.models.sandbox_config import SandboxConfig
+
+client = Client(
+    token=os.environ["SANDBOX0_TOKEN"],
+    base_url=os.environ.get("SANDBOX0_BASE_URL", "https://api.sandbox0.ai"),
+)
+
+sandbox = client.claim_sandbox(
+    template="dins",
+    config=SandboxConfig.from_dict({"hard_ttl": 1800}),
+)
+
+try:
+    sandbox.cmd("rm -f /tmp/sandbox0-test-databases.ready")
+
+    start_script = """
+set -e
+rm -f /tmp/sandbox0-test-databases.ready
+docker rm -f test-redis test-postgres >/dev/null 2>&1 || true
+docker pull redis:7-alpine
+docker pull postgres:16-alpine
+docker run -d --name test-redis -p 6379:6379 redis:7-alpine
+docker run -d --name test-postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=app_test -p 5432:5432 postgres:16-alpine
+until docker exec test-redis redis-cli ping | grep -q PONG; do sleep 1; done
+until docker exec test-postgres pg_isready -U postgres >/dev/null; do sleep 1; done
+touch /tmp/sandbox0-test-databases.ready
+"""
+    start = sandbox.cmd(
+        "sh",
+        CmdOptions(command=["/bin/sh", "-lc", start_script], wait=False, ttl_sec=1800),
+    )
+    try:
+        ready_command = "test -f /tmp/sandbox0-test-databases.ready && printf READY"
+        deadline = time.time() + 300
+        while True:
+            result = sandbox.cmd(
+                "sh",
+                CmdOptions(command=["/bin/sh", "-lc", ready_command]),
+            )
+            if "READY" in result.output_raw:
+                break
+            if time.time() > deadline:
+                raise TimeoutError("timed out waiting for test databases")
+            time.sleep(2)
+
+        print("REDIS_URL=redis://127.0.0.1:6379")
+        print("DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/app_test?sslmode=disable")
+    finally:
+        sandbox.delete_context(start.context_id)
+finally:
+    client.delete_sandbox(sandbox.id)`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `async function main() {
+    const { Client } = await import('sandbox0');
+
+    const client = new Client({
+        token: process.env.SANDBOX0_TOKEN!,
+        baseUrl: process.env.SANDBOX0_BASE_URL || 'https://api.sandbox0.ai',
+    });
+
+    const sandbox = await client.sandboxes.claim('dins', { hardTtl: 1800 });
+
+    try {
+        await sandbox.cmd('rm -f /tmp/sandbox0-test-databases.ready');
+
+        const startScript = [
+            'set -e',
+            'rm -f /tmp/sandbox0-test-databases.ready',
+            'docker rm -f test-redis test-postgres >/dev/null 2>&1 || true',
+            'docker pull redis:7-alpine',
+            'docker pull postgres:16-alpine',
+            'docker run -d --name test-redis -p 6379:6379 redis:7-alpine',
+            'docker run -d --name test-postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=app_test -p 5432:5432 postgres:16-alpine',
+            'until docker exec test-redis redis-cli ping | grep -q PONG; do sleep 1; done',
+            'until docker exec test-postgres pg_isready -U postgres >/dev/null; do sleep 1; done',
+            'touch /tmp/sandbox0-test-databases.ready',
+        ].join('\\n');
+
+        const start = await sandbox.cmd('sh', {
+            command: ['/bin/sh', '-lc', startScript],
+            wait: false,
+            ttlSec: 1800,
+        });
+        try {
+            const readyCommand = 'test -f /tmp/sandbox0-test-databases.ready && printf READY';
+            const deadline = Date.now() + 300_000;
+            while (true) {
+                const result = await sandbox.cmd('sh', {
+                    command: ['/bin/sh', '-lc', readyCommand],
+                });
+                if (result.outputRaw.includes('READY')) {
+                    break;
+                }
+                if (Date.now() > deadline) {
+                    throw new Error('timed out waiting for test databases');
+                }
+                await new Promise((resolve) => setTimeout(resolve, 2000));
+            }
+
+            console.log('REDIS_URL=redis://127.0.0.1:6379');
+            console.log('DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/app_test?sslmode=disable');
+        } finally {
+            await sandbox.deleteContext(start.contextId);
+        }
+    } finally {
+        await client.sandboxes.delete(sandbox.id);
+    }
+}
+
+main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+});`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `SANDBOX_ID="$(s0 -o json sandbox create --template dins --hard-ttl 1800 | jq -r '.ID')"
+trap 's0 sandbox delete "$SANDBOX_ID" >/dev/null 2>&1 || true' EXIT
+
+s0 sandbox exec "$SANDBOX_ID" -- rm -f /tmp/sandbox0-test-databases.ready
+
+s0 sandbox exec "$SANDBOX_ID" --no-wait --ttl 1800 -- /bin/sh -lc '
+set -e
+rm -f /tmp/sandbox0-test-databases.ready
+docker rm -f test-redis test-postgres >/dev/null 2>&1 || true
+docker pull redis:7-alpine
+docker pull postgres:16-alpine
+docker run -d --name test-redis -p 6379:6379 redis:7-alpine
+docker run -d --name test-postgres \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=app_test \
+  -p 5432:5432 \
+  postgres:16-alpine
+until docker exec test-redis redis-cli ping | grep -q PONG; do sleep 1; done
+until docker exec test-postgres pg_isready -U postgres; do sleep 1; done
+touch /tmp/sandbox0-test-databases.ready
+'
+
+ready=0
+for _ in $(seq 1 150); do
+  if [ "$(s0 sandbox exec "$SANDBOX_ID" -- /bin/sh -lc 'test -f /tmp/sandbox0-test-databases.ready && printf READY')" = "READY" ]; then
+    ready=1
+    break
+  fi
+  sleep 2
+done
+if [ "$ready" -ne 1 ]; then
+  echo "Timed out waiting for test databases" >&2
+  exit 1
+fi
+
+db_urls="$(s0 sandbox exec "$SANDBOX_ID" -- /bin/sh -lc '
+set -e
+docker exec test-redis redis-cli ping | grep -q PONG
+docker exec test-postgres pg_isready -U postgres >/dev/null
+printf "REDIS_URL=redis://127.0.0.1:6379\\n"
+printf "DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/app_test?sslmode=disable\\n"
+')"
+if ! printf "%s" "$db_urls" | grep -q "^REDIS_URL="; then
+  echo "Test databases are not ready" >&2
+  exit 1
+fi
+printf "%s" "$db_urls"`
+    }
+  ]}
+/>
+
+Use those URLs from commands that run inside the same sandbox:
+
+```bash
+REDIS_URL=redis://127.0.0.1:6379 \
+DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/app_test?sslmode=disable' \
+go test ./...
+```
+
+---
+
+## Build And Run An Image
+
+Docker build cache also lives under `/var/lib/docker`, so this is best for temporary test images rather than durable artifacts.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `script := strings.Join([]string{
+    "set -e",
+    "cat > main.go <<'EOF'",
+    "package main",
+    "import \\"fmt\\"",
+    "func main() { fmt.Println(\\"hello from docker in sandbox\\") }",
+    "EOF",
+    "CGO_ENABLED=0 go build -o hello main.go",
+    "cat > Dockerfile <<'EOF'",
+    "FROM scratch",
+    "COPY hello /hello",
+    "ENTRYPOINT [\\"/hello\\"]",
+    "EOF",
+    "docker build -t sandbox0-dins-test .",
+    "docker run --rm sandbox0-dins-test",
+}, "\\n")
+
+result, err := sandbox.Cmd(ctx, "sh",
+    sandbox0.WithCommand([]string{"/bin/sh", "-lc", script}),
+)
+if err != nil {
+    log.Fatal(err)
+}
+if !strings.Contains(result.OutputRaw, "hello from docker in sandbox") {
+    log.Fatalf("docker build test failed:\\n%s", result.OutputRaw)
+}
+fmt.Print(result.OutputRaw)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `script = """
+set -e
+cat > main.go <<'EOF'
+package main
+import "fmt"
+func main() { fmt.Println("hello from docker in sandbox") }
+EOF
+CGO_ENABLED=0 go build -o hello main.go
+cat > Dockerfile <<'EOF'
+FROM scratch
+COPY hello /hello
+ENTRYPOINT ["/hello"]
+EOF
+docker build -t sandbox0-dins-test .
+docker run --rm sandbox0-dins-test
+"""
+
+result = sandbox.cmd(
+    "sh",
+    CmdOptions(command=["/bin/sh", "-lc", script]),
+)
+if "hello from docker in sandbox" not in result.output_raw:
+    raise RuntimeError("docker build test failed:\\n" + result.output_raw)
+print(result.output_raw, end="")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const script = [
+    'set -e',
+    "cat > main.go <<'EOF'",
+    'package main',
+    'import "fmt"',
+    'func main() { fmt.Println("hello from docker in sandbox") }',
+    'EOF',
+    'CGO_ENABLED=0 go build -o hello main.go',
+    "cat > Dockerfile <<'EOF'",
+    'FROM scratch',
+    'COPY hello /hello',
+    'ENTRYPOINT ["/hello"]',
+    'EOF',
+    'docker build -t sandbox0-dins-test .',
+    'docker run --rm sandbox0-dins-test',
+].join('\\n');
+
+const result = await sandbox.cmd('sh', {
+    command: ['/bin/sh', '-lc', script],
+});
+if (!result.outputRaw.includes('hello from docker in sandbox')) {
+    throw new Error('docker build test failed:\\n' + result.outputRaw);
+}
+process.stdout.write(result.outputRaw);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox exec "$SANDBOX_ID" --stream -- /bin/sh -lc '
+set -e
+cat > main.go <<'"'"'EOF'"'"'
+package main
+import "fmt"
+func main() { fmt.Println("hello from docker in sandbox") }
+EOF
+CGO_ENABLED=0 go build -o hello main.go
+cat > Dockerfile <<'"'"'EOF'"'"'
+FROM scratch
+COPY hello /hello
+ENTRYPOINT ["/hello"]
+EOF
+docker build -t sandbox0-dins-test .
+docker run --rm sandbox0-dins-test
+'`
+    }
+  ]}
+/>
+
+---
+
+## Operational Notes
+
+- Containers launched by Docker are sandbox-local. Start test dependencies with `-p` and connect to `127.0.0.1` from commands inside the sandbox.
+- Use Sandbox Services when a containerized HTTP service needs to be reachable from outside the sandbox.
+- Docker state is not durable. Use Sandbox Volumes for source, generated files, or database dumps that must survive sandbox cleanup.
+- Pulling images can take longer than a single synchronous command request. Start long Docker setup commands asynchronously, then poll readiness with short commands.
+- Nested Kubernetes tools such as kind can run in a Docker in Sandbox environment, but node images and cluster data consume the sandbox's ephemeral disk.
+- Long-running containers count against the sandbox resource limits. Stop containers when a test run finishes if the sandbox will stay alive.
+
+---
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Sandbox Services" href="/docs/sandbox/services" cta="Continue">
+    Expose named sandbox ports through public HTTP service routes.
+  </Card>
+
+  <Card title="Volumes" href="/docs/volume" cta="Continue">
+    Persist source code, test fixtures, and generated artifacts beyond sandbox runtime cleanup.
+  </Card>
+</CardGroup>

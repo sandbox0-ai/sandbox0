@@ -31,6 +31,7 @@ jobs:
           kind-config: tests/e2e/kind-config.yaml
           kind-cluster-name: ${{ env.KIND_CLUSTER_NAME }}
           cache-key-suffix: pr-amd64
+          build-local-template-image: "true"
 
       - name: Run PR E2E
         env:

@@ -51,6 +51,7 @@ jobs:
           kind-config: tests/e2e/kind-config.yaml
           kind-cluster-name: sandbox0-e2e-${{ matrix.arch }}
           cache-key-suffix: ${{ matrix.arch }}
+          build-local-template-image: "true"
 
       - name: Run E2E
         env:

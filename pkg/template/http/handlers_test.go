@@ -1133,7 +1133,7 @@ func TestValidateTemplateSpecForClaims_RejectsMismatchedMainResources(t *testing
 	}
 }
 
-func TestValidateTemplateSpecForClaims_AllowsSystemOwnedRatioOverride(t *testing.T) {
+func TestValidateTemplateSpecForClaims_RejectsSystemOwnedMismatchedMainResources(t *testing.T) {
 	t.Parallel()
 
 	spec := v1alpha1.SandboxTemplateSpec{
@@ -1148,8 +1148,12 @@ func TestValidateTemplateSpecForClaims_AllowsSystemOwnedRatioOverride(t *testing
 	}
 
 	claims := &internalauth.Claims{IsSystem: true}
-	if err := validateTemplateSpecForClaims(spec, claims); err != nil {
-		t.Fatalf("expected system token to allow resource ratio override, got %v", err)
+	err := validateTemplateSpecForClaims(spec, claims)
+	if err == nil {
+		t.Fatal("expected system token to reject resource ratio mismatch")
+	}
+	if got := err.Error(); !strings.Contains(got, "system template total memory must equal total cpu") {
+		t.Fatalf("unexpected error %q", got)
 	}
 }
 

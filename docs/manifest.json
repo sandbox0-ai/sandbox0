@@ -56,6 +56,10 @@
           "title": "Sandbox Services"
         },
         {
+          "slug": "docker-in-sandbox",
+          "title": "Docker in Sandbox"
+        },
+        {
           "slug": "functions",
           "title": "Sandbox Functions"
         },

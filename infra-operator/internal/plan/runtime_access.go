@@ -14,17 +14,28 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	controllerinternalauth "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
+	s0template "github.com/sandbox0-ai/sandbox0/pkg/template"
 )
 
 func (p *InfraPlan) BuiltinTemplates() []infrav1alpha1.BuiltinTemplateConfig {
-	if p == nil || p.infra == nil || len(p.infra.Spec.BuiltinTemplates) == 0 {
+	if p == nil || p.infra == nil {
 		return nil
+	}
+	if len(p.infra.Spec.BuiltinTemplates) == 0 {
+		return defaultBuiltinTemplates()
 	}
 	out := make([]infrav1alpha1.BuiltinTemplateConfig, len(p.infra.Spec.BuiltinTemplates))
 	for i := range p.infra.Spec.BuiltinTemplates {
 		p.infra.Spec.BuiltinTemplates[i].DeepCopyInto(&out[i])
 	}
 	return out
+}
+
+func defaultBuiltinTemplates() []infrav1alpha1.BuiltinTemplateConfig {
+	return []infrav1alpha1.BuiltinTemplateConfig{
+		{TemplateID: s0template.DefaultTemplateID},
+		{TemplateID: s0template.DockerInSandboxTemplateID},
+	}
 }
 
 func (p *InfraPlan) DatabaseDSN(ctx context.Context, kubeClient client.Client) (string, error) {

@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	templatev1alpha1 "github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
@@ -41,6 +42,7 @@ type BuiltinTemplateOptions struct {
 	DatabaseMinConns     int32
 	TemplateStoreEnabled bool
 	Owner                string
+	MemoryPerCPU         resource.Quantity
 }
 
 // EnsureBuiltinTemplates creates or updates builtin templates in the template store.
@@ -88,38 +90,9 @@ func EnsureBuiltinTemplates(ctx context.Context, builtins []infrav1alpha1.Builti
 			return fmt.Errorf("builtin template_id is invalid: %w", err)
 		}
 
-		image := strings.TrimSpace(builtin.Image)
-		if image == "" {
-			image = template.DefaultTemplateImage
-		}
-		poolCfg := applyBuiltinTemplatePool(builtin.Pool)
-		displayName := strings.TrimSpace(builtin.DisplayName)
-		if displayName == "" {
-			displayName = templateID
-		}
-		description := strings.TrimSpace(builtin.Description)
-		if description == "" {
-			description = fmt.Sprintf("Builtin template %s installed by infra-operator.", templateID)
-		}
-
-		spec := templatev1alpha1.SandboxTemplateSpec{
-			DisplayName: displayName,
-			Description: description,
-			MainContainer: templatev1alpha1.ContainerSpec{
-				Image: image,
-				Resources: templatev1alpha1.ResourceQuota{
-					CPU:              resource.MustParse(template.DefaultTemplateCPU),
-					Memory:           resource.MustParse(template.DefaultTemplateMemory),
-					EphemeralStorage: resource.MustParse(template.DefaultTemplateEphemeralStorage),
-				},
-			},
-			Pool: templatev1alpha1.PoolStrategy{
-				MinIdle: poolCfg.MinIdle,
-				MaxIdle: poolCfg.MaxIdle,
-			},
-			Network: &templatev1alpha1.SandboxNetworkPolicy{
-				Mode: templatev1alpha1.NetworkModeAllowAll,
-			},
+		spec := buildBuiltinTemplateSpec(templateID, builtin)
+		if err := template.ValidateResourceRatio(spec, builtinTemplateMemoryPerCPU(opts), "builtin template "+templateID); err != nil {
+			return fmt.Errorf("validate builtin template %s: %w", templateID, err)
 		}
 
 		tpl := &template.Template{
@@ -148,6 +121,154 @@ func EnsureBuiltinTemplates(ctx context.Context, builtins []infrav1alpha1.Builti
 		logger.Info("Builtin template updated in store", "template_id", templateID)
 	}
 	return nil
+}
+
+func builtinTemplateMemoryPerCPU(opts BuiltinTemplateOptions) resource.Quantity {
+	if opts.MemoryPerCPU.Sign() <= 0 {
+		return template.MemoryPerCPUOrDefault("")
+	}
+	return opts.MemoryPerCPU
+}
+
+// TemplateMemoryPerCPUFromManagerConfig resolves the template resource shape used by manager API validation.
+func TemplateMemoryPerCPUFromManagerConfig(cfg *apiconfig.ManagerConfig) resource.Quantity {
+	if cfg == nil {
+		return template.MemoryPerCPUOrDefault("")
+	}
+	return template.MemoryPerCPUOrDefault(cfg.TeamTemplateMemoryPerCPU)
+}
+
+func buildBuiltinTemplateSpec(templateID string, builtin infrav1alpha1.BuiltinTemplateConfig) templatev1alpha1.SandboxTemplateSpec {
+	var spec templatev1alpha1.SandboxTemplateSpec
+	if builtin.Spec != nil {
+		spec = *builtin.Spec.DeepCopy()
+	} else if templateID == template.DockerInSandboxTemplateID {
+		spec = dockerInSandboxTemplateSpec()
+	} else {
+		spec = defaultBuiltinTemplateSpec(templateID)
+	}
+
+	applyBuiltinTemplateConfig(&spec, templateID, builtin)
+	return spec
+}
+
+func defaultBuiltinTemplateSpec(templateID string) templatev1alpha1.SandboxTemplateSpec {
+	displayName := templateID
+	if templateID == template.DefaultTemplateID {
+		displayName = template.DefaultTemplateDisplayName
+	}
+	return templatev1alpha1.SandboxTemplateSpec{
+		DisplayName: displayName,
+		Description: fmt.Sprintf("Builtin template %s installed by infra-operator.", templateID),
+		MainContainer: templatev1alpha1.ContainerSpec{
+			Image: template.DefaultTemplateImage,
+			Resources: templatev1alpha1.ResourceQuota{
+				CPU:              resource.MustParse(template.DefaultTemplateCPU),
+				Memory:           resource.MustParse(template.DefaultTemplateMemory),
+				EphemeralStorage: resource.MustParse(template.DefaultTemplateEphemeralStorage),
+			},
+		},
+		Pool: defaultBuiltinTemplatePool(),
+		Network: &templatev1alpha1.SandboxNetworkPolicy{
+			Mode: templatev1alpha1.NetworkModeAllowAll,
+		},
+	}
+}
+
+func dockerInSandboxTemplateSpec() templatev1alpha1.SandboxTemplateSpec {
+	sizeLimit := resource.MustParse(template.DockerInSandboxDockerRootSizeLimit)
+	return templatev1alpha1.SandboxTemplateSpec{
+		DisplayName: template.DockerInSandboxTemplateDisplayName,
+		Description: template.DockerInSandboxTemplateDescription,
+		MainContainer: templatev1alpha1.ContainerSpec{
+			Image: template.DefaultTemplateImage,
+			Resources: templatev1alpha1.ResourceQuota{
+				CPU:              resource.MustParse(template.DockerInSandboxCPU),
+				Memory:           resource.MustParse(template.DockerInSandboxMemory),
+				EphemeralStorage: resource.MustParse(template.DockerInSandboxEphemeralStorage),
+			},
+			SecurityContext: &templatev1alpha1.SecurityContext{
+				Privileged:               BoolPtr(true),
+				AllowPrivilegeEscalation: BoolPtr(true),
+			},
+		},
+		Pod: &templatev1alpha1.PodSpecOverride{
+			EmptyDirMounts: []templatev1alpha1.EmptyDirMountSpec{{
+				MountPath: template.DockerInSandboxDockerRoot,
+				SizeLimit: &sizeLimit,
+			}},
+		},
+		WarmProcesses: []templatev1alpha1.WarmProcessSpec{{
+			Name:    template.DockerInSandboxWarmProcessName,
+			Type:    templatev1alpha1.WarmProcessTypeCMD,
+			Command: []string{template.DockerInSandboxWarmProcessCommand},
+			Probes: &templatev1alpha1.SandboxProbeSet{
+				Readiness: &templatev1alpha1.SandboxProbeSpec{
+					Exec: &templatev1alpha1.ExecProbeSpec{
+						Command: []string{"docker", "info"},
+					},
+					InitialDelaySeconds: template.DockerInSandboxWarmProcessReadinessTime,
+					TimeoutSeconds:      10,
+				},
+			},
+		}},
+		Pool: defaultBuiltinTemplatePool(),
+		Network: &templatev1alpha1.SandboxNetworkPolicy{
+			Mode: templatev1alpha1.NetworkModeAllowAll,
+		},
+	}
+}
+
+func applyBuiltinTemplateConfig(spec *templatev1alpha1.SandboxTemplateSpec, templateID string, builtin infrav1alpha1.BuiltinTemplateConfig) {
+	if image := strings.TrimSpace(builtin.Image); image != "" {
+		spec.MainContainer.Image = image
+	}
+	if spec.MainContainer.Image == "" {
+		spec.MainContainer.Image = template.DefaultTemplateImage
+	}
+	if spec.MainContainer.Resources.CPU.Sign() == 0 {
+		spec.MainContainer.Resources.CPU = resource.MustParse(template.DefaultTemplateCPU)
+	}
+	if spec.MainContainer.Resources.Memory.Sign() == 0 {
+		spec.MainContainer.Resources.Memory = resource.MustParse(template.DefaultTemplateMemory)
+	}
+	if spec.MainContainer.Resources.EphemeralStorage.Sign() == 0 {
+		spec.MainContainer.Resources.EphemeralStorage = resource.MustParse(template.DefaultTemplateEphemeralStorage)
+	}
+
+	if displayName := strings.TrimSpace(builtin.DisplayName); displayName != "" {
+		spec.DisplayName = displayName
+	}
+	if spec.DisplayName == "" {
+		spec.DisplayName = templateID
+	}
+	if description := strings.TrimSpace(builtin.Description); description != "" {
+		spec.Description = description
+	}
+	if spec.Description == "" {
+		spec.Description = fmt.Sprintf("Builtin template %s installed by infra-operator.", templateID)
+	}
+
+	if builtin.Pool.MinIdle != 0 || builtin.Pool.MaxIdle != 0 || (spec.Pool.MinIdle == 0 && spec.Pool.MaxIdle == 0) {
+		poolCfg := applyBuiltinTemplatePool(builtin.Pool)
+		spec.Pool = templatev1alpha1.PoolStrategy{
+			MinIdle: poolCfg.MinIdle,
+			MaxIdle: poolCfg.MaxIdle,
+		}
+	}
+	if spec.Network == nil {
+		spec.Network = &templatev1alpha1.SandboxNetworkPolicy{
+			Mode: templatev1alpha1.NetworkModeAllowAll,
+		}
+	}
+}
+
+func defaultBuiltinTemplatePool() templatev1alpha1.PoolStrategy {
+	pool := applyBuiltinTemplatePool(infrav1alpha1.BuiltinTemplatePoolConfig{})
+	return templatev1alpha1.PoolStrategy{
+		MinIdle: pool.MinIdle,
+		MaxIdle: pool.MaxIdle,
+	}
 }
 
 func applyBuiltinTemplatePool(pool infrav1alpha1.BuiltinTemplatePoolConfig) infrav1alpha1.BuiltinTemplatePoolConfig {

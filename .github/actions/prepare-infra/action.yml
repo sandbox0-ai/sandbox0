@@ -23,6 +23,10 @@ inputs:
     description: Run aggressive disk cleanup on GitHub-hosted Linux runners.
     required: false
     default: "true"
+  build-local-template-image:
+    description: Add repo-local template image changes on top of the published default template image before loading it into Kind.
+    required: false
+    default: "false"
 runs:
   using: "composite"
   steps:
@@ -133,6 +137,23 @@ runs:
         ensure_image "registry:2.8.3" "${image_cache_dir}/infra-image-registry-2.8.3.tar"
         ensure_image "sandbox0ai/otemplates:default-v0.1.0" "${image_cache_dir}/infra-image-template-default-v0.1.0.tar"
 
+        if [ "${{ inputs.build-local-template-image }}" = "true" ]; then
+          echo "Building local default template image overlay..."
+          cat > "${RUNNER_TEMP}/sandbox0-template-overlay.Dockerfile" <<'EOF'
+        FROM sandbox0ai/otemplates:default-v0.1.0
+        ENV DEBIAN_FRONTEND=noninteractive
+        RUN if ! command -v dockerd >/dev/null 2>&1 || ! command -v fuse-overlayfs >/dev/null 2>&1; then \
+              apt-get update && \
+              apt-get install -y --no-install-recommends docker.io fuse-overlayfs iptables uidmap && \
+              rm -rf /var/lib/apt/lists/*; \
+            fi
+        COPY manager/procd/sandbox0-dockerd-entrypoint /usr/local/bin/sandbox0-dockerd-entrypoint
+        RUN chmod 0755 /usr/local/bin/sandbox0-dockerd-entrypoint
+        EOF
+          docker build -t sandbox0ai/otemplates:default-v0.1.0 -f "${RUNNER_TEMP}/sandbox0-template-overlay.Dockerfile" .
+          docker save -o "${image_cache_dir}/infra-image-template-default-v0.1.0.tar" sandbox0ai/otemplates:default-v0.1.0
+        fi
+
         ssh_fixture_archive="${image_cache_dir}/infra-image-e2e-openssh-server-68b605929e83.tar"
         ssh_fixture_source="lscr.io/linuxserver/openssh-server@sha256:68b605929e83b2efe000da09269688f6d82a44579e8a18e2d9e8c8d272917cf7"
         ssh_fixture_image="sandbox0ai/e2e-openssh-server:68b605929e83"
@@ -192,7 +213,7 @@ runs:
         key: infra-image-${{ runner.os }}-${{ inputs.cache-key-suffix }}-registry-2.8.3
 
     - name: Save template image cache
-      if: steps.infra-template-cache.outputs.cache-hit != 'true'
+      if: ${{ steps.infra-template-cache.outputs.cache-hit != 'true' && inputs.build-local-template-image != 'true' }}
       uses: actions/cache/save@v4
       with:
         path: ${{ runner.temp }}/infra-image-cache/infra-image-template-default-v0.1.0.tar
@@ -204,6 +225,22 @@ runs:
       with:
         path: ${{ runner.temp }}/infra-image-cache/infra-image-e2e-openssh-server-68b605929e83.tar
         key: infra-image-${{ runner.os }}-${{ inputs.cache-key-suffix }}-e2e-openssh-server-68b605929e83
+
+    - name: Free image archives after Kind load
+      shell: bash
+      run: |
+        rm -f "${RUNNER_TEMP}/infra-image-cache/"*.tar
+        docker image rm \
+          sandbox0ai/infra:latest \
+          postgres:16-alpine \
+          rustfs/rustfs:1.0.0-alpha.79 \
+          registry:2.8.3 \
+          sandbox0ai/otemplates:default-v0.1.0 \
+          sandbox0ai/e2e-openssh-server:68b605929e83 \
+          2>/dev/null || true
+        docker builder prune -af || true
+        docker system df || true
+        df -h
 
     - name: Disk diagnostics (on failure)
       if: failure()

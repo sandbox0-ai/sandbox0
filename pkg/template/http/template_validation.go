@@ -11,29 +11,34 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	s0template "github.com/sandbox0-ai/sandbox0/pkg/template"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 func validateTemplateSpecForClaims(spec v1alpha1.SandboxTemplateSpec, claims *internalauth.Claims) error {
-	if claims != nil && claims.IsSystemToken() {
-		return nil
+	isSystem := claims != nil && claims.IsSystemToken()
+	if !isSystem {
+		if spec.Pod != nil {
+			return fmt.Errorf("spec.pod requires system identity")
+		}
+		if spec.MainContainer.SecurityContext != nil {
+			return fmt.Errorf("spec.mainContainer.securityContext requires system identity")
+		}
+		if strings.TrimSpace(spec.MainContainer.ImagePullPolicy) != "" {
+			return fmt.Errorf("spec.mainContainer.imagePullPolicy requires system identity")
+		}
+		if spec.ClusterId != nil {
+			return fmt.Errorf("spec.clusterId requires system identity")
+		}
 	}
 
-	if spec.Pod != nil {
-		return fmt.Errorf("spec.pod requires system identity")
+	subject := "team-owned template"
+	if isSystem {
+		subject = "system template"
 	}
-	if spec.MainContainer.SecurityContext != nil {
-		return fmt.Errorf("spec.mainContainer.securityContext requires system identity")
-	}
-	if strings.TrimSpace(spec.MainContainer.ImagePullPolicy) != "" {
-		return fmt.Errorf("spec.mainContainer.imagePullPolicy requires system identity")
-	}
-	if spec.ClusterId != nil {
-		return fmt.Errorf("spec.clusterId requires system identity")
-	}
-	if err := validateTeamTemplateResourceRatio(spec); err != nil {
+	if err := validateTemplateResourceRatio(spec, subject); err != nil {
 		return err
 	}
 	return nil
@@ -390,39 +395,16 @@ func validateReservedMountPath(path, field string) error {
 	return nil
 }
 
-func validateTeamTemplateResourceRatio(spec v1alpha1.SandboxTemplateSpec) error {
-	memoryPerCPU := configuredTeamTemplateMemoryPerCPU()
-	totalCPU := spec.MainContainer.Resources.CPU.DeepCopy()
-	totalMemory := spec.MainContainer.Resources.Memory.DeepCopy()
-	requiredMemory := memoryForCPU(totalCPU, memoryPerCPU)
-	if totalMemory.Cmp(requiredMemory) != 0 {
-		return fmt.Errorf(
-			"team-owned template total memory must equal total cpu * %s (got cpu=%s memory=%s expectedMemory=%s)",
-			memoryPerCPU.String(),
-			totalCPU.String(),
-			totalMemory.String(),
-			requiredMemory.String(),
-		)
-	}
-	return nil
+func validateTemplateResourceRatio(spec v1alpha1.SandboxTemplateSpec, subject string) error {
+	return s0template.ValidateResourceRatio(spec, configuredTemplateMemoryPerCPU(), subject)
 }
 
-func configuredTeamTemplateMemoryPerCPU() resource.Quantity {
-	defaultQuantity := resource.MustParse("4Gi")
+func configuredTemplateMemoryPerCPU() resource.Quantity {
 	cfg := config.LoadManagerConfig()
 	if cfg == nil {
-		return defaultQuantity
+		return s0template.MemoryPerCPUOrDefault("")
 	}
-	parsed, err := resource.ParseQuantity(strings.TrimSpace(cfg.TeamTemplateMemoryPerCPU))
-	if err != nil || parsed.Sign() <= 0 {
-		return defaultQuantity
-	}
-	return parsed
-}
-
-func memoryForCPU(cpu, memoryPerCPU resource.Quantity) resource.Quantity {
-	requiredBytes := cpu.MilliValue() * memoryPerCPU.Value() / 1000
-	return *resource.NewQuantity(requiredBytes, resource.BinarySI)
+	return s0template.MemoryPerCPUOrDefault(cfg.TeamTemplateMemoryPerCPU)
 }
 
 func validateCIDRs(values []string, field string) error {

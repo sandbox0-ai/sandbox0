@@ -140,7 +140,7 @@ try {
     {
       label: "CLI",
       language: "bash",
-      code: `SANDBOX_ID="$(s0 -o json sandbox create --template dins --hard-ttl 1800 | jq -r '.id')"
+      code: `SANDBOX_ID="$(s0 -o json sandbox create --template dins --hard-ttl 1800 | jq -r '.ID')"
 trap 's0 sandbox delete "$SANDBOX_ID" >/dev/null 2>&1 || true' EXIT
 
 s0 sandbox exec "$SANDBOX_ID" -- /bin/sh -lc '

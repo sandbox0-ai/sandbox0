@@ -4,7 +4,7 @@ import "github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 
 const (
 	DefaultTemplateID               = "default"
-	DefaultTemplateImage            = "sandbox0ai/otemplates:default-v0.1.0"
+	DefaultTemplateImage            = "sandbox0ai/otemplates:default-v0.2.0"
 	DefaultTemplateCPU              = "500m"
 	DefaultTemplateMemory           = "2Gi"
 	DefaultTemplateEphemeralStorage = v1alpha1.DefaultSandboxEphemeralStorage

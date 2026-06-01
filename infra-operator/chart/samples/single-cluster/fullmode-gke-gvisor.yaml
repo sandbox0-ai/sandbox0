@@ -36,7 +36,7 @@ spec:
       pushEndpoint: 127.0.0.1:30500
   builtinTemplates:
     - templateId: default
-      image: sandbox0ai/otemplates:default-v0.1.0
+      image: sandbox0ai/otemplates:default-v0.2.0
       displayName: Default
       description: Builtin template installed by infra-operator.
       pool:

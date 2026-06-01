@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Template image tag (e.g. default-v0.1.0)"
+        description: "Template image tag (e.g. default-v0.2.0)"
         required: true
-        default: "default-v0.1.0"
+        default: "default-v0.2.0"
       dockerfile:
         description: "Dockerfile path relative to repo root"
         required: true

@@ -20,7 +20,7 @@ import (
 
 const (
 	netdHTTPFixtureImageEnvVar     = "E2E_NETD_HTTP_FIXTURE_IMAGE"
-	defaultNetdHTTPFixtureImageRef = "sandbox0ai/otemplates:default-v0.1.0"
+	defaultNetdHTTPFixtureImageRef = "sandbox0ai/otemplates:default-v0.2.0"
 	netdHTTPFixturePort            = 8080
 )
 

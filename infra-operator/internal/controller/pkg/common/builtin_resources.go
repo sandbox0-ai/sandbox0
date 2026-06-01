@@ -7,11 +7,14 @@ import (
 )
 
 const (
-	BuiltinDatabaseSecretSuffix = "sandbox0-database-credentials"
-	BuiltinDatabasePVCSuffix    = "postgres-data"
-	BuiltinStorageSecretSuffix  = "sandbox0-rustfs-credentials"
-	BuiltinStoragePVCSuffix     = "rustfs-data"
-	BuiltinRegistryPVCSuffix    = "registry-data"
+	BuiltinDatabaseSecretSuffix              = "sandbox0-database-credentials"
+	BuiltinDatabasePVCSuffix                 = "postgres-data"
+	BuiltinStorageSecretSuffix               = "sandbox0-rustfs-credentials"
+	BuiltinStoragePVCSuffix                  = "rustfs-data"
+	BuiltinCredentialVaultSecretSuffix       = "credential-vault-root"
+	BuiltinCredentialVaultManagerTokenSuffix = "credential-vault-manager-token"
+	BuiltinCredentialVaultPVCSuffix          = "openbao-data"
+	BuiltinRegistryPVCSuffix                 = "registry-data"
 )
 
 func BuiltinDatabaseSecretName(infraName string) string {
@@ -28,6 +31,18 @@ func BuiltinStorageSecretName(infraName string) string {
 
 func BuiltinStoragePVCName(infraName string) string {
 	return fmt.Sprintf("%s-%s", infraName, BuiltinStoragePVCSuffix)
+}
+
+func BuiltinCredentialVaultSecretName(infraName string) string {
+	return fmt.Sprintf("%s-%s", infraName, BuiltinCredentialVaultSecretSuffix)
+}
+
+func BuiltinCredentialVaultManagerTokenSecretName(infraName string) string {
+	return fmt.Sprintf("%s-%s", infraName, BuiltinCredentialVaultManagerTokenSuffix)
+}
+
+func BuiltinCredentialVaultPVCName(infraName string) string {
+	return fmt.Sprintf("%s-%s", infraName, BuiltinCredentialVaultPVCSuffix)
 }
 
 func BuiltinRegistryPVCName(infraName string) string {

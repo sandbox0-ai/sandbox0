@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -38,17 +39,50 @@ type SourceStore interface {
 
 // Repository persists effective credential bindings in PostgreSQL.
 type Repository struct {
-	db   DB
-	pool *pgxpool.Pool
+	db                 DB
+	pool               *pgxpool.Pool
+	defaultStorageKind string
+	secretCodec        SecretCodec
+	vaultResolver      *VaultResolver
 }
 
 var ErrCredentialSourceInUse = errors.New("credential source is in use")
 
-func NewRepository(pool *pgxpool.Pool) *Repository {
-	return &Repository{
-		db:   pool,
-		pool: pool,
+type RepositoryOption func(*Repository)
+
+func WithDefaultStorageKind(kind string) RepositoryOption {
+	return func(r *Repository) {
+		r.defaultStorageKind = kind
 	}
+}
+
+func WithSecretCodec(codec SecretCodec) RepositoryOption {
+	return func(r *Repository) {
+		r.secretCodec = codec
+	}
+}
+
+func WithVaultResolver(resolver *VaultResolver) RepositoryOption {
+	return func(r *Repository) {
+		r.vaultResolver = resolver
+	}
+}
+
+func NewRepository(pool *pgxpool.Pool, opts ...RepositoryOption) *Repository {
+	repo := &Repository{
+		db:                 pool,
+		pool:               pool,
+		defaultStorageKind: CredentialSourceStorageKindEncryptedPG,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(repo)
+		}
+	}
+	if repo.defaultStorageKind == "" {
+		repo.defaultStorageKind = CredentialSourceStorageKindEncryptedPG
+	}
+	return repo
 }
 
 func (r *Repository) Pool() *pgxpool.Pool {
@@ -243,19 +277,23 @@ func (r *Repository) GetSourceVersion(ctx context.Context, sourceID, version int
 	}
 
 	var (
-		source   CredentialSourceVersion
-		specJSON []byte
+		source         CredentialSourceVersion
+		specJSON       []byte
+		storagePayload []byte
 	)
 	err := r.db.QueryRow(ctx, `
-		SELECT v.source_id, v.version, s.resolver_kind, v.spec_json, v.created_at
+		SELECT v.source_id, s.team_id, v.version, s.resolver_kind, v.storage_kind, v.spec_json, v.storage_payload, v.created_at
 		FROM credential_source_versions v
 		JOIN credential_sources s ON s.id = v.source_id
 		WHERE v.source_id = $1 AND v.version = $2
 	`, sourceID, version).Scan(
 		&source.SourceID,
+		&source.TeamID,
 		&source.Version,
 		&source.ResolverKind,
+		&source.StorageKind,
 		&specJSON,
+		&storagePayload,
 		&source.CreatedAt,
 	)
 	if err == pgx.ErrNoRows {
@@ -264,11 +302,12 @@ func (r *Repository) GetSourceVersion(ctx context.Context, sourceID, version int
 	if err != nil {
 		return nil, fmt.Errorf("get source version: %w", err)
 	}
-	if len(specJSON) > 0 {
-		if err := json.Unmarshal(specJSON, &source.Spec); err != nil {
-			return nil, fmt.Errorf("unmarshal source spec: %w", err)
-		}
+	spec, externalRef, err := r.resolveSourceVersionSpec(ctx, &source, specJSON, storagePayload)
+	if err != nil {
+		return nil, err
 	}
+	source.Spec = spec
+	source.ExternalRef = externalRef
 	return &source, nil
 }
 
@@ -281,7 +320,7 @@ func (r *Repository) ListSourceMetadata(ctx context.Context, teamID string) ([]C
 	}
 
 	rows, err := r.db.Query(ctx, `
-		SELECT s.name, s.resolver_kind, s.current_version, s.status, v.spec_json, s.created_at, s.updated_at
+		SELECT s.name, s.resolver_kind, v.storage_kind, s.current_version, s.status, v.spec_json, s.created_at, s.updated_at
 		FROM credential_sources s
 		JOIN credential_source_versions v
 		  ON v.source_id = s.id AND v.version = s.current_version
@@ -323,7 +362,7 @@ func (r *Repository) GetSourceMetadata(ctx context.Context, teamID, name string)
 		specJSON []byte
 	)
 	err := r.db.QueryRow(ctx, `
-		SELECT s.name, s.resolver_kind, s.current_version, s.status, v.spec_json, s.created_at, s.updated_at
+		SELECT s.name, s.resolver_kind, v.storage_kind, s.current_version, s.status, v.spec_json, s.created_at, s.updated_at
 		FROM credential_sources s
 		JOIN credential_source_versions v
 		  ON v.source_id = s.id AND v.version = s.current_version
@@ -331,6 +370,7 @@ func (r *Repository) GetSourceMetadata(ctx context.Context, teamID, name string)
 	`, teamID, name).Scan(
 		&record.Name,
 		&record.ResolverKind,
+		&record.StorageKind,
 		&record.CurrentVersion,
 		&record.Status,
 		&specJSON,
@@ -361,11 +401,6 @@ func (r *Repository) PutSource(ctx context.Context, teamID string, record *Crede
 	}
 	if record.ResolverKind == "" {
 		return nil, fmt.Errorf("resolver_kind is required")
-	}
-
-	specJSON, err := json.Marshal(record.Spec)
-	if err != nil {
-		return nil, fmt.Errorf("marshal source record spec: %w", err)
 	}
 
 	tx, err := r.pool.Begin(ctx)
@@ -412,10 +447,16 @@ func (r *Repository) PutSource(ctx context.Context, teamID string, record *Crede
 		return nil, fmt.Errorf("load source record for update: %w", err)
 	}
 
+	storageKind := normalizeStorageKind(record.StorageKind, r.defaultStorageKind)
+	specJSON, storagePayload, err := r.prepareSourceVersionPayload(ctx, teamID, sourceID, currentVersion, record.ResolverKind, storageKind, record)
+	if err != nil {
+		return nil, err
+	}
+
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO credential_source_versions (source_id, version, spec_json)
-		VALUES ($1, $2, $3)
-	`, sourceID, currentVersion, specJSON); err != nil {
+		INSERT INTO credential_source_versions (source_id, version, spec_json, storage_kind, storage_payload)
+		VALUES ($1, $2, $3, $4, $5)
+	`, sourceID, currentVersion, specJSON, storageKind, storagePayload); err != nil {
 		return nil, fmt.Errorf("insert source version: %w", err)
 	}
 
@@ -457,6 +498,7 @@ func (r *Repository) scanSourceMetadata(rows pgx.Rows) (*CredentialSourceMetadat
 	if err := rows.Scan(
 		&record.Name,
 		&record.ResolverKind,
+		&record.StorageKind,
 		&record.CurrentVersion,
 		&record.Status,
 		&specJSON,
@@ -466,6 +508,224 @@ func (r *Repository) scanSourceMetadata(rows pgx.Rows) (*CredentialSourceMetadat
 		return nil, fmt.Errorf("scan source record: %w", err)
 	}
 	return &record, nil
+}
+
+func (r *Repository) resolveSourceVersionSpec(ctx context.Context, source *CredentialSourceVersion, specJSON, storagePayload []byte) (CredentialSourceSecretSpec, *CredentialSourceExternalRefSpec, error) {
+	if source == nil {
+		return CredentialSourceSecretSpec{}, nil, fmt.Errorf("credential source version is required")
+	}
+	switch normalizeStorageKind(source.StorageKind, "") {
+	case CredentialSourceStorageKindPlaintextPG, "":
+		var spec CredentialSourceSecretSpec
+		if len(specJSON) > 0 {
+			if err := json.Unmarshal(specJSON, &spec); err != nil {
+				return CredentialSourceSecretSpec{}, nil, fmt.Errorf("unmarshal plaintext source spec: %w", err)
+			}
+		}
+		return spec, nil, nil
+	case CredentialSourceStorageKindEncryptedPG:
+		if r.secretCodec == nil {
+			return CredentialSourceSecretSpec{}, nil, fmt.Errorf("encrypted_pg credential source storage is not configured")
+		}
+		spec, err := r.secretCodec.Decrypt(ctx, credentialSourceAAD(source.TeamID, source.SourceID, source.Version, source.ResolverKind), storagePayload)
+		if err != nil {
+			return CredentialSourceSecretSpec{}, nil, err
+		}
+		return spec, nil, nil
+	case CredentialSourceStorageKindHashiCorpVault:
+		if r.vaultResolver == nil {
+			return CredentialSourceSecretSpec{}, nil, fmt.Errorf("hashicorp_vault credential source storage is not configured")
+		}
+		ref, err := decodeExternalRef(storagePayload)
+		if err != nil {
+			return CredentialSourceSecretSpec{}, nil, err
+		}
+		spec, err := r.vaultResolver.Resolve(ctx, source.TeamID, source.ResolverKind, ref)
+		if err != nil {
+			return CredentialSourceSecretSpec{}, nil, err
+		}
+		return spec, ref, nil
+	case CredentialSourceStorageKindExternalRef:
+		if r.vaultResolver == nil {
+			return CredentialSourceSecretSpec{}, nil, fmt.Errorf("external_ref credential source storage is not configured")
+		}
+		ref, err := decodeExternalRef(storagePayload)
+		if err != nil {
+			return CredentialSourceSecretSpec{}, nil, err
+		}
+		switch ref.Provider {
+		case CredentialSourceExternalProviderHashiCorpVault:
+			spec, err := r.vaultResolver.Resolve(ctx, source.TeamID, source.ResolverKind, ref)
+			if err != nil {
+				return CredentialSourceSecretSpec{}, nil, err
+			}
+			return spec, ref, nil
+		default:
+			return CredentialSourceSecretSpec{}, nil, fmt.Errorf("external credential source provider %q is not supported", ref.Provider)
+		}
+	default:
+		return CredentialSourceSecretSpec{}, nil, fmt.Errorf("credential source storage kind %q is not supported", source.StorageKind)
+	}
+}
+
+func (r *Repository) prepareSourceVersionPayload(ctx context.Context, teamID string, sourceID, version int64, resolverKind, storageKind string, record *CredentialSourceWriteRequest) ([]byte, []byte, error) {
+	switch storageKind {
+	case CredentialSourceStorageKindEncryptedPG:
+		if r.secretCodec == nil {
+			return nil, nil, fmt.Errorf("encrypted_pg credential source storage is not configured")
+		}
+		payload, err := r.secretCodec.Encrypt(ctx, credentialSourceAAD(teamID, sourceID, version, resolverKind), record.Spec)
+		if err != nil {
+			return nil, nil, err
+		}
+		return []byte(`{}`), payload, nil
+	case CredentialSourceStorageKindHashiCorpVault:
+		if r.vaultResolver == nil {
+			return nil, nil, fmt.Errorf("hashicorp_vault credential source storage is not configured")
+		}
+		ref := record.ExternalRef
+		if ref == nil {
+			if !credentialSourceSpecPresent(record.Spec) {
+				return nil, nil, fmt.Errorf("hashicorp_vault credential source requires spec or externalRef")
+			}
+			ref = defaultVaultSourceRef(teamID, record.Name, version)
+		}
+		ref.Provider = CredentialSourceExternalProviderHashiCorpVault
+		if ref.Connection == "" {
+			ref.Connection = "default"
+		}
+		if ref.Mount == "" {
+			ref.Mount = "secret"
+		}
+		if credentialSourceSpecPresent(record.Spec) {
+			if err := r.vaultResolver.Put(ctx, teamID, resolverKind, ref, record.Spec); err != nil {
+				return nil, nil, err
+			}
+		}
+		payload, err := json.Marshal(ref)
+		if err != nil {
+			return nil, nil, fmt.Errorf("marshal vault source reference: %w", err)
+		}
+		return []byte(`{}`), payload, nil
+	case CredentialSourceStorageKindExternalRef:
+		if record.ExternalRef == nil {
+			return nil, nil, fmt.Errorf("external_ref credential source requires externalRef")
+		}
+		payload, err := json.Marshal(record.ExternalRef)
+		if err != nil {
+			return nil, nil, fmt.Errorf("marshal external source reference: %w", err)
+		}
+		return []byte(`{}`), payload, nil
+	case CredentialSourceStorageKindPlaintextPG:
+		specJSON, err := json.Marshal(record.Spec)
+		if err != nil {
+			return nil, nil, fmt.Errorf("marshal source record spec: %w", err)
+		}
+		return specJSON, []byte(`{}`), nil
+	default:
+		return nil, nil, fmt.Errorf("credential source storage kind %q is not supported", storageKind)
+	}
+}
+
+func (r *Repository) BackfillPlaintextSources(ctx context.Context) (int64, error) {
+	if r == nil || r.pool == nil {
+		return 0, fmt.Errorf("binding repository pool is not configured")
+	}
+	if r.secretCodec == nil {
+		return 0, fmt.Errorf("encrypted_pg credential source storage is not configured")
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT v.source_id, s.team_id, v.version, s.resolver_kind, v.spec_json
+		FROM credential_source_versions v
+		JOIN credential_sources s ON s.id = v.source_id
+		WHERE v.storage_kind = $1
+		ORDER BY v.source_id, v.version
+	`, CredentialSourceStorageKindPlaintextPG)
+	if err != nil {
+		return 0, fmt.Errorf("list plaintext credential sources: %w", err)
+	}
+	defer rows.Close()
+
+	type rowData struct {
+		sourceID     int64
+		teamID       string
+		version      int64
+		resolverKind string
+		specJSON     []byte
+	}
+	var pending []rowData
+	for rows.Next() {
+		var row rowData
+		if err := rows.Scan(&row.sourceID, &row.teamID, &row.version, &row.resolverKind, &row.specJSON); err != nil {
+			return 0, fmt.Errorf("scan plaintext credential source: %w", err)
+		}
+		pending = append(pending, row)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate plaintext credential sources: %w", err)
+	}
+
+	var backfilled int64
+	for _, row := range pending {
+		var spec CredentialSourceSecretSpec
+		if err := json.Unmarshal(row.specJSON, &spec); err != nil {
+			return backfilled, fmt.Errorf("unmarshal plaintext credential source %d/%d: %w", row.sourceID, row.version, err)
+		}
+		payload, err := r.secretCodec.Encrypt(ctx, credentialSourceAAD(row.teamID, row.sourceID, row.version, row.resolverKind), spec)
+		if err != nil {
+			return backfilled, fmt.Errorf("encrypt credential source %d/%d: %w", row.sourceID, row.version, err)
+		}
+		tag, err := r.pool.Exec(ctx, `
+			UPDATE credential_source_versions
+			SET storage_kind = $1,
+			    storage_payload = $2,
+			    spec_json = '{}'::jsonb
+			WHERE source_id = $3 AND version = $4 AND storage_kind = $5
+		`, CredentialSourceStorageKindEncryptedPG, payload, row.sourceID, row.version, CredentialSourceStorageKindPlaintextPG)
+		if err != nil {
+			return backfilled, fmt.Errorf("update credential source %d/%d: %w", row.sourceID, row.version, err)
+		}
+		backfilled += tag.RowsAffected()
+	}
+	return backfilled, nil
+}
+
+func defaultVaultSourceRef(teamID, name string, version int64) *CredentialSourceExternalRefSpec {
+	return &CredentialSourceExternalRefSpec{
+		Provider:   CredentialSourceExternalProviderHashiCorpVault,
+		Connection: "default",
+		Mount:      "secret",
+		Path:       fmt.Sprintf("sandbox0/credential-sources/%s/%s/%d", cleanVaultPath(teamID), cleanVaultPath(name), version),
+	}
+}
+
+func decodeExternalRef(payload []byte) (*CredentialSourceExternalRefSpec, error) {
+	var ref CredentialSourceExternalRefSpec
+	if err := json.Unmarshal(payload, &ref); err != nil {
+		return nil, fmt.Errorf("unmarshal external source reference: %w", err)
+	}
+	if ref.Provider == "" {
+		ref.Provider = CredentialSourceExternalProviderHashiCorpVault
+	}
+	return &ref, nil
+}
+
+func normalizeStorageKind(kind, defaultKind string) string {
+	kind = strings.TrimSpace(kind)
+	if kind == "" {
+		kind = strings.TrimSpace(defaultKind)
+	}
+	if kind == "" {
+		return CredentialSourceStorageKindEncryptedPG
+	}
+	return kind
+}
+
+func credentialSourceSpecPresent(spec CredentialSourceSecretSpec) bool {
+	return spec.StaticHeaders != nil ||
+		spec.StaticTLSClientCertificate != nil ||
+		spec.StaticUsernamePassword != nil ||
+		spec.StaticSSHPrivateKey != nil
 }
 
 func normalizeSourceStatus(status string) string {

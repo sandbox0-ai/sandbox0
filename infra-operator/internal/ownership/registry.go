@@ -53,6 +53,13 @@ func Registry() []Entry {
 		exact("spec.redis.operationTimeout", "redis", []string{"global-gateway", "regional-gateway", "cluster-gateway"}, nil, UpdateSemanticsDeclarative, "Controls Redis operation timeout for gateway rate limiting."),
 		exact("spec.redis.failOpen", "redis", []string{"global-gateway", "regional-gateway", "cluster-gateway"}, nil, UpdateSemanticsDeclarative, "Controls gateway behavior when Redis rate limiting is unavailable."),
 
+		exact("spec.credentialVault.type", "plan", []string{"credential-store", "manager"}, []string{"InfraPlan.Components.EnableCredentialVault"}, UpdateSemanticsDeclarative, "Selects builtin OpenBao versus external HashiCorp Vault reconciliation and manager Vault connection injection."),
+		prefix("spec.credentialVault.builtin", "credential-store", []string{"credential-store", "manager", "status"}, nil, UpdateSemanticsMixed, "Builtin OpenBao fields are reconciled by the credential-store service and injected into manager runtime config."),
+		exact("spec.credentialVault.builtin.enabled", "credential-store", []string{"credential-store", "status"}, []string{"InfraPlan.Components.EnableCredentialVault"}, UpdateSemanticsDeclarative, "Enables builtin OpenBao reconciliation and disabled cleanup."),
+		exact("spec.credentialVault.builtin.persistence", "credential-store", []string{"credential-store"}, nil, UpdateSemanticsCreateOnce, "Defines the builtin OpenBao PVC and cannot be changed after creation."),
+		exact("spec.credentialVault.builtin.statefulResourcePolicy", "credential-store", []string{"credential-store", "status"}, []string{"cleanup policy"}, UpdateSemanticsDeclarative, "Controls retain versus delete semantics when builtin OpenBao is disabled."),
+		prefix("spec.credentialVault.external", "credential-store", []string{"credential-store", "manager"}, nil, UpdateSemanticsDeclarative, "External HashiCorp Vault endpoint and token secret are validated and mounted into manager."),
+
 		exact("spec.registry.provider", "plan", []string{"registry"}, []string{"InfraPlan.Components.EnableRegistry"}, UpdateSemanticsDeclarative, "Selects builtin versus external registry reconciliation."),
 		exact("spec.registry.imagePullSecretName", "registry", []string{"registry", "manager"}, nil, UpdateSemanticsDeclarative, "Controls the pull secret propagated into template namespaces."),
 		prefix("spec.registry.builtin", "registry", []string{"registry"}, nil, UpdateSemanticsMixed, "Builtin registry fields are reconciled by the registry service; immutable subpaths are declared separately."),

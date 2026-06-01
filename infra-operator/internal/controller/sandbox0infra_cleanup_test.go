@@ -97,6 +97,7 @@ func TestCleanupDisabledServiceResourcesCleansBuiltinDependencies(t *testing.T) 
 		infraplan.Compile(infra).Cleanup,
 		database.NewReconciler(resources),
 		nil,
+		nil,
 		storage.NewReconciler(resources),
 		registry.NewReconciler(resources),
 	)

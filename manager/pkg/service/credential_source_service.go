@@ -63,6 +63,40 @@ func validateCredentialSourceWriteRequest(record *egressauth.CredentialSourceWri
 	if record.Name == "" {
 		return fmt.Errorf("credential source name is required")
 	}
+	storageKind := strings.TrimSpace(record.StorageKind)
+	if storageKind == "" {
+		storageKind = egressauth.CredentialSourceStorageKindEncryptedPG
+	}
+	switch storageKind {
+	case egressauth.CredentialSourceStorageKindEncryptedPG:
+		if err := validateSecretBearingCredentialSource(record); err != nil {
+			return err
+		}
+	case egressauth.CredentialSourceStorageKindHashiCorpVault:
+		return validateHashiCorpVaultCredentialSource(record)
+	default:
+		return fmt.Errorf("credential source storageKind %q is not supported", record.StorageKind)
+	}
+	return nil
+}
+
+func validateHashiCorpVaultCredentialSource(record *egressauth.CredentialSourceWriteRequest) error {
+	hasSpec := credentialSourceSpecPresent(record.Spec)
+	if record.ExternalRef != nil {
+		if err := validateExternalCredentialSourceRef(record, !hasSpec); err != nil {
+			return err
+		}
+	}
+	if !hasSpec {
+		if record.ExternalRef == nil {
+			return fmt.Errorf("hashicorp_vault credential source requires spec or externalRef")
+		}
+		return nil
+	}
+	return validateSecretBearingCredentialSource(record)
+}
+
+func validateSecretBearingCredentialSource(record *egressauth.CredentialSourceWriteRequest) error {
 	switch record.ResolverKind {
 	case "static_headers":
 		if record.Spec.StaticHeaders == nil {
@@ -118,4 +152,50 @@ func validateCredentialSourceWriteRequest(record *egressauth.CredentialSourceWri
 		return fmt.Errorf("credential source resolver_kind %q is not supported", record.ResolverKind)
 	}
 	return nil
+}
+
+func validateExternalCredentialSourceRef(record *egressauth.CredentialSourceWriteRequest, requireFields bool) error {
+	if record.ExternalRef == nil {
+		return fmt.Errorf("hashicorp_vault credential source requires externalRef")
+	}
+	if record.ExternalRef.Provider == "" {
+		record.ExternalRef.Provider = egressauth.CredentialSourceExternalProviderHashiCorpVault
+	}
+	if record.ExternalRef.Provider != egressauth.CredentialSourceExternalProviderHashiCorpVault {
+		return fmt.Errorf("external credential source provider %q is not supported", record.ExternalRef.Provider)
+	}
+	if strings.TrimSpace(record.ExternalRef.Path) == "" {
+		return fmt.Errorf("hashicorp_vault externalRef path is required")
+	}
+	if !requireFields {
+		return nil
+	}
+	switch record.ResolverKind {
+	case "static_headers":
+		if len(record.ExternalRef.Fields) == 0 {
+			return fmt.Errorf("static_headers hashicorp_vault externalRef fields are required")
+		}
+	case "static_username_password":
+		if record.ExternalRef.Fields["username"] == "" || record.ExternalRef.Fields["password"] == "" {
+			return fmt.Errorf("static_username_password hashicorp_vault externalRef requires username and password fields")
+		}
+	case "static_tls_client_certificate":
+		if record.ExternalRef.Fields["certificatePem"] == "" || record.ExternalRef.Fields["privateKeyPem"] == "" {
+			return fmt.Errorf("static_tls_client_certificate hashicorp_vault externalRef requires certificatePem and privateKeyPem fields")
+		}
+	case "static_ssh_private_key":
+		if record.ExternalRef.Fields["privateKeyPem"] == "" {
+			return fmt.Errorf("static_ssh_private_key hashicorp_vault externalRef requires privateKeyPem field")
+		}
+	default:
+		return fmt.Errorf("credential source resolver_kind %q is not supported", record.ResolverKind)
+	}
+	return nil
+}
+
+func credentialSourceSpecPresent(spec egressauth.CredentialSourceSecretSpec) bool {
+	return spec.StaticHeaders != nil ||
+		spec.StaticTLSClientCertificate != nil ||
+		spec.StaticUsernamePassword != nil ||
+		spec.StaticSSHPrivateKey != nil
 }

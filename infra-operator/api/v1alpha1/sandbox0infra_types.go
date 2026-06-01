@@ -53,6 +53,15 @@ const (
 	RedisTypeExternal RedisType = "external"
 )
 
+// CredentialVaultType defines the type of Vault-compatible credential store.
+// +kubebuilder:validation:Enum=builtin;external
+type CredentialVaultType string
+
+const (
+	CredentialVaultTypeBuiltin  CredentialVaultType = "builtin"
+	CredentialVaultTypeExternal CredentialVaultType = "external"
+)
+
 // RegistryProvider defines the registry provider type.
 // +kubebuilder:validation:Enum=builtin;aws;gcp;azure;aliyun;harbor
 type RegistryProvider string
@@ -108,6 +117,11 @@ type Sandbox0InfraSpec struct {
 	// uses process-local memory.
 	// +optional
 	Redis *RedisConfig `json:"redis,omitempty"`
+
+	// CredentialVault configures a Vault-compatible backend for credential
+	// sources that use hashicorp_vault storage or external references.
+	// +optional
+	CredentialVault *CredentialVaultConfig `json:"credentialVault,omitempty"`
 
 	// Registry configures the container registry
 	// +optional
@@ -354,6 +368,110 @@ type RedisURLSecretRef struct {
 
 	// Key is the key containing the Redis URL.
 	// +kubebuilder:default="url"
+	// +optional
+	Key string `json:"key,omitempty"`
+}
+
+// CredentialVaultConfig defines the region-level Vault-compatible credential backend.
+type CredentialVaultConfig struct {
+	// Type specifies the Vault backend type: builtin or external.
+	// +kubebuilder:default=builtin
+	Type CredentialVaultType `json:"type,omitempty"`
+
+	// Builtin configures the built-in OpenBao instance.
+	// +optional
+	// +kubebuilder:default={}
+	Builtin *BuiltinCredentialVaultConfig `json:"builtin,omitempty"`
+
+	// External configures an existing HashiCorp Vault-compatible endpoint.
+	// +optional
+	External *ExternalCredentialVaultConfig `json:"external,omitempty"`
+}
+
+// BuiltinCredentialVaultConfig defines the built-in OpenBao configuration.
+// +kubebuilder:validation:XValidation:rule="has(self.persistence) == has(oldSelf.persistence)",message="persistence presence is immutable after creation"
+type BuiltinCredentialVaultConfig struct {
+	// Enabled enables the built-in OpenBao instance.
+	// +kubebuilder:default=true
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Image specifies the OpenBao image for the builtin instance.
+	// +kubebuilder:default="openbao/openbao:2.3.1"
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// Port specifies the OpenBao API port.
+	// +kubebuilder:default=8200
+	// +optional
+	Port int32 `json:"port,omitempty"`
+
+	// Mount configures the KV v2 mount path used by Sandbox0.
+	// +kubebuilder:default="secret"
+	// +optional
+	Mount string `json:"mount,omitempty"`
+
+	// Persistence configures OpenBao storage.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="persistence is immutable after creation"
+	// +optional
+	Persistence *PersistenceConfig `json:"persistence,omitempty"`
+
+	// StatefulResourcePolicy controls what happens to the builtin PVC and token
+	// secret when the builtin vault is disabled or replaced by an external vault.
+	// +kubebuilder:default=Retain
+	// +optional
+	StatefulResourcePolicy BuiltinStatefulResourcePolicy `json:"statefulResourcePolicy,omitempty"`
+}
+
+// ExternalCredentialVaultConfig defines an external HashiCorp Vault-compatible endpoint.
+type ExternalCredentialVaultConfig struct {
+	// Address is the base URL of the external Vault endpoint.
+	Address string `json:"address"`
+
+	// TokenSecret references a secret containing a Vault token for manager.
+	TokenSecret CredentialVaultTokenSecretRef `json:"tokenSecret"`
+
+	// CACertSecret optionally references a PEM CA bundle for the Vault endpoint.
+	// +optional
+	CACertSecret *CredentialVaultCACertSecretRef `json:"caCertSecret,omitempty"`
+
+	// Namespace sets X-Vault-Namespace for Vault Enterprise deployments.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+
+	// Mount configures the default KV v2 mount path.
+	// +kubebuilder:default="secret"
+	// +optional
+	Mount string `json:"mount,omitempty"`
+
+	// SkipTLSVerify disables TLS verification for development-only external Vault endpoints.
+	// +optional
+	// +kubebuilder:default=false
+	SkipTLSVerify bool `json:"skipTLSVerify,omitempty"`
+
+	// AllowedPathPrefixes limits credential source references resolved through this connection.
+	// The literal string {{teamID}} is replaced with the caller team id.
+	// +optional
+	AllowedPathPrefixes []string `json:"allowedPathPrefixes,omitempty"`
+}
+
+// CredentialVaultTokenSecretRef references a Vault token in a secret.
+type CredentialVaultTokenSecretRef struct {
+	// Name is the name of the secret.
+	Name string `json:"name"`
+
+	// Key is the key containing the Vault token.
+	// +kubebuilder:default="token"
+	// +optional
+	Key string `json:"key,omitempty"`
+}
+
+// CredentialVaultCACertSecretRef references a Vault CA bundle in a secret.
+type CredentialVaultCACertSecretRef struct {
+	// Name is the name of the secret.
+	Name string `json:"name"`
+
+	// Key is the key containing the PEM CA bundle.
+	// +kubebuilder:default="ca.crt"
 	// +optional
 	Key string `json:"key,omitempty"`
 }
@@ -1167,6 +1285,24 @@ func IsRedisEnabled(infra *Sandbox0Infra) bool {
 	return rediscache.SpecEnabled(true, string(infra.Spec.Redis.Type), builtinEnabled)
 }
 
+// IsCredentialVaultEnabled returns true when a Vault-compatible credential backend should be reconciled.
+func IsCredentialVaultEnabled(infra *Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.CredentialVault == nil {
+		return false
+	}
+	switch infra.Spec.CredentialVault.Type {
+	case CredentialVaultTypeBuiltin, "":
+		if infra.Spec.CredentialVault.Builtin != nil {
+			return infra.Spec.CredentialVault.Builtin.Enabled
+		}
+		return true
+	case CredentialVaultTypeExternal:
+		return true
+	default:
+		return true
+	}
+}
+
 // IsRegistryEnabled returns true when registry should be reconciled.
 func IsRegistryEnabled(infra *Sandbox0Infra) bool {
 	if infra == nil || infra.Spec.Registry == nil {
@@ -1507,6 +1643,7 @@ const (
 	ConditionTypeReady                = "Ready"
 	ConditionTypeDatabaseReady        = "DatabaseReady"
 	ConditionTypeRedisReady           = "RedisReady"
+	ConditionTypeCredentialVaultReady = "CredentialVaultReady"
 	ConditionTypeStorageReady         = "StorageReady"
 	ConditionTypeRegistryReady        = "RegistryReady"
 	ConditionTypeGlobalGatewayReady   = "GlobalGatewayReady"

@@ -36,12 +36,23 @@ const (
 	UsernamePassword     CredentialProjectionType = "username_password"
 )
 
+// Defines values for CredentialSourceExternalRefSpecProvider.
+const (
+	CredentialSourceExternalRefSpecProviderHashicorpVault CredentialSourceExternalRefSpecProvider = "hashicorp_vault"
+)
+
 // Defines values for CredentialSourceResolverKind.
 const (
 	StaticHeaders              CredentialSourceResolverKind = "static_headers"
 	StaticSshPrivateKey        CredentialSourceResolverKind = "static_ssh_private_key"
 	StaticTlsClientCertificate CredentialSourceResolverKind = "static_tls_client_certificate"
 	StaticUsernamePassword     CredentialSourceResolverKind = "static_username_password"
+)
+
+// Defines values for CredentialSourceStorageKind.
+const (
+	CredentialSourceStorageKindEncryptedPg    CredentialSourceStorageKind = "encrypted_pg"
+	CredentialSourceStorageKindHashicorpVault CredentialSourceStorageKind = "hashicorp_vault"
 )
 
 // Defines values for DeviceLoginPollResponseStatus.
@@ -788,6 +799,28 @@ type CredentialBinding struct {
 // CredentialProjectionType defines model for CredentialProjectionType.
 type CredentialProjectionType string
 
+// CredentialSourceExternalRefSpec Reference to credential material already stored in HashiCorp Vault or a compatible backend.
+type CredentialSourceExternalRefSpec struct {
+	// Connection Manager Vault connection name. Defaults to default.
+	Connection *string `json:"connection,omitempty"`
+
+	// Fields Maps logical credential fields to Vault data keys when referencing existing secrets.
+	Fields *map[string]string `json:"fields,omitempty"`
+
+	// Mount KV v2 mount path. Defaults to the configured connection mount.
+	Mount *string `json:"mount,omitempty"`
+
+	// Path KV v2 secret path under the mount.
+	Path     string                                   `json:"path"`
+	Provider *CredentialSourceExternalRefSpecProvider `json:"provider,omitempty"`
+
+	// Version Optional KV v2 version. Omit or use latest for the current version.
+	Version *string `json:"version,omitempty"`
+}
+
+// CredentialSourceExternalRefSpecProvider defines model for CredentialSourceExternalRefSpec.Provider.
+type CredentialSourceExternalRefSpecProvider string
+
 // CredentialSourceMetadata defines model for CredentialSourceMetadata.
 type CredentialSourceMetadata struct {
 	CreatedAt      *time.Time                   `json:"createdAt"`
@@ -795,17 +828,28 @@ type CredentialSourceMetadata struct {
 	Name           string                       `json:"name"`
 	ResolverKind   CredentialSourceResolverKind `json:"resolverKind"`
 	Status         *string                      `json:"status,omitempty"`
-	UpdatedAt      *time.Time                   `json:"updatedAt"`
+
+	// StorageKind Secret storage backend. Defaults to encrypted_pg.
+	StorageKind *CredentialSourceStorageKind `json:"storageKind,omitempty"`
+	UpdatedAt   *time.Time                   `json:"updatedAt"`
 }
 
 // CredentialSourceResolverKind defines model for CredentialSourceResolverKind.
 type CredentialSourceResolverKind string
 
+// CredentialSourceStorageKind Secret storage backend. Defaults to encrypted_pg.
+type CredentialSourceStorageKind string
+
 // CredentialSourceWriteRequest defines model for CredentialSourceWriteRequest.
 type CredentialSourceWriteRequest struct {
-	Name         string                       `json:"name"`
-	ResolverKind CredentialSourceResolverKind `json:"resolverKind"`
-	Spec         CredentialSourceWriteSpec    `json:"spec"`
+	// ExternalRef Reference to credential material already stored in HashiCorp Vault or a compatible backend.
+	ExternalRef  *CredentialSourceExternalRefSpec `json:"externalRef,omitempty"`
+	Name         string                           `json:"name"`
+	ResolverKind CredentialSourceResolverKind     `json:"resolverKind"`
+	Spec         *CredentialSourceWriteSpec       `json:"spec,omitempty"`
+
+	// StorageKind Secret storage backend. Defaults to encrypted_pg.
+	StorageKind *CredentialSourceStorageKind `json:"storageKind,omitempty"`
 }
 
 // CredentialSourceWriteSpec defines model for CredentialSourceWriteSpec.

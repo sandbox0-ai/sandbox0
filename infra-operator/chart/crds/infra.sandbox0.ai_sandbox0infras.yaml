@@ -153,6 +153,135 @@ spec:
                 - internalAuthPublicKeySecret
                 - url
                 type: object
+              credentialVault:
+                description: |-
+                  CredentialVault configures a Vault-compatible backend for credential
+                  sources that use hashicorp_vault storage or external references.
+                properties:
+                  builtin:
+                    default: {}
+                    description: Builtin configures the built-in OpenBao instance.
+                    properties:
+                      enabled:
+                        default: true
+                        description: Enabled enables the built-in OpenBao instance.
+                        type: boolean
+                      image:
+                        default: openbao/openbao:2.3.1
+                        description: Image specifies the OpenBao image for the builtin
+                          instance.
+                        type: string
+                      mount:
+                        default: secret
+                        description: Mount configures the KV v2 mount path used by
+                          Sandbox0.
+                        type: string
+                      persistence:
+                        description: Persistence configures OpenBao storage.
+                        properties:
+                          size:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            default: 20Gi
+                            description: Size specifies the storage size
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          storageClass:
+                            description: StorageClass specifies the storage class
+                              (empty for default)
+                            type: string
+                        type: object
+                        x-kubernetes-validations:
+                        - message: persistence is immutable after creation
+                          rule: self == oldSelf
+                      port:
+                        default: 8200
+                        description: Port specifies the OpenBao API port.
+                        format: int32
+                        type: integer
+                      statefulResourcePolicy:
+                        default: Retain
+                        description: |-
+                          StatefulResourcePolicy controls what happens to the builtin PVC and token
+                          secret when the builtin vault is disabled or replaced by an external vault.
+                        enum:
+                        - Retain
+                        - Delete
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: persistence presence is immutable after creation
+                      rule: has(self.persistence) == has(oldSelf.persistence)
+                  external:
+                    description: External configures an existing HashiCorp Vault-compatible
+                      endpoint.
+                    properties:
+                      address:
+                        description: Address is the base URL of the external Vault
+                          endpoint.
+                        type: string
+                      allowedPathPrefixes:
+                        description: |-
+                          AllowedPathPrefixes limits credential source references resolved through this connection.
+                          The literal string {{teamID}} is replaced with the caller team id.
+                        items:
+                          type: string
+                        type: array
+                      caCertSecret:
+                        description: CACertSecret optionally references a PEM CA bundle
+                          for the Vault endpoint.
+                        properties:
+                          key:
+                            default: ca.crt
+                            description: Key is the key containing the PEM CA bundle.
+                            type: string
+                          name:
+                            description: Name is the name of the secret.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      mount:
+                        default: secret
+                        description: Mount configures the default KV v2 mount path.
+                        type: string
+                      namespace:
+                        description: Namespace sets X-Vault-Namespace for Vault Enterprise
+                          deployments.
+                        type: string
+                      skipTLSVerify:
+                        default: false
+                        description: SkipTLSVerify disables TLS verification for development-only
+                          external Vault endpoints.
+                        type: boolean
+                      tokenSecret:
+                        description: TokenSecret references a secret containing a
+                          Vault token for manager.
+                        properties:
+                          key:
+                            default: token
+                            description: Key is the key containing the Vault token.
+                            type: string
+                          name:
+                            description: Name is the name of the secret.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    required:
+                    - address
+                    - tokenSecret
+                    type: object
+                  type:
+                    default: builtin
+                    description: 'Type specifies the Vault backend type: builtin or
+                      external.'
+                    enum:
+                    - builtin
+                    - external
+                    type: string
+                type: object
               database:
                 description: Database configures the main database for sandbox0
                 properties:

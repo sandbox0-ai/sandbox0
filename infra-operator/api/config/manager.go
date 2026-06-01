@@ -158,6 +158,8 @@ type ManagerConfig struct {
 	EgressAuthDefaultResolveTTL metav1.Duration `yaml:"egress_auth_default_resolve_ttl" json:"-"`
 	// +optional
 	EgressAuthStaticAuth []StaticEgressAuthConfig `yaml:"egress_auth_static_auth" json:"-"`
+	// +optional
+	CredentialStore CredentialStoreConfig `yaml:"credential_store" json:"-"`
 
 	// Autoscaler config for pool scaling behavior
 	// +optional
@@ -177,6 +179,37 @@ type StaticEgressAuthConfig struct {
 	AuthRef string            `yaml:"auth_ref" json:"authRef"`
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 	TTL     metav1.Duration   `yaml:"ttl" json:"ttl"`
+}
+
+// CredentialStoreConfig configures credential source secret storage.
+type CredentialStoreConfig struct {
+	DefaultStorageKind string                       `yaml:"default_storage_kind" json:"-"`
+	EncryptedPG        CredentialEncryptedPGConfig  `yaml:"encrypted_pg" json:"-"`
+	Vault              CredentialVaultRuntimeConfig `yaml:"vault" json:"-"`
+}
+
+type CredentialEncryptedPGConfig struct {
+	KeyID           string `yaml:"key_id" json:"-"`
+	KeyFile         string `yaml:"key_file" json:"-"`
+	Key             string `yaml:"key" json:"-"`
+	BackfillOnStart *bool  `yaml:"backfill_on_start" json:"-"`
+}
+
+type CredentialVaultRuntimeConfig struct {
+	Connections []CredentialVaultConnectionConfig `yaml:"connections" json:"-"`
+}
+
+type CredentialVaultConnectionConfig struct {
+	Name                string   `yaml:"name" json:"-"`
+	Provider            string   `yaml:"provider" json:"-"`
+	Address             string   `yaml:"address" json:"-"`
+	TokenFile           string   `yaml:"token_file" json:"-"`
+	CACertFile          string   `yaml:"ca_cert_file" json:"-"`
+	Namespace           string   `yaml:"namespace" json:"-"`
+	DefaultMount        string   `yaml:"default_mount" json:"-"`
+	KVVersion           int      `yaml:"kv_version" json:"-"`
+	SkipTLSVerify       bool     `yaml:"skip_tls_verify" json:"-"`
+	AllowedPathPrefixes []string `yaml:"allowed_path_prefixes" json:"-"`
 }
 
 // SandboxPodPlacementConfig defines default scheduling constraints for sandbox
@@ -394,6 +427,13 @@ func LoadManagerConfig() *ManagerConfig {
 		if cfg.EgressAuthStaticAuth[idx].TTL.Duration == 0 {
 			cfg.EgressAuthStaticAuth[idx].TTL = cfg.EgressAuthDefaultResolveTTL
 		}
+	}
+	if cfg.CredentialStore.DefaultStorageKind == "" {
+		cfg.CredentialStore.DefaultStorageKind = "encrypted_pg"
+	}
+	if cfg.CredentialStore.EncryptedPG.BackfillOnStart == nil {
+		defaultBackfill := true
+		cfg.CredentialStore.EncryptedPG.BackfillOnStart = &defaultBackfill
 	}
 	return cfg
 }

@@ -47,6 +47,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/rbac"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/clustergateway"
+	credentialstoresvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/credentialstore"
 	ctldsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/ctld"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/globalgateway"
@@ -167,6 +168,9 @@ func (r *Sandbox0InfraReconciler) setDefaults(infra *infrav1alpha1.Sandbox0Infra
 	if infra.Spec.Redis != nil && infra.Spec.Redis.Type == "" {
 		infra.Spec.Redis.Type = infrav1alpha1.RedisTypeBuiltin
 	}
+	if infra.Spec.CredentialVault != nil && infra.Spec.CredentialVault.Type == "" {
+		infra.Spec.CredentialVault.Type = infrav1alpha1.CredentialVaultTypeBuiltin
+	}
 	if infra.Spec.Registry != nil && infra.Spec.Registry.Provider == "" {
 		infra.Spec.Registry.Provider = infrav1alpha1.RegistryProviderBuiltin
 	}
@@ -238,6 +242,7 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	authReconciler := internalauth.NewReconciler(resources)
 	dbReconciler := database.NewReconciler(resources)
 	redisReconciler := redissvc.NewReconciler(resources)
+	credentialStoreReconciler := credentialstoresvc.NewReconciler(resources)
 	storageReconciler := storage.NewReconciler(resources)
 	registryReconciler := registry.NewReconciler(resources)
 	globalGatewayReconciler := globalgateway.NewReconciler(resources)
@@ -252,11 +257,11 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	nodeReadinessReconciler := nodereadiness.NewReconciler(resources)
 	rbacReconciler := rbac.NewReconciler(resources)
 
-	if err := r.cleanupDisabledServiceResources(ctx, infra, compiledPlan.Cleanup, dbReconciler, redisReconciler, storageReconciler, registryReconciler); err != nil {
+	if err := r.cleanupDisabledServiceResources(ctx, infra, compiledPlan.Cleanup, dbReconciler, redisReconciler, credentialStoreReconciler, storageReconciler, registryReconciler); err != nil {
 		return ctrl.Result{RequeueAfter: requeueInterval}, err
 	}
 
-	steps, err := r.bindWorkflowSteps(infra, compiledPlan, resources, imageRepo, imageTag, authReconciler, dbReconciler, redisReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
+	steps, err := r.bindWorkflowSteps(infra, compiledPlan, resources, imageRepo, imageTag, authReconciler, dbReconciler, redisReconciler, credentialStoreReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -271,6 +276,7 @@ func (r *Sandbox0InfraReconciler) bindWorkflowSteps(
 	authReconciler *internalauth.Reconciler,
 	dbReconciler *database.Reconciler,
 	redisReconciler *redissvc.Reconciler,
+	credentialStoreReconciler *credentialstoresvc.Reconciler,
 	storageReconciler *storage.Reconciler,
 	registryReconciler *registry.Reconciler,
 	globalGatewayReconciler *globalgateway.Reconciler,
@@ -287,7 +293,7 @@ func (r *Sandbox0InfraReconciler) bindWorkflowSteps(
 ) ([]reconcileStep, error) {
 	steps := make([]reconcileStep, 0, len(compiledPlan.Workflow.Steps))
 	for _, planned := range compiledPlan.Workflow.Steps {
-		run, err := r.workflowStepRunner(infra, compiledPlan, resources, imageRepo, imageTag, planned.Name, authReconciler, dbReconciler, redisReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
+		run, err := r.workflowStepRunner(infra, compiledPlan, resources, imageRepo, imageTag, planned.Name, authReconciler, dbReconciler, redisReconciler, credentialStoreReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
 		if err != nil {
 			return nil, err
 		}
@@ -312,6 +318,7 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 	authReconciler *internalauth.Reconciler,
 	dbReconciler *database.Reconciler,
 	redisReconciler *redissvc.Reconciler,
+	credentialStoreReconciler *credentialstoresvc.Reconciler,
 	storageReconciler *storage.Reconciler,
 	registryReconciler *registry.Reconciler,
 	globalGatewayReconciler *globalgateway.Reconciler,
@@ -341,6 +348,8 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 		return func(ctx context.Context) error { return dbReconciler.Reconcile(ctx, infra) }, nil
 	case "redis":
 		return func(ctx context.Context) error { return redisReconciler.Reconcile(ctx, infra) }, nil
+	case "credential-store":
+		return func(ctx context.Context) error { return credentialStoreReconciler.Reconcile(ctx, infra) }, nil
 	case "storage":
 		return func(ctx context.Context) error { return storageReconciler.Reconcile(ctx, infra) }, nil
 	case "registry":
@@ -433,6 +442,7 @@ func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(
 	cleanupPlan infraplan.CleanupPlan,
 	dbReconciler *database.Reconciler,
 	redisReconciler *redissvc.Reconciler,
+	credentialStoreReconciler *credentialstoresvc.Reconciler,
 	storageReconciler *storage.Reconciler,
 	registryReconciler *registry.Reconciler,
 ) error {
@@ -460,6 +470,11 @@ func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(
 	}
 	if cleanupPlan.CleanupBuiltinRedis && redisReconciler != nil {
 		if err := redisReconciler.CleanupBuiltinResources(ctx, infra); err != nil {
+			return err
+		}
+	}
+	if cleanupPlan.CleanupBuiltinCredentialVault && credentialStoreReconciler != nil {
+		if err := credentialStoreReconciler.CleanupBuiltinResources(ctx, infra); err != nil {
 			return err
 		}
 	}
@@ -771,6 +786,7 @@ func managedConditionTypeSet() map[string]struct{} {
 		infrav1alpha1.ConditionTypeReady:                {},
 		infrav1alpha1.ConditionTypeInternalAuthReady:    {},
 		infrav1alpha1.ConditionTypeDatabaseReady:        {},
+		infrav1alpha1.ConditionTypeCredentialVaultReady: {},
 		infrav1alpha1.ConditionTypeStorageReady:         {},
 		infrav1alpha1.ConditionTypeRegistryReady:        {},
 		infrav1alpha1.ConditionTypeGlobalGatewayReady:   {},

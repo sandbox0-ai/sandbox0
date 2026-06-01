@@ -143,6 +143,52 @@ spec:
         failOpen: true
 ```
 
+### Credential Source Storage
+
+Credential sources are stored in encrypted PostgreSQL by default. `infra-operator` creates and mounts a stable per-installation encryption key for manager. During upgrade, legacy plaintext rows remain readable and are not rewritten automatically.
+
+Configure `spec.credentialVault` when new credential source material should live in a Vault-compatible backend. Builtin mode installs OpenBao:
+
+```yaml
+spec:
+    credentialVault:
+        type: builtin
+        builtin:
+            enabled: true
+            mount: secret
+```
+
+External mode connects manager to an existing HashiCorp Vault-compatible endpoint:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+    name: sandbox0-vault-token
+    namespace: sandbox0-system
+stringData:
+    token: <vault-token>
+---
+apiVersion: infra.sandbox0.ai/v1alpha1
+kind: Sandbox0Infra
+metadata:
+    name: fullmode
+    namespace: sandbox0-system
+spec:
+    credentialVault:
+        type: external
+        external:
+            address: https://vault.example.com
+            tokenSecret:
+                name: sandbox0-vault-token
+                key: token
+            mount: secret
+            allowedPathPrefixes:
+                - sandbox0/credential-sources/{{teamID}}/
+```
+
+When `spec.credentialVault` is enabled, manager stores newly written credential sources in the configured Vault backend. Existing rows keep their recorded storage backend.
+
 ### Public Routing and Region Identity
 
 `spec.publicExposure` decides the public host pattern used for sandbox URLs. Keep it consistent with your region and DNS plan.

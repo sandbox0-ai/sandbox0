@@ -57,6 +57,7 @@ type ComponentPlan struct {
 	EnableInternalAuth        bool
 	EnableDatabase            bool
 	EnableRedis               bool
+	EnableCredentialVault     bool
 	EnableStorage             bool
 	EnableRegistry            bool
 	EnableInitUser            bool
@@ -69,12 +70,13 @@ type ValidationPlan struct {
 }
 
 type CleanupPlan struct {
-	CleanupBuiltinDatabase bool
-	CleanupBuiltinRedis    bool
-	CleanupBuiltinStorage  bool
-	CleanupBuiltinRegistry bool
-	DeleteNamespaced       []ResourceRef
-	DeleteClusterScoped    []ResourceRef
+	CleanupBuiltinDatabase        bool
+	CleanupBuiltinRedis           bool
+	CleanupBuiltinCredentialVault bool
+	CleanupBuiltinStorage         bool
+	CleanupBuiltinRegistry        bool
+	DeleteNamespaced              []ResourceRef
+	DeleteClusterScoped           []ResourceRef
 }
 
 type ResourceRef struct {
@@ -204,6 +206,7 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 	enableStorageProxy := infrav1alpha1.IsStorageProxyEnabled(infra)
 	enableDatabase := infrav1alpha1.IsDatabaseEnabled(infra)
 	enableRedis := infrav1alpha1.IsRedisEnabled(infra)
+	enableCredentialVault := infrav1alpha1.IsCredentialVaultEnabled(infra)
 
 	hasControlPlane := enableRegionalGateway || enableSSHGateway || enableScheduler
 	hasDataPlane := enableClusterGateway || enableManager || enableStorageProxy
@@ -223,6 +226,7 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 		EnableInternalAuth:        hasControlPlane || hasDataPlane,
 		EnableDatabase:            enableDatabase,
 		EnableRedis:               enableRedis,
+		EnableCredentialVault:     enableCredentialVault,
 		EnableStorage:             infrav1alpha1.IsStorageEnabled(infra),
 		EnableRegistry:            infrav1alpha1.IsRegistryEnabled(infra),
 		EnableInitUser:            enableDatabase && initUserConsumerEnabled(infra),
@@ -690,6 +694,7 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 
 	cleanup.CleanupBuiltinDatabase = !builtinDatabaseActive(infra)
 	cleanup.CleanupBuiltinRedis = !builtinRedisActive(infra)
+	cleanup.CleanupBuiltinCredentialVault = !builtinCredentialVaultActive(infra)
 	cleanup.CleanupBuiltinStorage = !builtinStorageActive(infra)
 	cleanup.CleanupBuiltinRegistry = !builtinRegistryActive(infra)
 
@@ -796,6 +801,13 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-postgres", infra.Name)),
 		)
 	}
+	if cleanup.CleanupBuiltinCredentialVault {
+		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
+			namespacedRef("StatefulSet", infra.Namespace, fmt.Sprintf("%s-openbao", infra.Name)),
+			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-openbao", infra.Name)),
+			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-openbao", infra.Name)),
+		)
+	}
 	if cleanup.CleanupBuiltinStorage {
 		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
 			namespacedRef("StatefulSet", infra.Namespace, fmt.Sprintf("%s-rustfs", infra.Name)),
@@ -836,6 +848,9 @@ func compileStatusPlan(compiled *InfraPlan) StatusPlan {
 	}
 	if components.EnableRedis {
 		expected = append(expected, infrav1alpha1.ConditionTypeRedisReady)
+	}
+	if components.EnableCredentialVault {
+		expected = append(expected, infrav1alpha1.ConditionTypeCredentialVaultReady)
 	}
 	if components.EnableStorage {
 		expected = append(expected, infrav1alpha1.ConditionTypeStorageReady)
@@ -917,6 +932,9 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 	}
 	if compiled.Components.EnableRedis {
 		appendSuccessStep("redis", infrav1alpha1.ConditionTypeRedisReady, "RedisReady", "Redis is ready", "RedisFailed")
+	}
+	if compiled.Components.EnableCredentialVault {
+		appendSuccessStep("credential-store", infrav1alpha1.ConditionTypeCredentialVaultReady, "CredentialVaultReady", "Credential vault is ready", "CredentialVaultFailed")
 	}
 	if compiled.Components.EnableStorage {
 		appendSuccessStep("storage", infrav1alpha1.ConditionTypeStorageReady, "StorageReady", "Storage is ready", "StorageFailed")
@@ -1028,6 +1046,13 @@ func compileRetainedResourceStatusPlan(compiled *InfraPlan) []infrav1alpha1.Reta
 		retained = append(retained,
 			common.NewRetainedResourceStatus("storage", "Secret", common.BuiltinStorageSecretName(infra.Name)),
 			common.NewRetainedResourceStatus("storage", "PersistentVolumeClaim", common.BuiltinStoragePVCName(infra.Name)),
+		)
+	}
+	if infra.Spec.CredentialVault != nil && !builtinCredentialVaultActive(infra) && credentialVaultStatefulResourcePolicy(infra) == infrav1alpha1.BuiltinStatefulResourcePolicyRetain {
+		retained = append(retained,
+			common.NewRetainedResourceStatus("credential-vault", "Secret", common.BuiltinCredentialVaultSecretName(infra.Name)),
+			common.NewRetainedResourceStatus("credential-vault", "Secret", common.BuiltinCredentialVaultManagerTokenSecretName(infra.Name)),
+			common.NewRetainedResourceStatus("credential-vault", "PersistentVolumeClaim", common.BuiltinCredentialVaultPVCName(infra.Name)),
 		)
 	}
 	if infra.Spec.Registry != nil && !builtinRegistryActive(infra) && registryStatefulResourcePolicy(infra) == infrav1alpha1.BuiltinStatefulResourcePolicyRetain {
@@ -1389,6 +1414,19 @@ func builtinRedisActive(infra *infrav1alpha1.Sandbox0Infra) bool {
 	return infra.Spec.Redis.Builtin.Enabled
 }
 
+func builtinCredentialVaultActive(infra *infrav1alpha1.Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.CredentialVault == nil {
+		return false
+	}
+	if infra.Spec.CredentialVault.Type != "" && infra.Spec.CredentialVault.Type != infrav1alpha1.CredentialVaultTypeBuiltin {
+		return false
+	}
+	if infra.Spec.CredentialVault.Builtin == nil {
+		return true
+	}
+	return infra.Spec.CredentialVault.Builtin.Enabled
+}
+
 func builtinStorageActive(infra *infrav1alpha1.Sandbox0Infra) bool {
 	if infra == nil || infra.Spec.Storage == nil || infra.Spec.Storage.Type != infrav1alpha1.StorageTypeBuiltin {
 		return false
@@ -1421,6 +1459,13 @@ func storageStatefulResourcePolicy(infra *infrav1alpha1.Sandbox0Infra) infrav1al
 		return infrav1alpha1.BuiltinStatefulResourcePolicyRetain
 	}
 	return infra.Spec.Storage.Builtin.StatefulResourcePolicy
+}
+
+func credentialVaultStatefulResourcePolicy(infra *infrav1alpha1.Sandbox0Infra) infrav1alpha1.BuiltinStatefulResourcePolicy {
+	if infra == nil || infra.Spec.CredentialVault == nil || infra.Spec.CredentialVault.Builtin == nil || infra.Spec.CredentialVault.Builtin.StatefulResourcePolicy == "" {
+		return infrav1alpha1.BuiltinStatefulResourcePolicyRetain
+	}
+	return infra.Spec.CredentialVault.Builtin.StatefulResourcePolicy
 }
 
 func registryStatefulResourcePolicy(infra *infrav1alpha1.Sandbox0Infra) infrav1alpha1.BuiltinStatefulResourcePolicy {

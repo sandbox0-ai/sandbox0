@@ -43,6 +43,7 @@ func (s *memorySourceStore) PutSource(_ context.Context, teamID string, record *
 	cloned := &egressauth.CredentialSourceMetadata{
 		Name:         record.Name,
 		ResolverKind: record.ResolverKind,
+		StorageKind:  record.StorageKind,
 		Status:       "active",
 	}
 	if current == nil || current.CurrentVersion == 0 {
@@ -152,6 +153,46 @@ func TestCredentialSourceServicePutSSHPrivateKeySource(t *testing.T) {
 	}
 	if record.CurrentVersion != 1 {
 		t.Fatalf("current version = %d, want 1", record.CurrentVersion)
+	}
+}
+
+func TestCredentialSourceServiceRejectsExplicitStorageKind(t *testing.T) {
+	store := newMemorySourceStore()
+	svc := NewCredentialSourceService(store, zap.NewNop())
+
+	_, err := svc.PutSource(context.Background(), "team-1", &egressauth.CredentialSourceWriteRequest{
+		Name:         "corp-proxy",
+		ResolverKind: "static_username_password",
+		StorageKind:  egressauth.CredentialSourceStorageKindHashiCorpVault,
+		Spec: egressauth.CredentialSourceSecretSpec{
+			StaticUsernamePassword: &egressauth.StaticUsernamePasswordSourceSpec{
+				Username: "alice",
+				Password: "secret",
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected explicit storageKind to be rejected")
+	}
+}
+
+func TestCredentialSourceServiceRejectsExternalRef(t *testing.T) {
+	store := newMemorySourceStore()
+	svc := NewCredentialSourceService(store, zap.NewNop())
+
+	_, err := svc.PutSource(context.Background(), "team-1", &egressauth.CredentialSourceWriteRequest{
+		Name:         "corp-proxy",
+		ResolverKind: "static_username_password",
+		ExternalRef: &egressauth.CredentialSourceExternalRefSpec{
+			Path: "sandbox0/credential-sources/team-1/corp-proxy",
+			Fields: map[string]string{
+				"username": "user",
+				"password": "pass",
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected externalRef to be rejected")
 	}
 }
 

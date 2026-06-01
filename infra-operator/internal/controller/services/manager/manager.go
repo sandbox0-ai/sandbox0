@@ -26,6 +26,7 @@ import (
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	credentialstoresvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/credentialstore"
 	netdservice "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/netd"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -165,6 +166,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		})
 	}
 
+	credentialStoreMounts, credentialStoreVolumes := credentialstoresvc.ManagerCredentialStoreVolumes(scope, config)
+	volumeMounts = append(volumeMounts, credentialStoreMounts...)
+	volumes = append(volumes, credentialStoreVolumes...)
+
 	// Create deployment
 	if err := r.Resources.ReconcileDeploymentWithScope(ctx, scope, deploymentName, labels, replicas, common.ServiceDefinition{
 		Name:               "manager",
@@ -276,6 +281,9 @@ func (r *Reconciler) buildConfig(ctx context.Context, imageRepo, imageTag string
 		}
 		cfg.NetdMITMCASecretName = secretName
 		cfg.NetdMITMCASecretNamespace = compiledPlan.Scope.Namespace
+	}
+	if err := credentialstoresvc.ApplyManagerCredentialStoreConfig(ctx, r.Resources, compiledPlan.Scope, cfg); err != nil {
+		return nil, fmt.Errorf("apply credential store config: %w", err)
 	}
 
 	cfg.ManagerImage = fmt.Sprintf("%s:%s", imageRepo, imageTag)

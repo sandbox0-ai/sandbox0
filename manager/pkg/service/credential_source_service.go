@@ -63,6 +63,16 @@ func validateCredentialSourceWriteRequest(record *egressauth.CredentialSourceWri
 	if record.Name == "" {
 		return fmt.Errorf("credential source name is required")
 	}
+	if strings.TrimSpace(record.StorageKind) != "" {
+		return fmt.Errorf("credential source storage backend is configured by the platform")
+	}
+	if record.ExternalRef != nil {
+		return fmt.Errorf("credential source externalRef is configured by the platform")
+	}
+	return validateSecretBearingCredentialSource(record)
+}
+
+func validateSecretBearingCredentialSource(record *egressauth.CredentialSourceWriteRequest) error {
 	switch record.ResolverKind {
 	case "static_headers":
 		if record.Spec.StaticHeaders == nil {

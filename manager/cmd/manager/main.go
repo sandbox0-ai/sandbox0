@@ -136,7 +136,10 @@ func main() {
 	if err := runSandboxStoreMigrations(ctx, pool, logger); err != nil {
 		logger.Fatal("Failed to run sandbox store migrations", zap.Error(err))
 	}
-	credentialStore := egressauth.NewRepository(pool)
+	credentialStore, err := buildCredentialStore(ctx, pool, cfg, logger)
+	if err != nil {
+		logger.Fatal("Failed to configure credential store", zap.Error(err))
+	}
 
 	// Initialize clock for cross-cluster time synchronization
 	var clk *clock.Clock
@@ -599,6 +602,74 @@ func runEgressAuthMigrations(ctx context.Context, pool *pgxpool.Pool, logger *za
 
 	logger.Info("Egress auth migrations completed successfully")
 	return nil
+}
+
+func buildCredentialStore(ctx context.Context, pool *pgxpool.Pool, cfg *config.ManagerConfig, logger *zap.Logger) (*egressauth.Repository, error) {
+	if cfg == nil {
+		cfg = &config.ManagerConfig{}
+	}
+	storeCfg := cfg.CredentialStore
+	if strings.TrimSpace(storeCfg.DefaultStorageKind) == "" {
+		storeCfg.DefaultStorageKind = egressauth.CredentialSourceStorageKindEncryptedPG
+	}
+
+	var codec egressauth.SecretCodec
+	if storeCfg.EncryptedPG.KeyFile != "" || storeCfg.EncryptedPG.Key != "" {
+		key, err := loadCredentialEncryptionKey(storeCfg.EncryptedPG)
+		if err != nil {
+			return nil, err
+		}
+		keyID := strings.TrimSpace(storeCfg.EncryptedPG.KeyID)
+		if keyID == "" {
+			keyID = "default"
+		}
+		codec, err = egressauth.NewAESGCMCodec(keyID, map[string][]byte{keyID: key})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	vaultConfigs := make([]egressauth.VaultConnectionConfig, 0, len(storeCfg.Vault.Connections))
+	for _, conn := range storeCfg.Vault.Connections {
+		vaultConfigs = append(vaultConfigs, egressauth.VaultConnectionConfig{
+			Name:                conn.Name,
+			Provider:            conn.Provider,
+			Address:             conn.Address,
+			TokenFile:           conn.TokenFile,
+			CACertFile:          conn.CACertFile,
+			Namespace:           conn.Namespace,
+			DefaultMount:        conn.DefaultMount,
+			KVVersion:           conn.KVVersion,
+			SkipTLSVerify:       conn.SkipTLSVerify,
+			AllowedPathPrefixes: conn.AllowedPathPrefixes,
+		})
+	}
+	vaultResolver, err := egressauth.NewVaultResolver(vaultConfigs)
+	if err != nil {
+		return nil, err
+	}
+
+	repo := egressauth.NewRepository(
+		pool,
+		egressauth.WithDefaultStorageKind(storeCfg.DefaultStorageKind),
+		egressauth.WithSecretCodec(codec),
+		egressauth.WithVaultResolver(vaultResolver),
+	)
+	return repo, nil
+}
+
+func loadCredentialEncryptionKey(cfg config.CredentialEncryptedPGConfig) ([]byte, error) {
+	if strings.TrimSpace(cfg.KeyFile) != "" {
+		data, err := os.ReadFile(cfg.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("read credential encryption key file: %w", err)
+		}
+		return data, nil
+	}
+	if strings.TrimSpace(cfg.Key) != "" {
+		return []byte(cfg.Key), nil
+	}
+	return nil, fmt.Errorf("credential encrypted_pg key_file or key is required")
 }
 
 func runSandboxStoreMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {

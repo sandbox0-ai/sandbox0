@@ -16,14 +16,26 @@ type CredentialSource struct {
 
 // CredentialSourceVersion stores one versioned resolver config.
 type CredentialSourceVersion struct {
-	SourceID     int64                      `json:"sourceId"`
-	Version      int64                      `json:"version"`
-	ResolverKind string                     `json:"resolverKind"`
-	Spec         CredentialSourceSecretSpec `json:"spec"`
-	CreatedAt    time.Time                  `json:"createdAt,omitempty"`
+	SourceID     int64                            `json:"sourceId"`
+	TeamID       string                           `json:"teamId,omitempty"`
+	Version      int64                            `json:"version"`
+	ResolverKind string                           `json:"resolverKind"`
+	StorageKind  string                           `json:"storageKind,omitempty"`
+	Spec         CredentialSourceSecretSpec       `json:"spec"`
+	ExternalRef  *CredentialSourceExternalRefSpec `json:"externalRef,omitempty"`
+	CreatedAt    time.Time                        `json:"createdAt,omitempty"`
 }
 
-// CredentialSourceSecretSpec is the typed source config stored in PostgreSQL.
+const (
+	CredentialSourceStorageKindEncryptedPG    = "encrypted_pg"
+	CredentialSourceStorageKindHashiCorpVault = "hashicorp_vault"
+	CredentialSourceStorageKindExternalRef    = "external_ref"
+	CredentialSourceStorageKindPlaintextPG    = "plaintext_pg"
+
+	CredentialSourceExternalProviderHashiCorpVault = "hashicorp_vault"
+)
+
+// CredentialSourceSecretSpec is the typed source config resolved for runtime use.
 type CredentialSourceSecretSpec struct {
 	StaticHeaders              *StaticHeadersSourceSpec              `json:"staticHeaders,omitempty"`
 	StaticTLSClientCertificate *StaticTLSClientCertificateSourceSpec `json:"staticTLSClientCertificate,omitempty"`
@@ -57,17 +69,30 @@ type StaticSSHPrivateKeySourceSpec struct {
 
 // CredentialSourceWriteRequest is the secret-bearing public write model.
 type CredentialSourceWriteRequest struct {
-	Name         string                     `json:"name"`
-	ResolverKind string                     `json:"resolverKind"`
-	Spec         CredentialSourceSecretSpec `json:"spec"`
+	Name         string                           `json:"name"`
+	ResolverKind string                           `json:"resolverKind"`
+	StorageKind  string                           `json:"storageKind,omitempty"`
+	Spec         CredentialSourceSecretSpec       `json:"spec"`
+	ExternalRef  *CredentialSourceExternalRefSpec `json:"externalRef,omitempty"`
 }
 
 // CredentialSourceMetadata is the public metadata view of one source.
 type CredentialSourceMetadata struct {
 	Name           string    `json:"name"`
 	ResolverKind   string    `json:"resolverKind"`
+	StorageKind    string    `json:"-"`
 	CurrentVersion int64     `json:"currentVersion"`
 	Status         string    `json:"status"`
 	CreatedAt      time.Time `json:"createdAt,omitempty"`
 	UpdatedAt      time.Time `json:"updatedAt,omitempty"`
+}
+
+// CredentialSourceExternalRefSpec points at secret material held in a Vault-compatible backend.
+type CredentialSourceExternalRefSpec struct {
+	Provider   string            `json:"provider"`
+	Connection string            `json:"connection,omitempty"`
+	Mount      string            `json:"mount,omitempty"`
+	Path       string            `json:"path"`
+	Version    string            `json:"version,omitempty"`
+	Fields     map[string]string `json:"fields,omitempty"`
 }

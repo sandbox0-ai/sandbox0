@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mkdir -p /var/lib/docker /var/run/docker
+
+if docker info >/dev/null 2>&1; then
+  exec tail -f /dev/null
+fi
+
+storage_driver="${DOCKER_STORAGE_DRIVER:-}"
+if [ -z "${storage_driver}" ]; then
+  if [ -e /dev/fuse ] && command -v fuse-overlayfs >/dev/null 2>&1; then
+    storage_driver="fuse-overlayfs"
+  else
+    storage_driver="vfs"
+  fi
+fi
+
+exec dockerd \
+  --host="${DOCKER_HOST:-unix:///var/run/docker.sock}" \
+  --data-root="${DOCKER_DATA_ROOT:-/var/lib/docker}" \
+  --exec-root="${DOCKER_EXEC_ROOT:-/var/run/docker}" \
+  --pidfile="${DOCKER_PIDFILE:-/var/run/docker.pid}" \
+  --storage-driver="${storage_driver}"

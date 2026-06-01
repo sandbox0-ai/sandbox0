@@ -50,8 +50,9 @@ func TestOperatorUpdateTemplateStatusUsesReadyIdlePods(t *testing.T) {
 		lastStats:      make(map[string]TemplateCounts),
 	}
 
-	err := op.updateTemplateStatus(context.Background(), template)
+	needsProbeRequeue, err := op.updateTemplateStatus(context.Background(), template)
 	require.NoError(t, err)
+	assert.False(t, needsProbeRequeue)
 
 	assert.Equal(t, int32(1), template.Status.IdleCount)
 	assert.Equal(t, int32(1), template.Status.ActiveCount)
@@ -66,6 +67,32 @@ func TestOperatorUpdateTemplateStatusUsesReadyIdlePods(t *testing.T) {
 	assert.Equal(t, int32(1), publisher.activeCount)
 	assert.Equal(t, "default/template-a", publisher.statsKey)
 	assert.Equal(t, TemplateCounts{IdleCount: 1, ActiveCount: 1}, op.lastStats["default/template-a"])
+}
+
+func TestShouldRequeueSandboxProbe(t *testing.T) {
+	pod := newOperatorTestPod("default", "idle-not-ready", "template-a", PoolTypeIdle, corev1.PodRunning, corev1.ConditionTrue)
+	pod.Spec.ReadinessGates = []corev1.PodReadinessGate{{
+		ConditionType: v1alpha1.SandboxPodReadinessConditionType,
+	}}
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+		Type:   v1alpha1.SandboxPodReadinessConditionType,
+		Status: corev1.ConditionFalse,
+		Reason: "InitialDelay",
+	})
+
+	assert.True(t, shouldRequeueSandboxProbe(pod))
+
+	pod.Status.Conditions = []corev1.PodCondition{
+		{
+			Type:   corev1.PodReady,
+			Status: corev1.ConditionTrue,
+		},
+		{
+			Type:   v1alpha1.SandboxPodReadinessConditionType,
+			Status: corev1.ConditionTrue,
+		},
+	}
+	assert.False(t, shouldRequeueSandboxProbe(pod))
 }
 
 type recordingNamespacePolicyReconciler struct {

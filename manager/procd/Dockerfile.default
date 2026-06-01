@@ -133,7 +133,7 @@ RUN apt-get update \
 # Preinstall a "common E2B-like" Python stack (WITHOUT Jupyter server).
 # Notes:
 # - We intentionally do NOT install: jupyter-server, ipykernel (sandbox0 doesn't use Jupyter for code execution).
-RUN python3 -m pip install --no-cache-dir --break-system-packages \
+RUN python3 -m pip install --no-cache-dir --break-system-packages --ignore-installed \
     aiohttp==3.12.14 \
     beautifulsoup4==4.13.4 \
     bokeh==3.7.3 \
@@ -166,6 +166,19 @@ RUN python3 -m pip install --no-cache-dir --break-system-packages \
     tornado==6.5.1 \
     xarray==2025.4.0 \
     xlrd==2.0.1
+
+# Docker client/daemon support for Docker in Sandbox templates.
+# The default template does not start dockerd; the DinS template starts it as a warm process.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    docker.io \
+    fuse-overlayfs \
+    iptables \
+    uidmap \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY manager/procd/sandbox0-dockerd-entrypoint /usr/local/bin/sandbox0-dockerd-entrypoint
+RUN chmod 0755 /usr/local/bin/sandbox0-dockerd-entrypoint
 
 # Add Go to PATH
 ENV PATH=$PATH:/usr/lib/go/bin:/root/go/bin

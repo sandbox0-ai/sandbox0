@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
+	s0template "github.com/sandbox0-ai/sandbox0/pkg/template"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -140,7 +141,7 @@ func normalizeTeamTemplateResourceRatioForCreate(spec *apispec.SandboxTemplateSp
 		return
 	}
 
-	requiredMemory := memoryForCPU(mainCPU, resource.MustParse("4Gi"))
+	requiredMemory := s0template.MemoryForCPU(mainCPU, s0template.MemoryPerCPUOrDefault(""))
 	if mainMemory.Cmp(requiredMemory) == 0 {
 		return
 	}
@@ -156,16 +157,6 @@ func parseQuotaQuantity(value *string) (resource.Quantity, bool) {
 		return resource.Quantity{}, false
 	}
 	return parsed, true
-}
-
-func memoryForCPU(cpu, memoryPerCPU resource.Quantity) resource.Quantity {
-	if cpu.Sign() <= 0 || memoryPerCPU.Sign() <= 0 {
-		return resource.Quantity{}
-	}
-	requiredBytes := memoryPerCPU.Value() * cpu.MilliValue() / 1000
-	result := memoryPerCPU.DeepCopy()
-	result.Set(requiredBytes)
-	return result
 }
 
 func ptr[T any](value T) *T {

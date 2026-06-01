@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	templatev1alpha1 "github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/rediscache"
 )
 
@@ -1349,6 +1350,11 @@ type BuiltinTemplateConfig struct {
 	DisplayName string                    `json:"displayName,omitempty"`
 	Description string                    `json:"description,omitempty"`
 	Pool        BuiltinTemplatePoolConfig `json:"pool,omitempty"`
+	// Spec optionally overrides the full template spec seeded by infra-operator.
+	// When omitted, infra-operator builds the spec from the legacy fields above
+	// and the built-in preset for the template ID.
+	// +optional
+	Spec *templatev1alpha1.SandboxTemplateSpec `json:"spec,omitempty"`
 }
 
 // BuiltinTemplatePoolConfig holds pool defaults for builtin templates.

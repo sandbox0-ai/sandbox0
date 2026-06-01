@@ -85,6 +85,13 @@ spec:
       pool:
         minIdle: 1
         maxIdle: 5
+    - templateId: dins
+      image: sandbox0ai/otemplates:default-v0.1.0
+      displayName: Docker in Sandbox
+      description: Builtin Docker in Sandbox template installed by infra-operator.
+      pool:
+        minIdle: 1
+        maxIdle: 5
   # Shared placement for sandbox template Pods plus node-local helpers such as
   # netd and ctld. In production, point this at your dedicated sandbox
   # node pool and pair it with services.manager.config.sandboxRuntimeClassName.

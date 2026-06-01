@@ -80,6 +80,1174 @@ spec:
                           format: int32
                           type: integer
                       type: object
+                    spec:
+                      description: |-
+                        Spec optionally overrides the full template spec seeded by infra-operator.
+                        When omitted, infra-operator builds the spec from the legacy fields above
+                        and the built-in preset for the template ID.
+                      properties:
+                        clusterId:
+                          description: Environment configuration
+                          type: string
+                        description:
+                          description: Description of the template
+                          type: string
+                        displayName:
+                          type: string
+                        envVars:
+                          additionalProperties:
+                            type: string
+                          description: Environment variables injected into the procd-managed
+                            sandbox environment.
+                          type: object
+                        mainContainer:
+                          description: MainContainer configuration (required)
+                          properties:
+                            env:
+                              items:
+                                description: EnvVar represents an environment variable
+                                properties:
+                                  name:
+                                    type: string
+                                  value:
+                                    type: string
+                                required:
+                                - name
+                                - value
+                                type: object
+                              type: array
+                            image:
+                              type: string
+                            imagePullPolicy:
+                              type: string
+                            resources:
+                              description: ResourceQuota defines resource quota (per
+                                template)
+                              properties:
+                                cpu:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                                ephemeralStorage:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                                memory:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                              type: object
+                            securityContext:
+                              description: SecurityContext defines security context
+                                for containers
+                              properties:
+                                allowPrivilegeEscalation:
+                                  type: boolean
+                                appArmorProfile:
+                                  properties:
+                                    localhostProfile:
+                                      type: string
+                                    type:
+                                      enum:
+                                      - Unconfined
+                                      - RuntimeDefault
+                                      - Localhost
+                                      type: string
+                                  required:
+                                  - type
+                                  type: object
+                                capabilities:
+                                  description: Capabilities defines Linux capabilities
+                                  properties:
+                                    add:
+                                      items:
+                                        type: string
+                                      type: array
+                                    drop:
+                                      items:
+                                        type: string
+                                      type: array
+                                  type: object
+                                privileged:
+                                  type: boolean
+                                readOnlyRootFilesystem:
+                                  type: boolean
+                                runAsGroup:
+                                  format: int64
+                                  type: integer
+                                runAsNonRoot:
+                                  type: boolean
+                                runAsUser:
+                                  format: int64
+                                  type: integer
+                                seccompProfile:
+                                  properties:
+                                    localhostProfile:
+                                      type: string
+                                    type:
+                                      enum:
+                                      - Unconfined
+                                      - RuntimeDefault
+                                      - Localhost
+                                      type: string
+                                  required:
+                                  - type
+                                  type: object
+                              type: object
+                          required:
+                          - image
+                          - resources
+                          type: object
+                        network:
+                          description: Template sandbox network policy and optional
+                            credential bindings.
+                          properties:
+                            credentialBindings:
+                              description: |-
+                                CredentialBindings defines sandbox-scoped credential bindings that
+                                EgressCredentialRule entries can resolve by CredentialRef.
+                              items:
+                                description: |-
+                                  CredentialBinding defines one named credential projection that outbound auth
+                                  rules can reference. The binding itself does not match traffic.
+                                properties:
+                                  cachePolicy:
+                                    description: CachePolicy controls broker-side
+                                      caching for resolved auth material.
+                                    properties:
+                                      ttl:
+                                        description: TTL overrides the default broker
+                                          cache TTL for resolved auth material.
+                                        type: string
+                                    type: object
+                                  projection:
+                                    description: Projection defines how resolved source
+                                      material is projected into runtime auth directives.
+                                    properties:
+                                      httpHeaders:
+                                        description: HTTPHeaders projects resolved
+                                          source data into outbound HTTP headers.
+                                        properties:
+                                          headers:
+                                            description: Headers lists the outbound
+                                              headers to synthesize.
+                                            items:
+                                              description: ProjectedHeader defines
+                                                one projected header template.
+                                              properties:
+                                                name:
+                                                  description: Name is the outbound
+                                                    header name.
+                                                  type: string
+                                                valueTemplate:
+                                                  description: ValueTemplate is rendered
+                                                    against the resolved source payload.
+                                                  type: string
+                                              required:
+                                              - name
+                                              - valueTemplate
+                                              type: object
+                                            type: array
+                                        type: object
+                                      sshProxy:
+                                        description: SSHProxy projects sandbox-side
+                                          fake keys and upstream identity for transparent
+                                          SSH proxying.
+                                        properties:
+                                          knownHosts:
+                                            description: KnownHosts contains OpenSSH
+                                              known_hosts entries used to verify upstream
+                                              host keys.
+                                            items:
+                                              type: string
+                                            type: array
+                                          sandboxPublicKeys:
+                                            description: SandboxPublicKeys are fake
+                                              public keys accepted from sandbox-side
+                                              SSH clients.
+                                            items:
+                                              type: string
+                                            type: array
+                                          upstreamUsername:
+                                            description: UpstreamUsername is the username
+                                              netd uses when authenticating to the
+                                              upstream SSH server.
+                                            type: string
+                                        type: object
+                                      tlsClientCertificate:
+                                        description: TLSClientCertificate projects
+                                          one client certificate for TLS re-origination.
+                                        type: object
+                                      type:
+                                        description: Type selects the runtime projection
+                                          shape.
+                                        type: string
+                                      usernamePassword:
+                                        description: UsernamePassword projects one
+                                          username/password pair into an early auth
+                                          exchange.
+                                        type: object
+                                    required:
+                                    - type
+                                    type: object
+                                  ref:
+                                    description: Ref is the stable identifier matched
+                                      by EgressCredentialRule.CredentialRef.
+                                    type: string
+                                  sourceRef:
+                                    description: SourceRef identifies the region-scoped
+                                      credential source resolved by manager.
+                                    type: string
+                                required:
+                                - projection
+                                - ref
+                                - sourceRef
+                                type: object
+                              type: array
+                            egress:
+                              description: |-
+                                NetworkEgressPolicy defines egress policy.
+                                In allow-all mode, denied* fields are enforced and allowed* fields are ignored.
+                                In block-all mode, allowed* fields are enforced and denied* fields are ignored.
+                              properties:
+                                allowedCidrs:
+                                  description: 'Deprecated: use TrafficRules instead.'
+                                  items:
+                                    type: string
+                                  type: array
+                                allowedDomains:
+                                  description: 'Deprecated: use TrafficRules instead.'
+                                  items:
+                                    type: string
+                                  type: array
+                                allowedPorts:
+                                  description: 'Deprecated: use TrafficRules instead.'
+                                  items:
+                                    description: PortSpec defines a port specification
+                                    properties:
+                                      endPort:
+                                        description: EndPort for port ranges (optional)
+                                        format: int32
+                                        type: integer
+                                      port:
+                                        description: Port number
+                                        format: int32
+                                        type: integer
+                                      protocol:
+                                        description: Protocol (tcp or udp)
+                                        type: string
+                                    required:
+                                    - port
+                                    type: object
+                                  type: array
+                                credentialRules:
+                                  items:
+                                    description: EgressCredentialRule defines a credential
+                                      injection rule matched against outbound traffic.
+                                    properties:
+                                      credentialRef:
+                                        description: |-
+                                          CredentialRef identifies the binding ref resolved by the runtime egress
+                                          auth resolver when this traffic rule matches.
+                                        type: string
+                                      domains:
+                                        description: Domains matches outbound destinations
+                                          by DNS name or wildcard suffix.
+                                        items:
+                                          type: string
+                                        type: array
+                                      failurePolicy:
+                                        description: FailurePolicy controls whether
+                                          netd should fail-open or fail-closed when
+                                          auth material cannot be enforced.
+                                        type: string
+                                      httpMatch:
+                                        description: HTTPMatch constrains HTTP-family
+                                          credential injection to request attributes.
+                                        properties:
+                                          headers:
+                                            description: Headers matches HTTP request
+                                              headers.
+                                            items:
+                                              description: HTTPValueMatch defines
+                                                one header or query parameter matcher.
+                                              properties:
+                                                name:
+                                                  description: Name is the header
+                                                    or query parameter name.
+                                                  type: string
+                                                present:
+                                                  description: Present controls presence-only
+                                                    matching when Values is empty.
+                                                  type: boolean
+                                                values:
+                                                  description: Values matches any
+                                                    one value. Empty with Present=true
+                                                    only requires presence.
+                                                  items:
+                                                    type: string
+                                                  type: array
+                                              required:
+                                              - name
+                                              type: object
+                                            type: array
+                                          methods:
+                                            description: Methods matches HTTP methods.
+                                              Values are normalized to uppercase.
+                                            items:
+                                              type: string
+                                            type: array
+                                          pathPrefixes:
+                                            description: PathPrefixes matches URL
+                                              path prefixes.
+                                            items:
+                                              type: string
+                                            type: array
+                                          paths:
+                                            description: Paths matches exact URL paths.
+                                            items:
+                                              type: string
+                                            type: array
+                                          query:
+                                            description: Query matches decoded query
+                                              parameters.
+                                            items:
+                                              description: HTTPValueMatch defines
+                                                one header or query parameter matcher.
+                                              properties:
+                                                name:
+                                                  description: Name is the header
+                                                    or query parameter name.
+                                                  type: string
+                                                present:
+                                                  description: Present controls presence-only
+                                                    matching when Values is empty.
+                                                  type: boolean
+                                                values:
+                                                  description: Values matches any
+                                                    one value. Empty with Present=true
+                                                    only requires presence.
+                                                  items:
+                                                    type: string
+                                                  type: array
+                                              required:
+                                              - name
+                                              type: object
+                                            type: array
+                                        type: object
+                                      name:
+                                        description: Name is an optional stable identifier
+                                          used for merge and replacement.
+                                        type: string
+                                      ports:
+                                        description: Ports constrains the rule to
+                                          specific ports/protocols.
+                                        items:
+                                          description: PortSpec defines a port specification
+                                          properties:
+                                            endPort:
+                                              description: EndPort for port ranges
+                                                (optional)
+                                              format: int32
+                                              type: integer
+                                            port:
+                                              description: Port number
+                                              format: int32
+                                              type: integer
+                                            protocol:
+                                              description: Protocol (tcp or udp)
+                                              type: string
+                                          required:
+                                          - port
+                                          type: object
+                                        type: array
+                                      protocol:
+                                        description: Protocol is the intended application
+                                          protocol for the rule.
+                                        type: string
+                                      rollout:
+                                        description: Rollout controls whether this
+                                          rule is active. Empty defaults to enabled.
+                                        type: string
+                                      tlsMode:
+                                        description: TLSMode indicates whether netd
+                                          should intercept TLS for matching flows.
+                                        type: string
+                                    required:
+                                    - credentialRef
+                                    type: object
+                                  type: array
+                                deniedCidrs:
+                                  description: 'Deprecated: use TrafficRules instead.'
+                                  items:
+                                    type: string
+                                  type: array
+                                deniedDomains:
+                                  description: 'Deprecated: use TrafficRules instead.'
+                                  items:
+                                    type: string
+                                  type: array
+                                deniedPorts:
+                                  description: 'Deprecated: use TrafficRules instead.'
+                                  items:
+                                    description: PortSpec defines a port specification
+                                    properties:
+                                      endPort:
+                                        description: EndPort for port ranges (optional)
+                                        format: int32
+                                        type: integer
+                                      port:
+                                        description: Port number
+                                        format: int32
+                                        type: integer
+                                      protocol:
+                                        description: Protocol (tcp or udp)
+                                        type: string
+                                    required:
+                                    - port
+                                    type: object
+                                  type: array
+                                protocolRules:
+                                  items:
+                                    description: ProtocolRule defines protocol-aware
+                                      controls applied after traffic is allowed.
+                                    properties:
+                                      domains:
+                                        description: Domains matches outbound destinations
+                                          by DNS name or wildcard suffix.
+                                        items:
+                                          type: string
+                                        type: array
+                                      httpMatch:
+                                        description: HTTPMatch constrains HTTP-carried
+                                          protocol rules to request attributes.
+                                        properties:
+                                          headers:
+                                            description: Headers matches HTTP request
+                                              headers.
+                                            items:
+                                              description: HTTPValueMatch defines
+                                                one header or query parameter matcher.
+                                              properties:
+                                                name:
+                                                  description: Name is the header
+                                                    or query parameter name.
+                                                  type: string
+                                                present:
+                                                  description: Present controls presence-only
+                                                    matching when Values is empty.
+                                                  type: boolean
+                                                values:
+                                                  description: Values matches any
+                                                    one value. Empty with Present=true
+                                                    only requires presence.
+                                                  items:
+                                                    type: string
+                                                  type: array
+                                              required:
+                                              - name
+                                              type: object
+                                            type: array
+                                          methods:
+                                            description: Methods matches HTTP methods.
+                                              Values are normalized to uppercase.
+                                            items:
+                                              type: string
+                                            type: array
+                                          pathPrefixes:
+                                            description: PathPrefixes matches URL
+                                              path prefixes.
+                                            items:
+                                              type: string
+                                            type: array
+                                          paths:
+                                            description: Paths matches exact URL paths.
+                                            items:
+                                              type: string
+                                            type: array
+                                          query:
+                                            description: Query matches decoded query
+                                              parameters.
+                                            items:
+                                              description: HTTPValueMatch defines
+                                                one header or query parameter matcher.
+                                              properties:
+                                                name:
+                                                  description: Name is the header
+                                                    or query parameter name.
+                                                  type: string
+                                                present:
+                                                  description: Present controls presence-only
+                                                    matching when Values is empty.
+                                                  type: boolean
+                                                values:
+                                                  description: Values matches any
+                                                    one value. Empty with Present=true
+                                                    only requires presence.
+                                                  items:
+                                                    type: string
+                                                  type: array
+                                              required:
+                                              - name
+                                              type: object
+                                            type: array
+                                        type: object
+                                      mcp:
+                                        description: MCP configures Model Context
+                                          Protocol operation policy.
+                                        properties:
+                                          tools:
+                                            description: Tools controls MCP tools/call
+                                              requests.
+                                            properties:
+                                              allowed:
+                                                description: Allowed permits only
+                                                  listed tools when non-empty.
+                                                items:
+                                                  type: string
+                                                type: array
+                                              denied:
+                                                description: Denied blocks listed
+                                                  tools before evaluating Allowed.
+                                                items:
+                                                  type: string
+                                                type: array
+                                            type: object
+                                        type: object
+                                      name:
+                                        description: Name is an optional stable identifier
+                                          used for merge and replacement.
+                                        type: string
+                                      ports:
+                                        description: Ports constrains the rule to
+                                          specific ports/protocols.
+                                        items:
+                                          description: PortSpec defines a port specification
+                                          properties:
+                                            endPort:
+                                              description: EndPort for port ranges
+                                                (optional)
+                                              format: int32
+                                              type: integer
+                                            port:
+                                              description: Port number
+                                              format: int32
+                                              type: integer
+                                            protocol:
+                                              description: Protocol (tcp or udp)
+                                              type: string
+                                          required:
+                                          - port
+                                          type: object
+                                        type: array
+                                      protocol:
+                                        description: Protocol selects the protocol
+                                          adapter for this rule.
+                                        type: string
+                                      tlsMode:
+                                        description: TLSMode controls whether netd
+                                          must terminate TLS to inspect this protocol.
+                                        type: string
+                                    required:
+                                    - protocol
+                                    type: object
+                                  type: array
+                                proxy:
+                                  description: EgressProxyPolicy configures a transparent
+                                    egress proxy for allowed TCP traffic.
+                                  properties:
+                                    address:
+                                      description: Address is the proxy endpoint in
+                                        host:port form.
+                                      type: string
+                                    credentialRef:
+                                      description: CredentialRef optionally references
+                                        a username_password credential binding.
+                                      type: string
+                                    type:
+                                      description: Type selects the proxy protocol.
+                                        The first version supports SOCKS5 only.
+                                      type: string
+                                  required:
+                                  - address
+                                  - type
+                                  type: object
+                                trafficRules:
+                                  items:
+                                    description: TrafficRule defines one ordered egress
+                                      allow/deny matcher.
+                                    properties:
+                                      action:
+                                        description: Action defines whether matching
+                                          traffic is allowed or denied.
+                                        type: string
+                                      appProtocols:
+                                        description: AppProtocols constrains the rule
+                                          to classified application protocols.
+                                        items:
+                                          description: TrafficRuleAppProtocol defines
+                                            the classified application protocol matched
+                                            by one traffic rule.
+                                          type: string
+                                        type: array
+                                      cidrs:
+                                        description: CIDRs matches outbound destinations
+                                          by IP range.
+                                        items:
+                                          type: string
+                                        type: array
+                                      domains:
+                                        description: Domains matches outbound destinations
+                                          by DNS name or wildcard suffix.
+                                        items:
+                                          type: string
+                                        type: array
+                                      name:
+                                        description: Name is an optional stable identifier
+                                          used for merge and replacement.
+                                        type: string
+                                      ports:
+                                        description: Ports constrains the rule to
+                                          specific ports/protocols.
+                                        items:
+                                          description: PortSpec defines a port specification
+                                          properties:
+                                            endPort:
+                                              description: EndPort for port ranges
+                                                (optional)
+                                              format: int32
+                                              type: integer
+                                            port:
+                                              description: Port number
+                                              format: int32
+                                              type: integer
+                                            protocol:
+                                              description: Protocol (tcp or udp)
+                                              type: string
+                                          required:
+                                          - port
+                                          type: object
+                                        type: array
+                                    required:
+                                    - action
+                                    type: object
+                                  type: array
+                              type: object
+                            mode:
+                              description: NetworkPolicyMode defines network policy
+                                mode
+                              type: string
+                          required:
+                          - mode
+                          type: object
+                        pod:
+                          description: Pod-level configuration
+                          properties:
+                            affinity:
+                              description: Affinity defines pod affinity rules
+                              properties:
+                                nodeAffinity:
+                                  description: NodeAffinity defines node affinity
+                                    rules
+                                  properties:
+                                    preferredDuringSchedulingIgnoredDuringExecution:
+                                      items:
+                                        description: PreferredSchedulingTerm defines
+                                          preferred scheduling term
+                                        properties:
+                                          preference:
+                                            description: NodeSelectorTerm defines
+                                              node selector term
+                                            properties:
+                                              matchExpressions:
+                                                items:
+                                                  description: NodeSelectorRequirement
+                                                    defines node selector requirement
+                                                  properties:
+                                                    key:
+                                                      type: string
+                                                    operator:
+                                                      type: string
+                                                    values:
+                                                      items:
+                                                        type: string
+                                                      type: array
+                                                  required:
+                                                  - key
+                                                  - operator
+                                                  type: object
+                                                type: array
+                                              matchFields:
+                                                items:
+                                                  description: NodeSelectorRequirement
+                                                    defines node selector requirement
+                                                  properties:
+                                                    key:
+                                                      type: string
+                                                    operator:
+                                                      type: string
+                                                    values:
+                                                      items:
+                                                        type: string
+                                                      type: array
+                                                  required:
+                                                  - key
+                                                  - operator
+                                                  type: object
+                                                type: array
+                                            type: object
+                                          weight:
+                                            format: int32
+                                            type: integer
+                                        required:
+                                        - preference
+                                        - weight
+                                        type: object
+                                      type: array
+                                    requiredDuringSchedulingIgnoredDuringExecution:
+                                      description: NodeSelector defines node selector
+                                      properties:
+                                        nodeSelectorTerms:
+                                          items:
+                                            description: NodeSelectorTerm defines
+                                              node selector term
+                                            properties:
+                                              matchExpressions:
+                                                items:
+                                                  description: NodeSelectorRequirement
+                                                    defines node selector requirement
+                                                  properties:
+                                                    key:
+                                                      type: string
+                                                    operator:
+                                                      type: string
+                                                    values:
+                                                      items:
+                                                        type: string
+                                                      type: array
+                                                  required:
+                                                  - key
+                                                  - operator
+                                                  type: object
+                                                type: array
+                                              matchFields:
+                                                items:
+                                                  description: NodeSelectorRequirement
+                                                    defines node selector requirement
+                                                  properties:
+                                                    key:
+                                                      type: string
+                                                    operator:
+                                                      type: string
+                                                    values:
+                                                      items:
+                                                        type: string
+                                                      type: array
+                                                  required:
+                                                  - key
+                                                  - operator
+                                                  type: object
+                                                type: array
+                                            type: object
+                                          type: array
+                                      required:
+                                      - nodeSelectorTerms
+                                      type: object
+                                  type: object
+                                podAffinity:
+                                  description: PodAffinity defines pod affinity rules
+                                  properties:
+                                    preferredDuringSchedulingIgnoredDuringExecution:
+                                      items:
+                                        description: WeightedPodAffinityTerm defines
+                                          weighted pod affinity term
+                                        properties:
+                                          podAffinityTerm:
+                                            description: PodAffinityTerm defines pod
+                                              affinity term
+                                            properties:
+                                              labelSelector:
+                                                description: LabelSelector defines
+                                                  label selector
+                                                properties:
+                                                  matchExpressions:
+                                                    items:
+                                                      description: LabelSelectorRequirement
+                                                        defines label selector requirement
+                                                      properties:
+                                                        key:
+                                                          type: string
+                                                        operator:
+                                                          type: string
+                                                        values:
+                                                          items:
+                                                            type: string
+                                                          type: array
+                                                      required:
+                                                      - key
+                                                      - operator
+                                                      type: object
+                                                    type: array
+                                                  matchLabels:
+                                                    additionalProperties:
+                                                      type: string
+                                                    type: object
+                                                type: object
+                                              namespaces:
+                                                items:
+                                                  type: string
+                                                type: array
+                                              topologyKey:
+                                                type: string
+                                            required:
+                                            - topologyKey
+                                            type: object
+                                          weight:
+                                            format: int32
+                                            type: integer
+                                        required:
+                                        - podAffinityTerm
+                                        - weight
+                                        type: object
+                                      type: array
+                                    requiredDuringSchedulingIgnoredDuringExecution:
+                                      items:
+                                        description: PodAffinityTerm defines pod affinity
+                                          term
+                                        properties:
+                                          labelSelector:
+                                            description: LabelSelector defines label
+                                              selector
+                                            properties:
+                                              matchExpressions:
+                                                items:
+                                                  description: LabelSelectorRequirement
+                                                    defines label selector requirement
+                                                  properties:
+                                                    key:
+                                                      type: string
+                                                    operator:
+                                                      type: string
+                                                    values:
+                                                      items:
+                                                        type: string
+                                                      type: array
+                                                  required:
+                                                  - key
+                                                  - operator
+                                                  type: object
+                                                type: array
+                                              matchLabels:
+                                                additionalProperties:
+                                                  type: string
+                                                type: object
+                                            type: object
+                                          namespaces:
+                                            items:
+                                              type: string
+                                            type: array
+                                          topologyKey:
+                                            type: string
+                                        required:
+                                        - topologyKey
+                                        type: object
+                                      type: array
+                                  type: object
+                              type: object
+                            emptyDirMounts:
+                              items:
+                                description: EmptyDirMountSpec declares an ephemeral
+                                  Kubernetes emptyDir mount for the main sandbox container.
+                                properties:
+                                  mountPath:
+                                    type: string
+                                  sizeLimit:
+                                    anyOf:
+                                    - type: integer
+                                    - type: string
+                                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                    x-kubernetes-int-or-string: true
+                                required:
+                                - mountPath
+                                type: object
+                              type: array
+                            nodeSelector:
+                              additionalProperties:
+                                type: string
+                              type: object
+                            serviceAccountName:
+                              type: string
+                            tolerations:
+                              items:
+                                description: Toleration defines pod toleration
+                                properties:
+                                  effect:
+                                    type: string
+                                  key:
+                                    type: string
+                                  operator:
+                                    type: string
+                                  value:
+                                    type: string
+                                type: object
+                              type: array
+                          type: object
+                        pool:
+                          description: Pool strategy
+                          properties:
+                            maxIdle:
+                              format: int32
+                              type: integer
+                            minIdle:
+                              format: int32
+                              type: integer
+                          required:
+                          - maxIdle
+                          - minIdle
+                          type: object
+                        tags:
+                          items:
+                            type: string
+                          type: array
+                        volumeMounts:
+                          description: |-
+                            VolumeMounts declares the fixed sandbox volume portal mount points that
+                            can be bound to concrete SandboxVolumes when a sandbox is claimed.
+                          items:
+                            properties:
+                              mountPath:
+                                type: string
+                              name:
+                                type: string
+                              readOnly:
+                                type: boolean
+                            required:
+                            - mountPath
+                            - name
+                            type: object
+                          type: array
+                        warmProcesses:
+                          description: |-
+                            WarmProcesses are started by procd when the template pod starts, before the
+                            pod becomes claimable from the warm pool.
+                          items:
+                            properties:
+                              alias:
+                                type: string
+                              command:
+                                items:
+                                  type: string
+                                type: array
+                              cwd:
+                                type: string
+                              envVars:
+                                additionalProperties:
+                                  type: string
+                                type: object
+                              name:
+                                type: string
+                              probes:
+                                properties:
+                                  liveness:
+                                    properties:
+                                      exec:
+                                        properties:
+                                          command:
+                                            items:
+                                              type: string
+                                            type: array
+                                        required:
+                                        - command
+                                        type: object
+                                      httpGet:
+                                        properties:
+                                          host:
+                                            type: string
+                                          httpHeaders:
+                                            items:
+                                              properties:
+                                                name:
+                                                  type: string
+                                                value:
+                                                  type: string
+                                              required:
+                                              - name
+                                              - value
+                                              type: object
+                                            type: array
+                                          path:
+                                            type: string
+                                          port:
+                                            anyOf:
+                                            - type: integer
+                                            - type: string
+                                            x-kubernetes-int-or-string: true
+                                          scheme:
+                                            type: string
+                                        required:
+                                        - port
+                                        type: object
+                                      initialDelaySeconds:
+                                        format: int32
+                                        type: integer
+                                      process:
+                                        type: object
+                                      tcpSocket:
+                                        properties:
+                                          host:
+                                            type: string
+                                          port:
+                                            anyOf:
+                                            - type: integer
+                                            - type: string
+                                            x-kubernetes-int-or-string: true
+                                        required:
+                                        - port
+                                        type: object
+                                      timeoutSeconds:
+                                        format: int32
+                                        type: integer
+                                    type: object
+                                  readiness:
+                                    properties:
+                                      exec:
+                                        properties:
+                                          command:
+                                            items:
+                                              type: string
+                                            type: array
+                                        required:
+                                        - command
+                                        type: object
+                                      httpGet:
+                                        properties:
+                                          host:
+                                            type: string
+                                          httpHeaders:
+                                            items:
+                                              properties:
+                                                name:
+                                                  type: string
+                                                value:
+                                                  type: string
+                                              required:
+                                              - name
+                                              - value
+                                              type: object
+                                            type: array
+                                          path:
+                                            type: string
+                                          port:
+                                            anyOf:
+                                            - type: integer
+                                            - type: string
+                                            x-kubernetes-int-or-string: true
+                                          scheme:
+                                            type: string
+                                        required:
+                                        - port
+                                        type: object
+                                      initialDelaySeconds:
+                                        format: int32
+                                        type: integer
+                                      process:
+                                        type: object
+                                      tcpSocket:
+                                        properties:
+                                          host:
+                                            type: string
+                                          port:
+                                            anyOf:
+                                            - type: integer
+                                            - type: string
+                                            x-kubernetes-int-or-string: true
+                                        required:
+                                        - port
+                                        type: object
+                                      timeoutSeconds:
+                                        format: int32
+                                        type: integer
+                                    type: object
+                                  startup:
+                                    properties:
+                                      exec:
+                                        properties:
+                                          command:
+                                            items:
+                                              type: string
+                                            type: array
+                                        required:
+                                        - command
+                                        type: object
+                                      httpGet:
+                                        properties:
+                                          host:
+                                            type: string
+                                          httpHeaders:
+                                            items:
+                                              properties:
+                                                name:
+                                                  type: string
+                                                value:
+                                                  type: string
+                                              required:
+                                              - name
+                                              - value
+                                              type: object
+                                            type: array
+                                          path:
+                                            type: string
+                                          port:
+                                            anyOf:
+                                            - type: integer
+                                            - type: string
+                                            x-kubernetes-int-or-string: true
+                                          scheme:
+                                            type: string
+                                        required:
+                                        - port
+                                        type: object
+                                      initialDelaySeconds:
+                                        format: int32
+                                        type: integer
+                                      process:
+                                        type: object
+                                      tcpSocket:
+                                        properties:
+                                          host:
+                                            type: string
+                                          port:
+                                            anyOf:
+                                            - type: integer
+                                            - type: string
+                                            x-kubernetes-int-or-string: true
+                                        required:
+                                        - port
+                                        type: object
+                                      timeoutSeconds:
+                                        format: int32
+                                        type: integer
+                                    type: object
+                                type: object
+                              type:
+                                enum:
+                                - repl
+                                - cmd
+                                type: string
+                            required:
+                            - type
+                            type: object
+                          type: array
+                      required:
+                      - mainContainer
+                      - pool
+                      type: object
                     templateId:
                       type: string
                   required:

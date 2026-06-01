@@ -9,6 +9,7 @@ import (
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
+	"github.com/sandbox0-ai/sandbox0/pkg/template"
 )
 
 func TestCompileDerivesCrossServiceReferences(t *testing.T) {
@@ -151,6 +152,33 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 	}
 	if compiled.RegionalGateway.IngressConfig == nil || !compiled.RegionalGateway.IngressConfig.Enabled {
 		t.Fatalf("expected regional gateway ingress config to be compiled, got %#v", compiled.RegionalGateway.IngressConfig)
+	}
+}
+
+func TestBuiltinTemplatesDefaultsAndOverrides(t *testing.T) {
+	t.Parallel()
+
+	defaults := Compile(&infrav1alpha1.Sandbox0Infra{}).BuiltinTemplates()
+	if len(defaults) != 2 {
+		t.Fatalf("default builtin template count = %d, want 2", len(defaults))
+	}
+	if defaults[0].TemplateID != template.DefaultTemplateID || defaults[1].TemplateID != template.DockerInSandboxTemplateID {
+		t.Fatalf("default builtin templates = %#v, want default and dins", defaults)
+	}
+
+	overridden := Compile(&infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			BuiltinTemplates: []infrav1alpha1.BuiltinTemplateConfig{{
+				TemplateID: "default",
+				Image:      "example.com/default:latest",
+			}},
+		},
+	}).BuiltinTemplates()
+	if len(overridden) != 1 {
+		t.Fatalf("overridden builtin template count = %d, want 1", len(overridden))
+	}
+	if overridden[0].Image != "example.com/default:latest" {
+		t.Fatalf("overridden image = %q, want custom image", overridden[0].Image)
 	}
 }
 

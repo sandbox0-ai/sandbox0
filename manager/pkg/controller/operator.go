@@ -27,7 +27,8 @@ import (
 )
 
 const (
-	maxRetries = 5
+	maxRetries               = 5
+	sandboxProbeRequeueAfter = 5 * time.Second
 )
 
 // Operator is the main controller for SandboxTemplate CRD
@@ -260,8 +261,12 @@ func (op *Operator) syncHandler(ctx context.Context, key string) error {
 	}
 
 	// Update status
-	if err := op.updateTemplateStatus(ctx, template); err != nil {
+	needsProbeRequeue, err := op.updateTemplateStatus(ctx, template)
+	if err != nil {
 		return fmt.Errorf("update status: %w", err)
+	}
+	if needsProbeRequeue {
+		op.workqueue.AddAfter(key, sandboxProbeRequeueAfter)
 	}
 
 	// Scale down for idle templates (async, background operation)
@@ -281,14 +286,14 @@ func (op *Operator) syncHandler(ctx context.Context, key string) error {
 }
 
 // updateTemplateStatus updates the status of a SandboxTemplate
-func (op *Operator) updateTemplateStatus(ctx context.Context, template *v1alpha1.SandboxTemplate) error {
+func (op *Operator) updateTemplateStatus(ctx context.Context, template *v1alpha1.SandboxTemplate) (bool, error) {
 	// Get idle pods
 	idlePods, err := op.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
 		LabelTemplateID: template.Name,
 		LabelPoolType:   PoolTypeIdle,
 	}))
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Get active pods
@@ -297,16 +302,20 @@ func (op *Operator) updateTemplateStatus(ctx context.Context, template *v1alpha1
 		LabelPoolType:   PoolTypeActive,
 	}))
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	reconciledPods := make(map[string]*corev1.Pod, len(idlePods)+len(activePods))
+	needsProbeRequeue := false
 	for _, pod := range append(append([]*corev1.Pod(nil), idlePods...), activePods...) {
 		updatedPod, err := op.ensureSandboxProbeConditions(ctx, pod)
 		if err != nil {
-			return fmt.Errorf("ensure sandbox pod probe conditions for %s/%s: %w", pod.Namespace, pod.Name, err)
+			return false, fmt.Errorf("ensure sandbox pod probe conditions for %s/%s: %w", pod.Namespace, pod.Name, err)
 		}
 		reconciledPods[pod.Namespace+"/"+pod.Name] = updatedPod
+		if op.probeRunner != nil && shouldRequeueSandboxProbe(updatedPod) {
+			needsProbeRequeue = true
+		}
 	}
 
 	// Count only ready idle pods as available pooled capacity.
@@ -373,7 +382,18 @@ func (op *Operator) updateTemplateStatus(ctx context.Context, template *v1alpha1
 		)
 	}
 
-	return nil
+	return needsProbeRequeue, nil
+}
+
+func shouldRequeueSandboxProbe(pod *corev1.Pod) bool {
+	if pod == nil || pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || !HasSandboxPodReadinessGate(pod) {
+		return false
+	}
+	if !podConditionTrue(pod.Status.Conditions, v1alpha1.SandboxPodReadinessConditionType) {
+		return true
+	}
+	live := findPodCondition(pod.Status.Conditions, v1alpha1.SandboxPodLivenessConditionType)
+	return live != nil && live.Status == corev1.ConditionFalse
 }
 
 func (op *Operator) ensureSandboxProbeConditions(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, error) {

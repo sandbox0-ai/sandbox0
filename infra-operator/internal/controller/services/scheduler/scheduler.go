@@ -72,6 +72,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		DatabaseMinConns:     config.DatabasePool.MinConns,
 		TemplateStoreEnabled: true,
 		Owner:                "scheduler",
+		MemoryPerCPU:         common.TemplateMemoryPerCPUFromManagerConfig(compiledPlan.Manager.Config),
 	}); err != nil {
 		return err
 	}

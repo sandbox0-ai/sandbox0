@@ -23,11 +23,13 @@ func TestServeExposesRewrittenMountsOverGRPC(t *testing.T) {
 
 	client := &fakePrepareClient{
 		response: &ctldapi.PrepareRootFSResponse{
-			Prepared: true,
-			UpperDir: "/s0fs/upper",
-			WorkDir:  "/s0fs/work",
+			Prepared:   true,
+			MountPoint: "/rootfs/s0fs",
+			UpperDir:   "/s0fs/upper",
+			WorkDir:    "/s0fs/work",
 		},
 	}
+	mounter := &fakeOverlayMounter{mount: rootfs.Mount{Type: "bind", Source: "/rootfs/merged", Options: []string{"rbind", "rw"}}}
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- Serve(ctx, ServerConfig{
@@ -41,7 +43,8 @@ func TestServeExposesRewrittenMountsOverGRPC(t *testing.T) {
 				ok:   true,
 				meta: rootfs.Metadata{SandboxID: "sandbox-a", TeamID: "team-a", Mode: rootfs.ModeS0FSUpperdir, VolumeID: "rootfs-a", CtldPort: 8095},
 			},
-			PrepareClient: client,
+			PrepareClient:  client,
+			OverlayMounter: mounter,
 		})
 	}()
 	conn := dialSnapshotterServer(t, socketPath)
@@ -56,11 +59,17 @@ func TestServeExposesRewrittenMountsOverGRPC(t *testing.T) {
 	if len(resp.Mounts) != 1 {
 		t.Fatalf("mount count = %d, want 1", len(resp.Mounts))
 	}
-	if got := optionValue(resp.Mounts[0].Options, "upperdir="); got != "/s0fs/upper" {
-		t.Fatalf("upperdir = %q, want /s0fs/upper", got)
+	if resp.Mounts[0].Type != "bind" || resp.Mounts[0].Source != "/rootfs/merged" {
+		t.Fatalf("mount = %+v, want bind /rootfs/merged", resp.Mounts[0])
 	}
-	if got := optionValue(resp.Mounts[0].Options, "workdir="); got != "/s0fs/work" {
-		t.Fatalf("workdir = %q, want /s0fs/work", got)
+	if !hasOption(resp.Mounts[0].Options, "rbind") || !hasOption(resp.Mounts[0].Options, "rw") {
+		t.Fatalf("options = %#v, want rbind,rw", resp.Mounts[0].Options)
+	}
+	if got := optionValue(mounter.overlay.Options, "upperdir="); got != "/s0fs/upper" {
+		t.Fatalf("mounter upperdir = %q, want /s0fs/upper", got)
+	}
+	if got := optionValue(mounter.overlay.Options, "workdir="); got != "/s0fs/work" {
+		t.Fatalf("mounter workdir = %q, want /s0fs/work", got)
 	}
 
 	cancel()

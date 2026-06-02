@@ -3,7 +3,7 @@ FROM debian:bookworm-slim
 # Install runtime dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      ca-certificates tzdata libzstd1 liblz4-1 iptables ipset nftables iproute2 && \
+      ca-certificates tzdata libzstd1 liblz4-1 iptables ipset nftables iproute2 fuse-overlayfs && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy all binaries from the local bin directory to /usr/local/bin/

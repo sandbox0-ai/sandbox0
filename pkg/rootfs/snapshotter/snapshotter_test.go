@@ -54,10 +54,12 @@ func TestMountsRewritesOverlayUpperAndWorkDirs(t *testing.T) {
 			Prepared:       true,
 			SandboxID:      "sandbox-a",
 			RootFSVolumeID: "rootfs-a",
+			MountPoint:     "/rootfs/s0fs",
 			UpperDir:       "/s0fs/upper",
 			WorkDir:        "/s0fs/work",
 		},
 	}
+	mounter := &fakeOverlayMounter{mount: rootfs.Mount{Type: "bind", Source: "/rootfs/merged", Options: []string{"rbind", "rw"}}}
 	sn, err := New(base, fakeResolver{
 		ok: true,
 		meta: rootfs.Metadata{
@@ -67,7 +69,7 @@ func TestMountsRewritesOverlayUpperAndWorkDirs(t *testing.T) {
 			VolumeID:  "rootfs-a",
 			CtldPort:  8095,
 		},
-	}, client)
+	}, client, WithOverlayMounter(mounter))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -79,14 +81,23 @@ func TestMountsRewritesOverlayUpperAndWorkDirs(t *testing.T) {
 	if got := mounts[0].Target; got != "/" {
 		t.Fatalf("target = %q, want /", got)
 	}
-	if got := optionValue(mounts[0].Options, "upperdir="); got != "/s0fs/upper" {
-		t.Fatalf("upperdir = %q, want /s0fs/upper", got)
+	if mounts[0].Type != "bind" || mounts[0].Source != "/rootfs/merged" {
+		t.Fatalf("mount = %+v, want bind /rootfs/merged", mounts[0])
 	}
-	if got := optionValue(mounts[0].Options, "workdir="); got != "/s0fs/work" {
-		t.Fatalf("workdir = %q, want /s0fs/work", got)
+	if !hasOption(mounts[0].Options, "rbind") || !hasOption(mounts[0].Options, "rw") {
+		t.Fatalf("options = %#v, want rbind,rw", mounts[0].Options)
 	}
-	if !hasOption(mounts[0].Options, "volatile") {
-		t.Fatalf("options = %#v, want volatile preserved", mounts[0].Options)
+	if mounter.key != "container-a" {
+		t.Fatalf("mounter key = %q, want container-a", mounter.key)
+	}
+	if got := optionValue(mounter.overlay.Options, "upperdir="); got != "/s0fs/upper" {
+		t.Fatalf("mounter upperdir = %q, want /s0fs/upper", got)
+	}
+	if got := optionValue(mounter.overlay.Options, "workdir="); got != "/s0fs/work" {
+		t.Fatalf("mounter workdir = %q, want /s0fs/work", got)
+	}
+	if got := optionValue(mounter.overlay.Options, "lowerdir="); got != "/lower" {
+		t.Fatalf("mounter lowerdir = %q, want /lower", got)
 	}
 	if client.address != "http://127.0.0.1:8095" {
 		t.Fatalf("ctld address = %q, want local ctld address", client.address)
@@ -110,10 +121,12 @@ func TestPrepareRewritesOverlayUpperAndWorkDirs(t *testing.T) {
 			Prepared:       true,
 			SandboxID:      "sandbox-a",
 			RootFSVolumeID: "rootfs-a",
+			MountPoint:     "/rootfs/s0fs",
 			UpperDir:       "/s0fs/upper",
 			WorkDir:        "/s0fs/work",
 		},
 	}
+	mounter := &fakeOverlayMounter{mount: rootfs.Mount{Type: "bind", Source: "/rootfs/merged", Options: []string{"rbind", "rw"}}}
 	sn, err := New(base, fakeResolver{
 		ok: true,
 		meta: rootfs.Metadata{
@@ -123,7 +136,7 @@ func TestPrepareRewritesOverlayUpperAndWorkDirs(t *testing.T) {
 			VolumeID:  "rootfs-a",
 			CtldPort:  8095,
 		},
-	}, client)
+	}, client, WithOverlayMounter(mounter))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -135,11 +148,8 @@ func TestPrepareRewritesOverlayUpperAndWorkDirs(t *testing.T) {
 	if got := mounts[0].Target; got != "/" {
 		t.Fatalf("target = %q, want /", got)
 	}
-	if got := optionValue(mounts[0].Options, "upperdir="); got != "/s0fs/upper" {
-		t.Fatalf("upperdir = %q, want /s0fs/upper", got)
-	}
-	if got := optionValue(mounts[0].Options, "workdir="); got != "/s0fs/work" {
-		t.Fatalf("workdir = %q, want /s0fs/work", got)
+	if mounts[0].Type != "bind" || mounts[0].Source != "/rootfs/merged" {
+		t.Fatalf("mount = %+v, want bind /rootfs/merged", mounts[0])
 	}
 	if client.request.SandboxID != "sandbox-a" || client.request.TeamID != "team-a" || client.request.RootFSVolumeID != "rootfs-a" {
 		t.Fatalf("prepare request = %+v, want sandbox-a team-a rootfs-a", client.request)
@@ -220,12 +230,13 @@ func TestMountsUsesExplicitCtldAddress(t *testing.T) {
 		Options: []string{"lowerdir=/lower", "upperdir=/old-upper", "workdir=/old-work"},
 	}}}
 	client := &fakePrepareClient{
-		response: &ctldapi.PrepareRootFSResponse{Prepared: true, UpperDir: "/upper", WorkDir: "/work"},
+		response: &ctldapi.PrepareRootFSResponse{Prepared: true, MountPoint: "/rootfs/s0fs", UpperDir: "/upper", WorkDir: "/work"},
 	}
+	mounter := &fakeOverlayMounter{mount: rootfs.Mount{Type: "bind", Source: "/rootfs/merged", Options: []string{"rbind", "rw"}}}
 	sn, err := New(base, fakeResolver{
 		ok:   true,
 		meta: rootfs.Metadata{SandboxID: "sandbox-a", TeamID: "team-a", Mode: rootfs.ModeS0FSUpperdir, VolumeID: "rootfs-a", CtldPort: 8095},
-	}, client, WithCtldAddress("http://ctld-host:8095"))
+	}, client, WithCtldAddress("http://ctld-host:8095"), WithOverlayMounter(mounter))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -235,6 +246,21 @@ func TestMountsUsesExplicitCtldAddress(t *testing.T) {
 	}
 	if client.address != "http://ctld-host:8095" {
 		t.Fatalf("ctld address = %q, want explicit address", client.address)
+	}
+}
+
+func TestRemoveUnmountsPreparedFuseOverlay(t *testing.T) {
+	base := &fakeSnapshotter{}
+	mounter := &fakeOverlayMounter{}
+	sn, err := New(base, nil, nil, WithOverlayMounter(mounter))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if err := sn.Remove(context.Background(), "container-a"); err != nil {
+		t.Fatalf("Remove() error = %v", err)
+	}
+	if mounter.unmountedKey != "container-a" {
+		t.Fatalf("unmounted key = %q, want container-a", mounter.unmountedKey)
 	}
 }
 
@@ -288,6 +314,39 @@ func (c *fakePrepareClient) PrepareRootFS(_ context.Context, address string, req
 	c.address = address
 	c.request = req
 	return c.response, c.err
+}
+
+type fakeOverlayMounter struct {
+	key          string
+	overlay      rootfs.Mount
+	prepared     *ctldapi.PrepareRootFSResponse
+	mount        rootfs.Mount
+	err          error
+	unmountedKey string
+	closed       bool
+}
+
+func (m *fakeOverlayMounter) Mount(_ context.Context, key string, overlay rootfs.Mount, prepared *ctldapi.PrepareRootFSResponse) (rootfs.Mount, error) {
+	m.key = key
+	m.overlay = overlay
+	m.prepared = prepared
+	if m.err != nil {
+		return rootfs.Mount{}, m.err
+	}
+	if m.mount.Type == "" {
+		return rootfs.Mount{Type: "bind", Source: "/merged", Options: []string{"rbind", "rw"}}, nil
+	}
+	return m.mount, nil
+}
+
+func (m *fakeOverlayMounter) Unmount(_ context.Context, key string) error {
+	m.unmountedKey = key
+	return nil
+}
+
+func (m *fakeOverlayMounter) Close() error {
+	m.closed = true
+	return nil
 }
 
 type fakeSnapshotter struct {

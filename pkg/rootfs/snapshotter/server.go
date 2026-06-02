@@ -17,11 +17,12 @@ import (
 )
 
 type ServerConfig struct {
-	SocketPath    string
-	Base          snapshots.Snapshotter
-	Resolver      MetadataResolver
-	PrepareClient rootfs.PrepareClient
-	CtldAddress   string
+	SocketPath     string
+	Base           snapshots.Snapshotter
+	Resolver       MetadataResolver
+	PrepareClient  rootfs.PrepareClient
+	CtldAddress    string
+	OverlayMounter OverlayMounter
 }
 
 func Serve(ctx context.Context, cfg ServerConfig) error {
@@ -32,7 +33,11 @@ func Serve(ctx context.Context, cfg ServerConfig) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	wrapped, err := New(cfg.Base, cfg.Resolver, cfg.PrepareClient, WithCtldAddress(cfg.CtldAddress))
+	opts := []Option{WithCtldAddress(cfg.CtldAddress)}
+	if cfg.OverlayMounter != nil {
+		opts = append(opts, WithOverlayMounter(cfg.OverlayMounter))
+	}
+	wrapped, err := New(cfg.Base, cfg.Resolver, cfg.PrepareClient, opts...)
 	if err != nil {
 		return err
 	}

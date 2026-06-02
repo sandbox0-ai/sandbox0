@@ -24,6 +24,7 @@ type Snapshotter struct {
 	client      rootfs.PrepareClient
 	ctldAddress string
 	namespace   string
+	mounter     OverlayMounter
 }
 
 type Option func(*Snapshotter)
@@ -40,6 +41,12 @@ func WithNamespace(namespace string) Option {
 	}
 }
 
+func WithOverlayMounter(mounter OverlayMounter) Option {
+	return func(s *Snapshotter) {
+		s.mounter = mounter
+	}
+}
+
 func New(base snapshots.Snapshotter, resolver MetadataResolver, client rootfs.PrepareClient, opts ...Option) (*Snapshotter, error) {
 	if base == nil {
 		return nil, fmt.Errorf("base snapshotter is required")
@@ -48,6 +55,7 @@ func New(base snapshots.Snapshotter, resolver MetadataResolver, client rootfs.Pr
 		base:     base,
 		resolver: resolver,
 		client:   client,
+		mounter:  NewFuseOverlayMounter(""),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -93,6 +101,11 @@ func (s *Snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 
 func (s *Snapshotter) Remove(ctx context.Context, key string) error {
 	ctx = s.ensureNamespace(ctx)
+	if s.mounter != nil {
+		if err := s.mounter.Unmount(ctx, key); err != nil {
+			return err
+		}
+	}
 	return s.base.Remove(ctx, key)
 }
 
@@ -102,7 +115,15 @@ func (s *Snapshotter) Walk(ctx context.Context, fn snapshots.WalkFunc, filters .
 }
 
 func (s *Snapshotter) Close() error {
-	return s.base.Close()
+	var closeErr error
+	if s.mounter != nil {
+		closeErr = s.mounter.Close()
+	}
+	baseErr := s.base.Close()
+	if closeErr != nil {
+		return closeErr
+	}
+	return baseErr
 }
 
 func (s *Snapshotter) Mounts(ctx context.Context, key string) ([]mount.Mount, error) {
@@ -128,6 +149,17 @@ func (s *Snapshotter) rewriteRootFSMounts(ctx context.Context, key string, mount
 	result, err := rootfs.PrepareAndRewriteOverlayMounts(ctx, s.client, s.ctldAddress, meta, toRootFSMounts(mounts))
 	if err != nil {
 		return nil, err
+	}
+	if result.Rewritten && result.RootFS != nil && s.mounter != nil {
+		idx := firstOverlayMountIndex(result.Mounts)
+		if idx < 0 {
+			return nil, fmt.Errorf("rewritten overlay rootfs mount is required")
+		}
+		merged, err := s.mounter.Mount(ctx, key, result.Mounts[idx], result.RootFS)
+		if err != nil {
+			return nil, err
+		}
+		result.Mounts[idx] = merged
 	}
 	return applyRootFSMounts(mounts, result.Mounts), nil
 }
@@ -178,4 +210,13 @@ func applyRootFSMounts(original []mount.Mount, rewritten []rootfs.Mount) []mount
 		out[i].Options = append([]string(nil), rewritten[i].Options...)
 	}
 	return out
+}
+
+func firstOverlayMountIndex(mounts []rootfs.Mount) int {
+	for i := range mounts {
+		if strings.TrimSpace(mounts[i].Type) == "overlay" {
+			return i
+		}
+	}
+	return -1
 }

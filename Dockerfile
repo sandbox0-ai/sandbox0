@@ -44,7 +44,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 FROM alpine:3.19
 
-RUN apk add --no-cache ca-certificates tzdata zstd-libs lz4-libs iptables ipset nftables iproute2
+RUN apk add --no-cache ca-certificates tzdata zstd-libs lz4-libs iptables ipset nftables iproute2 fuse-overlayfs
 
 COPY --from=builder /out/ /usr/local/bin/
 COPY scripts/entrypoint.sh /usr/local/bin/entrypoint

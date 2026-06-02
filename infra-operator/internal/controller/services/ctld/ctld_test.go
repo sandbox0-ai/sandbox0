@@ -7,14 +7,17 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	nodev1 "k8s.io/api/node/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfs"
 )
 
 func TestReconcileUsesSharedSandboxNodePlacement(t *testing.T) {
@@ -70,6 +73,12 @@ func TestReconcileFallsBackToLegacyNetdPlacement(t *testing.T) {
 
 func reconcileCtldDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) *appsv1.DaemonSet {
 	t.Helper()
+	ds, _ := reconcileCtldForTest(t, infra)
+	return ds
+}
+
+func reconcileCtldForTest(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) (*appsv1.DaemonSet, ctrlclient.Client) {
+	t.Helper()
 
 	scheme := runtime.NewScheme()
 	if err := appsv1.AddToScheme(scheme); err != nil {
@@ -80,6 +89,9 @@ func reconcileCtldDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) *a
 	}
 	if err := storagev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add storagev1 scheme: %v", err)
+	}
+	if err := nodev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add nodev1 scheme: %v", err)
 	}
 	if err := infrav1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add infra scheme: %v", err)
@@ -132,7 +144,7 @@ func reconcileCtldDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) *a
 		t.Fatal("expected csi driver podInfoOnMount=true")
 	}
 
-	return ds
+	return ds, client
 }
 
 func TestReconcilePassesDefaultPauseConfigToCtld(t *testing.T) {
@@ -175,6 +187,22 @@ func TestReconcileEnablesRootFSSnapshotterWhenRootFSPersistenceEnabled(t *testin
 	assertContainsArg(t, args, "-rootfs-snapshotter=true")
 	assertContainsArg(t, args, "-rootfs-snapshotter-socket=/host-run/containerd/sandbox0-rootfs-snapshotter.sock")
 	assertContainsArg(t, args, "-rootfs-snapshotter-base=overlayfs")
+}
+
+func TestReconcileCreatesRootFSRuntimeClassWhenRootFSPersistenceEnabled(t *testing.T) {
+	infra := newCtldTestInfra()
+	infra.Spec.Services.Manager.Config = &infrav1alpha1.ManagerConfig{
+		RootFSPersistenceEnabled: true,
+	}
+
+	_, client := reconcileCtldForTest(t, infra)
+	runtimeClass := &nodev1.RuntimeClass{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: rootfs.RuntimeClassName}, runtimeClass); err != nil {
+		t.Fatalf("expected rootfs runtime class to be created: %v", err)
+	}
+	if runtimeClass.Handler != rootfs.RuntimeClassName {
+		t.Fatalf("runtime class handler = %q, want %q", runtimeClass.Handler, rootfs.RuntimeClassName)
+	}
 }
 
 func TestReconcileMountsObjectEncryptionKeyWhenEnabled(t *testing.T) {

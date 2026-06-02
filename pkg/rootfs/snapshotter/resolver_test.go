@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/errdefs"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfs"
 	"google.golang.org/grpc"
@@ -46,6 +47,9 @@ func TestCRIMetadataResolverReadsRootFSAnnotationsFromPodSandboxStatus(t *testin
 	}
 	if meta.SandboxID != "sandbox-a" || meta.TeamID != "team-a" || meta.VolumeID != "rootfs-a" || meta.CtldPort != 8095 {
 		t.Fatalf("metadata = %+v, want sandbox-a team-a rootfs-a 8095", meta)
+	}
+	if store.namespace != defaultContainerdNamespace {
+		t.Fatalf("container store namespace = %q, want %s", store.namespace, defaultContainerdNamespace)
 	}
 }
 
@@ -95,12 +99,30 @@ func TestCRIMetadataResolverReturnsCRIError(t *testing.T) {
 	}
 }
 
+func TestCRIMetadataResolverUsesExistingNamespace(t *testing.T) {
+	store := &fakeContainerStore{err: errdefs.ErrNotFound}
+	resolver := CRIMetadataResolver{Containers: store, Runtime: &fakeRuntimeService{}, Namespace: "fallback"}
+
+	_, ok, err := resolver.ResolveRootFSMetadata(namespaces.WithNamespace(context.Background(), "custom"), "extract-key")
+	if err != nil {
+		t.Fatalf("ResolveRootFSMetadata() error = %v", err)
+	}
+	if ok {
+		t.Fatal("ResolveRootFSMetadata() ok = true, want false")
+	}
+	if store.namespace != "custom" {
+		t.Fatalf("container store namespace = %q, want custom", store.namespace)
+	}
+}
+
 type fakeContainerStore struct {
 	containers map[string]containers.Container
 	err        error
+	namespace  string
 }
 
-func (s *fakeContainerStore) Get(_ context.Context, id string) (containers.Container, error) {
+func (s *fakeContainerStore) Get(ctx context.Context, id string) (containers.Container, error) {
+	s.namespace, _ = namespaces.Namespace(ctx)
 	if s.err != nil {
 		return containers.Container{}, s.err
 	}

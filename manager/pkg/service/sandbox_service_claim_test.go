@@ -24,6 +24,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfs"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
@@ -561,6 +562,9 @@ func TestCreateNewPodCreatesRootFSVolumeWhenPersistenceEnabled(t *testing.T) {
 	if got := pod.Annotations[controller.AnnotationRootFSCtldPort]; got != "8095" {
 		t.Fatalf("rootfs ctld port annotation = %q, want 8095", got)
 	}
+	if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != rootfs.RuntimeClassName {
+		t.Fatalf("runtimeClassName = %#v, want %q", pod.Spec.RuntimeClassName, rootfs.RuntimeClassName)
+	}
 	if len(volumeClient.deleted) != 0 {
 		t.Fatalf("deleted volumes = %#v, want none", volumeClient.deleted)
 	}
@@ -640,6 +644,9 @@ func TestCreateNewPodUsesExistingRootFSVolumeWhenPersistenceEnabled(t *testing.T
 	}
 	if got := pod.Annotations[controller.AnnotationRootFSMode]; got != controller.RootFSModeS0FSUpperdir {
 		t.Fatalf("rootfs mode annotation = %q, want %q", got, controller.RootFSModeS0FSUpperdir)
+	}
+	if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != rootfs.RuntimeClassName {
+		t.Fatalf("runtimeClassName = %#v, want %q", pod.Spec.RuntimeClassName, rootfs.RuntimeClassName)
 	}
 }
 

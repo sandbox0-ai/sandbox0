@@ -16,6 +16,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfs"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -1111,6 +1112,8 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		annotations[controller.AnnotationWebhookStateVolumeID] = stateVolume.VolumeID
 	}
 	if rootfsVolume != nil {
+		runtimeClassName := rootfs.RuntimeClassName
+		spec.RuntimeClassName = &runtimeClassName
 		annotations[controller.AnnotationRootFSMode] = controller.RootFSModeS0FSUpperdir
 		annotations[controller.AnnotationRootFSVolumeID] = rootfsVolume.VolumeID
 		if s.config.CtldPort > 0 {

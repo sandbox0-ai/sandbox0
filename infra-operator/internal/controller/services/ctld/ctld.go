@@ -7,6 +7,7 @@ import (
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	nodev1 "k8s.io/api/node/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,6 +20,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storage"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfs"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 )
 
@@ -60,6 +62,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 	if err := r.ensureCSIDriver(ctx, labels); err != nil {
 		return err
+	}
+	if cfg := ctldManagerConfig(infra); cfg != nil && cfg.RootFSPersistenceEnabled {
+		if err := r.ensureRootFSRuntimeClass(ctx, labels); err != nil {
+			return err
+		}
 	}
 
 	image := fmt.Sprintf("%s:%s", imageRepo, imageTag)
@@ -326,6 +333,29 @@ func (r *Reconciler) ensureCSIDriver(ctx context.Context, labels map[string]stri
 	}
 	current.Labels = desired.Labels
 	current.Spec = desired.Spec
+	return r.Resources.Client.Update(ctx, current)
+}
+
+func (r *Reconciler) ensureRootFSRuntimeClass(ctx context.Context, labels map[string]string) error {
+	desired := &nodev1.RuntimeClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   rootfs.RuntimeClassName,
+			Labels: labels,
+		},
+		Handler: rootfs.RuntimeClassName,
+	}
+	current := &nodev1.RuntimeClass{}
+	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: rootfs.RuntimeClassName}, current)
+	if apierrors.IsNotFound(err) {
+		return r.Resources.Client.Create(ctx, desired)
+	}
+	if err != nil {
+		return err
+	}
+	current.Labels = desired.Labels
+	current.Handler = desired.Handler
+	current.Overhead = desired.Overhead
+	current.Scheduling = desired.Scheduling
 	return r.Resources.Client.Update(ctx, current)
 }
 

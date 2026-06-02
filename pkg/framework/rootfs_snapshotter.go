@@ -12,8 +12,8 @@ const (
 	rootFSSnapshotterSocketPath = "/run/containerd/sandbox0-rootfs-snapshotter.sock"
 )
 
-// ConfigureKindRootFSSnapshotter configures each kind node to use the Sandbox0
-// rootfs proxy snapshotter for new CRI containers.
+// ConfigureKindRootFSSnapshotter configures each kind node with the Sandbox0
+// rootfs proxy snapshotter runtime handler.
 func ConfigureKindRootFSSnapshotter(ctx context.Context, clusterName string) error {
 	clusterName = strings.TrimSpace(clusterName)
 	if clusterName == "" {
@@ -168,47 +168,45 @@ cat >> "${tmp}" <<EOF
 [proxy_plugins.sandbox0-rootfs]
   type = "snapshot"
   address = "${socket}"
-# END sandbox0 rootfs snapshotter
+  [proxy_plugins.sandbox0-rootfs.exports]
+    root = "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs"
 EOF
 
-set_snapshotter() {
-  table="$1"
-  next="$(mktemp)"
-  awk -v table="${table}" -v plugin="${plugin}" '
-    BEGIN { in_table = 0; wrote = 0 }
-    /^\[.*\]$/ {
-      if (in_table == 1 && wrote == 0) {
-        print "  snapshotter = \"" plugin "\""
-        wrote = 1
-      }
-      in_table = ($0 == table)
-    }
-    in_table == 1 && /^[[:space:]]*snapshotter[[:space:]]*=/ {
-      print "  snapshotter = \"" plugin "\""
-      wrote = 1
-      next
-    }
-    { print }
-    END {
-      if (in_table == 1 && wrote == 0) {
-        print "  snapshotter = \"" plugin "\""
-      }
-    }
-  ' "${tmp}" > "${next}"
-  mv "${next}" "${tmp}"
-}
-
-if grep -q '^\[plugins\."io\.containerd\.cri\.v1\.runtime"\.containerd\]' "${tmp}"; then
-  set_snapshotter '[plugins."io.containerd.cri.v1.runtime".containerd]'
-elif grep -q '^\[plugins\."io\.containerd\.grpc\.v1\.cri"\.containerd\]' "${tmp}"; then
-  set_snapshotter '[plugins."io.containerd.grpc.v1.cri".containerd]'
-else
+append_runtime_handler() {
+  containerd_table="$1"
+  runtime_table="[${containerd_table}.runtimes.${plugin}]"
+  options_table="[${containerd_table}.runtimes.${plugin}.options]"
   cat >> "${tmp}" <<EOF
 
-[plugins."io.containerd.cri.v1.runtime".containerd]
+${runtime_table}
+  runtime_type = "io.containerd.runc.v2"
   snapshotter = "${plugin}"
 EOF
+  if [ -f /etc/containerd/cri-base.json ]; then
+    printf '  base_runtime_spec = "/etc/containerd/cri-base.json"\n' >> "${tmp}"
+  fi
+  cat >> "${tmp}" <<EOF
+${options_table}
+  SystemdCgroup = true
+EOF
+}
+
+configured=0
+if grep -q '^\[plugins\."io\.containerd\.cri\.v1\.runtime"\.containerd\]' "${tmp}"; then
+  append_runtime_handler 'plugins."io.containerd.cri.v1.runtime".containerd'
+  configured=1
 fi
+if grep -q '^\[plugins\."io\.containerd\.grpc\.v1\.cri"\.containerd\]' "${tmp}"; then
+  append_runtime_handler 'plugins."io.containerd.grpc.v1.cri".containerd'
+  configured=1
+fi
+if [ "${configured}" = "0" ]; then
+  append_runtime_handler 'plugins."io.containerd.cri.v1.runtime".containerd'
+fi
+
+cat >> "${tmp}" <<EOF
+# END sandbox0 rootfs snapshotter
+EOF
 
 mv "${tmp}" "${cfg}"
 systemctl restart containerd

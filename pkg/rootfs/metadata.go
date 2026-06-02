@@ -15,6 +15,8 @@ const (
 	AnnotationCtldPort  = "sandbox0.ai/rootfs-ctld-port"
 
 	ModeS0FSUpperdir = "s0fs-upperdir"
+
+	RuntimeClassName = "sandbox0-rootfs"
 )
 
 type Metadata struct {

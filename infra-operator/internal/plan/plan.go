@@ -980,6 +980,10 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 		appendCheckStep("manager-rbac", infrav1alpha1.ConditionTypeManagerReady, "ManagerRBACFailed")
 		appendSuccessStep("manager", infrav1alpha1.ConditionTypeManagerReady, "ManagerReady", "Manager is ready", "ManagerFailed")
 	}
+	if compiled.Components.EnableStorageProxy {
+		appendCheckStep("storage-proxy-rbac", infrav1alpha1.ConditionTypeStorageProxyReady, "StorageProxyRBACFailed")
+		appendSuccessStep("storage-proxy", infrav1alpha1.ConditionTypeStorageProxyReady, "StorageProxyReady", "Storage proxy is ready", "StorageProxyFailed")
+	}
 	if compiled.Components.EnableNetd {
 		appendCheckStep("netd-rbac", infrav1alpha1.ConditionTypeNetdReady, "NetdRBACFailed")
 		appendSuccessStep("netd", infrav1alpha1.ConditionTypeNetdReady, "NetdReady", "netd is ready", "NetdFailed")
@@ -987,10 +991,6 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 	if compiled.Components.EnableManager {
 		appendCheckStep("data-plane-node-readiness", infrav1alpha1.ConditionTypeManagerReady, "DataPlaneNodesNotReady")
 		appendCheckStep("builtin-template-pods", infrav1alpha1.ConditionTypeManagerReady, "BuiltinTemplatePodsNotReady")
-	}
-	if compiled.Components.EnableStorageProxy {
-		appendCheckStep("storage-proxy-rbac", infrav1alpha1.ConditionTypeStorageProxyReady, "StorageProxyRBACFailed")
-		appendSuccessStep("storage-proxy", infrav1alpha1.ConditionTypeStorageProxyReady, "StorageProxyReady", "Storage proxy is ready", "StorageProxyFailed")
 	}
 	if compiled.Components.EnableClusterRegistration {
 		appendSuccessStep("register-cluster", infrav1alpha1.ConditionTypeClusterRegistered, "ClusterRegistered", "Cluster registration completed", "ClusterRegistrationFailed")

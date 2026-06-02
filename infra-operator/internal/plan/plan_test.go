@@ -963,12 +963,12 @@ func TestCompileTracksWorkflowRequirements(t *testing.T) {
 		"ctld",
 		"manager-rbac",
 		"manager",
+		"storage-proxy-rbac",
+		"storage-proxy",
 		"netd-rbac",
 		"netd",
 		"data-plane-node-readiness",
 		"builtin-template-pods",
-		"storage-proxy-rbac",
-		"storage-proxy",
 		"register-cluster",
 	}
 	if len(got) != len(want) {

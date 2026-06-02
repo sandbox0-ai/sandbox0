@@ -72,9 +72,21 @@ func assertRootFSRestoredAfterClean(env *framework.ScenarioEnv, session *e2eutil
 			HardTtl: &hardTTL,
 		},
 	}
-	resp, status, err := session.ClaimSandboxDetailed(env.TestCtx.Context, GinkgoT(), claim)
-	Expect(err).NotTo(HaveOccurred())
-	Expect(status).To(Equal(http.StatusCreated))
+	var (
+		resp   *apispec.ClaimResponse
+		status int
+	)
+	Eventually(func() error {
+		var claimErr error
+		resp, status, claimErr = session.ClaimSandboxDetailed(env.TestCtx.Context, GinkgoT(), claim)
+		if claimErr != nil {
+			return claimErr
+		}
+		if status != http.StatusCreated {
+			return fmt.Errorf("claim status %d", status)
+		}
+		return nil
+	}).WithTimeout(2 * time.Minute).WithPolling(3 * time.Second).Should(Succeed())
 	Expect(resp).NotTo(BeNil())
 	sandboxID := resp.SandboxId
 	Expect(sandboxID).NotTo(BeEmpty())

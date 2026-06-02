@@ -94,6 +94,56 @@ func TestMountsRewritesOverlayUpperAndWorkDirs(t *testing.T) {
 	}
 }
 
+func TestPrepareRewritesOverlayUpperAndWorkDirs(t *testing.T) {
+	base := &fakeSnapshotter{
+		mounts: []mount.Mount{{
+			Type:    "overlay",
+			Source:  "overlay",
+			Target:  "/",
+			Options: []string{"lowerdir=/lower", "upperdir=/containerd/upper", "workdir=/containerd/work"},
+		}},
+	}
+	client := &fakePrepareClient{
+		response: &ctldapi.PrepareRootFSResponse{
+			Prepared:       true,
+			SandboxID:      "sandbox-a",
+			RootFSVolumeID: "rootfs-a",
+			UpperDir:       "/s0fs/upper",
+			WorkDir:        "/s0fs/work",
+		},
+	}
+	sn, err := New(base, fakeResolver{
+		ok: true,
+		meta: rootfs.Metadata{
+			SandboxID: "sandbox-a",
+			TeamID:    "team-a",
+			Mode:      rootfs.ModeS0FSUpperdir,
+			VolumeID:  "rootfs-a",
+			CtldPort:  8095,
+		},
+	}, client)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	mounts, err := sn.Prepare(context.Background(), "container-a", "parent-a")
+	if err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if got := mounts[0].Target; got != "/" {
+		t.Fatalf("target = %q, want /", got)
+	}
+	if got := optionValue(mounts[0].Options, "upperdir="); got != "/s0fs/upper" {
+		t.Fatalf("upperdir = %q, want /s0fs/upper", got)
+	}
+	if got := optionValue(mounts[0].Options, "workdir="); got != "/s0fs/work" {
+		t.Fatalf("workdir = %q, want /s0fs/work", got)
+	}
+	if client.request.SandboxID != "sandbox-a" || client.request.TeamID != "team-a" || client.request.RootFSVolumeID != "rootfs-a" {
+		t.Fatalf("prepare request = %+v, want sandbox-a team-a rootfs-a", client.request)
+	}
+}
+
 func TestMountsUsesExplicitCtldAddress(t *testing.T) {
 	base := &fakeSnapshotter{mounts: []mount.Mount{{
 		Type:    "overlay",

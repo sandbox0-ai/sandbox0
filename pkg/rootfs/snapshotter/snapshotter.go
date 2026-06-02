@@ -63,7 +63,11 @@ func (s *Snapshotter) Usage(ctx context.Context, key string) (snapshots.Usage, e
 }
 
 func (s *Snapshotter) Prepare(ctx context.Context, key, parent string, opts ...snapshots.Opt) ([]mount.Mount, error) {
-	return s.base.Prepare(ctx, key, parent, opts...)
+	mounts, err := s.base.Prepare(ctx, key, parent, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return s.rewriteRootFSMounts(ctx, key, mounts)
 }
 
 func (s *Snapshotter) View(ctx context.Context, key, parent string, opts ...snapshots.Opt) ([]mount.Mount, error) {
@@ -91,6 +95,10 @@ func (s *Snapshotter) Mounts(ctx context.Context, key string) ([]mount.Mount, er
 	if err != nil {
 		return nil, err
 	}
+	return s.rewriteRootFSMounts(ctx, key, mounts)
+}
+
+func (s *Snapshotter) rewriteRootFSMounts(ctx context.Context, key string, mounts []mount.Mount) ([]mount.Mount, error) {
 	if s.resolver == nil {
 		return mounts, nil
 	}

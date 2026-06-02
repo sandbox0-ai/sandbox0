@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfs"
 )
 
 const (
@@ -169,7 +171,7 @@ cat >> "${tmp}" <<EOF
   type = "snapshot"
   address = "${socket}"
   [proxy_plugins.sandbox0-rootfs.exports]
-    root = "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs"
+    root = "` + rootfs.SnapshotterHostRootPath + `"
 EOF
 
 append_runtime_handler() {

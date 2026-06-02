@@ -186,7 +186,9 @@ func TestReconcileEnablesRootFSSnapshotterWhenRootFSPersistenceEnabled(t *testin
 	args := ds.Spec.Template.Spec.Containers[0].Args
 	assertContainsArg(t, args, "-rootfs-snapshotter=true")
 	assertContainsArg(t, args, "-rootfs-snapshotter-socket=/host-run/containerd/sandbox0-rootfs-snapshotter.sock")
-	assertContainsArg(t, args, "-rootfs-snapshotter-base=overlayfs")
+	assertContainsArg(t, args, "-rootfs-snapshotter-root="+rootfs.SnapshotterContainerRootPath)
+	assertContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "rootfs-snapshotter-root", rootfs.SnapshotterContainerRootPath)
+	assertPodHostPathVolume(t, ds.Spec.Template.Spec.Volumes, "rootfs-snapshotter-root", rootfs.SnapshotterHostRootPath)
 }
 
 func TestReconcileCreatesRootFSRuntimeClassWhenRootFSPersistenceEnabled(t *testing.T) {
@@ -249,6 +251,23 @@ func assertPodVolume(t *testing.T, volumes []corev1.Volume, name string) {
 		}
 	}
 	t.Fatalf("expected volume %q, got %#v", name, volumes)
+}
+
+func assertPodHostPathVolume(t *testing.T, volumes []corev1.Volume, name, path string) {
+	t.Helper()
+	for _, volume := range volumes {
+		if volume.Name != name {
+			continue
+		}
+		if volume.HostPath == nil {
+			t.Fatalf("volume %q hostPath is nil", name)
+		}
+		if volume.HostPath.Path != path {
+			t.Fatalf("volume %q hostPath = %q, want %q", name, volume.HostPath.Path, path)
+		}
+		return
+	}
+	t.Fatalf("expected hostPath volume %q, got %#v", name, volumes)
 }
 
 func newCtldTestInfra() *infrav1alpha1.Sandbox0Infra {

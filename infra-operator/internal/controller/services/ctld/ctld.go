@@ -161,6 +161,21 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			},
 		})
 	}
+	if cfg := ctldManagerConfig(infra); cfg != nil && cfg.RootFSPersistenceEnabled {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "rootfs-snapshotter-root",
+			MountPath: rootfs.SnapshotterContainerRootPath,
+		})
+		volumes = append(volumes, corev1.Volume{
+			Name: "rootfs-snapshotter-root",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: rootfs.SnapshotterHostRootPath,
+					Type: &hostPathDirectoryOrCreate,
+				},
+			},
+		})
+	}
 
 	desired := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -302,7 +317,7 @@ func ctldArgs(infra *infrav1alpha1.Sandbox0Infra) []string {
 		args = append(args,
 			"-rootfs-snapshotter=true",
 			"-rootfs-snapshotter-socket=/host-run/containerd/sandbox0-rootfs-snapshotter.sock",
-			"-rootfs-snapshotter-base=overlayfs",
+			fmt.Sprintf("-rootfs-snapshotter-root=%s", rootfs.SnapshotterContainerRootPath),
 		)
 	}
 	return args

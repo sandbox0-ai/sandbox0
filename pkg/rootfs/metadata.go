@@ -17,6 +17,9 @@ const (
 	ModeS0FSUpperdir = "s0fs-upperdir"
 
 	RuntimeClassName = "sandbox0-rootfs"
+
+	SnapshotterHostRootPath      = "/var/lib/containerd/io.containerd.snapshotter.v1.sandbox0-rootfs"
+	SnapshotterContainerRootPath = "/host-var-lib/containerd/io.containerd.snapshotter.v1.sandbox0-rootfs"
 )
 
 type Metadata struct {

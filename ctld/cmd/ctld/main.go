@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/plugins/snapshots/overlay"
 	"github.com/jackc/pgx/v5/pgxpool"
 	ctldportal "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal"
 	ctldpower "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/power"
@@ -24,6 +26,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/k8s"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfs"
 	rootfssnapshotter "github.com/sandbox0-ai/sandbox0/pkg/rootfs/snapshotter"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	storagedb "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
@@ -52,6 +55,7 @@ var (
 	rootfsSnapshotter       = false
 	rootfsSnapshotterSocket = "/host-run/containerd/sandbox0-rootfs-snapshotter.sock"
 	rootfsSnapshotterBase   = "overlayfs"
+	rootfsSnapshotterRoot   = rootfs.SnapshotterContainerRootPath
 )
 
 func main() {
@@ -70,7 +74,8 @@ func main() {
 	flag.StringVar(&csiSocket, "csi-socket", "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock", "CSI endpoint socket for sandbox volume portals")
 	flag.BoolVar(&rootfsSnapshotter, "rootfs-snapshotter", false, "serve a containerd proxy snapshotter that rewrites sandbox rootfs upperdir to s0fs")
 	flag.StringVar(&rootfsSnapshotterSocket, "rootfs-snapshotter-socket", "/host-run/containerd/sandbox0-rootfs-snapshotter.sock", "unix socket for the rootfs containerd proxy snapshotter")
-	flag.StringVar(&rootfsSnapshotterBase, "rootfs-snapshotter-base", "overlayfs", "base containerd snapshotter delegated by the rootfs proxy snapshotter")
+	flag.StringVar(&rootfsSnapshotterBase, "rootfs-snapshotter-base", "overlayfs", "deprecated compatibility flag; rootfs snapshotter now uses an in-process overlayfs backend")
+	flag.StringVar(&rootfsSnapshotterRoot, "rootfs-snapshotter-root", rootfs.SnapshotterContainerRootPath, "overlayfs backend root for the rootfs containerd proxy snapshotter")
 	flag.Parse()
 
 	log.Println("Starting ctld")
@@ -262,14 +267,20 @@ func runRootFSSnapshotter(ctx context.Context, portal volumePortalHandler) error
 	}
 	defer criConn.Close()
 
-	baseSnapshotter := strings.TrimSpace(rootfsSnapshotterBase)
-	if baseSnapshotter == "" {
-		baseSnapshotter = "overlayfs"
+	overlayRoot := strings.TrimSpace(rootfsSnapshotterRoot)
+	if overlayRoot == "" {
+		overlayRoot = rootfs.SnapshotterContainerRootPath
 	}
-	log.Printf("Serving rootfs snapshotter on %s with base snapshotter %s", rootfsSnapshotterSocket, baseSnapshotter)
+	base, err := overlay.NewSnapshotter(overlayRoot)
+	if err != nil {
+		return fmt.Errorf("open rootfs overlay snapshotter: %w", err)
+	}
+	defer base.Close()
+
+	log.Printf("Serving rootfs snapshotter on %s with overlay root %s", rootfsSnapshotterSocket, overlayRoot)
 	return rootfssnapshotter.Serve(ctx, rootfssnapshotter.ServerConfig{
 		SocketPath:    rootfsSnapshotterSocket,
-		Base:          containerdClient.SnapshotService(baseSnapshotter),
+		Base:          base,
 		Resolver:      rootfssnapshotter.CRIMetadataResolver{Containers: containerdClient.ContainerService(), Runtime: runtimeapi.NewRuntimeServiceClient(criConn)},
 		PrepareClient: localRootFSPrepareClient{portal: portal},
 	})

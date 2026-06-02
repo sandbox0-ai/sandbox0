@@ -3,6 +3,8 @@ package framework
 import (
 	"strings"
 	"testing"
+
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfs"
 )
 
 func TestKindRootFSSnapshotterConfigureScriptCoversContainerdCRIPaths(t *testing.T) {
@@ -11,7 +13,7 @@ func TestKindRootFSSnapshotterConfigureScriptCoversContainerdCRIPaths(t *testing
 		"[proxy_plugins.sandbox0-rootfs]",
 		`address = "${socket}"`,
 		`[proxy_plugins.sandbox0-rootfs.exports]`,
-		`root = "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs"`,
+		`root = "` + rootfs.SnapshotterHostRootPath + `"`,
 		`append_runtime_handler 'plugins."io.containerd.cri.v1.runtime".containerd'`,
 		`append_runtime_handler 'plugins."io.containerd.grpc.v1.cri".containerd'`,
 		`runtime_type = "io.containerd.runc.v2"`,

@@ -86,7 +86,9 @@ func waitForDefaultTemplateClaimable(env *framework.ScenarioEnv, session *e2euti
 }
 
 func assertRootFSRestoredAfterClean(env *framework.ScenarioEnv, session *e2eutils.Session) {
-	hardTTL := int32(12)
+	// Keep the TTL above cold rootfs startup on CI so the test exercises
+	// cleaned restore instead of racing the initial claim readiness path.
+	hardTTL := int32(90)
 	claim := apispec.ClaimRequest{
 		Template: ptr("default"),
 		Config: &apispec.SandboxConfig{

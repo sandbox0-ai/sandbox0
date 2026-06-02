@@ -11,6 +11,7 @@ import (
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfs"
+	"google.golang.org/grpc/metadata"
 )
 
 func TestMountsNoopsWhenMetadataIsUnavailable(t *testing.T) {
@@ -187,6 +188,31 @@ func TestMountsPreservesExistingContainerdNamespace(t *testing.T) {
 	}
 }
 
+func TestPrepareNormalizesIncomingContainerdNamespaceForNestedCalls(t *testing.T) {
+	base := &fakeSnapshotter{
+		mounts: []mount.Mount{{
+			Type:    "overlay",
+			Source:  "overlay",
+			Options: []string{"lowerdir=/lower", "upperdir=/containerd/upper", "workdir=/containerd/work"},
+		}},
+	}
+	sn, err := New(base, fakeResolver{}, nil)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(namespaces.GRPCHeader, "custom"))
+	if _, err := sn.Prepare(ctx, "extract-key", "parent"); err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if base.namespace != "custom" {
+		t.Fatalf("base namespace = %q, want custom", base.namespace)
+	}
+	if base.outgoingNamespace != "custom" {
+		t.Fatalf("base outgoing namespace = %q, want custom", base.outgoingNamespace)
+	}
+}
+
 func TestMountsUsesExplicitCtldAddress(t *testing.T) {
 	base := &fakeSnapshotter{mounts: []mount.Mount{{
 		Type:    "overlay",
@@ -265,10 +291,11 @@ func (c *fakePrepareClient) PrepareRootFS(_ context.Context, address string, req
 }
 
 type fakeSnapshotter struct {
-	mounts        []mount.Mount
-	mountsCalls   int
-	cleanupCalled bool
-	namespace     string
+	mounts            []mount.Mount
+	mountsCalls       int
+	cleanupCalled     bool
+	namespace         string
+	outgoingNamespace string
 }
 
 func (s *fakeSnapshotter) Stat(ctx context.Context, _ string) (snapshots.Info, error) {
@@ -329,6 +356,11 @@ func (s *fakeSnapshotter) Cleanup(ctx context.Context) error {
 
 func (s *fakeSnapshotter) recordNamespace(ctx context.Context) {
 	s.namespace, _ = namespaces.Namespace(ctx)
+	if md, ok := metadata.FromOutgoingContext(ctx); ok {
+		if values := md.Get(namespaces.GRPCHeader); len(values) > 0 {
+			s.outgoingNamespace = values[0]
+		}
+	}
 }
 
 func cloneContainerdMounts(mounts []mount.Mount) []mount.Mount {

@@ -13,8 +13,10 @@ func ensureContainerdNamespace(ctx context.Context, namespace string) context.Co
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if _, ok := namespaces.Namespace(ctx); ok {
-		return ctx
+	if existing, ok := namespaces.Namespace(ctx); ok {
+		if existing = strings.TrimSpace(existing); existing != "" {
+			return namespaces.WithNamespace(ctx, existing)
+		}
 	}
 	namespace = strings.TrimSpace(namespace)
 	if namespace == "" {

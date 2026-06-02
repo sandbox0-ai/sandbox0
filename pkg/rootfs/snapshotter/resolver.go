@@ -9,6 +9,8 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfs"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
@@ -19,6 +21,7 @@ type ContainerStore interface {
 
 type RuntimeService interface {
 	PodSandboxStatus(ctx context.Context, in *runtime.PodSandboxStatusRequest, opts ...grpc.CallOption) (*runtime.PodSandboxStatusResponse, error)
+	ListContainers(ctx context.Context, in *runtime.ListContainersRequest, opts ...grpc.CallOption) (*runtime.ListContainersResponse, error)
 }
 
 // CRIMetadataResolver uses containerd container metadata to find the owning CRI
@@ -46,16 +49,33 @@ func (r CRIMetadataResolver) ResolveRootFSMetadata(ctx context.Context, snapshot
 	if err != nil {
 		return rootfs.Metadata{}, false, err
 	}
-	if !ok {
-		return rootfs.Metadata{}, false, nil
-	}
-	sandboxID := strings.TrimSpace(container.SandboxID)
-	if sandboxID == "" {
-		return rootfs.Metadata{}, false, nil
+	if ok {
+		sandboxID := strings.TrimSpace(container.SandboxID)
+		if sandboxID == "" {
+			sandboxID = strings.TrimSpace(container.ID)
+		}
+		if sandboxID != "" {
+			return r.resolvePodSandboxMetadata(ctx, sandboxID)
+		}
 	}
 
+	sandboxID, ok, err := r.resolveSandboxIDFromCRIContainer(ctx, snapshotKey)
+	if err != nil {
+		return rootfs.Metadata{}, false, err
+	}
+	if ok {
+		return r.resolvePodSandboxMetadata(ctx, sandboxID)
+	}
+
+	return r.resolvePodSandboxMetadata(ctx, snapshotKey)
+}
+
+func (r CRIMetadataResolver) resolvePodSandboxMetadata(ctx context.Context, sandboxID string) (rootfs.Metadata, bool, error) {
 	resp, err := r.Runtime.PodSandboxStatus(ctx, &runtime.PodSandboxStatusRequest{PodSandboxId: sandboxID})
 	if err != nil {
+		if isNotFound(err) {
+			return rootfs.Metadata{}, false, nil
+		}
 		return rootfs.Metadata{}, false, fmt.Errorf("get pod sandbox status %s: %w", sandboxID, err)
 	}
 	status := resp.GetStatus()
@@ -65,10 +85,33 @@ func (r CRIMetadataResolver) ResolveRootFSMetadata(ctx context.Context, snapshot
 	return rootfs.MetadataFromAnnotations(status.GetAnnotations()), true, nil
 }
 
+func (r CRIMetadataResolver) resolveSandboxIDFromCRIContainer(ctx context.Context, snapshotKey string) (string, bool, error) {
+	resp, err := r.Runtime.ListContainers(ctx, &runtime.ListContainersRequest{
+		Filter: &runtime.ContainerFilter{Id: snapshotKey},
+	})
+	if err != nil {
+		if isNotFound(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("list containers for CRI id %s: %w", snapshotKey, err)
+	}
+	for _, container := range resp.GetContainers() {
+		if strings.TrimSpace(container.GetId()) != snapshotKey {
+			continue
+		}
+		sandboxID := strings.TrimSpace(container.GetPodSandboxId())
+		if sandboxID == "" {
+			return "", false, nil
+		}
+		return sandboxID, true, nil
+	}
+	return "", false, nil
+}
+
 func (r CRIMetadataResolver) resolveContainer(ctx context.Context, snapshotKey string) (containers.Container, bool, error) {
 	container, err := r.Containers.Get(ctx, snapshotKey)
 	if err != nil {
-		if errdefs.IsNotFound(err) {
+		if isNotFound(err) {
 			all, err := r.Containers.List(ctx)
 			if err != nil {
 				return containers.Container{}, false, fmt.Errorf("list containers for snapshot key %s: %w", snapshotKey, err)
@@ -87,4 +130,8 @@ func (r CRIMetadataResolver) resolveContainer(ctx context.Context, snapshotKey s
 
 func (r CRIMetadataResolver) ensureNamespace(ctx context.Context) context.Context {
 	return ensureContainerdNamespace(ctx, r.Namespace)
+}
+
+func isNotFound(err error) bool {
+	return errdefs.IsNotFound(err) || status.Code(err) == codes.NotFound
 }

@@ -1046,6 +1046,9 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	if sandboxID == "" {
 		sandboxID = podName
 	}
+	if err := s.ensureTemplateNamespaceForPod(ctx, template.Namespace); err != nil {
+		return nil, fmt.Errorf("ensure template namespace: %w", err)
+	}
 	rootfsVolume, err := s.prepareRootFSVolume(ctx, req, sandboxID)
 	if err != nil {
 		return nil, fmt.Errorf("prepare rootfs volume: %w", err)
@@ -1094,9 +1097,6 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 
 	if err := controller.EnsureProcdConfigSecret(ctx, s.k8sClient, s.secretLister, template); err != nil {
 		return nil, fmt.Errorf("ensure procd config secret: %w", err)
-	}
-	if err := controller.EnsureNetdMITMCASecret(ctx, s.k8sClient, template.Namespace); err != nil {
-		return nil, fmt.Errorf("ensure netd MITM CA secret: %w", err)
 	}
 
 	annotations := controller.ClaimedSandboxPodAnnotations(map[string]string{
@@ -1190,6 +1190,52 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	)
 
 	return createdPod, nil
+}
+
+func (s *SandboxService) ensureTemplateNamespaceForPod(ctx context.Context, namespace string) error {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return fmt.Errorf("template namespace is required")
+	}
+	if s == nil || s.k8sClient == nil {
+		return fmt.Errorf("k8s client is required to ensure namespace %s", namespace)
+	}
+
+	if _, err := s.k8sClient.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{}); err != nil {
+		if !k8serrors.IsNotFound(err) {
+			return fmt.Errorf("get namespace %s: %w", namespace, err)
+		}
+		ns := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: namespace,
+				Labels: map[string]string{
+					managerNamespaceLabelKey: managerNamespaceLabelValue,
+				},
+			},
+		}
+		if _, err := s.k8sClient.CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{}); err != nil && !k8serrors.IsAlreadyExists(err) {
+			return fmt.Errorf("create namespace %s: %w", namespace, err)
+		}
+	}
+
+	if err := controller.EnsureNetdMITMCASecret(ctx, s.k8sClient, namespace); err != nil {
+		return fmt.Errorf("ensure netd MITM CA secret: %w", err)
+	}
+	if s.namespacePolicy != nil {
+		if err := s.namespacePolicy.EnsureBaseline(ctx, namespace); err != nil {
+			return fmt.Errorf("ensure template namespace baseline: %w", err)
+		}
+	}
+	if s.networkProvider != nil {
+		if err := s.networkProvider.EnsureBaseline(ctx, namespace); err != nil && s.logger != nil {
+			s.logger.Warn("Network provider baseline failed",
+				zap.String("provider", s.networkProvider.Name()),
+				zap.String("namespace", namespace),
+				zap.Error(err),
+			)
+		}
+	}
+	return nil
 }
 
 func (s *SandboxService) requestSandboxDeletionAfterClaimFailure(pod *corev1.Pod, reason string) {

@@ -312,6 +312,7 @@ func main() {
 		managerMetrics,
 	)
 	sandboxService.SetCredentialStore(credentialStore)
+	sandboxService.SetNamespacePolicyReconciler(templateNamespacePolicy)
 	sandboxService.SetQuotaStore(quota.NewRepository(pool))
 	sandboxService.SetSandboxStore(service.NewPGSandboxStore(pool))
 	if cfg.StorageProxyBaseURL != "" && cfg.StorageProxyHTTPPort > 0 && storageProxyAdminTokenGenerator != nil {

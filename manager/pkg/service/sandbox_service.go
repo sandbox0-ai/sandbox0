@@ -9,6 +9,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/namespacepolicy"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
 	egressauth "github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
@@ -119,6 +120,7 @@ type SandboxService struct {
 	templateLister         controller.TemplateLister
 	NetworkPolicyService   *NetworkPolicyService
 	networkProvider        network.Provider
+	namespacePolicy        namespacepolicy.TemplateNamespaceReconciler
 	procdClient            *ProcdClient
 	ctldClient             *CtldClient
 	internalTokenGenerator TokenGenerator
@@ -260,6 +262,11 @@ func (s *SandboxService) SetAutoScaler(scaler AutoScalerInterface) {
 // SetCredentialStore injects the sandbox credential binding store.
 func (s *SandboxService) SetCredentialStore(store egressauth.BindingStore) {
 	s.credentialStore = store
+}
+
+// SetNamespacePolicyReconciler installs the manager-owned template namespace baseline reconciler.
+func (s *SandboxService) SetNamespacePolicyReconciler(reconciler namespacepolicy.TemplateNamespaceReconciler) {
+	s.namespacePolicy = reconciler
 }
 
 // SetPowerExecutor overrides sandbox power execution (used by tests and future node executors).

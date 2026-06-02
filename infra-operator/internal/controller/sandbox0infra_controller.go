@@ -855,6 +855,9 @@ func (r *Sandbox0InfraReconciler) waitBuiltinTemplatePodsReady(ctx context.Conte
 	if !compiledPlan.Components.EnableManager || !compiledPlan.Manager.TemplateStoreEnabled {
 		return nil
 	}
+	if compiledPlan.Manager.Config != nil && compiledPlan.Manager.Config.RootFSPersistenceEnabled {
+		return nil
+	}
 
 	for _, builtin := range compiledPlan.BuiltinTemplates() {
 		templateID, err := naming.CanonicalTemplateID(builtin.TemplateID)

@@ -19,14 +19,18 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
+	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 )
 
 func TestRunStepsSetsConditions(t *testing.T) {
@@ -136,5 +140,83 @@ func TestIsReadyPod(t *testing.T) {
 	}
 	if isReadyPod(notReadyPod) {
 		t.Fatalf("expected pending pod to be reported as not ready")
+	}
+}
+
+func TestWaitBuiltinTemplatePodsReadySkipsWhenRootFSPersistenceEnabled(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Services: &infrav1alpha1.ServicesConfig{
+				ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					Config: &infrav1alpha1.ClusterGatewayConfig{
+						AuthMode: "public",
+					},
+				},
+				Manager: &infrav1alpha1.ManagerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					Config: &infrav1alpha1.ManagerConfig{
+						RootFSPersistenceEnabled: true,
+					},
+				},
+			},
+		},
+	}
+	reconciler := &Sandbox0InfraReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+		Scheme: scheme,
+	}
+
+	if err := reconciler.waitBuiltinTemplatePodsReady(ctx, infra, infraplan.Compile(infra)); err != nil {
+		t.Fatalf("wait builtin template pods with rootfs persistence enabled: %v", err)
+	}
+}
+
+func TestWaitBuiltinTemplatePodsReadyRequiresPodsWhenIdlePoolEnabled(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Services: &infrav1alpha1.ServicesConfig{
+				ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					Config: &infrav1alpha1.ClusterGatewayConfig{
+						AuthMode: "public",
+					},
+				},
+				Manager: &infrav1alpha1.ManagerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+			},
+		},
+	}
+	reconciler := &Sandbox0InfraReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+		Scheme: scheme,
+	}
+
+	err := reconciler.waitBuiltinTemplatePodsReady(ctx, infra, infraplan.Compile(infra))
+	if err == nil || !strings.Contains(err.Error(), `builtin template "default" pods not ready`) {
+		t.Fatalf("expected builtin template pod readiness error, got %v", err)
 	}
 }

@@ -23,6 +23,7 @@ type Snapshotter struct {
 	resolver    MetadataResolver
 	client      rootfs.PrepareClient
 	ctldAddress string
+	namespace   string
 }
 
 type Option func(*Snapshotter)
@@ -30,6 +31,12 @@ type Option func(*Snapshotter)
 func WithCtldAddress(address string) Option {
 	return func(s *Snapshotter) {
 		s.ctldAddress = strings.TrimSpace(address)
+	}
+}
+
+func WithNamespace(namespace string) Option {
+	return func(s *Snapshotter) {
+		s.namespace = strings.TrimSpace(namespace)
 	}
 }
 
@@ -51,18 +58,22 @@ func New(base snapshots.Snapshotter, resolver MetadataResolver, client rootfs.Pr
 }
 
 func (s *Snapshotter) Stat(ctx context.Context, key string) (snapshots.Info, error) {
+	ctx = s.ensureNamespace(ctx)
 	return s.base.Stat(ctx, key)
 }
 
 func (s *Snapshotter) Update(ctx context.Context, info snapshots.Info, fieldpaths ...string) (snapshots.Info, error) {
+	ctx = s.ensureNamespace(ctx)
 	return s.base.Update(ctx, info, fieldpaths...)
 }
 
 func (s *Snapshotter) Usage(ctx context.Context, key string) (snapshots.Usage, error) {
+	ctx = s.ensureNamespace(ctx)
 	return s.base.Usage(ctx, key)
 }
 
 func (s *Snapshotter) Prepare(ctx context.Context, key, parent string, opts ...snapshots.Opt) ([]mount.Mount, error) {
+	ctx = s.ensureNamespace(ctx)
 	mounts, err := s.base.Prepare(ctx, key, parent, opts...)
 	if err != nil {
 		return nil, err
@@ -71,18 +82,22 @@ func (s *Snapshotter) Prepare(ctx context.Context, key, parent string, opts ...s
 }
 
 func (s *Snapshotter) View(ctx context.Context, key, parent string, opts ...snapshots.Opt) ([]mount.Mount, error) {
+	ctx = s.ensureNamespace(ctx)
 	return s.base.View(ctx, key, parent, opts...)
 }
 
 func (s *Snapshotter) Commit(ctx context.Context, name, key string, opts ...snapshots.Opt) error {
+	ctx = s.ensureNamespace(ctx)
 	return s.base.Commit(ctx, name, key, opts...)
 }
 
 func (s *Snapshotter) Remove(ctx context.Context, key string) error {
+	ctx = s.ensureNamespace(ctx)
 	return s.base.Remove(ctx, key)
 }
 
 func (s *Snapshotter) Walk(ctx context.Context, fn snapshots.WalkFunc, filters ...string) error {
+	ctx = s.ensureNamespace(ctx)
 	return s.base.Walk(ctx, fn, filters...)
 }
 
@@ -91,6 +106,7 @@ func (s *Snapshotter) Close() error {
 }
 
 func (s *Snapshotter) Mounts(ctx context.Context, key string) ([]mount.Mount, error) {
+	ctx = s.ensureNamespace(ctx)
 	mounts, err := s.base.Mounts(ctx, key)
 	if err != nil {
 		return nil, err
@@ -121,7 +137,15 @@ func (s *Snapshotter) Cleanup(ctx context.Context) error {
 	if !ok {
 		return nil
 	}
+	ctx = s.ensureNamespace(ctx)
 	return cleaner.Cleanup(ctx)
+}
+
+func (s *Snapshotter) ensureNamespace(ctx context.Context) context.Context {
+	if s == nil {
+		return ensureContainerdNamespace(ctx, "")
+	}
+	return ensureContainerdNamespace(ctx, s.namespace)
 }
 
 func toRootFSMounts(mounts []mount.Mount) []rootfs.Mount {

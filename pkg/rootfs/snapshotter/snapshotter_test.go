@@ -8,6 +8,7 @@ import (
 
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfs"
 )
@@ -144,6 +145,48 @@ func TestPrepareRewritesOverlayUpperAndWorkDirs(t *testing.T) {
 	}
 }
 
+func TestPrepareInjectsDefaultContainerdNamespace(t *testing.T) {
+	base := &fakeSnapshotter{
+		mounts: []mount.Mount{{
+			Type:    "overlay",
+			Source:  "overlay",
+			Options: []string{"lowerdir=/lower", "upperdir=/containerd/upper", "workdir=/containerd/work"},
+		}},
+	}
+	sn, err := New(base, fakeResolver{}, nil)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := sn.Prepare(context.Background(), "extract-key", "parent"); err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if base.namespace != defaultContainerdNamespace {
+		t.Fatalf("base namespace = %q, want %s", base.namespace, defaultContainerdNamespace)
+	}
+}
+
+func TestMountsPreservesExistingContainerdNamespace(t *testing.T) {
+	base := &fakeSnapshotter{
+		mounts: []mount.Mount{{
+			Type:    "overlay",
+			Source:  "overlay",
+			Options: []string{"lowerdir=/lower", "upperdir=/containerd/upper", "workdir=/containerd/work"},
+		}},
+	}
+	sn, err := New(base, fakeResolver{}, nil, WithNamespace("fallback"))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := sn.Mounts(namespaces.WithNamespace(context.Background(), "custom"), "container-a"); err != nil {
+		t.Fatalf("Mounts() error = %v", err)
+	}
+	if base.namespace != "custom" {
+		t.Fatalf("base namespace = %q, want custom", base.namespace)
+	}
+}
+
 func TestMountsUsesExplicitCtldAddress(t *testing.T) {
 	base := &fakeSnapshotter{mounts: []mount.Mount{{
 		Type:    "overlay",
@@ -225,42 +268,52 @@ type fakeSnapshotter struct {
 	mounts        []mount.Mount
 	mountsCalls   int
 	cleanupCalled bool
+	namespace     string
 }
 
-func (s *fakeSnapshotter) Stat(context.Context, string) (snapshots.Info, error) {
+func (s *fakeSnapshotter) Stat(ctx context.Context, _ string) (snapshots.Info, error) {
+	s.recordNamespace(ctx)
 	return snapshots.Info{}, nil
 }
 
-func (s *fakeSnapshotter) Update(_ context.Context, info snapshots.Info, _ ...string) (snapshots.Info, error) {
+func (s *fakeSnapshotter) Update(ctx context.Context, info snapshots.Info, _ ...string) (snapshots.Info, error) {
+	s.recordNamespace(ctx)
 	return info, nil
 }
 
-func (s *fakeSnapshotter) Usage(context.Context, string) (snapshots.Usage, error) {
+func (s *fakeSnapshotter) Usage(ctx context.Context, _ string) (snapshots.Usage, error) {
+	s.recordNamespace(ctx)
 	return snapshots.Usage{}, nil
 }
 
-func (s *fakeSnapshotter) Prepare(context.Context, string, string, ...snapshots.Opt) ([]mount.Mount, error) {
+func (s *fakeSnapshotter) Prepare(ctx context.Context, _, _ string, _ ...snapshots.Opt) ([]mount.Mount, error) {
+	s.recordNamespace(ctx)
 	return cloneContainerdMounts(s.mounts), nil
 }
 
-func (s *fakeSnapshotter) View(context.Context, string, string, ...snapshots.Opt) ([]mount.Mount, error) {
+func (s *fakeSnapshotter) View(ctx context.Context, _, _ string, _ ...snapshots.Opt) ([]mount.Mount, error) {
+	s.recordNamespace(ctx)
 	return cloneContainerdMounts(s.mounts), nil
 }
 
-func (s *fakeSnapshotter) Mounts(context.Context, string) ([]mount.Mount, error) {
+func (s *fakeSnapshotter) Mounts(ctx context.Context, _ string) ([]mount.Mount, error) {
+	s.recordNamespace(ctx)
 	s.mountsCalls++
 	return cloneContainerdMounts(s.mounts), nil
 }
 
-func (s *fakeSnapshotter) Commit(context.Context, string, string, ...snapshots.Opt) error {
+func (s *fakeSnapshotter) Commit(ctx context.Context, _, _ string, _ ...snapshots.Opt) error {
+	s.recordNamespace(ctx)
 	return nil
 }
 
-func (s *fakeSnapshotter) Remove(context.Context, string) error {
+func (s *fakeSnapshotter) Remove(ctx context.Context, _ string) error {
+	s.recordNamespace(ctx)
 	return nil
 }
 
-func (s *fakeSnapshotter) Walk(context.Context, snapshots.WalkFunc, ...string) error {
+func (s *fakeSnapshotter) Walk(ctx context.Context, _ snapshots.WalkFunc, _ ...string) error {
+	s.recordNamespace(ctx)
 	return nil
 }
 
@@ -268,9 +321,14 @@ func (s *fakeSnapshotter) Close() error {
 	return nil
 }
 
-func (s *fakeSnapshotter) Cleanup(context.Context) error {
+func (s *fakeSnapshotter) Cleanup(ctx context.Context) error {
+	s.recordNamespace(ctx)
 	s.cleanupCalled = true
 	return nil
+}
+
+func (s *fakeSnapshotter) recordNamespace(ctx context.Context) {
+	s.namespace, _ = namespaces.Namespace(ctx)
 }
 
 func cloneContainerdMounts(mounts []mount.Mount) []mount.Mount {

@@ -6,14 +6,11 @@ import (
 	"strings"
 
 	"github.com/containerd/containerd/v2/core/containers"
-	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/errdefs"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfs"
 	"google.golang.org/grpc"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
-
-const defaultContainerdNamespace = "k8s.io"
 
 type ContainerStore interface {
 	Get(ctx context.Context, id string) (containers.Container, error)
@@ -68,15 +65,5 @@ func (r CRIMetadataResolver) ResolveRootFSMetadata(ctx context.Context, snapshot
 }
 
 func (r CRIMetadataResolver) ensureNamespace(ctx context.Context) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if _, ok := namespaces.Namespace(ctx); ok {
-		return ctx
-	}
-	namespace := strings.TrimSpace(r.Namespace)
-	if namespace == "" {
-		namespace = defaultContainerdNamespace
-	}
-	return namespaces.WithNamespace(ctx, namespace)
+	return ensureContainerdNamespace(ctx, r.Namespace)
 }

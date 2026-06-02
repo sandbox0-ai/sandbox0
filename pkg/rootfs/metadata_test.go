@@ -38,3 +38,9 @@ func TestMetadataFromAnnotationsIgnoresInvalidCtldPort(t *testing.T) {
 		t.Fatalf("ctld port = %d, want 0", meta.CtldPort)
 	}
 }
+
+func TestSnapshotterRootPathIsHostVisible(t *testing.T) {
+	if SnapshotterContainerRootPath != SnapshotterHostRootPath {
+		t.Fatalf("container root path = %q, want host-visible path %q", SnapshotterContainerRootPath, SnapshotterHostRootPath)
+	}
+}

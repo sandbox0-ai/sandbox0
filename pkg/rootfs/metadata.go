@@ -18,8 +18,11 @@ const (
 
 	RuntimeClassName = "sandbox0-rootfs"
 
+	// The overlay backend returns mount source paths to the host containerd
+	// process, so ctld must mount the snapshotter root at the same absolute path
+	// that exists on the node.
 	SnapshotterHostRootPath      = "/var/lib/containerd/io.containerd.snapshotter.v1.sandbox0-rootfs"
-	SnapshotterContainerRootPath = "/host-var-lib/containerd/io.containerd.snapshotter.v1.sandbox0-rootfs"
+	SnapshotterContainerRootPath = SnapshotterHostRootPath
 )
 
 type Metadata struct {

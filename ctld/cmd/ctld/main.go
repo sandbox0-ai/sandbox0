@@ -75,7 +75,7 @@ func main() {
 	flag.BoolVar(&rootfsSnapshotter, "rootfs-snapshotter", false, "serve a containerd proxy snapshotter that rewrites sandbox rootfs upperdir to s0fs")
 	flag.StringVar(&rootfsSnapshotterSocket, "rootfs-snapshotter-socket", "/host-run/containerd/sandbox0-rootfs-snapshotter.sock", "unix socket for the rootfs containerd proxy snapshotter")
 	flag.StringVar(&rootfsSnapshotterBase, "rootfs-snapshotter-base", "overlayfs", "deprecated compatibility flag; rootfs snapshotter now uses an in-process overlayfs backend")
-	flag.StringVar(&rootfsSnapshotterRoot, "rootfs-snapshotter-root", rootfs.SnapshotterContainerRootPath, "overlayfs backend root for the rootfs containerd proxy snapshotter")
+	flag.StringVar(&rootfsSnapshotterRoot, "rootfs-snapshotter-root", rootfs.SnapshotterContainerRootPath, "host-visible overlayfs backend root for the rootfs containerd proxy snapshotter")
 	flag.Parse()
 
 	log.Println("Starting ctld")

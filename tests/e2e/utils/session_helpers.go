@@ -53,6 +53,13 @@ func NewAPISession(env *framework.ScenarioEnv, useEdge bool) (*Session, func(), 
 	return session, cleanup, nil
 }
 
+func (s *Session) SetTimeout(timeout time.Duration) {
+	if s == nil || s.client == nil || timeout <= 0 {
+		return
+	}
+	s.client.Timeout = timeout
+}
+
 func (s *Session) doJSONSpecRequest(
 	t ContractT,
 	ctx context.Context,

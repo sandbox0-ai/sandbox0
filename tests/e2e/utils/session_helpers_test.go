@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
@@ -65,5 +66,16 @@ func TestSessionDoJSONRequestOmitsSelectedTeamHeaderWhenUnset(t *testing.T) {
 	}
 	if gotTeamID != "" {
 		t.Fatalf("expected team header to be omitted, got %q", gotTeamID)
+	}
+}
+
+func TestSessionSetTimeoutUpdatesHTTPClientTimeout(t *testing.T) {
+	t.Parallel()
+
+	session := &Session{client: &http.Client{Timeout: time.Second}}
+	session.SetTimeout(2 * time.Minute)
+
+	if session.client.Timeout != 2*time.Minute {
+		t.Fatalf("client timeout = %s, want 2m", session.client.Timeout)
 	}
 }

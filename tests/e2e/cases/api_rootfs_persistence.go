@@ -3,6 +3,7 @@ package cases
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
@@ -28,6 +29,7 @@ func registerApiRootFSPersistenceSuite(envProvider func() *framework.ScenarioEnv
 			var err error
 			session, cleanup, err = e2eutils.NewAPISession(env, false)
 			Expect(err).NotTo(HaveOccurred())
+			session.SetTimeout(2 * time.Minute)
 
 			password, err := framework.GetSecretValue(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, "admin-password", "password")
 			Expect(err).NotTo(HaveOccurred())
@@ -36,7 +38,7 @@ func registerApiRootFSPersistenceSuite(envProvider func() *framework.ScenarioEnv
 				return session.Login(env.TestCtx.Context, GinkgoT(), "admin@example.com", password)
 			}).WithTimeout(2 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
 
-			waitForDefaultTemplateReady(env, session)
+			waitForDefaultTemplateClaimable(env, session)
 		})
 
 		AfterAll(func() {
@@ -49,6 +51,38 @@ func registerApiRootFSPersistenceSuite(envProvider func() *framework.ScenarioEnv
 			assertRootFSRestoredAfterClean(env, session)
 		})
 	})
+}
+
+func waitForDefaultTemplateClaimable(env *framework.ScenarioEnv, session *e2eutils.Session) {
+	Eventually(func() error {
+		tpl, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), "default")
+		if err != nil {
+			return err
+		}
+		if tpl.TemplateId != "default" {
+			return fmt.Errorf("default template not registered")
+		}
+		return nil
+	}).WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
+
+	templateNamespace, err := naming.TemplateNamespaceForBuiltin("default")
+	Expect(err).NotTo(HaveOccurred())
+	Eventually(func() error {
+		output, err := framework.KubectlOutput(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			"get", "sandboxtemplate", "default",
+			"--namespace", templateNamespace,
+			"-o", "jsonpath={.metadata.name}",
+		)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(output) != "default" {
+			return fmt.Errorf("default SandboxTemplate CR not ready")
+		}
+		return nil
+	}).WithTimeout(3 * time.Minute).WithPolling(3 * time.Second).Should(Succeed())
 }
 
 func assertRootFSRestoredAfterClean(env *framework.ScenarioEnv, session *e2eutils.Session) {

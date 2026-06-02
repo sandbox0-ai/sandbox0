@@ -11,6 +11,7 @@ import (
 
 	ctldserver "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/server"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -81,6 +82,26 @@ func TestCombinedControllerRoutesMountedVolumeAPIToPortalHandler(t *testing.T) {
 	server.Handler.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+func TestCombinedControllerRoutesPodProbeToPowerController(t *testing.T) {
+	controller := &fakeProbeController{}
+	server := newHTTPServer(":0", combinedController{
+		Controller: controller,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/pods/tpl-default/pod-1/probes/readiness", nil)
+	rec := httptest.NewRecorder()
+	server.Handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "tpl-default", controller.namespace)
+	assert.Equal(t, "pod-1", controller.name)
+	assert.Equal(t, sandboxprobe.KindReadiness, controller.kind)
+
+	var resp sandboxprobe.Response
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, sandboxprobe.StatusPassed, resp.Status)
 }
 
 func TestPrepareVolumePortalHandoffReturnsConflictForActivePortal(t *testing.T) {
@@ -200,6 +221,20 @@ func TestNormalizeRootFSCRIEndpoint(t *testing.T) {
 	assert.Equal(t, "unix:///host-run/containerd/containerd.sock", normalizeRootFSCRIEndpoint("/host-run/containerd/containerd.sock"))
 	assert.Equal(t, "unix:///custom.sock", normalizeRootFSCRIEndpoint("unix:///custom.sock"))
 	assert.Equal(t, "dns:///cri.example", normalizeRootFSCRIEndpoint("dns:///cri.example"))
+}
+
+type fakeProbeController struct {
+	ctldserver.NotImplementedController
+	namespace string
+	name      string
+	kind      sandboxprobe.Kind
+}
+
+func (f *fakeProbeController) ProbePod(_ *http.Request, namespace, name string, kind sandboxprobe.Kind) (sandboxprobe.Response, int) {
+	f.namespace = namespace
+	f.name = name
+	f.kind = kind
+	return sandboxprobe.Passed(kind, "ProbePassed", "ok", nil), http.StatusOK
 }
 
 type fakeVolumePortalHandler struct {

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfs"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -76,7 +77,7 @@ func TestPodResolverResolveUsesQoSCandidate(t *testing.T) {
 			Labels:    map[string]string{controller.LabelSandboxID: "sandbox-1"},
 		},
 		Spec:   corev1.PodSpec{NodeName: "node-a", RuntimeClassName: strPtr("kata-shared")},
-		Status: corev1.PodStatus{QOSClass: corev1.PodQOSBurstable},
+		Status: corev1.PodStatus{QOSClass: corev1.PodQOSGuaranteed},
 	})
 
 	resolver := NewPodResolver(client, "node-a", root)
@@ -199,6 +200,34 @@ func TestPodResolverResolvePodDoesNotRequireSandboxLabel(t *testing.T) {
 	assert.Equal(t, "idle-pod-1", target.PodName)
 	assert.Equal(t, "10.0.0.10", target.PodIP)
 	assert.Equal(t, int32(49983), target.ProcdPort)
+}
+
+func TestPodResolverResolvePodTreatsRootFSRuntimeClassAsRunc(t *testing.T) {
+	root := t.TempDir()
+	uid := types.UID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+	podDir := filepath.Join(root, "kubepods", "podaaaaaaaa_bbbb_cccc_dddd_eeeeeeeeeeee")
+	require.NoError(t, os.MkdirAll(podDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(podDir, "cgroup.freeze"), []byte("0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(podDir, "memory.current"), []byte("64\n"), 0o644))
+
+	client := fake.NewSimpleClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rootfs-pod",
+			Namespace: "tpl-default",
+			UID:       uid,
+		},
+		Spec: corev1.PodSpec{
+			NodeName:         "node-a",
+			RuntimeClassName: strPtr(rootfs.RuntimeClassName),
+		},
+		Status: corev1.PodStatus{QOSClass: corev1.PodQOSBurstable},
+	})
+
+	resolver := NewPodResolver(client, "node-a", root)
+	target, err := resolver.ResolvePod(&http.Request{}, "tpl-default", "rootfs-pod")
+	require.NoError(t, err)
+	assert.Equal(t, "runc", target.Runtime)
+	assert.Equal(t, podDir, target.CgroupDir)
 }
 
 func TestPodResolverResolvePodUsesCacheBeforeLiveGet(t *testing.T) {

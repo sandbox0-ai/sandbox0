@@ -512,6 +512,10 @@ func (c combinedController) Probe(r *http.Request, sandboxID string, kind sandbo
 	return c.Controller.Probe(r, sandboxID, kind)
 }
 
+func (c combinedController) ProbePod(r *http.Request, namespace, name string, kind sandboxprobe.Kind) (sandboxprobe.Response, int) {
+	return c.Controller.ProbePod(r, namespace, name, kind)
+}
+
 type volumePortalHandler interface {
 	Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, error)
 	Unbind(ctx context.Context, req ctldapi.UnbindVolumePortalRequest) (ctldapi.UnbindVolumePortalResponse, error)

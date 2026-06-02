@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfs"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -173,7 +174,7 @@ func isRuncRuntimeClassName(runtimeClassName *string) bool {
 	if raw == "" {
 		return true
 	}
-	return strings.Contains(raw, "runc")
+	return strings.Contains(raw, "runc") || raw == rootfs.RuntimeClassName
 }
 
 func (r *PodResolver) runtimeAdapters() []RuntimeAdapter {

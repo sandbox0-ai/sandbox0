@@ -513,6 +513,18 @@ type StorageProxyConfig struct {
 	// +kubebuilder:default=20
 	FilesystemMaxUpload int `json:"filesystemMaxUpload,omitempty"`
 	// +optional
+	// +kubebuilder:default="4Mi"
+	S0FSSegmentTargetSize string `json:"s0fsSegmentTargetSize,omitempty"`
+	// +optional
+	// +kubebuilder:default="1m"
+	S0FSCompactionInterval string `json:"s0fsCompactionInterval,omitempty"`
+	// +optional
+	// +kubebuilder:default="0.5"
+	S0FSCompactionMinDeadRatio string `json:"s0fsCompactionMinDeadRatio,omitempty"`
+	// +optional
+	// +kubebuilder:default="1Mi"
+	S0FSCompactionMinReclaimSize string `json:"s0fsCompactionMinReclaimSize,omitempty"`
+	// +optional
 	// +kubebuilder:default=true
 	ObjectEncryptionEnabled bool `json:"objectEncryptionEnabled,omitempty"`
 	// +optional

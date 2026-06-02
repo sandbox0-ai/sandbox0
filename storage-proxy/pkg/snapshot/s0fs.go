@@ -86,6 +86,11 @@ func (m *Manager) s0fsConfig(teamID, volumeID string) (s0fs.Config, error) {
 		return s0fs.Config{}, err
 	}
 	cfg.Encryption = encryption
+	segmentTargetSize, err := volume.S0FSSegmentTargetSize(m.config)
+	if err != nil {
+		return s0fs.Config{}, err
+	}
+	cfg.SegmentTargetSize = segmentTargetSize
 	store, err := m.s0fsObjectStore(teamID, volumeID)
 	if err != nil {
 		return s0fs.Config{}, err
@@ -824,7 +829,7 @@ func (m *Manager) garbageCollectS0FSVolumeObjects(ctx context.Context, volumeID,
 		state, err := s0fs.LoadSnapshot(ctx, cfg, snapshot.ID)
 		if err != nil {
 			if errors.Is(err, s0fs.ErrSnapshotNotFound) {
-				continue
+				return nil, nil
 			}
 			return nil, err
 		}

@@ -14,7 +14,6 @@ func StateStorageBytes(state *SnapshotState) int64 {
 	for _, extents := range state.ColdFiles {
 		for _, extent := range extents {
 			if extent.SegmentID == "" {
-				size += int64(extent.Length)
 				continue
 			}
 			if _, seen := seenSegments[extent.SegmentID]; seen {

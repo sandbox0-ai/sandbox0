@@ -24,6 +24,7 @@ type Config struct {
 	HeadStore            HeadStore
 	Encryption           *EncryptionConfig
 	MaterializeInterval  time.Duration
+	SegmentTargetSize    uint64
 	WALSyncHook          func()
 	LocalDiskGuard       *LocalDiskGuard
 }
@@ -53,6 +54,7 @@ type Segment struct {
 	Length     uint64             `json:"length"`
 	SHA256     string             `json:"sha256,omitempty"`
 	Encryption *SegmentEncryption `json:"encryption,omitempty"`
+	InlineData []byte             `json:"inline_data,omitempty"`
 }
 
 type Node struct {

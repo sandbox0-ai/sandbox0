@@ -3,6 +3,7 @@ package s0fs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,6 +18,41 @@ func LoadSnapshot(_ context.Context, cfg Config, snapshotID string) (*SnapshotSt
 		return nil, fmt.Errorf("%w: wal path is required", ErrInvalidInput)
 	}
 	return loadSnapshotState(snapshotFilePath(cfg.WALPath, snapshotID), cfg.VolumeID, "snapshot:"+snapshotID, cfg.Encryption)
+}
+
+func LoadLocalSnapshots(ctx context.Context, cfg Config) ([]*SnapshotState, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if cfg.WALPath == "" {
+		return nil, fmt.Errorf("%w: wal path is required", ErrInvalidInput)
+	}
+	entries, err := os.ReadDir(filepath.Join(filepath.Dir(cfg.WALPath), "snapshots"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read local snapshots: %w", err)
+	}
+	states := make([]*SnapshotState, 0, len(entries))
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		snapshotID := strings.TrimSuffix(entry.Name(), ".json")
+		state, err := LoadSnapshot(ctx, cfg, snapshotID)
+		if err != nil {
+			if errors.Is(err, ErrSnapshotNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		states = append(states, state)
+	}
+	return states, nil
 }
 
 func snapshotFilePath(walPath, snapshotID string) string {
@@ -157,6 +193,9 @@ func PrepareForkState(state *SnapshotState, sourceVolumeID string) (*SnapshotSta
 			continue
 		}
 		for _, extent := range extents {
+			if extent.SegmentID == "" {
+				continue
+			}
 			segment := clone.Segments[extent.SegmentID]
 			if segment == nil {
 				return nil, fmt.Errorf("%w: missing source segment %s", ErrInvalidInput, extent.SegmentID)
@@ -291,9 +330,6 @@ func (s *SnapshotState) Read(inode uint64, offset uint64, size uint64) ([]byte, 
 }
 
 func readColdRange(materializer *Materializer, extents []FileExtent, segments map[string]*Segment, offset uint64, size uint64) ([]byte, error) {
-	if materializer == nil || !materializer.Enabled() {
-		return nil, fmt.Errorf("%w: cold data resolver is not configured", ErrInvalidInput)
-	}
 	if len(extents) == 0 {
 		return nil, nil
 	}
@@ -313,12 +349,35 @@ func readColdRange(materializer *Materializer, extents []FileExtent, segments ma
 
 		readStart := maxUint64(rangeStart, extentStart)
 		readEnd := minUint64(rangeEnd, extentEnd)
+		if extent.SegmentID == "" {
+			out = append(out, make([]byte, readEnd-readStart)...)
+			remaining -= readEnd - readStart
+			if remaining == 0 {
+				break
+			}
+			fileOffset = extentEnd
+			continue
+		}
 		segment := segments[extent.SegmentID]
 		if segment == nil {
 			return nil, fmt.Errorf("%w: missing segment %s", ErrInvalidInput, extent.SegmentID)
 		}
 		segmentOffset := extent.Offset + (readStart - extentStart)
-		chunk, err := materializer.ReadSegmentRange(segment, int64(segmentOffset), int64(readEnd-readStart))
+		var (
+			chunk []byte
+			err   error
+		)
+		if isInlineSegment(segment) {
+			chunk, err = inlineSegmentRange(segment, segmentOffset, readEnd-readStart)
+			if err == nil {
+				chunk = slices.Clone(chunk)
+			}
+		} else {
+			if materializer == nil || !materializer.Enabled() {
+				return nil, fmt.Errorf("%w: cold data resolver is not configured", ErrInvalidInput)
+			}
+			chunk, err = materializer.ReadSegmentRange(segment, int64(segmentOffset), int64(readEnd-readStart))
+		}
 		if err != nil {
 			return nil, fmt.Errorf("read cold segment %s: %w", segment.Key, err)
 		}

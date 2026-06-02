@@ -60,6 +60,10 @@ func ParseAccessMode(value string) (AccessMode, bool) {
 	}
 }
 
+func S0FSBackgroundCompactionEnabled(accessMode AccessMode) bool {
+	return NormalizeAccessMode(string(accessMode)) == AccessModeRWO
+}
+
 func NormalizeOwnerKind(value string) string {
 	switch strings.TrimSpace(value) {
 	case OwnerKindCtld:

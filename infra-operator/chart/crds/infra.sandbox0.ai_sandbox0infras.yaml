@@ -4039,6 +4039,18 @@ spec:
                           restoreRemountTimeout:
                             default: 30s
                             type: string
+                          s0fsCompactionInterval:
+                            default: 1m
+                            type: string
+                          s0fsCompactionMinDeadRatio:
+                            default: "0.5"
+                            type: string
+                          s0fsCompactionMinReclaimSize:
+                            default: 1Mi
+                            type: string
+                          s0fsSegmentTargetSize:
+                            default: 4Mi
+                            type: string
                           volumePortalCacheSizeLimit:
                             default: 20Gi
                             type: string

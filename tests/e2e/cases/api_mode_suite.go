@@ -1,6 +1,7 @@
 package cases
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -295,6 +296,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 
 				It("keeps claim-mounted volumes writable", func() {
 					assertClaimMountedVolumeWritable(env, session)
+				})
+
+				It("persists large-file partial rewrites across remounts", func() {
+					assertS0FSLargeFilePartialRewriteAcrossRemount(env, session)
 				})
 
 				It("rejects mounting an active RWO volume into a second sandbox", func() {
@@ -2331,6 +2336,100 @@ func assertClaimMountedVolumeWritable(env *framework.ScenarioEnv, session *e2eut
 			return body, readErr
 		}).WithTimeout(90 * time.Second).WithPolling(2 * time.Second).Should(Equal(expected))
 	}
+}
+
+func assertS0FSLargeFilePartialRewriteAcrossRemount(env *framework.ScenarioEnv, session *e2eutils.Session) {
+	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(volume).NotTo(BeNil())
+	volumeID := expectStringPtr(volume.Id, "volume id")
+	DeferCleanup(func() {
+		deleteSandboxVolumeForCleanup(env, session, volumeID)
+	})
+
+	filePath := "/s0fs-large/large.bin"
+	original := bytes.Repeat([]byte("a"), 6*1024*1024)
+	patch := []byte("S0FS_PARTIAL_REWRITE_OK")
+	patchOffset := 4*1024*1024 + 257
+	expected := bytes.Clone(original)
+	copy(expected[patchOffset:], patch)
+
+	status, err = session.WriteVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, filePath, original, "")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+
+	mountPoint := "/workspace/s0fs-large"
+	templateID := createVolumePortalTemplate(env, session, mountPoint)
+	claimReq := apispec.ClaimRequest{
+		Template: &templateID,
+		Mounts: &[]apispec.ClaimMountRequest{{
+			SandboxvolumeId: volumeID,
+			MountPoint:      mountPoint,
+		}},
+	}
+	claimVolume := func() *apispec.ClaimResponse {
+		var resp *apispec.ClaimResponse
+		Eventually(func() error {
+			var claimErr error
+			resp, claimErr = session.ClaimSandboxWithRequest(env.TestCtx.Context, GinkgoT(), claimReq)
+			return claimErr
+		}).WithTimeout(2 * time.Minute).WithPolling(3 * time.Second).Should(Succeed())
+		Expect(resp).NotTo(BeNil())
+		return resp
+	}
+
+	firstClaim := claimVolume()
+	firstSandboxID := firstClaim.SandboxId
+	firstDeleted := false
+	DeferCleanup(func() {
+		if !firstDeleted {
+			_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), firstSandboxID)
+		}
+	})
+	processType := apispec.ProcessTypeCmd
+	ttlSec := int32(120)
+	envVars := map[string]string{
+		"PATCH_OFFSET": fmt.Sprintf("%d", patchOffset),
+		"PATCH_DATA":   string(patch),
+	}
+	ctxReq := apispec.CreateContextRequest{
+		Type: &processType,
+		Cmd: &apispec.CreateCMDContextRequest{
+			Command: []string{
+				"/bin/sh",
+				"-lc",
+				`set -eu; printf "%s" "$PATCH_DATA" | dd of=/workspace/s0fs-large/s0fs-large/large.bin bs=1 seek="$PATCH_OFFSET" conv=notrunc 2>/dev/null; sync`,
+			},
+		},
+		EnvVars: &envVars,
+		TtlSec:  &ttlSec,
+	}
+	ctxResp, status, err := session.CreateContext(env.TestCtx.Context, GinkgoT(), firstSandboxID, ctxReq)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(ctxResp).NotTo(BeNil())
+	DeferCleanup(func() {
+		_, _ = session.DeleteContext(env.TestCtx.Context, GinkgoT(), firstSandboxID, ctxResp.Id)
+	})
+
+	Eventually(func() ([]byte, error) {
+		body, _, readErr := session.ReadVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, filePath)
+		return body, readErr
+	}).WithTimeout(90 * time.Second).WithPolling(3 * time.Second).Should(Equal(expected))
+
+	Expect(session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), firstSandboxID)).To(Succeed())
+	firstDeleted = true
+
+	secondClaim := claimVolume()
+	secondSandboxID := secondClaim.SandboxId
+	DeferCleanup(func() {
+		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), secondSandboxID)
+	})
+	Eventually(func() ([]byte, error) {
+		body, _, readErr := session.ReadFile(env.TestCtx.Context, GinkgoT(), secondSandboxID, mountPoint+filePath)
+		return body, readErr
+	}).WithTimeout(90 * time.Second).WithPolling(3 * time.Second).Should(Equal(expected))
 }
 
 func deleteSandboxVolumeForCleanup(env *framework.ScenarioEnv, session *e2eutils.Session, volumeID string) {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1150,6 +1151,19 @@ func TestCreateSnapshotPreservesColdSegments(t *testing.T) {
 	if string(payload) != "snapshot-data" {
 		t.Fatalf("snapshot data = %q, want snapshot-data", payload)
 	}
+
+	localSnapshots, err := LoadLocalSnapshots(ctx, Config{
+		VolumeID:    "vol-snapshot",
+		WALPath:     walPath,
+		ObjectStore: store,
+		HeadStore:   heads,
+	})
+	if err != nil {
+		t.Fatalf("LoadLocalSnapshots() error = %v", err)
+	}
+	if len(localSnapshots) != 1 {
+		t.Fatalf("local snapshots = %d, want 1", len(localSnapshots))
+	}
 }
 
 func TestMaterializerGarbageCollectionPlanDeletesUnreferencedObjects(t *testing.T) {
@@ -1215,6 +1229,310 @@ func TestMaterializerGarbageCollectionPlanDeletesUnreferencedObjects(t *testing.
 	}
 	if _, err := store.Head("manifests/00000000000000000004.json"); err != nil {
 		t.Fatalf("current manifest missing after GC: %v", err)
+	}
+}
+
+func TestCompactionGarbageCollectionRetainsSnapshotSegments(t *testing.T) {
+	ctx := context.Background()
+	store := newPrefixedRecordingStore(t, "vol-compact-snapshot")
+	engine, err := Open(ctx, Config{
+		VolumeID:          "vol-compact-snapshot",
+		WALPath:           filepath.Join(t.TempDir(), "engine.wal"),
+		ObjectStore:       store,
+		HeadStore:         newMemoryHeadStore(),
+		SegmentTargetSize: 1024,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	node, err := engine.CreateFile(RootInode, "data.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if _, err := engine.Write(node.Inode, 0, []byte("abcdef")); err != nil {
+		t.Fatalf("Write(initial) error = %v", err)
+	}
+	first, err := engine.SyncMaterialize(ctx)
+	if err != nil {
+		t.Fatalf("SyncMaterialize(initial) error = %v", err)
+	}
+	var oldSegmentKey string
+	for _, segment := range first.State.Segments {
+		oldSegmentKey = segment.Key
+	}
+	if oldSegmentKey == "" {
+		t.Fatal("initial materialization did not create a segment")
+	}
+
+	snapshotState, err := engine.CreateSnapshot("snap-before-overwrite")
+	if err != nil {
+		t.Fatalf("CreateSnapshot() error = %v", err)
+	}
+	if _, err := engine.Write(node.Inode, 1, []byte("Z")); err != nil {
+		t.Fatalf("Write(overwrite) error = %v", err)
+	}
+	if _, err := engine.SyncMaterialize(ctx); err != nil {
+		t.Fatalf("SyncMaterialize(overwrite) error = %v", err)
+	}
+	compacted, _, err := engine.Compact(ctx, CompactionOptions{Force: true})
+	if err != nil {
+		t.Fatalf("Compact() error = %v", err)
+	}
+
+	latest, err := engine.Read(node.Inode, 0, 6)
+	if err != nil {
+		t.Fatalf("Read(latest) error = %v", err)
+	}
+	if string(latest) != "aZcdef" {
+		t.Fatalf("latest payload = %q, want aZcdef", latest)
+	}
+	snapshotPayload, err := NewSnapshotReader(snapshotState, engine.materializer).Read(node.Inode, 0, 6)
+	if err != nil {
+		t.Fatalf("SnapshotReader.Read() error = %v", err)
+	}
+	if string(snapshotPayload) != "abcdef" {
+		t.Fatalf("snapshot payload = %q, want abcdef", snapshotPayload)
+	}
+
+	retainedManifests := map[string]struct{}{manifestKey(compacted.ManifestSeq): {}}
+	withSnapshot, err := engine.materializer.PlanGarbageCollection(ctx, []*SnapshotState{compacted.State, snapshotState}, retainedManifests)
+	if err != nil {
+		t.Fatalf("PlanGarbageCollection(with snapshot) error = %v", err)
+	}
+	for _, key := range withSnapshot.Segments {
+		if key == oldSegmentKey {
+			t.Fatalf("old snapshot segment %s was planned for deletion", oldSegmentKey)
+		}
+	}
+	withoutSnapshot, err := engine.materializer.PlanGarbageCollection(ctx, []*SnapshotState{compacted.State}, retainedManifests)
+	if err != nil {
+		t.Fatalf("PlanGarbageCollection(without snapshot) error = %v", err)
+	}
+	if !slices.Contains(withoutSnapshot.Segments, oldSegmentKey) {
+		t.Fatalf("old segment %s was not collectible without snapshot retention: %v", oldSegmentKey, withoutSnapshot.Segments)
+	}
+}
+
+func TestExtentWriteDoesNotRewriteUnmodifiedColdData(t *testing.T) {
+	ctx := context.Background()
+	store := newPrefixedRecordingStore(t, "vol-extent-overwrite")
+	heads := newMemoryHeadStore()
+	engine, err := Open(ctx, Config{
+		VolumeID:          "vol-extent-overwrite",
+		WALPath:           filepath.Join(t.TempDir(), "engine.wal"),
+		ObjectStore:       store,
+		HeadStore:         heads,
+		SegmentTargetSize: 1024,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	a, err := engine.CreateFile(RootInode, "a.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile(a) error = %v", err)
+	}
+	b, err := engine.CreateFile(RootInode, "b.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile(b) error = %v", err)
+	}
+	aPayload := bytes.Repeat([]byte("a"), 64)
+	bPayload := bytes.Repeat([]byte("b"), 64)
+	if _, err := engine.Write(a.Inode, 0, aPayload); err != nil {
+		t.Fatalf("Write(a) error = %v", err)
+	}
+	if _, err := engine.Write(b.Inode, 0, bPayload); err != nil {
+		t.Fatalf("Write(b) error = %v", err)
+	}
+	first, err := engine.SyncMaterialize(ctx)
+	if err != nil {
+		t.Fatalf("SyncMaterialize(first) error = %v", err)
+	}
+	if len(first.State.Segments) != 1 {
+		t.Fatalf("first segment count = %d, want 1", len(first.State.Segments))
+	}
+
+	store.resetCalls()
+	if _, err := engine.Write(a.Inode, 10, []byte("Z")); err != nil {
+		t.Fatalf("overwrite a byte: %v", err)
+	}
+	second, err := engine.SyncMaterialize(ctx)
+	if err != nil {
+		t.Fatalf("SyncMaterialize(second) error = %v", err)
+	}
+	if gets := store.calls(); len(gets) != 0 {
+		t.Fatalf("overwrite materialization read cold segments = %+v, want none", gets)
+	}
+	if len(second.State.Segments) != 2 {
+		t.Fatalf("second segment count = %d, want old segment plus 1-byte segment", len(second.State.Segments))
+	}
+	if got, want := StateStorageBytes(second.State), int64(len(aPayload)+len(bPayload)+1); got != want {
+		t.Fatalf("StateStorageBytes() = %d, want %d", got, want)
+	}
+	updated, err := engine.Read(a.Inode, 0, uint64(len(aPayload)))
+	if err != nil {
+		t.Fatalf("Read(a) error = %v", err)
+	}
+	wantPayload := bytes.Clone(aPayload)
+	wantPayload[10] = 'Z'
+	if !bytes.Equal(updated, wantPayload) {
+		t.Fatalf("updated payload mismatch")
+	}
+	bRead, err := engine.Read(b.Inode, 0, uint64(len(bPayload)))
+	if err != nil {
+		t.Fatalf("Read(b) error = %v", err)
+	}
+	if !bytes.Equal(bRead, bPayload) {
+		t.Fatalf("b payload changed")
+	}
+}
+
+func TestMaterializerSplitsDirtyDataAtSegmentTargetSize(t *testing.T) {
+	ctx := context.Background()
+	store := newPrefixedRecordingStore(t, "vol-target-size")
+	engine, err := Open(ctx, Config{
+		VolumeID:          "vol-target-size",
+		WALPath:           filepath.Join(t.TempDir(), "engine.wal"),
+		ObjectStore:       store,
+		HeadStore:         newMemoryHeadStore(),
+		SegmentTargetSize: 4,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	node, err := engine.CreateFile(RootInode, "large.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if _, err := engine.Write(node.Inode, 0, []byte("0123456789")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	manifest, err := engine.SyncMaterialize(ctx)
+	if err != nil {
+		t.Fatalf("SyncMaterialize() error = %v", err)
+	}
+	var lengths []uint64
+	for _, segment := range manifest.State.Segments {
+		lengths = append(lengths, segment.Length)
+	}
+	slices.Sort(lengths)
+	if got, want := lengths, []uint64{2, 4, 4}; !slices.Equal(got, want) {
+		t.Fatalf("segment lengths = %v, want %v", got, want)
+	}
+}
+
+func TestSparseExtentWriteReadsZerosWithoutStoringHoleBytes(t *testing.T) {
+	ctx := context.Background()
+	store := newPrefixedRecordingStore(t, "vol-sparse")
+	engine, err := Open(ctx, Config{
+		VolumeID:    "vol-sparse",
+		WALPath:     filepath.Join(t.TempDir(), "engine.wal"),
+		ObjectStore: store,
+		HeadStore:   newMemoryHeadStore(),
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	node, err := engine.CreateFile(RootInode, "sparse.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if _, err := engine.Write(node.Inode, 4, []byte("x")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	payload, err := engine.Read(node.Inode, 0, 5)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if got, want := payload, []byte{0, 0, 0, 0, 'x'}; !bytes.Equal(got, want) {
+		t.Fatalf("payload = %v, want %v", got, want)
+	}
+	manifest, err := engine.SyncMaterialize(ctx)
+	if err != nil {
+		t.Fatalf("SyncMaterialize() error = %v", err)
+	}
+	if got, want := StateStorageBytes(manifest.State), int64(1); got != want {
+		t.Fatalf("StateStorageBytes() = %d, want %d", got, want)
+	}
+}
+
+func TestCompactionRewritesLiveRangesFromFragmentedSegments(t *testing.T) {
+	ctx := context.Background()
+	store := newPrefixedRecordingStore(t, "vol-compact-fragment")
+	engine, err := Open(ctx, Config{
+		VolumeID:          "vol-compact-fragment",
+		WALPath:           filepath.Join(t.TempDir(), "engine.wal"),
+		ObjectStore:       store,
+		HeadStore:         newMemoryHeadStore(),
+		SegmentTargetSize: 1024,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	a, err := engine.CreateFile(RootInode, "a.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile(a) error = %v", err)
+	}
+	b, err := engine.CreateFile(RootInode, "b.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile(b) error = %v", err)
+	}
+	aPayload := bytes.Repeat([]byte("a"), 64)
+	bPayload := bytes.Repeat([]byte("b"), 64)
+	if _, err := engine.Write(a.Inode, 0, aPayload); err != nil {
+		t.Fatalf("Write(a) error = %v", err)
+	}
+	if _, err := engine.Write(b.Inode, 0, bPayload); err != nil {
+		t.Fatalf("Write(b) error = %v", err)
+	}
+	first, err := engine.SyncMaterialize(ctx)
+	if err != nil {
+		t.Fatalf("SyncMaterialize(first) error = %v", err)
+	}
+	var oldSegmentID string
+	for id := range first.State.Segments {
+		oldSegmentID = id
+	}
+	if _, err := engine.Write(a.Inode, 10, []byte("Z")); err != nil {
+		t.Fatalf("overwrite a byte: %v", err)
+	}
+	if _, err := engine.SyncMaterialize(ctx); err != nil {
+		t.Fatalf("SyncMaterialize(fragmented) error = %v", err)
+	}
+
+	manifest, result, err := engine.Compact(ctx, CompactionOptions{
+		MinDeadRatio:    0.001,
+		MinReclaimBytes: 1,
+	})
+	if err != nil {
+		t.Fatalf("Compact() error = %v", err)
+	}
+	if result == nil || !slices.Equal(result.CompactedSegments, []string{oldSegmentID}) {
+		t.Fatalf("compacted segments = %+v, want %s", result, oldSegmentID)
+	}
+	if _, ok := manifest.State.Segments[oldSegmentID]; ok {
+		t.Fatalf("old segment %s is still referenced after compaction", oldSegmentID)
+	}
+	if got, want := StateStorageBytes(manifest.State), int64(len(aPayload)+len(bPayload)); got != want {
+		t.Fatalf("StateStorageBytes() = %d, want %d", got, want)
+	}
+	updated, err := engine.Read(a.Inode, 0, uint64(len(aPayload)))
+	if err != nil {
+		t.Fatalf("Read(a) error = %v", err)
+	}
+	wantPayload := bytes.Clone(aPayload)
+	wantPayload[10] = 'Z'
+	if !bytes.Equal(updated, wantPayload) {
+		t.Fatalf("compacted a payload mismatch")
 	}
 }
 

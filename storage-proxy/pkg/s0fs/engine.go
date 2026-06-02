@@ -53,6 +53,7 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 	materializer := NewMaterializer(cfg.VolumeID, cfg.ObjectStore, cfg.HeadStore, cfg.ObjectStoreForVolume)
 	if materializer != nil {
 		materializer.SetEncryption(cfg.Encryption)
+		materializer.SetSegmentTargetSize(cfg.SegmentTargetSize)
 	}
 	var latestManifest *Manifest
 	if materializer != nil {
@@ -841,6 +842,7 @@ func (e *Engine) persistCurrentStateLocked() error {
 
 func (e *Engine) persistCurrentStateLockedWithReserve(reserve bool) error {
 	state := cloneState(e.currentStateLocked())
+	pruneUnreferencedSegments(state)
 	if reserve {
 		if err := e.reserveLocalDiskLocked(estimatedStateBytes(state)); err != nil {
 			return err
@@ -959,6 +961,9 @@ func (e *Engine) applyLink(record walRecord) error {
 }
 
 func (e *Engine) applyWrite(record walRecord) error {
+	if e.usesExtentLayoutLocked() {
+		return e.applyExtentWrite(record)
+	}
 	node, err := e.fileNodeLocked(record.Inode)
 	if err != nil {
 		return err
@@ -1041,6 +1046,9 @@ func (e *Engine) applySetOwner(record walRecord) error {
 }
 
 func (e *Engine) applyTruncate(record walRecord) error {
+	if e.usesExtentLayoutLocked() {
+		return e.applyExtentTruncate(record)
+	}
 	node, err := e.fileNodeLocked(record.Inode)
 	if err != nil {
 		return err
@@ -1097,6 +1105,13 @@ func (e *Engine) needsMaterializationLocked() bool {
 			return true
 		}
 	}
+	for _, extents := range e.coldFiles {
+		for _, extent := range extents {
+			if segment := e.segments[extent.SegmentID]; isInlineSegment(segment) {
+				return true
+			}
+		}
+	}
 	return false
 }
 
@@ -1136,6 +1151,7 @@ func (e *Engine) exportStateLocked() (*SnapshotState, error) {
 func (e *Engine) materializeStateLocked() (*SnapshotState, error) {
 	state := cloneState(e.currentStateLocked())
 	if len(state.ColdFiles) == 0 {
+		pruneUnreferencedSegments(state)
 		return state, nil
 	}
 	for inode := range state.ColdFiles {
@@ -1143,6 +1159,7 @@ func (e *Engine) materializeStateLocked() (*SnapshotState, error) {
 			delete(state.ColdFiles, inode)
 		}
 	}
+	pruneUnreferencedSegments(state)
 	return state, nil
 }
 

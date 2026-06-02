@@ -304,6 +304,8 @@ Examples:
 - `services.clusterGateway.config.authMode` switches between `public`, `internal`, and `both`
 - `services.manager.config.autoscaler.*` tunes pool scale behavior
 - `services.storageProxy.config.filesystem*` tunes filesystem behavior; `services.manager.config.procdConfig.volume*` tunes mounted volume cache sizing
+- `services.storageProxy.config.s0fsSegmentTargetSize` sets the target S0FS segment size for materialized volume data; the default is `4Mi`
+- `services.storageProxy.config.s0fsCompaction*` tunes background S0FS compaction for RWO volume owners; `s0fsCompactionInterval` accepts `0`, `off`, or `disabled` to turn it off
 - `services.storageProxy.config.cacheSizeLimit`, `logSizeLimit`, `volumePortalCacheSizeLimit`, and `volumePortalRootMinFree` cap node-local storage used by storage-proxy cache, logs, and mounted volume portals
 - `services.storageProxy.config.objectEncryptionEnabled` controls application-layer encryption for S0FS object storage and node-local volume cache files; it is enabled by default
 - `services.netd.config.egressBandwidthBytesPerSecond`, `ingressBandwidthBytesPerSecond`, and `bandwidthBurstBytes` apply per-sandbox bandwidth throttling when set above zero
@@ -316,6 +318,10 @@ spec:
             config:
                 cacheSizeLimit: 20Gi
                 logSizeLimit: 1Gi
+                s0fsSegmentTargetSize: 4Mi
+                s0fsCompactionInterval: 1m
+                s0fsCompactionMinDeadRatio: "0.5"
+                s0fsCompactionMinReclaimSize: 1Mi
                 volumePortalCacheSizeLimit: 20Gi
                 volumePortalRootMinFree: 5Gi
         netd:

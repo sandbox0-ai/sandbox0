@@ -14,6 +14,7 @@ import (
 
 type ContainerStore interface {
 	Get(ctx context.Context, id string) (containers.Container, error)
+	List(ctx context.Context, filters ...string) ([]containers.Container, error)
 }
 
 type RuntimeService interface {
@@ -41,12 +42,12 @@ func (r CRIMetadataResolver) ResolveRootFSMetadata(ctx context.Context, snapshot
 	}
 
 	ctx = r.ensureNamespace(ctx)
-	container, err := r.Containers.Get(ctx, snapshotKey)
+	container, ok, err := r.resolveContainer(ctx, snapshotKey)
 	if err != nil {
-		if errdefs.IsNotFound(err) {
-			return rootfs.Metadata{}, false, nil
-		}
-		return rootfs.Metadata{}, false, fmt.Errorf("get container %s: %w", snapshotKey, err)
+		return rootfs.Metadata{}, false, err
+	}
+	if !ok {
+		return rootfs.Metadata{}, false, nil
 	}
 	sandboxID := strings.TrimSpace(container.SandboxID)
 	if sandboxID == "" {
@@ -62,6 +63,26 @@ func (r CRIMetadataResolver) ResolveRootFSMetadata(ctx context.Context, snapshot
 		return rootfs.Metadata{}, false, fmt.Errorf("pod sandbox status %s is empty", sandboxID)
 	}
 	return rootfs.MetadataFromAnnotations(status.GetAnnotations()), true, nil
+}
+
+func (r CRIMetadataResolver) resolveContainer(ctx context.Context, snapshotKey string) (containers.Container, bool, error) {
+	container, err := r.Containers.Get(ctx, snapshotKey)
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			all, err := r.Containers.List(ctx)
+			if err != nil {
+				return containers.Container{}, false, fmt.Errorf("list containers for snapshot key %s: %w", snapshotKey, err)
+			}
+			for _, container := range all {
+				if strings.TrimSpace(container.SnapshotKey) == snapshotKey {
+					return container, true, nil
+				}
+			}
+			return containers.Container{}, false, nil
+		}
+		return containers.Container{}, false, fmt.Errorf("get container %s: %w", snapshotKey, err)
+	}
+	return container, true, nil
 }
 
 func (r CRIMetadataResolver) ensureNamespace(ctx context.Context) context.Context {

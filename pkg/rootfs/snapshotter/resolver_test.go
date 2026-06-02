@@ -53,6 +53,46 @@ func TestCRIMetadataResolverReadsRootFSAnnotationsFromPodSandboxStatus(t *testin
 	}
 }
 
+func TestCRIMetadataResolverFindsContainerBySnapshotKey(t *testing.T) {
+	store := &fakeContainerStore{
+		containers: map[string]containers.Container{
+			"container-a": {ID: "container-a", SnapshotKey: "snapshot-key-a", SandboxID: "cri-sandbox-a"},
+			"container-b": {ID: "container-b", SnapshotKey: "snapshot-key-b", SandboxID: "cri-sandbox-b"},
+		},
+	}
+	runtimeService := &fakeRuntimeService{
+		status: &runtime.PodSandboxStatusResponse{
+			Status: &runtime.PodSandboxStatus{
+				Annotations: map[string]string{
+					rootfs.AnnotationSandboxID: "sandbox-a",
+					rootfs.AnnotationTeamID:    "team-a",
+					rootfs.AnnotationMode:      rootfs.ModeS0FSUpperdir,
+					rootfs.AnnotationVolumeID:  "rootfs-a",
+					rootfs.AnnotationCtldPort:  "8095",
+				},
+			},
+		},
+	}
+	resolver := CRIMetadataResolver{Containers: store, Runtime: runtimeService}
+
+	meta, ok, err := resolver.ResolveRootFSMetadata(context.Background(), "snapshot-key-a")
+	if err != nil {
+		t.Fatalf("ResolveRootFSMetadata() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("ResolveRootFSMetadata() ok = false, want true")
+	}
+	if !store.listCalled {
+		t.Fatal("container store List() was not called")
+	}
+	if runtimeService.request.PodSandboxId != "cri-sandbox-a" {
+		t.Fatalf("CRI sandbox id = %q, want cri-sandbox-a", runtimeService.request.PodSandboxId)
+	}
+	if meta.SandboxID != "sandbox-a" || meta.TeamID != "team-a" || meta.VolumeID != "rootfs-a" || meta.CtldPort != 8095 {
+		t.Fatalf("metadata = %+v, want sandbox-a team-a rootfs-a 8095", meta)
+	}
+}
+
 func TestCRIMetadataResolverNoopsWhenContainerIsNotCreatedYet(t *testing.T) {
 	resolver := CRIMetadataResolver{
 		Containers: &fakeContainerStore{err: errdefs.ErrNotFound},
@@ -99,6 +139,18 @@ func TestCRIMetadataResolverReturnsCRIError(t *testing.T) {
 	}
 }
 
+func TestCRIMetadataResolverReturnsContainerListError(t *testing.T) {
+	resolver := CRIMetadataResolver{
+		Containers: &fakeContainerStore{err: errdefs.ErrNotFound, listErr: errors.New("container list unavailable")},
+		Runtime:    &fakeRuntimeService{},
+	}
+
+	_, _, err := resolver.ResolveRootFSMetadata(context.Background(), "snapshot-key-a")
+	if err == nil || !strings.Contains(err.Error(), "container list unavailable") {
+		t.Fatalf("ResolveRootFSMetadata() error = %v, want container list unavailable", err)
+	}
+}
+
 func TestCRIMetadataResolverUsesExistingNamespace(t *testing.T) {
 	store := &fakeContainerStore{err: errdefs.ErrNotFound}
 	resolver := CRIMetadataResolver{Containers: store, Runtime: &fakeRuntimeService{}, Namespace: "fallback"}
@@ -118,7 +170,9 @@ func TestCRIMetadataResolverUsesExistingNamespace(t *testing.T) {
 type fakeContainerStore struct {
 	containers map[string]containers.Container
 	err        error
+	listErr    error
 	namespace  string
+	listCalled bool
 }
 
 func (s *fakeContainerStore) Get(ctx context.Context, id string) (containers.Container, error) {
@@ -131,6 +185,19 @@ func (s *fakeContainerStore) Get(ctx context.Context, id string) (containers.Con
 		return containers.Container{}, errdefs.ErrNotFound
 	}
 	return container, nil
+}
+
+func (s *fakeContainerStore) List(ctx context.Context, _ ...string) ([]containers.Container, error) {
+	s.namespace, _ = namespaces.Namespace(ctx)
+	s.listCalled = true
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	out := make([]containers.Container, 0, len(s.containers))
+	for _, container := range s.containers {
+		out = append(out, container)
+	}
+	return out, nil
 }
 
 type fakeRuntimeService struct {

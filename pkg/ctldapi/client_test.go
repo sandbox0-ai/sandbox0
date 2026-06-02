@@ -97,6 +97,46 @@ func TestClientBindVolumePortalUsesSharedPath(t *testing.T) {
 	}
 }
 
+func TestClientPrepareRootFSUsesSharedPath(t *testing.T) {
+	t.Parallel()
+
+	var gotReq PrepareRootFSRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want %s", r.Method, http.MethodPost)
+		}
+		if r.URL.Path != "/api/v1/rootfs/prepare" {
+			t.Fatalf("path = %s, want /api/v1/rootfs/prepare", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(PrepareRootFSResponse{
+			Prepared:       true,
+			SandboxID:      gotReq.SandboxID,
+			RootFSVolumeID: gotReq.RootFSVolumeID,
+			UpperDir:       "/var/lib/sandbox0/ctld/rootfs/team-a/sandbox-a/rootfs-a/s0fs/upper",
+			WorkDir:        "/var/lib/sandbox0/ctld/rootfs/team-a/sandbox-a/rootfs-a/s0fs/work",
+		})
+	}))
+	defer server.Close()
+
+	resp, err := NewClient(server.Client()).PrepareRootFS(context.Background(), server.URL, PrepareRootFSRequest{
+		SandboxID:      "sandbox-a",
+		TeamID:         "team-a",
+		RootFSVolumeID: "rootfs-a",
+	})
+	if err != nil {
+		t.Fatalf("PrepareRootFS() error = %v", err)
+	}
+	if gotReq.TeamID != "team-a" || gotReq.RootFSVolumeID != "rootfs-a" {
+		t.Fatalf("request = %+v, want team-a rootfs-a", gotReq)
+	}
+	if resp == nil || !resp.Prepared || resp.SandboxID != "sandbox-a" || resp.UpperDir == "" || resp.WorkDir == "" {
+		t.Fatalf("response = %#v, want prepared rootfs response", resp)
+	}
+}
+
 func TestPostJSONReturnsCheckVolumePortalErrorMessage(t *testing.T) {
 	t.Parallel()
 

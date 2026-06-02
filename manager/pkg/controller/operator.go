@@ -49,6 +49,7 @@ type Operator struct {
 	metrics *obsmetrics.ManagerMetrics
 
 	namespacePolicy namespacepolicy.TemplateNamespaceReconciler
+	disableIdlePool bool
 
 	// Template informer and lister (to be injected)
 	templateInformer cache.SharedIndexInformer
@@ -69,6 +70,12 @@ func (op *Operator) SetNamespacePolicyReconciler(reconciler namespacepolicy.Temp
 
 func (op *Operator) SetSandboxProbeRunner(runner SandboxProbeRunner) {
 	op.probeRunner = runner
+}
+
+// SetIdlePoolDisabled disables idle ReplicaSet maintenance for runtimes that
+// never claim idle pods, such as persistent rootfs mode.
+func (op *Operator) SetIdlePoolDisabled(disabled bool) {
+	op.disableIdlePool = disabled
 }
 
 // TemplateListerImpl implements TemplateLister
@@ -256,8 +263,10 @@ func (op *Operator) syncHandler(ctx context.Context, key string) error {
 	}
 
 	// Reconcile the pool (ReplicaSet)
-	if err := op.poolManager.ReconcilePool(ctx, template); err != nil {
-		return fmt.Errorf("reconcile pool: %w", err)
+	if !op.disableIdlePool {
+		if err := op.poolManager.ReconcilePool(ctx, template); err != nil {
+			return fmt.Errorf("reconcile pool: %w", err)
+		}
 	}
 
 	// Update status
@@ -271,7 +280,7 @@ func (op *Operator) syncHandler(ctx context.Context, key string) error {
 
 	// Scale down for idle templates (async, background operation)
 	// Scale up is handled synchronously in SandboxService.OnColdClaim
-	if op.autoScaler != nil {
+	if !op.disableIdlePool && op.autoScaler != nil {
 		if err := op.autoScaler.ReconcileScaleDown(ctx, template, op.clock.Now()); err != nil {
 			op.logger.Warn("Scale down reconcile failed",
 				zap.String("template", template.Name),
@@ -365,7 +374,7 @@ func (op *Operator) updateTemplateStatus(ctx context.Context, template *v1alpha1
 	}
 
 	// Update status if changed
-	if template.Status.IdleCount != idleCount || template.Status.ActiveCount != activeCount {
+	if template.Status.IdleCount != idleCount || template.Status.ActiveCount != activeCount || len(template.Status.Conditions) == 0 {
 		template.Status.IdleCount = idleCount
 		template.Status.ActiveCount = activeCount
 		template.Status.LastUpdateTime = metav1.Now()
@@ -441,15 +450,19 @@ func probeFailure(kind sandboxprobe.Kind, reason, message string) *sandboxprobe.
 // computeConditions computes the conditions for a template
 func (op *Operator) computeConditions(template *v1alpha1.SandboxTemplate, idleCount, activeCount int32) []v1alpha1.SandboxTemplateCondition {
 	conditions := []v1alpha1.SandboxTemplateCondition{}
+	minIdle, maxIdle := template.Spec.Pool.MinIdle, template.Spec.Pool.MaxIdle
+	if op.disableIdlePool {
+		minIdle, maxIdle = 0, 0
+	}
 
 	// Ready condition
 	readyStatus := v1alpha1.ConditionTrue
 	readyReason := "PoolReady"
 	readyMessage := "Pool is ready"
-	if idleCount < template.Spec.Pool.MinIdle {
+	if idleCount < minIdle {
 		readyStatus = v1alpha1.ConditionFalse
 		readyReason = "InsufficientIdlePods"
-		readyMessage = fmt.Sprintf("Idle pod count (%d) is less than minIdle (%d)", idleCount, template.Spec.Pool.MinIdle)
+		readyMessage = fmt.Sprintf("Idle pod count (%d) is less than minIdle (%d)", idleCount, minIdle)
 	}
 
 	conditions = append(conditions, v1alpha1.SandboxTemplateCondition{
@@ -464,10 +477,10 @@ func (op *Operator) computeConditions(template *v1alpha1.SandboxTemplate, idleCo
 	healthyStatus := v1alpha1.ConditionTrue
 	healthyReason := "PoolHealthy"
 	healthyMessage := "Pool is healthy"
-	if idleCount > template.Spec.Pool.MaxIdle {
+	if idleCount > maxIdle {
 		healthyStatus = v1alpha1.ConditionFalse
 		healthyReason = "ExcessIdlePods"
-		healthyMessage = fmt.Sprintf("Idle pod count (%d) exceeds maxIdle (%d)", idleCount, template.Spec.Pool.MaxIdle)
+		healthyMessage = fmt.Sprintf("Idle pod count (%d) exceeds maxIdle (%d)", idleCount, maxIdle)
 	}
 
 	conditions = append(conditions, v1alpha1.SandboxTemplateCondition{

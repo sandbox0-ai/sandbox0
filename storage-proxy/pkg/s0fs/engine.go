@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"sort"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -249,6 +251,14 @@ func (e *Engine) Symlink(parent uint64, name, target string, mode uint32) (*Node
 	return e.create(parent, name, TypeSymlink, mode, target)
 }
 
+func (e *Engine) Mknod(parent uint64, name string, mode, rdev uint32) (*Node, error) {
+	typ, perm, err := fileTypeFromMode(mode)
+	if err != nil {
+		return nil, err
+	}
+	return e.createNode(parent, name, typ, perm, "", rdev)
+}
+
 func (e *Engine) Link(inode uint64, newParent uint64, newName string) (*Node, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -463,6 +473,100 @@ func (e *Engine) SetOwner(inode uint64, uid, gid uint32) error {
 	record.Inode = inode
 	record.Mode = uid
 	record.Offset = uint64(gid)
+	if err := e.appendAndApplyLocked(record, estimatedWALRecordBytes(record)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (e *Engine) GetXattr(inode uint64, name string) ([]byte, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if err := e.checkOpen(); err != nil {
+		return nil, err
+	}
+	if name == "" {
+		return nil, fmt.Errorf("%w: xattr name is required", ErrInvalidInput)
+	}
+	node, ok := e.nodes[inode]
+	if !ok || node == nil {
+		return nil, ErrNotFound
+	}
+	if len(node.Xattrs) == 0 {
+		return nil, ErrNoAttr
+	}
+	value, ok := node.Xattrs[name]
+	if !ok {
+		return nil, ErrNoAttr
+	}
+	return slices.Clone(value), nil
+}
+
+func (e *Engine) ListXattrs(inode uint64) ([]string, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if err := e.checkOpen(); err != nil {
+		return nil, err
+	}
+	node, ok := e.nodes[inode]
+	if !ok || node == nil {
+		return nil, ErrNotFound
+	}
+	names := make([]string, 0, len(node.Xattrs))
+	for name := range node.Xattrs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func (e *Engine) SetXattr(inode uint64, name string, value []byte, flags uint32) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.checkOpen(); err != nil {
+		return err
+	}
+	if name == "" {
+		return fmt.Errorf("%w: xattr name is required", ErrInvalidInput)
+	}
+	node, ok := e.nodes[inode]
+	if !ok || node == nil {
+		return ErrNotFound
+	}
+	_, exists := node.Xattrs[name]
+	if err := validateXattrFlags(flags, exists); err != nil {
+		return err
+	}
+	record := e.newRecord("setxattr")
+	record.Inode = inode
+	record.XattrName = name
+	record.XattrValue = slices.Clone(value)
+	record.XattrFlags = flags
+	if err := e.appendAndApplyLocked(record, estimatedWALRecordBytes(record)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (e *Engine) RemoveXattr(inode uint64, name string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.checkOpen(); err != nil {
+		return err
+	}
+	if name == "" {
+		return fmt.Errorf("%w: xattr name is required", ErrInvalidInput)
+	}
+	node, ok := e.nodes[inode]
+	if !ok || node == nil {
+		return ErrNotFound
+	}
+	if _, exists := node.Xattrs[name]; !exists {
+		return ErrNoAttr
+	}
+	record := e.newRecord("removexattr")
+	record.Inode = inode
+	record.XattrName = name
 	if err := e.appendAndApplyLocked(record, estimatedWALRecordBytes(record)); err != nil {
 		return err
 	}
@@ -714,6 +818,10 @@ func (e *Engine) DeleteSnapshot(snapshotID string) error {
 }
 
 func (e *Engine) create(parent uint64, name string, typ FileType, mode uint32, target string) (*Node, error) {
+	return e.createNode(parent, name, typ, mode, target, 0)
+}
+
+func (e *Engine) createNode(parent uint64, name string, typ FileType, mode uint32, target string, rdev uint32) (*Node, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if err := e.checkOpen(); err != nil {
@@ -735,6 +843,7 @@ func (e *Engine) create(parent uint64, name string, typ FileType, mode uint32, t
 	record.Name = name
 	record.Type = typ
 	record.Mode = mode
+	record.Rdev = rdev
 	record.Target = target
 	if err := e.appendAndApplyLocked(record, estimatedWALRecordBytes(record)); err != nil {
 		return nil, err
@@ -780,9 +889,12 @@ func (e *Engine) refreshLocalDiskGuardLocked() {
 }
 
 func estimatedWALRecordBytes(record walRecord) int64 {
-	size := int64(512 + len(record.Name) + len(record.NewName) + len(record.Target))
+	size := int64(512 + len(record.Name) + len(record.NewName) + len(record.Target) + len(record.XattrName))
 	if len(record.Data) > 0 {
 		size += int64(len(record.Data) * 2)
+	}
+	if len(record.XattrValue) > 0 {
+		size += int64(len(record.XattrValue) * 2)
 	}
 	return size
 }
@@ -798,6 +910,9 @@ func estimatedStateBytes(state *SnapshotState) int64 {
 	for _, node := range state.Nodes {
 		if node != nil {
 			total += int64(256 + len(node.Target))
+			for name, value := range node.Xattrs {
+				total += int64(128 + len(name) + len(value)*2)
+			}
 		}
 	}
 	for _, children := range state.Children {
@@ -897,6 +1012,10 @@ func (e *Engine) apply(record walRecord) error {
 		return e.applyTruncate(record)
 	case "unlink":
 		return e.applyUnlink(record)
+	case "setxattr":
+		return e.applySetXattr(record)
+	case "removexattr":
+		return e.applyRemoveXattr(record)
 	default:
 		return fmt.Errorf("unknown wal op %q", record.Op)
 	}
@@ -918,6 +1037,7 @@ func (e *Engine) applyCreate(record walRecord) error {
 		Type:   record.Type,
 		Mode:   record.Mode,
 		Nlink:  1,
+		Rdev:   record.Rdev,
 		Target: record.Target,
 		Atime:  now,
 		Mtime:  now,
@@ -934,6 +1054,45 @@ func (e *Engine) applyCreate(record walRecord) error {
 	if record.Inode >= e.nextInode {
 		e.nextInode = record.Inode + 1
 	}
+	return nil
+}
+
+func (e *Engine) applySetXattr(record walRecord) error {
+	if record.Inode == 0 || record.XattrName == "" {
+		return fmt.Errorf("%w: invalid setxattr record", ErrInvalidInput)
+	}
+	node, ok := e.nodes[record.Inode]
+	if !ok || node == nil {
+		return ErrNotFound
+	}
+	_, exists := node.Xattrs[record.XattrName]
+	if err := validateXattrFlags(record.XattrFlags, exists); err != nil {
+		return err
+	}
+	if node.Xattrs == nil {
+		node.Xattrs = make(map[string][]byte)
+	}
+	node.Xattrs[record.XattrName] = slices.Clone(record.XattrValue)
+	node.Ctime = time.Unix(0, record.TimeUnix).UTC()
+	return nil
+}
+
+func (e *Engine) applyRemoveXattr(record walRecord) error {
+	if record.Inode == 0 || record.XattrName == "" {
+		return fmt.Errorf("%w: invalid removexattr record", ErrInvalidInput)
+	}
+	node, ok := e.nodes[record.Inode]
+	if !ok || node == nil {
+		return ErrNotFound
+	}
+	if _, exists := node.Xattrs[record.XattrName]; !exists {
+		return ErrNoAttr
+	}
+	delete(node.Xattrs, record.XattrName)
+	if len(node.Xattrs) == 0 {
+		node.Xattrs = nil
+	}
+	node.Ctime = time.Unix(0, record.TimeUnix).UTC()
 	return nil
 }
 
@@ -1282,7 +1441,45 @@ func (e *Engine) fileNodeLocked(inode uint64) (*Node, error) {
 	if node.Type == TypeDirectory {
 		return nil, ErrIsDir
 	}
+	if node.Type != TypeFile {
+		return nil, ErrNotFile
+	}
 	return node, nil
+}
+
+func fileTypeFromMode(mode uint32) (FileType, uint32, error) {
+	perm := mode & 0o7777
+	switch mode & syscall.S_IFMT {
+	case 0, syscall.S_IFREG:
+		return TypeFile, perm, nil
+	case syscall.S_IFCHR:
+		return TypeCharDevice, perm, nil
+	case syscall.S_IFBLK:
+		return TypeBlockDevice, perm, nil
+	case syscall.S_IFIFO:
+		return TypeFIFO, perm, nil
+	case syscall.S_IFSOCK:
+		return TypeSocket, perm, nil
+	default:
+		return "", 0, fmt.Errorf("%w: unsupported mknod file type %#o", ErrInvalidInput, mode&syscall.S_IFMT)
+	}
+}
+
+func validateXattrFlags(flags uint32, exists bool) error {
+	const allowed = XattrCreateFlag | XattrReplaceFlag
+	if flags&^allowed != 0 {
+		return fmt.Errorf("%w: unsupported xattr flags %#x", ErrInvalidInput, flags)
+	}
+	if flags&XattrCreateFlag != 0 && flags&XattrReplaceFlag != 0 {
+		return fmt.Errorf("%w: xattr create and replace flags are mutually exclusive", ErrInvalidInput)
+	}
+	if flags&XattrCreateFlag != 0 && exists {
+		return ErrExists
+	}
+	if flags&XattrReplaceFlag != 0 && !exists {
+		return ErrNoAttr
+	}
+	return nil
 }
 
 func (e *Engine) pathLocked(target uint64) (string, bool) {

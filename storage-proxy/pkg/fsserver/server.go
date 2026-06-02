@@ -588,7 +588,37 @@ func (s *FileSystemServer) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb
 func (s *FileSystemServer) Mknod(ctx context.Context, req *pb.MknodRequest) (*pb.NodeResponse, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.NodeResponse, error) {
 		if isS0FSVolume(volCtx) {
-			return nil, fserror.New(fserror.Unimplemented, "mknod is not implemented for s0fs")
+			if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, fsmeta.Ino(req.Parent)); err != nil {
+				return nil, fserror.New(fserror.Internal, err.Error())
+			}
+			path := resolveChildPath(volCtx, req.Parent, req.Name)
+			node, err := volCtx.S0FS.Mknod(req.Parent, req.Name, req.Mode, req.Rdev)
+			if err != nil {
+				return nil, mapS0FSError(err)
+			}
+			if req.Actor != nil && len(req.Actor.Gids) > 0 {
+				if err := volCtx.S0FS.SetOwner(node.Inode, req.Actor.Uid, req.Actor.Gids[0]); err != nil {
+					return nil, fserror.New(fserror.Internal, err.Error())
+				}
+				node, err = volCtx.S0FS.GetAttr(node.Inode)
+				if err != nil {
+					return nil, mapS0FSError(err)
+				}
+			}
+			if path == "" {
+				path = resolveInodePath(volCtx, node.Inode)
+			}
+			eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CREATE
+			if path == "" {
+				eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+			}
+			s.publishEvent(runCtx, &pb.WatchEvent{
+				VolumeId:  req.VolumeId,
+				EventType: eventType,
+				Path:      path,
+				Inode:     node.Inode,
+			})
+			return s0fsNodeResponse(node, 0), nil
 		}
 		return nil, unsupportedVolumeBackend(volCtx)
 	})
@@ -1122,7 +1152,11 @@ func (s *FileSystemServer) GetXattr(ctx context.Context, req *pb.GetXattrRequest
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
-		return nil, fserror.New(fserror.Unimplemented, "xattr is not implemented for s0fs")
+		value, err := volCtx.S0FS.GetXattr(req.Inode, req.Name)
+		if err != nil {
+			return nil, mapS0FSError(err)
+		}
+		return &pb.GetXattrResponse{Value: value}, nil
 	}
 
 	return nil, unsupportedVolumeBackend(volCtx)
@@ -1132,7 +1166,18 @@ func (s *FileSystemServer) GetXattr(ctx context.Context, req *pb.GetXattrRequest
 func (s *FileSystemServer) SetXattr(ctx context.Context, req *pb.SetXattrRequest) (*pb.Empty, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.Empty, error) {
 		if isS0FSVolume(volCtx) {
-			return nil, fserror.New(fserror.Unimplemented, "xattr is not implemented for s0fs")
+			if err := volCtx.S0FS.SetXattr(req.Inode, req.Name, req.Value, req.Flags); err != nil {
+				return nil, mapS0FSError(err)
+			}
+			path := resolveInodePath(volCtx, req.Inode)
+			eventType := pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+			s.publishEvent(runCtx, &pb.WatchEvent{
+				VolumeId:  req.VolumeId,
+				EventType: eventType,
+				Path:      path,
+				Inode:     req.Inode,
+			})
+			return &pb.Empty{}, nil
 		}
 		return nil, unsupportedVolumeBackend(volCtx)
 	})
@@ -1145,7 +1190,16 @@ func (s *FileSystemServer) ListXattr(ctx context.Context, req *pb.ListXattrReque
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
-		return nil, fserror.New(fserror.Unimplemented, "xattr is not implemented for s0fs")
+		names, err := volCtx.S0FS.ListXattrs(req.Inode)
+		if err != nil {
+			return nil, mapS0FSError(err)
+		}
+		var data strings.Builder
+		for _, name := range names {
+			data.WriteString(name)
+			data.WriteByte(0)
+		}
+		return &pb.ListXattrResponse{Data: []byte(data.String())}, nil
 	}
 
 	return nil, unsupportedVolumeBackend(volCtx)
@@ -1155,7 +1209,17 @@ func (s *FileSystemServer) ListXattr(ctx context.Context, req *pb.ListXattrReque
 func (s *FileSystemServer) RemoveXattr(ctx context.Context, req *pb.RemoveXattrRequest) (*pb.Empty, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.Empty, error) {
 		if isS0FSVolume(volCtx) {
-			return nil, fserror.New(fserror.Unimplemented, "xattr is not implemented for s0fs")
+			if err := volCtx.S0FS.RemoveXattr(req.Inode, req.Name); err != nil {
+				return nil, mapS0FSError(err)
+			}
+			path := resolveInodePath(volCtx, req.Inode)
+			s.publishEvent(runCtx, &pb.WatchEvent{
+				VolumeId:  req.VolumeId,
+				EventType: pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE,
+				Path:      path,
+				Inode:     req.Inode,
+			})
+			return &pb.Empty{}, nil
 		}
 		return nil, unsupportedVolumeBackend(volCtx)
 	})
@@ -1228,6 +1292,14 @@ func s0fsAttr(node *s0fs.Node) *pb.GetAttrResponse {
 		mode |= syscall.S_IFDIR
 	case s0fs.TypeSymlink:
 		mode |= syscall.S_IFLNK
+	case s0fs.TypeCharDevice:
+		mode |= syscall.S_IFCHR
+	case s0fs.TypeBlockDevice:
+		mode |= syscall.S_IFBLK
+	case s0fs.TypeFIFO:
+		mode |= syscall.S_IFIFO
+	case s0fs.TypeSocket:
+		mode |= syscall.S_IFSOCK
 	default:
 		mode |= syscall.S_IFREG
 	}
@@ -1241,6 +1313,7 @@ func s0fsAttr(node *s0fs.Node) *pb.GetAttrResponse {
 		Nlink:     node.Nlink,
 		Uid:       node.UID,
 		Gid:       node.GID,
+		Rdev:      uint64(node.Rdev),
 		Size:      size,
 		Blocks:    (size + 511) / 512,
 		AtimeSec:  node.Atime.Unix(),
@@ -1318,11 +1391,19 @@ func s0fsNodeResponse(node *s0fs.Node, handleID uint64) *pb.NodeResponse {
 func s0fsTypeNumber(typ s0fs.FileType) uint32 {
 	switch typ {
 	case s0fs.TypeDirectory:
-		return uint32(fsmeta.TypeDirectory)
+		return syscall.S_IFDIR
 	case s0fs.TypeSymlink:
-		return uint32(fsmeta.TypeSymlink)
+		return syscall.S_IFLNK
+	case s0fs.TypeCharDevice:
+		return syscall.S_IFCHR
+	case s0fs.TypeBlockDevice:
+		return syscall.S_IFBLK
+	case s0fs.TypeFIFO:
+		return syscall.S_IFIFO
+	case s0fs.TypeSocket:
+		return syscall.S_IFSOCK
 	default:
-		return uint32(fsmeta.TypeFile)
+		return syscall.S_IFREG
 	}
 }
 
@@ -1332,11 +1413,13 @@ func mapS0FSError(err error) error {
 		return nil
 	case errors.Is(err, s0fs.ErrNotFound):
 		return fserror.New(fserror.NotFound, err.Error())
+	case errors.Is(err, s0fs.ErrNoAttr):
+		return syscall.ENODATA
 	case errors.Is(err, s0fs.ErrExists):
 		return fserror.New(fserror.AlreadyExists, err.Error())
 	case errors.Is(err, s0fs.ErrNotEmpty), errors.Is(err, s0fs.ErrIsDir):
 		return fserror.New(fserror.FailedPrecondition, err.Error())
-	case errors.Is(err, s0fs.ErrInvalidInput), errors.Is(err, s0fs.ErrNotDir):
+	case errors.Is(err, s0fs.ErrInvalidInput), errors.Is(err, s0fs.ErrNotDir), errors.Is(err, s0fs.ErrNotFile):
 		return fserror.New(fserror.InvalidArgument, err.Error())
 	case errors.Is(err, s0fs.ErrNoSpace):
 		return fserror.New(fserror.ResourceExhausted, err.Error())

@@ -105,6 +105,45 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 	}
 }
 
+func TestClaimIdlePodSkipsHotClaimWhenRootFSPersistenceEnabled(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+	}
+	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
+
+	client := fake.NewSimpleClientset(readyPod.DeepCopy())
+	svc := &SandboxService{
+		k8sClient: client,
+		podLister: newClaimTestPodLister(t, readyPod),
+		config: SandboxServiceConfig{
+			RootFSPersistenceEnabled: true,
+		},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+
+	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{
+		TeamID: "team-a",
+		UserID: "user-a",
+	})
+	if err != nil {
+		t.Fatalf("claimIdlePod() error = %v", err)
+	}
+	if pod != nil {
+		t.Fatalf("claimIdlePod() = %s, want nil when rootfs persistence is enabled", pod.Name)
+	}
+	stored, err := client.CoreV1().Pods("ns-a").Get(context.Background(), "idle-ready", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	if got := stored.Labels[controller.LabelPoolType]; got != controller.PoolTypeIdle {
+		t.Fatalf("pool-type = %q, want idle", got)
+	}
+}
+
 func TestClaimRequestDoesNotAcceptRuntimeMetadataFromJSON(t *testing.T) {
 	var req ClaimRequest
 	if err := json.Unmarshal([]byte(`{
@@ -427,6 +466,181 @@ func TestCreateNewPodMarksColdPodNonEvictable(t *testing.T) {
 	}
 	if got := pod.Annotations[controller.AnnotationClusterAutoscalerSafeToEvict]; got != "false" {
 		t.Fatalf("safe-to-evict annotation = %q, want false", got)
+	}
+}
+
+func TestCreateNewPodCreatesRootFSVolumeWhenPersistenceEnabled(t *testing.T) {
+	withClaimTestPublicKey(t)
+
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{Image: "busybox"},
+		},
+	}
+	client := fake.NewSimpleClientset()
+	volumeClient := &recordingSystemVolumeClient{}
+	svc := &SandboxService{
+		k8sClient:           client,
+		secretLister:        newClaimTestSecretLister(t),
+		webhookStateVolumes: volumeClient,
+		config: SandboxServiceConfig{
+			CtldEnabled:              true,
+			RootFSPersistenceEnabled: true,
+			CtldPort:                 8095,
+		},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+	req := &ClaimRequest{
+		SandboxID: "sandbox-a",
+		TeamID:    "team-a",
+		UserID:    "user-a",
+	}
+
+	pod, err := svc.createNewPod(context.Background(), template, req)
+	if err != nil {
+		t.Fatalf("createNewPod() error = %v", err)
+	}
+	if len(volumeClient.created) != 1 || volumeClient.created[0] != "sandbox-a-rootfs" {
+		t.Fatalf("created volumes = %#v, want sandbox-a-rootfs", volumeClient.created)
+	}
+	if got := req.RootFSVolumeID; got != "sandbox-a-rootfs" {
+		t.Fatalf("request rootfs volume = %q, want sandbox-a-rootfs", got)
+	}
+	if got := pod.Annotations[controller.AnnotationRootFSVolumeID]; got != "sandbox-a-rootfs" {
+		t.Fatalf("rootfs volume annotation = %q, want sandbox-a-rootfs", got)
+	}
+	if got := pod.Annotations[controller.AnnotationRootFSMode]; got != controller.RootFSModeS0FSUpperdir {
+		t.Fatalf("rootfs mode annotation = %q, want %q", got, controller.RootFSModeS0FSUpperdir)
+	}
+	if got := pod.Annotations[controller.AnnotationRootFSCtldPort]; got != "8095" {
+		t.Fatalf("rootfs ctld port annotation = %q, want 8095", got)
+	}
+	if len(volumeClient.deleted) != 0 {
+		t.Fatalf("deleted volumes = %#v, want none", volumeClient.deleted)
+	}
+}
+
+func TestCreateNewPodRejectsRootFSPersistenceWithoutCtld(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{Image: "busybox"},
+		},
+	}
+	volumeClient := &recordingSystemVolumeClient{}
+	svc := &SandboxService{
+		k8sClient:           fake.NewSimpleClientset(),
+		secretLister:        newClaimTestSecretLister(t),
+		webhookStateVolumes: volumeClient,
+		config: SandboxServiceConfig{
+			RootFSPersistenceEnabled: true,
+			CtldPort:                 8095,
+		},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+
+	_, err := svc.createNewPod(context.Background(), template, &ClaimRequest{
+		SandboxID: "sandbox-a",
+		TeamID:    "team-a",
+		UserID:    "user-a",
+	})
+	if err == nil {
+		t.Fatal("createNewPod() error = nil, want ctld requirement error")
+	}
+	if len(volumeClient.created) != 0 {
+		t.Fatalf("created volumes = %#v, want none", volumeClient.created)
+	}
+}
+
+func TestCreateNewPodUsesExistingRootFSVolumeWhenPersistenceEnabled(t *testing.T) {
+	withClaimTestPublicKey(t)
+
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{Image: "busybox"},
+		},
+	}
+	svc := &SandboxService{
+		k8sClient:    fake.NewSimpleClientset(),
+		secretLister: newClaimTestSecretLister(t),
+		config: SandboxServiceConfig{
+			CtldEnabled:              true,
+			RootFSPersistenceEnabled: true,
+			CtldPort:                 8095,
+		},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+
+	pod, err := svc.createNewPod(context.Background(), template, &ClaimRequest{
+		SandboxID:      "sandbox-a",
+		TeamID:         "team-a",
+		UserID:         "user-a",
+		RootFSVolumeID: "rootfs-existing",
+	})
+	if err != nil {
+		t.Fatalf("createNewPod() error = %v", err)
+	}
+	if got := pod.Annotations[controller.AnnotationRootFSVolumeID]; got != "rootfs-existing" {
+		t.Fatalf("rootfs volume annotation = %q, want rootfs-existing", got)
+	}
+	if got := pod.Annotations[controller.AnnotationRootFSMode]; got != controller.RootFSModeS0FSUpperdir {
+		t.Fatalf("rootfs mode annotation = %q, want %q", got, controller.RootFSModeS0FSUpperdir)
+	}
+}
+
+func TestCreateNewPodPinsRootFSRestoreToPreviousNode(t *testing.T) {
+	withClaimTestPublicKey(t)
+
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{Image: "busybox"},
+		},
+	}
+	svc := &SandboxService{
+		k8sClient:    fake.NewSimpleClientset(),
+		secretLister: newClaimTestSecretLister(t),
+		config: SandboxServiceConfig{
+			CtldEnabled:              true,
+			RootFSPersistenceEnabled: true,
+			CtldPort:                 8095,
+		},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+
+	pod, err := svc.createNewPod(context.Background(), template, &ClaimRequest{
+		SandboxID:      "sandbox-a",
+		TeamID:         "team-a",
+		UserID:         "user-a",
+		RootFSVolumeID: "rootfs-existing",
+		RootFSNodeName: "node-a",
+	})
+	if err != nil {
+		t.Fatalf("createNewPod() error = %v", err)
+	}
+	if got := pod.Spec.NodeName; got != "node-a" {
+		t.Fatalf("pod nodeName = %q, want node-a", got)
+	}
+	if got := pod.Annotations[controller.AnnotationRootFSVolumeID]; got != "rootfs-existing" {
+		t.Fatalf("rootfs volume annotation = %q, want rootfs-existing", got)
 	}
 }
 

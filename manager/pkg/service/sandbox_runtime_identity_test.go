@@ -59,6 +59,7 @@ func (s *memorySandboxStore) MarkSandboxDeleted(_ context.Context, sandboxID str
 	record.DeletedAt = deletedAt
 	record.CurrentPodName = ""
 	record.CurrentPodNamespace = ""
+	record.CurrentNodeName = ""
 	s.deletes = append(s.deletes, sandboxID)
 	return nil
 }
@@ -74,10 +75,11 @@ func (s *memorySandboxStore) WithSandboxLock(ctx context.Context, sandboxID stri
 	return fn(ctx, memorySandboxStoreTx{store: s}, record)
 }
 
-func (t memorySandboxStoreTx) SaveRuntime(_ context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time) error {
+func (t memorySandboxStoreTx) SaveRuntime(_ context.Context, sandboxID, namespace, podName, nodeName, status string, generation int64, expiresAt, hardExpiresAt time.Time) error {
 	record := t.store.records[sandboxID]
 	record.CurrentPodNamespace = namespace
 	record.CurrentPodName = podName
+	record.CurrentNodeName = nodeName
 	record.Status = status
 	record.RuntimeGeneration = generation
 	record.ExpiresAt = expiresAt
@@ -86,10 +88,13 @@ func (t memorySandboxStoreTx) SaveRuntime(_ context.Context, sandboxID, namespac
 	return nil
 }
 
-func (t memorySandboxStoreTx) MarkRuntimeCleaned(_ context.Context, sandboxID string, generation int64, _ time.Time) error {
+func (t memorySandboxStoreTx) MarkRuntimeCleaned(_ context.Context, sandboxID string, generation int64, nodeName string, _ time.Time) error {
 	record := t.store.records[sandboxID]
 	record.CurrentPodNamespace = ""
 	record.CurrentPodName = ""
+	if nodeName != "" {
+		record.CurrentNodeName = nodeName
+	}
 	record.Status = SandboxStatusCleaned
 	if record.RuntimeGeneration < generation {
 		record.RuntimeGeneration = generation
@@ -189,6 +194,15 @@ func TestRestoreCleanedSandboxRuntimeDoesNotCreatePodWhileRuntimeDeleting(t *tes
 	}
 	if store.saves != 0 {
 		t.Fatalf("store saves = %d, want 0", store.saves)
+	}
+}
+
+func TestRootFSRestoreNodeNameRequiresRootFSVolume(t *testing.T) {
+	if got := rootfsRestoreNodeName(&SandboxRecord{RootFSVolumeID: "rootfs-a", CurrentNodeName: "node-a"}); got != "node-a" {
+		t.Fatalf("rootfsRestoreNodeName() = %q, want node-a", got)
+	}
+	if got := rootfsRestoreNodeName(&SandboxRecord{CurrentNodeName: "node-a"}); got != "" {
+		t.Fatalf("rootfsRestoreNodeName() without rootfs volume = %q, want empty", got)
 	}
 }
 

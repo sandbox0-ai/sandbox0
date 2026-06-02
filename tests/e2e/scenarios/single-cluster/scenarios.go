@@ -15,6 +15,7 @@ var scenarioManifestPaths = []string{
 	"single-cluster/fullmode.yaml",
 	"single-cluster/minimal.yaml",
 	"single-cluster/network-policy.yaml",
+	"single-cluster/rootfs-persistence.yaml",
 	"single-cluster/volumes.yaml",
 }
 

@@ -43,6 +43,10 @@ type ClaimRequest struct {
 	SandboxID string `json:"-"`
 	// RuntimeGeneration identifies the current runtime pod incarnation.
 	RuntimeGeneration int64 `json:"-"`
+	// RootFSVolumeID is the manager-owned SandboxVolume used for a persistent writable rootfs.
+	RootFSVolumeID string `json:"-"`
+	// RootFSNodeName pins a restored rootfs runtime to the node that still owns the local upperdir.
+	RootFSNodeName string `json:"-"`
 }
 
 type ClaimMount struct {
@@ -385,7 +389,10 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 
 	// Try to claim an idle pod first
 	phaseStarted = time.Now()
-	pod, err := s.claimIdlePod(ctx, template, req)
+	var pod *corev1.Pod
+	if !s.config.RootFSPersistenceEnabled {
+		pod, err = s.claimIdlePod(ctx, template, req)
+	}
 	claimIdleType := "hot"
 	if pod == nil {
 		claimIdleType = "cold"
@@ -411,7 +418,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 
 		// Trigger async scale-up to replenish the idle pool
 		// This runs in a goroutine to not block the cold claim response
-		if s.autoScaler != nil {
+		if s.autoScaler != nil && !s.config.RootFSPersistenceEnabled {
 			go func() {
 				scaleCtx := context.Background()
 				scaleDecision, scaleErr := s.autoScaler.OnColdClaim(scaleCtx, template)
@@ -553,9 +560,11 @@ func (s *SandboxService) persistClaimedSandbox(ctx context.Context, pod *corev1.
 		Status:              s.podToSandboxStatus(pod),
 		Config:              cfg,
 		Mounts:              mounts,
+		RootFSVolumeID:      strings.TrimSpace(pod.Annotations[controller.AnnotationRootFSVolumeID]),
 		TemplateSpec:        template.Spec,
 		CurrentPodName:      pod.Name,
 		CurrentPodNamespace: pod.Namespace,
+		CurrentNodeName:     pod.Spec.NodeName,
 		RuntimeGeneration:   runtimeGenerationFromPod(pod),
 		ClaimedAt:           parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationClaimedAt),
 		ExpiresAt:           parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt),
@@ -834,6 +843,9 @@ func isVolumePortalPendingPublicationError(resp *ctldapi.BindVolumePortalRespons
 
 // claimIdlePod claims an idle pod from the pool
 func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.SandboxTemplate, req *ClaimRequest) (*corev1.Pod, error) {
+	if s != nil && s.config.RootFSPersistenceEnabled {
+		return nil, nil
+	}
 	var claimedPod *corev1.Pod
 	desiredTemplateHash, err := controller.TemplateSpecHash(template)
 	if err != nil {
@@ -1024,6 +1036,9 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	// Build pod spec before side-effecting resources so claims fail fast when the
 	// sandbox data plane has no ready nodes to receive the pod.
 	spec := v1alpha1.BuildPodSpec(template)
+	if rootfsNodeName := strings.TrimSpace(req.RootFSNodeName); rootfsNodeName != "" {
+		spec.NodeName = rootfsNodeName
+	}
 	if err := s.ensureDataPlaneReadyCapacity(spec); err != nil {
 		return nil, err
 	}
@@ -1031,8 +1046,27 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	if sandboxID == "" {
 		sandboxID = podName
 	}
+	rootfsVolume, err := s.prepareRootFSVolume(ctx, req, sandboxID)
+	if err != nil {
+		return nil, fmt.Errorf("prepare rootfs volume: %w", err)
+	}
+	rollbackRootFSVolume := func() {
+		if rootfsVolume == nil || !rootfsVolume.Created || s.webhookStateVolumes == nil {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.webhookStateVolumes.Delete(cleanupCtx, req.TeamID, req.UserID, sandboxID, rootfsVolume.VolumeID); err != nil && s.logger != nil {
+			s.logger.Warn("Failed to roll back rootfs volume",
+				zap.String("sandboxID", sandboxID),
+				zap.String("volumeID", rootfsVolume.VolumeID),
+				zap.Error(err),
+			)
+		}
+	}
 	stateVolume, err := s.prepareWebhookStateVolume(ctx, req, sandboxID)
 	if err != nil {
+		rollbackRootFSVolume()
 		return nil, fmt.Errorf("prepare webhook state volume: %w", err)
 	}
 	rollbackStateVolume := func() {
@@ -1049,6 +1083,14 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 			)
 		}
 	}
+	podCreated := false
+	defer func() {
+		if podCreated {
+			return
+		}
+		rollbackRootFSVolume()
+		rollbackStateVolume()
+	}()
 
 	if err := controller.EnsureProcdConfigSecret(ctx, s.k8sClient, s.secretLister, template); err != nil {
 		return nil, fmt.Errorf("ensure procd config secret: %w", err)
@@ -1067,6 +1109,13 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	})
 	if stateVolume != nil {
 		annotations[controller.AnnotationWebhookStateVolumeID] = stateVolume.VolumeID
+	}
+	if rootfsVolume != nil {
+		annotations[controller.AnnotationRootFSMode] = controller.RootFSModeS0FSUpperdir
+		annotations[controller.AnnotationRootFSVolumeID] = rootfsVolume.VolumeID
+		if s.config.CtldPort > 0 {
+			annotations[controller.AnnotationRootFSCtldPort] = strconv.Itoa(s.config.CtldPort)
+		}
 	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1119,7 +1168,6 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	// Create the pod
 	createdPod, err := s.k8sClient.CoreV1().Pods(template.ObjectMeta.Namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
-		rollbackStateVolume()
 		if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
 			s.logger.Warn("Failed to clean up staged credential bindings after create failure",
 				zap.String("sandboxID", sandboxID),
@@ -1128,6 +1176,7 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		}
 		return nil, fmt.Errorf("create pod: %w", err)
 	}
+	podCreated = true
 
 	if err := s.applyNetworkProvider(ctx, createdPod, req.TeamID, policySpecFromState(networkState)); err != nil {
 		s.requestSandboxDeletionAfterClaimFailure(createdPod, "network policy apply failed")
@@ -1200,6 +1249,19 @@ func (s *SandboxService) ensureDataPlaneReadyCapacity(spec corev1.PodSpec) error
 		return fmt.Errorf("%w: manager node cache is not configured", ErrDataPlaneNotReady)
 	}
 	selector := labels.SelectorFromSet(spec.NodeSelector)
+	if nodeName := strings.TrimSpace(spec.NodeName); nodeName != "" {
+		node, err := s.nodeLister.Get(nodeName)
+		if err != nil {
+			return fmt.Errorf("%w: pinned node %q is not available", ErrDataPlaneNotReady, nodeName)
+		}
+		if !selector.Matches(labels.Set(node.Labels)) {
+			return fmt.Errorf("%w: pinned node %q does not match selector %q", ErrDataPlaneNotReady, nodeName, labels.Set(spec.NodeSelector).String())
+		}
+		if !dataplane.NodeReady(node) {
+			return fmt.Errorf("%w: pinned node %q is not data-plane ready", ErrDataPlaneNotReady, nodeName)
+		}
+		return nil
+	}
 	nodes, err := s.nodeLister.List(selector)
 	if err != nil {
 		return fmt.Errorf("list data-plane-ready nodes: %w", err)

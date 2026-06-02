@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/jackc/pgx/v5/pgxpool"
 	ctldportal "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal"
 	ctldpower "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/power"
@@ -23,27 +24,34 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/k8s"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
+	rootfssnapshotter "github.com/sandbox0-ai/sandbox0/pkg/rootfs/snapshotter"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	storagedb "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
 var (
-	httpAddr               = ":8095"
-	kubeconfig             = ""
-	cgroupRoot             = "/host-sys/fs/cgroup"
-	criEndpoint            = "/host-run/containerd/containerd.sock"
-	procRoot               = "/proc"
-	nodeName               = os.Getenv("NODE_NAME")
-	pauseMinMemoryRequest  = "10Mi"
-	pauseMinMemoryLimit    = "32Mi"
-	pauseMemoryBufferRatio = "1.1"
-	pauseMinCPU            = "10m"
-	defaultSandboxTTL      time.Duration
-	portalRoot             = "/var/lib/sandbox0/ctld"
-	csiSocket              = "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock"
-	podName                = os.Getenv("POD_NAME")
-	podNamespace           = os.Getenv("POD_NAMESPACE")
+	httpAddr                = ":8095"
+	kubeconfig              = ""
+	cgroupRoot              = "/host-sys/fs/cgroup"
+	criEndpoint             = "/host-run/containerd/containerd.sock"
+	procRoot                = "/proc"
+	nodeName                = os.Getenv("NODE_NAME")
+	pauseMinMemoryRequest   = "10Mi"
+	pauseMinMemoryLimit     = "32Mi"
+	pauseMemoryBufferRatio  = "1.1"
+	pauseMinCPU             = "10m"
+	defaultSandboxTTL       time.Duration
+	portalRoot              = "/var/lib/sandbox0/ctld"
+	csiSocket               = "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock"
+	podName                 = os.Getenv("POD_NAME")
+	podNamespace            = os.Getenv("POD_NAMESPACE")
+	rootfsSnapshotter       = false
+	rootfsSnapshotterSocket = "/host-run/containerd/sandbox0-rootfs-snapshotter.sock"
+	rootfsSnapshotterBase   = "overlayfs"
 )
 
 func main() {
@@ -60,6 +68,9 @@ func main() {
 	flag.DurationVar(&defaultSandboxTTL, "default-sandbox-ttl", 0, "default sandbox TTL restored on resume when no original TTL is recorded")
 	flag.StringVar(&portalRoot, "volume-portal-root", "/var/lib/sandbox0/ctld", "host-local root for ctld volume portal WAL and cache")
 	flag.StringVar(&csiSocket, "csi-socket", "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock", "CSI endpoint socket for sandbox volume portals")
+	flag.BoolVar(&rootfsSnapshotter, "rootfs-snapshotter", false, "serve a containerd proxy snapshotter that rewrites sandbox rootfs upperdir to s0fs")
+	flag.StringVar(&rootfsSnapshotterSocket, "rootfs-snapshotter-socket", "/host-run/containerd/sandbox0-rootfs-snapshotter.sock", "unix socket for the rootfs containerd proxy snapshotter")
+	flag.StringVar(&rootfsSnapshotterBase, "rootfs-snapshotter-base", "overlayfs", "base containerd snapshotter delegated by the rootfs proxy snapshotter")
 	flag.Parse()
 
 	log.Println("Starting ctld")
@@ -114,6 +125,7 @@ func main() {
 		PodNamespace:  podNamespace,
 	})
 	go portalManager.Run(ctx)
+	startRootFSSnapshotter(ctx, portalManager)
 	csiServer := ctldportal.NewCSIServer(nodeName, portalManager)
 	go func() {
 		if err := csiServer.Serve(csiSocket); err != nil && ctx.Err() == nil {
@@ -220,6 +232,82 @@ func initPortalDatabase(ctx context.Context, cfg *apiconfig.StorageProxyConfig, 
 		Schema:          schema,
 		ConfigModifier:  modifier,
 	})
+}
+
+func startRootFSSnapshotter(ctx context.Context, portal volumePortalHandler) {
+	if !rootfsSnapshotter {
+		return
+	}
+	if portal == nil {
+		log.Printf("ctld rootfs snapshotter disabled: volume portal is not configured")
+		return
+	}
+	go func() {
+		if err := runRootFSSnapshotter(ctx, portal); err != nil && ctx.Err() == nil {
+			log.Fatalf("ctld rootfs snapshotter failed: %v", err)
+		}
+	}()
+}
+
+func runRootFSSnapshotter(ctx context.Context, portal volumePortalHandler) error {
+	containerdClient, err := containerd.New(strings.TrimSpace(criEndpoint), containerd.WithDefaultNamespace("k8s.io"))
+	if err != nil {
+		return err
+	}
+	defer containerdClient.Close()
+
+	criConn, err := dialRootFSCRIEndpoint(ctx, criEndpoint)
+	if err != nil {
+		return err
+	}
+	defer criConn.Close()
+
+	baseSnapshotter := strings.TrimSpace(rootfsSnapshotterBase)
+	if baseSnapshotter == "" {
+		baseSnapshotter = "overlayfs"
+	}
+	log.Printf("Serving rootfs snapshotter on %s with base snapshotter %s", rootfsSnapshotterSocket, baseSnapshotter)
+	return rootfssnapshotter.Serve(ctx, rootfssnapshotter.ServerConfig{
+		SocketPath:    rootfsSnapshotterSocket,
+		Base:          containerdClient.SnapshotService(baseSnapshotter),
+		Resolver:      rootfssnapshotter.CRIMetadataResolver{Containers: containerdClient.ContainerService(), Runtime: runtimeapi.NewRuntimeServiceClient(criConn)},
+		PrepareClient: localRootFSPrepareClient{portal: portal},
+	})
+}
+
+func dialRootFSCRIEndpoint(ctx context.Context, endpoint string) (*grpc.ClientConn, error) {
+	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return grpc.DialContext(dialCtx, normalizeRootFSCRIEndpoint(endpoint), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+}
+
+func normalizeRootFSCRIEndpoint(endpoint string) string {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return "unix:///host-run/containerd/containerd.sock"
+	}
+	if strings.Contains(endpoint, "://") {
+		return endpoint
+	}
+	if strings.HasPrefix(endpoint, "/") {
+		return "unix://" + endpoint
+	}
+	return endpoint
+}
+
+type localRootFSPrepareClient struct {
+	portal volumePortalHandler
+}
+
+func (c localRootFSPrepareClient) PrepareRootFS(ctx context.Context, _ string, req ctldapi.PrepareRootFSRequest) (*ctldapi.PrepareRootFSResponse, error) {
+	if c.portal == nil {
+		return nil, errors.New("volume portal is not configured")
+	}
+	resp, err := c.portal.PrepareRootFS(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 type combinedController struct {
@@ -349,6 +437,39 @@ func (c combinedController) AbortVolumeSnapshotCheckpoint(r *http.Request, req c
 	return resp, http.StatusOK
 }
 
+func (c combinedController) PrepareRootFS(r *http.Request, req ctldapi.PrepareRootFSRequest) (ctldapi.PrepareRootFSResponse, int) {
+	if c.Portal == nil {
+		return ctldapi.PrepareRootFSResponse{Error: "ctld rootfs not implemented"}, http.StatusNotImplemented
+	}
+	resp, err := c.Portal.PrepareRootFS(r.Context(), req)
+	if err != nil {
+		return ctldapi.PrepareRootFSResponse{Error: err.Error()}, volumePortalErrorStatus(err)
+	}
+	return resp, http.StatusOK
+}
+
+func (c combinedController) CheckpointRootFS(r *http.Request, req ctldapi.CheckpointRootFSRequest) (ctldapi.CheckpointRootFSResponse, int) {
+	if c.Portal == nil {
+		return ctldapi.CheckpointRootFSResponse{Error: "ctld rootfs not implemented"}, http.StatusNotImplemented
+	}
+	resp, err := c.Portal.CheckpointRootFS(r.Context(), req)
+	if err != nil {
+		return ctldapi.CheckpointRootFSResponse{Error: err.Error()}, volumePortalErrorStatus(err)
+	}
+	return resp, http.StatusOK
+}
+
+func (c combinedController) ReleaseRootFS(r *http.Request, req ctldapi.ReleaseRootFSRequest) (ctldapi.ReleaseRootFSResponse, int) {
+	if c.Portal == nil {
+		return ctldapi.ReleaseRootFSResponse{Error: "ctld rootfs not implemented"}, http.StatusNotImplemented
+	}
+	resp, err := c.Portal.ReleaseRootFS(r.Context(), req)
+	if err != nil {
+		return ctldapi.ReleaseRootFSResponse{Error: err.Error()}, volumePortalErrorStatus(err)
+	}
+	return resp, http.StatusOK
+}
+
 func volumePortalErrorStatus(err error) int {
 	if err == nil {
 		return http.StatusOK
@@ -392,5 +513,8 @@ type volumePortalHandler interface {
 	PrepareSnapshotCheckpoint(ctx context.Context, req ctldapi.PrepareVolumeSnapshotCheckpointRequest) (ctldapi.PrepareVolumeSnapshotCheckpointResponse, error)
 	CompleteSnapshotCheckpoint(ctx context.Context, req ctldapi.CompleteVolumeSnapshotCheckpointRequest) (ctldapi.CompleteVolumeSnapshotCheckpointResponse, error)
 	AbortSnapshotCheckpoint(ctx context.Context, req ctldapi.AbortVolumeSnapshotCheckpointRequest) (ctldapi.AbortVolumeSnapshotCheckpointResponse, error)
+	PrepareRootFS(ctx context.Context, req ctldapi.PrepareRootFSRequest) (ctldapi.PrepareRootFSResponse, error)
+	CheckpointRootFS(ctx context.Context, req ctldapi.CheckpointRootFSRequest) (ctldapi.CheckpointRootFSResponse, error)
+	ReleaseRootFS(ctx context.Context, req ctldapi.ReleaseRootFSRequest) (ctldapi.ReleaseRootFSResponse, error)
 	MountedVolumeHandler() http.Handler
 }

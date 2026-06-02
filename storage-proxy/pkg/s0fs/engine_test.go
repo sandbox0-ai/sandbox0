@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -338,6 +339,111 @@ func TestEngineMetadataMutationReplay(t *testing.T) {
 	}
 	if !bytes.Equal(data, []byte("abc")) {
 		t.Fatalf("data after replay = %q, want abc", data)
+	}
+}
+
+func TestEngineMknodSpecialNodeReplay(t *testing.T) {
+	walPath := filepath.Join(t.TempDir(), "volume.wal")
+	engine, err := Open(context.Background(), Config{VolumeID: "vol-1", WALPath: walPath})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	node, err := engine.Mknod(RootInode, "console", syscall.S_IFCHR|0o600, 0x0501)
+	if err != nil {
+		t.Fatalf("Mknod() error = %v", err)
+	}
+	if node.Type != TypeCharDevice || node.Mode != 0o600 || node.Rdev != 0x0501 {
+		t.Fatalf("Mknod() node = %+v, want char device mode 0600 rdev 0x501", node)
+	}
+	if _, err := engine.Read(node.Inode, 0, 1); !errors.Is(err, ErrNotFile) {
+		t.Fatalf("Read(char device) err = %v, want ErrNotFile", err)
+	}
+	if _, err := engine.Write(node.Inode, 0, []byte("x")); !errors.Is(err, ErrNotFile) {
+		t.Fatalf("Write(char device) err = %v, want ErrNotFile", err)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	replayed, err := Open(context.Background(), Config{VolumeID: "vol-1", WALPath: walPath})
+	if err != nil {
+		t.Fatalf("Open(replay) error = %v", err)
+	}
+	defer replayed.Close()
+
+	replayedNode, err := replayed.Lookup(RootInode, "console")
+	if err != nil {
+		t.Fatalf("Lookup(console) error = %v", err)
+	}
+	if replayedNode.Type != TypeCharDevice || replayedNode.Mode != 0o600 || replayedNode.Rdev != 0x0501 {
+		t.Fatalf("replayed node = %+v, want char device mode 0600 rdev 0x501", replayedNode)
+	}
+}
+
+func TestEngineXattrReplayAndFlags(t *testing.T) {
+	walPath := filepath.Join(t.TempDir(), "volume.wal")
+	engine, err := Open(context.Background(), Config{VolumeID: "vol-1", WALPath: walPath})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	node, err := engine.CreateFile(RootInode, "meta.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if err := engine.SetXattr(node.Inode, "trusted.overlay.opaque", []byte("y"), XattrCreateFlag); err != nil {
+		t.Fatalf("SetXattr(create) error = %v", err)
+	}
+	if err := engine.SetXattr(node.Inode, "trusted.overlay.opaque", []byte("z"), XattrCreateFlag); !errors.Is(err, ErrExists) {
+		t.Fatalf("SetXattr(create existing) err = %v, want ErrExists", err)
+	}
+	if err := engine.SetXattr(node.Inode, "trusted.overlay.opaque", []byte(""), XattrReplaceFlag); err != nil {
+		t.Fatalf("SetXattr(replace empty) error = %v", err)
+	}
+	if err := engine.SetXattr(node.Inode, "user.note", []byte("note"), 0); err != nil {
+		t.Fatalf("SetXattr(user.note) error = %v", err)
+	}
+	if err := engine.SetXattr(node.Inode, "user.missing", []byte("missing"), XattrReplaceFlag); !errors.Is(err, ErrNoAttr) {
+		t.Fatalf("SetXattr(replace missing) err = %v, want ErrNoAttr", err)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	replayed, err := Open(context.Background(), Config{VolumeID: "vol-1", WALPath: walPath})
+	if err != nil {
+		t.Fatalf("Open(replay) error = %v", err)
+	}
+	defer replayed.Close()
+
+	replayedNode, err := replayed.Lookup(RootInode, "meta.txt")
+	if err != nil {
+		t.Fatalf("Lookup(meta) error = %v", err)
+	}
+	value, err := replayed.GetXattr(replayedNode.Inode, "trusted.overlay.opaque")
+	if err != nil {
+		t.Fatalf("GetXattr(opaque) error = %v", err)
+	}
+	if len(value) != 0 {
+		t.Fatalf("GetXattr(opaque) = %q, want empty value", value)
+	}
+	names, err := replayed.ListXattrs(replayedNode.Inode)
+	if err != nil {
+		t.Fatalf("ListXattrs() error = %v", err)
+	}
+	wantNames := []string{"trusted.overlay.opaque", "user.note"}
+	if len(names) != len(wantNames) || names[0] != wantNames[0] || names[1] != wantNames[1] {
+		t.Fatalf("ListXattrs() = %v, want %v", names, wantNames)
+	}
+	if err := replayed.RemoveXattr(replayedNode.Inode, "trusted.overlay.opaque"); err != nil {
+		t.Fatalf("RemoveXattr() error = %v", err)
+	}
+	if _, err := replayed.GetXattr(replayedNode.Inode, "trusted.overlay.opaque"); !errors.Is(err, ErrNoAttr) {
+		t.Fatalf("GetXattr(removed) err = %v, want ErrNoAttr", err)
+	}
+	if err := replayed.RemoveXattr(replayedNode.Inode, "trusted.overlay.opaque"); !errors.Is(err, ErrNoAttr) {
+		t.Fatalf("RemoveXattr(removed) err = %v, want ErrNoAttr", err)
 	}
 }
 

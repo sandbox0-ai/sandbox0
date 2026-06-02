@@ -45,6 +45,18 @@ func init() {
 				env, cleanup, setupErr = framework.SetupScenario(baseCfg, scenario)
 				Expect(setupErr).NotTo(HaveOccurred())
 				DeferCleanup(cleanup)
+				if env.Infra.Name == "rootfs-persistence" && !env.Config.UseExistingCluster {
+					Expect(framework.KubectlRolloutStatus(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, "daemonset/"+env.Infra.Name+"-ctld", "3m")).To(Succeed())
+					DeferCleanup(func() {
+						if err := framework.RestoreKindContainerdConfig(env.TestCtx.Context, env.Config.ClusterName); err != nil {
+							GinkgoWriter.Printf("restore kind containerd config failed: %v\n", err)
+						}
+					})
+					Expect(framework.ConfigureKindRootFSSnapshotter(env.TestCtx.Context, env.Config.ClusterName)).To(Succeed())
+					Expect(framework.Kubectl(env.TestCtx.Context, env.Config.Kubeconfig, "wait", "node", "--all", "--for=condition=Ready", "--timeout=2m")).To(Succeed())
+					Expect(framework.KubectlRolloutStatus(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, "daemonset/"+env.Infra.Name+"-ctld", "3m")).To(Succeed())
+					Expect(framework.KubectlRolloutStatus(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, "deployment/"+env.Infra.Name+"-manager", "3m")).To(Succeed())
+				}
 			})
 
 			AfterAll(func() {

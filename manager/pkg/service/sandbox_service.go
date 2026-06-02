@@ -21,22 +21,23 @@ import (
 
 // Sandbox represents a sandbox instance
 type Sandbox struct {
-	ID            string              `json:"id"`
-	TemplateID    string              `json:"template_id"`
-	TeamID        string              `json:"team_id"`
-	UserID        string              `json:"user_id"`
-	InternalAddr  string              `json:"internal_addr"`
-	Status        string              `json:"status"`
-	Paused        bool                `json:"paused"`
-	PowerState    SandboxPowerState   `json:"power_state"`
-	AutoResume    bool                `json:"auto_resume"`
-	Services      []SandboxAppService `json:"services,omitempty"`
-	Mounts        []ClaimMount        `json:"mounts,omitempty"`
-	PodName       string              `json:"pod_name"`
-	ExpiresAt     time.Time           `json:"expires_at"`
-	HardExpiresAt time.Time           `json:"hard_expires_at"`
-	ClaimedAt     time.Time           `json:"claimed_at"`
-	CreatedAt     time.Time           `json:"created_at"`
+	ID             string              `json:"id"`
+	TemplateID     string              `json:"template_id"`
+	TeamID         string              `json:"team_id"`
+	UserID         string              `json:"user_id"`
+	InternalAddr   string              `json:"internal_addr"`
+	Status         string              `json:"status"`
+	Paused         bool                `json:"paused"`
+	PowerState     SandboxPowerState   `json:"power_state"`
+	AutoResume     bool                `json:"auto_resume"`
+	Services       []SandboxAppService `json:"services,omitempty"`
+	Mounts         []ClaimMount        `json:"mounts,omitempty"`
+	RootFSVolumeID string              `json:"rootfs_volume_id,omitempty"`
+	PodName        string              `json:"pod_name"`
+	ExpiresAt      time.Time           `json:"expires_at"`
+	HardExpiresAt  time.Time           `json:"hard_expires_at"`
+	ClaimedAt      time.Time           `json:"claimed_at"`
+	CreatedAt      time.Time           `json:"created_at"`
 }
 
 // SandboxStatus represents possible sandbox statuses
@@ -92,19 +93,20 @@ var claimIdlePodBackoff = wait.Backoff{
 
 // SandboxServiceConfig handles configuration for SandboxService
 type SandboxServiceConfig struct {
-	DefaultTTL             time.Duration
-	PauseMinMemoryRequest  string
-	PauseMinMemoryLimit    string
-	PauseMemoryBufferRatio float64
-	PauseMinCPU            string
-	CtldEnabled            bool
-	CtldPort               int
-	CtldClientTimeout      time.Duration
-	CtldHTTPClient         *http.Client
-	ProcdPort              int
-	ProcdClientTimeout     time.Duration
-	ProcdHTTPClient        *http.Client
-	ProcdInitTimeout       time.Duration
+	DefaultTTL               time.Duration
+	PauseMinMemoryRequest    string
+	PauseMinMemoryLimit      string
+	PauseMemoryBufferRatio   float64
+	PauseMinCPU              string
+	CtldEnabled              bool
+	CtldPort                 int
+	CtldClientTimeout        time.Duration
+	CtldHTTPClient           *http.Client
+	RootFSPersistenceEnabled bool
+	ProcdPort                int
+	ProcdClientTimeout       time.Duration
+	ProcdHTTPClient          *http.Client
+	ProcdInitTimeout         time.Duration
 }
 
 // SandboxService handles sandbox operations

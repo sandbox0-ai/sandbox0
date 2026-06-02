@@ -36,7 +36,7 @@ func (s *SandboxService) RestoreCleanedSandboxRuntime(ctx context.Context, sandb
 				return k8serrors.NewConflict(corev1.Resource("pod"), existing.Name, fmt.Errorf("sandbox runtime deletion is still in progress"))
 			}
 			pod = existing
-			return tx.SaveRuntime(lockCtx, sandboxID, existing.Namespace, existing.Name, s.podToSandboxStatus(existing), runtimeGenerationFromPod(existing), parseRFC3339AnnotationTime(existing.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(existing.Annotations, controller.AnnotationHardExpiresAt))
+			return tx.SaveRuntime(lockCtx, sandboxID, existing.Namespace, existing.Name, existing.Spec.NodeName, s.podToSandboxStatus(existing), runtimeGenerationFromPod(existing), parseRFC3339AnnotationTime(existing.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(existing.Annotations, controller.AnnotationHardExpiresAt))
 		}
 		if getErr != nil && !k8serrors.IsNotFound(getErr) {
 			return fmt.Errorf("get current runtime pod: %w", getErr)
@@ -55,6 +55,8 @@ func (s *SandboxService) RestoreCleanedSandboxRuntime(ctx context.Context, sandb
 			Mounts:            locked.Mounts,
 			SandboxID:         locked.ID,
 			RuntimeGeneration: generation,
+			RootFSVolumeID:    locked.RootFSVolumeID,
+			RootFSNodeName:    rootfsRestoreNodeName(locked),
 		}
 		pod, err = s.claimIdlePod(lockCtx, template, req)
 		if err != nil {
@@ -67,7 +69,7 @@ func (s *SandboxService) RestoreCleanedSandboxRuntime(ctx context.Context, sandb
 				return fmt.Errorf("create runtime pod: %w", err)
 			}
 		}
-		return tx.SaveRuntime(lockCtx, sandboxID, pod.Namespace, pod.Name, SandboxStatusStarting, generation, parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt))
+		return tx.SaveRuntime(lockCtx, sandboxID, pod.Namespace, pod.Name, pod.Spec.NodeName, SandboxStatusStarting, generation, parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt))
 	})
 	if err != nil {
 		if errors.Is(err, ErrSandboxRecordNotFound) {
@@ -111,6 +113,8 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 		Mounts:            record.Mounts,
 		SandboxID:         record.ID,
 		RuntimeGeneration: record.RuntimeGeneration + 1,
+		RootFSVolumeID:    record.RootFSVolumeID,
+		RootFSNodeName:    rootfsRestoreNodeName(record),
 	}
 	if _, err := s.bindVolumePortals(ctx, pod, req, template); err != nil {
 		return fmt.Errorf("bind volume portals: %w", err)
@@ -136,6 +140,13 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 		)
 	}
 	return nil
+}
+
+func rootfsRestoreNodeName(record *SandboxRecord) string {
+	if record == nil || strings.TrimSpace(record.RootFSVolumeID) == "" {
+		return ""
+	}
+	return strings.TrimSpace(record.CurrentNodeName)
 }
 
 func (s *SandboxService) templateForSandboxRecord(record *SandboxRecord) (*v1alpha1.SandboxTemplate, error) {

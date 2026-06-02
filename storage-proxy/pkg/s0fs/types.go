@@ -8,12 +8,21 @@ import (
 
 const RootInode uint64 = 1
 
+const (
+	XattrCreateFlag  uint32 = 1
+	XattrReplaceFlag uint32 = 2
+)
+
 type FileType string
 
 const (
-	TypeDirectory FileType = "directory"
-	TypeFile      FileType = "file"
-	TypeSymlink   FileType = "symlink"
+	TypeDirectory   FileType = "directory"
+	TypeFile        FileType = "file"
+	TypeSymlink     FileType = "symlink"
+	TypeCharDevice  FileType = "char_device"
+	TypeBlockDevice FileType = "block_device"
+	TypeFIFO        FileType = "fifo"
+	TypeSocket      FileType = "socket"
 )
 
 type Config struct {
@@ -64,8 +73,10 @@ type Node struct {
 	UID    uint32
 	GID    uint32
 	Nlink  uint32
+	Rdev   uint32
 	Size   uint64
 	Target string
+	Xattrs map[string][]byte
 	Atime  time.Time
 	Mtime  time.Time
 	Ctime  time.Time
@@ -82,21 +93,31 @@ func cloneNode(node *Node) *Node {
 		return nil
 	}
 	clone := *node
+	if len(node.Xattrs) > 0 {
+		clone.Xattrs = make(map[string][]byte, len(node.Xattrs))
+		for name, value := range node.Xattrs {
+			clone.Xattrs[name] = append([]byte(nil), value...)
+		}
+	}
 	return &clone
 }
 
 type walRecord struct {
-	Seq       uint64   `json:"seq"`
-	Op        string   `json:"op"`
-	Inode     uint64   `json:"inode,omitempty"`
-	Parent    uint64   `json:"parent,omitempty"`
-	Name      string   `json:"name,omitempty"`
-	NewParent uint64   `json:"new_parent,omitempty"`
-	NewName   string   `json:"new_name,omitempty"`
-	Type      FileType `json:"type,omitempty"`
-	Mode      uint32   `json:"mode,omitempty"`
-	Offset    uint64   `json:"offset,omitempty"`
-	Data      []byte   `json:"data,omitempty"`
-	Target    string   `json:"target,omitempty"`
-	TimeUnix  int64    `json:"time_unix"`
+	Seq        uint64   `json:"seq"`
+	Op         string   `json:"op"`
+	Inode      uint64   `json:"inode,omitempty"`
+	Parent     uint64   `json:"parent,omitempty"`
+	Name       string   `json:"name,omitempty"`
+	NewParent  uint64   `json:"new_parent,omitempty"`
+	NewName    string   `json:"new_name,omitempty"`
+	Type       FileType `json:"type,omitempty"`
+	Mode       uint32   `json:"mode,omitempty"`
+	Rdev       uint32   `json:"rdev,omitempty"`
+	Offset     uint64   `json:"offset,omitempty"`
+	Data       []byte   `json:"data,omitempty"`
+	Target     string   `json:"target,omitempty"`
+	XattrName  string   `json:"xattr_name,omitempty"`
+	XattrValue []byte   `json:"xattr_value,omitempty"`
+	XattrFlags uint32   `json:"xattr_flags,omitempty"`
+	TimeUnix   int64    `json:"time_unix"`
 }

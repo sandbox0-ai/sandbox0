@@ -442,6 +442,10 @@ type ManagerConfig struct {
 	TeamTemplateMemoryPerCPU string `json:"teamTemplateMemoryPerCpu,omitempty"`
 	// +optional
 	SandboxRuntimeClassName string `json:"sandboxRuntimeClassName,omitempty"`
+	// RootFSPersistenceEnabled stores the sandbox writable rootfs in a manager-owned SandboxVolume.
+	// +optional
+	// +kubebuilder:default=false
+	RootFSPersistenceEnabled bool `json:"rootfsPersistenceEnabled,omitempty"`
 	// +optional
 	// +kubebuilder:default="30s"
 	NetdPolicyApplyTimeout metav1.Duration `json:"netdPolicyApplyTimeout,omitempty"`

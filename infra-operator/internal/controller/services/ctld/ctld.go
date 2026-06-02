@@ -291,6 +291,13 @@ func ctldArgs(infra *infrav1alpha1.Sandbox0Infra) []string {
 		fmt.Sprintf("-pause-min-cpu=%s", pauseMinCPU),
 		fmt.Sprintf("-default-sandbox-ttl=%s", defaultTTL),
 	}
+	if cfg != nil && cfg.RootFSPersistenceEnabled {
+		args = append(args,
+			"-rootfs-snapshotter=true",
+			"-rootfs-snapshotter-socket=/host-run/containerd/sandbox0-rootfs-snapshotter.sock",
+			"-rootfs-snapshotter-base=overlayfs",
+		)
+	}
 	return args
 }
 

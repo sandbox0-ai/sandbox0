@@ -69,6 +69,43 @@ func TestOperatorUpdateTemplateStatusUsesReadyIdlePods(t *testing.T) {
 	assert.Equal(t, TemplateCounts{IdleCount: 1, ActiveCount: 1}, op.lastStats["default/template-a"])
 }
 
+func TestOperatorUpdateTemplateStatusIgnoresMinIdleWhenIdlePoolDisabled(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			Pool: v1alpha1.PoolStrategy{
+				MinIdle: 2,
+				MaxIdle: 5,
+			},
+		},
+	}
+
+	podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
+		cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
+	})
+	op := &Operator{
+		podLister:       corelisters.NewPodLister(podIndexer),
+		logger:          zap.NewNop(),
+		lastStats:       make(map[string]TemplateCounts),
+		disableIdlePool: true,
+	}
+
+	needsProbeRequeue, err := op.updateTemplateStatus(context.Background(), template)
+	require.NoError(t, err)
+	assert.False(t, needsProbeRequeue)
+
+	assert.Equal(t, int32(0), template.Status.IdleCount)
+	assert.Equal(t, int32(0), template.Status.ActiveCount)
+	require.Len(t, template.Status.Conditions, 2)
+	assert.Equal(t, v1alpha1.ConditionTrue, template.Status.Conditions[0].Status)
+	assert.Equal(t, "PoolReady", template.Status.Conditions[0].Reason)
+	assert.Equal(t, v1alpha1.ConditionTrue, template.Status.Conditions[1].Status)
+	assert.Equal(t, "PoolHealthy", template.Status.Conditions[1].Reason)
+}
+
 func TestShouldRequeueSandboxProbe(t *testing.T) {
 	pod := newOperatorTestPod("default", "idle-not-ready", "template-a", PoolTypeIdle, corev1.PodRunning, corev1.ConditionTrue)
 	pod.Spec.ReadinessGates = []corev1.PodReadinessGate{{

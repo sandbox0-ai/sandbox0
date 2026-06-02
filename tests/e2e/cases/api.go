@@ -20,15 +20,17 @@ func RegisterApiSuite(envProvider func() *framework.ScenarioEnv) {
 		registerApiNetworkPolicySuite(envProvider)
 		registerApiVolumesSuite(envProvider)
 		registerApiFullModeSuite(envProvider)
+		registerApiRootFSPersistenceSuite(envProvider)
 		registerApiUnknownSuite(envProvider)
 	})
 }
 
 var knownApiScenarios = map[string]struct{}{
-	"minimal":        {},
-	"network-policy": {},
-	"volumes":        {},
-	"fullmode":       {},
+	"minimal":            {},
+	"network-policy":     {},
+	"rootfs-persistence": {},
+	"volumes":            {},
+	"fullmode":           {},
 }
 
 func normalizeScenarioName(name string) string {

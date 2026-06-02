@@ -164,6 +164,19 @@ func TestReconcilePassesPauseConfigToCtld(t *testing.T) {
 	assertContainsArg(t, args, "-default-sandbox-ttl=5m0s")
 }
 
+func TestReconcileEnablesRootFSSnapshotterWhenRootFSPersistenceEnabled(t *testing.T) {
+	infra := newCtldTestInfra()
+	infra.Spec.Services.Manager.Config = &infrav1alpha1.ManagerConfig{
+		RootFSPersistenceEnabled: true,
+	}
+
+	ds := reconcileCtldDaemonSet(t, infra)
+	args := ds.Spec.Template.Spec.Containers[0].Args
+	assertContainsArg(t, args, "-rootfs-snapshotter=true")
+	assertContainsArg(t, args, "-rootfs-snapshotter-socket=/host-run/containerd/sandbox0-rootfs-snapshotter.sock")
+	assertContainsArg(t, args, "-rootfs-snapshotter-base=overlayfs")
+}
+
 func TestReconcileMountsObjectEncryptionKeyWhenEnabled(t *testing.T) {
 	infra := newCtldTestInfra()
 	infra.Spec.Services.StorageProxy = &infrav1alpha1.StorageProxyServiceConfig{

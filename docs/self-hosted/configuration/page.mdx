@@ -303,6 +303,7 @@ Examples:
 
 - `services.clusterGateway.config.authMode` switches between `public`, `internal`, and `both`
 - `services.manager.config.autoscaler.*` tunes pool scale behavior
+- `services.manager.config.rootfsPersistenceEnabled` creates a manager-owned SandboxVolume for each sandbox writable rootfs and writes the node runtime annotation contract; it requires `ctld` plus a compatible rootfs upperdir runtime or snapshotter on sandbox nodes, and clean restore prefers the previous node while that node-local upperdir owner is active
 - `services.storageProxy.config.filesystem*` tunes filesystem behavior; `services.manager.config.procdConfig.volume*` tunes mounted volume cache sizing
 - `services.storageProxy.config.s0fsSegmentTargetSize` sets the target S0FS segment size for materialized volume data; the default is `4Mi`
 - `services.storageProxy.config.s0fsCompaction*` tunes background S0FS compaction for RWO volume owners; `s0fsCompactionInterval` accepts `0`, `off`, or `disabled` to turn it off
@@ -311,9 +312,24 @@ Examples:
 - `services.netd.config.egressBandwidthBytesPerSecond`, `ingressBandwidthBytesPerSecond`, and `bandwidthBurstBytes` apply per-sandbox bandwidth throttling when set above zero
 - `services.netd.config.*` also controls proxy ports, policy enforcement, and node-level networking behavior
 
+When `rootfsPersistenceEnabled` is enabled, `ctld` also serves a containerd proxy snapshotter on the host at `/run/containerd/sandbox0-rootfs-snapshotter.sock`. Configure containerd to register that proxy snapshotter and use it for sandbox workloads. The exact CRI plugin path differs across containerd versions, but the node-level intent is:
+
+```toml
+[proxy_plugins]
+    [proxy_plugins.sandbox0-rootfs]
+        type = "snapshot"
+        address = "/run/containerd/sandbox0-rootfs-snapshotter.sock"
+
+[plugins."io.containerd.cri.v1.runtime".containerd]
+    snapshotter = "sandbox0-rootfs"
+```
+
 ```yaml
 spec:
     services:
+        manager:
+            config:
+                rootfsPersistenceEnabled: true
         storageProxy:
             config:
                 cacheSizeLimit: 20Gi

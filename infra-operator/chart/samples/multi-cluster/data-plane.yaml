@@ -123,6 +123,7 @@ spec:
       replicas: 1
       # config:
       #   sandboxRuntimeClassName: kata
+      #   rootfsPersistenceEnabled: true
     storageProxy:
       enabled: true
       replicas: 1

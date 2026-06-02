@@ -23,6 +23,7 @@ import (
 const (
 	webhookStateMountPoint = volumeportal.WebhookStateMountPath
 	webhookStateVolumeKind = "webhook-state"
+	rootfsVolumeKind       = "rootfs"
 )
 
 var ErrVolumePortalBindConflict = errors.New("volume portal bind conflict")
@@ -393,6 +394,35 @@ type webhookStateVolume struct {
 	VolumeID string
 }
 
+type rootfsVolume struct {
+	VolumeID string
+	Created  bool
+}
+
+func (s *SandboxService) prepareRootFSVolume(ctx context.Context, req *ClaimRequest, sandboxID string) (*rootfsVolume, error) {
+	if s == nil || req == nil || !s.config.RootFSPersistenceEnabled {
+		return nil, nil
+	}
+	if !s.config.CtldEnabled {
+		return nil, fmt.Errorf("rootfs persistence requires ctld")
+	}
+	if s.config.CtldPort <= 0 {
+		return nil, fmt.Errorf("rootfs persistence requires a ctld port")
+	}
+	if volumeID := strings.TrimSpace(req.RootFSVolumeID); volumeID != "" {
+		return &rootfsVolume{VolumeID: volumeID}, nil
+	}
+	if s.webhookStateVolumes == nil {
+		return nil, fmt.Errorf("rootfs system volume client is not configured")
+	}
+	volumeID, err := s.webhookStateVolumes.Create(ctx, req.TeamID, req.UserID, sandboxID, rootfsVolumeKind)
+	if err != nil {
+		return nil, err
+	}
+	req.RootFSVolumeID = volumeID
+	return &rootfsVolume{VolumeID: volumeID, Created: true}, nil
+}
+
 func (s *SandboxService) prepareWebhookStateVolume(ctx context.Context, req *ClaimRequest, sandboxID string) (*webhookStateVolume, error) {
 	if s == nil || s.getWebhookInfo(req) == nil {
 		return nil, nil
@@ -413,7 +443,7 @@ func (s *SandboxService) deleteWebhookStateVolume(ctx context.Context, info Sand
 	if s == nil || s.webhookStateVolumes == nil || strings.TrimSpace(info.SandboxID) == "" {
 		return nil
 	}
-	if strings.TrimSpace(info.WebhookStateVolumeID) == "" && strings.TrimSpace(info.WebhookURL) == "" {
+	if strings.TrimSpace(info.WebhookStateVolumeID) == "" && strings.TrimSpace(info.RootFSVolumeID) == "" && strings.TrimSpace(info.WebhookURL) == "" {
 		return nil
 	}
 	return s.webhookStateVolumes.MarkSandboxForCleanup(ctx, info.TeamID, info.UserID, info.SandboxID, "sandbox_deleted")

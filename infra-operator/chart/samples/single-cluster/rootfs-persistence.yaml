@@ -1,0 +1,58 @@
+# Example: Single-cluster rootfs persistence mode.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandbox0-system
+---
+apiVersion: infra.sandbox0.ai/v1alpha1
+kind: Sandbox0Infra
+metadata:
+  name: rootfs-persistence
+  namespace: sandbox0-system
+spec:
+  database:
+    type: builtin
+    builtin:
+      enabled: true
+      persistence:
+        size: "20Gi"
+  publicExposure:
+    enabled: true
+    rootDomain: sandbox0.app
+    regionId: aws-us-east-1
+  storage:
+    type: builtin
+    builtin:
+      enabled: true
+      persistence:
+        size: "20Gi"
+  builtinTemplates:
+    - templateId: default
+      image: sandbox0ai/otemplates:default-v0.2.0
+      displayName: Default
+      description: Builtin template installed by infra-operator.
+      pool:
+        minIdle: 0
+        maxIdle: 0
+  services:
+    clusterGateway:
+      enabled: true
+      replicas: 1
+      service:
+        type: NodePort
+        port: 30080
+      config:
+        authMode: public
+    manager:
+      enabled: true
+      replicas: 1
+      config:
+        cleanupInterval: 5s
+        rootfsPersistenceEnabled: true
+    storageProxy:
+      enabled: true
+      replicas: 1
+      config:
+        objectEncryptionEnabled: true
+  initUser:
+    email: "admin@example.com"

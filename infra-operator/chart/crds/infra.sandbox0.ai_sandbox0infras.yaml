@@ -2998,6 +2998,11 @@ spec:
                           resyncPeriod:
                             default: 30s
                             type: string
+                          rootfsPersistenceEnabled:
+                            default: false
+                            description: RootFSPersistenceEnabled stores the sandbox
+                              writable rootfs in a manager-owned SandboxVolume.
+                            type: boolean
                           sandboxRuntimeClassName:
                             type: string
                           shutdownTimeout:

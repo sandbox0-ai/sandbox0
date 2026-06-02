@@ -26,6 +26,7 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 	cfg.DefaultSandboxTTL = spec.DefaultSandboxTTL
 	cfg.TeamTemplateMemoryPerCPU = spec.TeamTemplateMemoryPerCPU
 	cfg.SandboxRuntimeClassName = spec.SandboxRuntimeClassName
+	cfg.RootFSPersistenceEnabled = spec.RootFSPersistenceEnabled
 	cfg.NetdPolicyApplyTimeout = spec.NetdPolicyApplyTimeout
 	cfg.NetdPolicyApplyPollInterval = spec.NetdPolicyApplyPollInterval
 	cfg.PauseMinMemoryRequest = spec.PauseMinMemoryRequest

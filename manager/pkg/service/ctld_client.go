@@ -72,6 +72,18 @@ func (c *CtldClient) AbortVolumePortalHandoff(ctx context.Context, ctldAddress s
 	return c.apiOrDefault().AbortVolumePortalHandoff(ctx, ctldAddress, req)
 }
 
+func (c *CtldClient) PrepareRootFS(ctx context.Context, ctldAddress string, req ctldapi.PrepareRootFSRequest) (*ctldapi.PrepareRootFSResponse, error) {
+	return c.apiOrDefault().PrepareRootFS(ctx, ctldAddress, req)
+}
+
+func (c *CtldClient) CheckpointRootFS(ctx context.Context, ctldAddress string, req ctldapi.CheckpointRootFSRequest) (*ctldapi.CheckpointRootFSResponse, error) {
+	return c.apiOrDefault().CheckpointRootFS(ctx, ctldAddress, req)
+}
+
+func (c *CtldClient) ReleaseRootFS(ctx context.Context, ctldAddress string, req ctldapi.ReleaseRootFSRequest) (*ctldapi.ReleaseRootFSResponse, error) {
+	return c.apiOrDefault().ReleaseRootFS(ctx, ctldAddress, req)
+}
+
 func (c *CtldClient) apiOrDefault() *ctldapi.Client {
 	if c != nil && c.api != nil {
 		return c.api

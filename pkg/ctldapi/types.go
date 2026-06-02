@@ -162,3 +162,40 @@ type ReleaseVolumeOwnerResponse struct {
 	Busy     bool   `json:"busy,omitempty"`
 	Error    string `json:"error,omitempty"`
 }
+
+// PrepareRootFSRequest prepares a node-local s0fs mount that can be used as an
+// overlayfs upperdir/workdir pair for a sandbox writable rootfs.
+type PrepareRootFSRequest struct {
+	SandboxID      string `json:"sandbox_id"`
+	TeamID         string `json:"team_id"`
+	RootFSVolumeID string `json:"rootfs_volume_id"`
+}
+
+type PrepareRootFSResponse struct {
+	Prepared       bool   `json:"prepared"`
+	SandboxID      string `json:"sandbox_id,omitempty"`
+	RootFSVolumeID string `json:"rootfs_volume_id,omitempty"`
+	MountPoint     string `json:"mount_point,omitempty"`
+	UpperDir       string `json:"upper_dir,omitempty"`
+	WorkDir        string `json:"work_dir,omitempty"`
+	MountedAt      string `json:"mounted_at,omitempty"`
+	Error          string `json:"error,omitempty"`
+}
+
+type CheckpointRootFSRequest struct {
+	SandboxID string `json:"sandbox_id"`
+}
+
+type CheckpointRootFSResponse struct {
+	Checkpointed bool   `json:"checkpointed"`
+	Error        string `json:"error,omitempty"`
+}
+
+type ReleaseRootFSRequest struct {
+	SandboxID string `json:"sandbox_id"`
+}
+
+type ReleaseRootFSResponse struct {
+	Released bool   `json:"released"`
+	Error    string `json:"error,omitempty"`
+}

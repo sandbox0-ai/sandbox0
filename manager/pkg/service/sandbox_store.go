@@ -37,9 +37,11 @@ type SandboxRecord struct {
 	Status              string
 	Config              SandboxConfig
 	Mounts              []ClaimMount
+	RootFSVolumeID      string
 	TemplateSpec        v1alpha1.SandboxTemplateSpec
 	CurrentPodName      string
 	CurrentPodNamespace string
+	CurrentNodeName     string
 	RuntimeGeneration   int64
 	ClaimedAt           time.Time
 	ExpiresAt           time.Time
@@ -60,8 +62,8 @@ type SandboxStore interface {
 
 // SandboxStoreTx is a locked sandbox store transaction.
 type SandboxStoreTx interface {
-	SaveRuntime(ctx context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time) error
-	MarkRuntimeCleaned(ctx context.Context, sandboxID string, generation int64, cleanedAt time.Time) error
+	SaveRuntime(ctx context.Context, sandboxID, namespace, podName, nodeName, status string, generation int64, expiresAt, hardExpiresAt time.Time) error
+	MarkRuntimeCleaned(ctx context.Context, sandboxID string, generation int64, nodeName string, cleanedAt time.Time) error
 }
 
 type PGSandboxStore struct {
@@ -105,11 +107,11 @@ func (s *PGSandboxStore) UpsertSandbox(ctx context.Context, record *SandboxRecor
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO manager.sandboxes (
 			sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
-			cluster_id, status, config, mounts, template_spec,
-			current_pod_name, current_pod_namespace, runtime_generation,
+			cluster_id, status, config, mounts, rootfs_volume_id, template_spec,
+			current_pod_name, current_pod_namespace, current_node_name, runtime_generation,
 			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, COALESCE($19, NOW()), NOW())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, COALESCE($21, NOW()), NOW())
 		ON CONFLICT (sandbox_id) DO UPDATE SET
 			team_id = EXCLUDED.team_id,
 			user_id = EXCLUDED.user_id,
@@ -120,9 +122,11 @@ func (s *PGSandboxStore) UpsertSandbox(ctx context.Context, record *SandboxRecor
 			status = EXCLUDED.status,
 			config = EXCLUDED.config,
 			mounts = EXCLUDED.mounts,
+			rootfs_volume_id = EXCLUDED.rootfs_volume_id,
 			template_spec = EXCLUDED.template_spec,
 			current_pod_name = EXCLUDED.current_pod_name,
 			current_pod_namespace = EXCLUDED.current_pod_namespace,
+			current_node_name = EXCLUDED.current_node_name,
 			runtime_generation = EXCLUDED.runtime_generation,
 			claimed_at = EXCLUDED.claimed_at,
 			expires_at = EXCLUDED.expires_at,
@@ -130,8 +134,8 @@ func (s *PGSandboxStore) UpsertSandbox(ctx context.Context, record *SandboxRecor
 			deleted_at = EXCLUDED.deleted_at,
 			updated_at = NOW()
 	`, record.ID, record.TeamID, record.UserID, record.TemplateID, record.TemplateName, record.TemplateNamespace,
-		record.ClusterID, record.Status, configJSON, mountsJSON, specJSON,
-		record.CurrentPodName, record.CurrentPodNamespace, record.RuntimeGeneration,
+		record.ClusterID, record.Status, configJSON, mountsJSON, record.RootFSVolumeID, specJSON,
+		record.CurrentPodName, record.CurrentPodNamespace, record.CurrentNodeName, record.RuntimeGeneration,
 		nullableTime(record.ClaimedAt), nullableTime(record.ExpiresAt), nullableTime(record.HardExpiresAt), nullableTime(record.DeletedAt), nullableTime(record.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("upsert sandbox: %w", err)
@@ -187,6 +191,7 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 		SET status = $2,
 			current_pod_name = '',
 			current_pod_namespace = '',
+			current_node_name = '',
 			deleted_at = $3,
 			updated_at = NOW()
 		WHERE sandbox_id = $1
@@ -226,36 +231,38 @@ type sandboxStoreTx struct {
 	tx pgx.Tx
 }
 
-func (t sandboxStoreTx) SaveRuntime(ctx context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time) error {
+func (t sandboxStoreTx) SaveRuntime(ctx context.Context, sandboxID, namespace, podName, nodeName, status string, generation int64, expiresAt, hardExpiresAt time.Time) error {
 	_, err := t.tx.Exec(ctx, `
 		UPDATE manager.sandboxes
 		SET status = $2,
 			current_pod_namespace = $3,
 			current_pod_name = $4,
-			runtime_generation = $5,
-			expires_at = $6,
-			hard_expires_at = $7,
+			current_node_name = $5,
+			runtime_generation = $6,
+			expires_at = $7,
+			hard_expires_at = $8,
 			deleted_at = NULL,
 			updated_at = NOW()
 		WHERE sandbox_id = $1
-	`, sandboxID, status, namespace, podName, generation, nullableTime(expiresAt), nullableTime(hardExpiresAt))
+	`, sandboxID, status, namespace, podName, nodeName, generation, nullableTime(expiresAt), nullableTime(hardExpiresAt))
 	if err != nil {
 		return fmt.Errorf("save sandbox runtime: %w", err)
 	}
 	return nil
 }
 
-func (t sandboxStoreTx) MarkRuntimeCleaned(ctx context.Context, sandboxID string, generation int64, cleanedAt time.Time) error {
+func (t sandboxStoreTx) MarkRuntimeCleaned(ctx context.Context, sandboxID string, generation int64, nodeName string, cleanedAt time.Time) error {
 	_, err := t.tx.Exec(ctx, `
 		UPDATE manager.sandboxes
 		SET status = $2,
 			current_pod_namespace = '',
 			current_pod_name = '',
+			current_node_name = COALESCE(NULLIF($4, ''), current_node_name),
 			runtime_generation = GREATEST(runtime_generation, $3),
 			expires_at = NULL,
 			updated_at = NOW()
 		WHERE sandbox_id = $1
-	`, sandboxID, SandboxStatusCleaned, generation)
+	`, sandboxID, SandboxStatusCleaned, generation, nodeName)
 	if err != nil {
 		return fmt.Errorf("mark sandbox runtime cleaned: %w", err)
 	}
@@ -265,8 +272,8 @@ func (t sandboxStoreTx) MarkRuntimeCleaned(ctx context.Context, sandboxID string
 func sandboxRecordSelectSQL() string {
 	return `
 		SELECT sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
-			cluster_id, status, config, mounts, template_spec,
-			current_pod_name, current_pod_namespace, runtime_generation,
+			cluster_id, status, config, mounts, rootfs_volume_id, template_spec,
+			current_pod_name, current_pod_namespace, current_node_name, runtime_generation,
 			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 		FROM manager.sandboxes`
 }
@@ -300,8 +307,8 @@ func scanSandboxRecordInto(scanner sandboxRecordScanner) (*SandboxRecord, error)
 	var claimedAt, expiresAt, hardExpiresAt, deletedAt *time.Time
 	if err := scanner.Scan(
 		&record.ID, &record.TeamID, &record.UserID, &record.TemplateID, &record.TemplateName, &record.TemplateNamespace,
-		&record.ClusterID, &record.Status, &configJSON, &mountsJSON, &specJSON,
-		&record.CurrentPodName, &record.CurrentPodNamespace, &record.RuntimeGeneration,
+		&record.ClusterID, &record.Status, &configJSON, &mountsJSON, &record.RootFSVolumeID, &specJSON,
+		&record.CurrentPodName, &record.CurrentPodNamespace, &record.CurrentNodeName, &record.RuntimeGeneration,
 		&claimedAt, &expiresAt, &hardExpiresAt, &deletedAt, &record.CreatedAt, &record.UpdatedAt,
 	); err != nil {
 		return nil, err

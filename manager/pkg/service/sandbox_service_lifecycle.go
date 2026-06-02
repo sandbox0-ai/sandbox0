@@ -86,7 +86,7 @@ func (s *SandboxService) CleanSandboxRuntime(ctx context.Context, sandboxID stri
 		if err != nil {
 			if k8serrors.IsNotFound(err) {
 				if tx != nil {
-					return tx.MarkRuntimeCleaned(ctx, sandboxID, 0, s.clock.Now())
+					return tx.MarkRuntimeCleaned(ctx, sandboxID, 0, "", s.clock.Now())
 				}
 				return nil
 			}
@@ -105,7 +105,7 @@ func (s *SandboxService) CleanSandboxRuntime(ctx context.Context, sandboxID stri
 			return fmt.Errorf("delete runtime pod: %w", err)
 		}
 		if tx != nil {
-			return tx.MarkRuntimeCleaned(ctx, sandboxID, generation, s.clock.Now())
+			return tx.MarkRuntimeCleaned(ctx, sandboxID, generation, pod.Spec.NodeName, s.clock.Now())
 		}
 		return nil
 	}
@@ -395,9 +395,11 @@ func (s *SandboxService) persistUpdatedSandboxPod(ctx context.Context, pod *core
 		Status:              s.podToSandboxStatus(pod),
 		Config:              parseSandboxConfig(pod.Annotations[controller.AnnotationConfig]),
 		Mounts:              parseClaimMounts(pod.Annotations[controller.AnnotationMounts]),
+		RootFSVolumeID:      strings.TrimSpace(pod.Annotations[controller.AnnotationRootFSVolumeID]),
 		TemplateSpec:        template.Spec,
 		CurrentPodName:      pod.Name,
 		CurrentPodNamespace: pod.Namespace,
+		CurrentNodeName:     pod.Spec.NodeName,
 		RuntimeGeneration:   runtimeGenerationFromPod(pod),
 		ClaimedAt:           parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationClaimedAt),
 		ExpiresAt:           parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt),
@@ -495,22 +497,23 @@ func (s *SandboxService) podToSandbox(ctx context.Context, pod *corev1.Pod, sand
 	powerState := sandboxPowerStateFromAnnotations(pod.Annotations)
 
 	return &Sandbox{
-		ID:            sandboxID,
-		TemplateID:    sandboxTemplateIDFromLabels(pod.Labels),
-		TeamID:        pod.Annotations[controller.AnnotationTeamID],
-		UserID:        pod.Annotations[controller.AnnotationUserID],
-		InternalAddr:  internalAddr,
-		Status:        status,
-		Paused:        powerState.Observed == SandboxPowerStatePaused,
-		PowerState:    powerState,
-		AutoResume:    autoResume,
-		Services:      cfg.Services,
-		Mounts:        parseClaimMounts(pod.Annotations[controller.AnnotationMounts]),
-		PodName:       pod.Name,
-		ExpiresAt:     expiresAt,
-		HardExpiresAt: hardExpiresAt,
-		ClaimedAt:     claimedAt,
-		CreatedAt:     createdAt,
+		ID:             sandboxID,
+		TemplateID:     sandboxTemplateIDFromLabels(pod.Labels),
+		TeamID:         pod.Annotations[controller.AnnotationTeamID],
+		UserID:         pod.Annotations[controller.AnnotationUserID],
+		InternalAddr:   internalAddr,
+		Status:         status,
+		Paused:         powerState.Observed == SandboxPowerStatePaused,
+		PowerState:     powerState,
+		AutoResume:     autoResume,
+		Services:       cfg.Services,
+		Mounts:         parseClaimMounts(pod.Annotations[controller.AnnotationMounts]),
+		RootFSVolumeID: strings.TrimSpace(pod.Annotations[controller.AnnotationRootFSVolumeID]),
+		PodName:        pod.Name,
+		ExpiresAt:      expiresAt,
+		HardExpiresAt:  hardExpiresAt,
+		ClaimedAt:      claimedAt,
+		CreatedAt:      createdAt,
 	}
 }
 
@@ -530,21 +533,22 @@ func (s *SandboxService) recordToSandbox(record *SandboxRecord) *Sandbox {
 		Phase:              SandboxPowerPhaseStable,
 	}
 	return &Sandbox{
-		ID:            record.ID,
-		TemplateID:    record.TemplateID,
-		TeamID:        record.TeamID,
-		UserID:        record.UserID,
-		Status:        record.Status,
-		Paused:        false,
-		PowerState:    powerState,
-		AutoResume:    autoResume,
-		Services:      record.Config.Services,
-		Mounts:        record.Mounts,
-		PodName:       record.CurrentPodName,
-		ExpiresAt:     record.ExpiresAt,
-		HardExpiresAt: record.HardExpiresAt,
-		ClaimedAt:     record.ClaimedAt,
-		CreatedAt:     record.CreatedAt,
+		ID:             record.ID,
+		TemplateID:     record.TemplateID,
+		TeamID:         record.TeamID,
+		UserID:         record.UserID,
+		Status:         record.Status,
+		Paused:         false,
+		PowerState:     powerState,
+		AutoResume:     autoResume,
+		Services:       record.Config.Services,
+		Mounts:         record.Mounts,
+		RootFSVolumeID: record.RootFSVolumeID,
+		PodName:        record.CurrentPodName,
+		ExpiresAt:      record.ExpiresAt,
+		HardExpiresAt:  record.HardExpiresAt,
+		ClaimedAt:      record.ClaimedAt,
+		CreatedAt:      record.CreatedAt,
 	}
 }
 
@@ -553,11 +557,16 @@ func sandboxLifecycleInfoFromRecord(record *SandboxRecord) SandboxLifecycleInfo 
 		return SandboxLifecycleInfo{}
 	}
 	info := SandboxLifecycleInfo{
-		Namespace: record.CurrentPodNamespace,
-		PodName:   record.CurrentPodName,
-		SandboxID: record.ID,
-		TeamID:    record.TeamID,
-		UserID:    record.UserID,
+		Namespace:      record.CurrentPodNamespace,
+		PodName:        record.CurrentPodName,
+		SandboxID:      record.ID,
+		TeamID:         record.TeamID,
+		UserID:         record.UserID,
+		RootFSVolumeID: record.RootFSVolumeID,
+		NodeName:       record.CurrentNodeName,
+	}
+	if strings.TrimSpace(record.RootFSVolumeID) != "" {
+		info.RootFSMode = controller.RootFSModeS0FSUpperdir
 	}
 	if record.Config.Webhook != nil {
 		info.WebhookURL = strings.TrimSpace(record.Config.Webhook.URL)

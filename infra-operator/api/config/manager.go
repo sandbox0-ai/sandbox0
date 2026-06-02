@@ -82,6 +82,9 @@ type ManagerConfig struct {
 	TeamTemplateMemoryPerCPU string `yaml:"team_template_memory_per_cpu" json:"teamTemplateMemoryPerCpu"`
 	// +optional
 	SandboxRuntimeClassName string `yaml:"sandbox_runtime_class_name" json:"sandboxRuntimeClassName"`
+	// +optional
+	// +kubebuilder:default=false
+	RootFSPersistenceEnabled bool `yaml:"rootfs_persistence_enabled" json:"rootfsPersistenceEnabled"`
 
 	// NetworkPolicyProvider selects the dataplane integration used to enforce sandbox network policy.
 	// +optional

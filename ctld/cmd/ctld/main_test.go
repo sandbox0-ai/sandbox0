@@ -144,12 +144,72 @@ func TestReleaseVolumeOwnerReturnsConflictForBusyOwner(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rec.Code)
 }
 
+func TestRootFSPrepareRouteForwardsToPortalHandler(t *testing.T) {
+	portal := fakeVolumePortalHandler{
+		rootfsPrepareResp: ctldapi.PrepareRootFSResponse{
+			Prepared:       true,
+			SandboxID:      "sandbox-1",
+			RootFSVolumeID: "vol-rootfs",
+			UpperDir:       "/var/lib/sandbox0/ctld/rootfs/team/sandbox/vol/s0fs/upper",
+			WorkDir:        "/var/lib/sandbox0/ctld/rootfs/team/sandbox/vol/s0fs/work",
+		},
+	}
+	server := newHTTPServer(":0", combinedController{
+		Controller: ctldserver.NotImplementedController{},
+		Portal:     portal,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rootfs/prepare", strings.NewReader(`{"sandbox_id":"sandbox-1","team_id":"team-a","rootfs_volume_id":"vol-rootfs"}`))
+	rec := httptest.NewRecorder()
+	server.Handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp ctldapi.PrepareRootFSResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.True(t, resp.Prepared)
+	assert.Equal(t, "vol-rootfs", resp.RootFSVolumeID)
+	assert.NotEmpty(t, resp.UpperDir)
+	assert.NotEmpty(t, resp.WorkDir)
+}
+
+func TestLocalRootFSPrepareClientCallsPortal(t *testing.T) {
+	client := localRootFSPrepareClient{
+		portal: fakeVolumePortalHandler{
+			rootfsPrepareResp: ctldapi.PrepareRootFSResponse{
+				Prepared:       true,
+				SandboxID:      "sandbox-a",
+				RootFSVolumeID: "rootfs-a",
+				UpperDir:       "/s0fs/upper",
+				WorkDir:        "/s0fs/work",
+			},
+		},
+	}
+
+	resp, err := client.PrepareRootFS(context.Background(), "", ctldapi.PrepareRootFSRequest{
+		SandboxID:      "sandbox-a",
+		TeamID:         "team-a",
+		RootFSVolumeID: "rootfs-a",
+	})
+	require.NoError(t, err)
+	assert.True(t, resp.Prepared)
+	assert.Equal(t, "/s0fs/upper", resp.UpperDir)
+}
+
+func TestNormalizeRootFSCRIEndpoint(t *testing.T) {
+	assert.Equal(t, "unix:///host-run/containerd/containerd.sock", normalizeRootFSCRIEndpoint(""))
+	assert.Equal(t, "unix:///host-run/containerd/containerd.sock", normalizeRootFSCRIEndpoint("/host-run/containerd/containerd.sock"))
+	assert.Equal(t, "unix:///custom.sock", normalizeRootFSCRIEndpoint("unix:///custom.sock"))
+	assert.Equal(t, "dns:///cri.example", normalizeRootFSCRIEndpoint("dns:///cri.example"))
+}
+
 type fakeVolumePortalHandler struct {
-	mountedHandler http.Handler
-	bindErr        error
-	prepareErr     error
-	releaseResp    ctldapi.ReleaseVolumeOwnerResponse
-	releaseErr     error
+	mountedHandler    http.Handler
+	bindErr           error
+	prepareErr        error
+	releaseResp       ctldapi.ReleaseVolumeOwnerResponse
+	releaseErr        error
+	rootfsPrepareResp ctldapi.PrepareRootFSResponse
+	rootfsPrepareErr  error
 }
 
 func (f fakeVolumePortalHandler) Bind(_ context.Context, _ ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, error) {
@@ -206,6 +266,24 @@ func (f fakeVolumePortalHandler) CompleteSnapshotCheckpoint(_ context.Context, _
 
 func (f fakeVolumePortalHandler) AbortSnapshotCheckpoint(_ context.Context, _ ctldapi.AbortVolumeSnapshotCheckpointRequest) (ctldapi.AbortVolumeSnapshotCheckpointResponse, error) {
 	return ctldapi.AbortVolumeSnapshotCheckpointResponse{Aborted: true}, nil
+}
+
+func (f fakeVolumePortalHandler) PrepareRootFS(_ context.Context, _ ctldapi.PrepareRootFSRequest) (ctldapi.PrepareRootFSResponse, error) {
+	if f.rootfsPrepareErr != nil {
+		return ctldapi.PrepareRootFSResponse{}, f.rootfsPrepareErr
+	}
+	if f.rootfsPrepareResp.Prepared || f.rootfsPrepareResp.Error != "" {
+		return f.rootfsPrepareResp, nil
+	}
+	return ctldapi.PrepareRootFSResponse{Prepared: true}, nil
+}
+
+func (f fakeVolumePortalHandler) CheckpointRootFS(context.Context, ctldapi.CheckpointRootFSRequest) (ctldapi.CheckpointRootFSResponse, error) {
+	return ctldapi.CheckpointRootFSResponse{Checkpointed: true}, nil
+}
+
+func (f fakeVolumePortalHandler) ReleaseRootFS(context.Context, ctldapi.ReleaseRootFSRequest) (ctldapi.ReleaseRootFSResponse, error) {
+	return ctldapi.ReleaseRootFSResponse{Released: true}, nil
 }
 
 func (f fakeVolumePortalHandler) MountedVolumeHandler() http.Handler {

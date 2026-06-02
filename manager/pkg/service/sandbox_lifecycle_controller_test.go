@@ -307,6 +307,157 @@ func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForCleanedRunti
 	}
 }
 
+func TestSandboxServiceCleanupDeletedSandboxCheckpointsRootFSForCleanedRuntime(t *testing.T) {
+	var got ctldapi.CheckpointRootFSRequest
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/rootfs/checkpoint" {
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode checkpoint request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ctldapi.CheckpointRootFSResponse{Checkpointed: true})
+	}))
+	defer ctld.Close()
+
+	ctldURL, err := url.Parse(ctld.URL)
+	if err != nil {
+		t.Fatalf("parse ctld url: %v", err)
+	}
+	ctldPort, err := strconv.Atoi(ctldURL.Port())
+	if err != nil {
+		t.Fatalf("parse ctld port: %v", err)
+	}
+	volumeClient := &recordingSystemVolumeClient{}
+	svc := &SandboxService{
+		ctldClient:          NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		webhookStateVolumes: volumeClient,
+		config: SandboxServiceConfig{
+			CtldEnabled: true,
+			CtldPort:    ctldPort,
+		},
+		logger: zap.NewNop(),
+	}
+
+	err = svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
+		Namespace:             "ns-a",
+		PodName:               "pod-a",
+		SandboxID:             "sandbox-a",
+		TeamID:                "team-a",
+		UserID:                "user-a",
+		RootFSVolumeID:        "rootfs-a",
+		HostIP:                ctldURL.Hostname(),
+		RuntimeDeletionReason: runtimeDeletionReasonCleaned,
+	})
+	if err != nil {
+		t.Fatalf("CleanupDeletedSandbox() error = %v", err)
+	}
+	if got.SandboxID != "sandbox-a" {
+		t.Fatalf("checkpoint sandboxID = %q, want sandbox-a", got.SandboxID)
+	}
+	if len(volumeClient.marked) != 0 {
+		t.Fatalf("marked volumes = %#v, want none for cleaned runtime", volumeClient.marked)
+	}
+}
+
+func TestSandboxServiceCleanupDeletedSandboxSkipsUnknownRootFSMode(t *testing.T) {
+	var calls int
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.NotFound(w, r)
+	}))
+	defer ctld.Close()
+
+	ctldURL, err := url.Parse(ctld.URL)
+	if err != nil {
+		t.Fatalf("parse ctld url: %v", err)
+	}
+	ctldPort, err := strconv.Atoi(ctldURL.Port())
+	if err != nil {
+		t.Fatalf("parse ctld port: %v", err)
+	}
+	svc := &SandboxService{
+		ctldClient: NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config: SandboxServiceConfig{
+			CtldEnabled: true,
+			CtldPort:    ctldPort,
+		},
+		logger: zap.NewNop(),
+	}
+
+	err = svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
+		Namespace:             "ns-a",
+		PodName:               "pod-a",
+		SandboxID:             "sandbox-a",
+		RootFSMode:            "unknown",
+		RootFSVolumeID:        "rootfs-a",
+		HostIP:                ctldURL.Hostname(),
+		RuntimeDeletionReason: runtimeDeletionReasonCleaned,
+	})
+	if err != nil {
+		t.Fatalf("CleanupDeletedSandbox() error = %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("ctld calls = %d, want none", calls)
+	}
+}
+
+func TestSandboxServiceCleanupDeletedSandboxReleasesRootFSForDeletedSandbox(t *testing.T) {
+	var got ctldapi.ReleaseRootFSRequest
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/rootfs/release" {
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode release request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ctldapi.ReleaseRootFSResponse{Released: true})
+	}))
+	defer ctld.Close()
+
+	ctldURL, err := url.Parse(ctld.URL)
+	if err != nil {
+		t.Fatalf("parse ctld url: %v", err)
+	}
+	ctldPort, err := strconv.Atoi(ctldURL.Port())
+	if err != nil {
+		t.Fatalf("parse ctld port: %v", err)
+	}
+	volumeClient := &recordingSystemVolumeClient{}
+	svc := &SandboxService{
+		ctldClient:          NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		webhookStateVolumes: volumeClient,
+		config: SandboxServiceConfig{
+			CtldEnabled: true,
+			CtldPort:    ctldPort,
+		},
+		logger: zap.NewNop(),
+	}
+
+	err = svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
+		Namespace:      "ns-a",
+		PodName:        "pod-a",
+		SandboxID:      "sandbox-a",
+		TeamID:         "team-a",
+		UserID:         "user-a",
+		RootFSVolumeID: "rootfs-a",
+		HostIP:         ctldURL.Hostname(),
+	})
+	if err != nil {
+		t.Fatalf("CleanupDeletedSandbox() error = %v", err)
+	}
+	if got.SandboxID != "sandbox-a" {
+		t.Fatalf("release sandboxID = %q, want sandbox-a", got.SandboxID)
+	}
+	if len(volumeClient.marked) != 1 || volumeClient.marked[0] != "sandbox-a:sandbox_deleted" {
+		t.Fatalf("marked volumes = %#v, want sandbox-a:sandbox_deleted", volumeClient.marked)
+	}
+}
+
 func TestSandboxServiceCleanupDeletedSandboxUnbindsVolumePortals(t *testing.T) {
 	var got ctldapi.UnbindVolumePortalRequest
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -377,6 +528,38 @@ func TestSandboxLifecycleInfoFromPodIncludesWebhookMetadata(t *testing.T) {
 	}
 	if info.WebhookURL != "https://example.test/webhook" || info.WebhookSecret != "secret" {
 		t.Fatalf("unexpected webhook metadata: %#v", info)
+	}
+}
+
+func TestSandboxLifecycleInfoFromPodIncludesRootFSMetadata(t *testing.T) {
+	pod := newLifecycleTestPod()
+	pod.Annotations[controller.AnnotationRootFSMode] = controller.RootFSModeS0FSUpperdir
+	pod.Annotations[controller.AnnotationRootFSVolumeID] = "rootfs-a"
+
+	info, ok := sandboxLifecycleInfoFromPod(pod)
+	if !ok {
+		t.Fatal("expected lifecycle info")
+	}
+	if info.RootFSMode != controller.RootFSModeS0FSUpperdir || info.RootFSVolumeID != "rootfs-a" {
+		t.Fatalf("unexpected rootfs metadata: %#v", info)
+	}
+}
+
+func TestSandboxLifecycleInfoFromRecordIncludesRootFSNode(t *testing.T) {
+	info := sandboxLifecycleInfoFromRecord(&SandboxRecord{
+		ID:                  "sandbox-a",
+		TeamID:              "team-a",
+		UserID:              "user-a",
+		CurrentPodNamespace: "ns-a",
+		CurrentPodName:      "pod-a",
+		CurrentNodeName:     "node-a",
+		RootFSVolumeID:      "rootfs-a",
+	})
+	if info.NodeName != "node-a" {
+		t.Fatalf("node name = %q, want node-a", info.NodeName)
+	}
+	if info.RootFSMode != controller.RootFSModeS0FSUpperdir || info.RootFSVolumeID != "rootfs-a" {
+		t.Fatalf("unexpected rootfs metadata: %#v", info)
 	}
 }
 

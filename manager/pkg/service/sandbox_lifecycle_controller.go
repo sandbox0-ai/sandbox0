@@ -41,6 +41,8 @@ type SandboxLifecycleInfo struct {
 	WebhookURL            string
 	WebhookSecret         string
 	WebhookStateVolumeID  string
+	RootFSMode            string
+	RootFSVolumeID        string
 	PodUID                string
 	NodeName              string
 	HostIP                string
@@ -69,6 +71,8 @@ type sandboxLifecycleQueueItem struct {
 	WebhookURL            string
 	WebhookSecret         string
 	WebhookStateVolumeID  string
+	RootFSMode            string
+	RootFSVolumeID        string
 	PodUID                string
 	NodeName              string
 	HostIP                string
@@ -279,6 +283,8 @@ func (c *SandboxLifecycleController) cleanupDeletedSandbox(ctx context.Context, 
 		WebhookURL:            item.WebhookURL,
 		WebhookSecret:         item.WebhookSecret,
 		WebhookStateVolumeID:  item.WebhookStateVolumeID,
+		RootFSMode:            item.RootFSMode,
+		RootFSVolumeID:        item.RootFSVolumeID,
 		PodUID:                item.PodUID,
 		NodeName:              item.NodeName,
 		HostIP:                item.HostIP,
@@ -350,9 +356,17 @@ func (s *SandboxService) CleanupDeletedSandbox(ctx context.Context, info Sandbox
 			errs = append(errs, fmt.Errorf("delete credential bindings: %w", err))
 		}
 	}
+	if runtimeCleaned {
+		if err := s.checkpointDeletedSandboxRootFS(ctx, info); err != nil {
+			errs = append(errs, fmt.Errorf("checkpoint sandbox rootfs: %w", err))
+		}
+	}
 	if !runtimeCleaned {
+		if err := s.releaseDeletedSandboxRootFS(ctx, info); err != nil {
+			errs = append(errs, fmt.Errorf("release sandbox rootfs: %w", err))
+		}
 		if err := s.deleteWebhookStateVolume(ctx, info); err != nil {
-			errs = append(errs, fmt.Errorf("delete webhook state volume: %w", err))
+			errs = append(errs, fmt.Errorf("delete sandbox system volumes: %w", err))
 		}
 	}
 	if err := s.unbindDeletedSandboxVolumePortals(ctx, info); err != nil {
@@ -361,6 +375,48 @@ func (s *SandboxService) CleanupDeletedSandbox(ctx context.Context, info Sandbox
 	s.powerStateLocks.Delete(sandboxID)
 	s.powerStateReconcilers.Delete(sandboxID)
 	return errors.Join(errs...)
+}
+
+func (s *SandboxService) checkpointDeletedSandboxRootFS(ctx context.Context, info SandboxLifecycleInfo) error {
+	if s == nil || !s.config.CtldEnabled || s.ctldClient == nil || !sandboxLifecycleRootFSEnabled(info) {
+		return nil
+	}
+	if strings.TrimSpace(info.HostIP) == "" && strings.TrimSpace(info.NodeName) == "" {
+		return nil
+	}
+	ctldAddress, err := s.ctldAddressForLifecycleInfo(ctx, info)
+	if err != nil {
+		return err
+	}
+	_, err = s.ctldClient.CheckpointRootFS(ctx, ctldAddress, ctldapi.CheckpointRootFSRequest{
+		SandboxID: info.SandboxID,
+	})
+	return err
+}
+
+func (s *SandboxService) releaseDeletedSandboxRootFS(ctx context.Context, info SandboxLifecycleInfo) error {
+	if s == nil || !s.config.CtldEnabled || s.ctldClient == nil || !sandboxLifecycleRootFSEnabled(info) {
+		return nil
+	}
+	if strings.TrimSpace(info.HostIP) == "" && strings.TrimSpace(info.NodeName) == "" {
+		return nil
+	}
+	ctldAddress, err := s.ctldAddressForLifecycleInfo(ctx, info)
+	if err != nil {
+		return err
+	}
+	_, err = s.ctldClient.ReleaseRootFS(ctx, ctldAddress, ctldapi.ReleaseRootFSRequest{
+		SandboxID: info.SandboxID,
+	})
+	return err
+}
+
+func sandboxLifecycleRootFSEnabled(info SandboxLifecycleInfo) bool {
+	if strings.TrimSpace(info.RootFSVolumeID) == "" {
+		return false
+	}
+	mode := strings.TrimSpace(info.RootFSMode)
+	return mode == "" || mode == controller.RootFSModeS0FSUpperdir
 }
 
 func (s *SandboxService) unbindDeletedSandboxVolumePortals(ctx context.Context, info SandboxLifecycleInfo) error {
@@ -465,6 +521,8 @@ func sandboxLifecycleItemFromInfo(info SandboxLifecycleInfo, deleted bool) sandb
 		WebhookURL:            info.WebhookURL,
 		WebhookSecret:         info.WebhookSecret,
 		WebhookStateVolumeID:  info.WebhookStateVolumeID,
+		RootFSMode:            info.RootFSMode,
+		RootFSVolumeID:        info.RootFSVolumeID,
 		PodUID:                info.PodUID,
 		NodeName:              info.NodeName,
 		HostIP:                info.HostIP,
@@ -512,11 +570,15 @@ func sandboxLifecycleInfoFromPod(pod *corev1.Pod) (SandboxLifecycleInfo, bool) {
 	webhookURL := ""
 	webhookSecret := ""
 	webhookStateVolumeID := ""
+	rootfsMode := ""
+	rootfsVolumeID := ""
 	runtimeDeletionReason := ""
 	if pod.Annotations != nil {
 		teamID = strings.TrimSpace(pod.Annotations[controller.AnnotationTeamID])
 		userID = strings.TrimSpace(pod.Annotations[controller.AnnotationUserID])
 		webhookStateVolumeID = strings.TrimSpace(pod.Annotations[controller.AnnotationWebhookStateVolumeID])
+		rootfsMode = strings.TrimSpace(pod.Annotations[controller.AnnotationRootFSMode])
+		rootfsVolumeID = strings.TrimSpace(pod.Annotations[controller.AnnotationRootFSVolumeID])
 		runtimeDeletionReason = strings.TrimSpace(pod.Annotations[controller.AnnotationRuntimeDeletionReason])
 		if configJSON := strings.TrimSpace(pod.Annotations[controller.AnnotationConfig]); configJSON != "" {
 			var cfg SandboxConfig
@@ -535,6 +597,8 @@ func sandboxLifecycleInfoFromPod(pod *corev1.Pod) (SandboxLifecycleInfo, bool) {
 		WebhookURL:            webhookURL,
 		WebhookSecret:         webhookSecret,
 		WebhookStateVolumeID:  webhookStateVolumeID,
+		RootFSMode:            rootfsMode,
+		RootFSVolumeID:        rootfsVolumeID,
 		PodUID:                string(pod.UID),
 		NodeName:              pod.Spec.NodeName,
 		HostIP:                pod.Status.HostIP,

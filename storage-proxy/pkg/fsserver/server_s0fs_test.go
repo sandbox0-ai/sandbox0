@@ -3,6 +3,7 @@ package fsserver
 import (
 	"bytes"
 	"context"
+	"errors"
 	"path/filepath"
 	"sync/atomic"
 	"syscall"
@@ -752,6 +753,163 @@ func TestS0FSLinkCreatesHardLink(t *testing.T) {
 	}
 	if string(readResp.Data) != "payload" {
 		t.Fatalf("Read(linked) data = %q, want payload", readResp.Data)
+	}
+}
+
+func TestS0FSMknodSpecialNode(t *testing.T) {
+	t.Parallel()
+
+	volCtx := newMountedS0FSVolumeContext(t, "vol-1", "team-a")
+	server := newTestFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, nil)
+	ctx := authContext("team-a", "")
+
+	resp, err := server.Mknod(ctx, &pb.MknodRequest{
+		VolumeId: "vol-1",
+		Parent:   1,
+		Name:     "console",
+		Mode:     syscall.S_IFCHR | 0o600,
+		Rdev:     0x0501,
+		Actor:    &pb.PosixActor{Uid: 1000, Gids: []uint32{1001}},
+	})
+	if err != nil {
+		t.Fatalf("Mknod() error = %v", err)
+	}
+	if resp.Attr == nil {
+		t.Fatal("Mknod() returned nil attr")
+	}
+	if resp.Attr.Mode&syscall.S_IFMT != syscall.S_IFCHR || resp.Attr.Mode&0o7777 != 0o600 {
+		t.Fatalf("Mknod() mode = %#o, want char device 0600", resp.Attr.Mode)
+	}
+	if resp.Attr.Rdev != 0x0501 || resp.Attr.Uid != 1000 || resp.Attr.Gid != 1001 {
+		t.Fatalf("Mknod() attr = %+v, want rdev 0x501 uid 1000 gid 1001", resp.Attr)
+	}
+
+	listResp, err := server.ReadDir(ctx, &pb.ReadDirRequest{
+		VolumeId: "vol-1",
+		Inode:    1,
+		Plus:     false,
+	})
+	if err != nil {
+		t.Fatalf("ReadDir() error = %v", err)
+	}
+	if len(listResp.Entries) != 1 || listResp.Entries[0].Name != "console" {
+		t.Fatalf("ReadDir() entries = %+v, want console", listResp.Entries)
+	}
+	if listResp.Entries[0].Type != syscall.S_IFCHR {
+		t.Fatalf("ReadDir() type = %#o, want S_IFCHR", listResp.Entries[0].Type)
+	}
+
+	plusResp, err := server.ReadDir(ctx, &pb.ReadDirRequest{
+		VolumeId: "vol-1",
+		Inode:    1,
+		Plus:     true,
+	})
+	if err != nil {
+		t.Fatalf("ReadDirPlus() error = %v", err)
+	}
+	if len(plusResp.Entries) != 1 || plusResp.Entries[0].Attr == nil {
+		t.Fatalf("ReadDirPlus() entries = %+v, want attr", plusResp.Entries)
+	}
+	if plusResp.Entries[0].Attr.Mode&syscall.S_IFMT != syscall.S_IFCHR || plusResp.Entries[0].Attr.Rdev != 0x0501 {
+		t.Fatalf("ReadDirPlus() attr = %+v, want char device rdev 0x501", plusResp.Entries[0].Attr)
+	}
+
+	if _, err := server.Read(ctx, &pb.ReadRequest{
+		VolumeId: "vol-1",
+		Inode:    resp.Inode,
+		Offset:   0,
+		Size:     1,
+	}); fserror.CodeOf(err) != fserror.InvalidArgument {
+		t.Fatalf("Read(char device) code = %v, want %v (err=%v)", fserror.CodeOf(err), fserror.InvalidArgument, err)
+	}
+}
+
+func TestS0FSXattrLifecycle(t *testing.T) {
+	t.Parallel()
+
+	volCtx := newMountedS0FSVolumeContext(t, "vol-1", "team-a")
+	server := newTestFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, nil)
+	ctx := authContext("team-a", "")
+
+	createResp, err := server.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   1,
+		Name:     "meta.txt",
+		Mode:     0o644,
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	if _, err := server.SetXattr(ctx, &pb.SetXattrRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		Name:     "trusted.overlay.opaque",
+		Value:    []byte("y"),
+		Flags:    s0fs.XattrCreateFlag,
+	}); err != nil {
+		t.Fatalf("SetXattr(opaque) error = %v", err)
+	}
+	if _, err := server.SetXattr(ctx, &pb.SetXattrRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		Name:     "user.note",
+		Value:    []byte("note"),
+	}); err != nil {
+		t.Fatalf("SetXattr(user.note) error = %v", err)
+	}
+
+	getResp, err := server.GetXattr(ctx, &pb.GetXattrRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		Name:     "trusted.overlay.opaque",
+	})
+	if err != nil {
+		t.Fatalf("GetXattr(opaque) error = %v", err)
+	}
+	if !bytes.Equal(getResp.Value, []byte("y")) {
+		t.Fatalf("GetXattr(opaque) = %q, want y", getResp.Value)
+	}
+
+	listResp, err := server.ListXattr(ctx, &pb.ListXattrRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+	})
+	if err != nil {
+		t.Fatalf("ListXattr() error = %v", err)
+	}
+	if !bytes.Equal(listResp.Data, []byte("trusted.overlay.opaque\x00user.note\x00")) {
+		t.Fatalf("ListXattr() = %#v, want sorted NUL-separated names", listResp.Data)
+	}
+
+	if _, err := server.RemoveXattr(ctx, &pb.RemoveXattrRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		Name:     "trusted.overlay.opaque",
+	}); err != nil {
+		t.Fatalf("RemoveXattr(opaque) error = %v", err)
+	}
+	if _, err := server.GetXattr(ctx, &pb.GetXattrRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		Name:     "trusted.overlay.opaque",
+	}); !errors.Is(err, syscall.ENODATA) {
+		t.Fatalf("GetXattr(removed) err = %v, want ENODATA", err)
+	}
+	if _, err := server.RemoveXattr(ctx, &pb.RemoveXattrRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		Name:     "trusted.overlay.opaque",
+	}); !errors.Is(err, syscall.ENODATA) {
+		t.Fatalf("RemoveXattr(removed) err = %v, want ENODATA", err)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfs"
 	"go.uber.org/zap"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -37,7 +38,7 @@ const (
 	PoolTypeActive = "active"
 
 	// Annotations
-	AnnotationTeamID                       = "sandbox0.ai/team-id"
+	AnnotationTeamID                       = rootfs.AnnotationTeamID
 	AnnotationUserID                       = "sandbox0.ai/user-id"
 	AnnotationClaimedAt                    = "sandbox0.ai/claimed-at"
 	AnnotationClaimType                    = "sandbox0.ai/claim-type" // "hot" or "cold"
@@ -56,13 +57,18 @@ const (
 	AnnotationNetworkPolicy                = "sandbox0.ai/network-policy" // JSON serialized network policy spec
 	AnnotationNetworkPolicyHash            = "sandbox0.ai/network-policy-hash"
 	AnnotationNetworkPolicyAppliedHash     = "sandbox0.ai/network-policy-applied-hash"
-	AnnotationSandboxID                    = "sandbox0.ai/sandbox-id"
+	AnnotationSandboxID                    = rootfs.AnnotationSandboxID
 	AnnotationRuntimeGeneration            = "sandbox0.ai/runtime-generation"
 	AnnotationRuntimeDeletionReason        = "sandbox0.ai/runtime-deletion-reason"
+	AnnotationRootFSMode                   = rootfs.AnnotationMode
+	AnnotationRootFSVolumeID               = rootfs.AnnotationVolumeID
+	AnnotationRootFSCtldPort               = rootfs.AnnotationCtldPort
 	AnnotationWebhookStateVolumeID         = "sandbox0.ai/webhook-state-volume-id"
 	AnnotationTemplateSpecHash             = "sandbox0.ai/template-spec-hash"
 	AnnotationClusterAutoscalerSafeToEvict = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 	AnnotationOwnerKind                    = "sandbox0.ai/owner-kind"
+
+	RootFSModeS0FSUpperdir = rootfs.ModeS0FSUpperdir
 
 	unhealthyIdlePodRepairGracePeriod = 2 * time.Minute
 )

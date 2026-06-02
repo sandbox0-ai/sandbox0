@@ -30,6 +30,9 @@ const (
 	pathVolumeSnapshotPrepare       = "/api/v1/volume-portals/snapshot-checkpoints/prepare"
 	pathVolumeSnapshotComplete      = "/api/v1/volume-portals/snapshot-checkpoints/complete"
 	pathVolumeSnapshotAbort         = "/api/v1/volume-portals/snapshot-checkpoints/abort"
+	pathRootFSPrepare               = "/api/v1/rootfs/prepare"
+	pathRootFSCheckpoint            = "/api/v1/rootfs/checkpoint"
+	pathRootFSRelease               = "/api/v1/rootfs/release"
 )
 
 var defaultHTTPClient = &http.Client{Timeout: DefaultRequestTimeout}
@@ -131,6 +134,18 @@ func (c *Client) AbortVolumeSnapshotCheckpoint(ctx context.Context, ctldAddress 
 	return PostJSON[AbortVolumeSnapshotCheckpointResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathVolumeSnapshotAbort, req)
 }
 
+func (c *Client) PrepareRootFS(ctx context.Context, ctldAddress string, req PrepareRootFSRequest) (*PrepareRootFSResponse, error) {
+	return PostJSON[PrepareRootFSResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSPrepare, req)
+}
+
+func (c *Client) CheckpointRootFS(ctx context.Context, ctldAddress string, req CheckpointRootFSRequest) (*CheckpointRootFSResponse, error) {
+	return PostJSON[CheckpointRootFSResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSCheckpoint, req)
+}
+
+func (c *Client) ReleaseRootFS(ctx context.Context, ctldAddress string, req ReleaseRootFSRequest) (*ReleaseRootFSResponse, error) {
+	return PostJSON[ReleaseRootFSResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSRelease, req)
+}
+
 func (c *Client) httpClientOrDefault() *http.Client {
 	if c != nil && c.httpClient != nil {
 		return c.httpClient
@@ -209,6 +224,12 @@ func responseError(resp any) string {
 	case *BindVolumePortalResponse:
 		return strings.TrimSpace(typed.Error)
 	case *UnbindVolumePortalResponse:
+		return strings.TrimSpace(typed.Error)
+	case *PrepareRootFSResponse:
+		return strings.TrimSpace(typed.Error)
+	case *CheckpointRootFSResponse:
+		return strings.TrimSpace(typed.Error)
+	case *ReleaseRootFSResponse:
 		return strings.TrimSpace(typed.Error)
 	default:
 		return ""

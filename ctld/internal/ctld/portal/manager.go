@@ -51,7 +51,9 @@ type Manager struct {
 	portals         map[string]*portalMount
 	portalsByTarget map[string]*portalMount
 	boundVolumes    map[string]*boundVolume
+	rootfs          map[string]*rootfsMount
 	volumes         *localVolumeManager
+	mountFS         fuseMounter
 }
 
 type portalMount struct {
@@ -62,12 +64,31 @@ type portalMount struct {
 	mountPath  string
 	targetPath string
 	fs         *volumefuse.FileSystem
-	server     *fuse.Server
+	server     fuseMount
 
 	volumeID  string
 	teamID    string
 	mountedAt time.Time
 }
+
+type rootfsMount struct {
+	sandboxID string
+	volumeID  string
+	teamID    string
+	cacheDir  string
+	mountPath string
+	upperDir  string
+	workDir   string
+	fs        *volumefuse.FileSystem
+	server    fuseMount
+	mountedAt time.Time
+}
+
+type fuseMount interface {
+	Unmount() error
+}
+
+type fuseMounter func(*volumefuse.FileSystem, string) (fuseMount, error)
 
 type boundVolume struct {
 	volumeID  string
@@ -133,7 +154,9 @@ func NewManager(cfg Config) *Manager {
 		portals:                make(map[string]*portalMount),
 		portalsByTarget:        make(map[string]*portalMount),
 		boundVolumes:           make(map[string]*boundVolume),
+		rootfs:                 make(map[string]*rootfsMount),
 		volumes:                newLocalVolumeManager(),
+		mountFS:                mountPortalFS,
 	}
 	manager.volumeAPI = newMountedVolumeAPIHandler(storageConfig, cfg.Repository, manager.volumes, l)
 	return manager
@@ -205,7 +228,7 @@ func (m *Manager) PublishPortal(ctx context.Context, req publishRequest) error {
 	}
 
 	fs := volumefuse.New(key, time.Second, unboundSession{})
-	server, err := mountPortalFS(fs, req.TargetPath)
+	server, err := m.mountFS(fs, req.TargetPath)
 	if err != nil {
 		return err
 	}
@@ -227,7 +250,7 @@ func (m *Manager) PublishPortal(ctx context.Context, req publishRequest) error {
 	return nil
 }
 
-func mountPortalFS(fs *volumefuse.FileSystem, targetPath string) (*fuse.Server, error) {
+func mountPortalFS(fs *volumefuse.FileSystem, targetPath string) (fuseMount, error) {
 	opts := &fuse.MountOptions{
 		FsName:        "sandbox0-volume-portal",
 		Name:          "sandbox0-volume",

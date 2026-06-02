@@ -35,6 +35,12 @@ type MountedVolumeController interface {
 	MountedVolumeHandler() http.Handler
 }
 
+type RootFSController interface {
+	PrepareRootFS(r *http.Request, req ctldapi.PrepareRootFSRequest) (ctldapi.PrepareRootFSResponse, int)
+	CheckpointRootFS(r *http.Request, req ctldapi.CheckpointRootFSRequest) (ctldapi.CheckpointRootFSResponse, int)
+	ReleaseRootFS(r *http.Request, req ctldapi.ReleaseRootFSRequest) (ctldapi.ReleaseRootFSResponse, int)
+}
+
 type NotImplementedController struct{}
 
 func (NotImplementedController) Pause(_ *http.Request, _ string) (ctldapi.PauseResponse, int) {
@@ -311,6 +317,72 @@ func NewMux(controller Controller) http.Handler {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		resp, status := volumeController.AbortVolumeSnapshotCheckpoint(r, req)
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+	mux.HandleFunc("/api/v1/rootfs/prepare", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		rootfsController, ok := controller.(RootFSController)
+		if !ok {
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSResponse{Error: "ctld rootfs not implemented"})
+			return
+		}
+		var req ctldapi.PrepareRootFSRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSResponse{Error: err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		resp, status := rootfsController.PrepareRootFS(r, req)
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+	mux.HandleFunc("/api/v1/rootfs/checkpoint", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		rootfsController, ok := controller.(RootFSController)
+		if !ok {
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(ctldapi.CheckpointRootFSResponse{Error: "ctld rootfs not implemented"})
+			return
+		}
+		var req ctldapi.CheckpointRootFSRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(ctldapi.CheckpointRootFSResponse{Error: err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		resp, status := rootfsController.CheckpointRootFS(r, req)
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+	mux.HandleFunc("/api/v1/rootfs/release", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		rootfsController, ok := controller.(RootFSController)
+		if !ok {
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(ctldapi.ReleaseRootFSResponse{Error: "ctld rootfs not implemented"})
+			return
+		}
+		var req ctldapi.ReleaseRootFSRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(ctldapi.ReleaseRootFSResponse{Error: err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		resp, status := rootfsController.ReleaseRootFS(r, req)
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(resp)
 	})

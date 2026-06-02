@@ -198,6 +198,7 @@ func main() {
 	if pool != nil {
 		operator.SetTemplateStatsPublisher(controller.NewPGTemplateStatsPublisher(pool, cfg.DefaultClusterId, clk, logger))
 	}
+	operator.SetIdlePoolDisabled(cfg.RootFSPersistenceEnabled)
 
 	// Create listers
 	podLister := informerFactory.Core().V1().Pods().Lister()
@@ -279,19 +280,20 @@ func main() {
 
 	// Create services
 	cfgForSandbox := service.SandboxServiceConfig{
-		DefaultTTL:             cfg.DefaultSandboxTTL.Duration,
-		PauseMinMemoryRequest:  cfg.PauseMinMemoryRequest,
-		PauseMinMemoryLimit:    cfg.PauseMinMemoryLimit,
-		PauseMemoryBufferRatio: pauseMemoryBufferRatio,
-		PauseMinCPU:            cfg.PauseMinCPU,
-		CtldEnabled:            cfg.CtldEnabled,
-		CtldPort:               cfg.CtldPort,
-		CtldClientTimeout:      cfg.CtldClientTimeout.Duration,
-		CtldHTTPClient:         obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.CtldClientTimeout.Duration}),
-		ProcdPort:              cfg.ProcdConfig.HTTPPort,
-		ProcdClientTimeout:     cfg.ProcdClientTimeout.Duration,
-		ProcdHTTPClient:        obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration}),
-		ProcdInitTimeout:       cfg.ProcdInitTimeout.Duration,
+		DefaultTTL:               cfg.DefaultSandboxTTL.Duration,
+		PauseMinMemoryRequest:    cfg.PauseMinMemoryRequest,
+		PauseMinMemoryLimit:      cfg.PauseMinMemoryLimit,
+		PauseMemoryBufferRatio:   pauseMemoryBufferRatio,
+		PauseMinCPU:              cfg.PauseMinCPU,
+		CtldEnabled:              cfg.CtldEnabled,
+		CtldPort:                 cfg.CtldPort,
+		CtldClientTimeout:        cfg.CtldClientTimeout.Duration,
+		CtldHTTPClient:           obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.CtldClientTimeout.Duration}),
+		RootFSPersistenceEnabled: cfg.RootFSPersistenceEnabled,
+		ProcdPort:                cfg.ProcdConfig.HTTPPort,
+		ProcdClientTimeout:       cfg.ProcdClientTimeout.Duration,
+		ProcdHTTPClient:          obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration}),
+		ProcdInitTimeout:         cfg.ProcdInitTimeout.Duration,
 	}
 
 	sandboxService := service.NewSandboxService(

@@ -75,7 +75,7 @@ func PrepareAndRewriteOverlayMounts(
 		if err != nil {
 			return result, err
 		}
-		result.Mounts[i].Options = options
+		result.Mounts[i].Options = ensureOverlayUserXattrOption(options)
 		result.RootFS = resp
 		result.Rewritten = true
 		return result, nil
@@ -98,6 +98,15 @@ func prepareRequestFromMetadata(meta Metadata) (ctldapi.PrepareRootFSRequest, er
 		TeamID:         teamID,
 		RootFSVolumeID: volumeID,
 	}, nil
+}
+
+func ensureOverlayUserXattrOption(options []string) []string {
+	for _, option := range options {
+		if strings.TrimSpace(option) == "userxattr" {
+			return options
+		}
+	}
+	return append(options, "userxattr")
 }
 
 func cloneMounts(mounts []Mount) []Mount {

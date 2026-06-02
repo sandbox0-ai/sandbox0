@@ -63,8 +63,40 @@ func TestPrepareAndRewriteOverlayMountsPreparesAndRewritesOverlay(t *testing.T) 
 	if client.request.SandboxID != "sandbox-a" || client.request.TeamID != "team-a" || client.request.RootFSVolumeID != "rootfs-a" {
 		t.Fatalf("prepare request = %+v, want sandbox-a team-a rootfs-a", client.request)
 	}
-	if got := result.Mounts[0].Options; got[1] != "upperdir=/s0fs/upper" || got[2] != "workdir=/s0fs/work" {
+	if got := result.Mounts[0].Options; got[1] != "upperdir=/s0fs/upper" || got[2] != "workdir=/s0fs/work" || got[3] != "userxattr" {
 		t.Fatalf("mount options = %#v, want s0fs upper/work", got)
+	}
+}
+
+func TestPrepareAndRewriteOverlayMountsPreservesExistingUserXattr(t *testing.T) {
+	client := &recordingPrepareClient{
+		response: &ctldapi.PrepareRootFSResponse{
+			Prepared: true,
+			UpperDir: "/s0fs/upper",
+			WorkDir:  "/s0fs/work",
+		},
+	}
+	result, err := PrepareAndRewriteOverlayMounts(context.Background(), client, "http://ctld", Metadata{
+		SandboxID: "sandbox-a",
+		TeamID:    "team-a",
+		Mode:      ModeS0FSUpperdir,
+		VolumeID:  "rootfs-a",
+	}, []Mount{{
+		Type:    "overlay",
+		Source:  "overlay",
+		Options: []string{"lowerdir=/lower", "upperdir=/old-upper", "workdir=/old-work", "userxattr"},
+	}})
+	if err != nil {
+		t.Fatalf("PrepareAndRewriteOverlayMounts() error = %v", err)
+	}
+	count := 0
+	for _, option := range result.Mounts[0].Options {
+		if option == "userxattr" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("userxattr count = %d, want 1 in %#v", count, result.Mounts[0].Options)
 	}
 }
 

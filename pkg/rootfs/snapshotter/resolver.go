@@ -45,7 +45,8 @@ func (r CRIMetadataResolver) ResolveRootFSMetadata(ctx context.Context, snapshot
 	}
 
 	ctx = r.ensureNamespace(ctx)
-	container, ok, err := r.resolveContainer(ctx, snapshotKey)
+	candidates := snapshotKeyCandidates(snapshotKey)
+	container, ok, err := r.resolveContainer(ctx, candidates)
 	if err != nil {
 		return rootfs.Metadata{}, false, err
 	}
@@ -59,7 +60,7 @@ func (r CRIMetadataResolver) ResolveRootFSMetadata(ctx context.Context, snapshot
 		}
 	}
 
-	sandboxID, ok, err := r.resolveSandboxIDFromCRIContainer(ctx, snapshotKey)
+	sandboxID, ok, err := r.resolveSandboxIDFromCRIContainer(ctx, candidates)
 	if err != nil {
 		return rootfs.Metadata{}, false, err
 	}
@@ -67,7 +68,13 @@ func (r CRIMetadataResolver) ResolveRootFSMetadata(ctx context.Context, snapshot
 		return r.resolvePodSandboxMetadata(ctx, sandboxID)
 	}
 
-	return r.resolvePodSandboxMetadata(ctx, snapshotKey)
+	for _, candidate := range candidates {
+		meta, ok, err := r.resolvePodSandboxMetadata(ctx, candidate)
+		if err != nil || ok {
+			return meta, ok, err
+		}
+	}
+	return rootfs.Metadata{}, false, nil
 }
 
 func (r CRIMetadataResolver) resolvePodSandboxMetadata(ctx context.Context, sandboxID string) (rootfs.Metadata, bool, error) {
@@ -85,47 +92,54 @@ func (r CRIMetadataResolver) resolvePodSandboxMetadata(ctx context.Context, sand
 	return rootfs.MetadataFromAnnotations(status.GetAnnotations()), true, nil
 }
 
-func (r CRIMetadataResolver) resolveSandboxIDFromCRIContainer(ctx context.Context, snapshotKey string) (string, bool, error) {
-	resp, err := r.Runtime.ListContainers(ctx, &runtime.ListContainersRequest{
-		Filter: &runtime.ContainerFilter{Id: snapshotKey},
-	})
-	if err != nil {
-		if isNotFound(err) {
-			return "", false, nil
+func (r CRIMetadataResolver) resolveSandboxIDFromCRIContainer(ctx context.Context, snapshotKeys []string) (string, bool, error) {
+	for _, snapshotKey := range snapshotKeys {
+		resp, err := r.Runtime.ListContainers(ctx, &runtime.ListContainersRequest{
+			Filter: &runtime.ContainerFilter{Id: snapshotKey},
+		})
+		if err != nil {
+			if isNotFound(err) {
+				continue
+			}
+			return "", false, fmt.Errorf("list containers for CRI id %s: %w", snapshotKey, err)
 		}
-		return "", false, fmt.Errorf("list containers for CRI id %s: %w", snapshotKey, err)
-	}
-	for _, container := range resp.GetContainers() {
-		if strings.TrimSpace(container.GetId()) != snapshotKey {
-			continue
+		for _, container := range resp.GetContainers() {
+			if strings.TrimSpace(container.GetId()) != snapshotKey {
+				continue
+			}
+			sandboxID := strings.TrimSpace(container.GetPodSandboxId())
+			if sandboxID == "" {
+				return "", false, nil
+			}
+			return sandboxID, true, nil
 		}
-		sandboxID := strings.TrimSpace(container.GetPodSandboxId())
-		if sandboxID == "" {
-			return "", false, nil
-		}
-		return sandboxID, true, nil
 	}
 	return "", false, nil
 }
 
-func (r CRIMetadataResolver) resolveContainer(ctx context.Context, snapshotKey string) (containers.Container, bool, error) {
-	container, err := r.Containers.Get(ctx, snapshotKey)
-	if err != nil {
-		if isNotFound(err) {
-			all, err := r.Containers.List(ctx)
-			if err != nil {
-				return containers.Container{}, false, fmt.Errorf("list containers for snapshot key %s: %w", snapshotKey, err)
-			}
-			for _, container := range all {
-				if strings.TrimSpace(container.SnapshotKey) == snapshotKey {
-					return container, true, nil
-				}
-			}
-			return containers.Container{}, false, nil
+func (r CRIMetadataResolver) resolveContainer(ctx context.Context, snapshotKeys []string) (containers.Container, bool, error) {
+	for _, snapshotKey := range snapshotKeys {
+		container, err := r.Containers.Get(ctx, snapshotKey)
+		if err == nil {
+			return container, true, nil
 		}
-		return containers.Container{}, false, fmt.Errorf("get container %s: %w", snapshotKey, err)
+		if !isNotFound(err) {
+			return containers.Container{}, false, fmt.Errorf("get container %s: %w", snapshotKey, err)
+		}
 	}
-	return container, true, nil
+
+	all, err := r.Containers.List(ctx)
+	if err != nil {
+		return containers.Container{}, false, fmt.Errorf("list containers for snapshot key %s: %w", snapshotKeys[0], err)
+	}
+	for _, snapshotKey := range snapshotKeys {
+		for _, container := range all {
+			if strings.TrimSpace(container.SnapshotKey) == snapshotKey {
+				return container, true, nil
+			}
+		}
+	}
+	return containers.Container{}, false, nil
 }
 
 func (r CRIMetadataResolver) ensureNamespace(ctx context.Context) context.Context {
@@ -134,4 +148,28 @@ func (r CRIMetadataResolver) ensureNamespace(ctx context.Context) context.Contex
 
 func isNotFound(err error) bool {
 	return errdefs.IsNotFound(err) || status.Code(err) == codes.NotFound
+}
+
+func snapshotKeyCandidates(snapshotKey string) []string {
+	snapshotKey = strings.TrimSpace(snapshotKey)
+	if snapshotKey == "" {
+		return nil
+	}
+	candidates := []string{snapshotKey}
+	if idx := strings.LastIndex(snapshotKey, "/"); idx >= 0 && idx+1 < len(snapshotKey) {
+		candidates = appendUniqueString(candidates, strings.TrimSpace(snapshotKey[idx+1:]))
+	}
+	return candidates
+}
+
+func appendUniqueString(values []string, value string) []string {
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
 }

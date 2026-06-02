@@ -42,6 +42,15 @@ func ConfigureKindRootFSSnapshotter(ctx context.Context, clusterName string) err
 	return nil
 }
 
+// KindClusterNodeNames returns the Docker container names for a kind cluster.
+func KindClusterNodeNames(ctx context.Context, clusterName string) ([]string, error) {
+	clusterName = strings.TrimSpace(clusterName)
+	if clusterName == "" {
+		return nil, fmt.Errorf("cluster name is required")
+	}
+	return kindNodeNames(ctx, clusterName)
+}
+
 // RestoreKindContainerdConfig restores the containerd config backed up by
 // ConfigureKindRootFSSnapshotter.
 func RestoreKindContainerdConfig(ctx context.Context, clusterName string) error {

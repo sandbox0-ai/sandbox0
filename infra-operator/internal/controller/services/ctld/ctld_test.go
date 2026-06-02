@@ -136,6 +136,7 @@ func reconcileCtldForTest(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) (*ap
 	if len(ds.Spec.Template.Spec.Containers[0].VolumeMounts) < 6 {
 		t.Fatalf("expected ctld config, csi, kubelet, data, cgroup, and containerd mounts, got %#v", ds.Spec.Template.Spec.Containers[0].VolumeMounts)
 	}
+	assertContainerVolumeMountPropagation(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "ctld-data", corev1.MountPropagationBidirectional)
 	driver := &storagev1.CSIDriver{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: "volume.sandbox0.ai"}, driver); err != nil {
 		t.Fatalf("expected csi driver to be created: %v", err)
@@ -239,6 +240,23 @@ func assertContainerVolumeMount(t *testing.T, mounts []corev1.VolumeMount, name,
 			}
 			return
 		}
+	}
+	t.Fatalf("expected volume mount %q, got %#v", name, mounts)
+}
+
+func assertContainerVolumeMountPropagation(t *testing.T, mounts []corev1.VolumeMount, name string, propagation corev1.MountPropagationMode) {
+	t.Helper()
+	for _, mount := range mounts {
+		if mount.Name != name {
+			continue
+		}
+		if mount.MountPropagation == nil {
+			t.Fatalf("volume mount %q propagation is nil", name)
+		}
+		if *mount.MountPropagation != propagation {
+			t.Fatalf("volume mount %q propagation = %q, want %q", name, *mount.MountPropagation, propagation)
+		}
+		return
 	}
 	t.Fatalf("expected volume mount %q, got %#v", name, mounts)
 }

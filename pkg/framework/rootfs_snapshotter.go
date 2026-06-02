@@ -86,19 +86,27 @@ func kindNodeNames(ctx context.Context, clusterName string) ([]string, error) {
 }
 
 func kindNodesWithRootFSSnapshotterSocket(ctx context.Context, nodes []string, timeout time.Duration) ([]string, error) {
+	targetNodes := rootFSSnapshotterTargetKindNodes(nodes)
+	if len(targetNodes) == 0 {
+		return nil, fmt.Errorf("no kind nodes available for rootfs snapshotter configuration")
+	}
+
 	deadline := time.Now().Add(timeout)
 	for {
 		var rootfsNodes []string
-		for _, node := range nodes {
+		var missingNodes []string
+		for _, node := range targetNodes {
 			if err := RunCommand(ctx, "docker", "exec", node, "test", "-S", rootFSSnapshotterSocketPath); err == nil {
 				rootfsNodes = append(rootfsNodes, node)
+				continue
 			}
+			missingNodes = append(missingNodes, node)
 		}
-		if len(rootfsNodes) > 0 {
+		if len(missingNodes) == 0 {
 			return rootfsNodes, nil
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("rootfs snapshotter socket %s did not appear on any kind node", rootFSSnapshotterSocketPath)
+			return nil, fmt.Errorf("rootfs snapshotter socket %s did not appear on kind nodes: %s", rootFSSnapshotterSocketPath, strings.Join(missingNodes, ", "))
 		}
 		select {
 		case <-ctx.Done():
@@ -106,6 +114,26 @@ func kindNodesWithRootFSSnapshotterSocket(ctx context.Context, nodes []string, t
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+func rootFSSnapshotterTargetKindNodes(nodes []string) []string {
+	var normalized []string
+	var workers []string
+	for _, node := range nodes {
+		node = strings.TrimSpace(node)
+		if node == "" {
+			continue
+		}
+		normalized = append(normalized, node)
+		if strings.HasSuffix(node, "-control-plane") {
+			continue
+		}
+		workers = append(workers, node)
+	}
+	if len(workers) > 0 {
+		return workers
+	}
+	return normalized
 }
 
 func restoreKindNodeContainerdConfig(ctx context.Context, node string) error {
@@ -139,10 +167,19 @@ func configureKindNodeRootFSSnapshotter(ctx context.Context, node string) error 
 	if err := RunCommand(ctx, "docker", "exec", node, "sh", "-ec", kindRootFSSnapshotterConfigureScript()); err != nil {
 		return fmt.Errorf("configure rootfs snapshotter on kind node %s: %w", node, err)
 	}
-	if err := RunCommand(ctx, "docker", "exec", node, "sh", "-ec", "ctr plugins ls | grep -q sandbox0-rootfs"); err != nil {
-		return fmt.Errorf("verify rootfs snapshotter plugin on kind node %s: %w", node, err)
+	if err := RunCommand(ctx, "docker", "exec", node, "sh", "-ec", kindRootFSSnapshotterVerifyScript()); err != nil {
+		return fmt.Errorf("verify rootfs snapshotter runtime handler on kind node %s: %w", node, err)
 	}
 	return nil
+}
+
+func kindRootFSSnapshotterVerifyScript() string {
+	return `
+set -eu
+
+ctr plugins ls | grep -q sandbox0-rootfs
+containerd config dump | grep -q 'runtimes.sandbox0-rootfs'
+`
 }
 
 func kindRootFSSnapshotterConfigureScript() string {

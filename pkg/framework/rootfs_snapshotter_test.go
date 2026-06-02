@@ -42,3 +42,38 @@ func TestKindRootFSRestoreContainerdScriptRestoresBackup(t *testing.T) {
 		}
 	}
 }
+
+func TestRootFSSnapshotterTargetKindNodesPrefersWorkers(t *testing.T) {
+	nodes := []string{
+		"sandbox0-pr-e2e-control-plane",
+		"sandbox0-pr-e2e-worker",
+		"sandbox0-pr-e2e-worker2",
+	}
+
+	got := rootFSSnapshotterTargetKindNodes(nodes)
+	want := []string{"sandbox0-pr-e2e-worker", "sandbox0-pr-e2e-worker2"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("target nodes = %#v, want %#v", got, want)
+	}
+}
+
+func TestRootFSSnapshotterTargetKindNodesFallsBackToAllNodes(t *testing.T) {
+	nodes := []string{"custom-node-a", "custom-node-b"}
+
+	got := rootFSSnapshotterTargetKindNodes(nodes)
+	if strings.Join(got, ",") != strings.Join(nodes, ",") {
+		t.Fatalf("target nodes = %#v, want %#v", got, nodes)
+	}
+}
+
+func TestKindRootFSSnapshotterVerifyScriptChecksRuntimeHandler(t *testing.T) {
+	script := kindRootFSSnapshotterVerifyScript()
+	for _, want := range []string{
+		"ctr plugins ls | grep -q sandbox0-rootfs",
+		"containerd config dump | grep -q 'runtimes.sandbox0-rootfs'",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("verify script missing %q\n%s", want, script)
+		}
+	}
+}

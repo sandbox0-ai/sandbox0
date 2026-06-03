@@ -30,6 +30,7 @@ type SandboxRecord struct {
 	ID                  string
 	TeamID              string
 	UserID              string
+	FilesystemID        string
 	TemplateID          string
 	TemplateName        string
 	TemplateNamespace   string
@@ -104,15 +105,16 @@ func (s *PGSandboxStore) UpsertSandbox(ctx context.Context, record *SandboxRecor
 	}
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO manager.sandboxes (
-			sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
+			sandbox_id, team_id, user_id, filesystem_id, template_id, template_name, template_namespace,
 			cluster_id, status, config, mounts, template_spec,
 			current_pod_name, current_pod_namespace, runtime_generation,
 			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, COALESCE($19, NOW()), NOW())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, COALESCE($20, NOW()), NOW())
 		ON CONFLICT (sandbox_id) DO UPDATE SET
 			team_id = EXCLUDED.team_id,
 			user_id = EXCLUDED.user_id,
+			filesystem_id = EXCLUDED.filesystem_id,
 			template_id = EXCLUDED.template_id,
 			template_name = EXCLUDED.template_name,
 			template_namespace = EXCLUDED.template_namespace,
@@ -129,7 +131,7 @@ func (s *PGSandboxStore) UpsertSandbox(ctx context.Context, record *SandboxRecor
 			hard_expires_at = EXCLUDED.hard_expires_at,
 			deleted_at = EXCLUDED.deleted_at,
 			updated_at = NOW()
-	`, record.ID, record.TeamID, record.UserID, record.TemplateID, record.TemplateName, record.TemplateNamespace,
+	`, record.ID, record.TeamID, record.UserID, record.FilesystemID, record.TemplateID, record.TemplateName, record.TemplateNamespace,
 		record.ClusterID, record.Status, configJSON, mountsJSON, specJSON,
 		record.CurrentPodName, record.CurrentPodNamespace, record.RuntimeGeneration,
 		nullableTime(record.ClaimedAt), nullableTime(record.ExpiresAt), nullableTime(record.HardExpiresAt), nullableTime(record.DeletedAt), nullableTime(record.CreatedAt))
@@ -265,7 +267,7 @@ func (t sandboxStoreTx) MarkRuntimeCleaned(ctx context.Context, sandboxID string
 func sandboxRecordSelectSQL() string {
 	return `
 		SELECT sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
-			cluster_id, status, config, mounts, template_spec,
+			filesystem_id, cluster_id, status, config, mounts, template_spec,
 			current_pod_name, current_pod_namespace, runtime_generation,
 			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 		FROM manager.sandboxes`
@@ -300,7 +302,7 @@ func scanSandboxRecordInto(scanner sandboxRecordScanner) (*SandboxRecord, error)
 	var claimedAt, expiresAt, hardExpiresAt, deletedAt *time.Time
 	if err := scanner.Scan(
 		&record.ID, &record.TeamID, &record.UserID, &record.TemplateID, &record.TemplateName, &record.TemplateNamespace,
-		&record.ClusterID, &record.Status, &configJSON, &mountsJSON, &specJSON,
+		&record.FilesystemID, &record.ClusterID, &record.Status, &configJSON, &mountsJSON, &specJSON,
 		&record.CurrentPodName, &record.CurrentPodNamespace, &record.RuntimeGeneration,
 		&claimedAt, &expiresAt, &hardExpiresAt, &deletedAt, &record.CreatedAt, &record.UpdatedAt,
 	); err != nil {

@@ -159,6 +159,8 @@ func (s *Server) setupRoutes() {
 			sandboxes.PUT("/:id/services", s.updateSandboxServices)
 			sandboxes.POST("/:id/pause", s.pauseSandbox)
 			sandboxes.POST("/:id/resume", s.resumeSandbox)
+			sandboxes.POST("/:id/clean", s.cleanSandbox)
+			sandboxes.POST("/:id/restore", s.restoreSandbox)
 			sandboxes.POST("/:id/refresh", s.refreshSandbox)
 			sandboxes.DELETE("/:id", s.terminateSandbox)
 		}

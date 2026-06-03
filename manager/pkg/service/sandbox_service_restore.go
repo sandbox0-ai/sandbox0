@@ -51,6 +51,7 @@ func (s *SandboxService) RestoreCleanedSandboxRuntime(ctx context.Context, sandb
 			TeamID:            locked.TeamID,
 			UserID:            locked.UserID,
 			Template:          locked.TemplateID,
+			FilesystemID:      locked.FilesystemID,
 			Config:            &locked.Config,
 			Mounts:            locked.Mounts,
 			SandboxID:         locked.ID,
@@ -107,6 +108,7 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 		TeamID:            record.TeamID,
 		UserID:            record.UserID,
 		Template:          record.TemplateID,
+		FilesystemID:      record.FilesystemID,
 		Config:            &record.Config,
 		Mounts:            record.Mounts,
 		SandboxID:         record.ID,
@@ -118,11 +120,15 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	if err := s.bindWebhookStatePortal(ctx, pod, req); err != nil {
 		return fmt.Errorf("bind webhook state portal: %w", err)
 	}
+	rootPath, err := s.bindRootfs(ctx, pod, req)
+	if err != nil {
+		return fmt.Errorf("bind rootfs: %w", err)
+	}
 	procdAddress, err := s.prodAddress(ctx, pod)
 	if err != nil {
 		return fmt.Errorf("get procd address: %w", err)
 	}
-	if _, err := s.initializeProcd(ctx, pod, req, procdAddress); err != nil {
+	if _, err := s.initializeProcd(ctx, pod, req, procdAddress, rootPath); err != nil {
 		return fmt.Errorf("initialize procd: %w", err)
 	}
 	if err := s.persistUpdatedSandboxPod(ctx, pod); err != nil {
@@ -170,25 +176,4 @@ func (s *SandboxService) templateForSandboxRecord(record *SandboxRecord) (*v1alp
 		},
 		Spec: spec,
 	}, nil
-}
-
-func cleanedSandboxResumeResponse(sandboxID string, generation int64) *ResumeSandboxResponse {
-	return &ResumeSandboxResponse{
-		SandboxID: sandboxID,
-		Resumed:   true,
-		PowerState: SandboxPowerState{
-			Desired:            SandboxPowerStateActive,
-			DesiredGeneration:  generation,
-			Observed:           SandboxPowerStateActive,
-			ObservedGeneration: generation,
-			Phase:              SandboxPowerPhaseStable,
-		},
-	}
-}
-
-func sandboxRestoreContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	if _, ok := ctx.Deadline(); ok {
-		return context.WithCancel(ctx)
-	}
-	return context.WithTimeout(ctx, defaultSandboxPowerTransitionTimeout)
 }

@@ -130,13 +130,15 @@ const (
 
 // Defines values for QuotaDimension.
 const (
-	ActiveSandboxes   QuotaDimension = "active_sandboxes"
-	CpuMillicpu       QuotaDimension = "cpu_millicpu"
-	Egress            QuotaDimension = "egress"
-	Ingress           QuotaDimension = "ingress"
-	MemoryMib         QuotaDimension = "memory_mib"
-	SnapshotStorageGb QuotaDimension = "snapshot_storage_gb"
-	VolumeStorageGb   QuotaDimension = "volume_storage_gb"
+	ActiveSandboxes             QuotaDimension = "active_sandboxes"
+	CpuMillicpu                 QuotaDimension = "cpu_millicpu"
+	Egress                      QuotaDimension = "egress"
+	FilesystemSnapshotStorageGb QuotaDimension = "filesystem_snapshot_storage_gb"
+	FilesystemStorageGb         QuotaDimension = "filesystem_storage_gb"
+	Ingress                     QuotaDimension = "ingress"
+	MemoryMib                   QuotaDimension = "memory_mib"
+	SnapshotStorageGb           QuotaDimension = "snapshot_storage_gb"
+	VolumeStorageGb             QuotaDimension = "volume_storage_gb"
 )
 
 // Defines values for REPLReadyMode.
@@ -158,6 +160,13 @@ const (
 	SandboxAppServiceRuntimeTypeFunction    SandboxAppServiceRuntimeType = "function"
 	SandboxAppServiceRuntimeTypeManual      SandboxAppServiceRuntimeType = "manual"
 	SandboxAppServiceRuntimeTypeWarmProcess SandboxAppServiceRuntimeType = "warm_process"
+)
+
+// Defines values for SandboxFilesystemState.
+const (
+	Available SandboxFilesystemState = "available"
+	Bound     SandboxFilesystemState = "bound"
+	Deleted   SandboxFilesystemState = "deleted"
 )
 
 // Defines values for SandboxFunctionRuntime.
@@ -380,6 +389,26 @@ const (
 // Defines values for SuccessSSHPublicKeyResponseSuccess.
 const (
 	SuccessSSHPublicKeyResponseSuccessTrue SuccessSSHPublicKeyResponseSuccess = true
+)
+
+// Defines values for SuccessSandboxFilesystemListResponseSuccess.
+const (
+	SuccessSandboxFilesystemListResponseSuccessTrue SuccessSandboxFilesystemListResponseSuccess = true
+)
+
+// Defines values for SuccessSandboxFilesystemResponseSuccess.
+const (
+	SuccessSandboxFilesystemResponseSuccessTrue SuccessSandboxFilesystemResponseSuccess = true
+)
+
+// Defines values for SuccessSandboxFilesystemSnapshotListResponseSuccess.
+const (
+	SuccessSandboxFilesystemSnapshotListResponseSuccessTrue SuccessSandboxFilesystemSnapshotListResponseSuccess = true
+)
+
+// Defines values for SuccessSandboxFilesystemSnapshotResponseSuccess.
+const (
+	SuccessSandboxFilesystemSnapshotResponseSuccessTrue SuccessSandboxFilesystemSnapshotResponseSuccess = true
 )
 
 // Defines values for SuccessSandboxListResponseSuccess.
@@ -605,15 +634,19 @@ type ClaimMountRequest struct {
 
 // ClaimRequest defines model for ClaimRequest.
 type ClaimRequest struct {
-	Config   *SandboxConfig       `json:"config,omitempty"`
-	Mounts   *[]ClaimMountRequest `json:"mounts,omitempty"`
-	Template *string              `json:"template,omitempty"`
+	Config *SandboxConfig `json:"config,omitempty"`
+
+	// FilesystemId Optional source SandboxFilesystem ID used to initialize the new sandbox root filesystem.
+	FilesystemId *string              `json:"filesystem_id"`
+	Mounts       *[]ClaimMountRequest `json:"mounts,omitempty"`
+	Template     *string              `json:"template,omitempty"`
 }
 
 // ClaimResponse defines model for ClaimResponse.
 type ClaimResponse struct {
 	BootstrapMounts *[]MountStatus         `json:"bootstrap_mounts,omitempty"`
 	ClusterId       *string                `json:"cluster_id"`
+	FilesystemId    *string                `json:"filesystem_id"`
 	PodName         string                 `json:"pod_name"`
 	SandboxId       string                 `json:"sandbox_id"`
 	Status          SandboxLifecycleStatus `json:"status"`
@@ -622,7 +655,9 @@ type ClaimResponse struct {
 
 // ContainerSpec defines model for ContainerSpec.
 type ContainerSpec struct {
-	Env             *[]EnvVar        `json:"env,omitempty"`
+	Env *[]EnvVar `json:"env,omitempty"`
+
+	// Image Base OCI image used for the sandbox root filesystem. SandboxFilesystem branches are tied to the resolved immutable image digest.
 	Image           string           `json:"image"`
 	ImagePullPolicy *string          `json:"imagePullPolicy,omitempty"`
 	Resources       ResourceQuota    `json:"resources"`
@@ -743,6 +778,27 @@ type CreateRegionRequest struct {
 type CreateSSHPublicKeyRequest struct {
 	Name      string `json:"name"`
 	PublicKey string `json:"public_key"`
+}
+
+// CreateSandboxFilesystemRequest defines model for CreateSandboxFilesystemRequest.
+type CreateSandboxFilesystemRequest struct {
+	// BaseImageDigest Resolved immutable base image digest. Required when snapshot_id is omitted by storage-proxy direct callers.
+	BaseImageDigest *string `json:"base_image_digest,omitempty"`
+
+	// S0fsHead Initial s0fs head for low-level restore/import paths.
+	S0fsHead *string `json:"s0fs_head,omitempty"`
+
+	// SnapshotId Optional filesystem snapshot ID used to initialize the filesystem.
+	SnapshotId *string `json:"snapshot_id,omitempty"`
+
+	// Template Template whose mainContainer.image provides the base image digest.
+	Template *string `json:"template,omitempty"`
+}
+
+// CreateSandboxFilesystemSnapshotRequest defines model for CreateSandboxFilesystemSnapshotRequest.
+type CreateSandboxFilesystemSnapshotRequest struct {
+	Description *string `json:"description,omitempty"`
+	Name        string  `json:"name"`
 }
 
 // CreateSandboxVolumeRequest defines model for CreateSandboxVolumeRequest.
@@ -966,6 +1022,12 @@ type FileInfo struct {
 
 // FileInfoType defines model for FileInfo.Type.
 type FileInfoType string
+
+// ForkSandboxFilesystemRequest defines model for ForkSandboxFilesystemRequest.
+type ForkSandboxFilesystemRequest struct {
+	// Template Optional template ID to associate with the forked filesystem. Defaults to the source filesystem template.
+	Template *string `json:"template,omitempty"`
+}
 
 // ForkVolumeRequest defines model for ForkVolumeRequest.
 type ForkVolumeRequest struct {
@@ -1466,14 +1528,15 @@ type Sandbox struct {
 	CreatedAt  time.Time `json:"created_at"`
 
 	// ExpiresAt Soft expiration timestamp. Zero value means not set.
-	ExpiresAt time.Time `json:"expires_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	FilesystemId *string   `json:"filesystem_id"`
 
 	// HardExpiresAt Hard expiration timestamp. Zero value means not set.
 	HardExpiresAt time.Time              `json:"hard_expires_at"`
 	Id            string                 `json:"id"`
 	Mounts        *[]ClaimMountRequest   `json:"mounts,omitempty"`
 	Paused        bool                   `json:"paused"`
-	PodName       string                 `json:"pod_name"`
+	PodName       *string                `json:"pod_name"`
 	PowerState    SandboxPowerState      `json:"power_state"`
 	Services      *[]SandboxAppService   `json:"services,omitempty"`
 	Ssh           *SandboxSSHConnection  `json:"ssh,omitempty"`
@@ -1609,6 +1672,39 @@ type SandboxConfig struct {
 	Webhook *WebhookConfig `json:"webhook,omitempty"`
 }
 
+// SandboxFilesystem defines model for SandboxFilesystem.
+type SandboxFilesystem struct {
+	BaseImageDigest    string                 `json:"base_image_digest"`
+	CreatedAt          time.Time              `json:"created_at"`
+	DeletedAt          *time.Time             `json:"deleted_at"`
+	Id                 string                 `json:"id"`
+	S0fsHead           string                 `json:"s0fs_head"`
+	SourceFilesystemId *string                `json:"source_filesystem_id"`
+	State              SandboxFilesystemState `json:"state"`
+	TeamId             string                 `json:"team_id"`
+	TemplateId         *string                `json:"template_id"`
+	UpdatedAt          time.Time              `json:"updated_at"`
+	UserId             string                 `json:"user_id"`
+}
+
+// SandboxFilesystemState defines model for SandboxFilesystem.State.
+type SandboxFilesystemState string
+
+// SandboxFilesystemSnapshot defines model for SandboxFilesystemSnapshot.
+type SandboxFilesystemSnapshot struct {
+	BaseImageDigest string     `json:"base_image_digest"`
+	CreatedAt       time.Time  `json:"created_at"`
+	Description     *string    `json:"description,omitempty"`
+	ExpiresAt       *time.Time `json:"expires_at"`
+	FilesystemId    string     `json:"filesystem_id"`
+	Id              string     `json:"id"`
+	Name            string     `json:"name"`
+	S0fsHead        string     `json:"s0fs_head"`
+	SizeBytes       int64      `json:"size_bytes"`
+	TeamId          string     `json:"team_id"`
+	UserId          string     `json:"user_id"`
+}
+
 // SandboxFunction Function code executed by procd for a sandbox service request. cluster-gateway owns public ingress and carries this source to procd.
 type SandboxFunction struct {
 	// Handler Python callable name. Defaults to handler.
@@ -1730,8 +1826,9 @@ type SandboxStatus struct {
 	ClaimedAt     *string                 `json:"claimed_at,omitempty"`
 	CreatedAt     *string                 `json:"created_at,omitempty"`
 	ExpiresAt     *string                 `json:"expires_at,omitempty"`
+	FilesystemId  *string                 `json:"filesystem_id"`
 	HardExpiresAt *string                 `json:"hard_expires_at,omitempty"`
-	PodName       *string                 `json:"pod_name,omitempty"`
+	PodName       *string                 `json:"pod_name"`
 	SandboxId     *string                 `json:"sandbox_id,omitempty"`
 	Status        *SandboxLifecycleStatus `json:"status,omitempty"`
 	TeamId        *string                 `json:"team_id,omitempty"`
@@ -1742,9 +1839,10 @@ type SandboxStatus struct {
 // SandboxSummary defines model for SandboxSummary.
 type SandboxSummary struct {
 	// ClusterId Cluster where sandbox runs (multi-cluster only)
-	ClusterId *string   `json:"cluster_id"`
-	CreatedAt time.Time `json:"created_at"`
-	ExpiresAt time.Time `json:"expires_at"`
+	ClusterId    *string   `json:"cluster_id"`
+	CreatedAt    time.Time `json:"created_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	FilesystemId *string   `json:"filesystem_id"`
 
 	// HardExpiresAt Hard expiration timestamp. Zero value means not set.
 	HardExpiresAt time.Time              `json:"hard_expires_at"`
@@ -2224,6 +2322,42 @@ type SuccessSSHPublicKeyResponse struct {
 // SuccessSSHPublicKeyResponseSuccess defines model for SuccessSSHPublicKeyResponse.Success.
 type SuccessSSHPublicKeyResponseSuccess bool
 
+// SuccessSandboxFilesystemListResponse defines model for SuccessSandboxFilesystemListResponse.
+type SuccessSandboxFilesystemListResponse struct {
+	Data    *[]SandboxFilesystem                        `json:"data,omitempty"`
+	Success SuccessSandboxFilesystemListResponseSuccess `json:"success"`
+}
+
+// SuccessSandboxFilesystemListResponseSuccess defines model for SuccessSandboxFilesystemListResponse.Success.
+type SuccessSandboxFilesystemListResponseSuccess bool
+
+// SuccessSandboxFilesystemResponse defines model for SuccessSandboxFilesystemResponse.
+type SuccessSandboxFilesystemResponse struct {
+	Data    *SandboxFilesystem                      `json:"data,omitempty"`
+	Success SuccessSandboxFilesystemResponseSuccess `json:"success"`
+}
+
+// SuccessSandboxFilesystemResponseSuccess defines model for SuccessSandboxFilesystemResponse.Success.
+type SuccessSandboxFilesystemResponseSuccess bool
+
+// SuccessSandboxFilesystemSnapshotListResponse defines model for SuccessSandboxFilesystemSnapshotListResponse.
+type SuccessSandboxFilesystemSnapshotListResponse struct {
+	Data    *[]SandboxFilesystemSnapshot                        `json:"data,omitempty"`
+	Success SuccessSandboxFilesystemSnapshotListResponseSuccess `json:"success"`
+}
+
+// SuccessSandboxFilesystemSnapshotListResponseSuccess defines model for SuccessSandboxFilesystemSnapshotListResponse.Success.
+type SuccessSandboxFilesystemSnapshotListResponseSuccess bool
+
+// SuccessSandboxFilesystemSnapshotResponse defines model for SuccessSandboxFilesystemSnapshotResponse.
+type SuccessSandboxFilesystemSnapshotResponse struct {
+	Data    *SandboxFilesystemSnapshot                      `json:"data,omitempty"`
+	Success SuccessSandboxFilesystemSnapshotResponseSuccess `json:"success"`
+}
+
+// SuccessSandboxFilesystemSnapshotResponseSuccess defines model for SuccessSandboxFilesystemSnapshotResponse.Success.
+type SuccessSandboxFilesystemSnapshotResponseSuccess bool
+
 // SuccessSandboxListResponse defines model for SuccessSandboxListResponse.
 type SuccessSandboxListResponse struct {
 	Data *struct {
@@ -2630,6 +2764,9 @@ type ContextID = string
 // FilePath defines model for FilePath.
 type FilePath = string
 
+// FilesystemSnapshotID defines model for FilesystemSnapshotID.
+type FilesystemSnapshotID = string
+
 // IdentityID defines model for IdentityID.
 type IdentityID = string
 
@@ -2644,6 +2781,9 @@ type QueryRecursive = bool
 
 // RegionId defines model for RegionId.
 type RegionId = string
+
+// SandboxFilesystemID defines model for SandboxFilesystemID.
+type SandboxFilesystemID = string
 
 // SandboxID defines model for SandboxID.
 type SandboxID = string
@@ -2831,6 +2971,15 @@ type PostApiV1SandboxesIdRefreshJSONRequestBody = SandboxRefreshRequest
 
 // PutApiV1SandboxesIdServicesJSONRequestBody defines body for PutApiV1SandboxesIdServices for application/json ContentType.
 type PutApiV1SandboxesIdServicesJSONRequestBody = SandboxServicesUpdateRequest
+
+// PostApiV1SandboxfilesystemsJSONRequestBody defines body for PostApiV1Sandboxfilesystems for application/json ContentType.
+type PostApiV1SandboxfilesystemsJSONRequestBody = CreateSandboxFilesystemRequest
+
+// PostApiV1SandboxfilesystemsIdForkJSONRequestBody defines body for PostApiV1SandboxfilesystemsIdFork for application/json ContentType.
+type PostApiV1SandboxfilesystemsIdForkJSONRequestBody = ForkSandboxFilesystemRequest
+
+// PostApiV1SandboxfilesystemsIdSnapshotsJSONRequestBody defines body for PostApiV1SandboxfilesystemsIdSnapshots for application/json ContentType.
+type PostApiV1SandboxfilesystemsIdSnapshotsJSONRequestBody = CreateSandboxFilesystemSnapshotRequest
 
 // PostApiV1SandboxvolumesJSONRequestBody defines body for PostApiV1Sandboxvolumes for application/json ContentType.
 type PostApiV1SandboxvolumesJSONRequestBody = CreateSandboxVolumeRequest

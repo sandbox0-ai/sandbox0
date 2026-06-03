@@ -29,16 +29,19 @@ import (
 const (
 	volumePortalBindRetryWindow   = 5 * time.Second
 	volumePortalBindRetryInterval = 100 * time.Millisecond
+	rootfsProcdInitMinTimeout     = 60 * time.Second
 )
 
 // ClaimRequest represents a sandbox claim request
 type ClaimRequest struct {
 	TeamID   string
 	UserID   string
-	Template string         `json:"template"`
-	Config   *SandboxConfig `json:"config,omitempty"`
-	Mounts   []ClaimMount   `json:"mounts,omitempty"`
-	Metadata *ClaimMetadata `json:"-"`
+	Template string `json:"template"`
+	// FilesystemID optionally initializes the sandbox root filesystem from an existing SandboxFilesystem.
+	FilesystemID string         `json:"filesystem_id,omitempty"`
+	Config       *SandboxConfig `json:"config,omitempty"`
+	Mounts       []ClaimMount   `json:"mounts,omitempty"`
+	Metadata     *ClaimMetadata `json:"-"`
 	// SandboxID is an internal stable ID used when recreating an existing sandbox.
 	SandboxID string `json:"-"`
 	// RuntimeGeneration identifies the current runtime pod incarnation.
@@ -204,6 +207,18 @@ func setMountsAnnotation(annotations map[string]string, mounts []ClaimMount) err
 	return nil
 }
 
+func setFilesystemAnnotation(annotations map[string]string, filesystemID string) {
+	if annotations == nil {
+		return
+	}
+	filesystemID = strings.TrimSpace(filesystemID)
+	if filesystemID == "" {
+		delete(annotations, controller.AnnotationFilesystemID)
+		return
+	}
+	annotations[controller.AnnotationFilesystemID] = filesystemID
+}
+
 func validateClaimMounts(req *ClaimRequest) error {
 	if req == nil {
 		return nil
@@ -263,6 +278,7 @@ type ClaimResponse struct {
 	ProcdAddress    string                 `json:"procd_address"`
 	PodName         string                 `json:"pod_name"`
 	Template        string                 `json:"template"`
+	FilesystemID    string                 `json:"filesystem_id,omitempty"`
 	ClusterId       *string                `json:"cluster_id,omitempty"`
 	BootstrapMounts []BootstrapMountStatus `json:"bootstrap_mounts,omitempty"`
 }
@@ -278,6 +294,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		return nil, err
 	}
 	req.Template = canonicalTemplateID
+	req.FilesystemID = strings.TrimSpace(req.FilesystemID)
 	phaseStarted = time.Now()
 	if err := validateClaimMounts(req); err != nil {
 		s.observeClaimPhase(req.Template, "unknown", "validate_claim_mounts", phaseStarted, err)
@@ -482,6 +499,17 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	s.observeClaimPhase(req.Template, claimType, "bind_webhook_state_portal", phaseStarted, nil)
 
 	phaseStarted = time.Now()
+	rootPath, err := s.bindRootfs(ctx, pod, req)
+	s.observeClaimPhase(req.Template, claimType, "bind_rootfs", phaseStarted, err)
+	if err != nil {
+		s.requestSandboxDeletionAfterClaimFailure(pod, "rootfs bind failed")
+		if metrics != nil {
+			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+		}
+		return nil, fmt.Errorf("bind rootfs: %w", err)
+	}
+
+	phaseStarted = time.Now()
 	procdAddress, err := s.prodAddress(ctx, pod)
 	s.observeClaimPhase(req.Template, claimType, "resolve_procd_address", phaseStarted, err)
 	if err != nil {
@@ -492,7 +520,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		return nil, fmt.Errorf("get procd address: %w", err)
 	}
 	phaseStarted = time.Now()
-	if _, err := s.initializeProcd(ctx, pod, req, procdAddress); err != nil {
+	if _, err := s.initializeProcd(ctx, pod, req, procdAddress, rootPath); err != nil {
 		s.observeClaimPhase(req.Template, claimType, "initialize_procd", phaseStarted, err)
 		s.requestSandboxDeletionAfterClaimFailure(pod, "procd initialization failed")
 		if metrics != nil {
@@ -524,6 +552,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		ProcdAddress:    procdAddress,
 		PodName:         pod.Name,
 		Template:        req.Template,
+		FilesystemID:    req.FilesystemID,
 		ClusterId:       template.Spec.ClusterId,
 		BootstrapMounts: portalMounts,
 	}, nil
@@ -546,6 +575,7 @@ func (s *SandboxService) persistClaimedSandbox(ctx context.Context, pod *corev1.
 		ID:                  sandboxID,
 		TeamID:              req.TeamID,
 		UserID:              req.UserID,
+		FilesystemID:        req.FilesystemID,
 		TemplateID:          controller.TemplateLogicalID(template),
 		TemplateName:        template.Name,
 		TemplateNamespace:   template.Namespace,
@@ -658,6 +688,70 @@ func (s *SandboxService) bindVolumePortals(ctx context.Context, pod *corev1.Pod,
 		})
 	}
 	return out, nil
+}
+
+func (s *SandboxService) bindRootfs(ctx context.Context, pod *corev1.Pod, req *ClaimRequest) (string, error) {
+	if req == nil || strings.TrimSpace(req.FilesystemID) == "" {
+		return "", nil
+	}
+	if s == nil || !s.config.CtldEnabled {
+		return "", fmt.Errorf("ctld is required for sandbox filesystem rootfs")
+	}
+	if s.ctldClient == nil {
+		return "", fmt.Errorf("ctld client is not configured")
+	}
+	if pod == nil {
+		return "", fmt.Errorf("pod is nil")
+	}
+	if err := s.validateFilesystemAccess(ctx, req); err != nil {
+		return "", err
+	}
+	sandboxID := sandboxIDFromPod(pod)
+	if sandboxID == "" {
+		sandboxID = req.SandboxID
+	}
+	if sandboxID == "" {
+		sandboxID = pod.Name
+	}
+	ctldAddress, err := s.ctldAddressForPod(ctx, pod)
+	if err != nil {
+		return "", err
+	}
+	resp, err := s.ctldClient.BindRootfs(ctx, ctldAddress, ctldapi.BindRootfsRequest{
+		Namespace:           pod.Namespace,
+		PodName:             pod.Name,
+		PodUID:              string(pod.UID),
+		PortalName:          volumeportal.RootfsPortalName,
+		MountPath:           volumeportal.RootfsMountPath,
+		SandboxID:           sandboxID,
+		TeamID:              req.TeamID,
+		SandboxFilesystemID: strings.TrimSpace(req.FilesystemID),
+	})
+	if err != nil {
+		return "", err
+	}
+	if resp == nil || strings.TrimSpace(resp.RootPath) == "" {
+		return volumeportal.RootfsMountPath, nil
+	}
+	return strings.TrimSpace(resp.RootPath), nil
+}
+
+func (s *SandboxService) validateFilesystemAccess(ctx context.Context, req *ClaimRequest) error {
+	if s == nil || s.filesystemMetadata == nil || req == nil || strings.TrimSpace(req.FilesystemID) == "" {
+		return nil
+	}
+	info, err := s.filesystemMetadata.GetFilesystem(ctx, req.TeamID, req.UserID, strings.TrimSpace(req.FilesystemID))
+	if err != nil {
+		return fmt.Errorf("get filesystem metadata for %s: %w", req.FilesystemID, err)
+	}
+	if strings.TrimSpace(info.TeamID) != strings.TrimSpace(req.TeamID) {
+		return fmt.Errorf("%w: filesystem %s does not belong to team %s", ErrInvalidClaimRequest, req.FilesystemID, req.TeamID)
+	}
+	templateID := strings.TrimSpace(info.TemplateID)
+	if templateID != "" && templateID != strings.TrimSpace(req.Template) {
+		return fmt.Errorf("%w: filesystem %s belongs to template %s, not %s", ErrInvalidClaimRequest, req.FilesystemID, templateID, req.Template)
+	}
+	return nil
 }
 
 func (s *SandboxService) validateVolumePortalAccess(ctx context.Context, teamID, userID, volumeID string, mount v1alpha1.VolumeMountSpec) error {
@@ -915,6 +1009,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		pod.Annotations[controller.AnnotationUserID] = req.UserID
 		pod.Annotations[controller.AnnotationClaimedAt] = s.clock.Now().Format(time.RFC3339)
 		pod.Annotations[controller.AnnotationClaimType] = "hot"
+		setFilesystemAnnotation(pod.Annotations, req.FilesystemID)
 		if stateVolume != nil {
 			pod.Annotations[controller.AnnotationWebhookStateVolumeID] = stateVolume.VolumeID
 		} else {
@@ -1065,6 +1160,7 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		controller.AnnotationClaimedAt:         s.clock.Now().Format(time.RFC3339),
 		controller.AnnotationClaimType:         "cold",
 	})
+	setFilesystemAnnotation(annotations, req.FilesystemID)
 	if stateVolume != nil {
 		annotations[controller.AnnotationWebhookStateVolumeID] = stateVolume.VolumeID
 	}
@@ -1215,6 +1311,7 @@ func (s *SandboxService) initializeProcd(
 	pod *corev1.Pod,
 	req *ClaimRequest,
 	procdAddress string,
+	rootPath string,
 ) (*InitializeResponse, error) {
 	if s.internalTokenGenerator == nil {
 		return nil, fmt.Errorf("token generators not configured, cannot authenticate with procd")
@@ -1233,11 +1330,6 @@ func (s *SandboxService) initializeProcd(
 		sandboxID = pod.Name
 	}
 
-	internalToken, err := s.internalTokenGenerator.GenerateToken(teamID, userID, sandboxID)
-	if err != nil {
-		return nil, fmt.Errorf("generate internal token: %w", err)
-	}
-
 	webhookInfo := s.getWebhookInfo(req)
 	var webhookConfig *InitializeWebhook
 	if webhookInfo != nil {
@@ -1252,6 +1344,7 @@ func (s *SandboxService) initializeProcd(
 		SandboxID: sandboxID,
 		TeamID:    teamID,
 		EnvVars:   sandboxEnvVarsForInitialize(req.Config),
+		RootPath:  strings.TrimSpace(rootPath),
 		Webhook:   webhookConfig,
 	}
 
@@ -1261,6 +1354,9 @@ func (s *SandboxService) initializeProcd(
 	if timeout == 0 {
 		timeout = 6 * time.Second
 	}
+	if strings.TrimSpace(rootPath) != "" && timeout < rootfsProcdInitMinTimeout {
+		timeout = rootfsProcdInitMinTimeout
+	}
 
 	initCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -1269,6 +1365,10 @@ func (s *SandboxService) initializeProcd(
 	defer ticker.Stop()
 
 	for {
+		internalToken, err := s.internalTokenGenerator.GenerateToken(teamID, userID, sandboxID)
+		if err != nil {
+			return nil, fmt.Errorf("generate internal token: %w", err)
+		}
 		initResp, initErr = s.procdClient.Initialize(initCtx, procdAddress, initReq, internalToken)
 		if initErr == nil {
 			return initResp, nil

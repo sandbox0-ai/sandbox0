@@ -41,6 +41,7 @@ type SandboxLifecycleInfo struct {
 	WebhookURL            string
 	WebhookSecret         string
 	WebhookStateVolumeID  string
+	FilesystemID          string
 	PodUID                string
 	NodeName              string
 	HostIP                string
@@ -69,6 +70,7 @@ type sandboxLifecycleQueueItem struct {
 	WebhookURL            string
 	WebhookSecret         string
 	WebhookStateVolumeID  string
+	FilesystemID          string
 	PodUID                string
 	NodeName              string
 	HostIP                string
@@ -279,6 +281,7 @@ func (c *SandboxLifecycleController) cleanupDeletedSandbox(ctx context.Context, 
 		WebhookURL:            item.WebhookURL,
 		WebhookSecret:         item.WebhookSecret,
 		WebhookStateVolumeID:  item.WebhookStateVolumeID,
+		FilesystemID:          item.FilesystemID,
 		PodUID:                item.PodUID,
 		NodeName:              item.NodeName,
 		HostIP:                item.HostIP,
@@ -355,12 +358,56 @@ func (s *SandboxService) CleanupDeletedSandbox(ctx context.Context, info Sandbox
 			errs = append(errs, fmt.Errorf("delete webhook state volume: %w", err))
 		}
 	}
+	if err := s.unbindDeletedSandboxRootfs(ctx, info); err != nil {
+		errs = append(errs, fmt.Errorf("unbind sandbox rootfs: %w", err))
+	}
 	if err := s.unbindDeletedSandboxVolumePortals(ctx, info); err != nil {
 		errs = append(errs, fmt.Errorf("unbind sandbox volume portals: %w", err))
 	}
 	s.powerStateLocks.Delete(sandboxID)
 	s.powerStateReconcilers.Delete(sandboxID)
 	return errors.Join(errs...)
+}
+
+func (s *SandboxService) unbindDeletedSandboxRootfs(ctx context.Context, info SandboxLifecycleInfo) error {
+	filesystemID := strings.TrimSpace(info.FilesystemID)
+	if s == nil || !s.config.CtldEnabled || filesystemID == "" {
+		return nil
+	}
+	if s.ctldClient == nil {
+		return fmt.Errorf("ctld client is not configured")
+	}
+	if strings.TrimSpace(info.PodUID) == "" {
+		if s.logger != nil {
+			s.logger.Warn("Skipping sandbox rootfs cleanup without pod UID",
+				zap.String("sandboxID", info.SandboxID),
+				zap.String("namespace", info.Namespace),
+				zap.String("pod", info.PodName),
+			)
+		}
+		return nil
+	}
+	ctldAddress, err := s.ctldAddressForLifecycleInfo(ctx, info)
+	if err != nil {
+		return err
+	}
+	_, err = s.ctldClient.UnbindRootfs(ctx, ctldAddress, ctldapi.UnbindRootfsRequest{
+		PodUID:              info.PodUID,
+		PortalName:          volumeportal.RootfsPortalName,
+		MountPath:           volumeportal.RootfsMountPath,
+		SandboxFilesystemID: filesystemID,
+	})
+	if err != nil && isRootfsAlreadyUnboundError(err) {
+		if s.logger != nil {
+			s.logger.Warn("Skipping deleted sandbox rootfs cleanup after ctld reported it already unbound",
+				zap.String("sandboxID", info.SandboxID),
+				zap.String("filesystemID", filesystemID),
+				zap.Error(err),
+			)
+		}
+		return nil
+	}
+	return err
 }
 
 func (s *SandboxService) unbindDeletedSandboxVolumePortals(ctx context.Context, info SandboxLifecycleInfo) error {
@@ -465,6 +512,7 @@ func sandboxLifecycleItemFromInfo(info SandboxLifecycleInfo, deleted bool) sandb
 		WebhookURL:            info.WebhookURL,
 		WebhookSecret:         info.WebhookSecret,
 		WebhookStateVolumeID:  info.WebhookStateVolumeID,
+		FilesystemID:          info.FilesystemID,
 		PodUID:                info.PodUID,
 		NodeName:              info.NodeName,
 		HostIP:                info.HostIP,
@@ -512,11 +560,13 @@ func sandboxLifecycleInfoFromPod(pod *corev1.Pod) (SandboxLifecycleInfo, bool) {
 	webhookURL := ""
 	webhookSecret := ""
 	webhookStateVolumeID := ""
+	filesystemID := ""
 	runtimeDeletionReason := ""
 	if pod.Annotations != nil {
 		teamID = strings.TrimSpace(pod.Annotations[controller.AnnotationTeamID])
 		userID = strings.TrimSpace(pod.Annotations[controller.AnnotationUserID])
 		webhookStateVolumeID = strings.TrimSpace(pod.Annotations[controller.AnnotationWebhookStateVolumeID])
+		filesystemID = strings.TrimSpace(pod.Annotations[controller.AnnotationFilesystemID])
 		runtimeDeletionReason = strings.TrimSpace(pod.Annotations[controller.AnnotationRuntimeDeletionReason])
 		if configJSON := strings.TrimSpace(pod.Annotations[controller.AnnotationConfig]); configJSON != "" {
 			var cfg SandboxConfig
@@ -535,6 +585,7 @@ func sandboxLifecycleInfoFromPod(pod *corev1.Pod) (SandboxLifecycleInfo, bool) {
 		WebhookURL:            webhookURL,
 		WebhookSecret:         webhookSecret,
 		WebhookStateVolumeID:  webhookStateVolumeID,
+		FilesystemID:          filesystemID,
 		PodUID:                string(pod.UID),
 		NodeName:              pod.Spec.NodeName,
 		HostIP:                pod.Status.HostIP,

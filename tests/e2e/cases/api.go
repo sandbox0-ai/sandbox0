@@ -19,6 +19,7 @@ func RegisterApiSuite(envProvider func() *framework.ScenarioEnv) {
 		registerApiMinimalSuite(envProvider)
 		registerApiNetworkPolicySuite(envProvider)
 		registerApiVolumesSuite(envProvider)
+		registerApiFilesystemsSuite(envProvider)
 		registerApiFullModeSuite(envProvider)
 		registerApiUnknownSuite(envProvider)
 	})
@@ -28,6 +29,7 @@ var knownApiScenarios = map[string]struct{}{
 	"minimal":        {},
 	"network-policy": {},
 	"volumes":        {},
+	"filesystems":    {},
 	"fullmode":       {},
 }
 

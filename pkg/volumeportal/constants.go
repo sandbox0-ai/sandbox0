@@ -10,6 +10,8 @@ const (
 
 	WebhookStatePortalName = "sandbox0-webhook-state"
 	WebhookStateMountPath  = "/var/lib/sandbox0/procd"
+	RootfsPortalName       = "sandbox0-rootfs"
+	RootfsMountPath        = "/var/lib/sandbox0/rootfs"
 
 	PodInfoName      = "csi.storage.k8s.io/pod.name"
 	PodInfoNamespace = "csi.storage.k8s.io/pod.namespace"

@@ -31,6 +31,67 @@ type S0FSCommittedHead struct {
 	UpdatedAt     time.Time `json:"updated_at"`
 }
 
+// SandboxFilesystemS0FSCommittedHead stores the current committed immutable
+// manifest pointer for one sandbox filesystem.
+type SandboxFilesystemS0FSCommittedHead struct {
+	FilesystemID  string    `json:"filesystem_id"`
+	ManifestSeq   uint64    `json:"manifest_seq"`
+	CheckpointSeq uint64    `json:"checkpoint_seq"`
+	ManifestKey   string    `json:"manifest_key"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+const (
+	SandboxFilesystemStateAvailable = "available"
+	SandboxFilesystemStateBound     = "bound"
+	SandboxFilesystemStateDeleted   = "deleted"
+)
+
+// SandboxFilesystem stores metadata for a persistent sandbox root filesystem.
+// It is intentionally independent from SandboxVolume metadata while sharing
+// lower-level s0fs storage primitives.
+type SandboxFilesystem struct {
+	ID                 string     `json:"id"`
+	TeamID             string     `json:"team_id"`
+	UserID             string     `json:"user_id"`
+	SourceFilesystemID *string    `json:"source_filesystem_id,omitempty"`
+	TemplateID         *string    `json:"template_id,omitempty"`
+	BaseImageDigest    string     `json:"base_image_digest"`
+	S0FSHead           string     `json:"s0fs_head"`
+	State              string     `json:"state"`
+	DeletedAt          *time.Time `json:"deleted_at,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
+// SandboxFilesystemSnapshot stores immutable snapshot metadata for a
+// SandboxFilesystem branch.
+type SandboxFilesystemSnapshot struct {
+	ID              string     `json:"id"`
+	FilesystemID    string     `json:"filesystem_id"`
+	TeamID          string     `json:"team_id"`
+	UserID          string     `json:"user_id"`
+	BaseImageDigest string     `json:"base_image_digest"`
+	S0FSHead        string     `json:"s0fs_head"`
+	Name            string     `json:"name"`
+	Description     string     `json:"description,omitempty"`
+	SizeBytes       int64      `json:"size_bytes"`
+	CreatedAt       time.Time  `json:"created_at"`
+	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
+}
+
+// SandboxFilesystemMount coordinates the single active writable owner for a
+// SandboxFilesystem branch across ctld instances.
+type SandboxFilesystemMount struct {
+	ID            string           `json:"id"`
+	FilesystemID  string           `json:"filesystem_id"`
+	ClusterID     string           `json:"cluster_id"`
+	PodID         string           `json:"pod_id"`
+	LastHeartbeat time.Time        `json:"last_heartbeat"`
+	MountedAt     time.Time        `json:"mounted_at"`
+	MountOptions  *json.RawMessage `json:"mount_options,omitempty"`
+}
+
 const (
 	SandboxVolumeOwnerKindSandbox = "sandbox"
 )

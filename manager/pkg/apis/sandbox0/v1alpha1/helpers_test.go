@@ -230,6 +230,17 @@ manager_image: sandbox0/manager:test
 	if mount := findVolumeMount(spec.Containers[0].VolumeMounts, webhookVolume.Name); mount == nil || mount.MountPath != volumeportal.WebhookStateMountPath {
 		t.Fatalf("expected webhook state mount, got %#v", spec.Containers[0].VolumeMounts)
 	}
+
+	rootfsVolume := findCSIVolumeByPortal(spec.Volumes, volumeportal.RootfsPortalName)
+	if rootfsVolume == nil {
+		t.Fatalf("expected rootfs portal volume, got %#v", spec.Volumes)
+	}
+	if got := rootfsVolume.CSI.VolumeAttributes[volumeportal.AttributeMountPath]; got != volumeportal.RootfsMountPath {
+		t.Fatalf("rootfs mount path attr = %q, want %q", got, volumeportal.RootfsMountPath)
+	}
+	if mount := findVolumeMount(spec.Containers[0].VolumeMounts, rootfsVolume.Name); mount == nil || mount.MountPath != volumeportal.RootfsMountPath {
+		t.Fatalf("expected rootfs mount, got %#v", spec.Containers[0].VolumeMounts)
+	}
 }
 
 func TestBuildPodSpecInjectsEmptyDirMounts(t *testing.T) {

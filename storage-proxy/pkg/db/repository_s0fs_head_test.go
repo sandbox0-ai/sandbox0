@@ -236,6 +236,85 @@ func TestAcquireMountAllowsROXSharing(t *testing.T) {
 	}
 }
 
+func TestAcquireSandboxFilesystemMountRejectsConflictingOwner(t *testing.T) {
+	repo := newS0FSCommittedHeadTestRepository(t)
+	if repo == nil {
+		return
+	}
+
+	ctx := context.Background()
+	filesystemID := "fs-" + uuid.NewString()
+	createTestSandboxFilesystem(t, repo, filesystemID)
+
+	first := &SandboxFilesystemMount{
+		ID:            uuid.NewString(),
+		FilesystemID:  filesystemID,
+		ClusterID:     "cluster-a",
+		PodID:         "pod-a",
+		LastHeartbeat: time.Now().UTC(),
+		MountedAt:     time.Now().UTC(),
+		MountOptions:  mustMountOptionsRaw(t, "RWO"),
+	}
+	if err := repo.AcquireSandboxFilesystemMount(ctx, first, 15); err != nil {
+		t.Fatalf("AcquireSandboxFilesystemMount(first) error = %v", err)
+	}
+
+	second := &SandboxFilesystemMount{
+		ID:            uuid.NewString(),
+		FilesystemID:  filesystemID,
+		ClusterID:     "cluster-b",
+		PodID:         "pod-b",
+		LastHeartbeat: time.Now().UTC(),
+		MountedAt:     time.Now().UTC(),
+		MountOptions:  mustMountOptionsRaw(t, "RWO"),
+	}
+	if err := repo.AcquireSandboxFilesystemMount(ctx, second, 15); err != ErrConflict {
+		t.Fatalf("AcquireSandboxFilesystemMount(second) err = %v, want %v", err, ErrConflict)
+	}
+}
+
+func TestDeleteSandboxFilesystemMountMarksFilesystemAvailable(t *testing.T) {
+	repo := newS0FSCommittedHeadTestRepository(t)
+	if repo == nil {
+		return
+	}
+
+	ctx := context.Background()
+	filesystemID := "fs-" + uuid.NewString()
+	createTestSandboxFilesystem(t, repo, filesystemID)
+
+	mount := &SandboxFilesystemMount{
+		ID:            uuid.NewString(),
+		FilesystemID:  filesystemID,
+		ClusterID:     "cluster-a",
+		PodID:         "pod-a",
+		LastHeartbeat: time.Now().UTC(),
+		MountedAt:     time.Now().UTC(),
+		MountOptions:  mustMountOptionsRaw(t, "RWO"),
+	}
+	if err := repo.AcquireSandboxFilesystemMount(ctx, mount, 15); err != nil {
+		t.Fatalf("AcquireSandboxFilesystemMount() error = %v", err)
+	}
+	fs, err := repo.GetSandboxFilesystem(ctx, filesystemID)
+	if err != nil {
+		t.Fatalf("GetSandboxFilesystem(bound) error = %v", err)
+	}
+	if fs.State != SandboxFilesystemStateBound {
+		t.Fatalf("filesystem state after acquire = %q, want %q", fs.State, SandboxFilesystemStateBound)
+	}
+
+	if err := repo.DeleteSandboxFilesystemMount(ctx, filesystemID, "cluster-a", "pod-a"); err != nil {
+		t.Fatalf("DeleteSandboxFilesystemMount() error = %v", err)
+	}
+	fs, err = repo.GetSandboxFilesystem(ctx, filesystemID)
+	if err != nil {
+		t.Fatalf("GetSandboxFilesystem(available) error = %v", err)
+	}
+	if fs.State != SandboxFilesystemStateAvailable {
+		t.Fatalf("filesystem state after delete = %q, want %q", fs.State, SandboxFilesystemStateAvailable)
+	}
+}
+
 func newS0FSCommittedHeadTestRepository(t *testing.T) *Repository {
 	t.Helper()
 
@@ -281,6 +360,23 @@ func createTestSandboxVolume(t *testing.T, repo *Repository, volumeID string) {
 		UpdatedAt:  now,
 	}); err != nil {
 		t.Fatalf("CreateSandboxVolume(%s) error = %v", volumeID, err)
+	}
+}
+
+func createTestSandboxFilesystem(t *testing.T, repo *Repository, filesystemID string) {
+	t.Helper()
+
+	now := time.Now().UTC()
+	if err := repo.CreateSandboxFilesystem(context.Background(), &SandboxFilesystem{
+		ID:              filesystemID,
+		TeamID:          "team-1",
+		UserID:          "user-1",
+		BaseImageDigest: "sha256:base",
+		State:           SandboxFilesystemStateAvailable,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}); err != nil {
+		t.Fatalf("CreateSandboxFilesystem(%s) error = %v", filesystemID, err)
 	}
 }
 

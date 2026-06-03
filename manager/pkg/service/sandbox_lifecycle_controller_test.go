@@ -362,6 +362,98 @@ func TestSandboxServiceCleanupDeletedSandboxUnbindsVolumePortals(t *testing.T) {
 	}
 }
 
+func TestSandboxServiceCleanupDeletedSandboxUnbindsRootfs(t *testing.T) {
+	var got ctldapi.UnbindRootfsRequest
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/rootfs/unbind" {
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode rootfs unbind request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ctldapi.UnbindRootfsResponse{SandboxFilesystemID: "fs-1", Unbound: true})
+	}))
+	defer ctld.Close()
+
+	ctldURL, err := url.Parse(ctld.URL)
+	if err != nil {
+		t.Fatalf("parse ctld url: %v", err)
+	}
+	ctldPort, err := strconv.Atoi(ctldURL.Port())
+	if err != nil {
+		t.Fatalf("parse ctld port: %v", err)
+	}
+	svc := &SandboxService{
+		ctldClient: NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config: SandboxServiceConfig{
+			CtldEnabled: true,
+			CtldPort:    ctldPort,
+		},
+		logger: zap.NewNop(),
+	}
+
+	err = svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
+		Namespace:    "ns-a",
+		PodName:      "sandbox-a",
+		SandboxID:    "sandbox-a",
+		PodUID:       "pod-uid-a",
+		HostIP:       ctldURL.Hostname(),
+		FilesystemID: "fs-1",
+	})
+	if err != nil {
+		t.Fatalf("CleanupDeletedSandbox() error = %v", err)
+	}
+	if got.PodUID != "pod-uid-a" || got.SandboxFilesystemID != "fs-1" {
+		t.Fatalf("unexpected rootfs unbind request: %+v", got)
+	}
+	if got.PortalName != volumeportal.RootfsPortalName || got.MountPath != volumeportal.RootfsMountPath {
+		t.Fatalf("unexpected rootfs portal identity: %+v", got)
+	}
+}
+
+func TestSandboxServiceCleanupDeletedSandboxToleratesMissingRootfsBinding(t *testing.T) {
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/rootfs/unbind" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(ctldapi.UnbindRootfsResponse{Error: "rootfs portal sandbox0-rootfs for pod pod-uid-a is not bound"})
+	}))
+	defer ctld.Close()
+
+	ctldURL, err := url.Parse(ctld.URL)
+	if err != nil {
+		t.Fatalf("parse ctld url: %v", err)
+	}
+	ctldPort, err := strconv.Atoi(ctldURL.Port())
+	if err != nil {
+		t.Fatalf("parse ctld port: %v", err)
+	}
+	svc := &SandboxService{
+		ctldClient: NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config: SandboxServiceConfig{
+			CtldEnabled: true,
+			CtldPort:    ctldPort,
+		},
+		logger: zap.NewNop(),
+	}
+
+	err = svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
+		Namespace:    "ns-a",
+		PodName:      "sandbox-a",
+		SandboxID:    "sandbox-a",
+		PodUID:       "pod-uid-a",
+		HostIP:       ctldURL.Hostname(),
+		FilesystemID: "fs-1",
+	})
+	if err != nil {
+		t.Fatalf("CleanupDeletedSandbox() error = %v", err)
+	}
+}
+
 func TestSandboxLifecycleInfoFromPodIncludesWebhookMetadata(t *testing.T) {
 	pod := newLifecycleTestPod()
 	pod.Annotations[controller.AnnotationUserID] = "user-a"
@@ -419,6 +511,19 @@ func TestSandboxLifecycleInfoFromPodIncludesVolumePortals(t *testing.T) {
 	portal := info.VolumePortals[0]
 	if portal.SandboxVolumeID != "vol-1" || portal.MountPoint != "/workspace/data" || portal.PortalName != "data" {
 		t.Fatalf("volume portal = %+v, want vol-1 data", portal)
+	}
+}
+
+func TestSandboxLifecycleInfoFromPodIncludesFilesystemID(t *testing.T) {
+	pod := newLifecycleTestPod()
+	pod.Annotations[controller.AnnotationFilesystemID] = "fs-1"
+
+	info, ok := sandboxLifecycleInfoFromPod(pod)
+	if !ok {
+		t.Fatal("expected lifecycle info")
+	}
+	if info.FilesystemID != "fs-1" {
+		t.Fatalf("filesystem id = %q, want fs-1", info.FilesystemID)
 	}
 }
 
@@ -555,6 +660,98 @@ func TestTerminateSandboxRequestsPodDeleteWithoutExternalCleanup(t *testing.T) {
 	}
 	if !sawFinalizerUpdate {
 		t.Fatal("TerminateSandbox did not add sandbox cleanup finalizer before deleting the pod")
+	}
+}
+
+func TestTerminateSandboxToleratesMissingRootfsBinding(t *testing.T) {
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/rootfs/unbind" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(ctldapi.UnbindRootfsResponse{Error: "not found"})
+	}))
+	defer ctld.Close()
+	ctldURL, err := url.Parse(ctld.URL)
+	if err != nil {
+		t.Fatalf("parse ctld url: %v", err)
+	}
+	ctldPort, err := strconv.Atoi(ctldURL.Port())
+	if err != nil {
+		t.Fatalf("parse ctld port: %v", err)
+	}
+	pod := newLifecycleTestPod()
+	pod.UID = types.UID("pod-uid-a")
+	pod.Status.HostIP = ctldURL.Hostname()
+	pod.Annotations[controller.AnnotationFilesystemID] = "fs-1"
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	if err := indexer.Add(pod.DeepCopy()); err != nil {
+		t.Fatalf("add pod to indexer: %v", err)
+	}
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	svc := &SandboxService{
+		k8sClient:  client,
+		podLister:  corelisters.NewPodLister(indexer),
+		ctldClient: NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config: SandboxServiceConfig{
+			CtldEnabled: true,
+			CtldPort:    ctldPort,
+		},
+		logger: zap.NewNop(),
+	}
+
+	if err := svc.TerminateSandbox(context.Background(), pod.Name); err != nil {
+		t.Fatalf("TerminateSandbox() error = %v", err)
+	}
+	if _, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{}); !k8serrors.IsNotFound(err) {
+		t.Fatalf("pod get error = %v, want not found after delete", err)
+	}
+}
+
+func TestCleanSandboxRuntimeDoesNotTolerateMissingRootfsBinding(t *testing.T) {
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/rootfs/unbind" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(ctldapi.UnbindRootfsResponse{Error: "not found"})
+	}))
+	defer ctld.Close()
+	ctldURL, err := url.Parse(ctld.URL)
+	if err != nil {
+		t.Fatalf("parse ctld url: %v", err)
+	}
+	ctldPort, err := strconv.Atoi(ctldURL.Port())
+	if err != nil {
+		t.Fatalf("parse ctld port: %v", err)
+	}
+	pod := newLifecycleTestPod()
+	pod.UID = types.UID("pod-uid-a")
+	pod.Status.HostIP = ctldURL.Hostname()
+	pod.Annotations[controller.AnnotationFilesystemID] = "fs-1"
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	if err := indexer.Add(pod.DeepCopy()); err != nil {
+		t.Fatalf("add pod to indexer: %v", err)
+	}
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	svc := &SandboxService{
+		k8sClient:  client,
+		podLister:  corelisters.NewPodLister(indexer),
+		ctldClient: NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config: SandboxServiceConfig{
+			CtldEnabled: true,
+			CtldPort:    ctldPort,
+		},
+		logger: zap.NewNop(),
+	}
+
+	if err := svc.CleanSandboxRuntime(context.Background(), pod.Name); err == nil {
+		t.Fatal("CleanSandboxRuntime() error = nil, want missing rootfs binding error")
+	}
+	if _, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("pod get error = %v, want pod to remain after failed clean", err)
 	}
 }
 

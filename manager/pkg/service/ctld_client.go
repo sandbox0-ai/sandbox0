@@ -48,6 +48,18 @@ func (c *CtldClient) ProbePod(ctx context.Context, ctldAddress, namespace, podNa
 	return c.apiOrDefault().ProbePod(ctx, ctldAddress, namespace, podName, kind)
 }
 
+func (c *CtldClient) BindRootfs(ctx context.Context, ctldAddress string, req ctldapi.BindRootfsRequest) (*ctldapi.BindRootfsResponse, error) {
+	return c.apiOrDefault().BindRootfs(ctx, ctldAddress, req)
+}
+
+func (c *CtldClient) CommitRootfs(ctx context.Context, ctldAddress string, req ctldapi.CommitRootfsRequest) (*ctldapi.CommitRootfsResponse, error) {
+	return c.apiOrDefault().CommitRootfs(ctx, ctldAddress, req)
+}
+
+func (c *CtldClient) UnbindRootfs(ctx context.Context, ctldAddress string, req ctldapi.UnbindRootfsRequest) (*ctldapi.UnbindRootfsResponse, error) {
+	return c.apiOrDefault().UnbindRootfs(ctx, ctldAddress, req)
+}
+
 func (c *CtldClient) BindVolumePortal(ctx context.Context, ctldAddress string, req ctldapi.BindVolumePortalRequest) (*ctldapi.BindVolumePortalResponse, error) {
 	return c.apiOrDefault().BindVolumePortal(ctx, ctldAddress, req)
 }

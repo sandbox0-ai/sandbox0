@@ -25,20 +25,21 @@ import (
 )
 
 type apiModeSuiteOptions struct {
-	name                      string
-	describe                  string
-	templateNamePrefix        string
-	fileContent               string
-	includeSandboxListTests   bool
-	includeTemplateStatus     bool
-	includePoolReadinessGate  bool
-	includeNetworkPolicy      bool
-	includeVolumeLifecycle    bool
-	includeObjectEncryption   bool
-	includeWebhookLifecycle   bool
-	includeMeteringAssertions bool
-	expectStorageUnavailable  bool
-	expectNetworkUnavailable  bool
+	name                       string
+	describe                   string
+	templateNamePrefix         string
+	fileContent                string
+	includeSandboxListTests    bool
+	includeTemplateStatus      bool
+	includePoolReadinessGate   bool
+	includeNetworkPolicy       bool
+	includeVolumeLifecycle     bool
+	includeFilesystemLifecycle bool
+	includeObjectEncryption    bool
+	includeWebhookLifecycle    bool
+	includeMeteringAssertions  bool
+	expectStorageUnavailable   bool
+	expectNetworkUnavailable   bool
 }
 
 const (
@@ -323,6 +324,14 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 						assertObjectEncryptionLifecycle(env, session)
 					})
 				}
+			})
+		}
+
+		if opts.includeFilesystemLifecycle {
+			Context("sandbox filesystems", func() {
+				It("persists root filesystem state across clean and restore", func() {
+					assertSandboxFilesystemLifecycle(env, session)
+				})
 			})
 		}
 
@@ -849,8 +858,9 @@ func assertTemplateRolloutClaimFallsBackToColdStart(env *framework.ScenarioEnv, 
 	}()
 
 	sandbox := waitForSandboxPodReadyEventually(env, session, claimResp.SandboxId, templateNamespace)
-	Expect(sandbox.PodName).NotTo(Equal(staleIdlePod.Name))
-	Expect(podAnnotationEventually(env, templateNamespace, sandbox.PodName, "sandbox0.ai/claim-type")).To(Equal("cold"))
+	podName := sandboxPodName(sandbox)
+	Expect(podName).NotTo(Equal(staleIdlePod.Name))
+	Expect(podAnnotationEventually(env, templateNamespace, podName, "sandbox0.ai/claim-type")).To(Equal("cold"))
 }
 
 func rolloutClaimWarmProcesses(marker string) []apispec.WarmProcessSpec {
@@ -1407,10 +1417,12 @@ func assertSandboxNetworkIsolation(env *framework.ScenarioEnv, session *e2eutils
 
 	sandboxA := waitForSandboxPodReadyEventually(env, session, sandboxAID, templateANamespace)
 	sandboxB := waitForSandboxPodReadyEventually(env, session, sandboxBID, templateBNamespace)
+	sandboxAPod := sandboxPodName(sandboxA)
+	sandboxBPod := sandboxPodName(sandboxB)
 
-	nodeA, err := framework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, templateANamespace, "pod", sandboxA.PodName, "{.spec.nodeName}")
+	nodeA, err := framework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, templateANamespace, "pod", sandboxAPod, "{.spec.nodeName}")
 	Expect(err).NotTo(HaveOccurred())
-	nodeB, err := framework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, templateBNamespace, "pod", sandboxB.PodName, "{.spec.nodeName}")
+	nodeB, err := framework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, templateBNamespace, "pod", sandboxBPod, "{.spec.nodeName}")
 	Expect(err).NotTo(HaveOccurred())
 	Expect(nodeA).To(Equal(workerNodes[0]))
 	Expect(nodeB).To(Equal(workerNodes[1]))
@@ -1419,9 +1431,9 @@ func assertSandboxNetworkIsolation(env *framework.ScenarioEnv, session *e2eutils
 	const exposedPort int32 = 18080
 	const expectedBody = "sandbox public route works\n"
 
-	startSandboxHTTPServer(env, templateBNamespace, sandboxB.PodName, exposedPort, expectedBody)
+	startSandboxHTTPServer(env, templateBNamespace, sandboxBPod, exposedPort, expectedBody)
 	Eventually(func() error {
-		body, execErr := execInSandboxPod(env, templateBNamespace, sandboxB.PodName, fmt.Sprintf("curl -fsS --max-time 5 http://127.0.0.1:%d/", exposedPort))
+		body, execErr := execInSandboxPod(env, templateBNamespace, sandboxBPod, fmt.Sprintf("curl -fsS --max-time 5 http://127.0.0.1:%d/", exposedPort))
 		if execErr != nil {
 			return execErr
 		}
@@ -1431,12 +1443,12 @@ func assertSandboxNetworkIsolation(env *framework.ScenarioEnv, session *e2eutils
 		return nil
 	}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
 
-	podIPB, err := framework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, templateBNamespace, "pod", sandboxB.PodName, "{.status.podIP}")
+	podIPB, err := framework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, templateBNamespace, "pod", sandboxBPod, "{.status.podIP}")
 	Expect(err).NotTo(HaveOccurred())
 	Expect(strings.TrimSpace(podIPB)).NotTo(BeEmpty())
 
 	Eventually(func() error {
-		_, execErr := execInSandboxPod(env, templateANamespace, sandboxA.PodName, fmt.Sprintf("curl -fsS --max-time 5 http://%s:%d/", strings.TrimSpace(podIPB), exposedPort))
+		_, execErr := execInSandboxPod(env, templateANamespace, sandboxAPod, fmt.Sprintf("curl -fsS --max-time 5 http://%s:%d/", strings.TrimSpace(podIPB), exposedPort))
 		if execErr == nil {
 			return fmt.Errorf("expected private sandbox-to-sandbox request to fail")
 		}
@@ -1448,7 +1460,7 @@ func assertSandboxNetworkIsolation(env *framework.ScenarioEnv, session *e2eutils
 	clusterGatewayBaseURL := fmt.Sprintf("http://%s-cluster-gateway.%s.svc.cluster.local:%d", env.Infra.Name, env.Infra.Namespace, clusterGatewayPort)
 
 	Eventually(func() error {
-		body, execErr := execInSandboxPod(env, templateANamespace, sandboxA.PodName, fmt.Sprintf("curl -fsS --max-time 5 %s/healthz", clusterGatewayBaseURL))
+		body, execErr := execInSandboxPod(env, templateANamespace, sandboxAPod, fmt.Sprintf("curl -fsS --max-time 5 %s/healthz", clusterGatewayBaseURL))
 		if execErr != nil {
 			return execErr
 		}
@@ -1478,7 +1490,7 @@ func assertSandboxNetworkIsolation(env *framework.ScenarioEnv, session *e2eutils
 	Expect(publicHost).NotTo(BeEmpty())
 
 	Eventually(func() error {
-		body, execErr := execInSandboxPod(env, templateANamespace, sandboxA.PodName, fmt.Sprintf("curl -fsS --max-time 10 -H 'Host: %s' %s/", publicHost, clusterGatewayBaseURL))
+		body, execErr := execInSandboxPod(env, templateANamespace, sandboxAPod, fmt.Sprintf("curl -fsS --max-time 10 -H 'Host: %s' %s/", publicHost, clusterGatewayBaseURL))
 		if execErr != nil {
 			return execErr
 		}
@@ -1505,7 +1517,7 @@ func assertEgressQuota(env *framework.ScenarioEnv, session *e2eutils.Session, sa
 		_, _ = session.DeleteTeamQuota(env.TestCtx.Context, quota.DimensionEgress)
 	})
 
-	_, err = execInSandboxPod(env, templateNamespace, sandbox.PodName, "curl -fsS --max-time 5 http://example.com/")
+	_, err = execInSandboxPod(env, templateNamespace, sandboxPodName(sandbox), "curl -fsS --max-time 5 http://example.com/")
 	Expect(err).To(HaveOccurred())
 }
 
@@ -1525,7 +1537,7 @@ func assertIngressQuota(env *framework.ScenarioEnv, session *e2eutils.Session, s
 		_, _ = session.DeleteTeamQuota(env.TestCtx.Context, quota.DimensionIngress)
 	})
 
-	_, err = execInSandboxPod(env, templateNamespace, sandbox.PodName, "curl -fsS --max-time 5 http://example.com/")
+	_, err = execInSandboxPod(env, templateNamespace, sandboxPodName(sandbox), "curl -fsS --max-time 5 http://example.com/")
 	Expect(err).To(HaveOccurred())
 }
 
@@ -1771,20 +1783,21 @@ func waitForSandboxPodReadyEventually(env *framework.ScenarioEnv, session *e2eut
 		if err != nil {
 			return err
 		}
-		if strings.TrimSpace(current.PodName) == "" {
+		podName := sandboxPodNameValue(current)
+		if strings.TrimSpace(podName) == "" {
 			return fmt.Errorf("sandbox %s pod name not assigned", sandboxID)
 		}
-		if err := framework.KubectlWaitForCondition(env.TestCtx.Context, env.Config.Kubeconfig, namespace, "pod", current.PodName, "Ready", "10s"); err != nil {
+		if err := framework.KubectlWaitForCondition(env.TestCtx.Context, env.Config.Kubeconfig, namespace, "pod", podName, "Ready", "10s"); err != nil {
 			describe, describeErr := framework.KubectlOutput(
 				env.TestCtx.Context,
 				env.Config.Kubeconfig,
 				"-n", namespace,
-				"describe", "pod", current.PodName,
+				"describe", "pod", podName,
 			)
 			if describeErr != nil {
-				return fmt.Errorf("wait for pod %s ready: %w (describe failed: %v)", current.PodName, err, describeErr)
+				return fmt.Errorf("wait for pod %s ready: %w (describe failed: %v)", podName, err, describeErr)
 			}
-			return fmt.Errorf("wait for pod %s ready: %w\n%s", current.PodName, err, strings.TrimSpace(describe))
+			return fmt.Errorf("wait for pod %s ready: %w\n%s", podName, err, strings.TrimSpace(describe))
 		}
 		sandbox = current
 		return nil
@@ -2002,6 +2015,149 @@ func assertVolumeLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session
 	status, err = session.DeleteSnapshot(env.TestCtx.Context, GinkgoT(), snapshotVolumeID, snapshot.Id)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
+}
+
+func assertSandboxFilesystemLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session) {
+	templateID := "default"
+	baseImageDigest := "sha256:e2e-rootfs-base"
+	filesystem, status, err := session.CreateSandboxFilesystem(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxFilesystemRequest{
+		Template:        &templateID,
+		BaseImageDigest: &baseImageDigest,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(filesystem).NotTo(BeNil())
+	Expect(filesystem.Id).NotTo(BeEmpty())
+	filesystemID := filesystem.Id
+	DeferCleanup(func() {
+		_, _ = session.DeleteSandboxFilesystem(env.TestCtx.Context, GinkgoT(), filesystemID)
+	})
+
+	claimResp, err := session.ClaimSandboxWithRequest(env.TestCtx.Context, GinkgoT(), apispec.ClaimRequest{
+		Template:     &templateID,
+		FilesystemId: &filesystemID,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(claimResp).NotTo(BeNil())
+	Expect(claimResp.FilesystemId).NotTo(BeNil())
+	Expect(*claimResp.FilesystemId).To(Equal(filesystemID))
+	sandboxID := claimResp.SandboxId
+	DeferCleanup(func() {
+		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	})
+
+	sandbox, status, err := session.GetSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(sandbox.FilesystemId).NotTo(BeNil())
+	Expect(*sandbox.FilesystemId).To(Equal(filesystemID))
+
+	filePath := fmt.Sprintf("/tmp/sandbox-filesystem-e2e-%d.txt", time.Now().UnixNano())
+	originalContent := []byte("sandbox filesystem original content")
+	status, err = session.WriteFile(env.TestCtx.Context, GinkgoT(), sandboxID, filePath, originalContent, "")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	assertSandboxCommandOutput(env, session, sandboxID, []string{"/bin/sh", "-lc", "cat " + shellQuote(filePath)}, string(originalContent))
+
+	cleaned, status, err := session.CleanSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(cleaned).NotTo(BeNil())
+	Expect(cleaned.Status).To(Equal(apispec.SandboxLifecycleStatusCleaned))
+
+	snapshot, status, err := session.CreateSandboxFilesystemSnapshot(env.TestCtx.Context, GinkgoT(), filesystemID, apispec.CreateSandboxFilesystemSnapshotRequest{Name: "e2e-rootfs-before-mutation"})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(snapshot).NotTo(BeNil())
+	Expect(snapshot.Id).NotTo(BeEmpty())
+	DeferCleanup(func() {
+		_, _ = session.DeleteSandboxFilesystemSnapshot(env.TestCtx.Context, GinkgoT(), filesystemID, snapshot.Id)
+	})
+
+	snapshots, status, err := session.ListSandboxFilesystemSnapshots(env.TestCtx.Context, GinkgoT(), filesystemID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(snapshots).NotTo(BeEmpty())
+
+	gotSnapshot, status, err := session.GetSandboxFilesystemSnapshot(env.TestCtx.Context, GinkgoT(), filesystemID, snapshot.Id)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(gotSnapshot.Id).To(Equal(snapshot.Id))
+
+	forked, status, err := session.ForkSandboxFilesystem(env.TestCtx.Context, GinkgoT(), filesystemID, apispec.ForkSandboxFilesystemRequest{})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(forked).NotTo(BeNil())
+	Expect(forked.Id).NotTo(Equal(filesystemID))
+	_, err = session.DeleteSandboxFilesystem(env.TestCtx.Context, GinkgoT(), forked.Id)
+	Expect(err).NotTo(HaveOccurred())
+
+	fromSnapshot, status, err := session.CreateSandboxFilesystem(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxFilesystemRequest{
+		Template:   &templateID,
+		SnapshotId: &snapshot.Id,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(fromSnapshot).NotTo(BeNil())
+	Expect(fromSnapshot.SourceFilesystemId).NotTo(BeNil())
+	Expect(*fromSnapshot.SourceFilesystemId).To(Equal(filesystemID))
+	_, err = session.DeleteSandboxFilesystem(env.TestCtx.Context, GinkgoT(), fromSnapshot.Id)
+	Expect(err).NotTo(HaveOccurred())
+
+	restored, status, err := session.RestoreSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(restored).NotTo(BeNil())
+	Expect(restored.FilesystemId).NotTo(BeNil())
+	Expect(*restored.FilesystemId).To(Equal(filesystemID))
+	Eventually(func() ([]byte, error) {
+		body, _, readErr := session.ReadFile(env.TestCtx.Context, GinkgoT(), sandboxID, filePath)
+		return body, readErr
+	}).WithTimeout(90 * time.Second).WithPolling(2 * time.Second).Should(Equal(originalContent))
+
+	mutatedContent := []byte("sandbox filesystem mutated content")
+	status, err = session.WriteFile(env.TestCtx.Context, GinkgoT(), sandboxID, filePath, mutatedContent, "")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+
+	cleaned, status, err = session.CleanSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(cleaned.Status).To(Equal(apispec.SandboxLifecycleStatusCleaned))
+
+	filesystem, status, err = session.RestoreSandboxFilesystemSnapshot(env.TestCtx.Context, GinkgoT(), filesystemID, snapshot.Id)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(filesystem).NotTo(BeNil())
+	Expect(filesystem.Id).To(Equal(filesystemID))
+
+	restored, status, err = session.RestoreSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(restored.FilesystemId).NotTo(BeNil())
+	Expect(*restored.FilesystemId).To(Equal(filesystemID))
+	Eventually(func() ([]byte, error) {
+		body, _, readErr := session.ReadFile(env.TestCtx.Context, GinkgoT(), sandboxID, filePath)
+		return body, readErr
+	}).WithTimeout(90 * time.Second).WithPolling(2 * time.Second).Should(Equal(originalContent))
+}
+
+func assertSandboxCommandOutput(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string, command []string, expected string) {
+	processType := apispec.ProcessTypeCmd
+	wait := true
+	ctxReq := apispec.CreateContextRequest{
+		Type: &processType,
+		Cmd: &apispec.CreateCMDContextRequest{
+			Command: command,
+		},
+		WaitUntilDone: &wait,
+	}
+	ctxResp, status, err := session.CreateContext(env.TestCtx.Context, GinkgoT(), sandboxID, ctxReq)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(ctxResp).NotTo(BeNil())
+	Expect(ctxResp.OutputRaw).NotTo(BeNil())
+	Expect(strings.TrimSpace(*ctxResp.OutputRaw)).To(Equal(expected))
 }
 
 func assertVolumeStorageQuota(env *framework.ScenarioEnv, session *e2eutils.Session) {
@@ -2591,6 +2747,19 @@ func expectStringPtr(value any, label string) string {
 		Fail(fmt.Sprintf("%s should be a string or *string, got %T", label, value))
 		return ""
 	}
+}
+
+func sandboxPodNameValue(sandbox *apispec.Sandbox) string {
+	if sandbox == nil || sandbox.PodName == nil {
+		return ""
+	}
+	return strings.TrimSpace(*sandbox.PodName)
+}
+
+func sandboxPodName(sandbox *apispec.Sandbox) string {
+	name := sandboxPodNameValue(sandbox)
+	Expect(name).NotTo(BeEmpty(), "sandbox pod name should not be empty")
+	return name
 }
 
 func ptr[T any](value T) *T {

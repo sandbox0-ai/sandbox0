@@ -274,6 +274,7 @@ func assertSandboxEgressProxy(env *framework.ScenarioEnv, session *e2eutils.Sess
 	Expect(err).NotTo(HaveOccurred())
 
 	sandbox = waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
+	sandboxPod := sandboxPodName(sandbox)
 
 	sourceName := fmt.Sprintf("e2e-socks5-proxy-%d", time.Now().UnixNano())
 	refName := "api-egress-proxy"
@@ -341,7 +342,7 @@ func assertSandboxEgressProxy(env *framework.ScenarioEnv, session *e2eutils.Sess
 	Expect(policy.Egress.Proxy).NotTo(BeNil())
 
 	Eventually(func() error {
-		body, execErr := execInSandboxPod(env, templateNamespace, sandbox.PodName, fmt.Sprintf(
+		body, execErr := execInSandboxPod(env, templateNamespace, sandboxPod, fmt.Sprintf(
 			"curl -fsS --max-time 10 http://%s:%d/",
 			egressProxyTargetAddress,
 			egressProxyTargetPort,

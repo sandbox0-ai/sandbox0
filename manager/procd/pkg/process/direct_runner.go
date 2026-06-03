@@ -51,10 +51,7 @@ func (r *DirectRunner) Start(cmd *exec.Cmd) error {
 
 	r.base.SetState(ProcessStateStarting)
 
-	// Create a new process group for signal management
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-	}
+	prepareDirectRunnerSysProcAttr(cmd)
 
 	cmd.Stdout = &directRunnerOutputWriter{
 		runner: r,
@@ -88,6 +85,15 @@ func (r *DirectRunner) Start(cmd *exec.Cmd) error {
 	go r.monitorProcess()
 
 	return nil
+}
+
+func prepareDirectRunnerSysProcAttr(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	// Create a new process group for signal management without discarding
+	// rootfs-related attributes such as Chroot.
+	cmd.SysProcAttr.Setpgid = true
 }
 
 // Stop terminates the direct process.

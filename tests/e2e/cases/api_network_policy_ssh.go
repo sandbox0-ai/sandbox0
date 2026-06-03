@@ -209,8 +209,9 @@ func assertSSHAppProtocolTrafficRules(env *framework.ScenarioEnv, session *e2eut
 	Expect(err).NotTo(HaveOccurred())
 
 	sandbox = waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
+	sandboxPod := sandboxPodName(sandbox)
 
-	Expect(installSSHFixturePrivateKey(env, templateNamespace, sandbox.PodName)).To(Succeed())
+	Expect(installSSHFixturePrivateKey(env, templateNamespace, sandboxPod)).To(Succeed())
 
 	clearPolicy := apispec.SandboxNetworkPolicy{
 		Mode: apispec.AllowAll,
@@ -226,7 +227,7 @@ func assertSSHAppProtocolTrafficRules(env *framework.ScenarioEnv, session *e2eut
 	Expect(err).NotTo(HaveOccurred())
 	Expect(apiErr).To(BeNil())
 	Expect(status).To(Equal(200))
-	assertSSHFixtureCommandEventuallySucceeds(env, templateNamespace, sandbox.PodName, sshCommand)
+	assertSSHFixtureCommandEventuallySucceeds(env, templateNamespace, sandboxPod, sshCommand)
 
 	Expect(updateSandboxTrafficRulesPolicy(
 		env,
@@ -235,7 +236,7 @@ func assertSSHAppProtocolTrafficRules(env *framework.ScenarioEnv, session *e2eut
 		apispec.BlockAll,
 		buildTrafficRule("allow-tls-only", apispec.Allow, serviceCIDR, apispec.TrafficRuleAppProtocolTls),
 	)).To(Succeed())
-	assertSSHFixtureCommandEventuallyFails(env, templateNamespace, sandbox.PodName, sshCommand)
+	assertSSHFixtureCommandEventuallyFails(env, templateNamespace, sandboxPod, sshCommand)
 
 	Expect(updateSandboxTrafficRulesPolicy(
 		env,
@@ -244,7 +245,7 @@ func assertSSHAppProtocolTrafficRules(env *framework.ScenarioEnv, session *e2eut
 		apispec.BlockAll,
 		buildTrafficRule("allow-ssh", apispec.Allow, serviceCIDR, apispec.TrafficRuleAppProtocolSsh),
 	)).To(Succeed())
-	assertSSHFixtureCommandEventuallySucceeds(env, templateNamespace, sandbox.PodName, sshCommand)
+	assertSSHFixtureCommandEventuallySucceeds(env, templateNamespace, sandboxPod, sshCommand)
 
 	Expect(updateSandboxTrafficRulesPolicy(
 		env,
@@ -253,7 +254,7 @@ func assertSSHAppProtocolTrafficRules(env *framework.ScenarioEnv, session *e2eut
 		apispec.AllowAll,
 		buildTrafficRule("deny-ssh", apispec.Deny, serviceCIDR, apispec.TrafficRuleAppProtocolSsh),
 	)).To(Succeed())
-	assertSSHFixtureCommandEventuallyFails(env, templateNamespace, sandbox.PodName, sshCommand)
+	assertSSHFixtureCommandEventuallyFails(env, templateNamespace, sandboxPod, sshCommand)
 }
 
 func installSSHFixturePrivateKey(env *framework.ScenarioEnv, namespace, podName string) error {
@@ -339,6 +340,7 @@ func assertSSHTransparentEgressAuthProxy(env *framework.ScenarioEnv, session *e2
 	Expect(err).NotTo(HaveOccurred())
 
 	sandbox = waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
+	sandboxPod := sandboxPodName(sandbox)
 
 	sourceName := fmt.Sprintf("e2e-ssh-key-%d", time.Now().UnixNano())
 	refName := "api-ssh-proxy"
@@ -366,11 +368,11 @@ func assertSSHTransparentEgressAuthProxy(env *framework.ScenarioEnv, session *e2
 	Expect(apiErr).To(BeNil())
 	Expect(status).To(Equal(http.StatusOK))
 
-	Expect(installSSHProxyFakePrivateKey(env, templateNamespace, sandbox.PodName)).To(Succeed())
+	Expect(installSSHProxyFakePrivateKey(env, templateNamespace, sandboxPod)).To(Succeed())
 	fakeKeyCommand := buildSSHFixtureCommand(fixture, "/tmp/sandbox0-e2e-ssh-fake-key")
-	assertSSHFixtureCommandEventuallyFails(env, templateNamespace, sandbox.PodName, fakeKeyCommand)
+	assertSSHFixtureCommandEventuallyFails(env, templateNamespace, sandboxPod, fakeKeyCommand)
 
-	knownHosts := scanSSHFixtureKnownHosts(env, templateNamespace, sandbox.PodName, fixture)
+	knownHosts := scanSSHFixtureKnownHosts(env, templateNamespace, sandboxPod, fixture)
 	created, err := session.CreateCredentialSource(env.TestCtx.Context, GinkgoT(), apispec.CredentialSourceWriteRequest{
 		Name:         sourceName,
 		ResolverKind: apispec.StaticSshPrivateKey,
@@ -416,7 +418,7 @@ func assertSSHTransparentEgressAuthProxy(env *framework.ScenarioEnv, session *e2
 	Expect(status).To(Equal(http.StatusOK))
 	Expect(policy).NotTo(BeNil())
 
-	assertSSHFixtureCommandEventuallySucceeds(env, templateNamespace, sandbox.PodName, fakeKeyCommand)
+	assertSSHFixtureCommandEventuallySucceeds(env, templateNamespace, sandboxPod, fakeKeyCommand)
 }
 
 func scanSSHFixtureKnownHosts(env *framework.ScenarioEnv, namespace, podName string, fixture *sshFixture) []string {

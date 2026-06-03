@@ -173,6 +173,28 @@ func (s *Server) resumeSandbox(c *gin.Context) {
 	s.proxyToManagerAndInvalidateSandbox(c, sandboxID)
 }
 
+// cleanSandbox cleans a sandbox runtime while preserving durable sandbox state.
+func (s *Server) cleanSandbox(c *gin.Context) {
+	sandboxID := c.Param("id")
+	if sandboxID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+		return
+	}
+
+	s.proxyToManagerAndInvalidateSandbox(c, sandboxID)
+}
+
+// restoreSandbox restores a cleaned sandbox runtime.
+func (s *Server) restoreSandbox(c *gin.Context) {
+	sandboxID := c.Param("id")
+	if sandboxID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+		return
+	}
+
+	s.proxyToManagerAndInvalidateSandbox(c, sandboxID)
+}
+
 // refreshSandbox refreshes sandbox TTL
 func (s *Server) refreshSandbox(c *gin.Context) {
 	sandboxID := c.Param("id")

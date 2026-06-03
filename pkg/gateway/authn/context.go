@@ -84,6 +84,11 @@ const (
 	PermSandboxVolumeFileRead  = "sandboxvolumefile:read"
 	PermSandboxVolumeFileWrite = "sandboxvolumefile:write"
 
+	PermSandboxFilesystemCreate = "sandboxfilesystem:create"
+	PermSandboxFilesystemRead   = "sandboxfilesystem:read"
+	PermSandboxFilesystemWrite  = "sandboxfilesystem:write"
+	PermSandboxFilesystemDelete = "sandboxfilesystem:delete"
+
 	PermQuotaRead  = "quota:read"
 	PermQuotaWrite = "quota:write"
 )
@@ -109,6 +114,10 @@ var RolePermissions = map[string][]string{
 		PermSandboxVolumeDelete,
 		PermSandboxVolumeFileRead,
 		PermSandboxVolumeFileWrite,
+		PermSandboxFilesystemCreate,
+		PermSandboxFilesystemRead,
+		PermSandboxFilesystemWrite,
+		PermSandboxFilesystemDelete,
 		PermQuotaRead,
 		PermQuotaWrite,
 	},
@@ -128,6 +137,10 @@ var RolePermissions = map[string][]string{
 		PermSandboxVolumeDelete,
 		PermSandboxVolumeFileRead,
 		PermSandboxVolumeFileWrite,
+		PermSandboxFilesystemCreate,
+		PermSandboxFilesystemRead,
+		PermSandboxFilesystemWrite,
+		PermSandboxFilesystemDelete,
 		PermQuotaRead,
 	},
 	"builder": {
@@ -140,6 +153,7 @@ var RolePermissions = map[string][]string{
 		PermCredentialSourceRead,
 		PermSandboxVolumeRead,
 		PermSandboxVolumeFileRead,
+		PermSandboxFilesystemRead,
 		PermQuotaRead,
 	},
 }

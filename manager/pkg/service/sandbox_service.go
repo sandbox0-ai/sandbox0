@@ -25,6 +25,7 @@ type Sandbox struct {
 	TemplateID    string              `json:"template_id"`
 	TeamID        string              `json:"team_id"`
 	UserID        string              `json:"user_id"`
+	FilesystemID  string              `json:"filesystem_id,omitempty"`
 	InternalAddr  string              `json:"internal_addr"`
 	Status        string              `json:"status"`
 	Paused        bool                `json:"paused"`
@@ -69,6 +70,7 @@ var ErrInvalidClaimRequest = errors.New("invalid claim request")
 var ErrClaimConflict = errors.New("claim conflict")
 var ErrDataPlaneNotReady = errors.New("data plane not ready")
 var ErrQuotaExceeded = errors.New("quota exceeded")
+var ErrSandboxRuntimeCleaned = errors.New("sandbox runtime is cleaned")
 var errSandboxPowerStateStale = errors.New("sandbox power state changed during execution")
 
 // ErrSandboxPowerTransitionSuperseded is returned when a newer pause/resume request replaces the requested transition.
@@ -129,6 +131,7 @@ type SandboxService struct {
 	powerExecutor          SandboxPowerExecutor
 	webhookStateVolumes    SandboxSystemVolumeClient
 	volumeMetadata         SandboxVolumeMetadataClient
+	filesystemMetadata     SandboxFilesystemMetadataClient
 	deletionWebhookEmitter SandboxDeletionWebhookEmitter
 	quotaStore             TeamQuotaLimitStore
 	sandboxStore           SandboxStore
@@ -274,11 +277,19 @@ func (s *SandboxService) SetWebhookStateVolumeClient(client SandboxSystemVolumeC
 	if metadataClient, ok := client.(SandboxVolumeMetadataClient); ok {
 		s.volumeMetadata = metadataClient
 	}
+	if metadataClient, ok := client.(SandboxFilesystemMetadataClient); ok {
+		s.filesystemMetadata = metadataClient
+	}
 }
 
 // SetVolumeMetadataClient injects the metadata client used to validate user volume mounts.
 func (s *SandboxService) SetVolumeMetadataClient(client SandboxVolumeMetadataClient) {
 	s.volumeMetadata = client
+}
+
+// SetFilesystemMetadataClient injects the metadata client used to validate sandbox filesystems.
+func (s *SandboxService) SetFilesystemMetadataClient(client SandboxFilesystemMetadataClient) {
+	s.filesystemMetadata = client
 }
 
 // SetDeletionWebhookEmitter injects the emitter for manager-owned sandbox deletion events.

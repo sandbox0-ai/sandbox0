@@ -244,7 +244,23 @@ func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error)
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is not running and auto_resume is disabled")
 		return nil, errors.New("sandbox auto_resume is disabled")
 	}
-	if sandboxNeedsRuntime(sandbox) {
+	if sandboxRuntimeMissing(sandbox) {
+		restoreCtx, cancel := context.WithTimeout(c.Request.Context(), defaultAutoResumeTimeout)
+		defer cancel()
+		if err := s.managerClient.RestoreSandbox(restoreCtx, sandboxID, authCtx.UserID, authCtx.TeamID); err != nil {
+			s.logger.Warn("Restore sandbox failed",
+				zap.String("sandbox_id", sandboxID),
+				zap.Error(err),
+			)
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is restoring")
+			return nil, err
+		}
+		sandbox, err = s.managerClient.GetSandbox(c.Request.Context(), sandboxID, authCtx.UserID, authCtx.TeamID)
+		if err != nil {
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is restoring")
+			return nil, err
+		}
+	} else if sandboxWantsPaused(sandbox) {
 		resumeCtx, cancel := context.WithTimeout(c.Request.Context(), defaultAutoResumeTimeout)
 		defer cancel()
 		if err := s.managerClient.ResumeSandbox(resumeCtx, sandboxID, authCtx.UserID, authCtx.TeamID); err != nil {

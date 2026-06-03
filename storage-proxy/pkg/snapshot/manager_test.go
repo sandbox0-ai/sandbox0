@@ -58,6 +58,10 @@ type fakeRepo struct {
 	owners       map[string]*db.SandboxVolumeOwner
 	snapshots    map[string]*db.Snapshot
 	heads        map[string]*db.S0FSCommittedHead
+	filesystems  map[string]*db.SandboxFilesystem
+	fsSnapshots  map[string]*db.SandboxFilesystemSnapshot
+	fsHeads      map[string]*db.SandboxFilesystemS0FSCommittedHead
+	fsMounts     map[string][]*db.SandboxFilesystemMount
 	activeMounts map[string][]*db.VolumeMount
 	deleted      []string
 	deleteErr    error
@@ -69,6 +73,10 @@ func newFakeRepo() *fakeRepo {
 		owners:       make(map[string]*db.SandboxVolumeOwner),
 		snapshots:    make(map[string]*db.Snapshot),
 		heads:        make(map[string]*db.S0FSCommittedHead),
+		filesystems:  make(map[string]*db.SandboxFilesystem),
+		fsSnapshots:  make(map[string]*db.SandboxFilesystemSnapshot),
+		fsHeads:      make(map[string]*db.SandboxFilesystemS0FSCommittedHead),
+		fsMounts:     make(map[string][]*db.SandboxFilesystemMount),
 		activeMounts: make(map[string][]*db.VolumeMount),
 	}
 }
@@ -203,6 +211,130 @@ func (r *fakeRepo) CompareAndSwapS0FSCommittedHead(_ context.Context, volumeID s
 
 func (r *fakeRepo) GetActiveMounts(_ context.Context, volumeID string, _ int) ([]*db.VolumeMount, error) {
 	return r.activeMounts[volumeID], nil
+}
+
+func (r *fakeRepo) CreateSandboxFilesystem(_ context.Context, fs *db.SandboxFilesystem) error {
+	if fs != nil {
+		r.filesystems[fs.ID] = cloneFakeSandboxFilesystem(fs)
+	}
+	return nil
+}
+
+func (r *fakeRepo) GetSandboxFilesystem(_ context.Context, id string) (*db.SandboxFilesystem, error) {
+	fs, ok := r.filesystems[id]
+	if !ok || fs.DeletedAt != nil {
+		return nil, db.ErrNotFound
+	}
+	return cloneFakeSandboxFilesystem(fs), nil
+}
+
+func (r *fakeRepo) DeleteSandboxFilesystem(_ context.Context, id string) error {
+	fs, ok := r.filesystems[id]
+	if !ok || fs.DeletedAt != nil {
+		return db.ErrNotFound
+	}
+	now := time.Now().UTC()
+	fs.DeletedAt = &now
+	fs.State = db.SandboxFilesystemStateDeleted
+	return nil
+}
+
+func (r *fakeRepo) CreateSandboxFilesystemSnapshot(_ context.Context, snapshot *db.SandboxFilesystemSnapshot) error {
+	if snapshot != nil {
+		r.fsSnapshots[snapshot.ID] = cloneFakeSandboxFilesystemSnapshot(snapshot)
+	}
+	return nil
+}
+
+func (r *fakeRepo) GetSandboxFilesystemSnapshot(_ context.Context, filesystemID, snapshotID, teamID string) (*db.SandboxFilesystemSnapshot, error) {
+	snapshot, ok := r.fsSnapshots[snapshotID]
+	if !ok || snapshot.FilesystemID != filesystemID || snapshot.TeamID != teamID {
+		return nil, db.ErrNotFound
+	}
+	return cloneFakeSandboxFilesystemSnapshot(snapshot), nil
+}
+
+func (r *fakeRepo) FindSandboxFilesystemSnapshot(_ context.Context, snapshotID, teamID string) (*db.SandboxFilesystemSnapshot, error) {
+	snapshot, ok := r.fsSnapshots[snapshotID]
+	if !ok || snapshot.TeamID != teamID {
+		return nil, db.ErrNotFound
+	}
+	return cloneFakeSandboxFilesystemSnapshot(snapshot), nil
+}
+
+func (r *fakeRepo) DeleteSandboxFilesystemSnapshot(_ context.Context, filesystemID, snapshotID, teamID string) error {
+	snapshot, ok := r.fsSnapshots[snapshotID]
+	if !ok || snapshot.FilesystemID != filesystemID || snapshot.TeamID != teamID {
+		return db.ErrNotFound
+	}
+	delete(r.fsSnapshots, snapshotID)
+	return nil
+}
+
+func (r *fakeRepo) RestoreSandboxFilesystemSnapshot(_ context.Context, filesystemID, snapshotID, teamID string) (*db.SandboxFilesystem, error) {
+	fs, ok := r.filesystems[filesystemID]
+	snapshot := r.fsSnapshots[snapshotID]
+	if !ok || snapshot == nil || snapshot.FilesystemID != filesystemID || snapshot.TeamID != teamID {
+		return nil, db.ErrNotFound
+	}
+	fs.S0FSHead = snapshot.S0FSHead
+	if snapshot.S0FSHead == "" {
+		delete(r.fsHeads, filesystemID)
+	}
+	return cloneFakeSandboxFilesystem(fs), nil
+}
+
+func (r *fakeRepo) GetSandboxFilesystemS0FSCommittedHead(_ context.Context, filesystemID string) (*db.SandboxFilesystemS0FSCommittedHead, error) {
+	head, ok := r.fsHeads[filesystemID]
+	if !ok {
+		return nil, db.ErrNotFound
+	}
+	clone := *head
+	return &clone, nil
+}
+
+func (r *fakeRepo) CompareAndSwapSandboxFilesystemS0FSCommittedHead(_ context.Context, filesystemID string, expectedManifestSeq uint64, head *db.SandboxFilesystemS0FSCommittedHead) error {
+	if head == nil || head.ManifestSeq == 0 || head.ManifestKey == "" {
+		return errors.New("invalid sandbox filesystem committed head")
+	}
+	if _, ok := r.filesystems[filesystemID]; !ok {
+		return db.ErrNotFound
+	}
+	current, ok := r.fsHeads[filesystemID]
+	if !ok {
+		if expectedManifestSeq != 0 {
+			return db.ErrConflict
+		}
+	} else if current.ManifestSeq != expectedManifestSeq || head.ManifestSeq <= current.ManifestSeq {
+		return db.ErrConflict
+	}
+	clone := *head
+	r.fsHeads[filesystemID] = &clone
+	if fs := r.filesystems[filesystemID]; fs != nil {
+		fs.S0FSHead = head.ManifestKey
+		fs.UpdatedAt = head.UpdatedAt
+	}
+	return nil
+}
+
+func (r *fakeRepo) GetActiveSandboxFilesystemMounts(_ context.Context, filesystemID string, _ int) ([]*db.SandboxFilesystemMount, error) {
+	return r.fsMounts[filesystemID], nil
+}
+
+func cloneFakeSandboxFilesystem(fs *db.SandboxFilesystem) *db.SandboxFilesystem {
+	if fs == nil {
+		return nil
+	}
+	clone := *fs
+	return &clone
+}
+
+func cloneFakeSandboxFilesystemSnapshot(snapshot *db.SandboxFilesystemSnapshot) *db.SandboxFilesystemSnapshot {
+	if snapshot == nil {
+		return nil
+	}
+	clone := *snapshot
+	return &clone
 }
 
 func rawMountOptions(t *testing.T, opts volume.MountOptions) *json.RawMessage {

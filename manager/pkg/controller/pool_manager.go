@@ -44,6 +44,7 @@ const (
 	AnnotationExpiresAt                    = "sandbox0.ai/expires-at"
 	AnnotationHardExpiresAt                = "sandbox0.ai/hard-expires-at"
 	AnnotationConfig                       = "sandbox0.ai/config"
+	AnnotationFilesystemID                 = "sandbox0.ai/filesystem-id"
 	AnnotationMounts                       = "sandbox0.ai/mounts"
 	AnnotationPaused                       = "sandbox0.ai/paused"
 	AnnotationPausedAt                     = "sandbox0.ai/paused-at"

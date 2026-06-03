@@ -51,6 +51,7 @@ type Manager struct {
 	mu                   sync.RWMutex
 	contexts             map[string]*Context
 	sandboxEnvVars       map[string]string
+	sandboxRootPath      string
 	onExit               process.ExitHandler
 	onStart              process.StartHandler
 	defaultCleanupPolicy CleanupPolicy
@@ -92,6 +93,13 @@ func (m *Manager) SetSandboxEnvVars(envVars map[string]string) {
 	m.sandboxEnvVars = process.CloneEnvVars(envVars)
 }
 
+// SetSandboxRootPath sets the filesystem root used for new sandbox contexts.
+func (m *Manager) SetSandboxRootPath(rootPath string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sandboxRootPath = rootPath
+}
+
 // SandboxEnvVars returns a copy of the sandbox-level default environment variables.
 func (m *Manager) SandboxEnvVars() map[string]string {
 	m.mu.RLock()
@@ -131,6 +139,9 @@ func (m *Manager) CreateContextWithPolicyAndREPLConfig(config process.ProcessCon
 	startHandler := m.onStart
 	defaultPolicy := m.defaultCleanupPolicy
 	config.EnvVars = process.MergeEnvVars(m.sandboxEnvVars, config.EnvVars)
+	if config.RootPath == "" {
+		config.RootPath = m.sandboxRootPath
+	}
 	// Define exit handler for the new context
 	exitHandler := func(event process.ExitEvent) {
 		if m.onExit != nil {

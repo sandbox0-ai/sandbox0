@@ -41,8 +41,9 @@ func assertNetdTransparentEgressPolicy(env *framework.ScenarioEnv, session *e2eu
 	templateNamespace, err := naming.TemplateNamespaceForBuiltin(sandbox.TemplateId)
 	Expect(err).NotTo(HaveOccurred())
 	sandbox = waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
+	sandboxPod := sandboxPodName(sandbox)
 
-	fixture := setupNetdHTTPFixture(env, templateNamespace, sandbox.PodName)
+	fixture := setupNetdHTTPFixture(env, templateNamespace, sandboxPod)
 	clearPolicy := apispec.SandboxNetworkPolicy{Mode: apispec.AllowAll}
 	defer func() {
 		_, _, _, _ = session.UpdateNetworkPolicy(env.TestCtx.Context, GinkgoT(), sandboxID, clearPolicy)
@@ -61,10 +62,10 @@ func assertNetdTransparentEgressPolicy(env *framework.ScenarioEnv, session *e2eu
 	Expect(apiErr).To(BeNil())
 	Expect(status).To(Equal(http.StatusOK))
 	Expect(policy).NotTo(BeNil())
-	waitForSandboxNetworkPolicyApplied(env, templateNamespace, sandbox.PodName)
+	waitForSandboxNetworkPolicyApplied(env, templateNamespace, sandboxPod)
 
-	assertNetdHTTPFixtureEventuallySucceeds(env, templateNamespace, sandbox.PodName, fixture.AllowIP, "allow")
-	assertNetdHTTPFixtureEventuallyFails(env, templateNamespace, sandbox.PodName, fixture.DenyIP)
+	assertNetdHTTPFixtureEventuallySucceeds(env, templateNamespace, sandboxPod, fixture.AllowIP, "allow")
+	assertNetdHTTPFixtureEventuallyFails(env, templateNamespace, sandboxPod, fixture.DenyIP)
 }
 
 func setupNetdHTTPFixture(env *framework.ScenarioEnv, sandboxNamespace, sandboxPodName string) *netdHTTPFixture {

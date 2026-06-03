@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -189,6 +190,112 @@ func TestRestoreCleanedSandboxRuntimeDoesNotCreatePodWhileRuntimeDeleting(t *tes
 	}
 	if store.saves != 0 {
 		t.Fatalf("store saves = %d, want 0", store.saves)
+	}
+}
+
+func TestGetSandboxPrefersCleanedRecordOverDeletingRuntimePod(t *testing.T) {
+	deletionTime := metav1.NewTime(time.Now().UTC())
+	pod := runtimeIdentityPod("ns-a", "pod-a", "sandbox-a")
+	pod.DeletionTimestamp = &deletionTime
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-a": {
+			ID:                "sandbox-a",
+			TeamID:            "team-a",
+			UserID:            "user-a",
+			TemplateID:        "default",
+			TemplateName:      "default",
+			TemplateNamespace: "tpl-default",
+			Status:            SandboxStatusCleaned,
+			RuntimeGeneration: 3,
+		},
+	}}
+	svc := &SandboxService{
+		podLister:    runtimeIdentityPodLister(t, pod),
+		sandboxStore: store,
+		logger:       zap.NewNop(),
+	}
+
+	sandbox, err := svc.GetSandbox(context.Background(), "sandbox-a")
+	if err != nil {
+		t.Fatalf("GetSandbox() error = %v", err)
+	}
+	if sandbox.Status != SandboxStatusCleaned {
+		t.Fatalf("status = %q, want cleaned", sandbox.Status)
+	}
+	if sandbox.PodName != "" {
+		t.Fatalf("pod name = %q, want empty", sandbox.PodName)
+	}
+}
+
+func TestCleanSandboxRuntimeWaitsForPodDeletionAndReturnsCleanedRecord(t *testing.T) {
+	pod := runtimeIdentityPod("ns-a", "pod-a", "sandbox-a")
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-a": {
+			ID:                  "sandbox-a",
+			TeamID:              "team-a",
+			UserID:              "user-a",
+			TemplateID:          "default",
+			TemplateName:        "default",
+			TemplateNamespace:   "tpl-default",
+			Status:              SandboxStatusRunning,
+			CurrentPodNamespace: pod.Namespace,
+			CurrentPodName:      pod.Name,
+			RuntimeGeneration:   1,
+		},
+	}}
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	svc := &SandboxService{
+		k8sClient:    client,
+		podLister:    runtimeIdentityPodLister(t, pod),
+		sandboxStore: store,
+		clock:        systemTime{},
+		logger:       zap.NewNop(),
+	}
+
+	if err := svc.CleanSandboxRuntime(context.Background(), "sandbox-a"); err != nil {
+		t.Fatalf("CleanSandboxRuntime() error = %v", err)
+	}
+	if _, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{}); !k8serrors.IsNotFound(err) {
+		t.Fatalf("pod get after clean error = %v, want not found", err)
+	}
+	sandbox, err := svc.GetSandbox(context.Background(), "sandbox-a")
+	if err != nil {
+		t.Fatalf("GetSandbox() error = %v", err)
+	}
+	if sandbox.Status != SandboxStatusCleaned {
+		t.Fatalf("status = %q, want cleaned", sandbox.Status)
+	}
+	if sandbox.PodName != "" {
+		t.Fatalf("pod name = %q, want empty", sandbox.PodName)
+	}
+}
+
+func TestResumeCleanedSandboxRuntimeReturnsConflictError(t *testing.T) {
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-a": {
+			ID:                "sandbox-a",
+			TeamID:            "team-a",
+			UserID:            "user-a",
+			TemplateID:        "template-a",
+			TemplateName:      "template-a",
+			TemplateNamespace: "ns-a",
+			Status:            SandboxStatusCleaned,
+			RuntimeGeneration: 1,
+		},
+	}}
+	svc := &SandboxService{
+		podLister:    newTestPodLister(t),
+		sandboxStore: store,
+		clock:        systemTime{},
+		logger:       zap.NewNop(),
+	}
+
+	_, err := svc.ResumeSandboxAndWait(context.Background(), "sandbox-a")
+	if !errors.Is(err, ErrSandboxRuntimeCleaned) {
+		t.Fatalf("ResumeSandboxAndWait() error = %v, want ErrSandboxRuntimeCleaned", err)
+	}
+	if store.saves != 0 {
+		t.Fatalf("runtime save count = %d, want 0", store.saves)
 	}
 }
 

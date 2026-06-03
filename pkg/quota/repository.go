@@ -119,6 +119,18 @@ func (r *Repository) CurrentUsage(ctx context.Context, teamID string, dimension 
 			return 0, err
 		}
 		return BytesToGBRoundUp(current), nil
+	case DimensionFilesystemGB:
+		current, err := r.currentStorageUsageBytes(ctx, teamID, metering.SubjectTypeFilesystem)
+		if err != nil {
+			return 0, err
+		}
+		return BytesToGBRoundUp(current), nil
+	case DimensionFSSnapshotGB:
+		current, err := r.currentStorageUsageBytes(ctx, teamID, metering.SubjectTypeFilesystemSnapshot)
+		if err != nil {
+			return 0, err
+		}
+		return BytesToGBRoundUp(current), nil
 	case DimensionEgress:
 		return r.currentNetworkUsage(ctx, teamID, metering.WindowTypeSandboxEgressBytes)
 	case DimensionIngress:
@@ -266,6 +278,10 @@ func storageDimensionMatchesSubjectType(dimension Dimension, subjectType string)
 		return subjectType == metering.SubjectTypeVolume
 	case DimensionSnapshotGB:
 		return subjectType == metering.SubjectTypeSnapshot
+	case DimensionFilesystemGB:
+		return subjectType == metering.SubjectTypeFilesystem
+	case DimensionFSSnapshotGB:
+		return subjectType == metering.SubjectTypeFilesystemSnapshot
 	default:
 		return false
 	}

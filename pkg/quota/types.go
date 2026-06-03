@@ -15,6 +15,8 @@ const (
 	DimensionMemory          Dimension = "memory_mib"
 	DimensionVolumeStorageGB Dimension = "volume_storage_gb"
 	DimensionSnapshotGB      Dimension = "snapshot_storage_gb"
+	DimensionFilesystemGB    Dimension = "filesystem_storage_gb"
+	DimensionFSSnapshotGB    Dimension = "filesystem_snapshot_storage_gb"
 	DimensionEgress          Dimension = "egress"
 	DimensionIngress         Dimension = "ingress"
 )
@@ -26,6 +28,8 @@ func KnownDimension(d Dimension) bool {
 		DimensionMemory,
 		DimensionVolumeStorageGB,
 		DimensionSnapshotGB,
+		DimensionFilesystemGB,
+		DimensionFSSnapshotGB,
 		DimensionEgress,
 		DimensionIngress:
 		return true

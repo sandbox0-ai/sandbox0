@@ -16,6 +16,7 @@ var scenarioManifestPaths = []string{
 	"single-cluster/minimal.yaml",
 	"single-cluster/network-policy.yaml",
 	"single-cluster/volumes.yaml",
+	"single-cluster/filesystems.yaml",
 }
 
 // LoadScenarios builds single-cluster scenarios from a fixed manifest allowlist.

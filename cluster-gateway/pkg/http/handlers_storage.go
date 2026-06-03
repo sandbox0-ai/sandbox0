@@ -44,6 +44,15 @@ func requireVolumeID(c *gin.Context) (string, bool) {
 	return id, true
 }
 
+func requireFilesystemID(c *gin.Context) (string, bool) {
+	id := c.Param("id")
+	if id == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "filesystem id is required")
+		return "", false
+	}
+	return id, true
+}
+
 // createSandboxVolume creates a new sandbox volume
 func (s *Server) createSandboxVolume(c *gin.Context) {
 	c.Request.URL.Path = "/sandboxvolumes"
@@ -151,5 +160,112 @@ func (s *Server) deleteSandboxVolumeSnapshot(c *gin.Context) {
 		return
 	}
 	c.Request.URL.Path = "/sandboxvolumes/" + id + "/snapshots/" + snapshotID
+	s.proxyToStorageProxy(c)
+}
+
+// createSandboxFilesystem creates a new sandbox filesystem.
+func (s *Server) createSandboxFilesystem(c *gin.Context) {
+	c.Request.URL.Path = "/sandboxfilesystems"
+	s.proxyToStorageProxy(c)
+}
+
+// listSandboxFilesystems lists sandbox filesystems for the authenticated team.
+func (s *Server) listSandboxFilesystems(c *gin.Context) {
+	c.Request.URL.Path = "/sandboxfilesystems"
+	s.proxyToStorageProxy(c)
+}
+
+// getSandboxFilesystem gets a sandbox filesystem by ID.
+func (s *Server) getSandboxFilesystem(c *gin.Context) {
+	id, ok := requireFilesystemID(c)
+	if !ok {
+		return
+	}
+	c.Request.URL.Path = "/sandboxfilesystems/" + id
+	s.proxyToStorageProxy(c)
+}
+
+// deleteSandboxFilesystem deletes a sandbox filesystem.
+func (s *Server) deleteSandboxFilesystem(c *gin.Context) {
+	id, ok := requireFilesystemID(c)
+	if !ok {
+		return
+	}
+	c.Request.URL.Path = "/sandboxfilesystems/" + id
+	s.proxyToStorageProxy(c)
+}
+
+// forkSandboxFilesystem forks a sandbox filesystem.
+func (s *Server) forkSandboxFilesystem(c *gin.Context) {
+	id, ok := requireFilesystemID(c)
+	if !ok {
+		return
+	}
+	c.Request.URL.Path = "/sandboxfilesystems/" + id + "/fork"
+	s.proxyToStorageProxy(c)
+}
+
+// createSandboxFilesystemSnapshot creates a snapshot of a sandbox filesystem.
+func (s *Server) createSandboxFilesystemSnapshot(c *gin.Context) {
+	id, ok := requireFilesystemID(c)
+	if !ok {
+		return
+	}
+	c.Request.URL.Path = "/sandboxfilesystems/" + id + "/snapshots"
+	s.proxyToStorageProxy(c)
+}
+
+// listSandboxFilesystemSnapshots lists snapshots of a sandbox filesystem.
+func (s *Server) listSandboxFilesystemSnapshots(c *gin.Context) {
+	id, ok := requireFilesystemID(c)
+	if !ok {
+		return
+	}
+	c.Request.URL.Path = "/sandboxfilesystems/" + id + "/snapshots"
+	s.proxyToStorageProxy(c)
+}
+
+// getSandboxFilesystemSnapshot gets a filesystem snapshot by ID.
+func (s *Server) getSandboxFilesystemSnapshot(c *gin.Context) {
+	id, ok := requireFilesystemID(c)
+	snapshotID := c.Param("snapshot_id")
+	if !ok {
+		return
+	}
+	if snapshotID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "filesystem id and snapshot id are required")
+		return
+	}
+	c.Request.URL.Path = "/sandboxfilesystems/" + id + "/snapshots/" + snapshotID
+	s.proxyToStorageProxy(c)
+}
+
+// restoreSandboxFilesystemSnapshot restores a filesystem from a snapshot.
+func (s *Server) restoreSandboxFilesystemSnapshot(c *gin.Context) {
+	id, ok := requireFilesystemID(c)
+	snapshotID := c.Param("snapshot_id")
+	if !ok {
+		return
+	}
+	if snapshotID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "filesystem id and snapshot id are required")
+		return
+	}
+	c.Request.URL.Path = "/sandboxfilesystems/" + id + "/snapshots/" + snapshotID + "/restore"
+	s.proxyToStorageProxy(c)
+}
+
+// deleteSandboxFilesystemSnapshot deletes a filesystem snapshot.
+func (s *Server) deleteSandboxFilesystemSnapshot(c *gin.Context) {
+	id, ok := requireFilesystemID(c)
+	snapshotID := c.Param("snapshot_id")
+	if !ok {
+		return
+	}
+	if snapshotID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "filesystem id and snapshot id are required")
+		return
+	}
+	c.Request.URL.Path = "/sandboxfilesystems/" + id + "/snapshots/" + snapshotID
 	s.proxyToStorageProxy(c)
 }

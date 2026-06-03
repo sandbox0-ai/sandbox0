@@ -347,6 +347,350 @@ func (r *Repository) deleteSandboxVolume(ctx context.Context, db DB, id string) 
 	return nil
 }
 
+// CreateSandboxFilesystem creates a new sandbox filesystem record.
+func (r *Repository) CreateSandboxFilesystem(ctx context.Context, fs *SandboxFilesystem) error {
+	if fs == nil {
+		return fmt.Errorf("sandbox filesystem is required")
+	}
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO sandbox_filesystems (
+			id, team_id, user_id, source_filesystem_id, template_id,
+			base_image_digest, s0fs_head, state, deleted_at,
+			created_at, updated_at
+		) VALUES (
+			$1, $2, $3, $4, $5,
+			$6, $7, $8, $9,
+			$10, $11
+		)
+	`, fs.ID, fs.TeamID, fs.UserID, fs.SourceFilesystemID, fs.TemplateID,
+		fs.BaseImageDigest, fs.S0FSHead, fs.State, fs.DeletedAt,
+		fs.CreatedAt, fs.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("create sandbox filesystem: %w", err)
+	}
+	return nil
+}
+
+// ListSandboxFilesystemsByTeam retrieves non-deleted filesystems for a team.
+func (r *Repository) ListSandboxFilesystemsByTeam(ctx context.Context, teamID string) ([]*SandboxFilesystem, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT
+			id, team_id, user_id, source_filesystem_id, template_id,
+			base_image_digest, s0fs_head, state, deleted_at,
+			created_at, updated_at
+		FROM sandbox_filesystems
+		WHERE team_id = $1
+			AND deleted_at IS NULL
+		ORDER BY created_at DESC
+	`, teamID)
+	if err != nil {
+		return nil, fmt.Errorf("query sandbox filesystems: %w", err)
+	}
+	defer rows.Close()
+
+	var filesystems []*SandboxFilesystem
+	for rows.Next() {
+		fs, err := scanSandboxFilesystem(rows)
+		if err != nil {
+			return nil, err
+		}
+		filesystems = append(filesystems, fs)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sandbox filesystems: %w", err)
+	}
+	return filesystems, nil
+}
+
+// GetSandboxFilesystem retrieves a sandbox filesystem by ID.
+func (r *Repository) GetSandboxFilesystem(ctx context.Context, id string) (*SandboxFilesystem, error) {
+	return r.getSandboxFilesystem(ctx, r.pool, id)
+}
+
+func (r *Repository) getSandboxFilesystem(ctx context.Context, db DB, id string) (*SandboxFilesystem, error) {
+	rows, err := db.Query(ctx, `
+		SELECT
+			id, team_id, user_id, source_filesystem_id, template_id,
+			base_image_digest, s0fs_head, state, deleted_at,
+			created_at, updated_at
+		FROM sandbox_filesystems
+		WHERE id = $1
+			AND deleted_at IS NULL
+	`, id)
+	if err != nil {
+		return nil, fmt.Errorf("query sandbox filesystem: %w", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("query sandbox filesystem: %w", err)
+		}
+		return nil, ErrNotFound
+	}
+	fs, err := scanSandboxFilesystem(rows)
+	if err != nil {
+		return nil, err
+	}
+	return fs, nil
+}
+
+func scanSandboxFilesystem(rows pgx.Rows) (*SandboxFilesystem, error) {
+	var fs SandboxFilesystem
+	err := rows.Scan(
+		&fs.ID, &fs.TeamID, &fs.UserID, &fs.SourceFilesystemID, &fs.TemplateID,
+		&fs.BaseImageDigest, &fs.S0FSHead, &fs.State, &fs.DeletedAt,
+		&fs.CreatedAt, &fs.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("scan sandbox filesystem: %w", err)
+	}
+	return &fs, nil
+}
+
+// DeleteSandboxFilesystem soft-deletes a sandbox filesystem record.
+func (r *Repository) DeleteSandboxFilesystem(ctx context.Context, id string) error {
+	cmdTag, err := r.pool.Exec(ctx, `
+		UPDATE sandbox_filesystems
+		SET state = $2,
+			deleted_at = COALESCE(deleted_at, NOW()),
+			updated_at = NOW()
+		WHERE id = $1
+			AND deleted_at IS NULL
+	`, id, SandboxFilesystemStateDeleted)
+	if err != nil {
+		return fmt.Errorf("delete sandbox filesystem: %w", err)
+	}
+	if cmdTag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ForkSandboxFilesystem creates a new filesystem branch from a source filesystem.
+func (r *Repository) ForkSandboxFilesystem(ctx context.Context, sourceID string, fs *SandboxFilesystem) error {
+	if fs == nil {
+		return fmt.Errorf("sandbox filesystem is required")
+	}
+	return r.WithTx(ctx, func(tx pgx.Tx) error {
+		source, err := r.getSandboxFilesystem(ctx, tx, sourceID)
+		if err != nil {
+			return err
+		}
+		fs.SourceFilesystemID = &source.ID
+		fs.BaseImageDigest = source.BaseImageDigest
+		fs.S0FSHead = source.S0FSHead
+		if fs.TemplateID == nil {
+			fs.TemplateID = source.TemplateID
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO sandbox_filesystems (
+				id, team_id, user_id, source_filesystem_id, template_id,
+				base_image_digest, s0fs_head, state, deleted_at,
+				created_at, updated_at
+			) VALUES (
+				$1, $2, $3, $4, $5,
+				$6, $7, $8, $9,
+				$10, $11
+			)
+		`, fs.ID, fs.TeamID, fs.UserID, fs.SourceFilesystemID, fs.TemplateID,
+			fs.BaseImageDigest, fs.S0FSHead, fs.State, fs.DeletedAt,
+			fs.CreatedAt, fs.UpdatedAt)
+		if err != nil {
+			return fmt.Errorf("fork sandbox filesystem: %w", err)
+		}
+		return nil
+	})
+}
+
+// CreateSandboxFilesystemSnapshot creates immutable snapshot metadata for a filesystem.
+func (r *Repository) CreateSandboxFilesystemSnapshot(ctx context.Context, snapshot *SandboxFilesystemSnapshot) error {
+	if snapshot == nil {
+		return fmt.Errorf("sandbox filesystem snapshot is required")
+	}
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO sandbox_filesystem_snapshots (
+			id, filesystem_id, team_id, user_id, base_image_digest,
+			s0fs_head, name, description, size_bytes,
+			created_at, expires_at
+		) VALUES (
+			$1, $2, $3, $4, $5,
+			$6, $7, $8, $9,
+			$10, $11
+		)
+	`, snapshot.ID, snapshot.FilesystemID, snapshot.TeamID, snapshot.UserID, snapshot.BaseImageDigest,
+		snapshot.S0FSHead, snapshot.Name, snapshot.Description, snapshot.SizeBytes,
+		snapshot.CreatedAt, snapshot.ExpiresAt)
+	if err != nil {
+		return fmt.Errorf("create sandbox filesystem snapshot: %w", err)
+	}
+	return nil
+}
+
+// ListSandboxFilesystemSnapshots retrieves snapshots for a filesystem owned by a team.
+func (r *Repository) ListSandboxFilesystemSnapshots(ctx context.Context, filesystemID, teamID string) ([]*SandboxFilesystemSnapshot, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT
+			id, filesystem_id, team_id, user_id, base_image_digest,
+			s0fs_head, name, description, size_bytes,
+			created_at, expires_at
+		FROM sandbox_filesystem_snapshots
+		WHERE filesystem_id = $1
+			AND team_id = $2
+		ORDER BY created_at DESC
+	`, filesystemID, teamID)
+	if err != nil {
+		return nil, fmt.Errorf("query sandbox filesystem snapshots: %w", err)
+	}
+	defer rows.Close()
+
+	var snapshots []*SandboxFilesystemSnapshot
+	for rows.Next() {
+		snapshot, err := scanSandboxFilesystemSnapshot(rows)
+		if err != nil {
+			return nil, err
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sandbox filesystem snapshots: %w", err)
+	}
+	return snapshots, nil
+}
+
+// GetSandboxFilesystemSnapshot retrieves a filesystem snapshot by ID.
+func (r *Repository) GetSandboxFilesystemSnapshot(ctx context.Context, filesystemID, snapshotID, teamID string) (*SandboxFilesystemSnapshot, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT
+			id, filesystem_id, team_id, user_id, base_image_digest,
+			s0fs_head, name, description, size_bytes,
+			created_at, expires_at
+		FROM sandbox_filesystem_snapshots
+		WHERE filesystem_id = $1
+			AND id = $2
+			AND team_id = $3
+	`, filesystemID, snapshotID, teamID)
+	if err != nil {
+		return nil, fmt.Errorf("query sandbox filesystem snapshot: %w", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("query sandbox filesystem snapshot: %w", err)
+		}
+		return nil, ErrNotFound
+	}
+	return scanSandboxFilesystemSnapshot(rows)
+}
+
+// FindSandboxFilesystemSnapshot retrieves a filesystem snapshot by team and snapshot ID.
+func (r *Repository) FindSandboxFilesystemSnapshot(ctx context.Context, snapshotID, teamID string) (*SandboxFilesystemSnapshot, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT
+			id, filesystem_id, team_id, user_id, base_image_digest,
+			s0fs_head, name, description, size_bytes,
+			created_at, expires_at
+		FROM sandbox_filesystem_snapshots
+		WHERE id = $1
+			AND team_id = $2
+	`, snapshotID, teamID)
+	if err != nil {
+		return nil, fmt.Errorf("query sandbox filesystem snapshot: %w", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("query sandbox filesystem snapshot: %w", err)
+		}
+		return nil, ErrNotFound
+	}
+	return scanSandboxFilesystemSnapshot(rows)
+}
+
+func scanSandboxFilesystemSnapshot(rows pgx.Rows) (*SandboxFilesystemSnapshot, error) {
+	var snapshot SandboxFilesystemSnapshot
+	err := rows.Scan(
+		&snapshot.ID, &snapshot.FilesystemID, &snapshot.TeamID, &snapshot.UserID, &snapshot.BaseImageDigest,
+		&snapshot.S0FSHead, &snapshot.Name, &snapshot.Description, &snapshot.SizeBytes,
+		&snapshot.CreatedAt, &snapshot.ExpiresAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("scan sandbox filesystem snapshot: %w", err)
+	}
+	return &snapshot, nil
+}
+
+// DeleteSandboxFilesystemSnapshot deletes a filesystem snapshot.
+func (r *Repository) DeleteSandboxFilesystemSnapshot(ctx context.Context, filesystemID, snapshotID, teamID string) error {
+	cmdTag, err := r.pool.Exec(ctx, `
+		DELETE FROM sandbox_filesystem_snapshots
+		WHERE filesystem_id = $1
+			AND id = $2
+			AND team_id = $3
+	`, filesystemID, snapshotID, teamID)
+	if err != nil {
+		return fmt.Errorf("delete sandbox filesystem snapshot: %w", err)
+	}
+	if cmdTag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// RestoreSandboxFilesystemSnapshot moves a filesystem branch head to a snapshot head.
+func (r *Repository) RestoreSandboxFilesystemSnapshot(ctx context.Context, filesystemID, snapshotID, teamID string) (*SandboxFilesystem, error) {
+	var restored *SandboxFilesystem
+	err := r.WithTx(ctx, func(tx pgx.Tx) error {
+		fs, err := r.getSandboxFilesystem(ctx, tx, filesystemID)
+		if err != nil {
+			return err
+		}
+		snapshot, err := r.GetSandboxFilesystemSnapshot(ctx, filesystemID, snapshotID, teamID)
+		if err != nil {
+			return err
+		}
+		if fs.TeamID != teamID || snapshot.TeamID != teamID {
+			return ErrNotFound
+		}
+		if fs.BaseImageDigest != snapshot.BaseImageDigest {
+			return fmt.Errorf("%w: filesystem snapshot base image does not match filesystem", ErrConflict)
+		}
+		cmdTag, err := tx.Exec(ctx, `
+			UPDATE sandbox_filesystems
+			SET s0fs_head = $2,
+				state = $3,
+				updated_at = NOW()
+			WHERE id = $1
+				AND team_id = $4
+				AND deleted_at IS NULL
+		`, filesystemID, snapshot.S0FSHead, SandboxFilesystemStateAvailable, teamID)
+		if err != nil {
+			return fmt.Errorf("restore sandbox filesystem snapshot: %w", err)
+		}
+		if cmdTag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		head, err := sandboxFilesystemS0FSHeadFromManifestKey(filesystemID, snapshot.S0FSHead, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		if head != nil {
+			if err := r.setSandboxFilesystemS0FSCommittedHeadTx(ctx, tx, filesystemID, head); err != nil {
+				return err
+			}
+		} else {
+			if err := r.clearSandboxFilesystemS0FSCommittedHeadTx(ctx, tx, filesystemID); err != nil {
+				return err
+			}
+		}
+		restored, err = r.getSandboxFilesystem(ctx, tx, filesystemID)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return restored, nil
+}
+
 // CreateSandboxVolumeOwnerTx creates durable ownership metadata for a system volume.
 func (r *Repository) CreateSandboxVolumeOwnerTx(ctx context.Context, tx pgx.Tx, owner *SandboxVolumeOwner) error {
 	_, err := tx.Exec(ctx, `

@@ -97,6 +97,43 @@ func TestClientBindVolumePortalUsesSharedPath(t *testing.T) {
 	}
 }
 
+func TestClientBindRootfsUsesRootfsPath(t *testing.T) {
+	t.Parallel()
+
+	var gotReq BindRootfsRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want %s", r.Method, http.MethodPost)
+		}
+		if r.URL.Path != "/api/v1/rootfs/bind" {
+			t.Fatalf("path = %s, want /api/v1/rootfs/bind", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(BindRootfsResponse{
+			SandboxFilesystemID: gotReq.SandboxFilesystemID,
+			RootPath:            gotReq.MountPath,
+		})
+	}))
+	defer server.Close()
+
+	resp, err := NewClient(server.Client()).BindRootfs(context.Background(), server.URL, BindRootfsRequest{
+		SandboxFilesystemID: "fs-1",
+		PodUID:              "pod-1",
+		MountPath:           "/var/lib/sandbox0/rootfs",
+	})
+	if err != nil {
+		t.Fatalf("BindRootfs() error = %v", err)
+	}
+	if resp == nil || resp.SandboxFilesystemID != "fs-1" || resp.RootPath != "/var/lib/sandbox0/rootfs" {
+		t.Fatalf("response = %#v, want bound fs-1", resp)
+	}
+	if gotReq.PodUID != "pod-1" {
+		t.Fatalf("PodUID = %q, want pod-1", gotReq.PodUID)
+	}
+}
+
 func TestPostJSONReturnsCheckVolumePortalErrorMessage(t *testing.T) {
 	t.Parallel()
 

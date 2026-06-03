@@ -224,3 +224,43 @@ func (s *Session) ResumeSandbox(ctx context.Context, t ContractT, sandboxID stri
 	}
 	return resp.Data, status, nil
 }
+
+func (s *Session) CleanSandbox(ctx context.Context, t ContractT, sandboxID string) (*apispec.Sandbox, int, error) {
+	specPath := "/api/v1/sandboxes/{id}/clean"
+	requestPath := "/api/v1/sandboxes/" + sandboxID + "/clean"
+	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodPost, specPath, requestPath, nil, true)
+	if err != nil {
+		return nil, status, err
+	}
+	if status != http.StatusOK {
+		return nil, status, fmt.Errorf("clean sandbox failed with status %d: %s", status, formatAPIError(body))
+	}
+	var resp apispec.SuccessSandboxResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, status, err
+	}
+	if !resp.Success || resp.Data == nil {
+		return nil, status, fmt.Errorf("clean sandbox response missing data")
+	}
+	return resp.Data, status, nil
+}
+
+func (s *Session) RestoreSandbox(ctx context.Context, t ContractT, sandboxID string) (*apispec.Sandbox, int, error) {
+	specPath := "/api/v1/sandboxes/{id}/restore"
+	requestPath := "/api/v1/sandboxes/" + sandboxID + "/restore"
+	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodPost, specPath, requestPath, nil, true)
+	if err != nil {
+		return nil, status, err
+	}
+	if status != http.StatusOK {
+		return nil, status, fmt.Errorf("restore sandbox failed with status %d: %s", status, formatAPIError(body))
+	}
+	var resp apispec.SuccessSandboxResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, status, err
+	}
+	if !resp.Success || resp.Data == nil {
+		return nil, status, fmt.Errorf("restore sandbox response missing data")
+	}
+	return resp.Data, status, nil
+}

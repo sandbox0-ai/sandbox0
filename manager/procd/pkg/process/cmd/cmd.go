@@ -91,6 +91,13 @@ func (c *CMD) prepareExecCmd(ctx context.Context) *exec.Cmd {
 		args = c.command[1:]
 	}
 
+	// Set environment variables
+	envLayers := []map[string]string{config.EnvVars}
+	if config.PTYSize != nil {
+		envLayers = append(envLayers, map[string]string{"TERM": resolveTerm(config)})
+	}
+	env := process.MergeEnvironment(os.Environ(), envLayers...)
+	cmdPath = process.ResolveCommandInRoot(config.RootPath, cmdPath, env)
 	cmd := exec.CommandContext(ctx, cmdPath, args...)
 
 	// Set working directory
@@ -98,12 +105,8 @@ func (c *CMD) prepareExecCmd(ctx context.Context) *exec.Cmd {
 		cmd.Dir = config.CWD
 	}
 
-	// Set environment variables
-	envLayers := []map[string]string{config.EnvVars}
-	if config.PTYSize != nil {
-		envLayers = append(envLayers, map[string]string{"TERM": resolveTerm(config)})
-	}
-	cmd.Env = process.MergeEnvironment(os.Environ(), envLayers...)
+	cmd.Env = env
+	process.ApplyRootPath(cmd, config)
 
 	return cmd
 }

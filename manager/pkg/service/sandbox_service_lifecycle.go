@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -46,6 +49,9 @@ func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string)
 		return fmt.Errorf("get pod: %w", err)
 	}
 	s.thawSandboxBeforeTermination(ctx, pod, sandboxID)
+	if err := s.unbindRootfsBeforeRuntimeDeletion(ctx, pod, true); err != nil {
+		return fmt.Errorf("unbind rootfs before termination: %w", err)
+	}
 
 	pod, err = s.ensureSandboxDeletionFinalizer(ctx, pod)
 	if err != nil {
@@ -81,6 +87,8 @@ func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string)
 // CleanSandboxRuntime deletes the runtime pod while preserving durable sandbox state and public services.
 func (s *SandboxService) CleanSandboxRuntime(ctx context.Context, sandboxID string) error {
 	s.logger.Info("Cleaning sandbox runtime", zap.String("sandboxID", sandboxID))
+	var deletedPodNamespace string
+	var deletedPodName string
 	clean := func(ctx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
 		pod, err := s.getSandboxPod(ctx, sandboxID)
 		if err != nil {
@@ -93,6 +101,9 @@ func (s *SandboxService) CleanSandboxRuntime(ctx context.Context, sandboxID stri
 			return fmt.Errorf("get pod: %w", err)
 		}
 		generation := runtimeGenerationFromPod(pod)
+		if err := s.unbindRootfsBeforeRuntimeDeletion(ctx, pod, false); err != nil {
+			return fmt.Errorf("unbind rootfs before clean: %w", err)
+		}
 		pod, err = s.ensureSandboxDeletionFinalizer(ctx, pod)
 		if err != nil {
 			return fmt.Errorf("ensure sandbox cleanup finalizer: %w", err)
@@ -104,6 +115,8 @@ func (s *SandboxService) CleanSandboxRuntime(ctx context.Context, sandboxID stri
 		if err := s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 			return fmt.Errorf("delete runtime pod: %w", err)
 		}
+		deletedPodNamespace = pod.Namespace
+		deletedPodName = pod.Name
 		if tx != nil {
 			return tx.MarkRuntimeCleaned(ctx, sandboxID, generation, s.clock.Now())
 		}
@@ -112,13 +125,19 @@ func (s *SandboxService) CleanSandboxRuntime(ctx context.Context, sandboxID stri
 	if s.sandboxStore != nil {
 		if err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, clean); err != nil {
 			if errors.Is(err, ErrSandboxRecordNotFound) {
-				return clean(ctx, nil, nil)
+				if err := clean(ctx, nil, nil); err != nil {
+					return err
+				}
+				return s.waitForRuntimePodDeleted(ctx, deletedPodNamespace, deletedPodName)
 			}
 			return err
 		}
-		return nil
+		return s.waitForRuntimePodDeleted(ctx, deletedPodNamespace, deletedPodName)
 	}
-	return clean(ctx, nil, nil)
+	if err := clean(ctx, nil, nil); err != nil {
+		return err
+	}
+	return s.waitForRuntimePodDeleted(ctx, deletedPodNamespace, deletedPodName)
 }
 
 // CleanSandboxRuntimeByID implements controller.SandboxRuntimeCleaner.
@@ -129,7 +148,33 @@ func (s *SandboxService) CleanSandboxRuntimeByID(ctx context.Context, sandboxID 
 const (
 	runtimeDeletionReasonCleaned = "cleaned"
 	runtimeDeletionReasonDeleted = "deleted"
+	runtimeDeletionWaitTimeout   = 30 * time.Second
 )
+
+func (s *SandboxService) waitForRuntimePodDeleted(ctx context.Context, namespace, name string) error {
+	if s == nil || s.k8sClient == nil || strings.TrimSpace(namespace) == "" || strings.TrimSpace(name) == "" {
+		return nil
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, runtimeDeletionWaitTimeout)
+	defer cancel()
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		_, err := s.k8sClient.CoreV1().Pods(namespace).Get(waitCtx, name, metav1.GetOptions{})
+		if k8serrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("wait for runtime pod deletion: %w", err)
+		}
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("runtime pod %s/%s was not deleted after %s", namespace, name, runtimeDeletionWaitTimeout)
+		case <-ticker.C:
+		}
+	}
+}
 
 func (s *SandboxService) markRuntimeDeletionReason(ctx context.Context, pod *corev1.Pod, reason string) (*corev1.Pod, error) {
 	if s == nil || pod == nil || s.k8sClient == nil || strings.TrimSpace(reason) == "" {
@@ -167,6 +212,70 @@ func (s *SandboxService) thawSandboxBeforeTermination(ctx context.Context, pod *
 	}
 }
 
+func (s *SandboxService) unbindRootfsBeforeRuntimeDeletion(ctx context.Context, pod *corev1.Pod, tolerateAlreadyUnbound bool) error {
+	if s == nil || pod == nil || pod.Annotations == nil {
+		return nil
+	}
+	filesystemID := strings.TrimSpace(pod.Annotations[controller.AnnotationFilesystemID])
+	if filesystemID == "" {
+		return nil
+	}
+	if !s.config.CtldEnabled {
+		return fmt.Errorf("ctld is required for sandbox filesystem rootfs")
+	}
+	if s.ctldClient == nil {
+		return fmt.Errorf("ctld client is not configured")
+	}
+	if strings.TrimSpace(string(pod.UID)) == "" {
+		return fmt.Errorf("pod uid is required for rootfs unbind")
+	}
+	ctldAddress, err := s.ctldAddressForPod(ctx, pod)
+	if err != nil {
+		return err
+	}
+	resp, err := s.ctldClient.UnbindRootfs(ctx, ctldAddress, ctldapi.UnbindRootfsRequest{
+		PodUID:              string(pod.UID),
+		PortalName:          volumeportal.RootfsPortalName,
+		MountPath:           volumeportal.RootfsMountPath,
+		SandboxFilesystemID: filesystemID,
+	})
+	if err != nil {
+		if tolerateAlreadyUnbound && isRootfsAlreadyUnboundError(err) {
+			if s.logger != nil {
+				s.logger.Warn("Skipping sandbox rootfs unbind after ctld reported it already unbound",
+					zap.String("sandboxID", sandboxIDFromPod(pod)),
+					zap.String("filesystemID", filesystemID),
+					zap.Error(err),
+				)
+			}
+			return nil
+		}
+		return err
+	}
+	if s.logger != nil && resp != nil && strings.TrimSpace(resp.S0FSHead) != "" {
+		s.logger.Info("Committed sandbox filesystem rootfs",
+			zap.String("sandboxID", sandboxIDFromPod(pod)),
+			zap.String("filesystemID", filesystemID),
+			zap.String("s0fsHead", resp.S0FSHead),
+		)
+	}
+	return nil
+}
+
+func isRootfsAlreadyUnboundError(err error) bool {
+	var reqErr *ctldapi.RequestError
+	if !errors.As(err, &reqErr) || reqErr == nil {
+		return false
+	}
+	if reqErr.StatusCode != http.StatusBadRequest && reqErr.StatusCode != http.StatusNotFound {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(reqErr.Message))
+	return strings.Contains(message, "not found") ||
+		strings.Contains(message, "is not bound") ||
+		strings.Contains(message, "not bound")
+}
+
 // GetSandbox gets a sandbox by ID
 func (s *SandboxService) GetSandbox(ctx context.Context, sandboxID string) (*Sandbox, error) {
 	var record *SandboxRecord
@@ -178,6 +287,9 @@ func (s *SandboxService) GetSandbox(ctx context.Context, sandboxID string) (*San
 		}
 		if record != nil && record.Status == SandboxStatusDeleted {
 			return nil, k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
+		}
+		if record != nil && record.Status == SandboxStatusCleaned {
+			return s.recordToSandbox(record), nil
 		}
 	}
 	// Find the pod by sandbox ID
@@ -388,6 +500,7 @@ func (s *SandboxService) persistUpdatedSandboxPod(ctx context.Context, pod *core
 		ID:                  sandboxIDFromPod(pod),
 		TeamID:              pod.Annotations[controller.AnnotationTeamID],
 		UserID:              pod.Annotations[controller.AnnotationUserID],
+		FilesystemID:        pod.Annotations[controller.AnnotationFilesystemID],
 		TemplateID:          sandboxTemplateIDFromLabels(pod.Labels),
 		TemplateName:        template.Name,
 		TemplateNamespace:   template.Namespace,
@@ -499,6 +612,7 @@ func (s *SandboxService) podToSandbox(ctx context.Context, pod *corev1.Pod, sand
 		TemplateID:    sandboxTemplateIDFromLabels(pod.Labels),
 		TeamID:        pod.Annotations[controller.AnnotationTeamID],
 		UserID:        pod.Annotations[controller.AnnotationUserID],
+		FilesystemID:  pod.Annotations[controller.AnnotationFilesystemID],
 		InternalAddr:  internalAddr,
 		Status:        status,
 		Paused:        powerState.Observed == SandboxPowerStatePaused,
@@ -534,6 +648,7 @@ func (s *SandboxService) recordToSandbox(record *SandboxRecord) *Sandbox {
 		TemplateID:    record.TemplateID,
 		TeamID:        record.TeamID,
 		UserID:        record.UserID,
+		FilesystemID:  record.FilesystemID,
 		Status:        record.Status,
 		Paused:        false,
 		PowerState:    powerState,
@@ -553,11 +668,12 @@ func sandboxLifecycleInfoFromRecord(record *SandboxRecord) SandboxLifecycleInfo 
 		return SandboxLifecycleInfo{}
 	}
 	info := SandboxLifecycleInfo{
-		Namespace: record.CurrentPodNamespace,
-		PodName:   record.CurrentPodName,
-		SandboxID: record.ID,
-		TeamID:    record.TeamID,
-		UserID:    record.UserID,
+		Namespace:    record.CurrentPodNamespace,
+		PodName:      record.CurrentPodName,
+		SandboxID:    record.ID,
+		TeamID:       record.TeamID,
+		UserID:       record.UserID,
+		FilesystemID: record.FilesystemID,
 	}
 	if record.Config.Webhook != nil {
 		info.WebhookURL = strings.TrimSpace(record.Config.Webhook.URL)
@@ -629,6 +745,7 @@ func (s *SandboxService) GetSandboxStatus(ctx context.Context, sandboxID string)
 		"template_id":     sandbox.TemplateID,
 		"team_id":         sandbox.TeamID,
 		"user_id":         sandbox.UserID,
+		"filesystem_id":   sandbox.FilesystemID,
 		"pod_name":        sandbox.PodName,
 		"status":          sandbox.Status,
 		"claimed_at":      sandbox.ClaimedAt.Format(time.RFC3339),

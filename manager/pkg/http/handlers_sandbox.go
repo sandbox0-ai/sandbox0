@@ -581,6 +581,10 @@ func (s *Server) resumeSandbox(c *gin.Context) {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox belongs to a different team")
 		return
 	}
+	if sandbox.Status == service.SandboxStatusCleaned {
+		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "sandbox is cleaned; call restore instead of resume")
+		return
+	}
 
 	resp, err := s.sandboxService.ResumeSandboxAndWait(c.Request.Context(), sandboxID)
 	if err != nil {
@@ -598,6 +602,8 @@ func (s *Server) writeSandboxPowerTransitionError(c *gin.Context, action, sandbo
 		zap.Error(err),
 	)
 	switch {
+	case errors.Is(err, service.ErrSandboxRuntimeCleaned):
+		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "sandbox is cleaned; call restore instead of resume")
 	case errors.Is(err, service.ErrSandboxPowerTransitionSuperseded):
 		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, fmt.Sprintf("sandbox %s was superseded by a newer power transition", action))
 	case errors.Is(err, context.DeadlineExceeded):
@@ -607,6 +613,95 @@ func (s *Server) writeSandboxPowerTransitionError(c *gin.Context, action, sandbo
 	default:
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, fmt.Sprintf("failed to %s sandbox: %v", action, err))
 	}
+}
+
+// cleanSandbox cleans a sandbox runtime while preserving durable sandbox state.
+func (s *Server) cleanSandbox(c *gin.Context) {
+	sandboxID := c.Param("id")
+	if sandboxID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+		return
+	}
+
+	claims := internalauth.ClaimsFromContext(c.Request.Context())
+	if claims == nil {
+		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
+		return
+	}
+
+	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
+	if err != nil {
+		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, fmt.Sprintf("sandbox not found: %v", err))
+		return
+	}
+	if sandbox.TeamID != claims.TeamID {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox belongs to a different team")
+		return
+	}
+
+	if err := s.sandboxService.CleanSandboxRuntime(c.Request.Context(), sandboxID); err != nil {
+		s.logger.Error("Failed to clean sandbox runtime",
+			zap.String("sandboxID", sandboxID),
+			zap.Error(err),
+		)
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, fmt.Sprintf("failed to clean sandbox: %v", err))
+		return
+	}
+
+	sandbox, err = s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
+	if err != nil {
+		spec.JSONSuccess(c, http.StatusOK, gin.H{"sandbox_id": sandboxID, "status": service.SandboxStatusCleaned})
+		return
+	}
+	spec.JSONSuccess(c, http.StatusOK, sandbox)
+}
+
+// restoreSandbox restores a cleaned sandbox runtime.
+func (s *Server) restoreSandbox(c *gin.Context) {
+	sandboxID := c.Param("id")
+	if sandboxID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+		return
+	}
+
+	claims := internalauth.ClaimsFromContext(c.Request.Context())
+	if claims == nil {
+		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
+		return
+	}
+
+	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
+	if err != nil {
+		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, fmt.Sprintf("sandbox not found: %v", err))
+		return
+	}
+	if sandbox.TeamID != claims.TeamID {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox belongs to a different team")
+		return
+	}
+	if sandbox.Status != service.SandboxStatusCleaned {
+		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "sandbox is not cleaned")
+		return
+	}
+
+	restored, err := s.sandboxService.RestoreCleanedSandboxRuntime(c.Request.Context(), sandboxID)
+	if err != nil {
+		s.logger.Error("Failed to restore sandbox runtime",
+			zap.String("sandboxID", sandboxID),
+			zap.Error(err),
+		)
+		switch {
+		case apierrors.IsNotFound(err):
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, fmt.Sprintf("sandbox not found: %v", err))
+		case apierrors.IsConflict(err):
+			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
+		default:
+			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, fmt.Sprintf("failed to restore sandbox: %v", err))
+		}
+		return
+	}
+
+	spec.JSONSuccess(c, http.StatusOK, restored)
 }
 
 // refreshSandbox refreshes sandbox TTL

@@ -19,6 +19,9 @@ import (
 const DefaultRequestTimeout = 15 * time.Second
 
 const (
+	pathRootfsBind                  = "/api/v1/rootfs/bind"
+	pathRootfsCommit                = "/api/v1/rootfs/commit"
+	pathRootfsUnbind                = "/api/v1/rootfs/unbind"
 	pathVolumePortalBind            = "/api/v1/volume-portals/bind"
 	pathVolumePortalUnbind          = "/api/v1/volume-portals/unbind"
 	pathVolumePortalCheck           = "/api/v1/volume-portals/check"
@@ -85,6 +88,18 @@ func (c *Client) Probe(ctx context.Context, ctldAddress, sandboxID string, kind 
 func (c *Client) ProbePod(ctx context.Context, ctldAddress, namespace, podName string, kind sandboxprobe.Kind) (*sandboxprobe.Response, error) {
 	path := fmt.Sprintf("/api/v1/pods/%s/%s/probes/%s", url.PathEscape(namespace), url.PathEscape(podName), url.PathEscape(string(kind)))
 	return PostJSON[sandboxprobe.Response](ctx, c.httpClientOrDefault(), ctldAddress, path, nil)
+}
+
+func (c *Client) BindRootfs(ctx context.Context, ctldAddress string, req BindRootfsRequest) (*BindRootfsResponse, error) {
+	return PostJSON[BindRootfsResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootfsBind, req)
+}
+
+func (c *Client) CommitRootfs(ctx context.Context, ctldAddress string, req CommitRootfsRequest) (*CommitRootfsResponse, error) {
+	return PostJSON[CommitRootfsResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootfsCommit, req)
+}
+
+func (c *Client) UnbindRootfs(ctx context.Context, ctldAddress string, req UnbindRootfsRequest) (*UnbindRootfsResponse, error) {
+	return PostJSON[UnbindRootfsResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootfsUnbind, req)
 }
 
 func (c *Client) BindVolumePortal(ctx context.Context, ctldAddress string, req BindVolumePortalRequest) (*BindVolumePortalResponse, error) {
@@ -187,6 +202,12 @@ func responseError(resp any) string {
 	case *PauseResponse:
 		return strings.TrimSpace(typed.Error)
 	case *ResumeResponse:
+		return strings.TrimSpace(typed.Error)
+	case *BindRootfsResponse:
+		return strings.TrimSpace(typed.Error)
+	case *CommitRootfsResponse:
+		return strings.TrimSpace(typed.Error)
+	case *UnbindRootfsResponse:
 		return strings.TrimSpace(typed.Error)
 	case *AttachVolumeOwnerResponse:
 		return strings.TrimSpace(typed.Error)

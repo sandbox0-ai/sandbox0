@@ -125,6 +125,7 @@ func main() {
 	httpServer := newHTTPServer(httpAddr, combinedController{
 		Controller: buildPowerController(ctx, obsProvider),
 		Portal:     portalManager,
+		Rootfs:     portalManager,
 	})
 	if obsProvider != nil {
 		httpServer.Handler = httpobs.ServerMiddleware(obsProvider.HTTPServerConfig(zapLogger))(httpServer.Handler)
@@ -225,6 +226,41 @@ func initPortalDatabase(ctx context.Context, cfg *apiconfig.StorageProxyConfig, 
 type combinedController struct {
 	ctldserver.Controller
 	Portal volumePortalHandler
+	Rootfs rootfsHandler
+}
+
+func (c combinedController) BindRootfs(r *http.Request, req ctldapi.BindRootfsRequest) (ctldapi.BindRootfsResponse, int) {
+	if c.Rootfs == nil {
+		return ctldapi.BindRootfsResponse{Error: "ctld rootfs not implemented"}, http.StatusNotImplemented
+	}
+	resp, err := c.Rootfs.BindRootfs(r.Context(), req)
+	if err != nil {
+		return ctldapi.BindRootfsResponse{Error: err.Error()}, rootfsErrorStatus(err)
+	}
+	return resp, http.StatusOK
+}
+
+func (c combinedController) CommitRootfs(r *http.Request, req ctldapi.CommitRootfsRequest) (ctldapi.CommitRootfsResponse, int) {
+	if c.Rootfs == nil {
+		return ctldapi.CommitRootfsResponse{Error: "ctld rootfs not implemented"}, http.StatusNotImplemented
+	}
+	resp, err := c.Rootfs.CommitRootfs(r.Context(), req)
+	if err != nil {
+		return ctldapi.CommitRootfsResponse{Error: err.Error()}, rootfsErrorStatus(err)
+	}
+	return resp, http.StatusOK
+}
+
+func (c combinedController) UnbindRootfs(r *http.Request, req ctldapi.UnbindRootfsRequest) (ctldapi.UnbindRootfsResponse, int) {
+	if c.Rootfs == nil {
+		return ctldapi.UnbindRootfsResponse{Error: "ctld rootfs not implemented"}, http.StatusNotImplemented
+	}
+	resp, err := c.Rootfs.UnbindRootfs(r.Context(), req)
+	if err != nil {
+		resp.Error = err.Error()
+		return resp, rootfsErrorStatus(err)
+	}
+	return resp, http.StatusOK
 }
 
 func (c combinedController) BindVolumePortal(r *http.Request, req ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, int) {
@@ -369,6 +405,25 @@ func volumePortalErrorStatus(err error) int {
 	}
 }
 
+func rootfsErrorStatus(err error) int {
+	if err == nil {
+		return http.StatusOK
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return http.StatusRequestTimeout
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	switch {
+	case strings.Contains(message, "already has an active owner"),
+		strings.Contains(message, "actively bound"),
+		strings.Contains(message, "already bound"),
+		strings.Contains(message, "not bound to filesystem"):
+		return http.StatusConflict
+	default:
+		return http.StatusBadRequest
+	}
+}
+
 func (c combinedController) MountedVolumeHandler() http.Handler {
 	if c.Portal == nil {
 		return nil
@@ -393,4 +448,10 @@ type volumePortalHandler interface {
 	CompleteSnapshotCheckpoint(ctx context.Context, req ctldapi.CompleteVolumeSnapshotCheckpointRequest) (ctldapi.CompleteVolumeSnapshotCheckpointResponse, error)
 	AbortSnapshotCheckpoint(ctx context.Context, req ctldapi.AbortVolumeSnapshotCheckpointRequest) (ctldapi.AbortVolumeSnapshotCheckpointResponse, error)
 	MountedVolumeHandler() http.Handler
+}
+
+type rootfsHandler interface {
+	BindRootfs(ctx context.Context, req ctldapi.BindRootfsRequest) (ctldapi.BindRootfsResponse, error)
+	CommitRootfs(ctx context.Context, req ctldapi.CommitRootfsRequest) (ctldapi.CommitRootfsResponse, error)
+	UnbindRootfs(ctx context.Context, req ctldapi.UnbindRootfsRequest) (ctldapi.UnbindRootfsResponse, error)
 }

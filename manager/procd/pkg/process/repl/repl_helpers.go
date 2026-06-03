@@ -33,13 +33,19 @@ func startWithCandidates(base *process.BaseProcess, runner *process.PTYRunner, c
 	foundAny := false
 
 	for _, candidate := range candidates {
-		path, err := exec.LookPath(candidate.name)
-		if err != nil {
-			errs = append(errs, fmt.Sprintf("%s: not found", candidate.name))
-			continue
+		env := process.MergeEnvironment(os.Environ(), config.EnvVars, extraEnv)
+		path := process.ResolveCommandInRoot(config.RootPath, candidate.name, env)
+		if path == candidate.name && !strings.Contains(path, "/") {
+			resolved, err := exec.LookPath(candidate.name)
+			if err != nil {
+				errs = append(errs, fmt.Sprintf("%s: not found", candidate.name))
+				continue
+			}
+			path = resolved
 		}
 		foundAny = true
 
+		path = process.ResolveCommandInRoot(config.RootPath, path, env)
 		cmd := exec.Command(path, candidate.args...)
 		if config.CWD != "" {
 			cmd.Dir = config.CWD
@@ -49,13 +55,14 @@ func startWithCandidates(base *process.BaseProcess, runner *process.PTYRunner, c
 		// PTY automatically creates a new session and handles terminal control.
 		// Setting Setpgid would conflict with PTY's session management.
 
-		cmd.Env = process.MergeEnvironment(os.Environ(), config.EnvVars, extraEnv)
+		cmd.Env = env
+		process.ApplyRootPath(cmd, config)
 
-		err = runner.Start(cmd, config.PTYSize)
-		if err == nil {
+		startErr := runner.Start(cmd, config.PTYSize)
+		if startErr == nil {
 			return nil
 		}
-		errs = append(errs, fmt.Sprintf("%s: %v", path, err))
+		errs = append(errs, fmt.Sprintf("%s: %v", path, startErr))
 	}
 
 	if base != nil {

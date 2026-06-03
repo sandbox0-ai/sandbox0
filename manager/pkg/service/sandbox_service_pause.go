@@ -535,17 +535,13 @@ func (s *SandboxService) ResumeSandboxAndWait(ctx context.Context, sandboxID str
 	resp, err := s.RequestResumeSandbox(ctx, sandboxID)
 	if err != nil {
 		if k8serrors.IsNotFound(err) && s.sandboxStore != nil {
-			waitCtx, cancel := sandboxRestoreContext(ctx)
-			defer cancel()
-			sandbox, restoreErr := s.RestoreCleanedSandboxRuntime(waitCtx, sandboxID)
-			if restoreErr != nil {
-				return nil, restoreErr
+			record, getErr := s.sandboxStore.GetSandbox(ctx, sandboxID)
+			if getErr != nil {
+				return nil, fmt.Errorf("get sandbox record: %w", getErr)
 			}
-			generation := int64(0)
-			if sandbox != nil {
-				generation = sandbox.PowerState.DesiredGeneration
+			if record != nil && record.Status == SandboxStatusCleaned {
+				return nil, ErrSandboxRuntimeCleaned
 			}
-			return cleanedSandboxResumeResponse(sandboxID, generation), nil
 		}
 		return nil, err
 	}

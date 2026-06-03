@@ -28,6 +28,17 @@ type StorageProxyAdminTokenGenerator struct {
 	generator *internalauth.Generator
 }
 
+var storageProxyAdminPermissions = []string{
+	"sandboxvolume:create",
+	"sandboxvolume:read",
+	"sandboxvolume:write",
+	"sandboxvolume:delete",
+	"sandboxfilesystem:create",
+	"sandboxfilesystem:read",
+	"sandboxfilesystem:write",
+	"sandboxfilesystem:delete",
+}
+
 func NewStorageProxyAdminTokenGenerator(generator *internalauth.Generator) *StorageProxyAdminTokenGenerator {
 	return &StorageProxyAdminTokenGenerator{generator: generator}
 }
@@ -35,22 +46,12 @@ func NewStorageProxyAdminTokenGenerator(generator *internalauth.Generator) *Stor
 func (g *StorageProxyAdminTokenGenerator) GenerateToken(teamID, userID, sandboxID string) (string, error) {
 	if teamID == "" {
 		return g.generator.GenerateSystem("storage-proxy", internalauth.GenerateOptions{
-			Permissions: []string{
-				"sandboxvolume:create",
-				"sandboxvolume:read",
-				"sandboxvolume:write",
-				"sandboxvolume:delete",
-			},
-			SandboxID: sandboxID,
+			Permissions: storageProxyAdminPermissions,
+			SandboxID:   sandboxID,
 		})
 	}
 	return g.generator.Generate("storage-proxy", teamID, userID, internalauth.GenerateOptions{
-		Permissions: []string{
-			"sandboxvolume:create",
-			"sandboxvolume:read",
-			"sandboxvolume:write",
-			"sandboxvolume:delete",
-		},
-		SandboxID: sandboxID,
+		Permissions: storageProxyAdminPermissions,
+		SandboxID:   sandboxID,
 	})
 }

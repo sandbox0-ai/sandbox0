@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -102,6 +103,39 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 	}
 	if got := pod.Annotations[controller.AnnotationClusterAutoscalerSafeToEvict]; got != "false" {
 		t.Fatalf("safe-to-evict annotation = %q, want false", got)
+	}
+}
+
+func TestClaimIdlePodAnnotatesFilesystemID(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+	}
+	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
+
+	client := fake.NewSimpleClientset(readyPod.DeepCopy())
+	svc := &SandboxService{
+		k8sClient: client,
+		podLister: newClaimTestPodLister(t, readyPod),
+		clock:     systemTime{},
+		logger:    zap.NewNop(),
+	}
+
+	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{
+		TeamID:       "team-a",
+		UserID:       "user-a",
+		FilesystemID: "fs-123",
+	})
+	if err != nil {
+		t.Fatalf("claimIdlePod() error = %v", err)
+	}
+	if pod == nil {
+		t.Fatal("claimIdlePod() = nil, want ready pod")
+	}
+	if got := pod.Annotations[controller.AnnotationFilesystemID]; got != "fs-123" {
+		t.Fatalf("filesystem annotation = %q, want fs-123", got)
 	}
 }
 
@@ -862,6 +896,28 @@ func (c *fakeVolumeMetadataClient) PrepareForVolumePortalBind(_ context.Context,
 	return c.prepareErr
 }
 
+type fakeFilesystemMetadataClient struct {
+	info *SandboxFilesystemInfo
+	err  error
+}
+
+func (c fakeFilesystemMetadataClient) GetFilesystem(_ context.Context, teamID, userID, filesystemID string) (*SandboxFilesystemInfo, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	if c.info != nil {
+		return c.info, nil
+	}
+	return &SandboxFilesystemInfo{
+		ID:              filesystemID,
+		TeamID:          teamID,
+		UserID:          userID,
+		TemplateID:      "template-a",
+		BaseImageDigest: "sha256:base",
+		State:           "available",
+	}, nil
+}
+
 func TestPrepareVolumePortalBindUsesPreparationClientWhenAvailable(t *testing.T) {
 	metadata := &fakeVolumeMetadataClient{}
 	svc := &SandboxService{volumeMetadata: metadata}
@@ -1026,6 +1082,173 @@ func TestBindVolumePortalTreatsCtldConflictAsClaimConflict(t *testing.T) {
 	if !errors.Is(err, ErrClaimConflict) {
 		t.Fatalf("bindVolumePortal() error = %v, want ErrClaimConflict", err)
 	}
+}
+
+func TestBindRootfsCallsCtldWithFilesystemID(t *testing.T) {
+	var got ctldapi.BindRootfsRequest
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/rootfs/bind" {
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode rootfs bind request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ctldapi.BindRootfsResponse{
+			SandboxFilesystemID: "fs-1",
+			RootPath:            volumeportal.RootfsMountPath,
+		})
+	}))
+	defer ctld.Close()
+
+	ctldURL, err := url.Parse(ctld.URL)
+	if err != nil {
+		t.Fatalf("parse ctld url: %v", err)
+	}
+	ctldPort, err := strconv.Atoi(ctldURL.Port())
+	if err != nil {
+		t.Fatalf("parse ctld port: %v", err)
+	}
+
+	client := fake.NewSimpleClientset(&corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{{
+				Type:    corev1.NodeInternalIP,
+				Address: ctldURL.Hostname(),
+			}},
+		},
+	})
+	svc := &SandboxService{
+		k8sClient:          client,
+		ctldClient:         NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		filesystemMetadata: fakeFilesystemMetadataClient{},
+		config: SandboxServiceConfig{
+			CtldEnabled: true,
+			CtldPort:    ctldPort,
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "team-a", UID: "pod-uid"},
+		Spec:       corev1.PodSpec{NodeName: "node-a"},
+	}
+
+	rootPath, err := svc.bindRootfs(context.Background(), pod, &ClaimRequest{
+		TeamID:       "team-a",
+		UserID:       "user-a",
+		Template:     "template-a",
+		SandboxID:    "sandbox-a",
+		FilesystemID: "fs-1",
+	})
+	if err != nil {
+		t.Fatalf("bindRootfs() error = %v", err)
+	}
+	if rootPath != volumeportal.RootfsMountPath {
+		t.Fatalf("rootPath = %q, want %q", rootPath, volumeportal.RootfsMountPath)
+	}
+	if got.SandboxFilesystemID != "fs-1" || got.TeamID != "team-a" || got.PodUID != "pod-uid" {
+		t.Fatalf("rootfs bind request = %+v", got)
+	}
+	if got.PortalName != volumeportal.RootfsPortalName || got.MountPath != volumeportal.RootfsMountPath {
+		t.Fatalf("rootfs portal = %s/%s, want %s/%s", got.PortalName, got.MountPath, volumeportal.RootfsPortalName, volumeportal.RootfsMountPath)
+	}
+}
+
+func TestBindRootfsRejectsTemplateMismatch(t *testing.T) {
+	svc := &SandboxService{
+		ctldClient: &CtldClient{},
+		filesystemMetadata: fakeFilesystemMetadataClient{info: &SandboxFilesystemInfo{
+			ID:         "fs-1",
+			TeamID:     "team-a",
+			UserID:     "user-a",
+			TemplateID: "template-b",
+		}},
+		config: SandboxServiceConfig{CtldEnabled: true},
+	}
+
+	_, err := svc.bindRootfs(context.Background(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "team-a", UID: "pod-uid"},
+	}, &ClaimRequest{
+		TeamID:       "team-a",
+		UserID:       "user-a",
+		Template:     "template-a",
+		FilesystemID: "fs-1",
+	})
+	if err == nil {
+		t.Fatal("bindRootfs() error = nil, want template mismatch")
+	}
+	if !errors.Is(err, ErrInvalidClaimRequest) {
+		t.Fatalf("bindRootfs() error = %v, want ErrInvalidClaimRequest", err)
+	}
+}
+
+func TestInitializeProcdRegeneratesInternalTokenForRetries(t *testing.T) {
+	tokenGenerator := &sequenceTokenGenerator{tokens: []string{"token-a", "token-b"}}
+	var mu sync.Mutex
+	seenTokens := make([]string, 0, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/initialize" {
+			http.NotFound(w, r)
+			return
+		}
+		mu.Lock()
+		seenTokens = append(seenTokens, r.Header.Get("X-Internal-Token"))
+		attempt := len(seenTokens)
+		mu.Unlock()
+		if attempt == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"code":"unauthorized","message":"unauthorized"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"sandbox_id":"sandbox-a","team_id":"team-a"}`))
+	}))
+	defer server.Close()
+
+	pod := newClaimTestPod("ns-a", "pod-a", "template-a", true)
+	svc := &SandboxService{
+		procdClient:            NewProcdClientWithHTTPClient(server.Client()),
+		internalTokenGenerator: tokenGenerator,
+		config: SandboxServiceConfig{
+			ProcdInitTimeout: time.Second,
+		},
+	}
+
+	_, err := svc.initializeProcd(context.Background(), pod, &ClaimRequest{
+		TeamID: "team-a",
+		UserID: "user-a",
+	}, server.URL, "")
+	if err != nil {
+		t.Fatalf("initializeProcd() error = %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seenTokens) != 2 {
+		t.Fatalf("seen tokens = %#v, want two attempts", seenTokens)
+	}
+	if seenTokens[0] == seenTokens[1] {
+		t.Fatalf("initializeProcd reused token %q across retries", seenTokens[0])
+	}
+	if seenTokens[0] != "token-a" || seenTokens[1] != "token-b" {
+		t.Fatalf("seen tokens = %#v, want token-a then token-b", seenTokens)
+	}
+}
+
+type sequenceTokenGenerator struct {
+	tokens []string
+	calls  int
+}
+
+func (g *sequenceTokenGenerator) GenerateToken(_, _, _ string) (string, error) {
+	if g.calls >= len(g.tokens) {
+		g.calls++
+		return "token-extra", nil
+	}
+	token := g.tokens[g.calls]
+	g.calls++
+	return token, nil
 }
 
 func newClaimTestPodLister(t *testing.T, pods ...*corev1.Pod) corelisters.PodLister {

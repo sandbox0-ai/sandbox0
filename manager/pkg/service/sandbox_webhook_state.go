@@ -41,6 +41,12 @@ type SandboxVolumeMetadataClient interface {
 	Get(ctx context.Context, teamID, userID, volumeID string) (*SandboxVolumeInfo, error)
 }
 
+// SandboxFilesystemMetadataClient fetches filesystem metadata before binding a
+// node-local rootfs portal.
+type SandboxFilesystemMetadataClient interface {
+	GetFilesystem(ctx context.Context, teamID, userID, filesystemID string) (*SandboxFilesystemInfo, error)
+}
+
 type SandboxVolumePortalPreparationClient interface {
 	PrepareForVolumePortalBind(ctx context.Context, req PrepareVolumePortalBindRequest) error
 }
@@ -95,6 +101,15 @@ type SandboxVolumeInfo struct {
 	TeamID     string `json:"team_id"`
 	UserID     string `json:"user_id"`
 	AccessMode string `json:"access_mode"`
+}
+
+type SandboxFilesystemInfo struct {
+	ID              string `json:"id"`
+	TeamID          string `json:"team_id"`
+	UserID          string `json:"user_id"`
+	TemplateID      string `json:"template_id,omitempty"`
+	BaseImageDigest string `json:"base_image_digest"`
+	State           string `json:"state"`
 }
 
 func (c *StorageProxyVolumeClient) Create(ctx context.Context, teamID, userID, sandboxID, purpose string) (string, error) {
@@ -196,6 +211,49 @@ func (c *StorageProxyVolumeClient) Get(ctx context.Context, teamID, userID, volu
 		return nil, fmt.Errorf("get sandbox volume returned no id")
 	}
 	return volume, nil
+}
+
+func (c *StorageProxyVolumeClient) GetFilesystem(ctx context.Context, teamID, userID, filesystemID string) (*SandboxFilesystemInfo, error) {
+	if c == nil || c.baseURL == "" {
+		return nil, fmt.Errorf("storage-proxy filesystem client is not configured")
+	}
+	filesystemID = strings.TrimSpace(filesystemID)
+	if filesystemID == "" {
+		return nil, fmt.Errorf("filesystem id is required")
+	}
+	token, err := c.generateToken(teamID, userID, "")
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/sandboxfilesystems/"+url.PathEscape(filesystemID), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Internal-Token", token)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get sandbox filesystem: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read get filesystem response: %w", err)
+	}
+	filesystem, apiErr, err := spec.DecodeResponse[SandboxFilesystemInfo](bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("decode get filesystem response: %w", err)
+	}
+	if apiErr != nil {
+		return nil, fmt.Errorf("get sandbox filesystem failed: %s", apiErr.Message)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("get sandbox filesystem failed with status %d", resp.StatusCode)
+	}
+	if filesystem == nil || strings.TrimSpace(filesystem.ID) == "" {
+		return nil, fmt.Errorf("get sandbox filesystem returned no id")
+	}
+	return filesystem, nil
 }
 
 func (c *StorageProxyVolumeClient) PrepareForVolumePortalBind(ctx context.Context, req PrepareVolumePortalBindRequest) error {

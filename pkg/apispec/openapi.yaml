@@ -20,6 +20,7 @@ tags:
   - name: templates
   - name: registry
   - name: sandbox-volumes
+  - name: sandbox-filesystems
   - name: snapshots
 paths:
   /healthz:
@@ -1564,7 +1565,8 @@ paths:
   /api/v1/sandboxes/{id}/resume:
     post:
       tags: [sandboxes]
-      summary: Resume a sandbox
+      summary: Resume a paused sandbox
+      description: Resumes paused sandbox power state only. Cleaned sandboxes must use the restore API.
       security:
         - bearerAuth: []
       x-upstream-service: manager
@@ -1579,13 +1581,67 @@ paths:
               schema:
                 $ref: "#/components/schemas/SuccessResumeSandboxResponse"
         "409":
-          description: Resume was superseded by a newer power transition
+          description: Resume was superseded by a newer power transition, or the sandbox is cleaned and must be restored
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "504":
           description: Timed out waiting for the sandbox to resume
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/sandboxes/{id}/clean:
+    post:
+      tags: [sandboxes]
+      summary: Clean a sandbox runtime
+      description: Stops the runtime pod while preserving sandbox identity and persistent filesystem state.
+      security:
+        - bearerAuth: []
+      x-upstream-service: manager
+      x-upstream-path: /api/v1/sandboxes/{id}/clean
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+      responses:
+        "200":
+          description: Sandbox runtime cleaned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessSandboxResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/sandboxes/{id}/restore:
+    post:
+      tags: [sandboxes]
+      summary: Restore a cleaned sandbox runtime
+      description: Claims a matching pooled pod and binds the sandbox filesystem before releasing procd.
+      security:
+        - bearerAuth: []
+      x-upstream-service: manager
+      x-upstream-path: /api/v1/sandboxes/{id}/restore
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+      responses:
+        "200":
+          description: Sandbox restored
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessSandboxResponse"
+        "409":
+          description: Sandbox is not cleaned or restore conflicts with a deleting runtime
           content:
             application/json:
               schema:
@@ -2807,6 +2863,220 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessRestoreResponse"
+  /api/v1/sandboxfilesystems:
+    post:
+      tags: [sandbox-filesystems]
+      summary: Create sandbox filesystem
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /sandboxfilesystems
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSandboxFilesystemRequest"
+      responses:
+        "201":
+          description: Filesystem created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessSandboxFilesystemResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+    get:
+      tags: [sandbox-filesystems]
+      summary: List sandbox filesystems
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /sandboxfilesystems
+      responses:
+        "200":
+          description: Filesystem list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessSandboxFilesystemListResponse"
+  /api/v1/sandboxfilesystems/{id}:
+    get:
+      tags: [sandbox-filesystems]
+      summary: Get sandbox filesystem
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /sandboxfilesystems/{id}
+      parameters:
+        - $ref: "#/components/parameters/SandboxFilesystemID"
+      responses:
+        "200":
+          description: Filesystem
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessSandboxFilesystemResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+    delete:
+      tags: [sandbox-filesystems]
+      summary: Delete sandbox filesystem
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /sandboxfilesystems/{id}
+      parameters:
+        - $ref: "#/components/parameters/SandboxFilesystemID"
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessDeletedResponse"
+  /api/v1/sandboxfilesystems/{id}/fork:
+    post:
+      tags: [sandbox-filesystems]
+      summary: Fork sandbox filesystem
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /sandboxfilesystems/{id}/fork
+      parameters:
+        - $ref: "#/components/parameters/SandboxFilesystemID"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForkSandboxFilesystemRequest"
+      responses:
+        "201":
+          description: Filesystem forked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessSandboxFilesystemResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/sandboxfilesystems/{id}/snapshots:
+    post:
+      tags: [sandbox-filesystems]
+      summary: Create sandbox filesystem snapshot
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /sandboxfilesystems/{id}/snapshots
+      parameters:
+        - $ref: "#/components/parameters/SandboxFilesystemID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSandboxFilesystemSnapshotRequest"
+      responses:
+        "201":
+          description: Filesystem snapshot created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessSandboxFilesystemSnapshotResponse"
+    get:
+      tags: [sandbox-filesystems]
+      summary: List sandbox filesystem snapshots
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /sandboxfilesystems/{id}/snapshots
+      parameters:
+        - $ref: "#/components/parameters/SandboxFilesystemID"
+      responses:
+        "200":
+          description: Filesystem snapshot list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessSandboxFilesystemSnapshotListResponse"
+  /api/v1/sandboxfilesystems/{id}/snapshots/{snapshot_id}:
+    get:
+      tags: [sandbox-filesystems]
+      summary: Get sandbox filesystem snapshot
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /sandboxfilesystems/{id}/snapshots/{snapshot_id}
+      parameters:
+        - $ref: "#/components/parameters/SandboxFilesystemID"
+        - $ref: "#/components/parameters/FilesystemSnapshotID"
+      responses:
+        "200":
+          description: Filesystem snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessSandboxFilesystemSnapshotResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+    delete:
+      tags: [sandbox-filesystems]
+      summary: Delete sandbox filesystem snapshot
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /sandboxfilesystems/{id}/snapshots/{snapshot_id}
+      parameters:
+        - $ref: "#/components/parameters/SandboxFilesystemID"
+        - $ref: "#/components/parameters/FilesystemSnapshotID"
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessDeletedResponse"
+  /api/v1/sandboxfilesystems/{id}/snapshots/{snapshot_id}/restore:
+    post:
+      tags: [sandbox-filesystems]
+      summary: Restore sandbox filesystem snapshot
+      description: Restores filesystem content metadata from a filesystem snapshot. This is distinct from sandbox runtime restore.
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /sandboxfilesystems/{id}/snapshots/{snapshot_id}/restore
+      parameters:
+        - $ref: "#/components/parameters/SandboxFilesystemID"
+        - $ref: "#/components/parameters/FilesystemSnapshotID"
+      responses:
+        "200":
+          description: Filesystem snapshot restored
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessSandboxFilesystemResponse"
+        "409":
+          description: Snapshot is incompatible with filesystem base image
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
 components:
   securitySchemes:
     bearerAuth:
@@ -2868,7 +3138,19 @@ components:
       required: true
       schema:
         type: string
+    SandboxFilesystemID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
     SnapshotID:
+      name: snapshot_id
+      in: path
+      required: true
+      schema:
+        type: string
+    FilesystemSnapshotID:
       name: snapshot_id
       in: path
       required: true
@@ -2997,6 +3279,8 @@ components:
         - memory_mib
         - volume_storage_gb
         - snapshot_storage_gb
+        - filesystem_storage_gb
+        - filesystem_snapshot_storage_gb
         - egress
         - ingress
     TeamQuota:
@@ -3716,6 +4000,10 @@ components:
       properties:
         template:
           type: string
+        filesystem_id:
+          type: string
+          nullable: true
+          description: Optional source SandboxFilesystem ID used to initialize the new sandbox root filesystem.
         config:
           $ref: "#/components/schemas/SandboxConfig"
         mounts:
@@ -3984,6 +4272,9 @@ components:
           $ref: "#/components/schemas/SandboxLifecycleStatus"
         pod_name:
           type: string
+        filesystem_id:
+          type: string
+          nullable: true
         template:
           type: string
         cluster_id:
@@ -4049,6 +4340,9 @@ components:
           type: string
         user_id:
           type: string
+        filesystem_id:
+          type: string
+          nullable: true
         status:
           $ref: "#/components/schemas/SandboxLifecycleStatus"
         paused:
@@ -4067,6 +4361,7 @@ components:
             $ref: "#/components/schemas/ClaimMountRequest"
         pod_name:
           type: string
+          nullable: true
         ssh:
           $ref: "#/components/schemas/SandboxSSHConnection"
         expires_at:
@@ -4150,8 +4445,12 @@ components:
           type: string
         user_id:
           type: string
+        filesystem_id:
+          type: string
+          nullable: true
         pod_name:
           type: string
+          nullable: true
         status:
           $ref: "#/components/schemas/SandboxLifecycleStatus"
         claimed_at:
@@ -4192,6 +4491,9 @@ components:
         cluster_id:
           type: string
           description: Cluster where sandbox runs (multi-cluster only)
+          nullable: true
+        filesystem_id:
+          type: string
           nullable: true
         created_at:
           type: string
@@ -4962,6 +5264,130 @@ components:
               type: array
               items:
                 $ref: "#/components/schemas/SandboxVolume"
+    CreateSandboxFilesystemRequest:
+      type: object
+      properties:
+        template:
+          type: string
+          description: Template whose mainContainer.image provides the base image digest.
+        snapshot_id:
+          type: string
+          description: Optional filesystem snapshot ID used to initialize the filesystem.
+        base_image_digest:
+          type: string
+          description: Resolved immutable base image digest. Required when snapshot_id is omitted by storage-proxy direct callers.
+        s0fs_head:
+          type: string
+          description: Initial s0fs head for low-level restore/import paths.
+    ForkSandboxFilesystemRequest:
+      type: object
+      properties:
+        template:
+          type: string
+          description: Optional template ID to associate with the forked filesystem. Defaults to the source filesystem template.
+    SandboxFilesystem:
+      type: object
+      properties:
+        id:
+          type: string
+        team_id:
+          type: string
+        user_id:
+          type: string
+        source_filesystem_id:
+          type: string
+          nullable: true
+        template_id:
+          type: string
+          nullable: true
+        base_image_digest:
+          type: string
+        s0fs_head:
+          type: string
+        state:
+          type: string
+          enum: [available, bound, deleted]
+        deleted_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required: [id, team_id, user_id, base_image_digest, s0fs_head, state, created_at, updated_at]
+    SuccessSandboxFilesystemResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/SandboxFilesystem"
+    SuccessSandboxFilesystemListResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: "#/components/schemas/SandboxFilesystem"
+    CreateSandboxFilesystemSnapshotRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+      required: [name]
+    SandboxFilesystemSnapshot:
+      type: object
+      properties:
+        id:
+          type: string
+        filesystem_id:
+          type: string
+        team_id:
+          type: string
+        user_id:
+          type: string
+        base_image_digest:
+          type: string
+        s0fs_head:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        size_bytes:
+          type: integer
+          format: int64
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+      required: [id, filesystem_id, team_id, user_id, base_image_digest, s0fs_head, name, size_bytes, created_at]
+    SuccessSandboxFilesystemSnapshotResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/SandboxFilesystemSnapshot"
+    SuccessSandboxFilesystemSnapshotListResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: "#/components/schemas/SandboxFilesystemSnapshot"
     CreateSnapshotRequest:
       type: object
       properties:
@@ -5147,6 +5573,7 @@ components:
       properties:
         image:
           type: string
+          description: Base OCI image used for the sandbox root filesystem. SandboxFilesystem branches are tied to the resolved immutable image digest.
         imagePullPolicy:
           type: string
         env:

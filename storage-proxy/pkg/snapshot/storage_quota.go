@@ -31,6 +31,10 @@ func storageQuotaDimension(subjectType string) (quota.Dimension, bool) {
 		return quota.DimensionVolumeStorageGB, true
 	case meteringpkg.SubjectTypeSnapshot:
 		return quota.DimensionSnapshotGB, true
+	case meteringpkg.SubjectTypeFilesystem:
+		return quota.DimensionFilesystemGB, true
+	case meteringpkg.SubjectTypeFilesystemSnapshot:
+		return quota.DimensionFSSnapshotGB, true
 	default:
 		return "", false
 	}

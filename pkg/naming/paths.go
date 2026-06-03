@@ -35,6 +35,18 @@ func S3VolumePrefix(teamID, volumeID string) (string, error) {
 	return fmt.Sprintf("sandboxvolumes/%s/%s", teamID, volumeID), nil
 }
 
+// S3FilesystemPrefix returns the object-store prefix used for a team's root filesystem data.
+// Example: sandboxfilesystems/<teamID>/<filesystemID>
+func S3FilesystemPrefix(teamID, filesystemID string) (string, error) {
+	if err := validatePathID("teamID", teamID); err != nil {
+		return "", err
+	}
+	if err := validatePathID("filesystemID", filesystemID); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("sandboxfilesystems/%s/%s", teamID, filesystemID), nil
+}
+
 // FilesystemVolumePath returns the internal S0FS directory where a volume lives.
 // Example: /volumes/<volumeID>
 func FilesystemVolumePath(volumeID string) (string, error) {

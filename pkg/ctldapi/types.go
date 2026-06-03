@@ -33,6 +33,57 @@ type ResumeResponse struct {
 
 type ProbeResponse = sandboxprobe.Response
 
+// BindRootfsRequest binds a pre-published pod rootfs portal to a concrete
+// SandboxFilesystem branch at claim or restore time.
+type BindRootfsRequest struct {
+	Namespace           string `json:"namespace"`
+	PodName             string `json:"pod_name"`
+	PodUID              string `json:"pod_uid"`
+	PortalName          string `json:"portal_name,omitempty"`
+	MountPath           string `json:"mount_path"`
+	SandboxID           string `json:"sandbox_id"`
+	TeamID              string `json:"team_id"`
+	SandboxFilesystemID string `json:"sandboxfilesystem_id"`
+}
+
+// BindRootfsResponse describes the node-local rootfs mount session created by ctld.
+type BindRootfsResponse struct {
+	SandboxFilesystemID string `json:"sandboxfilesystem_id"`
+	RootPath            string `json:"root_path"`
+	MountedAt           string `json:"mounted_at"`
+	Error               string `json:"error,omitempty"`
+}
+
+// CommitRootfsRequest flushes a bound rootfs branch to durable s0fs storage.
+type CommitRootfsRequest struct {
+	PodUID              string `json:"pod_uid"`
+	PortalName          string `json:"portal_name,omitempty"`
+	MountPath           string `json:"mount_path"`
+	SandboxFilesystemID string `json:"sandboxfilesystem_id"`
+}
+
+type CommitRootfsResponse struct {
+	SandboxFilesystemID string `json:"sandboxfilesystem_id"`
+	S0FSHead            string `json:"s0fs_head,omitempty"`
+	Committed           bool   `json:"committed"`
+	Error               string `json:"error,omitempty"`
+}
+
+// UnbindRootfsRequest releases a bound rootfs portal and flushes local state.
+type UnbindRootfsRequest struct {
+	PodUID              string `json:"pod_uid"`
+	PortalName          string `json:"portal_name,omitempty"`
+	MountPath           string `json:"mount_path"`
+	SandboxFilesystemID string `json:"sandboxfilesystem_id"`
+}
+
+type UnbindRootfsResponse struct {
+	SandboxFilesystemID string `json:"sandboxfilesystem_id"`
+	S0FSHead            string `json:"s0fs_head,omitempty"`
+	Unbound             bool   `json:"unbound"`
+	Error               string `json:"error,omitempty"`
+}
+
 // BindVolumePortalRequest binds one pre-published pod portal to a concrete
 // sandbox volume at claim time.
 type BindVolumePortalRequest struct {

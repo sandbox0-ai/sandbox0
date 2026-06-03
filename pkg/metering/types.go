@@ -33,6 +33,8 @@ const (
 	WindowTypeSandboxRuntimeMiBMilliseconds = "sandbox.runtime_mib_milliseconds"
 	WindowTypeSandboxVolumeByteHours        = "sandbox.volume_byte_hours"
 	WindowTypeSandboxSnapshotByteHours      = "sandbox.snapshot_byte_hours"
+	WindowTypeSandboxFilesystemByteHours    = "sandbox.filesystem_byte_hours"
+	WindowTypeSandboxFSSnapshotByteHours    = "sandbox.filesystem_snapshot_byte_hours"
 
 	WindowTypeManagedAgentSessionRunningMilliseconds = "managed_agent.session_running_milliseconds"
 
@@ -45,6 +47,8 @@ const (
 	SubjectTypeSandbox             = "sandbox"
 	SubjectTypeVolume              = "volume"
 	SubjectTypeSnapshot            = "snapshot"
+	SubjectTypeFilesystem          = "filesystem"
+	SubjectTypeFilesystemSnapshot  = "filesystem_snapshot"
 	SubjectTypeManagedAgentSession = "managed_agent_session"
 )
 

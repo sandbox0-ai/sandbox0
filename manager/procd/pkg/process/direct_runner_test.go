@@ -4,6 +4,7 @@ import (
 	"context"
 	"os/exec"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -50,6 +51,25 @@ func TestDirectRunner_WriterPathPublishesAndCapturesOutput(t *testing.T) {
 				received = true
 			}
 		}
+	}
+}
+
+func TestDirectRunnerPreservesRootPathSysProcAttr(t *testing.T) {
+	cmd := exec.Command("/bin/sh", "-lc", "true")
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Chroot: "/sandbox-root",
+	}
+
+	prepareDirectRunnerSysProcAttr(cmd)
+
+	if cmd.SysProcAttr == nil {
+		t.Fatal("SysProcAttr is nil")
+	}
+	if !cmd.SysProcAttr.Setpgid {
+		t.Fatal("Setpgid = false, want true")
+	}
+	if cmd.SysProcAttr.Chroot != "/sandbox-root" {
+		t.Fatalf("Chroot = %q, want /sandbox-root", cmd.SysProcAttr.Chroot)
 	}
 }
 

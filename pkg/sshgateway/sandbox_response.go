@@ -20,7 +20,6 @@ func SandboxToAPI(sandbox *mgr.Sandbox, sshInfo *ConnectionInfo) *apispec.Sandbo
 		HardExpiresAt: sandbox.HardExpiresAt,
 		Id:            sandbox.ID,
 		Paused:        sandbox.Paused,
-		PodName:       sandbox.PodName,
 		PowerState: apispec.SandboxPowerState{
 			Desired:            apispec.SandboxPowerStateDesired(sandbox.PowerState.Desired),
 			DesiredGeneration:  sandbox.PowerState.DesiredGeneration,
@@ -34,6 +33,12 @@ func SandboxToAPI(sandbox *mgr.Sandbox, sshInfo *ConnectionInfo) *apispec.Sandbo
 	}
 	if sandbox.UserID != "" {
 		payload.UserId = &sandbox.UserID
+	}
+	if sandbox.PodName != "" {
+		payload.PodName = &sandbox.PodName
+	}
+	if sandbox.FilesystemID != "" {
+		payload.FilesystemId = &sandbox.FilesystemID
 	}
 	if sshInfo != nil {
 		payload.Ssh = &apispec.SandboxSSHConnection{

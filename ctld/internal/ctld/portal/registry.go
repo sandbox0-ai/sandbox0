@@ -67,6 +67,39 @@ func (m *Manager) validateBindableVolume(ctx context.Context, req ctldBindContex
 	return vol, nil
 }
 
+func (m *Manager) validateBindableRootfs(ctx context.Context, filesystemID, teamID string) (*db.SandboxFilesystem, error) {
+	if m == nil || m.repo == nil {
+		return nil, fmt.Errorf("ctld filesystem registry unavailable")
+	}
+	fs, err := m.repo.GetSandboxFilesystem(ctx, filesystemID)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(fs.TeamID) != strings.TrimSpace(teamID) {
+		return nil, fmt.Errorf("filesystem %s does not belong to team %s", filesystemID, teamID)
+	}
+	if fs.State == db.SandboxFilesystemStateDeleted {
+		return nil, fmt.Errorf("filesystem %s is deleted", filesystemID)
+	}
+
+	heartbeatTimeout := 15
+	if m.storage != nil && m.storage.HeartbeatTimeout > 0 {
+		heartbeatTimeout = m.storage.HeartbeatTimeout
+	}
+	mounts, err := m.repo.GetActiveSandboxFilesystemMounts(ctx, filesystemID, heartbeatTimeout)
+	if err != nil {
+		return nil, err
+	}
+	selfPodID := m.ownerPodID()
+	for _, mount := range mounts {
+		if mount.ClusterID == m.clusterID && mount.PodID == selfPodID {
+			continue
+		}
+		return nil, fmt.Errorf("filesystem %s already has an active owner on %s/%s", filesystemID, mount.ClusterID, mount.PodID)
+	}
+	return fs, nil
+}
+
 func isTransferSourceMount(mount *db.VolumeMount, sourceClusterID, sourcePodID string) bool {
 	if mount == nil || strings.TrimSpace(sourcePodID) == "" {
 		return false
@@ -209,5 +242,89 @@ func (m *Manager) unregisterOwner(bound *boundVolume) {
 	}
 	if err := m.repo.DeleteMount(context.Background(), bound.volumeID, m.clusterID, m.ownerPodID()); err != nil && m.logger != nil {
 		m.logger.Warn("ctld volume owner unregister failed", zap.String("volume_id", bound.volumeID), zap.Error(err))
+	}
+}
+
+func (m *Manager) registerRootfsOwner(ctx context.Context, bound *boundRootfs) error {
+	if m == nil || m.repo == nil || bound == nil || bound.filesystemID == "" {
+		return fmt.Errorf("ctld filesystem registry unavailable")
+	}
+	ownerPodID := m.ownerPodID()
+	if ownerPodID == "" {
+		return fmt.Errorf("ctld pod identity unavailable")
+	}
+
+	opts := volume.MountOptions{
+		AccessMode:   volume.AccessModeRWO,
+		OwnerKind:    volume.OwnerKindCtld,
+		OwnerPort:    8095,
+		NodeName:     m.nodeName,
+		PodNamespace: m.podNamespace,
+	}
+	rawOpts, err := json.Marshal(opts)
+	if err != nil {
+		return err
+	}
+	rawMsg := json.RawMessage(rawOpts)
+	mount := &db.SandboxFilesystemMount{
+		ID:            uuid.NewString(),
+		FilesystemID:  bound.filesystemID,
+		ClusterID:     m.clusterID,
+		PodID:         ownerPodID,
+		LastHeartbeat: time.Now().UTC(),
+		MountedAt:     bound.mountedAt,
+		MountOptions:  &rawMsg,
+	}
+	heartbeatTimeout := 15
+	if m.storage != nil && m.storage.HeartbeatTimeout > 0 {
+		heartbeatTimeout = m.storage.HeartbeatTimeout
+	}
+	if err := m.repo.AcquireSandboxFilesystemMount(ctx, mount, heartbeatTimeout); err != nil {
+		return err
+	}
+
+	interval := m.heartbeatInterval
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	heartbeatCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	bound.heartbeatCancel = cancel
+	bound.heartbeatDone = done
+	go func(filesystemID string) {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				if err := m.repo.UpdateSandboxFilesystemMountHeartbeat(context.Background(), filesystemID, m.clusterID, ownerPodID); err != nil && m.logger != nil {
+					m.logger.Warn("ctld filesystem owner heartbeat failed", zap.String("filesystem_id", filesystemID), zap.Error(err))
+				}
+			}
+		}
+	}(bound.filesystemID)
+	return nil
+}
+
+func (m *Manager) unregisterRootfsOwner(bound *boundRootfs) {
+	if m == nil || bound == nil {
+		return
+	}
+	if bound.heartbeatCancel != nil {
+		bound.heartbeatCancel()
+		bound.heartbeatCancel = nil
+	}
+	if bound.heartbeatDone != nil {
+		<-bound.heartbeatDone
+		bound.heartbeatDone = nil
+	}
+	if m.repo == nil || bound.filesystemID == "" {
+		return
+	}
+	if err := m.repo.DeleteSandboxFilesystemMount(context.Background(), bound.filesystemID, m.clusterID, m.ownerPodID()); err != nil && m.logger != nil {
+		m.logger.Warn("ctld filesystem owner unregister failed", zap.String("filesystem_id", bound.filesystemID), zap.Error(err))
 	}
 }

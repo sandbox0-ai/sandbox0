@@ -51,7 +51,9 @@ type Manager struct {
 	portals         map[string]*portalMount
 	portalsByTarget map[string]*portalMount
 	boundVolumes    map[string]*boundVolume
+	boundRootfs     map[string]*boundRootfs
 	volumes         *localVolumeManager
+	filesystems     *localVolumeManager
 }
 
 type portalMount struct {
@@ -65,6 +67,7 @@ type portalMount struct {
 	server     *fuse.Server
 
 	volumeID  string
+	rootfsID  string
 	teamID    string
 	mountedAt time.Time
 }
@@ -76,6 +79,19 @@ type boundVolume struct {
 	mountedAt time.Time
 	refCount  int
 	volCtx    *volume.VolumeContext
+
+	heartbeatCancel context.CancelFunc
+	heartbeatDone   chan struct{}
+
+	materializeCancel context.CancelFunc
+	materializeDone   chan struct{}
+}
+
+type boundRootfs struct {
+	filesystemID string
+	teamID       string
+	mountedAt    time.Time
+	volCtx       *volume.VolumeContext
 
 	heartbeatCancel context.CancelFunc
 	heartbeatDone   chan struct{}
@@ -133,7 +149,9 @@ func NewManager(cfg Config) *Manager {
 		portals:                make(map[string]*portalMount),
 		portalsByTarget:        make(map[string]*portalMount),
 		boundVolumes:           make(map[string]*boundVolume),
+		boundRootfs:            make(map[string]*boundRootfs),
 		volumes:                newLocalVolumeManager(),
+		filesystems:            newLocalVolumeManager(),
 	}
 	manager.volumeAPI = newMountedVolumeAPIHandler(storageConfig, cfg.Repository, manager.volumes, l)
 	return manager
@@ -809,6 +827,10 @@ func (m *Manager) releaseOwnerOnlyVolumeLocked(ctx context.Context, volumeID str
 }
 
 func (m *Manager) unbindLockedSnapshot(pm *portalMount) error {
+	if pm.rootfsID != "" {
+		_, err := m.unbindRootfsLocked(context.Background(), pm)
+		return err
+	}
 	volumeID := pm.volumeID
 	m.clearPortalLocked(pm)
 	if volumeID == "" {
@@ -881,6 +903,29 @@ func (m *Manager) createObjectStore(teamID, volumeID string) (objectstore.Store,
 		return nil, err
 	}
 	prefix, err := naming.S3VolumePrefix(teamID, volumeID)
+	if err != nil {
+		return nil, err
+	}
+	return objectstore.Prefix(store, prefix+"/s0fs/"), nil
+}
+
+func (m *Manager) createFilesystemObjectStore(teamID, filesystemID string) (objectstore.Store, error) {
+	if m == nil || m.storage == nil || strings.TrimSpace(m.storage.S3Bucket) == "" {
+		return nil, nil
+	}
+	store, err := objectstore.Create(objectstore.Config{
+		Type:         m.storage.ObjectStorageType,
+		Bucket:       m.storage.S3Bucket,
+		Region:       m.storage.S3Region,
+		Endpoint:     m.storage.S3Endpoint,
+		AccessKey:    m.storage.S3AccessKey,
+		SecretKey:    m.storage.S3SecretKey,
+		SessionToken: m.storage.S3SessionToken,
+	})
+	if err != nil {
+		return nil, err
+	}
+	prefix, err := naming.S3FilesystemPrefix(teamID, filesystemID)
 	if err != nil {
 		return nil, err
 	}
@@ -1088,6 +1133,7 @@ func (m *Manager) clearPortalLocked(pm *portalMount) {
 		pm.fs.SetSession(unboundSession{})
 	}
 	pm.volumeID = ""
+	pm.rootfsID = ""
 	pm.teamID = ""
 	pm.mountedAt = time.Time{}
 }

@@ -184,12 +184,21 @@ func (c *ManagerClient) TerminateSandbox(ctx context.Context, sandboxID, userID,
 
 // ResumeSandbox asks manager to resume a paused sandbox and waits for it to become active.
 func (c *ManagerClient) ResumeSandbox(ctx context.Context, sandboxID, userID, teamID string) error {
+	return c.postSandboxAction(ctx, sandboxID, userID, teamID, "resume")
+}
+
+// RestoreSandbox asks manager to restore a cleaned sandbox runtime and waits until procd is initialized.
+func (c *ManagerClient) RestoreSandbox(ctx context.Context, sandboxID, userID, teamID string) error {
+	return c.postSandboxAction(ctx, sandboxID, userID, teamID, "restore")
+}
+
+func (c *ManagerClient) postSandboxAction(ctx context.Context, sandboxID, userID, teamID, action string) error {
 	token, err := c.internalAuthGen.Generate("manager", teamID, userID, internalauth.GenerateOptions{})
 	if err != nil {
 		return fmt.Errorf("generate internal token: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/api/v1/sandboxes/%s/resume", c.baseURL, sandboxID)
+	url := fmt.Sprintf("%s/api/v1/sandboxes/%s/%s", c.baseURL, sandboxID, action)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader([]byte("{}")))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)

@@ -17,6 +17,12 @@ type Controller interface {
 	ProbePod(r *http.Request, namespace, name string, kind sandboxprobe.Kind) (sandboxprobe.Response, int)
 }
 
+type RootfsController interface {
+	BindRootfs(r *http.Request, req ctldapi.BindRootfsRequest) (ctldapi.BindRootfsResponse, int)
+	CommitRootfs(r *http.Request, req ctldapi.CommitRootfsRequest) (ctldapi.CommitRootfsResponse, int)
+	UnbindRootfs(r *http.Request, req ctldapi.UnbindRootfsRequest) (ctldapi.UnbindRootfsResponse, int)
+}
+
 type VolumePortalController interface {
 	BindVolumePortal(r *http.Request, req ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, int)
 	UnbindVolumePortal(r *http.Request, req ctldapi.UnbindVolumePortalRequest) (ctldapi.UnbindVolumePortalResponse, int)
@@ -72,6 +78,72 @@ func NewMux(controller Controller) http.Handler {
 			mux.Handle("/sandboxvolumes/", mountedHandler)
 		}
 	}
+	mux.HandleFunc("/api/v1/rootfs/bind", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		rootfsController, ok := controller.(RootfsController)
+		if !ok {
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(ctldapi.BindRootfsResponse{Error: "ctld rootfs not implemented"})
+			return
+		}
+		var req ctldapi.BindRootfsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(ctldapi.BindRootfsResponse{Error: err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		resp, status := rootfsController.BindRootfs(r, req)
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+	mux.HandleFunc("/api/v1/rootfs/commit", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		rootfsController, ok := controller.(RootfsController)
+		if !ok {
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(ctldapi.CommitRootfsResponse{Error: "ctld rootfs not implemented"})
+			return
+		}
+		var req ctldapi.CommitRootfsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(ctldapi.CommitRootfsResponse{Error: err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		resp, status := rootfsController.CommitRootfs(r, req)
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+	mux.HandleFunc("/api/v1/rootfs/unbind", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		rootfsController, ok := controller.(RootfsController)
+		if !ok {
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(ctldapi.UnbindRootfsResponse{Error: "ctld rootfs not implemented"})
+			return
+		}
+		var req ctldapi.UnbindRootfsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(ctldapi.UnbindRootfsResponse{Error: err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		resp, status := rootfsController.UnbindRootfs(r, req)
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(resp)
+	})
 	mux.HandleFunc("/api/v1/volume-portals/bind", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)

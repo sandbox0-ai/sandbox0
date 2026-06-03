@@ -70,6 +70,27 @@ type snapshotManager interface {
 	CreateVolumeFromSnapshot(ctx context.Context, req *snapshot.CreateVolumeFromSnapshotRequest) (*db.SandboxVolume, error)
 }
 
+type filesystemRepository interface {
+	CreateSandboxFilesystem(ctx context.Context, fs *db.SandboxFilesystem) error
+	ListSandboxFilesystemsByTeam(ctx context.Context, teamID string) ([]*db.SandboxFilesystem, error)
+	GetSandboxFilesystem(ctx context.Context, id string) (*db.SandboxFilesystem, error)
+	DeleteSandboxFilesystem(ctx context.Context, id string) error
+	ForkSandboxFilesystem(ctx context.Context, sourceID string, fs *db.SandboxFilesystem) error
+	CreateSandboxFilesystemSnapshot(ctx context.Context, snapshot *db.SandboxFilesystemSnapshot) error
+	ListSandboxFilesystemSnapshots(ctx context.Context, filesystemID, teamID string) ([]*db.SandboxFilesystemSnapshot, error)
+	GetSandboxFilesystemSnapshot(ctx context.Context, filesystemID, snapshotID, teamID string) (*db.SandboxFilesystemSnapshot, error)
+	FindSandboxFilesystemSnapshot(ctx context.Context, snapshotID, teamID string) (*db.SandboxFilesystemSnapshot, error)
+	DeleteSandboxFilesystemSnapshot(ctx context.Context, filesystemID, snapshotID, teamID string) error
+	RestoreSandboxFilesystemSnapshot(ctx context.Context, filesystemID, snapshotID, teamID string) (*db.SandboxFilesystem, error)
+}
+
+type filesystemSnapshotManager interface {
+	ForkSandboxFilesystem(ctx context.Context, req *snapshot.ForkSandboxFilesystemRequest) (*db.SandboxFilesystem, error)
+	CreateSandboxFilesystemFromSnapshot(ctx context.Context, req *snapshot.CreateSandboxFilesystemFromSnapshotRequest) (*db.SandboxFilesystem, error)
+	CreateSandboxFilesystemSnapshot(ctx context.Context, req *snapshot.CreateSandboxFilesystemSnapshotRequest) (*db.SandboxFilesystemSnapshot, error)
+	RestoreSandboxFilesystemSnapshot(ctx context.Context, req *snapshot.RestoreSandboxFilesystemSnapshotRequest) (*db.SandboxFilesystem, error)
+}
+
 type volumeMutationBarrier interface {
 	WithShared(ctx context.Context, volumeID string, fn func(context.Context) error) error
 	WithExclusive(ctx context.Context, volumeID string, fn func(context.Context) error) error
@@ -185,6 +206,18 @@ func NewServer(logger *logrus.Logger, cfg *config.StorageProxyConfig, k8sClient 
 	s.mux.HandleFunc("GET /sandboxvolumes/{id}/files/list", s.handleVolumeFileList)
 	s.mux.HandleFunc("POST /sandboxvolumes/{id}/files/move", s.handleVolumeFileMove)
 	s.mux.HandleFunc("GET /sandboxvolumes/{id}/files/watch", s.handleVolumeFileWatch)
+
+	// Sandbox Filesystem handlers
+	s.mux.HandleFunc("POST /sandboxfilesystems", s.createSandboxFilesystem)
+	s.mux.HandleFunc("GET /sandboxfilesystems", s.listSandboxFilesystems)
+	s.mux.HandleFunc("GET /sandboxfilesystems/{id}", s.getSandboxFilesystem)
+	s.mux.HandleFunc("DELETE /sandboxfilesystems/{id}", s.deleteSandboxFilesystem)
+	s.mux.HandleFunc("POST /sandboxfilesystems/{id}/fork", s.forkSandboxFilesystem)
+	s.mux.HandleFunc("POST /sandboxfilesystems/{id}/snapshots", s.createSandboxFilesystemSnapshot)
+	s.mux.HandleFunc("GET /sandboxfilesystems/{id}/snapshots", s.listSandboxFilesystemSnapshots)
+	s.mux.HandleFunc("GET /sandboxfilesystems/{id}/snapshots/{snapshot_id}", s.getSandboxFilesystemSnapshot)
+	s.mux.HandleFunc("DELETE /sandboxfilesystems/{id}/snapshots/{snapshot_id}", s.deleteSandboxFilesystemSnapshot)
+	s.mux.HandleFunc("POST /sandboxfilesystems/{id}/snapshots/{snapshot_id}/restore", s.restoreSandboxFilesystemSnapshot)
 
 	// Internal manager-owned SandboxVolume lifecycle handlers.
 	s.mux.HandleFunc("POST /internal/v1/sandboxvolumes/owned", s.createOwnedSandboxVolume)

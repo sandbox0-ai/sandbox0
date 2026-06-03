@@ -356,6 +356,8 @@ func (s *Server) setupRoutes() {
 			sandboxes.DELETE("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxDelete), s.deleteSandbox)
 			sandboxes.POST("/:id/pause", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.pauseSandbox)
 			sandboxes.POST("/:id/resume", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.resumeSandbox)
+			sandboxes.POST("/:id/clean", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.cleanSandbox)
+			sandboxes.POST("/:id/restore", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.restoreSandbox)
 			sandboxes.POST("/:id/refresh", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.refreshSandbox)
 
 			// === Network Policy (→ Manager) ===
@@ -460,6 +462,26 @@ func (s *Server) setupRoutes() {
 				snapshots.DELETE("/:snapshot_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeDelete), s.deleteSandboxVolumeSnapshot)
 			}
 
+		}
+
+		// === SandboxFilesystem Management (→ Storage Proxy) ===
+		sandboxfilesystems := v1.Group("/sandboxfilesystems")
+		sandboxfilesystems.Use(s.storageProxyUpstreamMiddleware())
+		{
+			sandboxfilesystems.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxFilesystemCreate), s.createSandboxFilesystem)
+			sandboxfilesystems.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxFilesystemRead), s.listSandboxFilesystems)
+			sandboxfilesystems.GET("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxFilesystemRead), s.getSandboxFilesystem)
+			sandboxfilesystems.DELETE("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxFilesystemDelete), s.deleteSandboxFilesystem)
+			sandboxfilesystems.POST("/:id/fork", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxFilesystemWrite), s.forkSandboxFilesystem)
+
+			snapshots := sandboxfilesystems.Group("/:id/snapshots")
+			{
+				snapshots.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxFilesystemWrite), s.createSandboxFilesystemSnapshot)
+				snapshots.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxFilesystemRead), s.listSandboxFilesystemSnapshots)
+				snapshots.GET("/:snapshot_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxFilesystemRead), s.getSandboxFilesystemSnapshot)
+				snapshots.POST("/:snapshot_id/restore", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxFilesystemWrite), s.restoreSandboxFilesystemSnapshot)
+				snapshots.DELETE("/:snapshot_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxFilesystemDelete), s.deleteSandboxFilesystemSnapshot)
+			}
 		}
 	}
 

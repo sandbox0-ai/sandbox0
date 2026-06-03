@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -36,9 +38,11 @@ const MaxFileSize = 100 * 1024 * 1024 // 100MB
 
 // Manager handles file system operations.
 type Manager struct {
-	rootPath        string
-	watcherMgr      *WatcherManager
-	allowExecutable bool
+	mu                sync.RWMutex
+	rootPath          string
+	rootAbsolutePaths bool
+	watcherMgr        *WatcherManager
+	allowExecutable   bool
 }
 
 // NewManager creates a new file manager.
@@ -60,20 +64,41 @@ func NewManager(rootPath string) (*Manager, error) {
 	}, nil
 }
 
+// SetSandboxRootPath makes all file API paths resolve inside rootPath. This is
+// used after manager binds a persistent sandbox filesystem for the sandbox.
+func (m *Manager) SetSandboxRootPath(rootPath string) {
+	rootPath = filepath.Clean(strings.TrimSpace(rootPath))
+	if rootPath == "" || rootPath == "." {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rootPath = rootPath
+	m.rootAbsolutePaths = true
+}
+
 // sanitizePath cleans the path and resolves relative paths against rootPath.
 // The sandbox container provides the isolation boundary, so all paths
 // (absolute or relative) within the sandbox are allowed.
 func (m *Manager) sanitizePath(path string) string {
+	m.mu.RLock()
+	rootPath := m.rootPath
+	rootAbsolutePaths := m.rootAbsolutePaths
+	m.mu.RUnlock()
+
 	// Clean the path to resolve . and .. components
 	cleanPath := filepath.Clean(path)
 
 	// For absolute paths, return as-is
 	if filepath.IsAbs(cleanPath) {
+		if rootAbsolutePaths {
+			return filepath.Clean(filepath.Join(rootPath, strings.TrimPrefix(cleanPath, string(filepath.Separator))))
+		}
 		return cleanPath
 	}
 
 	// For relative paths, join with root and clean
-	return filepath.Clean(filepath.Join(m.rootPath, cleanPath))
+	return filepath.Clean(filepath.Join(rootPath, cleanPath))
 }
 
 func pathIsDir(path string) (bool, error) {
@@ -381,6 +406,8 @@ func (m *Manager) Emit(event WatchEvent) {
 
 // GetRootPath returns the root path.
 func (m *Manager) GetRootPath() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.rootPath
 }
 

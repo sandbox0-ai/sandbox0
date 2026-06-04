@@ -47,7 +47,7 @@ spec:
       enabled: true
       replicas: 1
       config:
-        procdInitTimeout: 90s
+        procdInitTimeout: 5m
     storageProxy:
       enabled: true
       replicas: 1

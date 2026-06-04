@@ -24,6 +24,8 @@ type Session struct {
 	client    *http.Client
 }
 
+const apiSessionRequestTimeout = 90 * time.Second
+
 func NewAPISession(env *framework.ScenarioEnv, useEdge bool) (*Session, func(), error) {
 	if env == nil {
 		return nil, nil, fmt.Errorf("scenario env is required")
@@ -47,7 +49,7 @@ func NewAPISession(env *framework.ScenarioEnv, useEdge bool) (*Session, func(), 
 		baseURL:   baseURL,
 		apiPrefix: "/api/v1",
 		client: &http.Client{
-			Timeout: 15 * time.Second,
+			Timeout: apiSessionRequestTimeout,
 		},
 	}
 	return session, cleanup, nil

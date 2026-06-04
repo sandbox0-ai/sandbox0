@@ -1882,8 +1882,6 @@ func createFilesystemRootfsTemplate(env *framework.ScenarioEnv, session *e2eutil
 	req := e2eutils.CloneTemplateForCreate(*base, templateID)
 	Expect(req.Spec.MainContainer).NotTo(BeNil())
 	req.Spec.MainContainer.Image = filesystemE2ETemplateImage
-	imagePullPolicy := "IfNotPresent"
-	req.Spec.MainContainer.ImagePullPolicy = &imagePullPolicy
 	if req.Spec.Pool != nil {
 		req.Spec.Pool.MinIdle = 1
 		req.Spec.Pool.MaxIdle = 1

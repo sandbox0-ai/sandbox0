@@ -12,6 +12,7 @@ import (
 
 	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
 	filepkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/webhook"
 	"go.uber.org/zap"
 )
@@ -100,7 +101,6 @@ func TestInitializeConfiguresRootPath(t *testing.T) {
 	}
 	contextManager := ctxpkg.NewManager()
 	handler := NewInitializeHandler(dispatcher, fileManager, contextManager, 8080, zap.NewNop())
-	handler.rootfsBootstrapSource = writeBootstrapSource(t)
 
 	body, err := json.Marshal(InitializeRequest{
 		SandboxID: "sandbox-1",
@@ -120,6 +120,9 @@ func TestInitializeConfiguresRootPath(t *testing.T) {
 	if got := fileManager.GetRootPath(); got != rootfs {
 		t.Fatalf("file root path = %q, want %q", got, rootfs)
 	}
+	if _, err := os.Stat(filepath.Join(rootfs, "bin", "sh")); !os.IsNotExist(err) {
+		t.Fatalf("initialize copied base image content into rootfs, err=%v", err)
+	}
 	if err := fileManager.WriteFile("/etc/sandbox0-root.txt", []byte("ok"), 0o644); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
@@ -130,130 +133,22 @@ func TestInitializeConfiguresRootPath(t *testing.T) {
 	if string(data) != "ok" {
 		t.Fatalf("rootfs file = %q, want ok", string(data))
 	}
-}
 
-func TestBootstrapRootfsCopiesBaseContent(t *testing.T) {
-	source := writeBootstrapSource(t)
-	target := t.TempDir()
-
-	if err := bootstrapRootfsFrom(source, target); err != nil {
-		t.Fatalf("bootstrapRootfsFrom() error = %v", err)
-	}
-
-	data, err := os.ReadFile(filepath.Join(target, "bin", "sh"))
+	var processRootPath string
+	contextManager.SetStartHandler(func(event process.StartEvent) {
+		processRootPath = event.Config.RootPath
+	})
+	ctx, err := contextManager.CreateContext(process.ProcessConfig{
+		Type:    process.ProcessTypeCMD,
+		Command: []string{"/bin/sh", "-c", "true"},
+	})
 	if err != nil {
-		t.Fatalf("read copied shell: %v", err)
+		t.Fatalf("CreateContext() error = %v", err)
 	}
-	if string(data) != "#!/bin/sh\n" {
-		t.Fatalf("copied shell = %q", string(data))
+	defer func() {
+		_ = ctx.Stop()
+	}()
+	if processRootPath != "" {
+		t.Fatalf("process root path = %q, want empty", processRootPath)
 	}
-	link, err := os.Readlink(filepath.Join(target, "usr", "bin", "sh"))
-	if err != nil {
-		t.Fatalf("read copied symlink: %v", err)
-	}
-	if link != "../../bin/sh" {
-		t.Fatalf("copied symlink = %q, want ../../bin/sh", link)
-	}
-	if _, err := os.Stat(filepath.Join(target, "proc", "ignored")); !os.IsNotExist(err) {
-		t.Fatalf("proc content was copied, err=%v", err)
-	}
-	if _, err := os.Stat(filepath.Join(target, rootfsBootstrapMarker)); err != nil {
-		t.Fatalf("bootstrap marker missing: %v", err)
-	}
-}
-
-func TestBootstrapRootfsSkipsExistingMarker(t *testing.T) {
-	source := writeBootstrapSource(t)
-	target := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(target, ".sandbox0"), 0o755); err != nil {
-		t.Fatalf("create marker dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(target, rootfsBootstrapMarker), []byte("{}\n"), 0o644); err != nil {
-		t.Fatalf("write marker: %v", err)
-	}
-
-	if err := bootstrapRootfsFrom(source, target); err != nil {
-		t.Fatalf("bootstrapRootfsFrom() error = %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(target, "bin", "sh")); !os.IsNotExist(err) {
-		t.Fatalf("bootstrap copied content despite marker, err=%v", err)
-	}
-}
-
-func TestBootstrapRootfsCompletesNonEmptyTarget(t *testing.T) {
-	source := writeBootstrapSource(t)
-	target := t.TempDir()
-	if err := os.WriteFile(filepath.Join(target, "custom.txt"), []byte("keep"), 0o644); err != nil {
-		t.Fatalf("write custom file: %v", err)
-	}
-
-	if err := bootstrapRootfsFrom(source, target); err != nil {
-		t.Fatalf("bootstrapRootfsFrom() error = %v", err)
-	}
-	data, err := os.ReadFile(filepath.Join(target, "bin", "sh"))
-	if err != nil {
-		t.Fatalf("read copied shell: %v", err)
-	}
-	if string(data) != "#!/bin/sh\n" {
-		t.Fatalf("copied shell = %q", string(data))
-	}
-	custom, err := os.ReadFile(filepath.Join(target, "custom.txt"))
-	if err != nil {
-		t.Fatalf("read custom file: %v", err)
-	}
-	if string(custom) != "keep" {
-		t.Fatalf("custom file = %q, want keep", string(custom))
-	}
-	if _, err := os.Stat(filepath.Join(target, rootfsBootstrapMarker)); err != nil {
-		t.Fatalf("bootstrap marker missing: %v", err)
-	}
-}
-
-func TestBootstrapRootfsDoesNotOverwriteExistingFiles(t *testing.T) {
-	source := writeBootstrapSource(t)
-	target := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(target, "bin"), 0o755); err != nil {
-		t.Fatalf("create target bin: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(target, "bin", "sh"), []byte("custom shell\n"), 0o755); err != nil {
-		t.Fatalf("write custom shell: %v", err)
-	}
-
-	if err := bootstrapRootfsFrom(source, target); err != nil {
-		t.Fatalf("bootstrapRootfsFrom() error = %v", err)
-	}
-	data, err := os.ReadFile(filepath.Join(target, "bin", "sh"))
-	if err != nil {
-		t.Fatalf("read target shell: %v", err)
-	}
-	if string(data) != "custom shell\n" {
-		t.Fatalf("target shell = %q, want custom shell", string(data))
-	}
-	if _, err := os.Stat(filepath.Join(target, rootfsBootstrapMarker)); err != nil {
-		t.Fatalf("bootstrap marker missing: %v", err)
-	}
-}
-
-func writeBootstrapSource(t *testing.T) string {
-	t.Helper()
-	source := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(source, "bin"), 0o755); err != nil {
-		t.Fatalf("create bin: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(source, "bin", "sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatalf("write shell: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(source, "usr", "bin"), 0o755); err != nil {
-		t.Fatalf("create usr bin: %v", err)
-	}
-	if err := os.Symlink("../../bin/sh", filepath.Join(source, "usr", "bin", "sh")); err != nil {
-		t.Fatalf("write symlink: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(source, "proc"), 0o755); err != nil {
-		t.Fatalf("create proc: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(source, "proc", "ignored"), []byte("ignored"), 0o644); err != nil {
-		t.Fatalf("write proc file: %v", err)
-	}
-	return source
 }

@@ -46,7 +46,6 @@ const (
 	templateNamespaceBaselineDenyPolicyName  = "sandbox0-baseline-deny-sandbox-ingress"
 	templateNamespaceBaselineAllowPolicyName = "sandbox0-baseline-allow-system-to-sandbox"
 	templateNamespaceBaselineProcdPort       = 49983
-	filesystemE2ETemplateImage               = "busybox:1.36"
 )
 
 type e2ePodList struct {
@@ -330,7 +329,7 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 
 		if opts.includeFilesystemLifecycle {
 			Context("sandbox filesystems", func() {
-				It("persists root filesystem state across clean and restore", func() {
+				It("persists filesystem state across clean and restore", func() {
 					assertSandboxFilesystemLifecycle(env, session)
 				})
 			})
@@ -1874,42 +1873,6 @@ func createReadOnlyVolumePortalTemplate(env *framework.ScenarioEnv, session *e2e
 	return createVolumePortalTemplateWithReadOnly(env, session, mountPath, true)
 }
 
-func createFilesystemRootfsTemplate(env *framework.ScenarioEnv, session *e2eutils.Session) string {
-	templateID := fmt.Sprintf("filesystem-rootfs-%d", time.Now().UnixNano())
-	base, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), "default")
-	Expect(err).NotTo(HaveOccurred())
-
-	req := e2eutils.CloneTemplateForCreate(*base, templateID)
-	Expect(req.Spec.MainContainer).NotTo(BeNil())
-	req.Spec.MainContainer.Image = filesystemE2ETemplateImage
-	if req.Spec.Pool != nil {
-		req.Spec.Pool.MinIdle = 1
-		req.Spec.Pool.MaxIdle = 1
-	}
-
-	created, err := session.CreateTemplate(env.TestCtx.Context, GinkgoT(), req)
-	Expect(err).NotTo(HaveOccurred())
-	templateNamespace, err := naming.TemplateNamespaceForTeam(expectStringPtr(created.TeamId, "team id"))
-	Expect(err).NotTo(HaveOccurred())
-
-	DeferCleanup(func() {
-		deleteTeamTemplateAndWaitForNamespaceCleanup(env, session, templateID, templateNamespace)
-	})
-
-	Eventually(func() error {
-		tpl, getErr := session.GetTemplate(env.TestCtx.Context, GinkgoT(), templateID)
-		if getErr != nil {
-			return getErr
-		}
-		if tpl.Status == nil || tpl.Status.IdleCount == nil || *tpl.Status.IdleCount < 1 {
-			return fmt.Errorf("template %s idle pool is not ready", templateID)
-		}
-		return nil
-	}).WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
-
-	return templateID
-}
-
 func createVolumePortalTemplateWithReadOnly(env *framework.ScenarioEnv, session *e2eutils.Session, mountPath string, readOnly bool) string {
 	templateID := fmt.Sprintf("volume-portal-%d", time.Now().UnixNano())
 	base, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), "default")
@@ -2055,7 +2018,7 @@ func assertVolumeLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session
 }
 
 func assertSandboxFilesystemLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session) {
-	templateID := createFilesystemRootfsTemplate(env, session)
+	templateID := "default"
 	baseImageDigest := "sha256:e2e-rootfs-base"
 	filesystem, status, err := session.CreateSandboxFilesystem(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxFilesystemRequest{
 		Template:        &templateID,
@@ -2094,7 +2057,6 @@ func assertSandboxFilesystemLifecycle(env *framework.ScenarioEnv, session *e2eut
 	status, err = session.WriteFile(env.TestCtx.Context, GinkgoT(), sandboxID, filePath, originalContent, "")
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
-	assertSandboxCommandOutput(env, session, sandboxID, []string{"/bin/sh", "-lc", "cat " + shellQuote(filePath)}, string(originalContent))
 
 	cleaned, status, err := session.CleanSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
 	Expect(err).NotTo(HaveOccurred())

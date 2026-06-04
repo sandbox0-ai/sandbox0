@@ -15,27 +15,25 @@ import (
 
 // InitializeHandler handles sandbox initialization requests.
 type InitializeHandler struct {
-	dispatcher            *webhook.Dispatcher
-	fileManager           *file.Manager
-	contextManager        *ctxpkg.Manager
-	httpPort              int
-	logger                *zap.Logger
-	rootfsBootstrapSource string
-	readyOnce             sync.Once
-	watchMu               sync.Mutex
-	watchPath             string
-	unsubscribe           func() error
+	dispatcher     *webhook.Dispatcher
+	fileManager    *file.Manager
+	contextManager *ctxpkg.Manager
+	httpPort       int
+	logger         *zap.Logger
+	readyOnce      sync.Once
+	watchMu        sync.Mutex
+	watchPath      string
+	unsubscribe    func() error
 }
 
 // NewInitializeHandler creates a new initialize handler.
 func NewInitializeHandler(dispatcher *webhook.Dispatcher, fileManager *file.Manager, contextManager *ctxpkg.Manager, httpPort int, logger *zap.Logger) *InitializeHandler {
 	return &InitializeHandler{
-		dispatcher:            dispatcher,
-		fileManager:           fileManager,
-		contextManager:        contextManager,
-		httpPort:              httpPort,
-		logger:                logger,
-		rootfsBootstrapSource: "/",
+		dispatcher:     dispatcher,
+		fileManager:    fileManager,
+		contextManager: contextManager,
+		httpPort:       httpPort,
+		logger:         logger,
 	}
 }
 
@@ -101,28 +99,9 @@ func (h *InitializeHandler) Initialize(w http.ResponseWriter, r *http.Request) {
 
 	if h.contextManager != nil {
 		h.contextManager.SetSandboxEnvVars(req.EnvVars)
-		if rootPath := strings.TrimSpace(req.RootPath); rootPath != "" {
-			if err := h.bootstrapRootfs(rootPath); err != nil {
-				if h.logger != nil {
-					h.logger.Error("Failed to bootstrap sandbox rootfs", zap.String("root_path", rootPath), zap.Error(err))
-				}
-				writeError(w, http.StatusInternalServerError, "rootfs_bootstrap_failed", err.Error())
-				return
-			}
-			h.contextManager.SetSandboxRootPath(rootPath)
-		}
 	}
 	if h.fileManager != nil {
 		if rootPath := strings.TrimSpace(req.RootPath); rootPath != "" {
-			if h.contextManager == nil {
-				if err := h.bootstrapRootfs(rootPath); err != nil {
-					if h.logger != nil {
-						h.logger.Error("Failed to bootstrap sandbox rootfs", zap.String("root_path", rootPath), zap.Error(err))
-					}
-					writeError(w, http.StatusInternalServerError, "rootfs_bootstrap_failed", err.Error())
-					return
-				}
-			}
 			h.fileManager.SetSandboxRootPath(rootPath)
 		}
 	}

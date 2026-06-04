@@ -52,13 +52,6 @@ func bootstrapRootfsFrom(sourceRoot, targetRoot string) error {
 	if rootfsBootstrapMarkerExists(targetAbs) {
 		return nil
 	}
-	nonEmpty, err := rootfsHasContent(targetAbs)
-	if err != nil {
-		return err
-	}
-	if nonEmpty {
-		return writeRootfsBootstrapMarker(targetAbs, sourceAbs, "adopted")
-	}
 
 	if err := filepath.WalkDir(sourceAbs, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -121,20 +114,6 @@ func rootfsBootstrapMarkerExists(targetRoot string) bool {
 	return err == nil
 }
 
-func rootfsHasContent(targetRoot string) (bool, error) {
-	entries, err := os.ReadDir(targetRoot)
-	if err != nil {
-		return false, fmt.Errorf("read rootfs target: %w", err)
-	}
-	for _, entry := range entries {
-		if entry.Name() == ".sandbox0" {
-			continue
-		}
-		return true, nil
-	}
-	return false, nil
-}
-
 func shouldSkipRootfsBootstrapPath(path, rel, targetRoot string) bool {
 	path = filepath.Clean(path)
 	targetRoot = filepath.Clean(targetRoot)
@@ -173,15 +152,21 @@ func copyRootfsSymlink(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
-	if existing, err := os.Readlink(dst); err == nil && existing == target {
+	if _, err := os.Lstat(dst); err == nil {
 		return nil
+	} else if !os.IsNotExist(err) {
+		return err
 	}
-	_ = os.Remove(dst)
 	return os.Symlink(target, dst)
 }
 
 func copyRootfsRegularFile(src, dst string, info os.FileInfo) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(dst); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
 		return err
 	}
 	in, err := os.Open(src)

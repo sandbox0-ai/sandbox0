@@ -180,7 +180,7 @@ func TestBootstrapRootfsSkipsExistingMarker(t *testing.T) {
 	}
 }
 
-func TestBootstrapRootfsAdoptsNonEmptyTarget(t *testing.T) {
+func TestBootstrapRootfsCompletesNonEmptyTarget(t *testing.T) {
 	source := writeBootstrapSource(t)
 	target := t.TempDir()
 	if err := os.WriteFile(filepath.Join(target, "custom.txt"), []byte("keep"), 0o644); err != nil {
@@ -190,11 +190,47 @@ func TestBootstrapRootfsAdoptsNonEmptyTarget(t *testing.T) {
 	if err := bootstrapRootfsFrom(source, target); err != nil {
 		t.Fatalf("bootstrapRootfsFrom() error = %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(target, "bin", "sh")); !os.IsNotExist(err) {
-		t.Fatalf("bootstrap copied content into non-empty target, err=%v", err)
+	data, err := os.ReadFile(filepath.Join(target, "bin", "sh"))
+	if err != nil {
+		t.Fatalf("read copied shell: %v", err)
+	}
+	if string(data) != "#!/bin/sh\n" {
+		t.Fatalf("copied shell = %q", string(data))
+	}
+	custom, err := os.ReadFile(filepath.Join(target, "custom.txt"))
+	if err != nil {
+		t.Fatalf("read custom file: %v", err)
+	}
+	if string(custom) != "keep" {
+		t.Fatalf("custom file = %q, want keep", string(custom))
 	}
 	if _, err := os.Stat(filepath.Join(target, rootfsBootstrapMarker)); err != nil {
-		t.Fatalf("adopt marker missing: %v", err)
+		t.Fatalf("bootstrap marker missing: %v", err)
+	}
+}
+
+func TestBootstrapRootfsDoesNotOverwriteExistingFiles(t *testing.T) {
+	source := writeBootstrapSource(t)
+	target := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(target, "bin"), 0o755); err != nil {
+		t.Fatalf("create target bin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "bin", "sh"), []byte("custom shell\n"), 0o755); err != nil {
+		t.Fatalf("write custom shell: %v", err)
+	}
+
+	if err := bootstrapRootfsFrom(source, target); err != nil {
+		t.Fatalf("bootstrapRootfsFrom() error = %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(target, "bin", "sh"))
+	if err != nil {
+		t.Fatalf("read target shell: %v", err)
+	}
+	if string(data) != "custom shell\n" {
+		t.Fatalf("target shell = %q, want custom shell", string(data))
+	}
+	if _, err := os.Stat(filepath.Join(target, rootfsBootstrapMarker)); err != nil {
+		t.Fatalf("bootstrap marker missing: %v", err)
 	}
 }
 

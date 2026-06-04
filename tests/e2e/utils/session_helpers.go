@@ -24,7 +24,10 @@ type Session struct {
 	client    *http.Client
 }
 
-const apiSessionRequestTimeout = 90 * time.Second
+const (
+	apiSessionRequestTimeout         = 90 * time.Second
+	apiSessionFilesystemClaimTimeout = 5 * time.Minute
+)
 
 func NewAPISession(env *framework.ScenarioEnv, useEdge bool) (*Session, func(), error) {
 	if env == nil {
@@ -64,10 +67,23 @@ func (s *Session) doJSONSpecRequest(
 	body any,
 	withAuth bool,
 ) (int, []byte, error) {
+	return s.doJSONSpecRequestWithTimeout(t, ctx, method, specPath, requestPath, body, withAuth, 0)
+}
+
+func (s *Session) doJSONSpecRequestWithTimeout(
+	t ContractT,
+	ctx context.Context,
+	method string,
+	specPath string,
+	requestPath string,
+	body any,
+	withAuth bool,
+	timeout time.Duration,
+) (int, []byte, error) {
 	if t != nil {
 		ValidateRequestExample(t, method, specPath, defaultContentType, body)
 	}
-	status, respBody, err := s.doJSONRequest(ctx, method, requestPath, body, withAuth)
+	status, respBody, err := s.doJSONRequestWithTimeout(ctx, method, requestPath, body, withAuth, timeout)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -102,6 +118,10 @@ func (s *Session) doRawSpecRequest(
 }
 
 func (s *Session) doJSONRequest(ctx context.Context, method, path string, body any, withAuth bool) (int, []byte, error) {
+	return s.doJSONRequestWithTimeout(ctx, method, path, body, withAuth, 0)
+}
+
+func (s *Session) doJSONRequestWithTimeout(ctx context.Context, method, path string, body any, withAuth bool, timeout time.Duration) (int, []byte, error) {
 	if s == nil {
 		return 0, nil, fmt.Errorf("api session is nil")
 	}
@@ -125,7 +145,8 @@ func (s *Session) doJSONRequest(ctx context.Context, method, path string, body a
 	}
 	s.setAuthHeaders(req, withAuth)
 
-	resp, err := s.client.Do(req)
+	client := s.clientForTimeout(timeout)
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -136,6 +157,18 @@ func (s *Session) doJSONRequest(ctx context.Context, method, path string, body a
 		return resp.StatusCode, nil, err
 	}
 	return resp.StatusCode, respBody, nil
+}
+
+func (s *Session) clientForTimeout(timeout time.Duration) *http.Client {
+	if s == nil || s.client == nil {
+		return &http.Client{Timeout: timeout}
+	}
+	if timeout <= 0 || s.client.Timeout == timeout {
+		return s.client
+	}
+	client := *s.client
+	client.Timeout = timeout
+	return &client
 }
 
 func (s *Session) doRawRequest(ctx context.Context, method, path string, body []byte, contentType string, withAuth bool) (int, []byte, error) {

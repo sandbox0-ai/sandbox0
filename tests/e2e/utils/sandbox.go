@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 )
@@ -92,7 +94,11 @@ func (s *Session) ClaimSandboxDetailed(ctx context.Context, t ContractT, req api
 	if s.teamID == "" || s.userID == "" {
 		return nil, 0, fmt.Errorf("team or user id missing")
 	}
-	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodPost, "/api/v1/sandboxes", "/api/v1/sandboxes", req, true)
+	requestTimeout := time.Duration(0)
+	if req.FilesystemId != nil && strings.TrimSpace(*req.FilesystemId) != "" {
+		requestTimeout = apiSessionFilesystemClaimTimeout
+	}
+	status, body, err := s.doJSONSpecRequestWithTimeout(t, ctx, http.MethodPost, "/api/v1/sandboxes", "/api/v1/sandboxes", req, true, requestTimeout)
 	if err != nil {
 		return nil, status, err
 	}

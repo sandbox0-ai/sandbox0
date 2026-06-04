@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
@@ -65,5 +66,34 @@ func TestSessionDoJSONRequestOmitsSelectedTeamHeaderWhenUnset(t *testing.T) {
 	}
 	if gotTeamID != "" {
 		t.Fatalf("expected team header to be omitted, got %q", gotTeamID)
+	}
+}
+
+func TestSessionClientForTimeoutClonesDefaultClient(t *testing.T) {
+	t.Parallel()
+
+	transport := http.DefaultTransport
+	baseClient := &http.Client{
+		Timeout:   apiSessionRequestTimeout,
+		Transport: transport,
+	}
+	session := &Session{client: baseClient}
+
+	if got := session.clientForTimeout(0); got != baseClient {
+		t.Fatalf("default timeout client = %p, want base client %p", got, baseClient)
+	}
+
+	customClient := session.clientForTimeout(5 * time.Minute)
+	if customClient == baseClient {
+		t.Fatalf("custom timeout reused base client")
+	}
+	if customClient.Timeout != 5*time.Minute {
+		t.Fatalf("custom client timeout = %s, want 5m", customClient.Timeout)
+	}
+	if customClient.Transport != transport {
+		t.Fatalf("custom client transport was not preserved")
+	}
+	if baseClient.Timeout != apiSessionRequestTimeout {
+		t.Fatalf("base client timeout = %s, want %s", baseClient.Timeout, apiSessionRequestTimeout)
 	}
 }

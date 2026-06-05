@@ -88,7 +88,7 @@ func TestReconcileCreatesSSHGatewayResources(t *testing.T) {
 	}
 
 	configMap := &corev1.ConfigMap{}
-	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-ssh-gateway", Namespace: infra.Namespace}, configMap); err != nil {
+	if err := client.Get(context.Background(), types.NamespacedName{Name: sshGatewayConfigMapName(t, deployment), Namespace: infra.Namespace}, configMap); err != nil {
 		t.Fatalf("get configmap: %v", err)
 	}
 	configYAML := configMap.Data["config.yaml"]
@@ -106,6 +106,17 @@ func TestReconcileCreatesSSHGatewayResources(t *testing.T) {
 	if len(hostKeySecret.Data[sshHostPrivateKeyKey]) == 0 && len(hostKeySecret.StringData[sshHostPrivateKeyKey]) == 0 {
 		t.Fatal("expected ssh host private key to be generated")
 	}
+}
+
+func sshGatewayConfigMapName(t *testing.T, deployment *appsv1.Deployment) string {
+	t.Helper()
+	for _, volume := range deployment.Spec.Template.Spec.Volumes {
+		if volume.Name == "config" && volume.ConfigMap != nil {
+			return volume.ConfigMap.Name
+		}
+	}
+	t.Fatalf("expected config volume, got %#v", deployment.Spec.Template.Spec.Volumes)
+	return ""
 }
 
 func newTestScheme(t *testing.T) *runtime.Scheme {

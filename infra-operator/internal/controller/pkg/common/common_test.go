@@ -7,6 +7,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -229,6 +230,139 @@ func TestConfigHashAnnotationChangesWithConfig(t *testing.T) {
 	}
 	if sameA[PodTemplateConfigHashAnnotation] == changed[PodTemplateConfigHashAnnotation] {
 		t.Fatalf("expected changed config to produce a different hash, got %q", changed[PodTemplateConfigHashAnnotation])
+	}
+}
+
+func TestReconcileHashedServiceConfigMapCreatesImmutableContentAddressedConfigMap(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add corev1 scheme: %v", err)
+	}
+	if err := infrav1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add infra scheme: %v", err)
+	}
+
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+	}
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(infra.DeepCopy()).
+		Build()
+	manager := NewResourceManager(client, scheme, nil, LocalDevConfig{})
+
+	ref, err := manager.ReconcileHashedServiceConfigMap(context.Background(), infra, "demo-manager", GetServiceLabels("demo", "manager"), map[string]any{
+		"http_port": 8080,
+	})
+	if err != nil {
+		t.Fatalf("reconcile hashed service configmap: %v", err)
+	}
+	if ref.ConfigMapName != HashedServiceConfigMapName("demo-manager", ref.Hash) {
+		t.Fatalf("configmap name = %q, want hashed name for %q", ref.ConfigMapName, ref.Hash)
+	}
+	if ref.ConfigMapName == "demo-manager" {
+		t.Fatal("expected content-addressed configmap name, got legacy service name")
+	}
+	if got := ref.PodAnnotations()[PodTemplateConfigHashAnnotation]; got != ref.Hash {
+		t.Fatalf("pod config hash annotation = %q, want %q", got, ref.Hash)
+	}
+
+	cm := &corev1.ConfigMap{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: ref.ConfigMapName, Namespace: infra.Namespace}, cm); err != nil {
+		t.Fatalf("get configmap: %v", err)
+	}
+	if cm.Immutable == nil || !*cm.Immutable {
+		t.Fatalf("expected immutable configmap, got %#v", cm.Immutable)
+	}
+	if cm.Annotations[ServiceConfigBaseNameAnnotation] != "demo-manager" {
+		t.Fatalf("base name annotation = %q", cm.Annotations[ServiceConfigBaseNameAnnotation])
+	}
+	if cm.Annotations[ServiceConfigHashAnnotation] != ref.Hash {
+		t.Fatalf("hash annotation = %q, want %q", cm.Annotations[ServiceConfigHashAnnotation], ref.Hash)
+	}
+	if cm.Data["config.yaml"] == "" {
+		t.Fatal("expected config.yaml data")
+	}
+	if len(cm.OwnerReferences) != 1 || cm.OwnerReferences[0].Name != infra.Name {
+		t.Fatalf("expected owner reference to infra, got %#v", cm.OwnerReferences)
+	}
+}
+
+func TestReconcileHashedServiceConfigMapRetainsLivePodConfigAndCleansUnusedConfig(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add corev1 scheme: %v", err)
+	}
+	if err := infrav1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add infra scheme: %v", err)
+	}
+
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+	}
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(infra.DeepCopy()).
+		Build()
+	manager := NewResourceManager(client, scheme, nil, LocalDevConfig{})
+	labels := GetServiceLabels("demo", "manager")
+
+	first, err := manager.ReconcileHashedServiceConfigMap(context.Background(), infra, "demo-manager", labels, map[string]any{
+		"http_port": 8080,
+	})
+	if err != nil {
+		t.Fatalf("reconcile first configmap: %v", err)
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "manager-old",
+			Namespace: infra.Namespace,
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "manager", Image: "manager:test"}},
+			Volumes: []corev1.Volume{{
+				Name: "config",
+				VolumeSource: corev1.VolumeSource{
+					ConfigMap: &corev1.ConfigMapVolumeSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: first.ConfigMapName},
+					},
+				},
+			}},
+		},
+	}
+	if err := client.Create(context.Background(), pod); err != nil {
+		t.Fatalf("create pod: %v", err)
+	}
+
+	second, err := manager.ReconcileHashedServiceConfigMap(context.Background(), infra, "demo-manager", labels, map[string]any{
+		"http_port": 18080,
+	})
+	if err != nil {
+		t.Fatalf("reconcile second configmap: %v", err)
+	}
+	if second.ConfigMapName == first.ConfigMapName {
+		t.Fatalf("expected changed config to use a new configmap name, got %q", second.ConfigMapName)
+	}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: first.ConfigMapName, Namespace: infra.Namespace}, &corev1.ConfigMap{}); err != nil {
+		t.Fatalf("expected live pod referenced configmap to be retained: %v", err)
+	}
+
+	if err := client.Delete(context.Background(), pod); err != nil {
+		t.Fatalf("delete pod: %v", err)
+	}
+	if _, err := manager.ReconcileHashedServiceConfigMap(context.Background(), infra, "demo-manager", labels, map[string]any{
+		"http_port": 18080,
+	}); err != nil {
+		t.Fatalf("reconcile second configmap after old pod deletion: %v", err)
+	}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: first.ConfigMapName, Namespace: infra.Namespace}, &corev1.ConfigMap{}); !errors.IsNotFound(err) {
+		t.Fatalf("expected unused old configmap to be cleaned up, got err=%v", err)
 	}
 }
 

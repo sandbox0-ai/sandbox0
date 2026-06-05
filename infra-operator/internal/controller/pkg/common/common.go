@@ -59,6 +59,12 @@ type LocalDevConfig struct {
 
 const PodTemplateConfigHashAnnotation = "infra.sandbox0.ai/config-hash"
 
+const (
+	ServiceConfigBaseNameAnnotation = "infra.sandbox0.ai/service-config-base-name"
+	ServiceConfigHashAnnotation     = "infra.sandbox0.ai/service-config-hash"
+	serviceConfigNameHashLength     = 16
+)
+
 func NewResourceManager(client client.Client, scheme *runtime.Scheme, imagePullPolicy *corev1.PullPolicy, localDev LocalDevConfig) *ResourceManager {
 	return &ResourceManager{
 		Client:          client,
@@ -86,6 +92,17 @@ type ServiceDefinition struct {
 	ReadinessProbe     *corev1.Probe
 	ServiceAccountName string
 	Resources          *corev1.ResourceRequirements
+}
+
+type ServiceConfigRef struct {
+	ConfigMapName string
+	Hash          string
+}
+
+// PodAnnotations returns the pod-template annotations that roll workloads when
+// the referenced service config changes.
+func (r ServiceConfigRef) PodAnnotations() map[string]string {
+	return ConfigHashAnnotationFromHash(r.Hash)
 }
 
 // ReconcileDeployment creates or updates a deployment.
@@ -685,6 +702,115 @@ func (r *ResourceManager) ReconcileServiceConfigMapWithScope(ctx context.Context
 	return r.Client.Update(ctx, existing)
 }
 
+func (r *ResourceManager) ReconcileHashedServiceConfigMap(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, config any) (ServiceConfigRef, error) {
+	return r.ReconcileHashedServiceConfigMapWithScope(ctx, NewObjectScope(infra), name, labels, config)
+}
+
+// ReconcileHashedServiceConfigMapWithScope creates an immutable ConfigMap whose
+// name includes the config hash. Service pods mount config.yaml with subPath, so
+// the pod spec must reference the exact ConfigMap object for the desired config.
+func (r *ResourceManager) ReconcileHashedServiceConfigMapWithScope(ctx context.Context, scope ObjectScope, name string, labels map[string]string, config any) (ServiceConfigRef, error) {
+	if config == nil {
+		config = map[string]any{}
+	}
+
+	payload, err := yamlv3.Marshal(config)
+	if err != nil {
+		return ServiceConfigRef{}, fmt.Errorf("marshal config for %s: %w", name, err)
+	}
+	hash := ConfigHashFromPayload(payload)
+	configMapName := HashedServiceConfigMapName(name, hash)
+
+	desiredLabels := EnsureManagedLabels(labels, name)
+	desired := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      configMapName,
+			Namespace: scope.Namespace,
+			Labels:    desiredLabels,
+			Annotations: map[string]string{
+				ServiceConfigBaseNameAnnotation: name,
+				ServiceConfigHashAnnotation:     hash,
+			},
+		},
+		Immutable: BoolPtr(true),
+		Data: map[string]string{
+			"config.yaml": string(payload),
+		},
+	}
+
+	if err := scope.SetControllerReference(desired, r.Scheme); err != nil {
+		return ServiceConfigRef{}, err
+	}
+
+	existing := &corev1.ConfigMap{}
+	err = r.Client.Get(ctx, types.NamespacedName{Name: configMapName, Namespace: scope.Namespace}, existing)
+	if err != nil && !errors.IsNotFound(err) {
+		return ServiceConfigRef{}, err
+	}
+
+	if errors.IsNotFound(err) {
+		if err := r.Client.Create(ctx, desired); err != nil {
+			return ServiceConfigRef{}, err
+		}
+	} else {
+		if existing.Data["config.yaml"] != desired.Data["config.yaml"] {
+			return ServiceConfigRef{}, fmt.Errorf("service configmap %q already exists with mismatched config hash", configMapName)
+		}
+		existing.Labels = desired.Labels
+		existing.Annotations = desired.Annotations
+		existing.OwnerReferences = desired.OwnerReferences
+		if existing.Immutable == nil || !*existing.Immutable {
+			existing.Immutable = BoolPtr(true)
+		}
+		if err := r.Client.Update(ctx, existing); err != nil {
+			return ServiceConfigRef{}, err
+		}
+	}
+
+	ref := ServiceConfigRef{ConfigMapName: configMapName, Hash: hash}
+	if err := r.cleanupUnusedServiceConfigMaps(ctx, scope, name, ref.ConfigMapName); err != nil {
+		return ServiceConfigRef{}, err
+	}
+	return ref, nil
+}
+
+func (r *ResourceManager) cleanupUnusedServiceConfigMaps(ctx context.Context, scope ObjectScope, baseName, currentName string) error {
+	var pods corev1.PodList
+	if err := r.Client.List(ctx, &pods, client.InNamespace(scope.Namespace)); err != nil {
+		return err
+	}
+	inUse := make(map[string]struct{})
+	for _, pod := range pods.Items {
+		for _, volume := range pod.Spec.Volumes {
+			if volume.ConfigMap == nil {
+				continue
+			}
+			inUse[volume.ConfigMap.Name] = struct{}{}
+		}
+	}
+
+	var configMaps corev1.ConfigMapList
+	if err := r.Client.List(ctx, &configMaps, client.InNamespace(scope.Namespace)); err != nil {
+		return err
+	}
+	for _, configMap := range configMaps.Items {
+		if configMap.Name == currentName {
+			continue
+		}
+		if configMap.Annotations[ServiceConfigBaseNameAnnotation] != baseName {
+			continue
+		}
+		if _, ok := inUse[configMap.Name]; ok {
+			continue
+		}
+		cm := configMap.DeepCopy()
+		if err := r.Client.Delete(ctx, cm); err != nil && !errors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
+}
+
 // ReconcileNamespace creates a namespace if it does not exist.
 // It ignores errors if the operator does not have permission to create the namespace.
 func (r *ResourceManager) ReconcileNamespace(ctx context.Context, name string) error {
@@ -963,8 +1089,12 @@ func ConfigHash(config any) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return ConfigHashFromPayload(payload), nil
+}
+
+func ConfigHashFromPayload(payload []byte) string {
 	sum := sha256.Sum256(payload)
-	return hex.EncodeToString(sum[:]), nil
+	return hex.EncodeToString(sum[:])
 }
 
 func ConfigHashAnnotation(config any) (map[string]string, error) {
@@ -972,9 +1102,28 @@ func ConfigHashAnnotation(config any) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	return ConfigHashAnnotationFromHash(hash), nil
+}
+
+func ConfigHashAnnotationFromHash(hash string) map[string]string {
 	return map[string]string{
 		PodTemplateConfigHashAnnotation: hash,
-	}, nil
+	}
+}
+
+func HashedServiceConfigMapName(baseName, hash string) string {
+	if len(hash) > serviceConfigNameHashLength {
+		hash = hash[:serviceConfigNameHashLength]
+	}
+	suffix := "-config-" + hash
+	if len(baseName)+len(suffix) <= 253 {
+		return baseName + suffix
+	}
+	maxBaseLen := 253 - len(suffix)
+	if maxBaseLen < 1 {
+		maxBaseLen = 1
+	}
+	return strings.TrimRight(baseName[:maxBaseLen], "-.") + suffix
 }
 
 // EnsurePodTemplateAnnotations returns a cloned annotations map for pod templates.

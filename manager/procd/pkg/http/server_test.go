@@ -13,7 +13,7 @@ import (
 func TestProbeHandlersUseProbeCheckers(t *testing.T) {
 	server := &Server{
 		probeRunner: func(kind sandboxprobe.Kind) sandboxprobe.Response {
-			return sandboxprobe.Failed(kind, "WarmProcessNotRunning", "warm process is not running", nil)
+			return sandboxprobe.Failed(kind, "SandboxProbeFailed", "sandbox probe failed", nil)
 		},
 	}
 
@@ -69,7 +69,7 @@ func TestProbeHandlersSucceedWhenProbeCheckerPasses(t *testing.T) {
 func TestSandboxProbeHandlerWritesProbeResponse(t *testing.T) {
 	server := &Server{
 		probeRunner: func(kind sandboxprobe.Kind) sandboxprobe.Response {
-			return sandboxprobe.Failed(kind, "WarmProcessNotRunning", "warm process is not running", nil)
+			return sandboxprobe.Failed(kind, "SandboxProbeFailed", "sandbox probe failed", nil)
 		},
 	}
 	recorder := httptest.NewRecorder()

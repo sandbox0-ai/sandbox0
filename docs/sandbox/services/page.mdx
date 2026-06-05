@@ -16,7 +16,7 @@ A sandbox service has three layers:
 | Layer | Purpose |
 |-------|---------|
 | Service | Names the public entrypoint and, for listener-backed services, the sandbox port |
-| Runtime | Describes who owns the backing process: user, warm process, command, or function |
+| Runtime | Describes who owns the backing process: user, command, or function |
 | Route | Matches public HTTP requests and applies route policy before proxying or executing |
 
 The service response includes a `public_url` when `ingress.public` is true and the deployment has an exposure domain. Treat `public_url` as the service base URL. Append a route path when calling it.
@@ -32,7 +32,6 @@ When `runtime` is omitted, Sandbox0 treats the service as `manual`.
 | Runtime | `port` | Public access behavior |
 |---------|--------|------------------------|
 | `manual` | Required | Sandbox0 proxies traffic to `port`. The template, user, or agent must keep the listener running |
-| `warm_process` | Required | Sandbox0 proxies traffic to `port`. Public access does not create a new process; the template warm process must already provide the listener |
 | `cmd` | Required | On public access, Sandbox0 creates the configured procd `cmd` context when it is missing, waits for readiness, then proxies traffic to `port` |
 | `function` | Omit | Sandbox0 routes the request to procd and executes the configured inline function source. No user-managed listener is required |
 
@@ -159,7 +158,7 @@ After applying this service, the first request starts the command, waits for `/h
 curl "$PUBLIC_URL/api/hello"
 ```
 
-## Manual And Warm Process Services
+## Manual Services
 
 Use `manual` when another actor starts and owns the listener.
 
@@ -169,23 +168,6 @@ services:
       port: 3000
       runtime:
           type: manual
-      ingress:
-          public: true
-          routes:
-              - id: web
-                path_prefix: /
-                resume: true
-```
-
-Use `warm_process` when the template already starts the listener as a warm process. Public access does not create another process.
-
-```yaml
-services:
-    - id: web
-      port: 3000
-      runtime:
-          type: warm_process
-          warm_process_name: web
       ingress:
           public: true
           routes:

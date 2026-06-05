@@ -74,27 +74,7 @@ Warm-pool capacity is counted from idle pods that are ready for claiming.
 
 - An idle pod in `Running` phase but with `Ready=False` does not count toward `idleCount`
 - A hot claim only selects idle pods that are already `Ready`
-- If `warmProcesses` are configured, SandboxProbe readiness stays unavailable until every warm process is running and healthy.
-
-Use `warmProcesses` for template-owned helpers that should already be running when the sandbox is claimed:
-
-```yaml
-spec:
-    warmProcesses:
-        - name: codex
-          type: cmd
-          alias: codex
-          command: ["/bin/sh", "-lc", "/app/start-codex.sh"]
-          cwd: /workspace
-          probes:
-              readiness:
-                  process: {}
-    pool:
-        minIdle: 2
-        maxIdle: 10
-```
-
-In this model, the pod only counts as warm-pool capacity after procd has started the warm process and SandboxProbe readiness passes.
+- Readiness is based on the sandbox container, procd, and volume portal state
 
 **Choosing `minIdle`:**
 
@@ -143,10 +123,6 @@ During the transition, the pool may temporarily drop below `minIdle`. Plan updat
 ## Next Steps
 
 <CardGroup>
-  <Card title="Warm Processes" href="/docs/template/warm-processes" cta="Continue">
-    Pre-start REPL and command processes for lower per-request latency.
-  </Card>
-
   <Card title="Configuration" href="/docs/template/configuration" cta="Continue">
     Tune template resources, runtime behavior, mounts, and networking.
   </Card>

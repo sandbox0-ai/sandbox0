@@ -198,20 +198,6 @@ func dockerInSandboxTemplateSpec() templatev1alpha1.SandboxTemplateSpec {
 				SizeLimit: &sizeLimit,
 			}},
 		},
-		WarmProcesses: []templatev1alpha1.WarmProcessSpec{{
-			Name:    template.DockerInSandboxWarmProcessName,
-			Type:    templatev1alpha1.WarmProcessTypeCMD,
-			Command: []string{template.DockerInSandboxWarmProcessCommand},
-			Probes: &templatev1alpha1.SandboxProbeSet{
-				Readiness: &templatev1alpha1.SandboxProbeSpec{
-					Exec: &templatev1alpha1.ExecProbeSpec{
-						Command: []string{"docker", "info"},
-					},
-					InitialDelaySeconds: template.DockerInSandboxWarmProcessReadinessTime,
-					TimeoutSeconds:      10,
-				},
-			},
-		}},
 		Pool: defaultBuiltinTemplatePool(),
 		Network: &templatev1alpha1.SandboxNetworkPolicy{
 			Mode: templatev1alpha1.NetworkModeAllowAll,

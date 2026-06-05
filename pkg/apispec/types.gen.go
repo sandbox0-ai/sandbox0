@@ -154,10 +154,9 @@ const (
 
 // Defines values for SandboxAppServiceRuntimeType.
 const (
-	SandboxAppServiceRuntimeTypeCmd         SandboxAppServiceRuntimeType = "cmd"
-	SandboxAppServiceRuntimeTypeFunction    SandboxAppServiceRuntimeType = "function"
-	SandboxAppServiceRuntimeTypeManual      SandboxAppServiceRuntimeType = "manual"
-	SandboxAppServiceRuntimeTypeWarmProcess SandboxAppServiceRuntimeType = "warm_process"
+	SandboxAppServiceRuntimeTypeCmd      SandboxAppServiceRuntimeType = "cmd"
+	SandboxAppServiceRuntimeTypeFunction SandboxAppServiceRuntimeType = "function"
+	SandboxAppServiceRuntimeTypeManual   SandboxAppServiceRuntimeType = "manual"
 )
 
 // Defines values for SandboxFunctionRuntime.
@@ -515,12 +514,6 @@ const (
 	ROX VolumeAccessMode = "ROX"
 	RWO VolumeAccessMode = "RWO"
 	RWX VolumeAccessMode = "RWX"
-)
-
-// Defines values for WarmProcessSpecType.
-const (
-	WarmProcessSpecTypeCmd  WarmProcessSpecType = "cmd"
-	WarmProcessSpecTypeRepl WarmProcessSpecType = "repl"
 )
 
 // APIKey defines model for APIKey.
@@ -932,11 +925,6 @@ type ErrorEnvelope struct {
 // ErrorEnvelopeSuccess defines model for ErrorEnvelope.Success.
 type ErrorEnvelopeSuccess bool
 
-// ExecAction defines model for ExecAction.
-type ExecAction struct {
-	Command *[]string `json:"command,omitempty"`
-}
-
 // ExecCandidate defines model for ExecCandidate.
 type ExecCandidate struct {
 	Args *[]string `json:"args,omitempty"`
@@ -987,21 +975,6 @@ type GatewayMetadata struct {
 
 // GatewayMetadataGatewayMode defines model for GatewayMetadata.GatewayMode.
 type GatewayMetadataGatewayMode string
-
-// HTTPGetAction defines model for HTTPGetAction.
-type HTTPGetAction struct {
-	Host        *string       `json:"host,omitempty"`
-	HttpHeaders *[]HTTPHeader `json:"httpHeaders,omitempty"`
-	Path        *string       `json:"path,omitempty"`
-	Port        ProbePort     `json:"port"`
-	Scheme      *string       `json:"scheme,omitempty"`
-}
-
-// HTTPHeader defines model for HTTPHeader.
-type HTTPHeader struct {
-	Name  string `json:"name"`
-	Value string `json:"value"`
-}
 
 // HTTPHeadersProjection defines model for HTTPHeadersProjection.
 type HTTPHeadersProjection struct {
@@ -1250,12 +1223,6 @@ type PreferredSchedulingTerm struct {
 	Weight     int32            `json:"weight"`
 }
 
-// ProbePort defines model for ProbePort.
-type ProbePort = int32
-
-// ProcessProbeAction defines model for ProcessProbeAction.
-type ProcessProbeAction = map[string]interface{}
-
 // ProcessType defines model for ProcessType.
 type ProcessType string
 
@@ -1492,7 +1459,7 @@ type SandboxAppService struct {
 	Id      string                   `json:"id"`
 	Ingress SandboxAppServiceIngress `json:"ingress"`
 
-	// Port Public exposure routing port. Required for manual, cmd, and warm_process services. Omit for function services; Sandbox0 assigns the internal function service port.
+	// Port Public exposure routing port. Required for manual and cmd services. Omit for function services; Sandbox0 assigns the internal function service port.
 	Port    *int32                    `json:"port,omitempty"`
 	Runtime *SandboxAppServiceRuntime `json:"runtime,omitempty"`
 }
@@ -1565,9 +1532,6 @@ type SandboxAppServiceRuntime struct {
 
 	// Type Runtime strategy for restarting a service process.
 	Type SandboxAppServiceRuntimeType `json:"type"`
-
-	// WarmProcessName Warm process alias or context ID used when type is warm_process.
-	WarmProcessName *string `json:"warm_process_name,omitempty"`
 }
 
 // SandboxAppServiceRuntimeType Runtime strategy for restarting a service process.
@@ -1582,7 +1546,7 @@ type SandboxAppServiceView struct {
 	Id      string                   `json:"id"`
 	Ingress SandboxAppServiceIngress `json:"ingress"`
 
-	// Port Public exposure routing port. Required for manual, cmd, and warm_process services. Omit for function services; Sandbox0 assigns the internal function service port.
+	// Port Public exposure routing port. Required for manual and cmd services. Omit for function services; Sandbox0 assigns the internal function service port.
 	Port *int32 `json:"port,omitempty"`
 
 	// PublicUrl Public HTTPS URL for this service when public exposure is enabled.
@@ -1673,23 +1637,6 @@ type SandboxPowerStateObserved string
 // SandboxPowerStatePhase defines model for SandboxPowerState.Phase.
 type SandboxPowerStatePhase string
 
-// SandboxProbeSet defines model for SandboxProbeSet.
-type SandboxProbeSet struct {
-	Liveness  *SandboxProbeSpec `json:"liveness,omitempty"`
-	Readiness *SandboxProbeSpec `json:"readiness,omitempty"`
-	Startup   *SandboxProbeSpec `json:"startup,omitempty"`
-}
-
-// SandboxProbeSpec defines model for SandboxProbeSpec.
-type SandboxProbeSpec struct {
-	Exec                *ExecAction         `json:"exec,omitempty"`
-	HttpGet             *HTTPGetAction      `json:"httpGet,omitempty"`
-	InitialDelaySeconds *int32              `json:"initialDelaySeconds,omitempty"`
-	Process             *ProcessProbeAction `json:"process,omitempty"`
-	TcpSocket           *TCPSocketAction    `json:"tcpSocket,omitempty"`
-	TimeoutSeconds      *int32              `json:"timeoutSeconds,omitempty"`
-}
-
 // SandboxRefreshRequest defines model for SandboxRefreshRequest.
 type SandboxRefreshRequest struct {
 	// Duration Duration to extend TTL in seconds (optional, defaults to original TTL)
@@ -1779,7 +1726,6 @@ type SandboxTemplateSpec struct {
 	Public        *bool                 `json:"public,omitempty"`
 	Tags          *[]string             `json:"tags,omitempty"`
 	VolumeMounts  *[]VolumeMountSpec    `json:"volumeMounts,omitempty"`
-	WarmProcesses *[]WarmProcessSpec    `json:"warmProcesses,omitempty"`
 }
 
 // SandboxTemplateStatus defines model for SandboxTemplateStatus.
@@ -2426,12 +2372,6 @@ type SuccessWrittenResponse struct {
 // SuccessWrittenResponseSuccess defines model for SuccessWrittenResponse.Success.
 type SuccessWrittenResponseSuccess bool
 
-// TCPSocketAction defines model for TCPSocketAction.
-type TCPSocketAction struct {
-	Host *string   `json:"host,omitempty"`
-	Port ProbePort `json:"port"`
-}
-
 // TLSClientCertificateProjection Client certificate projection used for TLS terminate-reoriginate auth.
 type TLSClientCertificateProjection = map[string]interface{}
 
@@ -2579,20 +2519,6 @@ type VolumeMountSpec struct {
 	Name      string `json:"name"`
 	ReadOnly  *bool  `json:"readOnly,omitempty"`
 }
-
-// WarmProcessSpec defines model for WarmProcessSpec.
-type WarmProcessSpec struct {
-	Alias   *string             `json:"alias,omitempty"`
-	Command *[]string           `json:"command,omitempty"`
-	Cwd     *string             `json:"cwd,omitempty"`
-	EnvVars *map[string]string  `json:"envVars,omitempty"`
-	Name    *string             `json:"name,omitempty"`
-	Probes  *SandboxProbeSet    `json:"probes,omitempty"`
-	Type    WarmProcessSpecType `json:"type"`
-}
-
-// WarmProcessSpecType defines model for WarmProcessSpec.Type.
-type WarmProcessSpecType string
 
 // WebLoginExchangeRequest defines model for WebLoginExchangeRequest.
 type WebLoginExchangeRequest struct {

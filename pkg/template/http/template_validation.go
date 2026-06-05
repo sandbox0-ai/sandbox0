@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	config "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
@@ -14,7 +13,6 @@ import (
 	s0template "github.com/sandbox0-ai/sandbox0/pkg/template"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 func validateTemplateSpecForClaims(spec v1alpha1.SandboxTemplateSpec, claims *internalauth.Claims) error {
@@ -75,9 +73,6 @@ func validateTemplateSpec(spec v1alpha1.SandboxTemplateSpec) error {
 		return fmt.Errorf("spec.mainContainer.resources.ephemeralStorage must be >= 0")
 	}
 	if err := validateSecurityContext(spec.MainContainer.SecurityContext, "spec.mainContainer.securityContext"); err != nil {
-		return err
-	}
-	if err := validateWarmProcesses(spec.WarmProcesses); err != nil {
 		return err
 	}
 	if err := validateVolumeMounts(spec.VolumeMounts); err != nil {
@@ -263,122 +258,6 @@ func validateTemplateClaimNameBudget(scope, teamID, templateID string, spec v1al
 		return fmt.Errorf("template_id cannot generate claimable sandbox exposure labels: %w", err)
 	}
 	return nil
-}
-
-func validateWarmProcesses(processes []v1alpha1.WarmProcessSpec) error {
-	for i, proc := range processes {
-		field := fmt.Sprintf("spec.warmProcesses[%d]", i)
-		switch proc.Type {
-		case v1alpha1.WarmProcessTypeREPL:
-			if len(proc.Command) > 0 {
-				return fmt.Errorf("%s.command is only valid for cmd warm processes", field)
-			}
-		case v1alpha1.WarmProcessTypeCMD:
-			if len(proc.Command) == 0 {
-				return fmt.Errorf("%s.command is required for cmd warm processes", field)
-			}
-			if strings.TrimSpace(proc.Command[0]) == "" {
-				return fmt.Errorf("%s.command[0] is required", field)
-			}
-		default:
-			return fmt.Errorf("%s.type must be one of: repl, cmd", field)
-		}
-		if strings.TrimSpace(proc.CWD) != "" {
-			cleanCWD, err := validateAbsoluteMountPath(proc.CWD, field+".cwd")
-			if err != nil {
-				return err
-			}
-			if err := validateReservedMountPath(cleanCWD, field+".cwd"); err != nil {
-				return err
-			}
-		}
-		if err := validateSandboxProbeSet(proc.Probes, field+".probes"); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func validateSandboxProbeSet(probes *v1alpha1.SandboxProbeSet, field string) error {
-	if probes == nil {
-		return nil
-	}
-	if err := validateSandboxProbe(probes.Startup, field+".startup"); err != nil {
-		return err
-	}
-	if err := validateSandboxProbe(probes.Readiness, field+".readiness"); err != nil {
-		return err
-	}
-	return validateSandboxProbe(probes.Liveness, field+".liveness")
-}
-
-func validateSandboxProbe(probe *v1alpha1.SandboxProbeSpec, field string) error {
-	if probe == nil {
-		return nil
-	}
-	if probe.TimeoutSeconds < 0 {
-		return fmt.Errorf("%s.timeoutSeconds must be non-negative", field)
-	}
-	if probe.InitialDelaySeconds < 0 {
-		return fmt.Errorf("%s.initialDelaySeconds must be non-negative", field)
-	}
-	configured := 0
-	if probe.Process != nil {
-		configured++
-	}
-	if probe.Exec != nil {
-		configured++
-		if len(probe.Exec.Command) == 0 || strings.TrimSpace(probe.Exec.Command[0]) == "" {
-			return fmt.Errorf("%s.exec.command[0] is required", field)
-		}
-	}
-	if probe.HTTPGet != nil {
-		configured++
-		if err := validateProbePort(probe.HTTPGet.Port, field+".httpGet.port"); err != nil {
-			return err
-		}
-		if probe.HTTPGet.Scheme != "" && !strings.EqualFold(probe.HTTPGet.Scheme, "http") && !strings.EqualFold(probe.HTTPGet.Scheme, "https") {
-			return fmt.Errorf("%s.httpGet.scheme must be http or https", field)
-		}
-	}
-	if probe.TCPSocket != nil {
-		configured++
-		if err := validateProbePort(probe.TCPSocket.Port, field+".tcpSocket.port"); err != nil {
-			return err
-		}
-	}
-	if configured == 0 {
-		return fmt.Errorf("%s must configure one of process, exec, httpGet, or tcpSocket", field)
-	}
-	if configured > 1 {
-		return fmt.Errorf("%s must configure only one of process, exec, httpGet, or tcpSocket", field)
-	}
-	return nil
-}
-
-func validateProbePort(port intstr.IntOrString, field string) error {
-	if port.Type == intstr.Int {
-		if port.IntVal <= 0 {
-			return fmt.Errorf("%s must be positive", field)
-		}
-		return nil
-	}
-	if strings.TrimSpace(port.StrVal) == "" {
-		return fmt.Errorf("%s is required", field)
-	}
-	parsed, err := strconv.Atoi(strings.TrimSpace(port.StrVal))
-	if err != nil || parsed <= 0 {
-		return fmt.Errorf("%s must be a positive numeric port", field)
-	}
-	return nil
-}
-
-func validateAbsoluteMountPath(value, field string) (string, error) {
-	cleaned := filepath.Clean(strings.TrimSpace(value))
-	if !filepath.IsAbs(cleaned) || cleaned == string(filepath.Separator) || strings.Contains(cleaned, "..") {
-		return "", fmt.Errorf("%s is invalid", field)
-	}
-	return cleaned, nil
 }
 
 func validateReservedMountPath(path, field string) error {

@@ -1,7 +1,6 @@
 package v1alpha1
 
 import (
-	"encoding/json"
 	"fmt"
 	"path"
 	"sort"
@@ -15,14 +14,13 @@ import (
 )
 
 const (
-	procdBinVolumeName  = "procd-bin"
-	procdConfigVolume   = "procd-config"
-	WarmProcessesEnvVar = "SANDBOX0_WARM_PROCESSES"
-	netdMITMCAVolume    = "netd-mitm-ca"
-	netdMITMCACertKey   = "ca.crt"
-	netdMITMCAEnvVar    = "SANDBOX0_NETD_MITM_CA_FILE"
-	netdMITMCADir       = "/var/run/sandbox0/netd"
-	netdMITMCACertPath  = netdMITMCADir + "/mitm-ca.crt"
+	procdBinVolumeName = "procd-bin"
+	procdConfigVolume  = "procd-config"
+	netdMITMCAVolume   = "netd-mitm-ca"
+	netdMITMCACertKey  = "ca.crt"
+	netdMITMCAEnvVar   = "SANDBOX0_NETD_MITM_CA_FILE"
+	netdMITMCADir      = "/var/run/sandbox0/netd"
+	netdMITMCACertPath = netdMITMCADir + "/mitm-ca.crt"
 
 	// Template resources remain hard limits; requests reserve a smaller baseline
 	// so warm pools and cold-start sandboxes can be packed efficiently.
@@ -340,10 +338,6 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 		envVars = append(envVars, corev1.EnvVar{Name: ev.Name, Value: ev.Value})
 	}
 	envVars = appendProcdConfigEnvVars(envVars)
-	if len(template.Spec.WarmProcesses) > 0 {
-		data, _ := json.Marshal(template.Spec.WarmProcesses)
-		envVars = append(envVars, corev1.EnvVar{Name: WarmProcessesEnvVar, Value: string(data)})
-	}
 	container.Env = envVars
 	container.Command = []string{"/procd/bin/procd"}
 	container.Ports = append(container.Ports, corev1.ContainerPort{

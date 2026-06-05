@@ -3822,7 +3822,7 @@ components:
         port:
           type: integer
           format: int32
-          description: Public exposure routing port. Required for manual, cmd, and warm_process services. Omit for function services; Sandbox0 assigns the internal function service port.
+          description: Public exposure routing port. Required for manual and cmd services. Omit for function services; Sandbox0 assigns the internal function service port.
         runtime:
           $ref: "#/components/schemas/SandboxAppServiceRuntime"
         ingress:
@@ -3835,7 +3835,7 @@ components:
       properties:
         type:
           type: string
-          enum: [warm_process, cmd, manual, function]
+          enum: [cmd, manual, function]
           description: Runtime strategy for restarting a service process.
         command:
           type: array
@@ -3848,9 +3848,6 @@ components:
           type: object
           additionalProperties:
             type: string
-        warm_process_name:
-          type: string
-          description: Warm process alias or context ID used when type is warm_process.
         function:
           $ref: "#/components/schemas/SandboxFunction"
       required: [type]
@@ -5114,10 +5111,6 @@ components:
             type: string
         mainContainer:
           $ref: "#/components/schemas/ContainerSpec"
-        warmProcesses:
-          type: array
-          items:
-            $ref: "#/components/schemas/WarmProcessSpec"
         volumeMounts:
           type: array
           items:
@@ -5168,61 +5161,6 @@ components:
         readOnly:
           type: boolean
       required: [name, mountPath]
-    WarmProcessSpec:
-      type: object
-      properties:
-        name:
-          type: string
-        type:
-          type: string
-          enum: [repl, cmd]
-          x-enum-varnames:
-            - WarmProcessSpecTypeRepl
-            - WarmProcessSpecTypeCmd
-        alias:
-          type: string
-        command:
-          type: array
-          items:
-            type: string
-        cwd:
-          type: string
-        envVars:
-          type: object
-          additionalProperties:
-            type: string
-        probes:
-          $ref: "#/components/schemas/SandboxProbeSet"
-      required: [type]
-    SandboxProbeSet:
-      type: object
-      properties:
-        startup:
-          $ref: "#/components/schemas/SandboxProbeSpec"
-        readiness:
-          $ref: "#/components/schemas/SandboxProbeSpec"
-        liveness:
-          $ref: "#/components/schemas/SandboxProbeSpec"
-    SandboxProbeSpec:
-      type: object
-      properties:
-        process:
-          $ref: "#/components/schemas/ProcessProbeAction"
-        exec:
-          $ref: "#/components/schemas/ExecAction"
-        httpGet:
-          $ref: "#/components/schemas/HTTPGetAction"
-        tcpSocket:
-          $ref: "#/components/schemas/TCPSocketAction"
-        initialDelaySeconds:
-          type: integer
-          format: int32
-        timeoutSeconds:
-          type: integer
-          format: int32
-    ProcessProbeAction:
-      type: object
-      additionalProperties: false
     EnvVar:
       type: object
       properties:

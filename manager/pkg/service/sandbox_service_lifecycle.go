@@ -85,6 +85,11 @@ func (s *SandboxService) CleanSandboxRuntime(ctx context.Context, sandboxID stri
 		pod, err := s.getSandboxPod(ctx, sandboxID)
 		if err != nil {
 			if k8serrors.IsNotFound(err) {
+				if record != nil {
+					if err := s.releaseSandboxFilesystemOwner(ctx, record.FilesystemID, record.ID, record.RuntimeGeneration); err != nil {
+						return fmt.Errorf("release sandbox filesystem owner: %w", err)
+					}
+				}
 				if tx != nil {
 					return tx.MarkRuntimeCleaned(ctx, sandboxID, 0, s.clock.Now())
 				}
@@ -556,11 +561,13 @@ func sandboxLifecycleInfoFromRecord(record *SandboxRecord) SandboxLifecycleInfo 
 		return SandboxLifecycleInfo{}
 	}
 	info := SandboxLifecycleInfo{
-		Namespace: record.CurrentPodNamespace,
-		PodName:   record.CurrentPodName,
-		SandboxID: record.ID,
-		TeamID:    record.TeamID,
-		UserID:    record.UserID,
+		Namespace:         record.CurrentPodNamespace,
+		PodName:           record.CurrentPodName,
+		SandboxID:         record.ID,
+		TeamID:            record.TeamID,
+		UserID:            record.UserID,
+		FilesystemID:      record.FilesystemID,
+		RuntimeGeneration: record.RuntimeGeneration,
 	}
 	if record.Config.Webhook != nil {
 		info.WebhookURL = strings.TrimSpace(record.Config.Webhook.URL)

@@ -47,6 +47,7 @@ const (
 	AnnotationMounts                       = "sandbox0.ai/mounts"
 	AnnotationFilesystemID                 = "sandbox0.ai/filesystem-id"
 	AnnotationFilesystemBaseImageRef       = "sandbox0.ai/filesystem-base-image-ref"
+	AnnotationFilesystemBaseImageDigest    = "sandbox0.ai/filesystem-base-image-digest"
 	AnnotationPaused                       = "sandbox0.ai/paused"
 	AnnotationPausedAt                     = "sandbox0.ai/paused-at"
 	AnnotationPausedState                  = "sandbox0.ai/paused-state"

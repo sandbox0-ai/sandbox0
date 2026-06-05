@@ -44,6 +44,9 @@ type ClaimRequest struct {
 	// FilesystemBaseImageRef is the immutable lower image recorded by the
 	// sandbox filesystem object. It is internal runtime metadata, not public API.
 	FilesystemBaseImageRef string `json:"-"`
+	// FilesystemBaseImageDigest is authoritative when set. It keeps restore from
+	// silently rebasing an existing filesystem onto a moved image tag.
+	FilesystemBaseImageDigest string `json:"-"`
 	// SandboxID is an internal stable ID used when recreating an existing sandbox.
 	SandboxID string `json:"-"`
 	// RuntimeGeneration identifies the current runtime pod incarnation.
@@ -222,6 +225,11 @@ func setFilesystemAnnotations(annotations map[string]string, req *ClaimRequest) 
 		annotations[controller.AnnotationFilesystemBaseImageRef] = baseImageRef
 	} else {
 		delete(annotations, controller.AnnotationFilesystemBaseImageRef)
+	}
+	if baseImageDigest := strings.TrimSpace(req.FilesystemBaseImageDigest); baseImageDigest != "" {
+		annotations[controller.AnnotationFilesystemBaseImageDigest] = baseImageDigest
+	} else {
+		delete(annotations, controller.AnnotationFilesystemBaseImageDigest)
 	}
 }
 
@@ -442,6 +450,26 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 
 	_ = resolvedName // reserved for audit/debugging (name used is template.ObjectMeta.Name)
 
+	phaseStarted = time.Now()
+	if err := s.acquireClaimFilesystem(ctx, req, template); err != nil {
+		s.observeClaimPhase(req.Template, "unknown", "acquire_filesystem", phaseStarted, err)
+		return nil, err
+	}
+	s.observeClaimPhase(req.Template, "unknown", "acquire_filesystem", phaseStarted, nil)
+	filesystemOwnerActive := true
+	defer func() {
+		if filesystemOwnerActive {
+			releaseCtx := context.Background()
+			if err := s.releaseClaimFilesystemOwner(releaseCtx, req); err != nil && s.logger != nil {
+				s.logger.Warn("Failed to release sandbox filesystem owner after claim failure",
+					zap.String("sandboxID", req.SandboxID),
+					zap.String("filesystemID", req.FilesystemID),
+					zap.Error(err),
+				)
+			}
+		}
+	}()
+
 	// Try to claim an idle pod first
 	phaseStarted = time.Now()
 	pod, err := s.claimIdlePod(ctx, template, req)
@@ -576,6 +604,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "success").Inc()
 		metrics.SandboxClaimDuration.WithLabelValues(req.Template, claimType).Observe(time.Since(start).Seconds())
 	}
+	filesystemOwnerActive = false
 
 	return &ClaimResponse{
 		SandboxID:       req.SandboxID,

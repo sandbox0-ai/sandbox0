@@ -51,13 +51,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		}
 		storageConfig.ObjectEncryptionKeyPath = common.ObjectEncryptionKeyPath
 	}
-	podAnnotations, err := common.ConfigHashAnnotation(storageConfig)
+	configRef, err := r.Resources.ReconcileHashedServiceConfigMap(ctx, infra, name, labels, storageConfig)
 	if err != nil {
 		return err
 	}
-	if err := r.Resources.ReconcileServiceConfigMap(ctx, infra, name, labels, storageConfig); err != nil {
-		return err
-	}
+	podAnnotations := configRef.PodAnnotations()
 	if err := r.ensureCSIDriver(ctx, labels); err != nil {
 		return err
 	}
@@ -85,7 +83,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			Name: "config",
 			VolumeSource: corev1.VolumeSource{
 				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: name},
+					LocalObjectReference: corev1.LocalObjectReference{Name: configRef.ConfigMapName},
 				},
 			},
 		},

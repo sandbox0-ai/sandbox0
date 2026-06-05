@@ -62,13 +62,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if _, _, err := common.EnsureEd25519KeyPair(ctx, r.Resources.Client, r.Resources.Scheme, infra, hostKeySecretName, sshHostPrivateKeyKey, sshHostPublicKeyKey); err != nil {
 		return err
 	}
-	podAnnotations, err := common.ConfigHashAnnotation(config)
+	configRef, err := r.Resources.ReconcileHashedServiceConfigMap(ctx, infra, deploymentName, labels, config)
 	if err != nil {
 		return err
 	}
-	if err := r.Resources.ReconcileServiceConfigMap(ctx, infra, deploymentName, labels, config); err != nil {
-		return err
-	}
+	podAnnotations := configRef.PodAnnotations()
 
 	var resources *corev1.ResourceRequirements
 	serviceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
@@ -107,7 +105,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		{
 			Name: "config",
 			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: deploymentName}},
+				ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: configRef.ConfigMapName}},
 			},
 		},
 		{

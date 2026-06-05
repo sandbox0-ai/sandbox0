@@ -95,21 +95,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 			config.MITMCAKeyPath = "/tls/ca.key"
 		}
 	}
-	podAnnotations, err := common.ConfigHashAnnotation(config)
+	configRef, err := r.Resources.ReconcileHashedServiceConfigMapWithScope(ctx, scope, name, labels, config)
 	if err != nil {
 		return err
 	}
-
-	if err := r.Resources.ReconcileServiceConfigMapWithScope(ctx, scope, name, labels, config); err != nil {
-		return err
-	}
+	podAnnotations := configRef.PodAnnotations()
 
 	volumes := []corev1.Volume{
 		{
 			Name: "config",
 			VolumeSource: corev1.VolumeSource{
 				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: name},
+					LocalObjectReference: corev1.LocalObjectReference{Name: configRef.ConfigMapName},
 				},
 			},
 		},

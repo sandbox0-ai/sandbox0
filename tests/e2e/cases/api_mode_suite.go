@@ -2057,8 +2057,8 @@ func assertObjectEncryptionLifecycle(env *framework.ScenarioEnv, session *e2euti
 	privateKey := getSecretValueWithEscapedKey(env, secretName, "private\\.key")
 	Expect(privateKey).To(ContainSubstring("BEGIN"))
 
-	assertConfigMapContains(env, env.Infra.Name+"-storage-proxy", "object_encryption_enabled: true")
-	assertConfigMapContains(env, env.Infra.Name+"-ctld", "object_encryption_enabled: true")
+	assertWorkloadConfigMapContains(env, "deployment", env.Infra.Name+"-storage-proxy", "object_encryption_enabled: true")
+	assertWorkloadConfigMapContains(env, "daemonset", env.Infra.Name+"-ctld", "object_encryption_enabled: true")
 
 	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{})
 	Expect(err).NotTo(HaveOccurred())
@@ -2174,6 +2174,29 @@ func assertConfigMapContains(env *framework.ScenarioEnv, configMapName, expected
 	)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(output).To(ContainSubstring(expected))
+}
+
+func assertWorkloadConfigMapContains(env *framework.ScenarioEnv, workloadKind, workloadName, expected string) {
+	configMapName := workloadConfigMapName(env, workloadKind, workloadName)
+	assertConfigMapContains(env, configMapName, expected)
+}
+
+func workloadConfigMapName(env *framework.ScenarioEnv, workloadKind, workloadName string) string {
+	output, err := framework.KubectlOutput(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		"get",
+		workloadKind,
+		workloadName,
+		"-o",
+		`jsonpath={.spec.template.spec.volumes[?(@.name=="config")].configMap.name}`,
+		"--namespace",
+		env.Infra.Namespace,
+	)
+	Expect(err).NotTo(HaveOccurred())
+	name := strings.TrimSpace(output)
+	Expect(name).NotTo(BeEmpty())
+	return name
 }
 
 func assertNoPlaintextInStorage(env *framework.ScenarioEnv, target, root, sentinel string) {

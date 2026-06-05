@@ -563,9 +563,16 @@ func TestReconcileCreatesGlobalGatewayResources(t *testing.T) {
 		t.Fatalf("reconcile returned error: %v", err)
 	}
 
-	configMap := &corev1.ConfigMap{}
+	deployment := &appsv1.Deployment{}
 	if err := client.Get(context.Background(), types.NamespacedName{
 		Name:      "demo-global-gateway",
+		Namespace: infra.Namespace,
+	}, deployment); err != nil {
+		t.Fatalf("expected deployment to be updated: %v", err)
+	}
+	configMap := &corev1.ConfigMap{}
+	if err := client.Get(context.Background(), types.NamespacedName{
+		Name:      globalGatewayConfigMapName(t, deployment),
 		Namespace: infra.Namespace,
 	}, configMap); err != nil {
 		t.Fatalf("expected configmap to be created: %v", err)
@@ -585,13 +592,6 @@ func TestReconcileCreatesGlobalGatewayResources(t *testing.T) {
 		t.Fatalf("expected service port 8080, got %#v", service.Spec.Ports)
 	}
 
-	deployment := &appsv1.Deployment{}
-	if err := client.Get(context.Background(), types.NamespacedName{
-		Name:      "demo-global-gateway",
-		Namespace: infra.Namespace,
-	}, deployment); err != nil {
-		t.Fatalf("expected deployment to be updated: %v", err)
-	}
 	if len(deployment.Spec.Template.Spec.Containers) != 1 {
 		t.Fatalf("expected one container, got %d", len(deployment.Spec.Template.Spec.Containers))
 	}
@@ -605,5 +605,15 @@ func TestReconcileCreatesGlobalGatewayResources(t *testing.T) {
 	if len(container.Ports) != 1 || container.Ports[0].ContainerPort != 8080 {
 		t.Fatalf("expected container port 8080, got %#v", container.Ports)
 	}
+}
 
+func globalGatewayConfigMapName(t *testing.T, deployment *appsv1.Deployment) string {
+	t.Helper()
+	for _, volume := range deployment.Spec.Template.Spec.Volumes {
+		if volume.Name == "config" && volume.ConfigMap != nil {
+			return volume.ConfigMap.Name
+		}
+	}
+	t.Fatalf("expected config volume, got %#v", deployment.Spec.Template.Spec.Volumes)
+	return ""
 }

@@ -243,10 +243,18 @@ func TestReconcileUsesCompiledPlanForEgressAuthResolverURL(t *testing.T) {
 	if err := reconciler.Reconcile(context.Background(), "ghcr.io/sandbox0-ai/sandbox0", "latest", compiled); err != nil {
 		t.Fatalf("reconcile returned error: %v", err)
 	}
+	ds := &appsv1.DaemonSet{}
+	if err := client.Get(context.Background(), types.NamespacedName{
+		Name:      infra.Name + "-netd",
+		Namespace: infra.Namespace,
+	}, ds); err != nil {
+		t.Fatalf("expected daemonset: %v", err)
+	}
+	configMapName := netdConfigMapName(t, ds)
 
 	configMap := &corev1.ConfigMap{}
 	if err := client.Get(context.Background(), types.NamespacedName{
-		Name:      infra.Name + "-netd",
+		Name:      configMapName,
 		Namespace: infra.Namespace,
 	}, configMap); err != nil {
 		t.Fatalf("expected configmap to be created: %v", err)
@@ -317,10 +325,11 @@ func assertNetdMITMSecretMounted(t *testing.T, client ctrlclient.Client, infra *
 	if !foundVolume || !foundMount {
 		t.Fatalf("expected mitm-ca volume and mount, got volumes=%#v mounts=%#v", ds.Spec.Template.Spec.Volumes, ds.Spec.Template.Spec.Containers[0].VolumeMounts)
 	}
+	configMapName := netdConfigMapName(t, ds)
 
 	cm := &corev1.ConfigMap{}
 	if err := client.Get(context.Background(), types.NamespacedName{
-		Name:      infra.Name + "-netd",
+		Name:      configMapName,
 		Namespace: infra.Namespace,
 	}, cm); err != nil {
 		t.Fatalf("expected configmap: %v", err)
@@ -328,6 +337,17 @@ func assertNetdMITMSecretMounted(t *testing.T, client ctrlclient.Client, infra *
 	if got := cm.Data["config.yaml"]; !containsMITMPaths(got) {
 		t.Fatalf("expected mitm ca paths in config, got %q", got)
 	}
+}
+
+func netdConfigMapName(t *testing.T, ds *appsv1.DaemonSet) string {
+	t.Helper()
+	for _, volume := range ds.Spec.Template.Spec.Volumes {
+		if volume.Name == "config" && volume.ConfigMap != nil {
+			return volume.ConfigMap.Name
+		}
+	}
+	t.Fatalf("expected config volume, got %#v", ds.Spec.Template.Spec.Volumes)
+	return ""
 }
 
 func assertValidManagedMITMCASecret(t *testing.T, secret *corev1.Secret) {

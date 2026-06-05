@@ -304,7 +304,7 @@ func TestReconcileRegionalGatewayPublicModeUpgradesToBoth(t *testing.T) {
 	}
 
 	configMap := &corev1.ConfigMap{}
-	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-cluster-gateway", Namespace: infra.Namespace}, configMap); err != nil {
+	if err := client.Get(context.Background(), types.NamespacedName{Name: configMapNameForVolume(t, deployment.Spec.Template.Spec.Volumes, "config"), Namespace: infra.Namespace}, configMap); err != nil {
 		t.Fatalf("get cluster gateway configmap: %v", err)
 	}
 	if !strings.Contains(configMap.Data["config.yaml"], "auth_mode: both") {
@@ -332,6 +332,17 @@ func newClusterGatewayTestReconciler(t *testing.T, objects ...runtime.Object) (*
 		Build()
 
 	return NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{})), client
+}
+
+func configMapNameForVolume(t *testing.T, volumes []corev1.Volume, name string) string {
+	t.Helper()
+	for _, volume := range volumes {
+		if volume.Name == name && volume.ConfigMap != nil {
+			return volume.ConfigMap.Name
+		}
+	}
+	t.Fatalf("expected configmap volume %q, got %#v", name, volumes)
+	return ""
 }
 
 func hasVolume(volumes []corev1.Volume, name string) bool {

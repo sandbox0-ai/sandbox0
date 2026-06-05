@@ -36,12 +36,6 @@ func TestBuildBuiltinTemplateSpecUsesDockerInSandboxPreset(t *testing.T) {
 	if got := spec.Pod.EmptyDirMounts[0].MountPath; got != template.DockerInSandboxDockerRoot {
 		t.Fatalf("emptyDir mount path = %q, want %q", got, template.DockerInSandboxDockerRoot)
 	}
-	if len(spec.WarmProcesses) != 1 || spec.WarmProcesses[0].Name != template.DockerInSandboxWarmProcessName {
-		t.Fatalf("warmProcesses = %#v, want dockerd process", spec.WarmProcesses)
-	}
-	if spec.WarmProcesses[0].Probes == nil || spec.WarmProcesses[0].Probes.Readiness == nil || spec.WarmProcesses[0].Probes.Readiness.Exec == nil {
-		t.Fatalf("expected dockerd readiness exec probe, got %#v", spec.WarmProcesses[0].Probes)
-	}
 }
 
 func TestBuildBuiltinTemplateSpecAllowsFullSpecOverride(t *testing.T) {

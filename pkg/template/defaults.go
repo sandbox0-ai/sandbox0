@@ -12,17 +12,14 @@ const (
 	DefaultTemplateMinIdle          = int32(1)
 	DefaultTemplateMaxIdle          = int32(5)
 
-	DockerInSandboxTemplateID               = "dins"
-	DockerInSandboxTemplateDisplayName      = "Docker in Sandbox"
-	DockerInSandboxTemplateDescription      = "Builtin Docker in Sandbox template installed by infra-operator."
-	DockerInSandboxCPU                      = "1"
-	DockerInSandboxMemory                   = "4Gi"
-	DockerInSandboxEphemeralStorage         = "20Gi"
-	DockerInSandboxDockerRoot               = "/var/lib/docker"
-	DockerInSandboxDockerRootSizeLimit      = "20Gi"
-	DockerInSandboxWarmProcessName          = "dockerd"
-	DockerInSandboxWarmProcessCommand       = "/usr/local/bin/sandbox0-dockerd-entrypoint"
-	DockerInSandboxWarmProcessReadinessTime = int32(2)
+	DockerInSandboxTemplateID          = "dins"
+	DockerInSandboxTemplateDisplayName = "Docker in Sandbox"
+	DockerInSandboxTemplateDescription = "Builtin Docker in Sandbox template installed by infra-operator."
+	DockerInSandboxCPU                 = "1"
+	DockerInSandboxMemory              = "4Gi"
+	DockerInSandboxEphemeralStorage    = "20Gi"
+	DockerInSandboxDockerRoot          = "/var/lib/docker"
+	DockerInSandboxDockerRootSizeLimit = "20Gi"
 )
 
 // ApplyDefaultPool applies default pool values when not explicitly set.

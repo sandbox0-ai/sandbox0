@@ -52,10 +52,9 @@ type SandboxAppServiceRouteRateLimit struct {
 }
 
 const (
-	SandboxAppServiceRuntimeWarmProcess = "warm_process"
-	SandboxAppServiceRuntimeCMD         = "cmd"
-	SandboxAppServiceRuntimeManual      = "manual"
-	SandboxAppServiceRuntimeFunction    = "function"
+	SandboxAppServiceRuntimeCMD      = "cmd"
+	SandboxAppServiceRuntimeManual   = "manual"
+	SandboxAppServiceRuntimeFunction = "function"
 )
 
 // SandboxAppService describes an application service running inside a sandbox.
@@ -70,12 +69,11 @@ type SandboxAppService struct {
 
 // SandboxAppServiceRuntime captures the restartable command for a sandbox service.
 type SandboxAppServiceRuntime struct {
-	Type            string            `json:"type"`
-	Command         []string          `json:"command,omitempty"`
-	CWD             string            `json:"cwd,omitempty"`
-	EnvVars         map[string]string `json:"env_vars,omitempty"`
-	WarmProcessName string            `json:"warm_process_name,omitempty"`
-	Function        *SandboxFunction  `json:"function,omitempty"`
+	Type     string            `json:"type"`
+	Command  []string          `json:"command,omitempty"`
+	CWD      string            `json:"cwd,omitempty"`
+	EnvVars  map[string]string `json:"env_vars,omitempty"`
+	Function *SandboxFunction  `json:"function,omitempty"`
 }
 
 // SandboxFunction configures code that cluster-gateway sends to procd for execution.
@@ -166,12 +164,11 @@ func normalizeSandboxAppService(service SandboxAppService) (SandboxAppService, e
 		runtime := *service.Runtime
 		runtime.Type = strings.ToLower(strings.TrimSpace(runtime.Type))
 		switch runtime.Type {
-		case "", SandboxAppServiceRuntimeManual, SandboxAppServiceRuntimeCMD, SandboxAppServiceRuntimeWarmProcess, SandboxAppServiceRuntimeFunction:
+		case "", SandboxAppServiceRuntimeManual, SandboxAppServiceRuntimeCMD, SandboxAppServiceRuntimeFunction:
 		default:
-			return service, fmt.Errorf("runtime.type must be one of: warm_process, cmd, manual, function")
+			return service, fmt.Errorf("runtime.type must be one of: cmd, manual, function")
 		}
 		runtime.CWD = strings.TrimSpace(runtime.CWD)
-		runtime.WarmProcessName = strings.TrimSpace(runtime.WarmProcessName)
 		if runtime.Type == "" {
 			runtime.Type = SandboxAppServiceRuntimeManual
 		}
@@ -186,7 +183,6 @@ func normalizeSandboxAppService(service SandboxAppService) (SandboxAppService, e
 			}
 			runtime.Command = nil
 			runtime.CWD = ""
-			runtime.WarmProcessName = ""
 			runtime.Function = function
 		} else {
 			runtime.Function = nil
@@ -291,8 +287,6 @@ func SandboxAppServicePublishBlockers(service SandboxAppService) []string {
 		blockers = append(blockers, "manual_runtime")
 	} else if service.Runtime.Type == SandboxAppServiceRuntimeCMD && len(service.Runtime.Command) == 0 {
 		blockers = append(blockers, "missing_command")
-	} else if service.Runtime.Type == SandboxAppServiceRuntimeWarmProcess && strings.TrimSpace(service.Runtime.WarmProcessName) == "" {
-		blockers = append(blockers, "missing_warm_process_name")
 	} else if service.Runtime.Type == SandboxAppServiceRuntimeFunction && service.Runtime.Function == nil {
 		blockers = append(blockers, "missing_function")
 	}

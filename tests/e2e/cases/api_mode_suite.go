@@ -731,10 +731,6 @@ func assertTemplatePoolReadinessGate(env *framework.ScenarioEnv, session *e2euti
 	}
 	templateReq.Spec.Pool.MinIdle = 1
 	templateReq.Spec.Pool.MaxIdle = 1
-	templateReq.Spec.WarmProcesses = &[]apispec.WarmProcessSpec{{
-		Type:    "cmd",
-		Command: ptr([]string{"/bin/sh", "-lc", "touch /tmp/started; sleep 3600"}),
-	}}
 
 	created, err := session.CreateTemplate(env.TestCtx.Context, GinkgoT(), templateReq)
 	Expect(err).NotTo(HaveOccurred())
@@ -813,7 +809,7 @@ func assertTemplateRolloutClaimFallsBackToColdStart(env *framework.ScenarioEnv, 
 	}
 	templateReq.Spec.Pool.MinIdle = 1
 	templateReq.Spec.Pool.MaxIdle = 1
-	templateReq.Spec.WarmProcesses = ptr(rolloutClaimWarmProcesses("before"))
+	templateReq.Spec.EnvVars = ptr(map[string]string{"E2E_ROLLOUT_MARKER": "before"})
 
 	created, err := session.CreateTemplate(env.TestCtx.Context, GinkgoT(), templateReq)
 	Expect(err).NotTo(HaveOccurred())
@@ -832,7 +828,7 @@ func assertTemplateRolloutClaimFallsBackToColdStart(env *framework.ScenarioEnv, 
 	Expect(updated.Spec.Pool).NotTo(BeNil())
 	updated.Spec.Pool.MinIdle = 0
 	updated.Spec.Pool.MaxIdle = 0
-	updated.Spec.WarmProcesses = ptr(rolloutClaimWarmProcesses("after"))
+	updated.Spec.EnvVars = ptr(map[string]string{"E2E_ROLLOUT_MARKER": "after"})
 	updatedResp, err := session.UpdateTemplate(env.TestCtx.Context, GinkgoT(), name, apispec.TemplateUpdateRequest{
 		Spec: updated.Spec,
 	})
@@ -851,15 +847,6 @@ func assertTemplateRolloutClaimFallsBackToColdStart(env *framework.ScenarioEnv, 
 	sandbox := waitForSandboxPodReadyEventually(env, session, claimResp.SandboxId, templateNamespace)
 	Expect(sandbox.PodName).NotTo(Equal(staleIdlePod.Name))
 	Expect(podAnnotationEventually(env, templateNamespace, sandbox.PodName, "sandbox0.ai/claim-type")).To(Equal("cold"))
-}
-
-func rolloutClaimWarmProcesses(marker string) []apispec.WarmProcessSpec {
-	return []apispec.WarmProcessSpec{{
-		Alias:   ptr("rollout-cold-start"),
-		Type:    apispec.WarmProcessSpecTypeCmd,
-		Command: ptr([]string{"/bin/sh", "-lc", "touch /tmp/rollout-warm; sleep 3600"}),
-		EnvVars: ptr(map[string]string{"E2E_ROLLOUT_MARKER": marker}),
-	}}
 }
 
 func waitForReadyIdlePoolPodEventually(env *framework.ScenarioEnv, namespace, templateNameForCluster string) idlePoolPodInfo {

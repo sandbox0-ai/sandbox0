@@ -97,15 +97,10 @@ func TestSandboxAppServicePublishBlockersRequirePublicRestartableRuntime(t *test
 		t.Fatalf("blockers = %#v, want none", blockers)
 	}
 
-	service.Runtime = &SandboxAppServiceRuntime{Type: SandboxAppServiceRuntimeWarmProcess}
+	service.Runtime = &SandboxAppServiceRuntime{Type: SandboxAppServiceRuntimeManual}
 	blockers = SandboxAppServicePublishBlockers(service)
-	if len(blockers) != 1 || blockers[0] != "missing_warm_process_name" {
-		t.Fatalf("blockers = %#v, want missing_warm_process_name", blockers)
-	}
-
-	service.Runtime.WarmProcessName = "python"
-	if blockers := SandboxAppServicePublishBlockers(service); len(blockers) != 0 {
-		t.Fatalf("blockers = %#v, want none", blockers)
+	if len(blockers) != 1 || blockers[0] != "manual_runtime" {
+		t.Fatalf("blockers = %#v, want manual_runtime", blockers)
 	}
 }
 
@@ -119,9 +114,8 @@ func TestNormalizeSandboxAppServicesSupportsFunctionRuntime(t *testing.T) {
 					Code: "def handler(request):\n    return {'status': 204}\n",
 				},
 			},
-			Command:         []string{"/bin/ignored"},
-			CWD:             "/ignored",
-			WarmProcessName: "ignored",
+			Command: []string{"/bin/ignored"},
+			CWD:     "/ignored",
 		},
 		Ingress: SandboxAppServiceIngress{Public: true},
 	}})
@@ -144,7 +138,7 @@ func TestNormalizeSandboxAppServicesSupportsFunctionRuntime(t *testing.T) {
 	if service.Port != 49983 {
 		t.Fatalf("function service port = %d, want 49983", service.Port)
 	}
-	if len(service.Runtime.Command) != 0 || service.Runtime.CWD != "" || service.Runtime.WarmProcessName != "" {
+	if len(service.Runtime.Command) != 0 || service.Runtime.CWD != "" {
 		t.Fatalf("function runtime kept process fields: %#v", service.Runtime)
 	}
 	if len(service.Ingress.Routes) != 1 || service.Ingress.Routes[0].ID != "webhook" {

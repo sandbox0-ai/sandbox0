@@ -168,7 +168,7 @@ RUN python3 -m pip install --no-cache-dir --break-system-packages --ignore-insta
     xlrd==2.0.1
 
 # Docker client/daemon support for Docker in Sandbox templates.
-# The default template does not start dockerd; the DinS template starts it as a warm process.
+# Docker-in-Sandbox users start dockerd after the sandbox is claimed.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     docker.io \

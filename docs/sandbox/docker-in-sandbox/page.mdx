@@ -14,6 +14,10 @@ Typical uses:
 The examples assume your workspace has a `dins` template. If claiming `dins` returns not found, ask your Sandbox0 operator to enable Docker in Sandbox for your environment.
 </Callout>
 
+<Callout variant="info">
+The `dins` template provides Docker binaries and writable Docker state, but it does not start `dockerd` before the sandbox is claimed. Start `/usr/local/bin/sandbox0-dockerd-entrypoint` from a sandbox command before using `docker`.
+</Callout>
+
 ---
 
 ## Start Test Databases
@@ -60,6 +64,8 @@ func main() {
 
     startScript := strings.Join([]string{
         "set -e",
+        "/usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &",
+        "until docker info >/dev/null 2>&1; do sleep 1; done",
         "rm -f /tmp/sandbox0-test-databases.ready",
         "docker rm -f test-redis test-postgres >/dev/null 2>&1 || true",
         "docker pull redis:7-alpine",
@@ -69,6 +75,7 @@ func main() {
         "until docker exec test-redis redis-cli ping | grep -q PONG; do sleep 1; done",
         "until docker exec test-postgres pg_isready -U postgres >/dev/null; do sleep 1; done",
         "touch /tmp/sandbox0-test-databases.ready",
+        "tail -f /dev/null",
     }, "\\n")
 
     start, err := sandbox.Cmd(ctx, "sh",
@@ -127,6 +134,8 @@ try:
 
     start_script = """
 set -e
+/usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &
+until docker info >/dev/null 2>&1; do sleep 1; done
 rm -f /tmp/sandbox0-test-databases.ready
 docker rm -f test-redis test-postgres >/dev/null 2>&1 || true
 docker pull redis:7-alpine
@@ -136,6 +145,7 @@ docker run -d --name test-postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=
 until docker exec test-redis redis-cli ping | grep -q PONG; do sleep 1; done
 until docker exec test-postgres pg_isready -U postgres >/dev/null; do sleep 1; done
 touch /tmp/sandbox0-test-databases.ready
+tail -f /dev/null
 """
     start = sandbox.cmd(
         "sh",
@@ -180,6 +190,8 @@ finally:
 
         const startScript = [
             'set -e',
+            '/usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &',
+            'until docker info >/dev/null 2>&1; do sleep 1; done',
             'rm -f /tmp/sandbox0-test-databases.ready',
             'docker rm -f test-redis test-postgres >/dev/null 2>&1 || true',
             'docker pull redis:7-alpine',
@@ -189,6 +201,7 @@ finally:
             'until docker exec test-redis redis-cli ping | grep -q PONG; do sleep 1; done',
             'until docker exec test-postgres pg_isready -U postgres >/dev/null; do sleep 1; done',
             'touch /tmp/sandbox0-test-databases.ready',
+            'tail -f /dev/null',
         ].join('\\n');
 
         const start = await sandbox.cmd('sh', {
@@ -237,6 +250,8 @@ s0 sandbox exec "$SANDBOX_ID" -- rm -f /tmp/sandbox0-test-databases.ready
 
 s0 sandbox exec "$SANDBOX_ID" --no-wait --ttl 1800 -- /bin/sh -lc '
 set -e
+/usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &
+until docker info >/dev/null 2>&1; do sleep 1; done
 rm -f /tmp/sandbox0-test-databases.ready
 docker rm -f test-redis test-postgres >/dev/null 2>&1 || true
 docker pull redis:7-alpine
@@ -250,6 +265,7 @@ docker run -d --name test-postgres \
 until docker exec test-redis redis-cli ping | grep -q PONG; do sleep 1; done
 until docker exec test-postgres pg_isready -U postgres; do sleep 1; done
 touch /tmp/sandbox0-test-databases.ready
+tail -f /dev/null
 '
 
 ready=0
@@ -302,6 +318,8 @@ Docker build cache also lives under `/var/lib/docker`, so this is best for tempo
       language: "go",
       code: `script := strings.Join([]string{
     "set -e",
+    "/usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &",
+    "until docker info >/dev/null 2>&1; do sleep 1; done",
     "cat > main.go <<'EOF'",
     "package main",
     "import \\"fmt\\"",
@@ -333,6 +351,8 @@ fmt.Print(result.OutputRaw)`
       language: "python",
       code: `script = """
 set -e
+/usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &
+until docker info >/dev/null 2>&1; do sleep 1; done
 cat > main.go <<'EOF'
 package main
 import "fmt"
@@ -361,6 +381,8 @@ print(result.output_raw, end="")`
       language: "typescript",
       code: `const script = [
     'set -e',
+    '/usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &',
+    'until docker info >/dev/null 2>&1; do sleep 1; done',
     "cat > main.go <<'EOF'",
     'package main',
     'import "fmt"',
@@ -389,6 +411,8 @@ process.stdout.write(result.outputRaw);`
       language: "bash",
       code: `s0 sandbox exec "$SANDBOX_ID" --stream -- /bin/sh -lc '
 set -e
+/usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &
+until docker info >/dev/null 2>&1; do sleep 1; done
 cat > main.go <<'"'"'EOF'"'"'
 package main
 import "fmt"

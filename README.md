@@ -19,7 +19,7 @@ Use Sandbox0 when your agent needs:
 - **Isolated execution** for untrusted code, user files, generated scripts, and tool calls.
 - **Stateful sessions** for REPL-style workflows such as `python`, `bash`, language servers, agent runtimes, and long-running helpers.
 - **Persistent workspaces** through volumes, snapshots, restore, fork, and sync workflows.
-- **Fast startup** through template-backed warm pools and warm processes.
+- **Fast startup** through template-backed warm pools.
 - **Network control** with allow/deny policy and destination-scoped credential injection.
 - **Custom runtimes** from your own container images, packages, tools, and resource limits.
 - **Self-hosting** when you need to own the data plane, storage, network boundary, and deployment policy.
@@ -32,7 +32,7 @@ Sandbox0 Cloud uses `https://api.sandbox0.ai` for sandboxes, templates, volumes,
 
 | Building block | What it is                                                                                                 | Why agent developers care                                                                             |
 | -------------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| **Template**   | A runtime blueprint: image, resources, warm pool, warm processes, volume mount points, and default policy. | Keeps environments reproducible and makes startup fast.                                               |
+| **Template**   | A runtime blueprint: image, resources, warm pool, volume mount points, and default policy.                 | Keeps environments reproducible and makes startup fast.                                               |
 | **Sandbox**    | An isolated runtime instance created from a template.                                                      | Gives each task, user, or agent worker its own execution boundary.                                    |
 | **Context**    | A process/session inside a sandbox.                                                                        | Choose stateful REPL behavior or one-shot command execution per tool call.                            |
 | **Volume**     | Persistent storage independent of a sandbox lifetime.                                                      | Keeps repositories, caches, checkpoints, artifacts, and session workspaces across sandbox recreation. |
@@ -118,7 +118,7 @@ More examples:
 
 **Coding agents**
 
-Use a custom template with language runtimes, package managers, git, build tools, and an attached volume for the repository workspace. Use a REPL or warm process for the active agent loop, and one-shot commands for isolated build/test steps.
+Use a custom template with language runtimes, package managers, git, build tools, and an attached volume for the repository workspace. Use a REPL for the active agent loop, and one-shot commands for isolated build/test steps.
 
 **Data or browser agents**
 
@@ -163,10 +163,9 @@ Agent workloads are latency-sensitive because every tool call can sit on the cri
 Sandbox0 optimizes for this in three places:
 
 - **Warm pools** keep template instances ready so a claim does not need to build the environment from scratch.
-- **Warm processes** can start agent runtimes, language servers, or helpers before the sandbox is claimed.
 - **Volumes** keep caches, repositories, and generated state separate from sandbox lifetime, avoiding repeated setup work.
 
-For best results, put expensive environment setup into the template image or warm process, keep active task state in a volume, and keep sandboxes short-lived enough that idle compute does not become the source of truth.
+For best results, put expensive environment setup into the template image, keep active task state in a volume, and keep sandboxes short-lived enough that idle compute does not become the source of truth.
 
 ## Self-Hosting
 

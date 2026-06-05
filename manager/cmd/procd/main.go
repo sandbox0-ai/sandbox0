@@ -159,17 +159,6 @@ func main() {
 	// Note: Network isolation is handled by netd via pod annotations.
 	// Procd no longer manages network policies.
 
-	warmProcesses, err := startWarmProcesses(contextManager, logger)
-	if err != nil {
-		logger.Fatal("Failed to start warm processes", zap.Error(err))
-	}
-	probeRunner := &warmProcessProber{
-		manager:              contextManager,
-		processes:            warmProcesses,
-		logger:               logger,
-		exitOnFailedLiveness: len(warmProcesses) > 0,
-	}
-
 	// Create and start HTTP server
 	server := procdhttp.NewServer(
 		cfg,
@@ -179,7 +168,7 @@ func main() {
 		webhookDispatcher,
 		logger,
 		obsProvider,
-		probeRunner.Probe,
+		nil,
 	)
 
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())

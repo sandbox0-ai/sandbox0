@@ -12,7 +12,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -536,57 +535,6 @@ func TestUpdateTemplate_RejectsInvalidPoolRange(t *testing.T) {
 	}
 }
 
-func TestUpdateTemplate_AllowsWarmProcessesForRegularTeam(t *testing.T) {
-	t.Parallel()
-
-	store := &testTemplateStore{
-		getTemplateFn: func(context.Context, string, string, string) (*template.Template, error) {
-			return &template.Template{
-				TemplateID: "demo",
-				Scope:      "team",
-				TeamID:     "team-1",
-				Spec: v1alpha1.SandboxTemplateSpec{
-					MainContainer: v1alpha1.ContainerSpec{
-						Image: "ubuntu:22.04",
-						Resources: v1alpha1.ResourceQuota{
-							CPU:    resource.MustParse("1"),
-							Memory: resource.MustParse("4Gi"),
-						},
-					},
-					Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
-				},
-			}, nil
-		},
-	}
-	h := &Handler{Store: store, Logger: zap.NewNop()}
-
-	router := gin.New()
-	router.Use(withClaims(&internalauth.Claims{
-		TeamID: "team-1",
-		UserID: "user-1",
-	}))
-	router.PUT("/api/v1/templates/:id", h.UpdateTemplate)
-
-	body := []byte(`{
-		"spec":{
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
-			"pool":{"minIdle":0,"maxIdle":1},
-			"warmProcesses":[{"type":"cmd","command":["/bin/sh","-lc","sleep 3600"],"cwd":"/workspace","envVars":{"MODE":"warm"}}]
-		}
-	}`)
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/demo", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
-	}
-	if !store.updateCalled {
-		t.Fatalf("expected update called for warm process request")
-	}
-}
-
 func TestUpdateTemplate_SystemWithoutTeamUpdatesPublicTemplate(t *testing.T) {
 	t.Parallel()
 
@@ -626,40 +574,6 @@ func TestUpdateTemplate_SystemWithoutTeamUpdatesPublicTemplate(t *testing.T) {
 	}
 	if store.updatedScope != naming.ScopePublic || store.updatedTeamID != "" {
 		t.Fatalf("updated scope/team = %q/%q, want public/empty", store.updatedScope, store.updatedTeamID)
-	}
-}
-
-func TestCreateTemplate_AllowsWarmProcessesForRegularTeam(t *testing.T) {
-	t.Parallel()
-
-	store := &testTemplateStore{}
-	h := &Handler{Store: store, Logger: zap.NewNop()}
-
-	router := gin.New()
-	router.Use(withClaims(&internalauth.Claims{
-		TeamID: "team-1",
-		UserID: "user-1",
-	}))
-	router.POST("/api/v1/templates", h.CreateTemplate)
-
-	body := []byte(`{
-		"template_id":"demo",
-		"spec":{
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
-			"pool":{"minIdle":0,"maxIdle":1},
-			"warmProcesses":[{"type":"repl","alias":"bash","cwd":"/workspace"}]
-		}
-	}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("expected status %d, got %d", http.StatusCreated, rec.Code)
-	}
-	if !store.createCalled {
-		t.Fatalf("expected create called for warm process request")
 	}
 }
 
@@ -939,62 +853,6 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 			},
 			wantErr: "spec.mainContainer.securityContext.appArmorProfile.localhostProfile must be omitted unless type is Localhost",
 		},
-		{
-			name: "reject cmd warm process without command",
-			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
-				s.WarmProcesses = []v1alpha1.WarmProcessSpec{{Type: v1alpha1.WarmProcessTypeCMD}}
-			},
-			wantErr: "spec.warmProcesses[0].command is required for cmd warm processes",
-		},
-		{
-			name: "reject repl warm process with command",
-			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
-				s.WarmProcesses = []v1alpha1.WarmProcessSpec{{Type: v1alpha1.WarmProcessTypeREPL, Command: []string{"bash"}}}
-			},
-			wantErr: "spec.warmProcesses[0].command is only valid for cmd warm processes",
-		},
-		{
-			name: "reject invalid warm process type",
-			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
-				s.WarmProcesses = []v1alpha1.WarmProcessSpec{{Type: "daemon"}}
-			},
-			wantErr: "spec.warmProcesses[0].type must be one of: repl, cmd",
-		},
-		{
-			name: "reject warm process probe without handler",
-			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
-				s.WarmProcesses = []v1alpha1.WarmProcessSpec{{
-					Type:   v1alpha1.WarmProcessTypeREPL,
-					Probes: &v1alpha1.SandboxProbeSet{Readiness: &v1alpha1.SandboxProbeSpec{}},
-				}}
-			},
-			wantErr: "spec.warmProcesses[0].probes.readiness must configure one of process, exec, httpGet, or tcpSocket",
-		},
-		{
-			name: "reject warm process probe with multiple handlers",
-			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
-				s.WarmProcesses = []v1alpha1.WarmProcessSpec{{
-					Type: v1alpha1.WarmProcessTypeREPL,
-					Probes: &v1alpha1.SandboxProbeSet{Liveness: &v1alpha1.SandboxProbeSpec{
-						Process: &v1alpha1.ProcessProbeSpec{},
-						Exec:    &v1alpha1.ExecProbeSpec{Command: []string{"true"}},
-					}},
-				}}
-			},
-			wantErr: "spec.warmProcesses[0].probes.liveness must configure only one of process, exec, httpGet, or tcpSocket",
-		},
-		{
-			name: "reject warm process probe with invalid http port",
-			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
-				s.WarmProcesses = []v1alpha1.WarmProcessSpec{{
-					Type: v1alpha1.WarmProcessTypeREPL,
-					Probes: &v1alpha1.SandboxProbeSet{Startup: &v1alpha1.SandboxProbeSpec{
-						HTTPGet: &v1alpha1.HTTPGetProbeSpec{Port: intstr.FromInt(0)},
-					}},
-				}}
-			},
-			wantErr: "spec.warmProcesses[0].probes.startup.httpGet.port must be positive",
-		},
 	}
 
 	for _, tc := range cases {
@@ -1060,32 +918,6 @@ func TestValidateTemplateSpec_AllowsEmptyDirMounts(t *testing.T) {
 
 	if err := validateTemplateSpec(spec); err != nil {
 		t.Fatalf("validateTemplateSpec: %v", err)
-	}
-}
-
-func TestValidateTemplateSpecForClaims_AllowsWarmProcesses(t *testing.T) {
-	t.Parallel()
-
-	spec := v1alpha1.SandboxTemplateSpec{
-		MainContainer: v1alpha1.ContainerSpec{
-			Image: "ubuntu:22.04",
-			Resources: v1alpha1.ResourceQuota{
-				CPU:    resource.MustParse("1"),
-				Memory: resource.MustParse("4Gi"),
-			},
-		},
-		WarmProcesses: []v1alpha1.WarmProcessSpec{{
-			Type:  v1alpha1.WarmProcessTypeREPL,
-			Alias: "bash",
-			Probes: &v1alpha1.SandboxProbeSet{Readiness: &v1alpha1.SandboxProbeSpec{
-				Process: &v1alpha1.ProcessProbeSpec{},
-			}},
-		}},
-		Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
-	}
-
-	if err := validateTemplateSpecForClaims(spec, &internalauth.Claims{TeamID: "team-1"}); err != nil {
-		t.Fatalf("expected warm processes to be allowed, got %v", err)
 	}
 }
 

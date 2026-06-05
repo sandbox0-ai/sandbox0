@@ -1,7 +1,6 @@
 package v1alpha1
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -285,45 +284,6 @@ procd_config:
 	port := findContainerPort(main.Ports, "http")
 	if port == nil || port.ContainerPort != 41000 {
 		t.Fatalf("expected named http port 41000, got %#v", port)
-	}
-}
-
-func TestBuildPodSpecInjectsWarmProcessesEnv(t *testing.T) {
-	configPath := writeManagerConfig(t, `
-manager_image: sandbox0/manager:test
-`)
-	t.Setenv("CONFIG_PATH", configPath)
-
-	template := newTestTemplate()
-	template.Spec.WarmProcesses = []WarmProcessSpec{{
-		Type:    WarmProcessTypeCMD,
-		Command: []string{"/bin/sh", "-lc", "sleep 3600"},
-		CWD:     "/workspace",
-		EnvVars: map[string]string{"MODE": "warm"},
-	}}
-
-	spec := BuildPodSpec(template)
-	if len(spec.Containers) != 1 {
-		t.Fatalf("expected procd-only pod, got %d containers", len(spec.Containers))
-	}
-
-	main := spec.Containers[0]
-	if main.Name != "procd" {
-		t.Fatalf("expected main container to remain procd, got %q", main.Name)
-	}
-	env := findEnvVar(main.Env, WarmProcessesEnvVar)
-	if env == nil || env.Value == "" {
-		t.Fatalf("expected %s env var, got %#v", WarmProcessesEnvVar, env)
-	}
-	var decoded []WarmProcessSpec
-	if err := json.Unmarshal([]byte(env.Value), &decoded); err != nil {
-		t.Fatalf("warm process env is invalid JSON: %v", err)
-	}
-	if len(decoded) != 1 || decoded[0].Type != WarmProcessTypeCMD {
-		t.Fatalf("unexpected warm processes: %#v", decoded)
-	}
-	if len(decoded[0].Command) != 3 || decoded[0].Command[2] != "sleep 3600" {
-		t.Fatalf("unexpected warm command: %#v", decoded[0].Command)
 	}
 }
 

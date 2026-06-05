@@ -13,8 +13,8 @@ import (
 
 // LauncherConfig controls how procd launches user processes.
 type LauncherConfig struct {
-	RootPath string
-	Chroot   bool
+	RootPath     string
+	LauncherPath string
 }
 
 // LaunchOptions are applied to one exec.Cmd before it starts.
@@ -61,11 +61,7 @@ func NewCommandContext(ctx context.Context, name string, args []string, opts Lau
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.CommandContext(ctx, cmdPath, args...)
-	cmd.Dir = cfg.sandboxPath(opts.CWD)
-	cmd.Env = opts.Env
-	cfg.apply(cmd)
-	return cmd, nil
+	return cfg.newPivotCommand(ctx, cmdPath, args, opts), nil
 }
 
 // LookPath resolves an executable using the configured rootfs when enabled.
@@ -93,14 +89,23 @@ func (cfg LauncherConfig) enabled() bool {
 	return strings.TrimSpace(cfg.RootPath) != ""
 }
 
-func (cfg LauncherConfig) apply(cmd *exec.Cmd) {
-	if cmd == nil || !cfg.enabled() || !cfg.Chroot {
-		return
+func (cfg LauncherConfig) newPivotCommand(ctx context.Context, cmdPath string, args []string, opts LaunchOptions) *exec.Cmd {
+	launcherPath := strings.TrimSpace(cfg.LauncherPath)
+	if launcherPath == "" {
+		launcherPath = "/proc/self/exe"
 	}
-	if cmd.SysProcAttr == nil {
-		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	launcherArgs := []string{
+		rootFSLauncherArg,
+		"--root", cfg.RootPath,
+		"--cwd", cfg.sandboxPath(opts.CWD),
+		"--",
+		cmdPath,
 	}
-	cmd.SysProcAttr.Chroot = cfg.RootPath
+	launcherArgs = append(launcherArgs, args...)
+	cmd := exec.CommandContext(ctx, launcherPath, launcherArgs...)
+	cmd.Dir = string(filepath.Separator)
+	cmd.Env = opts.Env
+	return cmd
 }
 
 func (cfg LauncherConfig) resolveCommand(name string, env []string) (string, error) {

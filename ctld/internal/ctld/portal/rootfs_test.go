@@ -118,6 +118,80 @@ func TestManagerSandboxRootFSLifecycle(t *testing.T) {
 	}
 }
 
+func TestBindSandboxRootFSPreparesImageBaseOnDigestMismatch(t *testing.T) {
+	preparedBaseRoot := filepath.Join(t.TempDir(), "prepared-base")
+	var mountedLower string
+	var released rootFSBase
+	previousMount := mountOverlayRootFSForBind
+	previousUnmount := unmountRootFSForRelease
+	previousPrepare := prepareRootFSBaseForBind
+	previousRelease := releaseRootFSBaseForRelease
+	mountOverlayRootFSForBind = func(lowerDir, upperDir, workDir, targetPath string) error {
+		mountedLower = lowerDir
+		return nil
+	}
+	unmountRootFSForRelease = func(targetPath string) error {
+		return nil
+	}
+	prepareRootFSBaseForBind = func(ctx context.Context, m *Manager, req ctldapi.BindSandboxRootFSRequest, paths rootFSPaths) (rootFSBase, error) {
+		if req.BaseImageDigest != "sha256:abc" || req.CarrierImageDigest != "sha256:def" {
+			t.Fatalf("digest request = base:%q carrier:%q", req.BaseImageDigest, req.CarrierImageDigest)
+		}
+		return rootFSBase{
+			rootPath:       preparedBaseRoot,
+			snapshotter:    "overlayfs",
+			snapshotKey:    "sandbox0-rootfs-base-team-a-fs-a-1",
+			mountPath:      preparedBaseRoot,
+			snapshotActive: true,
+		}, nil
+	}
+	releaseRootFSBaseForRelease = func(ctx context.Context, m *Manager, base rootFSBase) error {
+		released = base
+		return nil
+	}
+	t.Cleanup(func() {
+		mountOverlayRootFSForBind = previousMount
+		unmountRootFSForRelease = previousUnmount
+		prepareRootFSBaseForBind = previousPrepare
+		releaseRootFSBaseForRelease = previousRelease
+	})
+
+	mgr := NewManager(Config{
+		RootDir:       t.TempDir(),
+		StorageConfig: &apiconfig.StorageProxyConfig{},
+	})
+	req := ctldapi.BindSandboxRootFSRequest{
+		TeamID:             "team-a",
+		SandboxID:          "sandbox-a",
+		PodUID:             "pod-a",
+		FilesystemID:       "fs-a",
+		RuntimeGeneration:  1,
+		BaseImageRef:       "ubuntu:24.04",
+		BaseImageDigest:    "sha256:abc",
+		CarrierImageDigest: "sha256:def",
+		TargetPath:         "/sandbox0/rootfs",
+		TargetHostPath:     t.TempDir(),
+	}
+	if _, err := mgr.BindSandboxRootFS(context.Background(), req); err != nil {
+		t.Fatalf("BindSandboxRootFS() error = %v", err)
+	}
+	if mountedLower != preparedBaseRoot {
+		t.Fatalf("overlay lowerdir = %q, want prepared base %q", mountedLower, preparedBaseRoot)
+	}
+	if _, err := mgr.ReleaseSandboxRootFS(context.Background(), ctldapi.ReleaseSandboxRootFSRequest{
+		TeamID:            req.TeamID,
+		SandboxID:         req.SandboxID,
+		PodUID:            req.PodUID,
+		FilesystemID:      req.FilesystemID,
+		RuntimeGeneration: req.RuntimeGeneration,
+	}); err != nil {
+		t.Fatalf("ReleaseSandboxRootFS() error = %v", err)
+	}
+	if !released.snapshotActive || released.rootPath != preparedBaseRoot {
+		t.Fatalf("released base = %+v, want prepared base", released)
+	}
+}
+
 func TestSandboxRootFSPathsDerivesHostPathFromPodUID(t *testing.T) {
 	paths, err := sandboxRootFSPaths(ctldapi.BindSandboxRootFSRequest{
 		PodUID:            "pod/../uid",
@@ -142,5 +216,49 @@ func TestSandboxRootFSPathsDerivesHostPathFromPodUID(t *testing.T) {
 	}
 	if paths.upperDir != filepath.Join("/cache", "runtime", "7", "upper") {
 		t.Fatalf("upperDir = %q", paths.upperDir)
+	}
+}
+
+func TestRootFSBaseImageReferencePinsDigest(t *testing.T) {
+	tests := []struct {
+		name   string
+		ref    string
+		digest string
+		want   string
+	}{
+		{name: "tag", ref: "ubuntu:24.04", digest: "sha256:abc", want: "ubuntu@sha256:abc"},
+		{name: "registry port tag", ref: "registry.local:5000/team/app:latest", digest: "sha256:def", want: "registry.local:5000/team/app@sha256:def"},
+		{name: "existing digest", ref: "ubuntu@sha256:old", digest: "sha256:new", want: "ubuntu@sha256:new"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := rootFSBaseImageReference(tt.ref, tt.digest)
+			if err != nil {
+				t.Fatalf("rootFSBaseImageReference() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("rootFSBaseImageReference() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestShouldPrepareImageBase(t *testing.T) {
+	tests := []struct {
+		name string
+		req  ctldapi.BindSandboxRootFSRequest
+		want bool
+	}{
+		{name: "no base digest", req: ctldapi.BindSandboxRootFSRequest{}, want: false},
+		{name: "matching carrier", req: ctldapi.BindSandboxRootFSRequest{BaseImageDigest: "sha256:abc", CarrierImageDigest: "docker-pullable://ubuntu@sha256:abc"}, want: false},
+		{name: "mismatched carrier", req: ctldapi.BindSandboxRootFSRequest{BaseImageDigest: "sha256:abc", CarrierImageDigest: "sha256:def"}, want: true},
+		{name: "unknown carrier", req: ctldapi.BindSandboxRootFSRequest{BaseImageDigest: "sha256:abc"}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldPrepareImageBase(tt.req); got != tt.want {
+				t.Fatalf("shouldPrepareImageBase() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

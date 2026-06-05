@@ -138,8 +138,11 @@ procd_config:
 	if got := envByName["sandbox_rootfs_path"].Value; got != SandboxRootFSMountPath {
 		t.Fatalf("sandbox_rootfs_path = %q, want %q", got, SandboxRootFSMountPath)
 	}
-	if got := envByName["sandbox_rootfs_chroot"].Value; got != "true" {
-		t.Fatalf("sandbox_rootfs_chroot = %q, want true", got)
+	if !hasCapability(main.SecurityContext.Capabilities.Add, "SYS_ADMIN") {
+		t.Fatalf("capabilities.add = %#v, want SYS_ADMIN", main.SecurityContext.Capabilities.Add)
+	}
+	if !hasCapability(main.SecurityContext.Capabilities.Add, "SYS_CHROOT") {
+		t.Fatalf("capabilities.add = %#v, want SYS_CHROOT", main.SecurityContext.Capabilities.Add)
 	}
 }
 
@@ -499,6 +502,15 @@ func findVolume(volumes []corev1.Volume, name string) *corev1.Volume {
 		}
 	}
 	return nil
+}
+
+func hasCapability(capabilities []corev1.Capability, want string) bool {
+	for _, capability := range capabilities {
+		if string(capability) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func findCSIVolumeByPortal(volumes []corev1.Volume, portalName string) *corev1.Volume {

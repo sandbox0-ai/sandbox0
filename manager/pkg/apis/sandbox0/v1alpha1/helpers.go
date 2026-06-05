@@ -293,11 +293,38 @@ func applySandboxRootFS(spec *corev1.PodSpec) {
 			Name:  "sandbox_rootfs_path",
 			Value: SandboxRootFSMountPath,
 		})
-		ensureContainerEnvVar(&spec.Containers[i], corev1.EnvVar{
-			Name:  "sandbox_rootfs_chroot",
-			Value: "true",
-		})
+		ensureContainerCapability(&spec.Containers[i], corev1.Capability("SYS_ADMIN"))
+		ensureContainerCapability(&spec.Containers[i], corev1.Capability("SYS_CHROOT"))
 	}
+}
+
+func ensureContainerCapability(container *corev1.Container, capability corev1.Capability) {
+	if container == nil || capability == "" {
+		return
+	}
+	if container.SecurityContext == nil {
+		container.SecurityContext = &corev1.SecurityContext{}
+	}
+	if container.SecurityContext.Capabilities == nil {
+		container.SecurityContext.Capabilities = &corev1.Capabilities{}
+	}
+	for _, existing := range container.SecurityContext.Capabilities.Add {
+		if strings.EqualFold(string(existing), string(capability)) {
+			return
+		}
+	}
+	drop := container.SecurityContext.Capabilities.Drop
+	if len(drop) > 0 {
+		filtered := drop[:0]
+		for _, existing := range drop {
+			if strings.EqualFold(string(existing), string(capability)) {
+				continue
+			}
+			filtered = append(filtered, existing)
+		}
+		container.SecurityContext.Capabilities.Drop = filtered
+	}
+	container.SecurityContext.Capabilities.Add = append(container.SecurityContext.Capabilities.Add, capability)
 }
 
 func volumePortalVolumeName(index int, portalName string) string {

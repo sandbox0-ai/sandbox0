@@ -370,9 +370,34 @@ func (s *SandboxService) CleanupDeletedSandbox(ctx context.Context, info Sandbox
 	if err := s.releaseSandboxFilesystemOwner(ctx, info.FilesystemID, sandboxID, info.RuntimeGeneration); err != nil {
 		errs = append(errs, fmt.Errorf("release sandbox filesystem owner: %w", err))
 	}
+	if runtimeCleaned && len(errs) == 0 {
+		if err := s.markSandboxRuntimeCleaned(ctx, sandboxID, info.RuntimeGeneration); err != nil {
+			errs = append(errs, fmt.Errorf("mark sandbox runtime cleaned: %w", err))
+		}
+	}
 	s.powerStateLocks.Delete(sandboxID)
 	s.powerStateReconcilers.Delete(sandboxID)
 	return errors.Join(errs...)
+}
+
+func (s *SandboxService) markSandboxRuntimeCleaned(ctx context.Context, sandboxID string, generation int64) error {
+	if s == nil || s.sandboxStore == nil || strings.TrimSpace(sandboxID) == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	if s.clock != nil {
+		now = s.clock.Now()
+	}
+	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
+		if record == nil || record.Status == SandboxStatusDeleted {
+			return nil
+		}
+		return tx.MarkRuntimeCleaned(lockCtx, sandboxID, generation, now)
+	})
+	if errors.Is(err, ErrSandboxRecordNotFound) {
+		return nil
+	}
+	return err
 }
 
 func (s *SandboxService) unbindDeletedSandboxVolumePortals(ctx context.Context, info SandboxLifecycleInfo) error {

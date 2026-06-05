@@ -117,3 +117,70 @@ func TestCleanupDeletedSandboxReleasesFilesystemOwner(t *testing.T) {
 		t.Fatalf("unexpected release request: %+v", got)
 	}
 }
+
+func TestCleanupDeletedSandboxMarksCleanedAfterFilesystemOwnerRelease(t *testing.T) {
+	filesystems := &recordingSandboxFilesystemStore{}
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-a": {
+			ID:                "sandbox-a",
+			Status:            "running",
+			FilesystemID:      "fs-a",
+			RuntimeGeneration: 3,
+		},
+	}}
+	svc := &SandboxService{
+		sandboxFilesystemStore: filesystems,
+		sandboxStore:           store,
+	}
+
+	err := svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
+		SandboxID:             "sandbox-a",
+		FilesystemID:          "fs-a",
+		RuntimeGeneration:     3,
+		RuntimeDeletionReason: runtimeDeletionReasonCleaned,
+	})
+	if err != nil {
+		t.Fatalf("CleanupDeletedSandbox() error = %v", err)
+	}
+	if len(filesystems.releaseReqs) != 1 {
+		t.Fatalf("release requests = %d, want 1", len(filesystems.releaseReqs))
+	}
+	if store.cleans != 1 {
+		t.Fatalf("store cleans = %d, want 1", store.cleans)
+	}
+	if got := store.records["sandbox-a"].Status; got != SandboxStatusCleaned {
+		t.Fatalf("status = %q, want cleaned", got)
+	}
+}
+
+func TestCleanupDeletedSandboxDoesNotMarkCleanedWhenFilesystemOwnerReleaseFails(t *testing.T) {
+	filesystems := &recordingSandboxFilesystemStore{releaseErr: errors.New("release failed")}
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-a": {
+			ID:                "sandbox-a",
+			Status:            "running",
+			FilesystemID:      "fs-a",
+			RuntimeGeneration: 3,
+		},
+	}}
+	svc := &SandboxService{
+		sandboxFilesystemStore: filesystems,
+		sandboxStore:           store,
+	}
+
+	err := svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
+		SandboxID:             "sandbox-a",
+		FilesystemID:          "fs-a",
+		RuntimeGeneration:     3,
+		RuntimeDeletionReason: runtimeDeletionReasonCleaned,
+	})
+	if err == nil {
+		t.Fatal("CleanupDeletedSandbox() error = nil, want release failure")
+	}
+	if store.cleans != 0 {
+		t.Fatalf("store cleans = %d, want 0", store.cleans)
+	}
+	if got := store.records["sandbox-a"].Status; got != "running" {
+		t.Fatalf("status = %q, want running", got)
+	}
+}

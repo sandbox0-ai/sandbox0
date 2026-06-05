@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -19,8 +20,10 @@ import (
 )
 
 const (
-	rootFSStateDirName = ".sandbox0"
-	rootFSUpperTarName = "upper.tar"
+	rootFSStateDirName     = ".sandbox0"
+	rootFSUpperTarName     = "upper.tar"
+	rootFSXAttrPAXPrefix   = "SANDBOX0.xattr.base64."
+	rootFSXAttrInitialSize = 256
 )
 
 func restoreRootFSUpperDir(ctx context.Context, engine *s0fs.Engine, upperDir string) error {
@@ -190,6 +193,18 @@ func tarDirectory(root string) ([]byte, error) {
 			header.AccessTime = time.Unix(stat.Atim.Sec, stat.Atim.Nsec)
 			header.ChangeTime = time.Unix(stat.Ctim.Sec, stat.Ctim.Nsec)
 		}
+		xattrs, err := readFileXAttrs(path)
+		if err != nil {
+			return err
+		}
+		if len(xattrs) > 0 {
+			if header.PAXRecords == nil {
+				header.PAXRecords = make(map[string]string, len(xattrs))
+			}
+			for name, value := range xattrs {
+				header.PAXRecords[rootFSXAttrPAXPrefix+name] = base64.StdEncoding.EncodeToString(value)
+			}
+		}
 		if err := tw.WriteHeader(header); err != nil {
 			return err
 		}
@@ -281,6 +296,9 @@ func extractTarToDir(reader io.Reader, root string) error {
 			continue
 		}
 		applyTarMetadata(target, header)
+		if err := applyTarXAttrs(target, header); err != nil {
+			return err
+		}
 	}
 }
 
@@ -324,4 +342,99 @@ func applyTarMetadata(path string, header *tar.Header) {
 		return
 	}
 	_ = os.Chtimes(path, modTime, modTime)
+}
+
+func readFileXAttrs(path string) (map[string][]byte, error) {
+	size, err := unix.Llistxattr(path, nil)
+	if err != nil {
+		if isIgnorableXAttrError(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("list xattrs for %s: %w", path, err)
+	}
+	if size <= 0 {
+		return nil, nil
+	}
+	names := make([]byte, size)
+	n, err := unix.Llistxattr(path, names)
+	if err != nil {
+		if isIgnorableXAttrError(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("list xattrs for %s: %w", path, err)
+	}
+	names = names[:n]
+	out := make(map[string][]byte)
+	for len(names) > 0 {
+		idx := bytes.IndexByte(names, 0)
+		if idx < 0 {
+			break
+		}
+		name := string(names[:idx])
+		names = names[idx+1:]
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		value, err := readFileXAttr(path, name)
+		if err != nil {
+			if errors.Is(err, unix.ENODATA) || isIgnorableXAttrError(err) {
+				continue
+			}
+			return nil, err
+		}
+		out[name] = value
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+func readFileXAttr(path, name string) ([]byte, error) {
+	size := rootFSXAttrInitialSize
+	for {
+		buf := make([]byte, size)
+		n, err := unix.Lgetxattr(path, name, buf)
+		if err == nil {
+			return append([]byte(nil), buf[:n]...), nil
+		}
+		if errors.Is(err, unix.ERANGE) {
+			size *= 2
+			continue
+		}
+		if isIgnorableXAttrError(err) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("read xattr %s for %s: %w", name, path, err)
+	}
+}
+
+func applyTarXAttrs(path string, header *tar.Header) error {
+	if header == nil || len(header.PAXRecords) == 0 {
+		return nil
+	}
+	for key, encoded := range header.PAXRecords {
+		if !strings.HasPrefix(key, rootFSXAttrPAXPrefix) {
+			continue
+		}
+		name := strings.TrimPrefix(key, rootFSXAttrPAXPrefix)
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		value, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return fmt.Errorf("decode xattr %s for %s: %w", name, path, err)
+		}
+		if err := unix.Lsetxattr(path, name, value, 0); err != nil {
+			if isIgnorableXAttrError(err) {
+				continue
+			}
+			return fmt.Errorf("set xattr %s for %s: %w", name, path, err)
+		}
+	}
+	return nil
+}
+
+func isIgnorableXAttrError(err error) bool {
+	return errors.Is(err, unix.ENOTSUP) || errors.Is(err, unix.EOPNOTSUPP)
 }

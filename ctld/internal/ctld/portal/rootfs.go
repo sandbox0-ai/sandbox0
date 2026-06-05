@@ -28,6 +28,10 @@ const (
 var (
 	mountOverlayRootFSForBind = mountOverlayRootFS
 	unmountRootFSForRelease   = unmountRootFS
+	prepareRootFSBaseForBind  = func(ctx context.Context, m *Manager, req ctldapi.BindSandboxRootFSRequest, paths rootFSPaths) (rootFSBase, error) {
+		return m.prepareRootFSBase(ctx, req, paths)
+	}
+	releaseRootFSBaseForRelease = releaseRootFSBase
 )
 
 // BindSandboxRootFS prepares the node-local mutable upperdir owner for one
@@ -82,27 +86,37 @@ func (m *Manager) BindSandboxRootFS(ctx context.Context, req ctldapi.BindSandbox
 		_ = engine.Close()
 		return ctldapi.BindSandboxRootFSResponse{}, err
 	}
-	if err := mountOverlayRootFSForBind(paths.baseRootPath, paths.upperDir, paths.workDir, paths.targetHostPath); err != nil {
+	base, err := prepareRootFSBaseForBind(ctx, m, req, paths)
+	if err != nil {
+		_ = engine.Close()
+		return ctldapi.BindSandboxRootFSResponse{}, err
+	}
+	if err := mountOverlayRootFSForBind(base.rootPath, paths.upperDir, paths.workDir, paths.targetHostPath); err != nil {
+		_ = releaseRootFSBaseForRelease(ctx, m, base)
 		_ = engine.Close()
 		return ctldapi.BindSandboxRootFSResponse{}, err
 	}
 	mount := &rootFSMount{
-		filesystemID:      req.FilesystemID,
-		teamID:            req.TeamID,
-		sandboxID:         req.SandboxID,
-		podUID:            req.PodUID,
-		runtimeGeneration: req.RuntimeGeneration,
-		baseImageRef:      strings.TrimSpace(req.BaseImageRef),
-		baseImageDigest:   strings.TrimSpace(req.BaseImageDigest),
-		mountPoint:        paths.mountPoint,
-		targetHostPath:    paths.targetHostPath,
-		baseRootPath:      paths.baseRootPath,
-		cacheDir:          cacheDir,
-		upperDir:          paths.upperDir,
-		workDir:           paths.workDir,
-		mountedAt:         time.Now().UTC(),
-		s0fs:              engine,
-		overlayMounted:    true,
+		filesystemID:       req.FilesystemID,
+		teamID:             req.TeamID,
+		sandboxID:          req.SandboxID,
+		podUID:             req.PodUID,
+		runtimeGeneration:  req.RuntimeGeneration,
+		baseImageRef:       strings.TrimSpace(req.BaseImageRef),
+		baseImageDigest:    strings.TrimSpace(req.BaseImageDigest),
+		mountPoint:         paths.mountPoint,
+		targetHostPath:     paths.targetHostPath,
+		baseRootPath:       base.rootPath,
+		baseSnapshotter:    base.snapshotter,
+		baseSnapshotKey:    base.snapshotKey,
+		baseSnapshotMount:  base.mountPath,
+		baseSnapshotActive: base.snapshotActive,
+		cacheDir:           cacheDir,
+		upperDir:           paths.upperDir,
+		workDir:            paths.workDir,
+		mountedAt:          time.Now().UTC(),
+		s0fs:               engine,
+		overlayMounted:     true,
 	}
 
 	m.mu.Lock()
@@ -110,6 +124,7 @@ func (m *Manager) BindSandboxRootFS(ctx context.Context, req ctldapi.BindSandbox
 		resp := rootFSBindResponse(existing)
 		m.mu.Unlock()
 		_ = unmountRootFSForRelease(paths.targetHostPath)
+		_ = releaseRootFSBaseForRelease(ctx, m, base)
 		_ = engine.Close()
 		if !sameRootFSOwner(existing, req) {
 			return ctldapi.BindSandboxRootFSResponse{}, fmt.Errorf("sandbox rootfs %s already bound to sandbox %s generation %d", req.FilesystemID, existing.sandboxID, existing.runtimeGeneration)
@@ -321,6 +336,19 @@ func (m *Manager) closeRootFSMount(ctx context.Context, mount *rootFSMount) erro
 		}
 		mount.s0fs = nil
 	}
+	if mount.baseSnapshotActive {
+		base := rootFSBase{
+			rootPath:       mount.baseRootPath,
+			snapshotter:    mount.baseSnapshotter,
+			snapshotKey:    mount.baseSnapshotKey,
+			mountPath:      mount.baseSnapshotMount,
+			snapshotActive: mount.baseSnapshotActive,
+		}
+		if err := releaseRootFSBaseForRelease(ctx, m, base); err != nil {
+			return err
+		}
+		mount.baseSnapshotActive = false
+	}
 	return nil
 }
 
@@ -328,6 +356,7 @@ type rootFSPaths struct {
 	mountPoint     string
 	targetHostPath string
 	baseRootPath   string
+	baseMountDir   string
 	upperDir       string
 	workDir        string
 }
@@ -335,9 +364,10 @@ type rootFSPaths struct {
 func sandboxRootFSPaths(req ctldapi.BindSandboxRootFSRequest, cacheDir string) (rootFSPaths, error) {
 	generation := fmt.Sprintf("%d", req.RuntimeGeneration)
 	paths := rootFSPaths{
-		mountPoint: strings.TrimSpace(req.TargetPath),
-		upperDir:   filepath.Join(cacheDir, "runtime", generation, "upper"),
-		workDir:    filepath.Join(cacheDir, "runtime", generation, "work"),
+		mountPoint:   strings.TrimSpace(req.TargetPath),
+		baseMountDir: filepath.Join(cacheDir, "runtime", generation, "base"),
+		upperDir:     filepath.Join(cacheDir, "runtime", generation, "upper"),
+		workDir:      filepath.Join(cacheDir, "runtime", generation, "work"),
 	}
 	if paths.mountPoint == "" {
 		paths.mountPoint = "/sandbox0/rootfs"
@@ -357,7 +387,7 @@ func sandboxRootFSPaths(req ctldapi.BindSandboxRootFSRequest, cacheDir string) (
 	if paths.baseRootPath == "" {
 		paths.baseRootPath = containerRootFSPath(req.ContainerID)
 	}
-	if paths.baseRootPath == "" {
+	if paths.baseRootPath == "" && strings.TrimSpace(req.BaseImageRef) == "" && strings.TrimSpace(req.BaseImageDigest) == "" {
 		return rootFSPaths{}, fmt.Errorf("container_id or base_root_path is required to bind sandbox rootfs")
 	}
 	return paths, nil

@@ -261,6 +261,9 @@ func (s *SandboxService) ensureClaimFilesystem(req *ClaimRequest, template *v1al
 	if req.FilesystemBaseImageRef == "" && template != nil {
 		req.FilesystemBaseImageRef = strings.TrimSpace(template.Spec.MainContainer.Image)
 	}
+	if req.FilesystemBaseImageDigest == "" {
+		req.FilesystemBaseImageDigest = imageDigestFromReference(req.FilesystemBaseImageRef)
+	}
 	return nil
 }
 

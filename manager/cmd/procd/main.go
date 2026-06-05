@@ -26,6 +26,14 @@ import (
 )
 
 func main() {
+	if handled, err := process.RunLauncherFromArgs(os.Args[1:]); handled {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "sandbox rootfs launcher failed: %v\n", err)
+			os.Exit(127)
+		}
+		return
+	}
+
 	// // Start the reaper to clean up zombie processes
 	// go reaper.Reap()
 
@@ -273,19 +281,12 @@ func configureProcessLauncher(logger *zap.Logger) {
 	if rootPath == "" {
 		return
 	}
-	chroot := true
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("sandbox_rootfs_chroot"))) {
-	case "0", "false", "off", "disabled", "no":
-		chroot = false
-	}
 	process.ConfigureLauncher(process.LauncherConfig{
 		RootPath: rootPath,
-		Chroot:   chroot,
 	})
 	if logger != nil {
 		logger.Info("Configured process launcher",
 			zap.String("sandbox_rootfs_path", rootPath),
-			zap.Bool("sandbox_rootfs_chroot", chroot),
 		)
 	}
 }

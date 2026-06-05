@@ -22,23 +22,31 @@ func (s *SandboxService) bindSandboxRootFS(ctx context.Context, pod *corev1.Pod,
 	if s.ctldClient == nil {
 		return fmt.Errorf("ctld client is not configured")
 	}
+	carrierImageDigest := procdImageDigest(pod)
+	if strings.TrimSpace(req.FilesystemBaseImageDigest) == "" && carrierImageDigest != "" {
+		req.FilesystemBaseImageDigest = carrierImageDigest
+		if err := s.acquireClaimFilesystem(ctx, req, nil); err != nil {
+			return err
+		}
+	}
 	ctldAddress, err := s.ctldAddressForPod(ctx, pod)
 	if err != nil {
 		return err
 	}
 	resp, err := s.ctldClient.BindSandboxRootFS(ctx, ctldAddress, ctldapi.BindSandboxRootFSRequest{
-		Namespace:         pod.Namespace,
-		PodName:           pod.Name,
-		PodUID:            string(pod.UID),
-		ContainerID:       procdContainerID(pod),
-		SandboxID:         req.SandboxID,
-		TeamID:            req.TeamID,
-		FilesystemID:      req.FilesystemID,
-		RuntimeGeneration: req.RuntimeGeneration,
-		BaseImageRef:      req.FilesystemBaseImageRef,
-		BaseImageDigest:   req.FilesystemBaseImageDigest,
-		TargetPath:        sandboxRootFSMountPath,
-		RootFSVolumeName:  v1alpha1.SandboxRootFSVolumeName,
+		Namespace:          pod.Namespace,
+		PodName:            pod.Name,
+		PodUID:             string(pod.UID),
+		ContainerID:        procdContainerID(pod),
+		SandboxID:          req.SandboxID,
+		TeamID:             req.TeamID,
+		FilesystemID:       req.FilesystemID,
+		RuntimeGeneration:  req.RuntimeGeneration,
+		BaseImageRef:       req.FilesystemBaseImageRef,
+		BaseImageDigest:    req.FilesystemBaseImageDigest,
+		CarrierImageDigest: carrierImageDigest,
+		TargetPath:         sandboxRootFSMountPath,
+		RootFSVolumeName:   v1alpha1.SandboxRootFSVolumeName,
 	})
 	if err != nil {
 		return err
@@ -182,4 +190,41 @@ func procdContainerID(pod *corev1.Pod) string {
 		}
 	}
 	return ""
+}
+
+func procdImageDigest(pod *corev1.Pod) string {
+	if pod == nil {
+		return ""
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == "procd" {
+			return imageDigestFromReference(status.ImageID)
+		}
+	}
+	return ""
+}
+
+func imageDigestFromReference(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	if idx := strings.LastIndex(ref, "@"); idx >= 0 && idx+1 < len(ref) {
+		return normalizeImageDigest(ref[idx+1:])
+	}
+	if idx := strings.LastIndex(ref, "sha256:"); idx >= 0 {
+		return normalizeImageDigest(ref[idx:])
+	}
+	return ""
+}
+
+func normalizeImageDigest(digest string) string {
+	digest = strings.TrimSpace(digest)
+	if digest == "" {
+		return ""
+	}
+	if idx := strings.LastIndex(digest, "sha256:"); idx >= 0 {
+		digest = digest[idx:]
+	}
+	return strings.ToLower(digest)
 }

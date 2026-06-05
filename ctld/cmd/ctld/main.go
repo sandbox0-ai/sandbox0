@@ -105,13 +105,14 @@ func main() {
 	}
 
 	portalManager := ctldportal.NewManager(ctldportal.Config{
-		NodeName:      nodeName,
-		RootDir:       portalRoot,
-		Logger:        zapLogger,
-		StorageConfig: storageCfg,
-		Repository:    repo,
-		PodName:       podName,
-		PodNamespace:  podNamespace,
+		NodeName:          nodeName,
+		RootDir:           portalRoot,
+		Logger:            zapLogger,
+		StorageConfig:     storageCfg,
+		Repository:        repo,
+		PodName:           podName,
+		PodNamespace:      podNamespace,
+		ContainerdAddress: criEndpoint,
 	})
 	go portalManager.Run(ctx)
 	csiServer := ctldportal.NewCSIServer(nodeName, portalManager)

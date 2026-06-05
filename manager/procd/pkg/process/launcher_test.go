@@ -18,7 +18,7 @@ func TestNewCommandContextUsesSandboxRootFS(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(binDir, "hello"), []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	ConfigureLauncher(LauncherConfig{RootPath: root, Chroot: true})
+	ConfigureLauncher(LauncherConfig{RootPath: root, LauncherPath: "/procd/bin/procd-test"})
 	t.Cleanup(func() { ConfigureLauncher(LauncherConfig{}) })
 
 	cmd, err := NewCommandContext(context.Background(), "hello", []string{"arg"}, LaunchOptions{
@@ -28,20 +28,34 @@ func TestNewCommandContextUsesSandboxRootFS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCommandContext() error = %v", err)
 	}
-	if cmd.Path != "/usr/bin/hello" {
-		t.Fatalf("cmd.Path = %q, want /usr/bin/hello", cmd.Path)
+	if cmd.Path != "/procd/bin/procd-test" {
+		t.Fatalf("cmd.Path = %q, want launcher path", cmd.Path)
 	}
-	if cmd.Dir != "/workspace" {
-		t.Fatalf("cmd.Dir = %q, want /workspace", cmd.Dir)
+	if cmd.Dir != "/" {
+		t.Fatalf("cmd.Dir = %q, want /", cmd.Dir)
 	}
-	if cmd.SysProcAttr == nil || cmd.SysProcAttr.Chroot != root {
-		t.Fatalf("cmd.SysProcAttr = %#v, want chroot %q", cmd.SysProcAttr, root)
+	wantArgs := []string{
+		"/procd/bin/procd-test",
+		rootFSLauncherArg,
+		"--root", root,
+		"--cwd", "/workspace",
+		"--",
+		"/usr/bin/hello",
+		"arg",
+	}
+	if len(cmd.Args) != len(wantArgs) {
+		t.Fatalf("cmd.Args = %#v, want %#v", cmd.Args, wantArgs)
+	}
+	for i := range wantArgs {
+		if cmd.Args[i] != wantArgs[i] {
+			t.Fatalf("cmd.Args[%d] = %q, want %q; all args=%#v", i, cmd.Args[i], wantArgs[i], cmd.Args)
+		}
 	}
 }
 
-func TestSetProcessGroupPreservesLauncherSysProcAttr(t *testing.T) {
+func TestSetProcessGroupPreservesExistingSysProcAttr(t *testing.T) {
 	cmd := exec.Command("/bin/true")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Chroot: "/sandbox0/rootfs"}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}
 
 	SetProcessGroup(cmd)
 
@@ -51,7 +65,7 @@ func TestSetProcessGroupPreservesLauncherSysProcAttr(t *testing.T) {
 	if !cmd.SysProcAttr.Setpgid {
 		t.Fatal("Setpgid = false, want true")
 	}
-	if cmd.SysProcAttr.Chroot != "/sandbox0/rootfs" {
-		t.Fatalf("Chroot = %q, want /sandbox0/rootfs", cmd.SysProcAttr.Chroot)
+	if cmd.SysProcAttr.Pdeathsig != syscall.SIGTERM {
+		t.Fatalf("Pdeathsig = %v, want SIGTERM", cmd.SysProcAttr.Pdeathsig)
 	}
 }

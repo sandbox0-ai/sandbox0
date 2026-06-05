@@ -47,6 +47,7 @@ func TestBindSandboxRootFSSendsCtldRequest(t *testing.T) {
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
 		Name:        "procd",
 		ContainerID: "containerd://container-a",
+		ImageID:     "docker-pullable://ubuntu@sha256:abc",
 	}}
 
 	err := service.bindSandboxRootFS(context.Background(), pod, &ClaimRequest{
@@ -74,6 +75,123 @@ func TestBindSandboxRootFSSendsCtldRequest(t *testing.T) {
 	}
 	if got.BaseImageDigest != "sha256:abc" {
 		t.Fatalf("base_image_digest = %q, want sha256:abc", got.BaseImageDigest)
+	}
+	if got.CarrierImageDigest != "sha256:abc" {
+		t.Fatalf("carrier_image_digest = %q, want sha256:abc", got.CarrierImageDigest)
+	}
+}
+
+func TestBindSandboxRootFSSendsBaseDigestMismatchToCtld(t *testing.T) {
+	var got ctldapi.BindSandboxRootFSRequest
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode bind request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(ctldapi.BindSandboxRootFSResponse{
+			FilesystemID: got.FilesystemID,
+			MountPoint:   got.TargetPath,
+		})
+	}))
+	defer ctld.Close()
+	host, port := splitTestServerHostPort(t, ctld.URL)
+
+	service := &SandboxService{
+		ctldClient: NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config: SandboxServiceConfig{
+			CtldEnabled: true,
+			CtldPort:    port,
+		},
+	}
+	pod := &corev1.Pod{}
+	pod.Namespace = "ns-a"
+	pod.Name = "pod-a"
+	pod.UID = types.UID("pod-uid")
+	pod.Status.HostIP = host
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:        "procd",
+		ContainerID: "containerd://container-a",
+		ImageID:     "docker-pullable://ubuntu@sha256:def",
+	}}
+
+	err := service.bindSandboxRootFS(context.Background(), pod, &ClaimRequest{
+		TeamID:                    "team-a",
+		SandboxID:                 "sandbox-a",
+		FilesystemID:              "fs-a",
+		RuntimeGeneration:         3,
+		FilesystemBaseImageDigest: "sha256:abc",
+	})
+	if err != nil {
+		t.Fatalf("bindSandboxRootFS() error = %v", err)
+	}
+	if got.BaseImageDigest != "sha256:abc" || got.CarrierImageDigest != "sha256:def" {
+		t.Fatalf("digest request = base:%q carrier:%q, want base sha256:abc carrier sha256:def", got.BaseImageDigest, got.CarrierImageDigest)
+	}
+}
+
+func TestBindSandboxRootFSBackfillsBaseDigestFromCarrierImage(t *testing.T) {
+	var got ctldapi.BindSandboxRootFSRequest
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode bind request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(ctldapi.BindSandboxRootFSResponse{
+			FilesystemID: got.FilesystemID,
+			MountPoint:   got.TargetPath,
+		})
+	}))
+	defer ctld.Close()
+	host, port := splitTestServerHostPort(t, ctld.URL)
+
+	store := &recordingSandboxFilesystemStore{
+		acquireResp: &SandboxFilesystemRecord{
+			FilesystemID: "fs-a",
+			TeamID:       "team-a",
+			UserID:       "user-a",
+			BaseImageRef: "ubuntu:24.04",
+		},
+	}
+	service := &SandboxService{
+		ctldClient:             NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		sandboxFilesystemStore: store,
+		config: SandboxServiceConfig{
+			CtldEnabled: true,
+			CtldPort:    port,
+		},
+	}
+	pod := &corev1.Pod{}
+	pod.Namespace = "ns-a"
+	pod.Name = "pod-a"
+	pod.UID = types.UID("pod-uid")
+	pod.Status.HostIP = host
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:        "procd",
+		ContainerID: "containerd://container-a",
+		ImageID:     "docker-pullable://ubuntu@sha256:def",
+	}}
+
+	req := &ClaimRequest{
+		TeamID:                 "team-a",
+		UserID:                 "user-a",
+		SandboxID:              "sandbox-a",
+		FilesystemID:           "fs-a",
+		RuntimeGeneration:      3,
+		FilesystemBaseImageRef: "ubuntu:24.04",
+	}
+	if err := service.bindSandboxRootFS(context.Background(), pod, req); err != nil {
+		t.Fatalf("bindSandboxRootFS() error = %v", err)
+	}
+	if req.FilesystemBaseImageDigest != "sha256:def" {
+		t.Fatalf("request base digest = %q, want carrier digest", req.FilesystemBaseImageDigest)
+	}
+	if got.BaseImageDigest != "sha256:def" || got.CarrierImageDigest != "sha256:def" {
+		t.Fatalf("ctld digest request = base:%q carrier:%q, want sha256:def", got.BaseImageDigest, got.CarrierImageDigest)
+	}
+	if len(store.acquireReqs) != 1 {
+		t.Fatalf("acquire requests = %d, want 1", len(store.acquireReqs))
+	}
+	acquire := store.acquireReqs[0]
+	if acquire.BaseImageDigest != "sha256:def" || acquire.OwnerSandboxID != "sandbox-a" || acquire.OwnerRuntimeGeneration != 3 {
+		t.Fatalf("filesystem acquire request = %+v, want digest backfill for sandbox-a generation 3", acquire)
 	}
 }
 

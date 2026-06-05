@@ -2,11 +2,13 @@ package portal
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
+	"golang.org/x/sys/unix"
 )
 
 func TestRootFSUpperDirSyncRoundTrip(t *testing.T) {
@@ -52,5 +54,48 @@ func TestRootFSUpperDirSyncRoundTrip(t *testing.T) {
 	}
 	if link != "hello.txt" {
 		t.Fatalf("restored symlink = %q", link)
+	}
+}
+
+func TestRootFSUpperDirSyncPreservesXAttrs(t *testing.T) {
+	ctx := context.Background()
+	engine, err := s0fs.Open(ctx, s0fs.Config{
+		VolumeID: "fs-xattrs",
+		WALPath:  filepath.Join(t.TempDir(), "rootfs.wal"),
+	})
+	if err != nil {
+		t.Fatalf("open s0fs: %v", err)
+	}
+	defer engine.Close()
+
+	upper := t.TempDir()
+	dir := filepath.Join(upper, "deleted-base-dir")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir upper: %v", err)
+	}
+	const attrName = "user.sandbox0.rootfs"
+	attrValue := []byte("opaque")
+	if err := unix.Lsetxattr(dir, attrName, attrValue, 0); err != nil {
+		if isIgnorableXAttrError(err) || errors.Is(err, unix.EPERM) {
+			t.Skipf("xattrs are not available in this test environment: %v", err)
+		}
+		t.Fatalf("set xattr: %v", err)
+	}
+
+	if err := syncRootFSUpperToS0FS(ctx, engine, upper); err != nil {
+		t.Fatalf("sync upper: %v", err)
+	}
+
+	restored := filepath.Join(t.TempDir(), "restored")
+	if err := restoreRootFSUpperDir(ctx, engine, restored); err != nil {
+		t.Fatalf("restore upper: %v", err)
+	}
+	got := make([]byte, 64)
+	n, err := unix.Lgetxattr(filepath.Join(restored, "deleted-base-dir"), attrName, got)
+	if err != nil {
+		t.Fatalf("read restored xattr: %v", err)
+	}
+	if string(got[:n]) != string(attrValue) {
+		t.Fatalf("restored xattr = %q, want %q", string(got[:n]), string(attrValue))
 	}
 }

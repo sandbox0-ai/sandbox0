@@ -114,9 +114,6 @@ func (s *SandboxService) CleanSandboxRuntime(ctx context.Context, sandboxID stri
 		if err := s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 			return fmt.Errorf("delete runtime pod: %w", err)
 		}
-		if tx != nil {
-			return tx.MarkRuntimeCleaned(ctx, sandboxID, generation, s.clock.Now())
-		}
 		return nil
 	}
 	if s.sandboxStore != nil {

@@ -44,6 +44,10 @@ func TestBindSandboxRootFSSendsCtldRequest(t *testing.T) {
 	pod.Name = "pod-a"
 	pod.UID = types.UID("pod-uid")
 	pod.Status.HostIP = host
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:        "procd",
+		ContainerID: "containerd://container-a",
+	}}
 
 	err := service.bindSandboxRootFS(context.Background(), pod, &ClaimRequest{
 		TeamID:                    "team-a",
@@ -61,6 +65,12 @@ func TestBindSandboxRootFSSendsCtldRequest(t *testing.T) {
 	}
 	if got.TargetPath != sandboxRootFSMountPath {
 		t.Fatalf("target_path = %q, want %q", got.TargetPath, sandboxRootFSMountPath)
+	}
+	if got.ContainerID != "containerd://container-a" {
+		t.Fatalf("container_id = %q, want containerd://container-a", got.ContainerID)
+	}
+	if got.RootFSVolumeName != "sandbox-rootfs" {
+		t.Fatalf("rootfs_volume_name = %q, want sandbox-rootfs", got.RootFSVolumeName)
 	}
 	if got.BaseImageDigest != "sha256:abc" {
 		t.Fatalf("base_image_digest = %q, want sha256:abc", got.BaseImageDigest)

@@ -107,6 +107,42 @@ sandbox_runtime_class_name: kata-shared
 	}
 }
 
+func TestBuildPodSpecInjectsSandboxRootFSWhenCtldEnabled(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+ctld_enabled: true
+procd_config:
+  root_path: /workspace
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	spec := BuildPodSpec(newTestTemplate())
+	main := spec.Containers[0]
+	mount := findVolumeMount(main.VolumeMounts, SandboxRootFSVolumeName)
+	if mount == nil {
+		t.Fatal("expected sandbox rootfs volume mount")
+	}
+	if mount.MountPath != SandboxRootFSMountPath {
+		t.Fatalf("rootfs mount path = %q, want %q", mount.MountPath, SandboxRootFSMountPath)
+	}
+	if mount.MountPropagation == nil || *mount.MountPropagation != corev1.MountPropagationHostToContainer {
+		t.Fatalf("rootfs mount propagation = %#v, want HostToContainer", mount.MountPropagation)
+	}
+	if volume := findVolume(spec.Volumes, SandboxRootFSVolumeName); volume == nil || volume.EmptyDir == nil {
+		t.Fatalf("expected sandbox rootfs emptyDir volume, got %#v", volume)
+	}
+	envByName := envVarsByName(main.Env)
+	if got := envByName["root_path"].Value; got != SandboxRootFSMountPath {
+		t.Fatalf("root_path = %q, want %q", got, SandboxRootFSMountPath)
+	}
+	if got := envByName["sandbox_rootfs_path"].Value; got != SandboxRootFSMountPath {
+		t.Fatalf("sandbox_rootfs_path = %q, want %q", got, SandboxRootFSMountPath)
+	}
+	if got := envByName["sandbox_rootfs_chroot"].Value; got != "true" {
+		t.Fatalf("sandbox_rootfs_chroot = %q, want true", got)
+	}
+}
+
 func TestBuildPodSpecLeavesOrdinarySandboxNonPrivileged(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
@@ -493,6 +529,14 @@ func findEnvVar(envVars []corev1.EnvVar, name string) *corev1.EnvVar {
 		}
 	}
 	return nil
+}
+
+func envVarsByName(envVars []corev1.EnvVar) map[string]corev1.EnvVar {
+	out := make(map[string]corev1.EnvVar, len(envVars))
+	for _, envVar := range envVars {
+		out[envVar.Name] = envVar
+	}
+	return out
 }
 
 func findVolumeMount(mounts []corev1.VolumeMount, name string) *corev1.VolumeMount {

@@ -2,6 +2,7 @@ package portal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,14 +11,24 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 )
 
-const defaultSandboxRootFSSubdir = "rootfs"
+const (
+	defaultSandboxRootFSSubdir     = "rootfs"
+	defaultSandboxRootFSVolumeName = "sandbox-rootfs"
+	kubeletEmptyDirVolumeRoot      = "/var/lib/kubelet/pods"
+	containerdTaskRoot             = "/run/containerd/io.containerd.runtime.v2.task/k8s.io"
+)
+
+var (
+	mountOverlayRootFSForBind = mountOverlayRootFS
+	unmountRootFSForRelease   = unmountRootFS
+)
 
 // BindSandboxRootFS prepares the node-local mutable upperdir owner for one
 // sandbox runtime generation. The immutable base image is identified here but
@@ -52,19 +63,27 @@ func (m *Manager) BindSandboxRootFS(ctx context.Context, req ctldapi.BindSandbox
 	m.mu.Unlock()
 
 	cacheDir := filepath.Join(m.rootDir, defaultSandboxRootFSSubdir, safePath(req.TeamID), safePath(req.FilesystemID))
-	mountPoint := strings.TrimSpace(req.TargetPath)
-	if mountPoint == "" {
-		mountPoint = filepath.Join(cacheDir, "runtime", fmt.Sprintf("%d", req.RuntimeGeneration), "merged")
-	}
-	if err := os.MkdirAll(mountPoint, 0o755); err != nil {
-		return ctldapi.BindSandboxRootFSResponse{}, fmt.Errorf("create rootfs mount point: %w", err)
-	}
 	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
 		return ctldapi.BindSandboxRootFSResponse{}, fmt.Errorf("create rootfs cache dir: %w", err)
+	}
+	paths, err := sandboxRootFSPaths(req, cacheDir)
+	if err != nil {
+		return ctldapi.BindSandboxRootFSResponse{}, err
+	}
+	if err := os.MkdirAll(paths.targetHostPath, 0o755); err != nil {
+		return ctldapi.BindSandboxRootFSResponse{}, fmt.Errorf("create rootfs mount point: %w", err)
 	}
 
 	engine, err := m.openRootFSEngine(ctx, req.TeamID, req.FilesystemID, cacheDir)
 	if err != nil {
+		return ctldapi.BindSandboxRootFSResponse{}, err
+	}
+	if err := restoreRootFSUpperDir(ctx, engine, paths.upperDir); err != nil {
+		_ = engine.Close()
+		return ctldapi.BindSandboxRootFSResponse{}, err
+	}
+	if err := mountOverlayRootFSForBind(paths.baseRootPath, paths.upperDir, paths.workDir, paths.targetHostPath); err != nil {
+		_ = engine.Close()
 		return ctldapi.BindSandboxRootFSResponse{}, err
 	}
 	mount := &rootFSMount{
@@ -75,16 +94,22 @@ func (m *Manager) BindSandboxRootFS(ctx context.Context, req ctldapi.BindSandbox
 		runtimeGeneration: req.RuntimeGeneration,
 		baseImageRef:      strings.TrimSpace(req.BaseImageRef),
 		baseImageDigest:   strings.TrimSpace(req.BaseImageDigest),
-		mountPoint:        mountPoint,
+		mountPoint:        paths.mountPoint,
+		targetHostPath:    paths.targetHostPath,
+		baseRootPath:      paths.baseRootPath,
 		cacheDir:          cacheDir,
+		upperDir:          paths.upperDir,
+		workDir:           paths.workDir,
 		mountedAt:         time.Now().UTC(),
 		s0fs:              engine,
+		overlayMounted:    true,
 	}
 
 	m.mu.Lock()
 	if existing := m.rootfs[key]; existing != nil {
 		resp := rootFSBindResponse(existing)
 		m.mu.Unlock()
+		_ = unmountRootFSForRelease(paths.targetHostPath)
 		_ = engine.Close()
 		if !sameRootFSOwner(existing, req) {
 			return ctldapi.BindSandboxRootFSResponse{}, fmt.Errorf("sandbox rootfs %s already bound to sandbox %s generation %d", req.FilesystemID, existing.sandboxID, existing.runtimeGeneration)
@@ -119,6 +144,9 @@ func (m *Manager) FlushSandboxRootFS(ctx context.Context, req ctldapi.FlushSandb
 		m.mu.Unlock()
 		if s0 == nil {
 			return ctldapi.FlushSandboxRootFSResponse{Flushed: true, FilesystemID: filesystemID}, nil
+		}
+		if err := syncRootFSUpperToS0FS(ctx, s0, mount.upperDir); err != nil {
+			return ctldapi.FlushSandboxRootFSResponse{}, fmt.Errorf("sync sandbox rootfs upperdir: %w", err)
 		}
 		if _, err := s0.SyncMaterialize(ctx); err != nil {
 			return ctldapi.FlushSandboxRootFSResponse{}, fmt.Errorf("materialize sandbox rootfs: %w", err)
@@ -201,7 +229,7 @@ func (m *Manager) openRootFSEngine(ctx context.Context, teamID, filesystemID, ca
 		ObjectStoreForVolume: func(sourceID string) (objectstore.Store, error) {
 			return m.createRootFSObjectStore(teamID, sourceID)
 		},
-		HeadStore:      db.NewS0FSHeadStore(m.repo),
+		HeadStore:      newSandboxFilesystemHeadStore(m.repo),
 		Encryption:     encryption,
 		LocalDiskGuard: m.localDiskGuard(cacheDir),
 	})
@@ -251,6 +279,10 @@ func (m *Manager) startRootFSMaterializer(mount *rootFSMount) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				if err := syncRootFSUpperToS0FS(ctx, mount.s0fs, mount.upperDir); err != nil && m.logger != nil {
+					m.logger.Warn("ctld sandbox rootfs upperdir sync failed", zap.String("filesystem_id", filesystemID), zap.Error(err))
+					continue
+				}
 				if _, err := mount.s0fs.SyncMaterialize(ctx); err != nil && m.logger != nil {
 					m.logger.Warn("ctld sandbox rootfs materialize failed", zap.String("filesystem_id", filesystemID), zap.Error(err))
 				}
@@ -272,13 +304,114 @@ func (m *Manager) closeRootFSMount(ctx context.Context, mount *rootFSMount) erro
 		mount.materializeDone = nil
 	}
 	if mount.s0fs != nil {
+		if err := syncRootFSUpperToS0FS(ctx, mount.s0fs, mount.upperDir); err != nil {
+			return fmt.Errorf("sync sandbox rootfs upperdir: %w", err)
+		}
 		if _, err := mount.s0fs.SyncMaterialize(ctx); err != nil {
 			return fmt.Errorf("materialize sandbox rootfs: %w", err)
+		}
+		if mount.overlayMounted {
+			if err := unmountRootFSForRelease(mount.targetHostPath); err != nil {
+				return err
+			}
+			mount.overlayMounted = false
 		}
 		if err := mount.s0fs.Close(); err != nil {
 			return err
 		}
 		mount.s0fs = nil
+	}
+	return nil
+}
+
+type rootFSPaths struct {
+	mountPoint     string
+	targetHostPath string
+	baseRootPath   string
+	upperDir       string
+	workDir        string
+}
+
+func sandboxRootFSPaths(req ctldapi.BindSandboxRootFSRequest, cacheDir string) (rootFSPaths, error) {
+	generation := fmt.Sprintf("%d", req.RuntimeGeneration)
+	paths := rootFSPaths{
+		mountPoint: strings.TrimSpace(req.TargetPath),
+		upperDir:   filepath.Join(cacheDir, "runtime", generation, "upper"),
+		workDir:    filepath.Join(cacheDir, "runtime", generation, "work"),
+	}
+	if paths.mountPoint == "" {
+		paths.mountPoint = "/sandbox0/rootfs"
+	}
+	paths.targetHostPath = strings.TrimSpace(req.TargetHostPath)
+	if paths.targetHostPath == "" {
+		volumeName := strings.TrimSpace(req.RootFSVolumeName)
+		if volumeName == "" {
+			volumeName = defaultSandboxRootFSVolumeName
+		}
+		if strings.TrimSpace(req.PodUID) == "" {
+			return rootFSPaths{}, fmt.Errorf("pod_uid is required to resolve sandbox rootfs host path")
+		}
+		paths.targetHostPath = filepath.Join(kubeletEmptyDirVolumeRoot, safePath(req.PodUID), "volumes", "kubernetes.io~empty-dir", safePath(volumeName))
+	}
+	paths.baseRootPath = strings.TrimSpace(req.BaseRootPath)
+	if paths.baseRootPath == "" {
+		paths.baseRootPath = containerRootFSPath(req.ContainerID)
+	}
+	if paths.baseRootPath == "" {
+		return rootFSPaths{}, fmt.Errorf("container_id or base_root_path is required to bind sandbox rootfs")
+	}
+	return paths, nil
+}
+
+func containerRootFSPath(containerID string) string {
+	id := strings.TrimSpace(containerID)
+	if id == "" {
+		return ""
+	}
+	if idx := strings.Index(id, "://"); idx >= 0 {
+		id = id[idx+len("://"):]
+	}
+	id = safePath(id)
+	if id == "" {
+		return ""
+	}
+	return filepath.Join(containerdTaskRoot, id, "rootfs")
+}
+
+func mountOverlayRootFS(lowerDir, upperDir, workDir, targetPath string) error {
+	if strings.TrimSpace(lowerDir) == "" || strings.TrimSpace(upperDir) == "" || strings.TrimSpace(workDir) == "" || strings.TrimSpace(targetPath) == "" {
+		return fmt.Errorf("lowerdir, upperdir, workdir and target path are required")
+	}
+	if info, err := os.Stat(lowerDir); err != nil {
+		return fmt.Errorf("stat sandbox rootfs lowerdir: %w", err)
+	} else if !info.IsDir() {
+		return fmt.Errorf("sandbox rootfs lowerdir %s is not a directory", lowerDir)
+	}
+	for _, dir := range []string{upperDir, targetPath} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("create rootfs directory %s: %w", dir, err)
+		}
+	}
+	if err := resetDirectory(workDir, 0o755); err != nil {
+		return fmt.Errorf("reset sandbox rootfs workdir: %w", err)
+	}
+	options := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", lowerDir, upperDir, workDir)
+	if err := unix.Mount("overlay", targetPath, "overlay", 0, options); err != nil {
+		return fmt.Errorf("mount sandbox rootfs overlay: %w", err)
+	}
+	return nil
+}
+
+func unmountRootFS(targetPath string) error {
+	targetPath = strings.TrimSpace(targetPath)
+	if targetPath == "" {
+		return nil
+	}
+	if err := unix.Unmount(targetPath, unix.MNT_DETACH); err != nil {
+		if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOENT) {
+			return nil
+		}
+		return fmt.Errorf("unmount sandbox rootfs overlay: %w", err)
 	}
 	return nil
 }

@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	corev1 "k8s.io/api/core/v1"
 )
 
-const sandboxRootFSMountPath = "/sandbox0/rootfs"
+const sandboxRootFSMountPath = v1alpha1.SandboxRootFSMountPath
 
 func (s *SandboxService) bindSandboxRootFS(ctx context.Context, pod *corev1.Pod, req *ClaimRequest) error {
 	if s == nil || !s.config.CtldEnabled || req == nil || strings.TrimSpace(req.FilesystemID) == "" {
@@ -29,6 +30,7 @@ func (s *SandboxService) bindSandboxRootFS(ctx context.Context, pod *corev1.Pod,
 		Namespace:         pod.Namespace,
 		PodName:           pod.Name,
 		PodUID:            string(pod.UID),
+		ContainerID:       procdContainerID(pod),
 		SandboxID:         req.SandboxID,
 		TeamID:            req.TeamID,
 		FilesystemID:      req.FilesystemID,
@@ -36,6 +38,7 @@ func (s *SandboxService) bindSandboxRootFS(ctx context.Context, pod *corev1.Pod,
 		BaseImageRef:      req.FilesystemBaseImageRef,
 		BaseImageDigest:   req.FilesystemBaseImageDigest,
 		TargetPath:        sandboxRootFSMountPath,
+		RootFSVolumeName:  v1alpha1.SandboxRootFSVolumeName,
 	})
 	if err != nil {
 		return err
@@ -167,4 +170,16 @@ func podHostIP(pod *corev1.Pod) string {
 		return ""
 	}
 	return pod.Status.HostIP
+}
+
+func procdContainerID(pod *corev1.Pod) string {
+	if pod == nil {
+		return ""
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == "procd" {
+			return strings.TrimSpace(status.ContainerID)
+		}
+	}
+	return ""
 }

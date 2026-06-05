@@ -94,9 +94,14 @@ type rootFSMount struct {
 	baseImageRef      string
 	baseImageDigest   string
 	mountPoint        string
+	targetHostPath    string
+	baseRootPath      string
 	cacheDir          string
+	upperDir          string
+	workDir           string
 	mountedAt         time.Time
 	s0fs              *s0fs.Engine
+	overlayMounted    bool
 
 	materializeCancel context.CancelFunc
 	materializeDone   chan struct{}

@@ -14,13 +14,15 @@ import (
 )
 
 const (
-	procdBinVolumeName = "procd-bin"
-	procdConfigVolume  = "procd-config"
-	netdMITMCAVolume   = "netd-mitm-ca"
-	netdMITMCACertKey  = "ca.crt"
-	netdMITMCAEnvVar   = "SANDBOX0_NETD_MITM_CA_FILE"
-	netdMITMCADir      = "/var/run/sandbox0/netd"
-	netdMITMCACertPath = netdMITMCADir + "/mitm-ca.crt"
+	procdBinVolumeName      = "procd-bin"
+	procdConfigVolume       = "procd-config"
+	SandboxRootFSVolumeName = "sandbox-rootfs"
+	SandboxRootFSMountPath  = "/sandbox0/rootfs"
+	netdMITMCAVolume        = "netd-mitm-ca"
+	netdMITMCACertKey       = "ca.crt"
+	netdMITMCAEnvVar        = "SANDBOX0_NETD_MITM_CA_FILE"
+	netdMITMCADir           = "/var/run/sandbox0/netd"
+	netdMITMCACertPath      = netdMITMCADir + "/mitm-ca.crt"
 
 	// Template resources remain hard limits; requests reserve a smaller baseline
 	// so warm pools and cold-start sandboxes can be packed efficiently.
@@ -45,6 +47,7 @@ func BuildPodSpec(template *SandboxTemplate) corev1.PodSpec {
 	applyNetdMITMCATrustMaterial(&spec)
 	applyVolumePortals(&spec, template)
 	applyEmptyDirMounts(&spec, template)
+	applySandboxRootFS(&spec)
 	applyProcdInit(&spec)
 	applyDefaultSandboxPlacement(&spec)
 
@@ -244,6 +247,56 @@ func applyEmptyDirMounts(spec *corev1.PodSpec, template *SandboxTemplate) {
 				MountPath: mountPath,
 			})
 		}
+	}
+}
+
+func applySandboxRootFS(spec *corev1.PodSpec) {
+	if spec == nil {
+		return
+	}
+	cfg := config.LoadManagerConfig()
+	if cfg == nil || !cfg.CtldEnabled {
+		return
+	}
+	volumeFound := false
+	for i := range spec.Volumes {
+		if spec.Volumes[i].Name != SandboxRootFSVolumeName {
+			continue
+		}
+		volumeFound = true
+		spec.Volumes[i].VolumeSource = corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		}
+		break
+	}
+	if !volumeFound {
+		spec.Volumes = append(spec.Volumes, corev1.Volume{
+			Name: SandboxRootFSVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		})
+	}
+
+	mountPropagation := corev1.MountPropagationHostToContainer
+	for i := range spec.Containers {
+		ensureContainerVolumeMount(&spec.Containers[i], corev1.VolumeMount{
+			Name:             SandboxRootFSVolumeName,
+			MountPath:        SandboxRootFSMountPath,
+			MountPropagation: &mountPropagation,
+		})
+		ensureContainerEnvVar(&spec.Containers[i], corev1.EnvVar{
+			Name:  "root_path",
+			Value: SandboxRootFSMountPath,
+		})
+		ensureContainerEnvVar(&spec.Containers[i], corev1.EnvVar{
+			Name:  "sandbox_rootfs_path",
+			Value: SandboxRootFSMountPath,
+		})
+		ensureContainerEnvVar(&spec.Containers[i], corev1.EnvVar{
+			Name:  "sandbox_rootfs_chroot",
+			Value: "true",
+		})
 	}
 }
 

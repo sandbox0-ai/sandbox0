@@ -453,12 +453,18 @@ func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(
 		}
 		if err := r.Get(ctx, key, obj); err != nil {
 			if apierrors.IsNotFound(err) {
+				if ref.Kind == "ConfigMap" && ref.Namespace != "" {
+					return r.deleteHashedServiceConfigMaps(ctx, ref.Namespace, ref.Name)
+				}
 				return nil
 			}
 			return err
 		}
 		if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
 			return err
+		}
+		if ref.Kind == "ConfigMap" && ref.Namespace != "" {
+			return r.deleteHashedServiceConfigMaps(ctx, ref.Namespace, ref.Name)
 		}
 		return nil
 	}
@@ -507,6 +513,23 @@ func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(
 		}
 	}
 
+	return nil
+}
+
+func (r *Sandbox0InfraReconciler) deleteHashedServiceConfigMaps(ctx context.Context, namespace, baseName string) error {
+	var configMaps corev1.ConfigMapList
+	if err := r.List(ctx, &configMaps, client.InNamespace(namespace)); err != nil {
+		return err
+	}
+	for _, configMap := range configMaps.Items {
+		if configMap.Annotations[common.ServiceConfigBaseNameAnnotation] != baseName {
+			continue
+		}
+		cm := configMap.DeepCopy()
+		if err := r.Delete(ctx, cm); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
 	return nil
 }
 

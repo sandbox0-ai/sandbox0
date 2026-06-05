@@ -15,10 +15,11 @@ import (
 const rootFSLauncherArg = "__sandbox0_rootfs_launch"
 
 type rootFSLauncherOptions struct {
-	Root    string
-	CWD     string
-	Command string
-	Args    []string
+	Root           string
+	CWD            string
+	ExternalMounts []string
+	Command        string
+	Args           []string
 }
 
 // RunLauncherFromArgs executes the internal rootfs launcher mode when args
@@ -50,6 +51,12 @@ func parseRootFSLauncherArgs(args []string) (rootFSLauncherOptions, error) {
 			}
 			opts.CWD = args[1]
 			args = args[2:]
+		case "--external-mount":
+			if len(args) < 2 {
+				return opts, fmt.Errorf("--external-mount requires a value")
+			}
+			opts.ExternalMounts = append(opts.ExternalMounts, args[1])
+			args = args[2:]
 		case "--":
 			args = args[1:]
 			if len(args) == 0 {
@@ -74,6 +81,16 @@ func parseRootFSLauncherArgs(args []string) (rootFSLauncherOptions, error) {
 	opts.Command, err = cleanAbsoluteLauncherPath(opts.Command, "command")
 	if err != nil {
 		return opts, err
+	}
+	for i, mount := range opts.ExternalMounts {
+		clean, err := cleanAbsoluteLauncherPath(mount, "external mount")
+		if err != nil {
+			return opts, err
+		}
+		if clean == string(filepath.Separator) {
+			return opts, fmt.Errorf("external mount must not be root")
+		}
+		opts.ExternalMounts[i] = clean
 	}
 	return opts, nil
 }
@@ -103,6 +120,9 @@ func runRootFSLauncher(opts rootFSLauncherOptions) error {
 		return err
 	}
 	if err := prepareSandboxRootFSMounts(opts.Root); err != nil {
+		return err
+	}
+	if err := bindExternalMounts(opts.Root, opts.ExternalMounts); err != nil {
 		return err
 	}
 
@@ -178,6 +198,78 @@ func prepareSandboxRootFSMounts(root string) error {
 		return fmt.Errorf("chmod sandbox tmp: %w", err)
 	}
 	return nil
+}
+
+func bindExternalMounts(root string, mounts []string) error {
+	for _, mountPath := range mounts {
+		source := filepath.Clean(mountPath)
+		info, err := os.Lstat(source)
+		if err != nil {
+			return fmt.Errorf("stat external mount %s: %w", source, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("external mount %s must not be a symlink", source)
+		}
+		target, err := prepareExternalMountTarget(root, source, info)
+		if err != nil {
+			return err
+		}
+		if filepath.Clean(source) == filepath.Clean(target) {
+			continue
+		}
+		if err := unix.Mount(source, target, "", unix.MS_BIND|unix.MS_REC, ""); err != nil && !errors.Is(err, unix.EBUSY) {
+			return fmt.Errorf("bind external mount %s into sandbox rootfs: %w", source, err)
+		}
+	}
+	return nil
+}
+
+func prepareExternalMountTarget(root, mountPath string, sourceInfo os.FileInfo) (string, error) {
+	rel := strings.TrimPrefix(filepath.Clean(mountPath), string(filepath.Separator))
+	if rel == "" {
+		return "", fmt.Errorf("external mount target must not be root")
+	}
+	current := filepath.Clean(root)
+	parts := strings.Split(rel, string(filepath.Separator))
+	for i, part := range parts {
+		current = filepath.Join(current, part)
+		last := i == len(parts)-1
+		info, err := os.Lstat(current)
+		switch {
+		case err == nil:
+			if info.Mode()&os.ModeSymlink != 0 {
+				return "", fmt.Errorf("external mount target %s must not be a symlink", current)
+			}
+			if !last && !info.IsDir() {
+				return "", fmt.Errorf("external mount parent %s is not a directory", current)
+			}
+			if last {
+				if sourceInfo.IsDir() && !info.IsDir() {
+					return "", fmt.Errorf("external mount target %s is not a directory", current)
+				}
+				if !sourceInfo.IsDir() && info.IsDir() {
+					return "", fmt.Errorf("external mount target %s is a directory", current)
+				}
+			}
+		case os.IsNotExist(err):
+			if last && !sourceInfo.IsDir() {
+				file, err := os.OpenFile(current, os.O_CREATE|os.O_RDWR, sourceInfo.Mode().Perm())
+				if err != nil {
+					return "", fmt.Errorf("create external mount file target %s: %w", current, err)
+				}
+				if err := file.Close(); err != nil {
+					return "", fmt.Errorf("close external mount file target %s: %w", current, err)
+				}
+				return current, nil
+			}
+			if err := os.Mkdir(current, 0o755); err != nil && !os.IsExist(err) {
+				return "", fmt.Errorf("create external mount target %s: %w", current, err)
+			}
+		default:
+			return "", fmt.Errorf("stat external mount target %s: %w", current, err)
+		}
+	}
+	return current, nil
 }
 
 func ensureSandboxRootDir(root, name string, mode os.FileMode) (string, error) {

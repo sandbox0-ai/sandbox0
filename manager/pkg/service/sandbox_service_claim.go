@@ -1374,10 +1374,11 @@ func (s *SandboxService) initializeProcd(
 	}
 
 	initReq := InitializeRequest{
-		SandboxID: sandboxID,
-		TeamID:    teamID,
-		EnvVars:   sandboxEnvVarsForInitialize(req.Config),
-		Webhook:   webhookConfig,
+		SandboxID:         sandboxID,
+		TeamID:            teamID,
+		EnvVars:           sandboxEnvVarsForInitialize(req.Config),
+		VolumeMountPoints: sandboxVolumeMountPointsForInitialize(req.Mounts),
+		Webhook:           webhookConfig,
 	}
 
 	var initErr error
@@ -1413,4 +1414,24 @@ func sandboxEnvVarsForInitialize(cfg *SandboxConfig) map[string]string {
 		return nil
 	}
 	return cloneEnvVars(cfg.EnvVars)
+}
+
+func sandboxVolumeMountPointsForInitialize(mounts []ClaimMount) []string {
+	if len(mounts) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(mounts))
+	seen := make(map[string]struct{}, len(mounts))
+	for _, mount := range mounts {
+		mountPoint := filepath.Clean(strings.TrimSpace(mount.MountPoint))
+		if mountPoint == "." || mountPoint == "" || mountPoint == string(filepath.Separator) || !filepath.IsAbs(mountPoint) {
+			continue
+		}
+		if _, ok := seen[mountPoint]; ok {
+			continue
+		}
+		seen[mountPoint] = struct{}{}
+		out = append(out, mountPoint)
+	}
+	return out
 }

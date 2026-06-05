@@ -4,6 +4,7 @@ package file
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -108,6 +109,32 @@ func TestSanitizePath(t *testing.T) {
 				t.Errorf("sanitizePath() = %s, want %s", result, filepath.Clean(tt.want))
 			}
 		})
+	}
+}
+
+func TestSanitizePathUsesExternalMount(t *testing.T) {
+	rootPath := t.TempDir()
+	externalPath := filepath.Join(t.TempDir(), "workspace", "data")
+	if err := os.MkdirAll(externalPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := NewManager(rootPath)
+	if err != nil {
+		t.Fatalf("NewManager() failed = %v", err)
+	}
+	m.SetExternalMounts([]string{externalPath})
+
+	got := m.sanitizePath(filepath.Join(externalPath, "hello.txt"))
+	want := filepath.Join(externalPath, "hello.txt")
+	if got != want {
+		t.Fatalf("sanitizePath() = %s, want %s", got, want)
+	}
+
+	got = m.sanitizePath(filepath.Join(externalPath+"-other", "hello.txt"))
+	want = filepath.Join(rootPath, strings.TrimPrefix(filepath.Clean(filepath.Join(externalPath+"-other", "hello.txt")), string(filepath.Separator)))
+	if got != want {
+		t.Fatalf("sanitizePath() for sibling = %s, want %s", got, want)
 	}
 }
 

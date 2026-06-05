@@ -108,10 +108,11 @@ type StatsResponse struct {
 
 // InitializeRequest represents the procd initialize request.
 type InitializeRequest struct {
-	SandboxID string             `json:"sandbox_id"`
-	TeamID    string             `json:"team_id,omitempty"`
-	EnvVars   map[string]string  `json:"env_vars,omitempty"`
-	Webhook   *InitializeWebhook `json:"webhook,omitempty"`
+	SandboxID         string             `json:"sandbox_id"`
+	TeamID            string             `json:"team_id,omitempty"`
+	EnvVars           map[string]string  `json:"env_vars,omitempty"`
+	VolumeMountPoints []string           `json:"volume_mount_points,omitempty"`
+	Webhook           *InitializeWebhook `json:"webhook,omitempty"`
 }
 
 // InitializeWebhook represents webhook configuration for initialization.

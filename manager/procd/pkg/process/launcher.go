@@ -13,8 +13,9 @@ import (
 
 // LauncherConfig controls how procd launches user processes.
 type LauncherConfig struct {
-	RootPath     string
-	LauncherPath string
+	RootPath       string
+	LauncherPath   string
+	ExternalMounts []string
 }
 
 // LaunchOptions are applied to one exec.Cmd before it starts.
@@ -35,8 +36,17 @@ func ConfigureLauncher(cfg LauncherConfig) {
 	if cfg.RootPath == "." || cfg.RootPath == string(filepath.Separator) {
 		cfg.RootPath = ""
 	}
+	cfg.ExternalMounts = normalizeLauncherExternalMounts(cfg.ExternalMounts)
 	launcherMu.Lock()
 	defaultLauncher = cfg
+	launcherMu.Unlock()
+}
+
+// ConfigureExternalMounts updates the pod-local mount paths that the launcher
+// should bind into the sandbox rootfs before pivoting.
+func ConfigureExternalMounts(paths []string) {
+	launcherMu.Lock()
+	defaultLauncher.ExternalMounts = normalizeLauncherExternalMounts(paths)
 	launcherMu.Unlock()
 }
 
@@ -98,9 +108,11 @@ func (cfg LauncherConfig) newPivotCommand(ctx context.Context, cmdPath string, a
 		rootFSLauncherArg,
 		"--root", cfg.RootPath,
 		"--cwd", cfg.sandboxPath(opts.CWD),
-		"--",
-		cmdPath,
 	}
+	for _, mount := range cfg.ExternalMounts {
+		launcherArgs = append(launcherArgs, "--external-mount", mount)
+	}
+	launcherArgs = append(launcherArgs, "--", cmdPath)
 	launcherArgs = append(launcherArgs, args...)
 	cmd := exec.CommandContext(ctx, launcherPath, launcherArgs...)
 	cmd.Dir = string(filepath.Separator)
@@ -170,4 +182,24 @@ func isExecutable(path string) error {
 		return fmt.Errorf("%w: %s is not executable", ErrProcessStartFailed, path)
 	}
 	return nil
+}
+
+func normalizeLauncherExternalMounts(paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(paths))
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		clean := filepath.Clean(strings.TrimSpace(path))
+		if clean == "." || clean == "" || clean == string(filepath.Separator) || !filepath.IsAbs(clean) {
+			continue
+		}
+		if _, ok := seen[clean]; ok {
+			continue
+		}
+		seen[clean] = struct{}{}
+		out = append(out, clean)
+	}
+	return out
 }

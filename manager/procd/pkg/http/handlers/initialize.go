@@ -8,6 +8,7 @@ import (
 
 	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/webhook"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
@@ -39,10 +40,11 @@ func NewInitializeHandler(dispatcher *webhook.Dispatcher, fileManager *file.Mana
 
 // InitializeRequest is the request body for initializing sandbox settings.
 type InitializeRequest struct {
-	SandboxID string             `json:"sandbox_id"`
-	TeamID    string             `json:"team_id,omitempty"`
-	EnvVars   map[string]string  `json:"env_vars,omitempty"`
-	Webhook   *InitializeWebhook `json:"webhook,omitempty"`
+	SandboxID         string             `json:"sandbox_id"`
+	TeamID            string             `json:"team_id,omitempty"`
+	EnvVars           map[string]string  `json:"env_vars,omitempty"`
+	VolumeMountPoints []string           `json:"volume_mount_points,omitempty"`
+	Webhook           *InitializeWebhook `json:"webhook,omitempty"`
 }
 
 // InitializeWebhook represents webhook configuration.
@@ -99,6 +101,10 @@ func (h *InitializeHandler) Initialize(w http.ResponseWriter, r *http.Request) {
 	if h.contextManager != nil {
 		h.contextManager.SetSandboxEnvVars(req.EnvVars)
 	}
+	if h.fileManager != nil {
+		h.fileManager.SetExternalMounts(req.VolumeMountPoints)
+	}
+	process.ConfigureExternalMounts(req.VolumeMountPoints)
 
 	h.dispatcher.SetConfig(webhookURL, webhookSecret)
 	h.dispatcher.SetIdentity(req.SandboxID, teamID)

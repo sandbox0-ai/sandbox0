@@ -35,6 +35,7 @@ type SandboxSummary struct {
 	Status        string            `json:"status"`
 	Paused        bool              `json:"paused"`
 	PowerState    SandboxPowerState `json:"power_state"`
+	FilesystemID  string            `json:"filesystem_id,omitempty"`
 	CreatedAt     time.Time         `json:"created_at"`
 	ExpiresAt     time.Time         `json:"expires_at"`
 	HardExpiresAt time.Time         `json:"hard_expires_at"`
@@ -107,6 +108,7 @@ func (s *SandboxService) ListSandboxes(ctx context.Context, req *ListSandboxesRe
 			Status:        status,
 			Paused:        paused,
 			PowerState:    powerState,
+			FilesystemID:  pod.Annotations[controller.AnnotationFilesystemID],
 			CreatedAt:     pod.CreationTimestamp.Time,
 			ExpiresAt:     expiresAt,
 			HardExpiresAt: hardExpiresAt,
@@ -171,6 +173,7 @@ func (s *SandboxService) listSandboxesFromStore(ctx context.Context, req *ListSa
 			Status:        sandbox.Status,
 			Paused:        sandbox.Paused,
 			PowerState:    sandbox.PowerState,
+			FilesystemID:  sandbox.FilesystemID,
 			CreatedAt:     sandbox.CreatedAt,
 			ExpiresAt:     sandbox.ExpiresAt,
 			HardExpiresAt: sandbox.HardExpiresAt,

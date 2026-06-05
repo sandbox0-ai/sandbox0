@@ -45,6 +45,8 @@ const (
 	AnnotationHardExpiresAt                = "sandbox0.ai/hard-expires-at"
 	AnnotationConfig                       = "sandbox0.ai/config"
 	AnnotationMounts                       = "sandbox0.ai/mounts"
+	AnnotationFilesystemID                 = "sandbox0.ai/filesystem-id"
+	AnnotationFilesystemBaseImageRef       = "sandbox0.ai/filesystem-base-image-ref"
 	AnnotationPaused                       = "sandbox0.ai/paused"
 	AnnotationPausedAt                     = "sandbox0.ai/paused-at"
 	AnnotationPausedState                  = "sandbox0.ai/paused-state"

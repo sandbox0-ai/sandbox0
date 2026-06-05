@@ -79,12 +79,13 @@ type idlePoolPodInfo struct {
 func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiModeSuiteOptions) {
 	Describe(opts.describe, Ordered, func() {
 		var (
-			env               *framework.ScenarioEnv
-			session           *e2eutils.Session
-			cleanup           func()
-			sandboxID         string
-			sshFixtureState   *sshFixture
-			sshFixtureCleanup func()
+			env                 *framework.ScenarioEnv
+			session             *e2eutils.Session
+			cleanup             func()
+			sandboxID           string
+			sandboxFilesystemID string
+			sshFixtureState     *sshFixture
+			sshFixtureCleanup   func()
 		)
 
 		BeforeAll(func() {
@@ -109,6 +110,9 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 
 			resp := claimSandboxEventually(env, session, "default")
 			sandboxID = resp.SandboxId
+			Expect(resp.FilesystemId).NotTo(BeNil())
+			sandboxFilesystemID = *resp.FilesystemId
+			Expect(sandboxFilesystemID).NotTo(BeEmpty())
 		})
 
 		AfterAll(func() {
@@ -188,13 +192,17 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 			It("fetches status and refreshes sandboxes", func() {
 				Expect(sandboxID).NotTo(BeEmpty())
 
-				_, status, err := session.GetSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+				sandbox, status, err := session.GetSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(status).To(Equal(http.StatusOK))
+				Expect(sandbox.FilesystemId).NotTo(BeNil())
+				Expect(*sandbox.FilesystemId).To(Equal(sandboxFilesystemID))
 
-				_, status, err = session.GetSandboxStatus(env.TestCtx.Context, GinkgoT(), sandboxID)
+				sandboxStatus, status, err := session.GetSandboxStatus(env.TestCtx.Context, GinkgoT(), sandboxID)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(status).To(Equal(http.StatusOK))
+				Expect(sandboxStatus.FilesystemId).NotTo(BeNil())
+				Expect(*sandboxStatus.FilesystemId).To(Equal(sandboxFilesystemID))
 
 				_, status, err = session.RefreshSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
 				Expect(err).NotTo(HaveOccurred())
@@ -203,7 +211,7 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 
 			if opts.includeSandboxListTests {
 				It("lists sandboxes", func() {
-					assertSandboxListContainsClaimedSandbox(env, session, sandboxID)
+					assertSandboxListContainsClaimedSandbox(env, session, sandboxID, sandboxFilesystemID)
 				})
 
 				It("lists sandboxes with filters", func() {
@@ -1282,7 +1290,7 @@ spec:
 	}).WithTimeout(45 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
 }
 
-func assertSandboxListContainsClaimedSandbox(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {
+func assertSandboxListContainsClaimedSandbox(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID, filesystemID string) {
 	listResp, status, err := session.ListSandboxes(env.TestCtx.Context, GinkgoT(), nil)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
@@ -1295,6 +1303,8 @@ func assertSandboxListContainsClaimedSandbox(env *framework.ScenarioEnv, session
 			found = true
 			Expect(sb.TemplateId).NotTo(BeEmpty())
 			Expect(sb.Status).NotTo(BeEmpty())
+			Expect(sb.FilesystemId).NotTo(BeNil())
+			Expect(*sb.FilesystemId).To(Equal(filesystemID))
 			break
 		}
 	}

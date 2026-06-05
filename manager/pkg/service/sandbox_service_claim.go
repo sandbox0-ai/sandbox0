@@ -457,6 +457,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	}
 	s.observeClaimPhase(req.Template, "unknown", "acquire_filesystem", phaseStarted, nil)
 	filesystemOwnerActive := true
+	claimSucceeded := false
 	defer func() {
 		if filesystemOwnerActive {
 			releaseCtx := context.Background()
@@ -467,6 +468,21 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 					zap.Error(err),
 				)
 			}
+		}
+	}()
+	rootFSBound := false
+	rootFSBoundPod := (*corev1.Pod)(nil)
+	defer func() {
+		if claimSucceeded || !rootFSBound {
+			return
+		}
+		releaseCtx := context.Background()
+		if err := s.releaseSandboxRootFSForPod(releaseCtx, rootFSBoundPod, req); err != nil && s.logger != nil {
+			s.logger.Warn("Failed to release sandbox rootfs after claim failure",
+				zap.String("sandboxID", req.SandboxID),
+				zap.String("filesystemID", req.FilesystemID),
+				zap.Error(err),
+			)
 		}
 	}()
 
@@ -548,6 +564,19 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	}
 
 	phaseStarted = time.Now()
+	if err := s.bindSandboxRootFS(ctx, pod, req); err != nil {
+		s.observeClaimPhase(req.Template, claimType, "bind_sandbox_rootfs", phaseStarted, err)
+		s.requestSandboxDeletionAfterClaimFailure(pod, "sandbox rootfs bind failed")
+		if metrics != nil {
+			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+		}
+		return nil, fmt.Errorf("bind sandbox rootfs: %w", err)
+	}
+	rootFSBound = true
+	rootFSBoundPod = pod
+	s.observeClaimPhase(req.Template, claimType, "bind_sandbox_rootfs", phaseStarted, nil)
+
+	phaseStarted = time.Now()
 	portalMounts, err := s.bindVolumePortals(ctx, pod, req, template)
 	s.observeClaimPhase(req.Template, claimType, "bind_volume_portals", phaseStarted, err)
 	if err != nil {
@@ -604,6 +633,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "success").Inc()
 		metrics.SandboxClaimDuration.WithLabelValues(req.Template, claimType).Observe(time.Since(start).Seconds())
 	}
+	claimSucceeded = true
 	filesystemOwnerActive = false
 
 	return &ClaimResponse{

@@ -137,6 +137,23 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	if err := s.ensureClaimFilesystem(req, template); err != nil {
 		return err
 	}
+	rootFSBound := false
+	defer func() {
+		if !rootFSBound {
+			return
+		}
+		if err := s.releaseSandboxRootFSForPod(context.Background(), pod, req); err != nil && s.logger != nil {
+			s.logger.Warn("Failed to release sandbox rootfs after restore failure",
+				zap.String("sandboxID", req.SandboxID),
+				zap.String("filesystemID", req.FilesystemID),
+				zap.Error(err),
+			)
+		}
+	}()
+	if err := s.bindSandboxRootFS(ctx, pod, req); err != nil {
+		return fmt.Errorf("bind sandbox rootfs: %w", err)
+	}
+	rootFSBound = true
 	if _, err := s.bindVolumePortals(ctx, pod, req, template); err != nil {
 		return fmt.Errorf("bind volume portals: %w", err)
 	}
@@ -153,6 +170,7 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	if err := s.persistUpdatedSandboxPod(ctx, pod); err != nil {
 		return fmt.Errorf("persist restored sandbox: %w", err)
 	}
+	rootFSBound = false
 	if s.logger != nil {
 		s.logger.Info("Restored cleaned sandbox runtime",
 			zap.String("sandboxID", record.ID),

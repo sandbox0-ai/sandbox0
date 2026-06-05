@@ -364,6 +364,9 @@ func (s *SandboxService) CleanupDeletedSandbox(ctx context.Context, info Sandbox
 	if err := s.unbindDeletedSandboxVolumePortals(ctx, info); err != nil {
 		errs = append(errs, fmt.Errorf("unbind sandbox volume portals: %w", err))
 	}
+	if err := s.releaseSandboxRootFSForLifecycle(ctx, info); err != nil {
+		errs = append(errs, fmt.Errorf("release sandbox rootfs: %w", err))
+	}
 	if err := s.releaseSandboxFilesystemOwner(ctx, info.FilesystemID, sandboxID, info.RuntimeGeneration); err != nil {
 		errs = append(errs, fmt.Errorf("release sandbox filesystem owner: %w", err))
 	}

@@ -106,6 +106,11 @@ func (s *SandboxService) CleanSandboxRuntime(ctx context.Context, sandboxID stri
 		if err != nil {
 			return fmt.Errorf("mark runtime deletion reason: %w", err)
 		}
+		filesystemID := sandboxFilesystemIDForClean(record, pod)
+		teamID := sandboxTeamIDForClean(record, pod)
+		if err := s.flushSandboxRootFSForPod(ctx, pod, filesystemID, teamID, sandboxID, generation); err != nil {
+			return fmt.Errorf("flush sandbox rootfs: %w", err)
+		}
 		if err := s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 			return fmt.Errorf("delete runtime pod: %w", err)
 		}
@@ -124,6 +129,26 @@ func (s *SandboxService) CleanSandboxRuntime(ctx context.Context, sandboxID stri
 		return nil
 	}
 	return clean(ctx, nil, nil)
+}
+
+func sandboxFilesystemIDForClean(record *SandboxRecord, pod *corev1.Pod) string {
+	if record != nil && strings.TrimSpace(record.FilesystemID) != "" {
+		return strings.TrimSpace(record.FilesystemID)
+	}
+	if pod != nil && pod.Annotations != nil {
+		return strings.TrimSpace(pod.Annotations[controller.AnnotationFilesystemID])
+	}
+	return ""
+}
+
+func sandboxTeamIDForClean(record *SandboxRecord, pod *corev1.Pod) string {
+	if record != nil && strings.TrimSpace(record.TeamID) != "" {
+		return strings.TrimSpace(record.TeamID)
+	}
+	if pod != nil && pod.Annotations != nil {
+		return strings.TrimSpace(pod.Annotations[controller.AnnotationTeamID])
+	}
+	return ""
 }
 
 // CleanSandboxRuntimeByID implements controller.SandboxRuntimeCleaner.

@@ -51,6 +51,7 @@ type Manager struct {
 	portals         map[string]*portalMount
 	portalsByTarget map[string]*portalMount
 	boundVolumes    map[string]*boundVolume
+	rootfs          map[string]*rootFSMount
 	volumes         *localVolumeManager
 }
 
@@ -79,6 +80,23 @@ type boundVolume struct {
 
 	heartbeatCancel context.CancelFunc
 	heartbeatDone   chan struct{}
+
+	materializeCancel context.CancelFunc
+	materializeDone   chan struct{}
+}
+
+type rootFSMount struct {
+	filesystemID      string
+	teamID            string
+	sandboxID         string
+	podUID            string
+	runtimeGeneration int64
+	baseImageRef      string
+	baseImageDigest   string
+	mountPoint        string
+	cacheDir          string
+	mountedAt         time.Time
+	s0fs              *s0fs.Engine
 
 	materializeCancel context.CancelFunc
 	materializeDone   chan struct{}
@@ -133,6 +151,7 @@ func NewManager(cfg Config) *Manager {
 		portals:                make(map[string]*portalMount),
 		portalsByTarget:        make(map[string]*portalMount),
 		boundVolumes:           make(map[string]*boundVolume),
+		rootfs:                 make(map[string]*rootFSMount),
 		volumes:                newLocalVolumeManager(),
 	}
 	manager.volumeAPI = newMountedVolumeAPIHandler(storageConfig, cfg.Repository, manager.volumes, l)

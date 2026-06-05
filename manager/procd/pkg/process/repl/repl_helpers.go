@@ -1,9 +1,9 @@
 package repl
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
@@ -33,23 +33,26 @@ func startWithCandidates(base *process.BaseProcess, runner *process.PTYRunner, c
 	foundAny := false
 
 	for _, candidate := range candidates {
-		path, err := exec.LookPath(candidate.name)
+		env := process.MergeEnvironment(os.Environ(), config.EnvVars, extraEnv)
+		path, err := process.LookPath(candidate.name, env)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: not found", candidate.name))
 			continue
 		}
 		foundAny = true
 
-		cmd := exec.Command(path, candidate.args...)
-		if config.CWD != "" {
-			cmd.Dir = config.CWD
+		cmd, err := process.NewCommandContext(context.Background(), path, candidate.args, process.LaunchOptions{
+			CWD: config.CWD,
+			Env: env,
+		})
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", path, err))
+			continue
 		}
 
 		// Note: Do NOT set Setpgid for PTY processes.
 		// PTY automatically creates a new session and handles terminal control.
 		// Setting Setpgid would conflict with PTY's session management.
-
-		cmd.Env = process.MergeEnvironment(os.Environ(), config.EnvVars, extraEnv)
 
 		err = runner.Start(cmd, config.PTYSize)
 		if err == nil {
@@ -70,7 +73,7 @@ func startWithCandidates(base *process.BaseProcess, runner *process.PTYRunner, c
 
 // CheckExecutable checks if an executable is available in PATH.
 func CheckExecutable(name string) (string, bool) {
-	path, err := exec.LookPath(name)
+	path, err := process.LookPath(name, os.Environ())
 	return path, err == nil
 }
 

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -48,6 +49,7 @@ func main() {
 		zap.Int("http_port", cfg.HTTPPort),
 		zap.String("root_path", cfg.RootPath),
 	)
+	configureProcessLauncher(logger)
 	if bundlePath, err := trust.ConfigureNetdMITMCATrust(); err != nil {
 		logger.Warn("Failed to configure netd MITM CA trust", zap.Error(err))
 	} else if bundlePath != "" {
@@ -264,4 +266,26 @@ func initLogger(logLevel string) *zap.Logger {
 	}
 
 	return logger
+}
+
+func configureProcessLauncher(logger *zap.Logger) {
+	rootPath := strings.TrimSpace(os.Getenv("sandbox_rootfs_path"))
+	if rootPath == "" {
+		return
+	}
+	chroot := true
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("sandbox_rootfs_chroot"))) {
+	case "0", "false", "off", "disabled", "no":
+		chroot = false
+	}
+	process.ConfigureLauncher(process.LauncherConfig{
+		RootPath: rootPath,
+		Chroot:   chroot,
+	})
+	if logger != nil {
+		logger.Info("Configured process launcher",
+			zap.String("sandbox_rootfs_path", rootPath),
+			zap.Bool("sandbox_rootfs_chroot", chroot),
+		)
+	}
 }

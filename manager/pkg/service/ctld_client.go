@@ -72,6 +72,18 @@ func (c *CtldClient) AbortVolumePortalHandoff(ctx context.Context, ctldAddress s
 	return c.apiOrDefault().AbortVolumePortalHandoff(ctx, ctldAddress, req)
 }
 
+func (c *CtldClient) BindSandboxRootFS(ctx context.Context, ctldAddress string, req ctldapi.BindSandboxRootFSRequest) (*ctldapi.BindSandboxRootFSResponse, error) {
+	return c.apiOrDefault().BindSandboxRootFS(ctx, ctldAddress, req)
+}
+
+func (c *CtldClient) FlushSandboxRootFS(ctx context.Context, ctldAddress string, req ctldapi.FlushSandboxRootFSRequest) (*ctldapi.FlushSandboxRootFSResponse, error) {
+	return c.apiOrDefault().FlushSandboxRootFS(ctx, ctldAddress, req)
+}
+
+func (c *CtldClient) ReleaseSandboxRootFS(ctx context.Context, ctldAddress string, req ctldapi.ReleaseSandboxRootFSRequest) (*ctldapi.ReleaseSandboxRootFSResponse, error) {
+	return c.apiOrDefault().ReleaseSandboxRootFS(ctx, ctldAddress, req)
+}
+
 func (c *CtldClient) apiOrDefault() *ctldapi.Client {
 	if c != nil && c.api != nil {
 		return c.api

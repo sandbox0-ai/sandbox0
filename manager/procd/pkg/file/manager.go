@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -60,20 +61,12 @@ func NewManager(rootPath string) (*Manager, error) {
 	}, nil
 }
 
-// sanitizePath cleans the path and resolves relative paths against rootPath.
-// The sandbox container provides the isolation boundary, so all paths
-// (absolute or relative) within the sandbox are allowed.
+// sanitizePath resolves sandbox paths inside rootPath. Absolute user paths are
+// treated as absolute within the sandbox root, not the carrier container root.
 func (m *Manager) sanitizePath(path string) string {
-	// Clean the path to resolve . and .. components
-	cleanPath := filepath.Clean(path)
-
-	// For absolute paths, return as-is
-	if filepath.IsAbs(cleanPath) {
-		return cleanPath
-	}
-
-	// For relative paths, join with root and clean
-	return filepath.Clean(filepath.Join(m.rootPath, cleanPath))
+	cleanPath := filepath.Clean(string(filepath.Separator) + path)
+	rel := strings.TrimPrefix(cleanPath, string(filepath.Separator))
+	return filepath.Clean(filepath.Join(m.rootPath, rel))
 }
 
 func pathIsDir(path string) (bool, error) {

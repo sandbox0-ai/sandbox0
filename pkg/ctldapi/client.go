@@ -30,6 +30,9 @@ const (
 	pathVolumeSnapshotPrepare       = "/api/v1/volume-portals/snapshot-checkpoints/prepare"
 	pathVolumeSnapshotComplete      = "/api/v1/volume-portals/snapshot-checkpoints/complete"
 	pathVolumeSnapshotAbort         = "/api/v1/volume-portals/snapshot-checkpoints/abort"
+	pathSandboxRootFSBind           = "/api/v1/sandbox-rootfs/bind"
+	pathSandboxRootFSFlush          = "/api/v1/sandbox-rootfs/flush"
+	pathSandboxRootFSRelease        = "/api/v1/sandbox-rootfs/release"
 )
 
 var defaultHTTPClient = &http.Client{Timeout: DefaultRequestTimeout}
@@ -131,6 +134,18 @@ func (c *Client) AbortVolumeSnapshotCheckpoint(ctx context.Context, ctldAddress 
 	return PostJSON[AbortVolumeSnapshotCheckpointResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathVolumeSnapshotAbort, req)
 }
 
+func (c *Client) BindSandboxRootFS(ctx context.Context, ctldAddress string, req BindSandboxRootFSRequest) (*BindSandboxRootFSResponse, error) {
+	return PostJSON[BindSandboxRootFSResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathSandboxRootFSBind, req)
+}
+
+func (c *Client) FlushSandboxRootFS(ctx context.Context, ctldAddress string, req FlushSandboxRootFSRequest) (*FlushSandboxRootFSResponse, error) {
+	return PostJSON[FlushSandboxRootFSResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathSandboxRootFSFlush, req)
+}
+
+func (c *Client) ReleaseSandboxRootFS(ctx context.Context, ctldAddress string, req ReleaseSandboxRootFSRequest) (*ReleaseSandboxRootFSResponse, error) {
+	return PostJSON[ReleaseSandboxRootFSResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathSandboxRootFSRelease, req)
+}
+
 func (c *Client) httpClientOrDefault() *http.Client {
 	if c != nil && c.httpClient != nil {
 		return c.httpClient
@@ -209,6 +224,12 @@ func responseError(resp any) string {
 	case *BindVolumePortalResponse:
 		return strings.TrimSpace(typed.Error)
 	case *UnbindVolumePortalResponse:
+		return strings.TrimSpace(typed.Error)
+	case *BindSandboxRootFSResponse:
+		return strings.TrimSpace(typed.Error)
+	case *FlushSandboxRootFSResponse:
+		return strings.TrimSpace(typed.Error)
+	case *ReleaseSandboxRootFSResponse:
 		return strings.TrimSpace(typed.Error)
 	default:
 		return ""

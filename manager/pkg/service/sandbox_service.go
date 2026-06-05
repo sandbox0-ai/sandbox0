@@ -32,6 +32,7 @@ type Sandbox struct {
 	AutoResume    bool                `json:"auto_resume"`
 	Services      []SandboxAppService `json:"services,omitempty"`
 	Mounts        []ClaimMount        `json:"mounts,omitempty"`
+	FilesystemID  string              `json:"filesystem_id,omitempty"`
 	PodName       string              `json:"pod_name"`
 	ExpiresAt     time.Time           `json:"expires_at"`
 	HardExpiresAt time.Time           `json:"hard_expires_at"`

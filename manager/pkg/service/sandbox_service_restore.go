@@ -179,7 +179,7 @@ func (s *SandboxService) templateForSandboxRecord(record *SandboxRecord) (*v1alp
 	}, nil
 }
 
-func cleanedSandboxResumeResponse(sandboxID string, generation int64) *ResumeSandboxResponse {
+func cleanedSandboxRestoreResponse(sandboxID string, generation int64) *ResumeSandboxResponse {
 	return &ResumeSandboxResponse{
 		SandboxID: sandboxID,
 		Resumed:   true,

@@ -103,7 +103,7 @@ func (s *SandboxService) ResumeSandboxAndWait(ctx context.Context, sandboxID str
 			if sandbox != nil {
 				generation = sandbox.PowerState.DesiredGeneration
 			}
-			return cleanedSandboxResumeResponse(sandboxID, generation), nil
+			return cleanedSandboxRestoreResponse(sandboxID, generation), nil
 		}
 		return nil, err
 	}

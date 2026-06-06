@@ -362,7 +362,7 @@ func TestClaimSandboxBindsDeclaredVolumePortal(t *testing.T) {
 	}
 }
 
-func TestResumeCleanedSandboxRuntimeAppliesRootFSCheckpointBeforeInitialize(t *testing.T) {
+func TestCleanedSandboxRuntimeRestoreAppliesRootFSCheckpointBeforeInitialize(t *testing.T) {
 	events := &orderedEvents{}
 	namespace, err := naming.TemplateNamespaceForBuiltin("default")
 	utils.RequireNoError(t, err, "resolve template namespace")
@@ -442,17 +442,17 @@ func TestResumeCleanedSandboxRuntimeAppliesRootFSCheckpointBeforeInitialize(t *t
 
 	resp, body = doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxes/sandbox-1/resume", env.token, nil)
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("resume status = %d, body = %s", resp.StatusCode, string(body))
+		t.Fatalf("cleaned runtime restore status = %d, body = %s", resp.StatusCode, string(body))
 	}
 	resumeResp, errInfo, err := spec.DecodeResponse[service.ResumeSandboxResponse](bytes.NewReader(body))
 	if err != nil {
-		t.Fatalf("decode resume response: %v", err)
+		t.Fatalf("decode cleaned runtime restore response: %v", err)
 	}
 	if errInfo != nil {
-		t.Fatalf("unexpected resume error: %+v", errInfo)
+		t.Fatalf("unexpected cleaned runtime restore error: %+v", errInfo)
 	}
 	if resumeResp == nil || !resumeResp.Resumed {
-		t.Fatalf("resume response = %+v, want resumed", resumeResp)
+		t.Fatalf("cleaned runtime restore response = %+v, want restored", resumeResp)
 	}
 
 	if got := events.List(); len(got) != 2 || got[0] != "apply-rootfs" || got[1] != "initialize-procd" {

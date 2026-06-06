@@ -45,6 +45,7 @@ func TestResolveContainerIDUsesCRILabels(t *testing.T) {
 			},
 			{
 				Id:       "container-1",
+				State:    runtimeapi.ContainerState_CONTAINER_RUNNING,
 				Metadata: &runtimeapi.ContainerMetadata{Name: "sandbox"},
 				Labels: map[string]string{
 					"io.kubernetes.pod.namespace": "default",
@@ -64,6 +65,44 @@ func TestResolveContainerIDUsesCRILabels(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, "container-1", containerID)
+	assert.Equal(t, "uid-1", podUID)
+}
+
+func TestResolveContainerIDPrefersRunningAttempt(t *testing.T) {
+	runtime := NewContainerdRuntime(ContainerdRuntimeConfig{
+		CRIClient: fakeCRIClient{containers: []*runtimeapi.Container{
+			{
+				Id:       "exited-container",
+				State:    runtimeapi.ContainerState_CONTAINER_EXITED,
+				Metadata: &runtimeapi.ContainerMetadata{Name: "sandbox"},
+				Labels: map[string]string{
+					"io.kubernetes.pod.namespace": "default",
+					"io.kubernetes.pod.name":      "pod-1",
+					"io.kubernetes.pod.uid":       "uid-1",
+				},
+			},
+			{
+				Id:       "running-container",
+				State:    runtimeapi.ContainerState_CONTAINER_RUNNING,
+				Metadata: &runtimeapi.ContainerMetadata{Name: "sandbox"},
+				Labels: map[string]string{
+					"io.kubernetes.pod.namespace": "default",
+					"io.kubernetes.pod.name":      "pod-1",
+					"io.kubernetes.pod.uid":       "uid-1",
+				},
+			},
+		}},
+	})
+
+	containerID, podUID, err := runtime.resolveContainerID(context.Background(), ctldapi.RootFSContainerRef{
+		Namespace:     "default",
+		PodName:       "pod-1",
+		PodUID:        "uid-1",
+		ContainerName: "sandbox",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "running-container", containerID)
 	assert.Equal(t, "uid-1", podUID)
 }
 

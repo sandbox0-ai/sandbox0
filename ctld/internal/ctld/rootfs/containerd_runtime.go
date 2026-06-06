@@ -176,7 +176,11 @@ func (r *ContainerdRuntime) resolveContainerID(ctx context.Context, target ctlda
 	if conn != nil {
 		defer conn.Close()
 	}
-	resp, err := client.ListContainers(ctx, &runtimeapi.ListContainersRequest{})
+	resp, err := client.ListContainers(ctx, &runtimeapi.ListContainersRequest{
+		Filter: &runtimeapi.ContainerFilter{
+			State: &runtimeapi.ContainerStateValue{State: runtimeapi.ContainerState_CONTAINER_RUNNING},
+		},
+	})
 	if err != nil {
 		return "", "", fmt.Errorf("list cri containers: %w", err)
 	}
@@ -193,9 +197,12 @@ func (r *ContainerdRuntime) resolveContainerID(ctx context.Context, target ctlda
 		if target.PodUID != "" && podUID != target.PodUID {
 			continue
 		}
+		if item.GetState() != runtimeapi.ContainerState_CONTAINER_RUNNING {
+			continue
+		}
 		return item.GetId(), podUID, nil
 	}
-	return "", "", fmt.Errorf("%w: container %s in pod %s/%s", ErrNotFound, target.ContainerName, target.Namespace, target.PodName)
+	return "", "", fmt.Errorf("%w: running container %s in pod %s/%s", ErrNotFound, target.ContainerName, target.Namespace, target.PodName)
 }
 
 func (r *ContainerdRuntime) runtimeClient(ctx context.Context) (criRuntimeService, *grpc.ClientConn, error) {
@@ -265,8 +272,12 @@ func inspectContainer(ctx context.Context, client containerdClient, containerdRo
 	if err != nil {
 		return ctldapi.RootFSInfo{}, fmt.Errorf("inspect container %s: %w", containerID, err)
 	}
+	containerdID := strings.TrimSpace(container.ID())
+	if containerdID == "" {
+		containerdID = containerID
+	}
 	info := ctldapi.RootFSInfo{
-		ContainerID:    containerID,
+		ContainerID:    containerdID,
 		ContainerName:  target.ContainerName,
 		PodNamespace:   target.Namespace,
 		PodName:        target.PodName,

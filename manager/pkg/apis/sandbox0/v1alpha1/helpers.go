@@ -14,15 +14,13 @@ import (
 )
 
 const (
-	procdBinVolumeName      = "procd-bin"
-	procdConfigVolume       = "procd-config"
-	SandboxRootFSVolumeName = "sandbox-rootfs"
-	SandboxRootFSMountPath  = "/sandbox0/rootfs"
-	netdMITMCAVolume        = "netd-mitm-ca"
-	netdMITMCACertKey       = "ca.crt"
-	netdMITMCAEnvVar        = "SANDBOX0_NETD_MITM_CA_FILE"
-	netdMITMCADir           = "/var/run/sandbox0/netd"
-	netdMITMCACertPath      = netdMITMCADir + "/mitm-ca.crt"
+	procdBinVolumeName = "procd-bin"
+	procdConfigVolume  = "procd-config"
+	netdMITMCAVolume   = "netd-mitm-ca"
+	netdMITMCACertKey  = "ca.crt"
+	netdMITMCAEnvVar   = "SANDBOX0_NETD_MITM_CA_FILE"
+	netdMITMCADir      = "/var/run/sandbox0/netd"
+	netdMITMCACertPath = netdMITMCADir + "/mitm-ca.crt"
 
 	// Template resources remain hard limits; requests reserve a smaller baseline
 	// so warm pools and cold-start sandboxes can be packed efficiently.
@@ -47,7 +45,6 @@ func BuildPodSpec(template *SandboxTemplate) corev1.PodSpec {
 	applyNetdMITMCATrustMaterial(&spec)
 	applyVolumePortals(&spec, template)
 	applyEmptyDirMounts(&spec, template)
-	applySandboxRootFS(&spec)
 	applyProcdInit(&spec)
 	applyDefaultSandboxPlacement(&spec)
 
@@ -248,83 +245,6 @@ func applyEmptyDirMounts(spec *corev1.PodSpec, template *SandboxTemplate) {
 			})
 		}
 	}
-}
-
-func applySandboxRootFS(spec *corev1.PodSpec) {
-	if spec == nil {
-		return
-	}
-	cfg := config.LoadManagerConfig()
-	if cfg == nil || !cfg.CtldEnabled {
-		return
-	}
-	volumeFound := false
-	for i := range spec.Volumes {
-		if spec.Volumes[i].Name != SandboxRootFSVolumeName {
-			continue
-		}
-		volumeFound = true
-		spec.Volumes[i].VolumeSource = corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{},
-		}
-		break
-	}
-	if !volumeFound {
-		spec.Volumes = append(spec.Volumes, corev1.Volume{
-			Name: SandboxRootFSVolumeName,
-			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
-			},
-		})
-	}
-
-	mountPropagation := corev1.MountPropagationHostToContainer
-	for i := range spec.Containers {
-		ensureContainerVolumeMount(&spec.Containers[i], corev1.VolumeMount{
-			Name:             SandboxRootFSVolumeName,
-			MountPath:        SandboxRootFSMountPath,
-			MountPropagation: &mountPropagation,
-		})
-		ensureContainerEnvVar(&spec.Containers[i], corev1.EnvVar{
-			Name:  "root_path",
-			Value: SandboxRootFSMountPath,
-		})
-		ensureContainerEnvVar(&spec.Containers[i], corev1.EnvVar{
-			Name:  "sandbox_rootfs_path",
-			Value: SandboxRootFSMountPath,
-		})
-		ensureContainerCapability(&spec.Containers[i], corev1.Capability("SYS_ADMIN"))
-		ensureContainerCapability(&spec.Containers[i], corev1.Capability("SYS_CHROOT"))
-	}
-}
-
-func ensureContainerCapability(container *corev1.Container, capability corev1.Capability) {
-	if container == nil || capability == "" {
-		return
-	}
-	if container.SecurityContext == nil {
-		container.SecurityContext = &corev1.SecurityContext{}
-	}
-	if container.SecurityContext.Capabilities == nil {
-		container.SecurityContext.Capabilities = &corev1.Capabilities{}
-	}
-	for _, existing := range container.SecurityContext.Capabilities.Add {
-		if strings.EqualFold(string(existing), string(capability)) {
-			return
-		}
-	}
-	drop := container.SecurityContext.Capabilities.Drop
-	if len(drop) > 0 {
-		filtered := drop[:0]
-		for _, existing := range drop {
-			if strings.EqualFold(string(existing), string(capability)) {
-				continue
-			}
-			filtered = append(filtered, existing)
-		}
-		container.SecurityContext.Capabilities.Drop = filtered
-	}
-	container.SecurityContext.Capabilities.Add = append(container.SecurityContext.Capabilities.Add, capability)
 }
 
 func volumePortalVolumeName(index int, portalName string) string {

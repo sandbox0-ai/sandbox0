@@ -144,36 +144,12 @@ func TestReleaseVolumeOwnerReturnsConflictForBusyOwner(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rec.Code)
 }
 
-func TestBindSandboxRootFSRoutesToPortalHandler(t *testing.T) {
-	server := newHTTPServer(":0", combinedController{
-		Controller: ctldserver.NotImplementedController{},
-		Portal: fakeVolumePortalHandler{
-			rootFSBindResp: ctldapi.BindSandboxRootFSResponse{
-				FilesystemID: "fs-1",
-				MountPoint:   "/sandbox0/rootfs",
-			},
-		},
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandbox-rootfs/bind", strings.NewReader(`{"filesystem_id":"fs-1","team_id":"team-1","sandbox_id":"sandbox-1","pod_uid":"pod-1","runtime_generation":2}`))
-	rec := httptest.NewRecorder()
-	server.Handler.ServeHTTP(rec, req)
-
-	assert.Equal(t, http.StatusOK, rec.Code)
-	var resp ctldapi.BindSandboxRootFSResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, "fs-1", resp.FilesystemID)
-	assert.Equal(t, "/sandbox0/rootfs", resp.MountPoint)
-}
-
 type fakeVolumePortalHandler struct {
 	mountedHandler http.Handler
 	bindErr        error
 	prepareErr     error
 	releaseResp    ctldapi.ReleaseVolumeOwnerResponse
 	releaseErr     error
-	rootFSBindResp ctldapi.BindSandboxRootFSResponse
-	rootFSBindErr  error
 }
 
 func (f fakeVolumePortalHandler) Bind(_ context.Context, _ ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, error) {
@@ -230,24 +206,6 @@ func (f fakeVolumePortalHandler) CompleteSnapshotCheckpoint(_ context.Context, _
 
 func (f fakeVolumePortalHandler) AbortSnapshotCheckpoint(_ context.Context, _ ctldapi.AbortVolumeSnapshotCheckpointRequest) (ctldapi.AbortVolumeSnapshotCheckpointResponse, error) {
 	return ctldapi.AbortVolumeSnapshotCheckpointResponse{Aborted: true}, nil
-}
-
-func (f fakeVolumePortalHandler) BindSandboxRootFS(_ context.Context, req ctldapi.BindSandboxRootFSRequest) (ctldapi.BindSandboxRootFSResponse, error) {
-	if f.rootFSBindErr != nil {
-		return ctldapi.BindSandboxRootFSResponse{}, f.rootFSBindErr
-	}
-	if f.rootFSBindResp.FilesystemID != "" || f.rootFSBindResp.MountPoint != "" {
-		return f.rootFSBindResp, nil
-	}
-	return ctldapi.BindSandboxRootFSResponse{FilesystemID: req.FilesystemID}, nil
-}
-
-func (f fakeVolumePortalHandler) FlushSandboxRootFS(_ context.Context, req ctldapi.FlushSandboxRootFSRequest) (ctldapi.FlushSandboxRootFSResponse, error) {
-	return ctldapi.FlushSandboxRootFSResponse{Flushed: true, FilesystemID: req.FilesystemID}, nil
-}
-
-func (f fakeVolumePortalHandler) ReleaseSandboxRootFS(_ context.Context, req ctldapi.ReleaseSandboxRootFSRequest) (ctldapi.ReleaseSandboxRootFSResponse, error) {
-	return ctldapi.ReleaseSandboxRootFSResponse{Released: true, FilesystemID: req.FilesystemID}, nil
 }
 
 func (f fakeVolumePortalHandler) MountedVolumeHandler() http.Handler {

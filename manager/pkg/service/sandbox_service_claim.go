@@ -44,9 +44,6 @@ type ClaimRequest struct {
 	// FilesystemBaseImageRef is the immutable lower image recorded by the
 	// sandbox filesystem object. It is internal runtime metadata, not public API.
 	FilesystemBaseImageRef string `json:"-"`
-	// FilesystemBaseImageDigest is authoritative when set. It keeps restore from
-	// silently rebasing an existing filesystem onto a moved image tag.
-	FilesystemBaseImageDigest string `json:"-"`
 	// SandboxID is an internal stable ID used when recreating an existing sandbox.
 	SandboxID string `json:"-"`
 	// RuntimeGeneration identifies the current runtime pod incarnation.
@@ -226,11 +223,6 @@ func setFilesystemAnnotations(annotations map[string]string, req *ClaimRequest) 
 	} else {
 		delete(annotations, controller.AnnotationFilesystemBaseImageRef)
 	}
-	if baseImageDigest := strings.TrimSpace(req.FilesystemBaseImageDigest); baseImageDigest != "" {
-		annotations[controller.AnnotationFilesystemBaseImageDigest] = baseImageDigest
-	} else {
-		delete(annotations, controller.AnnotationFilesystemBaseImageDigest)
-	}
 }
 
 func validateSandboxFilesystemID(filesystemID string) error {
@@ -260,9 +252,6 @@ func (s *SandboxService) ensureClaimFilesystem(req *ClaimRequest, template *v1al
 	}
 	if req.FilesystemBaseImageRef == "" && template != nil {
 		req.FilesystemBaseImageRef = strings.TrimSpace(template.Spec.MainContainer.Image)
-	}
-	if req.FilesystemBaseImageDigest == "" {
-		req.FilesystemBaseImageDigest = imageDigestFromReference(req.FilesystemBaseImageRef)
 	}
 	return nil
 }
@@ -453,42 +442,6 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 
 	_ = resolvedName // reserved for audit/debugging (name used is template.ObjectMeta.Name)
 
-	phaseStarted = time.Now()
-	if err := s.acquireClaimFilesystem(ctx, req, template); err != nil {
-		s.observeClaimPhase(req.Template, "unknown", "acquire_filesystem", phaseStarted, err)
-		return nil, err
-	}
-	s.observeClaimPhase(req.Template, "unknown", "acquire_filesystem", phaseStarted, nil)
-	filesystemOwnerActive := true
-	claimSucceeded := false
-	defer func() {
-		if filesystemOwnerActive {
-			releaseCtx := context.Background()
-			if err := s.releaseClaimFilesystemOwner(releaseCtx, req); err != nil && s.logger != nil {
-				s.logger.Warn("Failed to release sandbox filesystem owner after claim failure",
-					zap.String("sandboxID", req.SandboxID),
-					zap.String("filesystemID", req.FilesystemID),
-					zap.Error(err),
-				)
-			}
-		}
-	}()
-	rootFSBound := false
-	rootFSBoundPod := (*corev1.Pod)(nil)
-	defer func() {
-		if claimSucceeded || !rootFSBound {
-			return
-		}
-		releaseCtx := context.Background()
-		if err := s.releaseSandboxRootFSForPod(releaseCtx, rootFSBoundPod, req); err != nil && s.logger != nil {
-			s.logger.Warn("Failed to release sandbox rootfs after claim failure",
-				zap.String("sandboxID", req.SandboxID),
-				zap.String("filesystemID", req.FilesystemID),
-				zap.Error(err),
-			)
-		}
-	}()
-
 	// Try to claim an idle pod first
 	phaseStarted = time.Now()
 	pod, err := s.claimIdlePod(ctx, template, req)
@@ -567,19 +520,6 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	}
 
 	phaseStarted = time.Now()
-	if err := s.bindSandboxRootFS(ctx, pod, req); err != nil {
-		s.observeClaimPhase(req.Template, claimType, "bind_sandbox_rootfs", phaseStarted, err)
-		s.requestSandboxDeletionAfterClaimFailure(pod, "sandbox rootfs bind failed")
-		if metrics != nil {
-			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
-		}
-		return nil, fmt.Errorf("bind sandbox rootfs: %w", err)
-	}
-	rootFSBound = true
-	rootFSBoundPod = pod
-	s.observeClaimPhase(req.Template, claimType, "bind_sandbox_rootfs", phaseStarted, nil)
-
-	phaseStarted = time.Now()
 	portalMounts, err := s.bindVolumePortals(ctx, pod, req, template)
 	s.observeClaimPhase(req.Template, claimType, "bind_volume_portals", phaseStarted, err)
 	if err != nil {
@@ -636,8 +576,6 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "success").Inc()
 		metrics.SandboxClaimDuration.WithLabelValues(req.Template, claimType).Observe(time.Since(start).Seconds())
 	}
-	claimSucceeded = true
-	filesystemOwnerActive = false
 
 	return &ClaimResponse{
 		SandboxID:       req.SandboxID,
@@ -1374,11 +1312,10 @@ func (s *SandboxService) initializeProcd(
 	}
 
 	initReq := InitializeRequest{
-		SandboxID:         sandboxID,
-		TeamID:            teamID,
-		EnvVars:           sandboxEnvVarsForInitialize(req.Config),
-		VolumeMountPoints: sandboxVolumeMountPointsForInitialize(req.Mounts),
-		Webhook:           webhookConfig,
+		SandboxID: sandboxID,
+		TeamID:    teamID,
+		EnvVars:   sandboxEnvVarsForInitialize(req.Config),
+		Webhook:   webhookConfig,
 	}
 
 	var initErr error
@@ -1414,24 +1351,4 @@ func sandboxEnvVarsForInitialize(cfg *SandboxConfig) map[string]string {
 		return nil
 	}
 	return cloneEnvVars(cfg.EnvVars)
-}
-
-func sandboxVolumeMountPointsForInitialize(mounts []ClaimMount) []string {
-	if len(mounts) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(mounts))
-	seen := make(map[string]struct{}, len(mounts))
-	for _, mount := range mounts {
-		mountPoint := filepath.Clean(strings.TrimSpace(mount.MountPoint))
-		if mountPoint == "." || mountPoint == "" || mountPoint == string(filepath.Separator) || !filepath.IsAbs(mountPoint) {
-			continue
-		}
-		if _, ok := seen[mountPoint]; ok {
-			continue
-		}
-		seen[mountPoint] = struct{}{}
-		out = append(out, mountPoint)
-	}
-	return out
 }

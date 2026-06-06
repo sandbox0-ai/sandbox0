@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -51,6 +52,7 @@ type managerTestEnvOptions struct {
 	internalTokenGenerator service.TokenGenerator
 	procdClient            *service.ProcdClient
 	volumeMetadata         service.SandboxVolumeMetadataClient
+	sandboxStore           service.SandboxStore
 }
 
 func newManagerTestEnv(t *testing.T) *managerTestEnv {
@@ -157,6 +159,9 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 	}
 	if opts.volumeMetadata != nil {
 		sandboxService.SetVolumeMetadataClient(opts.volumeMetadata)
+	}
+	if opts.sandboxStore != nil {
+		sandboxService.SetSandboxStore(opts.sandboxStore)
 	}
 
 	templateService := service.NewTemplateService(
@@ -357,6 +362,111 @@ func TestClaimSandboxBindsDeclaredVolumePortal(t *testing.T) {
 	}
 }
 
+func TestResumeCleanedSandboxRuntimeAppliesRootFSCheckpointBeforeInitialize(t *testing.T) {
+	events := &orderedEvents{}
+	namespace, err := naming.TemplateNamespaceForBuiltin("default")
+	utils.RequireNoError(t, err, "resolve template namespace")
+	ctldServer := newRootFSApplyRecordingCtldServer(t, events, namespace)
+	t.Cleanup(ctldServer.Close)
+	procdServer := newInitializeEventServer(t, events)
+	t.Cleanup(procdServer.Close)
+
+	privateKey, _, err := createInternalKeys()
+	utils.RequireNoError(t, err, "create procd keys")
+	procdGen := internalauth.NewGenerator(internalauth.DefaultGeneratorConfig("manager", privateKey))
+
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: namespace},
+	}
+	now := time.Now().UTC()
+	store := newMemorySandboxStoreForManagerIntegration(&service.SandboxRecord{
+		ID:                "sandbox-1",
+		TeamID:            "team-1",
+		UserID:            "user-1",
+		TemplateID:        "default",
+		TemplateName:      template.Name,
+		TemplateNamespace: template.Namespace,
+		ClusterID:         "default",
+		Status:            service.SandboxStatusCleaned,
+		TemplateSpec:      template.Spec,
+		RuntimeGeneration: 3,
+		ClaimedAt:         now,
+		CreatedAt:         now,
+	}, &service.SandboxRootFSState{
+		SandboxID:           "sandbox-1",
+		TeamID:              "team-1",
+		RuntimeGeneration:   3,
+		Runtime:             "runc",
+		RuntimeHandler:      "runc",
+		BaseImageRef:        "docker.io/sandbox0ai/otemplates:default-v0.2.0",
+		BaseImageDigest:     "sha256:base",
+		Snapshotter:         "overlayfs",
+		SnapshotParent:      "sha256:parent",
+		SnapshotParentChain: []string{"sha256:parent"},
+		DiffDigest:          "sha256:diff",
+		DiffMediaType:       "application/vnd.oci.image.layer.v1.tar",
+		DiffSize:            128,
+		DiffObjectKey:       "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar",
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	})
+
+	env := newManagerTestEnvWithOptions(t, managerTestEnvOptions{
+		sandboxConfig: service.SandboxServiceConfig{
+			DefaultTTL:             time.Hour,
+			PauseMinMemoryRequest:  "10Mi",
+			PauseMinMemoryLimit:    "32Mi",
+			PauseMemoryBufferRatio: 1.1,
+			PauseMinCPU:            "10m",
+			ProcdPort:              49983,
+			ProcdClientTimeout:     5 * time.Second,
+			ProcdInitTimeout:       5 * time.Second,
+			CtldEnabled:            true,
+			CtldPort:               8095,
+			CtldHTTPClient:         newRewriteHTTPClientForURL(t, ctldServer.URL),
+		},
+		internalTokenGenerator: service.NewInternalTokenGenerator(procdGen),
+		procdClient:            newProcdClientForURL(t, procdServer.URL),
+		sandboxStore:           store,
+	})
+
+	resp, body := doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/internal/v1/templates", env.token, map[string]any{
+		"metadata": map[string]any{"name": template.Name},
+		"spec":     map[string]any{},
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create template status = %d, body = %s", resp.StatusCode, string(body))
+	}
+	addNode(t, env, "node-a", "10.0.0.1")
+	addIdleReadyPodForTemplate(t, env, template, "idle-rootfs", "10.0.0.20", "node-a")
+
+	resp, body = doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxes/sandbox-1/resume", env.token, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("resume status = %d, body = %s", resp.StatusCode, string(body))
+	}
+	resumeResp, errInfo, err := spec.DecodeResponse[service.ResumeSandboxResponse](bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("decode resume response: %v", err)
+	}
+	if errInfo != nil {
+		t.Fatalf("unexpected resume error: %+v", errInfo)
+	}
+	if resumeResp == nil || !resumeResp.Resumed {
+		t.Fatalf("resume response = %+v, want resumed", resumeResp)
+	}
+
+	if got := events.List(); len(got) != 2 || got[0] != "apply-rootfs" || got[1] != "initialize-procd" {
+		t.Fatalf("event order = %#v, want apply-rootfs before initialize-procd", got)
+	}
+	record, err := store.GetSandbox(context.Background(), "sandbox-1")
+	if err != nil {
+		t.Fatalf("get restored sandbox record: %v", err)
+	}
+	if record.Status != service.SandboxStatusRunning || record.CurrentPodName != "idle-rootfs" || record.RuntimeGeneration != 4 {
+		t.Fatalf("restored record = %+v", record)
+	}
+}
+
 type testTemplateLister struct {
 	client clientset.Interface
 }
@@ -537,6 +647,217 @@ func newVolumePortalBindRecordingCtldServer(t *testing.T, recorder *volumePortal
 		_ = json.NewEncoder(w).Encode(response)
 	})
 	return httptest.NewServer(mux)
+}
+
+type orderedEvents struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (e *orderedEvents) Add(event string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.events = append(e.events, event)
+}
+
+func (e *orderedEvents) List() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.events...)
+}
+
+func newRootFSApplyRecordingCtldServer(t *testing.T, events *orderedEvents, namespace string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/rootfs/apply", func(w http.ResponseWriter, r *http.Request) {
+		var req ctldapi.ApplyRootFSRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode ctld rootfs apply request: %v", err)
+		}
+		if req.Target.Namespace != namespace || req.Target.PodName != "idle-rootfs" || req.Target.ContainerName != "procd" {
+			t.Fatalf("unexpected rootfs target: %+v", req.Target)
+		}
+		if req.ExpectedBaseImageDigest != "sha256:base" || len(req.ExpectedSnapshotParentChain) != 1 || req.ExpectedSnapshotParentChain[0] != "sha256:parent" {
+			t.Fatalf("unexpected rootfs base validation: %+v", req)
+		}
+		if req.Descriptor.Digest != "sha256:diff" || req.Descriptor.ObjectKey != "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar" || !req.Freeze {
+			t.Fatalf("unexpected rootfs descriptor: %+v", req.Descriptor)
+		}
+		events.Add("apply-rootfs")
+		_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
+	})
+	return httptest.NewServer(mux)
+}
+
+func newInitializeEventServer(t *testing.T, events *orderedEvents) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/initialize", func(w http.ResponseWriter, r *http.Request) {
+		var req service.InitializeRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode initialize request: %v", err)
+		}
+		if req.SandboxID != "sandbox-1" || req.TeamID != "team-1" {
+			t.Fatalf("unexpected initialize request: %+v", req)
+		}
+		events.Add("initialize-procd")
+		_ = spec.WriteSuccess(w, http.StatusOK, service.InitializeResponse{SandboxID: req.SandboxID})
+	})
+	return httptest.NewServer(mux)
+}
+
+type memorySandboxStoreForManagerIntegration struct {
+	mu          sync.Mutex
+	records     map[string]*service.SandboxRecord
+	rootFSState map[string]*service.SandboxRootFSState
+}
+
+func newMemorySandboxStoreForManagerIntegration(record *service.SandboxRecord, rootFSState *service.SandboxRootFSState) *memorySandboxStoreForManagerIntegration {
+	store := &memorySandboxStoreForManagerIntegration{
+		records:     map[string]*service.SandboxRecord{},
+		rootFSState: map[string]*service.SandboxRootFSState{},
+	}
+	if record != nil {
+		store.records[record.ID] = cloneSandboxRecordForManagerIntegration(record)
+	}
+	if rootFSState != nil {
+		store.rootFSState[rootFSState.SandboxID] = cloneRootFSStateForManagerIntegration(rootFSState)
+	}
+	return store
+}
+
+func (s *memorySandboxStoreForManagerIntegration) UpsertSandbox(_ context.Context, record *service.SandboxRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if record == nil || record.ID == "" {
+		return nil
+	}
+	s.records[record.ID] = cloneSandboxRecordForManagerIntegration(record)
+	return nil
+}
+
+func (s *memorySandboxStoreForManagerIntegration) GetSandbox(_ context.Context, sandboxID string) (*service.SandboxRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record := s.records[sandboxID]
+	if record == nil {
+		return nil, service.ErrSandboxRecordNotFound
+	}
+	return cloneSandboxRecordForManagerIntegration(record), nil
+}
+
+func (s *memorySandboxStoreForManagerIntegration) ListSandboxes(_ context.Context, _ *service.ListSandboxesRequest) ([]*service.SandboxRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	records := make([]*service.SandboxRecord, 0, len(s.records))
+	for _, record := range s.records {
+		records = append(records, cloneSandboxRecordForManagerIntegration(record))
+	}
+	return records, nil
+}
+
+func (s *memorySandboxStoreForManagerIntegration) MarkSandboxDeleted(_ context.Context, sandboxID string, deletedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record := s.records[sandboxID]
+	if record == nil {
+		return service.ErrSandboxRecordNotFound
+	}
+	record.Status = service.SandboxStatusDeleted
+	record.DeletedAt = deletedAt
+	delete(s.rootFSState, sandboxID)
+	return nil
+}
+
+func (s *memorySandboxStoreForManagerIntegration) SaveRootFSState(_ context.Context, state *service.SandboxRootFSState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if state == nil || state.SandboxID == "" {
+		return nil
+	}
+	s.rootFSState[state.SandboxID] = cloneRootFSStateForManagerIntegration(state)
+	return nil
+}
+
+func (s *memorySandboxStoreForManagerIntegration) GetLatestRootFSState(_ context.Context, sandboxID string) (*service.SandboxRootFSState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.rootFSState[sandboxID]
+	if state == nil {
+		return nil, nil
+	}
+	return cloneRootFSStateForManagerIntegration(state), nil
+}
+
+func (s *memorySandboxStoreForManagerIntegration) WithSandboxLock(ctx context.Context, sandboxID string, fn func(context.Context, service.SandboxStoreTx, *service.SandboxRecord) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record := s.records[sandboxID]
+	if record == nil {
+		return service.ErrSandboxRecordNotFound
+	}
+	tx := memorySandboxStoreTxForManagerIntegration{store: s}
+	return fn(ctx, tx, cloneSandboxRecordForManagerIntegration(record))
+}
+
+type memorySandboxStoreTxForManagerIntegration struct {
+	store *memorySandboxStoreForManagerIntegration
+}
+
+func (t memorySandboxStoreTxForManagerIntegration) SaveRuntime(_ context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time) error {
+	record := t.store.records[sandboxID]
+	if record == nil {
+		return service.ErrSandboxRecordNotFound
+	}
+	record.CurrentPodNamespace = namespace
+	record.CurrentPodName = podName
+	record.Status = status
+	record.RuntimeGeneration = generation
+	record.ExpiresAt = expiresAt
+	record.HardExpiresAt = hardExpiresAt
+	return nil
+}
+
+func (t memorySandboxStoreTxForManagerIntegration) MarkRuntimeCleaned(_ context.Context, sandboxID string, generation int64, _ time.Time) error {
+	record := t.store.records[sandboxID]
+	if record == nil {
+		return service.ErrSandboxRecordNotFound
+	}
+	record.CurrentPodNamespace = ""
+	record.CurrentPodName = ""
+	record.Status = service.SandboxStatusCleaned
+	if record.RuntimeGeneration < generation {
+		record.RuntimeGeneration = generation
+	}
+	record.ExpiresAt = time.Time{}
+	return nil
+}
+
+func (t memorySandboxStoreTxForManagerIntegration) SaveRootFSState(_ context.Context, state *service.SandboxRootFSState) error {
+	if state == nil || state.SandboxID == "" {
+		return nil
+	}
+	t.store.rootFSState[state.SandboxID] = cloneRootFSStateForManagerIntegration(state)
+	return nil
+}
+
+func cloneSandboxRecordForManagerIntegration(record *service.SandboxRecord) *service.SandboxRecord {
+	if record == nil {
+		return nil
+	}
+	clone := *record
+	clone.Mounts = append([]service.ClaimMount(nil), record.Mounts...)
+	clone.TemplateSpec = *record.TemplateSpec.DeepCopy()
+	return &clone
+}
+
+func cloneRootFSStateForManagerIntegration(state *service.SandboxRootFSState) *service.SandboxRootFSState {
+	if state == nil {
+		return nil
+	}
+	clone := *state
+	clone.SnapshotParentChain = append([]string(nil), state.SnapshotParentChain...)
+	return &clone
 }
 
 func (r *initializeRequestRecorder) Get() service.InitializeRequest {

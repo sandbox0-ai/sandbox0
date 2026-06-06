@@ -36,6 +36,7 @@ type apiModeSuiteOptions struct {
 	includeVolumeLifecycle    bool
 	includeObjectEncryption   bool
 	includeWebhookLifecycle   bool
+	includeRootFSCleanRestore bool
 	includeMeteringAssertions bool
 	expectStorageUnavailable  bool
 	expectNetworkUnavailable  bool
@@ -215,6 +216,12 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					Expect(status).To(Equal(http.StatusOK))
 					Expect(listResp).NotTo(BeNil())
 					Expect(len(listResp.Sandboxes)).To(BeNumerically("<=", limit))
+				})
+			}
+
+			if opts.includeRootFSCleanRestore {
+				It("persists rootfs changes across clean and restore", func() {
+					assertSandboxRootFSPersistsAcrossCleanRestore(env, session)
 				})
 			}
 		})
@@ -1299,6 +1306,125 @@ func assertSandboxListContainsClaimedSandbox(env *framework.ScenarioEnv, session
 		}
 	}
 	Expect(found).To(BeTrue(), "created sandbox should be in the list")
+}
+
+func assertSandboxRootFSPersistsAcrossCleanRestore(env *framework.ScenarioEnv, session *e2eutils.Session) {
+	claimResp := claimSandboxEventually(env, session, "default")
+	sandboxID := claimResp.SandboxId
+	Expect(sandboxID).NotTo(BeEmpty())
+	DeferCleanup(func() {
+		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	})
+
+	templateNamespace, err := naming.TemplateNamespaceForBuiltin("default")
+	Expect(err).NotTo(HaveOccurred())
+	sandbox := waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
+
+	marker := fmt.Sprintf("s0-rootfs-clean-restore-%d", time.Now().UnixNano())
+	rootDir := "/tmp/" + marker
+	filePath := rootDir + "/marker.txt"
+	nestedPath := rootDir + "/nested/value.txt"
+	linkPath := rootDir + "/marker.link"
+	content := "rootfs checkpoint " + marker
+
+	writeScript := fmt.Sprintf(`set -eu
+rm -rf %s
+mkdir -p %s
+printf %%s %s > %s
+printf %%s nested > %s
+ln -sf %s %s
+chmod 751 %s
+test "$(cat %s)" = %s
+test "$(cat %s)" = nested
+test "$(cat %s)" = %s
+test "$(stat -c %%a %s)" = 751
+`,
+		shellQuote(rootDir),
+		shellQuote(filepathDir(nestedPath)),
+		shellQuote(content),
+		shellQuote(filePath),
+		shellQuote(nestedPath),
+		shellQuote(filePath),
+		shellQuote(linkPath),
+		shellQuote(rootDir),
+		shellQuote(filePath),
+		shellQuote(content),
+		shellQuote(nestedPath),
+		shellQuote(linkPath),
+		shellQuote(content),
+		shellQuote(rootDir),
+	)
+	_, err = execInSandboxPod(env, templateNamespace, sandbox.PodName, writeScript)
+	Expect(err).NotTo(HaveOccurred())
+
+	hardTTL := int32(1)
+	_, status, err := session.UpdateSandbox(env.TestCtx.Context, GinkgoT(), sandboxID, apispec.SandboxUpdateConfig{
+		HardTtl: &hardTTL,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+
+	waitForSandboxLifecycleStatusEventually(env, session, sandboxID, apispec.SandboxLifecycleStatusCleaned)
+
+	disabledHardTTL := int32(0)
+	_, status, err = session.UpdateSandbox(env.TestCtx.Context, GinkgoT(), sandboxID, apispec.SandboxUpdateConfig{
+		HardTtl: &disabledHardTTL,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+
+	resumeResp, status, err := session.ResumeSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(resumeResp).NotTo(BeNil())
+	Expect(resumeResp.Resumed).To(BeTrue())
+
+	restored := waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
+	verifyScript := fmt.Sprintf(`set -eu
+test "$(cat %s)" = %s
+test "$(cat %s)" = nested
+test "$(cat %s)" = %s
+test "$(stat -c %%a %s)" = 751
+`,
+		shellQuote(filePath),
+		shellQuote(content),
+		shellQuote(nestedPath),
+		shellQuote(linkPath),
+		shellQuote(content),
+		shellQuote(rootDir),
+	)
+	_, err = execInSandboxPod(env, templateNamespace, restored.PodName, verifyScript)
+	Expect(err).NotTo(HaveOccurred())
+}
+
+func waitForSandboxLifecycleStatusEventually(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string, want apispec.SandboxLifecycleStatus) *apispec.Sandbox {
+	var sandbox *apispec.Sandbox
+	Eventually(func() error {
+		current, status, err := session.GetSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+		if err != nil {
+			return err
+		}
+		if status != http.StatusOK {
+			return fmt.Errorf("get sandbox status %d", status)
+		}
+		if current == nil {
+			return fmt.Errorf("sandbox response missing")
+		}
+		if current.Status != want {
+			return fmt.Errorf("sandbox status = %s, want %s", current.Status, want)
+		}
+		sandbox = current
+		return nil
+	}).WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
+	return sandbox
+}
+
+func filepathDir(path string) string {
+	idx := strings.LastIndex(path, "/")
+	if idx <= 0 {
+		return "."
+	}
+	return path[:idx]
 }
 
 func assertFilesystemAndProcessCapabilities(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID, modeName, fileContent string) {

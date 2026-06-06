@@ -17,10 +17,11 @@ import (
 )
 
 type memorySandboxStore struct {
-	records map[string]*SandboxRecord
-	deletes []string
-	saves   int
-	cleans  int
+	records      map[string]*SandboxRecord
+	rootFSStates map[string]*SandboxRootFSState
+	deletes      []string
+	saves        int
+	cleans       int
 }
 
 type memorySandboxStoreTx struct {
@@ -59,8 +60,24 @@ func (s *memorySandboxStore) MarkSandboxDeleted(_ context.Context, sandboxID str
 	record.DeletedAt = deletedAt
 	record.CurrentPodName = ""
 	record.CurrentPodNamespace = ""
+	delete(s.rootFSStates, sandboxID)
 	s.deletes = append(s.deletes, sandboxID)
 	return nil
+}
+
+func (s *memorySandboxStore) SaveRootFSState(_ context.Context, state *SandboxRootFSState) error {
+	if s.rootFSStates == nil {
+		s.rootFSStates = make(map[string]*SandboxRootFSState)
+	}
+	s.rootFSStates[state.SandboxID] = cloneSandboxRootFSState(state)
+	return nil
+}
+
+func (s *memorySandboxStore) GetLatestRootFSState(_ context.Context, sandboxID string) (*SandboxRootFSState, error) {
+	if s == nil || s.rootFSStates == nil {
+		return nil, nil
+	}
+	return cloneSandboxRootFSState(s.rootFSStates[sandboxID]), nil
 }
 
 func (s *memorySandboxStore) WithSandboxLock(ctx context.Context, sandboxID string, fn func(context.Context, SandboxStoreTx, *SandboxRecord) error) error {
@@ -98,6 +115,10 @@ func (t memorySandboxStoreTx) MarkRuntimeCleaned(_ context.Context, sandboxID st
 	return nil
 }
 
+func (t memorySandboxStoreTx) SaveRootFSState(_ context.Context, state *SandboxRootFSState) error {
+	return t.store.SaveRootFSState(context.Background(), state)
+}
+
 func cloneSandboxRecord(record *SandboxRecord) *SandboxRecord {
 	if record == nil {
 		return nil
@@ -108,6 +129,17 @@ func cloneSandboxRecord(record *SandboxRecord) *SandboxRecord {
 	}
 	if record.Config.Services != nil {
 		clone.Config.Services = append([]SandboxAppService(nil), record.Config.Services...)
+	}
+	return &clone
+}
+
+func cloneSandboxRootFSState(state *SandboxRootFSState) *SandboxRootFSState {
+	if state == nil {
+		return nil
+	}
+	clone := *state
+	if state.SnapshotParentChain != nil {
+		clone.SnapshotParentChain = append([]string(nil), state.SnapshotParentChain...)
 	}
 	return &clone
 }

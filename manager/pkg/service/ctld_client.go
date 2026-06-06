@@ -60,6 +60,18 @@ func (c *CtldClient) CheckVolumePortals(ctx context.Context, ctldAddress string,
 	return c.apiOrDefault().CheckVolumePortals(ctx, ctldAddress, req)
 }
 
+func (c *CtldClient) InspectRootFS(ctx context.Context, ctldAddress string, req ctldapi.InspectRootFSRequest) (*ctldapi.InspectRootFSResponse, error) {
+	return c.apiOrDefault().InspectRootFS(ctx, ctldAddress, req)
+}
+
+func (c *CtldClient) SaveRootFS(ctx context.Context, ctldAddress string, req ctldapi.SaveRootFSRequest) (*ctldapi.SaveRootFSResponse, error) {
+	return c.apiOrDefault().SaveRootFS(ctx, ctldAddress, req)
+}
+
+func (c *CtldClient) ApplyRootFS(ctx context.Context, ctldAddress string, req ctldapi.ApplyRootFSRequest) (*ctldapi.ApplyRootFSResponse, error) {
+	return c.apiOrDefault().ApplyRootFS(ctx, ctldAddress, req)
+}
+
 func (c *CtldClient) PrepareVolumePortalHandoff(ctx context.Context, ctldAddress string, req ctldapi.PrepareVolumePortalHandoffRequest) (*ctldapi.PrepareVolumePortalHandoffResponse, error) {
 	return c.apiOrDefault().PrepareVolumePortalHandoff(ctx, ctldAddress, req)
 }

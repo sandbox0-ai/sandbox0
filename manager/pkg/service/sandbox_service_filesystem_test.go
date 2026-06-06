@@ -64,8 +64,8 @@ func TestAcquireClaimFilesystemUsesInternalStore(t *testing.T) {
 	if got.FilesystemID != "fs-existing" || got.TeamID != "team-a" || got.OwnerSandboxID != "sandbox-a" || got.OwnerRuntimeGeneration != 2 {
 		t.Fatalf("unexpected acquire request: %+v", got)
 	}
-	if got.LifecycleOwnerSandboxID != "" {
-		t.Fatalf("lifecycle owner = %q, want empty for provided filesystem", got.LifecycleOwnerSandboxID)
+	if got.LifecycleOwnerSandboxID != "sandbox-a" {
+		t.Fatalf("lifecycle owner = %q, want sandbox-a", got.LifecycleOwnerSandboxID)
 	}
 	if req.FilesystemBaseImageRef != "ubuntu@sha256:abc" {
 		t.Fatalf("base image ref = %q, want recorded digest ref", req.FilesystemBaseImageRef)

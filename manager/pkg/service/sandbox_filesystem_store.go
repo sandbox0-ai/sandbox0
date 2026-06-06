@@ -190,7 +190,7 @@ func (s *PGSandboxStore) DeleteForSandbox(ctx context.Context, req SandboxFilesy
 	_, err := s.pool.Exec(ctx, `
 		DELETE FROM manager.sandbox_filesystems
 		WHERE filesystem_id = $1
-			AND lifecycle_owner_sandbox_id = $2
+			AND (lifecycle_owner_sandbox_id = $2 OR lifecycle_owner_sandbox_id = '')
 	`, req.FilesystemID, req.LifecycleOwnerSandboxID)
 	if err != nil {
 		return fmt.Errorf("delete sandbox-owned filesystem: %w", err)

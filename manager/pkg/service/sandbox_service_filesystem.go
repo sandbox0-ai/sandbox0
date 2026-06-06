@@ -13,10 +13,8 @@ func (s *SandboxService) acquireClaimFilesystem(ctx context.Context, req *ClaimR
 	if s == nil || s.sandboxFilesystemStore == nil || req == nil {
 		return nil
 	}
-	if strings.TrimSpace(req.FilesystemID) == "" {
-		if err := s.ensureClaimFilesystem(req, template); err != nil {
-			return err
-		}
+	if err := s.ensureClaimFilesystem(req, template); err != nil {
+		return err
 	}
 	record, err := s.sandboxFilesystemStore.AcquireOwner(ctx, SandboxFilesystemAcquireRequest{
 		FilesystemID:            req.FilesystemID,

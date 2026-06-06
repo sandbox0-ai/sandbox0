@@ -595,16 +595,16 @@ func newProcdStubServer(t *testing.T) *httptest.Server {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/sandbox/pause", func(w http.ResponseWriter, r *http.Request) {
-		response := service.PauseResponse{
-			Paused: true,
-			ResourceUsage: &service.SandboxResourceUsage{
+		response := map[string]any{
+			"paused": true,
+			"resource_usage": &service.SandboxResourceUsage{
 				ContainerMemoryWorkingSet: 64 * 1024 * 1024,
 			},
 		}
 		_ = json.NewEncoder(w).Encode(response)
 	})
 	mux.HandleFunc("/api/v1/sandbox/resume", func(w http.ResponseWriter, r *http.Request) {
-		response := service.ResumeResponse{Resumed: true}
+		response := map[string]any{"resumed": true}
 		_ = json.NewEncoder(w).Encode(response)
 	})
 	mux.HandleFunc("/api/v1/sandbox/stats", func(w http.ResponseWriter, r *http.Request) {

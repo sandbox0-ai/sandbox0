@@ -1555,6 +1555,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          description: Sandbox pause requires ctld
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
         "404":
           description: Not found
           content:
@@ -1586,6 +1592,12 @@ paths:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "504":
           description: Timed out waiting for the sandbox to resume
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          description: Sandbox resume requires ctld
           content:
             application/json:
               schema:

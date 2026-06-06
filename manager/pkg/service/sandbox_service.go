@@ -71,6 +71,9 @@ var ErrDataPlaneNotReady = errors.New("data plane not ready")
 var ErrQuotaExceeded = errors.New("quota exceeded")
 var errSandboxPowerStateStale = errors.New("sandbox power state changed during execution")
 
+// ErrSandboxPowerRequiresCtld is returned when pause/resume is requested without ctld ownership enabled.
+var ErrSandboxPowerRequiresCtld = errors.New("sandbox power transitions require ctld")
+
 // ErrSandboxPowerTransitionSuperseded is returned when a newer pause/resume request replaces the requested transition.
 var ErrSandboxPowerTransitionSuperseded = errors.New("sandbox power transition superseded")
 
@@ -126,14 +129,12 @@ type SandboxService struct {
 	metrics                *obsmetrics.ManagerMetrics
 	autoScaler             AutoScalerInterface
 	credentialStore        egressauth.BindingStore
-	powerExecutor          SandboxPowerExecutor
 	webhookStateVolumes    SandboxSystemVolumeClient
 	volumeMetadata         SandboxVolumeMetadataClient
 	deletionWebhookEmitter SandboxDeletionWebhookEmitter
 	quotaStore             TeamQuotaLimitStore
 	sandboxStore           SandboxStore
 	powerStateLocks        sync.Map
-	powerStateReconcilers  sync.Map
 }
 
 type TeamQuotaLimitStore interface {
@@ -225,7 +226,6 @@ func NewSandboxService(
 		logger:                 logger,
 		metrics:                metrics,
 	}
-	service.powerExecutor = newSandboxPowerExecutor(service)
 	return service
 }
 
@@ -260,14 +260,6 @@ func (s *SandboxService) SetCredentialStore(store egressauth.BindingStore) {
 	s.credentialStore = store
 }
 
-// SetPowerExecutor overrides sandbox power execution (used by tests and future node executors).
-func (s *SandboxService) SetPowerExecutor(executor SandboxPowerExecutor) {
-	if executor == nil {
-		return
-	}
-	s.powerExecutor = executor
-}
-
 // SetWebhookStateVolumeClient injects the system volume client used for durable webhook state.
 func (s *SandboxService) SetWebhookStateVolumeClient(client SandboxSystemVolumeClient) {
 	s.webhookStateVolumes = client
@@ -294,11 +286,4 @@ func (s *SandboxService) SetQuotaStore(store TeamQuotaLimitStore) {
 // SetSandboxStore injects durable sandbox identity storage.
 func (s *SandboxService) SetSandboxStore(store SandboxStore) {
 	s.sandboxStore = store
-}
-
-func (s *SandboxService) sandboxPowerExecutor() SandboxPowerExecutor {
-	if s.powerExecutor != nil {
-		return s.powerExecutor
-	}
-	return newSandboxPowerExecutor(s)
 }

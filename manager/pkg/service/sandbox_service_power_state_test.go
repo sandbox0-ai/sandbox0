@@ -2,16 +2,11 @@ package service
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
-	"net/url"
 	"strconv"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
-	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -211,6 +206,7 @@ func TestRequestPauseSandboxRecordsDesiredPausedState(t *testing.T) {
 	svc := &SandboxService{
 		k8sClient: k8sClient,
 		podLister: newTestPodLister(t, pod),
+		config:    SandboxServiceConfig{CtldEnabled: true},
 		clock:     systemTime{},
 		logger:    zap.NewNop(),
 	}
@@ -253,6 +249,7 @@ func TestRequestPauseSandboxRetriesConflict(t *testing.T) {
 	svc := &SandboxService{
 		k8sClient: k8sClient,
 		podLister: newTestPodLister(t, pod),
+		config:    SandboxServiceConfig{CtldEnabled: true},
 		clock:     systemTime{},
 		logger:    zap.NewNop(),
 	}
@@ -281,19 +278,16 @@ func TestRequestPauseSandboxByIDRecordsDesiredState(t *testing.T) {
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 	k8sClient := fake.NewSimpleClientset(pod)
-	executor := &recordingPowerExecutor{}
 	svc := &SandboxService{
 		k8sClient: k8sClient,
 		podLister: newTestPodLister(t, pod),
+		config:    SandboxServiceConfig{CtldEnabled: true},
 		clock:     systemTime{},
 		logger:    zap.NewNop(),
 	}
-	svc.SetPowerExecutor(executor)
-	svc.powerStateReconcilers.Store("sandbox-1", struct{}{})
 
 	require.NoError(t, svc.RequestPauseSandboxByID(context.Background(), "sandbox-1"))
 
-	assert.Empty(t, executor.pauseCalls)
 	updated, err := k8sClient.CoreV1().Pods("default").Get(context.Background(), "sandbox-1", metav1.GetOptions{})
 	require.NoError(t, err)
 	state := sandboxPowerStateFromAnnotations(updated.Annotations)
@@ -302,175 +296,33 @@ func TestRequestPauseSandboxByIDRecordsDesiredState(t *testing.T) {
 	assert.Equal(t, SandboxPowerPhasePausing, state.Phase)
 }
 
-func TestSandboxPowerExecutorOverrideIsUsed(t *testing.T) {
-	executor := &recordingPowerExecutor{}
-	svc := &SandboxService{logger: zap.NewNop()}
-	svc.SetPowerExecutor(executor)
-
-	pauseResp, err := svc.PauseSandbox(context.Background(), "sandbox-1")
-	require.NoError(t, err)
-	resumeResp, err := svc.ResumeSandbox(context.Background(), "sandbox-1")
-	require.NoError(t, err)
-
-	assert.Equal(t, []string{"sandbox-1"}, executor.pauseCalls)
-	assert.Equal(t, []string{"sandbox-1"}, executor.resumeCalls)
-	assert.Equal(t, SandboxPowerStatePaused, pauseResp.PowerState.Desired)
-	assert.Equal(t, SandboxPowerStateActive, resumeResp.PowerState.Desired)
-}
-
-func TestReconcileSandboxPowerStateUsesConfiguredExecutor(t *testing.T) {
-	t.Run("pause", func(t *testing.T) {
-		pod := newPowerStatePod(SandboxPowerStatePaused, SandboxPowerStateActive, SandboxPowerPhasePausing)
-		executor := &recordingPowerExecutor{}
-		svc := &SandboxService{
-			k8sClient: fake.NewSimpleClientset(pod),
-			podLister: newTestPodLister(t, pod),
-			logger:    zap.NewNop(),
-		}
-		svc.SetPowerExecutor(executor)
-
-		svc.reconcileSandboxPowerState("sandbox-1")
-
-		assert.Equal(t, []string{"sandbox-1"}, executor.pauseCalls)
-		assert.Empty(t, executor.resumeCalls)
-	})
-
-	t.Run("resume", func(t *testing.T) {
-		pod := newPowerStatePod(SandboxPowerStateActive, SandboxPowerStatePaused, SandboxPowerPhaseResuming)
-		executor := &recordingPowerExecutor{}
-		svc := &SandboxService{
-			k8sClient: fake.NewSimpleClientset(pod),
-			podLister: newTestPodLister(t, pod),
-			logger:    zap.NewNop(),
-		}
-		svc.SetPowerExecutor(executor)
-
-		svc.reconcileSandboxPowerState("sandbox-1")
-
-		assert.Empty(t, executor.pauseCalls)
-		assert.Equal(t, []string{"sandbox-1"}, executor.resumeCalls)
-	})
-}
-
-func TestShouldReconcileSandboxPowerStateSkipsDeletingPod(t *testing.T) {
-	pending := newPowerStatePod(SandboxPowerStatePaused, SandboxPowerStateActive, SandboxPowerPhasePausing)
-	assert.True(t, shouldReconcileSandboxPowerState(pending))
-
-	stable := newPowerStatePod(SandboxPowerStatePaused, SandboxPowerStatePaused, SandboxPowerPhaseStable)
-	assert.False(t, shouldReconcileSandboxPowerState(stable))
-
-	deleting := newPowerStatePod(SandboxPowerStatePaused, SandboxPowerStateActive, SandboxPowerPhasePausing)
-	deletedAt := metav1.NewTime(time.Now())
-	deleting.DeletionTimestamp = &deletedAt
-	assert.False(t, shouldReconcileSandboxPowerState(deleting))
-}
-
-func TestReconcileSandboxPowerStateSkipsDeletingPod(t *testing.T) {
-	pod := newPowerStatePod(SandboxPowerStatePaused, SandboxPowerStateActive, SandboxPowerPhasePausing)
-	deletedAt := metav1.NewTime(time.Now())
-	pod.DeletionTimestamp = &deletedAt
-	executor := &recordingPowerExecutor{}
+func TestRequestSandboxPowerRequiresCtld(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sandbox-1",
+			Namespace: "default",
+			Labels: map[string]string{
+				controller.LabelSandboxID: "sandbox-1",
+			},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	k8sClient := fake.NewSimpleClientset(pod)
 	svc := &SandboxService{
-		k8sClient: fake.NewSimpleClientset(pod),
-		podLister: newTestPodLister(t, pod),
-		logger:    zap.NewNop(),
-	}
-	svc.SetPowerExecutor(executor)
-
-	svc.reconcileSandboxPowerState("sandbox-1")
-
-	assert.Empty(t, executor.pauseCalls)
-	assert.Empty(t, executor.resumeCalls)
-}
-
-func TestStartPowerStateReconcilerTriggersPendingTransitions(t *testing.T) {
-	pod := newPowerStatePod(SandboxPowerStatePaused, SandboxPowerStateActive, SandboxPowerPhasePausing)
-	pauseCalled := make(chan struct{})
-	svc := &SandboxService{
-		k8sClient: fake.NewSimpleClientset(pod),
-		podLister: newTestPodLister(t, pod),
-		logger:    zap.NewNop(),
-	}
-	svc.SetPowerExecutor(&completingPowerExecutor{service: svc, pauseCalled: pauseCalled})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		svc.StartPowerStateReconciler(ctx, time.Hour)
-		close(done)
-	}()
-
-	<-pauseCalled
-	cancel()
-	<-done
-}
-
-func TestStartPowerStateReconcilerSkipsWhenCtldEnabled(t *testing.T) {
-	pod := newPowerStatePod(SandboxPowerStatePaused, SandboxPowerStateActive, SandboxPowerPhasePausing)
-	pauseCalled := make(chan struct{})
-	svc := &SandboxService{
-		k8sClient: fake.NewSimpleClientset(pod),
-		podLister: newTestPodLister(t, pod),
-		config:    SandboxServiceConfig{CtldEnabled: true},
-		logger:    zap.NewNop(),
-	}
-	svc.SetPowerExecutor(&completingPowerExecutor{service: svc, pauseCalled: pauseCalled})
-
-	done := make(chan struct{})
-	go func() {
-		svc.StartPowerStateReconciler(context.Background(), time.Millisecond)
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal("StartPowerStateReconciler did not return when ctld is enabled")
-	}
-	select {
-	case <-pauseCalled:
-		t.Fatal("manager reconciler executed a ctld-owned power transition")
-	default:
-	}
-}
-
-func TestRequestResumeSandboxDoesNotBlockOnInFlightReconcile(t *testing.T) {
-	pod := newPowerStatePod(SandboxPowerStatePaused, SandboxPowerStateActive, SandboxPowerPhasePausing)
-	executor := newBlockingPowerExecutor()
-	svc := &SandboxService{
-		k8sClient: fake.NewSimpleClientset(pod),
+		k8sClient: k8sClient,
 		podLister: newTestPodLister(t, pod),
 		clock:     systemTime{},
 		logger:    zap.NewNop(),
 	}
-	svc.SetPowerExecutor(executor)
 
-	go svc.reconcileSandboxPowerState("sandbox-1")
-	<-executor.pauseStarted
+	_, err := svc.RequestPauseSandbox(context.Background(), "sandbox-1")
+	require.ErrorIs(t, err, ErrSandboxPowerRequiresCtld)
+	_, err = svc.RequestResumeSandbox(context.Background(), "sandbox-1")
+	require.ErrorIs(t, err, ErrSandboxPowerRequiresCtld)
 
-	done := make(chan *ResumeSandboxResponse, 1)
-	errCh := make(chan error, 1)
-	go func() {
-		resp, err := svc.RequestResumeSandbox(context.Background(), "sandbox-1")
-		if err != nil {
-			errCh <- err
-			return
-		}
-		done <- resp
-	}()
-
-	select {
-	case err := <-errCh:
-		t.Fatalf("RequestResumeSandbox returned error: %v", err)
-	case resp := <-done:
-		assert.Equal(t, SandboxPowerStateActive, resp.PowerState.Desired)
-		assert.Equal(t, SandboxPowerPhaseStable, resp.PowerState.Phase)
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal("RequestResumeSandbox blocked on in-flight reconcile")
-	}
-
-	close(executor.pauseRelease)
-	<-executor.pauseFinished
+	updated, err := k8sClient.CoreV1().Pods("default").Get(context.Background(), "sandbox-1", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, updated.Annotations[controller.AnnotationPowerStateDesired])
 }
 
 func TestRequestResumeSandboxKeepsCtldInFlightPausePending(t *testing.T) {
@@ -530,13 +382,15 @@ func TestPauseSandboxAndWaitReturnsAfterObservedPaused(t *testing.T) {
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
+	k8sClient := fake.NewSimpleClientset(pod)
+	completePowerTransitionOnUpdate(t, k8sClient, SandboxPowerStatePaused)
 	svc := &SandboxService{
-		k8sClient: fake.NewSimpleClientset(pod),
+		k8sClient: k8sClient,
 		podLister: newTestPodLister(t, pod),
+		config:    SandboxServiceConfig{CtldEnabled: true},
 		clock:     systemTime{},
 		logger:    zap.NewNop(),
 	}
-	svc.SetPowerExecutor(&completingPowerExecutor{service: svc})
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -551,13 +405,15 @@ func TestPauseSandboxAndWaitReturnsAfterObservedPaused(t *testing.T) {
 func TestResumeSandboxAndWaitReturnsAfterObservedActive(t *testing.T) {
 	pod := newPowerStatePod(SandboxPowerStatePaused, SandboxPowerStatePaused, SandboxPowerPhaseStable)
 	pod.Annotations[controller.AnnotationPaused] = "true"
+	k8sClient := fake.NewSimpleClientset(pod)
+	completePowerTransitionOnUpdate(t, k8sClient, SandboxPowerStateActive)
 	svc := &SandboxService{
-		k8sClient: fake.NewSimpleClientset(pod),
+		k8sClient: k8sClient,
 		podLister: newTestPodLister(t, pod),
+		config:    SandboxServiceConfig{CtldEnabled: true},
 		clock:     systemTime{},
 		logger:    zap.NewNop(),
 	}
-	svc.SetPowerExecutor(&completingPowerExecutor{service: svc})
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -580,14 +436,15 @@ func TestPauseSandboxAndWaitReturnsSupersededWhenDesiredChanges(t *testing.T) {
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
-	executor := newBlockingPowerExecutor()
+	k8sClient := fake.NewSimpleClientset(pod)
+	pauseRequested := notifyPowerTransitionRequest(k8sClient, SandboxPowerStatePaused)
 	svc := &SandboxService{
-		k8sClient: fake.NewSimpleClientset(pod),
+		k8sClient: k8sClient,
 		podLister: newTestPodLister(t, pod),
+		config:    SandboxServiceConfig{CtldEnabled: true},
 		clock:     systemTime{},
 		logger:    zap.NewNop(),
 	}
-	svc.SetPowerExecutor(executor)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -600,11 +457,10 @@ func TestPauseSandboxAndWaitReturnsSupersededWhenDesiredChanges(t *testing.T) {
 		resp, err := svc.PauseSandboxAndWait(ctx, "sandbox-1")
 		resultCh <- result{resp: resp, err: err}
 	}()
-	<-executor.pauseStarted
+	<-pauseRequested
 
 	_, err := svc.RequestResumeSandbox(context.Background(), "sandbox-1")
 	require.NoError(t, err)
-	close(executor.pauseRelease)
 
 	res := <-resultCh
 	require.ErrorIs(t, res.err, ErrSandboxPowerTransitionSuperseded)
@@ -613,224 +469,64 @@ func TestPauseSandboxAndWaitReturnsSupersededWhenDesiredChanges(t *testing.T) {
 	assert.Equal(t, SandboxPowerStateActive, res.resp.PowerState.Desired)
 }
 
-func TestPauseSandboxLocalResumesProcdAfterStalePause(t *testing.T) {
-	pod := newPowerStatePod(SandboxPowerStatePaused, SandboxPowerStateActive, SandboxPowerPhasePausing)
-	pod.Annotations[controller.AnnotationTeamID] = "team-1"
-	pod.Annotations[controller.AnnotationUserID] = "user-1"
-	pod.Spec = corev1.PodSpec{Containers: []corev1.Container{{Name: "procd"}}}
-	pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "127.0.0.1"}
-	k8sClient := fake.NewSimpleClientset(pod)
-
-	var calls []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls = append(calls, r.URL.Path)
-		switch r.URL.Path {
-		case "/api/v1/sandbox/pause":
-			current, err := k8sClient.CoreV1().Pods("default").Get(r.Context(), "sandbox-1", metav1.GetOptions{})
-			require.NoError(t, err)
-			updated := current.DeepCopy()
-			updated.Annotations[controller.AnnotationPowerStateDesired] = SandboxPowerStateActive
-			updated.Annotations[controller.AnnotationPowerStateDesiredGeneration] = "3"
-			updated.Annotations[controller.AnnotationPowerStateObserved] = SandboxPowerStateActive
-			updated.Annotations[controller.AnnotationPowerStateObservedGeneration] = "3"
-			updated.Annotations[controller.AnnotationPowerStatePhase] = SandboxPowerPhaseStable
-			_, err = k8sClient.CoreV1().Pods("default").Update(r.Context(), updated, metav1.UpdateOptions{})
-			require.NoError(t, err)
-			_ = spec.WriteSuccess(w, http.StatusOK, PauseResponse{Paused: true, ResourceUsage: &SandboxResourceUsage{ContainerMemoryWorkingSet: 128}})
-		case "/api/v1/sandbox/resume":
-			_ = spec.WriteSuccess(w, http.StatusOK, ResumeResponse{Resumed: true})
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-	serverURL, err := url.Parse(server.URL)
-	require.NoError(t, err)
-	port, err := strconv.Atoi(serverURL.Port())
-	require.NoError(t, err)
-
-	svc := &SandboxService{
-		k8sClient:              k8sClient,
-		podLister:              newTestPodLister(t, pod),
-		procdClient:            NewProcdClient(ProcdClientConfig{Timeout: time.Second}),
-		internalTokenGenerator: staticTokenGenerator{},
-		config: SandboxServiceConfig{
-			ProcdPort:              port,
-			PauseMinCPU:            "10m",
-			PauseMemoryBufferRatio: 1.1,
-		},
-		clock:  systemTime{},
-		logger: zap.NewNop(),
-	}
-
-	resp, err := svc.pauseSandboxLocal(context.Background(), "sandbox-1")
-	require.NoError(t, err)
-	assert.False(t, resp.Paused)
-	assert.Equal(t, SandboxPowerStateActive, resp.PowerState.Desired)
-	assert.Equal(t, []string{"/api/v1/sandbox/pause", "/api/v1/sandbox/resume"}, calls)
-}
-
-func TestCompletePausedSandboxRejectsStaleGeneration(t *testing.T) {
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "sandbox-1",
-			Namespace: "default",
-			Labels: map[string]string{
-				controller.LabelSandboxID: "sandbox-1",
-			},
-			Annotations: map[string]string{
-				controller.AnnotationPowerStateDesired:           SandboxPowerStateActive,
-				controller.AnnotationPowerStateDesiredGeneration: "2",
-				controller.AnnotationPowerStateObserved:          SandboxPowerStateActive,
-			},
-		},
-		Spec:   corev1.PodSpec{Containers: []corev1.Container{{Name: "procd"}}},
-		Status: corev1.PodStatus{Phase: corev1.PodRunning},
-	}
-	svc := &SandboxService{
-		k8sClient: fake.NewSimpleClientset(pod),
-		podLister: newTestPodLister(t, pod),
-		config: SandboxServiceConfig{
-			PauseMinCPU:            "10m",
-			PauseMemoryBufferRatio: 1.1,
-		},
-		clock:  systemTime{},
-		logger: zap.NewNop(),
-	}
-
-	resp, err := svc.completePausedSandbox(context.Background(), pod, "sandbox-1", &SandboxResourceUsage{ContainerMemoryWorkingSet: 128}, expectedSandboxPowerState{Desired: SandboxPowerStatePaused, Generation: 1})
-	require.ErrorIs(t, err, errSandboxPowerStateStale)
-	assert.False(t, resp.Paused)
-	assert.Equal(t, SandboxPowerStateActive, resp.PowerState.Desired)
-
-	updated, getErr := svc.k8sClient.CoreV1().Pods("default").Get(context.Background(), "sandbox-1", metav1.GetOptions{})
-	require.NoError(t, getErr)
-	assert.Empty(t, updated.Annotations[controller.AnnotationPaused])
-}
-
-type recordingPowerExecutor struct {
-	pauseCalls  []string
-	resumeCalls []string
-}
-
-type blockingPowerExecutor struct {
-	mu                sync.Mutex
-	pauseCalls        []string
-	resumeCalls       []string
-	pauseStarted      chan struct{}
-	pauseRelease      chan struct{}
-	pauseFinished     chan struct{}
-	pauseStartedOnce  sync.Once
-	pauseFinishedOnce sync.Once
-}
-
-type completingPowerExecutor struct {
-	service      *SandboxService
-	pauseCalled  chan struct{}
-	resumeCalled chan struct{}
-}
-
 type staticTokenGenerator struct{}
-
-func newBlockingPowerExecutor() *blockingPowerExecutor {
-	return &blockingPowerExecutor{
-		pauseStarted:  make(chan struct{}),
-		pauseRelease:  make(chan struct{}),
-		pauseFinished: make(chan struct{}),
-	}
-}
-
-func (e *recordingPowerExecutor) Pause(_ context.Context, sandboxID string) (*PauseSandboxResponse, error) {
-	e.pauseCalls = append(e.pauseCalls, sandboxID)
-	return &PauseSandboxResponse{
-		SandboxID: sandboxID,
-		Paused:    true,
-		PowerState: SandboxPowerState{
-			Desired: SandboxPowerStatePaused,
-		},
-	}, nil
-}
-
-func (e *recordingPowerExecutor) Resume(_ context.Context, sandboxID string) (*ResumeSandboxResponse, error) {
-	e.resumeCalls = append(e.resumeCalls, sandboxID)
-	return &ResumeSandboxResponse{
-		SandboxID: sandboxID,
-		Resumed:   true,
-		PowerState: SandboxPowerState{
-			Desired: SandboxPowerStateActive,
-		},
-	}, nil
-}
-
-func (e *blockingPowerExecutor) Pause(_ context.Context, sandboxID string) (*PauseSandboxResponse, error) {
-	e.mu.Lock()
-	e.pauseCalls = append(e.pauseCalls, sandboxID)
-	e.mu.Unlock()
-	e.pauseStartedOnce.Do(func() { close(e.pauseStarted) })
-	<-e.pauseRelease
-	e.pauseFinishedOnce.Do(func() { close(e.pauseFinished) })
-	return &PauseSandboxResponse{
-		SandboxID: sandboxID,
-		Paused:    true,
-		PowerState: SandboxPowerState{
-			Desired: SandboxPowerStatePaused,
-		},
-	}, nil
-}
-
-func (e *blockingPowerExecutor) Resume(_ context.Context, sandboxID string) (*ResumeSandboxResponse, error) {
-	e.mu.Lock()
-	e.resumeCalls = append(e.resumeCalls, sandboxID)
-	e.mu.Unlock()
-	return &ResumeSandboxResponse{
-		SandboxID: sandboxID,
-		Resumed:   true,
-		PowerState: SandboxPowerState{
-			Desired: SandboxPowerStateActive,
-		},
-	}, nil
-}
-
-func (e *completingPowerExecutor) Pause(ctx context.Context, sandboxID string) (*PauseSandboxResponse, error) {
-	notifyOnce(e.pauseCalled)
-	pod, err := e.service.getSandboxPodForPowerState(ctx, sandboxID)
-	if err != nil {
-		return nil, err
-	}
-	updated := pod.DeepCopy()
-	if updated.Annotations == nil {
-		updated.Annotations = make(map[string]string)
-	}
-	updated.Annotations[controller.AnnotationPaused] = "true"
-	state := completedSandboxPowerState(updated.Annotations, SandboxPowerStatePaused)
-	applySandboxPowerStateAnnotations(updated.Annotations, state)
-	if _, err := e.service.k8sClient.CoreV1().Pods(updated.Namespace).Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
-		return nil, err
-	}
-	return &PauseSandboxResponse{SandboxID: sandboxID, Paused: true, PowerState: state}, nil
-}
-
-func (e *completingPowerExecutor) Resume(ctx context.Context, sandboxID string) (*ResumeSandboxResponse, error) {
-	notifyOnce(e.resumeCalled)
-	pod, err := e.service.getSandboxPodForPowerState(ctx, sandboxID)
-	if err != nil {
-		return nil, err
-	}
-	updated := pod.DeepCopy()
-	if updated.Annotations == nil {
-		updated.Annotations = make(map[string]string)
-	}
-	delete(updated.Annotations, controller.AnnotationPaused)
-	state := completedSandboxPowerState(updated.Annotations, SandboxPowerStateActive)
-	applySandboxPowerStateAnnotations(updated.Annotations, state)
-	if _, err := e.service.k8sClient.CoreV1().Pods(updated.Namespace).Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
-		return nil, err
-	}
-	return &ResumeSandboxResponse{SandboxID: sandboxID, Resumed: true, PowerState: state}, nil
-}
 
 func (staticTokenGenerator) GenerateToken(_, _, _ string) (string, error) {
 	return "token", nil
+}
+
+func completePowerTransitionOnUpdate(t *testing.T, k8sClient *fake.Clientset, target string) {
+	t.Helper()
+	k8sClient.PrependReactor("update", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() != "" {
+			return false, nil, nil
+		}
+		updateAction, ok := action.(ktesting.UpdateAction)
+		if !ok {
+			return false, nil, nil
+		}
+		pod, ok := updateAction.GetObject().(*corev1.Pod)
+		if !ok || pod.Annotations == nil {
+			return false, nil, nil
+		}
+		state := sandboxPowerStateFromAnnotations(pod.Annotations)
+		if state.Desired != target || state.Phase == SandboxPowerPhaseStable {
+			return false, nil, nil
+		}
+		completed := completedSandboxPowerState(pod.Annotations, target)
+		applySandboxPowerStateAnnotations(pod.Annotations, completed)
+		if target == SandboxPowerStatePaused {
+			pod.Annotations[controller.AnnotationPaused] = "true"
+		} else {
+			delete(pod.Annotations, controller.AnnotationPaused)
+			delete(pod.Annotations, controller.AnnotationPausedAt)
+			delete(pod.Annotations, controller.AnnotationPausedState)
+		}
+		return false, nil, nil
+	})
+}
+
+func notifyPowerTransitionRequest(k8sClient *fake.Clientset, target string) <-chan struct{} {
+	requested := make(chan struct{})
+	k8sClient.PrependReactor("update", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() != "" {
+			return false, nil, nil
+		}
+		updateAction, ok := action.(ktesting.UpdateAction)
+		if !ok {
+			return false, nil, nil
+		}
+		pod, ok := updateAction.GetObject().(*corev1.Pod)
+		if !ok {
+			return false, nil, nil
+		}
+		state := sandboxPowerStateFromAnnotations(pod.Annotations)
+		if state.Desired == target {
+			notifyOnce(requested)
+		}
+		return false, nil, nil
+	})
+	return requested
 }
 
 func notifyOnce(ch chan struct{}) {

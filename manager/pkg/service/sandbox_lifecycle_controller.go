@@ -359,7 +359,6 @@ func (s *SandboxService) CleanupDeletedSandbox(ctx context.Context, info Sandbox
 		errs = append(errs, fmt.Errorf("unbind sandbox volume portals: %w", err))
 	}
 	s.powerStateLocks.Delete(sandboxID)
-	s.powerStateReconcilers.Delete(sandboxID)
 	return errors.Join(errs...)
 }
 

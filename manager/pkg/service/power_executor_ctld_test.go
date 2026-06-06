@@ -15,14 +15,21 @@ import (
 	ktesting "k8s.io/client-go/testing"
 )
 
-func TestNewSandboxServiceUsesCtldExecutorWhenEnabled(t *testing.T) {
+func TestNewSandboxServiceInitializesCtldClientDefaults(t *testing.T) {
 	svc := NewSandboxService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, SandboxServiceConfig{CtldEnabled: true}, zap.NewNop(), nil)
-	_, ok := svc.powerExecutor.(*ctldSandboxPowerExecutor)
-	assert.True(t, ok)
 	assert.Equal(t, 8095, svc.config.CtldPort)
 	assert.Equal(t, 15*time.Second, svc.config.CtldClientTimeout)
 	require.NotNil(t, svc.ctldClient)
 	assert.Equal(t, 15*time.Second, svc.ctldClient.httpClient.Timeout)
+}
+
+func TestSandboxPowerRequiresCtldEnabled(t *testing.T) {
+	svc := NewSandboxService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, SandboxServiceConfig{}, zap.NewNop(), nil)
+
+	_, err := svc.PauseSandbox(context.Background(), "sandbox-1")
+	require.ErrorIs(t, err, ErrSandboxPowerRequiresCtld)
+	_, err = svc.ResumeSandbox(context.Background(), "sandbox-1")
+	require.ErrorIs(t, err, ErrSandboxPowerRequiresCtld)
 }
 
 func TestCtldAddressForPodUsesHostIPWithoutK8sClient(t *testing.T) {
@@ -75,7 +82,6 @@ func TestCtldPowerExecutorRequestsPauseAsDesiredState(t *testing.T) {
 		logger:    zap.NewNop(),
 		clock:     systemTime{},
 	}
-	svc.SetPowerExecutor(&ctldSandboxPowerExecutor{service: svc})
 
 	resp, err := svc.PauseSandbox(context.Background(), "sandbox-1")
 	require.NoError(t, err)
@@ -122,7 +128,6 @@ func TestCtldPowerExecutorRequestsResumeAsDesiredState(t *testing.T) {
 		logger:    zap.NewNop(),
 		clock:     systemTime{},
 	}
-	svc.SetPowerExecutor(&ctldSandboxPowerExecutor{service: svc})
 
 	resp, err := svc.ResumeSandbox(context.Background(), "sandbox-1")
 	require.NoError(t, err)

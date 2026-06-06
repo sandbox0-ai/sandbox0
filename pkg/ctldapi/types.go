@@ -93,6 +93,9 @@ type SaveRootFSResponse struct {
 
 type ApplyRootFSRequest struct {
 	Target                      RootFSContainerRef   `json:"target"`
+	ExpectedRuntime             string               `json:"expected_runtime,omitempty"`
+	ExpectedRuntimeHandler      string               `json:"expected_runtime_handler,omitempty"`
+	ExpectedSnapshotter         string               `json:"expected_snapshotter,omitempty"`
 	ExpectedBaseImageDigest     string               `json:"expected_base_image_digest,omitempty"`
 	ExpectedSnapshotParent      string               `json:"expected_snapshot_parent,omitempty"`
 	ExpectedSnapshotParentChain []string             `json:"expected_snapshot_parent_chain,omitempty"`

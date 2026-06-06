@@ -677,6 +677,9 @@ func newRootFSApplyRecordingCtldServer(t *testing.T, events *orderedEvents, name
 		if req.Target.Namespace != namespace || req.Target.PodName != "idle-rootfs" || req.Target.ContainerName != "procd" {
 			t.Fatalf("unexpected rootfs target: %+v", req.Target)
 		}
+		if req.ExpectedRuntime != "runc" || req.ExpectedRuntimeHandler != "runc" || req.ExpectedSnapshotter != "overlayfs" {
+			t.Fatalf("unexpected rootfs runtime validation: %+v", req)
+		}
 		if req.ExpectedBaseImageDigest != "sha256:base" || len(req.ExpectedSnapshotParentChain) != 1 || req.ExpectedSnapshotParentChain[0] != "sha256:parent" {
 			t.Fatalf("unexpected rootfs base validation: %+v", req)
 		}

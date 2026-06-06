@@ -108,6 +108,9 @@ func TestFinishRestoredSandboxRuntimeAppliesRootFSBeforeProcdInitialization(t *t
 		require.Equal(t, "/api/v1/rootfs/apply", r.URL.Path)
 		var req ctldapi.ApplyRootFSRequest
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		assert.Equal(t, "runc", req.ExpectedRuntime)
+		assert.Equal(t, "io.containerd.runc.v2", req.ExpectedRuntimeHandler)
+		assert.Equal(t, "overlayfs", req.ExpectedSnapshotter)
 		assert.Equal(t, "sha256:base", req.ExpectedBaseImageDigest)
 		assert.Equal(t, "parent-1", req.ExpectedSnapshotParent)
 		assert.Equal(t, []string{"parent-1", "parent-0"}, req.ExpectedSnapshotParentChain)

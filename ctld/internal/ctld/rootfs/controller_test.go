@@ -2,6 +2,7 @@ package rootfs
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -101,6 +102,9 @@ func TestControllerApplyRootFSDownloadsAndAppliesDiff(t *testing.T) {
 
 	resp, status := controller.ApplyRootFS(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.ApplyRootFSRequest{
 		Target:                      rootFSTarget(),
+		ExpectedRuntime:             "runc",
+		ExpectedRuntimeHandler:      "runc",
+		ExpectedSnapshotter:         "overlayfs",
 		ExpectedBaseImageDigest:     "sha256:base",
 		ExpectedSnapshotParent:      "parent-1",
 		ExpectedSnapshotParentChain: []string{"parent-1", "parent-0"},
@@ -140,6 +144,64 @@ func TestControllerApplyRootFSRejectsBaseMismatch(t *testing.T) {
 	require.Equal(t, http.StatusConflict, status)
 	assert.Contains(t, resp.Error, "base image digest mismatch")
 	assert.False(t, runtime.applyCalled)
+}
+
+func TestControllerApplyRootFSRejectsRuntimeMismatch(t *testing.T) {
+	store := objectstore.NewMemoryStore(t.Name())
+	require.NoError(t, store.Put("rootfs/diff.tar", strings.NewReader("rootfs diff")))
+	runtime := &fakeRuntime{info: rootFSInfo("gvisor")}
+	controller := NewController(Config{Runtime: runtime, Store: store})
+
+	resp, status := controller.ApplyRootFS(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.ApplyRootFSRequest{
+		Target:          rootFSTarget(),
+		ExpectedRuntime: "runc",
+		Descriptor: ctldapi.RootFSDiffDescriptor{
+			MediaType: "application/vnd.oci.image.layer.v1.tar",
+			Digest:    "sha256:feedface",
+			Size:      int64(len("rootfs diff")),
+			ObjectKey: "rootfs/diff.tar",
+		},
+	})
+
+	require.Equal(t, http.StatusConflict, status)
+	assert.Contains(t, resp.Error, "runtime mismatch")
+	assert.False(t, runtime.applyCalled)
+}
+
+func TestValidateExpectedBaseRejectsRuntimeCompatibilityMismatches(t *testing.T) {
+	info := rootFSInfo("gvisor")
+	info.RuntimeHandler = "gvisor-rootfs"
+
+	tests := []struct {
+		name string
+		req  ctldapi.ApplyRootFSRequest
+		want string
+	}{
+		{
+			name: "runtime",
+			req:  ctldapi.ApplyRootFSRequest{ExpectedRuntime: "runc"},
+			want: "runtime mismatch",
+		},
+		{
+			name: "runtime handler",
+			req:  ctldapi.ApplyRootFSRequest{ExpectedRuntimeHandler: "runsc-default"},
+			want: "runtime handler mismatch",
+		},
+		{
+			name: "snapshotter",
+			req:  ctldapi.ApplyRootFSRequest{ExpectedSnapshotter: "devmapper"},
+			want: "snapshotter mismatch",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateExpectedBase(info, tt.req)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+			assert.True(t, errors.Is(err, ErrConflict))
+		})
+	}
 }
 
 func TestControllerApplyRootFSRejectsMissingDescriptorObjectKey(t *testing.T) {

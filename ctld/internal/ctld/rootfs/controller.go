@@ -249,6 +249,15 @@ func validateSupportedRuntime(info ctldapi.RootFSInfo) error {
 }
 
 func validateExpectedBase(info ctldapi.RootFSInfo, req ctldapi.ApplyRootFSRequest) error {
+	if expected := strings.TrimSpace(req.ExpectedRuntime); expected != "" && strings.TrimSpace(info.Runtime) != expected {
+		return fmt.Errorf("%w: runtime mismatch: expected %s, got %s", ErrConflict, expected, info.Runtime)
+	}
+	if expected := strings.TrimSpace(req.ExpectedRuntimeHandler); expected != "" && strings.TrimSpace(info.RuntimeHandler) != expected {
+		return fmt.Errorf("%w: runtime handler mismatch: expected %s, got %s", ErrConflict, expected, info.RuntimeHandler)
+	}
+	if expected := strings.TrimSpace(req.ExpectedSnapshotter); expected != "" && strings.TrimSpace(info.Snapshotter) != expected {
+		return fmt.Errorf("%w: snapshotter mismatch: expected %s, got %s", ErrConflict, expected, info.Snapshotter)
+	}
 	if expected := strings.TrimSpace(req.ExpectedBaseImageDigest); expected != "" && strings.TrimSpace(info.BaseImageDigest) != expected {
 		return fmt.Errorf("%w: base image digest mismatch: expected %s, got %s", ErrConflict, expected, info.BaseImageDigest)
 	}

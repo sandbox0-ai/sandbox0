@@ -81,6 +81,9 @@ func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *
 	}
 	resp, err := s.ctldClient.ApplyRootFSWithTimeout(ctx, ctldAddress, ctldapi.ApplyRootFSRequest{
 		Target:                      rootFSTargetForPod(pod),
+		ExpectedRuntime:             state.Runtime,
+		ExpectedRuntimeHandler:      state.RuntimeHandler,
+		ExpectedSnapshotter:         state.Snapshotter,
 		ExpectedBaseImageDigest:     state.BaseImageDigest,
 		ExpectedSnapshotParent:      state.SnapshotParent,
 		ExpectedSnapshotParentChain: append([]string(nil), state.SnapshotParentChain...),

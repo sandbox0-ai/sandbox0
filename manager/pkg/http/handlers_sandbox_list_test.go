@@ -149,26 +149,6 @@ func TestClaimSandboxReturnsUnavailableWhenDataPlaneNotReady(t *testing.T) {
 	}
 }
 
-func TestClaimSandboxRejectsFilesystemID(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	server := &Server{logger: zap.NewNop()}
-	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"template":"default","filesystem_id":"fs-user"}`))
-	request = request.WithContext(internalauth.WithClaims(request.Context(), &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
-	ctx.Request = request
-
-	server.claimSandbox(ctx)
-
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
-	}
-	if !strings.Contains(recorder.Body.String(), "filesystem_id") {
-		t.Fatalf("response body = %q, want filesystem_id error", recorder.Body.String())
-	}
-}
-
 func newHTTPTestPodLister(t *testing.T, pods ...*corev1.Pod) corelisters.PodLister {
 	t.Helper()
 	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{

@@ -1,9 +1,7 @@
 package http
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -26,22 +24,7 @@ type updateSandboxRequest struct {
 // claimSandbox claims a sandbox
 func (s *Server) claimSandbox(c *gin.Context) {
 	var req service.ClaimRequest
-	body, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
-		return
-	}
-	body = bytes.TrimSpace(body)
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(body, &raw); err != nil {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
-		return
-	}
-	if _, ok := raw["filesystem_id"]; ok {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "filesystem_id is managed by Sandbox0 and cannot be set on sandbox claims")
-		return
-	}
-	if err := json.Unmarshal(body, &req); err != nil {
+	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return
 	}

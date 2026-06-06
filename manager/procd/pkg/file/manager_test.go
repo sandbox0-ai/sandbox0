@@ -4,6 +4,7 @@ package file
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -14,79 +15,79 @@ func TestSanitizePath(t *testing.T) {
 		name     string
 		rootPath string
 		input    string
-		wantAbs  bool // whether result should be absolute
+		want     string
 	}{
 		{
 			name:     "relative simple file",
 			rootPath: "/tmp/test",
 			input:    "file.txt",
-			wantAbs:  true,
+			want:     "/tmp/test/file.txt",
 		},
 		{
 			name:     "relative nested path",
 			rootPath: "/tmp/test",
 			input:    "dir1/dir2/file.txt",
-			wantAbs:  true,
+			want:     "/tmp/test/dir1/dir2/file.txt",
 		},
 		{
 			name:     "relative path with dot",
 			rootPath: "/tmp/test",
 			input:    "./file.txt",
-			wantAbs:  true,
+			want:     "/tmp/test/file.txt",
 		},
 		{
 			name:     "relative path with double dot",
 			rootPath: "/tmp/test",
 			input:    "../etc/passwd",
-			wantAbs:  true,
+			want:     "/tmp/test/etc/passwd",
 		},
 		{
 			name:     "relative path with multiple double dots",
 			rootPath: "/tmp/test",
 			input:    "../../../../../etc/passwd",
-			wantAbs:  true,
+			want:     "/tmp/test/etc/passwd",
 		},
 		{
 			name:     "relative path that resolves to root",
 			rootPath: "/tmp/test",
 			input:    "foo/..",
-			wantAbs:  true,
+			want:     "/tmp/test",
 		},
 		{
 			name:     "absolute path",
 			rootPath: "/tmp/test",
 			input:    "/etc/passwd",
-			wantAbs:  true,
+			want:     "/tmp/test/etc/passwd",
 		},
 		{
 			name:     "absolute path within root",
 			rootPath: "/tmp/test",
 			input:    "/tmp/test/dir/file.txt",
-			wantAbs:  true,
+			want:     "/tmp/test/tmp/test/dir/file.txt",
 		},
 		{
 			name:     "empty path",
 			rootPath: "/tmp/test",
 			input:    "",
-			wantAbs:  true,
+			want:     "/tmp/test",
 		},
 		{
 			name:     "path with trailing slash",
 			rootPath: "/tmp/test",
 			input:    "dir/",
-			wantAbs:  true,
+			want:     "/tmp/test/dir",
 		},
 		{
 			name:     "path with multiple slashes",
 			rootPath: "/tmp/test",
 			input:    "dir///file.txt",
-			wantAbs:  true,
+			want:     "/tmp/test/dir/file.txt",
 		},
 		{
 			name:     "path with current dir in middle",
 			rootPath: "/tmp/test",
 			input:    "dir/./file.txt",
-			wantAbs:  true,
+			want:     "/tmp/test/dir/file.txt",
 		},
 	}
 
@@ -104,7 +105,36 @@ func TestSanitizePath(t *testing.T) {
 			if !filepath.IsAbs(result) {
 				t.Errorf("sanitizePath() result %s is not absolute", result)
 			}
+			if result != filepath.Clean(tt.want) {
+				t.Errorf("sanitizePath() = %s, want %s", result, filepath.Clean(tt.want))
+			}
 		})
+	}
+}
+
+func TestSanitizePathUsesExternalMount(t *testing.T) {
+	rootPath := t.TempDir()
+	externalPath := filepath.Join(t.TempDir(), "workspace", "data")
+	if err := os.MkdirAll(externalPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := NewManager(rootPath)
+	if err != nil {
+		t.Fatalf("NewManager() failed = %v", err)
+	}
+	m.SetExternalMounts([]string{externalPath})
+
+	got := m.sanitizePath(filepath.Join(externalPath, "hello.txt"))
+	want := filepath.Join(externalPath, "hello.txt")
+	if got != want {
+		t.Fatalf("sanitizePath() = %s, want %s", got, want)
+	}
+
+	got = m.sanitizePath(filepath.Join(externalPath+"-other", "hello.txt"))
+	want = filepath.Join(rootPath, strings.TrimPrefix(filepath.Clean(filepath.Join(externalPath+"-other", "hello.txt")), string(filepath.Separator)))
+	if got != want {
+		t.Fatalf("sanitizePath() for sibling = %s, want %s", got, want)
 	}
 }
 

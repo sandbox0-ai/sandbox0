@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,6 +26,14 @@ import (
 )
 
 func main() {
+	if handled, err := process.RunLauncherFromArgs(os.Args[1:]); handled {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "sandbox rootfs launcher failed: %v\n", err)
+			os.Exit(127)
+		}
+		return
+	}
+
 	// // Start the reaper to clean up zombie processes
 	// go reaper.Reap()
 
@@ -48,6 +57,7 @@ func main() {
 		zap.Int("http_port", cfg.HTTPPort),
 		zap.String("root_path", cfg.RootPath),
 	)
+	configureProcessLauncher(logger)
 	if bundlePath, err := trust.ConfigureNetdMITMCATrust(); err != nil {
 		logger.Warn("Failed to configure netd MITM CA trust", zap.Error(err))
 	} else if bundlePath != "" {
@@ -264,4 +274,19 @@ func initLogger(logLevel string) *zap.Logger {
 	}
 
 	return logger
+}
+
+func configureProcessLauncher(logger *zap.Logger) {
+	rootPath := strings.TrimSpace(os.Getenv("sandbox_rootfs_path"))
+	if rootPath == "" {
+		return
+	}
+	process.ConfigureLauncher(process.LauncherConfig{
+		RootPath: rootPath,
+	})
+	if logger != nil {
+		logger.Info("Configured process launcher",
+			zap.String("sandbox_rootfs_path", rootPath),
+		)
+	}
 }

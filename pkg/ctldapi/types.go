@@ -162,3 +162,66 @@ type ReleaseVolumeOwnerResponse struct {
 	Busy     bool   `json:"busy,omitempty"`
 	Error    string `json:"error,omitempty"`
 }
+
+// BindSandboxRootFSRequest asks node-local ctld to prepare the sandbox rootfs
+// view for one runtime pod generation.
+type BindSandboxRootFSRequest struct {
+	Namespace          string `json:"namespace"`
+	PodName            string `json:"pod_name"`
+	PodUID             string `json:"pod_uid"`
+	ContainerID        string `json:"container_id,omitempty"`
+	SandboxID          string `json:"sandbox_id"`
+	TeamID             string `json:"team_id"`
+	FilesystemID       string `json:"filesystem_id"`
+	RuntimeGeneration  int64  `json:"runtime_generation"`
+	BaseImageRef       string `json:"base_image_ref,omitempty"`
+	BaseImageDigest    string `json:"base_image_digest,omitempty"`
+	CarrierImageDigest string `json:"carrier_image_digest,omitempty"`
+	TargetPath         string `json:"target_path,omitempty"`
+	TargetHostPath     string `json:"target_host_path,omitempty"`
+	RootFSVolumeName   string `json:"rootfs_volume_name,omitempty"`
+	BaseRootPath       string `json:"base_root_path,omitempty"`
+}
+
+// BindSandboxRootFSResponse describes the prepared rootfs mount point.
+type BindSandboxRootFSResponse struct {
+	FilesystemID string `json:"filesystem_id"`
+	MountPoint   string `json:"mount_point"`
+	MountedAt    string `json:"mounted_at"`
+	Error        string `json:"error,omitempty"`
+}
+
+// FlushSandboxRootFSRequest commits mutable rootfs upperdir state before clean.
+type FlushSandboxRootFSRequest struct {
+	Namespace         string `json:"namespace"`
+	PodName           string `json:"pod_name"`
+	PodUID            string `json:"pod_uid"`
+	SandboxID         string `json:"sandbox_id"`
+	TeamID            string `json:"team_id,omitempty"`
+	FilesystemID      string `json:"filesystem_id"`
+	RuntimeGeneration int64  `json:"runtime_generation"`
+}
+
+type FlushSandboxRootFSResponse struct {
+	Flushed      bool   `json:"flushed"`
+	FilesystemID string `json:"filesystem_id"`
+	Error        string `json:"error,omitempty"`
+}
+
+// ReleaseSandboxRootFSRequest releases node-local rootfs state for one runtime
+// generation. It is idempotent and may be called after pod deletion.
+type ReleaseSandboxRootFSRequest struct {
+	Namespace         string `json:"namespace"`
+	PodName           string `json:"pod_name"`
+	PodUID            string `json:"pod_uid"`
+	SandboxID         string `json:"sandbox_id"`
+	TeamID            string `json:"team_id,omitempty"`
+	FilesystemID      string `json:"filesystem_id"`
+	RuntimeGeneration int64  `json:"runtime_generation"`
+}
+
+type ReleaseSandboxRootFSResponse struct {
+	Released     bool   `json:"released"`
+	FilesystemID string `json:"filesystem_id"`
+	Error        string `json:"error,omitempty"`
+}

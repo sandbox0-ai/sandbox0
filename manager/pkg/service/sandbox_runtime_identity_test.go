@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 	corelisters "k8s.io/client-go/listers/core/v1"
+	ktesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -192,6 +193,47 @@ func TestRestoreCleanedSandboxRuntimeDoesNotCreatePodWhileRuntimeDeleting(t *tes
 	}
 }
 
+func TestCleanSandboxRuntimeDefersCleanedStatusUntilLifecycleCleanup(t *testing.T) {
+	pod := runtimeIdentityPod("ns-a", "pod-a", "sandbox-a")
+	pod.UID = "pod-uid-a"
+	pod.Annotations[controller.AnnotationFilesystemID] = "fs-a"
+	pod.Annotations[controller.AnnotationRuntimeGeneration] = "4"
+
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-a": {
+			ID:                  "sandbox-a",
+			TeamID:              "team-a",
+			UserID:              "user-a",
+			Status:              "running",
+			FilesystemID:        "fs-a",
+			CurrentPodName:      "pod-a",
+			CurrentPodNamespace: "ns-a",
+			RuntimeGeneration:   4,
+		},
+	}}
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	svc := &SandboxService{
+		k8sClient:    client,
+		podLister:    runtimeIdentityPodLister(t, pod),
+		sandboxStore: store,
+		clock:        systemTime{},
+		logger:       zap.NewNop(),
+	}
+
+	if err := svc.CleanSandboxRuntime(context.Background(), "sandbox-a"); err != nil {
+		t.Fatalf("CleanSandboxRuntime() error = %v", err)
+	}
+	if store.cleans != 0 {
+		t.Fatalf("store cleans = %d, want 0 before lifecycle cleanup", store.cleans)
+	}
+	if got := store.records["sandbox-a"].Status; got != "running" {
+		t.Fatalf("status = %q, want running before lifecycle cleanup", got)
+	}
+	if !hasClientAction(client.Actions(), "delete", "pods") {
+		t.Fatalf("expected pod delete action, got %#v", client.Actions())
+	}
+}
+
 func TestTerminateCleanedSandboxRecordRunsPersistentCleanup(t *testing.T) {
 	store := &memorySandboxStore{records: map[string]*SandboxRecord{
 		"sandbox-a": {
@@ -233,6 +275,15 @@ func TestTerminateCleanedSandboxRecordRunsPersistentCleanup(t *testing.T) {
 	if len(volumes.marked) != 1 || volumes.marked[0] != "sandbox-a:sandbox_deleted" {
 		t.Fatalf("marked volumes = %#v, want sandbox-a:sandbox_deleted", volumes.marked)
 	}
+}
+
+func hasClientAction(actions []ktesting.Action, verb, resource string) bool {
+	for _, action := range actions {
+		if action.GetVerb() == verb && action.GetResource().Resource == resource {
+			return true
+		}
+	}
+	return false
 }
 
 func runtimeIdentityPod(namespace, name, sandboxID string) *corev1.Pod {

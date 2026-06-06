@@ -24,6 +24,10 @@ func (s *SandboxService) RestoreCleanedSandboxRuntime(ctx context.Context, sandb
 	var pod *corev1.Pod
 	var record *SandboxRecord
 	claimType := "hot"
+	releaseFilesystemOnFailure := false
+	filesystemID := ""
+	filesystemSandboxID := ""
+	filesystemGeneration := int64(0)
 	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, locked *SandboxRecord) error {
 		if locked.Status == SandboxStatusDeleted || !locked.DeletedAt.IsZero() {
 			return k8serrors.NewNotFound(corev1.Resource("sandbox"), sandboxID)
@@ -60,6 +64,13 @@ func (s *SandboxService) RestoreCleanedSandboxRuntime(ctx context.Context, sandb
 		if err := s.ensureClaimFilesystem(req, template); err != nil {
 			return err
 		}
+		if err := s.acquireClaimFilesystem(lockCtx, req, template); err != nil {
+			return err
+		}
+		releaseFilesystemOnFailure = true
+		filesystemID = req.FilesystemID
+		filesystemSandboxID = req.SandboxID
+		filesystemGeneration = req.RuntimeGeneration
 		pod, err = s.claimIdlePod(lockCtx, template, req)
 		if err != nil {
 			return fmt.Errorf("claim idle pod: %w", err)
@@ -74,6 +85,9 @@ func (s *SandboxService) RestoreCleanedSandboxRuntime(ctx context.Context, sandb
 		return tx.SaveRuntime(lockCtx, sandboxID, pod.Namespace, pod.Name, SandboxStatusStarting, generation, parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt))
 	})
 	if err != nil {
+		if releaseFilesystemOnFailure {
+			_ = s.releaseSandboxFilesystemOwner(context.Background(), filesystemID, filesystemSandboxID, filesystemGeneration)
+		}
 		if errors.Is(err, ErrSandboxRecordNotFound) {
 			return nil, k8serrors.NewNotFound(corev1.Resource("sandbox"), sandboxID)
 		}
@@ -89,6 +103,9 @@ func (s *SandboxService) RestoreCleanedSandboxRuntime(ctx context.Context, sandb
 	if err := s.finishRestoredSandboxRuntime(ctx, pod, record, claimType); err != nil {
 		s.requestSandboxDeletionAfterClaimFailure(pod, "restored runtime initialization failed")
 		_ = s.CleanSandboxRuntime(context.Background(), sandboxID)
+		if releaseFilesystemOnFailure {
+			_ = s.releaseSandboxFilesystemOwner(context.Background(), filesystemID, filesystemSandboxID, filesystemGeneration)
+		}
 		return nil, err
 	}
 	return s.GetSandbox(ctx, sandboxID)
@@ -120,6 +137,23 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	if err := s.ensureClaimFilesystem(req, template); err != nil {
 		return err
 	}
+	rootFSBound := false
+	defer func() {
+		if !rootFSBound {
+			return
+		}
+		if err := s.releaseSandboxRootFSForPod(context.Background(), pod, req); err != nil && s.logger != nil {
+			s.logger.Warn("Failed to release sandbox rootfs after restore failure",
+				zap.String("sandboxID", req.SandboxID),
+				zap.String("filesystemID", req.FilesystemID),
+				zap.Error(err),
+			)
+		}
+	}()
+	if err := s.bindSandboxRootFS(ctx, pod, req); err != nil {
+		return fmt.Errorf("bind sandbox rootfs: %w", err)
+	}
+	rootFSBound = true
 	if _, err := s.bindVolumePortals(ctx, pod, req, template); err != nil {
 		return fmt.Errorf("bind volume portals: %w", err)
 	}
@@ -136,6 +170,7 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	if err := s.persistUpdatedSandboxPod(ctx, pod); err != nil {
 		return fmt.Errorf("persist restored sandbox: %w", err)
 	}
+	rootFSBound = false
 	if s.logger != nil {
 		s.logger.Info("Restored cleaned sandbox runtime",
 			zap.String("sandboxID", record.ID),

@@ -139,6 +139,9 @@ func TestEnsureClaimFilesystemCreatesIDAndRecordsBaseImage(t *testing.T) {
 	if req.FilesystemBaseImageRef != "ubuntu@sha256:abc" {
 		t.Fatalf("filesystem base image = %q, want template image", req.FilesystemBaseImageRef)
 	}
+	if req.FilesystemBaseImageDigest != "sha256:abc" {
+		t.Fatalf("filesystem base image digest = %q, want sha256:abc", req.FilesystemBaseImageDigest)
+	}
 }
 
 func TestEnsureClaimFilesystemRejectsPathSeparator(t *testing.T) {

@@ -20,6 +20,18 @@ func TestSandboxEnvVarsForInitializeClonesConfigEnvVars(t *testing.T) {
 	}
 }
 
+func TestSandboxVolumeMountPointsForInitializeNormalizesMounts(t *testing.T) {
+	got := sandboxVolumeMountPointsForInitialize([]ClaimMount{
+		{SandboxVolumeID: "vol-1", MountPoint: "/workspace/data"},
+		{SandboxVolumeID: "vol-1", MountPoint: "/workspace/project/../data"},
+		{SandboxVolumeID: "vol-2", MountPoint: "relative"},
+		{SandboxVolumeID: "vol-3", MountPoint: "/"},
+	})
+	if len(got) != 1 || got[0] != "/workspace/data" {
+		t.Fatalf("mount points = %#v, want [/workspace/data]", got)
+	}
+}
+
 func TestCloneSandboxConfigClonesEnvVars(t *testing.T) {
 	cfg := &SandboxConfig{
 		EnvVars: map[string]string{

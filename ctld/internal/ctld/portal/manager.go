@@ -30,6 +30,7 @@ import (
 const defaultRootDir = "/var/lib/sandbox0/ctld"
 const defaultVolumePortalCacheSizeLimit = "20Gi"
 const defaultVolumePortalRootMinFree = "5Gi"
+const defaultContainerdAddress = "/host-run/containerd/containerd.sock"
 
 type Manager struct {
 	nodeName               string
@@ -45,12 +46,14 @@ type Manager struct {
 	ownerOnlyIdleTTL       time.Duration
 	portalCacheMaxBytes    int64
 	portalRootMinFreeBytes int64
+	containerdAddress      string
 	volumeAPI              http.Handler
 
 	mu              sync.Mutex
 	portals         map[string]*portalMount
 	portalsByTarget map[string]*portalMount
 	boundVolumes    map[string]*boundVolume
+	rootfs          map[string]*rootFSMount
 	volumes         *localVolumeManager
 }
 
@@ -84,14 +87,41 @@ type boundVolume struct {
 	materializeDone   chan struct{}
 }
 
+type rootFSMount struct {
+	filesystemID       string
+	teamID             string
+	sandboxID          string
+	podUID             string
+	runtimeGeneration  int64
+	baseImageRef       string
+	baseImageDigest    string
+	mountPoint         string
+	targetHostPath     string
+	baseRootPath       string
+	cacheDir           string
+	upperDir           string
+	workDir            string
+	baseSnapshotter    string
+	baseSnapshotKey    string
+	baseSnapshotMount  string
+	baseSnapshotActive bool
+	mountedAt          time.Time
+	s0fs               *s0fs.Engine
+	overlayMounted     bool
+
+	materializeCancel context.CancelFunc
+	materializeDone   chan struct{}
+}
+
 type Config struct {
-	NodeName      string
-	RootDir       string
-	Logger        *zap.Logger
-	StorageConfig *apiconfig.StorageProxyConfig
-	Repository    *db.Repository
-	PodName       string
-	PodNamespace  string
+	NodeName          string
+	RootDir           string
+	Logger            *zap.Logger
+	StorageConfig     *apiconfig.StorageProxyConfig
+	Repository        *db.Repository
+	PodName           string
+	PodNamespace      string
+	ContainerdAddress string
 }
 
 func NewManager(cfg Config) *Manager {
@@ -116,6 +146,10 @@ func NewManager(cfg Config) *Manager {
 	ownerOnlyIdleTTL, _ := time.ParseDuration(storageConfig.DirectVolumeFileIdleTTL)
 	portalCacheMaxBytes := parseQuantityBytesOrDefault(storageConfig.VolumePortalCacheSizeLimit, defaultVolumePortalCacheSizeLimit)
 	portalRootMinFreeBytes := parseQuantityBytesOrDefault(storageConfig.VolumePortalRootMinFree, defaultVolumePortalRootMinFree)
+	containerdAddress := strings.TrimSpace(cfg.ContainerdAddress)
+	if containerdAddress == "" {
+		containerdAddress = defaultContainerdAddress
+	}
 	manager := &Manager{
 		nodeName:               strings.TrimSpace(cfg.NodeName),
 		rootDir:                rootDir,
@@ -130,9 +164,11 @@ func NewManager(cfg Config) *Manager {
 		ownerOnlyIdleTTL:       ownerOnlyIdleTTL,
 		portalCacheMaxBytes:    portalCacheMaxBytes,
 		portalRootMinFreeBytes: portalRootMinFreeBytes,
+		containerdAddress:      containerdAddress,
 		portals:                make(map[string]*portalMount),
 		portalsByTarget:        make(map[string]*portalMount),
 		boundVolumes:           make(map[string]*boundVolume),
+		rootfs:                 make(map[string]*rootFSMount),
 		volumes:                newLocalVolumeManager(),
 	}
 	manager.volumeAPI = newMountedVolumeAPIHandler(storageConfig, cfg.Repository, manager.volumes, l)

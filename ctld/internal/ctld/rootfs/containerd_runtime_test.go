@@ -2,7 +2,10 @@ package rootfs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
@@ -119,6 +122,36 @@ func TestResolveContainerIDReturnsNotFound(t *testing.T) {
 	assert.True(t, errors.Is(err, ErrNotFound))
 }
 
+func TestFindLiveRootFSByTaskAnnotations(t *testing.T) {
+	taskRoot := t.TempDir()
+	writeTaskConfig(t, filepath.Join(taskRoot, "wrong"), map[string]string{
+		"io.kubernetes.cri.container-type":    "container",
+		"io.kubernetes.cri.container-name":    "procd",
+		"io.kubernetes.cri.sandbox-namespace": "tpl-default",
+		"io.kubernetes.cri.sandbox-name":      "other-pod",
+		"io.kubernetes.cri.sandbox-uid":       "other-uid",
+	})
+	wantTask := filepath.Join(taskRoot, "task-1")
+	writeTaskConfig(t, wantTask, map[string]string{
+		"io.kubernetes.cri.container-type":    "container",
+		"io.kubernetes.cri.container-name":    "procd",
+		"io.kubernetes.cri.sandbox-namespace": "tpl-default",
+		"io.kubernetes.cri.sandbox-name":      "pod-1",
+		"io.kubernetes.cri.sandbox-uid":       "uid-1",
+	})
+	require.NoError(t, os.Mkdir(filepath.Join(wantTask, "rootfs"), 0o755))
+
+	got, err := findLiveRootFSByTaskAnnotations(taskRoot, ctldapi.RootFSInfo{
+		ContainerName: "procd",
+		PodNamespace:  "tpl-default",
+		PodName:       "pod-1",
+		PodUID:        "uid-1",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(wantTask, "rootfs"), got)
+}
+
 func TestDigestFromReference(t *testing.T) {
 	assert.Equal(t, "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", digestFromReference("busybox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
 	assert.Empty(t, digestFromReference("busybox:1.36"))
@@ -140,4 +173,14 @@ func (c fakeCRIClient) ListContainers(_ context.Context, _ *runtimeapi.ListConta
 		return nil, c.err
 	}
 	return &runtimeapi.ListContainersResponse{Containers: c.containers}, nil
+}
+
+func writeTaskConfig(t *testing.T, taskDir string, annotations map[string]string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(taskDir, 0o755))
+	raw, err := json.Marshal(struct {
+		Annotations map[string]string `json:"annotations"`
+	}{Annotations: annotations})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(taskDir, "config.json"), raw, 0o644))
 }

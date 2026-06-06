@@ -2,8 +2,10 @@ package rootfs
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -148,6 +150,11 @@ func (r *ContainerdRuntime) ApplyDiff(ctx context.Context, info ctldapi.RootFSIn
 	}
 	defer closeClient()
 
+	liveRootFS, err := liveRootFSPath(r.containerdRoot, r.namespace, info)
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, err
+	}
+
 	ociDesc, err := descriptorToOCI(desc)
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, err
@@ -156,7 +163,6 @@ func (r *ContainerdRuntime) ApplyDiff(ctx context.Context, info ctldapi.RootFSIn
 	if err := content.WriteBlob(ctx, client.ContentStore(), ref, reader, ociDesc); err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("write rootfs diff into containerd content store: %w", err)
 	}
-	liveRootFS := filepath.Join(r.containerdRoot, "io.containerd.runtime.v2.task", r.namespace, info.ContainerID, "rootfs")
 	applied, err := client.DiffService().Apply(ctx, ociDesc, []mount.Mount{{
 		Type:    "bind",
 		Source:  liveRootFS,
@@ -302,6 +308,82 @@ func inspectContainer(ctx context.Context, client containerdClient, containerdRo
 	info.SnapshotParent = parent
 	info.SnapshotParentChain = chain
 	return info, nil
+}
+
+func liveRootFSPath(containerdRoot, namespace string, info ctldapi.RootFSInfo) (string, error) {
+	taskRoot := filepath.Join(containerdRoot, "io.containerd.runtime.v2.task", namespace)
+	if id := strings.TrimSpace(info.ContainerID); id != "" {
+		liveRootFS := filepath.Join(taskRoot, id, "rootfs")
+		if st, err := os.Stat(liveRootFS); err == nil && st.IsDir() {
+			return liveRootFS, nil
+		} else if err != nil && !os.IsNotExist(err) {
+			return "", fmt.Errorf("inspect live rootfs %s: %w", liveRootFS, err)
+		}
+	}
+
+	liveRootFS, err := findLiveRootFSByTaskAnnotations(taskRoot, info)
+	if err == nil {
+		return liveRootFS, nil
+	}
+	return "", err
+}
+
+func findLiveRootFSByTaskAnnotations(taskRoot string, info ctldapi.RootFSInfo) (string, error) {
+	entries, err := os.ReadDir(taskRoot)
+	if err != nil {
+		return "", fmt.Errorf("scan containerd task root %s: %w", taskRoot, err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		taskDir := filepath.Join(taskRoot, entry.Name())
+		raw, err := os.ReadFile(filepath.Join(taskDir, "config.json"))
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return "", fmt.Errorf("read task config %s: %w", taskDir, err)
+		}
+		var spec struct {
+			Annotations map[string]string `json:"annotations"`
+		}
+		if err := json.Unmarshal(raw, &spec); err != nil {
+			return "", fmt.Errorf("parse task config %s: %w", taskDir, err)
+		}
+		if !rootFSTaskMatches(spec.Annotations, info) {
+			continue
+		}
+		liveRootFS := filepath.Join(taskDir, "rootfs")
+		if st, err := os.Stat(liveRootFS); err == nil && st.IsDir() {
+			return liveRootFS, nil
+		} else if err != nil && !os.IsNotExist(err) {
+			return "", fmt.Errorf("inspect live rootfs %s: %w", liveRootFS, err)
+		}
+	}
+	return "", fmt.Errorf("%w: live rootfs for container %s in pod %s/%s", ErrNotFound, info.ContainerName, info.PodNamespace, info.PodName)
+}
+
+func rootFSTaskMatches(annotations map[string]string, info ctldapi.RootFSInfo) bool {
+	if annotations == nil {
+		return false
+	}
+	if annotations["io.kubernetes.cri.container-type"] != "container" {
+		return false
+	}
+	if annotations["io.kubernetes.cri.container-name"] != info.ContainerName {
+		return false
+	}
+	if annotations["io.kubernetes.cri.sandbox-namespace"] != info.PodNamespace {
+		return false
+	}
+	if annotations["io.kubernetes.cri.sandbox-name"] != info.PodName {
+		return false
+	}
+	if info.PodUID != "" && annotations["io.kubernetes.cri.sandbox-uid"] != info.PodUID {
+		return false
+	}
+	return true
 }
 
 func snapshotParentChain(ctx context.Context, snapshotter snapshots.Snapshotter, snapshotKey string) (string, []string, error) {

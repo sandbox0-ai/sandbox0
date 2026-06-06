@@ -255,7 +255,7 @@ func main() {
 	var storageProxyAdminTokenGenerator service.TokenGenerator
 	privateKey, err := internalauth.LoadEd25519PrivateKeyFromFile(internalauth.DefaultInternalJWTPrivateKeyPath)
 	if err != nil {
-		logger.Warn("Failed to load internal auth private key, pause/resume will not work",
+		logger.Warn("Failed to load internal auth private key, procd and storage-proxy calls will not work",
 			zap.String("path", internalauth.DefaultInternalJWTPrivateKeyPath),
 			zap.Error(err),
 		)
@@ -267,7 +267,7 @@ func main() {
 		})
 		internalTokenGenerator = service.NewInternalTokenGenerator(internalAuthGen)
 		storageProxyAdminTokenGenerator = service.NewStorageProxyAdminTokenGenerator(internalAuthGen)
-		logger.Info("Internal auth generators initialized for procd communication")
+		logger.Info("Internal auth generators initialized for procd and storage-proxy communication")
 	}
 
 	// Parse ratios
@@ -485,7 +485,6 @@ func main() {
 		}
 	}()
 
-	go sandboxService.StartPowerStateReconciler(ctx, cfg.ResyncPeriod.Duration)
 	go sandboxService.StartSystemVolumeReconciler(ctx, cfg.ResyncPeriod.Duration)
 
 	// Start HTTP server

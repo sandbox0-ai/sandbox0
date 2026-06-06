@@ -88,19 +88,6 @@ type SandboxResourceUsage struct {
 	Contexts []ContextResourceUsage `json:"contexts"`
 }
 
-// PauseResponse represents the response from procd pause API.
-type PauseResponse struct {
-	Paused        bool                  `json:"paused"`
-	Error         string                `json:"error,omitempty"`
-	ResourceUsage *SandboxResourceUsage `json:"resource_usage,omitempty"`
-}
-
-// ResumeResponse represents the response from procd resume API.
-type ResumeResponse struct {
-	Resumed bool   `json:"resumed"`
-	Error   string `json:"error,omitempty"`
-}
-
 // StatsResponse represents the response from procd stats API.
 type StatsResponse struct {
 	SandboxResourceUsage
@@ -125,18 +112,6 @@ type InitializeWebhook struct {
 type InitializeResponse struct {
 	SandboxID string `json:"sandbox_id"`
 	TeamID    string `json:"team_id,omitempty"`
-}
-
-// Pause calls the procd pause API and returns resource usage.
-func (c *ProcdClient) Pause(ctx context.Context, procdAddress, internalToken string) (*PauseResponse, error) {
-	url := procdAddress + "/api/v1/sandbox/pause"
-	return doProcdRequest[PauseResponse](ctx, c.httpClient, http.MethodPost, url, internalToken, "pause", nil)
-}
-
-// Resume calls the procd resume API.
-func (c *ProcdClient) Resume(ctx context.Context, procdAddress, internalToken string) (*ResumeResponse, error) {
-	url := procdAddress + "/api/v1/sandbox/resume"
-	return doProcdRequest[ResumeResponse](ctx, c.httpClient, http.MethodPost, url, internalToken, "resume", nil)
 }
 
 // Stats calls the procd stats API.

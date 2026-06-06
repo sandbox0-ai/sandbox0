@@ -600,6 +600,8 @@ func (s *Server) writeSandboxPowerTransitionError(c *gin.Context, action, sandbo
 	switch {
 	case errors.Is(err, service.ErrSandboxPowerTransitionSuperseded):
 		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, fmt.Sprintf("sandbox %s was superseded by a newer power transition", action))
+	case errors.Is(err, service.ErrSandboxPowerRequiresCtld):
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox pause/resume requires ctld")
 	case errors.Is(err, context.DeadlineExceeded):
 		spec.JSONError(c, http.StatusGatewayTimeout, spec.CodeUnavailable, fmt.Sprintf("timed out waiting for sandbox to %s", action))
 	case errors.Is(err, context.Canceled):

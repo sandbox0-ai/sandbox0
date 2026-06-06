@@ -8,48 +8,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// SandboxPowerExecutor executes pause and resume transitions for a sandbox.
-// The manager-local implementation executes transitions directly; ctld mode records desired state for node-local reconciliation.
-type SandboxPowerExecutor interface {
-	Pause(ctx context.Context, sandboxID string) (*PauseSandboxResponse, error)
-	Resume(ctx context.Context, sandboxID string) (*ResumeSandboxResponse, error)
-}
-
-type localSandboxPowerExecutor struct {
-	service *SandboxService
-}
-
-type ctldSandboxPowerExecutor struct {
-	service *SandboxService
-}
-
-func newSandboxPowerExecutor(service *SandboxService) SandboxPowerExecutor {
-	if service != nil && service.config.CtldEnabled {
-		return &ctldSandboxPowerExecutor{service: service}
-	}
-	return newLocalSandboxPowerExecutor(service)
-}
-
-func newLocalSandboxPowerExecutor(service *SandboxService) SandboxPowerExecutor {
-	return &localSandboxPowerExecutor{service: service}
-}
-
-func (e *localSandboxPowerExecutor) Pause(ctx context.Context, sandboxID string) (*PauseSandboxResponse, error) {
-	return e.service.pauseSandboxLocal(ctx, sandboxID)
-}
-
-func (e *localSandboxPowerExecutor) Resume(ctx context.Context, sandboxID string) (*ResumeSandboxResponse, error) {
-	return e.service.resumeSandboxLocal(ctx, sandboxID)
-}
-
-func (e *ctldSandboxPowerExecutor) Pause(ctx context.Context, sandboxID string) (*PauseSandboxResponse, error) {
-	return e.service.RequestPauseSandbox(ctx, sandboxID)
-}
-
-func (e *ctldSandboxPowerExecutor) Resume(ctx context.Context, sandboxID string) (*ResumeSandboxResponse, error) {
-	return e.service.RequestResumeSandbox(ctx, sandboxID)
-}
-
 func (s *SandboxService) ctldAddressForPod(ctx context.Context, pod *corev1.Pod) (string, error) {
 	if pod == nil {
 		return "", fmt.Errorf("pod is nil")

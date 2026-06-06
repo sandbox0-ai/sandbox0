@@ -13,6 +13,10 @@ Use this page when you need to:
 Pause state is separate from `status`. Use `paused` for the simple user-facing state, and `power_state` when you need to inspect desired versus observed transition progress.
 </Callout>
 
+<Callout variant="warning">
+Self-hosted deployments must run `ctld` on sandbox nodes for pause and resume. The manager records the desired power state, and `ctld` performs cgroup freeze/thaw plus the observed-state update.
+</Callout>
+
 ## Pause A Sandbox
 
 Pause a sandbox to release compute while keeping its state available for a later resume.

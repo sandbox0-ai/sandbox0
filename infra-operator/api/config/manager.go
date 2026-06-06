@@ -113,6 +113,7 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default="10m"
 	PauseMinCPU string `yaml:"pause_min_cpu" json:"pauseMinCPU"`
+	// CtldEnabled gates ctld-owned sandbox power transitions. When false, pause/resume is unsupported.
 	// +optional
 	// +kubebuilder:default=false
 	CtldEnabled bool `yaml:"ctld_enabled" json:"-"`

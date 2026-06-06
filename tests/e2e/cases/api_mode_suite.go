@@ -1415,7 +1415,7 @@ func waitForSandboxLifecycleStatusEventually(env *framework.ScenarioEnv, session
 		}
 		sandbox = current
 		return nil
-	}).WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
+	}).WithTimeout(8 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
 	return sandbox
 }
 

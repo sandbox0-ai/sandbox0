@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
@@ -11,6 +12,8 @@ import (
 )
 
 const sandboxRootFSContainerName = "procd"
+
+const sandboxRootFSOperationTimeout = 5 * time.Minute
 
 func (s *SandboxService) saveSandboxRootFSCheckpoint(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, tx SandboxStoreTx) error {
 	if s == nil || !s.config.CtldEnabled || s.ctldClient == nil || pod == nil {
@@ -39,13 +42,13 @@ func (s *SandboxService) saveSandboxRootFSCheckpoint(ctx context.Context, pod *c
 		return err
 	}
 	generation := runtimeGenerationFromPod(pod)
-	resp, err := s.ctldClient.SaveRootFS(ctx, ctldAddress, ctldapi.SaveRootFSRequest{
+	resp, err := s.ctldClient.SaveRootFSWithTimeout(ctx, ctldAddress, ctldapi.SaveRootFSRequest{
 		Target:                    rootFSTargetForPod(pod),
 		SandboxID:                 sandboxID,
 		TeamID:                    teamID,
 		ExpectedRuntimeGeneration: generation,
 		Freeze:                    true,
-	})
+	}, sandboxRootFSOperationTimeout)
 	if err != nil {
 		return fmt.Errorf("save sandbox rootfs checkpoint: %w", rootFSResponseError(err, saveRootFSError(resp)))
 	}
@@ -76,7 +79,7 @@ func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *
 	if err != nil {
 		return err
 	}
-	resp, err := s.ctldClient.ApplyRootFS(ctx, ctldAddress, ctldapi.ApplyRootFSRequest{
+	resp, err := s.ctldClient.ApplyRootFSWithTimeout(ctx, ctldAddress, ctldapi.ApplyRootFSRequest{
 		Target:                      rootFSTargetForPod(pod),
 		ExpectedBaseImageDigest:     state.BaseImageDigest,
 		ExpectedSnapshotParent:      state.SnapshotParent,
@@ -88,7 +91,7 @@ func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *
 			ObjectKey: state.DiffObjectKey,
 		},
 		Freeze: true,
-	})
+	}, sandboxRootFSOperationTimeout)
 	if err != nil {
 		return fmt.Errorf("apply sandbox rootfs checkpoint: %w", rootFSResponseError(err, applyRootFSError(resp)))
 	}

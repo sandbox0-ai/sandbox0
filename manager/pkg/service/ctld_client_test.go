@@ -149,3 +149,29 @@ func TestCtldClientRootFSMethods(t *testing.T) {
 		})
 	}
 }
+
+func TestCtldClientRootFSMethodsCanUseExtendedTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/rootfs/save", r.URL.Path)
+		time.Sleep(80 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{
+			Descriptor: ctldapi.RootFSDiffDescriptor{Digest: "sha256:diff"},
+		})
+	}))
+	defer server.Close()
+
+	client := NewCtldClientWithHTTPClient(&http.Client{Timeout: 20 * time.Millisecond})
+	req := ctldapi.SaveRootFSRequest{
+		Target:    ctldapi.RootFSContainerRef{Namespace: "default", PodName: "pod-1", ContainerName: "procd"},
+		SandboxID: "sandbox-1",
+		TeamID:    "team-1",
+	}
+
+	_, err := client.SaveRootFS(context.Background(), server.URL, req)
+	require.Error(t, err)
+
+	resp, err := client.SaveRootFSWithTimeout(context.Background(), server.URL, req, time.Second)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "sha256:diff", resp.Descriptor.Digest)
+}

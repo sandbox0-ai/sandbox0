@@ -116,7 +116,7 @@ func (r *ContainerdRuntime) Inspect(ctx context.Context, target ctldapi.RootFSCo
 	return info, nil
 }
 
-func (r *ContainerdRuntime) CreateDiff(ctx context.Context, info ctldapi.RootFSInfo) (ctldapi.RootFSDiffDescriptor, io.ReadCloser, error) {
+func (r *ContainerdRuntime) CreateDiff(ctx context.Context, info ctldapi.RootFSInfo) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
 	if strings.TrimSpace(info.SnapshotKey) == "" || strings.TrimSpace(info.Snapshotter) == "" {
 		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("%w: snapshot key and snapshotter are required", ErrBadRequest)
 	}
@@ -135,7 +135,7 @@ func (r *ContainerdRuntime) CreateDiff(ctx context.Context, info ctldapi.RootFSI
 		closeClient()
 		return ctldapi.RootFSDiffDescriptor{}, nil, err
 	}
-	return descriptorFromOCI(desc), closeWithFunc{ReadCloser: reader, closeFunc: closeClient}, nil
+	return descriptorFromOCI(desc), closeReadSeekWithFunc{ReadSeekCloser: reader, closeFunc: closeClient}, nil
 }
 
 func (r *ContainerdRuntime) ApplyDiff(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, reader io.Reader) (ctldapi.RootFSDiffDescriptor, error) {
@@ -400,13 +400,13 @@ func normalizeCRIEndpoint(endpoint string) string {
 	return endpoint
 }
 
-type closeWithFunc struct {
-	io.ReadCloser
+type closeReadSeekWithFunc struct {
+	io.ReadSeekCloser
 	closeFunc func()
 }
 
-func (r closeWithFunc) Close() error {
-	err := r.ReadCloser.Close()
+func (r closeReadSeekWithFunc) Close() error {
+	err := r.ReadSeekCloser.Close()
 	if r.closeFunc != nil {
 		r.closeFunc()
 	}

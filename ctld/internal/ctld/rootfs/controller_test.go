@@ -177,13 +177,13 @@ func (r *fakeRuntime) Inspect(_ context.Context, target ctldapi.RootFSContainerR
 	return r.info, r.inspectErr
 }
 
-func (r *fakeRuntime) CreateDiff(_ context.Context, info ctldapi.RootFSInfo) (ctldapi.RootFSDiffDescriptor, io.ReadCloser, error) {
+func (r *fakeRuntime) CreateDiff(_ context.Context, info ctldapi.RootFSInfo) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
 	r.createCalled = true
 	r.createInfo = info
 	if r.createErr != nil {
 		return ctldapi.RootFSDiffDescriptor{}, nil, r.createErr
 	}
-	return r.createDesc, io.NopCloser(strings.NewReader(r.createContent)), nil
+	return r.createDesc, readSeekNopCloser{Reader: strings.NewReader(r.createContent)}, nil
 }
 
 func (r *fakeRuntime) ApplyDiff(_ context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, content io.Reader) (ctldapi.RootFSDiffDescriptor, error) {
@@ -226,4 +226,12 @@ func rootFSInfo(runtime string) ctldapi.RootFSInfo {
 		BaseImageRef:        "docker.io/library/busybox:1.36",
 		BaseImageDigest:     "sha256:base",
 	}
+}
+
+type readSeekNopCloser struct {
+	*strings.Reader
+}
+
+func (readSeekNopCloser) Close() error {
+	return nil
 }

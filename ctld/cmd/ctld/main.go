@@ -105,14 +105,13 @@ func main() {
 	}
 
 	portalManager := ctldportal.NewManager(ctldportal.Config{
-		NodeName:          nodeName,
-		RootDir:           portalRoot,
-		Logger:            zapLogger,
-		StorageConfig:     storageCfg,
-		Repository:        repo,
-		PodName:           podName,
-		PodNamespace:      podNamespace,
-		ContainerdAddress: criEndpoint,
+		NodeName:      nodeName,
+		RootDir:       portalRoot,
+		Logger:        zapLogger,
+		StorageConfig: storageCfg,
+		Repository:    repo,
+		PodName:       podName,
+		PodNamespace:  podNamespace,
 	})
 	go portalManager.Run(ctx)
 	csiServer := ctldportal.NewCSIServer(nodeName, portalManager)
@@ -350,39 +349,6 @@ func (c combinedController) AbortVolumeSnapshotCheckpoint(r *http.Request, req c
 	return resp, http.StatusOK
 }
 
-func (c combinedController) BindSandboxRootFS(r *http.Request, req ctldapi.BindSandboxRootFSRequest) (ctldapi.BindSandboxRootFSResponse, int) {
-	if c.Portal == nil {
-		return ctldapi.BindSandboxRootFSResponse{Error: "ctld sandbox rootfs not implemented"}, http.StatusNotImplemented
-	}
-	resp, err := c.Portal.BindSandboxRootFS(r.Context(), req)
-	if err != nil {
-		return ctldapi.BindSandboxRootFSResponse{Error: err.Error()}, volumePortalErrorStatus(err)
-	}
-	return resp, http.StatusOK
-}
-
-func (c combinedController) FlushSandboxRootFS(r *http.Request, req ctldapi.FlushSandboxRootFSRequest) (ctldapi.FlushSandboxRootFSResponse, int) {
-	if c.Portal == nil {
-		return ctldapi.FlushSandboxRootFSResponse{Error: "ctld sandbox rootfs not implemented"}, http.StatusNotImplemented
-	}
-	resp, err := c.Portal.FlushSandboxRootFS(r.Context(), req)
-	if err != nil {
-		return ctldapi.FlushSandboxRootFSResponse{Error: err.Error()}, volumePortalErrorStatus(err)
-	}
-	return resp, http.StatusOK
-}
-
-func (c combinedController) ReleaseSandboxRootFS(r *http.Request, req ctldapi.ReleaseSandboxRootFSRequest) (ctldapi.ReleaseSandboxRootFSResponse, int) {
-	if c.Portal == nil {
-		return ctldapi.ReleaseSandboxRootFSResponse{Error: "ctld sandbox rootfs not implemented"}, http.StatusNotImplemented
-	}
-	resp, err := c.Portal.ReleaseSandboxRootFS(r.Context(), req)
-	if err != nil {
-		return ctldapi.ReleaseSandboxRootFSResponse{Error: err.Error()}, volumePortalErrorStatus(err)
-	}
-	return resp, http.StatusOK
-}
-
 func volumePortalErrorStatus(err error) int {
 	if err == nil {
 		return http.StatusOK
@@ -426,8 +392,5 @@ type volumePortalHandler interface {
 	PrepareSnapshotCheckpoint(ctx context.Context, req ctldapi.PrepareVolumeSnapshotCheckpointRequest) (ctldapi.PrepareVolumeSnapshotCheckpointResponse, error)
 	CompleteSnapshotCheckpoint(ctx context.Context, req ctldapi.CompleteVolumeSnapshotCheckpointRequest) (ctldapi.CompleteVolumeSnapshotCheckpointResponse, error)
 	AbortSnapshotCheckpoint(ctx context.Context, req ctldapi.AbortVolumeSnapshotCheckpointRequest) (ctldapi.AbortVolumeSnapshotCheckpointResponse, error)
-	BindSandboxRootFS(ctx context.Context, req ctldapi.BindSandboxRootFSRequest) (ctldapi.BindSandboxRootFSResponse, error)
-	FlushSandboxRootFS(ctx context.Context, req ctldapi.FlushSandboxRootFSRequest) (ctldapi.FlushSandboxRootFSResponse, error)
-	ReleaseSandboxRootFS(ctx context.Context, req ctldapi.ReleaseSandboxRootFSRequest) (ctldapi.ReleaseSandboxRootFSResponse, error)
 	MountedVolumeHandler() http.Handler
 }

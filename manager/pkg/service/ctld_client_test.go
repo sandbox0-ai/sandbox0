@@ -85,31 +85,3 @@ func TestCtldClientCheckVolumePortals(t *testing.T) {
 	assert.False(t, resp.Ready)
 	assert.Equal(t, []string{"workspace"}, resp.Missing)
 }
-
-func TestCtldClientBindSandboxRootFS(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, http.MethodPost, r.Method)
-		assert.Equal(t, "/api/v1/sandbox-rootfs/bind", r.URL.Path)
-		var req ctldapi.BindSandboxRootFSRequest
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-		assert.Equal(t, "fs-1", req.FilesystemID)
-		assert.Equal(t, int64(2), req.RuntimeGeneration)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(ctldapi.BindSandboxRootFSResponse{
-			FilesystemID: req.FilesystemID,
-			MountPoint:   req.TargetPath,
-		})
-	}))
-	defer server.Close()
-
-	client := NewCtldClient(CtldClientConfig{})
-	resp, err := client.BindSandboxRootFS(context.Background(), server.URL, ctldapi.BindSandboxRootFSRequest{
-		FilesystemID:      "fs-1",
-		RuntimeGeneration: 2,
-		TargetPath:        "/sandbox0/rootfs",
-	})
-	require.NoError(t, err)
-	require.NotNil(t, resp)
-	assert.Equal(t, "fs-1", resp.FilesystemID)
-	assert.Equal(t, "/sandbox0/rootfs", resp.MountPoint)
-}

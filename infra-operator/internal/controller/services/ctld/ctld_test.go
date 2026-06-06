@@ -121,20 +121,8 @@ func reconcileCtldDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) *a
 	if len(ds.Spec.Template.Spec.Containers) != 2 || ds.Spec.Template.Spec.Containers[1].Name != "csi-node-driver-registrar" {
 		t.Fatalf("expected csi node-driver-registrar sidecar, got %#v", ds.Spec.Template.Spec.Containers)
 	}
-	if len(ds.Spec.Template.Spec.Containers[0].VolumeMounts) < 7 {
+	if len(ds.Spec.Template.Spec.Containers[0].VolumeMounts) < 6 {
 		t.Fatalf("expected ctld config, csi, kubelet, data, cgroup, and containerd mounts, got %#v", ds.Spec.Template.Spec.Containers[0].VolumeMounts)
-	}
-	var containerdRootMount *corev1.VolumeMount
-	for i := range ds.Spec.Template.Spec.Containers[0].VolumeMounts {
-		mount := &ds.Spec.Template.Spec.Containers[0].VolumeMounts[i]
-		if mount.Name == "containerd-root" {
-			containerdRootMount = mount
-			break
-		}
-	}
-	if containerdRootMount == nil || containerdRootMount.MountPath != "/run/containerd" ||
-		containerdRootMount.MountPropagation == nil || *containerdRootMount.MountPropagation != corev1.MountPropagationHostToContainer {
-		t.Fatalf("expected /run/containerd HostToContainer mount, got %#v", containerdRootMount)
 	}
 	driver := &storagev1.CSIDriver{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: "volume.sandbox0.ai"}, driver); err != nil {

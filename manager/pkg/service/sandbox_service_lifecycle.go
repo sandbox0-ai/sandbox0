@@ -85,11 +85,6 @@ func (s *SandboxService) CleanSandboxRuntime(ctx context.Context, sandboxID stri
 		pod, err := s.getSandboxPod(ctx, sandboxID)
 		if err != nil {
 			if k8serrors.IsNotFound(err) {
-				if record != nil {
-					if err := s.releaseSandboxFilesystemOwner(ctx, record.FilesystemID, record.ID, record.RuntimeGeneration); err != nil {
-						return fmt.Errorf("release sandbox filesystem owner: %w", err)
-					}
-				}
 				if tx != nil {
 					return tx.MarkRuntimeCleaned(ctx, sandboxID, 0, s.clock.Now())
 				}
@@ -106,13 +101,11 @@ func (s *SandboxService) CleanSandboxRuntime(ctx context.Context, sandboxID stri
 		if err != nil {
 			return fmt.Errorf("mark runtime deletion reason: %w", err)
 		}
-		filesystemID := sandboxFilesystemIDForClean(record, pod)
-		teamID := sandboxTeamIDForClean(record, pod)
-		if err := s.flushSandboxRootFSForPod(ctx, pod, filesystemID, teamID, sandboxID, generation); err != nil {
-			return fmt.Errorf("flush sandbox rootfs: %w", err)
-		}
 		if err := s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 			return fmt.Errorf("delete runtime pod: %w", err)
+		}
+		if tx != nil {
+			return tx.MarkRuntimeCleaned(ctx, sandboxID, generation, s.clock.Now())
 		}
 		return nil
 	}
@@ -126,26 +119,6 @@ func (s *SandboxService) CleanSandboxRuntime(ctx context.Context, sandboxID stri
 		return nil
 	}
 	return clean(ctx, nil, nil)
-}
-
-func sandboxFilesystemIDForClean(record *SandboxRecord, pod *corev1.Pod) string {
-	if record != nil && strings.TrimSpace(record.FilesystemID) != "" {
-		return strings.TrimSpace(record.FilesystemID)
-	}
-	if pod != nil && pod.Annotations != nil {
-		return strings.TrimSpace(pod.Annotations[controller.AnnotationFilesystemID])
-	}
-	return ""
-}
-
-func sandboxTeamIDForClean(record *SandboxRecord, pod *corev1.Pod) string {
-	if record != nil && strings.TrimSpace(record.TeamID) != "" {
-		return strings.TrimSpace(record.TeamID)
-	}
-	if pod != nil && pod.Annotations != nil {
-		return strings.TrimSpace(pod.Annotations[controller.AnnotationTeamID])
-	}
-	return ""
 }
 
 // CleanSandboxRuntimeByID implements controller.SandboxRuntimeCleaner.
@@ -422,7 +395,6 @@ func (s *SandboxService) persistUpdatedSandboxPod(ctx context.Context, pod *core
 		Status:              s.podToSandboxStatus(pod),
 		Config:              parseSandboxConfig(pod.Annotations[controller.AnnotationConfig]),
 		Mounts:              parseClaimMounts(pod.Annotations[controller.AnnotationMounts]),
-		FilesystemID:        strings.TrimSpace(pod.Annotations[controller.AnnotationFilesystemID]),
 		TemplateSpec:        template.Spec,
 		CurrentPodName:      pod.Name,
 		CurrentPodNamespace: pod.Namespace,
@@ -534,7 +506,6 @@ func (s *SandboxService) podToSandbox(ctx context.Context, pod *corev1.Pod, sand
 		AutoResume:    autoResume,
 		Services:      cfg.Services,
 		Mounts:        parseClaimMounts(pod.Annotations[controller.AnnotationMounts]),
-		FilesystemID:  strings.TrimSpace(pod.Annotations[controller.AnnotationFilesystemID]),
 		PodName:       pod.Name,
 		ExpiresAt:     expiresAt,
 		HardExpiresAt: hardExpiresAt,
@@ -569,7 +540,6 @@ func (s *SandboxService) recordToSandbox(record *SandboxRecord) *Sandbox {
 		AutoResume:    autoResume,
 		Services:      record.Config.Services,
 		Mounts:        record.Mounts,
-		FilesystemID:  record.FilesystemID,
 		PodName:       record.CurrentPodName,
 		ExpiresAt:     record.ExpiresAt,
 		HardExpiresAt: record.HardExpiresAt,
@@ -583,13 +553,11 @@ func sandboxLifecycleInfoFromRecord(record *SandboxRecord) SandboxLifecycleInfo 
 		return SandboxLifecycleInfo{}
 	}
 	info := SandboxLifecycleInfo{
-		Namespace:         record.CurrentPodNamespace,
-		PodName:           record.CurrentPodName,
-		SandboxID:         record.ID,
-		TeamID:            record.TeamID,
-		UserID:            record.UserID,
-		FilesystemID:      record.FilesystemID,
-		RuntimeGeneration: record.RuntimeGeneration,
+		Namespace: record.CurrentPodNamespace,
+		PodName:   record.CurrentPodName,
+		SandboxID: record.ID,
+		TeamID:    record.TeamID,
+		UserID:    record.UserID,
 	}
 	if record.Config.Webhook != nil {
 		info.WebhookURL = strings.TrimSpace(record.Config.Webhook.URL)
@@ -662,7 +630,6 @@ func (s *SandboxService) GetSandboxStatus(ctx context.Context, sandboxID string)
 		"team_id":         sandbox.TeamID,
 		"user_id":         sandbox.UserID,
 		"pod_name":        sandbox.PodName,
-		"filesystem_id":   sandbox.FilesystemID,
 		"status":          sandbox.Status,
 		"claimed_at":      sandbox.ClaimedAt.Format(time.RFC3339),
 		"expires_at":      sandbox.ExpiresAt.Format(time.RFC3339),

@@ -27,7 +27,6 @@ func TestSandboxToAPIIncludesSSHInfo(t *testing.T) {
 	now := time.Now().UTC()
 	sandbox := &mgr.Sandbox{
 		ID:            "sb_123",
-		FilesystemID:  "fs_123",
 		TemplateID:    "default",
 		TeamID:        "team-1",
 		UserID:        "user-1",
@@ -57,8 +56,5 @@ func TestSandboxToAPIIncludesSSHInfo(t *testing.T) {
 	}
 	if payload.Ssh.Username != sandbox.ID {
 		t.Fatalf("ssh username = %q", payload.Ssh.Username)
-	}
-	if payload.FilesystemId == nil || *payload.FilesystemId != sandbox.FilesystemID {
-		t.Fatalf("filesystem_id = %#v, want %q", payload.FilesystemId, sandbox.FilesystemID)
 	}
 }

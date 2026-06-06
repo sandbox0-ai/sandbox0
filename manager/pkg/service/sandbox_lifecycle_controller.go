@@ -41,11 +41,9 @@ type SandboxLifecycleInfo struct {
 	WebhookURL            string
 	WebhookSecret         string
 	WebhookStateVolumeID  string
-	FilesystemID          string
 	PodUID                string
 	NodeName              string
 	HostIP                string
-	RuntimeGeneration     int64
 	RuntimeDeletionReason string
 	VolumePortals         []SandboxLifecycleVolumePortal
 }
@@ -71,11 +69,9 @@ type sandboxLifecycleQueueItem struct {
 	WebhookURL            string
 	WebhookSecret         string
 	WebhookStateVolumeID  string
-	FilesystemID          string
 	PodUID                string
 	NodeName              string
 	HostIP                string
-	RuntimeGeneration     int64
 	RuntimeDeletionReason string
 	VolumePortalsJSON     string
 	Deleted               bool
@@ -283,11 +279,9 @@ func (c *SandboxLifecycleController) cleanupDeletedSandbox(ctx context.Context, 
 		WebhookURL:            item.WebhookURL,
 		WebhookSecret:         item.WebhookSecret,
 		WebhookStateVolumeID:  item.WebhookStateVolumeID,
-		FilesystemID:          item.FilesystemID,
 		PodUID:                item.PodUID,
 		NodeName:              item.NodeName,
 		HostIP:                item.HostIP,
-		RuntimeGeneration:     item.RuntimeGeneration,
 		RuntimeDeletionReason: item.RuntimeDeletionReason,
 		VolumePortals:         decodeSandboxLifecycleVolumePortals(item.VolumePortalsJSON),
 	}
@@ -364,47 +358,9 @@ func (s *SandboxService) CleanupDeletedSandbox(ctx context.Context, info Sandbox
 	if err := s.unbindDeletedSandboxVolumePortals(ctx, info); err != nil {
 		errs = append(errs, fmt.Errorf("unbind sandbox volume portals: %w", err))
 	}
-	if err := s.releaseSandboxRootFSForLifecycle(ctx, info); err != nil {
-		errs = append(errs, fmt.Errorf("release sandbox rootfs: %w", err))
-	}
-	if len(errs) == 0 {
-		if err := s.releaseSandboxFilesystemOwner(ctx, info.FilesystemID, sandboxID, info.RuntimeGeneration); err != nil {
-			errs = append(errs, fmt.Errorf("release sandbox filesystem owner: %w", err))
-		}
-	}
-	if !runtimeCleaned && len(errs) == 0 {
-		if err := s.deleteSandboxOwnedFilesystem(ctx, info.FilesystemID, sandboxID); err != nil {
-			errs = append(errs, fmt.Errorf("delete sandbox-owned filesystem: %w", err))
-		}
-	}
-	if runtimeCleaned && len(errs) == 0 {
-		if err := s.markSandboxRuntimeCleaned(ctx, sandboxID, info.RuntimeGeneration); err != nil {
-			errs = append(errs, fmt.Errorf("mark sandbox runtime cleaned: %w", err))
-		}
-	}
 	s.powerStateLocks.Delete(sandboxID)
 	s.powerStateReconcilers.Delete(sandboxID)
 	return errors.Join(errs...)
-}
-
-func (s *SandboxService) markSandboxRuntimeCleaned(ctx context.Context, sandboxID string, generation int64) error {
-	if s == nil || s.sandboxStore == nil || strings.TrimSpace(sandboxID) == "" {
-		return nil
-	}
-	now := time.Now().UTC()
-	if s.clock != nil {
-		now = s.clock.Now()
-	}
-	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
-		if record == nil || record.Status == SandboxStatusDeleted {
-			return nil
-		}
-		return tx.MarkRuntimeCleaned(lockCtx, sandboxID, generation, now)
-	})
-	if errors.Is(err, ErrSandboxRecordNotFound) {
-		return nil
-	}
-	return err
 }
 
 func (s *SandboxService) unbindDeletedSandboxVolumePortals(ctx context.Context, info SandboxLifecycleInfo) error {
@@ -509,11 +465,9 @@ func sandboxLifecycleItemFromInfo(info SandboxLifecycleInfo, deleted bool) sandb
 		WebhookURL:            info.WebhookURL,
 		WebhookSecret:         info.WebhookSecret,
 		WebhookStateVolumeID:  info.WebhookStateVolumeID,
-		FilesystemID:          info.FilesystemID,
 		PodUID:                info.PodUID,
 		NodeName:              info.NodeName,
 		HostIP:                info.HostIP,
-		RuntimeGeneration:     info.RuntimeGeneration,
 		RuntimeDeletionReason: info.RuntimeDeletionReason,
 		VolumePortalsJSON:     encodeSandboxLifecycleVolumePortals(info.VolumePortals),
 		Deleted:               deleted,
@@ -558,13 +512,11 @@ func sandboxLifecycleInfoFromPod(pod *corev1.Pod) (SandboxLifecycleInfo, bool) {
 	webhookURL := ""
 	webhookSecret := ""
 	webhookStateVolumeID := ""
-	filesystemID := ""
 	runtimeDeletionReason := ""
 	if pod.Annotations != nil {
 		teamID = strings.TrimSpace(pod.Annotations[controller.AnnotationTeamID])
 		userID = strings.TrimSpace(pod.Annotations[controller.AnnotationUserID])
 		webhookStateVolumeID = strings.TrimSpace(pod.Annotations[controller.AnnotationWebhookStateVolumeID])
-		filesystemID = strings.TrimSpace(pod.Annotations[controller.AnnotationFilesystemID])
 		runtimeDeletionReason = strings.TrimSpace(pod.Annotations[controller.AnnotationRuntimeDeletionReason])
 		if configJSON := strings.TrimSpace(pod.Annotations[controller.AnnotationConfig]); configJSON != "" {
 			var cfg SandboxConfig
@@ -583,11 +535,9 @@ func sandboxLifecycleInfoFromPod(pod *corev1.Pod) (SandboxLifecycleInfo, bool) {
 		WebhookURL:            webhookURL,
 		WebhookSecret:         webhookSecret,
 		WebhookStateVolumeID:  webhookStateVolumeID,
-		FilesystemID:          filesystemID,
 		PodUID:                string(pod.UID),
 		NodeName:              pod.Spec.NodeName,
 		HostIP:                pod.Status.HostIP,
-		RuntimeGeneration:     runtimeGenerationFromPod(pod),
 		RuntimeDeletionReason: runtimeDeletionReason,
 		VolumePortals:         sandboxLifecycleVolumePortalsFromPod(pod, webhookStateVolumeID),
 	}, true

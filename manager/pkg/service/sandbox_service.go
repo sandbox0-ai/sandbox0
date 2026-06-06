@@ -32,7 +32,6 @@ type Sandbox struct {
 	AutoResume    bool                `json:"auto_resume"`
 	Services      []SandboxAppService `json:"services,omitempty"`
 	Mounts        []ClaimMount        `json:"mounts,omitempty"`
-	FilesystemID  string              `json:"filesystem_id,omitempty"`
 	PodName       string              `json:"pod_name"`
 	ExpiresAt     time.Time           `json:"expires_at"`
 	HardExpiresAt time.Time           `json:"hard_expires_at"`
@@ -133,7 +132,6 @@ type SandboxService struct {
 	deletionWebhookEmitter SandboxDeletionWebhookEmitter
 	quotaStore             TeamQuotaLimitStore
 	sandboxStore           SandboxStore
-	sandboxFilesystemStore SandboxFilesystemStore
 	powerStateLocks        sync.Map
 	powerStateReconcilers  sync.Map
 }
@@ -296,14 +294,6 @@ func (s *SandboxService) SetQuotaStore(store TeamQuotaLimitStore) {
 // SetSandboxStore injects durable sandbox identity storage.
 func (s *SandboxService) SetSandboxStore(store SandboxStore) {
 	s.sandboxStore = store
-	if filesystemStore, ok := store.(SandboxFilesystemStore); ok {
-		s.sandboxFilesystemStore = filesystemStore
-	}
-}
-
-// SetSandboxFilesystemStore injects internal sandbox rootfs state storage.
-func (s *SandboxService) SetSandboxFilesystemStore(store SandboxFilesystemStore) {
-	s.sandboxFilesystemStore = store
 }
 
 func (s *SandboxService) sandboxPowerExecutor() SandboxPowerExecutor {

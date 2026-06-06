@@ -69,7 +69,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	nodeSelector, tolerations := common.ResolveSandboxNodePlacement(infra)
 	args := ctldArgs(infra)
 	bidirectional := corev1.MountPropagationBidirectional
-	hostToContainer := corev1.MountPropagationHostToContainer
 	hostPathDirectoryOrCreate := corev1.HostPathDirectoryOrCreate
 	volumeMounts := []corev1.VolumeMount{
 		{Name: "config", MountPath: "/config/config.yaml", SubPath: "config.yaml", ReadOnly: true},
@@ -78,7 +77,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		{Name: "ctld-data", MountPath: "/var/lib/sandbox0/ctld"},
 		{Name: "host-cgroup", MountPath: "/host-sys/fs/cgroup"},
 		{Name: "containerd-sock", MountPath: "/host-run/containerd"},
-		{Name: "containerd-root", MountPath: "/run/containerd", MountPropagation: &hostToContainer},
 	}
 	volumes := []corev1.Volume{
 		{
@@ -130,12 +128,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		},
 		{
 			Name: "containerd-sock",
-			VolumeSource: corev1.VolumeSource{
-				HostPath: &corev1.HostPathVolumeSource{Path: "/run/containerd"},
-			},
-		},
-		{
-			Name: "containerd-root",
 			VolumeSource: corev1.VolumeSource{
 				HostPath: &corev1.HostPathVolumeSource{Path: "/run/containerd"},
 			},

@@ -3977,9 +3977,6 @@ components:
       properties:
         sandbox_id:
           type: string
-        filesystem_id:
-          type: string
-          description: Durable sandbox root filesystem ID bound to this sandbox.
         status:
           $ref: "#/components/schemas/SandboxLifecycleStatus"
         pod_name:
@@ -4049,9 +4046,6 @@ components:
           type: string
         user_id:
           type: string
-        filesystem_id:
-          type: string
-          description: Durable sandbox root filesystem ID bound to this sandbox.
         status:
           $ref: "#/components/schemas/SandboxLifecycleStatus"
         paused:
@@ -4155,9 +4149,6 @@ components:
           type: string
         pod_name:
           type: string
-        filesystem_id:
-          type: string
-          description: Durable sandbox root filesystem ID bound to this sandbox.
         status:
           $ref: "#/components/schemas/SandboxLifecycleStatus"
         claimed_at:
@@ -4195,9 +4186,6 @@ components:
           type: boolean
         power_state:
           $ref: "#/components/schemas/SandboxPowerState"
-        filesystem_id:
-          type: string
-          description: Durable sandbox root filesystem ID bound to this sandbox.
         cluster_id:
           type: string
           description: Cluster where sandbox runs (multi-cluster only)

@@ -8,7 +8,6 @@ func registerApiFullModeSuite(envProvider func() *framework.ScenarioEnv) {
 		describe:                  "API full mode",
 		templateNamePrefix:        "e2e-fullmode",
 		fileContent:               "hello fullmode",
-		includeSandboxListTests:   true,
 		includeTemplateStatus:     true,
 		includePoolReadinessGate:  true,
 		includeNetworkPolicy:      true,

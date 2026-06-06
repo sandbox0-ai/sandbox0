@@ -54,11 +54,7 @@ func (c *CMD) Start() error {
 	}
 
 	ctx := c.context()
-	cmd, err := c.prepareExecCmd(ctx)
-	if err != nil {
-		c.SetState(process.ProcessStateCrashed)
-		return fmt.Errorf("%w: %v", process.ErrProcessStartFailed, err)
-	}
+	cmd := c.prepareExecCmd(ctx)
 	config := c.GetConfig()
 
 	// Check if PTY is requested
@@ -86,7 +82,7 @@ func (c *CMD) Start() error {
 }
 
 // prepareExecCmd creates and configures the exec.Cmd instance.
-func (c *CMD) prepareExecCmd(ctx context.Context) (*exec.Cmd, error) {
+func (c *CMD) prepareExecCmd(ctx context.Context) *exec.Cmd {
 	config := c.GetConfig()
 
 	cmdPath := c.command[0]
@@ -95,15 +91,21 @@ func (c *CMD) prepareExecCmd(ctx context.Context) (*exec.Cmd, error) {
 		args = c.command[1:]
 	}
 
+	cmd := exec.CommandContext(ctx, cmdPath, args...)
+
+	// Set working directory
+	if config.CWD != "" {
+		cmd.Dir = config.CWD
+	}
+
+	// Set environment variables
 	envLayers := []map[string]string{config.EnvVars}
 	if config.PTYSize != nil {
 		envLayers = append(envLayers, map[string]string{"TERM": resolveTerm(config)})
 	}
-	env := process.MergeEnvironment(os.Environ(), envLayers...)
-	return process.NewCommandContext(ctx, cmdPath, args, process.LaunchOptions{
-		CWD: config.CWD,
-		Env: env,
-	})
+	cmd.Env = process.MergeEnvironment(os.Environ(), envLayers...)
+
+	return cmd
 }
 
 // Stop stops the command execution.

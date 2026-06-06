@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
@@ -34,22 +33,12 @@ const (
 
 // ClaimRequest represents a sandbox claim request
 type ClaimRequest struct {
-	TeamID       string
-	UserID       string
-	Template     string         `json:"template"`
-	FilesystemID string         `json:"-"`
-	Config       *SandboxConfig `json:"config,omitempty"`
-	Mounts       []ClaimMount   `json:"mounts,omitempty"`
-	Metadata     *ClaimMetadata `json:"-"`
-	// FilesystemBaseImageRef is the immutable lower image recorded by the
-	// sandbox filesystem object. It is internal runtime metadata, not public API.
-	FilesystemBaseImageRef string `json:"-"`
-	// FilesystemBaseImageDigest is authoritative when set. It keeps restore from
-	// silently rebasing an existing filesystem onto a moved image tag.
-	FilesystemBaseImageDigest string `json:"-"`
-	// FilesystemLifecycleOwnerSandboxID ties the root filesystem lifecycle to
-	// the sandbox. It is internal runtime metadata, not public API.
-	FilesystemLifecycleOwnerSandboxID string `json:"-"`
+	TeamID   string
+	UserID   string
+	Template string         `json:"template"`
+	Config   *SandboxConfig `json:"config,omitempty"`
+	Mounts   []ClaimMount   `json:"mounts,omitempty"`
+	Metadata *ClaimMetadata `json:"-"`
 	// SandboxID is an internal stable ID used when recreating an existing sandbox.
 	SandboxID string `json:"-"`
 	// RuntimeGeneration identifies the current runtime pod incarnation.
@@ -215,62 +204,6 @@ func setMountsAnnotation(annotations map[string]string, mounts []ClaimMount) err
 	return nil
 }
 
-func setFilesystemAnnotations(annotations map[string]string, req *ClaimRequest) {
-	if annotations == nil || req == nil {
-		return
-	}
-	if filesystemID := strings.TrimSpace(req.FilesystemID); filesystemID != "" {
-		annotations[controller.AnnotationFilesystemID] = filesystemID
-	} else {
-		delete(annotations, controller.AnnotationFilesystemID)
-	}
-	if baseImageRef := strings.TrimSpace(req.FilesystemBaseImageRef); baseImageRef != "" {
-		annotations[controller.AnnotationFilesystemBaseImageRef] = baseImageRef
-	} else {
-		delete(annotations, controller.AnnotationFilesystemBaseImageRef)
-	}
-	if baseImageDigest := strings.TrimSpace(req.FilesystemBaseImageDigest); baseImageDigest != "" {
-		annotations[controller.AnnotationFilesystemBaseImageDigest] = baseImageDigest
-	} else {
-		delete(annotations, controller.AnnotationFilesystemBaseImageDigest)
-	}
-}
-
-func validateSandboxFilesystemID(filesystemID string) error {
-	filesystemID = strings.TrimSpace(filesystemID)
-	if filesystemID == "" {
-		return nil
-	}
-	if len(filesystemID) > 255 {
-		return fmt.Errorf("%w: filesystem_id is too long", ErrInvalidClaimRequest)
-	}
-	if strings.Contains(filesystemID, "/") {
-		return fmt.Errorf("%w: filesystem_id cannot contain '/'", ErrInvalidClaimRequest)
-	}
-	return nil
-}
-
-func (s *SandboxService) ensureClaimFilesystem(req *ClaimRequest, template *v1alpha1.SandboxTemplate) error {
-	if req == nil {
-		return nil
-	}
-	req.FilesystemID = strings.TrimSpace(req.FilesystemID)
-	if err := validateSandboxFilesystemID(req.FilesystemID); err != nil {
-		return err
-	}
-	if req.FilesystemID == "" {
-		req.FilesystemID = "fs-" + uuid.NewString()
-	}
-	req.FilesystemLifecycleOwnerSandboxID = strings.TrimSpace(req.SandboxID)
-	if req.FilesystemBaseImageRef == "" && template != nil {
-		req.FilesystemBaseImageRef = strings.TrimSpace(template.Spec.MainContainer.Image)
-	}
-	if req.FilesystemBaseImageDigest == "" {
-		req.FilesystemBaseImageDigest = imageDigestFromReference(req.FilesystemBaseImageRef)
-	}
-	return nil
-}
-
 func validateClaimMounts(req *ClaimRequest) error {
 	if req == nil {
 		return nil
@@ -326,7 +259,6 @@ type WebhookConfig struct {
 // ClaimResponse represents a sandbox claim response
 type ClaimResponse struct {
 	SandboxID       string                 `json:"sandbox_id"`
-	FilesystemID    string                 `json:"filesystem_id"`
 	Status          string                 `json:"status"`
 	ProcdAddress    string                 `json:"procd_address"`
 	PodName         string                 `json:"pod_name"`
@@ -428,12 +360,6 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	if req.RuntimeGeneration <= 0 {
 		req.RuntimeGeneration = 1
 	}
-	phaseStarted = time.Now()
-	if err := s.ensureClaimFilesystem(req, template); err != nil {
-		s.observeClaimPhase(req.Template, "unknown", "ensure_filesystem", phaseStarted, err)
-		return nil, err
-	}
-	s.observeClaimPhase(req.Template, "unknown", "ensure_filesystem", phaseStarted, nil)
 
 	phaseStarted = time.Now()
 	if err := s.enforceSandboxCPUQuota(ctx, req.TeamID, template); err != nil {
@@ -456,42 +382,6 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	s.observeClaimPhase(req.Template, "unknown", "validate_template_mounts", phaseStarted, nil)
 
 	_ = resolvedName // reserved for audit/debugging (name used is template.ObjectMeta.Name)
-
-	phaseStarted = time.Now()
-	if err := s.acquireClaimFilesystem(ctx, req, template); err != nil {
-		s.observeClaimPhase(req.Template, "unknown", "acquire_filesystem", phaseStarted, err)
-		return nil, err
-	}
-	s.observeClaimPhase(req.Template, "unknown", "acquire_filesystem", phaseStarted, nil)
-	filesystemOwnerActive := true
-	claimSucceeded := false
-	defer func() {
-		if filesystemOwnerActive {
-			releaseCtx := context.Background()
-			if err := s.releaseClaimFilesystemOwner(releaseCtx, req); err != nil && s.logger != nil {
-				s.logger.Warn("Failed to release sandbox filesystem owner after claim failure",
-					zap.String("sandboxID", req.SandboxID),
-					zap.String("filesystemID", req.FilesystemID),
-					zap.Error(err),
-				)
-			}
-		}
-	}()
-	rootFSBound := false
-	rootFSBoundPod := (*corev1.Pod)(nil)
-	defer func() {
-		if claimSucceeded || !rootFSBound {
-			return
-		}
-		releaseCtx := context.Background()
-		if err := s.releaseSandboxRootFSForPod(releaseCtx, rootFSBoundPod, req); err != nil && s.logger != nil {
-			s.logger.Warn("Failed to release sandbox rootfs after claim failure",
-				zap.String("sandboxID", req.SandboxID),
-				zap.String("filesystemID", req.FilesystemID),
-				zap.Error(err),
-			)
-		}
-	}()
 
 	// Try to claim an idle pod first
 	phaseStarted = time.Now()
@@ -571,19 +461,6 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	}
 
 	phaseStarted = time.Now()
-	if err := s.bindSandboxRootFS(ctx, pod, req); err != nil {
-		s.observeClaimPhase(req.Template, claimType, "bind_sandbox_rootfs", phaseStarted, err)
-		s.requestSandboxDeletionAfterClaimFailure(pod, "sandbox rootfs bind failed")
-		if metrics != nil {
-			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
-		}
-		return nil, fmt.Errorf("bind sandbox rootfs: %w", err)
-	}
-	rootFSBound = true
-	rootFSBoundPod = pod
-	s.observeClaimPhase(req.Template, claimType, "bind_sandbox_rootfs", phaseStarted, nil)
-
-	phaseStarted = time.Now()
 	portalMounts, err := s.bindVolumePortals(ctx, pod, req, template)
 	s.observeClaimPhase(req.Template, claimType, "bind_volume_portals", phaseStarted, err)
 	if err != nil {
@@ -640,12 +517,9 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "success").Inc()
 		metrics.SandboxClaimDuration.WithLabelValues(req.Template, claimType).Observe(time.Since(start).Seconds())
 	}
-	claimSucceeded = true
-	filesystemOwnerActive = false
 
 	return &ClaimResponse{
 		SandboxID:       req.SandboxID,
-		FilesystemID:    req.FilesystemID,
 		Status:          "starting",
 		ProcdAddress:    procdAddress,
 		PodName:         pod.Name,
@@ -679,7 +553,6 @@ func (s *SandboxService) persistClaimedSandbox(ctx context.Context, pod *corev1.
 		Status:              s.podToSandboxStatus(pod),
 		Config:              cfg,
 		Mounts:              mounts,
-		FilesystemID:        strings.TrimSpace(req.FilesystemID),
 		TemplateSpec:        template.Spec,
 		CurrentPodName:      pod.Name,
 		CurrentPodNamespace: pod.Namespace,
@@ -1042,7 +915,6 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		pod.Annotations[controller.AnnotationUserID] = req.UserID
 		pod.Annotations[controller.AnnotationClaimedAt] = s.clock.Now().Format(time.RFC3339)
 		pod.Annotations[controller.AnnotationClaimType] = "hot"
-		setFilesystemAnnotations(pod.Annotations, req)
 		if stateVolume != nil {
 			pod.Annotations[controller.AnnotationWebhookStateVolumeID] = stateVolume.VolumeID
 		} else {
@@ -1193,7 +1065,6 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		controller.AnnotationClaimedAt:         s.clock.Now().Format(time.RFC3339),
 		controller.AnnotationClaimType:         "cold",
 	})
-	setFilesystemAnnotations(annotations, req)
 	if stateVolume != nil {
 		annotations[controller.AnnotationWebhookStateVolumeID] = stateVolume.VolumeID
 	}
@@ -1378,11 +1249,10 @@ func (s *SandboxService) initializeProcd(
 	}
 
 	initReq := InitializeRequest{
-		SandboxID:         sandboxID,
-		TeamID:            teamID,
-		EnvVars:           sandboxEnvVarsForInitialize(req.Config),
-		VolumeMountPoints: sandboxVolumeMountPointsForInitialize(req.Mounts),
-		Webhook:           webhookConfig,
+		SandboxID: sandboxID,
+		TeamID:    teamID,
+		EnvVars:   sandboxEnvVarsForInitialize(req.Config),
+		Webhook:   webhookConfig,
 	}
 
 	var initErr error
@@ -1418,24 +1288,4 @@ func sandboxEnvVarsForInitialize(cfg *SandboxConfig) map[string]string {
 		return nil
 	}
 	return cloneEnvVars(cfg.EnvVars)
-}
-
-func sandboxVolumeMountPointsForInitialize(mounts []ClaimMount) []string {
-	if len(mounts) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(mounts))
-	seen := make(map[string]struct{}, len(mounts))
-	for _, mount := range mounts {
-		mountPoint := filepath.Clean(strings.TrimSpace(mount.MountPoint))
-		if mountPoint == "." || mountPoint == "" || mountPoint == string(filepath.Separator) || !filepath.IsAbs(mountPoint) {
-			continue
-		}
-		if _, ok := seen[mountPoint]; ok {
-			continue
-		}
-		seen[mountPoint] = struct{}{}
-		out = append(out, mountPoint)
-	}
-	return out
 }

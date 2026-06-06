@@ -6,9 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
-	"sync"
 	"syscall"
 	"time"
 )
@@ -42,8 +39,6 @@ type Manager struct {
 	rootPath        string
 	watcherMgr      *WatcherManager
 	allowExecutable bool
-	externalMu      sync.RWMutex
-	externalMounts  []string
 }
 
 // NewManager creates a new file manager.
@@ -65,62 +60,20 @@ func NewManager(rootPath string) (*Manager, error) {
 	}, nil
 }
 
-// sanitizePath resolves sandbox paths inside rootPath. Absolute user paths are
-// treated as absolute within the sandbox root, not the carrier container root.
+// sanitizePath cleans the path and resolves relative paths against rootPath.
+// The sandbox container provides the isolation boundary, so all paths
+// (absolute or relative) within the sandbox are allowed.
 func (m *Manager) sanitizePath(path string) string {
-	cleanPath := filepath.Clean(string(filepath.Separator) + path)
-	if externalMount := m.externalMountFor(cleanPath); externalMount != "" {
-		rel := strings.TrimPrefix(cleanPath, externalMount)
-		rel = strings.TrimPrefix(rel, string(filepath.Separator))
-		return filepath.Clean(filepath.Join(externalMount, rel))
-	}
-	rel := strings.TrimPrefix(cleanPath, string(filepath.Separator))
-	return filepath.Clean(filepath.Join(m.rootPath, rel))
-}
+	// Clean the path to resolve . and .. components
+	cleanPath := filepath.Clean(path)
 
-// SetExternalMounts configures pod-local mounts that live outside rootPath but
-// must remain visible at their sandbox mount points.
-func (m *Manager) SetExternalMounts(paths []string) {
-	if m == nil {
-		return
+	// For absolute paths, return as-is
+	if filepath.IsAbs(cleanPath) {
+		return cleanPath
 	}
-	m.externalMu.Lock()
-	m.externalMounts = normalizeExternalMounts(paths)
-	m.externalMu.Unlock()
-}
 
-func (m *Manager) externalMountFor(cleanPath string) string {
-	m.externalMu.RLock()
-	defer m.externalMu.RUnlock()
-	for _, mount := range m.externalMounts {
-		if cleanPath == mount || strings.HasPrefix(cleanPath, mount+string(filepath.Separator)) {
-			return mount
-		}
-	}
-	return ""
-}
-
-func normalizeExternalMounts(paths []string) []string {
-	if len(paths) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(paths))
-	out := make([]string, 0, len(paths))
-	for _, path := range paths {
-		clean := filepath.Clean(strings.TrimSpace(path))
-		if clean == "." || clean == "" || clean == string(filepath.Separator) || !filepath.IsAbs(clean) {
-			continue
-		}
-		if _, ok := seen[clean]; ok {
-			continue
-		}
-		seen[clean] = struct{}{}
-		out = append(out, clean)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return len(out[i]) > len(out[j])
-	})
-	return out
+	// For relative paths, join with root and clean
+	return filepath.Clean(filepath.Join(m.rootPath, cleanPath))
 }
 
 func pathIsDir(path string) (bool, error) {

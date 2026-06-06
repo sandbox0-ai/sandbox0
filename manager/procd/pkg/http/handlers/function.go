@@ -359,16 +359,11 @@ func (h *FunctionHandler) materializeSource(source sandboxfunction.Source) (stri
 }
 
 func (h *FunctionHandler) run(ctx context.Context, modulePath, handler string, envVars map[string]string, payload []byte) ([]byte, string, functionRunTruncation, error) {
-	env := process.MergeEnvironment(os.Environ(), h.sandboxEnvVars(), envVars)
-	cmd, err := process.NewCommandContext(ctx, h.runnerPath, []string{modulePath, handler}, process.LaunchOptions{
-		CWD: filepath.Dir(modulePath),
-		Env: env,
-	})
-	if err != nil {
-		return nil, "", functionRunTruncation{}, err
-	}
+	cmd := osexec.CommandContext(ctx, h.runnerPath, modulePath, handler)
+	cmd.Dir = filepath.Dir(modulePath)
 	cmd.Stdin = bytes.NewReader(payload)
-	process.SetProcessGroup(cmd)
+	cmd.Env = process.MergeEnvironment(os.Environ(), h.sandboxEnvVars(), envVars)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = killFunctionProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 
@@ -377,7 +372,7 @@ func (h *FunctionHandler) run(ctx context.Context, modulePath, handler string, e
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
-	err = cmd.Run()
+	err := cmd.Run()
 	return stdout.Bytes(), stderr.String(), functionRunTruncation{
 		stdout: stdout.Truncated(),
 		stderr: stderr.Truncated(),
@@ -397,15 +392,10 @@ func killFunctionProcessGroup(cmd *osexec.Cmd) func() error {
 }
 
 func (h *FunctionHandler) runStream(ctx context.Context, w http.ResponseWriter, modulePath, handler string, envVars map[string]string, payload []byte) error {
-	env := process.MergeEnvironment(os.Environ(), h.sandboxEnvVars(), envVars)
-	cmd, err := process.NewCommandContext(ctx, h.runnerPath, []string{"--stream", modulePath, handler}, process.LaunchOptions{
-		CWD: filepath.Dir(modulePath),
-		Env: env,
-	})
-	if err != nil {
-		return err
-	}
-	process.SetProcessGroup(cmd)
+	cmd := osexec.CommandContext(ctx, h.runnerPath, "--stream", modulePath, handler)
+	cmd.Dir = filepath.Dir(modulePath)
+	cmd.Env = process.MergeEnvironment(os.Environ(), h.sandboxEnvVars(), envVars)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = killFunctionProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 
@@ -516,15 +506,10 @@ func (h *FunctionHandler) runWebSocket(ctx context.Context, conn *websocket.Conn
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	env := process.MergeEnvironment(os.Environ(), h.sandboxEnvVars(), envVars)
-	cmd, err := process.NewCommandContext(ctx, h.runnerPath, []string{"--websocket", modulePath, handler}, process.LaunchOptions{
-		CWD: filepath.Dir(modulePath),
-		Env: env,
-	})
-	if err != nil {
-		return err
-	}
-	process.SetProcessGroup(cmd)
+	cmd := osexec.CommandContext(ctx, h.runnerPath, "--websocket", modulePath, handler)
+	cmd.Dir = filepath.Dir(modulePath)
+	cmd.Env = process.MergeEnvironment(os.Environ(), h.sandboxEnvVars(), envVars)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = killFunctionProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 

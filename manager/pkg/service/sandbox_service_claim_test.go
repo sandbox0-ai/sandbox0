@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -110,7 +109,6 @@ func TestClaimRequestDoesNotAcceptRuntimeMetadataFromJSON(t *testing.T) {
 	var req ClaimRequest
 	if err := json.Unmarshal([]byte(`{
 		"template":"template-a",
-		"filesystem_id":"fs-public-input",
 		"metadata":{
 			"owner_kind":"managed-agent"
 		}
@@ -119,63 +117,6 @@ func TestClaimRequestDoesNotAcceptRuntimeMetadataFromJSON(t *testing.T) {
 	}
 	if req.Metadata != nil {
 		t.Fatalf("metadata = %#v, want nil for public JSON input", req.Metadata)
-	}
-	if req.FilesystemID != "" {
-		t.Fatalf("filesystem_id = %q, want empty for public JSON input", req.FilesystemID)
-	}
-}
-
-func TestEnsureClaimFilesystemCreatesIDAndRecordsBaseImage(t *testing.T) {
-	template := &v1alpha1.SandboxTemplate{
-		Spec: v1alpha1.SandboxTemplateSpec{
-			MainContainer: v1alpha1.ContainerSpec{Image: "ubuntu@sha256:abc"},
-		},
-	}
-	req := &ClaimRequest{SandboxID: "sandbox-a"}
-	svc := &SandboxService{}
-
-	if err := svc.ensureClaimFilesystem(req, template); err != nil {
-		t.Fatalf("ensureClaimFilesystem() error = %v", err)
-	}
-	if !strings.HasPrefix(req.FilesystemID, "fs-") {
-		t.Fatalf("filesystem_id = %q, want generated fs-* id", req.FilesystemID)
-	}
-	if req.FilesystemBaseImageRef != "ubuntu@sha256:abc" {
-		t.Fatalf("filesystem base image = %q, want template image", req.FilesystemBaseImageRef)
-	}
-	if req.FilesystemBaseImageDigest != "sha256:abc" {
-		t.Fatalf("filesystem base image digest = %q, want sha256:abc", req.FilesystemBaseImageDigest)
-	}
-	if req.FilesystemLifecycleOwnerSandboxID != "sandbox-a" {
-		t.Fatalf("filesystem lifecycle owner = %q, want sandbox-a", req.FilesystemLifecycleOwnerSandboxID)
-	}
-}
-
-func TestEnsureClaimFilesystemKeepsInternalFilesystemSandboxOwned(t *testing.T) {
-	req := &ClaimRequest{SandboxID: "sandbox-a", FilesystemID: "fs-existing"}
-	svc := &SandboxService{}
-
-	if err := svc.ensureClaimFilesystem(req, nil); err != nil {
-		t.Fatalf("ensureClaimFilesystem() error = %v", err)
-	}
-	if req.FilesystemID != "fs-existing" {
-		t.Fatalf("filesystem_id = %q, want fs-existing", req.FilesystemID)
-	}
-	if req.FilesystemLifecycleOwnerSandboxID != "sandbox-a" {
-		t.Fatalf("filesystem lifecycle owner = %q, want sandbox-a", req.FilesystemLifecycleOwnerSandboxID)
-	}
-}
-
-func TestEnsureClaimFilesystemRejectsPathSeparator(t *testing.T) {
-	req := &ClaimRequest{FilesystemID: "team-a/fs-a"}
-	svc := &SandboxService{}
-
-	err := svc.ensureClaimFilesystem(req, nil)
-	if err == nil {
-		t.Fatal("ensureClaimFilesystem() error = nil, want invalid claim request")
-	}
-	if !errors.Is(err, ErrInvalidClaimRequest) {
-		t.Fatalf("ensureClaimFilesystem() error = %v, want ErrInvalidClaimRequest", err)
 	}
 }
 
@@ -207,43 +148,6 @@ func TestClaimIdlePodAppliesRuntimeOwnerMetadata(t *testing.T) {
 		t.Fatalf("claimIdlePod() error = %v", err)
 	}
 	assertClaimOwnerMetadata(t, pod)
-}
-
-func TestClaimIdlePodAnnotatesSandboxFilesystem(t *testing.T) {
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "template-a",
-			Namespace: "ns-a",
-		},
-	}
-	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
-
-	client := fake.NewSimpleClientset(readyPod.DeepCopy())
-	svc := &SandboxService{
-		k8sClient: client,
-		podLister: newClaimTestPodLister(t, readyPod),
-		clock:     systemTime{},
-		logger:    zap.NewNop(),
-	}
-
-	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{
-		TeamID:                 "team-a",
-		UserID:                 "user-a",
-		FilesystemID:           "fs-existing",
-		FilesystemBaseImageRef: "busybox@sha256:abc",
-	})
-	if err != nil {
-		t.Fatalf("claimIdlePod() error = %v", err)
-	}
-	if pod == nil {
-		t.Fatal("claimIdlePod() = nil, want ready pod")
-	}
-	if got := pod.Annotations[controller.AnnotationFilesystemID]; got != "fs-existing" {
-		t.Fatalf("filesystem annotation = %q, want fs-existing", got)
-	}
-	if got := pod.Annotations[controller.AnnotationFilesystemBaseImageRef]; got != "busybox@sha256:abc" {
-		t.Fatalf("filesystem base image annotation = %q, want busybox digest", got)
-	}
 }
 
 func TestClaimIdlePodRequiresCurrentTemplateHash(t *testing.T) {
@@ -523,43 +427,6 @@ func TestCreateNewPodMarksColdPodNonEvictable(t *testing.T) {
 	}
 	if got := pod.Annotations[controller.AnnotationClusterAutoscalerSafeToEvict]; got != "false" {
 		t.Fatalf("safe-to-evict annotation = %q, want false", got)
-	}
-}
-
-func TestCreateNewPodAnnotatesSandboxFilesystem(t *testing.T) {
-	withClaimTestPublicKey(t)
-
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "template-a",
-			Namespace: "ns-a",
-		},
-		Spec: v1alpha1.SandboxTemplateSpec{
-			MainContainer: v1alpha1.ContainerSpec{Image: "busybox"},
-		},
-	}
-	client := fake.NewSimpleClientset()
-	svc := &SandboxService{
-		k8sClient:    client,
-		secretLister: newClaimTestSecretLister(t),
-		clock:        systemTime{},
-		logger:       zap.NewNop(),
-	}
-
-	pod, err := svc.createNewPod(context.Background(), template, &ClaimRequest{
-		TeamID:                 "team-a",
-		UserID:                 "user-a",
-		FilesystemID:           "fs-cold",
-		FilesystemBaseImageRef: "busybox@sha256:def",
-	})
-	if err != nil {
-		t.Fatalf("createNewPod() error = %v", err)
-	}
-	if got := pod.Annotations[controller.AnnotationFilesystemID]; got != "fs-cold" {
-		t.Fatalf("filesystem annotation = %q, want fs-cold", got)
-	}
-	if got := pod.Annotations[controller.AnnotationFilesystemBaseImageRef]; got != "busybox@sha256:def" {
-		t.Fatalf("filesystem base image annotation = %q, want busybox digest", got)
 	}
 }
 

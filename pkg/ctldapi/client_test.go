@@ -97,6 +97,79 @@ func TestClientBindVolumePortalUsesSharedPath(t *testing.T) {
 	}
 }
 
+func TestClientRootFSMethodsUseSharedPaths(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		path string
+		call func(*Client, string) error
+	}{
+		{
+			name: "inspect",
+			path: "/api/v1/rootfs/inspect",
+			call: func(client *Client, address string) error {
+				_, err := client.InspectRootFS(context.Background(), address, InspectRootFSRequest{
+					Target: RootFSContainerRef{Namespace: "default", PodName: "pod-1", ContainerName: "sandbox"},
+				})
+				return err
+			},
+		},
+		{
+			name: "save",
+			path: "/api/v1/rootfs/save",
+			call: func(client *Client, address string) error {
+				_, err := client.SaveRootFS(context.Background(), address, SaveRootFSRequest{
+					Target:    RootFSContainerRef{Namespace: "default", PodName: "pod-1", ContainerName: "sandbox"},
+					SandboxID: "sandbox-1",
+					TeamID:    "team-1",
+				})
+				return err
+			},
+		},
+		{
+			name: "apply",
+			path: "/api/v1/rootfs/apply",
+			call: func(client *Client, address string) error {
+				_, err := client.ApplyRootFS(context.Background(), address, ApplyRootFSRequest{
+					Target:     RootFSContainerRef{Namespace: "default", PodName: "pod-1", ContainerName: "sandbox"},
+					Descriptor: RootFSDiffDescriptor{MediaType: "application/vnd.oci.image.layer.v1.tar", Digest: "sha256:abc", ObjectKey: "rootfs/diff.tar"},
+				})
+				return err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost {
+					t.Fatalf("method = %s, want %s", r.Method, http.MethodPost)
+				}
+				if r.URL.Path != tt.path {
+					t.Fatalf("path = %s, want %s", r.URL.Path, tt.path)
+				}
+				switch tt.name {
+				case "inspect":
+					_ = json.NewEncoder(w).Encode(InspectRootFSResponse{Info: RootFSInfo{Runtime: "runc"}})
+				case "save":
+					_ = json.NewEncoder(w).Encode(SaveRootFSResponse{Descriptor: RootFSDiffDescriptor{ObjectKey: "rootfs/diff.tar"}})
+				case "apply":
+					_ = json.NewEncoder(w).Encode(ApplyRootFSResponse{Applied: true})
+				}
+			}))
+			defer server.Close()
+
+			if err := tt.call(NewClient(server.Client()), server.URL); err != nil {
+				t.Fatalf("%s returned error: %v", tt.name, err)
+			}
+		})
+	}
+}
+
 func TestPostJSONReturnsCheckVolumePortalErrorMessage(t *testing.T) {
 	t.Parallel()
 

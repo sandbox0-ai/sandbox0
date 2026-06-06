@@ -1,0 +1,104 @@
+package rootfs
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
+)
+
+func TestRuntimeFamily(t *testing.T) {
+	tests := []struct {
+		handler string
+		want    string
+	}{
+		{handler: "io.containerd.runc.v2", want: "runc"},
+		{handler: "runsc", want: "gvisor"},
+		{handler: "gvisor-rootfs", want: "gvisor"},
+		{handler: "containerd-shim-kata-v2", want: "kata"},
+		{handler: "custom-runtime", want: "custom-runtime"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.handler, func(t *testing.T) {
+			assert.Equal(t, tt.want, runtimeFamily(tt.handler))
+		})
+	}
+}
+
+func TestResolveContainerIDUsesCRILabels(t *testing.T) {
+	runtime := NewContainerdRuntime(ContainerdRuntimeConfig{
+		CRIClient: fakeCRIClient{containers: []*runtimeapi.Container{
+			{
+				Id:       "wrong-container",
+				Metadata: &runtimeapi.ContainerMetadata{Name: "sandbox"},
+				Labels: map[string]string{
+					"io.kubernetes.pod.namespace": "default",
+					"io.kubernetes.pod.name":      "other-pod",
+					"io.kubernetes.pod.uid":       "other-uid",
+				},
+			},
+			{
+				Id:       "container-1",
+				Metadata: &runtimeapi.ContainerMetadata{Name: "sandbox"},
+				Labels: map[string]string{
+					"io.kubernetes.pod.namespace": "default",
+					"io.kubernetes.pod.name":      "pod-1",
+					"io.kubernetes.pod.uid":       "uid-1",
+				},
+			},
+		}},
+	})
+
+	containerID, podUID, err := runtime.resolveContainerID(context.Background(), ctldapi.RootFSContainerRef{
+		Namespace:     "default",
+		PodName:       "pod-1",
+		PodUID:        "uid-1",
+		ContainerName: "sandbox",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "container-1", containerID)
+	assert.Equal(t, "uid-1", podUID)
+}
+
+func TestResolveContainerIDReturnsNotFound(t *testing.T) {
+	runtime := NewContainerdRuntime(ContainerdRuntimeConfig{CRIClient: fakeCRIClient{}})
+
+	_, _, err := runtime.resolveContainerID(context.Background(), ctldapi.RootFSContainerRef{
+		Namespace:     "default",
+		PodName:       "pod-1",
+		ContainerName: "sandbox",
+	})
+
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrNotFound))
+}
+
+func TestDigestFromReference(t *testing.T) {
+	assert.Equal(t, "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", digestFromReference("busybox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+	assert.Empty(t, digestFromReference("busybox:1.36"))
+}
+
+func TestNormalizeCRIEndpoint(t *testing.T) {
+	assert.Equal(t, "unix:///run/containerd/containerd.sock", normalizeCRIEndpoint("/run/containerd/containerd.sock"))
+	assert.Equal(t, "unix:///run/containerd/containerd.sock", normalizeCRIEndpoint("unix:///run/containerd/containerd.sock"))
+	assert.Equal(t, "127.0.0.1:1234", normalizeCRIEndpoint("127.0.0.1:1234"))
+}
+
+type fakeCRIClient struct {
+	containers []*runtimeapi.Container
+	err        error
+}
+
+func (c fakeCRIClient) ListContainers(_ context.Context, _ *runtimeapi.ListContainersRequest, _ ...grpc.CallOption) (*runtimeapi.ListContainersResponse, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	return &runtimeapi.ListContainersResponse{Containers: c.containers}, nil
+}

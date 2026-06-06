@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,7 @@ type recordingController struct {
 	probedPodNS    string
 	probedPodName  string
 	probedKind     sandboxprobe.Kind
+	rootFSTarget   ctldapi.RootFSContainerRef
 }
 
 func (c *recordingController) Pause(_ *http.Request, sandboxID string) (ctldapi.PauseResponse, int) {
@@ -42,6 +44,23 @@ func (c *recordingController) ProbePod(_ *http.Request, namespace, name string, 
 	c.probedPodName = name
 	c.probedKind = kind
 	return sandboxprobe.Passed(kind, "SandboxProbePassed", "sandbox probe passed", nil), http.StatusOK
+}
+
+func (c *recordingController) InspectRootFS(_ *http.Request, req ctldapi.InspectRootFSRequest) (ctldapi.InspectRootFSResponse, int) {
+	c.rootFSTarget = req.Target
+	return ctldapi.InspectRootFSResponse{Info: ctldapi.RootFSInfo{Runtime: "runc"}}, http.StatusOK
+}
+
+func (c *recordingController) SaveRootFS(_ *http.Request, req ctldapi.SaveRootFSRequest) (ctldapi.SaveRootFSResponse, int) {
+	c.rootFSTarget = req.Target
+	return ctldapi.SaveRootFSResponse{
+		Descriptor: ctldapi.RootFSDiffDescriptor{Digest: "sha256:abc", ObjectKey: "rootfs/diff.tar"},
+	}, http.StatusOK
+}
+
+func (c *recordingController) ApplyRootFS(_ *http.Request, req ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int) {
+	c.rootFSTarget = req.Target
+	return ctldapi.ApplyRootFSResponse{Applied: true}, http.StatusOK
 }
 
 func TestNewMuxRoutesPauseResume(t *testing.T) {
@@ -93,4 +112,69 @@ func TestNewMuxDefaultsToNotImplementedController(t *testing.T) {
 	var resp ctldapi.PauseResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.False(t, resp.Paused)
+}
+
+func TestNewMuxRoutesRootFS(t *testing.T) {
+	controller := &recordingController{}
+	handler := NewMux(controller)
+
+	target := ctldapi.RootFSContainerRef{Namespace: "default", PodName: "pod-1", PodUID: "uid-1", ContainerName: "sandbox"}
+	tests := []struct {
+		name string
+		path string
+		body any
+		want func(*testing.T, []byte)
+	}{
+		{
+			name: "inspect",
+			path: "/api/v1/rootfs/inspect",
+			body: ctldapi.InspectRootFSRequest{Target: target},
+			want: func(t *testing.T, body []byte) {
+				t.Helper()
+				var resp ctldapi.InspectRootFSResponse
+				require.NoError(t, json.Unmarshal(body, &resp))
+				assert.Equal(t, "runc", resp.Info.Runtime)
+			},
+		},
+		{
+			name: "save",
+			path: "/api/v1/rootfs/save",
+			body: ctldapi.SaveRootFSRequest{Target: target, SandboxID: "sandbox-1", TeamID: "team-1"},
+			want: func(t *testing.T, body []byte) {
+				t.Helper()
+				var resp ctldapi.SaveRootFSResponse
+				require.NoError(t, json.Unmarshal(body, &resp))
+				assert.Equal(t, "rootfs/diff.tar", resp.Descriptor.ObjectKey)
+			},
+		},
+		{
+			name: "apply",
+			path: "/api/v1/rootfs/apply",
+			body: ctldapi.ApplyRootFSRequest{
+				Target:     target,
+				Descriptor: ctldapi.RootFSDiffDescriptor{Digest: "sha256:abc", ObjectKey: "rootfs/diff.tar"},
+			},
+			want: func(t *testing.T, body []byte) {
+				t.Helper()
+				var resp ctldapi.ApplyRootFSResponse
+				require.NoError(t, json.Unmarshal(body, &resp))
+				assert.True(t, resp.Applied)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := json.Marshal(tt.body)
+			require.NoError(t, err)
+			req := httptest.NewRequest(http.MethodPost, tt.path, bytes.NewReader(payload))
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusOK, rec.Code)
+			assert.Equal(t, target, controller.rootFSTarget)
+			tt.want(t, rec.Body.Bytes())
+		})
+	}
 }

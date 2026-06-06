@@ -19,13 +19,14 @@ func (s *SandboxService) acquireClaimFilesystem(ctx context.Context, req *ClaimR
 		}
 	}
 	record, err := s.sandboxFilesystemStore.AcquireOwner(ctx, SandboxFilesystemAcquireRequest{
-		FilesystemID:           req.FilesystemID,
-		TeamID:                 req.TeamID,
-		UserID:                 req.UserID,
-		BaseImageRef:           req.FilesystemBaseImageRef,
-		BaseImageDigest:        req.FilesystemBaseImageDigest,
-		OwnerSandboxID:         req.SandboxID,
-		OwnerRuntimeGeneration: req.RuntimeGeneration,
+		FilesystemID:            req.FilesystemID,
+		TeamID:                  req.TeamID,
+		UserID:                  req.UserID,
+		BaseImageRef:            req.FilesystemBaseImageRef,
+		BaseImageDigest:         req.FilesystemBaseImageDigest,
+		LifecycleOwnerSandboxID: req.FilesystemLifecycleOwnerSandboxID,
+		OwnerSandboxID:          req.SandboxID,
+		OwnerRuntimeGeneration:  req.RuntimeGeneration,
 	})
 	if err != nil {
 		switch {
@@ -48,6 +49,21 @@ func (s *SandboxService) acquireClaimFilesystem(ctx context.Context, req *ClaimR
 		req.FilesystemBaseImageDigest = record.BaseImageDigest
 	}
 	return nil
+}
+
+func (s *SandboxService) deleteSandboxOwnedFilesystem(ctx context.Context, filesystemID, sandboxID string) error {
+	if s == nil || s.sandboxFilesystemStore == nil {
+		return nil
+	}
+	filesystemID = strings.TrimSpace(filesystemID)
+	sandboxID = strings.TrimSpace(sandboxID)
+	if filesystemID == "" || sandboxID == "" {
+		return nil
+	}
+	return s.sandboxFilesystemStore.DeleteForSandbox(ctx, SandboxFilesystemDeleteRequest{
+		FilesystemID:            filesystemID,
+		LifecycleOwnerSandboxID: sandboxID,
+	})
 }
 
 func (s *SandboxService) releaseSandboxFilesystemOwner(ctx context.Context, filesystemID, sandboxID string, runtimeGeneration int64) error {

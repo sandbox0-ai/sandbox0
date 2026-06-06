@@ -127,7 +127,7 @@ func TestEnsureClaimFilesystemCreatesIDAndRecordsBaseImage(t *testing.T) {
 			MainContainer: v1alpha1.ContainerSpec{Image: "ubuntu@sha256:abc"},
 		},
 	}
-	req := &ClaimRequest{}
+	req := &ClaimRequest{SandboxID: "sandbox-a"}
 	svc := &SandboxService{}
 
 	if err := svc.ensureClaimFilesystem(req, template); err != nil {
@@ -141,6 +141,24 @@ func TestEnsureClaimFilesystemCreatesIDAndRecordsBaseImage(t *testing.T) {
 	}
 	if req.FilesystemBaseImageDigest != "sha256:abc" {
 		t.Fatalf("filesystem base image digest = %q, want sha256:abc", req.FilesystemBaseImageDigest)
+	}
+	if req.FilesystemLifecycleOwnerSandboxID != "sandbox-a" {
+		t.Fatalf("filesystem lifecycle owner = %q, want sandbox-a", req.FilesystemLifecycleOwnerSandboxID)
+	}
+}
+
+func TestEnsureClaimFilesystemKeepsProvidedFilesystemStandalone(t *testing.T) {
+	req := &ClaimRequest{SandboxID: "sandbox-a", FilesystemID: "fs-provided"}
+	svc := &SandboxService{}
+
+	if err := svc.ensureClaimFilesystem(req, nil); err != nil {
+		t.Fatalf("ensureClaimFilesystem() error = %v", err)
+	}
+	if req.FilesystemID != "fs-provided" {
+		t.Fatalf("filesystem_id = %q, want fs-provided", req.FilesystemID)
+	}
+	if req.FilesystemLifecycleOwnerSandboxID != "" {
+		t.Fatalf("filesystem lifecycle owner = %q, want empty", req.FilesystemLifecycleOwnerSandboxID)
 	}
 }
 

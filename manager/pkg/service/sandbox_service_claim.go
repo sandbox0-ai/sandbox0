@@ -47,6 +47,10 @@ type ClaimRequest struct {
 	// FilesystemBaseImageDigest is authoritative when set. It keeps restore from
 	// silently rebasing an existing filesystem onto a moved image tag.
 	FilesystemBaseImageDigest string `json:"-"`
+	// FilesystemLifecycleOwnerSandboxID is set only for filesystems created
+	// implicitly by this sandbox claim. Such filesystems are deleted with the
+	// sandbox; user-provided filesystems are only released.
+	FilesystemLifecycleOwnerSandboxID string `json:"-"`
 	// SandboxID is an internal stable ID used when recreating an existing sandbox.
 	SandboxID string `json:"-"`
 	// RuntimeGeneration identifies the current runtime pod incarnation.
@@ -257,6 +261,9 @@ func (s *SandboxService) ensureClaimFilesystem(req *ClaimRequest, template *v1al
 	}
 	if req.FilesystemID == "" {
 		req.FilesystemID = "fs-" + uuid.NewString()
+		req.FilesystemLifecycleOwnerSandboxID = strings.TrimSpace(req.SandboxID)
+	} else {
+		req.FilesystemLifecycleOwnerSandboxID = ""
 	}
 	if req.FilesystemBaseImageRef == "" && template != nil {
 		req.FilesystemBaseImageRef = strings.TrimSpace(template.Spec.MainContainer.Image)

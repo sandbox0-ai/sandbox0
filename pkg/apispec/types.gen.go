@@ -598,12 +598,9 @@ type ClaimMountRequest struct {
 
 // ClaimRequest defines model for ClaimRequest.
 type ClaimRequest struct {
-	Config *SandboxConfig `json:"config,omitempty"`
-
-	// FilesystemId Optional durable sandbox root filesystem ID. When omitted, Sandbox0 creates a new filesystem ID for the sandbox.
-	FilesystemId *string              `json:"filesystem_id,omitempty"`
-	Mounts       *[]ClaimMountRequest `json:"mounts,omitempty"`
-	Template     *string              `json:"template,omitempty"`
+	Config   *SandboxConfig       `json:"config,omitempty"`
+	Mounts   *[]ClaimMountRequest `json:"mounts,omitempty"`
+	Template *string              `json:"template,omitempty"`
 }
 
 // ClaimResponse defines model for ClaimResponse.

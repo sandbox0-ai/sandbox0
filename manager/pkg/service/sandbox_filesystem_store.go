@@ -21,28 +21,30 @@ var (
 // SandboxFilesystemRecord is the internal durable rootfs state. It is not a
 // public API resource.
 type SandboxFilesystemRecord struct {
-	FilesystemID           string
-	TeamID                 string
-	UserID                 string
-	BaseImageRef           string
-	BaseImageDigest        string
-	UpperdirHead           map[string]any
-	Status                 string
-	OwnerSandboxID         string
-	OwnerRuntimeGeneration int64
-	OwnerAcquiredAt        time.Time
-	CreatedAt              time.Time
-	UpdatedAt              time.Time
+	FilesystemID            string
+	TeamID                  string
+	UserID                  string
+	BaseImageRef            string
+	BaseImageDigest         string
+	UpperdirHead            map[string]any
+	Status                  string
+	OwnerSandboxID          string
+	OwnerRuntimeGeneration  int64
+	OwnerAcquiredAt         time.Time
+	LifecycleOwnerSandboxID string
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
 }
 
 type SandboxFilesystemAcquireRequest struct {
-	FilesystemID           string
-	TeamID                 string
-	UserID                 string
-	BaseImageRef           string
-	BaseImageDigest        string
-	OwnerSandboxID         string
-	OwnerRuntimeGeneration int64
+	FilesystemID            string
+	TeamID                  string
+	UserID                  string
+	BaseImageRef            string
+	BaseImageDigest         string
+	LifecycleOwnerSandboxID string
+	OwnerSandboxID          string
+	OwnerRuntimeGeneration  int64
 }
 
 type SandboxFilesystemReleaseRequest struct {
@@ -51,11 +53,17 @@ type SandboxFilesystemReleaseRequest struct {
 	OwnerRuntimeGeneration int64
 }
 
+type SandboxFilesystemDeleteRequest struct {
+	FilesystemID            string
+	LifecycleOwnerSandboxID string
+}
+
 // SandboxFilesystemStore persists internal sandbox rootfs state and RWO owner
 // locks. It intentionally has no public CRUD shape.
 type SandboxFilesystemStore interface {
 	AcquireOwner(ctx context.Context, req SandboxFilesystemAcquireRequest) (*SandboxFilesystemRecord, error)
 	ReleaseOwner(ctx context.Context, req SandboxFilesystemReleaseRequest) error
+	DeleteForSandbox(ctx context.Context, req SandboxFilesystemDeleteRequest) error
 }
 
 func (s *PGSandboxStore) AcquireOwner(ctx context.Context, req SandboxFilesystemAcquireRequest) (*SandboxFilesystemRecord, error) {
@@ -84,11 +92,11 @@ func (s *PGSandboxStore) AcquireOwner(ctx context.Context, req SandboxFilesystem
 
 	_, err = tx.Exec(ctx, `
 		INSERT INTO manager.sandbox_filesystems (
-			filesystem_id, team_id, user_id, base_image_ref, base_image_digest, status, created_at, updated_at
+			filesystem_id, team_id, user_id, base_image_ref, base_image_digest, status, lifecycle_owner_sandbox_id, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
 		ON CONFLICT (filesystem_id) DO NOTHING
-	`, req.FilesystemID, req.TeamID, req.UserID, req.BaseImageRef, req.BaseImageDigest, SandboxFilesystemStatusReady)
+	`, req.FilesystemID, req.TeamID, req.UserID, req.BaseImageRef, req.BaseImageDigest, SandboxFilesystemStatusReady, req.LifecycleOwnerSandboxID)
 	if err != nil {
 		return nil, fmt.Errorf("insert sandbox filesystem: %w", err)
 	}
@@ -107,6 +115,9 @@ func (s *PGSandboxStore) AcquireOwner(ctx context.Context, req SandboxFilesystem
 		(record.OwnerSandboxID != req.OwnerSandboxID || record.OwnerRuntimeGeneration != req.OwnerRuntimeGeneration) {
 		return nil, fmt.Errorf("%w: %s is owned by sandbox %s generation %d", ErrSandboxFilesystemBusy, req.FilesystemID, record.OwnerSandboxID, record.OwnerRuntimeGeneration)
 	}
+	if record.LifecycleOwnerSandboxID != "" && record.LifecycleOwnerSandboxID != req.OwnerSandboxID {
+		return nil, fmt.Errorf("%w: %s lifecycle is owned by sandbox %s", ErrSandboxFilesystemBusy, req.FilesystemID, record.LifecycleOwnerSandboxID)
+	}
 
 	baseImageRef := record.BaseImageRef
 	if baseImageRef == "" {
@@ -116,6 +127,10 @@ func (s *PGSandboxStore) AcquireOwner(ctx context.Context, req SandboxFilesystem
 	if baseImageDigest == "" {
 		baseImageDigest = req.BaseImageDigest
 	}
+	lifecycleOwnerSandboxID := record.LifecycleOwnerSandboxID
+	if lifecycleOwnerSandboxID == "" {
+		lifecycleOwnerSandboxID = req.LifecycleOwnerSandboxID
+	}
 	record, err = scanSandboxFilesystemRecord(tx.QueryRow(ctx, `
 		UPDATE manager.sandbox_filesystems
 		SET base_image_ref = $2,
@@ -123,11 +138,12 @@ func (s *PGSandboxStore) AcquireOwner(ctx context.Context, req SandboxFilesystem
 			owner_sandbox_id = $4,
 			owner_runtime_generation = $5,
 			owner_acquired_at = COALESCE(owner_acquired_at, NOW()),
+			lifecycle_owner_sandbox_id = $6,
 			updated_at = NOW()
 		WHERE filesystem_id = $1
 		RETURNING filesystem_id, team_id, user_id, base_image_ref, base_image_digest, upperdir_head, status,
-			owner_sandbox_id, owner_runtime_generation, owner_acquired_at, created_at, updated_at
-	`, req.FilesystemID, baseImageRef, baseImageDigest, req.OwnerSandboxID, req.OwnerRuntimeGeneration))
+			owner_sandbox_id, owner_runtime_generation, owner_acquired_at, lifecycle_owner_sandbox_id, created_at, updated_at
+	`, req.FilesystemID, baseImageRef, baseImageDigest, req.OwnerSandboxID, req.OwnerRuntimeGeneration, lifecycleOwnerSandboxID))
 	if err != nil {
 		return nil, err
 	}
@@ -162,12 +178,33 @@ func (s *PGSandboxStore) ReleaseOwner(ctx context.Context, req SandboxFilesystem
 	return nil
 }
 
+func (s *PGSandboxStore) DeleteForSandbox(ctx context.Context, req SandboxFilesystemDeleteRequest) error {
+	if s == nil || s.pool == nil {
+		return nil
+	}
+	req.FilesystemID = strings.TrimSpace(req.FilesystemID)
+	req.LifecycleOwnerSandboxID = strings.TrimSpace(req.LifecycleOwnerSandboxID)
+	if req.FilesystemID == "" || req.LifecycleOwnerSandboxID == "" {
+		return nil
+	}
+	_, err := s.pool.Exec(ctx, `
+		DELETE FROM manager.sandbox_filesystems
+		WHERE filesystem_id = $1
+			AND (lifecycle_owner_sandbox_id = $2 OR lifecycle_owner_sandbox_id = '')
+	`, req.FilesystemID, req.LifecycleOwnerSandboxID)
+	if err != nil {
+		return fmt.Errorf("delete sandbox-owned filesystem: %w", err)
+	}
+	return nil
+}
+
 func normalizeSandboxFilesystemAcquireRequest(req SandboxFilesystemAcquireRequest) SandboxFilesystemAcquireRequest {
 	req.FilesystemID = strings.TrimSpace(req.FilesystemID)
 	req.TeamID = strings.TrimSpace(req.TeamID)
 	req.UserID = strings.TrimSpace(req.UserID)
 	req.BaseImageRef = strings.TrimSpace(req.BaseImageRef)
 	req.BaseImageDigest = strings.TrimSpace(req.BaseImageDigest)
+	req.LifecycleOwnerSandboxID = strings.TrimSpace(req.LifecycleOwnerSandboxID)
 	req.OwnerSandboxID = strings.TrimSpace(req.OwnerSandboxID)
 	return req
 }
@@ -175,7 +212,7 @@ func normalizeSandboxFilesystemAcquireRequest(req SandboxFilesystemAcquireReques
 func sandboxFilesystemSelectSQL() string {
 	return `
 		SELECT filesystem_id, team_id, user_id, base_image_ref, base_image_digest, upperdir_head, status,
-			owner_sandbox_id, owner_runtime_generation, owner_acquired_at, created_at, updated_at
+			owner_sandbox_id, owner_runtime_generation, owner_acquired_at, lifecycle_owner_sandbox_id, created_at, updated_at
 		FROM manager.sandbox_filesystems`
 }
 
@@ -196,7 +233,7 @@ func scanSandboxFilesystemRecordInto(scanner sandboxRecordScanner) (*SandboxFile
 	var ownerAcquiredAt *time.Time
 	if err := scanner.Scan(
 		&record.FilesystemID, &record.TeamID, &record.UserID, &record.BaseImageRef, &record.BaseImageDigest, &upperdirHeadJSON, &record.Status,
-		&record.OwnerSandboxID, &record.OwnerRuntimeGeneration, &ownerAcquiredAt, &record.CreatedAt, &record.UpdatedAt,
+		&record.OwnerSandboxID, &record.OwnerRuntimeGeneration, &ownerAcquiredAt, &record.LifecycleOwnerSandboxID, &record.CreatedAt, &record.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}

@@ -367,8 +367,15 @@ func (s *SandboxService) CleanupDeletedSandbox(ctx context.Context, info Sandbox
 	if err := s.releaseSandboxRootFSForLifecycle(ctx, info); err != nil {
 		errs = append(errs, fmt.Errorf("release sandbox rootfs: %w", err))
 	}
-	if err := s.releaseSandboxFilesystemOwner(ctx, info.FilesystemID, sandboxID, info.RuntimeGeneration); err != nil {
-		errs = append(errs, fmt.Errorf("release sandbox filesystem owner: %w", err))
+	if len(errs) == 0 {
+		if err := s.releaseSandboxFilesystemOwner(ctx, info.FilesystemID, sandboxID, info.RuntimeGeneration); err != nil {
+			errs = append(errs, fmt.Errorf("release sandbox filesystem owner: %w", err))
+		}
+	}
+	if !runtimeCleaned && len(errs) == 0 {
+		if err := s.deleteSandboxOwnedFilesystem(ctx, info.FilesystemID, sandboxID); err != nil {
+			errs = append(errs, fmt.Errorf("delete sandbox-owned filesystem: %w", err))
+		}
 	}
 	if runtimeCleaned && len(errs) == 0 {
 		if err := s.markSandboxRuntimeCleaned(ctx, sandboxID, info.RuntimeGeneration); err != nil {

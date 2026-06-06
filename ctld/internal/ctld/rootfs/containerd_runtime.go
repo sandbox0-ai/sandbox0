@@ -28,6 +28,7 @@ const (
 	defaultCRIEndpoint        = "/host-run/containerd/containerd.sock"
 	defaultContainerdEndpoint = "/host-run/containerd/containerd.sock"
 	defaultContainerdRoot     = "/host-run/containerd"
+	defaultContainerdHostRoot = "/run/containerd"
 	defaultNamespace          = "k8s.io"
 	defaultDialTimeout        = 10 * time.Second
 )
@@ -40,6 +41,7 @@ type ContainerdRuntimeConfig struct {
 	CRIEndpoint        string
 	ContainerdEndpoint string
 	ContainerdRoot     string
+	ContainerdHostRoot string
 	Namespace          string
 	DialTimeout        time.Duration
 	CRIClient          criRuntimeService
@@ -51,6 +53,7 @@ type ContainerdRuntime struct {
 	criEndpoint        string
 	containerdEndpoint string
 	containerdRoot     string
+	containerdHostRoot string
 	namespace          string
 	dialTimeout        time.Duration
 	criClient          criRuntimeService
@@ -80,6 +83,10 @@ func NewContainerdRuntime(cfg ContainerdRuntimeConfig) *ContainerdRuntime {
 	if containerdRoot == "" {
 		containerdRoot = defaultContainerdRoot
 	}
+	containerdHostRoot := strings.TrimSpace(cfg.ContainerdHostRoot)
+	if containerdHostRoot == "" {
+		containerdHostRoot = defaultContainerdHostRoot
+	}
 	namespace := strings.TrimSpace(cfg.Namespace)
 	if namespace == "" {
 		namespace = defaultNamespace
@@ -92,6 +99,7 @@ func NewContainerdRuntime(cfg ContainerdRuntimeConfig) *ContainerdRuntime {
 		criEndpoint:        criEndpoint,
 		containerdEndpoint: containerdEndpoint,
 		containerdRoot:     containerdRoot,
+		containerdHostRoot: containerdHostRoot,
 		namespace:          namespace,
 		dialTimeout:        timeout,
 		criClient:          cfg.CRIClient,
@@ -150,7 +158,7 @@ func (r *ContainerdRuntime) ApplyDiff(ctx context.Context, info ctldapi.RootFSIn
 	}
 	defer closeClient()
 
-	liveRootFS, err := liveRootFSPath(r.containerdRoot, r.namespace, info)
+	liveRootFS, err := liveRootFSPath(r.containerdRoot, r.containerdHostRoot, r.namespace, info)
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, err
 	}
@@ -310,25 +318,26 @@ func inspectContainer(ctx context.Context, client containerdClient, containerdRo
 	return info, nil
 }
 
-func liveRootFSPath(containerdRoot, namespace string, info ctldapi.RootFSInfo) (string, error) {
+func liveRootFSPath(containerdRoot, containerdHostRoot, namespace string, info ctldapi.RootFSInfo) (string, error) {
 	taskRoot := filepath.Join(containerdRoot, "io.containerd.runtime.v2.task", namespace)
+	hostTaskRoot := filepath.Join(containerdHostRoot, "io.containerd.runtime.v2.task", namespace)
 	if id := strings.TrimSpace(info.ContainerID); id != "" {
 		liveRootFS := filepath.Join(taskRoot, id, "rootfs")
 		if st, err := os.Stat(liveRootFS); err == nil && st.IsDir() {
-			return liveRootFS, nil
+			return filepath.Join(hostTaskRoot, id, "rootfs"), nil
 		} else if err != nil && !os.IsNotExist(err) {
 			return "", fmt.Errorf("inspect live rootfs %s: %w", liveRootFS, err)
 		}
 	}
 
-	liveRootFS, err := findLiveRootFSByTaskAnnotations(taskRoot, info)
+	liveRootFS, err := findLiveRootFSByTaskAnnotations(taskRoot, hostTaskRoot, info)
 	if err == nil {
 		return liveRootFS, nil
 	}
 	return "", err
 }
 
-func findLiveRootFSByTaskAnnotations(taskRoot string, info ctldapi.RootFSInfo) (string, error) {
+func findLiveRootFSByTaskAnnotations(taskRoot, hostTaskRoot string, info ctldapi.RootFSInfo) (string, error) {
 	entries, err := os.ReadDir(taskRoot)
 	if err != nil {
 		return "", fmt.Errorf("scan containerd task root %s: %w", taskRoot, err)
@@ -356,7 +365,7 @@ func findLiveRootFSByTaskAnnotations(taskRoot string, info ctldapi.RootFSInfo) (
 		}
 		liveRootFS := filepath.Join(taskDir, "rootfs")
 		if st, err := os.Stat(liveRootFS); err == nil && st.IsDir() {
-			return liveRootFS, nil
+			return filepath.Join(hostTaskRoot, entry.Name(), "rootfs"), nil
 		} else if err != nil && !os.IsNotExist(err) {
 			return "", fmt.Errorf("inspect live rootfs %s: %w", liveRootFS, err)
 		}

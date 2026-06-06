@@ -39,6 +39,7 @@ var (
 	criEndpoint            = "/host-run/containerd/containerd.sock"
 	containerdEndpoint     = "/host-run/containerd/containerd.sock"
 	containerdRoot         = "/host-run/containerd"
+	containerdHostRoot     = "/run/containerd"
 	containerdNamespace    = "k8s.io"
 	procRoot               = "/proc"
 	nodeName               = os.Getenv("NODE_NAME")
@@ -60,6 +61,7 @@ func main() {
 	flag.StringVar(&criEndpoint, "cri-endpoint", "/host-run/containerd/containerd.sock", "host CRI socket used to read pod sandbox stats")
 	flag.StringVar(&containerdEndpoint, "containerd-endpoint", "/host-run/containerd/containerd.sock", "host containerd socket used for rootfs diff/apply")
 	flag.StringVar(&containerdRoot, "containerd-root", "/host-run/containerd", "host containerd runtime root mounted into ctld")
+	flag.StringVar(&containerdHostRoot, "containerd-host-root", "/run/containerd", "host containerd runtime root path used in containerd mount requests")
 	flag.StringVar(&containerdNamespace, "containerd-namespace", "k8s.io", "containerd namespace used by Kubernetes")
 	flag.StringVar(&procRoot, "proc-root", "/proc", "host proc root used to inspect sandbox processes")
 	flag.StringVar(&nodeName, "node-name", os.Getenv("NODE_NAME"), "current node name used to validate local sandbox ownership")
@@ -221,6 +223,7 @@ func buildRootFSController(storageCfg *apiconfig.StorageProxyConfig, resolver *c
 			CRIEndpoint:        criEndpoint,
 			ContainerdEndpoint: containerdEndpoint,
 			ContainerdRoot:     containerdRoot,
+			ContainerdHostRoot: containerdHostRoot,
 			Namespace:          containerdNamespace,
 		}),
 		Store:    store,

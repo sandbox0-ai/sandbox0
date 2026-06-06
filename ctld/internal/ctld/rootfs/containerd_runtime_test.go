@@ -124,6 +124,7 @@ func TestResolveContainerIDReturnsNotFound(t *testing.T) {
 
 func TestFindLiveRootFSByTaskAnnotations(t *testing.T) {
 	taskRoot := t.TempDir()
+	hostTaskRoot := filepath.Join(string(filepath.Separator), "run", "containerd", "io.containerd.runtime.v2.task", "k8s.io")
 	writeTaskConfig(t, filepath.Join(taskRoot, "wrong"), map[string]string{
 		"io.kubernetes.cri.container-type":    "container",
 		"io.kubernetes.cri.container-name":    "procd",
@@ -141,7 +142,7 @@ func TestFindLiveRootFSByTaskAnnotations(t *testing.T) {
 	})
 	require.NoError(t, os.Mkdir(filepath.Join(wantTask, "rootfs"), 0o755))
 
-	got, err := findLiveRootFSByTaskAnnotations(taskRoot, ctldapi.RootFSInfo{
+	got, err := findLiveRootFSByTaskAnnotations(taskRoot, hostTaskRoot, ctldapi.RootFSInfo{
 		ContainerName: "procd",
 		PodNamespace:  "tpl-default",
 		PodName:       "pod-1",
@@ -149,7 +150,24 @@ func TestFindLiveRootFSByTaskAnnotations(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(wantTask, "rootfs"), got)
+	assert.Equal(t, filepath.Join(hostTaskRoot, "task-1", "rootfs"), got)
+}
+
+func TestLiveRootFSPathMapsMountedRootToHostRoot(t *testing.T) {
+	containerdRoot := t.TempDir()
+	containerdHostRoot := filepath.Join(string(filepath.Separator), "run", "containerd")
+	containerID := "container-1"
+	require.NoError(t, os.MkdirAll(filepath.Join(containerdRoot, "io.containerd.runtime.v2.task", "k8s.io", containerID, "rootfs"), 0o755))
+
+	got, err := liveRootFSPath(containerdRoot, containerdHostRoot, "k8s.io", ctldapi.RootFSInfo{
+		ContainerID:   containerID,
+		ContainerName: "procd",
+		PodNamespace:  "tpl-default",
+		PodName:       "pod-1",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(containerdHostRoot, "io.containerd.runtime.v2.task", "k8s.io", containerID, "rootfs"), got)
 }
 
 func TestDigestFromReference(t *testing.T) {

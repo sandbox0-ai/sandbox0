@@ -226,3 +226,23 @@ func TestCleanupDeletedSandboxDoesNotMarkCleanedWhenFilesystemOwnerReleaseFails(
 		t.Fatalf("status = %q, want running", got)
 	}
 }
+
+func TestCleanupDeletedSandboxDoesNotDeleteFilesystemWhenOwnerReleaseFails(t *testing.T) {
+	filesystems := &recordingSandboxFilesystemStore{releaseErr: errors.New("release failed")}
+	svc := &SandboxService{sandboxFilesystemStore: filesystems}
+
+	err := svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
+		SandboxID:         "sandbox-a",
+		FilesystemID:      "fs-a",
+		RuntimeGeneration: 3,
+	})
+	if err == nil {
+		t.Fatal("CleanupDeletedSandbox() error = nil, want release failure")
+	}
+	if len(filesystems.releaseReqs) != 1 {
+		t.Fatalf("release requests = %d, want 1", len(filesystems.releaseReqs))
+	}
+	if len(filesystems.deleteReqs) != 0 {
+		t.Fatalf("delete requests = %d, want 0", len(filesystems.deleteReqs))
+	}
+}

@@ -37,7 +37,7 @@ type ClaimRequest struct {
 	TeamID       string
 	UserID       string
 	Template     string         `json:"template"`
-	FilesystemID string         `json:"-"`
+	FilesystemID string         `json:"filesystem_id,omitempty"`
 	Config       *SandboxConfig `json:"config,omitempty"`
 	Mounts       []ClaimMount   `json:"mounts,omitempty"`
 	Metadata     *ClaimMetadata `json:"-"`
@@ -47,9 +47,6 @@ type ClaimRequest struct {
 	// FilesystemBaseImageDigest is authoritative when set. It keeps restore from
 	// silently rebasing an existing filesystem onto a moved image tag.
 	FilesystemBaseImageDigest string `json:"-"`
-	// FilesystemLifecycleOwnerSandboxID ties the root filesystem lifecycle to
-	// the sandbox. It is internal runtime metadata, not public API.
-	FilesystemLifecycleOwnerSandboxID string `json:"-"`
 	// SandboxID is an internal stable ID used when recreating an existing sandbox.
 	SandboxID string `json:"-"`
 	// RuntimeGeneration identifies the current runtime pod incarnation.
@@ -261,7 +258,6 @@ func (s *SandboxService) ensureClaimFilesystem(req *ClaimRequest, template *v1al
 	if req.FilesystemID == "" {
 		req.FilesystemID = "fs-" + uuid.NewString()
 	}
-	req.FilesystemLifecycleOwnerSandboxID = strings.TrimSpace(req.SandboxID)
 	if req.FilesystemBaseImageRef == "" && template != nil {
 		req.FilesystemBaseImageRef = strings.TrimSpace(template.Spec.MainContainer.Image)
 	}

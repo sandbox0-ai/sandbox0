@@ -110,7 +110,6 @@ func TestClaimRequestDoesNotAcceptRuntimeMetadataFromJSON(t *testing.T) {
 	var req ClaimRequest
 	if err := json.Unmarshal([]byte(`{
 		"template":"template-a",
-		"filesystem_id":"fs-public-input",
 		"metadata":{
 			"owner_kind":"managed-agent"
 		}
@@ -120,9 +119,6 @@ func TestClaimRequestDoesNotAcceptRuntimeMetadataFromJSON(t *testing.T) {
 	if req.Metadata != nil {
 		t.Fatalf("metadata = %#v, want nil for public JSON input", req.Metadata)
 	}
-	if req.FilesystemID != "" {
-		t.Fatalf("filesystem_id = %q, want empty for public JSON input", req.FilesystemID)
-	}
 }
 
 func TestEnsureClaimFilesystemCreatesIDAndRecordsBaseImage(t *testing.T) {
@@ -131,7 +127,7 @@ func TestEnsureClaimFilesystemCreatesIDAndRecordsBaseImage(t *testing.T) {
 			MainContainer: v1alpha1.ContainerSpec{Image: "ubuntu@sha256:abc"},
 		},
 	}
-	req := &ClaimRequest{SandboxID: "sandbox-a"}
+	req := &ClaimRequest{}
 	svc := &SandboxService{}
 
 	if err := svc.ensureClaimFilesystem(req, template); err != nil {
@@ -145,24 +141,6 @@ func TestEnsureClaimFilesystemCreatesIDAndRecordsBaseImage(t *testing.T) {
 	}
 	if req.FilesystemBaseImageDigest != "sha256:abc" {
 		t.Fatalf("filesystem base image digest = %q, want sha256:abc", req.FilesystemBaseImageDigest)
-	}
-	if req.FilesystemLifecycleOwnerSandboxID != "sandbox-a" {
-		t.Fatalf("filesystem lifecycle owner = %q, want sandbox-a", req.FilesystemLifecycleOwnerSandboxID)
-	}
-}
-
-func TestEnsureClaimFilesystemKeepsInternalFilesystemSandboxOwned(t *testing.T) {
-	req := &ClaimRequest{SandboxID: "sandbox-a", FilesystemID: "fs-existing"}
-	svc := &SandboxService{}
-
-	if err := svc.ensureClaimFilesystem(req, nil); err != nil {
-		t.Fatalf("ensureClaimFilesystem() error = %v", err)
-	}
-	if req.FilesystemID != "fs-existing" {
-		t.Fatalf("filesystem_id = %q, want fs-existing", req.FilesystemID)
-	}
-	if req.FilesystemLifecycleOwnerSandboxID != "sandbox-a" {
-		t.Fatalf("filesystem lifecycle owner = %q, want sandbox-a", req.FilesystemLifecycleOwnerSandboxID)
 	}
 }
 

@@ -3716,6 +3716,9 @@ components:
       properties:
         template:
           type: string
+        filesystem_id:
+          type: string
+          description: Optional durable sandbox root filesystem ID. When omitted, Sandbox0 creates a new filesystem ID for the sandbox.
         config:
           $ref: "#/components/schemas/SandboxConfig"
         mounts:

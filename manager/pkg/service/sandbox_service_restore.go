@@ -51,14 +51,10 @@ func (s *SandboxService) RestoreCleanedSandboxRuntime(ctx context.Context, sandb
 			TeamID:            locked.TeamID,
 			UserID:            locked.UserID,
 			Template:          locked.TemplateID,
-			FilesystemID:      locked.FilesystemID,
 			Config:            &locked.Config,
 			Mounts:            locked.Mounts,
 			SandboxID:         locked.ID,
 			RuntimeGeneration: generation,
-		}
-		if err := s.ensureClaimFilesystem(req, template); err != nil {
-			return err
 		}
 		pod, err = s.claimIdlePod(lockCtx, template, req)
 		if err != nil {
@@ -111,14 +107,10 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 		TeamID:            record.TeamID,
 		UserID:            record.UserID,
 		Template:          record.TemplateID,
-		FilesystemID:      record.FilesystemID,
 		Config:            &record.Config,
 		Mounts:            record.Mounts,
 		SandboxID:         record.ID,
 		RuntimeGeneration: record.RuntimeGeneration + 1,
-	}
-	if err := s.ensureClaimFilesystem(req, template); err != nil {
-		return err
 	}
 	if _, err := s.bindVolumePortals(ctx, pod, req, template); err != nil {
 		return fmt.Errorf("bind volume portals: %w", err)

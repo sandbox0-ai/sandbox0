@@ -598,25 +598,19 @@ type ClaimMountRequest struct {
 
 // ClaimRequest defines model for ClaimRequest.
 type ClaimRequest struct {
-	Config *SandboxConfig `json:"config,omitempty"`
-
-	// FilesystemId Optional durable sandbox root filesystem ID. When omitted, Sandbox0 creates a new filesystem ID for the sandbox.
-	FilesystemId *string              `json:"filesystem_id,omitempty"`
-	Mounts       *[]ClaimMountRequest `json:"mounts,omitempty"`
-	Template     *string              `json:"template,omitempty"`
+	Config   *SandboxConfig       `json:"config,omitempty"`
+	Mounts   *[]ClaimMountRequest `json:"mounts,omitempty"`
+	Template *string              `json:"template,omitempty"`
 }
 
 // ClaimResponse defines model for ClaimResponse.
 type ClaimResponse struct {
-	BootstrapMounts *[]MountStatus `json:"bootstrap_mounts,omitempty"`
-	ClusterId       *string        `json:"cluster_id"`
-
-	// FilesystemId Durable sandbox root filesystem ID bound to this sandbox.
-	FilesystemId *string                `json:"filesystem_id,omitempty"`
-	PodName      string                 `json:"pod_name"`
-	SandboxId    string                 `json:"sandbox_id"`
-	Status       SandboxLifecycleStatus `json:"status"`
-	Template     string                 `json:"template"`
+	BootstrapMounts *[]MountStatus         `json:"bootstrap_mounts,omitempty"`
+	ClusterId       *string                `json:"cluster_id"`
+	PodName         string                 `json:"pod_name"`
+	SandboxId       string                 `json:"sandbox_id"`
+	Status          SandboxLifecycleStatus `json:"status"`
+	Template        string                 `json:"template"`
 }
 
 // ContainerSpec defines model for ContainerSpec.
@@ -1441,9 +1435,6 @@ type Sandbox struct {
 	// ExpiresAt Soft expiration timestamp. Zero value means not set.
 	ExpiresAt time.Time `json:"expires_at"`
 
-	// FilesystemId Durable sandbox root filesystem ID bound to this sandbox.
-	FilesystemId *string `json:"filesystem_id,omitempty"`
-
 	// HardExpiresAt Hard expiration timestamp. Zero value means not set.
 	HardExpiresAt time.Time              `json:"hard_expires_at"`
 	Id            string                 `json:"id"`
@@ -1683,12 +1674,9 @@ type SandboxServicesUpdateRequest struct {
 
 // SandboxStatus defines model for SandboxStatus.
 type SandboxStatus struct {
-	ClaimedAt *string `json:"claimed_at,omitempty"`
-	CreatedAt *string `json:"created_at,omitempty"`
-	ExpiresAt *string `json:"expires_at,omitempty"`
-
-	// FilesystemId Durable sandbox root filesystem ID bound to this sandbox.
-	FilesystemId  *string                 `json:"filesystem_id,omitempty"`
+	ClaimedAt     *string                 `json:"claimed_at,omitempty"`
+	CreatedAt     *string                 `json:"created_at,omitempty"`
+	ExpiresAt     *string                 `json:"expires_at,omitempty"`
 	HardExpiresAt *string                 `json:"hard_expires_at,omitempty"`
 	PodName       *string                 `json:"pod_name,omitempty"`
 	SandboxId     *string                 `json:"sandbox_id,omitempty"`
@@ -1704,9 +1692,6 @@ type SandboxSummary struct {
 	ClusterId *string   `json:"cluster_id"`
 	CreatedAt time.Time `json:"created_at"`
 	ExpiresAt time.Time `json:"expires_at"`
-
-	// FilesystemId Durable sandbox root filesystem ID bound to this sandbox.
-	FilesystemId *string `json:"filesystem_id,omitempty"`
 
 	// HardExpiresAt Hard expiration timestamp. Zero value means not set.
 	HardExpiresAt time.Time              `json:"hard_expires_at"`

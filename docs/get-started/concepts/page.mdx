@@ -24,8 +24,8 @@ The key idea is separation of concerns:
 A common confusion is mixing compute state and durable state.
 
 - Process state lives in the sandbox runtime and disappears when the runtime is paused or deleted.
-- Sandbox0 restores the writable root filesystem checkpoint for paused sandboxes, so files written outside mounted volumes can survive pause/resume for the same sandbox identity.
-- Durable state that needs snapshots, sharing, or recovery outside the sandbox identity should be written to volumes or external systems.
+- Sandbox0 restores the writable root filesystem checkpoint for paused sandboxes, so files written outside mounted volumes survive pause/resume for the same sandbox identity.
+- Durable state that must survive sandbox delete or `hard_ttl`, needs snapshots, or needs sharing outside the sandbox identity should be written to volumes or external systems.
 - If your agent must recover after failures or redeploys, treat sandbox runtime as ephemeral and volumes as the source of truth.
 
 <Callout variant="info">
@@ -80,7 +80,7 @@ This keeps each agent worker simple while allowing safe parallel execution.
 
 ## Common Pitfalls
 
-- Treating sandbox filesystem as permanent storage.
+- Treating the sandbox root filesystem as permanent storage after sandbox delete or `hard_ttl`.
 - Using a single long-lived sandbox for unrelated tasks.
 - Skipping checkpoint persistence until task end.
 - Over-permissive auth/network settings in early prototypes that leak into production.

@@ -2,6 +2,8 @@
 
 Manage files and directories within a sandbox. The Files API provides full POSIX file operations including read, write, delete, move, and real-time file watching.
 
+Files written to the sandbox writable filesystem are restored across checkpointed pause/resume for the same sandbox identity. They are deleted when the sandbox is deleted or `hard_ttl` expires. Use [Volumes](/docs/volume) for data that must outlive a sandbox identity, needs snapshots, or must be shared across sandboxes.
+
 ## File Model
 
 ### FileInfo

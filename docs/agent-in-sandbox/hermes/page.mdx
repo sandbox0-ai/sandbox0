@@ -6,122 +6,385 @@ The builtin `hermes` template uses the upstream Hermes image and declares `/opt/
 
 ## Create The Sandbox
 
-This flow creates a Hermes data volume, claims a sandbox from the builtin template, and exposes the API server through a `cmd` service. It leaves `ttl` and `hard_ttl` unset.
+Create a SandboxVolume, claim the builtin `hermes` template, mount the volume, and expose the Hermes API server as a `cmd` Sandbox Service. The example leaves `ttl` and `hard_ttl` unset.
+
+Set one Hermes API key and one Sandbox0 route token before running the SDK examples:
 
 ```bash
-export SANDBOX0_BASE_URL="${SANDBOX0_BASE_URL:-https://api.sandbox0.ai}"
 export HERMES_API_SERVER_KEY="$(openssl rand -hex 32)"
 export HERMES_ROUTE_TOKEN="$(openssl rand -hex 32)"
-export HERMES_ROUTE_TOKEN_SHA256="$(printf '%s' "$HERMES_ROUTE_TOKEN" | sha256sum | awk '{print $1}')"
+```
 
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `package main
+
+import (
+    "context"
+    "crypto/sha256"
+    "encoding/hex"
+    "fmt"
+    "log"
+    "os"
+
+    sandbox0 "github.com/sandbox0-ai/sdk-go"
+    "github.com/sandbox0-ai/sdk-go/pkg/apispec"
+)
+
+func main() {
+    ctx := context.Background()
+    opts := []sandbox0.Option{sandbox0.WithToken(mustEnv("SANDBOX0_TOKEN"))}
+    if baseURL := os.Getenv("SANDBOX0_BASE_URL"); baseURL != "" {
+        opts = append(opts, sandbox0.WithBaseURL(baseURL))
+    }
+
+    client, err := sandbox0.NewClient(opts...)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    routeHash := sha256.Sum256([]byte(mustEnv("HERMES_ROUTE_TOKEN")))
+    volume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{
+        AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWO),
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    command := "set -eu\\n" +
+        "mkdir -p /workspace/.hermes /opt/data\\n" +
+        "cp -R /opt/data/. /workspace/.hermes/ 2>/dev/null || true\\n" +
+        "rm -f /workspace/.hermes/gateway.lock /workspace/.hermes/gateway.pid\\n" +
+        "chown -R hermes:hermes /workspace/.hermes\\n" +
+        "sync_back() { mkdir -p /opt/data; cp -R /workspace/.hermes/. /opt/data/ 2>/dev/null || true; }\\n" +
+        "/opt/hermes/bin/hermes gateway run --no-supervise &\\n" +
+        "child=\\\"$!\\\"\\n" +
+        "trap 'kill -TERM \\\"$child\\\" 2>/dev/null || true; wait \\\"$child\\\" 2>/dev/null || true; sync_back; exit 143' TERM INT\\n" +
+        "wait \\\"$child\\\"\\n" +
+        "status=\\\"$?\\\"\\n" +
+        "sync_back\\n" +
+        "exit \\\"$status\\\""
+
+    sandbox, err := client.ClaimSandbox(ctx, "hermes",
+        sandbox0.WithSandboxBootstrapMount(volume.ID, "/opt/data"),
+        sandbox0.WithSandboxAutoResume(true),
+        sandbox0.WithSandboxEnvVars(map[string]string{
+            "HERMES_HOME":         "/workspace/.hermes",
+            "HERMES_PERSIST_HOME": "/opt/data",
+            "HOME":                "/workspace/.hermes",
+            "API_SERVER_ENABLED":  "true",
+            "API_SERVER_HOST":     "0.0.0.0",
+            "API_SERVER_PORT":     "8642",
+            "API_SERVER_KEY":      mustEnv("HERMES_API_SERVER_KEY"),
+        }),
+        sandbox0.WithSandboxServices([]apispec.SandboxAppService{
+            {
+                ID:   "gateway",
+                Port: apispec.NewOptInt32(8642),
+                Runtime: apispec.NewOptSandboxAppServiceRuntime(apispec.SandboxAppServiceRuntime{
+                    Type:    apispec.SandboxAppServiceRuntimeTypeCmd,
+                    Command: []string{"sh", "-lc", command},
+                }),
+                HealthCheck: apispec.NewOptSandboxAppServiceHealth(apispec.SandboxAppServiceHealth{
+                    Path: apispec.NewOptString("/health"),
+                }),
+                Ingress: apispec.SandboxAppServiceIngress{
+                    Public: true,
+                    Routes: []apispec.SandboxAppServiceRoute{
+                        {
+                            ID:             "gateway",
+                            PathPrefix:     apispec.NewOptString("/"),
+                            Methods:        []string{"GET", "POST"},
+                            TimeoutSeconds: apispec.NewOptInt32(60),
+                            Resume:         true,
+                            Auth: apispec.NewOptSandboxAppServiceRouteAuth(apispec.SandboxAppServiceRouteAuth{
+                                Mode:              apispec.SandboxAppServiceRouteAuthModeBearer,
+                                BearerTokenSHA256: apispec.NewOptString(hex.EncodeToString(routeHash[:])),
+                            }),
+                        },
+                    },
+                },
+            },
+        }),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    services, err := sandbox.GetServices(ctx)
+    if err != nil {
+        log.Fatal(err)
+    }
+    for _, service := range services.Services {
+        if service.ID == "gateway" {
+            fmt.Printf("SANDBOX_ID=%s\\n", sandbox.ID)
+            fmt.Printf("HERMES_PUBLIC_URL=%s\\n", service.PublicURL.Or(""))
+        }
+    }
+}
+
+func mustEnv(key string) string {
+    value := os.Getenv(key)
+    if value == "" {
+        log.Fatalf("%s is required", key)
+    }
+    return value
+}`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from hashlib import sha256
+import os
+from textwrap import dedent
+
+from sandbox0 import Client
+from sandbox0.apispec.models.claim_mount_request import ClaimMountRequest
+from sandbox0.apispec.models.create_sandbox_volume_request import CreateSandboxVolumeRequest
+from sandbox0.apispec.models.sandbox_config import SandboxConfig
+
+client = Client(
+    token=os.environ["SANDBOX0_TOKEN"],
+    base_url=os.environ.get("SANDBOX0_BASE_URL", "https://api.sandbox0.ai"),
+)
+
+route_hash = sha256(os.environ["HERMES_ROUTE_TOKEN"].encode()).hexdigest()
+volume = client.volumes.create(CreateSandboxVolumeRequest.from_dict({
+    "access_mode": "RWO",
+}))
+
+command = dedent("""
+    set -eu
+    mkdir -p /workspace/.hermes /opt/data
+    cp -R /opt/data/. /workspace/.hermes/ 2>/dev/null || true
+    rm -f /workspace/.hermes/gateway.lock /workspace/.hermes/gateway.pid
+    chown -R hermes:hermes /workspace/.hermes
+    sync_back() { mkdir -p /opt/data; cp -R /workspace/.hermes/. /opt/data/ 2>/dev/null || true; }
+    /opt/hermes/bin/hermes gateway run --no-supervise &
+    child="$!"
+    trap 'kill -TERM "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; sync_back; exit 143' TERM INT
+    wait "$child"
+    status="$?"
+    sync_back
+    exit "$status"
+""").strip()
+
+sandbox = client.sandboxes.claim(
+    "hermes",
+    mounts=[ClaimMountRequest(
+        sandboxvolume_id=volume.id,
+        mount_point="/opt/data",
+    )],
+    config=SandboxConfig.from_dict({
+        "auto_resume": True,
+        "env_vars": {
+            "HERMES_HOME": "/workspace/.hermes",
+            "HERMES_PERSIST_HOME": "/opt/data",
+            "HOME": "/workspace/.hermes",
+            "API_SERVER_ENABLED": "true",
+            "API_SERVER_HOST": "0.0.0.0",
+            "API_SERVER_PORT": "8642",
+            "API_SERVER_KEY": os.environ["HERMES_API_SERVER_KEY"],
+        },
+        "services": [{
+            "id": "gateway",
+            "port": 8642,
+            "runtime": {
+                "type": "cmd",
+                "command": ["sh", "-lc", command],
+            },
+            "health_check": {"path": "/health"},
+            "ingress": {
+                "public": True,
+                "routes": [{
+                    "id": "gateway",
+                    "path_prefix": "/",
+                    "methods": ["GET", "POST"],
+                    "auth": {
+                        "mode": "bearer",
+                        "bearer_token_sha256": route_hash,
+                    },
+                    "timeout_seconds": 60,
+                    "resume": True,
+                }],
+            },
+        }],
+    }),
+)
+
+services = sandbox.get_services().services
+public_url = next(s.public_url for s in services if s.id == "gateway")
+print("SANDBOX_ID=" + sandbox.id)
+print("HERMES_PUBLIC_URL=" + public_url)`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `import { createHash } from "node:crypto";
+import { Client, models } from "sandbox0";
+
+const token = process.env.SANDBOX0_TOKEN;
+const apiKey = process.env.HERMES_API_SERVER_KEY;
+const routeToken = process.env.HERMES_ROUTE_TOKEN;
+if (!token || !apiKey || !routeToken) {
+    throw new Error("SANDBOX0_TOKEN, HERMES_API_SERVER_KEY, and HERMES_ROUTE_TOKEN are required");
+}
+
+const client = new Client({
+    token,
+    baseUrl: process.env.SANDBOX0_BASE_URL || "https://api.sandbox0.ai",
+});
+
+const volume = await client.volumes.create({
+    accessMode: models.VolumeAccessMode.Rwo,
+});
+
+const command = [
+    "set -eu",
+    "mkdir -p /workspace/.hermes /opt/data",
+    "cp -R /opt/data/. /workspace/.hermes/ 2>/dev/null || true",
+    "rm -f /workspace/.hermes/gateway.lock /workspace/.hermes/gateway.pid",
+    "chown -R hermes:hermes /workspace/.hermes",
+    "sync_back() { mkdir -p /opt/data; cp -R /workspace/.hermes/. /opt/data/ 2>/dev/null || true; }",
+    "/opt/hermes/bin/hermes gateway run --no-supervise &",
+    "child=\\"$!\\"",
+    "trap 'kill -TERM \\"$child\\" 2>/dev/null || true; wait \\"$child\\" 2>/dev/null || true; sync_back; exit 143' TERM INT",
+    "wait \\"$child\\"",
+    "status=\\"$?\\"",
+    "sync_back",
+    "exit \\"$status\\"",
+].join("\\n");
+
+const sandbox = await client.sandboxes.claim("hermes", {
+    mounts: [{
+        sandboxvolumeId: volume.id,
+        mountPoint: "/opt/data",
+    }],
+    config: {
+        autoResume: true,
+        envVars: {
+            HERMES_HOME: "/workspace/.hermes",
+            HERMES_PERSIST_HOME: "/opt/data",
+            HOME: "/workspace/.hermes",
+            API_SERVER_ENABLED: "true",
+            API_SERVER_HOST: "0.0.0.0",
+            API_SERVER_PORT: "8642",
+            API_SERVER_KEY: apiKey,
+        },
+        services: [{
+            id: "gateway",
+            port: 8642,
+            runtime: {
+                type: "cmd",
+                command: ["sh", "-lc", command],
+            },
+            healthCheck: { path: "/health" },
+            ingress: {
+                _public: true,
+                routes: [{
+                    id: "gateway",
+                    pathPrefix: "/",
+                    methods: ["GET", "POST"],
+                    auth: {
+                        mode: "bearer",
+                        bearerTokenSha256: createHash("sha256").update(routeToken).digest("hex"),
+                    },
+                    timeoutSeconds: 60,
+                    resume: true,
+                }],
+            },
+        }],
+    },
+});
+
+const services = await sandbox.getServices();
+const gateway = services.services.find((service) => service.id === "gateway");
+console.log("SANDBOX_ID=" + sandbox.id);
+console.log("HERMES_PUBLIC_URL=" + (gateway?.publicUrl || ""));`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `# The CLI can claim the builtin template and mount the volume.
+# Use one of the SDK tabs to attach the gateway service route.
 HERMES_VOLUME_ID="$(
-    curl -fsS "$SANDBOX0_BASE_URL/api/v1/sandboxvolumes" \
-        -H "authorization: Bearer $SANDBOX0_TOKEN" \
-        -H "content-type: application/json" \
-        -d '{"access_mode":"RWO"}' \
-        | jq -r '.data.id'
+    s0 -o json volume create --access-mode RWO \\
+        | jq -r '.ID // .id'
 )"
 
-cat > hermes-sandbox.yaml <<EOF
-template: hermes
-mounts:
-    - sandboxvolume_id: "$HERMES_VOLUME_ID"
-      mount_point: /opt/data
-config:
-    auto_resume: true
-    env_vars:
-        HERMES_HOME: /workspace/.hermes
-        HERMES_PERSIST_HOME: /opt/data
-        HOME: /workspace/.hermes
-        API_SERVER_ENABLED: "true"
-        API_SERVER_HOST: 0.0.0.0
-        API_SERVER_PORT: "8642"
-        API_SERVER_KEY: "$HERMES_API_SERVER_KEY"
-    services:
-        - id: gateway
-          port: 8642
-          runtime:
-              type: cmd
-              command:
-                  - sh
-                  - -lc
-                  - |
-                      set -eu
-                      HERMES_HOME="\${HERMES_HOME:-/workspace/.hermes}"
-                      HERMES_PERSIST_HOME="\${HERMES_PERSIST_HOME:-/opt/data}"
-                      export HERMES_HOME HERMES_PERSIST_HOME HOME="\$HERMES_HOME"
-                      mkdir -p "\$HERMES_HOME" "\$HERMES_PERSIST_HOME"
-                      cp -R "\$HERMES_PERSIST_HOME"/. "\$HERMES_HOME"/ 2>/dev/null || true
-                      rm -f "\$HERMES_HOME/gateway.lock" "\$HERMES_HOME/gateway.pid"
-                      chown -R hermes:hermes "\$HERMES_HOME"
-                      sync_back() {
-                          mkdir -p "\$HERMES_PERSIST_HOME"
-                          cp -R "\$HERMES_HOME"/. "\$HERMES_PERSIST_HOME"/ 2>/dev/null || true
-                      }
-                      /opt/hermes/bin/hermes gateway run --no-supervise &
-                      child="\$!"
-                      trap 'kill -TERM "\$child" 2>/dev/null || true; wait "\$child" 2>/dev/null || true; sync_back; exit 143' TERM INT
-                      wait "\$child"
-                      status="\$?"
-                      sync_back
-                      exit "\$status"
-          health_check:
-              path: /health
-          ingress:
-              public: true
-              routes:
-                  - id: gateway
-                    path_prefix: /
-                    methods: [GET, POST]
-                    auth:
-                        mode: bearer
-                        bearer_token_sha256: "$HERMES_ROUTE_TOKEN_SHA256"
-                    timeout_seconds: 60
-                    resume: true
-EOF
+SANDBOX_ID="$(
+    s0 -o json sandbox create \\
+        --template hermes \\
+        --mount "$HERMES_VOLUME_ID:/opt/data" \\
+        | jq -r '.ID // .id'
+)"
 
-SANDBOX_ID="$(s0 -o json sandbox create -f hermes-sandbox.yaml | jq -r '.ID // .id')"
-echo "$SANDBOX_ID"
-```
+s0 sandbox get "$SANDBOX_ID"`
+    }
+  ]}
+/>
 
 Sandbox0 starts Hermes through `procd`, so the example runs the Hermes binary directly instead of relying on the Docker image entrypoint. Hermes keeps its active runtime home on `/workspace/.hermes` and syncs it with the persistent `/opt/data` volume when the process exits.
 
 ## Use The Public URL
 
-Fetch the service details and call the health endpoint.
+Call the health endpoint through the returned `HERMES_PUBLIC_URL`:
 
 ```bash
-HERMES_PUBLIC_URL="$(
-    s0 -o json sandbox service get -s "$SANDBOX_ID" \
-        | jq -r '(.Services // .services)[] | select((.ID // .id) == "gateway") | (.PublicURL // .public_url)'
-)"
-
 curl -fsS "$HERMES_PUBLIC_URL/health" \
     -H "authorization: Bearer $HERMES_ROUTE_TOKEN"
 ```
 
-Use the returned service `public_url` as `HERMES_PUBLIC_URL`. Requests that use the Hermes API server should also send the Hermes API server key according to the Hermes API server contract.
+Requests that use the Hermes API server should also send the Hermes API server key according to the Hermes API server contract.
 
 ## Pause And Resume
 
-The sandbox can be paused manually:
+Manual pause frees the runtime pod. A later public request can resume the sandbox because the sandbox has `auto_resume: true` and the route has `resume: true`.
 
-```bash
-s0 sandbox pause "$SANDBOX_ID"
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `_, err := client.PauseSandbox(ctx, sandbox.ID)
+if err != nil {
+    log.Fatal(err)
+}
 
-until [ "$(
-    curl -fsS "$SANDBOX0_BASE_URL/api/v1/sandboxes/$SANDBOX_ID" \
-        -H "authorization: Bearer $SANDBOX0_TOKEN" \
-        | jq -r '.data.status'
-)" = "paused" ]; do
-    sleep 1
-done
+_, err = client.ResumeSandbox(ctx, sandbox.ID)
+if err != nil {
+    log.Fatal(err)
+}`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `client.sandboxes.pause(sandbox.id)
+client.sandboxes.resume(sandbox.id)`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `await client.sandboxes.pause(sandbox.id);
+await client.sandboxes.resume(sandbox.id);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox pause "$SANDBOX_ID"
+s0 sandbox resume "$SANDBOX_ID"
 
-curl -fsS "$HERMES_PUBLIC_URL/health" \
-    -H "authorization: Bearer $HERMES_ROUTE_TOKEN"
-```
+# Or let the public route resume it:
+curl -fsS "$HERMES_PUBLIC_URL/health" \\
+    -H "authorization: Bearer $HERMES_ROUTE_TOKEN"`
+    }
+  ]}
+/>
 
-The request can resume the sandbox because the sandbox has `auto_resume: true` and the route has `resume: true`. Sandbox0 starts a new runtime pod and then starts the `cmd` service again. Hermes state under `/opt/data` remains on the mounted volume.
+Hermes state under `/opt/data` remains on the mounted volume. Running processes, sockets, memory, and in-flight requests are not preserved across pause/resume.
 
 <Callout variant="warning">
 Paused sandboxes cannot receive outbound long-polling, WebSocket, or cron events. Put message webhooks and schedulers in an always-on control plane that calls the Sandbox0 service URL, or keep the sandbox running for workflows that must listen continuously.

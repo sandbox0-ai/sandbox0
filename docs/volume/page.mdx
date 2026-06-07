@@ -4,7 +4,7 @@ Volume provides persistent storage for Sandbox0. It is a storage unit independen
 
 ## Why Volumes?
 
-The default Sandbox filesystem is ephemeral—when a Sandbox is deleted, all its data is lost. Volumes solve this problem:
+The default Sandbox writable filesystem is checkpointed across pause/resume for the same Sandbox identity. It is not independent long-term storage: when the Sandbox is deleted or `hard_ttl` expires, the identity and rootfs checkpoints are deleted too. Volumes solve the cases where data must outlive one Sandbox identity or be shared across Sandboxes:
 
 - **Data Persistence**: Store data that needs long-term retention, such as databases, model files, and user uploads
 - **Cross-Sandbox Sharing**: Mount the same Volume to multiple Sandboxes for data sharing

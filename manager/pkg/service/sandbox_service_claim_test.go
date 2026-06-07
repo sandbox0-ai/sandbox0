@@ -150,6 +150,50 @@ func TestClaimIdlePodAppliesRuntimeOwnerMetadata(t *testing.T) {
 	assertClaimOwnerMetadata(t, pod)
 }
 
+func TestClaimIdlePodUsesAbsoluteHardExpiresAtOverride(t *testing.T) {
+	now := time.Date(2026, time.March, 7, 12, 0, 0, 0, time.UTC)
+	hardExpiresAt := now.Add(30 * time.Minute)
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+	}
+	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
+
+	client := fake.NewSimpleClientset(readyPod.DeepCopy())
+	svc := &SandboxService{
+		k8sClient: client,
+		podLister: newClaimTestPodLister(t, readyPod),
+		clock:     fixedClock{now: now},
+		logger:    zap.NewNop(),
+	}
+
+	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{
+		TeamID:        "team-a",
+		UserID:        "user-a",
+		Config:        &SandboxConfig{HardTTL: int32Ptr(3600)},
+		HardExpiresAt: hardExpiresAt,
+	})
+	if err != nil {
+		t.Fatalf("claimIdlePod() error = %v", err)
+	}
+	if pod == nil {
+		t.Fatal("claimIdlePod() = nil, want ready pod")
+	}
+	if got := pod.Annotations[controller.AnnotationHardExpiresAt]; got != hardExpiresAt.Format(time.RFC3339) {
+		t.Fatalf("hard-expires-at annotation = %q, want %q", got, hardExpiresAt.Format(time.RFC3339))
+	}
+
+	var cfg SandboxConfig
+	if err := json.Unmarshal([]byte(pod.Annotations[controller.AnnotationConfig]), &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if cfg.HardTTL == nil || *cfg.HardTTL != 3600 {
+		t.Fatalf("config hard_ttl = %v, want 3600", cfg.HardTTL)
+	}
+}
+
 func TestClaimIdlePodRequiresCurrentTemplateHash(t *testing.T) {
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
@@ -461,6 +505,50 @@ func TestCreateNewPodAppliesRuntimeOwnerMetadata(t *testing.T) {
 		t.Fatalf("createNewPod() error = %v", err)
 	}
 	assertClaimOwnerMetadata(t, pod)
+}
+
+func TestCreateNewPodUsesAbsoluteHardExpiresAtOverride(t *testing.T) {
+	withClaimTestPublicKey(t)
+
+	now := time.Date(2026, time.March, 7, 12, 0, 0, 0, time.UTC)
+	hardExpiresAt := now.Add(30 * time.Minute)
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{Image: "busybox"},
+		},
+	}
+	client := fake.NewSimpleClientset()
+	svc := &SandboxService{
+		k8sClient:    client,
+		secretLister: newClaimTestSecretLister(t),
+		clock:        fixedClock{now: now},
+		logger:       zap.NewNop(),
+	}
+
+	pod, err := svc.createNewPod(context.Background(), template, &ClaimRequest{
+		TeamID:        "team-a",
+		UserID:        "user-a",
+		Config:        &SandboxConfig{HardTTL: int32Ptr(3600)},
+		HardExpiresAt: hardExpiresAt,
+	})
+	if err != nil {
+		t.Fatalf("createNewPod() error = %v", err)
+	}
+	if got := pod.Annotations[controller.AnnotationHardExpiresAt]; got != hardExpiresAt.Format(time.RFC3339) {
+		t.Fatalf("hard-expires-at annotation = %q, want %q", got, hardExpiresAt.Format(time.RFC3339))
+	}
+
+	var cfg SandboxConfig
+	if err := json.Unmarshal([]byte(pod.Annotations[controller.AnnotationConfig]), &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if cfg.HardTTL == nil || *cfg.HardTTL != 3600 {
+		t.Fatalf("config hard_ttl = %v, want 3600", cfg.HardTTL)
+	}
 }
 
 func TestCreateNewPodFailsBeforeCreateWhenDataPlaneNotReady(t *testing.T) {

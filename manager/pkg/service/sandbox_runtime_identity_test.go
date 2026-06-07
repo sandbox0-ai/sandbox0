@@ -249,6 +249,40 @@ func TestResumePausedSandboxRuntimeDoesNotCreatePodWhileRuntimeDeleting(t *testi
 	}
 }
 
+func TestResumePausedSandboxRuntimeRejectsHardExpiredRecord(t *testing.T) {
+	now := time.Date(2026, time.March, 7, 12, 0, 0, 0, time.UTC)
+	hardExpiresAt := now.Add(-time.Second)
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-a": {
+			ID:                "sandbox-a",
+			TeamID:            "team-a",
+			UserID:            "user-a",
+			TemplateID:        "default",
+			TemplateName:      "default",
+			TemplateNamespace: "tpl-default",
+			Status:            SandboxStatusPaused,
+			HardExpiresAt:     hardExpiresAt,
+			TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
+		},
+	}}
+	svc := &SandboxService{
+		sandboxStore: store,
+		clock:        fixedClock{now: now},
+		logger:       zap.NewNop(),
+	}
+
+	_, err := svc.ResumePausedSandboxRuntime(context.Background(), "sandbox-a")
+	if !k8serrors.IsNotFound(err) {
+		t.Fatalf("ResumePausedSandboxRuntime() error = %v, want not found", err)
+	}
+	if store.saves != 0 {
+		t.Fatalf("store saves = %d, want 0", store.saves)
+	}
+	if got := store.records["sandbox-a"].HardExpiresAt; !got.Equal(hardExpiresAt) {
+		t.Fatalf("hard expires at = %s, want %s", got, hardExpiresAt)
+	}
+}
+
 func TestTerminatePausedSandboxRecordRunsPersistentCleanup(t *testing.T) {
 	store := &memorySandboxStore{records: map[string]*SandboxRecord{
 		"sandbox-a": {

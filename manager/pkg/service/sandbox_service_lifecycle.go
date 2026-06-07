@@ -419,6 +419,17 @@ func expirationFromTTL(now time.Time, ttl *int32) time.Time {
 	return now.Add(time.Duration(*ttl) * time.Second)
 }
 
+func sandboxHardExpired(hardExpiresAt time.Time, now time.Time) bool {
+	return !hardExpiresAt.IsZero() && !hardExpiresAt.After(now)
+}
+
+func (s *SandboxService) now() time.Time {
+	if s != nil && s.clock != nil {
+		return s.clock.Now()
+	}
+	return time.Now()
+}
+
 func (s *SandboxService) persistUpdatedSandboxPod(ctx context.Context, pod *corev1.Pod) error {
 	if s == nil || s.sandboxStore == nil || pod == nil {
 		return nil

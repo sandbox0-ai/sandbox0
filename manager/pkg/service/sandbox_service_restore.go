@@ -29,6 +29,9 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 		if locked.Status == SandboxStatusDeleted || !locked.DeletedAt.IsZero() {
 			return k8serrors.NewNotFound(corev1.Resource("sandbox"), sandboxID)
 		}
+		if sandboxHardExpired(locked.HardExpiresAt, s.now()) {
+			return k8serrors.NewNotFound(corev1.Resource("sandbox"), sandboxID)
+		}
 		switch locked.Status {
 		case SandboxStatusStarting, SandboxStatusPausing, SandboxStatusResuming:
 			return k8serrors.NewConflict(corev1.Resource("sandbox"), sandboxID, fmt.Errorf("sandbox lifecycle operation %q is in progress", locked.Status))
@@ -69,6 +72,7 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 			Mounts:            locked.Mounts,
 			SandboxID:         locked.ID,
 			RuntimeGeneration: generation,
+			HardExpiresAt:     locked.HardExpiresAt,
 		}
 		pod, err = s.claimIdlePod(lockCtx, template, req)
 		if err != nil {

@@ -43,6 +43,8 @@ type ClaimRequest struct {
 	SandboxID string `json:"-"`
 	// RuntimeGeneration identifies the current runtime pod incarnation.
 	RuntimeGeneration int64 `json:"-"`
+	// HardExpiresAt preserves the absolute hard deadline when recreating a paused sandbox.
+	HardExpiresAt time.Time `json:"-"`
 }
 
 type ClaimMount struct {
@@ -166,6 +168,17 @@ func setHardExpirationAnnotation(annotations map[string]string, now time.Time, h
 	}
 	hardExpiresAt := now.Add(time.Duration(*hardTTL) * time.Second)
 	annotations[controller.AnnotationHardExpiresAt] = hardExpiresAt.Format(time.RFC3339)
+}
+
+func setClaimHardExpirationAnnotation(annotations map[string]string, now time.Time, hardTTL *int32, hardExpiresAt time.Time) {
+	if annotations == nil {
+		return
+	}
+	if !hardExpiresAt.IsZero() {
+		annotations[controller.AnnotationHardExpiresAt] = hardExpiresAt.UTC().Format(time.RFC3339)
+		return
+	}
+	setHardExpirationAnnotation(annotations, now, hardTTL)
 }
 
 func applyClaimMetadata(pod *corev1.Pod, metadata *ClaimMetadata) {
@@ -926,7 +939,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		persistedConfig := s.claimConfigForPersistence(req.Config)
 		if persistedConfig != nil {
 			setExpirationAnnotation(pod.Annotations, s.clock.Now(), persistedConfig.TTL)
-			setHardExpirationAnnotation(pod.Annotations, s.clock.Now(), persistedConfig.HardTTL)
+			setClaimHardExpirationAnnotation(pod.Annotations, s.clock.Now(), persistedConfig.HardTTL, req.HardExpiresAt)
 		}
 		if err := setMountsAnnotation(pod.Annotations, req.Mounts); err != nil {
 			return err
@@ -1091,7 +1104,7 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	persistedConfig := s.claimConfigForPersistence(req.Config)
 	if persistedConfig != nil {
 		setExpirationAnnotation(pod.Annotations, s.clock.Now(), persistedConfig.TTL)
-		setHardExpirationAnnotation(pod.Annotations, s.clock.Now(), persistedConfig.HardTTL)
+		setClaimHardExpirationAnnotation(pod.Annotations, s.clock.Now(), persistedConfig.HardTTL, req.HardExpiresAt)
 	}
 	if err := setMountsAnnotation(pod.Annotations, req.Mounts); err != nil {
 		return nil, err

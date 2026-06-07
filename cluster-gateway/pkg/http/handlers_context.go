@@ -261,6 +261,10 @@ func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error)
 				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
 				return nil, err
 			}
+			if sandboxNeedsRuntime(sandbox) {
+				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
+				return nil, errors.New("sandbox runtime is still unavailable after resume")
+			}
 		}
 	}
 
@@ -277,25 +281,15 @@ func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error)
 	return addr, nil
 }
 
-func sandboxWantsPaused(sandbox *mgr.Sandbox) bool {
-	if sandbox == nil {
-		return false
-	}
-	if sandbox.PowerState.Desired == mgr.SandboxPowerStatePaused {
-		return true
-	}
-	return sandbox.Paused
-}
-
 func sandboxNeedsRuntime(sandbox *mgr.Sandbox) bool {
-	return sandboxRuntimeMissing(sandbox) || sandboxWantsPaused(sandbox)
+	return sandboxRuntimeMissing(sandbox)
 }
 
 func sandboxRuntimeMissing(sandbox *mgr.Sandbox) bool {
 	if sandbox == nil {
 		return false
 	}
-	if sandbox.Status == mgr.SandboxStatusCleaned || strings.TrimSpace(sandbox.InternalAddr) == "" {
+	if sandbox.Status == mgr.SandboxStatusPaused || strings.TrimSpace(sandbox.InternalAddr) == "" {
 		return true
 	}
 	return false

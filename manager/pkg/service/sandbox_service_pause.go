@@ -5,14 +5,12 @@ import (
 	"fmt"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // PauseSandboxResponse represents the response from pausing a sandbox.
 type PauseSandboxResponse struct {
 	SandboxID     string                `json:"sandbox_id"`
 	Paused        bool                  `json:"paused"`
-	PowerState    SandboxPowerState     `json:"power_state"`
 	ResourceUsage *SandboxResourceUsage `json:"resource_usage,omitempty"`
 	UpdatedMemory string                `json:"updated_memory,omitempty"`
 	UpdatedCPU    string                `json:"updated_cpu,omitempty"`
@@ -20,125 +18,44 @@ type PauseSandboxResponse struct {
 
 // ResumeSandboxResponse represents the response from resuming a sandbox.
 type ResumeSandboxResponse struct {
-	SandboxID      string            `json:"sandbox_id"`
-	Resumed        bool              `json:"resumed"`
-	PowerState     SandboxPowerState `json:"power_state"`
-	RestoredMemory string            `json:"restored_memory,omitempty"`
+	SandboxID      string `json:"sandbox_id"`
+	Resumed        bool   `json:"resumed"`
+	RestoredMemory string `json:"restored_memory,omitempty"`
 }
 
-// PauseSandbox records a desired paused state for ctld reconciliation.
+// PauseSandbox checkpoints the writable rootfs and releases the runtime.
 func (s *SandboxService) PauseSandbox(ctx context.Context, sandboxID string) (*PauseSandboxResponse, error) {
-	return s.RequestPauseSandbox(ctx, sandboxID)
-}
-
-// RequestPauseSandbox records a desired paused state and reconciles it asynchronously.
-func (s *SandboxService) RequestPauseSandbox(ctx context.Context, sandboxID string) (*PauseSandboxResponse, error) {
-	if err := s.requireCtldPowerTransitions(); err != nil {
-		return nil, err
-	}
-	state, err := s.requestSandboxPowerState(ctx, sandboxID, SandboxPowerStatePaused)
-	if err != nil {
+	if err := s.PauseSandboxRuntime(ctx, sandboxID); err != nil {
 		return nil, err
 	}
 	return &PauseSandboxResponse{
-		SandboxID:  sandboxID,
-		Paused:     true,
-		PowerState: state,
+		SandboxID: sandboxID,
+		Paused:    true,
 	}, nil
 }
 
-// PauseSandboxAndWait records a desired paused state and waits until the sandbox observes it.
+// PauseSandboxAndWait checkpoints the writable rootfs and releases the runtime.
 func (s *SandboxService) PauseSandboxAndWait(ctx context.Context, sandboxID string) (*PauseSandboxResponse, error) {
-	resp, err := s.RequestPauseSandbox(ctx, sandboxID)
-	if err != nil {
-		return nil, err
-	}
-	if resp.PowerState.Desired == SandboxPowerStatePaused && resp.PowerState.Observed == SandboxPowerStatePaused && resp.PowerState.Phase == SandboxPowerPhaseStable {
-		return resp, nil
-	}
-	waitCtx, cancel := sandboxPowerTransitionContext(ctx)
-	defer cancel()
-	state, err := s.waitForSandboxPowerState(waitCtx, sandboxID, SandboxPowerStatePaused, resp.PowerState.DesiredGeneration)
-	if err != nil {
-		return &PauseSandboxResponse{SandboxID: sandboxID, Paused: state.Observed == SandboxPowerStatePaused, PowerState: state}, err
-	}
-	resp.PowerState = state
-	resp.Paused = true
-	return resp, nil
+	return s.PauseSandbox(ctx, sandboxID)
 }
 
-// ResumeSandbox records a desired active state for ctld reconciliation.
+// ResumeSandbox creates or reuses a runtime and restores the latest rootfs checkpoint.
 func (s *SandboxService) ResumeSandbox(ctx context.Context, sandboxID string) (*ResumeSandboxResponse, error) {
-	return s.RequestResumeSandbox(ctx, sandboxID)
-}
-
-// RequestResumeSandbox records a desired active state and reconciles it asynchronously.
-func (s *SandboxService) RequestResumeSandbox(ctx context.Context, sandboxID string) (*ResumeSandboxResponse, error) {
-	if err := s.requireCtldPowerTransitions(); err != nil {
-		return nil, err
-	}
-	state, err := s.requestSandboxPowerState(ctx, sandboxID, SandboxPowerStateActive)
+	_, err := s.ResumePausedSandboxRuntime(ctx, sandboxID)
 	if err != nil {
 		return nil, err
 	}
 	return &ResumeSandboxResponse{
-		SandboxID:  sandboxID,
-		Resumed:    true,
-		PowerState: state,
+		SandboxID: sandboxID,
+		Resumed:   true,
 	}, nil
 }
 
-// ResumeSandboxAndWait records a desired active state and waits until the sandbox observes it.
+// ResumeSandboxAndWait creates or reuses a runtime and restores the latest rootfs checkpoint.
 func (s *SandboxService) ResumeSandboxAndWait(ctx context.Context, sandboxID string) (*ResumeSandboxResponse, error) {
-	resp, err := s.RequestResumeSandbox(ctx, sandboxID)
-	if err != nil {
-		if k8serrors.IsNotFound(err) && s.sandboxStore != nil {
-			waitCtx, cancel := sandboxRestoreContext(ctx)
-			defer cancel()
-			sandbox, restoreErr := s.RestoreCleanedSandboxRuntime(waitCtx, sandboxID)
-			if restoreErr != nil {
-				return nil, restoreErr
-			}
-			generation := int64(0)
-			if sandbox != nil {
-				generation = sandbox.PowerState.DesiredGeneration
-			}
-			return cleanedSandboxRestoreResponse(sandboxID, generation), nil
-		}
-		return nil, err
-	}
-	if resp.PowerState.Desired == SandboxPowerStateActive && resp.PowerState.Observed == SandboxPowerStateActive && resp.PowerState.Phase == SandboxPowerPhaseStable {
-		return resp, nil
-	}
-	waitCtx, cancel := sandboxPowerTransitionContext(ctx)
+	waitCtx, cancel := sandboxRestoreContext(ctx)
 	defer cancel()
-	state, err := s.waitForSandboxPowerState(waitCtx, sandboxID, SandboxPowerStateActive, resp.PowerState.DesiredGeneration)
-	if err != nil {
-		return &ResumeSandboxResponse{SandboxID: sandboxID, Resumed: state.Observed == SandboxPowerStateActive, PowerState: state}, err
-	}
-	resp.PowerState = state
-	resp.Resumed = true
-	return resp, nil
-}
-
-// RequestPauseSandboxByID records the desired paused state for controller-driven reconciliation.
-func (s *SandboxService) RequestPauseSandboxByID(ctx context.Context, sandboxID string) error {
-	_, err := s.RequestPauseSandbox(ctx, sandboxID)
-	return err
-}
-
-// PauseSandboxByID records the desired paused state for compatibility with older controller callers.
-//
-// Deprecated: use RequestPauseSandboxByID for declarative pause requests.
-func (s *SandboxService) PauseSandboxByID(ctx context.Context, sandboxID string) error {
-	return s.RequestPauseSandboxByID(ctx, sandboxID)
-}
-
-func (s *SandboxService) requireCtldPowerTransitions() error {
-	if s == nil || !s.config.CtldEnabled {
-		return ErrSandboxPowerRequiresCtld
-	}
-	return nil
+	return s.ResumeSandbox(waitCtx, sandboxID)
 }
 
 // TerminateSandboxByID implements the SandboxTerminator interface from controller package.

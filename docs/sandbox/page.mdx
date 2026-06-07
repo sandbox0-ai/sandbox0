@@ -27,11 +27,14 @@ Sandbox0 Cloud clients should use `https://api.sandbox0.ai`. Set `SANDBOX0_BASE_
 |--------|-------------|
 | `starting` | Sandbox is being initialized |
 | `running` | Sandbox is active and ready to use |
+| `pausing` | Sandbox is checkpointing rootfs and releasing its runtime |
+| `paused` | Sandbox has no runtime; identity and latest rootfs checkpoint are preserved |
+| `resuming` | Sandbox is creating a new runtime and restoring rootfs |
+| `terminating` | Sandbox identity and durable state are being deleted |
 | `failed` | Sandbox encountered an error |
-| `completed` | Sandbox has finished execution |
 
 <Callout variant="info">
-Pause state is modeled separately from `status`. Use the `paused` boolean when you need to distinguish a paused sandbox from a running one. For async pause/resume flows, use `power_state` to inspect desired vs observed state plus generation counters.
+Use the `paused` boolean as a convenience for `status == "paused"`. Pause does not preserve running processes, memory, sockets, PID state, or live REPL sessions.
 </Callout>
 
 ---
@@ -57,7 +60,7 @@ Claim a sandbox from a template. The sandbox is created from a pre-warmed pool f
 |-------|------|-------------|
 | `env_vars` | object | Sandbox-level default environment variables for new procd-managed processes |
 | `ttl` | integer | Time to live in seconds (soft limit, triggers auto-pause; default: `0`, disabled) |
-| `hard_ttl` | integer | Hard runtime lifetime in seconds (cleans compute while preserving sandbox identity and services; default: `0`, disabled) |
+| `hard_ttl` | integer | Hard sandbox lifetime in seconds (deletes identity and durable state; default: `0`, disabled) |
 | `network` | object | `SandboxNetworkPolicy`. Controls traffic rules, protocol controls, credential bindings, and destination-scoped egress auth |
 | `webhook` | object | Webhook configuration |
 | `auto_resume` | boolean | Auto-resume when accessed (default: true) |
@@ -73,12 +76,12 @@ Sandbox0 uses two-tier TTL to balance resource efficiency and flexibility:
 
 | Field | Behavior | Use Case |
 |-------|----------|----------|
-| `ttl` | **Soft pause**: When expired, sandbox is automatically paused. Processes stop but state is preserved. Can be extended via refresh API. | Keep sandboxes alive during active use while freeing compute resources during idle periods. |
-| `hard_ttl` | **Hard clean**: When expired, Sandbox0 checkpoints the writable root filesystem, deletes the runtime pod, and marks the sandbox `cleaned`. Identity, configuration, services, and public URLs remain available until explicit delete. | Enforce compute cost limits while keeping a durable sandbox service that can be restored on demand. |
+| `ttl` | **Runtime soft pause**: When expired, Sandbox0 checkpoints the writable root filesystem, deletes the runtime pod, and marks the sandbox `paused`. | Keep sandboxes alive during active use while freeing compute resources during idle periods. |
+| `hard_ttl` | **Sandbox hard delete**: When expired, Sandbox0 deletes the sandbox identity and durable state, including paused rootfs checkpoints. | Enforce a maximum lifetime for compute and storage resources. |
 
 <Callout variant="info">
 The relationship: <code>ttl {'<='} hard_ttl</code>. When <code>ttl</code> expires first, sandbox pauses but can be resumed.
-When <code>hard_ttl</code> expires, sandbox compute is cleaned and the sandbox can be restored by resume-capable access. Restore starts a new runtime pod and reapplies the root filesystem checkpoint; it does not preserve running process state. Both can be extended via the refresh API.
+When <code>hard_ttl</code> expires, the sandbox is deleted and later access returns not found. Resume starts a new runtime generation from the latest rootfs checkpoint only while the sandbox is paused and still within its hard TTL.
 </Callout>
 
 **Example timeline (sandbox created with `ttl=300` and `hard_ttl=3600`):**
@@ -86,7 +89,7 @@ When <code>hard_ttl</code> expires, sandbox compute is cleaned and the sandbox c
 - `t=300`: TTL expires → sandbox auto-pauses
 - `t=310`: User calls refresh → TTL reset to 300, Hard TTL reset to 3600 (new hard deadline at `t=3910`)
 - `t=610`: TTL expires again → sandbox auto-pauses
-- `t=3910`: Hard TTL expires → runtime pod cleaned, sandbox status becomes `cleaned`
+- `t=3910`: Hard TTL expires → sandbox identity and durable state are deleted
 
 <Tabs
   tabs={[
@@ -405,7 +408,7 @@ Only the following fields can be updated at runtime:
 | Field | Type | Description |
 |-------|------|-------------|
 | `ttl` | integer | Time to live in seconds (soft limit) |
-| `hard_ttl` | integer | Hard runtime lifetime in seconds |
+| `hard_ttl` | integer | Hard sandbox lifetime in seconds |
 | `network` | object | Network policy configuration |
 | `auto_resume` | boolean | Auto-resume when accessed |
 | `services` | array | Sandbox Services for public HTTP routes, including Sandbox Functions |
@@ -589,7 +592,7 @@ console.log('Sandbox deleted');`
 
 <CardGroup>
   <Card title="Pause And Resume" href="/docs/sandbox/pause-resume" cta="Continue">
-    Control sandbox power state and resume behavior before wiring long-lived workflows.
+    Control checkpointed pause and resume behavior before wiring long-lived workflows.
   </Card>
 
   <Card title="Contexts" href="/docs/sandbox/contexts" cta="Continue">

@@ -36,7 +36,7 @@ type apiModeSuiteOptions struct {
 	includeVolumeLifecycle    bool
 	includeObjectEncryption   bool
 	includeWebhookLifecycle   bool
-	includeRootFSCleanRestore bool
+	includeRootFSPauseResume  bool
 	includeMeteringAssertions bool
 	expectStorageUnavailable  bool
 	expectNetworkUnavailable  bool
@@ -219,9 +219,9 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 				})
 			}
 
-			if opts.includeRootFSCleanRestore {
-				It("persists rootfs changes across clean and restore", func() {
-					assertSandboxRootFSPersistsAcrossCleanRestore(env, session)
+			if opts.includeRootFSPauseResume {
+				It("persists rootfs changes across pause and resume", func() {
+					assertSandboxRootFSPersistsAcrossPauseResume(env, session)
 				})
 			}
 		})
@@ -369,14 +369,14 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					Expect(status).To(Equal(http.StatusOK))
 					Expect(pausedResp).NotTo(BeNil())
 					Expect(pausedResp.Paused).To(BeTrue())
-					waitForSandboxPowerStateEventually(env, session, sandboxID, apispec.SandboxPowerStateObserved("paused"))
+					waitForSandboxLifecycleStatusEventually(env, session, sandboxID, apispec.SandboxLifecycleStatusPaused)
 
 					resumeResp, status, err := session.ResumeSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
 					Expect(err).NotTo(HaveOccurred())
 					Expect(status).To(Equal(http.StatusOK))
 					Expect(resumeResp).NotTo(BeNil())
 					Expect(resumeResp.Resumed).To(BeTrue())
-					waitForSandboxPowerStateEventually(env, session, sandboxID, apispec.SandboxPowerStateObserved("active"))
+					waitForSandboxLifecycleStatusEventually(env, session, sandboxID, apispec.SandboxLifecycleStatusRunning)
 
 					defaultUID := int64(1000)
 					defaultGID := int64(1000)
@@ -1308,7 +1308,7 @@ func assertSandboxListContainsClaimedSandbox(env *framework.ScenarioEnv, session
 	Expect(found).To(BeTrue(), "created sandbox should be in the list")
 }
 
-func assertSandboxRootFSPersistsAcrossCleanRestore(env *framework.ScenarioEnv, session *e2eutils.Session) {
+func assertSandboxRootFSPersistsAcrossPauseResume(env *framework.ScenarioEnv, session *e2eutils.Session) {
 	claimResp := claimSandboxEventually(env, session, "default")
 	sandboxID := claimResp.SandboxId
 	Expect(sandboxID).NotTo(BeEmpty())
@@ -1320,7 +1320,7 @@ func assertSandboxRootFSPersistsAcrossCleanRestore(env *framework.ScenarioEnv, s
 	Expect(err).NotTo(HaveOccurred())
 	sandbox := waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
 
-	marker := fmt.Sprintf("s0-rootfs-clean-restore-%d", time.Now().UnixNano())
+	marker := fmt.Sprintf("s0-rootfs-pause-resume-%d", time.Now().UnixNano())
 	rootDir := "/tmp/" + marker
 	filePath := rootDir + "/marker.txt"
 	nestedPath := rootDir + "/nested/value.txt"
@@ -1357,18 +1357,18 @@ test "$(stat -c %%a %s)" = 751
 	_, err = execInSandboxPod(env, templateNamespace, sandbox.PodName, writeScript)
 	Expect(err).NotTo(HaveOccurred())
 
-	hardTTL := int32(1)
+	ttl := int32(1)
 	_, status, err := session.UpdateSandbox(env.TestCtx.Context, GinkgoT(), sandboxID, apispec.SandboxUpdateConfig{
-		HardTtl: &hardTTL,
+		Ttl: &ttl,
 	})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 
-	waitForSandboxLifecycleStatusEventually(env, session, sandboxID, apispec.SandboxLifecycleStatusCleaned)
+	waitForSandboxLifecycleStatusEventually(env, session, sandboxID, apispec.SandboxLifecycleStatusPaused)
 
-	disabledHardTTL := int32(0)
+	disabledTTL := int32(0)
 	_, status, err = session.UpdateSandbox(env.TestCtx.Context, GinkgoT(), sandboxID, apispec.SandboxUpdateConfig{
-		HardTtl: &disabledHardTTL,
+		Ttl: &disabledTTL,
 	})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
@@ -1902,28 +1902,6 @@ func waitForSandboxPodReadyEventually(env *framework.ScenarioEnv, session *e2eut
 		sandbox = current
 		return nil
 	}).WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
-	return sandbox
-}
-
-func waitForSandboxPowerStateEventually(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string, observed apispec.SandboxPowerStateObserved) *apispec.Sandbox {
-	var sandbox *apispec.Sandbox
-	Eventually(func() error {
-		resp, status, err := session.GetSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
-		if err != nil {
-			return err
-		}
-		if status != http.StatusOK {
-			return fmt.Errorf("get sandbox status %d", status)
-		}
-		if resp == nil {
-			return fmt.Errorf("sandbox response missing")
-		}
-		if resp.PowerState.Observed != observed || resp.PowerState.Phase != apispec.SandboxPowerStatePhase("stable") {
-			return fmt.Errorf("sandbox power state not stable at %s yet: observed=%s phase=%s", observed, resp.PowerState.Observed, resp.PowerState.Phase)
-		}
-		sandbox = resp
-		return nil
-	}).WithTimeout(90 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
 	return sandbox
 }
 

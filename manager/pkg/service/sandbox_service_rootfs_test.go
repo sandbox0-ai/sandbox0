@@ -26,7 +26,7 @@ import (
 	ktesting "k8s.io/client-go/testing"
 )
 
-func TestCleanSandboxRuntimeSavesRootFSBeforeDeletingPod(t *testing.T) {
+func TestPauseSandboxRuntimeSavesRootFSBeforeDeletingPod(t *testing.T) {
 	saveCalled := false
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/api/v1/rootfs/save", r.URL.Path)
@@ -89,7 +89,7 @@ func TestCleanSandboxRuntimeSavesRootFSBeforeDeletingPod(t *testing.T) {
 		logger:       zap.NewNop(),
 	}
 
-	require.NoError(t, svc.CleanSandboxRuntime(context.Background(), "sandbox-1"))
+	require.NoError(t, svc.PauseSandboxRuntime(context.Background(), "sandbox-1"))
 
 	state := store.rootFSStates["sandbox-1"]
 	require.NotNil(t, state)
@@ -99,7 +99,7 @@ func TestCleanSandboxRuntimeSavesRootFSBeforeDeletingPod(t *testing.T) {
 	assert.Equal(t, []string{"parent-1", "parent-0"}, state.SnapshotParentChain)
 	assert.Equal(t, "sha256:diff", state.DiffDigest)
 	assert.Equal(t, "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar", state.DiffObjectKey)
-	assert.Equal(t, SandboxStatusCleaned, store.records["sandbox-1"].Status)
+	assert.Equal(t, SandboxStatusPaused, store.records["sandbox-1"].Status)
 }
 
 func TestFinishRestoredSandboxRuntimeAppliesRootFSBeforeProcdInitialization(t *testing.T) {
@@ -166,7 +166,7 @@ func TestFinishRestoredSandboxRuntimeAppliesRootFSBeforeProcdInitialization(t *t
 		TemplateNamespace: "template-default",
 		TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 		RuntimeGeneration: 3,
-		Status:            SandboxStatusCleaned,
+		Status:            SandboxStatusPaused,
 	}
 
 	require.NoError(t, svc.finishRestoredSandboxRuntime(context.Background(), pod, record, "hot"))
@@ -210,11 +210,11 @@ func TestRestoreFailureCleanupCanSkipRootFSSave(t *testing.T) {
 		logger:       zap.NewNop(),
 	}
 
-	require.NoError(t, svc.cleanSandboxRuntime(context.Background(), "sandbox-1", false))
+	require.NoError(t, svc.pauseSandboxRuntime(context.Background(), "sandbox-1", false))
 
 	assert.False(t, saveCalled.Load())
 	assert.Equal(t, originalState.DiffObjectKey, store.rootFSStates["sandbox-1"].DiffObjectKey)
-	assert.Equal(t, SandboxStatusCleaned, store.records["sandbox-1"].Status)
+	assert.Equal(t, SandboxStatusPaused, store.records["sandbox-1"].Status)
 }
 
 func rootFSTestPod(name, sandboxID, teamID string) *corev1.Pod {

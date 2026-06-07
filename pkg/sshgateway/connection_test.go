@@ -32,7 +32,6 @@ func TestSandboxToAPIIncludesSSHInfo(t *testing.T) {
 		UserID:        "user-1",
 		Status:        "running",
 		PodName:       "pod-1",
-		PowerState:    mgr.SandboxPowerState{Desired: "active", Observed: "active", Phase: "stable"},
 		AutoResume:    true,
 		Paused:        false,
 		ClaimedAt:     now,

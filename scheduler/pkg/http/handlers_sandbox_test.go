@@ -608,7 +608,7 @@ func TestListSandboxesRoutesTeamScopedToken(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"success":true,"data":{"sandboxes":[{"id":"rs-home-team-a-demo-abcde","template_id":"tmpl-a","status":"running","paused":false,"power_state":{"desired":"active","desired_generation":2,"observed":"active","observed_generation":2,"phase":"stable"},"created_at":"2026-04-07T00:00:00Z","expires_at":"2026-04-07T01:00:00Z","hard_expires_at":"2026-04-07T02:00:00Z"}],"count":1,"has_more":false}}`))
+		_, _ = w.Write([]byte(`{"success":true,"data":{"sandboxes":[{"id":"rs-home-team-a-demo-abcde","template_id":"tmpl-a","status":"running","paused":false,"runtime_generation":2,"created_at":"2026-04-07T00:00:00Z","expires_at":"2026-04-07T01:00:00Z","hard_expires_at":"2026-04-07T02:00:00Z"}],"count":1,"has_more":false}}`))
 	}))
 	defer cluster.Close()
 
@@ -671,16 +671,10 @@ func TestListSandboxesRoutesTeamScopedToken(t *testing.T) {
 		Success bool `json:"success"`
 		Data    struct {
 			Sandboxes []struct {
-				ID         string  `json:"id"`
-				ClusterID  *string `json:"cluster_id"`
-				PowerState struct {
-					Desired            string `json:"desired"`
-					DesiredGeneration  int64  `json:"desired_generation"`
-					Observed           string `json:"observed"`
-					ObservedGeneration int64  `json:"observed_generation"`
-					Phase              string `json:"phase"`
-				} `json:"power_state"`
-				HardExpiresAt string `json:"hard_expires_at"`
+				ID                string  `json:"id"`
+				ClusterID         *string `json:"cluster_id"`
+				RuntimeGeneration int64   `json:"runtime_generation"`
+				HardExpiresAt     string  `json:"hard_expires_at"`
 			} `json:"sandboxes"`
 			Count int `json:"count"`
 		} `json:"data"`
@@ -700,11 +694,8 @@ func TestListSandboxesRoutesTeamScopedToken(t *testing.T) {
 	if body.Data.Sandboxes[0].ClusterID == nil || *body.Data.Sandboxes[0].ClusterID != "home" {
 		t.Fatalf("cluster_id = %v, want home", body.Data.Sandboxes[0].ClusterID)
 	}
-	if body.Data.Sandboxes[0].PowerState.Desired != "active" || body.Data.Sandboxes[0].PowerState.Phase != "stable" {
-		t.Fatalf("power_state = %+v, want active/stable", body.Data.Sandboxes[0].PowerState)
-	}
-	if body.Data.Sandboxes[0].PowerState.DesiredGeneration != 2 || body.Data.Sandboxes[0].PowerState.ObservedGeneration != 2 {
-		t.Fatalf("power_state generations = %d/%d, want 2/2", body.Data.Sandboxes[0].PowerState.DesiredGeneration, body.Data.Sandboxes[0].PowerState.ObservedGeneration)
+	if body.Data.Sandboxes[0].RuntimeGeneration != 2 {
+		t.Fatalf("runtime_generation = %d, want 2", body.Data.Sandboxes[0].RuntimeGeneration)
 	}
 }
 

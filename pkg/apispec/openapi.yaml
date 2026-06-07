@@ -1544,7 +1544,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/SuccessPauseSandboxResponse"
         "409":
-          description: Pause was superseded by a newer power transition
+          description: Another sandbox lifecycle operation is in progress
           content:
             application/json:
               schema:
@@ -1585,7 +1585,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/SuccessResumeSandboxResponse"
         "409":
-          description: Resume was superseded by a newer power transition
+          description: Another sandbox lifecycle operation is in progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          description: Resume would exceed active runtime quota
           content:
             application/json:
               schema:
@@ -1597,7 +1603,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "503":
-          description: Sandbox resume requires ctld
+          description: Sandbox resume is temporarily unavailable
           content:
             application/json:
               schema:
@@ -3753,10 +3759,11 @@ components:
         ttl:
           type: integer
           format: int32
+          description: Runtime soft time-to-live in seconds. When it expires, Sandbox0 checkpoints the writable rootfs, pauses the sandbox, and releases runtime compute while preserving durable sandbox state.
         hard_ttl:
           type: integer
           format: int32
-          description: Hard time-to-live in seconds. When it expires, Sandbox0 cleans the runtime pod and preserves the sandbox identity, services, and public URLs until the sandbox is explicitly deleted.
+          description: Sandbox hard time-to-live in seconds. When it expires, Sandbox0 deletes the sandbox identity and durable state, including paused rootfs checkpoints.
         network:
           $ref: "#/components/schemas/SandboxNetworkPolicy"
         webhook:
@@ -4010,43 +4017,17 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/ClaimResponse"
-    SandboxPowerState:
-      type: object
-      properties:
-        desired:
-          type: string
-          enum: [active, paused]
-        desired_generation:
-          type: integer
-          format: int64
-        observed:
-          type: string
-          enum: [active, paused]
-          x-enum-varnames:
-            - SandboxPowerStateObservedActive
-            - SandboxPowerStateObservedPaused
-        observed_generation:
-          type: integer
-          format: int64
-        phase:
-          type: string
-          enum: [stable, pausing, resuming]
-      required:
-        - desired
-        - desired_generation
-        - observed
-        - observed_generation
-        - phase
     SandboxLifecycleStatus:
       type: string
-      enum: [starting, running, failed, completed, terminating, cleaned]
+      enum: [starting, running, pausing, paused, resuming, terminating, failed]
       x-enum-varnames:
         - SandboxLifecycleStatusStarting
         - SandboxLifecycleStatusRunning
-        - SandboxLifecycleStatusFailed
-        - SandboxLifecycleStatusCompleted
+        - SandboxLifecycleStatusPausing
+        - SandboxLifecycleStatusPaused
+        - SandboxLifecycleStatusResuming
         - SandboxLifecycleStatusTerminating
-        - SandboxLifecycleStatusCleaned
+        - SandboxLifecycleStatusFailed
     Sandbox:
       type: object
       properties:
@@ -4062,8 +4043,7 @@ components:
           $ref: "#/components/schemas/SandboxLifecycleStatus"
         paused:
           type: boolean
-        power_state:
-          $ref: "#/components/schemas/SandboxPowerState"
+          description: True when status is paused and no runtime is attached.
         auto_resume:
           type: boolean
         services:
@@ -4076,6 +4056,10 @@ components:
             $ref: "#/components/schemas/ClaimMountRequest"
         pod_name:
           type: string
+        runtime_generation:
+          type: integer
+          format: int64
+          description: Monotonically increasing runtime generation. Resume starts a new generation.
         ssh:
           $ref: "#/components/schemas/SandboxSSHConnection"
         expires_at:
@@ -4092,19 +4076,23 @@ components:
         created_at:
           type: string
           format: date-time
+        updated_at:
+          type: string
+          format: date-time
       required:
         - id
         - template_id
         - team_id
         - status
         - paused
-        - power_state
         - auto_resume
         - pod_name
+        - runtime_generation
         - expires_at
         - hard_expires_at
         - claimed_at
         - created_at
+        - updated_at
     SandboxSSHConnection:
       type: object
       properties:
@@ -4127,10 +4115,11 @@ components:
         ttl:
           type: integer
           format: int32
+          description: Runtime soft time-to-live in seconds. When it expires, Sandbox0 checkpoints the writable rootfs, pauses the sandbox, and releases runtime compute while preserving durable sandbox state.
         hard_ttl:
           type: integer
           format: int32
-          description: Hard time-to-live in seconds. When it expires, Sandbox0 cleans the runtime pod and preserves the sandbox identity, services, and public URLs until the sandbox is explicitly deleted.
+          description: Sandbox hard time-to-live in seconds. When it expires, Sandbox0 deletes the sandbox identity and durable state, including paused rootfs checkpoints.
         network:
           $ref: "#/components/schemas/SandboxNetworkPolicy"
         auto_resume:
@@ -4196,8 +4185,11 @@ components:
           $ref: "#/components/schemas/SandboxLifecycleStatus"
         paused:
           type: boolean
-        power_state:
-          $ref: "#/components/schemas/SandboxPowerState"
+          description: True when status is paused and no runtime is attached.
+        runtime_generation:
+          type: integer
+          format: int64
+          description: Monotonically increasing runtime generation. Resume starts a new generation.
         cluster_id:
           type: string
           description: Cluster where sandbox runs (multi-cluster only)
@@ -4212,15 +4204,19 @@ components:
           type: string
           format: date-time
           description: Hard expiration timestamp. Zero value means not set.
+        updated_at:
+          type: string
+          format: date-time
       required:
         - id
         - template_id
         - status
         - paused
-        - power_state
+        - runtime_generation
         - created_at
         - expires_at
         - hard_expires_at
+        - updated_at
     SuccessSandboxListResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
@@ -4338,15 +4334,13 @@ components:
           type: string
         paused:
           type: boolean
-        power_state:
-          $ref: "#/components/schemas/SandboxPowerState"
         resource_usage:
           $ref: "#/components/schemas/SandboxResourceUsage"
         updated_memory:
           type: string
         updated_cpu:
           type: string
-      required: [sandbox_id, paused, power_state]
+      required: [sandbox_id, paused]
     ResumeSandboxResponse:
       type: object
       properties:
@@ -4354,11 +4348,9 @@ components:
           type: string
         resumed:
           type: boolean
-        power_state:
-          $ref: "#/components/schemas/SandboxPowerState"
         restored_memory:
           type: string
-      required: [sandbox_id, resumed, power_state]
+      required: [sandbox_id, resumed]
     SuccessPauseSandboxResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"

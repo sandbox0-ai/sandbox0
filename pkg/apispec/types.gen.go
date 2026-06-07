@@ -171,9 +171,10 @@ const (
 
 // Defines values for SandboxLifecycleStatus.
 const (
-	SandboxLifecycleStatusCleaned     SandboxLifecycleStatus = "cleaned"
-	SandboxLifecycleStatusCompleted   SandboxLifecycleStatus = "completed"
 	SandboxLifecycleStatusFailed      SandboxLifecycleStatus = "failed"
+	SandboxLifecycleStatusPaused      SandboxLifecycleStatus = "paused"
+	SandboxLifecycleStatusPausing     SandboxLifecycleStatus = "pausing"
+	SandboxLifecycleStatusResuming    SandboxLifecycleStatus = "resuming"
 	SandboxLifecycleStatusRunning     SandboxLifecycleStatus = "running"
 	SandboxLifecycleStatusStarting    SandboxLifecycleStatus = "starting"
 	SandboxLifecycleStatusTerminating SandboxLifecycleStatus = "terminating"
@@ -183,25 +184,6 @@ const (
 const (
 	AllowAll SandboxNetworkPolicyMode = "allow-all"
 	BlockAll SandboxNetworkPolicyMode = "block-all"
-)
-
-// Defines values for SandboxPowerStateDesired.
-const (
-	Active SandboxPowerStateDesired = "active"
-	Paused SandboxPowerStateDesired = "paused"
-)
-
-// Defines values for SandboxPowerStateObserved.
-const (
-	SandboxPowerStateObservedActive SandboxPowerStateObserved = "active"
-	SandboxPowerStateObservedPaused SandboxPowerStateObserved = "paused"
-)
-
-// Defines values for SandboxPowerStatePhase.
-const (
-	Pausing  SandboxPowerStatePhase = "pausing"
-	Resuming SandboxPowerStatePhase = "resuming"
-	Stable   SandboxPowerStatePhase = "stable"
 )
 
 // Defines values for SeccompProfileType.
@@ -1169,7 +1151,6 @@ type PTYSize struct {
 // PauseSandboxResponse defines model for PauseSandboxResponse.
 type PauseSandboxResponse struct {
 	Paused        bool                  `json:"paused"`
-	PowerState    SandboxPowerState     `json:"power_state"`
 	ResourceUsage *SandboxResourceUsage `json:"resource_usage,omitempty"`
 	SandboxId     string                `json:"sandbox_id"`
 	UpdatedCpu    *string               `json:"updated_cpu,omitempty"`
@@ -1396,10 +1377,9 @@ type ResourceUsage struct {
 
 // ResumeSandboxResponse defines model for ResumeSandboxResponse.
 type ResumeSandboxResponse struct {
-	PowerState     SandboxPowerState `json:"power_state"`
-	RestoredMemory *string           `json:"restored_memory,omitempty"`
-	Resumed        bool              `json:"resumed"`
-	SandboxId      string            `json:"sandbox_id"`
+	RestoredMemory *string `json:"restored_memory,omitempty"`
+	Resumed        bool    `json:"resumed"`
+	SandboxId      string  `json:"sandbox_id"`
 }
 
 // SSHProxyProjection Transparent SSH proxy projection used for SSH egress re-origination.
@@ -1436,18 +1416,23 @@ type Sandbox struct {
 	ExpiresAt time.Time `json:"expires_at"`
 
 	// HardExpiresAt Hard expiration timestamp. Zero value means not set.
-	HardExpiresAt time.Time              `json:"hard_expires_at"`
-	Id            string                 `json:"id"`
-	Mounts        *[]ClaimMountRequest   `json:"mounts,omitempty"`
-	Paused        bool                   `json:"paused"`
-	PodName       string                 `json:"pod_name"`
-	PowerState    SandboxPowerState      `json:"power_state"`
-	Services      *[]SandboxAppService   `json:"services,omitempty"`
-	Ssh           *SandboxSSHConnection  `json:"ssh,omitempty"`
-	Status        SandboxLifecycleStatus `json:"status"`
-	TeamId        string                 `json:"team_id"`
-	TemplateId    string                 `json:"template_id"`
-	UserId        *string                `json:"user_id,omitempty"`
+	HardExpiresAt time.Time            `json:"hard_expires_at"`
+	Id            string               `json:"id"`
+	Mounts        *[]ClaimMountRequest `json:"mounts,omitempty"`
+
+	// Paused True when status is paused and no runtime is attached.
+	Paused  bool   `json:"paused"`
+	PodName string `json:"pod_name"`
+
+	// RuntimeGeneration Monotonically increasing runtime generation. Resume starts a new generation.
+	RuntimeGeneration int64                  `json:"runtime_generation"`
+	Services          *[]SandboxAppService   `json:"services,omitempty"`
+	Ssh               *SandboxSSHConnection  `json:"ssh,omitempty"`
+	Status            SandboxLifecycleStatus `json:"status"`
+	TeamId            string                 `json:"team_id"`
+	TemplateId        string                 `json:"template_id"`
+	UpdatedAt         time.Time              `json:"updated_at"`
+	UserId            *string                `json:"user_id,omitempty"`
 }
 
 // SandboxAppService Canonical service model for sandbox exposure.
@@ -1563,11 +1548,13 @@ type SandboxConfig struct {
 	AutoResume *bool              `json:"auto_resume,omitempty"`
 	EnvVars    *map[string]string `json:"env_vars,omitempty"`
 
-	// HardTtl Hard time-to-live in seconds. When it expires, Sandbox0 cleans the runtime pod and preserves the sandbox identity, services, and public URLs until the sandbox is explicitly deleted.
+	// HardTtl Sandbox hard time-to-live in seconds. When it expires, Sandbox0 deletes the sandbox identity and durable state, including paused rootfs checkpoints.
 	HardTtl  *int32                `json:"hard_ttl,omitempty"`
 	Network  *SandboxNetworkPolicy `json:"network,omitempty"`
 	Services *[]SandboxAppService  `json:"services,omitempty"`
-	Ttl      *int32                `json:"ttl,omitempty"`
+
+	// Ttl Runtime soft time-to-live in seconds. When it expires, Sandbox0 checkpoints the writable rootfs, pauses the sandbox, and releases runtime compute while preserving durable sandbox state.
+	Ttl *int32 `json:"ttl,omitempty"`
 
 	// Webhook Per-sandbox webhook configuration. Sandbox0 delivers webhook events at least once and consumers should deduplicate by event_id. For sandbox lifecycle events, procd persists signed delivery records to a manager-owned SandboxVolume outside the workspace before dispatch; manager also emits sandbox.deleted during pod deletion cleanup.
 	Webhook *WebhookConfig `json:"webhook,omitempty"`
@@ -1618,24 +1605,6 @@ type SandboxNetworkPolicy struct {
 
 // SandboxNetworkPolicyMode defines model for SandboxNetworkPolicy.Mode.
 type SandboxNetworkPolicyMode string
-
-// SandboxPowerState defines model for SandboxPowerState.
-type SandboxPowerState struct {
-	Desired            SandboxPowerStateDesired  `json:"desired"`
-	DesiredGeneration  int64                     `json:"desired_generation"`
-	Observed           SandboxPowerStateObserved `json:"observed"`
-	ObservedGeneration int64                     `json:"observed_generation"`
-	Phase              SandboxPowerStatePhase    `json:"phase"`
-}
-
-// SandboxPowerStateDesired defines model for SandboxPowerState.Desired.
-type SandboxPowerStateDesired string
-
-// SandboxPowerStateObserved defines model for SandboxPowerState.Observed.
-type SandboxPowerStateObserved string
-
-// SandboxPowerStatePhase defines model for SandboxPowerState.Phase.
-type SandboxPowerStatePhase string
 
 // SandboxRefreshRequest defines model for SandboxRefreshRequest.
 type SandboxRefreshRequest struct {
@@ -1694,12 +1663,17 @@ type SandboxSummary struct {
 	ExpiresAt time.Time `json:"expires_at"`
 
 	// HardExpiresAt Hard expiration timestamp. Zero value means not set.
-	HardExpiresAt time.Time              `json:"hard_expires_at"`
-	Id            string                 `json:"id"`
-	Paused        bool                   `json:"paused"`
-	PowerState    SandboxPowerState      `json:"power_state"`
-	Status        SandboxLifecycleStatus `json:"status"`
-	TemplateId    string                 `json:"template_id"`
+	HardExpiresAt time.Time `json:"hard_expires_at"`
+	Id            string    `json:"id"`
+
+	// Paused True when status is paused and no runtime is attached.
+	Paused bool `json:"paused"`
+
+	// RuntimeGeneration Monotonically increasing runtime generation. Resume starts a new generation.
+	RuntimeGeneration int64                  `json:"runtime_generation"`
+	Status            SandboxLifecycleStatus `json:"status"`
+	TemplateId        string                 `json:"template_id"`
+	UpdatedAt         time.Time              `json:"updated_at"`
 }
 
 // SandboxTemplateCondition defines model for SandboxTemplateCondition.
@@ -1743,11 +1717,13 @@ type SandboxUpdateConfig struct {
 	// (API or public exposure) must not auto resume the sandbox.
 	AutoResume *bool `json:"auto_resume,omitempty"`
 
-	// HardTtl Hard time-to-live in seconds. When it expires, Sandbox0 cleans the runtime pod and preserves the sandbox identity, services, and public URLs until the sandbox is explicitly deleted.
+	// HardTtl Sandbox hard time-to-live in seconds. When it expires, Sandbox0 deletes the sandbox identity and durable state, including paused rootfs checkpoints.
 	HardTtl  *int32                `json:"hard_ttl,omitempty"`
 	Network  *SandboxNetworkPolicy `json:"network,omitempty"`
 	Services *[]SandboxAppService  `json:"services,omitempty"`
-	Ttl      *int32                `json:"ttl,omitempty"`
+
+	// Ttl Runtime soft time-to-live in seconds. When it expires, Sandbox0 checkpoints the writable rootfs, pauses the sandbox, and releases runtime compute while preserving durable sandbox state.
+	Ttl *int32 `json:"ttl,omitempty"`
 }
 
 // SandboxUpdateRequest defines model for SandboxUpdateRequest.

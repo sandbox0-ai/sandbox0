@@ -6,7 +6,7 @@ Use services for:
 
 - public HTTP routes into a sandbox
 - route-level method filtering, auth, CORS, rate limits, timeout, and path rewrite
-- public URL auto-resume for paused or cleaned sandboxes
+- public URL auto-resume for paused sandboxes
 - public entrypoints for listeners, command-backed services, and sandbox functions
 
 ## Mental Model
@@ -66,7 +66,7 @@ Routes are evaluated before proxying or function execution.
 | `cors` | Handles CORS preflight and response headers at the gateway |
 | `rate_limit` | Applies per-route rate limiting at the gateway |
 | `timeout_seconds` | Sets the upstream or function execution timeout |
-| `resume` | Allows this route to resume a paused or cleaned sandbox when sandbox `auto_resume` is also true |
+| `resume` | Allows this route to resume a paused sandbox when sandbox `auto_resume` is also true |
 
 `path_prefix` is not stripped automatically. Without `rewrite_prefix`, the upstream service or function handler sees the original request path.
 
@@ -510,9 +510,9 @@ Public service auto-resume has two gates:
 - sandbox `auto_resume` must be true
 - matched route `resume` must be true
 
-Both gates are required for public URL requests to wake a paused sandbox or a cleaned sandbox.
+Both gates are required for public URL requests to wake a paused sandbox.
 
-For a cleaned sandbox, Sandbox0 creates a new runtime pod for the same sandbox identity. The sandbox ID and service `public_url` stay unchanged. For `cmd` services, the command is started again in the new runtime pod. For `function` services, there is still no long-running listener; each request executes the handler after the sandbox runtime is available.
+For a paused sandbox, Sandbox0 creates a new runtime pod for the same sandbox identity and restores the latest rootfs checkpoint. The sandbox ID and service `public_url` stay unchanged until the sandbox is deleted or `hard_ttl` expires. For `cmd` services, the command is started again in the new runtime pod. For `function` services, there is still no long-running listener; each request executes the handler after the sandbox runtime is available.
 
 ## Notes
 

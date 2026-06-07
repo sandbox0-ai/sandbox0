@@ -327,9 +327,9 @@ func (s *SandboxService) CleanupDeletedSandbox(ctx context.Context, info Sandbox
 		return nil
 	}
 
-	runtimeCleaned := strings.TrimSpace(info.RuntimeDeletionReason) == runtimeDeletionReasonCleaned
+	runtimePaused := strings.TrimSpace(info.RuntimeDeletionReason) == runtimeDeletionReasonPaused
 	var errs []error
-	if !runtimeCleaned && s.deletionWebhookEmitter != nil && strings.TrimSpace(info.WebhookURL) != "" {
+	if !runtimePaused && s.deletionWebhookEmitter != nil && strings.TrimSpace(info.WebhookURL) != "" {
 		if err := s.deletionWebhookEmitter.EmitSandboxDeleted(ctx, info); err != nil {
 			errs = append(errs, fmt.Errorf("emit sandbox.deleted webhook: %w", err))
 		}
@@ -339,7 +339,7 @@ func (s *SandboxService) CleanupDeletedSandbox(ctx context.Context, info Sandbox
 			errs = append(errs, fmt.Errorf("remove network policy: %w", err))
 		}
 	}
-	if !runtimeCleaned && s.credentialStore != nil {
+	if !runtimePaused && s.credentialStore != nil {
 		teamID := strings.TrimSpace(info.TeamID)
 		if teamID == "" {
 			logger.Warn("Skipping credential binding cleanup for sandbox without team ID",
@@ -350,7 +350,7 @@ func (s *SandboxService) CleanupDeletedSandbox(ctx context.Context, info Sandbox
 			errs = append(errs, fmt.Errorf("delete credential bindings: %w", err))
 		}
 	}
-	if !runtimeCleaned {
+	if !runtimePaused {
 		if err := s.deleteWebhookStateVolume(ctx, info); err != nil {
 			errs = append(errs, fmt.Errorf("delete webhook state volume: %w", err))
 		}

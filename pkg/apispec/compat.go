@@ -1,9 +1,10 @@
 package apispec
 
 const (
-	Cleaned     = SandboxLifecycleStatusCleaned
-	Completed   = SandboxLifecycleStatusCompleted
 	Failed      = SandboxLifecycleStatusFailed
+	Paused      = SandboxLifecycleStatusPaused
+	Pausing     = SandboxLifecycleStatusPausing
+	Resuming    = SandboxLifecycleStatusResuming
 	Running     = SandboxLifecycleStatusRunning
 	Starting    = SandboxLifecycleStatusStarting
 	Terminating = SandboxLifecycleStatusTerminating

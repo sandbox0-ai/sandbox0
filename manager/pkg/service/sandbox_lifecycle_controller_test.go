@@ -265,7 +265,7 @@ func TestSandboxServiceCleanupDeletedSandboxEmitsWebhookAndMarksStateVolumeForCl
 	}
 }
 
-func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForCleanedRuntime(t *testing.T) {
+func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForPausedRuntime(t *testing.T) {
 	removed := make([]string, 0, 1)
 	store := &deleteRecordingBindingStore{}
 	volumeClient := &recordingSystemVolumeClient{}
@@ -288,7 +288,7 @@ func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForCleanedRunti
 		UserID:                "user-a",
 		WebhookURL:            "https://example.test/webhook",
 		WebhookStateVolumeID:  "volume-a",
-		RuntimeDeletionReason: runtimeDeletionReasonCleaned,
+		RuntimeDeletionReason: runtimeDeletionReasonPaused,
 	})
 	if err != nil {
 		t.Fatalf("CleanupDeletedSandbox() error = %v", err)

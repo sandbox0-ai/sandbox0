@@ -223,6 +223,7 @@ func (p *LifecycleProjector) handleDelete(obj any) {
 	templateID := pod.Labels[controller.LabelTemplateID]
 	podUsage := sandboxUsageFromPod(pod)
 	claimedAt, claimedAtSet := parseRFC3339(pod.Annotations[controller.AnnotationClaimedAt])
+	runtimePaused := pod.Annotations[controller.AnnotationRuntimeDeletionReason] == "paused"
 	pendingEvents := make([]*meteringpkg.Event, 0, 3)
 	pendingWindows := make([]*meteringpkg.Window, 0, 2)
 	if state == nil {
@@ -256,6 +257,22 @@ func (p *LifecycleProjector) handleDelete(obj any) {
 			state.PausedAt = &pausedAt
 			state.ActiveSince = nil
 		}
+	}
+	if runtimePaused {
+		if !state.Paused {
+			pendingWindows = append(pendingWindows, p.buildSandboxRuntimeWindow(state, teamID, userID, templateID, state.ActiveSince, observedAt))
+			pendingEvents = append(pendingEvents, p.buildSandboxEvent(sandboxID, teamID, userID, templateID, observedAt, meteringpkg.EventTypeSandboxPaused, pauseEventID(sandboxID, observedAt), nil))
+		}
+		state.Paused = true
+		state.PausedAt = &observedAt
+		state.ActiveSince = nil
+		state.TerminatedAt = nil
+		state.LastObservedAt = observedAt
+		state.LastResourceVer = pod.ResourceVersion
+		if err := p.commitProjection(ctx, sandboxID, state, pendingEvents, pendingWindows, observedAt); err != nil {
+			return
+		}
+		return
 	}
 	if state.TerminatedAt == nil {
 		if !state.Paused {

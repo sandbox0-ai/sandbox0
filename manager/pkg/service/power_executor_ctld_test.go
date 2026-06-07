@@ -23,13 +23,35 @@ func TestNewSandboxServiceInitializesCtldClientDefaults(t *testing.T) {
 	assert.Equal(t, 15*time.Second, svc.ctldClient.httpClient.Timeout)
 }
 
-func TestSandboxPowerRequiresCtldEnabled(t *testing.T) {
-	svc := NewSandboxService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, SandboxServiceConfig{}, zap.NewNop(), nil)
+func TestCheckpointPauseRequiresCtldEnabled(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sandbox-1",
+			Namespace: "default",
+			Labels: map[string]string{
+				controller.LabelSandboxID: "sandbox-1",
+			},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-1": {
+			ID:     "sandbox-1",
+			TeamID: "team-1",
+			Status: SandboxStatusRunning,
+		},
+	}}
+	svc := &SandboxService{
+		k8sClient:    fake.NewSimpleClientset(pod),
+		podLister:    newTestPodLister(t, pod),
+		sandboxStore: store,
+		config:       SandboxServiceConfig{},
+		logger:       zap.NewNop(),
+		clock:        systemTime{},
+	}
 
 	_, err := svc.PauseSandbox(context.Background(), "sandbox-1")
-	require.ErrorIs(t, err, ErrSandboxPowerRequiresCtld)
-	_, err = svc.ResumeSandbox(context.Background(), "sandbox-1")
-	require.ErrorIs(t, err, ErrSandboxPowerRequiresCtld)
+	require.ErrorIs(t, err, ErrSandboxCheckpointRequiresCtld)
 }
 
 func TestCtldAddressForPodUsesHostIPWithoutK8sClient(t *testing.T) {
@@ -62,88 +84,6 @@ func TestCtldAddressForPodUsesNodeCacheBeforeLiveGet(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "http://10.0.0.1:8095", address)
 	assert.Empty(t, k8sClient.Actions())
-}
-
-func TestCtldPowerExecutorRequestsPauseAsDesiredState(t *testing.T) {
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "sandbox-1",
-			Namespace: "default",
-			Labels: map[string]string{
-				controller.LabelSandboxID: "sandbox-1",
-			},
-		},
-		Status: corev1.PodStatus{Phase: corev1.PodRunning},
-	}
-	svc := &SandboxService{
-		k8sClient: fake.NewSimpleClientset(pod),
-		podLister: newTestPodLister(t, pod),
-		config:    SandboxServiceConfig{CtldEnabled: true, CtldPort: 8095},
-		logger:    zap.NewNop(),
-		clock:     systemTime{},
-	}
-
-	resp, err := svc.PauseSandbox(context.Background(), "sandbox-1")
-	require.NoError(t, err)
-	assert.True(t, resp.Paused)
-	assert.Equal(t, SandboxPowerStatePaused, resp.PowerState.Desired)
-	assert.Equal(t, SandboxPowerStateActive, resp.PowerState.Observed)
-	assert.Equal(t, SandboxPowerPhasePausing, resp.PowerState.Phase)
-
-	updated, err := svc.k8sClient.CoreV1().Pods("default").Get(context.Background(), "sandbox-1", metav1.GetOptions{})
-	require.NoError(t, err)
-	state := sandboxPowerStateFromAnnotations(updated.Annotations)
-	assert.Equal(t, SandboxPowerStatePaused, state.Desired)
-	assert.Equal(t, SandboxPowerStateActive, state.Observed)
-	assert.Equal(t, SandboxPowerPhasePausing, state.Phase)
-	assert.Empty(t, updated.Annotations[controller.AnnotationPaused])
-	assert.Empty(t, updated.Annotations[controller.AnnotationPausedState])
-}
-
-func TestCtldPowerExecutorRequestsResumeAsDesiredState(t *testing.T) {
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "sandbox-1",
-			Namespace: "default",
-			Labels: map[string]string{
-				controller.LabelSandboxID: "sandbox-1",
-			},
-			Annotations: map[string]string{
-				controller.AnnotationPaused:                       "true",
-				controller.AnnotationPausedAt:                     time.Now().UTC().Format(time.RFC3339),
-				controller.AnnotationPausedState:                  `{"resources":{"procd":{"requests":{"cpu":"100m","memory":"128Mi"},"limits":{"cpu":"200m","memory":"256Mi"}}}}`,
-				controller.AnnotationPowerStateDesired:            SandboxPowerStatePaused,
-				controller.AnnotationPowerStateDesiredGeneration:  "2",
-				controller.AnnotationPowerStateObserved:           SandboxPowerStatePaused,
-				controller.AnnotationPowerStateObservedGeneration: "2",
-				controller.AnnotationPowerStatePhase:              SandboxPowerPhaseStable,
-			},
-		},
-		Status: corev1.PodStatus{Phase: corev1.PodRunning},
-	}
-	svc := &SandboxService{
-		k8sClient: fake.NewSimpleClientset(pod),
-		podLister: newTestPodLister(t, pod),
-		config:    SandboxServiceConfig{CtldEnabled: true, CtldPort: 8095},
-		logger:    zap.NewNop(),
-		clock:     systemTime{},
-	}
-
-	resp, err := svc.ResumeSandbox(context.Background(), "sandbox-1")
-	require.NoError(t, err)
-	assert.True(t, resp.Resumed)
-	assert.Equal(t, SandboxPowerStateActive, resp.PowerState.Desired)
-	assert.Equal(t, SandboxPowerStatePaused, resp.PowerState.Observed)
-	assert.Equal(t, SandboxPowerPhaseResuming, resp.PowerState.Phase)
-
-	updated, err := svc.k8sClient.CoreV1().Pods("default").Get(context.Background(), "sandbox-1", metav1.GetOptions{})
-	require.NoError(t, err)
-	state := sandboxPowerStateFromAnnotations(updated.Annotations)
-	assert.Equal(t, SandboxPowerStateActive, state.Desired)
-	assert.Equal(t, SandboxPowerStatePaused, state.Observed)
-	assert.Equal(t, SandboxPowerPhaseResuming, state.Phase)
-	assert.Equal(t, "true", updated.Annotations[controller.AnnotationPaused])
-	assert.NotEmpty(t, updated.Annotations[controller.AnnotationPausedState])
 }
 
 func TestTerminateSandboxRequestsAsyncThawBeforeDelete(t *testing.T) {

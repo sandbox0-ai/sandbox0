@@ -30,14 +30,15 @@ type ListSandboxesResponse struct {
 
 // SandboxSummary represents a summary of a sandbox for listing
 type SandboxSummary struct {
-	ID            string            `json:"id"`
-	TemplateID    string            `json:"template_id"`
-	Status        string            `json:"status"`
-	Paused        bool              `json:"paused"`
-	PowerState    SandboxPowerState `json:"power_state"`
-	CreatedAt     time.Time         `json:"created_at"`
-	ExpiresAt     time.Time         `json:"expires_at"`
-	HardExpiresAt time.Time         `json:"hard_expires_at"`
+	ID                string    `json:"id"`
+	TemplateID        string    `json:"template_id"`
+	Status            string    `json:"status"`
+	Paused            bool      `json:"paused"`
+	RuntimeGeneration int64     `json:"runtime_generation"`
+	CreatedAt         time.Time `json:"created_at"`
+	ExpiresAt         time.Time `json:"expires_at"`
+	HardExpiresAt     time.Time `json:"hard_expires_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 // ListSandboxes lists all sandboxes for a team with optional filters
@@ -90,9 +91,8 @@ func (s *SandboxService) ListSandboxes(ctx context.Context, req *ListSandboxesRe
 			continue
 		}
 
-		// Filter by paused state if specified
-		powerState := sandboxPowerStateFromAnnotations(pod.Annotations)
-		paused := powerState.Observed == SandboxPowerStatePaused
+		// Filter by paused state if specified.
+		paused := status == SandboxStatusPaused
 		if req.Paused != nil && paused != *req.Paused {
 			continue
 		}
@@ -102,14 +102,15 @@ func (s *SandboxService) ListSandboxes(ctx context.Context, req *ListSandboxesRe
 		hardExpiresAt := parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt)
 
 		summaries = append(summaries, &SandboxSummary{
-			ID:            sandboxIDFromPod(pod),
-			TemplateID:    templateID,
-			Status:        status,
-			Paused:        paused,
-			PowerState:    powerState,
-			CreatedAt:     pod.CreationTimestamp.Time,
-			ExpiresAt:     expiresAt,
-			HardExpiresAt: hardExpiresAt,
+			ID:                sandboxIDFromPod(pod),
+			TemplateID:        templateID,
+			Status:            status,
+			Paused:            paused,
+			RuntimeGeneration: runtimeGenerationFromPod(pod),
+			CreatedAt:         pod.CreationTimestamp.Time,
+			ExpiresAt:         expiresAt,
+			HardExpiresAt:     hardExpiresAt,
+			UpdatedAt:         pod.CreationTimestamp.Time,
 		})
 	}
 
@@ -166,14 +167,15 @@ func (s *SandboxService) listSandboxesFromStore(ctx context.Context, req *ListSa
 			continue
 		}
 		summaries = append(summaries, &SandboxSummary{
-			ID:            sandbox.ID,
-			TemplateID:    sandbox.TemplateID,
-			Status:        sandbox.Status,
-			Paused:        sandbox.Paused,
-			PowerState:    sandbox.PowerState,
-			CreatedAt:     sandbox.CreatedAt,
-			ExpiresAt:     sandbox.ExpiresAt,
-			HardExpiresAt: sandbox.HardExpiresAt,
+			ID:                sandbox.ID,
+			TemplateID:        sandbox.TemplateID,
+			Status:            sandbox.Status,
+			Paused:            sandbox.Paused,
+			RuntimeGeneration: sandbox.RuntimeGeneration,
+			CreatedAt:         sandbox.CreatedAt,
+			ExpiresAt:         sandbox.ExpiresAt,
+			HardExpiresAt:     sandbox.HardExpiresAt,
+			UpdatedAt:         sandbox.UpdatedAt,
 		})
 	}
 

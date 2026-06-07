@@ -15,8 +15,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// RestoreCleanedSandboxRuntime recreates the runtime pod for a durable cleaned sandbox.
-func (s *SandboxService) RestoreCleanedSandboxRuntime(ctx context.Context, sandboxID string) (*Sandbox, error) {
+// ResumePausedSandboxRuntime creates a new runtime for a paused durable sandbox
+// and restores the latest writable rootfs checkpoint.
+func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandboxID string) (*Sandbox, error) {
 	if s == nil || s.sandboxStore == nil {
 		return nil, k8serrors.NewNotFound(corev1.Resource("pod"), sandboxID)
 	}
@@ -27,6 +28,10 @@ func (s *SandboxService) RestoreCleanedSandboxRuntime(ctx context.Context, sandb
 	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, locked *SandboxRecord) error {
 		if locked.Status == SandboxStatusDeleted || !locked.DeletedAt.IsZero() {
 			return k8serrors.NewNotFound(corev1.Resource("sandbox"), sandboxID)
+		}
+		switch locked.Status {
+		case SandboxStatusStarting, SandboxStatusPausing, SandboxStatusResuming:
+			return k8serrors.NewConflict(corev1.Resource("sandbox"), sandboxID, fmt.Errorf("sandbox lifecycle operation %q is in progress", locked.Status))
 		}
 		record = locked
 
@@ -44,6 +49,15 @@ func (s *SandboxService) RestoreCleanedSandboxRuntime(ctx context.Context, sandb
 
 		template, err := s.templateForSandboxRecord(locked)
 		if err != nil {
+			return err
+		}
+		if err := s.enforceActiveSandboxQuota(lockCtx, locked.TeamID); err != nil {
+			return err
+		}
+		if err := s.enforceSandboxCPUQuota(lockCtx, locked.TeamID, template); err != nil {
+			return err
+		}
+		if err := s.enforceSandboxMemoryQuota(lockCtx, locked.TeamID, template); err != nil {
 			return err
 		}
 		generation := locked.RuntimeGeneration + 1
@@ -67,7 +81,7 @@ func (s *SandboxService) RestoreCleanedSandboxRuntime(ctx context.Context, sandb
 				return fmt.Errorf("create runtime pod: %w", err)
 			}
 		}
-		return tx.SaveRuntime(lockCtx, sandboxID, pod.Namespace, pod.Name, SandboxStatusStarting, generation, parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt))
+		return tx.SaveRuntime(lockCtx, sandboxID, pod.Namespace, pod.Name, SandboxStatusResuming, generation, parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt))
 	})
 	if err != nil {
 		if errors.Is(err, ErrSandboxRecordNotFound) {
@@ -84,7 +98,7 @@ func (s *SandboxService) RestoreCleanedSandboxRuntime(ctx context.Context, sandb
 
 	if err := s.finishRestoredSandboxRuntime(ctx, pod, record, claimType); err != nil {
 		s.requestSandboxDeletionAfterClaimFailure(pod, "restored runtime initialization failed")
-		_ = s.cleanSandboxRuntime(context.Background(), sandboxID, false)
+		_ = s.pauseSandboxRuntime(context.Background(), sandboxID, false)
 		return nil, err
 	}
 	return s.GetSandbox(ctx, sandboxID)
@@ -136,7 +150,7 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 		return fmt.Errorf("persist restored sandbox: %w", err)
 	}
 	if s.logger != nil {
-		s.logger.Info("Restored cleaned sandbox runtime",
+		s.logger.Info("Resumed paused sandbox runtime",
 			zap.String("sandboxID", record.ID),
 			zap.String("pod", pod.Name),
 			zap.String("claimType", claimType),
@@ -179,23 +193,9 @@ func (s *SandboxService) templateForSandboxRecord(record *SandboxRecord) (*v1alp
 	}, nil
 }
 
-func cleanedSandboxRestoreResponse(sandboxID string, generation int64) *ResumeSandboxResponse {
-	return &ResumeSandboxResponse{
-		SandboxID: sandboxID,
-		Resumed:   true,
-		PowerState: SandboxPowerState{
-			Desired:            SandboxPowerStateActive,
-			DesiredGeneration:  generation,
-			Observed:           SandboxPowerStateActive,
-			ObservedGeneration: generation,
-			Phase:              SandboxPowerPhaseStable,
-		},
-	}
-}
-
 func sandboxRestoreContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if _, ok := ctx.Deadline(); ok {
 		return context.WithCancel(ctx)
 	}
-	return context.WithTimeout(ctx, defaultSandboxPowerTransitionTimeout)
+	return context.WithTimeout(ctx, defaultSandboxRestoreTimeout)
 }

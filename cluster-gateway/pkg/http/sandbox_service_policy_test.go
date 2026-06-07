@@ -484,7 +484,7 @@ func TestSandboxCMDServiceStartsContextBeforeProxy(t *testing.T) {
 	}
 }
 
-func TestSandboxCMDServiceStartsAfterCleanedAutoResume(t *testing.T) {
+func TestSandboxCMDServiceStartsAfterPausedAutoResume(t *testing.T) {
 	var created atomic.Bool
 	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -517,9 +517,10 @@ func TestSandboxCMDServiceStartsAfterCleanedAutoResume(t *testing.T) {
 		Status:       mgr.SandboxStatusRunning,
 		Services:     []mgr.SandboxAppService{newCMDServiceForTest(port, true)},
 	}
-	cleanedSandbox := *activeSandbox
-	cleanedSandbox.InternalAddr = ""
-	cleanedSandbox.Status = mgr.SandboxStatusCleaned
+	pausedSandbox := *activeSandbox
+	pausedSandbox.InternalAddr = ""
+	pausedSandbox.Status = mgr.SandboxStatusPaused
+	pausedSandbox.Paused = true
 
 	var resumed atomic.Bool
 	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -529,7 +530,7 @@ func TestSandboxCMDServiceStartsAfterCleanedAutoResume(t *testing.T) {
 				_ = spec.WriteSuccess(w, http.StatusOK, activeSandbox)
 				return
 			}
-			_ = spec.WriteSuccess(w, http.StatusOK, &cleanedSandbox)
+			_ = spec.WriteSuccess(w, http.StatusOK, &pausedSandbox)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sandboxes/sb-demo/resume":
 			resumed.Store(true)
 			_ = spec.WriteSuccess(w, http.StatusOK, map[string]any{"sandbox_id": "sb-demo"})

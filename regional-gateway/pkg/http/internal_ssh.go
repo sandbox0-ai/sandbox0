@@ -79,23 +79,21 @@ func (s *Server) resolveInternalSSHTarget(c *gin.Context) {
 		return
 	}
 
-	if sandboxWantsPausedRegional(sandbox) {
+	if sandboxNeedsRuntimeRegional(sandbox) {
 		if !sandbox.AutoResume {
-			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is paused and auto_resume is disabled")
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is not running and auto_resume is disabled")
 			return
 		}
-		if sandbox.PowerState.Desired != mgr.SandboxPowerStateActive {
-			if err := s.resumeSandboxViaClusterGateway(c.Request.Context(), targetURL, sandboxID, sandbox.TeamID, sshUserID); err != nil {
-				s.logger.Warn("Failed to request SSH sandbox resume via cluster-gateway",
-					zap.String("sandbox_id", sandboxID),
-					zap.String("team_id", sandbox.TeamID),
-					zap.String("user_id", sshUserID),
-					zap.String("cluster_gateway_url", targetURL),
-					zap.Error(err),
-				)
-				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox resume failed")
-				return
-			}
+		if err := s.resumeSandboxViaClusterGateway(c.Request.Context(), targetURL, sandboxID, sandbox.TeamID, sshUserID); err != nil {
+			s.logger.Warn("Failed to request SSH sandbox resume via cluster-gateway",
+				zap.String("sandbox_id", sandboxID),
+				zap.String("team_id", sandbox.TeamID),
+				zap.String("user_id", sshUserID),
+				zap.String("cluster_gateway_url", targetURL),
+				zap.Error(err),
+			)
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox resume failed")
+			return
 		}
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
 		return
@@ -163,14 +161,14 @@ func (s *Server) resolveClusterGatewayTarget(c *gin.Context, sandboxID string) (
 	return targetURL, nil
 }
 
-func sandboxWantsPausedRegional(sandbox *mgr.Sandbox) bool {
+func sandboxNeedsRuntimeRegional(sandbox *mgr.Sandbox) bool {
 	if sandbox == nil {
 		return false
 	}
-	if sandbox.PowerState.Desired == mgr.SandboxPowerStatePaused {
+	if sandbox.Status == mgr.SandboxStatusPaused {
 		return true
 	}
-	return sandbox.Paused
+	return strings.TrimSpace(sandbox.InternalAddr) == ""
 }
 
 func (s *Server) getSandboxFromClusterGateway(ctx context.Context, clusterGatewayURL, sandboxID string) (*mgr.Sandbox, int, error) {

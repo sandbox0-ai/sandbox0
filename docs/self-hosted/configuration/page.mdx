@@ -105,6 +105,53 @@ spec:
             enabled: true
 ```
 
+### Sandbox RuntimeClass
+
+Use `services.manager.config.sandboxRuntimeClassName` when sandbox Pods should run with a non-default runtime such as `runc`, `gvisor`, or a custom `gvisor-rootfs` handler.
+
+```yaml
+spec:
+    services:
+        manager:
+            config:
+                sandboxRuntimeClassName: gvisor-rootfs
+```
+
+This field only controls the `runtimeClassName` written onto sandbox Pods. The named Kubernetes `RuntimeClass` must already exist, and its `handler` must already be configured in the node CRI runtime on every eligible sandbox node.
+
+`infra-operator` does not install node runtime handlers. It does not install `runsc`, write `/etc/containerd/config.toml`, restart containerd, or create a `gvisor-rootfs` handler. Do that through your node image, node bootstrap automation, or a dedicated privileged node setup process before scheduling sandbox workloads there.
+
+For `gVisor` rootfs clean/restore support on self-managed clusters, use a dedicated containerd handler that points to `runsc` with shared file access and overlay disabled, then create a matching `RuntimeClass`:
+
+```toml
+# /etc/containerd/config.toml
+version = 2
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor-rootfs]
+    runtime_type = "io.containerd.runsc.v1"
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor-rootfs.options]
+    TypeUrl = "io.containerd.runsc.v1.options"
+    ConfigPath = "/etc/containerd/runsc-rootfs.toml"
+```
+
+```toml
+# /etc/containerd/runsc-rootfs.toml
+[runsc_config]
+    overlay2 = "none"
+    file-access = "shared"
+```
+
+```yaml
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+    name: gvisor-rootfs
+handler: gvisor-rootfs
+```
+
+Keep `services.netd.runtimeClassName` unset, or set it only to a host-compatible runtime such as `runc`. `netd` should not run under `gvisor`, `gvisor-rootfs`, or `kata`.
+
 ### Shared Redis Rate Limiting
 
 Gateway rate limiting defaults to process-local memory. Configure `spec.redis` when gateway replicas need a shared Redis backend; infra-operator injects the Redis rate-limit settings into gateway services.
@@ -356,6 +403,7 @@ The reference below is generated from the `Sandbox0Infra` CRD schema produced by
 - Use `sandboxNodePlacement` to keep sandbox workloads and node-local sandbox services on the same node set.
 - Treat `sandbox0.ai/data-plane-ready` as operator-owned; use your own labels under `sandboxNodePlacement` and let `infra-operator` manage readiness.
 - If sandbox workloads use `gvisor` or `kata`, keep `services.netd.runtimeClassName` on a host-compatible runtime such as the cluster default runtime.
+- `services.manager.config.sandboxRuntimeClassName` references an existing Kubernetes `RuntimeClass`; it does not install the node-level containerd handler.
 - Keep control-plane and data-plane components in the same storage and latency domain for a given region.
 
 ## Next Steps

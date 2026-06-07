@@ -282,6 +282,55 @@ Expected result:
 
 This sample uses the native GKE node label `sandbox.gke.io/runtime=gvisor` for sandbox placement. You do not need to add a separate custom node label just to target `gVisor` nodes.
 
+### RuntimeClass and Rootfs Clean/Restore
+
+`services.manager.config.sandboxRuntimeClassName` only tells Sandbox0 which Kubernetes `RuntimeClass` to put on sandbox Pods. It does not install `runsc`, edit the node's containerd config, restart containerd, or create a custom runtime handler.
+
+On GKE Sandbox, Google manages the standard `gVisor` runtime setup and the sample uses `sandboxRuntimeClassName: gvisor`. On self-managed clusters, install the runtime handler and `RuntimeClass` before pointing Sandbox0 at it.
+
+For `gVisor` rootfs clean/restore support, use a dedicated handler with shared rootfs access. `gvisor-rootfs` is just an example name; the Kubernetes `RuntimeClass.handler` must match the handler configured in containerd on every sandbox node.
+
+```toml
+# /etc/containerd/config.toml
+version = 2
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor-rootfs]
+    runtime_type = "io.containerd.runsc.v1"
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor-rootfs.options]
+    TypeUrl = "io.containerd.runsc.v1.options"
+    ConfigPath = "/etc/containerd/runsc-rootfs.toml"
+```
+
+```toml
+# /etc/containerd/runsc-rootfs.toml
+[runsc_config]
+    overlay2 = "none"
+    file-access = "shared"
+```
+
+Restart containerd after changing node runtime configuration, then create the matching `RuntimeClass`:
+
+```yaml
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+    name: gvisor-rootfs
+handler: gvisor-rootfs
+```
+
+Then configure Sandbox0 sandbox Pods to use it:
+
+```yaml
+spec:
+    services:
+        manager:
+            config:
+                sandboxRuntimeClassName: gvisor-rootfs
+```
+
+Do not set `services.netd.runtimeClassName` to `gvisor`, `gvisor-rootfs`, or `kata`. `netd` should keep running on the node's default host-compatible runtime.
+
 ### 6) Expose the API Publicly
 
 After the `LoadBalancer` patch above, GKE allocates a public IP for `cluster-gateway`.
@@ -340,6 +389,7 @@ If `s0 sandbox create` returns a sandbox ID and the sandbox reaches `running`, t
 - Sandbox workload runtime selection should be handled by cluster defaults or administrator-managed service configuration, and the GCP `gVisor` sample places sandbox workloads onto nodes labeled `sandbox.gke.io/runtime=gvisor`.
 - Use `sandboxNodePlacement` to place sandbox workloads, `netd`, and `ctld` onto the same sandbox node pool.
 - Do not set `services.netd.runtimeClassName: gvisor`.
+- `infra-operator` does not install containerd runtime handlers. Install `runsc`/`containerd-shim-runsc-v1`, configure the handler, restart containerd, and create the `RuntimeClass` before using a custom `sandboxRuntimeClassName`.
 - `netd` and `ctld` depend on host features such as `hostNetwork` and `hostPath`. This is why GKE Autopilot is not a good fit for full Sandbox0 deployments.
 - Even when `netd` and `ctld` are scheduled onto `gVisor` nodes, they still run on the node's default host runtime because `services.netd.runtimeClassName` remains unset.
 - If you hit GCP `SSD_TOTAL_GB` quota limits while creating node pools, reduce `--disk-size` explicitly instead of relying on the larger default boot disk size.

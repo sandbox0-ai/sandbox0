@@ -10,7 +10,7 @@ This is the shortest production-like path from zero to a running self-hosted San
 - A default `StorageClass`
 
 <Callout variant="info">
-Kubernetes `1.35+` is required because Sandbox0 pause/resume depends on `ctld` and Kubernetes in-place pod resource updates. Sandbox pause needs to freeze the sandbox cgroup and reduce sandbox pod resources without recreating the pod, otherwise process state cannot be preserved across pause/resume.
+Kubernetes `1.35+` is required for the supported Sandbox0 runtime stack. Checkpointed pause/resume depends on `ctld` on sandbox nodes so Sandbox0 can save and restore writable rootfs checkpoints when releasing and recreating runtime pods.
 </Callout>
 
 ## 0) Create a Local Kind Cluster
@@ -288,7 +288,7 @@ This sample uses the native GKE node label `sandbox.gke.io/runtime=gvisor` for s
 
 On GKE Sandbox, Google manages the standard `gVisor` runtime setup and the sample uses `sandboxRuntimeClassName: gvisor`. On self-managed clusters, install the runtime handler and `RuntimeClass` before pointing Sandbox0 at it.
 
-For `gVisor` rootfs clean/restore support, use a dedicated handler with shared rootfs access. `gvisor-rootfs` is just an example name; the Kubernetes `RuntimeClass.handler` must match the handler configured in containerd on every sandbox node.
+For `gVisor` rootfs checkpoint and restore support, use a dedicated handler with shared rootfs access. `gvisor-rootfs` is just an example name; the Kubernetes `RuntimeClass.handler` must match the handler configured in containerd on every sandbox node.
 
 ```toml
 # /etc/containerd/config.toml

@@ -13,24 +13,19 @@ func SandboxToAPI(sandbox *mgr.Sandbox, sshInfo *ConnectionInfo) *apispec.Sandbo
 	}
 
 	payload := &apispec.Sandbox{
-		AutoResume:    sandbox.AutoResume,
-		ClaimedAt:     sandbox.ClaimedAt,
-		CreatedAt:     sandbox.CreatedAt,
-		ExpiresAt:     sandbox.ExpiresAt,
-		HardExpiresAt: sandbox.HardExpiresAt,
-		Id:            sandbox.ID,
-		Paused:        sandbox.Paused,
-		PodName:       sandbox.PodName,
-		PowerState: apispec.SandboxPowerState{
-			Desired:            apispec.SandboxPowerStateDesired(sandbox.PowerState.Desired),
-			DesiredGeneration:  sandbox.PowerState.DesiredGeneration,
-			Observed:           apispec.SandboxPowerStateObserved(sandbox.PowerState.Observed),
-			ObservedGeneration: sandbox.PowerState.ObservedGeneration,
-			Phase:              apispec.SandboxPowerStatePhase(sandbox.PowerState.Phase),
-		},
-		Status:     apispec.SandboxLifecycleStatus(sandbox.Status),
-		TeamId:     sandbox.TeamID,
-		TemplateId: sandbox.TemplateID,
+		AutoResume:        sandbox.AutoResume,
+		ClaimedAt:         sandbox.ClaimedAt,
+		CreatedAt:         sandbox.CreatedAt,
+		ExpiresAt:         sandbox.ExpiresAt,
+		HardExpiresAt:     sandbox.HardExpiresAt,
+		Id:                sandbox.ID,
+		Paused:            sandbox.Paused,
+		PodName:           sandbox.PodName,
+		RuntimeGeneration: sandbox.RuntimeGeneration,
+		Status:            apispec.SandboxLifecycleStatus(sandbox.Status),
+		TeamId:            sandbox.TeamID,
+		TemplateId:        sandbox.TemplateID,
+		UpdatedAt:         sandbox.UpdatedAt,
 	}
 	if sandbox.UserID != "" {
 		payload.UserId = &sandbox.UserID

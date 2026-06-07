@@ -6,7 +6,7 @@ Use functions for:
 
 - public webhook receivers
 - lightweight control endpoints
-- HTTP handlers that should resume a paused or cleaned sandbox on demand
+- HTTP handlers that should resume a paused sandbox on demand
 - handlers that return normal HTTP responses, SSE streams, or WebSocket messages
 
 ## Use Case: Warm Repository Webhooks
@@ -360,7 +360,7 @@ Public function auto-resume has two gates:
 - sandbox `auto_resume` must be true
 - matched route `resume` must be true
 
-Both gates are required for public URL requests to wake a paused sandbox or a cleaned sandbox. For a cleaned sandbox, Sandbox0 creates a new runtime pod for the same sandbox identity. The sandbox ID and function `public_url` stay unchanged, and each matching request executes the handler after the sandbox runtime is available.
+Both gates are required for public URL requests to wake a paused sandbox. Sandbox0 creates a new runtime pod for the same sandbox identity, restores the latest rootfs checkpoint, and then executes the handler. The sandbox ID and function `public_url` stay unchanged until the sandbox is deleted or `hard_ttl` expires.
 
 ## Notes
 

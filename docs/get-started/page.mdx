@@ -172,7 +172,7 @@ func main() {
     // Claim a sandbox from the "default" template
     sandbox, err := client.ClaimSandbox(ctx, "default",
         sandbox0.WithSandboxTTL(300),      // Auto-pause after 5 minutes (default: 5m)
-        sandbox0.WithSandboxHardTTL(3600), // Clean runtime after 1 hour (optional, 0 disables)
+        sandbox0.WithSandboxHardTTL(3600), // Delete sandbox state after 1 hour (optional, 0 disables)
     )
     if err != nil {
         log.Fatal(err)
@@ -199,7 +199,7 @@ client = Client(
 # Claim a sandbox from the "default" template
 with client.sandboxes.open("default", config=SandboxConfig(
     ttl=300,       # Auto-pause after 5 minutes (default: 5m)
-    hard_ttl=3600, # Clean runtime after 1 hour (optional, 0 disables)
+    hard_ttl=3600, # Delete sandbox state after 1 hour (optional, 0 disables)
 )) as sandbox:
     print(f"Sandbox ID: {sandbox.id}")
     print(f"Status: {sandbox.status}")`
@@ -219,7 +219,7 @@ const client = new Client({
 // Claim a sandbox from the "default" template
 const sandbox = await client.sandboxes.claim('default', {
     ttl: 300,       // Auto-pause after 5 minutes (default: 5m)
-    hardTtl: 3600,  // Clean runtime after 1 hour (optional, 0 disables)
+    hardTtl: 3600,  // Delete sandbox state after 1 hour (optional, 0 disables)
 });
 console.log('Sandbox ID:', sandbox.id);
 console.log('Status:', sandbox.status);

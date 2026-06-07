@@ -97,13 +97,13 @@ func TestGetProcdURLRechecksPausedStateAfterSuccessfulAccess(t *testing.T) {
 			}
 			if getCalls == 2 {
 				sandbox.Paused = true
-				sandbox.PowerState = mgr.SandboxPowerState{
-					Desired:            mgr.SandboxPowerStatePaused,
-					DesiredGeneration:  3,
-					Observed:           mgr.SandboxPowerStatePaused,
-					ObservedGeneration: 3,
-					Phase:              mgr.SandboxPowerPhaseStable,
-				}
+				sandbox.Status = mgr.SandboxStatusPaused
+				sandbox.InternalAddr = ""
+			}
+			if getCalls >= 3 {
+				sandbox.Paused = false
+				sandbox.Status = mgr.SandboxStatusRunning
+				sandbox.InternalAddr = "http://127.0.0.1:7777"
 			}
 			_ = spec.WriteSuccess(w, http.StatusOK, sandbox)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sandboxes/sb-1/resume":
@@ -111,13 +111,6 @@ func TestGetProcdURLRechecksPausedStateAfterSuccessfulAccess(t *testing.T) {
 			_ = spec.WriteSuccess(w, http.StatusOK, mgr.ResumeSandboxResponse{
 				SandboxID: "sb-1",
 				Resumed:   true,
-				PowerState: mgr.SandboxPowerState{
-					Desired:            mgr.SandboxPowerStateActive,
-					DesiredGeneration:  4,
-					Observed:           mgr.SandboxPowerStateActive,
-					ObservedGeneration: 4,
-					Phase:              mgr.SandboxPowerPhaseStable,
-				},
 			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -140,8 +133,8 @@ func TestGetProcdURLRechecksPausedStateAfterSuccessfulAccess(t *testing.T) {
 	if addr == nil || addr.String() != "http://127.0.0.1:7777" {
 		t.Fatalf("second addr = %v, want http://127.0.0.1:7777", addr)
 	}
-	if getCalls != 2 {
-		t.Fatalf("getCalls = %d, want 2", getCalls)
+	if getCalls != 3 {
+		t.Fatalf("getCalls = %d, want 3", getCalls)
 	}
 	if resumeCalls != 1 {
 		t.Fatalf("resumeCalls = %d, want 1", resumeCalls)
@@ -178,30 +171,16 @@ func TestGetProcdURLPausedSandboxReturnsWakingUp(t *testing.T) {
 				ID:           "sb-1",
 				TeamID:       "team-a",
 				UserID:       "user-a",
-				InternalAddr: "http://127.0.0.1:7777",
-				Status:       mgr.SandboxStatusRunning,
-				Paused:       false,
+				InternalAddr: "",
+				Status:       mgr.SandboxStatusPaused,
+				Paused:       true,
 				AutoResume:   true,
-				PowerState: mgr.SandboxPowerState{
-					Desired:            mgr.SandboxPowerStatePaused,
-					DesiredGeneration:  3,
-					Observed:           mgr.SandboxPowerStatePaused,
-					ObservedGeneration: 3,
-					Phase:              mgr.SandboxPowerPhaseStable,
-				},
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sandboxes/sb-1/resume":
 			resumeCalls++
 			_ = spec.WriteSuccess(w, http.StatusOK, mgr.ResumeSandboxResponse{
 				SandboxID: "sb-1",
 				Resumed:   true,
-				PowerState: mgr.SandboxPowerState{
-					Desired:            mgr.SandboxPowerStateActive,
-					DesiredGeneration:  4,
-					Observed:           mgr.SandboxPowerStateActive,
-					ObservedGeneration: 4,
-					Phase:              mgr.SandboxPowerPhaseStable,
-				},
 			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -215,9 +194,12 @@ func TestGetProcdURLPausedSandboxReturnsWakingUp(t *testing.T) {
 		logger:        zap.NewNop(),
 	}
 
-	addr, _ := mustGetProcdURL(t, server, "team-a", "user-a", "sb-1")
-	if addr == nil || addr.String() != "http://127.0.0.1:7777" {
-		t.Fatalf("addr = %v, want http://127.0.0.1:7777", addr)
+	addr, rec := mustGetProcdURL(t, server, "team-a", "user-a", "sb-1")
+	if addr != nil {
+		t.Fatalf("addr = %v, want nil", addr)
+	}
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
 	}
 	if resumeCalls != 1 {
 		t.Fatalf("resumeCalls = %d, want 1", resumeCalls)

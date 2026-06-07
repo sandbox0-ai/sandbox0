@@ -78,19 +78,32 @@ func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string)
 	return nil
 }
 
-// CleanSandboxRuntime deletes the runtime pod while preserving durable sandbox state and public services.
-func (s *SandboxService) CleanSandboxRuntime(ctx context.Context, sandboxID string) error {
-	return s.cleanSandboxRuntime(ctx, sandboxID, true)
+// PauseSandboxRuntime checkpoints the writable rootfs, deletes the runtime pod,
+// and preserves the durable sandbox identity for a later resume.
+func (s *SandboxService) PauseSandboxRuntime(ctx context.Context, sandboxID string) error {
+	return s.pauseSandboxRuntime(ctx, sandboxID, true)
 }
 
-func (s *SandboxService) cleanSandboxRuntime(ctx context.Context, sandboxID string, saveRootFS bool) error {
-	s.logger.Info("Cleaning sandbox runtime", zap.String("sandboxID", sandboxID))
-	clean := func(ctx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
+func (s *SandboxService) pauseSandboxRuntime(ctx context.Context, sandboxID string, saveRootFS bool) error {
+	s.logger.Info("Pausing sandbox runtime", zap.String("sandboxID", sandboxID))
+	pause := func(ctx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
+		if record != nil {
+			switch record.Status {
+			case SandboxStatusDeleted:
+				return k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
+			case SandboxStatusPaused:
+				return nil
+			case SandboxStatusStarting, SandboxStatusPausing, SandboxStatusResuming:
+				if saveRootFS {
+					return k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID, fmt.Errorf("sandbox lifecycle operation %q is in progress", record.Status))
+				}
+			}
+		}
 		pod, err := s.getSandboxPod(ctx, sandboxID)
 		if err != nil {
 			if k8serrors.IsNotFound(err) {
 				if tx != nil {
-					return tx.MarkRuntimeCleaned(ctx, sandboxID, 0, s.clock.Now())
+					return tx.MarkRuntimePaused(ctx, sandboxID, 0, s.clock.Now())
 				}
 				return nil
 			}
@@ -98,6 +111,9 @@ func (s *SandboxService) cleanSandboxRuntime(ctx context.Context, sandboxID stri
 		}
 		generation := runtimeGenerationFromPod(pod)
 		if saveRootFS {
+			if s == nil || !s.config.CtldEnabled || s.ctldClient == nil {
+				return ErrSandboxCheckpointRequiresCtld
+			}
 			if err := s.saveSandboxRootFSCheckpoint(ctx, pod, record, tx); err != nil {
 				return err
 			}
@@ -106,7 +122,7 @@ func (s *SandboxService) cleanSandboxRuntime(ctx context.Context, sandboxID stri
 		if err != nil {
 			return fmt.Errorf("ensure sandbox cleanup finalizer: %w", err)
 		}
-		pod, err = s.markRuntimeDeletionReason(ctx, pod, runtimeDeletionReasonCleaned)
+		pod, err = s.markRuntimeDeletionReason(ctx, pod, runtimeDeletionReasonPaused)
 		if err != nil {
 			return fmt.Errorf("mark runtime deletion reason: %w", err)
 		}
@@ -114,29 +130,47 @@ func (s *SandboxService) cleanSandboxRuntime(ctx context.Context, sandboxID stri
 			return fmt.Errorf("delete runtime pod: %w", err)
 		}
 		if tx != nil {
-			return tx.MarkRuntimeCleaned(ctx, sandboxID, generation, s.clock.Now())
+			return tx.MarkRuntimePaused(ctx, sandboxID, generation, s.clock.Now())
 		}
 		return nil
 	}
 	if s.sandboxStore != nil {
-		if err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, clean); err != nil {
+		if err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, pause); err != nil {
 			if errors.Is(err, ErrSandboxRecordNotFound) {
-				return clean(ctx, nil, nil)
+				return pause(ctx, nil, nil)
 			}
 			return err
 		}
 		return nil
 	}
-	return clean(ctx, nil, nil)
+	return pause(ctx, nil, nil)
 }
 
-// CleanSandboxRuntimeByID implements controller.SandboxRuntimeCleaner.
-func (s *SandboxService) CleanSandboxRuntimeByID(ctx context.Context, sandboxID string) error {
-	return s.CleanSandboxRuntime(ctx, sandboxID)
+// PauseSandboxByID implements controller.SandboxRuntimePauser.
+func (s *SandboxService) PauseSandboxByID(ctx context.Context, sandboxID string) error {
+	return s.PauseSandboxRuntime(ctx, sandboxID)
+}
+
+// ListHardExpiredSandboxIDs returns durable sandboxes whose hard TTL has expired.
+func (s *SandboxService) ListHardExpiredSandboxIDs(ctx context.Context, now time.Time, limit int) ([]string, error) {
+	if s == nil || s.sandboxStore == nil {
+		return nil, nil
+	}
+	records, err := s.sandboxStore.ListHardExpiredSandboxes(ctx, now, limit)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(records))
+	for _, record := range records {
+		if record != nil && strings.TrimSpace(record.ID) != "" {
+			ids = append(ids, record.ID)
+		}
+	}
+	return ids, nil
 }
 
 const (
-	runtimeDeletionReasonCleaned = "cleaned"
+	runtimeDeletionReasonPaused  = "paused"
 	runtimeDeletionReasonDeleted = "deleted"
 )
 
@@ -168,7 +202,7 @@ func (s *SandboxService) thawSandboxBeforeTermination(ctx context.Context, pod *
 	if s == nil || !s.config.CtldEnabled || !sandboxPodMayHaveFrozenCgroup(pod) {
 		return
 	}
-	if _, err := s.RequestResumeSandbox(ctx, sandboxID); err != nil {
+	if _, err := s.requestSandboxPowerState(ctx, sandboxID, SandboxPowerStateActive); err != nil {
 		s.logger.Warn("Failed to request sandbox thaw before termination",
 			zap.String("sandboxID", sandboxID),
 			zap.Error(err),
@@ -215,7 +249,7 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 				return nil, fmt.Errorf("get sandbox record: %w", getErr)
 			}
 			if record != nil && record.Status != SandboxStatusDeleted {
-				return s.updateCleanedSandboxRecord(ctx, record, cfg)
+				return s.updatePausedSandboxRecord(ctx, record, cfg)
 			}
 		}
 		return nil, fmt.Errorf("get pod: %w", err)
@@ -340,7 +374,7 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 	return s.podToSandbox(ctx, updatedPod, sandboxID), nil
 }
 
-func (s *SandboxService) updateCleanedSandboxRecord(ctx context.Context, record *SandboxRecord, cfg *SandboxUpdateConfig) (*Sandbox, error) {
+func (s *SandboxService) updatePausedSandboxRecord(ctx context.Context, record *SandboxRecord, cfg *SandboxUpdateConfig) (*Sandbox, error) {
 	if record == nil {
 		return nil, k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, "")
 	}
@@ -501,25 +535,24 @@ func (s *SandboxService) podToSandbox(ctx context.Context, pod *corev1.Pod, sand
 	if cfg.AutoResume != nil {
 		autoResume = *cfg.AutoResume
 	}
-	powerState := sandboxPowerStateFromAnnotations(pod.Annotations)
-
 	return &Sandbox{
-		ID:            sandboxID,
-		TemplateID:    sandboxTemplateIDFromLabels(pod.Labels),
-		TeamID:        pod.Annotations[controller.AnnotationTeamID],
-		UserID:        pod.Annotations[controller.AnnotationUserID],
-		InternalAddr:  internalAddr,
-		Status:        status,
-		Paused:        powerState.Observed == SandboxPowerStatePaused,
-		PowerState:    powerState,
-		AutoResume:    autoResume,
-		Services:      cfg.Services,
-		Mounts:        parseClaimMounts(pod.Annotations[controller.AnnotationMounts]),
-		PodName:       pod.Name,
-		ExpiresAt:     expiresAt,
-		HardExpiresAt: hardExpiresAt,
-		ClaimedAt:     claimedAt,
-		CreatedAt:     createdAt,
+		ID:                sandboxID,
+		TemplateID:        sandboxTemplateIDFromLabels(pod.Labels),
+		TeamID:            pod.Annotations[controller.AnnotationTeamID],
+		UserID:            pod.Annotations[controller.AnnotationUserID],
+		InternalAddr:      internalAddr,
+		Status:            status,
+		Paused:            status == SandboxStatusPaused,
+		AutoResume:        autoResume,
+		Services:          cfg.Services,
+		Mounts:            parseClaimMounts(pod.Annotations[controller.AnnotationMounts]),
+		PodName:           pod.Name,
+		RuntimeGeneration: runtimeGenerationFromPod(pod),
+		ExpiresAt:         expiresAt,
+		HardExpiresAt:     hardExpiresAt,
+		ClaimedAt:         claimedAt,
+		CreatedAt:         createdAt,
+		UpdatedAt:         createdAt,
 	}
 }
 
@@ -531,29 +564,23 @@ func (s *SandboxService) recordToSandbox(record *SandboxRecord) *Sandbox {
 	if record.Config.AutoResume != nil {
 		autoResume = *record.Config.AutoResume
 	}
-	powerState := SandboxPowerState{
-		Desired:            SandboxPowerStateActive,
-		DesiredGeneration:  record.RuntimeGeneration,
-		Observed:           SandboxPowerStateActive,
-		ObservedGeneration: record.RuntimeGeneration,
-		Phase:              SandboxPowerPhaseStable,
-	}
 	return &Sandbox{
-		ID:            record.ID,
-		TemplateID:    record.TemplateID,
-		TeamID:        record.TeamID,
-		UserID:        record.UserID,
-		Status:        record.Status,
-		Paused:        false,
-		PowerState:    powerState,
-		AutoResume:    autoResume,
-		Services:      record.Config.Services,
-		Mounts:        record.Mounts,
-		PodName:       record.CurrentPodName,
-		ExpiresAt:     record.ExpiresAt,
-		HardExpiresAt: record.HardExpiresAt,
-		ClaimedAt:     record.ClaimedAt,
-		CreatedAt:     record.CreatedAt,
+		ID:                record.ID,
+		TemplateID:        record.TemplateID,
+		TeamID:            record.TeamID,
+		UserID:            record.UserID,
+		Status:            record.Status,
+		Paused:            record.Status == SandboxStatusPaused,
+		AutoResume:        autoResume,
+		Services:          record.Config.Services,
+		Mounts:            record.Mounts,
+		PodName:           record.CurrentPodName,
+		RuntimeGeneration: record.RuntimeGeneration,
+		ExpiresAt:         record.ExpiresAt,
+		HardExpiresAt:     record.HardExpiresAt,
+		ClaimedAt:         record.ClaimedAt,
+		CreatedAt:         record.CreatedAt,
+		UpdatedAt:         record.UpdatedAt,
 	}
 }
 

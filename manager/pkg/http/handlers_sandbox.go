@@ -548,7 +548,7 @@ func (s *Server) pauseSandbox(c *gin.Context) {
 
 	resp, err := s.sandboxService.PauseSandboxAndWait(c.Request.Context(), sandboxID)
 	if err != nil {
-		s.writeSandboxPowerTransitionError(c, "pause", sandboxID, err)
+		s.writeSandboxLifecycleTransitionError(c, "pause", sandboxID, err)
 		return
 	}
 
@@ -584,24 +584,28 @@ func (s *Server) resumeSandbox(c *gin.Context) {
 
 	resp, err := s.sandboxService.ResumeSandboxAndWait(c.Request.Context(), sandboxID)
 	if err != nil {
-		s.writeSandboxPowerTransitionError(c, "resume", sandboxID, err)
+		s.writeSandboxLifecycleTransitionError(c, "resume", sandboxID, err)
 		return
 	}
 
 	spec.JSONSuccess(c, http.StatusOK, resp)
 }
 
-func (s *Server) writeSandboxPowerTransitionError(c *gin.Context, action, sandboxID string, err error) {
-	s.logger.Error("Failed to change sandbox power state",
+func (s *Server) writeSandboxLifecycleTransitionError(c *gin.Context, action, sandboxID string, err error) {
+	s.logger.Error("Failed to change sandbox lifecycle state",
 		zap.String("action", action),
 		zap.String("sandboxID", sandboxID),
 		zap.Error(err),
 	)
 	switch {
-	case errors.Is(err, service.ErrSandboxPowerTransitionSuperseded):
-		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, fmt.Sprintf("sandbox %s was superseded by a newer power transition", action))
-	case errors.Is(err, service.ErrSandboxPowerRequiresCtld):
-		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox pause/resume requires ctld")
+	case apierrors.IsConflict(err):
+		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, fmt.Sprintf("sandbox %s conflicts with another lifecycle operation", action))
+	case apierrors.IsNotFound(err):
+		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
+	case errors.Is(err, service.ErrQuotaExceeded):
+		spec.JSONError(c, http.StatusTooManyRequests, "quota_exceeded", err.Error())
+	case errors.Is(err, service.ErrSandboxCheckpointRequiresCtld):
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox checkpoint pause requires ctld")
 	case errors.Is(err, context.DeadlineExceeded):
 		spec.JSONError(c, http.StatusGatewayTimeout, spec.CodeUnavailable, fmt.Sprintf("timed out waiting for sandbox to %s", action))
 	case errors.Is(err, context.Canceled):

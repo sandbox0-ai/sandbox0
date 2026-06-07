@@ -27,11 +27,11 @@ func (c staticCleanupClock) Now() time.Time                  { return c.now }
 func (c staticCleanupClock) Since(t time.Time) time.Duration { return c.now.Sub(t) }
 func (c staticCleanupClock) Until(t time.Time) time.Duration { return t.Sub(c.now) }
 
-type recordingPauseRequester struct {
+type recordingRuntimePauser struct {
 	calls []string
 }
 
-func (r *recordingPauseRequester) RequestPauseSandboxByID(_ context.Context, sandboxID string) error {
+func (r *recordingRuntimePauser) PauseSandboxByID(_ context.Context, sandboxID string) error {
 	r.calls = append(r.calls, sandboxID)
 	return nil
 }
@@ -45,17 +45,23 @@ func (r *recordingSandboxTerminator) TerminateSandboxByID(_ context.Context, san
 	return nil
 }
 
-type recordingRuntimeCleaner struct {
+type recordingHardExpiredLister struct {
+	calls []time.Time
+	ids   []string
+}
+
+func (r *recordingHardExpiredLister) ListHardExpiredSandboxIDs(_ context.Context, now time.Time, _ int) ([]string, error) {
+	r.calls = append(r.calls, now)
+	return append([]string(nil), r.ids...), nil
+}
+
+type recordingLifecycleService struct {
+	recordingRuntimePauser
 	recordingSandboxTerminator
-	cleanCalls []string
+	recordingHardExpiredLister
 }
 
-func (r *recordingRuntimeCleaner) CleanSandboxRuntimeByID(_ context.Context, sandboxID string) error {
-	r.cleanCalls = append(r.cleanCalls, sandboxID)
-	return nil
-}
-
-func TestCleanupExpiredRequestsPauseDesiredState(t *testing.T) {
+func TestCleanupExpiredPausesRuntime(t *testing.T) {
 	now := time.Date(2026, time.April, 15, 19, 31, 0, 0, time.UTC)
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
@@ -81,7 +87,7 @@ func TestCleanupExpiredRequestsPauseDesiredState(t *testing.T) {
 	})
 	require.NoError(t, indexer.Add(pod))
 
-	pauseRequester := &recordingPauseRequester{}
+	runtimePauser := &recordingRuntimePauser{}
 	recorder := record.NewFakeRecorder(1)
 	controller := NewCleanupController(
 		nil,
@@ -89,7 +95,7 @@ func TestCleanupExpiredRequestsPauseDesiredState(t *testing.T) {
 		nil,
 		recorder,
 		staticCleanupClock{now: now},
-		pauseRequester,
+		runtimePauser,
 		nil,
 		zap.NewNop(),
 		time.Minute,
@@ -97,10 +103,10 @@ func TestCleanupExpiredRequestsPauseDesiredState(t *testing.T) {
 
 	require.NoError(t, controller.cleanupExpired(context.Background(), template))
 
-	assert.Equal(t, []string{"sandbox-1"}, pauseRequester.calls)
+	assert.Equal(t, []string{"sandbox-1"}, runtimePauser.calls)
 	select {
 	case event := <-recorder.Events:
-		assert.Contains(t, event, "ExpiredPodPauseRequested")
+		assert.Contains(t, event, "ExpiredSandboxRuntimePaused")
 	default:
 		t.Fatal("expected pause-requested event")
 	}
@@ -134,7 +140,7 @@ func TestCleanupExpiredSkipsDeletingPod(t *testing.T) {
 	})
 	require.NoError(t, indexer.Add(pod))
 
-	pauseRequester := &recordingPauseRequester{}
+	runtimePauser := &recordingRuntimePauser{}
 	recorder := record.NewFakeRecorder(1)
 	controller := NewCleanupController(
 		nil,
@@ -142,7 +148,7 @@ func TestCleanupExpiredSkipsDeletingPod(t *testing.T) {
 		nil,
 		recorder,
 		staticCleanupClock{now: now},
-		pauseRequester,
+		runtimePauser,
 		nil,
 		zap.NewNop(),
 		time.Minute,
@@ -150,7 +156,7 @@ func TestCleanupExpiredSkipsDeletingPod(t *testing.T) {
 
 	require.NoError(t, controller.cleanupExpired(context.Background(), template))
 
-	assert.Empty(t, pauseRequester.calls)
+	assert.Empty(t, runtimePauser.calls)
 	select {
 	case event := <-recorder.Events:
 		t.Fatalf("unexpected event: %s", event)
@@ -158,7 +164,7 @@ func TestCleanupExpiredSkipsDeletingPod(t *testing.T) {
 	}
 }
 
-func TestCleanupExpiredCleansHardExpiredRuntime(t *testing.T) {
+func TestCleanupExpiredDeletesHardExpiredSandbox(t *testing.T) {
 	now := time.Date(2026, time.April, 15, 19, 31, 0, 0, time.UTC)
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
@@ -185,7 +191,7 @@ func TestCleanupExpiredCleansHardExpiredRuntime(t *testing.T) {
 	})
 	require.NoError(t, indexer.Add(pod))
 
-	cleaner := &recordingRuntimeCleaner{}
+	terminator := &recordingSandboxTerminator{}
 	recorder := record.NewFakeRecorder(1)
 	controller := NewCleanupController(
 		nil,
@@ -194,21 +200,43 @@ func TestCleanupExpiredCleansHardExpiredRuntime(t *testing.T) {
 		recorder,
 		staticCleanupClock{now: now},
 		nil,
-		cleaner,
+		terminator,
 		zap.NewNop(),
 		time.Minute,
 	)
 
 	require.NoError(t, controller.cleanupExpired(context.Background(), template))
 
-	assert.Equal(t, []string{"sandbox-1"}, cleaner.cleanCalls)
-	assert.Empty(t, cleaner.calls)
+	assert.Equal(t, []string{"sandbox-1"}, terminator.calls)
 	select {
 	case event := <-recorder.Events:
-		assert.Contains(t, event, "HardExpiredPodDeleted")
+		assert.Contains(t, event, "HardExpiredSandboxDeleted")
 	default:
 		t.Fatal("expected hard-expired event")
 	}
+}
+
+func TestCleanupHardExpiredDurableSandboxesDeletesListedRecords(t *testing.T) {
+	now := time.Date(2026, time.April, 15, 19, 31, 0, 0, time.UTC)
+	service := &recordingLifecycleService{
+		recordingHardExpiredLister: recordingHardExpiredLister{ids: []string{"sandbox-paused"}},
+	}
+	controller := NewCleanupController(
+		nil,
+		corelisters.NewPodLister(cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})),
+		nil,
+		record.NewFakeRecorder(1),
+		staticCleanupClock{now: now},
+		service,
+		service,
+		zap.NewNop(),
+		time.Minute,
+	)
+
+	require.NoError(t, controller.cleanupHardExpiredDurableSandboxes(context.Background()))
+
+	assert.Len(t, service.recordingHardExpiredLister.calls, 1)
+	assert.Equal(t, []string{"sandbox-paused"}, service.recordingSandboxTerminator.calls)
 }
 
 func TestCleanupExpiredForceDeletesStaleDeletingPod(t *testing.T) {

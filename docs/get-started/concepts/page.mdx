@@ -9,7 +9,7 @@ Think in four building blocks:
 | Concept | What It Is | Why Agent Developers Care |
 |-------|-------------|---------------------------|
 | `Template` | The runtime blueprint (image, resources, defaults). | Defines your agent's execution environment and startup behavior. |
-| `Sandbox` | An isolated runtime instance created from a template. | The agent's working machine for running tools, commands, and sessions. |
+| `Sandbox` | Durable identity and configuration for an isolated environment. | The agent's working machine identity across runtime generations. |
 | `Context` | A process/session inside the sandbox (for example REPL-like or one-shot execution). | Controls whether state is preserved across turns or reset each run. |
 | `Volume` | Persistent storage decoupled from sandbox lifecycle. | Keeps knowledge, artifacts, and checkpoints across sandbox recreation. |
 
@@ -23,8 +23,8 @@ The key idea is separation of concerns:
 
 A common confusion is mixing compute state and durable state.
 
-- Process state lives in the sandbox runtime and can disappear when the runtime is cleaned or deleted.
-- Sandbox0 restores the writable root filesystem checkpoint for cleaned sandboxes, so files written outside mounted volumes can survive clean/restore for the same sandbox identity.
+- Process state lives in the sandbox runtime and disappears when the runtime is paused or deleted.
+- Sandbox0 restores the writable root filesystem checkpoint for paused sandboxes, so files written outside mounted volumes can survive pause/resume for the same sandbox identity.
 - Durable state that needs snapshots, sharing, or recovery outside the sandbox identity should be written to volumes or external systems.
 - If your agent must recover after failures or redeploys, treat sandbox runtime as ephemeral and volumes as the source of truth.
 
@@ -36,8 +36,8 @@ Design for restartability: assume any sandbox can be replaced, and your agent sh
 
 Sandbox0 uses lifecycle controls to balance responsiveness and cost:
 
-- `ttl`: soft timeout, typically leading to auto-pause.
-- `hard_ttl`: hard runtime deadline, leading to runtime cleanup while preserving the sandbox identity.
+- `ttl`: runtime soft timeout, leading to checkpointed pause.
+- `hard_ttl`: hard sandbox deadline, deleting identity and durable state even if paused.
 
 For agents, this means:
 - Keep short `ttl` for bursty workloads.
@@ -93,6 +93,6 @@ This keeps each agent worker simple while allowing safe parallel execution.
   </Card>
 
   <Card title="Pause And Resume" href="/docs/sandbox/pause-resume" cta="Continue">
-    Control sandbox power state and resume behavior before wiring long-lived workflows.
+    Control checkpointed pause and resume behavior before wiring long-lived workflows.
   </Card>
 </CardGroup>

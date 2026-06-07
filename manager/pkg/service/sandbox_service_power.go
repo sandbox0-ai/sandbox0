@@ -12,7 +12,6 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 )
 
@@ -136,25 +135,6 @@ func requestedSandboxPowerState(annotations map[string]string, target string) Sa
 	return state
 }
 
-func completedSandboxPowerState(annotations map[string]string, target string) SandboxPowerState {
-	current := sandboxPowerStateFromAnnotations(annotations)
-	generation := current.DesiredGeneration
-	if generation == 0 || current.Desired != target {
-		generation = nextSandboxPowerStateGeneration(current)
-	}
-	return SandboxPowerState{
-		Desired:            target,
-		DesiredGeneration:  generation,
-		Observed:           target,
-		ObservedGeneration: generation,
-		Phase:              SandboxPowerPhaseStable,
-	}
-}
-
-func staleSandboxPowerStateError(current SandboxPowerState) error {
-	return fmt.Errorf("%w: desired=%s generation=%d", errSandboxPowerStateStale, current.Desired, current.DesiredGeneration)
-}
-
 func applySandboxPowerStateAnnotations(annotations map[string]string, state SandboxPowerState) {
 	if annotations == nil {
 		return
@@ -227,28 +207,6 @@ func (s *SandboxService) requestSandboxPowerState(ctx context.Context, sandboxID
 	return state, nil
 }
 
-func (s *SandboxService) waitForSandboxPowerState(ctx context.Context, sandboxID, target string, generation int64) (SandboxPowerState, error) {
-	var state SandboxPowerState
-	err := wait.PollUntilContextCancel(ctx, defaultSandboxPowerPollInterval, true, func(ctx context.Context) (bool, error) {
-		pod, err := s.getSandboxPodForPowerState(ctx, sandboxID)
-		if err != nil {
-			return false, err
-		}
-		state = sandboxPowerStateFromAnnotations(pod.Annotations)
-		if generation > 0 && (state.Desired != target || state.DesiredGeneration != generation) {
-			return false, fmt.Errorf("%w: %w", ErrSandboxPowerTransitionSuperseded, staleSandboxPowerStateError(state))
-		}
-		return state.Desired == target && state.Observed == target && state.Phase == SandboxPowerPhaseStable, nil
-	})
-	if err != nil {
-		if ctx.Err() != nil {
-			return state, ctx.Err()
-		}
-		return state, err
-	}
-	return state, nil
-}
-
 func preserveCtldInFlightPowerTransition(current, requested SandboxPowerState, target string) SandboxPowerState {
 	if current.Phase == SandboxPowerPhaseStable || current.Observed != target {
 		return requested
@@ -260,13 +218,6 @@ func preserveCtldInFlightPowerTransition(current, requested SandboxPowerState, t
 		requested.Phase = SandboxPowerPhaseResuming
 	}
 	return requested
-}
-
-func sandboxPowerTransitionContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	if _, ok := ctx.Deadline(); ok {
-		return context.WithCancel(ctx)
-	}
-	return context.WithTimeout(ctx, defaultSandboxPowerTransitionTimeout)
 }
 
 func (s *SandboxService) getSandboxPodForPowerState(ctx context.Context, sandboxID string) (*corev1.Pod, error) {

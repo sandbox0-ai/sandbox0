@@ -21,31 +21,33 @@ import (
 
 // Sandbox represents a sandbox instance
 type Sandbox struct {
-	ID            string              `json:"id"`
-	TemplateID    string              `json:"template_id"`
-	TeamID        string              `json:"team_id"`
-	UserID        string              `json:"user_id"`
-	InternalAddr  string              `json:"internal_addr"`
-	Status        string              `json:"status"`
-	Paused        bool                `json:"paused"`
-	PowerState    SandboxPowerState   `json:"power_state"`
-	AutoResume    bool                `json:"auto_resume"`
-	Services      []SandboxAppService `json:"services,omitempty"`
-	Mounts        []ClaimMount        `json:"mounts,omitempty"`
-	PodName       string              `json:"pod_name"`
-	ExpiresAt     time.Time           `json:"expires_at"`
-	HardExpiresAt time.Time           `json:"hard_expires_at"`
-	ClaimedAt     time.Time           `json:"claimed_at"`
-	CreatedAt     time.Time           `json:"created_at"`
+	ID                string              `json:"id"`
+	TemplateID        string              `json:"template_id"`
+	TeamID            string              `json:"team_id"`
+	UserID            string              `json:"user_id"`
+	InternalAddr      string              `json:"internal_addr"`
+	Status            string              `json:"status"`
+	Paused            bool                `json:"paused"`
+	AutoResume        bool                `json:"auto_resume"`
+	Services          []SandboxAppService `json:"services,omitempty"`
+	Mounts            []ClaimMount        `json:"mounts,omitempty"`
+	PodName           string              `json:"pod_name"`
+	RuntimeGeneration int64               `json:"runtime_generation"`
+	ExpiresAt         time.Time           `json:"expires_at"`
+	HardExpiresAt     time.Time           `json:"hard_expires_at"`
+	ClaimedAt         time.Time           `json:"claimed_at"`
+	CreatedAt         time.Time           `json:"created_at"`
+	UpdatedAt         time.Time           `json:"updated_at"`
 }
 
 // SandboxStatus represents possible sandbox statuses
 const (
-	SandboxStatusPending      = "pending"
 	SandboxStatusStarting     = "starting"
 	SandboxStatusRunning      = "running"
+	SandboxStatusPausing      = "pausing"
+	SandboxStatusPaused       = "paused"
+	SandboxStatusResuming     = "resuming"
 	SandboxStatusFailed       = "failed"
-	SandboxStatusCompleted    = "completed"
 	SandboxStatusTerminating  = "terminating"
 	SandboxPowerStateActive   = "active"
 	SandboxPowerStatePaused   = "paused"
@@ -54,7 +56,7 @@ const (
 	SandboxPowerPhaseResuming = "resuming"
 )
 
-// SandboxPowerState tracks the latest desired and observed power state for async pause/resume.
+// SandboxPowerState tracks ctld cgroup state annotations used to thaw runtimes before deletion.
 type SandboxPowerState struct {
 	Desired            string `json:"desired"`
 	DesiredGeneration  int64  `json:"desired_generation"`
@@ -69,17 +71,10 @@ var ErrInvalidClaimRequest = errors.New("invalid claim request")
 var ErrClaimConflict = errors.New("claim conflict")
 var ErrDataPlaneNotReady = errors.New("data plane not ready")
 var ErrQuotaExceeded = errors.New("quota exceeded")
-var errSandboxPowerStateStale = errors.New("sandbox power state changed during execution")
-
-// ErrSandboxPowerRequiresCtld is returned when pause/resume is requested without ctld ownership enabled.
-var ErrSandboxPowerRequiresCtld = errors.New("sandbox power transitions require ctld")
-
-// ErrSandboxPowerTransitionSuperseded is returned when a newer pause/resume request replaces the requested transition.
-var ErrSandboxPowerTransitionSuperseded = errors.New("sandbox power transition superseded")
+var ErrSandboxCheckpointRequiresCtld = errors.New("sandbox checkpoint pause requires ctld")
 
 const defaultPodClaimReadyTimeout = 90 * time.Second
-const defaultSandboxPowerTransitionTimeout = 2 * time.Minute
-const defaultSandboxPowerPollInterval = 100 * time.Millisecond
+const defaultSandboxRestoreTimeout = 2 * time.Minute
 
 // claimIdlePodBackoff is the retry backoff for claiming idle pods.
 // Designed to balance between:

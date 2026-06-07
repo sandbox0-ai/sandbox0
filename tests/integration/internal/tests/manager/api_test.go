@@ -362,7 +362,7 @@ func TestClaimSandboxBindsDeclaredVolumePortal(t *testing.T) {
 	}
 }
 
-func TestCleanedSandboxRuntimeRestoreAppliesRootFSCheckpointBeforeInitialize(t *testing.T) {
+func TestPausedSandboxRuntimeResumeAppliesRootFSCheckpointBeforeInitialize(t *testing.T) {
 	events := &orderedEvents{}
 	namespace, err := naming.TemplateNamespaceForBuiltin("default")
 	utils.RequireNoError(t, err, "resolve template namespace")
@@ -387,7 +387,7 @@ func TestCleanedSandboxRuntimeRestoreAppliesRootFSCheckpointBeforeInitialize(t *
 		TemplateName:      template.Name,
 		TemplateNamespace: template.Namespace,
 		ClusterID:         "default",
-		Status:            service.SandboxStatusCleaned,
+		Status:            service.SandboxStatusPaused,
 		TemplateSpec:      template.Spec,
 		RuntimeGeneration: 3,
 		ClaimedAt:         now,
@@ -442,17 +442,17 @@ func TestCleanedSandboxRuntimeRestoreAppliesRootFSCheckpointBeforeInitialize(t *
 
 	resp, body = doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxes/sandbox-1/resume", env.token, nil)
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("cleaned runtime restore status = %d, body = %s", resp.StatusCode, string(body))
+		t.Fatalf("paused runtime resume status = %d, body = %s", resp.StatusCode, string(body))
 	}
 	resumeResp, errInfo, err := spec.DecodeResponse[service.ResumeSandboxResponse](bytes.NewReader(body))
 	if err != nil {
-		t.Fatalf("decode cleaned runtime restore response: %v", err)
+		t.Fatalf("decode paused runtime resume response: %v", err)
 	}
 	if errInfo != nil {
-		t.Fatalf("unexpected cleaned runtime restore error: %+v", errInfo)
+		t.Fatalf("unexpected paused runtime resume error: %+v", errInfo)
 	}
 	if resumeResp == nil || !resumeResp.Resumed {
-		t.Fatalf("cleaned runtime restore response = %+v, want restored", resumeResp)
+		t.Fatalf("paused runtime resume response = %+v, want resumed", resumeResp)
 	}
 
 	if got := events.List(); len(got) != 2 || got[0] != "apply-rootfs" || got[1] != "initialize-procd" {
@@ -759,6 +759,25 @@ func (s *memorySandboxStoreForManagerIntegration) ListSandboxes(_ context.Contex
 	return records, nil
 }
 
+func (s *memorySandboxStoreForManagerIntegration) ListHardExpiredSandboxes(_ context.Context, now time.Time, limit int) ([]*service.SandboxRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if limit <= 0 {
+		limit = len(s.records)
+	}
+	records := make([]*service.SandboxRecord, 0, len(s.records))
+	for _, record := range s.records {
+		if record == nil || record.DeletedAt.IsZero() == false || record.HardExpiresAt.IsZero() || record.HardExpiresAt.After(now) {
+			continue
+		}
+		records = append(records, cloneSandboxRecordForManagerIntegration(record))
+		if len(records) >= limit {
+			break
+		}
+	}
+	return records, nil
+}
+
 func (s *memorySandboxStoreForManagerIntegration) MarkSandboxDeleted(_ context.Context, sandboxID string, deletedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -821,14 +840,14 @@ func (t memorySandboxStoreTxForManagerIntegration) SaveRuntime(_ context.Context
 	return nil
 }
 
-func (t memorySandboxStoreTxForManagerIntegration) MarkRuntimeCleaned(_ context.Context, sandboxID string, generation int64, _ time.Time) error {
+func (t memorySandboxStoreTxForManagerIntegration) MarkRuntimePaused(_ context.Context, sandboxID string, generation int64, _ time.Time) error {
 	record := t.store.records[sandboxID]
 	if record == nil {
 		return service.ErrSandboxRecordNotFound
 	}
 	record.CurrentPodNamespace = ""
 	record.CurrentPodName = ""
-	record.Status = service.SandboxStatusCleaned
+	record.Status = service.SandboxStatusPaused
 	if record.RuntimeGeneration < generation {
 		record.RuntimeGeneration = generation
 	}

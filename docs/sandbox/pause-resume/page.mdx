@@ -1,25 +1,25 @@
 # Pause And Resume
 
-Sandbox0 can pause an idle sandbox without deleting it. Pause preserves sandbox state, while resume makes the sandbox runnable again.
+Sandbox0 can pause an idle sandbox without deleting it. Pause checkpoints the writable root filesystem, releases the runtime pod, and keeps the sandbox identity and durable state. Resume creates a new runtime generation and restores the latest rootfs checkpoint.
 
 Use this page when you need to:
 
 - pause a sandbox explicitly
 - resume a paused sandbox explicitly
 - understand how `ttl`, `auto_resume`, service routes, and SSH interact with pause state
-- inspect whether a pause or resume request has completed
+- inspect whether a sandbox is running or paused
 
 <Callout variant="info">
-Pause state is separate from `status`. Use `paused` for the simple user-facing state, and `power_state` when you need to inspect desired versus observed transition progress.
+Pause is a runtime lifecycle operation. It does not preserve running processes, memory, sockets, PID state, or live REPL sessions.
 </Callout>
 
 <Callout variant="warning">
-Self-hosted deployments must run `ctld` on sandbox nodes for pause and resume. The manager records the desired power state, and `ctld` performs cgroup freeze/thaw plus the observed-state update.
+Self-hosted deployments must run `ctld` on sandbox nodes for checkpointed pause/resume. `ctld` freezes the sandbox only as an internal consistency mechanism while saving or applying the writable rootfs checkpoint.
 </Callout>
 
 ## Pause A Sandbox
 
-Pause a sandbox to release compute while keeping its state available for a later resume.
+Pause a sandbox to release compute while keeping its identity, configuration, services, mounted durable storage, and latest writable rootfs checkpoint available for a later resume.
 
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/pause
@@ -97,7 +97,7 @@ console.log("Resume requested");`
 
 ## Inspect Pause State
 
-After requesting a pause or resume, fetch sandbox details to check whether the transition has completed.
+After requesting a pause or resume, fetch sandbox details to check the lifecycle status.
 
 <Tabs
   tabs={[
@@ -109,21 +109,24 @@ if err != nil {
     log.Fatal(err)
 }
 fmt.Printf("paused=%v\n", sb.Paused)
-fmt.Printf("power_state=%+v\n", sb.PowerState)`
+fmt.Printf("status=%s\n", sb.Status)
+fmt.Printf("runtime_generation=%d\n", sb.RuntimeGeneration)`
     },
     {
       label: "Python",
       language: "python",
       code: `sb = client.get_sandbox(sandbox.id)
 print("paused=", sb.paused)
-print("power_state=", sb.power_state)`
+print("status=", sb.status)
+print("runtime_generation=", sb.runtime_generation)`
     },
     {
       label: "TypeScript",
       language: "typescript",
       code: `const sb = await client.sandboxes.get(sandbox.id);
 console.log("paused=", sb.paused);
-console.log("powerState=", sb.powerState);`
+console.log("status=", sb.status);
+console.log("runtimeGeneration=", sb.runtimeGeneration);`
     },
     {
       label: "CLI",
@@ -139,10 +142,10 @@ console.log("powerState=", sb.powerState);`
 
 | Field | Behavior |
 |-------|----------|
-| `ttl` | Soft timeout. When it expires, Sandbox0 pauses the sandbox. |
-| `hard_ttl` | Hard runtime timeout. When it expires, Sandbox0 checkpoints the writable root filesystem, cleans the runtime pod, and keeps the sandbox identity for later restore. |
+| `ttl` | Runtime soft timeout. When it expires, Sandbox0 checkpoints the writable rootfs, pauses the sandbox, and releases runtime compute. |
+| `hard_ttl` | Sandbox hard timeout. When it expires, Sandbox0 deletes the sandbox identity and durable state, including rootfs checkpoints, even if the sandbox is already paused. |
 
-`auto_resume` is the sandbox-level gate for whether inbound access can wake a paused or cleaned sandbox:
+`auto_resume` is the sandbox-level gate for whether inbound access can wake a paused sandbox:
 
 - when `auto_resume` is `true`, supported access paths can resume the sandbox automatically
 - when `auto_resume` is `false`, you must call resume explicitly
@@ -152,7 +155,7 @@ Common auto-resume entrypoints:
 - service routes configured with `resume: true`; public service requests require both sandbox `auto_resume: true` and route `resume: true`
 - SSH access through Sandbox0 SSH Gateway
 
-For a cleaned sandbox, auto-resume creates a new runtime pod for the same sandbox identity and restores the saved root filesystem checkpoint before the sandbox is used. Public service URLs remain stable until the sandbox is explicitly deleted. Running processes are not preserved across clean/restore.
+For a paused sandbox, auto-resume creates a new runtime pod for the same sandbox identity and restores the saved rootfs checkpoint before the sandbox is used. Public service URLs remain stable until the sandbox is explicitly deleted or `hard_ttl` expires.
 
 See [Sandbox Services](/docs/sandbox/services), [Sandbox Functions](/docs/sandbox/functions), and [SSH](/docs/sandbox/ssh) for the user-facing flows.
 

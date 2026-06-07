@@ -94,7 +94,7 @@ func TestListSandboxes(t *testing.T) {
 			expectedHasMore: false,
 		},
 		{
-			name: "filter by paused state",
+			name: "filter by paused state excludes running pods without durable store",
 			pods: []*corev1.Pod{
 				createTestPod("sandbox-1", "team-a", "template-1", controller.PoolTypeActive, now, now, false),
 				createTestPod("sandbox-2", "team-a", "template-1", controller.PoolTypeActive, now, now, true),
@@ -106,8 +106,8 @@ func TestListSandboxes(t *testing.T) {
 				Limit:  50,
 				Offset: 0,
 			},
-			expectedCount:   1,
-			expectedIDs:     []string{"sandbox-2"},
+			expectedCount:   0,
+			expectedIDs:     nil,
 			expectedHasMore: false,
 		},
 		{
@@ -262,15 +262,11 @@ func TestListSandboxes_HardExpiresAt(t *testing.T) {
 	assert.True(t, gotWithoutHard.HardExpiresAt.IsZero())
 }
 
-func TestListSandboxes_IncludesPowerState(t *testing.T) {
+func TestListSandboxes_IncludesRuntimeGeneration(t *testing.T) {
 	logger := zap.NewNop()
 	now := time.Now()
-	pod := createTestPod("sandbox-power-state", "team-a", "template-1", controller.PoolTypeActive, now, now, false)
-	pod.Annotations[controller.AnnotationPowerStateDesired] = SandboxPowerStatePaused
-	pod.Annotations[controller.AnnotationPowerStateDesiredGeneration] = "7"
-	pod.Annotations[controller.AnnotationPowerStateObserved] = SandboxPowerStateActive
-	pod.Annotations[controller.AnnotationPowerStateObservedGeneration] = "6"
-	pod.Annotations[controller.AnnotationPowerStatePhase] = SandboxPowerPhasePausing
+	pod := createTestPod("sandbox-runtime-generation", "team-a", "template-1", controller.PoolTypeActive, now, now, false)
+	pod.Annotations[controller.AnnotationRuntimeGeneration] = "7"
 
 	k8sClient := fake.NewSimpleClientset(pod)
 	svc := &SandboxService{
@@ -287,12 +283,46 @@ func TestListSandboxes_IncludesPowerState(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, resp.Sandboxes, 1)
-	assert.Equal(t, SandboxPowerStatePaused, resp.Sandboxes[0].PowerState.Desired)
-	assert.Equal(t, int64(7), resp.Sandboxes[0].PowerState.DesiredGeneration)
-	assert.Equal(t, SandboxPowerStateActive, resp.Sandboxes[0].PowerState.Observed)
-	assert.Equal(t, int64(6), resp.Sandboxes[0].PowerState.ObservedGeneration)
-	assert.Equal(t, SandboxPowerPhasePausing, resp.Sandboxes[0].PowerState.Phase)
+	assert.Equal(t, int64(7), resp.Sandboxes[0].RuntimeGeneration)
 	assert.False(t, resp.Sandboxes[0].Paused)
+}
+
+func TestListSandboxesFromStoreFiltersPausedState(t *testing.T) {
+	now := time.Now()
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-running": {
+			ID:         "sandbox-running",
+			TeamID:     "team-a",
+			TemplateID: "template-1",
+			Status:     SandboxStatusRunning,
+			CreatedAt:  now.Add(-time.Minute),
+		},
+		"sandbox-paused": {
+			ID:                "sandbox-paused",
+			TeamID:            "team-a",
+			TemplateID:        "template-1",
+			Status:            SandboxStatusPaused,
+			RuntimeGeneration: 3,
+			CreatedAt:         now,
+		},
+	}}
+	svc := &SandboxService{
+		sandboxStore: store,
+		podLister:    newTestPodLister(t),
+		clock:        systemTime{},
+		logger:       zap.NewNop(),
+	}
+
+	resp, err := svc.ListSandboxes(context.Background(), &ListSandboxesRequest{
+		TeamID: "team-a",
+		Paused: boolPtr(true),
+		Limit:  50,
+	})
+	require.NoError(t, err)
+	require.Len(t, resp.Sandboxes, 1)
+	assert.Equal(t, "sandbox-paused", resp.Sandboxes[0].ID)
+	assert.True(t, resp.Sandboxes[0].Paused)
+	assert.Equal(t, int64(3), resp.Sandboxes[0].RuntimeGeneration)
 }
 
 func TestListSandboxes_TerminatingPodStatus(t *testing.T) {

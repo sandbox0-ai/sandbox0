@@ -21,7 +21,7 @@ type memorySandboxStore struct {
 	rootFSStates map[string]*SandboxRootFSState
 	deletes      []string
 	saves        int
-	cleans       int
+	pauses       int
 }
 
 type memorySandboxStoreTx struct {
@@ -43,7 +43,32 @@ func (s *memorySandboxStore) GetSandbox(_ context.Context, sandboxID string) (*S
 	return cloneSandboxRecord(s.records[sandboxID]), nil
 }
 
-func (s *memorySandboxStore) ListSandboxes(context.Context, *ListSandboxesRequest) ([]*SandboxRecord, error) {
+func (s *memorySandboxStore) ListSandboxes(_ context.Context, req *ListSandboxesRequest) ([]*SandboxRecord, error) {
+	if s == nil || s.records == nil {
+		return nil, nil
+	}
+	var records []*SandboxRecord
+	for _, record := range s.records {
+		if record == nil {
+			continue
+		}
+		if req != nil {
+			if req.TeamID != "" && record.TeamID != req.TeamID {
+				continue
+			}
+			if req.Status != "" && record.Status != req.Status {
+				continue
+			}
+			if req.TemplateID != "" && record.TemplateID != req.TemplateID {
+				continue
+			}
+		}
+		records = append(records, cloneSandboxRecord(record))
+	}
+	return records, nil
+}
+
+func (s *memorySandboxStore) ListHardExpiredSandboxes(context.Context, time.Time, int) ([]*SandboxRecord, error) {
 	return nil, nil
 }
 
@@ -103,15 +128,15 @@ func (t memorySandboxStoreTx) SaveRuntime(_ context.Context, sandboxID, namespac
 	return nil
 }
 
-func (t memorySandboxStoreTx) MarkRuntimeCleaned(_ context.Context, sandboxID string, generation int64, _ time.Time) error {
+func (t memorySandboxStoreTx) MarkRuntimePaused(_ context.Context, sandboxID string, generation int64, _ time.Time) error {
 	record := t.store.records[sandboxID]
 	record.CurrentPodNamespace = ""
 	record.CurrentPodName = ""
-	record.Status = SandboxStatusCleaned
+	record.Status = SandboxStatusPaused
 	if record.RuntimeGeneration < generation {
 		record.RuntimeGeneration = generation
 	}
-	t.store.cleans++
+	t.store.pauses++
 	return nil
 }
 
@@ -186,7 +211,7 @@ func TestGetSandboxPodRejectsMultipleActiveRuntimePods(t *testing.T) {
 	}
 }
 
-func TestRestoreCleanedSandboxRuntimeDoesNotCreatePodWhileRuntimeDeleting(t *testing.T) {
+func TestResumePausedSandboxRuntimeDoesNotCreatePodWhileRuntimeDeleting(t *testing.T) {
 	deletionTime := metav1.NewTime(time.Now().UTC())
 	pod := runtimeIdentityPod("ns-a", "pod-a", "sandbox-a")
 	pod.DeletionTimestamp = &deletionTime
@@ -198,7 +223,7 @@ func TestRestoreCleanedSandboxRuntimeDoesNotCreatePodWhileRuntimeDeleting(t *tes
 			TemplateID:        "default",
 			TemplateName:      "default",
 			TemplateNamespace: "tpl-default",
-			Status:            SandboxStatusCleaned,
+			Status:            SandboxStatusPaused,
 			TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 		},
 	}}
@@ -210,9 +235,9 @@ func TestRestoreCleanedSandboxRuntimeDoesNotCreatePodWhileRuntimeDeleting(t *tes
 		logger:       zap.NewNop(),
 	}
 
-	_, err := svc.RestoreCleanedSandboxRuntime(context.Background(), "sandbox-a")
+	_, err := svc.ResumePausedSandboxRuntime(context.Background(), "sandbox-a")
 	if !k8serrors.IsConflict(err) {
-		t.Fatalf("RestoreCleanedSandboxRuntime() error = %v, want conflict", err)
+		t.Fatalf("ResumePausedSandboxRuntime() error = %v, want conflict", err)
 	}
 	for _, action := range client.Actions() {
 		if action.GetVerb() == "create" && action.GetResource().Resource == "pods" {
@@ -224,13 +249,13 @@ func TestRestoreCleanedSandboxRuntimeDoesNotCreatePodWhileRuntimeDeleting(t *tes
 	}
 }
 
-func TestTerminateCleanedSandboxRecordRunsPersistentCleanup(t *testing.T) {
+func TestTerminatePausedSandboxRecordRunsPersistentCleanup(t *testing.T) {
 	store := &memorySandboxStore{records: map[string]*SandboxRecord{
 		"sandbox-a": {
 			ID:     "sandbox-a",
 			TeamID: "team-a",
 			UserID: "user-a",
-			Status: SandboxStatusCleaned,
+			Status: SandboxStatusPaused,
 			Config: SandboxConfig{Webhook: &WebhookConfig{
 				URL:    "https://example.test/webhook",
 				Secret: "secret",

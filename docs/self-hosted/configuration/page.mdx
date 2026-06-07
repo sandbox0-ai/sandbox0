@@ -121,7 +121,7 @@ This field only controls the `runtimeClassName` written onto sandbox Pods. The n
 
 `infra-operator` does not install node runtime handlers. It does not install `runsc`, write `/etc/containerd/config.toml`, restart containerd, or create a `gvisor-rootfs` handler. Do that through your node image, node bootstrap automation, or a dedicated privileged node setup process before scheduling sandbox workloads there.
 
-For `gVisor` rootfs clean/restore support on self-managed clusters, use a dedicated containerd handler that points to `runsc` with shared file access and overlay disabled, then create a matching `RuntimeClass`:
+For `gVisor` rootfs checkpoint and restore support on self-managed clusters, use a dedicated containerd handler that points to `runsc` with shared file access and overlay disabled, then create a matching `RuntimeClass`:
 
 ```toml
 # /etc/containerd/config.toml

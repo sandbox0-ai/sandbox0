@@ -20,9 +20,7 @@ const sandboxStoreSchemaName = "manager"
 
 var ErrSandboxRecordNotFound = errors.New("sandbox record not found")
 
-// SandboxRuntimeStateCleaned means the durable sandbox exists but has no runtime pod.
 const (
-	SandboxStatusCleaned = "cleaned"
 	SandboxStatusDeleted = "deleted"
 )
 
@@ -76,6 +74,7 @@ type SandboxStore interface {
 	UpsertSandbox(ctx context.Context, record *SandboxRecord) error
 	GetSandbox(ctx context.Context, sandboxID string) (*SandboxRecord, error)
 	ListSandboxes(ctx context.Context, req *ListSandboxesRequest) ([]*SandboxRecord, error)
+	ListHardExpiredSandboxes(ctx context.Context, now time.Time, limit int) ([]*SandboxRecord, error)
 	MarkSandboxDeleted(ctx context.Context, sandboxID string, deletedAt time.Time) error
 	SaveRootFSState(ctx context.Context, state *SandboxRootFSState) error
 	GetLatestRootFSState(ctx context.Context, sandboxID string) (*SandboxRootFSState, error)
@@ -85,7 +84,7 @@ type SandboxStore interface {
 // SandboxStoreTx is a locked sandbox store transaction.
 type SandboxStoreTx interface {
 	SaveRuntime(ctx context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time) error
-	MarkRuntimeCleaned(ctx context.Context, sandboxID string, generation int64, cleanedAt time.Time) error
+	MarkRuntimePaused(ctx context.Context, sandboxID string, generation int64, pausedAt time.Time) error
 	SaveRootFSState(ctx context.Context, state *SandboxRootFSState) error
 }
 
@@ -200,6 +199,41 @@ func (s *PGSandboxStore) ListSandboxes(ctx context.Context, req *ListSandboxesRe
 	return records, nil
 }
 
+func (s *PGSandboxStore) ListHardExpiredSandboxes(ctx context.Context, now time.Time, limit int) ([]*SandboxRecord, error) {
+	if s == nil || s.pool == nil {
+		return nil, nil
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if limit <= 0 {
+		limit = 500
+	}
+	rows, err := s.pool.Query(ctx, sandboxRecordSelectSQL()+`
+		WHERE deleted_at IS NULL
+			AND hard_expires_at IS NOT NULL
+			AND hard_expires_at <= $1
+		ORDER BY hard_expires_at ASC
+		LIMIT $2
+	`, now, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list hard-expired sandboxes: %w", err)
+	}
+	defer rows.Close()
+	var records []*SandboxRecord
+	for rows.Next() {
+		record, err := scanSandboxRecordRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate hard-expired sandboxes: %w", err)
+	}
+	return records, nil
+}
+
 func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID string, deletedAt time.Time) error {
 	if s == nil || s.pool == nil {
 		return nil
@@ -291,7 +325,7 @@ func (t sandboxStoreTx) SaveRuntime(ctx context.Context, sandboxID, namespace, p
 	return nil
 }
 
-func (t sandboxStoreTx) MarkRuntimeCleaned(ctx context.Context, sandboxID string, generation int64, cleanedAt time.Time) error {
+func (t sandboxStoreTx) MarkRuntimePaused(ctx context.Context, sandboxID string, generation int64, pausedAt time.Time) error {
 	_, err := t.tx.Exec(ctx, `
 		UPDATE manager.sandboxes
 		SET status = $2,
@@ -301,9 +335,9 @@ func (t sandboxStoreTx) MarkRuntimeCleaned(ctx context.Context, sandboxID string
 			expires_at = NULL,
 			updated_at = NOW()
 		WHERE sandbox_id = $1
-	`, sandboxID, SandboxStatusCleaned, generation)
+	`, sandboxID, SandboxStatusPaused, generation)
 	if err != nil {
-		return fmt.Errorf("mark sandbox runtime cleaned: %w", err)
+		return fmt.Errorf("mark sandbox runtime paused: %w", err)
 	}
 	return nil
 }

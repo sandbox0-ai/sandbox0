@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	servicemigrations "github.com/sandbox0-ai/sandbox0/manager/pkg/service/migrations"
@@ -49,12 +50,35 @@ type SandboxRecord struct {
 	UpdatedAt           time.Time
 }
 
+// SandboxRootFSState is manager-internal metadata for one persisted sandbox
+// writable rootfs diff.
+type SandboxRootFSState struct {
+	SandboxID           string
+	TeamID              string
+	RuntimeGeneration   int64
+	Runtime             string
+	RuntimeHandler      string
+	BaseImageRef        string
+	BaseImageDigest     string
+	Snapshotter         string
+	SnapshotParent      string
+	SnapshotParentChain []string
+	DiffDigest          string
+	DiffMediaType       string
+	DiffSize            int64
+	DiffObjectKey       string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
 // SandboxStore persists sandbox identities independently of runtime pods.
 type SandboxStore interface {
 	UpsertSandbox(ctx context.Context, record *SandboxRecord) error
 	GetSandbox(ctx context.Context, sandboxID string) (*SandboxRecord, error)
 	ListSandboxes(ctx context.Context, req *ListSandboxesRequest) ([]*SandboxRecord, error)
 	MarkSandboxDeleted(ctx context.Context, sandboxID string, deletedAt time.Time) error
+	SaveRootFSState(ctx context.Context, state *SandboxRootFSState) error
+	GetLatestRootFSState(ctx context.Context, sandboxID string) (*SandboxRootFSState, error)
 	WithSandboxLock(ctx context.Context, sandboxID string, fn func(context.Context, SandboxStoreTx, *SandboxRecord) error) error
 }
 
@@ -62,6 +86,7 @@ type SandboxStore interface {
 type SandboxStoreTx interface {
 	SaveRuntime(ctx context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time) error
 	MarkRuntimeCleaned(ctx context.Context, sandboxID string, generation int64, cleanedAt time.Time) error
+	SaveRootFSState(ctx context.Context, state *SandboxRootFSState) error
 }
 
 type PGSandboxStore struct {
@@ -194,7 +219,28 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 	if err != nil {
 		return fmt.Errorf("mark sandbox deleted: %w", err)
 	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM manager.sandbox_rootfs_states WHERE sandbox_id = $1`, sandboxID); err != nil {
+		return fmt.Errorf("delete sandbox rootfs states: %w", err)
+	}
 	return nil
+}
+
+func (s *PGSandboxStore) SaveRootFSState(ctx context.Context, state *SandboxRootFSState) error {
+	if s == nil || s.pool == nil || state == nil {
+		return nil
+	}
+	return saveRootFSState(ctx, s.pool, state)
+}
+
+func (s *PGSandboxStore) GetLatestRootFSState(ctx context.Context, sandboxID string) (*SandboxRootFSState, error) {
+	if s == nil || s.pool == nil {
+		return nil, nil
+	}
+	return scanRootFSState(s.pool.QueryRow(ctx, rootFSStateSelectSQL()+`
+		WHERE sandbox_id = $1
+		ORDER BY runtime_generation DESC, updated_at DESC
+		LIMIT 1
+	`, sandboxID))
 }
 
 func (s *PGSandboxStore) WithSandboxLock(ctx context.Context, sandboxID string, fn func(context.Context, SandboxStoreTx, *SandboxRecord) error) error {
@@ -262,6 +308,10 @@ func (t sandboxStoreTx) MarkRuntimeCleaned(ctx context.Context, sandboxID string
 	return nil
 }
 
+func (t sandboxStoreTx) SaveRootFSState(ctx context.Context, state *SandboxRootFSState) error {
+	return saveRootFSState(ctx, t.tx, state)
+}
+
 func sandboxRecordSelectSQL() string {
 	return `
 		SELECT sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
@@ -269,6 +319,93 @@ func sandboxRecordSelectSQL() string {
 			current_pod_name, current_pod_namespace, runtime_generation,
 			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 		FROM manager.sandboxes`
+}
+
+type rootFSStateExecutor interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+}
+
+func saveRootFSState(ctx context.Context, exec rootFSStateExecutor, state *SandboxRootFSState) error {
+	if exec == nil || state == nil {
+		return nil
+	}
+	if strings.TrimSpace(state.SandboxID) == "" {
+		return fmt.Errorf("sandbox_id is required")
+	}
+	if strings.TrimSpace(state.TeamID) == "" {
+		return fmt.Errorf("team_id is required")
+	}
+	if strings.TrimSpace(state.DiffDigest) == "" {
+		return fmt.Errorf("diff_digest is required")
+	}
+	if strings.TrimSpace(state.DiffObjectKey) == "" {
+		return fmt.Errorf("diff_object_key is required")
+	}
+	parentChainJSON, err := json.Marshal(state.SnapshotParentChain)
+	if err != nil {
+		return fmt.Errorf("marshal rootfs snapshot parent chain: %w", err)
+	}
+	_, err = exec.Exec(ctx, `
+		INSERT INTO manager.sandbox_rootfs_states (
+			sandbox_id, team_id, runtime_generation, runtime, runtime_handler,
+			base_image_ref, base_image_digest, snapshotter, snapshot_parent,
+			snapshot_parent_chain, diff_digest, diff_media_type, diff_size,
+			diff_object_key, created_at, updated_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, COALESCE($15, NOW()), NOW())
+		ON CONFLICT (sandbox_id, runtime_generation) DO UPDATE SET
+			team_id = EXCLUDED.team_id,
+			runtime = EXCLUDED.runtime,
+			runtime_handler = EXCLUDED.runtime_handler,
+			base_image_ref = EXCLUDED.base_image_ref,
+			base_image_digest = EXCLUDED.base_image_digest,
+			snapshotter = EXCLUDED.snapshotter,
+			snapshot_parent = EXCLUDED.snapshot_parent,
+			snapshot_parent_chain = EXCLUDED.snapshot_parent_chain,
+			diff_digest = EXCLUDED.diff_digest,
+			diff_media_type = EXCLUDED.diff_media_type,
+			diff_size = EXCLUDED.diff_size,
+			diff_object_key = EXCLUDED.diff_object_key,
+			updated_at = NOW()
+	`, state.SandboxID, state.TeamID, state.RuntimeGeneration, state.Runtime, state.RuntimeHandler,
+		state.BaseImageRef, state.BaseImageDigest, state.Snapshotter, state.SnapshotParent,
+		parentChainJSON, state.DiffDigest, state.DiffMediaType, state.DiffSize,
+		state.DiffObjectKey, nullableTime(state.CreatedAt))
+	if err != nil {
+		return fmt.Errorf("save sandbox rootfs state: %w", err)
+	}
+	return nil
+}
+
+func rootFSStateSelectSQL() string {
+	return `
+		SELECT sandbox_id, team_id, runtime_generation, runtime, runtime_handler,
+			base_image_ref, base_image_digest, snapshotter, snapshot_parent,
+			snapshot_parent_chain, diff_digest, diff_media_type, diff_size,
+			diff_object_key, created_at, updated_at
+		FROM manager.sandbox_rootfs_states`
+}
+
+func scanRootFSState(row sandboxRecordScanner) (*SandboxRootFSState, error) {
+	var state SandboxRootFSState
+	var parentChainJSON []byte
+	if err := row.Scan(
+		&state.SandboxID, &state.TeamID, &state.RuntimeGeneration, &state.Runtime, &state.RuntimeHandler,
+		&state.BaseImageRef, &state.BaseImageDigest, &state.Snapshotter, &state.SnapshotParent,
+		&parentChainJSON, &state.DiffDigest, &state.DiffMediaType, &state.DiffSize,
+		&state.DiffObjectKey, &state.CreatedAt, &state.UpdatedAt,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if len(parentChainJSON) > 0 {
+		if err := json.Unmarshal(parentChainJSON, &state.SnapshotParentChain); err != nil {
+			return nil, fmt.Errorf("unmarshal rootfs snapshot parent chain: %w", err)
+		}
+	}
+	return &state, nil
 }
 
 type sandboxRecordScanner interface {

@@ -74,11 +74,11 @@ Sandbox0 uses two-tier TTL to balance resource efficiency and flexibility:
 | Field | Behavior | Use Case |
 |-------|----------|----------|
 | `ttl` | **Soft pause**: When expired, sandbox is automatically paused. Processes stop but state is preserved. Can be extended via refresh API. | Keep sandboxes alive during active use while freeing compute resources during idle periods. |
-| `hard_ttl` | **Hard clean**: When expired, Sandbox0 deletes the runtime pod and marks the sandbox `cleaned`. Identity, configuration, services, and public URLs remain available until explicit delete. | Enforce compute cost limits while keeping a durable sandbox service that can be restored on demand. |
+| `hard_ttl` | **Hard clean**: When expired, Sandbox0 checkpoints the writable root filesystem, deletes the runtime pod, and marks the sandbox `cleaned`. Identity, configuration, services, and public URLs remain available until explicit delete. | Enforce compute cost limits while keeping a durable sandbox service that can be restored on demand. |
 
 <Callout variant="info">
 The relationship: <code>ttl {'<='} hard_ttl</code>. When <code>ttl</code> expires first, sandbox pauses but can be resumed.
-When <code>hard_ttl</code> expires, sandbox compute is cleaned and the sandbox can be restored by resume-capable access. Both can be extended via the refresh API.
+When <code>hard_ttl</code> expires, sandbox compute is cleaned and the sandbox can be restored by resume-capable access. Restore starts a new runtime pod and reapplies the root filesystem checkpoint; it does not preserve running process state. Both can be extended via the refresh API.
 </Callout>
 
 **Example timeline (sandbox created with `ttl=300` and `hard_ttl=3600`):**

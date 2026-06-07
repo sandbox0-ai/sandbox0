@@ -130,7 +130,7 @@ Create one sandbox per task or user request. Share read-only inputs through volu
 
 **Long-running sessions**
 
-Treat the sandbox process as runtime state and the volume as durable state. Checkpoint progress frequently, use TTLs to pause idle compute, and resume or recreate sandboxes from persisted workspace state.
+Treat the sandbox process as runtime state and the volume as durable state. Cleaned sandboxes restore the writable root filesystem checkpoint, but running processes are recreated. Checkpoint progress frequently, use TTLs to pause idle compute, and keep important workspace state in volumes or external storage.
 
 ## Managed Agents
 
@@ -151,7 +151,7 @@ Sandbox0 is designed for workloads that execute code the host should not trust.
 - Sandbox lifetime is controlled with `ttl` and `hard_ttl`; idle work can pause while durable state remains in volumes.
 - Network policy can block or restrict outbound traffic by default.
 - Egress auth resolves and injects credentials outside the sandbox process, so raw secrets do not need to be placed in environment variables or files inside untrusted code.
-- Persistent data lives in volumes, not in the ephemeral sandbox filesystem.
+- Sandbox0 checkpoints the sandbox writable root filesystem across clean/restore, while volumes remain the explicit durable storage surface for snapshots, sharing, and long-lived workspace data.
 - Self-hosted deployments let platform teams choose the Kubernetes runtime, storage, network, and regional boundary that match their security requirements.
 
 Isolation strength depends on your deployment choices. For production self-hosting, review the self-hosted docs and choose runtime, CNI, storage, and credential policies deliberately.
@@ -163,9 +163,9 @@ Agent workloads are latency-sensitive because every tool call can sit on the cri
 Sandbox0 optimizes for this in three places:
 
 - **Warm pools** keep template instances ready so a claim does not need to build the environment from scratch.
-- **Volumes** keep caches, repositories, and generated state separate from sandbox lifetime, avoiding repeated setup work.
+- **Rootfs checkpoints and volumes** keep restored sandboxes useful after cleanup. Use the rootfs checkpoint for transparent runtime restore and volumes for explicit durable workspaces, snapshots, and shared data.
 
-For best results, put expensive environment setup into the template image, keep active task state in a volume, and keep sandboxes short-lived enough that idle compute does not become the source of truth.
+For best results, put expensive environment setup into the template image, keep active task state in a volume when it must outlive the sandbox identity, and keep sandboxes short-lived enough that idle compute does not become the source of truth.
 
 ## Self-Hosting
 

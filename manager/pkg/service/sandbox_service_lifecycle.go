@@ -80,6 +80,10 @@ func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string)
 
 // CleanSandboxRuntime deletes the runtime pod while preserving durable sandbox state and public services.
 func (s *SandboxService) CleanSandboxRuntime(ctx context.Context, sandboxID string) error {
+	return s.cleanSandboxRuntime(ctx, sandboxID, true)
+}
+
+func (s *SandboxService) cleanSandboxRuntime(ctx context.Context, sandboxID string, saveRootFS bool) error {
 	s.logger.Info("Cleaning sandbox runtime", zap.String("sandboxID", sandboxID))
 	clean := func(ctx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
 		pod, err := s.getSandboxPod(ctx, sandboxID)
@@ -93,6 +97,11 @@ func (s *SandboxService) CleanSandboxRuntime(ctx context.Context, sandboxID stri
 			return fmt.Errorf("get pod: %w", err)
 		}
 		generation := runtimeGenerationFromPod(pod)
+		if saveRootFS {
+			if err := s.saveSandboxRootFSCheckpoint(ctx, pod, record, tx); err != nil {
+				return err
+			}
+		}
 		pod, err = s.ensureSandboxDeletionFinalizer(ctx, pod)
 		if err != nil {
 			return fmt.Errorf("ensure sandbox cleanup finalizer: %w", err)

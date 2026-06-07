@@ -60,6 +60,26 @@ func (c *CtldClient) CheckVolumePortals(ctx context.Context, ctldAddress string,
 	return c.apiOrDefault().CheckVolumePortals(ctx, ctldAddress, req)
 }
 
+func (c *CtldClient) InspectRootFS(ctx context.Context, ctldAddress string, req ctldapi.InspectRootFSRequest) (*ctldapi.InspectRootFSResponse, error) {
+	return c.apiOrDefault().InspectRootFS(ctx, ctldAddress, req)
+}
+
+func (c *CtldClient) SaveRootFS(ctx context.Context, ctldAddress string, req ctldapi.SaveRootFSRequest) (*ctldapi.SaveRootFSResponse, error) {
+	return c.apiOrDefault().SaveRootFS(ctx, ctldAddress, req)
+}
+
+func (c *CtldClient) SaveRootFSWithTimeout(ctx context.Context, ctldAddress string, req ctldapi.SaveRootFSRequest, timeout time.Duration) (*ctldapi.SaveRootFSResponse, error) {
+	return c.apiWithTimeout(timeout).SaveRootFS(ctx, ctldAddress, req)
+}
+
+func (c *CtldClient) ApplyRootFS(ctx context.Context, ctldAddress string, req ctldapi.ApplyRootFSRequest) (*ctldapi.ApplyRootFSResponse, error) {
+	return c.apiOrDefault().ApplyRootFS(ctx, ctldAddress, req)
+}
+
+func (c *CtldClient) ApplyRootFSWithTimeout(ctx context.Context, ctldAddress string, req ctldapi.ApplyRootFSRequest, timeout time.Duration) (*ctldapi.ApplyRootFSResponse, error) {
+	return c.apiWithTimeout(timeout).ApplyRootFS(ctx, ctldAddress, req)
+}
+
 func (c *CtldClient) PrepareVolumePortalHandoff(ctx context.Context, ctldAddress string, req ctldapi.PrepareVolumePortalHandoffRequest) (*ctldapi.PrepareVolumePortalHandoffResponse, error) {
 	return c.apiOrDefault().PrepareVolumePortalHandoff(ctx, ctldAddress, req)
 }
@@ -80,4 +100,16 @@ func (c *CtldClient) apiOrDefault() *ctldapi.Client {
 		return ctldapi.NewClient(c.httpClient)
 	}
 	return ctldapi.NewClient(nil)
+}
+
+func (c *CtldClient) apiWithTimeout(timeout time.Duration) *ctldapi.Client {
+	if timeout <= 0 {
+		return c.apiOrDefault()
+	}
+	if c != nil && c.httpClient != nil {
+		clone := *c.httpClient
+		clone.Timeout = timeout
+		return ctldapi.NewClient(&clone)
+	}
+	return ctldapi.NewClientWithTimeout(timeout)
 }

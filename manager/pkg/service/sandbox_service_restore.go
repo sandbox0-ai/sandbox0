@@ -84,7 +84,7 @@ func (s *SandboxService) RestoreCleanedSandboxRuntime(ctx context.Context, sandb
 
 	if err := s.finishRestoredSandboxRuntime(ctx, pod, record, claimType); err != nil {
 		s.requestSandboxDeletionAfterClaimFailure(pod, "restored runtime initialization failed")
-		_ = s.CleanSandboxRuntime(context.Background(), sandboxID)
+		_ = s.cleanSandboxRuntime(context.Background(), sandboxID, false)
 		return nil, err
 	}
 	return s.GetSandbox(ctx, sandboxID)
@@ -111,6 +111,13 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 		Mounts:            record.Mounts,
 		SandboxID:         record.ID,
 		RuntimeGeneration: record.RuntimeGeneration + 1,
+	}
+	rootFSState, err := s.latestRootFSState(ctx, record.ID)
+	if err != nil {
+		return fmt.Errorf("load rootfs checkpoint: %w", err)
+	}
+	if err := s.applySandboxRootFSCheckpoint(ctx, pod, rootFSState); err != nil {
+		return err
 	}
 	if _, err := s.bindVolumePortals(ctx, pod, req, template); err != nil {
 		return fmt.Errorf("bind volume portals: %w", err)
@@ -172,7 +179,7 @@ func (s *SandboxService) templateForSandboxRecord(record *SandboxRecord) (*v1alp
 	}, nil
 }
 
-func cleanedSandboxResumeResponse(sandboxID string, generation int64) *ResumeSandboxResponse {
+func cleanedSandboxRestoreResponse(sandboxID string, generation int64) *ResumeSandboxResponse {
 	return &ResumeSandboxResponse{
 		SandboxID: sandboxID,
 		Resumed:   true,

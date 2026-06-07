@@ -30,6 +30,9 @@ const (
 	pathVolumeSnapshotPrepare       = "/api/v1/volume-portals/snapshot-checkpoints/prepare"
 	pathVolumeSnapshotComplete      = "/api/v1/volume-portals/snapshot-checkpoints/complete"
 	pathVolumeSnapshotAbort         = "/api/v1/volume-portals/snapshot-checkpoints/abort"
+	pathRootFSInspect               = "/api/v1/rootfs/inspect"
+	pathRootFSSave                  = "/api/v1/rootfs/save"
+	pathRootFSApply                 = "/api/v1/rootfs/apply"
 )
 
 var defaultHTTPClient = &http.Client{Timeout: DefaultRequestTimeout}
@@ -131,6 +134,18 @@ func (c *Client) AbortVolumeSnapshotCheckpoint(ctx context.Context, ctldAddress 
 	return PostJSON[AbortVolumeSnapshotCheckpointResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathVolumeSnapshotAbort, req)
 }
 
+func (c *Client) InspectRootFS(ctx context.Context, ctldAddress string, req InspectRootFSRequest) (*InspectRootFSResponse, error) {
+	return PostJSON[InspectRootFSResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSInspect, req)
+}
+
+func (c *Client) SaveRootFS(ctx context.Context, ctldAddress string, req SaveRootFSRequest) (*SaveRootFSResponse, error) {
+	return PostJSON[SaveRootFSResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSSave, req)
+}
+
+func (c *Client) ApplyRootFS(ctx context.Context, ctldAddress string, req ApplyRootFSRequest) (*ApplyRootFSResponse, error) {
+	return PostJSON[ApplyRootFSResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSApply, req)
+}
+
 func (c *Client) httpClientOrDefault() *http.Client {
 	if c != nil && c.httpClient != nil {
 		return c.httpClient
@@ -209,6 +224,12 @@ func responseError(resp any) string {
 	case *BindVolumePortalResponse:
 		return strings.TrimSpace(typed.Error)
 	case *UnbindVolumePortalResponse:
+		return strings.TrimSpace(typed.Error)
+	case *InspectRootFSResponse:
+		return strings.TrimSpace(typed.Error)
+	case *SaveRootFSResponse:
+		return strings.TrimSpace(typed.Error)
+	case *ApplyRootFSResponse:
 		return strings.TrimSpace(typed.Error)
 	default:
 		return ""

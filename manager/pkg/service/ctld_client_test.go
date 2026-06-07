@@ -85,3 +85,93 @@ func TestCtldClientCheckVolumePortals(t *testing.T) {
 	assert.False(t, resp.Ready)
 	assert.Equal(t, []string{"workspace"}, resp.Missing)
 }
+
+func TestCtldClientRootFSMethods(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		call func(*CtldClient, string) error
+	}{
+		{
+			name: "inspect",
+			path: "/api/v1/rootfs/inspect",
+			call: func(client *CtldClient, address string) error {
+				_, err := client.InspectRootFS(context.Background(), address, ctldapi.InspectRootFSRequest{
+					Target: ctldapi.RootFSContainerRef{Namespace: "default", PodName: "pod-1", ContainerName: "procd"},
+				})
+				return err
+			},
+		},
+		{
+			name: "save",
+			path: "/api/v1/rootfs/save",
+			call: func(client *CtldClient, address string) error {
+				_, err := client.SaveRootFS(context.Background(), address, ctldapi.SaveRootFSRequest{
+					Target:    ctldapi.RootFSContainerRef{Namespace: "default", PodName: "pod-1", ContainerName: "procd"},
+					SandboxID: "sandbox-1",
+					TeamID:    "team-1",
+				})
+				return err
+			},
+		},
+		{
+			name: "apply",
+			path: "/api/v1/rootfs/apply",
+			call: func(client *CtldClient, address string) error {
+				_, err := client.ApplyRootFS(context.Background(), address, ctldapi.ApplyRootFSRequest{
+					Target:     ctldapi.RootFSContainerRef{Namespace: "default", PodName: "pod-1", ContainerName: "procd"},
+					Descriptor: ctldapi.RootFSDiffDescriptor{Digest: "sha256:abc", ObjectKey: "rootfs/diff.tar"},
+				})
+				return err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, http.MethodPost, r.Method)
+				assert.Equal(t, tt.path, r.URL.Path)
+				w.Header().Set("Content-Type", "application/json")
+				switch tt.name {
+				case "inspect":
+					_ = json.NewEncoder(w).Encode(ctldapi.InspectRootFSResponse{Info: ctldapi.RootFSInfo{Runtime: "runc"}})
+				case "save":
+					_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{Descriptor: ctldapi.RootFSDiffDescriptor{ObjectKey: "rootfs/diff.tar"}})
+				case "apply":
+					_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
+				}
+			}))
+			defer server.Close()
+
+			client := NewCtldClient(CtldClientConfig{})
+			require.NoError(t, tt.call(client, server.URL))
+		})
+	}
+}
+
+func TestCtldClientRootFSMethodsCanUseExtendedTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/rootfs/save", r.URL.Path)
+		time.Sleep(80 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{
+			Descriptor: ctldapi.RootFSDiffDescriptor{Digest: "sha256:diff"},
+		})
+	}))
+	defer server.Close()
+
+	client := NewCtldClientWithHTTPClient(&http.Client{Timeout: 20 * time.Millisecond})
+	req := ctldapi.SaveRootFSRequest{
+		Target:    ctldapi.RootFSContainerRef{Namespace: "default", PodName: "pod-1", ContainerName: "procd"},
+		SandboxID: "sandbox-1",
+		TeamID:    "team-1",
+	}
+
+	_, err := client.SaveRootFS(context.Background(), server.URL, req)
+	require.Error(t, err)
+
+	resp, err := client.SaveRootFSWithTimeout(context.Background(), server.URL, req, time.Second)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "sha256:diff", resp.Descriptor.Digest)
+}

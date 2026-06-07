@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -14,8 +15,10 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	ctldcgroup "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/cgroup"
 	ctldportal "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal"
 	ctldpower "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/power"
+	ctldrootfs "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/rootfs"
 	ctldserver "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/server"
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
@@ -25,6 +28,7 @@ import (
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	storagedb "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"go.uber.org/zap"
 )
 
@@ -33,6 +37,10 @@ var (
 	kubeconfig             = ""
 	cgroupRoot             = "/host-sys/fs/cgroup"
 	criEndpoint            = "/host-run/containerd/containerd.sock"
+	containerdEndpoint     = "/host-run/containerd/containerd.sock"
+	containerdRoot         = "/host-run/containerd"
+	containerdHostRoot     = "/run/containerd"
+	containerdNamespace    = "k8s.io"
 	procRoot               = "/proc"
 	nodeName               = os.Getenv("NODE_NAME")
 	pauseMinMemoryRequest  = "10Mi"
@@ -51,6 +59,10 @@ func main() {
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "optional kubeconfig path used by ctld")
 	flag.StringVar(&cgroupRoot, "cgroup-root", "/host-sys/fs/cgroup", "host cgroup root mounted into ctld")
 	flag.StringVar(&criEndpoint, "cri-endpoint", "/host-run/containerd/containerd.sock", "host CRI socket used to read pod sandbox stats")
+	flag.StringVar(&containerdEndpoint, "containerd-endpoint", "/host-run/containerd/containerd.sock", "host containerd socket used for rootfs diff/apply")
+	flag.StringVar(&containerdRoot, "containerd-root", "/host-run/containerd", "host containerd runtime root mounted into ctld")
+	flag.StringVar(&containerdHostRoot, "containerd-host-root", "/run/containerd", "host containerd runtime root path used in containerd mount requests")
+	flag.StringVar(&containerdNamespace, "containerd-namespace", "k8s.io", "containerd namespace used by Kubernetes")
 	flag.StringVar(&procRoot, "proc-root", "/proc", "host proc root used to inspect sandbox processes")
 	flag.StringVar(&nodeName, "node-name", os.Getenv("NODE_NAME"), "current node name used to validate local sandbox ownership")
 	flag.StringVar(&pauseMinMemoryRequest, "pause-min-memory-request", "10Mi", "minimum memory request to apply to paused sandbox pods")
@@ -122,9 +134,11 @@ func main() {
 	}()
 	defer csiServer.Stop()
 
+	powerController, podResolver := buildPowerController(ctx, obsProvider)
 	httpServer := newHTTPServer(httpAddr, combinedController{
-		Controller: buildPowerController(ctx, obsProvider),
+		Controller: powerController,
 		Portal:     portalManager,
+		RootFS:     buildRootFSController(storageCfg, podResolver),
 	})
 	if obsProvider != nil {
 		httpServer.Handler = httpobs.ServerMiddleware(obsProvider.HTTPServerConfig(zapLogger))(httpServer.Handler)
@@ -149,14 +163,14 @@ func newHTTPServer(addr string, controller ctldserver.Controller) *http.Server {
 	return &http.Server{Addr: addr, Handler: ctldserver.NewMux(controller)}
 }
 
-func buildPowerController(ctx context.Context, obsProvider *observability.Provider) ctldserver.Controller {
+func buildPowerController(ctx context.Context, obsProvider *observability.Provider) (ctldserver.Controller, *ctldpower.PodResolver) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	k8sClient, err := k8s.NewClientWithObservability(kubeconfig, obsProvider)
 	if err != nil {
 		log.Printf("ctld power control disabled: build kubernetes client: %v", err)
-		return ctldserver.NotImplementedController{}
+		return ctldserver.NotImplementedController{}, nil
 	}
 	resolver := ctldpower.NewPodResolver(k8sClient, nodeName, cgroupRoot)
 	resolver.ProcRoot = procRoot
@@ -196,7 +210,45 @@ func buildPowerController(ctx context.Context, obsProvider *observability.Provid
 			powerReconciler.Run(ctx, 1)
 		}()
 	}
-	return controller
+	return controller, resolver
+}
+
+func buildRootFSController(storageCfg *apiconfig.StorageProxyConfig, resolver *ctldpower.PodResolver) ctldserver.RootFSController {
+	store, err := buildRootFSObjectStore(storageCfg)
+	if err != nil {
+		log.Printf("ctld rootfs object store disabled: %v", err)
+	}
+	return ctldrootfs.NewController(ctldrootfs.Config{
+		Runtime: ctldrootfs.NewContainerdRuntime(ctldrootfs.ContainerdRuntimeConfig{
+			CRIEndpoint:        criEndpoint,
+			ContainerdEndpoint: containerdEndpoint,
+			ContainerdRoot:     containerdRoot,
+			ContainerdHostRoot: containerdHostRoot,
+			Namespace:          containerdNamespace,
+		}),
+		Store:    store,
+		Resolver: resolver,
+		FS:       ctldcgroup.NewFS(),
+	})
+}
+
+func buildRootFSObjectStore(cfg *apiconfig.StorageProxyConfig) (objectstore.Store, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("storage config is not configured")
+	}
+	store, err := objectstore.Create(objectstore.Config{
+		Type:         cfg.ObjectStorageType,
+		Bucket:       cfg.S3Bucket,
+		Region:       cfg.S3Region,
+		Endpoint:     cfg.S3Endpoint,
+		AccessKey:    cfg.S3AccessKey,
+		SecretKey:    cfg.S3SecretKey,
+		SessionToken: cfg.S3SessionToken,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return store, nil
 }
 
 func initPortalDatabase(ctx context.Context, cfg *apiconfig.StorageProxyConfig, obsProvider *observability.Provider) (*pgxpool.Pool, error) {
@@ -225,6 +277,7 @@ func initPortalDatabase(ctx context.Context, cfg *apiconfig.StorageProxyConfig, 
 type combinedController struct {
 	ctldserver.Controller
 	Portal volumePortalHandler
+	RootFS ctldserver.RootFSController
 }
 
 func (c combinedController) BindVolumePortal(r *http.Request, req ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, int) {
@@ -378,6 +431,27 @@ func (c combinedController) MountedVolumeHandler() http.Handler {
 
 func (c combinedController) Probe(r *http.Request, sandboxID string, kind sandboxprobe.Kind) (sandboxprobe.Response, int) {
 	return c.Controller.Probe(r, sandboxID, kind)
+}
+
+func (c combinedController) InspectRootFS(r *http.Request, req ctldapi.InspectRootFSRequest) (ctldapi.InspectRootFSResponse, int) {
+	if c.RootFS == nil {
+		return ctldapi.InspectRootFSResponse{Error: "ctld rootfs inspect not implemented"}, http.StatusNotImplemented
+	}
+	return c.RootFS.InspectRootFS(r, req)
+}
+
+func (c combinedController) SaveRootFS(r *http.Request, req ctldapi.SaveRootFSRequest) (ctldapi.SaveRootFSResponse, int) {
+	if c.RootFS == nil {
+		return ctldapi.SaveRootFSResponse{Error: "ctld rootfs save not implemented"}, http.StatusNotImplemented
+	}
+	return c.RootFS.SaveRootFS(r, req)
+}
+
+func (c combinedController) ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int) {
+	if c.RootFS == nil {
+		return ctldapi.ApplyRootFSResponse{Error: "ctld rootfs apply not implemented"}, http.StatusNotImplemented
+	}
+	return c.RootFS.ApplyRootFS(r, req)
 }
 
 type volumePortalHandler interface {

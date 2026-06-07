@@ -21,7 +21,7 @@ func (p *InfraPlan) BuiltinTemplates() []infrav1alpha1.BuiltinTemplateConfig {
 	if p == nil || p.infra == nil {
 		return nil
 	}
-	if len(p.infra.Spec.BuiltinTemplates) == 0 {
+	if p.infra.Spec.BuiltinTemplates == nil {
 		return defaultBuiltinTemplates()
 	}
 	out := make([]infrav1alpha1.BuiltinTemplateConfig, len(p.infra.Spec.BuiltinTemplates))
@@ -35,6 +35,8 @@ func defaultBuiltinTemplates() []infrav1alpha1.BuiltinTemplateConfig {
 	return []infrav1alpha1.BuiltinTemplateConfig{
 		{TemplateID: s0template.DefaultTemplateID},
 		{TemplateID: s0template.DockerInSandboxTemplateID},
+		{TemplateID: s0template.OpenClawTemplateID},
+		{TemplateID: s0template.HermesTemplateID},
 	}
 }
 

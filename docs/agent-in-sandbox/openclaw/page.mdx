@@ -1,0 +1,125 @@
+# OpenClaw
+
+Run OpenClaw inside a Sandbox0 sandbox when you want the OpenClaw gateway, workspace, logs, and session state to live behind Sandbox0 runtime controls.
+
+The builtin `openclaw` template uses the upstream OpenClaw image and declares `/home/node/.openclaw` as the persistent mount point.
+
+## Create The Sandbox
+
+This flow creates a volume owned by the OpenClaw image user, claims a sandbox from the builtin template, and exposes the gateway through a `cmd` service. It leaves `ttl` and `hard_ttl` unset.
+
+```bash
+export SANDBOX0_BASE_URL="${SANDBOX0_BASE_URL:-https://api.sandbox0.ai}"
+export OPENCLAW_GATEWAY_TOKEN="$(openssl rand -hex 32)"
+export OPENCLAW_ROUTE_TOKEN="$(openssl rand -hex 32)"
+export OPENCLAW_ROUTE_TOKEN_SHA256="$(printf '%s' "$OPENCLAW_ROUTE_TOKEN" | sha256sum | awk '{print $1}')"
+
+OPENCLAW_VOLUME_ID="$(
+    curl -fsS "$SANDBOX0_BASE_URL/api/v1/sandboxvolumes" \
+        -H "authorization: Bearer $SANDBOX0_TOKEN" \
+        -H "content-type: application/json" \
+        -d '{"access_mode":"RWO","default_posix_uid":1000,"default_posix_gid":1000}' \
+        | jq -r '.data.id'
+)"
+
+cat > openclaw-sandbox.yaml <<EOF
+template: openclaw
+mounts:
+    - sandboxvolume_id: "$OPENCLAW_VOLUME_ID"
+      mount_point: /home/node/.openclaw
+config:
+    auto_resume: true
+    env_vars:
+        OPENCLAW_GATEWAY_TOKEN: "$OPENCLAW_GATEWAY_TOKEN"
+    services:
+        - id: gateway
+          port: 18789
+          runtime:
+              type: cmd
+              command:
+                  - sh
+                  - -lc
+                  - |
+                      exec openclaw gateway run \
+                          --allow-unconfigured \
+                          --auth token \
+                          --token "\$OPENCLAW_GATEWAY_TOKEN" \
+                          --bind lan \
+                          --port "\$SANDBOX0_SERVICE_PORT"
+          health_check:
+              path: /health
+          ingress:
+              public: true
+              routes:
+                  - id: gateway
+                    path_prefix: /
+                    methods: [GET, POST]
+                    auth:
+                        mode: bearer
+                        bearer_token_sha256: "$OPENCLAW_ROUTE_TOKEN_SHA256"
+                    timeout_seconds: 60
+                    resume: true
+EOF
+
+SANDBOX_ID="$(s0 -o json sandbox create -f openclaw-sandbox.yaml | jq -r '.ID // .id')"
+echo "$SANDBOX_ID"
+```
+
+The Sandbox0 route token is checked before traffic reaches OpenClaw. OpenClaw also receives `OPENCLAW_GATEWAY_TOKEN` for its own gateway authentication.
+
+## Use The Public URL
+
+Fetch the service details and call the gateway health endpoint.
+
+```bash
+OPENCLAW_PUBLIC_URL="$(
+    s0 -o json sandbox service get -s "$SANDBOX_ID" \
+        | jq -r '(.Services // .services)[] | select((.ID // .id) == "gateway") | (.PublicURL // .public_url)'
+)"
+
+curl -fsS "$OPENCLAW_PUBLIC_URL/health" \
+    -H "authorization: Bearer $OPENCLAW_ROUTE_TOKEN"
+```
+
+Use the returned service `public_url` as `OPENCLAW_PUBLIC_URL`. For OpenAI-compatible clients, point the client at the same base URL and provide the OpenClaw gateway token as required by OpenClaw.
+
+## Pause And Resume
+
+The sandbox can be paused manually:
+
+```bash
+s0 sandbox pause "$SANDBOX_ID"
+
+until [ "$(
+    curl -fsS "$SANDBOX0_BASE_URL/api/v1/sandboxes/$SANDBOX_ID" \
+        -H "authorization: Bearer $SANDBOX0_TOKEN" \
+        | jq -r '.data.status'
+)" = "paused" ]; do
+    sleep 1
+done
+
+curl -fsS "$OPENCLAW_PUBLIC_URL/health" \
+    -H "authorization: Bearer $OPENCLAW_ROUTE_TOKEN"
+```
+
+The request can resume the sandbox because the sandbox has `auto_resume: true` and the route has `resume: true`. Sandbox0 starts a new runtime pod and then starts the `cmd` service again. OpenClaw state under `/home/node/.openclaw` remains on the mounted volume.
+
+<Callout variant="warning">
+Outbound channel connections do not wake a paused sandbox by themselves. If OpenClaw listens to Telegram, Discord, or another external channel through long polling or WebSockets, put the webhook receiver in an always-on control plane that calls the Sandbox0 service URL, or keep that sandbox running.
+</Callout>
+
+## Operator Notes
+
+The builtin template is configurable through `Sandbox0Infra.spec.builtinTemplates`. Remove `templateId: openclaw` from that list to delete the operator-managed public template, or replace its `image`, `pool`, or full `spec` to pin a reviewed OpenClaw image.
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Hermes" href="/docs/agent-in-sandbox/hermes" cta="Continue">
+    Run the Hermes gateway with a persistent `/opt/data` volume.
+  </Card>
+
+  <Card title="Sandbox Services" href="/docs/sandbox/services" cta="Continue">
+    Tune route auth, timeouts, rate limits, and auto-resume.
+  </Card>
+</CardGroup>

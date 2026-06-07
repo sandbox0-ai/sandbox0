@@ -119,6 +119,24 @@
       ]
     },
     {
+      "label": "AGENT IN SANDBOX",
+      "slug": "agent-in-sandbox",
+      "pages": [
+        {
+          "slug": "",
+          "title": "Overview"
+        },
+        {
+          "slug": "openclaw",
+          "title": "OpenClaw"
+        },
+        {
+          "slug": "hermes",
+          "title": "Hermes"
+        }
+      ]
+    },
+    {
       "label": "CREDENTIAL",
       "slug": "credential",
       "pages": [

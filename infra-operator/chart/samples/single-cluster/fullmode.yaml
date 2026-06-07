@@ -99,6 +99,20 @@ spec:
       pool:
         minIdle: 1
         maxIdle: 5
+    - templateId: openclaw
+      image: ghcr.io/openclaw/openclaw:latest
+      displayName: OpenClaw
+      description: Builtin OpenClaw agent-in-sandbox template installed by infra-operator.
+      pool:
+        minIdle: 0
+        maxIdle: 2
+    - templateId: hermes
+      image: nousresearch/hermes-agent:latest
+      displayName: Hermes
+      description: Builtin Hermes agent-in-sandbox template installed by infra-operator.
+      pool:
+        minIdle: 0
+        maxIdle: 2
   # Shared placement for sandbox template Pods plus node-local helpers such as
   # netd and ctld.
   # infra-operator manages sandbox0.ai/data-plane-ready; do not include it here.

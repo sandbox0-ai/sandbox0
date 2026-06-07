@@ -20,6 +20,27 @@ const (
 	DockerInSandboxEphemeralStorage    = "20Gi"
 	DockerInSandboxDockerRoot          = "/var/lib/docker"
 	DockerInSandboxDockerRootSizeLimit = "20Gi"
+
+	OpenClawTemplateID          = "openclaw"
+	OpenClawTemplateImage       = "ghcr.io/openclaw/openclaw:latest"
+	OpenClawTemplateDisplayName = "OpenClaw"
+	OpenClawTemplateDescription = "Builtin OpenClaw agent-in-sandbox template installed by infra-operator."
+	OpenClawCPU                 = "1"
+	OpenClawMemory              = "4Gi"
+	OpenClawEphemeralStorage    = "4Gi"
+	OpenClawDataMount           = "/home/node/.openclaw"
+	AgentWorkspaceMount         = "/workspace"
+	AgentWorkspaceSizeLimit     = "4Gi"
+
+	HermesTemplateID          = "hermes"
+	HermesTemplateImage       = "nousresearch/hermes-agent:latest"
+	HermesTemplateDisplayName = "Hermes"
+	HermesTemplateDescription = "Builtin Hermes agent-in-sandbox template installed by infra-operator."
+	HermesCPU                 = "1"
+	HermesMemory              = "4Gi"
+	HermesEphemeralStorage    = "4Gi"
+	HermesDataMount           = "/opt/data"
+	HermesRuntimeHome         = "/workspace/.hermes"
 )
 
 // ApplyDefaultPool applies default pool values when not explicitly set.

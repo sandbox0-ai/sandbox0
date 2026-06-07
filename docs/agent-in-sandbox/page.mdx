@@ -1,0 +1,79 @@
+# Agent in Sandbox
+
+Agent in Sandbox runs an agent framework gateway inside a Sandbox0 sandbox instead of on a cloud VM, VPS, or developer workstation.
+
+Use this pattern when the agent needs a long-lived workspace, controlled network access, and a service endpoint, but you do not want the sandbox runtime to become the place where broad production credentials live.
+
+## Why Not A VM Or VPS?
+
+A VM or VPS gives the agent a durable machine. That is simple, but it also makes the machine the trust boundary:
+
+- provider API keys, SSH keys, browser sessions, and service tokens often end up in the same filesystem the agent can read
+- filesystem state, runtime processes, network policy, and public ingress are usually coupled to one host
+- snapshot, fork, and cleanup behavior depends on host automation that must be built separately
+- every agent session tends to accumulate host-level drift unless you rebuild or re-image the machine
+
+Sandbox0 separates these concerns. The sandbox holds the agent runtime and workspace. Sandbox Volumes hold durable agent state. Network policy and egress auth sit outside the agent process. Public service routes can authenticate, rate-limit, and resume a paused sandbox before traffic reaches the agent framework.
+
+This is a better fit for agents that process untrusted inputs, run tools, browse the network, or execute code because the runtime can be isolated and replaced without treating the VM as the durable source of truth.
+
+## What Sandbox0 Owns
+
+| Layer | Sandbox0 primitive |
+|-------|--------------------|
+| Runtime image | Builtin or custom Template |
+| Durable agent state | SandboxVolume |
+| Process restart | `cmd` Sandbox Service |
+| Public HTTP entrypoint | Sandbox Service route |
+| Wake-up path | Sandbox `auto_resume` plus route `resume` |
+| Secret boundary | Credential sources, egress auth, LLMProxy, or external model proxy |
+| Network boundary | Sandbox network policy and protocol controls |
+
+The agent framework still owns its own sessions, memory format, plugins, and application-level APIs. Sandbox0 owns the runtime boundary around it.
+
+## Builtin Agent Templates
+
+Self-hosted deployments seed these public builtin templates when `spec.builtinTemplates` is omitted:
+
+```bash
+s0 template get openclaw
+s0 template get hermes
+```
+
+Operators can pin images, tune pools, or remove either template by setting `Sandbox0Infra.spec.builtinTemplates` explicitly. The default builtin images are:
+
+| Template | Image |
+|----------|-------|
+| `openclaw` | `ghcr.io/openclaw/openclaw:latest` |
+| `hermes` | `nousresearch/hermes-agent:latest` |
+
+## Lifecycle Choice
+
+The examples in this section deliberately do not set `ttl` or `hard_ttl`.
+
+Agent gateways often maintain channel connections, scheduled jobs, local caches, or operator sessions. A short `ttl` can pause the runtime at the wrong time, while a short `hard_ttl` can delete the sandbox identity and rootfs checkpoints. Choose those values after you decide how the agent should be woken up and how long its identity should live.
+
+You can still pause a sandbox manually. If the sandbox has `auto_resume: true` and the service route has `resume: true`, a later public request can create a new runtime pod and restart the `cmd` service. Running processes, sockets, memory, and in-flight connections are not preserved across pause/resume; durable state should live in the mounted volume.
+
+## Secret Boundary
+
+Do not mount broad cloud credentials or developer home directories into an agent sandbox.
+
+Prefer one of these patterns:
+
+- route model traffic through LLMProxy or another external model proxy
+- use Sandbox0 credential sources and egress auth for destination-scoped outbound auth
+- give the agent only a narrow service token when the framework itself requires an application-level API key
+- keep route auth at the Sandbox0 service layer so public requests are checked before they reach the agent gateway
+
+## Guides
+
+<CardGroup>
+  <Card title="OpenClaw" href="/docs/agent-in-sandbox/openclaw" cta="Continue">
+    Run the OpenClaw gateway from the builtin OpenClaw template with persistent state.
+  </Card>
+
+  <Card title="Hermes" href="/docs/agent-in-sandbox/hermes" cta="Continue">
+    Run the Hermes gateway from the builtin Hermes template with persistent state.
+  </Card>
+</CardGroup>

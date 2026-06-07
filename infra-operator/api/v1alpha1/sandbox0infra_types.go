@@ -169,7 +169,6 @@ type Sandbox0InfraSpec struct {
 
 	// BuiltinTemplates defines system builtin templates to seed the template store
 	// +optional
-	// +kubebuilder:default={}
 	BuiltinTemplates []BuiltinTemplateConfig `json:"builtinTemplates,omitempty"`
 }
 
@@ -1497,10 +1496,10 @@ type BuiltinTemplateConfig struct {
 type BuiltinTemplatePoolConfig struct {
 	// +optional
 	// +kubebuilder:default=1
-	MinIdle int32 `json:"minIdle,omitempty"`
+	MinIdle *int32 `json:"minIdle,omitempty"`
 	// +optional
 	// +kubebuilder:default=5
-	MaxIdle int32 `json:"maxIdle,omitempty"`
+	MaxIdle *int32 `json:"maxIdle,omitempty"`
 }
 
 // Sandbox0InfraStatus defines the observed state of Sandbox0Infra

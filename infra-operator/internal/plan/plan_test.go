@@ -159,11 +159,19 @@ func TestBuiltinTemplatesDefaultsAndOverrides(t *testing.T) {
 	t.Parallel()
 
 	defaults := Compile(&infrav1alpha1.Sandbox0Infra{}).BuiltinTemplates()
-	if len(defaults) != 2 {
-		t.Fatalf("default builtin template count = %d, want 2", len(defaults))
+	if len(defaults) != 4 {
+		t.Fatalf("default builtin template count = %d, want 4", len(defaults))
 	}
-	if defaults[0].TemplateID != template.DefaultTemplateID || defaults[1].TemplateID != template.DockerInSandboxTemplateID {
-		t.Fatalf("default builtin templates = %#v, want default and dins", defaults)
+	wantDefaults := []string{
+		template.DefaultTemplateID,
+		template.DockerInSandboxTemplateID,
+		template.OpenClawTemplateID,
+		template.HermesTemplateID,
+	}
+	for i, want := range wantDefaults {
+		if defaults[i].TemplateID != want {
+			t.Fatalf("default builtin template[%d] = %q, want %q; all defaults=%#v", i, defaults[i].TemplateID, want, defaults)
+		}
 	}
 
 	overridden := Compile(&infrav1alpha1.Sandbox0Infra{
@@ -179,6 +187,15 @@ func TestBuiltinTemplatesDefaultsAndOverrides(t *testing.T) {
 	}
 	if overridden[0].Image != "example.com/default:latest" {
 		t.Fatalf("overridden image = %q, want custom image", overridden[0].Image)
+	}
+
+	empty := Compile(&infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			BuiltinTemplates: []infrav1alpha1.BuiltinTemplateConfig{},
+		},
+	}).BuiltinTemplates()
+	if len(empty) != 0 {
+		t.Fatalf("explicit empty builtin templates = %#v, want none", empty)
 	}
 }
 

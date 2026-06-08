@@ -258,28 +258,7 @@ func validateExpectedBase(info ctldapi.RootFSInfo, req ctldapi.ApplyRootFSReques
 	if expected := strings.TrimSpace(req.ExpectedSnapshotter); expected != "" && strings.TrimSpace(info.Snapshotter) != expected {
 		return fmt.Errorf("%w: snapshotter mismatch: expected %s, got %s", ErrConflict, expected, info.Snapshotter)
 	}
-	if expected := strings.TrimSpace(req.ExpectedBaseImageDigest); expected != "" && strings.TrimSpace(info.BaseImageDigest) != expected {
-		return fmt.Errorf("%w: base image digest mismatch: expected %s, got %s", ErrConflict, expected, info.BaseImageDigest)
-	}
-	if expected := strings.TrimSpace(req.ExpectedSnapshotParent); expected != "" && strings.TrimSpace(info.SnapshotParent) != expected {
-		return fmt.Errorf("%w: snapshot parent mismatch: expected %s, got %s", ErrConflict, expected, info.SnapshotParent)
-	}
-	if len(req.ExpectedSnapshotParentChain) > 0 && !sameStringSlice(req.ExpectedSnapshotParentChain, info.SnapshotParentChain) {
-		return fmt.Errorf("%w: snapshot parent chain mismatch", ErrConflict)
-	}
 	return nil
-}
-
-func sameStringSlice(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 func defaultObjectKey(teamID, sandboxID string, generation int64, digest string) (string, error) {

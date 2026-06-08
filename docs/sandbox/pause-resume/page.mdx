@@ -60,6 +60,8 @@ console.log("Pause requested");`
 
 Resume a sandbox that was paused manually or by TTL expiry.
 
+Resume first restores the writable rootfs checkpoint onto a runtime pod created from the current template image. If that restore fails, Sandbox0 retries once with a runtime pod pinned to the checkpoint's recorded base image digest. Kubernetes pulls and garbage-collects that image through the normal kubelet image lifecycle.
+
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/resume
 </Endpoint>

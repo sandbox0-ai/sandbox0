@@ -574,7 +574,7 @@ func (s *Server) proxyDNSTCP(req *adapterRequest) error {
 	if req.DestIP == nil || req.DestPort <= 0 {
 		return fmt.Errorf("missing destination")
 	}
-	s.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	s.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()), req.Host, "dns")
 	upstream := req.UpstreamConn
 	var err error
 	if upstream == nil {

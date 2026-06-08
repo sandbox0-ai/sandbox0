@@ -25,6 +25,8 @@ type FlowKey struct {
 	DstIP   netip.Addr
 	SrcPort uint16
 	DstPort uint16
+	Host    string
+	App     string
 }
 
 func NewManager(logger *zap.Logger) (*Manager, error) {

@@ -1008,13 +1008,13 @@ func (s *Server) runPassThrough(adapter proxyAdapter, req *adapterRequest) error
 		if req.Conn == nil {
 			return fmt.Errorf("tcp pass-through requires connection")
 		}
-		s.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+		s.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()), req.Host, "unknown")
 		return s.relayTCPRequestWithUpstream(req, req.Prefix, req.UpstreamConn, req.UpstreamPrefix)
 	case "udp":
 		if req.UDPConn == nil || req.UDPSource == nil {
 			return fmt.Errorf("udp pass-through requires source datagram")
 		}
-		s.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "udp", req.UDPSource.Port)
+		s.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "udp", req.UDPSource.Port, req.Host, "unknown")
 		return s.forwardUDPDatagram(req.UDPConn, req.UDPSource, req.UDPPayload, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 	default:
 		return fmt.Errorf("unsupported pass-through transport %q", adapter.Transport())
@@ -1133,7 +1133,7 @@ func normalizeRelayError(err error) error {
 	return err
 }
 
-func (s *Server) recordFlow(srcIP string, dstIP net.IP, dstPort int, proto string, srcPort int) {
+func (s *Server) recordFlow(srcIP string, dstIP net.IP, dstPort int, proto string, srcPort int, host string, app string) {
 	if s.tracker == nil {
 		return
 	}
@@ -1163,6 +1163,8 @@ func (s *Server) recordFlow(srcIP string, dstIP net.IP, dstPort int, proto strin
 		DstIP:   dstAddr,
 		SrcPort: uint16(srcPort),
 		DstPort: uint16(dstPort),
+		Host:    normalizeHost(host),
+		App:     strings.ToLower(strings.TrimSpace(app)),
 	})
 }
 

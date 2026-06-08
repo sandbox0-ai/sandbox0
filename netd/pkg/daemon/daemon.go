@@ -603,7 +603,11 @@ func cleanupDeniedTrackedFlows(
 		if flow.Proto == 17 {
 			proto = "udp"
 		}
-		if !policy.AllowEgressL4(p, net.IP(flow.DstIP.AsSlice()), int(flow.DstPort), proto) {
+		allowed := policy.AllowEgressL4(p, net.IP(flow.DstIP.AsSlice()), int(flow.DstPort), proto)
+		if flow.Host != "" || flow.App != "" {
+			allowed = policy.AllowEgressDestination(p, net.IP(flow.DstIP.AsSlice()), int(flow.DstPort), proto, flow.Host, flow.App)
+		}
+		if !allowed {
 			flowsToKill = append(flowsToKill, flow)
 		}
 	}

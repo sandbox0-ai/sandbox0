@@ -1,0 +1,361 @@
+# OpenClaw
+
+Run OpenClaw inside a Sandbox0 sandbox when you want the OpenClaw gateway, workspace, logs, and session state to live behind Sandbox0 runtime controls.
+
+The builtin `openclaw` template uses the upstream OpenClaw image and declares `/home/node/.openclaw` as the persistent mount point.
+
+## Create The Sandbox
+
+Create a SandboxVolume, claim the builtin `openclaw` template, mount the volume, and expose the OpenClaw gateway as a `cmd` Sandbox Service. The example leaves `ttl` and `hard_ttl` unset.
+
+Set two tokens before running the SDK examples:
+
+```bash
+export OPENCLAW_GATEWAY_TOKEN="$(openssl rand -hex 32)"
+export OPENCLAW_ROUTE_TOKEN="$(openssl rand -hex 32)"
+```
+
+`OPENCLAW_ROUTE_TOKEN` is checked by the Sandbox0 public route before traffic reaches OpenClaw. `OPENCLAW_GATEWAY_TOKEN` is passed to OpenClaw for its own gateway auth.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `package main
+
+import (
+    "context"
+    "crypto/sha256"
+    "encoding/hex"
+    "fmt"
+    "log"
+    "os"
+
+    sandbox0 "github.com/sandbox0-ai/sdk-go"
+    "github.com/sandbox0-ai/sdk-go/pkg/apispec"
+)
+
+func main() {
+    ctx := context.Background()
+    opts := []sandbox0.Option{sandbox0.WithToken(mustEnv("SANDBOX0_TOKEN"))}
+    if baseURL := os.Getenv("SANDBOX0_BASE_URL"); baseURL != "" {
+        opts = append(opts, sandbox0.WithBaseURL(baseURL))
+    }
+
+    client, err := sandbox0.NewClient(opts...)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    routeHash := sha256.Sum256([]byte(mustEnv("OPENCLAW_ROUTE_TOKEN")))
+    volume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{
+        AccessMode:      apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWO),
+        DefaultPosixUID: apispec.NewOptInt64(1000),
+        DefaultPosixGid: apispec.NewOptInt64(1000),
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    sandbox, err := client.ClaimSandbox(ctx, "openclaw",
+        sandbox0.WithSandboxBootstrapMount(volume.ID, "/home/node/.openclaw"),
+        sandbox0.WithSandboxAutoResume(true),
+        sandbox0.WithSandboxEnvVars(map[string]string{
+            "OPENCLAW_GATEWAY_TOKEN": mustEnv("OPENCLAW_GATEWAY_TOKEN"),
+        }),
+        sandbox0.WithSandboxServices([]apispec.SandboxAppService{
+            {
+                ID:   "gateway",
+                Port: apispec.NewOptInt32(18789),
+                Runtime: apispec.NewOptSandboxAppServiceRuntime(apispec.SandboxAppServiceRuntime{
+                    Type: apispec.SandboxAppServiceRuntimeTypeCmd,
+                    Command: []string{
+                        "sh",
+                        "-lc",
+                        "exec openclaw gateway run --allow-unconfigured --auth token --token \\"$OPENCLAW_GATEWAY_TOKEN\\" --bind lan --port \\"$SANDBOX0_SERVICE_PORT\\"",
+                    },
+                }),
+                HealthCheck: apispec.NewOptSandboxAppServiceHealth(apispec.SandboxAppServiceHealth{
+                    Path: apispec.NewOptString("/health"),
+                }),
+                Ingress: apispec.SandboxAppServiceIngress{
+                    Public: true,
+                    Routes: []apispec.SandboxAppServiceRoute{
+                        {
+                            ID:             "gateway",
+                            PathPrefix:     apispec.NewOptString("/"),
+                            Methods:        []string{"GET", "POST"},
+                            TimeoutSeconds: apispec.NewOptInt32(60),
+                            Resume:         true,
+                            Auth: apispec.NewOptSandboxAppServiceRouteAuth(apispec.SandboxAppServiceRouteAuth{
+                                Mode:              apispec.SandboxAppServiceRouteAuthModeBearer,
+                                BearerTokenSHA256: apispec.NewOptString(hex.EncodeToString(routeHash[:])),
+                            }),
+                        },
+                    },
+                },
+            },
+        }),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    services, err := sandbox.GetServices(ctx)
+    if err != nil {
+        log.Fatal(err)
+    }
+    for _, service := range services.Services {
+        if service.ID == "gateway" {
+            fmt.Printf("SANDBOX_ID=%s\\n", sandbox.ID)
+            fmt.Printf("OPENCLAW_PUBLIC_URL=%s\\n", service.PublicURL.Or(""))
+        }
+    }
+}
+
+func mustEnv(key string) string {
+    value := os.Getenv(key)
+    if value == "" {
+        log.Fatalf("%s is required", key)
+    }
+    return value
+}`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from hashlib import sha256
+import os
+
+from sandbox0 import Client
+from sandbox0.apispec.models.claim_mount_request import ClaimMountRequest
+from sandbox0.apispec.models.create_sandbox_volume_request import CreateSandboxVolumeRequest
+from sandbox0.apispec.models.sandbox_config import SandboxConfig
+
+client = Client(
+    token=os.environ["SANDBOX0_TOKEN"],
+    base_url=os.environ.get("SANDBOX0_BASE_URL", "https://api.sandbox0.ai"),
+)
+
+route_hash = sha256(os.environ["OPENCLAW_ROUTE_TOKEN"].encode()).hexdigest()
+volume = client.volumes.create(CreateSandboxVolumeRequest.from_dict({
+    "access_mode": "RWO",
+    "default_posix_uid": 1000,
+    "default_posix_gid": 1000,
+}))
+
+sandbox = client.sandboxes.claim(
+    "openclaw",
+    mounts=[ClaimMountRequest(
+        sandboxvolume_id=volume.id,
+        mount_point="/home/node/.openclaw",
+    )],
+    config=SandboxConfig.from_dict({
+        "auto_resume": True,
+        "env_vars": {
+            "OPENCLAW_GATEWAY_TOKEN": os.environ["OPENCLAW_GATEWAY_TOKEN"],
+        },
+        "services": [{
+            "id": "gateway",
+            "port": 18789,
+            "runtime": {
+                "type": "cmd",
+                "command": [
+                    "sh",
+                    "-lc",
+                    "exec openclaw gateway run --allow-unconfigured --auth token --token \\"$OPENCLAW_GATEWAY_TOKEN\\" --bind lan --port \\"$SANDBOX0_SERVICE_PORT\\"",
+                ],
+            },
+            "health_check": {"path": "/health"},
+            "ingress": {
+                "public": True,
+                "routes": [{
+                    "id": "gateway",
+                    "path_prefix": "/",
+                    "methods": ["GET", "POST"],
+                    "auth": {
+                        "mode": "bearer",
+                        "bearer_token_sha256": route_hash,
+                    },
+                    "timeout_seconds": 60,
+                    "resume": True,
+                }],
+            },
+        }],
+    }),
+)
+
+services = sandbox.get_services().services
+public_url = next(s.public_url for s in services if s.id == "gateway")
+print("SANDBOX_ID=" + sandbox.id)
+print("OPENCLAW_PUBLIC_URL=" + public_url)`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `import { createHash } from "node:crypto";
+import { Client, models } from "sandbox0";
+
+const token = process.env.SANDBOX0_TOKEN;
+const gatewayToken = process.env.OPENCLAW_GATEWAY_TOKEN;
+const routeToken = process.env.OPENCLAW_ROUTE_TOKEN;
+if (!token || !gatewayToken || !routeToken) {
+    throw new Error("SANDBOX0_TOKEN, OPENCLAW_GATEWAY_TOKEN, and OPENCLAW_ROUTE_TOKEN are required");
+}
+
+const client = new Client({
+    token,
+    baseUrl: process.env.SANDBOX0_BASE_URL || "https://api.sandbox0.ai",
+});
+
+const volume = await client.volumes.create({
+    accessMode: models.VolumeAccessMode.Rwo,
+    defaultPosixUid: 1000,
+    defaultPosixGid: 1000,
+});
+
+const sandbox = await client.sandboxes.claim("openclaw", {
+    mounts: [{
+        sandboxvolumeId: volume.id,
+        mountPoint: "/home/node/.openclaw",
+    }],
+    config: {
+        autoResume: true,
+        envVars: { OPENCLAW_GATEWAY_TOKEN: gatewayToken },
+        services: [{
+            id: "gateway",
+            port: 18789,
+            runtime: {
+                type: "cmd",
+                command: [
+                    "sh",
+                    "-lc",
+                    "exec openclaw gateway run --allow-unconfigured --auth token --token \\"$OPENCLAW_GATEWAY_TOKEN\\" --bind lan --port \\"$SANDBOX0_SERVICE_PORT\\"",
+                ],
+            },
+            healthCheck: { path: "/health" },
+            ingress: {
+                _public: true,
+                routes: [{
+                    id: "gateway",
+                    pathPrefix: "/",
+                    methods: ["GET", "POST"],
+                    auth: {
+                        mode: "bearer",
+                        bearerTokenSha256: createHash("sha256").update(routeToken).digest("hex"),
+                    },
+                    timeoutSeconds: 60,
+                    resume: true,
+                }],
+            },
+        }],
+    },
+});
+
+const services = await sandbox.getServices();
+const gateway = services.services.find((service) => service.id === "gateway");
+console.log("SANDBOX_ID=" + sandbox.id);
+console.log("OPENCLAW_PUBLIC_URL=" + (gateway?.publicUrl || ""));`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `# The CLI can claim the builtin template and mount the volume.
+# Use one of the SDK tabs to attach the gateway service route.
+OPENCLAW_VOLUME_ID="$(
+    curl -fsS "$SANDBOX0_BASE_URL/api/v1/sandboxvolumes" \\
+        -H "authorization: Bearer $SANDBOX0_TOKEN" \\
+        -H "content-type: application/json" \\
+        -d '{"access_mode":"RWO","default_posix_uid":1000,"default_posix_gid":1000}' \\
+        | jq -r '.data.id'
+)"
+
+SANDBOX_ID="$(
+    s0 -o json sandbox create \\
+        --template openclaw \\
+        --mount "$OPENCLAW_VOLUME_ID:/home/node/.openclaw" \\
+        | jq -r '.ID // .id'
+)"
+
+s0 sandbox get "$SANDBOX_ID"`
+    }
+  ]}
+/>
+
+## Use The Public URL
+
+Call the gateway through the returned `OPENCLAW_PUBLIC_URL`:
+
+```bash
+curl -fsS "$OPENCLAW_PUBLIC_URL/health" \
+    -H "authorization: Bearer $OPENCLAW_ROUTE_TOKEN"
+```
+
+For OpenAI-compatible clients, point the client at the same base URL and provide the OpenClaw gateway token according to the OpenClaw gateway contract.
+
+## Pause And Resume
+
+Manual pause frees the runtime pod. A later public request can resume the sandbox because the sandbox has `auto_resume: true` and the route has `resume: true`.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `_, err := client.PauseSandbox(ctx, sandbox.ID)
+if err != nil {
+    log.Fatal(err)
+}
+
+_, err = client.ResumeSandbox(ctx, sandbox.ID)
+if err != nil {
+    log.Fatal(err)
+}`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `client.sandboxes.pause(sandbox.id)
+client.sandboxes.resume(sandbox.id)`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `await client.sandboxes.pause(sandbox.id);
+await client.sandboxes.resume(sandbox.id);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox pause "$SANDBOX_ID"
+s0 sandbox resume "$SANDBOX_ID"
+
+# Or let the public route resume it:
+curl -fsS "$OPENCLAW_PUBLIC_URL/health" \\
+    -H "authorization: Bearer $OPENCLAW_ROUTE_TOKEN"`
+    }
+  ]}
+/>
+
+OpenClaw state under `/home/node/.openclaw` remains on the mounted volume. Running processes, sockets, memory, and in-flight requests are not preserved across pause/resume.
+
+<Callout variant="warning">
+Outbound channel connections do not wake a paused sandbox by themselves. If OpenClaw listens to Telegram, Discord, or another external channel through long polling or WebSockets, put the webhook receiver in an always-on control plane that calls the Sandbox0 service URL, or keep that sandbox running.
+</Callout>
+
+## Operator Notes
+
+The builtin template is configurable through `Sandbox0Infra.spec.builtinTemplates`. Remove `templateId: openclaw` from that list to delete the operator-managed public template, or replace its `image`, `pool`, or full `spec` to pin a reviewed OpenClaw image.
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Hermes" href="/docs/agent-in-sandbox/hermes" cta="Continue">
+    Run the Hermes gateway with a persistent `/opt/data` volume.
+  </Card>
+
+  <Card title="Sandbox Services" href="/docs/sandbox/services" cta="Continue">
+    Tune route auth, timeouts, rate limits, and auto-resume.
+  </Card>
+</CardGroup>

@@ -55,7 +55,6 @@ spec:
             description: Sandbox0InfraSpec defines the desired state of Sandbox0Infra
             properties:
               builtinTemplates:
-                default: []
                 description: BuiltinTemplates defines system builtin templates to
                   seed the template store
                 items:

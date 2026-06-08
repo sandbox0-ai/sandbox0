@@ -64,7 +64,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storageproxy"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	"github.com/sandbox0-ai/sandbox0/pkg/template"
 )
 
 const (
@@ -885,11 +884,8 @@ func (r *Sandbox0InfraReconciler) waitBuiltinTemplatePodsReady(ctx context.Conte
 			return fmt.Errorf("invalid builtin template_id %q: %w", builtin.TemplateID, err)
 		}
 
-		minIdle, maxIdle := builtin.Pool.MinIdle, builtin.Pool.MaxIdle
-		if minIdle == 0 && maxIdle == 0 && builtin.Spec != nil {
-			minIdle, maxIdle = builtin.Spec.Pool.MinIdle, builtin.Spec.Pool.MaxIdle
-		}
-		minIdle, _ = template.ApplyDefaultPool(minIdle, maxIdle)
+		spec := common.BuildBuiltinTemplateSpec(templateID, builtin)
+		minIdle := spec.Pool.MinIdle
 		if minIdle == 0 {
 			continue
 		}

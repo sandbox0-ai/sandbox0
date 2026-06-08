@@ -27,7 +27,7 @@ A `Sandbox0Infra` spec is easier to reason about when you split it into five lay
 `spec.initUser` is consumed by the gateway runtime, not created by the operator itself.
 In local-password mode it bootstraps the first admin credentials; in OIDC-only mode it pre-creates the admin user and initial team so the first OIDC login with the same email lands on the intended admin account.
 
-When `spec.builtinTemplates` is omitted, infra-operator seeds two public builtin templates: `default` and `dins`. Set `spec.builtinTemplates` explicitly when you want to pin images, adjust pools, disable one of the builtins, or provide a full template `spec` for a runtime-specific Docker in Sandbox setup.
+When `spec.builtinTemplates` is omitted, infra-operator seeds public builtin templates for `default`, `dins`, `openclaw`, and `hermes`. Set `spec.builtinTemplates` explicitly when you want to pin images, adjust pools, disable one of the builtins, or provide a full template `spec` for a runtime-specific setup. Set it to `[]` to remove all operator-managed builtin templates.
 
 ## Deployment Profiles
 

@@ -70,7 +70,7 @@ func (a *httpAdapter) Handle(req *adapterRequest) error {
 	if req == nil || req.Server == nil || req.Conn == nil {
 		return fmt.Errorf("http adapter requires connection")
 	}
-	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()), req.Host, "http")
 	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
 		if !egressAuthNeedsHTTPMatch(req) {
 			if err := prepareHTTPHeaderDirectives(req.EgressAuth, "http", true); err != nil {
@@ -159,7 +159,7 @@ func (a *tlsAdapter) Handle(req *adapterRequest) error {
 	if req == nil || req.Server == nil || req.Conn == nil {
 		return fmt.Errorf("tls adapter requires connection")
 	}
-	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()), req.Host, "tls")
 	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
 		if req.EgressAuth.Rule.Protocol == v1alpha1.EgressAuthProtocolTLS {
 			if err := prepareTLSClientCertificateDirectives(req.EgressAuth, "tls", tlsTerminationRequired(req)); err != nil {
@@ -215,7 +215,7 @@ func (a *sshAdapter) Handle(req *adapterRequest) error {
 	if req == nil || req.Server == nil || req.Conn == nil {
 		return fmt.Errorf("ssh adapter requires connection")
 	}
-	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()), req.Host, "ssh")
 	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
 		if err := prepareSSHProxyDirectives(req.EgressAuth, "ssh", true); err != nil {
 			if req.EgressAuth.ShouldBypass() {
@@ -257,7 +257,7 @@ func (a *socks5Adapter) Handle(req *adapterRequest) error {
 	if req == nil || req.Server == nil || req.Conn == nil {
 		return fmt.Errorf("socks5 adapter requires connection")
 	}
-	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()), req.Host, "socks5")
 	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
 		if err := prepareUsernamePasswordDirectives(req.EgressAuth, "socks5", true); err != nil {
 			if req.EgressAuth.ShouldBypass() {
@@ -295,7 +295,7 @@ func (a *amqpAdapter) Handle(req *adapterRequest) error {
 	if req == nil || req.Server == nil || req.Conn == nil {
 		return fmt.Errorf("amqp adapter requires connection")
 	}
-	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()), req.Host, "amqp")
 	return req.Server.relayTCPRequest(req)
 }
 
@@ -328,7 +328,7 @@ func (a *mqttAdapter) Handle(req *adapterRequest) error {
 	if req == nil || req.Server == nil || req.Conn == nil {
 		return fmt.Errorf("mqtt adapter requires connection")
 	}
-	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()), req.Host, "mqtt")
 	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
 		if err := prepareUsernamePasswordDirectives(req.EgressAuth, "mqtt", true); err != nil {
 			if req.EgressAuth.ShouldBypass() {
@@ -366,7 +366,7 @@ func (a *mongodbAdapter) Handle(req *adapterRequest) error {
 	if req == nil || req.Server == nil || req.Conn == nil {
 		return fmt.Errorf("mongodb adapter requires connection")
 	}
-	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()), req.Host, "mongodb")
 	return req.Server.relayTCPRequest(req)
 }
 
@@ -383,7 +383,7 @@ func (a *redisAdapter) Handle(req *adapterRequest) error {
 	if req == nil || req.Server == nil || req.Conn == nil {
 		return fmt.Errorf("redis adapter requires connection")
 	}
-	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()), req.Host, "redis")
 	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
 		if err := prepareUsernamePasswordDirectives(req.EgressAuth, "redis", true); err != nil {
 			if req.EgressAuth.ShouldBypass() {
@@ -421,7 +421,7 @@ func (a *udpAdapter) Handle(req *adapterRequest) error {
 	if req == nil || req.Server == nil || req.UDPConn == nil || req.UDPSource == nil {
 		return fmt.Errorf("udp adapter requires source datagram")
 	}
-	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "udp", req.UDPSource.Port)
+	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "udp", req.UDPSource.Port, req.Host, "udp")
 	return req.Server.forwardUDPDatagram(req.UDPConn, req.UDPSource, req.UDPPayload, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 }
 
@@ -438,7 +438,7 @@ func (a *tcpPassThroughAdapter) Handle(req *adapterRequest) error {
 	if req == nil || req.Server == nil || req.Conn == nil {
 		return fmt.Errorf("tcp fallback adapter requires connection")
 	}
-	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()), req.Host, "unknown")
 	return req.Server.relayTCPRequest(req)
 }
 
@@ -455,6 +455,6 @@ func (a *udpPassThroughAdapter) Handle(req *adapterRequest) error {
 	if req == nil || req.Server == nil || req.UDPConn == nil || req.UDPSource == nil {
 		return fmt.Errorf("udp fallback adapter requires source datagram")
 	}
-	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "udp", req.UDPSource.Port)
+	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "udp", req.UDPSource.Port, req.Host, "unknown")
 	return req.Server.forwardUDPDatagram(req.UDPConn, req.UDPSource, req.UDPPayload, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 }

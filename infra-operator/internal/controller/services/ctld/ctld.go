@@ -315,9 +315,10 @@ func (r *Reconciler) ensureCSIDriver(ctx context.Context, labels map[string]stri
 	if err != nil {
 		return err
 	}
-	current.Labels = desired.Labels
-	current.Spec = desired.Spec
-	return r.Resources.Client.Update(ctx, current)
+	return r.Resources.UpdateObjectIfChanged(ctx, current, func() {
+		current.Labels = desired.Labels
+		current.Spec = desired.Spec
+	})
 }
 
 func (r *Reconciler) buildStorageConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.StorageProxyConfig, error) {

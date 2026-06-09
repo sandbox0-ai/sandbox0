@@ -441,9 +441,7 @@ func (r *Reconciler) reconcileStorageStatefulSet(ctx context.Context, infra *inf
 		return r.Resources.Client.Create(ctx, desiredSts)
 	}
 
-	// Update existing StatefulSet
-	sts.Spec = desiredSts.Spec
-	return r.Resources.Client.Update(ctx, sts)
+	return r.Resources.ApplyStatefulSet(ctx, infra, desiredSts)
 }
 
 // reconcileStorageService creates or updates the RustFS/MinIO Service.
@@ -495,9 +493,12 @@ func (r *Reconciler) reconcileStorageService(ctx context.Context, infra *infrav1
 		return r.Resources.Client.Create(ctx, desiredSvc)
 	}
 
-	// Update existing Service
-	svc.Spec = desiredSvc.Spec
-	return r.Resources.Client.Update(ctx, svc)
+	return r.Resources.UpdateObjectIfChanged(ctx, svc, func() {
+		svc.OwnerReferences = desiredSvc.OwnerReferences
+		svc.Spec.Type = desiredSvc.Spec.Type
+		svc.Spec.Selector = desiredSvc.Spec.Selector
+		svc.Spec.Ports = desiredSvc.Spec.Ports
+	})
 }
 
 func (r *Reconciler) ensureStorageBucket(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {

@@ -186,9 +186,11 @@ func (r *Reconciler) reconcileConfigMap(ctx context.Context, infra *infrav1alpha
 	if err != nil {
 		return err
 	}
-	current.Labels = desired.Labels
-	current.Data = desired.Data
-	return r.Resources.Client.Update(ctx, current)
+	return r.Resources.UpdateObjectIfChanged(ctx, current, func() {
+		current.Labels = desired.Labels
+		current.Data = desired.Data
+		current.OwnerReferences = desired.OwnerReferences
+	})
 }
 
 func (r *Reconciler) reconcilePVC(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, cfg infrav1alpha1.BuiltinCredentialVaultConfig) error {
@@ -316,9 +318,7 @@ func (r *Reconciler) reconcileStatefulSet(ctx context.Context, infra *infrav1alp
 	if err != nil {
 		return err
 	}
-	current.Labels = desired.Labels
-	current.Spec = desired.Spec
-	return r.Resources.Client.Update(ctx, current)
+	return r.Resources.ApplyStatefulSet(ctx, infra, desired)
 }
 
 func (r *Reconciler) reconcileService(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, cfg infrav1alpha1.BuiltinCredentialVaultConfig) error {

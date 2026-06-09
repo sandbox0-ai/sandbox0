@@ -11,7 +11,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 )
@@ -366,6 +368,34 @@ func TestReconcileHashedServiceConfigMapRetainsLivePodConfigAndCleansUnusedConfi
 	}
 }
 
+func TestReconcileHashedServiceConfigMapSkipsNoopUpdate(t *testing.T) {
+	infra := newCommonTestInfra()
+	updateCount := 0
+	manager, _ := newCommonTestResourceManager(t, interceptor.Funcs{
+		Update: func(ctx context.Context, client ctrlclient.WithWatch, obj ctrlclient.Object, opts ...ctrlclient.UpdateOption) error {
+			updateCount++
+			return client.Update(ctx, obj, opts...)
+		},
+	}, infra.DeepCopy())
+
+	labels := GetServiceLabels(infra.Name, "manager")
+	if _, err := manager.ReconcileHashedServiceConfigMap(context.Background(), infra, "demo-manager", labels, map[string]any{
+		"http_port": 8080,
+	}); err != nil {
+		t.Fatalf("reconcile hashed service configmap: %v", err)
+	}
+	updateCount = 0
+
+	if _, err := manager.ReconcileHashedServiceConfigMap(context.Background(), infra, "demo-manager", labels, map[string]any{
+		"http_port": 8080,
+	}); err != nil {
+		t.Fatalf("reconcile unchanged hashed service configmap: %v", err)
+	}
+	if updateCount != 0 {
+		t.Fatalf("expected unchanged hashed configmap to skip update, got %d updates", updateCount)
+	}
+}
+
 func TestEnsurePodTemplateAnnotationsClonesInput(t *testing.T) {
 	annotations := map[string]string{
 		PodTemplateConfigHashAnnotation: "abc123",
@@ -380,6 +410,174 @@ func TestEnsurePodTemplateAnnotationsClonesInput(t *testing.T) {
 	annotations["custom"] = "changed"
 	if got["custom"] != "value" {
 		t.Fatalf("expected cloned annotations to be isolated from caller mutation, got %#v", got)
+	}
+}
+
+func TestReconcileDeploymentSkipsNoopUpdate(t *testing.T) {
+	infra := newCommonTestInfra()
+	updateCount := 0
+	manager, client := newCommonTestResourceManager(t, interceptor.Funcs{
+		Update: func(ctx context.Context, client ctrlclient.WithWatch, obj ctrlclient.Object, opts ...ctrlclient.UpdateOption) error {
+			updateCount++
+			return client.Update(ctx, obj, opts...)
+		},
+	}, infra.DeepCopy())
+	labels := GetServiceLabels(infra.Name, "manager")
+	def := ServiceDefinition{
+		Name:       "manager",
+		TargetPort: 8080,
+		Image:      "sandbox0ai/infra:test",
+	}
+
+	if err := manager.ReconcileDeployment(context.Background(), infra, "demo-manager", labels, 1, def); err != nil {
+		t.Fatalf("reconcile deployment: %v", err)
+	}
+	updateCount = 0
+	if err := manager.ReconcileDeployment(context.Background(), infra, "demo-manager", labels, 1, def); err != nil {
+		t.Fatalf("reconcile unchanged deployment: %v", err)
+	}
+	if updateCount != 0 {
+		t.Fatalf("expected unchanged deployment to skip update, got %d updates", updateCount)
+	}
+
+	deploy := &appsv1.Deployment{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-manager", Namespace: infra.Namespace}, deploy); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	deploy.Spec.Template.Spec.Containers[0].Image = "old:test"
+	if err := client.Update(context.Background(), deploy); err != nil {
+		t.Fatalf("drift deployment: %v", err)
+	}
+	updateCount = 0
+	if err := manager.ReconcileDeployment(context.Background(), infra, "demo-manager", labels, 1, def); err != nil {
+		t.Fatalf("reconcile drifted deployment: %v", err)
+	}
+	if updateCount != 1 {
+		t.Fatalf("expected drifted deployment to update once, got %d updates", updateCount)
+	}
+}
+
+func TestReconcileServiceSkipsNoopUpdateAndPreservesAllocatedFields(t *testing.T) {
+	infra := newCommonTestInfra()
+	scheme := newCommonTestScheme(t)
+	labels := GetServiceLabels(infra.Name, "cluster-gateway")
+	ipFamilyPolicy := corev1.IPFamilyPolicySingleStack
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo-cluster-gateway",
+			Namespace: infra.Namespace,
+			Labels:    EnsureManagedLabels(labels, "demo-cluster-gateway"),
+		},
+		Spec: corev1.ServiceSpec{
+			Type:            corev1.ServiceTypeClusterIP,
+			ClusterIP:       "10.96.0.25",
+			ClusterIPs:      []string{"10.96.0.25"},
+			IPFamilies:      []corev1.IPFamily{corev1.IPv4Protocol},
+			IPFamilyPolicy:  &ipFamilyPolicy,
+			SessionAffinity: corev1.ServiceAffinityNone,
+			Selector:        labels,
+			Ports: []corev1.ServicePort{
+				BuildServicePort("http", 80, 8080, corev1.ServiceTypeClusterIP),
+			},
+		},
+	}
+	if err := NewObjectScope(infra).SetControllerReference(service, scheme); err != nil {
+		t.Fatalf("set service owner: %v", err)
+	}
+
+	updateCount := 0
+	manager, client := newCommonTestResourceManager(t, interceptor.Funcs{
+		Update: func(ctx context.Context, client ctrlclient.WithWatch, obj ctrlclient.Object, opts ...ctrlclient.UpdateOption) error {
+			updateCount++
+			return client.Update(ctx, obj, opts...)
+		},
+	}, infra.DeepCopy(), service)
+
+	if err := manager.ReconcileService(context.Background(), infra, service.Name, labels, corev1.ServiceTypeClusterIP, nil, 80, 8080); err != nil {
+		t.Fatalf("reconcile unchanged service: %v", err)
+	}
+	if updateCount != 0 {
+		t.Fatalf("expected unchanged service to skip update, got %d updates", updateCount)
+	}
+	got := &corev1.Service{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: service.Name, Namespace: service.Namespace}, got); err != nil {
+		t.Fatalf("get service: %v", err)
+	}
+	if got.Spec.ClusterIP != "10.96.0.25" {
+		t.Fatalf("expected allocated clusterIP to be preserved, got %q", got.Spec.ClusterIP)
+	}
+}
+
+func TestApplyStatefulSetSkipsNoopUpdate(t *testing.T) {
+	infra := newCommonTestInfra()
+	updateCount := 0
+	manager, client := newCommonTestResourceManager(t, interceptor.Funcs{
+		Update: func(ctx context.Context, client ctrlclient.WithWatch, obj ctrlclient.Object, opts ...ctrlclient.UpdateOption) error {
+			updateCount++
+			return client.Update(ctx, obj, opts...)
+		},
+	}, infra.DeepCopy())
+	desired := newCommonTestStatefulSet(infra, "demo-postgres", "postgres", "postgres:16")
+
+	if err := manager.ApplyStatefulSet(context.Background(), infra, desired); err != nil {
+		t.Fatalf("apply statefulset: %v", err)
+	}
+	updateCount = 0
+	if err := manager.ApplyStatefulSet(context.Background(), infra, desired); err != nil {
+		t.Fatalf("apply unchanged statefulset: %v", err)
+	}
+	if updateCount != 0 {
+		t.Fatalf("expected unchanged statefulset to skip update, got %d updates", updateCount)
+	}
+
+	sts := &appsv1.StatefulSet{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, sts); err != nil {
+		t.Fatalf("get statefulset: %v", err)
+	}
+	sts.Spec.Template.Spec.Containers[0].Image = "postgres:old"
+	if err := client.Update(context.Background(), sts); err != nil {
+		t.Fatalf("drift statefulset: %v", err)
+	}
+	updateCount = 0
+	if err := manager.ApplyStatefulSet(context.Background(), infra, desired); err != nil {
+		t.Fatalf("apply drifted statefulset: %v", err)
+	}
+	if updateCount != 1 {
+		t.Fatalf("expected drifted statefulset to update once, got %d updates", updateCount)
+	}
+}
+
+func TestApplyDaemonSetSkipsNoopUpdate(t *testing.T) {
+	infra := newCommonTestInfra()
+	updateCount := 0
+	manager, _ := newCommonTestResourceManager(t, interceptor.Funcs{
+		Update: func(ctx context.Context, client ctrlclient.WithWatch, obj ctrlclient.Object, opts ...ctrlclient.UpdateOption) error {
+			updateCount++
+			return client.Update(ctx, obj, opts...)
+		},
+	}, infra.DeepCopy())
+	desired := &appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-netd", Namespace: infra.Namespace},
+		Spec: appsv1.DaemonSetSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "netd"}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "netd"}},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "netd", Image: "sandbox0ai/infra:test"}},
+				},
+			},
+		},
+	}
+
+	if err := manager.ApplyDaemonSet(context.Background(), infra, desired); err != nil {
+		t.Fatalf("apply daemonset: %v", err)
+	}
+	updateCount = 0
+	if err := manager.ApplyDaemonSet(context.Background(), infra, desired); err != nil {
+		t.Fatalf("apply unchanged daemonset: %v", err)
+	}
+	if updateCount != 0 {
+		t.Fatalf("expected unchanged daemonset to skip update, got %d updates", updateCount)
 	}
 }
 
@@ -478,5 +676,59 @@ func TestApplyDaemonSetUpdatesExistingObject(t *testing.T) {
 	}
 	if len(got.OwnerReferences) != 1 || got.OwnerReferences[0].Name != infra.Name {
 		t.Fatalf("expected daemonset owner reference, got %#v", got.OwnerReferences)
+	}
+}
+
+func newCommonTestScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add appsv1 scheme: %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add corev1 scheme: %v", err)
+	}
+	if err := infrav1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add infra scheme: %v", err)
+	}
+	return scheme
+}
+
+func newCommonTestInfra() *infrav1alpha1.Sandbox0Infra {
+	return &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+	}
+}
+
+func newCommonTestResourceManager(t *testing.T, interceptors interceptor.Funcs, objects ...ctrlclient.Object) (*ResourceManager, ctrlclient.Client) {
+	t.Helper()
+	scheme := newCommonTestScheme(t)
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(objects...).
+		WithInterceptorFuncs(interceptors).
+		Build()
+	return NewResourceManager(client, scheme, nil, LocalDevConfig{}), client
+}
+
+func newCommonTestStatefulSet(infra *infrav1alpha1.Sandbox0Infra, name, containerName, image string) *appsv1.StatefulSet {
+	labels := map[string]string{"app": name}
+	replicas := int32(1)
+	return &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: infra.Namespace},
+		Spec: appsv1.StatefulSetSpec{
+			ServiceName: name,
+			Replicas:    &replicas,
+			Selector:    &metav1.LabelSelector{MatchLabels: labels},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: containerName, Image: image}},
+				},
+			},
+		},
 	}
 }

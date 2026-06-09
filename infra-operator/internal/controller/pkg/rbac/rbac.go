@@ -291,8 +291,10 @@ func (r *Reconciler) reconcileClusterRole(ctx context.Context, name string, labe
 		return err
 	}
 
-	found.Rules = rules
-	return r.Resources.Client.Update(ctx, found)
+	return r.Resources.UpdateObjectIfChanged(ctx, found, func() {
+		found.Labels = labels
+		found.Rules = rules
+	})
 }
 
 // reconcileClusterRoleBinding creates or updates a ClusterRoleBinding for a service.
@@ -324,7 +326,9 @@ func (r *Reconciler) reconcileClusterRoleBinding(ctx context.Context, infra *inf
 		return err
 	}
 
-	found.RoleRef = binding.RoleRef
-	found.Subjects = binding.Subjects
-	return r.Resources.Client.Update(ctx, found)
+	return r.Resources.UpdateObjectIfChanged(ctx, found, func() {
+		found.Labels = labels
+		found.RoleRef = binding.RoleRef
+		found.Subjects = binding.Subjects
+	})
 }

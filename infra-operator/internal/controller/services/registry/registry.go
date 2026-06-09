@@ -405,7 +405,7 @@ func (r *Reconciler) reconcileRegistryAuthSecret(ctx context.Context, infra *inf
 		return "", "", err
 	}
 
-	htpasswd, err := buildHtpasswd(username, password)
+	htpasswd, err := registryHtpasswdForSecret(secret, username, password)
 	if err != nil {
 		return "", "", err
 	}
@@ -417,10 +417,10 @@ func (r *Reconciler) reconcileRegistryAuthSecret(ctx context.Context, infra *inf
 				Namespace: infra.Namespace,
 			},
 			Type: corev1.SecretTypeOpaque,
-			StringData: map[string]string{
-				"username": username,
-				"password": password,
-				"htpasswd": htpasswd,
+			Data: map[string][]byte{
+				"username": []byte(username),
+				"password": []byte(password),
+				"htpasswd": []byte(htpasswd),
 			},
 		}
 
@@ -820,6 +820,26 @@ func buildHtpasswd(username, password string) (string, error) {
 		return "", fmt.Errorf("hash registry password: %w", err)
 	}
 	return fmt.Sprintf("%s:%s", username, string(hash)), nil
+}
+
+func registryHtpasswdForSecret(secret *corev1.Secret, username, password string) (string, error) {
+	if secret != nil && secret.Data != nil {
+		currentUsername := string(secret.Data["username"])
+		currentPassword := string(secret.Data["password"])
+		currentHtpasswd := strings.TrimSpace(string(secret.Data["htpasswd"]))
+		if currentUsername == username && currentPassword == password && registryHtpasswdMatches(currentHtpasswd, username, password) {
+			return currentHtpasswd, nil
+		}
+	}
+	return buildHtpasswd(username, password)
+}
+
+func registryHtpasswdMatches(line, username, password string) bool {
+	parts := strings.SplitN(line, ":", 2)
+	if len(parts) != 2 || parts[0] != username || parts[1] == "" {
+		return false
+	}
+	return bcrypt.CompareHashAndPassword([]byte(parts[1]), []byte(password)) == nil
 }
 
 func buildDockerConfigJSON(registry, username, password string) ([]byte, error) {

@@ -381,9 +381,7 @@ func (r *Reconciler) reconcileDatabaseStatefulSet(ctx context.Context, infra *in
 		return r.Resources.Client.Create(ctx, desiredSts)
 	}
 
-	// Update existing StatefulSet
-	sts.Spec = desiredSts.Spec
-	return r.Resources.Client.Update(ctx, sts)
+	return r.Resources.ApplyStatefulSet(ctx, infra, desiredSts)
 }
 
 // reconcileDatabaseService creates or updates the PostgreSQL Service.
@@ -430,9 +428,12 @@ func (r *Reconciler) reconcileDatabaseService(ctx context.Context, infra *infrav
 		return r.Resources.Client.Create(ctx, desiredSvc)
 	}
 
-	// Update existing Service
-	svc.Spec = desiredSvc.Spec
-	return r.Resources.Client.Update(ctx, svc)
+	return r.Resources.UpdateObjectIfChanged(ctx, svc, func() {
+		svc.OwnerReferences = desiredSvc.OwnerReferences
+		svc.Spec.Type = desiredSvc.Spec.Type
+		svc.Spec.Selector = desiredSvc.Spec.Selector
+		svc.Spec.Ports = desiredSvc.Spec.Ports
+	})
 }
 
 func (r *Reconciler) ensureDatabaseReady(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {

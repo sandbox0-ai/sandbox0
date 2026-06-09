@@ -29,6 +29,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -72,6 +73,16 @@ func NewResourceManager(client client.Client, scheme *runtime.Scheme, imagePullP
 		ImagePullPolicy: imagePullPolicy,
 		LocalDev:        localDev,
 	}
+}
+
+// UpdateObjectIfChanged updates obj only when mutate changes the live object.
+func (r *ResourceManager) UpdateObjectIfChanged(ctx context.Context, obj client.Object, mutate func()) error {
+	before := obj.DeepCopyObject()
+	mutate()
+	if apiequality.Semantic.DeepEqual(before, obj) {
+		return nil
+	}
+	return r.Client.Update(ctx, obj)
 }
 
 // ServiceDefinition defines deployment/daemonset configuration for a service.
@@ -179,9 +190,13 @@ func (r *ResourceManager) ReconcileDeploymentWithScope(ctx context.Context, scop
 		return r.Client.Create(ctx, desiredDeploy)
 	}
 
-	deploy.Spec = desiredDeploy.Spec
-	deploy.Labels = desiredLabels
-	return r.Client.Update(ctx, deploy)
+	return r.UpdateObjectIfChanged(ctx, deploy, func() {
+		deploy.Labels = desiredLabels
+		deploy.OwnerReferences = desiredDeploy.OwnerReferences
+		deploy.Spec.Replicas = desiredDeploy.Spec.Replicas
+		deploy.Spec.Selector = desiredDeploy.Spec.Selector
+		deploy.Spec.Template = desiredDeploy.Spec.Template
+	})
 }
 
 // EnsureDeploymentReady validates deployment readiness before reporting success.
@@ -285,6 +300,42 @@ func (r *ResourceManager) ReconcileDaemonSetWithScope(ctx context.Context, scope
 	return r.ApplyDaemonSetWithScope(ctx, scope, desiredDs)
 }
 
+// ApplyStatefulSet creates or updates a statefulset using fresh reads on each retry.
+func (r *ResourceManager) ApplyStatefulSet(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, desired *appsv1.StatefulSet) error {
+	return r.ApplyStatefulSetWithScope(ctx, NewObjectScope(infra), desired)
+}
+
+func (r *ResourceManager) ApplyStatefulSetWithScope(ctx context.Context, scope ObjectScope, desired *appsv1.StatefulSet) error {
+	if err := scope.SetControllerReference(desired, r.Scheme); err != nil {
+		return err
+	}
+
+	key := types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &appsv1.StatefulSet{}
+		err := r.Client.Get(ctx, key, current)
+		if errors.IsNotFound(err) {
+			return r.Client.Create(ctx, desired.DeepCopy())
+		}
+		if err != nil {
+			return err
+		}
+
+		return r.UpdateObjectIfChanged(ctx, current, func() {
+			current.Labels = desired.Labels
+			current.Annotations = desired.Annotations
+			current.OwnerReferences = desired.OwnerReferences
+			current.Spec.ServiceName = desired.Spec.ServiceName
+			current.Spec.Replicas = desired.Spec.Replicas
+			current.Spec.Selector = desired.Spec.Selector
+			current.Spec.Template = desired.Spec.Template
+			current.Spec.VolumeClaimTemplates = desired.Spec.VolumeClaimTemplates
+			current.Spec.PersistentVolumeClaimRetentionPolicy = desired.Spec.PersistentVolumeClaimRetentionPolicy
+			current.Spec.Ordinals = desired.Spec.Ordinals
+		})
+	})
+}
+
 // ApplyDaemonSet creates or updates a daemonset using fresh reads on each retry
 // so controller-driven status/resourceVersion updates do not cause reconcile
 // loops to fail on optimistic concurrency conflicts.
@@ -308,11 +359,13 @@ func (r *ResourceManager) ApplyDaemonSetWithScope(ctx context.Context, scope Obj
 			return err
 		}
 
-		current.Labels = desired.Labels
-		current.Annotations = desired.Annotations
-		current.Spec = desired.Spec
-		current.OwnerReferences = desired.OwnerReferences
-		return r.Client.Update(ctx, current)
+		return r.UpdateObjectIfChanged(ctx, current, func() {
+			current.Labels = desired.Labels
+			current.Annotations = desired.Annotations
+			current.OwnerReferences = desired.OwnerReferences
+			current.Spec.Selector = desired.Spec.Selector
+			current.Spec.Template = desired.Spec.Template
+		})
 	})
 }
 
@@ -457,10 +510,15 @@ func (r *ResourceManager) reconcileServicePorts(ctx context.Context, scope Objec
 			return err
 		}
 
-		svc.Spec = desiredSvc.Spec
-		svc.Labels = desiredLabels
-		svc.Annotations = CloneStringMap(annotations)
-		return r.Client.Update(ctx, svc)
+		return r.UpdateObjectIfChanged(ctx, svc, func() {
+			svc.Labels = desiredLabels
+			svc.Annotations = CloneStringMap(annotations)
+			svc.OwnerReferences = desiredSvc.OwnerReferences
+			svc.Spec.Type = desiredSvc.Spec.Type
+			svc.Spec.Selector = desiredSvc.Spec.Selector
+			svc.Spec.Ports = desiredSvc.Spec.Ports
+			svc.Spec.ExternalTrafficPolicy = desiredSvc.Spec.ExternalTrafficPolicy
+		})
 	})
 }
 
@@ -578,10 +636,12 @@ func (r *ResourceManager) ReconcileIngressWithScope(ctx context.Context, scope O
 		return r.Client.Create(ctx, desiredIngress)
 	}
 
-	ingress.Spec = desiredIngress.Spec
-	ingress.Labels = desiredLabels
-	ingress.Annotations = desiredAnnotations
-	return r.Client.Update(ctx, ingress)
+	return r.UpdateObjectIfChanged(ctx, ingress, func() {
+		ingress.Labels = desiredLabels
+		ingress.Annotations = desiredAnnotations
+		ingress.OwnerReferences = desiredIngress.OwnerReferences
+		ingress.Spec = desiredIngress.Spec
+	})
 }
 
 func ingressHosts(config *infrav1alpha1.IngressConfig) []string {
@@ -697,9 +757,11 @@ func (r *ResourceManager) ReconcileServiceConfigMapWithScope(ctx context.Context
 		return r.Client.Create(ctx, desired)
 	}
 
-	existing.Data = desired.Data
-	existing.Labels = desired.Labels
-	return r.Client.Update(ctx, existing)
+	return r.UpdateObjectIfChanged(ctx, existing, func() {
+		existing.Data = desired.Data
+		existing.Labels = desired.Labels
+		existing.OwnerReferences = desired.OwnerReferences
+	})
 }
 
 func (r *ResourceManager) ReconcileHashedServiceConfigMap(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, config any) (ServiceConfigRef, error) {
@@ -756,13 +818,14 @@ func (r *ResourceManager) ReconcileHashedServiceConfigMapWithScope(ctx context.C
 		if existing.Data["config.yaml"] != desired.Data["config.yaml"] {
 			return ServiceConfigRef{}, fmt.Errorf("service configmap %q already exists with mismatched config hash", configMapName)
 		}
-		existing.Labels = desired.Labels
-		existing.Annotations = desired.Annotations
-		existing.OwnerReferences = desired.OwnerReferences
-		if existing.Immutable == nil || !*existing.Immutable {
-			existing.Immutable = BoolPtr(true)
-		}
-		if err := r.Client.Update(ctx, existing); err != nil {
+		if err := r.UpdateObjectIfChanged(ctx, existing, func() {
+			existing.Labels = desired.Labels
+			existing.Annotations = desired.Annotations
+			existing.OwnerReferences = desired.OwnerReferences
+			if existing.Immutable == nil || !*existing.Immutable {
+				existing.Immutable = BoolPtr(true)
+			}
+		}); err != nil {
 			return ServiceConfigRef{}, err
 		}
 	}

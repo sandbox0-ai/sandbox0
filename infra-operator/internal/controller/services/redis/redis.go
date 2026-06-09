@@ -157,9 +157,13 @@ func (r *Reconciler) reconcileRedisDeployment(ctx context.Context, infra *infrav
 		return r.Resources.Client.Create(ctx, desired)
 	}
 
-	deploy.Labels = desired.Labels
-	deploy.Spec = desired.Spec
-	return r.Resources.Client.Update(ctx, deploy)
+	return r.Resources.UpdateObjectIfChanged(ctx, deploy, func() {
+		deploy.Labels = desired.Labels
+		deploy.OwnerReferences = desired.OwnerReferences
+		deploy.Spec.Replicas = desired.Spec.Replicas
+		deploy.Spec.Selector = desired.Spec.Selector
+		deploy.Spec.Template = desired.Spec.Template
+	})
 }
 
 func (r *Reconciler) reconcileRedisService(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {

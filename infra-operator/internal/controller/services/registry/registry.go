@@ -405,7 +405,7 @@ func (r *Reconciler) reconcileRegistryAuthSecret(ctx context.Context, infra *inf
 		return "", "", err
 	}
 
-	htpasswd, err := buildHtpasswd(username, password)
+	htpasswd, err := registryHtpasswdForSecret(secret, username, password)
 	if err != nil {
 		return "", "", err
 	}
@@ -417,10 +417,10 @@ func (r *Reconciler) reconcileRegistryAuthSecret(ctx context.Context, infra *inf
 				Namespace: infra.Namespace,
 			},
 			Type: corev1.SecretTypeOpaque,
-			StringData: map[string]string{
-				"username": username,
-				"password": password,
-				"htpasswd": htpasswd,
+			Data: map[string][]byte{
+				"username": []byte(username),
+				"password": []byte(password),
+				"htpasswd": []byte(htpasswd),
 			},
 		}
 
@@ -434,18 +434,28 @@ func (r *Reconciler) reconcileRegistryAuthSecret(ctx context.Context, infra *inf
 		return username, password, nil
 	}
 
-	updated := secret.DeepCopy()
-	if updated.Data == nil {
-		updated.Data = map[string][]byte{}
+	desired := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: infra.Namespace,
+		},
 	}
-	updated.Data["username"] = []byte(username)
-	updated.Data["password"] = []byte(password)
-	updated.Data["htpasswd"] = []byte(htpasswd)
-
-	if err := r.Resources.Client.Update(ctx, updated); err != nil {
+	if err := ctrl.SetControllerReference(infra, desired, r.Resources.Scheme); err != nil {
 		return "", "", err
 	}
 
+	if err := r.Resources.UpdateObjectIfChanged(ctx, secret, func() {
+		if secret.Data == nil {
+			secret.Data = map[string][]byte{}
+		}
+		secret.Type = corev1.SecretTypeOpaque
+		secret.Data["username"] = []byte(username)
+		secret.Data["password"] = []byte(password)
+		secret.Data["htpasswd"] = []byte(htpasswd)
+		secret.OwnerReferences = desired.OwnerReferences
+	}); err != nil {
+		return "", "", err
+	}
 	return username, password, nil
 }
 
@@ -480,15 +490,23 @@ func (r *Reconciler) reconcileRegistryPullSecret(ctx context.Context, infra *inf
 		return r.Resources.Client.Create(ctx, secret)
 	}
 
-	if secret.Data == nil {
-		secret.Data = map[string][]byte{}
+	desired := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: infra.Namespace,
+		},
 	}
-	if existing := secret.Data[corev1.DockerConfigJsonKey]; string(existing) == string(dockerConfig) {
-		return nil
+	if err := ctrl.SetControllerReference(infra, desired, r.Resources.Scheme); err != nil {
+		return err
 	}
-	secret.Data[corev1.DockerConfigJsonKey] = dockerConfig
-	secret.Type = corev1.SecretTypeDockerConfigJson
-	return r.Resources.Client.Update(ctx, secret)
+	return r.Resources.UpdateObjectIfChanged(ctx, secret, func() {
+		if secret.Data == nil {
+			secret.Data = map[string][]byte{}
+		}
+		secret.Data[corev1.DockerConfigJsonKey] = dockerConfig
+		secret.Type = corev1.SecretTypeDockerConfigJson
+		secret.OwnerReferences = desired.OwnerReferences
+	})
 }
 
 func (r *Reconciler) reconcileRegistryDeployment(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, builtin infrav1alpha1.BuiltinRegistryConfig) error {
@@ -802,6 +820,26 @@ func buildHtpasswd(username, password string) (string, error) {
 		return "", fmt.Errorf("hash registry password: %w", err)
 	}
 	return fmt.Sprintf("%s:%s", username, string(hash)), nil
+}
+
+func registryHtpasswdForSecret(secret *corev1.Secret, username, password string) (string, error) {
+	if secret != nil && secret.Data != nil {
+		currentUsername := string(secret.Data["username"])
+		currentPassword := string(secret.Data["password"])
+		currentHtpasswd := strings.TrimSpace(string(secret.Data["htpasswd"]))
+		if currentUsername == username && currentPassword == password && registryHtpasswdMatches(currentHtpasswd, username, password) {
+			return currentHtpasswd, nil
+		}
+	}
+	return buildHtpasswd(username, password)
+}
+
+func registryHtpasswdMatches(line, username, password string) bool {
+	parts := strings.SplitN(line, ":", 2)
+	if len(parts) != 2 || parts[0] != username || parts[1] == "" {
+		return false
+	}
+	return bcrypt.CompareHashAndPassword([]byte(parts[1]), []byte(password)) == nil
 }
 
 func buildDockerConfigJSON(registry, username, password string) ([]byte, error) {

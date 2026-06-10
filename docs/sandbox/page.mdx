@@ -1,6 +1,6 @@
 # Sandbox
 
-A Sandbox is an isolated execution environment where you can run code, manage files, and control network access. Each sandbox is created from a [Template](/docs/template) and provides a secure, ephemeral workspace.
+A Sandbox is an isolated execution environment where you can run code, manage files, and control network access. Each sandbox is created from a [Template](/docs/template) and has a writable root filesystem that is checkpointed across pause/resume for the same sandbox identity.
 
 For shell access and file copy over standard SSH clients, see [SSH](/docs/sandbox/ssh).
 
@@ -36,6 +36,17 @@ Sandbox0 Cloud clients should use `https://api.sandbox0.ai`. Set `SANDBOX0_BASE_
 <Callout variant="info">
 Use the `paused` boolean as a convenience for `status == "paused"`. Pause does not preserve running processes, memory, sockets, PID state, or live REPL sessions.
 </Callout>
+
+### Persistent Root Filesystem
+
+Sandbox0 persists the sandbox writable root filesystem as part of checkpointed pause/resume:
+
+- when `ttl` expires or pause is requested, Sandbox0 saves a rootfs checkpoint before releasing the runtime pod
+- when the sandbox resumes, Sandbox0 creates or reuses a runtime pod and restores the latest rootfs checkpoint before initializing sandbox processes
+- files written outside mounted volumes survive pause/resume for the same sandbox identity after a checkpoint succeeds
+- rootfs checkpoints are deleted when the sandbox is deleted or `hard_ttl` expires
+
+Use the root filesystem for transparent same-sandbox continuity. Use [Volumes](/docs/volume) for data that must outlive one sandbox identity, be shared, snapshotted, forked, restored, or accessed directly through APIs.
 
 ---
 

@@ -14,8 +14,19 @@ Pause is a runtime lifecycle operation. It does not preserve running processes, 
 </Callout>
 
 <Callout variant="warning">
-Self-hosted deployments must run `ctld` on sandbox nodes for checkpointed pause/resume. `ctld` freezes the sandbox only as an internal consistency mechanism while saving or applying the writable rootfs checkpoint.
+Self-hosted deployments must run `ctld` on sandbox nodes for checkpointed pause/resume. Pause saves the writable rootfs checkpoint and releases the runtime pod; it does not preserve process state.
 </Callout>
+
+## What Persists
+
+| State | Across pause/resume | After sandbox delete or `hard_ttl` |
+|-------|---------------------|-------------------------------------|
+| Sandbox identity and configuration | Preserved | Deleted |
+| Writable root filesystem | Latest checkpoint is restored | Deleted with the sandbox identity |
+| Mounted Volumes | Remounted if configured | Preserved until the Volume is deleted |
+| Processes, memory, sockets, PID state, live REPL sessions | Not preserved | Deleted |
+
+The rootfs checkpoint covers files written inside the sandbox filesystem, including files outside mounted volumes. It is different from a Sandbox Volume: it is tied to one sandbox identity and does not provide volume sharing, direct file APIs, snapshots, forks, or restore operations.
 
 ## Pause A Sandbox
 

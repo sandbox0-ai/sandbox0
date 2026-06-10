@@ -12,6 +12,11 @@ The default Sandbox writable filesystem is checkpointed across pause/resume for 
 - **Fast Forking**: Create independent child Volumes with Copy-on-Write isolation
 - **Quick Recovery**: Restore from snapshots quickly, ideal for rollbacks and environment cloning
 
+| Storage surface | Survives pause/resume | Survives sandbox delete or `hard_ttl` | Shareable | Snapshots and forks | Direct file API |
+|-----------------|-----------------------|----------------------------------------|-----------|---------------------|-----------------|
+| Sandbox root filesystem | Yes, after checkpointed pause | No | No | No | Through the Sandbox file API while the Sandbox exists |
+| Sandbox Volume | Yes | Yes, until the Volume is deleted | Yes | Yes | Yes |
+
 ## Volume and Sandbox Relationship
 
 ```mermaid

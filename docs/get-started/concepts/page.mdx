@@ -4,20 +4,22 @@ This page explains Sandbox0 from an AI agent developer perspective: how to think
 
 ## The Mental Model
 
-Think in four building blocks:
+Think in five building blocks:
 
 | Concept | What It Is | Why Agent Developers Care |
 |-------|-------------|---------------------------|
 | `Template` | The runtime blueprint (image, resources, defaults). | Defines your agent's execution environment and startup behavior. |
 | `Sandbox` | Durable identity and configuration for an isolated environment. | The agent's working machine identity across runtime generations. |
+| Root filesystem | The sandbox writable filesystem checkpointed during pause/resume. | Keeps files written inside the sandbox available when compute is released and later restored. |
 | `Context` | A process/session inside the sandbox (for example REPL-like or one-shot execution). | Controls whether state is preserved across turns or reset each run. |
 | `Volume` | Persistent storage decoupled from sandbox lifecycle. | Keeps knowledge, artifacts, and checkpoints across sandbox recreation. |
 
 The key idea is separation of concerns:
 - Use `Template` for environment consistency.
 - Use `Sandbox` for isolated execution.
+- Use the root filesystem for same-sandbox file continuity across pause/resume.
 - Use `Context` for process-level interaction patterns.
-- Use `Volume` for durable memory.
+- Use `Volume` for durable, shareable, or snapshot-ready memory.
 
 ## Agent Runtime vs Agent Memory
 
@@ -25,6 +27,7 @@ A common confusion is mixing compute state and durable state.
 
 - Process state lives in the sandbox runtime and disappears when the runtime is paused or deleted.
 - Sandbox0 restores the writable root filesystem checkpoint for paused sandboxes, so files written outside mounted volumes survive pause/resume for the same sandbox identity.
+- The rootfs checkpoint is not a Volume. It is not shareable across sandboxes, does not expose volume snapshot/fork APIs, and is deleted with the sandbox identity.
 - Durable state that must survive sandbox delete or `hard_ttl`, needs snapshots, or needs sharing outside the sandbox identity should be written to volumes or external systems.
 - If your agent must recover after failures or redeploys, treat sandbox runtime as ephemeral and volumes as the source of truth.
 

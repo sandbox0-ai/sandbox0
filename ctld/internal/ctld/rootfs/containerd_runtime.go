@@ -25,12 +25,14 @@ import (
 )
 
 const (
-	defaultCRIEndpoint        = "/host-run/containerd/containerd.sock"
-	defaultContainerdEndpoint = "/host-run/containerd/containerd.sock"
-	defaultContainerdRoot     = "/host-run/containerd"
-	defaultContainerdHostRoot = "/run/containerd"
-	defaultNamespace          = "k8s.io"
-	defaultDialTimeout        = 10 * time.Second
+	defaultCRIEndpoint            = "/host-run/containerd/containerd.sock"
+	defaultContainerdEndpoint     = "/host-run/containerd/containerd.sock"
+	defaultContainerdRoot         = "/host-run/containerd"
+	defaultContainerdHostRoot     = "/run/containerd"
+	defaultContainerdDataRoot     = "/host-var-lib/containerd"
+	defaultContainerdHostDataRoot = "/var/lib/containerd"
+	defaultNamespace              = "k8s.io"
+	defaultDialTimeout            = 10 * time.Second
 )
 
 type criRuntimeService interface {
@@ -38,27 +40,31 @@ type criRuntimeService interface {
 }
 
 type ContainerdRuntimeConfig struct {
-	CRIEndpoint        string
-	ContainerdEndpoint string
-	ContainerdRoot     string
-	ContainerdHostRoot string
-	Namespace          string
-	DialTimeout        time.Duration
-	CRIClient          criRuntimeService
-	CRIDialContext     func(ctx context.Context, endpoint string) (*grpc.ClientConn, error)
-	ContainerdClient   containerdClient
+	CRIEndpoint            string
+	ContainerdEndpoint     string
+	ContainerdRoot         string
+	ContainerdHostRoot     string
+	ContainerdDataRoot     string
+	ContainerdHostDataRoot string
+	Namespace              string
+	DialTimeout            time.Duration
+	CRIClient              criRuntimeService
+	CRIDialContext         func(ctx context.Context, endpoint string) (*grpc.ClientConn, error)
+	ContainerdClient       containerdClient
 }
 
 type ContainerdRuntime struct {
-	criEndpoint        string
-	containerdEndpoint string
-	containerdRoot     string
-	containerdHostRoot string
-	namespace          string
-	dialTimeout        time.Duration
-	criClient          criRuntimeService
-	criDialContext     func(ctx context.Context, endpoint string) (*grpc.ClientConn, error)
-	containerdClient   containerdClient
+	criEndpoint            string
+	containerdEndpoint     string
+	containerdRoot         string
+	containerdHostRoot     string
+	containerdDataRoot     string
+	containerdHostDataRoot string
+	namespace              string
+	dialTimeout            time.Duration
+	criClient              criRuntimeService
+	criDialContext         func(ctx context.Context, endpoint string) (*grpc.ClientConn, error)
+	containerdClient       containerdClient
 }
 
 type containerdClient interface {
@@ -87,6 +93,14 @@ func NewContainerdRuntime(cfg ContainerdRuntimeConfig) *ContainerdRuntime {
 	if containerdHostRoot == "" {
 		containerdHostRoot = defaultContainerdHostRoot
 	}
+	containerdDataRoot := strings.TrimSpace(cfg.ContainerdDataRoot)
+	if containerdDataRoot == "" {
+		containerdDataRoot = defaultContainerdDataRoot
+	}
+	containerdHostDataRoot := strings.TrimSpace(cfg.ContainerdHostDataRoot)
+	if containerdHostDataRoot == "" {
+		containerdHostDataRoot = defaultContainerdHostDataRoot
+	}
 	namespace := strings.TrimSpace(cfg.Namespace)
 	if namespace == "" {
 		namespace = defaultNamespace
@@ -96,15 +110,17 @@ func NewContainerdRuntime(cfg ContainerdRuntimeConfig) *ContainerdRuntime {
 		timeout = defaultDialTimeout
 	}
 	return &ContainerdRuntime{
-		criEndpoint:        criEndpoint,
-		containerdEndpoint: containerdEndpoint,
-		containerdRoot:     containerdRoot,
-		containerdHostRoot: containerdHostRoot,
-		namespace:          namespace,
-		dialTimeout:        timeout,
-		criClient:          cfg.CRIClient,
-		criDialContext:     cfg.CRIDialContext,
-		containerdClient:   cfg.ContainerdClient,
+		criEndpoint:            criEndpoint,
+		containerdEndpoint:     containerdEndpoint,
+		containerdRoot:         containerdRoot,
+		containerdHostRoot:     containerdHostRoot,
+		containerdDataRoot:     containerdDataRoot,
+		containerdHostDataRoot: containerdHostDataRoot,
+		namespace:              namespace,
+		dialTimeout:            timeout,
+		criClient:              cfg.CRIClient,
+		criDialContext:         cfg.CRIDialContext,
+		containerdClient:       cfg.ContainerdClient,
 	}
 }
 
@@ -133,6 +149,23 @@ func (r *ContainerdRuntime) CreateDiff(ctx context.Context, info ctldapi.RootFSI
 	client, closeClient, err := r.client(ctx)
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+
+	if desc, reader, ok, fastErr := r.createOverlayUpperDiff(ctx, client, info); ok && fastErr == nil {
+		closeClient()
+		return desc, reader, nil
+	} else if ok && fastErr != nil {
+		desc, err := crootfs.CreateDiff(ctx, info.SnapshotKey, client.SnapshotService(info.Snapshotter), client.DiffService())
+		if err != nil {
+			closeClient()
+			return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("overlayfs fast diff: %v; containerd diff: %w", fastErr, err)
+		}
+		blob, err := content.BlobReadSeeker(ctx, client.ContentStore(), desc)
+		if err != nil {
+			closeClient()
+			return ctldapi.RootFSDiffDescriptor{}, nil, err
+		}
+		return descriptorFromOCI(desc), closeReadSeekWithFunc{ReadSeekCloser: blob, closeFunc: closeClient}, nil
 	}
 
 	desc, err := crootfs.CreateDiff(ctx, info.SnapshotKey, client.SnapshotService(info.Snapshotter), client.DiffService())

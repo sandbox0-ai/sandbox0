@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
@@ -42,28 +41,14 @@ type Sandbox struct {
 
 // SandboxStatus represents possible sandbox statuses
 const (
-	SandboxStatusStarting     = "starting"
-	SandboxStatusRunning      = "running"
-	SandboxStatusPausing      = "pausing"
-	SandboxStatusPaused       = "paused"
-	SandboxStatusResuming     = "resuming"
-	SandboxStatusFailed       = "failed"
-	SandboxStatusTerminating  = "terminating"
-	SandboxPowerStateActive   = "active"
-	SandboxPowerStatePaused   = "paused"
-	SandboxPowerPhaseStable   = "stable"
-	SandboxPowerPhasePausing  = "pausing"
-	SandboxPowerPhaseResuming = "resuming"
+	SandboxStatusStarting    = "starting"
+	SandboxStatusRunning     = "running"
+	SandboxStatusPausing     = "pausing"
+	SandboxStatusPaused      = "paused"
+	SandboxStatusResuming    = "resuming"
+	SandboxStatusFailed      = "failed"
+	SandboxStatusTerminating = "terminating"
 )
-
-// SandboxPowerState tracks ctld cgroup state annotations used to thaw runtimes before deletion.
-type SandboxPowerState struct {
-	Desired            string `json:"desired"`
-	DesiredGeneration  int64  `json:"desired_generation"`
-	Observed           string `json:"observed"`
-	ObservedGeneration int64  `json:"observed_generation"`
-	Phase              string `json:"phase"`
-}
 
 // errNoIdlePod is returned when no idle pod is available for claiming.
 var errNoIdlePod = errors.New("no idle pod available")
@@ -129,7 +114,6 @@ type SandboxService struct {
 	deletionWebhookEmitter SandboxDeletionWebhookEmitter
 	quotaStore             TeamQuotaLimitStore
 	sandboxStore           SandboxStore
-	powerStateLocks        sync.Map
 }
 
 type TeamQuotaLimitStore interface {

@@ -45,7 +45,6 @@ func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string)
 		}
 		return fmt.Errorf("get pod: %w", err)
 	}
-	s.thawSandboxBeforeTermination(ctx, pod, sandboxID)
 
 	pod, err = s.ensureSandboxDeletionFinalizer(ctx, pod)
 	if err != nil {
@@ -196,18 +195,6 @@ func (s *SandboxService) markRuntimeDeletionReason(ctx context.Context, pod *cor
 		return nil, err
 	}
 	return updated, nil
-}
-
-func (s *SandboxService) thawSandboxBeforeTermination(ctx context.Context, pod *corev1.Pod, sandboxID string) {
-	if s == nil || !s.config.CtldEnabled || !sandboxPodMayHaveFrozenCgroup(pod) {
-		return
-	}
-	if _, err := s.requestSandboxPowerState(ctx, sandboxID, SandboxPowerStateActive); err != nil {
-		s.logger.Warn("Failed to request sandbox thaw before termination",
-			zap.String("sandboxID", sandboxID),
-			zap.Error(err),
-		)
-	}
 }
 
 // GetSandbox gets a sandbox by ID

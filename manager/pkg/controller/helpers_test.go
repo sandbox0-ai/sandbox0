@@ -147,18 +147,18 @@ func TestDesiredSandboxPodReadiness(t *testing.T) {
 		require.Equal(t, "SandboxActive", reason)
 	})
 
-	t.Run("paused sandbox is not ready", func(t *testing.T) {
+	t.Run("legacy paused annotation does not affect readiness", func(t *testing.T) {
 		status, reason, _ := DesiredSandboxPodReadiness(&corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Annotations: map[string]string{AnnotationPaused: "true"},
 			},
 			Status: corev1.PodStatus{Phase: corev1.PodRunning},
 		})
-		require.Equal(t, corev1.ConditionFalse, status)
-		require.Equal(t, "PowerStatePaused", reason)
+		require.Equal(t, corev1.ConditionTrue, status)
+		require.Equal(t, "SandboxActive", reason)
 	})
 
-	t.Run("resuming sandbox is not ready", func(t *testing.T) {
+	t.Run("legacy power-state annotation does not affect readiness", func(t *testing.T) {
 		status, reason, _ := DesiredSandboxPodReadiness(&corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Annotations: map[string]string{
@@ -169,8 +169,8 @@ func TestDesiredSandboxPodReadiness(t *testing.T) {
 			},
 			Status: corev1.PodStatus{Phase: corev1.PodRunning},
 		})
-		require.Equal(t, corev1.ConditionFalse, status)
-		require.Equal(t, "PowerStateTransitioning", reason)
+		require.Equal(t, corev1.ConditionTrue, status)
+		require.Equal(t, "SandboxActive", reason)
 	})
 
 }

@@ -9,13 +9,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	ctldcgroup "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/cgroup"
 	ctldportal "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal"
 	ctldpower "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/power"
 	ctldrootfs "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/rootfs"
@@ -35,19 +33,14 @@ import (
 var (
 	httpAddr               = ":8095"
 	kubeconfig             = ""
-	cgroupRoot             = "/host-sys/fs/cgroup"
 	criEndpoint            = "/host-run/containerd/containerd.sock"
 	containerdEndpoint     = "/host-run/containerd/containerd.sock"
 	containerdRoot         = "/host-run/containerd"
 	containerdHostRoot     = "/run/containerd"
+	containerdDataRoot     = "/host-var-lib/containerd"
+	containerdHostDataRoot = "/var/lib/containerd"
 	containerdNamespace    = "k8s.io"
-	procRoot               = "/proc"
 	nodeName               = os.Getenv("NODE_NAME")
-	pauseMinMemoryRequest  = "10Mi"
-	pauseMinMemoryLimit    = "32Mi"
-	pauseMemoryBufferRatio = "1.1"
-	pauseMinCPU            = "10m"
-	defaultSandboxTTL      time.Duration
 	portalRoot             = "/var/lib/sandbox0/ctld"
 	csiSocket              = "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock"
 	podName                = os.Getenv("POD_NAME")
@@ -57,19 +50,14 @@ var (
 func main() {
 	flag.StringVar(&httpAddr, "http-addr", ":8095", "HTTP listen address for ctld health and control endpoints")
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "optional kubeconfig path used by ctld")
-	flag.StringVar(&cgroupRoot, "cgroup-root", "/host-sys/fs/cgroup", "host cgroup root mounted into ctld")
 	flag.StringVar(&criEndpoint, "cri-endpoint", "/host-run/containerd/containerd.sock", "host CRI socket used to read pod sandbox stats")
 	flag.StringVar(&containerdEndpoint, "containerd-endpoint", "/host-run/containerd/containerd.sock", "host containerd socket used for rootfs diff/apply")
 	flag.StringVar(&containerdRoot, "containerd-root", "/host-run/containerd", "host containerd runtime root mounted into ctld")
 	flag.StringVar(&containerdHostRoot, "containerd-host-root", "/run/containerd", "host containerd runtime root path used in containerd mount requests")
+	flag.StringVar(&containerdDataRoot, "containerd-data-root", "/host-var-lib/containerd", "host containerd data root mounted into ctld")
+	flag.StringVar(&containerdHostDataRoot, "containerd-host-data-root", "/var/lib/containerd", "host containerd data root path returned by containerd snapshotters")
 	flag.StringVar(&containerdNamespace, "containerd-namespace", "k8s.io", "containerd namespace used by Kubernetes")
-	flag.StringVar(&procRoot, "proc-root", "/proc", "host proc root used to inspect sandbox processes")
 	flag.StringVar(&nodeName, "node-name", os.Getenv("NODE_NAME"), "current node name used to validate local sandbox ownership")
-	flag.StringVar(&pauseMinMemoryRequest, "pause-min-memory-request", "10Mi", "minimum memory request to apply to paused sandbox pods")
-	flag.StringVar(&pauseMinMemoryLimit, "pause-min-memory-limit", "32Mi", "minimum memory limit to apply to paused sandbox pods")
-	flag.StringVar(&pauseMemoryBufferRatio, "pause-memory-buffer-ratio", "1.1", "memory limit multiplier applied to paused sandbox working set")
-	flag.StringVar(&pauseMinCPU, "pause-min-cpu", "10m", "minimum CPU request and limit to apply to paused sandbox pods")
-	flag.DurationVar(&defaultSandboxTTL, "default-sandbox-ttl", 0, "default sandbox TTL restored on resume when no original TTL is recorded")
 	flag.StringVar(&portalRoot, "volume-portal-root", "/var/lib/sandbox0/ctld", "host-local root for ctld volume portal WAL and cache")
 	flag.StringVar(&csiSocket, "csi-socket", "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock", "CSI endpoint socket for sandbox volume portals")
 	flag.Parse()
@@ -134,11 +122,11 @@ func main() {
 	}()
 	defer csiServer.Stop()
 
-	powerController, podResolver := buildPowerController(ctx, obsProvider)
+	probeController := buildProbeController(ctx, obsProvider)
 	httpServer := newHTTPServer(httpAddr, combinedController{
-		Controller: powerController,
+		Controller: probeController,
 		Portal:     portalManager,
-		RootFS:     buildRootFSController(storageCfg, podResolver),
+		RootFS:     buildRootFSController(storageCfg),
 	})
 	if obsProvider != nil {
 		httpServer.Handler = httpobs.ServerMiddleware(obsProvider.HTTPServerConfig(zapLogger))(httpServer.Handler)
@@ -163,41 +151,24 @@ func newHTTPServer(addr string, controller ctldserver.Controller) *http.Server {
 	return &http.Server{Addr: addr, Handler: ctldserver.NewMux(controller)}
 }
 
-func buildPowerController(ctx context.Context, obsProvider *observability.Provider) (ctldserver.Controller, *ctldpower.PodResolver) {
+func buildProbeController(ctx context.Context, obsProvider *observability.Provider) ctldserver.Controller {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	k8sClient, err := k8s.NewClientWithObservability(kubeconfig, obsProvider)
 	if err != nil {
-		log.Printf("ctld power control disabled: build kubernetes client: %v", err)
-		return ctldserver.NotImplementedController{}, nil
+		log.Printf("ctld probe control disabled: build kubernetes client: %v", err)
+		return ctldserver.NotImplementedController{}
 	}
-	resolver := ctldpower.NewPodResolver(k8sClient, nodeName, cgroupRoot)
-	resolver.ProcRoot = procRoot
-	controller := ctldpower.NewController(resolver, nil)
+	resolver := ctldpower.NewPodResolver(k8sClient, nodeName)
+	controller := ctldpower.NewController(resolver)
 	if obsProvider != nil {
 		controller.HTTPClient = obsProvider.HTTP.NewClient(httpobs.Config{Timeout: 2 * time.Second})
 	}
-	controller.StatsProvider = ctldpower.NewCRIStatsProvider(criEndpoint)
 
 	if podCache, err := ctldpower.NewNodePodCache(k8sClient, nodeName, 0); err != nil {
 		log.Printf("ctld pod cache disabled: %v", err)
 	} else {
-		ratio, err := strconv.ParseFloat(pauseMemoryBufferRatio, 64)
-		if err != nil || ratio <= 0 {
-			log.Printf("invalid pause memory buffer ratio %q, using default 1.1", pauseMemoryBufferRatio)
-			ratio = 1.1
-		}
-		powerReconciler := ctldpower.NewPowerReconciler(k8sClient, podCache.PodLister(), resolver, controller, ctldpower.PowerReconcilerConfig{
-			PauseMinMemoryRequest:  pauseMinMemoryRequest,
-			PauseMinMemoryLimit:    pauseMinMemoryLimit,
-			PauseMemoryBufferRatio: ratio,
-			PauseMinCPU:            pauseMinCPU,
-			DefaultSandboxTTL:      defaultSandboxTTL,
-		})
-		if err := podCache.AddEventHandler(powerReconciler.EventHandler()); err != nil {
-			log.Printf("ctld power reconciler disabled: add pod handler: %v", err)
-		}
 		podCache.Start(ctx)
 		resolver.SetPodCache(podCache.PodLister(), podCache.PodIndexer())
 		go func() {
@@ -206,29 +177,27 @@ func buildPowerController(ctx context.Context, obsProvider *observability.Provid
 			if !podCache.WaitForSync(syncCtx) && ctx.Err() == nil {
 				log.Printf("ctld pod cache did not sync before timeout; live kubernetes lookups remain enabled")
 			}
-			powerReconciler.EnqueueAll()
-			powerReconciler.Run(ctx, 1)
 		}()
 	}
-	return controller, resolver
+	return controller
 }
 
-func buildRootFSController(storageCfg *apiconfig.StorageProxyConfig, resolver *ctldpower.PodResolver) ctldserver.RootFSController {
+func buildRootFSController(storageCfg *apiconfig.StorageProxyConfig) ctldserver.RootFSController {
 	store, err := buildRootFSObjectStore(storageCfg)
 	if err != nil {
 		log.Printf("ctld rootfs object store disabled: %v", err)
 	}
 	return ctldrootfs.NewController(ctldrootfs.Config{
 		Runtime: ctldrootfs.NewContainerdRuntime(ctldrootfs.ContainerdRuntimeConfig{
-			CRIEndpoint:        criEndpoint,
-			ContainerdEndpoint: containerdEndpoint,
-			ContainerdRoot:     containerdRoot,
-			ContainerdHostRoot: containerdHostRoot,
-			Namespace:          containerdNamespace,
+			CRIEndpoint:            criEndpoint,
+			ContainerdEndpoint:     containerdEndpoint,
+			ContainerdRoot:         containerdRoot,
+			ContainerdHostRoot:     containerdHostRoot,
+			ContainerdDataRoot:     containerdDataRoot,
+			ContainerdHostDataRoot: containerdHostDataRoot,
+			Namespace:              containerdNamespace,
 		}),
-		Store:    store,
-		Resolver: resolver,
-		FS:       ctldcgroup.NewFS(),
+		Store: store,
 	})
 }
 

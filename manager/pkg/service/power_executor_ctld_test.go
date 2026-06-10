@@ -86,7 +86,7 @@ func TestCtldAddressForPodUsesNodeCacheBeforeLiveGet(t *testing.T) {
 	assert.Empty(t, k8sClient.Actions())
 }
 
-func TestTerminateSandboxRequestsAsyncThawBeforeDelete(t *testing.T) {
+func TestTerminateSandboxDoesNotRequestPowerStateBeforeDelete(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "sandbox-1",
@@ -95,21 +95,10 @@ func TestTerminateSandboxRequestsAsyncThawBeforeDelete(t *testing.T) {
 				controller.LabelSandboxID: "sandbox-1",
 			},
 			Annotations: map[string]string{
-				controller.AnnotationPaused:                       "true",
-				controller.AnnotationPowerStateDesired:            SandboxPowerStatePaused,
-				controller.AnnotationPowerStateDesiredGeneration:  "2",
-				controller.AnnotationPowerStateObserved:           SandboxPowerStatePaused,
-				controller.AnnotationPowerStateObservedGeneration: "2",
-				controller.AnnotationPowerStatePhase:              SandboxPowerPhaseStable,
+				controller.AnnotationPaused: "true",
 			},
 		},
 		Spec: corev1.PodSpec{NodeName: "node-1"},
-		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{
-			Type:    corev1.PodConditionType("sandbox0.ai/live"),
-			Status:  corev1.ConditionUnknown,
-			Reason:  "SandboxPaused",
-			Message: "sandbox cgroup is frozen",
-		}}},
 	}
 	k8sClient := fake.NewSimpleClientset(pod)
 	svc := &SandboxService{
@@ -123,19 +112,16 @@ func TestTerminateSandboxRequestsAsyncThawBeforeDelete(t *testing.T) {
 	require.NoError(t, err)
 
 	actions := k8sClient.Actions()
-	var firstUpdatedPod *corev1.Pod
+	assert.Equal(t, "delete", actions[len(actions)-1].GetVerb())
 	for _, action := range actions {
 		updateAction, ok := action.(ktesting.UpdateAction)
 		if !ok || action.GetSubresource() != "" {
 			continue
 		}
-		firstUpdatedPod, _ = updateAction.GetObject().(*corev1.Pod)
-		break
+		updatedPod, _ := updateAction.GetObject().(*corev1.Pod)
+		require.NotNil(t, updatedPod)
+		assert.Empty(t, updatedPod.Annotations[controller.AnnotationPowerStateDesired])
+		assert.Empty(t, updatedPod.Annotations[controller.AnnotationPowerStateObserved])
+		assert.Empty(t, updatedPod.Annotations[controller.AnnotationPowerStatePhase])
 	}
-	require.NotNil(t, firstUpdatedPod)
-	state := sandboxPowerStateFromAnnotations(firstUpdatedPod.Annotations)
-	assert.Equal(t, SandboxPowerStateActive, state.Desired)
-	assert.Equal(t, SandboxPowerStatePaused, state.Observed)
-	assert.Equal(t, SandboxPowerPhaseResuming, state.Phase)
-	assert.Equal(t, "delete", actions[len(actions)-1].GetVerb())
 }

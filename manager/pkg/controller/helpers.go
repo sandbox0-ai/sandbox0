@@ -220,14 +220,6 @@ func DesiredSandboxPodReadiness(pod *corev1.Pod) (corev1.ConditionStatus, string
 	if pod.Status.Phase != corev1.PodRunning {
 		return corev1.ConditionFalse, "PodNotRunning", fmt.Sprintf("pod phase is %s", pod.Status.Phase)
 	}
-
-	desired, observed, phase := sandboxPowerStateFromAnnotations(pod.Annotations)
-	if desired != "active" {
-		return corev1.ConditionFalse, "PowerStatePaused", "sandbox desired power state is paused"
-	}
-	if observed != "active" || phase != "stable" {
-		return corev1.ConditionFalse, "PowerStateTransitioning", "sandbox power state is not yet active and stable"
-	}
 	return corev1.ConditionTrue, "SandboxActive", "sandbox is active and ready"
 }
 
@@ -270,41 +262,6 @@ func EnsureSandboxPodReadinessCondition(ctx context.Context, client kubernetes.I
 		return nil, err
 	}
 	return updated, nil
-}
-
-func sandboxPowerStateFromAnnotations(annotations map[string]string) (desired, observed, phase string) {
-	if annotations == nil {
-		return "active", "active", "stable"
-	}
-	legacyPaused := annotations[AnnotationPaused] == "true"
-	desired = strings.TrimSpace(annotations[AnnotationPowerStateDesired])
-	if desired == "" {
-		if legacyPaused {
-			desired = "paused"
-		} else {
-			desired = "active"
-		}
-	}
-	observed = strings.TrimSpace(annotations[AnnotationPowerStateObserved])
-	if observed == "" {
-		if legacyPaused {
-			observed = "paused"
-		} else {
-			observed = "active"
-		}
-	}
-	phase = strings.TrimSpace(annotations[AnnotationPowerStatePhase])
-	if phase == "" {
-		switch desired {
-		case observed:
-			phase = "stable"
-		case "paused":
-			phase = "pausing"
-		default:
-			phase = "resuming"
-		}
-	}
-	return desired, observed, phase
 }
 
 func podConditionTrue(conditions []corev1.PodCondition, conditionType corev1.PodConditionType) bool {

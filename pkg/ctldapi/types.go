@@ -82,7 +82,6 @@ type SaveRootFSRequest struct {
 	TeamID                    string             `json:"team_id"`
 	ExpectedRuntimeGeneration int64              `json:"expected_runtime_generation,omitempty"`
 	ObjectKey                 string             `json:"object_key,omitempty"`
-	Freeze                    bool               `json:"freeze,omitempty"`
 }
 
 type SaveRootFSResponse struct {
@@ -100,7 +99,6 @@ type ApplyRootFSRequest struct {
 	ExpectedSnapshotParent      string               `json:"expected_snapshot_parent,omitempty"`
 	ExpectedSnapshotParentChain []string             `json:"expected_snapshot_parent_chain,omitempty"`
 	Descriptor                  RootFSDiffDescriptor `json:"descriptor"`
-	Freeze                      bool                 `json:"freeze,omitempty"`
 }
 
 type ApplyRootFSResponse struct {

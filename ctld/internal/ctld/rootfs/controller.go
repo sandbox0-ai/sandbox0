@@ -11,8 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/cgroup"
-	ctldpower "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/power"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 )
@@ -29,23 +27,15 @@ type Runtime interface {
 	ApplyDiff(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, content io.Reader) (ctldapi.RootFSDiffDescriptor, error)
 }
 
-type PodResolver interface {
-	ResolvePod(r *http.Request, namespace, name string) (ctldpower.Target, error)
-}
-
 type Config struct {
 	Runtime          Runtime
 	Store            objectstore.Store
-	Resolver         PodResolver
-	FS               *cgroup.FS
 	OperationTimeout time.Duration
 }
 
 type Controller struct {
 	runtime          Runtime
 	store            objectstore.Store
-	resolver         PodResolver
-	fs               *cgroup.FS
 	operationTimeout time.Duration
 }
 
@@ -57,8 +47,6 @@ func NewController(cfg Config) *Controller {
 	return &Controller{
 		runtime:          cfg.Runtime,
 		store:            cfg.Store,
-		resolver:         cfg.Resolver,
-		fs:               cfg.FS,
 		operationTimeout: timeout,
 	}
 }
@@ -84,11 +72,6 @@ func (c *Controller) SaveRootFS(r *http.Request, req ctldapi.SaveRootFSRequest) 
 
 	ctx, cancel := c.operationContext(requestContext(r))
 	defer cancel()
-	thaw, err := c.freezeIfRequested(r, req.Target, req.Freeze)
-	if err != nil {
-		return ctldapi.SaveRootFSResponse{Error: err.Error()}, statusForError(err)
-	}
-	defer thaw()
 
 	info, err := c.inspect(ctx, req.Target)
 	if err != nil {
@@ -130,11 +113,6 @@ func (c *Controller) ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest
 
 	ctx, cancel := c.operationContext(requestContext(r))
 	defer cancel()
-	thaw, err := c.freezeIfRequested(r, req.Target, req.Freeze)
-	if err != nil {
-		return ctldapi.ApplyRootFSResponse{Error: err.Error()}, statusForError(err)
-	}
-	defer thaw()
 
 	info, err := c.inspect(ctx, req.Target)
 	if err != nil {
@@ -177,30 +155,6 @@ func (c *Controller) operationContext(parent context.Context) (context.Context, 
 		timeout = c.operationTimeout
 	}
 	return context.WithTimeout(parent, timeout)
-}
-
-func (c *Controller) freezeIfRequested(r *http.Request, target ctldapi.RootFSContainerRef, freeze bool) (func(), error) {
-	if !freeze {
-		return func() {}, nil
-	}
-	if c == nil || c.resolver == nil || c.fs == nil {
-		return nil, fmt.Errorf("rootfs freeze requested but pod resolver or cgroup fs is not configured")
-	}
-	powerTarget, err := c.resolver.ResolvePod(r, target.Namespace, target.PodName)
-	if err != nil {
-		return nil, err
-	}
-	if err := c.fs.Freeze(powerTarget.CgroupDir); err != nil {
-		return nil, fmt.Errorf("freeze sandbox cgroup: %w", err)
-	}
-	thawed := false
-	return func() {
-		if thawed {
-			return
-		}
-		thawed = true
-		_ = c.fs.Thaw(powerTarget.CgroupDir)
-	}, nil
 }
 
 func requestContext(r *http.Request) context.Context {
@@ -295,7 +249,7 @@ func statusForError(err error) int {
 	if errors.Is(err, ErrConflict) {
 		return http.StatusConflict
 	}
-	if errors.Is(err, ErrNotFound) || errors.Is(err, ctldpower.ErrPodNotFound) || errors.Is(err, ctldpower.ErrSandboxNotFound) || errors.Is(err, ctldpower.ErrRuntimeTargetNotFound) {
+	if errors.Is(err, ErrNotFound) {
 		return http.StatusNotFound
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

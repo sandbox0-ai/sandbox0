@@ -2,6 +2,7 @@ package ctld
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -112,9 +113,9 @@ func reconcileCtldDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) *a
 	if ds.Spec.Template.Spec.ServiceAccountName != "demo-ctld" {
 		t.Fatalf("expected service account demo-ctld, got %q", ds.Spec.Template.Spec.ServiceAccountName)
 	}
-	if len(ds.Spec.Template.Spec.Containers[0].Args) < 5 || ds.Spec.Template.Spec.Containers[0].Args[1] != "-cgroup-root=/host-sys/fs/cgroup" || ds.Spec.Template.Spec.Containers[0].Args[2] != "-cri-endpoint=/host-run/containerd/containerd.sock" {
-		t.Fatalf("expected cgroup root arg, got %#v", ds.Spec.Template.Spec.Containers[0].Args)
-	}
+	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-cri-endpoint=/host-run/containerd/containerd.sock")
+	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-containerd-data-root=/host-var-lib/containerd")
+	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-containerd-host-data-root=/var/lib/containerd")
 	if ds.Spec.Template.Spec.Containers[0].SecurityContext == nil || ds.Spec.Template.Spec.Containers[0].SecurityContext.Privileged == nil || !*ds.Spec.Template.Spec.Containers[0].SecurityContext.Privileged {
 		t.Fatal("expected ctld container to run privileged")
 	}
@@ -122,8 +123,9 @@ func reconcileCtldDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) *a
 		t.Fatalf("expected csi node-driver-registrar sidecar, got %#v", ds.Spec.Template.Spec.Containers)
 	}
 	if len(ds.Spec.Template.Spec.Containers[0].VolumeMounts) < 6 {
-		t.Fatalf("expected ctld config, csi, kubelet, data, cgroup, and containerd mounts, got %#v", ds.Spec.Template.Spec.Containers[0].VolumeMounts)
+		t.Fatalf("expected ctld config, csi, kubelet, data, containerd socket, and containerd data mounts, got %#v", ds.Spec.Template.Spec.Containers[0].VolumeMounts)
 	}
+	assertContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "containerd-data", "/host-var-lib/containerd")
 	driver := &storagev1.CSIDriver{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: "volume.sandbox0.ai"}, driver); err != nil {
 		t.Fatalf("expected csi driver to be created: %v", err)
@@ -135,17 +137,7 @@ func reconcileCtldDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) *a
 	return ds
 }
 
-func TestReconcilePassesDefaultPauseConfigToCtld(t *testing.T) {
-	ds := reconcileCtldDaemonSet(t, newCtldTestInfra())
-	args := ds.Spec.Template.Spec.Containers[0].Args
-	assertContainsArg(t, args, "-pause-min-memory-request=10Mi")
-	assertContainsArg(t, args, "-pause-min-memory-limit=32Mi")
-	assertContainsArg(t, args, "-pause-memory-buffer-ratio=1.1")
-	assertContainsArg(t, args, "-pause-min-cpu=10m")
-	assertContainsArg(t, args, "-default-sandbox-ttl=0s")
-}
-
-func TestReconcilePassesPauseConfigToCtld(t *testing.T) {
+func TestReconcileDoesNotPassPauseConfigToCtld(t *testing.T) {
 	infra := newCtldTestInfra()
 	infra.Spec.Services.Manager.Config = &infrav1alpha1.ManagerConfig{
 		PauseMinMemoryRequest:  "24Mi",
@@ -157,11 +149,11 @@ func TestReconcilePassesPauseConfigToCtld(t *testing.T) {
 
 	ds := reconcileCtldDaemonSet(t, infra)
 	args := ds.Spec.Template.Spec.Containers[0].Args
-	assertContainsArg(t, args, "-pause-min-memory-request=24Mi")
-	assertContainsArg(t, args, "-pause-min-memory-limit=96Mi")
-	assertContainsArg(t, args, "-pause-memory-buffer-ratio=1.4")
-	assertContainsArg(t, args, "-pause-min-cpu=25m")
-	assertContainsArg(t, args, "-default-sandbox-ttl=5m0s")
+	assertNotContainsArgPrefix(t, args, "-pause-min-memory-request=")
+	assertNotContainsArgPrefix(t, args, "-pause-min-memory-limit=")
+	assertNotContainsArgPrefix(t, args, "-pause-memory-buffer-ratio=")
+	assertNotContainsArgPrefix(t, args, "-pause-min-cpu=")
+	assertNotContainsArgPrefix(t, args, "-default-sandbox-ttl=")
 }
 
 func TestReconcileMountsObjectEncryptionKeyWhenEnabled(t *testing.T) {
@@ -185,6 +177,15 @@ func assertContainsArg(t *testing.T, args []string, want string) {
 		}
 	}
 	t.Fatalf("expected args to contain %q, got %#v", want, args)
+}
+
+func assertNotContainsArgPrefix(t *testing.T, args []string, prefix string) {
+	t.Helper()
+	for _, arg := range args {
+		if strings.HasPrefix(arg, prefix) {
+			t.Fatalf("expected args to omit prefix %q, got %#v", prefix, args)
+		}
+	}
 }
 
 func assertContainerVolumeMount(t *testing.T, mounts []corev1.VolumeMount, name, mountPath string) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -283,6 +284,8 @@ type combinedController struct {
 	RootFS ctldserver.RootFSController
 }
 
+var _ ctldserver.RootFSController = combinedController{}
+
 func (c combinedController) BindVolumePortal(r *http.Request, req ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, int) {
 	if c.Portal == nil {
 		return ctldapi.BindVolumePortalResponse{Error: "ctld volume portals not implemented"}, http.StatusNotImplemented
@@ -455,6 +458,13 @@ func (c combinedController) ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFS
 		return ctldapi.ApplyRootFSResponse{Error: "ctld rootfs apply not implemented"}, http.StatusNotImplemented
 	}
 	return c.RootFS.ApplyRootFS(r, req)
+}
+
+func (c combinedController) ReadRootFSDiff(r *http.Request, req ctldapi.ReadRootFSDiffRequest) (io.ReadCloser, ctldapi.RootFSDiffDescriptor, int, error) {
+	if c.RootFS == nil {
+		return nil, ctldapi.RootFSDiffDescriptor{}, http.StatusNotImplemented, fmt.Errorf("ctld rootfs diff read not implemented")
+	}
+	return c.RootFS.ReadRootFSDiff(r, req)
 }
 
 type volumePortalHandler interface {

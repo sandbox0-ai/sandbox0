@@ -327,7 +327,19 @@ func (s *SandboxService) CleanupDeletedSandbox(ctx context.Context, info Sandbox
 		return nil
 	}
 
-	runtimePaused := strings.TrimSpace(info.RuntimeDeletionReason) == runtimeDeletionReasonPaused
+	runtimeDeletionReason := strings.TrimSpace(info.RuntimeDeletionReason)
+	runtimePaused := runtimeDeletionReason == runtimeDeletionReasonPaused
+	if !runtimePaused && runtimeDeletionReason == "" && s.sandboxStore != nil && sandboxID != "" {
+		record, err := s.sandboxStore.GetSandbox(ctx, sandboxID)
+		if err == nil && record != nil && record.Status == SandboxStatusPaused {
+			runtimePaused = true
+		} else if err != nil && !errors.Is(err, ErrSandboxRecordNotFound) {
+			logger.Warn("Failed to load sandbox state during deletion cleanup",
+				zap.String("sandboxID", sandboxID),
+				zap.Error(err),
+			)
+		}
+	}
 	var errs []error
 	if !runtimePaused && s.deletionWebhookEmitter != nil && strings.TrimSpace(info.WebhookURL) != "" {
 		if err := s.deletionWebhookEmitter.EmitSandboxDeleted(ctx, info); err != nil {

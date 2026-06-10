@@ -35,7 +35,9 @@ func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string)
 					return fmt.Errorf("get sandbox record: %w", getErr)
 				}
 				if record != nil && record.Status != SandboxStatusDeleted {
-					if err := s.CleanupDeletedSandbox(ctx, sandboxLifecycleInfoFromRecord(record)); err != nil {
+					info := sandboxLifecycleInfoFromRecord(record)
+					info.RuntimeDeletionReason = runtimeDeletionReasonDeleted
+					if err := s.CleanupDeletedSandbox(ctx, info); err != nil {
 						return fmt.Errorf("cleanup deleted sandbox record: %w", err)
 					}
 				}
@@ -109,12 +111,6 @@ func (s *SandboxService) pauseSandboxRuntimeWithCheckpoint(ctx context.Context, 
 		s.restoreSandboxRuntimeAfterPauseFailure(ctx, sandboxID, plan.pod, plan.generation)
 		return err
 	}
-	preparedPod, err := s.prepareRuntimePodForDeletion(ctx, plan.pod, runtimeDeletionReasonPaused)
-	if err != nil {
-		s.restoreSandboxRuntimeAfterPauseFailure(ctx, sandboxID, plan.pod, plan.generation)
-		return fmt.Errorf("prepare paused runtime deletion: %w", err)
-	}
-	plan.pod = preparedPod
 	if err := s.finishSandboxRuntimePause(ctx, sandboxID, plan.generation); err != nil {
 		s.restoreSandboxRuntimeAfterPauseFailure(ctx, sandboxID, plan.pod, plan.generation)
 		return err
@@ -169,10 +165,6 @@ func (s *SandboxService) prepareSandboxRuntimePause(ctx context.Context, sandbox
 }
 
 func (s *SandboxService) deleteRuntimePodForPause(ctx context.Context, pod *corev1.Pod) error {
-	pod, err := s.prepareRuntimePodForDeletion(ctx, pod, runtimeDeletionReasonPaused)
-	if err != nil {
-		return fmt.Errorf("prepare runtime deletion: %w", err)
-	}
 	return s.deletePreparedRuntimePodForPause(ctx, pod)
 }
 

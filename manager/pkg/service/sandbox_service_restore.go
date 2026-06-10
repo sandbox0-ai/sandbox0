@@ -52,21 +52,16 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 		if getErr == nil {
 			if locked.Status == SandboxStatusPaused {
 				if existing.DeletionTimestamp != nil {
-					pending, err := s.pausedRuntimeDeletionPending(lockCtx, existing)
-					if err != nil {
+					if err := s.waitForPausedRuntimeDeletion(lockCtx, existing); err != nil {
 						return err
 					}
-					if !pending {
-						return k8serrors.NewConflict(corev1.Resource("pod"), existing.Name, fmt.Errorf("sandbox runtime deletion is still in progress"))
-					}
-				}
-				if existing.DeletionTimestamp == nil {
+				} else {
 					if err := s.deleteRuntimePodForPause(lockCtx, existing); err != nil {
 						return err
 					}
-				}
-				if err := s.waitForPausedRuntimeDeletion(lockCtx, existing); err != nil {
-					return err
+					if err := s.waitForPausedRuntimeDeletion(lockCtx, existing); err != nil {
+						return err
+					}
 				}
 			} else {
 				if existing.DeletionTimestamp != nil {

@@ -14,6 +14,7 @@ import (
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"go.uber.org/zap"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
@@ -130,6 +131,7 @@ type SandboxService struct {
 	deletionWebhookEmitter SandboxDeletionWebhookEmitter
 	quotaStore             TeamQuotaLimitStore
 	sandboxStore           SandboxStore
+	pauseMeteringRecorder  SandboxPauseMeteringRecorder
 	registryService        *RegistryService
 	rootFSImagePublisher   RootFSCheckpointImagePublisher
 	powerStateLocks        sync.Map
@@ -155,6 +157,11 @@ type TimeProvider interface {
 	Now() time.Time
 	Since(t time.Time) time.Duration
 	Until(t time.Time) time.Duration
+}
+
+// SandboxPauseMeteringRecorder records pause facts without requiring a Kubernetes pod patch.
+type SandboxPauseMeteringRecorder interface {
+	RecordSandboxPaused(ctx context.Context, pod *corev1.Pod, pausedAt time.Time)
 }
 
 // systemTime is the default implementation using system time
@@ -238,6 +245,13 @@ func (s *SandboxService) SetProcdClient(client *ProcdClient) {
 		return
 	}
 	s.procdClient = client
+}
+
+func (s *SandboxService) SetPauseMeteringRecorder(recorder SandboxPauseMeteringRecorder) {
+	if s == nil {
+		return
+	}
+	s.pauseMeteringRecorder = recorder
 }
 
 // SetCtldClient overrides the ctld client (used by tests and future node runtimes).

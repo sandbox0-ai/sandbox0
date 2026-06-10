@@ -111,10 +111,12 @@ func (s *SandboxService) pauseSandboxRuntimeWithCheckpoint(ctx context.Context, 
 		s.restoreSandboxRuntimeAfterPauseFailure(ctx, sandboxID, plan.pod, plan.generation)
 		return err
 	}
-	if err := s.finishSandboxRuntimePause(ctx, sandboxID, plan.generation); err != nil {
+	pausedAt, err := s.finishSandboxRuntimePause(ctx, sandboxID, plan.generation)
+	if err != nil {
 		s.restoreSandboxRuntimeAfterPauseFailure(ctx, sandboxID, plan.pod, plan.generation)
 		return err
 	}
+	s.recordSandboxPaused(ctx, plan.pod, pausedAt)
 	s.deleteRuntimePodForPauseAsync(sandboxID, plan.pod)
 	return nil
 }
@@ -196,11 +198,15 @@ func (s *SandboxService) deleteRuntimePodForPauseAsync(sandboxID string, pod *co
 	}()
 }
 
-func (s *SandboxService) finishSandboxRuntimePause(ctx context.Context, sandboxID string, generation int64) error {
-	if s == nil || s.sandboxStore == nil {
-		return nil
+func (s *SandboxService) finishSandboxRuntimePause(ctx context.Context, sandboxID string, generation int64) (time.Time, error) {
+	pausedAt := time.Now()
+	if s != nil && s.clock != nil {
+		pausedAt = s.clock.Now()
 	}
-	return s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
+	if s == nil || s.sandboxStore == nil {
+		return pausedAt, nil
+	}
+	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
 		if record != nil {
 			switch record.Status {
 			case SandboxStatusDeleted:
@@ -213,10 +219,18 @@ func (s *SandboxService) finishSandboxRuntimePause(ctx context.Context, sandboxI
 			}
 		}
 		if tx != nil {
-			return tx.MarkRuntimePaused(lockCtx, sandboxID, generation, s.clock.Now())
+			return tx.MarkRuntimePaused(lockCtx, sandboxID, generation, pausedAt)
 		}
 		return nil
 	})
+	return pausedAt, err
+}
+
+func (s *SandboxService) recordSandboxPaused(ctx context.Context, pod *corev1.Pod, pausedAt time.Time) {
+	if s == nil || s.pauseMeteringRecorder == nil || pod == nil {
+		return
+	}
+	s.pauseMeteringRecorder.RecordSandboxPaused(ctx, pod, pausedAt)
 }
 
 func (s *SandboxService) restoreSandboxRuntimeAfterPauseFailure(ctx context.Context, sandboxID string, pod *corev1.Pod, generation int64) {

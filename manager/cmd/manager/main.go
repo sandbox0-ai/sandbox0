@@ -312,6 +312,7 @@ func main() {
 	sandboxService.SetCredentialStore(credentialStore)
 	sandboxService.SetQuotaStore(quota.NewRepository(pool))
 	sandboxService.SetSandboxStore(service.NewPGSandboxStore(pool))
+	sandboxService.SetPauseMeteringRecorder(lifecycleProjector)
 	if cfg.StorageProxyBaseURL != "" && cfg.StorageProxyHTTPPort > 0 && storageProxyAdminTokenGenerator != nil {
 		storageProxyBaseURL := fmt.Sprintf("http://%s:%d", strings.TrimSpace(cfg.StorageProxyBaseURL), cfg.StorageProxyHTTPPort)
 		sandboxService.SetWebhookStateVolumeClient(service.NewStorageProxyVolumeClient(service.StorageProxyVolumeClientConfig{

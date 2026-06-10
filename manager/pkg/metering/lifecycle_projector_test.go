@@ -162,6 +162,44 @@ func TestLifecycleProjectorRecordsClaimPauseResumeTerminate(t *testing.T) {
 	}
 }
 
+func TestLifecycleProjectorRecordsDirectPauseWithoutTerminatingRuntimeDelete(t *testing.T) {
+	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
+	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
+
+	now := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
+	projector.now = func() time.Time { return now }
+
+	claimedAt := now.Add(-10 * time.Minute)
+	pod := withSandboxResources(buildSandboxPod(claimedAt, false, "", "1"), "2", "1Gi")
+	projector.handleUpsert(pod)
+
+	pausedAt := now.Add(-2 * time.Minute)
+	projector.RecordSandboxPaused(context.Background(), pod, pausedAt)
+	if len(recorder.events) != 2 || recorder.events[1].EventType != meteringpkg.EventTypeSandboxPaused {
+		t.Fatalf("expected direct pause event, got %#v", recorder.events)
+	}
+	if len(recorder.windows) != 2 || recorder.windows[1].WindowType != meteringpkg.WindowTypeSandboxRuntimeMiBMilliseconds {
+		t.Fatalf("expected direct pause runtime window, got %#v", recorder.windows)
+	}
+
+	projector.now = func() time.Time { return pausedAt.Add(5 * time.Second) }
+	projector.handleDelete(pod)
+	if len(recorder.events) != 2 {
+		t.Fatalf("runtime delete after direct pause recorded extra events: %#v", recorder.events)
+	}
+	state := recorder.states["sb-1"]
+	if state == nil || !state.Paused || state.TerminatedAt != nil {
+		t.Fatalf("runtime delete state = %#v, want paused and not terminated", state)
+	}
+
+	projector.now = func() time.Time { return now.Add(time.Minute) }
+	resumedPod := withSandboxResources(buildSandboxPod(claimedAt, false, "", "3"), "2", "1Gi")
+	projector.handleUpsert(resumedPod)
+	if len(recorder.events) != 3 || recorder.events[2].EventType != meteringpkg.EventTypeSandboxResumed {
+		t.Fatalf("expected resume event after direct pause runtime delete, got %#v", recorder.events)
+	}
+}
+
 func TestLifecycleProjectorRecordsErrorsInMetrics(t *testing.T) {
 	recorder := &fakeRecorder{
 		states: map[string]*meteringpkg.SandboxProjectionState{},

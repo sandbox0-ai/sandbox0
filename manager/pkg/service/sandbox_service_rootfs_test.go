@@ -30,6 +30,18 @@ import (
 	ktesting "k8s.io/client-go/testing"
 )
 
+type recordingPauseMeteringRecorder struct {
+	calls     atomic.Int32
+	sandboxID string
+	pausedAt  time.Time
+}
+
+func (r *recordingPauseMeteringRecorder) RecordSandboxPaused(_ context.Context, pod *corev1.Pod, pausedAt time.Time) {
+	r.calls.Add(1)
+	r.sandboxID = pod.Labels[controller.LabelSandboxID]
+	r.pausedAt = pausedAt
+}
+
 func TestPauseSandboxRuntimeSavesRootFSBeforeDeletingPod(t *testing.T) {
 	saveCalled := false
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -102,14 +114,16 @@ func TestPauseSandboxRuntimeSavesRootFSBeforeDeletingPod(t *testing.T) {
 			CurrentPodName:      "pod-1",
 		},
 	}}
+	pauseMeteringRecorder := &recordingPauseMeteringRecorder{}
 	svc := &SandboxService{
-		k8sClient:    k8sClient,
-		podLister:    newTestPodLister(t, pod),
-		sandboxStore: store,
-		ctldClient:   NewCtldClient(CtldClientConfig{Timeout: time.Second}),
-		config:       SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
-		clock:        systemTime{},
-		logger:       zap.NewNop(),
+		k8sClient:             k8sClient,
+		podLister:             newTestPodLister(t, pod),
+		sandboxStore:          store,
+		pauseMeteringRecorder: pauseMeteringRecorder,
+		ctldClient:            NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config:                SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+		clock:                 systemTime{},
+		logger:                zap.NewNop(),
 	}
 
 	done := make(chan error, 1)
@@ -140,6 +154,9 @@ func TestPauseSandboxRuntimeSavesRootFSBeforeDeletingPod(t *testing.T) {
 	assert.Equal(t, "sha256:diff", state.DiffDigest)
 	assert.Equal(t, "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar", state.DiffObjectKey)
 	assert.Equal(t, SandboxStatusPaused, store.records["sandbox-1"].Status)
+	assert.Equal(t, int32(1), pauseMeteringRecorder.calls.Load())
+	assert.Equal(t, "sandbox-1", pauseMeteringRecorder.sandboxID)
+	assert.False(t, pauseMeteringRecorder.pausedAt.IsZero())
 	assert.Equal(t, 1, store.saves)
 	assert.Equal(t, 1, store.pauses)
 }

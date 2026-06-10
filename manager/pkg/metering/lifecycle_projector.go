@@ -110,6 +110,23 @@ func (p *LifecycleProjector) ResourceEventHandler() cache.ResourceEventHandlerFu
 	}
 }
 
+// RecordSandboxPaused projects a durable pause without requiring the runtime pod to be patched first.
+func (p *LifecycleProjector) RecordSandboxPaused(_ context.Context, pod *corev1.Pod, pausedAt time.Time) {
+	if p == nil || pod == nil {
+		return
+	}
+	if pausedAt.IsZero() {
+		pausedAt = p.now()
+	}
+	pausedPod := pod.DeepCopy()
+	if pausedPod.Annotations == nil {
+		pausedPod.Annotations = map[string]string{}
+	}
+	pausedPod.Annotations[controller.AnnotationPaused] = "true"
+	pausedPod.Annotations[controller.AnnotationPausedAt] = pausedAt.UTC().Format(time.RFC3339)
+	p.handleUpsert(pausedPod)
+}
+
 func (p *LifecycleProjector) handleUpsert(obj any) {
 	pod := extractPod(obj)
 	if pod == nil {
@@ -223,7 +240,7 @@ func (p *LifecycleProjector) handleDelete(obj any) {
 	templateID := pod.Labels[controller.LabelTemplateID]
 	podUsage := sandboxUsageFromPod(pod)
 	claimedAt, claimedAtSet := parseRFC3339(pod.Annotations[controller.AnnotationClaimedAt])
-	runtimePaused := pod.Annotations[controller.AnnotationRuntimeDeletionReason] == "paused"
+	runtimePaused := pod.Annotations[controller.AnnotationRuntimeDeletionReason] == "paused" || (pod.Annotations[controller.AnnotationRuntimeDeletionReason] == "" && state != nil && state.Paused)
 	pendingEvents := make([]*meteringpkg.Event, 0, 3)
 	pendingWindows := make([]*meteringpkg.Window, 0, 2)
 	if state == nil {
@@ -262,9 +279,11 @@ func (p *LifecycleProjector) handleDelete(obj any) {
 		if !state.Paused {
 			pendingWindows = append(pendingWindows, p.buildSandboxRuntimeWindow(state, teamID, userID, templateID, state.ActiveSince, observedAt))
 			pendingEvents = append(pendingEvents, p.buildSandboxEvent(sandboxID, teamID, userID, templateID, observedAt, meteringpkg.EventTypeSandboxPaused, pauseEventID(sandboxID, observedAt), nil))
+			state.PausedAt = &observedAt
+		} else if state.PausedAt == nil {
+			state.PausedAt = &observedAt
 		}
 		state.Paused = true
-		state.PausedAt = &observedAt
 		state.ActiveSince = nil
 		state.TerminatedAt = nil
 		state.LastObservedAt = observedAt

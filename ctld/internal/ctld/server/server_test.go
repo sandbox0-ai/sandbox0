@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -61,6 +62,11 @@ func (c *recordingController) SaveRootFS(_ *http.Request, req ctldapi.SaveRootFS
 func (c *recordingController) ApplyRootFS(_ *http.Request, req ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int) {
 	c.rootFSTarget = req.Target
 	return ctldapi.ApplyRootFSResponse{Applied: true}, http.StatusOK
+}
+
+func (c *recordingController) ReadRootFSDiff(_ *http.Request, req ctldapi.ReadRootFSDiffRequest) (io.ReadCloser, ctldapi.RootFSDiffDescriptor, int, error) {
+	desc := req.Descriptor
+	return io.NopCloser(bytes.NewReader([]byte("rootfs diff"))), desc, http.StatusOK, nil
 }
 
 func TestNewMuxRoutesPauseResume(t *testing.T) {
@@ -177,4 +183,26 @@ func TestNewMuxRoutesRootFS(t *testing.T) {
 			tt.want(t, rec.Body.Bytes())
 		})
 	}
+}
+
+func TestNewMuxRoutesRootFSDiffRead(t *testing.T) {
+	controller := &recordingController{}
+	handler := NewMux(controller)
+	body := ctldapi.ReadRootFSDiffRequest{
+		Descriptor: ctldapi.RootFSDiffDescriptor{
+			MediaType: "application/vnd.oci.image.layer.v1.tar",
+			Digest:    "sha256:abc",
+			ObjectKey: "sandbox-rootfs/team-1/sandbox-1/3/sha256/abc.tar",
+		},
+	}
+	payload, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rootfs/diffs/read", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "application/vnd.oci.image.layer.v1.tar", rec.Header().Get("Content-Type"))
+	assert.Equal(t, "rootfs diff", rec.Body.String())
 }

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -12,6 +13,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 )
 
 const sandboxRootFSContainerName = "procd"
@@ -54,7 +57,7 @@ func (s *SandboxService) saveSandboxRootFSCheckpoint(ctx context.Context, pod *c
 	if err != nil {
 		return fmt.Errorf("save sandbox rootfs checkpoint: %w", rootFSResponseError(err, saveRootFSError(resp)))
 	}
-	state, err := rootFSStateFromSaveResponse(sandboxID, teamID, generation, resp)
+	state, err := rootFSStateFromSaveResponse(sandboxID, teamID, pod.Spec.NodeName, generation, resp)
 	if err != nil {
 		return err
 	}
@@ -105,9 +108,15 @@ func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *
 	return nil
 }
 
-func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, template *v1alpha1.SandboxTemplate, req *ClaimRequest, state *SandboxRootFSState) (*corev1.Pod, error) {
+func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, template *v1alpha1.SandboxTemplate, req *ClaimRequest, state *SandboxRootFSState, claimType string) (*corev1.Pod, error) {
 	if state == nil {
 		return pod, nil
+	}
+	if rootFSRequiresCheckpointImageRestore(state) {
+		if claimType == "checkpoint-image" {
+			return pod, nil
+		}
+		return nil, fmt.Errorf("runtime %q rootfs checkpoint restore requires a checkpoint image runtime", state.Runtime)
 	}
 	err := s.applySandboxRootFSCheckpoint(ctx, pod, state)
 	if err == nil {
@@ -145,6 +154,141 @@ func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Co
 		return nil, fmt.Errorf("%w; checkpoint base image retry failed: %v", err, fallbackErr)
 	}
 	return readyPod, nil
+}
+
+type preparedRootFSCheckpointImage struct {
+	state *SandboxRootFSState
+	image *RootFSCheckpointImage
+}
+
+func (p *preparedRootFSCheckpointImage) matches(state *SandboxRootFSState) bool {
+	if p == nil || p.state == nil || p.image == nil || state == nil {
+		return false
+	}
+	return p.state.SandboxID == state.SandboxID &&
+		p.state.RuntimeGeneration == state.RuntimeGeneration &&
+		p.state.DiffDigest == state.DiffDigest &&
+		p.state.DiffObjectKey == state.DiffObjectKey &&
+		p.state.BaseImageDigest == state.BaseImageDigest
+}
+
+func (s *SandboxService) prepublishRootFSCheckpointImage(ctx context.Context, sandboxID string) (*preparedRootFSCheckpointImage, error) {
+	if s == nil || s.sandboxStore == nil {
+		return nil, nil
+	}
+	record, err := s.sandboxStore.GetSandbox(ctx, sandboxID)
+	if err != nil {
+		if errors.Is(err, ErrSandboxRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if record == nil || record.Status != SandboxStatusPaused {
+		return nil, nil
+	}
+	state, err := s.latestRootFSState(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	if !rootFSRequiresCheckpointImageRestore(state) {
+		return nil, nil
+	}
+	image, err := s.publishRootFSCheckpointImage(ctx, state)
+	if err != nil {
+		return nil, err
+	}
+	return &preparedRootFSCheckpointImage{state: state, image: image}, nil
+}
+
+func (s *SandboxService) publishRootFSCheckpointImage(ctx context.Context, state *SandboxRootFSState) (*RootFSCheckpointImage, error) {
+	if state == nil {
+		return nil, fmt.Errorf("rootfs state is required")
+	}
+	if s == nil || s.rootFSImagePublisher == nil {
+		return nil, fmt.Errorf("rootfs checkpoint image publisher is not configured")
+	}
+	ctldAddress, err := s.rootFSDiffCtldAddress(ctx, state)
+	if err != nil {
+		return nil, err
+	}
+	image, err := s.rootFSImagePublisher.Publish(ctx, RootFSCheckpointImagePublishRequest{
+		TeamID:      state.TeamID,
+		CtldAddress: ctldAddress,
+		State:       state,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if image == nil || strings.TrimSpace(image.PullRef) == "" {
+		return nil, fmt.Errorf("rootfs checkpoint image publisher returned no pull ref")
+	}
+	return image, nil
+}
+
+func templateWithRootFSCheckpointImage(template *v1alpha1.SandboxTemplate, image *RootFSCheckpointImage) (*v1alpha1.SandboxTemplate, error) {
+	if template == nil {
+		return nil, fmt.Errorf("template is required")
+	}
+	if image == nil || strings.TrimSpace(image.PullRef) == "" {
+		return nil, fmt.Errorf("rootfs checkpoint image pull ref is required")
+	}
+	clone := template.DeepCopy()
+	clone.Spec.MainContainer.Image = image.PullRef
+	clone.Spec.MainContainer.ImagePullPolicy = string(corev1.PullIfNotPresent)
+	return clone, nil
+}
+
+func (s *SandboxService) rootFSDiffCtldAddress(ctx context.Context, state *SandboxRootFSState) (string, error) {
+	if state != nil && strings.TrimSpace(state.NodeName) != "" {
+		addr, err := s.ctldAddressForNodeName(ctx, strings.TrimSpace(state.NodeName))
+		if err == nil {
+			return addr, nil
+		}
+		if s != nil && s.logger != nil {
+			s.logger.Warn("Failed to resolve rootfs checkpoint source node ctld; trying another node",
+				zap.String("sandboxID", state.SandboxID),
+				zap.String("node", state.NodeName),
+				zap.Error(err),
+			)
+		}
+	}
+	if s == nil {
+		return "", fmt.Errorf("sandbox service is nil")
+	}
+	if s.nodeLister != nil {
+		nodes, err := s.nodeLister.List(labels.Everything())
+		if err == nil {
+			for _, node := range nodes {
+				addr, addrErr := ctldAddressForNode(node, s.config.CtldPort)
+				if addrErr == nil {
+					return addr, nil
+				}
+			}
+		}
+	}
+	if s.k8sClient == nil {
+		return "", fmt.Errorf("kubernetes client is not configured")
+	}
+	nodes, err := s.k8sClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return "", fmt.Errorf("list nodes for rootfs checkpoint diff: %w", err)
+	}
+	for i := range nodes.Items {
+		addr, addrErr := ctldAddressForNode(&nodes.Items[i], s.config.CtldPort)
+		if addrErr == nil {
+			return addr, nil
+		}
+	}
+	return "", fmt.Errorf("no node with an internal ip is available for rootfs checkpoint diff")
+}
+
+func rootFSRequiresCheckpointImageRestore(state *SandboxRootFSState) bool {
+	if state == nil {
+		return false
+	}
+	runtime := strings.ToLower(strings.TrimSpace(state.Runtime))
+	handler := strings.ToLower(strings.TrimSpace(state.RuntimeHandler))
+	return runtime == "gvisor" || strings.Contains(handler, "gvisor") || strings.Contains(handler, "runsc")
 }
 
 func (s *SandboxService) saveRestoredRuntimePod(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, status string) error {
@@ -231,7 +375,7 @@ func rootFSTargetForPod(pod *corev1.Pod) ctldapi.RootFSContainerRef {
 	}
 }
 
-func rootFSStateFromSaveResponse(sandboxID, teamID string, generation int64, resp *ctldapi.SaveRootFSResponse) (*SandboxRootFSState, error) {
+func rootFSStateFromSaveResponse(sandboxID, teamID, nodeName string, generation int64, resp *ctldapi.SaveRootFSResponse) (*SandboxRootFSState, error) {
 	if resp == nil {
 		return nil, fmt.Errorf("save sandbox rootfs checkpoint: empty ctld response")
 	}
@@ -247,6 +391,7 @@ func rootFSStateFromSaveResponse(sandboxID, teamID string, generation int64, res
 		RuntimeGeneration:   generation,
 		Runtime:             resp.Info.Runtime,
 		RuntimeHandler:      resp.Info.RuntimeHandler,
+		NodeName:            nodeName,
 		BaseImageRef:        resp.Info.BaseImageRef,
 		BaseImageDigest:     resp.Info.BaseImageDigest,
 		Snapshotter:         resp.Info.Snapshotter,

@@ -24,10 +24,18 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 		return nil, k8serrors.NewNotFound(corev1.Resource("pod"), sandboxID)
 	}
 
+	preparedCheckpointImage, err := s.prepublishRootFSCheckpointImage(ctx, sandboxID)
+	if err != nil && s.logger != nil {
+		s.logger.Warn("Failed to prepublish rootfs checkpoint image before resume",
+			zap.String("sandboxID", sandboxID),
+			zap.Error(err),
+		)
+	}
+
 	var pod *corev1.Pod
 	var record *SandboxRecord
 	claimType := "hot"
-	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, locked *SandboxRecord) error {
+	err = s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, locked *SandboxRecord) error {
 		if locked.Status == SandboxStatusDeleted || !locked.DeletedAt.IsZero() {
 			return k8serrors.NewNotFound(corev1.Resource("sandbox"), sandboxID)
 		}
@@ -86,6 +94,10 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 			return err
 		}
 		generation := locked.RuntimeGeneration + 1
+		rootFSState, err := tx.GetLatestRootFSState(lockCtx, locked.ID)
+		if err != nil {
+			return fmt.Errorf("load rootfs checkpoint: %w", err)
+		}
 		req := &ClaimRequest{
 			TeamID:            locked.TeamID,
 			UserID:            locked.UserID,
@@ -96,15 +108,37 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 			RuntimeGeneration: generation,
 			HardExpiresAt:     locked.HardExpiresAt,
 		}
-		pod, err = s.claimIdlePod(lockCtx, template, req)
-		if err != nil {
-			return fmt.Errorf("claim idle pod: %w", err)
-		}
-		if pod == nil {
-			claimType = "cold"
-			pod, err = s.createNewPod(lockCtx, template, req)
+		if rootFSRequiresCheckpointImageRestore(rootFSState) {
+			var checkpointImage *RootFSCheckpointImage
+			if preparedCheckpointImage != nil && preparedCheckpointImage.matches(rootFSState) {
+				checkpointImage = preparedCheckpointImage.image
+			}
+			if checkpointImage == nil {
+				checkpointImage, err = s.publishRootFSCheckpointImage(lockCtx, rootFSState)
+				if err != nil {
+					return fmt.Errorf("publish rootfs checkpoint image: %w", err)
+				}
+			}
+			checkpointTemplate, err := templateWithRootFSCheckpointImage(template, checkpointImage)
 			if err != nil {
-				return fmt.Errorf("create runtime pod: %w", err)
+				return fmt.Errorf("prepare checkpoint image runtime: %w", err)
+			}
+			claimType = "checkpoint-image"
+			pod, err = s.createNewPod(lockCtx, checkpointTemplate, req)
+			if err != nil {
+				return fmt.Errorf("create checkpoint image runtime pod: %w", err)
+			}
+		} else {
+			pod, err = s.claimIdlePod(lockCtx, template, req)
+			if err != nil {
+				return fmt.Errorf("claim idle pod: %w", err)
+			}
+			if pod == nil {
+				claimType = "cold"
+				pod, err = s.createNewPod(lockCtx, template, req)
+				if err != nil {
+					return fmt.Errorf("create runtime pod: %w", err)
+				}
 			}
 		}
 		return tx.SaveRuntime(lockCtx, sandboxID, pod.Namespace, pod.Name, SandboxStatusResuming, generation, parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt))
@@ -182,7 +216,7 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	if err != nil {
 		return err
 	}
-	if claimType == "cold" {
+	if claimType == "cold" || claimType == "checkpoint-image" {
 		readyPod, err := s.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
 		if err != nil {
 			return fmt.Errorf("wait for pod claim readiness: %w", err)
@@ -203,7 +237,7 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	if err != nil {
 		return fmt.Errorf("load rootfs checkpoint: %w", err)
 	}
-	pod, err = s.applySandboxRootFSCheckpointWithFallback(ctx, pod, record, template, req, rootFSState)
+	pod, err = s.applySandboxRootFSCheckpointWithFallback(ctx, pod, record, template, req, rootFSState, claimType)
 	if err != nil {
 		return err
 	}

@@ -359,6 +359,7 @@ func main() {
 		logger.Warn("Registry provider disabled", zap.Error(err))
 	}
 	registryService := service.NewRegistryService(registryProvider, logger)
+	sandboxService.SetRegistryService(registryService)
 	var templateStore *templstorepg.Store
 	var templateReconciler *templreconciler.SingleClusterReconciler
 	if cfg.TemplateStoreEnabled {

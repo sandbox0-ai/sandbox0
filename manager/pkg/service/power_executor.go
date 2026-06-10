@@ -36,6 +36,26 @@ func (s *SandboxService) ctldAddressForPod(ctx context.Context, pod *corev1.Pod)
 	return ctldAddressForNode(node, s.config.CtldPort)
 }
 
+func (s *SandboxService) ctldAddressForNodeName(ctx context.Context, nodeName string) (string, error) {
+	if nodeName == "" {
+		return "", fmt.Errorf("node name is required")
+	}
+	if s.nodeLister != nil {
+		node, err := s.nodeLister.Get(nodeName)
+		if err == nil {
+			return ctldAddressForNode(node, s.config.CtldPort)
+		}
+	}
+	if s.k8sClient == nil {
+		return "", fmt.Errorf("kubernetes client is not configured")
+	}
+	node, err := s.k8sClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("get node %s: %w", nodeName, err)
+	}
+	return ctldAddressForNode(node, s.config.CtldPort)
+}
+
 func ctldAddressForNode(node *corev1.Node, port int) (string, error) {
 	if node == nil {
 		return "", fmt.Errorf("node is nil")

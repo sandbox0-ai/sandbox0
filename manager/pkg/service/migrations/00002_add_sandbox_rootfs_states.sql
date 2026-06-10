@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS sandbox_rootfs_states (
     runtime_generation BIGINT NOT NULL,
     runtime TEXT NOT NULL DEFAULT '',
     runtime_handler TEXT NOT NULL DEFAULT '',
+    node_name TEXT NOT NULL DEFAULT '',
     base_image_ref TEXT NOT NULL DEFAULT '',
     base_image_digest TEXT NOT NULL DEFAULT '',
     snapshotter TEXT NOT NULL DEFAULT '',

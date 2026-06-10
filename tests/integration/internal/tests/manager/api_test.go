@@ -863,6 +863,10 @@ func (t memorySandboxStoreTxForManagerIntegration) SaveRootFSState(_ context.Con
 	return nil
 }
 
+func (t memorySandboxStoreTxForManagerIntegration) GetLatestRootFSState(_ context.Context, sandboxID string) (*service.SandboxRootFSState, error) {
+	return cloneRootFSStateForManagerIntegration(t.store.rootFSState[sandboxID]), nil
+}
+
 func cloneSandboxRecordForManagerIntegration(record *service.SandboxRecord) *service.SandboxRecord {
 	if record == nil {
 		return nil

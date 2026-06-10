@@ -144,6 +144,10 @@ func (t memorySandboxStoreTx) SaveRootFSState(_ context.Context, state *SandboxR
 	return t.store.SaveRootFSState(context.Background(), state)
 }
 
+func (t memorySandboxStoreTx) GetLatestRootFSState(_ context.Context, sandboxID string) (*SandboxRootFSState, error) {
+	return cloneSandboxRootFSState(t.store.rootFSStates[sandboxID]), nil
+}
+
 func cloneSandboxRecord(record *SandboxRecord) *SandboxRecord {
 	if record == nil {
 		return nil

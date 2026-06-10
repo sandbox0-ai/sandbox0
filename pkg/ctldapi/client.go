@@ -33,6 +33,7 @@ const (
 	pathRootFSInspect               = "/api/v1/rootfs/inspect"
 	pathRootFSSave                  = "/api/v1/rootfs/save"
 	pathRootFSApply                 = "/api/v1/rootfs/apply"
+	pathRootFSDiffRead              = "/api/v1/rootfs/diffs/read"
 )
 
 var defaultHTTPClient = &http.Client{Timeout: DefaultRequestTimeout}
@@ -146,11 +147,55 @@ func (c *Client) ApplyRootFS(ctx context.Context, ctldAddress string, req ApplyR
 	return PostJSON[ApplyRootFSResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSApply, req)
 }
 
+func (c *Client) OpenRootFSDiff(ctx context.Context, ctldAddress string, req ReadRootFSDiffRequest) (io.ReadCloser, error) {
+	return PostStream(ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSDiffRead, req)
+}
+
 func (c *Client) httpClientOrDefault() *http.Client {
 	if c != nil && c.httpClient != nil {
 		return c.httpClient
 	}
 	return defaultHTTPClient
+}
+
+// PostStream sends a JSON POST request and returns the response body stream.
+func PostStream(ctx context.Context, httpClient *http.Client, baseURL, path string, request any) (io.ReadCloser, error) {
+	if httpClient == nil {
+		httpClient = defaultHTTPClient
+	}
+
+	var reader io.Reader
+	if request != nil {
+		payload, err := json.Marshal(request)
+		if err != nil {
+			return nil, fmt.Errorf("encode request: %w", err)
+		}
+		reader = bytes.NewReader(payload)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+path, reader)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("do request: %w", err)
+	}
+	if resp.StatusCode == http.StatusOK {
+		return resp.Body, nil
+	}
+	defer resp.Body.Close()
+	body, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return nil, fmt.Errorf("read response: %w", readErr)
+	}
+	var out ReadRootFSDiffResponse
+	if len(body) > 0 {
+		_ = json.Unmarshal(body, &out)
+	}
+	return nil, &RequestError{StatusCode: resp.StatusCode, Message: strings.TrimSpace(out.Error)}
 }
 
 // PostJSON sends a JSON POST request to ctld and decodes the response.

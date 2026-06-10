@@ -130,6 +130,8 @@ type SandboxService struct {
 	deletionWebhookEmitter SandboxDeletionWebhookEmitter
 	quotaStore             TeamQuotaLimitStore
 	sandboxStore           SandboxStore
+	registryService        *RegistryService
+	rootFSImagePublisher   RootFSCheckpointImagePublisher
 	powerStateLocks        sync.Map
 }
 
@@ -277,6 +279,17 @@ func (s *SandboxService) SetDeletionWebhookEmitter(emitter SandboxDeletionWebhoo
 // SetQuotaStore injects the team quota limit store. Nil disables quota checks.
 func (s *SandboxService) SetQuotaStore(store TeamQuotaLimitStore) {
 	s.quotaStore = store
+}
+
+func (s *SandboxService) SetRegistryService(registryService *RegistryService) {
+	s.registryService = registryService
+	if registryService != nil && s.ctldClient != nil {
+		s.rootFSImagePublisher = NewRegistryRootFSCheckpointImagePublisher(registryService, s.ctldClient, s.logger)
+	}
+}
+
+func (s *SandboxService) SetRootFSImagePublisher(publisher RootFSCheckpointImagePublisher) {
+	s.rootFSImagePublisher = publisher
 }
 
 // SetSandboxStore injects durable sandbox identity storage.

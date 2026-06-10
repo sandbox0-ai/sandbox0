@@ -140,6 +140,30 @@ func (c *Controller) ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest
 	return ctldapi.ApplyRootFSResponse{Info: info, Descriptor: applied, Applied: true}, http.StatusOK
 }
 
+func (c *Controller) ReadRootFSDiff(r *http.Request, req ctldapi.ReadRootFSDiffRequest) (io.ReadCloser, ctldapi.RootFSDiffDescriptor, int, error) {
+	if err := validateDescriptor(req.Descriptor); err != nil {
+		return nil, ctldapi.RootFSDiffDescriptor{}, http.StatusBadRequest, err
+	}
+	objectKey := strings.Trim(strings.TrimSpace(req.Descriptor.ObjectKey), "/")
+	if objectKey == "" {
+		return nil, ctldapi.RootFSDiffDescriptor{}, http.StatusBadRequest, fmt.Errorf("%w: descriptor object_key is required", ErrBadRequest)
+	}
+	if !strings.HasPrefix(objectKey, "sandbox-rootfs/") {
+		return nil, ctldapi.RootFSDiffDescriptor{}, http.StatusBadRequest, fmt.Errorf("%w: rootfs diff object key must be under sandbox-rootfs/", ErrBadRequest)
+	}
+	if c.store == nil {
+		return nil, ctldapi.RootFSDiffDescriptor{}, http.StatusNotImplemented, fmt.Errorf("rootfs object store is not configured")
+	}
+
+	reader, err := c.store.Get(objectKey, 0, -1)
+	if err != nil {
+		return nil, ctldapi.RootFSDiffDescriptor{}, http.StatusInternalServerError, fmt.Errorf("download rootfs diff: %w", err)
+	}
+	desc := req.Descriptor
+	desc.ObjectKey = objectKey
+	return reader, desc, http.StatusOK, nil
+}
+
 func (c *Controller) inspect(ctx context.Context, target ctldapi.RootFSContainerRef) (ctldapi.RootFSInfo, error) {
 	if c == nil || c.runtime == nil {
 		return ctldapi.RootFSInfo{}, fmt.Errorf("rootfs runtime is not configured")

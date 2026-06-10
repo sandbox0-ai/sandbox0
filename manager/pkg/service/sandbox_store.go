@@ -56,6 +56,7 @@ type SandboxRootFSState struct {
 	RuntimeGeneration   int64
 	Runtime             string
 	RuntimeHandler      string
+	NodeName            string
 	BaseImageRef        string
 	BaseImageDigest     string
 	Snapshotter         string
@@ -86,6 +87,7 @@ type SandboxStoreTx interface {
 	SaveRuntime(ctx context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time) error
 	MarkRuntimePaused(ctx context.Context, sandboxID string, generation int64, pausedAt time.Time) error
 	SaveRootFSState(ctx context.Context, state *SandboxRootFSState) error
+	GetLatestRootFSState(ctx context.Context, sandboxID string) (*SandboxRootFSState, error)
 }
 
 type PGSandboxStore struct {
@@ -346,6 +348,13 @@ func (t sandboxStoreTx) SaveRootFSState(ctx context.Context, state *SandboxRootF
 	return saveRootFSState(ctx, t.tx, state)
 }
 
+func (t sandboxStoreTx) GetLatestRootFSState(ctx context.Context, sandboxID string) (*SandboxRootFSState, error) {
+	return scanRootFSState(t.tx.QueryRow(ctx, rootFSStateSelectSQL()+`
+			WHERE sandbox_id = $1
+			ORDER BY runtime_generation DESC, updated_at DESC
+			LIMIT 1`, sandboxID))
+}
+
 func sandboxRecordSelectSQL() string {
 	return `
 		SELECT sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
@@ -382,15 +391,16 @@ func saveRootFSState(ctx context.Context, exec rootFSStateExecutor, state *Sandb
 	_, err = exec.Exec(ctx, `
 		INSERT INTO manager.sandbox_rootfs_states (
 			sandbox_id, team_id, runtime_generation, runtime, runtime_handler,
-			base_image_ref, base_image_digest, snapshotter, snapshot_parent,
+			node_name, base_image_ref, base_image_digest, snapshotter, snapshot_parent,
 			snapshot_parent_chain, diff_digest, diff_media_type, diff_size,
 			diff_object_key, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, COALESCE($15, NOW()), NOW())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, COALESCE($16, NOW()), NOW())
 		ON CONFLICT (sandbox_id, runtime_generation) DO UPDATE SET
 			team_id = EXCLUDED.team_id,
 			runtime = EXCLUDED.runtime,
 			runtime_handler = EXCLUDED.runtime_handler,
+			node_name = EXCLUDED.node_name,
 			base_image_ref = EXCLUDED.base_image_ref,
 			base_image_digest = EXCLUDED.base_image_digest,
 			snapshotter = EXCLUDED.snapshotter,
@@ -402,7 +412,7 @@ func saveRootFSState(ctx context.Context, exec rootFSStateExecutor, state *Sandb
 			diff_object_key = EXCLUDED.diff_object_key,
 			updated_at = NOW()
 	`, state.SandboxID, state.TeamID, state.RuntimeGeneration, state.Runtime, state.RuntimeHandler,
-		state.BaseImageRef, state.BaseImageDigest, state.Snapshotter, state.SnapshotParent,
+		state.NodeName, state.BaseImageRef, state.BaseImageDigest, state.Snapshotter, state.SnapshotParent,
 		parentChainJSON, state.DiffDigest, state.DiffMediaType, state.DiffSize,
 		state.DiffObjectKey, nullableTime(state.CreatedAt))
 	if err != nil {
@@ -414,7 +424,7 @@ func saveRootFSState(ctx context.Context, exec rootFSStateExecutor, state *Sandb
 func rootFSStateSelectSQL() string {
 	return `
 		SELECT sandbox_id, team_id, runtime_generation, runtime, runtime_handler,
-			base_image_ref, base_image_digest, snapshotter, snapshot_parent,
+			node_name, base_image_ref, base_image_digest, snapshotter, snapshot_parent,
 			snapshot_parent_chain, diff_digest, diff_media_type, diff_size,
 			diff_object_key, created_at, updated_at
 		FROM manager.sandbox_rootfs_states`
@@ -425,7 +435,7 @@ func scanRootFSState(row sandboxRecordScanner) (*SandboxRootFSState, error) {
 	var parentChainJSON []byte
 	if err := row.Scan(
 		&state.SandboxID, &state.TeamID, &state.RuntimeGeneration, &state.Runtime, &state.RuntimeHandler,
-		&state.BaseImageRef, &state.BaseImageDigest, &state.Snapshotter, &state.SnapshotParent,
+		&state.NodeName, &state.BaseImageRef, &state.BaseImageDigest, &state.Snapshotter, &state.SnapshotParent,
 		&parentChainJSON, &state.DiffDigest, &state.DiffMediaType, &state.DiffSize,
 		&state.DiffObjectKey, &state.CreatedAt, &state.UpdatedAt,
 	); err != nil {

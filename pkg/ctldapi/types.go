@@ -108,6 +108,14 @@ type ApplyRootFSResponse struct {
 	Error      string               `json:"error,omitempty"`
 }
 
+type ReadRootFSDiffRequest struct {
+	Descriptor RootFSDiffDescriptor `json:"descriptor"`
+}
+
+type ReadRootFSDiffResponse struct {
+	Error string `json:"error,omitempty"`
+}
+
 // BindVolumePortalRequest binds one pre-published pod portal to a concrete
 // sandbox volume at claim time.
 type BindVolumePortalRequest struct {

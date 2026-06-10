@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"time"
 
@@ -78,6 +79,10 @@ func (c *CtldClient) ApplyRootFS(ctx context.Context, ctldAddress string, req ct
 
 func (c *CtldClient) ApplyRootFSWithTimeout(ctx context.Context, ctldAddress string, req ctldapi.ApplyRootFSRequest, timeout time.Duration) (*ctldapi.ApplyRootFSResponse, error) {
 	return c.apiWithTimeout(timeout).ApplyRootFS(ctx, ctldAddress, req)
+}
+
+func (c *CtldClient) OpenRootFSDiffWithTimeout(ctx context.Context, ctldAddress string, req ctldapi.ReadRootFSDiffRequest, timeout time.Duration) (io.ReadCloser, error) {
+	return c.apiWithTimeout(timeout).OpenRootFSDiff(ctx, ctldAddress, req)
 }
 
 func (c *CtldClient) PrepareVolumePortalHandoff(ctx context.Context, ctldAddress string, req ctldapi.PrepareVolumePortalHandoffRequest) (*ctldapi.PrepareVolumePortalHandoffResponse, error) {

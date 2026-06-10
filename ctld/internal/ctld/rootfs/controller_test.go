@@ -226,6 +226,47 @@ func TestControllerApplyRootFSRejectsMissingDescriptorObjectKey(t *testing.T) {
 	assert.Contains(t, resp.Error, "descriptor object_key is required")
 }
 
+func TestControllerReadRootFSDiffStreamsStoredDiff(t *testing.T) {
+	store := objectstore.NewMemoryStore(t.Name())
+	require.NoError(t, store.Put("sandbox-rootfs/team-1/sandbox-1/3/sha256/feedface.tar", strings.NewReader("rootfs diff")))
+	controller := NewController(Config{Runtime: &fakeRuntime{}, Store: store})
+
+	reader, desc, status, err := controller.ReadRootFSDiff(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.ReadRootFSDiffRequest{
+		Descriptor: ctldapi.RootFSDiffDescriptor{
+			MediaType: "application/vnd.oci.image.layer.v1.tar",
+			Digest:    "sha256:feedface",
+			Size:      int64(len("rootfs diff")),
+			ObjectKey: "sandbox-rootfs/team-1/sandbox-1/3/sha256/feedface.tar",
+		},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
+	require.NotNil(t, reader)
+	defer reader.Close()
+	payload, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "rootfs diff", string(payload))
+	assert.Equal(t, "sandbox-rootfs/team-1/sandbox-1/3/sha256/feedface.tar", desc.ObjectKey)
+}
+
+func TestControllerReadRootFSDiffRejectsNonRootFSPrefix(t *testing.T) {
+	controller := NewController(Config{Runtime: &fakeRuntime{}, Store: objectstore.NewMemoryStore(t.Name())})
+
+	reader, _, status, err := controller.ReadRootFSDiff(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.ReadRootFSDiffRequest{
+		Descriptor: ctldapi.RootFSDiffDescriptor{
+			MediaType: "application/vnd.oci.image.layer.v1.tar",
+			Digest:    "sha256:feedface",
+			ObjectKey: "other/team-1/diff.tar",
+		},
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, reader)
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Contains(t, err.Error(), "sandbox-rootfs")
+}
+
 type fakeRuntime struct {
 	info          ctldapi.RootFSInfo
 	inspectErr    error

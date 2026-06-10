@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 
@@ -35,6 +36,7 @@ type RootFSController interface {
 	InspectRootFS(r *http.Request, req ctldapi.InspectRootFSRequest) (ctldapi.InspectRootFSResponse, int)
 	SaveRootFS(r *http.Request, req ctldapi.SaveRootFSRequest) (ctldapi.SaveRootFSResponse, int)
 	ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int)
+	ReadRootFSDiff(r *http.Request, req ctldapi.ReadRootFSDiffRequest) (io.ReadCloser, ctldapi.RootFSDiffDescriptor, int, error)
 }
 
 type MountedVolumeController interface {
@@ -69,6 +71,10 @@ func (NotImplementedController) SaveRootFS(_ *http.Request, _ ctldapi.SaveRootFS
 
 func (NotImplementedController) ApplyRootFS(_ *http.Request, _ ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int) {
 	return ctldapi.ApplyRootFSResponse{Error: "ctld rootfs apply not implemented"}, http.StatusNotImplemented
+}
+
+func (NotImplementedController) ReadRootFSDiff(_ *http.Request, _ ctldapi.ReadRootFSDiffRequest) (io.ReadCloser, ctldapi.RootFSDiffDescriptor, int, error) {
+	return nil, ctldapi.RootFSDiffDescriptor{}, http.StatusNotImplemented, nil
 }
 
 func NewMux(controller Controller) http.Handler {
@@ -397,6 +403,45 @@ func NewMux(controller Controller) http.Handler {
 		resp, status := rootFSController.ApplyRootFS(r, req)
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(resp)
+	})
+	mux.HandleFunc("/api/v1/rootfs/diffs/read", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		rootFSController, ok := controller.(RootFSController)
+		if !ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(ctldapi.ReadRootFSDiffResponse{Error: "ctld rootfs diff read not implemented"})
+			return
+		}
+		var req ctldapi.ReadRootFSDiffRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(ctldapi.ReadRootFSDiffResponse{Error: err.Error()})
+			return
+		}
+		reader, desc, status, err := rootFSController.ReadRootFSDiff(r, req)
+		if err != nil || reader == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			msg := "read rootfs diff failed"
+			if err != nil {
+				msg = err.Error()
+			}
+			_ = json.NewEncoder(w).Encode(ctldapi.ReadRootFSDiffResponse{Error: msg})
+			return
+		}
+		defer reader.Close()
+		mediaType := strings.TrimSpace(desc.MediaType)
+		if mediaType == "" {
+			mediaType = "application/octet-stream"
+		}
+		w.Header().Set("Content-Type", mediaType)
+		w.WriteHeader(status)
+		_, _ = io.Copy(w, reader)
 	})
 	mux.HandleFunc("/api/v1/sandboxes/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

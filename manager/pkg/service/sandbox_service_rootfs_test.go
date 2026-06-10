@@ -39,7 +39,6 @@ func TestPauseSandboxRuntimeSavesRootFSBeforeDeletingPod(t *testing.T) {
 		assert.Equal(t, "sandbox-1", req.SandboxID)
 		assert.Equal(t, "team-1", req.TeamID)
 		assert.Equal(t, int64(3), req.ExpectedRuntimeGeneration)
-		assert.True(t, req.Freeze)
 		assert.Equal(t, ctldapi.RootFSContainerRef{
 			Namespace:     "default",
 			PodName:       "pod-1",
@@ -71,16 +70,36 @@ func TestPauseSandboxRuntimeSavesRootFSBeforeDeletingPod(t *testing.T) {
 	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
 	pod.Status.HostIP = ctldURL.Hostname()
 	k8sClient := fake.NewSimpleClientset(pod)
+	var store *memorySandboxStore
+	deleteStarted := make(chan struct{}, 1)
+	allowDelete := make(chan struct{})
+	releaseDelete := func() {
+		select {
+		case <-allowDelete:
+		default:
+			close(allowDelete)
+		}
+	}
+	defer releaseDelete()
 	k8sClient.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
 		require.True(t, saveCalled, "pod delete must happen after rootfs checkpoint save")
+		require.NotNil(t, store)
+		assert.Equal(t, SandboxStatusPaused, store.records["sandbox-1"].Status)
+		select {
+		case deleteStarted <- struct{}{}:
+		default:
+		}
+		<-allowDelete
 		return false, nil, nil
 	})
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+	store = &memorySandboxStore{records: map[string]*SandboxRecord{
 		"sandbox-1": {
-			ID:                "sandbox-1",
-			TeamID:            "team-1",
-			RuntimeGeneration: 3,
-			Status:            SandboxStatusRunning,
+			ID:                  "sandbox-1",
+			TeamID:              "team-1",
+			RuntimeGeneration:   3,
+			Status:              SandboxStatusRunning,
+			CurrentPodNamespace: "default",
+			CurrentPodName:      "pod-1",
 		},
 	}}
 	svc := &SandboxService{
@@ -93,7 +112,23 @@ func TestPauseSandboxRuntimeSavesRootFSBeforeDeletingPod(t *testing.T) {
 		logger:       zap.NewNop(),
 	}
 
-	require.NoError(t, svc.PauseSandboxRuntime(context.Background(), "sandbox-1"))
+	done := make(chan error, 1)
+	go func() {
+		done <- svc.PauseSandboxRuntime(context.Background(), "sandbox-1")
+	}()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		releaseDelete()
+		t.Fatal("PauseSandboxRuntime waited for pod delete to complete")
+	}
+	select {
+	case <-deleteStarted:
+	case <-time.After(time.Second):
+		t.Fatal("pod delete was not requested after pause")
+	}
+	releaseDelete()
 
 	state := store.rootFSStates["sandbox-1"]
 	require.NotNil(t, state)
@@ -104,6 +139,57 @@ func TestPauseSandboxRuntimeSavesRootFSBeforeDeletingPod(t *testing.T) {
 	assert.Equal(t, "sha256:diff", state.DiffDigest)
 	assert.Equal(t, "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar", state.DiffObjectKey)
 	assert.Equal(t, SandboxStatusPaused, store.records["sandbox-1"].Status)
+	assert.Equal(t, 1, store.saves)
+	assert.Equal(t, 1, store.pauses)
+}
+
+func TestPauseSandboxRuntimeRestoresRunningWhenRootFSSaveFails(t *testing.T) {
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/v1/rootfs/save", r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{Error: "simulated save failure"})
+	}))
+	defer ctld.Close()
+	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+
+	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
+	pod.Status.HostIP = ctldURL.Hostname()
+	k8sClient := fake.NewSimpleClientset(pod)
+	var deleted atomic.Bool
+	k8sClient.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
+		deleted.Store(true)
+		return false, nil, nil
+	})
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-1": {
+			ID:                  "sandbox-1",
+			TeamID:              "team-1",
+			RuntimeGeneration:   3,
+			Status:              SandboxStatusRunning,
+			CurrentPodNamespace: "default",
+			CurrentPodName:      "pod-1",
+		},
+	}}
+	svc := &SandboxService{
+		k8sClient:    k8sClient,
+		podLister:    newTestPodLister(t, pod),
+		sandboxStore: store,
+		ctldClient:   NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config:       SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+		clock:        systemTime{},
+		logger:       zap.NewNop(),
+	}
+
+	err := svc.PauseSandboxRuntime(context.Background(), "sandbox-1")
+
+	require.Error(t, err)
+	assert.False(t, deleted.Load())
+	assert.Nil(t, store.rootFSStates["sandbox-1"])
+	require.NotNil(t, store.records["sandbox-1"])
+	assert.Equal(t, SandboxStatusRunning, store.records["sandbox-1"].Status)
+	assert.Equal(t, "default", store.records["sandbox-1"].CurrentPodNamespace)
+	assert.Equal(t, "pod-1", store.records["sandbox-1"].CurrentPodName)
+	assert.Equal(t, int64(3), store.records["sandbox-1"].RuntimeGeneration)
 }
 
 func TestFinishRestoredSandboxRuntimeAppliesRootFSBeforeProcdInitialization(t *testing.T) {
@@ -120,7 +206,6 @@ func TestFinishRestoredSandboxRuntimeAppliesRootFSBeforeProcdInitialization(t *t
 		assert.Equal(t, []string{"parent-1", "parent-0"}, req.ExpectedSnapshotParentChain)
 		assert.Equal(t, "sha256:diff", req.Descriptor.Digest)
 		assert.Equal(t, "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar", req.Descriptor.ObjectKey)
-		assert.True(t, req.Freeze)
 		calls = append(calls, "apply")
 		_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
 	}))

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
@@ -13,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 // ResumePausedSandboxRuntime creates a new runtime for a paused durable sandbox
@@ -40,11 +42,31 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 
 		existing, getErr := s.getSandboxPod(lockCtx, sandboxID)
 		if getErr == nil {
-			if existing.DeletionTimestamp != nil {
-				return k8serrors.NewConflict(corev1.Resource("pod"), existing.Name, fmt.Errorf("sandbox runtime deletion is still in progress"))
+			if locked.Status == SandboxStatusPaused {
+				if existing.DeletionTimestamp != nil {
+					pending, err := s.pausedRuntimeDeletionPending(lockCtx, existing)
+					if err != nil {
+						return err
+					}
+					if !pending {
+						return k8serrors.NewConflict(corev1.Resource("pod"), existing.Name, fmt.Errorf("sandbox runtime deletion is still in progress"))
+					}
+				}
+				if existing.DeletionTimestamp == nil {
+					if err := s.deleteRuntimePodForPause(lockCtx, existing); err != nil {
+						return err
+					}
+				}
+				if err := s.waitForPausedRuntimeDeletion(lockCtx, existing); err != nil {
+					return err
+				}
+			} else {
+				if existing.DeletionTimestamp != nil {
+					return k8serrors.NewConflict(corev1.Resource("pod"), existing.Name, fmt.Errorf("sandbox runtime deletion is still in progress"))
+				}
+				pod = existing
+				return tx.SaveRuntime(lockCtx, sandboxID, existing.Namespace, existing.Name, s.podToSandboxStatus(existing), runtimeGenerationFromPod(existing), parseRFC3339AnnotationTime(existing.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(existing.Annotations, controller.AnnotationHardExpiresAt))
 			}
-			pod = existing
-			return tx.SaveRuntime(lockCtx, sandboxID, existing.Namespace, existing.Name, s.podToSandboxStatus(existing), runtimeGenerationFromPod(existing), parseRFC3339AnnotationTime(existing.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(existing.Annotations, controller.AnnotationHardExpiresAt))
 		}
 		if getErr != nil && !k8serrors.IsNotFound(getErr) {
 			return fmt.Errorf("get current runtime pod: %w", getErr)
@@ -106,6 +128,53 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 		return nil, err
 	}
 	return s.GetSandbox(ctx, sandboxID)
+}
+
+func pausedRuntimeDeletionPending(pod *corev1.Pod) bool {
+	return pod != nil &&
+		strings.TrimSpace(pod.Annotations[controller.AnnotationRuntimeDeletionReason]) == runtimeDeletionReasonPaused
+}
+
+func (s *SandboxService) pausedRuntimeDeletionPending(ctx context.Context, pod *corev1.Pod) (bool, error) {
+	if pausedRuntimeDeletionPending(pod) {
+		return true, nil
+	}
+	if s == nil || s.k8sClient == nil || pod == nil {
+		return false, nil
+	}
+	current, err := s.k8sClient.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+	if k8serrors.IsNotFound(err) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get deleting runtime pod: %w", err)
+	}
+	return pausedRuntimeDeletionPending(current), nil
+}
+
+func (s *SandboxService) waitForPausedRuntimeDeletion(ctx context.Context, pod *corev1.Pod) error {
+	if s == nil || s.k8sClient == nil || pod == nil {
+		return k8serrors.NewConflict(corev1.Resource("pod"), "", fmt.Errorf("sandbox runtime deletion is still in progress"))
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, defaultPausedRuntimeDeletionWaitTimeout)
+	defer cancel()
+	err := wait.PollUntilContextCancel(waitCtx, 100*time.Millisecond, true, func(pollCtx context.Context) (bool, error) {
+		_, getErr := s.k8sClient.CoreV1().Pods(pod.Namespace).Get(pollCtx, pod.Name, metav1.GetOptions{})
+		if k8serrors.IsNotFound(getErr) {
+			return true, nil
+		}
+		if getErr != nil {
+			return false, getErr
+		}
+		return false, nil
+	})
+	if err == nil {
+		return nil
+	}
+	if errors.Is(waitCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+		return k8serrors.NewConflict(corev1.Resource("pod"), pod.Name, fmt.Errorf("sandbox runtime deletion is still in progress"))
+	}
+	return fmt.Errorf("wait for paused runtime deletion: %w", err)
 }
 
 func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, claimType string) error {

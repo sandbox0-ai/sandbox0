@@ -1,13 +1,18 @@
 package rootfs
 
 import (
+	"archive/tar"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -170,6 +175,57 @@ func TestLiveRootFSPathMapsMountedRootToHostRoot(t *testing.T) {
 	assert.Equal(t, filepath.Join(containerdHostRoot, "io.containerd.runtime.v2.task", "k8s.io", containerID, "rootfs"), got)
 }
 
+func TestMapMountsToContainerdRootMapsOverlayPaths(t *testing.T) {
+	mounts := []mount.Mount{{
+		Type:   "overlay",
+		Source: "overlay",
+		Options: []string{
+			"lowerdir=/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/2/fs:/run/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/1/fs",
+			"upperdir=/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/3/fs",
+			"workdir=/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/3/work",
+			"index=off",
+		},
+	}}
+
+	mapped := mapMountsToLocalHostPaths(mounts, []hostPathMapping{
+		{hostRoot: "/run/containerd", localRoot: "/host-run/containerd"},
+		{hostRoot: "/var/lib/containerd", localRoot: "/host-var-lib/containerd"},
+	})
+	upperdir, ok := overlayUpperDir(mapped)
+
+	require.True(t, ok)
+	assert.Equal(t, "/host-var-lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/3/fs", upperdir)
+	assert.Equal(t, "lowerdir=/host-var-lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/2/fs:/host-run/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/1/fs", mapped[0].Options[0])
+	assert.Equal(t, "workdir=/host-var-lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/3/work", mapped[0].Options[2])
+}
+
+func TestCreateOverlayUpperDiffTarWritesUpperdirLayer(t *testing.T) {
+	lowerRoot := t.TempDir()
+	upperdir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(lowerRoot, "common.txt"), []byte("old"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(upperdir, "common.txt"), []byte("new"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(upperdir, "nested"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(upperdir, "nested", "added.txt"), []byte("added"), 0o644))
+
+	desc, reader, err := createOverlayUpperDiffTar(context.Background(), lowerRoot, upperdir)
+	require.NoError(t, err)
+	tmpReader := reader.(tempFileReadSeekCloser)
+	tmpPath := tmpReader.path
+
+	assert.Equal(t, ocispec.MediaTypeImageLayer, desc.MediaType)
+	assert.Greater(t, desc.Size, int64(0))
+	_, err = digest.Parse(desc.Digest)
+	require.NoError(t, err)
+
+	entries := readTarRegularFiles(t, reader)
+	assert.Equal(t, "new", entries["common.txt"])
+	assert.Equal(t, "added", entries["nested/added.txt"])
+
+	require.NoError(t, reader.Close())
+	_, err = os.Stat(tmpPath)
+	assert.True(t, os.IsNotExist(err))
+}
+
 func TestDigestFromReference(t *testing.T) {
 	assert.Equal(t, "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", digestFromReference("busybox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
 	assert.Empty(t, digestFromReference("busybox:1.36"))
@@ -201,4 +257,24 @@ func writeTaskConfig(t *testing.T, taskDir string, annotations map[string]string
 	}{Annotations: annotations})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(taskDir, "config.json"), raw, 0o644))
+}
+
+func readTarRegularFiles(t *testing.T, reader io.Reader) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	tr := tar.NewReader(reader)
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		require.NoError(t, err)
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		raw, err := io.ReadAll(tr)
+		require.NoError(t, err)
+		files[hdr.Name] = string(raw)
+	}
+	return files
 }

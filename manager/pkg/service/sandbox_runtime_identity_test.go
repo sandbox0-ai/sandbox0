@@ -249,6 +249,72 @@ func TestResumePausedSandboxRuntimeDoesNotCreatePodWhileRuntimeDeleting(t *testi
 	}
 }
 
+func TestWaitForPausedRuntimeDeletionReturnsAfterAPINotFound(t *testing.T) {
+	deletionTime := metav1.NewTime(time.Now().UTC())
+	pod := runtimeIdentityPod("ns-a", "pod-a", "sandbox-a")
+	pod.DeletionTimestamp = &deletionTime
+	pod.Annotations[controller.AnnotationRuntimeDeletionReason] = runtimeDeletionReasonPaused
+	svc := &SandboxService{
+		k8sClient: fake.NewSimpleClientset(),
+		logger:    zap.NewNop(),
+	}
+
+	if !pausedRuntimeDeletionPending(pod) {
+		t.Fatal("expected paused runtime deletion to be detected")
+	}
+	if err := svc.waitForPausedRuntimeDeletion(context.Background(), pod); err != nil {
+		t.Fatalf("waitForPausedRuntimeDeletion() error = %v", err)
+	}
+}
+
+func TestPausedRuntimeDeletionPendingRefreshesFromAPI(t *testing.T) {
+	deletionTime := metav1.NewTime(time.Now().UTC())
+	stalePod := runtimeIdentityPod("ns-a", "pod-a", "sandbox-a")
+	stalePod.DeletionTimestamp = &deletionTime
+	currentPod := stalePod.DeepCopy()
+	currentPod.Annotations[controller.AnnotationRuntimeDeletionReason] = runtimeDeletionReasonPaused
+	svc := &SandboxService{
+		k8sClient: fake.NewSimpleClientset(currentPod),
+		logger:    zap.NewNop(),
+	}
+
+	pending, err := svc.pausedRuntimeDeletionPending(context.Background(), stalePod)
+	if err != nil {
+		t.Fatalf("pausedRuntimeDeletionPending() error = %v", err)
+	}
+	if !pending {
+		t.Fatal("pausedRuntimeDeletionPending() = false, want true from API refresh")
+	}
+}
+
+func TestGetSandboxReturnsPausedRecordWhileOldRuntimeStillExists(t *testing.T) {
+	pod := runtimeIdentityPod("ns-a", "pod-a", "sandbox-a")
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-a": {
+			ID:           "sandbox-a",
+			TeamID:       "team-a",
+			UserID:       "user-a",
+			TemplateID:   "default",
+			Status:       SandboxStatusPaused,
+			TemplateSpec: v1alpha1.SandboxTemplateSpec{},
+		},
+	}}
+	svc := &SandboxService{
+		podLister:    runtimeIdentityPodLister(t, pod),
+		sandboxStore: store,
+		logger:       zap.NewNop(),
+	}
+
+	sandbox, err := svc.GetSandbox(context.Background(), "sandbox-a")
+
+	if err != nil {
+		t.Fatalf("GetSandbox() error = %v", err)
+	}
+	if sandbox.Status != SandboxStatusPaused || !sandbox.Paused {
+		t.Fatalf("sandbox status = %q paused=%v, want paused record", sandbox.Status, sandbox.Paused)
+	}
+}
+
 func TestResumePausedSandboxRuntimeRejectsHardExpiredRecord(t *testing.T) {
 	now := time.Date(2026, time.March, 7, 12, 0, 0, 0, time.UTC)
 	hardExpiresAt := now.Add(-time.Second)

@@ -2,7 +2,10 @@ package rootfs
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,7 +18,9 @@ import (
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/pkg/archive"
 	crootfs "github.com/containerd/containerd/v2/pkg/rootfs"
+	"github.com/containerd/continuity/fs"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
@@ -25,40 +30,48 @@ import (
 )
 
 const (
-	defaultCRIEndpoint        = "/host-run/containerd/containerd.sock"
-	defaultContainerdEndpoint = "/host-run/containerd/containerd.sock"
-	defaultContainerdRoot     = "/host-run/containerd"
-	defaultContainerdHostRoot = "/run/containerd"
-	defaultNamespace          = "k8s.io"
-	defaultDialTimeout        = 10 * time.Second
+	defaultCRIEndpoint             = "/host-run/containerd/containerd.sock"
+	defaultContainerdEndpoint      = "/host-run/containerd/containerd.sock"
+	defaultContainerdRoot          = "/host-run/containerd"
+	defaultContainerdHostRoot      = "/run/containerd"
+	defaultContainerdStateRoot     = "/host-var-lib/containerd"
+	defaultContainerdStateHostRoot = "/var/lib/containerd"
+	defaultNamespace               = "k8s.io"
+	defaultDialTimeout             = 10 * time.Second
 )
+
+var errOverlayUpperDiffUnavailable = errors.New("overlay upperdir diff unavailable")
 
 type criRuntimeService interface {
 	ListContainers(ctx context.Context, in *runtimeapi.ListContainersRequest, opts ...grpc.CallOption) (*runtimeapi.ListContainersResponse, error)
 }
 
 type ContainerdRuntimeConfig struct {
-	CRIEndpoint        string
-	ContainerdEndpoint string
-	ContainerdRoot     string
-	ContainerdHostRoot string
-	Namespace          string
-	DialTimeout        time.Duration
-	CRIClient          criRuntimeService
-	CRIDialContext     func(ctx context.Context, endpoint string) (*grpc.ClientConn, error)
-	ContainerdClient   containerdClient
+	CRIEndpoint             string
+	ContainerdEndpoint      string
+	ContainerdRoot          string
+	ContainerdHostRoot      string
+	ContainerdStateRoot     string
+	ContainerdStateHostRoot string
+	Namespace               string
+	DialTimeout             time.Duration
+	CRIClient               criRuntimeService
+	CRIDialContext          func(ctx context.Context, endpoint string) (*grpc.ClientConn, error)
+	ContainerdClient        containerdClient
 }
 
 type ContainerdRuntime struct {
-	criEndpoint        string
-	containerdEndpoint string
-	containerdRoot     string
-	containerdHostRoot string
-	namespace          string
-	dialTimeout        time.Duration
-	criClient          criRuntimeService
-	criDialContext     func(ctx context.Context, endpoint string) (*grpc.ClientConn, error)
-	containerdClient   containerdClient
+	criEndpoint             string
+	containerdEndpoint      string
+	containerdRoot          string
+	containerdHostRoot      string
+	containerdStateRoot     string
+	containerdStateHostRoot string
+	namespace               string
+	dialTimeout             time.Duration
+	criClient               criRuntimeService
+	criDialContext          func(ctx context.Context, endpoint string) (*grpc.ClientConn, error)
+	containerdClient        containerdClient
 }
 
 type containerdClient interface {
@@ -87,6 +100,14 @@ func NewContainerdRuntime(cfg ContainerdRuntimeConfig) *ContainerdRuntime {
 	if containerdHostRoot == "" {
 		containerdHostRoot = defaultContainerdHostRoot
 	}
+	containerdStateRoot := strings.TrimSpace(cfg.ContainerdStateRoot)
+	if containerdStateRoot == "" {
+		containerdStateRoot = defaultContainerdStateRoot
+	}
+	containerdStateHostRoot := strings.TrimSpace(cfg.ContainerdStateHostRoot)
+	if containerdStateHostRoot == "" {
+		containerdStateHostRoot = defaultContainerdStateHostRoot
+	}
 	namespace := strings.TrimSpace(cfg.Namespace)
 	if namespace == "" {
 		namespace = defaultNamespace
@@ -96,15 +117,17 @@ func NewContainerdRuntime(cfg ContainerdRuntimeConfig) *ContainerdRuntime {
 		timeout = defaultDialTimeout
 	}
 	return &ContainerdRuntime{
-		criEndpoint:        criEndpoint,
-		containerdEndpoint: containerdEndpoint,
-		containerdRoot:     containerdRoot,
-		containerdHostRoot: containerdHostRoot,
-		namespace:          namespace,
-		dialTimeout:        timeout,
-		criClient:          cfg.CRIClient,
-		criDialContext:     cfg.CRIDialContext,
-		containerdClient:   cfg.ContainerdClient,
+		criEndpoint:             criEndpoint,
+		containerdEndpoint:      containerdEndpoint,
+		containerdRoot:          containerdRoot,
+		containerdHostRoot:      containerdHostRoot,
+		containerdStateRoot:     containerdStateRoot,
+		containerdStateHostRoot: containerdStateHostRoot,
+		namespace:               namespace,
+		dialTimeout:             timeout,
+		criClient:               cfg.CRIClient,
+		criDialContext:          cfg.CRIDialContext,
+		containerdClient:        cfg.ContainerdClient,
 	}
 }
 
@@ -133,6 +156,14 @@ func (r *ContainerdRuntime) CreateDiff(ctx context.Context, info ctldapi.RootFSI
 	client, closeClient, err := r.client(ctx)
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+
+	if desc, reader, err := r.createOverlayUpperDiff(ctx, client, info); err == nil {
+		closeClient()
+		return desc, reader, nil
+	} else if ctxErr := ctx.Err(); ctxErr != nil {
+		closeClient()
+		return ctldapi.RootFSDiffDescriptor{}, nil, ctxErr
 	}
 
 	desc, err := crootfs.CreateDiff(ctx, info.SnapshotKey, client.SnapshotService(info.Snapshotter), client.DiffService())
@@ -180,6 +211,88 @@ func (r *ContainerdRuntime) ApplyDiff(ctx context.Context, info ctldapi.RootFSIn
 		return ctldapi.RootFSDiffDescriptor{}, err
 	}
 	return descriptorFromOCI(applied), nil
+}
+
+func (r *ContainerdRuntime) createOverlayUpperDiff(ctx context.Context, client containerdClient, info ctldapi.RootFSInfo) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+	snapshotter := client.SnapshotService(info.Snapshotter)
+	if snapshotter == nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, errOverlayUpperDiffUnavailable
+	}
+	activeMounts, err := snapshotter.Mounts(ctx, info.SnapshotKey)
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("inspect active snapshot mounts: %w", err)
+	}
+	activeMounts = mapMountsToLocalHostPaths(activeMounts, r.hostPathMappings())
+	upperdir, ok := overlayUpperDir(activeMounts)
+	if !ok {
+		return ctldapi.RootFSDiffDescriptor{}, nil, errOverlayUpperDiffUnavailable
+	}
+	if st, err := os.Stat(upperdir); err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("inspect overlay upperdir %s: %w", upperdir, err)
+	} else if !st.IsDir() {
+		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("overlay upperdir %s is not a directory", upperdir)
+	}
+
+	snapInfo, err := snapshotter.Stat(ctx, info.SnapshotKey)
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("inspect active snapshot: %w", err)
+	}
+	parent := strings.TrimSpace(snapInfo.Parent)
+	if parent == "" {
+		return ctldapi.RootFSDiffDescriptor{}, nil, errOverlayUpperDiffUnavailable
+	}
+	viewKey := newRootFSParentViewKey()
+	parentMounts, err := snapshotter.View(ctx, viewKey, parent)
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("create parent snapshot view: %w", err)
+	}
+	defer func() { _ = snapshotter.Remove(ctx, viewKey) }()
+
+	parentMounts = mapMountsToLocalHostPaths(parentMounts, r.hostPathMappings())
+	var desc ctldapi.RootFSDiffDescriptor
+	var reader io.ReadSeekCloser
+	err = mount.WithReadonlyTempMount(ctx, parentMounts, func(lowerRoot string) error {
+		var diffErr error
+		desc, reader, diffErr = createOverlayUpperDiffTar(ctx, lowerRoot, upperdir)
+		return diffErr
+	})
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+	return desc, reader, nil
+}
+
+func createOverlayUpperDiffTar(ctx context.Context, lowerRoot, upperdir string) (_ ctldapi.RootFSDiffDescriptor, _ io.ReadSeekCloser, retErr error) {
+	tmp, err := os.CreateTemp("", "sandbox0-rootfs-diff-*.tar")
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+	defer func() {
+		if retErr != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+
+	digester := digest.Canonical.Digester()
+	counter := &countingWriter{w: io.MultiWriter(tmp, digester.Hash())}
+	cw := archive.NewChangeWriter(counter, upperdir)
+	diffErr := fs.DiffDirChanges(ctx, lowerRoot, upperdir, fs.DiffSourceOverlayFS, cw.HandleChange)
+	closeErr := cw.Close()
+	if diffErr != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("create overlay upperdir diff: %w", diffErr)
+	}
+	if closeErr != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("close overlay upperdir diff: %w", closeErr)
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+	return ctldapi.RootFSDiffDescriptor{
+		MediaType: ocispec.MediaTypeImageLayer,
+		Digest:    digester.Digest().String(),
+		Size:      counter.n,
+	}, tempFileReadSeekCloser{File: tmp, path: tmp.Name()}, nil
 }
 
 func (r *ContainerdRuntime) resolveContainerID(ctx context.Context, target ctldapi.RootFSContainerRef) (string, string, error) {
@@ -452,6 +565,102 @@ func descriptorToOCI(desc ctldapi.RootFSDiffDescriptor) (ocispec.Descriptor, err
 	}, nil
 }
 
+func overlayUpperDir(mounts []mount.Mount) (string, bool) {
+	for _, m := range mounts {
+		if m.Type != "overlay" {
+			continue
+		}
+		for _, opt := range m.Options {
+			key, value, ok := strings.Cut(opt, "=")
+			if ok && key == "upperdir" && strings.TrimSpace(value) != "" {
+				return value, true
+			}
+		}
+	}
+	return "", false
+}
+
+type hostPathMapping struct {
+	hostRoot  string
+	localRoot string
+}
+
+func (r *ContainerdRuntime) hostPathMappings() []hostPathMapping {
+	return []hostPathMapping{
+		{hostRoot: r.containerdHostRoot, localRoot: r.containerdRoot},
+		{hostRoot: r.containerdStateHostRoot, localRoot: r.containerdStateRoot},
+	}
+}
+
+func mapMountsToLocalHostPaths(mounts []mount.Mount, mappings []hostPathMapping) []mount.Mount {
+	if len(mounts) == 0 {
+		return nil
+	}
+	mapped := make([]mount.Mount, 0, len(mounts))
+	for _, m := range mounts {
+		clone := m
+		clone.Source = mapHostPathToLocalRoot(clone.Source, mappings)
+		if len(m.Options) > 0 {
+			clone.Options = make([]string, 0, len(m.Options))
+			for _, opt := range m.Options {
+				clone.Options = append(clone.Options, mapMountOptionToLocalRoot(opt, mappings))
+			}
+		}
+		mapped = append(mapped, clone)
+	}
+	return mapped
+}
+
+func mapMountOptionToLocalRoot(opt string, mappings []hostPathMapping) string {
+	key, value, ok := strings.Cut(opt, "=")
+	if !ok {
+		return opt
+	}
+	switch key {
+	case "lowerdir":
+		parts := strings.Split(value, ":")
+		for i := range parts {
+			parts[i] = mapHostPathToLocalRoot(parts[i], mappings)
+		}
+		return key + "=" + strings.Join(parts, ":")
+	case "upperdir", "workdir":
+		return key + "=" + mapHostPathToLocalRoot(value, mappings)
+	default:
+		return opt
+	}
+}
+
+func mapHostPathToLocalRoot(pathValue string, mappings []hostPathMapping) string {
+	pathValue = strings.TrimSpace(pathValue)
+	if pathValue == "" {
+		return pathValue
+	}
+	cleanPath := filepath.Clean(pathValue)
+	for _, mapping := range mappings {
+		if strings.TrimSpace(mapping.hostRoot) == "" || strings.TrimSpace(mapping.localRoot) == "" {
+			continue
+		}
+		hostRoot := filepath.Clean(mapping.hostRoot)
+		localRoot := filepath.Clean(mapping.localRoot)
+		if cleanPath == hostRoot {
+			return localRoot
+		}
+		prefix := hostRoot + string(filepath.Separator)
+		if strings.HasPrefix(cleanPath, prefix) {
+			return filepath.Join(localRoot, strings.TrimPrefix(cleanPath, prefix))
+		}
+	}
+	return pathValue
+}
+
+func newRootFSParentViewKey() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		return "sandbox0-rootfs-parent-view-" + hex.EncodeToString(b[:])
+	}
+	return fmt.Sprintf("sandbox0-rootfs-parent-view-%d", time.Now().UnixNano())
+}
+
 func runtimeFamily(handler string) string {
 	raw := strings.ToLower(strings.TrimSpace(handler))
 	switch {
@@ -511,6 +720,30 @@ func (r closeReadSeekWithFunc) Close() error {
 	err := r.ReadSeekCloser.Close()
 	if r.closeFunc != nil {
 		r.closeFunc()
+	}
+	return err
+}
+
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	n, err := w.w.Write(p)
+	w.n += int64(n)
+	return n, err
+}
+
+type tempFileReadSeekCloser struct {
+	*os.File
+	path string
+}
+
+func (r tempFileReadSeekCloser) Close() error {
+	err := r.File.Close()
+	if removeErr := os.Remove(r.path); err == nil {
+		err = removeErr
 	}
 	return err
 }

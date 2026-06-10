@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	ctldcgroup "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/cgroup"
 	ctldportal "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal"
 	ctldpower "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/power"
 	ctldrootfs "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/rootfs"
@@ -33,25 +32,27 @@ import (
 )
 
 var (
-	httpAddr               = ":8095"
-	kubeconfig             = ""
-	cgroupRoot             = "/host-sys/fs/cgroup"
-	criEndpoint            = "/host-run/containerd/containerd.sock"
-	containerdEndpoint     = "/host-run/containerd/containerd.sock"
-	containerdRoot         = "/host-run/containerd"
-	containerdHostRoot     = "/run/containerd"
-	containerdNamespace    = "k8s.io"
-	procRoot               = "/proc"
-	nodeName               = os.Getenv("NODE_NAME")
-	pauseMinMemoryRequest  = "10Mi"
-	pauseMinMemoryLimit    = "32Mi"
-	pauseMemoryBufferRatio = "1.1"
-	pauseMinCPU            = "10m"
-	defaultSandboxTTL      time.Duration
-	portalRoot             = "/var/lib/sandbox0/ctld"
-	csiSocket              = "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock"
-	podName                = os.Getenv("POD_NAME")
-	podNamespace           = os.Getenv("POD_NAMESPACE")
+	httpAddr                = ":8095"
+	kubeconfig              = ""
+	cgroupRoot              = "/host-sys/fs/cgroup"
+	criEndpoint             = "/host-run/containerd/containerd.sock"
+	containerdEndpoint      = "/host-run/containerd/containerd.sock"
+	containerdRoot          = "/host-run/containerd"
+	containerdHostRoot      = "/run/containerd"
+	containerdStateRoot     = "/host-var-lib/containerd"
+	containerdStateHostRoot = "/var/lib/containerd"
+	containerdNamespace     = "k8s.io"
+	procRoot                = "/proc"
+	nodeName                = os.Getenv("NODE_NAME")
+	pauseMinMemoryRequest   = "10Mi"
+	pauseMinMemoryLimit     = "32Mi"
+	pauseMemoryBufferRatio  = "1.1"
+	pauseMinCPU             = "10m"
+	defaultSandboxTTL       time.Duration
+	portalRoot              = "/var/lib/sandbox0/ctld"
+	csiSocket               = "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock"
+	podName                 = os.Getenv("POD_NAME")
+	podNamespace            = os.Getenv("POD_NAMESPACE")
 )
 
 func main() {
@@ -62,6 +63,8 @@ func main() {
 	flag.StringVar(&containerdEndpoint, "containerd-endpoint", "/host-run/containerd/containerd.sock", "host containerd socket used for rootfs diff/apply")
 	flag.StringVar(&containerdRoot, "containerd-root", "/host-run/containerd", "host containerd runtime root mounted into ctld")
 	flag.StringVar(&containerdHostRoot, "containerd-host-root", "/run/containerd", "host containerd runtime root path used in containerd mount requests")
+	flag.StringVar(&containerdStateRoot, "containerd-state-root", "/host-var-lib/containerd", "host containerd state root mounted into ctld")
+	flag.StringVar(&containerdStateHostRoot, "containerd-state-host-root", "/var/lib/containerd", "host containerd state root path used in snapshot mounts")
 	flag.StringVar(&containerdNamespace, "containerd-namespace", "k8s.io", "containerd namespace used by Kubernetes")
 	flag.StringVar(&procRoot, "proc-root", "/proc", "host proc root used to inspect sandbox processes")
 	flag.StringVar(&nodeName, "node-name", os.Getenv("NODE_NAME"), "current node name used to validate local sandbox ownership")
@@ -134,11 +137,11 @@ func main() {
 	}()
 	defer csiServer.Stop()
 
-	powerController, podResolver := buildPowerController(ctx, obsProvider)
+	powerController := buildPowerController(ctx, obsProvider)
 	httpServer := newHTTPServer(httpAddr, combinedController{
 		Controller: powerController,
 		Portal:     portalManager,
-		RootFS:     buildRootFSController(storageCfg, podResolver),
+		RootFS:     buildRootFSController(storageCfg),
 	})
 	if obsProvider != nil {
 		httpServer.Handler = httpobs.ServerMiddleware(obsProvider.HTTPServerConfig(zapLogger))(httpServer.Handler)
@@ -163,14 +166,14 @@ func newHTTPServer(addr string, controller ctldserver.Controller) *http.Server {
 	return &http.Server{Addr: addr, Handler: ctldserver.NewMux(controller)}
 }
 
-func buildPowerController(ctx context.Context, obsProvider *observability.Provider) (ctldserver.Controller, *ctldpower.PodResolver) {
+func buildPowerController(ctx context.Context, obsProvider *observability.Provider) ctldserver.Controller {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	k8sClient, err := k8s.NewClientWithObservability(kubeconfig, obsProvider)
 	if err != nil {
 		log.Printf("ctld power control disabled: build kubernetes client: %v", err)
-		return ctldserver.NotImplementedController{}, nil
+		return ctldserver.NotImplementedController{}
 	}
 	resolver := ctldpower.NewPodResolver(k8sClient, nodeName, cgroupRoot)
 	resolver.ProcRoot = procRoot
@@ -210,25 +213,25 @@ func buildPowerController(ctx context.Context, obsProvider *observability.Provid
 			powerReconciler.Run(ctx, 1)
 		}()
 	}
-	return controller, resolver
+	return controller
 }
 
-func buildRootFSController(storageCfg *apiconfig.StorageProxyConfig, resolver *ctldpower.PodResolver) ctldserver.RootFSController {
+func buildRootFSController(storageCfg *apiconfig.StorageProxyConfig) ctldserver.RootFSController {
 	store, err := buildRootFSObjectStore(storageCfg)
 	if err != nil {
 		log.Printf("ctld rootfs object store disabled: %v", err)
 	}
 	return ctldrootfs.NewController(ctldrootfs.Config{
 		Runtime: ctldrootfs.NewContainerdRuntime(ctldrootfs.ContainerdRuntimeConfig{
-			CRIEndpoint:        criEndpoint,
-			ContainerdEndpoint: containerdEndpoint,
-			ContainerdRoot:     containerdRoot,
-			ContainerdHostRoot: containerdHostRoot,
-			Namespace:          containerdNamespace,
+			CRIEndpoint:             criEndpoint,
+			ContainerdEndpoint:      containerdEndpoint,
+			ContainerdRoot:          containerdRoot,
+			ContainerdHostRoot:      containerdHostRoot,
+			ContainerdStateRoot:     containerdStateRoot,
+			ContainerdStateHostRoot: containerdStateHostRoot,
+			Namespace:               containerdNamespace,
 		}),
-		Store:    store,
-		Resolver: resolver,
-		FS:       ctldcgroup.NewFS(),
+		Store: store,
 	})
 }
 

@@ -77,6 +77,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		{Name: "ctld-data", MountPath: "/var/lib/sandbox0/ctld"},
 		{Name: "host-cgroup", MountPath: "/host-sys/fs/cgroup"},
 		{Name: "containerd-sock", MountPath: "/host-run/containerd"},
+		{Name: "containerd-state", MountPath: "/host-var-lib/containerd"},
 	}
 	volumes := []corev1.Volume{
 		{
@@ -130,6 +131,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			Name: "containerd-sock",
 			VolumeSource: corev1.VolumeSource{
 				HostPath: &corev1.HostPathVolumeSource{Path: "/run/containerd"},
+			},
+		},
+		{
+			Name: "containerd-state",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: "/var/lib/containerd"},
 			},
 		},
 	}
@@ -281,6 +288,8 @@ func ctldArgs(infra *infrav1alpha1.Sandbox0Infra) []string {
 		"-http-addr=:8095",
 		"-cgroup-root=/host-sys/fs/cgroup",
 		"-cri-endpoint=/host-run/containerd/containerd.sock",
+		"-containerd-state-root=/host-var-lib/containerd",
+		"-containerd-state-host-root=/var/lib/containerd",
 		"-volume-portal-root=/var/lib/sandbox0/ctld",
 		"-csi-socket=/csi/csi.sock",
 		fmt.Sprintf("-pause-min-memory-request=%s", pauseMinMemoryRequest),

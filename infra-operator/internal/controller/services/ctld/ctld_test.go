@@ -115,6 +115,8 @@ func reconcileCtldDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) *a
 	if len(ds.Spec.Template.Spec.Containers[0].Args) < 5 || ds.Spec.Template.Spec.Containers[0].Args[1] != "-cgroup-root=/host-sys/fs/cgroup" || ds.Spec.Template.Spec.Containers[0].Args[2] != "-cri-endpoint=/host-run/containerd/containerd.sock" {
 		t.Fatalf("expected cgroup root arg, got %#v", ds.Spec.Template.Spec.Containers[0].Args)
 	}
+	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-containerd-state-root=/host-var-lib/containerd")
+	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-containerd-state-host-root=/var/lib/containerd")
 	if ds.Spec.Template.Spec.Containers[0].SecurityContext == nil || ds.Spec.Template.Spec.Containers[0].SecurityContext.Privileged == nil || !*ds.Spec.Template.Spec.Containers[0].SecurityContext.Privileged {
 		t.Fatal("expected ctld container to run privileged")
 	}
@@ -124,6 +126,8 @@ func reconcileCtldDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) *a
 	if len(ds.Spec.Template.Spec.Containers[0].VolumeMounts) < 6 {
 		t.Fatalf("expected ctld config, csi, kubelet, data, cgroup, and containerd mounts, got %#v", ds.Spec.Template.Spec.Containers[0].VolumeMounts)
 	}
+	assertContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "containerd-state", "/host-var-lib/containerd")
+	assertHostPathVolume(t, ds.Spec.Template.Spec.Volumes, "containerd-state", "/var/lib/containerd")
 	driver := &storagev1.CSIDriver{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: "volume.sandbox0.ai"}, driver); err != nil {
 		t.Fatalf("expected csi driver to be created: %v", err)
@@ -208,6 +212,22 @@ func assertPodVolume(t *testing.T, volumes []corev1.Volume, name string) {
 		}
 	}
 	t.Fatalf("expected volume %q, got %#v", name, volumes)
+}
+
+func assertHostPathVolume(t *testing.T, volumes []corev1.Volume, name, path string) {
+	t.Helper()
+	for _, volume := range volumes {
+		if volume.Name == name {
+			if volume.HostPath == nil {
+				t.Fatalf("volume %q is not a hostPath volume: %#v", name, volume)
+			}
+			if volume.HostPath.Path != path {
+				t.Fatalf("hostPath volume %q path = %q, want %q", name, volume.HostPath.Path, path)
+			}
+			return
+		}
+	}
+	t.Fatalf("expected hostPath volume %q, got %#v", name, volumes)
 }
 
 func newCtldTestInfra() *infrav1alpha1.Sandbox0Infra {

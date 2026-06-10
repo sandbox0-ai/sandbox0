@@ -75,6 +75,7 @@ var ErrSandboxCheckpointRequiresCtld = errors.New("sandbox checkpoint pause requ
 
 const defaultPodClaimReadyTimeout = 90 * time.Second
 const defaultSandboxRestoreTimeout = 2 * time.Minute
+const defaultPausedRuntimeDeletionWaitTimeout = 10 * time.Second
 
 // claimIdlePodBackoff is the retry backoff for claiming idle pods.
 // Designed to balance between:

@@ -150,6 +150,9 @@ func downstreamTLSNextProtos(req *adapterRequest) []string {
 		}
 		return []string{"h2"}
 	}
+	if req != nil && req.EgressAuth != nil && egressAuthMayUseHTTPSH2(req.EgressAuth) {
+		return []string{"h2", "http/1.1"}
+	}
 	if req != nil && policy.RequiresProtocolTLSTermination(req.Compiled, req.Host, req.DestPort, "mcp") {
 		return []string{"h2", "http/1.1"}
 	}
@@ -308,6 +311,33 @@ func egressAuthMayUseHTTP1(ctx *egressAuthContext) bool {
 		}
 	}
 	return ctx.Rule != nil && ctx.Rule.Protocol != v1alpha1.EgressAuthProtocolGRPC && ctx.Rule.Protocol != v1alpha1.EgressAuthProtocolTLS
+}
+
+func egressAuthMayUseHTTPSH2(ctx *egressAuthContext) bool {
+	if ctx == nil {
+		return false
+	}
+	if !ctx.RequestMatch {
+		return egressAuthRuleMayUseHTTPSH2(ctx.Rule)
+	}
+	for _, rule := range ctx.CandidateRules {
+		if egressAuthRuleMayUseHTTPSH2(rule) {
+			return true
+		}
+	}
+	return egressAuthRuleMayUseHTTPSH2(ctx.Rule)
+}
+
+func egressAuthRuleMayUseHTTPSH2(rule *policy.CompiledEgressAuthRule) bool {
+	if rule == nil || rule.TLSMode != v1alpha1.EgressTLSModeTerminateReoriginate {
+		return false
+	}
+	switch rule.Protocol {
+	case "", v1alpha1.EgressAuthProtocolHTTPS:
+		return true
+	default:
+		return false
+	}
 }
 
 func egressAuthRequiresGRPCH2(ctx *egressAuthContext) bool {

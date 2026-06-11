@@ -22,6 +22,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	"go.uber.org/zap"
+	"golang.org/x/net/http2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
@@ -192,6 +193,12 @@ func TestTLSAdapterInterceptsHTTPSAndInjectsHeaders(t *testing.T) {
 		MinVersion: tls.VersionTLS12,
 	})
 	defer clientTLS.Close()
+	if err := clientTLS.Handshake(); err != nil {
+		t.Fatalf("handshake client tls: %v", err)
+	}
+	if got := clientTLS.ConnectionState().NegotiatedProtocol; got != "http/1.1" {
+		t.Fatalf("negotiated protocol = %q, want http/1.1", got)
+	}
 
 	if _, err := io.WriteString(clientTLS, "POST /v1/test HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 7\r\n\r\npayload"); err != nil {
 		t.Fatalf("write tls request: %v", err)
@@ -218,6 +225,191 @@ func TestTLSAdapterInterceptsHTTPSAndInjectsHeaders(t *testing.T) {
 	}
 	if got := <-requestBody; got != "payload" {
 		t.Fatalf("request body = %q", got)
+	}
+}
+
+func TestTLSAdapterInterceptsHTTPSOverHTTP2AndInjectsHeaders(t *testing.T) {
+	mitmCertPEM, mitmKeyPEM, err := newSelfSignedCertificateAuthority("sandbox0-mitm", time.Hour)
+	if err != nil {
+		t.Fatalf("new mitm ca: %v", err)
+	}
+	mitmAuthority, err := newCertificateAuthority(mitmCertPEM, mitmKeyPEM, time.Hour)
+	if err != nil {
+		t.Fatalf("new mitm authority: %v", err)
+	}
+
+	upstreamCAPEM, upstreamCAKeyPEM, err := newSelfSignedCertificateAuthority("sandbox0-upstream", time.Hour)
+	if err != nil {
+		t.Fatalf("new upstream ca: %v", err)
+	}
+	upstreamAuthority, err := newCertificateAuthority(upstreamCAPEM, upstreamCAKeyPEM, time.Hour)
+	if err != nil {
+		t.Fatalf("new upstream authority: %v", err)
+	}
+	upstreamLeaf, err := upstreamAuthority.CertificateForHost("api.example.com")
+	if err != nil {
+		t.Fatalf("upstream leaf: %v", err)
+	}
+	upstreamRootPool := x509.NewCertPool()
+	if !upstreamRootPool.AppendCertsFromPEM(upstreamCAPEM) {
+		t.Fatal("append upstream ca")
+	}
+
+	requestHeaders := make(chan http.Header, 1)
+	requestBody := make(chan string, 1)
+	requestProtocol := make(chan string, 1)
+	upstreamListener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{*upstreamLeaf},
+		NextProtos:   []string{"h2"},
+		MinVersion:   tls.VersionTLS12,
+	})
+	if err != nil {
+		t.Fatalf("tls listen upstream: %v", err)
+	}
+	defer upstreamListener.Close()
+	upstreamServer := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, readErr := io.ReadAll(r.Body)
+			if readErr != nil {
+				t.Errorf("read upstream body: %v", readErr)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			requestHeaders <- r.Header.Clone()
+			requestBody <- string(body)
+			requestProtocol <- r.Proto
+			_, _ = w.Write([]byte("h2-secure-ok"))
+		}),
+	}
+	if err := http2.ConfigureServer(upstreamServer, &http2.Server{}); err != nil {
+		t.Fatalf("configure upstream http2 server: %v", err)
+	}
+	defer upstreamServer.Close()
+	go func() {
+		_ = upstreamServer.Serve(upstreamListener)
+	}()
+
+	proxyListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen proxy: %v", err)
+	}
+	defer proxyListener.Close()
+
+	server := &Server{
+		cfg: &config.NetdConfig{
+			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
+		},
+		logger:            zap.NewNop(),
+		tlsAuthority:      mitmAuthority,
+		upstreamTLSConfig: &tls.Config{RootCAs: upstreamRootPool},
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		conn, acceptErr := proxyListener.Accept()
+		if acceptErr != nil {
+			done <- acceptErr
+			return
+		}
+		defer conn.Close()
+		req := &adapterRequest{
+			Server:   server,
+			Compiled: &policy.CompiledPolicy{SandboxID: "sbx_123", TeamID: "team_123", Mode: v1alpha1.NetworkModeAllowAll},
+			SrcIP:    "10.0.0.2",
+			DestIP:   upstreamListener.Addr().(*net.TCPAddr).IP,
+			DestPort: upstreamListener.Addr().(*net.TCPAddr).Port,
+			Host:     "api.example.com",
+			Conn:     conn,
+			EgressAuth: &egressAuthContext{
+				Rule: &policy.CompiledEgressAuthRule{
+					Name:     "example-https",
+					AuthRef:  "example-api",
+					Protocol: v1alpha1.EgressAuthProtocolHTTPS,
+					TLSMode:  v1alpha1.EgressTLSModeTerminateReoriginate,
+				},
+				Resolved: egressauth.NewHTTPHeadersResolveResponse("example-api", map[string]string{
+					"Authorization": "Bearer h2-token",
+				}, nil),
+			},
+		}
+		done <- (&tlsAdapter{}).Handle(req)
+	}()
+
+	clientRootPool := x509.NewCertPool()
+	if !clientRootPool.AppendCertsFromPEM(mitmCertPEM) {
+		t.Fatal("append mitm ca")
+	}
+	clientTLSConfig := &tls.Config{
+		ServerName: "api.example.com",
+		RootCAs:    clientRootPool,
+		NextProtos: []string{"h2"},
+		MinVersion: tls.VersionTLS12,
+	}
+	negotiatedProtocol := make(chan string, 1)
+	clientTransport := &http2.Transport{
+		TLSClientConfig: clientTLSConfig,
+		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+			_ = network
+			_ = addr
+			tlsCfg := clientTLSConfig
+			if cfg != nil {
+				tlsCfg = cfg.Clone()
+			}
+			rawConn, dialErr := net.Dial("tcp4", proxyListener.Addr().String())
+			if dialErr != nil {
+				return nil, dialErr
+			}
+			tlsConn := tls.Client(rawConn, tlsCfg)
+			if handshakeErr := tlsConn.HandshakeContext(ctx); handshakeErr != nil {
+				_ = rawConn.Close()
+				return nil, handshakeErr
+			}
+			negotiatedProtocol <- tlsConn.ConnectionState().NegotiatedProtocol
+			return tlsConn, nil
+		},
+	}
+	defer clientTransport.CloseIdleConnections()
+	client := &http.Client{
+		Transport: clientTransport,
+		Timeout:   5 * time.Second,
+	}
+	httpReq, err := http.NewRequest(http.MethodPost, "https://api.example.com/v1/test", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatalf("new http2 request: %v", err)
+	}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		t.Fatalf("http2 client request: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read http2 response body: %v", err)
+	}
+	_ = resp.Body.Close()
+	if got := string(body); got != "h2-secure-ok" {
+		t.Fatalf("response body = %q", got)
+	}
+	if got := <-negotiatedProtocol; got != "h2" {
+		t.Fatalf("negotiated protocol = %q, want h2", got)
+	}
+	if got := <-requestProtocol; got != "HTTP/2.0" {
+		t.Fatalf("upstream protocol = %q, want HTTP/2.0", got)
+	}
+	headers := <-requestHeaders
+	if got := headers.Get("Authorization"); got != "Bearer h2-token" {
+		t.Fatalf("authorization header = %q", got)
+	}
+	if got := <-requestBody; got != "payload" {
+		t.Fatalf("request body = %q", got)
+	}
+	clientTransport.CloseIdleConnections()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("tls adapter handle: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for tls adapter")
 	}
 }
 

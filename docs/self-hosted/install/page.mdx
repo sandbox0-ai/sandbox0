@@ -331,6 +331,15 @@ spec:
 
 Do not set `services.netd.runtimeClassName` to `gvisor`, `gvisor-rootfs`, or `kata`. `netd` should keep running on the node's default host-compatible runtime.
 
+`ctld` assumes the node's containerd data root is `/var/lib/containerd` by default. If your node bootstrap stores containerd data somewhere else, set `services.ctld.containerdHostDataRoot` to the actual host path:
+
+```yaml
+spec:
+    services:
+        ctld:
+            containerdHostDataRoot: /var/lib/sandbox0-worker/containerd
+```
+
 ### 6) Expose the API Publicly
 
 After the `LoadBalancer` patch above, GKE allocates a public IP for `cluster-gateway`.
@@ -390,6 +399,7 @@ If `s0 sandbox create` returns a sandbox ID and the sandbox reaches `running`, t
 - Use `sandboxNodePlacement` to place sandbox workloads, `netd`, and `ctld` onto the same sandbox node pool.
 - Do not set `services.netd.runtimeClassName: gvisor`.
 - `infra-operator` does not install containerd runtime handlers. Install `runsc`/`containerd-shim-runsc-v1`, configure the handler, restart containerd, and create the `RuntimeClass` before using a custom `sandboxRuntimeClassName`.
+- If containerd uses a non-default data root, set `services.ctld.containerdHostDataRoot` to that host path so rootfs pause/resume can use the overlayfs fast path.
 - `netd` and `ctld` depend on host features such as `hostNetwork` and `hostPath`. This is why GKE Autopilot is not a good fit for full Sandbox0 deployments.
 - Even when `netd` and `ctld` are scheduled onto `gVisor` nodes, they still run on the node's default host runtime because `services.netd.runtimeClassName` remains unset.
 - If you hit GCP `SSD_TOTAL_GB` quota limits while creating node pools, reduce `--disk-size` explicitly instead of relying on the larger default boot disk size.

@@ -115,7 +115,6 @@ func reconcileCtldDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) *a
 	}
 	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-cri-endpoint=/host-run/containerd/containerd.sock")
 	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-containerd-data-root=/host-var-lib/containerd")
-	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-containerd-host-data-root=/var/lib/containerd")
 	if ds.Spec.Template.Spec.Containers[0].SecurityContext == nil || ds.Spec.Template.Spec.Containers[0].SecurityContext.Privileged == nil || !*ds.Spec.Template.Spec.Containers[0].SecurityContext.Privileged {
 		t.Fatal("expected ctld container to run privileged")
 	}
@@ -135,6 +134,28 @@ func reconcileCtldDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) *a
 	}
 
 	return ds
+}
+
+func TestReconcileUsesDefaultContainerdHostDataRoot(t *testing.T) {
+	infra := newCtldTestInfra()
+
+	ds := reconcileCtldDaemonSet(t, infra)
+	args := ds.Spec.Template.Spec.Containers[0].Args
+	assertContainsArg(t, args, "-containerd-host-data-root=/var/lib/containerd")
+	assertHostPathVolume(t, ds.Spec.Template.Spec.Volumes, "containerd-data", "/var/lib/containerd")
+}
+
+func TestReconcileUsesConfiguredContainerdHostDataRoot(t *testing.T) {
+	infra := newCtldTestInfra()
+	infra.Spec.Services.Ctld = &infrav1alpha1.CtldServiceConfig{
+		ContainerdHostDataRoot: "/var/lib/sandbox0-worker/containerd",
+	}
+
+	ds := reconcileCtldDaemonSet(t, infra)
+	args := ds.Spec.Template.Spec.Containers[0].Args
+	assertContainsArg(t, args, "-containerd-data-root=/host-var-lib/containerd")
+	assertContainsArg(t, args, "-containerd-host-data-root=/var/lib/sandbox0-worker/containerd")
+	assertHostPathVolume(t, ds.Spec.Template.Spec.Volumes, "containerd-data", "/var/lib/sandbox0-worker/containerd")
 }
 
 func TestReconcileDoesNotPassPauseConfigToCtld(t *testing.T) {
@@ -211,6 +232,23 @@ func assertPodVolume(t *testing.T, volumes []corev1.Volume, name string) {
 	t.Fatalf("expected volume %q, got %#v", name, volumes)
 }
 
+func assertHostPathVolume(t *testing.T, volumes []corev1.Volume, name, path string) {
+	t.Helper()
+	for _, volume := range volumes {
+		if volume.Name != name {
+			continue
+		}
+		if volume.HostPath == nil {
+			t.Fatalf("volume %q is not a hostPath volume: %#v", name, volume)
+		}
+		if volume.HostPath.Path != path {
+			t.Fatalf("hostPath volume %q path = %q, want %q", name, volume.HostPath.Path, path)
+		}
+		return
+	}
+	t.Fatalf("expected volume %q, got %#v", name, volumes)
+}
+
 func newCtldTestInfra() *infrav1alpha1.Sandbox0Infra {
 	return &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{
@@ -224,6 +262,7 @@ func newCtldTestInfra() *infrav1alpha1.Sandbox0Infra {
 						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
 					},
 				},
+				Ctld: &infrav1alpha1.CtldServiceConfig{},
 				Netd: &infrav1alpha1.NetdServiceConfig{},
 			},
 		},

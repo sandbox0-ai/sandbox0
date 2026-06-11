@@ -3,6 +3,7 @@ package ctld
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	appsv1 "k8s.io/api/apps/v1"
@@ -25,6 +26,12 @@ import (
 type Reconciler struct {
 	Resources *common.ResourceManager
 }
+
+const (
+	containerdDataMountPath        = "/host-var-lib/containerd"
+	defaultContainerdHostDataRoot  = "/var/lib/containerd"
+	defaultContainerdHostStateRoot = "/run/containerd"
+)
 
 func NewReconciler(resources *common.ResourceManager) *Reconciler {
 	return &Reconciler{Resources: resources}
@@ -67,7 +74,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 
 	nodeSelector, tolerations := common.ResolveSandboxNodePlacement(infra)
-	args := ctldArgs()
+	containerdHostDataRoot := ctldContainerdHostDataRoot(infra)
+	args := ctldArgs(containerdHostDataRoot)
 	bidirectional := corev1.MountPropagationBidirectional
 	hostPathDirectoryOrCreate := corev1.HostPathDirectoryOrCreate
 	volumeMounts := []corev1.VolumeMount{
@@ -76,7 +84,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		{Name: "kubelet", MountPath: "/var/lib/kubelet", MountPropagation: &bidirectional},
 		{Name: "ctld-data", MountPath: "/var/lib/sandbox0/ctld"},
 		{Name: "containerd-sock", MountPath: "/host-run/containerd"},
-		{Name: "containerd-data", MountPath: "/host-var-lib/containerd", ReadOnly: true},
+		{Name: "containerd-data", MountPath: containerdDataMountPath, ReadOnly: true},
 	}
 	volumes := []corev1.Volume{
 		{
@@ -123,13 +131,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		{
 			Name: "containerd-sock",
 			VolumeSource: corev1.VolumeSource{
-				HostPath: &corev1.HostPathVolumeSource{Path: "/run/containerd"},
+				HostPath: &corev1.HostPathVolumeSource{Path: defaultContainerdHostStateRoot},
 			},
 		},
 		{
 			Name: "containerd-data",
 			VolumeSource: corev1.VolumeSource{
-				HostPath: &corev1.HostPathVolumeSource{Path: "/var/lib/containerd"},
+				HostPath: &corev1.HostPathVolumeSource{Path: containerdHostDataRoot},
 			},
 		},
 	}
@@ -260,19 +268,32 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	return r.Resources.ApplyDaemonSet(ctx, infra, desired)
 }
 
-func ctldArgs() []string {
+func ctldArgs(containerdHostDataRoot string) []string {
+	if strings.TrimSpace(containerdHostDataRoot) == "" {
+		containerdHostDataRoot = defaultContainerdHostDataRoot
+	}
 	args := []string{
 		"-http-addr=:8095",
 		"-cri-endpoint=/host-run/containerd/containerd.sock",
 		"-containerd-endpoint=/host-run/containerd/containerd.sock",
 		"-containerd-root=/host-run/containerd",
-		"-containerd-host-root=/run/containerd",
-		"-containerd-data-root=/host-var-lib/containerd",
-		"-containerd-host-data-root=/var/lib/containerd",
+		"-containerd-host-root=" + defaultContainerdHostStateRoot,
+		"-containerd-data-root=" + containerdDataMountPath,
+		"-containerd-host-data-root=" + containerdHostDataRoot,
 		"-volume-portal-root=/var/lib/sandbox0/ctld",
 		"-csi-socket=/csi/csi.sock",
 	}
 	return args
+}
+
+func ctldContainerdHostDataRoot(infra *infrav1alpha1.Sandbox0Infra) string {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.Ctld == nil {
+		return defaultContainerdHostDataRoot
+	}
+	if root := strings.TrimSpace(infra.Spec.Services.Ctld.ContainerdHostDataRoot); root != "" {
+		return root
+	}
+	return defaultContainerdHostDataRoot
 }
 
 func (r *Reconciler) ensureCSIDriver(ctx context.Context, labels map[string]string) error {

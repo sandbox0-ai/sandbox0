@@ -2350,6 +2350,20 @@ spec:
                           rule: self.type != 'NodePort' || self.port == 0 || (self.port
                             >= 30000 && self.port <= 32767)
                     type: object
+                  ctld:
+                    default: {}
+                    description: Ctld configures the ctld node-local service (data
+                      plane)
+                    properties:
+                      containerdHostDataRoot:
+                        default: /var/lib/containerd
+                        description: |-
+                          ContainerdHostDataRoot is the containerd data root path on the host.
+                          Set this when nodes use a non-default containerd root such as a dedicated
+                          sandbox worker data disk.
+                        pattern: ^/.*
+                        type: string
+                    type: object
                   globalGateway:
                     default: {}
                     description: GlobalGateway configures the global-gateway service

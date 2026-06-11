@@ -50,7 +50,6 @@ func (s *SandboxService) saveSandboxRootFSCheckpoint(ctx context.Context, pod *c
 		SandboxID:                 sandboxID,
 		TeamID:                    teamID,
 		ExpectedRuntimeGeneration: generation,
-		Freeze:                    true,
 	}, sandboxRootFSOperationTimeout)
 	if err != nil {
 		return fmt.Errorf("save sandbox rootfs checkpoint: %w", rootFSResponseError(err, saveRootFSError(resp)))
@@ -96,7 +95,6 @@ func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *
 			Size:      state.DiffSize,
 			ObjectKey: state.DiffObjectKey,
 		},
-		Freeze: true,
 	}, sandboxRootFSOperationTimeout)
 	if err != nil {
 		return fmt.Errorf("apply sandbox rootfs checkpoint: %w", rootFSResponseError(err, applyRootFSError(resp)))

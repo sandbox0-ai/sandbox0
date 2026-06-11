@@ -39,7 +39,6 @@ func TestPauseSandboxRuntimeSavesRootFSBeforeDeletingPod(t *testing.T) {
 		assert.Equal(t, "sandbox-1", req.SandboxID)
 		assert.Equal(t, "team-1", req.TeamID)
 		assert.Equal(t, int64(3), req.ExpectedRuntimeGeneration)
-		assert.True(t, req.Freeze)
 		assert.Equal(t, ctldapi.RootFSContainerRef{
 			Namespace:     "default",
 			PodName:       "pod-1",
@@ -120,7 +119,6 @@ func TestFinishRestoredSandboxRuntimeAppliesRootFSBeforeProcdInitialization(t *t
 		assert.Equal(t, []string{"parent-1", "parent-0"}, req.ExpectedSnapshotParentChain)
 		assert.Equal(t, "sha256:diff", req.Descriptor.Digest)
 		assert.Equal(t, "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar", req.Descriptor.ObjectKey)
-		assert.True(t, req.Freeze)
 		calls = append(calls, "apply")
 		_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
 	}))

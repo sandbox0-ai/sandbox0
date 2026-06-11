@@ -67,7 +67,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 
 	nodeSelector, tolerations := common.ResolveSandboxNodePlacement(infra)
-	args := ctldArgs(infra)
+	args := ctldArgs()
 	bidirectional := corev1.MountPropagationBidirectional
 	hostPathDirectoryOrCreate := corev1.HostPathDirectoryOrCreate
 	volumeMounts := []corev1.VolumeMount{
@@ -75,8 +75,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		{Name: "csi-plugin", MountPath: "/csi"},
 		{Name: "kubelet", MountPath: "/var/lib/kubelet", MountPropagation: &bidirectional},
 		{Name: "ctld-data", MountPath: "/var/lib/sandbox0/ctld"},
-		{Name: "host-cgroup", MountPath: "/host-sys/fs/cgroup"},
 		{Name: "containerd-sock", MountPath: "/host-run/containerd"},
+		{Name: "containerd-data", MountPath: "/host-var-lib/containerd", ReadOnly: true},
 	}
 	volumes := []corev1.Volume{
 		{
@@ -121,15 +121,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			},
 		},
 		{
-			Name: "host-cgroup",
-			VolumeSource: corev1.VolumeSource{
-				HostPath: &corev1.HostPathVolumeSource{Path: "/sys/fs/cgroup"},
-			},
-		},
-		{
 			Name: "containerd-sock",
 			VolumeSource: corev1.VolumeSource{
 				HostPath: &corev1.HostPathVolumeSource{Path: "/run/containerd"},
+			},
+		},
+		{
+			Name: "containerd-data",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: "/var/lib/containerd"},
 			},
 		},
 	}
@@ -260,34 +260,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	return r.Resources.ApplyDaemonSet(ctx, infra, desired)
 }
 
-func ctldArgs(infra *infrav1alpha1.Sandbox0Infra) []string {
-	cfg := ctldManagerConfig(infra)
-	pauseMinMemoryRequest := "10Mi"
-	pauseMinMemoryLimit := "32Mi"
-	pauseMemoryBufferRatio := "1.1"
-	pauseMinCPU := "10m"
-	defaultTTL := "0s"
-	if cfg != nil {
-		pauseMinMemoryRequest = stringOrDefault(cfg.PauseMinMemoryRequest, pauseMinMemoryRequest)
-		pauseMinMemoryLimit = stringOrDefault(cfg.PauseMinMemoryLimit, pauseMinMemoryLimit)
-		pauseMemoryBufferRatio = stringOrDefault(cfg.PauseMemoryBufferRatio, pauseMemoryBufferRatio)
-		pauseMinCPU = stringOrDefault(cfg.PauseMinCPU, pauseMinCPU)
-		if cfg.DefaultSandboxTTL.Duration > 0 {
-			defaultTTL = cfg.DefaultSandboxTTL.Duration.String()
-		}
-	}
-
+func ctldArgs() []string {
 	args := []string{
 		"-http-addr=:8095",
-		"-cgroup-root=/host-sys/fs/cgroup",
 		"-cri-endpoint=/host-run/containerd/containerd.sock",
+		"-containerd-endpoint=/host-run/containerd/containerd.sock",
+		"-containerd-root=/host-run/containerd",
+		"-containerd-host-root=/run/containerd",
+		"-containerd-data-root=/host-var-lib/containerd",
+		"-containerd-host-data-root=/var/lib/containerd",
 		"-volume-portal-root=/var/lib/sandbox0/ctld",
 		"-csi-socket=/csi/csi.sock",
-		fmt.Sprintf("-pause-min-memory-request=%s", pauseMinMemoryRequest),
-		fmt.Sprintf("-pause-min-memory-limit=%s", pauseMinMemoryLimit),
-		fmt.Sprintf("-pause-memory-buffer-ratio=%s", pauseMemoryBufferRatio),
-		fmt.Sprintf("-pause-min-cpu=%s", pauseMinCPU),
-		fmt.Sprintf("-default-sandbox-ttl=%s", defaultTTL),
 	}
 	return args
 }
@@ -359,18 +342,4 @@ func normalizeObjectStorageType(storageType infrav1alpha1.StorageType) string {
 		return "s3"
 	}
 	return string(storageType)
-}
-
-func ctldManagerConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alpha1.ManagerConfig {
-	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.Manager == nil {
-		return nil
-	}
-	return infra.Spec.Services.Manager.Config
-}
-
-func stringOrDefault(value, fallback string) string {
-	if value == "" {
-		return fallback
-	}
-	return value
 }

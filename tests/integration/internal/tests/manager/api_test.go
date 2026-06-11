@@ -683,7 +683,7 @@ func newRootFSApplyRecordingCtldServer(t *testing.T, events *orderedEvents, name
 		if req.ExpectedBaseImageDigest != "sha256:base" || len(req.ExpectedSnapshotParentChain) != 1 || req.ExpectedSnapshotParentChain[0] != "sha256:parent" {
 			t.Fatalf("unexpected rootfs base validation: %+v", req)
 		}
-		if req.Descriptor.Digest != "sha256:diff" || req.Descriptor.ObjectKey != "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar" || !req.Freeze {
+		if req.Descriptor.Digest != "sha256:diff" || req.Descriptor.ObjectKey != "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar" {
 			t.Fatalf("unexpected rootfs descriptor: %+v", req.Descriptor)
 		}
 		events.Add("apply-rootfs")

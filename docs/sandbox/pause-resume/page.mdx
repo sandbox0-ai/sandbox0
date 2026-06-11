@@ -10,7 +10,7 @@ Use this page when you need to:
 - inspect whether a sandbox is running or paused
 
 <Callout variant="info">
-Pause is a runtime lifecycle operation. It does not preserve running processes, memory, sockets, PID state, or live REPL sessions.
+Pause is a runtime lifecycle operation. It checkpoints the writable rootfs and deletes the runtime pod; it does not freeze cgroups or preserve running processes, memory, sockets, PID state, or live REPL sessions.
 </Callout>
 
 <Callout variant="warning">
@@ -27,6 +27,8 @@ Self-hosted deployments must run `ctld` on sandbox nodes for checkpointed pause/
 | Processes, memory, sockets, PID state, live REPL sessions | Not preserved | Deleted |
 
 The rootfs checkpoint covers files written inside the sandbox filesystem, including files outside mounted volumes. It is different from a Sandbox Volume: it is tied to one sandbox identity and does not provide volume sharing, direct file APIs, snapshots, forks, or restore operations.
+
+On nodes using the containerd overlayfs snapshotter, `ctld` checkpoints only the active snapshot upperdir and stores it as a standard OCI layer diff. Other snapshotters, or nodes where the overlayfs upperdir is not readable by `ctld`, fall back to containerd's built-in diff path.
 
 ## Pause A Sandbox
 

@@ -122,8 +122,8 @@ func TestLifecycleProjectorRecordsClaimPauseResumeTerminate(t *testing.T) {
 	if len(recorder.events) != 1 || recorder.events[0].EventType != meteringpkg.EventTypeSandboxClaimed {
 		t.Fatalf("expected claim event, got %#v", recorder.events)
 	}
-	if len(recorder.windows) != 1 || recorder.windows[0].WindowType != meteringpkg.WindowTypeSandboxRequestCount {
-		t.Fatalf("expected request count window, got %#v", recorder.windows)
+	if len(recorder.windows) != 0 {
+		t.Fatalf("claim should not emit windows, got %#v", recorder.windows)
 	}
 
 	pausedAt := now.Add(-2 * time.Minute)
@@ -132,11 +132,11 @@ func TestLifecycleProjectorRecordsClaimPauseResumeTerminate(t *testing.T) {
 	if len(recorder.events) != 2 || recorder.events[1].EventType != meteringpkg.EventTypeSandboxPaused {
 		t.Fatalf("expected pause event, got %#v", recorder.events)
 	}
-	if len(recorder.windows) != 2 || recorder.windows[1].WindowType != meteringpkg.WindowTypeSandboxRuntimeMiBMilliseconds {
+	if len(recorder.windows) != 1 || recorder.windows[0].WindowType != meteringpkg.WindowTypeSandboxRuntimeMiBMilliseconds {
 		t.Fatalf("expected runtime window after pause, got %#v", recorder.windows)
 	}
-	if recorder.windows[1].Value != 491_520_000 {
-		t.Fatalf("paused runtime value = %d, want 491520000", recorder.windows[1].Value)
+	if recorder.windows[0].Value != 491_520_000 {
+		t.Fatalf("paused runtime value = %d, want 491520000", recorder.windows[0].Value)
 	}
 
 	projector.now = func() time.Time { return now.Add(time.Minute) }
@@ -145,8 +145,8 @@ func TestLifecycleProjectorRecordsClaimPauseResumeTerminate(t *testing.T) {
 	if len(recorder.events) != 3 || recorder.events[2].EventType != meteringpkg.EventTypeSandboxResumed {
 		t.Fatalf("expected resume event, got %#v", recorder.events)
 	}
-	if len(recorder.windows) != 2 {
-		t.Fatalf("window count after resume = %d, want 2", len(recorder.windows))
+	if len(recorder.windows) != 1 {
+		t.Fatalf("window count after resume = %d, want 1", len(recorder.windows))
 	}
 
 	projector.now = func() time.Time { return now.Add(2 * time.Minute) }
@@ -154,11 +154,11 @@ func TestLifecycleProjectorRecordsClaimPauseResumeTerminate(t *testing.T) {
 	if len(recorder.events) != 4 || recorder.events[3].EventType != meteringpkg.EventTypeSandboxTerminated {
 		t.Fatalf("expected terminate event, got %#v", recorder.events)
 	}
-	if len(recorder.windows) != 3 || recorder.windows[2].WindowType != meteringpkg.WindowTypeSandboxRuntimeMiBMilliseconds {
+	if len(recorder.windows) != 2 || recorder.windows[1].WindowType != meteringpkg.WindowTypeSandboxRuntimeMiBMilliseconds {
 		t.Fatalf("expected final runtime window, got %#v", recorder.windows)
 	}
-	if recorder.windows[2].Value != 61_440_000 {
-		t.Fatalf("final runtime value = %d, want 61440000", recorder.windows[2].Value)
+	if recorder.windows[1].Value != 61_440_000 {
+		t.Fatalf("final runtime value = %d, want 61440000", recorder.windows[1].Value)
 	}
 }
 
@@ -209,23 +209,17 @@ func TestLifecycleProjectorRecordsSandboxServerlessWindows(t *testing.T) {
 
 	projector.handleDelete(pod)
 
-	if len(recorder.windows) != 2 {
-		t.Fatalf("window count = %d, want 2", len(recorder.windows))
+	if len(recorder.windows) != 1 {
+		t.Fatalf("window count = %d, want 1", len(recorder.windows))
 	}
-	if recorder.windows[0].WindowType != meteringpkg.WindowTypeSandboxRequestCount {
-		t.Fatalf("first window type = %q, want %q", recorder.windows[0].WindowType, meteringpkg.WindowTypeSandboxRequestCount)
+	if recorder.windows[0].WindowType != meteringpkg.WindowTypeSandboxRuntimeMiBMilliseconds {
+		t.Fatalf("window type = %q, want %q", recorder.windows[0].WindowType, meteringpkg.WindowTypeSandboxRuntimeMiBMilliseconds)
 	}
-	if recorder.windows[0].Value != 1 || recorder.windows[0].Unit != meteringpkg.WindowUnitCount {
-		t.Fatalf("request window = %+v, want value=1 unit=count", recorder.windows[0])
+	if recorder.windows[0].Value != 2_048_000 {
+		t.Fatalf("runtime value = %d, want 2048000", recorder.windows[0].Value)
 	}
-	if recorder.windows[1].WindowType != meteringpkg.WindowTypeSandboxRuntimeMiBMilliseconds {
-		t.Fatalf("second window type = %q, want %q", recorder.windows[1].WindowType, meteringpkg.WindowTypeSandboxRuntimeMiBMilliseconds)
-	}
-	if recorder.windows[1].Value != 2_048_000 {
-		t.Fatalf("runtime value = %d, want 2048000", recorder.windows[1].Value)
-	}
-	if recorder.windows[1].Unit != meteringpkg.WindowUnitMiBMilliseconds {
-		t.Fatalf("runtime unit = %q, want %q", recorder.windows[1].Unit, meteringpkg.WindowUnitMiBMilliseconds)
+	if recorder.windows[0].Unit != meteringpkg.WindowUnitMiBMilliseconds {
+		t.Fatalf("runtime unit = %q, want %q", recorder.windows[0].Unit, meteringpkg.WindowUnitMiBMilliseconds)
 	}
 }
 
@@ -249,17 +243,14 @@ func TestLifecycleProjectorTerminatesPausedSandboxWithPausedWindow(t *testing.T)
 	if recorder.events[2].EventType != meteringpkg.EventTypeSandboxTerminated {
 		t.Fatalf("third event type = %q, want %q", recorder.events[2].EventType, meteringpkg.EventTypeSandboxTerminated)
 	}
-	if len(recorder.windows) != 2 {
-		t.Fatalf("window count = %d, want 2", len(recorder.windows))
+	if len(recorder.windows) != 1 {
+		t.Fatalf("window count = %d, want 1", len(recorder.windows))
 	}
-	if recorder.windows[0].WindowType != meteringpkg.WindowTypeSandboxRequestCount {
-		t.Fatalf("first window type = %q, want request count", recorder.windows[0].WindowType)
+	if recorder.windows[0].WindowType != meteringpkg.WindowTypeSandboxRuntimeMiBMilliseconds {
+		t.Fatalf("window type = %q, want runtime", recorder.windows[0].WindowType)
 	}
-	if recorder.windows[1].WindowType != meteringpkg.WindowTypeSandboxRuntimeMiBMilliseconds {
-		t.Fatalf("second window type = %q, want runtime", recorder.windows[1].WindowType)
-	}
-	if recorder.windows[1].Value != 184_320_000 {
-		t.Fatalf("runtime value = %d, want 184320000", recorder.windows[1].Value)
+	if recorder.windows[0].Value != 184_320_000 {
+		t.Fatalf("runtime value = %d, want 184320000", recorder.windows[0].Value)
 	}
 }
 
@@ -274,34 +265,37 @@ func TestLifecycleProjectorRetriesCommitWithoutDuplicatingWindows(t *testing.T) 
 	projector.now = func() time.Time { return now }
 	claimedAt := now.Add(-10 * time.Minute)
 	pausedAt := now.Add(-2 * time.Minute)
+	buildPod := func(paused bool, pausedAtValue string, resourceVersion string) *corev1.Pod {
+		return withSandboxResources(buildSandboxPod(claimedAt, paused, pausedAtValue, resourceVersion), "1", "1Gi")
+	}
 
-	projector.handleUpsert(buildSandboxPod(claimedAt, false, "", "1"))
+	projector.handleUpsert(buildPod(false, "", "1"))
 	if len(recorder.events) != 0 || len(recorder.windows) != 0 {
 		t.Fatalf("failed transaction should not persist facts")
 	}
 
 	recorder.stateUpsertErr = nil
-	projector.handleUpsert(buildSandboxPod(claimedAt, false, "", "1"))
-	projector.handleUpsert(buildSandboxPod(claimedAt, true, pausedAt.Format(time.RFC3339), "2"))
+	projector.handleUpsert(buildPod(false, "", "1"))
+	projector.handleUpsert(buildPod(true, pausedAt.Format(time.RFC3339), "2"))
 
 	recorder.stateUpsertErr = errors.New("boom")
 	projector.now = func() time.Time { return now.Add(time.Minute) }
-	projector.handleUpsert(buildSandboxPod(claimedAt, false, "", "3"))
+	projector.handleUpsert(buildPod(false, "", "3"))
 	if len(recorder.windows) != 1 {
 		t.Fatalf("window count after failed resume = %d, want 1", len(recorder.windows))
 	}
 
 	recorder.stateUpsertErr = nil
 	projector.now = func() time.Time { return now.Add(2 * time.Minute) }
-	projector.handleUpsert(buildSandboxPod(claimedAt, false, "", "3"))
+	projector.handleUpsert(buildPod(false, "", "3"))
 	if len(recorder.events) != 3 {
 		t.Fatalf("event count = %d, want 3", len(recorder.events))
 	}
 	if len(recorder.windows) != 1 {
 		t.Fatalf("window count = %d, want 1", len(recorder.windows))
 	}
-	if recorder.windows[0].WindowType != meteringpkg.WindowTypeSandboxRequestCount {
-		t.Fatalf("window type = %q, want request count", recorder.windows[0].WindowType)
+	if recorder.windows[0].WindowType != meteringpkg.WindowTypeSandboxRuntimeMiBMilliseconds {
+		t.Fatalf("window type = %q, want runtime", recorder.windows[0].WindowType)
 	}
 	if recorder.transactionCalls != 5 {
 		t.Fatalf("transaction_calls = %d, want 5", recorder.transactionCalls)

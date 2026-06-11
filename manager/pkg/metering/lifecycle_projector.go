@@ -163,7 +163,6 @@ func (p *LifecycleProjector) handleUpsert(obj any) {
 			LastResourceVer:   pod.ResourceVersion,
 		}
 		pendingEvents = append(pendingEvents, p.buildSandboxEvent(sandboxID, teamID, userID, templateID, claimedAt, meteringpkg.EventTypeSandboxClaimed, claimedEventID(sandboxID, claimedAt), claimEventData(pod)))
-		pendingWindows = append(pendingWindows, p.buildSandboxRequestWindow(state, teamID, userID, templateID, claimedAt, pod))
 	}
 
 	if paused {
@@ -244,7 +243,6 @@ func (p *LifecycleProjector) handleDelete(obj any) {
 			pendingEvents = append(pendingEvents, p.buildSandboxEvent(sandboxID, teamID, userID, templateID, claimedAt, meteringpkg.EventTypeSandboxClaimed, claimedEventID(sandboxID, claimedAt), claimEventData(pod)))
 			state.ClaimedAt = &claimedAt
 			state.ActiveSince = &claimedAt
-			pendingWindows = append(pendingWindows, p.buildSandboxRequestWindow(state, teamID, userID, templateID, claimedAt, pod))
 		}
 		if pod.Annotations[controller.AnnotationPaused] == "true" {
 			pausedAt := observedAt
@@ -390,30 +388,6 @@ func (p *LifecycleProjector) buildSandboxEvent(sandboxID, teamID, userID, templa
 		ClusterID:   p.clusterID,
 		OccurredAt:  occurredAt,
 		Data:        payload,
-	}
-}
-
-func (p *LifecycleProjector) buildSandboxRequestWindow(state *meteringpkg.SandboxProjectionState, teamID, userID, templateID string, occurredAt time.Time, pod *corev1.Pod) *meteringpkg.Window {
-	if state == nil || occurredAt.IsZero() {
-		return nil
-	}
-	return &meteringpkg.Window{
-		WindowID:    sandboxWindowID(state.SandboxID, meteringpkg.WindowTypeSandboxRequestCount, occurredAt, occurredAt),
-		Producer:    sandboxLifecycleProducer,
-		RegionID:    p.regionID,
-		WindowType:  meteringpkg.WindowTypeSandboxRequestCount,
-		SubjectType: meteringpkg.SubjectTypeSandbox,
-		SubjectID:   state.SandboxID,
-		TeamID:      teamID,
-		UserID:      userID,
-		SandboxID:   state.SandboxID,
-		TemplateID:  templateID,
-		ClusterID:   p.clusterID,
-		WindowStart: occurredAt,
-		WindowEnd:   occurredAt,
-		Value:       1,
-		Unit:        meteringpkg.WindowUnitCount,
-		Data:        requestWindowData(state, pod),
 	}
 }
 
@@ -590,18 +564,6 @@ func bytesToMiBRoundUp(value int64) int64 {
 	}
 	const mib = int64(1024 * 1024)
 	return (value + mib - 1) / mib
-}
-
-func requestWindowData(state *meteringpkg.SandboxProjectionState, pod *corev1.Pod) json.RawMessage {
-	data := map[string]any{
-		"product":             meteringpkg.ProductSandbox,
-		"resource_millicpu":   state.ResourceMillicpu,
-		"resource_memory_mib": state.ResourceMemoryMiB,
-	}
-	if pod != nil {
-		data["claim_type"] = pod.Annotations[controller.AnnotationClaimType]
-	}
-	return mustJSON(data)
 }
 
 func runtimeWindowData(state *meteringpkg.SandboxProjectionState, durationMS int64) json.RawMessage {

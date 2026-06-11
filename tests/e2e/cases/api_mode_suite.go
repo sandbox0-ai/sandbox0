@@ -463,9 +463,6 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 						if err != nil {
 							return err
 						}
-						if !hasMeteringWindow(windows, metering.WindowTypeSandboxRequestCount, pausedResp.SandboxId) {
-							return fmt.Errorf("missing sandbox.request_count window")
-						}
 						if !hasMeteringWindow(windows, metering.WindowTypeSandboxRuntimeMiBMilliseconds, pausedResp.SandboxId) {
 							return fmt.Errorf("missing sandbox.runtime_mib_milliseconds window")
 						}

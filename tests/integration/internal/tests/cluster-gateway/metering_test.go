@@ -60,10 +60,10 @@ func TestClusterGatewayIntegration_MeteringExportContract(t *testing.T) {
 		t.Fatalf("append second event: %v", err)
 	}
 	if err := repo.AppendWindow(ctx, &metering.Window{
-		WindowID:    "sandbox/sb-1/request/1",
-		Producer:    "manager.sandbox_lifecycle",
+		WindowID:    "sandbox/sb-1/egress/1",
+		Producer:    "netd.byte_windows/node-a",
 		RegionID:    "aws-us-east-1",
-		WindowType:  metering.WindowTypeSandboxRequestCount,
+		WindowType:  metering.WindowTypeSandboxEgressBytes,
 		SubjectType: metering.SubjectTypeSandbox,
 		SubjectID:   "sb-1",
 		TeamID:      "team-1",
@@ -72,9 +72,9 @@ func TestClusterGatewayIntegration_MeteringExportContract(t *testing.T) {
 		TemplateID:  "tpl-1",
 		ClusterID:   "cluster-a",
 		WindowStart: baseTime,
-		WindowEnd:   baseTime,
-		Value:       1,
-		Unit:        metering.WindowUnitCount,
+		WindowEnd:   baseTime.Add(time.Minute),
+		Value:       512,
+		Unit:        metering.WindowUnitBytes,
 	}); err != nil {
 		t.Fatalf("append first window: %v", err)
 	}

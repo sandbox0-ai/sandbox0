@@ -29,7 +29,6 @@ const (
 	WindowTypeSandboxIngressBytes = "sandbox.ingress_bytes"
 	WindowTypeSandboxEgressBytes  = "sandbox.egress_bytes"
 
-	WindowTypeSandboxRequestCount           = "sandbox.request_count"
 	WindowTypeSandboxRuntimeMiBMilliseconds = "sandbox.runtime_mib_milliseconds"
 	WindowTypeSandboxVolumeByteHours        = "sandbox.volume_byte_hours"
 	WindowTypeSandboxSnapshotByteHours      = "sandbox.snapshot_byte_hours"

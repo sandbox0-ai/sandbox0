@@ -30,7 +30,9 @@ type countingTLSConn struct {
 func (c *countingTLSConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
 	if n > 0 && c.limiter != nil {
-		c.limiter.wait(c.compiled, c.readDirection, n)
+		if waitErr := c.limiter.wait(c.compiled, c.readDirection, n); waitErr != nil && err == nil {
+			err = waitErr
+		}
 	}
 	atomic.AddInt64(&c.read, int64(n))
 	return n, err
@@ -38,7 +40,9 @@ func (c *countingTLSConn) Read(p []byte) (int, error) {
 
 func (c *countingTLSConn) Write(p []byte) (int, error) {
 	if len(p) > 0 && c.limiter != nil {
-		c.limiter.wait(c.compiled, c.writeDirection, len(p))
+		if err := c.limiter.wait(c.compiled, c.writeDirection, len(p)); err != nil {
+			return 0, err
+		}
 	}
 	n, err := c.Conn.Write(p)
 	atomic.AddInt64(&c.written, int64(n))

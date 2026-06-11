@@ -8,11 +8,15 @@ import (
 	"strings"
 	"time"
 
+	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 	"github.com/sandbox0-ai/sandbox0/pkg/framework"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	e2eutils "github.com/sandbox0-ai/sandbox0/tests/e2e/utils"
+	"gopkg.in/yaml.v3"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -22,6 +26,8 @@ const (
 	netdHTTPFixtureImageEnvVar     = "E2E_NETD_HTTP_FIXTURE_IMAGE"
 	defaultNetdHTTPFixtureImageRef = "sandbox0ai/otemplates:default-v0.2.0"
 	netdHTTPFixturePort            = 8080
+	netdHTTPFixtureLargeBytes      = 256 * 1024
+	netdRedisBandwidthMinElapsed   = 3 * time.Second
 )
 
 type netdHTTPFixture struct {
@@ -65,6 +71,121 @@ func assertNetdTransparentEgressPolicy(env *framework.ScenarioEnv, session *e2eu
 
 	assertNetdHTTPFixtureEventuallySucceeds(env, templateNamespace, sandbox.PodName, fixture.AllowIP, "allow")
 	assertNetdHTTPFixtureEventuallyFails(env, templateNamespace, sandbox.PodName, fixture.DenyIP)
+}
+
+func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {
+	if !netdRedisTeamBandwidthConfigured(env) {
+		Skip("netd Redis team bandwidth limit is not configured for this scenario")
+	}
+	Expect(sandboxID).NotTo(BeEmpty())
+
+	sandbox, status, err := session.GetSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(sandbox).NotTo(BeNil())
+
+	templateNamespace, err := naming.TemplateNamespaceForBuiltin(sandbox.TemplateId)
+	Expect(err).NotTo(HaveOccurred())
+	sandbox = waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
+
+	second := claimSandboxEventually(env, session, "default")
+	secondID := second.SandboxId
+	DeferCleanup(func() {
+		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), secondID)
+	})
+	secondSandbox := waitForSandboxPodReadyEventually(env, session, secondID, templateNamespace)
+
+	fixture := setupNetdHTTPFixture(env, templateNamespace, sandbox.PodName)
+	clearPolicy := apispec.SandboxNetworkPolicy{Mode: apispec.AllowAll}
+	DeferCleanup(func() {
+		_, _, _, _ = session.UpdateNetworkPolicy(env.TestCtx.Context, GinkgoT(), sandboxID, clearPolicy)
+		_, _, _, _ = session.UpdateNetworkPolicy(env.TestCtx.Context, GinkgoT(), secondID, clearPolicy)
+	})
+
+	applyNetdFixtureAllowPolicy(env, session, sandboxID, templateNamespace, sandbox.PodName, fixture.AllowIP)
+	applyNetdFixtureAllowPolicy(env, session, secondID, templateNamespace, secondSandbox.PodName, fixture.AllowIP)
+
+	started := time.Now()
+	errCh := make(chan error, 2)
+	for _, podName := range []string{sandbox.PodName, secondSandbox.PodName} {
+		podName := podName
+		go func() {
+			_, err := execInSandboxPod(env, templateNamespace, podName, netdHTTPFixtureLargeCurlCommand(fixture.AllowIP))
+			errCh <- err
+		}()
+	}
+	for i := 0; i < 2; i++ {
+		Expect(<-errCh).NotTo(HaveOccurred())
+	}
+	elapsed := time.Since(started)
+	Expect(elapsed).To(BeNumerically(">=", netdRedisBandwidthMinElapsed), "expected two same-team downloads to share the cluster-scoped bandwidth bucket")
+}
+
+func netdRedisTeamBandwidthConfigured(env *framework.ScenarioEnv) bool {
+	if env == nil || env.Infra.Name == "" || env.Infra.Namespace == "" {
+		return false
+	}
+	output, err := framework.KubectlOutput(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		"get", "daemonset", env.Infra.Name+"-netd",
+		"--namespace", env.Infra.Namespace,
+		"-o", "json",
+	)
+	if err != nil {
+		return false
+	}
+	var ds appsv1.DaemonSet
+	if err := json.Unmarshal([]byte(output), &ds); err != nil {
+		return false
+	}
+	configMapName := ""
+	for _, volume := range ds.Spec.Template.Spec.Volumes {
+		if volume.Name == "config" && volume.ConfigMap != nil {
+			configMapName = volume.ConfigMap.Name
+			break
+		}
+	}
+	if configMapName == "" {
+		return false
+	}
+	output, err = framework.KubectlOutput(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		"get", "configmap", configMapName,
+		"--namespace", env.Infra.Namespace,
+		"-o", "json",
+	)
+	if err != nil {
+		return false
+	}
+	var cm corev1.ConfigMap
+	if err := json.Unmarshal([]byte(output), &cm); err != nil {
+		return false
+	}
+	var cfg apiconfig.NetdConfig
+	if err := yaml.Unmarshal([]byte(cm.Data["config.yaml"]), &cfg); err != nil {
+		return false
+	}
+	return strings.TrimSpace(cfg.RedisURL) != "" &&
+		(cfg.TeamEgressBandwidthBytesPerSecond > 0 || cfg.TeamIngressBandwidthBytesPerSecond > 0)
+}
+
+func applyNetdFixtureAllowPolicy(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID, namespace, podName, allowIP string) {
+	rules := []apispec.TrafficRule{
+		buildNetdHTTPRule("allow-http-fixture", apispec.Allow, allowIP),
+	}
+	policy, status, apiErr, err := session.UpdateNetworkPolicy(env.TestCtx.Context, GinkgoT(), sandboxID, apispec.SandboxNetworkPolicy{
+		Mode: apispec.BlockAll,
+		Egress: &apispec.NetworkEgressPolicy{
+			TrafficRules: &rules,
+		},
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(apiErr).To(BeNil())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(policy).NotTo(BeNil())
+	waitForSandboxNetworkPolicyApplied(env, namespace, podName)
 }
 
 func setupNetdHTTPFixture(env *framework.ScenarioEnv, sandboxNamespace, sandboxPodName string) *netdHTTPFixture {
@@ -164,6 +285,7 @@ spec:
           rm -rf "$dir"
           mkdir -p "$dir"
           printf '%[4]s\n' > "$dir/index.html"
+          python3 -c 'from pathlib import Path; Path("/tmp/sandbox0-e2e-netd-http/large.bin").write_bytes(b"x" * %[7]d)'
           exec python3 -m http.server %[6]d --bind 0.0.0.0 -d "$dir"
       ports:
         - name: http
@@ -175,7 +297,7 @@ spec:
           port: http
         initialDelaySeconds: 1
         periodSeconds: 2
-`, namespace, imageRef, name, body, netdHTTPFixtureNodeNameYAML(nodeName), netdHTTPFixturePort)
+`, namespace, imageRef, name, body, netdHTTPFixtureNodeNameYAML(nodeName), netdHTTPFixturePort, netdHTTPFixtureLargeBytes)
 }
 
 func netdHTTPFixtureNodeNameYAML(nodeName string) string {
@@ -252,4 +374,8 @@ func assertNetdHTTPFixtureEventuallyFails(env *framework.ScenarioEnv, namespace,
 
 func netdHTTPFixtureCurlCommand(ip string) string {
 	return fmt.Sprintf("curl -4 -fsS --connect-timeout 2 --max-time 5 http://%s:%d/", ip, netdHTTPFixturePort)
+}
+
+func netdHTTPFixtureLargeCurlCommand(ip string) string {
+	return fmt.Sprintf("curl -4 -fsS --connect-timeout 2 --max-time 30 -o /dev/null http://%s:%d/large.bin", ip, netdHTTPFixturePort)
 }

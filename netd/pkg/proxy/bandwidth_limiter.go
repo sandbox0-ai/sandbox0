@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"sync"
@@ -28,32 +29,48 @@ type bandwidthBucket struct {
 	last   time.Time
 }
 
+type teamBandwidthLimiter interface {
+	reserve(ctx context.Context, compiled *policy.CompiledPolicy, direction bandwidthDirection, bytes int) (time.Duration, error)
+	rate(direction bandwidthDirection) int64
+	burstBytes(direction bandwidthDirection) int64
+	Close() error
+}
+
 type bandwidthLimiter struct {
 	mu          sync.Mutex
 	egressRate  int64
 	ingressRate int64
 	burst       int64
+	team        teamBandwidthLimiter
 	buckets     map[bandwidthKey]*bandwidthBucket
 	now         func() time.Time
 	sleep       func(time.Duration)
 }
 
-func newBandwidthLimiter(cfg *config.NetdConfig) *bandwidthLimiter {
-	if cfg == nil || (cfg.EgressBandwidthBytesPerSecond <= 0 && cfg.IngressBandwidthBytesPerSecond <= 0) {
-		return nil
+func newBandwidthLimiter(ctx context.Context, cfg *config.NetdConfig) (*bandwidthLimiter, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	team, err := newRedisTeamBandwidthLimiter(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.EgressBandwidthBytesPerSecond <= 0 && cfg.IngressBandwidthBytesPerSecond <= 0 && team == nil {
+		return nil, nil
 	}
 	return &bandwidthLimiter{
 		egressRate:  cfg.EgressBandwidthBytesPerSecond,
 		ingressRate: cfg.IngressBandwidthBytesPerSecond,
 		burst:       cfg.BandwidthBurstBytes,
+		team:        team,
 		buckets:     make(map[bandwidthKey]*bandwidthBucket),
 		now:         time.Now,
 		sleep:       time.Sleep,
-	}
+	}, nil
 }
 
 func (l *bandwidthLimiter) limitedWriter(writer io.Writer, compiled *policy.CompiledPolicy, direction bandwidthDirection) io.Writer {
-	if l == nil || writer == nil || l.rate(direction) <= 0 {
+	if l == nil || writer == nil || !l.enabled(direction) {
 		return writer
 	}
 	return &bandwidthLimitedWriter{
@@ -64,23 +81,44 @@ func (l *bandwidthLimiter) limitedWriter(writer io.Writer, compiled *policy.Comp
 	}
 }
 
-func (l *bandwidthLimiter) wait(compiled *policy.CompiledPolicy, direction bandwidthDirection, bytes int) {
+func (l *bandwidthLimiter) wait(compiled *policy.CompiledPolicy, direction bandwidthDirection, bytes int) error {
 	if l == nil || bytes <= 0 {
-		return
+		return nil
 	}
-	rate := l.rate(direction)
-	if rate <= 0 {
-		return
+	delay, err := l.reserveDelay(context.Background(), compiled, direction, bytes)
+	if err != nil {
+		return err
 	}
-	delay := l.reserve(compiled, direction, bytes, rate)
 	if delay <= 0 {
-		return
+		return nil
 	}
 	sleep := l.sleep
 	if sleep == nil {
 		sleep = time.Sleep
 	}
 	sleep(delay)
+	return nil
+}
+
+func (l *bandwidthLimiter) reserveDelay(ctx context.Context, compiled *policy.CompiledPolicy, direction bandwidthDirection, bytes int) (time.Duration, error) {
+	if l == nil || bytes <= 0 {
+		return 0, nil
+	}
+	var delay time.Duration
+	rate := l.rate(direction)
+	if rate > 0 {
+		delay = l.reserve(compiled, direction, bytes, rate)
+	}
+	if l.team != nil && l.team.rate(direction) > 0 {
+		teamDelay, err := l.team.reserve(ctx, compiled, direction, bytes)
+		if err != nil {
+			return 0, err
+		}
+		if teamDelay > delay {
+			delay = teamDelay
+		}
+	}
+	return delay, nil
 }
 
 func (l *bandwidthLimiter) reserve(compiled *policy.CompiledPolicy, direction bandwidthDirection, bytes int, rate int64) time.Duration {
@@ -122,6 +160,16 @@ func (l *bandwidthLimiter) reserve(compiled *policy.CompiledPolicy, direction ba
 	return bucket.last.Sub(now)
 }
 
+func (l *bandwidthLimiter) enabled(direction bandwidthDirection) bool {
+	if l == nil {
+		return false
+	}
+	if l.rate(direction) > 0 {
+		return true
+	}
+	return l.team != nil && l.team.rate(direction) > 0
+}
+
 func (l *bandwidthLimiter) rate(direction bandwidthDirection) int64 {
 	if l == nil {
 		return 0
@@ -144,6 +192,44 @@ func (l *bandwidthLimiter) burstBytes(rate int64) int64 {
 		return l.burst
 	}
 	return rate
+}
+
+func (l *bandwidthLimiter) maxChunkBytes(direction bandwidthDirection) int {
+	if l == nil {
+		return 0
+	}
+	var max int64
+	if rate := l.rate(direction); rate > 0 {
+		max = positiveMin(max, l.burstBytes(rate))
+	}
+	if l.team != nil && l.team.rate(direction) > 0 {
+		max = positiveMin(max, l.team.burstBytes(direction))
+	}
+	if max <= 0 {
+		return 0
+	}
+	maxInt := int64(^uint(0) >> 1)
+	if max > maxInt {
+		return int(maxInt)
+	}
+	return int(max)
+}
+
+func positiveMin(current, candidate int64) int64 {
+	if candidate <= 0 {
+		return current
+	}
+	if current <= 0 || candidate < current {
+		return candidate
+	}
+	return current
+}
+
+func (l *bandwidthLimiter) Close() error {
+	if l == nil || l.team == nil {
+		return nil
+	}
+	return l.team.Close()
 }
 
 func (l *bandwidthLimiter) currentTime() time.Time {
@@ -175,11 +261,10 @@ func (w *bandwidthLimitedWriter) Write(p []byte) (int, error) {
 	if w == nil || w.writer == nil {
 		return 0, fmt.Errorf("bandwidth limited writer is not configured")
 	}
-	rate := w.limiter.rate(w.direction)
-	if rate <= 0 {
+	if w.limiter == nil || !w.limiter.enabled(w.direction) {
 		return w.writer.Write(p)
 	}
-	maxChunk := int(w.limiter.burstBytes(rate))
+	maxChunk := w.limiter.maxChunkBytes(w.direction)
 	if maxChunk <= 0 || maxChunk > len(p) {
 		maxChunk = len(p)
 	}
@@ -190,7 +275,9 @@ func (w *bandwidthLimitedWriter) Write(p []byte) (int, error) {
 			end = len(p)
 		}
 		chunk := p[written:end]
-		w.limiter.wait(w.compiled, w.direction, len(chunk))
+		if err := w.limiter.wait(w.compiled, w.direction, len(chunk)); err != nil {
+			return written, err
+		}
 		n, err := w.writer.Write(chunk)
 		written += n
 		if err != nil {

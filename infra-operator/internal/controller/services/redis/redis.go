@@ -255,6 +255,30 @@ func ApplyGatewayRateLimitConfig(ctx context.Context, c client.Client, infra *in
 	return nil
 }
 
+// ApplyNetdRedisConfig injects region-level Redis settings into netd process
+// config. Without spec.redis, netd keeps local-only bandwidth limiting.
+func ApplyNetdRedisConfig(ctx context.Context, c client.Client, infra *infrav1alpha1.Sandbox0Infra, cfg *apiconfig.NetdConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	redisCfg, ok, err := GetGatewayRedisConfig(ctx, c, infra)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		cfg.RedisURL = ""
+		cfg.RedisKeyPrefix = ""
+		cfg.RedisTimeout = metav1.Duration{}
+		cfg.RedisFailOpen = false
+		return nil
+	}
+	cfg.RedisURL = redisCfg.URL
+	cfg.RedisKeyPrefix = redisCfg.KeyPrefix
+	cfg.RedisTimeout = redisCfg.Timeout
+	cfg.RedisFailOpen = redisCfg.FailOpen
+	return nil
+}
+
 func applyGatewayRedisConfig(cfg *apiconfig.GatewayConfig, redisCfg GatewayRedisConfig, ok bool) {
 	if !ok {
 		cfg.RedisURL = ""

@@ -148,6 +148,19 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 		}
 		return nil, err
 	}
+	bandwidthLimiter, err := newBandwidthLimiter(context.Background(), cfg)
+	if err != nil {
+		_ = httpLn.Close()
+		_ = httpsLn.Close()
+		_ = udpConn.Close()
+		if udpHTTPConn != nil && udpHTTPConn != udpConn {
+			_ = udpHTTPConn.Close()
+		}
+		if auditor != nil {
+			_ = auditor.Close()
+		}
+		return nil, err
+	}
 	server := &Server{
 		cfg:              cfg,
 		store:            store,
@@ -168,7 +181,7 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 		dnsCache:         newDNSHostCache(),
 		udpReplyDialer:   dialUDPTransparent,
 		auditor:          auditor,
-		bandwidthLimiter: newBandwidthLimiter(cfg),
+		bandwidthLimiter: bandwidthLimiter,
 		exitCh:           make(chan error, 1),
 	}
 	if cfg.EgressAuthResolverURL != "" {
@@ -244,6 +257,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	if s.auditor != nil {
 		if closeErr := s.auditor.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}
+	if s.bandwidthLimiter != nil {
+		if closeErr := s.bandwidthLimiter.Close(); closeErr != nil && err == nil {
 			err = closeErr
 		}
 	}
@@ -1223,11 +1241,11 @@ func (s *Server) bandwidthLimitedWriter(writer io.Writer, compiled *policy.Compi
 	return s.bandwidthLimiter.limitedWriter(writer, compiled, direction)
 }
 
-func (s *Server) waitBandwidth(compiled *policy.CompiledPolicy, direction bandwidthDirection, bytes int) {
+func (s *Server) waitBandwidth(compiled *policy.CompiledPolicy, direction bandwidthDirection, bytes int) error {
 	if s == nil || s.bandwidthLimiter == nil {
-		return
+		return nil
 	}
-	s.bandwidthLimiter.wait(compiled, direction, bytes)
+	return s.bandwidthLimiter.wait(compiled, direction, bytes)
 }
 
 func (s *Server) newFlowAudit(transport string) *flowAudit {
@@ -1288,7 +1306,9 @@ type countingConn struct {
 func (c *countingConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
 	if n > 0 && c.limiter != nil {
-		c.limiter.wait(c.compiled, c.readDirection, n)
+		if waitErr := c.limiter.wait(c.compiled, c.readDirection, n); waitErr != nil && err == nil {
+			err = waitErr
+		}
 	}
 	atomic.AddInt64(&c.read, int64(n))
 	return n, err
@@ -1296,7 +1316,9 @@ func (c *countingConn) Read(p []byte) (int, error) {
 
 func (c *countingConn) Write(p []byte) (int, error) {
 	if len(p) > 0 && c.limiter != nil {
-		c.limiter.wait(c.compiled, c.writeDirection, len(p))
+		if err := c.limiter.wait(c.compiled, c.writeDirection, len(p)); err != nil {
+			return 0, err
+		}
 	}
 	n, err := c.Conn.Write(p)
 	atomic.AddInt64(&c.written, int64(n))

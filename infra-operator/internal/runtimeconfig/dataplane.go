@@ -141,6 +141,9 @@ func ToNetd(spec *infrav1alpha1.NetdConfig) *apiconfig.NetdConfig {
 	cfg.EgressBandwidthBytesPerSecond = spec.EgressBandwidthBytesPerSecond
 	cfg.IngressBandwidthBytesPerSecond = spec.IngressBandwidthBytesPerSecond
 	cfg.BandwidthBurstBytes = spec.BandwidthBurstBytes
+	cfg.TeamEgressBandwidthBytesPerSecond = spec.TeamEgressBandwidthBytesPerSecond
+	cfg.TeamIngressBandwidthBytesPerSecond = spec.TeamIngressBandwidthBytesPerSecond
+	cfg.TeamBandwidthBurstBytes = spec.TeamBandwidthBurstBytes
 	cfg.DNSPort = spec.DNSPort
 	cfg.PlatformAllowedCIDRs = cloneStrings(spec.PlatformAllowedCIDRs)
 	cfg.PlatformDeniedCIDRs = cloneStrings(spec.PlatformDeniedCIDRs)

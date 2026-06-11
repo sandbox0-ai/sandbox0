@@ -241,7 +241,9 @@ func writeCounted(req *adapterRequest, conn net.Conn, payload []byte, upstream b
 		if upstream {
 			direction = bandwidthEgress
 		}
-		req.Server.waitBandwidth(req.Compiled, direction, len(payload))
+		if err := req.Server.waitBandwidth(req.Compiled, direction, len(payload)); err != nil {
+			return err
+		}
 	}
 	n, err := conn.Write(payload)
 	if upstream {

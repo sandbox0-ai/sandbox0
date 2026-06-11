@@ -294,6 +294,7 @@ func (in *NetdConfig) DeepCopyInto(out *NetdConfig) {
 		**out = **in
 	}
 	out.ProxyUpstreamTimeout = in.ProxyUpstreamTimeout
+	out.RedisTimeout = in.RedisTimeout
 	if in.PlatformAllowedCIDRs != nil {
 		in, out := &in.PlatformAllowedCIDRs, &out.PlatformAllowedCIDRs
 		*out = make([]string, len(*in))

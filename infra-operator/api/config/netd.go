@@ -103,6 +103,27 @@ type NetdConfig struct {
 	// +optional
 	// Token bucket burst in bytes for bandwidth limiting. Zero uses one second of the configured rate.
 	BandwidthBurstBytes int64 `yaml:"bandwidth_burst_bytes" json:"bandwidthBurstBytes"`
+	// +optional
+	// Cluster-scoped per-team egress bandwidth limit in bytes per second. Requires Redis. Zero disables throttling.
+	TeamEgressBandwidthBytesPerSecond int64 `yaml:"team_egress_bandwidth_bytes_per_second" json:"teamEgressBandwidthBytesPerSecond"`
+	// +optional
+	// Cluster-scoped per-team ingress bandwidth limit in bytes per second. Requires Redis. Zero disables throttling.
+	TeamIngressBandwidthBytesPerSecond int64 `yaml:"team_ingress_bandwidth_bytes_per_second" json:"teamIngressBandwidthBytesPerSecond"`
+	// +optional
+	// Token bucket burst in bytes for team bandwidth limiting. Zero uses one second of the configured rate.
+	TeamBandwidthBurstBytes int64 `yaml:"team_bandwidth_burst_bytes" json:"teamBandwidthBurstBytes"`
+	// +optional
+	// RedisURL configures the Redis backend used by cluster-scoped team bandwidth limiting.
+	RedisURL string `yaml:"redis_url" json:"-"`
+	// +optional
+	// RedisKeyPrefix prefixes Redis keys used by netd.
+	RedisKeyPrefix string `yaml:"redis_key_prefix" json:"-"`
+	// +optional
+	// RedisTimeout bounds each Redis operation.
+	RedisTimeout metav1.Duration `yaml:"redis_timeout" json:"-"`
+	// +optional
+	// RedisFailOpen allows traffic when Redis is temporarily unavailable.
+	RedisFailOpen bool `yaml:"redis_fail_open" json:"-"`
 
 	// Ports and CIDRs
 	// +optional

@@ -32,6 +32,10 @@ spec:
     enabled: true
     rootDomain: sandbox0.app
     regionId: aws-us-east-1
+  redis:
+    type: builtin
+    builtin:
+      enabled: true
   # registry:
   #   # Builtin registry defaults to NodePort for easy kind debugging.
   #   provider: builtin
@@ -105,6 +109,8 @@ spec:
       config:
         egressAuthEnabled: true
         egressAuthFailurePolicy: fail-closed
+        teamIngressBandwidthBytesPerSecond: 65536
+        teamBandwidthBurstBytes: 65536
     manager:
       enabled: true
       replicas: 1

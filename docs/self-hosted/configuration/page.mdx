@@ -162,7 +162,7 @@ spec:
 
 ### Shared Redis Rate Limiting
 
-Gateway rate limiting defaults to process-local memory. Configure `spec.redis` when gateway replicas need a shared Redis backend; infra-operator injects the Redis rate-limit settings into gateway services.
+Gateway request rate limiting defaults to process-local memory. Configure `spec.redis` when gateway replicas need a shared Redis backend. The same Redis backend is also used by `netd` when cluster-scoped team bandwidth limits are configured.
 
 ```yaml
 spec:
@@ -364,10 +364,15 @@ Examples:
 - `services.storageProxy.config.cacheSizeLimit`, `logSizeLimit`, `volumePortalCacheSizeLimit`, and `volumePortalRootMinFree` cap node-local storage used by storage-proxy cache, logs, and mounted volume portals
 - `services.storageProxy.config.objectEncryptionEnabled` controls application-layer encryption for S0FS object storage and node-local volume cache files; it is enabled by default
 - `services.netd.config.egressBandwidthBytesPerSecond`, `ingressBandwidthBytesPerSecond`, and `bandwidthBurstBytes` apply per-sandbox bandwidth throttling when set above zero
+- `services.netd.config.teamEgressBandwidthBytesPerSecond`, `teamIngressBandwidthBytesPerSecond`, and `teamBandwidthBurstBytes` apply cluster-scoped per-team aggregate throttling when set above zero and `spec.redis` is configured
 - `services.netd.config.*` also controls proxy ports, policy enforcement, and node-level networking behavior
 
 ```yaml
 spec:
+    redis:
+        type: builtin
+        builtin:
+            enabled: true
     services:
         storageProxy:
             config:
@@ -384,6 +389,9 @@ spec:
                 egressBandwidthBytesPerSecond: 10485760
                 ingressBandwidthBytesPerSecond: 10485760
                 bandwidthBurstBytes: 10485760
+                teamEgressBandwidthBytesPerSecond: 104857600
+                teamIngressBandwidthBytesPerSecond: 104857600
+                teamBandwidthBurstBytes: 104857600
 ```
 
 Use `spec.sandboxNodePlacement` for the shared node placement consumed by sandbox template Pods, `netd`, and `ctld`. `infra-operator` owns `sandbox0.ai/data-plane-ready` and adds it to sandbox Pod placement after the required node-local components are Ready. The older `services.netd.nodeSelector` and `services.netd.tolerations` fields remain as compatibility aliases when the shared placement is unset.

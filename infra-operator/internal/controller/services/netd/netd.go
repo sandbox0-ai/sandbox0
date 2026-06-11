@@ -16,6 +16,7 @@ import (
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	redissvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/redis"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
@@ -73,6 +74,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 			return err
 		}
 		config.ClusterDNSCIDR = cidr
+	}
+	if err := redissvc.ApplyNetdRedisConfig(ctx, r.Resources.Client, compiledPlan.Scope.Owner(), config); err != nil {
+		return err
 	}
 	if dsn, err := compiledPlan.DatabaseDSN(ctx, r.Resources.Client); err == nil {
 		config.DatabaseURL = dsn

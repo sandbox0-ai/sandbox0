@@ -257,6 +257,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertNetdTransparentEgressPolicy(env, session, sandboxID)
 				})
 
+				It("enforces Redis-backed team bandwidth through netd", func() {
+					assertNetdRedisTeamBandwidthLimit(env, session, sandboxID)
+				})
+
 				It("enforces egress quota", func() {
 					assertEgressQuota(env, session, sandboxID)
 				})

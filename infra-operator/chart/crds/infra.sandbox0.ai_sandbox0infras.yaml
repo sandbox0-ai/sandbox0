@@ -3033,6 +3033,26 @@ spec:
                           shutdownDelay:
                             default: 2s
                             type: string
+                          teamBandwidthBurstBytes:
+                            description: Token bucket burst in bytes for team bandwidth
+                              limiting. Zero uses one second of the configured rate.
+                            format: int64
+                            minimum: 0
+                            type: integer
+                          teamEgressBandwidthBytesPerSecond:
+                            description: Cluster-scoped per-team egress bandwidth
+                              limit in bytes per second. Requires spec.redis. Zero
+                              disables throttling.
+                            format: int64
+                            minimum: 0
+                            type: integer
+                          teamIngressBandwidthBytesPerSecond:
+                            description: Cluster-scoped per-team ingress bandwidth
+                              limit in bytes per second. Requires spec.redis. Zero
+                              disables throttling.
+                            format: int64
+                            minimum: 0
+                            type: integer
                           useEbpf:
                             type: boolean
                           useEdt:

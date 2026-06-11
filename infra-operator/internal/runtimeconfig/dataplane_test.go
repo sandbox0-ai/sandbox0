@@ -49,11 +49,19 @@ func TestToStorageProxyPreservesS0FSLayoutConfig(t *testing.T) {
 
 func TestToNetdPreservesBandwidthLimits(t *testing.T) {
 	cfg := ToNetd(&infrav1alpha1.NetdConfig{
-		EgressBandwidthBytesPerSecond:  1024,
-		IngressBandwidthBytesPerSecond: 2048,
-		BandwidthBurstBytes:            4096,
+		EgressBandwidthBytesPerSecond:      1024,
+		IngressBandwidthBytesPerSecond:     2048,
+		BandwidthBurstBytes:                4096,
+		TeamEgressBandwidthBytesPerSecond:  8192,
+		TeamIngressBandwidthBytesPerSecond: 16384,
+		TeamBandwidthBurstBytes:            32768,
 	})
-	if cfg.EgressBandwidthBytesPerSecond != 1024 || cfg.IngressBandwidthBytesPerSecond != 2048 || cfg.BandwidthBurstBytes != 4096 {
+	if cfg.EgressBandwidthBytesPerSecond != 1024 ||
+		cfg.IngressBandwidthBytesPerSecond != 2048 ||
+		cfg.BandwidthBurstBytes != 4096 ||
+		cfg.TeamEgressBandwidthBytesPerSecond != 8192 ||
+		cfg.TeamIngressBandwidthBytesPerSecond != 16384 ||
+		cfg.TeamBandwidthBurstBytes != 32768 {
 		t.Fatalf("bandwidth limits were not preserved: %#v", cfg)
 	}
 }

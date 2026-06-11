@@ -680,6 +680,18 @@ type NetdConfig struct {
 	// Token bucket burst in bytes for bandwidth limiting. Zero uses one second of the configured rate.
 	BandwidthBurstBytes int64 `json:"bandwidthBurstBytes,omitempty"`
 	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// Cluster-scoped per-team egress bandwidth limit in bytes per second. Requires spec.redis. Zero disables throttling.
+	TeamEgressBandwidthBytesPerSecond int64 `json:"teamEgressBandwidthBytesPerSecond,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// Cluster-scoped per-team ingress bandwidth limit in bytes per second. Requires spec.redis. Zero disables throttling.
+	TeamIngressBandwidthBytesPerSecond int64 `json:"teamIngressBandwidthBytesPerSecond,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// Token bucket burst in bytes for team bandwidth limiting. Zero uses one second of the configured rate.
+	TeamBandwidthBurstBytes int64 `json:"teamBandwidthBurstBytes,omitempty"`
+	// +optional
 	// +kubebuilder:default=53
 	DNSPort int `json:"dnsPort,omitempty"`
 	// +optional

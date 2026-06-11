@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
@@ -267,6 +268,68 @@ func TestReconcileUsesCompiledPlanForEgressAuthResolverURL(t *testing.T) {
 	if got := cfg.EgressAuthResolverURL; got != compiled.Netd.EgressAuthResolverURL {
 		t.Fatalf("expected resolver URL %q, got %q", compiled.Netd.EgressAuthResolverURL, got)
 	}
+}
+
+func TestReconcileInjectsRedisConfigForTeamBandwidth(t *testing.T) {
+	failOpen := true
+	infra := newNetdTestInfra()
+	infra.Spec.Redis = &infrav1alpha1.RedisConfig{
+		Type:             infrav1alpha1.RedisTypeBuiltin,
+		KeyPrefix:        "custom",
+		OperationTimeout: metav1.Duration{Duration: 250 * time.Millisecond},
+		FailOpen:         &failOpen,
+	}
+	infra.Spec.Services.Netd.Config.TeamEgressBandwidthBytesPerSecond = 1024
+	infra.Spec.Services.Netd.Config.TeamIngressBandwidthBytesPerSecond = 2048
+	infra.Spec.Services.Netd.Config.TeamBandwidthBurstBytes = 4096
+
+	client, scheme := newNetdTestClient(t, infra.DeepCopy())
+	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
+	if err := reconciler.Reconcile(context.Background(), "ghcr.io/sandbox0-ai/sandbox0", "latest", infraplan.Compile(infra)); err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+	cfg := getReconciledNetdConfig(t, client, infra)
+	if cfg.RedisURL != "redis://demo-redis.sandbox0-system.svc:6379/0" {
+		t.Fatalf("RedisURL = %q", cfg.RedisURL)
+	}
+	if cfg.RedisKeyPrefix != "custom" {
+		t.Fatalf("RedisKeyPrefix = %q", cfg.RedisKeyPrefix)
+	}
+	if cfg.RedisTimeout.Duration != 250*time.Millisecond {
+		t.Fatalf("RedisTimeout = %s", cfg.RedisTimeout.Duration)
+	}
+	if !cfg.RedisFailOpen {
+		t.Fatal("RedisFailOpen = false, want true")
+	}
+	if cfg.TeamEgressBandwidthBytesPerSecond != 1024 ||
+		cfg.TeamIngressBandwidthBytesPerSecond != 2048 ||
+		cfg.TeamBandwidthBurstBytes != 4096 {
+		t.Fatalf("team bandwidth limits were not preserved: %#v", cfg)
+	}
+}
+
+func getReconciledNetdConfig(t *testing.T, client ctrlclient.Client, infra *infrav1alpha1.Sandbox0Infra) *apiconfig.NetdConfig {
+	t.Helper()
+	ds := &appsv1.DaemonSet{}
+	if err := client.Get(context.Background(), types.NamespacedName{
+		Name:      infra.Name + "-netd",
+		Namespace: infra.Namespace,
+	}, ds); err != nil {
+		t.Fatalf("expected daemonset: %v", err)
+	}
+	configMapName := netdConfigMapName(t, ds)
+	configMap := &corev1.ConfigMap{}
+	if err := client.Get(context.Background(), types.NamespacedName{
+		Name:      configMapName,
+		Namespace: infra.Namespace,
+	}, configMap); err != nil {
+		t.Fatalf("expected configmap to be created: %v", err)
+	}
+	cfg := &apiconfig.NetdConfig{}
+	if err := yaml.Unmarshal([]byte(configMap.Data["config.yaml"]), cfg); err != nil {
+		t.Fatalf("failed to parse netd config: %v", err)
+	}
+	return cfg
 }
 
 func newNetdTestClient(t *testing.T, objects ...ctrlclient.Object) (ctrlclient.Client, *runtime.Scheme) {

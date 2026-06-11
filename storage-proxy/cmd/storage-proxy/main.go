@@ -33,7 +33,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volumelock"
 	"github.com/sirupsen/logrus"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 )
 
 func main() {
@@ -57,13 +56,11 @@ func main() {
 	}
 	logrusLogger.SetLevel(level)
 
-	// Setup zap logger for new components
-	zapConfig := zap.NewProductionConfig()
-	zapConfig.Level = zap.NewAtomicLevelAt(zapcore.InfoLevel)
-	if cfg.LogLevel == "debug" {
-		zapConfig.Level = zap.NewAtomicLevelAt(zapcore.DebugLevel)
-	}
-	zapLogger, err := zapConfig.Build()
+	// Setup zap logger for new components.
+	zapLogger, err := observability.NewLogger(observability.LoggerConfig{
+		ServiceName: "storage-proxy",
+		Level:       cfg.LogLevel,
+	})
 	if err != nil {
 		logrusLogger.WithError(err).Fatal("Failed to create zap logger")
 	}
@@ -116,10 +113,10 @@ func main() {
 		if err := runMigrations(context.Background(), pool, cfg.DatabaseSchema, zapLogger); err != nil {
 			zapLogger.Fatal("Failed to run database migrations", zap.Error(err))
 		}
-		if err := metering.RunMigrations(context.Background(), pool, &zapLoggerAdapter{logger: zapLogger}); err != nil {
+		if err := metering.RunMigrations(context.Background(), pool, observability.NewMigrateLogger(zapLogger)); err != nil {
 			zapLogger.Fatal("Failed to run metering migrations", zap.Error(err))
 		}
-		if err := quota.RunMigrations(context.Background(), pool, &zapLoggerAdapter{logger: zapLogger}); err != nil {
+		if err := quota.RunMigrations(context.Background(), pool, observability.NewMigrateLogger(zapLogger)); err != nil {
 			zapLogger.Fatal("Failed to run quota migrations", zap.Error(err))
 		}
 
@@ -355,18 +352,6 @@ func initDatabase(ctx context.Context, databaseURL string, cfg *config.StoragePr
 	return pool, nil
 }
 
-type zapLoggerAdapter struct {
-	logger *zap.Logger
-}
-
-func (z *zapLoggerAdapter) Printf(format string, args ...any) {
-	z.logger.Info(fmt.Sprintf(format, args...))
-}
-
-func (z *zapLoggerAdapter) Fatalf(format string, args ...any) {
-	z.logger.Fatal(fmt.Sprintf(format, args...))
-}
-
 // runMigrations runs database migrations on startup
 func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, logger *zap.Logger) error {
 	logger.Info("Running database migrations")
@@ -375,12 +360,9 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, logge
 		schema = "storage_proxy"
 	}
 
-	// Create a migration logger that writes to zap
-	migrateLogger := &zapLogger{logger: logger}
-
 	if err := migrate.Up(ctx, pool, ".",
 		migrate.WithBaseFS(spmigrations.FS),
-		migrate.WithLogger(migrateLogger),
+		migrate.WithLogger(observability.NewMigrateLogger(logger)),
 		migrate.WithSchema(schema),
 	); err != nil {
 		return fmt.Errorf("migrate up: %w", err)
@@ -419,19 +401,6 @@ func runStorageMeteringFlushLoop(ctx context.Context, repo *metering.Repository,
 			}
 		}
 	}
-}
-
-// zapLogger adapts zap.Logger to migrate.Logger interface
-type zapLogger struct {
-	logger *zap.Logger
-}
-
-func (z *zapLogger) Printf(format string, args ...any) {
-	z.logger.Info(fmt.Sprintf(format, args...))
-}
-
-func (z *zapLogger) Fatalf(format string, args ...any) {
-	z.logger.Fatal(fmt.Sprintf(format, args...))
 }
 
 type pgxPoolClockAdapter struct {

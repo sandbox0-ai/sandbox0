@@ -11,13 +11,15 @@ import (
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/daemon"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 )
 
 func main() {
 	cfg := config.LoadNetdConfig()
 
-	logger, err := initLogger(cfg.LogLevel)
+	logger, err := observability.NewLogger(observability.LoggerConfig{
+		ServiceName: "netd",
+		Level:       cfg.LogLevel,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize logger: %v\n", err)
 		os.Exit(1)
@@ -52,44 +54,4 @@ func main() {
 	if err := daemon.Run(ctx); err != nil {
 		logger.Fatal("netd exited with error", zap.Error(err))
 	}
-}
-
-func initLogger(level string) (*zap.Logger, error) {
-	var logLevel zapcore.Level
-	switch level {
-	case "debug":
-		logLevel = zapcore.DebugLevel
-	case "info":
-		logLevel = zapcore.InfoLevel
-	case "warn":
-		logLevel = zapcore.WarnLevel
-	case "error":
-		logLevel = zapcore.ErrorLevel
-	default:
-		logLevel = zapcore.InfoLevel
-	}
-
-	cfg := zap.Config{
-		Level:       zap.NewAtomicLevelAt(logLevel),
-		Development: false,
-		Encoding:    "json",
-		EncoderConfig: zapcore.EncoderConfig{
-			TimeKey:        "ts",
-			LevelKey:       "level",
-			NameKey:        "logger",
-			CallerKey:      "caller",
-			FunctionKey:    zapcore.OmitKey,
-			MessageKey:     "msg",
-			StacktraceKey:  "stacktrace",
-			LineEnding:     zapcore.DefaultLineEnding,
-			EncodeLevel:    zapcore.LowercaseLevelEncoder,
-			EncodeTime:     zapcore.ISO8601TimeEncoder,
-			EncodeDuration: zapcore.SecondsDurationEncoder,
-			EncodeCaller:   zapcore.ShortCallerEncoder,
-		},
-		OutputPaths:      []string{"stdout"},
-		ErrorOutputPaths: []string{"stderr"},
-	}
-
-	return cfg.Build()
 }

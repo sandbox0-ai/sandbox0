@@ -27,7 +27,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	storagedb "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
-	"go.uber.org/zap"
 )
 
 var (
@@ -68,7 +67,10 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	zapLogger, err := zap.NewProduction()
+	zapLogger, err := observability.NewLogger(observability.LoggerConfig{
+		ServiceName: "ctld",
+		Level:       "info",
+	})
 	if err != nil {
 		log.Printf("ctld observability disabled: create zap logger: %v", err)
 	}

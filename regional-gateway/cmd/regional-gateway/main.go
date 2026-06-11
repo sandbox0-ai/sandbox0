@@ -15,7 +15,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	"github.com/sandbox0-ai/sandbox0/regional-gateway/pkg/http"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 )
 
 func main() {
@@ -23,7 +22,10 @@ func main() {
 	cfg := config.LoadRegionalGatewayConfig()
 
 	// Initialize logger
-	logger, err := initLogger(cfg.LogLevel)
+	logger, err := observability.NewLogger(observability.LoggerConfig{
+		ServiceName: "regional-gateway",
+		Level:       cfg.LogLevel,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize logger: %v\n", err)
 		os.Exit(1)
@@ -95,47 +97,6 @@ func main() {
 	logger.Info("Edge gateway shutdown complete")
 }
 
-// initLogger initializes the zap logger
-func initLogger(level string) (*zap.Logger, error) {
-	var logLevel zapcore.Level
-	switch level {
-	case "debug":
-		logLevel = zapcore.DebugLevel
-	case "info":
-		logLevel = zapcore.InfoLevel
-	case "warn":
-		logLevel = zapcore.WarnLevel
-	case "error":
-		logLevel = zapcore.ErrorLevel
-	default:
-		logLevel = zapcore.InfoLevel
-	}
-
-	config := zap.Config{
-		Level:       zap.NewAtomicLevelAt(logLevel),
-		Development: false,
-		Encoding:    "json",
-		EncoderConfig: zapcore.EncoderConfig{
-			TimeKey:        "ts",
-			LevelKey:       "level",
-			NameKey:        "logger",
-			CallerKey:      "caller",
-			FunctionKey:    zapcore.OmitKey,
-			MessageKey:     "msg",
-			StacktraceKey:  "stacktrace",
-			LineEnding:     zapcore.DefaultLineEnding,
-			EncodeLevel:    zapcore.LowercaseLevelEncoder,
-			EncodeTime:     zapcore.ISO8601TimeEncoder,
-			EncodeDuration: zapcore.SecondsDurationEncoder,
-			EncodeCaller:   zapcore.ShortCallerEncoder,
-		},
-		OutputPaths:      []string{"stdout"},
-		ErrorOutputPaths: []string{"stderr"},
-	}
-
-	return config.Build()
-}
-
 // initDatabase initializes the database connection pool
 func initDatabase(ctx context.Context, cfg *config.RegionalGatewayConfig, logger *zap.Logger, obsProvider *observability.Provider) (*pgxpool.Pool, error) {
 	pool, err := dbpool.New(ctx, dbpool.Options{
@@ -161,12 +122,9 @@ func initDatabase(ctx context.Context, cfg *config.RegionalGatewayConfig, logger
 func runMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {
 	logger.Info("Running database migrations")
 
-	// Create a migration logger that writes to zap
-	migrateLogger := &zapLogger{logger: logger}
-
 	if err := migrate.Up(ctx, pool, ".",
 		migrate.WithBaseFS(gatewaymigrations.FS),
-		migrate.WithLogger(migrateLogger),
+		migrate.WithLogger(observability.NewMigrateLogger(logger)),
 		migrate.WithSchema("shared_gateway"),
 	); err != nil {
 		return fmt.Errorf("migrate up: %w", err)
@@ -174,17 +132,4 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) 
 
 	logger.Info("Database migrations completed successfully")
 	return nil
-}
-
-// zapLogger adapts zap.Logger to migrate.Logger interface
-type zapLogger struct {
-	logger *zap.Logger
-}
-
-func (z *zapLogger) Printf(format string, args ...any) {
-	z.logger.Info(fmt.Sprintf(format, args...))
-}
-
-func (z *zapLogger) Fatalf(format string, args ...any) {
-	z.logger.Fatal(fmt.Sprintf(format, args...))
 }

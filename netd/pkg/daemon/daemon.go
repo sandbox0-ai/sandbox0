@@ -149,10 +149,10 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 			return fmt.Errorf("create netd database pool: %w", err)
 		}
 		meteringPool = pool
-		if err := meteringpkg.RunMigrations(ctx, meteringPool, &zapLoggerAdapter{logger: d.logger}); err != nil {
+		if err := meteringpkg.RunMigrations(ctx, meteringPool, observability.NewMigrateLogger(d.logger)); err != nil {
 			return fmt.Errorf("run metering migrations: %w", err)
 		}
-		if err := quota.RunMigrations(ctx, meteringPool, &zapLoggerAdapter{logger: d.logger}); err != nil {
+		if err := quota.RunMigrations(ctx, meteringPool, observability.NewMigrateLogger(d.logger)); err != nil {
 			return fmt.Errorf("run quota migrations: %w", err)
 		}
 		usageAggregator = netdmetering.NewAggregator(
@@ -403,24 +403,6 @@ func closeRuntimeResource(resource runtimeResource) {
 	if resource != nil {
 		resource.Close()
 	}
-}
-
-type zapLoggerAdapter struct {
-	logger *zap.Logger
-}
-
-func (l *zapLoggerAdapter) Printf(format string, args ...any) {
-	if l == nil || l.logger == nil {
-		return
-	}
-	l.logger.Sugar().Infof(format, args...)
-}
-
-func (l *zapLoggerAdapter) Fatalf(format string, args ...any) {
-	if l == nil || l.logger == nil {
-		return
-	}
-	l.logger.Sugar().Errorf(format, args...)
 }
 
 func (d *Daemon) syncRedirect(

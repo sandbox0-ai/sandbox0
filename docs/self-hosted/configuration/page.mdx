@@ -152,6 +152,15 @@ handler: gvisor-rootfs
 
 Keep `services.netd.runtimeClassName` unset, or set it only to a host-compatible runtime such as `runc`. `netd` should not run under `gvisor`, `gvisor-rootfs`, or `kata`.
 
+`ctld` assumes the node's containerd data root is `/var/lib/containerd` by default. If your nodes move containerd data to another host path, configure the same path so rootfs pause/resume can use the overlayfs fast path:
+
+```yaml
+spec:
+    services:
+        ctld:
+            containerdHostDataRoot: /var/lib/sandbox0-worker/containerd
+```
+
 ### Shared Redis Rate Limiting
 
 Gateway rate limiting defaults to process-local memory. Configure `spec.redis` when gateway replicas need a shared Redis backend; infra-operator injects the Redis rate-limit settings into gateway services.

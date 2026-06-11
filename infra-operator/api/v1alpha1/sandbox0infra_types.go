@@ -1016,6 +1016,11 @@ type ServicesConfig struct {
 	// +kubebuilder:default={}
 	Manager *ManagerServiceConfig `json:"manager,omitempty"`
 
+	// Ctld configures the ctld node-local service (data plane)
+	// +optional
+	// +kubebuilder:default={}
+	Ctld *CtldServiceConfig `json:"ctld,omitempty"`
+
 	// StorageProxy configures the storage-proxy service (data plane)
 	// +optional
 	// +kubebuilder:default={}
@@ -1137,6 +1142,17 @@ type StorageProxyServiceConfig struct {
 	// +optional
 	// +kubebuilder:default={}
 	Config *StorageProxyConfig `json:"config,omitempty"`
+}
+
+// CtldServiceConfig defines configuration for the ctld daemonset.
+type CtldServiceConfig struct {
+	// ContainerdHostDataRoot is the containerd data root path on the host.
+	// Set this when nodes use a non-default containerd root such as a dedicated
+	// sandbox worker data disk.
+	// +optional
+	// +kubebuilder:default=/var/lib/containerd
+	// +kubebuilder:validation:Pattern=`^/.*`
+	ContainerdHostDataRoot string `json:"containerdHostDataRoot,omitempty"`
 }
 
 // NetdServiceConfig defines configuration for netd service

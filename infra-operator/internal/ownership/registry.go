@@ -82,6 +82,7 @@ func Registry() []Entry {
 		prefix("spec.services.scheduler", "scheduler", []string{"scheduler", "status"}, nil, UpdateSemanticsDeclarative, "Direct runtime configuration for scheduler."),
 		prefix("spec.services.clusterGateway", "cluster-gateway", []string{"cluster-gateway", "status"}, nil, UpdateSemanticsDeclarative, "Direct runtime configuration for cluster-gateway."),
 		prefix("spec.services.manager", "manager", []string{"manager", "status"}, nil, UpdateSemanticsDeclarative, "Direct runtime configuration for manager."),
+		prefix("spec.services.ctld", "ctld", []string{"ctld", "status"}, nil, UpdateSemanticsDeclarative, "Direct runtime configuration for ctld."),
 		prefix("spec.services.storageProxy", "storage-proxy", []string{"storage-proxy", "status"}, nil, UpdateSemanticsDeclarative, "Direct runtime configuration for storage-proxy."),
 		prefix("spec.services.netd", "netd", []string{"netd", "status"}, nil, UpdateSemanticsDeclarative, "Direct runtime configuration for netd."),
 

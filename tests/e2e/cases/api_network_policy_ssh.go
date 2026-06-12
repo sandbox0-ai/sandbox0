@@ -24,6 +24,7 @@ const (
 	sshFixtureImageEnvVar     = "E2E_SSH_FIXTURE_IMAGE"
 	sshFixtureSourceImageRef  = "lscr.io/linuxserver/openssh-server@sha256:68b605929e83b2efe000da09269688f6d82a44579e8a18e2d9e8c8d272917cf7"
 	defaultSSHFixtureImageRef = "sandbox0ai/e2e-openssh-server:68b605929e83"
+	sshFixturePullAttempts    = 3
 )
 
 const sshFixturePrivateKey = `-----BEGIN OPENSSH PRIVATE KEY-----
@@ -182,13 +183,24 @@ spec:
 }
 
 func preloadSSHFixtureImage(env *framework.ScenarioEnv, imageRef string) error {
+	loaded, err := sshFixtureImageLoadedInKind(env, imageRef)
+	if err != nil {
+		fmt.Printf("Unable to inspect Kind image cache for %q: %v\n", imageRef, err)
+	} else if loaded {
+		fmt.Printf("SSH fixture image %q is already loaded in Kind cluster %q.\n", imageRef, env.TestCtx.Cluster.Name)
+		return nil
+	}
+
 	if _, err := framework.RunCommandOutput(env.TestCtx.Context, "docker", "image", "inspect", imageRef); err != nil {
 		sourceRef := imageRef
 		if imageRef == defaultSSHFixtureImageRef {
 			sourceRef = sshFixtureSourceImageRef
 		}
-		if err := framework.RunCommand(env.TestCtx.Context, "docker", "pull", sourceRef); err != nil {
-			return err
+
+		if _, err := framework.RunCommandOutput(env.TestCtx.Context, "docker", "image", "inspect", sourceRef); err != nil {
+			if err := pullSSHFixtureImageWithRetry(env, sourceRef); err != nil {
+				return err
+			}
 		}
 		if sourceRef != imageRef {
 			if err := framework.RunCommand(env.TestCtx.Context, "docker", "tag", sourceRef, imageRef); err != nil {
@@ -197,6 +209,83 @@ func preloadSSHFixtureImage(env *framework.ScenarioEnv, imageRef string) error {
 		}
 	}
 	return env.TestCtx.Cluster.LoadDockerImage(env.TestCtx.Context, imageRef)
+}
+
+func sshFixtureImageLoadedInKind(env *framework.ScenarioEnv, imageRef string) (bool, error) {
+	if env == nil || env.TestCtx == nil || env.TestCtx.Cluster == nil || env.TestCtx.Cluster.Name == "" {
+		return false, nil
+	}
+
+	nodesOutput, err := framework.RunCommandOutput(env.TestCtx.Context, "kind", "get", "nodes", "--name", env.TestCtx.Cluster.Name)
+	if err != nil {
+		return false, err
+	}
+
+	nodes := strings.Fields(nodesOutput)
+	if len(nodes) == 0 {
+		return false, nil
+	}
+
+	candidates := sshFixtureImageNameCandidates(imageRef)
+	for _, node := range nodes {
+		imagesOutput, err := framework.RunCommandOutput(env.TestCtx.Context, "docker", "exec", node, "ctr", "--namespace=k8s.io", "images", "ls", "-q")
+		if err != nil {
+			return false, err
+		}
+		if !sshFixtureImageListContains(imagesOutput, candidates) {
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
+func sshFixtureImageNameCandidates(imageRef string) []string {
+	candidates := []string{imageRef}
+	firstPathPart, _, ok := strings.Cut(imageRef, "/")
+	if ok && firstPathPart != "localhost" && !strings.ContainsAny(firstPathPart, ".:") {
+		candidates = append(candidates, "docker.io/"+imageRef)
+	}
+	return candidates
+}
+
+func sshFixtureImageListContains(imagesOutput string, candidates []string) bool {
+	for _, line := range strings.Split(imagesOutput, "\n") {
+		imageName := strings.TrimSpace(line)
+		if imageName == "" {
+			continue
+		}
+		for _, candidate := range candidates {
+			if imageName == candidate {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func pullSSHFixtureImageWithRetry(env *framework.ScenarioEnv, imageRef string) error {
+	var lastErr error
+	for attempt := 1; attempt <= sshFixturePullAttempts; attempt++ {
+		if err := framework.RunCommand(env.TestCtx.Context, "docker", "pull", imageRef); err != nil {
+			lastErr = err
+		} else {
+			return nil
+		}
+
+		if attempt == sshFixturePullAttempts {
+			break
+		}
+
+		delay := time.Duration(attempt*5) * time.Second
+		fmt.Printf("Retrying SSH fixture image pull for %q after %s (attempt %d/%d failed).\n", imageRef, delay, attempt, sshFixturePullAttempts)
+		select {
+		case <-time.After(delay):
+		case <-env.TestCtx.Context.Done():
+			return env.TestCtx.Context.Err()
+		}
+	}
+	return lastErr
 }
 
 func assertSSHAppProtocolTrafficRules(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string, fixture *sshFixture) {

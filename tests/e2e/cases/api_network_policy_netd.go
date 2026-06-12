@@ -158,6 +158,7 @@ func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eu
 	}
 	elapsed := time.Since(started)
 	Expect(elapsed).To(BeNumerically(">=", netdRedisBandwidthMinElapsed), "expected two same-team downloads to share the cluster-scoped bandwidth bucket")
+	Expect(clearNetdRedisTeamBandwidthKeys(env, team.Id)).To(Succeed())
 }
 
 func netdRedisTeamBandwidthConfigured(env *framework.ScenarioEnv) bool {

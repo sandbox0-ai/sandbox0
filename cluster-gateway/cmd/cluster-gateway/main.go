@@ -17,7 +17,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 )
 
 func main() {
@@ -25,7 +24,10 @@ func main() {
 	cfg := config.LoadClusterGatewayConfig()
 
 	// Initialize logger
-	logger, err := initLogger(cfg.LogLevel)
+	logger, err := observability.NewLogger(observability.LoggerConfig{
+		ServiceName: "cluster-gateway",
+		Level:       cfg.LogLevel,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize logger: %v\n", err)
 		os.Exit(1)
@@ -66,7 +68,7 @@ func main() {
 		}
 	}
 	if pool != nil {
-		if err := metering.RunMigrations(ctx, pool, &zapLogger{logger: logger}); err != nil {
+		if err := metering.RunMigrations(ctx, pool, observability.NewMigrateLogger(logger)); err != nil {
 			logger.Fatal("Failed to run metering migrations", zap.Error(err))
 		}
 	}
@@ -101,47 +103,6 @@ func main() {
 	logger.Info("Internal gateway shutdown complete")
 }
 
-// initLogger initializes the zap logger
-func initLogger(level string) (*zap.Logger, error) {
-	var logLevel zapcore.Level
-	switch level {
-	case "debug":
-		logLevel = zapcore.DebugLevel
-	case "info":
-		logLevel = zapcore.InfoLevel
-	case "warn":
-		logLevel = zapcore.WarnLevel
-	case "error":
-		logLevel = zapcore.ErrorLevel
-	default:
-		logLevel = zapcore.InfoLevel
-	}
-
-	config := zap.Config{
-		Level:       zap.NewAtomicLevelAt(logLevel),
-		Development: false,
-		Encoding:    "json",
-		EncoderConfig: zapcore.EncoderConfig{
-			TimeKey:        "ts",
-			LevelKey:       "level",
-			NameKey:        "logger",
-			CallerKey:      "caller",
-			FunctionKey:    zapcore.OmitKey,
-			MessageKey:     "msg",
-			StacktraceKey:  "stacktrace",
-			LineEnding:     zapcore.DefaultLineEnding,
-			EncodeLevel:    zapcore.LowercaseLevelEncoder,
-			EncodeTime:     zapcore.ISO8601TimeEncoder,
-			EncodeDuration: zapcore.SecondsDurationEncoder,
-			EncodeCaller:   zapcore.ShortCallerEncoder,
-		},
-		OutputPaths:      []string{"stdout"},
-		ErrorOutputPaths: []string{"stderr"},
-	}
-
-	return config.Build()
-}
-
 func initDatabase(ctx context.Context, cfg *config.ClusterGatewayConfig, logger *zap.Logger, obsProvider *observability.Provider) *pgxpool.Pool {
 	pool, err := dbpool.New(ctx, dbpool.Options{
 		DatabaseURL:    cfg.DatabaseURL,
@@ -165,11 +126,9 @@ func initDatabase(ctx context.Context, cfg *config.ClusterGatewayConfig, logger 
 func runMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {
 	logger.Info("Running database migrations")
 
-	migrateLogger := &zapLogger{logger: logger}
-
 	if err := migrate.Up(ctx, pool, ".",
 		migrate.WithBaseFS(gatewaymigrations.FS),
-		migrate.WithLogger(migrateLogger),
+		migrate.WithLogger(observability.NewMigrateLogger(logger)),
 		migrate.WithSchema("shared_gateway"),
 	); err != nil {
 		return fmt.Errorf("migrate up: %w", err)
@@ -177,16 +136,4 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) 
 
 	logger.Info("Database migrations completed successfully")
 	return nil
-}
-
-type zapLogger struct {
-	logger *zap.Logger
-}
-
-func (z *zapLogger) Printf(format string, args ...any) {
-	z.logger.Info(fmt.Sprintf(format, args...))
-}
-
-func (z *zapLogger) Fatalf(format string, args ...any) {
-	z.logger.Fatal(fmt.Sprintf(format, args...))
 }

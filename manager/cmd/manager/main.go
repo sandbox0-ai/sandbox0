@@ -39,7 +39,6 @@ import (
 	templreconciler "github.com/sandbox0-ai/sandbox0/pkg/template/reconciler"
 	templstorepg "github.com/sandbox0-ai/sandbox0/pkg/template/store/pg"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -56,7 +55,14 @@ func main() {
 	cfg := config.LoadManagerConfig()
 
 	// Initialize logger
-	logger := initLogger(cfg.LogLevel)
+	logger, err := observability.NewLogger(observability.LoggerConfig{
+		ServiceName: "manager",
+		Level:       cfg.LogLevel,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to initialize logger: %v\n", err)
+		os.Exit(1)
+	}
 	defer logger.Sync()
 
 	logger.Info("Starting Manager",
@@ -506,31 +512,6 @@ func main() {
 	logger.Info("Manager stopped")
 }
 
-// initLogger initializes the logger
-func initLogger(logLevel string) *zap.Logger {
-	level := zapcore.InfoLevel
-	switch logLevel {
-	case "debug":
-		level = zapcore.DebugLevel
-	case "warn":
-		level = zapcore.WarnLevel
-	case "error":
-		level = zapcore.ErrorLevel
-	}
-
-	cfg := zap.NewProductionConfig()
-	cfg.Level = zap.NewAtomicLevelAt(level)
-	cfg.EncoderConfig.TimeKey = "timestamp"
-	cfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-
-	logger, err := cfg.Build()
-	if err != nil {
-		panic(fmt.Sprintf("Failed to initialize logger: %v", err))
-	}
-
-	return logger
-}
-
 // buildKubeConfig builds Kubernetes config
 func buildKubeConfig(kubeconfig string) (*rest.Config, error) {
 	if kubeconfig != "" {
@@ -554,10 +535,9 @@ func startMetricsServer(port int, logger *zap.Logger) {
 func runTemplateMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {
 	logger.Info("Running template migrations")
 
-	migrateLogger := &zapMigrateLogger{logger: logger}
 	if err := migrate.Up(ctx, pool, ".",
 		migrate.WithBaseFS(templmigrations.FS),
-		migrate.WithLogger(migrateLogger),
+		migrate.WithLogger(observability.NewMigrateLogger(logger)),
 		migrate.WithSchema("scheduler"),
 	); err != nil {
 		return fmt.Errorf("migrate up: %w", err)
@@ -570,8 +550,7 @@ func runTemplateMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.
 func runMeteringMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {
 	logger.Info("Running metering migrations")
 
-	migrateLogger := &zapMigrateLogger{logger: logger}
-	if err := metering.RunMigrations(ctx, pool, migrateLogger); err != nil {
+	if err := metering.RunMigrations(ctx, pool, observability.NewMigrateLogger(logger)); err != nil {
 		return fmt.Errorf("metering migrations: %w", err)
 	}
 
@@ -582,8 +561,7 @@ func runMeteringMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.
 func runQuotaMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {
 	logger.Info("Running quota migrations")
 
-	migrateLogger := &zapMigrateLogger{logger: logger}
-	if err := quota.RunMigrations(ctx, pool, migrateLogger); err != nil {
+	if err := quota.RunMigrations(ctx, pool, observability.NewMigrateLogger(logger)); err != nil {
 		return fmt.Errorf("quota migrations: %w", err)
 	}
 
@@ -594,8 +572,7 @@ func runQuotaMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Log
 func runEgressAuthMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {
 	logger.Info("Running egress auth migrations")
 
-	migrateLogger := &zapMigrateLogger{logger: logger}
-	if err := egressauth.RunMigrations(ctx, pool, migrateLogger); err != nil {
+	if err := egressauth.RunMigrations(ctx, pool, observability.NewMigrateLogger(logger)); err != nil {
 		return fmt.Errorf("egress auth migrations: %w", err)
 	}
 
@@ -674,8 +651,7 @@ func loadCredentialEncryptionKey(cfg config.CredentialEncryptedPGConfig) ([]byte
 func runSandboxStoreMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {
 	logger.Info("Running sandbox store migrations")
 
-	migrateLogger := &zapMigrateLogger{logger: logger}
-	if err := service.RunSandboxStoreMigrations(ctx, pool, migrateLogger); err != nil {
+	if err := service.RunSandboxStoreMigrations(ctx, pool, observability.NewMigrateLogger(logger)); err != nil {
 		return fmt.Errorf("sandbox store migrations: %w", err)
 	}
 
@@ -702,19 +678,6 @@ func initDatabase(ctx context.Context, databaseURL string, maxConns, minConns in
 	)
 
 	return pool, nil
-}
-
-// zapMigrateLogger adapts zap.Logger to migrate.Logger interface.
-type zapMigrateLogger struct {
-	logger *zap.Logger
-}
-
-func (z *zapMigrateLogger) Printf(format string, args ...any) {
-	z.logger.Info(fmt.Sprintf(format, args...))
-}
-
-func (z *zapMigrateLogger) Fatalf(format string, args ...any) {
-	z.logger.Fatal(fmt.Sprintf(format, args...))
 }
 
 // pgxPoolAdapter adapts pgxpool.Pool to clock.DB interface

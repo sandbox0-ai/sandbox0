@@ -19,13 +19,15 @@ import (
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	sshserver "github.com/sandbox0-ai/sandbox0/ssh-gateway/pkg/server"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 )
 
 func main() {
 	cfg := config.LoadSSHGatewayConfig()
 
-	logger, err := initLogger(cfg.LogLevel)
+	logger, err := observability.NewLogger(observability.LoggerConfig{
+		ServiceName: "ssh-gateway",
+		Level:       cfg.LogLevel,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize logger: %v\n", err)
 		os.Exit(1)
@@ -114,46 +116,6 @@ func main() {
 	}
 }
 
-func initLogger(level string) (*zap.Logger, error) {
-	var logLevel zapcore.Level
-	switch level {
-	case "debug":
-		logLevel = zapcore.DebugLevel
-	case "info":
-		logLevel = zapcore.InfoLevel
-	case "warn":
-		logLevel = zapcore.WarnLevel
-	case "error":
-		logLevel = zapcore.ErrorLevel
-	default:
-		logLevel = zapcore.InfoLevel
-	}
-
-	config := zap.Config{
-		Level:       zap.NewAtomicLevelAt(logLevel),
-		Development: false,
-		Encoding:    "json",
-		EncoderConfig: zapcore.EncoderConfig{
-			TimeKey:        "ts",
-			LevelKey:       "level",
-			NameKey:        "logger",
-			CallerKey:      "caller",
-			FunctionKey:    zapcore.OmitKey,
-			MessageKey:     "msg",
-			StacktraceKey:  "stacktrace",
-			LineEnding:     zapcore.DefaultLineEnding,
-			EncodeLevel:    zapcore.LowercaseLevelEncoder,
-			EncodeTime:     zapcore.ISO8601TimeEncoder,
-			EncodeDuration: zapcore.SecondsDurationEncoder,
-			EncodeCaller:   zapcore.ShortCallerEncoder,
-		},
-		OutputPaths:      []string{"stdout"},
-		ErrorOutputPaths: []string{"stderr"},
-	}
-
-	return config.Build()
-}
-
 func initDatabase(ctx context.Context, cfg *config.SSHGatewayConfig, logger *zap.Logger, obsProvider *observability.Provider) (*pgxpool.Pool, error) {
 	pool, err := dbpool.New(ctx, dbpool.Options{
 		DatabaseURL:    cfg.DatabaseURL,
@@ -174,26 +136,13 @@ func initDatabase(ctx context.Context, cfg *config.SSHGatewayConfig, logger *zap
 
 func runMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {
 	logger.Info("Running database migrations")
-	migrateLogger := &zapLogger{logger: logger}
 	if err := migrate.Up(ctx, pool, ".",
 		migrate.WithBaseFS(gatewaymigrations.FS),
-		migrate.WithLogger(migrateLogger),
+		migrate.WithLogger(observability.NewMigrateLogger(logger)),
 		migrate.WithSchema("shared_gateway"),
 	); err != nil {
 		return fmt.Errorf("migrate up: %w", err)
 	}
 	logger.Info("Database migrations completed successfully")
 	return nil
-}
-
-type zapLogger struct {
-	logger *zap.Logger
-}
-
-func (z *zapLogger) Printf(format string, args ...any) {
-	z.logger.Info(fmt.Sprintf(format, args...))
-}
-
-func (z *zapLogger) Fatalf(format string, args ...any) {
-	z.logger.Fatal(fmt.Sprintf(format, args...))
 }

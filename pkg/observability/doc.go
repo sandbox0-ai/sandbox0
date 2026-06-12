@@ -16,7 +16,16 @@
 //
 // # Quick Start
 //
-// Initialize observability provider once in your main.go:
+// Initialize the shared service logger and observability provider once in your
+// main.go:
+//
+//	logger, err := observability.NewLogger(observability.LoggerConfig{
+//	    ServiceName: "cluster-gateway",
+//	    Level:       cfg.LogLevel,
+//	})
+//	if err != nil {
+//	    return err
+//	}
 //
 //	provider, err := observability.New(observability.Config{
 //	    ServiceName: "cluster-gateway",
@@ -87,11 +96,12 @@
 //
 // # Best Practices
 //
-// 1. Create one Provider instance per service
+// 1. Create one Logger and Provider instance per service
 // 2. Pass the provider to all client constructors
 // 3. Always call provider.Shutdown() on graceful shutdown
-// 4. Use context for request-scoped metadata
-// 5. Set appropriate timeout values for all clients
+// 4. Use NewMigrateLogger when wiring migration output to zap
+// 5. Use context for request-scoped metadata
+// 6. Set appropriate timeout values for all clients
 //
 // # Performance
 //

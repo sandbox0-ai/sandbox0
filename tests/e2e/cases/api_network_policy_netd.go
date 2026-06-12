@@ -98,23 +98,23 @@ func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eu
 
 	originalTeamID := session.SelectedTeamID()
 	var sandboxIDs []string
-	DeferCleanup(func() {
+	defer func() {
 		defer session.SelectTeam(originalTeamID)
 		session.SelectTeam(team.Id)
 		var cleanupErrs []error
+		if err := clearNetdRedisTeamBandwidthKeys(env, team.Id); err != nil {
+			cleanupErrs = append(cleanupErrs, err)
+		}
 		for _, id := range sandboxIDs {
 			if err := session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), id); err != nil {
 				cleanupErrs = append(cleanupErrs, err)
 			}
 		}
-		if err := clearNetdRedisTeamBandwidthKeys(env, team.Id); err != nil {
-			cleanupErrs = append(cleanupErrs, err)
-		}
 		if _, err := session.DeleteTeam(env.TestCtx.Context, GinkgoT(), team.Id); err != nil {
 			cleanupErrs = append(cleanupErrs, err)
 		}
 		Expect(errors.Join(cleanupErrs...)).NotTo(HaveOccurred())
-	})
+	}()
 
 	Expect(session.Login(env.TestCtx.Context, GinkgoT(), "admin@example.com", adminPassword)).To(Succeed())
 	session.SelectTeam(team.Id)

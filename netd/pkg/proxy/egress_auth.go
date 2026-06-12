@@ -19,6 +19,7 @@ type egressAuthContext struct {
 	Rule                         *policy.CompiledEgressAuthRule
 	CandidateRules               []*policy.CompiledEgressAuthRule
 	RequestMatch                 bool
+	ResolveOnHTTPRequest         bool
 	Resolved                     *egressauth.ResolveResponse
 	ResolvedHeaders              map[string]string
 	ResolvedTLSClientCertificate *resolvedTLSClientCertificate
@@ -445,10 +446,11 @@ func (s *Server) attachEgressAuth(req *adapterRequest, decision trafficDecision)
 	}
 	rule := candidates[0]
 	ctx := &egressAuthContext{
-		Rule:           rule,
-		CandidateRules: append([]*policy.CompiledEgressAuthRule(nil), candidates...),
-		RequestMatch:   rule.HTTPMatch != nil,
-		FailurePolicy:  egressAuthFailurePolicy(s.cfg, rule),
+		Rule:                 rule,
+		CandidateRules:       append([]*policy.CompiledEgressAuthRule(nil), candidates...),
+		RequestMatch:         rule.HTTPMatch != nil,
+		ResolveOnHTTPRequest: deferEgressAuthResolveUntilHTTPRequest(decision, rule),
+		FailurePolicy:        egressAuthFailurePolicy(s.cfg, rule),
 	}
 	req.EgressAuth = ctx
 	if !egressAuthEnabled(s.cfg) {
@@ -456,11 +458,19 @@ func (s *Server) attachEgressAuth(req *adapterRequest, decision trafficDecision)
 		proxyMetrics.RecordEgressAuthDecision(decision.Protocol, "bypassed", ctx.BypassReason)
 		return
 	}
-	if ctx.RequestMatch {
+	if ctx.RequestMatch || ctx.ResolveOnHTTPRequest {
 		return
 	}
 	decision.MatchedAuthRule = rule
 	s.resolveEgressAuth(req, decision)
+}
+
+func deferEgressAuthResolveUntilHTTPRequest(decision trafficDecision, rule *policy.CompiledEgressAuthRule) bool {
+	return rule != nil &&
+		rule.HTTPMatch == nil &&
+		decision.Protocol == "tls" &&
+		(rule.Protocol == "" || rule.Protocol == v1alpha1.EgressAuthProtocolHTTPS) &&
+		rule.TLSMode == v1alpha1.EgressTLSModeTerminateReoriginate
 }
 
 func egressAuthRuleCandidates(decision trafficDecision) []*policy.CompiledEgressAuthRule {

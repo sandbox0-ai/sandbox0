@@ -179,7 +179,7 @@ func (a *tlsAdapter) Handle(req *adapterRequest) error {
 			}
 			return req.Server.proxyTLSStream(req)
 		}
-		if !egressAuthNeedsHTTPMatch(req) {
+		if !egressAuthNeedsHTTPMatch(req) && !egressAuthResolvesOnHTTPRequest(req) {
 			if err := prepareHTTPHeaderDirectives(req.EgressAuth, "tls", tlsTerminationRequired(req)); err != nil {
 				if req.EgressAuth.ShouldBypass() {
 					return req.Server.relayTCPRequest(req)

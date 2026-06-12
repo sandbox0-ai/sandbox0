@@ -152,26 +152,32 @@ func bridgeSSHChannel(req *adapterRequest, downstream ssh.Channel, downstreamReq
 		})
 	}
 	var wg sync.WaitGroup
-	var upstreamDone sync.WaitGroup
+	var upstreamOutboundDone sync.WaitGroup
+	var upstreamStreamsDone sync.WaitGroup
 	wg.Add(6)
-	upstreamDone.Add(3)
+	upstreamOutboundDone.Add(3)
+	upstreamStreamsDone.Add(2)
 	go func() {
-		defer upstreamDone.Done()
 		copySSHStream(&wg, upstream, downstream, closeBoth, false, req, bandwidthEgress)
 	}()
-	go copySSHStream(&wg, downstream, upstream, closeBoth, false, req, bandwidthIngress)
 	go func() {
-		defer upstreamDone.Done()
-		copySSHStream(&wg, upstream.Stderr(), downstream.Stderr(), closeBoth, false, req, bandwidthEgress)
+		defer upstreamOutboundDone.Done()
+		defer upstreamStreamsDone.Done()
+		copySSHStream(&wg, downstream, upstream, closeBoth, false, req, bandwidthIngress)
 	}()
-	go copySSHStream(&wg, downstream.Stderr(), upstream.Stderr(), closeBoth, false, req, bandwidthIngress)
+	go copySSHStream(&wg, upstream.Stderr(), downstream.Stderr(), closeBoth, false, req, bandwidthEgress)
+	go func() {
+		defer upstreamOutboundDone.Done()
+		defer upstreamStreamsDone.Done()
+		copySSHStream(&wg, downstream.Stderr(), upstream.Stderr(), closeBoth, false, req, bandwidthIngress)
+	}()
 	go forwardSSHRequests(&wg, downstreamRequests, upstream, closeBoth, true, false)
 	go func() {
-		defer upstreamDone.Done()
-		forwardSSHRequests(&wg, upstreamRequests, downstream, closeBoth, false, false)
+		defer upstreamOutboundDone.Done()
+		forwardUpstreamSSHRequests(&wg, upstreamRequests, downstream, &upstreamStreamsDone)
 	}()
 	go func() {
-		upstreamDone.Wait()
+		upstreamOutboundDone.Wait()
 		_ = downstream.Close()
 	}()
 	wg.Wait()
@@ -202,17 +208,31 @@ func forwardSSHRequests(wg *sync.WaitGroup, requests <-chan *ssh.Request, dst ss
 			}
 			continue
 		}
-		ok, err := dst.SendRequest(req.Type, req.WantReply, req.Payload)
-		if req.WantReply {
-			if err != nil {
-				_ = req.Reply(false, nil)
-			} else {
-				_ = req.Reply(ok, nil)
-			}
-		}
+		forwardSSHRequest(req, dst)
 	}
 	if closeOnEnd {
 		closeBoth()
+	}
+}
+
+func forwardUpstreamSSHRequests(wg *sync.WaitGroup, requests <-chan *ssh.Request, dst ssh.Channel, streamsDone *sync.WaitGroup) {
+	defer wg.Done()
+	for req := range requests {
+		if isTerminalUpstreamSSHRequest(req.Type) && streamsDone != nil {
+			streamsDone.Wait()
+		}
+		forwardSSHRequest(req, dst)
+	}
+}
+
+func forwardSSHRequest(req *ssh.Request, dst ssh.Channel) {
+	ok, err := dst.SendRequest(req.Type, req.WantReply, req.Payload)
+	if req.WantReply {
+		if err != nil {
+			_ = req.Reply(false, nil)
+		} else {
+			_ = req.Reply(ok, nil)
+		}
 	}
 }
 
@@ -222,6 +242,15 @@ func allowDownstreamSSHRequest(requestType string) bool {
 		return false
 	default:
 		return true
+	}
+}
+
+func isTerminalUpstreamSSHRequest(requestType string) bool {
+	switch requestType {
+	case "exit-status", "exit-signal":
+		return true
+	default:
+		return false
 	}
 }
 

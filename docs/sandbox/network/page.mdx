@@ -54,9 +54,9 @@ For HTTPS and gRPC rules, request matching requires `tlsMode: terminate-reorigin
 
 ## Protocol Rules
 
-`protocolRules` run after traffic is allowed. The first supported protocol is MCP over HTTP/HTTPS. Use it to allow a sandbox to reach an MCP server while limiting tool calls by tool name.
+`protocolRules` run after traffic is allowed. HTTP rules can limit request methods and paths; MCP rules can limit remote MCP tool calls by tool name.
 
-For HTTPS MCP servers, set `tlsMode: terminate-reoriginate` on the protocol rule so netd can inspect JSON-RPC request bodies.
+For HTTPS HTTP or MCP rules, set `tlsMode: terminate-reoriginate` on the protocol rule so netd can inspect request contents.
 
 ## Get Network Policy
 

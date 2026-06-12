@@ -806,6 +806,11 @@ func (s *Server) proxyHTTPRequest(req *adapterRequest) error {
 	if req.EgressAuth != nil && len(req.EgressAuth.ResolvedHeaders) > 0 {
 		injectHTTPHeaders(httpReq, req.EgressAuth.ResolvedHeaders)
 	}
+	if err := s.enforceHTTPPolicyForHTTPRequest(req, httpReq, func(status int, body []byte) error {
+		return writeHTTPProtocolPolicyResponse(req.Conn, status, body)
+	}); err != nil {
+		return err
+	}
 	if err := s.enforceMCPPolicyForHTTPRequest(req, httpReq, func(status int, body []byte) error {
 		return writeMCPPolicyHTTPResponse(req.Conn, status, body)
 	}); err != nil {

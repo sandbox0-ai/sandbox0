@@ -505,9 +505,19 @@ func validateTrafficRule(rule v1alpha1.TrafficRule) error {
 
 func validateProtocolRule(rule v1alpha1.ProtocolRule) error {
 	switch rule.Protocol {
+	case v1alpha1.ProtocolRuleProtocolHTTP:
+		if rule.HTTP == nil {
+			return fmt.Errorf("http config is required")
+		}
+		if rule.MCP != nil {
+			return fmt.Errorf("mcp config is not supported for http protocol rules")
+		}
 	case v1alpha1.ProtocolRuleProtocolMCP:
 		if rule.MCP == nil {
 			return fmt.Errorf("mcp config is required")
+		}
+		if rule.HTTP != nil {
+			return fmt.Errorf("http config is not supported for mcp protocol rules")
 		}
 	default:
 		return fmt.Errorf("unsupported protocol %q", rule.Protocol)
@@ -522,6 +532,11 @@ func validateProtocolRule(rule v1alpha1.ProtocolRule) error {
 	}
 	if rule.HTTPMatch != nil {
 		if err := validateHTTPMatchFields("egress protocol rule "+rule.Name, rule.HTTPMatch); err != nil {
+			return err
+		}
+	}
+	if rule.HTTP != nil {
+		if err := validateHTTPProtocolRule(rule.HTTP); err != nil {
 			return err
 		}
 	}
@@ -589,6 +604,83 @@ func validateHTTPMatchFields(label string, match *v1alpha1.HTTPMatch) error {
 		if strings.TrimSpace(matcher.Name) == "" {
 			return fmt.Errorf("%s httpMatch query name is required", label)
 		}
+	}
+	return nil
+}
+
+func validateHTTPProtocolRule(rule *v1alpha1.HTTPProtocolRule) error {
+	if rule.Methods != nil {
+		if err := validateHTTPMethodPolicy(rule.Methods); err != nil {
+			return err
+		}
+	}
+	if rule.Paths != nil {
+		if err := validateHTTPPathPolicy(rule.Paths); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateHTTPMethodPolicy(policy *v1alpha1.HTTPMethodPolicy) error {
+	seenAllowed := make(map[string]struct{}, len(policy.Allowed))
+	for _, method := range policy.Allowed {
+		method = strings.ToUpper(strings.TrimSpace(method))
+		if method == "" {
+			return fmt.Errorf("http methods allowed method is required")
+		}
+		if !validHTTPMethod(method) {
+			return fmt.Errorf("http methods allowed method %q is invalid", method)
+		}
+		if _, ok := seenAllowed[method]; ok {
+			return fmt.Errorf("duplicate http allowed method %q", method)
+		}
+		seenAllowed[method] = struct{}{}
+	}
+	seenDenied := make(map[string]struct{}, len(policy.Denied))
+	for _, method := range policy.Denied {
+		method = strings.ToUpper(strings.TrimSpace(method))
+		if method == "" {
+			return fmt.Errorf("http methods denied method is required")
+		}
+		if !validHTTPMethod(method) {
+			return fmt.Errorf("http methods denied method %q is invalid", method)
+		}
+		if _, ok := seenDenied[method]; ok {
+			return fmt.Errorf("duplicate http denied method %q", method)
+		}
+		seenDenied[method] = struct{}{}
+	}
+	return nil
+}
+
+func validateHTTPPathPolicy(policy *v1alpha1.HTTPPathPolicy) error {
+	if err := validateHTTPPathList("http paths allowed", policy.Allowed); err != nil {
+		return err
+	}
+	if err := validateHTTPPathList("http paths denied", policy.Denied); err != nil {
+		return err
+	}
+	if err := validateHTTPPathList("http path prefixes allowed", policy.AllowedPrefixes); err != nil {
+		return err
+	}
+	if err := validateHTTPPathList("http path prefixes denied", policy.DeniedPrefixes); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateHTTPPathList(label string, values []string) error {
+	seen := make(map[string]struct{}, len(values))
+	for _, path := range values {
+		path = strings.TrimSpace(path)
+		if path == "" || !strings.HasPrefix(path, "/") {
+			return fmt.Errorf("%s path %q must start with /", label, path)
+		}
+		if _, ok := seen[path]; ok {
+			return fmt.Errorf("duplicate %s path %q", label, path)
+		}
+		seen[path] = struct{}{}
 	}
 	return nil
 }

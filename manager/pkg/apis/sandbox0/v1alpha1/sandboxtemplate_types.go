@@ -338,7 +338,8 @@ type TrafficRule struct {
 type ProtocolRuleProtocol string
 
 const (
-	ProtocolRuleProtocolMCP ProtocolRuleProtocol = "mcp"
+	ProtocolRuleProtocolMCP  ProtocolRuleProtocol = "mcp"
+	ProtocolRuleProtocolHTTP ProtocolRuleProtocol = "http"
 )
 
 // ProtocolRule defines protocol-aware controls applied after traffic is allowed.
@@ -361,8 +362,44 @@ type ProtocolRule struct {
 	// HTTPMatch constrains HTTP-carried protocol rules to request attributes.
 	HTTPMatch *HTTPMatch `json:"httpMatch,omitempty"`
 
+	// HTTP configures HTTP request policy.
+	HTTP *HTTPProtocolRule `json:"http,omitempty"`
+
 	// MCP configures Model Context Protocol operation policy.
 	MCP *MCPProtocolRule `json:"mcp,omitempty"`
+}
+
+// HTTPProtocolRule defines HTTP-specific request policy.
+type HTTPProtocolRule struct {
+	// Methods controls HTTP methods.
+	Methods *HTTPMethodPolicy `json:"methods,omitempty"`
+
+	// Paths controls URL paths.
+	Paths *HTTPPathPolicy `json:"paths,omitempty"`
+}
+
+// HTTPMethodPolicy defines allow and deny lists for HTTP methods.
+type HTTPMethodPolicy struct {
+	// Allowed permits only listed methods when non-empty.
+	Allowed []string `json:"allowed,omitempty"`
+
+	// Denied blocks listed methods before evaluating Allowed.
+	Denied []string `json:"denied,omitempty"`
+}
+
+// HTTPPathPolicy defines allow and deny lists for HTTP request paths.
+type HTTPPathPolicy struct {
+	// Allowed permits only listed exact paths when any allowed path list is non-empty.
+	Allowed []string `json:"allowed,omitempty"`
+
+	// Denied blocks listed exact paths before evaluating Allowed.
+	Denied []string `json:"denied,omitempty"`
+
+	// AllowedPrefixes permits only paths with listed prefixes when any allowed path list is non-empty.
+	AllowedPrefixes []string `json:"allowedPrefixes,omitempty"`
+
+	// DeniedPrefixes blocks paths with listed prefixes before evaluating Allowed.
+	DeniedPrefixes []string `json:"deniedPrefixes,omitempty"`
 }
 
 // MCPProtocolRule defines MCP-specific operation policy.

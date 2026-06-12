@@ -84,6 +84,7 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 			session           *e2eutils.Session
 			cleanup           func()
 			sandboxID         string
+			adminPassword     string
 			sshFixtureState   *sshFixture
 			sshFixtureCleanup func()
 		)
@@ -97,6 +98,7 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 
 			password, err := framework.GetSecretValue(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, "admin-password", "password")
 			Expect(err).NotTo(HaveOccurred())
+			adminPassword = password
 
 			Eventually(func() error {
 				return session.Login(env.TestCtx.Context, GinkgoT(), "admin@example.com", password)
@@ -245,6 +247,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertCredentialSourceBindingLifecycle(env, session, sandboxID)
 				})
 
+				It("proxies SSH egress auth without exposing upstream private keys to the sandbox", func() {
+					assertSSHTransparentEgressAuthProxy(env, session, sandboxID, sshFixtureState)
+				})
+
 				It("matches SSH app protocols through traffic rules", func() {
 					assertSSHAppProtocolTrafficRules(env, session, sandboxID, sshFixtureState)
 				})
@@ -258,7 +264,7 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 				})
 
 				It("enforces Redis-backed team bandwidth through netd", func() {
-					assertNetdRedisTeamBandwidthLimit(env, session, sandboxID)
+					assertNetdRedisTeamBandwidthLimit(env, session, adminPassword)
 				})
 
 				It("enforces egress quota", func() {
@@ -267,10 +273,6 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 
 				It("enforces ingress quota", func() {
 					assertIngressQuota(env, session, sandboxID)
-				})
-
-				It("proxies SSH egress auth without exposing upstream private keys to the sandbox", func() {
-					assertSSHTransparentEgressAuthProxy(env, session, sandboxID, sshFixtureState)
 				})
 
 				It("creates and repairs template namespace ingress baseline policies", func() {

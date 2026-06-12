@@ -64,7 +64,17 @@ type CompiledProtocolRule struct {
 	Ports     []PortRange
 	TLSMode   v1alpha1.EgressTLSMode
 	HTTPMatch *CompiledHTTPMatch
+	HTTP      *CompiledHTTPProtocolRule
 	MCP       *CompiledMCPProtocolRule
+}
+
+type CompiledHTTPProtocolRule struct {
+	AllowedMethods      []string
+	DeniedMethods       []string
+	AllowedPaths        []string
+	DeniedPaths         []string
+	AllowedPathPrefixes []string
+	DeniedPathPrefixes  []string
 }
 
 type CompiledMCPProtocolRule struct {
@@ -289,7 +299,7 @@ func compileProtocolRules(values []v1alpha1.ProtocolRule) ([]CompiledProtocolRul
 	for _, value := range values {
 		protocol := strings.ToLower(strings.TrimSpace(string(value.Protocol)))
 		switch protocol {
-		case string(v1alpha1.ProtocolRuleProtocolMCP):
+		case string(v1alpha1.ProtocolRuleProtocolHTTP), string(v1alpha1.ProtocolRuleProtocolMCP):
 		default:
 			return nil, fmt.Errorf("unsupported protocol %q", value.Protocol)
 		}
@@ -314,15 +324,49 @@ func compileProtocolRules(values []v1alpha1.ProtocolRule) ([]CompiledProtocolRul
 			TLSMode:   value.TLSMode,
 			HTTPMatch: compileHTTPMatch(value.HTTPMatch),
 		}
+		if value.HTTP != nil {
+			rule.HTTP = compileHTTPProtocolRule(value.HTTP)
+		}
 		if value.MCP != nil {
 			rule.MCP = compileMCPProtocolRule(value.MCP)
 		}
-		if protocol == string(v1alpha1.ProtocolRuleProtocolMCP) && rule.MCP == nil {
-			return nil, fmt.Errorf("protocol rule %q requires mcp config", value.Name)
+		switch protocol {
+		case string(v1alpha1.ProtocolRuleProtocolHTTP):
+			if rule.HTTP == nil {
+				return nil, fmt.Errorf("protocol rule %q requires http config", value.Name)
+			}
+			if rule.MCP != nil {
+				return nil, fmt.Errorf("protocol rule %q cannot include mcp config for http", value.Name)
+			}
+		case string(v1alpha1.ProtocolRuleProtocolMCP):
+			if rule.MCP == nil {
+				return nil, fmt.Errorf("protocol rule %q requires mcp config", value.Name)
+			}
+			if rule.HTTP != nil {
+				return nil, fmt.Errorf("protocol rule %q cannot include http config for mcp", value.Name)
+			}
 		}
 		out = append(out, rule)
 	}
 	return out, nil
+}
+
+func compileHTTPProtocolRule(value *v1alpha1.HTTPProtocolRule) *CompiledHTTPProtocolRule {
+	if value == nil {
+		return nil
+	}
+	rule := &CompiledHTTPProtocolRule{}
+	if value.Methods != nil {
+		rule.AllowedMethods = normalizeUpperStrings(value.Methods.Allowed)
+		rule.DeniedMethods = normalizeUpperStrings(value.Methods.Denied)
+	}
+	if value.Paths != nil {
+		rule.AllowedPaths = normalizeNonEmptyStrings(value.Paths.Allowed)
+		rule.DeniedPaths = normalizeNonEmptyStrings(value.Paths.Denied)
+		rule.AllowedPathPrefixes = normalizeNonEmptyStrings(value.Paths.AllowedPrefixes)
+		rule.DeniedPathPrefixes = normalizeNonEmptyStrings(value.Paths.DeniedPrefixes)
+	}
+	return rule
 }
 
 func compileMCPProtocolRule(value *v1alpha1.MCPProtocolRule) *CompiledMCPProtocolRule {

@@ -125,7 +125,8 @@ const (
 
 // Defines values for ProtocolRuleProtocol.
 const (
-	ProtocolRuleProtocolMcp ProtocolRuleProtocol = "mcp"
+	ProtocolRuleProtocolHttp ProtocolRuleProtocol = "http"
+	ProtocolRuleProtocolMcp  ProtocolRuleProtocol = "mcp"
 )
 
 // Defines values for QuotaDimension.
@@ -982,6 +983,39 @@ type HTTPMatch struct {
 	Query *[]HTTPValueMatch `json:"query,omitempty"`
 }
 
+// HTTPMethodPolicy HTTP method allow and deny lists.
+type HTTPMethodPolicy struct {
+	// Allowed When non-empty, only listed HTTP methods are allowed.
+	Allowed *[]string `json:"allowed,omitempty"`
+
+	// Denied HTTP methods that are always denied before allowed is evaluated.
+	Denied *[]string `json:"denied,omitempty"`
+}
+
+// HTTPPathPolicy HTTP path allow and deny lists.
+type HTTPPathPolicy struct {
+	// Allowed When any allowed path list is non-empty, only listed exact paths are allowed.
+	Allowed *[]string `json:"allowed,omitempty"`
+
+	// AllowedPrefixes When any allowed path list is non-empty, only paths with listed prefixes are allowed.
+	AllowedPrefixes *[]string `json:"allowedPrefixes,omitempty"`
+
+	// Denied Exact paths that are always denied before allowed is evaluated.
+	Denied *[]string `json:"denied,omitempty"`
+
+	// DeniedPrefixes Path prefixes that are always denied before allowed is evaluated.
+	DeniedPrefixes *[]string `json:"deniedPrefixes,omitempty"`
+}
+
+// HTTPProtocolRule HTTP request operation policy.
+type HTTPProtocolRule struct {
+	// Methods HTTP method allow and deny lists.
+	Methods *HTTPMethodPolicy `json:"methods,omitempty"`
+
+	// Paths HTTP path allow and deny lists.
+	Paths *HTTPPathPolicy `json:"paths,omitempty"`
+}
+
 // HTTPValueMatch defines model for HTTPValueMatch.
 type HTTPValueMatch struct {
 	// Name Header or query parameter name.
@@ -1235,6 +1269,9 @@ type ProjectionSpec struct {
 type ProtocolRule struct {
 	// Domains Domain match list for the rule.
 	Domains *[]string `json:"domains,omitempty"`
+
+	// Http HTTP request operation policy.
+	Http *HTTPProtocolRule `json:"http,omitempty"`
 
 	// HttpMatch Request-level matcher for HTTP-family egress credential rules.
 	HttpMatch *HTTPMatch `json:"httpMatch,omitempty"`

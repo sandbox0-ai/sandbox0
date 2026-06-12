@@ -270,6 +270,40 @@ func TestBuildNetworkPolicyStateMergesNamedProtocolRules(t *testing.T) {
 	}
 }
 
+func TestBuildNetworkPolicyStateAcceptsHTTPProtocolRules(t *testing.T) {
+	svc := NewNetworkPolicyService(zap.NewNop())
+	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
+		SandboxID: "sb-1",
+		TeamID:    "team-1",
+		RequestSpec: &v1alpha1.SandboxNetworkPolicy{
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				ProtocolRules: []v1alpha1.ProtocolRule{{
+					Name:     "api-readonly",
+					Protocol: v1alpha1.ProtocolRuleProtocolHTTP,
+					Domains:  []string{"api.example.com"},
+					HTTP: &v1alpha1.HTTPProtocolRule{
+						Methods: &v1alpha1.HTTPMethodPolicy{Allowed: []string{"GET"}},
+						Paths: &v1alpha1.HTTPPathPolicy{
+							AllowedPrefixes: []string{"/v1/read"},
+						},
+					},
+				}},
+			},
+		},
+	})
+
+	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
+		t.Fatalf("expected egress policy")
+	}
+	if len(result.PolicySpec.Egress.ProtocolRules) != 1 {
+		t.Fatalf("protocol rule count = %d, want 1", len(result.PolicySpec.Egress.ProtocolRules))
+	}
+	rule := result.PolicySpec.Egress.ProtocolRules[0]
+	if rule.HTTP == nil || rule.HTTP.Methods == nil || len(rule.HTTP.Methods.Allowed) != 1 || rule.HTTP.Methods.Allowed[0] != "GET" {
+		t.Fatalf("unexpected http method policy: %#v", rule.HTTP)
+	}
+}
+
 func TestBuildNetworkPolicyStateRejectsMixedLegacyAndTrafficRules(t *testing.T) {
 	svc := NewNetworkPolicyService(zap.NewNop())
 	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
@@ -337,6 +371,29 @@ func TestBuildNetworkPolicyStateRejectsInvalidProtocolRules(t *testing.T) {
 	}
 	if len(result.PolicySpec.Egress.ProtocolRules) != 0 {
 		t.Fatalf("expected invalid protocol rules to be dropped, got %#v", result.PolicySpec.Egress.ProtocolRules)
+	}
+}
+
+func TestBuildNetworkPolicyStateRejectsInvalidHTTPProtocolRules(t *testing.T) {
+	svc := NewNetworkPolicyService(zap.NewNop())
+	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
+		SandboxID: "sb-1",
+		TeamID:    "team-1",
+		RequestSpec: &v1alpha1.SandboxNetworkPolicy{
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				ProtocolRules: []v1alpha1.ProtocolRule{{
+					Name:     "invalid-http",
+					Protocol: v1alpha1.ProtocolRuleProtocolHTTP,
+				}},
+			},
+		},
+	})
+
+	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
+		t.Fatalf("expected egress policy")
+	}
+	if len(result.PolicySpec.Egress.ProtocolRules) != 0 {
+		t.Fatalf("expected invalid http protocol rules to be dropped, got %#v", result.PolicySpec.Egress.ProtocolRules)
 	}
 }
 

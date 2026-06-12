@@ -11,6 +11,10 @@ func MatchMCPProtocolRule(policy *CompiledPolicy, host string, destPort int, req
 	return matchProtocolRule(policy, string(v1alpha1.ProtocolRuleProtocolMCP), host, destPort, req)
 }
 
+func MatchHTTPProtocolRule(policy *CompiledPolicy, host string, destPort int, req *http.Request) *CompiledProtocolRule {
+	return matchProtocolRule(policy, string(v1alpha1.ProtocolRuleProtocolHTTP), host, destPort, req)
+}
+
 func HasProtocolRules(policy *CompiledPolicy, protocol string) bool {
 	if policy == nil {
 		return false
@@ -66,6 +70,43 @@ func AllowMCPTool(rule *CompiledProtocolRule, name string) (bool, string) {
 		return false, "tool_not_allowed"
 	}
 	return true, "tool_allowed"
+}
+
+func AllowHTTPRequest(rule *CompiledProtocolRule, req *http.Request) (bool, string) {
+	if rule == nil || rule.HTTP == nil {
+		return true, "no_rule"
+	}
+	if req == nil {
+		return false, "missing_request"
+	}
+	method := strings.ToUpper(strings.TrimSpace(req.Method))
+	if method == "" {
+		return false, "missing_method"
+	}
+	if matchString(method, rule.HTTP.DeniedMethods) {
+		return false, "method_denied"
+	}
+	if len(rule.HTTP.AllowedMethods) > 0 && !matchString(method, rule.HTTP.AllowedMethods) {
+		return false, "method_not_allowed"
+	}
+	path := "/"
+	if req.URL != nil && req.URL.Path != "" {
+		path = req.URL.Path
+	}
+	if matchString(path, rule.HTTP.DeniedPaths) || matchPathPrefix(path, rule.HTTP.DeniedPathPrefixes) {
+		return false, "path_denied"
+	}
+	if hasHTTPPathAllowList(rule.HTTP) && !matchString(path, rule.HTTP.AllowedPaths) && !matchPathPrefix(path, rule.HTTP.AllowedPathPrefixes) {
+		return false, "path_not_allowed"
+	}
+	return true, "request_allowed"
+}
+
+func hasHTTPPathAllowList(rule *CompiledHTTPProtocolRule) bool {
+	if rule == nil {
+		return false
+	}
+	return len(rule.AllowedPaths) > 0 || len(rule.AllowedPathPrefixes) > 0
 }
 
 func matchProtocolRule(policy *CompiledPolicy, protocol string, host string, destPort int, req *http.Request) *CompiledProtocolRule {

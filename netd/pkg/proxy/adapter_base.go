@@ -99,7 +99,7 @@ func (a *httpAdapter) Handle(req *adapterRequest) error {
 		}
 		return req.Server.proxyHTTPRequest(req)
 	}
-	if policy.HasProtocolRules(req.Compiled, "mcp") {
+	if policy.HasProtocolRules(req.Compiled, "http") || policy.HasProtocolRules(req.Compiled, "mcp") {
 		return req.Server.proxyHTTPRequest(req)
 	}
 	return req.Server.relayTCPRequest(req)
@@ -179,7 +179,7 @@ func (a *tlsAdapter) Handle(req *adapterRequest) error {
 			}
 			return req.Server.proxyTLSStream(req)
 		}
-		if !egressAuthNeedsHTTPMatch(req) {
+		if !egressAuthNeedsHTTPMatch(req) && !egressAuthResolvesOnHTTPRequest(req) {
 			if err := prepareHTTPHeaderDirectives(req.EgressAuth, "tls", tlsTerminationRequired(req)); err != nil {
 				if req.EgressAuth.ShouldBypass() {
 					return req.Server.relayTCPRequest(req)

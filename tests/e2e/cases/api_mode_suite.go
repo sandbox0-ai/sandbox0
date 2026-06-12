@@ -84,6 +84,7 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 			session           *e2eutils.Session
 			cleanup           func()
 			sandboxID         string
+			adminPassword     string
 			sshFixtureState   *sshFixture
 			sshFixtureCleanup func()
 		)
@@ -97,6 +98,7 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 
 			password, err := framework.GetSecretValue(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, "admin-password", "password")
 			Expect(err).NotTo(HaveOccurred())
+			adminPassword = password
 
 			Eventually(func() error {
 				return session.Login(env.TestCtx.Context, GinkgoT(), "admin@example.com", password)
@@ -258,7 +260,7 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 				})
 
 				It("enforces Redis-backed team bandwidth through netd", func() {
-					assertNetdRedisTeamBandwidthLimit(env, session)
+					assertNetdRedisTeamBandwidthLimit(env, session, adminPassword)
 				})
 
 				It("enforces egress quota", func() {

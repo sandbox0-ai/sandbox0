@@ -21,10 +21,17 @@ func (s *Session) UseTeam(teamID string) func() {
 		return func() {}
 	}
 	previous := s.teamID
-	s.teamID = teamID
+	s.SelectTeam(teamID)
 	return func() {
-		s.teamID = previous
+		s.SelectTeam(previous)
 	}
+}
+
+func (s *Session) SelectTeam(teamID string) {
+	if s == nil {
+		return
+	}
+	s.teamID = teamID
 }
 
 func (s *Session) CreateTeam(ctx context.Context, t ContractT, name, slug string, homeRegionID *string) (*apispec.Team, int, error) {

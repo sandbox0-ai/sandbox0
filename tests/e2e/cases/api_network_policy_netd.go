@@ -79,7 +79,7 @@ func assertNetdTransparentEgressPolicy(env *framework.ScenarioEnv, session *e2eu
 	assertNetdHTTPFixtureEventuallyFails(env, templateNamespace, sandbox.PodName, fixture.DenyIP)
 }
 
-func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eutils.Session) {
+func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eutils.Session, adminPassword string) {
 	if !netdRedisTeamBandwidthConfigured(env) {
 		Skip("netd Redis team bandwidth limit is not configured for this scenario")
 	}
@@ -96,10 +96,11 @@ func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eu
 	Expect(status).To(Equal(http.StatusCreated))
 	Expect(team).NotTo(BeNil())
 
+	originalTeamID := session.SelectedTeamID()
 	var sandboxIDs []string
-	restoreTeam := session.UseTeam(team.Id)
 	DeferCleanup(func() {
-		defer restoreTeam()
+		defer session.SelectTeam(originalTeamID)
+		session.SelectTeam(team.Id)
 		var cleanupErrs []error
 		for _, id := range sandboxIDs {
 			if err := session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), id); err != nil {
@@ -114,6 +115,9 @@ func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eu
 		}
 		Expect(errors.Join(cleanupErrs...)).NotTo(HaveOccurred())
 	})
+
+	Expect(session.Login(env.TestCtx.Context, GinkgoT(), "admin@example.com", adminPassword)).To(Succeed())
+	session.SelectTeam(team.Id)
 
 	first := claimSandboxEventually(env, session, "default")
 	sandboxIDs = append(sandboxIDs, first.SandboxId)

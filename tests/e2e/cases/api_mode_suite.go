@@ -247,6 +247,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertCredentialSourceBindingLifecycle(env, session, sandboxID)
 				})
 
+				It("proxies SSH egress auth without exposing upstream private keys to the sandbox", func() {
+					assertSSHTransparentEgressAuthProxy(env, session, sandboxID, sshFixtureState)
+				})
+
 				It("matches SSH app protocols through traffic rules", func() {
 					assertSSHAppProtocolTrafficRules(env, session, sandboxID, sshFixtureState)
 				})
@@ -269,10 +273,6 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 
 				It("enforces ingress quota", func() {
 					assertIngressQuota(env, session, sandboxID)
-				})
-
-				It("proxies SSH egress auth without exposing upstream private keys to the sandbox", func() {
-					assertSSHTransparentEgressAuthProxy(env, session, sandboxID, sshFixtureState)
 				})
 
 				It("creates and repairs template namespace ingress baseline policies", func() {

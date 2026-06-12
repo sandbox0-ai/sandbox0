@@ -404,10 +404,25 @@ func (s *Server) setupPublicRoutes() {
 }
 
 func (s *Server) handleNoRoute(c *gin.Context) {
+	if s.requestHostIsPublicExposure(c) {
+		s.proxyPublicExposureNoRoute(c)
+		return
+	}
 	if s.handleAPINoRoute(c) {
 		return
 	}
 	s.proxyPublicExposureNoRoute(c)
+}
+
+func (s *Server) requestHostIsPublicExposure(c *gin.Context) bool {
+	if c == nil || c.Request == nil {
+		return false
+	}
+	if s == nil || s.cfg == nil || !s.cfg.PublicExposureEnabled {
+		return false
+	}
+	_, ok := s.exposureLabelFromHost(normalizeHost(c.Request.Host))
+	return ok
 }
 
 func (s *Server) handleAPINoRoute(c *gin.Context) bool {

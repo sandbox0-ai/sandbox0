@@ -31,6 +31,29 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+type blockingEgressAuthResolver struct {
+	called  chan *egressauth.ResolveRequest
+	release <-chan struct{}
+	resp    *egressauth.ResolveResponse
+}
+
+func (r *blockingEgressAuthResolver) Resolve(_ context.Context, req *egressauth.ResolveRequest) (*egressauth.ResolveResponse, error) {
+	if r != nil && r.called != nil && req != nil {
+		copied := *req
+		select {
+		case r.called <- &copied:
+		default:
+		}
+	}
+	if r != nil && r.release != nil {
+		<-r.release
+	}
+	if r == nil {
+		return nil, nil
+	}
+	return cloneResolveResponse(r.resp), nil
+}
+
 func TestPrefixedConnReadsPrefixBeforeConn(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
@@ -225,6 +248,187 @@ func TestTLSAdapterInterceptsHTTPSAndInjectsHeaders(t *testing.T) {
 	}
 	if got := <-requestBody; got != "payload" {
 		t.Fatalf("request body = %q", got)
+	}
+}
+
+func TestTLSAdapterDefersHTTPSHeaderResolutionUntilAfterDownstreamHandshake(t *testing.T) {
+	mitmCertPEM, mitmKeyPEM, err := newSelfSignedCertificateAuthority("sandbox0-mitm", time.Hour)
+	if err != nil {
+		t.Fatalf("new mitm ca: %v", err)
+	}
+	mitmAuthority, err := newCertificateAuthority(mitmCertPEM, mitmKeyPEM, time.Hour)
+	if err != nil {
+		t.Fatalf("new mitm authority: %v", err)
+	}
+
+	upstreamCAPEM, upstreamCAKeyPEM, err := newSelfSignedCertificateAuthority("sandbox0-upstream", time.Hour)
+	if err != nil {
+		t.Fatalf("new upstream ca: %v", err)
+	}
+	upstreamAuthority, err := newCertificateAuthority(upstreamCAPEM, upstreamCAKeyPEM, time.Hour)
+	if err != nil {
+		t.Fatalf("new upstream authority: %v", err)
+	}
+	upstreamLeaf, err := upstreamAuthority.CertificateForHost("api.example.com")
+	if err != nil {
+		t.Fatalf("upstream leaf: %v", err)
+	}
+	upstreamRootPool := x509.NewCertPool()
+	if !upstreamRootPool.AppendCertsFromPEM(upstreamCAPEM) {
+		t.Fatal("append upstream ca")
+	}
+
+	requestHeaders := make(chan http.Header, 1)
+	upstreamListener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{*upstreamLeaf},
+		NextProtos:   []string{"http/1.1"},
+		MinVersion:   tls.VersionTLS12,
+	})
+	if err != nil {
+		t.Fatalf("tls listen upstream: %v", err)
+	}
+	defer upstreamListener.Close()
+	upstreamServer := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestHeaders <- r.Header.Clone()
+			_, _ = io.Copy(io.Discard, r.Body)
+			_, _ = w.Write([]byte("secure-ok"))
+		}),
+	}
+	defer upstreamServer.Close()
+	go func() {
+		_ = upstreamServer.Serve(upstreamListener)
+	}()
+
+	proxyListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen proxy: %v", err)
+	}
+	defer proxyListener.Close()
+
+	releaseResolver := make(chan struct{})
+	resolver := &blockingEgressAuthResolver{
+		called:  make(chan *egressauth.ResolveRequest, 1),
+		release: releaseResolver,
+		resp: egressauth.NewHTTPHeadersResolveResponse("example-api", map[string]string{
+			"Authorization": "Bearer delayed-token",
+		}, nil),
+	}
+	released := false
+	defer func() {
+		if !released {
+			close(releaseResolver)
+		}
+	}()
+
+	server := &Server{
+		cfg: &config.NetdConfig{
+			EgressAuthEnabled:    true,
+			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
+		},
+		logger:            zap.NewNop(),
+		tlsAuthority:      mitmAuthority,
+		upstreamTLSConfig: &tls.Config{RootCAs: upstreamRootPool, NextProtos: []string{"http/1.1"}},
+		authResolver:      resolver,
+		authCache:         newMemoryEgressAuthCache(),
+	}
+	rule := &policy.CompiledEgressAuthRule{
+		Name:     "example-https",
+		AuthRef:  "example-api",
+		Protocol: v1alpha1.EgressAuthProtocolHTTPS,
+		TLSMode:  v1alpha1.EgressTLSModeTerminateReoriginate,
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		conn, acceptErr := proxyListener.Accept()
+		if acceptErr != nil {
+			done <- acceptErr
+			return
+		}
+		defer conn.Close()
+		req := &adapterRequest{
+			Server:   server,
+			Compiled: &policy.CompiledPolicy{SandboxID: "sbx_123", TeamID: "team_123", Mode: v1alpha1.NetworkModeAllowAll},
+			SrcIP:    "10.0.0.2",
+			DestIP:   upstreamListener.Addr().(*net.TCPAddr).IP,
+			DestPort: upstreamListener.Addr().(*net.TCPAddr).Port,
+			Host:     "api.example.com",
+			Conn:     conn,
+		}
+		server.attachEgressAuth(req, trafficDecision{
+			Action:          decisionActionUseAdapter,
+			Transport:       "tcp",
+			Protocol:        "tls",
+			MatchedAuthRule: rule,
+		})
+		done <- (&tlsAdapter{}).Handle(req)
+	}()
+
+	clientRootPool := x509.NewCertPool()
+	if !clientRootPool.AppendCertsFromPEM(mitmCertPEM) {
+		t.Fatal("append mitm ca")
+	}
+	rawConn, err := net.Dial("tcp4", proxyListener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer rawConn.Close()
+	if err := rawConn.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set handshake deadline: %v", err)
+	}
+	clientTLS := tls.Client(rawConn, &tls.Config{
+		ServerName: "api.example.com",
+		RootCAs:    clientRootPool,
+		NextProtos: []string{"http/1.1"},
+		MinVersion: tls.VersionTLS12,
+	})
+	defer clientTLS.Close()
+	if err := clientTLS.Handshake(); err != nil {
+		t.Fatalf("handshake client tls before resolver release: %v", err)
+	}
+	if err := rawConn.SetDeadline(time.Time{}); err != nil {
+		t.Fatalf("clear handshake deadline: %v", err)
+	}
+	select {
+	case req := <-resolver.called:
+		t.Fatalf("resolver called before downstream request was read: %#v", req)
+	default:
+	}
+
+	if _, err := io.WriteString(clientTLS, "POST /v1/test HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 7\r\n\r\npayload"); err != nil {
+		t.Fatalf("write tls request: %v", err)
+	}
+	select {
+	case req := <-resolver.called:
+		if req.AuthRef != "example-api" {
+			t.Fatalf("resolver auth ref = %q, want example-api", req.AuthRef)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("resolver was not called after downstream request was read")
+	}
+	close(releaseResolver)
+	released = true
+
+	resp, err := http.ReadResponse(bufio.NewReader(clientTLS), nil)
+	if err != nil {
+		t.Fatalf("read https response: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read https response body: %v", err)
+	}
+	_ = resp.Body.Close()
+	if got := string(body); got != "secure-ok" {
+		t.Fatalf("response body = %q", got)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("tls adapter handle: %v", err)
+	}
+
+	headers := <-requestHeaders
+	if got := headers.Get("Authorization"); got != "Bearer delayed-token" {
+		t.Fatalf("authorization header = %q", got)
 	}
 }
 

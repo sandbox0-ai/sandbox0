@@ -59,7 +59,7 @@ func (s *Server) proxyHTTPSRequest(req *adapterRequest) error {
 		return fmt.Errorf("handshake downstream tls: %w", err)
 	}
 	defer downstreamTLS.Close()
-	if req.EgressAuth != nil && req.EgressAuth.Rule != nil && !egressAuthNeedsHTTPMatch(req) {
+	if req.EgressAuth != nil && req.EgressAuth.Rule != nil && !egressAuthNeedsHTTPMatch(req) && !egressAuthResolvesOnHTTPRequest(req) {
 		if req.EgressAuth.ResolveError != nil {
 			_ = writeHTTPProxyError(downstreamTLS, http.StatusServiceUnavailable, "egress auth resolution failed")
 			return fmt.Errorf("resolve egress auth for %q: %w", req.EgressAuth.Rule.AuthRef, req.EgressAuth.ResolveError)

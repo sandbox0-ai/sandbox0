@@ -18,7 +18,7 @@ func (s *Server) prepareEgressAuthForHTTPRequest(req *adapterRequest, httpReq *h
 	if len(candidates) == 0 {
 		return
 	}
-	if !ctx.RequestMatch && ctx.Rule != nil && ctx.Rule.HTTPMatch == nil {
+	if !ctx.RequestMatch && ctx.Rule != nil && ctx.Rule.HTTPMatch == nil && !ctx.ResolveOnHTTPRequest {
 		return
 	}
 	rule := matchEgressAuthRuleForHTTPRequest(candidates, httpReq)
@@ -53,11 +53,13 @@ func selectEgressAuthRuleForHTTPRequest(ctx *egressAuthContext, rule *policy.Com
 	if ctx == nil || rule == nil || ctx.Rule == rule {
 		if ctx != nil {
 			ctx.RequestMatch = true
+			ctx.ResolveOnHTTPRequest = false
 		}
 		return
 	}
 	ctx.Rule = rule
 	ctx.RequestMatch = true
+	ctx.ResolveOnHTTPRequest = false
 	ctx.Resolved = nil
 	ctx.ResolvedHeaders = nil
 	ctx.ResolvedTLSClientCertificate = nil
@@ -78,4 +80,8 @@ func egressAuthNeedsHTTPMatch(req *adapterRequest) bool {
 		req.EgressAuth != nil &&
 		(req.EgressAuth.RequestMatch ||
 			(req.EgressAuth.Rule != nil && req.EgressAuth.Rule.HTTPMatch != nil))
+}
+
+func egressAuthResolvesOnHTTPRequest(req *adapterRequest) bool {
+	return req != nil && req.EgressAuth != nil && req.EgressAuth.ResolveOnHTTPRequest
 }

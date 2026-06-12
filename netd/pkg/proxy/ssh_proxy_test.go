@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -96,6 +97,60 @@ func TestProxySSHSessionReoriginatesWithPlatformCredential(t *testing.T) {
 	}
 }
 
+func TestBridgeSSHChannelDelaysExitStatusUntilUpstreamStreamsDrain(t *testing.T) {
+	downstream := newOrderedFakeSSHChannel()
+	upstream := newOrderedFakeSSHChannel()
+	downstream.closeInput()
+	upstream.closeStderr()
+
+	downstreamRequests := make(chan *ssh.Request)
+	close(downstreamRequests)
+	upstreamRequests := make(chan *ssh.Request, 2)
+
+	done := make(chan struct{})
+	go func() {
+		bridgeSSHChannel(nil, downstream, downstreamRequests, upstream, upstreamRequests)
+		close(done)
+	}()
+
+	upstreamRequests <- &ssh.Request{Type: "keepalive@openssh.com"}
+	if !downstream.waitForEvent("request:keepalive@openssh.com", time.Second) {
+		t.Fatalf("upstream request forwarding did not start; events=%v", downstream.eventsSnapshot())
+	}
+
+	upstreamRequests <- &ssh.Request{
+		Type:    "exit-status",
+		Payload: ssh.Marshal(struct{ Status uint32 }{Status: 0}),
+	}
+	if downstream.waitForEvent("request:exit-status", 100*time.Millisecond) {
+		t.Fatalf("exit-status forwarded before upstream stdout drained; events=%v", downstream.eventsSnapshot())
+	}
+
+	if _, err := upstream.stdoutWriter.Write([]byte("ok")); err != nil {
+		t.Fatalf("write upstream stdout: %v", err)
+	}
+	if err := upstream.stdoutWriter.Close(); err != nil {
+		t.Fatalf("close upstream stdout: %v", err)
+	}
+	close(upstreamRequests)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatalf("bridge did not exit; downstream events=%v upstream events=%v", downstream.eventsSnapshot(), upstream.eventsSnapshot())
+	}
+
+	events := downstream.eventsSnapshot()
+	outputIndex := eventIndex(events, "stdout:ok")
+	exitStatusIndex := eventIndex(events, "request:exit-status")
+	if outputIndex < 0 || exitStatusIndex < 0 {
+		t.Fatalf("missing stdout or exit-status event; events=%v", events)
+	}
+	if exitStatusIndex < outputIndex {
+		t.Fatalf("exit-status forwarded before stdout; events=%v", events)
+	}
+}
+
 func TestKnownHostsCallbackRejectsUntrustedKey(t *testing.T) {
 	hostSigner, _, _ := mustTestSSHSigner(t)
 	otherSigner, _, _ := mustTestSSHSigner(t)
@@ -116,6 +171,132 @@ func testKnownHostLine(host string, port int, key ssh.PublicKey) string {
 		pattern = fmt.Sprintf("[%s]:%d", host, port)
 	}
 	return pattern + " " + strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key)))
+}
+
+type orderedFakeSSHChannel struct {
+	stdoutReader *io.PipeReader
+	stdoutWriter *io.PipeWriter
+	stderrReader *io.PipeReader
+	stderrWriter *io.PipeWriter
+	stderr       *orderedFakeSSHStream
+
+	mu        sync.Mutex
+	events    []string
+	eventCh   chan string
+	closeOnce sync.Once
+}
+
+func newOrderedFakeSSHChannel() *orderedFakeSSHChannel {
+	stdoutReader, stdoutWriter := io.Pipe()
+	stderrReader, stderrWriter := io.Pipe()
+	ch := &orderedFakeSSHChannel{
+		stdoutReader: stdoutReader,
+		stdoutWriter: stdoutWriter,
+		stderrReader: stderrReader,
+		stderrWriter: stderrWriter,
+		eventCh:      make(chan string, 32),
+	}
+	ch.stderr = &orderedFakeSSHStream{channel: ch}
+	return ch
+}
+
+func (c *orderedFakeSSHChannel) Read(p []byte) (int, error) {
+	return c.stdoutReader.Read(p)
+}
+
+func (c *orderedFakeSSHChannel) Write(p []byte) (int, error) {
+	c.record("stdout:" + string(p))
+	return len(p), nil
+}
+
+func (c *orderedFakeSSHChannel) Close() error {
+	c.closeOnce.Do(func() {
+		c.record("close")
+		_ = c.stdoutReader.Close()
+		_ = c.stdoutWriter.Close()
+		_ = c.stderrReader.Close()
+		_ = c.stderrWriter.Close()
+	})
+	return nil
+}
+
+func (c *orderedFakeSSHChannel) CloseWrite() error {
+	c.record("close-write")
+	return nil
+}
+
+func (c *orderedFakeSSHChannel) SendRequest(name string, _ bool, _ []byte) (bool, error) {
+	c.record("request:" + name)
+	return true, nil
+}
+
+func (c *orderedFakeSSHChannel) Stderr() io.ReadWriter {
+	return c.stderr
+}
+
+func (c *orderedFakeSSHChannel) closeInput() {
+	_ = c.stdoutWriter.Close()
+	c.closeStderr()
+}
+
+func (c *orderedFakeSSHChannel) closeStderr() {
+	_ = c.stderrWriter.Close()
+}
+
+func (c *orderedFakeSSHChannel) record(event string) {
+	c.mu.Lock()
+	c.events = append(c.events, event)
+	c.mu.Unlock()
+	select {
+	case c.eventCh <- event:
+	default:
+	}
+}
+
+func (c *orderedFakeSSHChannel) waitForEvent(event string, timeout time.Duration) bool {
+	deadline := time.After(timeout)
+	for {
+		if c.hasEvent(event) {
+			return true
+		}
+		select {
+		case <-c.eventCh:
+		case <-deadline:
+			return c.hasEvent(event)
+		}
+	}
+}
+
+func (c *orderedFakeSSHChannel) hasEvent(event string) bool {
+	return eventIndex(c.eventsSnapshot(), event) >= 0
+}
+
+func (c *orderedFakeSSHChannel) eventsSnapshot() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.events...)
+}
+
+type orderedFakeSSHStream struct {
+	channel *orderedFakeSSHChannel
+}
+
+func (s *orderedFakeSSHStream) Read(p []byte) (int, error) {
+	return s.channel.stderrReader.Read(p)
+}
+
+func (s *orderedFakeSSHStream) Write(p []byte) (int, error) {
+	s.channel.record("stderr:" + string(p))
+	return len(p), nil
+}
+
+func eventIndex(events []string, event string) int {
+	for i, current := range events {
+		if current == event {
+			return i
+		}
+	}
+	return -1
 }
 
 func startTestSSHUpstream(t *testing.T, hostSigner ssh.Signer, authorizedKey ssh.PublicKey) (string, func()) {

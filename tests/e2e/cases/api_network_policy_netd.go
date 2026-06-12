@@ -1,18 +1,23 @@
 package cases
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 	"github.com/sandbox0-ai/sandbox0/pkg/framework"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/rediscache"
 	e2eutils "github.com/sandbox0-ai/sandbox0/tests/e2e/utils"
 	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
@@ -28,6 +33,7 @@ const (
 	netdHTTPFixturePort            = 8080
 	netdHTTPFixtureLargeBytes      = 256 * 1024
 	netdRedisBandwidthMinElapsed   = 3 * time.Second
+	defaultNetdBandwidthKeyPrefix  = "sandbox0:netd:bandwidth"
 )
 
 type netdHTTPFixture struct {
@@ -73,37 +79,70 @@ func assertNetdTransparentEgressPolicy(env *framework.ScenarioEnv, session *e2eu
 	assertNetdHTTPFixtureEventuallyFails(env, templateNamespace, sandbox.PodName, fixture.DenyIP)
 }
 
-func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {
+func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eutils.Session, adminPassword string) {
 	if !netdRedisTeamBandwidthConfigured(env) {
 		Skip("netd Redis team bandwidth limit is not configured for this scenario")
 	}
-	Expect(sandboxID).NotTo(BeEmpty())
 
-	sandbox, status, err := session.GetSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	team, status, err := session.CreateTeam(
+		env.TestCtx.Context,
+		GinkgoT(),
+		"E2E bandwidth "+suffix,
+		"e2e-bandwidth-"+suffix,
+		nil,
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(team).NotTo(BeNil())
+
+	originalTeamID := session.SelectedTeamID()
+	var sandboxIDs []string
+	defer func() {
+		defer session.SelectTeam(originalTeamID)
+		session.SelectTeam(team.Id)
+		var cleanupErrs []error
+		if err := clearNetdRedisTeamBandwidthKeys(env, team.Id); err != nil {
+			cleanupErrs = append(cleanupErrs, err)
+		}
+		for _, id := range sandboxIDs {
+			if err := session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), id); err != nil {
+				cleanupErrs = append(cleanupErrs, err)
+			}
+		}
+		if _, err := session.DeleteTeam(env.TestCtx.Context, GinkgoT(), team.Id); err != nil {
+			cleanupErrs = append(cleanupErrs, err)
+		}
+		Expect(errors.Join(cleanupErrs...)).NotTo(HaveOccurred())
+	}()
+
+	Expect(session.Login(env.TestCtx.Context, GinkgoT(), "admin@example.com", adminPassword)).To(Succeed())
+	session.SelectTeam(team.Id)
+
+	first := claimSandboxEventually(env, session, "default")
+	sandboxIDs = append(sandboxIDs, first.SandboxId)
+	second := claimSandboxEventually(env, session, "default")
+	sandboxIDs = append(sandboxIDs, second.SandboxId)
+
+	sandbox, status, err := session.GetSandbox(env.TestCtx.Context, GinkgoT(), first.SandboxId)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 	Expect(sandbox).NotTo(BeNil())
-
 	templateNamespace, err := naming.TemplateNamespaceForBuiltin(sandbox.TemplateId)
 	Expect(err).NotTo(HaveOccurred())
-	sandbox = waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
+	sandbox = waitForSandboxPodReadyEventually(env, session, first.SandboxId, templateNamespace)
 
-	second := claimSandboxEventually(env, session, "default")
-	secondID := second.SandboxId
-	DeferCleanup(func() {
-		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), secondID)
-	})
-	secondSandbox := waitForSandboxPodReadyEventually(env, session, secondID, templateNamespace)
+	secondSandbox := waitForSandboxPodReadyEventually(env, session, second.SandboxId, templateNamespace)
 
 	fixture := setupNetdHTTPFixture(env, templateNamespace, sandbox.PodName)
 	clearPolicy := apispec.SandboxNetworkPolicy{Mode: apispec.AllowAll}
 	DeferCleanup(func() {
-		_, _, _, _ = session.UpdateNetworkPolicy(env.TestCtx.Context, GinkgoT(), sandboxID, clearPolicy)
-		_, _, _, _ = session.UpdateNetworkPolicy(env.TestCtx.Context, GinkgoT(), secondID, clearPolicy)
+		_, _, _, _ = session.UpdateNetworkPolicy(env.TestCtx.Context, GinkgoT(), first.SandboxId, clearPolicy)
+		_, _, _, _ = session.UpdateNetworkPolicy(env.TestCtx.Context, GinkgoT(), second.SandboxId, clearPolicy)
 	})
 
-	applyNetdFixtureAllowPolicy(env, session, sandboxID, templateNamespace, sandbox.PodName, fixture.AllowIP)
-	applyNetdFixtureAllowPolicy(env, session, secondID, templateNamespace, secondSandbox.PodName, fixture.AllowIP)
+	applyNetdFixtureAllowPolicy(env, session, first.SandboxId, templateNamespace, sandbox.PodName, fixture.AllowIP)
+	applyNetdFixtureAllowPolicy(env, session, second.SandboxId, templateNamespace, secondSandbox.PodName, fixture.AllowIP)
 
 	started := time.Now()
 	errCh := make(chan error, 2)
@@ -119,11 +158,18 @@ func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eu
 	}
 	elapsed := time.Since(started)
 	Expect(elapsed).To(BeNumerically(">=", netdRedisBandwidthMinElapsed), "expected two same-team downloads to share the cluster-scoped bandwidth bucket")
+	Expect(clearNetdRedisTeamBandwidthKeys(env, team.Id)).To(Succeed())
 }
 
 func netdRedisTeamBandwidthConfigured(env *framework.ScenarioEnv) bool {
+	cfg, ok := netdRedisTeamBandwidthConfig(env)
+	return ok && strings.TrimSpace(cfg.RedisURL) != "" &&
+		(cfg.TeamEgressBandwidthBytesPerSecond > 0 || cfg.TeamIngressBandwidthBytesPerSecond > 0)
+}
+
+func netdRedisTeamBandwidthConfig(env *framework.ScenarioEnv) (*apiconfig.NetdConfig, bool) {
 	if env == nil || env.Infra.Name == "" || env.Infra.Namespace == "" {
-		return false
+		return nil, false
 	}
 	output, err := framework.KubectlOutput(
 		env.TestCtx.Context,
@@ -133,11 +179,11 @@ func netdRedisTeamBandwidthConfigured(env *framework.ScenarioEnv) bool {
 		"-o", "json",
 	)
 	if err != nil {
-		return false
+		return nil, false
 	}
 	var ds appsv1.DaemonSet
 	if err := json.Unmarshal([]byte(output), &ds); err != nil {
-		return false
+		return nil, false
 	}
 	configMapName := ""
 	for _, volume := range ds.Spec.Template.Spec.Volumes {
@@ -147,7 +193,7 @@ func netdRedisTeamBandwidthConfigured(env *framework.ScenarioEnv) bool {
 		}
 	}
 	if configMapName == "" {
-		return false
+		return nil, false
 	}
 	output, err = framework.KubectlOutput(
 		env.TestCtx.Context,
@@ -157,18 +203,111 @@ func netdRedisTeamBandwidthConfigured(env *framework.ScenarioEnv) bool {
 		"-o", "json",
 	)
 	if err != nil {
-		return false
+		return nil, false
 	}
 	var cm corev1.ConfigMap
 	if err := json.Unmarshal([]byte(output), &cm); err != nil {
-		return false
+		return nil, false
 	}
 	var cfg apiconfig.NetdConfig
 	if err := yaml.Unmarshal([]byte(cm.Data["config.yaml"]), &cfg); err != nil {
-		return false
+		return nil, false
 	}
-	return strings.TrimSpace(cfg.RedisURL) != "" &&
-		(cfg.TeamEgressBandwidthBytesPerSecond > 0 || cfg.TeamIngressBandwidthBytesPerSecond > 0)
+	return &cfg, true
+}
+
+func clearNetdRedisTeamBandwidthKeys(env *framework.ScenarioEnv, teamID string) error {
+	cfg, ok := netdRedisTeamBandwidthConfig(env)
+	if !ok || strings.TrimSpace(cfg.RedisURL) == "" || strings.TrimSpace(teamID) == "" {
+		return nil
+	}
+
+	serviceName := env.Infra.Name + "-redis"
+	port, err := framework.GetServicePort(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, serviceName)
+	if err != nil {
+		return err
+	}
+
+	localURL, cleanup, err := framework.PortForwardService(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, serviceName, port)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	forwarded, err := url.Parse(localURL)
+	if err != nil {
+		return err
+	}
+	if forwarded.Host == "" {
+		return fmt.Errorf("redis port-forward did not return a host")
+	}
+
+	options, err := redis.ParseURL(cfg.RedisURL)
+	if err != nil {
+		return err
+	}
+	options.Addr = forwarded.Host
+
+	client := redis.NewClient(options)
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(env.TestCtx.Context, 10*time.Second)
+	defer cancel()
+	keys := netdRedisTeamBandwidthKeys(cfg, teamID)
+	if err := client.Del(ctx, keys...).Err(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func netdRedisTeamBandwidthKeys(cfg *apiconfig.NetdConfig, teamID string) []string {
+	return []string{
+		netdRedisTeamBandwidthKey(cfg, teamID, "egress"),
+		netdRedisTeamBandwidthKey(cfg, teamID, "ingress"),
+	}
+}
+
+func netdRedisTeamBandwidthKey(cfg *apiconfig.NetdConfig, teamID, direction string) string {
+	keyPrefix := defaultNetdBandwidthKeyPrefix
+	if cfg != nil {
+		basePrefix := strings.TrimSpace(cfg.RedisKeyPrefix)
+		if basePrefix == "" {
+			basePrefix = rediscache.DefaultKeyPrefix
+		}
+		keyPrefix = rediscache.JoinKeyPrefix(basePrefix, "netd", "bandwidth")
+		if keyPrefix == "" {
+			keyPrefix = defaultNetdBandwidthKeyPrefix
+		}
+	}
+	raw := rediscache.JoinKeyPrefix(
+		"region", netdRedisValueOrUnknown(cfgRegionID(cfg)),
+		"cluster", netdRedisValueOrUnknown(cfgClusterID(cfg)),
+		"team", teamID,
+		"direction", direction,
+	)
+	return rediscache.HashedKey(keyPrefix, raw)
+}
+
+func cfgRegionID(cfg *apiconfig.NetdConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	return cfg.RegionID
+}
+
+func cfgClusterID(cfg *apiconfig.NetdConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	return cfg.ClusterID
+}
+
+func netdRedisValueOrUnknown(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	return value
 }
 
 func applyNetdFixtureAllowPolicy(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID, namespace, podName, allowIP string) {

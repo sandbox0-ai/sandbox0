@@ -170,6 +170,21 @@ func TestCompileNetworkPolicyProtocolRules(t *testing.T) {
 						Denied:  []string{"run_command"},
 					},
 				},
+			}, {
+				Name:     "api-readonly",
+				Protocol: v1alpha1.ProtocolRuleProtocolHTTP,
+				Domains:  []string{"API.Example.COM"},
+				Ports:    []v1alpha1.PortSpec{{Port: 80, Protocol: "tcp"}},
+				HTTP: &v1alpha1.HTTPProtocolRule{
+					Methods: &v1alpha1.HTTPMethodPolicy{
+						Allowed: []string{"get", "HEAD"},
+						Denied:  []string{"post"},
+					},
+					Paths: &v1alpha1.HTTPPathPolicy{
+						AllowedPrefixes: []string{"/v1/read"},
+						Denied:          []string{"/v1/read/private"},
+					},
+				},
 			}},
 		},
 	}
@@ -178,8 +193,8 @@ func TestCompileNetworkPolicyProtocolRules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile failed: %v", err)
 	}
-	if len(compiled.Egress.ProtocolRules) != 1 {
-		t.Fatalf("protocol rule count = %d, want 1", len(compiled.Egress.ProtocolRules))
+	if len(compiled.Egress.ProtocolRules) != 2 {
+		t.Fatalf("protocol rule count = %d, want 2", len(compiled.Egress.ProtocolRules))
 	}
 	rule := compiled.Egress.ProtocolRules[0]
 	if rule.Protocol != "mcp" || rule.TLSMode != v1alpha1.EgressTLSModeTerminateReoriginate {
@@ -193,6 +208,22 @@ func TestCompileNetworkPolicyProtocolRules(t *testing.T) {
 	}
 	if len(rule.MCP.DeniedTools) != 1 || rule.MCP.DeniedTools[0] != "run_command" {
 		t.Fatalf("denied tools = %#v", rule.MCP.DeniedTools)
+	}
+	httpRule := compiled.Egress.ProtocolRules[1]
+	if httpRule.Protocol != "http" || httpRule.HTTP == nil {
+		t.Fatalf("unexpected http protocol rule: %+v", httpRule)
+	}
+	if len(httpRule.HTTP.AllowedMethods) != 2 || httpRule.HTTP.AllowedMethods[0] != "GET" {
+		t.Fatalf("allowed methods = %#v", httpRule.HTTP.AllowedMethods)
+	}
+	if len(httpRule.HTTP.DeniedMethods) != 1 || httpRule.HTTP.DeniedMethods[0] != "POST" {
+		t.Fatalf("denied methods = %#v", httpRule.HTTP.DeniedMethods)
+	}
+	if len(httpRule.HTTP.AllowedPathPrefixes) != 1 || httpRule.HTTP.AllowedPathPrefixes[0] != "/v1/read" {
+		t.Fatalf("allowed path prefixes = %#v", httpRule.HTTP.AllowedPathPrefixes)
+	}
+	if len(httpRule.HTTP.DeniedPaths) != 1 || httpRule.HTTP.DeniedPaths[0] != "/v1/read/private" {
+		t.Fatalf("denied paths = %#v", httpRule.HTTP.DeniedPaths)
 	}
 }
 

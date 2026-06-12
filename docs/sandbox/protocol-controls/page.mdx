@@ -2,7 +2,7 @@
 
 `egress.protocolRules` adds protocol-aware controls after outbound traffic is allowed by `trafficRules`.
 
-Use it when a sandbox must reach a broad protocol endpoint but only a subset of protocol operations should be allowed. The first supported protocol is remote MCP over HTTP or HTTPS.
+Use it when a sandbox must reach a broad protocol endpoint but only a subset of protocol operations should be allowed. Sandbox0 supports HTTP request controls and remote MCP controls over HTTP or HTTPS.
 
 ## How It Fits
 
@@ -13,6 +13,48 @@ Use it when a sandbox must reach a broad protocol endpoint but only a subset of 
 | `credentialRules` | Resolve and inject outbound credentials for matching traffic |
 
 Protocol controls are enforced in the data plane by `netd`. Regional control plane services store and distribute policy; they are not in the per-request data path.
+
+## HTTP Request Policy
+
+HTTP protocol rules inspect outbound HTTP requests. `httpMatch` scopes the rule to matching requests, while `http` defines the operation policy. `denied` is evaluated before `allowed`. If an allowed list is non-empty, only listed values are allowed.
+
+```yaml
+mode: block-all
+egress:
+    trafficRules:
+        - name: allow-api
+          action: allow
+          domains:
+              - api.example.com
+          ports:
+              - port: 443
+                protocol: tcp
+    protocolRules:
+        - name: api-readonly
+          protocol: http
+          domains:
+              - api.example.com
+          ports:
+              - port: 443
+                protocol: tcp
+          tlsMode: terminate-reoriginate
+          http:
+              methods:
+                  allowed:
+                      - GET
+                      - HEAD
+                  denied:
+                      - POST
+                      - PUT
+                      - DELETE
+              paths:
+                  allowedPrefixes:
+                      - /v1/read
+                  denied:
+                      - /v1/read/private
+```
+
+When an HTTP request is denied, netd does not forward it upstream. It returns `403 Forbidden` to the sandbox process and writes the protocol decision to the netd audit event.
 
 ## MCP Tool Policy
 
@@ -251,13 +293,15 @@ main().catch((error) => {
 
 ## HTTPS Inspection
 
-For HTTPS MCP servers, set `tlsMode: terminate-reoriginate` on the protocol rule. Sandbox0 then uses the netd MITM CA already exposed to procd-managed processes.
+For HTTPS HTTP and MCP protocol rules, set `tlsMode: terminate-reoriginate` on the protocol rule. Sandbox0 then uses the netd MITM CA already exposed to procd-managed processes.
 
-Without TLS termination, netd can still apply destination-level `trafficRules`, but it cannot read MCP JSON-RPC bodies or enforce tool names.
+Without TLS termination, netd can still apply destination-level `trafficRules`, but it cannot read HTTPS request contents or enforce request-level protocol policy.
 
 ## Current Scope
 
-The first implementation targets remote MCP over HTTP/HTTPS Streamable HTTP style requests:
+HTTP protocol controls support request method and path allow/deny lists for HTTP/1.1 and HTTP/2 HTTPS requests when TLS termination is enabled.
+
+MCP protocol controls target remote MCP over HTTP/HTTPS Streamable HTTP style requests:
 
 - `tools/call` is enforced by tool name.
 - `tools/list` is audited but not filtered.

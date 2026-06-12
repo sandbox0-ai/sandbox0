@@ -460,6 +460,55 @@ spec:
                               items:
                                 type: string
                               type: array
+                            http:
+                              description: HTTP configures HTTP request policy.
+                              properties:
+                                methods:
+                                  description: Methods controls HTTP methods.
+                                  properties:
+                                    allowed:
+                                      description: Allowed permits only listed methods
+                                        when non-empty.
+                                      items:
+                                        type: string
+                                      type: array
+                                    denied:
+                                      description: Denied blocks listed methods before
+                                        evaluating Allowed.
+                                      items:
+                                        type: string
+                                      type: array
+                                  type: object
+                                paths:
+                                  description: Paths controls URL paths.
+                                  properties:
+                                    allowed:
+                                      description: Allowed permits only listed exact
+                                        paths when any allowed path list is non-empty.
+                                      items:
+                                        type: string
+                                      type: array
+                                    allowedPrefixes:
+                                      description: AllowedPrefixes permits only paths
+                                        with listed prefixes when any allowed path
+                                        list is non-empty.
+                                      items:
+                                        type: string
+                                      type: array
+                                    denied:
+                                      description: Denied blocks listed exact paths
+                                        before evaluating Allowed.
+                                      items:
+                                        type: string
+                                      type: array
+                                    deniedPrefixes:
+                                      description: DeniedPrefixes blocks paths with
+                                        listed prefixes before evaluating Allowed.
+                                      items:
+                                        type: string
+                                      type: array
+                                  type: object
+                              type: object
                             httpMatch:
                               description: HTTPMatch constrains HTTP-carried protocol
                                 rules to request attributes.

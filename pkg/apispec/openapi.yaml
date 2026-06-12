@@ -5643,14 +5643,63 @@ components:
           $ref: "#/components/schemas/EgressTLSMode"
         httpMatch:
           $ref: "#/components/schemas/HTTPMatch"
+        http:
+          $ref: "#/components/schemas/HTTPProtocolRule"
         mcp:
           $ref: "#/components/schemas/MCPProtocolRule"
       required: [protocol]
     ProtocolRuleProtocol:
       type: string
-      enum: [mcp]
+      enum: [http, mcp]
       x-enum-varnames:
+        - ProtocolRuleProtocolHttp
         - ProtocolRuleProtocolMcp
+    HTTPProtocolRule:
+      type: object
+      description: HTTP request operation policy.
+      properties:
+        methods:
+          $ref: "#/components/schemas/HTTPMethodPolicy"
+        paths:
+          $ref: "#/components/schemas/HTTPPathPolicy"
+    HTTPMethodPolicy:
+      type: object
+      description: HTTP method allow and deny lists.
+      properties:
+        allowed:
+          type: array
+          description: When non-empty, only listed HTTP methods are allowed.
+          items:
+            type: string
+        denied:
+          type: array
+          description: HTTP methods that are always denied before allowed is evaluated.
+          items:
+            type: string
+    HTTPPathPolicy:
+      type: object
+      description: HTTP path allow and deny lists.
+      properties:
+        allowed:
+          type: array
+          description: When any allowed path list is non-empty, only listed exact paths are allowed.
+          items:
+            type: string
+        denied:
+          type: array
+          description: Exact paths that are always denied before allowed is evaluated.
+          items:
+            type: string
+        allowedPrefixes:
+          type: array
+          description: When any allowed path list is non-empty, only paths with listed prefixes are allowed.
+          items:
+            type: string
+        deniedPrefixes:
+          type: array
+          description: Path prefixes that are always denied before allowed is evaluated.
+          items:
+            type: string
     MCPProtocolRule:
       type: object
       description: Model Context Protocol operation policy.

@@ -160,6 +160,14 @@ func (s *Server) handleHTTP2ProxyRequest(w http.ResponseWriter, downstreamReq *h
 	if requestScoped.EgressAuth != nil && len(requestScoped.EgressAuth.ResolvedHeaders) > 0 {
 		injectHTTPHeaders(upstreamReq, requestScoped.EgressAuth.ResolvedHeaders)
 	}
+	if err := s.enforceHTTPPolicyForHTTPRequest(&requestScoped, upstreamReq, func(status int, body []byte) error {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(status)
+		_, writeErr := w.Write(body)
+		return writeErr
+	}); err != nil {
+		return err
+	}
 	if err := s.enforceMCPPolicyForHTTPRequest(&requestScoped, upstreamReq, func(status int, body []byte) error {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)

@@ -153,7 +153,8 @@ func downstreamTLSNextProtos(req *adapterRequest) []string {
 	if req != nil && req.EgressAuth != nil && egressAuthMayUseHTTPSH2(req.EgressAuth) {
 		return []string{"h2", "http/1.1"}
 	}
-	if req != nil && policy.RequiresProtocolTLSTermination(req.Compiled, req.Host, req.DestPort, "mcp") {
+	if req != nil && (policy.RequiresProtocolTLSTermination(req.Compiled, req.Host, req.DestPort, "http") ||
+		policy.RequiresProtocolTLSTermination(req.Compiled, req.Host, req.DestPort, "mcp")) {
 		return []string{"h2", "http/1.1"}
 	}
 	return []string{"http/1.1"}
@@ -167,7 +168,8 @@ func shouldProxyHTTP2(req *adapterRequest, state tls.ConnectionState) bool {
 		if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
 			return true
 		}
-		return policy.RequiresProtocolTLSTermination(req.Compiled, req.Host, req.DestPort, "mcp")
+		return policy.RequiresProtocolTLSTermination(req.Compiled, req.Host, req.DestPort, "http") ||
+			policy.RequiresProtocolTLSTermination(req.Compiled, req.Host, req.DestPort, "mcp")
 	}
 	return false
 }
@@ -234,6 +236,11 @@ func (s *Server) proxyHTTPFromConn(downstream net.Conn, req *adapterRequest, ups
 	if req.EgressAuth != nil && len(req.EgressAuth.ResolvedHeaders) > 0 {
 		injectHTTPHeaders(httpReq, req.EgressAuth.ResolvedHeaders)
 	}
+	if err := s.enforceHTTPPolicyForHTTPRequest(req, httpReq, func(status int, body []byte) error {
+		return writeHTTPProtocolPolicyResponse(downstream, status, body)
+	}); err != nil {
+		return err
+	}
 	if err := s.enforceMCPPolicyForHTTPRequest(req, httpReq, func(status int, body []byte) error {
 		return writeMCPPolicyHTTPResponse(downstream, status, body)
 	}); err != nil {
@@ -265,7 +272,8 @@ func tlsTerminationRequired(req *adapterRequest) bool {
 	if egressAuthRequiresTLSTermination(req.EgressAuth) {
 		return true
 	}
-	return policy.RequiresProtocolTLSTermination(req.Compiled, req.Host, req.DestPort, "mcp")
+	return policy.RequiresProtocolTLSTermination(req.Compiled, req.Host, req.DestPort, "http") ||
+		policy.RequiresProtocolTLSTermination(req.Compiled, req.Host, req.DestPort, "mcp")
 }
 
 func egressAuthRequiresTLSTermination(ctx *egressAuthContext) bool {

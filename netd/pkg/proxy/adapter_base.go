@@ -99,7 +99,7 @@ func (a *httpAdapter) Handle(req *adapterRequest) error {
 		}
 		return req.Server.proxyHTTPRequest(req)
 	}
-	if policy.HasProtocolRules(req.Compiled, "mcp") {
+	if policy.HasProtocolRules(req.Compiled, "http") || policy.HasProtocolRules(req.Compiled, "mcp") {
 		return req.Server.proxyHTTPRequest(req)
 	}
 	return req.Server.relayTCPRequest(req)

@@ -17,6 +17,8 @@ Managed Agents sit above raw sandboxes. A sandbox gives an agent processes, file
 | Agent | Versioned instructions, model, tools, MCP servers, and skills |
 | Environment | Runtime package and networking configuration |
 | Session | Durable unit of work that binds an agent snapshot, environment, resources, and vaults |
+| Deployment | Reusable session creation definition with optional cron schedule |
+| Deployment run | Audit record for one manual or scheduled session creation attempt |
 | Events | Append-only interaction log for user input, agent output, tools, status, and errors |
 | Vault | Credential container attached to a session |
 | Resource | File or repository materialized into the session workspace |
@@ -62,7 +64,7 @@ Session truth lives outside the sandbox. The sandbox is an execution attachment 
 2. Create an `environment` with package and network settings.
 3. Create an LLM vault with `sandbox0.managed_agents.role = llm` and the target agent harness.
 4. Create a session that references the agent, environment, and vault ids.
-5. Send `user.message` events.
+5. Send `user.message` events, or create a deployment that stores initial events for manual or scheduled runs.
 6. Sandbox0 starts the selected agent harness. Agent-in-sandbox harnesses claim or resume a sandbox immediately; sandbox-as-tool harnesses claim a sandbox when a tool needs one.
 7. The harness emits callbacks. The gateway appends events to the durable session log.
 8. The client lists or streams events until the session becomes idle, requires action, or terminates.
@@ -87,6 +89,7 @@ The official Claude Managed Agents documentation is still the canonical SDK refe
 - [Agent setup](https://platform.claude.com/docs/en/managed-agents/agent-setup)
 - [Environments](https://platform.claude.com/docs/en/managed-agents/environments)
 - [Sessions](https://platform.claude.com/docs/en/managed-agents/sessions)
+- [Scheduled deployments](https://platform.claude.com/docs/en/managed-agents/scheduled-deployments)
 - [Vaults](https://platform.claude.com/docs/en/managed-agents/vaults)
 
 ## Next Steps
@@ -98,5 +101,9 @@ The official Claude Managed Agents documentation is still the canonical SDK refe
 
   <Card title="Agents" href="/docs/managed-agents/agents" cta="Continue">
     Define versioned agents with prompts, tools, MCP servers, and skills.
+  </Card>
+
+  <Card title="Deployments" href="/docs/managed-agents/deployments" cta="Continue">
+    Run managed agents manually or on a cron schedule from a reusable definition.
   </Card>
 </CardGroup>

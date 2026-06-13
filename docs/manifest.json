@@ -94,6 +94,10 @@
           "title": "Sessions"
         },
         {
+          "slug": "deployments",
+          "title": "Deployments"
+        },
+        {
           "slug": "events",
           "title": "Events"
         },

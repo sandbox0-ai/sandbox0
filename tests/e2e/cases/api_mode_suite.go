@@ -374,7 +374,9 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					Expect(err).NotTo(HaveOccurred())
 					Expect(status).To(Equal(http.StatusOK))
 					Expect(pausedResp).NotTo(BeNil())
-					Expect(pausedResp.Paused).To(BeTrue())
+					Expect(pausedResp.Paused).To(BeFalse())
+					Expect(pausedResp.Status).NotTo(BeNil())
+					Expect(*pausedResp.Status).To(Equal(apispec.SandboxLifecycleStatusPausing))
 					waitForSandboxLifecycleStatusEventually(env, session, sandboxID, apispec.SandboxLifecycleStatusPaused)
 
 					resumeResp, status, err := session.ResumeSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)

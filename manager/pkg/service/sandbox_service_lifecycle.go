@@ -17,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 )
 
@@ -77,14 +78,92 @@ func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string)
 	return nil
 }
 
-// PauseSandboxRuntime checkpoints the writable rootfs, deletes the runtime pod,
-// and preserves the durable sandbox identity for a later resume.
+// PauseSandboxRuntime accepts a pause request and schedules checkpoint work.
 func (s *SandboxService) PauseSandboxRuntime(ctx context.Context, sandboxID string) error {
-	return s.pauseSandboxRuntime(ctx, sandboxID, true)
+	_, err := s.RequestPauseSandboxRuntime(ctx, sandboxID)
+	return err
+}
+
+// RequestPauseSandboxRuntime records a durable pausing state and returns without
+// waiting for rootfs checkpoint upload.
+func (s *SandboxService) RequestPauseSandboxRuntime(ctx context.Context, sandboxID string) (string, error) {
+	if s == nil {
+		return "", fmt.Errorf("sandbox service is nil")
+	}
+	if s.sandboxStore == nil {
+		if err := s.pauseSandboxRuntime(ctx, sandboxID, true); err != nil {
+			return "", err
+		}
+		return SandboxStatusPaused, nil
+	}
+
+	status := SandboxStatusPausing
+	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
+		switch record.Status {
+		case SandboxStatusDeleted:
+			return k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
+		case SandboxStatusPaused:
+			status = SandboxStatusPaused
+			return nil
+		case SandboxStatusPausing:
+			status = SandboxStatusPausing
+			return nil
+		case SandboxStatusStarting, SandboxStatusResuming:
+			return k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID, fmt.Errorf("sandbox lifecycle operation %q is in progress", record.Status))
+		}
+
+		pod, err := s.getSandboxPod(lockCtx, sandboxID)
+		if err != nil {
+			if k8serrors.IsNotFound(err) {
+				status = SandboxStatusPaused
+				return tx.MarkRuntimePaused(lockCtx, sandboxID, 0, s.clock.Now())
+			}
+			return fmt.Errorf("get pod: %w", err)
+		}
+		if !s.config.CtldEnabled || s.ctldClient == nil {
+			return ErrSandboxCheckpointRequiresCtld
+		}
+		generation := runtimeGenerationFromPod(pod)
+		status = SandboxStatusPausing
+		return tx.SaveRuntime(lockCtx, sandboxID, pod.Namespace, pod.Name, SandboxStatusPausing, generation, parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt))
+	})
+	if err != nil {
+		if errors.Is(err, ErrSandboxRecordNotFound) {
+			if fallbackErr := s.pauseSandboxRuntime(ctx, sandboxID, true); fallbackErr != nil {
+				return "", fallbackErr
+			}
+			return SandboxStatusPaused, nil
+		}
+		return "", err
+	}
+	if status == SandboxStatusPausing {
+		s.enqueueSandboxPause(sandboxID)
+	}
+	return status, nil
+}
+
+func (s *SandboxService) enqueueSandboxPause(sandboxID string) {
+	if s == nil || strings.TrimSpace(sandboxID) == "" {
+		return
+	}
+	if s.pauseEnqueuer != nil {
+		s.pauseEnqueuer.EnqueueSandboxPause(sandboxID)
+		return
+	}
+	go func() {
+		if err := s.CompletePausingSandboxRuntime(context.Background(), sandboxID); err != nil && s.logger != nil {
+			s.logger.Warn("Async sandbox pause completion failed",
+				zap.String("sandboxID", sandboxID),
+				zap.Error(err),
+			)
+		}
+	}()
 }
 
 func (s *SandboxService) pauseSandboxRuntime(ctx context.Context, sandboxID string, saveRootFS bool) error {
-	s.logger.Info("Pausing sandbox runtime", zap.String("sandboxID", sandboxID))
+	if s.logger != nil {
+		s.logger.Info("Pausing sandbox runtime", zap.String("sandboxID", sandboxID))
+	}
 	pause := func(ctx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
 		if record != nil {
 			switch record.Status {
@@ -143,6 +222,134 @@ func (s *SandboxService) pauseSandboxRuntime(ctx context.Context, sandboxID stri
 		return nil
 	}
 	return pause(ctx, nil, nil)
+}
+
+// CompletePausingSandboxRuntime finishes a previously accepted durable pause.
+func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sandboxID string) error {
+	if s == nil {
+		return nil
+	}
+	if s.sandboxStore == nil {
+		return s.pauseSandboxRuntime(ctx, sandboxID, true)
+	}
+
+	var record *SandboxRecord
+	if err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(_ context.Context, _ SandboxStoreTx, locked *SandboxRecord) error {
+		if locked.Status != SandboxStatusPausing {
+			return nil
+		}
+		record = cloneSandboxRecordForLifecycle(locked)
+		return nil
+	}); err != nil {
+		if errors.Is(err, ErrSandboxRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	if record == nil {
+		return nil
+	}
+
+	pod, err := s.getSandboxPod(ctx, sandboxID)
+	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			return s.markPausingRuntimePaused(ctx, sandboxID, record.RuntimeGeneration)
+		}
+		return fmt.Errorf("get pod: %w", err)
+	}
+	generation := runtimeGenerationFromPod(pod)
+	if generation != record.RuntimeGeneration {
+		return fmt.Errorf("sandbox runtime generation changed during pause: record=%d pod=%d", record.RuntimeGeneration, generation)
+	}
+	if record.CurrentPodName != "" && pod.Name != record.CurrentPodName {
+		return k8serrors.NewConflict(schema.GroupResource{Resource: "pod"}, pod.Name, fmt.Errorf("pausing sandbox points at runtime pod %s", record.CurrentPodName))
+	}
+	if record.CurrentPodNamespace != "" && pod.Namespace != record.CurrentPodNamespace {
+		return k8serrors.NewConflict(schema.GroupResource{Resource: "pod"}, pod.Name, fmt.Errorf("pausing sandbox points at runtime namespace %s", record.CurrentPodNamespace))
+	}
+	if !s.config.CtldEnabled || s.ctldClient == nil {
+		return ErrSandboxCheckpointRequiresCtld
+	}
+	if err := s.saveSandboxRootFSCheckpoint(ctx, pod, record, nil); err != nil {
+		return err
+	}
+	stillPausing, err := s.sandboxStillPausing(ctx, sandboxID, generation)
+	if err != nil || !stillPausing {
+		return err
+	}
+	pod, err = s.ensureSandboxDeletionFinalizer(ctx, pod)
+	if err != nil {
+		return fmt.Errorf("ensure sandbox cleanup finalizer: %w", err)
+	}
+	pod, err = s.markRuntimeDeletionReason(ctx, pod, runtimeDeletionReasonPaused)
+	if err != nil {
+		return fmt.Errorf("mark runtime deletion reason: %w", err)
+	}
+	if err := s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
+		return fmt.Errorf("delete runtime pod: %w", err)
+	}
+	if err := s.waitForRuntimePodDeleted(ctx, pod.Namespace, pod.Name); err != nil {
+		return err
+	}
+	return s.markPausingRuntimePaused(ctx, sandboxID, generation)
+}
+
+func (s *SandboxService) sandboxStillPausing(ctx context.Context, sandboxID string, generation int64) (bool, error) {
+	if s == nil || s.sandboxStore == nil {
+		return true, nil
+	}
+	record, err := s.sandboxStore.GetSandbox(ctx, sandboxID)
+	if err != nil {
+		return false, err
+	}
+	return record != nil && record.Status == SandboxStatusPausing && record.RuntimeGeneration == generation, nil
+}
+
+func (s *SandboxService) markPausingRuntimePaused(ctx context.Context, sandboxID string, generation int64) error {
+	if s == nil || s.sandboxStore == nil {
+		return nil
+	}
+	return s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
+		if record.Status != SandboxStatusPausing || record.RuntimeGeneration != generation {
+			return nil
+		}
+		return tx.MarkRuntimePaused(lockCtx, sandboxID, generation, s.clock.Now())
+	})
+}
+
+const (
+	defaultSandboxPausePodDeletionTimeout = 2 * time.Minute
+	defaultSandboxPausePodDeletionPoll    = 500 * time.Millisecond
+)
+
+func (s *SandboxService) waitForRuntimePodDeleted(ctx context.Context, namespace, name string) error {
+	if s == nil || s.k8sClient == nil || namespace == "" || name == "" {
+		return nil
+	}
+	return wait.PollUntilContextTimeout(ctx, defaultSandboxPausePodDeletionPoll, defaultSandboxPausePodDeletionTimeout, true, func(ctx context.Context) (bool, error) {
+		_, err := s.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+		if k8serrors.IsNotFound(err) {
+			return true, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return false, nil
+	})
+}
+
+func cloneSandboxRecordForLifecycle(record *SandboxRecord) *SandboxRecord {
+	if record == nil {
+		return nil
+	}
+	clone := *record
+	if record.Mounts != nil {
+		clone.Mounts = append([]ClaimMount(nil), record.Mounts...)
+	}
+	if record.Config.Services != nil {
+		clone.Config.Services = append([]SandboxAppService(nil), record.Config.Services...)
+	}
+	return &clone
 }
 
 // PauseSandboxByID implements controller.SandboxRuntimePauser.
@@ -208,6 +415,9 @@ func (s *SandboxService) GetSandbox(ctx context.Context, sandboxID string) (*San
 		}
 		if record != nil && record.Status == SandboxStatusDeleted {
 			return nil, k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
+		}
+		if recordLifecycleStatusOverridesPod(record.Status) {
+			return s.recordToSandbox(record), nil
 		}
 	}
 	// Find the pod by sandbox ID
@@ -579,6 +789,15 @@ func (s *SandboxService) recordToSandbox(record *SandboxRecord) *Sandbox {
 		ClaimedAt:         record.ClaimedAt,
 		CreatedAt:         record.CreatedAt,
 		UpdatedAt:         record.UpdatedAt,
+	}
+}
+
+func recordLifecycleStatusOverridesPod(status string) bool {
+	switch status {
+	case SandboxStatusPausing, SandboxStatusResuming:
+		return true
+	default:
+		return false
 	}
 }
 

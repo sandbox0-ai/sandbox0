@@ -1184,11 +1184,13 @@ type PTYSize struct {
 
 // PauseSandboxResponse defines model for PauseSandboxResponse.
 type PauseSandboxResponse struct {
-	Paused        bool                  `json:"paused"`
-	ResourceUsage *SandboxResourceUsage `json:"resource_usage,omitempty"`
-	SandboxId     string                `json:"sandbox_id"`
-	UpdatedCpu    *string               `json:"updated_cpu,omitempty"`
-	UpdatedMemory *string               `json:"updated_memory,omitempty"`
+	// Paused True when checkpoint completion has finished and the sandbox is paused.
+	Paused        bool                    `json:"paused"`
+	ResourceUsage *SandboxResourceUsage   `json:"resource_usage,omitempty"`
+	SandboxId     string                  `json:"sandbox_id"`
+	Status        *SandboxLifecycleStatus `json:"status,omitempty"`
+	UpdatedCpu    *string                 `json:"updated_cpu,omitempty"`
+	UpdatedMemory *string                 `json:"updated_memory,omitempty"`
 }
 
 // PodAffinity defines model for PodAffinity.

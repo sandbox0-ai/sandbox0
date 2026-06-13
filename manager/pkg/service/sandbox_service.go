@@ -108,6 +108,7 @@ type SandboxService struct {
 	logger                 *zap.Logger
 	metrics                *obsmetrics.ManagerMetrics
 	autoScaler             AutoScalerInterface
+	pauseEnqueuer          SandboxPauseEnqueuer
 	credentialStore        egressauth.BindingStore
 	webhookStateVolumes    SandboxSystemVolumeClient
 	volumeMetadata         SandboxVolumeMetadataClient
@@ -119,6 +120,11 @@ type SandboxService struct {
 type TeamQuotaLimitStore interface {
 	GetLimit(ctx context.Context, teamID string, dimension quota.Dimension) (*quota.Limit, error)
 	CurrentUsage(ctx context.Context, teamID string, dimension quota.Dimension) (int64, error)
+}
+
+// SandboxPauseEnqueuer schedules durable pausing sandboxes for background completion.
+type SandboxPauseEnqueuer interface {
+	EnqueueSandboxPause(sandboxID string)
 }
 
 // AutoScalerInterface defines the interface for auto scaling.
@@ -232,6 +238,11 @@ func (s *SandboxService) SetCtldClient(client *CtldClient) {
 // SetAutoScaler injects the auto scaler for automatic pool scaling.
 func (s *SandboxService) SetAutoScaler(scaler AutoScalerInterface) {
 	s.autoScaler = scaler
+}
+
+// SetPauseEnqueuer injects the background worker used to complete accepted pause operations.
+func (s *SandboxService) SetPauseEnqueuer(enqueuer SandboxPauseEnqueuer) {
+	s.pauseEnqueuer = enqueuer
 }
 
 // SetCredentialStore injects the sandbox credential binding store.

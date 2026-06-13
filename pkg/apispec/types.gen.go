@@ -2401,11 +2401,19 @@ type Team struct {
 
 // TeamMember defines model for TeamMember.
 type TeamMember struct {
-	Id       string    `json:"id"`
-	JoinedAt time.Time `json:"joined_at"`
-	Role     string    `json:"role"`
-	TeamId   string    `json:"team_id"`
-	UserId   string    `json:"user_id"`
+	// AvatarUrl User avatar URL. Present in team member list responses.
+	AvatarUrl *string `json:"avatar_url,omitempty"`
+
+	// Email User email address. Present in team member list responses.
+	Email    *openapi_types.Email `json:"email,omitempty"`
+	Id       string               `json:"id"`
+	JoinedAt time.Time            `json:"joined_at"`
+
+	// Name User display name. Present in team member list responses.
+	Name   *string `json:"name,omitempty"`
+	Role   string  `json:"role"`
+	TeamId string  `json:"team_id"`
+	UserId string  `json:"user_id"`
 }
 
 // TeamQuota defines model for TeamQuota.

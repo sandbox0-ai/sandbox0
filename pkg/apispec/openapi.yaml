@@ -3509,6 +3509,16 @@ components:
         joined_at:
           type: string
           format: date-time
+        email:
+          type: string
+          format: email
+          description: User email address. Present in team member list responses.
+        name:
+          type: string
+          description: User display name. Present in team member list responses.
+        avatar_url:
+          type: string
+          description: User avatar URL. Present in team member list responses.
       required: [id, team_id, user_id, role, joined_at]
     CreateTeamRequest:
       type: object

@@ -21,7 +21,9 @@ type teamRepository interface {
 	GetTeamByID(ctx context.Context, id string) (*identity.Team, error)
 	UpdateTeam(ctx context.Context, team *identity.Team) error
 	DeleteTeam(ctx context.Context, id string) error
+	TransferTeamOwner(ctx context.Context, teamID, userID string) (*identity.Team, error)
 	GetTeamMembers(ctx context.Context, teamID string) ([]*identity.TeamMemberWithUser, error)
+	SearchTeamMembers(ctx context.Context, teamID, query string) ([]*identity.TeamMemberWithUser, error)
 	GetUserByEmail(ctx context.Context, email string) (*identity.User, error)
 	AddTeamMember(ctx context.Context, member *identity.TeamMember) error
 	UpdateTeamMemberRole(ctx context.Context, teamID, userID, role string) error
@@ -317,6 +319,65 @@ func (h *TeamHandler) DeleteTeam(c *gin.Context) {
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"message": "team deleted"})
 }
 
+// TransferTeamOwnerRequest is the request body for transferring team ownership.
+type TransferTeamOwnerRequest struct {
+	UserID string `json:"user_id" binding:"required"`
+}
+
+// TransferTeamOwner transfers team ownership to an existing team member.
+func (h *TeamHandler) TransferTeamOwner(c *gin.Context) {
+	authCtx := middleware.GetAuthContext(c)
+	if authCtx == nil || authCtx.UserID == "" {
+		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "not authenticated")
+		return
+	}
+
+	teamID := c.Param("id")
+
+	var req TransferTeamOwnerRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
+		return
+	}
+	req.UserID = strings.TrimSpace(req.UserID)
+	if req.UserID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "user_id is required")
+		return
+	}
+
+	team, err := h.repo.GetTeamByID(c.Request.Context(), teamID)
+	if err != nil {
+		if errors.Is(err, identity.ErrTeamNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "team not found")
+			return
+		}
+		h.logger.Error("Failed to get team", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get team")
+		return
+	}
+	if !isTeamOwner(team, authCtx.UserID) {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "only team owner can transfer ownership")
+		return
+	}
+
+	team, err = h.repo.TransferTeamOwner(c.Request.Context(), teamID, req.UserID)
+	if err != nil {
+		if errors.Is(err, identity.ErrMemberNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "member not found")
+			return
+		}
+		if errors.Is(err, identity.ErrTeamNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "team not found")
+			return
+		}
+		h.logger.Error("Failed to transfer team owner", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to transfer team owner")
+		return
+	}
+
+	spec.JSONSuccess(c, http.StatusOK, team)
+}
+
 // ListTeamMembers returns all members of a team
 func (h *TeamHandler) ListTeamMembers(c *gin.Context) {
 	authCtx := middleware.GetAuthContext(c)
@@ -339,7 +400,13 @@ func (h *TeamHandler) ListTeamMembers(c *gin.Context) {
 		return
 	}
 
-	members, err := h.repo.GetTeamMembers(c.Request.Context(), teamID)
+	query := strings.TrimSpace(c.Query("query"))
+	var members []*identity.TeamMemberWithUser
+	if query == "" {
+		members, err = h.repo.GetTeamMembers(c.Request.Context(), teamID)
+	} else {
+		members, err = h.repo.SearchTeamMembers(c.Request.Context(), teamID, query)
+	}
 	if err != nil {
 		h.logger.Error("Failed to get members", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get members")
@@ -459,6 +526,43 @@ func (h *TeamHandler) UpdateTeamMember(c *gin.Context) {
 		return
 	}
 
+	team, err := h.repo.GetTeamByID(c.Request.Context(), teamID)
+	if err != nil {
+		if errors.Is(err, identity.ErrTeamNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "team not found")
+			return
+		}
+		h.logger.Error("Failed to get team", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get team")
+		return
+	}
+	targetMember, err := h.repo.GetTeamMember(c.Request.Context(), teamID, userID)
+	if err != nil {
+		if errors.Is(err, identity.ErrMemberNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "member not found")
+			return
+		}
+		h.logger.Error("Failed to get target member", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get member")
+		return
+	}
+	if isTeamOwner(team, userID) && req.Role != "admin" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "team owner must remain an admin")
+		return
+	}
+	if targetMember.Role == "admin" && req.Role != "admin" {
+		members, err := h.repo.GetTeamMembers(c.Request.Context(), teamID)
+		if err != nil {
+			h.logger.Error("Failed to get members", zap.Error(err))
+			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to check team admins")
+			return
+		}
+		if countTeamAdmins(members) <= 1 {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "cannot remove the last admin")
+			return
+		}
+	}
+
 	if err := h.repo.UpdateTeamMemberRole(c.Request.Context(), teamID, userID, req.Role); err != nil {
 		if errors.Is(err, identity.ErrMemberNotFound) {
 			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "member not found")
@@ -575,23 +679,40 @@ func (h *TeamHandler) RemoveTeamMember(c *gin.Context) {
 		return
 	}
 
-	// Check if this is the last admin
-	if userID == authCtx.UserID && member.Role == "admin" {
+	team, err := h.repo.GetTeamByID(c.Request.Context(), teamID)
+	if err != nil {
+		if errors.Is(err, identity.ErrTeamNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "team not found")
+			return
+		}
+		h.logger.Error("Failed to get team", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get team")
+		return
+	}
+	if isTeamOwner(team, userID) {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "cannot remove team owner")
+		return
+	}
+
+	targetMember, err := h.repo.GetTeamMember(c.Request.Context(), teamID, userID)
+	if err != nil {
+		if errors.Is(err, identity.ErrMemberNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "member not found")
+			return
+		}
+		h.logger.Error("Failed to get target member", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get member")
+		return
+	}
+
+	if targetMember.Role == "admin" {
 		members, err := h.repo.GetTeamMembers(c.Request.Context(), teamID)
 		if err != nil {
 			h.logger.Error("Failed to get members", zap.Error(err))
 			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to check team admins")
 			return
 		}
-
-		adminCount := 0
-		for _, m := range members {
-			if m.Role == "admin" {
-				adminCount++
-			}
-		}
-
-		if adminCount <= 1 {
+		if countTeamAdmins(members) <= 1 {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "cannot remove the last admin")
 			return
 		}
@@ -608,4 +729,18 @@ func (h *TeamHandler) RemoveTeamMember(c *gin.Context) {
 	}
 
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"message": "member removed"})
+}
+
+func isTeamOwner(team *identity.Team, userID string) bool {
+	return team != nil && team.OwnerID != nil && *team.OwnerID == strings.TrimSpace(userID)
+}
+
+func countTeamAdmins(members []*identity.TeamMemberWithUser) int {
+	count := 0
+	for _, member := range members {
+		if member != nil && member.Role == "admin" {
+			count++
+		}
+	}
+	return count
 }

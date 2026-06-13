@@ -131,6 +131,7 @@ func RegisterIdentityRoutes(router gin.IRouter, deps Deps) {
 		teams.GET("/:id", teamHandler.GetTeam)
 		teams.PUT("/:id", teamHandler.UpdateTeam)
 		teams.DELETE("/:id", teamHandler.DeleteTeam)
+		teams.PUT("/:id/owner", teamHandler.TransferTeamOwner)
 
 		// Team members
 		teams.GET("/:id/members", teamHandler.ListTeamMembers)

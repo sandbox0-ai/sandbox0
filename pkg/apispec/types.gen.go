@@ -2482,6 +2482,11 @@ type TrafficRuleAction string
 // TrafficRuleAppProtocol defines model for TrafficRuleAppProtocol.
 type TrafficRuleAppProtocol string
 
+// TransferTeamOwnerRequest defines model for TransferTeamOwnerRequest.
+type TransferTeamOwnerRequest struct {
+	UserId string `json:"user_id"`
+}
+
 // UpdateRegionRequest defines model for UpdateRegionRequest.
 type UpdateRegionRequest struct {
 	DisplayName        *string `json:"display_name,omitempty"`
@@ -2733,6 +2738,12 @@ type GetAuthOidcProviderLoginParams struct {
 	WebLogin *bool `form:"web_login,omitempty" json:"web_login,omitempty"`
 }
 
+// GetTeamsIdMembersParams defines parameters for GetTeamsIdMembers.
+type GetTeamsIdMembersParams struct {
+	// Query Search by member email, display name, or user ID.
+	Query *string `form:"query,omitempty" json:"query,omitempty"`
+}
+
 // PostApiKeysJSONRequestBody defines body for PostApiKeys for application/json ContentType.
 type PostApiKeysJSONRequestBody = CreateAPIKeyRequest
 
@@ -2834,6 +2845,9 @@ type PostTeamsIdMembersJSONRequestBody = AddTeamMemberRequest
 
 // PutTeamsIdMembersUserIdJSONRequestBody defines body for PutTeamsIdMembersUserId for application/json ContentType.
 type PutTeamsIdMembersUserIdJSONRequestBody = UpdateTeamMemberRequest
+
+// PutTeamsIdOwnerJSONRequestBody defines body for PutTeamsIdOwner for application/json ContentType.
+type PutTeamsIdOwnerJSONRequestBody = TransferTeamOwnerRequest
 
 // PutUsersMeJSONRequestBody defines body for PutUsersMe for application/json ContentType.
 type PutUsersMeJSONRequestBody = UpdateUserRequest

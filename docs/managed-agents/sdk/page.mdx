@@ -80,6 +80,37 @@ for await (const event of client.beta.sessions.events.list(session.id, { limit: 
 }
 ```
 
+## Scheduled Deployment
+
+Use deployments when the same agent workflow should run manually or on a cron schedule.
+
+```typescript
+const deployment = await client.beta.deployments.create({
+    agent: agent.id,
+    environment_id: environment.id,
+    name: `Daily digest ${suffix}`,
+    initial_events: [{
+        type: "user.message",
+        content: [{ type: "text", text: "Create the daily digest." }],
+    }],
+    schedule: {
+        type: "cron",
+        expression: "0 9 * * 1-5",
+        timezone: "UTC",
+    },
+    vault_ids: [llmVault.id],
+});
+
+const run = await client.beta.deployments.run(deployment.id);
+
+for await (const deploymentRun of client.beta.deploymentRuns.list({
+    deployment_id: deployment.id,
+    limit: 20,
+})) {
+    console.log(deploymentRun.id, deploymentRun.session_id);
+}
+```
+
 ## Required Variables
 
 | Variable | Purpose |
@@ -127,5 +158,9 @@ curl -fsS "https://agents.sandbox0.ai/v1/sessions" \
 
   <Card title="Environments" href="/docs/managed-agents/environments" cta="Continue">
     Prepare reusable environments with packages and network policy.
+  </Card>
+
+  <Card title="Deployments" href="/docs/managed-agents/deployments" cta="Continue">
+    Create recurring or manually triggered managed agent workflows.
   </Card>
 </CardGroup>

@@ -4,6 +4,8 @@ A session is the durable unit of agent work. It binds one agent snapshot, one en
 
 Official reference: [Claude Managed Agents sessions](https://platform.claude.com/docs/en/managed-agents/sessions).
 
+Sessions can be created directly by application code or indirectly by a deployment run. After a deployment starts a session, read and control that session with the same session and event APIs used for direct sessions.
+
 ## Create A Session
 
 ```typescript
@@ -89,6 +91,10 @@ Sandbox0 keeps session state and event history outside the sandbox. The sandbox 
 <CardGroup>
   <Card title="Events" href="/docs/managed-agents/events" cta="Continue">
     Append user input, stream agent output, and interpret retry lifecycle events.
+  </Card>
+
+  <Card title="Deployments" href="/docs/managed-agents/deployments" cta="Continue">
+    Reuse a session definition for manual or scheduled runs.
   </Card>
 
   <Card title="Vaults" href="/docs/managed-agents/vaults" cta="Continue">

@@ -333,6 +333,8 @@ func main() {
 	sandboxService.SetDeletionWebhookEmitter(service.NewHTTPSandboxDeletionWebhookEmitter(obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration})))
 	sandboxLifecycleController := service.NewSandboxLifecycleController(k8sClient, podLister, sandboxService, logger)
 	podInformer.Informer().AddEventHandler(sandboxLifecycleController.ResourceEventHandler())
+	sandboxPauseController := service.NewSandboxPauseController(sandboxService, logger)
+	sandboxService.SetPauseEnqueuer(sandboxPauseController)
 	operator.SetSandboxProbeRunner(sandboxService)
 	staticAuth := make([]egressauthruntime.StaticAuthConfig, 0, len(cfg.EgressAuthStaticAuth))
 	for _, entry := range cfg.EgressAuthStaticAuth {
@@ -488,6 +490,12 @@ func main() {
 	go func() {
 		if err := sandboxLifecycleController.Run(ctx, 2); err != nil && err != context.Canceled {
 			logger.Error("Sandbox lifecycle controller failed", zap.Error(err))
+		}
+	}()
+
+	go func() {
+		if err := sandboxPauseController.Run(ctx, 2); err != nil && err != context.Canceled {
+			logger.Error("Sandbox pause controller failed", zap.Error(err))
 		}
 	}()
 

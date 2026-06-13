@@ -11,6 +11,7 @@ import (
 type PauseSandboxResponse struct {
 	SandboxID     string                `json:"sandbox_id"`
 	Paused        bool                  `json:"paused"`
+	Status        string                `json:"status,omitempty"`
 	ResourceUsage *SandboxResourceUsage `json:"resource_usage,omitempty"`
 	UpdatedMemory string                `json:"updated_memory,omitempty"`
 	UpdatedCPU    string                `json:"updated_cpu,omitempty"`
@@ -23,18 +24,20 @@ type ResumeSandboxResponse struct {
 	RestoredMemory string `json:"restored_memory,omitempty"`
 }
 
-// PauseSandbox checkpoints the writable rootfs and releases the runtime.
+// PauseSandbox accepts a checkpointed pause request and returns the lifecycle state.
 func (s *SandboxService) PauseSandbox(ctx context.Context, sandboxID string) (*PauseSandboxResponse, error) {
-	if err := s.PauseSandboxRuntime(ctx, sandboxID); err != nil {
+	status, err := s.RequestPauseSandboxRuntime(ctx, sandboxID)
+	if err != nil {
 		return nil, err
 	}
 	return &PauseSandboxResponse{
 		SandboxID: sandboxID,
-		Paused:    true,
+		Paused:    status == SandboxStatusPaused,
+		Status:    status,
 	}, nil
 }
 
-// PauseSandboxAndWait checkpoints the writable rootfs and releases the runtime.
+// PauseSandboxAndWait accepts a pause request. Checkpoint completion is asynchronous.
 func (s *SandboxService) PauseSandboxAndWait(ctx context.Context, sandboxID string) (*PauseSandboxResponse, error) {
 	return s.PauseSandbox(ctx, sandboxID)
 }

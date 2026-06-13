@@ -34,6 +34,8 @@ On nodes using the containerd overlayfs snapshotter, `ctld` checkpoints only the
 
 Pause a sandbox to release compute while keeping its identity, configuration, services, mounted durable storage, and latest writable rootfs checkpoint available for a later resume.
 
+The pause endpoint accepts the lifecycle transition and returns once the sandbox is recorded as `pausing`. Rootfs checkpoint upload and runtime pod deletion continue in the background. Poll sandbox details until `status` is `paused` before treating the checkpoint as resume-ready.
+
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/pause
 </Endpoint>
@@ -113,6 +115,8 @@ console.log("Resume requested");`
 ## Inspect Pause State
 
 After requesting a pause or resume, fetch sandbox details to check the lifecycle status.
+
+During pause, `paused` remains `false` while `status` is `pausing`. It becomes `true` only after checkpoint upload has completed, the runtime pod has been released, and the sandbox is safe to resume from durable state.
 
 <Tabs
   tabs={[

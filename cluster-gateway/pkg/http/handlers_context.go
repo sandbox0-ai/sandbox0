@@ -289,10 +289,11 @@ func sandboxRuntimeMissing(sandbox *mgr.Sandbox) bool {
 	if sandbox == nil {
 		return false
 	}
-	if sandbox.Status == mgr.SandboxStatusPaused || strings.TrimSpace(sandbox.InternalAddr) == "" {
+	switch sandbox.Status {
+	case mgr.SandboxStatusPaused, mgr.SandboxStatusPausing, mgr.SandboxStatusResuming:
 		return true
 	}
-	return false
+	return strings.TrimSpace(sandbox.InternalAddr) == ""
 }
 
 func (s *Server) buildProcdRequestModifier(c *gin.Context) (proxy.RequestModifier, error) {

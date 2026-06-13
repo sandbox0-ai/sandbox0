@@ -778,6 +778,25 @@ func (s *memorySandboxStoreForManagerIntegration) ListHardExpiredSandboxes(_ con
 	return records, nil
 }
 
+func (s *memorySandboxStoreForManagerIntegration) ListPausingSandboxes(_ context.Context, limit int) ([]*service.SandboxRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if limit <= 0 {
+		limit = len(s.records)
+	}
+	records := make([]*service.SandboxRecord, 0, len(s.records))
+	for _, record := range s.records {
+		if record == nil || record.Status != service.SandboxStatusPausing {
+			continue
+		}
+		records = append(records, cloneSandboxRecordForManagerIntegration(record))
+		if len(records) >= limit {
+			break
+		}
+	}
+	return records, nil
+}
+
 func (s *memorySandboxStoreForManagerIntegration) MarkSandboxDeleted(_ context.Context, sandboxID string, deletedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -158,7 +158,7 @@ func (s *SandboxService) listSandboxesFromStore(ctx context.Context, req *ListSa
 	summaries := make([]*SandboxSummary, 0, len(records))
 	for _, record := range records {
 		sandbox := s.recordToSandbox(record)
-		if record.CurrentPodName != "" {
+		if record.CurrentPodName != "" && !recordLifecycleStatusOverridesPod(record.Status) {
 			if pod, err := s.getSandboxPod(ctx, record.ID); err == nil {
 				sandbox = s.podToSandbox(ctx, pod, record.ID)
 			}

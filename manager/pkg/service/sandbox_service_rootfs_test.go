@@ -30,7 +30,7 @@ import (
 	ktesting "k8s.io/client-go/testing"
 )
 
-func TestPauseSandboxRuntimeSavesRootFSBeforeDeletingPod(t *testing.T) {
+func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 	saveCalled := false
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/api/v1/rootfs/save", r.URL.Path)
@@ -82,17 +82,28 @@ func TestPauseSandboxRuntimeSavesRootFSBeforeDeletingPod(t *testing.T) {
 			Status:            SandboxStatusRunning,
 		},
 	}}
+	enqueuer := &recordingPauseEnqueuer{}
 	svc := &SandboxService{
-		k8sClient:    k8sClient,
-		podLister:    newTestPodLister(t, pod),
-		sandboxStore: store,
-		ctldClient:   NewCtldClient(CtldClientConfig{Timeout: time.Second}),
-		config:       SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
-		clock:        systemTime{},
-		logger:       zap.NewNop(),
+		k8sClient:     k8sClient,
+		podLister:     newTestPodLister(t, pod),
+		sandboxStore:  store,
+		ctldClient:    NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config:        SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+		clock:         systemTime{},
+		logger:        zap.NewNop(),
+		pauseEnqueuer: enqueuer,
 	}
 
-	require.NoError(t, svc.PauseSandboxRuntime(context.Background(), "sandbox-1"))
+	resp, err := svc.PauseSandbox(context.Background(), "sandbox-1")
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.False(t, resp.Paused)
+	assert.Equal(t, SandboxStatusPausing, resp.Status)
+	assert.False(t, saveCalled, "pause request must not synchronously save rootfs")
+	assert.Equal(t, []string{"sandbox-1"}, enqueuer.calls)
+	assert.Equal(t, SandboxStatusPausing, store.records["sandbox-1"].Status)
+
+	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
 
 	state := store.rootFSStates["sandbox-1"]
 	require.NotNil(t, state)
@@ -103,6 +114,39 @@ func TestPauseSandboxRuntimeSavesRootFSBeforeDeletingPod(t *testing.T) {
 	assert.Equal(t, "sha256:diff", state.DiffDigest)
 	assert.Equal(t, "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar", state.DiffObjectKey)
 	assert.Equal(t, SandboxStatusPaused, store.records["sandbox-1"].Status)
+}
+
+func TestGetSandboxReportsPausingRecordWhileRuntimePodStillRunning(t *testing.T) {
+	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
+	pod.Status.PodIP = "10.0.0.10"
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-1": {
+			ID:                  "sandbox-1",
+			TeamID:              "team-1",
+			UserID:              "user-1",
+			TemplateID:          "template-1",
+			CurrentPodName:      "pod-1",
+			CurrentPodNamespace: "default",
+			RuntimeGeneration:   3,
+			Status:              SandboxStatusPausing,
+		},
+	}}
+	svc := &SandboxService{
+		k8sClient:    fake.NewSimpleClientset(pod),
+		podLister:    newTestPodLister(t, pod),
+		sandboxStore: store,
+		config:       SandboxServiceConfig{ProcdPort: 49983},
+		clock:        systemTime{},
+		logger:       zap.NewNop(),
+	}
+
+	sandbox, err := svc.GetSandbox(context.Background(), "sandbox-1")
+	require.NoError(t, err)
+	require.NotNil(t, sandbox)
+	assert.Equal(t, SandboxStatusPausing, sandbox.Status)
+	assert.False(t, sandbox.Paused)
+	assert.Empty(t, sandbox.InternalAddr)
+	assert.Equal(t, "pod-1", sandbox.PodName)
 }
 
 func TestFinishRestoredSandboxRuntimeAppliesRootFSBeforeProcdInitialization(t *testing.T) {
@@ -385,6 +429,14 @@ func rootFSTestPod(name, sandboxID, teamID string) *corev1.Pod {
 			}},
 		},
 	}
+}
+
+type recordingPauseEnqueuer struct {
+	calls []string
+}
+
+func (r *recordingPauseEnqueuer) EnqueueSandboxPause(sandboxID string) {
+	r.calls = append(r.calls, sandboxID)
 }
 
 func metav1ObjectMeta(name, sandboxID, teamID string) metav1.ObjectMeta {

@@ -74,6 +74,7 @@ type SandboxStore interface {
 	UpsertSandbox(ctx context.Context, record *SandboxRecord) error
 	GetSandbox(ctx context.Context, sandboxID string) (*SandboxRecord, error)
 	ListSandboxes(ctx context.Context, req *ListSandboxesRequest) ([]*SandboxRecord, error)
+	ListPausingSandboxes(ctx context.Context, limit int) ([]*SandboxRecord, error)
 	ListHardExpiredSandboxes(ctx context.Context, now time.Time, limit int) ([]*SandboxRecord, error)
 	MarkSandboxDeleted(ctx context.Context, sandboxID string, deletedAt time.Time) error
 	SaveRootFSState(ctx context.Context, state *SandboxRootFSState) error
@@ -195,6 +196,37 @@ func (s *PGSandboxStore) ListSandboxes(ctx context.Context, req *ListSandboxesRe
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate sandboxes: %w", err)
+	}
+	return records, nil
+}
+
+func (s *PGSandboxStore) ListPausingSandboxes(ctx context.Context, limit int) ([]*SandboxRecord, error) {
+	if s == nil || s.pool == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 500
+	}
+	rows, err := s.pool.Query(ctx, sandboxRecordSelectSQL()+`
+		WHERE deleted_at IS NULL
+			AND status = $1
+		ORDER BY updated_at ASC
+		LIMIT $2
+	`, SandboxStatusPausing, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list pausing sandboxes: %w", err)
+	}
+	defer rows.Close()
+	var records []*SandboxRecord
+	for rows.Next() {
+		record, err := scanSandboxRecordRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate pausing sandboxes: %w", err)
 	}
 	return records, nil
 }

@@ -4344,6 +4344,10 @@ components:
           type: string
         paused:
           type: boolean
+          description: True when checkpoint completion has finished and the sandbox is paused.
+        status:
+          $ref: "#/components/schemas/SandboxLifecycleStatus"
+          description: Current lifecycle status. Async pause requests usually return pausing.
         resource_usage:
           $ref: "#/components/schemas/SandboxResourceUsage"
         updated_memory:

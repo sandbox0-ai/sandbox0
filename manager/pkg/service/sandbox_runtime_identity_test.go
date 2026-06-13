@@ -72,6 +72,26 @@ func (s *memorySandboxStore) ListHardExpiredSandboxes(context.Context, time.Time
 	return nil, nil
 }
 
+func (s *memorySandboxStore) ListPausingSandboxes(_ context.Context, limit int) ([]*SandboxRecord, error) {
+	if s == nil || s.records == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = len(s.records)
+	}
+	records := make([]*SandboxRecord, 0, len(s.records))
+	for _, record := range s.records {
+		if record == nil || record.Status != SandboxStatusPausing {
+			continue
+		}
+		records = append(records, cloneSandboxRecord(record))
+		if len(records) >= limit {
+			break
+		}
+	}
+	return records, nil
+}
+
 func (s *memorySandboxStore) MarkSandboxDeleted(_ context.Context, sandboxID string, deletedAt time.Time) error {
 	if s.records == nil {
 		s.records = make(map[string]*SandboxRecord)

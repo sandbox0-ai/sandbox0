@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -115,6 +116,121 @@ func TestHTTPAdapterInjectsResolvedHeaders(t *testing.T) {
 	}
 	if got := <-requestBody; got != "payload" {
 		t.Fatalf("request body = %q", got)
+	}
+}
+
+func TestHTTPAdapterSubstitutesPlaceholdersInQueryHeaderAndBody(t *testing.T) {
+	type observedRequest struct {
+		Query  string
+		Header string
+		Body   string
+	}
+	requests := make(chan observedRequest, 1)
+	upstream := httptestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		requests <- observedRequest{
+			Query:  r.URL.Query().Get("token"),
+			Header: r.Header.Get("X-Api-Key"),
+			Body:   string(body),
+		}
+		_, _ = w.Write([]byte("ok"))
+	})
+	defer upstream.Close()
+
+	addr := upstream.Listener.Addr().(*net.TCPAddr)
+	proxyListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen proxy: %v", err)
+	}
+	defer proxyListener.Close()
+
+	server := &Server{
+		cfg: &config.NetdConfig{
+			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
+		},
+		logger: zap.NewNop(),
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		conn, acceptErr := proxyListener.Accept()
+		if acceptErr != nil {
+			done <- acceptErr
+			return
+		}
+		defer conn.Close()
+
+		body := "body=s0env_test_token"
+		rawReq := "POST /v1/test?token=s0env_test_token HTTP/1.1\r\n" +
+			"Host: api.example.com\r\n" +
+			"X-Api-Key: s0env_test_token\r\n" +
+			"Content-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" +
+			body
+		req := &adapterRequest{
+			Server:   server,
+			Compiled: &policy.CompiledPolicy{SandboxID: "sbx_123", TeamID: "team_123"},
+			SrcIP:    "10.0.0.2",
+			DestIP:   addr.IP,
+			DestPort: addr.Port,
+			Host:     "api.example.com",
+			Conn:     conn,
+			Prefix:   bytes.NewReader([]byte(rawReq)),
+			EgressAuth: &egressAuthContext{
+				Rule: &policy.CompiledEgressAuthRule{
+					Name:    "example-http",
+					AuthRef: "example-api",
+				},
+				Resolved: egressauth.NewPlaceholderSubstitutionResolveResponse("example-api", &egressauth.PlaceholderSubstitutionDirective{
+					Replacements: []egressauth.PlaceholderSubstitutionReplacement{{
+						Placeholder: "s0env_test_token",
+						Value:       "resolved-secret",
+						Locations: []egressauth.PlaceholderSubstitutionLocation{
+							egressauth.PlaceholderSubstitutionLocationHeader,
+							egressauth.PlaceholderSubstitutionLocationQuery,
+							egressauth.PlaceholderSubstitutionLocationBody,
+						},
+					}},
+				}, nil),
+			},
+		}
+		done <- (&httpAdapter{}).Handle(req)
+	}()
+
+	clientConn, err := net.Dial("tcp4", proxyListener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer clientConn.Close()
+	resp, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	_ = resp.Body.Close()
+	if string(body) != "ok" {
+		t.Fatalf("response body = %q", body)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("adapter handle: %v", err)
+	}
+
+	observed := <-requests
+	if observed.Query != "resolved-secret" {
+		t.Fatalf("query token = %q", observed.Query)
+	}
+	if observed.Header != "resolved-secret" {
+		t.Fatalf("x-api-key = %q", observed.Header)
+	}
+	if observed.Body != "body=resolved-secret" {
+		t.Fatalf("body = %q", observed.Body)
 	}
 }
 

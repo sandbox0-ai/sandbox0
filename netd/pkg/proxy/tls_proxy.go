@@ -64,7 +64,7 @@ func (s *Server) proxyHTTPSRequest(req *adapterRequest) error {
 			_ = writeHTTPProxyError(downstreamTLS, http.StatusServiceUnavailable, "egress auth resolution failed")
 			return fmt.Errorf("resolve egress auth for %q: %w", req.EgressAuth.Rule.AuthRef, req.EgressAuth.ResolveError)
 		}
-		if req.EgressAuth.Resolved == nil || len(req.EgressAuth.ResolvedHeaders) == 0 {
+		if !hasResolvedHTTPAuthMaterial(req.EgressAuth) {
 			_ = writeHTTPProxyError(downstreamTLS, http.StatusServiceUnavailable, "egress auth material unavailable")
 			return fmt.Errorf("egress auth material missing for %q", req.EgressAuth.Rule.AuthRef)
 		}
@@ -235,6 +235,10 @@ func (s *Server) proxyHTTPFromConn(downstream net.Conn, req *adapterRequest, ups
 	}
 	if req.EgressAuth != nil && len(req.EgressAuth.ResolvedHeaders) > 0 {
 		injectHTTPHeaders(httpReq, req.EgressAuth.ResolvedHeaders)
+	}
+	if err := applyResolvedHTTPPlaceholderSubstitutions(req.EgressAuth, "tls", httpReq); err != nil {
+		_ = writeHTTPProxyError(downstream, http.StatusServiceUnavailable, "egress auth placeholder substitution failed")
+		return fmt.Errorf("apply egress auth placeholder substitutions for %q: %w", egressAuthRuleRef(req.EgressAuth), err)
 	}
 	if err := s.enforceHTTPPolicyForHTTPRequest(req, httpReq, func(status int, body []byte) error {
 		return writeHTTPProtocolPolicyResponse(downstream, status, body)

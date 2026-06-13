@@ -341,6 +341,22 @@ func toStoreProjection(in v1alpha1.ProjectionSpec) egressauth.ProjectionSpec {
 			})
 		}
 	}
+	if in.PlaceholderSubstitution != nil {
+		out.PlaceholderSubstitution = &egressauth.PlaceholderSubstitutionProjection{
+			Replacements: make([]egressauth.PlaceholderReplacement, 0, len(in.PlaceholderSubstitution.Replacements)),
+		}
+		for _, replacement := range in.PlaceholderSubstitution.Replacements {
+			locations := make([]egressauth.PlaceholderSubstitutionLocation, 0, len(replacement.Locations))
+			for _, location := range replacement.Locations {
+				locations = append(locations, egressauth.PlaceholderSubstitutionLocation(location))
+			}
+			out.PlaceholderSubstitution.Replacements = append(out.PlaceholderSubstitution.Replacements, egressauth.PlaceholderReplacement{
+				Placeholder:   replacement.Placeholder,
+				ValueTemplate: replacement.ValueTemplate,
+				Locations:     locations,
+			})
+		}
+	}
 	if in.TLSClientCertificate != nil {
 		out.TLSClientCertificate = &egressauth.TLSClientCertificateProjection{}
 	}
@@ -366,6 +382,18 @@ func cloneStoreProjection(in egressauth.ProjectionSpec) egressauth.ProjectionSpe
 			Headers: make([]egressauth.ProjectedHeader, 0, len(in.HTTPHeaders.Headers)),
 		}
 		out.HTTPHeaders.Headers = append(out.HTTPHeaders.Headers, in.HTTPHeaders.Headers...)
+	}
+	if in.PlaceholderSubstitution != nil {
+		out.PlaceholderSubstitution = &egressauth.PlaceholderSubstitutionProjection{
+			Replacements: make([]egressauth.PlaceholderReplacement, 0, len(in.PlaceholderSubstitution.Replacements)),
+		}
+		for _, replacement := range in.PlaceholderSubstitution.Replacements {
+			out.PlaceholderSubstitution.Replacements = append(out.PlaceholderSubstitution.Replacements, egressauth.PlaceholderReplacement{
+				Placeholder:   replacement.Placeholder,
+				ValueTemplate: replacement.ValueTemplate,
+				Locations:     append([]egressauth.PlaceholderSubstitutionLocation(nil), replacement.Locations...),
+			})
+		}
 	}
 	if in.TLSClientCertificate != nil {
 		out.TLSClientCertificate = &egressauth.TLSClientCertificateProjection{}
@@ -395,6 +423,22 @@ func fromStoreProjection(in egressauth.ProjectionSpec) v1alpha1.ProjectionSpec {
 			out.HTTPHeaders.Headers = append(out.HTTPHeaders.Headers, v1alpha1.ProjectedHeader{
 				Name:          header.Name,
 				ValueTemplate: header.ValueTemplate,
+			})
+		}
+	}
+	if in.PlaceholderSubstitution != nil {
+		out.PlaceholderSubstitution = &v1alpha1.PlaceholderSubstitutionProjection{
+			Replacements: make([]v1alpha1.PlaceholderReplacement, 0, len(in.PlaceholderSubstitution.Replacements)),
+		}
+		for _, replacement := range in.PlaceholderSubstitution.Replacements {
+			locations := make([]v1alpha1.PlaceholderSubstitutionLocation, 0, len(replacement.Locations))
+			for _, location := range replacement.Locations {
+				locations = append(locations, v1alpha1.PlaceholderSubstitutionLocation(location))
+			}
+			out.PlaceholderSubstitution.Replacements = append(out.PlaceholderSubstitution.Replacements, v1alpha1.PlaceholderReplacement{
+				Placeholder:   replacement.Placeholder,
+				ValueTemplate: replacement.ValueTemplate,
+				Locations:     locations,
 			})
 		}
 	}

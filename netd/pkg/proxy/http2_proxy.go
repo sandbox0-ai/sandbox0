@@ -160,6 +160,12 @@ func (s *Server) handleHTTP2ProxyRequest(w http.ResponseWriter, downstreamReq *h
 	if requestScoped.EgressAuth != nil && len(requestScoped.EgressAuth.ResolvedHeaders) > 0 {
 		injectHTTPHeaders(upstreamReq, requestScoped.EgressAuth.ResolvedHeaders)
 	}
+	if err := applyResolvedHTTPPlaceholderSubstitutions(requestScoped.EgressAuth, "tls", upstreamReq); err != nil {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("egress auth placeholder substitution failed"))
+		return fmt.Errorf("apply http2 egress auth placeholder substitutions for %q: %w", egressAuthRuleRef(requestScoped.EgressAuth), err)
+	}
 	if err := s.enforceHTTPPolicyForHTTPRequest(&requestScoped, upstreamReq, func(status int, body []byte) error {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(status)

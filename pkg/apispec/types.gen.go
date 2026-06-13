@@ -30,10 +30,11 @@ const (
 
 // Defines values for CredentialProjectionType.
 const (
-	HttpHeaders          CredentialProjectionType = "http_headers"
-	SshProxy             CredentialProjectionType = "ssh_proxy"
-	TlsClientCertificate CredentialProjectionType = "tls_client_certificate"
-	UsernamePassword     CredentialProjectionType = "username_password"
+	HttpHeaders             CredentialProjectionType = "http_headers"
+	PlaceholderSubstitution CredentialProjectionType = "placeholder_substitution"
+	SshProxy                CredentialProjectionType = "ssh_proxy"
+	TlsClientCertificate    CredentialProjectionType = "tls_client_certificate"
+	UsernamePassword        CredentialProjectionType = "username_password"
 )
 
 // Defines values for CredentialSourceResolverKind.
@@ -117,6 +118,13 @@ const (
 	MountStatusStatePending  MountStatusState = "pending"
 )
 
+// Defines values for PlaceholderSubstitutionLocation.
+const (
+	PlaceholderSubstitutionLocationBody   PlaceholderSubstitutionLocation = "body"
+	PlaceholderSubstitutionLocationHeader PlaceholderSubstitutionLocation = "header"
+	PlaceholderSubstitutionLocationQuery  PlaceholderSubstitutionLocation = "query"
+)
+
 // Defines values for ProcessType.
 const (
 	ProcessTypeCmd  ProcessType = "cmd"
@@ -148,9 +156,9 @@ const (
 
 // Defines values for SandboxAppServiceRouteAuthMode.
 const (
-	Bearer SandboxAppServiceRouteAuthMode = "bearer"
-	Header SandboxAppServiceRouteAuthMode = "header"
-	None   SandboxAppServiceRouteAuthMode = "none"
+	SandboxAppServiceRouteAuthModeBearer SandboxAppServiceRouteAuthMode = "bearer"
+	SandboxAppServiceRouteAuthModeHeader SandboxAppServiceRouteAuthMode = "header"
+	SandboxAppServiceRouteAuthModeNone   SandboxAppServiceRouteAuthMode = "none"
 )
 
 // Defines values for SandboxAppServiceRuntimeType.
@@ -1193,6 +1201,27 @@ type PauseSandboxResponse struct {
 	UpdatedMemory *string                 `json:"updated_memory,omitempty"`
 }
 
+// PlaceholderReplacement defines model for PlaceholderReplacement.
+type PlaceholderReplacement struct {
+	// Locations HTTP request locations where this placeholder can be replaced.
+	Locations []PlaceholderSubstitutionLocation `json:"locations"`
+
+	// Placeholder Opaque sandbox-visible value to replace.
+	Placeholder string `json:"placeholder"`
+
+	// ValueTemplate Template rendered against the resolved credential source payload.
+	ValueTemplate string `json:"valueTemplate"`
+}
+
+// PlaceholderSubstitutionLocation defines model for PlaceholderSubstitutionLocation.
+type PlaceholderSubstitutionLocation string
+
+// PlaceholderSubstitutionProjection defines model for PlaceholderSubstitutionProjection.
+type PlaceholderSubstitutionProjection struct {
+	// Replacements Placeholder replacements applied to outbound HTTP requests at the egress boundary.
+	Replacements *[]PlaceholderReplacement `json:"replacements,omitempty"`
+}
+
 // PodAffinity defines model for PodAffinity.
 type PodAffinity struct {
 	PreferredDuringSchedulingIgnoredDuringExecution *[]WeightedPodAffinityTerm `json:"preferredDuringSchedulingIgnoredDuringExecution,omitempty"`
@@ -1254,7 +1283,8 @@ type ProjectedHeader struct {
 
 // ProjectionSpec defines model for ProjectionSpec.
 type ProjectionSpec struct {
-	HttpHeaders *HTTPHeadersProjection `json:"httpHeaders,omitempty"`
+	HttpHeaders             *HTTPHeadersProjection             `json:"httpHeaders,omitempty"`
+	PlaceholderSubstitution *PlaceholderSubstitutionProjection `json:"placeholderSubstitution,omitempty"`
 
 	// SshProxy Transparent SSH proxy projection used for SSH egress re-origination.
 	SshProxy *SSHProxyProjection `json:"sshProxy,omitempty"`

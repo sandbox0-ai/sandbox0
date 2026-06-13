@@ -59,6 +59,27 @@ func testSSHProxyCredentialBinding(ref string) v1alpha1.CredentialBinding {
 	}
 }
 
+func testPlaceholderSubstitutionCredentialBinding(ref string) v1alpha1.CredentialBinding {
+	return v1alpha1.CredentialBinding{
+		Ref:       ref,
+		SourceRef: ref + "-source",
+		Projection: v1alpha1.ProjectionSpec{
+			Type: v1alpha1.CredentialProjectionTypePlaceholderSubstitution,
+			PlaceholderSubstitution: &v1alpha1.PlaceholderSubstitutionProjection{
+				Replacements: []v1alpha1.PlaceholderReplacement{{
+					Placeholder:   "s0env_test_token",
+					ValueTemplate: "{{ .token }}",
+					Locations: []v1alpha1.PlaceholderSubstitutionLocation{
+						v1alpha1.PlaceholderSubstitutionLocationHeader,
+						v1alpha1.PlaceholderSubstitutionLocationQuery,
+						v1alpha1.PlaceholderSubstitutionLocationBody,
+					},
+				}},
+			},
+		},
+	}
+}
+
 func TestBuildNetworkPolicyStateMergesNamedRulesAndBindings(t *testing.T) {
 	svc := NewNetworkPolicyService(zap.NewNop())
 	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
@@ -532,6 +553,101 @@ func TestBuildNetworkPolicyStateDropsHTTPMatchForHTTPSRuleWithoutTLSInterception
 	}
 	if len(result.CredentialBindings) != 0 {
 		t.Fatalf("bindings = %#v, want invalid bindings dropped with httpMatch rule", result.CredentialBindings)
+	}
+}
+
+func TestBuildNetworkPolicyStateKeepsPlaceholderSubstitutionForHTTPRule(t *testing.T) {
+	svc := NewNetworkPolicyService(zap.NewNop())
+	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
+		SandboxID: "sb-1",
+		TeamID:    "team-1",
+		RequestSpec: &v1alpha1.SandboxNetworkPolicy{
+			Mode: v1alpha1.NetworkModeBlockAll,
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				CredentialRules: []v1alpha1.EgressCredentialRule{{
+					Name:          "api-placeholder",
+					CredentialRef: "api-token",
+					Protocol:      v1alpha1.EgressAuthProtocolHTTP,
+					Domains:       []string{"api.example.com"},
+				}},
+			},
+		},
+		RequestBindings: []v1alpha1.CredentialBinding{
+			testPlaceholderSubstitutionCredentialBinding("api-token"),
+		},
+	})
+
+	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
+		t.Fatalf("expected egress policy")
+	}
+	if len(result.PolicySpec.Egress.CredentialRules) != 1 {
+		t.Fatalf("rule count = %d, want 1", len(result.PolicySpec.Egress.CredentialRules))
+	}
+	if len(result.CredentialBindings) != 1 {
+		t.Fatalf("binding count = %d, want 1", len(result.CredentialBindings))
+	}
+}
+
+func TestBuildNetworkPolicyStateDropsPlaceholderSubstitutionForNonHTTPRule(t *testing.T) {
+	svc := NewNetworkPolicyService(zap.NewNop())
+	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
+		SandboxID: "sb-1",
+		TeamID:    "team-1",
+		RequestSpec: &v1alpha1.SandboxNetworkPolicy{
+			Mode: v1alpha1.NetworkModeBlockAll,
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				CredentialRules: []v1alpha1.EgressCredentialRule{{
+					Name:          "api-placeholder",
+					CredentialRef: "api-token",
+					Protocol:      v1alpha1.EgressAuthProtocolSOCKS5,
+				}},
+			},
+		},
+		RequestBindings: []v1alpha1.CredentialBinding{
+			testPlaceholderSubstitutionCredentialBinding("api-token"),
+		},
+	})
+
+	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
+		t.Fatalf("expected egress policy")
+	}
+	if len(result.PolicySpec.Egress.CredentialRules) != 0 {
+		t.Fatalf("rules = %#v, want placeholder_substitution rules dropped for non-http protocol", result.PolicySpec.Egress.CredentialRules)
+	}
+	if len(result.CredentialBindings) != 0 {
+		t.Fatalf("bindings = %#v, want invalid placeholder_substitution binding dropped", result.CredentialBindings)
+	}
+}
+
+func TestBuildNetworkPolicyStateDropsHTTPSPlaceholderSubstitutionWithoutTLSInterception(t *testing.T) {
+	svc := NewNetworkPolicyService(zap.NewNop())
+	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
+		SandboxID: "sb-1",
+		TeamID:    "team-1",
+		RequestSpec: &v1alpha1.SandboxNetworkPolicy{
+			Mode: v1alpha1.NetworkModeBlockAll,
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				CredentialRules: []v1alpha1.EgressCredentialRule{{
+					Name:          "api-placeholder",
+					CredentialRef: "api-token",
+					Protocol:      v1alpha1.EgressAuthProtocolHTTPS,
+					Domains:       []string{"api.example.com"},
+				}},
+			},
+		},
+		RequestBindings: []v1alpha1.CredentialBinding{
+			testPlaceholderSubstitutionCredentialBinding("api-token"),
+		},
+	})
+
+	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
+		t.Fatalf("expected egress policy")
+	}
+	if len(result.PolicySpec.Egress.CredentialRules) != 0 {
+		t.Fatalf("rules = %#v, want placeholder_substitution https rules without tls interception dropped", result.PolicySpec.Egress.CredentialRules)
+	}
+	if len(result.CredentialBindings) != 0 {
+		t.Fatalf("bindings = %#v, want invalid placeholder_substitution binding dropped", result.CredentialBindings)
 	}
 }
 

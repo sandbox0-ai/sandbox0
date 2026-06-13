@@ -88,3 +88,43 @@ func TestResolveResponseMarshalPreservesUsernamePasswordDirective(t *testing.T) 
 		t.Fatalf("username = %q", resp.Directives[0].UsernamePassword.Username)
 	}
 }
+
+func TestResolveResponseMarshalPreservesPlaceholderSubstitutionDirective(t *testing.T) {
+	payload, err := json.Marshal(NewPlaceholderSubstitutionResolveResponse("example-api", &PlaceholderSubstitutionDirective{
+		Replacements: []PlaceholderSubstitutionReplacement{{
+			Placeholder: "s0env_test_token",
+			Value:       "resolved-secret",
+			Locations: []PlaceholderSubstitutionLocation{
+				PlaceholderSubstitutionLocationHeader,
+				PlaceholderSubstitutionLocationQuery,
+				PlaceholderSubstitutionLocationBody,
+			},
+		}},
+	}, nil))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var resp ResolveResponse
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Headers) != 0 {
+		t.Fatalf("legacy headers = %#v, want none", resp.Headers)
+	}
+	if len(resp.Directives) != 1 || resp.Directives[0].PlaceholderSubstitution == nil {
+		t.Fatalf("unexpected directives: %#v", resp.Directives)
+	}
+	replacements := resp.Directives[0].PlaceholderSubstitution.Replacements
+	if len(replacements) != 1 {
+		t.Fatalf("replacement count = %d, want 1", len(replacements))
+	}
+	if replacements[0].Value != "resolved-secret" {
+		t.Fatalf("value = %q", replacements[0].Value)
+	}
+	cloned := CloneResolveResponse(&resp)
+	replacements[0].Value = "mutated"
+	if cloned.Directives[0].PlaceholderSubstitution.Replacements[0].Value != "resolved-secret" {
+		t.Fatalf("clone value = %q", cloned.Directives[0].PlaceholderSubstitution.Replacements[0].Value)
+	}
+}

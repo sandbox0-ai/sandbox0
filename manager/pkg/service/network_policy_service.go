@@ -377,6 +377,16 @@ func validateNetworkCredentialConfig(policy *v1alpha1.SandboxNetworkPolicy, bind
 				return fmt.Errorf("egress rule %q with protocol ssh requires ssh_proxy projection on %q", rule.Name, rule.CredentialRef)
 			}
 		}
+		if projectionType, ok := bindingProjectionTypes[rule.CredentialRef]; ok && projectionType == v1alpha1.CredentialProjectionTypePlaceholderSubstitution {
+			if !isHTTPFamilyEgressAuthProtocol(rule.Protocol) {
+				return fmt.Errorf("egress rule %q with placeholder_substitution projection requires protocol http, https, or grpc", rule.Name)
+			}
+			if rule.Protocol == v1alpha1.EgressAuthProtocolHTTPS || rule.Protocol == v1alpha1.EgressAuthProtocolGRPC {
+				if rule.TLSMode != v1alpha1.EgressTLSModeTerminateReoriginate {
+					return fmt.Errorf("egress rule %q with placeholder_substitution projection and protocol %s requires tlsMode terminate-reoriginate", rule.Name, rule.Protocol)
+				}
+			}
+		}
 		if err := validateHTTPMatch(rule); err != nil {
 			return err
 		}
@@ -429,6 +439,15 @@ func validateHTTPMatch(rule v1alpha1.EgressCredentialRule) error {
 		}
 	}
 	return validateHTTPMatchFields("egress rule "+rule.Name, rule.HTTPMatch)
+}
+
+func isHTTPFamilyEgressAuthProtocol(protocol v1alpha1.EgressAuthProtocol) bool {
+	switch protocol {
+	case v1alpha1.EgressAuthProtocolHTTP, v1alpha1.EgressAuthProtocolHTTPS, v1alpha1.EgressAuthProtocolGRPC:
+		return true
+	default:
+		return false
+	}
 }
 
 func validHTTPMethod(method string) bool {
@@ -723,6 +742,39 @@ func validateProjection(ref string, projection v1alpha1.ProjectionSpec) error {
 			}
 			if strings.TrimSpace(header.ValueTemplate) == "" {
 				return fmt.Errorf("credential binding projected header valueTemplate is required for %q", ref)
+			}
+		}
+	case v1alpha1.CredentialProjectionTypePlaceholderSubstitution:
+		if projection.PlaceholderSubstitution == nil {
+			return fmt.Errorf("credential binding projection.placeholderSubstitution is required for %q", ref)
+		}
+		if len(projection.PlaceholderSubstitution.Replacements) == 0 {
+			return fmt.Errorf("credential binding projection.placeholderSubstitution replacements are required for %q", ref)
+		}
+		seen := map[string]struct{}{}
+		for _, replacement := range projection.PlaceholderSubstitution.Replacements {
+			if strings.TrimSpace(replacement.Placeholder) == "" {
+				return fmt.Errorf("credential binding placeholder is required for %q", ref)
+			}
+			if strings.TrimSpace(replacement.ValueTemplate) == "" {
+				return fmt.Errorf("credential binding placeholder valueTemplate is required for %q", ref)
+			}
+			if len(replacement.Locations) == 0 {
+				return fmt.Errorf("credential binding placeholder locations are required for %q", ref)
+			}
+			for _, location := range replacement.Locations {
+				switch location {
+				case v1alpha1.PlaceholderSubstitutionLocationHeader,
+					v1alpha1.PlaceholderSubstitutionLocationQuery,
+					v1alpha1.PlaceholderSubstitutionLocationBody:
+				default:
+					return fmt.Errorf("credential binding placeholder location %q is not supported for %q", location, ref)
+				}
+				key := replacement.Placeholder + "\x00" + string(location)
+				if _, ok := seen[key]; ok {
+					return fmt.Errorf("credential binding placeholder %q has duplicate location %q for %q", replacement.Placeholder, location, ref)
+				}
+				seen[key] = struct{}{}
 			}
 		}
 	case v1alpha1.CredentialProjectionTypeTLSClientCertificate:

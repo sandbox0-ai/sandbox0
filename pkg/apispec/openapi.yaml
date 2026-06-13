@@ -5895,6 +5895,8 @@ components:
           $ref: "#/components/schemas/CredentialProjectionType"
         httpHeaders:
           $ref: "#/components/schemas/HTTPHeadersProjection"
+        placeholderSubstitution:
+          $ref: "#/components/schemas/PlaceholderSubstitutionProjection"
         tlsClientCertificate:
           $ref: "#/components/schemas/TLSClientCertificateProjection"
         usernamePassword:
@@ -5904,7 +5906,7 @@ components:
       required: [type]
     CredentialProjectionType:
       type: string
-      enum: [http_headers, tls_client_certificate, username_password, ssh_proxy]
+      enum: [http_headers, placeholder_substitution, tls_client_certificate, username_password, ssh_proxy]
     HTTPHeadersProjection:
       type: object
       properties:
@@ -5913,6 +5915,32 @@ components:
           description: Outbound headers synthesized from the resolved credential source.
           items:
             $ref: "#/components/schemas/ProjectedHeader"
+    PlaceholderSubstitutionProjection:
+      type: object
+      properties:
+        replacements:
+          type: array
+          description: Placeholder replacements applied to outbound HTTP requests at the egress boundary.
+          items:
+            $ref: "#/components/schemas/PlaceholderReplacement"
+    PlaceholderReplacement:
+      type: object
+      properties:
+        placeholder:
+          type: string
+          description: Opaque sandbox-visible value to replace.
+        valueTemplate:
+          type: string
+          description: Template rendered against the resolved credential source payload.
+        locations:
+          type: array
+          description: HTTP request locations where this placeholder can be replaced.
+          items:
+            $ref: "#/components/schemas/PlaceholderSubstitutionLocation"
+      required: [placeholder, valueTemplate, locations]
+    PlaceholderSubstitutionLocation:
+      type: string
+      enum: [header, query, body]
     TLSClientCertificateProjection:
       type: object
       description: Client certificate projection used for TLS terminate-reoriginate auth.

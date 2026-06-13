@@ -507,6 +507,8 @@ type ProjectionSpec struct {
 	Type CredentialProjectionType `json:"type"`
 	// HTTPHeaders projects resolved source data into outbound HTTP headers.
 	HTTPHeaders *HTTPHeadersProjection `json:"httpHeaders,omitempty"`
+	// PlaceholderSubstitution replaces sandbox-visible placeholders at the egress boundary.
+	PlaceholderSubstitution *PlaceholderSubstitutionProjection `json:"placeholderSubstitution,omitempty"`
 	// TLSClientCertificate projects one client certificate for TLS re-origination.
 	TLSClientCertificate *TLSClientCertificateProjection `json:"tlsClientCertificate,omitempty"`
 	// UsernamePassword projects one username/password pair into an early auth exchange.
@@ -519,10 +521,11 @@ type ProjectionSpec struct {
 type CredentialProjectionType string
 
 const (
-	CredentialProjectionTypeHTTPHeaders          CredentialProjectionType = "http_headers"
-	CredentialProjectionTypeTLSClientCertificate CredentialProjectionType = "tls_client_certificate"
-	CredentialProjectionTypeUsernamePassword     CredentialProjectionType = "username_password"
-	CredentialProjectionTypeSSHProxy             CredentialProjectionType = "ssh_proxy"
+	CredentialProjectionTypeHTTPHeaders             CredentialProjectionType = "http_headers"
+	CredentialProjectionTypePlaceholderSubstitution CredentialProjectionType = "placeholder_substitution"
+	CredentialProjectionTypeTLSClientCertificate    CredentialProjectionType = "tls_client_certificate"
+	CredentialProjectionTypeUsernamePassword        CredentialProjectionType = "username_password"
+	CredentialProjectionTypeSSHProxy                CredentialProjectionType = "ssh_proxy"
 )
 
 // HTTPHeadersProjection injects HTTP headers derived from source data.
@@ -530,6 +533,31 @@ type HTTPHeadersProjection struct {
 	// Headers lists the outbound headers to synthesize.
 	Headers []ProjectedHeader `json:"headers,omitempty"`
 }
+
+// PlaceholderSubstitutionProjection replaces placeholders in outbound HTTP traffic.
+type PlaceholderSubstitutionProjection struct {
+	// Replacements lists placeholder replacement templates.
+	Replacements []PlaceholderReplacement `json:"replacements,omitempty"`
+}
+
+// PlaceholderReplacement defines one placeholder replacement template.
+type PlaceholderReplacement struct {
+	// Placeholder is the opaque sandbox-visible value to replace.
+	Placeholder string `json:"placeholder"`
+	// ValueTemplate is rendered against the resolved source payload.
+	ValueTemplate string `json:"valueTemplate"`
+	// Locations limits replacement to selected HTTP request locations.
+	Locations []PlaceholderSubstitutionLocation `json:"locations,omitempty"`
+}
+
+// PlaceholderSubstitutionLocation identifies an HTTP request location.
+type PlaceholderSubstitutionLocation string
+
+const (
+	PlaceholderSubstitutionLocationHeader PlaceholderSubstitutionLocation = "header"
+	PlaceholderSubstitutionLocationQuery  PlaceholderSubstitutionLocation = "query"
+	PlaceholderSubstitutionLocationBody   PlaceholderSubstitutionLocation = "body"
+)
 
 // TLSClientCertificateProjection projects one client certificate for TLS re-origination.
 type TLSClientCertificateProjection struct{}

@@ -14,27 +14,50 @@ type CredentialBinding struct {
 
 // ProjectionSpec defines how resolved source data should be projected into runtime directives.
 type ProjectionSpec struct {
-	Type                 CredentialProjectionType        `json:"type"`
-	HTTPHeaders          *HTTPHeadersProjection          `json:"httpHeaders,omitempty"`
-	TLSClientCertificate *TLSClientCertificateProjection `json:"tlsClientCertificate,omitempty"`
-	UsernamePassword     *UsernamePasswordProjection     `json:"usernamePassword,omitempty"`
-	SSHProxy             *SSHProxyProjection             `json:"sshProxy,omitempty"`
+	Type                    CredentialProjectionType           `json:"type"`
+	HTTPHeaders             *HTTPHeadersProjection             `json:"httpHeaders,omitempty"`
+	PlaceholderSubstitution *PlaceholderSubstitutionProjection `json:"placeholderSubstitution,omitempty"`
+	TLSClientCertificate    *TLSClientCertificateProjection    `json:"tlsClientCertificate,omitempty"`
+	UsernamePassword        *UsernamePasswordProjection        `json:"usernamePassword,omitempty"`
+	SSHProxy                *SSHProxyProjection                `json:"sshProxy,omitempty"`
 }
 
 // CredentialProjectionType identifies the runtime projection shape.
 type CredentialProjectionType string
 
 const (
-	CredentialProjectionTypeHTTPHeaders          CredentialProjectionType = "http_headers"
-	CredentialProjectionTypeTLSClientCertificate CredentialProjectionType = "tls_client_certificate"
-	CredentialProjectionTypeUsernamePassword     CredentialProjectionType = "username_password"
-	CredentialProjectionTypeSSHProxy             CredentialProjectionType = "ssh_proxy"
+	CredentialProjectionTypeHTTPHeaders             CredentialProjectionType = "http_headers"
+	CredentialProjectionTypePlaceholderSubstitution CredentialProjectionType = "placeholder_substitution"
+	CredentialProjectionTypeTLSClientCertificate    CredentialProjectionType = "tls_client_certificate"
+	CredentialProjectionTypeUsernamePassword        CredentialProjectionType = "username_password"
+	CredentialProjectionTypeSSHProxy                CredentialProjectionType = "ssh_proxy"
 )
 
 // HTTPHeadersProjection injects HTTP headers derived from source data.
 type HTTPHeadersProjection struct {
 	Headers []ProjectedHeader `json:"headers,omitempty"`
 }
+
+// PlaceholderSubstitutionProjection replaces placeholders in outbound HTTP traffic.
+type PlaceholderSubstitutionProjection struct {
+	Replacements []PlaceholderReplacement `json:"replacements,omitempty"`
+}
+
+// PlaceholderReplacement defines one placeholder replacement template.
+type PlaceholderReplacement struct {
+	Placeholder   string                            `json:"placeholder"`
+	ValueTemplate string                            `json:"valueTemplate"`
+	Locations     []PlaceholderSubstitutionLocation `json:"locations,omitempty"`
+}
+
+// PlaceholderSubstitutionLocation identifies an HTTP request location.
+type PlaceholderSubstitutionLocation string
+
+const (
+	PlaceholderSubstitutionLocationHeader PlaceholderSubstitutionLocation = "header"
+	PlaceholderSubstitutionLocationQuery  PlaceholderSubstitutionLocation = "query"
+	PlaceholderSubstitutionLocationBody   PlaceholderSubstitutionLocation = "body"
+)
 
 // TLSClientCertificateProjection projects one client certificate for TLS re-origination.
 type TLSClientCertificateProjection struct{}

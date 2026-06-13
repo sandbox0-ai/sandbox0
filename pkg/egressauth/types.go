@@ -32,27 +32,41 @@ type ResolveResponse struct {
 type ResolveDirectiveKind string
 
 const (
-	ResolveDirectiveKindHTTPHeaders          ResolveDirectiveKind = "http_headers"
-	ResolveDirectiveKindGRPCMetadata         ResolveDirectiveKind = "grpc_metadata"
-	ResolveDirectiveKindTLSClientCertificate ResolveDirectiveKind = "tls_client_certificate"
-	ResolveDirectiveKindUsernamePassword     ResolveDirectiveKind = "username_password"
-	ResolveDirectiveKindSSHProxy             ResolveDirectiveKind = "ssh_proxy"
-	ResolveDirectiveKindSSHAgentSign         ResolveDirectiveKind = "ssh_agent_sign"
-	ResolveDirectiveKindCustom               ResolveDirectiveKind = "custom"
+	ResolveDirectiveKindHTTPHeaders             ResolveDirectiveKind = "http_headers"
+	ResolveDirectiveKindPlaceholderSubstitution ResolveDirectiveKind = "placeholder_substitution"
+	ResolveDirectiveKindGRPCMetadata            ResolveDirectiveKind = "grpc_metadata"
+	ResolveDirectiveKindTLSClientCertificate    ResolveDirectiveKind = "tls_client_certificate"
+	ResolveDirectiveKindUsernamePassword        ResolveDirectiveKind = "username_password"
+	ResolveDirectiveKindSSHProxy                ResolveDirectiveKind = "ssh_proxy"
+	ResolveDirectiveKindSSHAgentSign            ResolveDirectiveKind = "ssh_agent_sign"
+	ResolveDirectiveKindCustom                  ResolveDirectiveKind = "custom"
 )
 
 // ResolveDirective is a typed outbound auth directive.
 type ResolveDirective struct {
-	Kind                 ResolveDirectiveKind           `json:"kind"`
-	HTTPHeaders          *HTTPHeadersDirective          `json:"httpHeaders,omitempty"`
-	TLSClientCertificate *TLSClientCertificateDirective `json:"tlsClientCertificate,omitempty"`
-	UsernamePassword     *UsernamePasswordDirective     `json:"usernamePassword,omitempty"`
-	SSHProxy             *SSHProxyDirective             `json:"sshProxy,omitempty"`
+	Kind                    ResolveDirectiveKind              `json:"kind"`
+	HTTPHeaders             *HTTPHeadersDirective             `json:"httpHeaders,omitempty"`
+	PlaceholderSubstitution *PlaceholderSubstitutionDirective `json:"placeholderSubstitution,omitempty"`
+	TLSClientCertificate    *TLSClientCertificateDirective    `json:"tlsClientCertificate,omitempty"`
+	UsernamePassword        *UsernamePasswordDirective        `json:"usernamePassword,omitempty"`
+	SSHProxy                *SSHProxyDirective                `json:"sshProxy,omitempty"`
 }
 
 // HTTPHeadersDirective injects HTTP headers into a matching request.
 type HTTPHeadersDirective struct {
 	Headers map[string]string `json:"headers,omitempty"`
+}
+
+// PlaceholderSubstitutionDirective replaces placeholders in outbound HTTP requests.
+type PlaceholderSubstitutionDirective struct {
+	Replacements []PlaceholderSubstitutionReplacement `json:"replacements,omitempty"`
+}
+
+// PlaceholderSubstitutionReplacement is one resolved placeholder replacement.
+type PlaceholderSubstitutionReplacement struct {
+	Placeholder string                            `json:"placeholder"`
+	Value       string                            `json:"value"`
+	Locations   []PlaceholderSubstitutionLocation `json:"locations,omitempty"`
 }
 
 // TLSClientCertificateDirective configures one upstream mTLS client certificate.
@@ -95,6 +109,27 @@ func NewHTTPHeadersResolveResponse(authRef string, headers map[string]string, ex
 			Kind: ResolveDirectiveKindHTTPHeaders,
 			HTTPHeaders: &HTTPHeadersDirective{
 				Headers: cloneStringMap(headers),
+			},
+		}}
+	}
+	if expiresAt != nil {
+		expiresCopy := *expiresAt
+		resp.ExpiresAt = &expiresCopy
+	}
+	resp.EnsureCompatibilityFields()
+	return resp
+}
+
+// NewPlaceholderSubstitutionResolveResponse constructs a typed placeholder substitution response.
+func NewPlaceholderSubstitutionResolveResponse(authRef string, directive *PlaceholderSubstitutionDirective, expiresAt *time.Time) *ResolveResponse {
+	resp := &ResolveResponse{
+		AuthRef: authRef,
+	}
+	if directive != nil {
+		resp.Directives = []ResolveDirective{{
+			Kind: ResolveDirectiveKindPlaceholderSubstitution,
+			PlaceholderSubstitution: &PlaceholderSubstitutionDirective{
+				Replacements: clonePlaceholderSubstitutionReplacements(directive.Replacements),
 			},
 		}}
 	}
@@ -275,6 +310,11 @@ func cloneDirectives(in []ResolveDirective) []ResolveDirective {
 				Headers: cloneStringMap(directive.HTTPHeaders.Headers),
 			}
 		}
+		if directive.PlaceholderSubstitution != nil {
+			cloned.PlaceholderSubstitution = &PlaceholderSubstitutionDirective{
+				Replacements: clonePlaceholderSubstitutionReplacements(directive.PlaceholderSubstitution.Replacements),
+			}
+		}
 		if directive.TLSClientCertificate != nil {
 			cloned.TLSClientCertificate = &TLSClientCertificateDirective{
 				CertificatePEM: directive.TLSClientCertificate.CertificatePEM,
@@ -298,6 +338,21 @@ func cloneDirectives(in []ResolveDirective) []ResolveDirective {
 			}
 		}
 		out = append(out, cloned)
+	}
+	return out
+}
+
+func clonePlaceholderSubstitutionReplacements(in []PlaceholderSubstitutionReplacement) []PlaceholderSubstitutionReplacement {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]PlaceholderSubstitutionReplacement, 0, len(in))
+	for _, replacement := range in {
+		out = append(out, PlaceholderSubstitutionReplacement{
+			Placeholder: replacement.Placeholder,
+			Value:       replacement.Value,
+			Locations:   append([]PlaceholderSubstitutionLocation(nil), replacement.Locations...),
+		})
 	}
 	return out
 }

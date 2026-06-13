@@ -32,24 +32,151 @@ func (p *staticHeadersProvider) Resolve(
 	if source.Spec.StaticHeaders == nil {
 		return nil, fmt.Errorf("static_headers source spec is required")
 	}
-	if binding.Projection.Type != egressauth.CredentialProjectionTypeHTTPHeaders || binding.Projection.HTTPHeaders == nil {
-		return nil, fmt.Errorf("http_headers projection is required")
+
+	var response *egressauth.ResolveResponse
+	switch binding.Projection.Type {
+	case egressauth.CredentialProjectionTypeHTTPHeaders:
+		headers, err := projectHTTPHeaders(binding.Projection.HTTPHeaders, source.Spec.StaticHeaders.Values)
+		if err != nil {
+			return nil, err
+		}
+
+		ttl := defaultTTL
+		if ttlOverride, ok := parseBindingTTL(binding.CachePolicy, defaultTTL); ok {
+			ttl = ttlOverride
+		}
+		expiresAt := time.Now().UTC().Add(ttl)
+		response = egressauth.NewHTTPHeadersResolveResponse(req.AuthRef, headers, &expiresAt)
+		return &ResolveResult{
+			Response: response,
+			TTL:      ttl,
+		}, nil
+	case egressauth.CredentialProjectionTypePlaceholderSubstitution:
+		directive, err := projectPlaceholderSubstitution(binding.Projection.PlaceholderSubstitution, source.Spec.StaticHeaders.Values)
+		if err != nil {
+			return nil, err
+		}
+
+		ttl := defaultTTL
+		if ttlOverride, ok := parseBindingTTL(binding.CachePolicy, defaultTTL); ok {
+			ttl = ttlOverride
+		}
+		expiresAt := time.Now().UTC().Add(ttl)
+		response = egressauth.NewPlaceholderSubstitutionResolveResponse(req.AuthRef, directive, &expiresAt)
+		return &ResolveResult{
+			Response: response,
+			TTL:      ttl,
+		}, nil
+	default:
+		return nil, fmt.Errorf("http_headers or placeholder_substitution projection is required")
+	}
+}
+
+func parseBindingTTL(cachePolicy *egressauth.CachePolicySpec, defaultTTL time.Duration) (time.Duration, bool) {
+	if cachePolicy == nil {
+		return defaultTTL, false
 	}
 
-	headers, err := projectHTTPHeaders(binding.Projection.HTTPHeaders, source.Spec.StaticHeaders.Values)
+	raw := strings.TrimSpace(cachePolicy.TTL)
+	if raw == "" {
+		return defaultTTL, false
+	}
+	ttl, err := time.ParseDuration(raw)
+	if err != nil || ttl <= 0 {
+		return defaultTTL, false
+	}
+	return ttl, true
+}
+
+func projectHTTPHeaders(projection *egressauth.HTTPHeadersProjection, values map[string]string) (map[string]string, error) {
+	if projection == nil {
+		return nil, fmt.Errorf("http headers projection is required")
+	}
+	if len(projection.Headers) == 0 {
+		return nil, nil
+	}
+
+	out := make(map[string]string, len(projection.Headers))
+	for _, header := range projection.Headers {
+		name := strings.TrimSpace(header.Name)
+		if name == "" {
+			return nil, fmt.Errorf("projected header name is required")
+		}
+		rendered, err := renderValueTemplate(header.ValueTemplate, values)
+		if err != nil {
+			return nil, fmt.Errorf("render projected header %q: %w", name, err)
+		}
+		out[name] = rendered
+	}
+	return out, nil
+}
+
+func projectPlaceholderSubstitution(projection *egressauth.PlaceholderSubstitutionProjection, values map[string]string) (*egressauth.PlaceholderSubstitutionDirective, error) {
+	if projection == nil {
+		return nil, fmt.Errorf("placeholder substitution projection is required")
+	}
+	if len(projection.Replacements) == 0 {
+		return nil, nil
+	}
+
+	replacements := make([]egressauth.PlaceholderSubstitutionReplacement, 0, len(projection.Replacements))
+	for _, replacement := range projection.Replacements {
+		if strings.TrimSpace(replacement.Placeholder) == "" {
+			return nil, fmt.Errorf("placeholder is required")
+		}
+		locations, err := normalizePlaceholderSubstitutionLocations(replacement.Locations)
+		if err != nil {
+			return nil, err
+		}
+		rendered, err := renderValueTemplate(replacement.ValueTemplate, values)
+		if err != nil {
+			return nil, fmt.Errorf("render placeholder replacement: %w", err)
+		}
+		replacements = append(replacements, egressauth.PlaceholderSubstitutionReplacement{
+			Placeholder: replacement.Placeholder,
+			Value:       rendered,
+			Locations:   locations,
+		})
+	}
+
+	return &egressauth.PlaceholderSubstitutionDirective{Replacements: replacements}, nil
+}
+
+func normalizePlaceholderSubstitutionLocations(in []egressauth.PlaceholderSubstitutionLocation) ([]egressauth.PlaceholderSubstitutionLocation, error) {
+	if len(in) == 0 {
+		return nil, fmt.Errorf("placeholder substitution locations are required")
+	}
+
+	seen := map[egressauth.PlaceholderSubstitutionLocation]struct{}{}
+	out := make([]egressauth.PlaceholderSubstitutionLocation, 0, len(in))
+	for _, location := range in {
+		switch location {
+		case egressauth.PlaceholderSubstitutionLocationHeader,
+			egressauth.PlaceholderSubstitutionLocationQuery,
+			egressauth.PlaceholderSubstitutionLocationBody:
+		default:
+			return nil, fmt.Errorf("unsupported placeholder substitution location %q", location)
+		}
+		if _, ok := seen[location]; ok {
+			continue
+		}
+		seen[location] = struct{}{}
+		out = append(out, location)
+	}
+	return out, nil
+}
+
+func renderValueTemplate(valueTemplate string, values map[string]string) (string, error) {
+	tpl, err := template.New("credential-value").Option("missingkey=error").Parse(valueTemplate)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	ttl := defaultTTL
-	if ttlOverride, ok := parseBindingTTL(binding.CachePolicy, defaultTTL); ok {
-		ttl = ttlOverride
+	var rendered bytes.Buffer
+	if err := tpl.Execute(&rendered, values); err != nil {
+		return "", err
 	}
-	expiresAt := time.Now().UTC().Add(ttl)
-	return &ResolveResult{
-		Response: egressauth.NewHTTPHeadersResolveResponse(req.AuthRef, headers, &expiresAt),
-		TTL:      ttl,
-	}, nil
+	return rendered.String(), nil
 }
 
 func (p *staticTLSClientCertificateProvider) Resolve(
@@ -151,56 +278,4 @@ func (p *staticSSHPrivateKeyProvider) Resolve(
 		}, &expiresAt),
 		TTL: ttl,
 	}, nil
-}
-
-func parseBindingTTL(cachePolicy *egressauth.CachePolicySpec, defaultTTL time.Duration) (time.Duration, bool) {
-	if cachePolicy == nil {
-		return defaultTTL, false
-	}
-
-	raw := strings.TrimSpace(cachePolicy.TTL)
-	if raw == "" {
-		return defaultTTL, false
-	}
-	ttl, err := time.ParseDuration(raw)
-	if err != nil || ttl <= 0 {
-		return defaultTTL, false
-	}
-	return ttl, true
-}
-
-func projectHTTPHeaders(projection *egressauth.HTTPHeadersProjection, values map[string]string) (map[string]string, error) {
-	if projection == nil {
-		return nil, fmt.Errorf("http headers projection is required")
-	}
-	if len(projection.Headers) == 0 {
-		return nil, nil
-	}
-
-	out := make(map[string]string, len(projection.Headers))
-	for _, header := range projection.Headers {
-		name := strings.TrimSpace(header.Name)
-		if name == "" {
-			return nil, fmt.Errorf("projected header name is required")
-		}
-		rendered, err := renderValueTemplate(header.ValueTemplate, values)
-		if err != nil {
-			return nil, fmt.Errorf("render projected header %q: %w", name, err)
-		}
-		out[name] = rendered
-	}
-	return out, nil
-}
-
-func renderValueTemplate(valueTemplate string, values map[string]string) (string, error) {
-	tpl, err := template.New("header").Option("missingkey=error").Parse(valueTemplate)
-	if err != nil {
-		return "", err
-	}
-
-	var rendered bytes.Buffer
-	if err := tpl.Execute(&rendered, values); err != nil {
-		return "", err
-	}
-	return rendered.String(), nil
 }

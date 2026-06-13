@@ -205,6 +205,39 @@ spec:
                                     type: object
                                   type: array
                               type: object
+                            placeholderSubstitution:
+                              description: PlaceholderSubstitution replaces sandbox-visible
+                                placeholders at the egress boundary.
+                              properties:
+                                replacements:
+                                  description: Replacements lists placeholder replacement
+                                    templates.
+                                  items:
+                                    description: PlaceholderReplacement defines one
+                                      placeholder replacement template.
+                                    properties:
+                                      locations:
+                                        description: Locations limits replacement
+                                          to selected HTTP request locations.
+                                        items:
+                                          description: PlaceholderSubstitutionLocation
+                                            identifies an HTTP request location.
+                                          type: string
+                                        type: array
+                                      placeholder:
+                                        description: Placeholder is the opaque sandbox-visible
+                                          value to replace.
+                                        type: string
+                                      valueTemplate:
+                                        description: ValueTemplate is rendered against
+                                          the resolved source payload.
+                                        type: string
+                                    required:
+                                    - placeholder
+                                    - valueTemplate
+                                    type: object
+                                  type: array
+                              type: object
                             sshProxy:
                               description: SSHProxy projects sandbox-side fake keys
                                 and upstream identity for transparent SSH proxying.

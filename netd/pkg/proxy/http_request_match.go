@@ -62,6 +62,7 @@ func selectEgressAuthRuleForHTTPRequest(ctx *egressAuthContext, rule *policy.Com
 	ctx.ResolveOnHTTPRequest = false
 	ctx.Resolved = nil
 	ctx.ResolvedHeaders = nil
+	ctx.ResolvedPlaceholderSubstitutions = nil
 	ctx.ResolvedTLSClientCertificate = nil
 	ctx.ResolvedUsernamePassword = nil
 	ctx.ResolvedSSHProxy = nil

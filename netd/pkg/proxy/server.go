@@ -806,6 +806,10 @@ func (s *Server) proxyHTTPRequest(req *adapterRequest) error {
 	if req.EgressAuth != nil && len(req.EgressAuth.ResolvedHeaders) > 0 {
 		injectHTTPHeaders(httpReq, req.EgressAuth.ResolvedHeaders)
 	}
+	if err := applyResolvedHTTPPlaceholderSubstitutions(req.EgressAuth, "http", httpReq); err != nil {
+		_ = writeHTTPProxyError(req.Conn, http.StatusServiceUnavailable, "egress auth placeholder substitution failed")
+		return fmt.Errorf("apply egress auth placeholder substitutions for %q: %w", egressAuthRuleRef(req.EgressAuth), err)
+	}
 	if err := s.enforceHTTPPolicyForHTTPRequest(req, httpReq, func(status int, body []byte) error {
 		return writeHTTPProtocolPolicyResponse(req.Conn, status, body)
 	}); err != nil {

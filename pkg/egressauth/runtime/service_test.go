@@ -198,6 +198,34 @@ func testSSHProxyBindingRecord(updatedAt time.Time) *egressauth.BindingRecord {
 	}
 }
 
+func testPlaceholderSubstitutionBindingRecord(updatedAt time.Time) *egressauth.BindingRecord {
+	return &egressauth.BindingRecord{
+		TeamID:    "team-1",
+		SandboxID: "sbx-1",
+		UpdatedAt: updatedAt,
+		Bindings: []egressauth.CredentialBinding{{
+			Ref:           "example-api",
+			SourceRef:     "example-source",
+			SourceID:      1,
+			SourceVersion: 1,
+			Projection: egressauth.ProjectionSpec{
+				Type: egressauth.CredentialProjectionTypePlaceholderSubstitution,
+				PlaceholderSubstitution: &egressauth.PlaceholderSubstitutionProjection{
+					Replacements: []egressauth.PlaceholderReplacement{{
+						Placeholder:   "s0env_test_token",
+						ValueTemplate: "{{ .token }}",
+						Locations: []egressauth.PlaceholderSubstitutionLocation{
+							egressauth.PlaceholderSubstitutionLocationHeader,
+							egressauth.PlaceholderSubstitutionLocationQuery,
+							egressauth.PlaceholderSubstitutionLocationBody,
+						},
+					}},
+				},
+			},
+		}},
+	}
+}
+
 func TestResolveUsesBindingProviderAndCache(t *testing.T) {
 	provider := &countingProvider{}
 	store := &fakeBindingStore{
@@ -258,6 +286,51 @@ func TestResolveInvalidatesCacheWhenBindingsRevisionChanges(t *testing.T) {
 	}
 	if provider.calls != 2 {
 		t.Fatalf("provider calls = %d, want 2", provider.calls)
+	}
+}
+
+func TestResolveReturnsPlaceholderSubstitutionDirective(t *testing.T) {
+	store := &fakeBindingStore{
+		recordFn: func() *egressauth.BindingRecord {
+			return testPlaceholderSubstitutionBindingRecord(time.Unix(10, 0).UTC())
+		},
+		sourceVersionFn: func(int64, int64) *egressauth.CredentialSourceVersion {
+			return testStaticSourceVersion("resolved-secret")
+		},
+	}
+
+	service := NewService(Config{
+		DefaultResolveTTL: time.Minute,
+	}, store, zap.NewNop())
+
+	resp, err := service.Resolve(context.Background(), &egressauth.ResolveRequest{
+		TeamID:    "team-1",
+		SandboxID: "sbx-1",
+		AuthRef:   "example-api",
+		Protocol:  "http",
+	})
+	if err != nil {
+		t.Fatalf("resolve placeholder substitution: %v", err)
+	}
+	if len(resp.Headers) != 0 {
+		t.Fatalf("legacy headers = %#v, want none", resp.Headers)
+	}
+	if len(resp.Directives) != 1 || resp.Directives[0].Kind != egressauth.ResolveDirectiveKindPlaceholderSubstitution {
+		t.Fatalf("unexpected directives: %#v", resp.Directives)
+	}
+	directive := resp.Directives[0].PlaceholderSubstitution
+	if directive == nil || len(directive.Replacements) != 1 {
+		t.Fatalf("unexpected placeholder directive: %#v", directive)
+	}
+	replacement := directive.Replacements[0]
+	if replacement.Placeholder != "s0env_test_token" {
+		t.Fatalf("placeholder = %q", replacement.Placeholder)
+	}
+	if replacement.Value != "resolved-secret" {
+		t.Fatalf("value = %q", replacement.Value)
+	}
+	if len(replacement.Locations) != 3 {
+		t.Fatalf("locations = %#v", replacement.Locations)
 	}
 }
 

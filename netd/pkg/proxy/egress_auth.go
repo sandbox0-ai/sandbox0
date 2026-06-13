@@ -16,21 +16,22 @@ import (
 )
 
 type egressAuthContext struct {
-	Rule                         *policy.CompiledEgressAuthRule
-	CandidateRules               []*policy.CompiledEgressAuthRule
-	RequestMatch                 bool
-	ResolveOnHTTPRequest         bool
-	Resolved                     *egressauth.ResolveResponse
-	ResolvedHeaders              map[string]string
-	ResolvedTLSClientCertificate *resolvedTLSClientCertificate
-	ResolvedUsernamePassword     *resolvedUsernamePassword
-	ResolvedSSHProxy             *resolvedSSHProxy
-	CacheHit                     bool
-	ResolveAttempt               bool
-	ResolveError                 error
-	FailurePolicy                string
-	BypassReason                 string
-	EnforcementReason            string
+	Rule                             *policy.CompiledEgressAuthRule
+	CandidateRules                   []*policy.CompiledEgressAuthRule
+	RequestMatch                     bool
+	ResolveOnHTTPRequest             bool
+	Resolved                         *egressauth.ResolveResponse
+	ResolvedHeaders                  map[string]string
+	ResolvedPlaceholderSubstitutions []resolvedPlaceholderSubstitution
+	ResolvedTLSClientCertificate     *resolvedTLSClientCertificate
+	ResolvedUsernamePassword         *resolvedUsernamePassword
+	ResolvedSSHProxy                 *resolvedSSHProxy
+	CacheHit                         bool
+	ResolveAttempt                   bool
+	ResolveError                     error
+	FailurePolicy                    string
+	BypassReason                     string
+	EnforcementReason                string
 }
 
 type resolvedTLSClientCertificate struct {
@@ -49,6 +50,12 @@ type resolvedSSHProxy struct {
 	PrivateKeyPEM     string
 	Passphrase        string
 	KnownHosts        []string
+}
+
+type resolvedPlaceholderSubstitution struct {
+	Placeholder string
+	Value       string
+	Locations   []egressauth.PlaceholderSubstitutionLocation
 }
 
 type egressAuthResolver interface {
@@ -174,26 +181,40 @@ func cloneResolvedHeaders(in map[string]string) map[string]string {
 	return out
 }
 
-func resolveHTTPHeadersForAdapter(ctx *egressAuthContext, allowHTTPHeaders bool) (map[string]string, error) {
+func hasResolvedHTTPAuthMaterial(ctx *egressAuthContext) bool {
+	return ctx != nil &&
+		ctx.Resolved != nil &&
+		(len(ctx.ResolvedHeaders) > 0 || len(ctx.ResolvedPlaceholderSubstitutions) > 0)
+}
+
+func egressAuthRuleRef(ctx *egressAuthContext) string {
+	if ctx == nil || ctx.Rule == nil {
+		return ""
+	}
+	return ctx.Rule.AuthRef
+}
+
+func resolveHTTPDirectivesForAdapter(ctx *egressAuthContext, allowHTTPDirectives bool) (map[string]string, []resolvedPlaceholderSubstitution, error) {
 	if ctx == nil || ctx.Resolved == nil {
-		return nil, errEgressAuthMaterialUnavailable
+		return nil, nil, errEgressAuthMaterialUnavailable
 	}
 
 	if len(ctx.Resolved.Directives) == 0 && len(ctx.Resolved.Headers) > 0 {
-		if !allowHTTPHeaders {
-			return nil, errEgressAuthDirectiveUnsupported
+		if !allowHTTPDirectives {
+			return nil, nil, errEgressAuthDirectiveUnsupported
 		}
-		return cloneResolvedHeaders(ctx.Resolved.Headers), nil
+		return cloneResolvedHeaders(ctx.Resolved.Headers), nil, nil
 	}
 
-	if !allowHTTPHeaders {
+	if !allowHTTPDirectives {
 		if len(ctx.Resolved.Directives) > 0 || len(ctx.Resolved.Headers) > 0 {
-			return nil, errEgressAuthDirectiveUnsupported
+			return nil, nil, errEgressAuthDirectiveUnsupported
 		}
-		return nil, errEgressAuthMaterialUnavailable
+		return nil, nil, errEgressAuthMaterialUnavailable
 	}
 
 	headers := map[string]string{}
+	replacements := []resolvedPlaceholderSubstitution{}
 	for _, directive := range ctx.Resolved.Directives {
 		switch directive.Kind {
 		case egressauth.ResolveDirectiveKindHTTPHeaders:
@@ -203,14 +224,31 @@ func resolveHTTPHeadersForAdapter(ctx *egressAuthContext, allowHTTPHeaders bool)
 			for key, value := range directive.HTTPHeaders.Headers {
 				headers[key] = value
 			}
+		case egressauth.ResolveDirectiveKindPlaceholderSubstitution:
+			if directive.PlaceholderSubstitution == nil {
+				continue
+			}
+			for _, replacement := range directive.PlaceholderSubstitution.Replacements {
+				if strings.TrimSpace(replacement.Placeholder) == "" || len(replacement.Locations) == 0 {
+					return nil, nil, errEgressAuthDirectiveInvalid
+				}
+				replacements = append(replacements, resolvedPlaceholderSubstitution{
+					Placeholder: replacement.Placeholder,
+					Value:       replacement.Value,
+					Locations:   append([]egressauth.PlaceholderSubstitutionLocation(nil), replacement.Locations...),
+				})
+			}
 		default:
-			return nil, errEgressAuthDirectiveUnsupported
+			return nil, nil, errEgressAuthDirectiveUnsupported
 		}
 	}
-	if len(headers) == 0 {
-		return nil, errEgressAuthMaterialUnavailable
+	if len(headers) == 0 && len(replacements) == 0 {
+		return nil, nil, errEgressAuthMaterialUnavailable
 	}
-	return headers, nil
+	if len(headers) == 0 {
+		headers = nil
+	}
+	return headers, replacements, nil
 }
 
 func prepareHTTPHeaderDirectives(ctx *egressAuthContext, protocol string, allowHTTPHeaders bool) error {
@@ -228,9 +266,10 @@ func prepareHTTPHeaderDirectives(ctx *egressAuthContext, protocol string, allowH
 		return errEgressAuthMaterialUnavailable
 	}
 
-	headers, err := resolveHTTPHeadersForAdapter(ctx, allowHTTPHeaders)
+	headers, replacements, err := resolveHTTPDirectivesForAdapter(ctx, allowHTTPHeaders)
 	if err == nil {
 		ctx.ResolvedHeaders = headers
+		ctx.ResolvedPlaceholderSubstitutions = replacements
 		return nil
 	}
 	applyEgressAuthDirectiveError(ctx, protocol, err)

@@ -96,6 +96,64 @@ func (r *Repository) DeleteTeam(ctx context.Context, id string) error {
 	return nil
 }
 
+// TransferTeamOwner sets a team member as the team owner and ensures they have admin role.
+func (r *Repository) TransferTeamOwner(ctx context.Context, teamID, userID string) (*Team, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin transfer team owner: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	var memberID string
+	if err := tx.QueryRow(ctx, `
+		SELECT id
+		FROM team_members
+		WHERE team_id = $1 AND user_id = $2
+	`, teamID, userID).Scan(&memberID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrMemberNotFound
+		}
+		return nil, fmt.Errorf("query owner member: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE team_members
+		SET role = 'admin'
+		WHERE team_id = $1 AND user_id = $2
+	`, teamID, userID); err != nil {
+		return nil, fmt.Errorf("promote owner member: %w", err)
+	}
+
+	var team Team
+	err = tx.QueryRow(ctx, `
+		UPDATE teams
+		SET owner_id = $2
+		WHERE id = $1
+		RETURNING id, name, slug, owner_id, home_region_id, created_at, updated_at
+	`, teamID, userID).Scan(
+		&team.ID,
+		&team.Name,
+		&team.Slug,
+		&team.OwnerID,
+		&team.HomeRegionID,
+		&team.CreatedAt,
+		&team.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrTeamNotFound
+		}
+		return nil, fmt.Errorf("update team owner: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit transfer team owner: %w", err)
+	}
+	return &team, nil
+}
+
 // GetTeamsByUserID retrieves all teams a user belongs to.
 func (r *Repository) GetTeamsByUserID(ctx context.Context, userID string) ([]*Team, error) {
 	rows, err := r.pool.Query(ctx, `
@@ -211,8 +269,37 @@ func (r *Repository) GetTeamMembers(ctx context.Context, teamID string) ([]*Team
 	if err != nil {
 		return nil, fmt.Errorf("query team members: %w", err)
 	}
-	defer rows.Close()
+	return scanTeamMembers(rows)
+}
 
+// SearchTeamMembers retrieves members whose profile fields match query.
+func (r *Repository) SearchTeamMembers(ctx context.Context, teamID, query string) ([]*TeamMemberWithUser, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return r.GetTeamMembers(ctx, teamID)
+	}
+
+	rows, err := r.pool.Query(ctx, `
+		SELECT tm.id, tm.team_id, tm.user_id, tm.role, tm.joined_at,
+		       u.id, u.email, u.name, u.avatar_url, u.email_verified, u.is_admin, u.created_at, u.updated_at
+		FROM team_members tm
+		INNER JOIN users u ON u.id = tm.user_id
+		WHERE tm.team_id = $1
+		  AND (
+		    u.email ILIKE $2 ESCAPE '\'
+		    OR u.name ILIKE $2 ESCAPE '\'
+		    OR tm.user_id::text ILIKE $2 ESCAPE '\'
+		  )
+		ORDER BY tm.joined_at
+	`, teamID, likeContainsPattern(query))
+	if err != nil {
+		return nil, fmt.Errorf("search team members: %w", err)
+	}
+	return scanTeamMembers(rows)
+}
+
+func scanTeamMembers(rows pgx.Rows) ([]*TeamMemberWithUser, error) {
+	defer rows.Close()
 	var members []*TeamMemberWithUser
 	for rows.Next() {
 		var m TeamMemberWithUser
@@ -224,7 +311,15 @@ func (r *Repository) GetTeamMembers(ctx context.Context, teamID string) ([]*Team
 		}
 		members = append(members, &m)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate team members: %w", err)
+	}
 	return members, nil
+}
+
+func likeContainsPattern(value string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return "%" + replacer.Replace(value) + "%"
 }
 
 // GetTeamMember retrieves a specific team member.

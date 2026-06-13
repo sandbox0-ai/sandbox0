@@ -26,6 +26,9 @@ func TestRegisterRoutesMountsSelfHostedPublicSurface(t *testing.T) {
 	if !hasRoute(router, "GET", "/teams") {
 		t.Fatal("expected full public routes to include /teams")
 	}
+	if !hasRoute(router, "PUT", "/teams/:id/owner") {
+		t.Fatal("expected full public routes to include team owner transfer")
+	}
 	if !hasRoute(router, "GET", "/users/me/ssh-keys") {
 		t.Fatal("expected full public routes to include SSH key list")
 	}
@@ -63,6 +66,9 @@ func TestRegisterIdentityRoutesOmitsRegionalStateRoutes(t *testing.T) {
 	}
 	if !hasRoute(router, "GET", "/teams") {
 		t.Fatal("expected identity routes to include /teams")
+	}
+	if !hasRoute(router, "PUT", "/teams/:id/owner") {
+		t.Fatal("expected identity routes to include team owner transfer")
 	}
 }
 

@@ -20,6 +20,12 @@ import (
 type stubTeamRepository struct {
 	createdTeam     *identity.Team
 	addedTeamMember *identity.TeamMember
+	teams           map[string]*identity.Team
+	members         map[string]*identity.TeamMember
+	memberLists     map[string][]*identity.TeamMemberWithUser
+	searchMembers   []*identity.TeamMemberWithUser
+	searchTeamID    string
+	searchQuery     string
 }
 
 func (s *stubTeamRepository) GetTeamsByUserID(context.Context, string) ([]*identity.Team, error) {
@@ -34,11 +40,23 @@ func (s *stubTeamRepository) CreateTeam(_ context.Context, team *identity.Team) 
 	return nil
 }
 
-func (s *stubTeamRepository) GetTeamMember(context.Context, string, string) (*identity.TeamMember, error) {
+func (s *stubTeamRepository) GetTeamMember(_ context.Context, teamID, userID string) (*identity.TeamMember, error) {
+	if s.members != nil {
+		if member, ok := s.members[teamMemberKey(teamID, userID)]; ok {
+			copyMember := *member
+			return &copyMember, nil
+		}
+	}
 	return nil, identity.ErrMemberNotFound
 }
 
-func (s *stubTeamRepository) GetTeamByID(context.Context, string) (*identity.Team, error) {
+func (s *stubTeamRepository) GetTeamByID(_ context.Context, id string) (*identity.Team, error) {
+	if s.teams != nil {
+		if team, ok := s.teams[id]; ok {
+			copyTeam := *team
+			return &copyTeam, nil
+		}
+	}
 	return nil, identity.ErrTeamNotFound
 }
 
@@ -50,8 +68,46 @@ func (s *stubTeamRepository) DeleteTeam(context.Context, string) error {
 	return nil
 }
 
-func (s *stubTeamRepository) GetTeamMembers(context.Context, string) ([]*identity.TeamMemberWithUser, error) {
-	return nil, nil
+func (s *stubTeamRepository) TransferTeamOwner(_ context.Context, teamID, userID string) (*identity.Team, error) {
+	team, ok := s.teams[teamID]
+	if !ok {
+		return nil, identity.ErrTeamNotFound
+	}
+	member, ok := s.members[teamMemberKey(teamID, userID)]
+	if !ok {
+		return nil, identity.ErrMemberNotFound
+	}
+	member.Role = "admin"
+	team.OwnerID = &member.UserID
+	copyTeam := *team
+	return &copyTeam, nil
+}
+
+func (s *stubTeamRepository) GetTeamMembers(_ context.Context, teamID string) ([]*identity.TeamMemberWithUser, error) {
+	if s.memberLists != nil {
+		if members, ok := s.memberLists[teamID]; ok {
+			return members, nil
+		}
+	}
+	members := make([]*identity.TeamMemberWithUser, 0)
+	for _, member := range s.members {
+		if member.TeamID == teamID {
+			members = append(members, &identity.TeamMemberWithUser{
+				ID:       member.ID,
+				TeamID:   member.TeamID,
+				UserID:   member.UserID,
+				Role:     member.Role,
+				JoinedAt: member.JoinedAt,
+			})
+		}
+	}
+	return members, nil
+}
+
+func (s *stubTeamRepository) SearchTeamMembers(_ context.Context, teamID, query string) ([]*identity.TeamMemberWithUser, error) {
+	s.searchTeamID = teamID
+	s.searchQuery = query
+	return s.searchMembers, nil
 }
 
 func (s *stubTeamRepository) GetUserByEmail(context.Context, string) (*identity.User, error) {
@@ -64,11 +120,21 @@ func (s *stubTeamRepository) AddTeamMember(_ context.Context, member *identity.T
 	return nil
 }
 
-func (s *stubTeamRepository) UpdateTeamMemberRole(context.Context, string, string, string) error {
+func (s *stubTeamRepository) UpdateTeamMemberRole(_ context.Context, teamID, userID, role string) error {
+	member, ok := s.members[teamMemberKey(teamID, userID)]
+	if !ok {
+		return identity.ErrMemberNotFound
+	}
+	member.Role = role
 	return nil
 }
 
-func (s *stubTeamRepository) RemoveTeamMember(context.Context, string, string) error {
+func (s *stubTeamRepository) RemoveTeamMember(_ context.Context, teamID, userID string) error {
+	key := teamMemberKey(teamID, userID)
+	if _, ok := s.members[key]; !ok {
+		return identity.ErrMemberNotFound
+	}
+	delete(s.members, key)
 	return nil
 }
 
@@ -288,4 +354,223 @@ func TestTeamHandlerCreateTeamReturnsInternalErrorWhenRegionLookupFails(t *testi
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
 	}
+}
+
+func TestTeamHandlerTransferTeamOwnerPromotesExistingMember(t *testing.T) {
+	ownerID := "user-owner"
+	nextOwnerID := "user-next"
+	repo := newTeamManagementRepo(ownerID)
+	repo.members[teamMemberKey("team-1", nextOwnerID)] = &identity.TeamMember{
+		ID:     "member-next",
+		TeamID: "team-1",
+		UserID: nextOwnerID,
+		Role:   "viewer",
+	}
+
+	rec := performTeamManagementRequest(t, repo, ownerID, http.MethodPut, "/teams/team-1/owner", map[string]any{
+		"user_id": nextOwnerID,
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := *repo.teams["team-1"].OwnerID; got != nextOwnerID {
+		t.Fatalf("owner = %q, want %q", got, nextOwnerID)
+	}
+	if got := repo.members[teamMemberKey("team-1", nextOwnerID)].Role; got != "admin" {
+		t.Fatalf("new owner role = %q, want admin", got)
+	}
+}
+
+func TestTeamHandlerTransferTeamOwnerRequiresCurrentOwner(t *testing.T) {
+	ownerID := "user-owner"
+	callerID := "user-admin"
+	repo := newTeamManagementRepo(ownerID)
+	repo.members[teamMemberKey("team-1", callerID)] = &identity.TeamMember{
+		ID:     "member-admin",
+		TeamID: "team-1",
+		UserID: callerID,
+		Role:   "admin",
+	}
+
+	rec := performTeamManagementRequest(t, repo, callerID, http.MethodPut, "/teams/team-1/owner", map[string]any{
+		"user_id": callerID,
+	})
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+	if got := *repo.teams["team-1"].OwnerID; got != ownerID {
+		t.Fatalf("owner changed to %q", got)
+	}
+}
+
+func TestTeamHandlerListTeamMembersUsesSearchQuery(t *testing.T) {
+	ownerID := "user-owner"
+	repo := newTeamManagementRepo(ownerID)
+	repo.searchMembers = []*identity.TeamMemberWithUser{
+		{ID: "member-owner", TeamID: "team-1", UserID: ownerID, Role: "admin", Email: "owner@example.com"},
+	}
+
+	rec := performTeamManagementRequest(t, repo, ownerID, http.MethodGet, "/teams/team-1/members?query=owner", nil)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if repo.searchTeamID != "team-1" || repo.searchQuery != "owner" {
+		t.Fatalf("search = (%q, %q), want (team-1, owner)", repo.searchTeamID, repo.searchQuery)
+	}
+}
+
+func TestTeamHandlerUpdateTeamMemberRejectsOwnerDemotion(t *testing.T) {
+	ownerID := "user-owner"
+	callerID := "user-admin"
+	repo := newTeamManagementRepo(ownerID)
+	repo.members[teamMemberKey("team-1", callerID)] = &identity.TeamMember{
+		ID:     "member-admin",
+		TeamID: "team-1",
+		UserID: callerID,
+		Role:   "admin",
+	}
+
+	rec := performTeamManagementRequest(t, repo, callerID, http.MethodPut, "/teams/team-1/members/"+ownerID, map[string]any{
+		"role": "viewer",
+	})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if got := repo.members[teamMemberKey("team-1", ownerID)].Role; got != "admin" {
+		t.Fatalf("owner role = %q, want admin", got)
+	}
+}
+
+func TestTeamHandlerRemoveTeamMemberRejectsOwnerRemoval(t *testing.T) {
+	ownerID := "user-owner"
+	callerID := "user-admin"
+	repo := newTeamManagementRepo(ownerID)
+	repo.members[teamMemberKey("team-1", callerID)] = &identity.TeamMember{
+		ID:     "member-admin",
+		TeamID: "team-1",
+		UserID: callerID,
+		Role:   "admin",
+	}
+
+	rec := performTeamManagementRequest(t, repo, callerID, http.MethodDelete, "/teams/team-1/members/"+ownerID, nil)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if _, ok := repo.members[teamMemberKey("team-1", ownerID)]; !ok {
+		t.Fatal("owner member was removed")
+	}
+}
+
+func TestTeamHandlerUpdateTeamMemberRejectsLastAdminDemotion(t *testing.T) {
+	adminID := "user-admin"
+	repo := newTeamManagementRepo("")
+	repo.members[teamMemberKey("team-1", adminID)] = &identity.TeamMember{
+		ID:     "member-admin",
+		TeamID: "team-1",
+		UserID: adminID,
+		Role:   "admin",
+	}
+
+	rec := performTeamManagementRequest(t, repo, adminID, http.MethodPut, "/teams/team-1/members/"+adminID, map[string]any{
+		"role": "viewer",
+	})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if got := repo.members[teamMemberKey("team-1", adminID)].Role; got != "admin" {
+		t.Fatalf("admin role = %q, want admin", got)
+	}
+}
+
+func TestTeamHandlerRemoveTeamMemberRejectsLastAdminRemoval(t *testing.T) {
+	adminID := "user-admin"
+	repo := newTeamManagementRepo("")
+	repo.members[teamMemberKey("team-1", adminID)] = &identity.TeamMember{
+		ID:     "member-admin",
+		TeamID: "team-1",
+		UserID: adminID,
+		Role:   "admin",
+	}
+
+	rec := performTeamManagementRequest(t, repo, adminID, http.MethodDelete, "/teams/team-1/members/"+adminID, nil)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if _, ok := repo.members[teamMemberKey("team-1", adminID)]; !ok {
+		t.Fatal("last admin was removed")
+	}
+}
+
+func newTeamManagementRepo(ownerID string) *stubTeamRepository {
+	var ownerPtr *string
+	if ownerID != "" {
+		ownerPtr = &ownerID
+	}
+	repo := &stubTeamRepository{
+		teams: map[string]*identity.Team{
+			"team-1": {
+				ID:      "team-1",
+				Name:    "Team One",
+				Slug:    "team-one",
+				OwnerID: ownerPtr,
+			},
+		},
+		members: make(map[string]*identity.TeamMember),
+	}
+	if ownerID != "" {
+		repo.members[teamMemberKey("team-1", ownerID)] = &identity.TeamMember{
+			ID:     "member-owner",
+			TeamID: "team-1",
+			UserID: ownerID,
+			Role:   "admin",
+		}
+	}
+	return repo
+}
+
+func performTeamManagementRequest(t *testing.T, repo *stubTeamRepository, authUserID, method, path string, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+
+	handler := NewTeamHandler(repo, zap.NewNop())
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set("auth_context", &authn.AuthContext{
+			AuthMethod: authn.AuthMethodJWT,
+			UserID:     authUserID,
+			TeamID:     "team-1",
+			TeamRole:   "admin",
+		})
+		c.Next()
+	})
+	router.GET("/teams/:id/members", handler.ListTeamMembers)
+	router.PUT("/teams/:id/owner", handler.TransferTeamOwner)
+	router.PUT("/teams/:id/members/:userId", handler.UpdateTeamMember)
+	router.DELETE("/teams/:id/members/:userId", handler.RemoveTeamMember)
+
+	var reader *bytes.Reader
+	if body == nil {
+		reader = bytes.NewReader(nil)
+	} else {
+		rawBody, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal request: %v", err)
+		}
+		reader = bytes.NewReader(rawBody)
+	}
+	req := httptest.NewRequest(method, path, reader)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}
+
+func teamMemberKey(teamID, userID string) string {
+	return teamID + ":" + userID
 }

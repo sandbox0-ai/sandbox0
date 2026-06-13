@@ -903,6 +903,46 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+  /teams/{id}/owner:
+    put:
+      tags: [teams]
+      summary: Transfer team ownership
+      description: Transfers ownership to an existing team member and promotes the new owner to admin if needed.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/TeamID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransferTeamOwnerRequest"
+      responses:
+        "200":
+          description: Team owner transferred
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessTeamResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Only the current owner can transfer ownership
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Team or member not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
   /teams/{id}/members:
     get:
       tags: [teams]
@@ -911,6 +951,12 @@ paths:
         - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/TeamID"
+        - name: query
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Search by member email, display name, or user ID.
       responses:
         "200":
           description: Team members
@@ -984,6 +1030,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessMessageResponse"
+        "400":
+          description: Invalid member role change
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
         "403":
           description: Forbidden
           content:
@@ -1011,6 +1063,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessMessageResponse"
+        "400":
+          description: Invalid member removal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
         "403":
           description: Forbidden
           content:
@@ -3538,6 +3596,12 @@ components:
           type: string
         slug:
           type: string
+    TransferTeamOwnerRequest:
+      type: object
+      properties:
+        user_id:
+          type: string
+      required: [user_id]
     AddTeamMemberRequest:
       type: object
       properties:

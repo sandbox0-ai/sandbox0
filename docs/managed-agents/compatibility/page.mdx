@@ -21,7 +21,7 @@ Official reference: [Claude Managed Agents quickstart](https://platform.claude.c
 | Custom skills | Supported through uploaded skill versions |
 | MCP servers | Supported for URL MCP servers and vault-backed credentials |
 | GitHub repository resources | Supported at session creation |
-| Agent harnesses | Supported for `claude`, `codex`, and `openai-agents` |
+| Agent harnesses | Supported for `claude`, `codex`, `openai-agents`, and `pi` |
 | External AI gateways | Supported when the gateway exposes the API shape required by the selected agent harness |
 
 ## Current Differences
@@ -32,11 +32,12 @@ Official reference: [Claude Managed Agents quickstart](https://platform.claude.c
 | API token | SDK `apiKey` is a Sandbox0 API key, not the Anthropic LLM token. |
 | LLM token | Stored in an LLM vault and projected by Sandbox0 credential policy. |
 | Agent harness | Selected by the compatibility key `sandbox0.managed_agents.engine` on the LLM vault. |
-| Environment variable credentials | Stored as sandbox environment placeholders and resolved by Sandbox0 egress auth. They are available to sandbox processes, not as SDK client or harness configuration secrets. |
-| Sandbox claim | Runtime setup claims or resumes a Sandbox0 sandbox and mounts a persistent workspace volume. |
-| Claude harness | Requires an Anthropic-compatible endpoint. |
+| Environment variable credentials | Stored as sandbox environment placeholders and resolved by Sandbox0 egress auth. They are available to sandbox-backed runtimes, not as SDK client or resident harness configuration secrets. External sandbox-as-tool harnesses reject them today. |
+| Sandbox claim | Agent-in-sandbox harnesses claim or resume a Sandbox0 sandbox before the run. Sandbox-as-tool harnesses start in a resident runtime and claim the sandbox only when a sandbox tool needs one. |
+| Claude harness | Requires an Anthropic Messages-compatible endpoint. |
 | Codex harness | Requires an OpenAI-compatible endpoint. |
 | OpenAI Agents harness | Requires an OpenAI Responses-compatible endpoint and uses Sandbox0 as a tool target. |
+| Pi harness | Requires an Anthropic Messages-compatible endpoint and uses Sandbox0 as a tool target. |
 | Retry state | Automatic retries are exposed as `session.status_rescheduled` plus `retry_status.type = "retrying"` errors when the selected harness provides a retry signal. |
 | Scheduled deployments | Sandbox0 accepts five-field POSIX cron expressions with IANA timezones. It does not backfill missed runs after unpause or downtime. |
 | Deployment failure handling | Scheduled run creation failures are stored on deployment runs. Non-rate-limit failures pause the deployment. |
@@ -48,7 +49,7 @@ Official reference: [Claude Managed Agents quickstart](https://platform.claude.c
 
 ## Tool Support
 
-The Claude wrapper maps Managed Agents tool definitions to Claude Agent SDK options.
+Harness wrappers map Managed Agents tool definitions to the selected runtime adapter.
 
 | Tool type | Status | Notes |
 |-----------|--------|-------|
@@ -112,14 +113,14 @@ Sandbox0 stores the session and event log outside the sandbox. Sandbox attachmen
 | Action | Behavior |
 |--------|----------|
 | Create session | Stores durable session truth, snapshots the agent, and records environment, resources, and vault ids. |
-| Send user message | Ensures a sandbox is ready, bootstraps wrapper state, starts a run, and appends status events. |
+| Send user message | Starts the selected harness and appends status events. Agent-in-sandbox harnesses prepare the sandbox before the run; sandbox-as-tool harnesses claim the sandbox on first sandbox tool execution. |
 | Interrupt | Interrupts the active wrapper run and moves local session truth back toward idle. |
 | Delete | Rejects active running sessions. Delete after interrupting and reaching idle. |
 | Archive | Makes the session read-only for new input events. |
 
-`claude` and `codex` use agent in sandbox behavior. `openai-agents` uses sandbox as tool behavior, so the resident runtime can start a run before a Sandbox0 sandbox is claimed.
+`claude` and `codex` use agent in sandbox behavior. `openai-agents` and `pi` use sandbox as tool behavior, so the resident runtime can start a run before a Sandbox0 sandbox is claimed.
 
-Sandbox0 session lifecycle includes `idle`, `running`, `rescheduling`, and `terminated`. The `rescheduling` state is transient and means the active run is waiting for an automatic retry. It is currently mapped from Claude Agent SDK `api_retry` events, Codex app-server `willRetry` errors, and OpenAI Agents SDK runner-managed retry policy decisions.
+Sandbox0 session lifecycle includes `idle`, `running`, `rescheduling`, and `terminated`. The `rescheduling` state is transient and means the active run is waiting for an automatic retry. It is currently mapped from Claude Agent SDK `api_retry` events, Codex app-server `willRetry` errors, and OpenAI Agents SDK runner-managed retry policy decisions. The `pi` harness surfaces provider or runtime failures as session errors but does not expose a runtime-managed automatic retry signal yet.
 
 ## Version Drift
 

@@ -1780,11 +1780,16 @@ type SandboxTemplateStatus struct {
 }
 
 // SandboxUpdateConfig Subset of SandboxConfig fields that can be updated at runtime without restarting the sandbox.
-// Note: env_vars and webhook are not included as they only affect new processes or require restart.
+// Note: env_vars only affect new processes. webhook is not included as it requires restart.
 type SandboxUpdateConfig struct {
 	// AutoResume Sandbox-level resume gate for paused sandboxes. When false, any inbound request
 	// (API or public exposure) must not auto resume the sandbox.
 	AutoResume *bool `json:"auto_resume,omitempty"`
+
+	// EnvVars Sandbox-level environment variables used as defaults for new procd-managed
+	// processes. Omitting this field preserves the existing environment map; passing
+	// an empty object clears it.
+	EnvVars *map[string]string `json:"env_vars,omitempty"`
 
 	// HardTtl Sandbox hard time-to-live in seconds. When it expires, Sandbox0 deletes the sandbox identity and durable state, including paused rootfs checkpoints.
 	HardTtl  *int32                `json:"hard_ttl,omitempty"`
@@ -1798,7 +1803,7 @@ type SandboxUpdateConfig struct {
 // SandboxUpdateRequest defines model for SandboxUpdateRequest.
 type SandboxUpdateRequest struct {
 	// Config Subset of SandboxConfig fields that can be updated at runtime without restarting the sandbox.
-	// Note: env_vars and webhook are not included as they only affect new processes or require restart.
+	// Note: env_vars only affect new processes. webhook is not included as it requires restart.
 	Config *SandboxUpdateConfig `json:"config,omitempty"`
 }
 

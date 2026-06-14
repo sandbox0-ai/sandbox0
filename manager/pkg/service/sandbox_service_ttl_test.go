@@ -3,6 +3,11 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"testing"
 	"time"
 
@@ -124,6 +129,88 @@ func TestUpdateSandboxZeroTTLDisablesExpirations(t *testing.T) {
 	assert.Equal(t, int32(0), *cfg.HardTTL)
 }
 
+func TestUpdateSandboxEnvVarsUpdatesProcdAndConfig(t *testing.T) {
+	pod := testSandboxPod()
+	pod.Annotations[controller.AnnotationConfig] = `{"env_vars":{"OLD":"old"},"ttl":300}`
+
+	var procdReq UpdateSandboxEnvVarsRequest
+	procdServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/api/v1/sandbox/env_vars" {
+			t.Fatalf("unexpected procd request %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("X-Internal-Token"); got != "token" {
+			t.Fatalf("X-Internal-Token = %q, want token", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&procdReq); err != nil {
+			t.Fatalf("decode procd request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"data": map[string]any{
+				"env_vars": procdReq.EnvVars,
+			},
+		})
+	}))
+	t.Cleanup(procdServer.Close)
+	procdPort := configurePodForProcdServer(t, pod, procdServer.URL)
+
+	svc, client := newSandboxServiceForTTLTests(t, pod, 0)
+	svc.config.ProcdPort = procdPort
+	svc.procdClient = NewProcdClientWithHTTPClient(procdServer.Client())
+	svc.internalTokenGenerator = staticTokenGenerator{}
+
+	_, err := svc.UpdateSandbox(context.Background(), pod.Name, &SandboxUpdateConfig{
+		EnvVars: map[string]string{
+			"APP_ENV": "test",
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"APP_ENV": "test"}, procdReq.EnvVars)
+
+	stored, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	var cfg SandboxConfig
+	require.NoError(t, json.Unmarshal([]byte(stored.Annotations[controller.AnnotationConfig]), &cfg))
+	assert.Equal(t, map[string]string{"APP_ENV": "test"}, cfg.EnvVars)
+	require.NotNil(t, cfg.TTL)
+	assert.Equal(t, int32(300), *cfg.TTL)
+}
+
+func TestUpdateSandboxEnvVarsClearsConfig(t *testing.T) {
+	pod := testSandboxPod()
+	pod.Annotations[controller.AnnotationConfig] = `{"env_vars":{"OLD":"old"}}`
+
+	var procdReq UpdateSandboxEnvVarsRequest
+	procdServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&procdReq); err != nil {
+			t.Fatalf("decode procd request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"data":    map[string]any{"env_vars": map[string]string{}},
+		})
+	}))
+	t.Cleanup(procdServer.Close)
+	procdPort := configurePodForProcdServer(t, pod, procdServer.URL)
+
+	svc, client := newSandboxServiceForTTLTests(t, pod, 0)
+	svc.config.ProcdPort = procdPort
+	svc.procdClient = NewProcdClientWithHTTPClient(procdServer.Client())
+	svc.internalTokenGenerator = staticTokenGenerator{}
+
+	_, err := svc.UpdateSandbox(context.Background(), pod.Name, &SandboxUpdateConfig{
+		EnvVars: map[string]string{},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, procdReq.EnvVars)
+
+	stored, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	var cfg SandboxConfig
+	require.NoError(t, json.Unmarshal([]byte(stored.Annotations[controller.AnnotationConfig]), &cfg))
+	assert.Empty(t, cfg.EnvVars)
+}
+
 func TestRefreshSandboxDisabledTTLRemainsDisabled(t *testing.T) {
 	pod := testSandboxPod()
 	pod.Annotations[controller.AnnotationConfig] = `{"ttl":0,"hard_ttl":0}`
@@ -139,4 +226,23 @@ func TestRefreshSandboxDisabledTTLRemainsDisabled(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, stored.Annotations[controller.AnnotationExpiresAt])
 	assert.Empty(t, stored.Annotations[controller.AnnotationHardExpiresAt])
+}
+
+func configurePodForProcdServer(t *testing.T, pod *corev1.Pod, rawURL string) int {
+	t.Helper()
+	parsed, err := url.Parse(rawURL)
+	require.NoError(t, err)
+	host, portText, err := net.SplitHostPort(parsed.Host)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(portText)
+	require.NoError(t, err)
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	if pod.Labels == nil {
+		pod.Labels = map[string]string{}
+	}
+	pod.Annotations[controller.AnnotationSandboxID] = pod.Name
+	pod.Status.PodIP = host
+	return port
 }

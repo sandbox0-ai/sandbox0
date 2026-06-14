@@ -489,6 +489,9 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 		if cfg.AutoResume != nil {
 			merged.AutoResume = cfg.AutoResume
 		}
+		if cfg.EnvVars != nil {
+			merged.EnvVars = cloneEnvVars(cfg.EnvVars)
+		}
 		if cfg.Services != nil {
 			services, err := NormalizeSandboxAppServices(cfg.Services)
 			if err != nil {
@@ -558,6 +561,11 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 		return nil, fmt.Errorf("update pod: %w", err)
 	}
 
+	if cfg.EnvVars != nil {
+		if err := s.updateActiveSandboxEnvVars(ctx, updatedPod, sandboxID, sandboxEnvVarsFromPod(updatedPod)); err != nil {
+			return nil, fmt.Errorf("update sandbox env vars: %w", err)
+		}
+	}
 	if networkState != nil {
 		teamID := updatedPod.Annotations[controller.AnnotationTeamID]
 		if err := s.applyNetworkProvider(ctx, updatedPod, teamID, policySpecFromState(networkState)); err != nil {
@@ -588,6 +596,9 @@ func (s *SandboxService) updatePausedSandboxRecord(ctx context.Context, record *
 	if cfg.AutoResume != nil {
 		merged.AutoResume = cfg.AutoResume
 	}
+	if cfg.EnvVars != nil {
+		merged.EnvVars = cloneEnvVars(cfg.EnvVars)
+	}
 	if cfg.Services != nil {
 		services, err := NormalizeSandboxAppServices(cfg.Services)
 		if err != nil {
@@ -607,6 +618,44 @@ func (s *SandboxService) updatePausedSandboxRecord(ctx context.Context, record *
 		return nil, err
 	}
 	return s.recordToSandbox(record), nil
+}
+
+func (s *SandboxService) updateActiveSandboxEnvVars(ctx context.Context, pod *corev1.Pod, sandboxID string, envVars map[string]string) error {
+	if s.procdClient == nil {
+		return fmt.Errorf("procd client is not configured")
+	}
+	if s.internalTokenGenerator == nil {
+		return fmt.Errorf("token generators not configured, cannot authenticate with procd")
+	}
+	procdAddress, err := s.prodAddress(ctx, pod)
+	if err != nil {
+		return fmt.Errorf("procd address: %w", err)
+	}
+	currentSandboxID := sandboxIDFromPod(pod)
+	if currentSandboxID == "" {
+		currentSandboxID = sandboxID
+	}
+	teamID, userID := "", ""
+	if pod != nil && pod.Annotations != nil {
+		teamID = pod.Annotations[controller.AnnotationTeamID]
+		userID = pod.Annotations[controller.AnnotationUserID]
+	}
+	internalToken, err := s.internalTokenGenerator.GenerateToken(teamID, userID, currentSandboxID)
+	if err != nil {
+		return fmt.Errorf("generate internal token: %w", err)
+	}
+	_, err = s.procdClient.UpdateSandboxEnvVars(ctx, procdAddress, UpdateSandboxEnvVarsRequest{
+		EnvVars: cloneEnvVars(envVars),
+	}, internalToken)
+	return err
+}
+
+func sandboxEnvVarsFromPod(pod *corev1.Pod) map[string]string {
+	if pod == nil || pod.Annotations == nil {
+		return nil
+	}
+	cfg := parseSandboxConfig(pod.Annotations[controller.AnnotationConfig])
+	return cloneEnvVars(cfg.EnvVars)
 }
 
 func expirationFromTTL(now time.Time, ttl *int32) time.Time {

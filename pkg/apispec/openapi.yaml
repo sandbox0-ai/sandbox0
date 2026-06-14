@@ -4184,8 +4184,16 @@ components:
       type: object
       description: |
         Subset of SandboxConfig fields that can be updated at runtime without restarting the sandbox.
-        Note: env_vars and webhook are not included as they only affect new processes or require restart.
+        Note: env_vars only affect new processes. webhook is not included as it requires restart.
       properties:
+        env_vars:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Sandbox-level environment variables used as defaults for new procd-managed
+            processes. Omitting this field preserves the existing environment map; passing
+            an empty object clears it.
         ttl:
           type: integer
           format: int32

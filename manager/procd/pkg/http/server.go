@@ -130,6 +130,7 @@ func (s *Server) setupRoutes() {
 	// Initialize handler
 	initializeHandler := handlers.NewInitializeHandler(s.webhookDispatcher, s.fileManager, s.contextManager, s.cfg.HTTPPort, s.logger)
 	api.HandleFunc("/initialize", initializeHandler.Initialize).Methods("POST")
+	api.HandleFunc("/sandbox/env_vars", initializeHandler.UpdateSandboxEnvVars).Methods("PUT")
 
 	// File handlers
 	fileHandler := handlers.NewFileHandler(s.fileManager, s.logger)

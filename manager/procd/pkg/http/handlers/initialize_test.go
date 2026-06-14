@@ -83,3 +83,52 @@ func TestInitializeClearsSandboxEnvVars(t *testing.T) {
 		t.Fatalf("sandbox env vars = %#v, want empty", envVars)
 	}
 }
+
+func TestUpdateSandboxEnvVars(t *testing.T) {
+	dispatcher := webhook.NewDispatcher(webhook.Options{}, zap.NewNop())
+	t.Cleanup(func() {
+		_ = dispatcher.Shutdown(context.Background())
+	})
+	contextManager := ctxpkg.NewManager()
+	handler := NewInitializeHandler(dispatcher, nil, contextManager, 8080, zap.NewNop())
+
+	body, err := json.Marshal(UpdateSandboxEnvVarsRequest{
+		EnvVars: map[string]string{
+			"APP_ENV": "updated",
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/sandbox/env_vars", bytes.NewReader(body))
+	recorder := httptest.NewRecorder()
+	handler.UpdateSandboxEnvVars(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("UpdateSandboxEnvVars() status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if got := contextManager.SandboxEnvVars()["APP_ENV"]; got != "updated" {
+		t.Fatalf("sandbox env APP_ENV = %q, want updated", got)
+	}
+}
+
+func TestUpdateSandboxEnvVarsClearsEnv(t *testing.T) {
+	dispatcher := webhook.NewDispatcher(webhook.Options{}, zap.NewNop())
+	t.Cleanup(func() {
+		_ = dispatcher.Shutdown(context.Background())
+	})
+	contextManager := ctxpkg.NewManager()
+	contextManager.SetSandboxEnvVars(map[string]string{"APP_ENV": "test"})
+	handler := NewInitializeHandler(dispatcher, nil, contextManager, 8080, zap.NewNop())
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/sandbox/env_vars", bytes.NewReader([]byte(`{}`)))
+	recorder := httptest.NewRecorder()
+	handler.UpdateSandboxEnvVars(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("UpdateSandboxEnvVars() status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if envVars := contextManager.SandboxEnvVars(); len(envVars) != 0 {
+		t.Fatalf("sandbox env vars = %#v, want empty", envVars)
+	}
+}

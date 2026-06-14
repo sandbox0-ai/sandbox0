@@ -17,7 +17,7 @@ Official reference: [Claude Managed Agents quickstart](https://platform.claude.c
 | Deployment runs | Supported for manual and scheduled session creation audit records |
 | Events | Supported for list, send, and event streaming |
 | Files | Supported for upload, metadata, download, delete, and file-backed message content |
-| Vaults and credentials | Supported for LLM credentials, MCP credentials, and Sandbox0 HTTP header credential projection |
+| Vaults and credentials | Supported for LLM credentials, MCP credentials, Sandbox0 HTTP header credential projection, and sandbox environment variable credentials |
 | Custom skills | Supported through uploaded skill versions |
 | MCP servers | Supported for URL MCP servers and vault-backed credentials |
 | GitHub repository resources | Supported at session creation |
@@ -32,6 +32,7 @@ Official reference: [Claude Managed Agents quickstart](https://platform.claude.c
 | API token | SDK `apiKey` is a Sandbox0 API key, not the Anthropic LLM token. |
 | LLM token | Stored in an LLM vault and projected by Sandbox0 credential policy. |
 | Agent harness | Selected by the compatibility key `sandbox0.managed_agents.engine` on the LLM vault. |
+| Environment variable credentials | Stored as sandbox environment placeholders and resolved by Sandbox0 egress auth. They are available to sandbox processes, not as SDK client or harness configuration secrets. |
 | Sandbox claim | Runtime setup claims or resumes a Sandbox0 sandbox and mounts a persistent workspace volume. |
 | Claude harness | Requires an Anthropic-compatible endpoint. |
 | Codex harness | Requires an OpenAI-compatible endpoint. |
@@ -68,6 +69,8 @@ Networking options:
 | `unrestricted` | Sandbox network mode is `allow-all` |
 | `limited` | Sandbox network mode is `block-all` with allowed hosts derived from environment settings, package managers, MCP servers, and session credential bindings |
 
+For `environment_variable` credentials, `auth.networking.type = "unrestricted"` uses the session environment network policy as the egress boundary. `auth.networking.type = "limited"` requires `allowed_hosts`; each entry must be a bare hostname, IPv4 address, or `*.` wildcard hostname, with no scheme, port, or path.
+
 Package managers supported in environment config:
 
 - `apt`
@@ -97,6 +100,10 @@ Only vault metadata supports reserved `sandbox0.managed_agents.*` keys today.
 | `credential` | `role`, `kind=http_headers`, `target_domains`, `headers_json` |
 
 LLM vaults must contain exactly one active `static_bearer` credential and must not set `mcp_server_url`.
+
+Credential vaults may contain `static_bearer`, `mcp_oauth`, or `environment_variable` credentials. `static_bearer` and `mcp_oauth` follow the official Managed Agents MCP credential model when `mcp_server_url` is set. Sandbox0 also uses unbound `static_bearer` credentials for LLM vaults and HTTP header projection vaults as a compatibility extension.
+
+`environment_variable` credentials follow the official Managed Agents auth shape: create them with `auth.secret_name`, write-only `auth.secret_value`, and `auth.networking`. Read APIs return `secret_name` and networking metadata, never `secret_value`. `secret_name` is unique among active credentials in the same vault and immutable after creation.
 
 ## Session Lifecycle Notes
 

@@ -22,6 +22,8 @@ Use agent in sandbox when you want the agent process itself to live with the wor
 
 Use sandbox as tool when you want to embed an agent into a product workflow or control plane. The agent harness stays in a managed runtime service, while Sandbox0 provides isolated tool execution only when the agent needs to inspect files or run commands.
 
+Vault `environment_variable` credentials are applied to the Sandbox0 sandbox process environment. With `claude` and `codex`, the agent process runs in that sandbox and inherits those variables as placeholders. With `openai-agents`, only sandbox tool processes see them; the resident OpenAI Agents runtime service does not receive those secrets as SDK client or harness configuration.
+
 ## Supported Harnesses
 
 | Harness | Execution model | Runtime adapter | Model API shape | Best fit |

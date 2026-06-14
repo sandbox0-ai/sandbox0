@@ -71,7 +71,45 @@ await client.beta.vaults.credentials.create(apiVault.id, {
 });
 ```
 
-Credential vaults can use `static_bearer` or `mcp_oauth` credentials. Sandbox0 resolves secret values and projects headers only for the target domains.
+Credential vaults can use `static_bearer`, `mcp_oauth`, or `environment_variable` credentials. For Sandbox0 HTTP header projection, Sandbox0 resolves secret values and projects headers only for the target domains.
+
+<Callout variant="info">
+Sandbox0 credential vault metadata is still validated as `kind=http_headers`, so provide `target_domains` and `headers_json` when creating the vault. `environment_variable` credentials use the official Managed Agents credential auth shape, but their runtime scope comes from `auth.networking`.
+</Callout>
+
+## Environment Variable Credentials
+
+Use `environment_variable` credentials when a process running inside the sandbox expects a conventional environment variable, such as `OPENAI_API_KEY`, `GITHUB_TOKEN`, or a service-specific SDK token.
+
+```typescript
+await client.beta.vaults.credentials.create(apiVault.id, {
+    display_name: "OpenAI API key",
+    auth: {
+        type: "environment_variable",
+        secret_name: "OPENAI_API_KEY",
+        secret_value: process.env.OPENAI_API_KEY!,
+        networking: {
+            type: "limited",
+            allowed_hosts: ["api.openai.com"],
+        },
+    },
+});
+```
+
+Sandbox0 stores `secret_value` as write-only secret material. At runtime, Sandbox0 sets the sandbox-level environment variable named by `secret_name` to an opaque placeholder. New processes in the sandbox inherit that placeholder through normal process environment behavior. When sandbox HTTP traffic leaves through Sandbox0 egress auth, the placeholder is substituted with the real secret in headers, query parameters, and request bodies for the credential's networking scope.
+
+This credential is for the sandbox, not for the Managed Agents SDK client or harness configuration. Do not pass the real secret to Claude, Codex, or the OpenAI Agents harness. Store it in the vault and let Sandbox0 project it into sandbox processes.
+
+| Networking type | Behavior |
+|-----------------|----------|
+| `unrestricted` | The secret can be substituted on any outbound host allowed by the session environment network policy |
+| `limited` | The secret can be substituted only for `allowed_hosts`; entries must be bare hostnames, IPv4 addresses, or `*.` wildcard hostnames, with no scheme, port, or path |
+
+`secret_name` must be unique among active credentials in the same vault and cannot be changed after creation. Archive the credential and create a replacement if the environment variable name needs to change. A vault can contain at most 20 active credentials.
+
+<Callout variant="warning">
+`environment_variable` credentials require a Sandbox0-backed runtime path. External managed-agent runtimes reject them because they cannot use Sandbox0 sandbox environment injection and egress substitution.
+</Callout>
 
 ## MCP Credentials
 
@@ -90,7 +128,7 @@ await client.beta.vaults.credentials.create(vault.id, {
 
 ## Runtime Injection
 
-Sandbox0 injects credentials through egress auth and compatibility environment variables:
+Sandbox0 injects model provider credentials through egress auth and harness compatibility environment variables:
 
 | Harness | Compatibility environment |
 |--------|---------------------------|
@@ -98,7 +136,9 @@ Sandbox0 injects credentials through egress auth and compatibility environment v
 | `codex` | `CODEX_API_KEY`, `OPENAI_API_KEY`, and `openai_base_url` harness config |
 | `openai-agents` | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `openai_base_url` harness config |
 
-The environment variables may contain placeholders. The real token is projected by Sandbox0-managed credential policy when the sandbox contacts the configured host.
+The harness compatibility environment variables may contain placeholders. The real token is projected by Sandbox0-managed credential policy when the sandbox contacts the configured model provider host.
+
+Vault `environment_variable` credentials are separate from these harness compatibility variables. They create user-defined sandbox process environment variables and resolve them through the same egress auth boundary.
 
 For `openai-agents`, the runtime expects an OpenAI Responses-compatible base URL. If the provider exposes a different API shape, use an external AI gateway that presents an OpenAI Responses-compatible endpoint and store the gateway base URL in `sandbox0.managed_agents.llm_base_url`.
 

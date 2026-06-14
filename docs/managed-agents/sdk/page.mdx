@@ -129,7 +129,7 @@ Set both `apiKey` and `authToken` to the Sandbox0 API key. The Anthropic SDK can
 </Callout>
 
 <Callout variant="info">
-The `as any` cast on unbound `static_bearer` credentials is intentional for current Anthropic TypeScript SDK types. Sandbox0 LLM credentials must omit `mcp_server_url`.
+The `as any` cast on unbound `static_bearer` credentials is intentional for current Anthropic TypeScript SDK types. Sandbox0 LLM credentials must omit `mcp_server_url`. Do not use this cast for `environment_variable` credentials when using current official SDKs; they are part of the official Managed Agents auth shape.
 </Callout>
 
 ## Direct HTTP Calls

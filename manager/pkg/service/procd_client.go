@@ -114,6 +114,16 @@ type InitializeResponse struct {
 	TeamID    string `json:"team_id,omitempty"`
 }
 
+// UpdateSandboxEnvVarsRequest updates sandbox-level default environment variables.
+type UpdateSandboxEnvVarsRequest struct {
+	EnvVars map[string]string `json:"env_vars,omitempty"`
+}
+
+// UpdateSandboxEnvVarsResponse represents the response from procd env update API.
+type UpdateSandboxEnvVarsResponse struct {
+	EnvVars map[string]string `json:"env_vars"`
+}
+
 // Stats calls the procd stats API.
 func (c *ProcdClient) Stats(ctx context.Context, procdAddress, internalToken string) (*StatsResponse, error) {
 	url := procdAddress + "/api/v1/sandbox/stats"
@@ -124,6 +134,12 @@ func (c *ProcdClient) Stats(ctx context.Context, procdAddress, internalToken str
 func (c *ProcdClient) Initialize(ctx context.Context, procdAddress string, req InitializeRequest, internalToken string) (*InitializeResponse, error) {
 	url := procdAddress + "/api/v1/initialize"
 	return doProcdRequest[InitializeResponse](ctx, c.httpClient, http.MethodPost, url, internalToken, "initialize", req)
+}
+
+// UpdateSandboxEnvVars updates sandbox-level default environment variables for future processes.
+func (c *ProcdClient) UpdateSandboxEnvVars(ctx context.Context, procdAddress string, req UpdateSandboxEnvVarsRequest, internalToken string) (*UpdateSandboxEnvVarsResponse, error) {
+	url := procdAddress + "/api/v1/sandbox/env_vars"
+	return doProcdRequest[UpdateSandboxEnvVarsResponse](ctx, c.httpClient, http.MethodPut, url, internalToken, "update sandbox env vars", req)
 }
 
 func doProcdRequest[T any](ctx context.Context, httpClient *http.Client, method, url, internalToken, action string, request any) (*T, error) {

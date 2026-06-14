@@ -78,9 +78,10 @@ type SandboxConfig struct {
 }
 
 // SandboxUpdateConfig represents sandbox configuration fields that can be updated at runtime.
-// Unlike SandboxConfig, env_vars and webhook are excluded as they only affect new processes
-// or require restart to take effect.
+// EnvVars updates only the default environment for new procd-managed processes.
+// Webhook is excluded because it requires reinitializing the sandbox runtime.
 type SandboxUpdateConfig struct {
+	EnvVars    map[string]string              `json:"env_vars,omitempty"`
 	TTL        *int32                         `json:"ttl,omitempty"`
 	HardTTL    *int32                         `json:"hard_ttl,omitempty"`
 	Network    *v1alpha1.SandboxNetworkPolicy `json:"network,omitempty"`

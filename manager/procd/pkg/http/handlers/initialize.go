@@ -58,6 +58,16 @@ type InitializeResponse struct {
 	TeamID    string `json:"team_id,omitempty"`
 }
 
+// UpdateSandboxEnvVarsRequest updates sandbox-level default environment variables.
+type UpdateSandboxEnvVarsRequest struct {
+	EnvVars map[string]string `json:"env_vars,omitempty"`
+}
+
+// UpdateSandboxEnvVarsResponse returns the normalized sandbox environment.
+type UpdateSandboxEnvVarsResponse struct {
+	EnvVars map[string]string `json:"env_vars"`
+}
+
 // Initialize sets sandbox identity and webhook settings.
 func (h *InitializeHandler) Initialize(w http.ResponseWriter, r *http.Request) {
 	if h.dispatcher == nil {
@@ -123,6 +133,23 @@ func (h *InitializeHandler) Initialize(w http.ResponseWriter, r *http.Request) {
 		SandboxID: req.SandboxID,
 		TeamID:    teamID,
 	})
+}
+
+// UpdateSandboxEnvVars updates default environment variables for future sandbox processes.
+func (h *InitializeHandler) UpdateSandboxEnvVars(w http.ResponseWriter, r *http.Request) {
+	var req UpdateSandboxEnvVarsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	envVars := map[string]string{}
+	if h.contextManager != nil {
+		h.contextManager.SetSandboxEnvVars(req.EnvVars)
+		if current := h.contextManager.SandboxEnvVars(); current != nil {
+			envVars = current
+		}
+	}
+	writeJSON(w, http.StatusOK, UpdateSandboxEnvVarsResponse{EnvVars: envVars})
 }
 
 func (h *InitializeHandler) configureWebhookWatch(webhookURL, watchDir string) {

@@ -42,9 +42,11 @@ Harnesses with observable automatic retry attempts report them through the same 
 | `claude` | Claude Agent SDK `system` messages with `subtype = "api_retry"` |
 | `codex` | Codex app-server `error` notifications with `willRetry = true` |
 | `openai-agents` | OpenAI Agents SDK runner-managed `ModelRetrySettings` policy decisions |
-| `pi` | Provider or runtime failures are surfaced as session errors; no Pi runtime-managed retry signal is exposed yet |
+| `pi` | Pi runtime-managed model request retries around Anthropic Messages-compatible streams |
 
-Sandbox0 disables hidden OpenAI Python client retries for the `openai-agents` runtime and routes model retries through the OpenAI Agents SDK retry policy so retry state is visible in the session event stream.
+Sandbox0 disables hidden model client retries where they would obscure retry state. The `openai-agents` runtime disables hidden OpenAI Python client retries and routes model retries through the OpenAI Agents SDK retry policy. The `pi` runtime disables hidden Anthropic SDK request retries and retries transient provider or transport failures at the model request boundary before sandbox tool execution, so retry state remains visible in the session event stream.
+
+The Pi retry budget defaults to `2` retries and can be configured through harness config with `engine.model_max_retries` or `engine.max_retries`. If the retry budget is exhausted, Sandbox0 emits `session.error` with `error.retry_status.type = "exhausted"` and ends the turn with `session.status_idle` whose `stop_reason.type = "retries_exhausted"`.
 
 ## Select A Harness
 

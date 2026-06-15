@@ -285,19 +285,20 @@ func main() {
 
 	// Create services
 	cfgForSandbox := service.SandboxServiceConfig{
-		DefaultTTL:             cfg.DefaultSandboxTTL.Duration,
-		PauseMinMemoryRequest:  cfg.PauseMinMemoryRequest,
-		PauseMinMemoryLimit:    cfg.PauseMinMemoryLimit,
-		PauseMemoryBufferRatio: pauseMemoryBufferRatio,
-		PauseMinCPU:            cfg.PauseMinCPU,
-		CtldEnabled:            cfg.CtldEnabled,
-		CtldPort:               cfg.CtldPort,
-		CtldClientTimeout:      cfg.CtldClientTimeout.Duration,
-		CtldHTTPClient:         obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.CtldClientTimeout.Duration}),
-		ProcdPort:              cfg.ProcdConfig.HTTPPort,
-		ProcdClientTimeout:     cfg.ProcdClientTimeout.Duration,
-		ProcdHTTPClient:        obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration}),
-		ProcdInitTimeout:       cfg.ProcdInitTimeout.Duration,
+		DefaultTTL:                          cfg.DefaultSandboxTTL.Duration,
+		PauseMinMemoryRequest:               cfg.PauseMinMemoryRequest,
+		PauseMinMemoryLimit:                 cfg.PauseMinMemoryLimit,
+		PauseMemoryBufferRatio:              pauseMemoryBufferRatio,
+		PauseMinCPU:                         cfg.PauseMinCPU,
+		CtldEnabled:                         cfg.CtldEnabled,
+		CtldPort:                            cfg.CtldPort,
+		CtldClientTimeout:                   cfg.CtldClientTimeout.Duration,
+		CtldHTTPClient:                      obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.CtldClientTimeout.Duration}),
+		ProcdPort:                           cfg.ProcdConfig.HTTPPort,
+		ProcdClientTimeout:                  cfg.ProcdClientTimeout.Duration,
+		ProcdHTTPClient:                     obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration}),
+		ProcdInitTimeout:                    cfg.ProcdInitTimeout.Duration,
+		AllowColdStartWithoutReadyDataPlane: cfg.AllowColdStartWithoutReadyDataPlane,
 	}
 
 	sandboxService := service.NewSandboxService(

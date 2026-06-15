@@ -2764,6 +2764,12 @@ spec:
                         default: {}
                         description: Config contains manager specific configuration
                         properties:
+                          allowColdStartWithoutReadyDataPlane:
+                            description: |-
+                              AllowColdStartWithoutReadyDataPlane lets cold claims create Pending pods
+                              when no sandbox data-plane-ready nodes exist yet. This is required for
+                              node autoscaler scale-from-zero deployments.
+                            type: boolean
                           autoscaler:
                             default: {}
                             description: AutoscalerConfig defines manager autoscaler

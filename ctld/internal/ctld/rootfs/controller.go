@@ -24,7 +24,9 @@ var (
 type Runtime interface {
 	Inspect(ctx context.Context, target ctldapi.RootFSContainerRef) (ctldapi.RootFSInfo, error)
 	CreateDiff(ctx context.Context, info ctldapi.RootFSInfo) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error)
+	CreateDiffFromBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error)
 	ApplyDiff(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, content io.Reader) (ctldapi.RootFSDiffDescriptor, error)
+	CaptureBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string) error
 }
 
 type Config struct {
@@ -80,7 +82,7 @@ func (c *Controller) SaveRootFS(r *http.Request, req ctldapi.SaveRootFSRequest) 
 	if err := validateSupportedRuntime(info); err != nil {
 		return ctldapi.SaveRootFSResponse{Info: info, Error: err.Error()}, http.StatusBadRequest
 	}
-	desc, reader, err := c.runtime.CreateDiff(ctx, info)
+	desc, reader, err := c.createDiff(ctx, info, strings.TrimSpace(req.ParentLayerID))
 	if err != nil {
 		return ctldapi.SaveRootFSResponse{Info: info, Error: fmt.Sprintf("create rootfs diff: %v", err)}, statusForError(err)
 	}
@@ -104,7 +106,12 @@ func (c *Controller) ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest
 	if err := validateTarget(req.Target); err != nil {
 		return ctldapi.ApplyRootFSResponse{Error: err.Error()}, http.StatusBadRequest
 	}
-	if err := validateDescriptor(req.Descriptor); err != nil {
+	layered := len(req.Layers) > 0
+	if layered {
+		if err := validateLayerDescriptors(req.Layers); err != nil {
+			return ctldapi.ApplyRootFSResponse{Error: err.Error()}, http.StatusBadRequest
+		}
+	} else if err := validateDescriptor(req.Descriptor); err != nil {
 		return ctldapi.ApplyRootFSResponse{Error: err.Error()}, http.StatusBadRequest
 	}
 	if c.store == nil {
@@ -124,19 +131,68 @@ func (c *Controller) ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest
 	if err := validateExpectedBase(info, req); err != nil {
 		return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, http.StatusConflict
 	}
+	if layered {
+		if err := validateStrictExpectedBase(info, req); err != nil {
+			return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, http.StatusConflict
+		}
+		if err := validateBaselineLayerID(req); err != nil {
+			return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, http.StatusBadRequest
+		}
+		applied, err := c.applyLayers(ctx, info, req.Layers)
+		if err != nil {
+			return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, statusForError(err)
+		}
+		if req.BaselineLayerID != "" {
+			if err := c.runtime.CaptureBaseline(ctx, info, req.BaselineLayerID); err != nil {
+				return ctldapi.ApplyRootFSResponse{Info: info, Error: fmt.Sprintf("capture rootfs baseline: %v", err)}, statusForError(err)
+			}
+		}
+		return ctldapi.ApplyRootFSResponse{Info: info, Layers: applied, Applied: true}, http.StatusOK
+	}
 
-	reader, err := c.store.Get(req.Descriptor.ObjectKey, 0, -1)
+	applied, err := c.applyDescriptor(ctx, info, req.Descriptor)
 	if err != nil {
-		return ctldapi.ApplyRootFSResponse{Info: info, Error: fmt.Sprintf("download rootfs diff: %v", err)}, http.StatusInternalServerError
+		return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, statusForError(err)
+	}
+	return ctldapi.ApplyRootFSResponse{Info: info, Descriptor: applied, Applied: true}, http.StatusOK
+}
+
+func (c *Controller) createDiff(ctx context.Context, info ctldapi.RootFSInfo, parentLayerID string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+	if parentLayerID != "" {
+		return c.runtime.CreateDiffFromBaseline(ctx, info, parentLayerID)
+	}
+	return c.runtime.CreateDiff(ctx, info)
+}
+
+func (c *Controller) applyLayers(ctx context.Context, info ctldapi.RootFSInfo, layers []ctldapi.RootFSLayerDescriptor) ([]ctldapi.RootFSLayerDescriptor, error) {
+	applied := make([]ctldapi.RootFSLayerDescriptor, 0, len(layers))
+	for _, layer := range layers {
+		desc, err := c.applyDescriptor(ctx, info, layer.Descriptor)
+		if err != nil {
+			return nil, err
+		}
+		applied = append(applied, ctldapi.RootFSLayerDescriptor{
+			LayerID:       layer.LayerID,
+			ParentLayerID: layer.ParentLayerID,
+			Descriptor:    desc,
+		})
+	}
+	return applied, nil
+}
+
+func (c *Controller) applyDescriptor(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor) (ctldapi.RootFSDiffDescriptor, error) {
+	reader, err := c.store.Get(desc.ObjectKey, 0, -1)
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("download rootfs diff: %w", err)
 	}
 	defer reader.Close()
 
-	applied, err := c.runtime.ApplyDiff(ctx, info, req.Descriptor, reader)
+	applied, err := c.runtime.ApplyDiff(ctx, info, desc, reader)
 	if err != nil {
-		return ctldapi.ApplyRootFSResponse{Info: info, Error: fmt.Sprintf("apply rootfs diff: %v", err)}, statusForError(err)
+		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("apply rootfs diff: %w", err)
 	}
-	applied.ObjectKey = req.Descriptor.ObjectKey
-	return ctldapi.ApplyRootFSResponse{Info: info, Descriptor: applied, Applied: true}, http.StatusOK
+	applied.ObjectKey = desc.ObjectKey
+	return applied, nil
 }
 
 func (c *Controller) inspect(ctx context.Context, target ctldapi.RootFSContainerRef) (ctldapi.RootFSInfo, error) {
@@ -190,6 +246,33 @@ func validateDescriptor(desc ctldapi.RootFSDiffDescriptor) error {
 	return nil
 }
 
+func validateLayerDescriptors(layers []ctldapi.RootFSLayerDescriptor) error {
+	if len(layers) == 0 {
+		return fmt.Errorf("%w: layers are required", ErrBadRequest)
+	}
+	seen := make(map[string]struct{}, len(layers))
+	for i, layer := range layers {
+		layerID := strings.TrimSpace(layer.LayerID)
+		if layerID == "" {
+			return fmt.Errorf("%w: layers[%d].layer_id is required", ErrBadRequest, i)
+		}
+		if _, ok := seen[layerID]; ok {
+			return fmt.Errorf("%w: duplicate rootfs layer %q", ErrBadRequest, layerID)
+		}
+		seen[layerID] = struct{}{}
+		if strings.TrimSpace(layer.ParentLayerID) == layerID {
+			return fmt.Errorf("%w: layers[%d].parent_layer_id cannot reference itself", ErrBadRequest, i)
+		}
+		if i > 0 && strings.TrimSpace(layer.ParentLayerID) != strings.TrimSpace(layers[i-1].LayerID) {
+			return fmt.Errorf("%w: layers[%d].parent_layer_id must reference previous layer", ErrBadRequest, i)
+		}
+		if err := validateDescriptor(layer.Descriptor); err != nil {
+			return fmt.Errorf("%w: layers[%d]: %v", ErrBadRequest, i, err)
+		}
+	}
+	return nil
+}
+
 func validateSupportedRuntime(info ctldapi.RootFSInfo) error {
 	runtime := strings.ToLower(strings.TrimSpace(info.Runtime))
 	switch runtime {
@@ -213,6 +296,45 @@ func validateExpectedBase(info ctldapi.RootFSInfo, req ctldapi.ApplyRootFSReques
 		return fmt.Errorf("%w: snapshotter mismatch: expected %s, got %s", ErrConflict, expected, info.Snapshotter)
 	}
 	return nil
+}
+
+func validateStrictExpectedBase(info ctldapi.RootFSInfo, req ctldapi.ApplyRootFSRequest) error {
+	if expected := strings.TrimSpace(req.ExpectedBaseImageDigest); expected != "" && strings.TrimSpace(info.BaseImageDigest) != expected {
+		return fmt.Errorf("%w: base image digest mismatch: expected %s, got %s", ErrConflict, expected, info.BaseImageDigest)
+	}
+	if expected := strings.TrimSpace(req.ExpectedSnapshotParent); expected != "" && strings.TrimSpace(info.SnapshotParent) != expected {
+		return fmt.Errorf("%w: snapshot parent mismatch: expected %s, got %s", ErrConflict, expected, info.SnapshotParent)
+	}
+	if len(req.ExpectedSnapshotParentChain) > 0 && !equalStringSlices(req.ExpectedSnapshotParentChain, info.SnapshotParentChain) {
+		return fmt.Errorf("%w: snapshot parent chain mismatch", ErrConflict)
+	}
+	return nil
+}
+
+func validateBaselineLayerID(req ctldapi.ApplyRootFSRequest) error {
+	if strings.TrimSpace(req.BaselineLayerID) == "" {
+		return nil
+	}
+	if len(req.Layers) == 0 {
+		return fmt.Errorf("%w: baseline_layer_id requires layers", ErrBadRequest)
+	}
+	head := strings.TrimSpace(req.Layers[len(req.Layers)-1].LayerID)
+	if strings.TrimSpace(req.BaselineLayerID) != head {
+		return fmt.Errorf("%w: baseline_layer_id must match the head layer", ErrBadRequest)
+	}
+	return nil
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if strings.TrimSpace(a[i]) != strings.TrimSpace(b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func defaultObjectKey(teamID, sandboxID string, generation int64, digest string) (string, error) {

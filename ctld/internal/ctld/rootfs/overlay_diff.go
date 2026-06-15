@@ -24,31 +24,42 @@ func (r *ContainerdRuntime) createOverlayUpperDiff(ctx context.Context, client c
 	if strings.TrimSpace(info.Snapshotter) != "overlayfs" {
 		return ctldapi.RootFSDiffDescriptor{}, nil, false, nil
 	}
-	snapshotter := client.SnapshotService(info.Snapshotter)
-	if snapshotter == nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, true, fmt.Errorf("overlayfs snapshotter is not configured")
-	}
-	snapshotInfo, err := snapshotter.Stat(ctx, info.SnapshotKey)
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, true, fmt.Errorf("inspect overlayfs snapshot: %w", err)
-	}
-	if snapshotInfo.Kind != snapshots.KindActive {
-		return ctldapi.RootFSDiffDescriptor{}, nil, false, nil
-	}
-	mounts, err := snapshotter.Mounts(ctx, info.SnapshotKey)
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, true, fmt.Errorf("inspect overlayfs mounts: %w", err)
-	}
-	upperdir, ok := overlayUpperdir(mounts)
-	if !ok {
-		return ctldapi.RootFSDiffDescriptor{}, nil, false, nil
-	}
-	mountedUpperdir, err := r.mountedContainerdDataPath(upperdir)
+	upperdir, err := r.activeOverlayUpperdir(ctx, client, info)
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, nil, true, err
 	}
-	desc, reader, err := writeOverlayUpperDiff(ctx, mountedUpperdir)
+	desc, reader, err := writeOverlayUpperDiff(ctx, upperdir)
 	return desc, reader, true, err
+}
+
+func (r *ContainerdRuntime) activeOverlayUpperdir(ctx context.Context, client containerdClient, info ctldapi.RootFSInfo) (string, error) {
+	if strings.TrimSpace(info.Snapshotter) != "overlayfs" {
+		return "", fmt.Errorf("%w: rootfs baseline requires overlayfs snapshotter", ErrBadRequest)
+	}
+	snapshotter := client.SnapshotService(info.Snapshotter)
+	if snapshotter == nil {
+		return "", fmt.Errorf("overlayfs snapshotter is not configured")
+	}
+	snapshotInfo, err := snapshotter.Stat(ctx, info.SnapshotKey)
+	if err != nil {
+		return "", fmt.Errorf("inspect overlayfs snapshot: %w", err)
+	}
+	if snapshotInfo.Kind != snapshots.KindActive {
+		return "", fmt.Errorf("%w: rootfs snapshot %s is not active", ErrBadRequest, info.SnapshotKey)
+	}
+	mounts, err := snapshotter.Mounts(ctx, info.SnapshotKey)
+	if err != nil {
+		return "", fmt.Errorf("inspect overlayfs mounts: %w", err)
+	}
+	upperdir, ok := overlayUpperdir(mounts)
+	if !ok {
+		return "", fmt.Errorf("%w: overlayfs upperdir is not available", ErrBadRequest)
+	}
+	mountedUpperdir, err := r.mountedContainerdDataPath(upperdir)
+	if err != nil {
+		return "", err
+	}
+	return mountedUpperdir, nil
 }
 
 func overlayUpperdir(mounts []mount.Mount) (string, bool) {
@@ -117,6 +128,46 @@ func rebasePath(path, fromRoot, toRoot string) (string, bool) {
 }
 
 func writeOverlayUpperDiff(ctx context.Context, upperdir string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+	return writeOverlayDiffTar(upperdir, func(changeFn fs.ChangeFunc) error {
+		return walkOverlayUpper(ctx, upperdir, changeFn)
+	})
+}
+
+func writeOverlayUpperDiffFromBaseline(ctx context.Context, baselineDir, upperdir string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+	return writeOverlayDiffTar(upperdir, func(changeFn fs.ChangeFunc) error {
+		return fs.Changes(ctx, baselineDir, upperdir, func(kind fs.ChangeKind, path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			if kind == fs.ChangeKindDelete {
+				return changeFn(kind, path, nil, nil)
+			}
+			if isOverlayWhiteout(info) {
+				return changeFn(fs.ChangeKindDelete, path, nil, nil)
+			}
+			if info != nil && info.IsDir() {
+				sourcePath := filepath.Join(upperdir, strings.TrimPrefix(path, string(filepath.Separator)))
+				opaque, err := isOverlayOpaqueDir(sourcePath)
+				if err != nil {
+					return err
+				}
+				if opaque {
+					if err := changeFn(fs.ChangeKindDelete, filepath.Join(path, ".wh..opq"), nil, nil); err != nil {
+						return err
+					}
+				}
+			}
+			return changeFn(kind, path, info, nil)
+		})
+	})
+}
+
+func writeOverlayDiffTar(source string, walkChanges func(fs.ChangeFunc) error) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
 	tmp, err := os.CreateTemp("", "sandbox0-rootfs-overlay-diff-*.tar")
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, nil, err
@@ -131,8 +182,8 @@ func writeOverlayUpperDiff(ctx context.Context, upperdir string) (ctldapi.RootFS
 
 	digester := digest.Canonical.Digester()
 	writer := io.MultiWriter(tmp, digester.Hash())
-	cw := archive.NewChangeWriter(writer, upperdir)
-	if err := walkOverlayUpper(ctx, upperdir, cw.HandleChange); err != nil {
+	cw := archive.NewChangeWriter(writer, source)
+	if err := walkChanges(cw.HandleChange); err != nil {
 		_ = cw.Close()
 		return ctldapi.RootFSDiffDescriptor{}, nil, err
 	}

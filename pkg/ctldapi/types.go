@@ -67,6 +67,14 @@ type RootFSDiffDescriptor struct {
 	ObjectKey string `json:"object_key,omitempty"`
 }
 
+// RootFSLayerDescriptor identifies one immutable rootfs diff layer in a
+// sandbox rootfs head chain.
+type RootFSLayerDescriptor struct {
+	LayerID       string               `json:"layer_id"`
+	ParentLayerID string               `json:"parent_layer_id,omitempty"`
+	Descriptor    RootFSDiffDescriptor `json:"descriptor"`
+}
+
 type InspectRootFSRequest struct {
 	Target RootFSContainerRef `json:"target"`
 }
@@ -81,6 +89,7 @@ type SaveRootFSRequest struct {
 	SandboxID                 string             `json:"sandbox_id"`
 	TeamID                    string             `json:"team_id"`
 	ExpectedRuntimeGeneration int64              `json:"expected_runtime_generation,omitempty"`
+	ParentLayerID             string             `json:"parent_layer_id,omitempty"`
 	ObjectKey                 string             `json:"object_key,omitempty"`
 }
 
@@ -91,21 +100,24 @@ type SaveRootFSResponse struct {
 }
 
 type ApplyRootFSRequest struct {
-	Target                      RootFSContainerRef   `json:"target"`
-	ExpectedRuntime             string               `json:"expected_runtime,omitempty"`
-	ExpectedRuntimeHandler      string               `json:"expected_runtime_handler,omitempty"`
-	ExpectedSnapshotter         string               `json:"expected_snapshotter,omitempty"`
-	ExpectedBaseImageDigest     string               `json:"expected_base_image_digest,omitempty"`
-	ExpectedSnapshotParent      string               `json:"expected_snapshot_parent,omitempty"`
-	ExpectedSnapshotParentChain []string             `json:"expected_snapshot_parent_chain,omitempty"`
-	Descriptor                  RootFSDiffDescriptor `json:"descriptor"`
+	Target                      RootFSContainerRef      `json:"target"`
+	ExpectedRuntime             string                  `json:"expected_runtime,omitempty"`
+	ExpectedRuntimeHandler      string                  `json:"expected_runtime_handler,omitempty"`
+	ExpectedSnapshotter         string                  `json:"expected_snapshotter,omitempty"`
+	ExpectedBaseImageDigest     string                  `json:"expected_base_image_digest,omitempty"`
+	ExpectedSnapshotParent      string                  `json:"expected_snapshot_parent,omitempty"`
+	ExpectedSnapshotParentChain []string                `json:"expected_snapshot_parent_chain,omitempty"`
+	BaselineLayerID             string                  `json:"baseline_layer_id,omitempty"`
+	Layers                      []RootFSLayerDescriptor `json:"layers,omitempty"`
+	Descriptor                  RootFSDiffDescriptor    `json:"descriptor"`
 }
 
 type ApplyRootFSResponse struct {
-	Info       RootFSInfo           `json:"info,omitempty"`
-	Descriptor RootFSDiffDescriptor `json:"descriptor,omitempty"`
-	Applied    bool                 `json:"applied"`
-	Error      string               `json:"error,omitempty"`
+	Info       RootFSInfo              `json:"info,omitempty"`
+	Descriptor RootFSDiffDescriptor    `json:"descriptor,omitempty"`
+	Layers     []RootFSLayerDescriptor `json:"layers,omitempty"`
+	Applied    bool                    `json:"applied"`
+	Error      string                  `json:"error,omitempty"`
 }
 
 // BindVolumePortalRequest binds one pre-published pod portal to a concrete

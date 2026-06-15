@@ -186,7 +186,41 @@ func cloneSandboxRootFSState(state *SandboxRootFSState) *SandboxRootFSState {
 	if state.SnapshotParentChain != nil {
 		clone.SnapshotParentChain = append([]string(nil), state.SnapshotParentChain...)
 	}
+	clone.LayerChain = cloneSandboxRootFSLayers(state.LayerChain)
 	return &clone
+}
+
+func TestRootFSStateFromLayerChainKeepsCurrentSandboxID(t *testing.T) {
+	state := rootFSStateFromLayerChain("child-sandbox", []*SandboxRootFSLayer{
+		{
+			ID:              "layer-parent",
+			SourceSandboxID: "parent-sandbox",
+			TeamID:          "team-1",
+			DiffDigest:      "sha256:parent",
+			DiffObjectKey:   "rootfs/parent.tar",
+		},
+		{
+			ID:              "layer-child",
+			ParentLayerID:   "layer-parent",
+			SourceSandboxID: "parent-sandbox",
+			TeamID:          "team-1",
+			DiffDigest:      "sha256:child",
+			DiffObjectKey:   "rootfs/child.tar",
+		},
+	})
+
+	if state == nil {
+		t.Fatal("state is nil")
+	}
+	if state.SandboxID != "child-sandbox" {
+		t.Fatalf("SandboxID = %q, want child-sandbox", state.SandboxID)
+	}
+	if state.LayerID != "layer-child" || state.ParentLayerID != "layer-parent" {
+		t.Fatalf("head = %q parent = %q, want layer-child/layer-parent", state.LayerID, state.ParentLayerID)
+	}
+	if len(state.LayerChain) != 2 {
+		t.Fatalf("LayerChain len = %d, want 2", len(state.LayerChain))
+	}
 }
 
 func TestSandboxIndexTracksMultipleRuntimePodsForSameSandbox(t *testing.T) {

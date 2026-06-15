@@ -69,6 +69,39 @@ func TestControllerSaveRootFSUploadsDiffWithDefaultObjectKey(t *testing.T) {
 	assert.Equal(t, "rootfs diff", string(payload))
 }
 
+func TestControllerSaveRootFSUsesParentBaseline(t *testing.T) {
+	store := objectstore.NewMemoryStore(t.Name())
+	runtime := &fakeRuntime{
+		info: rootFSInfo("runc"),
+		createBaselineDesc: ctldapi.RootFSDiffDescriptor{
+			MediaType: "application/vnd.oci.image.layer.v1.tar",
+			Digest:    "sha256:child",
+			Size:      int64(len("child diff")),
+		},
+		createBaselineContent: "child diff",
+	}
+	controller := NewController(Config{Runtime: runtime, Store: store})
+
+	resp, status := controller.SaveRootFS(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.SaveRootFSRequest{
+		Target:        rootFSTarget(),
+		SandboxID:     "sandbox-1",
+		TeamID:        "team-1",
+		ParentLayerID: "layer-parent",
+	})
+
+	require.Equal(t, http.StatusOK, status, resp.Error)
+	assert.True(t, runtime.createBaselineCalled)
+	assert.False(t, runtime.createCalled)
+	assert.Equal(t, "layer-parent", runtime.createBaselineLayerID)
+	assert.Equal(t, "sandbox-rootfs/team-1/sandbox-1/0/sha256/child.tar", resp.Descriptor.ObjectKey)
+	reader, err := store.Get(resp.Descriptor.ObjectKey, 0, -1)
+	require.NoError(t, err)
+	defer reader.Close()
+	payload, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "child diff", string(payload))
+}
+
 func TestControllerSaveRootFSRejectsUnsupportedRuntime(t *testing.T) {
 	runtime := &fakeRuntime{
 		info:          rootFSInfo("kata"),
@@ -124,6 +157,66 @@ func TestControllerApplyRootFSDownloadsAndAppliesDiff(t *testing.T) {
 	assert.Equal(t, "rootfs/diff.tar", runtime.applyInputDesc.ObjectKey)
 }
 
+func TestControllerApplyRootFSAppliesLayerChainAndCapturesBaseline(t *testing.T) {
+	store := objectstore.NewMemoryStore(t.Name())
+	require.NoError(t, store.Put("rootfs/parent.tar", strings.NewReader("parent diff")))
+	require.NoError(t, store.Put("rootfs/child.tar", strings.NewReader("child diff")))
+	runtime := &fakeRuntime{
+		info: rootFSInfo("runc"),
+		applyDesc: ctldapi.RootFSDiffDescriptor{
+			MediaType: "application/vnd.oci.image.layer.v1.tar",
+			Digest:    "sha256:applied",
+			Size:      int64(len("applied")),
+		},
+	}
+	controller := NewController(Config{Runtime: runtime, Store: store})
+
+	resp, status := controller.ApplyRootFS(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.ApplyRootFSRequest{
+		Target:                      rootFSTarget(),
+		ExpectedRuntime:             "runc",
+		ExpectedRuntimeHandler:      "runc",
+		ExpectedSnapshotter:         "overlayfs",
+		ExpectedBaseImageDigest:     "sha256:base",
+		ExpectedSnapshotParent:      "parent-1",
+		ExpectedSnapshotParentChain: []string{"parent-1", "parent-0"},
+		BaselineLayerID:             "layer-child",
+		Layers: []ctldapi.RootFSLayerDescriptor{
+			{
+				LayerID: "layer-parent",
+				Descriptor: ctldapi.RootFSDiffDescriptor{
+					MediaType: "application/vnd.oci.image.layer.v1.tar",
+					Digest:    "sha256:parent",
+					Size:      int64(len("parent diff")),
+					ObjectKey: "rootfs/parent.tar",
+				},
+			},
+			{
+				LayerID:       "layer-child",
+				ParentLayerID: "layer-parent",
+				Descriptor: ctldapi.RootFSDiffDescriptor{
+					MediaType: "application/vnd.oci.image.layer.v1.tar",
+					Digest:    "sha256:child",
+					Size:      int64(len("child diff")),
+					ObjectKey: "rootfs/child.tar",
+				},
+			},
+		},
+	})
+
+	require.Equal(t, http.StatusOK, status, resp.Error)
+	assert.True(t, resp.Applied)
+	require.Len(t, resp.Layers, 2)
+	assert.Equal(t, "rootfs/parent.tar", resp.Layers[0].Descriptor.ObjectKey)
+	assert.Equal(t, "rootfs/child.tar", resp.Layers[1].Descriptor.ObjectKey)
+	assert.Equal(t, []string{"parent diff", "child diff"}, runtime.applyContents)
+	require.Len(t, runtime.applyInputDescs, 2)
+	assert.Equal(t, "rootfs/parent.tar", runtime.applyInputDescs[0].ObjectKey)
+	assert.Equal(t, "rootfs/child.tar", runtime.applyInputDescs[1].ObjectKey)
+	assert.True(t, runtime.captureBaselineCalled)
+	assert.Equal(t, "layer-child", runtime.captureBaselineLayerID)
+	assert.Equal(t, rootFSInfo("runc"), runtime.captureInfo)
+}
+
 func TestControllerApplyRootFSForceAppliesBaseMismatch(t *testing.T) {
 	store := objectstore.NewMemoryStore(t.Name())
 	require.NoError(t, store.Put("rootfs/diff.tar", strings.NewReader("rootfs diff")))
@@ -154,6 +247,31 @@ func TestControllerApplyRootFSForceAppliesBaseMismatch(t *testing.T) {
 	assert.True(t, resp.Applied)
 	assert.True(t, runtime.applyCalled)
 	assert.Equal(t, "rootfs diff", runtime.applyContent)
+}
+
+func TestControllerApplyRootFSLayerChainRejectsBaseMismatch(t *testing.T) {
+	store := objectstore.NewMemoryStore(t.Name())
+	require.NoError(t, store.Put("rootfs/diff.tar", strings.NewReader("rootfs diff")))
+	runtime := &fakeRuntime{info: rootFSInfo("runc")}
+	controller := NewController(Config{Runtime: runtime, Store: store})
+
+	resp, status := controller.ApplyRootFS(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.ApplyRootFSRequest{
+		Target:                  rootFSTarget(),
+		ExpectedBaseImageDigest: "sha256:other-base",
+		Layers: []ctldapi.RootFSLayerDescriptor{{
+			LayerID: "layer-1",
+			Descriptor: ctldapi.RootFSDiffDescriptor{
+				MediaType: "application/vnd.oci.image.layer.v1.tar",
+				Digest:    "sha256:feedface",
+				Size:      int64(len("rootfs diff")),
+				ObjectKey: "rootfs/diff.tar",
+			},
+		}},
+	})
+
+	require.Equal(t, http.StatusConflict, status)
+	assert.Contains(t, resp.Error, "base image digest mismatch")
+	assert.False(t, runtime.applyCalled)
 }
 
 func TestControllerApplyRootFSRejectsRuntimeMismatch(t *testing.T) {
@@ -227,21 +345,33 @@ func TestControllerApplyRootFSRejectsMissingDescriptorObjectKey(t *testing.T) {
 }
 
 type fakeRuntime struct {
-	info          ctldapi.RootFSInfo
-	inspectErr    error
-	createDesc    ctldapi.RootFSDiffDescriptor
-	createContent string
-	createErr     error
-	applyDesc     ctldapi.RootFSDiffDescriptor
-	applyErr      error
+	info                  ctldapi.RootFSInfo
+	inspectErr            error
+	createDesc            ctldapi.RootFSDiffDescriptor
+	createContent         string
+	createErr             error
+	createBaselineDesc    ctldapi.RootFSDiffDescriptor
+	createBaselineContent string
+	createBaselineErr     error
+	applyDesc             ctldapi.RootFSDiffDescriptor
+	applyErr              error
+	captureBaselineErr    error
 
-	inspectTargets []ctldapi.RootFSContainerRef
-	createCalled   bool
-	createInfo     ctldapi.RootFSInfo
-	applyCalled    bool
-	applyInfo      ctldapi.RootFSInfo
-	applyInputDesc ctldapi.RootFSDiffDescriptor
-	applyContent   string
+	inspectTargets         []ctldapi.RootFSContainerRef
+	createCalled           bool
+	createInfo             ctldapi.RootFSInfo
+	createBaselineCalled   bool
+	createBaselineInfo     ctldapi.RootFSInfo
+	createBaselineLayerID  string
+	applyCalled            bool
+	applyInfo              ctldapi.RootFSInfo
+	applyInputDesc         ctldapi.RootFSDiffDescriptor
+	applyContent           string
+	applyInputDescs        []ctldapi.RootFSDiffDescriptor
+	applyContents          []string
+	captureBaselineCalled  bool
+	captureInfo            ctldapi.RootFSInfo
+	captureBaselineLayerID string
 }
 
 func (r *fakeRuntime) Inspect(_ context.Context, target ctldapi.RootFSContainerRef) (ctldapi.RootFSInfo, error) {
@@ -258,19 +388,38 @@ func (r *fakeRuntime) CreateDiff(_ context.Context, info ctldapi.RootFSInfo) (ct
 	return r.createDesc, readSeekNopCloser{Reader: strings.NewReader(r.createContent)}, nil
 }
 
+func (r *fakeRuntime) CreateDiffFromBaseline(_ context.Context, info ctldapi.RootFSInfo, baselineLayerID string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+	r.createBaselineCalled = true
+	r.createBaselineInfo = info
+	r.createBaselineLayerID = baselineLayerID
+	if r.createBaselineErr != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, r.createBaselineErr
+	}
+	return r.createBaselineDesc, readSeekNopCloser{Reader: strings.NewReader(r.createBaselineContent)}, nil
+}
+
 func (r *fakeRuntime) ApplyDiff(_ context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, content io.Reader) (ctldapi.RootFSDiffDescriptor, error) {
 	r.applyCalled = true
 	r.applyInfo = info
 	r.applyInputDesc = desc
+	r.applyInputDescs = append(r.applyInputDescs, desc)
 	payload, err := io.ReadAll(content)
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, err
 	}
 	r.applyContent = string(payload)
+	r.applyContents = append(r.applyContents, string(payload))
 	if r.applyErr != nil {
 		return ctldapi.RootFSDiffDescriptor{}, r.applyErr
 	}
 	return r.applyDesc, nil
+}
+
+func (r *fakeRuntime) CaptureBaseline(_ context.Context, info ctldapi.RootFSInfo, baselineLayerID string) error {
+	r.captureBaselineCalled = true
+	r.captureInfo = info
+	r.captureBaselineLayerID = baselineLayerID
+	return r.captureBaselineErr
 }
 
 func rootFSTarget() ctldapi.RootFSContainerRef {

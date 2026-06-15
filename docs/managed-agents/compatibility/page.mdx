@@ -45,6 +45,7 @@ Official reference: [Claude Managed Agents quickstart](https://platform.claude.c
 | Anthropic pre-built skills | Not supported. Use Sandbox0 custom skills. |
 | Multi-agent threads | Not implemented in the current backend surface. |
 | Outcomes and memory research preview | Not implemented in the current backend surface. |
+| Event catalog | Sandbox0 recognizes the current official event catalog for implemented capabilities. Outcome events are excluded, and multi-agent thread events are recognized for SDK compatibility but not emitted by the current backend. |
 | Rate limits | Deployment-specific. Do not assume Anthropic-hosted organization limits apply. |
 
 ## Tool Support
@@ -58,6 +59,8 @@ Harness wrappers map Managed Agents tool definitions to the selected runtime ada
 | Custom tools | Supported | The wrapper emits `agent.custom_tool_use` and waits for `user.custom_tool_result` |
 
 Tool confirmation events are supported. When a tool policy requires confirmation, the session emits `session.status_idle` with `stop_reason.type = "requires_action"` and the relevant event ids.
+
+Sandbox0 also accepts `user.tool_result` for agent-toolset results supplied by the integration. Tool result content supports `text`, `image`, `document`, and `search_result` blocks. Use `user.custom_tool_result` for `agent.custom_tool_use`.
 
 ## Environment Support
 

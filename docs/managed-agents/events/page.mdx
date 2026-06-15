@@ -2,7 +2,10 @@
 
 Events are the durable interface for a session. Send user input as events, then list or stream events to observe status, agent output, tool calls, and errors.
 
-Official reference: [Claude Managed Agents events and streaming](https://platform.claude.com/docs/en/managed-agents/events-and-streaming).
+Official references:
+
+- [Claude Managed Agents events and streaming](https://platform.claude.com/docs/en/managed-agents/events-and-streaming)
+- [Claude Managed Agents event types](https://platform.claude.com/docs/en/managed-agents/reference#event-types)
 
 ## Send User Input
 
@@ -21,10 +24,13 @@ await client.beta.sessions.events.send(session.id, {
 for await (const event of client.beta.sessions.events.list(session.id, {
     order: "asc",
     limit: 100,
+    types: ["agent.message", "session.status_idle"],
 })) {
     console.log(event.type);
 }
 ```
+
+Direct HTTP callers can also filter by `types[]` or `types`, plus `created_at[gt]`, `created_at[gte]`, `created_at[lt]`, and `created_at[lte]`.
 
 ## Stream Events
 
@@ -41,23 +47,89 @@ for await (const event of stream) {
 }
 ```
 
-## Common Event Types
+## Supported Event Types
+
+Claude Managed Agents groups events into five domains: user, agent, session, span, and system events. Sandbox0 tracks the current official event shape for capabilities implemented by Sandbox0.
+
+Outcome events are not supported because Sandbox0 does not implement Managed Agents outcomes. Memory has no standalone `memory.*` event family in the official event catalog, and Sandbox0 does not implement Managed Agents memory.
+
+### User Events
 
 | Event | Meaning |
 |-------|---------|
 | `user.message` | User input sent by your application |
-| `agent.message` | Agent text output |
-| `agent.tool_use` | Built-in tool request |
-| `agent.mcp_tool_use` | MCP tool request |
-| `agent.custom_tool_use` | Custom tool request for your application |
+| `user.interrupt` | Stop the active run and return the session toward idle |
+| `user.custom_tool_result` | Result for an `agent.custom_tool_use` request |
 | `user.tool_confirmation` | Allow or deny a tool that requires confirmation |
-| `user.custom_tool_result` | Result for a custom tool call |
+| `user.tool_result` | Result for an agent-toolset tool when the integration is responsible for returning the result |
+
+`session_thread_id` is accepted on interrupt, tool confirmation, and tool-result events for SDK compatibility. Sandbox0 does not emit multi-agent thread events from its own backend today.
+
+### Agent Events
+
+| Event | Meaning |
+|-------|---------|
+| `agent.message` | Agent text output |
+| `agent.thinking` | Agent thinking output when the selected harness exposes it |
+| `agent.tool_use` | Built-in tool request |
+| `agent.tool_result` | Built-in tool result |
+| `agent.mcp_tool_use` | MCP tool request |
+| `agent.mcp_tool_result` | MCP tool result |
+| `agent.custom_tool_use` | Custom tool request for your application |
+| `agent.thread_context_compacted` | Conversation history was compacted |
+| `agent.thread_message_received` | Recognized for SDK compatibility; not emitted without multi-agent thread support |
+| `agent.thread_message_sent` | Recognized for SDK compatibility; not emitted without multi-agent thread support |
+
+### Session Events
+
+| Event | Meaning |
+|-------|---------|
 | `session.status_running` | A run is active |
 | `session.status_rescheduled` | The active run is waiting for an automatic harness retry after a retriable error |
 | `session.status_idle` | The turn ended or the agent requires action |
+| `session.status_terminated` | The session reached a terminal state |
+| `session.deleted` | The session was deleted and event streams should stop |
+| `session.updated` | A session update changed at least one supported field |
 | `session.error` | Session-level error |
+| `session.thread_created` | Recognized for SDK compatibility; not emitted without multi-agent thread support |
+| `session.thread_status_running` | Recognized for SDK compatibility; not emitted without multi-agent thread support |
+| `session.thread_status_idle` | Recognized for SDK compatibility; not emitted without multi-agent thread support |
+| `session.thread_status_rescheduled` | Recognized for SDK compatibility; not emitted without multi-agent thread support |
+| `session.thread_status_terminated` | Recognized for SDK compatibility; not emitted without multi-agent thread support |
+
+### Span Events
+
+| Event | Meaning |
+|-------|---------|
+| `span.model_request_start` | A model request started |
+| `span.model_request_end` | A model request ended and includes model usage when available |
+
+### System Events
+
+| Event | Meaning |
+|-------|---------|
+| `system.message` | Adds privileged system context for the accompanying turn and subsequent turns |
 
 Treat `session.status_idle` with `stop_reason.type = "end_turn"` as a normal turn completion. If the stop reason is `requires_action`, send the required confirmation or custom tool result before expecting the run to continue.
+
+`system.message` follows the official request ordering rule: at most one per request, it must be the final event, and it must immediately follow `user.message`, `user.tool_result`, or `user.custom_tool_result`.
+
+## Action Resolution
+
+When a tool needs application input, the session emits `session.status_idle` with `stop_reason.type = "requires_action"` and one or more event ids.
+
+| Pending event | Response event |
+|---------------|----------------|
+| `agent.tool_use` requiring confirmation | `user.tool_confirmation` |
+| `agent.mcp_tool_use` requiring confirmation | `user.tool_confirmation` |
+| `agent.custom_tool_use` | `user.custom_tool_result` |
+| `agent.tool_use` whose result is provided by the integration | `user.tool_result` |
+
+Tool result content supports `text`, `image`, `document`, and `search_result` blocks for tool-result events. `search_result` is not accepted in `user.message` content.
+
+## Session Update Events
+
+`UpdateSession` appends `session.updated` when a supported field actually changes. The event includes only changed official fields. Sandbox0 `vault_ids` updates refresh runtime credential state but are not emitted as non-official `session.updated` fields.
 
 ## Retry Events
 

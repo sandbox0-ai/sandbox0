@@ -40,7 +40,7 @@ const deployment = await client.beta.deployments.create({
 
 When the cron fires, Sandbox0 creates a new session from the stored deployment definition and sends the configured initial events. The created session then follows the normal session lifecycle and event stream.
 
-`initial_events` is required. Use `user.message` for normal recurring tasks; Sandbox0 also accepts compatible initial event types such as `system.message` and `user.define_outcome` when your SDK version exposes them.
+`initial_events` is required. Use `user.message` for normal recurring tasks. `system.message` can accompany a user event when your SDK version exposes it. Outcome initial events are not supported because Sandbox0 does not implement Managed Agents outcomes.
 
 ## Schedule Support
 

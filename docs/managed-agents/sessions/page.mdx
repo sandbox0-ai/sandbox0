@@ -60,6 +60,10 @@ Resources are materialized into the session workspace.
 | `file` | Mount an uploaded file into the workspace |
 | `github_repository` | Clone a repository into the workspace |
 
+File resources are created from Files API uploads. When an uploaded file is attached to a session, Sandbox0 creates a new session-scoped file id for the resource. Use `files.list` with `scope_id: session.id` to list those scoped files and any output files captured for the session.
+
+See [Files](/docs/managed-agents/files) for upload, scoped copy, output file, and limit details.
+
 Repository authorization tokens are accepted on create or update, but are not returned in responses.
 
 ## Lifecycle
@@ -94,11 +98,11 @@ Sandbox0 keeps session state and event history outside the sandbox. The sandbox 
     Append user input, stream agent output, and interpret retry lifecycle events.
   </Card>
 
-  <Card title="Deployments" href="/docs/managed-agents/deployments" cta="Continue">
-    Reuse a session definition for manual or scheduled runs.
+  <Card title="Files" href="/docs/managed-agents/files" cta="Continue">
+    Upload files, attach them to sessions, and read scoped outputs.
   </Card>
 
-  <Card title="Vaults" href="/docs/managed-agents/vaults" cta="Continue">
-    Store model and external service credentials outside agent code.
+  <Card title="Deployments" href="/docs/managed-agents/deployments" cta="Continue">
+    Reuse a session definition for manual or scheduled runs.
   </Card>
 </CardGroup>

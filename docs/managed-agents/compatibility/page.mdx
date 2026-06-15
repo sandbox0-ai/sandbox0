@@ -16,7 +16,7 @@ Official reference: [Claude Managed Agents quickstart](https://platform.claude.c
 | Deployments | Supported for reusable manual runs and cron scheduled runs |
 | Deployment runs | Supported for manual and scheduled session creation audit records |
 | Events | Supported for list, send, and event streaming |
-| Files | Supported for upload, metadata, download, delete, and file-backed message content |
+| Files | Supported for upload, metadata, download, delete, session-scoped resources, scoped listing, captured output files, and file-backed message content |
 | Vaults and credentials | Supported for LLM credentials, MCP credentials, Sandbox0 HTTP header credential projection, and sandbox environment variable credentials |
 | Custom skills | Supported through uploaded skill versions |
 | MCP servers | Supported for URL MCP servers and vault-backed credentials |
@@ -47,6 +47,19 @@ Official reference: [Claude Managed Agents quickstart](https://platform.claude.c
 | Outcomes and memory research preview | Not implemented in the current backend surface. |
 | Event catalog | Sandbox0 recognizes the current official event catalog for implemented capabilities. Outcome events are excluded, and multi-agent thread events are recognized for SDK compatibility but not emitted by the current backend. |
 | Rate limits | Deployment-specific. Do not assume Anthropic-hosted organization limits apply. |
+
+## Files Compatibility
+
+Sandbox0 implements the Managed Agents Files API as team-scoped storage plus session-scoped file records.
+
+| Capability | Sandbox0 behavior |
+|------------|-------------------|
+| Upload | Stores file bytes in the team asset store and metadata in PostgreSQL |
+| File resources | Creates a new session-scoped file id when an uploaded file is attached to a session |
+| Scoped listing | `files.list` with `scope_id: session.id` returns session-scoped file resources and captured output files |
+| Output files | Captures files under `/mnt/session/outputs` after terminal runs |
+| Download | Supported for uploaded and scoped files |
+| Limits | 500 MB per file, 500 GB per team, 100 Files API requests per minute per team, and 100 session-scoped file resources per session |
 
 ## Tool Support
 

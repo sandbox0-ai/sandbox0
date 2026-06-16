@@ -49,12 +49,23 @@ func (s *SandboxService) saveSandboxRootFSCheckpoint(ctx context.Context, pod *c
 	}
 	generation := runtimeGenerationFromPod(pod)
 	parentLayerID := ""
+	expectedHeadLayerID := ""
 	if parentState, err := s.latestRootFSState(ctx, sandboxID); err != nil {
 		return fmt.Errorf("load current rootfs head: %w", err)
 	} else if parentState != nil {
-		parentLayerID = strings.TrimSpace(parentState.LayerID)
+		expectedHeadLayerID = strings.TrimSpace(parentState.LayerID)
+		if squash, reason := s.shouldSquashSandboxRootFSCheckpoint(parentState); squash {
+			if s.logger != nil {
+				s.logger.Info("Squashing sandbox rootfs checkpoint",
+					zap.String("sandboxID", sandboxID),
+					zap.String("headLayerID", expectedHeadLayerID),
+					zap.String("reason", reason),
+				)
+			}
+		} else {
+			parentLayerID = expectedHeadLayerID
+		}
 	}
-	expectedHeadLayerID := parentLayerID
 	saveReq := ctldapi.SaveRootFSRequest{
 		Target:                    rootFSTargetForPod(pod),
 		SandboxID:                 sandboxID,
@@ -85,6 +96,34 @@ func (s *SandboxService) saveSandboxRootFSCheckpoint(ctx context.Context, pod *c
 		return s.sandboxStore.SaveRootFSState(ctx, state)
 	}
 	return nil
+}
+
+func (s *SandboxService) shouldSquashSandboxRootFSCheckpoint(state *SandboxRootFSState) (bool, string) {
+	if s == nil || s.config.RootFSSquashDisabled || state == nil {
+		return false, ""
+	}
+	depth := len(state.LayerChain)
+	if depth == 0 && strings.TrimSpace(state.LayerID) != "" {
+		depth = 1
+	}
+	if maxDepth := s.config.RootFSSquashMaxChainDepth; maxDepth > 0 && depth >= maxDepth {
+		return true, fmt.Sprintf("chain_depth:%d", depth)
+	}
+	if maxBytes := s.config.RootFSSquashMaxChainBytes; maxBytes > 0 {
+		var totalBytes int64
+		for _, layer := range state.LayerChain {
+			if layer != nil && layer.DiffSize > 0 {
+				totalBytes += layer.DiffSize
+			}
+		}
+		if totalBytes == 0 && state.DiffSize > 0 {
+			totalBytes = state.DiffSize
+		}
+		if totalBytes >= maxBytes {
+			return true, fmt.Sprintf("chain_bytes:%d", totalBytes)
+		}
+	}
+	return false, ""
 }
 
 func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *corev1.Pod, state *SandboxRootFSState) error {

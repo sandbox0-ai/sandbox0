@@ -38,6 +38,7 @@ import (
 	templmigrations "github.com/sandbox0-ai/sandbox0/pkg/template/migrations"
 	templreconciler "github.com/sandbox0-ai/sandbox0/pkg/template/reconciler"
 	templstorepg "github.com/sandbox0-ai/sandbox0/pkg/template/store/pg"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
@@ -299,6 +300,9 @@ func main() {
 		ProcdHTTPClient:                     obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration}),
 		ProcdInitTimeout:                    cfg.ProcdInitTimeout.Duration,
 		AllowColdStartWithoutReadyDataPlane: cfg.AllowColdStartWithoutReadyDataPlane,
+		RootFSSquashDisabled:                cfg.RootFSMaintenance.SquashDisabled,
+		RootFSSquashMaxChainDepth:           cfg.RootFSMaintenance.SquashMaxChainDepth,
+		RootFSSquashMaxChainBytes:           cfg.RootFSMaintenance.SquashMaxChainBytes,
 	}
 
 	sandboxService := service.NewSandboxService(
@@ -318,7 +322,8 @@ func main() {
 	)
 	sandboxService.SetCredentialStore(credentialStore)
 	sandboxService.SetQuotaStore(quota.NewRepository(pool))
-	sandboxService.SetSandboxStore(service.NewPGSandboxStore(pool))
+	sandboxStore := service.NewPGSandboxStore(pool)
+	sandboxService.SetSandboxStore(sandboxStore)
 	if cfg.StorageProxyBaseURL != "" && cfg.StorageProxyHTTPPort > 0 && storageProxyAdminTokenGenerator != nil {
 		storageProxyBaseURL := fmt.Sprintf("http://%s:%d", strings.TrimSpace(cfg.StorageProxyBaseURL), cfg.StorageProxyHTTPPort)
 		sandboxService.SetWebhookStateVolumeClient(service.NewStorageProxyVolumeClient(service.StorageProxyVolumeClientConfig{
@@ -499,6 +504,29 @@ func main() {
 			logger.Error("Sandbox pause controller failed", zap.Error(err))
 		}
 	}()
+	if !cfg.RootFSMaintenance.Disabled {
+		rootFSObjectStore, err := buildRootFSObjectStore(cfg)
+		if err != nil {
+			logger.Warn("Rootfs maintenance disabled; object store is not configured", zap.Error(err))
+		} else if rootFSObjectStore == nil {
+			logger.Warn("Rootfs maintenance disabled; object store is not configured")
+		} else {
+			rootFSMaintenanceController := service.NewRootFSMaintenanceController(
+				sandboxStore,
+				rootFSObjectStore,
+				rootFSMaintenanceControllerConfig(cfg),
+				logger,
+				managerMetrics,
+			)
+			go func() {
+				if err := rootFSMaintenanceController.Run(ctx); err != nil && err != context.Canceled {
+					logger.Error("Rootfs maintenance controller failed", zap.Error(err))
+				}
+			}()
+		}
+	} else {
+		logger.Info("Rootfs maintenance controller disabled by config")
+	}
 
 	go sandboxService.StartSystemVolumeReconciler(ctx, cfg.ResyncPeriod.Duration)
 
@@ -587,6 +615,47 @@ func runEgressAuthMigrations(ctx context.Context, pool *pgxpool.Pool, logger *za
 
 	logger.Info("Egress auth migrations completed successfully")
 	return nil
+}
+
+func buildRootFSObjectStore(cfg *config.ManagerConfig) (objectstore.Store, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	storageCfg := cfg.RootFSObjectStorage
+	if strings.TrimSpace(storageCfg.Type) == "" && strings.TrimSpace(storageCfg.Bucket) == "" {
+		return nil, nil
+	}
+	store, err := objectstore.Create(objectstore.Config{
+		Type:         storageCfg.Type,
+		Bucket:       storageCfg.Bucket,
+		Region:       storageCfg.Region,
+		Endpoint:     storageCfg.Endpoint,
+		AccessKey:    storageCfg.AccessKey,
+		SecretKey:    storageCfg.SecretKey,
+		SessionToken: storageCfg.SessionToken,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return store, nil
+}
+
+func rootFSMaintenanceControllerConfig(cfg *config.ManagerConfig) service.RootFSMaintenanceControllerConfig {
+	if cfg == nil {
+		return service.RootFSMaintenanceControllerConfig{}
+	}
+	return service.RootFSMaintenanceControllerConfig{
+		Interval:         cfg.RootFSMaintenance.Interval.Duration,
+		BatchSize:        cfg.RootFSMaintenance.BatchSize,
+		MaxBatchesPerRun: cfg.RootFSMaintenance.MaxBatchesPerRun,
+		Workers:          cfg.RootFSMaintenance.Workers,
+		DeleteOptions: service.DeletePendingRootFSObjectsOptions{
+			ClaimTTL:    cfg.RootFSMaintenance.ObjectDeleteClaimTTL.Duration,
+			BackoffBase: cfg.RootFSMaintenance.ObjectDeleteBackoffBase.Duration,
+			BackoffMax:  cfg.RootFSMaintenance.ObjectDeleteBackoffMax.Duration,
+			MaxAttempts: cfg.RootFSMaintenance.ObjectDeleteMaxAttempts,
+		},
+	}
 }
 
 func buildCredentialStore(ctx context.Context, pool *pgxpool.Pool, cfg *config.ManagerConfig, logger *zap.Logger) (*egressauth.Repository, error) {

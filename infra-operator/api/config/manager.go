@@ -143,9 +143,11 @@ type ManagerConfig struct {
 	// Procd config injected into sandbox pods
 	// +optional
 	// +kubebuilder:default={}
-	ProcdConfig          ProcdConfig `yaml:"procd_config" json:"procdConfig"`
-	StorageProxyBaseURL  string      `yaml:"storage_proxy_base_url" json:"-"`
-	StorageProxyHTTPPort int         `yaml:"storage_proxy_http_port" json:"-"`
+	ProcdConfig          ProcdConfig               `yaml:"procd_config" json:"procdConfig"`
+	StorageProxyBaseURL  string                    `yaml:"storage_proxy_base_url" json:"-"`
+	StorageProxyHTTPPort int                       `yaml:"storage_proxy_http_port" json:"-"`
+	RootFSMaintenance    RootFSMaintenanceConfig   `yaml:"rootfs_maintenance" json:"-"`
+	RootFSObjectStorage  RootFSObjectStorageConfig `yaml:"rootfs_object_storage" json:"-"`
 
 	// Registry config for image pull secret provisioning
 	// +optional
@@ -192,6 +194,31 @@ type CredentialStoreConfig struct {
 	DefaultStorageKind string                       `yaml:"default_storage_kind" json:"-"`
 	EncryptedPG        CredentialEncryptedPGConfig  `yaml:"encrypted_pg" json:"-"`
 	Vault              CredentialVaultRuntimeConfig `yaml:"vault" json:"-"`
+}
+
+type RootFSMaintenanceConfig struct {
+	Disabled                bool            `yaml:"disabled" json:"-"`
+	Interval                metav1.Duration `yaml:"interval" json:"-"`
+	BatchSize               int             `yaml:"batch_size" json:"-"`
+	MaxBatchesPerRun        int             `yaml:"max_batches_per_run" json:"-"`
+	Workers                 int             `yaml:"workers" json:"-"`
+	ObjectDeleteClaimTTL    metav1.Duration `yaml:"object_delete_claim_ttl" json:"-"`
+	ObjectDeleteBackoffBase metav1.Duration `yaml:"object_delete_backoff_base" json:"-"`
+	ObjectDeleteBackoffMax  metav1.Duration `yaml:"object_delete_backoff_max" json:"-"`
+	ObjectDeleteMaxAttempts int             `yaml:"object_delete_max_attempts" json:"-"`
+	SquashDisabled          bool            `yaml:"squash_disabled" json:"-"`
+	SquashMaxChainDepth     int             `yaml:"squash_max_chain_depth" json:"-"`
+	SquashMaxChainBytes     int64           `yaml:"squash_max_chain_bytes" json:"-"`
+}
+
+type RootFSObjectStorageConfig struct {
+	Type         string `yaml:"type" json:"-"`
+	Bucket       string `yaml:"bucket" json:"-"`
+	Region       string `yaml:"region" json:"-"`
+	Endpoint     string `yaml:"endpoint" json:"-"`
+	AccessKey    string `yaml:"access_key" json:"-"`
+	SecretKey    string `yaml:"secret_key" json:"-"`
+	SessionToken string `yaml:"session_token" json:"-"`
 }
 
 type CredentialEncryptedPGConfig struct {
@@ -436,7 +463,41 @@ func LoadManagerConfig() *ManagerConfig {
 	if cfg.CredentialStore.DefaultStorageKind == "" {
 		cfg.CredentialStore.DefaultStorageKind = "encrypted_pg"
 	}
+	applyRootFSMaintenanceDefaults(cfg)
 	return cfg
+}
+
+func applyRootFSMaintenanceDefaults(cfg *ManagerConfig) {
+	if cfg == nil {
+		return
+	}
+	if cfg.RootFSMaintenance.Interval.Duration == 0 {
+		cfg.RootFSMaintenance.Interval = metav1.Duration{Duration: time.Minute}
+	}
+	if cfg.RootFSMaintenance.BatchSize <= 0 {
+		cfg.RootFSMaintenance.BatchSize = 100
+	}
+	if cfg.RootFSMaintenance.MaxBatchesPerRun <= 0 {
+		cfg.RootFSMaintenance.MaxBatchesPerRun = 10
+	}
+	if cfg.RootFSMaintenance.Workers <= 0 {
+		cfg.RootFSMaintenance.Workers = 1
+	}
+	if cfg.RootFSMaintenance.ObjectDeleteClaimTTL.Duration == 0 {
+		cfg.RootFSMaintenance.ObjectDeleteClaimTTL = metav1.Duration{Duration: 2 * time.Minute}
+	}
+	if cfg.RootFSMaintenance.ObjectDeleteBackoffBase.Duration == 0 {
+		cfg.RootFSMaintenance.ObjectDeleteBackoffBase = metav1.Duration{Duration: 5 * time.Second}
+	}
+	if cfg.RootFSMaintenance.ObjectDeleteBackoffMax.Duration == 0 {
+		cfg.RootFSMaintenance.ObjectDeleteBackoffMax = metav1.Duration{Duration: 10 * time.Minute}
+	}
+	if cfg.RootFSMaintenance.SquashMaxChainDepth <= 0 {
+		cfg.RootFSMaintenance.SquashMaxChainDepth = 8
+	}
+	if cfg.RootFSMaintenance.SquashMaxChainBytes <= 0 {
+		cfg.RootFSMaintenance.SquashMaxChainBytes = 512 * 1024 * 1024
+	}
 }
 
 func loadManagerConfig(path string) (*ManagerConfig, error) {

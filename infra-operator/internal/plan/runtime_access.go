@@ -14,6 +14,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	controllerinternalauth "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storage"
 	s0template "github.com/sandbox0-ai/sandbox0/pkg/template"
 )
 
@@ -48,6 +49,32 @@ func (p *InfraPlan) DatabaseDSN(ctx context.Context, kubeClient client.Client) (
 		return "", fmt.Errorf("database is not configured")
 	}
 	return database.GetDatabaseDSN(ctx, kubeClient, p.infra)
+}
+
+func (p *InfraPlan) RootFSObjectStorage(ctx context.Context, kubeClient client.Client) (*apiconfig.RootFSObjectStorageConfig, error) {
+	if p == nil || p.infra == nil {
+		return nil, fmt.Errorf("compiled plan source infra is required")
+	}
+	if p.infra.Spec.Storage == nil {
+		return nil, nil
+	}
+	storageConfig, err := storage.GetStorageConfig(ctx, kubeClient, p.infra)
+	if err != nil {
+		return nil, err
+	}
+	storageType := string(storageConfig.Type)
+	if storageConfig.Type == infrav1alpha1.StorageTypeBuiltin {
+		storageType = "s3"
+	}
+	return &apiconfig.RootFSObjectStorageConfig{
+		Type:         storageType,
+		Bucket:       storageConfig.Bucket,
+		Region:       storageConfig.Region,
+		Endpoint:     storageConfig.Endpoint,
+		AccessKey:    storageConfig.AccessKey,
+		SecretKey:    storageConfig.SecretKey,
+		SessionToken: storageConfig.SessionToken,
+	}, nil
 }
 
 func (p *InfraPlan) InitUser() *infrav1alpha1.InitUserConfig {

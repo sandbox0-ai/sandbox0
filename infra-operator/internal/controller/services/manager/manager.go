@@ -271,6 +271,11 @@ func (r *Reconciler) buildConfig(ctx context.Context, imageRepo, imageTag string
 	if dsn, err := compiledPlan.DatabaseDSN(ctx, r.Resources.Client); err == nil {
 		cfg.DatabaseURL = dsn
 	}
+	if rootFSObjectStorage, err := compiledPlan.RootFSObjectStorage(ctx, r.Resources.Client); err != nil {
+		return nil, fmt.Errorf("resolve rootfs object storage config: %w", err)
+	} else if rootFSObjectStorage != nil {
+		cfg.RootFSObjectStorage = *rootFSObjectStorage
+	}
 
 	if cfg.NetworkPolicyProvider == "netd" {
 		secretName, err := netdservice.EnsureMITMCASecretWithScope(ctx, r.Resources, compiledPlan.Scope, compiledPlan, common.GetServiceLabels(compiledPlan.Scope.Name, "netd"))

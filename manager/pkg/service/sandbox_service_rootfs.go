@@ -54,6 +54,7 @@ func (s *SandboxService) saveSandboxRootFSCheckpoint(ctx context.Context, pod *c
 	} else if parentState != nil {
 		parentLayerID = strings.TrimSpace(parentState.LayerID)
 	}
+	expectedHeadLayerID := parentLayerID
 	saveReq := ctldapi.SaveRootFSRequest{
 		Target:                    rootFSTargetForPod(pod),
 		SandboxID:                 sandboxID,
@@ -76,6 +77,7 @@ func (s *SandboxService) saveSandboxRootFSCheckpoint(ctx context.Context, pod *c
 	}
 	state.LayerID = uuid.NewString()
 	state.ParentLayerID = parentLayerID
+	state.ExpectedHeadLayerID = expectedHeadLayerID
 	if tx != nil {
 		return tx.SaveRootFSState(ctx, state)
 	}

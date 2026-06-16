@@ -82,6 +82,11 @@ type ManagerConfig struct {
 	TeamTemplateMemoryPerCPU string `yaml:"team_template_memory_per_cpu" json:"teamTemplateMemoryPerCpu"`
 	// +optional
 	SandboxRuntimeClassName string `yaml:"sandbox_runtime_class_name" json:"sandboxRuntimeClassName"`
+	// AllowColdStartWithoutReadyDataPlane lets cold claims create Pending pods
+	// when no sandbox data-plane-ready nodes exist yet. This is required for
+	// node autoscaler scale-from-zero deployments.
+	// +optional
+	AllowColdStartWithoutReadyDataPlane bool `yaml:"allow_cold_start_without_ready_data_plane" json:"allowColdStartWithoutReadyDataPlane"`
 
 	// NetworkPolicyProvider selects the dataplane integration used to enforce sandbox network policy.
 	// +optional

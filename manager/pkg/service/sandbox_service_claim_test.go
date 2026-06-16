@@ -312,6 +312,22 @@ func TestClaimIdlePodRequiresDataPlaneReadyNode(t *testing.T) {
 	}
 }
 
+func TestEnsureDataPlaneReadyCapacityAllowsColdStartWithoutReadyNode(t *testing.T) {
+	svc := &SandboxService{
+		nodeLister: newClaimTestNodeLister(t),
+		config: SandboxServiceConfig{
+			AllowColdStartWithoutReadyDataPlane: true,
+		},
+	}
+	spec := corev1.PodSpec{
+		NodeSelector: dataplane.DataPlaneReadyNodeSelector(),
+	}
+
+	if err := svc.ensureDataPlaneReadyCapacity(spec); err != nil {
+		t.Fatalf("ensureDataPlaneReadyCapacity() error = %v", err)
+	}
+}
+
 func TestClaimIdlePodRequestsDeleteAfterNetworkApplyFailure(t *testing.T) {
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{

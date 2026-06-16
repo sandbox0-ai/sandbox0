@@ -358,6 +358,7 @@ Examples:
 
 - `services.clusterGateway.config.authMode` switches between `public`, `internal`, and `both`
 - `services.manager.config.autoscaler.*` tunes pool scale behavior
+- `services.manager.config.allowColdStartWithoutReadyDataPlane` lets cold claims create Pending pods for external node autoscaler scale-from-zero deployments; keep it disabled unless the cluster autoscaler can provision matching sandbox nodes
 - `services.storageProxy.config.filesystem*` tunes filesystem behavior; `services.manager.config.procdConfig.volume*` tunes mounted volume cache sizing
 - `services.storageProxy.config.s0fsSegmentTargetSize` sets the target S0FS segment size for materialized volume data; the default is `4Mi`
 - `services.storageProxy.config.s0fsCompaction*` tunes background S0FS compaction for RWO volume owners; `s0fsCompactionInterval` accepts `0`, `off`, or `disabled` to turn it off

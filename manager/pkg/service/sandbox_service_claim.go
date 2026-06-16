@@ -1211,6 +1211,9 @@ func (s *SandboxService) ensureDataPlaneReadyCapacity(spec corev1.PodSpec) error
 		return nil
 	}
 	if s == nil || s.nodeLister == nil {
+		if s != nil && s.config.AllowColdStartWithoutReadyDataPlane {
+			return nil
+		}
 		return fmt.Errorf("%w: manager node cache is not configured", ErrDataPlaneNotReady)
 	}
 	selector := labels.SelectorFromSet(spec.NodeSelector)
@@ -1219,6 +1222,9 @@ func (s *SandboxService) ensureDataPlaneReadyCapacity(spec corev1.PodSpec) error
 		return fmt.Errorf("list data-plane-ready nodes: %w", err)
 	}
 	if len(nodes) == 0 {
+		if s.config.AllowColdStartWithoutReadyDataPlane {
+			return nil
+		}
 		return fmt.Errorf("%w: no nodes match selector %q", ErrDataPlaneNotReady, labels.Set(spec.NodeSelector).String())
 	}
 	return nil

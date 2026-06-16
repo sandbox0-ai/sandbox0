@@ -42,7 +42,7 @@ func TestBuildPodTemplateIncludesTemplateHash(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got.Annotations)
 	assert.Equal(t, "hash-v1", got.Annotations[AnnotationTemplateSpecHash])
-	assert.NotContains(t, got.Annotations, AnnotationClusterAutoscalerSafeToEvict)
+	assert.Equal(t, "true", got.Annotations[AnnotationClusterAutoscalerSafeToEvict])
 	assert.Equal(t, PoolTypeIdle, got.Labels[LabelPoolType])
 	assert.Equal(t, "template-a", got.Labels[LabelTemplateID])
 	assert.Equal(t, "logical-a", got.Labels[LabelTemplateLogicalID])

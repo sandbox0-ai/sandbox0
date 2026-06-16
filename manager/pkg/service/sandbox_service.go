@@ -75,19 +75,20 @@ var claimIdlePodBackoff = wait.Backoff{
 
 // SandboxServiceConfig handles configuration for SandboxService
 type SandboxServiceConfig struct {
-	DefaultTTL             time.Duration
-	PauseMinMemoryRequest  string
-	PauseMinMemoryLimit    string
-	PauseMemoryBufferRatio float64
-	PauseMinCPU            string
-	CtldEnabled            bool
-	CtldPort               int
-	CtldClientTimeout      time.Duration
-	CtldHTTPClient         *http.Client
-	ProcdPort              int
-	ProcdClientTimeout     time.Duration
-	ProcdHTTPClient        *http.Client
-	ProcdInitTimeout       time.Duration
+	DefaultTTL                          time.Duration
+	PauseMinMemoryRequest               string
+	PauseMinMemoryLimit                 string
+	PauseMemoryBufferRatio              float64
+	PauseMinCPU                         string
+	CtldEnabled                         bool
+	CtldPort                            int
+	CtldClientTimeout                   time.Duration
+	CtldHTTPClient                      *http.Client
+	ProcdPort                           int
+	ProcdClientTimeout                  time.Duration
+	ProcdHTTPClient                     *http.Client
+	ProcdInitTimeout                    time.Duration
+	AllowColdStartWithoutReadyDataPlane bool
 }
 
 // SandboxService handles sandbox operations

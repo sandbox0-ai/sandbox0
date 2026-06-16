@@ -442,6 +442,11 @@ type ManagerConfig struct {
 	TeamTemplateMemoryPerCPU string `json:"teamTemplateMemoryPerCpu,omitempty"`
 	// +optional
 	SandboxRuntimeClassName string `json:"sandboxRuntimeClassName,omitempty"`
+	// AllowColdStartWithoutReadyDataPlane lets cold claims create Pending pods
+	// when no sandbox data-plane-ready nodes exist yet. This is required for
+	// node autoscaler scale-from-zero deployments.
+	// +optional
+	AllowColdStartWithoutReadyDataPlane bool `json:"allowColdStartWithoutReadyDataPlane,omitempty"`
 	// +optional
 	// +kubebuilder:default="30s"
 	NetdPolicyApplyTimeout metav1.Duration `json:"netdPolicyApplyTimeout,omitempty"`

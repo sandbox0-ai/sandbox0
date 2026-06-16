@@ -80,7 +80,7 @@ func TemplateLogicalID(template *v1alpha1.SandboxTemplate) string {
 }
 
 // ClaimedSandboxPodAnnotations returns manager-owned metadata for active sandbox
-// pods. Idle pool pods intentionally do not carry these annotations.
+// pods. Active sandboxes are marked unsafe for Cluster Autoscaler eviction.
 func ClaimedSandboxPodAnnotations(extra map[string]string) map[string]string {
 	annotations := make(map[string]string, len(extra)+1)
 	for key, value := range extra {
@@ -312,7 +312,8 @@ func (pm *PoolManager) reconcileReplicaSetMetadata(
 func (pm *PoolManager) buildPodTemplate(template *v1alpha1.SandboxTemplate, specHash string) (corev1.PodTemplateSpec, error) {
 	spec := v1alpha1.BuildPodSpec(template)
 	annotations := map[string]string{
-		AnnotationTemplateSpecHash: specHash,
+		AnnotationTemplateSpecHash:             specHash,
+		AnnotationClusterAutoscalerSafeToEvict: "true",
 	}
 	return corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{

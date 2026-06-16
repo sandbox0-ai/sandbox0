@@ -26,7 +26,7 @@ Self-hosted deployments must run `ctld` on sandbox nodes for checkpointed pause/
 | Mounted Volumes | Remounted if configured | Preserved until the Volume is deleted |
 | Processes, memory, sockets, PID state, live REPL sessions | Not preserved | Deleted |
 
-The rootfs checkpoint covers files written inside the sandbox filesystem, including files outside mounted volumes. It is different from a Sandbox Volume: it is tied to one sandbox identity and does not provide volume sharing, direct file APIs, snapshots, forks, or restore operations.
+The rootfs checkpoint covers files written inside the sandbox filesystem, including files outside mounted volumes. Each successful checkpoint records a rootfs object id on the Sandbox. A later sandbox claim can pass that `rootfs_id` to start from the checkpointed root filesystem, but manager only accepts it when the requested template image matches the checkpoint base image. It is still different from a Sandbox Volume: it does not provide mounted shared storage, direct file APIs, or Volume snapshot/restore operations.
 
 On nodes using the containerd overlayfs snapshotter, `ctld` checkpoints only the active snapshot upperdir and stores it as a standard OCI layer diff. Other snapshotters, or nodes where the overlayfs upperdir is not readable by `ctld`, fall back to containerd's built-in diff path.
 
@@ -77,6 +77,8 @@ Resume a sandbox that was paused manually or by TTL expiry.
 
 Resume first restores the writable rootfs checkpoint onto a runtime pod created from the current template image. If that restore fails, Sandbox0 retries once with a runtime pod pinned to the checkpoint's recorded base image digest. Kubernetes pulls and garbage-collects that image through the normal kubelet image lifecycle.
 
+To create a new sandbox from a saved rootfs object, pass `rootfs_id` in `POST /api/v1/sandboxes`. The rootfs is applied before procd initialization, so files from the checkpoint are visible to the first process started in the new sandbox.
+
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/resume
 </Endpoint>
@@ -117,6 +119,8 @@ console.log("Resume requested");`
 After requesting a pause or resume, fetch sandbox details to check the lifecycle status.
 
 During pause, `paused` remains `false` while `status` is `pausing`. It becomes `true` only after checkpoint upload has completed, the runtime pod has been released, and the sandbox is safe to resume from durable state.
+
+After a successful checkpoint, sandbox details include `rootfs_id`. Use that value in a future claim request only with a template image that matches the checkpoint base image.
 
 <Tabs
   tabs={[

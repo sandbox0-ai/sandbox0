@@ -76,6 +76,8 @@ func (s *SandboxService) saveSandboxRootFSCheckpoint(ctx context.Context, pod *c
 	}
 	state.LayerID = uuid.NewString()
 	state.ParentLayerID = parentLayerID
+	state.RootFSID = uuid.NewString()
+	state.ExpiresAt = record.HardExpiresAt
 	if tx != nil {
 		return tx.SaveRootFSState(ctx, state)
 	}
@@ -127,6 +129,60 @@ func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *
 		return fmt.Errorf("apply sandbox rootfs checkpoint: ctld did not report applied")
 	}
 	return nil
+}
+
+func (s *SandboxService) rootFSStateForClaim(ctx context.Context, req *ClaimRequest, template *v1alpha1.SandboxTemplate) (*SandboxRootFSState, error) {
+	if req == nil {
+		return nil, nil
+	}
+	rootFSID := strings.TrimSpace(req.RootFSID)
+	if rootFSID == "" {
+		return nil, nil
+	}
+	if s == nil || s.sandboxStore == nil {
+		return nil, fmt.Errorf("%w: rootfs_id requires the sandbox store", ErrInvalidClaimRequest)
+	}
+	state, err := s.sandboxStore.GetRootFSState(ctx, req.TeamID, rootFSID)
+	if err != nil {
+		return nil, fmt.Errorf("load rootfs %s: %w", rootFSID, err)
+	}
+	if state == nil {
+		return nil, fmt.Errorf("%w: rootfs_id %q not found", ErrInvalidClaimRequest, rootFSID)
+	}
+	if err := validateRootFSBaseImageForTemplate(rootFSID, state, template); err != nil {
+		return nil, err
+	}
+	req.RootFSID = rootFSID
+	if sandboxID := strings.TrimSpace(req.SandboxID); sandboxID != "" {
+		state.SandboxID = sandboxID
+	}
+	return state, nil
+}
+
+func validateRootFSBaseImageForTemplate(rootFSID string, state *SandboxRootFSState, template *v1alpha1.SandboxTemplate) error {
+	if state == nil {
+		return fmt.Errorf("%w: rootfs_id %q not found", ErrInvalidClaimRequest, rootFSID)
+	}
+	if template == nil {
+		return fmt.Errorf("template is required")
+	}
+	templateImage := strings.TrimSpace(template.Spec.MainContainer.Image)
+	if templateImage == "" {
+		return fmt.Errorf("%w: template image is required for rootfs_id %q", ErrInvalidClaimRequest, rootFSID)
+	}
+	templateDigest := imageDigestFromRef(templateImage)
+	stateDigest := strings.TrimSpace(state.BaseImageDigest)
+	if templateDigest != "" {
+		if stateDigest == templateDigest {
+			return nil
+		}
+		return fmt.Errorf("%w: rootfs_id %q base image digest %q does not match template image digest %q", ErrInvalidClaimRequest, rootFSID, stateDigest, templateDigest)
+	}
+	stateRef := strings.TrimSpace(state.BaseImageRef)
+	if stateRef != "" && normalizeImageRefForRootFSCompare(stateRef) == normalizeImageRefForRootFSCompare(templateImage) {
+		return nil
+	}
+	return fmt.Errorf("%w: rootfs_id %q base image %q does not match template image %q", ErrInvalidClaimRequest, rootFSID, stateRef, templateImage)
 }
 
 func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, template *v1alpha1.SandboxTemplate, req *ClaimRequest, state *SandboxRootFSState) (*corev1.Pod, error) {
@@ -234,6 +290,39 @@ func imageRepositoryFromRef(ref string) string {
 		ref = ref[:lastColon]
 	}
 	return strings.TrimSpace(ref)
+}
+
+func imageDigestFromRef(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	if idx := strings.LastIndex(ref, "@"); idx >= 0 {
+		return strings.TrimSpace(ref[idx+1:])
+	}
+	return ""
+}
+
+func normalizeImageRefForRootFSCompare(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	first := ref
+	if idx := strings.Index(first, "/"); idx >= 0 {
+		first = first[:idx]
+	}
+	hasSlash := strings.Contains(ref, "/")
+	hasRegistry := hasSlash && (strings.Contains(first, ".") || strings.Contains(first, ":") || first == "localhost")
+	if !hasRegistry {
+		ref = "docker.io/" + ref
+	} else if strings.HasPrefix(ref, "index.docker.io/") {
+		ref = "docker.io/" + strings.TrimPrefix(ref, "index.docker.io/")
+	}
+	if rest := strings.TrimPrefix(ref, "docker.io/"); rest != ref && !strings.Contains(strings.SplitN(rest, "@", 2)[0], "/") {
+		ref = "docker.io/library/" + rest
+	}
+	return ref
 }
 
 func rootFSLayerDescriptors(state *SandboxRootFSState) []ctldapi.RootFSLayerDescriptor {

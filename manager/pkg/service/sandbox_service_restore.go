@@ -70,6 +70,7 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 			Template:          locked.TemplateID,
 			Config:            &locked.Config,
 			Mounts:            locked.Mounts,
+			RootFSID:          locked.RootFSID,
 			SandboxID:         locked.ID,
 			RuntimeGeneration: generation,
 			HardExpiresAt:     locked.HardExpiresAt,
@@ -131,6 +132,7 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 		Template:          record.TemplateID,
 		Config:            &record.Config,
 		Mounts:            record.Mounts,
+		RootFSID:          record.RootFSID,
 		SandboxID:         record.ID,
 		RuntimeGeneration: record.RuntimeGeneration + 1,
 	}

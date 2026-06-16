@@ -30,6 +30,9 @@ func SandboxToAPI(sandbox *mgr.Sandbox, sshInfo *ConnectionInfo) *apispec.Sandbo
 	if sandbox.UserID != "" {
 		payload.UserId = &sandbox.UserID
 	}
+	if sandbox.RootFSID != "" {
+		payload.RootfsId = &sandbox.RootFSID
+	}
 	if sshInfo != nil {
 		payload.Ssh = &apispec.SandboxSSHConnection{
 			Host:     sshInfo.Host,

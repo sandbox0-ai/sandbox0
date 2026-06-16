@@ -115,6 +115,11 @@ func (s *memorySandboxStore) SaveRootFSState(_ context.Context, state *SandboxRo
 		s.rootFSStates = make(map[string]*SandboxRootFSState)
 	}
 	s.rootFSStates[state.SandboxID] = cloneSandboxRootFSState(state)
+	if state.RootFSID != "" && s.records != nil {
+		if record := s.records[state.SandboxID]; record != nil {
+			record.RootFSID = state.RootFSID
+		}
+	}
 	return nil
 }
 
@@ -122,7 +127,35 @@ func (s *memorySandboxStore) GetLatestRootFSState(_ context.Context, sandboxID s
 	if s == nil || s.rootFSStates == nil {
 		return nil, nil
 	}
-	return cloneSandboxRootFSState(s.rootFSStates[sandboxID]), nil
+	if state := s.rootFSStates[sandboxID]; state != nil {
+		return cloneSandboxRootFSState(state), nil
+	}
+	if s.records != nil {
+		record := s.records[sandboxID]
+		if record != nil && record.RootFSID != "" {
+			for _, state := range s.rootFSStates {
+				if state != nil && state.RootFSID == record.RootFSID && state.TeamID == record.TeamID {
+					clone := cloneSandboxRootFSState(state)
+					clone.SandboxID = sandboxID
+					return clone, nil
+				}
+			}
+		}
+	}
+	return nil, nil
+}
+
+func (s *memorySandboxStore) GetRootFSState(_ context.Context, teamID, rootFSID string) (*SandboxRootFSState, error) {
+	if s == nil || s.rootFSStates == nil {
+		return nil, nil
+	}
+	for _, state := range s.rootFSStates {
+		if state == nil || state.RootFSID != rootFSID || state.TeamID != teamID {
+			continue
+		}
+		return cloneSandboxRootFSState(state), nil
+	}
+	return nil, nil
 }
 
 func (s *memorySandboxStore) WithSandboxLock(ctx context.Context, sandboxID string, fn func(context.Context, SandboxStoreTx, *SandboxRecord) error) error {

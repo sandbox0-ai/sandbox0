@@ -589,19 +589,25 @@ type ClaimMountRequest struct {
 
 // ClaimRequest defines model for ClaimRequest.
 type ClaimRequest struct {
-	Config   *SandboxConfig       `json:"config,omitempty"`
-	Mounts   *[]ClaimMountRequest `json:"mounts,omitempty"`
-	Template *string              `json:"template,omitempty"`
+	Config *SandboxConfig       `json:"config,omitempty"`
+	Mounts *[]ClaimMountRequest `json:"mounts,omitempty"`
+
+	// RootfsId Optional rootfs object to restore before procd initialization. The rootfs base image must match the selected template image.
+	RootfsId *string `json:"rootfs_id,omitempty"`
+	Template *string `json:"template,omitempty"`
 }
 
 // ClaimResponse defines model for ClaimResponse.
 type ClaimResponse struct {
-	BootstrapMounts *[]MountStatus         `json:"bootstrap_mounts,omitempty"`
-	ClusterId       *string                `json:"cluster_id"`
-	PodName         string                 `json:"pod_name"`
-	SandboxId       string                 `json:"sandbox_id"`
-	Status          SandboxLifecycleStatus `json:"status"`
-	Template        string                 `json:"template"`
+	BootstrapMounts *[]MountStatus `json:"bootstrap_mounts,omitempty"`
+	ClusterId       *string        `json:"cluster_id"`
+	PodName         string         `json:"pod_name"`
+
+	// RootfsId Rootfs object restored for this claim, when provided.
+	RootfsId  *string                `json:"rootfs_id,omitempty"`
+	SandboxId string                 `json:"sandbox_id"`
+	Status    SandboxLifecycleStatus `json:"status"`
+	Template  string                 `json:"template"`
 }
 
 // ContainerSpec defines model for ContainerSpec.
@@ -1493,6 +1499,9 @@ type Sandbox struct {
 	Paused  bool   `json:"paused"`
 	PodName string `json:"pod_name"`
 
+	// RootfsId Current rootfs object id. Present after a rootfs checkpoint is saved or when the sandbox was claimed from a rootfs object.
+	RootfsId *string `json:"rootfs_id,omitempty"`
+
 	// RuntimeGeneration Monotonically increasing runtime generation. Resume starts a new generation.
 	RuntimeGeneration int64                  `json:"runtime_generation"`
 	Services          *[]SandboxAppService   `json:"services,omitempty"`
@@ -1737,6 +1746,9 @@ type SandboxSummary struct {
 
 	// Paused True when status is paused and no runtime is attached.
 	Paused bool `json:"paused"`
+
+	// RootfsId Current rootfs object id when one is associated with the sandbox.
+	RootfsId *string `json:"rootfs_id,omitempty"`
 
 	// RuntimeGeneration Monotonically increasing runtime generation. Resume starts a new generation.
 	RuntimeGeneration int64                  `json:"runtime_generation"`

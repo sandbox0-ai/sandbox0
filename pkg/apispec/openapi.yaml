@@ -3814,6 +3814,9 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ClaimMountRequest"
+        rootfs_id:
+          type: string
+          description: Optional rootfs object to restore before procd initialization. The rootfs base image must match the selected template image.
       required: []
     ClaimMountRequest:
       type: object
@@ -4079,6 +4082,9 @@ components:
         cluster_id:
           type: string
           nullable: true
+        rootfs_id:
+          type: string
+          description: Rootfs object restored for this claim, when provided.
         bootstrap_mounts:
           type: array
           items:
@@ -4102,6 +4108,26 @@ components:
         - SandboxLifecycleStatusResuming
         - SandboxLifecycleStatusTerminating
         - SandboxLifecycleStatusFailed
+    RootFS:
+      type: object
+      description: Immutable sandbox writable root filesystem head that can be used as the base for a future sandbox claim or fork.
+      properties:
+        id:
+          type: string
+        source_sandbox_id:
+          type: string
+        base_image_ref:
+          type: string
+        base_image_digest:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+      required: [id, source_sandbox_id, base_image_ref, base_image_digest, created_at]
     Sandbox:
       type: object
       properties:
@@ -4134,6 +4160,9 @@ components:
           type: integer
           format: int64
           description: Monotonically increasing runtime generation. Resume starts a new generation.
+        rootfs_id:
+          type: string
+          description: Current rootfs object id. Present after a rootfs checkpoint is saved or when the sandbox was claimed from a rootfs object.
         ssh:
           $ref: "#/components/schemas/SandboxSSHConnection"
         expires_at:
@@ -4272,6 +4301,9 @@ components:
           type: integer
           format: int64
           description: Monotonically increasing runtime generation. Resume starts a new generation.
+        rootfs_id:
+          type: string
+          description: Current rootfs object id when one is associated with the sandbox.
         cluster_id:
           type: string
           description: Cluster where sandbox runs (multi-cluster only)

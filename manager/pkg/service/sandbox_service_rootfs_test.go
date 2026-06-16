@@ -435,6 +435,168 @@ func TestFinishRestoredSandboxRuntimeAppliesRootFSLayerChain(t *testing.T) {
 	assert.Equal(t, "rootfs/child.tar", applyReq.Layers[1].Descriptor.ObjectKey)
 }
 
+func TestClaimSandboxAppliesRootFSBeforeInitialize(t *testing.T) {
+	templateID := "template-a"
+	namespace, err := naming.TemplateNamespaceForBuiltin(templateID)
+	require.NoError(t, err)
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      templateID,
+			Namespace: namespace,
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{Image: "docker.io/library/busybox:1.36"},
+		},
+	}
+	templateHash, err := controller.TemplateSpecHash(template)
+	require.NoError(t, err)
+
+	var applySeen atomic.Bool
+	var applyReq ctldapi.ApplyRootFSRequest
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/v1/rootfs/apply", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&applyReq))
+		applySeen.Store(true)
+		_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
+	}))
+	defer ctld.Close()
+	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+
+	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/v1/initialize", r.URL.Path)
+		require.True(t, applySeen.Load(), "rootfs must be applied before procd initialization")
+		require.NoError(t, spec.WriteSuccess(w, http.StatusOK, InitializeResponse{SandboxID: "sandbox-claim", TeamID: "team-1"}))
+	}))
+	defer procd.Close()
+	procdURL, procdPort := parsedTestServer(t, procd.URL)
+
+	idlePod := newClaimTestPod(namespace, "idle-ready", templateID, true)
+	idlePod.Annotations[controller.AnnotationTemplateSpecHash] = templateHash
+	idlePod.Status.HostIP = ctldURL.Hostname()
+	idlePod.Status.PodIP = procdURL.Hostname()
+
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{},
+		rootFSStates: map[string]*SandboxRootFSState{
+			"source-sandbox": {
+				RootFSID:          "rootfs-1",
+				LayerID:           "layer-head",
+				SandboxID:         "source-sandbox",
+				TeamID:            "team-1",
+				Runtime:           "runc",
+				RuntimeHandler:    "io.containerd.runc.v2",
+				BaseImageRef:      "docker.io/library/busybox:1.36",
+				BaseImageDigest:   "sha256:base",
+				Snapshotter:       "overlayfs",
+				SnapshotParent:    "parent-1",
+				DiffDigest:        "sha256:diff",
+				DiffMediaType:     "application/vnd.oci.image.layer.v1.tar",
+				DiffSize:          123,
+				DiffObjectKey:     "rootfs/diff.tar",
+				RuntimeGeneration: 3,
+			},
+		},
+	}
+	client := fake.NewSimpleClientset(idlePod.DeepCopy())
+	svc := &SandboxService{
+		k8sClient:              client,
+		podLister:              newClaimTestPodLister(t, idlePod),
+		secretLister:           newClaimTestSecretLister(t),
+		templateLister:         staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
+		sandboxStore:           store,
+		ctldClient:             NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		procdClient:            NewProcdClient(ProcdClientConfig{Timeout: time.Second}),
+		internalTokenGenerator: staticTokenGenerator{},
+		config: SandboxServiceConfig{
+			CtldEnabled: true,
+			CtldPort:    ctldPort,
+			ProcdPort:   procdPort,
+		},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+
+	resp, err := svc.ClaimSandbox(context.Background(), &ClaimRequest{
+		TeamID:    "team-1",
+		UserID:    "user-1",
+		Template:  templateID,
+		RootFSID:  "rootfs-1",
+		SandboxID: "sandbox-claim",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "rootfs-1", resp.RootFSID)
+	assert.Equal(t, "layer-head", applyReq.BaselineLayerID)
+	require.Len(t, applyReq.Layers, 1)
+	assert.Equal(t, "layer-head", applyReq.Layers[0].LayerID)
+	assert.Equal(t, "rootfs-1", store.records["sandbox-claim"].RootFSID)
+}
+
+func TestRootFSClaimRejectsTemplateImageMismatch(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "template-a", Namespace: "ns-a"},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{Image: "docker.io/library/alpine:3.20"},
+		},
+	}
+	store := &memorySandboxStore{
+		rootFSStates: map[string]*SandboxRootFSState{
+			"source-sandbox": {
+				RootFSID:        "rootfs-1",
+				SandboxID:       "source-sandbox",
+				TeamID:          "team-1",
+				BaseImageRef:    "docker.io/library/busybox:1.36",
+				BaseImageDigest: "sha256:base",
+				DiffDigest:      "sha256:diff",
+				DiffObjectKey:   "rootfs/diff.tar",
+			},
+		},
+	}
+	svc := &SandboxService{sandboxStore: store}
+
+	_, err := svc.rootFSStateForClaim(context.Background(), &ClaimRequest{
+		TeamID:   "team-1",
+		RootFSID: "rootfs-1",
+	}, template)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidClaimRequest)
+}
+
+func TestRootFSClaimAcceptsDockerHubNormalizedImage(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "template-a", Namespace: "ns-a"},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{Image: "busybox:1.36"},
+		},
+	}
+	store := &memorySandboxStore{
+		rootFSStates: map[string]*SandboxRootFSState{
+			"source-sandbox": {
+				RootFSID:        "rootfs-1",
+				SandboxID:       "source-sandbox",
+				TeamID:          "team-1",
+				BaseImageRef:    "docker.io/library/busybox:1.36",
+				BaseImageDigest: "sha256:base",
+				DiffDigest:      "sha256:diff",
+				DiffObjectKey:   "rootfs/diff.tar",
+			},
+		},
+	}
+	svc := &SandboxService{sandboxStore: store}
+	require.Equal(t,
+		normalizeImageRefForRootFSCompare("docker.io/library/busybox:1.36"),
+		normalizeImageRefForRootFSCompare("busybox:1.36"),
+	)
+
+	state, err := svc.rootFSStateForClaim(context.Background(), &ClaimRequest{
+		TeamID:   "team-1",
+		RootFSID: "rootfs-1",
+	}, template)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, "rootfs-1", state.RootFSID)
+}
+
 func TestFinishRestoredSandboxRuntimeRetriesWithCheckpointBaseImage(t *testing.T) {
 	withClaimTestPublicKey(t)
 

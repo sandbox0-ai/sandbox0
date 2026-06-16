@@ -40,6 +40,7 @@ type SandboxRecord struct {
 	CurrentPodName      string
 	CurrentPodNamespace string
 	RuntimeGeneration   int64
+	RootFSID            string
 	ClaimedAt           time.Time
 	ExpiresAt           time.Time
 	HardExpiresAt       time.Time
@@ -51,6 +52,7 @@ type SandboxRecord struct {
 // SandboxRootFSState is manager-internal metadata for one persisted sandbox
 // writable rootfs diff.
 type SandboxRootFSState struct {
+	RootFSID            string
 	LayerID             string
 	ParentLayerID       string
 	SandboxID           string
@@ -69,6 +71,7 @@ type SandboxRootFSState struct {
 	DiffObjectKey       string
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
+	ExpiresAt           time.Time
 	LayerChain          []*SandboxRootFSLayer
 }
 
@@ -104,6 +107,7 @@ type SandboxStore interface {
 	MarkSandboxDeleted(ctx context.Context, sandboxID string, deletedAt time.Time) error
 	SaveRootFSState(ctx context.Context, state *SandboxRootFSState) error
 	GetLatestRootFSState(ctx context.Context, sandboxID string) (*SandboxRootFSState, error)
+	GetRootFSState(ctx context.Context, teamID, rootFSID string) (*SandboxRootFSState, error)
 	WithSandboxLock(ctx context.Context, sandboxID string, fn func(context.Context, SandboxStoreTx, *SandboxRecord) error) error
 }
 
@@ -157,9 +161,9 @@ func (s *PGSandboxStore) UpsertSandbox(ctx context.Context, record *SandboxRecor
 			sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
 			cluster_id, status, config, mounts, template_spec,
 			current_pod_name, current_pod_namespace, runtime_generation,
-			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
+			rootfs_id, claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, COALESCE($19, NOW()), NOW())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, COALESCE($20, NOW()), NOW())
 		ON CONFLICT (sandbox_id) DO UPDATE SET
 			team_id = EXCLUDED.team_id,
 			user_id = EXCLUDED.user_id,
@@ -174,6 +178,7 @@ func (s *PGSandboxStore) UpsertSandbox(ctx context.Context, record *SandboxRecor
 			current_pod_name = EXCLUDED.current_pod_name,
 			current_pod_namespace = EXCLUDED.current_pod_namespace,
 			runtime_generation = EXCLUDED.runtime_generation,
+			rootfs_id = EXCLUDED.rootfs_id,
 			claimed_at = EXCLUDED.claimed_at,
 			expires_at = EXCLUDED.expires_at,
 			hard_expires_at = EXCLUDED.hard_expires_at,
@@ -182,7 +187,7 @@ func (s *PGSandboxStore) UpsertSandbox(ctx context.Context, record *SandboxRecor
 	`, record.ID, record.TeamID, record.UserID, record.TemplateID, record.TemplateName, record.TemplateNamespace,
 		record.ClusterID, record.Status, configJSON, mountsJSON, specJSON,
 		record.CurrentPodName, record.CurrentPodNamespace, record.RuntimeGeneration,
-		nullableTime(record.ClaimedAt), nullableTime(record.ExpiresAt), nullableTime(record.HardExpiresAt), nullableTime(record.DeletedAt), nullableTime(record.CreatedAt))
+		record.RootFSID, nullableTime(record.ClaimedAt), nullableTime(record.ExpiresAt), nullableTime(record.HardExpiresAt), nullableTime(record.DeletedAt), nullableTime(record.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("upsert sandbox: %w", err)
 	}
@@ -313,6 +318,9 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 	if _, err := s.pool.Exec(ctx, `DELETE FROM manager.sandbox_rootfs_states WHERE sandbox_id = $1`, sandboxID); err != nil {
 		return fmt.Errorf("delete sandbox rootfs states: %w", err)
 	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM manager.rootfs_snapshots WHERE source_sandbox_id = $1`, sandboxID); err != nil {
+		return fmt.Errorf("delete sandbox rootfs objects: %w", err)
+	}
 	if _, err := s.pool.Exec(ctx, `DELETE FROM manager.sandbox_rootfs_heads WHERE sandbox_id = $1`, sandboxID); err != nil {
 		return fmt.Errorf("delete sandbox rootfs head: %w", err)
 	}
@@ -337,11 +345,27 @@ func (s *PGSandboxStore) GetLatestRootFSState(ctx context.Context, sandboxID str
 	if len(chain) > 0 {
 		return rootFSStateFromLayerChain(sandboxID, chain), nil
 	}
-	return scanRootFSState(s.pool.QueryRow(ctx, rootFSStateSelectSQL()+`
+	state, err := scanRootFSState(s.pool.QueryRow(ctx, rootFSStateSelectSQL()+`
 		WHERE sandbox_id = $1
 		ORDER BY runtime_generation DESC, updated_at DESC
 		LIMIT 1
 	`, sandboxID))
+	if err != nil || state != nil {
+		return state, err
+	}
+	record, err := s.GetSandbox(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	if record == nil || strings.TrimSpace(record.RootFSID) == "" {
+		return nil, nil
+	}
+	state, err = s.GetRootFSState(ctx, record.TeamID, record.RootFSID)
+	if err != nil || state == nil {
+		return state, err
+	}
+	state.SandboxID = sandboxID
+	return state, nil
 }
 
 func (s *PGSandboxStore) GetRootFSLayerChain(ctx context.Context, sandboxID string) ([]*SandboxRootFSLayer, error) {
@@ -365,6 +389,42 @@ func (s *PGSandboxStore) GetRootFSLayerChain(ctx context.Context, sandboxID stri
 		return nil, fmt.Errorf("iterate rootfs layer chain: %w", err)
 	}
 	return layers, nil
+}
+
+func (s *PGSandboxStore) GetRootFSState(ctx context.Context, teamID, rootFSID string) (*SandboxRootFSState, error) {
+	if s == nil || s.pool == nil {
+		return nil, nil
+	}
+	teamID = strings.TrimSpace(teamID)
+	rootFSID = strings.TrimSpace(rootFSID)
+	if teamID == "" || rootFSID == "" {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx, rootFSObjectLayerChainSQL(), teamID, rootFSID)
+	if err != nil {
+		return nil, fmt.Errorf("get rootfs object layer chain: %w", err)
+	}
+	defer rows.Close()
+	var layers []*SandboxRootFSLayer
+	for rows.Next() {
+		layer, err := scanRootFSLayerRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		layers = append(layers, layer)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rootfs object layer chain: %w", err)
+	}
+	if len(layers) == 0 {
+		return nil, nil
+	}
+	head := layers[len(layers)-1]
+	state := rootFSStateFromLayerChain(head.SourceSandboxID, layers)
+	if state != nil {
+		state.RootFSID = rootFSID
+	}
+	return state, nil
 }
 
 func (s *PGSandboxStore) WithSandboxLock(ctx context.Context, sandboxID string, fn func(context.Context, SandboxStoreTx, *SandboxRecord) error) error {
@@ -441,7 +501,7 @@ func sandboxRecordSelectSQL() string {
 		SELECT sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
 			cluster_id, status, config, mounts, template_spec,
 			current_pod_name, current_pod_namespace, runtime_generation,
-			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
+			rootfs_id, claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 		FROM manager.sandboxes`
 }
 
@@ -464,6 +524,9 @@ func saveRootFSState(ctx context.Context, exec rootFSStateExecutor, state *Sandb
 	}
 	if strings.TrimSpace(state.DiffObjectKey) == "" {
 		return fmt.Errorf("diff_object_key is required")
+	}
+	if strings.TrimSpace(state.RootFSID) != "" && strings.TrimSpace(state.LayerID) == "" {
+		return fmt.Errorf("layer_id is required for rootfs object")
 	}
 	parentChainJSON, err := json.Marshal(state.SnapshotParentChain)
 	if err != nil {
@@ -551,6 +614,27 @@ func saveRootFSLayerAndHead(ctx context.Context, exec rootFSStateExecutor, state
 	if err != nil {
 		return fmt.Errorf("advance rootfs head: %w", err)
 	}
+	if strings.TrimSpace(state.RootFSID) != "" {
+		_, err = exec.Exec(ctx, `
+			INSERT INTO manager.rootfs_snapshots (
+				snapshot_id, team_id, source_sandbox_id, head_layer_id, created_at, expires_at
+			)
+			VALUES ($1, $2, $3, $4, COALESCE($5, NOW()), $6)
+			ON CONFLICT (snapshot_id) DO NOTHING
+		`, state.RootFSID, state.TeamID, state.SandboxID, state.LayerID, nullableTime(state.CreatedAt), nullableTime(state.ExpiresAt))
+		if err != nil {
+			return fmt.Errorf("save rootfs object: %w", err)
+		}
+		_, err = exec.Exec(ctx, `
+			UPDATE manager.sandboxes
+			SET rootfs_id = $2,
+				updated_at = NOW()
+			WHERE sandbox_id = $1
+		`, state.SandboxID, state.RootFSID)
+		if err != nil {
+			return fmt.Errorf("advance sandbox rootfs object: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -575,6 +659,38 @@ func rootFSLayerChainSQL() string {
 			FROM manager.sandbox_rootfs_heads h
 			JOIN manager.rootfs_layers l ON l.layer_id = h.head_layer_id
 			WHERE h.sandbox_id = $1
+			UNION ALL
+			SELECT
+				p.layer_id, p.parent_layer_id, p.source_sandbox_id, p.team_id,
+				p.runtime_generation, p.runtime, p.runtime_handler, p.base_image_ref,
+				p.base_image_digest, p.snapshotter, p.snapshot_parent,
+				p.snapshot_parent_chain, p.diff_digest, p.diff_id, p.diff_media_type,
+				p.diff_size, p.diff_object_key, p.created_at, c.depth + 1 AS depth
+			FROM manager.rootfs_layers p
+			JOIN chain c ON p.layer_id = c.parent_layer_id
+		)
+		SELECT layer_id, parent_layer_id, source_sandbox_id, team_id, runtime_generation,
+			runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,
+			snapshot_parent, snapshot_parent_chain, diff_digest, diff_id, diff_media_type,
+			diff_size, diff_object_key, created_at
+		FROM chain
+		ORDER BY depth DESC`
+}
+
+func rootFSObjectLayerChainSQL() string {
+	return `
+		WITH RECURSIVE chain AS (
+			SELECT
+				l.layer_id, l.parent_layer_id, l.source_sandbox_id, l.team_id,
+				l.runtime_generation, l.runtime, l.runtime_handler, l.base_image_ref,
+				l.base_image_digest, l.snapshotter, l.snapshot_parent,
+				l.snapshot_parent_chain, l.diff_digest, l.diff_id, l.diff_media_type,
+				l.diff_size, l.diff_object_key, l.created_at, 0 AS depth
+			FROM manager.rootfs_snapshots r
+			JOIN manager.rootfs_layers l ON l.layer_id = r.head_layer_id
+			WHERE r.team_id = $1
+				AND r.snapshot_id = $2
+				AND (r.expires_at IS NULL OR r.expires_at > NOW())
 			UNION ALL
 			SELECT
 				p.layer_id, p.parent_layer_id, p.source_sandbox_id, p.team_id,
@@ -696,7 +812,7 @@ func scanSandboxRecordInto(scanner sandboxRecordScanner) (*SandboxRecord, error)
 		&record.ID, &record.TeamID, &record.UserID, &record.TemplateID, &record.TemplateName, &record.TemplateNamespace,
 		&record.ClusterID, &record.Status, &configJSON, &mountsJSON, &specJSON,
 		&record.CurrentPodName, &record.CurrentPodNamespace, &record.RuntimeGeneration,
-		&claimedAt, &expiresAt, &hardExpiresAt, &deletedAt, &record.CreatedAt, &record.UpdatedAt,
+		&record.RootFSID, &claimedAt, &expiresAt, &hardExpiresAt, &deletedAt, &record.CreatedAt, &record.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}

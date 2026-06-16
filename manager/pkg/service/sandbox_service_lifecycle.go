@@ -429,7 +429,11 @@ func (s *SandboxService) GetSandbox(ctx context.Context, sandboxID string) (*San
 		return nil, fmt.Errorf("get pod: %w", err)
 	}
 
-	return s.podToSandbox(ctx, pod, sandboxID), nil
+	sandbox := s.podToSandbox(ctx, pod, sandboxID)
+	if sandbox != nil && sandbox.RootFSID == "" && record != nil {
+		sandbox.RootFSID = record.RootFSID
+	}
+	return sandbox, nil
 }
 
 // UpdateSandbox updates mutable sandbox configuration fields.
@@ -684,8 +688,18 @@ func (s *SandboxService) persistUpdatedSandboxPod(ctx context.Context, pod *core
 	if template == nil {
 		return nil
 	}
+	sandboxID := sandboxIDFromPod(pod)
+	if sandboxID == "" {
+		sandboxID = pod.Name
+	}
+	rootFSID := strings.TrimSpace(pod.Annotations[controller.AnnotationRootFSID])
+	if rootFSID == "" && sandboxID != "" {
+		if existing, err := s.sandboxStore.GetSandbox(ctx, sandboxID); err == nil && existing != nil {
+			rootFSID = existing.RootFSID
+		}
+	}
 	record := &SandboxRecord{
-		ID:                  sandboxIDFromPod(pod),
+		ID:                  sandboxID,
 		TeamID:              pod.Annotations[controller.AnnotationTeamID],
 		UserID:              pod.Annotations[controller.AnnotationUserID],
 		TemplateID:          sandboxTemplateIDFromLabels(pod.Labels),
@@ -699,13 +713,11 @@ func (s *SandboxService) persistUpdatedSandboxPod(ctx context.Context, pod *core
 		CurrentPodName:      pod.Name,
 		CurrentPodNamespace: pod.Namespace,
 		RuntimeGeneration:   runtimeGenerationFromPod(pod),
+		RootFSID:            rootFSID,
 		ClaimedAt:           parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationClaimedAt),
 		ExpiresAt:           parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt),
 		HardExpiresAt:       parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt),
 		CreatedAt:           pod.CreationTimestamp.Time,
-	}
-	if record.ID == "" {
-		record.ID = pod.Name
 	}
 	return s.sandboxStore.UpsertSandbox(ctx, record)
 }
@@ -805,6 +817,7 @@ func (s *SandboxService) podToSandbox(ctx context.Context, pod *corev1.Pod, sand
 		Mounts:            parseClaimMounts(pod.Annotations[controller.AnnotationMounts]),
 		PodName:           pod.Name,
 		RuntimeGeneration: runtimeGenerationFromPod(pod),
+		RootFSID:          strings.TrimSpace(pod.Annotations[controller.AnnotationRootFSID]),
 		ExpiresAt:         expiresAt,
 		HardExpiresAt:     hardExpiresAt,
 		ClaimedAt:         claimedAt,
@@ -833,6 +846,7 @@ func (s *SandboxService) recordToSandbox(record *SandboxRecord) *Sandbox {
 		Mounts:            record.Mounts,
 		PodName:           record.CurrentPodName,
 		RuntimeGeneration: record.RuntimeGeneration,
+		RootFSID:          record.RootFSID,
 		ExpiresAt:         record.ExpiresAt,
 		HardExpiresAt:     record.HardExpiresAt,
 		ClaimedAt:         record.ClaimedAt,

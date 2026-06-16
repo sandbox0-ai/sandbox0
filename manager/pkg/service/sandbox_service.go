@@ -32,6 +32,7 @@ type Sandbox struct {
 	Mounts            []ClaimMount        `json:"mounts,omitempty"`
 	PodName           string              `json:"pod_name"`
 	RuntimeGeneration int64               `json:"runtime_generation"`
+	RootFSID          string              `json:"rootfs_id,omitempty"`
 	ExpiresAt         time.Time           `json:"expires_at"`
 	HardExpiresAt     time.Time           `json:"hard_expires_at"`
 	ClaimedAt         time.Time           `json:"claimed_at"`

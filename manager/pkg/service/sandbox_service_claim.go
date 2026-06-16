@@ -38,6 +38,7 @@ type ClaimRequest struct {
 	Template string         `json:"template"`
 	Config   *SandboxConfig `json:"config,omitempty"`
 	Mounts   []ClaimMount   `json:"mounts,omitempty"`
+	RootFSID string         `json:"rootfs_id,omitempty"`
 	Metadata *ClaimMetadata `json:"-"`
 	// SandboxID is an internal stable ID used when recreating an existing sandbox.
 	SandboxID string `json:"-"`
@@ -278,6 +279,7 @@ type ClaimResponse struct {
 	PodName         string                 `json:"pod_name"`
 	Template        string                 `json:"template"`
 	ClusterId       *string                `json:"cluster_id,omitempty"`
+	RootFSID        string                 `json:"rootfs_id,omitempty"`
 	BootstrapMounts []BootstrapMountStatus `json:"bootstrap_mounts,omitempty"`
 }
 
@@ -373,6 +375,15 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	}
 	if req.RuntimeGeneration <= 0 {
 		req.RuntimeGeneration = 1
+	}
+	var rootFSState *SandboxRootFSState
+	if strings.TrimSpace(req.RootFSID) != "" {
+		phaseStarted = time.Now()
+		rootFSState, err = s.rootFSStateForClaim(ctx, req, template)
+		s.observeClaimPhase(req.Template, "unknown", "load_rootfs", phaseStarted, err)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	phaseStarted = time.Now()
@@ -474,6 +485,19 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		s.refreshSandboxProbeConditionsAsync(pod)
 	}
 
+	if rootFSState != nil {
+		phaseStarted = time.Now()
+		pod, err = s.applySandboxRootFSCheckpointWithFallback(ctx, pod, nil, template, req, rootFSState)
+		s.observeClaimPhase(req.Template, claimType, "apply_rootfs", phaseStarted, err)
+		if err != nil {
+			s.requestSandboxDeletionAfterClaimFailure(pod, "rootfs apply failed")
+			if metrics != nil {
+				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+			}
+			return nil, fmt.Errorf("apply rootfs: %w", err)
+		}
+	}
+
 	phaseStarted = time.Now()
 	portalMounts, err := s.bindVolumePortals(ctx, pod, req, template)
 	s.observeClaimPhase(req.Template, claimType, "bind_volume_portals", phaseStarted, err)
@@ -539,6 +563,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		PodName:         pod.Name,
 		Template:        req.Template,
 		ClusterId:       template.Spec.ClusterId,
+		RootFSID:        req.RootFSID,
 		BootstrapMounts: portalMounts,
 	}, nil
 }
@@ -556,6 +581,10 @@ func (s *SandboxService) persistClaimedSandbox(ctx context.Context, pod *corev1.
 	}
 	cfg := parseSandboxConfig(pod.Annotations[controller.AnnotationConfig])
 	mounts := parseClaimMounts(pod.Annotations[controller.AnnotationMounts])
+	rootFSID := strings.TrimSpace(pod.Annotations[controller.AnnotationRootFSID])
+	if rootFSID == "" {
+		rootFSID = strings.TrimSpace(req.RootFSID)
+	}
 	return s.sandboxStore.UpsertSandbox(ctx, &SandboxRecord{
 		ID:                  sandboxID,
 		TeamID:              req.TeamID,
@@ -571,6 +600,7 @@ func (s *SandboxService) persistClaimedSandbox(ctx context.Context, pod *corev1.
 		CurrentPodName:      pod.Name,
 		CurrentPodNamespace: pod.Namespace,
 		RuntimeGeneration:   runtimeGenerationFromPod(pod),
+		RootFSID:            rootFSID,
 		ClaimedAt:           parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationClaimedAt),
 		ExpiresAt:           parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt),
 		HardExpiresAt:       parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt),
@@ -925,6 +955,11 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		pod.Annotations = controller.ClaimedSandboxPodAnnotations(pod.Annotations)
 		pod.Annotations[controller.AnnotationSandboxID] = sandboxID
 		pod.Annotations[controller.AnnotationRuntimeGeneration] = strconv.FormatInt(req.RuntimeGeneration, 10)
+		if rootFSID := strings.TrimSpace(req.RootFSID); rootFSID != "" {
+			pod.Annotations[controller.AnnotationRootFSID] = rootFSID
+		} else {
+			delete(pod.Annotations, controller.AnnotationRootFSID)
+		}
 		pod.Annotations[controller.AnnotationTeamID] = req.TeamID
 		pod.Annotations[controller.AnnotationUserID] = req.UserID
 		pod.Annotations[controller.AnnotationClaimedAt] = s.clock.Now().Format(time.RFC3339)
@@ -1079,6 +1114,9 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		controller.AnnotationClaimedAt:         s.clock.Now().Format(time.RFC3339),
 		controller.AnnotationClaimType:         "cold",
 	})
+	if rootFSID := strings.TrimSpace(req.RootFSID); rootFSID != "" {
+		annotations[controller.AnnotationRootFSID] = rootFSID
+	}
 	if stateVolume != nil {
 		annotations[controller.AnnotationWebhookStateVolumeID] = stateVolume.VolumeID
 	}

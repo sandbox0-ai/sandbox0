@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
@@ -35,6 +36,7 @@ type SandboxSummary struct {
 	Status            string    `json:"status"`
 	Paused            bool      `json:"paused"`
 	RuntimeGeneration int64     `json:"runtime_generation"`
+	RootFSID          string    `json:"rootfs_id,omitempty"`
 	CreatedAt         time.Time `json:"created_at"`
 	ExpiresAt         time.Time `json:"expires_at"`
 	HardExpiresAt     time.Time `json:"hard_expires_at"`
@@ -107,6 +109,7 @@ func (s *SandboxService) ListSandboxes(ctx context.Context, req *ListSandboxesRe
 			Status:            status,
 			Paused:            paused,
 			RuntimeGeneration: runtimeGenerationFromPod(pod),
+			RootFSID:          strings.TrimSpace(pod.Annotations[controller.AnnotationRootFSID]),
 			CreatedAt:         pod.CreationTimestamp.Time,
 			ExpiresAt:         expiresAt,
 			HardExpiresAt:     hardExpiresAt,
@@ -161,6 +164,9 @@ func (s *SandboxService) listSandboxesFromStore(ctx context.Context, req *ListSa
 		if record.CurrentPodName != "" && !recordLifecycleStatusOverridesPod(record.Status) {
 			if pod, err := s.getSandboxPod(ctx, record.ID); err == nil {
 				sandbox = s.podToSandbox(ctx, pod, record.ID)
+				if sandbox != nil && sandbox.RootFSID == "" {
+					sandbox.RootFSID = record.RootFSID
+				}
 			}
 		}
 		if req.Paused != nil && sandbox.Paused != *req.Paused {
@@ -172,6 +178,7 @@ func (s *SandboxService) listSandboxesFromStore(ctx context.Context, req *ListSa
 			Status:            sandbox.Status,
 			Paused:            sandbox.Paused,
 			RuntimeGeneration: sandbox.RuntimeGeneration,
+			RootFSID:          sandbox.RootFSID,
 			CreatedAt:         sandbox.CreatedAt,
 			ExpiresAt:         sandbox.ExpiresAt,
 			HardExpiresAt:     sandbox.HardExpiresAt,

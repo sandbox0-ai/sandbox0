@@ -27,7 +27,8 @@ A common confusion is mixing compute state and durable state.
 
 - Process state lives in the sandbox runtime and disappears when the runtime is paused or deleted.
 - Sandbox0 restores the writable root filesystem checkpoint for paused sandboxes, so files written outside mounted volumes survive pause/resume for the same sandbox identity.
-- The rootfs checkpoint is not a Volume. It is not shareable across sandboxes, does not expose volume snapshot/fork APIs, and is deleted with the sandbox identity.
+- A saved rootfs checkpoint has a `rootfs_id` that can be used as the base for a later sandbox claim when the template image matches the checkpoint base image.
+- The rootfs checkpoint is not a Volume. It does not expose mounted sharing, direct file APIs, or Volume snapshot/fork APIs, and it is deleted with the sandbox identity.
 - Durable state that must survive sandbox delete or `hard_ttl`, needs snapshots, or needs sharing outside the sandbox identity should be written to volumes or external systems.
 - If your agent must recover after failures or redeploys, treat sandbox runtime as ephemeral and volumes as the source of truth.
 

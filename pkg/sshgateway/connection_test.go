@@ -32,6 +32,7 @@ func TestSandboxToAPIIncludesSSHInfo(t *testing.T) {
 		UserID:        "user-1",
 		Status:        "running",
 		PodName:       "pod-1",
+		RootFSID:      "rootfs-1",
 		AutoResume:    true,
 		Paused:        false,
 		ClaimedAt:     now,
@@ -55,5 +56,8 @@ func TestSandboxToAPIIncludesSSHInfo(t *testing.T) {
 	}
 	if payload.Ssh.Username != sandbox.ID {
 		t.Fatalf("ssh username = %q", payload.Ssh.Username)
+	}
+	if payload.RootfsId == nil || *payload.RootfsId != "rootfs-1" {
+		t.Fatalf("rootfs_id = %v", payload.RootfsId)
 	}
 }

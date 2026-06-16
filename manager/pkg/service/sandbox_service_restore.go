@@ -100,7 +100,11 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 		return s.GetSandbox(ctx, sandboxID)
 	}
 
-	if err := s.finishRestoredSandboxRuntime(ctx, pod, record, claimType); err != nil {
+	restoredPod, err := s.finishRestoredSandboxRuntime(ctx, pod, record, claimType)
+	if err != nil {
+		if restoredPod != nil {
+			pod = restoredPod
+		}
 		s.requestSandboxDeletionAfterClaimFailure(pod, "restored runtime initialization failed")
 		_ = s.pauseSandboxRuntime(context.Background(), sandboxID, false)
 		return nil, err
@@ -108,15 +112,15 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 	return s.GetSandbox(ctx, sandboxID)
 }
 
-func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, claimType string) error {
+func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, claimType string) (*corev1.Pod, error) {
 	template, err := s.templateForSandboxRecord(record)
 	if err != nil {
-		return err
+		return pod, err
 	}
 	if claimType == "cold" {
 		readyPod, err := s.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
 		if err != nil {
-			return fmt.Errorf("wait for pod claim readiness: %w", err)
+			return pod, fmt.Errorf("wait for pod claim readiness: %w", err)
 		}
 		pod = readyPod
 		s.refreshSandboxProbeConditionsAsync(pod)
@@ -132,26 +136,27 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	}
 	rootFSState, err := s.latestRootFSState(ctx, record.ID)
 	if err != nil {
-		return fmt.Errorf("load rootfs checkpoint: %w", err)
+		return pod, fmt.Errorf("load rootfs checkpoint: %w", err)
 	}
-	if err := s.applySandboxRootFSCheckpoint(ctx, pod, rootFSState); err != nil {
-		return err
+	pod, err = s.applySandboxRootFSCheckpointWithFallback(ctx, pod, record, template, req, rootFSState)
+	if err != nil {
+		return pod, err
 	}
 	if _, err := s.bindVolumePortals(ctx, pod, req, template); err != nil {
-		return fmt.Errorf("bind volume portals: %w", err)
+		return pod, fmt.Errorf("bind volume portals: %w", err)
 	}
 	if err := s.bindWebhookStatePortal(ctx, pod, req); err != nil {
-		return fmt.Errorf("bind webhook state portal: %w", err)
+		return pod, fmt.Errorf("bind webhook state portal: %w", err)
 	}
 	procdAddress, err := s.prodAddress(ctx, pod)
 	if err != nil {
-		return fmt.Errorf("get procd address: %w", err)
+		return pod, fmt.Errorf("get procd address: %w", err)
 	}
 	if _, err := s.initializeProcd(ctx, pod, req, procdAddress); err != nil {
-		return fmt.Errorf("initialize procd: %w", err)
+		return pod, fmt.Errorf("initialize procd: %w", err)
 	}
 	if err := s.persistUpdatedSandboxPod(ctx, pod); err != nil {
-		return fmt.Errorf("persist restored sandbox: %w", err)
+		return pod, fmt.Errorf("persist restored sandbox: %w", err)
 	}
 	if s.logger != nil {
 		s.logger.Info("Resumed paused sandbox runtime",
@@ -160,7 +165,7 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 			zap.String("claimType", claimType),
 		)
 	}
-	return nil
+	return pod, nil
 }
 
 func (s *SandboxService) templateForSandboxRecord(record *SandboxRecord) (*v1alpha1.SandboxTemplate, error) {

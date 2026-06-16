@@ -9,8 +9,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	godigest "github.com/opencontainers/go-digest"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -124,6 +127,113 @@ func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *
 		return fmt.Errorf("apply sandbox rootfs checkpoint: ctld did not report applied")
 	}
 	return nil
+}
+
+func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, template *v1alpha1.SandboxTemplate, req *ClaimRequest, state *SandboxRootFSState) (*corev1.Pod, error) {
+	if state == nil {
+		return pod, nil
+	}
+	err := s.applySandboxRootFSCheckpoint(ctx, pod, state)
+	if err == nil {
+		return pod, nil
+	}
+	fallbackTemplate, fallbackErr := templateWithCheckpointBaseImage(template, state)
+	if fallbackErr != nil {
+		return pod, fmt.Errorf("%w; checkpoint base image fallback unavailable: %v", err, fallbackErr)
+	}
+	if s != nil && s.logger != nil {
+		s.logger.Warn("Rootfs force-apply failed; retrying with checkpoint base image",
+			zap.String("sandboxID", state.SandboxID),
+			zap.String("baseImageRef", state.BaseImageRef),
+			zap.String("baseImageDigest", state.BaseImageDigest),
+			zap.Error(err),
+		)
+	}
+	s.requestSandboxDeletionAfterClaimFailure(pod, "rootfs force-apply failed")
+
+	fallbackPod, fallbackErr := s.createNewPod(ctx, fallbackTemplate, req)
+	if fallbackErr != nil {
+		return pod, fmt.Errorf("%w; create checkpoint base image runtime: %v", err, fallbackErr)
+	}
+	readyPod, fallbackErr := s.waitForPodClaimReady(ctx, fallbackPod.Namespace, fallbackPod.Name)
+	if fallbackErr != nil {
+		s.requestSandboxDeletionAfterClaimFailure(fallbackPod, "checkpoint base image runtime readiness failed")
+		return fallbackPod, fmt.Errorf("%w; wait for checkpoint base image runtime: %v", err, fallbackErr)
+	}
+	if fallbackErr := s.saveRestoredRuntimePod(ctx, readyPod, record, SandboxStatusResuming); fallbackErr != nil {
+		s.requestSandboxDeletionAfterClaimFailure(readyPod, "checkpoint base image runtime persistence failed")
+		return readyPod, fmt.Errorf("%w; save checkpoint base image runtime: %v", err, fallbackErr)
+	}
+	if fallbackErr := s.applySandboxRootFSCheckpoint(ctx, readyPod, state); fallbackErr != nil {
+		s.requestSandboxDeletionAfterClaimFailure(readyPod, "checkpoint base image rootfs apply failed")
+		return readyPod, fmt.Errorf("%w; checkpoint base image retry failed: %v", err, fallbackErr)
+	}
+	return readyPod, nil
+}
+
+func (s *SandboxService) saveRestoredRuntimePod(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, status string) error {
+	if s == nil || s.sandboxStore == nil || pod == nil || record == nil {
+		return nil
+	}
+	sandboxID := strings.TrimSpace(record.ID)
+	if sandboxID == "" {
+		sandboxID = sandboxIDFromPod(pod)
+	}
+	if sandboxID == "" {
+		return fmt.Errorf("sandbox_id is required")
+	}
+	return s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, _ *SandboxRecord) error {
+		return tx.SaveRuntime(lockCtx, sandboxID, pod.Namespace, pod.Name, status, runtimeGenerationFromPod(pod), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt))
+	})
+}
+
+func templateWithCheckpointBaseImage(template *v1alpha1.SandboxTemplate, state *SandboxRootFSState) (*v1alpha1.SandboxTemplate, error) {
+	if template == nil {
+		return nil, fmt.Errorf("template is required")
+	}
+	image, err := checkpointBaseImageRef(state)
+	if err != nil {
+		return nil, err
+	}
+	clone := template.DeepCopy()
+	clone.Spec.MainContainer.Image = image
+	clone.Spec.MainContainer.ImagePullPolicy = string(corev1.PullIfNotPresent)
+	return clone, nil
+}
+
+func checkpointBaseImageRef(state *SandboxRootFSState) (string, error) {
+	if state == nil {
+		return "", fmt.Errorf("rootfs state is required")
+	}
+	repo := imageRepositoryFromRef(state.BaseImageRef)
+	if repo == "" {
+		return "", fmt.Errorf("base image ref is required")
+	}
+	digestValue := strings.TrimSpace(state.BaseImageDigest)
+	if digestValue == "" {
+		return "", fmt.Errorf("base image digest is required")
+	}
+	parsed, err := godigest.Parse(digestValue)
+	if err != nil {
+		return "", fmt.Errorf("base image digest %q is invalid: %w", digestValue, err)
+	}
+	return repo + "@" + parsed.String(), nil
+}
+
+func imageRepositoryFromRef(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	if idx := strings.LastIndex(ref, "@"); idx >= 0 {
+		ref = ref[:idx]
+	}
+	lastSlash := strings.LastIndex(ref, "/")
+	lastColon := strings.LastIndex(ref, ":")
+	if lastColon > lastSlash {
+		ref = ref[:lastColon]
+	}
+	return strings.TrimSpace(ref)
 }
 
 func rootFSLayerDescriptors(state *SandboxRootFSState) []ctldapi.RootFSLayerDescriptor {

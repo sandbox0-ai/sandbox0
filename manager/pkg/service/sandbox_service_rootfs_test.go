@@ -260,6 +260,7 @@ func TestPauseSandboxRuntimeFallsBackToRootLayerWhenBaselineIsMissing(t *testing
 	require.NotNil(t, state)
 	assert.NotEmpty(t, state.LayerID)
 	assert.Empty(t, state.ParentLayerID)
+	assert.Equal(t, "layer-parent", state.ExpectedHeadLayerID)
 	assert.Equal(t, "sha256:full", state.DiffDigest)
 }
 

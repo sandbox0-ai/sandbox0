@@ -898,7 +898,25 @@ func cloneRootFSStateForManagerIntegration(state *service.SandboxRootFSState) *s
 	}
 	clone := *state
 	clone.SnapshotParentChain = append([]string(nil), state.SnapshotParentChain...)
+	clone.LayerChain = cloneRootFSLayersForManagerIntegration(state.LayerChain)
 	return &clone
+}
+
+func cloneRootFSLayersForManagerIntegration(layers []*service.SandboxRootFSLayer) []*service.SandboxRootFSLayer {
+	if len(layers) == 0 {
+		return nil
+	}
+	out := make([]*service.SandboxRootFSLayer, 0, len(layers))
+	for _, layer := range layers {
+		if layer == nil {
+			out = append(out, nil)
+			continue
+		}
+		clone := *layer
+		clone.SnapshotParentChain = append([]string(nil), layer.SnapshotParentChain...)
+		out = append(out, &clone)
+	}
+	return out
 }
 
 func (r *initializeRequestRecorder) Get() service.InitializeRequest {

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -197,6 +198,7 @@ func buildRootFSController(storageCfg *apiconfig.StorageProxyConfig) ctldserver.
 			ContainerdHostRoot:     containerdHostRoot,
 			ContainerdDataRoot:     containerdDataRoot,
 			ContainerdHostDataRoot: containerdHostDataRoot,
+			RootFSCacheDir:         filepath.Join(portalRoot, "rootfs"),
 			Namespace:              containerdNamespace,
 		}),
 		Store: store,

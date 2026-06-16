@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/containerd/containerd/v2/pkg/archive"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
@@ -80,6 +81,41 @@ func TestWriteOverlayUpperDiffConvertsOpaqueDirectories(t *testing.T) {
 	assert.Contains(t, entries, "var/")
 }
 
+func TestWriteOverlayUpperDiffFromBaselineAppliesAsChildDelta(t *testing.T) {
+	ctx := context.Background()
+	baseline := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(baseline, "etc"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(baseline, "etc", "config"), []byte("parent"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(baseline, "etc", "removed"), []byte("removed"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(baseline, "etc", "same"), []byte("same"), 0o644))
+
+	current := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(current, "etc"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(current, "etc", "config"), []byte("child"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(current, "etc", "added"), []byte("added"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(current, "etc", "same"), []byte("same"), 0o644))
+
+	desc, reader, err := writeOverlayUpperDiffFromBaseline(ctx, baseline, current)
+	require.NoError(t, err)
+	defer reader.Close()
+	require.NotEmpty(t, desc.Digest)
+	require.Positive(t, desc.Size)
+
+	applied := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(applied, "etc"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(applied, "etc", "config"), []byte("parent"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(applied, "etc", "removed"), []byte("removed"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(applied, "etc", "same"), []byte("same"), 0o644))
+
+	_, err = archive.Apply(ctx, applied, reader)
+	require.NoError(t, err)
+	assertFileContent(t, filepath.Join(applied, "etc", "config"), "child")
+	assertFileContent(t, filepath.Join(applied, "etc", "added"), "added")
+	assertFileContent(t, filepath.Join(applied, "etc", "same"), "same")
+	_, err = os.Stat(filepath.Join(applied, "etc", "removed"))
+	assert.True(t, os.IsNotExist(err))
+}
+
 func readTarEntries(t *testing.T, reader io.Reader) []string {
 	t.Helper()
 	tarReader := tar.NewReader(reader)
@@ -92,4 +128,11 @@ func readTarEntries(t *testing.T, reader io.Reader) []string {
 		require.NoError(t, err)
 		entries = append(entries, header.Name)
 	}
+}
+
+func assertFileContent(t *testing.T, path, want string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, want, string(got))
 }

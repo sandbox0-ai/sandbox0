@@ -51,6 +51,8 @@ type SandboxRecord struct {
 // SandboxRootFSState is manager-internal metadata for one persisted sandbox
 // writable rootfs diff.
 type SandboxRootFSState struct {
+	LayerID             string
+	ParentLayerID       string
 	SandboxID           string
 	TeamID              string
 	RuntimeGeneration   int64
@@ -67,6 +69,29 @@ type SandboxRootFSState struct {
 	DiffObjectKey       string
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
+	LayerChain          []*SandboxRootFSLayer
+}
+
+// SandboxRootFSLayer is one immutable OCI diff layer in a sandbox rootfs chain.
+type SandboxRootFSLayer struct {
+	ID                  string
+	ParentLayerID       string
+	SourceSandboxID     string
+	TeamID              string
+	RuntimeGeneration   int64
+	Runtime             string
+	RuntimeHandler      string
+	BaseImageRef        string
+	BaseImageDigest     string
+	Snapshotter         string
+	SnapshotParent      string
+	SnapshotParentChain []string
+	DiffDigest          string
+	DiffID              string
+	DiffMediaType       string
+	DiffSize            int64
+	DiffObjectKey       string
+	CreatedAt           time.Time
 }
 
 // SandboxStore persists sandbox identities independently of runtime pods.
@@ -288,6 +313,9 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 	if _, err := s.pool.Exec(ctx, `DELETE FROM manager.sandbox_rootfs_states WHERE sandbox_id = $1`, sandboxID); err != nil {
 		return fmt.Errorf("delete sandbox rootfs states: %w", err)
 	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM manager.sandbox_rootfs_heads WHERE sandbox_id = $1`, sandboxID); err != nil {
+		return fmt.Errorf("delete sandbox rootfs head: %w", err)
+	}
 	return nil
 }
 
@@ -302,11 +330,41 @@ func (s *PGSandboxStore) GetLatestRootFSState(ctx context.Context, sandboxID str
 	if s == nil || s.pool == nil {
 		return nil, nil
 	}
+	chain, err := s.GetRootFSLayerChain(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	if len(chain) > 0 {
+		return rootFSStateFromLayerChain(sandboxID, chain), nil
+	}
 	return scanRootFSState(s.pool.QueryRow(ctx, rootFSStateSelectSQL()+`
 		WHERE sandbox_id = $1
 		ORDER BY runtime_generation DESC, updated_at DESC
 		LIMIT 1
 	`, sandboxID))
+}
+
+func (s *PGSandboxStore) GetRootFSLayerChain(ctx context.Context, sandboxID string) ([]*SandboxRootFSLayer, error) {
+	if s == nil || s.pool == nil || strings.TrimSpace(sandboxID) == "" {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx, rootFSLayerChainSQL(), sandboxID)
+	if err != nil {
+		return nil, fmt.Errorf("get rootfs layer chain: %w", err)
+	}
+	defer rows.Close()
+	var layers []*SandboxRootFSLayer
+	for rows.Next() {
+		layer, err := scanRootFSLayerRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		layers = append(layers, layer)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rootfs layer chain: %w", err)
+	}
+	return layers, nil
 }
 
 func (s *PGSandboxStore) WithSandboxLock(ctx context.Context, sandboxID string, fn func(context.Context, SandboxStoreTx, *SandboxRecord) error) error {
@@ -411,6 +469,11 @@ func saveRootFSState(ctx context.Context, exec rootFSStateExecutor, state *Sandb
 	if err != nil {
 		return fmt.Errorf("marshal rootfs snapshot parent chain: %w", err)
 	}
+	if strings.TrimSpace(state.LayerID) != "" {
+		if err := saveRootFSLayerAndHead(ctx, exec, state); err != nil {
+			return err
+		}
+	}
 	_, err = exec.Exec(ctx, `
 		INSERT INTO manager.sandbox_rootfs_states (
 			sandbox_id, team_id, runtime_generation, runtime, runtime_handler,
@@ -443,6 +506,54 @@ func saveRootFSState(ctx context.Context, exec rootFSStateExecutor, state *Sandb
 	return nil
 }
 
+func saveRootFSLayerAndHead(ctx context.Context, exec rootFSStateExecutor, state *SandboxRootFSState) error {
+	if exec == nil || state == nil {
+		return nil
+	}
+	if strings.TrimSpace(state.LayerID) == "" {
+		return fmt.Errorf("layer_id is required")
+	}
+	if strings.TrimSpace(state.ParentLayerID) == strings.TrimSpace(state.LayerID) {
+		return fmt.Errorf("parent_layer_id cannot reference layer_id")
+	}
+	parentLayerID := nullableText(state.ParentLayerID)
+	parentChainJSON, err := json.Marshal(state.SnapshotParentChain)
+	if err != nil {
+		return fmt.Errorf("marshal rootfs layer snapshot parent chain: %w", err)
+	}
+	_, err = exec.Exec(ctx, `
+		INSERT INTO manager.rootfs_layers (
+			layer_id, parent_layer_id, source_sandbox_id, team_id, runtime_generation,
+			runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,
+			snapshot_parent, snapshot_parent_chain, diff_digest, diff_id, diff_media_type,
+			diff_size, diff_object_key, created_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, COALESCE($18, NOW()))
+		ON CONFLICT (layer_id) DO NOTHING
+	`, state.LayerID, parentLayerID, state.SandboxID, state.TeamID, state.RuntimeGeneration,
+		state.Runtime, state.RuntimeHandler, state.BaseImageRef, state.BaseImageDigest, state.Snapshotter,
+		state.SnapshotParent, parentChainJSON, state.DiffDigest, "", state.DiffMediaType,
+		state.DiffSize, state.DiffObjectKey, nullableTime(state.CreatedAt))
+	if err != nil {
+		return fmt.Errorf("save rootfs layer: %w", err)
+	}
+	_, err = exec.Exec(ctx, `
+		INSERT INTO manager.sandbox_rootfs_heads (
+			sandbox_id, team_id, head_layer_id, runtime_generation, updated_at
+		)
+		VALUES ($1, $2, $3, $4, NOW())
+		ON CONFLICT (sandbox_id) DO UPDATE SET
+			team_id = EXCLUDED.team_id,
+			head_layer_id = EXCLUDED.head_layer_id,
+			runtime_generation = EXCLUDED.runtime_generation,
+			updated_at = NOW()
+	`, state.SandboxID, state.TeamID, state.LayerID, state.RuntimeGeneration)
+	if err != nil {
+		return fmt.Errorf("advance rootfs head: %w", err)
+	}
+	return nil
+}
+
 func rootFSStateSelectSQL() string {
 	return `
 		SELECT sandbox_id, team_id, runtime_generation, runtime, runtime_handler,
@@ -450,6 +561,86 @@ func rootFSStateSelectSQL() string {
 			snapshot_parent_chain, diff_digest, diff_media_type, diff_size,
 			diff_object_key, created_at, updated_at
 		FROM manager.sandbox_rootfs_states`
+}
+
+func rootFSLayerChainSQL() string {
+	return `
+		WITH RECURSIVE chain AS (
+			SELECT
+				l.layer_id, l.parent_layer_id, l.source_sandbox_id, l.team_id,
+				l.runtime_generation, l.runtime, l.runtime_handler, l.base_image_ref,
+				l.base_image_digest, l.snapshotter, l.snapshot_parent,
+				l.snapshot_parent_chain, l.diff_digest, l.diff_id, l.diff_media_type,
+				l.diff_size, l.diff_object_key, l.created_at, 0 AS depth
+			FROM manager.sandbox_rootfs_heads h
+			JOIN manager.rootfs_layers l ON l.layer_id = h.head_layer_id
+			WHERE h.sandbox_id = $1
+			UNION ALL
+			SELECT
+				p.layer_id, p.parent_layer_id, p.source_sandbox_id, p.team_id,
+				p.runtime_generation, p.runtime, p.runtime_handler, p.base_image_ref,
+				p.base_image_digest, p.snapshotter, p.snapshot_parent,
+				p.snapshot_parent_chain, p.diff_digest, p.diff_id, p.diff_media_type,
+				p.diff_size, p.diff_object_key, p.created_at, c.depth + 1 AS depth
+			FROM manager.rootfs_layers p
+			JOIN chain c ON p.layer_id = c.parent_layer_id
+		)
+		SELECT layer_id, parent_layer_id, source_sandbox_id, team_id, runtime_generation,
+			runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,
+			snapshot_parent, snapshot_parent_chain, diff_digest, diff_id, diff_media_type,
+			diff_size, diff_object_key, created_at
+		FROM chain
+		ORDER BY depth DESC`
+}
+
+func scanRootFSLayerRows(rows pgx.Rows) (*SandboxRootFSLayer, error) {
+	var layer SandboxRootFSLayer
+	var parentLayerID *string
+	var parentChainJSON []byte
+	if err := rows.Scan(
+		&layer.ID, &parentLayerID, &layer.SourceSandboxID, &layer.TeamID, &layer.RuntimeGeneration,
+		&layer.Runtime, &layer.RuntimeHandler, &layer.BaseImageRef, &layer.BaseImageDigest, &layer.Snapshotter,
+		&layer.SnapshotParent, &parentChainJSON, &layer.DiffDigest, &layer.DiffID, &layer.DiffMediaType,
+		&layer.DiffSize, &layer.DiffObjectKey, &layer.CreatedAt,
+	); err != nil {
+		return nil, err
+	}
+	if parentLayerID != nil {
+		layer.ParentLayerID = *parentLayerID
+	}
+	if len(parentChainJSON) > 0 {
+		if err := json.Unmarshal(parentChainJSON, &layer.SnapshotParentChain); err != nil {
+			return nil, fmt.Errorf("unmarshal rootfs layer snapshot parent chain: %w", err)
+		}
+	}
+	return &layer, nil
+}
+
+func rootFSStateFromLayerChain(sandboxID string, chain []*SandboxRootFSLayer) *SandboxRootFSState {
+	if len(chain) == 0 {
+		return nil
+	}
+	head := chain[len(chain)-1]
+	return &SandboxRootFSState{
+		LayerID:             head.ID,
+		ParentLayerID:       head.ParentLayerID,
+		SandboxID:           sandboxID,
+		TeamID:              head.TeamID,
+		RuntimeGeneration:   head.RuntimeGeneration,
+		Runtime:             head.Runtime,
+		RuntimeHandler:      head.RuntimeHandler,
+		BaseImageRef:        head.BaseImageRef,
+		BaseImageDigest:     head.BaseImageDigest,
+		Snapshotter:         head.Snapshotter,
+		SnapshotParent:      head.SnapshotParent,
+		SnapshotParentChain: append([]string(nil), head.SnapshotParentChain...),
+		DiffDigest:          head.DiffDigest,
+		DiffMediaType:       head.DiffMediaType,
+		DiffSize:            head.DiffSize,
+		DiffObjectKey:       head.DiffObjectKey,
+		CreatedAt:           head.CreatedAt,
+		LayerChain:          cloneSandboxRootFSLayers(chain),
+	}
 }
 
 func scanRootFSState(row sandboxRecordScanner) (*SandboxRootFSState, error) {
@@ -548,9 +739,34 @@ func nullableTime(t time.Time) any {
 	return t
 }
 
+func nullableText(value string) any {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
 func derefTime(t *time.Time) time.Time {
 	if t == nil {
 		return time.Time{}
 	}
 	return *t
+}
+
+func cloneSandboxRootFSLayers(layers []*SandboxRootFSLayer) []*SandboxRootFSLayer {
+	if len(layers) == 0 {
+		return nil
+	}
+	out := make([]*SandboxRootFSLayer, 0, len(layers))
+	for _, layer := range layers {
+		if layer == nil {
+			out = append(out, nil)
+			continue
+		}
+		clone := *layer
+		clone.SnapshotParentChain = append([]string(nil), layer.SnapshotParentChain...)
+		out = append(out, &clone)
+	}
+	return out
 }

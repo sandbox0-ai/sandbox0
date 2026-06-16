@@ -2,6 +2,8 @@ package rootfs
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +18,7 @@ import (
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
 	crootfs "github.com/containerd/containerd/v2/pkg/rootfs"
+	"github.com/containerd/continuity/fs"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
@@ -31,6 +34,7 @@ const (
 	defaultContainerdHostRoot     = "/run/containerd"
 	defaultContainerdDataRoot     = "/host-var-lib/containerd"
 	defaultContainerdHostDataRoot = "/var/lib/containerd"
+	defaultRootFSCacheDir         = "/var/lib/sandbox0/ctld/rootfs"
 	defaultNamespace              = "k8s.io"
 	defaultDialTimeout            = 10 * time.Second
 )
@@ -46,6 +50,7 @@ type ContainerdRuntimeConfig struct {
 	ContainerdHostRoot     string
 	ContainerdDataRoot     string
 	ContainerdHostDataRoot string
+	RootFSCacheDir         string
 	Namespace              string
 	DialTimeout            time.Duration
 	CRIClient              criRuntimeService
@@ -60,6 +65,7 @@ type ContainerdRuntime struct {
 	containerdHostRoot     string
 	containerdDataRoot     string
 	containerdHostDataRoot string
+	rootFSCacheDir         string
 	namespace              string
 	dialTimeout            time.Duration
 	criClient              criRuntimeService
@@ -101,6 +107,10 @@ func NewContainerdRuntime(cfg ContainerdRuntimeConfig) *ContainerdRuntime {
 	if containerdHostDataRoot == "" {
 		containerdHostDataRoot = defaultContainerdHostDataRoot
 	}
+	rootFSCacheDir := strings.TrimSpace(cfg.RootFSCacheDir)
+	if rootFSCacheDir == "" {
+		rootFSCacheDir = defaultRootFSCacheDir
+	}
 	namespace := strings.TrimSpace(cfg.Namespace)
 	if namespace == "" {
 		namespace = defaultNamespace
@@ -116,6 +126,7 @@ func NewContainerdRuntime(cfg ContainerdRuntimeConfig) *ContainerdRuntime {
 		containerdHostRoot:     containerdHostRoot,
 		containerdDataRoot:     containerdDataRoot,
 		containerdHostDataRoot: containerdHostDataRoot,
+		rootFSCacheDir:         rootFSCacheDir,
 		namespace:              namespace,
 		dialTimeout:            timeout,
 		criClient:              cfg.CRIClient,
@@ -181,6 +192,32 @@ func (r *ContainerdRuntime) CreateDiff(ctx context.Context, info ctldapi.RootFSI
 	return descriptorFromOCI(desc), closeReadSeekWithFunc{ReadSeekCloser: reader, closeFunc: closeClient}, nil
 }
 
+func (r *ContainerdRuntime) CreateDiffFromBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+	if strings.TrimSpace(baselineLayerID) == "" {
+		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("%w: baseline layer id is required", ErrBadRequest)
+	}
+	client, closeClient, err := r.client(ctx)
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+	defer closeClient()
+
+	upperdir, err := r.activeOverlayUpperdir(ctx, client, info)
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+	baselineDir := r.rootFSBaselinePath(info, baselineLayerID)
+	if st, err := os.Stat(baselineDir); err != nil {
+		if os.IsNotExist(err) {
+			return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("%w: rootfs baseline %s is not captured", ErrNotFound, baselineLayerID)
+		}
+		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("inspect rootfs baseline: %w", err)
+	} else if !st.IsDir() {
+		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("%w: rootfs baseline path is not a directory", ErrConflict)
+	}
+	return writeOverlayUpperDiffFromBaseline(ctx, baselineDir, upperdir)
+}
+
 func (r *ContainerdRuntime) ApplyDiff(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, reader io.Reader) (ctldapi.RootFSDiffDescriptor, error) {
 	if strings.TrimSpace(info.ContainerID) == "" {
 		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("%w: container id is required", ErrBadRequest)
@@ -213,6 +250,64 @@ func (r *ContainerdRuntime) ApplyDiff(ctx context.Context, info ctldapi.RootFSIn
 		return ctldapi.RootFSDiffDescriptor{}, err
 	}
 	return descriptorFromOCI(applied), nil
+}
+
+func (r *ContainerdRuntime) CaptureBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string) error {
+	if strings.TrimSpace(baselineLayerID) == "" {
+		return fmt.Errorf("%w: baseline layer id is required", ErrBadRequest)
+	}
+	client, closeClient, err := r.client(ctx)
+	if err != nil {
+		return err
+	}
+	defer closeClient()
+
+	upperdir, err := r.activeOverlayUpperdir(ctx, client, info)
+	if err != nil {
+		return err
+	}
+	target := r.rootFSBaselinePath(info, baselineLayerID)
+	parent := filepath.Dir(target)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return fmt.Errorf("create rootfs baseline parent: %w", err)
+	}
+	tmp, err := os.MkdirTemp(parent, ".baseline-*")
+	if err != nil {
+		return fmt.Errorf("create rootfs baseline temp dir: %w", err)
+	}
+	removeTmp := true
+	defer func() {
+		if removeTmp {
+			_ = os.RemoveAll(tmp)
+		}
+	}()
+	if err := fs.CopyDir(tmp, upperdir); err != nil {
+		return fmt.Errorf("copy rootfs baseline: %w", err)
+	}
+	if err := os.RemoveAll(target); err != nil {
+		return fmt.Errorf("replace rootfs baseline: %w", err)
+	}
+	if err := os.Rename(tmp, target); err != nil {
+		return fmt.Errorf("publish rootfs baseline: %w", err)
+	}
+	removeTmp = false
+	return nil
+}
+
+func (r *ContainerdRuntime) rootFSBaselinePath(info ctldapi.RootFSInfo, baselineLayerID string) string {
+	root := defaultRootFSCacheDir
+	if r != nil && strings.TrimSpace(r.rootFSCacheDir) != "" {
+		root = r.rootFSCacheDir
+	}
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		info.PodNamespace,
+		info.PodName,
+		info.PodUID,
+		info.ContainerName,
+		info.ContainerID,
+		strings.TrimSpace(baselineLayerID),
+	}, "\x00")))
+	return filepath.Join(root, "baselines", hex.EncodeToString(sum[:]))
 }
 
 func (r *ContainerdRuntime) resolveContainerID(ctx context.Context, target ctldapi.RootFSContainerRef) (string, string, error) {

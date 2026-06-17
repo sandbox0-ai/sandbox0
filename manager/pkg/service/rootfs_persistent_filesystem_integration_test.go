@@ -68,6 +68,29 @@ func TestRootFSFilesystemPersistenceIntegration(t *testing.T) {
 	assert.Equal(t, "sandbox-source", snapshot.FilesystemID)
 	assert.Equal(t, "layer-squash", snapshot.HeadLayerID)
 
+	snapshots, err := store.ListRootFSSnapshots(ctx, &ListRootFSSnapshotsRequest{
+		SandboxID: "sandbox-source",
+		TeamID:    "team-1",
+	})
+	require.NoError(t, err)
+	require.Len(t, snapshots, 1)
+	assert.Equal(t, snapshot.ID, snapshots[0].ID)
+
+	loadedSnapshot, err := store.GetRootFSSnapshot(ctx, "snapshot-squash", "team-1")
+	require.NoError(t, err)
+	assert.Equal(t, snapshot.HeadLayerID, loadedSnapshot.HeadLayerID)
+	_, err = store.GetRootFSSnapshot(ctx, "snapshot-squash", "team-2")
+	require.ErrorIs(t, err, ErrRootFSSnapshotNotFound)
+
+	_, err = store.CreateRootFSSnapshot(ctx, &CreateRootFSSnapshotRequest{
+		SandboxID:  "sandbox-source",
+		SnapshotID: "snapshot-delete",
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.DeleteRootFSSnapshot(ctx, "snapshot-delete", "team-1"))
+	_, err = store.GetRootFSSnapshot(ctx, "snapshot-delete", "team-1")
+	require.ErrorIs(t, err, ErrRootFSSnapshotNotFound)
+
 	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-fork", "team-1")))
 	forked, err := store.ForkRootFSFilesystem(ctx, &ForkRootFSFilesystemRequest{
 		SourceSandboxID: "sandbox-source",

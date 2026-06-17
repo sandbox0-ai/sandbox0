@@ -467,6 +467,151 @@ func TestPausedSandboxRuntimeResumeAppliesRootFSCheckpointBeforeInitialize(t *te
 	}
 }
 
+func TestSandboxRootFSProductAPI(t *testing.T) {
+	now := time.Now().UTC()
+	store := newMemorySandboxStoreForManagerIntegration(&service.SandboxRecord{
+		ID:                "sandbox-1",
+		TeamID:            "team-1",
+		UserID:            "user-1",
+		TemplateID:        "template-1",
+		TemplateName:      "template-1",
+		TemplateNamespace: "template-default",
+		ClusterID:         "default",
+		Status:            service.SandboxStatusPaused,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}, &service.SandboxRootFSState{
+		SandboxID:         "sandbox-1",
+		TeamID:            "team-1",
+		LayerID:           "layer-v1",
+		RuntimeGeneration: 1,
+		Runtime:           "runc",
+		BaseImageDigest:   "sha256:base",
+		Snapshotter:       "overlayfs",
+		DiffDigest:        "sha256:layer-v1",
+		DiffObjectKey:     "rootfs/layer-v1.tar",
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	})
+	env := newManagerTestEnvWithOptions(t, managerTestEnvOptions{sandboxStore: store})
+
+	resp, body := doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxes/sandbox-1/snapshots", env.token, map[string]any{
+		"name":        "before-edit",
+		"description": "state before edit",
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create rootfs snapshot status = %d, body = %s", resp.StatusCode, string(body))
+	}
+	snapshot, errInfo, err := spec.DecodeResponse[service.SandboxRootFSSnapshot](bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("decode create rootfs snapshot response: %v", err)
+	}
+	if errInfo != nil {
+		t.Fatalf("unexpected create rootfs snapshot error: %+v", errInfo)
+	}
+	if snapshot == nil || snapshot.SandboxID != "sandbox-1" || snapshot.ID == "" {
+		t.Fatalf("unexpected snapshot response: %+v", snapshot)
+	}
+
+	resp, body = doRequest(t, env.server.Client(), http.MethodGet, env.server.URL+"/api/v1/sandboxes/sandbox-1/snapshots", env.token, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list rootfs snapshots status = %d, body = %s", resp.StatusCode, string(body))
+	}
+	list, errInfo, err := spec.DecodeResponse[service.ListSandboxRootFSSnapshotsResponse](bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("decode list rootfs snapshots response: %v", err)
+	}
+	if errInfo != nil {
+		t.Fatalf("unexpected list rootfs snapshots error: %+v", errInfo)
+	}
+	if list == nil || list.Count != 1 || len(list.Snapshots) != 1 || list.Snapshots[0].ID != snapshot.ID {
+		t.Fatalf("unexpected snapshot list: %+v", list)
+	}
+
+	store.mu.Lock()
+	store.rootFSState["sandbox-1"] = &service.SandboxRootFSState{
+		SandboxID:         "sandbox-1",
+		TeamID:            "team-1",
+		LayerID:           "layer-v2",
+		RuntimeGeneration: 2,
+		Runtime:           "runc",
+		BaseImageDigest:   "sha256:base",
+		Snapshotter:       "overlayfs",
+		DiffDigest:        "sha256:layer-v2",
+		DiffObjectKey:     "rootfs/layer-v2.tar",
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+	store.mu.Unlock()
+
+	resp, body = doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxes/sandbox-1/rootfs/restore", env.token, map[string]any{
+		"snapshot_id": snapshot.ID,
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("restore rootfs status = %d, body = %s", resp.StatusCode, string(body))
+	}
+	restoreResp, errInfo, err := spec.DecodeResponse[service.RestoreSandboxRootFSResponse](bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("decode restore rootfs response: %v", err)
+	}
+	if errInfo != nil {
+		t.Fatalf("unexpected restore rootfs error: %+v", errInfo)
+	}
+	if restoreResp == nil || restoreResp.Status != service.SandboxStatusPaused {
+		t.Fatalf("unexpected restore response: %+v", restoreResp)
+	}
+	restoredState, err := store.GetLatestRootFSState(context.Background(), "sandbox-1")
+	if err != nil {
+		t.Fatalf("get restored rootfs state: %v", err)
+	}
+	if restoredState == nil || restoredState.LayerID != "layer-v1" {
+		t.Fatalf("restored rootfs state = %+v, want layer-v1", restoredState)
+	}
+
+	resp, body = doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxes/sandbox-1/fork", env.token, nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("fork sandbox status = %d, body = %s", resp.StatusCode, string(body))
+	}
+	forkResp, errInfo, err := spec.DecodeResponse[service.ForkSandboxResponse](bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("decode fork response: %v", err)
+	}
+	if errInfo != nil {
+		t.Fatalf("unexpected fork error: %+v", errInfo)
+	}
+	if forkResp == nil || forkResp.SourceSandboxID != "sandbox-1" || forkResp.Sandbox == nil {
+		t.Fatalf("unexpected fork response: %+v", forkResp)
+	}
+	if forkResp.Sandbox.ID == "sandbox-1" || forkResp.Sandbox.Status != service.SandboxStatusPaused {
+		t.Fatalf("unexpected fork sandbox: %+v", forkResp.Sandbox)
+	}
+	forkState, err := store.GetLatestRootFSState(context.Background(), forkResp.Sandbox.ID)
+	if err != nil {
+		t.Fatalf("get fork rootfs state: %v", err)
+	}
+	if forkState == nil || forkState.LayerID != "layer-v1" {
+		t.Fatalf("fork rootfs state = %+v, want layer-v1", forkState)
+	}
+
+	resp, body = doRequest(t, env.server.Client(), http.MethodGet, env.server.URL+"/api/v1/sandbox-rootfs-snapshots/"+snapshot.ID, env.token, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("get rootfs snapshot status = %d, body = %s", resp.StatusCode, string(body))
+	}
+
+	resp, body = doRequest(t, env.server.Client(), http.MethodDelete, env.server.URL+"/api/v1/sandbox-rootfs-snapshots/"+snapshot.ID, env.token, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("delete rootfs snapshot status = %d, body = %s", resp.StatusCode, string(body))
+	}
+
+	store.mu.Lock()
+	store.records["sandbox-1"].Status = service.SandboxStatusRunning
+	store.mu.Unlock()
+	resp, body = doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxes/sandbox-1/snapshots", env.token, nil)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("running rootfs snapshot status = %d, body = %s", resp.StatusCode, string(body))
+	}
+}
+
 type testTemplateLister struct {
 	client clientset.Interface
 }
@@ -710,15 +855,19 @@ func newInitializeEventServer(t *testing.T, events *orderedEvents) *httptest.Ser
 }
 
 type memorySandboxStoreForManagerIntegration struct {
-	mu          sync.Mutex
-	records     map[string]*service.SandboxRecord
-	rootFSState map[string]*service.SandboxRootFSState
+	mu                sync.Mutex
+	records           map[string]*service.SandboxRecord
+	rootFSState       map[string]*service.SandboxRootFSState
+	rootFSFilesystems map[string]*service.RootFSFilesystem
+	rootFSSnapshots   map[string]*service.RootFSSnapshot
 }
 
 func newMemorySandboxStoreForManagerIntegration(record *service.SandboxRecord, rootFSState *service.SandboxRootFSState) *memorySandboxStoreForManagerIntegration {
 	store := &memorySandboxStoreForManagerIntegration{
-		records:     map[string]*service.SandboxRecord{},
-		rootFSState: map[string]*service.SandboxRootFSState{},
+		records:           map[string]*service.SandboxRecord{},
+		rootFSState:       map[string]*service.SandboxRootFSState{},
+		rootFSFilesystems: map[string]*service.RootFSFilesystem{},
+		rootFSSnapshots:   map[string]*service.RootFSSnapshot{},
 	}
 	if record != nil {
 		store.records[record.ID] = cloneSandboxRecordForManagerIntegration(record)
@@ -830,15 +979,148 @@ func (s *memorySandboxStoreForManagerIntegration) GetLatestRootFSState(_ context
 	return cloneRootFSStateForManagerIntegration(state), nil
 }
 
-func (s *memorySandboxStoreForManagerIntegration) WithSandboxLock(ctx context.Context, sandboxID string, fn func(context.Context, service.SandboxStoreTx, *service.SandboxRecord) error) error {
+func (s *memorySandboxStoreForManagerIntegration) CreateRootFSSnapshot(_ context.Context, req *service.CreateRootFSSnapshotRequest) (*service.RootFSSnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	state := s.rootFSState[req.SandboxID]
+	if state == nil || state.LayerID == "" {
+		return nil, service.ErrRootFSFilesystemNotFound
+	}
+	record := s.records[req.SandboxID]
+	if record == nil {
+		return nil, service.ErrSandboxRecordNotFound
+	}
+	snapshot := &service.RootFSSnapshot{
+		ID:              req.SnapshotID,
+		FilesystemID:    req.SandboxID,
+		TeamID:          record.TeamID,
+		SourceSandboxID: req.SandboxID,
+		HeadLayerID:     state.LayerID,
+		Name:            req.Name,
+		Description:     req.Description,
+		CreatedAt:       time.Now().UTC(),
+		ExpiresAt:       req.ExpiresAt,
+	}
+	s.rootFSSnapshots[snapshot.ID] = cloneRootFSSnapshotForManagerIntegration(snapshot)
+	return cloneRootFSSnapshotForManagerIntegration(snapshot), nil
+}
+
+func (s *memorySandboxStoreForManagerIntegration) ListRootFSSnapshots(_ context.Context, req *service.ListRootFSSnapshotsRequest) ([]*service.RootFSSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snapshots := make([]*service.RootFSSnapshot, 0, len(s.rootFSSnapshots))
+	for _, snapshot := range s.rootFSSnapshots {
+		if snapshot == nil || snapshot.SourceSandboxID != req.SandboxID {
+			continue
+		}
+		if req.TeamID != "" && snapshot.TeamID != req.TeamID {
+			continue
+		}
+		snapshots = append(snapshots, cloneRootFSSnapshotForManagerIntegration(snapshot))
+	}
+	return snapshots, nil
+}
+
+func (s *memorySandboxStoreForManagerIntegration) GetRootFSSnapshot(_ context.Context, snapshotID, teamID string) (*service.RootFSSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snapshot := s.rootFSSnapshots[snapshotID]
+	if snapshot == nil || (teamID != "" && snapshot.TeamID != teamID) {
+		return nil, service.ErrRootFSSnapshotNotFound
+	}
+	return cloneRootFSSnapshotForManagerIntegration(snapshot), nil
+}
+
+func (s *memorySandboxStoreForManagerIntegration) DeleteRootFSSnapshot(_ context.Context, snapshotID, teamID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snapshot := s.rootFSSnapshots[snapshotID]
+	if snapshot == nil || (teamID != "" && snapshot.TeamID != teamID) {
+		return service.ErrRootFSSnapshotNotFound
+	}
+	delete(s.rootFSSnapshots, snapshotID)
+	return nil
+}
+
+func (s *memorySandboxStoreForManagerIntegration) ForkRootFSFilesystem(_ context.Context, req *service.ForkRootFSFilesystemRequest) (*service.RootFSFilesystem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sourceState := s.rootFSState[req.SourceSandboxID]
+	if sourceState == nil || sourceState.LayerID == "" {
+		return nil, service.ErrRootFSFilesystemNotFound
+	}
+	target := s.records[req.TargetSandboxID]
+	if target == nil {
+		return nil, service.ErrSandboxRecordNotFound
+	}
+	targetTeamID := req.TargetTeamID
+	if targetTeamID == "" {
+		targetTeamID = target.TeamID
+	}
+	state := cloneRootFSStateForManagerIntegration(sourceState)
+	state.SandboxID = req.TargetSandboxID
+	state.TeamID = targetTeamID
+	s.rootFSState[req.TargetSandboxID] = state
+	filesystem := &service.RootFSFilesystem{
+		ID:                 req.TargetSandboxID,
+		TeamID:             targetTeamID,
+		SourceFilesystemID: req.SourceSandboxID,
+		HeadLayerID:        sourceState.LayerID,
+		CreatedAt:          time.Now().UTC(),
+		UpdatedAt:          time.Now().UTC(),
+	}
+	s.rootFSFilesystems[filesystem.ID] = cloneRootFSFilesystemForManagerIntegration(filesystem)
+	return cloneRootFSFilesystemForManagerIntegration(filesystem), nil
+}
+
+func (s *memorySandboxStoreForManagerIntegration) RestoreRootFSFromSnapshot(_ context.Context, req *service.RestoreRootFSFromSnapshotRequest) (*service.RootFSFilesystem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snapshot := s.rootFSSnapshots[req.SnapshotID]
+	if snapshot == nil || (req.TeamID != "" && snapshot.TeamID != req.TeamID) {
+		return nil, service.ErrRootFSSnapshotNotFound
+	}
+	target := s.records[req.SandboxID]
+	if target == nil {
+		return nil, service.ErrSandboxRecordNotFound
+	}
+	now := time.Now().UTC()
+	s.rootFSState[req.SandboxID] = &service.SandboxRootFSState{
+		SandboxID:         req.SandboxID,
+		TeamID:            target.TeamID,
+		LayerID:           snapshot.HeadLayerID,
+		RuntimeGeneration: target.RuntimeGeneration,
+		Runtime:           "runc",
+		BaseImageDigest:   "sha256:base",
+		Snapshotter:       "overlayfs",
+		DiffDigest:        "sha256:" + snapshot.HeadLayerID,
+		DiffObjectKey:     "rootfs/" + snapshot.HeadLayerID + ".tar",
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+	filesystem := &service.RootFSFilesystem{
+		ID:                 req.SandboxID,
+		TeamID:             target.TeamID,
+		SourceFilesystemID: snapshot.FilesystemID,
+		HeadLayerID:        snapshot.HeadLayerID,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}
+	s.rootFSFilesystems[filesystem.ID] = cloneRootFSFilesystemForManagerIntegration(filesystem)
+	return cloneRootFSFilesystemForManagerIntegration(filesystem), nil
+}
+
+func (s *memorySandboxStoreForManagerIntegration) WithSandboxLock(ctx context.Context, sandboxID string, fn func(context.Context, service.SandboxStoreTx, *service.SandboxRecord) error) error {
+	s.mu.Lock()
 	record := s.records[sandboxID]
 	if record == nil {
+		s.mu.Unlock()
 		return service.ErrSandboxRecordNotFound
 	}
+	cloned := cloneSandboxRecordForManagerIntegration(record)
+	s.mu.Unlock()
 	tx := memorySandboxStoreTxForManagerIntegration{store: s}
-	return fn(ctx, tx, cloneSandboxRecordForManagerIntegration(record))
+	return fn(ctx, tx, cloned)
 }
 
 type memorySandboxStoreTxForManagerIntegration struct {
@@ -917,6 +1199,22 @@ func cloneRootFSLayersForManagerIntegration(layers []*service.SandboxRootFSLayer
 		out = append(out, &clone)
 	}
 	return out
+}
+
+func cloneRootFSSnapshotForManagerIntegration(snapshot *service.RootFSSnapshot) *service.RootFSSnapshot {
+	if snapshot == nil {
+		return nil
+	}
+	clone := *snapshot
+	return &clone
+}
+
+func cloneRootFSFilesystemForManagerIntegration(filesystem *service.RootFSFilesystem) *service.RootFSFilesystem {
+	if filesystem == nil {
+		return nil
+	}
+	clone := *filesystem
+	return &clone
 }
 
 func (r *initializeRequestRecorder) Get() service.InitializeRequest {

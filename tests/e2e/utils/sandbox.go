@@ -246,3 +246,116 @@ func (s *Session) ResumeSandbox(ctx context.Context, t ContractT, sandboxID stri
 	}
 	return resp.Data, status, nil
 }
+
+func (s *Session) CreateSandboxRootFSSnapshot(ctx context.Context, t ContractT, sandboxID string, req apispec.CreateSandboxRootFSSnapshotRequest) (*apispec.SandboxRootFSSnapshot, int, error) {
+	specPath := "/api/v1/sandboxes/{id}/snapshots"
+	requestPath := "/api/v1/sandboxes/" + sandboxID + "/snapshots"
+	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodPost, specPath, requestPath, req, true)
+	if err != nil {
+		return nil, status, err
+	}
+	if status != http.StatusCreated {
+		return nil, status, fmt.Errorf("create sandbox rootfs snapshot failed with status %d: %s", status, formatAPIError(body))
+	}
+	var resp apispec.SuccessSandboxRootFSSnapshotResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, status, err
+	}
+	if !resp.Success || resp.Data == nil {
+		return nil, status, fmt.Errorf("create sandbox rootfs snapshot response missing data")
+	}
+	return resp.Data, status, nil
+}
+
+func (s *Session) ListSandboxRootFSSnapshots(ctx context.Context, t ContractT, sandboxID string) (*apispec.SandboxRootFSSnapshotList, int, error) {
+	specPath := "/api/v1/sandboxes/{id}/snapshots"
+	requestPath := "/api/v1/sandboxes/" + sandboxID + "/snapshots"
+	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodGet, specPath, requestPath, nil, true)
+	if err != nil {
+		return nil, status, err
+	}
+	if status != http.StatusOK {
+		return nil, status, fmt.Errorf("list sandbox rootfs snapshots failed with status %d: %s", status, formatAPIError(body))
+	}
+	var resp apispec.SuccessSandboxRootFSSnapshotListResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, status, err
+	}
+	if !resp.Success || resp.Data == nil {
+		return nil, status, fmt.Errorf("list sandbox rootfs snapshots response missing data")
+	}
+	return resp.Data, status, nil
+}
+
+func (s *Session) GetSandboxRootFSSnapshot(ctx context.Context, t ContractT, snapshotID string) (*apispec.SandboxRootFSSnapshot, int, error) {
+	specPath := "/api/v1/sandbox-rootfs-snapshots/{snapshot_id}"
+	requestPath := "/api/v1/sandbox-rootfs-snapshots/" + snapshotID
+	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodGet, specPath, requestPath, nil, true)
+	if err != nil {
+		return nil, status, err
+	}
+	if status != http.StatusOK {
+		return nil, status, fmt.Errorf("get sandbox rootfs snapshot failed with status %d: %s", status, formatAPIError(body))
+	}
+	var resp apispec.SuccessSandboxRootFSSnapshotResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, status, err
+	}
+	if !resp.Success || resp.Data == nil {
+		return nil, status, fmt.Errorf("get sandbox rootfs snapshot response missing data")
+	}
+	return resp.Data, status, nil
+}
+
+func (s *Session) DeleteSandboxRootFSSnapshot(ctx context.Context, t ContractT, snapshotID string) (int, error) {
+	specPath := "/api/v1/sandbox-rootfs-snapshots/{snapshot_id}"
+	requestPath := "/api/v1/sandbox-rootfs-snapshots/" + snapshotID
+	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodDelete, specPath, requestPath, nil, true)
+	if err != nil {
+		return status, err
+	}
+	if status != http.StatusOK {
+		return status, fmt.Errorf("delete sandbox rootfs snapshot failed with status %d: %s", status, formatAPIError(body))
+	}
+	return status, nil
+}
+
+func (s *Session) RestoreSandboxRootFS(ctx context.Context, t ContractT, sandboxID string, req apispec.RestoreSandboxRootFSRequest) (*apispec.RestoreSandboxRootFSResponse, int, error) {
+	specPath := "/api/v1/sandboxes/{id}/rootfs/restore"
+	requestPath := "/api/v1/sandboxes/" + sandboxID + "/rootfs/restore"
+	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodPost, specPath, requestPath, req, true)
+	if err != nil {
+		return nil, status, err
+	}
+	if status != http.StatusOK {
+		return nil, status, fmt.Errorf("restore sandbox rootfs failed with status %d: %s", status, formatAPIError(body))
+	}
+	var resp apispec.SuccessRestoreSandboxRootFSResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, status, err
+	}
+	if !resp.Success || resp.Data == nil {
+		return nil, status, fmt.Errorf("restore sandbox rootfs response missing data")
+	}
+	return resp.Data, status, nil
+}
+
+func (s *Session) ForkSandbox(ctx context.Context, t ContractT, sandboxID string) (*apispec.ForkSandboxResponse, int, error) {
+	specPath := "/api/v1/sandboxes/{id}/fork"
+	requestPath := "/api/v1/sandboxes/" + sandboxID + "/fork"
+	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodPost, specPath, requestPath, apispec.ForkSandboxRequest{}, true)
+	if err != nil {
+		return nil, status, err
+	}
+	if status != http.StatusCreated {
+		return nil, status, fmt.Errorf("fork sandbox failed with status %d: %s", status, formatAPIError(body))
+	}
+	var resp apispec.SuccessForkSandboxResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, status, err
+	}
+	if !resp.Success || resp.Data == nil {
+		return nil, status, fmt.Errorf("fork sandbox response missing data")
+	}
+	return resp.Data, status, nil
+}

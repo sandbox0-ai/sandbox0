@@ -271,21 +271,6 @@ console.log("Volume deleted");`
   ]}
 />
 
----
-
-## Persist Runtime Environment with Nix
-
-You can use **Nix + Volume** to persist and reuse your **runtime environment artifacts** across Sandboxes.
-
-- **Can persist**: dependency closures, build caches, package stores, lock files, and workspace-level toolchains
-- **Cannot persist**: live process runtime state (in-memory variables, process stacks, open sockets, PID state)
-
-This means:
-- A new Sandbox can quickly reproduce the same environment from mounted Volume data
-- But it still starts as a new process runtime, not a paused/resumed OS process image
-
----
-
 ## Next Steps
 
 <CardGroup>

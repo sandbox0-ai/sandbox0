@@ -158,7 +158,7 @@ Managed Agents supports two execution models:
 
 | Model | How it works | Best fit |
 | ----- | ------------ | -------- |
-| **Agent in sandbox** | The agent runtime process lives inside the per-session sandbox with the workspace and harness state. | Claude Code style coding agents, Codex app-server sessions, and workflows that expect local files and shell state. |
+| **Agent in sandbox** | The agent runtime process lives inside the per-session sandbox with the workspace and harness state. | Claude Code style coding agents, Codex app-server sessions, Pi Agent Core workflows, and workflows that expect local files and shell state. |
 | **Sandbox as tool** | A resident runtime service owns the agent loop and claims a Sandbox0 sandbox only when isolated tool execution is needed. | Product copilots and agent workflows built around a separate application control plane. |
 
 Use raw Sandbox0 sandboxes when you want direct control over processes, files, templates, volumes, ports, and network policy. Use Managed Agents when you want Sandbox0 to provide the session/event API and runtime attachment behind that API.

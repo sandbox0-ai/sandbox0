@@ -39,7 +39,7 @@ For platform-owned builtin templates, the operator manages the warm pool. That l
 | User-space dependencies, repository checkout, package cache, generated files, or per-project tool configuration on an existing base image | Builtin template plus rootfs snapshot or fork |
 | Data that must outlive sandbox identity, be mounted by multiple sandboxes, or be accessed through direct storage APIs | Sandbox Volume |
 
-Rootfs snapshots do not create template IDs and do not appear in `s0 template list`. A fork keeps the source sandbox's template and sandbox configuration, while restore changes only the target sandbox rootfs. See [Snapshot And Restore](/docs/sandbox/snapshot-restore) for the paused-state requirements and API workflow.
+Rootfs snapshots do not create template IDs and do not appear in `s0 template list`. A fork keeps the source sandbox's template and sandbox configuration, while restore changes only the target sandbox rootfs. See [Snapshot And Restore](/docs/sandbox/snapshot-restore) for the paused-state requirements and API workflow, or read [Initialize Once, Fork Many](/blog/2026-06/initialize-once-fork-many-custom-ai-agent-sandboxes) for the custom-environment pattern.
 
 ---
 
@@ -379,5 +379,9 @@ console.log("Template deleted");`
 
   <Card title="Snapshot And Restore" href="/docs/sandbox/snapshot-restore" cta="Continue">
     Reuse initialized rootfs state without creating another template.
+  </Card>
+
+  <Card title="Initialize Once, Fork Many" href="/blog/2026-06/initialize-once-fork-many-custom-ai-agent-sandboxes" cta="Read">
+    Customize a builtin template with rootfs snapshots and forks.
   </Card>
 </CardGroup>

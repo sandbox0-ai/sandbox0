@@ -76,6 +76,8 @@ s0 sandbox resume "$FORKED_SANDBOX_ID"
 
 Fork is usually the shorter path for branch-per-task workflows because it creates a new paused sandbox directly from the seed rootfs. Snapshot is better when you need a named checkpoint that can be listed, fetched, restored later, and cleaned up independently.
 
+For a longer walkthrough of this pattern, see [Initialize Once, Fork Many](/blog/2026-06/initialize-once-fork-many-custom-ai-agent-sandboxes).
+
 <Callout variant="warning">
 This pattern does not replace template-level configuration. Use a custom template when you need a different container image, resource limits, mount declarations, default network policy, environment defaults, or privileged runtime fields. Mounted Sandbox Volumes are separate from the sandbox rootfs and should be managed with Volume snapshot and fork APIs.
 </Callout>
@@ -453,5 +455,9 @@ For coding-agent and test-generation workflows, a common pattern is:
 
   <Card title="Volumes" href="/docs/volume" cta="Continue">
     Use durable shared storage when rootfs snapshots are not the right persistence boundary.
+  </Card>
+
+  <Card title="Initialize Once, Fork Many" href="/blog/2026-06/initialize-once-fork-many-custom-ai-agent-sandboxes" cta="Read">
+    Use rootfs snapshots and forks as lightweight custom environments.
   </Card>
 </CardGroup>

@@ -605,7 +605,7 @@ func (r *Repository) normalizeStorageObservation(ctx context.Context, db DB, obs
 	if observation.SubjectType == "" || observation.SubjectID == "" {
 		return nil, fmt.Errorf("storage subject_type and subject_id are required")
 	}
-	if observation.SubjectType != SubjectTypeVolume && observation.SubjectType != SubjectTypeSnapshot {
+	if observation.SubjectType != SubjectTypeVolume && observation.SubjectType != SubjectTypeSnapshot && observation.SubjectType != SubjectTypeRootFS {
 		return nil, fmt.Errorf("unsupported storage subject_type %q", observation.SubjectType)
 	}
 	if observation.SizeBytes < 0 {
@@ -748,8 +748,11 @@ func storageWindowFromState(state *StorageProjectionState, end time.Time) *Windo
 		return nil
 	}
 	windowType := WindowTypeSandboxVolumeByteHours
-	if state.SubjectType == SubjectTypeSnapshot {
+	switch state.SubjectType {
+	case SubjectTypeSnapshot:
 		windowType = WindowTypeSandboxSnapshotByteHours
+	case SubjectTypeRootFS:
+		windowType = WindowTypeSandboxRootFSByteHours
 	}
 	return &Window{
 		WindowID:    fmt.Sprintf("storage/%s/%s/%d/%d", state.SubjectType, state.SubjectID, start.UnixNano(), end.UnixNano()),

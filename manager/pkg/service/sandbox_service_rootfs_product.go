@@ -26,6 +26,22 @@ type SandboxRootFSProductStore interface {
 	RestoreRootFSFromSnapshot(ctx context.Context, req *RestoreRootFSFromSnapshotRequest) (*RootFSFilesystem, error)
 }
 
+type sandboxRootFSSnapshotCreator interface {
+	CreateRootFSSnapshot(ctx context.Context, req *CreateRootFSSnapshotRequest) (*RootFSSnapshot, error)
+}
+
+type sandboxRootFSRestorer interface {
+	RestoreRootFSFromSnapshot(ctx context.Context, req *RestoreRootFSFromSnapshotRequest) (*RootFSFilesystem, error)
+}
+
+type sandboxRootFSForker interface {
+	ForkRootFSFilesystem(ctx context.Context, req *ForkRootFSFilesystemRequest) (*RootFSFilesystem, error)
+}
+
+type sandboxRecordUpserter interface {
+	UpsertSandbox(ctx context.Context, record *SandboxRecord) error
+}
+
 type CreateSandboxRootFSSnapshotRequest struct {
 	Name        string    `json:"name,omitempty"`
 	Description string    `json:"description,omitempty"`
@@ -80,12 +96,16 @@ func (s *SandboxService) CreateSandboxRootFSSnapshot(ctx context.Context, sandbo
 		return nil, fmt.Errorf("team_id is required")
 	}
 	var snapshot *RootFSSnapshot
-	err = s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, _ SandboxStoreTx, record *SandboxRecord) error {
+	err = s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
 		if err := validateRootFSSandboxRecord(record, sandboxID, teamID, true); err != nil {
 			return err
 		}
+		creator := sandboxRootFSSnapshotCreator(store)
+		if txCreator, ok := tx.(sandboxRootFSSnapshotCreator); ok {
+			creator = txCreator
+		}
 		var createErr error
-		snapshot, createErr = store.CreateRootFSSnapshot(lockCtx, &CreateRootFSSnapshotRequest{
+		snapshot, createErr = creator.CreateRootFSSnapshot(lockCtx, &CreateRootFSSnapshotRequest{
 			SandboxID:   sandboxID,
 			SnapshotID:  generateRootFSSnapshotID(),
 			Name:        strings.TrimSpace(req.Name),
@@ -176,11 +196,15 @@ func (s *SandboxService) RestoreSandboxRootFS(ctx context.Context, sandboxID, te
 	if _, err := store.GetRootFSSnapshot(ctx, snapshotID, teamID); err != nil {
 		return nil, err
 	}
-	err = s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, _ SandboxStoreTx, record *SandboxRecord) error {
+	err = s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
 		if err := validateRootFSSandboxRecord(record, sandboxID, teamID, true); err != nil {
 			return err
 		}
-		_, restoreErr := store.RestoreRootFSFromSnapshot(lockCtx, &RestoreRootFSFromSnapshotRequest{
+		restorer := sandboxRootFSRestorer(store)
+		if txRestorer, ok := tx.(sandboxRootFSRestorer); ok {
+			restorer = txRestorer
+		}
+		_, restoreErr := restorer.RestoreRootFSFromSnapshot(lockCtx, &RestoreRootFSFromSnapshotRequest{
 			SandboxID:  sandboxID,
 			SnapshotID: snapshotID,
 			TeamID:     teamID,
@@ -246,18 +270,32 @@ func (s *SandboxService) ForkSandbox(ctx context.Context, sourceSandboxID, teamI
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}
-	err = s.sandboxStore.WithSandboxLock(ctx, sourceSandboxID, func(lockCtx context.Context, _ SandboxStoreTx, record *SandboxRecord) error {
+	err = s.sandboxStore.WithSandboxLock(ctx, sourceSandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
 		if err := validateRootFSSandboxRecord(record, sourceSandboxID, teamID, true); err != nil {
 			return err
 		}
-		if err := s.sandboxStore.UpsertSandbox(lockCtx, target); err != nil {
+		upserter := sandboxRecordUpserter(s.sandboxStore)
+		txBacked := false
+		if txUpserter, ok := tx.(sandboxRecordUpserter); ok {
+			upserter = txUpserter
+			txBacked = true
+		}
+		if err := upserter.UpsertSandbox(lockCtx, target); err != nil {
 			return err
 		}
-		if _, err := store.ForkRootFSFilesystem(lockCtx, &ForkRootFSFilesystemRequest{
+		forker := sandboxRootFSForker(store)
+		if txForker, ok := tx.(sandboxRootFSForker); ok {
+			forker = txForker
+			txBacked = true
+		}
+		if _, err := forker.ForkRootFSFilesystem(lockCtx, &ForkRootFSFilesystemRequest{
 			SourceSandboxID: sourceSandboxID,
 			TargetSandboxID: targetID,
 			TargetTeamID:    teamID,
 		}); err != nil {
+			if txBacked {
+				return err
+			}
 			if cleanupErr := s.sandboxStore.MarkSandboxDeleted(lockCtx, targetID, s.clock.Now().UTC()); cleanupErr != nil && s.logger != nil {
 				s.logger.Warn("Failed to clean up sandbox record after rootfs fork failure",
 					zap.String("sandboxID", targetID),

@@ -8,12 +8,15 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
 )
 
 var ErrRootFSHeadConflict = errors.New("rootfs filesystem head conflict")
 var ErrRootFSFilesystemNotFound = errors.New("rootfs filesystem not found")
 var ErrRootFSFilesystemConflict = errors.New("rootfs filesystem conflict")
 var ErrRootFSSnapshotNotFound = errors.New("rootfs snapshot not found")
+var ErrRootFSObjectConflict = errors.New("rootfs object metadata conflict")
 
 // RootFSFilesystem is the canonical persistent filesystem object backing a
 // sandbox writable rootfs.
@@ -73,8 +76,10 @@ type SquashRootFSFilesystemRequest struct {
 }
 
 type RootFSGarbageCollectionResult struct {
-	Layers            []*SandboxRootFSLayer
-	DeletedObjectKeys []string
+	Layers             []*SandboxRootFSLayer
+	DeletedObjectKeys  []string
+	ExpiredSnapshots   int
+	DeletedFilesystems int
 }
 
 type DeletePendingRootFSObjectsOptions struct {
@@ -95,9 +100,44 @@ type RootFSObjectDeletionQueueStats struct {
 	OldestQueued time.Time
 }
 
+// RootFSStorageUsage is the current COW physical storage usage for one team.
+// It counts distinct reachable rootfs diff objects, not sandbox layer-chain sums.
+type RootFSStorageUsage struct {
+	TeamID       string
+	ObjectCount  int64
+	StorageBytes int64
+	ObservedAt   time.Time
+}
+
+type RootFSObjectInfo struct {
+	Key      string
+	Size     int64
+	Modified time.Time
+}
+
+type RootFSObjectAuditResult struct {
+	Checked        int
+	Missing        int
+	SizeMismatched int
+}
+
 // RootFSObjectDeleter deletes rootfs diff objects from durable object storage.
 type RootFSObjectDeleter interface {
 	Delete(key string) error
+}
+
+type RootFSObjectInspector interface {
+	StatRootFSObject(key string) (RootFSObjectInfo, error)
+}
+
+type RootFSStorageMeteringRecorder interface {
+	RecordStorageObservation(context.Context, *meteringpkg.StorageObservation) error
+}
+
+type rootFSStoreDB interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
 const (
@@ -132,13 +172,24 @@ func (s *PGSandboxStore) CreateRootFSSnapshot(ctx context.Context, req *CreateRo
 	if s == nil || s.pool == nil || req == nil {
 		return nil, nil
 	}
+	return createRootFSSnapshot(ctx, s.pool, req)
+}
+
+func (t sandboxStoreTx) CreateRootFSSnapshot(ctx context.Context, req *CreateRootFSSnapshotRequest) (*RootFSSnapshot, error) {
+	return createRootFSSnapshot(ctx, t.tx, req)
+}
+
+func createRootFSSnapshot(ctx context.Context, db rootFSStoreDB, req *CreateRootFSSnapshotRequest) (*RootFSSnapshot, error) {
+	if db == nil || req == nil {
+		return nil, nil
+	}
 	if strings.TrimSpace(req.SandboxID) == "" {
 		return nil, fmt.Errorf("sandbox_id is required")
 	}
 	if strings.TrimSpace(req.SnapshotID) == "" {
 		return nil, fmt.Errorf("snapshot_id is required")
 	}
-	snapshot, err := scanRootFSSnapshot(s.pool.QueryRow(ctx, `
+	snapshot, err := scanRootFSSnapshot(db.QueryRow(ctx, `
 		WITH source AS (
 			SELECT b.filesystem_id, b.team_id, f.head_layer_id
 			FROM manager.sandbox_rootfs_bindings b
@@ -174,6 +225,7 @@ func (s *PGSandboxStore) ListRootFSSnapshots(ctx context.Context, req *ListRootF
 		FROM manager.rootfs_snapshots
 		WHERE source_sandbox_id = $1
 			AND ($2 = '' OR team_id = $2)
+			AND (expires_at IS NULL OR expires_at > NOW())
 		ORDER BY created_at DESC
 	`, strings.TrimSpace(req.SandboxID), strings.TrimSpace(req.TeamID))
 	if err != nil {
@@ -205,6 +257,7 @@ func (s *PGSandboxStore) GetRootFSSnapshot(ctx context.Context, snapshotID, team
 		FROM manager.rootfs_snapshots
 		WHERE snapshot_id = $1
 			AND ($2 = '' OR team_id = $2)
+			AND (expires_at IS NULL OR expires_at > NOW())
 	`, strings.TrimSpace(snapshotID), strings.TrimSpace(teamID)))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -237,6 +290,28 @@ func (s *PGSandboxStore) ForkRootFSFilesystem(ctx context.Context, req *ForkRoot
 	if s == nil || s.pool == nil || req == nil {
 		return nil, nil
 	}
+	filesystem, err := forkRootFSFilesystem(ctx, s.pool, req)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, s.rootFSForkNoRowsError(ctx, req)
+		}
+		return nil, err
+	}
+	return filesystem, nil
+}
+
+func (t sandboxStoreTx) ForkRootFSFilesystem(ctx context.Context, req *ForkRootFSFilesystemRequest) (*RootFSFilesystem, error) {
+	filesystem, err := forkRootFSFilesystem(ctx, t.tx, req)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("%w: source sandbox %s or target sandbox %s", ErrRootFSFilesystemNotFound, req.SourceSandboxID, req.TargetSandboxID)
+	}
+	return filesystem, err
+}
+
+func forkRootFSFilesystem(ctx context.Context, db rootFSStoreDB, req *ForkRootFSFilesystemRequest) (*RootFSFilesystem, error) {
+	if db == nil || req == nil {
+		return nil, nil
+	}
 	if strings.TrimSpace(req.SourceSandboxID) == "" {
 		return nil, fmt.Errorf("source_sandbox_id is required")
 	}
@@ -246,7 +321,7 @@ func (s *PGSandboxStore) ForkRootFSFilesystem(ctx context.Context, req *ForkRoot
 	if strings.TrimSpace(req.SourceSandboxID) == strings.TrimSpace(req.TargetSandboxID) {
 		return nil, fmt.Errorf("%w: source and target sandbox are the same", ErrRootFSFilesystemConflict)
 	}
-	filesystem, err := scanRootFSFilesystem(s.pool.QueryRow(ctx, `
+	filesystem, err := scanRootFSFilesystem(db.QueryRow(ctx, `
 		WITH source AS (
 			SELECT f.filesystem_id, f.team_id, f.head_layer_id, f.base_image_ref, f.base_image_digest
 			FROM manager.sandbox_rootfs_bindings b
@@ -295,9 +370,6 @@ func (s *PGSandboxStore) ForkRootFSFilesystem(ctx context.Context, req *ForkRoot
 		JOIN bound ON bound.filesystem_id = created.filesystem_id
 	`, req.SourceSandboxID, req.TargetSandboxID, strings.TrimSpace(req.TargetTeamID)))
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, s.rootFSForkNoRowsError(ctx, req)
-		}
 		return nil, fmt.Errorf("fork rootfs filesystem: %w", err)
 	}
 	return filesystem, nil
@@ -307,13 +379,35 @@ func (s *PGSandboxStore) RestoreRootFSFromSnapshot(ctx context.Context, req *Res
 	if s == nil || s.pool == nil || req == nil {
 		return nil, nil
 	}
+	filesystem, err := restoreRootFSFromSnapshot(ctx, s.pool, req)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, s.rootFSRestoreNoRowsError(ctx, req)
+		}
+		return nil, err
+	}
+	return filesystem, nil
+}
+
+func (t sandboxStoreTx) RestoreRootFSFromSnapshot(ctx context.Context, req *RestoreRootFSFromSnapshotRequest) (*RootFSFilesystem, error) {
+	filesystem, err := restoreRootFSFromSnapshot(ctx, t.tx, req)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("%w: snapshot %s or sandbox %s", ErrRootFSFilesystemConflict, req.SnapshotID, req.SandboxID)
+	}
+	return filesystem, err
+}
+
+func restoreRootFSFromSnapshot(ctx context.Context, db rootFSStoreDB, req *RestoreRootFSFromSnapshotRequest) (*RootFSFilesystem, error) {
+	if db == nil || req == nil {
+		return nil, nil
+	}
 	if strings.TrimSpace(req.SandboxID) == "" {
 		return nil, fmt.Errorf("sandbox_id is required")
 	}
 	if strings.TrimSpace(req.SnapshotID) == "" {
 		return nil, fmt.Errorf("snapshot_id is required")
 	}
-	filesystem, err := scanRootFSFilesystem(s.pool.QueryRow(ctx, `
+	filesystem, err := scanRootFSFilesystem(db.QueryRow(ctx, `
 		WITH snapshot AS (
 			SELECT s.snapshot_id, s.filesystem_id, s.team_id, s.head_layer_id,
 				l.base_image_ref, l.base_image_digest
@@ -321,6 +415,7 @@ func (s *PGSandboxStore) RestoreRootFSFromSnapshot(ctx context.Context, req *Res
 			JOIN manager.rootfs_layers l ON l.layer_id = s.head_layer_id
 			WHERE s.snapshot_id = $2
 				AND ($3 = '' OR s.team_id = $3)
+				AND (s.expires_at IS NULL OR s.expires_at > NOW())
 		),
 		target_sandbox AS (
 			SELECT sandbox_id, COALESCE(NULLIF($3, ''), team_id) AS team_id
@@ -387,9 +482,6 @@ func (s *PGSandboxStore) RestoreRootFSFromSnapshot(ctx context.Context, req *Res
 		JOIN bound ON bound.filesystem_id = restored.filesystem_id
 	`, req.SandboxID, req.SnapshotID, strings.TrimSpace(req.TeamID)))
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, s.rootFSRestoreNoRowsError(ctx, req)
-		}
 		return nil, fmt.Errorf("restore rootfs filesystem from snapshot: %w", err)
 	}
 	return filesystem, nil
@@ -450,6 +542,14 @@ func (s *PGSandboxStore) GarbageCollectRootFSFilesystemWithOptions(ctx context.C
 	if deleter == nil {
 		return nil, fmt.Errorf("rootfs object deleter is required")
 	}
+	expiredSnapshots, err := s.DeleteExpiredRootFSSnapshots(ctx, teamID, limit)
+	if err != nil {
+		return nil, err
+	}
+	deletedFilesystems, err := s.DeleteUnreferencedRootFSFilesystems(ctx, teamID, limit)
+	if err != nil {
+		return nil, err
+	}
 	layers, err := s.collectUnreferencedRootFSLayers(ctx, teamID, limit)
 	if err != nil {
 		return nil, err
@@ -457,13 +557,320 @@ func (s *PGSandboxStore) GarbageCollectRootFSFilesystemWithOptions(ctx context.C
 	opts.Limit = limit
 	deletedObjectKeys, err := s.DeletePendingRootFSObjectsWithOptions(ctx, deleter, opts)
 	result := &RootFSGarbageCollectionResult{
-		Layers:            layers,
-		DeletedObjectKeys: deletedObjectKeys,
+		Layers:             layers,
+		DeletedObjectKeys:  deletedObjectKeys,
+		ExpiredSnapshots:   expiredSnapshots,
+		DeletedFilesystems: deletedFilesystems,
 	}
 	if err != nil {
 		return result, err
 	}
 	return result, nil
+}
+
+func (s *PGSandboxStore) DeleteExpiredRootFSSnapshots(ctx context.Context, teamID string, limit int) (int, error) {
+	if s == nil || s.pool == nil {
+		return 0, nil
+	}
+	if limit <= 0 {
+		limit = defaultRootFSObjectDeleteLimit
+	}
+	if limit > maxRootFSObjectDeleteLimit {
+		limit = maxRootFSObjectDeleteLimit
+	}
+	tag, err := s.pool.Exec(ctx, `
+		WITH expired AS (
+			SELECT snapshot_id
+			FROM manager.rootfs_snapshots
+			WHERE expires_at IS NOT NULL
+				AND expires_at <= NOW()
+				AND ($1 = '' OR team_id = $1)
+			ORDER BY expires_at ASC
+			LIMIT $2
+			FOR UPDATE SKIP LOCKED
+		)
+		DELETE FROM manager.rootfs_snapshots s
+		USING expired e
+		WHERE s.snapshot_id = e.snapshot_id
+	`, strings.TrimSpace(teamID), limit)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired rootfs snapshots: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+func (s *PGSandboxStore) DeleteUnreferencedRootFSFilesystems(ctx context.Context, teamID string, limit int) (int, error) {
+	if s == nil || s.pool == nil {
+		return 0, nil
+	}
+	if limit <= 0 {
+		limit = defaultRootFSObjectDeleteLimit
+	}
+	if limit > maxRootFSObjectDeleteLimit {
+		limit = maxRootFSObjectDeleteLimit
+	}
+	total := 0
+	for total < limit {
+		deleted, err := s.deleteUnreferencedRootFSFilesystemLeaves(ctx, teamID, limit-total)
+		if err != nil {
+			return total, err
+		}
+		total += deleted
+		if deleted == 0 {
+			break
+		}
+	}
+	return total, nil
+}
+
+func (s *PGSandboxStore) deleteUnreferencedRootFSFilesystemLeaves(ctx context.Context, teamID string, limit int) (int, error) {
+	tag, err := s.pool.Exec(ctx, `
+		WITH RECURSIVE protected AS (
+			SELECT f.filesystem_id, f.source_filesystem_id
+			FROM manager.rootfs_filesystems f
+			WHERE EXISTS (
+				SELECT 1
+				FROM manager.sandbox_rootfs_bindings b
+				WHERE b.filesystem_id = f.filesystem_id
+			)
+			OR EXISTS (
+				SELECT 1
+				FROM manager.rootfs_snapshots s
+				WHERE s.filesystem_id = f.filesystem_id
+					AND (s.expires_at IS NULL OR s.expires_at > NOW())
+			)
+		),
+		protected_tree AS (
+			SELECT filesystem_id, source_filesystem_id
+			FROM protected
+			UNION
+			SELECT parent.filesystem_id, parent.source_filesystem_id
+			FROM manager.rootfs_filesystems parent
+			JOIN protected_tree child ON child.source_filesystem_id = parent.filesystem_id
+		),
+		candidates AS (
+			SELECT f.filesystem_id
+			FROM manager.rootfs_filesystems f
+			WHERE ($1 = '' OR f.team_id = $1)
+				AND NOT EXISTS (
+					SELECT 1
+					FROM protected_tree p
+					WHERE p.filesystem_id = f.filesystem_id
+				)
+				AND NOT EXISTS (
+					SELECT 1
+					FROM manager.rootfs_filesystems child
+					WHERE child.source_filesystem_id = f.filesystem_id
+				)
+			ORDER BY f.updated_at ASC
+			LIMIT $2
+			FOR UPDATE SKIP LOCKED
+		)
+		DELETE FROM manager.rootfs_filesystems f
+		USING candidates c
+		WHERE f.filesystem_id = c.filesystem_id
+	`, strings.TrimSpace(teamID), limit)
+	if err != nil {
+		return 0, fmt.Errorf("delete unreferenced rootfs filesystems: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+func (s *PGSandboxStore) ListRootFSStorageUsage(ctx context.Context, teamID string) ([]RootFSStorageUsage, error) {
+	if s == nil || s.pool == nil {
+		return nil, nil
+	}
+	observedAt := time.Now().UTC()
+	rows, err := s.pool.Query(ctx, `
+		WITH RECURSIVE roots AS (
+			SELECT f.head_layer_id AS layer_id
+			FROM manager.sandbox_rootfs_bindings b
+			JOIN manager.rootfs_filesystems f ON f.filesystem_id = b.filesystem_id
+			WHERE f.head_layer_id IS NOT NULL
+			UNION
+			SELECT head_layer_id AS layer_id
+			FROM manager.rootfs_snapshots
+			WHERE head_layer_id IS NOT NULL
+				AND (expires_at IS NULL OR expires_at > NOW())
+		),
+		reachable AS (
+			SELECT l.layer_id, l.parent_layer_id
+			FROM manager.rootfs_layers l
+			JOIN roots r ON r.layer_id = l.layer_id
+			UNION
+			SELECT parent.layer_id, parent.parent_layer_id
+			FROM manager.rootfs_layers parent
+			JOIN reachable child ON child.parent_layer_id = parent.layer_id
+		),
+		reachable_objects AS (
+			SELECT l.team_id, l.diff_object_key, MAX(l.diff_size) AS diff_size
+			FROM manager.rootfs_layers l
+			JOIN reachable r ON r.layer_id = l.layer_id
+			WHERE l.diff_object_key <> ''
+				AND ($1 = '' OR l.team_id = $1)
+			GROUP BY l.team_id, l.diff_object_key
+		),
+		known_teams AS (
+			SELECT DISTINCT team_id
+			FROM manager.rootfs_objects
+			WHERE team_id <> ''
+				AND ($1 = '' OR team_id = $1)
+			UNION
+			SELECT DISTINCT team_id
+			FROM reachable_objects
+			WHERE team_id <> ''
+			UNION
+			SELECT $1
+			WHERE $1 <> ''
+		)
+		SELECT
+			known_teams.team_id,
+			COUNT(reachable_objects.diff_object_key) AS object_count,
+			COALESCE(SUM(reachable_objects.diff_size), 0) AS storage_bytes
+		FROM known_teams
+		LEFT JOIN reachable_objects ON reachable_objects.team_id = known_teams.team_id
+		GROUP BY known_teams.team_id
+		ORDER BY known_teams.team_id ASC
+	`, strings.TrimSpace(teamID))
+	if err != nil {
+		return nil, fmt.Errorf("list rootfs storage usage: %w", err)
+	}
+	defer rows.Close()
+
+	var usages []RootFSStorageUsage
+	for rows.Next() {
+		var usage RootFSStorageUsage
+		if err := rows.Scan(&usage.TeamID, &usage.ObjectCount, &usage.StorageBytes); err != nil {
+			return nil, err
+		}
+		usage.ObservedAt = observedAt
+		usages = append(usages, usage)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rootfs storage usage: %w", err)
+	}
+	return usages, nil
+}
+
+func (s *PGSandboxStore) RecordRootFSStorageObservations(ctx context.Context, recorder RootFSStorageMeteringRecorder, teamID string, observedAt time.Time) ([]RootFSStorageUsage, error) {
+	if recorder == nil {
+		return nil, nil
+	}
+	if observedAt.IsZero() {
+		observedAt = time.Now().UTC()
+	} else {
+		observedAt = observedAt.UTC()
+	}
+	usages, err := s.ListRootFSStorageUsage(ctx, teamID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range usages {
+		usages[i].ObservedAt = observedAt
+		if err := recorder.RecordStorageObservation(ctx, &meteringpkg.StorageObservation{
+			SubjectType: meteringpkg.SubjectTypeRootFS,
+			SubjectID:   usages[i].TeamID,
+			Product:     meteringpkg.ProductSandbox,
+			TeamID:      usages[i].TeamID,
+			SizeBytes:   usages[i].StorageBytes,
+			ObservedAt:  observedAt,
+		}); err != nil {
+			return usages, fmt.Errorf("record rootfs storage observation for team %q: %w", usages[i].TeamID, err)
+		}
+	}
+	return usages, nil
+}
+
+func (s *PGSandboxStore) AuditRootFSObjects(ctx context.Context, inspector RootFSObjectInspector, teamID string, limit int) (*RootFSObjectAuditResult, error) {
+	if s == nil || s.pool == nil || inspector == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = defaultRootFSObjectDeleteLimit
+	}
+	if limit > maxRootFSObjectDeleteLimit {
+		limit = maxRootFSObjectDeleteLimit
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT object_key, diff_size
+		FROM manager.rootfs_objects
+		WHERE deleted_at IS NULL
+			AND ($1 = '' OR team_id = $1)
+		ORDER BY last_referenced_at ASC, object_key ASC
+		LIMIT $2
+	`, strings.TrimSpace(teamID), limit)
+	if err != nil {
+		return nil, fmt.Errorf("list rootfs objects for audit: %w", err)
+	}
+	defer rows.Close()
+
+	type auditCandidate struct {
+		objectKey string
+		diffSize  int64
+	}
+	var candidates []auditCandidate
+	for rows.Next() {
+		var candidate auditCandidate
+		if err := rows.Scan(&candidate.objectKey, &candidate.diffSize); err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rootfs object audit candidates: %w", err)
+	}
+
+	result := &RootFSObjectAuditResult{}
+	for _, candidate := range candidates {
+		result.Checked++
+		info, err := inspector.StatRootFSObject(candidate.objectKey)
+		if err != nil {
+			result.Missing++
+			if updateErr := s.recordRootFSObjectAuditError(ctx, candidate.objectKey, err); updateErr != nil {
+				return result, updateErr
+			}
+			continue
+		}
+		if candidate.diffSize > 0 && info.Size > 0 && info.Size != candidate.diffSize {
+			result.SizeMismatched++
+			if updateErr := s.recordRootFSObjectAuditError(ctx, candidate.objectKey, fmt.Errorf("object size %d does not match db size %d", info.Size, candidate.diffSize)); updateErr != nil {
+				return result, updateErr
+			}
+			continue
+		}
+		if err := s.clearRootFSObjectAuditError(ctx, candidate.objectKey); err != nil {
+			return result, err
+		}
+	}
+	return result, nil
+}
+
+func (s *PGSandboxStore) recordRootFSObjectAuditError(ctx context.Context, objectKey string, auditErr error) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE manager.rootfs_objects
+		SET missing_at = COALESCE(missing_at, NOW()),
+			last_error = $2,
+			updated_at = NOW()
+		WHERE object_key = $1
+	`, objectKey, truncateRootFSError(auditErr.Error()))
+	if err != nil {
+		return fmt.Errorf("record rootfs object audit error for %q: %w", objectKey, err)
+	}
+	return nil
+}
+
+func (s *PGSandboxStore) clearRootFSObjectAuditError(ctx context.Context, objectKey string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE manager.rootfs_objects
+		SET missing_at = NULL,
+			last_error = '',
+			updated_at = NOW()
+		WHERE object_key = $1
+	`, objectKey)
+	if err != nil {
+		return fmt.Errorf("clear rootfs object audit error for %q: %w", objectKey, err)
+	}
+	return nil
 }
 
 func (s *PGSandboxStore) collectUnreferencedRootFSLayers(ctx context.Context, teamID string, limit int) ([]*SandboxRootFSLayer, error) {
@@ -478,13 +885,15 @@ func (s *PGSandboxStore) collectUnreferencedRootFSLayers(ctx context.Context, te
 	}
 	rows, err := s.pool.Query(ctx, `
 		WITH RECURSIVE roots AS (
-			SELECT head_layer_id AS layer_id
-			FROM manager.rootfs_filesystems
-			WHERE head_layer_id IS NOT NULL
+			SELECT f.head_layer_id AS layer_id
+			FROM manager.sandbox_rootfs_bindings b
+			JOIN manager.rootfs_filesystems f ON f.filesystem_id = b.filesystem_id
+			WHERE f.head_layer_id IS NOT NULL
 			UNION
 			SELECT head_layer_id AS layer_id
 			FROM manager.rootfs_snapshots
 			WHERE head_layer_id IS NOT NULL
+				AND (expires_at IS NULL OR expires_at > NOW())
 		),
 		reachable AS (
 			SELECT l.layer_id, l.parent_layer_id
@@ -521,6 +930,16 @@ func (s *PGSandboxStore) collectUnreferencedRootFSLayers(ctx context.Context, te
 			FROM manager.rootfs_layers l
 			JOIN candidates c ON c.layer_id = l.layer_id
 			WHERE l.diff_object_key <> ''
+				AND NOT EXISTS (
+					SELECT 1
+					FROM manager.rootfs_layers ref
+					WHERE ref.diff_object_key = l.diff_object_key
+						AND NOT EXISTS (
+							SELECT 1
+							FROM candidates candidate_ref
+							WHERE candidate_ref.layer_id = ref.layer_id
+						)
+				)
 			ON CONFLICT (object_key) DO UPDATE SET
 				team_id = EXCLUDED.team_id,
 				next_attempt_at = NOW(),
@@ -534,14 +953,6 @@ func (s *PGSandboxStore) collectUnreferencedRootFSLayers(ctx context.Context, te
 			DELETE FROM manager.rootfs_layers l
 			USING candidates c
 			WHERE l.layer_id = c.layer_id
-				AND (
-					l.diff_object_key = ''
-					OR EXISTS (
-						SELECT 1
-						FROM queued_objects q
-						WHERE q.object_key = l.diff_object_key
-					)
-				)
 			RETURNING l.layer_id, l.parent_layer_id, l.source_sandbox_id, l.team_id,
 				l.runtime_generation, l.runtime, l.runtime_handler, l.base_image_ref,
 				l.base_image_digest, l.snapshotter, l.snapshot_parent,
@@ -594,6 +1005,16 @@ func (s *PGSandboxStore) DeletePendingRootFSObjectsWithOptions(ctx context.Conte
 		if err := ctx.Err(); err != nil {
 			return deleted, err
 		}
+		referenced, err := s.rootFSObjectHasLayerReferences(ctx, item.ObjectKey)
+		if err != nil {
+			return deleted, err
+		}
+		if referenced {
+			if err := s.clearRootFSObjectDeletion(ctx, item.ObjectKey, opts.ClaimedBy); err != nil {
+				return deleted, err
+			}
+			continue
+		}
 		if err := deleter.Delete(item.ObjectKey); err != nil {
 			if updateErr := s.recordRootFSObjectDeleteFailure(ctx, item, opts, err); updateErr != nil {
 				return deleted, updateErr
@@ -604,16 +1025,59 @@ func (s *PGSandboxStore) DeletePendingRootFSObjectsWithOptions(ctx context.Conte
 			}
 			continue
 		}
-		if _, err := s.pool.Exec(ctx, `
-			DELETE FROM manager.rootfs_object_deletions
-			WHERE object_key = $1
-				AND claimed_by = $2
-		`, item.ObjectKey, opts.ClaimedBy); err != nil {
-			return deleted, fmt.Errorf("clear rootfs object deletion %q: %w", item.ObjectKey, err)
+		if err := s.markRootFSObjectDeleted(ctx, item.ObjectKey); err != nil {
+			return deleted, err
+		}
+		if err := s.clearRootFSObjectDeletion(ctx, item.ObjectKey, opts.ClaimedBy); err != nil {
+			return deleted, err
 		}
 		deleted = append(deleted, item.ObjectKey)
 	}
 	return deleted, errors.Join(errs...)
+}
+
+func (s *PGSandboxStore) rootFSObjectHasLayerReferences(ctx context.Context, objectKey string) (bool, error) {
+	var referenced bool
+	if err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM manager.rootfs_layers
+			WHERE diff_object_key = $1
+		)
+	`, objectKey).Scan(&referenced); err != nil {
+		return false, fmt.Errorf("check rootfs object references for %q: %w", objectKey, err)
+	}
+	return referenced, nil
+}
+
+func (s *PGSandboxStore) markRootFSObjectDeleted(ctx context.Context, objectKey string) error {
+	if _, err := s.pool.Exec(ctx, `
+		UPDATE manager.rootfs_objects
+		SET deleted_at = NOW(),
+			missing_at = NULL,
+			last_error = '',
+			updated_at = NOW()
+		WHERE object_key = $1
+			AND NOT EXISTS (
+				SELECT 1
+				FROM manager.rootfs_layers
+				WHERE diff_object_key = $1
+			)
+	`, objectKey); err != nil {
+		return fmt.Errorf("mark rootfs object deleted %q: %w", objectKey, err)
+	}
+	return nil
+}
+
+func (s *PGSandboxStore) clearRootFSObjectDeletion(ctx context.Context, objectKey, claimedBy string) error {
+	if _, err := s.pool.Exec(ctx, `
+		DELETE FROM manager.rootfs_object_deletions
+		WHERE object_key = $1
+			AND claimed_by = $2
+	`, objectKey, claimedBy); err != nil {
+		return fmt.Errorf("clear rootfs object deletion %q: %w", objectKey, err)
+	}
+	return nil
 }
 
 func (s *PGSandboxStore) RootFSObjectDeletionQueueStats(ctx context.Context) (*RootFSObjectDeletionQueueStats, error) {
@@ -875,6 +1339,7 @@ func (s *PGSandboxStore) rootFSSnapshotExists(ctx context.Context, snapshotID, t
 			FROM manager.rootfs_snapshots
 			WHERE snapshot_id = $1
 				AND ($2 = '' OR team_id = $2)
+				AND (expires_at IS NULL OR expires_at > NOW())
 		)
 	`, snapshotID, teamID).Scan(&exists); err != nil {
 		return false, fmt.Errorf("check rootfs snapshot exists: %w", err)

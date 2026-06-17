@@ -147,6 +147,13 @@ func (s *PGSandboxStore) UpsertSandbox(ctx context.Context, record *SandboxRecor
 	if s == nil || s.pool == nil || record == nil {
 		return nil
 	}
+	return upsertSandboxRecord(ctx, s.pool, record)
+}
+
+func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *SandboxRecord) error {
+	if exec == nil || record == nil {
+		return nil
+	}
 	if strings.TrimSpace(record.ID) == "" {
 		return fmt.Errorf("sandbox_id is required")
 	}
@@ -154,7 +161,7 @@ func (s *PGSandboxStore) UpsertSandbox(ctx context.Context, record *SandboxRecor
 	if err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx, `
+	_, err = exec.Exec(ctx, `
 		INSERT INTO manager.sandboxes (
 			sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
 			cluster_id, status, config, mounts, template_spec,
@@ -472,6 +479,10 @@ func (t sandboxStoreTx) SaveRootFSState(ctx context.Context, state *SandboxRootF
 	return saveRootFSState(ctx, t.tx, state)
 }
 
+func (t sandboxStoreTx) UpsertSandbox(ctx context.Context, record *SandboxRecord) error {
+	return upsertSandboxRecord(ctx, t.tx, record)
+}
+
 func sandboxRecordSelectSQL() string {
 	return `
 		SELECT sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
@@ -530,6 +541,9 @@ func saveRootFSLayer(ctx context.Context, exec rootFSStateExecutor, state *Sandb
 	if strings.TrimSpace(state.ParentLayerID) == strings.TrimSpace(state.LayerID) {
 		return fmt.Errorf("parent_layer_id cannot reference layer_id")
 	}
+	if err := saveRootFSObject(ctx, exec, state); err != nil {
+		return err
+	}
 	parentLayerID := nullableText(state.ParentLayerID)
 	parentChainJSON, err := json.Marshal(state.SnapshotParentChain)
 	if err != nil {
@@ -550,6 +564,41 @@ func saveRootFSLayer(ctx context.Context, exec rootFSStateExecutor, state *Sandb
 		state.DiffSize, state.DiffObjectKey, nullableTime(state.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("save rootfs layer: %w", err)
+	}
+	return nil
+}
+
+func saveRootFSObject(ctx context.Context, exec rootFSStateExecutor, state *SandboxRootFSState) error {
+	if exec == nil || state == nil {
+		return nil
+	}
+	tag, err := exec.Exec(ctx, `
+		INSERT INTO manager.rootfs_objects (
+			object_key, team_id, diff_digest, diff_media_type, diff_size,
+			first_layer_id, last_referenced_at, missing_at, deleted_at,
+			last_error, created_at, updated_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, NOW()), NULL, NULL, '', COALESCE($7, NOW()), NOW())
+		ON CONFLICT (object_key) DO UPDATE SET
+			team_id = EXCLUDED.team_id,
+			diff_digest = EXCLUDED.diff_digest,
+			diff_media_type = EXCLUDED.diff_media_type,
+			diff_size = EXCLUDED.diff_size,
+			last_referenced_at = NOW(),
+			missing_at = NULL,
+			deleted_at = NULL,
+			last_error = '',
+			updated_at = NOW()
+		WHERE manager.rootfs_objects.team_id = EXCLUDED.team_id
+			AND manager.rootfs_objects.diff_digest = EXCLUDED.diff_digest
+			AND manager.rootfs_objects.diff_size = EXCLUDED.diff_size
+	`, state.DiffObjectKey, state.TeamID, state.DiffDigest, state.DiffMediaType,
+		state.DiffSize, state.LayerID, nullableTime(state.CreatedAt))
+	if err != nil {
+		return fmt.Errorf("save rootfs object: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: %s", ErrRootFSObjectConflict, state.DiffObjectKey)
 	}
 	return nil
 }

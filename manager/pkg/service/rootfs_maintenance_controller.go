@@ -28,11 +28,13 @@ type RootFSMaintenanceControllerConfig struct {
 // RootFSMaintenanceController runs internal rootfs metadata and object-store
 // maintenance. It is not user-facing API surface.
 type RootFSMaintenanceController struct {
-	store   *PGSandboxStore
-	deleter RootFSObjectDeleter
-	cfg     RootFSMaintenanceControllerConfig
-	logger  *zap.Logger
-	metrics *obsmetrics.ManagerMetrics
+	store            *PGSandboxStore
+	deleter          RootFSObjectDeleter
+	cfg              RootFSMaintenanceControllerConfig
+	logger           *zap.Logger
+	metrics          *obsmetrics.ManagerMetrics
+	objectInspector  RootFSObjectInspector
+	meteringRecorder RootFSStorageMeteringRecorder
 }
 
 func NewRootFSMaintenanceController(store *PGSandboxStore, deleter RootFSObjectDeleter, cfg RootFSMaintenanceControllerConfig, logger *zap.Logger, metrics *obsmetrics.ManagerMetrics) *RootFSMaintenanceController {
@@ -47,6 +49,20 @@ func NewRootFSMaintenanceController(store *PGSandboxStore, deleter RootFSObjectD
 		logger:  logger,
 		metrics: metrics,
 	}
+}
+
+func (c *RootFSMaintenanceController) SetStorageMeteringRecorder(recorder RootFSStorageMeteringRecorder) {
+	if c == nil {
+		return
+	}
+	c.meteringRecorder = recorder
+}
+
+func (c *RootFSMaintenanceController) SetObjectInspector(inspector RootFSObjectInspector) {
+	if c == nil {
+		return
+	}
+	c.objectInspector = inspector
 }
 
 func (c *RootFSMaintenanceController) Run(ctx context.Context) error {
@@ -114,8 +130,20 @@ func (c *RootFSMaintenanceController) RunOnce(ctx context.Context) error {
 			runErr = err
 			break
 		}
-		if result == nil || (len(result.Layers) == 0 && len(result.DeletedObjectKeys) == 0) {
+		if result == nil || (len(result.Layers) == 0 && len(result.DeletedObjectKeys) == 0 && result.ExpiredSnapshots == 0 && result.DeletedFilesystems == 0) {
 			break
+		}
+	}
+	if err := c.auditRootFSObjects(ctx); err != nil {
+		status = "error"
+		if runErr == nil {
+			runErr = err
+		}
+	}
+	if err := c.observeStorageUsage(ctx); err != nil {
+		status = "error"
+		if runErr == nil {
+			runErr = err
 		}
 	}
 	return runErr
@@ -157,6 +185,58 @@ func (c *RootFSMaintenanceController) observeQueueStats(ctx context.Context) {
 	c.metrics.RootFSObjectDeletionQueueDepth.WithLabelValues("due").Set(float64(stats.Due))
 	c.metrics.RootFSObjectDeletionQueueDepth.WithLabelValues("claimed").Set(float64(stats.Claimed))
 	c.metrics.RootFSObjectDeletionQueueDepth.WithLabelValues("dead_lettered").Set(float64(stats.DeadLettered))
+}
+
+func (c *RootFSMaintenanceController) auditRootFSObjects(ctx context.Context) error {
+	if c == nil || c.store == nil || c.objectInspector == nil {
+		return nil
+	}
+	result, err := c.store.AuditRootFSObjects(ctx, c.objectInspector, "", c.cfg.BatchSize)
+	if err != nil {
+		c.logger.Warn("Failed to audit rootfs object store consistency", zap.Error(err))
+		return err
+	}
+	if result != nil && (result.Missing > 0 || result.SizeMismatched > 0) {
+		c.logger.Warn("Rootfs object store audit found inconsistent objects",
+			zap.Int("checked", result.Checked),
+			zap.Int("missing", result.Missing),
+			zap.Int("sizeMismatched", result.SizeMismatched),
+		)
+	}
+	return nil
+}
+
+func (c *RootFSMaintenanceController) observeStorageUsage(ctx context.Context) error {
+	if c == nil || c.store == nil {
+		return nil
+	}
+	var usages []RootFSStorageUsage
+	var err error
+	if c.meteringRecorder != nil {
+		usages, err = c.store.RecordRootFSStorageObservations(ctx, c.meteringRecorder, "", time.Now().UTC())
+	} else {
+		usages, err = c.store.ListRootFSStorageUsage(ctx, "")
+	}
+	if err != nil {
+		c.logger.Warn("Failed to collect rootfs storage usage", zap.Error(err))
+		return err
+	}
+	if c.metrics == nil {
+		return nil
+	}
+	var totalBytes int64
+	var totalObjects int64
+	for _, usage := range usages {
+		totalBytes += usage.StorageBytes
+		totalObjects += usage.ObjectCount
+	}
+	if c.metrics.RootFSStorageBytes != nil {
+		c.metrics.RootFSStorageBytes.Set(float64(totalBytes))
+	}
+	if c.metrics.RootFSStorageObjects != nil {
+		c.metrics.RootFSStorageObjects.Set(float64(totalObjects))
+	}
+	return nil
 }
 
 func normalizeRootFSMaintenanceControllerConfig(cfg RootFSMaintenanceControllerConfig) RootFSMaintenanceControllerConfig {

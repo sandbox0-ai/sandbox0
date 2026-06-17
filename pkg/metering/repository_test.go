@@ -357,6 +357,27 @@ func TestStorageWindowFromStateSkipsSubByteHour(t *testing.T) {
 	}
 }
 
+func TestStorageWindowFromStateUsesRootFSWindowType(t *testing.T) {
+	start := time.Date(2026, 3, 12, 12, 0, 0, 0, time.UTC)
+	window := storageWindowFromState(&StorageProjectionState{
+		SubjectType: SubjectTypeRootFS,
+		SubjectID:   "team-1",
+		Product:     ProductSandbox,
+		TeamID:      "team-1",
+		SizeBytes:   1024,
+		ObservedAt:  start,
+	}, start.Add(time.Hour))
+	if window == nil {
+		t.Fatal("expected rootfs storage window")
+	}
+	if window.WindowType != WindowTypeSandboxRootFSByteHours {
+		t.Fatalf("window_type = %q, want %q", window.WindowType, WindowTypeSandboxRootFSByteHours)
+	}
+	if window.SubjectType != SubjectTypeRootFS || window.SubjectID != "team-1" {
+		t.Fatalf("unexpected subject: %s/%s", window.SubjectType, window.SubjectID)
+	}
+}
+
 func TestRecordStorageObservationClosesPreviousWindow(t *testing.T) {
 	start := time.Date(2026, 3, 12, 12, 0, 0, 0, time.UTC)
 	end := start.Add(2 * time.Hour)

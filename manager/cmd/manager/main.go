@@ -518,6 +518,8 @@ func main() {
 				logger,
 				managerMetrics,
 			)
+			rootFSMaintenanceController.SetObjectInspector(rootFSObjectStoreInspector{store: rootFSObjectStore})
+			rootFSMaintenanceController.SetStorageMeteringRecorder(meteringRepo)
 			go func() {
 				if err := rootFSMaintenanceController.Run(ctx); err != nil && err != context.Canceled {
 					logger.Error("Rootfs maintenance controller failed", zap.Error(err))
@@ -638,6 +640,22 @@ func buildRootFSObjectStore(cfg *config.ManagerConfig) (objectstore.Store, error
 		return nil, err
 	}
 	return store, nil
+}
+
+type rootFSObjectStoreInspector struct {
+	store objectstore.Store
+}
+
+func (i rootFSObjectStoreInspector) StatRootFSObject(key string) (service.RootFSObjectInfo, error) {
+	info, err := i.store.Head(key)
+	if err != nil {
+		return service.RootFSObjectInfo{}, err
+	}
+	return service.RootFSObjectInfo{
+		Key:      info.Key,
+		Size:     info.Size,
+		Modified: info.Modified,
+	}, nil
 }
 
 func rootFSMaintenanceControllerConfig(cfg *config.ManagerConfig) service.RootFSMaintenanceControllerConfig {

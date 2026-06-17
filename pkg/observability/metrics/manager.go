@@ -24,6 +24,8 @@ type ManagerMetrics struct {
 	RootFSGCLayersTotal            prometheus.Counter
 	RootFSObjectDeletesTotal       *prometheus.CounterVec
 	RootFSObjectDeletionQueueDepth *prometheus.GaugeVec
+	RootFSStorageBytes             prometheus.Gauge
+	RootFSStorageObjects           prometheus.Gauge
 }
 
 // NewManager registers and returns manager metrics.
@@ -108,5 +110,13 @@ func NewManager(registry prometheus.Registerer) *ManagerMetrics {
 			Name: "manager_rootfs_object_deletion_queue_depth",
 			Help: "Rootfs object deletion queue depth by state",
 		}, []string{"state"}),
+		RootFSStorageBytes: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "manager_rootfs_storage_bytes",
+			Help: "Current reachable persistent rootfs COW object bytes",
+		}),
+		RootFSStorageObjects: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "manager_rootfs_storage_objects",
+			Help: "Current reachable persistent rootfs COW object count",
+		}),
 	}
 }

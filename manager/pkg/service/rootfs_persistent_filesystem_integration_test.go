@@ -106,6 +106,13 @@ func TestRootFSFilesystemPersistenceIntegration(t *testing.T) {
 	assert.Equal(t, "layer-fork", gcResult.Layers[0].ID)
 	assert.Equal(t, int64(1), rootFSTestCountRows(t, pool, "rootfs_object_deletions"))
 
+	_, err = pool.Exec(ctx, `
+		UPDATE manager.rootfs_object_deletions
+		SET next_attempt_at = NOW(),
+			claimed_by = '',
+			claimed_until = NULL
+	`)
+	require.NoError(t, err)
 	deletedObjects, err := store.DeletePendingRootFSObjects(ctx, deleter, 10)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"rootfs/fork.tar"}, deletedObjects)
@@ -125,6 +132,91 @@ func TestRootFSFilesystemPersistenceIntegration(t *testing.T) {
 		)
 	`).Scan(&sourceFilesystemStillExists))
 	assert.True(t, sourceFilesystemStillExists, "source filesystem is retained by snapshot and fork references")
+}
+
+func TestRootFSObjectDeletionQueueClaimsBacksOffAndDeadLetters(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+
+	_, err := pool.Exec(ctx, `
+		INSERT INTO manager.rootfs_object_deletions (object_key, team_id, next_attempt_at)
+		VALUES
+			('rootfs/a.tar', 'team-1', NOW()),
+			('rootfs/b.tar', 'team-1', NOW())
+	`)
+	require.NoError(t, err)
+
+	claimed, err := store.claimPendingRootFSObjectDeletions(ctx, DeletePendingRootFSObjectsOptions{
+		Limit:     1,
+		ClaimedBy: "worker-a",
+		ClaimTTL:  time.Minute,
+	})
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+
+	claimedAgain, err := store.claimPendingRootFSObjectDeletions(ctx, DeletePendingRootFSObjectsOptions{
+		Limit:     2,
+		ClaimedBy: "worker-b",
+		ClaimTTL:  time.Minute,
+	})
+	require.NoError(t, err)
+	require.Len(t, claimedAgain, 1)
+	assert.NotEqual(t, claimed[0].ObjectKey, claimedAgain[0].ObjectKey)
+
+	_, err = pool.Exec(ctx, `
+		UPDATE manager.rootfs_object_deletions
+		SET claimed_by = '',
+			claimed_until = NOW() - INTERVAL '1 second'
+	`)
+	require.NoError(t, err)
+
+	deleteErr := assert.AnError
+	deleter := &recordingRootFSObjectDeleter{failKey: "rootfs/a.tar", err: deleteErr}
+	deleted, err := store.DeletePendingRootFSObjectsWithOptions(ctx, deleter, DeletePendingRootFSObjectsOptions{
+		Limit:           2,
+		ClaimedBy:       "worker-c",
+		ClaimTTL:        time.Minute,
+		BackoffBase:     time.Minute,
+		BackoffMax:      time.Minute,
+		ContinueOnError: true,
+	})
+	require.ErrorIs(t, err, deleteErr)
+	assert.Equal(t, []string{"rootfs/b.tar"}, deleted)
+	assert.ElementsMatch(t, []string{"rootfs/a.tar", "rootfs/b.tar"}, deleter.keys)
+
+	var attempts int
+	var nextAttemptAt time.Time
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT attempts, next_attempt_at
+		FROM manager.rootfs_object_deletions
+		WHERE object_key = 'rootfs/a.tar'
+	`).Scan(&attempts, &nextAttemptAt))
+	assert.Equal(t, 1, attempts)
+	assert.True(t, nextAttemptAt.After(time.Now().Add(30*time.Second)))
+	assert.Equal(t, int64(1), rootFSTestCountRows(t, pool, "rootfs_object_deletions"))
+
+	_, err = pool.Exec(ctx, `
+		UPDATE manager.rootfs_object_deletions
+		SET next_attempt_at = NOW()
+		WHERE object_key = 'rootfs/a.tar'
+	`)
+	require.NoError(t, err)
+	_, err = store.DeletePendingRootFSObjectsWithOptions(ctx, &recordingRootFSObjectDeleter{failKey: "rootfs/a.tar", err: deleteErr}, DeletePendingRootFSObjectsOptions{
+		Limit:       1,
+		ClaimedBy:   "worker-d",
+		ClaimTTL:    time.Minute,
+		BackoffBase: time.Minute,
+		BackoffMax:  time.Minute,
+		MaxAttempts: 2,
+	})
+	require.ErrorIs(t, err, deleteErr)
+
+	stats, err := store.RootFSObjectDeletionQueueStats(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, stats)
+	assert.Equal(t, int64(0), stats.Pending)
+	assert.Equal(t, int64(1), stats.DeadLettered)
 }
 
 func TestRootFSRootLayerSaveCanCASAgainstExistingHead(t *testing.T) {

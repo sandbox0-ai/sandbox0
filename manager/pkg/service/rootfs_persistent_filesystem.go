@@ -72,10 +72,36 @@ type RootFSGarbageCollectionResult struct {
 	DeletedObjectKeys []string
 }
 
+type DeletePendingRootFSObjectsOptions struct {
+	Limit           int
+	ClaimedBy       string
+	ClaimTTL        time.Duration
+	BackoffBase     time.Duration
+	BackoffMax      time.Duration
+	MaxAttempts     int
+	ContinueOnError bool
+}
+
+type RootFSObjectDeletionQueueStats struct {
+	Pending      int64
+	Due          int64
+	Claimed      int64
+	DeadLettered int64
+	OldestQueued time.Time
+}
+
 // RootFSObjectDeleter deletes rootfs diff objects from durable object storage.
 type RootFSObjectDeleter interface {
 	Delete(key string) error
 }
+
+const (
+	defaultRootFSObjectDeleteLimit       = 100
+	maxRootFSObjectDeleteLimit           = 1000
+	defaultRootFSObjectDeleteClaimTTL    = 2 * time.Minute
+	defaultRootFSObjectDeleteBackoffBase = 5 * time.Second
+	defaultRootFSObjectDeleteBackoffMax  = 10 * time.Minute
+)
 
 func (s *PGSandboxStore) GetRootFSFilesystem(ctx context.Context, sandboxID string) (*RootFSFilesystem, error) {
 	if s == nil || s.pool == nil || strings.TrimSpace(sandboxID) == "" {
@@ -343,6 +369,10 @@ func (s *PGSandboxStore) SquashRootFSFilesystem(ctx context.Context, req *Squash
 // keys are durably queued before layer metadata is removed, so failed object
 // deletes can be retried without losing the key.
 func (s *PGSandboxStore) GarbageCollectRootFSFilesystem(ctx context.Context, deleter RootFSObjectDeleter, teamID string, limit int) (*RootFSGarbageCollectionResult, error) {
+	return s.GarbageCollectRootFSFilesystemWithOptions(ctx, deleter, teamID, limit, DeletePendingRootFSObjectsOptions{})
+}
+
+func (s *PGSandboxStore) GarbageCollectRootFSFilesystemWithOptions(ctx context.Context, deleter RootFSObjectDeleter, teamID string, limit int, opts DeletePendingRootFSObjectsOptions) (*RootFSGarbageCollectionResult, error) {
 	if deleter == nil {
 		return nil, fmt.Errorf("rootfs object deleter is required")
 	}
@@ -350,7 +380,8 @@ func (s *PGSandboxStore) GarbageCollectRootFSFilesystem(ctx context.Context, del
 	if err != nil {
 		return nil, err
 	}
-	deletedObjectKeys, err := s.DeletePendingRootFSObjects(ctx, deleter, limit)
+	opts.Limit = limit
+	deletedObjectKeys, err := s.DeletePendingRootFSObjectsWithOptions(ctx, deleter, opts)
 	result := &RootFSGarbageCollectionResult{
 		Layers:            layers,
 		DeletedObjectKeys: deletedObjectKeys,
@@ -366,10 +397,10 @@ func (s *PGSandboxStore) collectUnreferencedRootFSLayers(ctx context.Context, te
 		return nil, nil
 	}
 	if limit <= 0 {
-		limit = 100
+		limit = defaultRootFSObjectDeleteLimit
 	}
-	if limit > 1000 {
-		limit = 1000
+	if limit > maxRootFSObjectDeleteLimit {
+		limit = maxRootFSObjectDeleteLimit
 	}
 	rows, err := s.pool.Query(ctx, `
 		WITH RECURSIVE roots AS (
@@ -418,6 +449,10 @@ func (s *PGSandboxStore) collectUnreferencedRootFSLayers(ctx context.Context, te
 			WHERE l.diff_object_key <> ''
 			ON CONFLICT (object_key) DO UPDATE SET
 				team_id = EXCLUDED.team_id,
+				next_attempt_at = NOW(),
+				claimed_by = '',
+				claimed_until = NULL,
+				dead_lettered_at = NULL,
 				updated_at = NOW()
 			RETURNING object_key
 		),
@@ -466,65 +501,223 @@ func (s *PGSandboxStore) collectUnreferencedRootFSLayers(ctx context.Context, te
 }
 
 func (s *PGSandboxStore) DeletePendingRootFSObjects(ctx context.Context, deleter RootFSObjectDeleter, limit int) ([]string, error) {
+	return s.DeletePendingRootFSObjectsWithOptions(ctx, deleter, DeletePendingRootFSObjectsOptions{Limit: limit})
+}
+
+func (s *PGSandboxStore) DeletePendingRootFSObjectsWithOptions(ctx context.Context, deleter RootFSObjectDeleter, opts DeletePendingRootFSObjectsOptions) ([]string, error) {
 	if s == nil || s.pool == nil || deleter == nil {
 		return nil, nil
 	}
-	if limit <= 0 {
-		limit = 100
-	}
-	if limit > 1000 {
-		limit = 1000
-	}
-	rows, err := s.pool.Query(ctx, `
-		SELECT object_key
-		FROM manager.rootfs_object_deletions
-		ORDER BY updated_at ASC
-		LIMIT $1
-	`, limit)
+	opts = normalizeRootFSObjectDeletionOptions(opts)
+	claimed, err := s.claimPendingRootFSObjectDeletions(ctx, opts)
 	if err != nil {
-		return nil, fmt.Errorf("list pending rootfs object deletions: %w", err)
-	}
-	defer rows.Close()
-
-	var keys []string
-	for rows.Next() {
-		var key string
-		if err := rows.Scan(&key); err != nil {
-			return nil, err
-		}
-		keys = append(keys, key)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate pending rootfs object deletions: %w", err)
+		return nil, err
 	}
 
-	deleted := make([]string, 0, len(keys))
-	for _, key := range keys {
+	deleted := make([]string, 0, len(claimed))
+	var errs []error
+	for _, item := range claimed {
 		if err := ctx.Err(); err != nil {
 			return deleted, err
 		}
-		if err := deleter.Delete(key); err != nil {
-			_, updateErr := s.pool.Exec(ctx, `
-				UPDATE manager.rootfs_object_deletions
-				SET attempts = attempts + 1,
-					last_error = $2,
-					updated_at = NOW()
-				WHERE object_key = $1
-			`, key, err.Error())
-			if updateErr != nil {
-				return deleted, fmt.Errorf("record rootfs object delete failure for %q: %w", key, updateErr)
+		if err := deleter.Delete(item.ObjectKey); err != nil {
+			if updateErr := s.recordRootFSObjectDeleteFailure(ctx, item, opts, err); updateErr != nil {
+				return deleted, updateErr
 			}
-			return deleted, fmt.Errorf("delete rootfs object %q: %w", key, err)
+			errs = append(errs, fmt.Errorf("delete rootfs object %q: %w", item.ObjectKey, err))
+			if !opts.ContinueOnError {
+				return deleted, errors.Join(errs...)
+			}
+			continue
 		}
 		if _, err := s.pool.Exec(ctx, `
 			DELETE FROM manager.rootfs_object_deletions
 			WHERE object_key = $1
-		`, key); err != nil {
-			return deleted, fmt.Errorf("clear rootfs object deletion %q: %w", key, err)
+				AND claimed_by = $2
+		`, item.ObjectKey, opts.ClaimedBy); err != nil {
+			return deleted, fmt.Errorf("clear rootfs object deletion %q: %w", item.ObjectKey, err)
 		}
-		deleted = append(deleted, key)
+		deleted = append(deleted, item.ObjectKey)
 	}
-	return deleted, nil
+	return deleted, errors.Join(errs...)
+}
+
+func (s *PGSandboxStore) RootFSObjectDeletionQueueStats(ctx context.Context) (*RootFSObjectDeletionQueueStats, error) {
+	if s == nil || s.pool == nil {
+		return nil, nil
+	}
+	var stats RootFSObjectDeletionQueueStats
+	var oldestQueued *time.Time
+	if err := s.pool.QueryRow(ctx, `
+		SELECT
+			COUNT(*) FILTER (WHERE dead_lettered_at IS NULL) AS pending,
+			COUNT(*) FILTER (
+				WHERE dead_lettered_at IS NULL
+					AND next_attempt_at <= NOW()
+					AND (claimed_until IS NULL OR claimed_until <= NOW())
+			) AS due,
+			COUNT(*) FILTER (
+				WHERE dead_lettered_at IS NULL
+					AND claimed_until IS NOT NULL
+					AND claimed_until > NOW()
+			) AS claimed,
+			COUNT(*) FILTER (WHERE dead_lettered_at IS NOT NULL) AS dead_lettered,
+			MIN(created_at) FILTER (WHERE dead_lettered_at IS NULL) AS oldest_queued
+		FROM manager.rootfs_object_deletions
+	`).Scan(&stats.Pending, &stats.Due, &stats.Claimed, &stats.DeadLettered, &oldestQueued); err != nil {
+		return nil, fmt.Errorf("load rootfs object deletion queue stats: %w", err)
+	}
+	if oldestQueued != nil {
+		stats.OldestQueued = *oldestQueued
+	}
+	return &stats, nil
+}
+
+type claimedRootFSObjectDeletion struct {
+	ObjectKey string
+	Attempts  int
+}
+
+func (s *PGSandboxStore) claimPendingRootFSObjectDeletions(ctx context.Context, opts DeletePendingRootFSObjectsOptions) ([]claimedRootFSObjectDeletion, error) {
+	claimTTLSeconds := durationSeconds(opts.ClaimTTL)
+	rows, err := s.pool.Query(ctx, `
+		WITH due AS (
+			SELECT object_key
+			FROM manager.rootfs_object_deletions
+			WHERE dead_lettered_at IS NULL
+				AND next_attempt_at <= NOW()
+				AND (claimed_until IS NULL OR claimed_until <= NOW())
+			ORDER BY next_attempt_at ASC, updated_at ASC
+			LIMIT $1
+			FOR UPDATE SKIP LOCKED
+		),
+		claimed AS (
+			UPDATE manager.rootfs_object_deletions q
+			SET claimed_by = $2,
+				claimed_until = NOW() + ($3::int * INTERVAL '1 second'),
+				updated_at = NOW()
+			FROM due
+			WHERE q.object_key = due.object_key
+			RETURNING q.object_key, q.attempts
+		)
+		SELECT object_key, attempts
+		FROM claimed
+		ORDER BY object_key ASC
+	`, opts.Limit, opts.ClaimedBy, claimTTLSeconds)
+	if err != nil {
+		return nil, fmt.Errorf("claim pending rootfs object deletions: %w", err)
+	}
+	defer rows.Close()
+
+	var claimed []claimedRootFSObjectDeletion
+	for rows.Next() {
+		var item claimedRootFSObjectDeletion
+		if err := rows.Scan(&item.ObjectKey, &item.Attempts); err != nil {
+			return nil, err
+		}
+		claimed = append(claimed, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate claimed rootfs object deletions: %w", err)
+	}
+	return claimed, nil
+}
+
+func (s *PGSandboxStore) recordRootFSObjectDeleteFailure(ctx context.Context, item claimedRootFSObjectDeletion, opts DeletePendingRootFSObjectsOptions, deleteErr error) error {
+	nextAttempts := item.Attempts + 1
+	delay := rootFSObjectDeleteBackoff(nextAttempts, opts.BackoffBase, opts.BackoffMax)
+	deadLetter := opts.MaxAttempts > 0 && nextAttempts >= opts.MaxAttempts
+	_, err := s.pool.Exec(ctx, `
+		UPDATE manager.rootfs_object_deletions
+		SET attempts = attempts + 1,
+			last_error = $3,
+			last_attempt_at = NOW(),
+			next_attempt_at = NOW() + ($4::int * INTERVAL '1 second'),
+			claimed_by = '',
+			claimed_until = NULL,
+			dead_lettered_at = CASE
+				WHEN $5 THEN NOW()
+				ELSE NULL
+			END,
+			updated_at = NOW()
+		WHERE object_key = $1
+			AND claimed_by = $2
+	`, item.ObjectKey, opts.ClaimedBy, truncateRootFSError(deleteErr.Error()), durationSeconds(delay), deadLetter)
+	if err != nil {
+		return fmt.Errorf("record rootfs object delete failure for %q: %w", item.ObjectKey, err)
+	}
+	return nil
+}
+
+func normalizeRootFSObjectDeletionOptions(opts DeletePendingRootFSObjectsOptions) DeletePendingRootFSObjectsOptions {
+	if opts.Limit <= 0 {
+		opts.Limit = defaultRootFSObjectDeleteLimit
+	}
+	if opts.Limit > maxRootFSObjectDeleteLimit {
+		opts.Limit = maxRootFSObjectDeleteLimit
+	}
+	opts.ClaimedBy = strings.TrimSpace(opts.ClaimedBy)
+	if opts.ClaimedBy == "" {
+		opts.ClaimedBy = fmt.Sprintf("rootfs-gc-%d", time.Now().UnixNano())
+	}
+	if opts.ClaimTTL <= 0 {
+		opts.ClaimTTL = defaultRootFSObjectDeleteClaimTTL
+	}
+	if opts.BackoffBase <= 0 {
+		opts.BackoffBase = defaultRootFSObjectDeleteBackoffBase
+	}
+	if opts.BackoffMax <= 0 {
+		opts.BackoffMax = defaultRootFSObjectDeleteBackoffMax
+	}
+	if opts.BackoffMax < opts.BackoffBase {
+		opts.BackoffMax = opts.BackoffBase
+	}
+	return opts
+}
+
+func rootFSObjectDeleteBackoff(attempt int, base, max time.Duration) time.Duration {
+	if base <= 0 {
+		base = defaultRootFSObjectDeleteBackoffBase
+	}
+	if max <= 0 {
+		max = defaultRootFSObjectDeleteBackoffMax
+	}
+	if max < base {
+		max = base
+	}
+	if attempt <= 1 {
+		return base
+	}
+	delay := base
+	for i := 1; i < attempt; i++ {
+		if delay >= max/2 {
+			return max
+		}
+		delay *= 2
+	}
+	if delay > max {
+		return max
+	}
+	return delay
+}
+
+func durationSeconds(d time.Duration) int {
+	if d <= 0 {
+		return 1
+	}
+	seconds := int(d.Round(time.Second) / time.Second)
+	if seconds < 1 {
+		return 1
+	}
+	return seconds
+}
+
+func truncateRootFSError(message string) string {
+	message = strings.TrimSpace(message)
+	if len(message) <= 2048 {
+		return message
+	}
+	return message[:2048]
 }
 
 func DeleteRootFSObjects(ctx context.Context, deleter RootFSObjectDeleter, layers []*SandboxRootFSLayer) ([]string, error) {

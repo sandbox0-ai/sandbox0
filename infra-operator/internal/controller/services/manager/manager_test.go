@@ -250,6 +250,68 @@ func TestBuildConfigEnablesCtldWhenManagerIsEnabled(t *testing.T) {
 	}
 }
 
+func TestBuildConfigInjectsRootFSObjectStorage(t *testing.T) {
+	reconciler := newManagerTestReconciler(t)
+	requireSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "s3-credentials",
+			Namespace: "sandbox0-system",
+		},
+		Data: map[string][]byte{
+			"accessKeyId":     []byte("access-key"),
+			"secretAccessKey": []byte("secret-key"),
+			"sessionToken":    []byte("session-token"),
+		},
+	}
+	if err := reconciler.Resources.Client.Create(context.Background(), requireSecret); err != nil {
+		t.Fatalf("seed s3 credentials: %v", err)
+	}
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
+					Enabled:  true,
+					Port:     5432,
+					Username: "sandbox0",
+					Database: "sandbox0",
+					SSLMode:  "disable",
+				},
+			},
+			Storage: &infrav1alpha1.StorageConfig{
+				Type: infrav1alpha1.StorageTypeS3,
+				S3: &infrav1alpha1.S3StorageConfig{
+					Bucket:          "rootfs-bucket",
+					Region:          "us-east-1",
+					Endpoint:        "https://s3.example.com",
+					SessionTokenKey: "sessionToken",
+					CredentialsSecret: infrav1alpha1.S3CredentialsSecret{
+						Name: "s3-credentials",
+					},
+				},
+			},
+		},
+	}
+
+	cfg, err := reconciler.buildConfig(context.Background(), "sandbox0/manager", "test", infraplan.Compile(infra))
+	if err != nil {
+		t.Fatalf("buildConfig returned error: %v", err)
+	}
+	if cfg.RootFSObjectStorage.Type != string(infrav1alpha1.StorageTypeS3) {
+		t.Fatalf("rootfs object storage type = %q, want s3", cfg.RootFSObjectStorage.Type)
+	}
+	if cfg.RootFSObjectStorage.Bucket != "rootfs-bucket" || cfg.RootFSObjectStorage.Endpoint != "https://s3.example.com" {
+		t.Fatalf("unexpected rootfs object storage: %#v", cfg.RootFSObjectStorage)
+	}
+	if cfg.RootFSObjectStorage.AccessKey != "access-key" || cfg.RootFSObjectStorage.SecretKey != "secret-key" || cfg.RootFSObjectStorage.SessionToken != "session-token" {
+		t.Fatalf("unexpected rootfs object storage credentials: %#v", cfg.RootFSObjectStorage)
+	}
+}
+
 func newManagerTestReconciler(t *testing.T) *Reconciler {
 	t.Helper()
 

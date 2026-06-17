@@ -49,6 +49,11 @@ type CreateRootFSSnapshotRequest struct {
 	ExpiresAt   time.Time
 }
 
+type ListRootFSSnapshotsRequest struct {
+	SandboxID string
+	TeamID    string
+}
+
 type ForkRootFSFilesystemRequest struct {
 	SourceSandboxID string
 	TargetSandboxID string
@@ -157,6 +162,75 @@ func (s *PGSandboxStore) CreateRootFSSnapshot(ctx context.Context, req *CreateRo
 		return nil, fmt.Errorf("create rootfs snapshot: %w", err)
 	}
 	return snapshot, nil
+}
+
+func (s *PGSandboxStore) ListRootFSSnapshots(ctx context.Context, req *ListRootFSSnapshotsRequest) ([]*RootFSSnapshot, error) {
+	if s == nil || s.pool == nil || req == nil {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT snapshot_id, filesystem_id, team_id, source_sandbox_id,
+			head_layer_id, name, description, created_at, expires_at
+		FROM manager.rootfs_snapshots
+		WHERE source_sandbox_id = $1
+			AND ($2 = '' OR team_id = $2)
+		ORDER BY created_at DESC
+	`, strings.TrimSpace(req.SandboxID), strings.TrimSpace(req.TeamID))
+	if err != nil {
+		return nil, fmt.Errorf("list rootfs snapshots: %w", err)
+	}
+	defer rows.Close()
+
+	var snapshots []*RootFSSnapshot
+	for rows.Next() {
+		snapshot, err := scanRootFSSnapshot(rows)
+		if err != nil {
+			return nil, err
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rootfs snapshots: %w", err)
+	}
+	return snapshots, nil
+}
+
+func (s *PGSandboxStore) GetRootFSSnapshot(ctx context.Context, snapshotID, teamID string) (*RootFSSnapshot, error) {
+	if s == nil || s.pool == nil || strings.TrimSpace(snapshotID) == "" {
+		return nil, nil
+	}
+	snapshot, err := scanRootFSSnapshot(s.pool.QueryRow(ctx, `
+		SELECT snapshot_id, filesystem_id, team_id, source_sandbox_id,
+			head_layer_id, name, description, created_at, expires_at
+		FROM manager.rootfs_snapshots
+		WHERE snapshot_id = $1
+			AND ($2 = '' OR team_id = $2)
+	`, strings.TrimSpace(snapshotID), strings.TrimSpace(teamID)))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("%w: %s", ErrRootFSSnapshotNotFound, snapshotID)
+		}
+		return nil, fmt.Errorf("get rootfs snapshot: %w", err)
+	}
+	return snapshot, nil
+}
+
+func (s *PGSandboxStore) DeleteRootFSSnapshot(ctx context.Context, snapshotID, teamID string) error {
+	if s == nil || s.pool == nil {
+		return nil
+	}
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM manager.rootfs_snapshots
+		WHERE snapshot_id = $1
+			AND ($2 = '' OR team_id = $2)
+	`, strings.TrimSpace(snapshotID), strings.TrimSpace(teamID))
+	if err != nil {
+		return fmt.Errorf("delete rootfs snapshot: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: %s", ErrRootFSSnapshotNotFound, snapshotID)
+	}
+	return nil
 }
 
 func (s *PGSandboxStore) ForkRootFSFilesystem(ctx context.Context, req *ForkRootFSFilesystemRequest) (*RootFSFilesystem, error) {

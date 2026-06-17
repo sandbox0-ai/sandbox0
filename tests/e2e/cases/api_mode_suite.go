@@ -225,6 +225,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 				It("persists rootfs changes across pause and resume", func() {
 					assertSandboxRootFSPersistsAcrossPauseResume(env, session)
 				})
+
+				It("snapshots restores and forks paused sandbox rootfs", func() {
+					assertSandboxRootFSSnapshotRestoreFork(env, session)
+				})
 			}
 		})
 
@@ -1399,6 +1403,161 @@ test "$(stat -c %%a %s)" = 751
 		shellQuote(rootDir),
 	)
 	_, err = execInSandboxPod(env, templateNamespace, restored.PodName, verifyScript)
+	Expect(err).NotTo(HaveOccurred())
+}
+
+func assertSandboxRootFSSnapshotRestoreFork(env *framework.ScenarioEnv, session *e2eutils.Session) {
+	claimResp := claimSandboxEventually(env, session, "default")
+	sourceSandboxID := claimResp.SandboxId
+	Expect(sourceSandboxID).NotTo(BeEmpty())
+	forkSandboxID := ""
+	snapshotID := ""
+	DeferCleanup(func() {
+		if snapshotID != "" {
+			_, _ = session.DeleteSandboxRootFSSnapshot(env.TestCtx.Context, GinkgoT(), snapshotID)
+		}
+		if forkSandboxID != "" {
+			_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), forkSandboxID)
+		}
+		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sourceSandboxID)
+	})
+
+	templateNamespace, err := naming.TemplateNamespaceForBuiltin("default")
+	Expect(err).NotTo(HaveOccurred())
+	source := waitForSandboxPodReadyEventually(env, session, sourceSandboxID, templateNamespace)
+
+	marker := fmt.Sprintf("s0-rootfs-snapshot-%d", time.Now().UnixNano())
+	rootDir := "/tmp/" + marker
+	filePath := rootDir + "/marker.txt"
+	nestedPath := rootDir + "/nested/value.txt"
+	v1Content := "snapshot v1 " + marker
+	v2Content := "snapshot v2 " + marker
+
+	writeV1Script := fmt.Sprintf(`set -eu
+rm -rf %s
+mkdir -p %s
+printf %%s %s > %s
+printf %%s nested-v1 > %s
+test "$(cat %s)" = %s
+test "$(cat %s)" = nested-v1
+`,
+		shellQuote(rootDir),
+		shellQuote(filepathDir(nestedPath)),
+		shellQuote(v1Content),
+		shellQuote(filePath),
+		shellQuote(nestedPath),
+		shellQuote(filePath),
+		shellQuote(v1Content),
+		shellQuote(nestedPath),
+	)
+	_, err = execInSandboxPod(env, templateNamespace, source.PodName, writeV1Script)
+	Expect(err).NotTo(HaveOccurred())
+
+	pausedResp, status, err := session.PauseSandbox(env.TestCtx.Context, GinkgoT(), sourceSandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(pausedResp).NotTo(BeNil())
+	waitForSandboxLifecycleStatusEventually(env, session, sourceSandboxID, apispec.SandboxLifecycleStatusPaused)
+
+	name := "e2e-rootfs-" + marker
+	snapshot, status, err := session.CreateSandboxRootFSSnapshot(env.TestCtx.Context, GinkgoT(), sourceSandboxID, apispec.CreateSandboxRootFSSnapshotRequest{
+		Name: ptr(name),
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(snapshot).NotTo(BeNil())
+	Expect(snapshot.Id).NotTo(BeEmpty())
+	snapshotID = snapshot.Id
+
+	listResp, status, err := session.ListSandboxRootFSSnapshots(env.TestCtx.Context, GinkgoT(), sourceSandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(listResp).NotTo(BeNil())
+	Expect(listResp.Count).To(BeNumerically(">=", 1))
+
+	loaded, status, err := session.GetSandboxRootFSSnapshot(env.TestCtx.Context, GinkgoT(), snapshotID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(loaded).NotTo(BeNil())
+	Expect(loaded.Id).To(Equal(snapshotID))
+
+	resumeResp, status, err := session.ResumeSandbox(env.TestCtx.Context, GinkgoT(), sourceSandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(resumeResp).NotTo(BeNil())
+	Expect(resumeResp.Resumed).To(BeTrue())
+	source = waitForSandboxPodReadyEventually(env, session, sourceSandboxID, templateNamespace)
+
+	writeV2Script := fmt.Sprintf(`set -eu
+printf %%s %s > %s
+printf %%s nested-v2 > %s
+test "$(cat %s)" = %s
+test "$(cat %s)" = nested-v2
+`,
+		shellQuote(v2Content),
+		shellQuote(filePath),
+		shellQuote(nestedPath),
+		shellQuote(filePath),
+		shellQuote(v2Content),
+		shellQuote(nestedPath),
+	)
+	_, err = execInSandboxPod(env, templateNamespace, source.PodName, writeV2Script)
+	Expect(err).NotTo(HaveOccurred())
+
+	pausedResp, status, err = session.PauseSandbox(env.TestCtx.Context, GinkgoT(), sourceSandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(pausedResp).NotTo(BeNil())
+	waitForSandboxLifecycleStatusEventually(env, session, sourceSandboxID, apispec.SandboxLifecycleStatusPaused)
+
+	restoreResp, status, err := session.RestoreSandboxRootFS(env.TestCtx.Context, GinkgoT(), sourceSandboxID, apispec.RestoreSandboxRootFSRequest{
+		SnapshotId: snapshotID,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(restoreResp).NotTo(BeNil())
+	Expect(restoreResp.Status).To(Equal(apispec.SandboxLifecycleStatusPaused))
+
+	forkResp, status, err := session.ForkSandbox(env.TestCtx.Context, GinkgoT(), sourceSandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(forkResp).NotTo(BeNil())
+	Expect(forkResp.SourceSandboxId).To(Equal(sourceSandboxID))
+	Expect(forkResp.Sandbox.Id).NotTo(BeEmpty())
+	Expect(forkResp.Sandbox.Id).NotTo(Equal(sourceSandboxID))
+	Expect(forkResp.Sandbox.Status).To(Equal(apispec.SandboxLifecycleStatusPaused))
+	forkSandboxID = forkResp.Sandbox.Id
+
+	status, err = session.DeleteSandboxRootFSSnapshot(env.TestCtx.Context, GinkgoT(), snapshotID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	snapshotID = ""
+
+	resumeResp, status, err = session.ResumeSandbox(env.TestCtx.Context, GinkgoT(), sourceSandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(resumeResp).NotTo(BeNil())
+	Expect(resumeResp.Resumed).To(BeTrue())
+	source = waitForSandboxPodReadyEventually(env, session, sourceSandboxID, templateNamespace)
+
+	verifyV1Script := fmt.Sprintf(`set -eu
+test "$(cat %s)" = %s
+test "$(cat %s)" = nested-v1
+`,
+		shellQuote(filePath),
+		shellQuote(v1Content),
+		shellQuote(nestedPath),
+	)
+	_, err = execInSandboxPod(env, templateNamespace, source.PodName, verifyV1Script)
+	Expect(err).NotTo(HaveOccurred())
+
+	resumeResp, status, err = session.ResumeSandbox(env.TestCtx.Context, GinkgoT(), forkSandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(resumeResp).NotTo(BeNil())
+	Expect(resumeResp.Resumed).To(BeTrue())
+	forked := waitForSandboxPodReadyEventually(env, session, forkSandboxID, templateNamespace)
+	_, err = execInSandboxPod(env, templateNamespace, forked.PodName, verifyV1Script)
 	Expect(err).NotTo(HaveOccurred())
 }
 

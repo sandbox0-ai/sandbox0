@@ -356,6 +356,10 @@ func (s *Server) setupRoutes() {
 			sandboxes.DELETE("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxDelete), s.deleteSandbox)
 			sandboxes.POST("/:id/pause", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.pauseSandbox)
 			sandboxes.POST("/:id/resume", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.resumeSandbox)
+			sandboxes.POST("/:id/snapshots", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.proxySandboxManagerSubresource("snapshots"))
+			sandboxes.GET("/:id/snapshots", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.proxySandboxManagerSubresource("snapshots"))
+			sandboxes.POST("/:id/rootfs/restore", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.proxySandboxManagerSubresource("rootfs/restore"))
+			sandboxes.POST("/:id/fork", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxCreate), s.proxySandboxManagerSubresource("fork"))
 			sandboxes.POST("/:id/refresh", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.refreshSandbox)
 
 			// === Network Policy (→ Manager) ===
@@ -428,6 +432,13 @@ func (s *Server) setupRoutes() {
 			quotas.GET("/:dimension", s.authMiddleware.RequirePermission(gatewayauthn.PermQuotaRead), s.proxyToManager)
 			quotas.PUT("/:dimension", s.authMiddleware.RequirePermission(gatewayauthn.PermQuotaWrite), s.proxyToManager)
 			quotas.DELETE("/:dimension", s.authMiddleware.RequirePermission(gatewayauthn.PermQuotaWrite), s.proxyToManager)
+		}
+
+		rootFSSnapshots := v1.Group("/sandbox-rootfs-snapshots")
+		rootFSSnapshots.Use(s.managerUpstreamMiddleware())
+		{
+			rootFSSnapshots.GET("/:snapshot_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.proxyManagerPathParam("/api/v1/sandbox-rootfs-snapshots/", "snapshot_id", "snapshot_id"))
+			rootFSSnapshots.DELETE("/:snapshot_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.proxyManagerPathParam("/api/v1/sandbox-rootfs-snapshots/", "snapshot_id", "snapshot_id"))
 		}
 
 		// === SandboxVolume Management (→ Storage Proxy) ===

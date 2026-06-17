@@ -159,9 +159,16 @@ func (s *Server) setupRoutes() {
 			sandboxes.PUT("/:id/services", s.updateSandboxServices)
 			sandboxes.POST("/:id/pause", s.pauseSandbox)
 			sandboxes.POST("/:id/resume", s.resumeSandbox)
+			sandboxes.POST("/:id/snapshots", s.createSandboxRootFSSnapshot)
+			sandboxes.GET("/:id/snapshots", s.listSandboxRootFSSnapshots)
+			sandboxes.POST("/:id/rootfs/restore", s.restoreSandboxRootFS)
+			sandboxes.POST("/:id/fork", s.forkSandbox)
 			sandboxes.POST("/:id/refresh", s.refreshSandbox)
 			sandboxes.DELETE("/:id", s.terminateSandbox)
 		}
+
+		v1.GET("/sandbox-rootfs-snapshots/:snapshot_id", s.getSandboxRootFSSnapshot)
+		v1.DELETE("/sandbox-rootfs-snapshots/:snapshot_id", s.deleteSandboxRootFSSnapshot)
 
 		// Template management (public API)
 		templates := v1.Group("/templates")

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -91,6 +92,68 @@ func TestClusterGatewayIntegration_VolumeEndpointsRequirePermissions(t *testing.
 	resp, _ = doGatewayRequest(t, env.server.Client(), http.MethodGet, env.server.URL+"/api/v1/sandboxvolumes", writeToken, nil)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected forbidden for list, got %d", resp.StatusCode)
+	}
+}
+
+func TestClusterGatewayIntegration_RootFSEndpointsProxyToManager(t *testing.T) {
+	keys := gatewayKeyPair{}
+	keys.privateKey, keys.publicKey = writeClusterGatewayKeys(t)
+
+	var mu sync.Mutex
+	var seen []string
+	managerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"success":true,"data":{}}`))
+	}))
+	t.Cleanup(managerServer.Close)
+
+	storageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("unexpected storage-proxy request: %s", r.URL.Path)
+	}))
+	t.Cleanup(storageServer.Close)
+
+	env := newGatewayTestEnv(t, managerServer.URL, storageServer.URL, nil, keys)
+	readToken := newInternalToken(t, env.edgeGen, []string{authn.PermSandboxRead})
+	writeToken := newInternalToken(t, env.edgeGen, []string{authn.PermSandboxWrite})
+	createToken := newInternalToken(t, env.edgeGen, []string{authn.PermSandboxCreate})
+
+	tests := []struct {
+		method string
+		path   string
+		token  string
+		want   string
+	}{
+		{method: http.MethodPost, path: "/api/v1/sandboxes/sandbox-1/snapshots", token: writeToken, want: "POST /api/v1/sandboxes/sandbox-1/snapshots"},
+		{method: http.MethodGet, path: "/api/v1/sandboxes/sandbox-1/snapshots", token: readToken, want: "GET /api/v1/sandboxes/sandbox-1/snapshots"},
+		{method: http.MethodPost, path: "/api/v1/sandboxes/sandbox-1/rootfs/restore", token: writeToken, want: "POST /api/v1/sandboxes/sandbox-1/rootfs/restore"},
+		{method: http.MethodPost, path: "/api/v1/sandboxes/sandbox-1/fork", token: createToken, want: "POST /api/v1/sandboxes/sandbox-1/fork"},
+		{method: http.MethodGet, path: "/api/v1/sandbox-rootfs-snapshots/snapshot-1", token: readToken, want: "GET /api/v1/sandbox-rootfs-snapshots/snapshot-1"},
+		{method: http.MethodDelete, path: "/api/v1/sandbox-rootfs-snapshots/snapshot-1", token: writeToken, want: "DELETE /api/v1/sandbox-rootfs-snapshots/snapshot-1"},
+	}
+	for _, tt := range tests {
+		resp, _ := doGatewayRequest(t, env.server.Client(), tt.method, env.server.URL+tt.path, tt.token, nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s %s status = %d, want 200", tt.method, tt.path, resp.StatusCode)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != len(tests) {
+		t.Fatalf("manager requests = %v, want %d requests", seen, len(tests))
+	}
+	for i, tt := range tests {
+		if seen[i] != tt.want {
+			t.Fatalf("manager request[%d] = %q, want %q; all requests: %v", i, seen[i], tt.want, seen)
+		}
+	}
+
+	resp, _ := doGatewayRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxes/sandbox-1/fork", readToken, nil)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("fork with read permission status = %d, want forbidden", resp.StatusCode)
 	}
 }
 

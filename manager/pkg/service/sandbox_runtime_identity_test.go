@@ -17,11 +17,13 @@ import (
 )
 
 type memorySandboxStore struct {
-	records      map[string]*SandboxRecord
-	rootFSStates map[string]*SandboxRootFSState
-	deletes      []string
-	saves        int
-	pauses       int
+	records           map[string]*SandboxRecord
+	rootFSStates      map[string]*SandboxRootFSState
+	rootFSFilesystems map[string]*RootFSFilesystem
+	rootFSSnapshots   map[string]*RootFSSnapshot
+	deletes           []string
+	saves             int
+	pauses            int
 }
 
 type memorySandboxStoreTx struct {

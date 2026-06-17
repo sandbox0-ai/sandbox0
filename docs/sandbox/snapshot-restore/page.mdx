@@ -38,6 +38,48 @@ Use [Volumes](/docs/volume) when data must be mounted by multiple sandboxes, acc
 The rootfs snapshot API stores snapshot metadata including `name`, `description`, and optional `expires_at`. Delete snapshots explicitly when cleanup workflows no longer need them.
 </Callout>
 
+## Initialize Once, Fork Many
+
+Rootfs snapshots and forks can act like a lightweight custom environment when your changes are ordinary filesystem state. Instead of building a custom image and maintaining a team-owned warm pool, start from a builtin template, initialize the sandbox, then checkpoint that rootfs state.
+
+Use this pattern for:
+
+- package installs and dependency caches
+- cloned repositories and checked-out branches
+- generated build artifacts that future runs should inherit
+- local tool configuration written into the sandbox filesystem
+
+Typical workflow:
+
+1. claim a sandbox from a builtin template backed by the platform warm pool
+2. install dependencies or prepare the workspace inside the sandbox rootfs
+3. pause the sandbox and wait until `status` is `paused`
+4. create a named snapshot when you need a stable restore point, or fork the paused sandbox directly when you need isolated task sandboxes
+5. resume the restored or forked sandbox before running task-specific commands
+
+```bash
+SANDBOX_ID="$(s0 -o json sandbox create --template default --hard-ttl 86400 | jq -r '.ID')"
+
+# Initialize the rootfs with your normal sandbox commands, file writes, or SSH session.
+
+s0 sandbox pause "$SANDBOX_ID"
+# Wait until this shows status "paused".
+s0 sandbox get "$SANDBOX_ID"
+
+s0 sandbox snapshot create "$SANDBOX_ID" \
+    --name python-deps-v1 \
+    --description "Default template after Python dependency install"
+
+FORKED_SANDBOX_ID="$(s0 -o json sandbox fork "$SANDBOX_ID" | jq -r '.sandbox.id')"
+s0 sandbox resume "$FORKED_SANDBOX_ID"
+```
+
+Fork is usually the shorter path for branch-per-task workflows because it creates a new paused sandbox directly from the seed rootfs. Snapshot is better when you need a named checkpoint that can be listed, fetched, restored later, and cleaned up independently.
+
+<Callout variant="warning">
+This pattern does not replace template-level configuration. Use a custom template when you need a different container image, resource limits, mount declarations, default network policy, environment defaults, or privileged runtime fields. Mounted Sandbox Volumes are separate from the sandbox rootfs and should be managed with Volume snapshot and fork APIs.
+</Callout>
+
 ## Pause Before Rootfs Operations
 
 Pause the sandbox and wait until `status` is `paused` before creating a snapshot, restoring, or forking.

@@ -14,7 +14,7 @@ Sandbox0 is the runtime boundary for enterprise AI agent platforms.
 
 It gives platform teams isolated, persistent sandboxes for agent work that needs to run code, edit repositories, expose per-agent HTTP services, keep workspace state, and access external systems without placing broad production credentials inside the agent runtime.
 
-The sandbox writable root filesystem is checkpointed across pause/resume. Sandbox0 can release the runtime pod, keep the sandbox identity, and restore files written inside the sandbox when a new runtime generation starts. Volumes are a separate storage primitive for data that must outlive one sandbox identity, be shared, snapshotted, forked, or accessed directly through APIs.
+The sandbox writable root filesystem is checkpointed across pause/resume. Sandbox0 can release the runtime pod, keep the sandbox identity, and restore files written inside the sandbox when a new runtime generation starts. Named rootfs snapshots, restore, and fork let teams reuse an initialized filesystem state without building a new template when the base template already fits. Volumes are a separate storage primitive for data that must outlive one sandbox identity, be shared, snapshotted, forked, or accessed directly through APIs.
 
 Use Sandbox0 when you need to:
 
@@ -26,7 +26,7 @@ Use Sandbox0 when you need to:
 | Expose per-agent HTTP endpoints | Sandbox Services with route auth, method filtering, CORS, rate limits, timeouts, path rewrite, and resume. |
 | Keep secrets outside the agent process | Credential sources, destination-scoped egress auth, SSH transparent proxying, LLMProxy, or an external AI gateway. |
 | Control network and MCP access | Ordered traffic rules, protocol-aware MCP tool controls, and egress audit in the data plane. |
-| Branch, evaluate, or recover agent state | Rootfs checkpoints for transparent sandbox resume, plus volumes, point-in-time snapshots, restore, and Copy-on-Write fork. |
+| Branch, evaluate, or recover agent state | Rootfs checkpoints for transparent sandbox resume, named rootfs snapshots, restore, Copy-on-Write sandbox fork, and volumes for shared durable data. |
 | Own the deployment boundary | Self-hosted Kubernetes data plane with external PostgreSQL, S3/OSS, Vault-compatible storage, Redis, and registry options. |
 
 Sandbox0 Cloud uses `https://api.sandbox0.ai` for sandboxes, templates, volumes, credentials, and team-scoped API keys. Managed Agents uses `https://agents.sandbox0.ai`.
@@ -167,7 +167,7 @@ Use raw Sandbox0 sandboxes when you want direct control over processes, files, t
 
 **Coding agents**
 
-Use a custom template with language runtimes, package managers, git, build tools, and an attached volume for the repository workspace. Use a stateful REPL for the active agent loop and one-shot commands for isolated build/test steps.
+Start from a builtin template when its image, resources, mount points, and network defaults already fit. Install project dependencies or clone repositories inside the sandbox, pause it, then create a rootfs snapshot or fork the paused sandbox for per-task branches. Use a custom template when you need a different base image, resource envelope, mount declarations, default environment, or network policy. Use a stateful REPL for the active agent loop and one-shot commands for isolated build/test steps.
 
 **Code interpreter, data, or browser agents**
 
@@ -179,7 +179,7 @@ Run gateways such as Hermes or OpenClaw as `cmd` Sandbox Services. Store framewo
 
 **Parallel workers**
 
-Create one sandbox per task, eval case, branch, or user request. Share read-only inputs through volumes, snapshots, or object storage, then write outputs to separate volumes or task-specific paths. Keep orchestration outside the sandbox boundary.
+Create one sandbox per task, eval case, branch, or user request. Fork from a paused seed sandbox when each worker should inherit the same initialized rootfs. Share read-only data through volumes or object storage, then write outputs to separate volumes or task-specific paths. Keep orchestration outside the sandbox boundary.
 
 **Long-running sessions**
 
@@ -191,19 +191,20 @@ Treat the sandbox process as runtime state and the volume as durable state. Paus
 | -------------- | ---------- | ---------------------------- |
 | **Template** | A runtime blueprint: image, resources, warm pool, mount points, and default policy. | Keeps environments reproducible and claims fast. |
 | **Sandbox** | A durable identity and configuration for an isolated runtime instance. | Gives each task, user, or agent worker its own execution boundary. |
-| **Root filesystem** | The sandbox writable filesystem checkpointed during pause/resume and tied to the sandbox identity. | Lets files written inside the sandbox survive runtime pod cleanup without explicit mounts. |
+| **Root filesystem** | The sandbox writable filesystem checkpointed during pause/resume and tied to the sandbox identity. | Lets files written inside the sandbox survive runtime pod cleanup without explicit mounts; named snapshots and forks can reuse initialized filesystem state. |
 | **Context** | A process/session inside a sandbox, either REPL-style or one-shot command. | Lets agents choose in-process continuity or clean execution per tool call. |
 | **Volume** | Persistent storage independent of a sandbox lifetime. | Keeps repositories, caches, agent memory, artifacts, checkpoints, snapshots, forks, and shared data. |
 | **Service** | A public HTTP entrypoint backed by a listener, command, or function. | Exposes per-sandbox APIs, previews, webhooks, and agent gateways with route policy. |
 | **Credential** | A secret source plus policy for how it may be projected or injected. | Lets agents call external services without storing raw production keys in the sandbox process. |
 
-The short version: use templates for repeatable environments, sandboxes for isolation, the root filesystem for same-sandbox file continuity across pause/resume, contexts for process behavior, volumes for durable or shared memory, services for controlled ingress, and credentials/network policy for controlled external access.
+The short version: use templates for runtime shape and warm pools, sandboxes for isolation, the root filesystem for same-sandbox file continuity and initialized-state snapshots, contexts for process behavior, volumes for durable or shared memory, services for controlled ingress, and credentials/network policy for controlled external access.
 
 ## Persistence And Lifecycle
 
 Sandbox0 separates runtime state from filesystem state.
 
 - The sandbox writable root filesystem is persisted as the latest rootfs checkpoint for the same sandbox identity. Files written outside mounted volumes survive pause/resume once the pause checkpoint succeeds.
+- Named rootfs snapshots, restore, and fork preserve or branch initialized sandbox filesystem state, but they still use the sandbox's template for image, resources, mounts, and network defaults.
 - `ttl` is a runtime soft timeout. When it expires, Sandbox0 checkpoints the writable root filesystem, pauses the sandbox, and releases runtime compute.
 - `hard_ttl` is a hard sandbox lifetime. When it expires, Sandbox0 deletes the sandbox identity and durable state tied to that identity, including rootfs checkpoints.
 - Pause/resume preserves sandbox identity and the latest writable root filesystem checkpoint, but not running processes, memory, sockets, PID state, or live REPL sessions.
@@ -233,9 +234,9 @@ Sandbox0 optimizes for this in these places:
 
 - **Warm pools** keep template instances ready so a claim can reuse an idle pod instead of starting the environment from scratch.
 - **Template images** move expensive package, toolchain, browser, and agent framework setup out of the request path.
-- **Rootfs checkpoints and volumes** keep resumed sandboxes useful after runtime cleanup. Use the rootfs checkpoint for transparent runtime restore and volumes for explicit durable workspaces, snapshots, forks, and shared data.
+- **Rootfs checkpoints, rootfs snapshots, and volumes** keep resumed or branched sandboxes useful after runtime cleanup. Use rootfs checkpoints for transparent runtime restore, rootfs snapshots/forks for initialized sandbox state, and volumes for explicit durable workspaces, snapshots, forks, and shared data.
 
-For best results, put expensive environment setup into the template image, keep active task state in a volume when it must outlive the sandbox identity, and keep sandboxes short-lived enough that idle compute does not become the source of truth.
+For best results, put broadly reused runtime setup into the template image, capture project-specific initialization with rootfs snapshots or forks when the base template already fits, keep active task state in a volume when it must outlive the sandbox identity, and keep sandboxes short-lived enough that idle compute does not become the source of truth.
 
 ## Self-Hosting
 

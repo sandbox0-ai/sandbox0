@@ -44,9 +44,9 @@ Sandbox0 persists the sandbox writable root filesystem as part of checkpointed p
 - when `ttl` expires or pause is requested, Sandbox0 saves a rootfs checkpoint before releasing the runtime pod
 - when the sandbox resumes, Sandbox0 creates or reuses a runtime pod and restores the latest rootfs checkpoint before initializing sandbox processes
 - files written outside mounted volumes survive pause/resume for the same sandbox identity after a checkpoint succeeds
-- rootfs checkpoints are deleted when the sandbox is deleted or `hard_ttl` expires
+- rootfs checkpoints for the sandbox identity are deleted when the sandbox is deleted or `hard_ttl` expires
 
-Use the root filesystem for transparent same-sandbox continuity. Use [Volumes](/docs/volume) for data that must outlive one sandbox identity, be shared, snapshotted, forked, restored, or accessed directly through APIs.
+Use the root filesystem for transparent same-sandbox continuity. Use [Snapshot And Restore](/docs/sandbox/snapshot-restore) for named rootfs snapshots, restore, and fork operations. Use [Volumes](/docs/volume) for storage that must be mounted by multiple sandboxes or accessed directly through Volume APIs.
 
 ---
 
@@ -480,6 +480,8 @@ Pause and resume is covered in a dedicated page because it affects TTL, `auto_re
 
 See [Pause And Resume](/docs/sandbox/pause-resume) for explicit pause, state inspection, resume, and auto-resume behavior.
 
+See [Snapshot And Restore](/docs/sandbox/snapshot-restore) for named rootfs snapshots, restore, and fork operations that require a paused sandbox.
+
 ---
 
 ## Refresh Sandbox TTL
@@ -604,6 +606,10 @@ console.log('Sandbox deleted');`
 <CardGroup>
   <Card title="Pause And Resume" href="/docs/sandbox/pause-resume" cta="Continue">
     Control checkpointed pause and resume behavior before wiring long-lived workflows.
+  </Card>
+
+  <Card title="Snapshot And Restore" href="/docs/sandbox/snapshot-restore" cta="Continue">
+    Create named rootfs snapshots, restore paused sandboxes, and fork sandbox state.
   </Card>
 
   <Card title="Contexts" href="/docs/sandbox/contexts" cta="Continue">

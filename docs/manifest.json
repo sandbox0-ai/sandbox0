@@ -28,6 +28,10 @@
           "title": "Pause And Resume"
         },
         {
+          "slug": "snapshot-restore",
+          "title": "Snapshot And Restore"
+        },
+        {
           "slug": "contexts",
           "title": "Contexts"
         },

@@ -4,7 +4,7 @@ Volume provides persistent storage for Sandbox0. It is a storage unit independen
 
 ## Why Volumes?
 
-The default Sandbox writable filesystem is checkpointed across pause/resume for the same Sandbox identity. It is not independent long-term storage: when the Sandbox is deleted or `hard_ttl` expires, the identity and rootfs checkpoints are deleted too. Volumes solve the cases where data must outlive one Sandbox identity or be shared across Sandboxes:
+The default Sandbox writable filesystem is checkpointed across pause/resume for the same Sandbox identity. Sandbox rootfs snapshots and forks can preserve or branch that rootfs state, but they still operate at the sandbox rootfs boundary. Volumes solve the cases where data must be mounted by multiple Sandboxes or accessed directly through storage APIs:
 
 - **Data Persistence**: Store data that needs long-term retention, such as databases, model files, and user uploads
 - **Cross-Sandbox Sharing**: Mount the same Volume to multiple Sandboxes for data sharing
@@ -14,7 +14,7 @@ The default Sandbox writable filesystem is checkpointed across pause/resume for 
 
 | Storage surface | Survives pause/resume | Survives sandbox delete or `hard_ttl` | Shareable | Snapshots and forks | Direct file API |
 |-----------------|-----------------------|----------------------------------------|-----------|---------------------|-----------------|
-| Sandbox root filesystem | Yes, after checkpointed pause | No | No | No | Through the Sandbox file API while the Sandbox exists |
+| Sandbox root filesystem | Yes, after checkpointed pause | Only through named rootfs snapshots or forks | No | Yes, through [Snapshot And Restore](/docs/sandbox/snapshot-restore) | Through the Sandbox file API while the Sandbox exists |
 | Sandbox Volume | Yes | Yes, until the Volume is deleted | Yes | Yes | Yes |
 
 ## Volume and Sandbox Relationship

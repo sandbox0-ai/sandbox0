@@ -1,0 +1,415 @@
+# Snapshot And Restore
+
+Sandbox rootfs snapshots are point-in-time copies of a paused sandbox writable root filesystem. Use them when you want to checkpoint an initialized workspace, roll a sandbox back to a known filesystem state, or fork a paused sandbox into an isolated child sandbox.
+
+Use this page when you need to:
+
+- create named rootfs snapshots from a paused sandbox
+- restore a paused sandbox rootfs from a snapshot
+- fork a paused sandbox into another paused sandbox
+- understand how rootfs snapshots differ from pause/resume and Volumes
+
+<Callout variant="warning">
+Sandbox rootfs snapshot, restore, and fork operations require a paused sandbox. If you call them while the sandbox is running, Sandbox0 returns `409 Conflict`. Pause first, then wait until sandbox `status` is `paused`.
+</Callout>
+
+## How It Differs From Pause And Resume
+
+| Capability | Purpose | Creates a named restore point | Creates another sandbox | Requires paused sandbox |
+|------------|---------|-------------------------------|-------------------------|-------------------------|
+| Pause/resume | Release compute and later continue the same sandbox identity from its latest checkpoint | No | No | Pause starts from a running sandbox; resume starts from a paused sandbox |
+| Snapshot | Publish an immutable point-in-time rootfs record | Yes | No | Yes |
+| Restore | Move a paused sandbox rootfs back to a snapshot | Uses an existing snapshot | No | Yes |
+| Fork | Create an isolated paused sandbox from a paused source sandbox rootfs | No | Yes | Yes |
+
+Pause/resume keeps the latest checkpoint for one sandbox identity. Rootfs snapshots are explicit records that you can list, fetch, restore, and delete. Fork creates a new sandbox with Copy-on-Write rootfs isolation from the source rootfs state.
+
+Use [Volumes](/docs/volume) when data must be mounted by multiple sandboxes, accessed directly through the Volume file API, or managed independently from sandbox rootfs lifecycle. Use sandbox rootfs snapshots when the default writable filesystem is the state you want to version.
+
+## State Model
+
+- `Create snapshot` reads the paused sandbox's current rootfs head and creates a snapshot record.
+- `Restore` changes a paused target sandbox rootfs head to the selected snapshot and leaves the sandbox paused.
+- `Fork` creates a new paused sandbox with the source sandbox configuration and an isolated rootfs fork.
+- `Resume` is required before reading or writing files through sandbox process and file APIs after restore or fork.
+- Deleting a snapshot does not modify any sandbox that already restored from it, and it does not affect forks created from the same rootfs state.
+
+<Callout variant="info">
+The rootfs snapshot API stores snapshot metadata including `name`, `description`, and optional `expires_at`. Delete snapshots explicitly when cleanup workflows no longer need them.
+</Callout>
+
+## Pause Before Rootfs Operations
+
+Pause the sandbox and wait until `status` is `paused` before creating a snapshot, restoring, or forking.
+
+<Endpoint method="POST">
+/api/v1/sandboxes/{'{id}'}/pause
+</Endpoint>
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `_, err := client.PauseSandbox(ctx, sandbox.ID)
+if err != nil {
+    log.Fatal(err)
+}
+
+for {
+    sb, err := client.GetSandbox(ctx, sandbox.ID)
+    if err != nil {
+        log.Fatal(err)
+    }
+    if sb.Status == apispec.SandboxLifecycleStatusPaused {
+        break
+    }
+    time.Sleep(time.Second)
+}`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `import time
+
+client.sandboxes.pause(sandbox.id)
+
+while True:
+    sb = client.sandboxes.get(sandbox.id)
+    if sb.status == "paused":
+        break
+    time.sleep(1)`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `await client.sandboxes.pause(sandbox.id);
+
+while (true) {
+    const sb = await client.sandboxes.get(sandbox.id);
+    if (sb.status === "paused") {
+        break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+}`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox pause sb_abc123
+
+# Wait until this shows status "paused".
+s0 sandbox get sb_abc123`
+    }
+  ]}
+/>
+
+## Create A Snapshot
+
+Create a rootfs snapshot from a paused sandbox.
+
+<Endpoint method="POST">
+/api/v1/sandboxes/{'{id}'}/snapshots
+</Endpoint>
+
+### Request Body
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Optional snapshot name |
+| `description` | string | Optional snapshot description |
+| `expires_at` | string | Optional RFC3339 timestamp stored as snapshot expiration metadata |
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `snapshot, err := client.CreateSandboxRootFSSnapshot(ctx, sandbox.ID, &apispec.CreateSandboxRootFSSnapshotRequest{
+    Name:        apispec.NewOptString("before-agent-task"),
+    Description: apispec.NewOptString("Workspace after dependency install"),
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("Snapshot ID: %s\\n", snapshot.ID)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.apispec.models.create_sandbox_root_fs_snapshot_request import CreateSandboxRootFSSnapshotRequest
+
+snapshot = client.sandboxes.create_rootfs_snapshot(
+    sandbox.id,
+    CreateSandboxRootFSSnapshotRequest(
+        name="before-agent-task",
+        description="Workspace after dependency install",
+    ),
+)
+print(f"Snapshot ID: {snapshot.id}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const snapshot = await client.sandboxes.createRootFSSnapshot(sandbox.id, {
+    name: "before-agent-task",
+    description: "Workspace after dependency install",
+});
+console.log("Snapshot ID:", snapshot.id);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox snapshot create sb_abc123 \\
+    --name before-agent-task \\
+    --description "Workspace after dependency install"`
+    }
+  ]}
+/>
+
+## List And Get Snapshots
+
+List snapshots created from a sandbox, or fetch a snapshot directly by snapshot ID.
+
+<Endpoint method="GET">
+/api/v1/sandboxes/{'{id}'}/snapshots
+</Endpoint>
+
+<Endpoint method="GET">
+/api/v1/sandbox-rootfs-snapshots/{'{snapshot_id}'}
+</Endpoint>
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `snapshots, err := client.ListSandboxRootFSSnapshots(ctx, sandbox.ID)
+if err != nil {
+    log.Fatal(err)
+}
+for _, item := range snapshots.Snapshots {
+    name := item.Name.Or("")
+    fmt.Printf("%s %s\\n", item.ID, name)
+}
+
+snapshot, err = client.GetSandboxRootFSSnapshot(ctx, snapshot.ID)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("Created at: %s\\n", snapshot.CreatedAt)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `snapshots = client.sandboxes.list_rootfs_snapshots(sandbox.id)
+for item in snapshots:
+    print(item.id, item.name)
+
+snapshot = client.sandboxes.get_rootfs_snapshot(snapshot.id)
+print(f"Created at: {snapshot.created_at}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const snapshots = await client.sandboxes.listRootFSSnapshots(sandbox.id);
+for (const item of snapshots) {
+    console.log(item.id, item.name);
+}
+
+const fetched = await client.sandboxes.getRootFSSnapshot(snapshot.id);
+console.log("Created at:", fetched.createdAt);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox snapshot list sb_abc123
+s0 sandbox snapshot get rootfs-snapshot-abc123`
+    }
+  ]}
+/>
+
+## Restore A Sandbox Rootfs
+
+Restore moves a paused target sandbox rootfs to the selected snapshot and returns the sandbox status. The sandbox stays paused after restore; resume it before using files, contexts, services, or SSH.
+
+<Endpoint method="POST">
+/api/v1/sandboxes/{'{id}'}/rootfs/restore
+</Endpoint>
+
+### Request Body
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `snapshot_id` | string | Rootfs snapshot ID to restore |
+
+<Callout variant="warning">
+Restore is destructive for the target sandbox rootfs. Files changed after the restored snapshot are no longer the target sandbox head after restore.
+</Callout>
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `restored, err := client.RestoreSandboxRootFS(ctx, sandbox.ID, apispec.RestoreSandboxRootFSRequest{
+    SnapshotID: snapshot.ID,
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("Restored snapshot %s, status=%s\\n", restored.SnapshotID, restored.Status)
+
+_, err = client.ResumeSandbox(ctx, sandbox.ID)
+if err != nil {
+    log.Fatal(err)
+}`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.apispec.models.restore_sandbox_root_fs_request import RestoreSandboxRootFSRequest
+
+restored = client.sandboxes.restore_rootfs(
+    sandbox.id,
+    RestoreSandboxRootFSRequest(snapshot_id=snapshot.id),
+)
+print(f"Restored snapshot {restored.snapshot_id}, status={restored.status}")
+
+client.sandboxes.resume(sandbox.id)`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const restored = await client.sandboxes.restoreRootFS(sandbox.id, {
+    snapshotId: snapshot.id,
+});
+console.log("Restored snapshot:", restored.snapshotId, "status:", restored.status);
+
+await client.sandboxes.resume(sandbox.id);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox snapshot restore sb_abc123 rootfs-snapshot-abc123
+s0 sandbox resume sb_abc123`
+    }
+  ]}
+/>
+
+## Fork A Sandbox
+
+Fork creates a new paused sandbox from a paused source sandbox rootfs. The fork receives its own sandbox ID. Writes made after resuming the fork do not modify the source sandbox rootfs.
+
+<Endpoint method="POST">
+/api/v1/sandboxes/{'{id}'}/fork
+</Endpoint>
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `forked, err := client.ForkSandbox(ctx, sandbox.ID, nil)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("Forked sandbox: %s\\n", forked.Sandbox.ID)
+
+_, err = client.ResumeSandbox(ctx, forked.Sandbox.ID)
+if err != nil {
+    log.Fatal(err)
+}`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `forked = client.sandboxes.fork(sandbox.id)
+print(f"Forked sandbox: {forked.sandbox.id}")
+
+client.sandboxes.resume(forked.sandbox.id)`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const forked = await client.sandboxes.fork(sandbox.id);
+console.log("Forked sandbox:", forked.sandbox.id);
+
+await client.sandboxes.resume(forked.sandbox.id);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox fork sb_abc123
+
+# Resume the forked sandbox ID returned by the fork command.
+s0 sandbox resume sb_forked123`
+    }
+  ]}
+/>
+
+## Delete A Snapshot
+
+Delete a rootfs snapshot when you no longer need it. This does not modify any sandbox that already restored from that snapshot, and it does not affect forks created from the same rootfs state.
+
+<Endpoint method="DELETE">
+/api/v1/sandbox-rootfs-snapshots/{'{snapshot_id}'}
+</Endpoint>
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `_, err := client.DeleteSandboxRootFSSnapshot(ctx, snapshot.ID)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println("Snapshot deleted")`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `client.sandboxes.delete_rootfs_snapshot(snapshot.id)
+print("Snapshot deleted")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `await client.sandboxes.deleteRootFSSnapshot(snapshot.id);
+console.log("Snapshot deleted");`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox snapshot delete rootfs-snapshot-abc123`
+    }
+  ]}
+/>
+
+## Typical Pattern
+
+For coding-agent and test-generation workflows, a common pattern is:
+
+1. claim a sandbox and initialize the repository or dependency cache
+2. write a marker, lockfile, or workspace state that future tasks should inherit
+3. pause the sandbox and wait for `status` to become `paused`
+4. create a rootfs snapshot, or fork directly from the paused sandbox
+5. restore or fork for each task branch
+6. resume the restored or forked sandbox and run task-specific work
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Pause And Resume" href="/docs/sandbox/pause-resume" cta="Continue">
+    Control the lifecycle state required before snapshot, restore, and fork operations.
+  </Card>
+
+  <Card title="Files" href="/docs/sandbox/files" cta="Continue">
+    Read and write sandbox files before creating a rootfs snapshot.
+  </Card>
+
+  <Card title="Volumes" href="/docs/volume" cta="Continue">
+    Use durable shared storage when rootfs snapshots are not the right persistence boundary.
+  </Card>
+</CardGroup>

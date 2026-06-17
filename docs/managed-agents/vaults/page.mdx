@@ -98,7 +98,7 @@ await client.beta.vaults.credentials.create(apiVault.id, {
 
 Sandbox0 stores `secret_value` as write-only secret material. At runtime, Sandbox0 sets the sandbox-level environment variable named by `secret_name` to an opaque placeholder. New processes in the sandbox inherit that placeholder through normal process environment behavior. When sandbox HTTP traffic leaves through Sandbox0 egress auth, the placeholder is substituted with the real secret in headers, query parameters, and request bodies for the credential's networking scope.
 
-This credential is for the sandbox, not for the Managed Agents SDK client or harness configuration. Do not pass the real secret to Claude, Codex, OpenAI Agents, or Pi harness configuration. Store it in the vault and let Sandbox0 project it into sandbox processes.
+This credential is for sandbox processes, not for the Managed Agents SDK client or harness configuration. Do not pass the real secret to agent configuration. Store it in the vault and let Sandbox0 project it into sandbox processes.
 
 | Networking type | Behavior |
 |-----------------|----------|
@@ -137,15 +137,15 @@ Sandbox0 injects model provider credentials through egress auth and harness comp
 | `openai-agents` | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `openai_base_url` harness config |
 | `pi` | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, and `anthropic_base_url` harness config |
 
-For agent-in-sandbox harnesses, compatibility environment variables may contain placeholders. The real token is projected by Sandbox0-managed credential policy when the sandbox contacts the configured model provider host.
+For agent-in-sandbox harnesses such as `claude`, `codex`, and `pi`, compatibility environment variables may contain placeholders. The real token is projected by Sandbox0-managed credential policy when the sandbox contacts the configured model provider host.
 
-For sandbox-as-tool harnesses, model-provider credentials are resolved as resident runtime configuration. Sandbox0 passes the selected LLM vault token to the runtime service for model calls. User-defined `environment_variable` credentials are not accepted by external sandbox-as-tool harnesses today.
+For sandbox-as-tool harnesses such as `openai-agents`, model-provider credentials are resolved as resident runtime configuration. Sandbox0 passes the selected LLM vault token to the runtime service for model calls. User-defined `environment_variable` credentials are not accepted by external sandbox-as-tool harnesses today.
 
 Vault `environment_variable` credentials are separate from these harness compatibility variables. They create user-defined sandbox process environment variables and resolve them through the same egress auth boundary.
 
 For `openai-agents`, the runtime expects an OpenAI Responses-compatible base URL. If the provider exposes a different API shape, use an external AI gateway that presents an OpenAI Responses-compatible endpoint and store the gateway base URL in `sandbox0.managed_agents.llm_base_url`.
 
-For `pi`, the runtime expects an Anthropic Messages-compatible base URL and uses Claude-format messages. If the provider exposes only an OpenAI or Codex-style API, use a gateway that presents an Anthropic Messages-compatible endpoint before selecting the `pi` harness.
+For `pi`, the sandbox-local wrapper expects an Anthropic Messages-compatible base URL and uses Claude-format messages. If the provider exposes only an OpenAI or Codex-style API, use a gateway that presents an Anthropic Messages-compatible endpoint before selecting the `pi` harness.
 
 ## Next Steps
 

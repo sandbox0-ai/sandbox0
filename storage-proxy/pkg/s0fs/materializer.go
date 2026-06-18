@@ -106,6 +106,9 @@ func (m *Materializer) Materialize(ctx context.Context, state *SnapshotState, ex
 	inline := cloneState(state)
 	normalizeState(inline)
 	defaultSegmentVolumeIDs(inline, m.volumeID)
+	if inline.NextSeq <= 1 {
+		inline.NextSeq = 2
+	}
 
 	nextSeq := checkpointSequence(inline)
 	if nextSeq == 0 {

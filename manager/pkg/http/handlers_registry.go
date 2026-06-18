@@ -41,6 +41,10 @@ func (s *Server) getRegistryCredentials(c *gin.Context) {
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "registry provider is not configured")
 			return
 		}
+		if errors.Is(err, registry.ErrInvalidTargetImage) {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+			return
+		}
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get registry credentials")
 		return
 	}

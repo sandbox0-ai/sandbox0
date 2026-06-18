@@ -72,6 +72,8 @@ const (
 
 	PermRegistryWrite = "registry:write"
 
+	PermAPIKeyManage = "apikey:manage"
+
 	PermCredentialSourceRead   = "credentialsource:read"
 	PermCredentialSourceWrite  = "credentialsource:write"
 	PermCredentialSourceDelete = "credentialsource:delete"
@@ -100,6 +102,7 @@ var RolePermissions = map[string][]string{
 		PermTemplateWrite,
 		PermTemplateDelete,
 		PermRegistryWrite,
+		PermAPIKeyManage,
 		PermCredentialSourceRead,
 		PermCredentialSourceWrite,
 		PermCredentialSourceDelete,

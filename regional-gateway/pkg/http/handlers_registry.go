@@ -39,6 +39,10 @@ func (s *Server) getRegistryCredentials(c *gin.Context) {
 	})
 	if err != nil {
 		s.logger.Error("Failed to get registry credentials", zap.Error(err))
+		if errors.Is(err, registryprovider.ErrInvalidTargetImage) {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+			return
+		}
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get registry credentials")
 		return
 	}

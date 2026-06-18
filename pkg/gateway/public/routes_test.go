@@ -1,6 +1,9 @@
 package public
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -8,6 +11,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
 )
 
@@ -89,6 +93,50 @@ func TestRegisterAPIKeyRoutesOnlyMountsRegionalAPIKeySurface(t *testing.T) {
 	}
 	if hasRoute(router, "POST", "/auth/login") {
 		t.Fatal("expected regional API key routes to omit /auth/login")
+	}
+}
+
+func TestRegisterAPIKeyRoutesRejectViewerJWTForManagement(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	deps := testDeps()
+	router := gin.New()
+	RegisterAPIKeyRoutes(router, deps)
+
+	tokens, err := deps.JWTIssuer.IssueTokenPair("user-1", "viewer@example.com", "Viewer", false, []authn.TeamGrant{
+		{TeamID: "team-1", TeamRole: "viewer", HomeRegionID: "aws-us-east-1"},
+	})
+	if err != nil {
+		t.Fatalf("issue token pair: %v", err)
+	}
+
+	tests := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{method: http.MethodGet, path: "/api-keys"},
+		{method: http.MethodPost, path: "/api-keys", body: `{"name":"viewer-key","roles":["viewer"]}`},
+		{method: http.MethodDelete, path: "/api-keys/key-1"},
+		{method: http.MethodPost, path: "/api-keys/key-1/deactivate"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			if tt.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+			req.Header.Set(internalauth.TeamIDHeader, "team-1")
+
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
+			}
+		})
 	}
 }
 

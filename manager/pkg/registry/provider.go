@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -28,6 +29,10 @@ type PushCredentialsRequest struct {
 	TeamID      string
 	TargetImage string
 }
+
+// ErrInvalidTargetImage indicates the requested image cannot be served by the
+// current team-scoped registry credential flow.
+var ErrInvalidTargetImage = errors.New("invalid target image")
 
 // Provider returns short-lived registry credentials.
 type Provider interface {
@@ -202,6 +207,9 @@ func (p *builtinProvider) GetPushCredentials(ctx context.Context, req PushCreden
 	if strings.TrimSpace(p.registry) == "" {
 		return nil, fmt.Errorf("builtin push registry is required")
 	}
+	if err := validateBuiltinTargetImage(req.TeamID, req.TargetImage, p.registry); err != nil {
+		return nil, err
+	}
 	username := strings.TrimSpace(p.cfg.Username)
 	password := strings.TrimSpace(p.cfg.Password)
 	if username == "" || password == "" {
@@ -221,4 +229,32 @@ func (p *builtinProvider) GetPushCredentials(ctx context.Context, req PushCreden
 		Username:     username,
 		Password:     password,
 	}, nil
+}
+
+func validateBuiltinTargetImage(teamID, targetImage, registryHost string) error {
+	trimmedTarget := strings.TrimSpace(targetImage)
+	if trimmedTarget == "" {
+		return fmt.Errorf("%w: targetImage is required for builtin registry credentials", ErrInvalidTargetImage)
+	}
+
+	prefix := naming.TeamImageRepositoryPrefix(teamID)
+	if prefix == "" {
+		return fmt.Errorf("%w: team id is required for builtin registry credentials", ErrInvalidTargetImage)
+	}
+
+	registryHostFromTarget, repository, err := naming.SplitImageReference(trimmedTarget)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidTargetImage, err)
+	}
+	if registryHostFromTarget != "" && naming.NormalizeRegistryHost(registryHostFromTarget) != naming.NormalizeRegistryHost(registryHost) {
+		return fmt.Errorf("%w: target image %q is outside builtin registry %q", ErrInvalidTargetImage, targetImage, naming.NormalizeRegistryHost(registryHost))
+	}
+	if repository == prefix || strings.HasPrefix(repository, prefix+"/") {
+		return nil
+	}
+	firstSegment, _, _ := strings.Cut(repository, "/")
+	if strings.HasPrefix(firstSegment, "t-") {
+		return fmt.Errorf("%w: target image %q is outside team registry prefix %q", ErrInvalidTargetImage, targetImage, prefix)
+	}
+	return nil
 }

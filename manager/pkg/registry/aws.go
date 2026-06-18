@@ -358,18 +358,18 @@ func resolveAWSTargetRepository(teamID, targetImage string) (string, error) {
 
 	_, repository, err := naming.SplitImageReference(trimmedTarget)
 	if err != nil {
-		return "", fmt.Errorf("invalid aws target image: %w", err)
+		return "", fmt.Errorf("%w: invalid aws target image: %v", ErrInvalidTargetImage, err)
 	}
 	prefix := naming.TeamImageRepositoryPrefix(teamID)
 	if prefix == "" {
-		return "", fmt.Errorf("aws target image requires team id")
+		return "", fmt.Errorf("%w: aws target image requires team id", ErrInvalidTargetImage)
 	}
 	if repository == prefix || strings.HasPrefix(repository, prefix+"/") {
 		return repository, nil
 	}
 	firstSegment, _, _ := strings.Cut(repository, "/")
 	if strings.HasPrefix(firstSegment, "t-") {
-		return "", fmt.Errorf("target image %q is outside team registry prefix %q", targetImage, prefix)
+		return "", fmt.Errorf("%w: target image %q is outside team registry prefix %q", ErrInvalidTargetImage, targetImage, prefix)
 	}
 	return prefix + "/" + repository, nil
 }

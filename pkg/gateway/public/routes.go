@@ -173,6 +173,7 @@ func RegisterAPIKeyRoutes(router gin.IRouter, deps Deps) {
 		apiKeys := router.Group("/api-keys")
 		apiKeys.Use(deps.AuthMiddleware.Authenticate())
 		apiKeys.Use(deps.AuthMiddleware.RequireJWTAuth())
+		apiKeys.Use(deps.AuthMiddleware.RequirePermission(authn.PermAPIKeyManage))
 		{
 			apiKeys.GET("", apiKeyHandler.ListAPIKeys)
 			apiKeys.POST("", apiKeyHandler.CreateAPIKey)

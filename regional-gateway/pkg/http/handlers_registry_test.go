@@ -97,6 +97,27 @@ func TestRegistryCredentialsRequireRegistryWritePermission(t *testing.T) {
 		}
 	})
 
+	t.Run("invalid target image returns bad request", func(t *testing.T) {
+		registrySpy.reset()
+		registrySpy.setError(registryprovider.ErrInvalidTargetImage)
+		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "developer"}})
+		if err != nil {
+			t.Fatalf("issue token pair: %v", err)
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/registry/credentials", strings.NewReader(`{"targetImage":"t-other/my-app:v1"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+		req.Header.Set(internalauth.TeamIDHeader, "team-1")
+
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+		}
+	})
+
 	t.Run("invalid json is rejected", func(t *testing.T) {
 		registrySpy.reset()
 		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "builder"}})
@@ -121,12 +142,16 @@ func TestRegistryCredentialsRequireRegistryWritePermission(t *testing.T) {
 type registryProviderSpy struct {
 	mu       sync.Mutex
 	requests []registryprovider.PushCredentialsRequest
+	err      error
 }
 
 func (s *registryProviderSpy) GetPushCredentials(_ context.Context, req registryprovider.PushCredentialsRequest) (*registryprovider.Credential, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.requests = append(s.requests, req)
+	if s.err != nil {
+		return nil, s.err
+	}
 	return &registryprovider.Credential{
 		Provider:     "builtin",
 		PushRegistry: "registry.example.com",
@@ -145,6 +170,13 @@ func (s *registryProviderSpy) reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.requests = nil
+	s.err = nil
+}
+
+func (s *registryProviderSpy) setError(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.err = err
 }
 
 func (s *registryProviderSpy) teamID() string {

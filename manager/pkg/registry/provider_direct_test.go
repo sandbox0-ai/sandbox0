@@ -28,7 +28,7 @@ func TestNewProvider_BuiltinWithDirectCredentials(t *testing.T) {
 		t.Fatal("NewProvider returned nil provider")
 	}
 
-	cred, err := p.GetPushCredentials(context.Background(), PushCredentialsRequest{TeamID: "team-1"})
+	cred, err := p.GetPushCredentials(context.Background(), PushCredentialsRequest{TeamID: "team-1", TargetImage: "my-app:v1"})
 	if err != nil {
 		t.Fatalf("GetPushCredentials returned error: %v", err)
 	}
@@ -45,6 +45,67 @@ func TestNewProvider_BuiltinWithDirectCredentials(t *testing.T) {
 	}
 	if cred.Username != "u" || cred.Password != "p" {
 		t.Fatalf("unexpected credentials: %s/%s", cred.Username, cred.Password)
+	}
+}
+
+func TestNewProvider_BuiltinAllowsTeamScopedTargetImages(t *testing.T) {
+	p, err := NewProvider(config.RegistryConfig{
+		Provider:     "builtin",
+		PushRegistry: "registry.example.com",
+		Builtin: &config.RegistryBuiltinConfig{
+			Username: "u",
+			Password: "p",
+		},
+	}, nil, nil)
+	if err != nil {
+		t.Fatalf("NewProvider returned error: %v", err)
+	}
+
+	prefix := naming.TeamImageRepositoryPrefix("team-1")
+	tests := []string{
+		"my-app:v1",
+		prefix + "/my-app:v1",
+		"registry.example.com/" + prefix + "/my-app:v1",
+	}
+	for _, targetImage := range tests {
+		t.Run(targetImage, func(t *testing.T) {
+			cred, err := p.GetPushCredentials(context.Background(), PushCredentialsRequest{TeamID: "team-1", TargetImage: targetImage})
+			if err != nil {
+				t.Fatalf("GetPushCredentials returned error: %v", err)
+			}
+			if cred.Provider != "builtin" {
+				t.Fatalf("unexpected provider: %s", cred.Provider)
+			}
+		})
+	}
+}
+
+func TestNewProvider_BuiltinRejectsOutOfScopeTargets(t *testing.T) {
+	p, err := NewProvider(config.RegistryConfig{
+		Provider:     "builtin",
+		PushRegistry: "registry.example.com",
+		Builtin: &config.RegistryBuiltinConfig{
+			Username: "u",
+			Password: "p",
+		},
+	}, nil, nil)
+	if err != nil {
+		t.Fatalf("NewProvider returned error: %v", err)
+	}
+
+	tests := []string{
+		"",
+		"t-other/probe:v1",
+		"registry.example.com/t-other/probe:v1",
+		"other-registry.example.com/my-app:v1",
+	}
+	for _, targetImage := range tests {
+		t.Run(targetImage, func(t *testing.T) {
+			_, err := p.GetPushCredentials(context.Background(), PushCredentialsRequest{TeamID: "team-1", TargetImage: targetImage})
+			if !errors.Is(err, ErrInvalidTargetImage) {
+				t.Fatalf("error = %v, want ErrInvalidTargetImage", err)
+			}
+		})
 	}
 }
 

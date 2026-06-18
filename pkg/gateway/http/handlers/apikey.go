@@ -50,6 +50,10 @@ func (h *APIKeyHandler) ListAPIKeys(c *gin.Context) {
 		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "not authenticated")
 		return
 	}
+	if !canManageTeamAPIKeys(authCtx) {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "API key management requires team admin access")
+		return
+	}
 
 	// Get keys for the current team or user
 	var keys []*apikey.APIKey
@@ -141,6 +145,10 @@ func (h *APIKeyHandler) CreateAPIKey(c *gin.Context) {
 	authCtx := middleware.GetAuthContext(c)
 	if authCtx == nil || authCtx.UserID == "" {
 		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "not authenticated")
+		return
+	}
+	if !canManageTeamAPIKeys(authCtx) {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "API key management requires team admin access")
 		return
 	}
 
@@ -254,6 +262,10 @@ func (h *APIKeyHandler) DeleteAPIKey(c *gin.Context) {
 		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "not authenticated")
 		return
 	}
+	if !canManageTeamAPIKeys(authCtx) {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "API key management requires team admin access")
+		return
+	}
 
 	keyID := c.Param("id")
 
@@ -298,6 +310,10 @@ func (h *APIKeyHandler) DeactivateAPIKey(c *gin.Context) {
 	authCtx := middleware.GetAuthContext(c)
 	if authCtx == nil || authCtx.UserID == "" {
 		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "not authenticated")
+		return
+	}
+	if !canManageTeamAPIKeys(authCtx) {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "API key management requires team admin access")
 		return
 	}
 
@@ -397,6 +413,10 @@ func canGrantAPIKeyRoles(authCtx *authn.AuthContext, roles []string) bool {
 
 func canManagePlatformAPIKeys(authCtx *authn.AuthContext) bool {
 	return authCtx != nil && authCtx.AuthMethod == authn.AuthMethodJWT && authCtx.IsSystemAdmin
+}
+
+func canManageTeamAPIKeys(authCtx *authn.AuthContext) bool {
+	return authCtx != nil && authCtx.AuthMethod == authn.AuthMethodJWT && authCtx.HasPermission(authn.PermAPIKeyManage)
 }
 
 func filterVisibleAPIKeys(authCtx *authn.AuthContext, keys []*apikey.APIKey) []*apikey.APIKey {

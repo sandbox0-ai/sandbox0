@@ -369,33 +369,7 @@ func (s *Server) setupRoutes() {
 			sandboxes.GET("/:id/services", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.proxySandboxManagerSubresource("services"))
 			sandboxes.PUT("/:id/services", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.proxySandboxManagerSubresource("services"))
 
-			// === Process/Context Management (→ Procd) ===
-			contexts := sandboxes.Group("/:id/contexts")
-			{
-				contexts.POST("", s.createContext)
-				contexts.GET("", s.listContexts)
-				contexts.GET("/:ctx_id", s.getContext)
-				contexts.DELETE("/:ctx_id", s.deleteContext)
-				contexts.POST("/:ctx_id/restart", s.restartContext)
-				contexts.POST("/:ctx_id/input", s.contextInput)
-				contexts.POST("/:ctx_id/exec", s.contextExec)
-				contexts.POST("/:ctx_id/resize", s.contextResize)
-				contexts.POST("/:ctx_id/signal", s.contextSignal)
-				contexts.GET("/:ctx_id/stats", s.contextStats)
-				contexts.GET("/:ctx_id/ws", s.contextWebSocket)
-			}
-
-			// === File System (→ Procd) ===
-			files := sandboxes.Group("/:id/files")
-			{
-				files.GET("", s.handleFileOperation)
-				files.POST("", s.handleFileOperation)
-				files.DELETE("", s.handleFileOperation)
-				files.GET("/watch", s.handleFileWatch)
-				files.POST("/move", s.handleFileMove)
-				files.GET("/stat", s.handleFileStat)
-				files.GET("/list", s.handleFileList)
-			}
+			s.registerSandboxProcdRoutes(sandboxes)
 		}
 
 		// === Template Management (→ Manager) ===
@@ -486,6 +460,36 @@ func (s *Server) setupRoutes() {
 
 	// Host-based public exposure fallback (for non-/api paths)
 	s.router.NoRoute(s.handlePublicExposureNoRoute)
+}
+
+func (s *Server) registerSandboxProcdRoutes(sandboxes *gin.RouterGroup) {
+	// === Process/Context Management (→ Procd) ===
+	contexts := sandboxes.Group("/:id/contexts")
+	{
+		contexts.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.createContext)
+		contexts.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.listContexts)
+		contexts.GET("/:ctx_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.getContext)
+		contexts.DELETE("/:ctx_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.deleteContext)
+		contexts.POST("/:ctx_id/restart", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.restartContext)
+		contexts.POST("/:ctx_id/input", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.contextInput)
+		contexts.POST("/:ctx_id/exec", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.contextExec)
+		contexts.POST("/:ctx_id/resize", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.contextResize)
+		contexts.POST("/:ctx_id/signal", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.contextSignal)
+		contexts.GET("/:ctx_id/stats", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.contextStats)
+		contexts.GET("/:ctx_id/ws", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.contextWebSocket)
+	}
+
+	// === File System (→ Procd) ===
+	files := sandboxes.Group("/:id/files")
+	{
+		files.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.handleFileOperation)
+		files.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.handleFileOperation)
+		files.DELETE("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.handleFileOperation)
+		files.GET("/watch", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.handleFileWatch)
+		files.POST("/move", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.handleFileMove)
+		files.GET("/stat", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.handleFileStat)
+		files.GET("/list", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.handleFileList)
+	}
 }
 
 func (s *Server) setupInternalControlPlaneRoutes() {

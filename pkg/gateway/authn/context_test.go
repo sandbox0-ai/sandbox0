@@ -51,6 +51,28 @@ func TestRolePermissionsIncludeRegistryWrite(t *testing.T) {
 	}
 }
 
+func TestRolePermissionsIncludeAPIKeyManageForAdminsOnly(t *testing.T) {
+	tests := []struct {
+		role string
+		want bool
+	}{
+		{role: "admin", want: true},
+		{role: "developer", want: false},
+		{role: "builder", want: false},
+		{role: "viewer", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.role, func(t *testing.T) {
+			permissions := ExpandRolePermissions(tt.role)
+			got := containsPermission(permissions, PermAPIKeyManage)
+			if got != tt.want {
+				t.Fatalf("api key manage permission = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func containsPermission(permissions []string, target string) bool {
 	for _, permission := range permissions {
 		if permission == target {

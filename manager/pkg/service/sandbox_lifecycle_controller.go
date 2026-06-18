@@ -331,7 +331,11 @@ func (s *SandboxService) CleanupDeletedSandbox(ctx context.Context, info Sandbox
 	var errs []error
 	if !runtimePaused && s.deletionWebhookEmitter != nil && strings.TrimSpace(info.WebhookURL) != "" {
 		if err := s.deletionWebhookEmitter.EmitSandboxDeleted(ctx, info); err != nil {
-			errs = append(errs, fmt.Errorf("emit sandbox.deleted webhook: %w", err))
+			logger.Warn("Failed to emit sandbox.deleted webhook",
+				zap.String("sandboxID", sandboxID),
+				zap.String("namespace", info.Namespace),
+				zap.Error(err),
+			)
 		}
 	}
 	if s.networkProvider != nil && info.Namespace != "" {

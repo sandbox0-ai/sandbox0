@@ -59,6 +59,41 @@ func TestGetProcdURLFetchesManagerForEachRequest(t *testing.T) {
 	}
 }
 
+func TestGetProcdURLReturnsNotFoundForMissingSandbox(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate keypair: %v", err)
+	}
+	tokenGen := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller:     "cluster-gateway",
+		PrivateKey: privateKey,
+		TTL:        time.Minute,
+	})
+	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sandboxes/missing-sandbox" {
+			t.Fatalf("unexpected manager request %s %s", r.Method, r.URL.Path)
+		}
+		_ = spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
+	}))
+	defer manager.Close()
+
+	server := &Server{
+		managerClient: client.NewManagerClient(manager.URL, tokenGen, zap.NewNop(), time.Second),
+		logger:        zap.NewNop(),
+	}
+
+	addr, rec := mustGetProcdURL(t, server, "team-a", "user-a", "missing-sandbox")
+
+	if addr != nil {
+		t.Fatalf("addr = %v, want nil", addr)
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
 func TestGetProcdURLRechecksPausedStateAfterSuccessfulAccess(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

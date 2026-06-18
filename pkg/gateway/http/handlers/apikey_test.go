@@ -245,6 +245,67 @@ func TestCreateAPIKeyRejectsPlatformRoles(t *testing.T) {
 	}
 }
 
+func TestCreateAPIKeyRejectsWhitespaceName(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+	gin.SetMode(gin.ReleaseMode)
+
+	authCtx := &authn.AuthContext{
+		AuthMethod:  authn.AuthMethodJWT,
+		TeamID:      "team-1",
+		UserID:      "user-1",
+		TeamRole:    "admin",
+		Permissions: authn.ExpandRolePermissions("admin"),
+	}
+	rec := performCreateAPIKeyRequestWithStore(t, &fakeAPIKeyStore{}, authCtx, map[string]any{
+		"name":  "   ",
+		"roles": []string{"viewer"},
+	})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	_, apiErr, err := spec.DecodeResponse[map[string]any](rec.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr == nil || apiErr.Code != spec.CodeBadRequest {
+		t.Fatalf("unexpected api error: %#v", apiErr)
+	}
+}
+
+func TestCreateAPIKeyRejectsUnsupportedExpiresIn(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+	gin.SetMode(gin.ReleaseMode)
+
+	authCtx := &authn.AuthContext{
+		AuthMethod:  authn.AuthMethodJWT,
+		TeamID:      "team-1",
+		UserID:      "user-1",
+		TeamRole:    "admin",
+		Permissions: authn.ExpandRolePermissions("admin"),
+	}
+	store := &fakeAPIKeyStore{}
+	rec := performCreateAPIKeyRequestWithStore(t, store, authCtx, map[string]any{
+		"name":       "bad-expiry",
+		"roles":      []string{"viewer"},
+		"expires_in": "1d",
+	})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if !store.createdExpiresAt.IsZero() {
+		t.Fatalf("createdExpiresAt = %s, want zero because key should not be created", store.createdExpiresAt)
+	}
+	_, apiErr, err := spec.DecodeResponse[map[string]any](rec.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr == nil || apiErr.Code != spec.CodeBadRequest {
+		t.Fatalf("unexpected api error: %#v", apiErr)
+	}
+}
+
 func TestFilterVisibleAPIKeysHidesPlatformKeysOutsideSystemAdminJWT(t *testing.T) {
 	keys := []*apikey.APIKey{
 		{ID: "team-key", Scope: apikey.ScopeTeam},
@@ -276,7 +337,7 @@ func TestDeleteAPIKeyRejectsPlatformKeyForTeamAdmin(t *testing.T) {
 
 	store := &fakeAPIKeyStore{
 		key: &apikey.APIKey{
-			ID:     "key-1",
+			ID:     "66666666-6666-6666-6666-666666666666",
 			TeamID: "team-1",
 			Scope:  apikey.ScopePlatform,
 		},
@@ -288,7 +349,7 @@ func TestDeleteAPIKeyRejectsPlatformKeyForTeamAdmin(t *testing.T) {
 		TeamRole:    "admin",
 		Permissions: authn.ExpandRolePermissions("admin"),
 	}
-	rec := performDeleteAPIKeyRequest(t, store, authCtx, "key-1")
+	rec := performDeleteAPIKeyRequest(t, store, authCtx, "66666666-6666-6666-6666-666666666666")
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
@@ -298,15 +359,44 @@ func TestDeleteAPIKeyRejectsPlatformKeyForTeamAdmin(t *testing.T) {
 	}
 }
 
+func TestAPIKeyMutationsRejectMalformedID(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+	gin.SetMode(gin.ReleaseMode)
+
+	authCtx := &authn.AuthContext{
+		AuthMethod:  authn.AuthMethodJWT,
+		TeamID:      "team-1",
+		UserID:      "user-1",
+		TeamRole:    "admin",
+		Permissions: authn.ExpandRolePermissions("admin"),
+	}
+	store := &fakeAPIKeyStore{}
+
+	deleteRec := performDeleteAPIKeyRequest(t, store, authCtx, "not-a-uuid")
+	if deleteRec.Code != http.StatusBadRequest {
+		t.Fatalf("delete status = %d, want %d body=%s", deleteRec.Code, http.StatusBadRequest, deleteRec.Body.String())
+	}
+
+	deactivateRec := performDeactivateAPIKeyRequest(t, store, authCtx, "not-a-uuid")
+	if deactivateRec.Code != http.StatusBadRequest {
+		t.Fatalf("deactivate status = %d, want %d body=%s", deactivateRec.Code, http.StatusBadRequest, deactivateRec.Body.String())
+	}
+
+	if store.deletedID != "" || store.deactivatedID != "" {
+		t.Fatalf("store mutation ids = deleted:%q deactivated:%q, want empty", store.deletedID, store.deactivatedID)
+	}
+}
+
 func TestListAPIKeysReturnsEmptyArray(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 	gin.SetMode(gin.ReleaseMode)
 
 	authCtx := &authn.AuthContext{
-		AuthMethod: authn.AuthMethodJWT,
-		TeamID:     "team-1",
-		UserID:     "user-1",
-		TeamRole:   "admin",
+		AuthMethod:  authn.AuthMethodJWT,
+		TeamID:      "team-1",
+		UserID:      "user-1",
+		TeamRole:    "admin",
+		Permissions: authn.ExpandRolePermissions("admin"),
 	}
 	rec := performListAPIKeysRequest(t, &fakeAPIKeyStore{}, authCtx)
 
@@ -445,6 +535,26 @@ func performDeleteAPIKeyRequest(t *testing.T, store apiKeyStore, authCtx *authn.
 	router.DELETE("/api-keys/:id", handler.DeleteAPIKey)
 
 	req := httptest.NewRequest(http.MethodDelete, "/api-keys/"+keyID, nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}
+
+func performDeactivateAPIKeyRequest(t *testing.T, store apiKeyStore, authCtx *authn.AuthContext, keyID string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	handler := &APIKeyHandler{
+		keys:   store,
+		logger: zap.NewNop(),
+	}
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set("auth_context", authCtx)
+		c.Next()
+	})
+	router.POST("/api-keys/:id/deactivate", handler.DeactivateAPIKey)
+
+	req := httptest.NewRequest(http.MethodPost, "/api-keys/"+keyID+"/deactivate", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	return rec

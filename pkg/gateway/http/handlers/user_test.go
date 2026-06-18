@@ -16,7 +16,10 @@ import (
 	"go.uber.org/zap"
 )
 
-const testSSHPublicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ4dLZLZOA/asaP+5QO6t81jzbe5G4jrI2F+jbjL6TY8 sandbox0-e2e"
+const (
+	testSSHPublicKey   = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ4dLZLZOA/asaP+5QO6t81jzbe5G4jrI2F+jbjL6TY8 sandbox0-e2e"
+	testSSHPublicKeyID = "11111111-1111-1111-1111-111111111111"
+)
 
 type fakeUserRepository struct {
 	user                   *identity.User
@@ -107,6 +110,50 @@ func newAuthenticatedUserContext(t *testing.T, method, target, body string) (*gi
 	return ctx, rec
 }
 
+func TestUpdateCurrentUserRejectsWhitespaceName(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	repo := &fakeUserRepository{user: &identity.User{ID: "user-1", Email: "user@example.com", Name: "User"}}
+	handler := NewUserHandler(repo, zap.NewNop())
+	ctx, rec := newAuthenticatedUserContext(t, http.MethodPut, "/users/me", `{"name":"   "}`)
+
+	handler.UpdateCurrentUser(ctx)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if repo.user.Name != "User" {
+		t.Fatalf("stored name = %q, want unchanged User", repo.user.Name)
+	}
+}
+
+func TestUpdateCurrentUserClearsName(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	repo := &fakeUserRepository{user: &identity.User{ID: "user-1", Email: "user@example.com", Name: "   "}}
+	handler := NewUserHandler(repo, zap.NewNop())
+	ctx, rec := newAuthenticatedUserContext(t, http.MethodPut, "/users/me", `{"name":""}`)
+
+	handler.UpdateCurrentUser(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if repo.user.Name != "" {
+		t.Fatalf("stored name = %q, want empty", repo.user.Name)
+	}
+	resp, apiErr, err := spec.DecodeResponse[UserResponse](rec.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr != nil {
+		t.Fatalf("unexpected api error: %#v", apiErr)
+	}
+	if resp.Name != "" {
+		t.Fatalf("response name = %q, want empty", resp.Name)
+	}
+}
+
 func TestCreateUserSSHPublicKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -188,7 +235,7 @@ func TestListUserSSHPublicKeys(t *testing.T) {
 	repo := &fakeUserRepository{
 		user: &identity.User{ID: "user-1"},
 		sshKeys: []*identity.UserSSHPublicKey{{
-			ID:                "sshkey-1",
+			ID:                testSSHPublicKeyID,
 			TeamID:            "team-1",
 			UserID:            "user-1",
 			Name:              "Laptop",
@@ -232,16 +279,34 @@ func TestDeleteUserSSHPublicKey(t *testing.T) {
 
 	repo := &fakeUserRepository{user: &identity.User{ID: "user-1"}}
 	handler := NewUserHandler(repo, zap.NewNop())
-	ctx, rec := newAuthenticatedUserContext(t, http.MethodDelete, "/users/me/ssh-keys/sshkey-1", "")
-	ctx.Params = gin.Params{{Key: "id", Value: "sshkey-1"}}
+	ctx, rec := newAuthenticatedUserContext(t, http.MethodDelete, "/users/me/ssh-keys/"+testSSHPublicKeyID, "")
+	ctx.Params = gin.Params{{Key: "id", Value: testSSHPublicKeyID}}
 
 	handler.DeleteUserSSHPublicKey(ctx)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
-	if repo.lastDeletedTeamID != "team-1" || repo.lastDeletedUserID != "user-1" || repo.lastDeletedSSHPublicID != "sshkey-1" {
-		t.Fatalf("delete args = (%q, %q, %q), want (%q, %q, %q)", repo.lastDeletedTeamID, repo.lastDeletedUserID, repo.lastDeletedSSHPublicID, "team-1", "user-1", "sshkey-1")
+	if repo.lastDeletedTeamID != "team-1" || repo.lastDeletedUserID != "user-1" || repo.lastDeletedSSHPublicID != testSSHPublicKeyID {
+		t.Fatalf("delete args = (%q, %q, %q), want (%q, %q, %q)", repo.lastDeletedTeamID, repo.lastDeletedUserID, repo.lastDeletedSSHPublicID, "team-1", "user-1", testSSHPublicKeyID)
+	}
+}
+
+func TestDeleteUserSSHPublicKeyRejectsMalformedID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	repo := &fakeUserRepository{user: &identity.User{ID: "user-1"}}
+	handler := NewUserHandler(repo, zap.NewNop())
+	ctx, rec := newAuthenticatedUserContext(t, http.MethodDelete, "/users/me/ssh-keys/not-a-uuid", "")
+	ctx.Params = gin.Params{{Key: "id", Value: "not-a-uuid"}}
+
+	handler.DeleteUserSSHPublicKey(ctx)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if repo.lastDeletedSSHPublicID != "" {
+		t.Fatalf("deleted id = %q, want empty", repo.lastDeletedSSHPublicID)
 	}
 }
 
@@ -253,8 +318,8 @@ func TestDeleteUserSSHPublicKeyReturnsNotFound(t *testing.T) {
 		deleteSSHPublicKeyErr: identity.ErrSSHPublicKeyNotFound,
 	}
 	handler := NewUserHandler(repo, zap.NewNop())
-	ctx, rec := newAuthenticatedUserContext(t, http.MethodDelete, "/users/me/ssh-keys/sshkey-1", "")
-	ctx.Params = gin.Params{{Key: "id", Value: "sshkey-1"}}
+	ctx, rec := newAuthenticatedUserContext(t, http.MethodDelete, "/users/me/ssh-keys/"+testSSHPublicKeyID, "")
+	ctx.Params = gin.Params{{Key: "id", Value: testSSHPublicKeyID}}
 
 	handler.DeleteUserSSHPublicKey(ctx)
 

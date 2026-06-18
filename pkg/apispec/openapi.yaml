@@ -4906,6 +4906,13 @@ components:
         output_raw:
           type: string
           description: Raw PTY output for CMD contexts with wait=true, may contain terminal control characters
+        exit_code:
+          type: integer
+          format: int32
+          description: Present when the underlying process has exited.
+        state:
+          type: string
+          description: Final process state when the underlying process has exited.
       required: [id, type, running, paused, created_at]
     ContextStatsResponse:
       type: object
@@ -4936,6 +4943,13 @@ components:
         output_raw:
           type: string
           description: Raw PTY output, may contain terminal control characters (e.g. \r)
+        exit_code:
+          type: integer
+          format: int32
+          description: Present when the underlying process has exited.
+        state:
+          type: string
+          description: Final process state when the underlying process has exited.
       required: [output_raw]
     ResizeContextRequest:
       type: object

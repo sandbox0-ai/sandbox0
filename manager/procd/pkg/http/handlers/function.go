@@ -28,14 +28,15 @@ import (
 )
 
 const (
-	defaultFunctionRunnerPath = "/procd/bin/python-runner"
-	defaultFunctionCacheRoot  = "/tmp/sandbox0-functions"
-	defaultFunctionTimeout    = 30 * time.Second
-	maxFunctionTimeout        = 120 * time.Second
-	maxFunctionExecuteBytes   = sandboxfunction.MaxHTTPRequestBytes + sandboxfunction.MaxInlineSourceBytes + (1 << 20)
-	maxFunctionStdoutBytes    = 4 << 20
-	maxFunctionStderrBytes    = 64 << 10
-	maxFunctionStreamFrame    = 4 << 20
+	defaultFunctionRunnerPath  = "/procd/bin/python-runner"
+	defaultFunctionCacheRoot   = "/tmp/sandbox0-functions"
+	defaultFunctionTimeout     = 30 * time.Second
+	maxFunctionTimeout         = 120 * time.Second
+	maxFunctionExecuteBytes    = sandboxfunction.MaxHTTPRequestBytes + sandboxfunction.MaxInlineSourceBytes + (1 << 20)
+	maxFunctionStdoutBytes     = 4 << 20
+	maxFunctionStderrBytes     = 64 << 10
+	maxFunctionStreamFrame     = 4 << 20
+	functionRunnerWaitInterval = 50 * time.Millisecond
 )
 
 var (
@@ -129,17 +130,15 @@ func (h *FunctionHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
-	if _, err := os.Stat(h.runnerPath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			writeError(w, http.StatusServiceUnavailable, spec.CodeUnavailable, "function runtime unavailable")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, spec.CodeInternal, "function runtime unavailable")
-		return
-	}
 	timeout, err := h.requestTimeout(req.TimeoutMS)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+	if err := h.waitRunner(ctx); err != nil {
+		h.writeRunnerUnavailable(w, err)
 		return
 	}
 	modulePath, err := h.materializeSource(req.Source)
@@ -160,9 +159,6 @@ func (h *FunctionHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, spec.CodeInternal, "failed to encode function request")
 		return
 	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
-	defer cancel()
 
 	stdout, stderr, truncated, err := h.run(ctx, modulePath, req.Handler, req.EnvVars, payload)
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -207,12 +203,20 @@ func (h *FunctionHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
-	if _, err := os.Stat(h.runnerPath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			writeError(w, http.StatusServiceUnavailable, spec.CodeUnavailable, "function runtime unavailable")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, spec.CodeInternal, "function runtime unavailable")
+	ctx := r.Context()
+	if req.TimeoutMS < 0 {
+		writeError(w, http.StatusBadRequest, spec.CodeBadRequest, "timeout_ms must be >= 0")
+		return
+	}
+	if req.TimeoutMS > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(req.TimeoutMS)*time.Millisecond)
+		defer cancel()
+	}
+	waitCtx, waitCancel := h.runnerWaitContext(ctx, req.TimeoutMS)
+	defer waitCancel()
+	if err := h.waitRunner(waitCtx); err != nil {
+		h.writeRunnerUnavailable(w, err)
 		return
 	}
 	modulePath, err := h.materializeSource(req.Source)
@@ -235,16 +239,6 @@ func (h *FunctionHandler) Stream(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := proxy.DisableResponseWriteDeadline(w); err != nil {
 		h.logger.Debug("Failed to disable function stream response deadline", zap.Error(err))
-	}
-	ctx := r.Context()
-	if req.TimeoutMS < 0 {
-		writeError(w, http.StatusBadRequest, spec.CodeBadRequest, "timeout_ms must be >= 0")
-		return
-	}
-	if req.TimeoutMS > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(req.TimeoutMS)*time.Millisecond)
-		defer cancel()
 	}
 	tracker := &trackingResponseWriter{ResponseWriter: w}
 	if err := h.runStream(ctx, tracker, modulePath, req.Handler, req.EnvVars, payload); err != nil {
@@ -287,7 +281,9 @@ func (h *FunctionHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, err.Error()), time.Now().Add(time.Second))
 		return
 	}
-	if _, err := os.Stat(h.runnerPath); err != nil {
+	waitCtx, waitCancel := h.runnerWaitContext(r.Context(), req.TimeoutMS)
+	defer waitCancel()
+	if err := h.waitRunner(waitCtx); err != nil {
 		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "function runtime unavailable"), time.Now().Add(time.Second))
 		return
 	}
@@ -659,6 +655,9 @@ func validateFunctionExecuteRequest(req sandboxfunction.ExecuteRequest) error {
 			return errors.New("request.body_base64 must be valid base64")
 		}
 	}
+	if req.TimeoutMS < 0 {
+		return errors.New("timeout_ms must be >= 0")
+	}
 	return nil
 }
 
@@ -686,6 +685,62 @@ func decodeFunctionExecuteResponse(data []byte) (sandboxfunction.ExecuteResponse
 		response.Headers = map[string][]string{}
 	}
 	return response, nil
+}
+
+func (h *FunctionHandler) checkRunner() error {
+	info, err := os.Stat(h.runnerPath)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("%s is a directory", h.runnerPath)
+	}
+	return nil
+}
+
+func (h *FunctionHandler) waitRunner(ctx context.Context) error {
+	var lastErr error
+	for {
+		err := h.checkRunner()
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		lastErr = err
+
+		timer := time.NewTimer(functionRunnerWaitInterval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			if lastErr != nil {
+				return lastErr
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (h *FunctionHandler) runnerWaitContext(parent context.Context, timeoutMS int) (context.Context, context.CancelFunc) {
+	if timeoutMS > 0 {
+		return context.WithTimeout(parent, time.Duration(timeoutMS)*time.Millisecond)
+	}
+	return context.WithTimeout(parent, h.defaultTimeout)
+}
+
+func (h *FunctionHandler) writeRunnerUnavailable(w http.ResponseWriter, err error) {
+	if errors.Is(err, os.ErrNotExist) {
+		writeError(w, http.StatusServiceUnavailable, spec.CodeUnavailable, "function runtime unavailable")
+		return
+	}
+	writeError(w, http.StatusInternalServerError, spec.CodeInternal, "function runtime unavailable")
 }
 
 func encodeWebSocketClientMessage(messageType int, data []byte) sandboxfunction.WebSocketFrame {

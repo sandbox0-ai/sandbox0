@@ -20,7 +20,8 @@ type InitializeHandler struct {
 	contextManager *ctxpkg.Manager
 	httpPort       int
 	logger         *zap.Logger
-	readyOnce      sync.Once
+	readyMu        sync.Mutex
+	readySentKey   string
 	watchMu        sync.Mutex
 	watchPath      string
 	unsubscribe    func() error
@@ -116,23 +117,40 @@ func (h *InitializeHandler) Initialize(w http.ResponseWriter, r *http.Request) {
 	h.configureWebhookWatch(strings.TrimSpace(webhookURL), strings.TrimSpace(webhookWatchDir))
 
 	if webhookURL != "" {
-		h.readyOnce.Do(func() {
-			if _, err := h.dispatcher.Enqueue(webhook.Event{
-				EventType: webhook.EventTypeSandboxReady,
-				Payload: map[string]any{
-					"http_port":  h.httpPort,
-					"sandbox_id": req.SandboxID,
-				},
-			}); err != nil && h.logger != nil {
+		if err := h.enqueueSandboxReady(req.SandboxID, webhookURL); err != nil {
+			if h.logger != nil {
 				h.logger.Warn("Failed to enqueue sandbox ready webhook", zap.Error(err))
 			}
-		})
+			writeError(w, http.StatusServiceUnavailable, "webhook_enqueue_failed", err.Error())
+			return
+		}
 	}
 
 	writeJSON(w, http.StatusOK, InitializeResponse{
 		SandboxID: req.SandboxID,
 		TeamID:    teamID,
 	})
+}
+
+func (h *InitializeHandler) enqueueSandboxReady(sandboxID, webhookURL string) error {
+	h.readyMu.Lock()
+	defer h.readyMu.Unlock()
+
+	readyKey := strings.TrimSpace(sandboxID) + "\x00" + strings.TrimSpace(webhookURL)
+	if h.readySentKey == readyKey {
+		return nil
+	}
+	if _, err := h.dispatcher.Enqueue(webhook.Event{
+		EventType: webhook.EventTypeSandboxReady,
+		Payload: map[string]any{
+			"http_port":  h.httpPort,
+			"sandbox_id": sandboxID,
+		},
+	}); err != nil {
+		return err
+	}
+	h.readySentKey = readyKey
+	return nil
 }
 
 // UpdateSandboxEnvVars updates default environment variables for future sandbox processes.

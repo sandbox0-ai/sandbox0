@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
@@ -81,6 +83,36 @@ func TestInitializeClearsSandboxEnvVars(t *testing.T) {
 	}
 	if envVars := contextManager.SandboxEnvVars(); len(envVars) != 0 {
 		t.Fatalf("sandbox env vars = %#v, want empty", envVars)
+	}
+}
+
+func TestInitializeFailsWhenReadyWebhookCannotBeQueued(t *testing.T) {
+	outboxPath := filepath.Join(t.TempDir(), "outbox")
+	if err := os.WriteFile(outboxPath, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("write outbox file: %v", err)
+	}
+	dispatcher := webhook.NewDispatcher(webhook.Options{OutboxDir: outboxPath}, zap.NewNop())
+	t.Cleanup(func() {
+		_ = dispatcher.Shutdown(context.Background())
+	})
+	handler := NewInitializeHandler(dispatcher, nil, ctxpkg.NewManager(), 8080, zap.NewNop())
+
+	body, err := json.Marshal(InitializeRequest{
+		SandboxID: "sandbox-1",
+		Webhook: &InitializeWebhook{
+			URL: "http://127.0.0.1:1/events",
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/initialize", bytes.NewReader(body))
+	recorder := httptest.NewRecorder()
+	handler.Initialize(recorder, req)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("Initialize() status = %d, want %d body=%s", recorder.Code, http.StatusServiceUnavailable, recorder.Body.String())
 	}
 }
 

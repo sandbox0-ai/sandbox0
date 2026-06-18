@@ -84,6 +84,8 @@ type ContextResponse struct {
 	Paused    bool                `json:"paused"`
 	CreatedAt string              `json:"created_at"`
 	OutputRaw string              `json:"output_raw,omitempty"`
+	ExitCode  *int                `json:"exit_code,omitempty"`
+	State     string              `json:"state,omitempty"`
 }
 
 func normalizeStringMap(value map[string]string) map[string]string {
@@ -93,8 +95,13 @@ func normalizeStringMap(value map[string]string) map[string]string {
 	return value
 }
 
+type contextTerminalStatus struct {
+	ExitCode int
+	State    string
+}
+
 func newContextResponse(ctx *ctxpkg.Context, outputRaw string) ContextResponse {
-	return ContextResponse{
+	response := ContextResponse{
 		ID:        ctx.ID,
 		Type:      ctx.Type,
 		Alias:     ctx.Alias,
@@ -105,6 +112,31 @@ func newContextResponse(ctx *ctxpkg.Context, outputRaw string) ContextResponse {
 		Paused:    ctx.IsPaused(),
 		CreatedAt: ctx.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
 		OutputRaw: outputRaw,
+	}
+	applyTerminalStatusToContextResponse(&response, terminalStatusForContext(ctx))
+	return response
+}
+
+func applyTerminalStatusToContextResponse(response *ContextResponse, status *contextTerminalStatus) {
+	if response == nil || status == nil {
+		return
+	}
+	exitCode := status.ExitCode
+	response.ExitCode = &exitCode
+	response.State = status.State
+}
+
+func terminalStatusForContext(ctx *ctxpkg.Context) *contextTerminalStatus {
+	if ctx == nil || ctx.MainProcess == nil || !ctx.MainProcess.IsFinished() {
+		return nil
+	}
+	exitCode, err := ctx.MainProcess.ExitCode()
+	if err != nil {
+		return nil
+	}
+	return &contextTerminalStatus{
+		ExitCode: exitCode,
+		State:    string(ctx.MainProcess.State()),
 	}
 }
 
@@ -126,6 +158,8 @@ type ContextInputRequest struct {
 // ContextExecResponse is the response body for synchronous execution.
 type ContextExecResponse struct {
 	OutputRaw string `json:"output_raw"`
+	ExitCode  *int   `json:"exit_code,omitempty"`
+	State     string `json:"state,omitempty"`
 }
 
 // ResizeContextRequest is the request body for resizing a PTY.
@@ -464,7 +498,9 @@ func (h *ContextHandler) Exec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, ContextExecResponse{OutputRaw: output})
+	response := ContextExecResponse{OutputRaw: output}
+	applyTerminalStatusToExecResponse(&response, terminalStatusForContext(ctx))
+	writeJSON(w, http.StatusOK, response)
 }
 
 // Stats returns resource usage statistics for a context.
@@ -514,6 +550,15 @@ func normalizeExecOutput(processType process.ProcessType, raw string) string {
 		normalized = repl.DefaultReadyToken + normalized
 	}
 	return normalized
+}
+
+func applyTerminalStatusToExecResponse(response *ContextExecResponse, status *contextTerminalStatus) {
+	if response == nil || status == nil {
+		return
+	}
+	exitCode := status.ExitCode
+	response.ExitCode = &exitCode
+	response.State = status.State
 }
 
 func (h *ContextHandler) execInputSync(ctx *ctxpkg.Context, input string, requestCtx context.Context) (string, *execError, bool) {

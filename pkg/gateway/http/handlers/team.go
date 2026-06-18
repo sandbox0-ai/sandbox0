@@ -412,6 +412,9 @@ func (h *TeamHandler) ListTeamMembers(c *gin.Context) {
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get members")
 		return
 	}
+	if members == nil {
+		members = []*identity.TeamMemberWithUser{}
+	}
 
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"members": members})
 }

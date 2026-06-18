@@ -29,7 +29,14 @@ func (s *CredentialSourceService) ListSources(ctx context.Context, teamID string
 	if s == nil || s.store == nil {
 		return nil, fmt.Errorf("credential source store is not configured")
 	}
-	return s.store.ListSourceMetadata(ctx, teamID)
+	records, err := s.store.ListSourceMetadata(ctx, teamID)
+	if err != nil {
+		return nil, err
+	}
+	if records == nil {
+		records = []egressauth.CredentialSourceMetadata{}
+	}
+	return records, nil
 }
 
 func (s *CredentialSourceService) GetSource(ctx context.Context, teamID, name string) (*egressauth.CredentialSourceMetadata, error) {

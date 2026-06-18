@@ -206,6 +206,9 @@ func (s *Server) listSandboxVolumes(w http.ResponseWriter, r *http.Request) {
 		_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "internal server error")
 		return
 	}
+	if volumes == nil {
+		volumes = []*db.SandboxVolume{}
+	}
 
 	_ = spec.WriteSuccess(w, http.StatusOK, volumes)
 }

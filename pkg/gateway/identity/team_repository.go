@@ -300,7 +300,7 @@ func (r *Repository) SearchTeamMembers(ctx context.Context, teamID, query string
 
 func scanTeamMembers(rows pgx.Rows) ([]*TeamMemberWithUser, error) {
 	defer rows.Close()
-	var members []*TeamMemberWithUser
+	members := make([]*TeamMemberWithUser, 0)
 	for rows.Next() {
 		var m TeamMemberWithUser
 		if err := rows.Scan(

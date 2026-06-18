@@ -219,7 +219,7 @@ func processDoneMessage(exitEvent *process.ExitEvent, proc process.Process) (wsD
 func (h *ContextHandler) List(w http.ResponseWriter, r *http.Request) {
 	contexts := h.manager.ListContexts()
 
-	var response []ContextResponse
+	response := make([]ContextResponse, 0, len(contexts))
 	for _, ctx := range contexts {
 		response = append(response, newContextResponse(ctx, ""))
 	}

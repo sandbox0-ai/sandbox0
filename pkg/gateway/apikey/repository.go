@@ -126,7 +126,7 @@ func (r *Repository) GetAPIKeysByTeamID(ctx context.Context, teamID string) ([]*
 	}
 	defer rows.Close()
 
-	var keys []*APIKey
+	keys := make([]*APIKey, 0)
 	for rows.Next() {
 		var key APIKey
 		var rolesJSON []byte
@@ -141,6 +141,9 @@ func (r *Repository) GetAPIKeysByTeamID(ctx context.Context, teamID string) ([]*
 			return nil, err
 		}
 		keys = append(keys, &key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate api keys: %w", err)
 	}
 	return keys, nil
 }
@@ -159,7 +162,7 @@ func (r *Repository) GetAPIKeysByUserID(ctx context.Context, userID string) ([]*
 	}
 	defer rows.Close()
 
-	var keys []*APIKey
+	keys := make([]*APIKey, 0)
 	for rows.Next() {
 		var key APIKey
 		var rolesJSON []byte
@@ -174,6 +177,9 @@ func (r *Repository) GetAPIKeysByUserID(ctx context.Context, userID string) ([]*
 			return nil, err
 		}
 		keys = append(keys, &key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate api keys: %w", err)
 	}
 	return keys, nil
 }

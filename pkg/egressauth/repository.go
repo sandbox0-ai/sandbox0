@@ -332,7 +332,7 @@ func (r *Repository) ListSourceMetadata(ctx context.Context, teamID string) ([]C
 	}
 	defer rows.Close()
 
-	var out []CredentialSourceMetadata
+	out := make([]CredentialSourceMetadata, 0)
 	for rows.Next() {
 		record, err := r.scanSourceMetadata(rows)
 		if err != nil {

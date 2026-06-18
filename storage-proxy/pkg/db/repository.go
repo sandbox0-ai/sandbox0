@@ -263,7 +263,7 @@ func (r *Repository) ListSandboxVolumesByTeam(ctx context.Context, teamID string
 	}
 	defer rows.Close()
 
-	var volumes []*SandboxVolume
+	volumes := make([]*SandboxVolume, 0)
 	for rows.Next() {
 		var v SandboxVolume
 		err := rows.Scan(
@@ -277,6 +277,9 @@ func (r *Repository) ListSandboxVolumesByTeam(ctx context.Context, teamID string
 			return nil, fmt.Errorf("scan sandbox volume: %w", err)
 		}
 		volumes = append(volumes, &v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sandbox volumes: %w", err)
 	}
 
 	return volumes, nil
@@ -639,7 +642,7 @@ func (r *Repository) ListSnapshotsByVolume(ctx context.Context, volumeID string)
 	}
 	defer rows.Close()
 
-	var snapshots []*Snapshot
+	snapshots := make([]*Snapshot, 0)
 	for rows.Next() {
 		var s Snapshot
 		err := rows.Scan(
@@ -652,6 +655,9 @@ func (r *Repository) ListSnapshotsByVolume(ctx context.Context, volumeID string)
 			return nil, fmt.Errorf("scan snapshot: %w", err)
 		}
 		snapshots = append(snapshots, &s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate snapshots: %w", err)
 	}
 
 	return snapshots, nil

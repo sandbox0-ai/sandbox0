@@ -298,6 +298,38 @@ func TestDeleteAPIKeyRejectsPlatformKeyForTeamAdmin(t *testing.T) {
 	}
 }
 
+func TestListAPIKeysReturnsEmptyArray(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+	gin.SetMode(gin.ReleaseMode)
+
+	authCtx := &authn.AuthContext{
+		AuthMethod: authn.AuthMethodJWT,
+		TeamID:     "team-1",
+		UserID:     "user-1",
+		TeamRole:   "admin",
+	}
+	rec := performListAPIKeysRequest(t, &fakeAPIKeyStore{}, authCtx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	resp, apiErr, err := spec.DecodeResponse[struct {
+		APIKeys []*apikey.APIKey `json:"api_keys"`
+	}](rec.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr != nil {
+		t.Fatalf("unexpected api error: %+v", apiErr)
+	}
+	if resp.APIKeys == nil {
+		t.Fatal("api_keys slice is nil, want empty array")
+	}
+	if len(resp.APIKeys) != 0 {
+		t.Fatalf("api_keys = %d, want 0", len(resp.APIKeys))
+	}
+}
+
 func TestCreateAPIKeyRejectsRoleEscalation(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 	gin.SetMode(gin.ReleaseMode)
@@ -418,6 +450,26 @@ func performDeleteAPIKeyRequest(t *testing.T, store apiKeyStore, authCtx *authn.
 	return rec
 }
 
+func performListAPIKeysRequest(t *testing.T, store apiKeyStore, authCtx *authn.AuthContext) *httptest.ResponseRecorder {
+	t.Helper()
+
+	handler := &APIKeyHandler{
+		keys:   store,
+		logger: zap.NewNop(),
+	}
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set("auth_context", authCtx)
+		c.Next()
+	})
+	router.GET("/api-keys", handler.ListAPIKeys)
+
+	req := httptest.NewRequest(http.MethodGet, "/api-keys", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}
+
 type fakeAPIKeyStore struct {
 	key              *apikey.APIKey
 	createdScope     string
@@ -445,10 +497,16 @@ func (s *fakeAPIKeyStore) CreateAPIKey(_ context.Context, teamID, _ string, user
 }
 
 func (s *fakeAPIKeyStore) GetAPIKeysByTeamID(context.Context, string) ([]*apikey.APIKey, error) {
+	if s.key == nil {
+		return nil, nil
+	}
 	return []*apikey.APIKey{s.key}, nil
 }
 
 func (s *fakeAPIKeyStore) GetAPIKeysByUserID(context.Context, string) ([]*apikey.APIKey, error) {
+	if s.key == nil {
+		return nil, nil
+	}
 	return []*apikey.APIKey{s.key}, nil
 }
 

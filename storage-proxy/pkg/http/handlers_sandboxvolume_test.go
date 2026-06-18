@@ -107,6 +107,36 @@ func TestCreateSandboxVolumeDefaultsPosixIdentityToRoot(t *testing.T) {
 	}
 }
 
+func TestListSandboxVolumesReturnsEmptyArray(t *testing.T) {
+	server := &Server{
+		logger: logrus.New(),
+		repo:   newFakeHTTPRepo(),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/sandboxvolumes", nil)
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
+	recorder := httptest.NewRecorder()
+
+	server.listSandboxVolumes(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	resp, apiErr, err := spec.DecodeResponse[[]db.SandboxVolume](recorder.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr != nil {
+		t.Fatalf("unexpected api error: %+v", apiErr)
+	}
+	if *resp == nil {
+		t.Fatal("volumes slice is nil, want empty array")
+	}
+	if len(*resp) != 0 {
+		t.Fatalf("volumes = %d, want 0", len(*resp))
+	}
+}
+
 func TestCreateSandboxVolumeFromSnapshot(t *testing.T) {
 	repo := newFakeHTTPRepo()
 	snapshotMgr := &fakeHTTPSnapshotManager{}
@@ -138,6 +168,37 @@ func TestCreateSandboxVolumeFromSnapshot(t *testing.T) {
 	}
 	if len(repo.volumes) != 0 {
 		t.Fatalf("expected handler to delegate snapshot-backed create, repo volumes = %d", len(repo.volumes))
+	}
+}
+
+func TestListSnapshotsReturnsEmptyArray(t *testing.T) {
+	server := &Server{
+		logger:      logrus.New(),
+		snapshotMgr: &fakeHTTPSnapshotManager{},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/sandboxvolumes/vol-1/snapshots", nil)
+	req.SetPathValue("volume_id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
+	recorder := httptest.NewRecorder()
+
+	server.listSnapshots(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	resp, apiErr, err := spec.DecodeResponse[[]snapshotResponse](recorder.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr != nil {
+		t.Fatalf("unexpected api error: %+v", apiErr)
+	}
+	if *resp == nil {
+		t.Fatal("snapshots slice is nil, want empty array")
+	}
+	if len(*resp) != 0 {
+		t.Fatalf("snapshots = %d, want 0", len(*resp))
 	}
 }
 

@@ -422,6 +422,35 @@ func TestTeamHandlerListTeamMembersUsesSearchQuery(t *testing.T) {
 	}
 }
 
+func TestTeamHandlerListTeamMembersSearchReturnsEmptyArray(t *testing.T) {
+	ownerID := "user-owner"
+	repo := newTeamManagementRepo(ownerID)
+
+	rec := performTeamManagementRequest(t, repo, ownerID, http.MethodGet, "/teams/team-1/members?query=missing", nil)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	resp, apiErr, err := spec.DecodeResponse[struct {
+		Members []*identity.TeamMemberWithUser `json:"members"`
+	}](rec.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr != nil {
+		t.Fatalf("unexpected api error: %+v", apiErr)
+	}
+	if resp.Members == nil {
+		t.Fatal("members slice is nil, want empty array")
+	}
+	if len(resp.Members) != 0 {
+		t.Fatalf("members = %d, want 0", len(resp.Members))
+	}
+	if repo.searchTeamID != "team-1" || repo.searchQuery != "missing" {
+		t.Fatalf("search = (%q, %q), want (team-1, missing)", repo.searchTeamID, repo.searchQuery)
+	}
+}
+
 func TestTeamHandlerUpdateTeamMemberRejectsOwnerDemotion(t *testing.T) {
 	ownerID := "user-owner"
 	callerID := "user-admin"

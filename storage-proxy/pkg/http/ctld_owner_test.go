@@ -137,7 +137,7 @@ func TestCreateSnapshotPreparesCtldCheckpoint(t *testing.T) {
 		selfClusterID: "cluster-a",
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/snapshots", bytes.NewReader([]byte(`{"name":"checkpoint"}`)))
+	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/snapshots", bytes.NewReader([]byte(`{"name":" checkpoint "}`)))
 	req.SetPathValue("volume_id", "vol-1")
 	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
 	recorder := httptest.NewRecorder()
@@ -152,6 +152,31 @@ func TestCreateSnapshotPreparesCtldCheckpoint(t *testing.T) {
 	}
 	if snapshotMgr.lastCreate == nil || !snapshotMgr.lastCreate.ActiveCheckpointPrepared {
 		t.Fatalf("CreateSnapshot request = %+v, want active checkpoint prepared", snapshotMgr.lastCreate)
+	}
+	if snapshotMgr.lastCreate.Name != "checkpoint" {
+		t.Fatalf("CreateSnapshot name = %q, want normalized checkpoint", snapshotMgr.lastCreate.Name)
+	}
+}
+
+func TestCreateSnapshotRejectsWhitespaceName(t *testing.T) {
+	snapshotMgr := &fakeHTTPSnapshotManager{}
+	server := &Server{
+		logger:      logrus.New(),
+		snapshotMgr: snapshotMgr,
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/snapshots", bytes.NewReader([]byte(`{"name":"   "}`)))
+	req.SetPathValue("volume_id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
+	recorder := httptest.NewRecorder()
+
+	server.createSnapshot(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+	if snapshotMgr.lastCreate != nil {
+		t.Fatalf("CreateSnapshot request = %+v, want nil for invalid name", snapshotMgr.lastCreate)
 	}
 }
 

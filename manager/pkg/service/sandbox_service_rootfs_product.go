@@ -16,6 +16,7 @@ import (
 
 var ErrSandboxRootFSStoreUnavailable = errors.New("sandbox rootfs store is unavailable")
 var ErrSandboxRootFSRequiresPausedSandbox = errors.New("sandbox rootfs operation requires a paused sandbox")
+var ErrRootFSSnapshotExpired = errors.New("rootfs snapshot expires_at must be in the future")
 
 type SandboxRootFSProductStore interface {
 	CreateRootFSSnapshot(ctx context.Context, req *CreateRootFSSnapshotRequest) (*RootFSSnapshot, error)
@@ -94,6 +95,9 @@ func (s *SandboxService) CreateSandboxRootFSSnapshot(ctx context.Context, sandbo
 	}
 	if teamID == "" {
 		return nil, fmt.Errorf("team_id is required")
+	}
+	if !req.ExpiresAt.IsZero() && !req.ExpiresAt.After(s.now().UTC()) {
+		return nil, ErrRootFSSnapshotExpired
 	}
 	var snapshot *RootFSSnapshot
 	err = s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
@@ -255,6 +259,15 @@ func (s *SandboxService) ForkSandbox(ctx context.Context, sourceSandboxID, teamI
 		return nil, err
 	}
 	now := s.clock.Now().UTC()
+	targetConfig := cloneSandboxConfigValue(source.Config)
+	expiresAt := expirationFromTTL(now, targetConfig.TTL)
+	if expiresAt.IsZero() && targetConfig.TTL == nil {
+		expiresAt = source.ExpiresAt
+	}
+	hardExpiresAt := expirationFromTTL(now, targetConfig.HardTTL)
+	if hardExpiresAt.IsZero() && targetConfig.HardTTL == nil {
+		hardExpiresAt = source.HardExpiresAt
+	}
 	target := &SandboxRecord{
 		ID:                targetID,
 		TeamID:            teamID,
@@ -264,9 +277,11 @@ func (s *SandboxService) ForkSandbox(ctx context.Context, sourceSandboxID, teamI
 		TemplateNamespace: source.TemplateNamespace,
 		ClusterID:         source.ClusterID,
 		Status:            SandboxStatusPaused,
-		Config:            cloneSandboxConfigValue(source.Config),
+		Config:            targetConfig,
 		TemplateSpec:      *source.TemplateSpec.DeepCopy(),
 		ClaimedAt:         now,
+		ExpiresAt:         expiresAt,
+		HardExpiresAt:     hardExpiresAt,
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}

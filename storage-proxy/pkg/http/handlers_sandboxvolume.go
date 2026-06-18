@@ -27,6 +27,29 @@ type createSandboxVolumeRequest struct {
 	AccessMode      string `json:"access_mode"`
 	DefaultPosixUID *int64 `json:"default_posix_uid,omitempty"`
 	DefaultPosixGID *int64 `json:"default_posix_gid,omitempty"`
+	snapshotIDSet   bool
+}
+
+func (r *createSandboxVolumeRequest) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	var decoded struct {
+		SnapshotID      string `json:"snapshot_id,omitempty"`
+		AccessMode      string `json:"access_mode"`
+		DefaultPosixUID *int64 `json:"default_posix_uid,omitempty"`
+		DefaultPosixGID *int64 `json:"default_posix_gid,omitempty"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	r.SnapshotID = decoded.SnapshotID
+	r.AccessMode = decoded.AccessMode
+	r.DefaultPosixUID = decoded.DefaultPosixUID
+	r.DefaultPosixGID = decoded.DefaultPosixGID
+	_, r.snapshotIDSet = fields["snapshot_id"]
+	return nil
 }
 
 type createOwnedSandboxVolumeRequest struct {
@@ -90,9 +113,13 @@ func (s *Server) createSandboxVolume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req createSandboxVolumeRequest
+	var req *createSandboxVolumeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+	if req == nil {
+		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "request body is required")
 		return
 	}
 
@@ -118,13 +145,19 @@ func (s *Server) createSandboxVolume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if strings.TrimSpace(req.SnapshotID) != "" {
+	snapshotID := strings.TrimSpace(req.SnapshotID)
+	if req.snapshotIDSet && snapshotID == "" {
+		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "snapshot_id must not be blank")
+		return
+	}
+
+	if snapshotID != "" {
 		if s.snapshotMgr == nil {
 			_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "snapshot manager is not configured")
 			return
 		}
 		vol, err := s.snapshotMgr.CreateVolumeFromSnapshot(r.Context(), &snapshot.CreateVolumeFromSnapshotRequest{
-			SnapshotID:      strings.TrimSpace(req.SnapshotID),
+			SnapshotID:      snapshotID,
 			TeamID:          teamId,
 			UserID:          userId,
 			AccessMode:      string(accessMode),

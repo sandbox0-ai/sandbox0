@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
@@ -90,6 +91,11 @@ func (s *Server) restoreSandboxRootFS(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return
 	}
+	req.SnapshotID = strings.TrimSpace(req.SnapshotID)
+	if req.SnapshotID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "snapshot_id is required")
+		return
+	}
 	resp, err := s.sandboxService.RestoreSandboxRootFS(c.Request.Context(), sandboxID, claims.TeamID, &req)
 	if err != nil {
 		s.writeSandboxRootFSError(c, "restore rootfs", sandboxID, err)
@@ -145,6 +151,8 @@ func (s *Server) writeSandboxRootFSError(c *gin.Context, action, sandboxID strin
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "forbidden")
 	case errors.Is(err, service.ErrSandboxRootFSRequiresPausedSandbox):
 		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "sandbox rootfs operation requires a paused sandbox")
+	case errors.Is(err, service.ErrRootFSSnapshotExpired):
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 	case errors.Is(err, service.ErrRootFSFilesystemConflict), errors.Is(err, service.ErrRootFSHeadConflict), errors.Is(err, service.ErrRootFSFilesystemNotFound):
 		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
 	case errors.Is(err, service.ErrSandboxRootFSStoreUnavailable):

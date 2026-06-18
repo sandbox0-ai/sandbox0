@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -49,7 +50,8 @@ func (s *Server) createSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Name == "" {
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "name is required")
 		return
 	}
@@ -68,7 +70,7 @@ func (s *Server) createSnapshot(w http.ResponseWriter, r *http.Request) {
 
 	snap, err := s.snapshotMgr.CreateSnapshotSimple(r.Context(), &snapshot.CreateSnapshotRequest{
 		VolumeID:                 volumeID,
-		Name:                     req.Name,
+		Name:                     name,
 		Description:              req.Description,
 		TeamID:                   claims.TeamID,
 		UserID:                   claims.UserID,

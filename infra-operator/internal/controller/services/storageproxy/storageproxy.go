@@ -273,9 +273,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		return nil, err
 	}
 	cfg.MetaURL = metaURL
-	if infra.Spec.Region != "" {
-		cfg.RegionID = infra.Spec.Region
-	}
+	cfg.RegionID = common.ResolveRegionID(infra)
 
 	storageConfig, err := storage.GetStorageConfig(ctx, r.Resources.Client, infra)
 	if err != nil {
@@ -290,9 +288,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	cfg.S3SecretKey = storageConfig.SecretKey
 	cfg.S3SessionToken = storageConfig.SessionToken
 
-	if infra.Spec.Cluster != nil && infra.Spec.Cluster.ID != "" {
-		cfg.DefaultClusterId = infra.Spec.Cluster.ID
-	}
+	cfg.DefaultClusterId = common.ResolveClusterID(infra)
 
 	return cfg, nil
 }

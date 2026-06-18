@@ -15,6 +15,7 @@ import (
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 )
 
 func TestReconcileUsesServicePortForHTTPServiceExposure(t *testing.T) {
@@ -339,6 +340,76 @@ func TestBuildConfigMapsBuiltinStorageToS3CompatibleType(t *testing.T) {
 	}
 	if cfg.S3Endpoint != "http://demo-rustfs.sandbox0-system.svc:9000" {
 		t.Fatalf("unexpected s3 endpoint: %q", cfg.S3Endpoint)
+	}
+}
+
+func TestBuildConfigDefaultsDataPlaneIdentity(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "fullmode",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			PublicExposure: &infrav1alpha1.PublicExposureConfig{
+				RegionID: "aws-us-east-1",
+			},
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
+					Enabled:  true,
+					Port:     5432,
+					Username: "sandbox0",
+					Database: "sandbox0",
+					SSLMode:  "disable",
+				},
+			},
+			Storage: &infrav1alpha1.StorageConfig{
+				Type: infrav1alpha1.StorageTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinStorageConfig{
+					Enabled: true,
+					Bucket:  "sandbox0",
+					Region:  "us-east-1",
+				},
+			},
+		},
+	}
+
+	reconciler, _ := newStorageProxyTestReconciler(t,
+		infra.DeepCopy(),
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "fullmode-sandbox0-database-credentials",
+				Namespace: infra.Namespace,
+			},
+			Data: map[string][]byte{
+				"username": []byte("sandbox0"),
+				"password": []byte("db-password"),
+				"database": []byte("sandbox0"),
+				"port":     []byte("5432"),
+			},
+		},
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "fullmode-sandbox0-rustfs-credentials",
+				Namespace: infra.Namespace,
+			},
+			Data: map[string][]byte{
+				"endpoint":          []byte("http://fullmode-rustfs.sandbox0-system.svc:9000"),
+				"RUSTFS_ACCESS_KEY": []byte("access-key"),
+				"RUSTFS_SECRET_KEY": []byte("secret-key"),
+			},
+		},
+	)
+
+	cfg, err := reconciler.buildConfig(context.Background(), infra)
+	if err != nil {
+		t.Fatalf("buildConfig returned error: %v", err)
+	}
+	if cfg.RegionID != "aws-us-east-1" {
+		t.Fatalf("region_id = %q, want aws-us-east-1", cfg.RegionID)
+	}
+	if cfg.DefaultClusterId != naming.DefaultClusterID {
+		t.Fatalf("default_cluster_id = %q, want %q", cfg.DefaultClusterId, naming.DefaultClusterID)
 	}
 }
 

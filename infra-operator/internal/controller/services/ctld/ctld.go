@@ -330,6 +330,8 @@ func (r *Reconciler) buildStorageConfig(ctx context.Context, infra *infrav1alpha
 	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
 		cfg = runtimeconfig.ToStorageProxy(infra.Spec.Services.StorageProxy.Config)
 	}
+	cfg.RegionID = common.ResolveRegionID(infra)
+	cfg.DefaultClusterId = common.ResolveClusterID(infra)
 	if infra != nil && infra.Spec.Database != nil && r != nil && r.Resources != nil && r.Resources.Client != nil {
 		if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
 			cfg.DatabaseURL = dsn
@@ -349,12 +351,6 @@ func (r *Reconciler) buildStorageConfig(ctx context.Context, infra *infrav1alpha
 	cfg.S3AccessKey = storageConfig.AccessKey
 	cfg.S3SecretKey = storageConfig.SecretKey
 	cfg.S3SessionToken = storageConfig.SessionToken
-	if infra.Spec.Region != "" {
-		cfg.RegionID = infra.Spec.Region
-	}
-	if infra.Spec.Cluster != nil && infra.Spec.Cluster.ID != "" {
-		cfg.DefaultClusterId = infra.Spec.Cluster.ID
-	}
 	return cfg, nil
 }
 

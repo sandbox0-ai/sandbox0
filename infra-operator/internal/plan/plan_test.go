@@ -9,6 +9,7 @@ import (
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 )
 
@@ -196,6 +197,51 @@ func TestBuiltinTemplatesDefaultsAndOverrides(t *testing.T) {
 	}).BuiltinTemplates()
 	if len(empty) != 0 {
 		t.Fatalf("explicit empty builtin templates = %#v, want none", empty)
+	}
+}
+
+func TestCompileDefaultsDataPlaneIdentityFromPublicExposure(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "fullmode",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			PublicExposure: &infrav1alpha1.PublicExposureConfig{
+				RegionID: "aws-us-east-1",
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				Manager: &infrav1alpha1.ManagerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+				Netd: &infrav1alpha1.NetdServiceConfig{
+					EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+
+	if got := compiled.Manager.RegionID; got != "aws-us-east-1" {
+		t.Fatalf("manager region ID = %q, want aws-us-east-1", got)
+	}
+	if got := compiled.Manager.DefaultClusterID; got != naming.DefaultClusterID {
+		t.Fatalf("manager default cluster ID = %q, want %q", got, naming.DefaultClusterID)
+	}
+	if got := compiled.Manager.Config.RegionID; got != "aws-us-east-1" {
+		t.Fatalf("manager config region ID = %q, want aws-us-east-1", got)
+	}
+	if got := compiled.Manager.Config.DefaultClusterId; got != naming.DefaultClusterID {
+		t.Fatalf("manager config default cluster ID = %q, want %q", got, naming.DefaultClusterID)
+	}
+	if got := compiled.Netd.RegionID; got != "aws-us-east-1" {
+		t.Fatalf("netd region ID = %q, want aws-us-east-1", got)
+	}
+	if got := compiled.Netd.ClusterID; got != naming.DefaultClusterID {
+		t.Fatalf("netd cluster ID = %q, want %q", got, naming.DefaultClusterID)
 	}
 }
 

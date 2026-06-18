@@ -1094,14 +1094,6 @@ type LabelSelectorRequirement struct {
 	Values   *[]string `json:"values,omitempty"`
 }
 
-// LifecyclePolicy defines model for LifecyclePolicy.
-type LifecyclePolicy struct {
-	DefaultTTL  *int32       `json:"defaultTTL,omitempty"`
-	IdleTimeout *int32       `json:"idleTimeout,omitempty"`
-	MaxTTL      *int32       `json:"maxTTL,omitempty"`
-	PreStop     *PreStopHook `json:"preStop,omitempty"`
-}
-
 // LoginRequest defines model for LoginRequest.
 type LoginRequest struct {
 	Email    openapi_types.Email `json:"email"`
@@ -1293,12 +1285,6 @@ type PortSpec struct {
 	EndPort  *int32  `json:"endPort,omitempty"`
 	Port     int32   `json:"port"`
 	Protocol *string `json:"protocol,omitempty"`
-}
-
-// PreStopHook defines model for PreStopHook.
-type PreStopHook struct {
-	Command        *[]string `json:"command,omitempty"`
-	TimeoutSeconds *int32    `json:"timeoutSeconds,omitempty"`
 }
 
 // PreferredSchedulingTerm defines model for PreferredSchedulingTerm.
@@ -1824,17 +1810,14 @@ type SandboxTemplateCondition struct {
 
 // SandboxTemplateSpec defines model for SandboxTemplateSpec.
 type SandboxTemplateSpec struct {
-	AllowedTeams  *[]string             `json:"allowedTeams,omitempty"`
 	ClusterId     *string               `json:"clusterId,omitempty"`
 	Description   *string               `json:"description,omitempty"`
 	DisplayName   *string               `json:"displayName,omitempty"`
 	EnvVars       *map[string]string    `json:"envVars,omitempty"`
-	Lifecycle     *LifecyclePolicy      `json:"lifecycle,omitempty"`
 	MainContainer *ContainerSpec        `json:"mainContainer,omitempty"`
 	Network       *SandboxNetworkPolicy `json:"network,omitempty"`
 	Pod           *PodSpecOverride      `json:"pod,omitempty"`
 	Pool          *PoolStrategy         `json:"pool,omitempty"`
-	Public        *bool                 `json:"public,omitempty"`
 	Tags          *[]string             `json:"tags,omitempty"`
 	VolumeMounts  *[]VolumeMountSpec    `json:"volumeMounts,omitempty"`
 }

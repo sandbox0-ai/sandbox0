@@ -596,14 +596,18 @@ func (s *SandboxService) UpdateNetworkPolicy(
 		if currentSandboxID == "" {
 			currentSandboxID = current.Name
 		}
-		networkState = s.NetworkPolicyService.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
+		buildReq := &BuildNetworkPolicyRequest{
 			SandboxID:        currentSandboxID,
 			TeamID:           teamID,
 			TemplateSpec:     templateSpec,
 			RequestSpec:      policy,
 			TemplateBindings: templateBindings,
 			RequestBindings:  requestBindings,
-		})
+		}
+		if err := s.NetworkPolicyService.ValidateNetworkPolicyRequest(buildReq); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidNetworkPolicy, err)
+		}
+		networkState = s.NetworkPolicyService.BuildNetworkPolicyState(buildReq)
 		rollbackBindings, err = s.syncCredentialBindings(ctx, current, teamID, networkState)
 		if err != nil {
 			return fmt.Errorf("stage credential bindings: %w", err)

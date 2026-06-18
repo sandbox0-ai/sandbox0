@@ -485,6 +485,59 @@ func TestCreateTemplate_RejectsMissingMainContainerImage(t *testing.T) {
 	}
 }
 
+func TestCreateTemplate_RejectsUnsupportedDocumentedSpecFields(t *testing.T) {
+	t.Parallel()
+
+	fields := map[string]string{
+		"lifecycle":    `"lifecycle":{"defaultTTL":60}`,
+		"public":       `"public":true`,
+		"allowedTeams": `"allowedTeams":["team-1"]`,
+	}
+	for field, fieldJSON := range fields {
+		field := field
+		fieldJSON := fieldJSON
+		t.Run(field, func(t *testing.T) {
+			t.Parallel()
+			store := &testTemplateStore{
+				getTemplateFn: func(context.Context, string, string, string) (*template.Template, error) {
+					return nil, nil
+				},
+			}
+			h := &Handler{Store: store, Logger: zap.NewNop()}
+
+			router := gin.New()
+			router.Use(withClaims(&internalauth.Claims{
+				TeamID: "team-1",
+				UserID: "user-1",
+			}))
+			router.POST("/api/v1/templates", h.CreateTemplate)
+
+			body := []byte(`{
+				"template_id":"demo",
+				"spec":{
+					"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
+					"pool":{"minIdle":0,"maxIdle":1},
+					` + fieldJSON + `
+				}
+			}`)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "spec."+field+" is not supported") {
+				t.Fatalf("response = %s, want unsupported field error", rec.Body.String())
+			}
+			if store.createCalled {
+				t.Fatalf("expected create not called for unsupported spec field")
+			}
+		})
+	}
+}
+
 func TestUpdateTemplate_RejectsInvalidPoolRange(t *testing.T) {
 	t.Parallel()
 
@@ -532,6 +585,46 @@ func TestUpdateTemplate_RejectsInvalidPoolRange(t *testing.T) {
 	}
 	if store.updateCalled {
 		t.Fatalf("expected update not called for invalid request")
+	}
+}
+
+func TestUpdateTemplate_RejectsUnsupportedDocumentedSpecFields(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{
+		getTemplateFn: func(context.Context, string, string, string) (*template.Template, error) {
+			return &template.Template{TemplateID: "demo", Scope: "team", TeamID: "team-1", Spec: validTemplateSpec()}, nil
+		},
+	}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	router.PUT("/api/v1/templates/:id", h.UpdateTemplate)
+
+	body := []byte(`{
+		"spec":{
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
+			"pool":{"minIdle":0,"maxIdle":1},
+			"allowedTeams":["team-1"]
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/demo", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "spec.allowedTeams is not supported") {
+		t.Fatalf("response = %s, want unsupported field error", rec.Body.String())
+	}
+	if store.updateCalled {
+		t.Fatalf("expected update not called for unsupported spec field")
 	}
 }
 
@@ -784,6 +877,71 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 				}
 			},
 			wantErr: "spec.network.egress.allowedPorts[0].endPort must be between port and 65535",
+		},
+		{
+			name: "reject invalid traffic rule cidr",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				s.Network = &v1alpha1.SandboxNetworkPolicy{
+					Mode: v1alpha1.NetworkModeBlockAll,
+					Egress: &v1alpha1.NetworkEgressPolicy{
+						TrafficRules: []v1alpha1.TrafficRule{{
+							Name:   "bad-cidr",
+							Action: v1alpha1.TrafficRuleActionAllow,
+							CIDRs:  []string{"not-a-cidr"},
+						}},
+					},
+				}
+			},
+			wantErr: `spec.network: egress traffic rule "bad-cidr" is invalid: invalid CIDR "not-a-cidr"`,
+		},
+		{
+			name: "reject invalid traffic rule action",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				s.Network = &v1alpha1.SandboxNetworkPolicy{
+					Mode: v1alpha1.NetworkModeBlockAll,
+					Egress: &v1alpha1.NetworkEgressPolicy{
+						TrafficRules: []v1alpha1.TrafficRule{{
+							Name:    "bad-action",
+							Action:  "pass",
+							Domains: []string{"example.com"},
+						}},
+					},
+				}
+			},
+			wantErr: `spec.network: egress traffic rule "bad-action" has unsupported action "pass"`,
+		},
+		{
+			name: "reject mixed legacy and traffic rules",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				s.Network = &v1alpha1.SandboxNetworkPolicy{
+					Mode: v1alpha1.NetworkModeBlockAll,
+					Egress: &v1alpha1.NetworkEgressPolicy{
+						AllowedCIDRs: []string{"10.0.0.0/8"},
+						TrafficRules: []v1alpha1.TrafficRule{{
+							Name:   "allow-private",
+							Action: v1alpha1.TrafficRuleActionAllow,
+							CIDRs:  []string{"10.0.0.0/8"},
+						}},
+					},
+				}
+			},
+			wantErr: "spec.network: egress trafficRules cannot be combined with legacy allowed*/denied* fields",
+		},
+		{
+			name: "reject dangling credential rule",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				s.Network = &v1alpha1.SandboxNetworkPolicy{
+					Mode: v1alpha1.NetworkModeBlockAll,
+					Egress: &v1alpha1.NetworkEgressPolicy{
+						CredentialRules: []v1alpha1.EgressCredentialRule{{
+							Name:          "missing",
+							CredentialRef: "missing-ref",
+							Protocol:      v1alpha1.EgressAuthProtocolHTTP,
+						}},
+					},
+				}
+			},
+			wantErr: `spec.network: egress rule credentialRef "missing-ref" not found`,
 		},
 		{
 			name: "reject invalid emptyDir mount path",

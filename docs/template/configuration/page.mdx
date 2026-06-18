@@ -109,18 +109,6 @@ Only ready idle pods count toward pool capacity.
 
 ---
 
-## Additional Template Fields
-
-The template spec also includes:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `lifecycle` | object | Template lifecycle defaults such as `defaultTTL`, `maxTTL`, `idleTimeout`, and `preStop`. |
-| `public` | boolean | Template visibility flag. |
-| `allowedTeams` | string[] | Optional team allowlist. |
-
----
-
 ## `network`
 
 Template-level default network policy. Templates now use the same public `SandboxNetworkPolicy` shape as claim-time and runtime sandbox network configuration.

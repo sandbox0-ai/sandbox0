@@ -112,6 +112,9 @@ func validateTemplateSpec(spec v1alpha1.SandboxTemplateSpec) error {
 				return err
 			}
 		}
+		if err := v1alpha1.ValidateSandboxNetworkPolicy(spec.Network, spec.Network.CredentialBindings); err != nil {
+			return fmt.Errorf("spec.network: %w", err)
+		}
 	}
 
 	return nil

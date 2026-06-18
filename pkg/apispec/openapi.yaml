@@ -2560,6 +2560,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessCredentialSourceResponse"
+        "409":
+          description: Credential source already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
   /api/v1/credential-sources/{name}:
     get:
       tags: [credential-sources]
@@ -2613,6 +2619,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessCredentialSourceResponse"
+        "404":
+          description: Credential source not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
     delete:
       tags: [credential-sources]
       summary: Delete credential source
@@ -5485,17 +5497,9 @@ components:
           $ref: "#/components/schemas/SandboxNetworkPolicy"
         pool:
           $ref: "#/components/schemas/PoolStrategy"
-        lifecycle:
-          $ref: "#/components/schemas/LifecyclePolicy"
         envVars:
           type: object
           additionalProperties:
-            type: string
-        public:
-          type: boolean
-        allowedTeams:
-          type: array
-          items:
             type: string
         clusterId:
           type: string
@@ -6384,30 +6388,6 @@ components:
           type: integer
           format: int32
       required: [port]
-    LifecyclePolicy:
-      type: object
-      properties:
-        defaultTTL:
-          type: integer
-          format: int32
-        maxTTL:
-          type: integer
-          format: int32
-        idleTimeout:
-          type: integer
-          format: int32
-        preStop:
-          $ref: "#/components/schemas/PreStopHook"
-    PreStopHook:
-      type: object
-      properties:
-        command:
-          type: array
-          items:
-            type: string
-        timeoutSeconds:
-          type: integer
-          format: int32
     SandboxTemplateStatus:
       type: object
       properties:

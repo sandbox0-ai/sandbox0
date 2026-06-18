@@ -34,7 +34,7 @@ await client.beta.vaults.credentials.create(llmVault.id, {
 | Metadata key | Required | Meaning |
 |--------------|----------|---------|
 | `sandbox0.managed_agents.role` | Yes | Must be `llm` for an LLM vault |
-| `sandbox0.managed_agents.engine` | Yes | `claude`, `codex`, `openai-agents`, or `pi` |
+| `sandbox0.managed_agents.engine` | Yes | `claude`, `codex`, or `openai-agents` |
 | `sandbox0.managed_agents.llm_base_url` | No | Model provider base URL |
 
 The LLM credential must be an unbound `static_bearer` credential. Do not set `mcp_server_url` on LLM credentials.
@@ -135,17 +135,14 @@ Sandbox0 injects model provider credentials through egress auth and harness comp
 | `claude` | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL` |
 | `codex` | `CODEX_API_KEY`, `OPENAI_API_KEY`, and `openai_base_url` harness config |
 | `openai-agents` | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `openai_base_url` harness config |
-| `pi` | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, and `anthropic_base_url` harness config |
 
-For agent-in-sandbox harnesses such as `claude`, `codex`, and `pi`, compatibility environment variables may contain placeholders. The real token is projected by Sandbox0-managed credential policy when the sandbox contacts the configured model provider host.
+For agent-in-sandbox harnesses such as `claude` and `codex`, compatibility environment variables may contain placeholders. The real token is projected by Sandbox0-managed credential policy when the sandbox contacts the configured model provider host.
 
 For sandbox-as-tool harnesses such as `openai-agents`, model-provider credentials are resolved as resident runtime configuration. Sandbox0 passes the selected LLM vault token to the runtime service for model calls. User-defined `environment_variable` credentials are not accepted by external sandbox-as-tool harnesses today.
 
 Vault `environment_variable` credentials are separate from these harness compatibility variables. They create user-defined sandbox process environment variables and resolve them through the same egress auth boundary.
 
 For `openai-agents`, the runtime expects an OpenAI Responses-compatible base URL. If the provider exposes a different API shape, use an external AI gateway that presents an OpenAI Responses-compatible endpoint and store the gateway base URL in `sandbox0.managed_agents.llm_base_url`.
-
-For `pi`, the sandbox-local wrapper expects an Anthropic Messages-compatible base URL and uses Claude-format messages. If the provider exposes only an OpenAI or Codex-style API, use a gateway that presents an Anthropic Messages-compatible endpoint before selecting the `pi` harness.
 
 ## Next Steps
 

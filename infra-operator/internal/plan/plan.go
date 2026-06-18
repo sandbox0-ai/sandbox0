@@ -379,10 +379,8 @@ func compileManagerPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 		managerPlan.NetworkPolicyProvider = "netd"
 	}
 	if infra != nil {
-		managerPlan.RegionID = infra.Spec.Region
-		if infra.Spec.Cluster != nil {
-			managerPlan.DefaultClusterID = infra.Spec.Cluster.ID
-		}
+		managerPlan.RegionID = common.ResolveRegionID(infra)
+		managerPlan.DefaultClusterID = common.ResolveClusterID(infra)
 		if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil {
 			svc := infra.Spec.Services.Manager
 			managerPlan.Replicas = svc.Replicas
@@ -544,10 +542,8 @@ func compileNetdPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) Ne
 	}
 
 	if infra != nil {
-		netdPlan.RegionID = infra.Spec.Region
-		if infra.Spec.Cluster != nil {
-			netdPlan.ClusterID = infra.Spec.Cluster.ID
-		}
+		netdPlan.RegionID = common.ResolveRegionID(infra)
+		netdPlan.ClusterID = common.ResolveClusterID(infra)
 		if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
 			if infra.Spec.Services.Netd.Config != nil {
 				netdPlan.Config = runtimeconfig.ToNetd(infra.Spec.Services.Netd.Config)

@@ -16,6 +16,7 @@ import (
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 )
 
 func TestReconcileUsesSharedSandboxNodePlacement(t *testing.T) {
@@ -188,6 +189,25 @@ func TestReconcileMountsObjectEncryptionKeyWhenEnabled(t *testing.T) {
 	ds := reconcileCtldDaemonSet(t, infra)
 	assertContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "object-encryption-key", common.ObjectEncryptionMountDir)
 	assertPodVolume(t, ds.Spec.Template.Spec.Volumes, "object-encryption-key")
+}
+
+func TestBuildStorageConfigDefaultsDataPlaneIdentity(t *testing.T) {
+	infra := newCtldTestInfra()
+	infra.Spec.PublicExposure = &infrav1alpha1.PublicExposureConfig{
+		RegionID: "aws-us-east-1",
+	}
+
+	reconciler := NewReconciler(common.NewResourceManager(nil, nil, nil, common.LocalDevConfig{}))
+	cfg, err := reconciler.buildStorageConfig(context.Background(), infra)
+	if err != nil {
+		t.Fatalf("buildStorageConfig returned error: %v", err)
+	}
+	if cfg.RegionID != "aws-us-east-1" {
+		t.Fatalf("region_id = %q, want aws-us-east-1", cfg.RegionID)
+	}
+	if cfg.DefaultClusterId != naming.DefaultClusterID {
+		t.Fatalf("default_cluster_id = %q, want %q", cfg.DefaultClusterId, naming.DefaultClusterID)
+	}
 }
 
 func assertContainsArg(t *testing.T, args []string, want string) {

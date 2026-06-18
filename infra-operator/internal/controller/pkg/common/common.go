@@ -42,6 +42,7 @@ import (
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 )
 
 type ResourceManager struct {
@@ -406,6 +407,28 @@ func ResolveServicePort(config *infrav1alpha1.ServiceNetworkConfig, fallback int
 		return config.Port
 	}
 	return fallback
+}
+
+// ResolveRegionID returns the canonical region ID used by data-plane services.
+func ResolveRegionID(infra *infrav1alpha1.Sandbox0Infra) string {
+	if infra == nil {
+		return ""
+	}
+	if regionID := strings.TrimSpace(infra.Spec.Region); regionID != "" {
+		return regionID
+	}
+	if infra.Spec.PublicExposure == nil {
+		return ""
+	}
+	return strings.TrimSpace(infra.Spec.PublicExposure.RegionID)
+}
+
+// ResolveClusterID returns the data-plane cluster ID, defaulting single-cluster installs.
+func ResolveClusterID(infra *infrav1alpha1.Sandbox0Infra) string {
+	if infra != nil && infra.Spec.Cluster != nil {
+		return naming.ClusterIDOrDefault(&infra.Spec.Cluster.ID)
+	}
+	return naming.DefaultClusterID
 }
 
 // ResolveSSHEndpoint returns the advertised SSH endpoint for a region when the

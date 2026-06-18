@@ -344,7 +344,18 @@ func (m *Manager) resolveS0FSForkState(ctx context.Context, teamID, sourceVolume
 	}
 	state, _, err := materializer.LoadLatestState(ctx)
 	if err != nil {
-		return nil, err
+		if !errors.Is(err, s0fs.ErrMaterializedManifestNotFound) {
+			return nil, err
+		}
+		engine, closeFn, openErr := m.openS0FSEngine(ctx, teamID, sourceVolumeID)
+		if openErr != nil {
+			return nil, openErr
+		}
+		defer closeFn()
+		state, err = engine.ExportState()
+		if err != nil {
+			return nil, err
+		}
 	}
 	return s0fs.PrepareForkState(state, sourceVolumeID)
 }

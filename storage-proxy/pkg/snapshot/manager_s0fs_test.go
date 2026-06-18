@@ -167,6 +167,57 @@ func TestS0FSForkVolumeUsesCopyOnWriteState(t *testing.T) {
 	}
 }
 
+func TestS0FSForkFreshEmptyVolumeCreatesEmptyChild(t *testing.T) {
+	t.Parallel()
+
+	mgr, repo, _, _ := newS0FSSnapshotTestManager(t, "vol-empty")
+
+	forked, err := mgr.ForkVolume(context.Background(), &ForkVolumeRequest{
+		SourceVolumeID: "vol-empty",
+		TeamID:         "team-1",
+		UserID:         "user-2",
+	})
+	if err != nil {
+		t.Fatalf("ForkVolume() error = %v", err)
+	}
+	if forked == nil || forked.ID == "" {
+		t.Fatalf("forked volume = %+v", forked)
+	}
+	if forked.SourceVolumeID == nil || *forked.SourceVolumeID != "vol-empty" {
+		t.Fatalf("forked source volume = %v, want vol-empty", forked.SourceVolumeID)
+	}
+	if _, ok := repo.volumes[forked.ID]; !ok {
+		t.Fatalf("forked volume not persisted: %+v", repo.volumes)
+	}
+
+	forkCfg, err := mgr.s0fsConfig("team-1", forked.ID)
+	if err != nil {
+		t.Fatalf("s0fsConfig(forked) error = %v", err)
+	}
+	forkMaterializer := s0fs.NewMaterializer(forked.ID, forkCfg.ObjectStore, forkCfg.HeadStore, forkCfg.ObjectStoreForVolume)
+	forkMaterializer.SetEncryption(forkCfg.Encryption)
+	forkState, _, err := forkMaterializer.LoadLatestState(context.Background())
+	if err != nil {
+		t.Fatalf("LoadLatestState(forked) error = %v", err)
+	}
+	if len(forkState.Data) != 0 || len(forkState.ColdFiles) != 0 || len(forkState.Segments) != 0 {
+		t.Fatalf("forked state has file data: data=%v cold=%v segments=%v", forkState.Data, forkState.ColdFiles, forkState.Segments)
+	}
+	if got := len(forkState.Children[s0fs.RootInode]); got != 0 {
+		t.Fatalf("forked root entries = %d, want 0", got)
+	}
+
+	freshForked := openFreshS0FSEngine(t, mgr, "team-1", forked.ID)
+	defer freshForked.Close()
+	entries, err := freshForked.ReadDir(s0fs.RootInode)
+	if err != nil {
+		t.Fatalf("ReadDir(forked root) error = %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("forked root entries = %+v, want empty", entries)
+	}
+}
+
 func TestS0FSCreateVolumeFromSnapshotUsesCopyOnWriteState(t *testing.T) {
 	t.Parallel()
 

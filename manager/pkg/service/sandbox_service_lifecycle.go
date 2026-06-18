@@ -413,18 +413,23 @@ func (s *SandboxService) GetSandbox(ctx context.Context, sandboxID string) (*San
 		if storeErr != nil {
 			return nil, fmt.Errorf("get sandbox record: %w", storeErr)
 		}
-		if record != nil && record.Status == SandboxStatusDeleted {
-			return nil, k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
-		}
-		if recordLifecycleStatusOverridesPod(record.Status) {
-			return s.recordToSandbox(record), nil
+		if record != nil {
+			if record.Status == SandboxStatusDeleted {
+				return nil, k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
+			}
+			if recordLifecycleStatusOverridesPod(record.Status) {
+				return s.recordToSandbox(record), nil
+			}
 		}
 	}
 	// Find the pod by sandbox ID
 	pod, err := s.getSandboxPod(ctx, sandboxID)
 	if err != nil {
-		if k8serrors.IsNotFound(err) && record != nil {
-			return s.recordToSandbox(record), nil
+		if k8serrors.IsNotFound(err) {
+			if record != nil {
+				return s.recordToSandbox(record), nil
+			}
+			return nil, k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
 		}
 		return nil, fmt.Errorf("get pod: %w", err)
 	}

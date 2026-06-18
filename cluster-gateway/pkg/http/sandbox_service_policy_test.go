@@ -177,6 +177,31 @@ func TestSandboxServiceHandlesCORSPreflight(t *testing.T) {
 	}
 }
 
+func TestSandboxServiceExposureReturnsNotFoundForMissingSandbox(t *testing.T) {
+	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/internal/v1/sandboxes/sb-missing" {
+			t.Fatalf("unexpected manager request %s %s", r.Method, r.URL.Path)
+		}
+		_ = spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
+	}))
+	defer manager.Close()
+
+	gateway := newSandboxServiceExposureTestServerWithManagerURL(t, manager.URL)
+	gatewayServer := httptest.NewServer(gateway)
+	defer gatewayServer.Close()
+
+	req := newGatewayRequest(t, http.MethodGet, gatewayServer.URL, "sb-missing--p3000.aws-us-east-1.sandbox0.app", "/")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+}
+
 func TestSandboxFunctionServiceExecutesThroughProcdPort(t *testing.T) {
 	var execReq sandboxfunction.ExecuteRequest
 	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

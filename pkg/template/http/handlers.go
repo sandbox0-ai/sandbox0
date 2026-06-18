@@ -2,7 +2,9 @@ package http
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -57,7 +59,7 @@ type Handler struct {
 
 // TemplateRequest represents the request body for updating a template.
 type TemplateRequest struct {
-	Spec v1alpha1.SandboxTemplateSpec `json:"spec"`
+	Spec json.RawMessage `json:"spec"`
 }
 
 // ListTemplates lists all templates.
@@ -199,15 +201,50 @@ func templateScopeForClaims(claims *internalauth.Claims) (string, string, error)
 	return "", "", errors.New("team_id is required for custom templates")
 }
 
+func decodeTemplateRequestSpec(raw json.RawMessage) (v1alpha1.SandboxTemplateSpec, error) {
+	var out v1alpha1.SandboxTemplateSpec
+	if len(raw) == 0 {
+		return out, nil
+	}
+	if err := rejectUnsupportedTemplateSpecFields(raw); err != nil {
+		return out, err
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return out, fmt.Errorf("invalid spec: %w", err)
+	}
+	return out, nil
+}
+
+func rejectUnsupportedTemplateSpecFields(raw json.RawMessage) error {
+	if strings.TrimSpace(string(raw)) == "null" {
+		return nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return fmt.Errorf("spec must be an object: %w", err)
+	}
+	for _, field := range []string{"lifecycle", "public", "allowedTeams"} {
+		if _, ok := fields[field]; ok {
+			return fmt.Errorf("spec.%s is not supported", field)
+		}
+	}
+	return nil
+}
+
 // CreateTemplate creates a new template.
 func (h *Handler) CreateTemplate(c *gin.Context) {
 	var req struct {
-		TemplateID string                       `json:"template_id"`
-		Spec       v1alpha1.SandboxTemplateSpec `json:"spec"`
+		TemplateID string          `json:"template_id"`
+		Spec       json.RawMessage `json:"spec"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	templateSpec, err := decodeTemplateRequestSpec(req.Spec)
+	if err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
 
@@ -228,19 +265,19 @@ func (h *Handler) CreateTemplate(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
-	if err := validateTemplateSpec(req.Spec); err != nil {
+	if err := validateTemplateSpec(templateSpec); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
-	if err := validateTemplateSpecForClaims(req.Spec, claims); err != nil {
+	if err := validateTemplateSpecForClaims(templateSpec, claims); err != nil {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, err.Error())
 		return
 	}
-	if err := validateTemplateImagesForClaims(req.Spec, claims, h.PrivateRegistryHosts); err != nil {
+	if err := validateTemplateImagesForClaims(templateSpec, claims, h.PrivateRegistryHosts); err != nil {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, err.Error())
 		return
 	}
-	if err := validateTemplateClaimNameBudget(scope, teamID, req.TemplateID, req.Spec); err != nil {
+	if err := validateTemplateClaimNameBudget(scope, teamID, req.TemplateID, templateSpec); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
@@ -263,7 +300,7 @@ func (h *Handler) CreateTemplate(c *gin.Context) {
 		Scope:      scope,
 		TeamID:     teamID,
 		UserID:     claims.UserID,
-		Spec:       req.Spec,
+		Spec:       templateSpec,
 	}
 
 	if err := h.Store.CreateTemplate(c.Request.Context(), tpl); err != nil {
@@ -317,19 +354,24 @@ func (h *Handler) UpdateTemplate(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body: "+err.Error())
 		return
 	}
-	if err := validateTemplateSpec(req.Spec); err != nil {
+	templateSpec, err := decodeTemplateRequestSpec(req.Spec)
+	if err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
-	if err := validateTemplateSpecForClaims(req.Spec, claims); err != nil {
+	if err := validateTemplateSpec(templateSpec); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+	if err := validateTemplateSpecForClaims(templateSpec, claims); err != nil {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, err.Error())
 		return
 	}
-	if err := validateTemplateImagesForClaims(req.Spec, claims, h.PrivateRegistryHosts); err != nil {
+	if err := validateTemplateImagesForClaims(templateSpec, claims, h.PrivateRegistryHosts); err != nil {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, err.Error())
 		return
 	}
-	if err := validateTemplateClaimNameBudget(scope, teamID, templateID, req.Spec); err != nil {
+	if err := validateTemplateClaimNameBudget(scope, teamID, templateID, templateSpec); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
@@ -350,7 +392,7 @@ func (h *Handler) UpdateTemplate(c *gin.Context) {
 		Scope:      scope,
 		TeamID:     teamID,
 		UserID:     claims.UserID,
-		Spec:       req.Spec,
+		Spec:       templateSpec,
 	}
 
 	if err := h.Store.UpdateTemplate(c.Request.Context(), tpl); err != nil {

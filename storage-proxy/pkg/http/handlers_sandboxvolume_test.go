@@ -107,6 +107,47 @@ func TestCreateSandboxVolumeDefaultsPosixIdentityToRoot(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxVolumeRejectsNullOrBlankSnapshotID(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "null body", body: `null`},
+		{name: "null snapshot", body: `{"snapshot_id":null}`},
+		{name: "blank snapshot", body: `{"snapshot_id":"   "}`},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newFakeHTTPRepo()
+			snapshotMgr := &fakeHTTPSnapshotManager{}
+			server := &Server{
+				logger:       logrus.New(),
+				repo:         repo,
+				meteringRepo: &fakeHTTPMeteringWriter{},
+				snapshotMgr:  snapshotMgr,
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes", bytes.NewReader([]byte(tc.body)))
+			req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
+			recorder := httptest.NewRecorder()
+
+			server.createSandboxVolume(recorder, req)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+			}
+			if len(repo.createdVolumes) != 0 {
+				t.Fatalf("created volumes = %d, want 0", len(repo.createdVolumes))
+			}
+			if snapshotMgr.lastCreateVolume != nil {
+				t.Fatalf("snapshot create request = %+v, want nil", snapshotMgr.lastCreateVolume)
+			}
+		})
+	}
+}
+
 func TestListSandboxVolumesReturnsEmptyArray(t *testing.T) {
 	server := &Server{
 		logger: logrus.New(),

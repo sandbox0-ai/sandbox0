@@ -104,6 +104,16 @@ func (h *TeamHandler) CreateTeam(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
 		return
 	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "team name is required")
+		return
+	}
+	slug, err := normalizeExplicitTeamSlug(req.Slug)
+	if err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
 
 	homeRegionID := normalizeOptionalString(req.HomeRegionID)
 	if err := validateNormalizedHomeRegionID(homeRegionID); err != nil {
@@ -123,8 +133,8 @@ func (h *TeamHandler) CreateTeam(c *gin.Context) {
 	}
 
 	team := &identity.Team{
-		Name:         req.Name,
-		Slug:         req.Slug,
+		Name:         name,
+		Slug:         slug,
 		OwnerID:      &authCtx.UserID,
 		HomeRegionID: homeRegionID,
 	}
@@ -161,6 +171,9 @@ func (h *TeamHandler) GetTeam(c *gin.Context) {
 	}
 
 	teamID := c.Param("id")
+	if rejectInvalidUUID(c, "team id", teamID) {
+		return
+	}
 
 	// Verify user is member of the team
 	_, err := h.repo.GetTeamMember(c.Request.Context(), teamID, authCtx.UserID)
@@ -204,6 +217,9 @@ func (h *TeamHandler) UpdateTeam(c *gin.Context) {
 	}
 
 	teamID := c.Param("id")
+	if rejectInvalidUUID(c, "team id", teamID) {
+		return
+	}
 
 	// Verify user is admin of the team
 	member, err := h.repo.GetTeamMember(c.Request.Context(), teamID, authCtx.UserID)
@@ -240,10 +256,20 @@ func (h *TeamHandler) UpdateTeam(c *gin.Context) {
 	}
 
 	if req.Name != "" {
-		team.Name = req.Name
+		name := strings.TrimSpace(req.Name)
+		if name == "" {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "team name is required")
+			return
+		}
+		team.Name = name
 	}
 	if req.Slug != "" {
-		team.Slug = req.Slug
+		slug, err := normalizeExplicitTeamSlug(req.Slug)
+		if err != nil {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+			return
+		}
+		team.Slug = slug
 	}
 	if req.HomeRegionID != nil {
 		nextHomeRegionID := normalizeOptionalString(req.HomeRegionID)
@@ -283,6 +309,40 @@ func sameOptionalString(a, b *string) bool {
 	}
 }
 
+func normalizeExplicitTeamSlug(value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	slug := strings.TrimSpace(value)
+	if slug == "" {
+		return "", errors.New("team slug cannot be whitespace")
+	}
+	if !isValidTeamSlug(slug) {
+		return "", errors.New("team slug must contain only lowercase letters, numbers, and single hyphens")
+	}
+	return slug, nil
+}
+
+func isValidTeamSlug(slug string) bool {
+	previousHyphen := false
+	for i, r := range slug {
+		switch {
+		case r >= 'a' && r <= 'z':
+			previousHyphen = false
+		case r >= '0' && r <= '9':
+			previousHyphen = false
+		case r == '-':
+			if i == 0 || previousHyphen {
+				return false
+			}
+			previousHyphen = true
+		default:
+			return false
+		}
+	}
+	return slug != "" && !previousHyphen
+}
+
 // DeleteTeam deletes a team
 func (h *TeamHandler) DeleteTeam(c *gin.Context) {
 	authCtx := middleware.GetAuthContext(c)
@@ -292,6 +352,9 @@ func (h *TeamHandler) DeleteTeam(c *gin.Context) {
 	}
 
 	teamID := c.Param("id")
+	if rejectInvalidUUID(c, "team id", teamID) {
+		return
+	}
 
 	// Verify user is owner of the team
 	team, err := h.repo.GetTeamByID(c.Request.Context(), teamID)
@@ -333,6 +396,9 @@ func (h *TeamHandler) TransferTeamOwner(c *gin.Context) {
 	}
 
 	teamID := c.Param("id")
+	if rejectInvalidUUID(c, "team id", teamID) {
+		return
+	}
 
 	var req TransferTeamOwnerRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -342,6 +408,9 @@ func (h *TeamHandler) TransferTeamOwner(c *gin.Context) {
 	req.UserID = strings.TrimSpace(req.UserID)
 	if req.UserID == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "user_id is required")
+		return
+	}
+	if rejectInvalidUUID(c, "user_id", req.UserID) {
 		return
 	}
 
@@ -387,6 +456,9 @@ func (h *TeamHandler) ListTeamMembers(c *gin.Context) {
 	}
 
 	teamID := c.Param("id")
+	if rejectInvalidUUID(c, "team id", teamID) {
+		return
+	}
 
 	// Verify user is member of the team
 	_, err := h.repo.GetTeamMember(c.Request.Context(), teamID, authCtx.UserID)
@@ -434,6 +506,9 @@ func (h *TeamHandler) AddTeamMember(c *gin.Context) {
 	}
 
 	teamID := c.Param("id")
+	if rejectInvalidUUID(c, "team id", teamID) {
+		return
+	}
 
 	// Verify user is admin of the team
 	member, err := h.repo.GetTeamMember(c.Request.Context(), teamID, authCtx.UserID)
@@ -505,6 +580,9 @@ func (h *TeamHandler) UpdateTeamMember(c *gin.Context) {
 
 	teamID := c.Param("id")
 	userID := c.Param("userId")
+	if rejectInvalidUUID(c, "team id", teamID) || rejectInvalidUUID(c, "user id", userID) {
+		return
+	}
 
 	// Verify user is admin of the team
 	member, err := h.repo.GetTeamMember(c.Request.Context(), teamID, authCtx.UserID)
@@ -590,6 +668,14 @@ func normalizeOptionalString(value *string) *string {
 	return &trimmed
 }
 
+func rejectInvalidUUID(c *gin.Context, field, value string) bool {
+	if isValidUUID(value) {
+		return false
+	}
+	spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, field+" must be a valid UUID")
+	return true
+}
+
 var errHomeRegionLookupUnavailable = errors.New("home region lookup unavailable")
 var errHomeRegionRequired = errors.New("home_region_id is required")
 var errHomeRegionInvalidFormat = errors.New("home region id must use provider-region format")
@@ -664,6 +750,9 @@ func (h *TeamHandler) RemoveTeamMember(c *gin.Context) {
 
 	teamID := c.Param("id")
 	userID := c.Param("userId")
+	if rejectInvalidUUID(c, "team id", teamID) || rejectInvalidUUID(c, "user id", userID) {
+		return
+	}
 
 	// Verify user is admin of the team (or removing themselves)
 	member, err := h.repo.GetTeamMember(c.Request.Context(), teamID, authCtx.UserID)

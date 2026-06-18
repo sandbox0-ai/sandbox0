@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -62,8 +63,12 @@ func (s *Server) createCredentialSource(c *gin.Context) {
 		return
 	}
 
-	record, err := s.credentialSourceService.PutSource(c.Request.Context(), claims.TeamID, &req)
+	record, err := s.credentialSourceService.CreateSource(c.Request.Context(), claims.TeamID, &req)
 	if err != nil {
+		if errors.Is(err, service.ErrCredentialSourceAlreadyExists) {
+			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "credential source already exists")
+			return
+		}
 		s.logger.Error("Failed to create credential source", zap.String("teamID", claims.TeamID), zap.String("name", req.Name), zap.Error(err))
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("failed to create credential source: %v", err))
 		return
@@ -91,8 +96,12 @@ func (s *Server) updateCredentialSource(c *gin.Context) {
 		return
 	}
 
-	record, err := s.credentialSourceService.PutSource(c.Request.Context(), claims.TeamID, &req)
+	record, err := s.credentialSourceService.UpdateSource(c.Request.Context(), claims.TeamID, &req)
 	if err != nil {
+		if errors.Is(err, service.ErrCredentialSourceNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "credential source not found")
+			return
+		}
 		s.logger.Error("Failed to update credential source", zap.String("teamID", claims.TeamID), zap.String("name", req.Name), zap.Error(err))
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("failed to update credential source: %v", err))
 		return

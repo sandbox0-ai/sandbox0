@@ -165,10 +165,17 @@ func (h *APIKeyHandler) CreateAPIKey(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
 		return
 	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "name is required")
+		return
+	}
 
 	// Parse expiration
 	expiresAt := time.Now().AddDate(0, 0, 90) // Default 90 days
+	req.ExpiresIn = strings.TrimSpace(req.ExpiresIn)
 	switch req.ExpiresIn {
+	case "":
 	case "30d":
 		expiresAt = time.Now().AddDate(0, 0, 30)
 	case "90d":
@@ -179,6 +186,9 @@ func (h *APIKeyHandler) CreateAPIKey(c *gin.Context) {
 		expiresAt = time.Now().AddDate(1, 0, 0)
 	case "never":
 		expiresAt = time.Now().AddDate(100, 0, 0) // ~100 years
+	default:
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "unsupported expires_in")
+		return
 	}
 
 	scope, err := normalizeCreateAPIKeyScope(req.Scope)
@@ -271,6 +281,10 @@ func (h *APIKeyHandler) DeleteAPIKey(c *gin.Context) {
 	}
 
 	keyID := c.Param("id")
+	if !isValidUUID(keyID) {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid API key id")
+		return
+	}
 
 	// Get the key to verify ownership
 	key, err := h.keys.GetAPIKeyByID(c.Request.Context(), keyID)
@@ -321,6 +335,10 @@ func (h *APIKeyHandler) DeactivateAPIKey(c *gin.Context) {
 	}
 
 	keyID := c.Param("id")
+	if !isValidUUID(keyID) {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid API key id")
+		return
+	}
 
 	// Get the key to verify ownership
 	key, err := h.keys.GetAPIKeyByID(c.Request.Context(), keyID)

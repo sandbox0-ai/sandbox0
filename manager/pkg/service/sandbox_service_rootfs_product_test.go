@@ -112,6 +112,62 @@ func TestSandboxRootFSProductSnapshotsRestoresAndForksPausedSandbox(t *testing.T
 	require.ErrorIs(t, err, ErrRootFSSnapshotNotFound)
 }
 
+func TestSandboxRootFSProductForkSetsLifecycleExpirations(t *testing.T) {
+	claimedAt := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	forkedAt := claimedAt.Add(5 * time.Minute)
+	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusPaused, claimedAt)
+	source.Config.TTL = int32Ptr(900)
+	source.Config.HardTTL = int32Ptr(1800)
+	source.ExpiresAt = claimedAt.Add(15 * time.Minute)
+	source.HardExpiresAt = claimedAt.Add(30 * time.Minute)
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{
+			"sandbox-1": source,
+		},
+		rootFSStates: map[string]*SandboxRootFSState{
+			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-v1"),
+		},
+	}
+	svc := rootFSProductTestService(store)
+	svc.clock = fixedClock{now: forkedAt}
+
+	forkResp, err := svc.ForkSandbox(context.Background(), "sandbox-1", "team-1", "user-2", nil)
+
+	require.NoError(t, err)
+	require.NotNil(t, forkResp)
+	require.NotNil(t, forkResp.Sandbox)
+	wantExpiresAt := forkedAt.Add(15 * time.Minute)
+	wantHardExpiresAt := forkedAt.Add(30 * time.Minute)
+	assert.Equal(t, wantExpiresAt, forkResp.Sandbox.ExpiresAt)
+	assert.Equal(t, wantHardExpiresAt, forkResp.Sandbox.HardExpiresAt)
+	stored := store.records[forkResp.Sandbox.ID]
+	require.NotNil(t, stored)
+	assert.Equal(t, wantExpiresAt, stored.ExpiresAt)
+	assert.Equal(t, wantHardExpiresAt, stored.HardExpiresAt)
+}
+
+func TestSandboxRootFSProductRejectsExpiredSnapshotExpiration(t *testing.T) {
+	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{
+			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusPaused, now),
+		},
+		rootFSStates: map[string]*SandboxRootFSState{
+			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-1"),
+		},
+	}
+	svc := rootFSProductTestService(store)
+	svc.clock = fixedClock{now: now}
+
+	_, err := svc.CreateSandboxRootFSSnapshot(context.Background(), "sandbox-1", "team-1", &CreateSandboxRootFSSnapshotRequest{
+		Name:      "expired",
+		ExpiresAt: now.Add(-time.Second),
+	})
+
+	require.ErrorIs(t, err, ErrRootFSSnapshotExpired)
+	assert.Empty(t, store.rootFSSnapshots)
+}
+
 func TestSandboxRootFSProductEnforcesTeamOwnership(t *testing.T) {
 	now := time.Now().UTC()
 	store := &memorySandboxStore{

@@ -1,6 +1,10 @@
 package service
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func TestNormalizeSandboxAppServicesCanonicalizesRoutes(t *testing.T) {
 	rewrite := "v1"
@@ -199,5 +203,107 @@ func TestNormalizeSandboxAppServicesRejectsMissingNonFunctionPort(t *testing.T) 
 	}})
 	if err == nil {
 		t.Fatal("NormalizeSandboxAppServices succeeded, want missing port error")
+	}
+}
+
+func TestNormalizeSandboxAppServicesRejectsJSONMissingIngress(t *testing.T) {
+	var req struct {
+		Services []SandboxAppService `json:"services"`
+	}
+	if err := json.Unmarshal([]byte(`{"services":[{"id":"api","port":8080}]}`), &req); err != nil {
+		t.Fatalf("unmarshal services: %v", err)
+	}
+
+	_, err := NormalizeSandboxAppServices(req.Services)
+	if err == nil {
+		t.Fatal("NormalizeSandboxAppServices succeeded, want missing ingress error")
+	}
+}
+
+func TestNormalizeSandboxAppServicesRejectsJSONRuntimeMissingType(t *testing.T) {
+	var req struct {
+		Services []SandboxAppService `json:"services"`
+	}
+	if err := json.Unmarshal([]byte(`{"services":[{"id":"api","port":8080,"runtime":{"command":["python3","-m","http.server","8080"]},"ingress":{"public":false}}]}`), &req); err != nil {
+		t.Fatalf("unmarshal services: %v", err)
+	}
+
+	_, err := NormalizeSandboxAppServices(req.Services)
+	if err == nil {
+		t.Fatal("NormalizeSandboxAppServices succeeded, want missing runtime type error")
+	}
+}
+
+func TestNormalizeSandboxAppServicesRejectsInvalidHTTPHeaderAndOriginFields(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+
+	tests := []struct {
+		name  string
+		route SandboxAppServiceRoute
+	}{
+		{
+			name: "auth header name newline",
+			route: SandboxAppServiceRoute{
+				ID:         "api",
+				PathPrefix: "/",
+				Methods:    []string{"GET"},
+				Auth: &SandboxAppServiceRouteAuth{
+					Mode:              SandboxAppServiceRouteAuthModeHeader,
+					HeaderName:        "X-Test\nInjected",
+					HeaderValueSHA256: hash,
+				},
+			},
+		},
+		{
+			name: "cors allowed header newline",
+			route: SandboxAppServiceRoute{
+				ID:         "api",
+				PathPrefix: "/",
+				Methods:    []string{"GET"},
+				CORS: &SandboxAppServiceRouteCORS{
+					AllowedOrigins: []string{"https://example.com"},
+					AllowedHeaders: []string{"X-Good\nBad"},
+				},
+			},
+		},
+		{
+			name: "cors expose header newline",
+			route: SandboxAppServiceRoute{
+				ID:         "api",
+				PathPrefix: "/",
+				Methods:    []string{"GET"},
+				CORS: &SandboxAppServiceRouteCORS{
+					AllowedOrigins: []string{"https://example.com"},
+					ExposeHeaders:  []string{"X-Good\nBad"},
+				},
+			},
+		},
+		{
+			name: "cors origin newline",
+			route: SandboxAppServiceRoute{
+				ID:         "api",
+				PathPrefix: "/",
+				Methods:    []string{"GET"},
+				CORS: &SandboxAppServiceRouteCORS{
+					AllowedOrigins: []string{"https://good.example\nAccess-Control-Allow-Origin: *"},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NormalizeSandboxAppServices([]SandboxAppService{{
+				ID:   "api",
+				Port: 8080,
+				Ingress: SandboxAppServiceIngress{
+					Public: true,
+					Routes: []SandboxAppServiceRoute{tt.route},
+				},
+			}})
+			if err == nil {
+				t.Fatal("NormalizeSandboxAppServices succeeded, want invalid header/origin error")
+			}
+		})
 	}
 }

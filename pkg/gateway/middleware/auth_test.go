@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
 )
@@ -21,6 +22,36 @@ type staticAPIKeyValidator struct {
 
 func (v staticAPIKeyValidator) ValidateAPIKey(context.Context, string) (*apikey.APIKey, error) {
 	return v.key, nil
+}
+
+func TestAuthMiddlewareAuthenticateReturnsErrorEnvelope(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	middleware := NewAuthMiddleware(nil, "test-secret", nil, zap.NewNop())
+	router := gin.New()
+	router.Use(middleware.Authenticate())
+	router.GET("/protected", func(c *gin.Context) {
+		c.Status(http.StatusNoContent)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	var response spec.Response
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if response.Success || response.Error == nil {
+		t.Fatalf("response = %+v, want error envelope", response)
+	}
+	if response.Error.Code != spec.CodeUnauthorized || response.Error.Message != "missing authorization header" {
+		t.Fatalf("error = %+v, want unauthorized missing authorization header", response.Error)
+	}
 }
 
 func TestAuthMiddleware_JWTAccessToken(t *testing.T) {
@@ -427,12 +458,12 @@ func TestAuthMiddleware_RequireJWTAuth(t *testing.T) {
 				t.Fatalf("unexpected status: got %d want %d", rec.Code, tt.wantStatus)
 			}
 			if tt.wantStatus == http.StatusUnauthorized {
-				var body map[string]string
+				var body spec.Response
 				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 					t.Fatalf("decode response: %v", err)
 				}
-				if body["error"] != "this API requires a user access token (human login); API keys are not supported" {
-					t.Fatalf("unexpected error message: %q", body["error"])
+				if body.Error == nil || body.Error.Message != "this API requires a user access token (human login); API keys are not supported" {
+					t.Fatalf("unexpected error response: %+v", body.Error)
 				}
 			}
 		})

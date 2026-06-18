@@ -134,6 +134,9 @@ func normalizeSandboxConfigForPersistence(cfg *SandboxConfig) error {
 	if cfg == nil {
 		return nil
 	}
+	if err := validateSandboxConfigLifecycle(cfg.TTL, cfg.HardTTL); err != nil {
+		return err
+	}
 	if len(cfg.Services) > 0 {
 		services, err := NormalizeSandboxAppServices(cfg.Services)
 		if err != nil {
@@ -143,6 +146,22 @@ func normalizeSandboxConfigForPersistence(cfg *SandboxConfig) error {
 	}
 	if cfg.AutoResume != nil && !*cfg.AutoResume && SandboxAppServicesHaveResumeRoute(cfg.Services) {
 		return fmt.Errorf("cannot set resume=true on public routes when sandbox auto_resume is disabled")
+	}
+	return nil
+}
+
+func validateSandboxConfigLifecycle(ttl, hardTTL *int32) error {
+	if ttl != nil && *ttl < 0 {
+		return fmt.Errorf("%w: ttl must be >= 0", ErrInvalidClaimRequest)
+	}
+	if hardTTL != nil && *hardTTL < 0 {
+		return fmt.Errorf("%w: hard_ttl must be >= 0", ErrInvalidClaimRequest)
+	}
+	if ttl == nil || hardTTL == nil || *ttl <= 0 || *hardTTL <= 0 {
+		return nil
+	}
+	if *ttl > *hardTTL {
+		return fmt.Errorf("%w: ttl must be <= hard_ttl", ErrInvalidClaimRequest)
 	}
 	return nil
 }
@@ -345,7 +364,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		if err != nil {
 			s.observeClaimPhase(req.Template, "unknown", "resolve_template", phaseStarted, err)
 			if k8serrors.IsNotFound(err) {
-				return nil, fmt.Errorf("template %s not found in namespace %s", req.Template, publicNamespace)
+				return nil, fmt.Errorf("template %s not found in namespace %s: %w", req.Template, publicNamespace, err)
 			}
 			return nil, fmt.Errorf("get template: %w", err)
 		}

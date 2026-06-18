@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -104,6 +105,57 @@ func TestCredentialSourceServicePutSource(t *testing.T) {
 	}
 }
 
+func TestCredentialSourceServiceCreateSourceRejectsDuplicate(t *testing.T) {
+	store := newMemorySourceStore()
+	svc := NewCredentialSourceService(store, zap.NewNop())
+
+	first, err := svc.CreateSource(context.Background(), "team-1", staticHeadersCredentialSourceRequest("github-api", "first"))
+	if err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+	if first.CurrentVersion != 1 {
+		t.Fatalf("current version = %d, want 1", first.CurrentVersion)
+	}
+
+	_, err = svc.CreateSource(context.Background(), "team-1", staticHeadersCredentialSourceRequest("github-api", "second"))
+	if !errors.Is(err, ErrCredentialSourceAlreadyExists) {
+		t.Fatalf("create duplicate error = %v, want ErrCredentialSourceAlreadyExists", err)
+	}
+	stored := store.records["team-1/github-api"]
+	if stored == nil || stored.CurrentVersion != 1 {
+		t.Fatalf("stored source = %#v, want unchanged version 1", stored)
+	}
+}
+
+func TestCredentialSourceServiceUpdateSourceRejectsMissing(t *testing.T) {
+	store := newMemorySourceStore()
+	svc := NewCredentialSourceService(store, zap.NewNop())
+
+	_, err := svc.UpdateSource(context.Background(), "team-1", staticHeadersCredentialSourceRequest("missing", "token"))
+	if !errors.Is(err, ErrCredentialSourceNotFound) {
+		t.Fatalf("update missing error = %v, want ErrCredentialSourceNotFound", err)
+	}
+	if len(store.records) != 0 {
+		t.Fatalf("records = %d, want 0", len(store.records))
+	}
+}
+
+func TestCredentialSourceServiceUpdateSourceUpdatesExisting(t *testing.T) {
+	store := newMemorySourceStore()
+	svc := NewCredentialSourceService(store, zap.NewNop())
+
+	if _, err := svc.CreateSource(context.Background(), "team-1", staticHeadersCredentialSourceRequest("github-api", "first")); err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+	updated, err := svc.UpdateSource(context.Background(), "team-1", staticHeadersCredentialSourceRequest("github-api", "second"))
+	if err != nil {
+		t.Fatalf("update source: %v", err)
+	}
+	if updated.CurrentVersion != 2 {
+		t.Fatalf("current version = %d, want 2", updated.CurrentVersion)
+	}
+}
+
 func TestCredentialSourceServicePutTLSClientCertificateSource(t *testing.T) {
 	store := newMemorySourceStore()
 	svc := NewCredentialSourceService(store, zap.NewNop())
@@ -179,6 +231,49 @@ func TestCredentialSourceServicePutSSHPrivateKeySource(t *testing.T) {
 	}
 }
 
+func TestCredentialSourceServiceRejectsWhitespaceName(t *testing.T) {
+	store := newMemorySourceStore()
+	svc := NewCredentialSourceService(store, zap.NewNop())
+
+	_, err := svc.PutSource(context.Background(), "team-1", &egressauth.CredentialSourceWriteRequest{
+		Name:         "   ",
+		ResolverKind: "static_username_password",
+		Spec: egressauth.CredentialSourceSecretSpec{
+			StaticUsernamePassword: &egressauth.StaticUsernamePasswordSourceSpec{
+				Username: "alice",
+				Password: "secret",
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected whitespace name to be rejected")
+	}
+	if len(store.records) != 0 {
+		t.Fatalf("records = %d, want 0", len(store.records))
+	}
+}
+
+func TestCredentialSourceServiceRejectsSlashName(t *testing.T) {
+	store := newMemorySourceStore()
+	svc := NewCredentialSourceService(store, zap.NewNop())
+
+	_, err := svc.PutSource(context.Background(), "team-1", &egressauth.CredentialSourceWriteRequest{
+		Name:         "manual/slash",
+		ResolverKind: "static_headers",
+		Spec: egressauth.CredentialSourceSecretSpec{
+			StaticHeaders: &egressauth.StaticHeadersSourceSpec{
+				Values: map[string]string{"token": "abc"},
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected slash name to be rejected")
+	}
+	if len(store.records) != 0 {
+		t.Fatalf("records = %d, want 0", len(store.records))
+	}
+}
+
 func TestCredentialSourceServiceRejectsExplicitStorageKind(t *testing.T) {
 	store := newMemorySourceStore()
 	svc := NewCredentialSourceService(store, zap.NewNop())
@@ -225,6 +320,18 @@ func cloneSourceMetadata(in *egressauth.CredentialSourceMetadata) *egressauth.Cr
 	}
 	cloned := *in
 	return &cloned
+}
+
+func staticHeadersCredentialSourceRequest(name, token string) *egressauth.CredentialSourceWriteRequest {
+	return &egressauth.CredentialSourceWriteRequest{
+		Name:         name,
+		ResolverKind: "static_headers",
+		Spec: egressauth.CredentialSourceSecretSpec{
+			StaticHeaders: &egressauth.StaticHeadersSourceSpec{
+				Values: map[string]string{"token": token},
+			},
+		},
+	}
 }
 
 func testTLSKeyPair(t *testing.T) (string, string, error) {

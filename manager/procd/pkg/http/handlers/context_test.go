@@ -31,6 +31,7 @@ type fakeProcess struct {
 	processType  process.ProcessType
 	exitHandlers []process.ExitHandler
 	handlerAdded chan struct{}
+	writeErr     error
 }
 
 func (f *fakeProcess) ID() string { return "proc-test" }
@@ -76,6 +77,9 @@ func (f *fakeProcess) Pause() error   { return nil }
 func (f *fakeProcess) Resume() error  { return nil }
 func (f *fakeProcess) IsPaused() bool { return false }
 func (f *fakeProcess) WriteInput(data []byte) error {
+	if f.writeErr != nil {
+		return f.writeErr
+	}
 	if f.onWrite != nil {
 		f.onWrite(data)
 	}
@@ -154,6 +158,42 @@ func TestListContextsReturnsEmptyArray(t *testing.T) {
 	}
 	if len(payload.Data.Contexts) != 0 {
 		t.Fatalf("contexts = %d, want 0", len(payload.Data.Contexts))
+	}
+}
+
+func TestCreateContextReturnsBadRequestForInvalidProcessConfig(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "cmd missing command", body: `{"type":"cmd"}`},
+		{name: "unsupported process type", body: `{"type":"wat"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := NewContextHandler(ctxpkg.NewManager(), zap.NewNop())
+			req := httptest.NewRequest(http.MethodPost, "/contexts", strings.NewReader(tt.body))
+			rec := httptest.NewRecorder()
+
+			handler.Create(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+			}
+			var resp struct {
+				Success bool `json:"success"`
+				Error   struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v", err)
+			}
+			if resp.Success || resp.Error.Code != "invalid_request" {
+				t.Fatalf("response = %+v, want invalid_request error", resp)
+			}
+		})
 	}
 }
 
@@ -363,6 +403,63 @@ func TestGetContext_EncodesNilEnvVarsAsEmptyObject(t *testing.T) {
 	}
 }
 
+func TestWriteInputRejectsMissingData(t *testing.T) {
+	proc := &fakeProcess{outputCh: make(chan process.ProcessOutput)}
+	handler, ctx := newHandlerWithContext(proc, process.ProcessTypeREPL)
+
+	req := httptest.NewRequest(http.MethodPost, "/contexts/"+ctx.ID+"/input", strings.NewReader(`{}`))
+	req = mux.SetURLVars(req, map[string]string{"id": ctx.ID})
+	rec := httptest.NewRecorder()
+
+	handler.WriteInput(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	var resp struct {
+		Success bool `json:"success"`
+		Error   struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if resp.Success || resp.Error.Code != "invalid_request" {
+		t.Fatalf("response = %+v, want invalid_request error", resp)
+	}
+}
+
+func TestWriteInputReturnsGoneForFinishedProcess(t *testing.T) {
+	proc := &fakeProcess{
+		outputCh: make(chan process.ProcessOutput),
+		writeErr: process.ErrProcessFinished,
+	}
+	handler, ctx := newHandlerWithContext(proc, process.ProcessTypeREPL)
+
+	req := httptest.NewRequest(http.MethodPost, "/contexts/"+ctx.ID+"/input", strings.NewReader(`{"data":"hello"}`))
+	req = mux.SetURLVars(req, map[string]string{"id": ctx.ID})
+	rec := httptest.NewRecorder()
+
+	handler.WriteInput(rec, req)
+
+	if rec.Code != http.StatusGone {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusGone, rec.Body.String())
+	}
+	var resp struct {
+		Success bool `json:"success"`
+		Error   struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if resp.Success || resp.Error.Code != "process_finished" {
+		t.Fatalf("response = %+v, want process_finished error", resp)
+	}
+}
+
 func TestNewWSOutputMessage(t *testing.T) {
 	msg := newWSOutputMessage(process.OutputSourcePTY, "hello")
 	if msg.Type != "output" {
@@ -405,6 +502,22 @@ func TestNewWSProcessDoneMessage(t *testing.T) {
 	}
 	if msg.State != string(process.ProcessStateStopped) {
 		t.Fatalf("state = %q, want %q", msg.State, process.ProcessStateStopped)
+	}
+}
+
+func TestParseSignalRejectsOutOfRangeNumericSignal(t *testing.T) {
+	if _, err := parseSignal("999"); err == nil {
+		t.Fatal("parseSignal(999) error = nil, want unsupported signal")
+	}
+	if _, err := parseSignal("0"); err == nil {
+		t.Fatal("parseSignal(0) error = nil, want unsupported signal")
+	}
+	sig, err := parseSignal("64")
+	if err != nil {
+		t.Fatalf("parseSignal(64) error = %v", err)
+	}
+	if sig != syscall.Signal(64) {
+		t.Fatalf("parseSignal(64) = %v, want 64", sig)
 	}
 }
 

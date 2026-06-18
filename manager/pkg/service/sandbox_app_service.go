@@ -2,13 +2,16 @@ package service
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxfunction"
+	"golang.org/x/net/http/httpguts"
 )
 
 const (
@@ -65,15 +68,19 @@ type SandboxAppService struct {
 	Runtime     *SandboxAppServiceRuntime `json:"runtime,omitempty"`
 	Ingress     SandboxAppServiceIngress  `json:"ingress"`
 	HealthCheck *SandboxAppServiceHealth  `json:"health_check,omitempty"`
+	jsonDecoded bool
+	ingressSet  bool
 }
 
 // SandboxAppServiceRuntime captures the restartable command for a sandbox service.
 type SandboxAppServiceRuntime struct {
-	Type     string            `json:"type"`
-	Command  []string          `json:"command,omitempty"`
-	CWD      string            `json:"cwd,omitempty"`
-	EnvVars  map[string]string `json:"env_vars,omitempty"`
-	Function *SandboxFunction  `json:"function,omitempty"`
+	Type        string            `json:"type"`
+	Command     []string          `json:"command,omitempty"`
+	CWD         string            `json:"cwd,omitempty"`
+	EnvVars     map[string]string `json:"env_vars,omitempty"`
+	Function    *SandboxFunction  `json:"function,omitempty"`
+	jsonDecoded bool
+	typeSet     bool
 }
 
 // SandboxFunction configures code that cluster-gateway sends to procd for execution.
@@ -111,6 +118,44 @@ type SandboxAppServiceRoute struct {
 // SandboxAppServiceHealth describes the readiness endpoint for a service.
 type SandboxAppServiceHealth struct {
 	Path string `json:"path,omitempty"`
+}
+
+func (s *SandboxAppService) UnmarshalJSON(data []byte) error {
+	type alias SandboxAppService
+	aux := struct {
+		Ingress *SandboxAppServiceIngress `json:"ingress"`
+		*alias
+	}{
+		alias: (*alias)(s),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	s.jsonDecoded = true
+	if aux.Ingress != nil {
+		s.Ingress = *aux.Ingress
+		s.ingressSet = true
+	}
+	return nil
+}
+
+func (r *SandboxAppServiceRuntime) UnmarshalJSON(data []byte) error {
+	type alias SandboxAppServiceRuntime
+	aux := struct {
+		Type *string `json:"type"`
+		*alias
+	}{
+		alias: (*alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	r.jsonDecoded = true
+	r.typeSet = aux.Type != nil
+	if aux.Type != nil {
+		r.Type = *aux.Type
+	}
+	return nil
 }
 
 // SandboxAppServiceView adds derived publishability state to a sandbox service.
@@ -158,11 +203,20 @@ func normalizeSandboxAppService(service SandboxAppService) (SandboxAppService, e
 	if !sandboxServiceRouteIDPattern.MatchString(service.ID) {
 		return service, fmt.Errorf("id must be a DNS label")
 	}
+	if service.jsonDecoded && !service.ingressSet {
+		return service, fmt.Errorf("ingress is required")
+	}
 	service.DisplayName = strings.TrimSpace(service.DisplayName)
 	runtimeType := SandboxAppServiceRuntimeManual
 	if service.Runtime != nil {
 		runtime := *service.Runtime
+		if runtime.jsonDecoded && !runtime.typeSet {
+			return service, fmt.Errorf("runtime.type is required")
+		}
 		runtime.Type = strings.ToLower(strings.TrimSpace(runtime.Type))
+		if runtime.jsonDecoded && runtime.Type == "" {
+			return service, fmt.Errorf("runtime.type is required")
+		}
 		switch runtime.Type {
 		case "", SandboxAppServiceRuntimeManual, SandboxAppServiceRuntimeCMD, SandboxAppServiceRuntimeFunction:
 		default:
@@ -443,7 +497,11 @@ func normalizeSandboxAppServiceRouteAuth(auth SandboxAppServiceRouteAuth) (Sandb
 		auth.HeaderName = ""
 		auth.HeaderValueSHA256 = ""
 	case SandboxAppServiceRouteAuthModeHeader:
-		auth.HeaderName = http.CanonicalHeaderKey(strings.TrimSpace(auth.HeaderName))
+		headerName := strings.TrimSpace(auth.HeaderName)
+		if !httpguts.ValidHeaderFieldName(headerName) {
+			return auth, fmt.Errorf("auth.header_name must be a valid HTTP header name")
+		}
+		auth.HeaderName = http.CanonicalHeaderKey(headerName)
 		auth.HeaderValueSHA256 = strings.ToLower(strings.TrimSpace(auth.HeaderValueSHA256))
 		if auth.HeaderName == "" || auth.HeaderValueSHA256 == "" {
 			return auth, fmt.Errorf("auth.header_name and auth.header_value_sha256 are required for header auth")
@@ -467,7 +525,7 @@ func validSHA256Hex(value string) bool {
 
 func normalizeSandboxAppServiceRouteCORS(cors SandboxAppServiceRouteCORS) (SandboxAppServiceRouteCORS, error) {
 	var err error
-	cors.AllowedOrigins, err = normalizeNonEmptyValues("cors.allowed_origins", cors.AllowedOrigins)
+	cors.AllowedOrigins, err = normalizeCORSOrigins("cors.allowed_origins", cors.AllowedOrigins)
 	if err != nil {
 		return cors, err
 	}
@@ -475,11 +533,11 @@ func normalizeSandboxAppServiceRouteCORS(cors SandboxAppServiceRouteCORS) (Sandb
 	if err != nil {
 		return cors, fmt.Errorf("cors.allowed_methods: %w", err)
 	}
-	cors.AllowedHeaders, err = normalizeNonEmptyValues("cors.allowed_headers", cors.AllowedHeaders)
+	cors.AllowedHeaders, err = normalizeHTTPHeaderNames("cors.allowed_headers", cors.AllowedHeaders)
 	if err != nil {
 		return cors, err
 	}
-	cors.ExposeHeaders, err = normalizeNonEmptyValues("cors.expose_headers", cors.ExposeHeaders)
+	cors.ExposeHeaders, err = normalizeHTTPHeaderNames("cors.expose_headers", cors.ExposeHeaders)
 	if err != nil {
 		return cors, err
 	}
@@ -489,7 +547,7 @@ func normalizeSandboxAppServiceRouteCORS(cors SandboxAppServiceRouteCORS) (Sandb
 	return cors, nil
 }
 
-func normalizeNonEmptyValues(field string, values []string) ([]string, error) {
+func normalizeHTTPHeaderNames(field string, values []string) ([]string, error) {
 	if len(values) > maxSandboxServiceAllowedValues {
 		return nil, fmt.Errorf("%s exceeds limit %d", field, maxSandboxServiceAllowedValues)
 	}
@@ -500,6 +558,10 @@ func normalizeNonEmptyValues(field string, values []string) ([]string, error) {
 		if value == "" {
 			return nil, fmt.Errorf("%s cannot contain empty values", field)
 		}
+		if !httpguts.ValidHeaderFieldName(value) {
+			return nil, fmt.Errorf("%s contains invalid HTTP header name %q", field, value)
+		}
+		value = http.CanonicalHeaderKey(value)
 		key := strings.ToLower(value)
 		if _, ok := seen[key]; ok {
 			continue
@@ -508,4 +570,62 @@ func normalizeNonEmptyValues(field string, values []string) ([]string, error) {
 		out = append(out, value)
 	}
 	return out, nil
+}
+
+func normalizeCORSOrigins(field string, values []string) ([]string, error) {
+	if len(values) > maxSandboxServiceAllowedValues {
+		return nil, fmt.Errorf("%s exceeds limit %d", field, maxSandboxServiceAllowedValues)
+	}
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		origin, err := normalizeCORSOrigin(value)
+		if err != nil {
+			return nil, fmt.Errorf("%s contains invalid origin %q", field, value)
+		}
+		key := strings.ToLower(origin)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, origin)
+	}
+	return out, nil
+}
+
+func normalizeCORSOrigin(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("origin is empty")
+	}
+	if containsHTTPControlChar(value) {
+		return "", fmt.Errorf("origin contains a control character")
+	}
+	if value == "*" {
+		return value, nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return "", err
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", fmt.Errorf("origin scheme must be http or https")
+	}
+	if parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("origin must be scheme://host[:port]")
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		return "", fmt.Errorf("origin must not include a path")
+	}
+	return scheme + "://" + parsed.Host, nil
+}
+
+func containsHTTPControlChar(value string) bool {
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
 }

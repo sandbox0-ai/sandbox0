@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -211,6 +212,39 @@ func TestUpdateSandboxEnvVarsClearsConfig(t *testing.T) {
 	assert.Empty(t, cfg.EnvVars)
 }
 
+func TestUpdateSandboxRejectsInvalidTTLState(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *SandboxUpdateConfig
+	}{
+		{name: "negative ttl", cfg: &SandboxUpdateConfig{TTL: int32Ptr(-1)}},
+		{name: "negative hard ttl", cfg: &SandboxUpdateConfig{HardTTL: int32Ptr(-1)}},
+		{name: "ttl beyond existing hard ttl", cfg: &SandboxUpdateConfig{TTL: int32Ptr(700)}},
+		{name: "ttl beyond updated hard ttl", cfg: &SandboxUpdateConfig{TTL: int32Ptr(1000), HardTTL: int32Ptr(60)}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := testSandboxPod()
+			pod.Annotations[controller.AnnotationExpiresAt] = "2026-03-07T12:05:00Z"
+			pod.Annotations[controller.AnnotationHardExpiresAt] = "2026-03-07T12:10:00Z"
+			pod.Annotations[controller.AnnotationConfig] = `{"ttl":300,"hard_ttl":600}`
+
+			svc, client := newSandboxServiceForTTLTests(t, pod, 0)
+
+			_, err := svc.UpdateSandbox(context.Background(), pod.Name, tt.cfg)
+			if !errors.Is(err, ErrInvalidClaimRequest) {
+				t.Fatalf("UpdateSandbox() error = %v, want ErrInvalidClaimRequest", err)
+			}
+
+			stored, getErr := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+			require.NoError(t, getErr)
+			assert.Equal(t, "2026-03-07T12:05:00Z", stored.Annotations[controller.AnnotationExpiresAt])
+			assert.Equal(t, "2026-03-07T12:10:00Z", stored.Annotations[controller.AnnotationHardExpiresAt])
+		})
+	}
+}
+
 func TestRefreshSandboxDisabledTTLRemainsDisabled(t *testing.T) {
 	pod := testSandboxPod()
 	pod.Annotations[controller.AnnotationConfig] = `{"ttl":0,"hard_ttl":0}`
@@ -226,6 +260,37 @@ func TestRefreshSandboxDisabledTTLRemainsDisabled(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, stored.Annotations[controller.AnnotationExpiresAt])
 	assert.Empty(t, stored.Annotations[controller.AnnotationHardExpiresAt])
+}
+
+func TestRefreshSandboxRejectsInvalidTTLState(t *testing.T) {
+	tests := []struct {
+		name string
+		req  *RefreshRequest
+	}{
+		{name: "negative duration", req: &RefreshRequest{Duration: -1}},
+		{name: "duration beyond hard ttl", req: &RefreshRequest{Duration: 700}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := testSandboxPod()
+			pod.Annotations[controller.AnnotationExpiresAt] = "2026-03-07T12:05:00Z"
+			pod.Annotations[controller.AnnotationHardExpiresAt] = "2026-03-07T12:10:00Z"
+			pod.Annotations[controller.AnnotationConfig] = `{"ttl":300,"hard_ttl":600}`
+
+			svc, client := newSandboxServiceForTTLTests(t, pod, 0)
+
+			_, err := svc.RefreshSandbox(context.Background(), pod.Name, tt.req)
+			if !errors.Is(err, ErrInvalidClaimRequest) {
+				t.Fatalf("RefreshSandbox() error = %v, want ErrInvalidClaimRequest", err)
+			}
+
+			stored, getErr := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+			require.NoError(t, getErr)
+			assert.Equal(t, "2026-03-07T12:05:00Z", stored.Annotations[controller.AnnotationExpiresAt])
+			assert.Equal(t, "2026-03-07T12:10:00Z", stored.Annotations[controller.AnnotationHardExpiresAt])
+		})
+	}
 }
 
 func configurePodForProcdServer(t *testing.T, pod *corev1.Pod, rawURL string) int {

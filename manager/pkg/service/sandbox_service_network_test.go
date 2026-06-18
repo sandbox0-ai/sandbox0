@@ -257,6 +257,95 @@ func TestUpdateNetworkPolicyRollsBackBindingsWhenPodUpdateFails(t *testing.T) {
 	assert.Equal(t, "existing-ref", record.Bindings[0].Ref)
 }
 
+func TestUpdateNetworkPolicyRejectsInvalidEgressPolicy(t *testing.T) {
+	ctx := context.Background()
+
+	danglingCredentialPolicy := func(bindings []v1alpha1.CredentialBinding) *v1alpha1.SandboxNetworkPolicy {
+		return &v1alpha1.SandboxNetworkPolicy{
+			Mode: v1alpha1.NetworkModeBlockAll,
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				CredentialRules: []v1alpha1.EgressCredentialRule{{
+					Name:          "dangling",
+					CredentialRef: "missing-ref",
+					Protocol:      v1alpha1.EgressAuthProtocolSSH,
+					Ports:         []v1alpha1.PortSpec{{Port: 22, Protocol: "tcp"}},
+				}},
+			},
+			CredentialBindings: bindings,
+		}
+	}
+
+	tests := []struct {
+		name   string
+		policy *v1alpha1.SandboxNetworkPolicy
+	}{
+		{
+			name: "invalid cidr",
+			policy: &v1alpha1.SandboxNetworkPolicy{
+				Mode: v1alpha1.NetworkModeBlockAll,
+				Egress: &v1alpha1.NetworkEgressPolicy{
+					TrafficRules: []v1alpha1.TrafficRule{{
+						Name:   "bad-cidr",
+						Action: v1alpha1.TrafficRuleActionAllow,
+						CIDRs:  []string{"not-a-cidr"},
+					}},
+				},
+			},
+		},
+		{
+			name: "mixed legacy and traffic rules",
+			policy: &v1alpha1.SandboxNetworkPolicy{
+				Mode: v1alpha1.NetworkModeBlockAll,
+				Egress: &v1alpha1.NetworkEgressPolicy{
+					AllowedCIDRs: []string{"10.0.0.0/8"},
+					TrafficRules: []v1alpha1.TrafficRule{{
+						Name:   "allow-ssh",
+						Action: v1alpha1.TrafficRuleActionAllow,
+						CIDRs:  []string{"10.0.0.1/32"},
+					}},
+				},
+			},
+		},
+		{
+			name: "invalid action",
+			policy: &v1alpha1.SandboxNetworkPolicy{
+				Mode: v1alpha1.NetworkModeBlockAll,
+				Egress: &v1alpha1.NetworkEgressPolicy{
+					TrafficRules: []v1alpha1.TrafficRule{{
+						Name:   "bad-action",
+						Action: "wat",
+						Ports:  []v1alpha1.PortSpec{{Port: 443, Protocol: "tcp"}},
+					}},
+				},
+			},
+		},
+		{
+			name:   "dangling credential without bindings",
+			policy: danglingCredentialPolicy(nil),
+		},
+		{
+			name:   "dangling credential with empty bindings",
+			policy: danglingCredentialPolicy([]v1alpha1.CredentialBinding{}),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := testSandboxNetworkPod()
+			svc, client, _ := newSandboxServiceForNetworkTests(t, pod, nil, network.NewNoopProvider())
+
+			_, err := svc.UpdateNetworkPolicy(ctx, pod.Name, tt.policy)
+
+			require.Error(t, err)
+			require.ErrorIs(t, err, ErrInvalidNetworkPolicy)
+			storedPod, getErr := client.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+			require.NoError(t, getErr)
+			assert.Equal(t, "{}", storedPod.Annotations[controller.AnnotationConfig])
+			assert.Empty(t, storedPod.Annotations[controller.AnnotationNetworkPolicy])
+		})
+	}
+}
+
 func TestUpdateSandboxRollsBackBindingsWhenPodUpdateFails(t *testing.T) {
 	ctx := context.Background()
 	pod := testSandboxNetworkPod()

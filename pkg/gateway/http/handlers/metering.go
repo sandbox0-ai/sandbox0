@@ -107,7 +107,7 @@ func parseMeteringCursor(c *gin.Context) (int64, int, bool) {
 	afterSequence := int64(0)
 	if value := c.Query("after_sequence"); value != "" {
 		parsed, err := strconv.ParseInt(value, 10, 64)
-		if err != nil {
+		if err != nil || parsed < 0 {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid after_sequence")
 			return 0, 0, false
 		}

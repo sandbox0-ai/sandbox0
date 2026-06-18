@@ -1,11 +1,13 @@
 package http
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
@@ -66,6 +68,10 @@ func (s *Server) updateNetworkPolicy(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return
 	}
+	if err := validateSandboxNetworkPolicyMode(&req); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
 
 	claims := internalauth.ClaimsFromContext(c.Request.Context())
 	if claims == nil {
@@ -90,6 +96,10 @@ func (s *Server) updateNetworkPolicy(c *gin.Context) {
 
 	updated, err := s.sandboxService.UpdateNetworkPolicy(c.Request.Context(), sandboxID, &req)
 	if err != nil {
+		if errors.Is(err, service.ErrInvalidNetworkPolicy) {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+			return
+		}
 		s.logger.Error("Failed to update network policy",
 			zap.String("sandboxID", sandboxID),
 			zap.Error(err),
@@ -99,4 +109,16 @@ func (s *Server) updateNetworkPolicy(c *gin.Context) {
 	}
 
 	spec.JSONSuccess(c, http.StatusOK, updated)
+}
+
+func validateSandboxNetworkPolicyMode(policy *v1alpha1.SandboxNetworkPolicy) error {
+	if policy == nil || policy.Mode == "" {
+		return fmt.Errorf("mode is required")
+	}
+	switch policy.Mode {
+	case v1alpha1.NetworkModeAllowAll, v1alpha1.NetworkModeBlockAll:
+		return nil
+	default:
+		return fmt.Errorf("mode must be %q or %q", v1alpha1.NetworkModeAllowAll, v1alpha1.NetworkModeBlockAll)
+	}
 }

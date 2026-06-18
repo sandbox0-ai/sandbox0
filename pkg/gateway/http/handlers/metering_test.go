@@ -168,6 +168,24 @@ func TestMeteringHandlerListEvents(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects negative after_sequence", func(t *testing.T) {
+		repo := &fakeMeteringReader{}
+		handler := NewMeteringHandler(repo, "", zap.NewNop())
+
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/internal/v1/metering/events?after_sequence=-1", nil)
+
+		handler.ListEvents(ctx)
+
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+		}
+		if repo.listEventCalls != 0 {
+			t.Fatalf("list events should not be called for negative after_sequence")
+		}
+	})
+
 	t.Run("clamps limit and returns events", func(t *testing.T) {
 		occurredAt := time.Date(2026, 3, 12, 9, 30, 0, 0, time.UTC)
 		repo := &fakeMeteringReader{

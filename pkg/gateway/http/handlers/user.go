@@ -87,8 +87,8 @@ func (h *UserHandler) GetCurrentUser(c *gin.Context) {
 
 // UpdateUserRequest is the request body for updating user
 type UpdateUserRequest struct {
-	Name      string `json:"name"`
-	AvatarURL string `json:"avatar_url"`
+	Name      *string `json:"name"`
+	AvatarURL *string `json:"avatar_url"`
 }
 
 // UpdateCurrentUser updates the current authenticated user
@@ -113,11 +113,16 @@ func (h *UserHandler) UpdateCurrentUser(c *gin.Context) {
 	}
 
 	// Update fields
-	if req.Name != "" {
-		user.Name = req.Name
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if *req.Name != "" && name == "" {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "name cannot be whitespace")
+			return
+		}
+		user.Name = name
 	}
-	if req.AvatarURL != "" {
-		user.AvatarURL = req.AvatarURL
+	if req.AvatarURL != nil {
+		user.AvatarURL = strings.TrimSpace(*req.AvatarURL)
 	}
 
 	if err := h.repo.UpdateUser(c.Request.Context(), user); err != nil {
@@ -342,6 +347,10 @@ func (h *UserHandler) DeleteUserSSHPublicKey(c *gin.Context) {
 	keyID := strings.TrimSpace(c.Param("id"))
 	if keyID == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "ssh public key id is required")
+		return
+	}
+	if !isValidUUID(keyID) {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid ssh public key id")
 		return
 	}
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -17,6 +18,9 @@ type CredentialSourceService struct {
 	store  egressauth.SourceStore
 	logger *zap.Logger
 }
+
+var ErrCredentialSourceAlreadyExists = errors.New("credential source already exists")
+var ErrCredentialSourceNotFound = errors.New("credential source not found")
 
 func NewCredentialSourceService(store egressauth.SourceStore, logger *zap.Logger) *CredentialSourceService {
 	return &CredentialSourceService{
@@ -56,6 +60,40 @@ func (s *CredentialSourceService) PutSource(ctx context.Context, teamID string, 
 	return s.store.PutSource(ctx, teamID, record)
 }
 
+func (s *CredentialSourceService) CreateSource(ctx context.Context, teamID string, record *egressauth.CredentialSourceWriteRequest) (*egressauth.CredentialSourceMetadata, error) {
+	if s == nil || s.store == nil {
+		return nil, fmt.Errorf("credential source store is not configured")
+	}
+	if err := validateCredentialSourceWriteRequest(record); err != nil {
+		return nil, err
+	}
+	existing, err := s.store.GetSourceMetadata(ctx, teamID, record.Name)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		return nil, ErrCredentialSourceAlreadyExists
+	}
+	return s.store.PutSource(ctx, teamID, record)
+}
+
+func (s *CredentialSourceService) UpdateSource(ctx context.Context, teamID string, record *egressauth.CredentialSourceWriteRequest) (*egressauth.CredentialSourceMetadata, error) {
+	if s == nil || s.store == nil {
+		return nil, fmt.Errorf("credential source store is not configured")
+	}
+	if err := validateCredentialSourceWriteRequest(record); err != nil {
+		return nil, err
+	}
+	existing, err := s.store.GetSourceMetadata(ctx, teamID, record.Name)
+	if err != nil {
+		return nil, err
+	}
+	if existing == nil {
+		return nil, ErrCredentialSourceNotFound
+	}
+	return s.store.PutSource(ctx, teamID, record)
+}
+
 func (s *CredentialSourceService) DeleteSource(ctx context.Context, teamID, name string) error {
 	if s == nil || s.store == nil {
 		return fmt.Errorf("credential source store is not configured")
@@ -67,8 +105,11 @@ func validateCredentialSourceWriteRequest(record *egressauth.CredentialSourceWri
 	if record == nil {
 		return fmt.Errorf("credential source record is required")
 	}
-	if record.Name == "" {
+	if strings.TrimSpace(record.Name) == "" {
 		return fmt.Errorf("credential source name is required")
+	}
+	if strings.Contains(record.Name, "/") {
+		return fmt.Errorf("credential source name must not contain /")
 	}
 	if strings.TrimSpace(record.StorageKind) != "" {
 		return fmt.Errorf("credential source storage backend is configured by the platform")

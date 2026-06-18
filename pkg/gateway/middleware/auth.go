@@ -10,6 +10,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
 )
@@ -61,9 +62,7 @@ func (m *AuthMiddleware) Authenticate() gin.HandlerFunc {
 				zap.String("error", err.Error()),
 				zap.String("client_ip", c.ClientIP()),
 			)
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": err.Error(),
-			})
+			abortJSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, err.Error())
 			return
 		}
 
@@ -73,6 +72,16 @@ func (m *AuthMiddleware) Authenticate() gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+func abortJSONError(c *gin.Context, status int, code, message string) {
+	c.AbortWithStatusJSON(status, spec.Response{
+		Success: false,
+		Error: &spec.Error{
+			Code:    code,
+			Message: message,
+		},
+	})
 }
 
 // AuthenticateRequest validates credentials and returns the auth context.
@@ -294,16 +303,12 @@ func (m *AuthMiddleware) RequirePermission(permission string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authCtx := GetAuthContext(c)
 		if authCtx == nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": "not authenticated",
-			})
+			abortJSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "not authenticated")
 			return
 		}
 
 		if !authCtx.HasPermission(permission) {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-				"error": "insufficient permissions",
-			})
+			abortJSONError(c, http.StatusForbidden, spec.CodeForbidden, "insufficient permissions")
 			return
 		}
 
@@ -316,9 +321,7 @@ func (m *AuthMiddleware) RequireJWTAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authCtx := GetAuthContext(c)
 		if authCtx == nil || authCtx.AuthMethod != authn.AuthMethodJWT || authCtx.UserID == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": "this API requires a user access token (human login); API keys are not supported",
-			})
+			abortJSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "this API requires a user access token (human login); API keys are not supported")
 			return
 		}
 
@@ -331,16 +334,12 @@ func (m *AuthMiddleware) RequireSystemAdmin() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authCtx := GetAuthContext(c)
 		if authCtx == nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": "not authenticated",
-			})
+			abortJSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "not authenticated")
 			return
 		}
 
 		if !authCtx.IsSystemAdmin {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-				"error": "system admin access required",
-			})
+			abortJSONError(c, http.StatusForbidden, spec.CodeForbidden, "system admin access required")
 			return
 		}
 

@@ -294,6 +294,8 @@ func (h *FileHandler) handleFileError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "path_exists", err.Error())
 	case file.ErrPathNotDir:
 		writeError(w, http.StatusConflict, "path_not_directory", err.Error())
+	case file.ErrPathNotFile:
+		writeError(w, http.StatusConflict, "path_not_file", err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, "operation_failed", err.Error())
 	}

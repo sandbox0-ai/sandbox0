@@ -2,6 +2,7 @@ package rootfs
 
 import (
 	"archive/tar"
+	"bytes"
 	"context"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/containerd/containerd/v2/pkg/archive"
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
@@ -39,6 +41,27 @@ func TestWriteOverlayUpperDiffIncludesUpperEntries(t *testing.T) {
 	assert.Contains(t, entries, "etc/")
 	assert.Contains(t, entries, "etc/config")
 	assert.Contains(t, entries, "etc/config-link")
+}
+
+func TestWriteOverlayUpperDiffExcludesRuntimePaths(t *testing.T) {
+	upperdir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(upperdir, "procd", "bin"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(upperdir, "procd", "bin", "procd"), []byte("runtime"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(upperdir, "procd", "bin", "python-runner"), []byte("runtime"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(upperdir, "workspace"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(upperdir, "workspace", "state"), []byte("value"), 0o644))
+
+	_, reader, err := writeOverlayUpperDiff(context.Background(), upperdir)
+	require.NoError(t, err)
+	defer reader.Close()
+
+	entries := readTarEntries(t, reader)
+	assert.NotContains(t, entries, "procd/")
+	assert.NotContains(t, entries, "procd/bin/")
+	assert.NotContains(t, entries, "procd/bin/procd")
+	assert.NotContains(t, entries, "procd/bin/python-runner")
+	assert.Contains(t, entries, "workspace/")
+	assert.Contains(t, entries, "workspace/state")
 }
 
 func TestWriteOverlayUpperDiffConvertsWhiteouts(t *testing.T) {
@@ -114,6 +137,44 @@ func TestWriteOverlayUpperDiffFromBaselineAppliesAsChildDelta(t *testing.T) {
 	assertFileContent(t, filepath.Join(applied, "etc", "same"), "same")
 	_, err = os.Stat(filepath.Join(applied, "etc", "removed"))
 	assert.True(t, os.IsNotExist(err))
+}
+
+func TestFilterRootFSDiffTarExcludesRuntimePaths(t *testing.T) {
+	var buf bytes.Buffer
+	tarWriter := tar.NewWriter(&buf)
+	writeTarEntry(t, tarWriter, "procd/bin/python-runner", []byte("runtime"), 0o755)
+	writeTarEntry(t, tarWriter, "procd/.wh..wh..opq", nil, 0o000)
+	writeTarEntry(t, tarWriter, "workspace/state", []byte("value"), 0o644)
+	require.NoError(t, tarWriter.Close())
+
+	desc, reader, err := filterRootFSDiffTar(rootFSDiffDescriptorForTest(), bytes.NewReader(buf.Bytes()))
+	require.NoError(t, err)
+	defer reader.Close()
+	require.NotEmpty(t, desc.Digest)
+	require.Positive(t, desc.Size)
+
+	entries := readTarEntries(t, reader)
+	assert.NotContains(t, entries, "procd/bin/python-runner")
+	assert.NotContains(t, entries, "procd/.wh..wh..opq")
+	assert.Contains(t, entries, "workspace/state")
+}
+
+func rootFSDiffDescriptorForTest() ctldapi.RootFSDiffDescriptor {
+	return ctldapi.RootFSDiffDescriptor{MediaType: "application/vnd.oci.image.layer.v1.tar"}
+}
+
+func writeTarEntry(t *testing.T, writer *tar.Writer, name string, data []byte, mode int64) {
+	t.Helper()
+	header := &tar.Header{
+		Name: name,
+		Mode: mode,
+		Size: int64(len(data)),
+	}
+	require.NoError(t, writer.WriteHeader(header))
+	if len(data) > 0 {
+		_, err := writer.Write(data)
+		require.NoError(t, err)
+	}
 }
 
 func readTarEntries(t *testing.T, reader io.Reader) []string {

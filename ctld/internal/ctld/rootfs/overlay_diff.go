@@ -1,10 +1,12 @@
 package rootfs
 
 import (
+	"archive/tar"
 	"context"
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -19,6 +21,10 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"golang.org/x/sys/unix"
 )
+
+var rootFSSnapshotExcludedPaths = []string{
+	"/procd",
+}
 
 func (r *ContainerdRuntime) createOverlayUpperDiff(ctx context.Context, client containerdClient, info ctldapi.RootFSInfo) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, bool, error) {
 	if strings.TrimSpace(info.Snapshotter) != "overlayfs" {
@@ -183,7 +189,7 @@ func writeOverlayDiffTar(source string, walkChanges func(fs.ChangeFunc) error) (
 	digester := digest.Canonical.Digester()
 	writer := io.MultiWriter(tmp, digester.Hash())
 	cw := archive.NewChangeWriter(writer, source)
-	if err := walkChanges(cw.HandleChange); err != nil {
+	if err := walkChanges(filteredRootFSChangeFunc(cw.HandleChange)); err != nil {
 		_ = cw.Close()
 		return ctldapi.RootFSDiffDescriptor{}, nil, err
 	}
@@ -225,6 +231,12 @@ func walkOverlayUpper(ctx context.Context, upperdir string, changeFn fs.ChangeFu
 			return nil
 		}
 		changePath := string(filepath.Separator) + rel
+		if isRootFSSnapshotExcludedPath(changePath) {
+			if info != nil && info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if isOverlayWhiteout(info) {
 			return changeFn(fs.ChangeKindDelete, changePath, nil, nil)
 		}
@@ -269,6 +281,103 @@ func isOverlayOpaqueDir(path string) (bool, error) {
 	return false, nil
 }
 
+func filteredRootFSChangeFunc(next fs.ChangeFunc) fs.ChangeFunc {
+	return func(kind fs.ChangeKind, changePath string, info os.FileInfo, err error) error {
+		if err != nil {
+			return next(kind, changePath, info, err)
+		}
+		if isRootFSSnapshotExcludedPath(changePath) {
+			return nil
+		}
+		return next(kind, changePath, info, err)
+	}
+}
+
+func filterRootFSDiffTar(desc ctldapi.RootFSDiffDescriptor, reader io.Reader) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+	if strings.TrimSpace(desc.MediaType) != "" && strings.TrimSpace(desc.MediaType) != ocispec.MediaTypeImageLayer {
+		return desc, noopReadSeekCloser{Reader: reader}, nil
+	}
+
+	tmp, err := os.CreateTemp("", "sandbox0-rootfs-filtered-diff-*.tar")
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+	removeOnError := true
+	defer func() {
+		if removeOnError {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+
+	digester := digest.Canonical.Digester()
+	writer := io.MultiWriter(tmp, digester.Hash())
+	tarWriter := tar.NewWriter(writer)
+	tarReader := tar.NewReader(reader)
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			_ = tarWriter.Close()
+			return ctldapi.RootFSDiffDescriptor{}, nil, err
+		}
+		if isRootFSSnapshotExcludedPath(header.Name) {
+			continue
+		}
+
+		headerCopy := *header
+		if err := tarWriter.WriteHeader(&headerCopy); err != nil {
+			_ = tarWriter.Close()
+			return ctldapi.RootFSDiffDescriptor{}, nil, err
+		}
+		if header.Size > 0 {
+			if _, err := io.Copy(tarWriter, tarReader); err != nil {
+				_ = tarWriter.Close()
+				return ctldapi.RootFSDiffDescriptor{}, nil, err
+			}
+		}
+	}
+	if err := tarWriter.Close(); err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+	stat, err := tmp.Stat()
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+
+	desc.Digest = digester.Digest().String()
+	desc.Size = stat.Size()
+	if strings.TrimSpace(desc.MediaType) == "" {
+		desc.MediaType = ocispec.MediaTypeImageLayer
+	}
+	removeOnError = false
+	return desc, removeOnCloseFile{File: tmp}, nil
+}
+
+func isRootFSSnapshotExcludedPath(changePath string) bool {
+	clean := cleanRootFSPath(changePath)
+	for _, excluded := range rootFSSnapshotExcludedPaths {
+		excluded = cleanRootFSPath(excluded)
+		if clean == excluded || strings.HasPrefix(clean, excluded+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func cleanRootFSPath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "/"
+	}
+	return path.Clean("/" + strings.TrimPrefix(value, "/"))
+}
+
 type removeOnCloseFile struct {
 	*os.File
 }
@@ -283,5 +392,17 @@ func (f removeOnCloseFile) Close() error {
 	if removeErr != nil && !os.IsNotExist(removeErr) {
 		return removeErr
 	}
+	return nil
+}
+
+type noopReadSeekCloser struct {
+	io.Reader
+}
+
+func (noopReadSeekCloser) Seek(int64, int) (int64, error) {
+	return 0, fmt.Errorf("seek is not supported")
+}
+
+func (noopReadSeekCloser) Close() error {
 	return nil
 }

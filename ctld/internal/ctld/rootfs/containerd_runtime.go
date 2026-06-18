@@ -232,6 +232,13 @@ func (r *ContainerdRuntime) ApplyDiff(ctx context.Context, info ctldapi.RootFSIn
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, err
 	}
+	filteredDesc, filteredReader, err := filterRootFSDiffTar(desc, reader)
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("filter rootfs diff: %w", err)
+	}
+	defer filteredReader.Close()
+	desc = filteredDesc
+	reader = filteredReader
 
 	ociDesc, err := descriptorToOCI(desc)
 	if err != nil {

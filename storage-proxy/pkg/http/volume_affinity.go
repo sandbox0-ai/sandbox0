@@ -285,13 +285,13 @@ func (s *Server) volumeOwnerPriority(mount *db.VolumeMount) int {
 		return 100
 	}
 	opts := volume.DecodeMountOptions(mount.MountOptions)
-	if opts.OwnerKind == volume.OwnerKindCtld {
+	if mount.PodID == s.selfPodID {
 		return 0
 	}
-	if mount.PodID == s.selfPodID {
-		return 1
+	if opts.OwnerKind == volume.OwnerKindCtld {
+		return 2
 	}
-	return 2
+	return 1
 }
 
 func cloneURL(in *url.URL) *url.URL {

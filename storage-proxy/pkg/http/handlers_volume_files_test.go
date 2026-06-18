@@ -378,6 +378,10 @@ type tarEntry struct {
 }
 
 func tarArchive(t *testing.T, entries []tarEntry) *bytes.Reader {
+	return bytes.NewReader(tarArchiveBytes(t, entries))
+}
+
+func tarArchiveBytes(t *testing.T, entries []tarEntry) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
@@ -404,7 +408,7 @@ func tarArchive(t *testing.T, entries []tarEntry) *bytes.Reader {
 	if err := tw.Close(); err != nil {
 		t.Fatalf("Close tar writer: %v", err)
 	}
-	return bytes.NewReader(buf.Bytes())
+	return buf.Bytes()
 }
 
 func TestReadVolumeFileUsesSharedBarrier(t *testing.T) {
@@ -1136,7 +1140,7 @@ func TestHandleVolumeFileStatProxiesToRemoteOwnerPod(t *testing.T) {
 	}
 }
 
-func TestHandleVolumeFileStatPrefersCtldOwnerAndPropagatesTeamHeader(t *testing.T) {
+func TestHandleVolumeFileStatPrefersStorageProxyOwnerOverCtld(t *testing.T) {
 	remoteSeen := make(chan *http.Request, 1)
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -1162,7 +1166,7 @@ func TestHandleVolumeFileStatPrefersCtldOwnerAndPropagatesTeamHeader(t *testing.
 		{
 			VolumeID:     "vol-1",
 			ClusterID:    "cluster-a",
-			PodID:        "local-pod",
+			PodID:        "remote-storage-proxy",
 			MountedAt:    time.Unix(20, 0),
 			MountOptions: mustMountOptionsRaw(t, volume.MountOptions{AccessMode: volume.AccessModeRWO, OwnerKind: volume.OwnerKindStorageProxy}),
 		},
@@ -1175,7 +1179,10 @@ func TestHandleVolumeFileStatPrefersCtldOwnerAndPropagatesTeamHeader(t *testing.
 		},
 	}
 	server.podResolver = &fakeVolumeFilePodResolver{
-		urls: map[string]string{"sandbox0-system/ctld-node-a": "http://127.0.0.1"},
+		urls: map[string]string{
+			"remote-storage-proxy":        remote.URL,
+			"sandbox0-system/ctld-node-a": "http://127.0.0.1",
+		},
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/sandboxvolumes/vol-1/files/stat?path=/docs/report.txt", nil)
@@ -1193,14 +1200,111 @@ func TestHandleVolumeFileStatPrefersCtldOwnerAndPropagatesTeamHeader(t *testing.
 	}
 	select {
 	case seen := <-remoteSeen:
-		if got := seen.Header.Get(volumeFileAffinityRoutedPodHeader); got != "sandbox0-system/ctld-node-a" {
-			t.Fatalf("routed pod header = %q, want %q", got, "sandbox0-system/ctld-node-a")
+		if got := seen.Header.Get(volumeFileAffinityRoutedPodHeader); got != "remote-storage-proxy" {
+			t.Fatalf("routed pod header = %q, want %q", got, "remote-storage-proxy")
 		}
 		if got := seen.Header.Get(volumeFileAffinityTeamHeader); got != "team-a" {
 			t.Fatalf("team header = %q, want %q", got, "team-a")
 		}
 	default:
-		t.Fatal("expected request to be proxied to ctld owner")
+		t.Fatal("expected request to be proxied to storage-proxy owner")
+	}
+}
+
+func TestHandleVolumeFileArchiveImportPrefersStorageProxyOwnerOverCtld(t *testing.T) {
+	type seenRequest struct {
+		header http.Header
+		body   []byte
+	}
+	remoteSeen := make(chan seenRequest, 1)
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read proxied archive: %v", err)
+		}
+		select {
+		case remoteSeen <- seenRequest{header: r.Header.Clone(), body: body}:
+		default:
+		}
+		_ = spec.WriteSuccess(w, http.StatusOK, volumeFileArchiveImportResponse{Files: 1, Bytes: 5})
+	}))
+	defer remote.Close()
+	ctldSeen := make(chan struct{}, 1)
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case ctldSeen <- struct{}{}:
+		default:
+		}
+		_ = spec.WriteSuccess(w, http.StatusOK, volumeFileArchiveImportResponse{Files: 1, Bytes: 5})
+	}))
+	defer ctld.Close()
+	ctldURL, err := url.Parse(ctld.URL)
+	if err != nil {
+		t.Fatalf("parse ctld url: %v", err)
+	}
+	ctldPort, err := strconv.Atoi(ctldURL.Port())
+	if err != nil {
+		t.Fatalf("parse ctld port: %v", err)
+	}
+
+	fileRPC := &fakeHTTPVolumeFileRPC{}
+	server, volMgr := newVolumeFileTestServer(fileRPC)
+	repo := server.repo.(*fakeHTTPRepo)
+	repo.activeMounts["vol-1"] = []*db.VolumeMount{
+		{
+			VolumeID:     "vol-1",
+			ClusterID:    "cluster-a",
+			PodID:        "remote-storage-proxy",
+			MountedAt:    time.Unix(20, 0),
+			MountOptions: mustMountOptionsRaw(t, volume.MountOptions{AccessMode: volume.AccessModeRWO, OwnerKind: volume.OwnerKindStorageProxy}),
+		},
+		{
+			VolumeID:     "vol-1",
+			ClusterID:    "cluster-a",
+			PodID:        "sandbox0-system/ctld-node-a",
+			MountedAt:    time.Unix(10, 0),
+			MountOptions: mustMountOptionsRaw(t, volume.MountOptions{AccessMode: volume.AccessModeRWO, OwnerKind: volume.OwnerKindCtld, OwnerPort: ctldPort}),
+		},
+	}
+	server.podResolver = &fakeVolumeFilePodResolver{
+		urls: map[string]string{
+			"remote-storage-proxy":        remote.URL,
+			"sandbox0-system/ctld-node-a": "http://127.0.0.1",
+		},
+	}
+
+	body := tarArchiveBytes(t, []tarEntry{{name: "skill/SKILL.md", body: []byte("skill"), mode: 0o644, typeflag: tar.TypeReg}})
+	req := httptest.NewRequest(http.MethodPut, "/sandboxvolumes/vol-1/files/archive?path=/.pi/skills", bytes.NewReader(body))
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-a"}))
+	recorder := httptest.NewRecorder()
+
+	server.handleVolumeFileArchiveImport(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if volMgr.acquireCalls != 0 {
+		t.Fatalf("AcquireDirectVolumeFileMount() calls = %d, want 0", volMgr.acquireCalls)
+	}
+	select {
+	case seen := <-remoteSeen:
+		if got := seen.header.Get(volumeFileAffinityRoutedPodHeader); got != "remote-storage-proxy" {
+			t.Fatalf("routed pod header = %q, want %q", got, "remote-storage-proxy")
+		}
+		if got := seen.header.Get(volumeFileAffinityTeamHeader); got != "team-a" {
+			t.Fatalf("team header = %q, want %q", got, "team-a")
+		}
+		if !bytes.Equal(seen.body, body) {
+			t.Fatalf("proxied archive body changed")
+		}
+	default:
+		t.Fatal("expected archive import to be proxied to storage-proxy owner")
+	}
+	select {
+	case <-ctldSeen:
+		t.Fatal("archive import was proxied to ctld owner")
+	default:
 	}
 }
 

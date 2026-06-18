@@ -127,6 +127,36 @@ func newHandlerWithContext(proc process.Process, processType process.ProcessType
 	return NewContextHandler(manager, zap.NewNop()), ctx
 }
 
+func TestListContextsReturnsEmptyArray(t *testing.T) {
+	handler := NewContextHandler(ctxpkg.NewManager(), zap.NewNop())
+	req := httptest.NewRequest(http.MethodGet, "/contexts", nil)
+	rec := httptest.NewRecorder()
+
+	handler.List(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var payload struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Contexts []ContextResponse `json:"contexts"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !payload.Success {
+		t.Fatal("success = false, want true")
+	}
+	if payload.Data.Contexts == nil {
+		t.Fatal("contexts slice is nil, want empty array")
+	}
+	if len(payload.Data.Contexts) != 0 {
+		t.Fatalf("contexts = %d, want 0", len(payload.Data.Contexts))
+	}
+}
+
 func TestExecInputSync_PromptBeforeOutputReturnsEmpty(t *testing.T) {
 	outputCh := make(chan process.ProcessOutput, 2)
 	proc := &fakeProcess{

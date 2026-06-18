@@ -125,7 +125,7 @@ func (s *Server) listSnapshots(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var responses []snapshotResponse
+	responses := make([]snapshotResponse, 0, len(snapshots))
 	for _, snap := range snapshots {
 		resp := snapshotResponse{
 			ID:          snap.ID,

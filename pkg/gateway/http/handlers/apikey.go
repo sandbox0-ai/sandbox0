@@ -67,6 +67,9 @@ func (h *APIKeyHandler) ListAPIKeys(c *gin.Context) {
 		return
 	}
 	keys = filterVisibleAPIKeys(authCtx, keys)
+	if keys == nil {
+		keys = []*apikey.APIKey{}
+	}
 
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"api_keys": keys})
 }

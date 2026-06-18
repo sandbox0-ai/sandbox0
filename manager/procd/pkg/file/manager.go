@@ -230,7 +230,7 @@ func (m *Manager) ListDir(path string) ([]*FileInfo, error) {
 		return nil, err
 	}
 
-	var result []*FileInfo
+	result := make([]*FileInfo, 0, len(entries))
 	for _, entry := range entries {
 		info, err := entry.Info()
 		if err != nil {

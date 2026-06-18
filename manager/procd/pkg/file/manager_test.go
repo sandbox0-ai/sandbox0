@@ -492,6 +492,31 @@ func TestListDir(t *testing.T) {
 	}
 }
 
+func TestListDirEmptyReturnsEmptySlice(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "test-file-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	m, err := NewManager(tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+
+	entries, err := m.ListDir(".")
+	if err != nil {
+		t.Fatalf("ListDir() failed = %v", err)
+	}
+	if entries == nil {
+		t.Fatal("ListDir() returned nil, want empty slice")
+	}
+	if len(entries) != 0 {
+		t.Fatalf("ListDir() returned %d entries, want 0", len(entries))
+	}
+}
+
 // TestGetRootPath tests GetRootPath returns the configured root.
 func TestGetRootPath(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "test-file-")

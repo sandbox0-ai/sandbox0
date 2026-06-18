@@ -19,6 +19,10 @@ type memorySourceStore struct {
 	records map[string]*egressauth.CredentialSourceMetadata
 }
 
+type nilListSourceStore struct {
+	*memorySourceStore
+}
+
 func newMemorySourceStore() *memorySourceStore {
 	return &memorySourceStore{records: make(map[string]*egressauth.CredentialSourceMetadata)}
 }
@@ -58,6 +62,25 @@ func (s *memorySourceStore) PutSource(_ context.Context, teamID string, record *
 func (s *memorySourceStore) DeleteSource(_ context.Context, teamID, name string) error {
 	delete(s.records, teamID+"/"+name)
 	return nil
+}
+
+func (s *nilListSourceStore) ListSourceMetadata(context.Context, string) ([]egressauth.CredentialSourceMetadata, error) {
+	return nil, nil
+}
+
+func TestCredentialSourceServiceListSourcesReturnsEmptySlice(t *testing.T) {
+	svc := NewCredentialSourceService(&nilListSourceStore{memorySourceStore: newMemorySourceStore()}, zap.NewNop())
+
+	records, err := svc.ListSources(context.Background(), "team-1")
+	if err != nil {
+		t.Fatalf("list sources: %v", err)
+	}
+	if records == nil {
+		t.Fatal("records slice is nil, want empty slice")
+	}
+	if len(records) != 0 {
+		t.Fatalf("records = %d, want 0", len(records))
+	}
 }
 
 func TestCredentialSourceServicePutSource(t *testing.T) {

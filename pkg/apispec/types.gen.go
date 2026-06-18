@@ -635,8 +635,14 @@ type ContainerSpec struct {
 
 // ContextExecResponse defines model for ContextExecResponse.
 type ContextExecResponse struct {
+	// ExitCode Present when the underlying process has exited.
+	ExitCode *int32 `json:"exit_code,omitempty"`
+
 	// OutputRaw Raw PTY output, may contain terminal control characters (e.g. \r)
 	OutputRaw string `json:"output_raw"`
+
+	// State Final process state when the underlying process has exited.
+	State *string `json:"state,omitempty"`
 }
 
 // ContextInputRequest defines model for ContextInputRequest.
@@ -663,13 +669,19 @@ type ContextResponse struct {
 	CreatedAt string             `json:"created_at"`
 	Cwd       *string            `json:"cwd,omitempty"`
 	EnvVars   *map[string]string `json:"env_vars,omitempty"`
-	Id        string             `json:"id"`
+
+	// ExitCode Present when the underlying process has exited.
+	ExitCode *int32 `json:"exit_code,omitempty"`
+	Id       string `json:"id"`
 
 	// OutputRaw Raw PTY output for CMD contexts with wait=true, may contain terminal control characters
-	OutputRaw *string     `json:"output_raw,omitempty"`
-	Paused    bool        `json:"paused"`
-	Running   bool        `json:"running"`
-	Type      ProcessType `json:"type"`
+	OutputRaw *string `json:"output_raw,omitempty"`
+	Paused    bool    `json:"paused"`
+	Running   bool    `json:"running"`
+
+	// State Final process state when the underlying process has exited.
+	State *string     `json:"state,omitempty"`
+	Type  ProcessType `json:"type"`
 }
 
 // ContextStatsResponse defines model for ContextStatsResponse.

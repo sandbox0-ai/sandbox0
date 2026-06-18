@@ -232,6 +232,10 @@ process.stdout.write(cmdResult.outputRaw);`
   ]}
 />
 
+When a non-streaming Cmd waits for completion, the response includes `output_raw`,
+`exit_code`, and `state`. `s0 sandbox exec` exits locally with the remote command
+exit code when it is non-zero.
+
 ### Cmd with Options
 
 <Tabs
@@ -388,6 +392,9 @@ Create a new context in a sandbox.
 | `ttl_sec` | integer | Context time-to-live in seconds |
 | `idle_timeout_sec` | integer | Idle timeout in seconds |
 | `wait_until_done` | boolean | Wait for completion (default: false) |
+
+For Cmd contexts created with `wait_until_done: true`, the response includes
+`output_raw`, `exit_code`, and `state` after the process exits.
 
 ### REPL Configuration
 
@@ -980,6 +987,9 @@ Execute input and wait for completion. For REPL contexts, the server appends a t
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/contexts/{'{ctx_id}'}/exec
 </Endpoint>
+
+The response always includes `output_raw`. It also includes `exit_code` and
+`state` when the underlying process has exited.
 
 <Tabs
   tabs={[

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -194,6 +195,87 @@ func TestCreateContextReturnsBadRequestForInvalidProcessConfig(t *testing.T) {
 				t.Fatalf("response = %+v, want invalid_request error", resp)
 			}
 		})
+	}
+}
+
+func TestCreateContextWaitUntilDoneIncludesCMDTerminalStatus(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell command fixture requires POSIX")
+	}
+	handler := NewContextHandler(ctxpkg.NewManager(), zap.NewNop())
+	req := httptest.NewRequest(http.MethodPost, "/contexts", strings.NewReader(`{
+		"type": "cmd",
+		"cmd": {"command": ["/bin/sh", "-c", "printf done; sleep 0.05; exit 7"]},
+		"wait_until_done": true
+	}`))
+	rec := httptest.NewRecorder()
+
+	handler.Create(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var resp struct {
+		Success bool            `json:"success"`
+		Data    ContextResponse `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("success = false, body = %s", rec.Body.String())
+	}
+	if resp.Data.OutputRaw != "done" {
+		t.Fatalf("output_raw = %q, want done", resp.Data.OutputRaw)
+	}
+	if resp.Data.ExitCode == nil || *resp.Data.ExitCode != 7 {
+		t.Fatalf("exit_code = %#v, want 7", resp.Data.ExitCode)
+	}
+	if resp.Data.State != string(process.ProcessStateCrashed) {
+		t.Fatalf("state = %q, want %q", resp.Data.State, process.ProcessStateCrashed)
+	}
+}
+
+func TestExecReturnsCMDTerminalStatus(t *testing.T) {
+	outputCh := make(chan process.ProcessOutput, 1)
+	var proc *fakeProcess
+	proc = &fakeProcess{
+		outputCh:    outputCh,
+		processType: process.ProcessTypeCMD,
+		onWrite: func([]byte) {
+			outputCh <- process.ProcessOutput{Source: process.OutputSourceStdout, Data: []byte("failed\n")}
+			proc.triggerExit(process.ExitEvent{ExitCode: 9, State: process.ProcessStateCrashed})
+			close(outputCh)
+		},
+	}
+	handler, ctx := newHandlerWithContext(proc, process.ProcessTypeCMD)
+	req := httptest.NewRequest(http.MethodPost, "/contexts/"+ctx.ID+"/exec", strings.NewReader(`{"data":"run"}`))
+	req = mux.SetURLVars(req, map[string]string{"id": ctx.ID})
+	rec := httptest.NewRecorder()
+
+	handler.Exec(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp struct {
+		Success bool                `json:"success"`
+		Data    ContextExecResponse `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("success = false, body = %s", rec.Body.String())
+	}
+	if resp.Data.OutputRaw != "failed\n" {
+		t.Fatalf("output_raw = %q, want failed newline", resp.Data.OutputRaw)
+	}
+	if resp.Data.ExitCode == nil || *resp.Data.ExitCode != 9 {
+		t.Fatalf("exit_code = %#v, want 9", resp.Data.ExitCode)
+	}
+	if resp.Data.State != string(process.ProcessStateCrashed) {
+		t.Fatalf("state = %q, want %q", resp.Data.State, process.ProcessStateCrashed)
 	}
 }
 

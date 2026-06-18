@@ -413,6 +413,117 @@ func TestSandboxFunctionServiceProxiesWebSocketThroughProcdPort(t *testing.T) {
 	}
 }
 
+func TestSandboxFunctionServiceExecutesAfterPausedAutoResume(t *testing.T) {
+	var executeCalled atomic.Bool
+	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/functions/execute" {
+			t.Fatalf("unexpected procd request %s %s", r.Method, r.URL.Path)
+		}
+		executeCalled.Store(true)
+		_ = spec.WriteSuccess(w, http.StatusOK, sandboxfunction.ExecuteResponse{
+			Status:     http.StatusCreated,
+			BodyBase64: "cmVzdW1lZCBmdW5jdGlvbiBvaw==",
+		})
+	}))
+	defer procd.Close()
+
+	port := serverPort(t, procd.URL)
+	activeSandbox := newFunctionServiceSandbox(procd.URL, port)
+	activeSandbox.Status = mgr.SandboxStatusRunning
+	activeSandbox.Services[0].Ingress.Routes[0].Resume = true
+	managerURL, resumed := newPausedFunctionManager(t, activeSandbox)
+
+	gateway := newSandboxServiceExposureTestServerWithManagerURL(t, managerURL)
+	gatewayServer := httptest.NewServer(gateway)
+	defer gatewayServer.Close()
+
+	req, err := http.NewRequest(http.MethodPost, gatewayServer.URL+"/events/resume", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Host = fmt.Sprintf("sb-demo--p%d.aws-us-east-1.sandbox0.app", port)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway request: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d body=%s", resp.StatusCode, string(body))
+	}
+	if string(body) != "resumed function ok" {
+		t.Fatalf("body = %q, want resumed function ok", string(body))
+	}
+	if !resumed.Load() {
+		t.Fatal("manager resume was not called")
+	}
+	if !executeCalled.Load() {
+		t.Fatal("function execute was not called")
+	}
+}
+
+func TestSandboxFunctionServiceProxiesWebSocketAfterPausedAutoResume(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/functions/ws" {
+			t.Fatalf("unexpected procd request %s %s", r.Method, r.URL.Path)
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade procd websocket: %v", err)
+		}
+		defer conn.Close()
+		var initReq sandboxfunction.ExecuteRequest
+		if err := conn.ReadJSON(&initReq); err != nil {
+			t.Fatalf("read init request: %v", err)
+		}
+		messageType, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read proxied message: %v", err)
+		}
+		if err := conn.WriteMessage(messageType, []byte("echo:"+string(data))); err != nil {
+			t.Fatalf("write proxied message: %v", err)
+		}
+	}))
+	defer procd.Close()
+
+	port := serverPort(t, procd.URL)
+	activeSandbox := newFunctionServiceSandbox(procd.URL, port)
+	activeSandbox.Status = mgr.SandboxStatusRunning
+	activeSandbox.Services[0].Ingress.Routes[0].Resume = true
+	managerURL, resumed := newPausedFunctionManager(t, activeSandbox)
+
+	gateway := newSandboxServiceExposureTestServerWithManagerURL(t, managerURL)
+	gatewayServer := httptest.NewServer(gateway)
+	defer gatewayServer.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(gatewayServer.URL, "http") + "/events/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, http.Header{
+		"Host": {fmt.Sprintf("sb-demo--p%d.aws-us-east-1.sandbox0.app", port)},
+	})
+	if err != nil {
+		t.Fatalf("dial gateway websocket: %v", err)
+	}
+	defer conn.Close()
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("after-pause")); err != nil {
+		t.Fatalf("write gateway websocket: %v", err)
+	}
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read gateway websocket: %v", err)
+	}
+	if string(data) != "echo:after-pause" {
+		t.Fatalf("websocket data = %q, want echo:after-pause", string(data))
+	}
+	if !resumed.Load() {
+		t.Fatal("manager resume was not called")
+	}
+}
+
 func TestSandboxCMDServiceStartsContextBeforeProxy(t *testing.T) {
 	var created atomic.Bool
 	var createReq procdCreateContextRequest
@@ -624,6 +735,33 @@ func newFunctionServiceSandbox(internalAddr string, port int) *mgr.Sandbox {
 			},
 		}},
 	}
+}
+
+func newPausedFunctionManager(t *testing.T, activeSandbox *mgr.Sandbox) (string, *atomic.Bool) {
+	t.Helper()
+	pausedSandbox := *activeSandbox
+	pausedSandbox.InternalAddr = ""
+	pausedSandbox.Status = mgr.SandboxStatusPaused
+	pausedSandbox.Paused = true
+
+	var resumed atomic.Bool
+	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/internal/v1/sandboxes/sb-demo":
+			if resumed.Load() {
+				_ = spec.WriteSuccess(w, http.StatusOK, activeSandbox)
+				return
+			}
+			_ = spec.WriteSuccess(w, http.StatusOK, &pausedSandbox)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sandboxes/sb-demo/resume":
+			resumed.Store(true)
+			_ = spec.WriteSuccess(w, http.StatusOK, map[string]any{"sandbox_id": "sb-demo"})
+		default:
+			t.Fatalf("unexpected manager request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(manager.Close)
+	return manager.URL, &resumed
 }
 
 func newCMDServiceForTest(port int, resume bool) mgr.SandboxAppService {

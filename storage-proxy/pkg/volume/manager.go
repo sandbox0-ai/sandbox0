@@ -542,9 +542,10 @@ func (m *Manager) RefreshDirectVolumeFileMount(ctx context.Context, volumeID str
 
 func (m *Manager) SyncDirectVolumeFileMount(ctx context.Context, volumeID string) error {
 	m.mu.RLock()
-	lease := m.directMounts[volumeID]
+	_, hasDirectLease := m.directMounts[volumeID]
+	_, hasLocalMount := m.volumes[volumeID]
 	m.mu.RUnlock()
-	if lease == nil {
+	if !hasDirectLease && !hasLocalMount {
 		return nil
 	}
 	volCtx, err := m.GetVolume(volumeID)

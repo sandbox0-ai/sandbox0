@@ -66,12 +66,17 @@ func (s *Server) updateSandboxServices(c *gin.Context) {
 	}
 
 	var req struct {
-		Services []service.SandboxAppService `json:"services"`
+		Services *[]service.SandboxAppService `json:"services"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return
 	}
+	if req.Services == nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "services is required")
+		return
+	}
+	services := *req.Services
 
 	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
 	if err != nil {
@@ -82,14 +87,14 @@ func (s *Server) updateSandboxServices(c *gin.Context) {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox belongs to a different team")
 		return
 	}
-	if !sandbox.AutoResume && service.SandboxAppServicesHaveResumeRoute(req.Services) {
+	if !sandbox.AutoResume && service.SandboxAppServicesHaveResumeRoute(services) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest,
 			"cannot set resume=true on public routes when sandbox auto_resume is disabled")
 		return
 	}
 
 	updated, err := s.sandboxService.UpdateSandbox(c.Request.Context(), sandboxID, &service.SandboxUpdateConfig{
-		Services: req.Services,
+		Services: services,
 	})
 	if err != nil {
 		s.logger.Error("Failed to update sandbox services",

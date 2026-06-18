@@ -801,6 +801,21 @@ func TestValidateClaimMountsRejectsDuplicateVolume(t *testing.T) {
 	}
 }
 
+func TestNormalizeSandboxConfigRejectsTTLGreaterThanHardTTL(t *testing.T) {
+	cfg := &SandboxConfig{
+		TTL:     int32Ptr(1000),
+		HardTTL: int32Ptr(10),
+	}
+
+	err := normalizeSandboxConfigForPersistence(cfg)
+	if err == nil {
+		t.Fatal("expected lifecycle validation error")
+	}
+	if !errors.Is(err, ErrInvalidClaimRequest) {
+		t.Fatalf("expected ErrInvalidClaimRequest, got %v", err)
+	}
+}
+
 func TestValidateClaimMountsRejectsDuplicateMountPoint(t *testing.T) {
 	req := &ClaimRequest{
 		Mounts: []ClaimMount{

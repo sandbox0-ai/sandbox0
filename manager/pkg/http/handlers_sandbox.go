@@ -48,6 +48,10 @@ func (s *Server) claimSandbox(c *gin.Context) {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 			return
 		}
+		if apierrors.IsNotFound(err) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, err.Error())
+			return
+		}
 		if errors.Is(err, service.ErrClaimConflict) {
 			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
 			return
@@ -87,6 +91,10 @@ func (s *Server) listSandboxes(c *gin.Context) {
 		Status:     c.Query("status"),
 		TemplateID: c.Query("template_id"),
 	}
+	if req.Status != "" && !isValidSandboxListStatus(req.Status) {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid status parameter")
+		return
+	}
 
 	// Parse paused filter
 	if pausedStr := c.Query("paused"); pausedStr != "" {
@@ -105,6 +113,10 @@ func (s *Server) listSandboxes(c *gin.Context) {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid limit parameter")
 			return
 		}
+		if limit < 1 || limit > 200 {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "limit must be between 1 and 200")
+			return
+		}
 		req.Limit = limit
 	}
 
@@ -113,6 +125,10 @@ func (s *Server) listSandboxes(c *gin.Context) {
 		offset, err := strconv.Atoi(offsetStr)
 		if err != nil {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid offset parameter")
+			return
+		}
+		if offset < 0 {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "offset must be >= 0")
 			return
 		}
 		req.Offset = offset
@@ -129,6 +145,21 @@ func (s *Server) listSandboxes(c *gin.Context) {
 	}
 
 	spec.JSONSuccess(c, http.StatusOK, resp)
+}
+
+func isValidSandboxListStatus(status string) bool {
+	switch status {
+	case service.SandboxStatusStarting,
+		service.SandboxStatusRunning,
+		service.SandboxStatusPausing,
+		service.SandboxStatusPaused,
+		service.SandboxStatusResuming,
+		service.SandboxStatusTerminating,
+		service.SandboxStatusFailed:
+		return true
+	default:
+		return false
+	}
 }
 
 // getSandbox gets a sandbox
@@ -238,6 +269,10 @@ func (s *Server) updateSandbox(c *gin.Context) {
 
 	updated, err := s.sandboxService.UpdateSandbox(c.Request.Context(), sandboxID, req.Config)
 	if err != nil {
+		if errors.Is(err, service.ErrInvalidClaimRequest) {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+			return
+		}
 		s.logger.Error("Failed to update sandbox",
 			zap.String("sandboxID", sandboxID),
 			zap.Error(err),
@@ -644,11 +679,17 @@ func (s *Server) refreshSandbox(c *gin.Context) {
 
 	// Parse optional request body
 	var req service.RefreshRequest
-	// Ignore error - body is optional
-	_ = c.ShouldBindJSON(&req)
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
+		return
+	}
 
 	resp, err := s.sandboxService.RefreshSandbox(c.Request.Context(), sandboxID, &req)
 	if err != nil {
+		if errors.Is(err, service.ErrInvalidClaimRequest) {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+			return
+		}
 		s.logger.Error("Failed to refresh sandbox",
 			zap.String("sandboxID", sandboxID),
 			zap.Error(err),

@@ -101,6 +101,70 @@ func TestListSandboxesReturnsOK(t *testing.T) {
 	}
 }
 
+func TestListSandboxesRejectsNegativeOffset(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := &Server{logger: zap.NewNop()}
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes?offset=-1", nil)
+	request = request.WithContext(internalauth.WithClaims(request.Context(), &internalauth.Claims{TeamID: "team-1"}))
+	ctx.Request = request
+
+	server.listSandboxes(ctx)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+
+	var response spec.Response
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if response.Success || response.Error == nil || response.Error.Code != spec.CodeBadRequest {
+		t.Fatalf("response = %+v, want bad_request error", response)
+	}
+}
+
+func TestListSandboxesRejectsInvalidStatusAndLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "invalid status", path: "/api/v1/sandboxes?status=not-a-status"},
+		{name: "zero limit", path: "/api/v1/sandboxes?limit=0"},
+		{name: "negative limit", path: "/api/v1/sandboxes?limit=-1"},
+		{name: "limit above maximum", path: "/api/v1/sandboxes?limit=201"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := &Server{logger: zap.NewNop()}
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			request = request.WithContext(internalauth.WithClaims(request.Context(), &internalauth.Claims{TeamID: "team-1"}))
+			ctx.Request = request
+
+			server.listSandboxes(ctx)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+			}
+
+			var response spec.Response
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("unmarshal response: %v", err)
+			}
+			if response.Success || response.Error == nil || response.Error.Code != spec.CodeBadRequest {
+				t.Fatalf("response = %+v, want bad_request error", response)
+			}
+		})
+	}
+}
+
 func TestClaimSandboxReturnsUnavailableWhenDataPlaneNotReady(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	withHTTPTestManagerConfig(t, `sandbox_pod_placement:
@@ -146,6 +210,116 @@ func TestClaimSandboxReturnsUnavailableWhenDataPlaneNotReady(t *testing.T) {
 	}
 	if got := recorder.Header().Get("Retry-After"); got != "1" {
 		t.Fatalf("Retry-After = %q, want 1", got)
+	}
+}
+
+func TestClaimSandboxReturnsNotFoundForMissingTemplate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	sandboxService := service.NewSandboxService(
+		fake.NewSimpleClientset(),
+		newHTTPTestPodLister(t),
+		nil,
+		nil,
+		nil,
+		staticHTTPTemplateLister{},
+		nil,
+		nil,
+		nil,
+		nil,
+		service.SandboxServiceConfig{},
+		zap.NewNop(),
+		nil,
+	)
+
+	server := &Server{sandboxService: sandboxService, logger: zap.NewNop()}
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"template":"missing"}`))
+	request = request.WithContext(internalauth.WithClaims(request.Context(), &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
+	ctx.Request = request
+
+	server.claimSandbox(ctx)
+
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusNotFound, recorder.Body.String())
+	}
+
+	var response spec.Response
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if response.Success || response.Error == nil || response.Error.Code != spec.CodeNotFound {
+		t.Fatalf("response = %+v, want not_found error", response)
+	}
+}
+
+func TestRefreshSandboxRejectsMalformedJSON(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "wrong duration type", body: `{"duration":"soon"}`},
+		{name: "malformed json", body: `{`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sandbox-1",
+					Namespace: "default",
+					Labels: map[string]string{
+						controller.LabelSandboxID: "sandbox-1",
+						controller.LabelPoolType:  controller.PoolTypeActive,
+					},
+					Annotations: map[string]string{
+						controller.AnnotationTeamID: "team-1",
+					},
+				},
+				Status: corev1.PodStatus{PodIP: "10.0.0.10"},
+			}
+			sandboxService := service.NewSandboxService(
+				fake.NewSimpleClientset(pod),
+				newHTTPTestPodLister(t, pod),
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				service.SandboxServiceConfig{},
+				zap.NewNop(),
+				nil,
+			)
+
+			server := &Server{sandboxService: sandboxService, logger: zap.NewNop()}
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sandbox-1/refresh", strings.NewReader(tt.body))
+			request.Header.Set("Content-Type", "application/json")
+			request = request.WithContext(internalauth.WithClaims(request.Context(), &internalauth.Claims{TeamID: "team-1"}))
+			ctx.Params = gin.Params{{Key: "id", Value: "sandbox-1"}}
+			ctx.Request = request
+
+			server.refreshSandbox(ctx)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+			}
+
+			var response spec.Response
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("unmarshal response: %v", err)
+			}
+			if response.Success || response.Error == nil || response.Error.Code != spec.CodeBadRequest {
+				t.Fatalf("response = %+v, want bad_request error", response)
+			}
+		})
 	}
 }
 

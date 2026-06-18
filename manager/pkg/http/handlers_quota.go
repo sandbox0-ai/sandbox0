@@ -12,7 +12,7 @@ import (
 )
 
 type putTeamQuotaRequest struct {
-	LimitValue int64 `json:"limit_value"`
+	LimitValue *int64 `json:"limit_value"`
 }
 
 func (s *Server) getTeamQuota(c *gin.Context) {
@@ -55,11 +55,15 @@ func (s *Server) putTeamQuota(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return
 	}
-	if req.LimitValue < 0 {
+	if req.LimitValue == nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "limit_value is required")
+		return
+	}
+	if *req.LimitValue < 0 {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "limit_value must be non-negative")
 		return
 	}
-	limit := &quota.Limit{TeamID: teamID, Dimension: dimension, LimitValue: req.LimitValue}
+	limit := &quota.Limit{TeamID: teamID, Dimension: dimension, LimitValue: *req.LimitValue}
 	if err := s.quotaRepo.PutLimit(c.Request.Context(), limit); err != nil {
 		s.logger.Error("Failed to put quota limit", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to update quota")

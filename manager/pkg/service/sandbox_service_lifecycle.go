@@ -491,6 +491,9 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 			merged.HardTTL = cfg.HardTTL
 			setHardExpirationAnnotation(updatedPod.Annotations, s.clock.Now(), cfg.HardTTL)
 		}
+		if err := validateSandboxConfigLifecycle(merged.TTL, merged.HardTTL); err != nil {
+			return err
+		}
 		if cfg.AutoResume != nil {
 			merged.AutoResume = cfg.AutoResume
 		}
@@ -590,14 +593,21 @@ func (s *SandboxService) updatePausedSandboxRecord(ctx context.Context, record *
 	}
 	merged := record.Config
 	now := s.clock.Now()
+	nextExpiresAt := record.ExpiresAt
+	nextHardExpiresAt := record.HardExpiresAt
 	if cfg.TTL != nil {
 		merged.TTL = cfg.TTL
-		record.ExpiresAt = expirationFromTTL(now, cfg.TTL)
+		nextExpiresAt = expirationFromTTL(now, cfg.TTL)
 	}
 	if cfg.HardTTL != nil {
 		merged.HardTTL = cfg.HardTTL
-		record.HardExpiresAt = expirationFromTTL(now, cfg.HardTTL)
+		nextHardExpiresAt = expirationFromTTL(now, cfg.HardTTL)
 	}
+	if err := validateSandboxConfigLifecycle(merged.TTL, merged.HardTTL); err != nil {
+		return nil, err
+	}
+	record.ExpiresAt = nextExpiresAt
+	record.HardExpiresAt = nextHardExpiresAt
 	if cfg.AutoResume != nil {
 		merged.AutoResume = cfg.AutoResume
 	}
@@ -987,15 +997,24 @@ func (s *SandboxService) RefreshSandbox(ctx context.Context, sandboxID string, r
 
 	// Determine the TTL to apply. Explicit duration enables TTL for that duration; otherwise use original config/default.
 	var ttlToApply *int32
-	if req != nil && req.Duration > 0 {
-		ttlToApply = int32Ptr(req.Duration)
-	} else if originalConfig.TTL != nil {
+	if req != nil {
+		if req.Duration < 0 {
+			return nil, fmt.Errorf("%w: duration must be >= 0", ErrInvalidClaimRequest)
+		}
+		if req.Duration > 0 {
+			ttlToApply = int32Ptr(req.Duration)
+		}
+	}
+	if ttlToApply == nil && originalConfig.TTL != nil {
 		ttlToApply = originalConfig.TTL
-	} else if s.config.DefaultTTL > 0 {
+	} else if ttlToApply == nil && s.config.DefaultTTL > 0 {
 		ttlToApply = int32Ptr(int32(s.config.DefaultTTL.Seconds()))
 	}
 	if ttlToApply != nil && *ttlToApply > 0 {
 		ttlDuration = time.Duration(*ttlToApply) * time.Second
+	}
+	if err := validateSandboxConfigLifecycle(ttlToApply, originalConfig.HardTTL); err != nil {
+		return nil, err
 	}
 	setExpirationAnnotation(podCopy.Annotations, now, ttlToApply)
 

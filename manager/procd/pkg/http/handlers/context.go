@@ -120,7 +120,7 @@ type ContextStatsResponse struct {
 
 // ContextInputRequest is the request body for sending input to a context.
 type ContextInputRequest struct {
-	Data string `json:"data"`
+	Data *string `json:"data"`
 }
 
 // ContextExecResponse is the response body for synchronous execution.
@@ -172,6 +172,7 @@ func (e *execError) Error() string {
 }
 
 const execTimeout = 30 * time.Second
+const maxLinuxSignal = 64
 
 func newWSOutputMessage(source process.OutputSource, data string) wsOutputMessage {
 	return wsOutputMessage{
@@ -300,7 +301,7 @@ func (h *ContextHandler) Create(w http.ResponseWriter, r *http.Request) {
 		PTYSize: req.PTYSize,
 	}, replConfig, policy)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "create_failed", err.Error())
+		h.writeCreateContextError(w, err)
 		return
 	}
 
@@ -318,6 +319,17 @@ func (h *ContextHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, newContextResponse(ctx, ""))
+}
+
+func (h *ContextHandler) writeCreateContextError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, process.ErrInvalidCommand),
+		errors.Is(err, process.ErrUnsupportedLanguage),
+		errors.Is(err, process.ErrUnsupportedProcessType):
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, "create_failed", err.Error())
+	}
 }
 
 // Get gets a context by ID.
@@ -384,11 +396,27 @@ func (h *ContextHandler) WriteInput(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	if req.Data == nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "data is required")
+		return
+	}
 
-	err := h.manager.WriteInput(id, []byte(req.Data))
+	err := h.manager.WriteInput(id, []byte(*req.Data))
 	if err != nil {
 		if err == ctxpkg.ErrContextNotFound {
 			writeError(w, http.StatusNotFound, "context_not_found", err.Error())
+			return
+		}
+		if errors.Is(err, process.ErrProcessFinished) {
+			writeError(w, http.StatusGone, "process_finished", err.Error())
+			return
+		}
+		if errors.Is(err, process.ErrProcessNotRunning) {
+			writeError(w, http.StatusConflict, "process_not_running", err.Error())
+			return
+		}
+		if errors.Is(err, process.ErrInputBufferFull) {
+			writeError(w, http.StatusConflict, "input_buffer_full", err.Error())
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "write_failed", err.Error())
@@ -408,7 +436,7 @@ func (h *ContextHandler) Exec(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if req.Data == "" {
+	if req.Data == nil || *req.Data == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "data is required")
 		return
 	}
@@ -427,7 +455,7 @@ func (h *ContextHandler) Exec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	output, execErr, aborted := h.execInputSync(ctx, req.Data, r.Context())
+	output, execErr, aborted := h.execInputSync(ctx, *req.Data, r.Context())
 	if aborted {
 		return
 	}
@@ -707,7 +735,7 @@ func parseSignal(value string) (syscall.Signal, error) {
 		return syscall.SIGCONT, nil
 	}
 
-	if num, err := strconv.Atoi(upper); err == nil && num > 0 {
+	if num, err := strconv.Atoi(upper); err == nil && num > 0 && num <= maxLinuxSignal {
 		return syscall.Signal(num), nil
 	}
 

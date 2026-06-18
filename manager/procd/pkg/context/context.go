@@ -57,7 +57,7 @@ func NewContext(config process.ProcessConfig, replConfig *repl.REPLConfig, exitH
 		proc, err = createREPLProcess(id, config, replConfig)
 	case process.ProcessTypeCMD:
 		if len(config.Command) == 0 {
-			return nil, fmt.Errorf("CMD process type requires command to be specified in config.Command")
+			return nil, fmt.Errorf("%w: command is required", process.ErrInvalidCommand)
 		}
 		proc, err = createCMDProcess(id, config, config.Command)
 	default:

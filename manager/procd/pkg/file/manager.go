@@ -113,6 +113,9 @@ func (m *Manager) ReadFile(path string) ([]byte, error) {
 		if os.IsPermission(err) {
 			return nil, ErrPermissionDenied
 		}
+		if errors.Is(err, syscall.EISDIR) {
+			return nil, ErrPathNotFile
+		}
 		return nil, err
 	}
 
@@ -130,6 +133,17 @@ func (m *Manager) WriteFile(path string, data []byte, perm os.FileMode) error {
 	}
 
 	cleanPath := m.sanitizePath(path)
+	if info, err := os.Stat(cleanPath); err == nil && info.IsDir() {
+		return ErrPathNotFile
+	} else if err != nil && !os.IsNotExist(err) {
+		if os.IsPermission(err) {
+			return ErrPermissionDenied
+		}
+		if errors.Is(err, syscall.ENOTDIR) {
+			return ErrPathNotDir
+		}
+		return err
+	}
 
 	// Ensure parent directory exists
 	dir := filepath.Dir(cleanPath)
@@ -226,6 +240,9 @@ func (m *Manager) ListDir(path string) ([]*FileInfo, error) {
 		}
 		if os.IsPermission(err) {
 			return nil, ErrPermissionDenied
+		}
+		if errors.Is(err, syscall.ENOTDIR) {
+			return nil, ErrPathNotDir
 		}
 		return nil, err
 	}

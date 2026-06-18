@@ -26,4 +26,7 @@ var (
 
 	// ErrPathNotDir is returned when a path exists but is not a directory.
 	ErrPathNotDir = errors.New("path is not a directory")
+
+	// ErrPathNotFile is returned when a path exists but is not a file.
+	ErrPathNotFile = errors.New("path is not a file")
 )

@@ -609,9 +609,12 @@ type ClaimMountRequest struct {
 
 // ClaimRequest defines model for ClaimRequest.
 type ClaimRequest struct {
-	Config   *SandboxConfig       `json:"config,omitempty"`
-	Mounts   *[]ClaimMountRequest `json:"mounts,omitempty"`
-	Template *string              `json:"template,omitempty"`
+	Config *SandboxConfig       `json:"config,omitempty"`
+	Mounts *[]ClaimMountRequest `json:"mounts,omitempty"`
+
+	// SnapshotId Optional sandbox rootfs snapshot ID used to initialize the claimed sandbox writable root filesystem.
+	SnapshotId *string `json:"snapshot_id,omitempty"`
+	Template   *string `json:"template,omitempty"`
 }
 
 // ClaimResponse defines model for ClaimResponse.

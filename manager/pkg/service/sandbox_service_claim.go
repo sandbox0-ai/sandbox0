@@ -33,12 +33,13 @@ const (
 
 // ClaimRequest represents a sandbox claim request
 type ClaimRequest struct {
-	TeamID   string
-	UserID   string
-	Template string         `json:"template"`
-	Config   *SandboxConfig `json:"config,omitempty"`
-	Mounts   []ClaimMount   `json:"mounts,omitempty"`
-	Metadata *ClaimMetadata `json:"-"`
+	TeamID     string
+	UserID     string
+	Template   string         `json:"template"`
+	SnapshotID string         `json:"snapshot_id,omitempty"`
+	Config     *SandboxConfig `json:"config,omitempty"`
+	Mounts     []ClaimMount   `json:"mounts,omitempty"`
+	Metadata   *ClaimMetadata `json:"-"`
 	// SandboxID is an internal stable ID used when recreating an existing sandbox.
 	SandboxID string `json:"-"`
 	// RuntimeGeneration identifies the current runtime pod incarnation.
@@ -311,6 +312,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		return nil, err
 	}
 	req.Template = canonicalTemplateID
+	req.SnapshotID = strings.TrimSpace(req.SnapshotID)
 	phaseStarted = time.Now()
 	if err := validateClaimMounts(req); err != nil {
 		s.observeClaimPhase(req.Template, "unknown", "validate_claim_mounts", phaseStarted, err)
@@ -493,11 +495,36 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		s.refreshSandboxProbeConditionsAsync(pod)
 	}
 
+	claimRecordPersisted := false
+	cleanupClaimFailure := func(pod *corev1.Pod, reason string) {
+		s.requestSandboxDeletionAfterClaimFailure(pod, reason)
+		if claimRecordPersisted {
+			s.markSandboxDeletedAfterClaimFailure(req.SandboxID, reason)
+		}
+	}
+
+	if req.SnapshotID != "" {
+		phaseStarted = time.Now()
+		var recordPersisted bool
+		pod, recordPersisted, err = s.initializeClaimRootFSFromSnapshot(ctx, pod, template, req)
+		if recordPersisted {
+			claimRecordPersisted = true
+		}
+		s.observeClaimPhase(req.Template, claimType, "initialize_rootfs_snapshot", phaseStarted, err)
+		if err != nil {
+			cleanupClaimFailure(pod, "rootfs snapshot initialization failed")
+			if metrics != nil {
+				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+			}
+			return nil, fmt.Errorf("initialize rootfs from snapshot: %w", err)
+		}
+	}
+
 	phaseStarted = time.Now()
 	portalMounts, err := s.bindVolumePortals(ctx, pod, req, template)
 	s.observeClaimPhase(req.Template, claimType, "bind_volume_portals", phaseStarted, err)
 	if err != nil {
-		s.requestSandboxDeletionAfterClaimFailure(pod, "volume portal bind failed")
+		cleanupClaimFailure(pod, "volume portal bind failed")
 		if metrics != nil {
 			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
 		}
@@ -506,7 +533,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	phaseStarted = time.Now()
 	if err := s.bindWebhookStatePortal(ctx, pod, req); err != nil {
 		s.observeClaimPhase(req.Template, claimType, "bind_webhook_state_portal", phaseStarted, err)
-		s.requestSandboxDeletionAfterClaimFailure(pod, "webhook state portal bind failed")
+		cleanupClaimFailure(pod, "webhook state portal bind failed")
 		if metrics != nil {
 			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
 		}
@@ -518,7 +545,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	procdAddress, err := s.prodAddress(ctx, pod)
 	s.observeClaimPhase(req.Template, claimType, "resolve_procd_address", phaseStarted, err)
 	if err != nil {
-		s.requestSandboxDeletionAfterClaimFailure(pod, "procd address resolution failed")
+		cleanupClaimFailure(pod, "procd address resolution failed")
 		if metrics != nil {
 			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
 		}
@@ -527,7 +554,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	phaseStarted = time.Now()
 	if _, err := s.initializeProcd(ctx, pod, req, procdAddress); err != nil {
 		s.observeClaimPhase(req.Template, claimType, "initialize_procd", phaseStarted, err)
-		s.requestSandboxDeletionAfterClaimFailure(pod, "procd initialization failed")
+		cleanupClaimFailure(pod, "procd initialization failed")
 		if metrics != nil {
 			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
 		}
@@ -538,7 +565,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	phaseStarted = time.Now()
 	if err := s.persistClaimedSandbox(ctx, pod, template, req); err != nil {
 		s.observeClaimPhase(req.Template, claimType, "persist_sandbox", phaseStarted, err)
-		s.requestSandboxDeletionAfterClaimFailure(pod, "sandbox persistence failed")
+		cleanupClaimFailure(pod, "sandbox persistence failed")
 		if metrics != nil {
 			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
 		}
@@ -566,16 +593,20 @@ func (s *SandboxService) persistClaimedSandbox(ctx context.Context, pod *corev1.
 	if s == nil || s.sandboxStore == nil || pod == nil || template == nil || req == nil {
 		return nil
 	}
+	return s.sandboxStore.UpsertSandbox(ctx, sandboxRecordForClaimedPod(s, pod, template, req))
+}
+
+func sandboxRecordForClaimedPod(s *SandboxService, pod *corev1.Pod, template *v1alpha1.SandboxTemplate, req *ClaimRequest) *SandboxRecord {
 	sandboxID := sandboxIDFromPod(pod)
 	if sandboxID == "" {
 		sandboxID = req.SandboxID
 	}
 	if sandboxID == "" {
-		return fmt.Errorf("sandbox_id is required")
+		sandboxID = pod.Name
 	}
 	cfg := parseSandboxConfig(pod.Annotations[controller.AnnotationConfig])
 	mounts := parseClaimMounts(pod.Annotations[controller.AnnotationMounts])
-	return s.sandboxStore.UpsertSandbox(ctx, &SandboxRecord{
+	return &SandboxRecord{
 		ID:                  sandboxID,
 		TeamID:              req.TeamID,
 		UserID:              req.UserID,
@@ -594,7 +625,63 @@ func (s *SandboxService) persistClaimedSandbox(ctx context.Context, pod *corev1.
 		ExpiresAt:           parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt),
 		HardExpiresAt:       parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt),
 		CreatedAt:           s.clock.Now(),
-	})
+	}
+}
+
+func (s *SandboxService) initializeClaimRootFSFromSnapshot(ctx context.Context, pod *corev1.Pod, template *v1alpha1.SandboxTemplate, req *ClaimRequest) (*corev1.Pod, bool, error) {
+	if req == nil || strings.TrimSpace(req.SnapshotID) == "" {
+		return pod, false, nil
+	}
+	store, err := s.rootFSProductStore()
+	if err != nil {
+		return pod, false, err
+	}
+	snapshotID := strings.TrimSpace(req.SnapshotID)
+	if _, err := store.GetRootFSSnapshot(ctx, snapshotID, req.TeamID); err != nil {
+		return pod, false, err
+	}
+	record := sandboxRecordForClaimedPod(s, pod, template, req)
+	if strings.TrimSpace(record.ID) == "" {
+		return pod, false, fmt.Errorf("sandbox_id is required")
+	}
+	if err := s.sandboxStore.UpsertSandbox(ctx, record); err != nil {
+		return pod, false, err
+	}
+	restorer := sandboxRootFSRestorer(store)
+	if _, err := restorer.RestoreRootFSFromSnapshot(ctx, &RestoreRootFSFromSnapshotRequest{
+		SandboxID:  record.ID,
+		SnapshotID: snapshotID,
+		TeamID:     req.TeamID,
+	}); err != nil {
+		return pod, true, err
+	}
+	state, err := s.latestRootFSState(ctx, record.ID)
+	if err != nil {
+		return pod, true, fmt.Errorf("load rootfs snapshot state: %w", err)
+	}
+	if state == nil {
+		return pod, true, fmt.Errorf("%w: snapshot %s", ErrRootFSFilesystemNotFound, snapshotID)
+	}
+	pod, err = s.applySandboxRootFSCheckpointWithFallback(ctx, pod, record, template, req, state, SandboxStatusStarting)
+	if err != nil {
+		return pod, true, err
+	}
+	return pod, true, nil
+}
+
+func (s *SandboxService) markSandboxDeletedAfterClaimFailure(sandboxID, reason string) {
+	if s == nil || s.sandboxStore == nil || strings.TrimSpace(sandboxID) == "" {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.sandboxStore.MarkSandboxDeleted(cleanupCtx, sandboxID, s.now().UTC()); err != nil && s.logger != nil {
+		s.logger.Warn("Failed to mark sandbox deleted after claim failure",
+			zap.String("sandboxID", sandboxID),
+			zap.String("reason", reason),
+			zap.Error(err),
+		)
+	}
 }
 
 func runtimeGenerationFromPod(pod *corev1.Pod) int64 {

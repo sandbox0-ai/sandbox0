@@ -138,7 +138,7 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	if err != nil {
 		return pod, fmt.Errorf("load rootfs checkpoint: %w", err)
 	}
-	pod, err = s.applySandboxRootFSCheckpointWithFallback(ctx, pod, record, template, req, rootFSState)
+	pod, err = s.applySandboxRootFSCheckpointWithFallback(ctx, pod, record, template, req, rootFSState, SandboxStatusResuming)
 	if err != nil {
 		return pod, err
 	}

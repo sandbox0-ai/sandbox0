@@ -3999,6 +3999,9 @@ components:
       properties:
         template:
           type: string
+        snapshot_id:
+          type: string
+          description: Optional sandbox rootfs snapshot ID used to initialize the claimed sandbox writable root filesystem.
         config:
           $ref: "#/components/schemas/SandboxConfig"
         mounts:

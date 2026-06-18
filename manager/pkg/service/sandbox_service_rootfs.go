@@ -170,9 +170,12 @@ func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *
 	return nil
 }
 
-func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, template *v1alpha1.SandboxTemplate, req *ClaimRequest, state *SandboxRootFSState) (*corev1.Pod, error) {
+func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, template *v1alpha1.SandboxTemplate, req *ClaimRequest, state *SandboxRootFSState, fallbackStatus string) (*corev1.Pod, error) {
 	if state == nil {
 		return pod, nil
+	}
+	if strings.TrimSpace(fallbackStatus) == "" {
+		fallbackStatus = SandboxStatusResuming
 	}
 	err := s.applySandboxRootFSCheckpoint(ctx, pod, state)
 	if err == nil {
@@ -201,7 +204,7 @@ func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Co
 		s.requestSandboxDeletionAfterClaimFailure(fallbackPod, "checkpoint base image runtime readiness failed")
 		return fallbackPod, fmt.Errorf("%w; wait for checkpoint base image runtime: %v", err, fallbackErr)
 	}
-	if fallbackErr := s.saveRestoredRuntimePod(ctx, readyPod, record, SandboxStatusResuming); fallbackErr != nil {
+	if fallbackErr := s.saveRestoredRuntimePod(ctx, readyPod, record, fallbackStatus); fallbackErr != nil {
 		s.requestSandboxDeletionAfterClaimFailure(readyPod, "checkpoint base image runtime persistence failed")
 		return readyPod, fmt.Errorf("%w; save checkpoint base image runtime: %v", err, fallbackErr)
 	}

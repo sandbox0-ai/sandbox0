@@ -21,6 +21,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
@@ -117,6 +118,19 @@ func TestClaimRequestDoesNotAcceptRuntimeMetadataFromJSON(t *testing.T) {
 	}
 	if req.Metadata != nil {
 		t.Fatalf("metadata = %#v, want nil for public JSON input", req.Metadata)
+	}
+}
+
+func TestClaimRequestAcceptsSnapshotIDFromJSON(t *testing.T) {
+	var req ClaimRequest
+	if err := json.Unmarshal([]byte(`{
+		"template":"template-a",
+		"snapshot_id":"rootfs-snapshot-1"
+	}`), &req); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if req.SnapshotID != "rootfs-snapshot-1" {
+		t.Fatalf("SnapshotID = %q, want rootfs-snapshot-1", req.SnapshotID)
 	}
 }
 
@@ -602,6 +616,124 @@ func TestCreateNewPodFailsBeforeCreateWhenDataPlaneNotReady(t *testing.T) {
 	}
 	if len(pods.Items) != 0 {
 		t.Fatalf("pods after data-plane-not-ready cold claim = %d, want 0", len(pods.Items))
+	}
+}
+
+func TestClaimSandboxInitializesRootFSFromSnapshotBeforeProcd(t *testing.T) {
+	withClaimTestPublicKey(t)
+
+	templateID := "template-a"
+	templateNamespace, err := naming.TemplateNamespaceForBuiltin(templateID)
+	if err != nil {
+		t.Fatalf("template namespace: %v", err)
+	}
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      templateID,
+			Namespace: templateNamespace,
+		},
+	}
+
+	var calls []string
+	var applyReq ctldapi.ApplyRootFSRequest
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/rootfs/apply" {
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&applyReq); err != nil {
+			t.Fatalf("decode apply request: %v", err)
+		}
+		calls = append(calls, "apply")
+		_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
+	}))
+	defer ctld.Close()
+	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+
+	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/initialize" {
+			http.NotFound(w, r)
+			return
+		}
+		if len(calls) != 1 || calls[0] != "apply" {
+			t.Fatalf("calls before procd = %v, want [apply]", calls)
+		}
+		calls = append(calls, "procd")
+		if err := spec.WriteSuccess(w, http.StatusOK, InitializeResponse{SandboxID: "sandbox-a", TeamID: "team-a"}); err != nil {
+			t.Fatalf("write procd response: %v", err)
+		}
+	}))
+	defer procd.Close()
+	procdURL, procdPort := parsedTestServer(t, procd.URL)
+
+	idlePod := newClaimTestPod(templateNamespace, "idle-ready", templateID, true)
+	idlePod.Spec.NodeName = "node-a"
+	idlePod.Status.HostIP = ctldURL.Hostname()
+	idlePod.Status.PodIP = procdURL.Hostname()
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{},
+		rootFSSnapshots: map[string]*RootFSSnapshot{
+			"rootfs-snapshot-1": {
+				ID:              "rootfs-snapshot-1",
+				FilesystemID:    "source-fs",
+				TeamID:          "team-a",
+				SourceSandboxID: "source-sandbox",
+				HeadLayerID:     "layer-v1",
+				CreatedAt:       time.Now().UTC(),
+			},
+		},
+	}
+	client := fake.NewSimpleClientset(idlePod.DeepCopy())
+	svc := &SandboxService{
+		k8sClient:              client,
+		podLister:              newClaimTestPodLister(t, idlePod),
+		secretLister:           newClaimTestSecretLister(t),
+		templateLister:         staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
+		sandboxStore:           store,
+		ctldClient:             NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		procdClient:            NewProcdClient(ProcdClientConfig{Timeout: time.Second}),
+		internalTokenGenerator: staticTokenGenerator{},
+		config: SandboxServiceConfig{
+			CtldEnabled:      true,
+			CtldPort:         ctldPort,
+			ProcdPort:        procdPort,
+			ProcdInitTimeout: time.Second,
+		},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+
+	resp, err := svc.ClaimSandbox(context.Background(), &ClaimRequest{
+		Template:   templateID,
+		SnapshotID: "rootfs-snapshot-1",
+		TeamID:     "team-a",
+		UserID:     "user-a",
+	})
+	if err != nil {
+		t.Fatalf("ClaimSandbox() error = %v", err)
+	}
+	if resp == nil || resp.SandboxID == "" {
+		t.Fatalf("ClaimSandbox() response = %+v, want sandbox id", resp)
+	}
+	if len(calls) != 2 || calls[0] != "apply" || calls[1] != "procd" {
+		t.Fatalf("calls = %v, want [apply procd]", calls)
+	}
+	if applyReq.Target.PodName != "idle-ready" {
+		t.Fatalf("apply target pod = %q, want idle-ready", applyReq.Target.PodName)
+	}
+	if applyReq.BaselineLayerID != "layer-v1" {
+		t.Fatalf("BaselineLayerID = %q, want layer-v1", applyReq.BaselineLayerID)
+	}
+	if len(applyReq.Layers) != 1 || applyReq.Layers[0].LayerID != "layer-v1" {
+		t.Fatalf("apply layers = %+v, want layer-v1", applyReq.Layers)
+	}
+	state := store.rootFSStates[resp.SandboxID]
+	if state == nil || state.LayerID != "layer-v1" {
+		t.Fatalf("rootfs state = %+v, want layer-v1 for claimed sandbox", state)
+	}
+	record := store.records[resp.SandboxID]
+	if record == nil || record.Status != SandboxStatusRunning {
+		t.Fatalf("record = %+v, want running claimed sandbox", record)
 	}
 }
 

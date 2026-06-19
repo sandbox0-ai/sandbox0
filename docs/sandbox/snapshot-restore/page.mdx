@@ -29,6 +29,7 @@ Use [Volumes](/docs/volume) when data must be mounted by multiple sandboxes, acc
 ## State Model
 
 - `Create snapshot` reads the paused sandbox's current rootfs head and creates a snapshot record.
+- `Claim with snapshot_id` creates a running sandbox and initializes its writable rootfs from the selected snapshot before process APIs are initialized.
 - `Restore` changes a paused target sandbox rootfs head to the selected snapshot and leaves the sandbox paused.
 - `Fork` creates a new paused sandbox with the source sandbox configuration and an isolated rootfs fork.
 - `Resume` is required before reading or writing files through sandbox process and file APIs after restore or fork.
@@ -269,6 +270,63 @@ console.log("Created at:", fetched.createdAt);`
       language: "bash",
       code: `s0 sandbox snapshot list sb_abc123
 s0 sandbox snapshot get rootfs-snapshot-abc123`
+    }
+  ]}
+/>
+
+## Claim From A Snapshot
+
+Use `snapshot_id` on sandbox claim when you want a new running sandbox initialized from a named rootfs snapshot. The requested template still controls image, resources, mount declarations, services, network defaults, and other runtime shape. Sandbox0 applies the snapshot rootfs before file APIs, contexts, services, and SSH are initialized.
+
+<Endpoint method="POST">
+/api/v1/sandboxes
+</Endpoint>
+
+### Request Body
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `template` | string | Template ID to use |
+| `snapshot_id` | string | Rootfs snapshot ID used to initialize the new sandbox writable rootfs |
+| `config` | object | Optional sandbox configuration |
+| `mounts` | array | Optional claim-time Sandbox Volume mounts |
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `sandbox, err := client.ClaimSandbox(ctx, "default",
+    sandbox0.WithSandboxSnapshotID(snapshot.ID),
+    sandbox0.WithSandboxHardTTL(3600),
+)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("Sandbox ID: %s\\n", sandbox.ID)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `sandbox = client.sandboxes.claim(
+    "default",
+    snapshot_id=snapshot.id,
+)
+print(f"Sandbox ID: {sandbox.id}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const sandbox = await client.sandboxes.claim("default", {
+    snapshotId: snapshot.id,
+    config: { hardTtl: 3600 },
+});
+console.log("Sandbox ID:", sandbox.id);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox create --template default --snapshot-id rootfs-snapshot-abc123`
     }
   ]}
 />

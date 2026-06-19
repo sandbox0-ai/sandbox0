@@ -2,7 +2,7 @@
 
 Manage files and directories within a sandbox. The Files API provides full POSIX file operations including read, write, delete, move, and real-time file watching.
 
-Files written to the sandbox writable filesystem are restored across checkpointed pause/resume for the same sandbox identity, including paths that are not backed by mounted Volumes. They are deleted with the sandbox identity unless you publish a rootfs snapshot or fork before cleanup. Use [Snapshot And Restore](/docs/sandbox/snapshot-restore) for sandbox rootfs checkpoints, restore, and fork operations. Use [Volumes](/docs/volume) for data that must be shared across sandboxes or accessed directly without a running sandbox.
+Files written to the sandbox writable filesystem are restored across checkpointed pause/resume for the same sandbox identity, including paths that are not backed by mounted Volumes. They are deleted with the sandbox identity unless you publish a rootfs snapshot or fork before cleanup. Use [Snapshot And Restore](/docs/sandbox/snapshot-restore) for sandbox rootfs checkpoints, restore, and fork operations. Use [Volumes](/docs/sandbox/volume) for data that must be shared across sandboxes or accessed directly without a running sandbox.
 
 ## File Model
 

@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,7 +12,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
@@ -19,23 +19,14 @@ import (
 	"go.uber.org/zap"
 )
 
-func TestFunctionHandlerExecuteWaitsForRunner(t *testing.T) {
+func TestFunctionHandlerExecuteMissingRunnerReturnsRuntimeUnavailable(t *testing.T) {
 	dir := t.TempDir()
 	runnerPath := filepath.Join(dir, "runner")
 	handler := newFunctionHandler(functionHandlerConfig{runnerPath: runnerPath}, zap.NewNop())
 
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		_ = os.WriteFile(runnerPath, []byte(`#!/bin/sh
-cat >/dev/null
-printf '{"status":201,"body_base64":"b2s="}\n'
-`), 0o755)
-	}()
-
 	req := sandboxfunction.ExecuteRequest{
-		Runtime:   sandboxfunction.RuntimePython,
-		Handler:   sandboxfunction.DefaultHandler,
-		TimeoutMS: 1000,
+		Runtime: sandboxfunction.RuntimePython,
+		Handler: sandboxfunction.DefaultHandler,
 		Source: sandboxfunction.Source{
 			Type: sandboxfunction.SourceTypeInline,
 			Code: "def handler(request):\n    return {'status': 201}\n",
@@ -49,18 +40,15 @@ printf '{"status":201,"body_base64":"b2s="}\n'
 
 	rec := httptest.NewRecorder()
 	handler.Execute(rec, httptest.NewRequest(http.MethodPost, "/api/v1/functions/execute", bytes.NewReader(body)))
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
-	var envelope struct {
-		Success bool                            `json:"success"`
-		Data    sandboxfunction.ExecuteResponse `json:"data"`
-	}
+	var envelope spec.Response
 	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if !envelope.Success || envelope.Data.Status != http.StatusCreated {
-		t.Fatalf("response = %+v, want created function response", envelope)
+	if envelope.Error == nil || envelope.Error.Code != spec.CodeUnavailable || envelope.Error.Message != "function runtime unavailable" {
+		t.Fatalf("error = %#v, want runtime unavailable", envelope.Error)
 	}
 }
 
@@ -289,6 +277,43 @@ printf '{"type":"chunk","body_base64":"ZGF0YTogdHdvCgo="}\n'
 	}
 }
 
+func TestFunctionHandlerStreamMissingRunnerReturnsRuntimeUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	runnerPath := filepath.Join(dir, "runner")
+	handler := newFunctionHandler(functionHandlerConfig{
+		runnerPath: runnerPath,
+		cacheRoot:  filepath.Join(dir, "cache"),
+	}, zap.NewNop())
+	req := sandboxfunction.ExecuteRequest{
+		Runtime: sandboxfunction.RuntimePython,
+		Handler: sandboxfunction.DefaultHandler,
+		Source: sandboxfunction.Source{
+			Type: sandboxfunction.SourceTypeInline,
+			Code: "def handler(request):\n    return None\n",
+		},
+		Request: sandboxfunction.HTTPRequest{Method: "GET", Path: "/events"},
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	httpReq := httptest.NewRequest(http.MethodPost, "/api/v1/functions/stream", bytes.NewReader(body))
+	handler.Stream(rec, httpReq)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var envelope spec.Response
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Error == nil || envelope.Error.Code != spec.CodeUnavailable || envelope.Error.Message != "function runtime unavailable" {
+		t.Fatalf("error = %#v, want runtime unavailable", envelope.Error)
+	}
+}
+
 func TestFunctionHandlerWebSocketRunsRunner(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell runner fixture requires POSIX")
@@ -340,12 +365,9 @@ printf '{"type":"message","message_type":"text","data":"echo"}\n'
 	}
 }
 
-func TestFunctionHandlerWebSocketWaitsForRunner(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell runner fixture requires POSIX")
-	}
+func TestFunctionHandlerWebSocketMissingRunnerClosesRuntimeUnavailable(t *testing.T) {
 	dir := t.TempDir()
-	runnerPath := filepath.Join(dir, "runner.sh")
+	runnerPath := filepath.Join(dir, "runner")
 	handler := newFunctionHandler(functionHandlerConfig{
 		runnerPath: runnerPath,
 		cacheRoot:  filepath.Join(dir, "cache"),
@@ -353,19 +375,9 @@ func TestFunctionHandlerWebSocketWaitsForRunner(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(handler.WebSocket))
 	defer server.Close()
 
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		_ = os.WriteFile(runnerPath, []byte(`#!/bin/sh
-read init
-read message
-printf '{"type":"message","message_type":"text","data":"echo-after-wait"}\n'
-`), 0o755)
-	}()
-
 	req := sandboxfunction.ExecuteRequest{
-		Runtime:   sandboxfunction.RuntimePython,
-		Handler:   sandboxfunction.DefaultHandler,
-		TimeoutMS: 1000,
+		Runtime: sandboxfunction.RuntimePython,
+		Handler: sandboxfunction.DefaultHandler,
 		Source: sandboxfunction.Source{
 			Type: sandboxfunction.SourceTypeInline,
 			Code: "def handler(request):\n    return None\n",
@@ -381,14 +393,12 @@ printf '{"type":"message","message_type":"text","data":"echo-after-wait"}\n'
 	if err := conn.WriteJSON(req); err != nil {
 		t.Fatalf("write init: %v", err)
 	}
-	if err := conn.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
-		t.Fatalf("write message: %v", err)
+	_, _, err = conn.ReadMessage()
+	var closeErr *websocket.CloseError
+	if !errors.As(err, &closeErr) {
+		t.Fatalf("read error = %v, want close error", err)
 	}
-	_, data, err := conn.ReadMessage()
-	if err != nil && err != io.EOF {
-		t.Fatalf("read message: %v", err)
-	}
-	if string(data) != "echo-after-wait" {
-		t.Fatalf("data = %q, want echo-after-wait", string(data))
+	if closeErr.Code != websocket.CloseInternalServerErr || closeErr.Text != "function runtime unavailable" {
+		t.Fatalf("close error = %#v, want runtime unavailable", closeErr)
 	}
 }

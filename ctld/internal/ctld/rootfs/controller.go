@@ -23,10 +23,10 @@ var (
 
 type Runtime interface {
 	Inspect(ctx context.Context, target ctldapi.RootFSContainerRef) (ctldapi.RootFSInfo, error)
-	CreateDiff(ctx context.Context, info ctldapi.RootFSInfo) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error)
-	CreateDiffFromBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error)
-	ApplyDiff(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, content io.Reader) (ctldapi.RootFSDiffDescriptor, error)
-	CaptureBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string) error
+	CreateDiff(ctx context.Context, info ctldapi.RootFSInfo, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error)
+	CreateDiffFromBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error)
+	ApplyDiff(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, content io.Reader, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, error)
+	CaptureBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string) error
 }
 
 type Config struct {
@@ -82,7 +82,7 @@ func (c *Controller) SaveRootFS(r *http.Request, req ctldapi.SaveRootFSRequest) 
 	if err := validateSupportedRuntime(info); err != nil {
 		return ctldapi.SaveRootFSResponse{Info: info, Error: err.Error()}, http.StatusBadRequest
 	}
-	desc, reader, err := c.createDiff(ctx, info, strings.TrimSpace(req.ParentLayerID))
+	desc, reader, err := c.createDiff(ctx, info, strings.TrimSpace(req.ParentLayerID), req.ExcludedPaths)
 	if err != nil {
 		return ctldapi.SaveRootFSResponse{Info: info, Error: fmt.Sprintf("create rootfs diff: %v", err)}, statusForError(err)
 	}
@@ -138,36 +138,36 @@ func (c *Controller) ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest
 		if err := validateBaselineLayerID(req); err != nil {
 			return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, http.StatusBadRequest
 		}
-		applied, err := c.applyLayers(ctx, info, req.Layers)
+		applied, err := c.applyLayers(ctx, info, req.Layers, req.ExcludedPaths)
 		if err != nil {
 			return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, statusForError(err)
 		}
 		if req.BaselineLayerID != "" {
-			if err := c.runtime.CaptureBaseline(ctx, info, req.BaselineLayerID); err != nil {
+			if err := c.runtime.CaptureBaseline(ctx, info, req.BaselineLayerID, req.ExcludedPaths); err != nil {
 				return ctldapi.ApplyRootFSResponse{Info: info, Error: fmt.Sprintf("capture rootfs baseline: %v", err)}, statusForError(err)
 			}
 		}
 		return ctldapi.ApplyRootFSResponse{Info: info, Layers: applied, Applied: true}, http.StatusOK
 	}
 
-	applied, err := c.applyDescriptor(ctx, info, req.Descriptor)
+	applied, err := c.applyDescriptor(ctx, info, req.Descriptor, req.ExcludedPaths)
 	if err != nil {
 		return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, statusForError(err)
 	}
 	return ctldapi.ApplyRootFSResponse{Info: info, Descriptor: applied, Applied: true}, http.StatusOK
 }
 
-func (c *Controller) createDiff(ctx context.Context, info ctldapi.RootFSInfo, parentLayerID string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+func (c *Controller) createDiff(ctx context.Context, info ctldapi.RootFSInfo, parentLayerID string, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
 	if parentLayerID != "" {
-		return c.runtime.CreateDiffFromBaseline(ctx, info, parentLayerID)
+		return c.runtime.CreateDiffFromBaseline(ctx, info, parentLayerID, excludedPaths)
 	}
-	return c.runtime.CreateDiff(ctx, info)
+	return c.runtime.CreateDiff(ctx, info, excludedPaths)
 }
 
-func (c *Controller) applyLayers(ctx context.Context, info ctldapi.RootFSInfo, layers []ctldapi.RootFSLayerDescriptor) ([]ctldapi.RootFSLayerDescriptor, error) {
+func (c *Controller) applyLayers(ctx context.Context, info ctldapi.RootFSInfo, layers []ctldapi.RootFSLayerDescriptor, excludedPaths []string) ([]ctldapi.RootFSLayerDescriptor, error) {
 	applied := make([]ctldapi.RootFSLayerDescriptor, 0, len(layers))
 	for _, layer := range layers {
-		desc, err := c.applyDescriptor(ctx, info, layer.Descriptor)
+		desc, err := c.applyDescriptor(ctx, info, layer.Descriptor, excludedPaths)
 		if err != nil {
 			return nil, err
 		}
@@ -180,14 +180,14 @@ func (c *Controller) applyLayers(ctx context.Context, info ctldapi.RootFSInfo, l
 	return applied, nil
 }
 
-func (c *Controller) applyDescriptor(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor) (ctldapi.RootFSDiffDescriptor, error) {
+func (c *Controller) applyDescriptor(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, error) {
 	reader, err := c.store.Get(desc.ObjectKey, 0, -1)
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("download rootfs diff: %w", err)
 	}
 	defer reader.Close()
 
-	applied, err := c.runtime.ApplyDiff(ctx, info, desc, reader)
+	applied, err := c.runtime.ApplyDiff(ctx, info, desc, reader, excludedPaths)
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("apply rootfs diff: %w", err)
 	}

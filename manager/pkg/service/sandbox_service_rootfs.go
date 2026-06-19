@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -72,6 +73,7 @@ func (s *SandboxService) saveSandboxRootFSCheckpoint(ctx context.Context, pod *c
 		TeamID:                    teamID,
 		ExpectedRuntimeGeneration: generation,
 		ParentLayerID:             parentLayerID,
+		ExcludedPaths:             rootFSExcludedPathsForPod(pod),
 	}
 	resp, err := s.ctldClient.SaveRootFSWithTimeout(ctx, ctldAddress, saveReq, sandboxRootFSOperationTimeout)
 	if err != nil && parentLayerID != "" && rootFSBaselineMissing(err, resp) {
@@ -154,6 +156,7 @@ func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *
 			Size:      state.DiffSize,
 			ObjectKey: state.DiffObjectKey,
 		},
+		ExcludedPaths: rootFSExcludedPathsForPod(pod),
 	}
 	if layers := rootFSLayerDescriptors(state); len(layers) > 0 {
 		req.Layers = layers
@@ -168,6 +171,34 @@ func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *
 		return fmt.Errorf("apply sandbox rootfs checkpoint: ctld did not report applied")
 	}
 	return nil
+}
+
+func rootFSExcludedPathsForPod(pod *corev1.Pod) []string {
+	if pod == nil {
+		return nil
+	}
+	portals := expectedVolumePortalsForPod(pod)
+	if len(portals) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(portals))
+	out := make([]string, 0, len(portals))
+	for _, portal := range portals {
+		raw := strings.TrimSpace(portal.MountPath)
+		if raw == "" || !strings.HasPrefix(raw, "/") {
+			continue
+		}
+		mountPath := path.Clean(raw)
+		if mountPath == "/" {
+			continue
+		}
+		if _, ok := seen[mountPath]; ok {
+			continue
+		}
+		seen[mountPath] = struct{}{}
+		out = append(out, mountPath)
+	}
+	return out
 }
 
 func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, template *v1alpha1.SandboxTemplate, req *ClaimRequest, state *SandboxRootFSState, fallbackStatus string) (*corev1.Pod, error) {

@@ -23,12 +23,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-var rootFSSnapshotExcludedPaths = []string{
+var defaultRootFSSnapshotExcludedPaths = []string{
 	"/procd",
 	volumeportal.WebhookStateMountPath,
 }
 
-func (r *ContainerdRuntime) createOverlayUpperDiff(ctx context.Context, client containerdClient, info ctldapi.RootFSInfo) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, bool, error) {
+func (r *ContainerdRuntime) createOverlayUpperDiff(ctx context.Context, client containerdClient, info ctldapi.RootFSInfo, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, bool, error) {
 	if strings.TrimSpace(info.Snapshotter) != "overlayfs" {
 		return ctldapi.RootFSDiffDescriptor{}, nil, false, nil
 	}
@@ -36,7 +36,7 @@ func (r *ContainerdRuntime) createOverlayUpperDiff(ctx context.Context, client c
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, nil, true, err
 	}
-	desc, reader, err := writeOverlayUpperDiff(ctx, upperdir)
+	desc, reader, err := writeOverlayUpperDiff(ctx, upperdir, excludedPaths)
 	return desc, reader, true, err
 }
 
@@ -135,14 +135,16 @@ func rebasePath(path, fromRoot, toRoot string) (string, bool) {
 	return filepath.Join(toRoot, rel), true
 }
 
-func writeOverlayUpperDiff(ctx context.Context, upperdir string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
-	return writeOverlayDiffTar(upperdir, func(changeFn fs.ChangeFunc) error {
-		return walkOverlayUpper(ctx, upperdir, changeFn)
+func writeOverlayUpperDiff(ctx context.Context, upperdir string, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+	filter := newRootFSPathFilter(excludedPaths)
+	return writeOverlayDiffTar(upperdir, filter, func(changeFn fs.ChangeFunc) error {
+		return walkOverlayUpper(ctx, upperdir, filter, changeFn)
 	})
 }
 
-func writeOverlayUpperDiffFromBaseline(ctx context.Context, baselineDir, upperdir string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
-	return writeOverlayDiffTar(upperdir, func(changeFn fs.ChangeFunc) error {
+func writeOverlayUpperDiffFromBaseline(ctx context.Context, baselineDir, upperdir string, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+	filter := newRootFSPathFilter(excludedPaths)
+	return writeOverlayDiffTar(upperdir, filter, func(changeFn fs.ChangeFunc) error {
 		return fs.Changes(ctx, baselineDir, upperdir, func(kind fs.ChangeKind, path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
@@ -153,7 +155,13 @@ func writeOverlayUpperDiffFromBaseline(ctx context.Context, baselineDir, upperdi
 			default:
 			}
 			if kind == fs.ChangeKindDelete {
+				if filter.Excludes(path) {
+					return nil
+				}
 				return changeFn(kind, path, nil, nil)
+			}
+			if filter.Excludes(path) {
+				return nil
 			}
 			if isOverlayWhiteout(info) {
 				return changeFn(fs.ChangeKindDelete, path, nil, nil)
@@ -175,7 +183,7 @@ func writeOverlayUpperDiffFromBaseline(ctx context.Context, baselineDir, upperdi
 	})
 }
 
-func writeOverlayDiffTar(source string, walkChanges func(fs.ChangeFunc) error) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+func writeOverlayDiffTar(source string, filter rootFSPathFilter, walkChanges func(fs.ChangeFunc) error) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
 	tmp, err := os.CreateTemp("", "sandbox0-rootfs-overlay-diff-*.tar")
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, nil, err
@@ -191,7 +199,7 @@ func writeOverlayDiffTar(source string, walkChanges func(fs.ChangeFunc) error) (
 	digester := digest.Canonical.Digester()
 	writer := io.MultiWriter(tmp, digester.Hash())
 	cw := archive.NewChangeWriter(writer, source)
-	if err := walkChanges(filteredRootFSChangeFunc(cw.HandleChange)); err != nil {
+	if err := walkChanges(filter.ChangeFunc(cw.HandleChange)); err != nil {
 		_ = cw.Close()
 		return ctldapi.RootFSDiffDescriptor{}, nil, err
 	}
@@ -214,7 +222,7 @@ func writeOverlayDiffTar(source string, walkChanges func(fs.ChangeFunc) error) (
 	}, removeOnCloseFile{File: tmp}, nil
 }
 
-func walkOverlayUpper(ctx context.Context, upperdir string, changeFn fs.ChangeFunc) error {
+func walkOverlayUpper(ctx context.Context, upperdir string, filter rootFSPathFilter, changeFn fs.ChangeFunc) error {
 	return filepath.Walk(upperdir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -233,7 +241,7 @@ func walkOverlayUpper(ctx context.Context, upperdir string, changeFn fs.ChangeFu
 			return nil
 		}
 		changePath := string(filepath.Separator) + rel
-		if isRootFSSnapshotExcludedPath(changePath) {
+		if filter.Excludes(changePath) {
 			if info != nil && info.IsDir() {
 				return filepath.SkipDir
 			}
@@ -283,22 +291,100 @@ func isOverlayOpaqueDir(path string) (bool, error) {
 	return false, nil
 }
 
-func filteredRootFSChangeFunc(next fs.ChangeFunc) fs.ChangeFunc {
+type rootFSPathFilter struct {
+	excluded       []string
+	opaquePreserve []string
+}
+
+func newRootFSPathFilter(extraPaths []string) rootFSPathFilter {
+	seen := make(map[string]struct{}, len(defaultRootFSSnapshotExcludedPaths)+len(extraPaths))
+	excluded := make([]string, 0, len(defaultRootFSSnapshotExcludedPaths)+len(extraPaths))
+	var opaquePreserve []string
+	add := func(value string, preserveOpaque bool) {
+		clean := cleanRootFSPath(value)
+		if clean == "/" {
+			return
+		}
+		if _, ok := seen[clean]; !ok {
+			seen[clean] = struct{}{}
+			excluded = append(excluded, clean)
+		}
+		if preserveOpaque {
+			opaquePreserve = append(opaquePreserve, clean)
+		}
+	}
+	for _, value := range defaultRootFSSnapshotExcludedPaths {
+		add(value, false)
+	}
+	for _, value := range extraPaths {
+		add(value, true)
+	}
+	return rootFSPathFilter{excluded: excluded, opaquePreserve: opaquePreserve}
+}
+
+func (f rootFSPathFilter) Excludes(changePath string) bool {
+	clean := cleanRootFSPath(changePath)
+	for _, excluded := range f.excluded {
+		if clean == excluded || strings.HasPrefix(clean, excluded+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func (f rootFSPathFilter) ExcludesTarHeader(headerName string) bool {
+	if f.Excludes(headerName) {
+		return true
+	}
+	if target, opaque, ok := rootFSTarWhiteoutTargetPath(headerName); ok {
+		if opaque {
+			return f.AffectsOpaquePreservedPath(target)
+		}
+		return f.Excludes(target)
+	}
+	return false
+}
+
+func (f rootFSPathFilter) ChangeFunc(next fs.ChangeFunc) fs.ChangeFunc {
 	return func(kind fs.ChangeKind, changePath string, info os.FileInfo, err error) error {
 		if err != nil {
 			return next(kind, changePath, info, err)
 		}
-		if isRootFSSnapshotExcludedPath(changePath) {
+		if f.Excludes(changePath) {
 			return nil
+		}
+		if target, opaque, ok := rootFSChangeWhiteoutTargetPath(changePath); ok {
+			if opaque && f.AffectsOpaquePreservedPath(target) {
+				return nil
+			}
+			if !opaque && f.Excludes(target) {
+				return nil
+			}
 		}
 		return next(kind, changePath, info, err)
 	}
 }
 
-func filterRootFSDiffTar(desc ctldapi.RootFSDiffDescriptor, reader io.Reader) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
-	if strings.TrimSpace(desc.MediaType) != "" && strings.TrimSpace(desc.MediaType) != ocispec.MediaTypeImageLayer {
+func (f rootFSPathFilter) AffectsOpaquePreservedPath(dir string) bool {
+	clean := cleanRootFSPath(dir)
+	for _, preserved := range f.opaquePreserve {
+		if clean == preserved || strings.HasPrefix(preserved, clean+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldFilterRootFSDiffTar(desc ctldapi.RootFSDiffDescriptor) bool {
+	mediaType := strings.TrimSpace(desc.MediaType)
+	return mediaType == "" || mediaType == ocispec.MediaTypeImageLayer
+}
+
+func filterRootFSDiffTar(desc ctldapi.RootFSDiffDescriptor, reader io.Reader, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+	if !shouldFilterRootFSDiffTar(desc) {
 		return desc, noopReadSeekCloser{Reader: reader}, nil
 	}
+	filter := newRootFSPathFilter(excludedPaths)
 
 	tmp, err := os.CreateTemp("", "sandbox0-rootfs-filtered-diff-*.tar")
 	if err != nil {
@@ -325,7 +411,7 @@ func filterRootFSDiffTar(desc ctldapi.RootFSDiffDescriptor, reader io.Reader) (c
 			_ = tarWriter.Close()
 			return ctldapi.RootFSDiffDescriptor{}, nil, err
 		}
-		if isRootFSSnapshotExcludedPath(header.Name) {
+		if filter.ExcludesTarHeader(header.Name) {
 			continue
 		}
 
@@ -361,15 +447,47 @@ func filterRootFSDiffTar(desc ctldapi.RootFSDiffDescriptor, reader io.Reader) (c
 	return desc, removeOnCloseFile{File: tmp}, nil
 }
 
-func isRootFSSnapshotExcludedPath(changePath string) bool {
-	clean := cleanRootFSPath(changePath)
-	for _, excluded := range rootFSSnapshotExcludedPaths {
-		excluded = cleanRootFSPath(excluded)
-		if clean == excluded || strings.HasPrefix(clean, excluded+"/") {
-			return true
+func (f rootFSPathFilter) RemoveAll(root string) error {
+	for _, excluded := range f.excluded {
+		rel := strings.TrimPrefix(excluded, "/")
+		if rel == "" {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(root, filepath.FromSlash(rel))); err != nil {
+			return fmt.Errorf("remove excluded rootfs path %s: %w", excluded, err)
 		}
 	}
-	return false
+	return nil
+}
+
+func rootFSTarWhiteoutTargetPath(headerName string) (string, bool, bool) {
+	clean := cleanRootFSPath(headerName)
+	base := path.Base(clean)
+	if base == ".wh..wh..opq" {
+		return path.Dir(clean), true, true
+	}
+	return rootFSFileWhiteoutTargetPath(clean)
+}
+
+func rootFSChangeWhiteoutTargetPath(changePath string) (string, bool, bool) {
+	clean := cleanRootFSPath(changePath)
+	base := path.Base(clean)
+	if base == ".wh..opq" {
+		return path.Dir(clean), true, true
+	}
+	return rootFSFileWhiteoutTargetPath(clean)
+}
+
+func rootFSFileWhiteoutTargetPath(clean string) (string, bool, bool) {
+	base := path.Base(clean)
+	if !strings.HasPrefix(base, ".wh.") {
+		return "", false, false
+	}
+	name := strings.TrimPrefix(base, ".wh.")
+	if name == "" {
+		return "", false, false
+	}
+	return path.Join(path.Dir(clean), name), false, true
 }
 
 func cleanRootFSPath(value string) string {

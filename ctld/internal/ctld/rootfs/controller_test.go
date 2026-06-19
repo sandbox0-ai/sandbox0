@@ -61,6 +61,7 @@ func TestControllerSaveRootFSUploadsDiffWithDefaultObjectKey(t *testing.T) {
 	require.Equal(t, http.StatusOK, status, resp.Error)
 	assert.Equal(t, "sandbox-rootfs/team-1/sandbox-1/7/sha256/feedface.tar", resp.Descriptor.ObjectKey)
 	assert.Equal(t, rootFSInfo("gvisor"), runtime.createInfo)
+	assert.Empty(t, runtime.createExcludedPaths)
 	reader, err := store.Get(resp.Descriptor.ObjectKey, 0, -1)
 	require.NoError(t, err)
 	defer reader.Close()
@@ -87,12 +88,14 @@ func TestControllerSaveRootFSUsesParentBaseline(t *testing.T) {
 		SandboxID:     "sandbox-1",
 		TeamID:        "team-1",
 		ParentLayerID: "layer-parent",
+		ExcludedPaths: []string{"/workspace/data"},
 	})
 
 	require.Equal(t, http.StatusOK, status, resp.Error)
 	assert.True(t, runtime.createBaselineCalled)
 	assert.False(t, runtime.createCalled)
 	assert.Equal(t, "layer-parent", runtime.createBaselineLayerID)
+	assert.Equal(t, []string{"/workspace/data"}, runtime.createBaselineExcludedPaths)
 	assert.Equal(t, "sandbox-rootfs/team-1/sandbox-1/0/sha256/child.tar", resp.Descriptor.ObjectKey)
 	reader, err := store.Get(resp.Descriptor.ObjectKey, 0, -1)
 	require.NoError(t, err)
@@ -141,6 +144,7 @@ func TestControllerApplyRootFSDownloadsAndAppliesDiff(t *testing.T) {
 		ExpectedBaseImageDigest:     "sha256:base",
 		ExpectedSnapshotParent:      "parent-1",
 		ExpectedSnapshotParentChain: []string{"parent-1", "parent-0"},
+		ExcludedPaths:               []string{"/workspace/data"},
 		Descriptor: ctldapi.RootFSDiffDescriptor{
 			MediaType: "application/vnd.oci.image.layer.v1.tar",
 			Digest:    "sha256:feedface",
@@ -155,6 +159,7 @@ func TestControllerApplyRootFSDownloadsAndAppliesDiff(t *testing.T) {
 	assert.Equal(t, "rootfs diff", runtime.applyContent)
 	assert.Equal(t, rootFSInfo("runc"), runtime.applyInfo)
 	assert.Equal(t, "rootfs/diff.tar", runtime.applyInputDesc.ObjectKey)
+	assert.Equal(t, []string{"/workspace/data"}, runtime.applyExcludedPaths)
 }
 
 func TestControllerApplyRootFSAppliesLayerChainAndCapturesBaseline(t *testing.T) {
@@ -180,6 +185,7 @@ func TestControllerApplyRootFSAppliesLayerChainAndCapturesBaseline(t *testing.T)
 		ExpectedSnapshotParent:      "parent-1",
 		ExpectedSnapshotParentChain: []string{"parent-1", "parent-0"},
 		BaselineLayerID:             "layer-child",
+		ExcludedPaths:               []string{"/workspace/data"},
 		Layers: []ctldapi.RootFSLayerDescriptor{
 			{
 				LayerID: "layer-parent",
@@ -212,8 +218,10 @@ func TestControllerApplyRootFSAppliesLayerChainAndCapturesBaseline(t *testing.T)
 	require.Len(t, runtime.applyInputDescs, 2)
 	assert.Equal(t, "rootfs/parent.tar", runtime.applyInputDescs[0].ObjectKey)
 	assert.Equal(t, "rootfs/child.tar", runtime.applyInputDescs[1].ObjectKey)
+	assert.Equal(t, [][]string{{"/workspace/data"}, {"/workspace/data"}}, runtime.applyExcludedPathCalls)
 	assert.True(t, runtime.captureBaselineCalled)
 	assert.Equal(t, "layer-child", runtime.captureBaselineLayerID)
+	assert.Equal(t, []string{"/workspace/data"}, runtime.captureBaselineExcludedPaths)
 	assert.Equal(t, rootFSInfo("runc"), runtime.captureInfo)
 }
 
@@ -357,21 +365,26 @@ type fakeRuntime struct {
 	applyErr              error
 	captureBaselineErr    error
 
-	inspectTargets         []ctldapi.RootFSContainerRef
-	createCalled           bool
-	createInfo             ctldapi.RootFSInfo
-	createBaselineCalled   bool
-	createBaselineInfo     ctldapi.RootFSInfo
-	createBaselineLayerID  string
-	applyCalled            bool
-	applyInfo              ctldapi.RootFSInfo
-	applyInputDesc         ctldapi.RootFSDiffDescriptor
-	applyContent           string
-	applyInputDescs        []ctldapi.RootFSDiffDescriptor
-	applyContents          []string
-	captureBaselineCalled  bool
-	captureInfo            ctldapi.RootFSInfo
-	captureBaselineLayerID string
+	inspectTargets               []ctldapi.RootFSContainerRef
+	createCalled                 bool
+	createInfo                   ctldapi.RootFSInfo
+	createBaselineCalled         bool
+	createBaselineInfo           ctldapi.RootFSInfo
+	createBaselineLayerID        string
+	createExcludedPaths          []string
+	createBaselineExcludedPaths  []string
+	applyCalled                  bool
+	applyInfo                    ctldapi.RootFSInfo
+	applyInputDesc               ctldapi.RootFSDiffDescriptor
+	applyContent                 string
+	applyInputDescs              []ctldapi.RootFSDiffDescriptor
+	applyContents                []string
+	applyExcludedPaths           []string
+	applyExcludedPathCalls       [][]string
+	captureBaselineCalled        bool
+	captureInfo                  ctldapi.RootFSInfo
+	captureBaselineLayerID       string
+	captureBaselineExcludedPaths []string
 }
 
 func (r *fakeRuntime) Inspect(_ context.Context, target ctldapi.RootFSContainerRef) (ctldapi.RootFSInfo, error) {
@@ -379,30 +392,34 @@ func (r *fakeRuntime) Inspect(_ context.Context, target ctldapi.RootFSContainerR
 	return r.info, r.inspectErr
 }
 
-func (r *fakeRuntime) CreateDiff(_ context.Context, info ctldapi.RootFSInfo) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+func (r *fakeRuntime) CreateDiff(_ context.Context, info ctldapi.RootFSInfo, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
 	r.createCalled = true
 	r.createInfo = info
+	r.createExcludedPaths = append([]string(nil), excludedPaths...)
 	if r.createErr != nil {
 		return ctldapi.RootFSDiffDescriptor{}, nil, r.createErr
 	}
 	return r.createDesc, readSeekNopCloser{Reader: strings.NewReader(r.createContent)}, nil
 }
 
-func (r *fakeRuntime) CreateDiffFromBaseline(_ context.Context, info ctldapi.RootFSInfo, baselineLayerID string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+func (r *fakeRuntime) CreateDiffFromBaseline(_ context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
 	r.createBaselineCalled = true
 	r.createBaselineInfo = info
 	r.createBaselineLayerID = baselineLayerID
+	r.createBaselineExcludedPaths = append([]string(nil), excludedPaths...)
 	if r.createBaselineErr != nil {
 		return ctldapi.RootFSDiffDescriptor{}, nil, r.createBaselineErr
 	}
 	return r.createBaselineDesc, readSeekNopCloser{Reader: strings.NewReader(r.createBaselineContent)}, nil
 }
 
-func (r *fakeRuntime) ApplyDiff(_ context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, content io.Reader) (ctldapi.RootFSDiffDescriptor, error) {
+func (r *fakeRuntime) ApplyDiff(_ context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, content io.Reader, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, error) {
 	r.applyCalled = true
 	r.applyInfo = info
 	r.applyInputDesc = desc
 	r.applyInputDescs = append(r.applyInputDescs, desc)
+	r.applyExcludedPaths = append([]string(nil), excludedPaths...)
+	r.applyExcludedPathCalls = append(r.applyExcludedPathCalls, append([]string(nil), excludedPaths...))
 	payload, err := io.ReadAll(content)
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, err
@@ -415,10 +432,11 @@ func (r *fakeRuntime) ApplyDiff(_ context.Context, info ctldapi.RootFSInfo, desc
 	return r.applyDesc, nil
 }
 
-func (r *fakeRuntime) CaptureBaseline(_ context.Context, info ctldapi.RootFSInfo, baselineLayerID string) error {
+func (r *fakeRuntime) CaptureBaseline(_ context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string) error {
 	r.captureBaselineCalled = true
 	r.captureInfo = info
 	r.captureBaselineLayerID = baselineLayerID
+	r.captureBaselineExcludedPaths = append([]string(nil), excludedPaths...)
 	return r.captureBaselineErr
 }
 

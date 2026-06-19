@@ -26,7 +26,7 @@ Creating snapshots, restoring, and forking require a paused sandbox. Claiming wi
 
 Pause/resume keeps the latest checkpoint for one sandbox identity. Rootfs snapshots are explicit records that you can list, fetch, claim from, restore, and delete. Fork creates a new sandbox with Copy-on-Write rootfs isolation from the source rootfs state.
 
-Use [Volumes](/docs/volume) when data must be mounted by multiple sandboxes, accessed directly through the Volume file API, or managed independently from sandbox rootfs lifecycle. Use sandbox rootfs snapshots when the default writable filesystem is the state you want to version.
+Use [Volumes](/docs/sandbox/volume) when data must be mounted by multiple sandboxes, accessed directly through the Volume file API, or managed independently from sandbox rootfs lifecycle. Use sandbox rootfs snapshots when the default writable filesystem is the state you want to version.
 
 ## State Model
 
@@ -517,7 +517,7 @@ For coding-agent and test-generation workflows, a common pattern is:
     Read and write sandbox files before creating a rootfs snapshot.
   </Card>
 
-  <Card title="Volumes" href="/docs/volume" cta="Continue">
+  <Card title="Volumes" href="/docs/sandbox/volume" cta="Continue">
     Use durable shared storage when rootfs snapshots are not the right persistence boundary.
   </Card>
 

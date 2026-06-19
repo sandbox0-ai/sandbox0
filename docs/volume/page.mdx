@@ -63,7 +63,7 @@ Manifest objects are encrypted as full blobs. Segment objects are encrypted in i
 This is service-side application-layer encryption. `storage-proxy` and `ctld` hold the volume encryption key so they can serve normal POSIX filesystem reads and writes. It is not end-to-end encryption where Sandbox0 services cannot decrypt volume data.
 </Callout>
 
-For self-hosted deployments, see [Self-hosted Configuration](/docs/self-hosted/configuration) for the storage-proxy encryption setting.
+For self-hosted deployments, see [Self-hosted Configuration](/docs/sandbox/self-hosted/configuration) for the storage-proxy encryption setting.
 
 ## Direct File Operations
 
@@ -274,11 +274,11 @@ console.log("Volume deleted");`
 ## Next Steps
 
 <CardGroup>
-  <Card title="Mounts" href="/docs/volume/mounts" cta="Continue">
+  <Card title="Mounts" href="/docs/sandbox/volume/mounts" cta="Continue">
     Mount volumes into sandbox templates and claims with correct access modes.
   </Card>
 
-  <Card title="HTTP" href="/docs/volume/http" cta="Continue">
+  <Card title="HTTP" href="/docs/sandbox/volume/http" cta="Continue">
     Use direct volume file APIs outside a running sandbox mount.
   </Card>
 </CardGroup>

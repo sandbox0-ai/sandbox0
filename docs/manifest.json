@@ -1,5 +1,31 @@
 {
-  "defaultPage": "get-started",
+  "defaultProduct": "sandbox",
+  "defaultPage": "sandbox",
+  "products": [
+    {
+      "slug": "sandbox",
+      "title": "sandbox",
+      "defaultPage": "sandbox",
+      "sections": [
+        "get-started",
+        "sandbox",
+        "template",
+        "volume",
+        "credential",
+        "integrations",
+        "self-hosted",
+        "agent-in-sandbox"
+      ]
+    },
+    {
+      "slug": "managed-agents",
+      "title": "managed-agents",
+      "defaultPage": "managed-agents",
+      "sections": [
+        "managed-agents"
+      ]
+    }
+  ],
   "sections": [
     {
       "label": "GET STARTED",
@@ -57,7 +83,10 @@
         },
         {
           "slug": "services",
-          "title": "Sandbox Services"
+          "title": "Sandbox Services",
+          "aliases": [
+            "gateway-policy"
+          ]
         },
         {
           "slug": "docker-in-sandbox",

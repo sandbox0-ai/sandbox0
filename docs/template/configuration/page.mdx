@@ -98,7 +98,7 @@ Claim-time sandbox `env_vars` are applied to new procd-managed processes after t
 
 ## `pool`
 
-Warm pool configuration. See [Warm Pool](/docs/template/pool) for a detailed guide.
+Warm pool configuration. See [Warm Pool](/docs/sandbox/template/pool) for a detailed guide.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -122,7 +122,7 @@ Template-level default network policy. Templates now use the same public `Sandbo
 | `egress.credentialRules` | array | — | Destination-scoped auth injection rules that reference `network.credentialBindings[*].ref`. |
 | `egress.allowed*` / `egress.denied*` | array | — | Legacy compatibility fields. Prefer `trafficRules` instead. |
 
-See [Network](/docs/sandbox/network) and [Protocol Controls](/docs/sandbox/protocol-controls) for traffic behavior, and [Credential](/docs/credential) for bindings and egress auth.
+See [Network](/docs/sandbox/network) and [Protocol Controls](/docs/sandbox/protocol-controls) for traffic behavior, and [Credential](/docs/sandbox/credential) for bindings and egress auth.
 
 ---
 
@@ -166,11 +166,11 @@ Attempting to set privileged fields without a system identity returns `403 Forbi
 ## Next Steps
 
 <CardGroup>
-  <Card title="Overview" href="/docs/volume" cta="Continue">
+  <Card title="Overview" href="/docs/sandbox/volume" cta="Continue">
     Use persistent volumes to keep workspace data beyond sandbox lifetimes.
   </Card>
 
-  <Card title="Mounts" href="/docs/volume/mounts" cta="Continue">
+  <Card title="Mounts" href="/docs/sandbox/volume/mounts" cta="Continue">
     Mount volumes into sandbox templates and claims with correct access modes.
   </Card>
 </CardGroup>

@@ -1,16 +1,17 @@
 # Snapshot And Restore
 
-Sandbox rootfs snapshots are point-in-time copies of a paused sandbox writable root filesystem. Use them when you want to checkpoint an initialized workspace, roll a sandbox back to a known filesystem state, or fork a paused sandbox into an isolated child sandbox.
+Sandbox rootfs snapshots are point-in-time copies of a paused sandbox writable root filesystem. Use them when you want to checkpoint an initialized workspace, claim new sandboxes from that known filesystem state, roll an existing sandbox back, or fork a paused sandbox into an isolated child sandbox.
 
 Use this page when you need to:
 
 - create named rootfs snapshots from a paused sandbox
+- claim a new sandbox with a named rootfs snapshot
 - restore a paused sandbox rootfs from a snapshot
 - fork a paused sandbox into another paused sandbox
 - understand how rootfs snapshots differ from pause/resume and Volumes
 
 <Callout variant="warning">
-Sandbox rootfs snapshot, restore, and fork operations require a paused sandbox. If you call them while the sandbox is running, Sandbox0 returns `409 Conflict`. Pause first, then wait until sandbox `status` is `paused`.
+Creating snapshots, restoring, and forking require a paused sandbox. Claiming with `snapshot_id` creates a new running sandbox from an existing snapshot and does not require a paused target sandbox. If you call paused-only operations while the sandbox is running, Sandbox0 returns `409 Conflict`.
 </Callout>
 
 ## How It Differs From Pause And Resume
@@ -19,10 +20,11 @@ Sandbox rootfs snapshot, restore, and fork operations require a paused sandbox. 
 |------------|---------|-------------------------------|-------------------------|-------------------------|
 | Pause/resume | Release compute and later continue the same sandbox identity from its latest checkpoint | No | No | Pause starts from a running sandbox; resume starts from a paused sandbox |
 | Snapshot | Publish an immutable point-in-time rootfs record | Yes | No | Yes |
+| Claim with `snapshot_id` | Create a running sandbox initialized from a named snapshot | Uses an existing snapshot | Yes | No target sandbox required |
 | Restore | Move a paused sandbox rootfs back to a snapshot | Uses an existing snapshot | No | Yes |
 | Fork | Create an isolated paused sandbox from a paused source sandbox rootfs | No | Yes | Yes |
 
-Pause/resume keeps the latest checkpoint for one sandbox identity. Rootfs snapshots are explicit records that you can list, fetch, restore, and delete. Fork creates a new sandbox with Copy-on-Write rootfs isolation from the source rootfs state.
+Pause/resume keeps the latest checkpoint for one sandbox identity. Rootfs snapshots are explicit records that you can list, fetch, claim from, restore, and delete. Fork creates a new sandbox with Copy-on-Write rootfs isolation from the source rootfs state.
 
 Use [Volumes](/docs/volume) when data must be mounted by multiple sandboxes, accessed directly through the Volume file API, or managed independently from sandbox rootfs lifecycle. Use sandbox rootfs snapshots when the default writable filesystem is the state you want to version.
 
@@ -32,16 +34,16 @@ Use [Volumes](/docs/volume) when data must be mounted by multiple sandboxes, acc
 - `Claim with snapshot_id` creates a running sandbox and initializes its writable rootfs from the selected snapshot before process APIs are initialized.
 - `Restore` changes a paused target sandbox rootfs head to the selected snapshot and leaves the sandbox paused.
 - `Fork` creates a new paused sandbox with the source sandbox configuration and an isolated rootfs fork.
-- `Resume` is required before reading or writing files through sandbox process and file APIs after restore or fork.
-- Deleting a snapshot does not modify any sandbox that already restored from it, and it does not affect forks created from the same rootfs state.
+- `Resume` is required before reading or writing files through sandbox process and file APIs after restore or fork. A sandbox claimed with `snapshot_id` starts running.
+- Deleting a snapshot does not modify any sandbox already claimed or restored from it, and it does not affect forks created from the same rootfs state.
 
 <Callout variant="info">
 The rootfs snapshot API stores snapshot metadata including `name`, `description`, and optional `expires_at`. Delete snapshots explicitly when cleanup workflows no longer need them.
 </Callout>
 
-## Initialize Once, Fork Many
+## Initialize Once, Claim Many
 
-Rootfs snapshots and forks can act like a lightweight custom environment when your changes are ordinary filesystem state. Instead of building a custom image and maintaining a team-owned warm pool, start from a builtin template, initialize the sandbox, then checkpoint that rootfs state.
+Rootfs snapshots plus claim-time `snapshot_id` can act like a lightweight custom rootfs when your changes are ordinary filesystem state. Instead of building a custom image and maintaining a team-owned warm pool, start from a builtin template, initialize the sandbox, publish a rootfs snapshot, then claim new sandboxes from that snapshot.
 
 Use this pattern for:
 
@@ -55,29 +57,33 @@ Typical workflow:
 1. claim a sandbox from a builtin template backed by the platform warm pool
 2. install dependencies or prepare the workspace inside the sandbox rootfs
 3. pause the sandbox and wait until `status` is `paused`
-4. create a named snapshot when you need a stable restore point, or fork the paused sandbox directly when you need isolated task sandboxes
-5. resume the restored or forked sandbox before running task-specific commands
+4. create a named rootfs snapshot for the initialized state
+5. claim each task sandbox with the same template and `snapshot_id`
 
 ```bash
-SANDBOX_ID="$(s0 -o json sandbox create --template default --hard-ttl 86400 | jq -r '.ID')"
+SEED_SANDBOX_ID="$(s0 -o json sandbox create --template default --hard-ttl 86400 | jq -r '.id')"
 
 # Initialize the rootfs with your normal sandbox commands, file writes, or SSH session.
 
-s0 sandbox pause "$SANDBOX_ID"
+s0 sandbox pause "$SEED_SANDBOX_ID"
 # Wait until this shows status "paused".
-s0 sandbox get "$SANDBOX_ID"
+s0 sandbox get "$SEED_SANDBOX_ID"
 
-s0 sandbox snapshot create "$SANDBOX_ID" \
+SNAPSHOT_ID="$(s0 -o json sandbox snapshot create "$SEED_SANDBOX_ID" \
     --name python-deps-v1 \
-    --description "Default template after Python dependency install"
+    --description "Default template after Python dependency install" \
+    | jq -r '.id')"
 
-FORKED_SANDBOX_ID="$(s0 -o json sandbox fork "$SANDBOX_ID" | jq -r '.sandbox.id')"
-s0 sandbox resume "$FORKED_SANDBOX_ID"
+TASK_SANDBOX_ID="$(s0 -o json sandbox create \
+    --template default \
+    --snapshot-id "$SNAPSHOT_ID" \
+    --hard-ttl 3600 \
+    | jq -r '.id')"
 ```
 
-Fork is usually the shorter path for branch-per-task workflows because it creates a new paused sandbox directly from the seed rootfs. Snapshot is better when you need a named checkpoint that can be listed, fetched, restored later, and cleaned up independently.
+Claiming with `snapshot_id` is the preferred path for reusable custom rootfs state because the result is a fresh running sandbox that still uses the builtin template's image, resources, mounts, services, and network defaults. Use restore when you need to roll an existing paused sandbox back to a snapshot. Use fork when you specifically need a paused child sandbox cloned from a paused seed.
 
-For a longer walkthrough of this pattern, see [Initialize Once, Fork Many](/blog/2026-06/initialize-once-fork-many-custom-ai-agent-sandboxes).
+For a longer walkthrough of this pattern, see [Initialize Once, Claim Many](/blog/2026-06/initialize-once-fork-many-custom-ai-agent-sandboxes).
 
 <Callout variant="warning">
 This pattern does not replace template-level configuration. Use a custom template when you need a different container image, resource limits, mount declarations, default network policy, environment defaults, or privileged runtime fields. Mounted Sandbox Volumes are separate from the sandbox rootfs and should be managed with Volume snapshot and fork APIs.
@@ -496,9 +502,9 @@ For coding-agent and test-generation workflows, a common pattern is:
 1. claim a sandbox and initialize the repository or dependency cache
 2. write a marker, lockfile, or workspace state that future tasks should inherit
 3. pause the sandbox and wait for `status` to become `paused`
-4. create a rootfs snapshot, or fork directly from the paused sandbox
-5. restore or fork for each task branch
-6. resume the restored or forked sandbox and run task-specific work
+4. create a rootfs snapshot for that initialized state
+5. claim each task sandbox with the same template and `snapshot_id`
+6. run task-specific work in the newly claimed sandbox
 
 ## Next Steps
 
@@ -515,7 +521,7 @@ For coding-agent and test-generation workflows, a common pattern is:
     Use durable shared storage when rootfs snapshots are not the right persistence boundary.
   </Card>
 
-  <Card title="Initialize Once, Fork Many" href="/blog/2026-06/initialize-once-fork-many-custom-ai-agent-sandboxes" cta="Read">
-    Use rootfs snapshots and forks as lightweight custom environments.
+  <Card title="Initialize Once, Claim Many" href="/blog/2026-06/initialize-once-fork-many-custom-ai-agent-sandboxes" cta="Read">
+    Use rootfs snapshots and claim-time snapshot IDs as lightweight custom rootfs state.
   </Card>
 </CardGroup>

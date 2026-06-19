@@ -418,24 +418,28 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 
 	_ = resolvedName // reserved for audit/debugging (name used is template.ObjectMeta.Name)
 
-	// Try to claim an idle pod first
-	phaseStarted = time.Now()
-	pod, err := s.claimIdlePod(ctx, template, req)
-	claimIdleType := "hot"
-	if pod == nil {
-		claimIdleType = "cold"
-	}
-	if err != nil {
-		claimIdleType = "unknown"
-	}
-	s.observeClaimPhase(req.Template, claimIdleType, "claim_idle_pod", phaseStarted, err)
-	if err != nil {
-		if metrics != nil {
-			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
-		}
-		return nil, fmt.Errorf("claim idle pod: %w", err)
-	}
+	// Try to claim an idle pod first. Claims with bound volumes need a
+	// claim-specific pod spec because Kubernetes volume mounts are immutable.
 	claimType := "hot"
+	var pod *corev1.Pod
+	if len(req.Mounts) == 0 {
+		phaseStarted = time.Now()
+		pod, err = s.claimIdlePod(ctx, template, req)
+		claimIdleType := "hot"
+		if pod == nil {
+			claimIdleType = "cold"
+		}
+		if err != nil {
+			claimIdleType = "unknown"
+		}
+		s.observeClaimPhase(req.Template, claimIdleType, "claim_idle_pod", phaseStarted, err)
+		if err != nil {
+			if metrics != nil {
+				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+			}
+			return nil, fmt.Errorf("claim idle pod: %w", err)
+		}
+	}
 
 	// If no idle pod available, create a new one (cold start)
 	if pod == nil {
@@ -753,6 +757,28 @@ func declaredVolumeMountsByPath(template *v1alpha1.SandboxTemplate) map[string]v
 	return out
 }
 
+func declaredVolumeMountsForClaim(template *v1alpha1.SandboxTemplate, mounts []ClaimMount) []v1alpha1.VolumeMountSpec {
+	if len(mounts) == 0 {
+		return nil
+	}
+	declared := declaredVolumeMountsByPath(template)
+	out := make([]v1alpha1.VolumeMountSpec, 0, len(mounts))
+	seen := make(map[string]struct{}, len(mounts))
+	for _, mount := range mounts {
+		mountPoint := filepath.Clean(strings.TrimSpace(mount.MountPoint))
+		if _, ok := seen[mountPoint]; ok {
+			continue
+		}
+		decl, ok := declared[mountPoint]
+		if !ok {
+			continue
+		}
+		seen[mountPoint] = struct{}{}
+		out = append(out, decl)
+	}
+	return out
+}
+
 func (s *SandboxService) bindVolumePortals(ctx context.Context, pod *corev1.Pod, req *ClaimRequest, template *v1alpha1.SandboxTemplate) ([]BootstrapMountStatus, error) {
 	if req == nil || len(req.Mounts) == 0 {
 		return nil, nil
@@ -954,6 +980,9 @@ func isVolumePortalPendingPublicationError(resp *ctldapi.BindVolumePortalRespons
 
 // claimIdlePod claims an idle pod from the pool
 func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.SandboxTemplate, req *ClaimRequest) (*corev1.Pod, error) {
+	if req != nil && len(req.Mounts) > 0 {
+		return nil, nil
+	}
 	var claimedPod *corev1.Pod
 	desiredTemplateHash, err := controller.TemplateSpecHash(template)
 	if err != nil {
@@ -1143,7 +1172,8 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 
 	// Build pod spec before side-effecting resources so claims fail fast when the
 	// sandbox data plane has no ready nodes to receive the pod.
-	spec := v1alpha1.BuildPodSpec(template)
+	volumeMounts := declaredVolumeMountsForClaim(template, req.Mounts)
+	spec := v1alpha1.BuildPodSpecWithVolumeMounts(template, volumeMounts)
 	if err := s.ensureDataPlaneReadyCapacity(spec); err != nil {
 		return nil, err
 	}

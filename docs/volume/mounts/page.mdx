@@ -2,7 +2,7 @@
 
 Volumes are mounted through template-declared mount points and bound when a Sandbox is claimed.
 
-Dynamic mount and unmount APIs are no longer part of the Sandbox API. Define the allowed mount paths in the template, then provide the Volume IDs for those paths in the claim request.
+Dynamic mount and unmount APIs are no longer part of the Sandbox API. Define the allowed mount paths in the template, then provide the Volume IDs for those paths in the claim request. Declaring a mount point does not mount a Volume by itself.
 
 ## Mount Flow
 
@@ -22,7 +22,7 @@ flowchart LR
 
 ## Define Mount Points
 
-Template mount paths are fixed before the Sandbox starts.
+Template mount paths are fixed before the Sandbox starts. They are optional claim-time binding points: if a claim does not bind a Volume at one of these paths, that path remains part of the sandbox writable root filesystem.
 
 ```yaml
 apiVersion: sandbox0.ai/v1alpha1
@@ -59,7 +59,7 @@ The claim request binds existing Volumes to template-declared paths.
 }
 ```
 
-`mount_point` must match a path declared in `spec.volumeMounts`.
+`mount_point` must match a path declared in `spec.volumeMounts`. Only paths present in the claim request are mounted as Sandbox Volumes. Unbound declared paths behave like ordinary rootfs directories and are included in rootfs checkpoints, snapshots, restore, and fork state. Bound Volume paths are excluded from rootfs checkpoints because the Volume owns that data.
 
 ## Access Modes
 

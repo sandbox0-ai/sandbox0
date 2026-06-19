@@ -73,6 +73,7 @@ func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
 	addRootFSTestVolumePortal(pod, "data", "/workspace/data")
 	addRootFSTestVolumePortal(pod, volumeportal.WebhookStatePortalName, volumeportal.WebhookStateMountPath)
+	pod.Annotations[controller.AnnotationWebhookStateVolumeID] = "webhook-volume-1"
 	pod.Status.HostIP = ctldURL.Hostname()
 	k8sClient := fake.NewSimpleClientset(pod)
 	k8sClient.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
@@ -85,6 +86,7 @@ func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 			TeamID:            "team-1",
 			RuntimeGeneration: 3,
 			Status:            SandboxStatusRunning,
+			Mounts:            []ClaimMount{{SandboxVolumeID: "volume-1", MountPoint: "/workspace/data"}},
 		},
 	}}
 	enqueuer := &recordingPauseEnqueuer{}
@@ -391,20 +393,33 @@ func TestGetSandboxReportsPausingRecordWhileRuntimePodStillRunning(t *testing.T)
 func TestFinishRestoredSandboxRuntimeAppliesRootFSBeforeProcdInitialization(t *testing.T) {
 	var calls []string
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/v1/rootfs/apply", r.URL.Path)
-		var req ctldapi.ApplyRootFSRequest
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-		assert.Equal(t, "runc", req.ExpectedRuntime)
-		assert.Equal(t, "io.containerd.runc.v2", req.ExpectedRuntimeHandler)
-		assert.Equal(t, "overlayfs", req.ExpectedSnapshotter)
-		assert.Equal(t, "sha256:base", req.ExpectedBaseImageDigest)
-		assert.Equal(t, "parent-1", req.ExpectedSnapshotParent)
-		assert.Equal(t, []string{"parent-1", "parent-0"}, req.ExpectedSnapshotParentChain)
-		assert.Equal(t, "sha256:diff", req.Descriptor.Digest)
-		assert.Equal(t, "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar", req.Descriptor.ObjectKey)
-		assert.ElementsMatch(t, []string{"/workspace/data"}, req.ExcludedPaths)
-		calls = append(calls, "apply")
-		_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
+		switch r.URL.Path {
+		case "/api/v1/rootfs/apply":
+			var req ctldapi.ApplyRootFSRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			assert.Equal(t, "runc", req.ExpectedRuntime)
+			assert.Equal(t, "io.containerd.runc.v2", req.ExpectedRuntimeHandler)
+			assert.Equal(t, "overlayfs", req.ExpectedSnapshotter)
+			assert.Equal(t, "sha256:base", req.ExpectedBaseImageDigest)
+			assert.Equal(t, "parent-1", req.ExpectedSnapshotParent)
+			assert.Equal(t, []string{"parent-1", "parent-0"}, req.ExpectedSnapshotParentChain)
+			assert.Equal(t, "sha256:diff", req.Descriptor.Digest)
+			assert.Equal(t, "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar", req.Descriptor.ObjectKey)
+			assert.ElementsMatch(t, []string{"/workspace/data"}, req.ExcludedPaths)
+			calls = append(calls, "apply")
+			_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
+		case "/api/v1/volume-portals/bind":
+			var req ctldapi.BindVolumePortalRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			assert.Equal(t, "volume-1", req.SandboxVolumeID)
+			assert.Equal(t, "/workspace/data", req.MountPath)
+			_ = json.NewEncoder(w).Encode(ctldapi.BindVolumePortalResponse{
+				SandboxVolumeID: req.SandboxVolumeID,
+				MountPoint:      req.MountPath,
+			})
+		default:
+			t.Fatalf("unexpected ctld path %s", r.URL.Path)
+		}
 	}))
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
@@ -435,6 +450,7 @@ func TestFinishRestoredSandboxRuntimeAppliesRootFSBeforeProcdInitialization(t *t
 		ctldClient:             NewCtldClient(CtldClientConfig{Timeout: time.Second}),
 		procdClient:            NewProcdClient(ProcdClientConfig{Timeout: time.Second}),
 		internalTokenGenerator: staticTokenGenerator{},
+		volumeMetadata:         fakeVolumeMetadataClient{},
 		config: SandboxServiceConfig{
 			CtldEnabled:      true,
 			CtldPort:         ctldPort,
@@ -452,6 +468,7 @@ func TestFinishRestoredSandboxRuntimeAppliesRootFSBeforeProcdInitialization(t *t
 		TemplateName:      "template-1",
 		TemplateNamespace: "template-default",
 		TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
+		Mounts:            []ClaimMount{{SandboxVolumeID: "volume-1", MountPoint: "/workspace/data"}},
 		RuntimeGeneration: 3,
 		Status:            SandboxStatusPaused,
 	}
@@ -722,7 +739,7 @@ func TestRestoreFailureCleanupCanSkipRootFSSave(t *testing.T) {
 	assert.Equal(t, SandboxStatusPaused, store.records["sandbox-1"].Status)
 }
 
-func TestRootFSExcludedPathsForPodUsesVolumePortalMountPaths(t *testing.T) {
+func TestRootFSExcludedPathsUseBoundMounts(t *testing.T) {
 	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
 	addRootFSTestVolumePortal(pod, "data", "/workspace/data/")
 	addRootFSTestVolumePortal(pod, "data-duplicate", "/workspace/data")
@@ -741,9 +758,23 @@ func TestRootFSExcludedPathsForPodUsesVolumePortalMountPaths(t *testing.T) {
 		},
 	})
 
-	got := rootFSExcludedPathsForPod(pod)
+	got := rootFSExcludedPathsForBoundMounts(pod, []ClaimMount{
+		{SandboxVolumeID: "volume-1", MountPoint: "/workspace/data/"},
+		{SandboxVolumeID: "volume-2", MountPoint: "/workspace/database"},
+		{SandboxVolumeID: "volume-3", MountPoint: "/"},
+		{SandboxVolumeID: "volume-4", MountPoint: "workspace/relative"},
+	})
 
 	assert.ElementsMatch(t, []string{"/workspace/data", "/workspace/database"}, got)
+}
+
+func TestRootFSExcludedPathsIgnoreUnboundDeclaredVolumePortals(t *testing.T) {
+	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
+	addRootFSTestVolumePortal(pod, "data", "/workspace/data")
+
+	got := rootFSExcludedPathsForBoundMounts(pod, nil)
+
+	assert.Empty(t, got)
 }
 
 func rootFSTestPod(name, sandboxID, teamID string) *corev1.Pod {

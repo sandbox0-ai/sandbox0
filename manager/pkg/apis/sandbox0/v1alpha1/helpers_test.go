@@ -196,7 +196,7 @@ manager_image: sandbox0/manager:test
 	}
 }
 
-func TestBuildPodSpecInjectsVolumePortalMounts(t *testing.T) {
+func TestBuildPodSpecDoesNotInjectOptionalUserVolumePortals(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
 `)
@@ -208,6 +208,38 @@ manager_image: sandbox0/manager:test
 	}
 
 	spec := BuildPodSpec(template)
+	userVolume := findCSIVolumeByPortal(spec.Volumes, "workspace")
+	if userVolume != nil {
+		t.Fatalf("workspace csi volume = %#v, want nil for optional unbound mount", userVolume)
+	}
+	if mount := findVolumeMountByPath(spec.Containers[0].VolumeMounts, "/workspace/bench-volume"); mount != nil {
+		t.Fatalf("workspace volume mount = %#v, want nil for optional unbound mount", mount)
+	}
+
+	webhookVolume := findCSIVolumeByPortal(spec.Volumes, volumeportal.WebhookStatePortalName)
+	if webhookVolume == nil {
+		t.Fatalf("expected webhook state portal volume, got %#v", spec.Volumes)
+	}
+	if mount := findVolumeMount(spec.Containers[0].VolumeMounts, webhookVolume.Name); mount == nil || mount.MountPath != volumeportal.WebhookStateMountPath {
+		t.Fatalf("expected webhook state mount, got %#v", spec.Containers[0].VolumeMounts)
+	}
+}
+
+func TestBuildPodSpecWithVolumeMountsInjectsBoundUserVolumePortals(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	template := newTestTemplate()
+	template.Spec.VolumeMounts = []VolumeMountSpec{
+		{Name: "workspace", MountPath: "/workspace/bench-volume"},
+		{Name: "cache", MountPath: "/workspace/cache"},
+	}
+
+	spec := BuildPodSpecWithVolumeMounts(template, []VolumeMountSpec{
+		{Name: "workspace", MountPath: "/workspace/bench-volume"},
+	})
 	userVolume := findCSIVolumeByPortal(spec.Volumes, "workspace")
 	if userVolume == nil {
 		t.Fatalf("expected workspace csi volume, got %#v", spec.Volumes)
@@ -221,13 +253,8 @@ manager_image: sandbox0/manager:test
 	if mount := findVolumeMount(spec.Containers[0].VolumeMounts, userVolume.Name); mount == nil || mount.MountPath != "/workspace/bench-volume" {
 		t.Fatalf("expected container mount for workspace volume, got %#v", spec.Containers[0].VolumeMounts)
 	}
-
-	webhookVolume := findCSIVolumeByPortal(spec.Volumes, volumeportal.WebhookStatePortalName)
-	if webhookVolume == nil {
-		t.Fatalf("expected webhook state portal volume, got %#v", spec.Volumes)
-	}
-	if mount := findVolumeMount(spec.Containers[0].VolumeMounts, webhookVolume.Name); mount == nil || mount.MountPath != volumeportal.WebhookStateMountPath {
-		t.Fatalf("expected webhook state mount, got %#v", spec.Containers[0].VolumeMounts)
+	if cacheVolume := findCSIVolumeByPortal(spec.Volumes, "cache"); cacheVolume != nil {
+		t.Fatalf("cache csi volume = %#v, want nil for unbound optional mount", cacheVolume)
 	}
 }
 

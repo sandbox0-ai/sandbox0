@@ -73,7 +73,7 @@ func (s *SandboxService) saveSandboxRootFSCheckpoint(ctx context.Context, pod *c
 		TeamID:                    teamID,
 		ExpectedRuntimeGeneration: generation,
 		ParentLayerID:             parentLayerID,
-		ExcludedPaths:             rootFSExcludedPathsForPod(pod),
+		ExcludedPaths:             rootFSExcludedPathsForBoundMounts(pod, rootFSBoundMountsForCheckpoint(pod, record)),
 	}
 	resp, err := s.ctldClient.SaveRootFSWithTimeout(ctx, ctldAddress, saveReq, sandboxRootFSOperationTimeout)
 	if err != nil && parentLayerID != "" && rootFSBaselineMissing(err, resp) {
@@ -128,7 +128,7 @@ func (s *SandboxService) shouldSquashSandboxRootFSCheckpoint(state *SandboxRootF
 	return false, ""
 }
 
-func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *corev1.Pod, state *SandboxRootFSState) error {
+func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *corev1.Pod, state *SandboxRootFSState, mounts []ClaimMount) error {
 	if state == nil {
 		return nil
 	}
@@ -156,7 +156,7 @@ func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *
 			Size:      state.DiffSize,
 			ObjectKey: state.DiffObjectKey,
 		},
-		ExcludedPaths: rootFSExcludedPathsForPod(pod),
+		ExcludedPaths: rootFSExcludedPathsForBoundMounts(pod, mounts),
 	}
 	if layers := rootFSLayerDescriptors(state); len(layers) > 0 {
 		req.Layers = layers
@@ -173,32 +173,46 @@ func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *
 	return nil
 }
 
-func rootFSExcludedPathsForPod(pod *corev1.Pod) []string {
-	if pod == nil {
+func rootFSBoundMountsForCheckpoint(pod *corev1.Pod, record *SandboxRecord) []ClaimMount {
+	if record != nil && len(record.Mounts) > 0 {
+		return record.Mounts
+	}
+	return parseClaimMountsFromPod(pod)
+}
+
+func parseClaimMountsFromPod(pod *corev1.Pod) []ClaimMount {
+	if pod == nil || pod.Annotations == nil {
 		return nil
 	}
-	portals := expectedVolumePortalsForPod(pod)
-	if len(portals) == 0 {
-		return nil
+	return parseClaimMounts(pod.Annotations[controller.AnnotationMounts])
+}
+
+func rootFSExcludedPathsForBoundMounts(pod *corev1.Pod, mounts []ClaimMount) []string {
+	seen := make(map[string]struct{}, len(mounts)+1)
+	out := make([]string, 0, len(mounts)+1)
+	for _, mount := range mounts {
+		out = appendRootFSExcludedPath(out, seen, mount.MountPoint)
 	}
-	seen := make(map[string]struct{}, len(portals))
-	out := make([]string, 0, len(portals))
-	for _, portal := range portals {
-		raw := strings.TrimSpace(portal.MountPath)
-		if raw == "" || !strings.HasPrefix(raw, "/") {
-			continue
-		}
-		mountPath := path.Clean(raw)
-		if mountPath == "/" {
-			continue
-		}
-		if _, ok := seen[mountPath]; ok {
-			continue
-		}
-		seen[mountPath] = struct{}{}
-		out = append(out, mountPath)
+	if pod != nil && pod.Annotations != nil && strings.TrimSpace(pod.Annotations[controller.AnnotationWebhookStateVolumeID]) != "" {
+		out = appendRootFSExcludedPath(out, seen, webhookStateMountPoint)
 	}
 	return out
+}
+
+func appendRootFSExcludedPath(out []string, seen map[string]struct{}, raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || !strings.HasPrefix(raw, "/") {
+		return out
+	}
+	mountPath := path.Clean(raw)
+	if mountPath == "/" {
+		return out
+	}
+	if _, ok := seen[mountPath]; ok {
+		return out
+	}
+	seen[mountPath] = struct{}{}
+	return append(out, mountPath)
 }
 
 func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, template *v1alpha1.SandboxTemplate, req *ClaimRequest, state *SandboxRootFSState, fallbackStatus string) (*corev1.Pod, error) {
@@ -208,7 +222,8 @@ func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Co
 	if strings.TrimSpace(fallbackStatus) == "" {
 		fallbackStatus = SandboxStatusResuming
 	}
-	err := s.applySandboxRootFSCheckpoint(ctx, pod, state)
+	mounts := claimMountsFromRequest(req)
+	err := s.applySandboxRootFSCheckpoint(ctx, pod, state, mounts)
 	if err == nil {
 		return pod, nil
 	}
@@ -239,11 +254,18 @@ func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Co
 		s.requestSandboxDeletionAfterClaimFailure(readyPod, "checkpoint base image runtime persistence failed")
 		return readyPod, fmt.Errorf("%w; save checkpoint base image runtime: %v", err, fallbackErr)
 	}
-	if fallbackErr := s.applySandboxRootFSCheckpoint(ctx, readyPod, state); fallbackErr != nil {
+	if fallbackErr := s.applySandboxRootFSCheckpoint(ctx, readyPod, state, mounts); fallbackErr != nil {
 		s.requestSandboxDeletionAfterClaimFailure(readyPod, "checkpoint base image rootfs apply failed")
 		return readyPod, fmt.Errorf("%w; checkpoint base image retry failed: %v", err, fallbackErr)
 	}
 	return readyPod, nil
+}
+
+func claimMountsFromRequest(req *ClaimRequest) []ClaimMount {
+	if req == nil {
+		return nil
+	}
+	return req.Mounts
 }
 
 func (s *SandboxService) saveRestoredRuntimePod(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, status string) error {

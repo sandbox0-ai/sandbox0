@@ -106,6 +106,39 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 	}
 }
 
+func TestClaimIdlePodSkipsClaimsWithBoundVolumes(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+	}
+	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
+
+	client := fake.NewSimpleClientset(readyPod.DeepCopy())
+	svc := &SandboxService{
+		k8sClient: client,
+		podLister: newClaimTestPodLister(t, readyPod),
+		clock:     systemTime{},
+		logger:    zap.NewNop(),
+	}
+
+	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{
+		TeamID: "team-a",
+		UserID: "user-a",
+		Mounts: []ClaimMount{{
+			SandboxVolumeID: "volume-1",
+			MountPoint:      "/workspace/data",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("claimIdlePod() error = %v", err)
+	}
+	if pod != nil {
+		t.Fatalf("claimIdlePod() = %s, want nil for claim-specific volume mounts", pod.Name)
+	}
+}
+
 func TestClaimRequestDoesNotAcceptRuntimeMetadataFromJSON(t *testing.T) {
 	var req ClaimRequest
 	if err := json.Unmarshal([]byte(`{
@@ -501,6 +534,55 @@ func TestCreateNewPodMarksColdPodNonEvictable(t *testing.T) {
 	}
 	if got := pod.Annotations[controller.AnnotationClusterAutoscalerSafeToEvict]; got != "false" {
 		t.Fatalf("safe-to-evict annotation = %q, want false", got)
+	}
+}
+
+func TestCreateNewPodInjectsOnlyBoundVolumePortals(t *testing.T) {
+	withClaimTestPublicKey(t)
+
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{Image: "busybox"},
+			VolumeMounts: []v1alpha1.VolumeMountSpec{
+				{Name: "data", MountPath: "/workspace/data"},
+				{Name: "cache", MountPath: "/workspace/cache"},
+			},
+		},
+	}
+	client := fake.NewSimpleClientset()
+	svc := &SandboxService{
+		k8sClient:    client,
+		secretLister: newClaimTestSecretLister(t),
+		clock:        systemTime{},
+		logger:       zap.NewNop(),
+	}
+
+	pod, err := svc.createNewPod(context.Background(), template, &ClaimRequest{
+		TeamID: "team-a",
+		UserID: "user-a",
+		Mounts: []ClaimMount{{
+			SandboxVolumeID: "volume-1",
+			MountPoint:      "/workspace/data",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("createNewPod() error = %v", err)
+	}
+	if findClaimTestCSIVolumeByPortal(pod.Spec.Volumes, "data") == nil {
+		t.Fatalf("expected bound data portal, got volumes %#v", pod.Spec.Volumes)
+	}
+	if findClaimTestCSIVolumeByPortal(pod.Spec.Volumes, "cache") != nil {
+		t.Fatalf("unexpected unbound cache portal in volumes %#v", pod.Spec.Volumes)
+	}
+	if mount := findClaimTestVolumeMountByPath(pod.Spec.Containers[0].VolumeMounts, "/workspace/data"); mount == nil {
+		t.Fatalf("expected bound data volume mount, got %#v", pod.Spec.Containers[0].VolumeMounts)
+	}
+	if mount := findClaimTestVolumeMountByPath(pod.Spec.Containers[0].VolumeMounts, "/workspace/cache"); mount != nil {
+		t.Fatalf("unexpected unbound cache volume mount %#v", mount)
 	}
 }
 
@@ -1428,6 +1510,27 @@ func newClaimTestNode(name, internalIP string) *corev1.Node {
 			Address: internalIP,
 		}}},
 	}
+}
+
+func findClaimTestCSIVolumeByPortal(volumes []corev1.Volume, portalName string) *corev1.Volume {
+	for i := range volumes {
+		if volumes[i].CSI == nil || volumes[i].CSI.Driver != volumeportal.DriverName {
+			continue
+		}
+		if volumes[i].CSI.VolumeAttributes[volumeportal.AttributePortalName] == portalName {
+			return &volumes[i]
+		}
+	}
+	return nil
+}
+
+func findClaimTestVolumeMountByPath(mounts []corev1.VolumeMount, mountPath string) *corev1.VolumeMount {
+	for i := range mounts {
+		if mounts[i].MountPath == mountPath {
+			return &mounts[i]
+		}
+	}
+	return nil
 }
 
 func splitTestServerAddress(t *testing.T, server *httptest.Server) (string, int) {

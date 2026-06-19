@@ -26,7 +26,7 @@ Self-hosted deployments must run `ctld` on sandbox nodes for checkpointed pause/
 | Mounted Volumes | Remounted if configured | Preserved until the Volume is deleted |
 | Processes, memory, sockets, PID state, live REPL sessions | Not preserved | Deleted |
 
-The rootfs checkpoint covers files written inside the sandbox filesystem, including files outside mounted volumes. It is different from a Sandbox Volume: it is tied to sandbox rootfs lifecycle and does not provide volume sharing or direct Volume file APIs. For named rootfs snapshots, restore, and fork operations, see [Snapshot And Restore](/docs/sandbox/snapshot-restore).
+The rootfs checkpoint covers files written inside the sandbox filesystem, including template-declared Volume mount paths that were not bound by the claim. Bound Sandbox Volume paths are excluded because the Volume owns that data. Rootfs checkpoints are different from Sandbox Volumes: they are tied to sandbox rootfs lifecycle and do not provide volume sharing or direct Volume file APIs. For named rootfs snapshots, restore, and fork operations, see [Snapshot And Restore](/docs/sandbox/snapshot-restore).
 
 On nodes using the containerd overlayfs snapshotter, `ctld` checkpoints only the active snapshot upperdir and stores it as a standard OCI layer diff. Other snapshotters, or nodes where the overlayfs upperdir is not readable by `ctld`, fall back to containerd's built-in diff path.
 

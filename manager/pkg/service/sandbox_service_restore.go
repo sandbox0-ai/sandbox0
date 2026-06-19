@@ -74,9 +74,11 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 			RuntimeGeneration: generation,
 			HardExpiresAt:     locked.HardExpiresAt,
 		}
-		pod, err = s.claimIdlePod(lockCtx, template, req)
-		if err != nil {
-			return fmt.Errorf("claim idle pod: %w", err)
+		if len(req.Mounts) == 0 {
+			pod, err = s.claimIdlePod(lockCtx, template, req)
+			if err != nil {
+				return fmt.Errorf("claim idle pod: %w", err)
+			}
 		}
 		if pod == nil {
 			claimType = "cold"

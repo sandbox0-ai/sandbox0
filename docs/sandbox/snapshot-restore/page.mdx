@@ -86,7 +86,7 @@ Claiming with `snapshot_id` is the preferred path for reusable custom rootfs sta
 For a longer walkthrough of this pattern, see [Initialize Once, Claim Many](/blog/2026-06/initialize-once-fork-many-custom-ai-agent-sandboxes).
 
 <Callout variant="warning">
-This pattern does not replace template-level configuration. Use a custom template when you need a different container image, resource limits, mount declarations, default network policy, environment defaults, or privileged runtime fields. Mounted Sandbox Volumes are separate from the sandbox rootfs and should be managed with Volume snapshot and fork APIs.
+This pattern does not replace template-level configuration. Use a custom template when you need a different container image, resource limits, mount declarations, default network policy, environment defaults, or privileged runtime fields. Template-declared Volume paths that are not bound by the claim remain ordinary rootfs directories and are included in rootfs snapshots. Mounted Sandbox Volumes are separate from the sandbox rootfs and should be managed with Volume snapshot and fork APIs.
 </Callout>
 
 ## Pause Before Rootfs Operations

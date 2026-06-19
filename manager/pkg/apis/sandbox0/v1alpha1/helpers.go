@@ -31,8 +31,15 @@ const (
 	minSandboxEphemeralStorageRequestBytes = int64(64 * 1024 * 1024)
 )
 
-// buildPodSpec builds a pod spec from a template
+// BuildPodSpec builds a pod spec from a template without optional user volume
+// portals. Claim-time mounts should use BuildPodSpecWithVolumeMounts.
 func BuildPodSpec(template *SandboxTemplate) corev1.PodSpec {
+	return BuildPodSpecWithVolumeMounts(template, nil)
+}
+
+// BuildPodSpecWithVolumeMounts builds a pod spec from a template and injects
+// only the user volume portals that are actually bound for this runtime.
+func BuildPodSpecWithVolumeMounts(template *SandboxTemplate, volumeMounts []VolumeMountSpec) corev1.PodSpec {
 	spec := corev1.PodSpec{
 		RestartPolicy: corev1.RestartPolicyAlways,
 		Containers:    buildContainers(template),
@@ -43,7 +50,7 @@ func BuildPodSpec(template *SandboxTemplate) corev1.PodSpec {
 
 	applyProcdSecretVolume(&spec, template)
 	applyNetdMITMCATrustMaterial(&spec)
-	applyVolumePortals(&spec, template)
+	applyVolumePortals(&spec, volumeMounts)
 	applyEmptyDirMounts(&spec, template)
 	applyProcdInit(&spec)
 	applyDefaultSandboxPlacement(&spec)
@@ -163,16 +170,16 @@ func tolerationKey(tol corev1.Toleration) string {
 	return string(tol.Operator) + "\x00" + tol.Key + "\x00" + tol.Value + "\x00" + string(tol.Effect)
 }
 
-func applyVolumePortals(spec *corev1.PodSpec, template *SandboxTemplate) {
-	if spec == nil || template == nil {
+func applyVolumePortals(spec *corev1.PodSpec, volumeMounts []VolumeMountSpec) {
+	if spec == nil {
 		return
 	}
-	mounts := make([]VolumeMountSpec, 0, len(template.Spec.VolumeMounts)+1)
+	mounts := make([]VolumeMountSpec, 0, len(volumeMounts)+1)
 	mounts = append(mounts, VolumeMountSpec{
 		Name:      volumeportal.WebhookStatePortalName,
 		MountPath: volumeportal.WebhookStateMountPath,
 	})
-	mounts = append(mounts, template.Spec.VolumeMounts...)
+	mounts = append(mounts, volumeMounts...)
 
 	seenMountPaths := make(map[string]struct{}, len(mounts))
 	for i, mount := range mounts {

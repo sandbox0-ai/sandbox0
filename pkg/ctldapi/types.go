@@ -91,6 +91,7 @@ type SaveRootFSRequest struct {
 	ExpectedRuntimeGeneration int64              `json:"expected_runtime_generation,omitempty"`
 	ParentLayerID             string             `json:"parent_layer_id,omitempty"`
 	ObjectKey                 string             `json:"object_key,omitempty"`
+	ExcludedPaths             []string           `json:"excluded_paths,omitempty"`
 }
 
 type SaveRootFSResponse struct {
@@ -110,6 +111,7 @@ type ApplyRootFSRequest struct {
 	BaselineLayerID             string                  `json:"baseline_layer_id,omitempty"`
 	Layers                      []RootFSLayerDescriptor `json:"layers,omitempty"`
 	Descriptor                  RootFSDiffDescriptor    `json:"descriptor"`
+	ExcludedPaths               []string                `json:"excluded_paths,omitempty"`
 }
 
 type ApplyRootFSResponse struct {

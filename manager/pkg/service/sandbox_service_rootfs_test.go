@@ -18,6 +18,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -46,6 +47,7 @@ func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 			PodUID:        "pod-uid",
 			ContainerName: "procd",
 		}, req.Target)
+		assert.ElementsMatch(t, []string{"/workspace/data", volumeportal.WebhookStateMountPath}, req.ExcludedPaths)
 		saveCalled = true
 		_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{
 			Info: ctldapi.RootFSInfo{
@@ -69,6 +71,8 @@ func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
 
 	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
+	addRootFSTestVolumePortal(pod, "data", "/workspace/data")
+	addRootFSTestVolumePortal(pod, volumeportal.WebhookStatePortalName, volumeportal.WebhookStateMountPath)
 	pod.Status.HostIP = ctldURL.Hostname()
 	k8sClient := fake.NewSimpleClientset(pod)
 	k8sClient.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
@@ -398,6 +402,7 @@ func TestFinishRestoredSandboxRuntimeAppliesRootFSBeforeProcdInitialization(t *t
 		assert.Equal(t, []string{"parent-1", "parent-0"}, req.ExpectedSnapshotParentChain)
 		assert.Equal(t, "sha256:diff", req.Descriptor.Digest)
 		assert.Equal(t, "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar", req.Descriptor.ObjectKey)
+		assert.ElementsMatch(t, []string{"/workspace/data"}, req.ExcludedPaths)
 		calls = append(calls, "apply")
 		_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
 	}))
@@ -414,6 +419,7 @@ func TestFinishRestoredSandboxRuntimeAppliesRootFSBeforeProcdInitialization(t *t
 	procdURL, procdPort := parsedTestServer(t, procd.URL)
 
 	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
+	addRootFSTestVolumePortal(pod, "data", "/workspace/data")
 	pod.Status.HostIP = ctldURL.Hostname()
 	pod.Status.PodIP = procdURL.Hostname()
 	store := &memorySandboxStore{
@@ -716,6 +722,30 @@ func TestRestoreFailureCleanupCanSkipRootFSSave(t *testing.T) {
 	assert.Equal(t, SandboxStatusPaused, store.records["sandbox-1"].Status)
 }
 
+func TestRootFSExcludedPathsForPodUsesVolumePortalMountPaths(t *testing.T) {
+	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
+	addRootFSTestVolumePortal(pod, "data", "/workspace/data/")
+	addRootFSTestVolumePortal(pod, "data-duplicate", "/workspace/data")
+	addRootFSTestVolumePortal(pod, "database", "/workspace/database")
+	addRootFSTestVolumePortal(pod, "ignored-root", "/")
+	pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+		Name: "ignored-relative",
+		VolumeSource: corev1.VolumeSource{
+			CSI: &corev1.CSIVolumeSource{
+				Driver: volumeportal.DriverName,
+				VolumeAttributes: map[string]string{
+					volumeportal.AttributePortalName: "ignored-relative",
+					volumeportal.AttributeMountPath:  "workspace/relative",
+				},
+			},
+		},
+	})
+
+	got := rootFSExcludedPathsForPod(pod)
+
+	assert.ElementsMatch(t, []string{"/workspace/data", "/workspace/database"}, got)
+}
+
 func rootFSTestPod(name, sandboxID, teamID string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1ObjectMeta(name, sandboxID, teamID),
@@ -732,6 +762,32 @@ func rootFSTestPod(name, sandboxID, teamID string) *corev1.Pod {
 				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
 			}},
 		},
+	}
+}
+
+func addRootFSTestVolumePortal(pod *corev1.Pod, name, mountPath string) {
+	if pod == nil {
+		return
+	}
+	portalName := volumeportal.NormalizePortalName(name, mountPath)
+	volumeName := "volume-" + portalName
+	pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+		Name: volumeName,
+		VolumeSource: corev1.VolumeSource{
+			CSI: &corev1.CSIVolumeSource{
+				Driver: volumeportal.DriverName,
+				VolumeAttributes: map[string]string{
+					volumeportal.AttributePortalName: portalName,
+					volumeportal.AttributeMountPath:  mountPath,
+				},
+			},
+		},
+	})
+	for i := range pod.Spec.Containers {
+		pod.Spec.Containers[i].VolumeMounts = append(pod.Spec.Containers[i].VolumeMounts, corev1.VolumeMount{
+			Name:      volumeName,
+			MountPath: mountPath,
+		})
 	}
 }
 

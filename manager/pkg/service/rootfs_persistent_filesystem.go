@@ -918,6 +918,11 @@ func (s *PGSandboxStore) collectUnreferencedRootFSLayers(ctx context.Context, te
 					FROM manager.rootfs_layers child
 					WHERE child.parent_layer_id = l.layer_id
 				)
+				AND NOT EXISTS (
+					SELECT 1
+					FROM manager.rootfs_filesystems f
+					WHERE f.head_layer_id = l.layer_id
+				)
 			ORDER BY l.created_at ASC
 			LIMIT $2
 			FOR UPDATE SKIP LOCKED

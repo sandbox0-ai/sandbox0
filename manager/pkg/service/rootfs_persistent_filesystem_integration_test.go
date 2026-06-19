@@ -336,6 +336,45 @@ func TestRootFSGCDeletesUnboundAncestorFilesystemAfterChildDeletion(t *testing.T
 	assert.False(t, rootFSTestFilesystemExists(t, pool, "sandbox-source"))
 }
 
+func TestRootFSGCSkipsLayerStillReferencedByOrphanFilesystem(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	now := time.Now().UTC()
+
+	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-orphan-a", "team-1")))
+	stateA := rootFSTestStoreState("sandbox-orphan-a", "team-1", "layer-orphan-a", "", 1, "orphan-a")
+	stateA.CreatedAt = now
+	require.NoError(t, store.SaveRootFSState(ctx, stateA))
+	time.Sleep(10 * time.Millisecond)
+
+	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-orphan-b", "team-1")))
+	stateB := rootFSTestStoreState("sandbox-orphan-b", "team-1", "layer-orphan-b", "", 1, "orphan-b")
+	stateB.CreatedAt = now.Add(-time.Hour)
+	require.NoError(t, store.SaveRootFSState(ctx, stateB))
+
+	_, err := pool.Exec(ctx, `
+		DELETE FROM manager.sandbox_rootfs_bindings
+		WHERE sandbox_id IN ('sandbox-orphan-a', 'sandbox-orphan-b')
+	`)
+	require.NoError(t, err)
+
+	deleter := &recordingRootFSObjectDeleter{}
+	result, err := store.GarbageCollectRootFSFilesystem(ctx, deleter, "team-1", 1)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.DeletedFilesystems)
+	require.Len(t, result.Layers, 1)
+	assert.Equal(t, "layer-orphan-a", result.Layers[0].ID)
+	assert.True(t, rootFSTestFilesystemExists(t, pool, "sandbox-orphan-b"))
+
+	result, err = store.GarbageCollectRootFSFilesystem(ctx, deleter, "team-1", 1)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.DeletedFilesystems)
+	require.Len(t, result.Layers, 1)
+	assert.Equal(t, "layer-orphan-b", result.Layers[0].ID)
+	assert.False(t, rootFSTestFilesystemExists(t, pool, "sandbox-orphan-b"))
+}
+
 func TestRootFSGCExpiresSnapshotBeforeLayerCollection(t *testing.T) {
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPool(t)

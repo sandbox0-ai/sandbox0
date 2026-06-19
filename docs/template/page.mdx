@@ -21,25 +21,25 @@ Builtin templates use curated public images and are ready to use immediately. Cu
 
 ## Custom Template Or Rootfs Snapshot
 
-You do not need a custom template for every initialized environment. If the base image, resources, network policy, and mount declarations already fit, you can claim a sandbox from a builtin template, install dependencies or clone repositories inside the writable root filesystem, pause it, then create a rootfs snapshot or fork it.
+You do not need a custom template for every initialized environment. If the base image, resources, network policy, and mount declarations already fit, you can claim a sandbox from a builtin template, install dependencies or clone repositories inside the writable root filesystem, pause it, create a rootfs snapshot, then claim future sandboxes with that `snapshot_id`.
 
 This is useful for dependency-heavy agent workspaces:
 
 1. claim a sandbox from a platform-owned builtin template such as `default` or `dins`
 2. install packages, populate caches, clone repositories, or write tool configuration
 3. pause the sandbox and wait for `status` to become `paused`
-4. create a named rootfs snapshot, or keep the paused sandbox as a seed and fork it for each task
-5. resume the restored or forked sandbox before running task-specific work
+4. create a named rootfs snapshot for the initialized state
+5. claim each task sandbox with the same template and `snapshot_id`
 
 For platform-owned builtin templates, the operator manages the warm pool. That lets teams reuse warm builtin capacity and store only the initialized rootfs state for their own dependency set instead of maintaining a separate custom template pool for each variation.
 
 | Need | Prefer |
 |------|--------|
 | Different base image, resource envelope, default environment, mount paths, network defaults, or privileged runtime fields | Custom template |
-| User-space dependencies, repository checkout, package cache, generated files, or per-project tool configuration on an existing base image | Builtin template plus rootfs snapshot or fork |
+| User-space dependencies, repository checkout, package cache, generated files, or per-project tool configuration on an existing base image | Builtin template plus rootfs snapshot and claim with `snapshot_id` |
 | Data that must outlive sandbox identity, be mounted by multiple sandboxes, or be accessed through direct storage APIs | Sandbox Volume |
 
-Rootfs snapshots do not create template IDs and do not appear in `s0 template list`. A fork keeps the source sandbox's template and sandbox configuration, while restore changes only the target sandbox rootfs. See [Snapshot And Restore](/docs/sandbox/snapshot-restore) for the paused-state requirements and API workflow, or read [Initialize Once, Fork Many](/blog/2026-06/initialize-once-fork-many-custom-ai-agent-sandboxes) for the custom-environment pattern.
+Rootfs snapshots do not create template IDs and do not appear in `s0 template list`. Claiming with `snapshot_id` creates a new running sandbox from the selected rootfs snapshot while the requested template still controls image, resources, mounts, services, and network defaults. Restore remains useful for rolling back an existing paused sandbox, and fork remains useful when you specifically need a paused child sandbox. See [Snapshot And Restore](/docs/sandbox/snapshot-restore) for the paused-state requirements and API workflow, or read [Initialize Once, Claim Many](/blog/2026-06/initialize-once-fork-many-custom-ai-agent-sandboxes) for the custom-rootfs pattern.
 
 ---
 
@@ -381,7 +381,7 @@ console.log("Template deleted");`
     Reuse initialized rootfs state without creating another template.
   </Card>
 
-  <Card title="Initialize Once, Fork Many" href="/blog/2026-06/initialize-once-fork-many-custom-ai-agent-sandboxes" cta="Read">
-    Customize a builtin template with rootfs snapshots and forks.
+  <Card title="Initialize Once, Claim Many" href="/blog/2026-06/initialize-once-fork-many-custom-ai-agent-sandboxes" cta="Read">
+    Customize a builtin template with rootfs snapshots and claim-time snapshot IDs.
   </Card>
 </CardGroup>

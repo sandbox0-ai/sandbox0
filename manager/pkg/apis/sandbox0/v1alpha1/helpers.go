@@ -31,8 +31,24 @@ const (
 	minSandboxEphemeralStorageRequestBytes = int64(64 * 1024 * 1024)
 )
 
-// buildPodSpec builds a pod spec from a template
+// BuildPodSpec builds a pod spec with every template-declared user volume portal.
 func BuildPodSpec(template *SandboxTemplate) corev1.PodSpec {
+	return buildPodSpec(template, template.Spec.VolumeMounts)
+}
+
+// BuildPodSpecWithVolumeMounts builds a pod spec with only the selected user
+// volume portals. The webhook state portal is always included.
+func BuildPodSpecWithVolumeMounts(template *SandboxTemplate, volumeMounts []VolumeMountSpec) corev1.PodSpec {
+	return buildPodSpec(template, volumeMounts)
+}
+
+// BuildIdlePodSpec builds an idle-pool pod spec. User volume portals are bound
+// per claim, so idle pods only include Sandbox0-managed system portals.
+func BuildIdlePodSpec(template *SandboxTemplate) corev1.PodSpec {
+	return buildPodSpec(template, nil)
+}
+
+func buildPodSpec(template *SandboxTemplate, volumeMounts []VolumeMountSpec) corev1.PodSpec {
 	spec := corev1.PodSpec{
 		RestartPolicy: corev1.RestartPolicyAlways,
 		Containers:    buildContainers(template),
@@ -43,7 +59,7 @@ func BuildPodSpec(template *SandboxTemplate) corev1.PodSpec {
 
 	applyProcdSecretVolume(&spec, template)
 	applyNetdMITMCATrustMaterial(&spec)
-	applyVolumePortals(&spec, template)
+	applyVolumePortals(&spec, volumeMounts)
 	applyEmptyDirMounts(&spec, template)
 	applyProcdInit(&spec)
 	applyDefaultSandboxPlacement(&spec)
@@ -163,16 +179,16 @@ func tolerationKey(tol corev1.Toleration) string {
 	return string(tol.Operator) + "\x00" + tol.Key + "\x00" + tol.Value + "\x00" + string(tol.Effect)
 }
 
-func applyVolumePortals(spec *corev1.PodSpec, template *SandboxTemplate) {
-	if spec == nil || template == nil {
+func applyVolumePortals(spec *corev1.PodSpec, volumeMounts []VolumeMountSpec) {
+	if spec == nil {
 		return
 	}
-	mounts := make([]VolumeMountSpec, 0, len(template.Spec.VolumeMounts)+1)
+	mounts := make([]VolumeMountSpec, 0, len(volumeMounts)+1)
 	mounts = append(mounts, VolumeMountSpec{
 		Name:      volumeportal.WebhookStatePortalName,
 		MountPath: volumeportal.WebhookStateMountPath,
 	})
-	mounts = append(mounts, template.Spec.VolumeMounts...)
+	mounts = append(mounts, volumeMounts...)
 
 	seenMountPaths := make(map[string]struct{}, len(mounts))
 	for i, mount := range mounts {

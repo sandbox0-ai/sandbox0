@@ -231,6 +231,31 @@ manager_image: sandbox0/manager:test
 	}
 }
 
+func TestBuildIdlePodSpecOmitsUserVolumePortalMounts(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	template := newTestTemplate()
+	template.Spec.VolumeMounts = []VolumeMountSpec{
+		{Name: "workspace", MountPath: "/workspace/bench-volume"},
+	}
+
+	spec := BuildIdlePodSpec(template)
+	if userVolume := findCSIVolumeByPortal(spec.Volumes, "workspace"); userVolume != nil {
+		t.Fatalf("unexpected user csi volume in idle pod spec: %#v", userVolume)
+	}
+
+	webhookVolume := findCSIVolumeByPortal(spec.Volumes, volumeportal.WebhookStatePortalName)
+	if webhookVolume == nil {
+		t.Fatalf("expected webhook state portal volume, got %#v", spec.Volumes)
+	}
+	if mount := findVolumeMount(spec.Containers[0].VolumeMounts, webhookVolume.Name); mount == nil || mount.MountPath != volumeportal.WebhookStateMountPath {
+		t.Fatalf("expected webhook state mount, got %#v", spec.Containers[0].VolumeMounts)
+	}
+}
+
 func TestBuildPodSpecInjectsEmptyDirMounts(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test

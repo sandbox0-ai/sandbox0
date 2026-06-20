@@ -106,6 +106,38 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 	}
 }
 
+func TestClaimIdlePodSkipsWhenClaimHasMounts(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+	}
+	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
+
+	svc := &SandboxService{
+		k8sClient: fake.NewSimpleClientset(readyPod.DeepCopy()),
+		podLister: newClaimTestPodLister(t, readyPod),
+		clock:     systemTime{},
+		logger:    zap.NewNop(),
+	}
+
+	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{
+		TeamID: "team-a",
+		UserID: "user-a",
+		Mounts: []ClaimMount{{
+			SandboxVolumeID: "vol-1",
+			MountPoint:      "/workspace/data",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("claimIdlePod() error = %v", err)
+	}
+	if pod != nil {
+		t.Fatalf("claimIdlePod() = %s, want nil when claim has mounts", pod.Name)
+	}
+}
+
 func TestClaimRequestDoesNotAcceptRuntimeMetadataFromJSON(t *testing.T) {
 	var req ClaimRequest
 	if err := json.Unmarshal([]byte(`{
@@ -501,6 +533,52 @@ func TestCreateNewPodMarksColdPodNonEvictable(t *testing.T) {
 	}
 	if got := pod.Annotations[controller.AnnotationClusterAutoscalerSafeToEvict]; got != "false" {
 		t.Fatalf("safe-to-evict annotation = %q, want false", got)
+	}
+}
+
+func TestCreateNewPodUsesOnlyClaimedVolumePortals(t *testing.T) {
+	withClaimTestPublicKey(t)
+
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{Image: "busybox"},
+			VolumeMounts: []v1alpha1.VolumeMountSpec{
+				{Name: "data", MountPath: "/workspace/data"},
+				{Name: "cache", MountPath: "/workspace/cache"},
+			},
+		},
+	}
+	client := fake.NewSimpleClientset()
+	svc := &SandboxService{
+		k8sClient:    client,
+		secretLister: newClaimTestSecretLister(t),
+		clock:        systemTime{},
+		logger:       zap.NewNop(),
+	}
+
+	pod, err := svc.createNewPod(context.Background(), template, &ClaimRequest{
+		TeamID: "team-a",
+		UserID: "user-a",
+		Mounts: []ClaimMount{{
+			SandboxVolumeID: "vol-1",
+			MountPoint:      "/workspace/data",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("createNewPod() error = %v", err)
+	}
+	if volume := findClaimTestCSIVolumeByPortal(pod.Spec.Volumes, "data"); volume == nil {
+		t.Fatalf("expected data csi volume, got %#v", pod.Spec.Volumes)
+	}
+	if volume := findClaimTestCSIVolumeByPortal(pod.Spec.Volumes, "cache"); volume != nil {
+		t.Fatalf("unexpected unclaimed cache csi volume: %#v", volume)
+	}
+	if volume := findClaimTestCSIVolumeByPortal(pod.Spec.Volumes, volumeportal.WebhookStatePortalName); volume == nil {
+		t.Fatalf("expected webhook state csi volume, got %#v", pod.Spec.Volumes)
 	}
 }
 
@@ -1030,32 +1108,26 @@ func TestValidateClaimMountsForTemplateRequiresDeclaredMountPoint(t *testing.T) 
 	}
 }
 
-func TestValidateClaimMountsForTemplateRequiresAllDeclaredMountPoints(t *testing.T) {
-	req := &ClaimRequest{}
-	template := &v1alpha1.SandboxTemplate{
-		Spec: v1alpha1.SandboxTemplateSpec{
-			VolumeMounts: []v1alpha1.VolumeMountSpec{{Name: "data", MountPath: "/workspace/data"}},
-		},
+func TestValidateClaimMountsForTemplateRejectsMountWhenTemplateDeclaresNone(t *testing.T) {
+	req := &ClaimRequest{
+		Mounts: []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/data"}},
 	}
+	template := &v1alpha1.SandboxTemplate{}
 
 	err := validateClaimMountsForTemplate(req, template)
 	if err == nil {
-		t.Fatal("expected missing declared mount validation error")
+		t.Fatal("expected undeclared mount point validation error")
 	}
 	if !errors.Is(err, ErrInvalidClaimRequest) {
 		t.Fatalf("expected ErrInvalidClaimRequest, got %v", err)
 	}
 }
 
-func TestValidateClaimMountsForTemplateAllowsOmittedOptionalMountPoint(t *testing.T) {
+func TestValidateClaimMountsForTemplateAllowsOmittedDeclaredMountPoints(t *testing.T) {
 	req := &ClaimRequest{}
 	template := &v1alpha1.SandboxTemplate{
 		Spec: v1alpha1.SandboxTemplateSpec{
-			VolumeMounts: []v1alpha1.VolumeMountSpec{{
-				Name:      "data",
-				MountPath: "/workspace/data",
-				Optional:  true,
-			}},
+			VolumeMounts: []v1alpha1.VolumeMountSpec{{Name: "data", MountPath: "/workspace/data"}},
 		},
 	}
 
@@ -1064,7 +1136,7 @@ func TestValidateClaimMountsForTemplateAllowsOmittedOptionalMountPoint(t *testin
 	}
 }
 
-func TestValidateClaimMountsForTemplateRequiresOnlyNonOptionalMountPoints(t *testing.T) {
+func TestValidateClaimMountsForTemplateAllowsPartialDeclaredMountPoints(t *testing.T) {
 	req := &ClaimRequest{
 		Mounts: []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/data"}},
 	}
@@ -1072,7 +1144,7 @@ func TestValidateClaimMountsForTemplateRequiresOnlyNonOptionalMountPoints(t *tes
 		Spec: v1alpha1.SandboxTemplateSpec{
 			VolumeMounts: []v1alpha1.VolumeMountSpec{
 				{Name: "data", MountPath: "/workspace/data"},
-				{Name: "cache", MountPath: "/workspace/cache", Optional: true},
+				{Name: "cache", MountPath: "/workspace/cache"},
 			},
 		},
 	}
@@ -1333,6 +1405,18 @@ func TestBindVolumePortalTreatsCtldConflictAsClaimConflict(t *testing.T) {
 func newClaimTestPodLister(t *testing.T, pods ...*corev1.Pod) corelisters.PodLister {
 	t.Helper()
 	return corelisters.NewPodLister(newClaimTestPodIndexer(t, pods...))
+}
+
+func findClaimTestCSIVolumeByPortal(volumes []corev1.Volume, portalName string) *corev1.Volume {
+	for i := range volumes {
+		if volumes[i].CSI == nil {
+			continue
+		}
+		if volumes[i].CSI.VolumeAttributes[volumeportal.AttributePortalName] == portalName {
+			return &volumes[i]
+		}
+	}
+	return nil
 }
 
 func withClaimTestPublicKey(t *testing.T) {

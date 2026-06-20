@@ -99,6 +99,7 @@ type InitializeRequest struct {
 	TeamID    string             `json:"team_id,omitempty"`
 	EnvVars   map[string]string  `json:"env_vars,omitempty"`
 	Webhook   *InitializeWebhook `json:"webhook,omitempty"`
+	MountDirs []string           `json:"mount_dirs,omitempty"`
 }
 
 // InitializeWebhook represents webhook configuration for initialization.

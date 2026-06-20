@@ -5545,9 +5545,6 @@ components:
           type: string
         readOnly:
           type: boolean
-        optional:
-          type: boolean
-          description: When true, this template-declared volume portal may be left unbound by the sandbox claim request.
       required: [name, mountPath]
     EnvVar:
       type: object

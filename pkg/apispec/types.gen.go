@@ -2682,10 +2682,7 @@ type VolumeFileArchiveImportResponse struct {
 type VolumeMountSpec struct {
 	MountPath string `json:"mountPath"`
 	Name      string `json:"name"`
-
-	// Optional When true, this template-declared volume portal may be left unbound by the sandbox claim request.
-	Optional *bool `json:"optional,omitempty"`
-	ReadOnly *bool `json:"readOnly,omitempty"`
+	ReadOnly  *bool  `json:"readOnly,omitempty"`
 }
 
 // WebLoginExchangeRequest defines model for WebLoginExchangeRequest.

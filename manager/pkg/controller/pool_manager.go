@@ -310,7 +310,7 @@ func (pm *PoolManager) reconcileReplicaSetMetadata(
 
 // buildPodTemplate builds the pod template for a template
 func (pm *PoolManager) buildPodTemplate(template *v1alpha1.SandboxTemplate, specHash string) (corev1.PodTemplateSpec, error) {
-	spec := v1alpha1.BuildPodSpec(template)
+	spec := v1alpha1.BuildIdlePodSpec(template)
 	annotations := map[string]string{
 		AnnotationTemplateSpecHash:             specHash,
 		AnnotationClusterAutoscalerSafeToEvict: "true",
@@ -531,9 +531,9 @@ func (pm *PoolManager) deleteStaleIdlePodWithRetry(ctx context.Context, namespac
 	return deleted, nil
 }
 
-// TemplateSpecHash returns the pod spec hash used to identify current idle pods.
+// TemplateSpecHash returns the idle pod spec hash used to identify current idle pods.
 func TemplateSpecHash(template *v1alpha1.SandboxTemplate) (string, error) {
-	podSpec := v1alpha1.BuildPodSpec(template)
+	podSpec := v1alpha1.BuildIdlePodSpec(template)
 	payload := struct {
 		PodSpec corev1.PodSpec `json:"podSpec"`
 	}{

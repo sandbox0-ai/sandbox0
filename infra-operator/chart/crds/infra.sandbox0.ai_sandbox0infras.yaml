@@ -1112,10 +1112,6 @@ spec:
                                 type: string
                               name:
                                 type: string
-                              optional:
-                                description: Optional allows a claim request to omit
-                                  binding this portal to a SandboxVolume.
-                                type: boolean
                               readOnly:
                                 type: boolean
                             required:

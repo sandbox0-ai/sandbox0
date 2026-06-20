@@ -8,6 +8,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	"go.opentelemetry.io/otel/attribute"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace/noop"
 )
 
@@ -35,6 +38,47 @@ func TestGinMiddlewareRecordsServerMetrics(t *testing.T) {
 	})
 	if !ok || got != 1 {
 		t.Fatalf("server request metric = %v, ok=%v; want 1", got, ok)
+	}
+}
+
+func TestGinMiddlewareUsesStableHTTPSpanAttributes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := tracetest.NewSpanRecorder()
+	tracerProvider := sdktrace.NewTracerProvider()
+	tracerProvider.RegisterSpanProcessor(recorder)
+
+	router := gin.New()
+	router.Use(GinMiddleware(ServerConfig{
+		ServiceName: "cluster-gateway",
+		Tracer:      tracerProvider.Tracer("test"),
+	}))
+	router.POST("/api/v1/sandboxes/:id", func(c *gin.Context) {
+		c.String(stdhttp.StatusCreated, "ok")
+	})
+
+	req := httptest.NewRequest(stdhttp.MethodPost, "http://sandbox0.test/api/v1/sandboxes/sandbox-12345678?debug=true", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(spans))
+	}
+	attrs := spanAttributes(spans[0].Attributes())
+	if got := attrs["http.request.method"].AsString(); got != "POST" {
+		t.Fatalf("http.request.method = %q, want POST", got)
+	}
+	if got := attrs["http.response.status_code"].AsInt64(); got != stdhttp.StatusCreated {
+		t.Fatalf("http.response.status_code = %d, want 201", got)
+	}
+	if got := attrs["http.route"].AsString(); got != "/api/v1/sandboxes/:id" {
+		t.Fatalf("http.route = %q, want /api/v1/sandboxes/:id", got)
+	}
+	if got := attrs["server.address"].AsString(); got != "sandbox0.test" {
+		t.Fatalf("server.address = %q, want sandbox0.test", got)
+	}
+	if got := attrs["url.full"].AsString(); got != "http://sandbox0.test/api/v1/sandboxes/sandbox-12345678?debug=true" {
+		t.Fatalf("url.full = %q", got)
 	}
 }
 
@@ -112,4 +156,12 @@ func labelsMatch(metric *dto.Metric, labels map[string]string) bool {
 		}
 	}
 	return true
+}
+
+func spanAttributes(attrs []attribute.KeyValue) map[string]attribute.Value {
+	out := make(map[string]attribute.Value, len(attrs))
+	for _, attr := range attrs {
+		out[string(attr.Key)] = attr.Value
+	}
+	return out
 }

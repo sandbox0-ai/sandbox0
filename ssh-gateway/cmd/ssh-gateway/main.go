@@ -37,14 +37,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	obsProvider, err := observability.New(observability.Config{
-		ServiceName: "ssh-gateway",
-		Logger:      logger,
-		TraceExporter: observability.TraceExporterConfig{
-			Type:     os.Getenv("OTEL_EXPORTER_TYPE"),
-			Endpoint: os.Getenv("OTEL_EXPORTER_ENDPOINT"),
-		},
-	})
+	obsProvider, err := observability.New(observability.ConfigFromEnv("ssh-gateway", logger))
 	if err != nil {
 		logger.Fatal("Failed to initialize observability", zap.Error(err))
 	}

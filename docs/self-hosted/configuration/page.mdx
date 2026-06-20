@@ -54,6 +54,30 @@ Sandbox compute uses a serverless-style contract:
 
 Idle template pool pods are capacity, not billable sandbox runtime. Public template idle pools are platform cost, and team template idle pools should be controlled by plan or entitlement limits rather than usage metering.
 
+## Platform Observability
+
+Sandbox0 platform services emit logs to container stdout and expose Prometheus-compatible metrics on their metrics ports. Configure `spec.observability` when you want the operator to inject standard OpenTelemetry environment variables into sandbox0-owned platform components.
+
+This configuration is intentionally limited to collection. It does not install an OpenTelemetry Collector, select a storage backend, create ClickHouse tables, or define query APIs. Storage and query adapters should be configured outside `Sandbox0Infra`.
+
+```yaml
+spec:
+    observability:
+        resourceAttributes:
+            deployment.environment: production
+        traces:
+            enabled: true
+            exporter: otlp
+            endpoint: http://otel-collector.observability.svc.cluster.local:4317
+            insecure: true
+            timeout: 10s
+            sampleRate: "0.25"
+```
+
+The operator adds built-in resource attributes such as `service.name`, `sandbox0.region.id`, `sandbox0.cluster.id`, `k8s.namespace.name`, `k8s.pod.name`, and `k8s.node.name`. Built-in attributes win over user-provided keys so dashboards and trace queries can rely on stable names.
+
+When traces are not enabled, services keep the default noop trace exporter. Existing direct environment overrides still work; standard OpenTelemetry variables such as `OTEL_TRACES_EXPORTER`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_HEADERS`, and `OTEL_RESOURCE_ATTRIBUTES` take precedence over the legacy `OTEL_EXPORTER_TYPE` and `OTEL_EXPORTER_ENDPOINT` variables.
+
 Official sample manifests:
 
 - <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/single-cluster/minimal.yaml">single-cluster/minimal.yaml</GitHubRawLink>

@@ -223,7 +223,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 							Name:            "netd",
 							Image:           image,
 							ImagePullPolicy: pullPolicy,
-							Env: []corev1.EnvVar{
+							Env: common.AppendObservabilityEnvVars([]corev1.EnvVar{
 								{
 									Name:  "SERVICE",
 									Value: "netd",
@@ -238,7 +238,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 										FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"},
 									},
 								},
-							},
+							}, scope.Owner(), common.ObservabilityEnvConfig{
+								ServiceName: "netd",
+								RegionID:    compiledPlan.Netd.RegionID,
+								ClusterID:   compiledPlan.Netd.ClusterID,
+							}),
 							Ports: []corev1.ContainerPort{
 								{Name: "metrics", ContainerPort: int32(config.MetricsPort)},
 								{Name: "health", ContainerPort: int32(config.HealthPort)},

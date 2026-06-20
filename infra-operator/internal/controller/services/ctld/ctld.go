@@ -188,7 +188,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 							Image:           image,
 							ImagePullPolicy: pullPolicy,
 							Args:            args,
-							Env: []corev1.EnvVar{
+							Env: common.AppendObservabilityEnvVars([]corev1.EnvVar{
 								{
 									Name:  "SERVICE",
 									Value: "ctld",
@@ -215,7 +215,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 										FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
 									},
 								},
-							},
+							}, infra, common.ObservabilityEnvConfig{
+								ServiceName: "ctld",
+								RegionID:    common.ResolveRegionID(infra),
+								ClusterID:   common.ResolveClusterID(infra),
+							}),
 							Ports: []corev1.ContainerPort{{
 								Name:          "http",
 								ContainerPort: ctldHTTPPort,

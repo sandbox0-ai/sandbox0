@@ -4,14 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
@@ -169,11 +172,7 @@ func initTracing(cfg Config) (*sdktrace.TracerProvider, error) {
 
 	switch cfg.TraceExporter.Type {
 	case "otlp":
-		exporter, err = otlptracegrpc.New(
-			context.Background(),
-			otlptracegrpc.WithEndpoint(cfg.TraceExporter.Endpoint),
-			otlptracegrpc.WithInsecure(), // TODO: support TLS
-		)
+		exporter, err = otlptracegrpc.New(context.Background(), otlpTraceGRPCOptions(cfg.TraceExporter)...)
 	case "stdout":
 		// Use custom zap-based exporter for consistent JSON logging
 		exporter = newZapSpanExporter(cfg.Logger)
@@ -189,9 +188,7 @@ func initTracing(cfg Config) (*sdktrace.TracerProvider, error) {
 
 	res, err := resource.New(
 		context.Background(),
-		resource.WithAttributes(
-			semconv.ServiceNameKey.String(cfg.ServiceName),
-		),
+		resource.WithAttributes(resourceAttributes(cfg)...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create resource: %w", err)
@@ -204,4 +201,50 @@ func initTracing(cfg Config) (*sdktrace.TracerProvider, error) {
 	)
 
 	return tp, nil
+}
+
+func otlpTraceGRPCOptions(cfg TraceExporterConfig) []otlptracegrpc.Option {
+	opts := make([]otlptracegrpc.Option, 0, 4)
+	endpoint := strings.TrimSpace(cfg.Endpoint)
+	if endpoint != "" {
+		if strings.Contains(endpoint, "://") {
+			opts = append(opts, otlptracegrpc.WithEndpointURL(endpoint))
+		} else {
+			opts = append(opts, otlptracegrpc.WithEndpoint(endpoint))
+		}
+	}
+	if len(cfg.Headers) > 0 {
+		opts = append(opts, otlptracegrpc.WithHeaders(cfg.Headers))
+	}
+	if cfg.Timeout > 0 {
+		opts = append(opts, otlptracegrpc.WithTimeout(cfg.Timeout))
+	}
+	if cfg.Insecure != nil && *cfg.Insecure {
+		opts = append(opts, otlptracegrpc.WithInsecure())
+	}
+	return opts
+}
+
+func resourceAttributes(cfg Config) []attribute.KeyValue {
+	attrs := []attribute.KeyValue{semconv.ServiceNameKey.String(cfg.ServiceName)}
+	if len(cfg.ResourceAttributes) == 0 {
+		return attrs
+	}
+
+	normalized := map[string]string{}
+	for key, value := range cfg.ResourceAttributes {
+		key = strings.TrimSpace(key)
+		if key != "" && key != string(semconv.ServiceNameKey) {
+			normalized[key] = value
+		}
+	}
+	keys := make([]string, 0, len(normalized))
+	for key := range normalized {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		attrs = append(attrs, attribute.String(key, normalized[key]))
+	}
+	return attrs
 }

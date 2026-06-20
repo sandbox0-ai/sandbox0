@@ -188,7 +188,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 			},
 		},
 		Image: fmt.Sprintf("%s:%s", imageRepo, imageTag),
-		EnvVars: []corev1.EnvVar{
+		EnvVars: common.AppendObservabilityEnvVars([]corev1.EnvVar{
 			{
 				Name:  "SERVICE",
 				Value: "manager",
@@ -197,7 +197,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 				Name:  "CONFIG_PATH",
 				Value: "/config/config.yaml",
 			},
-		},
+		}, scope.Owner(), common.ObservabilityEnvConfig{
+			ServiceName: "manager",
+			RegionID:    compiledPlan.Manager.RegionID,
+			ClusterID:   compiledPlan.Manager.DefaultClusterID,
+		}),
 		VolumeMounts:   volumeMounts,
 		Volumes:        volumes,
 		PodAnnotations: podAnnotations,

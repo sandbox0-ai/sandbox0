@@ -28,6 +28,9 @@ func TestNewLoggerUsesSharedJSONFormat(t *testing.T) {
 	if entry["service"] != "test-service" {
 		t.Fatalf("service = %v, want test-service", entry["service"])
 	}
+	if entry["service.name"] != "test-service" {
+		t.Fatalf("service.name = %v, want test-service", entry["service.name"])
+	}
 	if entry["level"] != "info" {
 		t.Fatalf("level = %v, want info", entry["level"])
 	}

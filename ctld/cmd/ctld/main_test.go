@@ -83,21 +83,6 @@ func TestCombinedControllerRoutesMountedVolumeAPIToPortalHandler(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
-func TestPrepareVolumePortalHandoffReturnsConflictForActivePortal(t *testing.T) {
-	server := newHTTPServer(":0", combinedController{
-		Controller: ctldserver.NotImplementedController{},
-		Portal: fakeVolumePortalHandler{
-			prepareErr: fmt.Errorf("volume vol-1 is actively bound to a portal"),
-		},
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/volume-portals/handoffs/prepare", strings.NewReader(`{"sandboxvolume_id":"vol-1"}`))
-	rec := httptest.NewRecorder()
-	server.Handler.ServeHTTP(rec, req)
-
-	assert.Equal(t, http.StatusConflict, rec.Code)
-}
-
 func TestBindVolumePortalReturnsConflictForActiveOwner(t *testing.T) {
 	server := newHTTPServer(":0", combinedController{
 		Controller: ctldserver.NotImplementedController{},
@@ -147,7 +132,6 @@ func TestReleaseVolumeOwnerReturnsConflictForBusyOwner(t *testing.T) {
 type fakeVolumePortalHandler struct {
 	mountedHandler http.Handler
 	bindErr        error
-	prepareErr     error
 	releaseResp    ctldapi.ReleaseVolumeOwnerResponse
 	releaseErr     error
 }
@@ -179,21 +163,6 @@ func (f fakeVolumePortalHandler) ReleaseOwner(_ context.Context, _ ctldapi.Relea
 		return f.releaseResp, nil
 	}
 	return ctldapi.ReleaseVolumeOwnerResponse{Released: true}, nil
-}
-
-func (f fakeVolumePortalHandler) PrepareHandoff(_ context.Context, _ ctldapi.PrepareVolumePortalHandoffRequest) (ctldapi.PrepareVolumePortalHandoffResponse, error) {
-	if f.prepareErr != nil {
-		return ctldapi.PrepareVolumePortalHandoffResponse{}, f.prepareErr
-	}
-	return ctldapi.PrepareVolumePortalHandoffResponse{Prepared: true}, nil
-}
-
-func (f fakeVolumePortalHandler) CompleteHandoff(_ context.Context, _ ctldapi.CompleteVolumePortalHandoffRequest) (ctldapi.CompleteVolumePortalHandoffResponse, error) {
-	return ctldapi.CompleteVolumePortalHandoffResponse{Completed: true}, nil
-}
-
-func (f fakeVolumePortalHandler) AbortHandoff(_ context.Context, _ ctldapi.AbortVolumePortalHandoffRequest) (ctldapi.AbortVolumePortalHandoffResponse, error) {
-	return ctldapi.AbortVolumePortalHandoffResponse{Aborted: true}, nil
 }
 
 func (f fakeVolumePortalHandler) PrepareSnapshotCheckpoint(_ context.Context, _ ctldapi.PrepareVolumeSnapshotCheckpointRequest) (ctldapi.PrepareVolumeSnapshotCheckpointResponse, error) {

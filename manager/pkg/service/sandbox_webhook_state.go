@@ -206,9 +206,6 @@ func (c *StorageProxyVolumeClient) PrepareForVolumePortalBind(ctx context.Contex
 	if volumeID == "" {
 		return fmt.Errorf("volume id is required")
 	}
-	if req.TargetClusterID == "" {
-		req.TargetClusterID = c.clusterID
-	}
 	token, err := c.generateToken(req.TeamID, req.UserID, "")
 	if err != nil {
 		return err

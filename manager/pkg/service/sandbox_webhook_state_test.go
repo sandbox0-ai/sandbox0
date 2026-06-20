@@ -65,12 +65,11 @@ func TestStorageProxyVolumeClientPrepareForPortalBind(t *testing.T) {
 		TokenGenerator: staticTokenGenerator{},
 	})
 	if err := client.PrepareForVolumePortalBind(t.Context(), PrepareVolumePortalBindRequest{
-		TeamID:         "team-1",
-		UserID:         "user-1",
-		VolumeID:       "vol-1",
-		TargetCtldAddr: "http://10.0.0.1:8095",
-		PodUID:         "pod-uid",
-		MountPath:      "/workspace",
+		TeamID:    "team-1",
+		UserID:    "user-1",
+		VolumeID:  "vol-1",
+		PodUID:    "pod-uid",
+		MountPath: "/workspace",
 	}); err != nil {
 		t.Fatalf("PrepareForVolumePortalBind() error = %v", err)
 	}
@@ -82,9 +81,6 @@ func TestStorageProxyVolumeClientPrepareForPortalBind(t *testing.T) {
 	}
 	if gotToken == "" {
 		t.Fatal("expected internal token header to be set")
-	}
-	if gotReq.TargetCtldAddr != "http://10.0.0.1:8095" {
-		t.Fatalf("targetCtldAddr = %q, want %q", gotReq.TargetCtldAddr, "http://10.0.0.1:8095")
 	}
 	if gotReq.PodUID != "pod-uid" {
 		t.Fatalf("podUID = %q, want %q", gotReq.PodUID, "pod-uid")

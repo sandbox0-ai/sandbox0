@@ -283,10 +283,8 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("pod_uid, sandboxvolume_id and team_id are required")
 	}
 	volumeRecord, err := m.validateBindableVolume(ctx, ctldBindContext{
-		volumeID:        req.SandboxVolumeID,
-		teamID:          req.TeamID,
-		sourceClusterID: strings.TrimSpace(req.TransferSourceClusterID),
-		sourcePodID:     strings.TrimSpace(req.TransferSourcePodID),
+		volumeID: req.SandboxVolumeID,
+		teamID:   req.TeamID,
 	})
 	if err != nil {
 		return ctldapi.BindVolumePortalResponse{}, err
@@ -449,7 +447,7 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 	m.boundVolumes[req.SandboxVolumeID] = bound
 	m.volumes.add(volCtx)
 	m.attachPortalLocked(pm, req.SandboxVolumeID, volumeRecord.TeamID, mountedAt)
-	if err := m.registerOwner(ctx, bound, strings.TrimSpace(req.TransferSourceClusterID), strings.TrimSpace(req.TransferSourcePodID)); err != nil {
+	if err := m.registerOwner(ctx, bound); err != nil {
 		m.clearPortalLocked(pm)
 		delete(m.boundVolumes, req.SandboxVolumeID)
 		m.volumes.remove(req.SandboxVolumeID)
@@ -603,7 +601,7 @@ func (m *Manager) AttachOwner(ctx context.Context, req ctldapi.AttachVolumeOwner
 	}
 	m.boundVolumes[req.SandboxVolumeID] = bound
 	m.volumes.add(volCtx)
-	if err := m.registerOwner(ctx, bound, "", ""); err != nil {
+	if err := m.registerOwner(ctx, bound); err != nil {
 		delete(m.boundVolumes, req.SandboxVolumeID)
 		m.volumes.remove(req.SandboxVolumeID)
 		m.mu.Unlock()
@@ -646,71 +644,6 @@ func (m *Manager) ReleaseOwner(ctx context.Context, req ctldapi.ReleaseVolumeOwn
 	}
 	m.mu.Unlock()
 	return ctldapi.ReleaseVolumeOwnerResponse{Released: true}, nil
-}
-
-func (m *Manager) PrepareHandoff(ctx context.Context, req ctldapi.PrepareVolumePortalHandoffRequest) (ctldapi.PrepareVolumePortalHandoffResponse, error) {
-	volumeID := strings.TrimSpace(req.SandboxVolumeID)
-	if volumeID == "" {
-		return ctldapi.PrepareVolumePortalHandoffResponse{}, fmt.Errorf("sandboxvolume_id is required")
-	}
-	m.mu.Lock()
-	bound := m.boundVolumes[volumeID]
-	m.mu.Unlock()
-	if bound == nil || bound.volCtx == nil || bound.volCtx.S0FS == nil {
-		return ctldapi.PrepareVolumePortalHandoffResponse{}, fmt.Errorf("volume %s is not owned by this ctld", volumeID)
-	}
-	if bound.refCount > 0 {
-		return ctldapi.PrepareVolumePortalHandoffResponse{}, fmt.Errorf("volume %s is actively bound to a portal", volumeID)
-	}
-	if err := m.volumes.prepareHandoff(ctx, volumeID); err != nil {
-		return ctldapi.PrepareVolumePortalHandoffResponse{}, err
-	}
-	if _, err := bound.volCtx.S0FS.SyncMaterialize(ctx); err != nil {
-		m.volumes.abortHandoff(volumeID)
-		return ctldapi.PrepareVolumePortalHandoffResponse{}, err
-	}
-	return ctldapi.PrepareVolumePortalHandoffResponse{Prepared: true}, nil
-}
-
-func (m *Manager) CompleteHandoff(ctx context.Context, req ctldapi.CompleteVolumePortalHandoffRequest) (ctldapi.CompleteVolumePortalHandoffResponse, error) {
-	volumeID := strings.TrimSpace(req.SandboxVolumeID)
-	if volumeID == "" {
-		return ctldapi.CompleteVolumePortalHandoffResponse{}, fmt.Errorf("sandboxvolume_id is required")
-	}
-	m.volumes.abortHandoff(volumeID)
-
-	m.mu.Lock()
-	bound := m.boundVolumes[volumeID]
-	if bound == nil {
-		m.mu.Unlock()
-		return ctldapi.CompleteVolumePortalHandoffResponse{Completed: true}, nil
-	}
-	if bound.materializeCancel != nil {
-		bound.materializeCancel()
-		bound.materializeCancel = nil
-	}
-	done := bound.materializeDone
-	bound.materializeDone = nil
-	if done != nil {
-		<-done
-	}
-	if err := m.volumes.UnmountVolume(ctx, volumeID, ""); err != nil {
-		m.mu.Unlock()
-		return ctldapi.CompleteVolumePortalHandoffResponse{}, err
-	}
-	delete(m.boundVolumes, volumeID)
-	m.unregisterOwner(bound)
-	m.mu.Unlock()
-	return ctldapi.CompleteVolumePortalHandoffResponse{Completed: true}, nil
-}
-
-func (m *Manager) AbortHandoff(ctx context.Context, req ctldapi.AbortVolumePortalHandoffRequest) (ctldapi.AbortVolumePortalHandoffResponse, error) {
-	volumeID := strings.TrimSpace(req.SandboxVolumeID)
-	if volumeID == "" {
-		return ctldapi.AbortVolumePortalHandoffResponse{}, fmt.Errorf("sandboxvolume_id is required")
-	}
-	m.volumes.abortHandoff(volumeID)
-	return ctldapi.AbortVolumePortalHandoffResponse{Aborted: true}, nil
 }
 
 func (m *Manager) PrepareSnapshotCheckpoint(ctx context.Context, req ctldapi.PrepareVolumeSnapshotCheckpointRequest) (ctldapi.PrepareVolumeSnapshotCheckpointResponse, error) {

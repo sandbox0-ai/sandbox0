@@ -80,18 +80,6 @@ func (c *CtldClient) ApplyRootFSWithTimeout(ctx context.Context, ctldAddress str
 	return c.apiWithTimeout(timeout).ApplyRootFS(ctx, ctldAddress, req)
 }
 
-func (c *CtldClient) PrepareVolumePortalHandoff(ctx context.Context, ctldAddress string, req ctldapi.PrepareVolumePortalHandoffRequest) (*ctldapi.PrepareVolumePortalHandoffResponse, error) {
-	return c.apiOrDefault().PrepareVolumePortalHandoff(ctx, ctldAddress, req)
-}
-
-func (c *CtldClient) CompleteVolumePortalHandoff(ctx context.Context, ctldAddress string, req ctldapi.CompleteVolumePortalHandoffRequest) (*ctldapi.CompleteVolumePortalHandoffResponse, error) {
-	return c.apiOrDefault().CompleteVolumePortalHandoff(ctx, ctldAddress, req)
-}
-
-func (c *CtldClient) AbortVolumePortalHandoff(ctx context.Context, ctldAddress string, req ctldapi.AbortVolumePortalHandoffRequest) (*ctldapi.AbortVolumePortalHandoffResponse, error) {
-	return c.apiOrDefault().AbortVolumePortalHandoff(ctx, ctldAddress, req)
-}
-
 func (c *CtldClient) apiOrDefault() *ctldapi.Client {
 	if c != nil && c.api != nil {
 		return c.api

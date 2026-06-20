@@ -19,13 +19,11 @@ import (
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
-	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"golang.org/x/sys/unix"
 )
 
 var defaultRootFSSnapshotExcludedPaths = []string{
 	"/procd",
-	volumeportal.WebhookStateMountPath,
 }
 
 func (r *ContainerdRuntime) createOverlayUpperDiff(ctx context.Context, client containerdClient, info ctldapi.RootFSInfo, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, bool, error) {

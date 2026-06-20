@@ -73,6 +73,8 @@ func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
 	addRootFSTestVolumePortal(pod, "data", "/workspace/data")
 	addRootFSTestVolumePortal(pod, volumeportal.WebhookStatePortalName, volumeportal.WebhookStateMountPath)
+	setRootFSTestClaimMounts(t, pod, []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/data"}})
+	pod.Annotations[controller.AnnotationWebhookStateVolumeID] = "webhook-state-vol-1"
 	pod.Status.HostIP = ctldURL.Hostname()
 	k8sClient := fake.NewSimpleClientset(pod)
 	k8sClient.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
@@ -420,6 +422,7 @@ func TestFinishRestoredSandboxRuntimeAppliesRootFSBeforeProcdInitialization(t *t
 
 	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
 	addRootFSTestVolumePortal(pod, "data", "/workspace/data")
+	setRootFSTestClaimMounts(t, pod, []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/data"}})
 	pod.Status.HostIP = ctldURL.Hostname()
 	pod.Status.PodIP = procdURL.Hostname()
 	store := &memorySandboxStore{
@@ -722,12 +725,17 @@ func TestRestoreFailureCleanupCanSkipRootFSSave(t *testing.T) {
 	assert.Equal(t, SandboxStatusPaused, store.records["sandbox-1"].Status)
 }
 
-func TestRootFSExcludedPathsForPodUsesVolumePortalMountPaths(t *testing.T) {
+func TestRootFSExcludedPathsForPodUsesBoundClaimMountPaths(t *testing.T) {
 	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
 	addRootFSTestVolumePortal(pod, "data", "/workspace/data/")
 	addRootFSTestVolumePortal(pod, "data-duplicate", "/workspace/data")
 	addRootFSTestVolumePortal(pod, "database", "/workspace/database")
 	addRootFSTestVolumePortal(pod, "ignored-root", "/")
+	setRootFSTestClaimMounts(t, pod, []ClaimMount{
+		{SandboxVolumeID: "vol-1", MountPoint: "/workspace/data/"},
+		{SandboxVolumeID: "vol-2", MountPoint: "/workspace/database"},
+	})
+	pod.Annotations[controller.AnnotationWebhookStateVolumeID] = "webhook-state-vol-1"
 	pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
 		Name: "ignored-relative",
 		VolumeSource: corev1.VolumeSource{
@@ -743,7 +751,16 @@ func TestRootFSExcludedPathsForPodUsesVolumePortalMountPaths(t *testing.T) {
 
 	got := rootFSExcludedPathsForPod(pod)
 
-	assert.ElementsMatch(t, []string{"/workspace/data", "/workspace/database"}, got)
+	assert.ElementsMatch(t, []string{"/workspace/data", "/workspace/database", volumeportal.WebhookStateMountPath}, got)
+}
+
+func TestRootFSExcludedPathsForPodIgnoresUnboundVolumePortals(t *testing.T) {
+	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
+	addRootFSTestVolumePortal(pod, "data", "/workspace/data")
+
+	got := rootFSExcludedPathsForPod(pod)
+
+	assert.Empty(t, got)
 }
 
 func rootFSTestPod(name, sandboxID, teamID string) *corev1.Pod {
@@ -789,6 +806,14 @@ func addRootFSTestVolumePortal(pod *corev1.Pod, name, mountPath string) {
 			MountPath: mountPath,
 		})
 	}
+}
+
+func setRootFSTestClaimMounts(t *testing.T, pod *corev1.Pod, mounts []ClaimMount) {
+	t.Helper()
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+	require.NoError(t, setMountsAnnotation(pod.Annotations, mounts))
 }
 
 type recordingPauseEnqueuer struct {

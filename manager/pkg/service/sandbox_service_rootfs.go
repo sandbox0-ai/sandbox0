@@ -177,26 +177,31 @@ func rootFSExcludedPathsForPod(pod *corev1.Pod) []string {
 	if pod == nil {
 		return nil
 	}
-	portals := expectedVolumePortalsForPod(pod)
-	if len(portals) == 0 {
-		return nil
+	var mounts []ClaimMount
+	if pod.Annotations != nil {
+		mounts = parseClaimMounts(pod.Annotations[controller.AnnotationMounts])
 	}
-	seen := make(map[string]struct{}, len(portals))
-	out := make([]string, 0, len(portals))
-	for _, portal := range portals {
-		raw := strings.TrimSpace(portal.MountPath)
+	seen := make(map[string]struct{}, len(mounts)+1)
+	out := make([]string, 0, len(mounts)+1)
+	add := func(raw string) {
 		if raw == "" || !strings.HasPrefix(raw, "/") {
-			continue
+			return
 		}
 		mountPath := path.Clean(raw)
 		if mountPath == "/" {
-			continue
+			return
 		}
 		if _, ok := seen[mountPath]; ok {
-			continue
+			return
 		}
 		seen[mountPath] = struct{}{}
 		out = append(out, mountPath)
+	}
+	for _, mount := range mounts {
+		add(strings.TrimSpace(mount.MountPoint))
+	}
+	if pod.Annotations != nil && strings.TrimSpace(pod.Annotations[controller.AnnotationWebhookStateVolumeID]) != "" {
+		add(webhookStateMountPoint)
 	}
 	return out
 }

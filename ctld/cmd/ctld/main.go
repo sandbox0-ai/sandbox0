@@ -309,39 +309,6 @@ func (c combinedController) ReleaseVolumeOwner(r *http.Request, req ctldapi.Rele
 	return resp, http.StatusOK
 }
 
-func (c combinedController) PrepareVolumePortalHandoff(r *http.Request, req ctldapi.PrepareVolumePortalHandoffRequest) (ctldapi.PrepareVolumePortalHandoffResponse, int) {
-	if c.Portal == nil {
-		return ctldapi.PrepareVolumePortalHandoffResponse{Error: "ctld volume portal handoff not implemented"}, http.StatusNotImplemented
-	}
-	resp, err := c.Portal.PrepareHandoff(r.Context(), req)
-	if err != nil {
-		return ctldapi.PrepareVolumePortalHandoffResponse{Error: err.Error()}, volumePortalErrorStatus(err)
-	}
-	return resp, http.StatusOK
-}
-
-func (c combinedController) CompleteVolumePortalHandoff(r *http.Request, req ctldapi.CompleteVolumePortalHandoffRequest) (ctldapi.CompleteVolumePortalHandoffResponse, int) {
-	if c.Portal == nil {
-		return ctldapi.CompleteVolumePortalHandoffResponse{Error: "ctld volume portal handoff not implemented"}, http.StatusNotImplemented
-	}
-	resp, err := c.Portal.CompleteHandoff(r.Context(), req)
-	if err != nil {
-		return ctldapi.CompleteVolumePortalHandoffResponse{Error: err.Error()}, volumePortalErrorStatus(err)
-	}
-	return resp, http.StatusOK
-}
-
-func (c combinedController) AbortVolumePortalHandoff(r *http.Request, req ctldapi.AbortVolumePortalHandoffRequest) (ctldapi.AbortVolumePortalHandoffResponse, int) {
-	if c.Portal == nil {
-		return ctldapi.AbortVolumePortalHandoffResponse{Error: "ctld volume portal handoff not implemented"}, http.StatusNotImplemented
-	}
-	resp, err := c.Portal.AbortHandoff(r.Context(), req)
-	if err != nil {
-		return ctldapi.AbortVolumePortalHandoffResponse{Error: err.Error()}, volumePortalErrorStatus(err)
-	}
-	return resp, http.StatusOK
-}
-
 func (c combinedController) PrepareVolumeSnapshotCheckpoint(r *http.Request, req ctldapi.PrepareVolumeSnapshotCheckpointRequest) (ctldapi.PrepareVolumeSnapshotCheckpointResponse, int) {
 	if c.Portal == nil {
 		return ctldapi.PrepareVolumeSnapshotCheckpointResponse{Error: "ctld volume snapshot checkpoint not implemented"}, http.StatusNotImplemented
@@ -388,7 +355,7 @@ func volumePortalErrorStatus(err error) int {
 		strings.Contains(message, "actively bound to a portal"),
 		strings.Contains(message, "still has active file requests"),
 		strings.Contains(message, "already bound to"),
-		strings.Contains(message, "handoff already in progress"):
+		strings.Contains(message, "snapshot checkpoint already in progress"):
 		return http.StatusConflict
 	default:
 		return http.StatusBadRequest
@@ -433,9 +400,6 @@ type volumePortalHandler interface {
 	CheckPublished(ctx context.Context, req ctldapi.CheckVolumePortalsRequest) (ctldapi.CheckVolumePortalsResponse, error)
 	AttachOwner(ctx context.Context, req ctldapi.AttachVolumeOwnerRequest) (ctldapi.AttachVolumeOwnerResponse, error)
 	ReleaseOwner(ctx context.Context, req ctldapi.ReleaseVolumeOwnerRequest) (ctldapi.ReleaseVolumeOwnerResponse, error)
-	PrepareHandoff(ctx context.Context, req ctldapi.PrepareVolumePortalHandoffRequest) (ctldapi.PrepareVolumePortalHandoffResponse, error)
-	CompleteHandoff(ctx context.Context, req ctldapi.CompleteVolumePortalHandoffRequest) (ctldapi.CompleteVolumePortalHandoffResponse, error)
-	AbortHandoff(ctx context.Context, req ctldapi.AbortVolumePortalHandoffRequest) (ctldapi.AbortVolumePortalHandoffResponse, error)
 	PrepareSnapshotCheckpoint(ctx context.Context, req ctldapi.PrepareVolumeSnapshotCheckpointRequest) (ctldapi.PrepareVolumeSnapshotCheckpointResponse, error)
 	CompleteSnapshotCheckpoint(ctx context.Context, req ctldapi.CompleteVolumeSnapshotCheckpointRequest) (ctldapi.CompleteVolumeSnapshotCheckpointResponse, error)
 	AbortSnapshotCheckpoint(ctx context.Context, req ctldapi.AbortVolumeSnapshotCheckpointRequest) (ctldapi.AbortVolumeSnapshotCheckpointResponse, error)

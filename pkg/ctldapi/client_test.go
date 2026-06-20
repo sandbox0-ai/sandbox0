@@ -37,11 +37,11 @@ func TestPostJSONReturnsStatusErrorWithTypedMessage(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusConflict)
-		_ = json.NewEncoder(w).Encode(PrepareVolumePortalHandoffResponse{Error: "volume is busy"})
+		_ = json.NewEncoder(w).Encode(BindVolumePortalResponse{Error: "volume is busy"})
 	}))
 	defer server.Close()
 
-	resp, err := PostJSON[PrepareVolumePortalHandoffResponse](context.Background(), server.Client(), server.URL, "/api/v1/volume-portals/handoffs/prepare", PrepareVolumePortalHandoffRequest{SandboxVolumeID: "vol-1"})
+	resp, err := PostJSON[BindVolumePortalResponse](context.Background(), server.Client(), server.URL, "/api/v1/volume-portals/bind", BindVolumePortalRequest{SandboxVolumeID: "vol-1"})
 	if err == nil {
 		t.Fatal("expected error")
 	}

@@ -782,6 +782,13 @@ func (s *Server) prepareSandboxVolumeForPortalBind(w http.ResponseWriter, r *htt
 			return nil
 		}
 
+		if err := s.releaseReleasableCtldVolumeOwners(runCtx, id); err != nil {
+			if errors.Is(err, errCtldOwnerBusy) {
+				return fmt.Errorf("%w: volume has active mounts", db.ErrConflict)
+			}
+			return fmt.Errorf("release ctld volume owners: %w", err)
+		}
+
 		const heartbeatTimeout = 15
 		mounts, err := s.repo.GetActiveMounts(runCtx, id, heartbeatTimeout)
 		if err != nil {
@@ -795,26 +802,7 @@ func (s *Server) prepareSandboxVolumeForPortalBind(w http.ResponseWriter, r *htt
 			return nil
 		}
 
-		source := s.selectPreferredVolumeOwner(mounts)
-		if source == nil {
-			return fmt.Errorf("%w: volume has active mounts", db.ErrConflict)
-		}
-		opts := volume.DecodeMountOptions(source.MountOptions)
-		if opts.OwnerKind != volume.OwnerKindCtld {
-			return fmt.Errorf("%w: volume has active mounts", db.ErrConflict)
-		}
-		if strings.TrimSpace(req.TargetCtldAddr) == "" {
-			return fmt.Errorf("%w: target ctld address is required for owner handoff", db.ErrConflict)
-		}
-		if err := s.executePortalBindHandoff(runCtx, vol, source, req); err != nil {
-			return err
-		}
-		_ = spec.WriteSuccess(w, http.StatusOK, map[string]any{
-			"prepared": true,
-			"cleaned":  cleaned,
-			"handoff":  true,
-		})
-		return nil
+		return fmt.Errorf("%w: volume has active mounts", db.ErrConflict)
 	}
 
 	if s.barrier != nil {

@@ -311,6 +311,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertClaimBootstrapMountLifecycle(env, session)
 				})
 
+				It("rejects unbound template volume mounts at claim time", func() {
+					assertClaimRejectsUnboundTemplateVolumeMount(env, session)
+				})
+
 				It("keeps claim-mounted volumes writable", func() {
 					assertClaimMountedVolumeWritable(env, session)
 				})
@@ -2514,6 +2518,18 @@ func assertClaimBootstrapMountLifecycle(env *framework.ScenarioEnv, session *e2e
 		body, _, readErr := session.ReadFile(env.TestCtx.Context, GinkgoT(), sandboxID, mountPoint+seedPath)
 		return body, readErr
 	}).WithTimeout(20 * time.Second).WithPolling(1 * time.Second).Should(Equal(seedContent))
+}
+
+func assertClaimRejectsUnboundTemplateVolumeMount(env *framework.ScenarioEnv, session *e2eutils.Session) {
+	mountPoint := "/workspace/unbound-claim"
+	templateID := createVolumePortalTemplate(env, session, mountPoint)
+	claimReq := apispec.ClaimRequest{
+		Template: &templateID,
+	}
+
+	_, status, err := session.ClaimSandboxDetailed(env.TestCtx.Context, GinkgoT(), claimReq)
+	Expect(err).To(HaveOccurred())
+	Expect(status).To(Equal(http.StatusBadRequest))
 }
 
 func assertClaimMountedVolumeWritable(env *framework.ScenarioEnv, session *e2eutils.Session) {

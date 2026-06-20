@@ -29,11 +29,11 @@ type localVolumeManager struct {
 }
 
 type localVolumeRequestState struct {
-	inFlight     int
-	transferring bool
-	lastAccess   time.Time
-	done         chan struct{}
-	cond         *sync.Cond
+	inFlight      int
+	checkpointing bool
+	lastAccess    time.Time
+	done          chan struct{}
+	cond          *sync.Cond
 }
 
 func newLocalVolumeManager() *localVolumeManager {
@@ -61,7 +61,7 @@ func (m *localVolumeManager) remove(volumeID string) (*volume.VolumeContext, boo
 	volCtx, ok := m.volumes[volumeID]
 	delete(m.volumes, volumeID)
 	if state := m.requests[volumeID]; state != nil {
-		if state.transferring && state.done != nil {
+		if state.checkpointing && state.done != nil {
 			close(state.done)
 		}
 		delete(m.requests, volumeID)
@@ -78,7 +78,7 @@ func (m *localVolumeManager) acquire(ctx context.Context, volumeID string) (func
 			m.mu.Unlock()
 			return nil, fmt.Errorf("volume %s not mounted", volumeID)
 		}
-		if state.transferring && state.done != nil {
+		if state.checkpointing && state.done != nil {
 			done := state.done
 			m.mu.Unlock()
 			select {
@@ -109,7 +109,7 @@ func (m *localVolumeManager) acquire(ctx context.Context, volumeID string) (func
 	}
 }
 
-func (m *localVolumeManager) prepareHandoff(ctx context.Context, volumeID string) error {
+func (m *localVolumeManager) prepareSnapshotCheckpoint(ctx context.Context, volumeID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -117,14 +117,14 @@ func (m *localVolumeManager) prepareHandoff(ctx context.Context, volumeID string
 	if m.volumes[volumeID] == nil || state == nil {
 		return fmt.Errorf("volume %s not mounted", volumeID)
 	}
-	if state.transferring {
-		return fmt.Errorf("volume %s handoff already in progress", volumeID)
+	if state.checkpointing {
+		return fmt.Errorf("volume %s snapshot checkpoint already in progress", volumeID)
 	}
-	state.transferring = true
+	state.checkpointing = true
 	state.done = make(chan struct{})
 	for state.inFlight > 0 {
 		if err := ctx.Err(); err != nil {
-			state.transferring = false
+			state.checkpointing = false
 			close(state.done)
 			state.done = nil
 			return err
@@ -134,15 +134,15 @@ func (m *localVolumeManager) prepareHandoff(ctx context.Context, volumeID string
 	return nil
 }
 
-func (m *localVolumeManager) abortHandoff(volumeID string) {
+func (m *localVolumeManager) completeSnapshotCheckpoint(volumeID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	state := m.requests[volumeID]
-	if state == nil || !state.transferring {
+	if state == nil || !state.checkpointing {
 		return
 	}
-	state.transferring = false
+	state.checkpointing = false
 	state.lastAccess = time.Now().UTC()
 	if state.done != nil {
 		close(state.done)
@@ -150,19 +150,11 @@ func (m *localVolumeManager) abortHandoff(volumeID string) {
 	}
 }
 
-func (m *localVolumeManager) prepareSnapshotCheckpoint(ctx context.Context, volumeID string) error {
-	return m.prepareHandoff(ctx, volumeID)
-}
-
-func (m *localVolumeManager) completeSnapshotCheckpoint(volumeID string) {
-	m.abortHandoff(volumeID)
-}
-
 func (m *localVolumeManager) canGarbageCollectS0FS(volumeID string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	state := m.requests[volumeID]
-	return state != nil && !state.transferring
+	return state != nil && !state.checkpointing
 }
 
 func (m *localVolumeManager) touch(volumeID string) {
@@ -182,7 +174,7 @@ func (m *localVolumeManager) canCleanupOwnerOnly(volumeID string, cutoff time.Ti
 	if m.volumes[volumeID] == nil || state == nil {
 		return false
 	}
-	if state.transferring || state.inFlight > 0 {
+	if state.checkpointing || state.inFlight > 0 {
 		return false
 	}
 	if state.lastAccess.IsZero() {
@@ -198,8 +190,8 @@ func (m *localVolumeManager) canReleaseOwnerOnly(volumeID string) (bool, string)
 	if state == nil {
 		return true, ""
 	}
-	if state.transferring {
-		return false, "handoff already in progress"
+	if state.checkpointing {
+		return false, "snapshot checkpoint already in progress"
 	}
 	if state.inFlight > 0 {
 		return false, "still has active file requests"

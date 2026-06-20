@@ -675,7 +675,7 @@ func resolveBuiltinDatabaseConfig(infra *infrav1alpha1.Sandbox0Infra) infrav1alp
 		SSLMode:                "disable",
 		StatefulResourcePolicy: infrav1alpha1.BuiltinStatefulResourcePolicyRetain,
 	}
-	if infra.Spec.Database.Builtin == nil {
+	if infra == nil || infra.Spec.Database == nil || infra.Spec.Database.Builtin == nil {
 		return cfg
 	}
 

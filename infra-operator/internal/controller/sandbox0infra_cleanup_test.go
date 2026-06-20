@@ -16,7 +16,10 @@ import (
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	credentialstoresvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/credentialstore"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/observability"
+	redissvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/redis"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storage"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
@@ -139,6 +142,39 @@ func TestCleanupDisabledServiceResourcesCleansBuiltinDependencies(t *testing.T) 
 	assertClientObjectMissing(t, client, types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-manager"}, &corev1.ServiceAccount{})
 	assertClientObjectMissing(t, client, types.NamespacedName{Name: "demo-manager"}, &rbacv1.ClusterRole{})
 	assertClientObjectMissing(t, client, types.NamespacedName{Name: "demo-manager"}, &rbacv1.ClusterRoleBinding{})
+}
+
+func TestCleanupDisabledServiceResourcesAllowsObservabilityOnlySpec(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Observability: &infrav1alpha1.ObservabilityConfig{
+				Backend: &infrav1alpha1.ObservabilityBackendConfig{
+					Type: infrav1alpha1.ObservabilityBackendTypeBuiltin,
+					Builtin: &infrav1alpha1.BuiltinObservabilityBackendConfig{
+						Provider: infrav1alpha1.ObservabilityBuiltinProviderClickHouse,
+					},
+				},
+			},
+		},
+	}
+
+	reconciler, _, scheme := newCleanupTestReconciler(t)
+	resources := common.NewResourceManager(reconciler.Client, scheme, nil, common.LocalDevConfig{})
+	err := reconciler.cleanupDisabledServiceResources(
+		context.Background(),
+		infra,
+		infraplan.Compile(infra).Cleanup,
+		database.NewReconciler(resources),
+		redissvc.NewReconciler(resources),
+		credentialstoresvc.NewReconciler(resources),
+		storage.NewReconciler(resources),
+		registry.NewReconciler(resources),
+		observability.NewReconciler(resources),
+	)
+	if err != nil {
+		t.Fatalf("cleanup disabled service resources: %v", err)
+	}
 }
 
 func newCleanupTestReconciler(t *testing.T, objects ...ctrlclient.Object) (*Sandbox0InfraReconciler, ctrlclient.Client, *runtime.Scheme) {

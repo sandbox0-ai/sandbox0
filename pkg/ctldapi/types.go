@@ -75,6 +75,14 @@ type RootFSLayerDescriptor struct {
 	Descriptor    RootFSDiffDescriptor `json:"descriptor"`
 }
 
+// RootFSPortalPath maps an unbound volume portal's visible mount path to the
+// node-local backing directory that should be checkpointed as rootfs content.
+type RootFSPortalPath struct {
+	PortalName  string `json:"portal_name,omitempty"`
+	MountPath   string `json:"mount_path"`
+	BackingPath string `json:"backing_path"`
+}
+
 type InspectRootFSRequest struct {
 	Target RootFSContainerRef `json:"target"`
 }
@@ -92,6 +100,7 @@ type SaveRootFSRequest struct {
 	ParentLayerID             string             `json:"parent_layer_id,omitempty"`
 	ObjectKey                 string             `json:"object_key,omitempty"`
 	ExcludedPaths             []string           `json:"excluded_paths,omitempty"`
+	PortalPaths               []RootFSPortalPath `json:"portal_paths,omitempty"`
 }
 
 type SaveRootFSResponse struct {
@@ -112,6 +121,7 @@ type ApplyRootFSRequest struct {
 	Layers                      []RootFSLayerDescriptor `json:"layers,omitempty"`
 	Descriptor                  RootFSDiffDescriptor    `json:"descriptor"`
 	ExcludedPaths               []string                `json:"excluded_paths,omitempty"`
+	PortalPaths                 []RootFSPortalPath      `json:"portal_paths,omitempty"`
 }
 
 type ApplyRootFSResponse struct {

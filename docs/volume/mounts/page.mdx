@@ -28,12 +28,12 @@ Template mount paths are fixed before the Sandbox starts.
 apiVersion: sandbox0.ai/v1alpha1
 kind: SandboxTemplate
 metadata:
-  name: default
+    name: default
 spec:
-  volumeMounts:
-    - name: workspace-data
-      mountPath: /workspace/data
-      readOnly: false
+    volumeMounts:
+        - name: workspace-data
+          mountPath: /workspace/data
+          readOnly: false
 ```
 
 Mount path requirements:
@@ -59,9 +59,9 @@ The claim request binds existing Volumes to template-declared paths.
 }
 ```
 
-`mount_point` must match a path declared in `spec.volumeMounts`. Every template-declared `volumeMount` must be bound by the claim request; Sandbox0 rejects claims that would leave a template volume mount unbound.
+`mount_point` must match a path declared in `spec.volumeMounts`. A claim may bind any subset of the declared mount paths.
 
-Only mounts present in the claim request are treated as bound Sandbox Volume paths for that Sandbox. Bound Sandbox Volume paths are excluded from rootfs pause, snapshot, restore, and fork checkpoints because their contents are owned by the Sandbox Volume.
+Only mounts present in the claim request are treated as bound Sandbox Volume paths for that Sandbox. Bound Sandbox Volume paths are excluded from rootfs pause, snapshot, restore, and fork checkpoints because their contents are owned by the Sandbox Volume. Declared paths omitted from the claim are created as writable rootfs directories, so their contents are captured by rootfs pause, snapshot, restore, and fork checkpoints.
 
 ## Access Modes
 

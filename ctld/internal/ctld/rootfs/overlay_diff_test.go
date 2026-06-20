@@ -33,7 +33,7 @@ func TestWriteOverlayUpperDiffIncludesUpperEntries(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(upperdir, "etc", "config"), []byte("value"), 0o644))
 	require.NoError(t, os.Symlink("config", filepath.Join(upperdir, "etc", "config-link")))
 
-	desc, reader, err := writeOverlayUpperDiff(context.Background(), upperdir, nil)
+	desc, reader, err := writeOverlayUpperDiff(context.Background(), upperdir, nil, nil)
 	require.NoError(t, err)
 	defer reader.Close()
 	require.NotEmpty(t, desc.Digest)
@@ -55,7 +55,7 @@ func TestWriteOverlayUpperDiffExcludesRuntimePaths(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(upperdir, "workspace"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(upperdir, "workspace", "state"), []byte("value"), 0o644))
 
-	_, reader, err := writeOverlayUpperDiff(context.Background(), upperdir, nil)
+	_, reader, err := writeOverlayUpperDiff(context.Background(), upperdir, nil, nil)
 	require.NoError(t, err)
 	defer reader.Close()
 
@@ -78,7 +78,7 @@ func TestWriteOverlayUpperDiffExcludesConfiguredWebhookStatePath(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(upperdir, "workspace"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(upperdir, "workspace", "state"), []byte("value"), 0o644))
 
-	_, reader, err := writeOverlayUpperDiff(context.Background(), upperdir, []string{volumeportal.WebhookStateMountPath})
+	_, reader, err := writeOverlayUpperDiff(context.Background(), upperdir, []string{volumeportal.WebhookStateMountPath}, nil)
 	require.NoError(t, err)
 	defer reader.Close()
 
@@ -104,7 +104,7 @@ func TestWriteOverlayUpperDiffExcludesConfiguredVolumePaths(t *testing.T) {
 		"/workspace/data",
 		"/",
 		"",
-	})
+	}, nil)
 	require.NoError(t, err)
 	defer reader.Close()
 
@@ -117,6 +117,32 @@ func TestWriteOverlayUpperDiffExcludesConfiguredVolumePaths(t *testing.T) {
 	assert.Contains(t, entries, "workspace/other/state")
 }
 
+func TestWriteOverlayUpperDiffAppendsUnboundPortalBackingAsVisiblePath(t *testing.T) {
+	upperdir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(upperdir, "workspace", "cache"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(upperdir, "workspace", "cache", "upper.txt"), []byte("upper"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(upperdir, "workspace", "state"), []byte("rootfs"), 0o644))
+
+	backing := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(backing, "nested"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(backing, "nested", "portal.txt"), []byte("portal"), 0o644))
+
+	_, reader, err := writeOverlayUpperDiff(context.Background(), upperdir, nil, []ctldapi.RootFSPortalPath{{
+		PortalName:  "cache",
+		MountPath:   "/workspace/cache",
+		BackingPath: backing,
+	}})
+	require.NoError(t, err)
+	defer reader.Close()
+
+	entries := readTarEntries(t, reader)
+	assert.Contains(t, entries, "workspace/state")
+	assert.Contains(t, entries, "workspace/cache/")
+	assert.Contains(t, entries, "workspace/cache/nested/")
+	assert.Contains(t, entries, "workspace/cache/nested/portal.txt")
+	assert.NotContains(t, entries, "workspace/cache/upper.txt")
+}
+
 func TestWriteOverlayUpperDiffExcludesOpaqueWhiteoutAffectingVolumePath(t *testing.T) {
 	upperdir := t.TempDir()
 	workspace := filepath.Join(upperdir, "workspace")
@@ -124,7 +150,7 @@ func TestWriteOverlayUpperDiffExcludesOpaqueWhiteoutAffectingVolumePath(t *testi
 	require.NoError(t, os.WriteFile(filepath.Join(workspace, "database", "rootfs.txt"), []byte("rootfs"), 0o644))
 	markOverlayOpaqueForTest(t, workspace)
 
-	_, reader, err := writeOverlayUpperDiff(context.Background(), upperdir, []string{"/workspace/data"})
+	_, reader, err := writeOverlayUpperDiff(context.Background(), upperdir, []string{"/workspace/data"}, nil)
 	require.NoError(t, err)
 	defer reader.Close()
 
@@ -145,7 +171,7 @@ func TestWriteOverlayUpperDiffConvertsWhiteouts(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	_, reader, err := writeOverlayUpperDiff(context.Background(), upperdir, nil)
+	_, reader, err := writeOverlayUpperDiff(context.Background(), upperdir, nil, nil)
 	require.NoError(t, err)
 	defer reader.Close()
 
@@ -160,7 +186,7 @@ func TestWriteOverlayUpperDiffConvertsOpaqueDirectories(t *testing.T) {
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 	markOverlayOpaqueForTest(t, dir)
 
-	_, reader, err := writeOverlayUpperDiff(context.Background(), upperdir, nil)
+	_, reader, err := writeOverlayUpperDiff(context.Background(), upperdir, nil, nil)
 	require.NoError(t, err)
 	defer reader.Close()
 
@@ -183,7 +209,7 @@ func TestWriteOverlayUpperDiffFromBaselineAppliesAsChildDelta(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(current, "etc", "added"), []byte("added"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(current, "etc", "same"), []byte("same"), 0o644))
 
-	desc, reader, err := writeOverlayUpperDiffFromBaseline(ctx, baseline, current, nil)
+	desc, reader, err := writeOverlayUpperDiffFromBaseline(ctx, baseline, current, nil, nil)
 	require.NoError(t, err)
 	defer reader.Close()
 	require.NotEmpty(t, desc.Digest)
@@ -218,7 +244,7 @@ func TestWriteOverlayUpperDiffFromBaselineExcludesConfiguredVolumePaths(t *testi
 	require.NoError(t, os.MkdirAll(filepath.Join(current, "workspace", "database"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(current, "workspace", "database", "same"), []byte("changed"), 0o644))
 
-	_, reader, err := writeOverlayUpperDiffFromBaseline(ctx, baseline, current, []string{"/workspace/data"})
+	_, reader, err := writeOverlayUpperDiffFromBaseline(ctx, baseline, current, []string{"/workspace/data"}, nil)
 	require.NoError(t, err)
 	defer reader.Close()
 
@@ -227,6 +253,35 @@ func TestWriteOverlayUpperDiffFromBaselineExcludesConfiguredVolumePaths(t *testi
 	assert.NotContains(t, entries, "workspace/data/old-volume.txt")
 	assert.NotContains(t, entries, "workspace/data/new-volume.txt")
 	assert.Contains(t, entries, "workspace/database/same")
+}
+
+func TestFilterRootFSDiffTarForApplyRestoresPortalBacking(t *testing.T) {
+	var buf bytes.Buffer
+	tarWriter := tar.NewWriter(&buf)
+	writeTarEntry(t, tarWriter, "workspace/cache/", nil, 0o755)
+	writeTarEntry(t, tarWriter, "workspace/cache/old.txt", []byte("new"), 0o644)
+	writeTarEntry(t, tarWriter, "workspace/root.txt", []byte("rootfs"), 0o644)
+	require.NoError(t, tarWriter.Close())
+
+	backing := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(backing, "stale.txt"), []byte("stale"), 0o644))
+
+	desc, reader, err := filterRootFSDiffTarForApply(rootFSDiffDescriptorForTest(), bytes.NewReader(buf.Bytes()), nil, []ctldapi.RootFSPortalPath{{
+		PortalName:  "cache",
+		MountPath:   "/workspace/cache",
+		BackingPath: backing,
+	}})
+	require.NoError(t, err)
+	defer reader.Close()
+	require.NotEmpty(t, desc.Digest)
+
+	entries := readTarEntries(t, reader)
+	assert.Contains(t, entries, "workspace/root.txt")
+	assert.NotContains(t, entries, "workspace/cache/")
+	assert.NotContains(t, entries, "workspace/cache/old.txt")
+	assertFileContent(t, filepath.Join(backing, "old.txt"), "new")
+	_, err = os.Stat(filepath.Join(backing, "stale.txt"))
+	assert.True(t, os.IsNotExist(err))
 }
 
 func TestFilterRootFSDiffTarExcludesRuntimePaths(t *testing.T) {

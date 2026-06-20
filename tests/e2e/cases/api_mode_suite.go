@@ -311,8 +311,8 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertClaimBootstrapMountLifecycle(env, session)
 				})
 
-				It("rejects unbound template volume mounts at claim time", func() {
-					assertClaimRejectsUnboundTemplateVolumeMount(env, session)
+				It("keeps unbound template volume mounts rootfs-backed", func() {
+					assertClaimUnboundTemplateVolumeMountWritable(env, session)
 				})
 
 				It("keeps claim-mounted volumes writable", func() {
@@ -2520,16 +2520,52 @@ func assertClaimBootstrapMountLifecycle(env *framework.ScenarioEnv, session *e2e
 	}).WithTimeout(20 * time.Second).WithPolling(1 * time.Second).Should(Equal(seedContent))
 }
 
-func assertClaimRejectsUnboundTemplateVolumeMount(env *framework.ScenarioEnv, session *e2eutils.Session) {
+func assertClaimUnboundTemplateVolumeMountWritable(env *framework.ScenarioEnv, session *e2eutils.Session) {
 	mountPoint := "/workspace/unbound-claim"
 	templateID := createVolumePortalTemplate(env, session, mountPoint)
+	template, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), templateID)
+	Expect(err).NotTo(HaveOccurred())
+	templateNamespace, err := naming.TemplateNamespaceForTeam(expectStringPtr(template.TeamId, "team id"))
+	Expect(err).NotTo(HaveOccurred())
+
 	claimReq := apispec.ClaimRequest{
 		Template: &templateID,
 	}
 
-	_, status, err := session.ClaimSandboxDetailed(env.TestCtx.Context, GinkgoT(), claimReq)
-	Expect(err).To(HaveOccurred())
-	Expect(status).To(Equal(http.StatusBadRequest))
+	claimResp, err := session.ClaimSandboxWithRequest(env.TestCtx.Context, GinkgoT(), claimReq)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(claimResp).NotTo(BeNil())
+	sandboxID := claimResp.SandboxId
+	DeferCleanup(func() {
+		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	})
+	if claimResp.BootstrapMounts != nil {
+		Expect(*claimResp.BootstrapMounts).To(BeEmpty())
+	}
+
+	sandbox := waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
+	content := []byte(fmt.Sprintf("unbound rootfs portal %d", time.Now().UnixNano()))
+	filePath := mountPoint + "/rootfs-backed.txt"
+	writeScript := fmt.Sprintf(`set -eu
+test -d %s
+test -w %s
+printf %%s %s > %s
+test "$(cat %s)" = %s
+`,
+		shellQuote(mountPoint),
+		shellQuote(mountPoint),
+		shellQuote(string(content)),
+		shellQuote(filePath),
+		shellQuote(filePath),
+		shellQuote(string(content)),
+	)
+	_, err = execInSandboxPod(env, templateNamespace, sandbox.PodName, writeScript)
+	Expect(err).NotTo(HaveOccurred())
+
+	Eventually(func() ([]byte, error) {
+		body, _, readErr := session.ReadFile(env.TestCtx.Context, GinkgoT(), sandboxID, filePath)
+		return body, readErr
+	}).WithTimeout(20 * time.Second).WithPolling(1 * time.Second).Should(Equal(content))
 }
 
 func assertClaimMountedVolumeWritable(env *framework.ScenarioEnv, session *e2eutils.Session) {

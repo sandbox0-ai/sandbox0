@@ -64,6 +64,9 @@ type portalMount struct {
 	fs         *volumefuse.FileSystem
 	server     *fuse.Server
 
+	rootfsBackingPath string
+	rootfsSession     volumefuse.Session
+
 	volumeID  string
 	teamID    string
 	mountedAt time.Time
@@ -204,20 +207,27 @@ func (m *Manager) PublishPortal(ctx context.Context, req publishRequest) error {
 		return fmt.Errorf("create portal target: %w", err)
 	}
 
-	fs := volumefuse.New(key, time.Second, unboundSession{})
+	rootfsBackingPath := m.unboundRootFSBackingPath(req.PodUID, req.Name)
+	if err := os.MkdirAll(rootfsBackingPath, 0o755); err != nil {
+		return fmt.Errorf("create unbound portal rootfs backing dir: %w", err)
+	}
+	rootfsSession := newRootFSBackedSession(rootfsBackingPath)
+	fs := volumefuse.New(key, time.Second, rootfsSession)
 	server, err := mountPortalFS(fs, req.TargetPath)
 	if err != nil {
 		return err
 	}
 	pm := &portalMount{
-		namespace:  req.Namespace,
-		podName:    req.PodName,
-		podUID:     req.PodUID,
-		name:       req.Name,
-		mountPath:  req.MountPath,
-		targetPath: req.TargetPath,
-		fs:         fs,
-		server:     server,
+		namespace:         req.Namespace,
+		podName:           req.PodName,
+		podUID:            req.PodUID,
+		name:              req.Name,
+		mountPath:         req.MountPath,
+		targetPath:        req.TargetPath,
+		fs:                fs,
+		server:            server,
+		rootfsBackingPath: rootfsBackingPath,
+		rootfsSession:     rootfsSession,
 	}
 
 	m.mu.Lock()
@@ -266,9 +276,44 @@ func (m *Manager) UnpublishPortal(targetPath string) error {
 		return unbindErr
 	}
 	if pm.server != nil {
-		return pm.server.Unmount()
+		if err := pm.server.Unmount(); err != nil {
+			return err
+		}
+	}
+	if pm.rootfsSession != nil {
+		pm.rootfsSession.Close()
+	}
+	if pm.rootfsBackingPath != "" {
+		return os.RemoveAll(pm.rootfsBackingPath)
 	}
 	return nil
+}
+
+func (m *Manager) RootFSPortalPaths(podUID string) []ctldapi.RootFSPortalPath {
+	if m == nil || strings.TrimSpace(podUID) == "" {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	out := make([]ctldapi.RootFSPortalPath, 0)
+	for _, pm := range m.portals {
+		if pm == nil || pm.podUID != podUID || pm.volumeID != "" {
+			continue
+		}
+		if pm.name == volumeportal.WebhookStatePortalName || pm.mountPath == volumeportal.WebhookStateMountPath {
+			continue
+		}
+		if strings.TrimSpace(pm.mountPath) == "" || strings.TrimSpace(pm.rootfsBackingPath) == "" {
+			continue
+		}
+		out = append(out, ctldapi.RootFSPortalPath{
+			PortalName:  pm.name,
+			MountPath:   pm.mountPath,
+			BackingPath: pm.rootfsBackingPath,
+		})
+	}
+	return out
 }
 
 func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, error) {
@@ -1018,7 +1063,7 @@ func (m *Manager) clearPortalLocked(pm *portalMount) {
 		return
 	}
 	if pm.fs != nil {
-		pm.fs.SetSession(unboundSession{})
+		pm.fs.SetSession(pm.rootfsSession)
 	}
 	pm.volumeID = ""
 	pm.teamID = ""
@@ -1049,6 +1094,14 @@ func safePath(value string) string {
 		return "_"
 	}
 	return strings.NewReplacer("/", "_", "\\", "_", "\x00", "_").Replace(value)
+}
+
+func (m *Manager) unboundRootFSBackingPath(podUID, portalName string) string {
+	rootDir := defaultRootDir
+	if m != nil && strings.TrimSpace(m.rootDir) != "" {
+		rootDir = m.rootDir
+	}
+	return filepath.Join(rootDir, "rootfs-portals", safePath(podUID), safePath(portalName))
 }
 
 func parseQuantityBytesOrDefault(value, fallback string) int64 {

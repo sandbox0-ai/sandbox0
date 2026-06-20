@@ -152,7 +152,7 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	if err != nil {
 		return pod, fmt.Errorf("get procd address: %w", err)
 	}
-	if _, err := s.initializeProcd(ctx, pod, req, procdAddress); err != nil {
+	if _, err := s.initializeProcd(ctx, pod, template, req, procdAddress); err != nil {
 		return pod, fmt.Errorf("initialize procd: %w", err)
 	}
 	if err := s.persistUpdatedSandboxPod(ctx, pod); err != nil {

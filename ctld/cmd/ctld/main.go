@@ -129,7 +129,7 @@ func main() {
 	httpServer := newHTTPServer(httpAddr, combinedController{
 		Controller: probeController,
 		Portal:     portalManager,
-		RootFS:     buildRootFSController(storageCfg),
+		RootFS:     buildRootFSController(storageCfg, portalManager),
 	})
 	if obsProvider != nil {
 		httpServer.Handler = httpobs.ServerMiddleware(obsProvider.HTTPServerConfig(zapLogger))(httpServer.Handler)
@@ -185,7 +185,7 @@ func buildProbeController(ctx context.Context, obsProvider *observability.Provid
 	return controller
 }
 
-func buildRootFSController(storageCfg *apiconfig.StorageProxyConfig) ctldserver.RootFSController {
+func buildRootFSController(storageCfg *apiconfig.StorageProxyConfig, portalResolver ctldrootfs.PortalResolver) ctldserver.RootFSController {
 	store, err := buildRootFSObjectStore(storageCfg)
 	if err != nil {
 		log.Printf("ctld rootfs object store disabled: %v", err)
@@ -201,7 +201,8 @@ func buildRootFSController(storageCfg *apiconfig.StorageProxyConfig) ctldserver.
 			RootFSCacheDir:         filepath.Join(portalRoot, "rootfs"),
 			Namespace:              containerdNamespace,
 		}),
-		Store: store,
+		Store:          store,
+		PortalResolver: portalResolver,
 	})
 }
 

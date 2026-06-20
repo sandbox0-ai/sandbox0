@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -26,7 +27,7 @@ var defaultRootFSSnapshotExcludedPaths = []string{
 	"/procd",
 }
 
-func (r *ContainerdRuntime) createOverlayUpperDiff(ctx context.Context, client containerdClient, info ctldapi.RootFSInfo, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, bool, error) {
+func (r *ContainerdRuntime) createOverlayUpperDiff(ctx context.Context, client containerdClient, info ctldapi.RootFSInfo, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, bool, error) {
 	if strings.TrimSpace(info.Snapshotter) != "overlayfs" {
 		return ctldapi.RootFSDiffDescriptor{}, nil, false, nil
 	}
@@ -34,7 +35,7 @@ func (r *ContainerdRuntime) createOverlayUpperDiff(ctx context.Context, client c
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, nil, true, err
 	}
-	desc, reader, err := writeOverlayUpperDiff(ctx, upperdir, excludedPaths)
+	desc, reader, err := writeOverlayUpperDiff(ctx, upperdir, excludedPaths, portalPaths)
 	return desc, reader, true, err
 }
 
@@ -133,16 +134,20 @@ func rebasePath(path, fromRoot, toRoot string) (string, bool) {
 	return filepath.Join(toRoot, rel), true
 }
 
-func writeOverlayUpperDiff(ctx context.Context, upperdir string, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
-	filter := newRootFSPathFilter(excludedPaths)
-	return writeOverlayDiffTar(upperdir, filter, func(changeFn fs.ChangeFunc) error {
+func writeOverlayUpperDiff(ctx context.Context, upperdir string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+	filter := newRootFSPathFilter(rootFSExcludedPathsWithPortals(excludedPaths, portalPaths))
+	desc, reader, err := writeOverlayDiffTar(upperdir, filter, func(changeFn fs.ChangeFunc) error {
 		return walkOverlayUpper(ctx, upperdir, filter, changeFn)
 	})
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+	return appendPortalRootFSToDiff(desc, reader, portalPaths)
 }
 
-func writeOverlayUpperDiffFromBaseline(ctx context.Context, baselineDir, upperdir string, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
-	filter := newRootFSPathFilter(excludedPaths)
-	return writeOverlayDiffTar(upperdir, filter, func(changeFn fs.ChangeFunc) error {
+func writeOverlayUpperDiffFromBaseline(ctx context.Context, baselineDir, upperdir string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+	filter := newRootFSPathFilter(rootFSExcludedPathsWithPortals(excludedPaths, portalPaths))
+	desc, reader, err := writeOverlayDiffTar(upperdir, filter, func(changeFn fs.ChangeFunc) error {
 		return fs.Changes(ctx, baselineDir, upperdir, func(kind fs.ChangeKind, path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
@@ -179,6 +184,10 @@ func writeOverlayUpperDiffFromBaseline(ctx context.Context, baselineDir, upperdi
 			return changeFn(kind, path, info, nil)
 		})
 	})
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+	return appendPortalRootFSToDiff(desc, reader, portalPaths)
 }
 
 func writeOverlayDiffTar(source string, filter rootFSPathFilter, walkChanges func(fs.ChangeFunc) error) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
@@ -443,6 +452,406 @@ func filterRootFSDiffTar(desc ctldapi.RootFSDiffDescriptor, reader io.Reader, ex
 	}
 	removeOnError = false
 	return desc, removeOnCloseFile{File: tmp}, nil
+}
+
+func filterRootFSDiffTarForSave(desc ctldapi.RootFSDiffDescriptor, reader io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+	filteredDesc, filteredReader, err := filterRootFSDiffTar(desc, reader, rootFSExcludedPathsWithPortals(excludedPaths, portalPaths))
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+	return appendPortalRootFSToDiff(filteredDesc, filteredReader, portalPaths)
+}
+
+func filterRootFSDiffTarForApply(desc ctldapi.RootFSDiffDescriptor, reader io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+	portalPaths = filterRootFSPortalPaths(portalPaths, excludedPaths)
+	if !shouldFilterRootFSDiffTar(desc) {
+		return desc, noopReadSeekCloser{Reader: reader}, nil
+	}
+	filter := newRootFSPathFilter(rootFSExcludedPathsWithPortals(excludedPaths, portalPaths))
+
+	tmp, err := os.CreateTemp("", "sandbox0-rootfs-apply-filtered-diff-*.tar")
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+	removeOnError := true
+	defer func() {
+		if removeOnError {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+
+	digester := digest.Canonical.Digester()
+	writer := io.MultiWriter(tmp, digester.Hash())
+	tarWriter := tar.NewWriter(writer)
+	tarReader := tar.NewReader(reader)
+	restored := make(map[string]struct{}, len(portalPaths))
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			_ = tarWriter.Close()
+			return ctldapi.RootFSDiffDescriptor{}, nil, err
+		}
+		if portal, rel, ok := matchRootFSPortalHeader(header.Name, portalPaths); ok {
+			if err := restoreRootFSPortalHeader(tarReader, header, portal, rel, restored); err != nil {
+				_ = tarWriter.Close()
+				return ctldapi.RootFSDiffDescriptor{}, nil, err
+			}
+			continue
+		}
+		if filter.ExcludesTarHeader(header.Name) {
+			continue
+		}
+
+		headerCopy := *header
+		if err := tarWriter.WriteHeader(&headerCopy); err != nil {
+			_ = tarWriter.Close()
+			return ctldapi.RootFSDiffDescriptor{}, nil, err
+		}
+		if header.Size > 0 {
+			if _, err := io.Copy(tarWriter, tarReader); err != nil {
+				_ = tarWriter.Close()
+				return ctldapi.RootFSDiffDescriptor{}, nil, err
+			}
+		}
+	}
+	if err := tarWriter.Close(); err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+	stat, err := tmp.Stat()
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+
+	desc.Digest = digester.Digest().String()
+	desc.Size = stat.Size()
+	if strings.TrimSpace(desc.MediaType) == "" {
+		desc.MediaType = ocispec.MediaTypeImageLayer
+	}
+	removeOnError = false
+	return desc, removeOnCloseFile{File: tmp}, nil
+}
+
+func appendPortalRootFSToDiff(desc ctldapi.RootFSDiffDescriptor, reader io.ReadSeekCloser, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+	portalPaths = filterRootFSPortalPaths(portalPaths, nil)
+	if len(portalPaths) == 0 {
+		return desc, reader, nil
+	}
+	defer reader.Close()
+
+	tmp, err := os.CreateTemp("", "sandbox0-rootfs-portal-diff-*.tar")
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+	removeOnError := true
+	defer func() {
+		if removeOnError {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+
+	digester := digest.Canonical.Digester()
+	writer := io.MultiWriter(tmp, digester.Hash())
+	tarWriter := tar.NewWriter(writer)
+	tarReader := tar.NewReader(reader)
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			_ = tarWriter.Close()
+			return ctldapi.RootFSDiffDescriptor{}, nil, err
+		}
+		headerCopy := *header
+		if err := tarWriter.WriteHeader(&headerCopy); err != nil {
+			_ = tarWriter.Close()
+			return ctldapi.RootFSDiffDescriptor{}, nil, err
+		}
+		if header.Size > 0 {
+			if _, err := io.Copy(tarWriter, tarReader); err != nil {
+				_ = tarWriter.Close()
+				return ctldapi.RootFSDiffDescriptor{}, nil, err
+			}
+		}
+	}
+	for _, portal := range portalPaths {
+		if err := writeRootFSPortalTree(tarWriter, portal); err != nil {
+			_ = tarWriter.Close()
+			return ctldapi.RootFSDiffDescriptor{}, nil, err
+		}
+	}
+	if err := tarWriter.Close(); err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+	stat, err := tmp.Stat()
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+
+	desc.Digest = digester.Digest().String()
+	desc.Size = stat.Size()
+	if strings.TrimSpace(desc.MediaType) == "" {
+		desc.MediaType = ocispec.MediaTypeImageLayer
+	}
+	removeOnError = false
+	return desc, removeOnCloseFile{File: tmp}, nil
+}
+
+func writeRootFSPortalTree(tw *tar.Writer, portal ctldapi.RootFSPortalPath) error {
+	mountPath := cleanRootFSPath(portal.MountPath)
+	backingPath := filepath.Clean(strings.TrimSpace(portal.BackingPath))
+	if mountPath == "/" || backingPath == "" || backingPath == "." {
+		return nil
+	}
+	if err := os.MkdirAll(backingPath, 0o755); err != nil {
+		return fmt.Errorf("create portal backing dir %s: %w", backingPath, err)
+	}
+	return filepath.WalkDir(backingPath, func(current string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(backingPath, current)
+		if err != nil {
+			return err
+		}
+		name := rootFSPortalTarName(mountPath, rel, info.IsDir())
+		var linkTarget string
+		if info.Mode()&os.ModeSymlink != 0 {
+			linkTarget, err = os.Readlink(current)
+			if err != nil {
+				return err
+			}
+		}
+		header, err := tar.FileInfoHeader(info, linkTarget)
+		if err != nil {
+			return err
+		}
+		header.Name = name
+		if err := tw.WriteHeader(header); err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		file, err := os.Open(current)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(tw, file)
+		closeErr := file.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		return closeErr
+	})
+}
+
+func restoreRootFSPortalHeader(reader io.Reader, header *tar.Header, portal ctldapi.RootFSPortalPath, rel string, restored map[string]struct{}) error {
+	backingPath := filepath.Clean(strings.TrimSpace(portal.BackingPath))
+	if backingPath == "" || backingPath == "." {
+		return nil
+	}
+	if _, ok := restored[backingPath]; !ok {
+		if err := os.RemoveAll(backingPath); err != nil {
+			return fmt.Errorf("clear portal backing dir %s: %w", backingPath, err)
+		}
+		if err := os.MkdirAll(backingPath, 0o755); err != nil {
+			return fmt.Errorf("create portal backing dir %s: %w", backingPath, err)
+		}
+		restored[backingPath] = struct{}{}
+	}
+	target, err := rootFSPortalRestorePath(backingPath, rel)
+	if err != nil {
+		return err
+	}
+	mode := os.FileMode(header.Mode)
+	switch header.Typeflag {
+	case tar.TypeDir:
+		if err := os.MkdirAll(target, mode); err != nil {
+			return err
+		}
+		return applyRootFSTarMetadata(target, header, false)
+	case tar.TypeReg, tar.TypeRegA:
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		file, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(file, reader)
+		closeErr := file.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		return applyRootFSTarMetadata(target, header, false)
+	case tar.TypeSymlink:
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		if err := os.RemoveAll(target); err != nil {
+			return err
+		}
+		if err := os.Symlink(header.Linkname, target); err != nil {
+			return err
+		}
+		return applyRootFSTarMetadata(target, header, true)
+	case tar.TypeLink:
+		linkPortal, linkRel, ok := matchRootFSPortalHeader(header.Linkname, []ctldapi.RootFSPortalPath{portal})
+		if !ok {
+			return nil
+		}
+		linkTarget, err := rootFSPortalRestorePath(linkPortal.BackingPath, linkRel)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		if err := os.RemoveAll(target); err != nil {
+			return err
+		}
+		if err := os.Link(linkTarget, target); err != nil {
+			return err
+		}
+		return applyRootFSTarMetadata(target, header, false)
+	case tar.TypeFifo:
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		if err := unix.Mkfifo(target, uint32(mode)); err != nil && !os.IsExist(err) {
+			return err
+		}
+		return applyRootFSTarMetadata(target, header, false)
+	default:
+		return nil
+	}
+}
+
+func applyRootFSTarMetadata(target string, header *tar.Header, symlink bool) error {
+	if header == nil {
+		return nil
+	}
+	if symlink {
+		_ = os.Lchown(target, header.Uid, header.Gid)
+		return nil
+	}
+	_ = os.Chown(target, header.Uid, header.Gid)
+	if header.Mode != 0 {
+		_ = os.Chmod(target, os.FileMode(header.Mode))
+	}
+	mtime := header.ModTime
+	if !mtime.IsZero() {
+		_ = os.Chtimes(target, mtime, mtime)
+	}
+	return nil
+}
+
+func rootFSPortalRestorePath(backingPath, rel string) (string, error) {
+	rel = filepath.Clean(filepath.FromSlash(strings.TrimPrefix(cleanRootFSPath(rel), "/")))
+	if rel == "." {
+		return backingPath, nil
+	}
+	target := filepath.Join(backingPath, rel)
+	cleanBacking := filepath.Clean(backingPath)
+	cleanTarget := filepath.Clean(target)
+	if cleanTarget != cleanBacking && !strings.HasPrefix(cleanTarget, cleanBacking+string(filepath.Separator)) {
+		return "", fmt.Errorf("portal restore path escapes backing dir")
+	}
+	return cleanTarget, nil
+}
+
+func rootFSPortalTarName(mountPath, rel string, isDir bool) string {
+	mountPath = strings.TrimPrefix(cleanRootFSPath(mountPath), "/")
+	rel = filepath.ToSlash(filepath.Clean(rel))
+	if rel == "." || rel == "" {
+		if isDir && !strings.HasSuffix(mountPath, "/") {
+			return mountPath + "/"
+		}
+		return mountPath
+	}
+	name := path.Join(mountPath, rel)
+	if isDir && !strings.HasSuffix(name, "/") {
+		name += "/"
+	}
+	return name
+}
+
+func matchRootFSPortalHeader(headerName string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSPortalPath, string, bool) {
+	clean := cleanRootFSPath(headerName)
+	for _, portal := range portalPaths {
+		mountPath := cleanRootFSPath(portal.MountPath)
+		if mountPath == "/" {
+			continue
+		}
+		if clean == mountPath {
+			return portal, "/", true
+		}
+		if strings.HasPrefix(clean, mountPath+"/") {
+			return portal, strings.TrimPrefix(clean, mountPath), true
+		}
+	}
+	return ctldapi.RootFSPortalPath{}, "", false
+}
+
+func filterRootFSPortalPaths(paths []ctldapi.RootFSPortalPath, excludedPaths []string) []ctldapi.RootFSPortalPath {
+	if len(paths) == 0 {
+		return nil
+	}
+	filter := newRootFSPathFilter(excludedPaths)
+	seen := make(map[string]struct{}, len(paths))
+	out := make([]ctldapi.RootFSPortalPath, 0, len(paths))
+	for _, portal := range paths {
+		mountPath := cleanRootFSPath(portal.MountPath)
+		backingPath := filepath.Clean(strings.TrimSpace(portal.BackingPath))
+		if mountPath == "/" || backingPath == "" || backingPath == "." || filter.Excludes(mountPath) {
+			continue
+		}
+		key := mountPath + "\x00" + backingPath
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		portal.MountPath = mountPath
+		portal.BackingPath = backingPath
+		out = append(out, portal)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].MountPath == out[j].MountPath {
+			return out[i].BackingPath < out[j].BackingPath
+		}
+		return out[i].MountPath < out[j].MountPath
+	})
+	return out
+}
+
+func rootFSExcludedPathsWithPortals(excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) []string {
+	if len(portalPaths) == 0 {
+		return excludedPaths
+	}
+	out := append([]string(nil), excludedPaths...)
+	for _, portal := range filterRootFSPortalPaths(portalPaths, excludedPaths) {
+		out = append(out, portal.MountPath)
+	}
+	return out
 }
 
 func (f rootFSPathFilter) RemoveAll(root string) error {

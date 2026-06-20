@@ -86,6 +86,40 @@ func TestInitializeClearsSandboxEnvVars(t *testing.T) {
 	}
 }
 
+func TestInitializeCreatesMountDirs(t *testing.T) {
+	dispatcher := webhook.NewDispatcher(webhook.Options{}, zap.NewNop())
+	t.Cleanup(func() {
+		_ = dispatcher.Shutdown(context.Background())
+	})
+	handler := NewInitializeHandler(dispatcher, nil, ctxpkg.NewManager(), 8080, zap.NewNop())
+	mountDir := filepath.Join(t.TempDir(), "workspace", "data")
+
+	body, err := json.Marshal(InitializeRequest{
+		SandboxID: "sandbox-1",
+		MountDirs: []string{
+			mountDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/initialize", bytes.NewReader(body))
+	recorder := httptest.NewRecorder()
+	handler.Initialize(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("Initialize() status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	info, err := os.Stat(mountDir)
+	if err != nil {
+		t.Fatalf("stat mount dir: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("mount dir is not a directory: %s", mountDir)
+	}
+}
+
 func TestInitializeFailsWhenReadyWebhookCannotBeQueued(t *testing.T) {
 	outboxPath := filepath.Join(t.TempDir(), "outbox")
 	if err := os.WriteFile(outboxPath, []byte("not a directory"), 0o644); err != nil {

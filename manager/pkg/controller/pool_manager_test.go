@@ -10,6 +10,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -46,6 +47,40 @@ func TestBuildPodTemplateIncludesTemplateHash(t *testing.T) {
 	assert.Equal(t, PoolTypeIdle, got.Labels[LabelPoolType])
 	assert.Equal(t, "template-a", got.Labels[LabelTemplateID])
 	assert.Equal(t, "logical-a", got.Labels[LabelTemplateLogicalID])
+}
+
+func TestBuildPodTemplatePreMountsUserVolumePortalsForIdlePool(t *testing.T) {
+	pm := &PoolManager{}
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{Image: "busybox"},
+			VolumeMounts: []v1alpha1.VolumeMountSpec{{
+				Name:      "data",
+				MountPath: "/workspace/data",
+			}},
+		},
+	}
+
+	got, err := pm.buildPodTemplate(template, "hash-v1")
+	require.NoError(t, err)
+	assert.NotNil(t, findCSIVolumeByPortal(got.Spec.Volumes, "data"))
+	assert.NotNil(t, findCSIVolumeByPortal(got.Spec.Volumes, volumeportal.WebhookStatePortalName))
+}
+
+func findCSIVolumeByPortal(volumes []corev1.Volume, portalName string) *corev1.Volume {
+	for i := range volumes {
+		if volumes[i].CSI == nil {
+			continue
+		}
+		if volumes[i].CSI.VolumeAttributes[volumeportal.AttributePortalName] == portalName {
+			return &volumes[i]
+		}
+	}
+	return nil
 }
 
 func TestDrainStaleIdlePodsUsesDeletePreconditions(t *testing.T) {

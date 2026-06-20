@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -552,7 +553,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		return nil, fmt.Errorf("get procd address: %w", err)
 	}
 	phaseStarted = time.Now()
-	if _, err := s.initializeProcd(ctx, pod, req, procdAddress); err != nil {
+	if _, err := s.initializeProcd(ctx, pod, template, req, procdAddress); err != nil {
 		s.observeClaimPhase(req.Template, claimType, "initialize_procd", phaseStarted, err)
 		cleanupClaimFailure(pod, "procd initialization failed")
 		if metrics != nil {
@@ -723,23 +724,21 @@ func (s *SandboxService) observeClaimPhase(template, claimType, phase string, st
 
 func validateClaimMountsForTemplate(req *ClaimRequest, template *v1alpha1.SandboxTemplate) error {
 	allowed := declaredVolumeMountsByPath(template)
+	var mounts []ClaimMount
+	if req != nil {
+		mounts = req.Mounts
+	}
 	if len(allowed) == 0 {
-		return nil
+		if len(mounts) == 0 {
+			return nil
+		}
+		mountPoint := filepath.Clean(mounts[0].MountPoint)
+		return fmt.Errorf("%w: mounts[0].mount_point %q is not declared by template", ErrInvalidClaimRequest, mountPoint)
 	}
-	if req == nil {
-		return fmt.Errorf("%w: template volumeMounts require claim mounts", ErrInvalidClaimRequest)
-	}
-	claimed := make(map[string]struct{}, len(req.Mounts))
-	for i := range req.Mounts {
-		mountPoint := filepath.Clean(req.Mounts[i].MountPoint)
+	for i := range mounts {
+		mountPoint := filepath.Clean(mounts[i].MountPoint)
 		if _, ok := allowed[mountPoint]; !ok {
 			return fmt.Errorf("%w: mounts[%d].mount_point %q is not declared by template", ErrInvalidClaimRequest, i, mountPoint)
-		}
-		claimed[mountPoint] = struct{}{}
-	}
-	for mountPath := range allowed {
-		if _, ok := claimed[mountPath]; !ok {
-			return fmt.Errorf("%w: template volumeMount %q requires a claim mount", ErrInvalidClaimRequest, mountPath)
 		}
 	}
 	return nil
@@ -761,6 +760,19 @@ func declaredVolumeMountsByPath(template *v1alpha1.SandboxTemplate) map[string]v
 		out[mountPath] = item
 	}
 	return out
+}
+
+func declaredVolumeMountDirs(template *v1alpha1.SandboxTemplate) []string {
+	declared := declaredVolumeMountsByPath(template)
+	if len(declared) == 0 {
+		return nil
+	}
+	dirs := make([]string, 0, len(declared))
+	for mountPath := range declared {
+		dirs = append(dirs, mountPath)
+	}
+	sort.Strings(dirs)
+	return dirs
 }
 
 func (s *SandboxService) bindVolumePortals(ctx context.Context, pod *corev1.Pod, req *ClaimRequest, template *v1alpha1.SandboxTemplate) ([]BootstrapMountStatus, error) {
@@ -1348,6 +1360,7 @@ func (s *SandboxService) ensureDataPlaneReadyCapacity(spec corev1.PodSpec) error
 func (s *SandboxService) initializeProcd(
 	ctx context.Context,
 	pod *corev1.Pod,
+	template *v1alpha1.SandboxTemplate,
 	req *ClaimRequest,
 	procdAddress string,
 ) (*InitializeResponse, error) {
@@ -1388,6 +1401,7 @@ func (s *SandboxService) initializeProcd(
 		TeamID:    teamID,
 		EnvVars:   sandboxEnvVarsForInitialize(req.Config),
 		Webhook:   webhookConfig,
+		MountDirs: declaredVolumeMountDirs(template),
 	}
 
 	var initErr error

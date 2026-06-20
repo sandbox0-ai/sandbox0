@@ -2,7 +2,10 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -44,6 +47,7 @@ type InitializeRequest struct {
 	TeamID    string             `json:"team_id,omitempty"`
 	EnvVars   map[string]string  `json:"env_vars,omitempty"`
 	Webhook   *InitializeWebhook `json:"webhook,omitempty"`
+	MountDirs []string           `json:"mount_dirs,omitempty"`
 }
 
 // InitializeWebhook represents webhook configuration.
@@ -84,6 +88,10 @@ func (h *InitializeHandler) Initialize(w http.ResponseWriter, r *http.Request) {
 
 	if req.SandboxID == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "sandbox_id is required")
+		return
+	}
+	if err := ensureMountDirs(req.MountDirs); err != nil {
+		writeError(w, http.StatusInternalServerError, "mount_dir_init_failed", err.Error())
 		return
 	}
 
@@ -130,6 +138,19 @@ func (h *InitializeHandler) Initialize(w http.ResponseWriter, r *http.Request) {
 		SandboxID: req.SandboxID,
 		TeamID:    teamID,
 	})
+}
+
+func ensureMountDirs(dirs []string) error {
+	for i := range dirs {
+		dir := filepath.Clean(strings.TrimSpace(dirs[i]))
+		if dir == "." || dir == string(filepath.Separator) || !filepath.IsAbs(dir) {
+			return fmt.Errorf("mount_dirs[%d] must be an absolute non-root path", i)
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("create mount dir %q: %w", dir, err)
+		}
+	}
+	return nil
 }
 
 func (h *InitializeHandler) enqueueSandboxReady(sandboxID, webhookURL string) error {

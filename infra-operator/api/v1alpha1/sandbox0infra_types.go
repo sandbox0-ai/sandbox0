@@ -67,6 +67,11 @@ const (
 // +kubebuilder:validation:Enum=builtin;aws;gcp;azure;aliyun;harbor
 type RegistryProvider string
 
+// ObservabilityTraceExporter defines the trace exporter configured through
+// standard OpenTelemetry environment variables.
+// +kubebuilder:validation:Enum=otlp;stdout;noop
+type ObservabilityTraceExporter string
+
 // BuiltinStatefulResourcePolicy controls how builtin stateful resources are
 // handled when a builtin component is disabled or switched to an external
 // provider.
@@ -80,6 +85,12 @@ const (
 	RegistryProviderAzure   RegistryProvider = "azure"
 	RegistryProviderAliyun  RegistryProvider = "aliyun"
 	RegistryProviderHarbor  RegistryProvider = "harbor"
+)
+
+const (
+	ObservabilityTraceExporterOTLP   ObservabilityTraceExporter = "otlp"
+	ObservabilityTraceExporterStdout ObservabilityTraceExporter = "stdout"
+	ObservabilityTraceExporterNoop   ObservabilityTraceExporter = "noop"
 )
 
 const (
@@ -141,6 +152,11 @@ type Sandbox0InfraSpec struct {
 	// +optional
 	EnterpriseLicense *EnterpriseLicenseConfig `json:"enterpriseLicense,omitempty"`
 
+	// Observability configures standard telemetry collection for platform services.
+	// It does not configure storage or query backends.
+	// +optional
+	Observability *ObservabilityConfig `json:"observability,omitempty"`
+
 	// Services configures individual services
 	// +optional
 	// +kubebuilder:default={}
@@ -184,6 +200,56 @@ type SandboxNodePlacementConfig struct {
 	// on tainted sandbox nodes.
 	// +optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+}
+
+// ObservabilityConfig configures standard telemetry collection for platform
+// services. Storage and query backends are intentionally configured outside
+// this API.
+type ObservabilityConfig struct {
+	// ResourceAttributes are appended to OTEL_RESOURCE_ATTRIBUTES for every
+	// platform component. Built-in service, region, cluster, and Kubernetes
+	// attributes take precedence on key conflicts.
+	// +optional
+	ResourceAttributes map[string]string `json:"resourceAttributes,omitempty"`
+
+	// Traces configures trace export through standard OpenTelemetry env vars.
+	// +optional
+	Traces *ObservabilityTracesConfig `json:"traces,omitempty"`
+}
+
+// ObservabilityTracesConfig configures OpenTelemetry trace export for platform
+// services.
+type ObservabilityTracesConfig struct {
+	// Enabled enables trace exporter env injection. When false or omitted,
+	// services keep their default noop tracer exporter.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Exporter is written to OTEL_TRACES_EXPORTER. Defaults to otlp when traces
+	// are enabled.
+	// +optional
+	Exporter ObservabilityTraceExporter `json:"exporter,omitempty"`
+
+	// Endpoint is written to OTEL_EXPORTER_OTLP_TRACES_ENDPOINT.
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+
+	// Headers are written to OTEL_EXPORTER_OTLP_TRACES_HEADERS.
+	// +optional
+	Headers map[string]string `json:"headers,omitempty"`
+
+	// Insecure is written to OTEL_EXPORTER_OTLP_TRACES_INSECURE when set.
+	// +optional
+	Insecure *bool `json:"insecure,omitempty"`
+
+	// Timeout is written to OTEL_EXPORTER_OTLP_TRACES_TIMEOUT.
+	// +optional
+	Timeout metav1.Duration `json:"timeout,omitempty"`
+
+	// SampleRate configures OTEL_TRACES_SAMPLER and OTEL_TRACES_SAMPLER_ARG.
+	// Valid values are decimal strings between 0 and 1, for example "0.25".
+	// +optional
+	SampleRate string `json:"sampleRate,omitempty"`
 }
 
 // DatabaseConfig defines database configuration

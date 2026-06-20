@@ -77,14 +77,7 @@ func main() {
 	defer cancel()
 
 	// Initialize observability provider
-	obsProvider, err := observability.New(observability.Config{
-		ServiceName: "manager",
-		Logger:      logger,
-		TraceExporter: observability.TraceExporterConfig{
-			Type:     os.Getenv("OTEL_EXPORTER_TYPE"),
-			Endpoint: os.Getenv("OTEL_EXPORTER_ENDPOINT"),
-		},
-	})
+	obsProvider, err := observability.New(observability.ConfigFromEnv("manager", logger))
 	if err != nil {
 		logger.Fatal("Failed to initialize observability", zap.Error(err))
 	}

@@ -78,14 +78,7 @@ func main() {
 	var obsProvider *observability.Provider
 	if zapLogger != nil {
 		defer zapLogger.Sync()
-		obsProvider, err = observability.New(observability.Config{
-			ServiceName: "ctld",
-			Logger:      zapLogger,
-			TraceExporter: observability.TraceExporterConfig{
-				Type:     os.Getenv("OTEL_EXPORTER_TYPE"),
-				Endpoint: os.Getenv("OTEL_EXPORTER_ENDPOINT"),
-			},
-		})
+		obsProvider, err = observability.New(observability.ConfigFromEnv("ctld", zapLogger))
 		if err != nil {
 			log.Printf("ctld observability disabled: %v", err)
 			obsProvider = nil

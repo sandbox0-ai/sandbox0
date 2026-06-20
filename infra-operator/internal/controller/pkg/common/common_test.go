@@ -3,7 +3,9 @@ package common
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -17,6 +19,99 @@ import (
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 )
+
+func TestAppendObservabilityEnvVarsAddsStandardOTELConfig(t *testing.T) {
+	insecure := false
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Region:  "aws-us-east-1",
+			Cluster: &infrav1alpha1.ClusterConfig{ID: "cluster-a"},
+			Observability: &infrav1alpha1.ObservabilityConfig{
+				ResourceAttributes: map[string]string{
+					"deployment.environment": "test",
+					"service.name":           "wrong",
+				},
+				Traces: &infrav1alpha1.ObservabilityTracesConfig{
+					Enabled:    true,
+					Exporter:   infrav1alpha1.ObservabilityTraceExporterOTLP,
+					Endpoint:   "http://collector.sandbox0:4317",
+					Headers:    map[string]string{"authorization": "Bearer token", "x-scope": "platform"},
+					Insecure:   &insecure,
+					Timeout:    metav1.Duration{Duration: 2 * time.Second},
+					SampleRate: "0.5",
+				},
+			},
+		},
+	}
+
+	env := AppendObservabilityEnvVars([]corev1.EnvVar{
+		{Name: "SERVICE", Value: "manager"},
+	}, infra, ObservabilityEnvConfig{
+		ServiceName: "manager",
+		RegionID:    ResolveRegionID(infra),
+		ClusterID:   ResolveClusterID(infra),
+	})
+
+	if envByName(env, "POD_NAME").ValueFrom == nil {
+		t.Fatal("expected POD_NAME field ref")
+	}
+	attrs := envByName(env, envOTELResourceAttributes).Value
+	for _, want := range []string{
+		"deployment.environment=test",
+		"service.name=manager",
+		"sandbox0.region.id=aws-us-east-1",
+		"sandbox0.cluster.id=cluster-a",
+		"k8s.pod.name=$(POD_NAME)",
+	} {
+		if !strings.Contains(attrs, want) {
+			t.Fatalf("OTEL_RESOURCE_ATTRIBUTES = %q, missing %q", attrs, want)
+		}
+	}
+	if got := envByName(env, envOTELTracesExporter).Value; got != "otlp" {
+		t.Fatalf("OTEL_TRACES_EXPORTER = %q, want otlp", got)
+	}
+	if got := envByName(env, envOTELExporterOTLPTraceEndpoint).Value; got != "http://collector.sandbox0:4317" {
+		t.Fatalf("trace endpoint = %q", got)
+	}
+	if got := envByName(env, envOTELExporterOTLPTraceHeaders).Value; got != "authorization=Bearer+token,x-scope=platform" {
+		t.Fatalf("trace headers = %q", got)
+	}
+	if got := envByName(env, envOTELExporterOTLPTraceInsecure).Value; got != "false" {
+		t.Fatalf("trace insecure = %q", got)
+	}
+	if got := envByName(env, envOTELExporterOTLPTraceTimeout).Value; got != "2s" {
+		t.Fatalf("trace timeout = %q", got)
+	}
+	if got := envByName(env, envOTELTracesSampler).Value; got != "parentbased_traceidratio" {
+		t.Fatalf("trace sampler = %q", got)
+	}
+	if got := envByName(env, envOTELTracesSamplerArg).Value; got != "0.5" {
+		t.Fatalf("trace sampler arg = %q", got)
+	}
+}
+
+func TestAppendObservabilityEnvVarsKeepsExplicitEnvVars(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Observability: &infrav1alpha1.ObservabilityConfig{
+				Traces: &infrav1alpha1.ObservabilityTracesConfig{Enabled: true},
+			},
+		},
+	}
+
+	env := AppendObservabilityEnvVars([]corev1.EnvVar{
+		{Name: "NODE_NAME", Value: "preset-node"},
+		{Name: envOTELTracesExporter, Value: "stdout"},
+	}, infra, ObservabilityEnvConfig{ServiceName: "scheduler"})
+
+	if got := envByName(env, "NODE_NAME").Value; got != "preset-node" {
+		t.Fatalf("NODE_NAME = %q, want preset-node", got)
+	}
+	if got := envByName(env, envOTELTracesExporter).Value; got != "stdout" {
+		t.Fatalf("OTEL_TRACES_EXPORTER = %q, want stdout", got)
+	}
+}
 
 func TestResolveSandboxNodePlacementFallsBackToNetdPlacement(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
@@ -731,4 +826,13 @@ func newCommonTestStatefulSet(infra *infrav1alpha1.Sandbox0Infra, name, containe
 			},
 		},
 	}
+}
+
+func envByName(env []corev1.EnvVar, name string) corev1.EnvVar {
+	for _, item := range env {
+		if item.Name == name {
+			return item
+		}
+	}
+	return corev1.EnvVar{}
 }

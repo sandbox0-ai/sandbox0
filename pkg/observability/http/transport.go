@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
+	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
@@ -45,13 +45,18 @@ func (t *observableTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	ctx, span := t.config.Tracer.Start(ctx, spanName,
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
-			attribute.String("http.method", method),
-			attribute.String("http.url", req.URL.String()),
-			attribute.String("http.host", host),
-			attribute.String("http.scheme", req.URL.Scheme),
-			attribute.String("http.target", req.URL.Path),
+			semconv.HTTPRequestMethodKey.String(method),
+			semconv.URLFullKey.String(req.URL.String()),
+			semconv.URLSchemeKey.String(req.URL.Scheme),
+			semconv.URLPathKey.String(req.URL.EscapedPath()),
 		),
 	)
+	if address, port := splitHostPort(req.URL.Host); address != "" {
+		span.SetAttributes(semconv.ServerAddressKey.String(address))
+		if port > 0 {
+			span.SetAttributes(semconv.ServerPort(port))
+		}
+	}
 	defer span.End()
 
 	// Inject trace context into HTTP headers
@@ -107,10 +112,10 @@ func (t *observableTransport) RoundTrip(req *http.Request) (*http.Response, erro
 
 	// Record span attributes
 	span.SetAttributes(
-		attribute.Int("http.status_code", statusCode),
+		semconv.HTTPResponseStatusCode(statusCode),
 	)
 	if resp.ContentLength > 0 {
-		span.SetAttributes(attribute.Int64("http.response.body.size", resp.ContentLength))
+		span.SetAttributes(semconv.HTTPResponseBodySizeKey.Int64(resp.ContentLength))
 	}
 	if statusCode >= 400 {
 		span.SetStatus(codes.Error, fmt.Sprintf("HTTP %d", statusCode))

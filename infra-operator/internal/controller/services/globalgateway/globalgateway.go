@@ -127,7 +127,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			},
 		},
 		Image: fmt.Sprintf("%s:%s", imageRepo, imageTag),
-		EnvVars: []corev1.EnvVar{
+		EnvVars: common.AppendObservabilityEnvVars([]corev1.EnvVar{
 			{
 				Name:  "SERVICE",
 				Value: "global-gateway",
@@ -136,7 +136,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 				Name:  "CONFIG_PATH",
 				Value: "/config/config.yaml",
 			},
-		},
+		}, infra, common.ObservabilityEnvConfig{
+			ServiceName: "global-gateway",
+			RegionID:    config.RegionID,
+		}),
 		VolumeMounts:   volumeMounts,
 		Volumes:        volumes,
 		PodAnnotations: podAnnotations,

@@ -52,9 +52,10 @@ func NewLogger(cfg LoggerConfig) (*zap.Logger, error) {
 	if err != nil {
 		return nil, err
 	}
-	fields := make([]zap.Field, 0, len(cfg.Fields)+1)
+	fields := make([]zap.Field, 0, len(cfg.Fields)+2)
 	if cfg.ServiceName != "" {
 		fields = append(fields, zap.String("service", cfg.ServiceName))
+		fields = append(fields, zap.String("service.name", cfg.ServiceName))
 	}
 	fields = append(fields, cfg.Fields...)
 	if len(fields) > 0 {

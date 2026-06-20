@@ -37,14 +37,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	obsProvider, err := observability.New(observability.Config{
-		ServiceName: "netd",
-		Logger:      logger,
-		TraceExporter: observability.TraceExporterConfig{
-			Type:     os.Getenv("OTEL_EXPORTER_TYPE"),
-			Endpoint: os.Getenv("OTEL_EXPORTER_ENDPOINT"),
-		},
-	})
+	obsProvider, err := observability.New(observability.ConfigFromEnv("netd", logger))
 	if err != nil {
 		logger.Fatal("Failed to initialize observability", zap.Error(err))
 	}

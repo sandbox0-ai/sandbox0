@@ -147,10 +147,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			ContainerPort: sshPort,
 		}},
 		Image: fmt.Sprintf("%s:%s", imageRepo, imageTag),
-		EnvVars: []corev1.EnvVar{
+		EnvVars: common.AppendObservabilityEnvVars([]corev1.EnvVar{
 			{Name: "SERVICE", Value: "ssh-gateway"},
 			{Name: "CONFIG_PATH", Value: "/config/config.yaml"},
-		},
+		}, infra, common.ObservabilityEnvConfig{
+			ServiceName: "ssh-gateway",
+			RegionID:    common.ResolveRegionID(infra),
+		}),
 		VolumeMounts:   volumeMounts,
 		Volumes:        volumes,
 		PodAnnotations: podAnnotations,

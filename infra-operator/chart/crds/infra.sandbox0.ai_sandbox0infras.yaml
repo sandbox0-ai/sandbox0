@@ -1597,6 +1597,59 @@ spec:
                     description: ShareWithMain uses the main database for S0FS metadata
                     type: boolean
                 type: object
+              observability:
+                description: |-
+                  Observability configures standard telemetry collection for platform services.
+                  It does not configure storage or query backends.
+                properties:
+                  resourceAttributes:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      ResourceAttributes are appended to OTEL_RESOURCE_ATTRIBUTES for every
+                      platform component. Built-in service, region, cluster, and Kubernetes
+                      attributes take precedence on key conflicts.
+                    type: object
+                  traces:
+                    description: Traces configures trace export through standard OpenTelemetry
+                      env vars.
+                    properties:
+                      enabled:
+                        description: |-
+                          Enabled enables trace exporter env injection. When false or omitted,
+                          services keep their default noop tracer exporter.
+                        type: boolean
+                      endpoint:
+                        description: Endpoint is written to OTEL_EXPORTER_OTLP_TRACES_ENDPOINT.
+                        type: string
+                      exporter:
+                        description: |-
+                          Exporter is written to OTEL_TRACES_EXPORTER. Defaults to otlp when traces
+                          are enabled.
+                        enum:
+                        - otlp
+                        - stdout
+                        - noop
+                        type: string
+                      headers:
+                        additionalProperties:
+                          type: string
+                        description: Headers are written to OTEL_EXPORTER_OTLP_TRACES_HEADERS.
+                        type: object
+                      insecure:
+                        description: Insecure is written to OTEL_EXPORTER_OTLP_TRACES_INSECURE
+                          when set.
+                        type: boolean
+                      sampleRate:
+                        description: |-
+                          SampleRate configures OTEL_TRACES_SAMPLER and OTEL_TRACES_SAMPLER_ARG.
+                          Valid values are decimal strings between 0 and 1, for example "0.25".
+                        type: string
+                      timeout:
+                        description: Timeout is written to OTEL_EXPORTER_OTLP_TRACES_TIMEOUT.
+                        type: string
+                    type: object
+                type: object
               publicExposure:
                 description: PublicExposure configures public URL exposure for sandboxes
                 properties:

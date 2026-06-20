@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
+	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
@@ -53,13 +54,7 @@ func ServerMiddleware(cfg ServerConfig) func(http.Handler) http.Handler {
 			spanName := fmt.Sprintf("HTTP %s %s", r.Method, r.URL.Path)
 			ctx, span := tracer.Start(ctx, spanName,
 				trace.WithSpanKind(trace.SpanKindServer),
-				trace.WithAttributes(
-					attribute.String("http.method", r.Method),
-					attribute.String("http.url", r.URL.String()),
-					attribute.String("http.host", r.Host),
-					attribute.String("http.scheme", r.URL.Scheme),
-					attribute.String("http.target", r.URL.Path),
-				),
+				trace.WithAttributes(serverRequestAttributes(r)...),
 			)
 			defer span.End()
 
@@ -75,7 +70,7 @@ func ServerMiddleware(cfg ServerConfig) func(http.Handler) http.Handler {
 			next.ServeHTTP(wrapped, r.WithContext(ctx))
 
 			status := wrapped.statusCode
-			span.SetAttributes(attribute.Int("http.status_code", status))
+			span.SetAttributes(semconv.HTTPResponseStatusCode(status))
 			if status >= 400 {
 				span.SetStatus(codes.Error, fmt.Sprintf("HTTP %d", status))
 			}
@@ -132,13 +127,7 @@ func GinMiddleware(cfg ServerConfig) gin.HandlerFunc {
 		spanName := fmt.Sprintf("HTTP %s %s", c.Request.Method, c.Request.URL.Path)
 		ctx, span := tracer.Start(ctx, spanName,
 			trace.WithSpanKind(trace.SpanKindServer),
-			trace.WithAttributes(
-				attribute.String("http.method", c.Request.Method),
-				attribute.String("http.url", c.Request.URL.String()),
-				attribute.String("http.host", c.Request.Host),
-				attribute.String("http.scheme", c.Request.URL.Scheme),
-				attribute.String("http.target", c.Request.URL.Path),
-			),
+			trace.WithAttributes(serverRequestAttributes(c.Request)...),
 		)
 		defer span.End()
 
@@ -157,10 +146,10 @@ func GinMiddleware(cfg ServerConfig) gin.HandlerFunc {
 		if route == "" {
 			route = initialRoute
 		}
-		span.SetAttributes(attribute.String("http.route", route))
+		span.SetAttributes(semconv.HTTPRoute(route))
 		span.SetName(fmt.Sprintf("HTTP %s %s", c.Request.Method, route))
 
-		span.SetAttributes(attribute.Int("http.status_code", status))
+		span.SetAttributes(semconv.HTTPResponseStatusCode(status))
 		if status >= 400 {
 			span.SetStatus(codes.Error, fmt.Sprintf("HTTP %d", status))
 		}
@@ -193,6 +182,88 @@ func GinMiddleware(cfg ServerConfig) gin.HandlerFunc {
 			)
 		}
 	}
+}
+
+func serverRequestAttributes(r *http.Request) []attribute.KeyValue {
+	scheme := requestScheme(r)
+	method := ""
+	host := ""
+	path := ""
+	fullURL := ""
+	if r != nil {
+		method = r.Method
+		host = r.Host
+	}
+	if r != nil && r.URL != nil {
+		if host == "" {
+			host = r.URL.Host
+		}
+		path = r.URL.EscapedPath()
+		if path == "" {
+			path = "/"
+		}
+		fullURL = requestFullURL(r, scheme, host)
+	}
+	address, port := splitHostPort(host)
+	attrs := []attribute.KeyValue{
+		semconv.HTTPRequestMethodKey.String(method),
+		semconv.URLFullKey.String(fullURL),
+		semconv.URLSchemeKey.String(scheme),
+		semconv.URLPathKey.String(path),
+	}
+	if address != "" {
+		attrs = append(attrs, semconv.ServerAddressKey.String(address))
+	}
+	if port > 0 {
+		attrs = append(attrs, semconv.ServerPort(port))
+	}
+	return attrs
+}
+
+func requestScheme(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if r.URL != nil && r.URL.Scheme != "" {
+		return r.URL.Scheme
+	}
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
+}
+
+func requestFullURL(r *http.Request, scheme, host string) string {
+	if r == nil || r.URL == nil {
+		return ""
+	}
+	if r.URL.IsAbs() {
+		return r.URL.String()
+	}
+	u := *r.URL
+	u.Scheme = scheme
+	u.Host = host
+	return u.String()
+}
+
+func splitHostPort(host string) (string, int) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "", 0
+	}
+	if address, portText, err := net.SplitHostPort(host); err == nil {
+		port, _ := strconv.Atoi(portText)
+		return address, port
+	}
+	if strings.Count(host, ":") == 1 {
+		if address, portText, ok := strings.Cut(host, ":"); ok {
+			port, err := strconv.Atoi(portText)
+			if err == nil {
+				return address, port
+			}
+		}
+	}
+	return host, 0
 }
 
 type responseWriter struct {

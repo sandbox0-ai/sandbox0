@@ -201,7 +201,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			},
 		},
 		Image: fmt.Sprintf("%s:%s", imageRepo, imageTag),
-		EnvVars: []corev1.EnvVar{
+		EnvVars: common.AppendObservabilityEnvVars([]corev1.EnvVar{
 			{
 				Name:  "SERVICE",
 				Value: "storage-proxy",
@@ -210,7 +210,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 				Name:  "CONFIG_PATH",
 				Value: "/config/config.yaml",
 			},
-		},
+		}, infra, common.ObservabilityEnvConfig{
+			ServiceName: "storage-proxy",
+			RegionID:    common.ResolveRegionID(infra),
+			ClusterID:   common.ResolveClusterID(infra),
+		}),
 		VolumeMounts:   volumeMounts,
 		Volumes:        volumes,
 		PodAnnotations: podAnnotations,

@@ -153,6 +153,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		},
 	}
 	envVars = append(envVars, registryEnvVars...)
+	envVars = common.AppendObservabilityEnvVars(envVars, scope.Owner(), common.ObservabilityEnvConfig{
+		ServiceName: "regional-gateway",
+		RegionID:    common.ResolveRegionID(scope.Owner()),
+	})
 
 	// Create deployment
 	httpPort := int32(config.HTTPPort)

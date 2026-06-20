@@ -173,7 +173,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 			},
 		},
 		Image: fmt.Sprintf("%s:%s", imageRepo, imageTag),
-		EnvVars: []corev1.EnvVar{
+		EnvVars: common.AppendObservabilityEnvVars([]corev1.EnvVar{
 			{
 				Name:  "SERVICE",
 				Value: "cluster-gateway",
@@ -182,7 +182,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 				Name:  "CONFIG_PATH",
 				Value: "/config/config.yaml",
 			},
-		},
+		}, scope.Owner(), common.ObservabilityEnvConfig{
+			ServiceName: "cluster-gateway",
+			RegionID:    common.ResolveRegionID(scope.Owner()),
+			ClusterID:   common.ResolveClusterID(scope.Owner()),
+		}),
 		VolumeMounts:   volumeMounts,
 		Volumes:        volumes,
 		PodAnnotations: podAnnotations,

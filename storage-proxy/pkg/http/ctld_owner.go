@@ -200,9 +200,6 @@ func (s *Server) releaseReleasableCtldVolumeOwners(ctx context.Context, volumeID
 	if s == nil || s.repo == nil || s.podResolver == nil || strings.TrimSpace(volumeID) == "" {
 		return nil
 	}
-	if err := s.waitForVolumeHandoff(ctx, volumeID); err != nil {
-		return err
-	}
 	heartbeatTimeout := 15
 	if s.cfg != nil && s.cfg.HeartbeatTimeout > 0 {
 		heartbeatTimeout = s.cfg.HeartbeatTimeout

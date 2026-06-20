@@ -23,9 +23,6 @@ type VolumePortalController interface {
 	CheckVolumePortals(r *http.Request, req ctldapi.CheckVolumePortalsRequest) (ctldapi.CheckVolumePortalsResponse, int)
 	AttachVolumeOwner(r *http.Request, req ctldapi.AttachVolumeOwnerRequest) (ctldapi.AttachVolumeOwnerResponse, int)
 	ReleaseVolumeOwner(r *http.Request, req ctldapi.ReleaseVolumeOwnerRequest) (ctldapi.ReleaseVolumeOwnerResponse, int)
-	PrepareVolumePortalHandoff(r *http.Request, req ctldapi.PrepareVolumePortalHandoffRequest) (ctldapi.PrepareVolumePortalHandoffResponse, int)
-	CompleteVolumePortalHandoff(r *http.Request, req ctldapi.CompleteVolumePortalHandoffRequest) (ctldapi.CompleteVolumePortalHandoffResponse, int)
-	AbortVolumePortalHandoff(r *http.Request, req ctldapi.AbortVolumePortalHandoffRequest) (ctldapi.AbortVolumePortalHandoffResponse, int)
 	PrepareVolumeSnapshotCheckpoint(r *http.Request, req ctldapi.PrepareVolumeSnapshotCheckpointRequest) (ctldapi.PrepareVolumeSnapshotCheckpointResponse, int)
 	CompleteVolumeSnapshotCheckpoint(r *http.Request, req ctldapi.CompleteVolumeSnapshotCheckpointRequest) (ctldapi.CompleteVolumeSnapshotCheckpointResponse, int)
 	AbortVolumeSnapshotCheckpoint(r *http.Request, req ctldapi.AbortVolumeSnapshotCheckpointRequest) (ctldapi.AbortVolumeSnapshotCheckpointResponse, int)
@@ -197,72 +194,6 @@ func NewMux(controller Controller) http.Handler {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		resp, status := volumeController.ReleaseVolumeOwner(r, req)
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(resp)
-	})
-	mux.HandleFunc("/api/v1/volume-portals/handoffs/prepare", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		volumeController, ok := controller.(VolumePortalController)
-		if !ok {
-			w.WriteHeader(http.StatusNotImplemented)
-			_ = json.NewEncoder(w).Encode(ctldapi.PrepareVolumePortalHandoffResponse{Error: "ctld volume portal handoff not implemented"})
-			return
-		}
-		var req ctldapi.PrepareVolumePortalHandoffRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(ctldapi.PrepareVolumePortalHandoffResponse{Error: err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		resp, status := volumeController.PrepareVolumePortalHandoff(r, req)
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(resp)
-	})
-	mux.HandleFunc("/api/v1/volume-portals/handoffs/complete", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		volumeController, ok := controller.(VolumePortalController)
-		if !ok {
-			w.WriteHeader(http.StatusNotImplemented)
-			_ = json.NewEncoder(w).Encode(ctldapi.CompleteVolumePortalHandoffResponse{Error: "ctld volume portal handoff not implemented"})
-			return
-		}
-		var req ctldapi.CompleteVolumePortalHandoffRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(ctldapi.CompleteVolumePortalHandoffResponse{Error: err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		resp, status := volumeController.CompleteVolumePortalHandoff(r, req)
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(resp)
-	})
-	mux.HandleFunc("/api/v1/volume-portals/handoffs/abort", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		volumeController, ok := controller.(VolumePortalController)
-		if !ok {
-			w.WriteHeader(http.StatusNotImplemented)
-			_ = json.NewEncoder(w).Encode(ctldapi.AbortVolumePortalHandoffResponse{Error: "ctld volume portal handoff not implemented"})
-			return
-		}
-		var req ctldapi.AbortVolumePortalHandoffRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(ctldapi.AbortVolumePortalHandoffResponse{Error: err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		resp, status := volumeController.AbortVolumePortalHandoff(r, req)
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(resp)
 	})

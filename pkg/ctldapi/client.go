@@ -19,20 +19,17 @@ import (
 const DefaultRequestTimeout = 15 * time.Second
 
 const (
-	pathVolumePortalBind            = "/api/v1/volume-portals/bind"
-	pathVolumePortalUnbind          = "/api/v1/volume-portals/unbind"
-	pathVolumePortalCheck           = "/api/v1/volume-portals/check"
-	pathVolumePortalOwnerAttach     = "/api/v1/volume-portals/owners/attach"
-	pathVolumePortalOwnerRelease    = "/api/v1/volume-portals/owners/release"
-	pathVolumePortalHandoffPrepare  = "/api/v1/volume-portals/handoffs/prepare"
-	pathVolumePortalHandoffComplete = "/api/v1/volume-portals/handoffs/complete"
-	pathVolumePortalHandoffAbort    = "/api/v1/volume-portals/handoffs/abort"
-	pathVolumeSnapshotPrepare       = "/api/v1/volume-portals/snapshot-checkpoints/prepare"
-	pathVolumeSnapshotComplete      = "/api/v1/volume-portals/snapshot-checkpoints/complete"
-	pathVolumeSnapshotAbort         = "/api/v1/volume-portals/snapshot-checkpoints/abort"
-	pathRootFSInspect               = "/api/v1/rootfs/inspect"
-	pathRootFSSave                  = "/api/v1/rootfs/save"
-	pathRootFSApply                 = "/api/v1/rootfs/apply"
+	pathVolumePortalBind         = "/api/v1/volume-portals/bind"
+	pathVolumePortalUnbind       = "/api/v1/volume-portals/unbind"
+	pathVolumePortalCheck        = "/api/v1/volume-portals/check"
+	pathVolumePortalOwnerAttach  = "/api/v1/volume-portals/owners/attach"
+	pathVolumePortalOwnerRelease = "/api/v1/volume-portals/owners/release"
+	pathVolumeSnapshotPrepare    = "/api/v1/volume-portals/snapshot-checkpoints/prepare"
+	pathVolumeSnapshotComplete   = "/api/v1/volume-portals/snapshot-checkpoints/complete"
+	pathVolumeSnapshotAbort      = "/api/v1/volume-portals/snapshot-checkpoints/abort"
+	pathRootFSInspect            = "/api/v1/rootfs/inspect"
+	pathRootFSSave               = "/api/v1/rootfs/save"
+	pathRootFSApply              = "/api/v1/rootfs/apply"
 )
 
 var defaultHTTPClient = &http.Client{Timeout: DefaultRequestTimeout}
@@ -108,18 +105,6 @@ func (c *Client) AttachVolumeOwner(ctx context.Context, ctldAddress string, req 
 
 func (c *Client) ReleaseVolumeOwner(ctx context.Context, ctldAddress string, req ReleaseVolumeOwnerRequest) (*ReleaseVolumeOwnerResponse, error) {
 	return PostJSON[ReleaseVolumeOwnerResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathVolumePortalOwnerRelease, req)
-}
-
-func (c *Client) PrepareVolumePortalHandoff(ctx context.Context, ctldAddress string, req PrepareVolumePortalHandoffRequest) (*PrepareVolumePortalHandoffResponse, error) {
-	return PostJSON[PrepareVolumePortalHandoffResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathVolumePortalHandoffPrepare, req)
-}
-
-func (c *Client) CompleteVolumePortalHandoff(ctx context.Context, ctldAddress string, req CompleteVolumePortalHandoffRequest) (*CompleteVolumePortalHandoffResponse, error) {
-	return PostJSON[CompleteVolumePortalHandoffResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathVolumePortalHandoffComplete, req)
-}
-
-func (c *Client) AbortVolumePortalHandoff(ctx context.Context, ctldAddress string, req AbortVolumePortalHandoffRequest) (*AbortVolumePortalHandoffResponse, error) {
-	return PostJSON[AbortVolumePortalHandoffResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathVolumePortalHandoffAbort, req)
 }
 
 func (c *Client) PrepareVolumeSnapshotCheckpoint(ctx context.Context, ctldAddress string, req PrepareVolumeSnapshotCheckpointRequest) (*PrepareVolumeSnapshotCheckpointResponse, error) {
@@ -208,12 +193,6 @@ func responseError(resp any) string {
 	case *ReleaseVolumeOwnerResponse:
 		return strings.TrimSpace(typed.Error)
 	case *CheckVolumePortalsResponse:
-		return strings.TrimSpace(typed.Error)
-	case *PrepareVolumePortalHandoffResponse:
-		return strings.TrimSpace(typed.Error)
-	case *CompleteVolumePortalHandoffResponse:
-		return strings.TrimSpace(typed.Error)
-	case *AbortVolumePortalHandoffResponse:
 		return strings.TrimSpace(typed.Error)
 	case *PrepareVolumeSnapshotCheckpointResponse:
 		return strings.TrimSpace(typed.Error)

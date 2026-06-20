@@ -722,14 +722,24 @@ func (s *SandboxService) observeClaimPhase(template, claimType, phase string, st
 }
 
 func validateClaimMountsForTemplate(req *ClaimRequest, template *v1alpha1.SandboxTemplate) error {
-	if req == nil || len(req.Mounts) == 0 {
+	allowed := declaredVolumeMountsByPath(template)
+	if len(allowed) == 0 {
 		return nil
 	}
-	allowed := declaredVolumeMountsByPath(template)
+	if req == nil {
+		return fmt.Errorf("%w: template volumeMounts require claim mounts", ErrInvalidClaimRequest)
+	}
+	claimed := make(map[string]struct{}, len(req.Mounts))
 	for i := range req.Mounts {
 		mountPoint := filepath.Clean(req.Mounts[i].MountPoint)
 		if _, ok := allowed[mountPoint]; !ok {
 			return fmt.Errorf("%w: mounts[%d].mount_point %q is not declared by template", ErrInvalidClaimRequest, i, mountPoint)
+		}
+		claimed[mountPoint] = struct{}{}
+	}
+	for mountPath := range allowed {
+		if _, ok := claimed[mountPath]; !ok {
+			return fmt.Errorf("%w: template volumeMount %q requires a claim mount", ErrInvalidClaimRequest, mountPath)
 		}
 	}
 	return nil
@@ -846,17 +856,16 @@ func (s *SandboxService) bindVolumePortal(ctx context.Context, pod *corev1.Pod, 
 		return nil, err
 	}
 	if err := s.prepareVolumePortalBind(ctx, PrepareVolumePortalBindRequest{
-		TeamID:         teamID,
-		UserID:         userID,
-		VolumeID:       volumeID,
-		TargetCtldAddr: ctldAddress,
-		Namespace:      pod.Namespace,
-		PodName:        pod.Name,
-		PodUID:         string(pod.UID),
-		PortalName:     volumeportal.NormalizePortalName(portalName, mountPoint),
-		MountPath:      mountPoint,
-		SandboxID:      sandboxID,
-		OwnerTeamID:    ownerTeamID,
+		TeamID:      teamID,
+		UserID:      userID,
+		VolumeID:    volumeID,
+		Namespace:   pod.Namespace,
+		PodName:     pod.Name,
+		PodUID:      string(pod.UID),
+		PortalName:  volumeportal.NormalizePortalName(portalName, mountPoint),
+		MountPath:   mountPoint,
+		SandboxID:   sandboxID,
+		OwnerTeamID: ownerTeamID,
 	}); err != nil {
 		if errors.Is(err, ErrVolumePortalBindConflict) {
 			return nil, fmt.Errorf("%w: %v", ErrClaimConflict, err)
@@ -941,7 +950,7 @@ func isVolumePortalBindConflictError(resp *ctldapi.BindVolumePortalResponse, err
 	return strings.Contains(message, "already has an active owner") ||
 		strings.Contains(message, "actively bound to a portal") ||
 		strings.Contains(message, "already bound to") ||
-		strings.Contains(message, "handoff already in progress")
+		strings.Contains(message, "snapshot checkpoint already in progress")
 }
 
 func isVolumePortalPendingPublicationError(resp *ctldapi.BindVolumePortalResponse, err error) bool {

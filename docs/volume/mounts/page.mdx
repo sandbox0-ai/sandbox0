@@ -59,7 +59,9 @@ The claim request binds existing Volumes to template-declared paths.
 }
 ```
 
-`mount_point` must match a path declared in `spec.volumeMounts`.
+`mount_point` must match a path declared in `spec.volumeMounts`. Every template-declared `volumeMount` must be bound by the claim request; Sandbox0 rejects claims that would leave a template volume mount unbound.
+
+Only mounts present in the claim request are treated as bound Sandbox Volume paths for that Sandbox. Bound Sandbox Volume paths are excluded from rootfs pause, snapshot, restore, and fork checkpoints because their contents are owned by the Sandbox Volume.
 
 ## Access Modes
 

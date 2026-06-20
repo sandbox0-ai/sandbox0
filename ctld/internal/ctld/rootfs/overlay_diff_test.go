@@ -64,6 +64,25 @@ func TestWriteOverlayUpperDiffExcludesRuntimePaths(t *testing.T) {
 	assert.NotContains(t, entries, "procd/bin/")
 	assert.NotContains(t, entries, "procd/bin/procd")
 	assert.NotContains(t, entries, "procd/bin/python-runner")
+	assert.Contains(t, entries, "var/lib/sandbox0/procd/")
+	assert.Contains(t, entries, "var/lib/sandbox0/procd/webhook-outbox/")
+	assert.Contains(t, entries, "var/lib/sandbox0/procd/webhook-outbox/evt.json")
+	assert.Contains(t, entries, "workspace/")
+	assert.Contains(t, entries, "workspace/state")
+}
+
+func TestWriteOverlayUpperDiffExcludesConfiguredWebhookStatePath(t *testing.T) {
+	upperdir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(upperdir, strings.TrimPrefix(volumeportal.WebhookStateMountPath, "/"), "webhook-outbox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(upperdir, strings.TrimPrefix(volumeportal.WebhookStateMountPath, "/"), "webhook-outbox", "evt.json"), []byte("runtime"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(upperdir, "workspace"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(upperdir, "workspace", "state"), []byte("value"), 0o644))
+
+	_, reader, err := writeOverlayUpperDiff(context.Background(), upperdir, []string{volumeportal.WebhookStateMountPath})
+	require.NoError(t, err)
+	defer reader.Close()
+
+	entries := readTarEntries(t, reader)
 	assert.NotContains(t, entries, "var/lib/sandbox0/procd/")
 	assert.NotContains(t, entries, "var/lib/sandbox0/procd/webhook-outbox/")
 	assert.NotContains(t, entries, "var/lib/sandbox0/procd/webhook-outbox/evt.json")
@@ -229,6 +248,26 @@ func TestFilterRootFSDiffTarExcludesRuntimePaths(t *testing.T) {
 	entries := readTarEntries(t, reader)
 	assert.NotContains(t, entries, "procd/bin/python-runner")
 	assert.NotContains(t, entries, "procd/.wh..wh..opq")
+	assert.Contains(t, entries, "var/lib/sandbox0/procd/webhook-outbox/evt.json")
+	assert.Contains(t, entries, "var/lib/sandbox0/procd/.wh..wh..opq")
+	assert.Contains(t, entries, "workspace/state")
+}
+
+func TestFilterRootFSDiffTarExcludesConfiguredWebhookStatePath(t *testing.T) {
+	var buf bytes.Buffer
+	tarWriter := tar.NewWriter(&buf)
+	writeTarEntry(t, tarWriter, "var/lib/sandbox0/procd/webhook-outbox/evt.json", []byte("runtime"), 0o644)
+	writeTarEntry(t, tarWriter, "var/lib/sandbox0/procd/.wh..wh..opq", nil, 0o000)
+	writeTarEntry(t, tarWriter, "workspace/state", []byte("value"), 0o644)
+	require.NoError(t, tarWriter.Close())
+
+	desc, reader, err := filterRootFSDiffTar(rootFSDiffDescriptorForTest(), bytes.NewReader(buf.Bytes()), []string{volumeportal.WebhookStateMountPath})
+	require.NoError(t, err)
+	defer reader.Close()
+	require.NotEmpty(t, desc.Digest)
+	require.Positive(t, desc.Size)
+
+	entries := readTarEntries(t, reader)
 	assert.NotContains(t, entries, "var/lib/sandbox0/procd/webhook-outbox/evt.json")
 	assert.NotContains(t, entries, "var/lib/sandbox0/procd/.wh..wh..opq")
 	assert.Contains(t, entries, "workspace/state")

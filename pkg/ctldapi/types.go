@@ -125,16 +125,14 @@ type ApplyRootFSResponse struct {
 // BindVolumePortalRequest binds one pre-published pod portal to a concrete
 // sandbox volume at claim time.
 type BindVolumePortalRequest struct {
-	Namespace               string `json:"namespace"`
-	PodName                 string `json:"pod_name"`
-	PodUID                  string `json:"pod_uid"`
-	PortalName              string `json:"portal_name,omitempty"`
-	MountPath               string `json:"mount_path"`
-	SandboxID               string `json:"sandbox_id"`
-	TeamID                  string `json:"team_id"`
-	SandboxVolumeID         string `json:"sandboxvolume_id"`
-	TransferSourceClusterID string `json:"transfer_source_cluster_id,omitempty"`
-	TransferSourcePodID     string `json:"transfer_source_pod_id,omitempty"`
+	Namespace       string `json:"namespace"`
+	PodName         string `json:"pod_name"`
+	PodUID          string `json:"pod_uid"`
+	PortalName      string `json:"portal_name,omitempty"`
+	MountPath       string `json:"mount_path"`
+	SandboxID       string `json:"sandbox_id"`
+	TeamID          string `json:"team_id"`
+	SandboxVolumeID string `json:"sandboxvolume_id"`
 }
 
 // BindVolumePortalResponse describes the node-local mount session created by ctld.
@@ -176,33 +174,6 @@ type CheckVolumePortalsResponse struct {
 	Ready   bool     `json:"ready"`
 	Missing []string `json:"missing,omitempty"`
 	Error   string   `json:"error,omitempty"`
-}
-
-type PrepareVolumePortalHandoffRequest struct {
-	SandboxVolumeID string `json:"sandboxvolume_id"`
-}
-
-type PrepareVolumePortalHandoffResponse struct {
-	Prepared bool   `json:"prepared"`
-	Error    string `json:"error,omitempty"`
-}
-
-type CompleteVolumePortalHandoffRequest struct {
-	SandboxVolumeID string `json:"sandboxvolume_id"`
-}
-
-type CompleteVolumePortalHandoffResponse struct {
-	Completed bool   `json:"completed"`
-	Error     string `json:"error,omitempty"`
-}
-
-type AbortVolumePortalHandoffRequest struct {
-	SandboxVolumeID string `json:"sandboxvolume_id"`
-}
-
-type AbortVolumePortalHandoffResponse struct {
-	Aborted bool   `json:"aborted"`
-	Error   string `json:"error,omitempty"`
 }
 
 type PrepareVolumeSnapshotCheckpointRequest struct {

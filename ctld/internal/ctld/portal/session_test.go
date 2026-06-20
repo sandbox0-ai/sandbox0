@@ -163,7 +163,7 @@ func TestLocalSessionReadIntoRequiresTrackedHandleForCache(t *testing.T) {
 	}
 }
 
-func TestLocalVolumeManagerPrepareHandoffDrainsInflightAndBlocksNewAcquires(t *testing.T) {
+func TestLocalVolumeManagerPrepareSnapshotCheckpointDrainsInflightAndBlocksNewAcquires(t *testing.T) {
 	mgr := newLocalVolumeManager()
 	mgr.add(&volume.VolumeContext{VolumeID: "vol-1"})
 
@@ -174,12 +174,12 @@ func TestLocalVolumeManagerPrepareHandoffDrainsInflightAndBlocksNewAcquires(t *t
 
 	prepared := make(chan error, 1)
 	go func() {
-		prepared <- mgr.prepareHandoff(context.Background(), "vol-1")
+		prepared <- mgr.prepareSnapshotCheckpoint(context.Background(), "vol-1")
 	}()
 
 	select {
 	case err := <-prepared:
-		t.Fatalf("prepareHandoff() returned early: %v", err)
+		t.Fatalf("prepareSnapshotCheckpoint() returned early: %v", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 
@@ -194,7 +194,7 @@ func TestLocalVolumeManagerPrepareHandoffDrainsInflightAndBlocksNewAcquires(t *t
 
 	select {
 	case err := <-acquired:
-		t.Fatalf("AcquireDirectVolumeFileMount(new) returned during handoff: %v", err)
+		t.Fatalf("AcquireDirectVolumeFileMount(new) returned during snapshot checkpoint: %v", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 
@@ -203,19 +203,19 @@ func TestLocalVolumeManagerPrepareHandoffDrainsInflightAndBlocksNewAcquires(t *t
 	select {
 	case err := <-prepared:
 		if err != nil {
-			t.Fatalf("prepareHandoff() error = %v", err)
+			t.Fatalf("prepareSnapshotCheckpoint() error = %v", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("prepareHandoff() did not complete after inflight request drained")
+		t.Fatal("prepareSnapshotCheckpoint() did not complete after inflight request drained")
 	}
 
 	select {
 	case err := <-acquired:
-		t.Fatalf("AcquireDirectVolumeFileMount(new) returned before handoff abort: %v", err)
+		t.Fatalf("AcquireDirectVolumeFileMount(new) returned before snapshot checkpoint completion: %v", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	mgr.abortHandoff("vol-1")
+	mgr.completeSnapshotCheckpoint("vol-1")
 
 	select {
 	case err := <-acquired:
@@ -223,7 +223,7 @@ func TestLocalVolumeManagerPrepareHandoffDrainsInflightAndBlocksNewAcquires(t *t
 			t.Fatalf("AcquireDirectVolumeFileMount(new) error = %v", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("AcquireDirectVolumeFileMount(new) did not resume after handoff abort")
+		t.Fatal("AcquireDirectVolumeFileMount(new) did not resume after snapshot checkpoint completion")
 	}
 }
 

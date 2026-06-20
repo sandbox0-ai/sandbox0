@@ -3,14 +3,19 @@ package http
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"testing"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
 )
 
@@ -417,6 +422,61 @@ func TestPrepareSandboxVolumeForPortalBindRejectsActiveRWOMounts(t *testing.T) {
 
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusConflict, recorder.Body.String())
+	}
+}
+
+func TestPrepareSandboxVolumeForPortalBindReleasesIdleCtldOwner(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1", UserID: "user-1", AccessMode: "RWO"}
+
+	var releaseCalls int
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/volume-portals/owners/release" {
+			http.NotFound(w, r)
+			return
+		}
+		releaseCalls++
+		repo.activeMounts["vol-1"] = nil
+		_ = json.NewEncoder(w).Encode(ctldapi.ReleaseVolumeOwnerResponse{Released: true})
+	}))
+	defer ctld.Close()
+	ctldURL, err := url.Parse(ctld.URL)
+	if err != nil {
+		t.Fatalf("parse ctld url: %v", err)
+	}
+	ctldPort, err := strconv.Atoi(ctldURL.Port())
+	if err != nil {
+		t.Fatalf("parse ctld port: %v", err)
+	}
+
+	repo.activeMounts["vol-1"] = []*db.VolumeMount{{
+		VolumeID:     "vol-1",
+		ClusterID:    "cluster-a",
+		PodID:        "sandbox0-system/ctld-a",
+		MountOptions: mustMountOptionsRaw(t, volume.MountOptions{OwnerKind: volume.OwnerKindCtld, OwnerPort: ctldPort}),
+	}}
+	server := &Server{
+		logger:      logrus.New(),
+		repo:        repo,
+		podResolver: &fakeVolumeFilePodResolver{urls: map[string]string{"sandbox0-system/ctld-a": ctld.URL}},
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/internal/v1/sandboxvolumes/vol-1/prepare-portal-bind", nil)
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		Caller: internalauth.ServiceManager,
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.prepareSandboxVolumeForPortalBind(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if releaseCalls != 1 {
+		t.Fatalf("release calls = %d, want 1", releaseCalls)
 	}
 }
 

@@ -1030,6 +1030,23 @@ func TestValidateClaimMountsForTemplateRequiresDeclaredMountPoint(t *testing.T) 
 	}
 }
 
+func TestValidateClaimMountsForTemplateRequiresAllDeclaredMountPoints(t *testing.T) {
+	req := &ClaimRequest{}
+	template := &v1alpha1.SandboxTemplate{
+		Spec: v1alpha1.SandboxTemplateSpec{
+			VolumeMounts: []v1alpha1.VolumeMountSpec{{Name: "data", MountPath: "/workspace/data"}},
+		},
+	}
+
+	err := validateClaimMountsForTemplate(req, template)
+	if err == nil {
+		t.Fatal("expected missing declared mount validation error")
+	}
+	if !errors.Is(err, ErrInvalidClaimRequest) {
+		t.Fatalf("expected ErrInvalidClaimRequest, got %v", err)
+	}
+}
+
 func TestValidateClaimMountsForTemplateAllowsDeclaredMountPoint(t *testing.T) {
 	req := &ClaimRequest{
 		Mounts: []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/project/../data"}},
@@ -1109,7 +1126,7 @@ func (c *fakeVolumeMetadataClient) PrepareForVolumePortalBind(_ context.Context,
 	if c == nil {
 		return nil
 	}
-	c.prepared = append(c.prepared, req.TeamID+":"+req.UserID+":"+req.VolumeID+":"+req.TargetCtldAddr+":"+req.PodUID)
+	c.prepared = append(c.prepared, req.TeamID+":"+req.UserID+":"+req.VolumeID+":"+req.PodUID)
 	return c.prepareErr
 }
 
@@ -1118,19 +1135,18 @@ func TestPrepareVolumePortalBindUsesPreparationClientWhenAvailable(t *testing.T)
 	svc := &SandboxService{volumeMetadata: metadata}
 
 	if err := svc.prepareVolumePortalBind(context.Background(), PrepareVolumePortalBindRequest{
-		TeamID:         "team-a",
-		UserID:         "user-a",
-		VolumeID:       "vol-1",
-		TargetCtldAddr: "http://ctld",
-		PodUID:         "pod-uid",
+		TeamID:   "team-a",
+		UserID:   "user-a",
+		VolumeID: "vol-1",
+		PodUID:   "pod-uid",
 	}); err != nil {
 		t.Fatalf("prepareVolumePortalBind() error = %v", err)
 	}
 	if len(metadata.prepared) != 1 {
 		t.Fatalf("prepared calls = %d, want 1", len(metadata.prepared))
 	}
-	if metadata.prepared[0] != "team-a:user-a:vol-1:http://ctld:pod-uid" {
-		t.Fatalf("prepared call = %q, want %q", metadata.prepared[0], "team-a:user-a:vol-1:http://ctld:pod-uid")
+	if metadata.prepared[0] != "team-a:user-a:vol-1:pod-uid" {
+		t.Fatalf("prepared call = %q, want %q", metadata.prepared[0], "team-a:user-a:vol-1:pod-uid")
 	}
 }
 

@@ -56,15 +56,69 @@ Idle template pool pods are capacity, not billable sandbox runtime. Public templ
 
 ## Platform Observability
 
-Sandbox0 platform services emit logs to container stdout and expose Prometheus-compatible metrics on their metrics ports. Configure `spec.observability` when you want the operator to inject standard OpenTelemetry environment variables into sandbox0-owned platform components.
+Sandbox0 platform services emit logs to container stdout and expose Prometheus-compatible metrics on their metrics ports. Configure `spec.observability` when you want the operator to wire sandbox0-owned platform components into an observability backend.
 
-This configuration is intentionally limited to collection. It does not install an OpenTelemetry Collector, select a storage backend, create ClickHouse tables, or define query APIs. Storage and query adapters should be configured outside `Sandbox0Infra`.
+Observability is disabled by default. The operator owns collection integration only: it can install collectors and a local builtin backend, or point platform services at an external collector. User-facing sandbox observability APIs, query adapters, dashboards, and retention policy beyond the selected backend remain outside this layer.
 
 ```yaml
 spec:
     observability:
+        backend:
+            type: builtin
+            builtin:
+                provider: clickhouse
+                clickhouse:
+                    persistence:
+                        size: 50Gi
         resourceAttributes:
             deployment.environment: production
+        collection:
+            logs:
+                enabled: true
+            metrics:
+                enabled: true
+            traces:
+                enabled: true
+```
+
+The builtin backend installs an OpenTelemetry Collector and a single-node ClickHouse instance. Use it for local self-hosted environments and small deployments where a built-in collection target is enough.
+
+If your platform already has an observability stack, use `external`. In `existingCollector` mode sandbox0 does not install collectors; it only injects standard OTEL trace environment variables into platform services:
+
+```yaml
+spec:
+    observability:
+        backend:
+            type: external
+            external:
+                mode: existingCollector
+                otlp:
+                    endpoint: http://otel-collector.observability.svc.cluster.local:4317
+                    headersSecret:
+                        name: otel-export-headers
+                        key: headers
+                    insecure: true
+```
+
+In `managedCollector` mode sandbox0 installs collectors for logs, metrics, and traces, then exports to your OTLP endpoint:
+
+```yaml
+spec:
+    observability:
+        backend:
+            type: external
+            external:
+                mode: managedCollector
+                otlp:
+                    endpoint: otel-gateway.example.com:4317
+                    insecure: false
+```
+
+The legacy direct trace exporter config remains supported and overrides backend-derived trace endpoint defaults:
+
+```yaml
+spec:
+    observability:
         traces:
             enabled: true
             exporter: otlp
@@ -76,7 +130,7 @@ spec:
 
 The operator adds built-in resource attributes such as `service.name`, `sandbox0.region.id`, `sandbox0.cluster.id`, `k8s.namespace.name`, `k8s.pod.name`, and `k8s.node.name`. Built-in attributes win over user-provided keys so dashboards and trace queries can rely on stable names.
 
-When traces are not enabled, services keep the default noop trace exporter. Existing direct environment overrides still work; standard OpenTelemetry variables such as `OTEL_TRACES_EXPORTER`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_HEADERS`, and `OTEL_RESOURCE_ATTRIBUTES` take precedence over the legacy `OTEL_EXPORTER_TYPE` and `OTEL_EXPORTER_ENDPOINT` variables.
+When traces are not enabled through `collection.traces` or the legacy `traces` block, services keep the default noop trace exporter. Existing direct environment overrides still work; standard OpenTelemetry variables such as `OTEL_TRACES_EXPORTER`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_HEADERS`, and `OTEL_RESOURCE_ATTRIBUTES` take precedence over operator-injected defaults.
 
 Official sample manifests:
 

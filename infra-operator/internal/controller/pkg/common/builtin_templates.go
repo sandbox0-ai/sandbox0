@@ -189,7 +189,7 @@ func defaultBuiltinTemplateSpec(templateID string) templatev1alpha1.SandboxTempl
 	if templateID == template.DefaultTemplateID {
 		displayName = template.DefaultTemplateDisplayName
 	}
-	return templatev1alpha1.SandboxTemplateSpec{
+	spec := templatev1alpha1.SandboxTemplateSpec{
 		DisplayName: displayName,
 		Description: fmt.Sprintf("Builtin template %s installed by infra-operator.", templateID),
 		MainContainer: templatev1alpha1.ContainerSpec{
@@ -205,6 +205,13 @@ func defaultBuiltinTemplateSpec(templateID string) templatev1alpha1.SandboxTempl
 			Mode: templatev1alpha1.NetworkModeAllowAll,
 		},
 	}
+	if templateID == template.DefaultTemplateID {
+		spec.VolumeMounts = []templatev1alpha1.VolumeMountSpec{{
+			Name:      template.DefaultTemplateWorkspaceName,
+			MountPath: template.DefaultTemplateWorkspaceMount,
+		}}
+	}
+	return spec
 }
 
 func dockerInSandboxTemplateSpec() templatev1alpha1.SandboxTemplateSpec {

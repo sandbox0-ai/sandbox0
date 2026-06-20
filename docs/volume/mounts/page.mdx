@@ -11,7 +11,7 @@ flowchart LR
     tmpl["SandboxTemplate<br/>volumeMounts"]
     claim["Claim request<br/>mounts"]
     ctld["ctld node portal"]
-    sb["Sandbox<br/>/workspace/data"]
+    sb["Sandbox<br/>/workspace"]
     vol["Volume"]
 
     tmpl --> claim
@@ -31,10 +31,12 @@ metadata:
     name: default
 spec:
     volumeMounts:
-        - name: workspace-data
-          mountPath: /workspace/data
+        - name: workspace
+          mountPath: /workspace
           readOnly: false
 ```
+
+The operator-managed `default` builtin template already declares the writable `/workspace` mount point. Custom templates must declare each mount point explicitly.
 
 Mount path requirements:
 
@@ -53,7 +55,7 @@ The claim request binds existing Volumes to template-declared paths.
     "mounts": [
         {
             "sandboxvolume_id": "vol_123",
-            "mount_point": "/workspace/data"
+            "mount_point": "/workspace"
         }
     ]
 }
@@ -86,8 +88,8 @@ This is what keeps file changes visible both from inside the sandbox and through
 After claim completes, use the mounted path like a normal filesystem:
 
 ```bash
-echo "hello" >/workspace/data/hello.txt
-cat /workspace/data/hello.txt
+echo "hello" >/workspace/hello.txt
+cat /workspace/hello.txt
 ```
 
 For control-plane file operations without a Sandbox, use `/api/v1/sandboxvolumes/{'{id}'}/files`.

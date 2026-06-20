@@ -11,6 +11,36 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 )
 
+func TestBuildBuiltinTemplateSpecUsesDefaultPreset(t *testing.T) {
+	t.Parallel()
+
+	spec := BuildBuiltinTemplateSpec(template.DefaultTemplateID, infrav1alpha1.BuiltinTemplateConfig{})
+
+	if spec.DisplayName != template.DefaultTemplateDisplayName {
+		t.Fatalf("DisplayName = %q, want %q", spec.DisplayName, template.DefaultTemplateDisplayName)
+	}
+	if spec.MainContainer.Image != template.DefaultTemplateImage {
+		t.Fatalf("image = %q, want %q", spec.MainContainer.Image, template.DefaultTemplateImage)
+	}
+	if len(spec.VolumeMounts) != 1 {
+		t.Fatalf("volumeMounts = %#v, want one workspace mount", spec.VolumeMounts)
+	}
+	mount := spec.VolumeMounts[0]
+	if mount.Name != template.DefaultTemplateWorkspaceName || mount.MountPath != template.DefaultTemplateWorkspaceMount || mount.ReadOnly {
+		t.Fatalf("volumeMounts[0] = %#v, want writable %s at %s", mount, template.DefaultTemplateWorkspaceName, template.DefaultTemplateWorkspaceMount)
+	}
+}
+
+func TestBuildBuiltinTemplateSpecDoesNotAddDefaultWorkspaceToGenericPreset(t *testing.T) {
+	t.Parallel()
+
+	spec := BuildBuiltinTemplateSpec("custom", infrav1alpha1.BuiltinTemplateConfig{})
+
+	if len(spec.VolumeMounts) != 0 {
+		t.Fatalf("volumeMounts = %#v, want none for generic builtin preset", spec.VolumeMounts)
+	}
+}
+
 func TestBuildBuiltinTemplateSpecUsesDockerInSandboxPreset(t *testing.T) {
 	t.Parallel()
 

@@ -11,6 +11,8 @@ const (
 	DefaultTemplateDisplayName      = "Default"
 	DefaultTemplateMinIdle          = int32(1)
 	DefaultTemplateMaxIdle          = int32(5)
+	DefaultTemplateWorkspaceName    = "workspace"
+	DefaultTemplateWorkspaceMount   = "/workspace"
 
 	DockerInSandboxTemplateID          = "dins"
 	DockerInSandboxTemplateDisplayName = "Docker in Sandbox"
@@ -29,7 +31,7 @@ const (
 	OpenClawMemory              = "4Gi"
 	OpenClawEphemeralStorage    = "4Gi"
 	OpenClawDataMount           = "/home/node/.openclaw"
-	AgentWorkspaceMount         = "/workspace"
+	AgentWorkspaceMount         = DefaultTemplateWorkspaceMount
 	AgentWorkspaceSizeLimit     = "4Gi"
 
 	HermesTemplateID          = "hermes"

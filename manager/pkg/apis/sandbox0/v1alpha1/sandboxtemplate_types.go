@@ -75,6 +75,8 @@ type VolumeMountSpec struct {
 	Name      string `json:"name"`
 	MountPath string `json:"mountPath"`
 	ReadOnly  bool   `json:"readOnly,omitempty"`
+	// Optional allows a claim request to omit binding this portal to a SandboxVolume.
+	Optional bool `json:"optional,omitempty"`
 }
 
 // EnvVar represents an environment variable

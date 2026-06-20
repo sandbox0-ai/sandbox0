@@ -28,18 +28,20 @@ Template mount paths are fixed before the Sandbox starts.
 apiVersion: sandbox0.ai/v1alpha1
 kind: SandboxTemplate
 metadata:
-  name: default
+    name: default
 spec:
-  volumeMounts:
-    - name: workspace-data
-      mountPath: /workspace/data
-      readOnly: false
+    volumeMounts:
+        - name: workspace-data
+          mountPath: /workspace/data
+          readOnly: false
+          optional: true
 ```
 
 Mount path requirements:
 
 - `name` must be unique within the template.
 - `mountPath` must be an absolute, clean path.
+- `optional` lets a claim omit this mount point. Omitted optional mounts stay as unbound portal directories for the lifetime of that sandbox.
 - `/` is not allowed.
 - Paths under `/var/lib/sandbox0/procd` are reserved for Sandbox0 internals.
 
@@ -59,9 +61,9 @@ The claim request binds existing Volumes to template-declared paths.
 }
 ```
 
-`mount_point` must match a path declared in `spec.volumeMounts`. Every template-declared `volumeMount` must be bound by the claim request; Sandbox0 rejects claims that would leave a template volume mount unbound.
+`mount_point` must match a path declared in `spec.volumeMounts`. Template-declared mounts are required by default. Sandbox0 rejects claims that omit required mounts, while mounts declared with `optional: true` may be left unbound.
 
-Only mounts present in the claim request are treated as bound Sandbox Volume paths for that Sandbox. Bound Sandbox Volume paths are excluded from rootfs pause, snapshot, restore, and fork checkpoints because their contents are owned by the Sandbox Volume.
+Only mounts present in the claim request are treated as bound Sandbox Volume paths for that Sandbox. Bound Sandbox Volume paths are excluded from rootfs pause, snapshot, restore, and fork checkpoints because their contents are owned by the Sandbox Volume. Unbound optional portal directories are not treated as Sandbox Volume contents.
 
 ## Access Modes
 

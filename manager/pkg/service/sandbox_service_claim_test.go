@@ -1047,6 +1047,41 @@ func TestValidateClaimMountsForTemplateRequiresAllDeclaredMountPoints(t *testing
 	}
 }
 
+func TestValidateClaimMountsForTemplateAllowsOmittedOptionalMountPoint(t *testing.T) {
+	req := &ClaimRequest{}
+	template := &v1alpha1.SandboxTemplate{
+		Spec: v1alpha1.SandboxTemplateSpec{
+			VolumeMounts: []v1alpha1.VolumeMountSpec{{
+				Name:      "data",
+				MountPath: "/workspace/data",
+				Optional:  true,
+			}},
+		},
+	}
+
+	if err := validateClaimMountsForTemplate(req, template); err != nil {
+		t.Fatalf("validateClaimMountsForTemplate() error = %v", err)
+	}
+}
+
+func TestValidateClaimMountsForTemplateRequiresOnlyNonOptionalMountPoints(t *testing.T) {
+	req := &ClaimRequest{
+		Mounts: []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/data"}},
+	}
+	template := &v1alpha1.SandboxTemplate{
+		Spec: v1alpha1.SandboxTemplateSpec{
+			VolumeMounts: []v1alpha1.VolumeMountSpec{
+				{Name: "data", MountPath: "/workspace/data"},
+				{Name: "cache", MountPath: "/workspace/cache", Optional: true},
+			},
+		},
+	}
+
+	if err := validateClaimMountsForTemplate(req, template); err != nil {
+		t.Fatalf("validateClaimMountsForTemplate() error = %v", err)
+	}
+}
+
 func TestValidateClaimMountsForTemplateAllowsDeclaredMountPoint(t *testing.T) {
 	req := &ClaimRequest{
 		Mounts: []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/project/../data"}},

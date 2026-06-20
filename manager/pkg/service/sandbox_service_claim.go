@@ -726,18 +726,22 @@ func validateClaimMountsForTemplate(req *ClaimRequest, template *v1alpha1.Sandbo
 	if len(allowed) == 0 {
 		return nil
 	}
-	if req == nil {
-		return fmt.Errorf("%w: template volumeMounts require claim mounts", ErrInvalidClaimRequest)
+	var mounts []ClaimMount
+	if req != nil {
+		mounts = req.Mounts
 	}
-	claimed := make(map[string]struct{}, len(req.Mounts))
-	for i := range req.Mounts {
-		mountPoint := filepath.Clean(req.Mounts[i].MountPoint)
+	claimed := make(map[string]struct{}, len(mounts))
+	for i := range mounts {
+		mountPoint := filepath.Clean(mounts[i].MountPoint)
 		if _, ok := allowed[mountPoint]; !ok {
 			return fmt.Errorf("%w: mounts[%d].mount_point %q is not declared by template", ErrInvalidClaimRequest, i, mountPoint)
 		}
 		claimed[mountPoint] = struct{}{}
 	}
-	for mountPath := range allowed {
+	for mountPath, mount := range allowed {
+		if mount.Optional {
+			continue
+		}
 		if _, ok := claimed[mountPath]; !ok {
 			return fmt.Errorf("%w: template volumeMount %q requires a claim mount", ErrInvalidClaimRequest, mountPath)
 		}

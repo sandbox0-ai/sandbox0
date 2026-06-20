@@ -40,6 +40,7 @@ When a sandbox is claimed:
 As long as `minIdle` idle pods are available, every claim is a **zero-cold-start** operation.
 
 In practice, “available” means the pod is ready for claiming, not merely `Pod Running`.
+Template-declared Volume portals are pre-mounted in idle pods. A claim can bind any subset of those paths to Sandbox Volumes without bypassing the warm pool; declared paths omitted from the claim remain writable rootfs-backed directories and are captured by rootfs checkpoints.
 
 ---
 

@@ -49,7 +49,7 @@ func TestBuildPodTemplateIncludesTemplateHash(t *testing.T) {
 	assert.Equal(t, "logical-a", got.Labels[LabelTemplateLogicalID])
 }
 
-func TestBuildPodTemplateOmitsUserVolumePortalsForIdlePool(t *testing.T) {
+func TestBuildPodTemplatePreMountsUserVolumePortalsForIdlePool(t *testing.T) {
 	pm := &PoolManager{}
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
@@ -67,7 +67,7 @@ func TestBuildPodTemplateOmitsUserVolumePortalsForIdlePool(t *testing.T) {
 
 	got, err := pm.buildPodTemplate(template, "hash-v1")
 	require.NoError(t, err)
-	assert.Nil(t, findCSIVolumeByPortal(got.Spec.Volumes, "data"))
+	assert.NotNil(t, findCSIVolumeByPortal(got.Spec.Volumes, "data"))
 	assert.NotNil(t, findCSIVolumeByPortal(got.Spec.Volumes, volumeportal.WebhookStatePortalName))
 }
 

@@ -106,7 +106,7 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 	}
 }
 
-func TestClaimIdlePodSkipsWhenClaimHasMounts(t *testing.T) {
+func TestClaimIdlePodAllowsClaimMounts(t *testing.T) {
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "template-a",
@@ -133,8 +133,11 @@ func TestClaimIdlePodSkipsWhenClaimHasMounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claimIdlePod() error = %v", err)
 	}
-	if pod != nil {
-		t.Fatalf("claimIdlePod() = %s, want nil when claim has mounts", pod.Name)
+	if pod == nil {
+		t.Fatal("claimIdlePod() = nil, want ready pod")
+	}
+	if pod.Name != "idle-ready" {
+		t.Fatalf("claimIdlePod() selected %q, want %q", pod.Name, "idle-ready")
 	}
 }
 
@@ -536,7 +539,7 @@ func TestCreateNewPodMarksColdPodNonEvictable(t *testing.T) {
 	}
 }
 
-func TestCreateNewPodUsesOnlyClaimedVolumePortals(t *testing.T) {
+func TestCreateNewPodPreMountsAllTemplateVolumePortals(t *testing.T) {
 	withClaimTestPublicKey(t)
 
 	template := &v1alpha1.SandboxTemplate{
@@ -574,8 +577,8 @@ func TestCreateNewPodUsesOnlyClaimedVolumePortals(t *testing.T) {
 	if volume := findClaimTestCSIVolumeByPortal(pod.Spec.Volumes, "data"); volume == nil {
 		t.Fatalf("expected data csi volume, got %#v", pod.Spec.Volumes)
 	}
-	if volume := findClaimTestCSIVolumeByPortal(pod.Spec.Volumes, "cache"); volume != nil {
-		t.Fatalf("unexpected unclaimed cache csi volume: %#v", volume)
+	if volume := findClaimTestCSIVolumeByPortal(pod.Spec.Volumes, "cache"); volume == nil {
+		t.Fatalf("expected unclaimed cache csi volume for rootfs-backed portal, got %#v", pod.Spec.Volumes)
 	}
 	if volume := findClaimTestCSIVolumeByPortal(pod.Spec.Volumes, volumeportal.WebhookStatePortalName); volume == nil {
 		t.Fatalf("expected webhook state csi volume, got %#v", pod.Spec.Volumes)

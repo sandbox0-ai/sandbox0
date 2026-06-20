@@ -36,16 +36,10 @@ func BuildPodSpec(template *SandboxTemplate) corev1.PodSpec {
 	return buildPodSpec(template, template.Spec.VolumeMounts)
 }
 
-// BuildPodSpecWithVolumeMounts builds a pod spec with only the selected user
-// volume portals. The webhook state portal is always included.
-func BuildPodSpecWithVolumeMounts(template *SandboxTemplate, volumeMounts []VolumeMountSpec) corev1.PodSpec {
-	return buildPodSpec(template, volumeMounts)
-}
-
-// BuildIdlePodSpec builds an idle-pool pod spec. User volume portals are bound
-// per claim, so idle pods only include Sandbox0-managed system portals.
+// BuildIdlePodSpec builds the idle-pool pod spec. User volume portals stay
+// pre-mounted so hot claims can bind selected portals without recreating pods.
 func BuildIdlePodSpec(template *SandboxTemplate) corev1.PodSpec {
-	return buildPodSpec(template, nil)
+	return BuildPodSpec(template)
 }
 
 func buildPodSpec(template *SandboxTemplate, volumeMounts []VolumeMountSpec) corev1.PodSpec {

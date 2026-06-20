@@ -105,6 +105,41 @@ func TestControllerSaveRootFSUsesParentBaseline(t *testing.T) {
 	assert.Equal(t, "child diff", string(payload))
 }
 
+func TestControllerSaveRootFSResolvesUnboundPortalPaths(t *testing.T) {
+	store := objectstore.NewMemoryStore(t.Name())
+	runtime := &fakeRuntime{
+		info: rootFSInfo("runc"),
+		createDesc: ctldapi.RootFSDiffDescriptor{
+			MediaType: "application/vnd.oci.image.layer.v1.tar",
+			Digest:    "sha256:feedface",
+			Size:      int64(len("rootfs diff")),
+		},
+		createContent: "rootfs diff",
+	}
+	controller := NewController(Config{
+		Runtime: runtime,
+		Store:   store,
+		PortalResolver: fakePortalResolver{paths: []ctldapi.RootFSPortalPath{
+			{PortalName: "cache", MountPath: "/workspace/cache", BackingPath: "/tmp/cache"},
+			{PortalName: "data", MountPath: "/workspace/data", BackingPath: "/tmp/data"},
+		}},
+	})
+
+	resp, status := controller.SaveRootFS(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.SaveRootFSRequest{
+		Target:        rootFSTarget(),
+		SandboxID:     "sandbox-1",
+		TeamID:        "team-1",
+		ExcludedPaths: []string{"/workspace/data"},
+	})
+
+	require.Equal(t, http.StatusOK, status, resp.Error)
+	assert.Equal(t, []ctldapi.RootFSPortalPath{{
+		PortalName:  "cache",
+		MountPath:   "/workspace/cache",
+		BackingPath: "/tmp/cache",
+	}}, runtime.createPortalPaths)
+}
+
 func TestControllerSaveRootFSRejectsUnsupportedRuntime(t *testing.T) {
 	runtime := &fakeRuntime{
 		info:          rootFSInfo("kata"),
@@ -373,6 +408,8 @@ type fakeRuntime struct {
 	createBaselineLayerID        string
 	createExcludedPaths          []string
 	createBaselineExcludedPaths  []string
+	createPortalPaths            []ctldapi.RootFSPortalPath
+	createBaselinePortalPaths    []ctldapi.RootFSPortalPath
 	applyCalled                  bool
 	applyInfo                    ctldapi.RootFSInfo
 	applyInputDesc               ctldapi.RootFSDiffDescriptor
@@ -381,10 +418,13 @@ type fakeRuntime struct {
 	applyContents                []string
 	applyExcludedPaths           []string
 	applyExcludedPathCalls       [][]string
+	applyPortalPaths             []ctldapi.RootFSPortalPath
+	applyPortalPathCalls         [][]ctldapi.RootFSPortalPath
 	captureBaselineCalled        bool
 	captureInfo                  ctldapi.RootFSInfo
 	captureBaselineLayerID       string
 	captureBaselineExcludedPaths []string
+	captureBaselinePortalPaths   []ctldapi.RootFSPortalPath
 }
 
 func (r *fakeRuntime) Inspect(_ context.Context, target ctldapi.RootFSContainerRef) (ctldapi.RootFSInfo, error) {
@@ -392,34 +432,38 @@ func (r *fakeRuntime) Inspect(_ context.Context, target ctldapi.RootFSContainerR
 	return r.info, r.inspectErr
 }
 
-func (r *fakeRuntime) CreateDiff(_ context.Context, info ctldapi.RootFSInfo, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+func (r *fakeRuntime) CreateDiff(_ context.Context, info ctldapi.RootFSInfo, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
 	r.createCalled = true
 	r.createInfo = info
 	r.createExcludedPaths = append([]string(nil), excludedPaths...)
+	r.createPortalPaths = append([]ctldapi.RootFSPortalPath(nil), portalPaths...)
 	if r.createErr != nil {
 		return ctldapi.RootFSDiffDescriptor{}, nil, r.createErr
 	}
 	return r.createDesc, readSeekNopCloser{Reader: strings.NewReader(r.createContent)}, nil
 }
 
-func (r *fakeRuntime) CreateDiffFromBaseline(_ context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+func (r *fakeRuntime) CreateDiffFromBaseline(_ context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
 	r.createBaselineCalled = true
 	r.createBaselineInfo = info
 	r.createBaselineLayerID = baselineLayerID
 	r.createBaselineExcludedPaths = append([]string(nil), excludedPaths...)
+	r.createBaselinePortalPaths = append([]ctldapi.RootFSPortalPath(nil), portalPaths...)
 	if r.createBaselineErr != nil {
 		return ctldapi.RootFSDiffDescriptor{}, nil, r.createBaselineErr
 	}
 	return r.createBaselineDesc, readSeekNopCloser{Reader: strings.NewReader(r.createBaselineContent)}, nil
 }
 
-func (r *fakeRuntime) ApplyDiff(_ context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, content io.Reader, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, error) {
+func (r *fakeRuntime) ApplyDiff(_ context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, content io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, error) {
 	r.applyCalled = true
 	r.applyInfo = info
 	r.applyInputDesc = desc
 	r.applyInputDescs = append(r.applyInputDescs, desc)
 	r.applyExcludedPaths = append([]string(nil), excludedPaths...)
 	r.applyExcludedPathCalls = append(r.applyExcludedPathCalls, append([]string(nil), excludedPaths...))
+	r.applyPortalPaths = append([]ctldapi.RootFSPortalPath(nil), portalPaths...)
+	r.applyPortalPathCalls = append(r.applyPortalPathCalls, append([]ctldapi.RootFSPortalPath(nil), portalPaths...))
 	payload, err := io.ReadAll(content)
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, err
@@ -432,11 +476,12 @@ func (r *fakeRuntime) ApplyDiff(_ context.Context, info ctldapi.RootFSInfo, desc
 	return r.applyDesc, nil
 }
 
-func (r *fakeRuntime) CaptureBaseline(_ context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string) error {
+func (r *fakeRuntime) CaptureBaseline(_ context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) error {
 	r.captureBaselineCalled = true
 	r.captureInfo = info
 	r.captureBaselineLayerID = baselineLayerID
 	r.captureBaselineExcludedPaths = append([]string(nil), excludedPaths...)
+	r.captureBaselinePortalPaths = append([]ctldapi.RootFSPortalPath(nil), portalPaths...)
 	return r.captureBaselineErr
 }
 
@@ -473,4 +518,12 @@ type readSeekNopCloser struct {
 
 func (readSeekNopCloser) Close() error {
 	return nil
+}
+
+type fakePortalResolver struct {
+	paths []ctldapi.RootFSPortalPath
+}
+
+func (r fakePortalResolver) RootFSPortalPaths(string) []ctldapi.RootFSPortalPath {
+	return append([]ctldapi.RootFSPortalPath(nil), r.paths...)
 }

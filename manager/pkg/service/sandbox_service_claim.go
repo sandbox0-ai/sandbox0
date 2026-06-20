@@ -762,23 +762,6 @@ func declaredVolumeMountsByPath(template *v1alpha1.SandboxTemplate) map[string]v
 	return out
 }
 
-func claimVolumeMountsForPodSpec(template *v1alpha1.SandboxTemplate, req *ClaimRequest) ([]v1alpha1.VolumeMountSpec, error) {
-	if req == nil || len(req.Mounts) == 0 {
-		return nil, nil
-	}
-	declared := declaredVolumeMountsByPath(template)
-	out := make([]v1alpha1.VolumeMountSpec, 0, len(req.Mounts))
-	for i := range req.Mounts {
-		mountPoint := filepath.Clean(req.Mounts[i].MountPoint)
-		mount, ok := declared[mountPoint]
-		if !ok {
-			return nil, fmt.Errorf("%w: mounts[%d].mount_point %q is not declared by template", ErrInvalidClaimRequest, i, mountPoint)
-		}
-		out = append(out, mount)
-	}
-	return out, nil
-}
-
 func declaredVolumeMountDirs(template *v1alpha1.SandboxTemplate) []string {
 	declared := declaredVolumeMountsByPath(template)
 	if len(declared) == 0 {
@@ -992,9 +975,6 @@ func isVolumePortalPendingPublicationError(resp *ctldapi.BindVolumePortalRespons
 
 // claimIdlePod claims an idle pod from the pool
 func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.SandboxTemplate, req *ClaimRequest) (*corev1.Pod, error) {
-	if req != nil && len(req.Mounts) > 0 {
-		return nil, nil
-	}
 	var claimedPod *corev1.Pod
 	desiredTemplateHash, err := controller.TemplateSpecHash(template)
 	if err != nil {
@@ -1184,11 +1164,7 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 
 	// Build pod spec before side-effecting resources so claims fail fast when the
 	// sandbox data plane has no ready nodes to receive the pod.
-	volumeMounts, err := claimVolumeMountsForPodSpec(template, req)
-	if err != nil {
-		return nil, err
-	}
-	spec := v1alpha1.BuildPodSpecWithVolumeMounts(template, volumeMounts)
+	spec := v1alpha1.BuildPodSpec(template)
 	if err := s.ensureDataPlaneReadyCapacity(spec); err != nil {
 		return nil, err
 	}

@@ -107,6 +107,7 @@ func TestCleanupDisabledServiceResourcesCleansBuiltinDependencies(t *testing.T) 
 		nil,
 		storage.NewReconciler(resources),
 		registry.NewReconciler(resources),
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("cleanup disabled service resources: %v", err)

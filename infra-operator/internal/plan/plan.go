@@ -60,6 +60,7 @@ type ComponentPlan struct {
 	EnableCredentialVault     bool
 	EnableStorage             bool
 	EnableRegistry            bool
+	EnableObservability       bool
 	EnableInitUser            bool
 	EnableClusterRegistration bool
 }
@@ -75,6 +76,7 @@ type CleanupPlan struct {
 	CleanupBuiltinCredentialVault bool
 	CleanupBuiltinStorage         bool
 	CleanupBuiltinRegistry        bool
+	CleanupBuiltinObservability   bool
 	DeleteNamespaced              []ResourceRef
 	DeleteClusterScoped           []ResourceRef
 }
@@ -229,6 +231,7 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 		EnableCredentialVault:     enableCredentialVault,
 		EnableStorage:             infrav1alpha1.IsStorageEnabled(infra),
 		EnableRegistry:            infrav1alpha1.IsRegistryEnabled(infra),
+		EnableObservability:       common.ObservabilityBackendEnabled(infra),
 		EnableInitUser:            enableDatabase && initUserConsumerEnabled(infra),
 		EnableClusterRegistration: hasDataPlane && infra != nil && infra.Spec.Cluster != nil && infra.Spec.ControlPlane != nil,
 	}
@@ -693,6 +696,7 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 	cleanup.CleanupBuiltinCredentialVault = !builtinCredentialVaultActive(infra)
 	cleanup.CleanupBuiltinStorage = !builtinStorageActive(infra)
 	cleanup.CleanupBuiltinRegistry = !builtinRegistryActive(infra)
+	cleanup.CleanupBuiltinObservability = !builtinObservabilityActive(infra)
 
 	if !compiled.Components.EnableGlobalGateway {
 		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
@@ -817,6 +821,29 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 			namespacedRef("Ingress", infra.Namespace, fmt.Sprintf("%s-registry", infra.Name)),
 		)
 	}
+	if !compiled.Components.EnableObservability || !common.ManagedObservabilityCollectorEnabled(infra) {
+		collectorName := common.ManagedObservabilityCollectorName(infra.Name)
+		agentName := fmt.Sprintf("%s-otel-agent", infra.Name)
+		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
+			namespacedRef("Deployment", infra.Namespace, collectorName),
+			namespacedRef("DaemonSet", infra.Namespace, agentName),
+			namespacedRef("Service", infra.Namespace, collectorName),
+			namespacedRef("ServiceAccount", infra.Namespace, collectorName),
+			namespacedRef("Secret", infra.Namespace, fmt.Sprintf("%s-config", collectorName)),
+			namespacedRef("Secret", infra.Namespace, fmt.Sprintf("%s-config", agentName)),
+		)
+		cleanup.DeleteClusterScoped = append(cleanup.DeleteClusterScoped,
+			clusterScopedRef("ClusterRole", collectorName),
+			clusterScopedRef("ClusterRoleBinding", collectorName),
+		)
+	}
+	if cleanup.CleanupBuiltinObservability {
+		clickHouseName := common.BuiltinObservabilityClickHouseName(infra.Name)
+		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
+			namespacedRef("StatefulSet", infra.Namespace, clickHouseName),
+			namespacedRef("Service", infra.Namespace, clickHouseName),
+		)
+	}
 
 	return cleanup
 }
@@ -853,6 +880,9 @@ func compileStatusPlan(compiled *InfraPlan) StatusPlan {
 	}
 	if components.EnableRegistry {
 		expected = append(expected, infrav1alpha1.ConditionTypeRegistryReady)
+	}
+	if components.EnableObservability {
+		expected = append(expected, infrav1alpha1.ConditionTypeObservabilityReady)
 	}
 	if components.EnableGlobalGateway {
 		expected = append(expected, infrav1alpha1.ConditionTypeGlobalGatewayReady)
@@ -937,6 +967,9 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 	}
 	if compiled.Components.EnableRegistry {
 		appendSuccessStep("registry", infrav1alpha1.ConditionTypeRegistryReady, "RegistryReady", "Registry is ready", "RegistryFailed")
+	}
+	if compiled.Components.EnableObservability {
+		appendSuccessStep("observability", infrav1alpha1.ConditionTypeObservabilityReady, "ObservabilityReady", "Observability backend integration is ready", "ObservabilityFailed")
 	}
 	if compiled.Components.EnableGlobalGateway && compiled.Enterprise.GlobalGateway {
 		appendCheckStep("global-gateway-enterprise-license", infrav1alpha1.ConditionTypeGlobalGatewayReady, "EnterpriseLicenseMissing")
@@ -1054,6 +1087,12 @@ func compileRetainedResourceStatusPlan(compiled *InfraPlan) []infrav1alpha1.Reta
 	if infra.Spec.Registry != nil && !builtinRegistryActive(infra) && registryStatefulResourcePolicy(infra) == infrav1alpha1.BuiltinStatefulResourcePolicyRetain {
 		retained = append(retained,
 			common.NewRetainedResourceStatus("registry", "PersistentVolumeClaim", common.BuiltinRegistryPVCName(infra.Name)),
+		)
+	}
+	if infra.Spec.Observability != nil && !builtinObservabilityActive(infra) && observabilityStatefulResourcePolicy(infra) == infrav1alpha1.BuiltinStatefulResourcePolicyRetain {
+		retained = append(retained,
+			common.NewRetainedResourceStatus("observability", "Secret", common.BuiltinObservabilityClickHouseSecretName(infra.Name)),
+			common.NewRetainedResourceStatus("observability", "PersistentVolumeClaim", common.BuiltinObservabilityClickHousePVCName(infra.Name)),
 		)
 	}
 
@@ -1443,6 +1482,17 @@ func builtinRegistryActive(infra *infrav1alpha1.Sandbox0Infra) bool {
 	return infra.Spec.Registry.Builtin.Enabled
 }
 
+func builtinObservabilityActive(infra *infrav1alpha1.Sandbox0Infra) bool {
+	if common.ResolveObservabilityBackendType(infra) != infrav1alpha1.ObservabilityBackendTypeBuiltin {
+		return false
+	}
+	backend := infra.Spec.Observability.Backend
+	if backend.Builtin == nil || backend.Builtin.Provider == "" {
+		return true
+	}
+	return backend.Builtin.Provider == infrav1alpha1.ObservabilityBuiltinProviderClickHouse
+}
+
 func databaseStatefulResourcePolicy(infra *infrav1alpha1.Sandbox0Infra) infrav1alpha1.BuiltinStatefulResourcePolicy {
 	if infra == nil || infra.Spec.Database == nil || infra.Spec.Database.Builtin == nil || infra.Spec.Database.Builtin.StatefulResourcePolicy == "" {
 		return infrav1alpha1.BuiltinStatefulResourcePolicyRetain
@@ -1469,4 +1519,13 @@ func registryStatefulResourcePolicy(infra *infrav1alpha1.Sandbox0Infra) infrav1a
 		return infrav1alpha1.BuiltinStatefulResourcePolicyRetain
 	}
 	return infra.Spec.Registry.Builtin.StatefulResourcePolicy
+}
+
+func observabilityStatefulResourcePolicy(infra *infrav1alpha1.Sandbox0Infra) infrav1alpha1.BuiltinStatefulResourcePolicy {
+	if infra == nil || infra.Spec.Observability == nil || infra.Spec.Observability.Backend == nil ||
+		infra.Spec.Observability.Backend.Builtin == nil || infra.Spec.Observability.Backend.Builtin.ClickHouse == nil ||
+		infra.Spec.Observability.Backend.Builtin.ClickHouse.StatefulResourcePolicy == "" {
+		return infrav1alpha1.BuiltinStatefulResourcePolicyRetain
+	}
+	return infra.Spec.Observability.Backend.Builtin.ClickHouse.StatefulResourcePolicy
 }

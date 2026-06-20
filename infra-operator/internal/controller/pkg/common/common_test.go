@@ -113,6 +113,79 @@ func TestAppendObservabilityEnvVarsKeepsExplicitEnvVars(t *testing.T) {
 	}
 }
 
+func TestAppendObservabilityEnvVarsUsesBuiltinBackendTraceDefaults(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Observability: &infrav1alpha1.ObservabilityConfig{
+				Backend: &infrav1alpha1.ObservabilityBackendConfig{
+					Type: infrav1alpha1.ObservabilityBackendTypeBuiltin,
+				},
+			},
+		},
+	}
+
+	env := AppendObservabilityEnvVars(nil, infra, ObservabilityEnvConfig{ServiceName: "manager"})
+
+	if got := envByName(env, envOTELTracesExporter).Value; got != "otlp" {
+		t.Fatalf("OTEL_TRACES_EXPORTER = %q, want otlp", got)
+	}
+	if got := envByName(env, envOTELExporterOTLPTraceEndpoint).Value; got != "http://demo-otel-collector.sandbox0-system.svc:4317" {
+		t.Fatalf("trace endpoint = %q", got)
+	}
+	if got := envByName(env, envOTELExporterOTLPTraceInsecure).Value; got != "true" {
+		t.Fatalf("trace insecure = %q", got)
+	}
+}
+
+func TestAppendObservabilityEnvVarsUsesExternalExistingCollectorSecretHeaders(t *testing.T) {
+	insecure := false
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Observability: &infrav1alpha1.ObservabilityConfig{
+				Backend: &infrav1alpha1.ObservabilityBackendConfig{
+					Type: infrav1alpha1.ObservabilityBackendTypeExternal,
+					External: &infrav1alpha1.ExternalObservabilityBackendConfig{
+						Mode: infrav1alpha1.ObservabilityExternalModeExistingCollector,
+						OTLP: &infrav1alpha1.ObservabilityOTLPConfig{
+							Endpoint: "otel.example.com:4317",
+							HeadersSecret: &infrav1alpha1.ObservabilityHeadersSecretRef{
+								Name: "otel-headers",
+								Key:  "trace-headers",
+							},
+							Insecure: &insecure,
+							Timeout:  metav1.Duration{Duration: time.Second},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	env := AppendObservabilityEnvVars(nil, infra, ObservabilityEnvConfig{ServiceName: "regional-gateway"})
+
+	if got := envByName(env, envOTELExporterOTLPTraceEndpoint).Value; got != "otel.example.com:4317" {
+		t.Fatalf("trace endpoint = %q", got)
+	}
+	headers := envByName(env, envOTELExporterOTLPTraceHeaders)
+	if headers.ValueFrom == nil || headers.ValueFrom.SecretKeyRef == nil {
+		t.Fatalf("expected trace headers secret ref, got %#v", headers)
+	}
+	if got := headers.ValueFrom.SecretKeyRef.Name; got != "otel-headers" {
+		t.Fatalf("headers secret name = %q", got)
+	}
+	if got := headers.ValueFrom.SecretKeyRef.Key; got != "trace-headers" {
+		t.Fatalf("headers secret key = %q", got)
+	}
+	if got := envByName(env, envOTELExporterOTLPTraceInsecure).Value; got != "false" {
+		t.Fatalf("trace insecure = %q", got)
+	}
+	if got := envByName(env, envOTELExporterOTLPTraceTimeout).Value; got != "1s" {
+		t.Fatalf("trace timeout = %q", got)
+	}
+}
+
 func TestResolveSandboxNodePlacementFallsBackToNetdPlacement(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		Spec: infrav1alpha1.Sandbox0InfraSpec{

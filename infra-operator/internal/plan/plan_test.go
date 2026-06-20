@@ -1083,6 +1083,34 @@ func TestCompileSkipsInitUserSecretStepForOIDCOnlyBootstrap(t *testing.T) {
 	}
 }
 
+func TestCompileTracksObservabilityBackendIntegration(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Observability: &infrav1alpha1.ObservabilityConfig{
+				Backend: &infrav1alpha1.ObservabilityBackendConfig{
+					Type: infrav1alpha1.ObservabilityBackendTypeBuiltin,
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+
+	if !compiled.Components.EnableObservability {
+		t.Fatal("expected observability backend integration to be enabled")
+	}
+	if compiled.Cleanup.CleanupBuiltinObservability {
+		t.Fatal("did not expect builtin observability cleanup while builtin backend is active")
+	}
+	if !containsString(workflowStepNames(compiled.Workflow.Steps), "observability") {
+		t.Fatalf("expected observability workflow step, got %#v", workflowStepNames(compiled.Workflow.Steps))
+	}
+	if !containsString(compiled.Status.ExpectedConditions, infrav1alpha1.ConditionTypeObservabilityReady) {
+		t.Fatalf("expected observability condition, got %#v", compiled.Status.ExpectedConditions)
+	}
+}
+
 func TestCompileTracksCleanupPlan(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{

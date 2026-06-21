@@ -32,7 +32,7 @@ Managed Agents can execute in two ways:
 | Model | What users should expect | Harnesses |
 |-------|--------------------------|---------|
 | Agent in sandbox | The agent runtime process lives inside the per-session sandbox with the workspace and harness state. | `claude`, `codex` |
-| Sandbox as tool | A resident runtime service owns the agent loop and uses Sandbox0 as an isolated tool target. | `openai-agents` |
+| Sandbox as tool | A resident runtime service owns the agent loop and uses Sandbox0 as an isolated tool target. | `sandpi` |
 
 Both models use the same Managed Agents API and durable event stream. Choose the model by selecting an agent harness through the LLM vault.
 
@@ -77,7 +77,7 @@ The public object model follows Claude Managed Agents where practical. The backe
 - The SDK `apiKey` is a Sandbox0 API key.
 - The LLM token is stored in a vault and projected by Sandbox0 credential policy.
 - The agent harness is selected through LLM vault metadata.
-- `claude` and `codex` run agent in sandbox; `openai-agents` uses sandbox as tool.
+- `claude` and `codex` run agent in sandbox; `sandpi` uses sandbox as tool.
 - The sandbox workspace is persistent across turns through a Sandbox0 volume.
 - Network policy and credential injection are enforced by Sandbox0.
 

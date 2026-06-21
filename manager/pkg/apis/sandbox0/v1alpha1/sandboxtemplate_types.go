@@ -227,7 +227,7 @@ type Toleration struct {
 	Effect   string `json:"effect,omitempty"`
 }
 
-const DefaultSandboxEphemeralStorage = "512Mi"
+const DefaultSandboxEphemeralStorage = "8Gi"
 
 // ResourceQuota defines resource quota (per template)
 type ResourceQuota struct {

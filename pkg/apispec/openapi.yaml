@@ -5564,7 +5564,7 @@ components:
           type: string
         ephemeralStorage:
           type: string
-          description: Ephemeral storage limit for the sandbox writable layer and container logs. Defaults to 512Mi when omitted.
+          description: Ephemeral storage limit for the sandbox writable layer and container logs. Defaults to 8Gi when omitted.
     SecurityContext:
       type: object
       properties:

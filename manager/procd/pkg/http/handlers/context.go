@@ -84,6 +84,8 @@ type ContextResponse struct {
 	Paused    bool                `json:"paused"`
 	CreatedAt string              `json:"created_at"`
 	OutputRaw string              `json:"output_raw,omitempty"`
+	Stdout    *string             `json:"stdout,omitempty"`
+	Stderr    *string             `json:"stderr,omitempty"`
 	ExitCode  *int                `json:"exit_code,omitempty"`
 	State     string              `json:"state,omitempty"`
 }
@@ -113,8 +115,36 @@ func newContextResponse(ctx *ctxpkg.Context, outputRaw string) ContextResponse {
 		CreatedAt: ctx.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
 		OutputRaw: outputRaw,
 	}
+	applySplitOutputToContextResponse(&response, ctx)
 	applyTerminalStatusToContextResponse(&response, terminalStatusForContext(ctx))
 	return response
+}
+
+func splitOutputForContext(ctx *ctxpkg.Context) (string, string, bool) {
+	if ctx == nil || ctx.Type != process.ProcessTypeCMD || ctx.MainProcess == nil {
+		return "", "", false
+	}
+	outputProvider, ok := ctx.MainProcess.(process.OutputProvider)
+	if !ok {
+		return "", "", false
+	}
+	stdout, stderr := outputProvider.GetOutput()
+	if stdout == "" && stderr == "" {
+		return "", "", false
+	}
+	return stdout, stderr, true
+}
+
+func applySplitOutputToContextResponse(response *ContextResponse, ctx *ctxpkg.Context) {
+	if response == nil {
+		return
+	}
+	stdout, stderr, ok := splitOutputForContext(ctx)
+	if !ok {
+		return
+	}
+	response.Stdout = &stdout
+	response.Stderr = &stderr
 }
 
 func applyTerminalStatusToContextResponse(response *ContextResponse, status *contextTerminalStatus) {
@@ -157,9 +187,11 @@ type ContextInputRequest struct {
 
 // ContextExecResponse is the response body for synchronous execution.
 type ContextExecResponse struct {
-	OutputRaw string `json:"output_raw"`
-	ExitCode  *int   `json:"exit_code,omitempty"`
-	State     string `json:"state,omitempty"`
+	OutputRaw string  `json:"output_raw"`
+	Stdout    *string `json:"stdout,omitempty"`
+	Stderr    *string `json:"stderr,omitempty"`
+	ExitCode  *int    `json:"exit_code,omitempty"`
+	State     string  `json:"state,omitempty"`
 }
 
 // ResizeContextRequest is the request body for resizing a PTY.
@@ -499,6 +531,7 @@ func (h *ContextHandler) Exec(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := ContextExecResponse{OutputRaw: output}
+	applySplitOutputToExecResponse(&response, ctx)
 	applyTerminalStatusToExecResponse(&response, terminalStatusForContext(ctx))
 	writeJSON(w, http.StatusOK, response)
 }
@@ -559,6 +592,18 @@ func applyTerminalStatusToExecResponse(response *ContextExecResponse, status *co
 	exitCode := status.ExitCode
 	response.ExitCode = &exitCode
 	response.State = status.State
+}
+
+func applySplitOutputToExecResponse(response *ContextExecResponse, ctx *ctxpkg.Context) {
+	if response == nil {
+		return
+	}
+	stdout, stderr, ok := splitOutputForContext(ctx)
+	if !ok {
+		return
+	}
+	response.Stdout = &stdout
+	response.Stderr = &stderr
 }
 
 func (h *ContextHandler) execInputSync(ctx *ctxpkg.Context, input string, requestCtx context.Context) (string, *execError, bool) {

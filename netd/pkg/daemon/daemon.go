@@ -419,18 +419,24 @@ func (d *Daemon) syncRedirect(
 	if netdWatcher == nil || redirectManager == nil || patcher == nil {
 		return fmt.Errorf("missing watcher or redirect manager or patcher or policy store")
 	}
-	sandboxes := netdWatcher.ListSandboxesByNode(d.cfg.NodeName)
+	// Redirect rules only need local source pods, while platform peer deny must
+	// know every active sandbox so cross-node private traffic is still blocked.
+	localSandboxes := netdWatcher.ListSandboxesByNode(d.cfg.NodeName)
+	allSandboxes := localSandboxes
+	if d.cfg.NodeName != "" {
+		allSandboxes = netdWatcher.ListSandboxesByNode("")
+	}
 	services := netdWatcher.ListServices()
 	endpoints := netdWatcher.ListEndpoints()
-	sandboxIPs := make([]string, 0, len(sandboxes))
-	for _, sandbox := range sandboxes {
+	sandboxIPs := make([]string, 0, len(localSandboxes))
+	for _, sandbox := range localSandboxes {
 		if sandbox.PodIP == "" {
 			continue
 		}
 		sandboxIPs = append(sandboxIPs, sandbox.PodIP)
 	}
 	if policyStore != nil {
-		result := policyStore.ReconcileSandboxes(sandboxes)
+		result := policyStore.ReconcileSandboxes(localSandboxes)
 		for _, podIP := range result.RemovedIPs {
 			if proxyServer != nil {
 				proxyServer.ForgetSandboxDNS(podIP)
@@ -445,7 +451,7 @@ func (d *Daemon) syncRedirect(
 		}
 	}
 	if platformState != nil {
-		platformState.Reconcile(sandboxes, services, endpoints)
+		platformState.Reconcile(allSandboxes, services, endpoints)
 	}
 
 	dnsCIDRs := clusterDNSCIDRs(d.cfg.ClusterDNSCIDR, services, endpoints)
@@ -459,7 +465,8 @@ func (d *Daemon) syncRedirect(
 
 	d.logger.Info(
 		"Syncing redirect rules",
-		zap.Int("sandboxes_total", len(sandboxes)),
+		zap.Int("sandboxes_local", len(localSandboxes)),
+		zap.Int("sandboxes_total", len(allSandboxes)),
 		zap.Int("sandbox_ips", len(sandboxIPs)),
 		zap.Strings("sandbox_ips", sandboxIPs),
 		zap.Strings("bypass_cidrs", bypassCIDRs),
@@ -468,10 +475,10 @@ func (d *Daemon) syncRedirect(
 		return err
 	}
 	patchedCount := 0
-	if err := patcher.SyncAppliedHashes(ctx, sandboxes); err != nil {
+	if err := patcher.SyncAppliedHashes(ctx, localSandboxes); err != nil {
 		d.logger.Warn("Failed to sync applied hashes", zap.Error(err))
 	} else {
-		for _, sandbox := range sandboxes {
+		for _, sandbox := range localSandboxes {
 			if sandbox.NetworkPolicyHash != "" && sandbox.NetworkPolicyHash == sandbox.NetworkAppliedHash {
 				patchedCount++
 			}
@@ -479,7 +486,8 @@ func (d *Daemon) syncRedirect(
 	}
 	d.logger.Info("Redirect rules synced",
 		zap.Int("sandboxes_patched", patchedCount),
-		zap.Int("sandboxes_total", len(sandboxes)),
+		zap.Int("sandboxes_local", len(localSandboxes)),
+		zap.Int("sandboxes_total", len(allSandboxes)),
 	)
 	return nil
 }

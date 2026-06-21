@@ -66,6 +66,18 @@ func TestListSandboxesByNodeUsesInformerCacheAsAuthoritativeSource(t *testing.T)
 	if got[0].Name != active.Name || got[0].PodIP != active.Status.PodIP {
 		t.Fatalf("unexpected sandbox: %#v", got[0])
 	}
+
+	all := w.ListSandboxesByNode("")
+	if len(all) != 2 {
+		t.Fatalf("all-node sandboxes = %#v, want active sandboxes from both nodes", all)
+	}
+	byName := map[string]*SandboxInfo{}
+	for _, info := range all {
+		byName[info.Name] = info
+	}
+	if byName[active.Name] == nil || byName[otherNode.Name] == nil {
+		t.Fatalf("all-node sandboxes = %#v, want %s and %s", all, active.Name, otherNode.Name)
+	}
 }
 
 func testSandboxPod(name, uid, resourceVersion, podIP, nodeName string) *corev1.Pod {

@@ -254,6 +254,10 @@
         {
           "slug": "github-ci",
           "title": "GitHub CI"
+        },
+        {
+          "slug": "vercel-eve",
+          "title": "Vercel Eve"
         }
       ]
     },

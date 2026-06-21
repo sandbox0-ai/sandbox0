@@ -1,0 +1,203 @@
+# Vercel Eve
+
+Vercel Eve agents can use Sandbox0 as their sandbox backend through the `@sandbox0/eve` adapter for the Sandbox0 JavaScript SDK.
+
+Use this integration when you want Eve's agent runtime and tool model, but want sandbox execution, prewarm snapshots, pause/resume, and network controls to run on Sandbox0.
+
+The adapter implements Eve's `SandboxBackend` lifecycle:
+
+- Eve `prewarm()` claims a Sandbox0 sandbox, runs `bootstrap`, writes seed files, pauses the sandbox, and captures a Sandbox0 rootfs snapshot
+- Eve `create()` claims a fresh Sandbox0 sandbox from the prewarmed rootfs snapshot
+- Eve durable session metadata stores the Sandbox0 `sandboxId`, so later turns can resume the same sandbox
+- Eve file, command, and network policy calls are translated to Sandbox0 SDK calls
+
+<Callout variant="info">
+This page covers the Eve sandbox backend integration. It does not replace Eve's agent, prompt, channel, or tool runtime.
+</Callout>
+
+## Requirements
+
+- an Eve application
+- Node.js 24 or newer for Eve 0.11.x
+- `sandbox0` and `@sandbox0/eve` in the app dependencies
+- a Sandbox0 API key
+- a Sandbox0 template with Bash and `/workspace`; the hosted `default` template already satisfies this
+
+The adapter does not require Sandbox0 Volumes for the default Eve lifecycle. Eve template state is captured with Sandbox0 rootfs snapshots, and durable session state is preserved by reusing or resuming the session sandbox.
+
+## Install
+
+```bash
+npm install sandbox0 @sandbox0/eve
+```
+
+If you deploy on Vercel or another hosted runtime, add the Sandbox0 credentials to that environment:
+
+```bash
+SANDBOX0_TOKEN=s0_...
+SANDBOX0_BASE_URL=https://api.sandbox0.ai
+SANDBOX0_TEMPLATE=default
+```
+
+`SANDBOX0_BASE_URL` defaults to Sandbox0 Cloud. Set it explicitly for a private deployment or when you want to pin the Eve app to a regional gateway.
+
+## Configure Eve
+
+Create or update `agent/sandbox/sandbox.ts`:
+
+```ts
+import { defineSandbox } from "eve/sandbox";
+import { sandbox0 } from "@sandbox0/eve";
+
+export default defineSandbox({
+    backend: sandbox0({
+        template: process.env.SANDBOX0_TEMPLATE ?? "default",
+        networkPolicy: "allow-all",
+    }),
+    revalidationKey: () => "sandbox0-eve-v1",
+    async bootstrap({ use }) {
+        const sandbox = await use();
+        await sandbox.run({
+            command: "python --version",
+        });
+    },
+    async onSession({ use }) {
+        await use({ networkPolicy: "allow-all" });
+    },
+});
+```
+
+Eve will pass files under `agent/sandbox/workspace/` to the backend as seed files. The Sandbox0 adapter writes those files under `/workspace`, matching Eve's workspace contract.
+
+```text
+agent/sandbox/
+    sandbox.ts
+    workspace/
+        README.md
+        scripts/
+            check.sh
+```
+
+The example above creates `/workspace/README.md` and `/workspace/scripts/check.sh` inside the Sandbox0 sandbox.
+
+## How Prewarm Works
+
+Eve calls `prewarm()` before serving traffic for a sandbox definition that has `bootstrap` or seed files.
+
+The Sandbox0 adapter performs this sequence:
+
+1. Claim a Sandbox0 sandbox from the configured template.
+2. Run Eve `bootstrap` inside that sandbox.
+3. Write Eve seed files into `/workspace`.
+4. Pause the sandbox and wait until Sandbox0 reports it as paused.
+5. Create a Sandbox0 rootfs snapshot.
+6. Store the mapping from Eve `templateKey` to Sandbox0 `snapshotId` under `.eve/sandbox0/`.
+
+At runtime, Eve calls `create()` with the same `templateKey`. The adapter reads the stored mapping and claims a new Sandbox0 sandbox with `snapshotId`.
+
+<Callout variant="warning">
+Rootfs snapshot creation requires a paused Sandbox0 sandbox. The adapter handles the pause and polling step before snapshot creation.
+</Callout>
+
+## Session Persistence
+
+Eve durable sessions keep backend metadata between turns. The Sandbox0 adapter stores the live `sandboxId` in that metadata.
+
+When the same Eve session continues later:
+
+- if the Sandbox0 sandbox is still running, the adapter opens it
+- if it is paused, the adapter resumes it first
+- if it is missing, Eve can rebuild the template and create a fresh session sandbox
+
+This is different from the prewarm sandbox. The prewarm sandbox is only used to build the reusable rootfs snapshot.
+
+## Prewarm Sandbox TTL
+
+By default, the adapter keeps the paused prewarm sandbox with a one hour hard TTL after rootfs snapshot creation. This gives operators a short inspection window while preventing the prewarm sandbox from living indefinitely.
+
+You can change that behavior:
+
+```ts
+import { defineSandbox } from "eve/sandbox";
+import { sandbox0 } from "@sandbox0/eve";
+
+export default defineSandbox({
+    backend: sandbox0({
+        template: "default",
+        prewarmSandboxHardTtlSec: 3600,
+        deletePrewarmSandbox: false,
+    }),
+});
+```
+
+Set `deletePrewarmSandbox: true` if you want the adapter to delete the prewarm sandbox after the rootfs snapshot is captured.
+
+## Network Policy
+
+The adapter maps Eve's basic sandbox network policies to Sandbox0 network policy:
+
+| Eve policy | Sandbox0 behavior |
+|------------|-------------------|
+| `"allow-all"` | allow all egress |
+| `"deny-all"` | block all egress |
+| domain and subnet allow rules | block by default and allow matching destinations |
+
+Example:
+
+```ts
+export default defineSandbox({
+    backend: sandbox0({
+        template: "default",
+        networkPolicy: {
+            allow: ["github.com", "registry.npmjs.org"],
+        },
+    }),
+});
+```
+
+Eve transform and credential-brokering rules are platform-specific and are not forwarded as Sandbox0 credentials by this adapter. Use Sandbox0 credential sources and egress auth for Sandbox0-native credential injection.
+
+## Run Locally
+
+Use Eve's normal local commands:
+
+```bash
+export SANDBOX0_TOKEN=s0_...
+export SANDBOX0_BASE_URL=https://api.sandbox0.ai
+export SANDBOX0_TEMPLATE=default
+
+npm exec -- eve build
+npm exec -- eve start --host 0.0.0.0 --port 3207
+```
+
+Then call the Eve app through Eve's client or your app's channel endpoint.
+
+For local environments behind an HTTP proxy, make sure the Node process can reach both the Sandbox0 API and your model provider, and that localhost requests are excluded from the proxy.
+
+```bash
+export HTTPS_PROXY=http://127.0.0.1:7890
+export HTTP_PROXY=http://127.0.0.1:7890
+export NO_PROXY=localhost,127.0.0.1,::1
+```
+
+## Production Guidance
+
+- Use a dedicated Sandbox0 API key for the Eve deployment.
+- Set a hard TTL for live session sandboxes if your application does not manage long-lived sessions.
+- Keep `/workspace` available in custom templates; Eve tools and seed files assume that path.
+- Use Sandbox0 rootfs snapshots for Eve template state. Use Sandbox0 Volumes only for app-specific shared or externally managed durable data.
+- Delete stale `.eve/sandbox0/` registry files when you intentionally remove the corresponding Sandbox0 rootfs snapshots.
+
+---
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Snapshot And Restore" href="/docs/sandbox/snapshot-restore" cta="Continue">
+    Learn how Sandbox0 rootfs snapshots initialize reusable sandbox state.
+  </Card>
+
+  <Card title="Pause And Resume" href="/docs/sandbox/pause-resume" cta="Continue">
+    Understand the sandbox lifecycle used by the Eve adapter.
+  </Card>
+</CardGroup>

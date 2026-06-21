@@ -5,8 +5,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1726,7 +1728,12 @@ func assertSandboxNetworkIsolation(env *framework.ScenarioEnv, session *e2eutils
 
 	clusterGatewayPort, err := framework.GetServicePort(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, env.Infra.Name+"-cluster-gateway")
 	Expect(err).NotTo(HaveOccurred())
-	clusterGatewayBaseURL := fmt.Sprintf("http://%s-cluster-gateway.%s.svc.cluster.local:%d", env.Infra.Name, env.Infra.Namespace, clusterGatewayPort)
+	clusterGatewayIP, err := framework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, "service", env.Infra.Name+"-cluster-gateway", "{.spec.clusterIP}")
+	Expect(err).NotTo(HaveOccurred())
+	clusterGatewayIP = strings.TrimSpace(clusterGatewayIP)
+	Expect(clusterGatewayIP).NotTo(BeEmpty())
+	Expect(strings.EqualFold(clusterGatewayIP, "None")).To(BeFalse())
+	clusterGatewayBaseURL := "http://" + net.JoinHostPort(clusterGatewayIP, strconv.Itoa(clusterGatewayPort))
 
 	Eventually(func() error {
 		body, execErr := execInSandboxPod(env, templateANamespace, sandboxA.PodName, fmt.Sprintf("curl -fsS --max-time 5 %s/healthz", clusterGatewayBaseURL))

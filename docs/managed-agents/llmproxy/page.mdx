@@ -8,7 +8,7 @@ The hosted Sandbox0 LLMProxy is intentionally simple: no Sandbox0 account, no LL
 
 Use LLMProxy when:
 
-- The selected harness is `openai-agents`, `codex`, or another OpenAI-compatible runtime.
+- The selected harness is `codex`, `sandpi`, or another OpenAI-compatible runtime.
 - The model provider exposes a Claude Code-compatible or Anthropic Messages-compatible endpoint.
 - You only need protocol translation and do not need request logs, caching, budgets, rate limits, or managed BYOK controls from a full AI gateway.
 - You want the fastest path: construct the URL, store it as the LLM base URL, and run the agent.
@@ -33,14 +33,14 @@ https://llmproxy.sandbox0.ai/claude2codex/https://api.z.ai/api/anthropic
 
 Use that full URL as `sandbox0.managed_agents.llm_base_url` on the LLM vault.
 
-## OpenAI Agents Example
+## Codex Example
 
 ```typescript
 const llmVault = await client.beta.vaults.create({
-    display_name: "OpenAI Agents via LLMProxy",
+    display_name: "Codex via LLMProxy",
     metadata: {
         "sandbox0.managed_agents.role": "llm",
-        "sandbox0.managed_agents.engine": "openai-agents",
+        "sandbox0.managed_agents.engine": "codex",
         "sandbox0.managed_agents.llm_base_url": "https://llmproxy.sandbox0.ai/claude2codex/https://api.z.ai/api/anthropic",
     },
 });

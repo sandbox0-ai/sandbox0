@@ -16,13 +16,13 @@ Sandbox0 supports two execution models.
 | Model | How it works | Harnesses |
 |-------|--------------|---------|
 | Agent in sandbox | The agent runtime process runs inside the per-session Sandbox0 sandbox. The sandbox contains the agent process, workspace, tools, and harness state. | `claude`, `codex` |
-| Sandbox as tool | A resident runtime service runs the agent loop outside the sandbox. The sandbox is claimed lazily and exposed to the agent as tools such as `bash`. | `openai-agents` |
+| Sandbox as tool | A resident runtime service runs the agent loop outside the sandbox. The sandbox is claimed lazily and exposed to the agent as tools such as `bash`. | `sandpi` |
 
 Use agent in sandbox when you want the agent process itself to live with the workspace. This is the most direct fit for coding agents that expect local files, shell commands, home-directory state, and long-lived process state inside the sandbox.
 
 Use sandbox as tool when you want to embed an agent into a product workflow or control plane. The agent harness stays in a managed runtime service, while Sandbox0 provides isolated tool execution only when the agent needs to inspect files or run commands.
 
-Vault `environment_variable` credentials are applied to Sandbox0-backed sandbox processes. With `claude` and `codex`, the agent process runs in that sandbox and inherits those variables as placeholders. External sandbox-as-tool harnesses such as `openai-agents` reject `environment_variable` vault credentials today because the resident runtime service cannot receive them as SDK client or harness configuration secrets.
+Vault `environment_variable` credentials are applied to Sandbox0-backed sandbox processes. With `claude` and `codex`, the agent process runs in that sandbox and inherits those variables as placeholders. Resident sandbox-as-tool harnesses such as `sandpi` reject `environment_variable` vault credentials today because the resident runtime service cannot receive them as SDK client or harness configuration secrets.
 
 ## Supported Harnesses
 
@@ -30,7 +30,7 @@ Vault `environment_variable` credentials are applied to Sandbox0-backed sandbox 
 |--------|-----------------|-----------------|-----------------|----------|
 | `claude` | Agent in sandbox | Claude Agent SDK wrapper | Anthropic Messages-compatible | Claude Code style coding agents and Anthropic-compatible providers |
 | `codex` | Agent in sandbox | Codex app-server wrapper | OpenAI-compatible | Codex app-server sessions that should keep Codex state inside the workspace |
-| `openai-agents` | Sandbox as tool | Resident OpenAI Agents Python runtime | OpenAI Responses-compatible | Product copilots and agent workflows built on the OpenAI Agents SDK |
+| `sandpi` | Sandbox as tool | Resident SandPi runtime | OpenAI-compatible | Product copilots and agent workflows that should keep the agent loop outside the hands sandbox |
 
 ## Retry Behavior
 
@@ -40,9 +40,9 @@ Harnesses with observable automatic retry attempts report them through the same 
 |--------|-------------------------------|
 | `claude` | Claude Agent SDK `system` messages with `subtype = "api_retry"` |
 | `codex` | Codex app-server `error` notifications with `willRetry = true` |
-| `openai-agents` | OpenAI Agents SDK runner-managed `ModelRetrySettings` policy decisions |
+| `sandpi` | No automatic retry signal is exposed today |
 
-Sandbox0 disables hidden model client retries where they would obscure retry state. The `openai-agents` runtime disables hidden OpenAI Python client retries and routes model retries through the OpenAI Agents SDK retry policy.
+Sandbox0 disables hidden model client retries where they would obscure retry state.
 
 ## Select A Harness
 
@@ -72,14 +72,14 @@ const codexVault = await client.beta.vaults.create({
 });
 ```
 
-For `openai-agents`:
+For `sandpi`:
 
 ```typescript
-const openAIAgentsVault = await client.beta.vaults.create({
-    display_name: "OpenAI Agents LLM",
+const sandpiVault = await client.beta.vaults.create({
+    display_name: "SandPi LLM",
     metadata: {
         "sandbox0.managed_agents.role": "llm",
-        "sandbox0.managed_agents.engine": "openai-agents",
+        "sandbox0.managed_agents.engine": "sandpi",
         "sandbox0.managed_agents.llm_base_url": "https://api.openai.com/v1",
     },
 });
@@ -88,7 +88,7 @@ const openAIAgentsVault = await client.beta.vaults.create({
 Add the model provider token to the selected LLM vault:
 
 ```typescript
-await client.beta.vaults.credentials.create(openAIAgentsVault.id, {
+await client.beta.vaults.credentials.create(sandpiVault.id, {
     display_name: "Model provider API key",
     auth: {
         type: "static_bearer",
@@ -105,7 +105,7 @@ Attach exactly one LLM vault to the session:
 const session = await client.beta.sessions.create({
     agent: agent.id,
     environment_id: environment.id,
-    vault_ids: [openAIAgentsVault.id],
+    vault_ids: [sandpiVault.id],
 });
 ```
 
@@ -121,7 +121,7 @@ Choose the gateway endpoint that matches the selected harness:
 |--------|------------------------------|
 | `claude` | Anthropic Messages-compatible API |
 | `codex` | OpenAI-compatible API |
-| `openai-agents` | OpenAI Responses-compatible API |
+| `sandpi` | OpenAI-compatible API |
 
 If you only need to bridge a Claude Code-compatible provider into an OpenAI-style harness, LLMProxy is the simplest option. The hosted tool does not require a Sandbox0 account, an LLMProxy login, or gateway-side setup. Use the LLMProxy URL as the LLM vault base URL, keep the upstream provider token in the vault credential, and let the selected runtime call it directly.
 
@@ -139,10 +139,10 @@ In this setup, the LLM vault stores the gateway base URL and the gateway API tok
 const cloudflareAccountId = process.env.CLOUDFLARE_ACCOUNT_ID!;
 
 const cloudflareGatewayVault = await client.beta.vaults.create({
-    display_name: "OpenAI Agents through Cloudflare AI Gateway",
+    display_name: "SandPi through Cloudflare AI Gateway",
     metadata: {
         "sandbox0.managed_agents.role": "llm",
-        "sandbox0.managed_agents.engine": "openai-agents",
+        "sandbox0.managed_agents.engine": "sandpi",
         "sandbox0.managed_agents.llm_base_url": `https://api.cloudflare.com/client/v4/accounts/${cloudflareAccountId}/ai/v1`,
     },
 });
@@ -159,7 +159,7 @@ await client.beta.vaults.credentials.create(cloudflareGatewayVault.id, {
 Configure the agent model to the gateway's model identifier, such as `anthropic/claude-sonnet-4` on Cloudflare AI Gateway or the model alias configured in LiteLLM, Portkey, or another gateway.
 
 <Callout variant="warning">
-Do not point a harness at a gateway endpoint with the wrong API shape. For example, the `openai-agents` harness needs an OpenAI Responses-compatible endpoint even if the gateway routes the request to an Anthropic model upstream.
+Do not point a harness at a gateway endpoint with the wrong API shape. For example, the `codex` and `sandpi` harnesses need an OpenAI-compatible endpoint even if the gateway routes the request to an Anthropic model upstream.
 </Callout>
 
 ## Claude Harness
@@ -174,17 +174,13 @@ The Codex harness launches Codex app-server inside the session sandbox. It expec
 
 For Minimax-compatible endpoints, Sandbox0 detects the provider from the LLM base URL and configures Codex provider settings accordingly.
 
-## OpenAI Agents Harness
+## SandPi Harness
 
-The `openai-agents` harness uses a resident Python runtime service built on the official OpenAI Agents SDK. The runtime receives the session snapshot from the Managed Agents gateway, runs the agent loop in the runtime service, and claims a Sandbox0 sandbox only when the agent needs sandbox tools.
+The `sandpi` harness uses a Sandbox0-native resident runtime. The runtime receives the session snapshot from the Managed Agents gateway, runs the agent loop in the runtime service, and claims a Sandbox0 sandbox only when the agent needs hands tools.
 
 This is the sandbox as tool model. The session still has durable Managed Agents event history, but the agent process is not the same process as the sandbox. The sandbox is an isolated tool target for commands and workspace work.
 
-The harness expects an OpenAI Responses-compatible endpoint. If the target provider does not expose that API shape directly, use an AI gateway that provides an OpenAI Responses-compatible surface and routes to the provider upstream.
-
-<Callout variant="info">
-For self-hosted deployments, configure the OpenAI Agents runtime callback base URL to an internal gateway URL when possible. The runtime sends session events back to the Managed Agents gateway; routing that callback through a public edge can introduce avoidable policy and timeout failures.
-</Callout>
+The harness expects an OpenAI-compatible endpoint. If the target provider does not expose that API shape directly, use an AI gateway that provides an OpenAI-compatible surface and routes to the provider upstream.
 
 ## Harness Configuration
 

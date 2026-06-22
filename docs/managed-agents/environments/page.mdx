@@ -26,6 +26,68 @@ const environment = await client.beta.environments.create({
 });
 ```
 
+## Build Readiness
+
+Sandbox0 builds environment package artifacts asynchronously. This is different from the hosted Claude Managed Agents environment behavior, where environment creation waits for the environment build before returning.
+
+`environments.create()` and `environments.update()` return quickly after the environment record is accepted. If `config.packages` contains packages, Sandbox0 prepares the reusable package artifact in a builder sandbox. Poll `environments.retrieve(environment.id)` before creating sessions that must use the new package set.
+
+Sandbox0 exposes build state in the optional response extension `sandbox0.environment_artifact`. This extension is not stored in user `metadata`.
+
+```typescript
+async function waitForEnvironmentReady(environmentID: string) {
+    const deadline = Date.now() + 10 * 60 * 1000;
+    let lastStatus = "missing";
+
+    while (Date.now() < deadline) {
+        const environment = await client.beta.environments.retrieve(environmentID);
+        const artifact = (environment as any).sandbox0?.environment_artifact;
+        const pending = artifact?.pending;
+
+        if (pending?.status === "failed") {
+            throw new Error(
+                `Environment build failed: ${pending.failure_reason ?? pending.id}`,
+            );
+        }
+        if (pending?.status === "pending" || pending?.status === "building") {
+            lastStatus = pending.status;
+            await new Promise((resolve) => setTimeout(resolve, 5000));
+            continue;
+        }
+
+        const active = artifact?.active;
+        if (active?.status === "ready") {
+            return environment;
+        }
+
+        lastStatus = active?.status ?? pending?.status ?? "missing";
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+    }
+
+    throw new Error(`Timed out waiting for environment artifact: ${lastStatus}`);
+}
+
+await waitForEnvironmentReady(environment.id);
+```
+
+The extension can contain:
+
+| Field | Meaning |
+|-------|---------|
+| `active` | The ready artifact currently used by new sessions for the environment's active config |
+| `pending` | A newer package build that is still `pending`, `building`, or `failed` |
+
+Artifact statuses are:
+
+| Status | Meaning |
+|--------|---------|
+| `pending` | A build record exists and is waiting for the builder |
+| `building` | The builder sandbox is installing packages and preparing the reusable artifact |
+| `ready` | The artifact is ready for new sessions |
+| `failed` | The build failed; check `failure_reason` |
+
+If an environment update has a `pending` build and an older `active` artifact, new sessions continue to use the older active package set until the pending build becomes ready. Existing sessions keep the artifact they were created with. If no ready artifact exists for the requested environment and harness target, session creation fails with a conflict instead of waiting inside the session request.
+
 ## Supported Configuration
 
 Only `type: cloud` environments are accepted today.
@@ -48,7 +110,7 @@ Best practices:
 - Pin versions for packages that affect builds or tests.
 - Keep interactive or task-specific installs in the session workspace, not in the reusable environment.
 - For `limited` networking, set `allow_package_managers: true` when the environment needs to fetch packages during setup.
-- Update the environment when shared dependencies change, then create new sessions from the updated environment.
+- Update the environment when shared dependencies change, wait for the package artifact to become `ready`, then create new sessions from the updated environment.
 
 Sessions created from an environment have the declared packages available at startup. A session keeps using the package set it was created with, so later environment updates do not change already-running sessions.
 
@@ -67,6 +129,7 @@ The final policy is enforced by Sandbox0 network policy and credential projectio
 ## Sandbox0 Notes
 
 - Reserved `sandbox0.managed_agents.*` metadata keys are not accepted on environments.
+- Package builds are asynchronous and exposed through `sandbox0.environment_artifact` on environment responses.
 - Updating an environment does not retroactively rebuild already pinned session artifacts.
 
 ## Next Steps

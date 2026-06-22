@@ -78,6 +78,8 @@ Sandbox0 also accepts `user.tool_result` for agent-toolset results supplied by t
 
 Only `type: cloud` environments are accepted today.
 
+Environment package builds are asynchronous in Sandbox0. This differs from the hosted Claude Managed Agents environment API, where environment creation waits for the environment build. After creating or updating a Sandbox0 Managed Agents environment with packages, poll `environments.retrieve(environment.id)` and check `sandbox0.environment_artifact` before creating sessions that require the new package set. See [Environments](/docs/managed-agents/environments#build-readiness).
+
 Networking options:
 
 | Networking type | Behavior |

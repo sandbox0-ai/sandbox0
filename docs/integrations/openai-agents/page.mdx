@@ -1,0 +1,284 @@
+# OpenAI Agents
+
+Use Sandbox0 as the sandbox backend for OpenAI Agents SDK `SandboxAgent` runs through the Sandbox0 Python SDK adapter.
+
+OpenAI Agents SDK [Sandbox Agents](https://openai.github.io/openai-agents-python/sandbox_agents/) pair an agent with a live sandbox workspace. The Sandbox0 adapter implements the SDK sandbox client interface and stores that workspace on a Sandbox0 Volume mounted at `/workspace`.
+
+<Callout variant="info">
+OpenAI Agents SDK Sandbox Agents are currently a beta feature. The Sandbox0 adapter follows the SDK sandbox client lifecycle and keeps Sandbox0-specific persistence on Sandbox Volumes.
+</Callout>
+
+## Requirements
+
+- Python 3.10 or later for the OpenAI Agents SDK dependency.
+- `sandbox0[openai-agents]` installed from the Sandbox0 Python SDK.
+- A Sandbox0 API key in `SANDBOX0_TOKEN` or passed to `Sandbox0SandboxClient`.
+- Optional `SANDBOX0_BASE_URL` when you are not using the default Sandbox0 Cloud endpoint.
+- A Sandbox0 template that declares a writable `/workspace` mount point. The operator-managed `default` builtin template already declares it.
+
+```bash
+pip install "sandbox0[openai-agents]"
+```
+
+For custom templates, declare the workspace mount before claiming sandboxes:
+
+```yaml
+apiVersion: sandbox0.ai/v1alpha1
+kind: SandboxTemplate
+metadata:
+    name: openai-agents
+spec:
+    volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+          readOnly: false
+```
+
+## Basic Usage
+
+Create a `Sandbox0SandboxClient` and pass it through `SandboxRunConfig`. The SDK runner creates, starts, stops, and deletes the runner-owned sandbox session.
+
+```python
+import asyncio
+
+from agents import Runner
+from agents.run import RunConfig
+from agents.sandbox import SandboxAgent, SandboxRunConfig
+
+from sandbox0_openai_agents import Sandbox0SandboxClient, Sandbox0SandboxClientOptions
+
+
+async def main() -> None:
+    client = Sandbox0SandboxClient()
+
+    agent = SandboxAgent(
+        name="sandbox0-demo",
+        instructions="Use the sandbox for filesystem and command execution tasks.",
+    )
+
+    result = await Runner.run(
+        agent,
+        "Create hello.txt in the workspace, print it, and summarize what you did.",
+        run_config=RunConfig(
+            sandbox=SandboxRunConfig(
+                client=client,
+                options=Sandbox0SandboxClientOptions(template="default"),
+            ),
+            workflow_name="Sandbox0 OpenAI Agents demo",
+        ),
+    )
+
+    print(result.final_output)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+The adapter maps the OpenAI SDK workspace root to `/workspace`. If you pass a custom `Manifest`, its `root` must match `workspace_mount_path`.
+
+## Capability Compatibility
+
+The OpenAI Agents SDK default sandbox capabilities can expose filesystem, shell, skill, memory, and patch-style tools. If your model provider or model adapter does not support every default tool shape, choose a smaller capability set.
+
+For a shell-only demo:
+
+```python
+from agents.sandbox import SandboxAgent
+from agents.sandbox.capabilities import Shell
+
+agent = SandboxAgent(
+    name="shell-only-demo",
+    instructions="Use shell commands for workspace tasks.",
+    capabilities=[Shell()],
+)
+```
+
+Use the full default capabilities when your model/runtime path supports them. Use an explicit capability list when you are routing through a provider that only supports ordinary function tools.
+
+## Sandbox Lifecycle
+
+There are two ownership modes:
+
+| Mode | `SandboxRunConfig` field | Who owns cleanup | Use when |
+|------|--------------------------|------------------|----------|
+| Runner-owned | `client=client` | OpenAI Agents SDK runner | You want a normal run that creates or resumes a sandbox session and cleans it up after the run. |
+| Caller-owned | `session=session` | Your application | You want to inspect the workspace, reuse a live session across multiple runs, or decide exactly when to delete backend resources. |
+
+### Runner-Owned Lifecycle
+
+When you pass `client=Sandbox0SandboxClient(...)`, the OpenAI Agents SDK resolves the sandbox session in this order:
+
+1. Reuse stored sandbox state from `RunState` when the run is resuming.
+2. Resume from explicit `session_state` when provided.
+3. Create a fresh sandbox session through `client.create(...)`.
+
+For a fresh Sandbox0 session, `create()` does the following:
+
+1. Creates a SandboxVolume, unless `volume_id` or `volume_snapshot_id` is provided.
+2. Claims a Sandbox0 sandbox from the selected template.
+3. Mounts the volume at `workspace_mount_path`, which defaults to `/workspace`.
+4. Stores both `sandbox_id` and `volume_id` in `Sandbox0SandboxSessionState`.
+
+At run time, the SDK calls `session.start()`. The Sandbox0 adapter reconnects to the existing sandbox when it is still running, resumes it if possible, or claims a replacement sandbox and mounts the same volume when the previous sandbox is gone.
+
+At the end of a runner-owned run, the SDK cleanup lifecycle is:
+
+1. `stop()` persists the workspace reference and, by default, creates a best-effort SandboxVolume snapshot.
+2. `shutdown()` runs session shutdown hooks.
+3. `client.delete(session)` releases Sandbox0 backend resources.
+
+With default options, `client.delete(session)` deletes the Sandbox0 sandbox runtime, root filesystem, and workspace volume. This makes the default runner-owned lifecycle disposable: files outside mounted volumes are gone with the sandbox, and `/workspace` data is gone with the volume.
+
+Set `delete_volume_on_delete=False` when serialized `RunState` or `session_state` must resume the same workspace volume after cleanup.
+
+### Caller-Owned Lifecycle
+
+When you create and inject a live session, the OpenAI Agents SDK does not delete it for you:
+
+```python
+from pathlib import Path
+
+from agents import Runner
+from agents.run import RunConfig
+from agents.sandbox import SandboxAgent, SandboxRunConfig
+
+from sandbox0_openai_agents import Sandbox0SandboxClient, Sandbox0SandboxClientOptions
+
+
+async def run_with_manual_lifecycle() -> None:
+    client = Sandbox0SandboxClient()
+    agent = SandboxAgent(name="inspector")
+
+    session = await client.create(
+        options=Sandbox0SandboxClientOptions(template="default"),
+    )
+
+    try:
+        async with session:
+            result = await Runner.run(
+                agent,
+                "Write a short report to report.txt.",
+                run_config=RunConfig(
+                    sandbox=SandboxRunConfig(session=session),
+                ),
+            )
+
+            report = await session.read(Path("report.txt"))
+            print(report.read().decode("utf-8"))
+    finally:
+        await client.delete(session)
+```
+
+`async with session` starts the sandbox session and then runs `stop()` and `shutdown()` on exit. It does not call the client-level delete hook. Call `client.delete(session)` when you want to delete Sandbox0 backend resources. By default, that deletes both the sandbox runtime/rootfs and the workspace volume.
+
+## Deletion and Persistence
+
+Sandbox0 has two relevant storage surfaces in this integration:
+
+| Surface | Default path | Deleted by `client.delete(session)` | Persistence behavior |
+|---------|--------------|-------------------------------------|----------------------|
+| Sandbox root filesystem | outside mounted volumes | Yes, when `delete_sandbox_on_delete=True` | Runtime-local state is deleted with the Sandbox0 sandbox unless you separately create rootfs snapshots or forks. |
+| SandboxVolume workspace | `/workspace` | Yes, when `delete_volume_on_delete=True` | Durable workspace data remains available by `volume_id` only when the volume is preserved. |
+
+Default cleanup deletes the OpenAI workspace volume:
+
+```python
+options = Sandbox0SandboxClientOptions(
+    template="default",
+    delete_sandbox_on_delete=True,
+    delete_volume_on_delete=True,
+)
+```
+
+Use `delete_volume_on_delete=False` when the workspace should survive session deletion:
+
+```python
+options = Sandbox0SandboxClientOptions(
+    template="default",
+    delete_volume_on_delete=False,
+)
+```
+
+With this setting, `client.delete(session)` deletes only the Sandbox0 sandbox runtime and root filesystem. The `/workspace` volume remains available by `volume_id` and can be remounted by a replacement sandbox.
+
+You can also keep the volume and delete it later through the Sandbox0 Volume API when your application-level retention policy expires.
+
+## File API Semantics
+
+While an OpenAI sandbox session is live, adapter file operations use the Sandbox0 sandbox file API:
+
+- `session.read(...)` calls the live sandbox `read_file` operation.
+- `session.write(...)` calls the live sandbox `write_file` operation.
+- Shell commands run through a Sandbox0 CMD context with `/workspace` as the working directory.
+
+This keeps reads and writes on the same live filesystem view that the agent sees through shell commands and filesystem tools.
+
+The direct SandboxVolume file API is still the right control-plane surface when you need to operate on a volume without a running sandbox. When a volume is mounted into a sandbox, Sandbox0 routes direct volume file requests to the active mounted owner so the mounted path remains authoritative.
+
+## Resume Behavior
+
+Serialized `Sandbox0SandboxSessionState` contains the sandbox ID, volume ID, latest volume snapshot ID, template, workspace mount path, and cleanup flags.
+
+On resume:
+
+1. If the recorded sandbox still exists, the adapter reconnects to it.
+2. If the recorded sandbox is paused, the adapter resumes it.
+3. If the recorded sandbox is missing or no longer usable, the adapter claims a replacement sandbox and mounts the same volume at `/workspace`.
+
+Because the workspace source of truth is the volume, a replacement sandbox can continue from the same files after the previous sandbox runtime and rootfs were deleted, as long as the workspace volume was not deleted.
+
+Use `volume_snapshot_id` to start a new workspace volume from a Sandbox0 Volume snapshot:
+
+```python
+options = Sandbox0SandboxClientOptions(
+    template="default",
+    volume_snapshot_id="snap_abc123",
+)
+```
+
+Generic OpenAI SDK snapshot specs are not used by this adapter. Use Sandbox0 Volume snapshots through `volume_snapshot_id` or by persisting the adapter session state.
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `template` | `default` | Sandbox0 template used when claiming a sandbox. |
+| `workspace_mount_path` | `/workspace` | Mount point for the OpenAI SDK workspace. Must match `Manifest.root`. |
+| `volume_id` | `None` | Existing SandboxVolume to mount as the workspace. |
+| `volume_snapshot_id` | `None` | SandboxVolume snapshot used to create a new workspace volume. |
+| `sandbox_ttl_sec` | `None` | Optional Sandbox0 sandbox TTL. |
+| `delete_sandbox_on_delete` | `True` | Delete the Sandbox0 sandbox runtime and rootfs when `client.delete(session)` runs. |
+| `delete_volume_on_delete` | `True` | Delete the workspace volume when `client.delete(session)` runs. |
+| `create_volume_snapshot_on_stop` | `True` | Create a best-effort volume snapshot during `stop()`. |
+| `exposed_ports` | `()` | Ports exposed through the OpenAI SDK sandbox session state. |
+| `poll_interval_sec` | `0.1` | Poll interval for sandbox status and command completion. |
+| `start_timeout_sec` | `60.0` | Timeout for sandbox startup and reconnect. |
+| `default_posix_uid` | `0` | Default UID for newly created volume files. |
+| `default_posix_gid` | `0` | Default GID for newly created volume files. |
+
+## Production Guidance
+
+- Keep durable agent workspace data under `/workspace`.
+- Do not rely on files outside mounted volumes to survive sandbox deletion.
+- Set `delete_volume_on_delete=False` when runner-owned sessions must resume the same workspace after cleanup.
+- Keep `delete_sandbox_on_delete=True` unless another owner is responsible for deleting the sandbox runtime.
+- Use `volume_id` or serialized `session_state` when you need deterministic workspace resume.
+- Use `volume_snapshot_id` when you need a new workspace forked from a known snapshot.
+- Use explicit OpenAI sandbox capabilities when your model provider does not support the default SandboxAgent tool surface.
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Volume Mounts" href="/docs/sandbox/volume/mounts" cta="Continue">
+    Define writable workspace mounts and understand mount-time volume binding.
+  </Card>
+
+  <Card title="Files" href="/docs/sandbox/files" cta="Continue">
+    Use the live sandbox file API while a sandbox exists.
+  </Card>
+
+  <Card title="Volume HTTP" href="/docs/sandbox/volume/http" cta="Continue">
+    Operate on SandboxVolumes directly without starting a sandbox.
+  </Card>
+</CardGroup>

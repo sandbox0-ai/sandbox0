@@ -24,7 +24,11 @@ Function services are different from listener-backed services:
 - use the returned `public_url` as the only public entrypoint
 - execute the handler once per matching request
 
-Python is the first supported function runtime. The sandbox image must include `python3` in `PATH`.
+Python is the first supported function runtime. The sandbox image must include `python3` in `PATH` and use Python 3.9 or later for the supported function feature set.
+
+<Callout variant="info">
+Sandbox0 injects `python-runner` into each sandbox pod, but the runner executes `python3` from the sandbox template image. Custom templates and custom images therefore own the Python runtime used by Sandbox Functions. Older Python versions are not supported; async handlers, streaming responses, and WebSocket handlers depend on Python's modern `asyncio` runtime.
+</Callout>
 
 ## Function Config
 

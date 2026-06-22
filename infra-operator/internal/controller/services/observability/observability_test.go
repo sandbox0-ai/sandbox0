@@ -9,7 +9,6 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -88,20 +87,5 @@ func observabilityTestInfra(spec infrav1alpha1.Sandbox0InfraSpec) *infrav1alpha1
 		},
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
 		Spec:       spec,
-	}
-}
-
-func assertPresentObject(t *testing.T, client ctrlclient.Client, obj ctrlclient.Object, namespace, name string) {
-	t.Helper()
-	if err := client.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: name}, obj); err != nil {
-		t.Fatalf("expected %T %s/%s to exist: %v", obj, namespace, name, err)
-	}
-}
-
-func assertMissingObject(t *testing.T, client ctrlclient.Client, obj ctrlclient.Object, namespace, name string) {
-	t.Helper()
-	err := client.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: name}, obj)
-	if err == nil {
-		t.Fatalf("expected %T %s/%s to be deleted", obj, namespace, name)
 	}
 }

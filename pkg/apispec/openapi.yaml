@@ -4910,6 +4910,12 @@ components:
         output_raw:
           type: string
           description: Raw PTY output for CMD contexts with wait=true, may contain terminal control characters
+        stdout:
+          type: string
+          description: Captured stdout for non-PTY CMD contexts when available.
+        stderr:
+          type: string
+          description: Captured stderr for non-PTY CMD contexts when available.
         exit_code:
           type: integer
           format: int32
@@ -4947,6 +4953,12 @@ components:
         output_raw:
           type: string
           description: Raw PTY output, may contain terminal control characters (e.g. \r)
+        stdout:
+          type: string
+          description: Captured stdout for non-PTY CMD contexts when available.
+        stderr:
+          type: string
+          description: Captured stderr for non-PTY CMD contexts when available.
         exit_code:
           type: integer
           format: int32

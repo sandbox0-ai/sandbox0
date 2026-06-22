@@ -648,6 +648,12 @@ type ContextExecResponse struct {
 
 	// State Final process state when the underlying process has exited.
 	State *string `json:"state,omitempty"`
+
+	// Stderr Captured stderr for non-PTY CMD contexts when available.
+	Stderr *string `json:"stderr,omitempty"`
+
+	// Stdout Captured stdout for non-PTY CMD contexts when available.
+	Stdout *string `json:"stdout,omitempty"`
 }
 
 // ContextInputRequest defines model for ContextInputRequest.
@@ -685,8 +691,14 @@ type ContextResponse struct {
 	Running   bool    `json:"running"`
 
 	// State Final process state when the underlying process has exited.
-	State *string     `json:"state,omitempty"`
-	Type  ProcessType `json:"type"`
+	State *string `json:"state,omitempty"`
+
+	// Stderr Captured stderr for non-PTY CMD contexts when available.
+	Stderr *string `json:"stderr,omitempty"`
+
+	// Stdout Captured stdout for non-PTY CMD contexts when available.
+	Stdout *string     `json:"stdout,omitempty"`
+	Type   ProcessType `json:"type"`
 }
 
 // ContextStatsResponse defines model for ContextStatsResponse.

@@ -76,7 +76,6 @@ type CleanupPlan struct {
 	CleanupBuiltinCredentialVault bool
 	CleanupBuiltinStorage         bool
 	CleanupBuiltinRegistry        bool
-	CleanupBuiltinObservability   bool
 	DeleteNamespaced              []ResourceRef
 	DeleteClusterScoped           []ResourceRef
 }
@@ -696,7 +695,6 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 	cleanup.CleanupBuiltinCredentialVault = !builtinCredentialVaultActive(infra)
 	cleanup.CleanupBuiltinStorage = !builtinStorageActive(infra)
 	cleanup.CleanupBuiltinRegistry = !builtinRegistryActive(infra)
-	cleanup.CleanupBuiltinObservability = !builtinObservabilityActive(infra)
 
 	if !compiled.Components.EnableGlobalGateway {
 		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
@@ -837,14 +835,6 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 			clusterScopedRef("ClusterRoleBinding", collectorName),
 		)
 	}
-	if cleanup.CleanupBuiltinObservability {
-		clickHouseName := common.BuiltinObservabilityClickHouseName(infra.Name)
-		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
-			namespacedRef("StatefulSet", infra.Namespace, clickHouseName),
-			namespacedRef("Service", infra.Namespace, clickHouseName),
-		)
-	}
-
 	return cleanup
 }
 
@@ -1089,13 +1079,6 @@ func compileRetainedResourceStatusPlan(compiled *InfraPlan) []infrav1alpha1.Reta
 			common.NewRetainedResourceStatus("registry", "PersistentVolumeClaim", common.BuiltinRegistryPVCName(infra.Name)),
 		)
 	}
-	if infra.Spec.Observability != nil && !builtinObservabilityActive(infra) && observabilityStatefulResourcePolicy(infra) == infrav1alpha1.BuiltinStatefulResourcePolicyRetain {
-		retained = append(retained,
-			common.NewRetainedResourceStatus("observability", "Secret", common.BuiltinObservabilityClickHouseSecretName(infra.Name)),
-			common.NewRetainedResourceStatus("observability", "PersistentVolumeClaim", common.BuiltinObservabilityClickHousePVCName(infra.Name)),
-		)
-	}
-
 	return retained
 }
 
@@ -1482,17 +1465,6 @@ func builtinRegistryActive(infra *infrav1alpha1.Sandbox0Infra) bool {
 	return infra.Spec.Registry.Builtin.Enabled
 }
 
-func builtinObservabilityActive(infra *infrav1alpha1.Sandbox0Infra) bool {
-	if common.ResolveObservabilityBackendType(infra) != infrav1alpha1.ObservabilityBackendTypeBuiltin {
-		return false
-	}
-	backend := infra.Spec.Observability.Backend
-	if backend.Builtin == nil || backend.Builtin.Provider == "" {
-		return true
-	}
-	return backend.Builtin.Provider == infrav1alpha1.ObservabilityBuiltinProviderClickHouse
-}
-
 func databaseStatefulResourcePolicy(infra *infrav1alpha1.Sandbox0Infra) infrav1alpha1.BuiltinStatefulResourcePolicy {
 	if infra == nil || infra.Spec.Database == nil || infra.Spec.Database.Builtin == nil || infra.Spec.Database.Builtin.StatefulResourcePolicy == "" {
 		return infrav1alpha1.BuiltinStatefulResourcePolicyRetain
@@ -1519,13 +1491,4 @@ func registryStatefulResourcePolicy(infra *infrav1alpha1.Sandbox0Infra) infrav1a
 		return infrav1alpha1.BuiltinStatefulResourcePolicyRetain
 	}
 	return infra.Spec.Registry.Builtin.StatefulResourcePolicy
-}
-
-func observabilityStatefulResourcePolicy(infra *infrav1alpha1.Sandbox0Infra) infrav1alpha1.BuiltinStatefulResourcePolicy {
-	if infra == nil || infra.Spec.Observability == nil || infra.Spec.Observability.Backend == nil ||
-		infra.Spec.Observability.Backend.Builtin == nil || infra.Spec.Observability.Backend.Builtin.ClickHouse == nil ||
-		infra.Spec.Observability.Backend.Builtin.ClickHouse.StatefulResourcePolicy == "" {
-		return infrav1alpha1.BuiltinStatefulResourcePolicyRetain
-	}
-	return infra.Spec.Observability.Backend.Builtin.ClickHouse.StatefulResourcePolicy
 }

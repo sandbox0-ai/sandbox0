@@ -17,12 +17,11 @@ import (
 )
 
 const (
-	defaultDatabasePVCSize   = "20Gi"
-	defaultStoragePVCSize    = "50Gi"
-	defaultRegistryPVCSize   = "20Gi"
-	defaultClickHousePVCSize = "20Gi"
-	nodePortMin              = 30000
-	nodePortMax              = 32767
+	defaultDatabasePVCSize = "20Gi"
+	defaultStoragePVCSize  = "50Gi"
+	defaultRegistryPVCSize = "20Gi"
+	nodePortMin            = 30000
+	nodePortMax            = 32767
 )
 
 func (r *Sandbox0InfraReconciler) validateSpecSemantics(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
@@ -40,7 +39,6 @@ func validateSpecSemantics(ctx context.Context, kubeClient ctrlclient.Client, in
 		errs = append(errs, validateBuiltinDatabaseSemantics(ctx, kubeClient, infra)...)
 		errs = append(errs, validateBuiltinStorageSemantics(ctx, kubeClient, infra)...)
 		errs = append(errs, validateBuiltinRegistrySemantics(ctx, kubeClient, infra)...)
-		errs = append(errs, validateBuiltinObservabilitySemantics(ctx, kubeClient, infra)...)
 	}
 	errs = append(errs, validateClusterSemantics(infra)...)
 	errs = append(errs, validateObservabilitySemantics(infra)...)
@@ -118,11 +116,6 @@ func validateObservabilitySemantics(infra *infrav1alpha1.Sandbox0Infra) []error 
 	switch backend.Type {
 	case "", infrav1alpha1.ObservabilityBackendTypeDisabled:
 		return nil
-	case infrav1alpha1.ObservabilityBackendTypeBuiltin:
-		if backend.Builtin != nil && backend.Builtin.Provider != "" &&
-			backend.Builtin.Provider != infrav1alpha1.ObservabilityBuiltinProviderClickHouse {
-			errs = append(errs, fmt.Errorf("spec.observability.backend.builtin.provider must be clickhouse"))
-		}
 	case infrav1alpha1.ObservabilityBackendTypeExternal:
 		if backend.External == nil || backend.External.OTLP == nil || strings.TrimSpace(backend.External.OTLP.Endpoint) == "" {
 			errs = append(errs, fmt.Errorf("spec.observability.backend.external.otlp.endpoint is required when observability backend type is external"))
@@ -225,54 +218,6 @@ func validateBuiltinRegistrySemantics(ctx context.Context, kubeClient ctrlclient
 		defaultRegistryPVCSize,
 		"spec.registry.builtin.persistence",
 	)
-}
-
-func validateBuiltinObservabilitySemantics(ctx context.Context, kubeClient ctrlclient.Client, infra *infrav1alpha1.Sandbox0Infra) []error {
-	if infra.Spec.Observability == nil || infra.Spec.Observability.Backend == nil ||
-		infra.Spec.Observability.Backend.Type != infrav1alpha1.ObservabilityBackendTypeBuiltin {
-		return nil
-	}
-
-	var clickHouse *infrav1alpha1.BuiltinObservabilityClickHouseConfig
-	if infra.Spec.Observability.Backend.Builtin != nil {
-		clickHouse = infra.Spec.Observability.Backend.Builtin.ClickHouse
-	}
-
-	var errs []error
-	secret := &corev1.Secret{}
-	secretName := common.BuiltinObservabilityClickHouseSecretName(infra.Name)
-	if err := kubeClient.Get(ctx, ctrlclient.ObjectKey{Namespace: infra.Namespace, Name: secretName}, secret); err == nil && clickHouse != nil {
-		if clickHouse.Username != "" && string(secret.Data["username"]) != "" && string(secret.Data["username"]) != clickHouse.Username {
-			errs = append(errs, fmt.Errorf("spec.observability.backend.builtin.clickhouse.username cannot be changed after the builtin ClickHouse credentials secret has been created"))
-		}
-		if clickHouse.Database != "" && string(secret.Data["database"]) != "" && string(secret.Data["database"]) != clickHouse.Database {
-			errs = append(errs, fmt.Errorf("spec.observability.backend.builtin.clickhouse.database cannot be changed after the builtin ClickHouse credentials secret has been created"))
-		}
-		if clickHouse.NativePort != 0 {
-			currentPort := strings.TrimSpace(string(secret.Data["nativePort"]))
-			if currentPort != "" && currentPort != fmt.Sprintf("%d", clickHouse.NativePort) {
-				errs = append(errs, fmt.Errorf("spec.observability.backend.builtin.clickhouse.nativePort cannot be changed after the builtin ClickHouse credentials secret has been created"))
-			}
-		}
-	} else if !apierrors.IsNotFound(err) {
-		errs = append(errs, fmt.Errorf("validate builtin observability secret semantics: %w", err))
-	}
-
-	var persistence *infrav1alpha1.PersistenceConfig
-	if clickHouse != nil {
-		persistence = clickHouse.Persistence
-	}
-	errs = append(errs, validatePersistencePVCSemantics(
-		ctx,
-		kubeClient,
-		infra.Namespace,
-		common.BuiltinObservabilityClickHousePVCName(infra.Name),
-		persistence,
-		defaultClickHousePVCSize,
-		"spec.observability.backend.builtin.clickhouse.persistence",
-	)...)
-
-	return errs
 }
 
 func validatePersistencePVCSemantics(

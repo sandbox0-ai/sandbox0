@@ -113,13 +113,19 @@ func TestAppendObservabilityEnvVarsKeepsExplicitEnvVars(t *testing.T) {
 	}
 }
 
-func TestAppendObservabilityEnvVarsUsesBuiltinBackendTraceDefaults(t *testing.T) {
+func TestAppendObservabilityEnvVarsUsesManagedCollectorTraceDefaults(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
 			Observability: &infrav1alpha1.ObservabilityConfig{
 				Backend: &infrav1alpha1.ObservabilityBackendConfig{
-					Type: infrav1alpha1.ObservabilityBackendTypeBuiltin,
+					Type: infrav1alpha1.ObservabilityBackendTypeExternal,
+					External: &infrav1alpha1.ExternalObservabilityBackendConfig{
+						Mode: infrav1alpha1.ObservabilityExternalModeManagedCollector,
+						OTLP: &infrav1alpha1.ObservabilityOTLPConfig{
+							Endpoint: "otel.example.com:4317",
+						},
+					},
 				},
 			},
 		},

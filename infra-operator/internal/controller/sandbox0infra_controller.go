@@ -500,11 +500,6 @@ func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(
 			return err
 		}
 	}
-	if cleanupPlan.CleanupBuiltinObservability && observabilityReconciler != nil {
-		if err := observabilityReconciler.CleanupBuiltinResources(ctx, infra); err != nil {
-			return err
-		}
-	}
 	for _, ref := range cleanupPlan.DeleteNamespaced {
 		obj, err := objectForCleanupKind(ref.Kind)
 		if err != nil {

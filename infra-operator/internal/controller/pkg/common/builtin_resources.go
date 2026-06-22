@@ -15,9 +15,6 @@ const (
 	BuiltinCredentialVaultManagerTokenSuffix = "credential-vault-manager-token"
 	BuiltinCredentialVaultPVCSuffix          = "openbao-data"
 	BuiltinRegistryPVCSuffix                 = "registry-data"
-	BuiltinObservabilityClickHouseSuffix     = "clickhouse"
-	BuiltinObservabilityClickHouseSecret     = "clickhouse-credentials"
-	BuiltinObservabilityClickHousePVCSuffix  = "clickhouse-data"
 )
 
 func BuiltinDatabaseSecretName(infraName string) string {
@@ -50,18 +47,6 @@ func BuiltinCredentialVaultPVCName(infraName string) string {
 
 func BuiltinRegistryPVCName(infraName string) string {
 	return fmt.Sprintf("%s-%s", infraName, BuiltinRegistryPVCSuffix)
-}
-
-func BuiltinObservabilityClickHouseName(infraName string) string {
-	return fmt.Sprintf("%s-%s", infraName, BuiltinObservabilityClickHouseSuffix)
-}
-
-func BuiltinObservabilityClickHouseSecretName(infraName string) string {
-	return fmt.Sprintf("%s-%s", infraName, BuiltinObservabilityClickHouseSecret)
-}
-
-func BuiltinObservabilityClickHousePVCName(infraName string) string {
-	return fmt.Sprintf("%s-%s", infraName, BuiltinObservabilityClickHousePVCSuffix)
 }
 
 func NewRetainedResourceStatus(component, kind, name string) infrav1alpha1.RetainedResourceStatus {

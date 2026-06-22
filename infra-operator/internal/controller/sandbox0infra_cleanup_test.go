@@ -150,9 +150,12 @@ func TestCleanupDisabledServiceResourcesAllowsObservabilityOnlySpec(t *testing.T
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
 			Observability: &infrav1alpha1.ObservabilityConfig{
 				Backend: &infrav1alpha1.ObservabilityBackendConfig{
-					Type: infrav1alpha1.ObservabilityBackendTypeBuiltin,
-					Builtin: &infrav1alpha1.BuiltinObservabilityBackendConfig{
-						Provider: infrav1alpha1.ObservabilityBuiltinProviderClickHouse,
+					Type: infrav1alpha1.ObservabilityBackendTypeExternal,
+					External: &infrav1alpha1.ExternalObservabilityBackendConfig{
+						Mode: infrav1alpha1.ObservabilityExternalModeManagedCollector,
+						OTLP: &infrav1alpha1.ObservabilityOTLPConfig{
+							Endpoint: "otel.example.com:4317",
+						},
 					},
 				},
 			},

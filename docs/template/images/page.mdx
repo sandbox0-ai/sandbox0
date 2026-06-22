@@ -9,6 +9,10 @@ Every Template references a container image. Sandbox0 supports two types of imag
 
 For private images, Sandbox0 provides a built-in registry and a CLI workflow to build and push images securely. Authentication is handled automatically — your images are protected and only accessible to your team.
 
+<Callout variant="info">
+If a template will run [Sandbox Functions](/docs/sandbox/functions), its image must include `python3` in `PATH` and use Python 3.9 or later. Sandbox0 injects the function runner, but the runner executes the Python interpreter from the template image, not from the manager image.
+</Callout>
+
 ---
 
 ## Using a Public Image

@@ -189,7 +189,8 @@ result2, err := sandbox.Cmd(ctx, \`/bin/sh -c "echo hi"\`)
 if err != nil {
     log.Fatal(err)
 }
-fmt.Print(result2.OutputRaw)
+fmt.Print(result2.Stdout)
+fmt.Fprint(os.Stderr, result2.Stderr)
 
 // Variables NOT preserved between Cmd calls
 sandbox.Cmd(ctx, \`/bin/sh -c "x=3"\`)
@@ -197,31 +198,38 @@ result2, err = sandbox.Cmd(ctx, \`/bin/sh -c "echo $x"\`)
 if err != nil {
     log.Fatal(err)
 }
-fmt.Print(result2.OutputRaw)`
+fmt.Print(result2.Stdout)
+fmt.Fprint(os.Stderr, result2.Stderr)`
     },
     {
       label: "Python",
       language: "python",
-      code: `# One-shot command - stateless
+      code: `import sys
+
+# One-shot command - stateless
 result = sandbox.cmd('echo "hello from cmd"')
-print(result.output_raw, end="")
+print(result.stdout, end="")
+print(result.stderr, end="", file=sys.stderr)
 
 # Variables NOT preserved between cmd calls
 sandbox.cmd('/bin/sh -c "x=3"')
 result = sandbox.cmd('/bin/sh -c "echo $x"')
-print(result.output_raw, end="")`
+print(result.stdout, end="")
+print(result.stderr, end="", file=sys.stderr)`
     },
     {
       label: "TypeScript",
       language: "typescript",
       code: `// One-shot command - stateless
 let cmdResult = await sandbox.cmd('echo "hello from cmd"');
-process.stdout.write(cmdResult.outputRaw);
+process.stdout.write(cmdResult.stdout);
+process.stderr.write(cmdResult.stderr);
 
 // Variables NOT preserved between cmd calls
 await sandbox.cmd('/bin/sh -c "x=3"');
 cmdResult = await sandbox.cmd('/bin/sh -c "echo $x"');
-process.stdout.write(cmdResult.outputRaw);`
+process.stdout.write(cmdResult.stdout);
+process.stderr.write(cmdResult.stderr);`
     },
     {
       label: "CLI",
@@ -233,9 +241,15 @@ process.stdout.write(cmdResult.outputRaw);`
 />
 
 When a non-streaming Cmd waits for completion, the response includes `output_raw`,
-`stdout`, `stderr`, `exit_code`, and `state`. `output_raw` remains the merged
-raw output for existing clients. `s0 sandbox exec` exits locally with the remote
-command exit code when it is non-zero.
+`stdout`, `stderr`, `exit_code`, and `state`. SDK `Cmd` helpers expose the split
+streams directly. `output_raw` remains the merged raw output for compatibility
+and as a fallback for PTY-style output. `s0 sandbox exec` writes command stdout
+to local stdout and command stderr to local stderr when split streams are
+available, falls back to `output_raw` otherwise, and exits locally with the
+remote command exit code when it is non-zero.
+
+When supporting older Sandbox0 servers, fall back to `output_raw` / `outputRaw`
+if both split stream fields are empty.
 
 ### Cmd with Options
 
@@ -255,12 +269,15 @@ command exit code when it is non-zero.
 if err != nil {
     log.Fatal(err)
 }
-fmt.Print(result2.OutputRaw)`
+fmt.Print(result2.Stdout)
+fmt.Fprint(os.Stderr, result2.Stderr)`
     },
     {
       label: "Python",
       language: "python",
-      code: `from sandbox0 import CmdOptions
+      code: `import sys
+
+from sandbox0 import CmdOptions
 
 result = sandbox.cmd(
     "bash -c 'echo $GREETING && pwd'",
@@ -271,7 +288,8 @@ result = sandbox.cmd(
         idle_timeout_sec=60,
     ),
 )
-print(result.output_raw, end="")`
+print(result.stdout, end="")
+print(result.stderr, end="", file=sys.stderr)`
     },
     {
       label: "TypeScript",
@@ -282,7 +300,8 @@ print(result.output_raw, end="")`
     ttlSec: 120,
     idleTimeoutSec: 60,
 });
-process.stdout.write(cmdResult.outputRaw);`
+process.stdout.write(cmdResult.stdout);
+process.stderr.write(cmdResult.stderr);`
     },
     {
       label: "CLI",

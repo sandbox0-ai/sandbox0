@@ -125,6 +125,9 @@ func (h *InitializeHandler) Initialize(w http.ResponseWriter, r *http.Request) {
 		h.contextManager.SetSandboxEnvVars(req.EnvVars)
 		h.contextManager.SetRootFS(rootFSMountPath)
 	}
+	if h.fileManager != nil {
+		h.fileManager.SetRootFS(rootFSMountPath)
+	}
 
 	h.dispatcher.SetConfig(webhookURL, webhookSecret)
 	h.dispatcher.SetIdentity(req.SandboxID, teamID)

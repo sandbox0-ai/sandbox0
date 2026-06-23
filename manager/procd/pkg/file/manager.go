@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -37,6 +39,8 @@ const MaxFileSize = 100 * 1024 * 1024 // 100MB
 // Manager handles file system operations.
 type Manager struct {
 	rootPath        string
+	rootFSMu        sync.RWMutex
+	rootFS          string
 	watcherMgr      *WatcherManager
 	allowExecutable bool
 }
@@ -60,20 +64,81 @@ func NewManager(rootPath string) (*Manager, error) {
 	}, nil
 }
 
-// sanitizePath cleans the path and resolves relative paths against rootPath.
-// The sandbox container provides the isolation boundary, so all paths
-// (absolute or relative) within the sandbox are allowed.
-func (m *Manager) sanitizePath(path string) string {
-	// Clean the path to resolve . and .. components
-	cleanPath := filepath.Clean(path)
+// SetRootFS sets the mounted root filesystem used for user-visible file paths.
+func (m *Manager) SetRootFS(rootFS string) {
+	value := filepath.Clean(strings.TrimSpace(rootFS))
+	if value == "." {
+		value = ""
+	}
 
-	// For absolute paths, return as-is
+	m.rootFSMu.Lock()
+	defer m.rootFSMu.Unlock()
+	m.rootFS = value
+}
+
+// RootFS returns the mounted root filesystem used for user-visible file paths.
+func (m *Manager) RootFS() string {
+	m.rootFSMu.RLock()
+	defer m.rootFSMu.RUnlock()
+	return m.rootFS
+}
+
+// sanitizePath cleans the path, resolves relative paths against rootPath, and
+// maps the resulting sandbox-visible path into the mounted rootfs when present.
+func (m *Manager) sanitizePath(path string) string {
+	return m.resolvePath(path)
+}
+
+func (m *Manager) virtualPath(path string) string {
+	cleanPath := filepath.Clean(path)
 	if filepath.IsAbs(cleanPath) {
 		return cleanPath
 	}
-
-	// For relative paths, join with root and clean
 	return filepath.Clean(filepath.Join(m.rootPath, cleanPath))
+}
+
+func (m *Manager) resolvePath(path string) string {
+	virtualPath := m.virtualPath(path)
+	rootFS := m.RootFS()
+	if rootFS == "" {
+		return virtualPath
+	}
+	return joinRootFS(rootFS, virtualPath)
+}
+
+func joinRootFS(rootFS, virtualPath string) string {
+	rootFS = filepath.Clean(rootFS)
+	virtualPath = filepath.Clean(virtualPath)
+	if virtualPath == "." || virtualPath == string(filepath.Separator) {
+		return rootFS
+	}
+	return filepath.Join(rootFS, strings.TrimPrefix(virtualPath, string(filepath.Separator)))
+}
+
+func (m *Manager) displayPath(path string) string {
+	rootFS := m.RootFS()
+	if rootFS == "" {
+		return path
+	}
+
+	cleanPath := filepath.Clean(path)
+	cleanRootFS := filepath.Clean(rootFS)
+	if cleanPath == cleanRootFS {
+		return string(filepath.Separator)
+	}
+	prefix := cleanRootFS + string(filepath.Separator)
+	if strings.HasPrefix(cleanPath, prefix) {
+		return string(filepath.Separator) + strings.TrimPrefix(cleanPath, prefix)
+	}
+	return path
+}
+
+func (m *Manager) displayEvent(event WatchEvent) WatchEvent {
+	event.Path = m.displayPath(event.Path)
+	if event.OldPath != "" {
+		event.OldPath = m.displayPath(event.OldPath)
+	}
+	return event
 }
 
 func pathIsDir(path string) (bool, error) {
@@ -375,7 +440,7 @@ func (m *Manager) SubscribeWatch(path string, recursive bool, handler func(Watch
 
 	go func(w *Watcher) {
 		for event := range w.EventChan {
-			handler(event)
+			handler(m.displayEvent(event))
 		}
 	}(watcher)
 
@@ -393,6 +458,10 @@ func (m *Manager) UnwatchDir(watchID string) error {
 
 // Emit broadcasts an external event to watchers.
 func (m *Manager) Emit(event WatchEvent) {
+	event.Path = m.resolvePath(event.Path)
+	if event.OldPath != "" {
+		event.OldPath = m.resolvePath(event.OldPath)
+	}
 	m.watcherMgr.Emit(event)
 }
 

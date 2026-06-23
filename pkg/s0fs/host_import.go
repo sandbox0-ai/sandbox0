@@ -2,6 +2,7 @@ package s0fs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -28,7 +29,7 @@ func ImportHostTree(ctx context.Context, root string, opts HostImportOptions) (*
 	if root == "" || root == "." {
 		return nil, fmt.Errorf("%w: root path is required", ErrInvalidInput)
 	}
-	info, err := os.Lstat(root)
+	info, err := os.Stat(root)
 	if err != nil {
 		return nil, fmt.Errorf("stat import root: %w", err)
 	}
@@ -62,7 +63,7 @@ func ImportHostTree(ctx context.Context, root string, opts HostImportOptions) (*
 
 	pathInodes := map[string]uint64{"/": RootInode}
 	hardlinks := make(map[hostFileKey]uint64)
-	err = filepath.WalkDir(root, func(hostPath string, entry fs.DirEntry, walkErr error) error {
+	err = walkHostImportTree(root, func(hostPath string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -140,6 +141,43 @@ func ImportHostTree(ctx context.Context, root string, opts HostImportOptions) (*
 		return nil, fmt.Errorf("import host tree: %w", err)
 	}
 	return state, nil
+}
+
+func walkHostImportTree(root string, fn fs.WalkDirFunc) error {
+	rootInfo, err := os.Stat(root)
+	if err != nil {
+		return fn(root, nil, err)
+	}
+	return walkHostImportDir(root, root, fs.FileInfoToDirEntry(rootInfo), fn)
+}
+
+func walkHostImportDir(root, hostPath string, entry fs.DirEntry, fn fs.WalkDirFunc) error {
+	if err := fn(hostPath, entry, nil); err != nil {
+		if errors.Is(err, filepath.SkipDir) && hostPath != root {
+			return nil
+		}
+		return err
+	}
+	if !entry.IsDir() {
+		return nil
+	}
+	entries, err := os.ReadDir(hostPath)
+	if err != nil {
+		if err := fn(hostPath, entry, err); err != nil && !errors.Is(err, filepath.SkipDir) {
+			return err
+		}
+		return nil
+	}
+	for _, child := range entries {
+		childPath := filepath.Join(hostPath, child.Name())
+		if err := walkHostImportDir(root, childPath, child, fn); err != nil {
+			if errors.Is(err, filepath.SkipDir) {
+				continue
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 func importHostNode(hostPath string, info os.FileInfo, inode uint64, now time.Time) (*Node, error) {

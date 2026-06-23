@@ -94,6 +94,29 @@ func TestImportHostTreePreservesBaseColdExtents(t *testing.T) {
 	}
 }
 
+func TestImportHostTreeFollowsRootSymlinkOnly(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "root")
+	requireNoError(t, os.Mkdir(root, 0o755))
+	requireNoError(t, os.WriteFile(filepath.Join(root, "file.txt"), []byte("hello"), 0o644))
+	requireNoError(t, os.Symlink("file.txt", filepath.Join(root, "link.txt")))
+	rootLink := filepath.Join(parent, "root-link")
+	requireNoError(t, os.Symlink(root, rootLink))
+
+	state, err := ImportHostTree(context.Background(), rootLink, HostImportOptions{})
+	if err != nil {
+		t.Fatalf("ImportHostTree(root symlink) error = %v", err)
+	}
+	fileNode := state.Nodes[requireStatePath(t, state, "/file.txt")]
+	if fileNode.Type != TypeFile {
+		t.Fatalf("file node type = %q, want file", fileNode.Type)
+	}
+	linkNode := state.Nodes[requireStatePath(t, state, "/link.txt")]
+	if linkNode.Type != TypeSymlink || linkNode.Target != "file.txt" {
+		t.Fatalf("child symlink node = %+v, want symlink to file.txt", linkNode)
+	}
+}
+
 func requireStatePath(t *testing.T, state *SnapshotState, path string) uint64 {
 	t.Helper()
 	inode := statePath(state, path)

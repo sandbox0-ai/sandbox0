@@ -453,6 +453,12 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default="500ms"
 	NetdPolicyApplyPollInterval metav1.Duration `json:"netdPolicyApplyPollInterval,omitempty"`
+	// EgressAuthDefaultResolveTTL controls the default lifetime of resolved
+	// egress auth material cached by netd when a binding does not set
+	// cachePolicy.ttl.
+	// +optional
+	// +kubebuilder:default="5m"
+	EgressAuthDefaultResolveTTL metav1.Duration `json:"egressAuthDefaultResolveTtl,omitempty"`
 	// +optional
 	// +kubebuilder:default="10Mi"
 	PauseMinMemoryRequest string `json:"pauseMinMemoryRequest,omitempty"`

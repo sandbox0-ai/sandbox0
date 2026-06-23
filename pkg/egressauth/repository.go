@@ -47,6 +47,7 @@ type Repository struct {
 }
 
 var ErrCredentialSourceInUse = errors.New("credential source is in use")
+var ErrCredentialSourceResolverKindImmutable = errors.New("credential source resolver_kind is immutable")
 
 type RepositoryOption func(*Repository)
 
@@ -282,7 +283,7 @@ func (r *Repository) GetSourceVersion(ctx context.Context, sourceID, version int
 		storagePayload []byte
 	)
 	err := r.db.QueryRow(ctx, `
-		SELECT v.source_id, s.team_id, v.version, s.resolver_kind, v.storage_kind, v.spec_json, v.storage_payload, v.created_at
+		SELECT v.source_id, s.team_id, v.version, v.resolver_kind, v.storage_kind, v.spec_json, v.storage_payload, v.created_at
 		FROM credential_source_versions v
 		JOIN credential_sources s ON s.id = v.source_id
 		WHERE v.source_id = $1 AND v.version = $2
@@ -412,17 +413,23 @@ func (r *Repository) PutSource(ctx context.Context, teamID string, record *Crede
 	}()
 
 	var (
-		sourceID       int64
-		currentVersion int64
+		sourceID             int64
+		currentVersion       int64
+		existingResolverKind string
+		existingSource       bool
 	)
 	err = tx.QueryRow(ctx, `
-		SELECT id, current_version
+		SELECT id, current_version, resolver_kind
 		FROM credential_sources
 		WHERE team_id = $1 AND name = $2
 		FOR UPDATE
-	`, teamID, record.Name).Scan(&sourceID, &currentVersion)
+	`, teamID, record.Name).Scan(&sourceID, &currentVersion, &existingResolverKind)
 	switch err {
 	case nil:
+		existingSource = true
+		if existingResolverKind != record.ResolverKind {
+			return nil, fmt.Errorf("%w: existing %q, requested %q", ErrCredentialSourceResolverKindImmutable, existingResolverKind, record.ResolverKind)
+		}
 		currentVersion++
 		if _, err := tx.Exec(ctx, `
 			UPDATE credential_sources
@@ -430,7 +437,7 @@ func (r *Repository) PutSource(ctx context.Context, teamID string, record *Crede
 			    current_version = $4,
 			    status = $5
 			WHERE team_id = $1 AND name = $2
-			`, teamID, record.Name, record.ResolverKind, currentVersion, normalizeSourceStatus("")); err != nil {
+		`, teamID, record.Name, record.ResolverKind, currentVersion, normalizeSourceStatus("")); err != nil {
 			return nil, fmt.Errorf("update source record: %w", err)
 		}
 	case pgx.ErrNoRows:
@@ -454,10 +461,20 @@ func (r *Repository) PutSource(ctx context.Context, teamID string, record *Crede
 	}
 
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO credential_source_versions (source_id, version, spec_json, storage_kind, storage_payload)
-		VALUES ($1, $2, $3, $4, $5)
-	`, sourceID, currentVersion, specJSON, storageKind, storagePayload); err != nil {
+		INSERT INTO credential_source_versions (source_id, version, resolver_kind, spec_json, storage_kind, storage_payload)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, sourceID, currentVersion, record.ResolverKind, specJSON, storageKind, storagePayload); err != nil {
 		return nil, fmt.Errorf("insert source version: %w", err)
+	}
+	if existingSource {
+		if _, err := tx.Exec(ctx, `
+			UPDATE sandbox_egress_credential_bindings
+			SET source_version = $2,
+			    updated_at = NOW()
+			WHERE source_id = $1
+		`, sourceID, currentVersion); err != nil {
+			return nil, fmt.Errorf("advance source bindings: %w", err)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {

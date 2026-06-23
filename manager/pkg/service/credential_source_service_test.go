@@ -156,6 +156,32 @@ func TestCredentialSourceServiceUpdateSourceUpdatesExisting(t *testing.T) {
 	}
 }
 
+func TestCredentialSourceServiceUpdateSourceRejectsResolverKindChange(t *testing.T) {
+	store := newMemorySourceStore()
+	svc := NewCredentialSourceService(store, zap.NewNop())
+
+	if _, err := svc.CreateSource(context.Background(), "team-1", staticHeadersCredentialSourceRequest("github-api", "first")); err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+	_, err := svc.UpdateSource(context.Background(), "team-1", &egressauth.CredentialSourceWriteRequest{
+		Name:         "github-api",
+		ResolverKind: "static_username_password",
+		Spec: egressauth.CredentialSourceSecretSpec{
+			StaticUsernamePassword: &egressauth.StaticUsernamePasswordSourceSpec{
+				Username: "alice",
+				Password: "secret",
+			},
+		},
+	})
+	if !errors.Is(err, egressauth.ErrCredentialSourceResolverKindImmutable) {
+		t.Fatalf("update resolver kind error = %v, want ErrCredentialSourceResolverKindImmutable", err)
+	}
+	stored := store.records["team-1/github-api"]
+	if stored == nil || stored.CurrentVersion != 1 || stored.ResolverKind != "static_headers" {
+		t.Fatalf("stored source = %#v, want unchanged static_headers version 1", stored)
+	}
+}
+
 func TestCredentialSourceServicePutTLSClientCertificateSource(t *testing.T) {
 	store := newMemorySourceStore()
 	svc := NewCredentialSourceService(store, zap.NewNop())

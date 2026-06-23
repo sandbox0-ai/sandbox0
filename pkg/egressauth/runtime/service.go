@@ -31,7 +31,6 @@ type Service struct {
 	bindingStore egressauth.BindingStore
 	staticAuth   map[string]StaticAuthConfig
 	providers    map[string]Provider
-	resolveCache *resultCache
 }
 
 func NewService(cfg Config, bindingStore egressauth.BindingStore, logger *zap.Logger) *Service {
@@ -48,7 +47,6 @@ func NewService(cfg Config, bindingStore egressauth.BindingStore, logger *zap.Lo
 		bindingStore: bindingStore,
 		staticAuth:   buildStaticAuthMap(cfg.StaticAuth),
 		providers:    make(map[string]Provider),
-		resolveCache: newResultCache(2048),
 	}
 	service.RegisterProvider("static_headers", &staticHeadersProvider{})
 	service.RegisterProvider("static_tls_client_certificate", &staticTLSClientCertificateProvider{})
@@ -76,19 +74,13 @@ func (s *Service) Resolve(ctx context.Context, req *egressauth.ResolveRequest) (
 		return nil, fmt.Errorf("authRef is required")
 	}
 
-	if binding, updatedAt := s.lookupBinding(ctx, req); binding != nil {
-		return s.resolveBinding(ctx, req, binding, updatedAt)
+	if binding := s.lookupBinding(ctx, req); binding != nil {
+		return s.resolveBinding(ctx, req, binding)
 	}
 	return s.resolveStatic(req)
 }
 
-func (s *Service) resolveBinding(ctx context.Context, req *egressauth.ResolveRequest, binding *egressauth.CredentialBinding, updatedAt time.Time) (*egressauth.ResolveResponse, error) {
-	cacheKey := bindingCacheKey(req, binding, updatedAt)
-	now := time.Now().UTC()
-	if response, ok := s.resolveCache.Get(cacheKey, now); ok {
-		return response, nil
-	}
-
+func (s *Service) resolveBinding(ctx context.Context, req *egressauth.ResolveRequest, binding *egressauth.CredentialBinding) (*egressauth.ResolveResponse, error) {
 	sourceVersion, err := s.bindingStore.GetSourceVersion(ctx, binding.SourceID, binding.SourceVersion)
 	if err != nil {
 		return nil, err
@@ -111,11 +103,6 @@ func (s *Service) resolveBinding(ctx context.Context, req *egressauth.ResolveReq
 		return nil, fmt.Errorf("provider %q returned empty response", providerName)
 	}
 
-	cacheTTL := result.TTL
-	if cacheTTL <= 0 && result.Response.ExpiresAt != nil {
-		cacheTTL = time.Until(*result.Response.ExpiresAt)
-	}
-	s.resolveCache.Set(cacheKey, result.Response, cacheTTL, now)
 	return cloneResolveResponse(result.Response), nil
 }
 
@@ -125,24 +112,18 @@ func (s *Service) resolveStatic(req *egressauth.ResolveRequest) (*egressauth.Res
 		return nil, ErrAuthRefNotFound
 	}
 
-	cacheKey := staticCacheKey(req)
 	now := time.Now().UTC()
-	if response, ok := s.resolveCache.Get(cacheKey, now); ok {
-		return response, nil
-	}
-
 	expiresAt := now.Add(entry.TTL)
 	response := egressauth.NewHTTPHeadersResolveResponse(entry.AuthRef, entry.Headers, &expiresAt)
-	s.resolveCache.Set(cacheKey, response, entry.TTL, now)
 	return response, nil
 }
 
-func (s *Service) lookupBinding(ctx context.Context, req *egressauth.ResolveRequest) (*egressauth.CredentialBinding, time.Time) {
+func (s *Service) lookupBinding(ctx context.Context, req *egressauth.ResolveRequest) *egressauth.CredentialBinding {
 	if s == nil || s.bindingStore == nil || req == nil {
-		return nil, time.Time{}
+		return nil
 	}
 	if strings.TrimSpace(req.TeamID) == "" || strings.TrimSpace(req.SandboxID) == "" {
-		return nil, time.Time{}
+		return nil
 	}
 
 	record, err := s.bindingStore.GetBindings(ctx, req.TeamID, req.SandboxID)
@@ -152,19 +133,19 @@ func (s *Service) lookupBinding(ctx context.Context, req *egressauth.ResolveRequ
 			zap.String("sandbox_id", req.SandboxID),
 			zap.Error(err),
 		)
-		return nil, time.Time{}
+		return nil
 	}
 	if record == nil {
-		return nil, time.Time{}
+		return nil
 	}
 
 	authRef := strings.TrimSpace(req.AuthRef)
 	for idx := range record.Bindings {
 		if strings.TrimSpace(record.Bindings[idx].Ref) == authRef {
-			return &record.Bindings[idx], record.UpdatedAt
+			return &record.Bindings[idx]
 		}
 	}
-	return nil, time.Time{}
+	return nil
 }
 
 func (s *Service) lookupStaticAuth(authRef string) (StaticAuthConfig, bool) {
@@ -195,37 +176,6 @@ func buildStaticAuthMap(entries []StaticAuthConfig) map[string]StaticAuthConfig 
 		}
 	}
 	return out
-}
-
-func bindingCacheKey(req *egressauth.ResolveRequest, binding *egressauth.CredentialBinding, updatedAt time.Time) string {
-	return strings.Join([]string{
-		"binding",
-		strings.TrimSpace(req.TeamID),
-		strings.TrimSpace(req.SandboxID),
-		strings.TrimSpace(req.AuthRef),
-		binding.SourceRef,
-		fmt.Sprintf("%d", binding.SourceID),
-		fmt.Sprintf("%d", binding.SourceVersion),
-		updatedAt.UTC().Format(time.RFC3339Nano),
-		strings.ToLower(strings.TrimSpace(req.Destination)),
-		fmt.Sprintf("%d", req.DestinationPort),
-		strings.ToLower(strings.TrimSpace(req.Transport)),
-		strings.ToLower(strings.TrimSpace(req.Protocol)),
-		strings.TrimSpace(req.RuleName),
-	}, "\x00")
-}
-
-func staticCacheKey(req *egressauth.ResolveRequest) string {
-	return strings.Join([]string{
-		"static",
-		strings.TrimSpace(req.AuthRef),
-		strings.TrimSpace(req.SandboxID),
-		strings.ToLower(strings.TrimSpace(req.Destination)),
-		fmt.Sprintf("%d", req.DestinationPort),
-		strings.ToLower(strings.TrimSpace(req.Transport)),
-		strings.ToLower(strings.TrimSpace(req.Protocol)),
-		strings.TrimSpace(req.RuleName),
-	}, "\x00")
 }
 
 func cloneResolveResponse(in *egressauth.ResolveResponse) *egressauth.ResolveResponse {

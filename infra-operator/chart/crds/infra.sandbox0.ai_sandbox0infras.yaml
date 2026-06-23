@@ -3050,6 +3050,13 @@ spec:
                           defaultSandboxTtl:
                             default: 0s
                             type: string
+                          egressAuthDefaultResolveTtl:
+                            default: 5m
+                            description: |-
+                              EgressAuthDefaultResolveTTL controls the default lifetime of resolved
+                              egress auth material cached by netd when a binding does not set
+                              cachePolicy.ttl.
+                            type: string
                           httpPort:
                             default: 8080
                             type: integer

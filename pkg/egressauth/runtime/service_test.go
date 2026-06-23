@@ -226,14 +226,15 @@ func testPlaceholderSubstitutionBindingRecord(updatedAt time.Time) *egressauth.B
 	}
 }
 
-func TestResolveUsesBindingProviderAndCache(t *testing.T) {
+func TestResolveReloadsBindingProviderResult(t *testing.T) {
 	provider := &countingProvider{}
+	token := "first"
 	store := &fakeBindingStore{
 		recordFn: func() *egressauth.BindingRecord {
 			return testBindingRecord(time.Unix(10, 0).UTC())
 		},
 		sourceVersionFn: func(int64, int64) *egressauth.CredentialSourceVersion {
-			return testStaticSourceVersion("binding")
+			return testStaticSourceVersion(token)
 		},
 	}
 
@@ -247,27 +248,35 @@ func TestResolveUsesBindingProviderAndCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first resolve: %v", err)
 	}
+	token = "second"
 	second, err := service.Resolve(context.Background(), req)
 	if err != nil {
 		t.Fatalf("second resolve: %v", err)
 	}
-	if provider.calls != 1 {
-		t.Fatalf("provider calls = %d, want 1", provider.calls)
+	if provider.calls != 2 {
+		t.Fatalf("provider calls = %d, want 2", provider.calls)
 	}
-	if first.Headers["Authorization"] != "Bearer binding" || second.Headers["Authorization"] != "Bearer binding" {
+	if first.Headers["Authorization"] != "Bearer first" || second.Headers["Authorization"] != "Bearer second" {
 		t.Fatalf("unexpected headers: first=%v second=%v", first.Headers, second.Headers)
 	}
 }
 
-func TestResolveInvalidatesCacheWhenBindingsRevisionChanges(t *testing.T) {
+func TestResolveUsesUpdatedBindingSourceVersion(t *testing.T) {
 	provider := &countingProvider{}
-	updatedAt := time.Unix(10, 0).UTC()
+	sourceVersion := int64(1)
 	store := &fakeBindingStore{
 		recordFn: func() *egressauth.BindingRecord {
-			return testBindingRecord(updatedAt)
+			record := testBindingRecord(time.Unix(10, 0).UTC())
+			record.Bindings[0].SourceVersion = sourceVersion
+			return record
 		},
-		sourceVersionFn: func(int64, int64) *egressauth.CredentialSourceVersion {
-			return testStaticSourceVersion("binding")
+		sourceVersionFn: func(_ int64, version int64) *egressauth.CredentialSourceVersion {
+			source := testStaticSourceVersion("old")
+			source.Version = version
+			if version == 2 {
+				source.Spec.StaticHeaders.Values["token"] = "new"
+			}
+			return source
 		},
 	}
 
@@ -280,12 +289,16 @@ func TestResolveInvalidatesCacheWhenBindingsRevisionChanges(t *testing.T) {
 	if _, err := service.Resolve(context.Background(), req); err != nil {
 		t.Fatalf("first resolve: %v", err)
 	}
-	updatedAt = updatedAt.Add(time.Second)
-	if _, err := service.Resolve(context.Background(), req); err != nil {
+	sourceVersion = 2
+	resp, err := service.Resolve(context.Background(), req)
+	if err != nil {
 		t.Fatalf("second resolve: %v", err)
 	}
 	if provider.calls != 2 {
 		t.Fatalf("provider calls = %d, want 2", provider.calls)
+	}
+	if got := resp.Headers["Authorization"]; got != "Bearer new" {
+		t.Fatalf("Authorization = %q, want Bearer new", got)
 	}
 }
 
@@ -352,8 +365,8 @@ func TestResolveFallsBackToStaticAuth(t *testing.T) {
 	}
 }
 
-func TestResolveRefreshesAfterCacheTTLExpires(t *testing.T) {
-	provider := &ttlCountingProvider{ttl: 15 * time.Millisecond}
+func TestResolveReturnsProviderExpiresAt(t *testing.T) {
+	provider := &ttlCountingProvider{ttl: 90 * time.Second}
 	store := &fakeBindingStore{
 		recordFn: func() *egressauth.BindingRecord {
 			return testBindingRecord(time.Unix(10, 0).UTC())
@@ -369,26 +382,22 @@ func TestResolveRefreshesAfterCacheTTLExpires(t *testing.T) {
 	service.RegisterProvider("static_headers", provider)
 
 	req := &egressauth.ResolveRequest{TeamID: "team-1", SandboxID: "sbx-1", AuthRef: "example-api", Destination: "api.example.com", Protocol: "http"}
-	_, err := service.Resolve(context.Background(), req)
+	start := time.Now().UTC()
+	resp, err := service.Resolve(context.Background(), req)
 	if err != nil {
-		t.Fatalf("first resolve: %v", err)
+		t.Fatalf("resolve: %v", err)
 	}
-	_, err = service.Resolve(context.Background(), req)
-	if err != nil {
+	if resp.ExpiresAt == nil {
+		t.Fatal("expiresAt is nil")
+	}
+	if resp.ExpiresAt.Before(start.Add(89*time.Second)) || resp.ExpiresAt.After(start.Add(91*time.Second)) {
+		t.Fatalf("expiresAt = %s, want approximately 90s from %s", resp.ExpiresAt, start)
+	}
+	if _, err := service.Resolve(context.Background(), req); err != nil {
 		t.Fatalf("second resolve: %v", err)
 	}
-	if provider.calls != 1 {
-		t.Fatalf("provider calls before expiry = %d, want 1", provider.calls)
-	}
-
-	time.Sleep(25 * time.Millisecond)
-
-	_, err = service.Resolve(context.Background(), req)
-	if err != nil {
-		t.Fatalf("third resolve after expiry: %v", err)
-	}
 	if provider.calls != 2 {
-		t.Fatalf("provider calls after expiry = %d, want 2", provider.calls)
+		t.Fatalf("provider calls = %d, want 2", provider.calls)
 	}
 }
 

@@ -1078,6 +1078,7 @@ func (in *ManagerConfig) DeepCopyInto(out *ManagerConfig) {
 	out.DefaultSandboxTTL = in.DefaultSandboxTTL
 	out.NetdPolicyApplyTimeout = in.NetdPolicyApplyTimeout
 	out.NetdPolicyApplyPollInterval = in.NetdPolicyApplyPollInterval
+	out.EgressAuthDefaultResolveTTL = in.EgressAuthDefaultResolveTTL
 	out.ProcdClientTimeout = in.ProcdClientTimeout
 	out.ProcdInitTimeout = in.ProcdInitTimeout
 	out.ShutdownTimeout = in.ShutdownTimeout

@@ -2596,6 +2596,7 @@ paths:
     put:
       tags: [credential-sources]
       summary: Update credential source
+      description: Replace the secret material for an existing credential source. The resolver kind is immutable for a source name; create a new source when changing resolver kinds.
       security:
         - bearerAuth: []
       x-upstream-service: manager
@@ -2619,6 +2620,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessCredentialSourceResponse"
+        "400":
+          description: Invalid credential source update
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
         "404":
           description: Credential source not found
           content:

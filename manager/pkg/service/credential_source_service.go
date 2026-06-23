@@ -91,6 +91,9 @@ func (s *CredentialSourceService) UpdateSource(ctx context.Context, teamID strin
 	if existing == nil {
 		return nil, ErrCredentialSourceNotFound
 	}
+	if existing.ResolverKind != record.ResolverKind {
+		return nil, egressauth.ErrCredentialSourceResolverKindImmutable
+	}
 	return s.store.PutSource(ctx, teamID, record)
 }
 

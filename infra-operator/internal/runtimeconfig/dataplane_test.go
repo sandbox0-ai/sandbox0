@@ -2,9 +2,20 @@ package runtimeconfig
 
 import (
 	"testing"
+	"time"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+func TestToManagerPreservesEgressAuthDefaultResolveTTL(t *testing.T) {
+	cfg := ToManager(&infrav1alpha1.ManagerConfig{
+		EgressAuthDefaultResolveTTL: metav1.Duration{Duration: 90 * time.Second},
+	})
+	if cfg.EgressAuthDefaultResolveTTL.Duration != 90*time.Second {
+		t.Fatalf("egress auth default resolve ttl = %s, want 90s", cfg.EgressAuthDefaultResolveTTL.Duration)
+	}
+}
 
 func TestToStorageProxyDefaultsObjectEncryptionEnabled(t *testing.T) {
 	cfg := ToStorageProxy(nil)

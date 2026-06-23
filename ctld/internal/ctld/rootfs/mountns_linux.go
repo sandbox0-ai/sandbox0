@@ -148,6 +148,9 @@ func mountFuseFDInMountNamespace(targetPath, namespacePath, rootPath string, opt
 		return -1, fmt.Errorf("open fuse device: %w", err)
 	}
 	if err := withMountNamespaceRoot(namespacePath, rootPath, func() error {
+		if err := os.MkdirAll(targetPath, 0o755); err != nil {
+			return fmt.Errorf("create fuse mountpoint %s: %w", targetPath, err)
+		}
 		var st unix.Stat_t
 		if err := unix.Stat(targetPath, &st); err != nil {
 			return fmt.Errorf("stat fuse mountpoint %s: %w", targetPath, err)

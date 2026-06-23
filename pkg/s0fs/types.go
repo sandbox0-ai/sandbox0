@@ -14,6 +14,10 @@ const (
 	TypeDirectory FileType = "directory"
 	TypeFile      FileType = "file"
 	TypeSymlink   FileType = "symlink"
+	TypeFIFO      FileType = "fifo"
+	TypeChar      FileType = "char_device"
+	TypeBlock     FileType = "block_device"
+	TypeSocket    FileType = "socket"
 )
 
 type Config struct {
@@ -66,6 +70,8 @@ type Node struct {
 	Nlink  uint32
 	Size   uint64
 	Target string
+	Rdev   uint64
+	Xattrs map[string][]byte `json:",omitempty"`
 	Atime  time.Time
 	Mtime  time.Time
 	Ctime  time.Time
@@ -82,6 +88,12 @@ func cloneNode(node *Node) *Node {
 		return nil
 	}
 	clone := *node
+	if node.Xattrs != nil {
+		clone.Xattrs = make(map[string][]byte, len(node.Xattrs))
+		for name, value := range node.Xattrs {
+			clone.Xattrs[name] = append([]byte(nil), value...)
+		}
+	}
 	return &clone
 }
 
@@ -98,5 +110,6 @@ type walRecord struct {
 	Offset    uint64   `json:"offset,omitempty"`
 	Data      []byte   `json:"data,omitempty"`
 	Target    string   `json:"target,omitempty"`
+	Rdev      uint64   `json:"rdev,omitempty"`
 	TimeUnix  int64    `json:"time_unix"`
 }

@@ -6,8 +6,8 @@ import (
 	"time"
 
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
+	"github.com/sandbox0-ai/sandbox0/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 )
 
 func (m *Manager) ObserveVolumeState(ctx context.Context, volumeID, teamID string, state *s0fs.SnapshotState, observedAt time.Time) error {

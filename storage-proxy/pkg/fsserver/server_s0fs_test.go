@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/router"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"google.golang.org/protobuf/proto"
@@ -411,6 +411,133 @@ func TestS0FSDirectoryAndSetAttr(t *testing.T) {
 		Name:     "dir",
 	}); err != nil {
 		t.Fatalf("Rmdir() error = %v", err)
+	}
+}
+
+func TestS0FSXattrs(t *testing.T) {
+	t.Parallel()
+
+	volCtx := newMountedS0FSVolumeContext(t, "vol-1", "team-a")
+	server := newTestFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, nil)
+	ctx := authContext("team-a", "")
+
+	fileResp, err := server.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   1,
+		Name:     "meta.txt",
+		Mode:     0o644,
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if _, err := server.SetXattr(ctx, &pb.SetXattrRequest{
+		VolumeId: "vol-1",
+		Inode:    fileResp.Inode,
+		Name:     "user.alpha",
+		Value:    []byte("one"),
+		Flags:    s0fs.XattrCreate,
+	}); err != nil {
+		t.Fatalf("SetXattr(create) error = %v", err)
+	}
+	if _, err := server.SetXattr(ctx, &pb.SetXattrRequest{
+		VolumeId: "vol-1",
+		Inode:    fileResp.Inode,
+		Name:     "user.alpha",
+		Value:    []byte("two"),
+		Flags:    s0fs.XattrCreate,
+	}); fserror.CodeOf(err) != fserror.AlreadyExists {
+		t.Fatalf("SetXattr(create existing) code = %v, err = %v, want AlreadyExists", fserror.CodeOf(err), err)
+	}
+	if _, err := server.SetXattr(ctx, &pb.SetXattrRequest{
+		VolumeId: "vol-1",
+		Inode:    fileResp.Inode,
+		Name:     "user.alpha",
+		Value:    []byte("two"),
+		Flags:    s0fs.XattrReplace,
+	}); err != nil {
+		t.Fatalf("SetXattr(replace) error = %v", err)
+	}
+	getResp, err := server.GetXattr(ctx, &pb.GetXattrRequest{
+		VolumeId: "vol-1",
+		Inode:    fileResp.Inode,
+		Name:     "user.alpha",
+	})
+	if err != nil {
+		t.Fatalf("GetXattr() error = %v", err)
+	}
+	if !bytes.Equal(getResp.Value, []byte("two")) {
+		t.Fatalf("GetXattr() value = %q, want two", getResp.Value)
+	}
+	listResp, err := server.ListXattr(ctx, &pb.ListXattrRequest{
+		VolumeId: "vol-1",
+		Inode:    fileResp.Inode,
+	})
+	if err != nil {
+		t.Fatalf("ListXattr() error = %v", err)
+	}
+	if !bytes.Equal(listResp.Data, []byte("user.alpha\x00")) {
+		t.Fatalf("ListXattr() data = %#v, want user.alpha null list", listResp.Data)
+	}
+	if _, err := server.RemoveXattr(ctx, &pb.RemoveXattrRequest{
+		VolumeId: "vol-1",
+		Inode:    fileResp.Inode,
+		Name:     "user.alpha",
+	}); err != nil {
+		t.Fatalf("RemoveXattr() error = %v", err)
+	}
+	if _, err := server.GetXattr(ctx, &pb.GetXattrRequest{
+		VolumeId: "vol-1",
+		Inode:    fileResp.Inode,
+		Name:     "user.alpha",
+	}); fserror.CodeOf(err) != fserror.NotFound {
+		t.Fatalf("GetXattr(removed) code = %v, err = %v, want NotFound", fserror.CodeOf(err), err)
+	}
+}
+
+func TestS0FSMknod(t *testing.T) {
+	t.Parallel()
+
+	volCtx := newMountedS0FSVolumeContext(t, "vol-1", "team-a")
+	server := newTestFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, nil)
+	ctx := authContext("team-a", "")
+
+	resp, err := server.Mknod(ctx, &pb.MknodRequest{
+		VolumeId: "vol-1",
+		Parent:   1,
+		Name:     "pipe",
+		Mode:     syscall.S_IFIFO | 0o666,
+		Umask:    0o022,
+	})
+	if err != nil {
+		t.Fatalf("Mknod(fifo) error = %v", err)
+	}
+	if resp.Attr.Mode&syscall.S_IFMT != syscall.S_IFIFO {
+		t.Fatalf("Mknod(fifo) mode = %#o, want fifo", resp.Attr.Mode)
+	}
+	if resp.Attr.Mode&0o777 != 0o644 {
+		t.Fatalf("Mknod(fifo) perm = %#o, want 0644", resp.Attr.Mode&0o777)
+	}
+
+	resp, err = server.Mknod(ctx, &pb.MknodRequest{
+		VolumeId: "vol-1",
+		Parent:   1,
+		Name:     "char",
+		Mode:     syscall.S_IFCHR | 0o600,
+		Rdev:     259,
+	})
+	if err != nil {
+		t.Fatalf("Mknod(char) error = %v", err)
+	}
+	if resp.Attr.Mode&syscall.S_IFMT != syscall.S_IFCHR || resp.Attr.Rdev != 259 {
+		t.Fatalf("Mknod(char) attr = %+v, want char rdev 259", resp.Attr)
 	}
 }
 

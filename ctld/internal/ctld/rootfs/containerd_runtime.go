@@ -849,28 +849,31 @@ func liveRootFSPathsForContainer(containerdRoot, containerdHostRoot, namespace s
 }
 
 func liveRootFSPathsFromTaskDir(taskDir, hostTaskDir, mountedRootFS string) (liveRootFSPaths, bool, error) {
+	taskRootExists := false
 	if st, err := os.Stat(mountedRootFS); err == nil && st.IsDir() {
-		return liveRootFSPaths{
-			mountedPath:        mountedRootFS,
-			hostPath:           filepath.Join(hostTaskDir, "rootfs"),
-			mountNamespacePath: taskMountNamespacePath(taskDir),
-		}, true, nil
+		taskRootExists = true
 	} else if err != nil && !os.IsNotExist(err) {
 		return liveRootFSPaths{}, false, fmt.Errorf("inspect live rootfs %s: %w", mountedRootFS, err)
 	}
 	if pidRootFS, nsPath := taskProcessRootFSPath(taskDir); pidRootFS != "" {
+		hostPath := pidRootFS
+		if taskRootExists {
+			hostPath = filepath.Join(hostTaskDir, "rootfs")
+		}
 		return liveRootFSPaths{
 			mountedPath:        pidRootFS,
-			hostPath:           pidRootFS,
+			hostPath:           hostPath,
 			mountNamespacePath: nsPath,
 		}, true, nil
 	}
+	if taskRootExists {
+		return liveRootFSPaths{
+			mountedPath:        mountedRootFS,
+			hostPath:           filepath.Join(hostTaskDir, "rootfs"),
+			mountNamespacePath: "",
+		}, true, nil
+	}
 	return liveRootFSPaths{}, false, nil
-}
-
-func taskMountNamespacePath(taskDir string) string {
-	_, nsPath := taskProcessRootFSPath(taskDir)
-	return nsPath
 }
 
 func taskProcessRootFSPath(taskDir string) (string, string) {

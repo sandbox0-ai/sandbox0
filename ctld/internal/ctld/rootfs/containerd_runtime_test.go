@@ -151,7 +151,7 @@ func TestFindLiveRootFSByTaskAnnotations(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(wantTask, "rootfs"), got.mountedPath)
+	assert.Equal(t, filepath.Join(string(filepath.Separator), "proc", "1234", "root"), got.mountedPath)
 	assert.Equal(t, filepath.Join(hostTaskRoot, "task-1", "rootfs"), got.hostPath)
 	assert.Equal(t, filepath.Join(string(filepath.Separator), "proc", "1234", "ns", "mnt"), got.mountNamespacePath)
 }
@@ -172,7 +172,7 @@ func TestLiveRootFSPathsExposeMountedAndHostRoots(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(taskDir, "rootfs"), got.mountedPath)
+	assert.Equal(t, filepath.Join(string(filepath.Separator), "proc", "5678", "root"), got.mountedPath)
 	assert.Equal(t, filepath.Join(containerdHostRoot, "io.containerd.runtime.v2.task", "k8s.io", containerID, "rootfs"), got.hostPath)
 	assert.Equal(t, filepath.Join(string(filepath.Separator), "proc", "5678", "ns", "mnt"), got.mountNamespacePath)
 }
@@ -195,6 +195,25 @@ func TestLiveRootFSPathMapsMountedRootToHostRoot(t *testing.T) {
 }
 
 func TestMountedLiveRootFSPathReturnsContainerMountedRoot(t *testing.T) {
+	containerdRoot := t.TempDir()
+	containerdHostRoot := filepath.Join(string(filepath.Separator), "run", "containerd")
+	containerID := "container-1"
+	mountedRoot := filepath.Join(containerdRoot, "io.containerd.runtime.v2.task", "k8s.io", containerID, "rootfs")
+	require.NoError(t, os.MkdirAll(mountedRoot, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(filepath.Dir(mountedRoot), "init.pid"), []byte("3456"), 0o644))
+
+	got, err := mountedLiveRootFSPath(containerdRoot, containerdHostRoot, "k8s.io", ctldapi.RootFSInfo{
+		ContainerID:   containerID,
+		ContainerName: "procd",
+		PodNamespace:  "tpl-default",
+		PodName:       "pod-1",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(string(filepath.Separator), "proc", "3456", "root"), got)
+}
+
+func TestMountedLiveRootFSPathFallsBackToTaskRootWithoutInitPID(t *testing.T) {
 	containerdRoot := t.TempDir()
 	containerdHostRoot := filepath.Join(string(filepath.Separator), "run", "containerd")
 	containerID := "container-1"

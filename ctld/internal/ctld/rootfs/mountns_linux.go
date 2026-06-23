@@ -133,7 +133,8 @@ func mountFuseServerInMountNamespace(fs fuse.RawFileSystem, targetPath, namespac
 	if err != nil {
 		return nil, err
 	}
-	server, err := fuse.NewServer(fs, "/dev/fd/"+strconv.Itoa(fd), opts)
+	serverOpts := fuseOptionsForMountedFD(opts)
+	server, err := fuse.NewServer(fs, "/dev/fd/"+strconv.Itoa(fd), serverOpts)
 	if err != nil {
 		_ = unmountPathInMountNamespace(namespacePath, rootPath, targetPath)
 		_ = unix.Close(fd)
@@ -180,6 +181,17 @@ func mountFuseFDInMountNamespace(targetPath, namespacePath, rootPath string, opt
 		return -1, err
 	}
 	return fd, nil
+}
+
+func fuseOptionsForMountedFD(opts *fuse.MountOptions) *fuse.MountOptions {
+	if opts == nil {
+		return nil
+	}
+	copied := *opts
+	copied.DirectMount = false
+	copied.DirectMountStrict = false
+	copied.DirectMountFlags = 0
+	return &copied
 }
 
 func unmountPathInMountNamespace(namespacePath, rootPath, targetPath string) error {

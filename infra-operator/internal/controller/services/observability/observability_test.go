@@ -2,7 +2,6 @@ package observability
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -10,94 +9,12 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 )
-
-func TestReconcileBuiltinCreatesClickHouseResourcesBeforeReady(t *testing.T) {
-	reconciler, client := newTestReconciler(t)
-	infra := observabilityTestInfra(infrav1alpha1.Sandbox0InfraSpec{
-		Observability: &infrav1alpha1.ObservabilityConfig{
-			Backend: &infrav1alpha1.ObservabilityBackendConfig{
-				Type: infrav1alpha1.ObservabilityBackendTypeBuiltin,
-			},
-		},
-	})
-
-	err := reconciler.Reconcile(context.Background(), infra)
-	if err == nil || !strings.Contains(err.Error(), "clickhouse statefulset") {
-		t.Fatalf("expected clickhouse readiness error, got %v", err)
-	}
-
-	assertPresentObject(t, client, &corev1.Secret{}, "sandbox0-system", "demo-clickhouse-credentials")
-	assertPresentObject(t, client, &corev1.PersistentVolumeClaim{}, "sandbox0-system", "demo-clickhouse-data")
-	assertPresentObject(t, client, &appsv1.StatefulSet{}, "sandbox0-system", "demo-clickhouse")
-	assertPresentObject(t, client, &corev1.Service{}, "sandbox0-system", "demo-clickhouse")
-}
-
-func TestCleanupBuiltinResourcesRespectsStatefulResourcePolicy(t *testing.T) {
-	t.Run("retain keeps pvc and secret", func(t *testing.T) {
-		reconciler, client := newTestReconciler(t,
-			&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "demo-clickhouse", Namespace: "sandbox0-system"}},
-			&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "demo-clickhouse", Namespace: "sandbox0-system"}},
-			&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "demo-clickhouse-credentials", Namespace: "sandbox0-system"}},
-			&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "demo-clickhouse-data", Namespace: "sandbox0-system"}},
-		)
-
-		err := reconciler.CleanupBuiltinResources(context.Background(), observabilityTestInfra(infrav1alpha1.Sandbox0InfraSpec{
-			Observability: &infrav1alpha1.ObservabilityConfig{
-				Backend: &infrav1alpha1.ObservabilityBackendConfig{
-					Builtin: &infrav1alpha1.BuiltinObservabilityBackendConfig{
-						ClickHouse: &infrav1alpha1.BuiltinObservabilityClickHouseConfig{
-							StatefulResourcePolicy: infrav1alpha1.BuiltinStatefulResourcePolicyRetain,
-						},
-					},
-				},
-			},
-		}))
-		if err != nil {
-			t.Fatalf("cleanup builtin resources: %v", err)
-		}
-
-		assertMissingObject(t, client, &appsv1.StatefulSet{}, "sandbox0-system", "demo-clickhouse")
-		assertMissingObject(t, client, &corev1.Service{}, "sandbox0-system", "demo-clickhouse")
-		assertPresentObject(t, client, &corev1.Secret{}, "sandbox0-system", "demo-clickhouse-credentials")
-		assertPresentObject(t, client, &corev1.PersistentVolumeClaim{}, "sandbox0-system", "demo-clickhouse-data")
-	})
-
-	t.Run("delete removes pvc and secret", func(t *testing.T) {
-		reconciler, client := newTestReconciler(t,
-			&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "demo-clickhouse", Namespace: "sandbox0-system"}},
-			&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "demo-clickhouse", Namespace: "sandbox0-system"}},
-			&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "demo-clickhouse-credentials", Namespace: "sandbox0-system"}},
-			&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "demo-clickhouse-data", Namespace: "sandbox0-system"}},
-		)
-
-		err := reconciler.CleanupBuiltinResources(context.Background(), observabilityTestInfra(infrav1alpha1.Sandbox0InfraSpec{
-			Observability: &infrav1alpha1.ObservabilityConfig{
-				Backend: &infrav1alpha1.ObservabilityBackendConfig{
-					Builtin: &infrav1alpha1.BuiltinObservabilityBackendConfig{
-						ClickHouse: &infrav1alpha1.BuiltinObservabilityClickHouseConfig{
-							StatefulResourcePolicy: infrav1alpha1.BuiltinStatefulResourcePolicyDelete,
-						},
-					},
-				},
-			},
-		}))
-		if err != nil {
-			t.Fatalf("cleanup builtin resources: %v", err)
-		}
-
-		assertMissingObject(t, client, &appsv1.StatefulSet{}, "sandbox0-system", "demo-clickhouse")
-		assertMissingObject(t, client, &corev1.Service{}, "sandbox0-system", "demo-clickhouse")
-		assertMissingObject(t, client, &corev1.Secret{}, "sandbox0-system", "demo-clickhouse-credentials")
-		assertMissingObject(t, client, &corev1.PersistentVolumeClaim{}, "sandbox0-system", "demo-clickhouse-data")
-	})
-}
 
 func TestGatewayCollectorConfigMergesExternalSecretHeaders(t *testing.T) {
 	reconciler, _ := newTestReconciler(t,
@@ -170,20 +87,5 @@ func observabilityTestInfra(spec infrav1alpha1.Sandbox0InfraSpec) *infrav1alpha1
 		},
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
 		Spec:       spec,
-	}
-}
-
-func assertPresentObject(t *testing.T, client ctrlclient.Client, obj ctrlclient.Object, namespace, name string) {
-	t.Helper()
-	if err := client.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: name}, obj); err != nil {
-		t.Fatalf("expected %T %s/%s to exist: %v", obj, namespace, name, err)
-	}
-}
-
-func assertMissingObject(t *testing.T, client ctrlclient.Client, obj ctrlclient.Object, namespace, name string) {
-	t.Helper()
-	err := client.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: name}, obj)
-	if err == nil {
-		t.Fatalf("expected %T %s/%s to be deleted", obj, namespace, name)
 	}
 }

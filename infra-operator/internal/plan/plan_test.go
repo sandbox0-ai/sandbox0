@@ -1089,7 +1089,13 @@ func TestCompileTracksObservabilityBackendIntegration(t *testing.T) {
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
 			Observability: &infrav1alpha1.ObservabilityConfig{
 				Backend: &infrav1alpha1.ObservabilityBackendConfig{
-					Type: infrav1alpha1.ObservabilityBackendTypeBuiltin,
+					Type: infrav1alpha1.ObservabilityBackendTypeExternal,
+					External: &infrav1alpha1.ExternalObservabilityBackendConfig{
+						Mode: infrav1alpha1.ObservabilityExternalModeManagedCollector,
+						OTLP: &infrav1alpha1.ObservabilityOTLPConfig{
+							Endpoint: "otel.example.com:4317",
+						},
+					},
 				},
 			},
 		},
@@ -1099,9 +1105,6 @@ func TestCompileTracksObservabilityBackendIntegration(t *testing.T) {
 
 	if !compiled.Components.EnableObservability {
 		t.Fatal("expected observability backend integration to be enabled")
-	}
-	if compiled.Cleanup.CleanupBuiltinObservability {
-		t.Fatal("did not expect builtin observability cleanup while builtin backend is active")
 	}
 	if !containsString(workflowStepNames(compiled.Workflow.Steps), "observability") {
 		t.Fatalf("expected observability workflow step, got %#v", workflowStepNames(compiled.Workflow.Steps))

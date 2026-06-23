@@ -1599,238 +1599,19 @@ spec:
                 type: object
               observability:
                 description: |-
-                  Observability configures standard telemetry collection for platform services
-                  and optional operator-managed backend integration.
+                  Observability configures standard telemetry collection and export for
+                  platform services.
                 properties:
                   backend:
                     default:
                       type: disabled
                     description: |-
-                      Backend configures optional observability backend integration. It is
-                      disabled by default.
+                      Backend configures optional observability export integration. It is disabled
+                      by default. Sandbox0 does not manage an observability storage backend.
                     properties:
-                      builtin:
-                        description: Builtin configures the operator-managed built-in
-                          backend.
-                        properties:
-                          clickhouse:
-                            description: ClickHouse configures the built-in ClickHouse
-                              instance.
-                            properties:
-                              database:
-                                default: otel
-                                description: Database specifies the ClickHouse database
-                                  created for telemetry tables.
-                                type: string
-                                x-kubernetes-validations:
-                                - message: database is immutable after creation
-                                  rule: self == oldSelf
-                              httpPort:
-                                default: 8123
-                                description: HTTPPort is the ClickHouse HTTP port.
-                                format: int32
-                                type: integer
-                              image:
-                                default: clickhouse/clickhouse-server:25.6
-                                description: Image specifies the ClickHouse image.
-                                type: string
-                              nativePort:
-                                default: 9000
-                                description: NativePort is the ClickHouse native TCP
-                                  port.
-                                format: int32
-                                type: integer
-                                x-kubernetes-validations:
-                                - message: nativePort is immutable after creation
-                                  rule: self == oldSelf
-                              persistence:
-                                description: Persistence configures ClickHouse storage.
-                                properties:
-                                  size:
-                                    anyOf:
-                                    - type: integer
-                                    - type: string
-                                    default: 20Gi
-                                    description: Size specifies the storage size
-                                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                                    x-kubernetes-int-or-string: true
-                                  storageClass:
-                                    description: StorageClass specifies the storage
-                                      class (empty for default)
-                                    type: string
-                                type: object
-                                x-kubernetes-validations:
-                                - message: persistence is immutable after creation
-                                  rule: self == oldSelf
-                              resources:
-                                description: Resources overrides the ClickHouse container
-                                  resources.
-                                properties:
-                                  claims:
-                                    description: |-
-                                      Claims lists the names of resources, defined in spec.resourceClaims,
-                                      that are used by this container.
-
-                                      This field depends on the
-                                      DynamicResourceAllocation feature gate.
-
-                                      This field is immutable. It can only be set for containers.
-                                    items:
-                                      description: ResourceClaim references one entry
-                                        in PodSpec.ResourceClaims.
-                                      properties:
-                                        name:
-                                          description: |-
-                                            Name must match the name of one entry in pod.spec.resourceClaims of
-                                            the Pod where this field is used. It makes that resource available
-                                            inside a container.
-                                          type: string
-                                        request:
-                                          description: |-
-                                            Request is the name chosen for a request in the referenced claim.
-                                            If empty, everything from the claim is made available, otherwise
-                                            only the result of this request.
-                                          type: string
-                                      required:
-                                      - name
-                                      type: object
-                                    type: array
-                                    x-kubernetes-list-map-keys:
-                                    - name
-                                    x-kubernetes-list-type: map
-                                  limits:
-                                    additionalProperties:
-                                      anyOf:
-                                      - type: integer
-                                      - type: string
-                                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                                      x-kubernetes-int-or-string: true
-                                    description: |-
-                                      Limits describes the maximum amount of compute resources allowed.
-                                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
-                                    type: object
-                                  requests:
-                                    additionalProperties:
-                                      anyOf:
-                                      - type: integer
-                                      - type: string
-                                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                                      x-kubernetes-int-or-string: true
-                                    description: |-
-                                      Requests describes the minimum amount of compute resources required.
-                                      If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
-                                      otherwise to an implementation-defined value. Requests cannot exceed Limits.
-                                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
-                                    type: object
-                                type: object
-                              statefulResourcePolicy:
-                                default: Retain
-                                description: |-
-                                  StatefulResourcePolicy controls what happens to the builtin PVC and
-                                  credentials secret when the builtin backend is disabled or replaced.
-                                enum:
-                                - Retain
-                                - Delete
-                                type: string
-                              username:
-                                default: otel
-                                description: Username specifies the ClickHouse user.
-                                type: string
-                                x-kubernetes-validations:
-                                - message: username is immutable after creation
-                                  rule: self == oldSelf
-                            type: object
-                            x-kubernetes-validations:
-                            - message: persistence presence is immutable after creation
-                              rule: has(self.persistence) == has(oldSelf.persistence)
-                          collector:
-                            description: Collector configures the operator-managed
-                              OpenTelemetry Collector.
-                            properties:
-                              image:
-                                default: otel/opentelemetry-collector-contrib:0.130.1
-                                description: Image specifies the OpenTelemetry Collector
-                                  contrib image.
-                                type: string
-                              replicas:
-                                default: 1
-                                description: Replicas configures gateway collector
-                                  replicas.
-                                format: int32
-                                type: integer
-                              resources:
-                                description: Resources overrides collector container
-                                  resources.
-                                properties:
-                                  claims:
-                                    description: |-
-                                      Claims lists the names of resources, defined in spec.resourceClaims,
-                                      that are used by this container.
-
-                                      This field depends on the
-                                      DynamicResourceAllocation feature gate.
-
-                                      This field is immutable. It can only be set for containers.
-                                    items:
-                                      description: ResourceClaim references one entry
-                                        in PodSpec.ResourceClaims.
-                                      properties:
-                                        name:
-                                          description: |-
-                                            Name must match the name of one entry in pod.spec.resourceClaims of
-                                            the Pod where this field is used. It makes that resource available
-                                            inside a container.
-                                          type: string
-                                        request:
-                                          description: |-
-                                            Request is the name chosen for a request in the referenced claim.
-                                            If empty, everything from the claim is made available, otherwise
-                                            only the result of this request.
-                                          type: string
-                                      required:
-                                      - name
-                                      type: object
-                                    type: array
-                                    x-kubernetes-list-map-keys:
-                                    - name
-                                    x-kubernetes-list-type: map
-                                  limits:
-                                    additionalProperties:
-                                      anyOf:
-                                      - type: integer
-                                      - type: string
-                                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                                      x-kubernetes-int-or-string: true
-                                    description: |-
-                                      Limits describes the maximum amount of compute resources allowed.
-                                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
-                                    type: object
-                                  requests:
-                                    additionalProperties:
-                                      anyOf:
-                                      - type: integer
-                                      - type: string
-                                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                                      x-kubernetes-int-or-string: true
-                                    description: |-
-                                      Requests describes the minimum amount of compute resources required.
-                                      If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
-                                      otherwise to an implementation-defined value. Requests cannot exceed Limits.
-                                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
-                                    type: object
-                                type: object
-                            type: object
-                          provider:
-                            default: clickhouse
-                            description: Provider selects the built-in backend provider.
-                              Defaults to clickhouse.
-                            enum:
-                            - clickhouse
-                            type: string
-                        type: object
                       external:
-                        description: External configures integration with a user-owned
-                          observability backend.
+                        description: External configures integration with user-owned
+                          observability infrastructure.
                         properties:
                           collector:
                             description: |-
@@ -1921,7 +1702,7 @@ spec:
                             type: string
                           otlp:
                             description: OTLP configures the OTLP endpoint used for
-                              external backend integration.
+                              external export integration.
                             properties:
                               endpoint:
                                 description: Endpoint is the OTLP gRPC endpoint.
@@ -1958,18 +1739,17 @@ spec:
                         type: object
                       type:
                         default: disabled
-                        description: Type selects the backend integration mode. Defaults
+                        description: Type selects the export integration mode. Defaults
                           to disabled.
                         enum:
                         - disabled
-                        - builtin
                         - external
                         type: string
                     type: object
                   collection:
                     description: |-
-                      Collection configures which signals sandbox0 should collect when a
-                      backend is enabled. It does not define user-facing query APIs.
+                      Collection configures which signals sandbox0 should collect when
+                      observability export is enabled. It does not define user-facing query APIs.
                     properties:
                       logs:
                         description: Logs configures platform and sandbox pod log
@@ -1978,8 +1758,8 @@ spec:
                           enabled:
                             default: true
                             description: |-
-                              Enabled enables this signal. Defaults to true when an observability
-                              backend is enabled.
+                              Enabled enables this signal. Defaults to true when observability export is
+                              enabled.
                             type: boolean
                         type: object
                       metrics:
@@ -1989,8 +1769,8 @@ spec:
                           enabled:
                             default: true
                             description: |-
-                              Enabled enables this signal. Defaults to true when an observability
-                              backend is enabled.
+                              Enabled enables this signal. Defaults to true when observability export is
+                              enabled.
                             type: boolean
                         type: object
                       traces:
@@ -1999,8 +1779,8 @@ spec:
                           enabled:
                             default: true
                             description: |-
-                              Enabled enables this signal. Defaults to true when an observability
-                              backend is enabled.
+                              Enabled enables this signal. Defaults to true when observability export is
+                              enabled.
                             type: boolean
                         type: object
                     type: object
@@ -2016,7 +1796,7 @@ spec:
                     description: |-
                       Traces configures trace export through standard OpenTelemetry env vars.
                       This legacy direct exporter config remains supported and takes precedence
-                      over backend-derived trace endpoint defaults.
+                      over export-derived trace endpoint defaults.
                     properties:
                       enabled:
                         description: |-

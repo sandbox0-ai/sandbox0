@@ -117,8 +117,6 @@ func ObservabilityBackendEnabled(infra *infrav1alpha1.Sandbox0Infra) bool {
 
 func ManagedObservabilityCollectorEnabled(infra *infrav1alpha1.Sandbox0Infra) bool {
 	switch ResolveObservabilityBackendType(infra) {
-	case infrav1alpha1.ObservabilityBackendTypeBuiltin:
-		return true
 	case infrav1alpha1.ObservabilityBackendTypeExternal:
 		return ResolveExternalObservabilityMode(infra) == infrav1alpha1.ObservabilityExternalModeManagedCollector
 	default:

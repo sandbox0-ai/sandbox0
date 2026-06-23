@@ -72,16 +72,12 @@ type RegistryProvider string
 // +kubebuilder:validation:Enum=otlp;stdout;noop
 type ObservabilityTraceExporter string
 
-// ObservabilityBackendType defines the operator-managed observability backend mode.
-// +kubebuilder:validation:Enum=disabled;builtin;external
+// ObservabilityBackendType defines the observability export integration mode.
+// +kubebuilder:validation:Enum=disabled;external
 type ObservabilityBackendType string
 
-// ObservabilityBuiltinProvider defines the built-in observability storage backend.
-// +kubebuilder:validation:Enum=clickhouse
-type ObservabilityBuiltinProvider string
-
-// ObservabilityExternalMode defines how sandbox0 integrates with an external
-// observability backend.
+// ObservabilityExternalMode defines how sandbox0 exports telemetry to external
+// observability infrastructure.
 // +kubebuilder:validation:Enum=managedCollector;existingCollector
 type ObservabilityExternalMode string
 
@@ -108,12 +104,7 @@ const (
 
 const (
 	ObservabilityBackendTypeDisabled ObservabilityBackendType = "disabled"
-	ObservabilityBackendTypeBuiltin  ObservabilityBackendType = "builtin"
 	ObservabilityBackendTypeExternal ObservabilityBackendType = "external"
-)
-
-const (
-	ObservabilityBuiltinProviderClickHouse ObservabilityBuiltinProvider = "clickhouse"
 )
 
 const (
@@ -180,8 +171,8 @@ type Sandbox0InfraSpec struct {
 	// +optional
 	EnterpriseLicense *EnterpriseLicenseConfig `json:"enterpriseLicense,omitempty"`
 
-	// Observability configures standard telemetry collection for platform services
-	// and optional operator-managed backend integration.
+	// Observability configures standard telemetry collection and export for
+	// platform services.
 	// +optional
 	Observability *ObservabilityConfig `json:"observability,omitempty"`
 
@@ -238,102 +229,34 @@ type ObservabilityConfig struct {
 	// +optional
 	ResourceAttributes map[string]string `json:"resourceAttributes,omitempty"`
 
-	// Backend configures optional observability backend integration. It is
-	// disabled by default.
+	// Backend configures optional observability export integration. It is disabled
+	// by default. Sandbox0 does not manage an observability storage backend.
 	// +optional
 	// +kubebuilder:default={type:disabled}
 	Backend *ObservabilityBackendConfig `json:"backend,omitempty"`
 
-	// Collection configures which signals sandbox0 should collect when a
-	// backend is enabled. It does not define user-facing query APIs.
+	// Collection configures which signals sandbox0 should collect when
+	// observability export is enabled. It does not define user-facing query APIs.
 	// +optional
 	Collection *ObservabilityCollectionConfig `json:"collection,omitempty"`
 
 	// Traces configures trace export through standard OpenTelemetry env vars.
 	// This legacy direct exporter config remains supported and takes precedence
-	// over backend-derived trace endpoint defaults.
+	// over export-derived trace endpoint defaults.
 	// +optional
 	Traces *ObservabilityTracesConfig `json:"traces,omitempty"`
 }
 
-// ObservabilityBackendConfig configures optional backend integration.
+// ObservabilityBackendConfig configures optional telemetry export integration.
 type ObservabilityBackendConfig struct {
-	// Type selects the backend integration mode. Defaults to disabled.
+	// Type selects the export integration mode. Defaults to disabled.
 	// +kubebuilder:default=disabled
 	// +optional
 	Type ObservabilityBackendType `json:"type,omitempty"`
 
-	// Builtin configures the operator-managed built-in backend.
-	// +optional
-	Builtin *BuiltinObservabilityBackendConfig `json:"builtin,omitempty"`
-
-	// External configures integration with a user-owned observability backend.
+	// External configures integration with user-owned observability infrastructure.
 	// +optional
 	External *ExternalObservabilityBackendConfig `json:"external,omitempty"`
-}
-
-// BuiltinObservabilityBackendConfig configures the built-in backend.
-type BuiltinObservabilityBackendConfig struct {
-	// Provider selects the built-in backend provider. Defaults to clickhouse.
-	// +kubebuilder:default=clickhouse
-	// +optional
-	Provider ObservabilityBuiltinProvider `json:"provider,omitempty"`
-
-	// ClickHouse configures the built-in ClickHouse instance.
-	// +optional
-	ClickHouse *BuiltinObservabilityClickHouseConfig `json:"clickhouse,omitempty"`
-
-	// Collector configures the operator-managed OpenTelemetry Collector.
-	// +optional
-	Collector *ManagedObservabilityCollectorConfig `json:"collector,omitempty"`
-}
-
-// BuiltinObservabilityClickHouseConfig configures a single-node ClickHouse
-// backend for local self-hosted observability collection.
-// +kubebuilder:validation:XValidation:rule="has(self.persistence) == has(oldSelf.persistence)",message="persistence presence is immutable after creation"
-type BuiltinObservabilityClickHouseConfig struct {
-	// Image specifies the ClickHouse image.
-	// +kubebuilder:default="clickhouse/clickhouse-server:25.6"
-	// +optional
-	Image string `json:"image,omitempty"`
-
-	// NativePort is the ClickHouse native TCP port.
-	// +kubebuilder:default=9000
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="nativePort is immutable after creation"
-	// +optional
-	NativePort int32 `json:"nativePort,omitempty"`
-
-	// HTTPPort is the ClickHouse HTTP port.
-	// +kubebuilder:default=8123
-	// +optional
-	HTTPPort int32 `json:"httpPort,omitempty"`
-
-	// Database specifies the ClickHouse database created for telemetry tables.
-	// +kubebuilder:default="otel"
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="database is immutable after creation"
-	// +optional
-	Database string `json:"database,omitempty"`
-
-	// Username specifies the ClickHouse user.
-	// +kubebuilder:default="otel"
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="username is immutable after creation"
-	// +optional
-	Username string `json:"username,omitempty"`
-
-	// Persistence configures ClickHouse storage.
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="persistence is immutable after creation"
-	// +optional
-	Persistence *PersistenceConfig `json:"persistence,omitempty"`
-
-	// Resources overrides the ClickHouse container resources.
-	// +optional
-	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
-
-	// StatefulResourcePolicy controls what happens to the builtin PVC and
-	// credentials secret when the builtin backend is disabled or replaced.
-	// +kubebuilder:default=Retain
-	// +optional
-	StatefulResourcePolicy BuiltinStatefulResourcePolicy `json:"statefulResourcePolicy,omitempty"`
 }
 
 // ManagedObservabilityCollectorConfig configures operator-managed collectors.
@@ -362,7 +285,7 @@ type ExternalObservabilityBackendConfig struct {
 	// +optional
 	Mode ObservabilityExternalMode `json:"mode,omitempty"`
 
-	// OTLP configures the OTLP endpoint used for external backend integration.
+	// OTLP configures the OTLP endpoint used for external export integration.
 	// +optional
 	OTLP *ObservabilityOTLPConfig `json:"otlp,omitempty"`
 
@@ -372,7 +295,8 @@ type ExternalObservabilityBackendConfig struct {
 	Collector *ManagedObservabilityCollectorConfig `json:"collector,omitempty"`
 }
 
-// ObservabilityOTLPConfig configures OTLP export to a collector or backend.
+// ObservabilityOTLPConfig configures OTLP export to a collector or observability
+// endpoint.
 type ObservabilityOTLPConfig struct {
 	// Endpoint is the OTLP gRPC endpoint.
 	// +optional
@@ -407,8 +331,8 @@ type ObservabilityHeadersSecretRef struct {
 	Key string `json:"key,omitempty"`
 }
 
-// ObservabilityCollectionConfig configures signal collection defaults for an
-// enabled backend.
+// ObservabilityCollectionConfig configures signal collection defaults for enabled
+// observability export.
 type ObservabilityCollectionConfig struct {
 	// Logs configures platform and sandbox pod log collection.
 	// +optional
@@ -425,8 +349,8 @@ type ObservabilityCollectionConfig struct {
 
 // ObservabilitySignalCollectionConfig configures a telemetry signal toggle.
 type ObservabilitySignalCollectionConfig struct {
-	// Enabled enables this signal. Defaults to true when an observability
-	// backend is enabled.
+	// Enabled enables this signal. Defaults to true when observability export is
+	// enabled.
 	// +kubebuilder:default=true
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`

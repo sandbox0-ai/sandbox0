@@ -56,20 +56,22 @@ Idle template pool pods are capacity, not billable sandbox runtime. Public templ
 
 ## Platform Observability
 
-Sandbox0 platform services emit logs to container stdout and expose Prometheus-compatible metrics on their metrics ports. Configure `spec.observability` when you want the operator to wire sandbox0-owned platform components into an observability backend.
+Sandbox0 platform services emit logs to container stdout and expose Prometheus-compatible metrics on their metrics ports. Configure `spec.observability` when you want the operator to export sandbox0-owned platform telemetry to your observability stack.
 
-Observability is disabled by default. The operator owns collection integration only: it can install collectors and a local builtin backend, or point platform services at an external collector. User-facing sandbox observability APIs, query adapters, dashboards, and retention policy beyond the selected backend remain outside this layer.
+Observability is disabled by default. The operator owns collection and export integration only: it can point platform services at an external collector, or install OpenTelemetry Collectors that export to your OTLP endpoint. Sandbox0 does not install or manage an observability storage/query backend. User-facing sandbox observability APIs, query adapters, dashboards, and retention policy remain outside this layer.
+
+In `managedCollector` mode sandbox0 installs collectors for logs, metrics, and traces, then exports to your OTLP endpoint:
 
 ```yaml
 spec:
     observability:
         backend:
-            type: builtin
-            builtin:
-                provider: clickhouse
-                clickhouse:
-                    persistence:
-                        size: 50Gi
+            type: external
+            external:
+                mode: managedCollector
+                otlp:
+                    endpoint: otel-gateway.example.com:4317
+                    insecure: false
         resourceAttributes:
             deployment.environment: production
         collection:
@@ -81,9 +83,7 @@ spec:
                 enabled: true
 ```
 
-The builtin backend installs an OpenTelemetry Collector and a single-node ClickHouse instance. Use it for local self-hosted environments and small deployments where a built-in collection target is enough.
-
-If your platform already has an observability stack, use `external`. In `existingCollector` mode sandbox0 does not install collectors; it only injects standard OTEL trace environment variables into platform services:
+If your platform already runs collectors, use `existingCollector`. In this mode sandbox0 does not install collectors; it only injects standard OTEL trace environment variables into platform services:
 
 ```yaml
 spec:
@@ -100,21 +100,7 @@ spec:
                     insecure: true
 ```
 
-In `managedCollector` mode sandbox0 installs collectors for logs, metrics, and traces, then exports to your OTLP endpoint:
-
-```yaml
-spec:
-    observability:
-        backend:
-            type: external
-            external:
-                mode: managedCollector
-                otlp:
-                    endpoint: otel-gateway.example.com:4317
-                    insecure: false
-```
-
-The legacy direct trace exporter config remains supported and overrides backend-derived trace endpoint defaults:
+The legacy direct trace exporter config remains supported and overrides export-derived trace endpoint defaults:
 
 ```yaml
 spec:

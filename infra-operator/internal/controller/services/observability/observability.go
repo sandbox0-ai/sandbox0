@@ -25,13 +25,7 @@ import (
 )
 
 const (
-	defaultCollectorImage   = "otel/opentelemetry-collector-contrib:0.130.1"
-	defaultClickHouseImage  = "clickhouse/clickhouse-server:25.6"
-	defaultClickHouseDB     = "otel"
-	defaultClickHouseUser   = "otel"
-	defaultClickHouseNative = int32(9000)
-	defaultClickHouseHTTP   = int32(8123)
-	defaultClickHousePVC    = "20Gi"
+	defaultCollectorImage = "otel/opentelemetry-collector-contrib:0.130.1"
 
 	agentComponentName      = "otel-agent"
 	collectorConfigFileName = "config.yaml"
@@ -39,17 +33,6 @@ const (
 
 type Reconciler struct {
 	Resources *common.ResourceManager
-}
-
-type clickHouseConfig struct {
-	Image                  string
-	NativePort             int32
-	HTTPPort               int32
-	Database               string
-	Username               string
-	Persistence            *infrav1alpha1.PersistenceConfig
-	Resources              *corev1.ResourceRequirements
-	StatefulResourcePolicy infrav1alpha1.BuiltinStatefulResourcePolicy
 }
 
 type collectorConfig struct {
@@ -67,24 +50,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	switch common.ResolveObservabilityBackendType(infra) {
 	case infrav1alpha1.ObservabilityBackendTypeDisabled, "":
 		logger.Info("Observability backend is disabled")
-		if err := r.cleanupManagedCollectorResources(ctx, infra); err != nil {
-			return err
-		}
-		return r.cleanupBuiltinClickHouseResources(ctx, infra)
-	case infrav1alpha1.ObservabilityBackendTypeBuiltin:
-		logger.Info("Reconciling builtin observability backend")
-		if err := r.reconcileBuiltinClickHouse(ctx, infra); err != nil {
-			return err
-		}
-		if collectorRequired(infra) {
-			return r.reconcileManagedCollectors(ctx, infra)
-		}
 		return r.cleanupManagedCollectorResources(ctx, infra)
 	case infrav1alpha1.ObservabilityBackendTypeExternal:
 		logger.Info("Reconciling external observability backend integration")
-		if err := r.cleanupBuiltinClickHouseResources(ctx, infra); err != nil {
-			return err
-		}
 		if common.ResolveExternalObservabilityMode(infra) == infrav1alpha1.ObservabilityExternalModeManagedCollector {
 			if collectorRequired(infra) {
 				return r.reconcileManagedCollectors(ctx, infra)
@@ -95,212 +63,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	default:
 		return fmt.Errorf("unsupported observability backend type: %s", common.ResolveObservabilityBackendType(infra))
 	}
-}
-
-func (r *Reconciler) CleanupBuiltinResources(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
-	return r.cleanupBuiltinClickHouseResources(ctx, infra)
-}
-
-func (r *Reconciler) reconcileBuiltinClickHouse(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
-	if err := r.reconcileClickHouseSecret(ctx, infra); err != nil {
-		return err
-	}
-	if err := r.reconcileClickHousePVC(ctx, infra); err != nil {
-		return err
-	}
-	if err := r.reconcileClickHouseStatefulSet(ctx, infra); err != nil {
-		return err
-	}
-	if err := r.reconcileClickHouseService(ctx, infra); err != nil {
-		return err
-	}
-	return r.ensureClickHouseReady(ctx, infra)
-}
-
-func (r *Reconciler) reconcileClickHouseSecret(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
-	name := common.BuiltinObservabilityClickHouseSecretName(infra.Name)
-	cfg := resolveClickHouseConfig(infra)
-	host := common.BuiltinObservabilityClickHouseName(infra.Name)
-	nativeEndpoint := fmt.Sprintf("tcp://%s.%s.svc:%d", host, infra.Namespace, cfg.NativePort)
-	httpEndpoint := fmt.Sprintf("http://%s.%s.svc:%d", host, infra.Namespace, cfg.HTTPPort)
-
-	secret := &corev1.Secret{}
-	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, secret)
-	if err != nil && !errors.IsNotFound(err) {
-		return err
-	}
-	if errors.IsNotFound(err) {
-		secret = &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: infra.Namespace},
-			Type:       corev1.SecretTypeOpaque,
-			StringData: map[string]string{
-				"username":       cfg.Username,
-				"password":       common.GenerateRandomString(32),
-				"database":       cfg.Database,
-				"host":           host,
-				"nativePort":     fmt.Sprintf("%d", cfg.NativePort),
-				"httpPort":       fmt.Sprintf("%d", cfg.HTTPPort),
-				"nativeEndpoint": nativeEndpoint,
-				"httpEndpoint":   httpEndpoint,
-			},
-		}
-		if err := ctrl.SetControllerReference(infra, secret, r.Resources.Scheme); err != nil {
-			return err
-		}
-		return r.Resources.Client.Create(ctx, secret)
-	}
-
-	return r.Resources.UpdateObjectIfChanged(ctx, secret, func() {
-		if secret.Data == nil {
-			secret.Data = map[string][]byte{}
-		}
-		secret.Data["host"] = []byte(host)
-		secret.Data["nativeEndpoint"] = []byte(nativeEndpoint)
-		secret.Data["httpEndpoint"] = []byte(httpEndpoint)
-	})
-}
-
-func (r *Reconciler) reconcileClickHousePVC(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
-	name := common.BuiltinObservabilityClickHousePVCName(infra.Name)
-	cfg := resolveClickHouseConfig(infra)
-
-	pvc := &corev1.PersistentVolumeClaim{}
-	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, pvc)
-	if err != nil && !errors.IsNotFound(err) {
-		return err
-	}
-	if err == nil {
-		return nil
-	}
-
-	size := resource.MustParse(defaultClickHousePVC)
-	var storageClass string
-	if cfg.Persistence != nil {
-		if !cfg.Persistence.Size.IsZero() {
-			size = cfg.Persistence.Size
-		}
-		storageClass = strings.TrimSpace(cfg.Persistence.StorageClass)
-	}
-	pvc = &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: infra.Namespace},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-			Resources: corev1.VolumeResourceRequirements{
-				Requests: corev1.ResourceList{corev1.ResourceStorage: size},
-			},
-		},
-	}
-	if storageClass != "" {
-		pvc.Spec.StorageClassName = &storageClass
-	}
-	if err := ctrl.SetControllerReference(infra, pvc, r.Resources.Scheme); err != nil {
-		return err
-	}
-	return r.Resources.Client.Create(ctx, pvc)
-}
-
-func (r *Reconciler) reconcileClickHouseStatefulSet(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
-	name := common.BuiltinObservabilityClickHouseName(infra.Name)
-	secretName := common.BuiltinObservabilityClickHouseSecretName(infra.Name)
-	pvcName := common.BuiltinObservabilityClickHousePVCName(infra.Name)
-	cfg := resolveClickHouseConfig(infra)
-	labels := common.GetServiceLabels(infra.Name, "clickhouse")
-	replicas := int32(1)
-	resources := corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("250m"),
-			corev1.ResourceMemory: resource.MustParse("512Mi"),
-		},
-		Limits: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("2"),
-			corev1.ResourceMemory: resource.MustParse("2Gi"),
-		},
-	}
-	if cfg.Resources != nil {
-		resources = *cfg.Resources
-	}
-
-	sts := &appsv1.StatefulSet{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: infra.Namespace, Labels: common.EnsureManagedLabels(labels, name)},
-		Spec: appsv1.StatefulSetSpec{
-			ServiceName: name,
-			Replicas:    &replicas,
-			Selector:    &metav1.LabelSelector{MatchLabels: labels},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels:      common.EnsureManagedLabels(labels, name),
-					Annotations: common.EnsurePodTemplateAnnotations(nil),
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "clickhouse",
-							Image: cfg.Image,
-							Ports: []corev1.ContainerPort{
-								{Name: "native", ContainerPort: cfg.NativePort},
-								{Name: "http", ContainerPort: cfg.HTTPPort},
-							},
-							Env: []corev1.EnvVar{
-								secretEnv("CLICKHOUSE_DB", secretName, "database"),
-								secretEnv("CLICKHOUSE_USER", secretName, "username"),
-								secretEnv("CLICKHOUSE_PASSWORD", secretName, "password"),
-								{Name: "CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT", Value: "1"},
-							},
-							VolumeMounts: []corev1.VolumeMount{
-								{Name: "data", MountPath: "/var/lib/clickhouse"},
-							},
-							Resources: resources,
-							LivenessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									HTTPGet: &corev1.HTTPGetAction{Path: "/ping", Port: intstr.FromString("http")},
-								},
-								InitialDelaySeconds: 30,
-								PeriodSeconds:       10,
-							},
-							ReadinessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									HTTPGet: &corev1.HTTPGetAction{Path: "/ping", Port: intstr.FromString("http")},
-								},
-								InitialDelaySeconds: 10,
-								PeriodSeconds:       5,
-							},
-						},
-					},
-					Volumes: []corev1.Volume{
-						{
-							Name: "data",
-							VolumeSource: corev1.VolumeSource{
-								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvcName},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-	return r.Resources.ApplyStatefulSet(ctx, infra, sts)
-}
-
-func (r *Reconciler) reconcileClickHouseService(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
-	name := common.BuiltinObservabilityClickHouseName(infra.Name)
-	cfg := resolveClickHouseConfig(infra)
-	labels := common.GetServiceLabels(infra.Name, "clickhouse")
-	return r.Resources.ReconcileServicePorts(ctx, infra, name, labels, corev1.ServiceTypeClusterIP, nil, []corev1.ServicePort{
-		{Name: "native", Port: cfg.NativePort, TargetPort: intstr.FromString("native"), Protocol: corev1.ProtocolTCP},
-		{Name: "http", Port: cfg.HTTPPort, TargetPort: intstr.FromString("http"), Protocol: corev1.ProtocolTCP},
-	})
-}
-
-func (r *Reconciler) ensureClickHouseReady(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
-	name := common.BuiltinObservabilityClickHouseName(infra.Name)
-	sts := &appsv1.StatefulSet{}
-	if err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, sts); err != nil {
-		return err
-	}
-	if sts.Status.ReadyReplicas < 1 {
-		return fmt.Errorf("clickhouse statefulset %q not ready: %d/1 ready", name, sts.Status.ReadyReplicas)
-	}
-	return nil
 }
 
 func (r *Reconciler) reconcileManagedCollectors(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
@@ -486,21 +248,6 @@ func (r *Reconciler) gatewayCollectorConfig(ctx context.Context, infra *infrav1a
 
 func (r *Reconciler) gatewayExporters(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (map[string]any, []corev1.EnvVar, error) {
 	switch common.ResolveObservabilityBackendType(infra) {
-	case infrav1alpha1.ObservabilityBackendTypeBuiltin:
-		secretName := common.BuiltinObservabilityClickHouseSecretName(infra.Name)
-		return map[string]any{
-				"clickhouse": map[string]any{
-					"endpoint": "${env:CLICKHOUSE_ENDPOINT}",
-					"username": "${env:CLICKHOUSE_USERNAME}",
-					"password": "${env:CLICKHOUSE_PASSWORD}",
-					"database": "${env:CLICKHOUSE_DATABASE}",
-				},
-			}, []corev1.EnvVar{
-				secretEnv("CLICKHOUSE_ENDPOINT", secretName, "nativeEndpoint"),
-				secretEnv("CLICKHOUSE_USERNAME", secretName, "username"),
-				secretEnv("CLICKHOUSE_PASSWORD", secretName, "password"),
-				secretEnv("CLICKHOUSE_DATABASE", secretName, "database"),
-			}, nil
 	case infrav1alpha1.ObservabilityBackendTypeExternal:
 		otlp := externalOTLPConfig(infra)
 		headers, err := r.resolveExternalHeaders(ctx, infra, otlp)
@@ -834,23 +581,6 @@ func (r *Reconciler) cleanupAgentCollectorResources(ctx context.Context, infra *
 	return r.deleteNamespaced(ctx, infra.Namespace, fmt.Sprintf("%s-config", name), &corev1.Secret{})
 }
 
-func (r *Reconciler) cleanupBuiltinClickHouseResources(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
-	name := common.BuiltinObservabilityClickHouseName(infra.Name)
-	if err := r.deleteNamespaced(ctx, infra.Namespace, name, &appsv1.StatefulSet{}); err != nil {
-		return err
-	}
-	if err := r.deleteNamespaced(ctx, infra.Namespace, name, &corev1.Service{}); err != nil {
-		return err
-	}
-	if resolveClickHouseConfig(infra).StatefulResourcePolicy != infrav1alpha1.BuiltinStatefulResourcePolicyDelete {
-		return nil
-	}
-	if err := r.deleteNamespaced(ctx, infra.Namespace, common.BuiltinObservabilityClickHouseSecretName(infra.Name), &corev1.Secret{}); err != nil {
-		return err
-	}
-	return r.deleteNamespaced(ctx, infra.Namespace, common.BuiltinObservabilityClickHousePVCName(infra.Name), &corev1.PersistentVolumeClaim{})
-}
-
 func (r *Reconciler) deleteNamespaced(ctx context.Context, namespace, name string, obj client.Object) error {
 	if err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, obj); err != nil {
 		if errors.IsNotFound(err) {
@@ -936,55 +666,11 @@ func parseHeaderList(value string) map[string]string {
 	return headers
 }
 
-func resolveClickHouseConfig(infra *infrav1alpha1.Sandbox0Infra) clickHouseConfig {
-	cfg := clickHouseConfig{
-		Image:                  defaultClickHouseImage,
-		NativePort:             defaultClickHouseNative,
-		HTTPPort:               defaultClickHouseHTTP,
-		Database:               defaultClickHouseDB,
-		Username:               defaultClickHouseUser,
-		StatefulResourcePolicy: infrav1alpha1.BuiltinStatefulResourcePolicyRetain,
-	}
-	if infra == nil || infra.Spec.Observability == nil || infra.Spec.Observability.Backend == nil ||
-		infra.Spec.Observability.Backend.Builtin == nil || infra.Spec.Observability.Backend.Builtin.ClickHouse == nil {
-		return cfg
-	}
-	builtin := infra.Spec.Observability.Backend.Builtin.ClickHouse
-	if value := strings.TrimSpace(builtin.Image); value != "" {
-		cfg.Image = value
-	}
-	if builtin.NativePort != 0 {
-		cfg.NativePort = builtin.NativePort
-	}
-	if builtin.HTTPPort != 0 {
-		cfg.HTTPPort = builtin.HTTPPort
-	}
-	if value := strings.TrimSpace(builtin.Database); value != "" {
-		cfg.Database = value
-	}
-	if value := strings.TrimSpace(builtin.Username); value != "" {
-		cfg.Username = value
-	}
-	cfg.Persistence = builtin.Persistence
-	if builtin.Resources != nil {
-		cfg.Resources = builtin.Resources.DeepCopy()
-	}
-	if builtin.StatefulResourcePolicy != "" {
-		cfg.StatefulResourcePolicy = builtin.StatefulResourcePolicy
-	}
-	return cfg
-}
-
 func resolveCollectorConfig(infra *infrav1alpha1.Sandbox0Infra) collectorConfig {
 	cfg := collectorConfig{Image: defaultCollectorImage, Replicas: 1}
 	var spec *infrav1alpha1.ManagedObservabilityCollectorConfig
 	if infra != nil && infra.Spec.Observability != nil && infra.Spec.Observability.Backend != nil {
-		switch common.ResolveObservabilityBackendType(infra) {
-		case infrav1alpha1.ObservabilityBackendTypeBuiltin:
-			if infra.Spec.Observability.Backend.Builtin != nil {
-				spec = infra.Spec.Observability.Backend.Builtin.Collector
-			}
-		case infrav1alpha1.ObservabilityBackendTypeExternal:
+		if common.ResolveObservabilityBackendType(infra) == infrav1alpha1.ObservabilityBackendTypeExternal {
 			if infra.Spec.Observability.Backend.External != nil {
 				spec = infra.Spec.Observability.Backend.External.Collector
 			}
@@ -1022,18 +708,6 @@ func collectorRequired(infra *infrav1alpha1.Sandbox0Infra) bool {
 
 func agentCollectorName(infraName string) string {
 	return fmt.Sprintf("%s-%s", infraName, agentComponentName)
-}
-
-func secretEnv(envName, secretName, key string) corev1.EnvVar {
-	return corev1.EnvVar{
-		Name: envName,
-		ValueFrom: &corev1.EnvVarSource{
-			SecretKeyRef: &corev1.SecretKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-				Key:                  key,
-			},
-		},
-	}
 }
 
 func httpProbe(path string) *corev1.Probe {

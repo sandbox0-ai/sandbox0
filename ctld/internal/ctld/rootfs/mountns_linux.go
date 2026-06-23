@@ -167,7 +167,11 @@ func mountFuseFDInMountNamespace(targetPath, namespacePath, rootPath string, opt
 			flags = opts.DirectMountFlags
 		}
 		data := fuseMountData(fd, st.Mode&unix.S_IFMT, opts)
-		if err := unix.Mount(source, targetPath, "fuse", flags, data); err != nil {
+		fsType := "fuse"
+		if opts.Name != "" {
+			fsType += "." + opts.Name
+		}
+		if err := unix.Mount(source, targetPath, fsType, flags, data); err != nil {
 			return fmt.Errorf("mount fuse filesystem at %s: %w", targetPath, err)
 		}
 		return nil
@@ -201,12 +205,6 @@ func fuseMountData(fd int, rootMode uint32, opts *fuse.MountOptions) string {
 	}
 	if opts.AllowOther {
 		parts = append(parts, "allow_other")
-	}
-	if opts.FsName != "" {
-		parts = append(parts, "fsname="+escapeFuseMountOption(opts.FsName))
-	}
-	if opts.Name != "" {
-		parts = append(parts, "subtype="+escapeFuseMountOption(opts.Name))
 	}
 	for _, opt := range opts.Options {
 		if opt = strings.TrimSpace(opt); opt != "" {

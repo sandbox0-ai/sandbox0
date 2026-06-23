@@ -1596,15 +1596,18 @@ type SandboxAppServiceIngress struct {
 
 // SandboxAppServiceRoute defines model for SandboxAppServiceRoute.
 type SandboxAppServiceRoute struct {
-	Auth           *SandboxAppServiceRouteAuth      `json:"auth,omitempty"`
-	Cors           *SandboxAppServiceRouteCORS      `json:"cors,omitempty"`
-	Id             string                           `json:"id"`
-	Methods        *[]string                        `json:"methods,omitempty"`
-	PathPrefix     *string                          `json:"path_prefix,omitempty"`
-	RateLimit      *SandboxAppServiceRouteRateLimit `json:"rate_limit,omitempty"`
-	Resume         bool                             `json:"resume"`
-	RewritePrefix  *string                          `json:"rewrite_prefix"`
-	TimeoutSeconds *int32                           `json:"timeout_seconds,omitempty"`
+	Auth       *SandboxAppServiceRouteAuth      `json:"auth,omitempty"`
+	Cors       *SandboxAppServiceRouteCORS      `json:"cors,omitempty"`
+	Id         string                           `json:"id"`
+	Methods    *[]string                        `json:"methods,omitempty"`
+	PathPrefix *string                          `json:"path_prefix,omitempty"`
+	RateLimit  *SandboxAppServiceRouteRateLimit `json:"rate_limit,omitempty"`
+
+	// Resume Allows this public route to wake a paused sandbox when sandbox auto_resume is true.
+	// Resume-enabled public routes require a restartable service runtime: cmd or function.
+	Resume         bool    `json:"resume"`
+	RewritePrefix  *string `json:"rewrite_prefix"`
+	TimeoutSeconds *int32  `json:"timeout_seconds,omitempty"`
 }
 
 // SandboxAppServiceRouteAuth defines model for SandboxAppServiceRouteAuth.

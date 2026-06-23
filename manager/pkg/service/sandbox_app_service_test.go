@@ -108,6 +108,87 @@ func TestSandboxAppServicePublishBlockersRequirePublicRestartableRuntime(t *test
 	}
 }
 
+func TestNormalizeSandboxAppServicesRejectsResumeRouteWithoutRestartableRuntime(t *testing.T) {
+	tests := []struct {
+		name    string
+		runtime *SandboxAppServiceRuntime
+	}{
+		{
+			name: "missing runtime",
+		},
+		{
+			name:    "manual runtime",
+			runtime: &SandboxAppServiceRuntime{Type: SandboxAppServiceRuntimeManual},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NormalizeSandboxAppServices([]SandboxAppService{{
+				ID:      "api",
+				Port:    8080,
+				Runtime: tt.runtime,
+				Ingress: SandboxAppServiceIngress{
+					Public: true,
+					Routes: []SandboxAppServiceRoute{{
+						ID:         "api",
+						PathPrefix: "/",
+						Resume:     true,
+					}},
+				},
+			}})
+			if err == nil {
+				t.Fatal("NormalizeSandboxAppServices succeeded, want resume runtime error")
+			}
+			if !strings.Contains(err.Error(), "resume requires runtime.type cmd or function") {
+				t.Fatalf("error = %q, want resume runtime message", err.Error())
+			}
+		})
+	}
+}
+
+func TestNormalizeSandboxAppServicesAllowsManualRouteWithoutResume(t *testing.T) {
+	services, err := NormalizeSandboxAppServices([]SandboxAppService{{
+		ID:   "api",
+		Port: 8080,
+		Ingress: SandboxAppServiceIngress{
+			Public: true,
+			Routes: []SandboxAppServiceRoute{{
+				ID:         "api",
+				PathPrefix: "/",
+			}},
+		},
+	}})
+	if err != nil {
+		t.Fatalf("NormalizeSandboxAppServices: %v", err)
+	}
+	if services[0].Runtime != nil {
+		t.Fatalf("runtime = %#v, want nil manual service", services[0].Runtime)
+	}
+}
+
+func TestNormalizeSandboxAppServicesAllowsResumeRouteWithCMDRuntime(t *testing.T) {
+	_, err := NormalizeSandboxAppServices([]SandboxAppService{{
+		ID:   "api",
+		Port: 8080,
+		Runtime: &SandboxAppServiceRuntime{
+			Type:    SandboxAppServiceRuntimeCMD,
+			Command: []string{"python3", "-m", "http.server", "8080"},
+		},
+		Ingress: SandboxAppServiceIngress{
+			Public: true,
+			Routes: []SandboxAppServiceRoute{{
+				ID:         "api",
+				PathPrefix: "/",
+				Resume:     true,
+			}},
+		},
+	}})
+	if err != nil {
+		t.Fatalf("NormalizeSandboxAppServices: %v", err)
+	}
+}
+
 func TestNormalizeSandboxAppServicesSupportsFunctionRuntime(t *testing.T) {
 	services, err := NormalizeSandboxAppServices([]SandboxAppService{{
 		ID: "webhook",

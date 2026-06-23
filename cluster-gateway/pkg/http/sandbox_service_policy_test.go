@@ -202,6 +202,65 @@ func TestSandboxServiceExposureReturnsNotFoundForMissingSandbox(t *testing.T) {
 	}
 }
 
+func TestSandboxServiceRejectsResumeRouteWithoutRestartableRuntime(t *testing.T) {
+	var resumed atomic.Bool
+	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/internal/v1/sandboxes/sb-demo":
+			_ = spec.WriteSuccess(w, http.StatusOK, &mgr.Sandbox{
+				ID:         "sb-demo",
+				TeamID:     "team-1",
+				AutoResume: true,
+				Status:     mgr.SandboxStatusPaused,
+				Paused:     true,
+				Services: []mgr.SandboxAppService{{
+					ID:   "api",
+					Port: 3000,
+					Ingress: mgr.SandboxAppServiceIngress{
+						Public: true,
+						Routes: []mgr.SandboxAppServiceRoute{{
+							ID:         "api",
+							PathPrefix: "/",
+							Resume:     true,
+						}},
+					},
+				}},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sandboxes/sb-demo/resume":
+			resumed.Store(true)
+			_ = spec.WriteSuccess(w, http.StatusOK, map[string]any{"sandbox_id": "sb-demo"})
+		default:
+			t.Fatalf("unexpected manager request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer manager.Close()
+
+	gateway := newSandboxServiceExposureTestServerWithManagerURL(t, manager.URL)
+	gatewayServer := httptest.NewServer(gateway)
+	defer gatewayServer.Close()
+
+	req := newGatewayRequest(t, http.MethodGet, gatewayServer.URL, "sb-demo--p3000.aws-us-east-1.sandbox0.app", "/")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway request: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d body=%s, want %d", resp.StatusCode, string(body), http.StatusConflict)
+	}
+	if !strings.Contains(string(body), "restartable service runtime") {
+		t.Fatalf("body = %q, want restartable runtime error", string(body))
+	}
+	if resumed.Load() {
+		t.Fatal("manager resume was called for an unrestartable route")
+	}
+}
+
 func TestSandboxFunctionServiceExecutesThroughProcdPort(t *testing.T) {
 	var execReq sandboxfunction.ExecuteRequest
 	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -177,6 +177,22 @@ func SandboxAppServicesHaveResumeRoute(services []SandboxAppService) bool {
 	return false
 }
 
+// SandboxAppServiceHasRestartableRuntime reports whether cluster-gateway can
+// recreate the service process after a sandbox runtime is resumed.
+func SandboxAppServiceHasRestartableRuntime(service SandboxAppService) bool {
+	if service.Runtime == nil {
+		return false
+	}
+	switch service.Runtime.Type {
+	case SandboxAppServiceRuntimeCMD:
+		return len(service.Runtime.Command) > 0
+	case SandboxAppServiceRuntimeFunction:
+		return service.Runtime.Function != nil
+	default:
+		return false
+	}
+}
+
 // NormalizeSandboxAppServices validates and canonicalizes sandbox services.
 func NormalizeSandboxAppServices(services []SandboxAppService) ([]SandboxAppService, error) {
 	if len(services) == 0 {
@@ -275,6 +291,9 @@ func normalizeSandboxAppService(service SandboxAppService) (SandboxAppService, e
 		}
 		if _, ok := seenRoutes[route.ID]; ok {
 			return service, fmt.Errorf("ingress.routes[%d]: duplicate id %q", i, route.ID)
+		}
+		if service.Ingress.Public && route.Resume && !SandboxAppServiceHasRestartableRuntime(service) {
+			return service, fmt.Errorf("ingress.routes[%d]: resume requires runtime.type cmd or function", i)
 		}
 		seenRoutes[route.ID] = struct{}{}
 		service.Ingress.Routes[i] = route

@@ -1749,7 +1749,7 @@ func assertSandboxNetworkIsolation(env *framework.ScenarioEnv, session *e2eutils
 	routes := []apispec.SandboxAppServiceRoute{{
 		Id:         "web",
 		PathPrefix: ptr("/"),
-		Resume:     true,
+		Resume:     false,
 	}}
 	_, exposureDomain, status, err := session.UpdateSandboxServices(env.TestCtx.Context, GinkgoT(), sandboxBID, []apispec.SandboxAppService{{
 		Id:   "web",

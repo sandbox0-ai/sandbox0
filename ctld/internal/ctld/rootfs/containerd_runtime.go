@@ -24,7 +24,6 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
@@ -370,13 +369,18 @@ func (r *ContainerdRuntime) CommitS0FSRootFS(ctx context.Context, req S0FSCommit
 			return ctldapi.RootFSHeadDescriptor{}, err
 		}
 	}
-	liveRootFS, err := liveRootFSPathsForContainer(r.containerdRoot, r.containerdHostRoot, r.namespace, req.Info)
+	client, closeClient, err := r.client(ctx)
 	if err != nil {
 		return ctldapi.RootFSHeadDescriptor{}, err
 	}
-	state, err := s0fs.ImportHostTree(ctx, liveRootFS.mountedPath, s0fs.HostImportOptions{
+	defer closeClient()
+	upperdir, err := r.activeOverlayUpperdir(ctx, client, req.Info)
+	if err != nil {
+		return ctldapi.RootFSHeadDescriptor{}, err
+	}
+	state, err := s0fs.ImportHostTree(ctx, upperdir, s0fs.HostImportOptions{
 		Base:          base,
-		ExcludedPaths: rootFSImportExcludedPaths(req.ExcludedPaths, liveRootFS.mountInfoPath),
+		ExcludedPaths: rootFSImportExcludedPaths(req.ExcludedPaths, ""),
 	})
 	if err != nil {
 		return ctldapi.RootFSHeadDescriptor{}, err
@@ -419,55 +423,22 @@ func (r *ContainerdRuntime) AttachS0FSRootFS(ctx context.Context, req S0FSAttach
 		_ = engine.Close()
 		return ctldapi.RootFSHeadDescriptor{}, "", err
 	}
+	defer engine.Close()
 	head, err := rootFSS0FSHeadFromLoadedManifest(teamID, volumeID, sourceManifest)
 	if err != nil {
-		_ = engine.Close()
 		return ctldapi.RootFSHeadDescriptor{}, "", err
 	}
 
 	liveRootFS, err := liveRootFSPathsForContainer(r.containerdRoot, r.containerdHostRoot, r.namespace, req.Info)
 	if err != nil {
-		_ = engine.Close()
 		return ctldapi.RootFSHeadDescriptor{}, "", err
 	}
-	if liveRootFS.mountNamespacePath == "" {
-		_ = engine.Close()
-		return ctldapi.RootFSHeadDescriptor{}, "", fmt.Errorf("%w: live rootfs mount namespace is not available", ErrNotFound)
+	materializer := s0fs.NewMaterializer(volumeID, rootFSS0FSObjectStore(req.Store, teamID, volumeID), nil)
+	if err := restoreS0FSStateToHostTree(ctx, sourceState, materializer, liveRootFS.mountedPath, req.ExcludedPaths); err != nil {
+		return ctldapi.RootFSHeadDescriptor{}, "", fmt.Errorf("restore s0fs rootfs head: %w", err)
 	}
-	containerMountPath := defaultRootFSUserMountPath
-	hostMountPath := filepath.Join(liveRootFS.mountedPath, strings.TrimPrefix(containerMountPath, "/"))
-	if err := os.MkdirAll(hostMountPath, 0o755); err != nil {
-		_ = engine.Close()
-		return ctldapi.RootFSHeadDescriptor{}, "", fmt.Errorf("create s0fs rootfs mountpoint: %w", err)
-	}
-	mountKey := rootFSS0FSMountKey(req.Info)
-	if old := r.takeS0FSMount(req.Info); old != nil {
-		_ = old.close()
-	}
-	session := portal.NewS0FSSession(volumeID, teamID, engine, nil)
-	server, err := mountS0FSRootFS(session, containerMountPath, liveRootFS.mountNamespacePath, liveRootFS.mountedPath)
-	if err != nil {
-		_ = engine.Close()
-		return ctldapi.RootFSHeadDescriptor{}, "", err
-	}
-	active := &s0fsRootFSMount{
-		key:                mountKey,
-		volumeID:           volumeID,
-		teamID:             teamID,
-		hostMountPath:      hostMountPath,
-		containerMountPath: containerMountPath,
-		engine:             engine,
-		server:             server,
-		session:            session,
-		mountNamespacePath: liveRootFS.mountNamespacePath,
-		mountRootPath:      liveRootFS.mountedPath,
-		mountPath:          containerMountPath,
-	}
-	r.s0fsMu.Lock()
-	r.s0fsMounts[mountKey] = active
-	r.s0fsMu.Unlock()
 
-	return head, containerMountPath, nil
+	return head, "", nil
 }
 
 func commitActiveS0FSMount(ctx context.Context, active *s0fsRootFSMount) (ctldapi.RootFSHeadDescriptor, error) {

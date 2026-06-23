@@ -91,6 +91,15 @@ type s0fsRootFSMount struct {
 	engine             *s0fs.Engine
 	server             *fuse.Server
 	session            volumefuse.Session
+	mountNamespacePath string
+	mountRootPath      string
+	mountPath          string
+}
+
+type liveRootFSPaths struct {
+	mountedPath        string
+	hostPath           string
+	mountNamespacePath string
 }
 
 type containerdClient interface {
@@ -359,7 +368,7 @@ func (r *ContainerdRuntime) CommitS0FSRootFS(ctx context.Context, req S0FSCommit
 			return ctldapi.RootFSHeadDescriptor{}, err
 		}
 	}
-	liveRootFS, err := liveRootFSPath(r.containerdRoot, r.containerdHostRoot, r.namespace, req.Info)
+	liveRootFS, err := mountedLiveRootFSPath(r.containerdRoot, r.containerdHostRoot, r.namespace, req.Info)
 	if err != nil {
 		return ctldapi.RootFSHeadDescriptor{}, err
 	}
@@ -414,13 +423,17 @@ func (r *ContainerdRuntime) AttachS0FSRootFS(ctx context.Context, req S0FSAttach
 		return ctldapi.RootFSHeadDescriptor{}, "", err
 	}
 
-	liveRootFS, err := liveRootFSPath(r.containerdRoot, r.containerdHostRoot, r.namespace, req.Info)
+	liveRootFS, err := liveRootFSPathsForContainer(r.containerdRoot, r.containerdHostRoot, r.namespace, req.Info)
 	if err != nil {
 		_ = engine.Close()
 		return ctldapi.RootFSHeadDescriptor{}, "", err
 	}
+	if liveRootFS.mountNamespacePath == "" {
+		_ = engine.Close()
+		return ctldapi.RootFSHeadDescriptor{}, "", fmt.Errorf("%w: live rootfs mount namespace is not available", ErrNotFound)
+	}
 	containerMountPath := defaultRootFSUserMountPath
-	hostMountPath := filepath.Join(liveRootFS, strings.TrimPrefix(containerMountPath, "/"))
+	hostMountPath := filepath.Join(liveRootFS.mountedPath, strings.TrimPrefix(containerMountPath, "/"))
 	if err := os.MkdirAll(hostMountPath, 0o755); err != nil {
 		_ = engine.Close()
 		return ctldapi.RootFSHeadDescriptor{}, "", fmt.Errorf("create s0fs rootfs mountpoint: %w", err)
@@ -430,7 +443,7 @@ func (r *ContainerdRuntime) AttachS0FSRootFS(ctx context.Context, req S0FSAttach
 		_ = old.close()
 	}
 	session := portal.NewS0FSSession(volumeID, teamID, engine, nil)
-	server, err := mountS0FSRootFS(session, hostMountPath)
+	server, err := mountS0FSRootFS(session, containerMountPath, liveRootFS.mountNamespacePath, liveRootFS.mountedPath)
 	if err != nil {
 		_ = engine.Close()
 		return ctldapi.RootFSHeadDescriptor{}, "", err
@@ -444,6 +457,9 @@ func (r *ContainerdRuntime) AttachS0FSRootFS(ctx context.Context, req S0FSAttach
 		engine:             engine,
 		server:             server,
 		session:            session,
+		mountNamespacePath: liveRootFS.mountNamespacePath,
+		mountRootPath:      liveRootFS.mountedPath,
+		mountPath:          containerMountPath,
 	}
 	r.s0fsMu.Lock()
 	r.s0fsMounts[mountKey] = active
@@ -466,7 +482,7 @@ func (m *s0fsRootFSMount) close() error {
 		return nil
 	}
 	if m.server != nil {
-		_ = m.server.Unmount()
+		_ = unmountS0FSRootFS(m.server, m.mountNamespacePath, m.mountRootPath, m.mountPath)
 	}
 	if m.session != nil {
 		m.session.Close()
@@ -520,27 +536,49 @@ func loadRootFSS0FSHead(ctx context.Context, store objectstore.Store, head ctlda
 	return manifest.State, manifest, nil
 }
 
-func mountS0FSRootFS(session volumefuse.Session, targetPath string) (*fuse.Server, error) {
+func mountS0FSRootFS(session volumefuse.Session, targetPath, mountNamespacePath, mountRootPath string) (*fuse.Server, error) {
 	fs := volumefuse.New("sandbox0-rootfs", time.Second, session)
 	opts := &fuse.MountOptions{
-		FsName:        "sandbox0-rootfs",
-		Name:          "sandbox0-rootfs",
-		MaxBackground: 128,
-		EnableLocks:   true,
-		AllowOther:    os.Getuid() == 0,
-		DirectMount:   true,
-		MaxWrite:      256 * 1024,
+		FsName:            "sandbox0-rootfs",
+		Name:              "sandbox0-rootfs",
+		MaxBackground:     128,
+		EnableLocks:       true,
+		AllowOther:        os.Getuid() == 0,
+		DirectMountStrict: true,
+		MaxWrite:          256 * 1024,
 	}
-	server, err := fuse.NewServer(fs, targetPath, opts)
-	if err != nil {
-		return nil, fmt.Errorf("mount s0fs rootfs: %w", err)
+	var server *fuse.Server
+	mountFn := func() error {
+		var err error
+		if mountNamespacePath != "" && mountRootPath != "" {
+			server, err = mountFuseServerInMountNamespace(fs, targetPath, mountNamespacePath, mountRootPath, opts)
+		} else {
+			server, err = fuse.NewServer(fs, targetPath, opts)
+		}
+		if err != nil {
+			return fmt.Errorf("mount s0fs rootfs: %w", err)
+		}
+		go server.Serve()
+		if err := server.WaitMount(); err != nil {
+			_ = unmountS0FSRootFS(server, mountNamespacePath, mountRootPath, targetPath)
+			return fmt.Errorf("wait for s0fs rootfs mount: %w", err)
+		}
+		return nil
 	}
-	go server.Serve()
-	if err := server.WaitMount(); err != nil {
-		_ = server.Unmount()
-		return nil, fmt.Errorf("wait for s0fs rootfs mount: %w", err)
+	if err := mountFn(); err != nil {
+		return nil, err
 	}
 	return server, nil
+}
+
+func unmountS0FSRootFS(server *fuse.Server, mountNamespacePath, mountRootPath, targetPath string) error {
+	if server == nil {
+		return nil
+	}
+	if mountNamespacePath != "" && mountRootPath != "" && targetPath != "" {
+		return unmountPathInMountNamespace(mountNamespacePath, mountRootPath, targetPath)
+	}
+	return server.Unmount()
 }
 
 func rootFSS0FSObjectStore(store objectstore.Store, teamID, volumeID string) objectstore.Store {
@@ -774,14 +812,32 @@ func inspectContainer(ctx context.Context, client containerdClient, containerdRo
 }
 
 func liveRootFSPath(containerdRoot, containerdHostRoot, namespace string, info ctldapi.RootFSInfo) (string, error) {
+	paths, err := liveRootFSPathsForContainer(containerdRoot, containerdHostRoot, namespace, info)
+	if err != nil {
+		return "", err
+	}
+	return paths.hostPath, nil
+}
+
+func mountedLiveRootFSPath(containerdRoot, containerdHostRoot, namespace string, info ctldapi.RootFSInfo) (string, error) {
+	paths, err := liveRootFSPathsForContainer(containerdRoot, containerdHostRoot, namespace, info)
+	if err != nil {
+		return "", err
+	}
+	return paths.mountedPath, nil
+}
+
+func liveRootFSPathsForContainer(containerdRoot, containerdHostRoot, namespace string, info ctldapi.RootFSInfo) (liveRootFSPaths, error) {
 	taskRoot := filepath.Join(containerdRoot, "io.containerd.runtime.v2.task", namespace)
 	hostTaskRoot := filepath.Join(containerdHostRoot, "io.containerd.runtime.v2.task", namespace)
 	if id := strings.TrimSpace(info.ContainerID); id != "" {
-		liveRootFS := filepath.Join(taskRoot, id, "rootfs")
-		if st, err := os.Stat(liveRootFS); err == nil && st.IsDir() {
-			return filepath.Join(hostTaskRoot, id, "rootfs"), nil
-		} else if err != nil && !os.IsNotExist(err) {
-			return "", fmt.Errorf("inspect live rootfs %s: %w", liveRootFS, err)
+		taskDir := filepath.Join(taskRoot, id)
+		hostTaskDir := filepath.Join(hostTaskRoot, id)
+		liveRootFS := filepath.Join(taskDir, "rootfs")
+		if paths, ok, err := liveRootFSPathsFromTaskDir(taskDir, hostTaskDir, liveRootFS); err != nil {
+			return liveRootFSPaths{}, err
+		} else if ok {
+			return paths, nil
 		}
 	}
 
@@ -789,13 +845,56 @@ func liveRootFSPath(containerdRoot, containerdHostRoot, namespace string, info c
 	if err == nil {
 		return liveRootFS, nil
 	}
-	return "", err
+	return liveRootFSPaths{}, err
 }
 
-func findLiveRootFSByTaskAnnotations(taskRoot, hostTaskRoot string, info ctldapi.RootFSInfo) (string, error) {
+func liveRootFSPathsFromTaskDir(taskDir, hostTaskDir, mountedRootFS string) (liveRootFSPaths, bool, error) {
+	if st, err := os.Stat(mountedRootFS); err == nil && st.IsDir() {
+		return liveRootFSPaths{
+			mountedPath:        mountedRootFS,
+			hostPath:           filepath.Join(hostTaskDir, "rootfs"),
+			mountNamespacePath: taskMountNamespacePath(taskDir),
+		}, true, nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return liveRootFSPaths{}, false, fmt.Errorf("inspect live rootfs %s: %w", mountedRootFS, err)
+	}
+	if pidRootFS, nsPath := taskProcessRootFSPath(taskDir); pidRootFS != "" {
+		return liveRootFSPaths{
+			mountedPath:        pidRootFS,
+			hostPath:           pidRootFS,
+			mountNamespacePath: nsPath,
+		}, true, nil
+	}
+	return liveRootFSPaths{}, false, nil
+}
+
+func taskMountNamespacePath(taskDir string) string {
+	_, nsPath := taskProcessRootFSPath(taskDir)
+	return nsPath
+}
+
+func taskProcessRootFSPath(taskDir string) (string, string) {
+	raw, err := os.ReadFile(filepath.Join(taskDir, "init.pid"))
+	if err != nil {
+		return "", ""
+	}
+	pid := strings.TrimSpace(string(raw))
+	if pid == "" {
+		return "", ""
+	}
+	for _, r := range pid {
+		if r < '0' || r > '9' {
+			return "", ""
+		}
+	}
+	procRoot := filepath.Join("/proc", pid)
+	return filepath.Join(procRoot, "root"), filepath.Join(procRoot, "ns", "mnt")
+}
+
+func findLiveRootFSByTaskAnnotations(taskRoot, hostTaskRoot string, info ctldapi.RootFSInfo) (liveRootFSPaths, error) {
 	entries, err := os.ReadDir(taskRoot)
 	if err != nil {
-		return "", fmt.Errorf("scan containerd task root %s: %w", taskRoot, err)
+		return liveRootFSPaths{}, fmt.Errorf("scan containerd task root %s: %w", taskRoot, err)
 	}
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -807,25 +906,26 @@ func findLiveRootFSByTaskAnnotations(taskRoot, hostTaskRoot string, info ctldapi
 			if os.IsNotExist(err) {
 				continue
 			}
-			return "", fmt.Errorf("read task config %s: %w", taskDir, err)
+			return liveRootFSPaths{}, fmt.Errorf("read task config %s: %w", taskDir, err)
 		}
 		var spec struct {
 			Annotations map[string]string `json:"annotations"`
 		}
 		if err := json.Unmarshal(raw, &spec); err != nil {
-			return "", fmt.Errorf("parse task config %s: %w", taskDir, err)
+			return liveRootFSPaths{}, fmt.Errorf("parse task config %s: %w", taskDir, err)
 		}
 		if !rootFSTaskMatches(spec.Annotations, info) {
 			continue
 		}
-		liveRootFS := filepath.Join(taskDir, "rootfs")
-		if st, err := os.Stat(liveRootFS); err == nil && st.IsDir() {
-			return filepath.Join(hostTaskRoot, entry.Name(), "rootfs"), nil
-		} else if err != nil && !os.IsNotExist(err) {
-			return "", fmt.Errorf("inspect live rootfs %s: %w", liveRootFS, err)
+		paths, ok, err := liveRootFSPathsFromTaskDir(taskDir, filepath.Join(hostTaskRoot, entry.Name()), filepath.Join(taskDir, "rootfs"))
+		if err != nil {
+			return liveRootFSPaths{}, err
+		}
+		if ok {
+			return paths, nil
 		}
 	}
-	return "", fmt.Errorf("%w: live rootfs for container %s in pod %s/%s", ErrNotFound, info.ContainerName, info.PodNamespace, info.PodName)
+	return liveRootFSPaths{}, fmt.Errorf("%w: live rootfs for container %s in pod %s/%s", ErrNotFound, info.ContainerName, info.PodNamespace, info.PodName)
 }
 
 func rootFSTaskMatches(annotations map[string]string, info ctldapi.RootFSInfo) bool {

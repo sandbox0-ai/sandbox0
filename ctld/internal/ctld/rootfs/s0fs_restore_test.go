@@ -34,3 +34,22 @@ func TestRestoreS0FSStateToHostTreeAppliesChangedSet(t *testing.T) {
 	_, err = os.Stat(filepath.Join(target, "tmp", "state", "old.txt"))
 	require.True(t, os.IsNotExist(err), "old file should be removed by whiteout")
 }
+
+func TestRestoreS0FSStateToHostTreeSkipsExcludedPaths(t *testing.T) {
+	upper := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(upper, "config"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(upper, "tmp"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(upper, "config", "internal_jwt_public.key"), []byte("runtime"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(upper, "tmp", "user.txt"), []byte("user"), 0o644))
+	state, err := s0fs.ImportHostTree(context.Background(), upper, s0fs.HostImportOptions{})
+	require.NoError(t, err)
+
+	target := t.TempDir()
+	require.NoError(t, restoreS0FSStateToHostTree(context.Background(), state, nil, target, []string{"/config/internal_jwt_public.key"}))
+
+	_, err = os.Stat(filepath.Join(target, "config", "internal_jwt_public.key"))
+	require.True(t, os.IsNotExist(err), "excluded runtime mount path should not be restored")
+	got, err := os.ReadFile(filepath.Join(target, "tmp", "user.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "user", string(got))
+}

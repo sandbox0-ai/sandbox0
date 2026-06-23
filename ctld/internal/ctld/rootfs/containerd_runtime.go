@@ -378,9 +378,13 @@ func (r *ContainerdRuntime) CommitS0FSRootFS(ctx context.Context, req S0FSCommit
 	if err != nil {
 		return ctldapi.RootFSHeadDescriptor{}, err
 	}
+	liveRootFS, err := liveRootFSPathsForContainer(r.containerdRoot, r.containerdHostRoot, r.namespace, req.Info)
+	if err != nil {
+		return ctldapi.RootFSHeadDescriptor{}, err
+	}
 	state, err := s0fs.ImportHostTree(ctx, upperdir, s0fs.HostImportOptions{
 		Base:          base,
-		ExcludedPaths: rootFSImportExcludedPaths(req.ExcludedPaths, ""),
+		ExcludedPaths: rootFSImportExcludedPaths(req.ExcludedPaths, liveRootFS.mountInfoPath),
 	})
 	if err != nil {
 		return ctldapi.RootFSHeadDescriptor{}, err
@@ -434,7 +438,8 @@ func (r *ContainerdRuntime) AttachS0FSRootFS(ctx context.Context, req S0FSAttach
 		return ctldapi.RootFSHeadDescriptor{}, "", err
 	}
 	materializer := s0fs.NewMaterializer(volumeID, rootFSS0FSObjectStore(req.Store, teamID, volumeID), nil)
-	if err := restoreS0FSStateToHostTree(ctx, sourceState, materializer, liveRootFS.mountedPath, req.ExcludedPaths); err != nil {
+	excludedPaths := rootFSImportExcludedPaths(req.ExcludedPaths, liveRootFS.mountInfoPath)
+	if err := restoreS0FSStateToHostTree(ctx, sourceState, materializer, liveRootFS.mountedPath, excludedPaths); err != nil {
 		return ctldapi.RootFSHeadDescriptor{}, "", fmt.Errorf("restore s0fs rootfs head: %w", err)
 	}
 

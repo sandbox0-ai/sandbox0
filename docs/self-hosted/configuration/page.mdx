@@ -310,6 +310,20 @@ spec:
 
 When `spec.credentialVault` is enabled, manager stores newly written credential sources in the configured Vault backend. Existing rows keep their recorded storage backend.
 
+### Egress Auth Resolve TTL
+
+netd caches resolved egress auth material until the `expiresAt` timestamp returned by manager. Manager does not keep an additional resolved-material cache. The default lifetime is 5 minutes and is also the normal credential rotation propagation bound for already-claimed sandboxes.
+
+Set `spec.services.manager.config.egressAuthDefaultResolveTtl` when you want a different platform default. Individual bindings can override it with `network.credentialBindings[*].cachePolicy.ttl`.
+
+```yaml
+spec:
+    services:
+        manager:
+            config:
+                egressAuthDefaultResolveTtl: 1m
+```
+
 ### Public Routing and Region Identity
 
 `spec.publicExposure` decides the public host pattern used for sandbox URLs. Keep it consistent with your region and DNS plan.

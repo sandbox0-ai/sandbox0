@@ -29,6 +29,7 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 	cfg.AllowColdStartWithoutReadyDataPlane = spec.AllowColdStartWithoutReadyDataPlane
 	cfg.NetdPolicyApplyTimeout = spec.NetdPolicyApplyTimeout
 	cfg.NetdPolicyApplyPollInterval = spec.NetdPolicyApplyPollInterval
+	cfg.EgressAuthDefaultResolveTTL = spec.EgressAuthDefaultResolveTTL
 	cfg.PauseMinMemoryRequest = spec.PauseMinMemoryRequest
 	cfg.PauseMinMemoryLimit = spec.PauseMinMemoryLimit
 	cfg.PauseMemoryBufferRatio = spec.PauseMemoryBufferRatio

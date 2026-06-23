@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
+	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
@@ -69,6 +70,10 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 		return
 	}
 	if !s.enforceSandboxServiceRoute(c, sandboxID, sandbox.TeamID, route) {
+		return
+	}
+	if route.Resume && !clientServiceHasRestartableRuntime(match.service) {
+		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "resume-enabled route requires a restartable service runtime")
 		return
 	}
 	needsRuntimeRefetch := sandboxRuntimeMissing(sandbox)
@@ -137,6 +142,10 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 		return
 	}
 	router.ProxyToTarget(c)
+}
+
+func clientServiceHasRestartableRuntime(service *mgr.SandboxAppService) bool {
+	return service != nil && mgr.SandboxAppServiceHasRestartableRuntime(*service)
 }
 
 func (s *Server) resolveExposureFromRequest(c *gin.Context) (sandboxID string, port int, _ string, err error) {

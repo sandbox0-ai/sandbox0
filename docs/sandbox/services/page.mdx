@@ -66,7 +66,7 @@ Routes are evaluated before proxying or function execution.
 | `cors` | Handles CORS preflight and response headers at the gateway |
 | `rate_limit` | Applies per-route rate limiting at the gateway |
 | `timeout_seconds` | Sets the upstream or function execution timeout |
-| `resume` | Allows this route to resume a paused sandbox when sandbox `auto_resume` is also true |
+| `resume` | Allows this route to resume a paused sandbox when sandbox `auto_resume` is also true. Resume-enabled public routes require `runtime.type: cmd` or `runtime.type: function` |
 
 `path_prefix` is not stripped automatically. Without `rewrite_prefix`, the upstream service or function handler sees the original request path.
 
@@ -173,8 +173,10 @@ services:
           routes:
               - id: web
                 path_prefix: /
-                resume: true
+                resume: false
 ```
+
+Manual services can expose a listener while the sandbox is running, but they cannot be restarted by public auto-resume. Use a `cmd` service or a function service when a public route needs `resume: true`.
 
 ## API Reference
 
@@ -241,6 +243,11 @@ resp, err := sandbox.UpdateServices(ctx, []apispec.SandboxAppService{
     {
         ID:   "api",
         Port: apispec.NewOptInt32(8080),
+        Runtime: apispec.NewOptSandboxAppServiceRuntime(apispec.SandboxAppServiceRuntime{
+            Type:    apispec.SandboxAppServiceRuntimeTypeCmd,
+            Command: []string{"python3", "-m", "http.server", "8080"},
+            Cwd:     apispec.NewOptString("/workspace"),
+        }),
         Ingress: apispec.SandboxAppServiceIngress{
             Public: true,
             Routes: []apispec.SandboxAppServiceRoute{
@@ -277,6 +284,11 @@ const resp = await sandbox.updateServices([
     {
         id: 'api',
         port: 8080,
+        runtime: {
+            type: 'cmd',
+            command: ['python3', '-m', 'http.server', '8080'],
+            cwd: '/workspace',
+        },
         ingress: {
             _public: true,
             routes: [
@@ -308,6 +320,7 @@ from sandbox0.apispec.models.sandbox_app_service_ingress import SandboxAppServic
 from sandbox0.apispec.models.sandbox_app_service_route import SandboxAppServiceRoute
 from sandbox0.apispec.models.sandbox_app_service_route_auth import SandboxAppServiceRouteAuth
 from sandbox0.apispec.models.sandbox_app_service_route_auth_mode import SandboxAppServiceRouteAuthMode
+from sandbox0.apispec.models.sandbox_app_service_runtime import SandboxAppServiceRuntime
 
 token_hash = hashlib.sha256(os.environ["PUBLIC_API_TOKEN"].encode()).hexdigest()
 
@@ -315,6 +328,11 @@ resp = sandbox.update_services([
     SandboxAppService(
         id="api",
         port=8080,
+        runtime=SandboxAppServiceRuntime(
+            type="cmd",
+            command=["python3", "-m", "http.server", "8080"],
+            cwd="/workspace",
+        ),
         ingress=SandboxAppServiceIngress(
             public=True,
             routes=[
@@ -400,6 +418,14 @@ config:
     services:
         - id: api
           port: 8080
+          runtime:
+              type: cmd
+              command:
+                  - python3
+                  - -m
+                  - http.server
+                  - "8080"
+              cwd: /workspace
           ingress:
               public: true
               routes:
@@ -421,6 +447,11 @@ config:
         {
             ID:   "api",
             Port: apispec.NewOptInt32(8080),
+            Runtime: apispec.NewOptSandboxAppServiceRuntime(apispec.SandboxAppServiceRuntime{
+                Type:    apispec.SandboxAppServiceRuntimeTypeCmd,
+                Command: []string{"python3", "-m", "http.server", "8080"},
+                Cwd:     apispec.NewOptString("/workspace"),
+            }),
             Ingress: apispec.SandboxAppServiceIngress{
                 Public: true,
                 Routes: []apispec.SandboxAppServiceRoute{
@@ -449,6 +480,11 @@ if err != nil {
         {
             id: 'api',
             port: 8080,
+            runtime: {
+                type: 'cmd',
+                command: ['python3', '-m', 'http.server', '8080'],
+                cwd: '/workspace',
+            },
             ingress: {
                 _public: true,
                 routes: [
@@ -478,6 +514,11 @@ sandbox = client.sandboxes.claim(
             {
                 "id": "api",
                 "port": 8080,
+                "runtime": {
+                    "type": "cmd",
+                    "command": ["python3", "-m", "http.server", "8080"],
+                    "cwd": "/workspace",
+                },
                 "ingress": {
                     "public": True,
                     "routes": [
@@ -505,12 +546,13 @@ sandbox = client.sandboxes.claim(
 
 ## Auto-Resume
 
-Public service auto-resume has two gates:
+Public service auto-resume has three requirements:
 
 - sandbox `auto_resume` must be true
 - matched route `resume` must be true
+- the matched service must be restartable with `runtime.type: cmd` or `runtime.type: function`
 
-Both gates are required for public URL requests to wake a paused sandbox.
+All three requirements are needed for public URL requests to wake a paused sandbox and make the backing service available.
 
 For a paused sandbox, Sandbox0 creates a new runtime pod for the same sandbox identity and restores the latest rootfs checkpoint. The sandbox ID and service `public_url` stay unchanged until the sandbox is deleted or `hard_ttl` expires. For `cmd` services, the command is started again in the new runtime pod. For `function` services, there is still no long-running listener; each request executes the handler after the sandbox runtime is available.
 

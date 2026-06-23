@@ -171,7 +171,7 @@ console.log("runtimeGeneration=", sb.runtimeGeneration);`
 
 Common auto-resume entrypoints:
 
-- service routes configured with `resume: true`; public service requests require both sandbox `auto_resume: true` and route `resume: true`
+- service routes configured with `resume: true`; public service requests require sandbox `auto_resume: true`, route `resume: true`, and a restartable service runtime (`cmd` or `function`)
 - SSH access through Sandbox0 SSH Gateway
 
 For a paused sandbox, auto-resume creates a new runtime pod for the same sandbox identity and restores the saved rootfs checkpoint before the sandbox is used. Public service URLs remain stable until the sandbox is explicitly deleted or `hard_ttl` expires.

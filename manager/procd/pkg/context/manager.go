@@ -51,6 +51,7 @@ type Manager struct {
 	mu                   sync.RWMutex
 	contexts             map[string]*Context
 	sandboxEnvVars       map[string]string
+	rootFS               string
 	onExit               process.ExitHandler
 	onStart              process.StartHandler
 	defaultCleanupPolicy CleanupPolicy
@@ -99,6 +100,18 @@ func (m *Manager) SandboxEnvVars() map[string]string {
 	return process.CloneEnvVars(m.sandboxEnvVars)
 }
 
+func (m *Manager) SetRootFS(rootFS string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rootFS = rootFS
+}
+
+func (m *Manager) RootFS() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.rootFS
+}
+
 // StartCleanup starts a background cleanup loop.
 func (m *Manager) StartCleanup(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
@@ -131,6 +144,9 @@ func (m *Manager) CreateContextWithPolicyAndREPLConfig(config process.ProcessCon
 	startHandler := m.onStart
 	defaultPolicy := m.defaultCleanupPolicy
 	config.EnvVars = process.MergeEnvVars(m.sandboxEnvVars, config.EnvVars)
+	if config.RootFS == "" {
+		config.RootFS = m.rootFS
+	}
 	// Define exit handler for the new context
 	exitHandler := func(event process.ExitEvent) {
 		if m.onExit != nil {

@@ -117,6 +117,44 @@ printf '{"status":202,"headers":{"x-runner":["ok"]},"body_base64":"aGVsbG8="}\n'
 	}
 }
 
+func TestFunctionHandlerMaterializesSourceInsideRootFS(t *testing.T) {
+	rootFS := t.TempDir()
+	handler := newFunctionHandler(functionHandlerConfig{
+		runnerPath: "/procd/bin/python-runner",
+		cacheRoot:  "/tmp/sandbox0-functions",
+	}, zap.NewNop())
+	source := sandboxfunction.Source{
+		Type: sandboxfunction.SourceTypeInline,
+		Code: "def handler(request):\n    return {'status': 204}\n",
+	}
+	digest := sandboxfunction.InlineDigest(source.Code)
+	dirName := strings.TrimPrefix(digest, "sha256:")
+
+	hostPath, execPath, err := handler.materializeSource(source, rootFS)
+	if err != nil {
+		t.Fatalf("materializeSource() error = %v", err)
+	}
+
+	wantHost := filepath.Join(rootFS, "tmp", "sandbox0-functions", dirName, sandboxfunction.DefaultFilename)
+	if hostPath != wantHost {
+		t.Fatalf("host path = %q, want %q", hostPath, wantHost)
+	}
+	wantExec := filepath.Join("/tmp/sandbox0-functions", dirName, sandboxfunction.DefaultFilename)
+	if execPath != wantExec {
+		t.Fatalf("exec path = %q, want %q", execPath, wantExec)
+	}
+	payload, err := os.ReadFile(wantHost)
+	if err != nil {
+		t.Fatalf("read materialized source: %v", err)
+	}
+	if string(payload) != source.Code {
+		t.Fatalf("materialized source = %q, want source code", payload)
+	}
+	if got := functionCommandDir(rootFS, hostPath, execPath); got != filepath.Dir(execPath) {
+		t.Fatalf("command dir = %q, want %q", got, filepath.Dir(execPath))
+	}
+}
+
 func TestFunctionHandlerExecuteMergesSandboxEnvVars(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell runner fixture requires POSIX")

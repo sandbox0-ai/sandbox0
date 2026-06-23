@@ -21,6 +21,7 @@ import (
 const sandboxRootFSContainerName = "procd"
 
 const sandboxRootFSOperationTimeout = 5 * time.Minute
+const sandboxRootFSMountPathAnnotation = "sandbox0.ai/rootfs-mount-path"
 
 func (s *SandboxService) saveSandboxRootFSCheckpoint(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, tx SandboxStoreTx) error {
 	if s == nil || !s.config.CtldEnabled || s.ctldClient == nil || pod == nil {
@@ -51,9 +52,15 @@ func (s *SandboxService) saveSandboxRootFSCheckpoint(ctx context.Context, pod *c
 	generation := runtimeGenerationFromPod(pod)
 	parentLayerID := ""
 	expectedHeadLayerID := ""
-	if parentState, err := s.latestRootFSState(ctx, sandboxID); err != nil {
+	filesystemID := sandboxID
+	var parentState *SandboxRootFSState
+	if latest, err := s.latestRootFSState(ctx, sandboxID); err != nil {
 		return fmt.Errorf("load current rootfs head: %w", err)
-	} else if parentState != nil {
+	} else if latest != nil {
+		parentState = latest
+		if strings.TrimSpace(parentState.S0FSVolumeID) != "" {
+			filesystemID = parentState.S0FSVolumeID
+		}
 		expectedHeadLayerID = strings.TrimSpace(parentState.LayerID)
 		if squash, reason := s.shouldSquashSandboxRootFSCheckpoint(parentState); squash {
 			if s.logger != nil {
@@ -67,12 +74,25 @@ func (s *SandboxService) saveSandboxRootFSCheckpoint(ctx context.Context, pod *c
 			parentLayerID = expectedHeadLayerID
 		}
 	}
+	if getter, ok := s.sandboxStore.(interface {
+		GetRootFSFilesystem(context.Context, string) (*RootFSFilesystem, error)
+	}); ok {
+		filesystem, err := getter.GetRootFSFilesystem(ctx, sandboxID)
+		if err != nil {
+			return fmt.Errorf("load rootfs filesystem: %w", err)
+		}
+		if filesystem != nil && strings.TrimSpace(filesystem.ID) != "" {
+			filesystemID = filesystem.ID
+		}
+	}
 	saveReq := ctldapi.SaveRootFSRequest{
 		Target:                    rootFSTargetForPod(pod),
 		SandboxID:                 sandboxID,
 		TeamID:                    teamID,
+		FilesystemID:              filesystemID,
 		ExpectedRuntimeGeneration: generation,
 		ParentLayerID:             parentLayerID,
+		ParentHead:                rootFSHeadDescriptorFromState(parentState),
 		ExcludedPaths:             rootFSExcludedPathsForPod(pod),
 	}
 	resp, err := s.ctldClient.SaveRootFSWithTimeout(ctx, ctldAddress, saveReq, sandboxRootFSOperationTimeout)
@@ -142,8 +162,28 @@ func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *
 	if err != nil {
 		return err
 	}
+	filesystemID := strings.TrimSpace(state.S0FSVolumeID)
+	if filesystemID == "" {
+		filesystemID = sandboxIDFromPod(pod)
+	}
+	if getter, ok := s.sandboxStore.(interface {
+		GetRootFSFilesystem(context.Context, string) (*RootFSFilesystem, error)
+	}); ok {
+		sandboxID := sandboxIDFromPod(pod)
+		if sandboxID != "" {
+			filesystem, err := getter.GetRootFSFilesystem(ctx, sandboxID)
+			if err != nil {
+				return fmt.Errorf("load rootfs filesystem: %w", err)
+			}
+			if filesystem != nil && strings.TrimSpace(filesystem.ID) != "" {
+				filesystemID = filesystem.ID
+			}
+		}
+	}
 	req := ctldapi.ApplyRootFSRequest{
 		Target:                      rootFSTargetForPod(pod),
+		TeamID:                      state.TeamID,
+		FilesystemID:                filesystemID,
 		ExpectedRuntime:             state.Runtime,
 		ExpectedRuntimeHandler:      state.RuntimeHandler,
 		ExpectedSnapshotter:         state.Snapshotter,
@@ -158,7 +198,10 @@ func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *
 		},
 		ExcludedPaths: rootFSExcludedPathsForPod(pod),
 	}
-	if layers := rootFSLayerDescriptors(state); len(layers) > 0 {
+	if rootFSStorageEngine(state.StorageEngine) == ctldapi.RootFSStorageEngineS0FS {
+		req.Head = rootFSHeadDescriptorFromState(state)
+		req.Descriptor = ctldapi.RootFSDiffDescriptor{}
+	} else if layers := rootFSLayerDescriptors(state); len(layers) > 0 {
 		req.Layers = layers
 		req.BaselineLayerID = state.LayerID
 		req.Descriptor = ctldapi.RootFSDiffDescriptor{}
@@ -169,6 +212,12 @@ func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *
 	}
 	if resp == nil || !resp.Applied {
 		return fmt.Errorf("apply sandbox rootfs checkpoint: ctld did not report applied")
+	}
+	if strings.TrimSpace(resp.MountPath) != "" {
+		if pod.Annotations == nil {
+			pod.Annotations = make(map[string]string)
+		}
+		pod.Annotations[sandboxRootFSMountPathAnnotation] = strings.TrimSpace(resp.MountPath)
 	}
 	return nil
 }
@@ -379,6 +428,38 @@ func rootFSStateFromSaveResponse(sandboxID, teamID string, generation int64, res
 	if resp == nil {
 		return nil, fmt.Errorf("save sandbox rootfs checkpoint: empty ctld response")
 	}
+	if resp.Head.Engine == ctldapi.RootFSStorageEngineS0FS || strings.TrimSpace(resp.Head.ManifestKey) != "" {
+		if strings.TrimSpace(resp.Head.VolumeID) == "" {
+			return nil, fmt.Errorf("save sandbox rootfs checkpoint: s0fs volume id is empty")
+		}
+		if strings.TrimSpace(resp.Head.ManifestKey) == "" {
+			return nil, fmt.Errorf("save sandbox rootfs checkpoint: s0fs manifest key is empty")
+		}
+		if resp.Head.ManifestSeq == 0 {
+			return nil, fmt.Errorf("save sandbox rootfs checkpoint: s0fs manifest seq is empty")
+		}
+		return &SandboxRootFSState{
+			SandboxID:         sandboxID,
+			TeamID:            teamID,
+			RuntimeGeneration: generation,
+			Runtime:           resp.Info.Runtime,
+			RuntimeHandler:    resp.Info.RuntimeHandler,
+			BaseImageRef:      resp.Info.BaseImageRef,
+			BaseImageDigest:   resp.Info.BaseImageDigest,
+			Snapshotter:       resp.Info.Snapshotter,
+			SnapshotParent:    resp.Info.SnapshotParent,
+			SnapshotParentChain: append([]string(nil),
+				resp.Info.SnapshotParentChain...),
+			StorageEngine:     ctldapi.RootFSStorageEngineS0FS,
+			DiffDigest:        "s0fs:" + resp.Head.ManifestKey,
+			DiffMediaType:     "application/vnd.sandbox0.rootfs.s0fs.v1+json",
+			DiffObjectKey:     resp.Head.ManifestKey,
+			S0FSVolumeID:      resp.Head.VolumeID,
+			S0FSManifestKey:   resp.Head.ManifestKey,
+			S0FSManifestSeq:   resp.Head.ManifestSeq,
+			S0FSCheckpointSeq: resp.Head.CheckpointSeq,
+		}, nil
+	}
 	if strings.TrimSpace(resp.Descriptor.Digest) == "" {
 		return nil, fmt.Errorf("save sandbox rootfs checkpoint: diff digest is empty")
 	}
@@ -396,11 +477,27 @@ func rootFSStateFromSaveResponse(sandboxID, teamID string, generation int64, res
 		Snapshotter:         resp.Info.Snapshotter,
 		SnapshotParent:      resp.Info.SnapshotParent,
 		SnapshotParentChain: append([]string(nil), resp.Info.SnapshotParentChain...),
+		StorageEngine:       ctldapi.RootFSStorageEngineOCIDiff,
 		DiffDigest:          resp.Descriptor.Digest,
 		DiffMediaType:       resp.Descriptor.MediaType,
 		DiffSize:            resp.Descriptor.Size,
 		DiffObjectKey:       resp.Descriptor.ObjectKey,
 	}, nil
+}
+
+func rootFSHeadDescriptorFromState(state *SandboxRootFSState) ctldapi.RootFSHeadDescriptor {
+	if state == nil || rootFSStorageEngine(state.StorageEngine) != ctldapi.RootFSStorageEngineS0FS {
+		return ctldapi.RootFSHeadDescriptor{}
+	}
+	return ctldapi.RootFSHeadDescriptor{
+		Engine:        ctldapi.RootFSStorageEngineS0FS,
+		TeamID:        state.TeamID,
+		FilesystemID:  state.S0FSVolumeID,
+		VolumeID:      state.S0FSVolumeID,
+		ManifestKey:   state.S0FSManifestKey,
+		ManifestSeq:   state.S0FSManifestSeq,
+		CheckpointSeq: state.S0FSCheckpointSeq,
+	}
 }
 
 func saveRootFSError(resp *ctldapi.SaveRootFSResponse) string {

@@ -67,6 +67,24 @@ type RootFSDiffDescriptor struct {
 	ObjectKey string `json:"object_key,omitempty"`
 }
 
+const (
+	RootFSStorageEngineOCIDiff = "oci-diff"
+	RootFSStorageEngineS0FS    = "s0fs"
+)
+
+// RootFSHeadDescriptor points to the persistent rootfs head. New rootfs
+// implementations should prefer this over RootFSDiffDescriptor so the hot path
+// is expressed as a filesystem head operation instead of an OCI tar diff.
+type RootFSHeadDescriptor struct {
+	Engine        string `json:"engine,omitempty"`
+	TeamID        string `json:"team_id,omitempty"`
+	FilesystemID  string `json:"filesystem_id,omitempty"`
+	VolumeID      string `json:"volume_id,omitempty"`
+	ManifestKey   string `json:"manifest_key,omitempty"`
+	ManifestSeq   uint64 `json:"manifest_seq,omitempty"`
+	CheckpointSeq uint64 `json:"checkpoint_seq,omitempty"`
+}
+
 // RootFSLayerDescriptor identifies one immutable rootfs diff layer in a
 // sandbox rootfs head chain.
 type RootFSLayerDescriptor struct {
@@ -93,24 +111,29 @@ type InspectRootFSResponse struct {
 }
 
 type SaveRootFSRequest struct {
-	Target                    RootFSContainerRef `json:"target"`
-	SandboxID                 string             `json:"sandbox_id"`
-	TeamID                    string             `json:"team_id"`
-	ExpectedRuntimeGeneration int64              `json:"expected_runtime_generation,omitempty"`
-	ParentLayerID             string             `json:"parent_layer_id,omitempty"`
-	ObjectKey                 string             `json:"object_key,omitempty"`
-	ExcludedPaths             []string           `json:"excluded_paths,omitempty"`
-	PortalPaths               []RootFSPortalPath `json:"portal_paths,omitempty"`
+	Target                    RootFSContainerRef   `json:"target"`
+	SandboxID                 string               `json:"sandbox_id"`
+	TeamID                    string               `json:"team_id"`
+	FilesystemID              string               `json:"filesystem_id,omitempty"`
+	ExpectedRuntimeGeneration int64                `json:"expected_runtime_generation,omitempty"`
+	ParentLayerID             string               `json:"parent_layer_id,omitempty"`
+	ParentHead                RootFSHeadDescriptor `json:"parent_head,omitempty"`
+	ObjectKey                 string               `json:"object_key,omitempty"`
+	ExcludedPaths             []string             `json:"excluded_paths,omitempty"`
+	PortalPaths               []RootFSPortalPath   `json:"portal_paths,omitempty"`
 }
 
 type SaveRootFSResponse struct {
 	Info       RootFSInfo           `json:"info,omitempty"`
 	Descriptor RootFSDiffDescriptor `json:"descriptor,omitempty"`
+	Head       RootFSHeadDescriptor `json:"head,omitempty"`
 	Error      string               `json:"error,omitempty"`
 }
 
 type ApplyRootFSRequest struct {
 	Target                      RootFSContainerRef      `json:"target"`
+	TeamID                      string                  `json:"team_id,omitempty"`
+	FilesystemID                string                  `json:"filesystem_id,omitempty"`
 	ExpectedRuntime             string                  `json:"expected_runtime,omitempty"`
 	ExpectedRuntimeHandler      string                  `json:"expected_runtime_handler,omitempty"`
 	ExpectedSnapshotter         string                  `json:"expected_snapshotter,omitempty"`
@@ -118,6 +141,7 @@ type ApplyRootFSRequest struct {
 	ExpectedSnapshotParent      string                  `json:"expected_snapshot_parent,omitempty"`
 	ExpectedSnapshotParentChain []string                `json:"expected_snapshot_parent_chain,omitempty"`
 	BaselineLayerID             string                  `json:"baseline_layer_id,omitempty"`
+	Head                        RootFSHeadDescriptor    `json:"head,omitempty"`
 	Layers                      []RootFSLayerDescriptor `json:"layers,omitempty"`
 	Descriptor                  RootFSDiffDescriptor    `json:"descriptor"`
 	ExcludedPaths               []string                `json:"excluded_paths,omitempty"`
@@ -127,7 +151,9 @@ type ApplyRootFSRequest struct {
 type ApplyRootFSResponse struct {
 	Info       RootFSInfo              `json:"info,omitempty"`
 	Descriptor RootFSDiffDescriptor    `json:"descriptor,omitempty"`
+	Head       RootFSHeadDescriptor    `json:"head,omitempty"`
 	Layers     []RootFSLayerDescriptor `json:"layers,omitempty"`
+	MountPath  string                  `json:"mount_path,omitempty"`
 	Applied    bool                    `json:"applied"`
 	Error      string                  `json:"error,omitempty"`
 }

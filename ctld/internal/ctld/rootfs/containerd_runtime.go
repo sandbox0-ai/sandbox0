@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
@@ -21,12 +20,10 @@ import (
 	"github.com/containerd/containerd/v2/core/snapshots"
 	crootfs "github.com/containerd/containerd/v2/pkg/rootfs"
 	"github.com/containerd/continuity/fs"
-	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/s0fs"
-	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -41,7 +38,6 @@ const (
 	defaultContainerdDataRoot     = "/host-var-lib/containerd"
 	defaultContainerdHostDataRoot = "/var/lib/containerd"
 	defaultRootFSCacheDir         = "/var/lib/sandbox0/ctld/rootfs"
-	defaultRootFSUserMountPath    = "/sandbox0/rootfs"
 	defaultNamespace              = "k8s.io"
 	defaultDialTimeout            = 10 * time.Second
 )
@@ -78,22 +74,6 @@ type ContainerdRuntime struct {
 	criClient              criRuntimeService
 	criDialContext         func(ctx context.Context, endpoint string) (*grpc.ClientConn, error)
 	containerdClient       containerdClient
-	s0fsMu                 sync.Mutex
-	s0fsMounts             map[string]*s0fsRootFSMount
-}
-
-type s0fsRootFSMount struct {
-	key                string
-	volumeID           string
-	teamID             string
-	hostMountPath      string
-	containerMountPath string
-	engine             *s0fs.Engine
-	server             *fuse.Server
-	session            volumefuse.Session
-	mountNamespacePath string
-	mountRootPath      string
-	mountPath          string
 }
 
 type liveRootFSPaths struct {
@@ -162,7 +142,6 @@ func NewContainerdRuntime(cfg ContainerdRuntimeConfig) *ContainerdRuntime {
 		criClient:              cfg.CRIClient,
 		criDialContext:         cfg.CRIDialContext,
 		containerdClient:       cfg.ContainerdClient,
-		s0fsMounts:             make(map[string]*s0fsRootFSMount),
 	}
 }
 
@@ -352,9 +331,6 @@ func (r *ContainerdRuntime) CommitS0FSRootFS(ctx context.Context, req S0FSCommit
 		return ctldapi.RootFSHeadDescriptor{}, fmt.Errorf("%w: rootfs filesystem id is required", ErrBadRequest)
 	}
 	teamID := strings.TrimSpace(req.TeamID)
-	if active := r.takeS0FSMount(req.Info); active != nil {
-		return commitActiveS0FSMount(ctx, active)
-	}
 
 	engine, err := r.openRootFSS0FSEngine(ctx, req.Store, teamID, volumeID)
 	if err != nil {
@@ -446,43 +422,6 @@ func (r *ContainerdRuntime) AttachS0FSRootFS(ctx context.Context, req S0FSAttach
 	return head, "", nil
 }
 
-func commitActiveS0FSMount(ctx context.Context, active *s0fsRootFSMount) (ctldapi.RootFSHeadDescriptor, error) {
-	defer active.close()
-	manifest, err := active.engine.EnsureMaterialized(ctx)
-	if err != nil {
-		return ctldapi.RootFSHeadDescriptor{}, err
-	}
-	return rootFSS0FSHeadFromManifest(active.teamID, active.volumeID, manifest)
-}
-
-func (m *s0fsRootFSMount) close() error {
-	if m == nil {
-		return nil
-	}
-	if m.server != nil {
-		_ = unmountS0FSRootFS(m.server, m.mountNamespacePath, m.mountRootPath, m.mountPath)
-	}
-	if m.session != nil {
-		m.session.Close()
-	}
-	if m.engine != nil {
-		return m.engine.Close()
-	}
-	return nil
-}
-
-func (r *ContainerdRuntime) takeS0FSMount(info ctldapi.RootFSInfo) *s0fsRootFSMount {
-	key := rootFSS0FSMountKey(info)
-	if key == "" {
-		return nil
-	}
-	r.s0fsMu.Lock()
-	defer r.s0fsMu.Unlock()
-	active := r.s0fsMounts[key]
-	delete(r.s0fsMounts, key)
-	return active
-}
-
 func (r *ContainerdRuntime) openRootFSS0FSEngine(ctx context.Context, store objectstore.Store, teamID, volumeID string) (*s0fs.Engine, error) {
 	if strings.TrimSpace(volumeID) == "" {
 		return nil, fmt.Errorf("%w: rootfs s0fs volume id is required", ErrBadRequest)
@@ -514,51 +453,6 @@ func loadRootFSS0FSHead(ctx context.Context, store objectstore.Store, head ctlda
 	return manifest.State, manifest, nil
 }
 
-func mountS0FSRootFS(session volumefuse.Session, targetPath, mountNamespacePath, mountRootPath string) (*fuse.Server, error) {
-	fs := volumefuse.New("sandbox0-rootfs", time.Second, session)
-	opts := &fuse.MountOptions{
-		FsName:            "sandbox0-rootfs",
-		Name:              "sandbox0-rootfs",
-		MaxBackground:     128,
-		EnableLocks:       true,
-		AllowOther:        os.Getuid() == 0,
-		DirectMountStrict: true,
-		MaxWrite:          256 * 1024,
-	}
-	var server *fuse.Server
-	mountFn := func() error {
-		var err error
-		if mountNamespacePath != "" && mountRootPath != "" {
-			server, err = mountFuseServerInMountNamespace(fs, targetPath, mountNamespacePath, mountRootPath, opts)
-		} else {
-			server, err = fuse.NewServer(fs, targetPath, opts)
-		}
-		if err != nil {
-			return fmt.Errorf("mount s0fs rootfs: %w", err)
-		}
-		go server.Serve()
-		if err := server.WaitMount(); err != nil {
-			_ = unmountS0FSRootFS(server, mountNamespacePath, mountRootPath, targetPath)
-			return fmt.Errorf("wait for s0fs rootfs mount: %w", err)
-		}
-		return nil
-	}
-	if err := mountFn(); err != nil {
-		return nil, err
-	}
-	return server, nil
-}
-
-func unmountS0FSRootFS(server *fuse.Server, mountNamespacePath, mountRootPath, targetPath string) error {
-	if server == nil {
-		return nil
-	}
-	if mountNamespacePath != "" && mountRootPath != "" && targetPath != "" {
-		return unmountPathInMountNamespace(mountNamespacePath, mountRootPath, targetPath)
-	}
-	return server.Unmount()
-}
-
 func rootFSS0FSObjectStore(store objectstore.Store, teamID, volumeID string) objectstore.Store {
 	return objectstore.Prefix(store, filepath.ToSlash(filepath.Join("rootfs", "s0fs", safeRootFSPath(teamID), safeRootFSPath(volumeID))))
 }
@@ -574,13 +468,6 @@ func rootFSS0FSVolumeID(filesystemID string, parent ctldapi.RootFSHeadDescriptor
 		return strings.TrimSpace(parent.VolumeID)
 	}
 	return strings.TrimSpace(sandboxID)
-}
-
-func rootFSS0FSMountKey(info ctldapi.RootFSInfo) string {
-	if strings.TrimSpace(info.ContainerID) != "" {
-		return strings.TrimSpace(info.ContainerID)
-	}
-	return strings.TrimSpace(info.PodNamespace) + "/" + strings.TrimSpace(info.PodName) + "/" + strings.TrimSpace(info.ContainerName)
 }
 
 func rootFSS0FSHeadFromManifest(teamID, volumeID string, manifest *s0fs.Manifest) (ctldapi.RootFSHeadDescriptor, error) {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
@@ -250,6 +251,29 @@ func TestLiveRootFSPathsFallBackToProcessRoot(t *testing.T) {
 	assert.Equal(t, filepath.Join(string(filepath.Separator), "proc", "9012", "root"), got.mountedPath)
 	assert.Equal(t, filepath.Join(string(filepath.Separator), "proc", "9012", "root"), got.hostPath)
 	assert.Equal(t, filepath.Join(string(filepath.Separator), "proc", "9012", "ns", "mnt"), got.mountNamespacePath)
+}
+
+func TestRootFSImportExcludedPathsIncludesProcessMounts(t *testing.T) {
+	mountInfo := filepath.Join(t.TempDir(), "mountinfo")
+	require.NoError(t, os.WriteFile(mountInfo, []byte(strings.Join([]string{
+		"36 25 0:32 / / rw,relatime - overlay overlay rw",
+		"37 36 0:33 / /proc rw,nosuid,nodev,noexec - proc proc rw",
+		"38 36 0:34 / /workspace rw,relatime - tmpfs tmpfs rw",
+		"39 36 0:35 / /etc/resolv.conf rw,relatime - tmpfs tmpfs rw",
+		"40 36 0:36 / /path\\040with\\040space rw,relatime - tmpfs tmpfs rw",
+		"",
+	}, "\n")), 0o644))
+
+	got := rootFSImportExcludedPaths([]string{"/workspace/data", "/proc"}, mountInfo)
+
+	assert.ElementsMatch(t, []string{
+		"/procd",
+		"/workspace/data",
+		"/proc",
+		"/workspace",
+		"/etc/resolv.conf",
+		"/path with space",
+	}, got)
 }
 
 func TestDigestFromReference(t *testing.T) {

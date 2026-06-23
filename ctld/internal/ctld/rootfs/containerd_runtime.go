@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -100,6 +101,7 @@ type liveRootFSPaths struct {
 	mountedPath        string
 	hostPath           string
 	mountNamespacePath string
+	mountInfoPath      string
 }
 
 type containerdClient interface {
@@ -368,13 +370,13 @@ func (r *ContainerdRuntime) CommitS0FSRootFS(ctx context.Context, req S0FSCommit
 			return ctldapi.RootFSHeadDescriptor{}, err
 		}
 	}
-	liveRootFS, err := mountedLiveRootFSPath(r.containerdRoot, r.containerdHostRoot, r.namespace, req.Info)
+	liveRootFS, err := liveRootFSPathsForContainer(r.containerdRoot, r.containerdHostRoot, r.namespace, req.Info)
 	if err != nil {
 		return ctldapi.RootFSHeadDescriptor{}, err
 	}
-	state, err := s0fs.ImportHostTree(ctx, liveRootFS, s0fs.HostImportOptions{
+	state, err := s0fs.ImportHostTree(ctx, liveRootFS.mountedPath, s0fs.HostImportOptions{
 		Base:          base,
-		ExcludedPaths: req.ExcludedPaths,
+		ExcludedPaths: rootFSImportExcludedPaths(req.ExcludedPaths, liveRootFS.mountInfoPath),
 	})
 	if err != nil {
 		return ctldapi.RootFSHeadDescriptor{}, err
@@ -855,7 +857,7 @@ func liveRootFSPathsFromTaskDir(taskDir, hostTaskDir, mountedRootFS string) (liv
 	} else if err != nil && !os.IsNotExist(err) {
 		return liveRootFSPaths{}, false, fmt.Errorf("inspect live rootfs %s: %w", mountedRootFS, err)
 	}
-	if pidRootFS, nsPath := taskProcessRootFSPath(taskDir); pidRootFS != "" {
+	if pidRootFS, nsPath, mountInfoPath := taskProcessRootFSPath(taskDir); pidRootFS != "" {
 		hostPath := pidRootFS
 		if taskRootExists {
 			hostPath = filepath.Join(hostTaskDir, "rootfs")
@@ -864,6 +866,7 @@ func liveRootFSPathsFromTaskDir(taskDir, hostTaskDir, mountedRootFS string) (liv
 			mountedPath:        pidRootFS,
 			hostPath:           hostPath,
 			mountNamespacePath: nsPath,
+			mountInfoPath:      mountInfoPath,
 		}, true, nil
 	}
 	if taskRootExists {
@@ -876,22 +879,89 @@ func liveRootFSPathsFromTaskDir(taskDir, hostTaskDir, mountedRootFS string) (liv
 	return liveRootFSPaths{}, false, nil
 }
 
-func taskProcessRootFSPath(taskDir string) (string, string) {
+func taskProcessRootFSPath(taskDir string) (string, string, string) {
 	raw, err := os.ReadFile(filepath.Join(taskDir, "init.pid"))
 	if err != nil {
-		return "", ""
+		return "", "", ""
 	}
 	pid := strings.TrimSpace(string(raw))
 	if pid == "" {
-		return "", ""
+		return "", "", ""
 	}
 	for _, r := range pid {
 		if r < '0' || r > '9' {
-			return "", ""
+			return "", "", ""
 		}
 	}
 	procRoot := filepath.Join("/proc", pid)
-	return filepath.Join(procRoot, "root"), filepath.Join(procRoot, "ns", "mnt")
+	return filepath.Join(procRoot, "root"), filepath.Join(procRoot, "ns", "mnt"), filepath.Join(procRoot, "mountinfo")
+}
+
+func rootFSImportExcludedPaths(extraPaths []string, mountInfoPath string) []string {
+	seen := make(map[string]struct{}, len(defaultRootFSSnapshotExcludedPaths)+len(extraPaths))
+	out := make([]string, 0, len(defaultRootFSSnapshotExcludedPaths)+len(extraPaths))
+	add := func(raw string) {
+		clean := cleanRootFSPath(raw)
+		if clean == "/" {
+			return
+		}
+		if _, ok := seen[clean]; ok {
+			return
+		}
+		seen[clean] = struct{}{}
+		out = append(out, clean)
+	}
+	for _, value := range defaultRootFSSnapshotExcludedPaths {
+		add(value)
+	}
+	for _, value := range extraPaths {
+		add(value)
+	}
+	for _, value := range rootFSMountInfoExcludedPaths(mountInfoPath) {
+		add(value)
+	}
+	return out
+}
+
+func rootFSMountInfoExcludedPaths(mountInfoPath string) []string {
+	mountInfoPath = strings.TrimSpace(mountInfoPath)
+	if mountInfoPath == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(mountInfoPath)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Split(line, " ")
+		if len(fields) < 5 {
+			continue
+		}
+		mountPoint := decodeMountInfoPath(fields[4])
+		if clean := cleanRootFSPath(mountPoint); clean != "/" {
+			out = append(out, clean)
+		}
+	}
+	return out
+}
+
+func decodeMountInfoPath(value string) string {
+	if !strings.Contains(value, "\\") {
+		return value
+	}
+	var b strings.Builder
+	for i := 0; i < len(value); i++ {
+		if value[i] == '\\' && i+3 < len(value) {
+			if n, err := strconv.ParseUint(value[i+1:i+4], 8, 8); err == nil {
+				b.WriteByte(byte(n))
+				i += 3
+				continue
+			}
+		}
+		b.WriteByte(value[i])
+	}
+	return b.String()
 }
 
 func findLiveRootFSByTaskAnnotations(taskRoot, hostTaskRoot string, info ctldapi.RootFSInfo) (liveRootFSPaths, error) {

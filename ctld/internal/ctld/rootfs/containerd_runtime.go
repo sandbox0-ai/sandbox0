@@ -462,7 +462,7 @@ func (r *ContainerdRuntime) AttachS0FSRootFS(ctx context.Context, req S0FSAttach
 		return ctldapi.RootFSHeadDescriptor{}, "", fmt.Errorf("create s0fs rootfs mountpoint: %w", err)
 	}
 
-	session := portal.NewS0FSSession(targetFilesystemID, teamID, engine, nil)
+	session := portal.NewS0FSRootFSSession(targetFilesystemID, teamID, engine, liveRootFS.mountedPath, nil)
 	server, err := mountS0FSRootFS(session, containerMountPath, liveRootFS.mountNamespacePath, liveRootFS.mountedPath)
 	if err != nil {
 		session.Close()

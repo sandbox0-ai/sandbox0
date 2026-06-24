@@ -1,6 +1,7 @@
 package rootfs
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/s0fs"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -121,6 +124,23 @@ func TestResolveContainerIDReturnsNotFound(t *testing.T) {
 
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrNotFound))
+}
+
+func TestRootFSS0FSMaterializerReadsInheritedSegments(t *testing.T) {
+	baseStore := objectstore.NewMemoryStore("rootfs-s0fs-inherited-segments-" + t.Name())
+	sourceStore := rootFSS0FSObjectStore(baseStore, "team-1", "source")
+	require.NoError(t, sourceStore.Put("segments/source-1.bin", bytes.NewReader([]byte("parent-data"))))
+
+	materializer := rootFSS0FSMaterializer(baseStore, "team-1", "fork")
+	got, err := materializer.ReadSegmentRange(&s0fs.Segment{
+		ID:       "source-1",
+		VolumeID: "source",
+		Key:      "segments/source-1.bin",
+		Length:   uint64(len("parent-data")),
+	}, 0, int64(len("parent-data")))
+
+	require.NoError(t, err)
+	assert.Equal(t, "parent-data", string(got))
 }
 
 func TestFindLiveRootFSByTaskAnnotations(t *testing.T) {

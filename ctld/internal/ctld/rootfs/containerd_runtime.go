@@ -383,28 +383,12 @@ func (r *ContainerdRuntime) AttachS0FSRootFS(ctx context.Context, req S0FSAttach
 		return ctldapi.RootFSHeadDescriptor{}, "", err
 	}
 	teamID := strings.TrimSpace(req.Head.TeamID)
-	volumeID := strings.TrimSpace(req.FilesystemID)
-	if volumeID == "" {
-		volumeID = strings.TrimSpace(req.Head.FilesystemID)
-	}
-	if volumeID == "" {
-		volumeID = strings.TrimSpace(req.Head.VolumeID)
-	}
-	engine, err := r.openRootFSS0FSEngine(ctx, req.Store, teamID, volumeID)
-	if err != nil {
-		return ctldapi.RootFSHeadDescriptor{}, "", err
-	}
+	targetFilesystemID := rootFSS0FSVolumeID(req.FilesystemID, req.Head, "")
 	sourceState, sourceManifest, err := loadRootFSS0FSHead(ctx, req.Store, req.Head)
 	if err != nil {
-		_ = engine.Close()
 		return ctldapi.RootFSHeadDescriptor{}, "", err
 	}
-	if err := engine.ReplaceState(sourceState); err != nil {
-		_ = engine.Close()
-		return ctldapi.RootFSHeadDescriptor{}, "", err
-	}
-	defer engine.Close()
-	head, err := rootFSS0FSHeadFromLoadedManifest(teamID, volumeID, sourceManifest)
+	head, err := rootFSS0FSHeadFromLoadedManifest(teamID, targetFilesystemID, sourceManifest)
 	if err != nil {
 		return ctldapi.RootFSHeadDescriptor{}, "", err
 	}
@@ -413,7 +397,7 @@ func (r *ContainerdRuntime) AttachS0FSRootFS(ctx context.Context, req S0FSAttach
 	if err != nil {
 		return ctldapi.RootFSHeadDescriptor{}, "", err
 	}
-	materializer := s0fs.NewMaterializer(volumeID, rootFSS0FSObjectStore(req.Store, teamID, volumeID), nil)
+	materializer := rootFSS0FSMaterializer(req.Store, teamID, req.Head.VolumeID)
 	excludedPaths := rootFSImportExcludedPaths(req.ExcludedPaths, liveRootFS.mountInfoPath)
 	if err := restoreS0FSStateToHostTree(ctx, sourceState, materializer, liveRootFS.mountedPath, excludedPaths); err != nil {
 		return ctldapi.RootFSHeadDescriptor{}, "", fmt.Errorf("restore s0fs rootfs head: %w", err)
@@ -432,12 +416,10 @@ func (r *ContainerdRuntime) openRootFSS0FSEngine(ctx context.Context, store obje
 	}
 	rootStore := rootFSS0FSObjectStore(store, teamID, volumeID)
 	return s0fs.Open(ctx, s0fs.Config{
-		VolumeID:    volumeID,
-		WALPath:     filepath.Join(cacheDir, "engine.wal"),
-		ObjectStore: rootStore,
-		ObjectStoreForVolume: func(sourceVolumeID string) (objectstore.Store, error) {
-			return rootFSS0FSObjectStore(store, teamID, sourceVolumeID), nil
-		},
+		VolumeID:             volumeID,
+		WALPath:              filepath.Join(cacheDir, "engine.wal"),
+		ObjectStore:          rootStore,
+		ObjectStoreForVolume: rootFSS0FSObjectStoreResolver(store, teamID),
 	})
 }
 
@@ -445,12 +427,27 @@ func loadRootFSS0FSHead(ctx context.Context, store objectstore.Store, head ctlda
 	if err := validateRootFSHeadDescriptor(head); err != nil {
 		return nil, nil, err
 	}
-	materializer := s0fs.NewMaterializer(head.VolumeID, rootFSS0FSObjectStore(store, head.TeamID, head.VolumeID), nil)
+	materializer := rootFSS0FSMaterializer(store, head.TeamID, head.VolumeID)
 	manifest, err := materializer.LoadManifestByKey(ctx, head.ManifestKey)
 	if err != nil {
 		return nil, nil, err
 	}
 	return manifest.State, manifest, nil
+}
+
+func rootFSS0FSMaterializer(store objectstore.Store, teamID, volumeID string) *s0fs.Materializer {
+	return s0fs.NewMaterializer(
+		volumeID,
+		rootFSS0FSObjectStore(store, teamID, volumeID),
+		nil,
+		rootFSS0FSObjectStoreResolver(store, teamID),
+	)
+}
+
+func rootFSS0FSObjectStoreResolver(store objectstore.Store, teamID string) s0fs.ObjectStoreResolver {
+	return func(volumeID string) (objectstore.Store, error) {
+		return rootFSS0FSObjectStore(store, teamID, volumeID), nil
+	}
 }
 
 func rootFSS0FSObjectStore(store objectstore.Store, teamID, volumeID string) objectstore.Store {

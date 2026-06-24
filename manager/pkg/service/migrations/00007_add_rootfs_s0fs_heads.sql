@@ -1,7 +1,7 @@
 -- +goose Up
 
 ALTER TABLE manager.rootfs_layers
-    ADD COLUMN IF NOT EXISTS storage_engine TEXT NOT NULL DEFAULT 'oci-diff',
+    ADD COLUMN IF NOT EXISTS storage_engine TEXT NOT NULL DEFAULT 's0fs',
     ADD COLUMN IF NOT EXISTS s0fs_volume_id TEXT NOT NULL DEFAULT '',
     ADD COLUMN IF NOT EXISTS s0fs_manifest_key TEXT NOT NULL DEFAULT '',
     ADD COLUMN IF NOT EXISTS s0fs_manifest_seq BIGINT NOT NULL DEFAULT 0,

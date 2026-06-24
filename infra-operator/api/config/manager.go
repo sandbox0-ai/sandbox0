@@ -206,9 +206,6 @@ type RootFSMaintenanceConfig struct {
 	ObjectDeleteBackoffBase metav1.Duration `yaml:"object_delete_backoff_base" json:"-"`
 	ObjectDeleteBackoffMax  metav1.Duration `yaml:"object_delete_backoff_max" json:"-"`
 	ObjectDeleteMaxAttempts int             `yaml:"object_delete_max_attempts" json:"-"`
-	SquashDisabled          bool            `yaml:"squash_disabled" json:"-"`
-	SquashMaxChainDepth     int             `yaml:"squash_max_chain_depth" json:"-"`
-	SquashMaxChainBytes     int64           `yaml:"squash_max_chain_bytes" json:"-"`
 }
 
 type RootFSObjectStorageConfig struct {
@@ -491,12 +488,6 @@ func applyRootFSMaintenanceDefaults(cfg *ManagerConfig) {
 	}
 	if cfg.RootFSMaintenance.ObjectDeleteBackoffMax.Duration == 0 {
 		cfg.RootFSMaintenance.ObjectDeleteBackoffMax = metav1.Duration{Duration: 10 * time.Minute}
-	}
-	if cfg.RootFSMaintenance.SquashMaxChainDepth <= 0 {
-		cfg.RootFSMaintenance.SquashMaxChainDepth = 8
-	}
-	if cfg.RootFSMaintenance.SquashMaxChainBytes <= 0 {
-		cfg.RootFSMaintenance.SquashMaxChainBytes = 512 * 1024 * 1024
 	}
 }
 

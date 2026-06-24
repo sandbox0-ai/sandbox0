@@ -806,14 +806,11 @@ func TestClaimSandboxInitializesRootFSFromSnapshotBeforeProcd(t *testing.T) {
 	if applyReq.Target.PodName != "idle-ready" {
 		t.Fatalf("apply target pod = %q, want idle-ready", applyReq.Target.PodName)
 	}
-	if applyReq.BaselineLayerID != "layer-v1" {
-		t.Fatalf("BaselineLayerID = %q, want layer-v1", applyReq.BaselineLayerID)
+	if applyReq.Head.ManifestKey != "manifests/layer-v1.json" {
+		t.Fatalf("head manifest = %q, want manifests/layer-v1.json", applyReq.Head.ManifestKey)
 	}
 	if initReq.RootFSMountPath != "/sandbox0/rootfs" {
 		t.Fatalf("initialize rootfs_mount_path = %q, want /sandbox0/rootfs", initReq.RootFSMountPath)
-	}
-	if len(applyReq.Layers) != 1 || applyReq.Layers[0].LayerID != "layer-v1" {
-		t.Fatalf("apply layers = %+v, want layer-v1", applyReq.Layers)
 	}
 	state := store.rootFSStates[resp.SandboxID]
 	if state == nil || state.LayerID != "layer-v1" {

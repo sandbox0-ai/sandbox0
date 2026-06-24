@@ -51,7 +51,7 @@ func main() {
 	flag.StringVar(&httpAddr, "http-addr", ":8095", "HTTP listen address for ctld health and control endpoints")
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "optional kubeconfig path used by ctld")
 	flag.StringVar(&criEndpoint, "cri-endpoint", "/host-run/containerd/containerd.sock", "host CRI socket used to read pod sandbox stats")
-	flag.StringVar(&containerdEndpoint, "containerd-endpoint", "/host-run/containerd/containerd.sock", "host containerd socket used for rootfs diff/apply")
+	flag.StringVar(&containerdEndpoint, "containerd-endpoint", "/host-run/containerd/containerd.sock", "host containerd socket used for rootfs inspect and s0fs attach")
 	flag.StringVar(&containerdRoot, "containerd-root", "/host-run/containerd", "host containerd runtime root mounted into ctld")
 	flag.StringVar(&containerdHostRoot, "containerd-host-root", "/run/containerd", "host containerd runtime root path used in containerd mount requests")
 	flag.StringVar(&containerdDataRoot, "containerd-data-root", "/host-var-lib/containerd", "host containerd data root mounted into ctld")

@@ -392,24 +392,7 @@ func TestPausedSandboxRuntimeResumeAppliesRootFSCheckpointBeforeInitialize(t *te
 		RuntimeGeneration: 3,
 		ClaimedAt:         now,
 		CreatedAt:         now,
-	}, &service.SandboxRootFSState{
-		SandboxID:           "sandbox-1",
-		TeamID:              "team-1",
-		RuntimeGeneration:   3,
-		Runtime:             "runc",
-		RuntimeHandler:      "runc",
-		BaseImageRef:        "docker.io/sandbox0ai/otemplates:default-v0.2.0",
-		BaseImageDigest:     "sha256:base",
-		Snapshotter:         "overlayfs",
-		SnapshotParent:      "sha256:parent",
-		SnapshotParentChain: []string{"sha256:parent"},
-		DiffDigest:          "sha256:diff",
-		DiffMediaType:       "application/vnd.oci.image.layer.v1.tar",
-		DiffSize:            128,
-		DiffObjectKey:       "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar",
-		CreatedAt:           now,
-		UpdatedAt:           now,
-	})
+	}, rootFSStateForManagerIntegration("sandbox-1", "team-1", "layer-v1", 3, now))
 
 	env := newManagerTestEnvWithOptions(t, managerTestEnvOptions{
 		sandboxConfig: service.SandboxServiceConfig{
@@ -480,19 +463,7 @@ func TestSandboxRootFSProductAPI(t *testing.T) {
 		Status:            service.SandboxStatusPaused,
 		CreatedAt:         now,
 		UpdatedAt:         now,
-	}, &service.SandboxRootFSState{
-		SandboxID:         "sandbox-1",
-		TeamID:            "team-1",
-		LayerID:           "layer-v1",
-		RuntimeGeneration: 1,
-		Runtime:           "runc",
-		BaseImageDigest:   "sha256:base",
-		Snapshotter:       "overlayfs",
-		DiffDigest:        "sha256:layer-v1",
-		DiffObjectKey:     "rootfs/layer-v1.tar",
-		CreatedAt:         now,
-		UpdatedAt:         now,
-	})
+	}, rootFSStateForManagerIntegration("sandbox-1", "team-1", "layer-v1", 1, now))
 	env := newManagerTestEnvWithOptions(t, managerTestEnvOptions{sandboxStore: store})
 
 	resp, body := doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxes/sandbox-1/snapshots", env.token, map[string]any{
@@ -529,19 +500,7 @@ func TestSandboxRootFSProductAPI(t *testing.T) {
 	}
 
 	store.mu.Lock()
-	store.rootFSState["sandbox-1"] = &service.SandboxRootFSState{
-		SandboxID:         "sandbox-1",
-		TeamID:            "team-1",
-		LayerID:           "layer-v2",
-		RuntimeGeneration: 2,
-		Runtime:           "runc",
-		BaseImageDigest:   "sha256:base",
-		Snapshotter:       "overlayfs",
-		DiffDigest:        "sha256:layer-v2",
-		DiffObjectKey:     "rootfs/layer-v2.tar",
-		CreatedAt:         now,
-		UpdatedAt:         now,
-	}
+	store.rootFSState["sandbox-1"] = rootFSStateForManagerIntegration("sandbox-1", "team-1", "layer-v2", 2, now)
 	store.mu.Unlock()
 
 	resp, body = doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxes/sandbox-1/rootfs/restore", env.token, map[string]any{
@@ -828,8 +787,8 @@ func newRootFSApplyRecordingCtldServer(t *testing.T, events *orderedEvents, name
 		if req.ExpectedBaseImageDigest != "sha256:base" || len(req.ExpectedSnapshotParentChain) != 1 || req.ExpectedSnapshotParentChain[0] != "sha256:parent" {
 			t.Fatalf("unexpected rootfs base validation: %+v", req)
 		}
-		if req.Descriptor.Digest != "sha256:diff" || req.Descriptor.ObjectKey != "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar" {
-			t.Fatalf("unexpected rootfs descriptor: %+v", req.Descriptor)
+		if req.Head.Engine != ctldapi.RootFSStorageEngineS0FS || req.Head.ManifestKey != "manifests/layer-v1.json" {
+			t.Fatalf("unexpected rootfs head: %+v", req.Head)
 		}
 		events.Add("apply-rootfs")
 		_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
@@ -1085,19 +1044,7 @@ func (s *memorySandboxStoreForManagerIntegration) RestoreRootFSFromSnapshot(_ co
 		return nil, service.ErrSandboxRecordNotFound
 	}
 	now := time.Now().UTC()
-	s.rootFSState[req.SandboxID] = &service.SandboxRootFSState{
-		SandboxID:         req.SandboxID,
-		TeamID:            target.TeamID,
-		LayerID:           snapshot.HeadLayerID,
-		RuntimeGeneration: target.RuntimeGeneration,
-		Runtime:           "runc",
-		BaseImageDigest:   "sha256:base",
-		Snapshotter:       "overlayfs",
-		DiffDigest:        "sha256:" + snapshot.HeadLayerID,
-		DiffObjectKey:     "rootfs/" + snapshot.HeadLayerID + ".tar",
-		CreatedAt:         now,
-		UpdatedAt:         now,
-	}
+	s.rootFSState[req.SandboxID] = rootFSStateForManagerIntegration(req.SandboxID, target.TeamID, snapshot.HeadLayerID, target.RuntimeGeneration, now)
 	filesystem := &service.RootFSFilesystem{
 		ID:                 req.SandboxID,
 		TeamID:             target.TeamID,
@@ -1182,6 +1129,33 @@ func cloneRootFSStateForManagerIntegration(state *service.SandboxRootFSState) *s
 	clone.SnapshotParentChain = append([]string(nil), state.SnapshotParentChain...)
 	clone.LayerChain = cloneRootFSLayersForManagerIntegration(state.LayerChain)
 	return &clone
+}
+
+func rootFSStateForManagerIntegration(sandboxID, teamID, layerID string, generation int64, now time.Time) *service.SandboxRootFSState {
+	manifestKey := "manifests/" + layerID + ".json"
+	return &service.SandboxRootFSState{
+		SandboxID:           sandboxID,
+		TeamID:              teamID,
+		LayerID:             layerID,
+		RuntimeGeneration:   generation,
+		Runtime:             "runc",
+		RuntimeHandler:      "runc",
+		BaseImageRef:        "docker.io/sandbox0ai/otemplates:default-v0.2.0",
+		BaseImageDigest:     "sha256:base",
+		Snapshotter:         "overlayfs",
+		SnapshotParent:      "sha256:parent",
+		SnapshotParentChain: []string{"sha256:parent"},
+		StorageEngine:       ctldapi.RootFSStorageEngineS0FS,
+		DiffDigest:          "s0fs:" + manifestKey,
+		DiffMediaType:       "application/vnd.sandbox0.rootfs.s0fs.v1+json",
+		DiffObjectKey:       manifestKey,
+		S0FSVolumeID:        sandboxID,
+		S0FSManifestKey:     manifestKey,
+		S0FSManifestSeq:     1,
+		S0FSCheckpointSeq:   1,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}
 }
 
 func cloneRootFSLayersForManagerIntegration(layers []*service.SandboxRootFSLayer) []*service.SandboxRootFSLayer {

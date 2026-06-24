@@ -50,7 +50,7 @@ type SandboxRecord struct {
 }
 
 // SandboxRootFSState is manager-internal metadata for one persisted sandbox
-// writable rootfs diff.
+// writable rootfs checkpoint.
 type SandboxRootFSState struct {
 	LayerID       string
 	ParentLayerID string
@@ -80,7 +80,8 @@ type SandboxRootFSState struct {
 	LayerChain          []*SandboxRootFSLayer
 }
 
-// SandboxRootFSLayer is one immutable OCI diff layer in a sandbox rootfs chain.
+// SandboxRootFSLayer is one immutable rootfs checkpoint record in a sandbox
+// rootfs chain.
 type SandboxRootFSLayer struct {
 	ID                  string
 	ParentLayerID       string
@@ -545,12 +546,7 @@ func validateRootFSState(state *SandboxRootFSState) error {
 			return fmt.Errorf("s0fs_manifest_seq is required")
 		}
 	default:
-		if strings.TrimSpace(state.DiffDigest) == "" {
-			return fmt.Errorf("diff_digest is required")
-		}
-		if strings.TrimSpace(state.DiffObjectKey) == "" {
-			return fmt.Errorf("diff_object_key is required")
-		}
+		return fmt.Errorf("unsupported rootfs storage_engine %q", state.StorageEngine)
 	}
 	return nil
 }
@@ -565,14 +561,9 @@ func saveRootFSLayer(ctx context.Context, exec rootFSStateExecutor, state *Sandb
 	if strings.TrimSpace(state.ParentLayerID) == strings.TrimSpace(state.LayerID) {
 		return fmt.Errorf("parent_layer_id cannot reference layer_id")
 	}
-	if rootFSStorageEngine(state.StorageEngine) != ctldapi.RootFSStorageEngineS0FS {
-		if err := saveRootFSObject(ctx, exec, state); err != nil {
-			return err
-		}
-	}
 	storageEngine := rootFSStorageEngine(state.StorageEngine)
-	if storageEngine == "" {
-		storageEngine = ctldapi.RootFSStorageEngineOCIDiff
+	if storageEngine != ctldapi.RootFSStorageEngineS0FS {
+		return fmt.Errorf("unsupported rootfs storage_engine %q", state.StorageEngine)
 	}
 	if state.DiffMediaType == "" && storageEngine == ctldapi.RootFSStorageEngineS0FS {
 		state.DiffMediaType = "application/vnd.sandbox0.rootfs.s0fs.v1+json"
@@ -627,48 +618,11 @@ func saveRootFSLayerRow(ctx context.Context, exec rootFSStateExecutor, state *Sa
 
 func rootFSStorageEngine(raw string) string {
 	switch strings.TrimSpace(raw) {
-	case "", ctldapi.RootFSStorageEngineOCIDiff:
-		return ctldapi.RootFSStorageEngineOCIDiff
-	case ctldapi.RootFSStorageEngineS0FS:
+	case "", ctldapi.RootFSStorageEngineS0FS:
 		return ctldapi.RootFSStorageEngineS0FS
 	default:
 		return strings.TrimSpace(raw)
 	}
-}
-
-func saveRootFSObject(ctx context.Context, exec rootFSStateExecutor, state *SandboxRootFSState) error {
-	if exec == nil || state == nil {
-		return nil
-	}
-	tag, err := exec.Exec(ctx, `
-		INSERT INTO manager.rootfs_objects (
-			object_key, team_id, diff_digest, diff_media_type, diff_size,
-			first_layer_id, last_referenced_at, missing_at, deleted_at,
-			last_error, created_at, updated_at
-		)
-		VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, NOW()), NULL, NULL, '', COALESCE($7, NOW()), NOW())
-		ON CONFLICT (object_key) DO UPDATE SET
-			team_id = EXCLUDED.team_id,
-			diff_digest = EXCLUDED.diff_digest,
-			diff_media_type = EXCLUDED.diff_media_type,
-			diff_size = EXCLUDED.diff_size,
-			last_referenced_at = NOW(),
-			missing_at = NULL,
-			deleted_at = NULL,
-			last_error = '',
-			updated_at = NOW()
-		WHERE manager.rootfs_objects.team_id = EXCLUDED.team_id
-			AND manager.rootfs_objects.diff_digest = EXCLUDED.diff_digest
-			AND manager.rootfs_objects.diff_size = EXCLUDED.diff_size
-	`, state.DiffObjectKey, state.TeamID, state.DiffDigest, state.DiffMediaType,
-		state.DiffSize, state.LayerID, nullableTime(state.CreatedAt))
-	if err != nil {
-		return fmt.Errorf("save rootfs object: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("%w: %s", ErrRootFSObjectConflict, state.DiffObjectKey)
-	}
-	return nil
 }
 
 func advanceSandboxRootFSFilesystemHead(ctx context.Context, exec rootFSStateExecutor, state *SandboxRootFSState) error {

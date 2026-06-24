@@ -159,7 +159,6 @@ func (s *rootFSUnionSession) SetAttr(ctx context.Context, req *pb.SetAttrRequest
 		if err != nil {
 			return nil, err
 		}
-		backend = rootFSUnionBackendUpper
 	}
 	resp, err := s.upper.SetAttr(ctx, &pb.SetAttrRequest{
 		VolumeId: req.GetVolumeId(),
@@ -1301,10 +1300,13 @@ func (s *rootFSUnionSession) mapLowerNodeResponse(resp *pb.NodeResponse) *pb.Nod
 	if resp == nil {
 		return nil
 	}
-	mapped := *resp
-	mapped.Inode = s.mapLowerInode(resp.GetInode())
-	mapped.Attr = cloneAttrWithInode(resp.GetAttr(), mapped.Inode)
-	return &mapped
+	inode := s.mapLowerInode(resp.GetInode())
+	return &pb.NodeResponse{
+		Inode:      inode,
+		Generation: resp.GetGeneration(),
+		Attr:       cloneAttrWithInode(resp.GetAttr(), inode),
+		HandleId:   resp.GetHandleId(),
+	}
 }
 
 func (s *rootFSUnionSession) mapLowerDirEntry(entry *pb.DirEntry) *pb.DirEntry {
@@ -1486,20 +1488,35 @@ func cloneAttrWithInode(attr *pb.GetAttrResponse, inode uint64) *pb.GetAttrRespo
 	if attr == nil {
 		return nil
 	}
-	copied := *attr
-	copied.Ino = inode
-	return &copied
+	return &pb.GetAttrResponse{
+		Ino:       inode,
+		Mode:      attr.GetMode(),
+		Nlink:     attr.GetNlink(),
+		Uid:       attr.GetUid(),
+		Gid:       attr.GetGid(),
+		Rdev:      attr.GetRdev(),
+		Size:      attr.GetSize(),
+		Blocks:    attr.GetBlocks(),
+		AtimeSec:  attr.GetAtimeSec(),
+		AtimeNsec: attr.GetAtimeNsec(),
+		MtimeSec:  attr.GetMtimeSec(),
+		MtimeNsec: attr.GetMtimeNsec(),
+		CtimeSec:  attr.GetCtimeSec(),
+		CtimeNsec: attr.GetCtimeNsec(),
+	}
 }
 
 func cloneDirEntry(entry *pb.DirEntry) *pb.DirEntry {
 	if entry == nil {
 		return nil
 	}
-	copied := *entry
-	if entry.Attr != nil {
-		copied.Attr = cloneAttrWithInode(entry.Attr, entry.GetInode())
+	return &pb.DirEntry{
+		Inode:  entry.GetInode(),
+		Offset: entry.GetOffset(),
+		Name:   entry.GetName(),
+		Type:   entry.GetType(),
+		Attr:   cloneAttrWithInode(entry.GetAttr(), entry.GetInode()),
 	}
-	return &copied
 }
 
 func rootFSUnionNotFound(value string) error {

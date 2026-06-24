@@ -19,6 +19,7 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
@@ -228,6 +229,10 @@ func (r *ContainerdRuntime) CommitS0FSRootFS(ctx context.Context, req S0FSCommit
 	if err != nil {
 		return ctldapi.RootFSHeadDescriptor{}, err
 	}
+	state, err = mergeS0FSRootFSPortalPaths(ctx, state, req.PortalPaths)
+	if err != nil {
+		return ctldapi.RootFSHeadDescriptor{}, err
+	}
 	if err := engine.ReplaceState(state); err != nil {
 		return ctldapi.RootFSHeadDescriptor{}, err
 	}
@@ -295,7 +300,10 @@ func (r *ContainerdRuntime) AttachS0FSRootFS(ctx context.Context, req S0FSAttach
 		return ctldapi.RootFSHeadDescriptor{}, "", fmt.Errorf("create s0fs rootfs mountpoint: %w", err)
 	}
 
-	runtimeMountPaths := rootFSRuntimeBindMountPaths(rootFSMountInfoExcludedPaths(liveRootFS.mountInfoPath), containerMountPath)
+	runtimeMountPaths := filterRootFSRuntimeBindMountPaths(
+		rootFSRuntimeBindMountPaths(rootFSMountInfoExcludedPaths(liveRootFS.mountInfoPath), containerMountPath),
+		req.PortalPaths,
+	)
 	session := portal.NewS0FSRootFSSession(targetFilesystemID, teamID, engine, liveRootFS.mountedPath, nil)
 	server, err := mountS0FSRootFS(session, containerMountPath, liveRootFS.mountNamespacePath, liveRootFS.mountedPath)
 	if err != nil {
@@ -466,7 +474,7 @@ func (r *ContainerdRuntime) openRootFSS0FSEngine(ctx context.Context, store obje
 	if strings.TrimSpace(volumeID) == "" {
 		return nil, fmt.Errorf("%w: rootfs s0fs volume id is required", ErrBadRequest)
 	}
-	cacheDir := filepath.Join(r.rootFSCacheDir, "s0fs", safeRootFSPath(teamID), safeRootFSPath(volumeID))
+	cacheDir := filepath.Join(r.rootFSCacheDir, "s0fs", rootfsstore.SafePath(teamID), rootfsstore.SafePath(volumeID))
 	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create rootfs s0fs cache dir: %w", err)
 	}
@@ -507,7 +515,7 @@ func rootFSS0FSObjectStoreResolver(store objectstore.Store, teamID string) s0fs.
 }
 
 func rootFSS0FSObjectStore(store objectstore.Store, teamID, volumeID string) objectstore.Store {
-	return objectstore.Prefix(store, filepath.ToSlash(filepath.Join("rootfs", "s0fs", safeRootFSPath(teamID), safeRootFSPath(volumeID))))
+	return rootfsstore.S0FSObjectStore(store, teamID, volumeID)
 }
 
 func rootFSS0FSVolumeID(filesystemID string, parent ctldapi.RootFSHeadDescriptor, sandboxID string) string {
@@ -625,6 +633,69 @@ func rootFSRuntimeBindMountPaths(paths []string, rootFSMountPath string) []strin
 		selected = append(selected, candidate)
 	}
 	return selected
+}
+
+func mergeS0FSRootFSPortalPaths(ctx context.Context, state *s0fs.SnapshotState, portalPaths []ctldapi.RootFSPortalPath) (*s0fs.SnapshotState, error) {
+	var err error
+	for _, portalPath := range portalPaths {
+		mountPath := cleanRootFSPath(portalPath.MountPath)
+		if mountPath == "/" {
+			return nil, fmt.Errorf("%w: rootfs portal mount path must be non-root", ErrBadRequest)
+		}
+		backingPath := strings.TrimSpace(portalPath.BackingPath)
+		if backingPath == "" {
+			continue
+		}
+		info, statErr := os.Stat(backingPath)
+		if statErr != nil {
+			return nil, fmt.Errorf("stat rootfs portal backing path %s: %w", backingPath, statErr)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("%w: rootfs portal backing path %s is not a directory", ErrBadRequest, backingPath)
+		}
+		state, err = s0fs.MergeHostTree(ctx, state, backingPath, mountPath, s0fs.HostImportOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("merge rootfs portal %s: %w", mountPath, err)
+		}
+	}
+	return state, nil
+}
+
+func filterRootFSRuntimeBindMountPaths(paths []string, portalPaths []ctldapi.RootFSPortalPath) []string {
+	if len(paths) == 0 || len(portalPaths) == 0 {
+		return paths
+	}
+	portalMounts := make([]string, 0, len(portalPaths))
+	for _, portalPath := range portalPaths {
+		mountPath := cleanRootFSPath(portalPath.MountPath)
+		if mountPath == "/" {
+			continue
+		}
+		portalMounts = append(portalMounts, mountPath)
+	}
+	if len(portalMounts) == 0 {
+		return paths
+	}
+	filtered := make([]string, 0, len(paths))
+	for _, raw := range paths {
+		mountPath := cleanRootFSPath(raw)
+		if rootFSRuntimeBindConflictsWithPortal(mountPath, portalMounts) {
+			continue
+		}
+		filtered = append(filtered, mountPath)
+	}
+	return filtered
+}
+
+func rootFSRuntimeBindConflictsWithPortal(mountPath string, portalMounts []string) bool {
+	for _, portalMount := range portalMounts {
+		if mountPath == portalMount ||
+			strings.HasPrefix(mountPath, portalMount+"/") ||
+			strings.HasPrefix(portalMount, mountPath+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func rootFSRuntimeBindCovered(candidate string, selected []string) bool {
@@ -748,15 +819,6 @@ func rootFSS0FSHeadFromLoadedManifest(teamID, volumeID string, manifest *s0fs.Ma
 		ManifestSeq:   manifest.ManifestSeq,
 		CheckpointSeq: manifest.CheckpointSeq,
 	}, nil
-}
-
-func safeRootFSPath(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "_"
-	}
-	replacer := strings.NewReplacer("/", "_", "\\", "_", "\x00", "_", "..", "_")
-	return replacer.Replace(value)
 }
 
 func (r *ContainerdRuntime) resolveContainerID(ctx context.Context, target ctldapi.RootFSContainerRef) (string, string, error) {

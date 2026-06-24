@@ -199,16 +199,12 @@ func TestRootFSStateFromLayerChainKeepsCurrentSandboxID(t *testing.T) {
 			ID:              "layer-parent",
 			SourceSandboxID: "parent-sandbox",
 			TeamID:          "team-1",
-			DiffDigest:      "sha256:parent",
-			DiffObjectKey:   "rootfs/parent.tar",
 		},
 		{
 			ID:              "layer-child",
 			ParentLayerID:   "layer-parent",
 			SourceSandboxID: "parent-sandbox",
 			TeamID:          "team-1",
-			DiffDigest:      "sha256:child",
-			DiffObjectKey:   "rootfs/child.tar",
 		},
 	})
 
@@ -232,9 +228,6 @@ func TestRootFSStateFromLayerChainPreservesS0FSHead(t *testing.T) {
 		SourceSandboxID:     "sandbox-source",
 		TeamID:              "team-1",
 		StorageEngine:       ctldapi.RootFSStorageEngineS0FS,
-		DiffDigest:          "s0fs:manifests/00000000000000000005.json",
-		DiffMediaType:       "application/vnd.sandbox0.rootfs.s0fs.v1+json",
-		DiffObjectKey:       "manifests/00000000000000000005.json",
 		S0FSVolumeID:        "fs-1",
 		S0FSManifestKey:     "manifests/00000000000000000005.json",
 		S0FSManifestSeq:     5,

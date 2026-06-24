@@ -197,15 +197,11 @@ type CredentialStoreConfig struct {
 }
 
 type RootFSMaintenanceConfig struct {
-	Disabled                bool            `yaml:"disabled" json:"-"`
-	Interval                metav1.Duration `yaml:"interval" json:"-"`
-	BatchSize               int             `yaml:"batch_size" json:"-"`
-	MaxBatchesPerRun        int             `yaml:"max_batches_per_run" json:"-"`
-	Workers                 int             `yaml:"workers" json:"-"`
-	ObjectDeleteClaimTTL    metav1.Duration `yaml:"object_delete_claim_ttl" json:"-"`
-	ObjectDeleteBackoffBase metav1.Duration `yaml:"object_delete_backoff_base" json:"-"`
-	ObjectDeleteBackoffMax  metav1.Duration `yaml:"object_delete_backoff_max" json:"-"`
-	ObjectDeleteMaxAttempts int             `yaml:"object_delete_max_attempts" json:"-"`
+	Disabled         bool            `yaml:"disabled" json:"-"`
+	Interval         metav1.Duration `yaml:"interval" json:"-"`
+	BatchSize        int             `yaml:"batch_size" json:"-"`
+	MaxBatchesPerRun int             `yaml:"max_batches_per_run" json:"-"`
+	Workers          int             `yaml:"workers" json:"-"`
 }
 
 type RootFSObjectStorageConfig struct {
@@ -479,15 +475,6 @@ func applyRootFSMaintenanceDefaults(cfg *ManagerConfig) {
 	}
 	if cfg.RootFSMaintenance.Workers <= 0 {
 		cfg.RootFSMaintenance.Workers = 1
-	}
-	if cfg.RootFSMaintenance.ObjectDeleteClaimTTL.Duration == 0 {
-		cfg.RootFSMaintenance.ObjectDeleteClaimTTL = metav1.Duration{Duration: 2 * time.Minute}
-	}
-	if cfg.RootFSMaintenance.ObjectDeleteBackoffBase.Duration == 0 {
-		cfg.RootFSMaintenance.ObjectDeleteBackoffBase = metav1.Duration{Duration: 5 * time.Second}
-	}
-	if cfg.RootFSMaintenance.ObjectDeleteBackoffMax.Duration == 0 {
-		cfg.RootFSMaintenance.ObjectDeleteBackoffMax = metav1.Duration{Duration: 10 * time.Minute}
 	}
 }
 

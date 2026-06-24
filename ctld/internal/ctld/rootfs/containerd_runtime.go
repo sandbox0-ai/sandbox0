@@ -608,9 +608,15 @@ func (r *ContainerdRuntime) takeS0FSMount(info ctldapi.RootFSInfo) *s0fsRootFSMo
 	r.s0fsMu.Lock()
 	defer r.s0fsMu.Unlock()
 	active := r.s0fsMounts[key]
+	if active == nil && strings.TrimSpace(info.PodUID) != "" {
+		active = r.s0fsMountsByPodUID[strings.TrimSpace(info.PodUID)]
+	}
 	delete(r.s0fsMounts, key)
 	if active != nil && strings.TrimSpace(active.podUID) != "" {
 		delete(r.s0fsMountsByPodUID, active.podUID)
+	}
+	if active != nil && strings.TrimSpace(active.key) != "" {
+		delete(r.s0fsMounts, active.key)
 	}
 	return active
 }

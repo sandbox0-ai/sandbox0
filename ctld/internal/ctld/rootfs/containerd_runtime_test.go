@@ -206,6 +206,25 @@ func TestCommitS0FSRootFSUsesActiveMountEngine(t *testing.T) {
 	assert.Equal(t, "child-data", string(payload))
 }
 
+func TestTakeS0FSMountFallsBackToPodUID(t *testing.T) {
+	runtime := NewContainerdRuntime(ContainerdRuntimeConfig{})
+	active := &s0fsRootFSMount{
+		key:    "old-container",
+		podUID: "pod-1",
+	}
+	runtime.s0fsMounts[active.key] = active
+	runtime.s0fsMountsByPodUID[active.podUID] = active
+
+	got := runtime.takeS0FSMount(ctldapi.RootFSInfo{
+		ContainerID: "new-container",
+		PodUID:      "pod-1",
+	})
+
+	require.Same(t, active, got)
+	assert.Empty(t, runtime.s0fsMounts)
+	assert.Empty(t, runtime.s0fsMountsByPodUID)
+}
+
 func TestS0FSRootFSVolumePortalPaths(t *testing.T) {
 	active := &s0fsRootFSMount{
 		mountRootPath:      "/proc/123/root",

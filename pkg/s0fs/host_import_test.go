@@ -94,6 +94,75 @@ func TestImportHostTreePreservesBaseColdExtents(t *testing.T) {
 	}
 }
 
+func TestImportHostTreePreservesSparseFileHoles(t *testing.T) {
+	root := t.TempDir()
+	filePath := filepath.Join(root, "sparse.img")
+	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDWR, 0o644)
+	requireNoError(t, err)
+	const sparseSize = 512 << 20
+	requireNoError(t, file.Truncate(sparseSize))
+	_, err = file.WriteAt([]byte("tail"), sparseSize-4)
+	requireNoError(t, err)
+	requireNoError(t, file.Close())
+
+	state, err := ImportHostTree(context.Background(), root, HostImportOptions{})
+	if err != nil {
+		t.Fatalf("ImportHostTree() error = %v", err)
+	}
+	inode := requireStatePath(t, state, "/sparse.img")
+	node := state.Nodes[inode]
+	if node.Size != sparseSize {
+		t.Fatalf("sparse size = %d, want %d", node.Size, sparseSize)
+	}
+	if got, want := StateStorageBytes(state), int64(4); got != want {
+		t.Fatalf("StateStorageBytes() = %d, want %d", got, want)
+	}
+	if data := state.Data[inode]; len(data) != 0 {
+		t.Fatalf("sparse file imported %d inline bytes, want none", len(data))
+	}
+
+	reader := NewSnapshotReader(state, nil)
+	head, err := reader.Read(inode, 0, 4)
+	requireNoError(t, err)
+	if got := head; !bytes.Equal(got, []byte{0, 0, 0, 0}) {
+		t.Fatalf("sparse head = %v, want zeros", got)
+	}
+	tail, err := reader.Read(inode, sparseSize-4, 4)
+	requireNoError(t, err)
+	if got := string(tail); got != "tail" {
+		t.Fatalf("sparse tail = %q, want tail", got)
+	}
+}
+
+func TestImportHostTreeScansLargeFilesAsColdExtents(t *testing.T) {
+	root := t.TempDir()
+	filePath := filepath.Join(root, "large.bin")
+	payload := bytes.Repeat([]byte("a"), hostImportInlineFileSize+1)
+	copy(payload[hostImportInlineChunkSize-2:], []byte("boundary"))
+	requireNoError(t, os.WriteFile(filePath, payload, 0o644))
+
+	state, err := ImportHostTree(context.Background(), root, HostImportOptions{})
+	if err != nil {
+		t.Fatalf("ImportHostTree() error = %v", err)
+	}
+	inode := requireStatePath(t, state, "/large.bin")
+	if data := state.Data[inode]; len(data) != 0 {
+		t.Fatalf("large file imported %d inline bytes, want cold extents", len(data))
+	}
+	if extents := state.ColdFiles[inode]; len(extents) == 0 {
+		t.Fatalf("large file has no cold extents")
+	}
+	if got, want := StateStorageBytes(state), int64(len(payload)); got != want {
+		t.Fatalf("StateStorageBytes() = %d, want %d", got, want)
+	}
+	reader := NewSnapshotReader(state, nil)
+	got, err := reader.Read(inode, hostImportInlineChunkSize-2, uint64(len("boundary")))
+	requireNoError(t, err)
+	if string(got) != "boundary" {
+		t.Fatalf("large file boundary read = %q, want boundary", got)
+	}
+}
+
 func TestImportHostTreeFollowsRootSymlinkOnly(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "root")

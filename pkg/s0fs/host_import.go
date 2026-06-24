@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -14,6 +15,11 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+)
+
+const (
+	hostImportInlineChunkSize = 4 << 20
+	hostImportInlineFileSize  = 16 << 20
 )
 
 type HostImportOptions struct {
@@ -126,6 +132,18 @@ func ImportHostTree(ctx context.Context, root string, opts HostImportOptions) (*
 			return nil
 		}
 		if preserveImportedFileData(state, base, basePaths[importPath], inode, node) {
+			return nil
+		}
+		if hostFileMayBeSparse(info) {
+			if err := importSparseHostFileData(ctx, state, hostPath, inode, node.Size); err != nil {
+				return err
+			}
+			return nil
+		}
+		if node.Size > hostImportInlineFileSize {
+			if err := importHostFileDataByScan(ctx, state, hostPath, inode, node.Size); err != nil {
+				return err
+			}
 			return nil
 		}
 		payload, err := os.ReadFile(hostPath)
@@ -242,6 +260,205 @@ func nodeFromFileInfo(inode uint64, typ FileType, info os.FileInfo, target strin
 		Mtime:  mtime,
 		Ctime:  ctime,
 	}
+}
+
+func hostFileMayBeSparse(info os.FileInfo) bool {
+	if info == nil || info.Size() <= 0 {
+		return false
+	}
+	stat, _ := info.Sys().(*syscall.Stat_t)
+	if stat == nil {
+		return false
+	}
+	allocated := uint64(stat.Blocks) * 512
+	return allocated < uint64(info.Size())
+}
+
+func importSparseHostFileData(ctx context.Context, state *SnapshotState, hostPath string, inode uint64, size uint64) error {
+	if size == 0 {
+		return nil
+	}
+	file, err := os.Open(hostPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	var (
+		scratch = &SnapshotState{Segments: make(map[string]*Segment)}
+		extents []FileExtent
+		offset  uint64
+		index   int
+	)
+	for offset < size {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		dataOffset, err := unix.Seek(int(file.Fd()), int64(offset), unix.SEEK_DATA)
+		if err != nil {
+			if errors.Is(err, unix.ENXIO) {
+				extents = append(extents, FileExtent{Length: size - offset})
+				break
+			}
+			if hostSparseSeekUnsupported(err) {
+				return importHostFileDataByScanFromFile(ctx, state, file, inode, size)
+			}
+			return fmt.Errorf("seek sparse data in %s: %w", hostPath, err)
+		}
+		if dataOffset < 0 {
+			return fmt.Errorf("%w: negative sparse data offset for %s", ErrInvalidInput, hostPath)
+		}
+		if uint64(dataOffset) > size {
+			extents = append(extents, FileExtent{Length: size - offset})
+			break
+		}
+		if uint64(dataOffset) > offset {
+			extents = append(extents, FileExtent{Length: uint64(dataOffset) - offset})
+		}
+
+		holeOffset, err := unix.Seek(int(file.Fd()), dataOffset, unix.SEEK_HOLE)
+		if err != nil {
+			if errors.Is(err, unix.ENXIO) {
+				holeOffset = int64(size)
+			} else if hostSparseSeekUnsupported(err) {
+				return importHostFileDataByScanFromFile(ctx, state, file, inode, size)
+			} else {
+				return fmt.Errorf("seek sparse hole in %s: %w", hostPath, err)
+			}
+		}
+		if holeOffset < dataOffset {
+			return fmt.Errorf("%w: sparse hole offset precedes data offset for %s", ErrInvalidInput, hostPath)
+		}
+		if uint64(holeOffset) > size {
+			holeOffset = int64(size)
+		}
+		next, err := importHostDataRange(ctx, scratch, file, inode, uint64(dataOffset), uint64(holeOffset), &index)
+		if err != nil {
+			return err
+		}
+		extents = append(extents, next...)
+		if uint64(holeOffset) == offset {
+			break
+		}
+		offset = uint64(holeOffset)
+	}
+	commitHostImportExtents(state, inode, extents, scratch.Segments)
+	return nil
+}
+
+func hostSparseSeekUnsupported(err error) bool {
+	return errors.Is(err, unix.EINVAL) ||
+		errors.Is(err, unix.ENOTTY) ||
+		errors.Is(err, unix.ENOSYS) ||
+		errors.Is(err, unix.EOPNOTSUPP)
+}
+
+func importHostFileDataByScan(ctx context.Context, state *SnapshotState, hostPath string, inode uint64, size uint64) error {
+	if size == 0 {
+		return nil
+	}
+	file, err := os.Open(hostPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return importHostFileDataByScanFromFile(ctx, state, file, inode, size)
+}
+
+func importHostFileDataByScanFromFile(ctx context.Context, state *SnapshotState, file *os.File, inode uint64, size uint64) error {
+	if size == 0 {
+		return nil
+	}
+	scratch := &SnapshotState{Segments: make(map[string]*Segment)}
+	index := 0
+	extents, err := importHostDataRange(ctx, scratch, file, inode, 0, size, &index)
+	if err != nil {
+		return err
+	}
+	commitHostImportExtents(state, inode, extents, scratch.Segments)
+	return nil
+}
+
+func importHostDataRange(ctx context.Context, state *SnapshotState, file *os.File, inode uint64, start, end uint64, index *int) ([]FileExtent, error) {
+	var extents []FileExtent
+	for offset := start; offset < end; {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		want := end - offset
+		if want > hostImportInlineChunkSize {
+			want = hostImportInlineChunkSize
+		}
+		buf := make([]byte, want)
+		n, err := file.ReadAt(buf, int64(offset))
+		if n > 0 {
+			payload := slices.Clone(buf[:n])
+			next, err := appendHostImportPayloadExtents(state, inode, index, payload)
+			if err != nil {
+				return nil, err
+			}
+			extents = append(extents, next...)
+			offset += uint64(n)
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
+		}
+		if n == 0 {
+			break
+		}
+	}
+	return extents, nil
+}
+
+func commitHostImportExtents(state *SnapshotState, inode uint64, extents []FileExtent, segments map[string]*Segment) {
+	extents = coalesceExtents(extents)
+	if len(extents) == 0 {
+		return
+	}
+	state.ColdFiles[inode] = extents
+	for segmentID, segment := range segments {
+		state.Segments[segmentID] = segment
+	}
+}
+
+func appendHostImportPayloadExtents(state *SnapshotState, inode uint64, index *int, payload []byte) ([]FileExtent, error) {
+	if len(payload) == 0 {
+		return nil, nil
+	}
+	start := 0
+	for start < len(payload) && payload[start] == 0 {
+		start++
+	}
+	end := len(payload)
+	for end > start && payload[end-1] == 0 {
+		end--
+	}
+	if start == len(payload) {
+		return []FileExtent{{Length: uint64(len(payload))}}, nil
+	}
+	extents := make([]FileExtent, 0, 3)
+	if start > 0 {
+		extents = append(extents, FileExtent{Length: uint64(start)})
+	}
+	trimmed := slices.Clone(payload[start:end])
+	segmentID := fmt.Sprintf("host-import-%d-%d", inode, *index)
+	*index = *index + 1
+	state.Segments[segmentID] = &Segment{
+		ID:         segmentID,
+		Length:     uint64(len(trimmed)),
+		InlineData: trimmed,
+	}
+	extents = append(extents, FileExtent{
+		SegmentID: segmentID,
+		Length:    uint64(len(trimmed)),
+	})
+	if end < len(payload) {
+		extents = append(extents, FileExtent{Length: uint64(len(payload) - end)})
+	}
+	return extents, nil
 }
 
 func preserveImportedFileData(state, base *SnapshotState, baseInode uint64, inode uint64, node *Node) bool {

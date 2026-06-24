@@ -312,7 +312,7 @@ func (e *Engine) Write(inode uint64, offset uint64, payload []byte) (int, error)
 	record.Data = slices.Clone(payload)
 	projectedBytes := estimatedWALRecordBytes(record)
 	end := offset + uint64(len(payload))
-	if end > node.Size {
+	if end > node.Size && !e.usesExtentLayoutLocked() {
 		projectedBytes += int64(end - node.Size)
 	}
 	if err := e.appendAndApplyLocked(record, projectedBytes); err != nil {
@@ -498,7 +498,7 @@ func (e *Engine) Truncate(inode uint64, size uint64) error {
 	record.Inode = inode
 	record.Offset = size
 	projectedBytes := estimatedWALRecordBytes(record)
-	if size > node.Size {
+	if size > node.Size && !e.usesExtentLayoutLocked() {
 		projectedBytes += int64(size - node.Size)
 	}
 	if err := e.appendAndApplyLocked(record, projectedBytes); err != nil {
@@ -1300,23 +1300,12 @@ func (e *Engine) snapshotStateLocked() *SnapshotState {
 
 func (e *Engine) exportStateLocked() (*SnapshotState, error) {
 	state := cloneState(e.currentStateLocked())
-	if len(state.ColdFiles) == 0 {
-		state.Segments = make(map[string]*Segment)
-		return state, nil
-	}
 	for inode := range state.ColdFiles {
-		node := state.Nodes[inode]
-		if node == nil {
-			continue
+		if state.Nodes[inode] == nil {
+			delete(state.ColdFiles, inode)
 		}
-		payload, err := e.readColdRangeLocked(inode, 0, node.Size)
-		if err != nil {
-			return nil, err
-		}
-		state.Data[inode] = payload
 	}
-	state.ColdFiles = make(map[uint64][]FileExtent)
-	state.Segments = make(map[string]*Segment)
+	pruneUnreferencedSegments(state)
 	return state, nil
 }
 

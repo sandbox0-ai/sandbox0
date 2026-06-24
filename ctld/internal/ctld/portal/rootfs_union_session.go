@@ -150,7 +150,7 @@ func (s *rootFSUnionSession) GetAttr(ctx context.Context, req *pb.GetAttrRequest
 }
 
 func (s *rootFSUnionSession) SetAttr(ctx context.Context, req *pb.SetAttrRequest) (*pb.SetAttrResponse, error) {
-	backend, backendInode, visibleInode, err := s.routeInode(req.GetInode())
+	backend, backendInode, handleID, visibleInode, err := s.routeSetAttrRequest(ctx, req.GetInode(), req.GetHandleId(), req.GetActor())
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +165,7 @@ func (s *rootFSUnionSession) SetAttr(ctx context.Context, req *pb.SetAttrRequest
 		Inode:    backendInode,
 		Valid:    req.GetValid(),
 		Attr:     req.GetAttr(),
-		HandleId: s.backendHandleID(req.GetHandleId(), rootFSUnionBackendUpper),
+		HandleId: handleID,
 		Actor:    req.GetActor(),
 	})
 	if err != nil {
@@ -1294,6 +1294,21 @@ func (s *rootFSUnionSession) routeWriteRequest(ctx context.Context, inode, handl
 		return backend, upperInode, 0, visibleInode, nil
 	}
 	return backend, backendInode, 0, visibleInode, nil
+}
+
+func (s *rootFSUnionSession) routeSetAttrRequest(ctx context.Context, inode, handleID uint64, actor *pb.PosixActor) (rootFSUnionBackend, uint64, uint64, uint64, error) {
+	if handle, ok := s.lookupHandle(handleID); ok {
+		if handle.backend == rootFSUnionBackendLower {
+			upperInode, err := s.copyUpVisibleInode(ctx, handle.visibleInode, actor)
+			if err != nil {
+				return rootFSUnionBackendLower, 0, 0, handle.visibleInode, err
+			}
+			return rootFSUnionBackendUpper, upperInode, 0, handle.visibleInode, nil
+		}
+		return rootFSUnionBackendUpper, handle.backendInode, handle.handleID, handle.visibleInode, nil
+	}
+	backend, backendInode, visibleInode, err := s.routeInode(inode)
+	return backend, backendInode, 0, visibleInode, err
 }
 
 func (s *rootFSUnionSession) mapLowerNodeResponse(resp *pb.NodeResponse) *pb.NodeResponse {

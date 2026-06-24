@@ -8,6 +8,8 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -157,6 +159,56 @@ func TestRootFSUnionSessionCreatesUnderLowerOnlyDirectory(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(backing, "tmp", "state.txt"))
 }
 
+func TestRootFSUnionSessionSparseCreateTruncateMaterializesWithoutHoleBytes(t *testing.T) {
+	ctx := context.Background()
+	backing := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(backing, "tmp"), 0o777))
+	session, engine := newRootFSUnionSessionWithObjectStoreForTest(t, backing)
+
+	tmp, err := session.Lookup(ctx, &pb.LookupRequest{Parent: s0fs.RootInode, Name: "tmp"})
+	require.NoError(t, err)
+	created, err := session.Create(ctx, &pb.CreateRequest{
+		Parent: tmp.Inode,
+		Name:   "sparse.img",
+		Mode:   0o644,
+		Flags:  uint32(os.O_RDWR),
+	})
+	require.NoError(t, err)
+
+	const sparseSize = 512 << 20
+	_, err = session.SetAttr(ctx, &pb.SetAttrRequest{
+		Inode:    created.Inode,
+		HandleId: created.HandleId,
+		Valid:    uint32(fsmeta.SetAttrSize),
+		Attr:     &pb.GetAttrResponse{Size: sparseSize},
+	})
+	require.NoError(t, err)
+	_, err = session.Write(ctx, &pb.WriteRequest{
+		Inode:    created.Inode,
+		HandleId: created.HandleId,
+		Offset:   sparseSize - 4,
+		Data:     []byte("tail"),
+	})
+	require.NoError(t, err)
+	_, err = session.Release(ctx, &pb.ReleaseRequest{Inode: created.Inode, HandleId: created.HandleId})
+	require.NoError(t, err)
+
+	head, err := engine.EnsureMaterialized(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, head)
+	require.NotNil(t, head.State)
+	assert.Equal(t, int64(4), s0fs.StateStorageBytes(head.State))
+	assert.Empty(t, head.State.Data[created.Inode])
+
+	tail, err := engine.Read(created.Inode, sparseSize-4, 4)
+	require.NoError(t, err)
+	assert.Equal(t, "tail", string(tail))
+	hole, err := engine.Read(created.Inode, 0, 4)
+	require.NoError(t, err)
+	assert.Equal(t, []byte{0, 0, 0, 0}, hole)
+	assert.NoFileExists(t, filepath.Join(backing, "tmp", "sparse.img"))
+}
+
 func TestRootFSUnionSessionHonorsUpperWhiteouts(t *testing.T) {
 	ctx := context.Background()
 	backing := t.TempDir()
@@ -188,13 +240,24 @@ func TestRootFSUnionSessionHonorsUpperWhiteouts(t *testing.T) {
 
 func newRootFSUnionSessionForTest(t *testing.T, backing string) (*rootFSUnionSession, *s0fs.Engine) {
 	t.Helper()
-	ctx := context.Background()
-	engine, err := s0fs.Open(ctx, s0fs.Config{
-		VolumeID: "rootfs-" + t.Name(),
-		WALPath:  filepath.Join(t.TempDir(), "rootfs.wal"),
+	return newRootFSUnionSessionForTestWithConfig(t, backing, s0fs.Config{})
+}
+
+func newRootFSUnionSessionWithObjectStoreForTest(t *testing.T, backing string) (*rootFSUnionSession, *s0fs.Engine) {
+	t.Helper()
+	return newRootFSUnionSessionForTestWithConfig(t, backing, s0fs.Config{
+		ObjectStore: objectstore.NewMemoryStore("rootfs-" + t.Name()),
 	})
+}
+
+func newRootFSUnionSessionForTestWithConfig(t *testing.T, backing string, cfg s0fs.Config) (*rootFSUnionSession, *s0fs.Engine) {
+	t.Helper()
+	ctx := context.Background()
+	cfg.VolumeID = "rootfs-" + t.Name()
+	cfg.WALPath = filepath.Join(t.TempDir(), "rootfs.wal")
+	engine, err := s0fs.Open(ctx, cfg)
 	require.NoError(t, err)
-	session := newRootFSUnionSession("rootfs-"+t.Name(), engine, NewS0FSSession("rootfs-"+t.Name(), "team-1", engine, nil), newRootFSBackedSession(backing))
+	session := newRootFSUnionSession(cfg.VolumeID, engine, NewS0FSSession(cfg.VolumeID, "team-1", engine, nil), newRootFSBackedSession(backing))
 	t.Cleanup(func() {
 		session.Close()
 		require.NoError(t, engine.Close())

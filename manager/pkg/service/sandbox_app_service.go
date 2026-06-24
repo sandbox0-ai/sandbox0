@@ -246,10 +246,13 @@ func normalizeSandboxAppService(service SandboxAppService) (SandboxAppService, e
 			runtime.Type = SandboxAppServiceRuntimeManual
 		}
 		runtimeType = runtime.Type
-		if runtime.Type == SandboxAppServiceRuntimeCMD && len(runtime.Command) == 0 {
-			return service, fmt.Errorf("runtime.command is required for cmd services")
-		}
-		if runtime.Type == SandboxAppServiceRuntimeFunction {
+		switch runtime.Type {
+		case SandboxAppServiceRuntimeCMD:
+			if len(runtime.Command) == 0 {
+				return service, fmt.Errorf("runtime.command is required for cmd services")
+			}
+			runtime.Function = nil
+		case SandboxAppServiceRuntimeFunction:
 			function, err := normalizeSandboxFunction(runtime.Function)
 			if err != nil {
 				return service, fmt.Errorf("runtime.function: %w", err)
@@ -257,10 +260,10 @@ func normalizeSandboxAppService(service SandboxAppService) (SandboxAppService, e
 			runtime.Command = nil
 			runtime.CWD = ""
 			runtime.Function = function
-		} else if runtime.Type == SandboxAppServiceRuntimeNextJS {
+		case SandboxAppServiceRuntimeNextJS:
 			runtime.Command = nil
 			runtime.Function = nil
-		} else {
+		default:
 			runtime.Function = nil
 		}
 		service.Runtime = &runtime

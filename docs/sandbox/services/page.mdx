@@ -1,13 +1,13 @@
 # Sandbox Services
 
-Sandbox Services expose public HTTP entrypoints for workloads inside a sandbox. A service can point to a long-running listener on a sandbox port, start a command on first public access, or route to a [Sandbox Function](/docs/sandbox/functions).
+Sandbox Services expose public HTTP entrypoints for workloads inside a sandbox. A service can point to a long-running listener on a sandbox port, start a command or managed Next.js app on first public access, or route to a [Sandbox Function](/docs/sandbox/functions).
 
 Use services for:
 
 - public HTTP routes into a sandbox
 - route-level method filtering, auth, CORS, rate limits, timeout, and path rewrite
 - public URL auto-resume for paused sandboxes
-- public entrypoints for listeners, command-backed services, and sandbox functions
+- public entrypoints for listeners, command-backed services, managed Next.js apps, and sandbox functions
 
 ## Mental Model
 
@@ -16,7 +16,7 @@ A sandbox service has three layers:
 | Layer | Purpose |
 |-------|---------|
 | Service | Names the public entrypoint and, for listener-backed services, the sandbox port |
-| Runtime | Describes who owns the backing process: user, command, or function |
+| Runtime | Describes who owns the backing process: user, command, managed app runtime, or function |
 | Route | Matches public HTTP requests and applies route policy before proxying or executing |
 
 The service response includes a `public_url` when `ingress.public` is true and the deployment has an exposure domain. Treat `public_url` as the service base URL. Append a route path when calling it.
@@ -33,9 +33,10 @@ When `runtime` is omitted, Sandbox0 treats the service as `manual`.
 |---------|--------|------------------------|
 | `manual` | Required | Sandbox0 proxies traffic to `port`. The template, user, or agent must keep the listener running |
 | `cmd` | Required | On public access, Sandbox0 creates the configured procd `cmd` context when it is missing, waits for readiness, then proxies traffic to `port` |
+| `nextjs` | Required | On public access, procd starts a managed Next.js runtime from `cwd`, listens on `port`, keeps it warm, and Sandbox0 proxies traffic to `port` |
 | `function` | Omit | Sandbox0 routes the request to procd and executes the configured inline function source. No user-managed listener is required |
 
-For `cmd` services, `health_check.path` controls readiness. If it is omitted, Sandbox0 falls back to a TCP connect check on the service port.
+For `cmd` and `nextjs` services, `health_check.path` controls readiness. If it is omitted, Sandbox0 falls back to a TCP connect check on the service port.
 
 ## Public URL Shape
 
@@ -66,7 +67,7 @@ Routes are evaluated before proxying or function execution.
 | `cors` | Handles CORS preflight and response headers at the gateway |
 | `rate_limit` | Applies per-route rate limiting at the gateway |
 | `timeout_seconds` | Sets the upstream or function execution timeout |
-| `resume` | Allows this route to resume a paused sandbox when sandbox `auto_resume` is also true. Resume-enabled public routes require `runtime.type: cmd` or `runtime.type: function` |
+| `resume` | Allows this route to resume a paused sandbox when sandbox `auto_resume` is also true. Resume-enabled public routes require `runtime.type: cmd`, `runtime.type: nextjs`, or `runtime.type: function` |
 
 `path_prefix` is not stripped automatically. Without `rewrite_prefix`, the upstream service or function handler sees the original request path.
 
@@ -158,6 +159,30 @@ After applying this service, the first request starts the command, waits for `/h
 curl "$PUBLIC_URL/api/hello"
 ```
 
+## Next.js Services
+
+A `nextjs` service lets procd own a Next.js app runtime instead of starting `npm` or `next` as a generic command. On first public access, procd loads `next` from the service `cwd`, starts an HTTP server on `port`, and reuses that server for later requests.
+
+```yaml
+services:
+    - id: web
+      port: 3000
+      runtime:
+          type: nextjs
+          cwd: /workspace/app
+          env_vars:
+              NODE_ENV: production
+      ingress:
+          public: true
+          routes:
+              - id: web
+                path_prefix: /
+                timeout_seconds: 30
+                resume: true
+```
+
+The app directory must contain the Next.js package it uses, for example in `node_modules/next`. procd's injected JavaScript runtime starts independently of the sandbox image, so the user image does not need to provide Node, a shell, or other procd bootstrap dependencies just for procd to boot.
+
 ## Manual Services
 
 Use `manual` when another actor starts and owns the listener.
@@ -176,7 +201,7 @@ services:
                 resume: false
 ```
 
-Manual services can expose a listener while the sandbox is running, but they cannot be restarted by public auto-resume. Use a `cmd` service or a function service when a public route needs `resume: true`.
+Manual services can expose a listener while the sandbox is running, but they cannot be restarted by public auto-resume. Use a `cmd`, `nextjs`, or function service when a public route needs `resume: true`.
 
 ## API Reference
 
@@ -550,11 +575,11 @@ Public service auto-resume has three requirements:
 
 - sandbox `auto_resume` must be true
 - matched route `resume` must be true
-- the matched service must be restartable with `runtime.type: cmd` or `runtime.type: function`
+- the matched service must be restartable with `runtime.type: cmd`, `runtime.type: nextjs`, or `runtime.type: function`
 
 All three requirements are needed for public URL requests to wake a paused sandbox and make the backing service available.
 
-For a paused sandbox, Sandbox0 creates a new runtime pod for the same sandbox identity and restores the latest rootfs checkpoint. The sandbox ID and service `public_url` stay unchanged until the sandbox is deleted or `hard_ttl` expires. For `cmd` services, the command is started again in the new runtime pod. For `function` services, there is still no long-running listener; each request executes the handler after the sandbox runtime is available.
+For a paused sandbox, Sandbox0 creates a new runtime pod for the same sandbox identity and restores the latest rootfs checkpoint. The sandbox ID and service `public_url` stay unchanged until the sandbox is deleted or `hard_ttl` expires. For `cmd` services, the command is started again in the new runtime pod. For `nextjs` services, procd starts the managed Next.js server again. For `function` services, there is still no long-running listener; each request executes the handler after the sandbox runtime is available.
 
 ## Notes
 

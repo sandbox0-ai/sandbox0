@@ -7,11 +7,16 @@ import (
 	"fmt"
 	"io"
 	"time"
-
-	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
 )
 
-const maxSandboxProcessLogScanBytes = int(MaxSandboxLogLimitBytes) + process.DefaultContainerLogMaxLineBytes
+const (
+	sandboxProcessLogMaxLineBytes    = 4096
+	sandboxProcessOutputMessage      = "sandbox process output"
+	maxSandboxProcessLogScanBytes    = int(MaxSandboxLogLimitBytes) + sandboxProcessLogMaxLineBytes
+	sandboxProcessOutputSourceStdout = "stdout"
+	sandboxProcessOutputSourceStderr = "stderr"
+	sandboxProcessOutputSourcePTY    = "pty"
+)
 
 type sandboxProcessLogReadCloser struct {
 	source  io.ReadCloser
@@ -21,7 +26,7 @@ type sandboxProcessLogReadCloser struct {
 
 func newSandboxProcessLogReadCloser(source io.ReadCloser) io.ReadCloser {
 	scanner := bufio.NewScanner(source)
-	scanner.Buffer(make([]byte, 0, process.DefaultContainerLogMaxLineBytes), maxSandboxProcessLogScanBytes)
+	scanner.Buffer(make([]byte, 0, sandboxProcessLogMaxLineBytes), maxSandboxProcessLogScanBytes)
 	return &sandboxProcessLogReadCloser{
 		source:  source,
 		scanner: scanner,
@@ -68,11 +73,11 @@ func isSandboxProcessLogLine(line []byte) bool {
 	if err := json.Unmarshal(payload, &event); err != nil {
 		return false
 	}
-	if event.Message != process.ContainerLogProcessOutputMessage || event.Data == nil {
+	if event.Message != sandboxProcessOutputMessage || event.Data == nil {
 		return false
 	}
 	switch event.Source {
-	case string(process.OutputSourceStdout), string(process.OutputSourceStderr), string(process.OutputSourcePTY):
+	case sandboxProcessOutputSourceStdout, sandboxProcessOutputSourceStderr, sandboxProcessOutputSourcePTY:
 		return true
 	default:
 		return false

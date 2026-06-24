@@ -15,6 +15,7 @@ import (
 
 const (
 	procdBinVolumeName = "procd-bin"
+	procdMountPath     = "/procd"
 	procdConfigVolume  = "procd-config"
 	netdMITMCAVolume   = "netd-mitm-ca"
 	netdMITMCACertKey  = "ca.crt"
@@ -349,14 +350,20 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 	}
 	envVars = appendProcdConfigEnvVars(envVars)
 	container.Env = envVars
-	container.Command = []string{"/procd/bin/procd"}
+	container.Command = []string{"/procd/runtime/ld-linux"}
+	container.Args = []string{
+		"--library-path",
+		"/procd/runtime/lib",
+		"/procd/runtime/node",
+		"/procd/app/src/main.js",
+	}
 	container.Ports = append(container.Ports, corev1.ContainerPort{
 		Name:          "http",
 		ContainerPort: int32(procdHTTPPort()),
 	})
 	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 		Name:      procdBinVolumeName,
-		MountPath: "/procd/bin",
+		MountPath: procdMountPath,
 	})
 
 	// Security context
@@ -509,12 +516,12 @@ func applyProcdInit(spec *corev1.PodSpec) {
 		Command: []string{
 			"/bin/sh",
 			"-c",
-			"cp /usr/local/bin/procd /procd/bin/procd && cp /usr/local/bin/python-runner /procd/bin/python-runner && chmod 0755 /procd/bin/procd /procd/bin/python-runner",
+			"mkdir -p /procd/runtime /procd/app /procd/bin /procd/state/functions /procd/state/webhook-outbox /procd/state/netd && cp -a /usr/local/sandbox0/procd-runtime/. /procd/runtime/ && cp -a /usr/local/sandbox0/procd/. /procd/app/ && cp /usr/local/bin/python-runner /procd/bin/python-runner && cp /usr/local/bin/pty-helper /procd/bin/pty-helper && chmod 0755 /procd/runtime/ld-linux /procd/runtime/node /procd/bin/python-runner /procd/bin/pty-helper && chmod 1777 /procd/state /procd/state/functions /procd/state/webhook-outbox /procd/state/netd",
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{
 				Name:      procdBinVolumeName,
-				MountPath: "/procd/bin",
+				MountPath: procdMountPath,
 			},
 		},
 	})

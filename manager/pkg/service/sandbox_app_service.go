@@ -58,6 +58,7 @@ const (
 	SandboxAppServiceRuntimeCMD      = "cmd"
 	SandboxAppServiceRuntimeManual   = "manual"
 	SandboxAppServiceRuntimeFunction = "function"
+	SandboxAppServiceRuntimeNextJS   = "nextjs"
 )
 
 // SandboxAppService describes an application service running inside a sandbox.
@@ -188,6 +189,8 @@ func SandboxAppServiceHasRestartableRuntime(service SandboxAppService) bool {
 		return len(service.Runtime.Command) > 0
 	case SandboxAppServiceRuntimeFunction:
 		return service.Runtime.Function != nil
+	case SandboxAppServiceRuntimeNextJS:
+		return true
 	default:
 		return false
 	}
@@ -234,9 +237,9 @@ func normalizeSandboxAppService(service SandboxAppService) (SandboxAppService, e
 			return service, fmt.Errorf("runtime.type is required")
 		}
 		switch runtime.Type {
-		case "", SandboxAppServiceRuntimeManual, SandboxAppServiceRuntimeCMD, SandboxAppServiceRuntimeFunction:
+		case "", SandboxAppServiceRuntimeManual, SandboxAppServiceRuntimeCMD, SandboxAppServiceRuntimeFunction, SandboxAppServiceRuntimeNextJS:
 		default:
-			return service, fmt.Errorf("runtime.type must be one of: cmd, manual, function")
+			return service, fmt.Errorf("runtime.type must be one of: cmd, manual, function, nextjs")
 		}
 		runtime.CWD = strings.TrimSpace(runtime.CWD)
 		if runtime.Type == "" {
@@ -254,6 +257,9 @@ func normalizeSandboxAppService(service SandboxAppService) (SandboxAppService, e
 			runtime.Command = nil
 			runtime.CWD = ""
 			runtime.Function = function
+		} else if runtime.Type == SandboxAppServiceRuntimeNextJS {
+			runtime.Command = nil
+			runtime.Function = nil
 		} else {
 			runtime.Function = nil
 		}
@@ -293,7 +299,7 @@ func normalizeSandboxAppService(service SandboxAppService) (SandboxAppService, e
 			return service, fmt.Errorf("ingress.routes[%d]: duplicate id %q", i, route.ID)
 		}
 		if service.Ingress.Public && route.Resume && !SandboxAppServiceHasRestartableRuntime(service) {
-			return service, fmt.Errorf("ingress.routes[%d]: resume requires runtime.type cmd or function", i)
+			return service, fmt.Errorf("ingress.routes[%d]: resume requires runtime.type cmd, function, or nextjs", i)
 		}
 		seenRoutes[route.ID] = struct{}{}
 		service.Ingress.Routes[i] = route

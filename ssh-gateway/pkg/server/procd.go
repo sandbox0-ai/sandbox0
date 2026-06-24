@@ -17,11 +17,12 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pkg/sftp"
-	procdfile "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"golang.org/x/crypto/ssh"
 )
+
+const procdFileTypeDir = "dir"
 
 type createContextRequest struct {
 	Type    string                `json:"type"`
@@ -618,7 +619,7 @@ func parseFileMode(mode string) uint32 {
 }
 
 func isDirType(fileType string) bool {
-	return fileType == string(procdfile.FileTypeDir)
+	return fileType == procdFileTypeDir
 }
 
 func (s *Server) dialContextWS(ctx context.Context, procdURL, contextID string, headers http.Header) (*websocket.Conn, error) {

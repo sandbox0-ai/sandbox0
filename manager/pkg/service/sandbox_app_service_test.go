@@ -140,10 +140,55 @@ func TestNormalizeSandboxAppServicesRejectsResumeRouteWithoutRestartableRuntime(
 			if err == nil {
 				t.Fatal("NormalizeSandboxAppServices succeeded, want resume runtime error")
 			}
-			if !strings.Contains(err.Error(), "resume requires runtime.type cmd or function") {
+			if !strings.Contains(err.Error(), "resume requires runtime.type cmd, function, or nextjs") {
 				t.Fatalf("error = %q, want resume runtime message", err.Error())
 			}
 		})
+	}
+}
+
+func TestNormalizeSandboxAppServicesSupportsNextJSRuntime(t *testing.T) {
+	services, err := NormalizeSandboxAppServices([]SandboxAppService{{
+		ID:   "web",
+		Port: 3000,
+		Runtime: &SandboxAppServiceRuntime{
+			Type:    SandboxAppServiceRuntimeNextJS,
+			Command: []string{"npm", "run", "dev"},
+			CWD:     "/workspace/app",
+			Function: &SandboxFunction{
+				Source: SandboxFunctionSource{Code: "def handler(request):\n    return None\n"},
+			},
+		},
+		Ingress: SandboxAppServiceIngress{
+			Public: true,
+			Routes: []SandboxAppServiceRoute{{
+				ID:         "web",
+				PathPrefix: "/",
+				Resume:     true,
+			}},
+		},
+	}})
+	if err != nil {
+		t.Fatalf("NormalizeSandboxAppServices: %v", err)
+	}
+	service := services[0]
+	if service.Runtime.Type != SandboxAppServiceRuntimeNextJS {
+		t.Fatalf("runtime type = %q, want nextjs", service.Runtime.Type)
+	}
+	if service.Runtime.CWD != "/workspace/app" {
+		t.Fatalf("nextjs runtime cwd = %q, want /workspace/app", service.Runtime.CWD)
+	}
+	if len(service.Runtime.Command) != 0 {
+		t.Fatalf("nextjs runtime kept command = %#v", service.Runtime.Command)
+	}
+	if service.Runtime.Function != nil {
+		t.Fatalf("nextjs runtime kept function = %#v", service.Runtime.Function)
+	}
+	if !SandboxAppServiceHasRestartableRuntime(service) {
+		t.Fatal("nextjs runtime should be restartable")
+	}
+	if blockers := SandboxAppServicePublishBlockers(service); len(blockers) != 0 {
+		t.Fatalf("blockers = %#v, want none", blockers)
 	}
 }
 

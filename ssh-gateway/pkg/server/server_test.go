@@ -22,7 +22,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pkg/sftp"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	procdfile "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
@@ -231,7 +230,7 @@ func TestServerSFTPSubsystem(t *testing.T) {
 	hostKeyPath := writeTestHostKey(t)
 
 	rootDir := t.TempDir()
-	fileManager, err := procdfile.NewManager(rootDir)
+	fileManager, err := newTestProcdFileManager(rootDir)
 	if err != nil {
 		t.Fatalf("file.NewManager() error = %v", err)
 	}
@@ -308,7 +307,7 @@ func TestServerSCPUpload(t *testing.T) {
 	hostKeyPath := writeTestHostKey(t)
 
 	rootDir := t.TempDir()
-	fileManager, err := procdfile.NewManager(rootDir)
+	fileManager, err := newTestProcdFileManager(rootDir)
 	if err != nil {
 		t.Fatalf("file.NewManager() error = %v", err)
 	}
@@ -402,7 +401,7 @@ func writeTestHostKey(t *testing.T) string {
 	return hostKeyPath
 }
 
-func newTestProcdFileServer(t *testing.T, fileManager *procdfile.Manager) *httptest.Server {
+func newTestProcdFileServer(t *testing.T, fileManager *testProcdFileManager) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get(internalauth.DefaultTokenHeader); got == "" {
@@ -476,18 +475,20 @@ func newTestProcdFileServer(t *testing.T, fileManager *procdfile.Manager) *httpt
 
 func writeTestProcdFileError(w http.ResponseWriter, err error) {
 	switch err {
-	case procdfile.ErrFileNotFound:
+	case errTestProcdFileNotFound:
 		_ = spec.WriteError(w, http.StatusNotFound, "file_not_found", err.Error())
-	case procdfile.ErrDirNotFound:
+	case errTestProcdDirNotFound:
 		_ = spec.WriteError(w, http.StatusNotFound, "directory_not_found", err.Error())
-	case procdfile.ErrFileTooLarge:
+	case errTestProcdFileTooLarge:
 		_ = spec.WriteError(w, http.StatusRequestEntityTooLarge, "file_too_large", err.Error())
-	case procdfile.ErrPermissionDenied:
+	case errTestProcdPermissionDenied:
 		_ = spec.WriteError(w, http.StatusForbidden, "permission_denied", err.Error())
-	case procdfile.ErrPathAlreadyExists:
+	case errTestProcdPathAlreadyExists:
 		_ = spec.WriteError(w, http.StatusConflict, "path_exists", err.Error())
-	case procdfile.ErrPathNotDir:
+	case errTestProcdPathNotDir:
 		_ = spec.WriteError(w, http.StatusConflict, "path_not_directory", err.Error())
+	case errTestProcdPathNotFile:
+		_ = spec.WriteError(w, http.StatusConflict, "path_not_file", err.Error())
 	default:
 		_ = spec.WriteError(w, http.StatusInternalServerError, "operation_failed", err.Error())
 	}

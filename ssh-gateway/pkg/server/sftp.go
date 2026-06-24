@@ -12,8 +12,9 @@ import (
 	"time"
 
 	"github.com/pkg/sftp"
-	procdfile "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
 )
+
+const procdFileTypeFile = "file"
 
 type sftpSubsystemRequest struct {
 	Subsystem string
@@ -294,7 +295,7 @@ func newPendingWriteState(filePath string, stat *procdStatResponse) pendingWrite
 	state := pendingWriteState{
 		Path:    filePath,
 		Name:    path.Base(strings.TrimSuffix(filePath, "/")),
-		Type:    string(procdfile.FileTypeFile),
+		Type:    procdFileTypeFile,
 		Mode:    "0644",
 		ModTime: time.Now(),
 	}

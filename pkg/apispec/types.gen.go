@@ -166,6 +166,7 @@ const (
 	SandboxAppServiceRuntimeTypeCmd      SandboxAppServiceRuntimeType = "cmd"
 	SandboxAppServiceRuntimeTypeFunction SandboxAppServiceRuntimeType = "function"
 	SandboxAppServiceRuntimeTypeManual   SandboxAppServiceRuntimeType = "manual"
+	SandboxAppServiceRuntimeTypeNextjs   SandboxAppServiceRuntimeType = "nextjs"
 )
 
 // Defines values for SandboxFunctionRuntime.
@@ -1604,7 +1605,7 @@ type SandboxAppServiceRoute struct {
 	RateLimit  *SandboxAppServiceRouteRateLimit `json:"rate_limit,omitempty"`
 
 	// Resume Allows this public route to wake a paused sandbox when sandbox auto_resume is true.
-	// Resume-enabled public routes require a restartable service runtime: cmd or function.
+	// Resume-enabled public routes require a restartable service runtime: cmd, function, or nextjs.
 	Resume         bool    `json:"resume"`
 	RewritePrefix  *string `json:"rewrite_prefix"`
 	TimeoutSeconds *int32  `json:"timeout_seconds,omitempty"`
@@ -1652,11 +1653,11 @@ type SandboxAppServiceRuntime struct {
 	// Function Function code executed by procd for a sandbox service request. cluster-gateway owns public ingress and carries this source to procd.
 	Function *SandboxFunction `json:"function,omitempty"`
 
-	// Type Runtime strategy for restarting a service process.
+	// Type Runtime strategy for restarting a service process. nextjs is a managed app runtime started by procd and kept warm after the first request.
 	Type SandboxAppServiceRuntimeType `json:"type"`
 }
 
-// SandboxAppServiceRuntimeType Runtime strategy for restarting a service process.
+// SandboxAppServiceRuntimeType Runtime strategy for restarting a service process. nextjs is a managed app runtime started by procd and kept warm after the first request.
 type SandboxAppServiceRuntimeType string
 
 // SandboxAppServiceView defines model for SandboxAppServiceView.

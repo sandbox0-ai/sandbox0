@@ -3,6 +3,7 @@ package v1alpha1
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
@@ -122,11 +123,56 @@ manager_image: sandbox0/manager:test
 	if main.Name != "procd" {
 		t.Fatalf("expected main container procd, got %q", main.Name)
 	}
+	if len(main.Command) != 1 || main.Command[0] != "/procd/runtime/ld-linux" {
+		t.Fatalf("procd command = %#v, want injected runtime loader", main.Command)
+	}
+	wantArgs := []string{"--library-path", "/procd/runtime/lib", "/procd/runtime/node", "/procd/app/src/main.js"}
+	if len(main.Args) != len(wantArgs) {
+		t.Fatalf("procd args = %#v, want %#v", main.Args, wantArgs)
+	}
+	for i := range wantArgs {
+		if main.Args[i] != wantArgs[i] {
+			t.Fatalf("procd args = %#v, want %#v", main.Args, wantArgs)
+		}
+	}
+	if mount := findVolumeMount(main.VolumeMounts, procdBinVolumeName); mount == nil || mount.MountPath != procdMountPath {
+		t.Fatalf("procd runtime mount = %#v, want %s", mount, procdMountPath)
+	}
 	if main.SecurityContext == nil {
 		t.Fatal("expected security context to be initialized")
 	}
 	if main.SecurityContext.Privileged != nil && *main.SecurityContext.Privileged {
 		t.Fatalf("expected ordinary sandbox to remain non-privileged, got %#v", main.SecurityContext)
+	}
+}
+
+func TestBuildPodSpecInjectsSelfContainedJSProcdRuntime(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	spec := BuildPodSpec(newTestTemplate())
+	if volume := findVolume(spec.Volumes, procdBinVolumeName); volume == nil || volume.EmptyDir == nil {
+		t.Fatalf("expected %s emptyDir volume, got %#v", procdBinVolumeName, volume)
+	}
+	if len(spec.InitContainers) == 0 {
+		t.Fatal("expected procd init container")
+	}
+	init := spec.InitContainers[0]
+	if init.Name != "procd-init" {
+		t.Fatalf("init name = %q, want procd-init", init.Name)
+	}
+	if len(init.Command) != 3 ||
+		!strings.Contains(init.Command[2], "/usr/local/sandbox0/procd-runtime") ||
+		!strings.Contains(init.Command[2], "/usr/local/sandbox0/procd") ||
+		!strings.Contains(init.Command[2], "/usr/local/bin/pty-helper") ||
+		!strings.Contains(init.Command[2], "/procd/state/functions") ||
+		!strings.Contains(init.Command[2], "chmod 1777 /procd/state") {
+		t.Fatalf("init command = %#v, want runtime, procd app, pty-helper, and writable procd state setup", init.Command)
+	}
+	if mount := findVolumeMount(init.VolumeMounts, procdBinVolumeName); mount == nil || mount.MountPath != procdMountPath {
+		t.Fatalf("init procd runtime mount = %#v, want %s", mount, procdMountPath)
 	}
 }
 

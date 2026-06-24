@@ -1,3 +1,15 @@
+FROM node:20-bookworm-slim AS procd-node-runtime
+
+RUN set -eux; \
+    mkdir -p /procd-runtime/lib; \
+    cp /usr/local/bin/node /procd-runtime/node; \
+    ldd /usr/local/bin/node | awk '{ if ($3 ~ /^\//) print $3; else if ($1 ~ /^\//) print $1 }' | sort -u | while read lib; do cp "$lib" /procd-runtime/lib/; done; \
+    for lib in /lib/*/libnss_dns.so.2 /lib/*/libnss_files.so.2 /lib/*/libresolv.so.2; do [ -e "$lib" ] && cp "$lib" /procd-runtime/lib/ || true; done; \
+    loader="$(ldd /usr/local/bin/node | awk '/ld-linux|ld-musl/ { if ($1 ~ /^\//) print $1; else if ($3 ~ /^\//) print $3; exit }')"; \
+    test -n "$loader"; \
+    cp "$loader" /procd-runtime/ld-linux; \
+    chmod 0755 /procd-runtime/node /procd-runtime/ld-linux
+
 FROM golang:1.25-alpine AS builder
 
 WORKDIR /workspace
@@ -34,8 +46,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/global-gateway ./global-gateway/cmd/global-gateway && \
     CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/cluster-gateway ./cluster-gateway/cmd/cluster-gateway && \
     CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/manager ./manager/cmd/manager && \
-    CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/procd ./manager/cmd/procd && \
     CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/python-runner ./manager/cmd/python-runner && \
+    CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -buildvcs=false -o /out/pty-helper ./manager/procd/pty-helper && \
     CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/scheduler ./scheduler/cmd/scheduler && \
     CGO_ENABLED=1 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/storage-proxy ./storage-proxy/cmd/storage-proxy && \
     CGO_ENABLED=1 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/infra-operator ./infra-operator/cmd/infra-operator && \
@@ -47,6 +59,9 @@ FROM alpine:3.19
 RUN apk add --no-cache ca-certificates tzdata zstd-libs lz4-libs iptables ipset nftables iproute2
 
 COPY --from=builder /out/ /usr/local/bin/
+COPY --from=procd-node-runtime /procd-runtime/ /usr/local/sandbox0/procd-runtime/
+COPY manager/procd/package.json /usr/local/sandbox0/procd/package.json
+COPY manager/procd/src/ /usr/local/sandbox0/procd/src/
 COPY scripts/entrypoint.sh /usr/local/bin/entrypoint
 RUN chmod +x /usr/local/bin/entrypoint
 

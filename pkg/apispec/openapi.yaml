@@ -4130,8 +4130,8 @@ components:
       properties:
         type:
           type: string
-          enum: [cmd, manual, function]
-          description: Runtime strategy for restarting a service process.
+          enum: [cmd, manual, function, nextjs]
+          description: Runtime strategy for restarting a service process. nextjs is a managed app runtime started by procd and kept warm after the first request.
         command:
           type: array
           items:
@@ -4209,7 +4209,7 @@ components:
           type: boolean
           description: |
             Allows this public route to wake a paused sandbox when sandbox auto_resume is true.
-            Resume-enabled public routes require a restartable service runtime: cmd or function.
+            Resume-enabled public routes require a restartable service runtime: cmd, function, or nextjs.
       required: [id, resume]
     SandboxAppServiceHealth:
       type: object

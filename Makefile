@@ -45,7 +45,19 @@ build: manifests proto apispec
 		fi; \
 		printf "$(GREEN)Building $$s...$(RESET)\n"; \
 		if [ "$$s" = "procd" ]; then \
-			dir="manager"; bin="procd"; src="./manager/cmd/procd"; \
+			find ./manager/procd/src -name '*.js' -print0 | xargs -0 -n1 node --check || exit 1; \
+			if [ -n "$(BIN_DIR)" ]; then \
+				mkdir -p $(BIN_DIR); \
+				pty_out="$(BIN_DIR)/pty-helper"; \
+				python_runner_out="$(BIN_DIR)/python-runner"; \
+			else \
+				mkdir -p manager/bin; \
+				pty_out="manager/bin/pty-helper"; \
+				python_runner_out="manager/bin/python-runner"; \
+			fi; \
+			CGO_ENABLED=0 GOOS=$(GOOS) $(GO) build -buildvcs=false -v -o $$pty_out ./manager/procd/pty-helper || exit 1; \
+			CGO_ENABLED=0 GOOS=$(GOOS) $(GO) build -buildvcs=false -v -o $$python_runner_out ./manager/cmd/python-runner || exit 1; \
+			continue; \
 		elif [ "$$s" = "infra-operator" ]; then \
 			dir="infra-operator"; bin="infra-operator"; src="./infra-operator/cmd/infra-operator"; \
 		elif [ "$$s" = "ctld" ]; then \
@@ -113,7 +125,10 @@ test:
 		elif [ "$$service" = "manager" ]; then \
 			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./manager/...; \
 		elif [ "$$service" = "procd" ]; then \
-			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./manager/procd/...; \
+			mkdir -p manager/bin; \
+			GOTOOLCHAIN=go1.25.0+auto CGO_ENABLED=0 $(GO) build -buildvcs=false -o manager/bin/pty-helper ./manager/procd/pty-helper || exit 1; \
+			GOTOOLCHAIN=go1.25.0+auto CGO_ENABLED=0 $(GO) build -buildvcs=false -o manager/bin/python-runner ./manager/cmd/python-runner || exit 1; \
+			SANDBOX0_PTY_HELPER_PATH="$$(pwd)/manager/bin/pty-helper" SANDBOX0_FUNCTION_RUNNER="$$(pwd)/manager/bin/python-runner" npm --prefix manager/procd test; \
 		elif [ "$$service" = "netd" ]; then \
 			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./netd/...; \
 		elif [ "$$service" = "scheduler" ]; then \
@@ -226,7 +241,7 @@ clean:
 	@for service in $(SERVICES); do \
 		printf "$(YELLOW)Cleaning $$service...$(RESET)\n"; \
 		if [ "$$service" = "procd" ]; then \
-			rm -rf manager/bin/procd manager/bin/python-runner; \
+			rm -rf manager/bin/procd manager/bin/python-runner manager/bin/pty-helper; \
 		else \
 			rm -rf $$service/bin; \
 		fi; \

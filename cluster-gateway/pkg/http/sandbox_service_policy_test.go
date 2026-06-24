@@ -679,6 +679,92 @@ func TestSandboxCMDServiceStartsContextBeforeProxy(t *testing.T) {
 	}
 }
 
+func TestSandboxNextJSServiceEnsuresRuntimeBeforeProxy(t *testing.T) {
+	var ensured atomic.Bool
+	var ensureReq procdEnsureNextJSRuntimeRequest
+	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/services/nextjs/ensure" {
+			t.Fatalf("unexpected procd request %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&ensureReq); err != nil {
+			t.Fatalf("decode nextjs ensure request: %v", err)
+		}
+		ensured.Store(true)
+		_ = spec.WriteSuccess(w, http.StatusOK, map[string]any{"running": true})
+	}))
+	defer procd.Close()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !ensured.Load() {
+			t.Fatalf("upstream hit before nextjs runtime was ensured")
+		}
+		if r.URL.Path == "/healthz" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		_, _ = w.Write([]byte("nextjs ok"))
+	}))
+	defer upstream.Close()
+
+	port := serverPort(t, upstream.URL)
+	gateway := newSandboxServiceExposureTestServer(t, &mgr.Sandbox{
+		ID:           "sb-demo",
+		TeamID:       "team-1",
+		UserID:       "user-1",
+		InternalAddr: procd.URL,
+		AutoResume:   true,
+		Services: []mgr.SandboxAppService{{
+			ID:   "web",
+			Port: port,
+			Runtime: &mgr.SandboxAppServiceRuntime{
+				Type:    mgr.SandboxAppServiceRuntimeNextJS,
+				CWD:     "/workspace/app",
+				EnvVars: map[string]string{"APP_ENV": "test"},
+			},
+			HealthCheck: &mgr.SandboxAppServiceHealth{Path: "/healthz"},
+			Ingress: mgr.SandboxAppServiceIngress{
+				Public: true,
+				Routes: []mgr.SandboxAppServiceRoute{{
+					ID:             "root",
+					PathPrefix:     "/",
+					TimeoutSeconds: 2,
+				}},
+			},
+		}},
+	})
+	gatewayServer := httptest.NewServer(gateway)
+	defer gatewayServer.Close()
+
+	req := newGatewayRequest(t, http.MethodGet, gatewayServer.URL, fmt.Sprintf("sb-demo--p%d.aws-us-east-1.sandbox0.app", port), "/hello")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway request: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.StatusCode, string(body))
+	}
+	if string(body) != "nextjs ok" {
+		t.Fatalf("body = %q, want nextjs ok", string(body))
+	}
+	if ensureReq.ServiceID != "web" || ensureReq.Port != port || ensureReq.CWD != "/workspace/app" {
+		t.Fatalf("ensure request = %+v, want service id, port, and cwd", ensureReq)
+	}
+	if ensureReq.EnvVars[sandboxServiceRuntimeServiceIDEnv] != "web" ||
+		ensureReq.EnvVars[sandboxServiceRuntimePortEnv] != strconv.Itoa(port) ||
+		ensureReq.EnvVars[sandboxServiceRuntimeTypeEnv] != mgr.SandboxAppServiceRuntimeNextJS {
+		t.Fatalf("service env vars = %#v, want nextjs service identity", ensureReq.EnvVars)
+	}
+	if ensureReq.EnvVars["APP_ENV"] != "test" {
+		t.Fatalf("APP_ENV = %q, want test", ensureReq.EnvVars["APP_ENV"])
+	}
+}
+
 func TestSandboxCMDServiceStartsAfterPausedAutoResume(t *testing.T) {
 	var created atomic.Bool
 	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

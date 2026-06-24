@@ -1,0 +1,12 @@
+{
+  "name": "@sandbox0/procd",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node ./src/main.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

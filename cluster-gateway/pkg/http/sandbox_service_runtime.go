@@ -54,6 +54,13 @@ type procdCreateCMDContextRequest struct {
 	Command []string `json:"command"`
 }
 
+type procdEnsureNextJSRuntimeRequest struct {
+	ServiceID string            `json:"service_id"`
+	Port      int               `json:"port"`
+	CWD       string            `json:"cwd,omitempty"`
+	EnvVars   map[string]string `json:"env_vars,omitempty"`
+}
+
 func (s *Server) ensureSandboxServiceRuntime(ctx context.Context, sandbox *mgr.Sandbox, service *mgr.SandboxAppService, route *mgr.SandboxAppServiceRoute) error {
 	if service == nil || service.Runtime == nil {
 		return nil
@@ -71,6 +78,11 @@ func (s *Server) ensureSandboxServiceRuntime(ctx context.Context, sandbox *mgr.S
 			if err := s.createSandboxServiceCMDContext(ctx, sandbox, service); err != nil {
 				return err
 			}
+		}
+		return s.waitSandboxServiceReady(ctx, sandbox, service, route)
+	case mgr.SandboxAppServiceRuntimeNextJS:
+		if err := s.ensureSandboxServiceNextJSRuntime(ctx, sandbox, service); err != nil {
+			return err
 		}
 		return s.waitSandboxServiceReady(ctx, sandbox, service, route)
 	default:
@@ -127,8 +139,18 @@ func sandboxServiceRuntimeEnvVars(service *mgr.SandboxAppService) map[string]str
 	}
 	env[sandboxServiceRuntimeServiceIDEnv] = service.ID
 	env[sandboxServiceRuntimePortEnv] = strconv.Itoa(service.Port)
-	env[sandboxServiceRuntimeTypeEnv] = mgr.SandboxAppServiceRuntimeCMD
+	env[sandboxServiceRuntimeTypeEnv] = service.Runtime.Type
 	return env
+}
+
+func (s *Server) ensureSandboxServiceNextJSRuntime(ctx context.Context, sandbox *mgr.Sandbox, service *mgr.SandboxAppService) error {
+	req := procdEnsureNextJSRuntimeRequest{
+		ServiceID: service.ID,
+		Port:      service.Port,
+		CWD:       service.Runtime.CWD,
+		EnvVars:   sandboxServiceRuntimeEnvVars(service),
+	}
+	return s.doSandboxProcdJSON(ctx, sandbox, http.MethodPost, "/api/v1/services/nextjs/ensure", req, nil)
 }
 
 func (s *Server) doSandboxProcdJSON(ctx context.Context, sandbox *mgr.Sandbox, method, path string, payload any, out any) error {

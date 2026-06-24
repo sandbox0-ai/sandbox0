@@ -56,6 +56,7 @@ type ProcessConfig struct {
 	Code       string            `json:"code"`    // For REPL: code to execute
 	Command    []string          `json:"command"` // For CMD: command path and arguments, e.g., ["/bin/ls", "-la"]
 	CWD        string            `json:"cwd"`
+	RootFS     string            `json:"rootfs,omitempty"`
 	EnvVars    map[string]string `json:"env_vars"`
 	PTYSize    *PTYSize          `json:"pty_size"`
 	Term       string            `json:"term"`

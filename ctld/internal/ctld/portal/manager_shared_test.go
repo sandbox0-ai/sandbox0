@@ -97,6 +97,70 @@ func TestUnbindLockedSnapshotKeepsSharedVolumeUntilLastPortal(t *testing.T) {
 	}
 }
 
+func TestBindRootFSVolumePortalDelegatesToBinder(t *testing.T) {
+	binder := &recordingRootFSBinder{}
+	mgr := &Manager{rootFSBinder: binder}
+	pm := &portalMount{
+		podUID:    "pod-uid",
+		mountPath: "/workspace/data",
+		volumeID:  "vol-1",
+	}
+
+	if err := mgr.bindRootFSVolumePortal(context.Background(), pm); err != nil {
+		t.Fatalf("bindRootFSVolumePortal() error = %v", err)
+	}
+	if binder.bind.PodUID != "pod-uid" || binder.bind.MountPath != "/workspace/data" {
+		t.Fatalf("bind request = %+v, want pod-uid /workspace/data", binder.bind)
+	}
+}
+
+func TestUnbindLockedSnapshotDelegatesRootFSVolumePortal(t *testing.T) {
+	binder := &recordingRootFSBinder{}
+	mgr := &Manager{
+		rootFSBinder: binder,
+		portals:      make(map[string]*portalMount),
+		boundVolumes: make(map[string]*boundVolume),
+		volumes:      newLocalVolumeManager(),
+	}
+	volCtx := &volume.VolumeContext{VolumeID: "vol-1"}
+	mgr.volumes.add(volCtx)
+	mgr.boundVolumes["vol-1"] = &boundVolume{
+		volumeID: "vol-1",
+		refCount: 1,
+		volCtx:   volCtx,
+	}
+	pm := &portalMount{
+		podUID:    "pod-uid",
+		mountPath: "/workspace/data",
+		volumeID:  "vol-1",
+		teamID:    "team-a",
+		mountedAt: time.Now().UTC(),
+		fs:        volumefuse.New("portal", time.Second, unboundSession{}),
+	}
+
+	if err := mgr.unbindLockedSnapshot(pm); err != nil {
+		t.Fatalf("unbindLockedSnapshot() error = %v", err)
+	}
+	if binder.unbind.PodUID != "pod-uid" || binder.unbind.MountPath != "/workspace/data" {
+		t.Fatalf("unbind request = %+v, want pod-uid /workspace/data", binder.unbind)
+	}
+}
+
+type recordingRootFSBinder struct {
+	bind   RootFSVolumePortalBindRequest
+	unbind RootFSVolumePortalBindRequest
+}
+
+func (b *recordingRootFSBinder) BindRootFSVolumePortal(_ context.Context, req RootFSVolumePortalBindRequest) error {
+	b.bind = req
+	return nil
+}
+
+func (b *recordingRootFSBinder) UnbindRootFSVolumePortal(_ context.Context, req RootFSVolumePortalBindRequest) error {
+	b.unbind = req
+	return nil
+}
+
 func TestCheckPublishedReportsMissingPortals(t *testing.T) {
 	mgr := &Manager{
 		portals: make(map[string]*portalMount),

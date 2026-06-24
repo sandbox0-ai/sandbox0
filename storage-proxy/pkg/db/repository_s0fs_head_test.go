@@ -12,8 +12,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
+	"github.com/sandbox0-ai/sandbox0/pkg/s0fs"
 	storagemigrations "github.com/sandbox0-ai/sandbox0/storage-proxy/migrations"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 )
 
 func TestS0FSCommittedHeadCompareAndSwapLifecycle(t *testing.T) {

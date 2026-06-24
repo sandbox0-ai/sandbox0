@@ -1463,6 +1463,91 @@ func TestSparseExtentWriteReadsZerosWithoutStoringHoleBytes(t *testing.T) {
 	}
 }
 
+func TestSparseTruncateMaterializeAndExportDoNotExpandHoleBytes(t *testing.T) {
+	ctx := context.Background()
+	store := newPrefixedRecordingStore(t, "vol-sparse-truncate")
+	engine, err := Open(ctx, Config{
+		VolumeID:    "vol-sparse-truncate",
+		WALPath:     filepath.Join(t.TempDir(), "engine.wal"),
+		ObjectStore: store,
+		HeadStore:   newMemoryHeadStore(),
+		LocalDiskGuard: &LocalDiskGuard{
+			Path:     t.TempDir(),
+			MaxBytes: 2 << 20,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	node, err := engine.CreateFile(RootInode, "sparse.img", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	const sparseSize = 512 << 20
+	if err := engine.Truncate(node.Inode, sparseSize); err != nil {
+		t.Fatalf("Truncate() error = %v", err)
+	}
+	if _, err := engine.Write(node.Inode, sparseSize-4, []byte("tail")); err != nil {
+		t.Fatalf("Write(tail) error = %v", err)
+	}
+	attr, err := engine.GetAttr(node.Inode)
+	if err != nil {
+		t.Fatalf("GetAttr() error = %v", err)
+	}
+	if !attr.BlocksValid {
+		t.Fatal("GetAttr() BlocksValid = false, want true")
+	}
+	if got, want := attr.Blocks, uint64(1); got != want {
+		t.Fatalf("GetAttr() Blocks = %d, want %d", got, want)
+	}
+
+	head, err := engine.EnsureMaterialized(ctx)
+	if err != nil {
+		t.Fatalf("EnsureMaterialized() error = %v", err)
+	}
+	if got, want := StateStorageBytes(head.State), int64(4); got != want {
+		t.Fatalf("StateStorageBytes(materialized) = %d, want %d", got, want)
+	}
+	if data := head.State.Data[node.Inode]; len(data) != 0 {
+		t.Fatalf("materialized state kept %d inline bytes, want none", len(data))
+	}
+
+	got, err := engine.Read(node.Inode, sparseSize-4, 4)
+	if err != nil {
+		t.Fatalf("Read(tail) error = %v", err)
+	}
+	if !bytes.Equal(got, []byte("tail")) {
+		t.Fatalf("Read(tail) = %q, want tail", got)
+	}
+	got, err = engine.Read(node.Inode, 0, 4)
+	if err != nil {
+		t.Fatalf("Read(hole) error = %v", err)
+	}
+	if !bytes.Equal(got, []byte{0, 0, 0, 0}) {
+		t.Fatalf("Read(hole) = %v, want zeros", got)
+	}
+
+	exported, err := engine.ExportState()
+	if err != nil {
+		t.Fatalf("ExportState() error = %v", err)
+	}
+	if got, want := StateStorageBytes(exported), int64(4); got != want {
+		t.Fatalf("StateStorageBytes(exported) = %d, want %d", got, want)
+	}
+	if data := exported.Data[node.Inode]; len(data) != 0 {
+		t.Fatalf("ExportState() expanded sparse file to %d inline bytes", len(data))
+	}
+	attr, err = engine.GetAttr(node.Inode)
+	if err != nil {
+		t.Fatalf("GetAttr(after export) error = %v", err)
+	}
+	if got, want := attr.Blocks, uint64(1); got != want {
+		t.Fatalf("GetAttr(after export) Blocks = %d, want %d", got, want)
+	}
+}
+
 func TestCompactionRewritesLiveRangesFromFragmentedSegments(t *testing.T) {
 	ctx := context.Background()
 	store := newPrefixedRecordingStore(t, "vol-compact-fragment")

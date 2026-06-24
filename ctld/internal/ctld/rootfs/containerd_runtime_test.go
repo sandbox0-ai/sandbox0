@@ -1,14 +1,18 @@
 package rootfs
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/s0fs"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -122,6 +126,173 @@ func TestResolveContainerIDReturnsNotFound(t *testing.T) {
 	assert.True(t, errors.Is(err, ErrNotFound))
 }
 
+func TestRootFSS0FSMaterializerReadsInheritedSegments(t *testing.T) {
+	baseStore := objectstore.NewMemoryStore("rootfs-s0fs-inherited-segments-" + t.Name())
+	sourceStore := rootFSS0FSObjectStore(baseStore, "team-1", "source")
+	require.NoError(t, sourceStore.Put("segments/source-1.bin", bytes.NewReader([]byte("parent-data"))))
+
+	materializer := rootFSS0FSMaterializer(baseStore, "team-1", "fork")
+	got, err := materializer.ReadSegmentRange(&s0fs.Segment{
+		ID:       "source-1",
+		VolumeID: "source",
+		Key:      "segments/source-1.bin",
+		Length:   uint64(len("parent-data")),
+	}, 0, int64(len("parent-data")))
+
+	require.NoError(t, err)
+	assert.Equal(t, "parent-data", string(got))
+}
+
+func TestCommitS0FSRootFSUsesActiveMountEngine(t *testing.T) {
+	ctx := context.Background()
+	baseStore := objectstore.NewMemoryStore("rootfs-s0fs-active-mount-" + t.Name())
+	teamID := "team-1"
+	sourceID := "source"
+	childID := "child"
+
+	source, err := s0fs.Open(ctx, s0fs.Config{
+		VolumeID:             sourceID,
+		WALPath:              filepath.Join(t.TempDir(), "source.wal"),
+		ObjectStore:          rootFSS0FSObjectStore(baseStore, teamID, sourceID),
+		ObjectStoreForVolume: rootFSS0FSObjectStoreResolver(baseStore, teamID),
+	})
+	require.NoError(t, err)
+	node, err := source.CreateFile(s0fs.RootInode, "state.txt", 0o644)
+	require.NoError(t, err)
+	_, err = source.Write(node.Inode, 0, []byte("parent-data"))
+	require.NoError(t, err)
+	sourceManifest, err := source.EnsureMaterialized(ctx)
+	require.NoError(t, err)
+	require.NoError(t, source.Close())
+
+	sourceHead, err := rootFSS0FSHeadFromManifest(teamID, sourceID, sourceManifest)
+	require.NoError(t, err)
+	sourceState, _, err := loadRootFSS0FSHead(ctx, baseStore, sourceHead)
+	require.NoError(t, err)
+
+	runtime := NewContainerdRuntime(ContainerdRuntimeConfig{RootFSCacheDir: t.TempDir()})
+	child, err := runtime.openRootFSS0FSEngine(ctx, baseStore, teamID, childID)
+	require.NoError(t, err)
+	require.NoError(t, child.ReplaceState(sourceState))
+	childNode, err := child.Lookup(s0fs.RootInode, "state.txt")
+	require.NoError(t, err)
+	require.NoError(t, child.Truncate(childNode.Inode, 0))
+	_, err = child.Write(childNode.Inode, 0, []byte("child-data"))
+	require.NoError(t, err)
+	childNode, err = child.Lookup(s0fs.RootInode, "state.txt")
+	require.NoError(t, err)
+
+	runtime.s0fsMounts[rootFSS0FSMountKey(ctldapi.RootFSInfo{ContainerID: "container-1"})] = &s0fsRootFSMount{
+		volumeID: childID,
+		teamID:   teamID,
+		engine:   child,
+	}
+	head, err := runtime.CommitS0FSRootFS(ctx, S0FSCommitRequest{
+		Store:        baseStore,
+		TeamID:       teamID,
+		FilesystemID: childID,
+		Info:         ctldapi.RootFSInfo{ContainerID: "container-1"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, childID, head.FilesystemID)
+	assert.Equal(t, childID, head.VolumeID)
+	assert.NotEmpty(t, head.ManifestKey)
+
+	childState, _, err := loadRootFSS0FSHead(ctx, baseStore, head)
+	require.NoError(t, err)
+	reader := s0fs.NewSnapshotReader(childState, rootFSS0FSMaterializer(baseStore, teamID, childID))
+	payload, err := reader.Read(childNode.Inode, 0, childNode.Size)
+	require.NoError(t, err)
+	assert.Equal(t, "child-data", string(payload))
+}
+
+func TestTakeS0FSMountFallsBackToPodUID(t *testing.T) {
+	runtime := NewContainerdRuntime(ContainerdRuntimeConfig{})
+	active := &s0fsRootFSMount{
+		key:    "old-container",
+		podUID: "pod-1",
+	}
+	runtime.s0fsMounts[active.key] = active
+	runtime.s0fsMountsByPodUID[active.podUID] = active
+
+	got := runtime.takeS0FSMount(ctldapi.RootFSInfo{
+		ContainerID: "new-container",
+		PodUID:      "pod-1",
+	})
+
+	require.Same(t, active, got)
+	assert.Empty(t, runtime.s0fsMounts)
+	assert.Empty(t, runtime.s0fsMountsByPodUID)
+}
+
+func TestS0FSRootFSVolumePortalPaths(t *testing.T) {
+	active := &s0fsRootFSMount{
+		mountRootPath:      "/proc/123/root",
+		containerMountPath: "/sandbox0/rootfs",
+	}
+
+	source, target := active.rootFSVolumePortalPaths("/workspace/data")
+
+	assert.Equal(t, "/proc/123/root/workspace/data", source)
+	assert.Equal(t, "/proc/123/root/sandbox0/rootfs/workspace/data", target)
+	assert.Equal(t, "/sandbox0/rootfs/workspace/data", rootFSNestedMountPath("/sandbox0/rootfs", "/workspace/data"))
+}
+
+func TestRootFSRuntimeBindMountPathsCollapseRecursiveMounts(t *testing.T) {
+	got := rootFSRuntimeBindMountPaths([]string{
+		"/proc",
+		"/proc/bus",
+		"/dev",
+		"/dev/pts",
+		"/dev/shm",
+		"/sys",
+		"/sys/fs/cgroup",
+		"/etc/hosts",
+		"/etc/resolv.conf",
+		"/workspace/data",
+		"/sandbox0/rootfs",
+		"/sandbox0/rootfs/dev",
+		"/sandbox0/rootfs/proc",
+		"/dev",
+	}, "/sandbox0/rootfs")
+
+	assert.Equal(t, []string{
+		"/dev",
+		"/proc",
+		"/sys",
+		"/etc/hosts",
+		"/etc/resolv.conf",
+		"/workspace/data",
+	}, got)
+}
+
+func TestRootFSRuntimeBindPathsTargetNestedRootFS(t *testing.T) {
+	source, target := rootFSRuntimeBindPaths("/sandbox0/rootfs", "/dev")
+
+	assert.Equal(t, "/dev", source)
+	assert.Equal(t, "/sandbox0/rootfs/dev", target)
+}
+
+func TestPrepareRuntimeRootFSBindTargetCreatesDirectoryAndFileTargets(t *testing.T) {
+	root := t.TempDir()
+	sourceDir := filepath.Join(root, "source-dir")
+	sourceFile := filepath.Join(root, "source-file")
+	targetDir := filepath.Join(root, "target-dir")
+	targetFile := filepath.Join(root, "nested", "target-file")
+	require.NoError(t, os.Mkdir(sourceDir, 0o755))
+	require.NoError(t, os.WriteFile(sourceFile, []byte("source"), 0o644))
+
+	require.NoError(t, prepareRuntimeRootFSBindTarget(sourceDir, targetDir))
+	require.NoError(t, prepareRuntimeRootFSBindTarget(sourceFile, targetFile))
+
+	dirInfo, err := os.Stat(targetDir)
+	require.NoError(t, err)
+	assert.True(t, dirInfo.IsDir())
+	fileInfo, err := os.Stat(targetFile)
+	require.NoError(t, err)
+	assert.False(t, fileInfo.IsDir())
+}
+
 func TestFindLiveRootFSByTaskAnnotations(t *testing.T) {
 	taskRoot := t.TempDir()
 	hostTaskRoot := filepath.Join(string(filepath.Separator), "run", "containerd", "io.containerd.runtime.v2.task", "k8s.io")
@@ -141,6 +312,7 @@ func TestFindLiveRootFSByTaskAnnotations(t *testing.T) {
 		"io.kubernetes.cri.sandbox-uid":       "uid-1",
 	})
 	require.NoError(t, os.Mkdir(filepath.Join(wantTask, "rootfs"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(wantTask, "init.pid"), []byte("1234\n"), 0o644))
 
 	got, err := findLiveRootFSByTaskAnnotations(taskRoot, hostTaskRoot, ctldapi.RootFSInfo{
 		ContainerName: "procd",
@@ -150,7 +322,30 @@ func TestFindLiveRootFSByTaskAnnotations(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(hostTaskRoot, "task-1", "rootfs"), got)
+	assert.Equal(t, filepath.Join(string(filepath.Separator), "proc", "1234", "root"), got.mountedPath)
+	assert.Equal(t, filepath.Join(hostTaskRoot, "task-1", "rootfs"), got.hostPath)
+	assert.Equal(t, filepath.Join(string(filepath.Separator), "proc", "1234", "ns", "mnt"), got.mountNamespacePath)
+}
+
+func TestLiveRootFSPathsExposeMountedAndHostRoots(t *testing.T) {
+	containerdRoot := t.TempDir()
+	containerdHostRoot := filepath.Join(string(filepath.Separator), "run", "containerd")
+	containerID := "container-1"
+	taskDir := filepath.Join(containerdRoot, "io.containerd.runtime.v2.task", "k8s.io", containerID)
+	require.NoError(t, os.MkdirAll(filepath.Join(taskDir, "rootfs"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(taskDir, "init.pid"), []byte("5678"), 0o644))
+
+	got, err := liveRootFSPathsForContainer(containerdRoot, containerdHostRoot, "k8s.io", ctldapi.RootFSInfo{
+		ContainerID:   containerID,
+		ContainerName: "procd",
+		PodNamespace:  "tpl-default",
+		PodName:       "pod-1",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(string(filepath.Separator), "proc", "5678", "root"), got.mountedPath)
+	assert.Equal(t, filepath.Join(containerdHostRoot, "io.containerd.runtime.v2.task", "k8s.io", containerID, "rootfs"), got.hostPath)
+	assert.Equal(t, filepath.Join(string(filepath.Separator), "proc", "5678", "ns", "mnt"), got.mountNamespacePath)
 }
 
 func TestLiveRootFSPathMapsMountedRootToHostRoot(t *testing.T) {
@@ -168,6 +363,87 @@ func TestLiveRootFSPathMapsMountedRootToHostRoot(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(containerdHostRoot, "io.containerd.runtime.v2.task", "k8s.io", containerID, "rootfs"), got)
+}
+
+func TestMountedLiveRootFSPathReturnsContainerMountedRoot(t *testing.T) {
+	containerdRoot := t.TempDir()
+	containerdHostRoot := filepath.Join(string(filepath.Separator), "run", "containerd")
+	containerID := "container-1"
+	mountedRoot := filepath.Join(containerdRoot, "io.containerd.runtime.v2.task", "k8s.io", containerID, "rootfs")
+	require.NoError(t, os.MkdirAll(mountedRoot, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(filepath.Dir(mountedRoot), "init.pid"), []byte("3456"), 0o644))
+
+	got, err := mountedLiveRootFSPath(containerdRoot, containerdHostRoot, "k8s.io", ctldapi.RootFSInfo{
+		ContainerID:   containerID,
+		ContainerName: "procd",
+		PodNamespace:  "tpl-default",
+		PodName:       "pod-1",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(string(filepath.Separator), "proc", "3456", "root"), got)
+}
+
+func TestMountedLiveRootFSPathFallsBackToTaskRootWithoutInitPID(t *testing.T) {
+	containerdRoot := t.TempDir()
+	containerdHostRoot := filepath.Join(string(filepath.Separator), "run", "containerd")
+	containerID := "container-1"
+	mountedRoot := filepath.Join(containerdRoot, "io.containerd.runtime.v2.task", "k8s.io", containerID, "rootfs")
+	require.NoError(t, os.MkdirAll(mountedRoot, 0o755))
+
+	got, err := mountedLiveRootFSPath(containerdRoot, containerdHostRoot, "k8s.io", ctldapi.RootFSInfo{
+		ContainerID:   containerID,
+		ContainerName: "procd",
+		PodNamespace:  "tpl-default",
+		PodName:       "pod-1",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, mountedRoot, got)
+}
+
+func TestLiveRootFSPathsFallBackToProcessRoot(t *testing.T) {
+	containerdRoot := t.TempDir()
+	containerdHostRoot := filepath.Join(string(filepath.Separator), "run", "containerd")
+	containerID := "container-1"
+	taskDir := filepath.Join(containerdRoot, "io.containerd.runtime.v2.task", "k8s.io", containerID)
+	require.NoError(t, os.MkdirAll(taskDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(taskDir, "init.pid"), []byte("9012\n"), 0o644))
+
+	got, err := liveRootFSPathsForContainer(containerdRoot, containerdHostRoot, "k8s.io", ctldapi.RootFSInfo{
+		ContainerID:   containerID,
+		ContainerName: "procd",
+		PodNamespace:  "tpl-default",
+		PodName:       "pod-1",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(string(filepath.Separator), "proc", "9012", "root"), got.mountedPath)
+	assert.Equal(t, filepath.Join(string(filepath.Separator), "proc", "9012", "root"), got.hostPath)
+	assert.Equal(t, filepath.Join(string(filepath.Separator), "proc", "9012", "ns", "mnt"), got.mountNamespacePath)
+}
+
+func TestRootFSImportExcludedPathsIncludesProcessMounts(t *testing.T) {
+	mountInfo := filepath.Join(t.TempDir(), "mountinfo")
+	require.NoError(t, os.WriteFile(mountInfo, []byte(strings.Join([]string{
+		"36 25 0:32 / / rw,relatime - overlay overlay rw",
+		"37 36 0:33 / /proc rw,nosuid,nodev,noexec - proc proc rw",
+		"38 36 0:34 / /workspace rw,relatime - tmpfs tmpfs rw",
+		"39 36 0:35 / /etc/resolv.conf rw,relatime - tmpfs tmpfs rw",
+		"40 36 0:36 / /path\\040with\\040space rw,relatime - tmpfs tmpfs rw",
+		"",
+	}, "\n")), 0o644))
+
+	got := rootFSImportExcludedPaths([]string{"/workspace/data", "/proc"}, mountInfo)
+
+	assert.ElementsMatch(t, []string{
+		"/procd",
+		"/workspace/data",
+		"/proc",
+		"/workspace",
+		"/etc/resolv.conf",
+		"/path with space",
+	}, got)
 }
 
 func TestDigestFromReference(t *testing.T) {

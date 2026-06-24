@@ -532,6 +532,94 @@ func TestFinishRestoredSandboxRuntimeAppliesRootFSLayerChain(t *testing.T) {
 	assert.Equal(t, "rootfs/child.tar", applyReq.Layers[1].Descriptor.ObjectKey)
 }
 
+func TestFinishRestoredSandboxRuntimeAppliesS0FSHead(t *testing.T) {
+	var applyReq ctldapi.ApplyRootFSRequest
+	var initReq InitializeRequest
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/v1/rootfs/apply", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&applyReq))
+		_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{
+			Applied:   true,
+			MountPath: "/sandbox0/rootfs",
+			Head: ctldapi.RootFSHeadDescriptor{
+				Engine:        ctldapi.RootFSStorageEngineS0FS,
+				TeamID:        "team-1",
+				FilesystemID:  "fs-1",
+				VolumeID:      "fs-1",
+				ManifestKey:   "manifests/00000000000000000007.json",
+				ManifestSeq:   7,
+				CheckpointSeq: 3,
+			},
+		})
+	}))
+	defer ctld.Close()
+	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+
+	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/v1/initialize", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&initReq))
+		require.NoError(t, spec.WriteSuccess(w, http.StatusOK, InitializeResponse{SandboxID: "sandbox-1", TeamID: "team-1"}))
+	}))
+	defer procd.Close()
+	procdURL, procdPort := parsedTestServer(t, procd.URL)
+
+	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
+	pod.Status.HostIP = ctldURL.Hostname()
+	pod.Status.PodIP = procdURL.Hostname()
+	k8sClient := fake.NewSimpleClientset(pod)
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{},
+		rootFSStates: map[string]*SandboxRootFSState{
+			"sandbox-1": rootFSTestS0FSState(),
+		},
+	}
+	svc := &SandboxService{
+		k8sClient:              k8sClient,
+		podLister:              newTestPodLister(t, pod),
+		sandboxStore:           store,
+		ctldClient:             NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		procdClient:            NewProcdClient(ProcdClientConfig{Timeout: time.Second}),
+		internalTokenGenerator: staticTokenGenerator{},
+		config: SandboxServiceConfig{
+			CtldEnabled:      true,
+			CtldPort:         ctldPort,
+			ProcdPort:        procdPort,
+			ProcdInitTimeout: time.Second,
+		},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+	record := &SandboxRecord{
+		ID:                "sandbox-1",
+		TeamID:            "team-1",
+		UserID:            "user-1",
+		TemplateID:        "template-1",
+		TemplateName:      "template-1",
+		TemplateNamespace: "template-default",
+		TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
+		RuntimeGeneration: 3,
+		Status:            SandboxStatusPaused,
+	}
+
+	_, err := svc.finishRestoredSandboxRuntime(context.Background(), pod, record, "hot")
+	require.NoError(t, err)
+
+	assert.Empty(t, applyReq.Descriptor.Digest)
+	assert.Empty(t, applyReq.Layers)
+	assert.Equal(t, "fs-1", applyReq.FilesystemID)
+	assert.Equal(t, ctldapi.RootFSStorageEngineS0FS, applyReq.Head.Engine)
+	assert.Equal(t, "team-1", applyReq.Head.TeamID)
+	assert.Equal(t, "fs-1", applyReq.Head.VolumeID)
+	assert.Equal(t, "manifests/00000000000000000007.json", applyReq.Head.ManifestKey)
+	assert.Equal(t, uint64(7), applyReq.Head.ManifestSeq)
+	assert.Equal(t, uint64(3), applyReq.Head.CheckpointSeq)
+	assert.Equal(t, "/sandbox0/rootfs", initReq.RootFSMountPath)
+
+	updated, err := k8sClient.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "/sandbox0/rootfs", updated.Annotations[sandboxRootFSMountPathAnnotation])
+}
+
 func TestFinishRestoredSandboxRuntimeRetriesWithCheckpointBaseImage(t *testing.T) {
 	withClaimTestPublicKey(t)
 
@@ -908,6 +996,21 @@ func rootFSTestLayerState() *SandboxRootFSState {
 			DiffObjectKey:       "rootfs/child.tar",
 		},
 	}
+	return state
+}
+
+func rootFSTestS0FSState() *SandboxRootFSState {
+	state := rootFSTestState()
+	state.LayerID = "layer-s0fs"
+	state.StorageEngine = ctldapi.RootFSStorageEngineS0FS
+	state.DiffDigest = "s0fs:manifests/00000000000000000007.json"
+	state.DiffMediaType = "application/vnd.sandbox0.rootfs.s0fs.v1+json"
+	state.DiffSize = 0
+	state.DiffObjectKey = "manifests/00000000000000000007.json"
+	state.S0FSVolumeID = "fs-1"
+	state.S0FSManifestKey = "manifests/00000000000000000007.json"
+	state.S0FSManifestSeq = 7
+	state.S0FSCheckpointSeq = 3
 	return state
 }
 

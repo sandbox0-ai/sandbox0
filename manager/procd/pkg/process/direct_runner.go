@@ -51,10 +51,7 @@ func (r *DirectRunner) Start(cmd *exec.Cmd) error {
 
 	r.base.SetState(ProcessStateStarting)
 
-	// Create a new process group for signal management
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-	}
+	ApplySysProcAttr(cmd, r.base.GetConfig(), true)
 
 	cmd.Stdout = &directRunnerOutputWriter{
 		runner: r,

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -45,6 +46,136 @@ func TestEngineSmallFileReadWriteReplay(t *testing.T) {
 	}
 	if !bytes.Equal(data, []byte("hello")) {
 		t.Fatalf("replayed data = %q, want hello", data)
+	}
+}
+
+func TestEngineXattrsReplayAndClone(t *testing.T) {
+	walPath := filepath.Join(t.TempDir(), "volume.wal")
+
+	engine, err := Open(context.Background(), Config{VolumeID: "vol-1", WALPath: walPath})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	node, err := engine.CreateFile(RootInode, "meta.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if err := engine.SetXattr(node.Inode, "user.alpha", []byte("one"), XattrCreate); err != nil {
+		t.Fatalf("SetXattr(create) error = %v", err)
+	}
+	if err := engine.SetXattr(node.Inode, "user.empty", nil, XattrCreate); err != nil {
+		t.Fatalf("SetXattr(empty) error = %v", err)
+	}
+	if err := engine.SetXattr(node.Inode, "user.alpha", []byte("two"), XattrCreate); !errors.Is(err, ErrExists) {
+		t.Fatalf("SetXattr(create existing) error = %v, want ErrExists", err)
+	}
+	if err := engine.SetXattr(node.Inode, "user.missing", []byte("value"), XattrReplace); !errors.Is(err, ErrXattrNotFound) {
+		t.Fatalf("SetXattr(replace missing) error = %v, want ErrXattrNotFound", err)
+	}
+	if err := engine.SetXattr(node.Inode, "user.alpha", []byte("two"), XattrReplace); err != nil {
+		t.Fatalf("SetXattr(replace) error = %v", err)
+	}
+
+	value, err := engine.GetXattr(node.Inode, "user.alpha")
+	if err != nil {
+		t.Fatalf("GetXattr() error = %v", err)
+	}
+	value[0] = 'X'
+	value, err = engine.GetXattr(node.Inode, "user.alpha")
+	if err != nil {
+		t.Fatalf("GetXattr(second) error = %v", err)
+	}
+	if !bytes.Equal(value, []byte("two")) {
+		t.Fatalf("GetXattr() value = %q, want two", value)
+	}
+	names, err := engine.ListXattrs(node.Inode)
+	if err != nil {
+		t.Fatalf("ListXattrs() error = %v", err)
+	}
+	if len(names) != 2 || names[0] != "user.alpha" || names[1] != "user.empty" {
+		t.Fatalf("ListXattrs() = %+v, want sorted xattrs", names)
+	}
+
+	state := engine.SnapshotState()
+	state.Nodes[node.Inode].Xattrs["user.alpha"][0] = 'X'
+	value, err = engine.GetXattr(node.Inode, "user.alpha")
+	if err != nil {
+		t.Fatalf("GetXattr(after state mutation) error = %v", err)
+	}
+	if !bytes.Equal(value, []byte("two")) {
+		t.Fatalf("GetXattr(after state mutation) = %q, want two", value)
+	}
+
+	if err := engine.Fsync(node.Inode); err != nil {
+		t.Fatalf("Fsync() error = %v", err)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	replayed, err := Open(context.Background(), Config{VolumeID: "vol-1", WALPath: walPath})
+	if err != nil {
+		t.Fatalf("Open(replay) error = %v", err)
+	}
+	defer replayed.Close()
+	replayedNode, err := replayed.Lookup(RootInode, "meta.txt")
+	if err != nil {
+		t.Fatalf("Lookup(replay) error = %v", err)
+	}
+	value, err = replayed.GetXattr(replayedNode.Inode, "user.alpha")
+	if err != nil {
+		t.Fatalf("GetXattr(replay) error = %v", err)
+	}
+	if !bytes.Equal(value, []byte("two")) {
+		t.Fatalf("GetXattr(replay) = %q, want two", value)
+	}
+	if err := replayed.RemoveXattr(replayedNode.Inode, "user.alpha"); err != nil {
+		t.Fatalf("RemoveXattr() error = %v", err)
+	}
+	if _, err := replayed.GetXattr(replayedNode.Inode, "user.alpha"); !errors.Is(err, ErrXattrNotFound) {
+		t.Fatalf("GetXattr(removed) error = %v, want ErrXattrNotFound", err)
+	}
+}
+
+func TestEngineMknodReplay(t *testing.T) {
+	walPath := filepath.Join(t.TempDir(), "volume.wal")
+
+	engine, err := Open(context.Background(), Config{VolumeID: "vol-1", WALPath: walPath})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if _, err := engine.Mknod(RootInode, "pipe", syscall.S_IFIFO|0o644, 0); err != nil {
+		t.Fatalf("Mknod(fifo) error = %v", err)
+	}
+	charNode, err := engine.Mknod(RootInode, "null", syscall.S_IFCHR|0o666, 259)
+	if err != nil {
+		t.Fatalf("Mknod(char) error = %v", err)
+	}
+	if charNode.Type != TypeChar || charNode.Rdev != 259 {
+		t.Fatalf("Mknod(char) node = %+v, want char rdev 259", charNode)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	replayed, err := Open(context.Background(), Config{VolumeID: "vol-1", WALPath: walPath})
+	if err != nil {
+		t.Fatalf("Open(replay) error = %v", err)
+	}
+	defer replayed.Close()
+	pipe, err := replayed.Lookup(RootInode, "pipe")
+	if err != nil {
+		t.Fatalf("Lookup(pipe) error = %v", err)
+	}
+	if pipe.Type != TypeFIFO {
+		t.Fatalf("Lookup(pipe) type = %q, want fifo", pipe.Type)
+	}
+	null, err := replayed.Lookup(RootInode, "null")
+	if err != nil {
+		t.Fatalf("Lookup(null) error = %v", err)
+	}
+	if null.Type != TypeChar || null.Rdev != 259 {
+		t.Fatalf("Lookup(null) node = %+v, want char rdev 259", null)
 	}
 }
 

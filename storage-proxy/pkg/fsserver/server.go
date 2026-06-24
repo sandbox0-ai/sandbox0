@@ -11,12 +11,12 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/router"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
@@ -588,7 +588,41 @@ func (s *FileSystemServer) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb
 func (s *FileSystemServer) Mknod(ctx context.Context, req *pb.MknodRequest) (*pb.NodeResponse, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.NodeResponse, error) {
 		if isS0FSVolume(volCtx) {
-			return nil, fserror.New(fserror.Unimplemented, "mknod is not implemented for s0fs")
+			if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, fsmeta.Ino(req.Parent)); err != nil {
+				return nil, fserror.New(fserror.Internal, err.Error())
+			}
+			path := resolveChildPath(volCtx, req.Parent, req.Name)
+			mode := req.Mode
+			if req.Umask != 0 {
+				mode &^= req.Umask & 0o777
+			}
+			node, err := volCtx.S0FS.Mknod(req.Parent, req.Name, mode, uint64(req.Rdev))
+			if err != nil {
+				return nil, mapS0FSError(err)
+			}
+			if req.Actor != nil && len(req.Actor.Gids) > 0 {
+				if err := volCtx.S0FS.SetOwner(node.Inode, req.Actor.Uid, req.Actor.Gids[0]); err != nil {
+					return nil, fserror.New(fserror.Internal, err.Error())
+				}
+				node, err = volCtx.S0FS.GetAttr(node.Inode)
+				if err != nil {
+					return nil, mapS0FSError(err)
+				}
+			}
+			if path == "" {
+				path = resolveInodePath(volCtx, node.Inode)
+			}
+			eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CREATE
+			if path == "" {
+				eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+			}
+			s.publishEvent(runCtx, &pb.WatchEvent{
+				VolumeId:  req.VolumeId,
+				EventType: eventType,
+				Path:      path,
+				Inode:     node.Inode,
+			})
+			return s0fsNodeResponse(node, 0), nil
 		}
 		return nil, unsupportedVolumeBackend(volCtx)
 	})
@@ -1122,7 +1156,11 @@ func (s *FileSystemServer) GetXattr(ctx context.Context, req *pb.GetXattrRequest
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
-		return nil, fserror.New(fserror.Unimplemented, "xattr is not implemented for s0fs")
+		value, err := volCtx.S0FS.GetXattr(req.Inode, req.Name)
+		if err != nil {
+			return nil, mapS0FSError(err)
+		}
+		return &pb.GetXattrResponse{Value: value}, nil
 	}
 
 	return nil, unsupportedVolumeBackend(volCtx)
@@ -1132,7 +1170,11 @@ func (s *FileSystemServer) GetXattr(ctx context.Context, req *pb.GetXattrRequest
 func (s *FileSystemServer) SetXattr(ctx context.Context, req *pb.SetXattrRequest) (*pb.Empty, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.Empty, error) {
 		if isS0FSVolume(volCtx) {
-			return nil, fserror.New(fserror.Unimplemented, "xattr is not implemented for s0fs")
+			if err := volCtx.S0FS.SetXattr(req.Inode, req.Name, req.Value, req.Flags); err != nil {
+				return nil, mapS0FSError(err)
+			}
+			s.publishEvent(runCtx, s0fsMetadataEvent(volCtx, req.VolumeId, req.Inode))
+			return &pb.Empty{}, nil
 		}
 		return nil, unsupportedVolumeBackend(volCtx)
 	})
@@ -1145,7 +1187,11 @@ func (s *FileSystemServer) ListXattr(ctx context.Context, req *pb.ListXattrReque
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
-		return nil, fserror.New(fserror.Unimplemented, "xattr is not implemented for s0fs")
+		names, err := volCtx.S0FS.ListXattrs(req.Inode)
+		if err != nil {
+			return nil, mapS0FSError(err)
+		}
+		return &pb.ListXattrResponse{Data: encodeXattrList(names)}, nil
 	}
 
 	return nil, unsupportedVolumeBackend(volCtx)
@@ -1155,10 +1201,37 @@ func (s *FileSystemServer) ListXattr(ctx context.Context, req *pb.ListXattrReque
 func (s *FileSystemServer) RemoveXattr(ctx context.Context, req *pb.RemoveXattrRequest) (*pb.Empty, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.Empty, error) {
 		if isS0FSVolume(volCtx) {
-			return nil, fserror.New(fserror.Unimplemented, "xattr is not implemented for s0fs")
+			if err := volCtx.S0FS.RemoveXattr(req.Inode, req.Name); err != nil {
+				return nil, mapS0FSError(err)
+			}
+			s.publishEvent(runCtx, s0fsMetadataEvent(volCtx, req.VolumeId, req.Inode))
+			return &pb.Empty{}, nil
 		}
 		return nil, unsupportedVolumeBackend(volCtx)
 	})
+}
+
+func encodeXattrList(names []string) []byte {
+	var data []byte
+	for _, name := range names {
+		data = append(data, name...)
+		data = append(data, 0)
+	}
+	return data
+}
+
+func s0fsMetadataEvent(volCtx *volume.VolumeContext, volumeID string, inode uint64) *pb.WatchEvent {
+	path := resolveInodePath(volCtx, inode)
+	eventType := pb.WatchEventType_WATCH_EVENT_TYPE_WRITE
+	if path == "" {
+		eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+	}
+	return &pb.WatchEvent{
+		VolumeId:  volumeID,
+		EventType: eventType,
+		Path:      path,
+		Inode:     inode,
+	}
 }
 
 func resolveInodePath(volCtx *volume.VolumeContext, inode uint64) string {
@@ -1228,6 +1301,14 @@ func s0fsAttr(node *s0fs.Node) *pb.GetAttrResponse {
 		mode |= syscall.S_IFDIR
 	case s0fs.TypeSymlink:
 		mode |= syscall.S_IFLNK
+	case s0fs.TypeFIFO:
+		mode |= syscall.S_IFIFO
+	case s0fs.TypeChar:
+		mode |= syscall.S_IFCHR
+	case s0fs.TypeBlock:
+		mode |= syscall.S_IFBLK
+	case s0fs.TypeSocket:
+		mode |= syscall.S_IFSOCK
 	default:
 		mode |= syscall.S_IFREG
 	}
@@ -1235,14 +1316,19 @@ func s0fsAttr(node *s0fs.Node) *pb.GetAttrResponse {
 	if node.Type == s0fs.TypeSymlink {
 		size = uint64(len(node.Target))
 	}
+	blocks := (size + 511) / 512
+	if node.BlocksValid {
+		blocks = node.Blocks
+	}
 	return &pb.GetAttrResponse{
 		Ino:       node.Inode,
 		Mode:      mode,
 		Nlink:     node.Nlink,
 		Uid:       node.UID,
 		Gid:       node.GID,
+		Rdev:      node.Rdev,
 		Size:      size,
-		Blocks:    (size + 511) / 512,
+		Blocks:    blocks,
 		AtimeSec:  node.Atime.Unix(),
 		AtimeNsec: int64(node.Atime.Nanosecond()),
 		MtimeSec:  node.Mtime.Unix(),
@@ -1331,6 +1417,8 @@ func mapS0FSError(err error) error {
 	case err == nil:
 		return nil
 	case errors.Is(err, s0fs.ErrNotFound):
+		return fserror.New(fserror.NotFound, err.Error())
+	case errors.Is(err, s0fs.ErrXattrNotFound):
 		return fserror.New(fserror.NotFound, err.Error())
 	case errors.Is(err, s0fs.ErrExists):
 		return fserror.New(fserror.AlreadyExists, err.Error())

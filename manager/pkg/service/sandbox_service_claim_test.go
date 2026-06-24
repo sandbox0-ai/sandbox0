@@ -717,6 +717,7 @@ func TestClaimSandboxInitializesRootFSFromSnapshotBeforeProcd(t *testing.T) {
 
 	var calls []string
 	var applyReq ctldapi.ApplyRootFSRequest
+	var initReq InitializeRequest
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/rootfs/apply" {
 			http.NotFound(w, r)
@@ -726,7 +727,7 @@ func TestClaimSandboxInitializesRootFSFromSnapshotBeforeProcd(t *testing.T) {
 			t.Fatalf("decode apply request: %v", err)
 		}
 		calls = append(calls, "apply")
-		_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
+		_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true, MountPath: "/sandbox0/rootfs"})
 	}))
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
@@ -738,6 +739,9 @@ func TestClaimSandboxInitializesRootFSFromSnapshotBeforeProcd(t *testing.T) {
 		}
 		if len(calls) != 1 || calls[0] != "apply" {
 			t.Fatalf("calls before procd = %v, want [apply]", calls)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&initReq); err != nil {
+			t.Fatalf("decode initialize request: %v", err)
 		}
 		calls = append(calls, "procd")
 		if err := spec.WriteSuccess(w, http.StatusOK, InitializeResponse{SandboxID: "sandbox-a", TeamID: "team-a"}); err != nil {
@@ -804,6 +808,9 @@ func TestClaimSandboxInitializesRootFSFromSnapshotBeforeProcd(t *testing.T) {
 	}
 	if applyReq.BaselineLayerID != "layer-v1" {
 		t.Fatalf("BaselineLayerID = %q, want layer-v1", applyReq.BaselineLayerID)
+	}
+	if initReq.RootFSMountPath != "/sandbox0/rootfs" {
+		t.Fatalf("initialize rootfs_mount_path = %q, want /sandbox0/rootfs", initReq.RootFSMountPath)
 	}
 	if len(applyReq.Layers) != 1 || applyReq.Layers[0].LayerID != "layer-v1" {
 		t.Fatalf("apply layers = %+v, want layer-v1", applyReq.Layers)

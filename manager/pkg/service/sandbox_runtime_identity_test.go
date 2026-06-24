@@ -7,6 +7,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -222,6 +223,36 @@ func TestRootFSStateFromLayerChainKeepsCurrentSandboxID(t *testing.T) {
 	}
 	if len(state.LayerChain) != 2 {
 		t.Fatalf("LayerChain len = %d, want 2", len(state.LayerChain))
+	}
+}
+
+func TestRootFSStateFromLayerChainPreservesS0FSHead(t *testing.T) {
+	state := rootFSStateFromLayerChain("sandbox-1", []*SandboxRootFSLayer{{
+		ID:                  "layer-s0fs",
+		SourceSandboxID:     "sandbox-source",
+		TeamID:              "team-1",
+		StorageEngine:       ctldapi.RootFSStorageEngineS0FS,
+		DiffDigest:          "s0fs:manifests/00000000000000000005.json",
+		DiffMediaType:       "application/vnd.sandbox0.rootfs.s0fs.v1+json",
+		DiffObjectKey:       "manifests/00000000000000000005.json",
+		S0FSVolumeID:        "fs-1",
+		S0FSManifestKey:     "manifests/00000000000000000005.json",
+		S0FSManifestSeq:     5,
+		S0FSCheckpointSeq:   2,
+		SnapshotParentChain: []string{"parent-1"},
+	}})
+
+	if state == nil {
+		t.Fatal("state is nil")
+	}
+	if state.StorageEngine != ctldapi.RootFSStorageEngineS0FS {
+		t.Fatalf("StorageEngine = %q, want s0fs", state.StorageEngine)
+	}
+	if state.S0FSVolumeID != "fs-1" || state.S0FSManifestSeq != 5 || state.S0FSCheckpointSeq != 2 {
+		t.Fatalf("s0fs head fields = volume %q manifest_seq %d checkpoint_seq %d", state.S0FSVolumeID, state.S0FSManifestSeq, state.S0FSCheckpointSeq)
+	}
+	if len(state.SnapshotParentChain) != 1 || state.SnapshotParentChain[0] != "parent-1" {
+		t.Fatalf("SnapshotParentChain = %+v, want [parent-1]", state.SnapshotParentChain)
 	}
 }
 

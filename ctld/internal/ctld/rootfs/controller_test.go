@@ -105,6 +105,40 @@ func TestControllerSaveRootFSUsesParentBaseline(t *testing.T) {
 	assert.Equal(t, "child diff", string(payload))
 }
 
+func TestControllerSaveRootFSCommitsS0FSWhenRuntimeSupportsIt(t *testing.T) {
+	head := rootFSS0FSHead()
+	runtime := &fakeS0FSRuntime{
+		fakeRuntime: fakeRuntime{info: rootFSInfo("runc")},
+		commitHead:  head,
+	}
+	controller := NewController(Config{Runtime: runtime, Store: objectstore.NewMemoryStore(t.Name())})
+
+	resp, status := controller.SaveRootFS(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.SaveRootFSRequest{
+		Target:       rootFSTarget(),
+		SandboxID:    "sandbox-1",
+		TeamID:       "team-1",
+		FilesystemID: "fs-target",
+		ParentHead: ctldapi.RootFSHeadDescriptor{
+			Engine:      ctldapi.RootFSStorageEngineS0FS,
+			VolumeID:    "fs-parent",
+			ManifestKey: "manifests/00000000000000000001.json",
+			ManifestSeq: 1,
+		},
+		ExcludedPaths: []string{"/workspace/data"},
+	})
+
+	require.Equal(t, http.StatusOK, status, resp.Error)
+	assert.Equal(t, head, resp.Head)
+	assert.True(t, runtime.commitCalled)
+	assert.False(t, runtime.createCalled)
+	assert.Equal(t, "sandbox-1", runtime.commitReq.SandboxID)
+	assert.Equal(t, "team-1", runtime.commitReq.TeamID)
+	assert.Equal(t, "fs-target", runtime.commitReq.FilesystemID)
+	assert.Equal(t, uint64(1), runtime.commitReq.ParentHead.ManifestSeq)
+	assert.Equal(t, []string{"/workspace/data"}, runtime.commitReq.ExcludedPaths)
+	assert.NotNil(t, runtime.commitReq.Store)
+}
+
 func TestControllerSaveRootFSResolvesUnboundPortalPaths(t *testing.T) {
 	store := objectstore.NewMemoryStore(t.Name())
 	runtime := &fakeRuntime{
@@ -258,6 +292,36 @@ func TestControllerApplyRootFSAppliesLayerChainAndCapturesBaseline(t *testing.T)
 	assert.Equal(t, "layer-child", runtime.captureBaselineLayerID)
 	assert.Equal(t, []string{"/workspace/data"}, runtime.captureBaselineExcludedPaths)
 	assert.Equal(t, rootFSInfo("runc"), runtime.captureInfo)
+}
+
+func TestControllerApplyRootFSAttachesS0FSHead(t *testing.T) {
+	head := rootFSS0FSHead()
+	runtime := &fakeS0FSRuntime{
+		fakeRuntime:     fakeRuntime{info: rootFSInfo("runc")},
+		attachHead:      head,
+		attachMountPath: "/sandbox0/rootfs",
+	}
+	controller := NewController(Config{Runtime: runtime, Store: objectstore.NewMemoryStore(t.Name())})
+
+	resp, status := controller.ApplyRootFS(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.ApplyRootFSRequest{
+		Target:       rootFSTarget(),
+		FilesystemID: "fs-target",
+		Head:         head,
+		ExcludedPaths: []string{
+			"/workspace/data",
+		},
+	})
+
+	require.Equal(t, http.StatusOK, status, resp.Error)
+	assert.True(t, resp.Applied)
+	assert.Equal(t, head, resp.Head)
+	assert.Equal(t, "/sandbox0/rootfs", resp.MountPath)
+	assert.True(t, runtime.attachCalled)
+	assert.False(t, runtime.applyCalled)
+	assert.Equal(t, "fs-target", runtime.attachReq.FilesystemID)
+	assert.Equal(t, head, runtime.attachReq.Head)
+	assert.Equal(t, []string{"/workspace/data"}, runtime.attachReq.ExcludedPaths)
+	assert.NotNil(t, runtime.attachReq.Store)
 }
 
 func TestControllerApplyRootFSForceAppliesBaseMismatch(t *testing.T) {
@@ -427,6 +491,40 @@ type fakeRuntime struct {
 	captureBaselinePortalPaths   []ctldapi.RootFSPortalPath
 }
 
+type fakeS0FSRuntime struct {
+	fakeRuntime
+
+	commitHead ctldapi.RootFSHeadDescriptor
+	commitErr  error
+	commitReq  S0FSCommitRequest
+
+	attachHead      ctldapi.RootFSHeadDescriptor
+	attachMountPath string
+	attachErr       error
+	attachReq       S0FSAttachRequest
+
+	commitCalled bool
+	attachCalled bool
+}
+
+func (r *fakeS0FSRuntime) CommitS0FSRootFS(_ context.Context, req S0FSCommitRequest) (ctldapi.RootFSHeadDescriptor, error) {
+	r.commitCalled = true
+	r.commitReq = req
+	if r.commitErr != nil {
+		return ctldapi.RootFSHeadDescriptor{}, r.commitErr
+	}
+	return r.commitHead, nil
+}
+
+func (r *fakeS0FSRuntime) AttachS0FSRootFS(_ context.Context, req S0FSAttachRequest) (ctldapi.RootFSHeadDescriptor, string, error) {
+	r.attachCalled = true
+	r.attachReq = req
+	if r.attachErr != nil {
+		return ctldapi.RootFSHeadDescriptor{}, "", r.attachErr
+	}
+	return r.attachHead, r.attachMountPath, nil
+}
+
 func (r *fakeRuntime) Inspect(_ context.Context, target ctldapi.RootFSContainerRef) (ctldapi.RootFSInfo, error) {
 	r.inspectTargets = append(r.inspectTargets, target)
 	return r.info, r.inspectErr
@@ -509,6 +607,18 @@ func rootFSInfo(runtime string) ctldapi.RootFSInfo {
 		SnapshotParentChain: []string{"parent-1", "parent-0"},
 		BaseImageRef:        "docker.io/library/busybox:1.36",
 		BaseImageDigest:     "sha256:base",
+	}
+}
+
+func rootFSS0FSHead() ctldapi.RootFSHeadDescriptor {
+	return ctldapi.RootFSHeadDescriptor{
+		Engine:        ctldapi.RootFSStorageEngineS0FS,
+		TeamID:        "team-1",
+		FilesystemID:  "fs-source",
+		VolumeID:      "fs-source",
+		ManifestKey:   "manifests/00000000000000000002.json",
+		ManifestSeq:   2,
+		CheckpointSeq: 9,
 	}
 }
 

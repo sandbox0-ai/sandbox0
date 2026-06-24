@@ -4,8 +4,8 @@ import (
 	"fmt"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 )
 
 func S0FSEncryptionConfig(cfg *config.StorageProxyConfig) (*s0fs.EncryptionConfig, error) {

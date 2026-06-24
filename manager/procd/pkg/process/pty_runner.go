@@ -51,6 +51,7 @@ func (r *PTYRunner) Start(cmd *exec.Cmd, size *PTYSize) error {
 		ptySize = &PTYSize{Rows: 100, Cols: 500}
 	}
 
+	ApplySysProcAttr(cmd, r.base.GetConfig(), false)
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
 		Rows: ptySize.Rows,
 		Cols: ptySize.Cols,

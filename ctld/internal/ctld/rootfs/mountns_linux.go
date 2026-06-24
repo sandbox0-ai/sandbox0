@@ -212,6 +212,24 @@ func bindMountPathInMountNamespace(namespacePath, sourcePath, targetPath string)
 	})
 }
 
+func bindMountPathInMountNamespaceRoot(namespacePath, rootPath, sourcePath, targetPath string) error {
+	return withMountNamespaceRoot(namespacePath, rootPath, func() error {
+		if err := unix.Mount(sourcePath, targetPath, "", unix.MS_BIND|unix.MS_REC, ""); err != nil {
+			return fmt.Errorf("bind mount %s to %s: %w", sourcePath, targetPath, err)
+		}
+		return nil
+	})
+}
+
+func unmountBindPathInMountNamespaceRoot(namespacePath, rootPath, targetPath string) error {
+	return withMountNamespaceRoot(namespacePath, rootPath, func() error {
+		if err := unix.Unmount(targetPath, 0); err != nil {
+			return fmt.Errorf("unmount bind filesystem at %s: %w", targetPath, err)
+		}
+		return nil
+	})
+}
+
 func unmountAbsolutePathInMountNamespace(namespacePath, targetPath string) error {
 	return withMountNamespace(namespacePath, func() error {
 		if err := unix.Unmount(targetPath, 0); err != nil {

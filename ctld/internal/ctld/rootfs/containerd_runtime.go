@@ -586,11 +586,7 @@ func (m *s0fsRootFSMount) close() error {
 		_ = unmountAbsolutePathInMountNamespace(m.mountNamespacePath, targetPath)
 		delete(m.portalMounts, mountPath)
 	}
-	for _, pair := range sortedBoundMountTargets(m.runtimeMounts) {
-		mountPath, targetPath := pair[0], pair[1]
-		_ = unmountAbsolutePathInMountNamespace(m.mountNamespacePath, targetPath)
-		delete(m.runtimeMounts, mountPath)
-	}
+	unmountRuntimeRootFSMounts(m.mountNamespacePath, m.mountRootPath, m.runtimeMounts)
 	if m.server != nil {
 		_ = unmountS0FSRootFS(m.server, m.mountNamespacePath, m.mountRootPath, m.mountPath)
 	}
@@ -726,16 +722,17 @@ func rootFSNestedMountPath(rootFSMountPath, mountPath string) string {
 func bindRuntimeRootFSMounts(namespacePath, mountRootPath, rootFSMountPath string, mountPaths []string) (map[string]string, error) {
 	bound := make(map[string]string)
 	for _, mountPath := range mountPaths {
-		sourcePath, targetPath := rootFSRuntimeBindPaths(mountRootPath, rootFSMountPath, mountPath)
+		sourcePath, targetPath := rootFSRuntimeBindPaths(rootFSMountPath, mountPath)
 		if sourcePath == "" || targetPath == "" || sourcePath == targetPath {
 			continue
 		}
-		if err := prepareRuntimeRootFSBindTarget(sourcePath, targetPath); err != nil {
-			unmountRuntimeRootFSMounts(namespacePath, bound)
-			return nil, err
-		}
-		if err := bindMountPathInMountNamespace(namespacePath, sourcePath, targetPath); err != nil {
-			unmountRuntimeRootFSMounts(namespacePath, bound)
+		if err := withMountNamespaceRoot(namespacePath, mountRootPath, func() error {
+			if err := prepareRuntimeRootFSBindTarget(sourcePath, targetPath); err != nil {
+				return err
+			}
+			return bindMountPathInMountNamespaceRoot("", "", sourcePath, targetPath)
+		}); err != nil {
+			unmountRuntimeRootFSMounts(namespacePath, mountRootPath, bound)
 			return nil, err
 		}
 		bound[mountPath] = targetPath
@@ -743,27 +740,21 @@ func bindRuntimeRootFSMounts(namespacePath, mountRootPath, rootFSMountPath strin
 	return bound, nil
 }
 
-func unmountRuntimeRootFSMounts(namespacePath string, mounts map[string]string) {
+func unmountRuntimeRootFSMounts(namespacePath, mountRootPath string, mounts map[string]string) {
 	for _, pair := range sortedBoundMountTargets(mounts) {
 		mountPath, targetPath := pair[0], pair[1]
-		_ = unmountAbsolutePathInMountNamespace(namespacePath, targetPath)
+		_ = unmountBindPathInMountNamespaceRoot(namespacePath, mountRootPath, targetPath)
 		delete(mounts, mountPath)
 	}
 }
 
-func rootFSRuntimeBindPaths(mountRootPath, rootFSMountPath, mountPath string) (string, string) {
-	mountRootPath = strings.TrimSpace(mountRootPath)
-	if mountRootPath == "" {
-		return "", ""
-	}
+func rootFSRuntimeBindPaths(rootFSMountPath, mountPath string) (string, string) {
 	mountPath = cleanRootFSPath(mountPath)
 	rootFSMountPath = cleanRootFSPath(rootFSMountPath)
 	if mountPath == "/" || mountPath == rootFSMountPath || strings.HasPrefix(mountPath, rootFSMountPath+"/") {
 		return "", ""
 	}
-	sourcePath := filepath.Join(mountRootPath, strings.TrimPrefix(mountPath, "/"))
-	targetPath := filepath.Join(mountRootPath, strings.TrimPrefix(rootFSNestedMountPath(rootFSMountPath, mountPath), "/"))
-	return sourcePath, targetPath
+	return mountPath, rootFSNestedMountPath(rootFSMountPath, mountPath)
 }
 
 func rootFSRuntimeBindMountPaths(paths []string, rootFSMountPath string) []string {

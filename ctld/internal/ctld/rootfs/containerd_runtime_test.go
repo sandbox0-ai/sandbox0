@@ -248,10 +248,10 @@ func TestRootFSRuntimeBindMountPathsCollapseRecursiveMounts(t *testing.T) {
 }
 
 func TestRootFSRuntimeBindPathsTargetNestedRootFS(t *testing.T) {
-	source, target := rootFSRuntimeBindPaths("/proc/123/root", "/sandbox0/rootfs", "/dev")
+	source, target := rootFSRuntimeBindPaths("/sandbox0/rootfs", "/dev")
 
-	assert.Equal(t, "/proc/123/root/dev", source)
-	assert.Equal(t, "/proc/123/root/sandbox0/rootfs/dev", target)
+	assert.Equal(t, "/dev", source)
+	assert.Equal(t, "/sandbox0/rootfs/dev", target)
 }
 
 func TestPrepareRuntimeRootFSBindTargetCreatesDirectoryAndFileTargets(t *testing.T) {

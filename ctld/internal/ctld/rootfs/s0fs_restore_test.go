@@ -1,9 +1,11 @@
 package rootfs
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/s0fs"
@@ -52,4 +54,37 @@ func TestRestoreS0FSStateToHostTreeSkipsExcludedPaths(t *testing.T) {
 	got, err := os.ReadFile(filepath.Join(target, "tmp", "user.txt"))
 	require.NoError(t, err)
 	require.Equal(t, "user", string(got))
+}
+
+func TestRestoreS0FSStateToHostTreePreservesSparseFiles(t *testing.T) {
+	upper := t.TempDir()
+	sourcePath := filepath.Join(upper, "tmp", "sparse.img")
+	require.NoError(t, os.MkdirAll(filepath.Dir(sourcePath), 0o755))
+	source, err := os.OpenFile(sourcePath, os.O_CREATE|os.O_RDWR, 0o644)
+	require.NoError(t, err)
+	const sparseSize = 64 << 20
+	require.NoError(t, source.Truncate(sparseSize))
+	_, err = source.WriteAt([]byte("tail"), sparseSize-4)
+	require.NoError(t, err)
+	require.NoError(t, source.Close())
+
+	state, err := s0fs.ImportHostTree(context.Background(), upper, s0fs.HostImportOptions{})
+	require.NoError(t, err)
+	target := t.TempDir()
+	require.NoError(t, restoreS0FSStateToHostTree(context.Background(), state, nil, target, nil))
+
+	restoredPath := filepath.Join(target, "tmp", "sparse.img")
+	info, err := os.Stat(restoredPath)
+	require.NoError(t, err)
+	require.Equal(t, int64(sparseSize), info.Size())
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	require.Less(t, stat.Blocks, int64(4096), "restored sparse file should not allocate hole blocks")
+	tail := make([]byte, 4)
+	restored, err := os.Open(restoredPath)
+	require.NoError(t, err)
+	_, err = restored.ReadAt(tail, sparseSize-4)
+	require.NoError(t, err)
+	require.NoError(t, restored.Close())
+	require.True(t, bytes.Equal(tail, []byte("tail")))
 }

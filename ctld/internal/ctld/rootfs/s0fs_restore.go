@@ -3,6 +3,8 @@ package rootfs
 import (
 	"context"
 	"fmt"
+	"io"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -13,6 +15,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/s0fs"
 	"golang.org/x/sys/unix"
 )
+
+const rootFSRestoreChunkSize = 4 << 20
 
 func restoreS0FSStateToHostTree(ctx context.Context, state *s0fs.SnapshotState, materializer *s0fs.Materializer, targetRoot string, excludedPaths []string) error {
 	if err := ctx.Err(); err != nil {
@@ -92,12 +96,8 @@ func restoreS0FSNode(ctx context.Context, state *s0fs.SnapshotState, reader *s0f
 				return applyS0FSMetadata(target, node)
 			}
 		}
-		payload, err := reader.Read(node.Inode, 0, node.Size)
-		if err != nil {
-			return fmt.Errorf("read s0fs file %s: %w", nodePath, err)
-		}
-		if err := os.WriteFile(target, payload, os.FileMode(node.Mode)); err != nil {
-			return fmt.Errorf("restore s0fs file %s: %w", nodePath, err)
+		if err := restoreS0FSFile(ctx, state, reader, target, nodePath, node); err != nil {
+			return err
 		}
 		restored[node.Inode] = target
 		return applyS0FSMetadata(target, node)
@@ -130,6 +130,98 @@ func restoreS0FSNode(ctx context.Context, state *s0fs.SnapshotState, reader *s0f
 	default:
 		return fmt.Errorf("%w: unsupported s0fs node type %q at %s", ErrBadRequest, node.Type, nodePath)
 	}
+}
+
+func restoreS0FSFile(ctx context.Context, state *s0fs.SnapshotState, reader *s0fs.SnapshotReader, target, nodePath string, node *s0fs.Node) error {
+	if node.Size > math.MaxInt64 {
+		return fmt.Errorf("%w: s0fs file %s is too large to restore", ErrBadRequest, nodePath)
+	}
+	_ = os.Remove(target)
+	file, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(node.Mode))
+	if err != nil {
+		return fmt.Errorf("create s0fs file %s: %w", nodePath, err)
+	}
+	defer file.Close()
+
+	if err := writeS0FSFileData(ctx, state, reader, file, node); err != nil {
+		return fmt.Errorf("restore s0fs file %s: %w", nodePath, err)
+	}
+	if err := file.Truncate(int64(node.Size)); err != nil {
+		return fmt.Errorf("truncate s0fs file %s: %w", nodePath, err)
+	}
+	return nil
+}
+
+func writeS0FSFileData(ctx context.Context, state *s0fs.SnapshotState, reader *s0fs.SnapshotReader, file *os.File, node *s0fs.Node) error {
+	if payload, ok := state.Data[node.Inode]; ok {
+		return writeSparsePayloadAt(file, 0, payload)
+	}
+	if extents := state.ColdFiles[node.Inode]; len(extents) > 0 {
+		return writeS0FSColdExtents(ctx, reader, file, node.Inode, extents)
+	}
+	if node.Size == 0 {
+		return nil
+	}
+	payload, err := reader.Read(node.Inode, 0, node.Size)
+	if err != nil {
+		return err
+	}
+	return writeSparsePayloadAt(file, 0, payload)
+}
+
+func writeS0FSColdExtents(ctx context.Context, reader *s0fs.SnapshotReader, file *os.File, inode uint64, extents []s0fs.FileExtent) error {
+	fileOffset := uint64(0)
+	for _, extent := range extents {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if extent.Length == 0 {
+			continue
+		}
+		if extent.SegmentID == "" {
+			fileOffset += extent.Length
+			continue
+		}
+		for consumed := uint64(0); consumed < extent.Length; {
+			want := extent.Length - consumed
+			if want > rootFSRestoreChunkSize {
+				want = rootFSRestoreChunkSize
+			}
+			payload, err := reader.Read(inode, fileOffset+consumed, want)
+			if err != nil {
+				return err
+			}
+			if len(payload) == 0 {
+				return io.ErrUnexpectedEOF
+			}
+			if err := writeSparsePayloadAt(file, fileOffset+consumed, payload); err != nil {
+				return err
+			}
+			consumed += uint64(len(payload))
+		}
+		fileOffset += extent.Length
+	}
+	return nil
+}
+
+func writeSparsePayloadAt(file *os.File, baseOffset uint64, payload []byte) error {
+	start := 0
+	for start < len(payload) && payload[start] == 0 {
+		start++
+	}
+	end := len(payload)
+	for end > start && payload[end-1] == 0 {
+		end--
+	}
+	if start == end {
+		return nil
+	}
+	offset := baseOffset + uint64(start)
+	if offset > math.MaxInt64 {
+		return fmt.Errorf("%w: sparse write offset is too large", ErrBadRequest)
+	}
+	_, err := file.WriteAt(payload[start:end], int64(offset))
+	return err
 }
 
 func applyS0FSWhiteout(targetRoot, parentPath, name string) (bool, error) {

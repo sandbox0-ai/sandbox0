@@ -111,6 +111,7 @@ func main() {
 		PodNamespace:  podNamespace,
 		RootFSBinder:  rootFSRuntime,
 	})
+	rootFSRuntime.SetRootFSPortalAttacher(portalManager)
 	go portalManager.Run(ctx)
 	csiServer := ctldportal.NewCSIServer(nodeName, portalManager)
 	go func() {

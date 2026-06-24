@@ -67,6 +67,7 @@ type portalMount struct {
 
 	rootfsBackingPath string
 	rootfsSession     volumefuse.Session
+	rootfsAttached    bool
 
 	volumeID  string
 	teamID    string
@@ -102,6 +103,16 @@ type Config struct {
 type RootFSVolumePortalBindRequest struct {
 	PodUID    string
 	MountPath string
+}
+
+type RootFSPortalSessionRequest struct {
+	PodUID  string
+	Session volumefuse.Session
+}
+
+type RootFSPortalSessionResponse struct {
+	MountPath  string
+	TargetPath string
 }
 
 type RootFSVolumePortalBinder interface {
@@ -314,7 +325,7 @@ func (m *Manager) RootFSPortalPaths(podUID string) []ctldapi.RootFSPortalPath {
 		if pm == nil || pm.podUID != podUID || pm.volumeID != "" {
 			continue
 		}
-		if pm.name == volumeportal.WebhookStatePortalName || pm.mountPath == volumeportal.WebhookStateMountPath {
+		if volumeportal.IsSystemPortal(pm.name, pm.mountPath) {
 			continue
 		}
 		if strings.TrimSpace(pm.mountPath) == "" || strings.TrimSpace(pm.rootfsBackingPath) == "" {
@@ -336,6 +347,9 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 	portalName := volumeportal.NormalizePortalName(req.PortalName, req.MountPath)
 	if portalName == "" {
 		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("portal name or mount path is required")
+	}
+	if volumeportal.IsSystemPortal(portalName, req.MountPath) {
+		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume portal %s is reserved by sandbox0", portalName)
 	}
 	if req.PodUID == "" || req.SandboxVolumeID == "" || req.TeamID == "" {
 		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("pod_uid, sandboxvolume_id and team_id are required")
@@ -553,6 +567,9 @@ func (m *Manager) Unbind(ctx context.Context, req ctldapi.UnbindVolumePortalRequ
 	if req.PodUID == "" || portalName == "" {
 		return ctldapi.UnbindVolumePortalResponse{}, fmt.Errorf("pod_uid and portal identity are required")
 	}
+	if volumeportal.IsSystemPortal(portalName, req.MountPath) {
+		return ctldapi.UnbindVolumePortalResponse{Unbound: true}, nil
+	}
 	m.mu.Lock()
 	pm := m.portals[portalKey(req.PodUID, portalName)]
 	if pm == nil {
@@ -594,6 +611,56 @@ func (m *Manager) CheckPublished(ctx context.Context, req ctldapi.CheckVolumePor
 		Ready:   len(missing) == 0,
 		Missing: missing,
 	}, nil
+}
+
+func (m *Manager) AttachRootFSPortalSession(ctx context.Context, req RootFSPortalSessionRequest) (RootFSPortalSessionResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return RootFSPortalSessionResponse{}, err
+	}
+	if strings.TrimSpace(req.PodUID) == "" {
+		return RootFSPortalSessionResponse{}, fmt.Errorf("pod uid is required")
+	}
+	if req.Session == nil {
+		return RootFSPortalSessionResponse{}, fmt.Errorf("rootfs session is required")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pm := m.portals[portalKey(req.PodUID, volumeportal.RootFSPortalName)]
+	if pm == nil {
+		return RootFSPortalSessionResponse{}, fmt.Errorf("rootfs portal for pod %s is not published", req.PodUID)
+	}
+	if pm.fs == nil {
+		return RootFSPortalSessionResponse{}, fmt.Errorf("rootfs portal for pod %s has no filesystem", req.PodUID)
+	}
+	pm.fs.SetSession(req.Session)
+	pm.rootfsAttached = true
+	return RootFSPortalSessionResponse{
+		MountPath:  pm.mountPath,
+		TargetPath: pm.targetPath,
+	}, nil
+}
+
+func (m *Manager) DetachRootFSPortalSession(ctx context.Context, podUID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	podUID = strings.TrimSpace(podUID)
+	if podUID == "" {
+		return nil
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pm := m.portals[portalKey(podUID, volumeportal.RootFSPortalName)]
+	if pm == nil || !pm.rootfsAttached {
+		return nil
+	}
+	if pm.fs != nil {
+		pm.fs.SetSession(pm.rootfsSession)
+	}
+	pm.rootfsAttached = false
+	return nil
 }
 
 func (m *Manager) AttachOwner(ctx context.Context, req ctldapi.AttachVolumeOwnerRequest) (ctldapi.AttachVolumeOwnerResponse, error) {
@@ -1130,6 +1197,7 @@ func (m *Manager) clearPortalLocked(pm *portalMount) {
 	if pm.fs != nil {
 		pm.fs.SetSession(pm.rootfsSession)
 	}
+	pm.rootfsAttached = false
 	pm.volumeID = ""
 	pm.teamID = ""
 	pm.mountedAt = time.Time{}

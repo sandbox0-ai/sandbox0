@@ -22,6 +22,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -36,7 +37,7 @@ const (
 	defaultContainerdDataRoot     = "/host-var-lib/containerd"
 	defaultContainerdHostDataRoot = "/var/lib/containerd"
 	defaultRootFSCacheDir         = "/var/lib/sandbox0/ctld/rootfs"
-	defaultRootFSUserMountPath    = "/sandbox0/rootfs"
+	defaultRootFSUserMountPath    = volumeportal.RootFSMountPath
 	defaultNamespace              = "k8s.io"
 	defaultDialTimeout            = 10 * time.Second
 )
@@ -73,6 +74,7 @@ type ContainerdRuntime struct {
 	criClient              criRuntimeService
 	criDialContext         func(ctx context.Context, endpoint string) (*grpc.ClientConn, error)
 	containerdClient       containerdClient
+	rootFSPortal           RootFSPortalAttacher
 	s0fsMu                 sync.Mutex
 	s0fsMounts             map[string]*s0fsRootFSMount
 	s0fsMountsByPodUID     map[string]*s0fsRootFSMount
@@ -94,13 +96,21 @@ type s0fsRootFSMount struct {
 	mountPath          string
 	portalMounts       map[string]string
 	runtimeMounts      map[string]string
+	rootFSPortal       RootFSPortalAttacher
+	rootFSPortalAttach bool
 }
 
 type liveRootFSPaths struct {
 	mountedPath        string
 	hostPath           string
+	taskRootPath       string
 	mountNamespacePath string
 	mountInfoPath      string
+}
+
+type RootFSPortalAttacher interface {
+	AttachRootFSPortalSession(ctx context.Context, req portal.RootFSPortalSessionRequest) (portal.RootFSPortalSessionResponse, error)
+	DetachRootFSPortalSession(ctx context.Context, podUID string) error
 }
 
 type containerdClient interface {
@@ -163,6 +173,13 @@ func NewContainerdRuntime(cfg ContainerdRuntimeConfig) *ContainerdRuntime {
 		s0fsMounts:             make(map[string]*s0fsRootFSMount),
 		s0fsMountsByPodUID:     make(map[string]*s0fsRootFSMount),
 	}
+}
+
+func (r *ContainerdRuntime) SetRootFSPortalAttacher(attacher RootFSPortalAttacher) {
+	if r == nil {
+		return
+	}
+	r.rootFSPortal = attacher
 }
 
 func (r *ContainerdRuntime) Inspect(ctx context.Context, target ctldapi.RootFSContainerRef) (ctldapi.RootFSInfo, error) {
@@ -293,6 +310,10 @@ func (r *ContainerdRuntime) AttachS0FSRootFS(ctx context.Context, req S0FSAttach
 		_ = old.close()
 	}
 
+	if strings.EqualFold(strings.TrimSpace(req.Info.Runtime), "gvisor") {
+		return r.attachS0FSRootFSViaPortal(ctx, req, engine, head, targetFilesystemID, teamID, liveRootFS, mountKey)
+	}
+
 	containerMountPath := defaultRootFSUserMountPath
 	hostMountPath := filepath.Join(liveRootFS.mountedPath, strings.TrimPrefix(containerMountPath, "/"))
 	if err := os.MkdirAll(hostMountPath, 0o755); err != nil {
@@ -335,14 +356,64 @@ func (r *ContainerdRuntime) AttachS0FSRootFS(ctx context.Context, req S0FSAttach
 		portalMounts:       make(map[string]string),
 		runtimeMounts:      runtimeMounts,
 	}
-	r.s0fsMu.Lock()
-	r.s0fsMounts[mountKey] = active
-	if strings.TrimSpace(active.podUID) != "" {
-		r.s0fsMountsByPodUID[active.podUID] = active
-	}
-	r.s0fsMu.Unlock()
+	r.storeS0FSMount(active)
 
 	return head, containerMountPath, nil
+}
+
+func (r *ContainerdRuntime) attachS0FSRootFSViaPortal(ctx context.Context, req S0FSAttachRequest, engine *s0fs.Engine, head ctldapi.RootFSHeadDescriptor, volumeID, teamID string, liveRootFS liveRootFSPaths, mountKey string) (ctldapi.RootFSHeadDescriptor, string, error) {
+	if r == nil || r.rootFSPortal == nil {
+		_ = engine.Close()
+		return ctldapi.RootFSHeadDescriptor{}, "", fmt.Errorf("%w: gvisor rootfs attach requires a published rootfs portal", ErrNotFound)
+	}
+	podUID := strings.TrimSpace(req.Info.PodUID)
+	if podUID == "" {
+		_ = engine.Close()
+		return ctldapi.RootFSHeadDescriptor{}, "", fmt.Errorf("%w: pod uid is required for gvisor rootfs attach", ErrBadRequest)
+	}
+	baseRoot := rootFSUnionBaseRoot(liveRootFS)
+	if baseRoot == "" {
+		_ = engine.Close()
+		return ctldapi.RootFSHeadDescriptor{}, "", fmt.Errorf("%w: gvisor rootfs base path is not available", ErrNotFound)
+	}
+	if err := validateRootFSUnionBaseRoot(baseRoot); err != nil {
+		_ = engine.Close()
+		return ctldapi.RootFSHeadDescriptor{}, "", err
+	}
+
+	session := portal.NewS0FSRootFSSession(volumeID, teamID, engine, baseRoot, nil)
+	attached, err := r.rootFSPortal.AttachRootFSPortalSession(ctx, portal.RootFSPortalSessionRequest{
+		PodUID:  podUID,
+		Session: session,
+	})
+	if err != nil {
+		session.Close()
+		_ = engine.Close()
+		return ctldapi.RootFSHeadDescriptor{}, "", err
+	}
+	mountPath := strings.TrimSpace(attached.MountPath)
+	if mountPath == "" {
+		mountPath = defaultRootFSUserMountPath
+	}
+
+	active := &s0fsRootFSMount{
+		key:                mountKey,
+		podUID:             podUID,
+		volumeID:           volumeID,
+		teamID:             teamID,
+		hostMountPath:      attached.TargetPath,
+		containerMountPath: mountPath,
+		engine:             engine,
+		session:            session,
+		mountRootPath:      baseRoot,
+		mountPath:          mountPath,
+		portalMounts:       make(map[string]string),
+		runtimeMounts:      make(map[string]string),
+		rootFSPortal:       r.rootFSPortal,
+		rootFSPortalAttach: true,
+	}
+	r.storeS0FSMount(active)
+	return head, mountPath, nil
 }
 
 func (r *ContainerdRuntime) BindRootFSVolumePortal(ctx context.Context, req portal.RootFSVolumePortalBindRequest) error {
@@ -351,6 +422,9 @@ func (r *ContainerdRuntime) BindRootFSVolumePortal(ctx context.Context, req port
 	}
 	active := r.s0fsMountByPodUID(req.PodUID)
 	if active == nil {
+		return nil
+	}
+	if active.rootFSPortalAttach {
 		return nil
 	}
 	mountPath := cleanRootFSPath(req.MountPath)
@@ -386,6 +460,9 @@ func (r *ContainerdRuntime) UnbindRootFSVolumePortal(ctx context.Context, req po
 	}
 	active := r.s0fsMountByPodUID(req.PodUID)
 	if active == nil {
+		return nil
+	}
+	if active.rootFSPortalAttach {
 		return nil
 	}
 	mountPath := cleanRootFSPath(req.MountPath)
@@ -429,6 +506,9 @@ func (m *s0fsRootFSMount) close() error {
 	if m.server != nil {
 		_ = unmountS0FSRootFS(m.server, m.mountNamespacePath, m.mountRootPath, m.mountPath)
 	}
+	if m.rootFSPortalAttach && m.rootFSPortal != nil {
+		_ = m.rootFSPortal.DetachRootFSPortalSession(context.Background(), m.podUID)
+	}
 	m.mu.Unlock()
 	if m.session != nil {
 		m.session.Close()
@@ -437,6 +517,18 @@ func (m *s0fsRootFSMount) close() error {
 		return m.engine.Close()
 	}
 	return nil
+}
+
+func (r *ContainerdRuntime) storeS0FSMount(active *s0fsRootFSMount) {
+	if r == nil || active == nil {
+		return
+	}
+	r.s0fsMu.Lock()
+	defer r.s0fsMu.Unlock()
+	r.s0fsMounts[active.key] = active
+	if strings.TrimSpace(active.podUID) != "" {
+		r.s0fsMountsByPodUID[active.podUID] = active
+	}
 }
 
 func (r *ContainerdRuntime) takeS0FSMount(info ctldapi.RootFSInfo) *s0fsRootFSMount {
@@ -1009,6 +1101,7 @@ func liveRootFSPathsFromTaskDir(taskDir, hostTaskDir, mountedRootFS string) (liv
 		return liveRootFSPaths{
 			mountedPath:        pidRootFS,
 			hostPath:           hostPath,
+			taskRootPath:       liveRootFSIfExists(mountedRootFS, taskRootExists),
 			mountNamespacePath: nsPath,
 			mountInfoPath:      mountInfoPath,
 		}, true, nil
@@ -1017,10 +1110,43 @@ func liveRootFSPathsFromTaskDir(taskDir, hostTaskDir, mountedRootFS string) (liv
 		return liveRootFSPaths{
 			mountedPath:        mountedRootFS,
 			hostPath:           filepath.Join(hostTaskDir, "rootfs"),
+			taskRootPath:       mountedRootFS,
 			mountNamespacePath: "",
 		}, true, nil
 	}
 	return liveRootFSPaths{}, false, nil
+}
+
+func liveRootFSIfExists(path string, exists bool) string {
+	if !exists {
+		return ""
+	}
+	return path
+}
+
+func rootFSUnionBaseRoot(paths liveRootFSPaths) string {
+	if strings.TrimSpace(paths.taskRootPath) != "" {
+		return strings.TrimSpace(paths.taskRootPath)
+	}
+	return strings.TrimSpace(paths.mountedPath)
+}
+
+func validateRootFSUnionBaseRoot(baseRoot string) error {
+	info, err := os.Stat(baseRoot)
+	if err != nil {
+		return fmt.Errorf("stat gvisor rootfs base path %s: %w", baseRoot, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%w: gvisor rootfs base path %s is not a directory", ErrBadRequest, baseRoot)
+	}
+	entries, err := os.ReadDir(baseRoot)
+	if err != nil {
+		return fmt.Errorf("read gvisor rootfs base path %s: %w", baseRoot, err)
+	}
+	if len(entries) == 0 {
+		return fmt.Errorf("%w: gvisor rootfs base path %s is empty; check containerd state root mount propagation", ErrNotFound, baseRoot)
+	}
+	return nil
 }
 
 func taskProcessRootFSPath(taskDir string) (string, string, string) {

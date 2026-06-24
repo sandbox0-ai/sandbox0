@@ -19,6 +19,9 @@ func ApplySysProcAttr(cmd *exec.Cmd, config ProcessConfig, setpgid bool) {
 	attr.Setpgid = attr.Setpgid || setpgid
 	if rootFS := strings.TrimSpace(config.RootFS); rootFS != "" {
 		attr.Chroot = rootFS
+		if strings.TrimSpace(cmd.Dir) == "" {
+			cmd.Dir = "/"
+		}
 	}
 	cmd.SysProcAttr = attr
 }

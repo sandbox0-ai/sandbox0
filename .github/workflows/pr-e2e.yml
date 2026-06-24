@@ -31,11 +31,15 @@ jobs:
           kind-config: tests/e2e/kind-config.yaml
           kind-cluster-name: ${{ env.KIND_CLUSTER_NAME }}
           cache-key-suffix: pr-amd64
+          sandbox-runtime-class: gvisor
+          sandbox-runtime-handler: gvisor
 
       - name: Run PR E2E
         env:
           E2E_USE_EXISTING_CLUSTER: "true"
           E2E_CLUSTER_NAME: ${{ env.KIND_CLUSTER_NAME }}
+          E2E_SANDBOX_RUNTIME_CLASS_NAME: gvisor
+          E2E_SANDBOX_RUNTIME_HANDLER: gvisor
         run: make test-e2e
 
       - name: Dump cluster state on failure

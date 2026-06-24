@@ -128,6 +128,10 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 		cleanup()
 		return nil, nil, err
 	}
+	if err := EnsureRuntimeClass(testCtx.Context, workingCfg.Kubeconfig, workingCfg.SandboxRuntimeClassName, workingCfg.SandboxRuntimeHandler); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
 
 	for _, spec := range scenario.Secrets {
 		if err := ApplySecret(testCtx.Context, workingCfg.Kubeconfig, spec); err != nil {
@@ -146,6 +150,17 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 		if namespacedManifest != scenario.ManifestPath {
 			manifestPath = namespacedManifest
 			appendCleanup(removeNamespacedManifest)
+		}
+	}
+	if workingCfg.SandboxRuntimeClassName != "" {
+		runtimeManifest, removeRuntimeManifest, err := RewriteManifestSandboxRuntimeClass(manifestPath, workingCfg.SandboxRuntimeClassName)
+		if err != nil {
+			cleanup()
+			return nil, nil, err
+		}
+		if runtimeManifest != manifestPath {
+			manifestPath = runtimeManifest
+			appendCleanup(removeRuntimeManifest)
 		}
 	}
 

@@ -177,7 +177,11 @@ func applyVolumePortals(spec *corev1.PodSpec, volumeMounts []VolumeMountSpec) {
 	if spec == nil {
 		return
 	}
-	mounts := make([]VolumeMountSpec, 0, len(volumeMounts)+1)
+	mounts := make([]VolumeMountSpec, 0, len(volumeMounts)+2)
+	mounts = append(mounts, VolumeMountSpec{
+		Name:      volumeportal.RootFSPortalName,
+		MountPath: volumeportal.RootFSMountPath,
+	})
 	mounts = append(mounts, VolumeMountSpec{
 		Name:      volumeportal.WebhookStatePortalName,
 		MountPath: volumeportal.WebhookStateMountPath,

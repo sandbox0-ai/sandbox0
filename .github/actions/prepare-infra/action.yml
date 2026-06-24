@@ -23,6 +23,14 @@ inputs:
     description: Run aggressive disk cleanup on GitHub-hosted Linux runners.
     required: false
     default: "true"
+  sandbox-runtime-class:
+    description: Optional RuntimeClass name used by sandbox pods in E2E.
+    required: false
+    default: ""
+  sandbox-runtime-handler:
+    description: Optional containerd runtime handler for the sandbox RuntimeClass.
+    required: false
+    default: ""
 runs:
   using: "composite"
   steps:
@@ -43,6 +51,16 @@ runs:
         version: v0.30.0
         config: ${{ inputs.kind-config }}
         cluster_name: ${{ inputs.kind-cluster-name }}
+
+    - name: Install gVisor runtime in Kind
+      if: ${{ inputs.sandbox-runtime-class != '' }}
+      shell: bash
+      run: |
+        handler="${{ inputs.sandbox-runtime-handler }}"
+        if [ -z "${handler}" ]; then
+          handler="${{ inputs.sandbox-runtime-class }}"
+        fi
+        bash tests/e2e/install-gvisor-kind.sh "${{ inputs.kind-cluster-name }}" "${{ inputs.sandbox-runtime-class }}" "${handler}"
 
     - name: Install Helm
       uses: azure/setup-helm@v4

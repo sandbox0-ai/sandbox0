@@ -125,6 +125,7 @@ func reconcileCtldDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) *a
 	if len(ds.Spec.Template.Spec.Containers[0].VolumeMounts) < 6 {
 		t.Fatalf("expected ctld config, csi, kubelet, data, containerd socket, and containerd data mounts, got %#v", ds.Spec.Template.Spec.Containers[0].VolumeMounts)
 	}
+	assertContainerVolumeMountPropagation(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "containerd-sock", "/host-run/containerd", corev1.MountPropagationHostToContainer)
 	assertContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "containerd-data", "/host-var-lib/containerd")
 	driver := &storagev1.CSIDriver{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: "volume.sandbox0.ai"}, driver); err != nil {
@@ -238,6 +239,26 @@ func assertContainerVolumeMount(t *testing.T, mounts []corev1.VolumeMount, name,
 			}
 			return
 		}
+	}
+	t.Fatalf("expected volume mount %q, got %#v", name, mounts)
+}
+
+func assertContainerVolumeMountPropagation(t *testing.T, mounts []corev1.VolumeMount, name, mountPath string, want corev1.MountPropagationMode) {
+	t.Helper()
+	for _, mount := range mounts {
+		if mount.Name != name {
+			continue
+		}
+		if mount.MountPath != mountPath {
+			t.Fatalf("volume mount %q path = %q, want %q", name, mount.MountPath, mountPath)
+		}
+		if mount.MountPropagation == nil {
+			t.Fatalf("volume mount %q propagation is nil, want %s", name, want)
+		}
+		if *mount.MountPropagation != want {
+			t.Fatalf("volume mount %q propagation = %s, want %s", name, *mount.MountPropagation, want)
+		}
+		return
 	}
 	t.Fatalf("expected volume mount %q, got %#v", name, mounts)
 }

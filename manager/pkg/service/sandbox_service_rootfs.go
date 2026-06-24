@@ -13,6 +13,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -246,6 +247,7 @@ func rootFSExcludedPathsForPod(pod *corev1.Pod) []string {
 	for _, mount := range mounts {
 		add(strings.TrimSpace(mount.MountPoint))
 	}
+	add(volumeportal.RootFSMountPath)
 	if pod.Annotations != nil && strings.TrimSpace(pod.Annotations[controller.AnnotationWebhookStateVolumeID]) != "" {
 		add(webhookStateMountPoint)
 	}

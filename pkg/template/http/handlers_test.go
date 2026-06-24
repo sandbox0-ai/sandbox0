@@ -17,6 +17,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 )
 
 type testTemplateStore struct {
@@ -960,6 +961,22 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 				}
 			},
 			wantErr: "spec.pod.emptyDirMounts[0].mountPath uses reserved path \"/config\"",
+		},
+		{
+			name: "reject rootfs emptyDir mount path",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				s.Pod = &v1alpha1.PodSpecOverride{
+					EmptyDirMounts: []v1alpha1.EmptyDirMountSpec{{MountPath: volumeportal.RootFSMountPath}},
+				}
+			},
+			wantErr: "spec.pod.emptyDirMounts[0].mountPath uses reserved path \"/sandbox0/rootfs\"",
+		},
+		{
+			name: "reject rootfs parent volume mount path",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				s.VolumeMounts = []v1alpha1.VolumeMountSpec{{Name: "system-shadow", MountPath: "/sandbox0"}}
+			},
+			wantErr: "spec.volumeMounts[0].mountPath uses a sandbox0 reserved path",
 		},
 		{
 			name: "reject emptyDir mount colliding with volume mount",

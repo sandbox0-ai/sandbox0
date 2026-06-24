@@ -15,6 +15,7 @@ import (
 )
 
 var defaultRootFSSnapshotExcludedPaths = []string{
+	"/.wh..wh..opq",
 	"/procd",
 }
 

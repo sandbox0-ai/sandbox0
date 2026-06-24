@@ -11,6 +11,9 @@ const (
 	WebhookStatePortalName = "sandbox0-webhook-state"
 	WebhookStateMountPath  = "/var/lib/sandbox0/procd"
 
+	RootFSPortalName = "sandbox0-rootfs"
+	RootFSMountPath  = "/sandbox0/rootfs"
+
 	PodInfoName      = "csi.storage.k8s.io/pod.name"
 	PodInfoNamespace = "csi.storage.k8s.io/pod.namespace"
 	PodInfoUID       = "csi.storage.k8s.io/pod.uid"
@@ -28,4 +31,14 @@ func NormalizePortalName(name, mountPath string) string {
 		return ""
 	}
 	return strings.NewReplacer("/", "-", "_", "-", ".", "-").Replace(mountPath)
+}
+
+// IsSystemPortal reports whether a published portal is owned by sandbox0.
+func IsSystemPortal(name, mountPath string) bool {
+	name = strings.TrimSpace(name)
+	mountPath = strings.TrimRight(strings.TrimSpace(mountPath), "/")
+	return name == WebhookStatePortalName ||
+		name == RootFSPortalName ||
+		mountPath == WebhookStateMountPath ||
+		mountPath == RootFSMountPath
 }

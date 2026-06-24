@@ -271,6 +271,9 @@ func normalizeClaimMounts(mounts []ClaimMount) ([]ClaimMount, error) {
 		if cleanMountPoint == webhookStateMountPoint || strings.HasPrefix(cleanMountPoint, webhookStateMountPoint+string(filepath.Separator)) {
 			return nil, fmt.Errorf("%w: mounts[%d].mount_point uses a sandbox0 reserved path", ErrInvalidClaimRequest, i)
 		}
+		if mountPathConflicts(cleanMountPoint, volumeportal.RootFSMountPath) {
+			return nil, fmt.Errorf("%w: mounts[%d].mount_point uses a sandbox0 reserved path", ErrInvalidClaimRequest, i)
+		}
 		if _, exists := seenVolumes[mount.SandboxVolumeID]; exists {
 			return nil, fmt.Errorf("%w: duplicate sandboxvolume_id %q in claim mounts", ErrInvalidClaimRequest, mount.SandboxVolumeID)
 		}
@@ -757,9 +760,24 @@ func declaredVolumeMountsByPath(template *v1alpha1.SandboxTemplate) map[string]v
 		if mountPath == webhookStateMountPoint || strings.HasPrefix(mountPath, webhookStateMountPoint+string(filepath.Separator)) {
 			continue
 		}
+		if mountPathConflicts(mountPath, volumeportal.RootFSMountPath) {
+			continue
+		}
 		out[mountPath] = item
 	}
 	return out
+}
+
+func mountPathConflicts(path, reserved string) bool {
+	path = filepath.Clean(strings.TrimSpace(path))
+	reserved = filepath.Clean(strings.TrimSpace(reserved))
+	if path == "." || reserved == "." {
+		return false
+	}
+	sep := string(filepath.Separator)
+	return path == reserved ||
+		strings.HasPrefix(path, reserved+sep) ||
+		strings.HasPrefix(reserved, path+sep)
 }
 
 func declaredVolumeMountDirs(template *v1alpha1.SandboxTemplate) []string {

@@ -41,6 +41,20 @@ func EnsureNamespace(ctx context.Context, kubeconfig, namespace string) error {
 	return ApplyManifestContent(ctx, kubeconfig, "sandbox0-e2e-namespace-", manifest)
 }
 
+func EnsureRuntimeClass(ctx context.Context, kubeconfig, name, handler string) error {
+	name = strings.TrimSpace(name)
+	handler = strings.TrimSpace(handler)
+	if name == "" {
+		return nil
+	}
+	if handler == "" {
+		handler = name
+	}
+	fmt.Printf("Ensuring RuntimeClass %q with handler %q exists...\n", name, handler)
+	manifest := fmt.Sprintf("apiVersion: node.k8s.io/v1\nkind: RuntimeClass\nmetadata:\n  name: %s\nhandler: %s\n", name, handler)
+	return ApplyManifestContent(ctx, kubeconfig, "sandbox0-e2e-runtimeclass-", manifest)
+}
+
 func ApplySecret(ctx context.Context, kubeconfig string, spec SecretSpec) error {
 	if spec.Name == "" || spec.Namespace == "" {
 		return fmt.Errorf("secret name and namespace are required")

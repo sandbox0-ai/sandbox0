@@ -229,6 +229,14 @@ manager_image: sandbox0/manager:test
 	if mount := findVolumeMount(spec.Containers[0].VolumeMounts, webhookVolume.Name); mount == nil || mount.MountPath != volumeportal.WebhookStateMountPath {
 		t.Fatalf("expected webhook state mount, got %#v", spec.Containers[0].VolumeMounts)
 	}
+
+	rootFSVolume := findCSIVolumeByPortal(spec.Volumes, volumeportal.RootFSPortalName)
+	if rootFSVolume == nil {
+		t.Fatalf("expected rootfs portal volume, got %#v", spec.Volumes)
+	}
+	if mount := findVolumeMount(spec.Containers[0].VolumeMounts, rootFSVolume.Name); mount == nil || mount.MountPath != volumeportal.RootFSMountPath {
+		t.Fatalf("expected rootfs mount, got %#v", spec.Containers[0].VolumeMounts)
+	}
 }
 
 func TestBuildIdlePodSpecPreMountsUserVolumePortals(t *testing.T) {
@@ -257,6 +265,14 @@ manager_image: sandbox0/manager:test
 	}
 	if mount := findVolumeMount(spec.Containers[0].VolumeMounts, webhookVolume.Name); mount == nil || mount.MountPath != volumeportal.WebhookStateMountPath {
 		t.Fatalf("expected webhook state mount, got %#v", spec.Containers[0].VolumeMounts)
+	}
+
+	rootFSVolume := findCSIVolumeByPortal(spec.Volumes, volumeportal.RootFSPortalName)
+	if rootFSVolume == nil {
+		t.Fatalf("expected rootfs portal volume, got %#v", spec.Volumes)
+	}
+	if mount := findVolumeMount(spec.Containers[0].VolumeMounts, rootFSVolume.Name); mount == nil || mount.MountPath != volumeportal.RootFSMountPath {
+		t.Fatalf("expected rootfs mount, got %#v", spec.Containers[0].VolumeMounts)
 	}
 }
 

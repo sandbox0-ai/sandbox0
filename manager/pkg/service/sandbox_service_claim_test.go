@@ -1096,6 +1096,20 @@ func TestValidateClaimMountsRejectsWebhookStatePath(t *testing.T) {
 	}
 }
 
+func TestValidateClaimMountsRejectsRootFSPath(t *testing.T) {
+	req := &ClaimRequest{
+		Mounts: []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: volumeportal.RootFSMountPath}},
+	}
+
+	err := validateClaimMounts(req)
+	if err == nil {
+		t.Fatal("expected reserved mount point validation error")
+	}
+	if !errors.Is(err, ErrInvalidClaimRequest) {
+		t.Fatalf("expected ErrInvalidClaimRequest, got %v", err)
+	}
+}
+
 func TestValidateClaimMountsForTemplateRequiresDeclaredMountPoint(t *testing.T) {
 	req := &ClaimRequest{
 		Mounts: []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/data"}},

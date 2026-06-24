@@ -10,9 +10,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/s0fs"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
+	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -206,6 +209,143 @@ func TestCommitS0FSRootFSUsesActiveMountEngine(t *testing.T) {
 	assert.Equal(t, "child-data", string(payload))
 }
 
+func TestAttachS0FSRootFSGVisorUsesRootFSPortal(t *testing.T) {
+	ctx := context.Background()
+	store := objectstore.NewMemoryStore("rootfs-gvisor-attach-" + t.Name())
+	teamID := "team-1"
+	sourceID := "source"
+	targetID := "target"
+	sourceHead := writeTestRootFSHead(t, ctx, store, teamID, sourceID)
+
+	containerdRoot := t.TempDir()
+	containerdHostRoot := filepath.Join(string(filepath.Separator), "run", "containerd")
+	containerID := "container-1"
+	taskRoot := filepath.Join(containerdRoot, "io.containerd.runtime.v2.task", "k8s.io", containerID)
+	require.NoError(t, os.MkdirAll(filepath.Join(taskRoot, "rootfs", "bin"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(taskRoot, "rootfs", "bin", "sh"), []byte("#!/bin/sh\n"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(taskRoot, "init.pid"), []byte("123456"), 0o644))
+
+	attacher := &recordingRootFSPortalAttacher{
+		response: portal.RootFSPortalSessionResponse{
+			MountPath:  volumeportal.RootFSMountPath,
+			TargetPath: filepath.Join(t.TempDir(), "rootfs-target"),
+		},
+	}
+	runtime := NewContainerdRuntime(ContainerdRuntimeConfig{
+		ContainerdRoot:     containerdRoot,
+		ContainerdHostRoot: containerdHostRoot,
+		RootFSCacheDir:     t.TempDir(),
+	})
+	runtime.SetRootFSPortalAttacher(attacher)
+
+	head, mountPath, err := runtime.AttachS0FSRootFS(ctx, S0FSAttachRequest{
+		Info: ctldapi.RootFSInfo{
+			Runtime:       "gvisor",
+			ContainerID:   containerID,
+			ContainerName: "procd",
+			PodNamespace:  "tpl-default",
+			PodName:       "pod-1",
+			PodUID:        "pod-uid",
+		},
+		Store:        store,
+		FilesystemID: targetID,
+		Head:         sourceHead,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, targetID, head.FilesystemID)
+	assert.Equal(t, volumeportal.RootFSMountPath, mountPath)
+	assert.Equal(t, "pod-uid", attacher.attach.PodUID)
+	assert.NotNil(t, attacher.attach.Session)
+	binNode, err := attacher.attach.Session.Lookup(ctx, &pb.LookupRequest{
+		VolumeId: targetID,
+		Parent:   s0fs.RootInode,
+		Name:     "bin",
+	})
+	require.NoError(t, err)
+	_, err = attacher.attach.Session.Lookup(ctx, &pb.LookupRequest{
+		VolumeId: targetID,
+		Parent:   binNode.Inode,
+		Name:     "sh",
+	})
+	require.NoError(t, err)
+
+	active := runtime.s0fsMountByPodUID("pod-uid")
+	require.NotNil(t, active)
+	assert.True(t, active.rootFSPortalAttach)
+	assert.Equal(t, filepath.Join(taskRoot, "rootfs"), active.mountRootPath)
+	assert.Equal(t, attacher.response.TargetPath, active.hostMountPath)
+}
+
+func TestAttachS0FSRootFSGVisorRejectsEmptyBaseRoot(t *testing.T) {
+	ctx := context.Background()
+	store := objectstore.NewMemoryStore("rootfs-gvisor-empty-base-" + t.Name())
+	teamID := "team-1"
+	sourceID := "source"
+	targetID := "target"
+	sourceHead := writeTestRootFSHead(t, ctx, store, teamID, sourceID)
+
+	containerdRoot := t.TempDir()
+	containerdHostRoot := filepath.Join(string(filepath.Separator), "run", "containerd")
+	containerID := "container-1"
+	taskRoot := filepath.Join(containerdRoot, "io.containerd.runtime.v2.task", "k8s.io", containerID)
+	require.NoError(t, os.MkdirAll(filepath.Join(taskRoot, "rootfs"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(taskRoot, "init.pid"), []byte("123456"), 0o644))
+
+	attacher := &recordingRootFSPortalAttacher{
+		response: portal.RootFSPortalSessionResponse{
+			MountPath:  volumeportal.RootFSMountPath,
+			TargetPath: filepath.Join(t.TempDir(), "rootfs-target"),
+		},
+	}
+	runtime := NewContainerdRuntime(ContainerdRuntimeConfig{
+		ContainerdRoot:     containerdRoot,
+		ContainerdHostRoot: containerdHostRoot,
+		RootFSCacheDir:     t.TempDir(),
+	})
+	runtime.SetRootFSPortalAttacher(attacher)
+
+	_, _, err := runtime.AttachS0FSRootFS(ctx, S0FSAttachRequest{
+		Info: ctldapi.RootFSInfo{
+			Runtime:       "gvisor",
+			ContainerID:   containerID,
+			ContainerName: "procd",
+			PodNamespace:  "tpl-default",
+			PodName:       "pod-1",
+			PodUID:        "pod-uid",
+		},
+		Store:        store,
+		FilesystemID: targetID,
+		Head:         sourceHead,
+	})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrNotFound))
+	assert.Contains(t, err.Error(), "is empty")
+	assert.Nil(t, attacher.attach.Session)
+	assert.Nil(t, runtime.s0fsMountByPodUID("pod-uid"))
+}
+
+func writeTestRootFSHead(t *testing.T, ctx context.Context, store objectstore.Store, teamID, sourceID string) ctldapi.RootFSHeadDescriptor {
+	t.Helper()
+
+	source, err := s0fs.Open(ctx, s0fs.Config{
+		VolumeID:             sourceID,
+		WALPath:              filepath.Join(t.TempDir(), "source.wal"),
+		ObjectStore:          rootFSS0FSObjectStore(store, teamID, sourceID),
+		ObjectStoreForVolume: rootFSS0FSObjectStoreResolver(store, teamID),
+	})
+	require.NoError(t, err)
+	node, err := source.CreateFile(s0fs.RootInode, "restored.txt", 0o644)
+	require.NoError(t, err)
+	_, err = source.Write(node.Inode, 0, []byte("restored"))
+	require.NoError(t, err)
+	sourceManifest, err := source.EnsureMaterialized(ctx)
+	require.NoError(t, err)
+	require.NoError(t, source.Close())
+	sourceHead, err := rootFSS0FSHeadFromManifest(teamID, sourceID, sourceManifest)
+	require.NoError(t, err)
+	return sourceHead
+}
+
 func TestTakeS0FSMountFallsBackToPodUID(t *testing.T) {
 	runtime := NewContainerdRuntime(ContainerdRuntimeConfig{})
 	active := &s0fsRootFSMount{
@@ -223,6 +363,22 @@ func TestTakeS0FSMountFallsBackToPodUID(t *testing.T) {
 	require.Same(t, active, got)
 	assert.Empty(t, runtime.s0fsMounts)
 	assert.Empty(t, runtime.s0fsMountsByPodUID)
+}
+
+type recordingRootFSPortalAttacher struct {
+	response portal.RootFSPortalSessionResponse
+	attach   portal.RootFSPortalSessionRequest
+	detach   string
+}
+
+func (a *recordingRootFSPortalAttacher) AttachRootFSPortalSession(_ context.Context, req portal.RootFSPortalSessionRequest) (portal.RootFSPortalSessionResponse, error) {
+	a.attach = req
+	return a.response, nil
+}
+
+func (a *recordingRootFSPortalAttacher) DetachRootFSPortalSession(_ context.Context, podUID string) error {
+	a.detach = podUID
+	return nil
 }
 
 func TestS0FSRootFSVolumePortalPaths(t *testing.T) {
@@ -475,6 +631,7 @@ func TestRootFSImportExcludedPathsIncludesProcessMounts(t *testing.T) {
 	got := rootFSImportExcludedPaths([]string{"/workspace/data", "/proc"}, mountInfo)
 
 	assert.ElementsMatch(t, []string{
+		"/.wh..wh..opq",
 		"/procd",
 		"/workspace/data",
 		"/proc",

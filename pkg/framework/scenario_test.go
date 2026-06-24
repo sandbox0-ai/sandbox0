@@ -86,3 +86,38 @@ spec:
 		t.Fatalf("rewritten manifest still contains source namespace:\n%s", got)
 	}
 }
+
+func TestRewriteManifestSandboxRuntimeClass(t *testing.T) {
+	manifest := `apiVersion: infra.sandbox0.ai/v1alpha1
+kind: Sandbox0Infra
+metadata:
+  name: fullmode
+  namespace: sandbox0-system
+spec:
+  services:
+    manager:
+      enabled: true
+`
+	manifestPath := filepath.Join(t.TempDir(), "fullmode.yaml")
+	if err := os.WriteFile(manifestPath, []byte(manifest), 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	rewrittenPath, cleanup, err := RewriteManifestSandboxRuntimeClass(manifestPath, "gvisor")
+	if err != nil {
+		t.Fatalf("RewriteManifestSandboxRuntimeClass returned error: %v", err)
+	}
+	defer cleanup()
+	if rewrittenPath == manifestPath {
+		t.Fatal("RewriteManifestSandboxRuntimeClass returned original path, want rewritten manifest")
+	}
+
+	content, err := os.ReadFile(rewrittenPath)
+	if err != nil {
+		t.Fatalf("read rewritten manifest: %v", err)
+	}
+	got := string(content)
+	if !strings.Contains(got, "sandboxRuntimeClassName: gvisor") {
+		t.Fatalf("rewritten manifest missing sandbox runtime class:\n%s", got)
+	}
+}

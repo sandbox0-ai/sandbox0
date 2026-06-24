@@ -10,6 +10,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 )
 
@@ -185,6 +186,64 @@ func TestCheckPublishedReportsMissingPortals(t *testing.T) {
 	}
 	if len(resp.Missing) != 1 || resp.Missing[0] != "cache" {
 		t.Fatalf("CheckPublished() missing = %v, want [cache]", resp.Missing)
+	}
+}
+
+func TestRootFSPortalPathsSkipsSystemPortals(t *testing.T) {
+	mgr := &Manager{portals: make(map[string]*portalMount)}
+	mgr.portals[portalKey("pod-uid", "workspace")] = &portalMount{
+		podUID:            "pod-uid",
+		name:              "workspace",
+		mountPath:         "/workspace",
+		rootfsBackingPath: "/tmp/workspace",
+	}
+	mgr.portals[portalKey("pod-uid", volumeportal.RootFSPortalName)] = &portalMount{
+		podUID:            "pod-uid",
+		name:              volumeportal.RootFSPortalName,
+		mountPath:         volumeportal.RootFSMountPath,
+		rootfsBackingPath: "/tmp/rootfs",
+	}
+
+	got := mgr.RootFSPortalPaths("pod-uid")
+
+	if len(got) != 1 || got[0].PortalName != "workspace" {
+		t.Fatalf("RootFSPortalPaths() = %+v, want only workspace", got)
+	}
+}
+
+func TestAttachRootFSPortalSessionSwitchesPublishedPortal(t *testing.T) {
+	rootfsSession := unboundSession{}
+	pm := &portalMount{
+		podUID:        "pod-uid",
+		name:          volumeportal.RootFSPortalName,
+		mountPath:     volumeportal.RootFSMountPath,
+		targetPath:    "/var/lib/kubelet/pods/pod-uid/rootfs",
+		rootfsSession: rootfsSession,
+		fs:            volumefuse.New(volumeportal.RootFSPortalName, time.Second, rootfsSession),
+	}
+	mgr := &Manager{portals: map[string]*portalMount{
+		portalKey("pod-uid", volumeportal.RootFSPortalName): pm,
+	}}
+
+	resp, err := mgr.AttachRootFSPortalSession(context.Background(), RootFSPortalSessionRequest{
+		PodUID:  "pod-uid",
+		Session: unboundSession{},
+	})
+	if err != nil {
+		t.Fatalf("AttachRootFSPortalSession() error = %v", err)
+	}
+	if resp.MountPath != volumeportal.RootFSMountPath || resp.TargetPath != pm.targetPath {
+		t.Fatalf("AttachRootFSPortalSession() response = %+v", resp)
+	}
+	if !pm.rootfsAttached {
+		t.Fatal("rootfsAttached = false, want true")
+	}
+
+	if err := mgr.DetachRootFSPortalSession(context.Background(), "pod-uid"); err != nil {
+		t.Fatalf("DetachRootFSPortalSession() error = %v", err)
+	}
+	if pm.rootfsAttached {
+		t.Fatal("rootfsAttached = true after detach")
 	}
 }
 

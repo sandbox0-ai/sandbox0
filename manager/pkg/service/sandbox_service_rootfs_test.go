@@ -46,7 +46,7 @@ func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 			PodUID:        "pod-uid",
 			ContainerName: "procd",
 		}, req.Target)
-		assert.ElementsMatch(t, []string{"/workspace/data", volumeportal.WebhookStateMountPath}, req.ExcludedPaths)
+		assert.ElementsMatch(t, []string{"/workspace/data", volumeportal.RootFSMountPath, volumeportal.WebhookStateMountPath}, req.ExcludedPaths)
 		saveCalled = true
 		_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{
 			Info: ctldapi.RootFSInfo{
@@ -247,7 +247,7 @@ func TestFinishRestoredSandboxRuntimeAppliesRootFSBeforeProcdInitialization(t *t
 		assert.Equal(t, ctldapi.RootFSStorageEngineS0FS, req.Head.Engine)
 		assert.Equal(t, "fs-1", req.Head.VolumeID)
 		assert.Equal(t, "manifests/00000000000000000007.json", req.Head.ManifestKey)
-		assert.ElementsMatch(t, []string{"/workspace/data"}, req.ExcludedPaths)
+		assert.ElementsMatch(t, []string{"/workspace/data", volumeportal.RootFSMountPath}, req.ExcludedPaths)
 		calls = append(calls, "apply")
 		_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
 	}))
@@ -597,7 +597,7 @@ func TestRootFSExcludedPathsForPodUsesBoundClaimMountPaths(t *testing.T) {
 
 	got := rootFSExcludedPathsForPod(pod)
 
-	assert.ElementsMatch(t, []string{"/workspace/data", "/workspace/database", volumeportal.WebhookStateMountPath}, got)
+	assert.ElementsMatch(t, []string{"/workspace/data", "/workspace/database", volumeportal.RootFSMountPath, volumeportal.WebhookStateMountPath}, got)
 }
 
 func TestRootFSExcludedPathsForPodIgnoresUnboundVolumePortals(t *testing.T) {
@@ -606,7 +606,7 @@ func TestRootFSExcludedPathsForPodIgnoresUnboundVolumePortals(t *testing.T) {
 
 	got := rootFSExcludedPathsForPod(pod)
 
-	assert.Empty(t, got)
+	assert.Equal(t, []string{volumeportal.RootFSMountPath}, got)
 }
 
 func rootFSTestPod(name, sandboxID, teamID string) *corev1.Pod {

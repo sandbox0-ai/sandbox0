@@ -210,6 +210,9 @@ func validateVolumeMounts(mounts []v1alpha1.VolumeMountSpec) error {
 		if cleanMountPath == volumeportal.WebhookStateMountPath || strings.HasPrefix(cleanMountPath, volumeportal.WebhookStateMountPath+string(filepath.Separator)) {
 			return fmt.Errorf("%s.mountPath uses a sandbox0 reserved path", field)
 		}
+		if mountPathConflicts(cleanMountPath, volumeportal.RootFSMountPath) {
+			return fmt.Errorf("%s.mountPath uses a sandbox0 reserved path", field)
+		}
 		if _, ok := seenPaths[cleanMountPath]; ok {
 			return fmt.Errorf("%s.mountPath %q is duplicated", field, cleanMountPath)
 		}
@@ -274,7 +277,22 @@ func validateReservedMountPath(path, field string) error {
 			return fmt.Errorf("%s uses reserved path %q", field, prefix)
 		}
 	}
+	if mountPathConflicts(path, volumeportal.RootFSMountPath) {
+		return fmt.Errorf("%s uses reserved path %q", field, volumeportal.RootFSMountPath)
+	}
 	return nil
+}
+
+func mountPathConflicts(path, reserved string) bool {
+	path = filepath.Clean(strings.TrimSpace(path))
+	reserved = filepath.Clean(strings.TrimSpace(reserved))
+	if path == "." || reserved == "." {
+		return false
+	}
+	sep := string(filepath.Separator)
+	return path == reserved ||
+		strings.HasPrefix(path, reserved+sep) ||
+		strings.HasPrefix(reserved, path+sep)
 }
 
 func validateTemplateResourceRatio(spec v1alpha1.SandboxTemplateSpec, subject string) error {

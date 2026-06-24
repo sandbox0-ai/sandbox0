@@ -27,6 +27,9 @@ type Config struct {
 	OperatorImagePullPolicy string
 
 	InfraNamespace string
+
+	SandboxRuntimeClassName string
+	SandboxRuntimeHandler   string
 }
 
 // LoadConfig reads E2E configuration from environment variables.
@@ -58,6 +61,12 @@ func LoadConfig() (Config, error) {
 		OperatorImagePullPolicy: envString("E2E_OPERATOR_IMAGE_PULL_POLICY", "IfNotPresent"),
 
 		InfraNamespace: envString("E2E_INFRA_NAMESPACE", "sandbox0-system"),
+
+		SandboxRuntimeClassName: envString("E2E_SANDBOX_RUNTIME_CLASS_NAME", ""),
+		SandboxRuntimeHandler:   envString("E2E_SANDBOX_RUNTIME_HANDLER", ""),
+	}
+	if cfg.SandboxRuntimeHandler == "" {
+		cfg.SandboxRuntimeHandler = cfg.SandboxRuntimeClassName
 	}
 
 	if cfg.UseExistingCluster {

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -99,6 +100,7 @@ type s0fsRootFSMount struct {
 	mountRootPath      string
 	mountPath          string
 	portalMounts       map[string]string
+	runtimeMounts      map[string]string
 }
 
 type liveRootFSPaths struct {
@@ -462,9 +464,17 @@ func (r *ContainerdRuntime) AttachS0FSRootFS(ctx context.Context, req S0FSAttach
 		return ctldapi.RootFSHeadDescriptor{}, "", fmt.Errorf("create s0fs rootfs mountpoint: %w", err)
 	}
 
+	runtimeMountPaths := rootFSRuntimeBindMountPaths(rootFSMountInfoExcludedPaths(liveRootFS.mountInfoPath), containerMountPath)
 	session := portal.NewS0FSRootFSSession(targetFilesystemID, teamID, engine, liveRootFS.mountedPath, nil)
 	server, err := mountS0FSRootFS(session, containerMountPath, liveRootFS.mountNamespacePath, liveRootFS.mountedPath)
 	if err != nil {
+		session.Close()
+		_ = engine.Close()
+		return ctldapi.RootFSHeadDescriptor{}, "", err
+	}
+	runtimeMounts, err := bindRuntimeRootFSMounts(liveRootFS.mountNamespacePath, liveRootFS.mountedPath, containerMountPath, runtimeMountPaths)
+	if err != nil {
+		_ = unmountS0FSRootFS(server, liveRootFS.mountNamespacePath, liveRootFS.mountedPath, containerMountPath)
 		session.Close()
 		_ = engine.Close()
 		return ctldapi.RootFSHeadDescriptor{}, "", err
@@ -484,6 +494,7 @@ func (r *ContainerdRuntime) AttachS0FSRootFS(ctx context.Context, req S0FSAttach
 		mountRootPath:      liveRootFS.mountedPath,
 		mountPath:          containerMountPath,
 		portalMounts:       make(map[string]string),
+		runtimeMounts:      runtimeMounts,
 	}
 	r.s0fsMu.Lock()
 	r.s0fsMounts[mountKey] = active
@@ -574,6 +585,11 @@ func (m *s0fsRootFSMount) close() error {
 	for mountPath, targetPath := range m.portalMounts {
 		_ = unmountAbsolutePathInMountNamespace(m.mountNamespacePath, targetPath)
 		delete(m.portalMounts, mountPath)
+	}
+	for _, pair := range sortedBoundMountTargets(m.runtimeMounts) {
+		mountPath, targetPath := pair[0], pair[1]
+		_ = unmountAbsolutePathInMountNamespace(m.mountNamespacePath, targetPath)
+		delete(m.runtimeMounts, mountPath)
 	}
 	if m.server != nil {
 		_ = unmountS0FSRootFS(m.server, m.mountNamespacePath, m.mountRootPath, m.mountPath)
@@ -705,6 +721,139 @@ func rootFSNestedMountPath(rootFSMountPath, mountPath string) string {
 		return rootFSMountPath
 	}
 	return filepath.Join(rootFSMountPath, strings.TrimPrefix(mountPath, "/"))
+}
+
+func bindRuntimeRootFSMounts(namespacePath, mountRootPath, rootFSMountPath string, mountPaths []string) (map[string]string, error) {
+	bound := make(map[string]string)
+	for _, mountPath := range mountPaths {
+		sourcePath, targetPath := rootFSRuntimeBindPaths(mountRootPath, rootFSMountPath, mountPath)
+		if sourcePath == "" || targetPath == "" || sourcePath == targetPath {
+			continue
+		}
+		if err := prepareRuntimeRootFSBindTarget(sourcePath, targetPath); err != nil {
+			unmountRuntimeRootFSMounts(namespacePath, bound)
+			return nil, err
+		}
+		if err := bindMountPathInMountNamespace(namespacePath, sourcePath, targetPath); err != nil {
+			unmountRuntimeRootFSMounts(namespacePath, bound)
+			return nil, err
+		}
+		bound[mountPath] = targetPath
+	}
+	return bound, nil
+}
+
+func unmountRuntimeRootFSMounts(namespacePath string, mounts map[string]string) {
+	for _, pair := range sortedBoundMountTargets(mounts) {
+		mountPath, targetPath := pair[0], pair[1]
+		_ = unmountAbsolutePathInMountNamespace(namespacePath, targetPath)
+		delete(mounts, mountPath)
+	}
+}
+
+func rootFSRuntimeBindPaths(mountRootPath, rootFSMountPath, mountPath string) (string, string) {
+	mountRootPath = strings.TrimSpace(mountRootPath)
+	if mountRootPath == "" {
+		return "", ""
+	}
+	mountPath = cleanRootFSPath(mountPath)
+	rootFSMountPath = cleanRootFSPath(rootFSMountPath)
+	if mountPath == "/" || mountPath == rootFSMountPath || strings.HasPrefix(mountPath, rootFSMountPath+"/") {
+		return "", ""
+	}
+	sourcePath := filepath.Join(mountRootPath, strings.TrimPrefix(mountPath, "/"))
+	targetPath := filepath.Join(mountRootPath, strings.TrimPrefix(rootFSNestedMountPath(rootFSMountPath, mountPath), "/"))
+	return sourcePath, targetPath
+}
+
+func rootFSRuntimeBindMountPaths(paths []string, rootFSMountPath string) []string {
+	rootFSMountPath = cleanRootFSPath(rootFSMountPath)
+	candidates := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, value := range paths {
+		clean := cleanRootFSPath(value)
+		if clean == "/" || clean == rootFSMountPath || strings.HasPrefix(clean, rootFSMountPath+"/") {
+			continue
+		}
+		if _, ok := seen[clean]; ok {
+			continue
+		}
+		seen[clean] = struct{}{}
+		candidates = append(candidates, clean)
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		leftDepth := rootFSPathDepth(candidates[i])
+		rightDepth := rootFSPathDepth(candidates[j])
+		if leftDepth != rightDepth {
+			return leftDepth < rightDepth
+		}
+		return candidates[i] < candidates[j]
+	})
+	selected := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if rootFSRuntimeBindCovered(candidate, selected) {
+			continue
+		}
+		selected = append(selected, candidate)
+	}
+	return selected
+}
+
+func rootFSRuntimeBindCovered(candidate string, selected []string) bool {
+	for _, parent := range selected {
+		if candidate == parent || strings.HasPrefix(candidate, parent+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func rootFSPathDepth(value string) int {
+	value = strings.Trim(strings.TrimSpace(value), "/")
+	if value == "" {
+		return 0
+	}
+	return strings.Count(value, "/") + 1
+}
+
+func prepareRuntimeRootFSBindTarget(sourcePath, targetPath string) error {
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		return fmt.Errorf("stat runtime rootfs bind source %s: %w", sourcePath, err)
+	}
+	if info.IsDir() {
+		if err := os.MkdirAll(targetPath, 0o755); err != nil {
+			return fmt.Errorf("create runtime rootfs bind target %s: %w", targetPath, err)
+		}
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		return fmt.Errorf("create runtime rootfs bind target parent %s: %w", filepath.Dir(targetPath), err)
+	}
+	f, err := os.OpenFile(targetPath, os.O_CREATE|os.O_RDONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("create runtime rootfs bind target %s: %w", targetPath, err)
+	}
+	return f.Close()
+}
+
+func sortedBoundMountTargets(mounts map[string]string) [][2]string {
+	if len(mounts) == 0 {
+		return nil
+	}
+	pairs := make([][2]string, 0, len(mounts))
+	for mountPath, targetPath := range mounts {
+		pairs = append(pairs, [2]string{mountPath, targetPath})
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		leftDepth := rootFSPathDepth(pairs[i][0])
+		rightDepth := rootFSPathDepth(pairs[j][0])
+		if leftDepth != rightDepth {
+			return leftDepth > rightDepth
+		}
+		return pairs[i][0] > pairs[j][0]
+	})
+	return pairs
 }
 
 func rootFSS0FSHeadFromManifest(teamID, volumeID string, manifest *s0fs.Manifest) (ctldapi.RootFSHeadDescriptor, error) {

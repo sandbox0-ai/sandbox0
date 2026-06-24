@@ -219,6 +219,61 @@ func TestS0FSRootFSVolumePortalPaths(t *testing.T) {
 	assert.Equal(t, "/sandbox0/rootfs/workspace/data", rootFSNestedMountPath("/sandbox0/rootfs", "/workspace/data"))
 }
 
+func TestRootFSRuntimeBindMountPathsCollapseRecursiveMounts(t *testing.T) {
+	got := rootFSRuntimeBindMountPaths([]string{
+		"/proc",
+		"/proc/bus",
+		"/dev",
+		"/dev/pts",
+		"/dev/shm",
+		"/sys",
+		"/sys/fs/cgroup",
+		"/etc/hosts",
+		"/etc/resolv.conf",
+		"/workspace/data",
+		"/sandbox0/rootfs",
+		"/sandbox0/rootfs/dev",
+		"/sandbox0/rootfs/proc",
+		"/dev",
+	}, "/sandbox0/rootfs")
+
+	assert.Equal(t, []string{
+		"/dev",
+		"/proc",
+		"/sys",
+		"/etc/hosts",
+		"/etc/resolv.conf",
+		"/workspace/data",
+	}, got)
+}
+
+func TestRootFSRuntimeBindPathsTargetNestedRootFS(t *testing.T) {
+	source, target := rootFSRuntimeBindPaths("/proc/123/root", "/sandbox0/rootfs", "/dev")
+
+	assert.Equal(t, "/proc/123/root/dev", source)
+	assert.Equal(t, "/proc/123/root/sandbox0/rootfs/dev", target)
+}
+
+func TestPrepareRuntimeRootFSBindTargetCreatesDirectoryAndFileTargets(t *testing.T) {
+	root := t.TempDir()
+	sourceDir := filepath.Join(root, "source-dir")
+	sourceFile := filepath.Join(root, "source-file")
+	targetDir := filepath.Join(root, "target-dir")
+	targetFile := filepath.Join(root, "nested", "target-file")
+	require.NoError(t, os.Mkdir(sourceDir, 0o755))
+	require.NoError(t, os.WriteFile(sourceFile, []byte("source"), 0o644))
+
+	require.NoError(t, prepareRuntimeRootFSBindTarget(sourceDir, targetDir))
+	require.NoError(t, prepareRuntimeRootFSBindTarget(sourceFile, targetFile))
+
+	dirInfo, err := os.Stat(targetDir)
+	require.NoError(t, err)
+	assert.True(t, dirInfo.IsDir())
+	fileInfo, err := os.Stat(targetFile)
+	require.NoError(t, err)
+	assert.False(t, fileInfo.IsDir())
+}
+
 func TestFindLiveRootFSByTaskAnnotations(t *testing.T) {
 	taskRoot := t.TempDir()
 	hostTaskRoot := filepath.Join(string(filepath.Separator), "run", "containerd", "io.containerd.runtime.v2.task", "k8s.io")

@@ -172,7 +172,7 @@ func (e *Engine) Lookup(parent uint64, name string) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	return cloneNode(e.nodes[inode]), nil
+	return e.cloneNodeWithUsageLocked(inode), nil
 }
 
 func (e *Engine) GetAttr(inode uint64) (*Node, error) {
@@ -181,11 +181,47 @@ func (e *Engine) GetAttr(inode uint64) (*Node, error) {
 	if err := e.checkOpen(); err != nil {
 		return nil, err
 	}
-	node, ok := e.nodes[inode]
-	if !ok {
+	if _, ok := e.nodes[inode]; !ok {
 		return nil, ErrNotFound
 	}
-	return cloneNode(node), nil
+	return e.cloneNodeWithUsageLocked(inode), nil
+}
+
+func (e *Engine) cloneNodeWithUsageLocked(inode uint64) *Node {
+	node := cloneNode(e.nodes[inode])
+	if node == nil {
+		return nil
+	}
+	node.Blocks = e.allocatedBlocksLocked(inode, node)
+	node.BlocksValid = true
+	return node
+}
+
+func (e *Engine) allocatedBlocksLocked(inode uint64, node *Node) uint64 {
+	if node == nil || node.Type != TypeFile {
+		return 0
+	}
+	if payload, ok := e.data[inode]; ok {
+		return blocksForBytes(uint64(len(payload)))
+	}
+	if extents := e.coldFiles[inode]; len(extents) > 0 {
+		var bytes uint64
+		for _, extent := range extents {
+			if extent.SegmentID == "" {
+				continue
+			}
+			bytes += extent.Length
+		}
+		return blocksForBytes(bytes)
+	}
+	return 0
+}
+
+func blocksForBytes(size uint64) uint64 {
+	if size == 0 {
+		return 0
+	}
+	return (size + 511) / 512
 }
 
 func (e *Engine) Mkdir(parent uint64, name string, mode uint32) (*Node, error) {
@@ -293,7 +329,7 @@ func (e *Engine) Link(inode uint64, newParent uint64, newName string) (*Node, er
 	if err := e.appendAndApplyLocked(record, estimatedWALRecordBytes(record)); err != nil {
 		return nil, err
 	}
-	return cloneNode(e.nodes[inode]), nil
+	return e.cloneNodeWithUsageLocked(inode), nil
 }
 
 func (e *Engine) Write(inode uint64, offset uint64, payload []byte) (int, error) {
@@ -855,7 +891,7 @@ func (e *Engine) create(parent uint64, name string, typ FileType, mode uint32, t
 	if err := e.appendAndApplyLocked(record, estimatedWALRecordBytes(record)); err != nil {
 		return nil, err
 	}
-	return cloneNode(e.nodes[record.Inode]), nil
+	return e.cloneNodeWithUsageLocked(record.Inode), nil
 }
 
 func (e *Engine) newRecord(op string) walRecord {

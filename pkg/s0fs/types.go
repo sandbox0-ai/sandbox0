@@ -62,19 +62,21 @@ type Segment struct {
 }
 
 type Node struct {
-	Inode  uint64
-	Type   FileType
-	Mode   uint32
-	UID    uint32
-	GID    uint32
-	Nlink  uint32
-	Size   uint64
-	Target string
-	Rdev   uint64
-	Xattrs map[string][]byte `json:",omitempty"`
-	Atime  time.Time
-	Mtime  time.Time
-	Ctime  time.Time
+	Inode       uint64
+	Type        FileType
+	Mode        uint32
+	UID         uint32
+	GID         uint32
+	Nlink       uint32
+	Size        uint64
+	Blocks      uint64 `json:"-"`
+	BlocksValid bool   `json:"-"`
+	Target      string
+	Rdev        uint64
+	Xattrs      map[string][]byte `json:",omitempty"`
+	Atime       time.Time
+	Mtime       time.Time
+	Ctime       time.Time
 }
 
 type DirEntry struct {

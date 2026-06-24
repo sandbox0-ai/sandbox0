@@ -1316,6 +1316,10 @@ func s0fsAttr(node *s0fs.Node) *pb.GetAttrResponse {
 	if node.Type == s0fs.TypeSymlink {
 		size = uint64(len(node.Target))
 	}
+	blocks := (size + 511) / 512
+	if node.BlocksValid {
+		blocks = node.Blocks
+	}
 	return &pb.GetAttrResponse{
 		Ino:       node.Inode,
 		Mode:      mode,
@@ -1324,7 +1328,7 @@ func s0fsAttr(node *s0fs.Node) *pb.GetAttrResponse {
 		Gid:       node.GID,
 		Rdev:      node.Rdev,
 		Size:      size,
-		Blocks:    (size + 511) / 512,
+		Blocks:    blocks,
 		AtimeSec:  node.Atime.Unix(),
 		AtimeNsec: int64(node.Atime.Nanosecond()),
 		MtimeSec:  node.Mtime.Unix(),

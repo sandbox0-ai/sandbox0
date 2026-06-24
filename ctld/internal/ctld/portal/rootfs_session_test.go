@@ -190,6 +190,10 @@ func TestRootFSUnionSessionSparseCreateTruncateMaterializesWithoutHoleBytes(t *t
 		Data:     []byte("tail"),
 	})
 	require.NoError(t, err)
+	attr, err := session.GetAttr(ctx, &pb.GetAttrRequest{Inode: created.Inode})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(sparseSize), attr.Size)
+	assert.Equal(t, uint64(1), attr.Blocks)
 	_, err = session.Release(ctx, &pb.ReleaseRequest{Inode: created.Inode, HandleId: created.HandleId})
 	require.NoError(t, err)
 

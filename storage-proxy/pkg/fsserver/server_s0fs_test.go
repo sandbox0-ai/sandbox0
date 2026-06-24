@@ -12,6 +12,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/router"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
@@ -181,6 +182,84 @@ func TestS0FSOpenTruncatesExistingFile(t *testing.T) {
 	}
 	if attrResp.Size != 2 {
 		t.Fatalf("GetAttr() size = %d, want 2", attrResp.Size)
+	}
+}
+
+func TestS0FSAttrReportsSparseAllocatedBlocks(t *testing.T) {
+	t.Parallel()
+
+	engine, err := s0fs.Open(context.Background(), s0fs.Config{
+		VolumeID:    "vol-sparse",
+		WALPath:     filepath.Join(t.TempDir(), "engine.wal"),
+		ObjectStore: objectstore.NewMemoryStore(t.Name()),
+	})
+	if err != nil {
+		t.Fatalf("open s0fs engine: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = engine.Close()
+	})
+	volCtx := &volume.VolumeContext{
+		VolumeID:  "vol-sparse",
+		TeamID:    "team-a",
+		Backend:   volume.BackendS0FS,
+		S0FS:      engine,
+		MountedAt: time.Now(),
+		RootInode: 1,
+		RootPath:  "/",
+	}
+	server := newTestFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-sparse": volCtx,
+		},
+	}, nil, nil)
+	ctx := authContext("team-a", "")
+
+	createResp, err := server.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-sparse",
+		Parent:   1,
+		Name:     "sparse.img",
+		Mode:     0o644,
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	const sparseSize = 512 << 20
+	if _, err := server.SetAttr(ctx, &pb.SetAttrRequest{
+		VolumeId: "vol-sparse",
+		Inode:    createResp.Inode,
+		HandleId: createResp.HandleId,
+		Valid:    uint32(fsmeta.SetAttrSize),
+		Attr:     &pb.GetAttrResponse{Size: sparseSize},
+	}); err != nil {
+		t.Fatalf("SetAttr(size) error = %v", err)
+	}
+	if _, err := server.Write(ctx, &pb.WriteRequest{
+		VolumeId: "vol-sparse",
+		Inode:    createResp.Inode,
+		HandleId: createResp.HandleId,
+		Offset:   sparseSize - 4,
+		Data:     []byte("tail"),
+	}); err != nil {
+		t.Fatalf("Write(tail) error = %v", err)
+	}
+
+	attrResp, err := server.GetAttr(ctx, &pb.GetAttrRequest{VolumeId: "vol-sparse", Inode: createResp.Inode})
+	if err != nil {
+		t.Fatalf("GetAttr() error = %v", err)
+	}
+	if got, want := attrResp.Size, uint64(sparseSize); got != want {
+		t.Fatalf("GetAttr() size = %d, want %d", got, want)
+	}
+	if got, want := attrResp.Blocks, uint64(1); got != want {
+		t.Fatalf("GetAttr() blocks = %d, want %d", got, want)
+	}
+	lookupResp, err := server.Lookup(ctx, &pb.LookupRequest{VolumeId: "vol-sparse", Parent: 1, Name: "sparse.img"})
+	if err != nil {
+		t.Fatalf("Lookup() error = %v", err)
+	}
+	if got, want := lookupResp.Attr.GetBlocks(), uint64(1); got != want {
+		t.Fatalf("Lookup() attr blocks = %d, want %d", got, want)
 	}
 }
 

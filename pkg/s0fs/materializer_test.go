@@ -1492,6 +1492,16 @@ func TestSparseTruncateMaterializeAndExportDoNotExpandHoleBytes(t *testing.T) {
 	if _, err := engine.Write(node.Inode, sparseSize-4, []byte("tail")); err != nil {
 		t.Fatalf("Write(tail) error = %v", err)
 	}
+	attr, err := engine.GetAttr(node.Inode)
+	if err != nil {
+		t.Fatalf("GetAttr() error = %v", err)
+	}
+	if !attr.BlocksValid {
+		t.Fatal("GetAttr() BlocksValid = false, want true")
+	}
+	if got, want := attr.Blocks, uint64(1); got != want {
+		t.Fatalf("GetAttr() Blocks = %d, want %d", got, want)
+	}
 
 	head, err := engine.EnsureMaterialized(ctx)
 	if err != nil {
@@ -1528,6 +1538,13 @@ func TestSparseTruncateMaterializeAndExportDoNotExpandHoleBytes(t *testing.T) {
 	}
 	if data := exported.Data[node.Inode]; len(data) != 0 {
 		t.Fatalf("ExportState() expanded sparse file to %d inline bytes", len(data))
+	}
+	attr, err = engine.GetAttr(node.Inode)
+	if err != nil {
+		t.Fatalf("GetAttr(after export) error = %v", err)
+	}
+	if got, want := attr.Blocks, uint64(1); got != want {
+		t.Fatalf("GetAttr(after export) Blocks = %d, want %d", got, want)
 	}
 }
 

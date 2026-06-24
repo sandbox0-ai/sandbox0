@@ -497,25 +497,24 @@ func main() {
 	if !cfg.RootFSMaintenance.Disabled {
 		rootFSObjectStore, err := buildRootFSObjectStore(cfg)
 		if err != nil {
-			logger.Warn("Rootfs maintenance disabled; object store is not configured", zap.Error(err))
+			logger.Warn("Rootfs s0fs object maintenance disabled; object store is not configured", zap.Error(err))
+			rootFSObjectStore = nil
 		} else if rootFSObjectStore == nil {
-			logger.Warn("Rootfs maintenance disabled; object store is not configured")
-		} else {
-			rootFSMaintenanceController := service.NewRootFSMaintenanceController(
-				sandboxStore,
-				rootFSObjectStore,
-				rootFSMaintenanceControllerConfig(cfg),
-				logger,
-				managerMetrics,
-			)
-			rootFSMaintenanceController.SetObjectInspector(rootFSObjectStoreInspector{store: rootFSObjectStore})
-			rootFSMaintenanceController.SetStorageMeteringRecorder(meteringRepo)
-			go func() {
-				if err := rootFSMaintenanceController.Run(ctx); err != nil && err != context.Canceled {
-					logger.Error("Rootfs maintenance controller failed", zap.Error(err))
-				}
-			}()
+			logger.Warn("Rootfs s0fs object maintenance disabled; object store is not configured")
 		}
+		rootFSMaintenanceController := service.NewRootFSMaintenanceController(
+			sandboxStore,
+			rootFSObjectStore,
+			rootFSMaintenanceControllerConfig(cfg),
+			logger,
+			managerMetrics,
+		)
+		rootFSMaintenanceController.SetStorageMeteringRecorder(meteringRepo)
+		go func() {
+			if err := rootFSMaintenanceController.Run(ctx); err != nil && err != context.Canceled {
+				logger.Error("Rootfs maintenance controller failed", zap.Error(err))
+			}
+		}()
 	} else {
 		logger.Info("Rootfs maintenance controller disabled by config")
 	}
@@ -632,22 +631,6 @@ func buildRootFSObjectStore(cfg *config.ManagerConfig) (objectstore.Store, error
 	return store, nil
 }
 
-type rootFSObjectStoreInspector struct {
-	store objectstore.Store
-}
-
-func (i rootFSObjectStoreInspector) StatRootFSObject(key string) (service.RootFSObjectInfo, error) {
-	info, err := i.store.Head(key)
-	if err != nil {
-		return service.RootFSObjectInfo{}, err
-	}
-	return service.RootFSObjectInfo{
-		Key:      info.Key,
-		Size:     info.Size,
-		Modified: info.Modified,
-	}, nil
-}
-
 func rootFSMaintenanceControllerConfig(cfg *config.ManagerConfig) service.RootFSMaintenanceControllerConfig {
 	if cfg == nil {
 		return service.RootFSMaintenanceControllerConfig{}
@@ -657,12 +640,6 @@ func rootFSMaintenanceControllerConfig(cfg *config.ManagerConfig) service.RootFS
 		BatchSize:        cfg.RootFSMaintenance.BatchSize,
 		MaxBatchesPerRun: cfg.RootFSMaintenance.MaxBatchesPerRun,
 		Workers:          cfg.RootFSMaintenance.Workers,
-		DeleteOptions: service.DeletePendingRootFSObjectsOptions{
-			ClaimTTL:    cfg.RootFSMaintenance.ObjectDeleteClaimTTL.Duration,
-			BackoffBase: cfg.RootFSMaintenance.ObjectDeleteBackoffBase.Duration,
-			BackoffMax:  cfg.RootFSMaintenance.ObjectDeleteBackoffMax.Duration,
-			MaxAttempts: cfg.RootFSMaintenance.ObjectDeleteMaxAttempts,
-		},
 	}
 }
 

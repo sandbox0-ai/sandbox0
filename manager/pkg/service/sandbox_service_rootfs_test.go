@@ -120,8 +120,7 @@ func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 	assert.Equal(t, "runc", state.Runtime)
 	assert.Equal(t, "sha256:base", state.BaseImageDigest)
 	assert.Equal(t, []string{"parent-1", "parent-0"}, state.SnapshotParentChain)
-	assert.Equal(t, "s0fs:manifests/00000000000000000003.json", state.DiffDigest)
-	assert.Equal(t, "manifests/00000000000000000003.json", state.DiffObjectKey)
+	assert.Equal(t, "manifests/00000000000000000003.json", state.S0FSManifestKey)
 	assert.NotEmpty(t, state.LayerID)
 	assert.Equal(t, SandboxStatusPaused, store.records["sandbox-1"].Status)
 }
@@ -173,8 +172,6 @@ func TestPauseSandboxRuntimeSavesChildLayerFromParentHead(t *testing.T) {
 				TeamID:            "team-1",
 				RuntimeGeneration: 3,
 				StorageEngine:     ctldapi.RootFSStorageEngineS0FS,
-				DiffDigest:        "s0fs:manifests/00000000000000000003.json",
-				DiffObjectKey:     "manifests/00000000000000000003.json",
 				S0FSVolumeID:      "sandbox-1",
 				S0FSManifestKey:   "manifests/00000000000000000003.json",
 				S0FSManifestSeq:   3,
@@ -199,7 +196,7 @@ func TestPauseSandboxRuntimeSavesChildLayerFromParentHead(t *testing.T) {
 	require.NotNil(t, state)
 	assert.NotEmpty(t, state.LayerID)
 	assert.Equal(t, "layer-parent", state.ParentLayerID)
-	assert.Equal(t, "s0fs:manifests/00000000000000000004.json", state.DiffDigest)
+	assert.Equal(t, "manifests/00000000000000000004.json", state.S0FSManifestKey)
 }
 
 func TestGetSandboxReportsPausingRecordWhileRuntimePodStillRunning(t *testing.T) {
@@ -570,7 +567,7 @@ func TestRestoreFailureCleanupCanSkipRootFSSave(t *testing.T) {
 	require.NoError(t, svc.pauseSandboxRuntime(context.Background(), "sandbox-1", false))
 
 	assert.False(t, saveCalled.Load())
-	assert.Equal(t, originalState.DiffObjectKey, store.rootFSStates["sandbox-1"].DiffObjectKey)
+	assert.Equal(t, originalState.S0FSManifestKey, store.rootFSStates["sandbox-1"].S0FSManifestKey)
 	assert.Equal(t, SandboxStatusPaused, store.records["sandbox-1"].Status)
 }
 
@@ -709,9 +706,6 @@ func rootFSTestState() *SandboxRootFSState {
 		SnapshotParent:      "parent-1",
 		SnapshotParentChain: []string{"parent-1", "parent-0"},
 		StorageEngine:       ctldapi.RootFSStorageEngineS0FS,
-		DiffDigest:          "s0fs:manifests/00000000000000000007.json",
-		DiffMediaType:       "application/vnd.sandbox0.rootfs.s0fs.v1+json",
-		DiffObjectKey:       "manifests/00000000000000000007.json",
 		S0FSVolumeID:        "fs-1",
 		S0FSManifestKey:     "manifests/00000000000000000007.json",
 		S0FSManifestSeq:     7,

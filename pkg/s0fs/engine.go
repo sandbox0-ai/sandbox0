@@ -802,13 +802,7 @@ func (e *Engine) RestoreSnapshot(snapshotID string) error {
 	if err != nil {
 		return err
 	}
-	minNextSeq := e.nextSeq + 1
-	if committedNext := e.lastCommittedManifest + 2; committedNext > minNextSeq {
-		minNextSeq = committedNext
-	}
-	if state.NextSeq < minNextSeq {
-		state.NextSeq = minNextSeq
-	}
+	state = e.replacementStateLocked(state)
 	if err := e.reserveLocalDiskLocked(estimatedStateBytes(state)); err != nil {
 		return err
 	}
@@ -830,10 +824,14 @@ func (e *Engine) ReplaceState(state *SnapshotState) error {
 	if err := e.checkOpen(); err != nil {
 		return err
 	}
+	if state == nil {
+		return fmt.Errorf("%w: replacement state is required", ErrInvalidInput)
+	}
+	state = e.replacementStateLocked(state)
 	if err := e.reserveLocalDiskLocked(estimatedStateBytes(state)); err != nil {
 		return err
 	}
-	e.replaceStateLocked(cloneState(state))
+	e.replaceStateLocked(state)
 	if err := e.persistCurrentStateLockedWithReserve(false); err != nil {
 		return err
 	}
@@ -843,6 +841,19 @@ func (e *Engine) ReplaceState(state *SnapshotState) error {
 	e.refreshLocalDiskGuardLocked()
 	e.markDirtyLocked()
 	return nil
+}
+
+func (e *Engine) replacementStateLocked(state *SnapshotState) *SnapshotState {
+	state = cloneState(state)
+	normalizeState(state)
+	minNextSeq := e.nextSeq + 1
+	if committedNext := e.lastCommittedManifest + 2; committedNext > minNextSeq {
+		minNextSeq = committedNext
+	}
+	if state.NextSeq < minNextSeq {
+		state.NextSeq = minNextSeq
+	}
+	return state
 }
 
 func (e *Engine) DeleteSnapshot(snapshotID string) error {

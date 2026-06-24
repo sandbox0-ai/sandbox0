@@ -7,25 +7,24 @@ import (
 
 // ManagerMetrics holds Prometheus metrics for the manager service.
 type ManagerMetrics struct {
-	TemplatesTotal                 prometheus.Gauge
-	IdlePodsTotal                  *prometheus.GaugeVec
-	ActivePodsTotal                *prometheus.GaugeVec
-	SandboxClaimsTotal             *prometheus.CounterVec
-	SandboxClaimDuration           *prometheus.HistogramVec
-	SandboxClaimPhaseDuration      *prometheus.HistogramVec
-	PodsCleanedTotal               *prometheus.CounterVec
-	ReconcileTotal                 *prometheus.CounterVec
-	ReconcileDuration              *prometheus.HistogramVec
-	MeteringEventsTotal            *prometheus.CounterVec
-	MeteringWindowsTotal           *prometheus.CounterVec
-	MeteringErrorsTotal            *prometheus.CounterVec
-	RootFSMaintenanceRunsTotal     *prometheus.CounterVec
-	RootFSMaintenanceDuration      *prometheus.HistogramVec
-	RootFSGCLayersTotal            prometheus.Counter
-	RootFSObjectDeletesTotal       *prometheus.CounterVec
-	RootFSObjectDeletionQueueDepth *prometheus.GaugeVec
-	RootFSStorageBytes             prometheus.Gauge
-	RootFSStorageObjects           prometheus.Gauge
+	TemplatesTotal               prometheus.Gauge
+	IdlePodsTotal                *prometheus.GaugeVec
+	ActivePodsTotal              *prometheus.GaugeVec
+	SandboxClaimsTotal           *prometheus.CounterVec
+	SandboxClaimDuration         *prometheus.HistogramVec
+	SandboxClaimPhaseDuration    *prometheus.HistogramVec
+	PodsCleanedTotal             *prometheus.CounterVec
+	ReconcileTotal               *prometheus.CounterVec
+	ReconcileDuration            *prometheus.HistogramVec
+	MeteringEventsTotal          *prometheus.CounterVec
+	MeteringWindowsTotal         *prometheus.CounterVec
+	MeteringErrorsTotal          *prometheus.CounterVec
+	RootFSMaintenanceRunsTotal   *prometheus.CounterVec
+	RootFSMaintenanceDuration    *prometheus.HistogramVec
+	RootFSGCLayersTotal          prometheus.Counter
+	RootFSS0FSObjectDeletesTotal *prometheus.CounterVec
+	RootFSStorageBytes           prometheus.Gauge
+	RootFSStorageObjects         prometheus.Gauge
 }
 
 // NewManager registers and returns manager metrics.
@@ -102,14 +101,10 @@ func NewManager(registry prometheus.Registerer) *ManagerMetrics {
 			Name: "manager_rootfs_gc_layers_total",
 			Help: "Total number of rootfs layer metadata records garbage-collected",
 		}),
-		RootFSObjectDeletesTotal: factory.NewCounterVec(prometheus.CounterOpts{
-			Name: "manager_rootfs_object_deletes_total",
-			Help: "Total number of rootfs object deletion attempts by status",
+		RootFSS0FSObjectDeletesTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "manager_rootfs_s0fs_object_deletes_total",
+			Help: "Total number of rootfs s0fs object deletions by status",
 		}, []string{"status"}),
-		RootFSObjectDeletionQueueDepth: factory.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "manager_rootfs_object_deletion_queue_depth",
-			Help: "Rootfs object deletion queue depth by state",
-		}, []string{"state"}),
 		RootFSStorageBytes: factory.NewGauge(prometheus.GaugeOpts{
 			Name: "manager_rootfs_storage_bytes",
 			Help: "Current reachable persistent rootfs COW object bytes",

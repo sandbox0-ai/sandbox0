@@ -3,6 +3,7 @@ package s0fs
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -91,6 +92,55 @@ func TestImportHostTreePreservesBaseColdExtents(t *testing.T) {
 	}
 	if state.Segments["seg-1"] == nil {
 		t.Fatalf("segment seg-1 was not copied")
+	}
+}
+
+func TestMergeHostTreeReplacesTargetSubtree(t *testing.T) {
+	baseRoot := t.TempDir()
+	requireNoError(t, os.MkdirAll(filepath.Join(baseRoot, "workspace", "portal"), 0o755))
+	requireNoError(t, os.WriteFile(filepath.Join(baseRoot, "workspace", "portal", "old.txt"), []byte("old"), 0o644))
+	requireNoError(t, os.WriteFile(filepath.Join(baseRoot, "root.txt"), []byte("root"), 0o644))
+	state, err := ImportHostTree(context.Background(), baseRoot, HostImportOptions{})
+	requireNoError(t, err)
+
+	backing := t.TempDir()
+	requireNoError(t, os.WriteFile(filepath.Join(backing, "new.txt"), []byte("new"), 0o644))
+
+	merged, err := MergeHostTree(context.Background(), state, backing, "/workspace/portal", HostImportOptions{})
+	requireNoError(t, err)
+
+	if _, err := merged.Lookup(requireStatePath(t, merged, "/workspace/portal"), "old.txt"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("old portal file lookup error = %v, want ErrNotFound", err)
+	}
+	newInode := requireStatePath(t, merged, "/workspace/portal/new.txt")
+	payload, err := merged.Read(newInode, 0, 3)
+	requireNoError(t, err)
+	if string(payload) != "new" {
+		t.Fatalf("new portal payload = %q, want new", payload)
+	}
+	rootInode := requireStatePath(t, merged, "/root.txt")
+	rootPayload, err := merged.Read(rootInode, 0, 4)
+	requireNoError(t, err)
+	if string(rootPayload) != "root" {
+		t.Fatalf("root payload = %q, want root", rootPayload)
+	}
+}
+
+func TestMergeHostTreeCreatesMissingParentsAndPreservesHardlinks(t *testing.T) {
+	backing := t.TempDir()
+	requireNoError(t, os.WriteFile(filepath.Join(backing, "a.txt"), []byte("linked"), 0o644))
+	requireNoError(t, os.Link(filepath.Join(backing, "a.txt"), filepath.Join(backing, "b.txt")))
+
+	merged, err := MergeHostTree(context.Background(), nil, backing, "/var/lib/portal", HostImportOptions{})
+	requireNoError(t, err)
+
+	a := requireStatePath(t, merged, "/var/lib/portal/a.txt")
+	b := requireStatePath(t, merged, "/var/lib/portal/b.txt")
+	if a != b {
+		t.Fatalf("hardlink inodes = %d and %d, want same inode", a, b)
+	}
+	if got := merged.Nodes[a].Nlink; got != 2 {
+		t.Fatalf("hardlink nlink = %d, want 2", got)
 	}
 }
 

@@ -67,10 +67,6 @@ type SandboxRootFSState struct {
 	SnapshotParent      string
 	SnapshotParentChain []string
 	StorageEngine       string
-	DiffDigest          string
-	DiffMediaType       string
-	DiffSize            int64
-	DiffObjectKey       string
 	S0FSVolumeID        string
 	S0FSManifestKey     string
 	S0FSManifestSeq     uint64
@@ -96,11 +92,6 @@ type SandboxRootFSLayer struct {
 	SnapshotParent      string
 	SnapshotParentChain []string
 	StorageEngine       string
-	DiffDigest          string
-	DiffID              string
-	DiffMediaType       string
-	DiffSize            int64
-	DiffObjectKey       string
 	S0FSVolumeID        string
 	S0FSManifestKey     string
 	S0FSManifestSeq     uint64
@@ -358,12 +349,6 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 	`, sandboxID); err != nil {
 		return fmt.Errorf("delete sandbox rootfs binding: %w", err)
 	}
-	if _, err := s.pool.Exec(ctx, `DELETE FROM manager.sandbox_rootfs_states WHERE sandbox_id = $1`, sandboxID); err != nil {
-		return fmt.Errorf("delete sandbox rootfs states: %w", err)
-	}
-	if _, err := s.pool.Exec(ctx, `DELETE FROM manager.sandbox_rootfs_heads WHERE sandbox_id = $1`, sandboxID); err != nil {
-		return fmt.Errorf("delete sandbox rootfs head: %w", err)
-	}
 	return nil
 }
 
@@ -565,24 +550,6 @@ func saveRootFSLayer(ctx context.Context, exec rootFSStateExecutor, state *Sandb
 	if storageEngine != ctldapi.RootFSStorageEngineS0FS {
 		return fmt.Errorf("unsupported rootfs storage_engine %q", state.StorageEngine)
 	}
-	if state.DiffMediaType == "" && storageEngine == ctldapi.RootFSStorageEngineS0FS {
-		state.DiffMediaType = "application/vnd.sandbox0.rootfs.s0fs.v1+json"
-	}
-	if state.DiffDigest == "" && state.S0FSManifestKey != "" {
-		state.DiffDigest = "s0fs:" + state.S0FSManifestKey
-	}
-	if state.DiffObjectKey == "" && state.S0FSManifestKey != "" {
-		state.DiffObjectKey = state.S0FSManifestKey
-	}
-	if state.DiffSize < 0 {
-		state.DiffSize = 0
-	}
-	if state.DiffDigest == "" {
-		state.DiffDigest = "s0fs:" + state.LayerID
-	}
-	if state.DiffObjectKey == "" {
-		state.DiffObjectKey = state.LayerID
-	}
 	parentLayerID := nullableText(state.ParentLayerID)
 	parentChainJSON, err := json.Marshal(state.SnapshotParentChain)
 	if err != nil {
@@ -599,16 +566,14 @@ func saveRootFSLayerRow(ctx context.Context, exec rootFSStateExecutor, state *Sa
 		INSERT INTO manager.rootfs_layers (
 			layer_id, parent_layer_id, source_sandbox_id, team_id, runtime_generation,
 			runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,
-			snapshot_parent, snapshot_parent_chain, diff_digest, diff_id, diff_media_type,
-			diff_size, diff_object_key, storage_engine, s0fs_volume_id, s0fs_manifest_key,
+			snapshot_parent, snapshot_parent_chain, storage_engine, s0fs_volume_id, s0fs_manifest_key,
 			s0fs_manifest_seq, s0fs_checkpoint_seq, created_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, COALESCE($23, NOW()))
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, COALESCE($18, NOW()))
 		ON CONFLICT (layer_id) DO NOTHING
 	`, state.LayerID, parentLayerID, state.SandboxID, state.TeamID, state.RuntimeGeneration,
 		state.Runtime, state.RuntimeHandler, state.BaseImageRef, state.BaseImageDigest, state.Snapshotter,
-		state.SnapshotParent, parentChainJSON, state.DiffDigest, "", state.DiffMediaType,
-		state.DiffSize, state.DiffObjectKey, storageEngine, state.S0FSVolumeID, state.S0FSManifestKey,
+		state.SnapshotParent, parentChainJSON, storageEngine, state.S0FSVolumeID, state.S0FSManifestKey,
 		int64(state.S0FSManifestSeq), int64(state.S0FSCheckpointSeq), nullableTime(state.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("save rootfs layer: %w", err)
@@ -710,23 +675,13 @@ func rootFSLayerChainSQL() string {
 			JOIN manager.rootfs_filesystems f ON f.filesystem_id = b.filesystem_id
 			WHERE b.sandbox_id = $1
 				AND f.head_layer_id IS NOT NULL
-			UNION ALL
-			SELECT h.head_layer_id
-			FROM manager.sandbox_rootfs_heads h
-			WHERE h.sandbox_id = $1
-				AND NOT EXISTS (
-					SELECT 1
-					FROM manager.sandbox_rootfs_bindings b
-					WHERE b.sandbox_id = $1
-				)
 		),
 		chain AS (
 			SELECT
 				l.layer_id, l.parent_layer_id, l.source_sandbox_id, l.team_id,
 				l.runtime_generation, l.runtime, l.runtime_handler, l.base_image_ref,
 				l.base_image_digest, l.snapshotter, l.snapshot_parent,
-				l.snapshot_parent_chain, l.storage_engine, l.diff_digest, l.diff_id, l.diff_media_type,
-				l.diff_size, l.diff_object_key, l.s0fs_volume_id, l.s0fs_manifest_key,
+				l.snapshot_parent_chain, l.storage_engine, l.s0fs_volume_id, l.s0fs_manifest_key,
 				l.s0fs_manifest_seq, l.s0fs_checkpoint_seq, l.created_at, 0 AS depth
 			FROM head h
 			JOIN manager.rootfs_layers l ON l.layer_id = h.head_layer_id
@@ -735,16 +690,14 @@ func rootFSLayerChainSQL() string {
 				p.layer_id, p.parent_layer_id, p.source_sandbox_id, p.team_id,
 				p.runtime_generation, p.runtime, p.runtime_handler, p.base_image_ref,
 				p.base_image_digest, p.snapshotter, p.snapshot_parent,
-				p.snapshot_parent_chain, p.storage_engine, p.diff_digest, p.diff_id, p.diff_media_type,
-				p.diff_size, p.diff_object_key, p.s0fs_volume_id, p.s0fs_manifest_key,
+				p.snapshot_parent_chain, p.storage_engine, p.s0fs_volume_id, p.s0fs_manifest_key,
 				p.s0fs_manifest_seq, p.s0fs_checkpoint_seq, p.created_at, c.depth + 1 AS depth
 			FROM manager.rootfs_layers p
 			JOIN chain c ON p.layer_id = c.parent_layer_id
 		)
 		SELECT layer_id, parent_layer_id, source_sandbox_id, team_id, runtime_generation,
 			runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,
-			snapshot_parent, snapshot_parent_chain, storage_engine, diff_digest, diff_id,
-			diff_media_type, diff_size, diff_object_key, s0fs_volume_id, s0fs_manifest_key,
+			snapshot_parent, snapshot_parent_chain, storage_engine, s0fs_volume_id, s0fs_manifest_key,
 			s0fs_manifest_seq, s0fs_checkpoint_seq, created_at
 		FROM chain
 		ORDER BY depth DESC`
@@ -759,8 +712,7 @@ func scanRootFSLayerRows(rows pgx.Rows) (*SandboxRootFSLayer, error) {
 	if err := rows.Scan(
 		&layer.ID, &parentLayerID, &layer.SourceSandboxID, &layer.TeamID, &layer.RuntimeGeneration,
 		&layer.Runtime, &layer.RuntimeHandler, &layer.BaseImageRef, &layer.BaseImageDigest, &layer.Snapshotter,
-		&layer.SnapshotParent, &parentChainJSON, &layer.StorageEngine, &layer.DiffDigest, &layer.DiffID,
-		&layer.DiffMediaType, &layer.DiffSize, &layer.DiffObjectKey, &layer.S0FSVolumeID,
+		&layer.SnapshotParent, &parentChainJSON, &layer.StorageEngine, &layer.S0FSVolumeID,
 		&layer.S0FSManifestKey, &s0fsManifestSeq, &s0fsCheckpointSeq, &layer.CreatedAt,
 	); err != nil {
 		return nil, err
@@ -801,10 +753,6 @@ func rootFSStateFromLayerChain(sandboxID string, chain []*SandboxRootFSLayer) *S
 		SnapshotParent:      head.SnapshotParent,
 		SnapshotParentChain: append([]string(nil), head.SnapshotParentChain...),
 		StorageEngine:       rootFSStorageEngine(head.StorageEngine),
-		DiffDigest:          head.DiffDigest,
-		DiffMediaType:       head.DiffMediaType,
-		DiffSize:            head.DiffSize,
-		DiffObjectKey:       head.DiffObjectKey,
 		S0FSVolumeID:        head.S0FSVolumeID,
 		S0FSManifestKey:     head.S0FSManifestKey,
 		S0FSManifestSeq:     head.S0FSManifestSeq,

@@ -164,6 +164,12 @@ func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *
 	if resp == nil || !resp.Applied {
 		return fmt.Errorf("apply sandbox rootfs checkpoint: ctld did not report applied")
 	}
+	if len(resp.Warnings) > 0 && s.logger != nil {
+		s.logger.Warn("Rootfs checkpoint applied with compatibility warnings",
+			zap.String("sandboxID", state.SandboxID),
+			zap.Strings("warnings", resp.Warnings),
+		)
+	}
 	if strings.TrimSpace(resp.MountPath) != "" {
 		if err := s.setSandboxRootFSMountPathAnnotation(ctx, pod, strings.TrimSpace(resp.MountPath)); err != nil {
 			return err
@@ -401,9 +407,6 @@ func rootFSStateFromSaveResponse(sandboxID, teamID string, generation int64, res
 		SnapshotParentChain: append([]string(nil),
 			resp.Info.SnapshotParentChain...),
 		StorageEngine:     ctldapi.RootFSStorageEngineS0FS,
-		DiffDigest:        "s0fs:" + resp.Head.ManifestKey,
-		DiffMediaType:     "application/vnd.sandbox0.rootfs.s0fs.v1+json",
-		DiffObjectKey:     resp.Head.ManifestKey,
 		S0FSVolumeID:      resp.Head.VolumeID,
 		S0FSManifestKey:   resp.Head.ManifestKey,
 		S0FSManifestSeq:   resp.Head.ManifestSeq,

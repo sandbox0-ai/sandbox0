@@ -4,12 +4,17 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/s0fs"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -31,8 +36,6 @@ func TestRootFSFilesystemPersistenceIntegration(t *testing.T) {
 	require.Len(t, latest.LayerChain, 2)
 	assert.Equal(t, "layer-root", latest.LayerChain[0].ID)
 	assert.Equal(t, "layer-child", latest.LayerChain[1].ID)
-	assert.Equal(t, int64(0), rootFSTestCountRows(t, pool, "sandbox_rootfs_states"))
-	assert.Equal(t, int64(0), rootFSTestCountRows(t, pool, "sandbox_rootfs_heads"))
 
 	err = store.SaveRootFSState(ctx, rootFSTestStoreState("sandbox-source", "team-1", "layer-stale", "layer-root", 3, "stale"))
 	require.ErrorIs(t, err, ErrRootFSHeadConflict)
@@ -101,14 +104,12 @@ func TestRootFSFilesystemPersistenceIntegration(t *testing.T) {
 	assert.Equal(t, "sandbox-fork", restored.ID)
 	assert.Equal(t, "layer-child", restored.HeadLayerID)
 
-	deleter := &recordingRootFSObjectDeleter{}
-	gcResult, err := store.GarbageCollectRootFSFilesystem(ctx, deleter, "team-1", 10)
+	gcResult, err := store.GarbageCollectRootFSFilesystem(ctx, nil, "team-1", 10)
 	require.NoError(t, err)
 	require.Len(t, gcResult.Layers, 1)
 	assert.Equal(t, "layer-fork", gcResult.Layers[0].ID)
-	assert.Empty(t, gcResult.DeletedObjectKeys)
-	assert.Empty(t, deleter.keys)
-	assert.Equal(t, int64(0), rootFSTestCountRows(t, pool, "rootfs_object_deletions"))
+	assert.Empty(t, gcResult.DeletedS0FSSegments)
+	assert.Empty(t, gcResult.DeletedS0FSManifests)
 
 	require.NoError(t, store.MarkSandboxDeleted(ctx, "sandbox-source", time.Now().UTC()))
 	sourceFilesystem, err := store.GetRootFSFilesystem(ctx, "sandbox-source")
@@ -124,91 +125,6 @@ func TestRootFSFilesystemPersistenceIntegration(t *testing.T) {
 		)
 	`).Scan(&sourceFilesystemStillExists))
 	assert.True(t, sourceFilesystemStillExists, "source filesystem is retained by snapshot and fork references")
-}
-
-func TestRootFSObjectDeletionQueueClaimsBacksOffAndDeadLetters(t *testing.T) {
-	ctx := context.Background()
-	pool := newSandboxStoreIntegrationPool(t)
-	store := NewPGSandboxStore(pool)
-
-	_, err := pool.Exec(ctx, `
-		INSERT INTO manager.rootfs_object_deletions (object_key, team_id, next_attempt_at)
-		VALUES
-			('rootfs/a.tar', 'team-1', NOW()),
-			('rootfs/b.tar', 'team-1', NOW())
-	`)
-	require.NoError(t, err)
-
-	claimed, err := store.claimPendingRootFSObjectDeletions(ctx, DeletePendingRootFSObjectsOptions{
-		Limit:     1,
-		ClaimedBy: "worker-a",
-		ClaimTTL:  time.Minute,
-	})
-	require.NoError(t, err)
-	require.Len(t, claimed, 1)
-
-	claimedAgain, err := store.claimPendingRootFSObjectDeletions(ctx, DeletePendingRootFSObjectsOptions{
-		Limit:     2,
-		ClaimedBy: "worker-b",
-		ClaimTTL:  time.Minute,
-	})
-	require.NoError(t, err)
-	require.Len(t, claimedAgain, 1)
-	assert.NotEqual(t, claimed[0].ObjectKey, claimedAgain[0].ObjectKey)
-
-	_, err = pool.Exec(ctx, `
-		UPDATE manager.rootfs_object_deletions
-		SET claimed_by = '',
-			claimed_until = NOW() - INTERVAL '1 second'
-	`)
-	require.NoError(t, err)
-
-	deleteErr := assert.AnError
-	deleter := &recordingRootFSObjectDeleter{failKey: "rootfs/a.tar", err: deleteErr}
-	deleted, err := store.DeletePendingRootFSObjectsWithOptions(ctx, deleter, DeletePendingRootFSObjectsOptions{
-		Limit:           2,
-		ClaimedBy:       "worker-c",
-		ClaimTTL:        time.Minute,
-		BackoffBase:     time.Minute,
-		BackoffMax:      time.Minute,
-		ContinueOnError: true,
-	})
-	require.ErrorIs(t, err, deleteErr)
-	assert.Equal(t, []string{"rootfs/b.tar"}, deleted)
-	assert.ElementsMatch(t, []string{"rootfs/a.tar", "rootfs/b.tar"}, deleter.keys)
-
-	var attempts int
-	var nextAttemptAt time.Time
-	require.NoError(t, pool.QueryRow(ctx, `
-		SELECT attempts, next_attempt_at
-		FROM manager.rootfs_object_deletions
-		WHERE object_key = 'rootfs/a.tar'
-	`).Scan(&attempts, &nextAttemptAt))
-	assert.Equal(t, 1, attempts)
-	assert.True(t, nextAttemptAt.After(time.Now().Add(30*time.Second)))
-	assert.Equal(t, int64(1), rootFSTestCountRows(t, pool, "rootfs_object_deletions"))
-
-	_, err = pool.Exec(ctx, `
-		UPDATE manager.rootfs_object_deletions
-		SET next_attempt_at = NOW()
-		WHERE object_key = 'rootfs/a.tar'
-	`)
-	require.NoError(t, err)
-	_, err = store.DeletePendingRootFSObjectsWithOptions(ctx, &recordingRootFSObjectDeleter{failKey: "rootfs/a.tar", err: deleteErr}, DeletePendingRootFSObjectsOptions{
-		Limit:       1,
-		ClaimedBy:   "worker-d",
-		ClaimTTL:    time.Minute,
-		BackoffBase: time.Minute,
-		BackoffMax:  time.Minute,
-		MaxAttempts: 2,
-	})
-	require.ErrorIs(t, err, deleteErr)
-
-	stats, err := store.RootFSObjectDeletionQueueStats(ctx)
-	require.NoError(t, err)
-	require.NotNil(t, stats)
-	assert.Equal(t, int64(0), stats.Pending)
-	assert.Equal(t, int64(1), stats.DeadLettered)
 }
 
 func TestRootFSRootLayerSaveCanCASAgainstExistingHead(t *testing.T) {
@@ -246,7 +162,7 @@ func TestRootFSRootLayerSaveCanCASAgainstExistingHead(t *testing.T) {
 	assert.False(t, staleExists, "failed CAS must roll back the candidate layer")
 }
 
-func TestRootFSGCSkipsObjectDeleteForS0FSLayer(t *testing.T) {
+func TestRootFSGCCollectsS0FSLayerMetadataWithoutObjectStore(t *testing.T) {
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPool(t)
 	store := NewPGSandboxStore(pool)
@@ -260,14 +176,12 @@ func TestRootFSGCSkipsObjectDeleteForS0FSLayer(t *testing.T) {
 	require.NoError(t, store.SaveRootFSState(ctx, stale))
 	require.NoError(t, store.MarkSandboxDeleted(ctx, "sandbox-stale", time.Now().UTC()))
 
-	deleter := &recordingRootFSObjectDeleter{}
-	result, err := store.GarbageCollectRootFSFilesystem(ctx, deleter, "team-1", 10)
+	result, err := store.GarbageCollectRootFSFilesystem(ctx, nil, "team-1", 10)
 	require.NoError(t, err)
 	require.Len(t, result.Layers, 1)
 	assert.Equal(t, "layer-stale", result.Layers[0].ID)
-	assert.Empty(t, result.DeletedObjectKeys)
-	assert.Empty(t, deleter.keys)
-	assert.Equal(t, int64(0), rootFSTestCountRows(t, pool, "rootfs_object_deletions"))
+	assert.Empty(t, result.DeletedS0FSSegments)
+	assert.Empty(t, result.DeletedS0FSManifests)
 }
 
 func TestRootFSGCDeletesUnboundAncestorFilesystemAfterChildDeletion(t *testing.T) {
@@ -317,15 +231,14 @@ func TestRootFSGCSkipsLayerStillReferencedByOrphanFilesystem(t *testing.T) {
 	`)
 	require.NoError(t, err)
 
-	deleter := &recordingRootFSObjectDeleter{}
-	result, err := store.GarbageCollectRootFSFilesystem(ctx, deleter, "team-1", 1)
+	result, err := store.GarbageCollectRootFSFilesystem(ctx, nil, "team-1", 1)
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.DeletedFilesystems)
 	require.Len(t, result.Layers, 1)
 	assert.Equal(t, "layer-orphan-a", result.Layers[0].ID)
 	assert.True(t, rootFSTestFilesystemExists(t, pool, "sandbox-orphan-b"))
 
-	result, err = store.GarbageCollectRootFSFilesystem(ctx, deleter, "team-1", 1)
+	result, err = store.GarbageCollectRootFSFilesystem(ctx, nil, "team-1", 1)
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.DeletedFilesystems)
 	require.Len(t, result.Layers, 1)
@@ -350,13 +263,13 @@ func TestRootFSGCExpiresSnapshotBeforeLayerCollection(t *testing.T) {
 	full.ExpectedHeadLayerID = "layer-old"
 	require.NoError(t, store.SaveRootFSState(ctx, full))
 
-	deleter := &recordingRootFSObjectDeleter{}
-	result, err := store.GarbageCollectRootFSFilesystem(ctx, deleter, "team-1", 10)
+	result, err := store.GarbageCollectRootFSFilesystem(ctx, nil, "team-1", 10)
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.ExpiredSnapshots)
 	require.Len(t, result.Layers, 1)
 	assert.Equal(t, "layer-old", result.Layers[0].ID)
-	assert.Empty(t, result.DeletedObjectKeys)
+	assert.Empty(t, result.DeletedS0FSSegments)
+	assert.Empty(t, result.DeletedS0FSManifests)
 	assert.Equal(t, int64(0), rootFSTestCountRows(t, pool, "rootfs_snapshots"))
 }
 
@@ -373,66 +286,71 @@ func TestRootFSStorageUsageIgnoresS0FSCheckpoints(t *testing.T) {
 	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-b", "team-1")))
 	require.NoError(t, store.SaveRootFSState(ctx, second))
 
-	usages, err := store.ListRootFSStorageUsage(ctx, "team-1")
+	usages, err := store.ListRootFSStorageUsage(ctx, nil, "team-1")
 	require.NoError(t, err)
 	assert.Empty(t, usages)
 
 	recorder := &recordingRootFSStorageMeteringRecorder{}
 	observedAt := time.Now().UTC()
-	usages, err = store.RecordRootFSStorageObservations(ctx, recorder, "team-1", observedAt)
+	usages, err = store.RecordRootFSStorageObservations(ctx, nil, recorder, "team-1", observedAt)
 	require.NoError(t, err)
 	assert.Empty(t, usages)
 	assert.Empty(t, recorder.observations)
 }
 
-func TestRootFSObjectAuditRecordsAndClearsMissingState(t *testing.T) {
+func TestRootFSS0FSObjectGCAndStorageUsageIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPool(t)
 	store := NewPGSandboxStore(pool)
+	objectStore := objectstore.NewMemoryStore("rootfs-s0fs-object-gc-" + t.Name())
+	teamID := "team-1"
+	filesystemID := "sandbox-s0fs-gc"
 
-	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-a", "team-1")))
-	require.NoError(t, store.SaveRootFSState(ctx, rootFSTestStoreState("sandbox-a", "team-1", "layer-a", "", 1, "audit")))
-	_, err := pool.Exec(ctx, `
-		INSERT INTO manager.rootfs_objects (
-			object_key, team_id, diff_digest, diff_media_type, diff_size,
-			first_layer_id, last_referenced_at, created_at, updated_at
-		)
-		VALUES ('rootfs/audit.tar', 'team-1', 'sha256:audit', 'application/vnd.oci.image.layer.v1.tar', $1, 'legacy-layer', NOW(), NOW(), NOW())
-	`, int64(len("audit")))
+	oldManifest, currentManifest := rootFSTestMaterializeTwoS0FSHeads(t, ctx, objectStore, teamID, filesystemID)
+	prefixed := rootfsstore.S0FSObjectStore(objectStore, teamID, filesystemID)
+	require.NoError(t, prefixed.Put("segments/orphan.bin", strings.NewReader("orphan")))
+
+	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord(filesystemID, teamID)))
+	oldState := rootFSTestStoreState(filesystemID, teamID, "layer-old", "", 1, "old")
+	oldState.S0FSManifestKey = rootFSTestS0FSManifestKey(oldManifest.ManifestSeq)
+	oldState.S0FSManifestSeq = oldManifest.ManifestSeq
+	oldState.S0FSCheckpointSeq = oldManifest.CheckpointSeq
+	require.NoError(t, store.SaveRootFSState(ctx, oldState))
+
+	currentState := rootFSTestStoreState(filesystemID, teamID, "layer-current", "layer-old", 2, "current")
+	currentState.S0FSManifestKey = rootFSTestS0FSManifestKey(currentManifest.ManifestSeq)
+	currentState.S0FSManifestSeq = currentManifest.ManifestSeq
+	currentState.S0FSCheckpointSeq = currentManifest.CheckpointSeq
+	require.NoError(t, store.SaveRootFSState(ctx, currentState))
+
+	result, err := store.GarbageCollectRootFSFilesystem(ctx, objectStore, teamID, 10)
 	require.NoError(t, err)
+	assert.Empty(t, result.Layers)
+	assert.Contains(t, result.DeletedS0FSSegments, teamID+"/"+filesystemID+"/segments/orphan.bin")
+	assert.Contains(t, result.DeletedS0FSSegments, teamID+"/"+filesystemID+"/segments/00000000000000000002-0.bin")
+	assert.Contains(t, result.DeletedS0FSManifests, teamID+"/"+filesystemID+"/"+rootFSTestS0FSManifestKey(oldManifest.ManifestSeq))
 
-	inspector := &recordingRootFSObjectInspector{err: assert.AnError}
-	result, err := store.AuditRootFSObjects(ctx, inspector, "team-1", 10)
+	_, err = prefixed.Head(rootFSTestS0FSManifestKey(oldManifest.ManifestSeq))
+	assert.Error(t, err)
+	_, err = prefixed.Head(rootFSTestS0FSManifestKey(currentManifest.ManifestSeq))
+	assert.NoError(t, err)
+	_, err = prefixed.Head("manifests/latest.json")
+	assert.NoError(t, err)
+
+	usages, err := store.ListRootFSStorageUsage(ctx, objectStore, teamID)
 	require.NoError(t, err)
-	require.NotNil(t, result)
-	assert.Equal(t, 1, result.Checked)
-	assert.Equal(t, 1, result.Missing)
+	require.Len(t, usages, 1)
+	assert.Equal(t, teamID, usages[0].TeamID)
+	assert.Equal(t, int64(3), usages[0].ObjectCount)
+	assert.Positive(t, usages[0].StorageBytes)
 
-	var missingAt *time.Time
-	var lastError string
-	require.NoError(t, pool.QueryRow(ctx, `
-		SELECT missing_at, last_error
-		FROM manager.rootfs_objects
-		WHERE object_key = 'rootfs/audit.tar'
-	`).Scan(&missingAt, &lastError))
-	require.NotNil(t, missingAt)
-	assert.Contains(t, lastError, assert.AnError.Error())
-
-	inspector.err = nil
-	inspector.info = RootFSObjectInfo{Key: "rootfs/audit.tar", Size: int64(len("audit"))}
-	result, err = store.AuditRootFSObjects(ctx, inspector, "team-1", 10)
+	recorder := &recordingRootFSStorageMeteringRecorder{}
+	observedAt := time.Now().UTC()
+	usages, err = store.RecordRootFSStorageObservations(ctx, objectStore, recorder, teamID, observedAt)
 	require.NoError(t, err)
-	require.NotNil(t, result)
-	assert.Equal(t, 1, result.Checked)
-	assert.Equal(t, 0, result.Missing)
-
-	require.NoError(t, pool.QueryRow(ctx, `
-		SELECT missing_at, last_error
-		FROM manager.rootfs_objects
-		WHERE object_key = 'rootfs/audit.tar'
-	`).Scan(&missingAt, &lastError))
-	assert.Nil(t, missingAt)
-	assert.Empty(t, lastError)
+	require.Len(t, usages, 1)
+	require.Len(t, recorder.observations, 1)
+	assert.Equal(t, usages[0].StorageBytes, recorder.observations[0].SizeBytes)
 }
 
 func newSandboxStoreIntegrationPool(t *testing.T) *pgxpool.Pool {
@@ -456,6 +374,35 @@ func newSandboxStoreIntegrationPool(t *testing.T) *pgxpool.Pool {
 	})
 	require.NoError(t, RunSandboxStoreMigrations(ctx, pool, noopSandboxStoreMigrateLogger{}))
 	return pool
+}
+
+func rootFSTestMaterializeTwoS0FSHeads(t *testing.T, ctx context.Context, store objectstore.Store, teamID, filesystemID string) (*s0fs.Manifest, *s0fs.Manifest) {
+	t.Helper()
+	engine, err := s0fs.Open(ctx, s0fs.Config{
+		VolumeID:    filesystemID,
+		WALPath:     filepath.Join(t.TempDir(), "engine.wal"),
+		ObjectStore: rootfsstore.S0FSObjectStore(store, teamID, filesystemID),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = engine.Close() })
+
+	node, err := engine.CreateFile(s0fs.RootInode, "state.txt", 0o644)
+	require.NoError(t, err)
+	_, err = engine.Write(node.Inode, 0, []byte("old"))
+	require.NoError(t, err)
+	oldManifest, err := engine.SyncMaterialize(ctx)
+	require.NoError(t, err)
+
+	require.NoError(t, engine.Truncate(node.Inode, 0))
+	_, err = engine.Write(node.Inode, 0, []byte("new"))
+	require.NoError(t, err)
+	currentManifest, err := engine.SyncMaterialize(ctx)
+	require.NoError(t, err)
+	return oldManifest, currentManifest
+}
+
+func rootFSTestS0FSManifestKey(seq uint64) string {
+	return fmt.Sprintf("manifests/%020d.json", seq)
 }
 
 func rootFSTestSandboxRecord(sandboxID, teamID string) *SandboxRecord {
@@ -487,9 +434,6 @@ func rootFSTestStoreState(sandboxID, teamID, layerID, parentLayerID string, gene
 		SnapshotParent:      "parent-1",
 		SnapshotParentChain: []string{"parent-1", "parent-0"},
 		StorageEngine:       ctldapi.RootFSStorageEngineS0FS,
-		DiffDigest:          "s0fs:" + manifestKey,
-		DiffMediaType:       "application/vnd.sandbox0.rootfs.s0fs.v1+json",
-		DiffObjectKey:       manifestKey,
 		S0FSVolumeID:        sandboxID,
 		S0FSManifestKey:     manifestKey,
 		S0FSManifestSeq:     uint64(generation),
@@ -502,12 +446,6 @@ func rootFSTestCountRows(t *testing.T, pool *pgxpool.Pool, table string) int64 {
 	t.Helper()
 	query := ""
 	switch table {
-	case "sandbox_rootfs_states":
-		query = "SELECT COUNT(*) FROM manager.sandbox_rootfs_states"
-	case "sandbox_rootfs_heads":
-		query = "SELECT COUNT(*) FROM manager.sandbox_rootfs_heads"
-	case "rootfs_object_deletions":
-		query = "SELECT COUNT(*) FROM manager.rootfs_object_deletions"
 	case "rootfs_snapshots":
 		query = "SELECT COUNT(*) FROM manager.rootfs_snapshots"
 	default:
@@ -538,18 +476,6 @@ type recordingRootFSStorageMeteringRecorder struct {
 func (r *recordingRootFSStorageMeteringRecorder) RecordStorageObservation(_ context.Context, observation *meteringpkg.StorageObservation) error {
 	r.observations = append(r.observations, observation)
 	return nil
-}
-
-type recordingRootFSObjectInspector struct {
-	info RootFSObjectInfo
-	err  error
-}
-
-func (i *recordingRootFSObjectInspector) StatRootFSObject(string) (RootFSObjectInfo, error) {
-	if i.err != nil {
-		return RootFSObjectInfo{}, i.err
-	}
-	return i.info, nil
 }
 
 type noopSandboxStoreMigrateLogger struct{}

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -16,6 +17,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 const sandboxRootFSContainerName = "procd"
@@ -214,10 +217,50 @@ func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *
 		return fmt.Errorf("apply sandbox rootfs checkpoint: ctld did not report applied")
 	}
 	if strings.TrimSpace(resp.MountPath) != "" {
-		if pod.Annotations == nil {
-			pod.Annotations = make(map[string]string)
+		if err := s.setSandboxRootFSMountPathAnnotation(ctx, pod, strings.TrimSpace(resp.MountPath)); err != nil {
+			return err
 		}
-		pod.Annotations[sandboxRootFSMountPathAnnotation] = strings.TrimSpace(resp.MountPath)
+	}
+	return nil
+}
+
+func (s *SandboxService) setSandboxRootFSMountPathAnnotation(ctx context.Context, pod *corev1.Pod, mountPath string) error {
+	mountPath = strings.TrimSpace(mountPath)
+	if pod == nil || mountPath == "" {
+		return nil
+	}
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+	pod.Annotations[sandboxRootFSMountPathAnnotation] = mountPath
+	if s == nil || s.k8sClient == nil || pod.Namespace == "" || pod.Name == "" {
+		return nil
+	}
+	patch := map[string]any{
+		"metadata": map[string]any{
+			"annotations": map[string]string{
+				sandboxRootFSMountPathAnnotation: mountPath,
+			},
+		},
+	}
+	raw, err := json.Marshal(patch)
+	if err != nil {
+		return fmt.Errorf("marshal rootfs mount annotation patch: %w", err)
+	}
+	updated, err := s.k8sClient.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType, raw, metav1.PatchOptions{})
+	if err != nil {
+		return fmt.Errorf("patch rootfs mount annotation: %w", err)
+	}
+	if updated != nil {
+		pod.ResourceVersion = updated.ResourceVersion
+		if updated.Annotations != nil {
+			if pod.Annotations == nil {
+				pod.Annotations = make(map[string]string)
+			}
+			for key, value := range updated.Annotations {
+				pod.Annotations[key] = value
+			}
+		}
 	}
 	return nil
 }

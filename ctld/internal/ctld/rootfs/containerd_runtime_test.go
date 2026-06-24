@@ -143,6 +143,82 @@ func TestRootFSS0FSMaterializerReadsInheritedSegments(t *testing.T) {
 	assert.Equal(t, "parent-data", string(got))
 }
 
+func TestCommitS0FSRootFSUsesActiveMountEngine(t *testing.T) {
+	ctx := context.Background()
+	baseStore := objectstore.NewMemoryStore("rootfs-s0fs-active-mount-" + t.Name())
+	teamID := "team-1"
+	sourceID := "source"
+	childID := "child"
+
+	source, err := s0fs.Open(ctx, s0fs.Config{
+		VolumeID:             sourceID,
+		WALPath:              filepath.Join(t.TempDir(), "source.wal"),
+		ObjectStore:          rootFSS0FSObjectStore(baseStore, teamID, sourceID),
+		ObjectStoreForVolume: rootFSS0FSObjectStoreResolver(baseStore, teamID),
+	})
+	require.NoError(t, err)
+	node, err := source.CreateFile(s0fs.RootInode, "state.txt", 0o644)
+	require.NoError(t, err)
+	_, err = source.Write(node.Inode, 0, []byte("parent-data"))
+	require.NoError(t, err)
+	sourceManifest, err := source.EnsureMaterialized(ctx)
+	require.NoError(t, err)
+	require.NoError(t, source.Close())
+
+	sourceHead, err := rootFSS0FSHeadFromManifest(teamID, sourceID, sourceManifest)
+	require.NoError(t, err)
+	sourceState, _, err := loadRootFSS0FSHead(ctx, baseStore, sourceHead)
+	require.NoError(t, err)
+
+	runtime := NewContainerdRuntime(ContainerdRuntimeConfig{RootFSCacheDir: t.TempDir()})
+	child, err := runtime.openRootFSS0FSEngine(ctx, baseStore, teamID, childID)
+	require.NoError(t, err)
+	require.NoError(t, child.ReplaceState(sourceState))
+	childNode, err := child.Lookup(s0fs.RootInode, "state.txt")
+	require.NoError(t, err)
+	require.NoError(t, child.Truncate(childNode.Inode, 0))
+	_, err = child.Write(childNode.Inode, 0, []byte("child-data"))
+	require.NoError(t, err)
+	childNode, err = child.Lookup(s0fs.RootInode, "state.txt")
+	require.NoError(t, err)
+
+	runtime.s0fsMounts[rootFSS0FSMountKey(ctldapi.RootFSInfo{ContainerID: "container-1"})] = &s0fsRootFSMount{
+		volumeID: childID,
+		teamID:   teamID,
+		engine:   child,
+	}
+	head, err := runtime.CommitS0FSRootFS(ctx, S0FSCommitRequest{
+		Store:        baseStore,
+		TeamID:       teamID,
+		FilesystemID: childID,
+		Info:         ctldapi.RootFSInfo{ContainerID: "container-1"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, childID, head.FilesystemID)
+	assert.Equal(t, childID, head.VolumeID)
+	assert.NotEmpty(t, head.ManifestKey)
+
+	childState, _, err := loadRootFSS0FSHead(ctx, baseStore, head)
+	require.NoError(t, err)
+	reader := s0fs.NewSnapshotReader(childState, rootFSS0FSMaterializer(baseStore, teamID, childID))
+	payload, err := reader.Read(childNode.Inode, 0, childNode.Size)
+	require.NoError(t, err)
+	assert.Equal(t, "child-data", string(payload))
+}
+
+func TestS0FSRootFSVolumePortalPaths(t *testing.T) {
+	active := &s0fsRootFSMount{
+		mountRootPath:      "/proc/123/root",
+		containerMountPath: "/sandbox0/rootfs",
+	}
+
+	source, target := active.rootFSVolumePortalPaths("/workspace/data")
+
+	assert.Equal(t, "/proc/123/root/workspace/data", source)
+	assert.Equal(t, "/proc/123/root/sandbox0/rootfs/workspace/data", target)
+	assert.Equal(t, "/sandbox0/rootfs/workspace/data", rootFSNestedMountPath("/sandbox0/rootfs", "/workspace/data"))
+}
+
 func TestFindLiveRootFSByTaskAnnotations(t *testing.T) {
 	taskRoot := t.TempDir()
 	hostTaskRoot := filepath.Join(string(filepath.Separator), "run", "containerd", "io.containerd.runtime.v2.task", "k8s.io")

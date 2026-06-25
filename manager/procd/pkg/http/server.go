@@ -40,6 +40,7 @@ type Server struct {
 
 	// Internal auth validator
 	authValidator *internalauth.Validator
+	barrier       *lifecycleBarrier
 
 	// Webhook dispatcher
 	webhookDispatcher *webhook.Dispatcher
@@ -64,6 +65,7 @@ func NewServer(
 		contextManager:    contextManager,
 		fileManager:       fileManager,
 		authValidator:     authValidator,
+		barrier:           newLifecycleBarrier(),
 		webhookDispatcher: webhookDispatcher,
 		logger:            logger,
 		obsProvider:       obsProvider,
@@ -98,9 +100,11 @@ func (s *Server) setupRoutes() {
 	// Apply auth middleware to all API routes
 	api.Use(s.authMiddleware)
 	api.Use(s.internalTokenMiddleware)
+	api.Use(s.barrier.middleware)
 
 	// Sandbox-level handlers (pause/resume all processes)
 	sandboxHandler := handlers.NewSandboxHandler(s.contextManager, s.webhookDispatcher, s.logger)
+	api.HandleFunc("/lifecycle/barrier", s.lifecycleBarrierHandler).Methods("PUT")
 	api.HandleFunc("/sandbox/pause", sandboxHandler.Pause).Methods("POST")
 	api.HandleFunc("/sandbox/resume", sandboxHandler.Resume).Methods("POST")
 	api.HandleFunc("/sandbox/stats", sandboxHandler.Stats).Methods("GET")

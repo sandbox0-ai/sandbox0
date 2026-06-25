@@ -16,7 +16,7 @@ const (
 	defaultSandboxPauseScanLimit    = 500
 )
 
-// SandboxPauseController completes durable pausing transitions outside the API request path.
+// SandboxPauseController completes durable pause transactions outside the API request path.
 type SandboxPauseController struct {
 	service        *SandboxService
 	logger         *zap.Logger
@@ -92,14 +92,14 @@ func (c *SandboxPauseController) enqueuePausingSandboxes(ctx context.Context) {
 	if c == nil || c.service == nil || c.service.sandboxStore == nil {
 		return
 	}
-	records, err := c.service.sandboxStore.ListPausingSandboxes(ctx, c.scanLimit)
+	txns, err := c.service.sandboxStore.ListActiveLifecycleTxns(ctx, SandboxLifecycleKindPause, c.scanLimit)
 	if err != nil {
-		c.logger.Warn("Failed to list pausing sandboxes", zap.Error(err))
+		c.logger.Warn("Failed to list active pause lifecycle transactions", zap.Error(err))
 		return
 	}
-	for _, record := range records {
-		if record != nil {
-			c.EnqueueSandboxPause(record.ID)
+	for _, txn := range txns {
+		if txn != nil {
+			c.EnqueueSandboxPause(txn.SandboxID)
 		}
 	}
 }

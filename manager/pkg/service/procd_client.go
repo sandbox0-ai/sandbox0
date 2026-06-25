@@ -93,6 +93,33 @@ type StatsResponse struct {
 	SandboxResourceUsage
 }
 
+// ProcdLifecycleBarrierRequest controls the runtime operation barrier in procd.
+type ProcdLifecycleBarrierRequest struct {
+	Active            bool  `json:"active"`
+	Epoch             int64 `json:"epoch,omitempty"`
+	RuntimeGeneration int64 `json:"runtime_generation,omitempty"`
+	WaitTimeoutMS     int64 `json:"wait_timeout_ms,omitempty"`
+}
+
+// ProcdLifecycleBarrierResponse is returned after procd applies the barrier.
+type ProcdLifecycleBarrierResponse struct {
+	Active            bool  `json:"active"`
+	Epoch             int64 `json:"epoch,omitempty"`
+	RuntimeGeneration int64 `json:"runtime_generation,omitempty"`
+	InFlight          int   `json:"in_flight"`
+}
+
+// ProcdPauseResponse is returned after pausing all procd-managed processes.
+type ProcdPauseResponse struct {
+	Paused        bool                  `json:"paused"`
+	ResourceUsage *SandboxResourceUsage `json:"resource_usage,omitempty"`
+}
+
+// ProcdResumeResponse is returned after resuming all procd-managed processes.
+type ProcdResumeResponse struct {
+	Resumed bool `json:"resumed"`
+}
+
 // InitializeRequest represents the procd initialize request.
 type InitializeRequest struct {
 	SandboxID string             `json:"sandbox_id"`
@@ -129,6 +156,24 @@ type UpdateSandboxEnvVarsResponse struct {
 func (c *ProcdClient) Stats(ctx context.Context, procdAddress, internalToken string) (*StatsResponse, error) {
 	url := procdAddress + "/api/v1/sandbox/stats"
 	return doProcdRequest[StatsResponse](ctx, c.httpClient, http.MethodGet, url, internalToken, "stats", nil)
+}
+
+// SetLifecycleBarrier activates or releases the procd runtime operation barrier.
+func (c *ProcdClient) SetLifecycleBarrier(ctx context.Context, procdAddress string, req ProcdLifecycleBarrierRequest, internalToken string) (*ProcdLifecycleBarrierResponse, error) {
+	url := procdAddress + "/api/v1/lifecycle/barrier"
+	return doProcdRequest[ProcdLifecycleBarrierResponse](ctx, c.httpClient, http.MethodPut, url, internalToken, "set lifecycle barrier", req)
+}
+
+// PauseSandbox pauses all procd-managed processes inside the sandbox.
+func (c *ProcdClient) PauseSandbox(ctx context.Context, procdAddress, internalToken string) (*ProcdPauseResponse, error) {
+	url := procdAddress + "/api/v1/sandbox/pause"
+	return doProcdRequest[ProcdPauseResponse](ctx, c.httpClient, http.MethodPost, url, internalToken, "pause procd sandbox", nil)
+}
+
+// ResumeSandbox resumes all procd-managed processes inside the sandbox.
+func (c *ProcdClient) ResumeSandbox(ctx context.Context, procdAddress, internalToken string) (*ProcdResumeResponse, error) {
+	url := procdAddress + "/api/v1/sandbox/resume"
+	return doProcdRequest[ProcdResumeResponse](ctx, c.httpClient, http.MethodPost, url, internalToken, "resume procd sandbox", nil)
 }
 
 // Initialize calls the procd initialize API.

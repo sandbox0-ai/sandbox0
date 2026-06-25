@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -857,6 +858,7 @@ func newInitializeEventServer(t *testing.T, events *orderedEvents) *httptest.Ser
 type memorySandboxStoreForManagerIntegration struct {
 	mu                sync.Mutex
 	records           map[string]*service.SandboxRecord
+	lifecycleTxns     map[string]*service.SandboxLifecycleTxn
 	rootFSState       map[string]*service.SandboxRootFSState
 	rootFSFilesystems map[string]*service.RootFSFilesystem
 	rootFSSnapshots   map[string]*service.RootFSSnapshot
@@ -865,6 +867,7 @@ type memorySandboxStoreForManagerIntegration struct {
 func newMemorySandboxStoreForManagerIntegration(record *service.SandboxRecord, rootFSState *service.SandboxRootFSState) *memorySandboxStoreForManagerIntegration {
 	store := &memorySandboxStoreForManagerIntegration{
 		records:           map[string]*service.SandboxRecord{},
+		lifecycleTxns:     map[string]*service.SandboxLifecycleTxn{},
 		rootFSState:       map[string]*service.SandboxRootFSState{},
 		rootFSFilesystems: map[string]*service.RootFSFilesystem{},
 		rootFSSnapshots:   map[string]*service.RootFSSnapshot{},
@@ -927,23 +930,34 @@ func (s *memorySandboxStoreForManagerIntegration) ListHardExpiredSandboxes(_ con
 	return records, nil
 }
 
-func (s *memorySandboxStoreForManagerIntegration) ListPausingSandboxes(_ context.Context, limit int) ([]*service.SandboxRecord, error) {
+func (s *memorySandboxStoreForManagerIntegration) ListActiveLifecycleTxns(_ context.Context, kind string, limit int) ([]*service.SandboxLifecycleTxn, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if limit <= 0 {
-		limit = len(s.records)
+		limit = len(s.lifecycleTxns)
 	}
-	records := make([]*service.SandboxRecord, 0, len(s.records))
-	for _, record := range s.records {
-		if record == nil || record.Status != service.SandboxStatusPausing {
+	txns := make([]*service.SandboxLifecycleTxn, 0, len(s.lifecycleTxns))
+	for _, txn := range s.lifecycleTxns {
+		if txn == nil || txn.Kind != kind || !managerIntegrationLifecyclePhaseActive(txn.Phase) {
 			continue
 		}
-		records = append(records, cloneSandboxRecordForManagerIntegration(record))
-		if len(records) >= limit {
+		txns = append(txns, cloneSandboxLifecycleTxnForManagerIntegration(txn))
+		if len(txns) >= limit {
 			break
 		}
 	}
-	return records, nil
+	return txns, nil
+}
+
+func (s *memorySandboxStoreForManagerIntegration) GetActiveLifecycleTxn(_ context.Context, sandboxID string) (*service.SandboxLifecycleTxn, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, txn := range s.lifecycleTxns {
+		if txn != nil && txn.SandboxID == sandboxID && managerIntegrationLifecyclePhaseActive(txn.Phase) {
+			return cloneSandboxLifecycleTxnForManagerIntegration(txn), nil
+		}
+	}
+	return nil, nil
 }
 
 func (s *memorySandboxStoreForManagerIntegration) MarkSandboxDeleted(_ context.Context, sandboxID string, deletedAt time.Time) error {
@@ -955,6 +969,13 @@ func (s *memorySandboxStoreForManagerIntegration) MarkSandboxDeleted(_ context.C
 	}
 	record.Status = service.SandboxStatusDeleted
 	record.DeletedAt = deletedAt
+	for _, txn := range s.lifecycleTxns {
+		if txn != nil && txn.SandboxID == sandboxID && managerIntegrationLifecyclePhaseActive(txn.Phase) {
+			txn.Phase = service.SandboxLifecyclePhaseAborted
+			txn.Error = "sandbox deleted"
+			txn.AbortedAt = deletedAt
+		}
+	}
 	delete(s.rootFSState, sandboxID)
 	return nil
 }
@@ -1129,7 +1150,7 @@ type memorySandboxStoreTxForManagerIntegration struct {
 
 func (t memorySandboxStoreTxForManagerIntegration) SaveRuntime(_ context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time) error {
 	record := t.store.records[sandboxID]
-	if record == nil {
+	if record == nil || !record.DeletedAt.IsZero() {
 		return service.ErrSandboxRecordNotFound
 	}
 	record.CurrentPodNamespace = namespace
@@ -1143,7 +1164,7 @@ func (t memorySandboxStoreTxForManagerIntegration) SaveRuntime(_ context.Context
 
 func (t memorySandboxStoreTxForManagerIntegration) MarkRuntimePaused(_ context.Context, sandboxID string, generation int64, _ time.Time) error {
 	record := t.store.records[sandboxID]
-	if record == nil {
+	if record == nil || !record.DeletedAt.IsZero() {
 		return service.ErrSandboxRecordNotFound
 	}
 	record.CurrentPodNamespace = ""
@@ -1164,6 +1185,90 @@ func (t memorySandboxStoreTxForManagerIntegration) SaveRootFSState(_ context.Con
 	return nil
 }
 
+func (t memorySandboxStoreTxForManagerIntegration) GetActiveLifecycleTxn(_ context.Context, sandboxID string) (*service.SandboxLifecycleTxn, error) {
+	for _, txn := range t.store.lifecycleTxns {
+		if txn != nil && txn.SandboxID == sandboxID && managerIntegrationLifecyclePhaseActive(txn.Phase) {
+			return cloneSandboxLifecycleTxnForManagerIntegration(txn), nil
+		}
+	}
+	return nil, nil
+}
+
+func (t memorySandboxStoreTxForManagerIntegration) BeginLifecycleTxn(_ context.Context, txn *service.SandboxLifecycleTxn) error {
+	if txn == nil || txn.ID == "" {
+		return nil
+	}
+	record := t.store.records[txn.SandboxID]
+	if record == nil {
+		return service.ErrSandboxRecordNotFound
+	}
+	record.LifecycleEpoch++
+	txn.Epoch = record.LifecycleEpoch
+	if txn.Phase == "" {
+		txn.Phase = service.SandboxLifecyclePhasePreparing
+	}
+	if txn.Source == "" {
+		txn.Source = service.SandboxLifecycleSourceManual
+	}
+	t.store.lifecycleTxns[txn.ID] = cloneSandboxLifecycleTxnForManagerIntegration(txn)
+	return nil
+}
+
+func (t memorySandboxStoreTxForManagerIntegration) SetLifecycleTxnRuntime(_ context.Context, txnID, namespace, podName string) error {
+	if txn := t.store.lifecycleTxns[txnID]; txn != nil && managerIntegrationLifecyclePhaseActive(txn.Phase) {
+		txn.ToPodNamespace = namespace
+		txn.ToPodName = podName
+	}
+	return nil
+}
+
+func (t memorySandboxStoreTxForManagerIntegration) UpdateLifecycleTxnPhase(_ context.Context, txnID, phase string) error {
+	if txn := t.store.lifecycleTxns[txnID]; txn != nil && managerIntegrationLifecyclePhaseActive(txn.Phase) {
+		if !txn.CancelRequestedAt.IsZero() {
+			return stderrors.New("active lifecycle txn not found")
+		}
+		txn.Phase = phase
+	}
+	return nil
+}
+
+func (t memorySandboxStoreTxForManagerIntegration) RequestLifecycleTxnCancel(_ context.Context, txnID, reason string) (bool, error) {
+	txn := t.store.lifecycleTxns[txnID]
+	if txn == nil ||
+		txn.Kind != service.SandboxLifecycleKindPause ||
+		txn.Source != service.SandboxLifecycleSourceAuto ||
+		!txn.Cancelable ||
+		!managerIntegrationLifecyclePhaseCancelable(txn.Phase) {
+		return false, nil
+	}
+	if txn.CancelRequestedAt.IsZero() {
+		txn.CancelRequestedAt = time.Now()
+	}
+	if txn.CancelReason == "" {
+		txn.CancelReason = reason
+	}
+	return true, nil
+}
+
+func (t memorySandboxStoreTxForManagerIntegration) CommitLifecycleTxn(_ context.Context, txnID, preparedHeadLayerID string) error {
+	if txn := t.store.lifecycleTxns[txnID]; txn != nil && managerIntegrationLifecyclePhaseActive(txn.Phase) {
+		if !txn.CancelRequestedAt.IsZero() {
+			return stderrors.New("active lifecycle txn not found")
+		}
+		txn.Phase = service.SandboxLifecyclePhaseCommitted
+		txn.PreparedHeadLayerID = preparedHeadLayerID
+	}
+	return nil
+}
+
+func (t memorySandboxStoreTxForManagerIntegration) AbortLifecycleTxn(_ context.Context, txnID, reason string) error {
+	if txn := t.store.lifecycleTxns[txnID]; txn != nil && managerIntegrationLifecyclePhaseActive(txn.Phase) {
+		txn.Phase = service.SandboxLifecyclePhaseAborted
+		txn.Error = reason
+	}
+	return nil
+}
+
 func cloneSandboxRecordForManagerIntegration(record *service.SandboxRecord) *service.SandboxRecord {
 	if record == nil {
 		return nil
@@ -1172,6 +1277,37 @@ func cloneSandboxRecordForManagerIntegration(record *service.SandboxRecord) *ser
 	clone.Mounts = append([]service.ClaimMount(nil), record.Mounts...)
 	clone.TemplateSpec = *record.TemplateSpec.DeepCopy()
 	return &clone
+}
+
+func cloneSandboxLifecycleTxnForManagerIntegration(txn *service.SandboxLifecycleTxn) *service.SandboxLifecycleTxn {
+	if txn == nil {
+		return nil
+	}
+	clone := *txn
+	return &clone
+}
+
+func managerIntegrationLifecyclePhaseActive(phase string) bool {
+	switch phase {
+	case service.SandboxLifecyclePhasePreparing,
+		service.SandboxLifecyclePhaseBarriered,
+		service.SandboxLifecyclePhasePublishing,
+		service.SandboxLifecyclePhaseCommitting:
+		return true
+	default:
+		return false
+	}
+}
+
+func managerIntegrationLifecyclePhaseCancelable(phase string) bool {
+	switch phase {
+	case service.SandboxLifecyclePhasePreparing,
+		service.SandboxLifecyclePhaseBarriered,
+		service.SandboxLifecyclePhasePublishing:
+		return true
+	default:
+		return false
+	}
 }
 
 func cloneRootFSStateForManagerIntegration(state *service.SandboxRootFSState) *service.SandboxRootFSState {

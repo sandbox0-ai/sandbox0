@@ -1603,7 +1603,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/SuccessPauseSandboxResponse"
         "409":
-          description: Another sandbox lifecycle operation is in progress
+          description: Sandbox lifecycle state conflicts with this operation
           content:
             application/json:
               schema:
@@ -1644,7 +1644,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/SuccessResumeSandboxResponse"
         "409":
-          description: Another sandbox lifecycle operation is in progress
+          description: Sandbox lifecycle state conflicts with this operation
           content:
             application/json:
               schema:
@@ -4298,13 +4298,11 @@ components:
               $ref: "#/components/schemas/ClaimResponse"
     SandboxLifecycleStatus:
       type: string
-      enum: [starting, running, pausing, paused, resuming, terminating, failed]
+      enum: [starting, running, paused, terminating, failed]
       x-enum-varnames:
         - SandboxLifecycleStatusStarting
         - SandboxLifecycleStatusRunning
-        - SandboxLifecycleStatusPausing
         - SandboxLifecycleStatusPaused
-        - SandboxLifecycleStatusResuming
         - SandboxLifecycleStatusTerminating
         - SandboxLifecycleStatusFailed
     Sandbox:
@@ -4719,7 +4717,7 @@ components:
           description: True when checkpoint persistence has finished, runtime deletion has been accepted, and the sandbox is paused.
         status:
           $ref: "#/components/schemas/SandboxLifecycleStatus"
-          description: Current lifecycle status. Async pause requests usually return pausing.
+          description: Current committed lifecycle status.
         resource_usage:
           $ref: "#/components/schemas/SandboxResourceUsage"
         updated_memory:

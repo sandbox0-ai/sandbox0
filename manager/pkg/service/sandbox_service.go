@@ -13,6 +13,7 @@ import (
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
@@ -43,9 +44,7 @@ type Sandbox struct {
 const (
 	SandboxStatusStarting    = "starting"
 	SandboxStatusRunning     = "running"
-	SandboxStatusPausing     = "pausing"
 	SandboxStatusPaused      = "paused"
-	SandboxStatusResuming    = "resuming"
 	SandboxStatusFailed      = "failed"
 	SandboxStatusTerminating = "terminating"
 )
@@ -60,7 +59,7 @@ var ErrInvalidNetworkPolicy = errors.New("invalid network policy")
 var ErrSandboxCheckpointRequiresCtld = errors.New("sandbox checkpoint pause requires ctld")
 
 const defaultPodClaimReadyTimeout = 90 * time.Second
-const defaultSandboxRestoreTimeout = 2 * time.Minute
+const defaultSandboxRestoreTimeout = 5 * time.Minute
 
 // claimIdlePodBackoff is the retry backoff for claiming idle pods.
 // Designed to balance between:
@@ -120,6 +119,7 @@ type SandboxService struct {
 	deletionWebhookEmitter SandboxDeletionWebhookEmitter
 	quotaStore             TeamQuotaLimitStore
 	sandboxStore           SandboxStore
+	resumeGroup            singleflight.Group
 }
 
 type TeamQuotaLimitStore interface {
@@ -127,7 +127,7 @@ type TeamQuotaLimitStore interface {
 	CurrentUsage(ctx context.Context, teamID string, dimension quota.Dimension) (int64, error)
 }
 
-// SandboxPauseEnqueuer schedules durable pausing sandboxes for background completion.
+// SandboxPauseEnqueuer schedules durable pause transactions for background completion.
 type SandboxPauseEnqueuer interface {
 	EnqueueSandboxPause(sandboxID string)
 }

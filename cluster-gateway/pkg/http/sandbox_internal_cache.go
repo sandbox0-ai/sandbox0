@@ -44,7 +44,10 @@ func (s *Server) getSandboxInternalCached(ctx context.Context, sandboxID string)
 	if s.sandboxInternalCache != nil {
 		sandbox, ok, err := s.sandboxInternalCache.Get(ctx, sandboxID)
 		if err == nil && ok && sandbox != nil {
-			return sandbox, nil
+			if sandboxInternalCacheable(sandbox) {
+				return sandbox, nil
+			}
+			s.invalidateSandboxInternalCache(ctx, sandboxID)
 		}
 		if err != nil && s.logger != nil {
 			s.logger.Debug("Sandbox internal cache lookup failed",
@@ -58,15 +61,21 @@ func (s *Server) getSandboxInternalCached(ctx context.Context, sandboxID string)
 	if err != nil {
 		return nil, err
 	}
-	if s.sandboxInternalCache != nil && sandbox != nil {
+	if s.sandboxInternalCache != nil && sandboxInternalCacheable(sandbox) {
 		if err := s.sandboxInternalCache.Set(ctx, sandboxID, sandbox); err != nil && s.logger != nil {
 			s.logger.Debug("Sandbox internal cache store failed",
 				zap.String("sandbox_id", sandboxID),
 				zap.Error(err),
 			)
 		}
+	} else if s.sandboxInternalCache != nil {
+		s.invalidateSandboxInternalCache(ctx, sandboxID)
 	}
 	return sandbox, nil
+}
+
+func sandboxInternalCacheable(sandbox *mgr.Sandbox) bool {
+	return sandbox != nil && strings.TrimSpace(sandbox.InternalAddr) == ""
 }
 
 func (s *Server) invalidateSandboxInternalCache(ctx context.Context, sandboxID string) {

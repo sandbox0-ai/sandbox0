@@ -212,7 +212,7 @@ For API changes, `pkg/apispec/openapi.yaml` is the source of truth. Generated SD
 ## Known Boundaries
 
 - Sandbox0 is a runtime boundary, not a complete agent framework. Bring your own harness or use Agent in Sandbox when you want a framework gateway to live inside the sandbox boundary.
-- Pause/resume does not preserve live processes, sockets, memory, or in-flight requests.
+- Pause/resume does not preserve live processes, sockets, or memory. Runtime requests are routed to a committed generation; during lifecycle transitions they may wait for the transaction to commit and continue after resume.
 - Self-hosted production installs require deliberate choices for Kubernetes runtime isolation, CNI, PostgreSQL, S3-compatible storage, registry, ingress, and credential policy.
 - Browser and computer-use workloads require templates and integrations that include the browser/runtime tools you need.
 - Do not hand-edit generated OpenAPI or SDK output. Update `sandbox0/pkg/apispec/openapi.yaml`, regenerate, and synchronize.

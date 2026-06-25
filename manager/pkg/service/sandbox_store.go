@@ -40,6 +40,7 @@ type SandboxRecord struct {
 	CurrentPodName      string
 	CurrentPodNamespace string
 	RuntimeGeneration   int64
+	LifecycleEpoch      int64
 	ClaimedAt           time.Time
 	ExpiresAt           time.Time
 	HardExpiresAt       time.Time
@@ -96,12 +97,55 @@ type SandboxRootFSLayer struct {
 	CreatedAt           time.Time
 }
 
+const (
+	SandboxLifecycleKindPause  = "pause"
+	SandboxLifecycleKindResume = "resume"
+
+	SandboxLifecycleSourceManual = "manual"
+	SandboxLifecycleSourceAuto   = "auto"
+
+	SandboxLifecyclePhasePreparing  = "preparing"
+	SandboxLifecyclePhaseBarriered  = "barriered"
+	SandboxLifecyclePhasePublishing = "publishing"
+	SandboxLifecyclePhaseCommitting = "committing"
+	SandboxLifecyclePhaseCommitted  = "committed"
+	SandboxLifecyclePhaseAborted    = "aborted"
+)
+
+// SandboxLifecycleTxn is the durable prepare/commit record for a sandbox
+// runtime generation transition.
+type SandboxLifecycleTxn struct {
+	ID                  string
+	SandboxID           string
+	Kind                string
+	Phase               string
+	Source              string
+	Cancelable          bool
+	Epoch               int64
+	FromGeneration      int64
+	ToGeneration        int64
+	FromPodNamespace    string
+	FromPodName         string
+	ToPodNamespace      string
+	ToPodName           string
+	ExpectedHeadLayerID string
+	PreparedHeadLayerID string
+	Error               string
+	CancelReason        string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+	CancelRequestedAt   time.Time
+	CommittedAt         time.Time
+	AbortedAt           time.Time
+}
+
 // SandboxStore persists sandbox identities independently of runtime pods.
 type SandboxStore interface {
 	UpsertSandbox(ctx context.Context, record *SandboxRecord) error
 	GetSandbox(ctx context.Context, sandboxID string) (*SandboxRecord, error)
 	ListSandboxes(ctx context.Context, req *ListSandboxesRequest) ([]*SandboxRecord, error)
-	ListPausingSandboxes(ctx context.Context, limit int) ([]*SandboxRecord, error)
+	ListActiveLifecycleTxns(ctx context.Context, kind string, limit int) ([]*SandboxLifecycleTxn, error)
+	GetActiveLifecycleTxn(ctx context.Context, sandboxID string) (*SandboxLifecycleTxn, error)
 	ListHardExpiredSandboxes(ctx context.Context, now time.Time, limit int) ([]*SandboxRecord, error)
 	MarkSandboxDeleted(ctx context.Context, sandboxID string, deletedAt time.Time) error
 	SaveRootFSState(ctx context.Context, state *SandboxRootFSState) error
@@ -114,6 +158,13 @@ type SandboxStoreTx interface {
 	SaveRuntime(ctx context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time) error
 	MarkRuntimePaused(ctx context.Context, sandboxID string, generation int64, pausedAt time.Time) error
 	SaveRootFSState(ctx context.Context, state *SandboxRootFSState) error
+	GetActiveLifecycleTxn(ctx context.Context, sandboxID string) (*SandboxLifecycleTxn, error)
+	BeginLifecycleTxn(ctx context.Context, txn *SandboxLifecycleTxn) error
+	SetLifecycleTxnRuntime(ctx context.Context, txnID, namespace, podName string) error
+	UpdateLifecycleTxnPhase(ctx context.Context, txnID, phase string) error
+	RequestLifecycleTxnCancel(ctx context.Context, txnID, reason string) (bool, error)
+	CommitLifecycleTxn(ctx context.Context, txnID, preparedHeadLayerID string) error
+	AbortLifecycleTxn(ctx context.Context, txnID, reason string) error
 }
 
 type PGSandboxStore struct {
@@ -165,10 +216,10 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 		INSERT INTO manager.sandboxes (
 			sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
 			cluster_id, status, config, mounts, template_spec,
-			current_pod_name, current_pod_namespace, runtime_generation,
+			current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch,
 			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, COALESCE($19, NOW()), NOW())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, COALESCE($20, NOW()), NOW())
 		ON CONFLICT (sandbox_id) DO UPDATE SET
 			team_id = EXCLUDED.team_id,
 			user_id = EXCLUDED.user_id,
@@ -183,6 +234,7 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 			current_pod_name = EXCLUDED.current_pod_name,
 			current_pod_namespace = EXCLUDED.current_pod_namespace,
 			runtime_generation = EXCLUDED.runtime_generation,
+			lifecycle_epoch = GREATEST(manager.sandboxes.lifecycle_epoch, EXCLUDED.lifecycle_epoch),
 			claimed_at = EXCLUDED.claimed_at,
 			expires_at = EXCLUDED.expires_at,
 			hard_expires_at = EXCLUDED.hard_expires_at,
@@ -190,7 +242,7 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 			updated_at = NOW()
 	`, record.ID, record.TeamID, record.UserID, record.TemplateID, record.TemplateName, record.TemplateNamespace,
 		record.ClusterID, record.Status, configJSON, mountsJSON, specJSON,
-		record.CurrentPodName, record.CurrentPodNamespace, record.RuntimeGeneration,
+		record.CurrentPodName, record.CurrentPodNamespace, record.RuntimeGeneration, record.LifecycleEpoch,
 		nullableTime(record.ClaimedAt), nullableTime(record.ExpiresAt), nullableTime(record.HardExpiresAt), nullableTime(record.DeletedAt), nullableTime(record.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("upsert sandbox: %w", err)
@@ -234,35 +286,42 @@ func (s *PGSandboxStore) ListSandboxes(ctx context.Context, req *ListSandboxesRe
 	return records, nil
 }
 
-func (s *PGSandboxStore) ListPausingSandboxes(ctx context.Context, limit int) ([]*SandboxRecord, error) {
+func (s *PGSandboxStore) ListActiveLifecycleTxns(ctx context.Context, kind string, limit int) ([]*SandboxLifecycleTxn, error) {
 	if s == nil || s.pool == nil {
 		return nil, nil
 	}
 	if limit <= 0 {
 		limit = 500
 	}
-	rows, err := s.pool.Query(ctx, sandboxRecordSelectSQL()+`
-		WHERE deleted_at IS NULL
-			AND status = $1
+	rows, err := s.pool.Query(ctx, lifecycleTxnSelectSQL()+`
+		WHERE kind = $1
+			AND phase IN ('preparing', 'barriered', 'publishing', 'committing')
 		ORDER BY updated_at ASC
 		LIMIT $2
-	`, SandboxStatusPausing, limit)
+	`, strings.TrimSpace(kind), limit)
 	if err != nil {
-		return nil, fmt.Errorf("list pausing sandboxes: %w", err)
+		return nil, fmt.Errorf("list active lifecycle txns: %w", err)
 	}
 	defer rows.Close()
-	var records []*SandboxRecord
+	var txns []*SandboxLifecycleTxn
 	for rows.Next() {
-		record, err := scanSandboxRecordRows(rows)
+		txn, err := scanLifecycleTxnRows(rows)
 		if err != nil {
 			return nil, err
 		}
-		records = append(records, record)
+		txns = append(txns, txn)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate pausing sandboxes: %w", err)
+		return nil, fmt.Errorf("iterate active lifecycle txns: %w", err)
 	}
-	return records, nil
+	return txns, nil
+}
+
+func (s *PGSandboxStore) GetActiveLifecycleTxn(ctx context.Context, sandboxID string) (*SandboxLifecycleTxn, error) {
+	if s == nil || s.pool == nil {
+		return nil, nil
+	}
+	return getActiveLifecycleTxn(ctx, s.pool, sandboxID)
 }
 
 func (s *PGSandboxStore) ListHardExpiredSandboxes(ctx context.Context, now time.Time, limit int) ([]*SandboxRecord, error) {
@@ -307,7 +366,12 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 	if deletedAt.IsZero() {
 		deletedAt = time.Now().UTC()
 	}
-	_, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin mark sandbox deleted tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `
 		UPDATE manager.sandboxes
 		SET status = $2,
 			current_pod_name = '',
@@ -315,11 +379,21 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 			deleted_at = $3,
 			updated_at = NOW()
 		WHERE sandbox_id = $1
-	`, sandboxID, SandboxStatusDeleted, deletedAt)
-	if err != nil {
+	`, sandboxID, SandboxStatusDeleted, deletedAt); err != nil {
 		return fmt.Errorf("mark sandbox deleted: %w", err)
 	}
-	if _, err := s.pool.Exec(ctx, `
+	if _, err := tx.Exec(ctx, `
+		UPDATE manager.sandbox_lifecycle_txns
+		SET phase = $2,
+			error = $3,
+			aborted_at = NOW(),
+			updated_at = NOW()
+		WHERE sandbox_id = $1
+			AND phase IN ('preparing', 'barriered', 'publishing', 'committing')
+	`, sandboxID, SandboxLifecyclePhaseAborted, "sandbox deleted"); err != nil {
+		return fmt.Errorf("abort sandbox lifecycle txns for deleted sandbox: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
 		WITH removed AS (
 			DELETE FROM manager.sandbox_rootfs_bindings
 			WHERE sandbox_id = $1
@@ -346,11 +420,14 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 	`, sandboxID); err != nil {
 		return fmt.Errorf("delete sandbox rootfs binding: %w", err)
 	}
-	if _, err := s.pool.Exec(ctx, `DELETE FROM manager.sandbox_rootfs_states WHERE sandbox_id = $1`, sandboxID); err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM manager.sandbox_rootfs_states WHERE sandbox_id = $1`, sandboxID); err != nil {
 		return fmt.Errorf("delete sandbox rootfs states: %w", err)
 	}
-	if _, err := s.pool.Exec(ctx, `DELETE FROM manager.sandbox_rootfs_heads WHERE sandbox_id = $1`, sandboxID); err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM manager.sandbox_rootfs_heads WHERE sandbox_id = $1`, sandboxID); err != nil {
 		return fmt.Errorf("delete sandbox rootfs head: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit mark sandbox deleted tx: %w", err)
 	}
 	return nil
 }
@@ -440,7 +517,7 @@ type sandboxStoreTx struct {
 }
 
 func (t sandboxStoreTx) SaveRuntime(ctx context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time) error {
-	_, err := t.tx.Exec(ctx, `
+	tag, err := t.tx.Exec(ctx, `
 		UPDATE manager.sandboxes
 		SET status = $2,
 			current_pod_namespace = $3,
@@ -451,15 +528,19 @@ func (t sandboxStoreTx) SaveRuntime(ctx context.Context, sandboxID, namespace, p
 			deleted_at = NULL,
 			updated_at = NOW()
 		WHERE sandbox_id = $1
+			AND deleted_at IS NULL
 	`, sandboxID, status, namespace, podName, generation, nullableTime(expiresAt), nullableTime(hardExpiresAt))
 	if err != nil {
 		return fmt.Errorf("save sandbox runtime: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: %s", ErrSandboxRecordNotFound, sandboxID)
 	}
 	return nil
 }
 
 func (t sandboxStoreTx) MarkRuntimePaused(ctx context.Context, sandboxID string, generation int64, pausedAt time.Time) error {
-	_, err := t.tx.Exec(ctx, `
+	tag, err := t.tx.Exec(ctx, `
 		UPDATE manager.sandboxes
 		SET status = $2,
 			current_pod_namespace = '',
@@ -468,15 +549,201 @@ func (t sandboxStoreTx) MarkRuntimePaused(ctx context.Context, sandboxID string,
 			expires_at = NULL,
 			updated_at = NOW()
 		WHERE sandbox_id = $1
+			AND deleted_at IS NULL
 	`, sandboxID, SandboxStatusPaused, generation)
 	if err != nil {
 		return fmt.Errorf("mark sandbox runtime paused: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: %s", ErrSandboxRecordNotFound, sandboxID)
 	}
 	return nil
 }
 
 func (t sandboxStoreTx) SaveRootFSState(ctx context.Context, state *SandboxRootFSState) error {
 	return saveRootFSState(ctx, t.tx, state)
+}
+
+func (t sandboxStoreTx) GetActiveLifecycleTxn(ctx context.Context, sandboxID string) (*SandboxLifecycleTxn, error) {
+	return getActiveLifecycleTxn(ctx, t.tx, sandboxID)
+}
+
+func (t sandboxStoreTx) BeginLifecycleTxn(ctx context.Context, txn *SandboxLifecycleTxn) error {
+	if txn == nil {
+		return nil
+	}
+	if strings.TrimSpace(txn.ID) == "" {
+		return fmt.Errorf("txn_id is required")
+	}
+	if strings.TrimSpace(txn.SandboxID) == "" {
+		return fmt.Errorf("sandbox_id is required")
+	}
+	if strings.TrimSpace(txn.Kind) == "" {
+		return fmt.Errorf("lifecycle kind is required")
+	}
+	tag, err := t.tx.Exec(ctx, `
+		UPDATE manager.sandboxes
+		SET lifecycle_epoch = lifecycle_epoch + 1,
+			updated_at = NOW()
+		WHERE sandbox_id = $1
+	`, txn.SandboxID)
+	if err != nil {
+		return fmt.Errorf("advance lifecycle epoch: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: %s", ErrSandboxRecordNotFound, txn.SandboxID)
+	}
+	var epoch int64
+	if err := t.tx.QueryRow(ctx, `SELECT lifecycle_epoch FROM manager.sandboxes WHERE sandbox_id = $1`, txn.SandboxID).Scan(&epoch); err != nil {
+		return fmt.Errorf("load lifecycle epoch: %w", err)
+	}
+	txn.Epoch = epoch
+	phase := strings.TrimSpace(txn.Phase)
+	if phase == "" {
+		phase = SandboxLifecyclePhasePreparing
+	}
+	source := strings.TrimSpace(txn.Source)
+	if source == "" {
+		source = SandboxLifecycleSourceManual
+	}
+	_, err = t.tx.Exec(ctx, `
+		INSERT INTO manager.sandbox_lifecycle_txns (
+			txn_id, sandbox_id, kind, phase, source, cancelable, epoch,
+			from_generation, to_generation,
+			from_pod_namespace, from_pod_name,
+			to_pod_namespace, to_pod_name,
+			expected_head_layer_id, prepared_head_layer_id,
+			created_at, updated_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW(), NOW())
+	`, txn.ID, txn.SandboxID, txn.Kind, phase, source, txn.Cancelable, txn.Epoch,
+		txn.FromGeneration, txn.ToGeneration,
+		txn.FromPodNamespace, txn.FromPodName,
+		txn.ToPodNamespace, txn.ToPodName,
+		txn.ExpectedHeadLayerID, txn.PreparedHeadLayerID)
+	if err != nil {
+		return fmt.Errorf("begin lifecycle txn: %w", err)
+	}
+	txn.Phase = phase
+	txn.Source = source
+	return nil
+}
+
+func (t sandboxStoreTx) SetLifecycleTxnRuntime(ctx context.Context, txnID, namespace, podName string) error {
+	txnID = strings.TrimSpace(txnID)
+	if txnID == "" {
+		return nil
+	}
+	tag, err := t.tx.Exec(ctx, `
+		UPDATE manager.sandbox_lifecycle_txns
+		SET to_pod_namespace = $2,
+			to_pod_name = $3,
+			updated_at = NOW()
+		WHERE txn_id = $1
+			AND phase IN ('preparing', 'barriered', 'publishing', 'committing')
+	`, txnID, strings.TrimSpace(namespace), strings.TrimSpace(podName))
+	if err != nil {
+		return fmt.Errorf("set lifecycle txn runtime: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("active lifecycle txn %s not found", txnID)
+	}
+	return nil
+}
+
+func (t sandboxStoreTx) UpdateLifecycleTxnPhase(ctx context.Context, txnID, phase string) error {
+	txnID = strings.TrimSpace(txnID)
+	phase = strings.TrimSpace(phase)
+	if txnID == "" || phase == "" {
+		return nil
+	}
+	tag, err := t.tx.Exec(ctx, `
+		UPDATE manager.sandbox_lifecycle_txns
+		SET phase = $2,
+			updated_at = NOW()
+		WHERE txn_id = $1
+			AND phase IN ('preparing', 'barriered', 'publishing', 'committing')
+			AND cancel_requested_at IS NULL
+	`, txnID, phase)
+	if err != nil {
+		return fmt.Errorf("update lifecycle txn phase: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("active lifecycle txn %s not found", txnID)
+	}
+	return nil
+}
+
+func (t sandboxStoreTx) RequestLifecycleTxnCancel(ctx context.Context, txnID, reason string) (bool, error) {
+	txnID = strings.TrimSpace(txnID)
+	if txnID == "" {
+		return false, nil
+	}
+	tag, err := t.tx.Exec(ctx, `
+		UPDATE manager.sandbox_lifecycle_txns
+		SET cancel_requested_at = COALESCE(cancel_requested_at, NOW()),
+			cancel_reason = CASE
+				WHEN cancel_reason = '' THEN $2
+				ELSE cancel_reason
+			END,
+			updated_at = NOW()
+		WHERE txn_id = $1
+			AND kind = 'pause'
+			AND source = 'auto'
+			AND cancelable = TRUE
+			AND phase IN ('preparing', 'barriered', 'publishing')
+	`, txnID, strings.TrimSpace(reason))
+	if err != nil {
+		return false, fmt.Errorf("request lifecycle txn cancel: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+func (t sandboxStoreTx) CommitLifecycleTxn(ctx context.Context, txnID, preparedHeadLayerID string) error {
+	txnID = strings.TrimSpace(txnID)
+	if txnID == "" {
+		return nil
+	}
+	tag, err := t.tx.Exec(ctx, `
+		UPDATE manager.sandbox_lifecycle_txns
+		SET phase = $2,
+			prepared_head_layer_id = $3,
+			committed_at = NOW(),
+			updated_at = NOW()
+		WHERE txn_id = $1
+			AND phase IN ('preparing', 'barriered', 'publishing', 'committing')
+			AND cancel_requested_at IS NULL
+	`, txnID, SandboxLifecyclePhaseCommitted, strings.TrimSpace(preparedHeadLayerID))
+	if err != nil {
+		return fmt.Errorf("commit lifecycle txn: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("active lifecycle txn %s not found", txnID)
+	}
+	return nil
+}
+
+func (t sandboxStoreTx) AbortLifecycleTxn(ctx context.Context, txnID, reason string) error {
+	txnID = strings.TrimSpace(txnID)
+	if txnID == "" {
+		return nil
+	}
+	tag, err := t.tx.Exec(ctx, `
+		UPDATE manager.sandbox_lifecycle_txns
+		SET phase = $2,
+			error = $3,
+			aborted_at = NOW(),
+			updated_at = NOW()
+		WHERE txn_id = $1
+			AND phase IN ('preparing', 'barriered', 'publishing', 'committing')
+	`, txnID, SandboxLifecyclePhaseAborted, strings.TrimSpace(reason))
+	if err != nil {
+		return fmt.Errorf("abort lifecycle txn: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("active lifecycle txn %s not found", txnID)
+	}
+	return nil
 }
 
 func (t sandboxStoreTx) UpsertSandbox(ctx context.Context, record *SandboxRecord) error {
@@ -487,9 +754,32 @@ func sandboxRecordSelectSQL() string {
 	return `
 		SELECT sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
 			cluster_id, status, config, mounts, template_spec,
-			current_pod_name, current_pod_namespace, runtime_generation,
+			current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch,
 			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 		FROM manager.sandboxes`
+}
+
+func lifecycleTxnSelectSQL() string {
+	return `
+		SELECT txn_id, sandbox_id, kind, phase, source, cancelable, epoch,
+			from_generation, to_generation,
+			from_pod_namespace, from_pod_name,
+			to_pod_namespace, to_pod_name,
+			expected_head_layer_id, prepared_head_layer_id,
+			error, cancel_reason, created_at, updated_at,
+			cancel_requested_at, committed_at, aborted_at
+		FROM manager.sandbox_lifecycle_txns`
+}
+
+func getActiveLifecycleTxn(ctx context.Context, exec interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, sandboxID string) (*SandboxLifecycleTxn, error) {
+	return scanLifecycleTxn(exec.QueryRow(ctx, lifecycleTxnSelectSQL()+`
+		WHERE sandbox_id = $1
+			AND phase IN ('preparing', 'barriered', 'publishing', 'committing')
+		ORDER BY updated_at DESC
+		LIMIT 1
+	`, sandboxID))
 }
 
 type rootFSStateExecutor interface {
@@ -805,7 +1095,7 @@ func scanSandboxRecordInto(scanner sandboxRecordScanner) (*SandboxRecord, error)
 	if err := scanner.Scan(
 		&record.ID, &record.TeamID, &record.UserID, &record.TemplateID, &record.TemplateName, &record.TemplateNamespace,
 		&record.ClusterID, &record.Status, &configJSON, &mountsJSON, &specJSON,
-		&record.CurrentPodName, &record.CurrentPodNamespace, &record.RuntimeGeneration,
+		&record.CurrentPodName, &record.CurrentPodNamespace, &record.RuntimeGeneration, &record.LifecycleEpoch,
 		&claimedAt, &expiresAt, &hardExpiresAt, &deletedAt, &record.CreatedAt, &record.UpdatedAt,
 	); err != nil {
 		return nil, err
@@ -824,6 +1114,58 @@ func scanSandboxRecordInto(scanner sandboxRecordScanner) (*SandboxRecord, error)
 	record.HardExpiresAt = derefTime(hardExpiresAt)
 	record.DeletedAt = derefTime(deletedAt)
 	return &record, nil
+}
+
+func scanLifecycleTxn(row sandboxRecordScanner) (*SandboxLifecycleTxn, error) {
+	txn, err := scanLifecycleTxnInto(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return txn, nil
+}
+
+func scanLifecycleTxnRows(rows pgx.Rows) (*SandboxLifecycleTxn, error) {
+	return scanLifecycleTxnInto(rows)
+}
+
+func scanLifecycleTxnInto(scanner sandboxRecordScanner) (*SandboxLifecycleTxn, error) {
+	var txn SandboxLifecycleTxn
+	var cancelRequestedAt, committedAt, abortedAt *time.Time
+	if err := scanner.Scan(
+		&txn.ID, &txn.SandboxID, &txn.Kind, &txn.Phase, &txn.Source, &txn.Cancelable, &txn.Epoch,
+		&txn.FromGeneration, &txn.ToGeneration,
+		&txn.FromPodNamespace, &txn.FromPodName,
+		&txn.ToPodNamespace, &txn.ToPodName,
+		&txn.ExpectedHeadLayerID, &txn.PreparedHeadLayerID,
+		&txn.Error, &txn.CancelReason, &txn.CreatedAt, &txn.UpdatedAt,
+		&cancelRequestedAt, &committedAt, &abortedAt,
+	); err != nil {
+		return nil, err
+	}
+	txn.CancelRequestedAt = derefTime(cancelRequestedAt)
+	txn.CommittedAt = derefTime(committedAt)
+	txn.AbortedAt = derefTime(abortedAt)
+	return &txn, nil
+}
+
+func cloneSandboxLifecycleTxn(txn *SandboxLifecycleTxn) *SandboxLifecycleTxn {
+	if txn == nil {
+		return nil
+	}
+	clone := *txn
+	return &clone
+}
+
+func sandboxLifecyclePhaseActive(phase string) bool {
+	switch phase {
+	case SandboxLifecyclePhasePreparing, SandboxLifecyclePhaseBarriered, SandboxLifecyclePhasePublishing, SandboxLifecyclePhaseCommitting:
+		return true
+	default:
+		return false
+	}
 }
 
 func marshalSandboxRecordJSON(record *SandboxRecord) ([]byte, []byte, []byte, error) {

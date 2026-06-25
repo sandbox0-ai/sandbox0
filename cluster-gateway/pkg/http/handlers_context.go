@@ -2,7 +2,6 @@ package http
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -19,8 +18,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
 )
-
-const defaultAutoResumeTimeout = 2 * time.Minute
 
 // === Process/Context Management Handlers (→ Procd) ===
 
@@ -245,9 +242,7 @@ func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error)
 		return nil, errors.New("sandbox auto_resume is disabled")
 	}
 	if sandboxNeedsRuntime(sandbox) {
-		resumeCtx, cancel := context.WithTimeout(c.Request.Context(), defaultAutoResumeTimeout)
-		defer cancel()
-		if err := s.managerClient.ResumeSandbox(resumeCtx, sandboxID, authCtx.UserID, authCtx.TeamID); err != nil {
+		if err := s.managerClient.ResumeSandbox(c.Request.Context(), sandboxID, authCtx.UserID, authCtx.TeamID); err != nil {
 			s.logger.Warn("Resume sandbox failed",
 				zap.String("sandbox_id", sandboxID),
 				zap.Error(err),
@@ -290,7 +285,7 @@ func sandboxRuntimeMissing(sandbox *mgr.Sandbox) bool {
 		return false
 	}
 	switch sandbox.Status {
-	case mgr.SandboxStatusPaused, mgr.SandboxStatusPausing, mgr.SandboxStatusResuming:
+	case mgr.SandboxStatusPaused:
 		return true
 	}
 	return strings.TrimSpace(sandbox.InternalAddr) == ""

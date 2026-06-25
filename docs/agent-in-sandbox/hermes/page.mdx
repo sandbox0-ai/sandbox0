@@ -384,7 +384,7 @@ curl -fsS "$HERMES_PUBLIC_URL/health" \\
   ]}
 />
 
-Hermes state under `/opt/data` remains on the mounted volume. Running processes, sockets, memory, and in-flight requests are not preserved across pause/resume.
+Hermes state under `/opt/data` remains on the mounted volume. Running processes, sockets, and memory are not preserved across pause/resume. Runtime requests are routed to a committed generation and may wait while lifecycle transactions commit.
 
 <Callout variant="warning">
 Paused sandboxes cannot receive outbound long-polling, WebSocket, or cron events. Put message webhooks and schedulers in an always-on control plane that calls the Sandbox0 service URL, or keep the sandbox running for workflows that must listen continuously.

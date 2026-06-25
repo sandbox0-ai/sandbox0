@@ -338,7 +338,7 @@ curl -fsS "$OPENCLAW_PUBLIC_URL/health" \\
   ]}
 />
 
-OpenClaw state under `/home/node/.openclaw` remains on the mounted volume. Running processes, sockets, memory, and in-flight requests are not preserved across pause/resume.
+OpenClaw state under `/home/node/.openclaw` remains on the mounted volume. Running processes, sockets, and memory are not preserved across pause/resume. Runtime requests are routed to a committed generation and may wait while lifecycle transactions commit.
 
 <Callout variant="warning">
 Outbound channel connections do not wake a paused sandbox by themselves. If OpenClaw listens to Telegram, Discord, or another external channel through long polling or WebSockets, put the webhook receiver in an always-on control plane that calls the Sandbox0 service URL, or keep that sandbox running.

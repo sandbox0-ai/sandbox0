@@ -18,6 +18,7 @@ func UpstreamTimeoutWhitelist() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if RequestPathAllowedWithoutUpstreamTimeout(c.Request.URL.Path) {
 			c.Request = proxy.WithUpstreamTimeoutDisabledRequest(c.Request)
+			_ = proxy.DisableResponseWriteDeadline(c.Writer)
 		}
 		c.Next()
 	}

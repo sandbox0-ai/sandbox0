@@ -29,6 +29,9 @@ const (
 	pathVolumeSnapshotAbort      = "/api/v1/volume-portals/snapshot-checkpoints/abort"
 	pathRootFSInspect            = "/api/v1/rootfs/inspect"
 	pathRootFSSave               = "/api/v1/rootfs/save"
+	pathRootFSSnapshotPrepare    = "/api/v1/rootfs/snapshots/prepare"
+	pathRootFSSnapshotPublish    = "/api/v1/rootfs/snapshots/publish"
+	pathRootFSSnapshotAbort      = "/api/v1/rootfs/snapshots/abort"
 	pathRootFSApply              = "/api/v1/rootfs/apply"
 )
 
@@ -127,6 +130,18 @@ func (c *Client) SaveRootFS(ctx context.Context, ctldAddress string, req SaveRoo
 	return PostJSON[SaveRootFSResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSSave, req)
 }
 
+func (c *Client) PrepareRootFSSnapshot(ctx context.Context, ctldAddress string, req PrepareRootFSSnapshotRequest) (*PrepareRootFSSnapshotResponse, error) {
+	return PostJSON[PrepareRootFSSnapshotResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSSnapshotPrepare, req)
+}
+
+func (c *Client) PublishRootFSSnapshot(ctx context.Context, ctldAddress string, req PublishRootFSSnapshotRequest) (*PublishRootFSSnapshotResponse, error) {
+	return PostJSON[PublishRootFSSnapshotResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSSnapshotPublish, req)
+}
+
+func (c *Client) AbortRootFSSnapshot(ctx context.Context, ctldAddress string, req AbortRootFSSnapshotRequest) (*AbortRootFSSnapshotResponse, error) {
+	return PostJSON[AbortRootFSSnapshotResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSSnapshotAbort, req)
+}
+
 func (c *Client) ApplyRootFS(ctx context.Context, ctldAddress string, req ApplyRootFSRequest) (*ApplyRootFSResponse, error) {
 	return PostJSON[ApplyRootFSResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSApply, req)
 }
@@ -207,6 +222,12 @@ func responseError(resp any) string {
 	case *InspectRootFSResponse:
 		return strings.TrimSpace(typed.Error)
 	case *SaveRootFSResponse:
+		return strings.TrimSpace(typed.Error)
+	case *PrepareRootFSSnapshotResponse:
+		return strings.TrimSpace(typed.Error)
+	case *PublishRootFSSnapshotResponse:
+		return strings.TrimSpace(typed.Error)
+	case *AbortRootFSSnapshotResponse:
 		return strings.TrimSpace(typed.Error)
 	case *ApplyRootFSResponse:
 		return strings.TrimSpace(typed.Error)

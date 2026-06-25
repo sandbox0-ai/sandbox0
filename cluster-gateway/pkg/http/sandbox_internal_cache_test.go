@@ -45,9 +45,47 @@ func TestGetSandboxInternalCachedPopulatesCache(t *testing.T) {
 		}
 		managerGets.Add(1)
 		_ = spec.WriteSuccess(w, http.StatusOK, &mgr.Sandbox{
+			ID:     "sb-1",
+			TeamID: "team-1",
+			Status: mgr.SandboxStatusPaused,
+			Paused: true,
+		})
+	}))
+	defer manager.Close()
+
+	cache := newTestSandboxInternalCache()
+	server := &Server{
+		managerClient:        newTestManagerClient(t, manager.URL),
+		sandboxInternalCache: cache,
+		logger:               zap.NewNop(),
+	}
+
+	for i := 0; i < 2; i++ {
+		sandbox, err := server.getSandboxInternalCached(context.Background(), "sb-1")
+		if err != nil {
+			t.Fatalf("get sandbox: %v", err)
+		}
+		if sandbox.Status != mgr.SandboxStatusPaused {
+			t.Fatalf("Status = %q, want paused", sandbox.Status)
+		}
+	}
+	if got := managerGets.Load(); got != 1 {
+		t.Fatalf("manager gets = %d, want 1", got)
+	}
+	if cache.sets != 1 {
+		t.Fatalf("cache sets = %d, want 1", cache.sets)
+	}
+}
+
+func TestGetSandboxInternalCachedDoesNotCacheRuntimeAddress(t *testing.T) {
+	var managerGets atomic.Int32
+	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		managerGets.Add(1)
+		_ = spec.WriteSuccess(w, http.StatusOK, &mgr.Sandbox{
 			ID:           "sb-1",
 			TeamID:       "team-1",
 			InternalAddr: "http://127.0.0.1:7777",
+			Status:       mgr.SandboxStatusRunning,
 		})
 	}))
 	defer manager.Close()
@@ -65,14 +103,55 @@ func TestGetSandboxInternalCachedPopulatesCache(t *testing.T) {
 			t.Fatalf("get sandbox: %v", err)
 		}
 		if sandbox.InternalAddr != "http://127.0.0.1:7777" {
-			t.Fatalf("InternalAddr = %q", sandbox.InternalAddr)
+			t.Fatalf("InternalAddr = %q, want runtime address", sandbox.InternalAddr)
 		}
+	}
+	if got := managerGets.Load(); got != 2 {
+		t.Fatalf("manager gets = %d, want 2", got)
+	}
+	if cache.sets != 0 {
+		t.Fatalf("cache sets = %d, want 0", cache.sets)
+	}
+}
+
+func TestGetSandboxInternalCachedInvalidatesCachedRuntimeAddress(t *testing.T) {
+	var managerGets atomic.Int32
+	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		managerGets.Add(1)
+		_ = spec.WriteSuccess(w, http.StatusOK, &mgr.Sandbox{
+			ID:     "sb-1",
+			TeamID: "team-1",
+			Status: mgr.SandboxStatusPaused,
+			Paused: true,
+		})
+	}))
+	defer manager.Close()
+
+	cache := newTestSandboxInternalCache()
+	cache.values["sb-1"] = &mgr.Sandbox{
+		ID:           "sb-1",
+		TeamID:       "team-1",
+		InternalAddr: "http://127.0.0.1:7777",
+		Status:       mgr.SandboxStatusRunning,
+	}
+	server := &Server{
+		managerClient:        newTestManagerClient(t, manager.URL),
+		sandboxInternalCache: cache,
+		logger:               zap.NewNop(),
+	}
+
+	sandbox, err := server.getSandboxInternalCached(context.Background(), "sb-1")
+	if err != nil {
+		t.Fatalf("get sandbox: %v", err)
+	}
+	if sandbox.InternalAddr != "" || sandbox.Status != mgr.SandboxStatusPaused {
+		t.Fatalf("sandbox = %+v, want paused sandbox without runtime address", sandbox)
 	}
 	if got := managerGets.Load(); got != 1 {
 		t.Fatalf("manager gets = %d, want 1", got)
 	}
-	if cache.sets != 1 {
-		t.Fatalf("cache sets = %d, want 1", cache.sets)
+	if cache.deletes != 1 {
+		t.Fatalf("cache deletes = %d, want 1", cache.deletes)
 	}
 }
 

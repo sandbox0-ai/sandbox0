@@ -158,7 +158,14 @@ func (s *SandboxService) listSandboxesFromStore(ctx context.Context, req *ListSa
 	summaries := make([]*SandboxSummary, 0, len(records))
 	for _, record := range records {
 		sandbox := s.recordToSandbox(record)
-		if record.CurrentPodName != "" && !recordLifecycleStatusOverridesPod(record.Status) {
+		var activeTxn *SandboxLifecycleTxn
+		if record != nil && record.Status != SandboxStatusPaused {
+			activeTxn, err = s.sandboxStore.GetActiveLifecycleTxn(ctx, record.ID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if record.CurrentPodName != "" && record.Status != SandboxStatusPaused && !sandboxLifecycleTxnHidesCommittedRuntime(activeTxn) {
 			if pod, err := s.getSandboxPod(ctx, record.ID); err == nil {
 				sandbox = s.podToSandbox(ctx, pod, record.ID)
 			}

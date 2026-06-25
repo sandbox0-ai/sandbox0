@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -34,38 +35,64 @@ import (
 func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 	saveCalled := false
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/v1/rootfs/save", r.URL.Path)
-		var req ctldapi.SaveRootFSRequest
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-		assert.Equal(t, "sandbox-1", req.SandboxID)
-		assert.Equal(t, "team-1", req.TeamID)
-		assert.Equal(t, int64(3), req.ExpectedRuntimeGeneration)
-		assert.Empty(t, req.ParentLayerID)
-		assert.Equal(t, ctldapi.RootFSContainerRef{
-			Namespace:     "default",
-			PodName:       "pod-1",
-			PodUID:        "pod-uid",
-			ContainerName: "procd",
-		}, req.Target)
-		assert.ElementsMatch(t, []string{"/workspace/data", volumeportal.WebhookStateMountPath}, req.ExcludedPaths)
-		saveCalled = true
-		_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{
-			Info: ctldapi.RootFSInfo{
-				Runtime:             "runc",
-				RuntimeHandler:      "io.containerd.runc.v2",
-				BaseImageRef:        "docker.io/library/busybox:1.36",
-				BaseImageDigest:     "sha256:base",
-				Snapshotter:         "overlayfs",
-				SnapshotParent:      "parent-1",
-				SnapshotParentChain: []string{"parent-1", "parent-0"},
-			},
-			Descriptor: ctldapi.RootFSDiffDescriptor{
-				MediaType: "application/vnd.oci.image.layer.v1.tar",
-				Digest:    "sha256:diff",
-				Size:      123,
-				ObjectKey: "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar",
-			},
-		})
+		switch r.URL.Path {
+		case "/api/v1/rootfs/snapshots/prepare":
+			var req ctldapi.PrepareRootFSSnapshotRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			assert.Empty(t, req.ParentLayerID)
+			assert.Equal(t, ctldapi.RootFSContainerRef{
+				Namespace:     "default",
+				PodName:       "pod-1",
+				PodUID:        "pod-uid",
+				ContainerName: "procd",
+			}, req.Target)
+			assert.ElementsMatch(t, []string{"/workspace/data", volumeportal.WebhookStateMountPath}, req.ExcludedPaths)
+			_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{
+				Handle: "handle-1",
+				Info: ctldapi.RootFSInfo{
+					Runtime:             "runc",
+					RuntimeHandler:      "io.containerd.runc.v2",
+					BaseImageRef:        "docker.io/library/busybox:1.36",
+					BaseImageDigest:     "sha256:base",
+					Snapshotter:         "overlayfs",
+					SnapshotParent:      "parent-1",
+					SnapshotParentChain: []string{"parent-1", "parent-0"},
+				},
+				Descriptor: ctldapi.RootFSDiffDescriptor{
+					MediaType: "application/vnd.oci.image.layer.v1.tar",
+					Digest:    "sha256:diff",
+					Size:      123,
+				},
+			})
+		case "/api/v1/rootfs/snapshots/publish":
+			var req ctldapi.PublishRootFSSnapshotRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			assert.Equal(t, "handle-1", req.Handle)
+			assert.Equal(t, "sandbox-1", req.SandboxID)
+			assert.Equal(t, "team-1", req.TeamID)
+			assert.Equal(t, int64(3), req.ExpectedRuntimeGeneration)
+			saveCalled = true
+			_ = json.NewEncoder(w).Encode(ctldapi.PublishRootFSSnapshotResponse{
+				Published: true,
+				Info: ctldapi.RootFSInfo{
+					Runtime:             "runc",
+					RuntimeHandler:      "io.containerd.runc.v2",
+					BaseImageRef:        "docker.io/library/busybox:1.36",
+					BaseImageDigest:     "sha256:base",
+					Snapshotter:         "overlayfs",
+					SnapshotParent:      "parent-1",
+					SnapshotParentChain: []string{"parent-1", "parent-0"},
+				},
+				Descriptor: ctldapi.RootFSDiffDescriptor{
+					MediaType: "application/vnd.oci.image.layer.v1.tar",
+					Digest:    "sha256:diff",
+					Size:      123,
+					ObjectKey: "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar",
+				},
+			})
+		default:
+			t.Fatalf("unexpected ctld path %s", r.URL.Path)
+		}
 	}))
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
@@ -107,19 +134,24 @@ func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 		logger:        zap.NewNop(),
 		pauseEnqueuer: enqueuer,
 	}
+	var procdCalls []string
+	defer attachRootFSTestProcd(t, pod, svc, &procdCalls)()
 
 	resp, err := svc.PauseSandbox(context.Background(), "sandbox-1")
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.False(t, resp.Paused)
-	assert.Equal(t, SandboxStatusPausing, resp.Status)
+	assert.Equal(t, SandboxStatusRunning, resp.Status)
 	assert.False(t, saveCalled, "pause request must not synchronously save rootfs")
 	assert.Equal(t, []string{"sandbox-1"}, enqueuer.calls)
-	assert.Equal(t, SandboxStatusPausing, store.records["sandbox-1"].Status)
+	assert.Equal(t, SandboxStatusRunning, store.records["sandbox-1"].Status)
+	require.Len(t, store.lifecycleTxns, 1)
 
 	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
 
 	assert.True(t, deleteCalled)
+	assert.Contains(t, procdCalls, "barrier:true")
+	assert.Contains(t, procdCalls, "pause")
 	_, err = k8sClient.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
 	require.NoError(t, err, "pause completion should not wait for the pod to disappear after delete is accepted")
 	state := store.rootFSStates["sandbox-1"]
@@ -135,27 +167,50 @@ func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 }
 
 func TestPauseSandboxRuntimeSavesChildLayerFromParentHead(t *testing.T) {
-	var savedReq ctldapi.SaveRootFSRequest
+	var savedReq ctldapi.PrepareRootFSSnapshotRequest
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/v1/rootfs/save", r.URL.Path)
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&savedReq))
-		_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{
-			Info: ctldapi.RootFSInfo{
-				Runtime:             "runc",
-				RuntimeHandler:      "io.containerd.runc.v2",
-				BaseImageRef:        "docker.io/library/busybox:1.36",
-				BaseImageDigest:     "sha256:base",
-				Snapshotter:         "overlayfs",
-				SnapshotParent:      "parent-1",
-				SnapshotParentChain: []string{"parent-1", "parent-0"},
-			},
-			Descriptor: ctldapi.RootFSDiffDescriptor{
-				MediaType: "application/vnd.oci.image.layer.v1.tar",
-				Digest:    "sha256:child",
-				Size:      123,
-				ObjectKey: "sandbox-rootfs/team-1/sandbox-1/4/sha256/child.tar",
-			},
-		})
+		switch r.URL.Path {
+		case "/api/v1/rootfs/snapshots/prepare":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&savedReq))
+			_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{
+				Handle: "handle-1",
+				Info: ctldapi.RootFSInfo{
+					Runtime:             "runc",
+					RuntimeHandler:      "io.containerd.runc.v2",
+					BaseImageRef:        "docker.io/library/busybox:1.36",
+					BaseImageDigest:     "sha256:base",
+					Snapshotter:         "overlayfs",
+					SnapshotParent:      "parent-1",
+					SnapshotParentChain: []string{"parent-1", "parent-0"},
+				},
+				Descriptor: ctldapi.RootFSDiffDescriptor{
+					MediaType: "application/vnd.oci.image.layer.v1.tar",
+					Digest:    "sha256:child",
+					Size:      123,
+				},
+			})
+		case "/api/v1/rootfs/snapshots/publish":
+			_ = json.NewEncoder(w).Encode(ctldapi.PublishRootFSSnapshotResponse{
+				Published: true,
+				Info: ctldapi.RootFSInfo{
+					Runtime:             "runc",
+					RuntimeHandler:      "io.containerd.runc.v2",
+					BaseImageRef:        "docker.io/library/busybox:1.36",
+					BaseImageDigest:     "sha256:base",
+					Snapshotter:         "overlayfs",
+					SnapshotParent:      "parent-1",
+					SnapshotParentChain: []string{"parent-1", "parent-0"},
+				},
+				Descriptor: ctldapi.RootFSDiffDescriptor{
+					MediaType: "application/vnd.oci.image.layer.v1.tar",
+					Digest:    "sha256:child",
+					Size:      123,
+					ObjectKey: "sandbox-rootfs/team-1/sandbox-1/4/sha256/child.tar",
+				},
+			})
+		default:
+			t.Fatalf("unexpected ctld path %s", r.URL.Path)
+		}
 	}))
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
@@ -168,7 +223,7 @@ func TestPauseSandboxRuntimeSavesChildLayerFromParentHead(t *testing.T) {
 				ID:                "sandbox-1",
 				TeamID:            "team-1",
 				RuntimeGeneration: 3,
-				Status:            SandboxStatusPausing,
+				Status:            SandboxStatusRunning,
 			},
 		},
 		rootFSStates: map[string]*SandboxRootFSState{
@@ -191,6 +246,8 @@ func TestPauseSandboxRuntimeSavesChildLayerFromParentHead(t *testing.T) {
 		clock:        systemTime{},
 		logger:       zap.NewNop(),
 	}
+	defer attachRootFSTestProcd(t, pod, svc, nil)()
+	addRootFSTestPauseTxn(store, pod, SandboxLifecyclePhasePreparing)
 
 	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
 
@@ -209,30 +266,47 @@ func TestCompletePausingSandboxRuntimeDoesNotCommitStaleCheckpoint(t *testing.T)
 				ID:                "sandbox-1",
 				TeamID:            "team-1",
 				RuntimeGeneration: 3,
-				Status:            SandboxStatusPausing,
+				Status:            SandboxStatusRunning,
 			},
 		},
 	}
+	txnID := ""
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/v1/rootfs/save", r.URL.Path)
-		store.setSandboxStatus("sandbox-1", SandboxStatusRunning)
-		_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{
-			Info: ctldapi.RootFSInfo{
-				Runtime:             "runc",
-				RuntimeHandler:      "io.containerd.runc.v2",
-				BaseImageRef:        "docker.io/library/busybox:1.36",
-				BaseImageDigest:     "sha256:base",
-				Snapshotter:         "overlayfs",
-				SnapshotParent:      "parent-1",
-				SnapshotParentChain: []string{"parent-1", "parent-0"},
-			},
-			Descriptor: ctldapi.RootFSDiffDescriptor{
-				MediaType: "application/vnd.oci.image.layer.v1.tar",
-				Digest:    "sha256:stale",
-				Size:      123,
-				ObjectKey: "sandbox-rootfs/team-1/sandbox-1/3/sha256/stale.tar",
-			},
-		})
+		switch r.URL.Path {
+		case "/api/v1/rootfs/snapshots/prepare":
+			store.mu.Lock()
+			store.lifecycleTxns[txnID].Phase = SandboxLifecyclePhaseAborted
+			store.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{
+				Handle: "handle-1",
+				Info: ctldapi.RootFSInfo{
+					Runtime:             "runc",
+					RuntimeHandler:      "io.containerd.runc.v2",
+					BaseImageRef:        "docker.io/library/busybox:1.36",
+					BaseImageDigest:     "sha256:base",
+					Snapshotter:         "overlayfs",
+					SnapshotParent:      "parent-1",
+					SnapshotParentChain: []string{"parent-1", "parent-0"},
+				},
+				Descriptor: ctldapi.RootFSDiffDescriptor{
+					MediaType: "application/vnd.oci.image.layer.v1.tar",
+					Digest:    "sha256:stale",
+					Size:      123,
+				},
+			})
+		case "/api/v1/rootfs/snapshots/publish":
+			_ = json.NewEncoder(w).Encode(ctldapi.PublishRootFSSnapshotResponse{
+				Published: true,
+				Descriptor: ctldapi.RootFSDiffDescriptor{
+					MediaType: "application/vnd.oci.image.layer.v1.tar",
+					Digest:    "sha256:stale",
+					Size:      123,
+					ObjectKey: "sandbox-rootfs/team-1/sandbox-1/3/sha256/stale.tar",
+				},
+			})
+		default:
+			t.Fatalf("unexpected ctld path %s", r.URL.Path)
+		}
 	}))
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
@@ -254,6 +328,8 @@ func TestCompletePausingSandboxRuntimeDoesNotCommitStaleCheckpoint(t *testing.T)
 		clock:        systemTime{},
 		logger:       zap.NewNop(),
 	}
+	defer attachRootFSTestProcd(t, pod, svc, nil)()
+	txnID = addRootFSTestPauseTxn(store, pod, SandboxLifecyclePhasePreparing)
 
 	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
 	assert.False(t, deleteCalled)
@@ -262,27 +338,50 @@ func TestCompletePausingSandboxRuntimeDoesNotCommitStaleCheckpoint(t *testing.T)
 }
 
 func TestPauseSandboxRuntimeSquashesRootFSWhenChainIsTooDeep(t *testing.T) {
-	var savedReq ctldapi.SaveRootFSRequest
+	var savedReq ctldapi.PrepareRootFSSnapshotRequest
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/v1/rootfs/save", r.URL.Path)
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&savedReq))
-		_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{
-			Info: ctldapi.RootFSInfo{
-				Runtime:             "runc",
-				RuntimeHandler:      "io.containerd.runc.v2",
-				BaseImageRef:        "docker.io/library/busybox:1.36",
-				BaseImageDigest:     "sha256:base",
-				Snapshotter:         "overlayfs",
-				SnapshotParent:      "parent-1",
-				SnapshotParentChain: []string{"parent-1", "parent-0"},
-			},
-			Descriptor: ctldapi.RootFSDiffDescriptor{
-				MediaType: "application/vnd.oci.image.layer.v1.tar",
-				Digest:    "sha256:squashed",
-				Size:      456,
-				ObjectKey: "sandbox-rootfs/team-1/sandbox-1/4/sha256/squashed.tar",
-			},
-		})
+		switch r.URL.Path {
+		case "/api/v1/rootfs/snapshots/prepare":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&savedReq))
+			_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{
+				Handle: "handle-1",
+				Info: ctldapi.RootFSInfo{
+					Runtime:             "runc",
+					RuntimeHandler:      "io.containerd.runc.v2",
+					BaseImageRef:        "docker.io/library/busybox:1.36",
+					BaseImageDigest:     "sha256:base",
+					Snapshotter:         "overlayfs",
+					SnapshotParent:      "parent-1",
+					SnapshotParentChain: []string{"parent-1", "parent-0"},
+				},
+				Descriptor: ctldapi.RootFSDiffDescriptor{
+					MediaType: "application/vnd.oci.image.layer.v1.tar",
+					Digest:    "sha256:squashed",
+					Size:      456,
+				},
+			})
+		case "/api/v1/rootfs/snapshots/publish":
+			_ = json.NewEncoder(w).Encode(ctldapi.PublishRootFSSnapshotResponse{
+				Published: true,
+				Info: ctldapi.RootFSInfo{
+					Runtime:             "runc",
+					RuntimeHandler:      "io.containerd.runc.v2",
+					BaseImageRef:        "docker.io/library/busybox:1.36",
+					BaseImageDigest:     "sha256:base",
+					Snapshotter:         "overlayfs",
+					SnapshotParent:      "parent-1",
+					SnapshotParentChain: []string{"parent-1", "parent-0"},
+				},
+				Descriptor: ctldapi.RootFSDiffDescriptor{
+					MediaType: "application/vnd.oci.image.layer.v1.tar",
+					Digest:    "sha256:squashed",
+					Size:      456,
+					ObjectKey: "sandbox-rootfs/team-1/sandbox-1/4/sha256/squashed.tar",
+				},
+			})
+		default:
+			t.Fatalf("unexpected ctld path %s", r.URL.Path)
+		}
 	}))
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
@@ -316,7 +415,7 @@ func TestPauseSandboxRuntimeSquashesRootFSWhenChainIsTooDeep(t *testing.T) {
 				ID:                "sandbox-1",
 				TeamID:            "team-1",
 				RuntimeGeneration: 3,
-				Status:            SandboxStatusPausing,
+				Status:            SandboxStatusRunning,
 			},
 		},
 		rootFSStates: map[string]*SandboxRootFSState{
@@ -336,6 +435,8 @@ func TestPauseSandboxRuntimeSquashesRootFSWhenChainIsTooDeep(t *testing.T) {
 		clock:  systemTime{},
 		logger: zap.NewNop(),
 	}
+	defer attachRootFSTestProcd(t, pod, svc, nil)()
+	addRootFSTestPauseTxn(store, pod, SandboxLifecyclePhasePreparing)
 
 	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
 
@@ -349,34 +450,57 @@ func TestPauseSandboxRuntimeSquashesRootFSWhenChainIsTooDeep(t *testing.T) {
 }
 
 func TestPauseSandboxRuntimeFallsBackToRootLayerWhenBaselineIsMissing(t *testing.T) {
-	var saveRequests []ctldapi.SaveRootFSRequest
+	var saveRequests []ctldapi.PrepareRootFSSnapshotRequest
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/v1/rootfs/save", r.URL.Path)
-		var req ctldapi.SaveRootFSRequest
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-		saveRequests = append(saveRequests, req)
-		if req.ParentLayerID != "" {
-			w.WriteHeader(http.StatusNotFound)
-			_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{Error: "create rootfs diff: rootfs baseline layer-parent is not captured"})
-			return
+		switch r.URL.Path {
+		case "/api/v1/rootfs/snapshots/prepare":
+			var req ctldapi.PrepareRootFSSnapshotRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			saveRequests = append(saveRequests, req)
+			if req.ParentLayerID != "" {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{Error: "create rootfs diff: rootfs baseline layer-parent is not captured"})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{
+				Handle: "handle-2",
+				Info: ctldapi.RootFSInfo{
+					Runtime:             "runc",
+					RuntimeHandler:      "io.containerd.runc.v2",
+					BaseImageRef:        "docker.io/library/busybox:1.36",
+					BaseImageDigest:     "sha256:base",
+					Snapshotter:         "overlayfs",
+					SnapshotParent:      "parent-1",
+					SnapshotParentChain: []string{"parent-1", "parent-0"},
+				},
+				Descriptor: ctldapi.RootFSDiffDescriptor{
+					MediaType: "application/vnd.oci.image.layer.v1.tar",
+					Digest:    "sha256:full",
+					Size:      456,
+				},
+			})
+		case "/api/v1/rootfs/snapshots/publish":
+			_ = json.NewEncoder(w).Encode(ctldapi.PublishRootFSSnapshotResponse{
+				Published: true,
+				Info: ctldapi.RootFSInfo{
+					Runtime:             "runc",
+					RuntimeHandler:      "io.containerd.runc.v2",
+					BaseImageRef:        "docker.io/library/busybox:1.36",
+					BaseImageDigest:     "sha256:base",
+					Snapshotter:         "overlayfs",
+					SnapshotParent:      "parent-1",
+					SnapshotParentChain: []string{"parent-1", "parent-0"},
+				},
+				Descriptor: ctldapi.RootFSDiffDescriptor{
+					MediaType: "application/vnd.oci.image.layer.v1.tar",
+					Digest:    "sha256:full",
+					Size:      456,
+					ObjectKey: "sandbox-rootfs/team-1/sandbox-1/3/sha256/full.tar",
+				},
+			})
+		default:
+			t.Fatalf("unexpected ctld path %s", r.URL.Path)
 		}
-		_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{
-			Info: ctldapi.RootFSInfo{
-				Runtime:             "runc",
-				RuntimeHandler:      "io.containerd.runc.v2",
-				BaseImageRef:        "docker.io/library/busybox:1.36",
-				BaseImageDigest:     "sha256:base",
-				Snapshotter:         "overlayfs",
-				SnapshotParent:      "parent-1",
-				SnapshotParentChain: []string{"parent-1", "parent-0"},
-			},
-			Descriptor: ctldapi.RootFSDiffDescriptor{
-				MediaType: "application/vnd.oci.image.layer.v1.tar",
-				Digest:    "sha256:full",
-				Size:      456,
-				ObjectKey: "sandbox-rootfs/team-1/sandbox-1/3/sha256/full.tar",
-			},
-		})
 	}))
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
@@ -389,7 +513,7 @@ func TestPauseSandboxRuntimeFallsBackToRootLayerWhenBaselineIsMissing(t *testing
 				ID:                "sandbox-1",
 				TeamID:            "team-1",
 				RuntimeGeneration: 3,
-				Status:            SandboxStatusPausing,
+				Status:            SandboxStatusRunning,
 			},
 		},
 		rootFSStates: map[string]*SandboxRootFSState{
@@ -412,6 +536,8 @@ func TestPauseSandboxRuntimeFallsBackToRootLayerWhenBaselineIsMissing(t *testing
 		clock:        systemTime{},
 		logger:       zap.NewNop(),
 	}
+	defer attachRootFSTestProcd(t, pod, svc, nil)()
+	addRootFSTestPauseTxn(store, pod, SandboxLifecyclePhasePreparing)
 
 	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
 
@@ -426,21 +552,24 @@ func TestPauseSandboxRuntimeFallsBackToRootLayerWhenBaselineIsMissing(t *testing
 	assert.Equal(t, "sha256:full", state.DiffDigest)
 }
 
-func TestGetSandboxReportsPausingRecordWhileRuntimePodStillRunning(t *testing.T) {
+func TestGetSandboxHidesRuntimeAfterPauseBarrier(t *testing.T) {
 	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
 	pod.Status.PodIP = "10.0.0.10"
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{
-		"sandbox-1": {
-			ID:                  "sandbox-1",
-			TeamID:              "team-1",
-			UserID:              "user-1",
-			TemplateID:          "template-1",
-			CurrentPodName:      "pod-1",
-			CurrentPodNamespace: "default",
-			RuntimeGeneration:   3,
-			Status:              SandboxStatusPausing,
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{
+			"sandbox-1": {
+				ID:                  "sandbox-1",
+				TeamID:              "team-1",
+				UserID:              "user-1",
+				TemplateID:          "template-1",
+				CurrentPodName:      "pod-1",
+				CurrentPodNamespace: "default",
+				RuntimeGeneration:   3,
+				Status:              SandboxStatusRunning,
+			},
 		},
-	}}
+	}
+	addRootFSTestPauseTxn(store, pod, SandboxLifecyclePhaseBarriered)
 	svc := &SandboxService{
 		k8sClient:    fake.NewSimpleClientset(pod),
 		podLister:    newTestPodLister(t, pod),
@@ -453,7 +582,7 @@ func TestGetSandboxReportsPausingRecordWhileRuntimePodStillRunning(t *testing.T)
 	sandbox, err := svc.GetSandbox(context.Background(), "sandbox-1")
 	require.NoError(t, err)
 	require.NotNil(t, sandbox)
-	assert.Equal(t, SandboxStatusPausing, sandbox.Status)
+	assert.Equal(t, SandboxStatusRunning, sandbox.Status)
 	assert.False(t, sandbox.Paused)
 	assert.Empty(t, sandbox.InternalAddr)
 	assert.Equal(t, "pod-1", sandbox.PodName)
@@ -677,17 +806,15 @@ func TestFinishRestoredSandboxRuntimeRetriesWithCheckpointBaseImage(t *testing.T
 	store := &memorySandboxStore{
 		records: map[string]*SandboxRecord{
 			"sandbox-1": {
-				ID:                  "sandbox-1",
-				TeamID:              "team-1",
-				UserID:              "user-1",
-				TemplateID:          "template-1",
-				TemplateName:        "template-1",
-				TemplateNamespace:   templateNamespace,
-				TemplateSpec:        template.Spec,
-				CurrentPodName:      "pod-current",
-				CurrentPodNamespace: templateNamespace,
-				RuntimeGeneration:   3,
-				Status:              SandboxStatusResuming,
+				ID:                "sandbox-1",
+				TeamID:            "team-1",
+				UserID:            "user-1",
+				TemplateID:        "template-1",
+				TemplateName:      "template-1",
+				TemplateNamespace: templateNamespace,
+				TemplateSpec:      template.Spec,
+				RuntimeGeneration: 3,
+				Status:            SandboxStatusPaused,
 			},
 		},
 		rootFSStates: map[string]*SandboxRootFSState{
@@ -729,9 +856,21 @@ func TestFinishRestoredSandboxRuntimeRetriesWithCheckpointBaseImage(t *testing.T
 	}
 	record := store.records["sandbox-1"]
 
-	_, err = svc.finishRestoredSandboxRuntime(context.Background(), currentPod, record, "hot")
+	restoredPod, err := svc.finishRestoredSandboxRuntime(context.Background(), currentPod, record, "hot")
 
 	require.NoError(t, err)
+	txn := &SandboxLifecycleTxn{
+		ID:             "resume-txn-sandbox-1",
+		SandboxID:      "sandbox-1",
+		Kind:           SandboxLifecycleKindResume,
+		Phase:          SandboxLifecyclePhasePreparing,
+		FromGeneration: 3,
+		ToGeneration:   runtimeGenerationFromPod(restoredPod),
+		ToPodNamespace: restoredPod.Namespace,
+		ToPodName:      restoredPod.Name,
+	}
+	store.lifecycleTxns = map[string]*SandboxLifecycleTxn{txn.ID: txn}
+	require.NoError(t, svc.commitResumedSandboxRuntime(context.Background(), restoredPod, record, txn))
 	require.Len(t, applyTargets, 2)
 	assert.Equal(t, "pod-current", applyTargets[0])
 	assert.NotEqual(t, "pod-current", applyTargets[1])
@@ -883,6 +1022,75 @@ func setRootFSTestClaimMounts(t *testing.T, pod *corev1.Pod, mounts []ClaimMount
 		pod.Annotations = make(map[string]string)
 	}
 	require.NoError(t, setMountsAnnotation(pod.Annotations, mounts))
+}
+
+func attachRootFSTestProcd(t *testing.T, pod *corev1.Pod, svc *SandboxService, calls *[]string) func() {
+	t.Helper()
+	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/lifecycle/barrier":
+			require.Equal(t, http.MethodPut, r.Method)
+			var req ProcdLifecycleBarrierRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			if calls != nil {
+				*calls = append(*calls, fmt.Sprintf("barrier:%t", req.Active))
+			}
+			require.NoError(t, spec.WriteSuccess(w, http.StatusOK, ProcdLifecycleBarrierResponse{
+				Active:            req.Active,
+				Epoch:             req.Epoch,
+				RuntimeGeneration: req.RuntimeGeneration,
+			}))
+		case "/api/v1/sandbox/pause":
+			require.Equal(t, http.MethodPost, r.Method)
+			if calls != nil {
+				*calls = append(*calls, "pause")
+			}
+			require.NoError(t, spec.WriteSuccess(w, http.StatusOK, ProcdPauseResponse{Paused: true}))
+		case "/api/v1/sandbox/resume":
+			require.Equal(t, http.MethodPost, r.Method)
+			if calls != nil {
+				*calls = append(*calls, "resume")
+			}
+			require.NoError(t, spec.WriteSuccess(w, http.StatusOK, ProcdResumeResponse{Resumed: true}))
+		default:
+			t.Fatalf("unexpected procd path %s", r.URL.Path)
+		}
+	}))
+	procdURL, procdPort := parsedTestServer(t, procd.URL)
+	pod.Status.PodIP = procdURL.Hostname()
+	svc.procdClient = NewProcdClientWithHTTPClient(procd.Client())
+	svc.internalTokenGenerator = staticTokenGenerator{}
+	svc.config.ProcdPort = procdPort
+	return procd.Close
+}
+
+func addRootFSTestPauseTxn(store *memorySandboxStore, pod *corev1.Pod, phase string) string {
+	if phase == "" {
+		phase = SandboxLifecyclePhasePreparing
+	}
+	sandboxID := sandboxIDFromPod(pod)
+	txnID := "pause-txn-" + sandboxID
+	if store.lifecycleTxns == nil {
+		store.lifecycleTxns = make(map[string]*SandboxLifecycleTxn)
+	}
+	store.lifecycleTxns[txnID] = &SandboxLifecycleTxn{
+		ID:               txnID,
+		SandboxID:        sandboxID,
+		Kind:             SandboxLifecycleKindPause,
+		Phase:            phase,
+		Epoch:            1,
+		FromGeneration:   runtimeGenerationFromPod(pod),
+		FromPodNamespace: pod.Namespace,
+		FromPodName:      pod.Name,
+	}
+	if record := store.records[sandboxID]; record != nil {
+		record.Status = SandboxStatusRunning
+		record.CurrentPodNamespace = pod.Namespace
+		record.CurrentPodName = pod.Name
+		record.RuntimeGeneration = runtimeGenerationFromPod(pod)
+		record.LifecycleEpoch = 1
+	}
+	return txnID
 }
 
 type recordingPauseEnqueuer struct {

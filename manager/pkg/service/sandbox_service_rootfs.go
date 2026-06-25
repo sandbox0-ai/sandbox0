@@ -84,19 +84,16 @@ func (s *SandboxService) prepareSandboxRootFSCheckpoint(ctx context.Context, pod
 			parentLayerID = expectedHeadLayerID
 		}
 	}
-	saveReq := ctldapi.SaveRootFSRequest{
-		Target:                    rootFSTargetForPod(pod),
-		SandboxID:                 sandboxID,
-		TeamID:                    teamID,
-		ExpectedRuntimeGeneration: generation,
-		ParentLayerID:             parentLayerID,
-		ExcludedPaths:             rootFSExcludedPathsForPod(pod),
+	prepareReq := ctldapi.PrepareRootFSSnapshotRequest{
+		Target:        rootFSTargetForPod(pod),
+		ParentLayerID: parentLayerID,
+		ExcludedPaths: rootFSExcludedPathsForPod(pod),
 	}
-	resp, err := s.ctldClient.SaveRootFSWithTimeout(ctx, ctldAddress, saveReq, sandboxRootFSOperationTimeout)
+	resp, err := s.prepareAndPublishSandboxRootFSSnapshot(ctx, ctldAddress, prepareReq, sandboxID, teamID, generation)
 	if err != nil && parentLayerID != "" && rootFSBaselineMissing(err, resp) {
 		parentLayerID = ""
-		saveReq.ParentLayerID = ""
-		resp, err = s.ctldClient.SaveRootFSWithTimeout(ctx, ctldAddress, saveReq, sandboxRootFSOperationTimeout)
+		prepareReq.ParentLayerID = ""
+		resp, err = s.prepareAndPublishSandboxRootFSSnapshot(ctx, ctldAddress, prepareReq, sandboxID, teamID, generation)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("save sandbox rootfs checkpoint: %w", rootFSResponseError(err, saveRootFSError(resp)))
@@ -109,6 +106,40 @@ func (s *SandboxService) prepareSandboxRootFSCheckpoint(ctx context.Context, pod
 	state.ParentLayerID = parentLayerID
 	state.ExpectedHeadLayerID = expectedHeadLayerID
 	return state, nil
+}
+
+func (s *SandboxService) prepareAndPublishSandboxRootFSSnapshot(ctx context.Context, ctldAddress string, prepareReq ctldapi.PrepareRootFSSnapshotRequest, sandboxID, teamID string, generation int64) (*ctldapi.SaveRootFSResponse, error) {
+	prepared, err := s.ctldClient.PrepareRootFSSnapshotWithTimeout(ctx, ctldAddress, prepareReq, sandboxRootFSOperationTimeout)
+	if err != nil {
+		resp := &ctldapi.SaveRootFSResponse{}
+		if prepared != nil {
+			resp.Info = prepared.Info
+			resp.Descriptor = prepared.Descriptor
+			resp.Error = prepared.Error
+		}
+		return resp, err
+	}
+	published, err := s.ctldClient.PublishRootFSSnapshotWithTimeout(ctx, ctldAddress, ctldapi.PublishRootFSSnapshotRequest{
+		Handle:                    prepared.Handle,
+		SandboxID:                 sandboxID,
+		TeamID:                    teamID,
+		ExpectedRuntimeGeneration: generation,
+	}, sandboxRootFSOperationTimeout)
+	if err != nil {
+		_, _ = s.ctldClient.AbortRootFSSnapshotWithTimeout(context.Background(), ctldAddress, ctldapi.AbortRootFSSnapshotRequest{Handle: prepared.Handle}, sandboxRootFSOperationTimeout)
+		resp := &ctldapi.SaveRootFSResponse{Info: prepared.Info, Descriptor: prepared.Descriptor}
+		if published != nil {
+			resp.Info = published.Info
+			resp.Descriptor = published.Descriptor
+			resp.Error = published.Error
+		}
+		return resp, err
+	}
+	return &ctldapi.SaveRootFSResponse{
+		Info:       published.Info,
+		Descriptor: published.Descriptor,
+		Error:      published.Error,
+	}, nil
 }
 
 func (s *SandboxService) shouldSquashSandboxRootFSCheckpoint(state *SandboxRootFSState) (bool, string) {
@@ -221,9 +252,6 @@ func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Co
 	if state == nil {
 		return pod, nil
 	}
-	if strings.TrimSpace(fallbackStatus) == "" {
-		fallbackStatus = SandboxStatusResuming
-	}
 	err := s.applySandboxRootFSCheckpoint(ctx, pod, state)
 	if err == nil {
 		return pod, nil
@@ -251,13 +279,15 @@ func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Co
 		s.requestSandboxDeletionAfterClaimFailure(fallbackPod, "checkpoint base image runtime readiness failed")
 		return fallbackPod, fmt.Errorf("%w; wait for checkpoint base image runtime: %v", err, fallbackErr)
 	}
-	if fallbackErr := s.saveRestoredRuntimePod(ctx, readyPod, record, fallbackStatus); fallbackErr != nil {
-		s.requestSandboxDeletionAfterClaimFailure(readyPod, "checkpoint base image runtime persistence failed")
-		return readyPod, fmt.Errorf("%w; save checkpoint base image runtime: %v", err, fallbackErr)
-	}
 	if fallbackErr := s.applySandboxRootFSCheckpoint(ctx, readyPod, state); fallbackErr != nil {
 		s.requestSandboxDeletionAfterClaimFailure(readyPod, "checkpoint base image rootfs apply failed")
 		return readyPod, fmt.Errorf("%w; checkpoint base image retry failed: %v", err, fallbackErr)
+	}
+	if strings.TrimSpace(fallbackStatus) != "" {
+		if fallbackErr := s.saveRestoredRuntimePod(ctx, readyPod, record, fallbackStatus); fallbackErr != nil {
+			s.requestSandboxDeletionAfterClaimFailure(readyPod, "checkpoint base image runtime persistence failed")
+			return readyPod, fallbackErr
+		}
 	}
 	return readyPod, nil
 }

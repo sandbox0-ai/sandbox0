@@ -4157,6 +4157,12 @@ components:
         handler:
           type: string
           description: Python callable name. Defaults to handler.
+        max_concurrency:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 1024
+          description: Maximum in-flight executions for this function service inside one sandbox runtime. Omit or set to 0 for unlimited.
         source:
           $ref: "#/components/schemas/SandboxFunctionSource"
       required: [runtime, source]

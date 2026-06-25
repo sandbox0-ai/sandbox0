@@ -195,6 +195,7 @@ func TestNormalizeSandboxAppServicesSupportsFunctionRuntime(t *testing.T) {
 		Runtime: &SandboxAppServiceRuntime{
 			Type: SandboxAppServiceRuntimeFunction,
 			Function: &SandboxFunction{
+				MaxConcurrency: 2,
 				Source: SandboxFunctionSource{
 					Code: "def handler(request):\n    return {'status': 204}\n",
 				},
@@ -216,6 +217,9 @@ func TestNormalizeSandboxAppServicesSupportsFunctionRuntime(t *testing.T) {
 	}
 	if service.Runtime.Function.Handler != "handler" {
 		t.Fatalf("function handler = %q, want handler", service.Runtime.Function.Handler)
+	}
+	if service.Runtime.Function.MaxConcurrency != 2 {
+		t.Fatalf("function max concurrency = %d, want 2", service.Runtime.Function.MaxConcurrency)
 	}
 	if service.Runtime.Function.Source.Type != "inline" {
 		t.Fatalf("function source type = %q, want inline", service.Runtime.Function.Source.Type)
@@ -251,6 +255,28 @@ func TestNormalizeSandboxAppServicesRejectsInvalidFunctionSource(t *testing.T) {
 	}})
 	if err == nil {
 		t.Fatal("NormalizeSandboxAppServices succeeded, want error")
+	}
+}
+
+func TestNormalizeSandboxAppServicesRejectsInvalidFunctionMaxConcurrency(t *testing.T) {
+	for _, maxConcurrency := range []int{-1, maxSandboxFunctionConcurrency + 1} {
+		_, err := NormalizeSandboxAppServices([]SandboxAppService{{
+			ID:   "webhook",
+			Port: 49983,
+			Runtime: &SandboxAppServiceRuntime{
+				Type: SandboxAppServiceRuntimeFunction,
+				Function: &SandboxFunction{
+					MaxConcurrency: maxConcurrency,
+					Source: SandboxFunctionSource{
+						Code: "def handler(request):\n    return None\n",
+					},
+				},
+			},
+			Ingress: SandboxAppServiceIngress{Public: true},
+		}})
+		if err == nil {
+			t.Fatalf("NormalizeSandboxAppServices max_concurrency=%d succeeded, want error", maxConcurrency)
+		}
 	}
 }
 

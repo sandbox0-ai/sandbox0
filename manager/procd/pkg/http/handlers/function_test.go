@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
@@ -190,6 +191,107 @@ printf '{"status":200,"body_base64":"b2s="}\n'
 	}
 }
 
+func TestFunctionHandlerEnforcesFunctionMaxConcurrency(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell runner fixture requires POSIX")
+	}
+	dir := t.TempDir()
+	startedPath := filepath.Join(dir, "started")
+	releasePath := filepath.Join(dir, "release")
+	runnerPath := filepath.Join(dir, "runner.sh")
+	if err := os.WriteFile(runnerPath, []byte(`#!/bin/sh
+cat >/dev/null
+touch "$RUNNER_STARTED"
+while [ ! -f "$RUNNER_RELEASE" ]; do
+  sleep 0.05
+done
+printf '{"status":200,"body_base64":"b2s="}\n'
+`), 0o755); err != nil {
+		t.Fatalf("write runner: %v", err)
+	}
+
+	handler := newFunctionHandler(functionHandlerConfig{
+		runnerPath: runnerPath,
+		cacheRoot:  filepath.Join(dir, "cache"),
+	}, zap.NewNop())
+	functionReq := sandboxfunction.ExecuteRequest{
+		ServiceID:      "webhook",
+		Runtime:        sandboxfunction.RuntimePython,
+		Handler:        sandboxfunction.DefaultHandler,
+		MaxConcurrency: 1,
+		EnvVars: map[string]string{
+			"RUNNER_STARTED": startedPath,
+			"RUNNER_RELEASE": releasePath,
+		},
+		Source: sandboxfunction.Source{
+			Type: sandboxfunction.SourceTypeInline,
+			Code: "def handler(request):\n    return None\n",
+		},
+		Request: sandboxfunction.HTTPRequest{
+			Method: "POST",
+			Path:   "/events",
+		},
+	}
+	body, err := json.Marshal(functionReq)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	firstDone := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		handler.Execute(rec, httptest.NewRequest(http.MethodPost, "/api/v1/functions/execute", bytes.NewReader(body)))
+		firstDone <- rec.Code
+	}()
+	waitForFile(t, startedPath)
+
+	rec := httptest.NewRecorder()
+	handler.Execute(rec, httptest.NewRequest(http.MethodPost, "/api/v1/functions/execute", bytes.NewReader(body)))
+	assertFunctionConcurrencyExceeded(t, rec.Code, rec.Body.Bytes())
+
+	rec = httptest.NewRecorder()
+	handler.Stream(rec, httptest.NewRequest(http.MethodPost, "/api/v1/functions/stream", bytes.NewReader(body)))
+	assertFunctionConcurrencyExceeded(t, rec.Code, rec.Body.Bytes())
+
+	server := httptest.NewServer(http.HandlerFunc(handler.WebSocket))
+	defer server.Close()
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	if err := conn.WriteJSON(functionReq); err != nil {
+		t.Fatalf("write websocket init: %v", err)
+	}
+	_, _, err = conn.ReadMessage()
+	_ = conn.Close()
+	var closeErr *websocket.CloseError
+	if !errors.As(err, &closeErr) {
+		t.Fatalf("websocket read error = %v, want close error", err)
+	}
+	if closeErr.Code != websocket.CloseTryAgainLater || closeErr.Text != functionConcurrencyExceededMessage {
+		t.Fatalf("websocket close error = %#v, want concurrency exceeded", closeErr)
+	}
+
+	if err := os.WriteFile(releasePath, []byte("release"), 0o600); err != nil {
+		t.Fatalf("write release file: %v", err)
+	}
+	select {
+	case code := <-firstDone:
+		if code != http.StatusOK {
+			t.Fatalf("first status = %d, want 200", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first function execution")
+	}
+
+	rec = httptest.NewRecorder()
+	handler.Execute(rec, httptest.NewRequest(http.MethodPost, "/api/v1/functions/execute", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status after release = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+}
+
 func TestFunctionHandlerRejectsMismatchedDigest(t *testing.T) {
 	handler := newFunctionHandler(functionHandlerConfig{
 		runnerPath: "/bin/false",
@@ -227,6 +329,32 @@ func TestFunctionHandlerRejectsMismatchedDigest(t *testing.T) {
 	if envelope.Error == nil || envelope.Error.Code != spec.CodeBadRequest {
 		t.Fatalf("error = %#v, want bad_request", envelope.Error)
 	}
+}
+
+func assertFunctionConcurrencyExceeded(t *testing.T, status int, body []byte) {
+	t.Helper()
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("status = %d body=%s, want 429", status, string(body))
+	}
+	var envelope spec.Response
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Error == nil || envelope.Error.Code != functionConcurrencyExceededCode || envelope.Error.Message != functionConcurrencyExceededMessage {
+		t.Fatalf("error = %#v, want concurrency exceeded", envelope.Error)
+	}
+}
+
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for file %s", path)
 }
 
 func TestFunctionHandlerStreamRunsRunner(t *testing.T) {

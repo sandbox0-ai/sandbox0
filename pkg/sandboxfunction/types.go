@@ -58,14 +58,15 @@ type HTTPRequest struct {
 
 // ExecuteRequest asks procd to execute function code inside the sandbox.
 type ExecuteRequest struct {
-	ServiceID string            `json:"service_id,omitempty"`
-	RouteID   string            `json:"route_id,omitempty"`
-	Runtime   string            `json:"runtime"`
-	Handler   string            `json:"handler"`
-	Source    Source            `json:"source"`
-	EnvVars   map[string]string `json:"env_vars,omitempty"`
-	Request   HTTPRequest       `json:"request"`
-	TimeoutMS int               `json:"timeout_ms,omitempty"`
+	ServiceID      string            `json:"service_id,omitempty"`
+	RouteID        string            `json:"route_id,omitempty"`
+	Runtime        string            `json:"runtime"`
+	Handler        string            `json:"handler"`
+	MaxConcurrency int               `json:"max_concurrency,omitempty"`
+	Source         Source            `json:"source"`
+	EnvVars        map[string]string `json:"env_vars,omitempty"`
+	Request        HTTPRequest       `json:"request"`
+	TimeoutMS      int               `json:"timeout_ms,omitempty"`
 }
 
 // ExecuteResponse is the HTTP response returned by a function handler.

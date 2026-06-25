@@ -4322,7 +4322,7 @@ components:
           $ref: "#/components/schemas/SandboxLifecycleStatus"
         paused:
           type: boolean
-          description: True when status is paused and no runtime is attached.
+          description: True when status is paused.
         auto_resume:
           type: boolean
         services:
@@ -4567,7 +4567,7 @@ components:
           $ref: "#/components/schemas/SandboxLifecycleStatus"
         paused:
           type: boolean
-          description: True when status is paused and no runtime is attached.
+          description: True when status is paused.
         runtime_generation:
           type: integer
           format: int64
@@ -4716,7 +4716,7 @@ components:
           type: string
         paused:
           type: boolean
-          description: True when checkpoint completion has finished and the sandbox is paused.
+          description: True when checkpoint persistence has finished, runtime deletion has been accepted, and the sandbox is paused.
         status:
           $ref: "#/components/schemas/SandboxLifecycleStatus"
           description: Current lifecycle status. Async pause requests usually return pausing.

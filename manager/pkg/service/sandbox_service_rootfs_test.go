@@ -77,8 +77,15 @@ func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 	pod.Annotations[controller.AnnotationWebhookStateVolumeID] = "webhook-state-vol-1"
 	pod.Status.HostIP = ctldURL.Hostname()
 	k8sClient := fake.NewSimpleClientset(pod)
+	deleteCalled := false
 	k8sClient.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
 		require.True(t, saveCalled, "pod delete must happen after rootfs checkpoint save")
+		deleteCalled = true
+		return true, nil, nil
+	})
+	k8sClient.PrependReactor("update", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
+		updated := action.(ktesting.UpdateAction).GetObject().(*corev1.Pod)
+		assert.NotContains(t, updated.Annotations, "sandbox0.ai/runtime-deletion-reason")
 		return false, nil, nil
 	})
 	store := &memorySandboxStore{records: map[string]*SandboxRecord{
@@ -112,6 +119,9 @@ func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 
 	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
 
+	assert.True(t, deleteCalled)
+	_, err = k8sClient.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err, "pause completion should not wait for the pod to disappear after delete is accepted")
 	state := store.rootFSStates["sandbox-1"]
 	require.NotNil(t, state)
 	assert.Equal(t, int64(3), state.RuntimeGeneration)

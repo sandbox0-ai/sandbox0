@@ -17,7 +17,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 )
 
@@ -36,7 +35,7 @@ func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string)
 					return fmt.Errorf("get sandbox record: %w", getErr)
 				}
 				if record != nil && record.Status != SandboxStatusDeleted {
-					if err := s.CleanupDeletedSandbox(ctx, sandboxLifecycleInfoFromRecord(record)); err != nil {
+					if err := s.cleanupDeletedSandbox(ctx, sandboxLifecycleInfoFromRecord(record), false); err != nil {
 						return fmt.Errorf("cleanup deleted sandbox record: %w", err)
 					}
 				}
@@ -50,10 +49,6 @@ func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string)
 	pod, err = s.ensureSandboxDeletionFinalizer(ctx, pod)
 	if err != nil {
 		return fmt.Errorf("ensure sandbox cleanup finalizer: %w", err)
-	}
-	pod, err = s.markRuntimeDeletionReason(ctx, pod, runtimeDeletionReasonDeleted)
-	if err != nil {
-		return fmt.Errorf("mark sandbox deletion reason: %w", err)
 	}
 
 	err = s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
@@ -200,10 +195,6 @@ func (s *SandboxService) pauseSandboxRuntime(ctx context.Context, sandboxID stri
 		if err != nil {
 			return fmt.Errorf("ensure sandbox cleanup finalizer: %w", err)
 		}
-		pod, err = s.markRuntimeDeletionReason(ctx, pod, runtimeDeletionReasonPaused)
-		if err != nil {
-			return fmt.Errorf("mark runtime deletion reason: %w", err)
-		}
 		if err := s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 			return fmt.Errorf("delete runtime pod: %w", err)
 		}
@@ -281,15 +272,8 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 	if err != nil {
 		return fmt.Errorf("ensure sandbox cleanup finalizer: %w", err)
 	}
-	pod, err = s.markRuntimeDeletionReason(ctx, pod, runtimeDeletionReasonPaused)
-	if err != nil {
-		return fmt.Errorf("mark runtime deletion reason: %w", err)
-	}
 	if err := s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 		return fmt.Errorf("delete runtime pod: %w", err)
-	}
-	if err := s.waitForRuntimePodDeleted(ctx, pod.Namespace, pod.Name); err != nil {
-		return err
 	}
 	return s.markPausingRuntimePaused(ctx, sandboxID, generation)
 }
@@ -314,27 +298,6 @@ func (s *SandboxService) markPausingRuntimePaused(ctx context.Context, sandboxID
 			return nil
 		}
 		return tx.MarkRuntimePaused(lockCtx, sandboxID, generation, s.clock.Now())
-	})
-}
-
-const (
-	defaultSandboxPausePodDeletionTimeout = 2 * time.Minute
-	defaultSandboxPausePodDeletionPoll    = 500 * time.Millisecond
-)
-
-func (s *SandboxService) waitForRuntimePodDeleted(ctx context.Context, namespace, name string) error {
-	if s == nil || s.k8sClient == nil || namespace == "" || name == "" {
-		return nil
-	}
-	return wait.PollUntilContextTimeout(ctx, defaultSandboxPausePodDeletionPoll, defaultSandboxPausePodDeletionTimeout, true, func(ctx context.Context) (bool, error) {
-		_, err := s.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
-		if k8serrors.IsNotFound(err) {
-			return true, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		return false, nil
 	})
 }
 
@@ -373,35 +336,6 @@ func (s *SandboxService) ListHardExpiredSandboxIDs(ctx context.Context, now time
 		}
 	}
 	return ids, nil
-}
-
-const (
-	runtimeDeletionReasonPaused  = "paused"
-	runtimeDeletionReasonDeleted = "deleted"
-)
-
-func (s *SandboxService) markRuntimeDeletionReason(ctx context.Context, pod *corev1.Pod, reason string) (*corev1.Pod, error) {
-	if s == nil || pod == nil || s.k8sClient == nil || strings.TrimSpace(reason) == "" {
-		return pod, nil
-	}
-	var updated *corev1.Pod
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		current, err := s.k8sClient.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-		updated = current.DeepCopy()
-		if updated.Annotations == nil {
-			updated.Annotations = make(map[string]string)
-		}
-		updated.Annotations[controller.AnnotationRuntimeDeletionReason] = reason
-		updated, err = s.k8sClient.CoreV1().Pods(updated.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
-		return err
-	})
-	if err != nil {
-		return nil, err
-	}
-	return updated, nil
 }
 
 // GetSandbox gets a sandbox by ID
@@ -870,11 +804,12 @@ func sandboxLifecycleInfoFromRecord(record *SandboxRecord) SandboxLifecycleInfo 
 		return SandboxLifecycleInfo{}
 	}
 	info := SandboxLifecycleInfo{
-		Namespace: record.CurrentPodNamespace,
-		PodName:   record.CurrentPodName,
-		SandboxID: record.ID,
-		TeamID:    record.TeamID,
-		UserID:    record.UserID,
+		Namespace:         record.CurrentPodNamespace,
+		PodName:           record.CurrentPodName,
+		SandboxID:         record.ID,
+		TeamID:            record.TeamID,
+		UserID:            record.UserID,
+		RuntimeGeneration: record.RuntimeGeneration,
 	}
 	if record.Config.Webhook != nil {
 		info.WebhookURL = strings.TrimSpace(record.Config.Webhook.URL)

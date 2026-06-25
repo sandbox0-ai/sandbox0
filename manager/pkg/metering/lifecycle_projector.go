@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -28,6 +30,18 @@ type Store interface {
 	GetSandboxProjectionState(ctx context.Context, sandboxID string) (*meteringpkg.SandboxProjectionState, error)
 	RunInTx(ctx context.Context, fn func(tx txStore) error) error
 }
+
+// RuntimeDeletionInfo identifies the runtime pod behind a Pod delete event.
+type RuntimeDeletionInfo struct {
+	SandboxID         string
+	Namespace         string
+	PodName           string
+	RuntimeGeneration int64
+}
+
+// RuntimePauseLookup determines whether a runtime pod deletion is a pause/stale
+// runtime cleanup rather than a sandbox termination.
+type RuntimePauseLookup func(ctx context.Context, info RuntimeDeletionInfo) (bool, error)
 
 type repositoryStore struct {
 	repo *meteringpkg.Repository
@@ -72,12 +86,13 @@ func (s *repositoryTxStore) UpsertSandboxProjectionState(ctx context.Context, st
 }
 
 type LifecycleProjector struct {
-	store     Store
-	regionID  string
-	clusterID string
-	logger    *zap.Logger
-	metrics   *obsmetrics.ManagerMetrics
-	now       func() time.Time
+	store              Store
+	runtimePauseLookup RuntimePauseLookup
+	regionID           string
+	clusterID          string
+	logger             *zap.Logger
+	metrics            *obsmetrics.ManagerMetrics
+	now                func() time.Time
 }
 
 func NewLifecycleProjector(store Store, regionID string, clusterID string) *LifecycleProjector {
@@ -100,6 +115,10 @@ func (p *LifecycleProjector) SetLogger(logger *zap.Logger) {
 
 func (p *LifecycleProjector) SetMetrics(metrics *obsmetrics.ManagerMetrics) {
 	p.metrics = metrics
+}
+
+func (p *LifecycleProjector) SetRuntimePauseLookup(lookup RuntimePauseLookup) {
+	p.runtimePauseLookup = lookup
 }
 
 func (p *LifecycleProjector) ResourceEventHandler() cache.ResourceEventHandlerFuncs {
@@ -222,7 +241,16 @@ func (p *LifecycleProjector) handleDelete(obj any) {
 	templateID := pod.Labels[controller.LabelTemplateID]
 	podUsage := sandboxUsageFromPod(pod)
 	claimedAt, claimedAtSet := parseRFC3339(pod.Annotations[controller.AnnotationClaimedAt])
-	runtimePaused := pod.Annotations[controller.AnnotationRuntimeDeletionReason] == "paused"
+	runtimePaused, lookupErr := p.runtimeDeletionIsPause(ctx, RuntimeDeletionInfo{
+		SandboxID:         sandboxID,
+		Namespace:         pod.Namespace,
+		PodName:           pod.Name,
+		RuntimeGeneration: runtimeGenerationFromPod(pod),
+	})
+	if lookupErr != nil {
+		p.recordError("load_runtime_pause_state", sandboxID, lookupErr)
+		return
+	}
 	pendingEvents := make([]*meteringpkg.Event, 0, 3)
 	pendingWindows := make([]*meteringpkg.Window, 0, 2)
 	if state == nil {
@@ -286,6 +314,28 @@ func (p *LifecycleProjector) handleDelete(obj any) {
 	if err := p.commitProjection(ctx, sandboxID, state, pendingEvents, pendingWindows, observedAt); err != nil {
 		return
 	}
+}
+
+func (p *LifecycleProjector) runtimeDeletionIsPause(ctx context.Context, info RuntimeDeletionInfo) (bool, error) {
+	if p == nil || p.runtimePauseLookup == nil {
+		return false, nil
+	}
+	return p.runtimePauseLookup(ctx, info)
+}
+
+func runtimeGenerationFromPod(pod *corev1.Pod) int64 {
+	if pod == nil || pod.Annotations == nil {
+		return 0
+	}
+	raw := strings.TrimSpace(pod.Annotations[controller.AnnotationRuntimeGeneration])
+	if raw == "" {
+		return 0
+	}
+	generation, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || generation < 0 {
+		return 0
+	}
+	return generation
 }
 
 func (p *LifecycleProjector) commitProjection(ctx context.Context, sandboxID string, state *meteringpkg.SandboxProjectionState, events []*meteringpkg.Event, windows []*meteringpkg.Window, observedAt time.Time) error {

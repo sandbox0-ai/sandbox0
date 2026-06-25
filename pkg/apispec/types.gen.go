@@ -1251,7 +1251,7 @@ type PTYSize struct {
 
 // PauseSandboxResponse defines model for PauseSandboxResponse.
 type PauseSandboxResponse struct {
-	// Paused True when checkpoint completion has finished and the sandbox is paused.
+	// Paused True when checkpoint persistence has finished, runtime deletion has been accepted, and the sandbox is paused.
 	Paused        bool                    `json:"paused"`
 	ResourceUsage *SandboxResourceUsage   `json:"resource_usage,omitempty"`
 	SandboxId     string                  `json:"sandbox_id"`
@@ -1554,7 +1554,7 @@ type Sandbox struct {
 	Id            string               `json:"id"`
 	Mounts        *[]ClaimMountRequest `json:"mounts,omitempty"`
 
-	// Paused True when status is paused and no runtime is attached.
+	// Paused True when status is paused.
 	Paused  bool   `json:"paused"`
 	PodName string `json:"pod_name"`
 
@@ -1821,7 +1821,7 @@ type SandboxSummary struct {
 	HardExpiresAt time.Time `json:"hard_expires_at"`
 	Id            string    `json:"id"`
 
-	// Paused True when status is paused and no runtime is attached.
+	// Paused True when status is paused.
 	Paused bool `json:"paused"`
 
 	// RuntimeGeneration Monotonically increasing runtime generation. Resume starts a new generation.

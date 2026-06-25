@@ -295,7 +295,7 @@ func TestSandboxServiceCleanupDeletedSandboxDoesNotBlockOnDeletionWebhookFailure
 	}
 }
 
-func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForPausedRuntime(t *testing.T) {
+func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForPausingRuntime(t *testing.T) {
 	removed := make([]string, 0, 1)
 	store := &deleteRecordingBindingStore{}
 	volumeClient := &recordingSystemVolumeClient{}
@@ -307,18 +307,76 @@ func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForPausedRuntim
 		credentialStore:        store,
 		webhookStateVolumes:    volumeClient,
 		deletionWebhookEmitter: emitter,
-		logger:                 zap.NewNop(),
+		sandboxStore: &memorySandboxStore{records: map[string]*SandboxRecord{
+			"sandbox-a": {
+				ID:     "sandbox-a",
+				TeamID: "team-a",
+				Status: SandboxStatusPausing,
+			},
+		}},
+		logger: zap.NewNop(),
 	}
 
 	err := svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
-		Namespace:             "ns-a",
-		PodName:               "pod-a",
-		SandboxID:             "sandbox-a",
-		TeamID:                "team-a",
-		UserID:                "user-a",
-		WebhookURL:            "https://example.test/webhook",
-		WebhookStateVolumeID:  "volume-a",
-		RuntimeDeletionReason: runtimeDeletionReasonPaused,
+		Namespace:            "ns-a",
+		PodName:              "pod-a",
+		SandboxID:            "sandbox-a",
+		TeamID:               "team-a",
+		UserID:               "user-a",
+		WebhookURL:           "https://example.test/webhook",
+		WebhookStateVolumeID: "volume-a",
+	})
+	if err != nil {
+		t.Fatalf("CleanupDeletedSandbox() error = %v", err)
+	}
+	if len(removed) != 1 || removed[0] != "ns-a/sandbox-a" {
+		t.Fatalf("network removals = %#v, want ns-a/sandbox-a", removed)
+	}
+	if store.deleteCalls != 0 {
+		t.Fatalf("DeleteBindings calls = %d, want 0", store.deleteCalls)
+	}
+	if len(emitter.calls) != 0 {
+		t.Fatalf("webhook calls = %d, want 0", len(emitter.calls))
+	}
+	if len(volumeClient.marked) != 0 {
+		t.Fatalf("marked volumes = %#v, want none", volumeClient.marked)
+	}
+}
+
+func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForStaleRuntime(t *testing.T) {
+	removed := make([]string, 0, 1)
+	store := &deleteRecordingBindingStore{}
+	volumeClient := &recordingSystemVolumeClient{}
+	emitter := &recordingDeletionWebhookEmitter{}
+	svc := &SandboxService{
+		networkProvider: &assertingNetworkProvider{removeFunc: func(namespace, sandboxID string) {
+			removed = append(removed, namespace+"/"+sandboxID)
+		}},
+		credentialStore:        store,
+		webhookStateVolumes:    volumeClient,
+		deletionWebhookEmitter: emitter,
+		sandboxStore: &memorySandboxStore{records: map[string]*SandboxRecord{
+			"sandbox-a": {
+				ID:                  "sandbox-a",
+				TeamID:              "team-a",
+				Status:              SandboxStatusRunning,
+				CurrentPodNamespace: "ns-a",
+				CurrentPodName:      "pod-new",
+				RuntimeGeneration:   2,
+			},
+		}},
+		logger: zap.NewNop(),
+	}
+
+	err := svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
+		Namespace:            "ns-a",
+		PodName:              "pod-old",
+		SandboxID:            "sandbox-a",
+		TeamID:               "team-a",
+		UserID:               "user-a",
+		WebhookURL:           "https://example.test/webhook",
+		WebhookStateVolumeID: "volume-a",
+		RuntimeGeneration:    1,
 	})
 	if err != nil {
 		t.Fatalf("CleanupDeletedSandbox() error = %v", err)
@@ -396,6 +454,7 @@ func TestSandboxLifecycleInfoFromPodIncludesWebhookMetadata(t *testing.T) {
 	pod := newLifecycleTestPod()
 	pod.Annotations[controller.AnnotationUserID] = "user-a"
 	pod.Annotations[controller.AnnotationWebhookStateVolumeID] = "volume-a"
+	pod.Annotations[controller.AnnotationRuntimeGeneration] = "7"
 	pod.Annotations[controller.AnnotationConfig] = `{"webhook":{"url":"https://example.test/webhook","secret":"secret"}}`
 
 	info, ok := sandboxLifecycleInfoFromPod(pod)
@@ -407,6 +466,9 @@ func TestSandboxLifecycleInfoFromPodIncludesWebhookMetadata(t *testing.T) {
 	}
 	if info.WebhookURL != "https://example.test/webhook" || info.WebhookSecret != "secret" {
 		t.Fatalf("unexpected webhook metadata: %#v", info)
+	}
+	if info.RuntimeGeneration != 7 {
+		t.Fatalf("runtime generation = %d, want 7", info.RuntimeGeneration)
 	}
 }
 

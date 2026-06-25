@@ -174,7 +174,6 @@ func (s *Server) setupRoutes() {
 			templates.POST("", s.templateHandler.CreateTemplate)
 			templates.PUT("/:id", s.templateHandler.UpdateTemplate)
 			templates.DELETE("/:id", s.templateHandler.DeleteTemplate)
-			templates.GET("/:id/allocations", s.templateHandler.GetTemplateAllocations)
 		}
 
 		// Cluster Management (admin API)

@@ -746,7 +746,7 @@ func TestResumePausedSandboxRuntimeBeginsTransactionBeforeClaimingPod(t *testing
 	}}
 	client := fake.NewSimpleClientset(idlePod.DeepCopy())
 	observedTxn := make(chan *SandboxLifecycleTxn, 1)
-	client.Fake.PrependReactor("update", "pods", func(_ ktesting.Action) (bool, runtime.Object, error) {
+	client.PrependReactor("update", "pods", func(_ ktesting.Action) (bool, runtime.Object, error) {
 		txn, err := store.GetActiveLifecycleTxn(context.Background(), "sandbox-a")
 		if err != nil {
 			t.Errorf("GetActiveLifecycleTxn() error = %v", err)

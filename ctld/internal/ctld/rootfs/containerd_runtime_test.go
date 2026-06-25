@@ -266,44 +266,6 @@ func TestRootFSRuntimeBindMountPathsCollapseRecursiveMounts(t *testing.T) {
 	}, got)
 }
 
-func TestFilterRootFSRuntimeBindMountPathsSkipsUnboundPortals(t *testing.T) {
-	got := filterRootFSRuntimeBindMountPaths([]string{
-		"/dev",
-		"/workspace",
-		"/tmp/cache",
-		"/var/run",
-	}, []ctldapi.RootFSPortalPath{
-		{MountPath: "/workspace/data", BackingPath: "/portal/workspace-data"},
-		{MountPath: "/tmp/cache", BackingPath: "/portal/cache"},
-	})
-
-	assert.Equal(t, []string{"/dev", "/var/run"}, got)
-}
-
-func TestMergeS0FSRootFSPortalPathsImportsBackingDir(t *testing.T) {
-	baseRoot := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(baseRoot, "workspace", "data"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(baseRoot, "workspace", "data", "old.txt"), []byte("old"), 0o644))
-	state, err := s0fs.ImportHostTree(context.Background(), baseRoot, s0fs.HostImportOptions{})
-	require.NoError(t, err)
-
-	backing := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(backing, "state.txt"), []byte("portal"), 0o644))
-
-	merged, err := mergeS0FSRootFSPortalPaths(context.Background(), state, []ctldapi.RootFSPortalPath{{
-		MountPath:   "/workspace/data",
-		BackingPath: backing,
-	}})
-	require.NoError(t, err)
-
-	reader := s0fs.NewSnapshotReader(merged, nil)
-	file := requireSnapshotPath(t, merged, "/workspace/data/state.txt")
-	payload, err := reader.Read(file, 0, uint64(len("portal")))
-	require.NoError(t, err)
-	assert.Equal(t, "portal", string(payload))
-	assert.Zero(t, snapshotPath(merged, "/workspace/data/old.txt"))
-}
-
 func TestRootFSRuntimeBindPathsTargetNestedRootFS(t *testing.T) {
 	source, target := rootFSRuntimeBindPaths("/sandbox0/rootfs", "/dev")
 
@@ -515,28 +477,4 @@ func writeTaskConfig(t *testing.T, taskDir string, annotations map[string]string
 	}{Annotations: annotations})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(taskDir, "config.json"), raw, 0o644))
-}
-
-func requireSnapshotPath(t *testing.T, state *s0fs.SnapshotState, target string) uint64 {
-	t.Helper()
-	inode := snapshotPath(state, target)
-	require.NotZero(t, inode, "missing snapshot path %s", target)
-	return inode
-}
-
-func snapshotPath(state *s0fs.SnapshotState, target string) uint64 {
-	if state == nil {
-		return 0
-	}
-	current := s0fs.RootInode
-	for _, part := range strings.Split(strings.Trim(target, "/"), "/") {
-		if part == "" {
-			continue
-		}
-		current = state.Children[current][part]
-		if current == 0 {
-			return 0
-		}
-	}
-	return current
 }

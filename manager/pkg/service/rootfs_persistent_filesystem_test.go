@@ -2,12 +2,12 @@ package service
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
-	"github.com/sandbox0-ai/sandbox0/pkg/s0fs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -56,6 +56,8 @@ func TestSaveRootFSStateWritesS0FSLayerWithoutObjectInventory(t *testing.T) {
 	state := rootFSTestState()
 	state.LayerID = "layer-s0fs"
 	state.StorageEngine = ctldapi.RootFSStorageEngineS0FS
+	state.DiffDigest = ""
+	state.DiffObjectKey = ""
 	state.S0FSVolumeID = "fs-1"
 	state.S0FSManifestKey = "manifests/00000000000000000007.json"
 	state.S0FSManifestSeq = 7
@@ -69,11 +71,11 @@ func TestSaveRootFSStateWritesS0FSLayerWithoutObjectInventory(t *testing.T) {
 	assert.Contains(t, exec.sqls[0], "INSERT INTO manager.rootfs_layers")
 	assert.Contains(t, exec.sqls[1], "INSERT INTO manager.rootfs_filesystems")
 	require.Len(t, exec.args, 2)
-	assert.Equal(t, ctldapi.RootFSStorageEngineS0FS, exec.args[0][12])
-	assert.Equal(t, "fs-1", exec.args[0][13])
-	assert.Equal(t, "manifests/00000000000000000007.json", exec.args[0][14])
-	assert.Equal(t, int64(7), exec.args[0][15])
-	assert.Equal(t, int64(3), exec.args[0][16])
+	assert.Equal(t, ctldapi.RootFSStorageEngineS0FS, exec.args[0][17])
+	assert.Equal(t, "fs-1", exec.args[0][18])
+	assert.Equal(t, "manifests/00000000000000000007.json", exec.args[0][19])
+	assert.Equal(t, int64(7), exec.args[0][20])
+	assert.Equal(t, int64(3), exec.args[0][21])
 }
 
 func TestSaveRootFSStateRequiresS0FSManifest(t *testing.T) {
@@ -126,16 +128,63 @@ func TestSaveRootFSStateUsesExpectedHeadLayerIDWhenParentDiffers(t *testing.T) {
 	assert.Equal(t, "layer-parent", exec.args[1][3])
 }
 
-func TestTrimRootFSS0FSGarbageCollectionPlanCapsObjectDeletes(t *testing.T) {
-	plan := &s0fs.GarbageCollectionPlan{
-		Segments:  []string{"segments/a.bin", "segments/b.bin"},
-		Manifests: []string{"manifests/a.json", "manifests/b.json"},
+func TestDeleteRootFSObjectsDedupesAndSkipsEmptyKeys(t *testing.T) {
+	deleter := &recordingRootFSObjectDeleter{}
+
+	deleted, err := DeleteRootFSObjects(context.Background(), deleter, []*SandboxRootFSLayer{
+		{DiffObjectKey: " rootfs/a.tar "},
+		nil,
+		{DiffObjectKey: ""},
+		{DiffObjectKey: "rootfs/a.tar"},
+		{DiffObjectKey: "rootfs/b.tar"},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"rootfs/a.tar", "rootfs/b.tar"}, deleted)
+	assert.Equal(t, []string{"rootfs/a.tar", "rootfs/b.tar"}, deleter.keys)
+}
+
+func TestDeleteRootFSObjectsReturnsDeletedKeysBeforeFailure(t *testing.T) {
+	deleteErr := errors.New("delete failed")
+	deleter := &recordingRootFSObjectDeleter{failKey: "rootfs/b.tar", err: deleteErr}
+
+	deleted, err := DeleteRootFSObjects(context.Background(), deleter, []*SandboxRootFSLayer{
+		{DiffObjectKey: "rootfs/a.tar"},
+		{DiffObjectKey: "rootfs/b.tar"},
+		{DiffObjectKey: "rootfs/c.tar"},
+	})
+
+	require.ErrorIs(t, err, deleteErr)
+	assert.Equal(t, []string{"rootfs/a.tar"}, deleted)
+	assert.Equal(t, []string{"rootfs/a.tar", "rootfs/b.tar"}, deleter.keys)
+}
+
+func TestDeleteRootFSObjectsHonorsCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	deleter := &recordingRootFSObjectDeleter{}
+
+	deleted, err := DeleteRootFSObjects(ctx, deleter, []*SandboxRootFSLayer{
+		{DiffObjectKey: "rootfs/a.tar"},
+	})
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Empty(t, deleted)
+	assert.Empty(t, deleter.keys)
+}
+
+type recordingRootFSObjectDeleter struct {
+	keys    []string
+	failKey string
+	err     error
+}
+
+func (d *recordingRootFSObjectDeleter) Delete(key string) error {
+	d.keys = append(d.keys, key)
+	if key == d.failKey {
+		return d.err
 	}
-
-	trimRootFSS0FSGarbageCollectionPlan(plan, 3)
-
-	assert.Equal(t, []string{"segments/a.bin", "segments/b.bin"}, plan.Segments)
-	assert.Equal(t, []string{"manifests/a.json"}, plan.Manifests)
+	return nil
 }
 
 type recordingRootFSStateExecutor struct {

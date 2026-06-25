@@ -142,8 +142,7 @@ func (c *Controller) ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest
 	if err := validateSupportedRuntime(info); err != nil {
 		return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, http.StatusBadRequest
 	}
-	warnings, err := validateRootFSCompatibility(info, req)
-	if err != nil {
+	if err := validateExpectedBase(info, req); err != nil {
 		return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, http.StatusConflict
 	}
 	portalPaths := c.portalPathsForRequest(info, req.Target, req.ExcludedPaths, req.PortalPaths)
@@ -158,7 +157,7 @@ func (c *Controller) ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest
 	if err != nil {
 		return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, statusForError(err)
 	}
-	return ctldapi.ApplyRootFSResponse{Info: info, Head: head, MountPath: mountPath, Applied: true, Warnings: warnings}, http.StatusOK
+	return ctldapi.ApplyRootFSResponse{Info: info, Head: head, MountPath: mountPath, Applied: true}, http.StatusOK
 }
 
 func (c *Controller) portalPathsForRequest(info ctldapi.RootFSInfo, target ctldapi.RootFSContainerRef, excludedPaths []string, requested []ctldapi.RootFSPortalPath) []ctldapi.RootFSPortalPath {
@@ -166,12 +165,9 @@ func (c *Controller) portalPathsForRequest(info ctldapi.RootFSInfo, target ctlda
 	if podUID == "" {
 		podUID = strings.TrimSpace(target.PodUID)
 	}
-	var paths []ctldapi.RootFSPortalPath
+	paths := append([]ctldapi.RootFSPortalPath(nil), requested...)
 	if podUID != "" && c != nil && c.portalResolver != nil {
 		paths = append(paths, c.portalResolver.RootFSPortalPaths(podUID)...)
-	}
-	if len(paths) == 0 {
-		paths = append(paths, requested...)
 	}
 	return filterRootFSPortalPaths(paths, excludedPaths)
 }
@@ -249,51 +245,17 @@ func validateSupportedRuntime(info ctldapi.RootFSInfo) error {
 	}
 }
 
-func validateRootFSCompatibility(info ctldapi.RootFSInfo, req ctldapi.ApplyRootFSRequest) ([]string, error) {
+func validateExpectedBase(info ctldapi.RootFSInfo, req ctldapi.ApplyRootFSRequest) error {
 	if expected := strings.TrimSpace(req.ExpectedRuntime); expected != "" && strings.TrimSpace(info.Runtime) != expected {
-		return nil, fmt.Errorf("%w: runtime mismatch: expected %s, got %s", ErrConflict, expected, info.Runtime)
+		return fmt.Errorf("%w: runtime mismatch: expected %s, got %s", ErrConflict, expected, info.Runtime)
 	}
 	if expected := strings.TrimSpace(req.ExpectedRuntimeHandler); expected != "" && strings.TrimSpace(info.RuntimeHandler) != expected {
-		return nil, fmt.Errorf("%w: runtime handler mismatch: expected %s, got %s", ErrConflict, expected, info.RuntimeHandler)
+		return fmt.Errorf("%w: runtime handler mismatch: expected %s, got %s", ErrConflict, expected, info.RuntimeHandler)
 	}
 	if expected := strings.TrimSpace(req.ExpectedSnapshotter); expected != "" && strings.TrimSpace(info.Snapshotter) != expected {
-		return nil, fmt.Errorf("%w: snapshotter mismatch: expected %s, got %s", ErrConflict, expected, info.Snapshotter)
+		return fmt.Errorf("%w: snapshotter mismatch: expected %s, got %s", ErrConflict, expected, info.Snapshotter)
 	}
-	var warnings []string
-	if expected := strings.TrimSpace(req.ExpectedBaseImageDigest); expected != "" && strings.TrimSpace(info.BaseImageDigest) != expected {
-		warnings = append(warnings, fmt.Sprintf("base image digest mismatch: expected %s, got %s", expected, strings.TrimSpace(info.BaseImageDigest)))
-	}
-	if expected := strings.TrimSpace(req.ExpectedSnapshotParent); expected != "" && strings.TrimSpace(info.SnapshotParent) != expected {
-		warnings = append(warnings, fmt.Sprintf("snapshot parent mismatch: expected %s, got %s", expected, strings.TrimSpace(info.SnapshotParent)))
-	}
-	if len(req.ExpectedSnapshotParentChain) > 0 && !sameStringSlice(trimStringSlice(req.ExpectedSnapshotParentChain), trimStringSlice(info.SnapshotParentChain)) {
-		warnings = append(warnings, fmt.Sprintf("snapshot parent chain mismatch: expected %s, got %s", strings.Join(trimStringSlice(req.ExpectedSnapshotParentChain), ","), strings.Join(trimStringSlice(info.SnapshotParentChain), ",")))
-	}
-	return warnings, nil
-}
-
-func trimStringSlice(values []string) []string {
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		out = append(out, value)
-	}
-	return out
-}
-
-func sameStringSlice(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	return nil
 }
 
 func statusForError(err error) int {

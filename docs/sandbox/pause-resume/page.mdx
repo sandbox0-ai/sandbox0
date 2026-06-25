@@ -26,9 +26,9 @@ Self-hosted deployments must run `ctld` on sandbox nodes for checkpointed pause/
 | Mounted Volumes | Remounted if configured | Preserved until the Volume is deleted |
 | Processes, memory, sockets, PID state, live REPL sessions | Not preserved | Deleted |
 
-The rootfs checkpoint covers files written inside the sandbox filesystem, including files outside mounted volumes. Template-declared Volume paths that are not bound in the claim remain rootfs-backed directories and are included in the checkpoint. Bound Sandbox Volume paths are excluded because their contents are owned by the Volume.
+The rootfs checkpoint covers files written inside the sandbox filesystem, including files outside mounted volumes. It is different from a Sandbox Volume: it is tied to sandbox rootfs lifecycle and does not provide volume sharing or direct Volume file APIs. For named rootfs snapshots, restore, and fork operations, see [Snapshot And Restore](/docs/sandbox/snapshot-restore).
 
-Rootfs checkpoints are stored as S0FS manifests and immutable segment objects in the rootfs object store. Each checkpoint is a complete writable-rootfs state, so Sandbox0 can restore the latest head directly without replaying legacy OCI layer diffs. It is different from a Sandbox Volume: it is tied to sandbox rootfs lifecycle and does not provide volume sharing or direct Volume file APIs. For named rootfs snapshots, restore, and fork operations, see [Snapshot And Restore](/docs/sandbox/snapshot-restore).
+On nodes using the containerd overlayfs snapshotter, `ctld` checkpoints only the active snapshot upperdir and stores it as a standard OCI layer diff. Other snapshotters, or nodes where the overlayfs upperdir is not readable by `ctld`, fall back to containerd's built-in diff path.
 
 ## Pause A Sandbox
 
@@ -75,7 +75,7 @@ console.log("Pause requested");`
 
 Resume a sandbox that was paused manually or by TTL expiry.
 
-Resume restores the writable rootfs checkpoint onto a runtime pod created from the current template image. Sandbox0 requires the runtime, runtime handler, and snapshotter to match the checkpoint. Base image digest and containerd snapshot parent differences are treated as compatibility warnings so template base images can receive normal patch upgrades without making existing rootfs checkpoints unusable.
+Resume first restores the writable rootfs checkpoint onto a runtime pod created from the current template image. If that restore fails, Sandbox0 retries once with a runtime pod pinned to the checkpoint's recorded base image digest. Kubernetes pulls and garbage-collects that image through the normal kubelet image lifecycle.
 
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/resume

@@ -57,33 +57,6 @@ func TestControllerSaveRootFSCommitsS0FSHead(t *testing.T) {
 	assert.Same(t, store, runtime.commitReq.Store)
 }
 
-func TestControllerSaveRootFSUsesResolvedPortalPaths(t *testing.T) {
-	head := rootFSS0FSHead()
-	runtime := &fakeRuntime{info: rootFSInfo(), commitHead: head}
-	controller := NewController(Config{
-		Runtime: runtime,
-		Store:   objectstore.NewMemoryStore("controller-save-resolved-portals"),
-		PortalResolver: fakePortalResolver{paths: []ctldapi.RootFSPortalPath{{
-			PortalName:  "workspace",
-			MountPath:   "/workspace",
-			BackingPath: "/var/lib/sandbox0/portals/pod-uid/workspace",
-		}}},
-	})
-
-	resp, status := controller.SaveRootFS(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.SaveRootFSRequest{
-		Target: rootFSTarget(),
-		PortalPaths: []ctldapi.RootFSPortalPath{{
-			MountPath:   "/workspace",
-			BackingPath: "/stale/request/path",
-		}},
-	})
-
-	require.Equal(t, http.StatusOK, status)
-	assert.Equal(t, head, resp.Head)
-	require.Len(t, runtime.commitReq.PortalPaths, 1)
-	assert.Equal(t, "/var/lib/sandbox0/portals/pod-uid/workspace", runtime.commitReq.PortalPaths[0].BackingPath)
-}
-
 func TestControllerApplyRootFSAttachesS0FSHead(t *testing.T) {
 	head := rootFSS0FSHead()
 	runtime := &fakeRuntime{
@@ -143,36 +116,6 @@ func TestControllerApplyRootFSValidatesRuntimeIdentity(t *testing.T) {
 
 	assert.Equal(t, http.StatusConflict, status)
 	assert.Contains(t, resp.Error, "runtime mismatch")
-}
-
-func TestControllerApplyRootFSWeaklyValidatesBaseIdentity(t *testing.T) {
-	head := rootFSS0FSHead()
-	runtime := &fakeRuntime{
-		info:       rootFSInfo(),
-		attachHead: head,
-		mountPath:  "/sandbox0/rootfs",
-	}
-	controller := NewController(Config{
-		Runtime: runtime,
-		Store:   objectstore.NewMemoryStore("controller-apply-base-warning"),
-	})
-
-	resp, status := controller.ApplyRootFS(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.ApplyRootFSRequest{
-		Target:                      rootFSTarget(),
-		ExpectedRuntime:             "runc",
-		ExpectedRuntimeHandler:      "io.containerd.runc.v2",
-		ExpectedSnapshotter:         "overlayfs",
-		ExpectedBaseImageDigest:     "sha256:new-base",
-		ExpectedSnapshotParent:      "new-parent",
-		ExpectedSnapshotParentChain: []string{"new-parent"},
-		Head:                        head,
-	})
-
-	require.Equal(t, http.StatusOK, status)
-	assert.True(t, resp.Applied)
-	assert.Len(t, resp.Warnings, 3)
-	assert.Contains(t, resp.Warnings[0], "base image digest mismatch")
-	assert.Equal(t, head, runtime.attachReq.Head)
 }
 
 func TestControllerSaveRootFSMapsRuntimeErrors(t *testing.T) {
@@ -296,12 +239,4 @@ func rootFSS0FSHead() ctldapi.RootFSHeadDescriptor {
 		ManifestSeq:   1,
 		CheckpointSeq: 1,
 	}
-}
-
-type fakePortalResolver struct {
-	paths []ctldapi.RootFSPortalPath
-}
-
-func (r fakePortalResolver) RootFSPortalPaths(string) []ctldapi.RootFSPortalPath {
-	return append([]ctldapi.RootFSPortalPath(nil), r.paths...)
 }

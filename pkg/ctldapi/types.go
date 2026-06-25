@@ -129,7 +129,6 @@ type ApplyRootFSResponse struct {
 	Head      RootFSHeadDescriptor `json:"head,omitempty"`
 	MountPath string               `json:"mount_path,omitempty"`
 	Applied   bool                 `json:"applied"`
-	Warnings  []string             `json:"warnings,omitempty"`
 	Error     string               `json:"error,omitempty"`
 }
 

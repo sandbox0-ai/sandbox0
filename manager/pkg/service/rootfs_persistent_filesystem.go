@@ -16,6 +16,7 @@ var ErrRootFSHeadConflict = errors.New("rootfs filesystem head conflict")
 var ErrRootFSFilesystemNotFound = errors.New("rootfs filesystem not found")
 var ErrRootFSFilesystemConflict = errors.New("rootfs filesystem conflict")
 var ErrRootFSSnapshotNotFound = errors.New("rootfs snapshot not found")
+var ErrRootFSObjectConflict = errors.New("rootfs object metadata conflict")
 
 // RootFSFilesystem is the canonical persistent filesystem object backing a
 // sandbox writable rootfs.
@@ -68,6 +69,12 @@ type RestoreRootFSFromSnapshotRequest struct {
 	TeamID     string
 }
 
+type SquashRootFSFilesystemRequest struct {
+	SandboxID           string
+	ExpectedHeadLayerID string
+	SquashedRootFSState *SandboxRootFSState
+}
+
 type RootFSGarbageCollectionResult struct {
 	Layers             []*SandboxRootFSLayer
 	DeletedObjectKeys  []string
@@ -94,7 +101,7 @@ type RootFSObjectDeletionQueueStats struct {
 }
 
 // RootFSStorageUsage is the current COW physical storage usage for one team.
-// It counts distinct reachable rootfs objects, not sandbox checkpoint-chain sums.
+// It counts distinct reachable rootfs diff objects, not sandbox layer-chain sums.
 type RootFSStorageUsage struct {
 	TeamID       string
 	ObjectCount  int64
@@ -114,7 +121,7 @@ type RootFSObjectAuditResult struct {
 	SizeMismatched int
 }
 
-// RootFSObjectDeleter deletes legacy rootfs objects from durable object storage.
+// RootFSObjectDeleter deletes rootfs diff objects from durable object storage.
 type RootFSObjectDeleter interface {
 	Delete(key string) error
 }
@@ -478,6 +485,49 @@ func restoreRootFSFromSnapshot(ctx context.Context, db rootFSStoreDB, req *Resto
 		return nil, fmt.Errorf("restore rootfs filesystem from snapshot: %w", err)
 	}
 	return filesystem, nil
+}
+
+// SquashRootFSFilesystem replaces a filesystem layer chain with a single
+// precomputed layer. The caller is responsible for creating the squashed diff
+// object before advancing the filesystem head.
+func (s *PGSandboxStore) SquashRootFSFilesystem(ctx context.Context, req *SquashRootFSFilesystemRequest) error {
+	if s == nil || s.pool == nil || req == nil || req.SquashedRootFSState == nil {
+		return nil
+	}
+	sandboxID := strings.TrimSpace(req.SandboxID)
+	if sandboxID == "" {
+		sandboxID = strings.TrimSpace(req.SquashedRootFSState.SandboxID)
+	}
+	if sandboxID == "" {
+		return fmt.Errorf("sandbox_id is required")
+	}
+	if strings.TrimSpace(req.ExpectedHeadLayerID) == "" {
+		return fmt.Errorf("expected_head_layer_id is required")
+	}
+	state := *req.SquashedRootFSState
+	state.SandboxID = sandboxID
+	if strings.TrimSpace(state.ParentLayerID) != "" {
+		return fmt.Errorf("squashed rootfs layer cannot have a parent layer")
+	}
+	if err := validateRootFSState(&state); err != nil {
+		return err
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin rootfs squash tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := saveRootFSLayer(ctx, tx, &state); err != nil {
+		return err
+	}
+	if err := advanceRootFSFilesystemHead(ctx, tx, &state, nullableText(req.ExpectedHeadLayerID)); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit rootfs squash tx: %w", err)
+	}
+	return nil
 }
 
 // GarbageCollectRootFSFilesystem removes unreferenced leaf layer metadata and

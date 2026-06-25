@@ -12,9 +12,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSaveRootFSStateWritesCheckpointAndFilesystemHeadOnly(t *testing.T) {
+func TestSaveRootFSStateWritesLayerAndFilesystemHeadOnly(t *testing.T) {
 	exec := &recordingRootFSStateExecutor{
 		tags: []pgconn.CommandTag{
+			pgconn.NewCommandTag("INSERT 0 1"),
 			pgconn.NewCommandTag("INSERT 0 1"),
 			pgconn.NewCommandTag("SELECT 1"),
 		},
@@ -25,11 +26,11 @@ func TestSaveRootFSStateWritesCheckpointAndFilesystemHeadOnly(t *testing.T) {
 	err := saveRootFSState(context.Background(), exec, state)
 
 	require.NoError(t, err)
-	require.Len(t, exec.sqls, 2)
-	assert.Contains(t, exec.sqls[0], "INSERT INTO manager.rootfs_layers")
-	assert.Contains(t, exec.sqls[1], "INSERT INTO manager.rootfs_filesystems")
+	require.Len(t, exec.sqls, 3)
+	assert.Contains(t, exec.sqls[0], "INSERT INTO manager.rootfs_objects")
+	assert.Contains(t, exec.sqls[1], "INSERT INTO manager.rootfs_layers")
+	assert.Contains(t, exec.sqls[2], "INSERT INTO manager.rootfs_filesystems")
 	for _, sql := range exec.sqls {
-		assert.NotContains(t, sql, "INSERT INTO manager.rootfs_objects")
 		assert.NotContains(t, sql, "INSERT INTO manager.sandbox_rootfs_states")
 		assert.NotContains(t, sql, "INSERT INTO manager.sandbox_rootfs_heads")
 	}
@@ -38,7 +39,6 @@ func TestSaveRootFSStateWritesCheckpointAndFilesystemHeadOnly(t *testing.T) {
 func TestSaveRootFSStateRequiresLayerID(t *testing.T) {
 	exec := &recordingRootFSStateExecutor{}
 	state := rootFSTestState()
-	state.LayerID = ""
 
 	err := saveRootFSState(context.Background(), exec, state)
 
@@ -84,7 +84,6 @@ func TestSaveRootFSStateRequiresS0FSManifest(t *testing.T) {
 	state.LayerID = "layer-s0fs"
 	state.StorageEngine = ctldapi.RootFSStorageEngineS0FS
 	state.S0FSVolumeID = "fs-1"
-	state.S0FSManifestKey = ""
 
 	err := saveRootFSState(context.Background(), exec, state)
 
@@ -96,6 +95,7 @@ func TestSaveRootFSStateMapsHeadCASMissToConflict(t *testing.T) {
 	exec := &recordingRootFSStateExecutor{
 		tags: []pgconn.CommandTag{
 			pgconn.NewCommandTag("INSERT 0 1"),
+			pgconn.NewCommandTag("INSERT 0 1"),
 			pgconn.NewCommandTag("SELECT 0"),
 		},
 	}
@@ -106,12 +106,13 @@ func TestSaveRootFSStateMapsHeadCASMissToConflict(t *testing.T) {
 	err := saveRootFSState(context.Background(), exec, state)
 
 	require.ErrorIs(t, err, ErrRootFSHeadConflict)
-	require.Len(t, exec.sqls, 2)
+	require.Len(t, exec.sqls, 3)
 }
 
 func TestSaveRootFSStateUsesExpectedHeadLayerIDWhenParentDiffers(t *testing.T) {
 	exec := &recordingRootFSStateExecutor{
 		tags: []pgconn.CommandTag{
+			pgconn.NewCommandTag("INSERT 0 1"),
 			pgconn.NewCommandTag("INSERT 0 1"),
 			pgconn.NewCommandTag("SELECT 1"),
 		},
@@ -124,8 +125,24 @@ func TestSaveRootFSStateUsesExpectedHeadLayerIDWhenParentDiffers(t *testing.T) {
 	err := saveRootFSState(context.Background(), exec, state)
 
 	require.NoError(t, err)
-	require.Len(t, exec.args, 2)
-	assert.Equal(t, "layer-parent", exec.args[1][3])
+	require.Len(t, exec.args, 3)
+	assert.Equal(t, "layer-parent", exec.args[2][3])
+}
+
+func TestSaveRootFSStateMapsObjectMetadataConflict(t *testing.T) {
+	exec := &recordingRootFSStateExecutor{
+		tags: []pgconn.CommandTag{
+			pgconn.NewCommandTag("INSERT 0 0"),
+		},
+	}
+	state := rootFSTestState()
+	state.LayerID = "layer-conflict"
+
+	err := saveRootFSState(context.Background(), exec, state)
+
+	require.ErrorIs(t, err, ErrRootFSObjectConflict)
+	require.Len(t, exec.sqls, 1)
+	assert.Contains(t, exec.sqls[0], "INSERT INTO manager.rootfs_objects")
 }
 
 func TestDeleteRootFSObjectsDedupesAndSkipsEmptyKeys(t *testing.T) {

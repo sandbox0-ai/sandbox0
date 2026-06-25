@@ -2,8 +2,11 @@ package rootfs
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,10 +16,15 @@ import (
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
+	crootfs "github.com/containerd/containerd/v2/pkg/rootfs"
+	"github.com/containerd/continuity/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/s0fs"
@@ -105,6 +113,8 @@ type liveRootFSPaths struct {
 type containerdClient interface {
 	LoadContainer(ctx context.Context, id string) (containerd.Container, error)
 	SnapshotService(snapshotterName string) snapshots.Snapshotter
+	DiffService() containerd.DiffService
+	ContentStore() content.Store
 	ImageService() images.Store
 	Close() error
 }
@@ -180,6 +190,165 @@ func (r *ContainerdRuntime) Inspect(ctx context.Context, target ctldapi.RootFSCo
 		return ctldapi.RootFSInfo{}, err
 	}
 	return info, nil
+}
+
+func (r *ContainerdRuntime) CreateDiff(ctx context.Context, info ctldapi.RootFSInfo, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+	if strings.TrimSpace(info.SnapshotKey) == "" || strings.TrimSpace(info.Snapshotter) == "" {
+		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("%w: snapshot key and snapshotter are required", ErrBadRequest)
+	}
+	client, closeClient, err := r.client(ctx)
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+
+	if desc, reader, ok, fastErr := r.createOverlayUpperDiff(ctx, client, info, excludedPaths, portalPaths); ok && fastErr == nil {
+		closeClient()
+		return desc, reader, nil
+	} else if ok && fastErr != nil {
+		desc, err := crootfs.CreateDiff(ctx, info.SnapshotKey, client.SnapshotService(info.Snapshotter), client.DiffService())
+		if err != nil {
+			closeClient()
+			return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("overlayfs fast diff: %v; containerd diff: %w", fastErr, err)
+		}
+		rootDesc, reader, needsClient, err := rootFSDiffReaderFromContent(ctx, client, desc, excludedPaths, portalPaths)
+		if err != nil {
+			closeClient()
+			return ctldapi.RootFSDiffDescriptor{}, nil, err
+		}
+		if !needsClient {
+			closeClient()
+			return rootDesc, reader, nil
+		}
+		return rootDesc, closeReadSeekWithFunc{ReadSeekCloser: reader, closeFunc: closeClient}, nil
+	}
+
+	desc, err := crootfs.CreateDiff(ctx, info.SnapshotKey, client.SnapshotService(info.Snapshotter), client.DiffService())
+	if err != nil {
+		closeClient()
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+	rootDesc, reader, needsClient, err := rootFSDiffReaderFromContent(ctx, client, desc, excludedPaths, portalPaths)
+	if err != nil {
+		closeClient()
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+	if !needsClient {
+		closeClient()
+		return rootDesc, reader, nil
+	}
+	return rootDesc, closeReadSeekWithFunc{ReadSeekCloser: reader, closeFunc: closeClient}, nil
+}
+
+func (r *ContainerdRuntime) CreateDiffFromBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+	if strings.TrimSpace(baselineLayerID) == "" {
+		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("%w: baseline layer id is required", ErrBadRequest)
+	}
+	client, closeClient, err := r.client(ctx)
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+	defer closeClient()
+
+	upperdir, err := r.activeOverlayUpperdir(ctx, client, info)
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
+	}
+	baselineDir := r.rootFSBaselinePath(info, baselineLayerID)
+	if st, err := os.Stat(baselineDir); err != nil {
+		if os.IsNotExist(err) {
+			return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("%w: rootfs baseline %s is not captured", ErrNotFound, baselineLayerID)
+		}
+		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("inspect rootfs baseline: %w", err)
+	} else if !st.IsDir() {
+		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("%w: rootfs baseline path is not a directory", ErrConflict)
+	}
+	return writeOverlayUpperDiffFromBaseline(ctx, baselineDir, upperdir, excludedPaths, portalPaths)
+}
+
+func (r *ContainerdRuntime) ApplyDiff(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, reader io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, error) {
+	if strings.TrimSpace(info.ContainerID) == "" {
+		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("%w: container id is required", ErrBadRequest)
+	}
+	client, closeClient, err := r.client(ctx)
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, err
+	}
+	defer closeClient()
+
+	liveRootFS, err := liveRootFSPath(r.containerdRoot, r.containerdHostRoot, r.namespace, info)
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, err
+	}
+	filteredDesc, filteredReader, err := filterRootFSDiffTarForApply(desc, reader, excludedPaths, portalPaths)
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("filter rootfs diff: %w", err)
+	}
+	defer filteredReader.Close()
+	desc = filteredDesc
+	reader = filteredReader
+
+	ociDesc, err := descriptorToOCI(desc)
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, err
+	}
+	ref := "sandbox0-rootfs-apply-" + strings.ReplaceAll(ociDesc.Digest.String(), ":", "-")
+	if err := content.WriteBlob(ctx, client.ContentStore(), ref, reader, ociDesc); err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("write rootfs diff into containerd content store: %w", err)
+	}
+	applied, err := client.DiffService().Apply(ctx, ociDesc, []mount.Mount{{
+		Type:    "bind",
+		Source:  liveRootFS,
+		Options: []string{"rbind", "rw"},
+	}})
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, err
+	}
+	return descriptorFromOCI(applied), nil
+}
+
+func (r *ContainerdRuntime) CaptureBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) error {
+	if strings.TrimSpace(baselineLayerID) == "" {
+		return fmt.Errorf("%w: baseline layer id is required", ErrBadRequest)
+	}
+	client, closeClient, err := r.client(ctx)
+	if err != nil {
+		return err
+	}
+	defer closeClient()
+
+	upperdir, err := r.activeOverlayUpperdir(ctx, client, info)
+	if err != nil {
+		return err
+	}
+	target := r.rootFSBaselinePath(info, baselineLayerID)
+	parent := filepath.Dir(target)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return fmt.Errorf("create rootfs baseline parent: %w", err)
+	}
+	tmp, err := os.MkdirTemp(parent, ".baseline-*")
+	if err != nil {
+		return fmt.Errorf("create rootfs baseline temp dir: %w", err)
+	}
+	removeTmp := true
+	defer func() {
+		if removeTmp {
+			_ = os.RemoveAll(tmp)
+		}
+	}()
+	if err := fs.CopyDir(tmp, upperdir); err != nil {
+		return fmt.Errorf("copy rootfs baseline: %w", err)
+	}
+	if err := newRootFSPathFilter(rootFSExcludedPathsWithPortals(excludedPaths, portalPaths)).RemoveAll(tmp); err != nil {
+		return fmt.Errorf("filter rootfs baseline: %w", err)
+	}
+	if err := os.RemoveAll(target); err != nil {
+		return fmt.Errorf("replace rootfs baseline: %w", err)
+	}
+	if err := os.Rename(tmp, target); err != nil {
+		return fmt.Errorf("publish rootfs baseline: %w", err)
+	}
+	removeTmp = false
+	return nil
 }
 
 func (r *ContainerdRuntime) CommitS0FSRootFS(ctx context.Context, req S0FSCommitRequest) (ctldapi.RootFSHeadDescriptor, error) {
@@ -759,6 +928,44 @@ func safeRootFSPath(value string) string {
 	return replacer.Replace(value)
 }
 
+func rootFSDiffReaderFromContent(ctx context.Context, client containerdClient, desc ocispec.Descriptor, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, bool, error) {
+	rootDesc := descriptorFromOCI(desc)
+	reader, err := content.BlobReadSeeker(ctx, client.ContentStore(), desc)
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, false, err
+	}
+	if !shouldFilterRootFSDiffTar(rootDesc) {
+		return rootDesc, reader, true, nil
+	}
+
+	filteredDesc, filteredReader, err := filterRootFSDiffTarForSave(rootDesc, reader, excludedPaths, portalPaths)
+	closeErr := reader.Close()
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, false, err
+	}
+	if closeErr != nil {
+		_ = filteredReader.Close()
+		return ctldapi.RootFSDiffDescriptor{}, nil, false, closeErr
+	}
+	return filteredDesc, filteredReader, false, nil
+}
+
+func (r *ContainerdRuntime) rootFSBaselinePath(info ctldapi.RootFSInfo, baselineLayerID string) string {
+	root := defaultRootFSCacheDir
+	if r != nil && strings.TrimSpace(r.rootFSCacheDir) != "" {
+		root = r.rootFSCacheDir
+	}
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		info.PodNamespace,
+		info.PodName,
+		info.PodUID,
+		info.ContainerName,
+		info.ContainerID,
+		strings.TrimSpace(baselineLayerID),
+	}, "\x00")))
+	return filepath.Join(root, "baselines", hex.EncodeToString(sum[:]))
+}
+
 func (r *ContainerdRuntime) resolveContainerID(ctx context.Context, target ctldapi.RootFSContainerRef) (string, string, error) {
 	client, conn, err := r.runtimeClient(ctx)
 	if err != nil {
@@ -1142,6 +1349,26 @@ func imageDigest(ctx context.Context, client containerdClient, imageRef string) 
 	return d.String(), nil
 }
 
+func descriptorFromOCI(desc ocispec.Descriptor) ctldapi.RootFSDiffDescriptor {
+	return ctldapi.RootFSDiffDescriptor{
+		MediaType: desc.MediaType,
+		Digest:    desc.Digest.String(),
+		Size:      desc.Size,
+	}
+}
+
+func descriptorToOCI(desc ctldapi.RootFSDiffDescriptor) (ocispec.Descriptor, error) {
+	d, err := digest.Parse(strings.TrimSpace(desc.Digest))
+	if err != nil {
+		return ocispec.Descriptor{}, fmt.Errorf("%w: invalid descriptor digest: %v", ErrBadRequest, err)
+	}
+	return ocispec.Descriptor{
+		MediaType: strings.TrimSpace(desc.MediaType),
+		Digest:    d,
+		Size:      desc.Size,
+	}, nil
+}
+
 func runtimeFamily(handler string) string {
 	raw := strings.ToLower(strings.TrimSpace(handler))
 	switch {
@@ -1190,4 +1417,17 @@ func normalizeCRIEndpoint(endpoint string) string {
 		return "unix://" + endpoint
 	}
 	return endpoint
+}
+
+type closeReadSeekWithFunc struct {
+	io.ReadSeekCloser
+	closeFunc func()
+}
+
+func (r closeReadSeekWithFunc) Close() error {
+	err := r.ReadSeekCloser.Close()
+	if r.closeFunc != nil {
+		r.closeFunc()
+	}
+	return err
 }

@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
-	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -327,7 +326,6 @@ func rootFSProductTestRecord(id, teamID, status string, now time.Time) *SandboxR
 }
 
 func rootFSProductTestState(sandboxID, teamID, layerID string) *SandboxRootFSState {
-	manifestKey := "manifests/" + layerID + ".json"
 	return &SandboxRootFSState{
 		LayerID:           layerID,
 		SandboxID:         sandboxID,
@@ -337,14 +335,8 @@ func rootFSProductTestState(sandboxID, teamID, layerID string) *SandboxRootFSSta
 		BaseImageRef:      "docker.io/library/busybox:1.36",
 		BaseImageDigest:   "sha256:base",
 		Snapshotter:       "overlayfs",
-		StorageEngine:     ctldapi.RootFSStorageEngineS0FS,
-		DiffDigest:        "s0fs:" + manifestKey,
-		DiffMediaType:     "application/vnd.sandbox0.rootfs.s0fs.v1+json",
-		DiffObjectKey:     manifestKey,
-		S0FSVolumeID:      sandboxID,
-		S0FSManifestKey:   manifestKey,
-		S0FSManifestSeq:   1,
-		S0FSCheckpointSeq: 1,
+		DiffDigest:        "sha256:" + layerID,
+		DiffObjectKey:     "rootfs/" + layerID + ".tar",
 		CreatedAt:         time.Now().UTC(),
 		UpdatedAt:         time.Now().UTC(),
 	}

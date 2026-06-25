@@ -119,13 +119,8 @@ func TestCtldClientRootFSMethods(t *testing.T) {
 			path: "/api/v1/rootfs/apply",
 			call: func(client *CtldClient, address string) error {
 				_, err := client.ApplyRootFS(context.Background(), address, ctldapi.ApplyRootFSRequest{
-					Target: ctldapi.RootFSContainerRef{Namespace: "default", PodName: "pod-1", ContainerName: "procd"},
-					Head: ctldapi.RootFSHeadDescriptor{
-						Engine:      ctldapi.RootFSStorageEngineS0FS,
-						VolumeID:    "sandbox-1",
-						ManifestKey: "manifests/00000000000000000001.json",
-						ManifestSeq: 1,
-					},
+					Target:     ctldapi.RootFSContainerRef{Namespace: "default", PodName: "pod-1", ContainerName: "procd"},
+					Descriptor: ctldapi.RootFSDiffDescriptor{Digest: "sha256:abc", ObjectKey: "rootfs/diff.tar"},
 				})
 				return err
 			},
@@ -142,7 +137,7 @@ func TestCtldClientRootFSMethods(t *testing.T) {
 				case "inspect":
 					_ = json.NewEncoder(w).Encode(ctldapi.InspectRootFSResponse{Info: ctldapi.RootFSInfo{Runtime: "runc"}})
 				case "save":
-					_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{Head: ctldapi.RootFSHeadDescriptor{Engine: ctldapi.RootFSStorageEngineS0FS, VolumeID: "sandbox-1", ManifestKey: "manifests/00000000000000000001.json", ManifestSeq: 1}})
+					_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{Descriptor: ctldapi.RootFSDiffDescriptor{ObjectKey: "rootfs/diff.tar"}})
 				case "apply":
 					_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
 				}
@@ -160,12 +155,7 @@ func TestCtldClientRootFSMethodsCanUseExtendedTimeout(t *testing.T) {
 		assert.Equal(t, "/api/v1/rootfs/save", r.URL.Path)
 		time.Sleep(80 * time.Millisecond)
 		_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{
-			Head: ctldapi.RootFSHeadDescriptor{
-				Engine:      ctldapi.RootFSStorageEngineS0FS,
-				VolumeID:    "sandbox-1",
-				ManifestKey: "manifests/00000000000000000001.json",
-				ManifestSeq: 1,
-			},
+			Descriptor: ctldapi.RootFSDiffDescriptor{Digest: "sha256:diff"},
 		})
 	}))
 	defer server.Close()
@@ -183,5 +173,5 @@ func TestCtldClientRootFSMethodsCanUseExtendedTimeout(t *testing.T) {
 	resp, err := client.SaveRootFSWithTimeout(context.Background(), server.URL, req, time.Second)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
-	assert.Equal(t, "manifests/00000000000000000001.json", resp.Head.ManifestKey)
+	assert.Equal(t, "sha256:diff", resp.Descriptor.Digest)
 }

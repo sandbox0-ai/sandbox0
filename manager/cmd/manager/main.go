@@ -293,6 +293,9 @@ func main() {
 		ProcdHTTPClient:                     obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration}),
 		ProcdInitTimeout:                    cfg.ProcdInitTimeout.Duration,
 		AllowColdStartWithoutReadyDataPlane: cfg.AllowColdStartWithoutReadyDataPlane,
+		RootFSSquashDisabled:                cfg.RootFSMaintenance.SquashDisabled,
+		RootFSSquashMaxChainDepth:           cfg.RootFSMaintenance.SquashMaxChainDepth,
+		RootFSSquashMaxChainBytes:           cfg.RootFSMaintenance.SquashMaxChainBytes,
 	}
 
 	sandboxService := service.NewSandboxService(

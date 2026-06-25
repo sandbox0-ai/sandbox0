@@ -40,6 +40,7 @@ func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 		assert.Equal(t, "sandbox-1", req.SandboxID)
 		assert.Equal(t, "team-1", req.TeamID)
 		assert.Equal(t, int64(3), req.ExpectedRuntimeGeneration)
+		assert.Empty(t, req.ParentLayerID)
 		assert.Equal(t, ctldapi.RootFSContainerRef{
 			Namespace:     "default",
 			PodName:       "pod-1",
@@ -58,14 +59,11 @@ func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 				SnapshotParent:      "parent-1",
 				SnapshotParentChain: []string{"parent-1", "parent-0"},
 			},
-			Head: ctldapi.RootFSHeadDescriptor{
-				Engine:        ctldapi.RootFSStorageEngineS0FS,
-				TeamID:        "team-1",
-				FilesystemID:  "sandbox-1",
-				VolumeID:      "sandbox-1",
-				ManifestKey:   "manifests/00000000000000000003.json",
-				ManifestSeq:   3,
-				CheckpointSeq: 1,
+			Descriptor: ctldapi.RootFSDiffDescriptor{
+				MediaType: "application/vnd.oci.image.layer.v1.tar",
+				Digest:    "sha256:diff",
+				Size:      123,
+				ObjectKey: "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar",
 			},
 		})
 	}))
@@ -120,8 +118,8 @@ func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 	assert.Equal(t, "runc", state.Runtime)
 	assert.Equal(t, "sha256:base", state.BaseImageDigest)
 	assert.Equal(t, []string{"parent-1", "parent-0"}, state.SnapshotParentChain)
-	assert.Equal(t, "s0fs:manifests/00000000000000000003.json", state.DiffDigest)
-	assert.Equal(t, "manifests/00000000000000000003.json", state.DiffObjectKey)
+	assert.Equal(t, "sha256:diff", state.DiffDigest)
+	assert.Equal(t, "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar", state.DiffObjectKey)
 	assert.NotEmpty(t, state.LayerID)
 	assert.Equal(t, SandboxStatusPaused, store.records["sandbox-1"].Status)
 }
@@ -141,14 +139,11 @@ func TestPauseSandboxRuntimeSavesChildLayerFromParentHead(t *testing.T) {
 				SnapshotParent:      "parent-1",
 				SnapshotParentChain: []string{"parent-1", "parent-0"},
 			},
-			Head: ctldapi.RootFSHeadDescriptor{
-				Engine:        ctldapi.RootFSStorageEngineS0FS,
-				TeamID:        "team-1",
-				FilesystemID:  "sandbox-1",
-				VolumeID:      "sandbox-1",
-				ManifestKey:   "manifests/00000000000000000004.json",
-				ManifestSeq:   4,
-				CheckpointSeq: 2,
+			Descriptor: ctldapi.RootFSDiffDescriptor{
+				MediaType: "application/vnd.oci.image.layer.v1.tar",
+				Digest:    "sha256:child",
+				Size:      123,
+				ObjectKey: "sandbox-rootfs/team-1/sandbox-1/4/sha256/child.tar",
 			},
 		})
 	}))
@@ -172,13 +167,8 @@ func TestPauseSandboxRuntimeSavesChildLayerFromParentHead(t *testing.T) {
 				SandboxID:         "sandbox-1",
 				TeamID:            "team-1",
 				RuntimeGeneration: 3,
-				StorageEngine:     ctldapi.RootFSStorageEngineS0FS,
-				DiffDigest:        "s0fs:manifests/00000000000000000003.json",
-				DiffObjectKey:     "manifests/00000000000000000003.json",
-				S0FSVolumeID:      "sandbox-1",
-				S0FSManifestKey:   "manifests/00000000000000000003.json",
-				S0FSManifestSeq:   3,
-				S0FSCheckpointSeq: 1,
+				DiffDigest:        "sha256:parent",
+				DiffObjectKey:     "sandbox-rootfs/team-1/sandbox-1/3/sha256/parent.tar",
 			},
 		},
 	}
@@ -194,12 +184,177 @@ func TestPauseSandboxRuntimeSavesChildLayerFromParentHead(t *testing.T) {
 
 	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
 
-	assert.Equal(t, "manifests/00000000000000000003.json", savedReq.ParentHead.ManifestKey)
+	assert.Equal(t, "layer-parent", savedReq.ParentLayerID)
 	state := store.rootFSStates["sandbox-1"]
 	require.NotNil(t, state)
 	assert.NotEmpty(t, state.LayerID)
 	assert.Equal(t, "layer-parent", state.ParentLayerID)
-	assert.Equal(t, "s0fs:manifests/00000000000000000004.json", state.DiffDigest)
+	assert.Equal(t, "sha256:child", state.DiffDigest)
+}
+
+func TestPauseSandboxRuntimeSquashesRootFSWhenChainIsTooDeep(t *testing.T) {
+	var savedReq ctldapi.SaveRootFSRequest
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/v1/rootfs/save", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&savedReq))
+		_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{
+			Info: ctldapi.RootFSInfo{
+				Runtime:             "runc",
+				RuntimeHandler:      "io.containerd.runc.v2",
+				BaseImageRef:        "docker.io/library/busybox:1.36",
+				BaseImageDigest:     "sha256:base",
+				Snapshotter:         "overlayfs",
+				SnapshotParent:      "parent-1",
+				SnapshotParentChain: []string{"parent-1", "parent-0"},
+			},
+			Descriptor: ctldapi.RootFSDiffDescriptor{
+				MediaType: "application/vnd.oci.image.layer.v1.tar",
+				Digest:    "sha256:squashed",
+				Size:      456,
+				ObjectKey: "sandbox-rootfs/team-1/sandbox-1/4/sha256/squashed.tar",
+			},
+		})
+	}))
+	defer ctld.Close()
+	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+
+	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
+	pod.Status.HostIP = ctldURL.Hostname()
+	parentState := &SandboxRootFSState{
+		LayerID:           "layer-8",
+		SandboxID:         "sandbox-1",
+		TeamID:            "team-1",
+		RuntimeGeneration: 3,
+		DiffDigest:        "sha256:parent",
+		DiffObjectKey:     "sandbox-rootfs/team-1/sandbox-1/3/sha256/parent.tar",
+	}
+	for i := 1; i <= 8; i++ {
+		layer := &SandboxRootFSLayer{
+			ID:            "layer-" + strconv.Itoa(i),
+			TeamID:        "team-1",
+			DiffDigest:    "sha256:layer",
+			DiffObjectKey: "rootfs/layer.tar",
+			DiffSize:      1,
+		}
+		if i > 1 {
+			layer.ParentLayerID = "layer-" + strconv.Itoa(i-1)
+		}
+		parentState.LayerChain = append(parentState.LayerChain, layer)
+	}
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{
+			"sandbox-1": {
+				ID:                "sandbox-1",
+				TeamID:            "team-1",
+				RuntimeGeneration: 3,
+				Status:            SandboxStatusPausing,
+			},
+		},
+		rootFSStates: map[string]*SandboxRootFSState{
+			"sandbox-1": parentState,
+		},
+	}
+	svc := &SandboxService{
+		k8sClient:    fake.NewSimpleClientset(pod),
+		podLister:    newTestPodLister(t, pod),
+		sandboxStore: store,
+		ctldClient:   NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config: SandboxServiceConfig{
+			CtldEnabled:               true,
+			CtldPort:                  ctldPort,
+			RootFSSquashMaxChainDepth: 8,
+		},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+
+	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
+
+	assert.Empty(t, savedReq.ParentLayerID)
+	state := store.rootFSStates["sandbox-1"]
+	require.NotNil(t, state)
+	assert.NotEmpty(t, state.LayerID)
+	assert.Empty(t, state.ParentLayerID)
+	assert.Equal(t, "layer-8", state.ExpectedHeadLayerID)
+	assert.Equal(t, "sha256:squashed", state.DiffDigest)
+}
+
+func TestPauseSandboxRuntimeFallsBackToRootLayerWhenBaselineIsMissing(t *testing.T) {
+	var saveRequests []ctldapi.SaveRootFSRequest
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/v1/rootfs/save", r.URL.Path)
+		var req ctldapi.SaveRootFSRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		saveRequests = append(saveRequests, req)
+		if req.ParentLayerID != "" {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{Error: "create rootfs diff: rootfs baseline layer-parent is not captured"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{
+			Info: ctldapi.RootFSInfo{
+				Runtime:             "runc",
+				RuntimeHandler:      "io.containerd.runc.v2",
+				BaseImageRef:        "docker.io/library/busybox:1.36",
+				BaseImageDigest:     "sha256:base",
+				Snapshotter:         "overlayfs",
+				SnapshotParent:      "parent-1",
+				SnapshotParentChain: []string{"parent-1", "parent-0"},
+			},
+			Descriptor: ctldapi.RootFSDiffDescriptor{
+				MediaType: "application/vnd.oci.image.layer.v1.tar",
+				Digest:    "sha256:full",
+				Size:      456,
+				ObjectKey: "sandbox-rootfs/team-1/sandbox-1/3/sha256/full.tar",
+			},
+		})
+	}))
+	defer ctld.Close()
+	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+
+	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
+	pod.Status.HostIP = ctldURL.Hostname()
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{
+			"sandbox-1": {
+				ID:                "sandbox-1",
+				TeamID:            "team-1",
+				RuntimeGeneration: 3,
+				Status:            SandboxStatusPausing,
+			},
+		},
+		rootFSStates: map[string]*SandboxRootFSState{
+			"sandbox-1": {
+				LayerID:           "layer-parent",
+				SandboxID:         "sandbox-1",
+				TeamID:            "team-1",
+				RuntimeGeneration: 2,
+				DiffDigest:        "sha256:parent",
+				DiffObjectKey:     "sandbox-rootfs/team-1/sandbox-1/2/sha256/parent.tar",
+			},
+		},
+	}
+	svc := &SandboxService{
+		k8sClient:    fake.NewSimpleClientset(pod),
+		podLister:    newTestPodLister(t, pod),
+		sandboxStore: store,
+		ctldClient:   NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config:       SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+		clock:        systemTime{},
+		logger:       zap.NewNop(),
+	}
+
+	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
+
+	require.Len(t, saveRequests, 2)
+	assert.Equal(t, "layer-parent", saveRequests[0].ParentLayerID)
+	assert.Empty(t, saveRequests[1].ParentLayerID)
+	state := store.rootFSStates["sandbox-1"]
+	require.NotNil(t, state)
+	assert.NotEmpty(t, state.LayerID)
+	assert.Empty(t, state.ParentLayerID)
+	assert.Equal(t, "layer-parent", state.ExpectedHeadLayerID)
+	assert.Equal(t, "sha256:full", state.DiffDigest)
 }
 
 func TestGetSandboxReportsPausingRecordWhileRuntimePodStillRunning(t *testing.T) {
@@ -247,9 +402,8 @@ func TestFinishRestoredSandboxRuntimeAppliesRootFSBeforeProcdInitialization(t *t
 		assert.Equal(t, "sha256:base", req.ExpectedBaseImageDigest)
 		assert.Equal(t, "parent-1", req.ExpectedSnapshotParent)
 		assert.Equal(t, []string{"parent-1", "parent-0"}, req.ExpectedSnapshotParentChain)
-		assert.Equal(t, ctldapi.RootFSStorageEngineS0FS, req.Head.Engine)
-		assert.Equal(t, "fs-1", req.Head.VolumeID)
-		assert.Equal(t, "manifests/00000000000000000007.json", req.Head.ManifestKey)
+		assert.Equal(t, "sha256:diff", req.Descriptor.Digest)
+		assert.Equal(t, "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar", req.Descriptor.ObjectKey)
 		assert.ElementsMatch(t, []string{"/workspace/data"}, req.ExcludedPaths)
 		calls = append(calls, "apply")
 		_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
@@ -308,6 +462,74 @@ func TestFinishRestoredSandboxRuntimeAppliesRootFSBeforeProcdInitialization(t *t
 	_, err := svc.finishRestoredSandboxRuntime(context.Background(), pod, record, "hot")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"apply", "procd"}, calls)
+}
+
+func TestFinishRestoredSandboxRuntimeAppliesRootFSLayerChain(t *testing.T) {
+	var applyReq ctldapi.ApplyRootFSRequest
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/v1/rootfs/apply", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&applyReq))
+		_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
+	}))
+	defer ctld.Close()
+	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+
+	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/v1/initialize", r.URL.Path)
+		require.NoError(t, spec.WriteSuccess(w, http.StatusOK, InitializeResponse{SandboxID: "sandbox-1", TeamID: "team-1"}))
+	}))
+	defer procd.Close()
+	procdURL, procdPort := parsedTestServer(t, procd.URL)
+
+	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
+	pod.Status.HostIP = ctldURL.Hostname()
+	pod.Status.PodIP = procdURL.Hostname()
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{},
+		rootFSStates: map[string]*SandboxRootFSState{
+			"sandbox-1": rootFSTestLayerState(),
+		},
+	}
+	svc := &SandboxService{
+		k8sClient:              fake.NewSimpleClientset(pod),
+		podLister:              newTestPodLister(t, pod),
+		sandboxStore:           store,
+		ctldClient:             NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		procdClient:            NewProcdClient(ProcdClientConfig{Timeout: time.Second}),
+		internalTokenGenerator: staticTokenGenerator{},
+		config: SandboxServiceConfig{
+			CtldEnabled:      true,
+			CtldPort:         ctldPort,
+			ProcdPort:        procdPort,
+			ProcdInitTimeout: time.Second,
+		},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+	record := &SandboxRecord{
+		ID:                "sandbox-1",
+		TeamID:            "team-1",
+		UserID:            "user-1",
+		TemplateID:        "template-1",
+		TemplateName:      "template-1",
+		TemplateNamespace: "template-default",
+		TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
+		RuntimeGeneration: 3,
+		Status:            SandboxStatusPaused,
+	}
+
+	_, err := svc.finishRestoredSandboxRuntime(context.Background(), pod, record, "hot")
+	require.NoError(t, err)
+
+	assert.Empty(t, applyReq.Descriptor.Digest)
+	assert.Equal(t, "layer-child", applyReq.BaselineLayerID)
+	require.Len(t, applyReq.Layers, 2)
+	assert.Equal(t, "layer-parent", applyReq.Layers[0].LayerID)
+	assert.Empty(t, applyReq.Layers[0].ParentLayerID)
+	assert.Equal(t, "rootfs/parent.tar", applyReq.Layers[0].Descriptor.ObjectKey)
+	assert.Equal(t, "layer-child", applyReq.Layers[1].LayerID)
+	assert.Equal(t, "layer-parent", applyReq.Layers[1].ParentLayerID)
+	assert.Equal(t, "rootfs/child.tar", applyReq.Layers[1].Descriptor.ObjectKey)
 }
 
 func TestFinishRestoredSandboxRuntimeAppliesS0FSHead(t *testing.T) {
@@ -382,6 +604,8 @@ func TestFinishRestoredSandboxRuntimeAppliesS0FSHead(t *testing.T) {
 	_, err := svc.finishRestoredSandboxRuntime(context.Background(), pod, record, "hot")
 	require.NoError(t, err)
 
+	assert.Empty(t, applyReq.Descriptor.Digest)
+	assert.Empty(t, applyReq.Layers)
 	assert.Equal(t, "fs-1", applyReq.FilesystemID)
 	assert.Equal(t, ctldapi.RootFSStorageEngineS0FS, applyReq.Head.Engine)
 	assert.Equal(t, "team-1", applyReq.Head.TeamID)
@@ -413,7 +637,7 @@ func TestFinishRestoredSandboxRuntimeRetriesWithCheckpointBaseImage(t *testing.T
 			assert.Equal(t, checkpointDigest, req.ExpectedBaseImageDigest)
 			if req.Target.PodName == "pod-current" {
 				w.WriteHeader(http.StatusInternalServerError)
-				_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Error: "attach s0fs rootfs: simulated conflict"})
+				_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Error: "apply rootfs diff: simulated conflict"})
 				return
 			}
 			_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
@@ -486,7 +710,22 @@ func TestFinishRestoredSandboxRuntimeRetriesWithCheckpointBaseImage(t *testing.T
 			},
 		},
 		rootFSStates: map[string]*SandboxRootFSState{
-			"sandbox-1": rootFSTestS0FSStateWithBaseDigest(checkpointDigest),
+			"sandbox-1": {
+				SandboxID:           "sandbox-1",
+				TeamID:              "team-1",
+				RuntimeGeneration:   3,
+				Runtime:             "runc",
+				RuntimeHandler:      "io.containerd.runc.v2",
+				BaseImageRef:        "docker.io/library/busybox:1.36",
+				BaseImageDigest:     checkpointDigest,
+				Snapshotter:         "overlayfs",
+				SnapshotParent:      "parent-1",
+				SnapshotParentChain: []string{"parent-1", "parent-0"},
+				DiffDigest:          "sha256:diff",
+				DiffMediaType:       "application/vnd.oci.image.layer.v1.tar",
+				DiffSize:            123,
+				DiffObjectKey:       "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar",
+			},
 		},
 	}
 	svc := &SandboxService{
@@ -699,7 +938,6 @@ func rootFSTestState() *SandboxRootFSState {
 	return &SandboxRootFSState{
 		SandboxID:           "sandbox-1",
 		TeamID:              "team-1",
-		LayerID:             "layer-s0fs",
 		RuntimeGeneration:   3,
 		Runtime:             "runc",
 		RuntimeHandler:      "io.containerd.runc.v2",
@@ -708,24 +946,71 @@ func rootFSTestState() *SandboxRootFSState {
 		Snapshotter:         "overlayfs",
 		SnapshotParent:      "parent-1",
 		SnapshotParentChain: []string{"parent-1", "parent-0"},
-		StorageEngine:       ctldapi.RootFSStorageEngineS0FS,
-		DiffDigest:          "s0fs:manifests/00000000000000000007.json",
-		DiffMediaType:       "application/vnd.sandbox0.rootfs.s0fs.v1+json",
-		DiffObjectKey:       "manifests/00000000000000000007.json",
-		S0FSVolumeID:        "fs-1",
-		S0FSManifestKey:     "manifests/00000000000000000007.json",
-		S0FSManifestSeq:     7,
-		S0FSCheckpointSeq:   3,
+		DiffDigest:          "sha256:diff",
+		DiffMediaType:       "application/vnd.oci.image.layer.v1.tar",
+		DiffSize:            123,
+		DiffObjectKey:       "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar",
 	}
 }
 
-func rootFSTestS0FSState() *SandboxRootFSState {
-	return rootFSTestState()
+func rootFSTestLayerState() *SandboxRootFSState {
+	state := rootFSTestState()
+	state.LayerID = "layer-child"
+	state.ParentLayerID = "layer-parent"
+	state.DiffDigest = "sha256:child"
+	state.DiffObjectKey = "rootfs/child.tar"
+	state.LayerChain = []*SandboxRootFSLayer{
+		{
+			ID:                  "layer-parent",
+			SourceSandboxID:     "sandbox-1",
+			TeamID:              "team-1",
+			RuntimeGeneration:   2,
+			Runtime:             "runc",
+			RuntimeHandler:      "io.containerd.runc.v2",
+			BaseImageRef:        "docker.io/library/busybox:1.36",
+			BaseImageDigest:     "sha256:base",
+			Snapshotter:         "overlayfs",
+			SnapshotParent:      "parent-1",
+			SnapshotParentChain: []string{"parent-1", "parent-0"},
+			DiffDigest:          "sha256:parent",
+			DiffMediaType:       "application/vnd.oci.image.layer.v1.tar",
+			DiffSize:            100,
+			DiffObjectKey:       "rootfs/parent.tar",
+		},
+		{
+			ID:                  "layer-child",
+			ParentLayerID:       "layer-parent",
+			SourceSandboxID:     "sandbox-1",
+			TeamID:              "team-1",
+			RuntimeGeneration:   3,
+			Runtime:             "runc",
+			RuntimeHandler:      "io.containerd.runc.v2",
+			BaseImageRef:        "docker.io/library/busybox:1.36",
+			BaseImageDigest:     "sha256:base",
+			Snapshotter:         "overlayfs",
+			SnapshotParent:      "parent-1",
+			SnapshotParentChain: []string{"parent-1", "parent-0"},
+			DiffDigest:          "sha256:child",
+			DiffMediaType:       "application/vnd.oci.image.layer.v1.tar",
+			DiffSize:            123,
+			DiffObjectKey:       "rootfs/child.tar",
+		},
+	}
+	return state
 }
 
-func rootFSTestS0FSStateWithBaseDigest(baseDigest string) *SandboxRootFSState {
+func rootFSTestS0FSState() *SandboxRootFSState {
 	state := rootFSTestState()
-	state.BaseImageDigest = baseDigest
+	state.LayerID = "layer-s0fs"
+	state.StorageEngine = ctldapi.RootFSStorageEngineS0FS
+	state.DiffDigest = "s0fs:manifests/00000000000000000007.json"
+	state.DiffMediaType = "application/vnd.sandbox0.rootfs.s0fs.v1+json"
+	state.DiffSize = 0
+	state.DiffObjectKey = "manifests/00000000000000000007.json"
+	state.S0FSVolumeID = "fs-1"
+	state.S0FSManifestKey = "manifests/00000000000000000007.json"
+	state.S0FSManifestSeq = 7
+	state.S0FSCheckpointSeq = 3
 	return state
 }
 

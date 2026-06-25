@@ -23,11 +23,28 @@ const sandboxRootFSContainerName = "procd"
 const sandboxRootFSOperationTimeout = 5 * time.Minute
 
 func (s *SandboxService) saveSandboxRootFSCheckpoint(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, tx SandboxStoreTx) error {
-	if s == nil || !s.config.CtldEnabled || s.ctldClient == nil || pod == nil {
+	state, err := s.prepareSandboxRootFSCheckpoint(ctx, pod, record)
+	if err != nil {
+		return err
+	}
+	if state == nil {
 		return nil
 	}
+	if tx != nil {
+		return tx.SaveRootFSState(ctx, state)
+	}
+	if s.sandboxStore != nil {
+		return s.sandboxStore.SaveRootFSState(ctx, state)
+	}
+	return nil
+}
+
+func (s *SandboxService) prepareSandboxRootFSCheckpoint(ctx context.Context, pod *corev1.Pod, record *SandboxRecord) (*SandboxRootFSState, error) {
+	if s == nil || !s.config.CtldEnabled || s.ctldClient == nil || pod == nil {
+		return nil, nil
+	}
 	if record == nil {
-		return nil
+		return nil, nil
 	}
 	sandboxID := sandboxIDFromPod(pod)
 	if sandboxID == "" {
@@ -41,18 +58,18 @@ func (s *SandboxService) saveSandboxRootFSCheckpoint(ctx context.Context, pod *c
 		teamID = pod.Annotations[controller.AnnotationTeamID]
 	}
 	if strings.TrimSpace(teamID) == "" {
-		return fmt.Errorf("team_id is required to save sandbox rootfs checkpoint")
+		return nil, fmt.Errorf("team_id is required to save sandbox rootfs checkpoint")
 	}
 
 	ctldAddress, err := s.ctldAddressForPod(ctx, pod)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	generation := runtimeGenerationFromPod(pod)
 	parentLayerID := ""
 	expectedHeadLayerID := ""
 	if parentState, err := s.latestRootFSState(ctx, sandboxID); err != nil {
-		return fmt.Errorf("load current rootfs head: %w", err)
+		return nil, fmt.Errorf("load current rootfs head: %w", err)
 	} else if parentState != nil {
 		expectedHeadLayerID = strings.TrimSpace(parentState.LayerID)
 		if squash, reason := s.shouldSquashSandboxRootFSCheckpoint(parentState); squash {
@@ -82,22 +99,16 @@ func (s *SandboxService) saveSandboxRootFSCheckpoint(ctx context.Context, pod *c
 		resp, err = s.ctldClient.SaveRootFSWithTimeout(ctx, ctldAddress, saveReq, sandboxRootFSOperationTimeout)
 	}
 	if err != nil {
-		return fmt.Errorf("save sandbox rootfs checkpoint: %w", rootFSResponseError(err, saveRootFSError(resp)))
+		return nil, fmt.Errorf("save sandbox rootfs checkpoint: %w", rootFSResponseError(err, saveRootFSError(resp)))
 	}
 	state, err := rootFSStateFromSaveResponse(sandboxID, teamID, generation, resp)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	state.LayerID = uuid.NewString()
 	state.ParentLayerID = parentLayerID
 	state.ExpectedHeadLayerID = expectedHeadLayerID
-	if tx != nil {
-		return tx.SaveRootFSState(ctx, state)
-	}
-	if s.sandboxStore != nil {
-		return s.sandboxStore.SaveRootFSState(ctx, state)
-	}
-	return nil
+	return state, nil
 }
 
 func (s *SandboxService) shouldSquashSandboxRootFSCheckpoint(state *SandboxRootFSState) (bool, string) {

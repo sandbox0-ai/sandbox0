@@ -185,6 +185,8 @@ func TestSandboxRootFSProductEnforcesTeamOwnership(t *testing.T) {
 }
 
 func (s *memorySandboxStore) CreateRootFSSnapshot(_ context.Context, req *CreateRootFSSnapshotRequest) (*RootFSSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.rootFSSnapshots == nil {
 		s.rootFSSnapshots = make(map[string]*RootFSSnapshot)
 	}
@@ -212,6 +214,8 @@ func (s *memorySandboxStore) CreateRootFSSnapshot(_ context.Context, req *Create
 }
 
 func (s *memorySandboxStore) ListRootFSSnapshots(_ context.Context, req *ListRootFSSnapshotsRequest) ([]*RootFSSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	var snapshots []*RootFSSnapshot
 	for _, snapshot := range s.rootFSSnapshots {
 		if snapshot == nil || snapshot.SourceSandboxID != req.SandboxID {
@@ -226,6 +230,8 @@ func (s *memorySandboxStore) ListRootFSSnapshots(_ context.Context, req *ListRoo
 }
 
 func (s *memorySandboxStore) GetRootFSSnapshot(_ context.Context, snapshotID, teamID string) (*RootFSSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	snapshot := s.rootFSSnapshots[snapshotID]
 	if snapshot == nil || (teamID != "" && snapshot.TeamID != teamID) {
 		return nil, ErrRootFSSnapshotNotFound
@@ -234,6 +240,8 @@ func (s *memorySandboxStore) GetRootFSSnapshot(_ context.Context, snapshotID, te
 }
 
 func (s *memorySandboxStore) DeleteRootFSSnapshot(_ context.Context, snapshotID, teamID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	snapshot := s.rootFSSnapshots[snapshotID]
 	if snapshot == nil || (teamID != "" && snapshot.TeamID != teamID) {
 		return ErrRootFSSnapshotNotFound
@@ -243,6 +251,8 @@ func (s *memorySandboxStore) DeleteRootFSSnapshot(_ context.Context, snapshotID,
 }
 
 func (s *memorySandboxStore) ForkRootFSFilesystem(_ context.Context, req *ForkRootFSFilesystemRequest) (*RootFSFilesystem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	sourceState := s.rootFSStates[req.SourceSandboxID]
 	if sourceState == nil || sourceState.LayerID == "" {
 		return nil, ErrRootFSFilesystemNotFound
@@ -278,9 +288,11 @@ func (s *memorySandboxStore) ForkRootFSFilesystem(_ context.Context, req *ForkRo
 }
 
 func (s *memorySandboxStore) RestoreRootFSFromSnapshot(_ context.Context, req *RestoreRootFSFromSnapshotRequest) (*RootFSFilesystem, error) {
-	snapshot, err := s.GetRootFSSnapshot(context.Background(), req.SnapshotID, req.TeamID)
-	if err != nil {
-		return nil, err
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snapshot := s.rootFSSnapshots[req.SnapshotID]
+	if snapshot == nil || (req.TeamID != "" && snapshot.TeamID != req.TeamID) {
+		return nil, ErrRootFSSnapshotNotFound
 	}
 	target := s.records[req.SandboxID]
 	if target == nil {

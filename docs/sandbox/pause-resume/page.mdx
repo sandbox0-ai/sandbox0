@@ -36,6 +36,8 @@ Pause a sandbox to release compute while keeping its identity, configuration, se
 
 The pause endpoint accepts the lifecycle transition and returns once the sandbox is recorded as `pausing`. Rootfs checkpoint upload and runtime pod deletion continue in the background. Poll sandbox details until `status` is `paused` before treating the checkpoint as resume-ready.
 
+Runtime access paths do not require callers to special-case `pausing` or `resuming`. File, context, public service, and SSH requests either use the currently committed runtime generation or wait for the lifecycle transition to commit before continuing on the next generation.
+
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/pause
 </Endpoint>
@@ -171,6 +173,7 @@ console.log("runtimeGeneration=", sb.runtimeGeneration);`
 
 Common auto-resume entrypoints:
 
+- sandbox runtime APIs such as files and contexts
 - service routes configured with `resume: true`; public service requests require sandbox `auto_resume: true`, route `resume: true`, and a restartable service runtime (`cmd` or `function`)
 - SSH access through Sandbox0 SSH Gateway
 

@@ -244,7 +244,7 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 	pod, err := s.getSandboxPod(ctx, sandboxID)
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
-			return s.markPausingRuntimePaused(ctx, sandboxID, record.RuntimeGeneration)
+			return s.markPausingRuntimePaused(ctx, sandboxID, record.RuntimeGeneration, nil)
 		}
 		return fmt.Errorf("get pod: %w", err)
 	}
@@ -261,7 +261,8 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 	if !s.config.CtldEnabled || s.ctldClient == nil {
 		return ErrSandboxCheckpointRequiresCtld
 	}
-	if err := s.saveSandboxRootFSCheckpoint(ctx, pod, record, nil); err != nil {
+	rootFSState, err := s.prepareSandboxRootFSCheckpoint(ctx, pod, record)
+	if err != nil {
 		return err
 	}
 	stillPausing, err := s.sandboxStillPausing(ctx, sandboxID, generation)
@@ -275,7 +276,7 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 	if err := s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 		return fmt.Errorf("delete runtime pod: %w", err)
 	}
-	return s.markPausingRuntimePaused(ctx, sandboxID, generation)
+	return s.markPausingRuntimePaused(ctx, sandboxID, generation, rootFSState)
 }
 
 func (s *SandboxService) sandboxStillPausing(ctx context.Context, sandboxID string, generation int64) (bool, error) {
@@ -289,13 +290,18 @@ func (s *SandboxService) sandboxStillPausing(ctx context.Context, sandboxID stri
 	return record != nil && record.Status == SandboxStatusPausing && record.RuntimeGeneration == generation, nil
 }
 
-func (s *SandboxService) markPausingRuntimePaused(ctx context.Context, sandboxID string, generation int64) error {
+func (s *SandboxService) markPausingRuntimePaused(ctx context.Context, sandboxID string, generation int64, rootFSState *SandboxRootFSState) error {
 	if s == nil || s.sandboxStore == nil {
 		return nil
 	}
 	return s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
 		if record.Status != SandboxStatusPausing || record.RuntimeGeneration != generation {
 			return nil
+		}
+		if rootFSState != nil {
+			if err := tx.SaveRootFSState(lockCtx, rootFSState); err != nil {
+				return err
+			}
 		}
 		return tx.MarkRuntimePaused(lockCtx, sandboxID, generation, s.clock.Now())
 	})

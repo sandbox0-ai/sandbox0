@@ -215,7 +215,7 @@ func TestCompletePausingSandboxRuntimeDoesNotCommitStaleCheckpoint(t *testing.T)
 	}
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/api/v1/rootfs/save", r.URL.Path)
-		store.records["sandbox-1"].Status = SandboxStatusRunning
+		store.setSandboxStatus("sandbox-1", SandboxStatusRunning)
 		_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{
 			Info: ctldapi.RootFSInfo{
 				Runtime:             "runc",

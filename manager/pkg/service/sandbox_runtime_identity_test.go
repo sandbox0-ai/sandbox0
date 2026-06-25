@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 )
 
 type memorySandboxStore struct {
+	mu                sync.Mutex
 	records           map[string]*SandboxRecord
 	rootFSStates      map[string]*SandboxRootFSState
 	rootFSFilesystems map[string]*RootFSFilesystem
@@ -32,6 +34,8 @@ type memorySandboxStoreTx struct {
 }
 
 func (s *memorySandboxStore) UpsertSandbox(_ context.Context, record *SandboxRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.records == nil {
 		s.records = make(map[string]*SandboxRecord)
 	}
@@ -40,14 +44,24 @@ func (s *memorySandboxStore) UpsertSandbox(_ context.Context, record *SandboxRec
 }
 
 func (s *memorySandboxStore) GetSandbox(_ context.Context, sandboxID string) (*SandboxRecord, error) {
-	if s == nil || s.records == nil {
+	if s == nil {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.records == nil {
 		return nil, nil
 	}
 	return cloneSandboxRecord(s.records[sandboxID]), nil
 }
 
 func (s *memorySandboxStore) ListSandboxes(_ context.Context, req *ListSandboxesRequest) ([]*SandboxRecord, error) {
-	if s == nil || s.records == nil {
+	if s == nil {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.records == nil {
 		return nil, nil
 	}
 	var records []*SandboxRecord
@@ -76,7 +90,12 @@ func (s *memorySandboxStore) ListHardExpiredSandboxes(context.Context, time.Time
 }
 
 func (s *memorySandboxStore) ListPausingSandboxes(_ context.Context, limit int) ([]*SandboxRecord, error) {
-	if s == nil || s.records == nil {
+	if s == nil {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.records == nil {
 		return nil, nil
 	}
 	if limit <= 0 {
@@ -96,6 +115,8 @@ func (s *memorySandboxStore) ListPausingSandboxes(_ context.Context, limit int) 
 }
 
 func (s *memorySandboxStore) MarkSandboxDeleted(_ context.Context, sandboxID string, deletedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.records == nil {
 		s.records = make(map[string]*SandboxRecord)
 	}
@@ -114,6 +135,8 @@ func (s *memorySandboxStore) MarkSandboxDeleted(_ context.Context, sandboxID str
 }
 
 func (s *memorySandboxStore) SaveRootFSState(_ context.Context, state *SandboxRootFSState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.rootFSStates == nil {
 		s.rootFSStates = make(map[string]*SandboxRootFSState)
 	}
@@ -122,24 +145,41 @@ func (s *memorySandboxStore) SaveRootFSState(_ context.Context, state *SandboxRo
 }
 
 func (s *memorySandboxStore) GetLatestRootFSState(_ context.Context, sandboxID string) (*SandboxRootFSState, error) {
-	if s == nil || s.rootFSStates == nil {
+	if s == nil {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rootFSStates == nil {
 		return nil, nil
 	}
 	return cloneSandboxRootFSState(s.rootFSStates[sandboxID]), nil
 }
 
 func (s *memorySandboxStore) WithSandboxLock(ctx context.Context, sandboxID string, fn func(context.Context, SandboxStoreTx, *SandboxRecord) error) error {
-	record, err := s.GetSandbox(ctx, sandboxID)
-	if err != nil {
-		return err
+	if s == nil {
+		return ErrSandboxRecordNotFound
 	}
+	s.mu.Lock()
+	record := cloneSandboxRecord(s.records[sandboxID])
+	s.mu.Unlock()
 	if record == nil {
 		return ErrSandboxRecordNotFound
 	}
 	return fn(ctx, memorySandboxStoreTx{store: s}, record)
 }
 
+func (s *memorySandboxStore) setSandboxStatus(sandboxID, status string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if record := s.records[sandboxID]; record != nil {
+		record.Status = status
+	}
+}
+
 func (t memorySandboxStoreTx) SaveRuntime(_ context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time) error {
+	t.store.mu.Lock()
+	defer t.store.mu.Unlock()
 	record := t.store.records[sandboxID]
 	record.CurrentPodNamespace = namespace
 	record.CurrentPodName = podName
@@ -152,6 +192,8 @@ func (t memorySandboxStoreTx) SaveRuntime(_ context.Context, sandboxID, namespac
 }
 
 func (t memorySandboxStoreTx) MarkRuntimePaused(_ context.Context, sandboxID string, generation int64, _ time.Time) error {
+	t.store.mu.Lock()
+	defer t.store.mu.Unlock()
 	record := t.store.records[sandboxID]
 	record.CurrentPodNamespace = ""
 	record.CurrentPodName = ""
@@ -164,7 +206,13 @@ func (t memorySandboxStoreTx) MarkRuntimePaused(_ context.Context, sandboxID str
 }
 
 func (t memorySandboxStoreTx) SaveRootFSState(_ context.Context, state *SandboxRootFSState) error {
-	return t.store.SaveRootFSState(context.Background(), state)
+	t.store.mu.Lock()
+	defer t.store.mu.Unlock()
+	if t.store.rootFSStates == nil {
+		t.store.rootFSStates = make(map[string]*SandboxRootFSState)
+	}
+	t.store.rootFSStates[state.SandboxID] = cloneSandboxRootFSState(state)
+	return nil
 }
 
 func cloneSandboxRecord(record *SandboxRecord) *SandboxRecord {
@@ -342,7 +390,7 @@ func TestResumePausedSandboxRuntimeJoinsResumingRuntime(t *testing.T) {
 
 	go func() {
 		time.Sleep(2 * sandboxLifecycleWaitInterval)
-		store.records["sandbox-a"].Status = SandboxStatusRunning
+		store.setSandboxStatus("sandbox-a", SandboxStatusRunning)
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)

@@ -69,40 +69,16 @@ runs:
         echo "Building infra image..."
         make docker-build-local
 
-    - name: Restore postgres image cache
-      id: infra-postgres-cache
-      uses: actions/cache/restore@v4
-      with:
-        path: ${{ runner.temp }}/infra-image-cache/infra-image-postgres-16-alpine.tar
-        key: infra-image-${{ runner.os }}-${{ inputs.cache-key-suffix }}-postgres-16-alpine
-
-    - name: Restore rustfs image cache
-      id: infra-rustfs-cache
-      uses: actions/cache/restore@v4
-      with:
-        path: ${{ runner.temp }}/infra-image-cache/infra-image-rustfs-1.0.0-alpha.79.tar
-        key: infra-image-${{ runner.os }}-${{ inputs.cache-key-suffix }}-rustfs-1.0.0-alpha.79
-
-    - name: Restore registry image cache
-      id: infra-registry-cache
-      uses: actions/cache/restore@v4
-      with:
-        path: ${{ runner.temp }}/infra-image-cache/infra-image-registry-2.8.3.tar
-        key: infra-image-${{ runner.os }}-${{ inputs.cache-key-suffix }}-registry-2.8.3
-
-    - name: Restore template image cache
-      id: infra-template-cache
-      uses: actions/cache/restore@v4
-      with:
-        path: ${{ runner.temp }}/infra-image-cache/infra-image-template-default-v0.2.0.tar
-        key: infra-image-${{ runner.os }}-${{ inputs.cache-key-suffix }}-template-default-v0.2.0
-
-    - name: Restore SSH fixture image cache
-      id: infra-ssh-fixture-cache
-      uses: actions/cache/restore@v4
-      with:
-        path: ${{ runner.temp }}/infra-image-cache/infra-image-e2e-openssh-server-68b605929e83.tar
-        key: infra-image-${{ runner.os }}-${{ inputs.cache-key-suffix }}-e2e-openssh-server-68b605929e83
+    - name: Load infra image to Kind
+      shell: bash
+      run: |
+        kind load docker-image sandbox0ai/infra:latest --name ${{ inputs.kind-cluster-name }}
+        docker image rm sandbox0ai/infra:latest 2>/dev/null || true
+        docker builder prune -af || true
+        echo "=== df -h after infra image load ==="
+        df -h
+        echo "=== docker system df after infra image load ==="
+        docker system df || true
 
     - name: Prepare image cache and temp directories
       shell: bash
@@ -110,65 +86,21 @@ runs:
         mkdir -p "${RUNNER_TEMP}/infra-image-cache" "${RUNNER_TEMP}/kind-tmp"
         echo "TMPDIR=${RUNNER_TEMP}/kind-tmp" >> "$GITHUB_ENV"
 
-    - name: Pull or load dependency images
-      shell: bash
-      run: |
-        image_cache_dir="${RUNNER_TEMP}/infra-image-cache"
-
-        ensure_image() {
-          local image="$1"
-          local archive="$2"
-          if [ -f "$archive" ]; then
-            echo "Loading cached image: $image"
-            docker load -i "$archive"
-          else
-            echo "Pulling image: $image"
-            docker pull "$image"
-            docker save -o "$archive" "$image"
-          fi
-        }
-
-        ensure_image "postgres:16-alpine" "${image_cache_dir}/infra-image-postgres-16-alpine.tar"
-        ensure_image "rustfs/rustfs:1.0.0-alpha.79" "${image_cache_dir}/infra-image-rustfs-1.0.0-alpha.79.tar"
-        ensure_image "registry:2.8.3" "${image_cache_dir}/infra-image-registry-2.8.3.tar"
-        ensure_image "sandbox0ai/otemplates:default-v0.2.0" "${image_cache_dir}/infra-image-template-default-v0.2.0.tar"
-
-        ssh_fixture_archive="${image_cache_dir}/infra-image-e2e-openssh-server-68b605929e83.tar"
-        ssh_fixture_source="lscr.io/linuxserver/openssh-server@sha256:68b605929e83b2efe000da09269688f6d82a44579e8a18e2d9e8c8d272917cf7"
-        ssh_fixture_image="sandbox0ai/e2e-openssh-server:68b605929e83"
-        if [ -f "${ssh_fixture_archive}" ]; then
-          echo "Loading cached image: ${ssh_fixture_image}"
-          docker load -i "${ssh_fixture_archive}"
-        else
-          echo "Pulling image: ${ssh_fixture_source}"
-          docker pull "${ssh_fixture_source}"
-          docker tag "${ssh_fixture_source}" "${ssh_fixture_image}"
-          docker save -o "${ssh_fixture_archive}" "${ssh_fixture_image}"
-        fi
-
-    - name: Load Image to Kind
-      shell: bash
-      run: |
-        archive="${RUNNER_TEMP}/infra-image-cache/infra-image-sandbox0ai-infra-latest.tar"
-        docker save -o "${archive}" sandbox0ai/infra:latest
-        kind load image-archive "${archive}" --name ${{ inputs.kind-cluster-name }}
-
-    - name: Load dependency images to Kind
-      shell: bash
-      run: |
-        image_cache_dir="${RUNNER_TEMP}/infra-image-cache"
-        kind load image-archive "${image_cache_dir}/infra-image-postgres-16-alpine.tar" --name ${{ inputs.kind-cluster-name }}
-        kind load image-archive "${image_cache_dir}/infra-image-rustfs-1.0.0-alpha.79.tar" --name ${{ inputs.kind-cluster-name }}
-        kind load image-archive "${image_cache_dir}/infra-image-registry-2.8.3.tar" --name ${{ inputs.kind-cluster-name }}
-        kind load image-archive "${image_cache_dir}/infra-image-template-default-v0.2.0.tar" --name ${{ inputs.kind-cluster-name }}
-        kind load image-archive "${image_cache_dir}/infra-image-e2e-openssh-server-68b605929e83.tar" --name ${{ inputs.kind-cluster-name }}
-
-    - name: Save shared infra build cache
-      uses: ./.github/actions/save-infra-build-cache
+    - name: Restore postgres image cache
+      id: infra-postgres-cache
+      uses: actions/cache/restore@v4
       with:
-        infra-dir: ${{ inputs.infra-dir }}
-        cache-key-suffix: ${{ inputs.cache-key-suffix }}
-        cache-hit: ${{ steps.infra-build-cache.outputs.cache-hit }}
+        path: ${{ runner.temp }}/infra-image-cache/infra-image-postgres-16-alpine.tar
+        key: infra-image-${{ runner.os }}-${{ inputs.cache-key-suffix }}-postgres-16-alpine
+
+    - name: Create postgres image archive
+      if: steps.infra-postgres-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        archive="${RUNNER_TEMP}/infra-image-cache/infra-image-postgres-16-alpine.tar"
+        docker pull postgres:16-alpine
+        docker save -o "${archive}" postgres:16-alpine
+        docker image rm postgres:16-alpine 2>/dev/null || true
 
     - name: Save postgres image cache
       if: steps.infra-postgres-cache.outputs.cache-hit != 'true'
@@ -177,12 +109,58 @@ runs:
         path: ${{ runner.temp }}/infra-image-cache/infra-image-postgres-16-alpine.tar
         key: infra-image-${{ runner.os }}-${{ inputs.cache-key-suffix }}-postgres-16-alpine
 
+    - name: Load postgres image to Kind
+      shell: bash
+      run: |
+        archive="${RUNNER_TEMP}/infra-image-cache/infra-image-postgres-16-alpine.tar"
+        kind load image-archive "${archive}" --name ${{ inputs.kind-cluster-name }}
+        rm -f "${archive}"
+
+    - name: Restore rustfs image cache
+      id: infra-rustfs-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/infra-image-cache/infra-image-rustfs-1.0.0-alpha.79.tar
+        key: infra-image-${{ runner.os }}-${{ inputs.cache-key-suffix }}-rustfs-1.0.0-alpha.79
+
+    - name: Create rustfs image archive
+      if: steps.infra-rustfs-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        archive="${RUNNER_TEMP}/infra-image-cache/infra-image-rustfs-1.0.0-alpha.79.tar"
+        docker pull rustfs/rustfs:1.0.0-alpha.79
+        docker save -o "${archive}" rustfs/rustfs:1.0.0-alpha.79
+        docker image rm rustfs/rustfs:1.0.0-alpha.79 2>/dev/null || true
+
     - name: Save rustfs image cache
       if: steps.infra-rustfs-cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@v4
       with:
         path: ${{ runner.temp }}/infra-image-cache/infra-image-rustfs-1.0.0-alpha.79.tar
         key: infra-image-${{ runner.os }}-${{ inputs.cache-key-suffix }}-rustfs-1.0.0-alpha.79
+
+    - name: Load rustfs image to Kind
+      shell: bash
+      run: |
+        archive="${RUNNER_TEMP}/infra-image-cache/infra-image-rustfs-1.0.0-alpha.79.tar"
+        kind load image-archive "${archive}" --name ${{ inputs.kind-cluster-name }}
+        rm -f "${archive}"
+
+    - name: Restore registry image cache
+      id: infra-registry-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/infra-image-cache/infra-image-registry-2.8.3.tar
+        key: infra-image-${{ runner.os }}-${{ inputs.cache-key-suffix }}-registry-2.8.3
+
+    - name: Create registry image archive
+      if: steps.infra-registry-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        archive="${RUNNER_TEMP}/infra-image-cache/infra-image-registry-2.8.3.tar"
+        docker pull registry:2.8.3
+        docker save -o "${archive}" registry:2.8.3
+        docker image rm registry:2.8.3 2>/dev/null || true
 
     - name: Save registry image cache
       if: steps.infra-registry-cache.outputs.cache-hit != 'true'
@@ -191,12 +169,61 @@ runs:
         path: ${{ runner.temp }}/infra-image-cache/infra-image-registry-2.8.3.tar
         key: infra-image-${{ runner.os }}-${{ inputs.cache-key-suffix }}-registry-2.8.3
 
+    - name: Load registry image to Kind
+      shell: bash
+      run: |
+        archive="${RUNNER_TEMP}/infra-image-cache/infra-image-registry-2.8.3.tar"
+        kind load image-archive "${archive}" --name ${{ inputs.kind-cluster-name }}
+        rm -f "${archive}"
+
+    - name: Restore template image cache
+      id: infra-template-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/infra-image-cache/infra-image-template-default-v0.2.0.tar
+        key: infra-image-${{ runner.os }}-${{ inputs.cache-key-suffix }}-template-default-v0.2.0
+
+    - name: Create template image archive
+      if: steps.infra-template-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        archive="${RUNNER_TEMP}/infra-image-cache/infra-image-template-default-v0.2.0.tar"
+        docker pull sandbox0ai/otemplates:default-v0.2.0
+        docker save -o "${archive}" sandbox0ai/otemplates:default-v0.2.0
+        docker image rm sandbox0ai/otemplates:default-v0.2.0 2>/dev/null || true
+
     - name: Save template image cache
       if: steps.infra-template-cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@v4
       with:
         path: ${{ runner.temp }}/infra-image-cache/infra-image-template-default-v0.2.0.tar
         key: infra-image-${{ runner.os }}-${{ inputs.cache-key-suffix }}-template-default-v0.2.0
+
+    - name: Load template image to Kind
+      shell: bash
+      run: |
+        archive="${RUNNER_TEMP}/infra-image-cache/infra-image-template-default-v0.2.0.tar"
+        kind load image-archive "${archive}" --name ${{ inputs.kind-cluster-name }}
+        rm -f "${archive}"
+
+    - name: Restore SSH fixture image cache
+      id: infra-ssh-fixture-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/infra-image-cache/infra-image-e2e-openssh-server-68b605929e83.tar
+        key: infra-image-${{ runner.os }}-${{ inputs.cache-key-suffix }}-e2e-openssh-server-68b605929e83
+
+    - name: Create SSH fixture image archive
+      if: steps.infra-ssh-fixture-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        archive="${RUNNER_TEMP}/infra-image-cache/infra-image-e2e-openssh-server-68b605929e83.tar"
+        source="lscr.io/linuxserver/openssh-server@sha256:68b605929e83b2efe000da09269688f6d82a44579e8a18e2d9e8c8d272917cf7"
+        image="sandbox0ai/e2e-openssh-server:68b605929e83"
+        docker pull "${source}"
+        docker tag "${source}" "${image}"
+        docker save -o "${archive}" "${image}"
+        docker image rm "${image}" "${source}" 2>/dev/null || true
 
     - name: Save SSH fixture image cache
       if: steps.infra-ssh-fixture-cache.outputs.cache-hit != 'true'
@@ -205,10 +232,24 @@ runs:
         path: ${{ runner.temp }}/infra-image-cache/infra-image-e2e-openssh-server-68b605929e83.tar
         key: infra-image-${{ runner.os }}-${{ inputs.cache-key-suffix }}-e2e-openssh-server-68b605929e83
 
-    - name: Free image archives after Kind load
+    - name: Load SSH fixture image to Kind
       shell: bash
       run: |
-        rm -f "${RUNNER_TEMP}/infra-image-cache/"*.tar
+        archive="${RUNNER_TEMP}/infra-image-cache/infra-image-e2e-openssh-server-68b605929e83.tar"
+        kind load image-archive "${archive}" --name ${{ inputs.kind-cluster-name }}
+        rm -f "${archive}"
+
+    - name: Save shared infra build cache
+      uses: ./.github/actions/save-infra-build-cache
+      with:
+        infra-dir: ${{ inputs.infra-dir }}
+        cache-key-suffix: ${{ inputs.cache-key-suffix }}
+        cache-hit: ${{ steps.infra-build-cache.outputs.cache-hit }}
+
+    - name: Final disk diagnostics
+      shell: bash
+      run: |
+        rm -f "${RUNNER_TEMP}/infra-image-cache/"*.tar 2>/dev/null || true
         docker image rm \
           sandbox0ai/infra:latest \
           postgres:16-alpine \

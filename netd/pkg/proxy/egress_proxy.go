@@ -107,7 +107,7 @@ func (s *Server) resolveSOCKS5ProxyAuth(ctx context.Context, req *adapterRequest
 			return &xproxy.Auth{User: material.Username, Password: material.Password}, nil
 		}
 	}
-	resp, err := s.authResolver.Resolve(ctx, &egressauth.ResolveRequest{
+	resp, err := s.resolveFreshEgressAuth(ctx, &egressauth.ResolveRequest{
 		SandboxID:       req.Compiled.SandboxID,
 		TeamID:          req.Compiled.TeamID,
 		AuthRef:         cfg.CredentialRef,

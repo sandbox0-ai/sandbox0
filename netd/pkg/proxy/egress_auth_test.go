@@ -14,11 +14,12 @@ import (
 )
 
 type stubEgressAuthResolver struct {
-	calls     int
-	resp      *egressauth.ResolveResponse
-	responses map[string]*egressauth.ResolveResponse
-	requests  []*egressauth.ResolveRequest
-	err       error
+	calls         int
+	resp          *egressauth.ResolveResponse
+	responseQueue []*egressauth.ResolveResponse
+	responses     map[string]*egressauth.ResolveResponse
+	requests      []*egressauth.ResolveRequest
+	err           error
 }
 
 func (s *stubEgressAuthResolver) Resolve(_ context.Context, req *egressauth.ResolveRequest) (*egressauth.ResolveResponse, error) {
@@ -30,10 +31,103 @@ func (s *stubEgressAuthResolver) Resolve(_ context.Context, req *egressauth.Reso
 	if s.err != nil {
 		return nil, s.err
 	}
+	if len(s.responseQueue) > 0 {
+		resp := s.responseQueue[0]
+		s.responseQueue = s.responseQueue[1:]
+		return cloneResolveResponse(resp), nil
+	}
 	if s.responses != nil && req != nil {
 		return cloneResolveResponse(s.responses[req.AuthRef]), nil
 	}
 	return cloneResolveResponse(s.resp), nil
+}
+
+func resolvedHeaderResponse(authRef, token, teamID, sourceRef string, sourceID, sourceVersion int64, expiresAt time.Time) *egressauth.ResolveResponse {
+	resp := egressauth.NewHTTPHeadersResolveResponse(authRef, map[string]string{"Authorization": "Bearer " + token}, &expiresAt)
+	resp.Source = &egressauth.ResolveSource{
+		TeamID:        teamID,
+		SourceRef:     sourceRef,
+		SourceID:      sourceID,
+		SourceVersion: sourceVersion,
+	}
+	return resp
+}
+
+func TestMemoryEgressAuthCacheInvalidatesRotatedSource(t *testing.T) {
+	expiresAt := time.Now().Add(time.Minute).UTC()
+	cache := newMemoryEgressAuthCache()
+	rotatedKey := egressAuthCacheKey{
+		SandboxID:       "sbx_123",
+		AuthRef:         "example-api",
+		Destination:     "api.example.com",
+		DestinationPort: 80,
+		Transport:       "tcp",
+		Protocol:        "http",
+	}
+	otherKey := egressAuthCacheKey{
+		SandboxID:       "sbx_123",
+		AuthRef:         "other-api",
+		Destination:     "other.example.com",
+		DestinationPort: 443,
+		Transport:       "tcp",
+		Protocol:        "tls",
+	}
+	staticKey := egressAuthCacheKey{
+		SandboxID:       "sbx_123",
+		AuthRef:         "static-api",
+		Destination:     "static.example.com",
+		DestinationPort: 80,
+		Transport:       "tcp",
+		Protocol:        "http",
+	}
+
+	cache.Put(rotatedKey, resolvedHeaderResponse("example-api", "old", "team-1", "example-source", 1, 1, expiresAt))
+	cache.Put(otherKey, resolvedHeaderResponse("other-api", "old", "team-1", "other-source", 2, 1, expiresAt))
+	cache.Put(staticKey, egressauth.NewHTTPHeadersResolveResponse("static-api", map[string]string{"Authorization": "Bearer static"}, &expiresAt))
+
+	removed := cache.InvalidateSource("team-1", 1, "example-source", 2)
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	if _, ok := cache.Get(rotatedKey); ok {
+		t.Fatal("rotated source entry should be invalidated")
+	}
+	if _, ok := cache.Get(otherKey); !ok {
+		t.Fatal("unrelated source entry should remain cached")
+	}
+	if _, ok := cache.Get(staticKey); !ok {
+		t.Fatal("static auth entry should remain cached")
+	}
+}
+
+func TestMemoryEgressAuthCacheRejectsStaleResolvedMaterialAfterInvalidation(t *testing.T) {
+	expiresAt := time.Now().Add(time.Minute).UTC()
+	cache := newMemoryEgressAuthCache()
+	key := egressAuthCacheKey{
+		SandboxID:       "sbx_123",
+		AuthRef:         "example-api",
+		Destination:     "api.example.com",
+		DestinationPort: 80,
+		Transport:       "tcp",
+		Protocol:        "http",
+	}
+
+	cache.InvalidateSource("team-1", 1, "example-source", 2)
+	cache.Put(key, resolvedHeaderResponse("example-api", "old", "team-1", "example-source", 1, 1, expiresAt))
+	if _, ok := cache.Get(key); ok {
+		t.Fatal("stale resolved material should not be cached")
+	}
+
+	cache.Put(key, resolvedHeaderResponse("example-api", "new", "team-1", "example-source", 1, 2, expiresAt))
+	if _, ok := cache.Get(key); !ok {
+		t.Fatal("current source version should be cached")
+	}
+	if removed := cache.InvalidateSource("team-1", 1, "example-source", 1); removed != 0 {
+		t.Fatalf("older invalidation removed %d entries, want 0", removed)
+	}
+	if _, ok := cache.Get(key); !ok {
+		t.Fatal("current source version should survive older duplicate invalidation")
+	}
 }
 
 func TestAttachEgressAuthUsesCacheBeforeResolver(t *testing.T) {
@@ -142,6 +236,64 @@ func TestAttachEgressAuthResolvesAndCaches(t *testing.T) {
 	server.attachEgressAuth(nextReq, decision)
 	if nextReq.EgressAuth == nil || !nextReq.EgressAuth.CacheHit {
 		t.Fatal("expected cached auth material on second request")
+	}
+}
+
+func TestAttachEgressAuthRetriesStaleResolveAfterInvalidation(t *testing.T) {
+	expiresAt := time.Now().Add(time.Minute).UTC()
+	cache := newMemoryEgressAuthCache()
+	cache.InvalidateSource("team_123", 1, "example-source", 2)
+	resolver := &stubEgressAuthResolver{
+		responseQueue: []*egressauth.ResolveResponse{
+			resolvedHeaderResponse("example-api", "old", "team_123", "example-source", 1, 1, expiresAt),
+			resolvedHeaderResponse("example-api", "fresh", "team_123", "example-source", 1, 2, expiresAt),
+		},
+	}
+	server := &Server{
+		cfg:          &config.NetdConfig{EgressAuthEnabled: true},
+		authResolver: resolver,
+		authCache:    cache,
+	}
+	req := &adapterRequest{
+		Compiled: &policy.CompiledPolicy{
+			SandboxID: "sbx_123",
+			TeamID:    "team_123",
+		},
+		DestIP:   net.ParseIP("8.8.8.8"),
+		DestPort: 80,
+		Host:     "api.example.com",
+	}
+	decision := trafficDecision{
+		Action:          decisionActionUseAdapter,
+		Transport:       "tcp",
+		Protocol:        "http",
+		MatchedAuthRule: &policy.CompiledEgressAuthRule{Name: "example-http", AuthRef: "example-api"},
+	}
+
+	server.attachEgressAuth(req, decision)
+
+	if resolver.calls != 2 {
+		t.Fatalf("resolver calls = %d, want 2", resolver.calls)
+	}
+	if req.EgressAuth == nil || req.EgressAuth.ResolveError != nil {
+		t.Fatalf("unexpected egress auth context: %+v", req.EgressAuth)
+	}
+	if got := req.EgressAuth.Resolved.Headers["Authorization"]; got != "Bearer fresh" {
+		t.Fatalf("authorization header = %q, want Bearer fresh", got)
+	}
+
+	nextReq := &adapterRequest{
+		Compiled: req.Compiled,
+		DestIP:   req.DestIP,
+		DestPort: req.DestPort,
+		Host:     req.Host,
+	}
+	server.attachEgressAuth(nextReq, decision)
+	if nextReq.EgressAuth == nil || !nextReq.EgressAuth.CacheHit {
+		t.Fatal("expected retried fresh material to be cached")
+	}
+	if resolver.calls != 2 {
+		t.Fatalf("resolver calls after cache hit = %d, want 2", resolver.calls)
 	}
 }
 

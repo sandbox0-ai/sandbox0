@@ -312,7 +312,7 @@ When `spec.credentialVault` is enabled, manager stores newly written credential 
 
 ### Egress Auth Resolve TTL
 
-netd caches resolved egress auth material until the `expiresAt` timestamp returned by manager. Manager does not keep an additional resolved-material cache. The default lifetime is 5 minutes and is also the normal credential rotation propagation bound for already-claimed sandboxes.
+netd caches resolved egress auth material until the `expiresAt` timestamp returned by manager. Manager does not keep an additional resolved-material cache. Credential source rotation actively invalidates affected netd cache entries, so already-claimed sandboxes normally use the rotated source on their next matching egress resolve. The default lifetime is 5 minutes, and the TTL remains the fallback consistency bound if realtime invalidation delivery is interrupted.
 
 Set `spec.services.manager.config.egressAuthDefaultResolveTtl` when you want a different platform default. Individual bindings can override it with `network.credentialBindings[*].cachePolicy.ttl`.
 

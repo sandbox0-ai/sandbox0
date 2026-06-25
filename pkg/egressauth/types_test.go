@@ -46,6 +46,37 @@ func TestResolveResponseUnmarshalHydratesCompatibilityHeaders(t *testing.T) {
 	}
 }
 
+func TestResolveResponsePreservesSourceMetadata(t *testing.T) {
+	resp := NewHTTPHeadersResolveResponse("example-api", map[string]string{"Authorization": "Bearer token"}, nil)
+	resp.Source = &ResolveSource{
+		TeamID:        "team-1",
+		SourceRef:     "github-token",
+		SourceID:      42,
+		SourceVersion: 7,
+	}
+
+	payload, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded ResolveResponse
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if decoded.Source == nil {
+		t.Fatal("source metadata was not decoded")
+	}
+	if decoded.Source.TeamID != "team-1" || decoded.Source.SourceRef != "github-token" || decoded.Source.SourceID != 42 || decoded.Source.SourceVersion != 7 {
+		t.Fatalf("decoded source = %#v", decoded.Source)
+	}
+
+	cloned := CloneResolveResponse(&decoded)
+	decoded.Source.SourceVersion = 8
+	if cloned.Source.SourceVersion != 7 {
+		t.Fatalf("clone source version = %d, want 7", cloned.Source.SourceVersion)
+	}
+}
+
 func TestResolveResponseMarshalPreservesTLSClientCertificateDirective(t *testing.T) {
 	payload, err := json.Marshal(NewTLSClientCertificateResolveResponse("example-cert", &TLSClientCertificateDirective{
 		CertificatePEM: "cert",

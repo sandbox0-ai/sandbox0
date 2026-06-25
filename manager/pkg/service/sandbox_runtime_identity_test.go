@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -267,7 +268,7 @@ func TestGetSandboxPodRejectsMultipleActiveRuntimePods(t *testing.T) {
 	}
 }
 
-func TestResumePausedSandboxRuntimeDoesNotCreatePodWhileRuntimeDeleting(t *testing.T) {
+func TestResumePausedSandboxRuntimeWaitsWhileRuntimeDeleting(t *testing.T) {
 	deletionTime := metav1.NewTime(time.Now().UTC())
 	pod := runtimeIdentityPod("ns-a", "pod-a", "sandbox-a")
 	pod.DeletionTimestamp = &deletionTime
@@ -291,9 +292,14 @@ func TestResumePausedSandboxRuntimeDoesNotCreatePodWhileRuntimeDeleting(t *testi
 		logger:       zap.NewNop(),
 	}
 
-	_, err := svc.ResumePausedSandboxRuntime(context.Background(), "sandbox-a")
-	if !k8serrors.IsConflict(err) {
-		t.Fatalf("ResumePausedSandboxRuntime() error = %v, want conflict", err)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*sandboxLifecycleWaitInterval)
+	defer cancel()
+	_, err := svc.ResumePausedSandboxRuntime(ctx, "sandbox-a")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ResumePausedSandboxRuntime() error = %v, want context deadline", err)
+	}
+	if k8serrors.IsConflict(err) {
+		t.Fatalf("ResumePausedSandboxRuntime() returned conflict while old runtime is deleting")
 	}
 	for _, action := range client.Actions() {
 		if action.GetVerb() == "create" && action.GetResource().Resource == "pods" {
@@ -302,6 +308,128 @@ func TestResumePausedSandboxRuntimeDoesNotCreatePodWhileRuntimeDeleting(t *testi
 	}
 	if store.saves != 0 {
 		t.Fatalf("store saves = %d, want 0", store.saves)
+	}
+}
+
+func TestResumePausedSandboxRuntimeJoinsResumingRuntime(t *testing.T) {
+	pod := runtimeIdentityPod("ns-a", "pod-a", "sandbox-a")
+	pod.Annotations[controller.AnnotationRuntimeGeneration] = "4"
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.PodIP = "10.0.0.4"
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-a": {
+			ID:                  "sandbox-a",
+			TeamID:              "team-a",
+			UserID:              "user-a",
+			TemplateID:          "default",
+			TemplateName:        "default",
+			TemplateNamespace:   "tpl-default",
+			Status:              SandboxStatusResuming,
+			CurrentPodName:      "pod-a",
+			CurrentPodNamespace: "ns-a",
+			RuntimeGeneration:   4,
+			TemplateSpec:        v1alpha1.SandboxTemplateSpec{},
+		},
+	}}
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	svc := &SandboxService{
+		k8sClient:    client,
+		podLister:    runtimeIdentityPodLister(t, pod),
+		sandboxStore: store,
+		config:       SandboxServiceConfig{ProcdPort: 49983},
+		logger:       zap.NewNop(),
+	}
+
+	go func() {
+		time.Sleep(2 * sandboxLifecycleWaitInterval)
+		store.records["sandbox-a"].Status = SandboxStatusRunning
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	sandbox, err := svc.ResumePausedSandboxRuntime(ctx, "sandbox-a")
+	if err != nil {
+		t.Fatalf("ResumePausedSandboxRuntime() error = %v, want nil", err)
+	}
+	if sandbox.Status != SandboxStatusRunning {
+		t.Fatalf("status = %q, want running", sandbox.Status)
+	}
+	if sandbox.RuntimeGeneration != 4 {
+		t.Fatalf("runtime generation = %d, want 4", sandbox.RuntimeGeneration)
+	}
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "create" && action.GetResource().Resource == "pods" {
+			t.Fatalf("unexpected pod create while joining active resume: %#v", action)
+		}
+	}
+}
+
+func TestResumePausedSandboxRuntimeCompletesPausingInsteadOfConflict(t *testing.T) {
+	pod := runtimeIdentityPod("ns-a", "pod-a", "sandbox-a")
+	pod.Annotations[controller.AnnotationRuntimeGeneration] = "4"
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.PodIP = "10.0.0.4"
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-a": {
+			ID:                  "sandbox-a",
+			TeamID:              "team-a",
+			UserID:              "user-a",
+			TemplateID:          "default",
+			TemplateName:        "default",
+			TemplateNamespace:   "tpl-default",
+			Status:              SandboxStatusPausing,
+			CurrentPodName:      "pod-a",
+			CurrentPodNamespace: "ns-a",
+			RuntimeGeneration:   4,
+			TemplateSpec:        v1alpha1.SandboxTemplateSpec{},
+		},
+	}}
+	svc := &SandboxService{
+		k8sClient:    fake.NewSimpleClientset(pod.DeepCopy()),
+		podLister:    runtimeIdentityPodLister(t, pod),
+		sandboxStore: store,
+		logger:       zap.NewNop(),
+	}
+
+	_, err := svc.ResumePausedSandboxRuntime(context.Background(), "sandbox-a")
+	if !errors.Is(err, ErrSandboxCheckpointRequiresCtld) {
+		t.Fatalf("ResumePausedSandboxRuntime() error = %v, want checkpoint requirement", err)
+	}
+	if k8serrors.IsConflict(err) {
+		t.Fatalf("ResumePausedSandboxRuntime() returned conflict for pausing sandbox")
+	}
+}
+
+func TestResumePausedSandboxRuntimeDoesNotCreateRuntimeForRunningRecordWithoutPod(t *testing.T) {
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-a": {
+			ID:                "sandbox-a",
+			TeamID:            "team-a",
+			UserID:            "user-a",
+			TemplateID:        "default",
+			TemplateName:      "default",
+			TemplateNamespace: "tpl-default",
+			Status:            SandboxStatusRunning,
+			RuntimeGeneration: 4,
+			TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
+		},
+	}}
+	client := fake.NewSimpleClientset()
+	svc := &SandboxService{
+		k8sClient:    client,
+		podLister:    runtimeIdentityPodLister(t),
+		sandboxStore: store,
+		logger:       zap.NewNop(),
+	}
+
+	_, err := svc.ResumePausedSandboxRuntime(context.Background(), "sandbox-a")
+	if !k8serrors.IsConflict(err) {
+		t.Fatalf("ResumePausedSandboxRuntime() error = %v, want conflict", err)
+	}
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "create" && action.GetResource().Resource == "pods" {
+			t.Fatalf("unexpected pod create for running record without runtime: %#v", action)
+		}
 	}
 }
 

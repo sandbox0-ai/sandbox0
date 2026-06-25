@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
@@ -15,6 +16,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const sandboxLifecycleWaitInterval = 100 * time.Millisecond
+
 // ResumePausedSandboxRuntime creates a new runtime for a paused durable sandbox
 // and restores the latest writable rootfs checkpoint.
 func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandboxID string) (*Sandbox, error) {
@@ -24,79 +27,120 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 
 	var pod *corev1.Pod
 	var record *SandboxRecord
+	var deletingPodRef *sandboxRuntimePodRef
 	claimType := "hot"
-	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, locked *SandboxRecord) error {
-		if locked.Status == SandboxStatusDeleted || !locked.DeletedAt.IsZero() {
-			return k8serrors.NewNotFound(corev1.Resource("sandbox"), sandboxID)
-		}
-		if sandboxHardExpired(locked.HardExpiresAt, s.now()) {
-			return k8serrors.NewNotFound(corev1.Resource("sandbox"), sandboxID)
-		}
-		switch locked.Status {
-		case SandboxStatusStarting, SandboxStatusPausing, SandboxStatusResuming:
-			return k8serrors.NewConflict(corev1.Resource("sandbox"), sandboxID, fmt.Errorf("sandbox lifecycle operation %q is in progress", locked.Status))
-		}
-		record = locked
-
-		existing, getErr := s.getSandboxPod(lockCtx, sandboxID)
-		if getErr == nil {
-			if existing.DeletionTimestamp != nil {
-				return k8serrors.NewConflict(corev1.Resource("pod"), existing.Name, fmt.Errorf("sandbox runtime deletion is still in progress"))
+	restoreNeeded := false
+	for {
+		pod = nil
+		record = nil
+		deletingPodRef = nil
+		restoreNeeded = false
+		err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, locked *SandboxRecord) error {
+			if locked.Status == SandboxStatusDeleted || !locked.DeletedAt.IsZero() {
+				return k8serrors.NewNotFound(corev1.Resource("sandbox"), sandboxID)
 			}
-			pod = existing
-			return tx.SaveRuntime(lockCtx, sandboxID, existing.Namespace, existing.Name, s.podToSandboxStatus(existing), runtimeGenerationFromPod(existing), parseRFC3339AnnotationTime(existing.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(existing.Annotations, controller.AnnotationHardExpiresAt))
-		}
-		if getErr != nil && !k8serrors.IsNotFound(getErr) {
-			return fmt.Errorf("get current runtime pod: %w", getErr)
-		}
+			if sandboxHardExpired(locked.HardExpiresAt, s.now()) {
+				return k8serrors.NewNotFound(corev1.Resource("sandbox"), sandboxID)
+			}
+			switch locked.Status {
+			case SandboxStatusPausing:
+				return errSandboxLifecyclePausing
+			case SandboxStatusStarting, SandboxStatusResuming:
+				return errSandboxLifecycleResuming
+			}
+			record = locked
 
-		template, err := s.templateForSandboxRecord(locked)
-		if err != nil {
-			return err
-		}
-		if err := s.enforceActiveSandboxQuota(lockCtx, locked.TeamID); err != nil {
-			return err
-		}
-		if err := s.enforceSandboxCPUQuota(lockCtx, locked.TeamID, template); err != nil {
-			return err
-		}
-		if err := s.enforceSandboxMemoryQuota(lockCtx, locked.TeamID, template); err != nil {
-			return err
-		}
-		generation := locked.RuntimeGeneration + 1
-		req := &ClaimRequest{
-			TeamID:            locked.TeamID,
-			UserID:            locked.UserID,
-			Template:          locked.TemplateID,
-			Config:            &locked.Config,
-			Mounts:            locked.Mounts,
-			SandboxID:         locked.ID,
-			RuntimeGeneration: generation,
-			HardExpiresAt:     locked.HardExpiresAt,
-		}
-		pod, err = s.claimIdlePod(lockCtx, template, req)
-		if err != nil {
-			return fmt.Errorf("claim idle pod: %w", err)
-		}
-		if pod == nil {
-			claimType = "cold"
-			pod, err = s.createNewPod(lockCtx, template, req)
+			existing, getErr := s.getSandboxPod(lockCtx, sandboxID)
+			if getErr == nil {
+				if existing.DeletionTimestamp != nil {
+					deletingPodRef = &sandboxRuntimePodRef{
+						namespace: existing.Namespace,
+						name:      existing.Name,
+					}
+					return errSandboxRuntimeDeleting
+				}
+				pod = existing
+				record = nil
+				return tx.SaveRuntime(lockCtx, sandboxID, existing.Namespace, existing.Name, s.podToSandboxStatus(existing), runtimeGenerationFromPod(existing), parseRFC3339AnnotationTime(existing.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(existing.Annotations, controller.AnnotationHardExpiresAt))
+			}
+			if getErr != nil && !k8serrors.IsNotFound(getErr) {
+				return fmt.Errorf("get current runtime pod: %w", getErr)
+			}
+			if locked.Status != SandboxStatusPaused {
+				return k8serrors.NewConflict(corev1.Resource("sandbox"), sandboxID, fmt.Errorf("sandbox runtime for status %q is not available", locked.Status))
+			}
+
+			template, err := s.templateForSandboxRecord(locked)
 			if err != nil {
-				return fmt.Errorf("create runtime pod: %w", err)
+				return err
 			}
+			if err := s.enforceActiveSandboxQuota(lockCtx, locked.TeamID); err != nil {
+				return err
+			}
+			if err := s.enforceSandboxCPUQuota(lockCtx, locked.TeamID, template); err != nil {
+				return err
+			}
+			if err := s.enforceSandboxMemoryQuota(lockCtx, locked.TeamID, template); err != nil {
+				return err
+			}
+			generation := locked.RuntimeGeneration + 1
+			req := &ClaimRequest{
+				TeamID:            locked.TeamID,
+				UserID:            locked.UserID,
+				Template:          locked.TemplateID,
+				Config:            &locked.Config,
+				Mounts:            locked.Mounts,
+				SandboxID:         locked.ID,
+				RuntimeGeneration: generation,
+				HardExpiresAt:     locked.HardExpiresAt,
+			}
+			pod, err = s.claimIdlePod(lockCtx, template, req)
+			if err != nil {
+				return fmt.Errorf("claim idle pod: %w", err)
+			}
+			if pod == nil {
+				claimType = "cold"
+				pod, err = s.createNewPod(lockCtx, template, req)
+				if err != nil {
+					return fmt.Errorf("create runtime pod: %w", err)
+				}
+			}
+			restoreNeeded = true
+			return tx.SaveRuntime(lockCtx, sandboxID, pod.Namespace, pod.Name, SandboxStatusResuming, generation, parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt))
+		})
+		if err == nil {
+			break
 		}
-		return tx.SaveRuntime(lockCtx, sandboxID, pod.Namespace, pod.Name, SandboxStatusResuming, generation, parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt))
-	})
-	if err != nil {
 		if errors.Is(err, ErrSandboxRecordNotFound) {
 			return nil, k8serrors.NewNotFound(corev1.Resource("sandbox"), sandboxID)
 		}
-		return nil, err
+		switch {
+		case errors.Is(err, errSandboxLifecyclePausing):
+			if err := s.CompletePausingSandboxRuntime(ctx, sandboxID); err != nil {
+				return nil, err
+			}
+			continue
+		case errors.Is(err, errSandboxLifecycleResuming):
+			if err := s.waitForSandboxLifecycleStatusExit(ctx, sandboxID, SandboxStatusStarting, SandboxStatusResuming); err != nil {
+				return nil, err
+			}
+			continue
+		case errors.Is(err, errSandboxRuntimeDeleting):
+			if deletingPodRef == nil {
+				return nil, err
+			}
+			if err := s.waitForSandboxRuntimePodDeletion(ctx, deletingPodRef.namespace, deletingPodRef.name); err != nil {
+				return nil, err
+			}
+			continue
+		default:
+			return nil, err
+		}
 	}
 	if pod == nil {
 		return nil, fmt.Errorf("restore sandbox runtime did not create or find a pod")
 	}
-	if record == nil {
+	if record == nil || !restoreNeeded {
 		return s.GetSandbox(ctx, sandboxID)
 	}
 
@@ -110,6 +154,92 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 		return nil, err
 	}
 	return s.GetSandbox(ctx, sandboxID)
+}
+
+var (
+	errSandboxLifecyclePausing  = errors.New("sandbox lifecycle pause is in progress")
+	errSandboxLifecycleResuming = errors.New("sandbox lifecycle resume is in progress")
+	errSandboxRuntimeDeleting   = errors.New("sandbox runtime pod deletion is in progress")
+)
+
+type sandboxRuntimePodRef struct {
+	namespace string
+	name      string
+}
+
+func (s *SandboxService) waitForSandboxLifecycleStatusExit(ctx context.Context, sandboxID string, statuses ...string) error {
+	if s == nil || s.sandboxStore == nil {
+		return nil
+	}
+	waiting := make(map[string]struct{}, len(statuses))
+	for _, status := range statuses {
+		waiting[status] = struct{}{}
+	}
+	ticker := time.NewTicker(sandboxLifecycleWaitInterval)
+	defer ticker.Stop()
+	for {
+		record, err := s.sandboxStore.GetSandbox(ctx, sandboxID)
+		if err != nil {
+			if errors.Is(err, ErrSandboxRecordNotFound) {
+				return k8serrors.NewNotFound(corev1.Resource("sandbox"), sandboxID)
+			}
+			return err
+		}
+		if record == nil || record.Status == SandboxStatusDeleted || !record.DeletedAt.IsZero() {
+			return k8serrors.NewNotFound(corev1.Resource("sandbox"), sandboxID)
+		}
+		if _, ok := waiting[record.Status]; !ok {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *SandboxService) waitForSandboxRuntimePodDeletion(ctx context.Context, namespace, name string) error {
+	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(name) == "" {
+		return nil
+	}
+	ticker := time.NewTicker(sandboxLifecycleWaitInterval)
+	defer ticker.Stop()
+	for {
+		apiDeleting := false
+		if s != nil && s.k8sClient != nil {
+			pod, err := s.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+			switch {
+			case k8serrors.IsNotFound(err):
+			case err != nil:
+				return err
+			case pod != nil && pod.DeletionTimestamp != nil:
+				apiDeleting = true
+			default:
+				return nil
+			}
+		}
+		if s != nil && s.podLister != nil {
+			pod, err := s.podLister.Pods(namespace).Get(name)
+			if k8serrors.IsNotFound(err) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if pod != nil && pod.DeletionTimestamp == nil && !apiDeleting {
+				return nil
+			}
+		} else if !apiDeleting {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, claimType string) (*corev1.Pod, error) {

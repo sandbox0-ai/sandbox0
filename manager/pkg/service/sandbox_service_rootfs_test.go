@@ -202,6 +202,65 @@ func TestPauseSandboxRuntimeSavesChildLayerFromParentHead(t *testing.T) {
 	assert.Equal(t, "sha256:child", state.DiffDigest)
 }
 
+func TestCompletePausingSandboxRuntimeDoesNotCommitStaleCheckpoint(t *testing.T) {
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{
+			"sandbox-1": {
+				ID:                "sandbox-1",
+				TeamID:            "team-1",
+				RuntimeGeneration: 3,
+				Status:            SandboxStatusPausing,
+			},
+		},
+	}
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/v1/rootfs/save", r.URL.Path)
+		store.records["sandbox-1"].Status = SandboxStatusRunning
+		_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{
+			Info: ctldapi.RootFSInfo{
+				Runtime:             "runc",
+				RuntimeHandler:      "io.containerd.runc.v2",
+				BaseImageRef:        "docker.io/library/busybox:1.36",
+				BaseImageDigest:     "sha256:base",
+				Snapshotter:         "overlayfs",
+				SnapshotParent:      "parent-1",
+				SnapshotParentChain: []string{"parent-1", "parent-0"},
+			},
+			Descriptor: ctldapi.RootFSDiffDescriptor{
+				MediaType: "application/vnd.oci.image.layer.v1.tar",
+				Digest:    "sha256:stale",
+				Size:      123,
+				ObjectKey: "sandbox-rootfs/team-1/sandbox-1/3/sha256/stale.tar",
+			},
+		})
+	}))
+	defer ctld.Close()
+	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+
+	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
+	pod.Status.HostIP = ctldURL.Hostname()
+	k8sClient := fake.NewSimpleClientset(pod)
+	deleteCalled := false
+	k8sClient.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
+		deleteCalled = true
+		return true, nil, nil
+	})
+	svc := &SandboxService{
+		k8sClient:    k8sClient,
+		podLister:    newTestPodLister(t, pod),
+		sandboxStore: store,
+		ctldClient:   NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config:       SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+		clock:        systemTime{},
+		logger:       zap.NewNop(),
+	}
+
+	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
+	assert.False(t, deleteCalled)
+	assert.Nil(t, store.rootFSStates["sandbox-1"])
+	assert.Equal(t, SandboxStatusRunning, store.records["sandbox-1"].Status)
+}
+
 func TestPauseSandboxRuntimeSquashesRootFSWhenChainIsTooDeep(t *testing.T) {
 	var savedReq ctldapi.SaveRootFSRequest
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

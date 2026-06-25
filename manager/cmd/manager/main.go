@@ -208,9 +208,17 @@ func main() {
 	sandboxIndex := service.NewSandboxIndex()
 	podInformer.Informer().AddEventHandler(sandboxIndex.ResourceEventHandler())
 	meteringRepo := metering.NewRepository(pool)
+	sandboxStore := service.NewPGSandboxStore(pool)
 	lifecycleProjector := managermetering.NewLifecycleProjector(managermetering.NewStore(meteringRepo), cfg.RegionID, cfg.DefaultClusterId)
 	lifecycleProjector.SetLogger(logger)
 	lifecycleProjector.SetMetrics(managerMetrics)
+	lifecycleProjector.SetRuntimePauseLookup(func(ctx context.Context, info managermetering.RuntimeDeletionInfo) (bool, error) {
+		record, err := sandboxStore.GetSandbox(ctx, info.SandboxID)
+		if err != nil || record == nil {
+			return false, err
+		}
+		return service.SandboxRecordDeletionIsRuntimeOnly(record, info.Namespace, info.PodName, info.RuntimeGeneration), nil
+	})
 	podInformer.Informer().AddEventHandler(lifecycleProjector.ResourceEventHandler())
 
 	// Create network policy service for building policy annotations
@@ -315,7 +323,6 @@ func main() {
 	)
 	sandboxService.SetCredentialStore(credentialStore)
 	sandboxService.SetQuotaStore(quota.NewRepository(pool))
-	sandboxStore := service.NewPGSandboxStore(pool)
 	sandboxService.SetSandboxStore(sandboxStore)
 	if cfg.StorageProxyBaseURL != "" && cfg.StorageProxyHTTPPort > 0 && storageProxyAdminTokenGenerator != nil {
 		storageProxyBaseURL := fmt.Sprintf("http://%s:%d", strings.TrimSpace(cfg.StorageProxyBaseURL), cfg.StorageProxyHTTPPort)

@@ -33,19 +33,19 @@ const (
 
 // SandboxLifecycleInfo carries the durable identity needed to clean sandbox-scoped state.
 type SandboxLifecycleInfo struct {
-	Namespace             string
-	PodName               string
-	SandboxID             string
-	TeamID                string
-	UserID                string
-	WebhookURL            string
-	WebhookSecret         string
-	WebhookStateVolumeID  string
-	PodUID                string
-	NodeName              string
-	HostIP                string
-	RuntimeDeletionReason string
-	VolumePortals         []SandboxLifecycleVolumePortal
+	Namespace            string
+	PodName              string
+	SandboxID            string
+	TeamID               string
+	UserID               string
+	WebhookURL           string
+	WebhookSecret        string
+	WebhookStateVolumeID string
+	PodUID               string
+	NodeName             string
+	HostIP               string
+	RuntimeGeneration    int64
+	VolumePortals        []SandboxLifecycleVolumePortal
 }
 
 // SandboxLifecycleVolumePortal carries the ctld identity for a bound sandbox volume portal.
@@ -61,20 +61,20 @@ type SandboxDeletionCleaner interface {
 }
 
 type sandboxLifecycleQueueItem struct {
-	Namespace             string
-	PodName               string
-	SandboxID             string
-	TeamID                string
-	UserID                string
-	WebhookURL            string
-	WebhookSecret         string
-	WebhookStateVolumeID  string
-	PodUID                string
-	NodeName              string
-	HostIP                string
-	RuntimeDeletionReason string
-	VolumePortalsJSON     string
-	Deleted               bool
+	Namespace            string
+	PodName              string
+	SandboxID            string
+	TeamID               string
+	UserID               string
+	WebhookURL           string
+	WebhookSecret        string
+	WebhookStateVolumeID string
+	PodUID               string
+	NodeName             string
+	HostIP               string
+	RuntimeGeneration    int64
+	VolumePortalsJSON    string
+	Deleted              bool
 }
 
 // SandboxLifecycleController reconciles sandbox deletion side effects from Pod lifecycle state.
@@ -271,19 +271,19 @@ func (c *SandboxLifecycleController) ensurePodCleanupFinalizer(ctx context.Conte
 
 func (c *SandboxLifecycleController) cleanupDeletedSandbox(ctx context.Context, item sandboxLifecycleQueueItem) error {
 	info := SandboxLifecycleInfo{
-		Namespace:             item.Namespace,
-		PodName:               item.PodName,
-		SandboxID:             item.SandboxID,
-		TeamID:                item.TeamID,
-		UserID:                item.UserID,
-		WebhookURL:            item.WebhookURL,
-		WebhookSecret:         item.WebhookSecret,
-		WebhookStateVolumeID:  item.WebhookStateVolumeID,
-		PodUID:                item.PodUID,
-		NodeName:              item.NodeName,
-		HostIP:                item.HostIP,
-		RuntimeDeletionReason: item.RuntimeDeletionReason,
-		VolumePortals:         decodeSandboxLifecycleVolumePortals(item.VolumePortalsJSON),
+		Namespace:            item.Namespace,
+		PodName:              item.PodName,
+		SandboxID:            item.SandboxID,
+		TeamID:               item.TeamID,
+		UserID:               item.UserID,
+		WebhookURL:           item.WebhookURL,
+		WebhookSecret:        item.WebhookSecret,
+		WebhookStateVolumeID: item.WebhookStateVolumeID,
+		PodUID:               item.PodUID,
+		NodeName:             item.NodeName,
+		HostIP:               item.HostIP,
+		RuntimeGeneration:    item.RuntimeGeneration,
+		VolumePortals:        decodeSandboxLifecycleVolumePortals(item.VolumePortalsJSON),
 	}
 	if info.SandboxID == "" {
 		info.SandboxID = info.PodName
@@ -315,6 +315,22 @@ func (s *SandboxService) CleanupDeletedSandbox(ctx context.Context, info Sandbox
 	if s == nil {
 		return nil
 	}
+	sandboxID := strings.TrimSpace(info.SandboxID)
+	if sandboxID == "" {
+		sandboxID = strings.TrimSpace(info.PodName)
+	}
+	if sandboxID == "" {
+		return nil
+	}
+
+	runtimePaused, err := s.runtimeDeletionIsPause(ctx, info)
+	if err != nil {
+		return err
+	}
+	return s.cleanupDeletedSandbox(ctx, info, runtimePaused)
+}
+
+func (s *SandboxService) cleanupDeletedSandbox(ctx context.Context, info SandboxLifecycleInfo, runtimePaused bool) error {
 	logger := s.logger
 	if logger == nil {
 		logger = zap.NewNop()
@@ -327,7 +343,6 @@ func (s *SandboxService) CleanupDeletedSandbox(ctx context.Context, info Sandbox
 		return nil
 	}
 
-	runtimePaused := strings.TrimSpace(info.RuntimeDeletionReason) == runtimeDeletionReasonPaused
 	var errs []error
 	if !runtimePaused && s.deletionWebhookEmitter != nil && strings.TrimSpace(info.WebhookURL) != "" {
 		if err := s.deletionWebhookEmitter.EmitSandboxDeleted(ctx, info); err != nil {
@@ -363,6 +378,50 @@ func (s *SandboxService) CleanupDeletedSandbox(ctx context.Context, info Sandbox
 		errs = append(errs, fmt.Errorf("unbind sandbox volume portals: %w", err))
 	}
 	return errors.Join(errs...)
+}
+
+func (s *SandboxService) runtimeDeletionIsPause(ctx context.Context, info SandboxLifecycleInfo) (bool, error) {
+	if s == nil || s.sandboxStore == nil {
+		return false, nil
+	}
+	sandboxID := strings.TrimSpace(info.SandboxID)
+	if sandboxID == "" {
+		sandboxID = strings.TrimSpace(info.PodName)
+	}
+	if sandboxID == "" {
+		return false, nil
+	}
+	record, err := s.sandboxStore.GetSandbox(ctx, sandboxID)
+	if err != nil {
+		return false, fmt.Errorf("get sandbox record for runtime deletion cleanup: %w", err)
+	}
+	return SandboxRecordDeletionIsRuntimeOnly(record, info.Namespace, info.PodName, info.RuntimeGeneration), nil
+}
+
+// SandboxRecordDeletionIsRuntimeOnly reports whether a runtime pod deletion should
+// be treated as pause/stale runtime cleanup instead of sandbox deletion.
+func SandboxRecordDeletionIsRuntimeOnly(record *SandboxRecord, namespace, podName string, runtimeGeneration int64) bool {
+	if record == nil {
+		return false
+	}
+	switch record.Status {
+	case SandboxStatusPausing, SandboxStatusPaused:
+		return true
+	case SandboxStatusDeleted:
+		return false
+	}
+	if runtimeGeneration > 0 && record.RuntimeGeneration > runtimeGeneration {
+		return true
+	}
+	podName = strings.TrimSpace(podName)
+	namespace = strings.TrimSpace(namespace)
+	if podName != "" && strings.TrimSpace(record.CurrentPodName) != "" && record.CurrentPodName != podName {
+		return true
+	}
+	if namespace != "" && strings.TrimSpace(record.CurrentPodNamespace) != "" && record.CurrentPodNamespace != namespace {
+		return true
+	}
+	return false
 }
 
 func (s *SandboxService) unbindDeletedSandboxVolumePortals(ctx context.Context, info SandboxLifecycleInfo) error {
@@ -459,20 +518,20 @@ func (s *SandboxService) ensureSandboxDeletionFinalizer(ctx context.Context, pod
 
 func sandboxLifecycleItemFromInfo(info SandboxLifecycleInfo, deleted bool) sandboxLifecycleQueueItem {
 	return sandboxLifecycleQueueItem{
-		Namespace:             info.Namespace,
-		PodName:               info.PodName,
-		SandboxID:             info.SandboxID,
-		TeamID:                info.TeamID,
-		UserID:                info.UserID,
-		WebhookURL:            info.WebhookURL,
-		WebhookSecret:         info.WebhookSecret,
-		WebhookStateVolumeID:  info.WebhookStateVolumeID,
-		PodUID:                info.PodUID,
-		NodeName:              info.NodeName,
-		HostIP:                info.HostIP,
-		RuntimeDeletionReason: info.RuntimeDeletionReason,
-		VolumePortalsJSON:     encodeSandboxLifecycleVolumePortals(info.VolumePortals),
-		Deleted:               deleted,
+		Namespace:            info.Namespace,
+		PodName:              info.PodName,
+		SandboxID:            info.SandboxID,
+		TeamID:               info.TeamID,
+		UserID:               info.UserID,
+		WebhookURL:           info.WebhookURL,
+		WebhookSecret:        info.WebhookSecret,
+		WebhookStateVolumeID: info.WebhookStateVolumeID,
+		PodUID:               info.PodUID,
+		NodeName:             info.NodeName,
+		HostIP:               info.HostIP,
+		RuntimeGeneration:    info.RuntimeGeneration,
+		VolumePortalsJSON:    encodeSandboxLifecycleVolumePortals(info.VolumePortals),
+		Deleted:              deleted,
 	}
 }
 
@@ -514,12 +573,10 @@ func sandboxLifecycleInfoFromPod(pod *corev1.Pod) (SandboxLifecycleInfo, bool) {
 	webhookURL := ""
 	webhookSecret := ""
 	webhookStateVolumeID := ""
-	runtimeDeletionReason := ""
 	if pod.Annotations != nil {
 		teamID = strings.TrimSpace(pod.Annotations[controller.AnnotationTeamID])
 		userID = strings.TrimSpace(pod.Annotations[controller.AnnotationUserID])
 		webhookStateVolumeID = strings.TrimSpace(pod.Annotations[controller.AnnotationWebhookStateVolumeID])
-		runtimeDeletionReason = strings.TrimSpace(pod.Annotations[controller.AnnotationRuntimeDeletionReason])
 		if configJSON := strings.TrimSpace(pod.Annotations[controller.AnnotationConfig]); configJSON != "" {
 			var cfg SandboxConfig
 			if err := json.Unmarshal([]byte(configJSON), &cfg); err == nil && cfg.Webhook != nil {
@@ -529,19 +586,19 @@ func sandboxLifecycleInfoFromPod(pod *corev1.Pod) (SandboxLifecycleInfo, bool) {
 		}
 	}
 	return SandboxLifecycleInfo{
-		Namespace:             pod.Namespace,
-		PodName:               pod.Name,
-		SandboxID:             sandboxID,
-		TeamID:                teamID,
-		UserID:                userID,
-		WebhookURL:            webhookURL,
-		WebhookSecret:         webhookSecret,
-		WebhookStateVolumeID:  webhookStateVolumeID,
-		PodUID:                string(pod.UID),
-		NodeName:              pod.Spec.NodeName,
-		HostIP:                pod.Status.HostIP,
-		RuntimeDeletionReason: runtimeDeletionReason,
-		VolumePortals:         sandboxLifecycleVolumePortalsFromPod(pod, webhookStateVolumeID),
+		Namespace:            pod.Namespace,
+		PodName:              pod.Name,
+		SandboxID:            sandboxID,
+		TeamID:               teamID,
+		UserID:               userID,
+		WebhookURL:           webhookURL,
+		WebhookSecret:        webhookSecret,
+		WebhookStateVolumeID: webhookStateVolumeID,
+		PodUID:               string(pod.UID),
+		NodeName:             pod.Spec.NodeName,
+		HostIP:               pod.Status.HostIP,
+		RuntimeGeneration:    runtimeGenerationFromPod(pod),
+		VolumePortals:        sandboxLifecycleVolumePortalsFromPod(pod, webhookStateVolumeID),
 	}, true
 }
 

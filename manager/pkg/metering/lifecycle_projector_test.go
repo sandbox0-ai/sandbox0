@@ -223,6 +223,74 @@ func TestLifecycleProjectorRecordsSandboxServerlessWindows(t *testing.T) {
 	}
 }
 
+func TestLifecycleProjectorRecordsPauseFromDurableStatusOnPodDelete(t *testing.T) {
+	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
+	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
+	projector.SetRuntimePauseLookup(func(_ context.Context, info RuntimeDeletionInfo) (bool, error) {
+		if info.SandboxID != "sb-1" || info.Namespace != "sandbox0" || info.PodName != "sb-1" {
+			t.Fatalf("runtime deletion info = %#v", info)
+		}
+		return true, nil
+	})
+
+	now := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
+	projector.now = func() time.Time { return now }
+	claimedAt := now
+	pod := withSandboxResources(buildSandboxPod(claimedAt, false, "", "1"), "1", "1Gi")
+	projector.handleUpsert(pod)
+
+	projector.now = func() time.Time { return now.Add(2 * time.Minute) }
+	projector.handleDelete(pod)
+
+	if len(recorder.events) != 2 {
+		t.Fatalf("event count = %d, want 2", len(recorder.events))
+	}
+	if recorder.events[1].EventType != meteringpkg.EventTypeSandboxPaused {
+		t.Fatalf("second event type = %q, want %q", recorder.events[1].EventType, meteringpkg.EventTypeSandboxPaused)
+	}
+	if len(recorder.windows) != 1 || recorder.windows[0].WindowType != meteringpkg.WindowTypeSandboxRuntimeMiBMilliseconds {
+		t.Fatalf("expected runtime window after durable pause delete, got %#v", recorder.windows)
+	}
+	if recorder.windows[0].Value != 122_880_000 {
+		t.Fatalf("runtime value = %d, want 122880000", recorder.windows[0].Value)
+	}
+	state := recorder.states["sb-1"]
+	if state == nil || !state.Paused || state.TerminatedAt != nil {
+		t.Fatalf("state after durable pause delete = %#v, want paused without termination", state)
+	}
+}
+
+func TestLifecycleProjectorTreatsStaleRuntimeDeleteAsPause(t *testing.T) {
+	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
+	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
+	projector.SetRuntimePauseLookup(func(_ context.Context, info RuntimeDeletionInfo) (bool, error) {
+		if info.RuntimeGeneration != 1 {
+			t.Fatalf("runtime generation = %d, want 1", info.RuntimeGeneration)
+		}
+		return true, nil
+	})
+
+	now := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
+	projector.now = func() time.Time { return now }
+	pod := buildSandboxPod(now, false, "", "1")
+	pod.Annotations[controller.AnnotationRuntimeGeneration] = "1"
+	projector.handleUpsert(pod)
+
+	projector.now = func() time.Time { return now.Add(time.Minute) }
+	projector.handleDelete(pod)
+
+	if len(recorder.events) != 2 {
+		t.Fatalf("event count = %d, want claim and pause", len(recorder.events))
+	}
+	if recorder.events[1].EventType != meteringpkg.EventTypeSandboxPaused {
+		t.Fatalf("second event type = %q, want pause", recorder.events[1].EventType)
+	}
+	state := recorder.states["sb-1"]
+	if state == nil || !state.Paused || state.TerminatedAt != nil {
+		t.Fatalf("state after stale runtime delete = %#v, want paused", state)
+	}
+}
+
 func TestLifecycleProjectorTerminatesPausedSandboxWithPausedWindow(t *testing.T) {
 	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
 	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")

@@ -682,13 +682,26 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 		return nil, fmt.Errorf("sandbox config is required")
 	}
 
+	var record *SandboxRecord
+	if s.sandboxStore != nil {
+		var getErr error
+		record, getErr = s.sandboxStore.GetSandbox(ctx, sandboxID)
+		if getErr != nil && !errors.Is(getErr, ErrSandboxRecordNotFound) {
+			return nil, fmt.Errorf("get sandbox record: %w", getErr)
+		}
+		if record != nil {
+			if record.Status == SandboxStatusDeleted {
+				return nil, k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
+			}
+			if record.Status == SandboxStatusPaused {
+				return s.updatePausedSandboxRecord(ctx, record, cfg)
+			}
+		}
+	}
+
 	pod, err := s.getSandboxPod(ctx, sandboxID)
 	if err != nil {
 		if k8serrors.IsNotFound(err) && s.sandboxStore != nil {
-			record, getErr := s.sandboxStore.GetSandbox(ctx, sandboxID)
-			if getErr != nil {
-				return nil, fmt.Errorf("get sandbox record: %w", getErr)
-			}
 			if record != nil && record.Status != SandboxStatusDeleted {
 				return s.updatePausedSandboxRecord(ctx, record, cfg)
 			}
@@ -934,12 +947,32 @@ func (s *SandboxService) persistUpdatedSandboxPod(ctx context.Context, pod *core
 	if s == nil || s.sandboxStore == nil || pod == nil {
 		return nil
 	}
+	sandboxID := sandboxIDFromPod(pod)
+	if sandboxID == "" {
+		sandboxID = pod.Name
+	}
+	existing, err := s.sandboxStore.GetSandbox(ctx, sandboxID)
+	if err != nil && !errors.Is(err, ErrSandboxRecordNotFound) {
+		return fmt.Errorf("get sandbox record before pod persistence: %w", err)
+	}
+	if existing != nil {
+		if existing.Status == SandboxStatusPaused || existing.Status == SandboxStatusDeleted {
+			return nil
+		}
+		activeTxn, txnErr := s.sandboxStore.GetActiveLifecycleTxn(ctx, sandboxID)
+		if txnErr != nil {
+			return fmt.Errorf("get active sandbox lifecycle txn before pod persistence: %w", txnErr)
+		}
+		if sandboxLifecycleTxnHidesCommittedRuntime(activeTxn) {
+			return nil
+		}
+	}
 	template := s.templateForPod(pod)
 	if template == nil {
 		return nil
 	}
 	record := &SandboxRecord{
-		ID:                  sandboxIDFromPod(pod),
+		ID:                  sandboxID,
 		TeamID:              pod.Annotations[controller.AnnotationTeamID],
 		UserID:              pod.Annotations[controller.AnnotationUserID],
 		TemplateID:          sandboxTemplateIDFromLabels(pod.Labels),
@@ -957,9 +990,6 @@ func (s *SandboxService) persistUpdatedSandboxPod(ctx context.Context, pod *core
 		ExpiresAt:           parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt),
 		HardExpiresAt:       parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt),
 		CreatedAt:           pod.CreationTimestamp.Time,
-	}
-	if record.ID == "" {
-		record.ID = pod.Name
 	}
 	return s.sandboxStore.UpsertSandbox(ctx, record)
 }

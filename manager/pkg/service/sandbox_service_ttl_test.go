@@ -130,6 +130,81 @@ func TestUpdateSandboxZeroTTLDisablesExpirations(t *testing.T) {
 	assert.Equal(t, int32(0), *cfg.HardTTL)
 }
 
+func TestUpdateSandboxPausedRecordIgnoresStaleRuntimePod(t *testing.T) {
+	pod := testSandboxPod()
+	pod.Annotations[controller.AnnotationExpiresAt] = "2026-03-07T12:05:00Z"
+	pod.Annotations[controller.AnnotationConfig] = `{"ttl":300}`
+
+	svc, client := newSandboxServiceForTTLTests(t, pod, 0)
+	svc.sandboxStore = &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-1": {
+			ID:                  "sandbox-1",
+			TeamID:              "team-1",
+			UserID:              "user-1",
+			TemplateID:          "default",
+			TemplateName:        "default",
+			TemplateNamespace:   "tpl-default",
+			Status:              SandboxStatusPaused,
+			Config:              SandboxConfig{TTL: int32Ptr(300)},
+			CurrentPodName:      pod.Name,
+			CurrentPodNamespace: pod.Namespace,
+			RuntimeGeneration:   3,
+			ExpiresAt:           time.Date(2026, time.March, 7, 12, 5, 0, 0, time.UTC),
+		},
+	}}
+
+	updated, err := svc.UpdateSandbox(context.Background(), "sandbox-1", &SandboxUpdateConfig{
+		TTL: int32Ptr(0),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, SandboxStatusPaused, updated.Status)
+	assert.True(t, updated.ExpiresAt.IsZero())
+
+	record, err := svc.sandboxStore.GetSandbox(context.Background(), "sandbox-1")
+	require.NoError(t, err)
+	require.NotNil(t, record.Config.TTL)
+	assert.Equal(t, SandboxStatusPaused, record.Status)
+	assert.Equal(t, int32(0), *record.Config.TTL)
+	assert.True(t, record.ExpiresAt.IsZero())
+
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "update" && action.GetResource().Resource == "pods" {
+			t.Fatalf("unexpected stale runtime pod update: %#v", action)
+		}
+	}
+	stored, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "2026-03-07T12:05:00Z", stored.Annotations[controller.AnnotationExpiresAt])
+}
+
+func TestPersistUpdatedSandboxPodDoesNotOverwritePausedRecord(t *testing.T) {
+	pod := testSandboxPod()
+	pod.Annotations[controller.AnnotationConfig] = `{"ttl":0}`
+
+	svc, _ := newSandboxServiceForTTLTests(t, pod, 0)
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-1": {
+			ID:                "sandbox-1",
+			TeamID:            "team-1",
+			UserID:            "user-1",
+			TemplateID:        "default",
+			TemplateName:      "default",
+			TemplateNamespace: "tpl-default",
+			Status:            SandboxStatusPaused,
+			Config:            SandboxConfig{TTL: int32Ptr(300)},
+			RuntimeGeneration: 3,
+		},
+	}}
+	svc.sandboxStore = store
+
+	require.NoError(t, svc.persistUpdatedSandboxPod(context.Background(), pod))
+	record, err := store.GetSandbox(context.Background(), "sandbox-1")
+	require.NoError(t, err)
+	require.NotNil(t, record.Config.TTL)
+	assert.Equal(t, SandboxStatusPaused, record.Status)
+	assert.Equal(t, int32(300), *record.Config.TTL)
+}
+
 func TestUpdateSandboxEnvVarsUpdatesProcdAndConfig(t *testing.T) {
 	pod := testSandboxPod()
 	pod.Annotations[controller.AnnotationConfig] = `{"env_vars":{"OLD":"old"},"ttl":300}`

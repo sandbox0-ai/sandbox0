@@ -22,19 +22,18 @@ Managed Agents sit above raw sandboxes. A sandbox gives an agent processes, file
 | Events | Append-only interaction log for user input, agent output, tools, status, and errors |
 | Vault | Credential container attached to a session |
 | Resource | File or repository materialized into the session workspace |
-| Agent harness | Runtime adapter that runs the session as agent in sandbox or sandbox as tool |
+| Agent harness | Runtime adapter that runs the session inside a Sandbox0 sandbox |
 | AI gateway | Optional external gateway that normalizes model provider APIs, logs usage, enforces policy, or stores provider credentials |
 
 ## Execution Models
 
-Managed Agents can execute in two ways:
+Managed Agents run the selected agent harness inside the per-session Sandbox0 sandbox:
 
 | Model | What users should expect | Harnesses |
 |-------|--------------------------|---------|
 | Agent in sandbox | The agent runtime process lives inside the per-session sandbox with the workspace and harness state. | `claude`, `codex` |
-| Sandbox as tool | A resident runtime service owns the agent loop and uses Sandbox0 as an isolated tool target. | `sandpi` |
 
-Both models use the same Managed Agents API and durable event stream. Choose the model by selecting an agent harness through the LLM vault.
+Choose the harness by attaching an LLM vault with `sandbox0.managed_agents.engine`.
 
 ## Architecture
 
@@ -43,14 +42,12 @@ flowchart TD
     sdk[Official Anthropic SDK] --> gateway[managed-agent gateway]
     gateway --> pg[(PostgreSQL session and event truth)]
     gateway --> sandbox0[Sandbox0 API]
-    sandbox0 --> runtime[Sandbox0 sandbox or tool sandbox]
-    gateway --> resident[resident runtime for sandbox-as-tool harnesses]
-    runtime --> wrapper[agent-in-sandbox wrapper]
+    sandbox0 --> runtime[Sandbox0 sandbox]
+    runtime --> wrapper[agent harness wrapper]
     wrapper --> callbacks[Signed runtime callbacks]
-    resident --> callbacks
     callbacks --> gateway
     wrapper --> llm[model provider API]
-    resident --> aigateway[optional AI gateway]
+    wrapper --> aigateway[optional AI gateway]
     aigateway --> llm
     gateway --> credentials[credential sources and network policy]
     credentials --> runtime
@@ -65,7 +62,7 @@ Session truth lives outside the sandbox. The sandbox is an execution attachment 
 3. Create an LLM vault with `sandbox0.managed_agents.role = llm` and the target agent harness.
 4. Create a session that references the agent, environment, and vault ids.
 5. Send `user.message` events, or create a deployment that stores initial events for manual or scheduled runs.
-6. Sandbox0 starts the selected agent harness. Agent-in-sandbox harnesses claim or resume a sandbox immediately; sandbox-as-tool harnesses claim a sandbox when a tool needs one.
+6. Sandbox0 claims or resumes the session sandbox and starts the selected agent harness.
 7. The harness emits callbacks. The gateway appends events to the durable session log.
 8. The client lists or streams events until the session becomes idle, requires action, or terminates.
 
@@ -77,7 +74,7 @@ The public object model follows Claude Managed Agents where practical. The backe
 - The SDK `apiKey` is a Sandbox0 API key.
 - The LLM token is stored in a vault and projected by Sandbox0 credential policy.
 - The agent harness is selected through LLM vault metadata.
-- `claude` and `codex` run agent in sandbox; `sandpi` uses sandbox as tool.
+- `claude` and `codex` run the agent process inside the sandbox.
 - The sandbox workspace is persistent across turns through a Sandbox0 volume.
 - Network policy and credential injection are enforced by Sandbox0.
 

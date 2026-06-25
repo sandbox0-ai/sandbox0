@@ -162,6 +162,7 @@ type SandboxStoreTx interface {
 	BeginLifecycleTxn(ctx context.Context, txn *SandboxLifecycleTxn) error
 	SetLifecycleTxnRuntime(ctx context.Context, txnID, namespace, podName string) error
 	UpdateLifecycleTxnPhase(ctx context.Context, txnID, phase string) error
+	SetLifecycleTxnPreparedHead(ctx context.Context, txnID, preparedHeadLayerID string) error
 	RequestLifecycleTxnCancel(ctx context.Context, txnID, reason string) (bool, error)
 	CommitLifecycleTxn(ctx context.Context, txnID, preparedHeadLayerID string) error
 	AbortLifecycleTxn(ctx context.Context, txnID, reason string) error
@@ -674,6 +675,29 @@ func (t sandboxStoreTx) UpdateLifecycleTxnPhase(ctx context.Context, txnID, phas
 	return nil
 }
 
+func (t sandboxStoreTx) SetLifecycleTxnPreparedHead(ctx context.Context, txnID, preparedHeadLayerID string) error {
+	txnID = strings.TrimSpace(txnID)
+	preparedHeadLayerID = strings.TrimSpace(preparedHeadLayerID)
+	if txnID == "" || preparedHeadLayerID == "" {
+		return nil
+	}
+	tag, err := t.tx.Exec(ctx, `
+		UPDATE manager.sandbox_lifecycle_txns
+		SET prepared_head_layer_id = $2,
+			updated_at = NOW()
+		WHERE txn_id = $1
+			AND phase IN ('preparing', 'barriered', 'publishing', 'committing')
+			AND cancel_requested_at IS NULL
+	`, txnID, preparedHeadLayerID)
+	if err != nil {
+		return fmt.Errorf("set lifecycle txn prepared head: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("active lifecycle txn %s not found", txnID)
+	}
+	return nil
+}
+
 func (t sandboxStoreTx) RequestLifecycleTxnCancel(ctx context.Context, txnID, reason string) (bool, error) {
 	txnID = strings.TrimSpace(txnID)
 	if txnID == "" {
@@ -889,6 +913,12 @@ func saveRootFSObject(ctx context.Context, exec rootFSStateExecutor, state *Sand
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("%w: %s", ErrRootFSObjectConflict, state.DiffObjectKey)
+	}
+	if _, err := exec.Exec(ctx, `
+		DELETE FROM manager.rootfs_object_deletions
+		WHERE object_key = $1
+	`, state.DiffObjectKey); err != nil {
+		return fmt.Errorf("clear pending rootfs object deletion: %w", err)
 	}
 	return nil
 }

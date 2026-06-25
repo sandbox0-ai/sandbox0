@@ -324,6 +324,12 @@ func main() {
 	sandboxService.SetCredentialStore(credentialStore)
 	sandboxService.SetQuotaStore(quota.NewRepository(pool))
 	sandboxService.SetSandboxStore(sandboxStore)
+	rootFSObjectStore, rootFSObjectStoreErr := buildRootFSObjectStore(cfg)
+	if rootFSObjectStoreErr != nil {
+		logger.Warn("Rootfs object cleanup disabled; object store is not configured", zap.Error(rootFSObjectStoreErr))
+	} else if rootFSObjectStore != nil {
+		sandboxService.SetRootFSObjectDeleter(rootFSObjectStore)
+	}
 	if cfg.StorageProxyBaseURL != "" && cfg.StorageProxyHTTPPort > 0 && storageProxyAdminTokenGenerator != nil {
 		storageProxyBaseURL := fmt.Sprintf("http://%s:%d", strings.TrimSpace(cfg.StorageProxyBaseURL), cfg.StorageProxyHTTPPort)
 		sandboxService.SetWebhookStateVolumeClient(service.NewStorageProxyVolumeClient(service.StorageProxyVolumeClientConfig{
@@ -505,9 +511,8 @@ func main() {
 		}
 	}()
 	if !cfg.RootFSMaintenance.Disabled {
-		rootFSObjectStore, err := buildRootFSObjectStore(cfg)
-		if err != nil {
-			logger.Warn("Rootfs maintenance disabled; object store is not configured", zap.Error(err))
+		if rootFSObjectStoreErr != nil {
+			logger.Warn("Rootfs maintenance disabled; object store is not configured", zap.Error(rootFSObjectStoreErr))
 		} else if rootFSObjectStore == nil {
 			logger.Warn("Rootfs maintenance disabled; object store is not configured")
 		} else {

@@ -119,6 +119,7 @@ type SandboxService struct {
 	deletionWebhookEmitter SandboxDeletionWebhookEmitter
 	quotaStore             TeamQuotaLimitStore
 	sandboxStore           SandboxStore
+	rootFSObjectDeleter    RootFSObjectDeleter
 	resumeGroup            singleflight.Group
 }
 
@@ -287,4 +288,10 @@ func (s *SandboxService) SetQuotaStore(store TeamQuotaLimitStore) {
 // SetSandboxStore injects durable sandbox identity storage.
 func (s *SandboxService) SetSandboxStore(store SandboxStore) {
 	s.sandboxStore = store
+}
+
+// SetRootFSObjectDeleter injects the object-store deleter used to clean up
+// rootfs diffs that were uploaded but never committed into the DB rootfs head.
+func (s *SandboxService) SetRootFSObjectDeleter(deleter RootFSObjectDeleter) {
+	s.rootFSObjectDeleter = deleter
 }

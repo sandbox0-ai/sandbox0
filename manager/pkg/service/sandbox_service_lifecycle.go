@@ -380,6 +380,19 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 		_ = s.abortLifecycleTxn(ctx, sandboxID, txn.ID, err.Error())
 		return err
 	}
+	rootFSCommitted := false
+	defer func() {
+		if !rootFSCommitted {
+			s.deleteUncommittedRootFSObject(rootFSState, "pause transaction did not commit")
+		}
+	}()
+	if err := s.markLifecycleTxnPreparedHead(ctx, sandboxID, txn.ID, rootFSState.LayerID); err != nil {
+		if errors.Is(err, errSandboxLifecycleCanceled) {
+			return nil
+		}
+		_ = s.abortLifecycleTxn(ctx, sandboxID, txn.ID, err.Error())
+		return err
+	}
 	stillPausing, err := s.sandboxStillPausing(ctx, sandboxID, txn.ID)
 	if err != nil || !stillPausing {
 		return err
@@ -403,6 +416,7 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 		_ = s.abortLifecycleTxn(ctx, sandboxID, txn.ID, err.Error())
 		return err
 	}
+	rootFSCommitted = true
 	barrierActive = false
 	if err := s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 		if s.logger != nil {
@@ -425,6 +439,31 @@ func (s *SandboxService) sandboxStillPausing(ctx context.Context, sandboxID, txn
 		return false, err
 	}
 	return txn != nil && txn.ID == txnID && txn.Kind == SandboxLifecycleKindPause, nil
+}
+
+func (s *SandboxService) markLifecycleTxnPreparedHead(ctx context.Context, sandboxID, txnID, preparedHeadLayerID string) error {
+	if s == nil || s.sandboxStore == nil || strings.TrimSpace(txnID) == "" || strings.TrimSpace(preparedHeadLayerID) == "" {
+		return nil
+	}
+	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, _ *SandboxRecord) error {
+		activeTxn, err := tx.GetActiveLifecycleTxn(lockCtx, sandboxID)
+		if err != nil {
+			return err
+		}
+		if activeTxn == nil || activeTxn.ID != txnID {
+			return nil
+		}
+		return tx.SetLifecycleTxnPreparedHead(lockCtx, txnID, preparedHeadLayerID)
+	})
+	if err == nil {
+		return nil
+	}
+	if canceled, cancelErr := s.abortPauseIfCancelRequested(ctx, sandboxID, txnID); cancelErr != nil {
+		return cancelErr
+	} else if canceled {
+		return errSandboxLifecycleCanceled
+	}
+	return err
 }
 
 func (s *SandboxService) commitPausingRuntimePaused(ctx context.Context, sandboxID string, txn *SandboxLifecycleTxn, generation int64, rootFSState *SandboxRootFSState) error {

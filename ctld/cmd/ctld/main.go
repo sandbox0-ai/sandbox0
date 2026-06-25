@@ -215,6 +215,21 @@ func buildRootFSObjectStore(cfg *apiconfig.StorageProxyConfig) (objectstore.Stor
 	if err != nil {
 		return nil, err
 	}
+	if cfg.ObjectEncryptionEnabled {
+		keyPEM, err := objectstore.LoadEncryptionKey(cfg.ObjectEncryptionKeyPath)
+		if err != nil {
+			return nil, err
+		}
+		keyEncryptor, err := objectstore.NewKeyEncryptor(keyPEM, cfg.ObjectEncryptionPassphrase)
+		if err != nil {
+			return nil, err
+		}
+		store = objectstore.Encrypting(store, objectstore.EncryptionConfig{
+			Enabled:      true,
+			Algorithm:    cfg.ObjectEncryptionAlgo,
+			KeyEncryptor: keyEncryptor,
+		})
+	}
 	return store, nil
 }
 

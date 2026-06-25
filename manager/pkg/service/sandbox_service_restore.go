@@ -42,6 +42,7 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 		req = nil
 		deletingPodRef = nil
 		restoreNeeded = false
+		var waitErr error
 		err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, locked *SandboxRecord) error {
 			if locked.Status == SandboxStatusDeleted || !locked.DeletedAt.IsZero() {
 				return k8serrors.NewNotFound(corev1.Resource("sandbox"), sandboxID)
@@ -61,14 +62,17 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 							return err
 						}
 					}
-					return errSandboxLifecyclePausing
+					waitErr = errSandboxLifecyclePausing
+					return nil
 				default:
-					return errSandboxLifecycleResuming
+					waitErr = errSandboxLifecycleResuming
+					return nil
 				}
 			}
 			switch locked.Status {
 			case SandboxStatusStarting:
-				return errSandboxLifecycleResuming
+				waitErr = errSandboxLifecycleResuming
+				return nil
 			}
 
 			existing, getErr := s.getSandboxPod(lockCtx, sandboxID)
@@ -136,6 +140,9 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 			}
 			return tx.BeginLifecycleTxn(lockCtx, txn)
 		})
+		if err == nil && waitErr != nil {
+			err = waitErr
+		}
 		if err == nil {
 			break
 		}

@@ -320,13 +320,14 @@ func TestCompletePausingSandboxRuntimeDoesNotCommitStaleCheckpoint(t *testing.T)
 		return true, nil, nil
 	})
 	svc := &SandboxService{
-		k8sClient:    k8sClient,
-		podLister:    newTestPodLister(t, pod),
-		sandboxStore: store,
-		ctldClient:   NewCtldClient(CtldClientConfig{Timeout: time.Second}),
-		config:       SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
-		clock:        systemTime{},
-		logger:       zap.NewNop(),
+		k8sClient:           k8sClient,
+		podLister:           newTestPodLister(t, pod),
+		sandboxStore:        store,
+		ctldClient:          NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config:              SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+		clock:               systemTime{},
+		logger:              zap.NewNop(),
+		rootFSObjectDeleter: &recordingRootFSObjectDeleter{},
 	}
 	defer attachRootFSTestProcd(t, pod, svc, nil)()
 	txnID = addRootFSTestPauseTxn(store, pod, SandboxLifecyclePhasePreparing)
@@ -335,6 +336,8 @@ func TestCompletePausingSandboxRuntimeDoesNotCommitStaleCheckpoint(t *testing.T)
 	assert.False(t, deleteCalled)
 	assert.Nil(t, store.rootFSStates["sandbox-1"])
 	assert.Equal(t, SandboxStatusRunning, store.records["sandbox-1"].Status)
+	deleter := svc.rootFSObjectDeleter.(*recordingRootFSObjectDeleter)
+	assert.Equal(t, []string{"sandbox-rootfs/team-1/sandbox-1/3/sha256/stale.tar"}, deleter.keys)
 }
 
 func TestPauseSandboxRuntimeSquashesRootFSWhenChainIsTooDeep(t *testing.T) {

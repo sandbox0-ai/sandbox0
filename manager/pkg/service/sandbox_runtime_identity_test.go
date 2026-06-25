@@ -210,7 +210,39 @@ func (s *memorySandboxStore) WithSandboxLock(ctx context.Context, sandboxID stri
 	if record == nil {
 		return ErrSandboxRecordNotFound
 	}
-	return fn(ctx, memorySandboxStoreTx{store: s}, record)
+	snapshot := s.snapshot()
+	if err := fn(ctx, memorySandboxStoreTx{store: s}, record); err != nil {
+		s.restore(snapshot)
+		return err
+	}
+	return nil
+}
+
+type memorySandboxStoreSnapshot struct {
+	records           map[string]*SandboxRecord
+	lifecycleTxns     map[string]*SandboxLifecycleTxn
+	rootFSStates      map[string]*SandboxRootFSState
+	rootFSFilesystems map[string]*RootFSFilesystem
+}
+
+func (s *memorySandboxStore) snapshot() memorySandboxStoreSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return memorySandboxStoreSnapshot{
+		records:           cloneSandboxRecordMap(s.records),
+		lifecycleTxns:     cloneSandboxLifecycleTxnMap(s.lifecycleTxns),
+		rootFSStates:      cloneSandboxRootFSStateMap(s.rootFSStates),
+		rootFSFilesystems: cloneRootFSFilesystemMap(s.rootFSFilesystems),
+	}
+}
+
+func (s *memorySandboxStore) restore(snapshot memorySandboxStoreSnapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.records = snapshot.records
+	s.lifecycleTxns = snapshot.lifecycleTxns
+	s.rootFSStates = snapshot.rootFSStates
+	s.rootFSFilesystems = snapshot.rootFSFilesystems
 }
 
 func (s *memorySandboxStore) setSandboxStatus(sandboxID, status string) {
@@ -317,6 +349,18 @@ func (t memorySandboxStoreTx) UpdateLifecycleTxnPhase(_ context.Context, txnID, 
 	return nil
 }
 
+func (t memorySandboxStoreTx) SetLifecycleTxnPreparedHead(_ context.Context, txnID, preparedHeadLayerID string) error {
+	t.store.mu.Lock()
+	defer t.store.mu.Unlock()
+	if txn := t.store.lifecycleTxns[txnID]; txn != nil && sandboxLifecyclePhaseActive(txn.Phase) {
+		if sandboxLifecycleTxnCancelRequested(txn) {
+			return fmt.Errorf("active lifecycle txn %s not found", txnID)
+		}
+		txn.PreparedHeadLayerID = preparedHeadLayerID
+	}
+	return nil
+}
+
 func (t memorySandboxStoreTx) RequestLifecycleTxnCancel(_ context.Context, txnID, reason string) (bool, error) {
 	t.store.mu.Lock()
 	defer t.store.mu.Unlock()
@@ -370,6 +414,28 @@ func cloneSandboxRecord(record *SandboxRecord) *SandboxRecord {
 	return &clone
 }
 
+func cloneSandboxRecordMap(records map[string]*SandboxRecord) map[string]*SandboxRecord {
+	if records == nil {
+		return nil
+	}
+	cloned := make(map[string]*SandboxRecord, len(records))
+	for key, record := range records {
+		cloned[key] = cloneSandboxRecord(record)
+	}
+	return cloned
+}
+
+func cloneSandboxLifecycleTxnMap(txns map[string]*SandboxLifecycleTxn) map[string]*SandboxLifecycleTxn {
+	if txns == nil {
+		return nil
+	}
+	cloned := make(map[string]*SandboxLifecycleTxn, len(txns))
+	for key, txn := range txns {
+		cloned[key] = cloneSandboxLifecycleTxn(txn)
+	}
+	return cloned
+}
+
 func cloneSandboxRootFSState(state *SandboxRootFSState) *SandboxRootFSState {
 	if state == nil {
 		return nil
@@ -380,6 +446,28 @@ func cloneSandboxRootFSState(state *SandboxRootFSState) *SandboxRootFSState {
 	}
 	clone.LayerChain = cloneSandboxRootFSLayers(state.LayerChain)
 	return &clone
+}
+
+func cloneSandboxRootFSStateMap(states map[string]*SandboxRootFSState) map[string]*SandboxRootFSState {
+	if states == nil {
+		return nil
+	}
+	cloned := make(map[string]*SandboxRootFSState, len(states))
+	for key, state := range states {
+		cloned[key] = cloneSandboxRootFSState(state)
+	}
+	return cloned
+}
+
+func cloneRootFSFilesystemMap(filesystems map[string]*RootFSFilesystem) map[string]*RootFSFilesystem {
+	if filesystems == nil {
+		return nil
+	}
+	cloned := make(map[string]*RootFSFilesystem, len(filesystems))
+	for key, filesystem := range filesystems {
+		cloned[key] = cloneRootFSFilesystemForTest(filesystem)
+	}
+	return cloned
 }
 
 func TestRootFSStateFromLayerChainKeepsCurrentSandboxID(t *testing.T) {

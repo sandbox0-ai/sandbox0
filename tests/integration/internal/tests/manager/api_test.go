@@ -1232,6 +1232,16 @@ func (t memorySandboxStoreTxForManagerIntegration) UpdateLifecycleTxnPhase(_ con
 	return nil
 }
 
+func (t memorySandboxStoreTxForManagerIntegration) SetLifecycleTxnPreparedHead(_ context.Context, txnID, preparedHeadLayerID string) error {
+	if txn := t.store.lifecycleTxns[txnID]; txn != nil && managerIntegrationLifecyclePhaseActive(txn.Phase) {
+		if !txn.CancelRequestedAt.IsZero() {
+			return stderrors.New("active lifecycle txn not found")
+		}
+		txn.PreparedHeadLayerID = preparedHeadLayerID
+	}
+	return nil
+}
+
 func (t memorySandboxStoreTxForManagerIntegration) RequestLifecycleTxnCancel(_ context.Context, txnID, reason string) (bool, error) {
 	txn := t.store.lifecycleTxns[txnID]
 	if txn == nil ||

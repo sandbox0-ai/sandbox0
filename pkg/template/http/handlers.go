@@ -515,49 +515,6 @@ func (h *Handler) DeleteTemplate(c *gin.Context) {
 	spec.JSONSuccess(c, http.StatusOK, response)
 }
 
-// GetTemplateAllocations gets allocations for a template.
-func (h *Handler) GetTemplateAllocations(c *gin.Context) {
-	if h.AllocationStore == nil {
-		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "allocations not supported")
-		return
-	}
-
-	templateID := c.Param("id")
-	if templateID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "template_id is required")
-		return
-	}
-	canonicalTemplateID, err := naming.CanonicalTemplateID(templateID)
-	if err != nil {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
-		return
-	}
-	templateID = canonicalTemplateID
-
-	claims := internalauth.ClaimsFromContext(c.Request.Context())
-	if claims == nil {
-		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
-		return
-	}
-	scope, teamID, err := templateScopeForClaims(claims)
-	if err != nil {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
-		return
-	}
-
-	allocations, err := h.AllocationStore.ListAllocationsByTemplate(c.Request.Context(), scope, teamID, templateID)
-	if err != nil {
-		h.Logger.Error("Failed to get template allocations", zap.Error(err))
-		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get template allocations")
-		return
-	}
-
-	spec.JSONSuccess(c, http.StatusOK, gin.H{
-		"allocations": allocations,
-		"count":       len(allocations),
-	})
-}
-
 func (h *Handler) triggerReconcile() {
 	if h.Reconciler == nil {
 		return

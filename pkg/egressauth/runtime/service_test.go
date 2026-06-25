@@ -302,6 +302,45 @@ func TestResolveUsesUpdatedBindingSourceVersion(t *testing.T) {
 	}
 }
 
+func TestResolveIncludesSourceMetadata(t *testing.T) {
+	store := &fakeBindingStore{
+		recordFn: func() *egressauth.BindingRecord {
+			record := testBindingRecord(time.Unix(10, 0).UTC())
+			record.Bindings[0].SourceVersion = 3
+			record.Bindings[0].Projection.HTTPHeaders = &egressauth.HTTPHeadersProjection{
+				Headers: []egressauth.ProjectedHeader{{
+					Name:          "Authorization",
+					ValueTemplate: "Bearer {{ .token }}",
+				}},
+			}
+			return record
+		},
+		sourceVersionFn: func(sourceID, version int64) *egressauth.CredentialSourceVersion {
+			source := testStaticSourceVersion("token")
+			source.SourceID = sourceID
+			source.TeamID = "team-1"
+			source.Version = version
+			return source
+		},
+	}
+
+	service := NewService(Config{DefaultResolveTTL: time.Minute}, store, zap.NewNop())
+	resp, err := service.Resolve(context.Background(), &egressauth.ResolveRequest{
+		TeamID:    "team-1",
+		SandboxID: "sbx-1",
+		AuthRef:   "example-api",
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if resp.Source == nil {
+		t.Fatal("source metadata is nil")
+	}
+	if resp.Source.TeamID != "team-1" || resp.Source.SourceRef != "example-source" || resp.Source.SourceID != 1 || resp.Source.SourceVersion != 3 {
+		t.Fatalf("source metadata = %#v", resp.Source)
+	}
+}
+
 func TestResolveReturnsPlaceholderSubstitutionDirective(t *testing.T) {
 	store := &fakeBindingStore{
 		recordFn: func() *egressauth.BindingRecord {

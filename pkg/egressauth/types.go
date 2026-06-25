@@ -22,11 +22,21 @@ type ResolveResponse struct {
 	AuthRef    string             `json:"authRef"`
 	Directives []ResolveDirective `json:"directives,omitempty"`
 	ExpiresAt  *time.Time         `json:"expiresAt,omitempty"`
+	Source     *ResolveSource     `json:"source,omitempty"`
 
 	// Headers is an in-memory compatibility view derived from `directives`.
 	// It is intentionally excluded from the wire format so the broker protocol
 	// can move to typed directives before netd adapters are rewritten.
 	Headers map[string]string `json:"-"`
+}
+
+// ResolveSource identifies the source version used to resolve runtime auth
+// material. It intentionally contains no secret material.
+type ResolveSource struct {
+	TeamID        string `json:"teamId,omitempty"`
+	SourceRef     string `json:"sourceRef,omitempty"`
+	SourceID      int64  `json:"sourceId,omitempty"`
+	SourceVersion int64  `json:"sourceVersion,omitempty"`
 }
 
 type ResolveDirectiveKind string
@@ -96,6 +106,7 @@ type resolveResponseWire struct {
 	Directives []ResolveDirective `json:"directives,omitempty"`
 	Headers    map[string]string  `json:"headers,omitempty"`
 	ExpiresAt  *time.Time         `json:"expiresAt,omitempty"`
+	Source     *ResolveSource     `json:"source,omitempty"`
 }
 
 // NewHTTPHeadersResolveResponse constructs the first typed directive response
@@ -234,6 +245,7 @@ func (r ResolveResponse) MarshalJSON() ([]byte, error) {
 		AuthRef:    clone.AuthRef,
 		Directives: clone.Directives,
 		ExpiresAt:  clone.ExpiresAt,
+		Source:     cloneResolveSource(clone.Source),
 	}
 	return json.Marshal(wire)
 }
@@ -255,6 +267,7 @@ func (r *ResolveResponse) UnmarshalJSON(data []byte) error {
 	} else {
 		r.ExpiresAt = nil
 	}
+	r.Source = cloneResolveSource(wire.Source)
 	r.EnsureCompatibilityFields()
 	return nil
 }
@@ -268,6 +281,7 @@ func CloneResolveResponse(in *ResolveResponse) *ResolveResponse {
 		AuthRef:    in.AuthRef,
 		Directives: cloneDirectives(in.Directives),
 		Headers:    cloneStringMap(in.Headers),
+		Source:     cloneResolveSource(in.Source),
 	}
 	if in.ExpiresAt != nil {
 		expiresCopy := *in.ExpiresAt
@@ -275,6 +289,18 @@ func CloneResolveResponse(in *ResolveResponse) *ResolveResponse {
 	}
 	out.EnsureCompatibilityFields()
 	return out
+}
+
+func cloneResolveSource(in *ResolveSource) *ResolveSource {
+	if in == nil {
+		return nil
+	}
+	return &ResolveSource{
+		TeamID:        in.TeamID,
+		SourceRef:     in.SourceRef,
+		SourceID:      in.SourceID,
+		SourceVersion: in.SourceVersion,
+	}
 }
 
 func extractHTTPHeaders(directives []ResolveDirective) map[string]string {

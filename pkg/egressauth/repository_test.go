@@ -2,17 +2,20 @@ package egressauth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth/migrations"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
+	"github.com/sandbox0-ai/sandbox0/pkg/pubsub"
 )
 
 type testMigrateLogger struct{}
@@ -86,6 +89,63 @@ func TestRepositoryPutSourceAdvancesExistingBindings(t *testing.T) {
 	}
 	if got := version.Spec.StaticHeaders.Values["token"]; got != "new-token" {
 		t.Fatalf("resolved token = %q, want new-token", got)
+	}
+}
+
+func TestRepositoryPutSourcePublishesRotationEvent(t *testing.T) {
+	ctx := context.Background()
+	repo, pool := newRepositoryTestStore(t)
+
+	listenConn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire listen connection: %v", err)
+	}
+	defer listenConn.Release()
+	if _, err := listenConn.Exec(ctx, "LISTEN "+pubsub.CredentialSourceRotationChannel); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	first, err := repo.PutSource(ctx, "team-1", staticHeadersSourceWriteRequest("github-source", "old-token"))
+	if err != nil {
+		t.Fatalf("put first source: %v", err)
+	}
+	source, err := repo.GetSourceByRef(ctx, "team-1", "github-source")
+	if err != nil {
+		t.Fatalf("get source by ref: %v", err)
+	}
+	if source == nil {
+		t.Fatal("source is nil")
+	}
+	if first.CurrentVersion != 1 {
+		t.Fatalf("first version = %d, want 1", first.CurrentVersion)
+	}
+
+	rotated, err := repo.PutSource(ctx, "team-1", staticHeadersSourceWriteRequest("github-source", "new-token"))
+	if err != nil {
+		t.Fatalf("rotate source: %v", err)
+	}
+	if rotated.CurrentVersion != 2 {
+		t.Fatalf("rotated version = %d, want 2", rotated.CurrentVersion)
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	notification, err := listenConn.Conn().WaitForNotification(waitCtx)
+	if err != nil {
+		t.Fatalf("wait for notification: %v", err)
+	}
+	if notification.Channel != pubsub.CredentialSourceRotationChannel {
+		t.Fatalf("notification channel = %q, want %q", notification.Channel, pubsub.CredentialSourceRotationChannel)
+	}
+	var event pubsub.CredentialSourceRotatedEvent
+	if err := json.Unmarshal([]byte(notification.Payload), &event); err != nil {
+		t.Fatalf("unmarshal event: %v", err)
+	}
+	if event.TeamID != "team-1" || event.SourceID != source.ID || event.SourceRef != "github-source" || event.SourceVersion != 2 {
+		t.Fatalf("rotation event = %#v", event)
+	}
+	if event.Timestamp.IsZero() {
+		t.Fatal("rotation event timestamp is zero")
 	}
 }
 

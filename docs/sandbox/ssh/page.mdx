@@ -27,14 +27,14 @@ s0 sandbox get "$SANDBOX_ID"
 The table output includes `SSH Host`, `SSH Port`, and `SSH Username` when SSH is available for the sandbox. Use `s0 -o json sandbox get "$SANDBOX_ID"` when you want to script against the same fields.
 
 <Callout variant="warning">
-Legacy `scp -O` is not supported. Use the default OpenSSH `scp` behavior, which runs over the SFTP subsystem.
+Sandbox0 supports `scp` only when the client uses SFTP-backed mode. OpenSSH 9.0 and newer use this mode by default. Legacy SCP protocol, including `scp -O` and OpenSSH 8.x `scp` clients that default to legacy SCP, is not supported. Use `sftp` or upgrade the OpenSSH client if you are on OpenSSH 8.x.
 </Callout>
 
 ---
 
 ## Manage SSH Public Keys
 
-Upload your SSH public key once, then reuse standard `ssh`, `scp`, and `sftp` clients.
+Upload your SSH public key once, then reuse standard `ssh`, SFTP-backed `scp`, and `sftp` clients.
 
 Create a key if you do not already have one:
 
@@ -100,7 +100,7 @@ If the sandbox is paused, `ssh-gateway` asks the control plane to resume it befo
 
 ## Copy Files with scp
 
-Use standard `scp` to upload or download files. The default OpenSSH mode is supported.
+Use `scp` to upload or download files when your OpenSSH client uses SFTP-backed mode. This is the default in OpenSSH 9.0 and newer. On OpenSSH 8.x, use the `sftp` command instead because its `scp` client speaks the legacy SCP protocol.
 
 Upload a local file:
 
@@ -114,7 +114,7 @@ Download a file from the sandbox:
 scp -i ~/.ssh/sandbox0_ed25519 -P "$SSH_PORT" "$SSH_USER@$SSH_HOST:/workspace/output.txt" ./output.txt
 ```
 
-Because `scp` runs over the SFTP subsystem here, `sftp` clients work too:
+Because file transfer runs over the SFTP subsystem here, `sftp` clients work too:
 
 ```bash
 sftp -i ~/.ssh/sandbox0_ed25519 -P "$SSH_PORT" "$SSH_USER@$SSH_HOST"

@@ -13,5 +13,4 @@ var (
 	ErrNotEmpty              = errors.New("directory is not empty")
 	ErrNotDir                = errors.New("inode is not a directory")
 	ErrNotFound              = errors.New("entry not found")
-	ErrXattrNotFound         = errors.New("extended attribute not found")
 )

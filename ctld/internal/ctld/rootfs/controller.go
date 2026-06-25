@@ -29,31 +29,6 @@ type Runtime interface {
 	CaptureBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) error
 }
 
-type S0FSRuntime interface {
-	CommitS0FSRootFS(ctx context.Context, req S0FSCommitRequest) (ctldapi.RootFSHeadDescriptor, error)
-	AttachS0FSRootFS(ctx context.Context, req S0FSAttachRequest) (ctldapi.RootFSHeadDescriptor, string, error)
-}
-
-type S0FSCommitRequest struct {
-	Info          ctldapi.RootFSInfo
-	Store         objectstore.Store
-	SandboxID     string
-	TeamID        string
-	FilesystemID  string
-	ParentHead    ctldapi.RootFSHeadDescriptor
-	ExcludedPaths []string
-	PortalPaths   []ctldapi.RootFSPortalPath
-}
-
-type S0FSAttachRequest struct {
-	Info          ctldapi.RootFSInfo
-	Store         objectstore.Store
-	FilesystemID  string
-	Head          ctldapi.RootFSHeadDescriptor
-	ExcludedPaths []string
-	PortalPaths   []ctldapi.RootFSPortalPath
-}
-
 type PortalResolver interface {
 	RootFSPortalPaths(podUID string) []ctldapi.RootFSPortalPath
 }
@@ -115,22 +90,6 @@ func (c *Controller) SaveRootFS(r *http.Request, req ctldapi.SaveRootFSRequest) 
 		return ctldapi.SaveRootFSResponse{Info: info, Error: err.Error()}, http.StatusBadRequest
 	}
 	portalPaths := c.portalPathsForRequest(info, req.Target, req.ExcludedPaths, req.PortalPaths)
-	if s0fsRuntime, ok := c.runtime.(S0FSRuntime); ok {
-		head, err := s0fsRuntime.CommitS0FSRootFS(ctx, S0FSCommitRequest{
-			Info:          info,
-			Store:         c.store,
-			SandboxID:     req.SandboxID,
-			TeamID:        req.TeamID,
-			FilesystemID:  req.FilesystemID,
-			ParentHead:    req.ParentHead,
-			ExcludedPaths: req.ExcludedPaths,
-			PortalPaths:   portalPaths,
-		})
-		if err != nil {
-			return ctldapi.SaveRootFSResponse{Info: info, Error: fmt.Sprintf("commit s0fs rootfs: %v", err)}, statusForError(err)
-		}
-		return ctldapi.SaveRootFSResponse{Info: info, Head: head}, http.StatusOK
-	}
 	desc, reader, err := c.createDiff(ctx, info, strings.TrimSpace(req.ParentLayerID), req.ExcludedPaths, portalPaths)
 	if err != nil {
 		return ctldapi.SaveRootFSResponse{Info: info, Error: fmt.Sprintf("create rootfs diff: %v", err)}, statusForError(err)
@@ -155,13 +114,8 @@ func (c *Controller) ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest
 	if err := validateTarget(req.Target); err != nil {
 		return ctldapi.ApplyRootFSResponse{Error: err.Error()}, http.StatusBadRequest
 	}
-	headed := !rootFSHeadDescriptorEmpty(req.Head)
 	layered := len(req.Layers) > 0
-	if headed {
-		if err := validateRootFSHeadDescriptor(req.Head); err != nil {
-			return ctldapi.ApplyRootFSResponse{Error: err.Error()}, http.StatusBadRequest
-		}
-	} else if layered {
+	if layered {
 		if err := validateLayerDescriptors(req.Layers); err != nil {
 			return ctldapi.ApplyRootFSResponse{Error: err.Error()}, http.StatusBadRequest
 		}
@@ -184,25 +138,6 @@ func (c *Controller) ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest
 	}
 	if err := validateExpectedBase(info, req); err != nil {
 		return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, http.StatusConflict
-	}
-	if headed {
-		s0fsRuntime, ok := c.runtime.(S0FSRuntime)
-		if !ok {
-			return ctldapi.ApplyRootFSResponse{Info: info, Error: "s0fs rootfs attach is not supported by this runtime"}, http.StatusNotImplemented
-		}
-		portalPaths := c.portalPathsForRequest(info, req.Target, req.ExcludedPaths, req.PortalPaths)
-		head, mountPath, err := s0fsRuntime.AttachS0FSRootFS(ctx, S0FSAttachRequest{
-			Info:          info,
-			Store:         c.store,
-			FilesystemID:  req.FilesystemID,
-			Head:          req.Head,
-			ExcludedPaths: req.ExcludedPaths,
-			PortalPaths:   portalPaths,
-		})
-		if err != nil {
-			return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, statusForError(err)
-		}
-		return ctldapi.ApplyRootFSResponse{Info: info, Head: head, MountPath: mountPath, Applied: true}, http.StatusOK
 	}
 	if layered {
 		if err := validateStrictExpectedBase(info, req); err != nil {
@@ -356,29 +291,6 @@ func validateLayerDescriptors(layers []ctldapi.RootFSLayerDescriptor) error {
 		if err := validateDescriptor(layer.Descriptor); err != nil {
 			return fmt.Errorf("%w: layers[%d]: %v", ErrBadRequest, i, err)
 		}
-	}
-	return nil
-}
-
-func rootFSHeadDescriptorEmpty(head ctldapi.RootFSHeadDescriptor) bool {
-	return strings.TrimSpace(head.Engine) == "" &&
-		strings.TrimSpace(head.VolumeID) == "" &&
-		strings.TrimSpace(head.ManifestKey) == "" &&
-		head.ManifestSeq == 0
-}
-
-func validateRootFSHeadDescriptor(head ctldapi.RootFSHeadDescriptor) error {
-	if strings.TrimSpace(head.Engine) != "" && strings.TrimSpace(head.Engine) != ctldapi.RootFSStorageEngineS0FS {
-		return fmt.Errorf("%w: unsupported rootfs head engine %q", ErrBadRequest, head.Engine)
-	}
-	if strings.TrimSpace(head.VolumeID) == "" {
-		return fmt.Errorf("%w: rootfs head volume_id is required", ErrBadRequest)
-	}
-	if strings.TrimSpace(head.ManifestKey) == "" {
-		return fmt.Errorf("%w: rootfs head manifest_key is required", ErrBadRequest)
-	}
-	if head.ManifestSeq == 0 {
-		return fmt.Errorf("%w: rootfs head manifest_seq is required", ErrBadRequest)
 	}
 	return nil
 }

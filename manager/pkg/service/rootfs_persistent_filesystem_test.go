@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -43,51 +42,6 @@ func TestSaveRootFSStateRequiresLayerID(t *testing.T) {
 	err := saveRootFSState(context.Background(), exec, state)
 
 	require.ErrorContains(t, err, "layer_id is required")
-	assert.Empty(t, exec.sqls)
-}
-
-func TestSaveRootFSStateWritesS0FSLayerWithoutObjectInventory(t *testing.T) {
-	exec := &recordingRootFSStateExecutor{
-		tags: []pgconn.CommandTag{
-			pgconn.NewCommandTag("INSERT 0 1"),
-			pgconn.NewCommandTag("SELECT 1"),
-		},
-	}
-	state := rootFSTestState()
-	state.LayerID = "layer-s0fs"
-	state.StorageEngine = ctldapi.RootFSStorageEngineS0FS
-	state.DiffDigest = ""
-	state.DiffObjectKey = ""
-	state.S0FSVolumeID = "fs-1"
-	state.S0FSManifestKey = "manifests/00000000000000000007.json"
-	state.S0FSManifestSeq = 7
-	state.S0FSCheckpointSeq = 3
-
-	err := saveRootFSState(context.Background(), exec, state)
-
-	require.NoError(t, err)
-	require.Len(t, exec.sqls, 2)
-	assert.NotContains(t, exec.sqls[0], "INSERT INTO manager.rootfs_objects")
-	assert.Contains(t, exec.sqls[0], "INSERT INTO manager.rootfs_layers")
-	assert.Contains(t, exec.sqls[1], "INSERT INTO manager.rootfs_filesystems")
-	require.Len(t, exec.args, 2)
-	assert.Equal(t, ctldapi.RootFSStorageEngineS0FS, exec.args[0][17])
-	assert.Equal(t, "fs-1", exec.args[0][18])
-	assert.Equal(t, "manifests/00000000000000000007.json", exec.args[0][19])
-	assert.Equal(t, int64(7), exec.args[0][20])
-	assert.Equal(t, int64(3), exec.args[0][21])
-}
-
-func TestSaveRootFSStateRequiresS0FSManifest(t *testing.T) {
-	exec := &recordingRootFSStateExecutor{}
-	state := rootFSTestState()
-	state.LayerID = "layer-s0fs"
-	state.StorageEngine = ctldapi.RootFSStorageEngineS0FS
-	state.S0FSVolumeID = "fs-1"
-
-	err := saveRootFSState(context.Background(), exec, state)
-
-	require.ErrorContains(t, err, "s0fs_manifest_key is required")
 	assert.Empty(t, exec.sqls)
 }
 

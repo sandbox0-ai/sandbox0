@@ -59,7 +59,6 @@ type FunctionHandler struct {
 	maxTimeout         time.Duration
 	upgrader           websocket.Upgrader
 	sandboxEnvProvider func() map[string]string
-	rootFSProvider     func() string
 }
 
 type functionHandlerRequest struct {
@@ -109,23 +108,11 @@ func (h *FunctionHandler) SetSandboxEnvVarsProvider(provider func() map[string]s
 	h.sandboxEnvProvider = provider
 }
 
-// SetRootFSProvider sets the mounted sandbox rootfs used by function runner executions.
-func (h *FunctionHandler) SetRootFSProvider(provider func() string) {
-	h.rootFSProvider = provider
-}
-
 func (h *FunctionHandler) sandboxEnvVars() map[string]string {
 	if h.sandboxEnvProvider == nil {
 		return nil
 	}
 	return h.sandboxEnvProvider()
-}
-
-func (h *FunctionHandler) rootFS() string {
-	if h.rootFSProvider == nil {
-		return ""
-	}
-	return strings.TrimSpace(h.rootFSProvider())
 }
 
 func (h *FunctionHandler) Execute(w http.ResponseWriter, r *http.Request) {
@@ -149,8 +136,7 @@ func (h *FunctionHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
-	rootFS := h.rootFS()
-	hostModulePath, execModulePath, err := h.materializeSource(req.Source, rootFS)
+	modulePath, err := h.materializeSource(req.Source)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
@@ -169,7 +155,7 @@ func (h *FunctionHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stdout, stderr, truncated, err := h.run(ctx, rootFS, hostModulePath, execModulePath, req.Handler, req.EnvVars, payload)
+	stdout, stderr, truncated, err := h.run(ctx, modulePath, req.Handler, req.EnvVars, payload)
 	if isFunctionRunnerStartError(err) {
 		h.writeRunnerStartError(w, err)
 		return
@@ -226,8 +212,7 @@ func (h *FunctionHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(req.TimeoutMS)*time.Millisecond)
 		defer cancel()
 	}
-	rootFS := h.rootFS()
-	hostModulePath, execModulePath, err := h.materializeSource(req.Source, rootFS)
+	modulePath, err := h.materializeSource(req.Source)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
@@ -249,7 +234,7 @@ func (h *FunctionHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		h.logger.Debug("Failed to disable function stream response deadline", zap.Error(err))
 	}
 	tracker := &trackingResponseWriter{ResponseWriter: w}
-	if err := h.runStream(ctx, tracker, rootFS, hostModulePath, execModulePath, req.Handler, req.EnvVars, payload); err != nil {
+	if err := h.runStream(ctx, tracker, modulePath, req.Handler, req.EnvVars, payload); err != nil {
 		if isFunctionRunnerStartError(err) {
 			if !tracker.written {
 				h.writeRunnerStartError(w, err)
@@ -295,8 +280,7 @@ func (h *FunctionHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, err.Error()), time.Now().Add(time.Second))
 		return
 	}
-	rootFS := h.rootFS()
-	hostModulePath, execModulePath, err := h.materializeSource(req.Source, rootFS)
+	modulePath, err := h.materializeSource(req.Source)
 	if err != nil {
 		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, err.Error()), time.Now().Add(time.Second))
 		return
@@ -313,7 +297,7 @@ func (h *FunctionHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "failed to encode function request"), time.Now().Add(time.Second))
 		return
 	}
-	if err := h.runWebSocket(r.Context(), conn, rootFS, hostModulePath, execModulePath, req.Handler, req.EnvVars, payload); err != nil {
+	if err := h.runWebSocket(r.Context(), conn, modulePath, req.Handler, req.EnvVars, payload); err != nil {
 		if isFunctionRunnerStartError(err) {
 			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "function runtime unavailable"), time.Now().Add(time.Second))
 			return
@@ -341,63 +325,38 @@ func (h *FunctionHandler) requestTimeout(timeoutMS int) (time.Duration, error) {
 	return timeout, nil
 }
 
-func (h *FunctionHandler) materializeSource(source sandboxfunction.Source, rootFS string) (string, string, error) {
+func (h *FunctionHandler) materializeSource(source sandboxfunction.Source) (string, error) {
 	digest := source.Digest
 	if digest == "" {
 		digest = sandboxfunction.InlineDigest(source.Code)
 	}
 	if !functionDigestPattern.MatchString(digest) {
-		return "", "", errors.New("source.digest must be a sha256 digest")
+		return "", errors.New("source.digest must be a sha256 digest")
 	}
 	expected := sandboxfunction.InlineDigest(source.Code)
 	if source.Code != "" && digest != expected && digest != sandboxfunction.LegacyInlineDigest(source.Filename, source.Code) {
-		return "", "", errors.New("source.digest does not match source code")
+		return "", errors.New("source.digest does not match source code")
 	}
 	dirName := strings.TrimPrefix(digest, "sha256:")
-	hostCacheRoot, execCacheRoot, err := h.sourceCacheRoots(rootFS)
-	if err != nil {
-		return "", "", err
+	dir := filepath.Join(h.cacheRoot, dirName)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("prepare function source cache: %w", err)
 	}
-	hostDir := filepath.Join(hostCacheRoot, dirName)
-	if err := os.MkdirAll(hostDir, 0o700); err != nil {
-		return "", "", fmt.Errorf("prepare function source cache: %w", err)
-	}
-	hostModulePath := filepath.Join(hostDir, sandboxfunction.DefaultFilename)
-	execModulePath := filepath.Join(execCacheRoot, dirName, sandboxfunction.DefaultFilename)
+	modulePath := filepath.Join(dir, sandboxfunction.DefaultFilename)
 	if source.Code != "" {
-		if err := os.WriteFile(hostModulePath, []byte(source.Code), 0o600); err != nil {
-			return "", "", fmt.Errorf("write function source: %w", err)
+		if err := os.WriteFile(modulePath, []byte(source.Code), 0o600); err != nil {
+			return "", fmt.Errorf("write function source: %w", err)
 		}
 	}
-	return hostModulePath, execModulePath, nil
+	return modulePath, nil
 }
 
-func (h *FunctionHandler) sourceCacheRoots(rootFS string) (string, string, error) {
-	execCacheRoot := filepath.Clean(h.cacheRoot)
-	if strings.TrimSpace(rootFS) == "" {
-		return execCacheRoot, execCacheRoot, nil
-	}
-	if !filepath.IsAbs(execCacheRoot) || execCacheRoot == string(os.PathSeparator) {
-		return "", "", errors.New("function cache root must be an absolute non-root path")
-	}
-	cleanRoot := filepath.Clean(rootFS)
-	hostCacheRoot := filepath.Join(cleanRoot, strings.TrimPrefix(execCacheRoot, string(os.PathSeparator)))
-	return hostCacheRoot, execCacheRoot, nil
-}
-
-func functionCommandDir(rootFS, hostModulePath, execModulePath string) string {
-	if strings.TrimSpace(rootFS) == "" {
-		return filepath.Dir(hostModulePath)
-	}
-	return filepath.Dir(execModulePath)
-}
-
-func (h *FunctionHandler) run(ctx context.Context, rootFS, hostModulePath, execModulePath, handler string, envVars map[string]string, payload []byte) ([]byte, string, functionRunTruncation, error) {
-	cmd := osexec.CommandContext(ctx, h.runnerPath, execModulePath, handler)
-	cmd.Dir = functionCommandDir(rootFS, hostModulePath, execModulePath)
+func (h *FunctionHandler) run(ctx context.Context, modulePath, handler string, envVars map[string]string, payload []byte) ([]byte, string, functionRunTruncation, error) {
+	cmd := osexec.CommandContext(ctx, h.runnerPath, modulePath, handler)
+	cmd.Dir = filepath.Dir(modulePath)
 	cmd.Stdin = bytes.NewReader(payload)
 	cmd.Env = process.MergeEnvironment(os.Environ(), h.sandboxEnvVars(), envVars)
-	process.ApplySysProcAttr(cmd, process.ProcessConfig{RootFS: rootFS}, true)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = killFunctionProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 
@@ -425,11 +384,11 @@ func killFunctionProcessGroup(cmd *osexec.Cmd) func() error {
 	}
 }
 
-func (h *FunctionHandler) runStream(ctx context.Context, w http.ResponseWriter, rootFS, hostModulePath, execModulePath, handler string, envVars map[string]string, payload []byte) error {
-	cmd := osexec.CommandContext(ctx, h.runnerPath, "--stream", execModulePath, handler)
-	cmd.Dir = functionCommandDir(rootFS, hostModulePath, execModulePath)
+func (h *FunctionHandler) runStream(ctx context.Context, w http.ResponseWriter, modulePath, handler string, envVars map[string]string, payload []byte) error {
+	cmd := osexec.CommandContext(ctx, h.runnerPath, "--stream", modulePath, handler)
+	cmd.Dir = filepath.Dir(modulePath)
 	cmd.Env = process.MergeEnvironment(os.Environ(), h.sandboxEnvVars(), envVars)
-	process.ApplySysProcAttr(cmd, process.ProcessConfig{RootFS: rootFS}, true)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = killFunctionProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 
@@ -536,14 +495,14 @@ func (h *FunctionHandler) runStream(ctx context.Context, w http.ResponseWriter, 
 	return nil
 }
 
-func (h *FunctionHandler) runWebSocket(ctx context.Context, conn *websocket.Conn, rootFS, hostModulePath, execModulePath, handler string, envVars map[string]string, payload []byte) error {
+func (h *FunctionHandler) runWebSocket(ctx context.Context, conn *websocket.Conn, modulePath, handler string, envVars map[string]string, payload []byte) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	cmd := osexec.CommandContext(ctx, h.runnerPath, "--websocket", execModulePath, handler)
-	cmd.Dir = functionCommandDir(rootFS, hostModulePath, execModulePath)
+	cmd := osexec.CommandContext(ctx, h.runnerPath, "--websocket", modulePath, handler)
+	cmd.Dir = filepath.Dir(modulePath)
 	cmd.Env = process.MergeEnvironment(os.Environ(), h.sandboxEnvVars(), envVars)
-	process.ApplySysProcAttr(cmd, process.ProcessConfig{RootFS: rootFS}, true)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = killFunctionProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 

@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
-	filepkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/webhook"
 	"go.uber.org/zap"
 )
@@ -84,45 +83,6 @@ func TestInitializeClearsSandboxEnvVars(t *testing.T) {
 	}
 	if envVars := contextManager.SandboxEnvVars(); len(envVars) != 0 {
 		t.Fatalf("sandbox env vars = %#v, want empty", envVars)
-	}
-}
-
-func TestInitializeConfiguresRootFSForContextAndFiles(t *testing.T) {
-	dispatcher := webhook.NewDispatcher(webhook.Options{}, zap.NewNop())
-	t.Cleanup(func() {
-		_ = dispatcher.Shutdown(context.Background())
-	})
-	contextManager := ctxpkg.NewManager()
-	fileManager, err := filepkg.NewManager(filepath.Join(t.TempDir(), "workspace"))
-	if err != nil {
-		t.Fatalf("NewManager() failed = %v", err)
-	}
-	t.Cleanup(func() {
-		_ = fileManager.Close()
-	})
-	handler := NewInitializeHandler(dispatcher, fileManager, contextManager, 8080, zap.NewNop())
-	rootFS := filepath.Join(t.TempDir(), "rootfs")
-
-	body, err := json.Marshal(InitializeRequest{
-		SandboxID:       "sandbox-1",
-		RootFSMountPath: rootFS,
-	})
-	if err != nil {
-		t.Fatalf("marshal request: %v", err)
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/initialize", bytes.NewReader(body))
-	recorder := httptest.NewRecorder()
-	handler.Initialize(recorder, req)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("Initialize() status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
-	}
-	if got := contextManager.RootFS(); got != rootFS {
-		t.Fatalf("context rootfs = %q, want %q", got, rootFS)
-	}
-	if got := fileManager.RootFS(); got != rootFS {
-		t.Fatalf("file rootfs = %q, want %q", got, rootFS)
 	}
 }
 

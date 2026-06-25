@@ -269,20 +269,6 @@ func (m *Materializer) LoadLatestManifest(ctx context.Context) (*Manifest, error
 	return m.loadLegacyLatestManifest(ctx)
 }
 
-func (m *Materializer) LoadManifestByKey(ctx context.Context, key string) (*Manifest, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if !m.Enabled() {
-		return nil, ErrMaterializedManifestNotFound
-	}
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return nil, fmt.Errorf("%w: manifest key is required", ErrInvalidInput)
-	}
-	return m.loadManifestByKey(ctx, key)
-}
-
 func (m *Materializer) LoadLatestState(ctx context.Context) (*SnapshotState, *Manifest, error) {
 	manifest, err := m.LoadLatestManifest(ctx)
 	if err != nil {

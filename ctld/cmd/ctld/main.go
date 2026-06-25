@@ -100,7 +100,6 @@ func main() {
 		}
 	}
 
-	rootFSRuntime := buildRootFSRuntime()
 	portalManager := ctldportal.NewManager(ctldportal.Config{
 		NodeName:      nodeName,
 		RootDir:       portalRoot,
@@ -109,7 +108,6 @@ func main() {
 		Repository:    repo,
 		PodName:       podName,
 		PodNamespace:  podNamespace,
-		RootFSBinder:  rootFSRuntime,
 	})
 	go portalManager.Run(ctx)
 	csiServer := ctldportal.NewCSIServer(nodeName, portalManager)
@@ -124,7 +122,7 @@ func main() {
 	httpServer := newHTTPServer(httpAddr, combinedController{
 		Controller: probeController,
 		Portal:     portalManager,
-		RootFS:     buildRootFSController(storageCfg, portalManager, rootFSRuntime),
+		RootFS:     buildRootFSController(storageCfg, portalManager),
 	})
 	if obsProvider != nil {
 		httpServer.Handler = httpobs.ServerMiddleware(obsProvider.HTTPServerConfig(zapLogger))(httpServer.Handler)
@@ -180,26 +178,22 @@ func buildProbeController(ctx context.Context, obsProvider *observability.Provid
 	return controller
 }
 
-func buildRootFSRuntime() *ctldrootfs.ContainerdRuntime {
-	return ctldrootfs.NewContainerdRuntime(ctldrootfs.ContainerdRuntimeConfig{
-		CRIEndpoint:            criEndpoint,
-		ContainerdEndpoint:     containerdEndpoint,
-		ContainerdRoot:         containerdRoot,
-		ContainerdHostRoot:     containerdHostRoot,
-		ContainerdDataRoot:     containerdDataRoot,
-		ContainerdHostDataRoot: containerdHostDataRoot,
-		RootFSCacheDir:         filepath.Join(portalRoot, "rootfs"),
-		Namespace:              containerdNamespace,
-	})
-}
-
-func buildRootFSController(storageCfg *apiconfig.StorageProxyConfig, portalResolver ctldrootfs.PortalResolver, runtime *ctldrootfs.ContainerdRuntime) ctldserver.RootFSController {
+func buildRootFSController(storageCfg *apiconfig.StorageProxyConfig, portalResolver ctldrootfs.PortalResolver) ctldserver.RootFSController {
 	store, err := buildRootFSObjectStore(storageCfg)
 	if err != nil {
 		log.Printf("ctld rootfs object store disabled: %v", err)
 	}
 	return ctldrootfs.NewController(ctldrootfs.Config{
-		Runtime:        runtime,
+		Runtime: ctldrootfs.NewContainerdRuntime(ctldrootfs.ContainerdRuntimeConfig{
+			CRIEndpoint:            criEndpoint,
+			ContainerdEndpoint:     containerdEndpoint,
+			ContainerdRoot:         containerdRoot,
+			ContainerdHostRoot:     containerdHostRoot,
+			ContainerdDataRoot:     containerdDataRoot,
+			ContainerdHostDataRoot: containerdHostDataRoot,
+			RootFSCacheDir:         filepath.Join(portalRoot, "rootfs"),
+			Namespace:              containerdNamespace,
+		}),
 		Store:          store,
 		PortalResolver: portalResolver,
 	})

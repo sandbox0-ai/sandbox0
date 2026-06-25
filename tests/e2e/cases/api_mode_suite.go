@@ -1333,7 +1333,7 @@ func assertSandboxRootFSPersistsAcrossPauseResume(env *framework.ScenarioEnv, se
 
 	templateNamespace, err := naming.TemplateNamespaceForBuiltin("default")
 	Expect(err).NotTo(HaveOccurred())
-	waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
+	sandbox := waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
 
 	marker := fmt.Sprintf("s0-rootfs-pause-resume-%d", time.Now().UnixNano())
 	rootDir := "/tmp/" + marker
@@ -1369,7 +1369,8 @@ test "$(stat -c %%a %s)" = 751
 		shellQuote(content),
 		shellQuote(rootDir),
 	)
-	runSandboxShellContextEventually(env, session, sandboxID, writeScript)
+	_, err = execInSandboxPod(env, templateNamespace, sandbox.PodName, writeScript)
+	Expect(err).NotTo(HaveOccurred())
 
 	ttl := int32(1)
 	_, status, err := session.UpdateSandbox(env.TestCtx.Context, GinkgoT(), sandboxID, apispec.SandboxUpdateConfig{
@@ -1393,7 +1394,7 @@ test "$(stat -c %%a %s)" = 751
 	Expect(resumeResp).NotTo(BeNil())
 	Expect(resumeResp.Resumed).To(BeTrue())
 
-	waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
+	restored := waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
 	verifyScript := fmt.Sprintf(`set -eu
 test "$(cat %s)" = %s
 test "$(cat %s)" = nested
@@ -1407,7 +1408,8 @@ test "$(stat -c %%a %s)" = 751
 		shellQuote(content),
 		shellQuote(rootDir),
 	)
-	runSandboxShellContextEventually(env, session, sandboxID, verifyScript)
+	_, err = execInSandboxPod(env, templateNamespace, restored.PodName, verifyScript)
+	Expect(err).NotTo(HaveOccurred())
 }
 
 func assertSandboxRootFSSnapshotRestoreFork(env *framework.ScenarioEnv, session *e2eutils.Session) {
@@ -1428,7 +1430,7 @@ func assertSandboxRootFSSnapshotRestoreFork(env *framework.ScenarioEnv, session 
 
 	templateNamespace, err := naming.TemplateNamespaceForBuiltin("default")
 	Expect(err).NotTo(HaveOccurred())
-	waitForSandboxPodReadyEventually(env, session, sourceSandboxID, templateNamespace)
+	source := waitForSandboxPodReadyEventually(env, session, sourceSandboxID, templateNamespace)
 
 	marker := fmt.Sprintf("s0-rootfs-snapshot-%d", time.Now().UnixNano())
 	rootDir := "/tmp/" + marker
@@ -1454,7 +1456,8 @@ test "$(cat %s)" = nested-v1
 		shellQuote(v1Content),
 		shellQuote(nestedPath),
 	)
-	runSandboxShellContextEventually(env, session, sourceSandboxID, writeV1Script)
+	_, err = execInSandboxPod(env, templateNamespace, source.PodName, writeV1Script)
+	Expect(err).NotTo(HaveOccurred())
 
 	pausedResp, status, err := session.PauseSandbox(env.TestCtx.Context, GinkgoT(), sourceSandboxID)
 	Expect(err).NotTo(HaveOccurred())
@@ -1489,7 +1492,7 @@ test "$(cat %s)" = nested-v1
 	Expect(status).To(Equal(http.StatusOK))
 	Expect(resumeResp).NotTo(BeNil())
 	Expect(resumeResp.Resumed).To(BeTrue())
-	waitForSandboxPodReadyEventually(env, session, sourceSandboxID, templateNamespace)
+	source = waitForSandboxPodReadyEventually(env, session, sourceSandboxID, templateNamespace)
 
 	writeV2Script := fmt.Sprintf(`set -eu
 printf %%s %s > %s
@@ -1504,7 +1507,8 @@ test "$(cat %s)" = nested-v2
 		shellQuote(v2Content),
 		shellQuote(nestedPath),
 	)
-	runSandboxShellContextEventually(env, session, sourceSandboxID, writeV2Script)
+	_, err = execInSandboxPod(env, templateNamespace, source.PodName, writeV2Script)
+	Expect(err).NotTo(HaveOccurred())
 
 	pausedResp, status, err = session.PauseSandbox(env.TestCtx.Context, GinkgoT(), sourceSandboxID)
 	Expect(err).NotTo(HaveOccurred())
@@ -1540,7 +1544,7 @@ test "$(cat %s)" = nested-v2
 	Expect(status).To(Equal(http.StatusOK))
 	Expect(resumeResp).NotTo(BeNil())
 	Expect(resumeResp.Resumed).To(BeTrue())
-	waitForSandboxPodReadyEventually(env, session, sourceSandboxID, templateNamespace)
+	source = waitForSandboxPodReadyEventually(env, session, sourceSandboxID, templateNamespace)
 
 	verifyV1Script := fmt.Sprintf(`set -eu
 test "$(cat %s)" = %s
@@ -1550,42 +1554,17 @@ test "$(cat %s)" = nested-v1
 		shellQuote(v1Content),
 		shellQuote(nestedPath),
 	)
-	runSandboxShellContextEventually(env, session, sourceSandboxID, verifyV1Script)
+	_, err = execInSandboxPod(env, templateNamespace, source.PodName, verifyV1Script)
+	Expect(err).NotTo(HaveOccurred())
 
 	resumeResp, status, err = session.ResumeSandbox(env.TestCtx.Context, GinkgoT(), forkSandboxID)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 	Expect(resumeResp).NotTo(BeNil())
 	Expect(resumeResp.Resumed).To(BeTrue())
-	waitForSandboxPodReadyEventually(env, session, forkSandboxID, templateNamespace)
-	runSandboxShellContextEventually(env, session, forkSandboxID, verifyV1Script)
-}
-
-func runSandboxShellContextEventually(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID, script string) {
-	processType := apispec.ProcessTypeCmd
-	waitUntilDone := true
-	command := []string{"/bin/sh", "-lc", script}
-	Eventually(func(g Gomega) {
-		ctxResp, status, err := session.CreateContext(env.TestCtx.Context, GinkgoT(), sandboxID, apispec.CreateContextRequest{
-			Type: &processType,
-			Cmd: &apispec.CreateCMDContextRequest{
-				Command: command,
-			},
-			WaitUntilDone: &waitUntilDone,
-		})
-		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(status).To(Equal(http.StatusCreated))
-		g.Expect(ctxResp).NotTo(BeNil())
-		g.Expect(ctxResp.ExitCode).NotTo(BeNil())
-		g.Expect(*ctxResp.ExitCode).To(Equal(int32(0)), "stdout=%s stderr=%s output_raw=%s", contextOutput(ctxResp.Stdout), contextOutput(ctxResp.Stderr), contextOutput(ctxResp.OutputRaw))
-	}).WithTimeout(60 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
-}
-
-func contextOutput(value *string) string {
-	if value == nil {
-		return ""
-	}
-	return *value
+	forked := waitForSandboxPodReadyEventually(env, session, forkSandboxID, templateNamespace)
+	_, err = execInSandboxPod(env, templateNamespace, forked.PodName, verifyV1Script)
+	Expect(err).NotTo(HaveOccurred())
 }
 
 func waitForSandboxLifecycleStatusEventually(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string, want apispec.SandboxLifecycleStatus) *apispec.Sandbox {

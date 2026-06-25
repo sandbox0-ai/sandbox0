@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/sandbox0-ai/sandbox0/pkg/s0fs"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 )
 
 // GetS0FSCommittedHead returns the committed immutable manifest pointer for a volume.

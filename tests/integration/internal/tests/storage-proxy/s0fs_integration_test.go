@@ -10,8 +10,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/sandbox0-ai/sandbox0/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 )
 
 type integrationHeadStore struct {

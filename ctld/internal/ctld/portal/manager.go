@@ -16,11 +16,11 @@ import (
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	"github.com/sandbox0-ai/sandbox0/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
 	"go.uber.org/zap"
@@ -46,7 +46,6 @@ type Manager struct {
 	portalCacheMaxBytes    int64
 	portalRootMinFreeBytes int64
 	volumeAPI              http.Handler
-	rootFSBinder           RootFSVolumePortalBinder
 
 	mu              sync.Mutex
 	portals         map[string]*portalMount
@@ -96,17 +95,6 @@ type Config struct {
 	Repository    *db.Repository
 	PodName       string
 	PodNamespace  string
-	RootFSBinder  RootFSVolumePortalBinder
-}
-
-type RootFSVolumePortalBindRequest struct {
-	PodUID    string
-	MountPath string
-}
-
-type RootFSVolumePortalBinder interface {
-	BindRootFSVolumePortal(ctx context.Context, req RootFSVolumePortalBindRequest) error
-	UnbindRootFSVolumePortal(ctx context.Context, req RootFSVolumePortalBindRequest) error
 }
 
 func NewManager(cfg Config) *Manager {
@@ -145,7 +133,6 @@ func NewManager(cfg Config) *Manager {
 		ownerOnlyIdleTTL:       ownerOnlyIdleTTL,
 		portalCacheMaxBytes:    portalCacheMaxBytes,
 		portalRootMinFreeBytes: portalRootMinFreeBytes,
-		rootFSBinder:           cfg.RootFSBinder,
 		portals:                make(map[string]*portalMount),
 		portalsByTarget:        make(map[string]*portalMount),
 		boundVolumes:           make(map[string]*boundVolume),
@@ -363,11 +350,7 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume portal already bound to %s", pm.volumeID)
 	}
 	if pm.volumeID == req.SandboxVolumeID {
-		response := boundResponse(pm)
-		if err := m.bindRootFSVolumePortal(ctx, pm); err != nil {
-			return ctldapi.BindVolumePortalResponse{}, err
-		}
-		return response, nil
+		return boundResponse(pm), nil
 	}
 
 	mountedAt := time.Now().UTC()
@@ -383,9 +366,6 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		if response.SandboxVolumeID != req.SandboxVolumeID {
 			return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume portal already bound to %s", response.SandboxVolumeID)
 		}
-		if err := m.bindRootFSVolumePortal(ctx, pm); err != nil {
-			return ctldapi.BindVolumePortalResponse{}, err
-		}
 		return response, nil
 	}
 	if bound := m.boundVolumes[req.SandboxVolumeID]; bound != nil {
@@ -394,9 +374,6 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 			bound.refCount = 1
 			response := boundResponse(pm)
 			m.mu.Unlock()
-			if err := m.bindRootFSVolumePortal(ctx, pm); err != nil {
-				return ctldapi.BindVolumePortalResponse{}, err
-			}
 			return response, nil
 		}
 		if accessMode != volume.AccessModeROX {
@@ -408,9 +385,6 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		bound.refCount++
 		response := boundResponse(pm)
 		m.mu.Unlock()
-		if err := m.bindRootFSVolumePortal(ctx, pm); err != nil {
-			return ctldapi.BindVolumePortalResponse{}, err
-		}
 		return response, nil
 	}
 	if existing := findBoundPortalForVolume(m.portals, req.SandboxVolumeID, key); existing != nil {
@@ -477,9 +451,6 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		if response.SandboxVolumeID != req.SandboxVolumeID {
 			return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume portal already bound to %s", response.SandboxVolumeID)
 		}
-		if err := m.bindRootFSVolumePortal(ctx, pm); err != nil {
-			return ctldapi.BindVolumePortalResponse{}, err
-		}
 		return response, nil
 	}
 	if bound := m.boundVolumes[req.SandboxVolumeID]; bound != nil {
@@ -489,9 +460,6 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 			response := boundResponse(pm)
 			m.mu.Unlock()
 			_ = engine.Close()
-			if err := m.bindRootFSVolumePortal(ctx, pm); err != nil {
-				return ctldapi.BindVolumePortalResponse{}, err
-			}
 			return response, nil
 		}
 		if accessMode != volume.AccessModeROX {
@@ -505,9 +473,6 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		response := boundResponse(pm)
 		m.mu.Unlock()
 		_ = engine.Close()
-		if err := m.bindRootFSVolumePortal(ctx, pm); err != nil {
-			return ctldapi.BindVolumePortalResponse{}, err
-		}
 		return response, nil
 	}
 	if existing := findBoundPortalForVolume(m.portals, req.SandboxVolumeID, key); existing != nil {
@@ -539,9 +504,6 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 	response := boundResponse(pm)
 	m.mu.Unlock()
 
-	if err := m.bindRootFSVolumePortal(ctx, pm); err != nil {
-		return ctldapi.BindVolumePortalResponse{}, err
-	}
 	return response, nil
 }
 
@@ -826,18 +788,17 @@ func (m *Manager) releaseOwnerOnlyVolumeLocked(ctx context.Context, volumeID str
 
 func (m *Manager) unbindLockedSnapshot(pm *portalMount) error {
 	volumeID := pm.volumeID
-	rootFSUnbind := m.unbindRootFSVolumePortalSnapshot(pm)
 	m.clearPortalLocked(pm)
 	if volumeID == "" {
-		return rootFSUnbind()
+		return nil
 	}
 	bound := m.boundVolumes[volumeID]
 	if bound == nil {
-		return rootFSUnbind()
+		return nil
 	}
 	if bound.refCount > 1 {
 		bound.refCount--
-		return rootFSUnbind()
+		return nil
 	}
 	if bound.materializeCancel != nil {
 		bound.materializeCancel()
@@ -852,33 +813,7 @@ func (m *Manager) unbindLockedSnapshot(pm *portalMount) error {
 	}
 	delete(m.boundVolumes, volumeID)
 	m.unregisterOwner(bound)
-	return rootFSUnbind()
-}
-
-func (m *Manager) bindRootFSVolumePortal(ctx context.Context, pm *portalMount) error {
-	if m == nil || m.rootFSBinder == nil || pm == nil || pm.volumeID == "" {
-		return nil
-	}
-	if strings.TrimSpace(pm.podUID) == "" || strings.TrimSpace(pm.mountPath) == "" {
-		return nil
-	}
-	return m.rootFSBinder.BindRootFSVolumePortal(ctx, RootFSVolumePortalBindRequest{
-		PodUID:    pm.podUID,
-		MountPath: pm.mountPath,
-	})
-}
-
-func (m *Manager) unbindRootFSVolumePortalSnapshot(pm *portalMount) func() error {
-	if m == nil || m.rootFSBinder == nil || pm == nil || strings.TrimSpace(pm.podUID) == "" || strings.TrimSpace(pm.mountPath) == "" {
-		return func() error { return nil }
-	}
-	req := RootFSVolumePortalBindRequest{
-		PodUID:    pm.podUID,
-		MountPath: pm.mountPath,
-	}
-	return func() error {
-		return m.rootFSBinder.UnbindRootFSVolumePortal(context.Background(), req)
-	}
+	return nil
 }
 
 type publishRequest struct {

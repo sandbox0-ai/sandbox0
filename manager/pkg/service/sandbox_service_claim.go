@@ -1397,12 +1397,11 @@ func (s *SandboxService) initializeProcd(
 	}
 
 	initReq := InitializeRequest{
-		SandboxID:       sandboxID,
-		TeamID:          teamID,
-		EnvVars:         sandboxEnvVarsForInitialize(req.Config),
-		Webhook:         webhookConfig,
-		MountDirs:       declaredVolumeMountDirs(template),
-		RootFSMountPath: strings.TrimSpace(pod.Annotations[sandboxRootFSMountPathAnnotation]),
+		SandboxID: sandboxID,
+		TeamID:    teamID,
+		EnvVars:   sandboxEnvVarsForInitialize(req.Config),
+		Webhook:   webhookConfig,
+		MountDirs: declaredVolumeMountDirs(template),
 	}
 
 	var initErr error

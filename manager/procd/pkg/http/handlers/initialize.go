@@ -43,12 +43,11 @@ func NewInitializeHandler(dispatcher *webhook.Dispatcher, fileManager *file.Mana
 
 // InitializeRequest is the request body for initializing sandbox settings.
 type InitializeRequest struct {
-	SandboxID       string             `json:"sandbox_id"`
-	TeamID          string             `json:"team_id,omitempty"`
-	EnvVars         map[string]string  `json:"env_vars,omitempty"`
-	Webhook         *InitializeWebhook `json:"webhook,omitempty"`
-	MountDirs       []string           `json:"mount_dirs,omitempty"`
-	RootFSMountPath string             `json:"rootfs_mount_path,omitempty"`
+	SandboxID string             `json:"sandbox_id"`
+	TeamID    string             `json:"team_id,omitempty"`
+	EnvVars   map[string]string  `json:"env_vars,omitempty"`
+	Webhook   *InitializeWebhook `json:"webhook,omitempty"`
+	MountDirs []string           `json:"mount_dirs,omitempty"`
 }
 
 // InitializeWebhook represents webhook configuration.
@@ -95,11 +94,6 @@ func (h *InitializeHandler) Initialize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "mount_dir_init_failed", err.Error())
 		return
 	}
-	rootFSMountPath, err := validateRootFSMountPath(req.RootFSMountPath)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
 
 	claims := internalauth.ClaimsFromContext(r.Context())
 	teamID := req.TeamID
@@ -123,10 +117,6 @@ func (h *InitializeHandler) Initialize(w http.ResponseWriter, r *http.Request) {
 
 	if h.contextManager != nil {
 		h.contextManager.SetSandboxEnvVars(req.EnvVars)
-		h.contextManager.SetRootFS(rootFSMountPath)
-	}
-	if h.fileManager != nil {
-		h.fileManager.SetRootFS(rootFSMountPath)
 	}
 
 	h.dispatcher.SetConfig(webhookURL, webhookSecret)
@@ -148,17 +138,6 @@ func (h *InitializeHandler) Initialize(w http.ResponseWriter, r *http.Request) {
 		SandboxID: req.SandboxID,
 		TeamID:    teamID,
 	})
-}
-
-func validateRootFSMountPath(raw string) (string, error) {
-	value := filepath.Clean(strings.TrimSpace(raw))
-	if value == "." {
-		return "", nil
-	}
-	if !filepath.IsAbs(value) || value == string(filepath.Separator) {
-		return "", fmt.Errorf("rootfs_mount_path must be an absolute non-root path")
-	}
-	return value, nil
 }
 
 func ensureMountDirs(dirs []string) error {

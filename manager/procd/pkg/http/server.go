@@ -122,7 +122,6 @@ func (s *Server) setupRoutes() {
 	functionHandler := handlers.NewFunctionHandler(s.logger)
 	if s.contextManager != nil {
 		functionHandler.SetSandboxEnvVarsProvider(s.contextManager.SandboxEnvVars)
-		functionHandler.SetRootFSProvider(s.contextManager.RootFS)
 	}
 	api.HandleFunc("/functions/execute", functionHandler.Execute).Methods("POST")
 	api.HandleFunc("/functions/stream", functionHandler.Stream).Methods("POST")

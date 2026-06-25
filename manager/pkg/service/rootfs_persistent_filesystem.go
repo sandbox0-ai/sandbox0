@@ -935,7 +935,6 @@ func (s *PGSandboxStore) collectUnreferencedRootFSLayers(ctx context.Context, te
 			FROM manager.rootfs_layers l
 			JOIN candidates c ON c.layer_id = l.layer_id
 			WHERE l.diff_object_key <> ''
-				AND l.storage_engine <> 's0fs'
 				AND NOT EXISTS (
 					SELECT 1
 					FROM manager.rootfs_layers ref
@@ -962,15 +961,13 @@ func (s *PGSandboxStore) collectUnreferencedRootFSLayers(ctx context.Context, te
 			RETURNING l.layer_id, l.parent_layer_id, l.source_sandbox_id, l.team_id,
 				l.runtime_generation, l.runtime, l.runtime_handler, l.base_image_ref,
 				l.base_image_digest, l.snapshotter, l.snapshot_parent,
-				l.snapshot_parent_chain, l.storage_engine, l.diff_digest, l.diff_id,
-				l.diff_media_type, l.diff_size, l.diff_object_key, l.s0fs_volume_id,
-				l.s0fs_manifest_key, l.s0fs_manifest_seq, l.s0fs_checkpoint_seq, l.created_at
+				l.snapshot_parent_chain, l.diff_digest, l.diff_id, l.diff_media_type,
+				l.diff_size, l.diff_object_key, l.created_at
 		)
 		SELECT layer_id, parent_layer_id, source_sandbox_id, team_id, runtime_generation,
 			runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,
-			snapshot_parent, snapshot_parent_chain, storage_engine, diff_digest, diff_id,
-			diff_media_type, diff_size, diff_object_key, s0fs_volume_id, s0fs_manifest_key,
-			s0fs_manifest_seq, s0fs_checkpoint_seq, created_at
+			snapshot_parent, snapshot_parent_chain, diff_digest, diff_id, diff_media_type,
+			diff_size, diff_object_key, created_at
 		FROM deleted
 		ORDER BY created_at ASC
 	`, strings.TrimSpace(teamID), limit)

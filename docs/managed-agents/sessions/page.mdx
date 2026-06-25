@@ -81,14 +81,12 @@ Sandbox0 keeps session state and event history outside the sandbox. The sandbox 
 
 ## Sandbox0 Runtime Behavior
 
-- Agent-in-sandbox harnesses create or resume a sandbox before the run starts.
-- Sandbox-as-tool harnesses start in a resident runtime and create or resume a sandbox only when a sandbox tool is executed.
+- Agent harnesses create or resume a sandbox before the run starts.
 - The workspace is backed by a Sandbox0 volume mounted at `/workspace`.
 - The runtime sandbox uses auto-resume.
 - Runtime sandbox lifetime is managed by the Managed Agents deployment.
 - The selected agent harness is resolved from the attached LLM vault; if no harness is selected, the default is `claude`.
 - `claude` and `codex` run the agent process inside the sandbox.
-- `sandpi` runs the agent loop in a resident runtime and uses Sandbox0 as a sandbox tool.
 - Harnesses with observable automatic retry attempts map them to the same session state sequence: `running`, `rescheduling`, `running`, then either `idle` or `terminated`.
 
 ## Next Steps

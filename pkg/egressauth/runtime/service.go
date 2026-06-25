@@ -103,7 +103,18 @@ func (s *Service) resolveBinding(ctx context.Context, req *egressauth.ResolveReq
 		return nil, fmt.Errorf("provider %q returned empty response", providerName)
 	}
 
-	return cloneResolveResponse(result.Response), nil
+	teamID := sourceVersion.TeamID
+	if strings.TrimSpace(teamID) == "" {
+		teamID = req.TeamID
+	}
+	response := cloneResolveResponse(result.Response)
+	response.Source = &egressauth.ResolveSource{
+		TeamID:        teamID,
+		SourceRef:     binding.SourceRef,
+		SourceID:      sourceVersion.SourceID,
+		SourceVersion: sourceVersion.Version,
+	}
+	return response, nil
 }
 
 func (s *Service) resolveStatic(req *egressauth.ResolveRequest) (*egressauth.ResolveResponse, error) {

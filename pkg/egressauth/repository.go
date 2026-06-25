@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/sandbox0-ai/sandbox0/pkg/pubsub"
 )
 
 type DB interface {
@@ -475,12 +476,33 @@ func (r *Repository) PutSource(ctx context.Context, teamID string, record *Crede
 		`, sourceID, currentVersion); err != nil {
 			return nil, fmt.Errorf("advance source bindings: %w", err)
 		}
+		event := pubsub.CredentialSourceRotatedEvent{
+			EventBase:     pubsub.NewEventBase(nil),
+			TeamID:        teamID,
+			SourceID:      sourceID,
+			SourceRef:     record.Name,
+			SourceVersion: currentVersion,
+		}
+		if err := notifyCredentialSourceRotated(ctx, tx, event); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit source upsert: %w", err)
 	}
 	return r.GetSourceMetadata(ctx, teamID, record.Name)
+}
+
+func notifyCredentialSourceRotated(ctx context.Context, tx pgx.Tx, event pubsub.CredentialSourceRotatedEvent) error {
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("marshal credential source rotation event: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "SELECT pg_notify($1, $2)", pubsub.CredentialSourceRotationChannel, string(payload)); err != nil {
+		return fmt.Errorf("notify credential source rotation: %w", err)
+	}
+	return nil
 }
 
 func (r *Repository) DeleteSource(ctx context.Context, teamID, name string) error {

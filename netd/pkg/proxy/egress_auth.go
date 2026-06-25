@@ -65,6 +65,8 @@ type egressAuthResolver interface {
 type egressAuthCache interface {
 	Get(egressAuthCacheKey) (*egressauth.ResolveResponse, bool)
 	Put(egressAuthCacheKey, *egressauth.ResolveResponse)
+	IsStale(*egressauth.ResolveResponse) bool
+	InvalidateSource(teamID string, sourceID int64, sourceRef string, sourceVersion int64) int
 }
 
 type egressAuthCacheKey struct {
@@ -76,10 +78,17 @@ type egressAuthCacheKey struct {
 	Protocol        string
 }
 
+type egressAuthSourceKey struct {
+	TeamID    string
+	SourceID  int64
+	SourceRef string
+}
+
 type memoryEgressAuthCache struct {
-	mu      sync.RWMutex
-	entries map[egressAuthCacheKey]*egressauth.ResolveResponse
-	now     func() time.Time
+	mu               sync.RWMutex
+	entries          map[egressAuthCacheKey]*egressauth.ResolveResponse
+	sourceWatermarks map[egressAuthSourceKey]int64
+	now              func() time.Time
 }
 
 type noopEgressAuthResolver struct{}
@@ -90,6 +99,7 @@ var errEgressAuthResolverUnconfigured = errors.New("egress auth resolver is not 
 var errEgressAuthDirectiveUnsupported = errors.New("egress auth directives unsupported by adapter")
 var errEgressAuthMaterialUnavailable = errors.New("egress auth material unavailable")
 var errEgressAuthDirectiveInvalid = errors.New("egress auth directive invalid")
+var errEgressAuthStaleResolvedMaterial = errors.New("egress auth resolved material is older than known credential source version")
 
 func WithEgressAuthResolver(resolver egressAuthResolver) ServerOption {
 	return func(s *Server) {
@@ -125,7 +135,8 @@ func WithUpstreamTLSConfig(cfg *tls.Config) ServerOption {
 
 func newMemoryEgressAuthCache() *memoryEgressAuthCache {
 	return &memoryEgressAuthCache{
-		entries: make(map[egressAuthCacheKey]*egressauth.ResolveResponse),
+		entries:          make(map[egressAuthCacheKey]*egressauth.ResolveResponse),
+		sourceWatermarks: make(map[egressAuthSourceKey]int64),
 		now: func() time.Time {
 			return time.Now().UTC()
 		},
@@ -136,20 +147,21 @@ func (c *memoryEgressAuthCache) Get(key egressAuthCacheKey) (*egressauth.Resolve
 	if c == nil {
 		return nil, false
 	}
-	c.mu.RLock()
+	c.mu.Lock()
 	entry := c.entries[key]
-	c.mu.RUnlock()
 	if entry == nil {
+		c.mu.Unlock()
 		return nil, false
 	}
-	if entry.ExpiresAt != nil && !entry.ExpiresAt.After(c.now()) {
-		c.mu.Lock()
+	if egressAuthCacheEntryExpired(entry, c.now()) || c.responseStaleLocked(entry) {
 		delete(c.entries, key)
 		proxyMetrics.SetEgressAuthCacheEntries(len(c.entries))
 		c.mu.Unlock()
 		return nil, false
 	}
-	return cloneResolveResponse(entry), true
+	cloned := cloneResolveResponse(entry)
+	c.mu.Unlock()
+	return cloned, true
 }
 
 func (c *memoryEgressAuthCache) Put(key egressAuthCacheKey, value *egressauth.ResolveResponse) {
@@ -157,9 +169,129 @@ func (c *memoryEgressAuthCache) Put(key egressAuthCacheKey, value *egressauth.Re
 		return
 	}
 	c.mu.Lock()
+	if c.responseStaleLocked(value) {
+		c.mu.Unlock()
+		return
+	}
 	c.entries[key] = cloneResolveResponse(value)
 	proxyMetrics.SetEgressAuthCacheEntries(len(c.entries))
 	c.mu.Unlock()
+}
+
+func (c *memoryEgressAuthCache) IsStale(value *egressauth.ResolveResponse) bool {
+	if c == nil || value == nil {
+		return false
+	}
+	c.mu.RLock()
+	stale := c.responseStaleLocked(value)
+	c.mu.RUnlock()
+	return stale
+}
+
+func (c *memoryEgressAuthCache) InvalidateSource(teamID string, sourceID int64, sourceRef string, sourceVersion int64) int {
+	if c == nil {
+		return 0
+	}
+	sourceKey, ok := egressAuthSourceKeyFromValues(teamID, sourceID, sourceRef)
+	if !ok {
+		return 0
+	}
+
+	c.mu.Lock()
+	if sourceVersion > c.sourceWatermarks[sourceKey] {
+		c.sourceWatermarks[sourceKey] = sourceVersion
+	}
+	removed := 0
+	for key, entry := range c.entries {
+		if !egressAuthSourceMatches(entry.Source, sourceKey) {
+			continue
+		}
+		if egressAuthSourceVersionBefore(entry.Source, sourceVersion) {
+			delete(c.entries, key)
+			removed++
+		}
+	}
+	if removed > 0 {
+		proxyMetrics.SetEgressAuthCacheEntries(len(c.entries))
+	}
+	c.mu.Unlock()
+	return removed
+}
+
+func egressAuthCacheEntryExpired(entry *egressauth.ResolveResponse, now time.Time) bool {
+	return entry != nil && entry.ExpiresAt != nil && !entry.ExpiresAt.After(now)
+}
+
+func (c *memoryEgressAuthCache) responseStaleLocked(value *egressauth.ResolveResponse) bool {
+	sourceKey, ok := egressAuthSourceKeyFromResolveSource(valueSource(value))
+	if !ok {
+		return false
+	}
+	watermark := c.sourceWatermarks[sourceKey]
+	return watermark > 0 && egressAuthSourceVersionBefore(value.Source, watermark)
+}
+
+func valueSource(value *egressauth.ResolveResponse) *egressauth.ResolveSource {
+	if value == nil {
+		return nil
+	}
+	return value.Source
+}
+
+func egressAuthSourceKeyFromResolveSource(source *egressauth.ResolveSource) (egressAuthSourceKey, bool) {
+	if source == nil {
+		return egressAuthSourceKey{}, false
+	}
+	return egressAuthSourceKeyFromValues(source.TeamID, source.SourceID, source.SourceRef)
+}
+
+func egressAuthSourceKeyFromValues(teamID string, sourceID int64, sourceRef string) (egressAuthSourceKey, bool) {
+	teamID = strings.TrimSpace(teamID)
+	sourceRef = strings.TrimSpace(sourceRef)
+	if sourceID <= 0 && sourceRef == "" {
+		return egressAuthSourceKey{}, false
+	}
+	if sourceID > 0 {
+		return egressAuthSourceKey{
+			TeamID:   teamID,
+			SourceID: sourceID,
+		}, true
+	}
+	return egressAuthSourceKey{
+		TeamID:    teamID,
+		SourceRef: sourceRef,
+	}, true
+}
+
+func egressAuthSourceMatches(source *egressauth.ResolveSource, target egressAuthSourceKey) bool {
+	sourceKey, ok := egressAuthSourceKeyFromResolveSource(source)
+	if !ok {
+		return false
+	}
+	if target.TeamID != "" && sourceKey.TeamID != "" && target.TeamID != sourceKey.TeamID {
+		return false
+	}
+	if target.SourceID > 0 && sourceKey.SourceID > 0 {
+		return target.SourceID == sourceKey.SourceID
+	}
+	return target.SourceRef != "" && sourceKey.SourceRef != "" && target.SourceRef == sourceKey.SourceRef
+}
+
+func egressAuthSourceVersionBefore(source *egressauth.ResolveSource, sourceVersion int64) bool {
+	if sourceVersion <= 0 {
+		return true
+	}
+	if source == nil || source.SourceVersion <= 0 {
+		return true
+	}
+	return source.SourceVersion < sourceVersion
+}
+
+func (s *Server) InvalidateEgressAuthSource(teamID string, sourceID int64, sourceRef string, sourceVersion int64) int {
+	if s == nil || s.authCache == nil {
+		return 0
+	}
+	return s.authCache.InvalidateSource(teamID, sourceID, sourceRef, sourceVersion)
 }
 
 func (noopEgressAuthResolver) Resolve(_ context.Context, _ *egressauth.ResolveRequest) (*egressauth.ResolveResponse, error) {
@@ -560,7 +692,7 @@ func (s *Server) resolveEgressAuth(req *adapterRequest, decision trafficDecision
 	}
 	ctx.ResolveAttempt = true
 	start := time.Now()
-	resolved, err := s.authResolver.Resolve(context.Background(), resolveReq)
+	resolved, err := s.resolveFreshEgressAuth(context.Background(), resolveReq)
 	duration := time.Since(start)
 	if err != nil {
 		ctx.ResolveError = err
@@ -580,6 +712,24 @@ func (s *Server) resolveEgressAuth(req *adapterRequest, decision trafficDecision
 	}
 	proxyMetrics.RecordEgressAuthResolve(decision.Protocol, "resolved", duration)
 	proxyMetrics.RecordEgressAuthDecision(decision.Protocol, "enforced", ctx.EnforcementReason)
+}
+
+func (s *Server) resolveFreshEgressAuth(ctx context.Context, req *egressauth.ResolveRequest) (*egressauth.ResolveResponse, error) {
+	if s == nil || s.authResolver == nil {
+		return nil, errEgressAuthResolverUnconfigured
+	}
+	resolved, err := s.authResolver.Resolve(ctx, req)
+	if err != nil || resolved == nil || s.authCache == nil || !s.authCache.IsStale(resolved) {
+		return resolved, err
+	}
+	resolved, err = s.authResolver.Resolve(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if resolved != nil && s.authCache.IsStale(resolved) {
+		return nil, errEgressAuthStaleResolvedMaterial
+	}
+	return resolved, nil
 }
 
 func (c *egressAuthContext) ShouldBypass() bool {

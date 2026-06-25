@@ -228,6 +228,9 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 		return err
 	}
 	d.proxyServer = proxyServer
+	if d.cfg.EgressAuthResolverURL != "" && meteringPool != nil {
+		startCredentialSourceRotationListener(ctx, meteringPool, d.logger, proxyServer)
+	}
 	proxyServer.Start(ctx)
 	if proxyExitCh != nil {
 		go func() {

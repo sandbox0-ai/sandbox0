@@ -124,14 +124,31 @@ func (p *LifecycleProjector) SetRuntimePauseLookup(lookup RuntimePauseLookup) {
 func (p *LifecycleProjector) ResourceEventHandler() cache.ResourceEventHandlerFuncs {
 	return cache.ResourceEventHandlerFuncs{
 		AddFunc:    p.handleUpsert,
-		UpdateFunc: func(_, newObj any) { p.handleUpsert(newObj) },
+		UpdateFunc: p.handleUpdate,
 		DeleteFunc: p.handleDelete,
 	}
+}
+
+func (p *LifecycleProjector) handleUpdate(oldObj, newObj any) {
+	oldPod := extractPod(oldObj)
+	newPod := extractPod(newObj)
+	if isTeamOwnedIdlePoolPod(oldPod) && !isTeamOwnedIdlePoolPod(newPod) {
+		p.handleWarmPoolDelete(oldPod)
+	}
+	p.handleUpsert(newObj)
 }
 
 func (p *LifecycleProjector) handleUpsert(obj any) {
 	pod := extractPod(obj)
 	if pod == nil {
+		return
+	}
+	if isTeamOwnedIdlePoolPod(pod) {
+		if pod.DeletionTimestamp != nil {
+			p.handleWarmPoolDelete(pod)
+			return
+		}
+		p.handleWarmPoolUpsert(pod)
 		return
 	}
 	if !isClaimedActiveSandbox(pod) {
@@ -223,7 +240,14 @@ func (p *LifecycleProjector) handleUpsert(obj any) {
 
 func (p *LifecycleProjector) handleDelete(obj any) {
 	pod := extractPod(obj)
-	if pod == nil || !isClaimedActiveSandbox(pod) {
+	if pod == nil {
+		return
+	}
+	if isTeamOwnedIdlePoolPod(pod) {
+		p.handleWarmPoolDelete(pod)
+		return
+	}
+	if !isClaimedActiveSandbox(pod) {
 		return
 	}
 	sandboxID := meteringSandboxIDFromPod(pod)
@@ -321,6 +345,130 @@ func (p *LifecycleProjector) runtimeDeletionIsPause(ctx context.Context, info Ru
 		return false, nil
 	}
 	return p.runtimePauseLookup(ctx, info)
+}
+
+func (p *LifecycleProjector) handleWarmPoolUpsert(pod *corev1.Pod) {
+	stateID := warmPoolMeteringIDFromPod(pod)
+	if stateID == "" {
+		return
+	}
+
+	ctx := context.Background()
+	state, err := p.store.GetSandboxProjectionState(ctx, stateID)
+	if err != nil {
+		p.recordError("load_warm_pool_state", stateID, err)
+		return
+	}
+	if state != nil && state.TerminatedAt != nil {
+		return
+	}
+
+	teamID := pod.Annotations[controller.AnnotationTeamID]
+	userID := pod.Annotations[controller.AnnotationUserID]
+	templateID := pod.Labels[controller.LabelTemplateID]
+	podUsage := sandboxUsageFromPod(pod)
+	observedAt := p.now()
+	activeSince := warmPoolActiveSince(pod, observedAt)
+	pendingWindows := make([]*meteringpkg.Window, 0, 1)
+
+	if state == nil {
+		state = &meteringpkg.SandboxProjectionState{
+			SandboxID:         stateID,
+			Namespace:         pod.Namespace,
+			TeamID:            teamID,
+			UserID:            userID,
+			TemplateID:        templateID,
+			ClusterID:         p.clusterID,
+			OwnerKind:         controller.OwnerKindTeamWarmPool,
+			ResourceMillicpu:  podUsage.ResourceMillicpu,
+			ResourceMemoryMiB: podUsage.ResourceMemoryMiB,
+			ActiveSince:       &activeSince,
+			LastObservedAt:    observedAt,
+			LastResourceVer:   pod.ResourceVersion,
+		}
+	}
+
+	pendingWindows = append(pendingWindows, p.buildWarmPoolRuntimeWindow(state, teamID, userID, templateID, state.ActiveSince, observedAt, pod))
+	state.Namespace = pod.Namespace
+	state.TeamID = teamID
+	state.UserID = userID
+	state.TemplateID = templateID
+	state.ClusterID = p.clusterID
+	state.OwnerKind = controller.OwnerKindTeamWarmPool
+	state.ResourceMillicpu = podUsage.ResourceMillicpu
+	state.ResourceMemoryMiB = podUsage.ResourceMemoryMiB
+	state.ClaimedAt = nil
+	state.ActiveSince = ptrTime(observedAt)
+	state.Paused = false
+	state.PausedAt = nil
+	state.TerminatedAt = nil
+	state.LastObservedAt = observedAt
+	state.LastResourceVer = pod.ResourceVersion
+
+	if err := p.commitProjection(ctx, stateID, state, nil, pendingWindows, observedAt); err != nil {
+		return
+	}
+}
+
+func (p *LifecycleProjector) handleWarmPoolDelete(pod *corev1.Pod) {
+	stateID := warmPoolMeteringIDFromPod(pod)
+	if stateID == "" {
+		return
+	}
+
+	ctx := context.Background()
+	state, err := p.store.GetSandboxProjectionState(ctx, stateID)
+	if err != nil {
+		p.recordError("load_warm_pool_state", stateID, err)
+		return
+	}
+	if state != nil && state.TerminatedAt != nil {
+		return
+	}
+
+	observedAt := p.now()
+	teamID := pod.Annotations[controller.AnnotationTeamID]
+	userID := pod.Annotations[controller.AnnotationUserID]
+	templateID := pod.Labels[controller.LabelTemplateID]
+	podUsage := sandboxUsageFromPod(pod)
+	if state == nil {
+		activeSince := warmPoolActiveSince(pod, observedAt)
+		state = &meteringpkg.SandboxProjectionState{
+			SandboxID:         stateID,
+			Namespace:         pod.Namespace,
+			TeamID:            teamID,
+			UserID:            userID,
+			TemplateID:        templateID,
+			ClusterID:         p.clusterID,
+			OwnerKind:         controller.OwnerKindTeamWarmPool,
+			ResourceMillicpu:  podUsage.ResourceMillicpu,
+			ResourceMemoryMiB: podUsage.ResourceMemoryMiB,
+			ActiveSince:       &activeSince,
+			LastObservedAt:    observedAt,
+			LastResourceVer:   pod.ResourceVersion,
+		}
+	}
+
+	pendingWindows := []*meteringpkg.Window{
+		p.buildWarmPoolRuntimeWindow(state, teamID, userID, templateID, state.ActiveSince, observedAt, pod),
+	}
+	state.Namespace = pod.Namespace
+	state.TeamID = teamID
+	state.UserID = userID
+	state.TemplateID = templateID
+	state.ClusterID = p.clusterID
+	state.OwnerKind = controller.OwnerKindTeamWarmPool
+	state.ResourceMillicpu = podUsage.ResourceMillicpu
+	state.ResourceMemoryMiB = podUsage.ResourceMemoryMiB
+	state.ActiveSince = nil
+	state.Paused = false
+	state.TerminatedAt = &observedAt
+	state.LastObservedAt = observedAt
+	state.LastResourceVer = pod.ResourceVersion
+
+	if err := p.commitProjection(ctx, stateID, state, nil, pendingWindows, observedAt); err != nil {
+		return
+	}
 }
 
 func runtimeGenerationFromPod(pod *corev1.Pod) int64 {
@@ -469,6 +617,33 @@ func (p *LifecycleProjector) buildSandboxRuntimeWindow(state *meteringpkg.Sandbo
 	}
 }
 
+func (p *LifecycleProjector) buildWarmPoolRuntimeWindow(state *meteringpkg.SandboxProjectionState, teamID, userID, templateID string, start *time.Time, end time.Time, pod *corev1.Pod) *meteringpkg.Window {
+	if state == nil || start == nil || start.IsZero() || end.IsZero() || !end.After(*start) {
+		return nil
+	}
+	durationMS := end.Sub(*start).Milliseconds()
+	if durationMS <= 0 || state.ResourceMemoryMiB <= 0 || teamID == "" || templateID == "" {
+		return nil
+	}
+	return &meteringpkg.Window{
+		WindowID:    warmPoolWindowID(state.SandboxID, meteringpkg.WindowTypeSandboxRuntimeMiBMilliseconds, *start, end),
+		Producer:    sandboxLifecycleProducer,
+		RegionID:    p.regionID,
+		WindowType:  meteringpkg.WindowTypeSandboxRuntimeMiBMilliseconds,
+		SubjectType: meteringpkg.SubjectTypeTemplate,
+		SubjectID:   templateID,
+		TeamID:      teamID,
+		UserID:      userID,
+		TemplateID:  templateID,
+		ClusterID:   p.clusterID,
+		WindowStart: *start,
+		WindowEnd:   end,
+		Value:       state.ResourceMemoryMiB * durationMS,
+		Unit:        meteringpkg.WindowUnitMiBMilliseconds,
+		Data:        warmPoolRuntimeWindowData(state, durationMS, pod),
+	}
+}
+
 func isClaimedActiveSandbox(pod *corev1.Pod) bool {
 	if pod == nil {
 		return false
@@ -480,6 +655,40 @@ func isClaimedActiveSandbox(pod *corev1.Pod) bool {
 		return false
 	}
 	return pod.Annotations[controller.AnnotationClaimedAt] != ""
+}
+
+func isTeamOwnedIdlePoolPod(pod *corev1.Pod) bool {
+	if pod == nil || pod.Labels[controller.LabelPoolType] != controller.PoolTypeIdle {
+		return false
+	}
+	if pod.Labels[controller.LabelTemplateID] == "" {
+		return false
+	}
+	return pod.Annotations[controller.AnnotationTeamID] != ""
+}
+
+func warmPoolMeteringIDFromPod(pod *corev1.Pod) string {
+	if pod == nil {
+		return ""
+	}
+	if pod.UID != "" {
+		return fmt.Sprintf("warm-pool/%s", pod.UID)
+	}
+	if pod.Namespace == "" || pod.Name == "" {
+		return ""
+	}
+	return fmt.Sprintf("warm-pool/%s/%s", pod.Namespace, pod.Name)
+}
+
+func warmPoolActiveSince(pod *corev1.Pod, observedAt time.Time) time.Time {
+	if pod == nil || pod.CreationTimestamp.IsZero() {
+		return observedAt
+	}
+	createdAt := pod.CreationTimestamp.UTC()
+	if createdAt.IsZero() || createdAt.After(observedAt) {
+		return observedAt
+	}
+	return createdAt
 }
 
 func meteringSandboxIDFromPod(pod *corev1.Pod) string {
@@ -625,6 +834,22 @@ func runtimeWindowData(state *meteringpkg.SandboxProjectionState, durationMS int
 	})
 }
 
+func warmPoolRuntimeWindowData(state *meteringpkg.SandboxProjectionState, durationMS int64, pod *corev1.Pod) json.RawMessage {
+	data := map[string]any{
+		"product":               meteringpkg.ProductSandbox,
+		"owner_kind":            controller.OwnerKindTeamWarmPool,
+		"pool_type":             controller.PoolTypeIdle,
+		"resource_millicpu":     state.ResourceMillicpu,
+		"resource_memory_mib":   state.ResourceMemoryMiB,
+		"duration_milliseconds": durationMS,
+	}
+	if pod != nil {
+		data["pod_name"] = pod.Name
+		data["namespace"] = pod.Namespace
+	}
+	return mustJSON(data)
+}
+
 func claimedEventID(sandboxID string, claimedAt time.Time) string {
 	return fmt.Sprintf("sandbox/%s/claimed/%d", sandboxID, claimedAt.UTC().UnixNano())
 }
@@ -643,6 +868,10 @@ func terminateEventID(sandboxID, resourceVersion string) string {
 
 func sandboxWindowID(sandboxID, windowType string, start, end time.Time) string {
 	return fmt.Sprintf("sandbox/%s/windows/%s/%d/%d", sandboxID, windowType, start.UTC().UnixNano(), end.UTC().UnixNano())
+}
+
+func warmPoolWindowID(stateID, windowType string, start, end time.Time) string {
+	return fmt.Sprintf("%s/windows/%s/%d/%d", stateID, windowType, start.UTC().UnixNano(), end.UTC().UnixNano())
 }
 
 func ptrTime(value time.Time) *time.Time {

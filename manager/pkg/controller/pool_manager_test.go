@@ -49,6 +49,30 @@ func TestBuildPodTemplateIncludesTemplateHash(t *testing.T) {
 	assert.Equal(t, "logical-a", got.Labels[LabelTemplateLogicalID])
 }
 
+func TestBuildPodTemplateAnnotatesTeamOwnedWarmPool(t *testing.T) {
+	pm := &PoolManager{}
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "team-template",
+			Namespace: "tpl-team",
+			Labels: map[string]string{
+				LabelTemplateScope: naming.ScopeTeam,
+			},
+			Annotations: map[string]string{
+				AnnotationTemplateTeamID: "team-1",
+				AnnotationTemplateUserID: "user-1",
+			},
+		},
+	}
+
+	got, err := pm.buildPodTemplate(template, "hash-v1")
+	require.NoError(t, err)
+	assert.Equal(t, "team-1", got.Annotations[AnnotationTeamID])
+	assert.Equal(t, "user-1", got.Annotations[AnnotationUserID])
+	assert.Equal(t, OwnerKindTeamWarmPool, got.Annotations[AnnotationOwnerKind])
+	assert.Equal(t, OwnerKindTeamWarmPool, got.Labels[LabelOwnerKind])
+}
+
 func TestBuildPodTemplatePreMountsUserVolumePortalsForIdlePool(t *testing.T) {
 	pm := &PoolManager{}
 	template := &v1alpha1.SandboxTemplate{

@@ -61,6 +61,8 @@ type ProcdConfig struct {
 	setKeys map[string]bool `yaml:"-" json:"-"`
 }
 
+const DefaultWebhookOutboxDir = "/var/lib/sandbox0/procd/webhook-outbox"
+
 // UnmarshalYAML captures configured keys without hardcoding them.
 func (c *ProcdConfig) UnmarshalYAML(value *yaml.Node) error {
 	if value == nil || value.Kind == 0 {
@@ -126,7 +128,7 @@ var (
 // LoadProcdConfig returns the procd configuration.
 func LoadProcdConfig() *ProcdConfig {
 	procdCfgOnce.Do(func() {
-		cfg := ProcdConfig{WebhookOutboxDir: "/var/lib/sandbox0/procd/webhook-outbox"}
+		cfg := ProcdConfig{WebhookOutboxDir: DefaultWebhookOutboxDir}
 		if err := applyProcdEnvOverrides(&cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to apply procd env overrides: %v\n", err)
 		}

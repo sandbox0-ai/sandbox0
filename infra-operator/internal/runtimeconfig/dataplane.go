@@ -10,6 +10,10 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 	if spec == nil {
 		return cfg
 	}
+	webhookOutboxDir := ""
+	if spec.ProcdConfig.WebhookOutboxDir != nil {
+		webhookOutboxDir = *spec.ProcdConfig.WebhookOutboxDir
+	}
 
 	cfg.HTTPPort = spec.HTTPPort
 	cfg.KubeConfig = spec.KubeConfig
@@ -49,6 +53,7 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 		WebhookRequestTimeout:  spec.ProcdConfig.WebhookRequestTimeout,
 		WebhookMaxRetries:      spec.ProcdConfig.WebhookMaxRetries,
 		WebhookBaseBackoff:     spec.ProcdConfig.WebhookBaseBackoff,
+		WebhookOutboxDir:       webhookOutboxDir,
 	}
 	cfg.Autoscaler = apiconfig.AutoscalerConfig{
 		MinScaleInterval:        spec.Autoscaler.MinScaleInterval,

@@ -370,6 +370,8 @@ type ProcdConfig struct {
 	// +optional
 	// +kubebuilder:default="500ms"
 	WebhookBaseBackoff metav1.Duration `json:"webhookBaseBackoff,omitempty"`
+	// +optional
+	WebhookOutboxDir *string `json:"webhookOutboxDir,omitempty"`
 }
 
 // AutoscalerConfig defines manager autoscaler settings.

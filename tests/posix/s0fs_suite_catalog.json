@@ -1,0 +1,225 @@
+{
+  "schema_version": 1,
+  "purpose": "Trusted POSIX/FUSE suite selection for mounted S0FS sandbox volumes.",
+  "targets": {
+    "quick": [
+      "smoke",
+      "git-integrity"
+    ],
+    "manual_or_nightly": [
+      "bulk-smallfile-integrity",
+      "archive-copy-rsync",
+      "pjdfstest",
+      "fsx",
+      "fsstress",
+      "xfstests-generic",
+      "fio",
+      "mdtest",
+      "filebench"
+    ]
+  },
+  "suites": [
+    {
+      "id": "smoke",
+      "type": "in_repo_workload",
+      "phase": "quick",
+      "default_enabled": true,
+      "trust_reason": "Small deterministic workload maintained with S0FS to catch basic create/read/write/rename/link/symlink/truncate/statfs regressions before heavier suites run.",
+      "source": {
+        "kind": "in_repo"
+      },
+      "sandbox0_relevance": [
+        "basic workspace file operations",
+        "read-after-write visibility",
+        "metadata and rename behavior"
+      ]
+    },
+    {
+      "id": "git-integrity",
+      "type": "in_repo_workload",
+      "phase": "quick",
+      "default_enabled": true,
+      "trust_reason": "Git pack/index verification is a workload-level integrity oracle for agent workspaces, and directly covers the class of failures reported in issue 609.",
+      "source": {
+        "kind": "in_repo"
+      },
+      "sandbox0_relevance": [
+        "git clone onto mounted S0FS volumes",
+        "pack read-after-write integrity",
+        "working tree digest parity with pod-local overlay storage"
+      ]
+    },
+    {
+      "id": "pjdfstest",
+      "type": "external_suite",
+      "phase": "manual_or_nightly",
+      "default_enabled": false,
+      "trust_reason": "pjdfstest is a mature POSIX syscall conformance suite used by filesystems to exercise POSIX behavior.",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/pjd/pjdfstest.git",
+        "default_ref": "ededbeb2b44929972898afb87474b0937f78a877",
+        "license": "BSD-2-Clause"
+      },
+      "sandbox0_relevance": [
+        "chmod/chown/open/link/symlink/rename/truncate/unlink semantics",
+        "first failure matrix for the S0FS POSIX compatibility profile"
+      ],
+      "notes": [
+        "Requires root inside the sandbox.",
+        "Requires autoconf, automake, make, a C compiler, perl, and prove/TAP-Harness."
+      ]
+    },
+    {
+      "id": "bulk-smallfile-integrity",
+      "type": "in_repo_workload",
+      "phase": "manual_or_nightly",
+      "default_enabled": false,
+      "trust_reason": "Deterministic Sandbox0-specific workload that directly covers large small-file trees such as 30000 files totaling 500 MiB.",
+      "source": {
+        "kind": "in_repo"
+      },
+      "sandbox0_relevance": [
+        "issue-style 500 MiB / 30000 small-file trees",
+        "deterministic per-file SHA-256 verification",
+        "temp-file plus rename write pattern",
+        "S0FS vs pod-local overlay tree parity"
+      ]
+    },
+    {
+      "id": "archive-copy-rsync",
+      "type": "in_repo_workload",
+      "phase": "manual_or_nightly",
+      "default_enabled": false,
+      "trust_reason": "Covers common agent workspace tree movement operations using standard tar, cp -a, and rsync commands with tree-digest parity checks.",
+      "source": {
+        "kind": "in_repo"
+      },
+      "sandbox0_relevance": [
+        "tar archive/extract",
+        "cp -a metadata-preserving copies",
+        "rsync -a workspace synchronization",
+        "package-manager and build-cache style file trees"
+      ]
+    },
+    {
+      "id": "fsx",
+      "type": "external_stress",
+      "phase": "manual_or_nightly",
+      "default_enabled": false,
+      "trust_reason": "fsx-style tests are widely used to find file data corruption under random write/truncate/read sequences.",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/kdave/xfstests.git",
+        "default_ref": "cac9fe2b8dc3e6dbc0c2383b9e3b4d3c1b9e7dd0",
+        "license": "GPL-2.0"
+      },
+      "sandbox0_relevance": [
+        "random write and truncate data-integrity stress",
+        "pack/file corruption class failures"
+      ],
+      "notes": [
+        "The runner first uses an installed fsx/fsx-linux binary if present.",
+        "With --install-deps, the runner builds xfstests ltp/fsx from the pinned source."
+      ]
+    },
+    {
+      "id": "fsstress",
+      "type": "external_stress",
+      "phase": "manual_or_nightly",
+      "default_enabled": false,
+      "trust_reason": "fsstress is a standard filesystem namespace and metadata stress workload from the xfstests/LTP ecosystem.",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/kdave/xfstests.git",
+        "default_ref": "cac9fe2b8dc3e6dbc0c2383b9e3b4d3c1b9e7dd0",
+        "license": "GPL-2.0"
+      },
+      "sandbox0_relevance": [
+        "metadata-heavy namespace operations",
+        "rename/unlink/create concurrency"
+      ],
+      "notes": [
+        "The runner first uses an installed fsstress binary if present.",
+        "With --install-deps, the runner builds xfstests ltp/fsstress from the pinned source.",
+        "Manual/nightly candidate. It should not be a quick PR gate until runtime and failure categories are understood."
+      ]
+    },
+    {
+      "id": "xfstests-generic",
+      "type": "external_suite",
+      "phase": "manual_or_nightly",
+      "default_enabled": false,
+      "trust_reason": "fstests/xfstests is the standard Linux filesystem regression suite used by many mature filesystems; it documents a FUSE setup path.",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/kdave/xfstests.git",
+        "default_ref": "cac9fe2b8dc3e6dbc0c2383b9e3b4d3c1b9e7dd0",
+        "license": "GPL-2.0"
+      },
+      "sandbox0_relevance": [
+        "broader Linux filesystem regression coverage",
+        "safe generic test subset after the S0FS compatibility profile is explicit"
+      ],
+      "notes": [
+        "Do not run the whole suite blindly. Many tests expect block devices, scratch devices, remounts, or destructive filesystem operations.",
+        "Start by evaluating safe generic tests for a mounted FUSE filesystem."
+      ]
+    },
+    {
+      "id": "fio",
+      "type": "external_benchmark",
+      "phase": "manual_or_nightly",
+      "default_enabled": false,
+      "trust_reason": "fio is a mature storage benchmark for reproducible sequential and random IO workloads.",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/axboe/fio.git",
+        "default_ref": "855d7e24e4188a357a150a7569c3150267106630",
+        "license": "GPL-2.0"
+      },
+      "sandbox0_relevance": [
+        "sequential read/write throughput",
+        "random IO trend tracking"
+      ]
+    },
+    {
+      "id": "mdtest",
+      "type": "external_benchmark",
+      "phase": "manual_or_nightly",
+      "default_enabled": false,
+      "trust_reason": "mdtest is a standard metadata benchmark from the IOR/HPC ecosystem for create/stat/remove scalability.",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/hpc/ior.git",
+        "default_ref": "967a9f65109760db8a3ac14a7fdd007f337d2960",
+        "tag": "4.0.0",
+        "binary": "src/mdtest",
+        "package_fallback": "ior",
+        "license": "GPL-2.0"
+      },
+      "sandbox0_relevance": [
+        "large file-count metadata pressure",
+        "small-file create/stat/remove throughput",
+        "S0FS vs pod-local overlay metadata comparison"
+      ]
+    },
+    {
+      "id": "filebench",
+      "type": "external_benchmark",
+      "phase": "manual_or_nightly",
+      "default_enabled": false,
+      "trust_reason": "Filebench provides filesystem workload models for metadata-heavy and application-like workloads.",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/filebench/filebench.git",
+        "default_ref": "22620e602cbbebad90c0bd041896ebccf70dbf5f",
+        "license": "CDDL-1.0"
+      },
+      "sandbox0_relevance": [
+        "small-file and metadata-heavy workload benchmarking",
+        "trend signal after correctness is stable"
+      ]
+    }
+  ]
+}

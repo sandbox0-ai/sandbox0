@@ -61,6 +61,74 @@ func (r fakeRow) Scan(dest ...any) error {
 	return nil
 }
 
+func TestGetLimitFallsBackToDefaultLimitWhenDBHasNoRow(t *testing.T) {
+	repo, err := NewRepositoryWithDBDefaults(&fakeDB{
+		queryRowFn: func(context.Context, string, ...any) pgx.Row {
+			return fakeRow{err: pgx.ErrNoRows}
+		},
+	}, []DefaultLimit{{Dimension: DimensionActiveSandboxes, LimitValue: 3}})
+	if err != nil {
+		t.Fatalf("NewRepositoryWithDBDefaults: %v", err)
+	}
+
+	limit, err := repo.GetLimit(context.Background(), "team-1", DimensionActiveSandboxes)
+	if err != nil {
+		t.Fatalf("GetLimit: %v", err)
+	}
+	if limit == nil || limit.TeamID != "team-1" || limit.Dimension != DimensionActiveSandboxes || limit.LimitValue != 3 {
+		t.Fatalf("limit = %+v, want default active sandbox limit 3", limit)
+	}
+}
+
+func TestGetLimitPrefersDBLimitOverDefaultLimit(t *testing.T) {
+	repo, err := NewRepositoryWithDBDefaults(&fakeDB{
+		queryRowFn: func(context.Context, string, ...any) pgx.Row {
+			return fakeRow{values: []any{"team-1", DimensionActiveSandboxes, int64(5)}}
+		},
+	}, []DefaultLimit{{Dimension: DimensionActiveSandboxes, LimitValue: 3}})
+	if err != nil {
+		t.Fatalf("NewRepositoryWithDBDefaults: %v", err)
+	}
+
+	limit, err := repo.GetLimit(context.Background(), "team-1", DimensionActiveSandboxes)
+	if err != nil {
+		t.Fatalf("GetLimit: %v", err)
+	}
+	if limit == nil || limit.LimitValue != 5 {
+		t.Fatalf("limit = %+v, want DB override limit 5", limit)
+	}
+}
+
+func TestNewRepositoryWithDBDefaultsRejectsInvalidLimits(t *testing.T) {
+	tests := []struct {
+		name     string
+		defaults []DefaultLimit
+	}{
+		{
+			name:     "unknown dimension",
+			defaults: []DefaultLimit{{Dimension: Dimension("unknown"), LimitValue: 1}},
+		},
+		{
+			name:     "negative value",
+			defaults: []DefaultLimit{{Dimension: DimensionActiveSandboxes, LimitValue: -1}},
+		},
+		{
+			name: "duplicate dimension",
+			defaults: []DefaultLimit{
+				{Dimension: DimensionActiveSandboxes, LimitValue: 1},
+				{Dimension: DimensionActiveSandboxes, LimitValue: 2},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := NewRepositoryWithDBDefaults(&fakeDB{}, tt.defaults); err == nil {
+				t.Fatal("NewRepositoryWithDBDefaults error = nil, want error")
+			}
+		})
+	}
+}
+
 func TestCurrentUsageReturnsStorageGB(t *testing.T) {
 	tests := []struct {
 		name        string

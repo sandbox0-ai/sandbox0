@@ -321,8 +321,12 @@ func main() {
 		logger,
 		managerMetrics,
 	)
+	quotaRepo, err := buildQuotaRepository(pool, cfg)
+	if err != nil {
+		logger.Fatal("Invalid quota configuration", zap.Error(err))
+	}
 	sandboxService.SetCredentialStore(credentialStore)
-	sandboxService.SetQuotaStore(quota.NewRepository(pool))
+	sandboxService.SetQuotaStore(quotaRepo)
 	sandboxService.SetSandboxStore(sandboxStore)
 	rootFSObjectStore, rootFSObjectStoreErr := buildRootFSObjectStore(cfg)
 	if rootFSObjectStoreErr != nil {
@@ -459,7 +463,7 @@ func main() {
 		cfg.PublicRootDomain,
 		cfg.PublicRegionID,
 	)
-	httpServer.SetQuotaRepository(quota.NewRepository(pool))
+	httpServer.SetQuotaRepository(quotaRepo)
 
 	// Start metrics server
 	go startMetricsServer(cfg.MetricsPort, logger)
@@ -622,6 +626,24 @@ func runEgressAuthMigrations(ctx context.Context, pool *pgxpool.Pool, logger *za
 
 	logger.Info("Egress auth migrations completed successfully")
 	return nil
+}
+
+func buildQuotaRepository(pool *pgxpool.Pool, cfg *config.ManagerConfig) (*quota.Repository, error) {
+	return quota.NewRepositoryWithDefaults(pool, defaultTeamQuotaLimits(cfg))
+}
+
+func defaultTeamQuotaLimits(cfg *config.ManagerConfig) []quota.DefaultLimit {
+	if cfg == nil || len(cfg.DefaultTeamQuotas) == 0 {
+		return nil
+	}
+	limits := make([]quota.DefaultLimit, 0, len(cfg.DefaultTeamQuotas))
+	for _, limit := range cfg.DefaultTeamQuotas {
+		limits = append(limits, quota.DefaultLimit{
+			Dimension:  quota.Dimension(limit.Dimension),
+			LimitValue: limit.LimitValue,
+		})
+	}
+	return limits
 }
 
 func buildRootFSObjectStore(cfg *config.ManagerConfig) (objectstore.Store, error) {

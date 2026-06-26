@@ -3050,6 +3050,38 @@ spec:
                           defaultSandboxTtl:
                             default: 0s
                             type: string
+                          defaultTeamQuotas:
+                            description: |-
+                              DefaultTeamQuotas configures region-wide fallback team quota limits.
+                              Team-specific quota rows in the database override these defaults.
+                            items:
+                              description: |-
+                                TeamQuotaLimitConfig configures a fallback quota limit for teams without a
+                                database override for the same dimension.
+                              properties:
+                                dimension:
+                                  enum:
+                                  - active_sandboxes
+                                  - cpu_millicpu
+                                  - memory_mib
+                                  - volume_storage_gb
+                                  - snapshot_storage_gb
+                                  - egress
+                                  - ingress
+                                  type: string
+                                limitValue:
+                                  format: int64
+                                  minimum: 0
+                                  type: integer
+                              required:
+                              - dimension
+                              - limitValue
+                              type: object
+                            maxItems: 7
+                            type: array
+                            x-kubernetes-list-map-keys:
+                            - dimension
+                            x-kubernetes-list-type: map
                           egressAuthDefaultResolveTtl:
                             default: 5m
                             description: |-

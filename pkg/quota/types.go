@@ -40,6 +40,13 @@ type Limit struct {
 	LimitValue int64     `json:"limit_value"`
 }
 
+// DefaultLimit configures a region-wide fallback quota limit for a dimension.
+// Team-specific database limits override these defaults.
+type DefaultLimit struct {
+	Dimension  Dimension `json:"dimension"`
+	LimitValue int64     `json:"limit_value"`
+}
+
 // Status describes the current quota view for a team and dimension.
 type Status struct {
 	TeamID     string    `json:"team_id"`

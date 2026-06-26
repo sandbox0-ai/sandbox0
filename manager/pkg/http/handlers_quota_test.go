@@ -147,6 +147,47 @@ func TestGetTeamQuotaReturnsUnlimitedWhenLimitIsUnset(t *testing.T) {
 	}
 }
 
+func TestGetTeamQuotaReturnsDefaultLimitWhenDBLimitIsUnset(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	repo, err := quota.NewRepositoryWithDBDefaults(
+		&quotaHandlerFakeDB{current: 1},
+		[]quota.DefaultLimit{{Dimension: quota.DimensionActiveSandboxes, LimitValue: 3}},
+	)
+	if err != nil {
+		t.Fatalf("NewRepositoryWithDBDefaults: %v", err)
+	}
+	server := &Server{
+		quotaRepo: repo,
+		logger:    zap.NewNop(),
+	}
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/quotas/active_sandboxes", nil)
+	request = request.WithContext(internalauth.WithClaims(request.Context(), &internalauth.Claims{TeamID: "team-1"}))
+	ctx.Request = request
+	ctx.Params = gin.Params{{Key: "dimension", Value: string(quota.DimensionActiveSandboxes)}}
+
+	server.getTeamQuota(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	resp, apiErr, err := spec.DecodeResponse[quota.Status](strings.NewReader(recorder.Body.String()))
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr != nil {
+		t.Fatalf("api error = %+v, want nil", apiErr)
+	}
+	if resp == nil || resp.LimitValue == nil || *resp.LimitValue != 3 || resp.Current != 1 || resp.Remaining == nil || *resp.Remaining != 2 {
+		t.Fatalf("quota status = %+v, want default limit=3 current=1 remaining=2", resp)
+	}
+	if resp.Unlimited {
+		t.Fatalf("quota status = %+v, want limited default quota", resp)
+	}
+}
+
 func TestPutTeamQuotaInternalRejectsMissingLimitValue(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

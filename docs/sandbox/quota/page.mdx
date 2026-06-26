@@ -12,6 +12,39 @@ quota status, but they cannot raise, lower, or delete team quota limits through
 the public API. Quota changes are applied by platform control-plane automation,
 operator tooling, or an admin backoffice path.
 
+Limit resolution uses this precedence:
+
+1. A team-specific quota row in the region database.
+2. A region-wide default from `Sandbox0Infra.spec.services.manager.config.defaultTeamQuotas`.
+3. Unlimited when neither is configured.
+
+Deleting a team-specific quota row does not necessarily make that dimension
+unlimited. If a `Sandbox0Infra` default exists for the dimension, the team falls
+back to that default.
+
+## Default quotas
+
+Self-hosted operators can configure region-wide fallback quota limits in the
+manager config:
+
+```yaml
+apiVersion: infra.sandbox0.ai/v1alpha1
+kind: Sandbox0Infra
+metadata:
+    name: sandbox0
+spec:
+    services:
+        manager:
+            config:
+                defaultTeamQuotas:
+                    - dimension: active_sandboxes
+                      limitValue: 10
+                    - dimension: cpu_millicpu
+                      limitValue: 8000
+                    - dimension: memory_mib
+                      limitValue: 16384
+```
+
 ## Dimensions
 
 | Dimension | Unit | Meaning |
@@ -24,5 +57,6 @@ operator tooling, or an admin backoffice path.
 | `egress` | `bytes` | Sandbox egress bytes recorded by network metering windows. |
 | `ingress` | `bytes` | Sandbox ingress bytes recorded by network metering windows. |
 
-When no limit is configured for a dimension, `unlimited` is `true`,
-`limit_value` is `null`, and `remaining` is `null`.
+When no database override or `Sandbox0Infra` default is configured for a
+dimension, `unlimited` is `true`, `limit_value` is `null`, and `remaining` is
+`null`.

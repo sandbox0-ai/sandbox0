@@ -444,6 +444,13 @@ type ManagerConfig struct {
 	TeamTemplateMemoryPerCPU string `json:"teamTemplateMemoryPerCpu,omitempty"`
 	// +optional
 	SandboxRuntimeClassName string `json:"sandboxRuntimeClassName,omitempty"`
+	// DefaultTeamQuotas configures region-wide fallback team quota limits.
+	// Team-specific quota rows in the database override these defaults.
+	// +optional
+	// +kubebuilder:validation:MaxItems=7
+	// +listType=map
+	// +listMapKey=dimension
+	DefaultTeamQuotas []TeamQuotaLimitConfig `json:"defaultTeamQuotas,omitempty"`
 	// AllowColdStartWithoutReadyDataPlane lets cold claims create Pending pods
 	// when no sandbox data-plane-ready nodes exist yet. This is required for
 	// node autoscaler scale-from-zero deployments.
@@ -488,6 +495,15 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default={}
 	Autoscaler AutoscalerConfig `json:"autoscaler,omitempty"`
+}
+
+// TeamQuotaLimitConfig configures a fallback quota limit for teams without a
+// database override for the same dimension.
+type TeamQuotaLimitConfig struct {
+	// +kubebuilder:validation:Enum=active_sandboxes;cpu_millicpu;memory_mib;volume_storage_gb;snapshot_storage_gb;egress;ingress
+	Dimension string `json:"dimension"`
+	// +kubebuilder:validation:Minimum=0
+	LimitValue int64 `json:"limitValue"`
 }
 
 // StorageProxyConfig defines user-facing configuration for storage-proxy.

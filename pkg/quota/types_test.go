@@ -55,3 +55,32 @@ func TestBytesToGBRoundUp(t *testing.T) {
 		})
 	}
 }
+
+func TestNewStatus(t *testing.T) {
+	limitValue := int64(5)
+	status := NewStatus("team-1", DimensionActiveSandboxes, &Limit{
+		TeamID:     "team-1",
+		Dimension:  DimensionActiveSandboxes,
+		LimitValue: limitValue,
+	}, 2)
+	if status.Unlimited {
+		t.Fatal("Unlimited = true, want false")
+	}
+	if status.LimitValue == nil || *status.LimitValue != limitValue {
+		t.Fatalf("LimitValue = %v, want %d", status.LimitValue, limitValue)
+	}
+	if status.Remaining == nil || *status.Remaining != 3 {
+		t.Fatalf("Remaining = %v, want 3", status.Remaining)
+	}
+	if status.Unit != "count" {
+		t.Fatalf("Unit = %q, want count", status.Unit)
+	}
+
+	unlimited := NewStatus("team-1", DimensionEgress, nil, 10)
+	if !unlimited.Unlimited || unlimited.LimitValue != nil || unlimited.Remaining != nil {
+		t.Fatalf("unlimited status = %+v, want nil limit and remaining", unlimited)
+	}
+	if unlimited.Unit != "bytes" {
+		t.Fatalf("Unit = %q, want bytes", unlimited.Unit)
+	}
+}

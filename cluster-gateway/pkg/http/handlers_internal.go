@@ -102,6 +102,28 @@ func (s *Server) proxyInternalTemplateRequest(c *gin.Context) {
 	s.proxy2Mgr.ProxyToTarget(c)
 }
 
+func (s *Server) proxyInternalSystemQuotaRequest(c *gin.Context) {
+	claims := internalauth.ClaimsFromContext(c.Request.Context())
+	if claims == nil || !claims.IsSystemToken() {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "system token is required")
+		return
+	}
+	authCtx := middleware.GetAuthContext(c)
+
+	internalToken, err := s.generateManagerToken(authCtx, claims, []string{"*:*"})
+	if err != nil {
+		s.logger.Error("Failed to generate internal token for manager",
+			zap.String("team_id", c.Param("team_id")),
+			zap.Error(err),
+		)
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "internal authentication failed")
+		return
+	}
+
+	c.Request.Header.Set(internalauth.DefaultTokenHeader, internalToken)
+	s.proxy2Mgr.ProxyToTarget(c)
+}
+
 func (s *Server) generateManagerToken(authCtx *authn.AuthContext, claims *internalauth.Claims, permissions []string) (string, error) {
 	opts := internalauth.GenerateOptions{
 		Permissions: permissions,

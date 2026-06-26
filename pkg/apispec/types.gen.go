@@ -490,6 +490,15 @@ const (
 	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
 )
 
+// Defines values for TeamQuotaUnit.
+const (
+	Bytes    TeamQuotaUnit = "bytes"
+	Count    TeamQuotaUnit = "count"
+	GB       TeamQuotaUnit = "GB"
+	MiB      TeamQuotaUnit = "MiB"
+	Millicpu TeamQuotaUnit = "millicpu"
+)
+
 // Defines values for TrafficRuleAction.
 const (
 	Allow TrafficRuleAction = "allow"
@@ -1373,11 +1382,6 @@ type ProtocolRule struct {
 
 // ProtocolRuleProtocol defines model for ProtocolRuleProtocol.
 type ProtocolRuleProtocol string
-
-// PutTeamQuotaRequest defines model for PutTeamQuotaRequest.
-type PutTeamQuotaRequest struct {
-	LimitValue int64 `json:"limit_value"`
-}
 
 // QuotaDimension defines model for QuotaDimension.
 type QuotaDimension string
@@ -2575,10 +2579,17 @@ type TeamMember struct {
 
 // TeamQuota defines model for TeamQuota.
 type TeamQuota struct {
+	Current    int64          `json:"current"`
 	Dimension  QuotaDimension `json:"dimension"`
 	LimitValue *int64         `json:"limit_value"`
+	Remaining  *int64         `json:"remaining"`
 	TeamId     string         `json:"team_id"`
+	Unit       TeamQuotaUnit  `json:"unit"`
+	Unlimited  bool           `json:"unlimited"`
 }
+
+// TeamQuotaUnit defines model for TeamQuota.Unit.
+type TeamQuotaUnit string
 
 // Template defines model for Template.
 type Template struct {
@@ -2910,9 +2921,6 @@ type PostApiV1CredentialSourcesJSONRequestBody = CredentialSourceWriteRequest
 
 // PutApiV1CredentialSourcesNameJSONRequestBody defines body for PutApiV1CredentialSourcesName for application/json ContentType.
 type PutApiV1CredentialSourcesNameJSONRequestBody = CredentialSourceWriteRequest
-
-// PutApiV1QuotasDimensionJSONRequestBody defines body for PutApiV1QuotasDimension for application/json ContentType.
-type PutApiV1QuotasDimensionJSONRequestBody = PutTeamQuotaRequest
 
 // PostApiV1RegistryCredentialsJSONRequestBody defines body for PostApiV1RegistryCredentials for application/json ContentType.
 type PostApiV1RegistryCredentialsJSONRequestBody = RegistryCredentialsRequest

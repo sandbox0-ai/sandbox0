@@ -152,11 +152,11 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 
 		Context("sandbox lifecycle", func() {
 			It("enforces active sandbox quota", func() {
-				_, status, err := session.PutTeamQuota(env.TestCtx.Context, quota.DimensionActiveSandboxes, 1)
+				_, status, err := session.PutTeamQuota(env.TestCtx.Context, env, quota.DimensionActiveSandboxes, 1)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(status).To(Equal(http.StatusOK))
 				defer func() {
-					_, _ = session.DeleteTeamQuota(env.TestCtx.Context, quota.DimensionActiveSandboxes)
+					_, _ = session.DeleteTeamQuota(env.TestCtx.Context, env, quota.DimensionActiveSandboxes)
 				}()
 
 				_, status, err = session.ClaimSandboxDetailed(env.TestCtx.Context, GinkgoT(), apispec.ClaimRequest{Template: ptr("default")})
@@ -165,11 +165,11 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 			})
 
 			It("enforces CPU quota", func() {
-				_, status, err := session.PutTeamQuota(env.TestCtx.Context, quota.DimensionCPU, 0)
+				_, status, err := session.PutTeamQuota(env.TestCtx.Context, env, quota.DimensionCPU, 0)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(status).To(Equal(http.StatusOK))
 				defer func() {
-					_, _ = session.DeleteTeamQuota(env.TestCtx.Context, quota.DimensionCPU)
+					_, _ = session.DeleteTeamQuota(env.TestCtx.Context, env, quota.DimensionCPU)
 				}()
 
 				_, status, err = session.ClaimSandboxDetailed(env.TestCtx.Context, GinkgoT(), apispec.ClaimRequest{Template: ptr("default")})
@@ -178,11 +178,11 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 			})
 
 			It("enforces memory quota", func() {
-				_, status, err := session.PutTeamQuota(env.TestCtx.Context, quota.DimensionMemory, 0)
+				_, status, err := session.PutTeamQuota(env.TestCtx.Context, env, quota.DimensionMemory, 0)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(status).To(Equal(http.StatusOK))
 				defer func() {
-					_, _ = session.DeleteTeamQuota(env.TestCtx.Context, quota.DimensionMemory)
+					_, _ = session.DeleteTeamQuota(env.TestCtx.Context, env, quota.DimensionMemory)
 				}()
 
 				_, status, err = session.ClaimSandboxDetailed(env.TestCtx.Context, GinkgoT(), apispec.ClaimRequest{Template: ptr("default")})
@@ -1786,11 +1786,11 @@ func assertEgressQuota(env *framework.ScenarioEnv, session *e2eutils.Session, sa
 	Expect(err).NotTo(HaveOccurred())
 	waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
 
-	_, status, err = session.PutTeamQuota(env.TestCtx.Context, quota.DimensionEgress, 0)
+	_, status, err = session.PutTeamQuota(env.TestCtx.Context, env, quota.DimensionEgress, 0)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 	DeferCleanup(func() {
-		_, _ = session.DeleteTeamQuota(env.TestCtx.Context, quota.DimensionEgress)
+		_, _ = session.DeleteTeamQuota(env.TestCtx.Context, env, quota.DimensionEgress)
 	})
 
 	_, err = execInSandboxPod(env, templateNamespace, sandbox.PodName, "curl -fsS --max-time 5 http://example.com/")
@@ -1806,11 +1806,11 @@ func assertIngressQuota(env *framework.ScenarioEnv, session *e2eutils.Session, s
 	Expect(err).NotTo(HaveOccurred())
 	waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
 
-	_, status, err = session.PutTeamQuota(env.TestCtx.Context, quota.DimensionIngress, 0)
+	_, status, err = session.PutTeamQuota(env.TestCtx.Context, env, quota.DimensionIngress, 0)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 	DeferCleanup(func() {
-		_, _ = session.DeleteTeamQuota(env.TestCtx.Context, quota.DimensionIngress)
+		_, _ = session.DeleteTeamQuota(env.TestCtx.Context, env, quota.DimensionIngress)
 	})
 
 	_, err = execInSandboxPod(env, templateNamespace, sandbox.PodName, "curl -fsS --max-time 5 http://example.com/")
@@ -2280,11 +2280,11 @@ func assertVolumeStorageQuota(env *framework.ScenarioEnv, session *e2eutils.Sess
 		deleteSandboxVolumeForCleanup(env, session, volumeID)
 	})
 
-	_, status, err = session.PutTeamQuota(env.TestCtx.Context, quota.DimensionVolumeStorageGB, 0)
+	_, status, err = session.PutTeamQuota(env.TestCtx.Context, env, quota.DimensionVolumeStorageGB, 0)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 	DeferCleanup(func() {
-		_, _ = session.DeleteTeamQuota(env.TestCtx.Context, quota.DimensionVolumeStorageGB)
+		_, _ = session.DeleteTeamQuota(env.TestCtx.Context, env, quota.DimensionVolumeStorageGB)
 	})
 
 	status, err = session.WriteVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, "/quota.txt", []byte("quota"), "")
@@ -2306,11 +2306,11 @@ func assertSnapshotStorageQuota(env *framework.ScenarioEnv, session *e2eutils.Se
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 
-	_, status, err = session.PutTeamQuota(env.TestCtx.Context, quota.DimensionSnapshotGB, 0)
+	_, status, err = session.PutTeamQuota(env.TestCtx.Context, env, quota.DimensionSnapshotGB, 0)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 	DeferCleanup(func() {
-		_, _ = session.DeleteTeamQuota(env.TestCtx.Context, quota.DimensionSnapshotGB)
+		_, _ = session.DeleteTeamQuota(env.TestCtx.Context, env, quota.DimensionSnapshotGB)
 	})
 
 	_, status, err = session.CreateSnapshot(env.TestCtx.Context, GinkgoT(), volumeID, apispec.CreateSnapshotRequest{Name: "quota"})

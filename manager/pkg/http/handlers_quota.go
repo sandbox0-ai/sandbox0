@@ -3,6 +3,7 @@ package http
 import (
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
@@ -16,10 +17,14 @@ type putTeamQuotaRequest struct {
 }
 
 func (s *Server) getTeamQuota(c *gin.Context) {
-	teamID, dimension, ok := s.quotaRequestScope(c)
+	teamID, dimension, ok := s.teamQuotaRequestScope(c)
 	if !ok {
 		return
 	}
+	s.writeTeamQuotaStatus(c, teamID, dimension)
+}
+
+func (s *Server) writeTeamQuotaStatus(c *gin.Context, teamID string, dimension quota.Dimension) {
 	if s.quotaRepo == nil {
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "quota is unavailable")
 		return
@@ -30,19 +35,17 @@ func (s *Server) getTeamQuota(c *gin.Context) {
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get quota")
 		return
 	}
-	if limit == nil {
-		spec.JSONSuccess(c, http.StatusOK, gin.H{
-			"team_id":     teamID,
-			"dimension":   dimension,
-			"limit_value": nil,
-		})
+	current, err := s.quotaRepo.CurrentUsage(c.Request.Context(), teamID, dimension)
+	if err != nil {
+		s.logger.Error("Failed to get quota usage", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get quota usage")
 		return
 	}
-	spec.JSONSuccess(c, http.StatusOK, limit)
+	spec.JSONSuccess(c, http.StatusOK, quota.NewStatus(teamID, dimension, limit, current))
 }
 
-func (s *Server) putTeamQuota(c *gin.Context) {
-	teamID, dimension, ok := s.quotaRequestScope(c)
+func (s *Server) putTeamQuotaInternal(c *gin.Context) {
+	teamID, dimension, ok := s.internalQuotaRequestScope(c)
 	if !ok {
 		return
 	}
@@ -72,8 +75,8 @@ func (s *Server) putTeamQuota(c *gin.Context) {
 	spec.JSONSuccess(c, http.StatusOK, limit)
 }
 
-func (s *Server) deleteTeamQuota(c *gin.Context) {
-	teamID, dimension, ok := s.quotaRequestScope(c)
+func (s *Server) deleteTeamQuotaInternal(c *gin.Context) {
+	teamID, dimension, ok := s.internalQuotaRequestScope(c)
 	if !ok {
 		return
 	}
@@ -89,7 +92,7 @@ func (s *Server) deleteTeamQuota(c *gin.Context) {
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"deleted": true})
 }
 
-func (s *Server) quotaRequestScope(c *gin.Context) (string, quota.Dimension, bool) {
+func (s *Server) teamQuotaRequestScope(c *gin.Context) (string, quota.Dimension, bool) {
 	claims := internalauth.ClaimsFromContext(c.Request.Context())
 	if claims == nil {
 		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
@@ -105,4 +108,27 @@ func (s *Server) quotaRequestScope(c *gin.Context) (string, quota.Dimension, boo
 		return "", "", false
 	}
 	return claims.TeamID, dimension, true
+}
+
+func (s *Server) internalQuotaRequestScope(c *gin.Context) (string, quota.Dimension, bool) {
+	claims := internalauth.ClaimsFromContext(c.Request.Context())
+	if claims == nil {
+		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
+		return "", "", false
+	}
+	if !claims.IsSystemToken() {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "system token is required")
+		return "", "", false
+	}
+	teamID := strings.TrimSpace(c.Param("team_id"))
+	if teamID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "team_id is required")
+		return "", "", false
+	}
+	dimension := quota.Dimension(c.Param("dimension"))
+	if !quota.KnownDimension(dimension) {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "unknown quota dimension")
+		return "", "", false
+	}
+	return teamID, dimension, true
 }

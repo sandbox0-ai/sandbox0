@@ -27,14 +27,12 @@ Sandbox0 Cloud clients should use `https://api.sandbox0.ai`. Set `SANDBOX0_BASE_
 |--------|-------------|
 | `starting` | Sandbox is being initialized |
 | `running` | Sandbox is active and ready to use |
-| `pausing` | Sandbox is checkpointing rootfs and releasing its runtime |
 | `paused` | Sandbox has no runtime; identity and latest rootfs checkpoint are preserved |
-| `resuming` | Sandbox is creating a new runtime and restoring rootfs |
 | `terminating` | Sandbox identity and durable state are being deleted |
 | `failed` | Sandbox encountered an error |
 
 <Callout variant="info">
-Use the `paused` boolean as a convenience for `status == "paused"`. Pause does not preserve running processes, memory, sockets, PID state, or live REPL sessions.
+Pause and resume use internal lifecycle transactions, but `pausing` and `resuming` are not caller-visible statuses. Use the `paused` boolean as a convenience for `status == "paused"`. Pause does not preserve running processes, memory, sockets, PID state, or live REPL sessions.
 </Callout>
 
 ### Persistent Root Filesystem

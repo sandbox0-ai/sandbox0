@@ -2,15 +2,18 @@ package rootfs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 )
@@ -38,6 +41,7 @@ type Config struct {
 	Store            objectstore.Store
 	OperationTimeout time.Duration
 	PortalResolver   PortalResolver
+	SnapshotDir      string
 }
 
 type Controller struct {
@@ -45,6 +49,7 @@ type Controller struct {
 	store            objectstore.Store
 	operationTimeout time.Duration
 	portalResolver   PortalResolver
+	snapshotDir      string
 }
 
 func NewController(cfg Config) *Controller {
@@ -57,6 +62,7 @@ func NewController(cfg Config) *Controller {
 		store:            cfg.Store,
 		operationTimeout: timeout,
 		portalResolver:   cfg.PortalResolver,
+		snapshotDir:      cfg.SnapshotDir,
 	}
 }
 
@@ -72,42 +78,95 @@ func (c *Controller) InspectRootFS(r *http.Request, req ctldapi.InspectRootFSReq
 }
 
 func (c *Controller) SaveRootFS(r *http.Request, req ctldapi.SaveRootFSRequest) (ctldapi.SaveRootFSResponse, int) {
-	if err := validateTarget(req.Target); err != nil {
-		return ctldapi.SaveRootFSResponse{Error: err.Error()}, http.StatusBadRequest
-	}
 	if c.store == nil {
 		return ctldapi.SaveRootFSResponse{Error: "rootfs object store is not configured"}, http.StatusNotImplemented
 	}
 
+	prepared, status := c.PrepareRootFSSnapshot(r, ctldapi.PrepareRootFSSnapshotRequest{
+		Target:        req.Target,
+		ParentLayerID: req.ParentLayerID,
+		ExcludedPaths: req.ExcludedPaths,
+		PortalPaths:   req.PortalPaths,
+	})
+	if status != http.StatusOK {
+		return ctldapi.SaveRootFSResponse{Info: prepared.Info, Error: prepared.Error}, status
+	}
+	published, status := c.PublishRootFSSnapshot(r, ctldapi.PublishRootFSSnapshotRequest{
+		Handle:                    prepared.Handle,
+		SandboxID:                 req.SandboxID,
+		TeamID:                    req.TeamID,
+		ExpectedRuntimeGeneration: req.ExpectedRuntimeGeneration,
+		ObjectKey:                 req.ObjectKey,
+	})
+	if status != http.StatusOK {
+		_, _ = c.AbortRootFSSnapshot(r, ctldapi.AbortRootFSSnapshotRequest{Handle: prepared.Handle})
+		return ctldapi.SaveRootFSResponse{Info: published.Info, Error: published.Error}, status
+	}
+	return ctldapi.SaveRootFSResponse{Info: published.Info, Descriptor: published.Descriptor}, http.StatusOK
+}
+
+func (c *Controller) PrepareRootFSSnapshot(r *http.Request, req ctldapi.PrepareRootFSSnapshotRequest) (ctldapi.PrepareRootFSSnapshotResponse, int) {
+	if err := validateTarget(req.Target); err != nil {
+		return ctldapi.PrepareRootFSSnapshotResponse{Error: err.Error()}, http.StatusBadRequest
+	}
 	ctx, cancel := c.operationContext(requestContext(r))
 	defer cancel()
 
 	info, err := c.inspect(ctx, req.Target)
 	if err != nil {
-		return ctldapi.SaveRootFSResponse{Error: err.Error()}, statusForError(err)
+		return ctldapi.PrepareRootFSSnapshotResponse{Error: err.Error()}, statusForError(err)
 	}
 	if err := validateSupportedRuntime(info); err != nil {
-		return ctldapi.SaveRootFSResponse{Info: info, Error: err.Error()}, http.StatusBadRequest
+		return ctldapi.PrepareRootFSSnapshotResponse{Info: info, Error: err.Error()}, http.StatusBadRequest
 	}
 	portalPaths := c.portalPathsForRequest(info, req.Target, req.ExcludedPaths, req.PortalPaths)
 	desc, reader, err := c.createDiff(ctx, info, strings.TrimSpace(req.ParentLayerID), req.ExcludedPaths, portalPaths)
 	if err != nil {
-		return ctldapi.SaveRootFSResponse{Info: info, Error: fmt.Sprintf("create rootfs diff: %v", err)}, statusForError(err)
+		return ctldapi.PrepareRootFSSnapshotResponse{Info: info, Error: fmt.Sprintf("create rootfs diff: %v", err)}, statusForError(err)
 	}
 	defer reader.Close()
 
+	handle := uuid.NewString()
+	if err := c.writePreparedSnapshot(handle, info, desc, reader); err != nil {
+		return ctldapi.PrepareRootFSSnapshotResponse{Info: info, Error: fmt.Sprintf("prepare rootfs snapshot: %v", err)}, http.StatusInternalServerError
+	}
+	return ctldapi.PrepareRootFSSnapshotResponse{Handle: handle, Info: info, Descriptor: desc}, http.StatusOK
+}
+
+func (c *Controller) PublishRootFSSnapshot(r *http.Request, req ctldapi.PublishRootFSSnapshotRequest) (ctldapi.PublishRootFSSnapshotResponse, int) {
+	if c.store == nil {
+		return ctldapi.PublishRootFSSnapshotResponse{Error: "rootfs object store is not configured"}, http.StatusNotImplemented
+	}
+	prepared, err := c.readPreparedSnapshot(req.Handle)
+	if err != nil {
+		return ctldapi.PublishRootFSSnapshotResponse{Error: err.Error()}, statusForError(err)
+	}
 	objectKey := strings.Trim(strings.TrimSpace(req.ObjectKey), "/")
 	if objectKey == "" {
-		objectKey, err = defaultObjectKey(req.TeamID, req.SandboxID, req.ExpectedRuntimeGeneration, desc.Digest)
+		objectKey, err = defaultObjectKey(req.TeamID, req.SandboxID, req.ExpectedRuntimeGeneration, prepared.Descriptor.Digest)
 		if err != nil {
-			return ctldapi.SaveRootFSResponse{Info: info, Error: err.Error()}, http.StatusBadRequest
+			return ctldapi.PublishRootFSSnapshotResponse{Info: prepared.Info, Error: err.Error()}, http.StatusBadRequest
 		}
 	}
-	if err := c.store.Put(objectKey, reader); err != nil {
-		return ctldapi.SaveRootFSResponse{Info: info, Error: fmt.Sprintf("upload rootfs diff: %v", err)}, http.StatusInternalServerError
+	content, err := os.Open(c.preparedSnapshotContentPath(req.Handle))
+	if err != nil {
+		return ctldapi.PublishRootFSSnapshotResponse{Info: prepared.Info, Error: fmt.Sprintf("open prepared rootfs snapshot: %v", err)}, statusForError(err)
 	}
+	defer content.Close()
+	if err := c.store.Put(objectKey, content); err != nil {
+		return ctldapi.PublishRootFSSnapshotResponse{Info: prepared.Info, Error: fmt.Sprintf("upload rootfs diff: %v", err)}, http.StatusInternalServerError
+	}
+	desc := prepared.Descriptor
 	desc.ObjectKey = objectKey
-	return ctldapi.SaveRootFSResponse{Info: info, Descriptor: desc}, http.StatusOK
+	_ = c.removePreparedSnapshot(req.Handle)
+	return ctldapi.PublishRootFSSnapshotResponse{Info: prepared.Info, Descriptor: desc, Published: true}, http.StatusOK
+}
+
+func (c *Controller) AbortRootFSSnapshot(_ *http.Request, req ctldapi.AbortRootFSSnapshotRequest) (ctldapi.AbortRootFSSnapshotResponse, int) {
+	if err := c.removePreparedSnapshot(req.Handle); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return ctldapi.AbortRootFSSnapshotResponse{Error: err.Error()}, statusForError(err)
+	}
+	return ctldapi.AbortRootFSSnapshotResponse{Aborted: true}, http.StatusOK
 }
 
 func (c *Controller) ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int) {
@@ -203,6 +262,120 @@ func (c *Controller) applyDescriptor(ctx context.Context, info ctldapi.RootFSInf
 	}
 	applied.ObjectKey = desc.ObjectKey
 	return applied, nil
+}
+
+type preparedRootFSSnapshot struct {
+	Handle     string                       `json:"handle"`
+	Info       ctldapi.RootFSInfo           `json:"info"`
+	Descriptor ctldapi.RootFSDiffDescriptor `json:"descriptor"`
+	CreatedAt  time.Time                    `json:"created_at"`
+}
+
+func (c *Controller) writePreparedSnapshot(handle string, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, reader io.Reader) error {
+	if strings.TrimSpace(handle) == "" {
+		return fmt.Errorf("%w: snapshot handle is required", ErrBadRequest)
+	}
+	if err := os.MkdirAll(c.preparedSnapshotDir(), 0o755); err != nil {
+		return err
+	}
+	contentTmp := c.preparedSnapshotContentPath(handle) + ".tmp"
+	content, err := os.Create(contentTmp)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(content, reader); err != nil {
+		_ = content.Close()
+		_ = os.Remove(contentTmp)
+		return err
+	}
+	if err := content.Close(); err != nil {
+		_ = os.Remove(contentTmp)
+		return err
+	}
+	if err := os.Rename(contentTmp, c.preparedSnapshotContentPath(handle)); err != nil {
+		_ = os.Remove(contentTmp)
+		return err
+	}
+
+	meta := preparedRootFSSnapshot{
+		Handle:     handle,
+		Info:       info,
+		Descriptor: desc,
+		CreatedAt:  time.Now().UTC(),
+	}
+	metaTmp := c.preparedSnapshotMetaPath(handle) + ".tmp"
+	metaFile, err := os.Create(metaTmp)
+	if err != nil {
+		return err
+	}
+	if err := json.NewEncoder(metaFile).Encode(meta); err != nil {
+		_ = metaFile.Close()
+		_ = os.Remove(metaTmp)
+		return err
+	}
+	if err := metaFile.Close(); err != nil {
+		_ = os.Remove(metaTmp)
+		return err
+	}
+	if err := os.Rename(metaTmp, c.preparedSnapshotMetaPath(handle)); err != nil {
+		_ = os.Remove(metaTmp)
+		return err
+	}
+	return nil
+}
+
+func (c *Controller) readPreparedSnapshot(handle string) (preparedRootFSSnapshot, error) {
+	handle = strings.TrimSpace(handle)
+	if handle == "" {
+		return preparedRootFSSnapshot{}, fmt.Errorf("%w: snapshot handle is required", ErrBadRequest)
+	}
+	metaFile, err := os.Open(c.preparedSnapshotMetaPath(handle))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return preparedRootFSSnapshot{}, fmt.Errorf("%w: rootfs snapshot handle %s", ErrNotFound, handle)
+		}
+		return preparedRootFSSnapshot{}, err
+	}
+	defer metaFile.Close()
+	var prepared preparedRootFSSnapshot
+	if err := json.NewDecoder(metaFile).Decode(&prepared); err != nil {
+		return preparedRootFSSnapshot{}, err
+	}
+	return prepared, nil
+}
+
+func (c *Controller) removePreparedSnapshot(handle string) error {
+	handle = strings.TrimSpace(handle)
+	if handle == "" {
+		return nil
+	}
+	contentErr := os.Remove(c.preparedSnapshotContentPath(handle))
+	metaErr := os.Remove(c.preparedSnapshotMetaPath(handle))
+	if contentErr != nil && !errors.Is(contentErr, os.ErrNotExist) {
+		return contentErr
+	}
+	if metaErr != nil && !errors.Is(metaErr, os.ErrNotExist) {
+		return metaErr
+	}
+	if errors.Is(contentErr, os.ErrNotExist) && errors.Is(metaErr, os.ErrNotExist) {
+		return os.ErrNotExist
+	}
+	return nil
+}
+
+func (c *Controller) preparedSnapshotContentPath(handle string) string {
+	return filepath.Join(c.preparedSnapshotDir(), filepath.Base(handle)+".tar")
+}
+
+func (c *Controller) preparedSnapshotMetaPath(handle string) string {
+	return filepath.Join(c.preparedSnapshotDir(), filepath.Base(handle)+".json")
+}
+
+func (c *Controller) preparedSnapshotDir() string {
+	if c != nil && strings.TrimSpace(c.snapshotDir) != "" {
+		return c.snapshotDir
+	}
+	return filepath.Join(os.TempDir(), "sandbox0-rootfs-snapshots")
 }
 
 func (c *Controller) portalPathsForRequest(info ctldapi.RootFSInfo, target ctldapi.RootFSContainerRef, excludedPaths []string, requested []ctldapi.RootFSPortalPath) []ctldapi.RootFSPortalPath {

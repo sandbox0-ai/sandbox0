@@ -311,7 +311,7 @@ func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForPausingRunti
 			"sandbox-a": {
 				ID:     "sandbox-a",
 				TeamID: "team-a",
-				Status: SandboxStatusPausing,
+				Status: SandboxStatusPaused,
 			},
 		}},
 		logger: zap.NewNop(),

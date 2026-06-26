@@ -34,9 +34,11 @@ On nodes using the containerd overlayfs snapshotter, `ctld` checkpoints only the
 
 Pause a sandbox to release compute while keeping its identity, configuration, services, mounted durable storage, and latest writable rootfs checkpoint available for a later resume.
 
-The pause endpoint accepts the lifecycle transition and returns once the sandbox is recorded as `pausing`. Rootfs checkpoint upload and runtime pod deletion continue in the background. Poll sandbox details until `status` is `paused` before treating the checkpoint as resume-ready.
+The pause endpoint accepts the lifecycle transition and returns the current committed state. Rootfs checkpoint upload and runtime pod deletion continue in the background. Until the pause transaction commits, sandbox details continue to report the previous committed runtime state, usually `running`. Poll sandbox details until `status` is `paused` and `paused` is `true` before treating the checkpoint as resume-ready.
 
-Runtime access paths do not require callers to special-case `pausing` or `resuming`. File, context, public service, and SSH requests either use the currently committed runtime generation or wait for the lifecycle transition to commit before continuing on the next generation.
+Runtime access paths do not expose `pausing` or `resuming` states. File, context, public service, and SSH requests are linearized to a committed runtime generation: they either use the currently committed runtime or wait for the lifecycle transaction to commit before continuing after resume. Lifecycle work in progress should not be handled as a caller-visible `409 Conflict`; conflicts are reserved for real policy or state conflicts such as disabled auto-resume, non-restartable service routes, quota limits, deletion, or paused-only operations.
+
+Automatic pause from `ttl` is opportunistic. If supported runtime access arrives before an automatic pause reaches its commit point, Sandbox0 cancels that automatic pause, releases the runtime barrier, and continues on the existing runtime generation. Explicit pause requests are not canceled by runtime access; those requests wait for the committed pause and then resume if auto-resume is allowed.
 
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/pause
@@ -118,7 +120,9 @@ console.log("Resume requested");`
 
 After requesting a pause or resume, fetch sandbox details to check the lifecycle status.
 
-During pause, `paused` remains `false` while `status` is `pausing`. It becomes `true` only after checkpoint upload has completed, the runtime pod has been released, and the sandbox is safe to resume from durable state.
+During asynchronous pause, `paused` remains `false` and `status` continues to reflect the last committed runtime state, usually `running`. It becomes `true` only after checkpoint upload has completed, the runtime pod has been released, and the sandbox is safe to resume from durable state.
+
+During resume, callers may wait while Sandbox0 creates and initializes a new runtime generation. After the resume transaction commits, `status` is `running`, `paused` is `false`, and `runtime_generation` has advanced. If an automatic pause is canceled before commit, `status` remains `running`, `paused` remains `false`, and `runtime_generation` does not change.
 
 <Tabs
   tabs={[

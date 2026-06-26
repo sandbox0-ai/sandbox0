@@ -182,8 +182,6 @@ const (
 const (
 	SandboxLifecycleStatusFailed      SandboxLifecycleStatus = "failed"
 	SandboxLifecycleStatusPaused      SandboxLifecycleStatus = "paused"
-	SandboxLifecycleStatusPausing     SandboxLifecycleStatus = "pausing"
-	SandboxLifecycleStatusResuming    SandboxLifecycleStatus = "resuming"
 	SandboxLifecycleStatusRunning     SandboxLifecycleStatus = "running"
 	SandboxLifecycleStatusStarting    SandboxLifecycleStatus = "starting"
 	SandboxLifecycleStatusTerminating SandboxLifecycleStatus = "terminating"

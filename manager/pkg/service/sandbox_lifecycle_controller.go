@@ -405,7 +405,7 @@ func SandboxRecordDeletionIsRuntimeOnly(record *SandboxRecord, namespace, podNam
 		return false
 	}
 	switch record.Status {
-	case SandboxStatusPausing, SandboxStatusPaused:
+	case SandboxStatusPaused:
 		return true
 	case SandboxStatusDeleted:
 		return false

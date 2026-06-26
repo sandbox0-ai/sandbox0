@@ -243,6 +243,91 @@ func TestRootFSObjectDeletionQueueClaimsBacksOffAndDeadLetters(t *testing.T) {
 	assert.Equal(t, int64(1), stats.DeadLettered)
 }
 
+func TestRootFSObjectDeletionSkipsActiveLifecyclePreparedHead(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+
+	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-pending", "team-1")))
+	state := rootFSTestStoreState("sandbox-pending", "team-1", "layer-pending", "", 1, "pending")
+	require.NoError(t, store.QueueUncommittedRootFSObjectDeletion(ctx, state, time.Now().Add(-time.Minute)))
+	require.NoError(t, store.WithSandboxLock(ctx, "sandbox-pending", func(lockCtx context.Context, tx SandboxStoreTx, _ *SandboxRecord) error {
+		return tx.BeginLifecycleTxn(lockCtx, &SandboxLifecycleTxn{
+			ID:                  "txn-pending",
+			SandboxID:           "sandbox-pending",
+			Kind:                SandboxLifecycleKindPause,
+			Phase:               SandboxLifecyclePhasePublishing,
+			Source:              SandboxLifecycleSourceAuto,
+			Cancelable:          true,
+			FromGeneration:      1,
+			PreparedHeadLayerID: "layer-pending",
+		})
+	}))
+
+	deleter := &recordingRootFSObjectDeleter{}
+	deleted, err := store.DeletePendingRootFSObjectsWithOptions(ctx, deleter, DeletePendingRootFSObjectsOptions{
+		Limit:     1,
+		ClaimedBy: "worker-active-txn",
+		ClaimTTL:  time.Minute,
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, deleted)
+	assert.Empty(t, deleter.keys)
+	assert.Equal(t, int64(1), rootFSTestCountRows(t, pool, "rootfs_object_deletions"))
+
+	var claimedBy string
+	var nextAttemptAt time.Time
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT claimed_by, next_attempt_at
+		FROM manager.rootfs_object_deletions
+		WHERE object_key = $1
+	`, state.DiffObjectKey).Scan(&claimedBy, &nextAttemptAt))
+	assert.Empty(t, claimedBy)
+	assert.True(t, nextAttemptAt.After(time.Now().Add(30*time.Second)))
+
+	require.NoError(t, store.WithSandboxLock(ctx, "sandbox-pending", func(lockCtx context.Context, tx SandboxStoreTx, _ *SandboxRecord) error {
+		return tx.AbortLifecycleTxn(lockCtx, "txn-pending", "test cleanup")
+	}))
+	_, err = pool.Exec(ctx, `
+		UPDATE manager.rootfs_object_deletions
+		SET next_attempt_at = NOW()
+		WHERE object_key = $1
+	`, state.DiffObjectKey)
+	require.NoError(t, err)
+
+	deleted, err = store.DeletePendingRootFSObjectsWithOptions(ctx, deleter, DeletePendingRootFSObjectsOptions{
+		Limit:     1,
+		ClaimedBy: "worker-aborted-txn",
+		ClaimTTL:  time.Minute,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{state.DiffObjectKey}, deleted)
+	assert.Equal(t, []string{state.DiffObjectKey}, deleter.keys)
+	assert.Equal(t, int64(0), rootFSTestCountRows(t, pool, "rootfs_object_deletions"))
+}
+
+func TestRootFSObjectDeletionQueueClearedWhenObjectCommits(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+
+	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-committed", "team-1")))
+	state := rootFSTestStoreState("sandbox-committed", "team-1", "layer-committed", "", 1, "committed")
+	require.NoError(t, store.QueueUncommittedRootFSObjectDeletion(ctx, state, time.Now().Add(-time.Minute)))
+	assert.Equal(t, int64(1), rootFSTestCountRows(t, pool, "rootfs_object_deletions"))
+
+	require.NoError(t, store.SaveRootFSState(ctx, state))
+	assert.Equal(t, int64(0), rootFSTestCountRows(t, pool, "rootfs_object_deletions"))
+
+	deleter := &recordingRootFSObjectDeleter{}
+	deleted, err := store.DeletePendingRootFSObjects(ctx, deleter, 10)
+	require.NoError(t, err)
+	assert.Empty(t, deleted)
+	assert.Empty(t, deleter.keys)
+}
+
 func TestRootFSRootLayerSaveCanCASAgainstExistingHead(t *testing.T) {
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPool(t)
@@ -475,6 +560,96 @@ func TestRootFSObjectAuditRecordsAndClearsMissingState(t *testing.T) {
 	`).Scan(&missingAt, &lastError))
 	assert.Nil(t, missingAt)
 	assert.Empty(t, lastError)
+}
+
+func TestRootFSObjectAuditAcceptsEncryptedPhysicalSizeOverhead(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+
+	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-a", "team-1")))
+	require.NoError(t, store.SaveRootFSState(ctx, rootFSTestStoreState("sandbox-a", "team-1", "layer-a", "", 1, "audit")))
+
+	_, err := pool.Exec(ctx, `
+		UPDATE manager.rootfs_objects
+		SET missing_at = NOW(),
+			last_error = 'previous transient audit error'
+		WHERE object_key = 'rootfs/audit.tar'
+	`)
+	require.NoError(t, err)
+
+	inspector := &recordingRootFSObjectInspector{
+		info: RootFSObjectInfo{Key: "rootfs/audit.tar", Size: int64(len("audit")) + 512},
+	}
+	result, err := store.AuditRootFSObjects(ctx, inspector, "team-1", 10)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, result.Checked)
+	assert.Equal(t, 0, result.SizeMismatched)
+
+	var missingAt *time.Time
+	var lastError string
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT missing_at, last_error
+		FROM manager.rootfs_objects
+		WHERE object_key = 'rootfs/audit.tar'
+	`).Scan(&missingAt, &lastError))
+	assert.Nil(t, missingAt)
+	assert.Empty(t, lastError)
+}
+
+func TestRootFSObjectAuditRejectsTruncatedPhysicalSize(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+
+	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-a", "team-1")))
+	require.NoError(t, store.SaveRootFSState(ctx, rootFSTestStoreState("sandbox-a", "team-1", "layer-a", "", 1, "audit")))
+
+	inspector := &recordingRootFSObjectInspector{
+		info: RootFSObjectInfo{Key: "rootfs/audit.tar", Size: int64(len("audit")) - 1},
+	}
+	result, err := store.AuditRootFSObjects(ctx, inspector, "team-1", 10)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, result.Checked)
+	assert.Equal(t, 1, result.SizeMismatched)
+
+	var missingAt *time.Time
+	var lastError string
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT missing_at, last_error
+		FROM manager.rootfs_objects
+		WHERE object_key = 'rootfs/audit.tar'
+	`).Scan(&missingAt, &lastError))
+	require.NotNil(t, missingAt)
+	assert.Contains(t, lastError, "smaller than db diff size")
+}
+
+func TestRootFSObjectAuditRejectsLogicalSizeMismatch(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+
+	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-a", "team-1")))
+	require.NoError(t, store.SaveRootFSState(ctx, rootFSTestStoreState("sandbox-a", "team-1", "layer-a", "", 1, "audit")))
+
+	inspector := &recordingRootFSObjectInspector{
+		info: RootFSObjectInfo{Key: "rootfs/audit.tar", Size: int64(len("audit")) + 1, SizeIsLogical: true},
+	}
+	result, err := store.AuditRootFSObjects(ctx, inspector, "team-1", 10)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, result.Checked)
+	assert.Equal(t, 1, result.SizeMismatched)
+
+	var lastError string
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT last_error
+		FROM manager.rootfs_objects
+		WHERE object_key = 'rootfs/audit.tar'
+	`).Scan(&lastError))
+	assert.Contains(t, lastError, "logical size")
 }
 
 func newSandboxStoreIntegrationPool(t *testing.T) *pgxpool.Pool {

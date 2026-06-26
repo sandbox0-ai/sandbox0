@@ -151,9 +151,7 @@ func isValidSandboxListStatus(status string) bool {
 	switch status {
 	case service.SandboxStatusStarting,
 		service.SandboxStatusRunning,
-		service.SandboxStatusPausing,
 		service.SandboxStatusPaused,
-		service.SandboxStatusResuming,
 		service.SandboxStatusTerminating,
 		service.SandboxStatusFailed:
 		return true

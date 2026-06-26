@@ -178,7 +178,7 @@ func buildProbeController(ctx context.Context, obsProvider *observability.Provid
 	return controller
 }
 
-func buildRootFSController(storageCfg *apiconfig.StorageProxyConfig, portalResolver ctldrootfs.PortalResolver) ctldserver.RootFSController {
+func buildRootFSController(storageCfg *apiconfig.StorageProxyConfig, portalResolver ctldrootfs.PortalResolver) rootFSHandler {
 	store, err := buildRootFSObjectStore(storageCfg)
 	if err != nil {
 		log.Printf("ctld rootfs object store disabled: %v", err)
@@ -215,6 +215,21 @@ func buildRootFSObjectStore(cfg *apiconfig.StorageProxyConfig) (objectstore.Stor
 	if err != nil {
 		return nil, err
 	}
+	if cfg.ObjectEncryptionEnabled {
+		keyPEM, err := objectstore.LoadEncryptionKey(cfg.ObjectEncryptionKeyPath)
+		if err != nil {
+			return nil, err
+		}
+		keyEncryptor, err := objectstore.NewKeyEncryptor(keyPEM, cfg.ObjectEncryptionPassphrase)
+		if err != nil {
+			return nil, err
+		}
+		store = objectstore.Encrypting(store, objectstore.EncryptionConfig{
+			Enabled:      true,
+			Algorithm:    cfg.ObjectEncryptionAlgo,
+			KeyEncryptor: keyEncryptor,
+		})
+	}
 	return store, nil
 }
 
@@ -244,7 +259,7 @@ func initPortalDatabase(ctx context.Context, cfg *apiconfig.StorageProxyConfig, 
 type combinedController struct {
 	ctldserver.Controller
 	Portal volumePortalHandler
-	RootFS ctldserver.RootFSController
+	RootFS rootFSHandler
 }
 
 func (c combinedController) BindVolumePortal(r *http.Request, req ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, int) {
@@ -381,11 +396,37 @@ func (c combinedController) SaveRootFS(r *http.Request, req ctldapi.SaveRootFSRe
 	return c.RootFS.SaveRootFS(r, req)
 }
 
+func (c combinedController) PrepareRootFSSnapshot(r *http.Request, req ctldapi.PrepareRootFSSnapshotRequest) (ctldapi.PrepareRootFSSnapshotResponse, int) {
+	if c.RootFS == nil {
+		return ctldapi.PrepareRootFSSnapshotResponse{Error: "ctld rootfs snapshot prepare not implemented"}, http.StatusNotImplemented
+	}
+	return c.RootFS.PrepareRootFSSnapshot(r, req)
+}
+
+func (c combinedController) PublishRootFSSnapshot(r *http.Request, req ctldapi.PublishRootFSSnapshotRequest) (ctldapi.PublishRootFSSnapshotResponse, int) {
+	if c.RootFS == nil {
+		return ctldapi.PublishRootFSSnapshotResponse{Error: "ctld rootfs snapshot publish not implemented"}, http.StatusNotImplemented
+	}
+	return c.RootFS.PublishRootFSSnapshot(r, req)
+}
+
+func (c combinedController) AbortRootFSSnapshot(r *http.Request, req ctldapi.AbortRootFSSnapshotRequest) (ctldapi.AbortRootFSSnapshotResponse, int) {
+	if c.RootFS == nil {
+		return ctldapi.AbortRootFSSnapshotResponse{Error: "ctld rootfs snapshot abort not implemented"}, http.StatusNotImplemented
+	}
+	return c.RootFS.AbortRootFSSnapshot(r, req)
+}
+
 func (c combinedController) ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int) {
 	if c.RootFS == nil {
 		return ctldapi.ApplyRootFSResponse{Error: "ctld rootfs apply not implemented"}, http.StatusNotImplemented
 	}
 	return c.RootFS.ApplyRootFS(r, req)
+}
+
+type rootFSHandler interface {
+	ctldserver.RootFSController
+	ctldserver.RootFSSnapshotController
 }
 
 type volumePortalHandler interface {

@@ -15,6 +15,7 @@ func TestSaveRootFSStateWritesLayerAndFilesystemHeadOnly(t *testing.T) {
 	exec := &recordingRootFSStateExecutor{
 		tags: []pgconn.CommandTag{
 			pgconn.NewCommandTag("INSERT 0 1"),
+			pgconn.NewCommandTag("DELETE 0"),
 			pgconn.NewCommandTag("INSERT 0 1"),
 			pgconn.NewCommandTag("SELECT 1"),
 		},
@@ -25,10 +26,11 @@ func TestSaveRootFSStateWritesLayerAndFilesystemHeadOnly(t *testing.T) {
 	err := saveRootFSState(context.Background(), exec, state)
 
 	require.NoError(t, err)
-	require.Len(t, exec.sqls, 3)
+	require.Len(t, exec.sqls, 4)
 	assert.Contains(t, exec.sqls[0], "INSERT INTO manager.rootfs_objects")
-	assert.Contains(t, exec.sqls[1], "INSERT INTO manager.rootfs_layers")
-	assert.Contains(t, exec.sqls[2], "INSERT INTO manager.rootfs_filesystems")
+	assert.Contains(t, exec.sqls[1], "DELETE FROM manager.rootfs_object_deletions")
+	assert.Contains(t, exec.sqls[2], "INSERT INTO manager.rootfs_layers")
+	assert.Contains(t, exec.sqls[3], "INSERT INTO manager.rootfs_filesystems")
 	for _, sql := range exec.sqls {
 		assert.NotContains(t, sql, "INSERT INTO manager.sandbox_rootfs_states")
 		assert.NotContains(t, sql, "INSERT INTO manager.sandbox_rootfs_heads")
@@ -49,6 +51,7 @@ func TestSaveRootFSStateMapsHeadCASMissToConflict(t *testing.T) {
 	exec := &recordingRootFSStateExecutor{
 		tags: []pgconn.CommandTag{
 			pgconn.NewCommandTag("INSERT 0 1"),
+			pgconn.NewCommandTag("DELETE 0"),
 			pgconn.NewCommandTag("INSERT 0 1"),
 			pgconn.NewCommandTag("SELECT 0"),
 		},
@@ -60,13 +63,14 @@ func TestSaveRootFSStateMapsHeadCASMissToConflict(t *testing.T) {
 	err := saveRootFSState(context.Background(), exec, state)
 
 	require.ErrorIs(t, err, ErrRootFSHeadConflict)
-	require.Len(t, exec.sqls, 3)
+	require.Len(t, exec.sqls, 4)
 }
 
 func TestSaveRootFSStateUsesExpectedHeadLayerIDWhenParentDiffers(t *testing.T) {
 	exec := &recordingRootFSStateExecutor{
 		tags: []pgconn.CommandTag{
 			pgconn.NewCommandTag("INSERT 0 1"),
+			pgconn.NewCommandTag("DELETE 0"),
 			pgconn.NewCommandTag("INSERT 0 1"),
 			pgconn.NewCommandTag("SELECT 1"),
 		},
@@ -79,8 +83,8 @@ func TestSaveRootFSStateUsesExpectedHeadLayerIDWhenParentDiffers(t *testing.T) {
 	err := saveRootFSState(context.Background(), exec, state)
 
 	require.NoError(t, err)
-	require.Len(t, exec.args, 3)
-	assert.Equal(t, "layer-parent", exec.args[2][3])
+	require.Len(t, exec.args, 4)
+	assert.Equal(t, "layer-parent", exec.args[3][3])
 }
 
 func TestSaveRootFSStateMapsObjectMetadataConflict(t *testing.T) {

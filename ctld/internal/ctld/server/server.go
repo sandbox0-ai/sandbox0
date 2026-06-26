@@ -34,6 +34,12 @@ type RootFSController interface {
 	ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int)
 }
 
+type RootFSSnapshotController interface {
+	PrepareRootFSSnapshot(r *http.Request, req ctldapi.PrepareRootFSSnapshotRequest) (ctldapi.PrepareRootFSSnapshotResponse, int)
+	PublishRootFSSnapshot(r *http.Request, req ctldapi.PublishRootFSSnapshotRequest) (ctldapi.PublishRootFSSnapshotResponse, int)
+	AbortRootFSSnapshot(r *http.Request, req ctldapi.AbortRootFSSnapshotRequest) (ctldapi.AbortRootFSSnapshotResponse, int)
+}
+
 type MountedVolumeController interface {
 	MountedVolumeHandler() http.Handler
 }
@@ -62,6 +68,18 @@ func (NotImplementedController) InspectRootFS(_ *http.Request, _ ctldapi.Inspect
 
 func (NotImplementedController) SaveRootFS(_ *http.Request, _ ctldapi.SaveRootFSRequest) (ctldapi.SaveRootFSResponse, int) {
 	return ctldapi.SaveRootFSResponse{Error: "ctld rootfs save not implemented"}, http.StatusNotImplemented
+}
+
+func (NotImplementedController) PrepareRootFSSnapshot(_ *http.Request, _ ctldapi.PrepareRootFSSnapshotRequest) (ctldapi.PrepareRootFSSnapshotResponse, int) {
+	return ctldapi.PrepareRootFSSnapshotResponse{Error: "ctld rootfs snapshot prepare not implemented"}, http.StatusNotImplemented
+}
+
+func (NotImplementedController) PublishRootFSSnapshot(_ *http.Request, _ ctldapi.PublishRootFSSnapshotRequest) (ctldapi.PublishRootFSSnapshotResponse, int) {
+	return ctldapi.PublishRootFSSnapshotResponse{Error: "ctld rootfs snapshot publish not implemented"}, http.StatusNotImplemented
+}
+
+func (NotImplementedController) AbortRootFSSnapshot(_ *http.Request, _ ctldapi.AbortRootFSSnapshotRequest) (ctldapi.AbortRootFSSnapshotResponse, int) {
+	return ctldapi.AbortRootFSSnapshotResponse{Error: "ctld rootfs snapshot abort not implemented"}, http.StatusNotImplemented
 }
 
 func (NotImplementedController) ApplyRootFS(_ *http.Request, _ ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int) {
@@ -304,6 +322,72 @@ func NewMux(controller Controller) http.Handler {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		resp, status := rootFSController.SaveRootFS(r, req)
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+	mux.HandleFunc("/api/v1/rootfs/snapshots/prepare", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		rootFSController, ok := controller.(RootFSSnapshotController)
+		if !ok {
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{Error: "ctld rootfs snapshot prepare not implemented"})
+			return
+		}
+		var req ctldapi.PrepareRootFSSnapshotRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{Error: err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		resp, status := rootFSController.PrepareRootFSSnapshot(r, req)
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+	mux.HandleFunc("/api/v1/rootfs/snapshots/publish", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		rootFSController, ok := controller.(RootFSSnapshotController)
+		if !ok {
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(ctldapi.PublishRootFSSnapshotResponse{Error: "ctld rootfs snapshot publish not implemented"})
+			return
+		}
+		var req ctldapi.PublishRootFSSnapshotRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(ctldapi.PublishRootFSSnapshotResponse{Error: err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		resp, status := rootFSController.PublishRootFSSnapshot(r, req)
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+	mux.HandleFunc("/api/v1/rootfs/snapshots/abort", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		rootFSController, ok := controller.(RootFSSnapshotController)
+		if !ok {
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(ctldapi.AbortRootFSSnapshotResponse{Error: "ctld rootfs snapshot abort not implemented"})
+			return
+		}
+		var req ctldapi.AbortRootFSSnapshotRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(ctldapi.AbortRootFSSnapshotResponse{Error: err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		resp, status := rootFSController.AbortRootFSSnapshot(r, req)
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(resp)
 	})

@@ -1,7 +1,6 @@
 package http
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -76,6 +75,10 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "resume-enabled route requires a restartable service runtime")
 		return
 	}
+	if !sandboxServiceHasTimeout(route) {
+		c.Request = proxy.WithUpstreamTimeoutDisabledRequest(c.Request)
+		_ = proxy.DisableResponseWriteDeadline(c.Writer)
+	}
 	needsRuntimeRefetch := sandboxRuntimeMissing(sandbox)
 	if sandboxNeedsRuntime(sandbox) {
 		if !sandbox.AutoResume {
@@ -86,9 +89,7 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is not running and resume is disabled")
 			return
 		}
-		resumeCtx, cancel := context.WithTimeout(c.Request.Context(), defaultAutoResumeTimeout)
-		defer cancel()
-		if err := s.managerClient.ResumeSandbox(resumeCtx, sandboxID, "", sandbox.TeamID); err != nil {
+		if err := s.managerClient.ResumeSandbox(c.Request.Context(), sandboxID, "", sandbox.TeamID); err != nil {
 			s.logger.Warn("Auto resume failed", zap.String("sandbox_id", sandboxID), zap.Error(err))
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
 			return

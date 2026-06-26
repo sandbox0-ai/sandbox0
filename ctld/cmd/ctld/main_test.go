@@ -129,6 +129,76 @@ func TestReleaseVolumeOwnerReturnsConflictForBusyOwner(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rec.Code)
 }
 
+func TestCombinedControllerRoutesRootFSSnapshotAPI(t *testing.T) {
+	server := newHTTPServer(":0", combinedController{
+		Controller: ctldserver.NotImplementedController{},
+		RootFS:     fakeRootFSHandler{},
+	})
+
+	t.Run("prepare", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/rootfs/snapshots/prepare", strings.NewReader(`{"target":{"namespace":"ns","pod_name":"pod","container_name":"sandbox"}}`))
+		rec := httptest.NewRecorder()
+		server.Handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		var resp ctldapi.PrepareRootFSSnapshotResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, "snapshot-handle", resp.Handle)
+	})
+
+	t.Run("publish", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/rootfs/snapshots/publish", strings.NewReader(`{"handle":"snapshot-handle","sandbox_id":"sandbox-1","team_id":"team-1"}`))
+		rec := httptest.NewRecorder()
+		server.Handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		var resp ctldapi.PublishRootFSSnapshotResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.True(t, resp.Published)
+		assert.Equal(t, "sha256:test", resp.Descriptor.Digest)
+	})
+
+	t.Run("abort", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/rootfs/snapshots/abort", strings.NewReader(`{"handle":"snapshot-handle"}`))
+		rec := httptest.NewRecorder()
+		server.Handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		var resp ctldapi.AbortRootFSSnapshotResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.True(t, resp.Aborted)
+	})
+}
+
+type fakeRootFSHandler struct{}
+
+func (fakeRootFSHandler) InspectRootFS(_ *http.Request, _ ctldapi.InspectRootFSRequest) (ctldapi.InspectRootFSResponse, int) {
+	return ctldapi.InspectRootFSResponse{}, http.StatusOK
+}
+
+func (fakeRootFSHandler) SaveRootFS(_ *http.Request, _ ctldapi.SaveRootFSRequest) (ctldapi.SaveRootFSResponse, int) {
+	return ctldapi.SaveRootFSResponse{}, http.StatusOK
+}
+
+func (fakeRootFSHandler) PrepareRootFSSnapshot(_ *http.Request, _ ctldapi.PrepareRootFSSnapshotRequest) (ctldapi.PrepareRootFSSnapshotResponse, int) {
+	return ctldapi.PrepareRootFSSnapshotResponse{Handle: "snapshot-handle"}, http.StatusOK
+}
+
+func (fakeRootFSHandler) PublishRootFSSnapshot(_ *http.Request, _ ctldapi.PublishRootFSSnapshotRequest) (ctldapi.PublishRootFSSnapshotResponse, int) {
+	return ctldapi.PublishRootFSSnapshotResponse{
+		Published:  true,
+		Descriptor: ctldapi.RootFSDiffDescriptor{Digest: "sha256:test"},
+	}, http.StatusOK
+}
+
+func (fakeRootFSHandler) AbortRootFSSnapshot(_ *http.Request, _ ctldapi.AbortRootFSSnapshotRequest) (ctldapi.AbortRootFSSnapshotResponse, int) {
+	return ctldapi.AbortRootFSSnapshotResponse{Aborted: true}, http.StatusOK
+}
+
+func (fakeRootFSHandler) ApplyRootFS(_ *http.Request, _ ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int) {
+	return ctldapi.ApplyRootFSResponse{}, http.StatusOK
+}
+
 type fakeVolumePortalHandler struct {
 	mountedHandler http.Handler
 	bindErr        error

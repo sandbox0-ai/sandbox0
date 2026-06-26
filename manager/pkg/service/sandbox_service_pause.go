@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 )
@@ -44,21 +45,43 @@ func (s *SandboxService) PauseSandboxAndWait(ctx context.Context, sandboxID stri
 
 // ResumeSandbox creates or reuses a runtime and restores the latest rootfs checkpoint.
 func (s *SandboxService) ResumeSandbox(ctx context.Context, sandboxID string) (*ResumeSandboxResponse, error) {
-	_, err := s.ResumePausedSandboxRuntime(ctx, sandboxID)
-	if err != nil {
-		return nil, err
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	return &ResumeSandboxResponse{
-		SandboxID: sandboxID,
-		Resumed:   true,
-	}, nil
+	key := strings.TrimSpace(sandboxID)
+	if key == "" {
+		return nil, fmt.Errorf("sandbox_id is required")
+	}
+	resultCh := s.resumeGroup.DoChan(key, func() (any, error) {
+		restoreCtx, cancel := sandboxRestoreContext(context.Background())
+		defer cancel()
+		_, err := s.ResumePausedSandboxRuntime(restoreCtx, key)
+		if err != nil {
+			return nil, err
+		}
+		return &ResumeSandboxResponse{
+			SandboxID: key,
+			Resumed:   true,
+		}, nil
+	})
+	select {
+	case result := <-resultCh:
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		resp, ok := result.Val.(*ResumeSandboxResponse)
+		if !ok || resp == nil {
+			return nil, fmt.Errorf("resume sandbox returned invalid result")
+		}
+		return resp, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // ResumeSandboxAndWait creates or reuses a runtime and restores the latest rootfs checkpoint.
 func (s *SandboxService) ResumeSandboxAndWait(ctx context.Context, sandboxID string) (*ResumeSandboxResponse, error) {
-	waitCtx, cancel := sandboxRestoreContext(ctx)
-	defer cancel()
-	return s.ResumeSandbox(waitCtx, sandboxID)
+	return s.ResumeSandbox(ctx, sandboxID)
 }
 
 // TerminateSandboxByID implements the SandboxTerminator interface from controller package.

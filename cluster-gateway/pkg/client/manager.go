@@ -197,7 +197,8 @@ func (c *ManagerClient) ResumeSandbox(ctx context.Context, sandboxID, userID, te
 	req.Header.Set(internalauth.DefaultTokenHeader, token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	httpClient := c.resumeHTTPClient()
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("execute request: %w", err)
 	}
@@ -216,6 +217,18 @@ func (c *ManagerClient) ResumeSandbox(ctx context.Context, sandboxID, userID, te
 		return fmt.Errorf("%w: unexpected status code %d", ErrManagerUnavailable, resp.StatusCode)
 	}
 	return nil
+}
+
+func (c *ManagerClient) resumeHTTPClient() *http.Client {
+	if c == nil || c.httpClient == nil {
+		return http.DefaultClient
+	}
+	if c.httpClient.Timeout == 0 {
+		return c.httpClient
+	}
+	withoutClientTimeout := *c.httpClient
+	withoutClientTimeout.Timeout = 0
+	return &withoutClientTimeout
 }
 
 func managerUnavailableStatusError(statusCode int, body []byte) error {

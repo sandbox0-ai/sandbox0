@@ -109,6 +109,44 @@ type SaveRootFSResponse struct {
 	Error      string               `json:"error,omitempty"`
 }
 
+type PrepareRootFSSnapshotRequest struct {
+	Target        RootFSContainerRef `json:"target"`
+	ParentLayerID string             `json:"parent_layer_id,omitempty"`
+	ExcludedPaths []string           `json:"excluded_paths,omitempty"`
+	PortalPaths   []RootFSPortalPath `json:"portal_paths,omitempty"`
+}
+
+type PrepareRootFSSnapshotResponse struct {
+	Handle     string               `json:"handle,omitempty"`
+	Info       RootFSInfo           `json:"info,omitempty"`
+	Descriptor RootFSDiffDescriptor `json:"descriptor,omitempty"`
+	Error      string               `json:"error,omitempty"`
+}
+
+type PublishRootFSSnapshotRequest struct {
+	Handle                    string `json:"handle"`
+	SandboxID                 string `json:"sandbox_id"`
+	TeamID                    string `json:"team_id"`
+	ExpectedRuntimeGeneration int64  `json:"expected_runtime_generation,omitempty"`
+	ObjectKey                 string `json:"object_key,omitempty"`
+}
+
+type PublishRootFSSnapshotResponse struct {
+	Info       RootFSInfo           `json:"info,omitempty"`
+	Descriptor RootFSDiffDescriptor `json:"descriptor,omitempty"`
+	Published  bool                 `json:"published"`
+	Error      string               `json:"error,omitempty"`
+}
+
+type AbortRootFSSnapshotRequest struct {
+	Handle string `json:"handle"`
+}
+
+type AbortRootFSSnapshotResponse struct {
+	Aborted bool   `json:"aborted"`
+	Error   string `json:"error,omitempty"`
+}
+
 type ApplyRootFSRequest struct {
 	Target                      RootFSContainerRef      `json:"target"`
 	ExpectedRuntime             string                  `json:"expected_runtime,omitempty"`

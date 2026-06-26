@@ -40,6 +40,7 @@ services:
           function:
               runtime: python
               handler: handler
+              max_concurrency: 1
               source:
                   type: inline
                   code: |
@@ -82,6 +83,7 @@ Or with the API:
                 "function": {
                     "runtime": "python",
                     "handler": "handler",
+                    "max_concurrency": 1,
                     "source": {
                         "type": "inline",
                         "code": "def handler(request):\n    return {\n        \"status\": 200,\n        \"headers\": {\"content-type\": \"application/json\"},\n        \"body\": {\n            \"service_id\": request[\"service_id\"],\n            \"route_id\": request[\"route_id\"],\n            \"method\": request[\"method\"],\n            \"path\": request[\"path\"],\n        },\n    }\n"
@@ -104,6 +106,8 @@ Or with the API:
     ]
 }
 ```
+
+Set `max_concurrency` when a function must serialize access to shared sandbox state, such as refreshing a repository volume or publishing snapshots. The limit is enforced inside procd for one function service in one sandbox runtime. Omit it or set it to `0` for unlimited execution. When the limit is reached, Sandbox0 rejects new HTTP and SSE invocations with `429 Too Many Requests`; WebSocket invocations are closed by the function runtime.
 
 ```bash
 curl -X PUT "$SANDBOX0_API_URL/api/v1/sandboxes/$SANDBOX_ID/services" \
@@ -221,6 +225,7 @@ config:
               function:
                   runtime: python
                   handler: handler
+                  max_concurrency: 1
                   source:
                       type: inline
                       code: |
@@ -252,6 +257,7 @@ sandbox, err := client.ClaimSandbox(ctx, "default",
                 Function: apispec.NewOptSandboxFunction(apispec.SandboxFunction{
                     Runtime: apispec.SandboxFunctionRuntimePython,
                     Handler: apispec.NewOptString("handler"),
+                    MaxConcurrency: apispec.NewOptInt32(1),
                     Source: apispec.SandboxFunctionSource{
                         Type: apispec.SandboxFunctionSourceTypeInline,
                         Code: functionSource,
@@ -289,6 +295,7 @@ if err != nil {
                 _function: {
                     runtime: 'python',
                     handler: 'handler',
+                    maxConcurrency: 1,
                     source: {
                         type: 'inline',
                         code: 'def handler(request):\\n    return {"status": 200, "body": "ok"}\\n',
@@ -327,6 +334,7 @@ sandbox = client.sandboxes.claim(
                     "function": {
                         "runtime": "python",
                         "handler": "handler",
+                        "max_concurrency": 1,
                         "source": {
                             "type": "inline",
                             "code": "def handler(request):\\n    return {'status': 200, 'body': 'ok'}\\n",
@@ -372,6 +380,7 @@ Both gates are required for public URL requests to wake a paused sandbox. Sandbo
 - Public traffic must match a route on a public function service.
 - If `methods` is empty, all methods are allowed.
 - Route auth, CORS, rate limits, timeouts, path rewrite, and resume behavior are applied before the handler runs.
+- Function `max_concurrency` limits simultaneous handler executions for one function service inside one sandbox runtime. It does not coordinate across different sandboxes or different function services.
 
 ## Next Steps
 

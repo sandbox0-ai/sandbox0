@@ -260,11 +260,12 @@ func buildSandboxFunctionExecuteRequest(r *http.Request, service *mgr.SandboxApp
 		Code:     fn.Source.Code,
 	}
 	execReq := sandboxfunction.ExecuteRequest{
-		ServiceID: service.ID,
-		Runtime:   fn.Runtime,
-		Handler:   fn.Handler,
-		Source:    source,
-		EnvVars:   service.Runtime.EnvVars,
+		ServiceID:      service.ID,
+		Runtime:        fn.Runtime,
+		Handler:        fn.Handler,
+		MaxConcurrency: fn.MaxConcurrency,
+		Source:         source,
+		EnvVars:        service.Runtime.EnvVars,
 		Request: sandboxfunction.HTTPRequest{
 			Method:     r.Method,
 			Path:       r.URL.Path,

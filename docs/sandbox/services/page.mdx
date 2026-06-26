@@ -95,7 +95,7 @@ The same request reaches the backing service or function as `/github`.
 
 Use [Sandbox Functions](/docs/sandbox/functions) when you want a public HTTP handler without running a long-lived listener inside the sandbox. A function is still configured as a service with `runtime.type: function`, so it uses the same public URL, route policy, auth, CORS, rate limit, timeout, rewrite, and auto-resume model.
 
-Function services omit `port`, execute inline source through procd, and can return normal HTTP responses, SSE streams, or WebSocket messages.
+Function services omit `port`, execute inline source through procd, and can return normal HTTP responses, SSE streams, or WebSocket messages. Set `runtime.function.max_concurrency` when one function service must limit simultaneous handler executions inside a sandbox runtime.
 
 ## Cmd Services
 

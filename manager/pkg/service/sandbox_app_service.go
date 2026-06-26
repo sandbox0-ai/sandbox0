@@ -24,6 +24,7 @@ const (
 	maxSandboxServiceRoutes        = 32
 	maxSandboxServiceMethods       = 16
 	maxSandboxServiceAllowedValues = 32
+	maxSandboxFunctionConcurrency  = 1024
 )
 
 var sandboxServiceRouteIDPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -85,9 +86,10 @@ type SandboxAppServiceRuntime struct {
 
 // SandboxFunction configures code that cluster-gateway sends to procd for execution.
 type SandboxFunction struct {
-	Runtime string                `json:"runtime"`
-	Handler string                `json:"handler,omitempty"`
-	Source  SandboxFunctionSource `json:"source"`
+	Runtime        string                `json:"runtime"`
+	Handler        string                `json:"handler,omitempty"`
+	MaxConcurrency int                   `json:"max_concurrency,omitempty"`
+	Source         SandboxFunctionSource `json:"source"`
 }
 
 // SandboxFunctionSource carries user function code in sandbox service config.
@@ -384,6 +386,12 @@ func normalizeSandboxFunction(function *SandboxFunction) (*SandboxFunction, erro
 	}
 	if !sandboxFunctionHandlerPattern.MatchString(out.Handler) {
 		return nil, fmt.Errorf("handler must match %s", sandboxFunctionHandlerPattern.String())
+	}
+	if out.MaxConcurrency < 0 {
+		return nil, fmt.Errorf("max_concurrency must be greater than or equal to 0")
+	}
+	if out.MaxConcurrency > maxSandboxFunctionConcurrency {
+		return nil, fmt.Errorf("max_concurrency must be less than or equal to %d", maxSandboxFunctionConcurrency)
 	}
 
 	source := out.Source

@@ -298,8 +298,9 @@ func TestSandboxFunctionServiceExecutesThroughProcdPort(t *testing.T) {
 			Runtime: &mgr.SandboxAppServiceRuntime{
 				Type: mgr.SandboxAppServiceRuntimeFunction,
 				Function: &mgr.SandboxFunction{
-					Runtime: "python",
-					Handler: "handler",
+					Runtime:        "python",
+					Handler:        "handler",
+					MaxConcurrency: 2,
 					Source: mgr.SandboxFunctionSource{
 						Type: "inline",
 						Code: "def handler(request):\n    return {'status': 201}\n",
@@ -345,6 +346,9 @@ func TestSandboxFunctionServiceExecutesThroughProcdPort(t *testing.T) {
 	}
 	if execReq.ServiceID != "webhook" || execReq.RouteID != "root" {
 		t.Fatalf("execute service/route = %q/%q, want webhook/root", execReq.ServiceID, execReq.RouteID)
+	}
+	if execReq.MaxConcurrency != 2 {
+		t.Fatalf("execute max_concurrency = %d, want 2", execReq.MaxConcurrency)
 	}
 	if execReq.Request.Path != "/events/stripe" || execReq.Request.RawQuery != "source=test" {
 		t.Fatalf("execute path/query = %q/%q", execReq.Request.Path, execReq.Request.RawQuery)

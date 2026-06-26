@@ -36,6 +36,9 @@ const (
 	maxFunctionStdoutBytes    = 4 << 20
 	maxFunctionStderrBytes    = 64 << 10
 	maxFunctionStreamFrame    = 4 << 20
+
+	functionConcurrencyExceededCode    = "function_concurrency_exceeded"
+	functionConcurrencyExceededMessage = "function concurrency limit exceeded"
 )
 
 var (
@@ -59,6 +62,7 @@ type FunctionHandler struct {
 	maxTimeout         time.Duration
 	upgrader           websocket.Upgrader
 	sandboxEnvProvider func() map[string]string
+	concurrency        *functionConcurrencyLimiter
 }
 
 type functionHandlerRequest struct {
@@ -100,6 +104,7 @@ func newFunctionHandler(config functionHandlerConfig, logger *zap.Logger) *Funct
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(*http.Request) bool { return true },
 		},
+		concurrency: newFunctionConcurrencyLimiter(),
 	}
 }
 
@@ -136,6 +141,12 @@ func (h *FunctionHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
+	release, ok := h.acquireFunctionSlot(req)
+	if !ok {
+		writeError(w, http.StatusTooManyRequests, functionConcurrencyExceededCode, functionConcurrencyExceededMessage)
+		return
+	}
+	defer release()
 	modulePath, err := h.materializeSource(req.Source)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
@@ -212,6 +223,12 @@ func (h *FunctionHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(req.TimeoutMS)*time.Millisecond)
 		defer cancel()
 	}
+	release, ok := h.acquireFunctionSlot(req)
+	if !ok {
+		writeError(w, http.StatusTooManyRequests, functionConcurrencyExceededCode, functionConcurrencyExceededMessage)
+		return
+	}
+	defer release()
 	modulePath, err := h.materializeSource(req.Source)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
@@ -280,6 +297,12 @@ func (h *FunctionHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, err.Error()), time.Now().Add(time.Second))
 		return
 	}
+	release, ok := h.acquireFunctionSlot(req)
+	if !ok {
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseTryAgainLater, functionConcurrencyExceededMessage), time.Now().Add(time.Second))
+		return
+	}
+	defer release()
 	modulePath, err := h.materializeSource(req.Source)
 	if err != nil {
 		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, err.Error()), time.Now().Add(time.Second))
@@ -655,6 +678,9 @@ func validateFunctionExecuteRequest(req sandboxfunction.ExecuteRequest) error {
 	if req.TimeoutMS < 0 {
 		return errors.New("timeout_ms must be >= 0")
 	}
+	if req.MaxConcurrency < 0 {
+		return errors.New("max_concurrency must be >= 0")
+	}
 	return nil
 }
 
@@ -749,6 +775,57 @@ type functionRunTruncation struct {
 type functionWebSocketResult struct {
 	err           error
 	processExited bool
+}
+
+type functionConcurrencyLimiter struct {
+	mu       sync.Mutex
+	inFlight map[string]int
+}
+
+func newFunctionConcurrencyLimiter() *functionConcurrencyLimiter {
+	return &functionConcurrencyLimiter{inFlight: map[string]int{}}
+}
+
+func (h *FunctionHandler) acquireFunctionSlot(req sandboxfunction.ExecuteRequest) (func(), bool) {
+	if h.concurrency == nil {
+		return func() {}, true
+	}
+	return h.concurrency.acquire(functionConcurrencyKey(req), req.MaxConcurrency)
+}
+
+func (l *functionConcurrencyLimiter) acquire(key string, limit int) (func(), bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if limit > 0 && l.inFlight[key] >= limit {
+		return nil, false
+	}
+	l.inFlight[key]++
+	return sync.OnceFunc(func() {
+		l.release(key)
+	}), true
+}
+
+func (l *functionConcurrencyLimiter) release(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	current := l.inFlight[key]
+	if current <= 1 {
+		delete(l.inFlight, key)
+		return
+	}
+	l.inFlight[key] = current - 1
+}
+
+func functionConcurrencyKey(req sandboxfunction.ExecuteRequest) string {
+	serviceID := strings.TrimSpace(req.ServiceID)
+	if serviceID != "" {
+		return "service:" + serviceID
+	}
+	digest := req.Source.Digest
+	if digest == "" && req.Source.Code != "" {
+		digest = sandboxfunction.InlineDigest(req.Source.Code)
+	}
+	return "source:" + req.Runtime + ":" + req.Handler + ":" + digest
 }
 
 type trackingResponseWriter struct {

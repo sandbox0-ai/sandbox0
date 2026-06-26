@@ -1700,6 +1700,9 @@ type SandboxFunction struct {
 	// Handler Python callable name. Defaults to handler.
 	Handler *string `json:"handler,omitempty"`
 
+	// MaxConcurrency Maximum in-flight executions for this function service inside one sandbox runtime. Omit or set to 0 for unlimited.
+	MaxConcurrency *int32 `json:"max_concurrency,omitempty"`
+
 	// Runtime Function runtime. Only python is supported in this version.
 	Runtime SandboxFunctionRuntime `json:"runtime"`
 

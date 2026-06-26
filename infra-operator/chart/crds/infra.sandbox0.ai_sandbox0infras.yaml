@@ -3124,6 +3124,8 @@ spec:
                               webhookMaxRetries:
                                 default: 3
                                 type: integer
+                              webhookOutboxDir:
+                                type: string
                               webhookQueueSize:
                                 default: 256
                                 type: integer

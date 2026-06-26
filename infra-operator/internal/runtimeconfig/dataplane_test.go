@@ -17,6 +17,37 @@ func TestToManagerPreservesEgressAuthDefaultResolveTTL(t *testing.T) {
 	}
 }
 
+func TestToManagerLeavesProcdWebhookOutboxDirUnsetWhenOmitted(t *testing.T) {
+	cfg := ToManager(&infrav1alpha1.ManagerConfig{})
+	if cfg.ProcdConfig.WebhookOutboxDir != "" {
+		t.Fatalf("webhook outbox dir = %q, want empty path", cfg.ProcdConfig.WebhookOutboxDir)
+	}
+}
+
+func TestToManagerPreservesProcdWebhookOutboxDir(t *testing.T) {
+	outboxDir := "/custom/procd/webhook-outbox"
+	cfg := ToManager(&infrav1alpha1.ManagerConfig{
+		ProcdConfig: infrav1alpha1.ProcdConfig{
+			WebhookOutboxDir: &outboxDir,
+		},
+	})
+	if cfg.ProcdConfig.WebhookOutboxDir != outboxDir {
+		t.Fatalf("webhook outbox dir = %q, want custom path", cfg.ProcdConfig.WebhookOutboxDir)
+	}
+}
+
+func TestToManagerPreservesExplicitEmptyProcdWebhookOutboxDir(t *testing.T) {
+	outboxDir := ""
+	cfg := ToManager(&infrav1alpha1.ManagerConfig{
+		ProcdConfig: infrav1alpha1.ProcdConfig{
+			WebhookOutboxDir: &outboxDir,
+		},
+	})
+	if cfg.ProcdConfig.WebhookOutboxDir != "" {
+		t.Fatalf("webhook outbox dir = %q, want empty path", cfg.ProcdConfig.WebhookOutboxDir)
+	}
+}
+
 func TestToStorageProxyDefaultsObjectEncryptionEnabled(t *testing.T) {
 	cfg := ToStorageProxy(nil)
 	if !cfg.ObjectEncryptionEnabled {

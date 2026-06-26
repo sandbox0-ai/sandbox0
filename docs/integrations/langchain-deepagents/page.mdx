@@ -1,0 +1,171 @@
+# LangChain Deep Agents
+
+Use Sandbox0 as the sandbox backend for LangChain Deep Agents and Deep Agents Code.
+
+LangChain Deep Agents can run shell commands and file tools through a pluggable sandbox backend. The Sandbox0 adapter implements that backend with a Sandbox0 sandbox from the `default` template.
+
+<Callout variant="info">
+Deep Agents Code owns the sandbox lifecycle when it creates the sandbox. Pass an existing `--sandbox-id` when your application or operator should own the lifecycle instead.
+</Callout>
+
+## Requirements
+
+- Python 3.11 or later for the Deep Agents dependencies.
+- `sandbox0[deepagents]` installed from the Sandbox0 Python SDK.
+- A Sandbox0 API key in `SANDBOX0_TOKEN` or passed to the provider.
+- Optional `SANDBOX0_BASE_URL` when you are not using the default Sandbox0 Cloud endpoint.
+- The Sandbox0 `default` template. The adapter uses `/workspace` as the Deep Agents working directory.
+
+```bash
+pip install "sandbox0[deepagents]"
+```
+
+## Basic Usage
+
+The package registers a Deep Agents Code sandbox provider named `sandbox0`.
+
+```bash
+export SANDBOX0_TOKEN=...
+dcode --sandbox sandbox0
+```
+
+Deep Agents Code starts a Sandbox0 sandbox, gives the agent shell and file access through the Deep Agents sandbox backend, and deletes the sandbox when the Deep Agents Code session exits normally.
+
+If you run a self-hosted or private Sandbox0 endpoint:
+
+```bash
+export SANDBOX0_TOKEN=...
+export SANDBOX0_BASE_URL=https://sandbox0.example.com
+dcode --sandbox sandbox0
+```
+
+## Sandbox Lifecycle
+
+There are two ownership modes.
+
+| Mode | How to start | Who deletes the sandbox | Use when |
+|------|--------------|-------------------------|----------|
+| Deep Agents Code-owned | `dcode --sandbox sandbox0` | Deep Agents Code calls the Sandbox0 provider delete hook on exit. | You want a disposable workspace for one agent session. |
+| Caller-owned | `dcode --sandbox sandbox0 --sandbox-id sb_abc123` | You delete or retain the sandbox through Sandbox0. | You want to inspect, reuse, pause, resume, snapshot, or delete the sandbox yourself. |
+
+### Deep Agents Code-Owned Lifecycle
+
+When no `--sandbox-id` is passed, Deep Agents Code calls `Sandbox0Provider.get_or_create(sandbox_id=None)`.
+
+For a fresh Sandbox0 sandbox, the provider:
+
+1. Claims a sandbox from the `default` template.
+2. Sets the Deep Agents working directory to `/workspace`.
+3. Returns a `Sandbox0DeepAgentsSandbox` backend.
+4. Deletes the Sandbox0 sandbox when Deep Agents Code exits normally.
+
+New Sandbox0 sandboxes created by this provider use these default lifecycle limits:
+
+| Field | Default | Behavior |
+|-------|---------|----------|
+| `ttl` | `3600` seconds | Runtime soft TTL. Sandbox0 can pause the sandbox after one hour and release runtime compute while preserving sandbox identity and checkpointed rootfs state. |
+| `hard_ttl` | `2592000` seconds | Hard lifetime cap. Sandbox0 deletes the sandbox identity and durable rootfs state after 30 days. |
+
+Normal Deep Agents Code cleanup deletes the sandbox before these limits matter. The TTLs are guardrails for abandoned sessions, interrupted clients, or failed cleanup.
+
+### Caller-Owned Lifecycle
+
+Pass an existing Sandbox0 sandbox ID when the sandbox should survive the Deep Agents Code process:
+
+```bash
+dcode --sandbox sandbox0 --sandbox-id sb_abc123
+```
+
+In this mode, the provider reattaches to the existing sandbox and Deep Agents Code does not delete it on exit. The sandbox keeps whatever `ttl`, `hard_ttl`, network policy, mounted volumes, services, and rootfs state it already has.
+
+Use Sandbox0 APIs or `s0` to pause, resume, snapshot, fork, or delete the sandbox later.
+
+## Override Lifecycle Defaults
+
+For `dcode`, use `~/.deepagents/config.toml` when you need provider parameters that are not exposed as CLI flags.
+
+Because Deep Agents config providers override entry-point discovery, include the provider class path when declaring `sandbox0` explicitly:
+
+```toml
+[sandboxes]
+default = "sandbox0"
+
+[sandboxes.providers.sandbox0]
+class_path = "sandbox0_deepagents.provider:Sandbox0Provider"
+working_dir = "/workspace"
+package = "sandbox0[deepagents]"
+supports_sandbox_id = true
+
+[sandboxes.providers.sandbox0.params]
+template = "default"
+sandbox_ttl_sec = 7200
+sandbox_hard_ttl_sec = 604800
+```
+
+This example creates new sandboxes with a two-hour soft TTL and seven-day hard TTL.
+
+If you pass a full `SandboxConfig` programmatically, explicit values are preserved and the provider only fills missing lifecycle fields with defaults.
+
+## Python Backend Usage
+
+Use `Sandbox0DeepAgentsSandbox` directly when your application creates and deletes the Sandbox0 sandbox itself.
+
+```python
+import os
+
+from sandbox0 import Client
+from sandbox0_deepagents import Sandbox0DeepAgentsSandbox
+
+
+client = Client(token=os.environ["SANDBOX0_TOKEN"])
+sandbox = client.sandboxes.claim("default")
+backend = Sandbox0DeepAgentsSandbox(sandbox=sandbox)
+
+try:
+    result = backend.execute("python3 - <<'PY'\nprint('hello from Sandbox0')\nPY")
+    print(result.output)
+finally:
+    client.sandboxes.delete(sandbox.id)
+```
+
+In this mode, the backend does not own the sandbox lifecycle. Your application decides when to pause, resume, snapshot, fork, or delete the sandbox.
+
+## File And Shell Semantics
+
+The adapter inherits Deep Agents `BaseSandbox` behavior.
+
+| Deep Agents operation | Sandbox0 path |
+|-----------------------|---------------|
+| `execute(...)` | Sandbox0 CMD context running `bash -lc` in `/workspace`. |
+| `upload_files(...)` | Sandbox0 sandbox file write API. |
+| `download_files(...)` | Sandbox0 sandbox file read API. |
+| `read`, `write`, `edit`, `ls`, `glob`, `grep`, `delete` | Deep Agents `BaseSandbox` helpers built from `execute`, `upload_files`, and `download_files`. |
+
+Deep Agents file transfer APIs expect absolute sandbox paths. Relative upload or download paths return `invalid_path`.
+
+The default Deep Agents working directory is `/workspace`, but file APIs can still access absolute paths that the sandbox process can access. Use Sandbox0 templates, mounted volumes, network policy, and credential boundaries to decide what should be reachable inside the sandbox.
+
+## Production Guidance
+
+- Use `dcode --sandbox sandbox0` for disposable agent sessions.
+- Use `--sandbox-id` when an operator or application owns retention and cleanup.
+- Keep important files under mounted durable storage when they must survive sandbox deletion.
+- Treat the default `ttl` and `hard_ttl` as safety limits, not as a substitute for explicit cleanup.
+- Keep broad cloud credentials outside the sandbox. Prefer Sandbox0 network policy, protocol controls, credential sources, and egress auth for destination-scoped access.
+- Use Sandbox0 pause, resume, snapshot, and fork APIs when you need to inspect or preserve an agent workspace.
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Pause And Resume" href="/docs/sandbox/pause-resume" cta="Continue">
+    Understand `ttl`, `hard_ttl`, auto-resume, and runtime lifecycle behavior.
+  </Card>
+
+  <Card title="Files" href="/docs/sandbox/files" cta="Continue">
+    Read, write, watch, and manage files inside a Sandbox0 sandbox.
+  </Card>
+
+  <Card title="OpenAI Agents" href="/docs/sandbox/integrations/openai-agents" cta="Continue">
+    Compare the OpenAI Agents SDK integration and its volume-backed workspace lifecycle.
+  </Card>
+</CardGroup>

@@ -256,6 +256,10 @@
           "title": "GitHub CI"
         },
         {
+          "slug": "langchain-deepagents",
+          "title": "LangChain Deep Agents"
+        },
+        {
           "slug": "openai-agents",
           "title": "OpenAI Agents"
         },

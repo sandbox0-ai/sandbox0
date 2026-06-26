@@ -18,7 +18,8 @@ type DB interface {
 }
 
 type Repository struct {
-	db DB
+	db            DB
+	defaultLimits map[Dimension]int64
 }
 
 func NewRepository(pool *pgxpool.Pool) *Repository {
@@ -33,6 +34,44 @@ func NewRepositoryWithDB(db DB) *Repository {
 		return nil
 	}
 	return &Repository{db: db}
+}
+
+func NewRepositoryWithDefaults(pool *pgxpool.Pool, defaults []DefaultLimit) (*Repository, error) {
+	if pool == nil {
+		return nil, nil
+	}
+	return NewRepositoryWithDBDefaults(pool, defaults)
+}
+
+func NewRepositoryWithDBDefaults(db DB, defaults []DefaultLimit) (*Repository, error) {
+	if db == nil {
+		return nil, nil
+	}
+	defaultLimits, err := buildDefaultLimitMap(defaults)
+	if err != nil {
+		return nil, err
+	}
+	return &Repository{db: db, defaultLimits: defaultLimits}, nil
+}
+
+func buildDefaultLimitMap(defaults []DefaultLimit) (map[Dimension]int64, error) {
+	if len(defaults) == 0 {
+		return nil, nil
+	}
+	limits := make(map[Dimension]int64, len(defaults))
+	for _, limit := range defaults {
+		if !KnownDimension(limit.Dimension) {
+			return nil, fmt.Errorf("unknown quota dimension %q", limit.Dimension)
+		}
+		if limit.LimitValue < 0 {
+			return nil, fmt.Errorf("default quota %s limit_value must be non-negative", limit.Dimension)
+		}
+		if _, exists := limits[limit.Dimension]; exists {
+			return nil, fmt.Errorf("duplicate default quota dimension %q", limit.Dimension)
+		}
+		limits[limit.Dimension] = limit.LimitValue
+	}
+	return limits, nil
 }
 
 func (r *Repository) GetLimit(ctx context.Context, teamID string, dimension Dimension) (*Limit, error) {
@@ -55,11 +94,22 @@ func (r *Repository) GetLimit(ctx context.Context, teamID string, dimension Dime
 	`, teamID, string(dimension)).Scan(&limit.TeamID, &limit.Dimension, &limit.LimitValue)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
+			return r.defaultLimit(teamID, dimension), nil
 		}
 		return nil, fmt.Errorf("query team quota limit: %w", err)
 	}
 	return &limit, nil
+}
+
+func (r *Repository) defaultLimit(teamID string, dimension Dimension) *Limit {
+	if r == nil || len(r.defaultLimits) == 0 {
+		return nil
+	}
+	limitValue, ok := r.defaultLimits[dimension]
+	if !ok {
+		return nil
+	}
+	return &Limit{TeamID: teamID, Dimension: dimension, LimitValue: limitValue}
 }
 
 func (r *Repository) CurrentUsage(ctx context.Context, teamID string, dimension Dimension) (int64, error) {

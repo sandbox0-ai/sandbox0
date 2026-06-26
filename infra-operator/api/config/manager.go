@@ -82,6 +82,10 @@ type ManagerConfig struct {
 	TeamTemplateMemoryPerCPU string `yaml:"team_template_memory_per_cpu" json:"teamTemplateMemoryPerCpu"`
 	// +optional
 	SandboxRuntimeClassName string `yaml:"sandbox_runtime_class_name" json:"sandboxRuntimeClassName"`
+	// DefaultTeamQuotas configures region-wide fallback team quota limits.
+	// Team-specific quota rows in the database override these defaults.
+	// +optional
+	DefaultTeamQuotas []TeamQuotaLimitConfig `yaml:"default_team_quotas" json:"defaultTeamQuotas"`
 	// AllowColdStartWithoutReadyDataPlane lets cold claims create Pending pods
 	// when no sandbox data-plane-ready nodes exist yet. This is required for
 	// node autoscaler scale-from-zero deployments.
@@ -180,6 +184,13 @@ type ManagerConfig struct {
 	// topology without requiring users to duplicate netd settings per template.
 	// +optional
 	SandboxPodPlacement SandboxPodPlacementConfig `yaml:"sandbox_pod_placement" json:"-"`
+}
+
+// TeamQuotaLimitConfig configures a fallback quota limit for teams without a
+// database override for the same dimension.
+type TeamQuotaLimitConfig struct {
+	Dimension  string `yaml:"dimension" json:"dimension"`
+	LimitValue int64  `yaml:"limit_value" json:"limitValue"`
 }
 
 // StaticEgressAuthConfig defines a static auth directive for runtime egress auth injection.

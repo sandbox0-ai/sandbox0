@@ -1313,56 +1313,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-    put:
-      tags: [quotas]
-      summary: Set team quota
-      security:
-        - bearerAuth: []
-      x-upstream-service: manager
-      x-upstream-path: /api/v1/quotas/{dimension}
-      parameters:
-        - $ref: "#/components/parameters/QuotaDimension"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/PutTeamQuotaRequest"
-      responses:
-        "200":
-          description: Updated team quota
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SuccessTeamQuotaResponse"
-        "400":
-          description: Invalid request
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
-    delete:
-      tags: [quotas]
-      summary: Delete team quota
-      security:
-        - bearerAuth: []
-      x-upstream-service: manager
-      x-upstream-path: /api/v1/quotas/{dimension}
-      parameters:
-        - $ref: "#/components/parameters/QuotaDimension"
-      responses:
-        "200":
-          description: Deleted team quota
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SuccessDeletedResponse"
-        "400":
-          description: Invalid request
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
   /api/v1/sandboxes/{id}:
     get:
       tags: [sandboxes]
@@ -3284,15 +3234,26 @@ components:
           type: integer
           format: int64
           nullable: true
-      required: [team_id, dimension]
-    PutTeamQuotaRequest:
-      type: object
-      properties:
-        limit_value:
+        current:
           type: integer
           format: int64
           minimum: 0
-      required: [limit_value]
+        remaining:
+          type: integer
+          format: int64
+          minimum: 0
+          nullable: true
+        unlimited:
+          type: boolean
+        unit:
+          type: string
+          enum:
+            - count
+            - millicpu
+            - MiB
+            - GB
+            - bytes
+      required: [team_id, dimension, limit_value, current, remaining, unlimited, unit]
     SuccessRegistryCredentialsResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"

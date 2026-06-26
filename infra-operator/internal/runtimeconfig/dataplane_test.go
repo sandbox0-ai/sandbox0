@@ -48,6 +48,24 @@ func TestToManagerPreservesExplicitEmptyProcdWebhookOutboxDir(t *testing.T) {
 	}
 }
 
+func TestToManagerPreservesDefaultTeamQuotas(t *testing.T) {
+	cfg := ToManager(&infrav1alpha1.ManagerConfig{
+		DefaultTeamQuotas: []infrav1alpha1.TeamQuotaLimitConfig{
+			{Dimension: "active_sandboxes", LimitValue: 3},
+			{Dimension: "cpu_millicpu", LimitValue: 2000},
+		},
+	})
+	if len(cfg.DefaultTeamQuotas) != 2 {
+		t.Fatalf("default team quotas len = %d, want 2", len(cfg.DefaultTeamQuotas))
+	}
+	if cfg.DefaultTeamQuotas[0].Dimension != "active_sandboxes" || cfg.DefaultTeamQuotas[0].LimitValue != 3 {
+		t.Fatalf("first default quota = %+v, want active_sandboxes=3", cfg.DefaultTeamQuotas[0])
+	}
+	if cfg.DefaultTeamQuotas[1].Dimension != "cpu_millicpu" || cfg.DefaultTeamQuotas[1].LimitValue != 2000 {
+		t.Fatalf("second default quota = %+v, want cpu_millicpu=2000", cfg.DefaultTeamQuotas[1])
+	}
+}
+
 func TestToStorageProxyDefaultsObjectEncryptionEnabled(t *testing.T) {
 	cfg := ToStorageProxy(nil)
 	if !cfg.ObjectEncryptionEnabled {

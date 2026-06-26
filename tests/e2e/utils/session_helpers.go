@@ -105,21 +105,17 @@ func (s *Session) doJSONRequest(ctx context.Context, method, path string, body a
 	}
 	path = ensureLeadingSlash(path)
 
-	var payload io.Reader
-	if body != nil {
-		raw, err := json.Marshal(body)
-		if err != nil {
-			return 0, nil, fmt.Errorf("marshal request body: %w", err)
-		}
-		payload = bytes.NewReader(raw)
+	payload, contentType, err := encodeJSONRequestBody(body)
+	if err != nil {
+		return 0, nil, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, s.baseURL+path, payload)
 	if err != nil {
 		return 0, nil, err
 	}
-	if body != nil {
-		req.Header.Set("Content-Type", defaultContentType)
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 	s.setAuthHeaders(req, withAuth)
 
@@ -128,12 +124,7 @@ func (s *Session) doJSONRequest(ctx context.Context, method, path string, body a
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return resp.StatusCode, nil, err
-	}
-	return resp.StatusCode, respBody, nil
+	return readResponseBody(resp)
 }
 
 func (s *Session) doRawRequest(ctx context.Context, method, path string, body []byte, contentType string, withAuth bool) (int, []byte, error) {
@@ -161,7 +152,21 @@ func (s *Session) doRawRequest(ctx context.Context, method, path string, body []
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
+	return readResponseBody(resp)
+}
 
+func encodeJSONRequestBody(body any) (io.Reader, string, error) {
+	if body == nil {
+		return nil, "", nil
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, "", fmt.Errorf("marshal request body: %w", err)
+	}
+	return bytes.NewReader(raw), defaultContentType, nil
+}
+
+func readResponseBody(resp *http.Response) (int, []byte, error) {
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return resp.StatusCode, nil, err

@@ -69,6 +69,9 @@ func TestSetupRoutesSkipsControlPlaneEndpointsInPublicMode(t *testing.T) {
 	if hasRoute(server.router, "POST", "/internal/v1/sandboxes/:id/resume") {
 		t.Fatal("expected public mode to skip internal sandbox resume route")
 	}
+	if hasRoute(server.router, "PUT", "/internal/v1/teams/:team_id/quotas/:dimension") {
+		t.Fatal("expected public mode to skip internal quota write route")
+	}
 }
 
 func TestSetupRoutesMountsControlPlaneEndpointsInInternalMode(t *testing.T) {
@@ -84,6 +87,12 @@ func TestSetupRoutesMountsControlPlaneEndpointsInInternalMode(t *testing.T) {
 	}
 	if !hasRoute(server.router, "POST", "/internal/v1/sandboxes/:id/resume") {
 		t.Fatal("expected internal mode to mount internal sandbox resume route")
+	}
+	if !hasRoute(server.router, "PUT", "/internal/v1/teams/:team_id/quotas/:dimension") {
+		t.Fatal("expected internal mode to mount internal quota write route")
+	}
+	if !hasRoute(server.router, "DELETE", "/internal/v1/teams/:team_id/quotas/:dimension") {
+		t.Fatal("expected internal mode to mount internal quota delete route")
 	}
 }
 
@@ -110,6 +119,25 @@ func TestSetupRoutesMountsSandboxLogsEndpoint(t *testing.T) {
 
 	if !hasRoute(server.router, "GET", "/api/v1/sandboxes/:id/logs") {
 		t.Fatal("expected sandbox logs route to be mounted")
+	}
+}
+
+func TestSetupRoutesExposesQuotaReadOnlyPublicAPI(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server, _, _ := testMeteringRouteServer(t, "public")
+	server.requestLogger = middleware.NewRequestLogger(zap.NewNop())
+	server.obsProvider = newTestMeteringObservability(t)
+	server.setupRoutes()
+
+	if !hasRoute(server.router, "GET", "/api/v1/quotas/:dimension") {
+		t.Fatal("expected public quota read route")
+	}
+	if hasRoute(server.router, "PUT", "/api/v1/quotas/:dimension") {
+		t.Fatal("expected public quota put route to be absent")
+	}
+	if hasRoute(server.router, "DELETE", "/api/v1/quotas/:dimension") {
+		t.Fatal("expected public quota delete route to be absent")
 	}
 }
 

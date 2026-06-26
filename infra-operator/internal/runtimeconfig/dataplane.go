@@ -30,6 +30,7 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 	cfg.DefaultSandboxTTL = spec.DefaultSandboxTTL
 	cfg.TeamTemplateMemoryPerCPU = spec.TeamTemplateMemoryPerCPU
 	cfg.SandboxRuntimeClassName = spec.SandboxRuntimeClassName
+	cfg.DefaultTeamQuotas = cloneTeamQuotaLimitConfigs(spec.DefaultTeamQuotas)
 	cfg.AllowColdStartWithoutReadyDataPlane = spec.AllowColdStartWithoutReadyDataPlane
 	cfg.NetdPolicyApplyTimeout = spec.NetdPolicyApplyTimeout
 	cfg.NetdPolicyApplyPollInterval = spec.NetdPolicyApplyPollInterval
@@ -65,6 +66,20 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 		ScaleDownPercent:        spec.Autoscaler.ScaleDownPercent,
 	}
 	return cfg
+}
+
+func cloneTeamQuotaLimitConfigs(in []infrav1alpha1.TeamQuotaLimitConfig) []apiconfig.TeamQuotaLimitConfig {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]apiconfig.TeamQuotaLimitConfig, 0, len(in))
+	for _, limit := range in {
+		out = append(out, apiconfig.TeamQuotaLimitConfig{
+			Dimension:  limit.Dimension,
+			LimitValue: limit.LimitValue,
+		})
+	}
+	return out
 }
 
 func ToStorageProxy(spec *infrav1alpha1.StorageProxyConfig) *apiconfig.StorageProxyConfig {

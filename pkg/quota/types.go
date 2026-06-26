@@ -40,6 +40,63 @@ type Limit struct {
 	LimitValue int64     `json:"limit_value"`
 }
 
+// DefaultLimit configures a region-wide fallback quota limit for a dimension.
+// Team-specific database limits override these defaults.
+type DefaultLimit struct {
+	Dimension  Dimension `json:"dimension"`
+	LimitValue int64     `json:"limit_value"`
+}
+
+// Status describes the current quota view for a team and dimension.
+type Status struct {
+	TeamID     string    `json:"team_id"`
+	Dimension  Dimension `json:"dimension"`
+	LimitValue *int64    `json:"limit_value"`
+	Current    int64     `json:"current"`
+	Remaining  *int64    `json:"remaining"`
+	Unlimited  bool      `json:"unlimited"`
+	Unit       string    `json:"unit"`
+}
+
+// NewStatus builds a user-facing quota status from the configured limit and usage.
+func NewStatus(teamID string, dimension Dimension, limit *Limit, current int64) Status {
+	status := Status{
+		TeamID:    teamID,
+		Dimension: dimension,
+		Current:   current,
+		Unlimited: limit == nil,
+		Unit:      UnitForDimension(dimension),
+	}
+	if limit == nil {
+		return status
+	}
+	status.LimitValue = &limit.LimitValue
+	remaining := limit.LimitValue - current
+	if remaining < 0 {
+		remaining = 0
+	}
+	status.Remaining = &remaining
+	return status
+}
+
+// UnitForDimension returns the unit used by limit and usage values for a quota dimension.
+func UnitForDimension(d Dimension) string {
+	switch d {
+	case DimensionActiveSandboxes:
+		return "count"
+	case DimensionCPU:
+		return "millicpu"
+	case DimensionMemory:
+		return "MiB"
+	case DimensionVolumeStorageGB, DimensionSnapshotGB:
+		return "GB"
+	case DimensionEgress, DimensionIngress:
+		return "bytes"
+	default:
+		return ""
+	}
+}
+
 type Decision struct {
 	Allowed    bool      `json:"allowed"`
 	TeamID     string    `json:"team_id"`

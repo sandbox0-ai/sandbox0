@@ -200,8 +200,6 @@ func (s *Server) setupRoutes() {
 		quotas := v1.Group("/quotas")
 		{
 			quotas.GET("/:dimension", s.getTeamQuota)
-			quotas.PUT("/:dimension", s.putTeamQuota)
-			quotas.DELETE("/:dimension", s.deleteTeamQuota)
 		}
 	}
 
@@ -234,6 +232,12 @@ func (s *Server) setupRoutes() {
 		internalEgressAuth := internal.Group("/egress-auth")
 		{
 			internalEgressAuth.POST("/resolve", s.resolveEgressAuth)
+		}
+
+		internalTeamQuotas := internal.Group("/teams/:team_id/quotas")
+		{
+			internalTeamQuotas.PUT("/:dimension", s.putTeamQuotaInternal)
+			internalTeamQuotas.DELETE("/:dimension", s.deleteTeamQuotaInternal)
 		}
 	}
 }

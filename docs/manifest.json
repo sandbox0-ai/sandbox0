@@ -74,6 +74,10 @@
           "title": "Network"
         },
         {
+          "slug": "quota",
+          "title": "Quotas"
+        },
+        {
           "slug": "protocol-controls",
           "title": "Protocol Controls"
         },

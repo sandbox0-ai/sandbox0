@@ -404,8 +404,6 @@ func (s *Server) setupRoutes() {
 		quotas.Use(s.managerUpstreamMiddleware())
 		{
 			quotas.GET("/:dimension", s.authMiddleware.RequirePermission(gatewayauthn.PermQuotaRead), s.proxyToManager)
-			quotas.PUT("/:dimension", s.authMiddleware.RequirePermission(gatewayauthn.PermQuotaWrite), s.proxyToManager)
-			quotas.DELETE("/:dimension", s.authMiddleware.RequirePermission(gatewayauthn.PermQuotaWrite), s.proxyToManager)
 		}
 
 		rootFSSnapshots := v1.Group("/sandbox-rootfs-snapshots")
@@ -513,6 +511,10 @@ func (s *Server) setupInternalControlPlaneRoutes() {
 
 		// Template statistics (→ Manager)
 		internal.GET("/templates/stats", s.getTemplateStats)
+
+		// Team quota management (→ Manager)
+		internal.PUT("/teams/:team_id/quotas/:dimension", s.proxyInternalSystemQuotaRequest)
+		internal.DELETE("/teams/:team_id/quotas/:dimension", s.proxyInternalSystemQuotaRequest)
 	}
 }
 

@@ -378,6 +378,32 @@ func TestStorageWindowFromStateUsesRootFSWindowType(t *testing.T) {
 	}
 }
 
+func TestStorageWindowFromStateUsesVolumeWindowTypeForSnapshot(t *testing.T) {
+	start := time.Date(2026, 3, 12, 12, 0, 0, 0, time.UTC)
+	window := storageWindowFromState(&StorageProjectionState{
+		SubjectType: SubjectTypeSnapshot,
+		SubjectID:   "snap-1",
+		Product:     ProductSandbox,
+		TeamID:      "team-1",
+		VolumeID:    "vol-1",
+		SnapshotID:  "snap-1",
+		SizeBytes:   1024,
+		ObservedAt:  start,
+	}, start.Add(time.Hour))
+	if window == nil {
+		t.Fatal("expected snapshot storage window")
+	}
+	if window.WindowType != WindowTypeSandboxVolumeByteHours {
+		t.Fatalf("window_type = %q, want %q", window.WindowType, WindowTypeSandboxVolumeByteHours)
+	}
+	if window.SubjectType != SubjectTypeSnapshot || window.SubjectID != "snap-1" {
+		t.Fatalf("unexpected subject: %s/%s", window.SubjectType, window.SubjectID)
+	}
+	if window.VolumeID != "vol-1" || window.SnapshotID != "snap-1" {
+		t.Fatalf("unexpected volume/snapshot ids: %s/%s", window.VolumeID, window.SnapshotID)
+	}
+}
+
 func TestRecordStorageObservationClosesPreviousWindow(t *testing.T) {
 	start := time.Date(2026, 3, 12, 12, 0, 0, 0, time.UTC)
 	end := start.Add(2 * time.Hour)

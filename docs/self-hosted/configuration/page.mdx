@@ -49,8 +49,8 @@ Sandbox compute uses a serverless-style contract:
 | `sandbox.runtime_mib_milliseconds` | `mib_milliseconds` | Active sandbox runtime multiplied by allocated memory |
 | `sandbox.egress_bytes` | `bytes` | Egress traffic observed by `netd` |
 | `sandbox.ingress_bytes` | `bytes` | Ingress traffic observed by `netd` |
-| `sandbox.volume_byte_hours` | `byte_hours` | Persisted volume storage over time |
-| `sandbox.snapshot_byte_hours` | `byte_hours` | Persisted snapshot storage over time |
+| `sandbox.volume_byte_hours` | `byte_hours` | Persisted volume and volume snapshot storage over time. Snapshot rows keep `subject_type=snapshot` |
+| `sandbox.rootfs_byte_hours` | `byte_hours` | Persisted sandbox rootfs COW object storage over time |
 
 Idle template pool pods are capacity, not billable sandbox runtime. Public template idle pools are platform cost, and team template idle pools should be controlled by plan or entitlement limits rather than usage metering.
 

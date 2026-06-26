@@ -749,8 +749,6 @@ func storageWindowFromState(state *StorageProjectionState, end time.Time) *Windo
 	}
 	windowType := WindowTypeSandboxVolumeByteHours
 	switch state.SubjectType {
-	case SubjectTypeSnapshot:
-		windowType = WindowTypeSandboxSnapshotByteHours
 	case SubjectTypeRootFS:
 		windowType = WindowTypeSandboxRootFSByteHours
 	}

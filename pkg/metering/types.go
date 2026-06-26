@@ -31,7 +31,6 @@ const (
 
 	WindowTypeSandboxRuntimeMiBMilliseconds = "sandbox.runtime_mib_milliseconds"
 	WindowTypeSandboxVolumeByteHours        = "sandbox.volume_byte_hours"
-	WindowTypeSandboxSnapshotByteHours      = "sandbox.snapshot_byte_hours"
 	WindowTypeSandboxRootFSByteHours        = "sandbox.rootfs_byte_hours"
 
 	WindowTypeManagedAgentSessionRunningMilliseconds = "managed_agent.session_running_milliseconds"

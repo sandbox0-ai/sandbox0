@@ -13,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 type fakeRecorder struct {
@@ -370,7 +371,7 @@ func TestLifecycleProjectorRetriesCommitWithoutDuplicatingWindows(t *testing.T) 
 	}
 }
 
-func TestLifecycleProjectorIgnoresIdlePoolPods(t *testing.T) {
+func TestLifecycleProjectorIgnoresPublicIdlePoolPods(t *testing.T) {
 	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
 	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
 
@@ -382,6 +383,95 @@ func TestLifecycleProjectorIgnoresIdlePoolPods(t *testing.T) {
 
 	if len(recorder.events) != 0 || len(recorder.windows) != 0 {
 		t.Fatalf("idle pool pod should not be metered, events=%#v windows=%#v", recorder.events, recorder.windows)
+	}
+}
+
+func TestLifecycleProjectorMetersTeamOwnedWarmPoolMemory(t *testing.T) {
+	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
+	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
+
+	createdAt := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
+	now := createdAt.Add(2 * time.Minute)
+	projector.now = func() time.Time { return now }
+
+	pod := withSandboxResources(buildTeamWarmPoolPod(createdAt, "1"), "2", "1Gi")
+	projector.handleUpsert(pod)
+
+	if len(recorder.events) != 0 {
+		t.Fatalf("warm pool should not emit lifecycle events, got %#v", recorder.events)
+	}
+	if len(recorder.windows) != 1 {
+		t.Fatalf("warm pool window count = %d, want 1", len(recorder.windows))
+	}
+	window := recorder.windows[0]
+	if window.WindowType != meteringpkg.WindowTypeSandboxRuntimeMiBMilliseconds {
+		t.Fatalf("window type = %q, want runtime memory", window.WindowType)
+	}
+	if window.SubjectType != meteringpkg.SubjectTypeTemplate || window.SubjectID != "tpl-1" {
+		t.Fatalf("subject = %s/%s, want template/tpl-1", window.SubjectType, window.SubjectID)
+	}
+	if window.TeamID != "team-1" || window.UserID != "user-1" || window.TemplateID != "tpl-1" {
+		t.Fatalf("unexpected ownership fields: team=%s user=%s template=%s", window.TeamID, window.UserID, window.TemplateID)
+	}
+	if window.SandboxID != "" {
+		t.Fatalf("warm pool window sandbox_id = %q, want empty", window.SandboxID)
+	}
+	if window.Value != 122_880_000 {
+		t.Fatalf("warm pool value = %d, want 122880000", window.Value)
+	}
+	state := recorder.states["warm-pool/pod-uid-1"]
+	if state == nil || state.ActiveSince == nil || !state.ActiveSince.Equal(now) {
+		t.Fatalf("warm pool state = %#v, want active_since advanced to %v", state, now)
+	}
+
+	projector.now = func() time.Time { return now.Add(time.Minute) }
+	pod.ResourceVersion = "2"
+	projector.handleUpsert(pod)
+	if len(recorder.windows) != 2 {
+		t.Fatalf("warm pool window count after resync = %d, want 2", len(recorder.windows))
+	}
+	if recorder.windows[1].Value != 61_440_000 {
+		t.Fatalf("resync warm pool value = %d, want 61440000", recorder.windows[1].Value)
+	}
+}
+
+func TestLifecycleProjectorClosesTeamWarmPoolWhenClaimed(t *testing.T) {
+	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
+	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
+
+	createdAt := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
+	firstObservedAt := createdAt.Add(2 * time.Minute)
+	projector.now = func() time.Time { return firstObservedAt }
+
+	idlePod := withSandboxResources(buildTeamWarmPoolPod(createdAt, "1"), "2", "1Gi")
+	projector.handleUpsert(idlePod)
+
+	claimedAt := createdAt.Add(5 * time.Minute)
+	projector.now = func() time.Time { return claimedAt }
+	activePod := withSandboxResources(buildSandboxPod(claimedAt, false, "", "2"), "2", "1Gi")
+	activePod.Name = idlePod.Name
+	activePod.Namespace = idlePod.Namespace
+	activePod.UID = idlePod.UID
+
+	projector.handleUpdate(idlePod, activePod)
+
+	if len(recorder.windows) != 2 {
+		t.Fatalf("window count after claim = %d, want 2", len(recorder.windows))
+	}
+	finalWarmPoolWindow := recorder.windows[1]
+	if finalWarmPoolWindow.SubjectType != meteringpkg.SubjectTypeTemplate || finalWarmPoolWindow.SubjectID != "tpl-1" {
+		t.Fatalf("final warm pool subject = %s/%s, want template/tpl-1", finalWarmPoolWindow.SubjectType, finalWarmPoolWindow.SubjectID)
+	}
+	if finalWarmPoolWindow.Value != 184_320_000 {
+		t.Fatalf("final warm pool value = %d, want 184320000", finalWarmPoolWindow.Value)
+	}
+
+	warmPoolState := recorder.states["warm-pool/pod-uid-1"]
+	if warmPoolState == nil || warmPoolState.ActiveSince != nil || warmPoolState.TerminatedAt == nil || !warmPoolState.TerminatedAt.Equal(claimedAt) {
+		t.Fatalf("warm pool state after claim = %#v, want closed at %v", warmPoolState, claimedAt)
+	}
+	if recorder.states["sb-1"] == nil {
+		t.Fatalf("active sandbox projection state was not created")
 	}
 }
 
@@ -409,6 +499,28 @@ func buildSandboxPod(claimedAt time.Time, paused bool, pausedAt string, resource
 				controller.LabelTemplateID: "tpl-1",
 			},
 			Annotations: annotations,
+		},
+	}
+}
+
+func buildTeamWarmPoolPod(createdAt time.Time, resourceVersion string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "idle-1",
+			Namespace:         "tpl-team-1",
+			UID:               types.UID("pod-uid-1"),
+			ResourceVersion:   resourceVersion,
+			CreationTimestamp: metav1.NewTime(createdAt),
+			Labels: map[string]string{
+				controller.LabelPoolType:   controller.PoolTypeIdle,
+				controller.LabelTemplateID: "tpl-1",
+				controller.LabelOwnerKind:  controller.OwnerKindTeamWarmPool,
+			},
+			Annotations: map[string]string{
+				controller.AnnotationTeamID:    "team-1",
+				controller.AnnotationUserID:    "user-1",
+				controller.AnnotationOwnerKind: controller.OwnerKindTeamWarmPool,
+			},
 		},
 	}
 }

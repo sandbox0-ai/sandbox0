@@ -28,6 +28,7 @@ const (
 	// Labels
 	LabelTemplateID        = "sandbox0.ai/template-id"
 	LabelTemplateLogicalID = "sandbox0.ai/template-logical-id"
+	LabelTemplateScope     = "sandbox0.ai/template-scope"
 	LabelPoolType          = "sandbox0.ai/pool-type"
 	LabelSandboxID         = "sandbox0.ai/sandbox-id"
 	LabelOwnerKind         = "sandbox0.ai/owner-kind"
@@ -60,8 +61,12 @@ const (
 	AnnotationRuntimeGeneration            = "sandbox0.ai/runtime-generation"
 	AnnotationWebhookStateVolumeID         = "sandbox0.ai/webhook-state-volume-id"
 	AnnotationTemplateSpecHash             = "sandbox0.ai/template-spec-hash"
+	AnnotationTemplateTeamID               = "sandbox0.ai/template-team-id"
+	AnnotationTemplateUserID               = "sandbox0.ai/template-user-id"
 	AnnotationClusterAutoscalerSafeToEvict = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 	AnnotationOwnerKind                    = "sandbox0.ai/owner-kind"
+
+	OwnerKindTeamWarmPool = "team_warm_pool"
 
 	unhealthyIdlePodRepairGracePeriod = 2 * time.Minute
 )
@@ -314,17 +319,58 @@ func (pm *PoolManager) buildPodTemplate(template *v1alpha1.SandboxTemplate, spec
 		AnnotationTemplateSpecHash:             specHash,
 		AnnotationClusterAutoscalerSafeToEvict: "true",
 	}
+	labels := map[string]string{
+		LabelTemplateID:        template.Name,
+		LabelTemplateLogicalID: TemplateLogicalID(template),
+		LabelPoolType:          PoolTypeIdle,
+	}
+	if teamID := teamOwnedTemplateTeamID(template); teamID != "" {
+		annotations[AnnotationTeamID] = teamID
+		annotations[AnnotationOwnerKind] = OwnerKindTeamWarmPool
+		labels[LabelOwnerKind] = OwnerKindTeamWarmPool
+		if userID := teamOwnedTemplateUserID(template); userID != "" {
+			annotations[AnnotationUserID] = userID
+		}
+	}
 	return corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
-			Labels: map[string]string{
-				LabelTemplateID:        template.Name,
-				LabelTemplateLogicalID: TemplateLogicalID(template),
-				LabelPoolType:          PoolTypeIdle,
-			},
+			Labels:      labels,
 			Annotations: annotations,
 		},
 		Spec: spec,
 	}, nil
+}
+
+type warmPoolTemplateMetadata struct {
+	TeamID    string `json:"team_id"`
+	UserID    string `json:"user_id,omitempty"`
+	OwnerKind string `json:"owner_kind"`
+}
+
+func teamWarmPoolTemplateMetadata(template *v1alpha1.SandboxTemplate) *warmPoolTemplateMetadata {
+	teamID := teamOwnedTemplateTeamID(template)
+	if teamID == "" {
+		return nil
+	}
+	return &warmPoolTemplateMetadata{
+		TeamID:    teamID,
+		UserID:    teamOwnedTemplateUserID(template),
+		OwnerKind: OwnerKindTeamWarmPool,
+	}
+}
+
+func teamOwnedTemplateTeamID(template *v1alpha1.SandboxTemplate) string {
+	if template == nil || template.Labels[LabelTemplateScope] != naming.ScopeTeam {
+		return ""
+	}
+	return template.Annotations[AnnotationTemplateTeamID]
+}
+
+func teamOwnedTemplateUserID(template *v1alpha1.SandboxTemplate) string {
+	if template == nil || template.Labels[LabelTemplateScope] != naming.ScopeTeam {
+		return ""
+	}
+	return template.Annotations[AnnotationTemplateUserID]
 }
 
 func (pm *PoolManager) reconcileReplicaSetTemplate(
@@ -534,9 +580,11 @@ func (pm *PoolManager) deleteStaleIdlePodWithRetry(ctx context.Context, namespac
 func TemplateSpecHash(template *v1alpha1.SandboxTemplate) (string, error) {
 	podSpec := v1alpha1.BuildIdlePodSpec(template)
 	payload := struct {
-		PodSpec corev1.PodSpec `json:"podSpec"`
+		PodSpec  corev1.PodSpec            `json:"podSpec"`
+		WarmPool *warmPoolTemplateMetadata `json:"warmPool,omitempty"`
 	}{
-		PodSpec: podSpec,
+		PodSpec:  podSpec,
+		WarmPool: teamWarmPoolTemplateMetadata(template),
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {

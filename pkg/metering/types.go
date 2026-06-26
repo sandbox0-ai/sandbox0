@@ -45,6 +45,7 @@ const (
 	SubjectTypeVolume              = "volume"
 	SubjectTypeSnapshot            = "snapshot"
 	SubjectTypeRootFS              = "rootfs"
+	SubjectTypeTemplate            = "template"
 	SubjectTypeManagedAgentSession = "managed_agent_session"
 )
 

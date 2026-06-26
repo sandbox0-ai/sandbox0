@@ -345,7 +345,7 @@ func TestListWindowsAfterReturnsOrderedWindows(t *testing.T) {
 
 func TestStorageWindowFromStateSkipsSubByteHour(t *testing.T) {
 	start := time.Date(2026, 3, 12, 12, 0, 0, 0, time.UTC)
-	window := storageWindowFromState(&StorageProjectionState{
+	window, remainder := storageWindowFromStateWithRemainder(&StorageProjectionState{
 		SubjectType: SubjectTypeVolume,
 		SubjectID:   "vol-1",
 		Product:     ProductSandbox,
@@ -354,6 +354,30 @@ func TestStorageWindowFromStateSkipsSubByteHour(t *testing.T) {
 	}, start.Add(time.Millisecond))
 	if window != nil {
 		t.Fatalf("expected nil window for sub-byte-hour usage, got %+v", window)
+	}
+	if remainder != int64(time.Millisecond) {
+		t.Fatalf("remainder = %d, want %d", remainder, int64(time.Millisecond))
+	}
+}
+
+func TestStorageWindowFromStateCarriesSubByteHourRemainder(t *testing.T) {
+	start := time.Date(2026, 3, 12, 12, 0, 0, 0, time.UTC)
+	window, remainder := storageWindowFromStateWithRemainder(&StorageProjectionState{
+		SubjectType:             SubjectTypeVolume,
+		SubjectID:               "vol-1",
+		Product:                 ProductSandbox,
+		SizeBytes:               1,
+		ObservedAt:              start,
+		UnbilledByteNanoseconds: int64(30 * time.Minute),
+	}, start.Add(30*time.Minute))
+	if window == nil {
+		t.Fatal("expected carried remainder to produce a byte-hour window")
+	}
+	if window.Value != 1 {
+		t.Fatalf("window value = %d, want 1", window.Value)
+	}
+	if remainder != 0 {
+		t.Fatalf("remainder = %d, want 0", remainder)
 	}
 }
 
@@ -429,6 +453,7 @@ func TestRecordStorageObservationClosesPreviousWindow(t *testing.T) {
 					"aws-us-east-1",
 					int64(1024),
 					start,
+					int64(0),
 				}}
 			},
 			execFn: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
@@ -445,6 +470,9 @@ func TestRecordStorageObservationClosesPreviousWindow(t *testing.T) {
 					upsertedState = true
 					if args[11] != int64(2048) {
 						t.Fatalf("state size arg = %v, want 2048", args[11])
+					}
+					if args[13] != int64(0) {
+						t.Fatalf("state remainder arg = %v, want 0", args[13])
 					}
 				default:
 					t.Fatalf("unexpected exec: %s", sql)

@@ -257,11 +257,13 @@ func (r *Repository) recordStorageObservation(ctx context.Context, db DB, observ
 		if state.ObservedAt.Before(previous.ObservedAt) {
 			return nil
 		}
-		if window := storageWindowFromState(previous, state.ObservedAt); window != nil {
+		window, remainder := storageWindowFromStateWithRemainder(previous, state.ObservedAt)
+		if window != nil {
 			if err := r.appendWindow(ctx, db, window); err != nil {
 				return err
 			}
 		}
+		state.UnbilledByteNanoseconds = remainder
 	}
 
 	return r.upsertStorageProjectionState(ctx, db, state)
@@ -295,7 +297,7 @@ func (r *Repository) closeStorageObservation(ctx context.Context, db DB, observa
 		}
 		end := state.ObservedAt
 		state.ObservedAt = observation.ResourceCreatedAt.UTC()
-		if window := storageWindowFromState(state, end); window != nil {
+		if window, _ := storageWindowFromStateWithRemainder(state, end); window != nil {
 			return r.appendWindow(ctx, db, window)
 		}
 		return nil
@@ -303,7 +305,7 @@ func (r *Repository) closeStorageObservation(ctx context.Context, db DB, observa
 	if state.ObservedAt.Before(previous.ObservedAt) {
 		return r.deleteStorageProjectionState(ctx, db, previous.SubjectType, previous.SubjectID)
 	}
-	if window := storageWindowFromState(previous, state.ObservedAt); window != nil {
+	if window, _ := storageWindowFromStateWithRemainder(previous, state.ObservedAt); window != nil {
 		if err := r.appendWindow(ctx, db, window); err != nil {
 			return err
 		}
@@ -331,7 +333,7 @@ func (r *Repository) FlushStorageProjectionWindows(ctx context.Context, before t
 				subject_type, subject_id, product, owner_kind,
 				team_id, user_id, COALESCE(sandbox_id, ''), COALESCE(volume_id, ''),
 				COALESCE(snapshot_id, ''), COALESCE(cluster_id, ''), region_id,
-				size_bytes, observed_at
+				size_bytes, observed_at, unbilled_byte_nanoseconds
 			FROM metering.storage_projection_state
 			WHERE observed_at < $1
 			ORDER BY observed_at ASC
@@ -350,7 +352,7 @@ func (r *Repository) FlushStorageProjectionWindows(ctx context.Context, before t
 				&state.SubjectType, &state.SubjectID, &state.Product, &state.OwnerKind,
 				&state.TeamID, &state.UserID, &state.SandboxID, &state.VolumeID,
 				&state.SnapshotID, &state.ClusterID, &state.RegionID,
-				&state.SizeBytes, &state.ObservedAt,
+				&state.SizeBytes, &state.ObservedAt, &state.UnbilledByteNanoseconds,
 			); err != nil {
 				return fmt.Errorf("scan storage projection state: %w", err)
 			}
@@ -361,7 +363,8 @@ func (r *Repository) FlushStorageProjectionWindows(ctx context.Context, before t
 		}
 
 		for _, state := range states {
-			if window := storageWindowFromState(state, before); window != nil {
+			window, remainder := storageWindowFromStateWithRemainder(state, before)
+			if window != nil {
 				if err := r.appendWindow(ctx, tx, window); err != nil {
 					return err
 				}
@@ -369,9 +372,10 @@ func (r *Repository) FlushStorageProjectionWindows(ctx context.Context, before t
 			if _, err := tx.Exec(ctx, `
 				UPDATE metering.storage_projection_state
 				SET observed_at = $3,
+					unbilled_byte_nanoseconds = $4,
 					updated_at = NOW()
 				WHERE subject_type = $1 AND subject_id = $2
-			`, state.SubjectType, state.SubjectID, before); err != nil {
+			`, state.SubjectType, state.SubjectID, before, remainder); err != nil {
 				return fmt.Errorf("advance storage projection state: %w", err)
 			}
 		}
@@ -670,7 +674,7 @@ func (r *Repository) getStorageProjectionStateForUpdate(ctx context.Context, db 
 			subject_type, subject_id, product, owner_kind,
 			team_id, user_id, COALESCE(sandbox_id, ''), COALESCE(volume_id, ''),
 			COALESCE(snapshot_id, ''), COALESCE(cluster_id, ''), region_id,
-			size_bytes, observed_at
+			size_bytes, observed_at, unbilled_byte_nanoseconds
 		FROM metering.storage_projection_state
 		WHERE subject_type = $1 AND subject_id = $2
 		FOR UPDATE
@@ -678,7 +682,7 @@ func (r *Repository) getStorageProjectionStateForUpdate(ctx context.Context, db 
 		&state.SubjectType, &state.SubjectID, &state.Product, &state.OwnerKind,
 		&state.TeamID, &state.UserID, &state.SandboxID, &state.VolumeID,
 		&state.SnapshotID, &state.ClusterID, &state.RegionID,
-		&state.SizeBytes, &state.ObservedAt,
+		&state.SizeBytes, &state.ObservedAt, &state.UnbilledByteNanoseconds,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -694,11 +698,11 @@ func (r *Repository) upsertStorageProjectionState(ctx context.Context, db DB, st
 		INSERT INTO metering.storage_projection_state (
 			subject_type, subject_id, product, owner_kind,
 			team_id, user_id, sandbox_id, volume_id, snapshot_id,
-			cluster_id, region_id, size_bytes, observed_at
+			cluster_id, region_id, size_bytes, observed_at, unbilled_byte_nanoseconds
 		) VALUES (
 			$1, $2, $3, $4,
 			$5, $6, $7, $8, $9,
-			$10, $11, $12, $13
+			$10, $11, $12, $13, $14
 		)
 		ON CONFLICT (subject_type, subject_id) DO UPDATE
 		SET product = EXCLUDED.product,
@@ -712,10 +716,11 @@ func (r *Repository) upsertStorageProjectionState(ctx context.Context, db DB, st
 			region_id = EXCLUDED.region_id,
 			size_bytes = EXCLUDED.size_bytes,
 			observed_at = EXCLUDED.observed_at,
+			unbilled_byte_nanoseconds = EXCLUDED.unbilled_byte_nanoseconds,
 			updated_at = NOW()
 	`, state.SubjectType, state.SubjectID, state.Product, state.OwnerKind,
 		state.TeamID, state.UserID, nullableString(state.SandboxID), nullableString(state.VolumeID), nullableString(state.SnapshotID),
-		nullableString(state.ClusterID), state.RegionID, state.SizeBytes, state.ObservedAt,
+		nullableString(state.ClusterID), state.RegionID, state.SizeBytes, state.ObservedAt, state.UnbilledByteNanoseconds,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert storage projection state: %w", err)
@@ -735,17 +740,23 @@ func (r *Repository) deleteStorageProjectionState(ctx context.Context, db DB, su
 }
 
 func storageWindowFromState(state *StorageProjectionState, end time.Time) *Window {
-	if state == nil || state.SizeBytes <= 0 {
-		return nil
+	window, _ := storageWindowFromStateWithRemainder(state, end)
+	return window
+}
+
+func storageWindowFromStateWithRemainder(state *StorageProjectionState, end time.Time) (*Window, int64) {
+	if state == nil {
+		return nil, 0
 	}
+	remainder := normalizeStorageRemainder(state.UnbilledByteNanoseconds)
 	end = end.UTC()
 	start := state.ObservedAt.UTC()
 	if !end.After(start) {
-		return nil
+		return nil, remainder
 	}
-	value := storageByteHours(state.SizeBytes, end.Sub(start))
+	value, remainder := storageByteHoursWithRemainder(state.SizeBytes, end.Sub(start), remainder)
 	if value <= 0 {
-		return nil
+		return nil, remainder
 	}
 	windowType := WindowTypeSandboxVolumeByteHours
 	switch state.SubjectType {
@@ -770,20 +781,40 @@ func storageWindowFromState(state *StorageProjectionState, end time.Time) *Windo
 		Value:       value,
 		Unit:        WindowUnitByteHours,
 		Data:        storageWindowData(state, end.Sub(start)),
-	}
+	}, remainder
 }
 
 func storageByteHours(sizeBytes int64, duration time.Duration) int64 {
+	value, _ := storageByteHoursWithRemainder(sizeBytes, duration, 0)
+	return value
+}
+
+func storageByteHoursWithRemainder(sizeBytes int64, duration time.Duration, previousRemainder int64) (int64, int64) {
+	remainder := normalizeStorageRemainder(previousRemainder)
 	if sizeBytes <= 0 || duration <= 0 {
+		return 0, remainder
+	}
+	accumulator := big.NewInt(remainder)
+	var usage big.Int
+	usage.Mul(big.NewInt(sizeBytes), big.NewInt(duration.Nanoseconds()))
+	accumulator.Add(accumulator, &usage)
+
+	hourNanos := big.NewInt(int64(time.Hour))
+	var quotient big.Int
+	var modulo big.Int
+	quotient.QuoRem(accumulator, hourNanos, &modulo)
+	if !quotient.IsInt64() {
+		return math.MaxInt64, 0
+	}
+	return quotient.Int64(), modulo.Int64()
+}
+
+func normalizeStorageRemainder(value int64) int64 {
+	if value <= 0 {
 		return 0
 	}
-	var product big.Int
-	product.Mul(big.NewInt(sizeBytes), big.NewInt(duration.Nanoseconds()))
-	product.Div(&product, big.NewInt(int64(time.Hour)))
-	if !product.IsInt64() {
-		return math.MaxInt64
-	}
-	return product.Int64()
+	hourNanos := int64(time.Hour)
+	return value % hourNanos
 }
 
 func storageWindowData(state *StorageProjectionState, duration time.Duration) json.RawMessage {

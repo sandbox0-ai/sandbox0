@@ -144,6 +144,10 @@ func (p *LifecycleProjector) handleUpsert(obj any) {
 		return
 	}
 	if isTeamOwnedIdlePoolPod(pod) {
+		if pod.DeletionTimestamp != nil {
+			p.handleWarmPoolDelete(pod)
+			return
+		}
 		p.handleWarmPoolUpsert(pod)
 		return
 	}
@@ -355,6 +359,9 @@ func (p *LifecycleProjector) handleWarmPoolUpsert(pod *corev1.Pod) {
 		p.recordError("load_warm_pool_state", stateID, err)
 		return
 	}
+	if state != nil && state.TerminatedAt != nil {
+		return
+	}
 
 	teamID := pod.Annotations[controller.AnnotationTeamID]
 	userID := pod.Annotations[controller.AnnotationUserID]
@@ -413,6 +420,9 @@ func (p *LifecycleProjector) handleWarmPoolDelete(pod *corev1.Pod) {
 	state, err := p.store.GetSandboxProjectionState(ctx, stateID)
 	if err != nil {
 		p.recordError("load_warm_pool_state", stateID, err)
+		return
+	}
+	if state != nil && state.TerminatedAt != nil {
 		return
 	}
 

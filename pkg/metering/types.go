@@ -127,19 +127,20 @@ type SandboxProjectionState struct {
 }
 
 type StorageProjectionState struct {
-	SubjectType string    `json:"subject_type"`
-	SubjectID   string    `json:"subject_id"`
-	Product     string    `json:"product,omitempty"`
-	OwnerKind   string    `json:"owner_kind,omitempty"`
-	TeamID      string    `json:"team_id,omitempty"`
-	UserID      string    `json:"user_id,omitempty"`
-	SandboxID   string    `json:"sandbox_id,omitempty"`
-	VolumeID    string    `json:"volume_id,omitempty"`
-	SnapshotID  string    `json:"snapshot_id,omitempty"`
-	ClusterID   string    `json:"cluster_id,omitempty"`
-	RegionID    string    `json:"region_id,omitempty"`
-	SizeBytes   int64     `json:"size_bytes"`
-	ObservedAt  time.Time `json:"observed_at"`
+	SubjectType             string    `json:"subject_type"`
+	SubjectID               string    `json:"subject_id"`
+	Product                 string    `json:"product,omitempty"`
+	OwnerKind               string    `json:"owner_kind,omitempty"`
+	TeamID                  string    `json:"team_id,omitempty"`
+	UserID                  string    `json:"user_id,omitempty"`
+	SandboxID               string    `json:"sandbox_id,omitempty"`
+	VolumeID                string    `json:"volume_id,omitempty"`
+	SnapshotID              string    `json:"snapshot_id,omitempty"`
+	ClusterID               string    `json:"cluster_id,omitempty"`
+	RegionID                string    `json:"region_id,omitempty"`
+	SizeBytes               int64     `json:"size_bytes"`
+	ObservedAt              time.Time `json:"observed_at"`
+	UnbilledByteNanoseconds int64     `json:"unbilled_byte_nanoseconds,omitempty"`
 }
 
 type StorageObservation struct {

@@ -475,6 +475,37 @@ func TestLifecycleProjectorClosesTeamWarmPoolWhenClaimed(t *testing.T) {
 	}
 }
 
+func TestLifecycleProjectorDoesNotReactivateDeletedTeamWarmPool(t *testing.T) {
+	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
+	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
+
+	createdAt := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
+	firstObservedAt := createdAt.Add(time.Minute)
+	projector.now = func() time.Time { return firstObservedAt }
+
+	pod := withSandboxResources(buildTeamWarmPoolPod(createdAt, "1"), "2", "1Gi")
+	projector.handleUpsert(pod)
+
+	deletedAt := firstObservedAt.Add(time.Minute)
+	projector.now = func() time.Time { return deletedAt }
+	projector.handleDelete(pod)
+	windowCountAfterDelete := len(recorder.windows)
+
+	lateUpdateAt := deletedAt.Add(time.Minute)
+	projector.now = func() time.Time { return lateUpdateAt }
+	pod.ResourceVersion = "3"
+	pod.DeletionTimestamp = ptrMetaTime(deletedAt)
+	projector.handleUpsert(pod)
+
+	if len(recorder.windows) != windowCountAfterDelete {
+		t.Fatalf("late deleted warm pool update added windows: got %d, want %d", len(recorder.windows), windowCountAfterDelete)
+	}
+	state := recorder.states["warm-pool/pod-uid-1"]
+	if state == nil || state.ActiveSince != nil || state.TerminatedAt == nil || !state.TerminatedAt.Equal(deletedAt) {
+		t.Fatalf("warm pool state after late update = %#v, want closed at %v", state, deletedAt)
+	}
+}
+
 func buildSandboxPod(claimedAt time.Time, paused bool, pausedAt string, resourceVersion string) *corev1.Pod {
 	annotations := map[string]string{
 		controller.AnnotationClaimedAt: claimedAt.Format(time.RFC3339),
@@ -540,4 +571,9 @@ func withSandboxResources(pod *corev1.Pod, cpu, memory string) *corev1.Pod {
 		},
 	}}
 	return pod
+}
+
+func ptrMetaTime(value time.Time) *metav1.Time {
+	metaTime := metav1.NewTime(value)
+	return &metaTime
 }

@@ -784,11 +784,6 @@ func storageWindowFromStateWithRemainder(state *StorageProjectionState, end time
 	}, remainder
 }
 
-func storageByteHours(sizeBytes int64, duration time.Duration) int64 {
-	value, _ := storageByteHoursWithRemainder(sizeBytes, duration, 0)
-	return value
-}
-
 func storageByteHoursWithRemainder(sizeBytes int64, duration time.Duration, previousRemainder int64) (int64, int64) {
 	remainder := normalizeStorageRemainder(previousRemainder)
 	if sizeBytes <= 0 || duration <= 0 {

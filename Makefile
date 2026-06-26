@@ -1,4 +1,4 @@
-.PHONY: all build test test-all test-integration test-integration-verbose test-e2e test-e2e-kind test-e2e-destroy test-e2e-load-images test-e2e-prepare-kind test-e2e-specific test-e2e-netd-cni lint tidy vendor clean helm-update helm-configs release docker-build docker-build-local build-local-all docker-push proto manifests apispec oapi-codegen
+.PHONY: all build test test-all test-integration test-integration-verbose test-e2e test-e2e-kind test-e2e-destroy test-e2e-load-images test-e2e-prepare-kind test-e2e-specific test-e2e-s0fs-posix test-e2e-netd-cni lint tidy vendor clean helm-update helm-configs release docker-build docker-build-local build-local-all docker-push proto manifests apispec oapi-codegen
 
 # Tool Binaries
 LOCALBIN ?= $(shell pwd)/bin
@@ -19,6 +19,15 @@ E2E_SSH_FIXTURE_SOURCE_IMAGE := lscr.io/linuxserver/openssh-server@sha256:68b605
 E2E_SSH_FIXTURE_IMAGE := sandbox0ai/e2e-openssh-server:68b605929e83
 E2E_DEPENDENCY_IMAGES := postgres:16-alpine rustfs/rustfs:1.0.0-alpha.79 registry:2.8.3 sandbox0ai/otemplates:default-v0.2.0 $(E2E_SSH_FIXTURE_IMAGE)
 E2E_IMAGE_PLATFORM ?= linux/$(shell uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
+E2E_CLUSTER_NAME ?= sandbox0-e2e
+S0FS_POSIX_CI_GIT_FILE_COUNT ?= 120
+S0FS_POSIX_CI_GIT_FILE_SIZE ?= 2048
+S0FS_POSIX_CI_BULK_FILE_COUNT ?= 1000
+S0FS_POSIX_CI_BULK_TOTAL_BYTES ?= 16777216
+S0FS_POSIX_CI_BULK_CONCURRENCY ?= 4
+S0FS_POSIX_CI_ARCHIVE_FILE_COUNT ?= 200
+S0FS_POSIX_CI_ARCHIVE_TOTAL_BYTES ?= 2097152
+S0FS_POSIX_CI_ARCHIVE_CONCURRENCY ?= 4
 
 # Default version
 VERSION ?= latest
@@ -204,6 +213,24 @@ test-e2e-specific:
 	fi
 	@printf "$(CYAN)Running E2E test: $(SPEC)...$(RESET)\n"
 	unset http_proxy && unset https_proxy && unset all_proxy && $(GO) test -v ./tests/e2e/... -focus="$(SPEC)" -timeout=30m
+
+test-e2e-s0fs-posix:
+	@printf "$(CYAN)Running S0FS POSIX E2E suite...$(RESET)\n"
+	unset http_proxy && unset https_proxy && unset all_proxy && python3 scripts/s0fs_posix_suite.py \
+		--kind-cluster "$(E2E_CLUSTER_NAME)" \
+		--kube-context "kind-$(E2E_CLUSTER_NAME)" \
+		--suite smoke \
+		--suite git-integrity \
+		--suite bulk-smallfile-integrity \
+		--suite archive-copy-rsync \
+		--git-file-count "$(S0FS_POSIX_CI_GIT_FILE_COUNT)" \
+		--git-file-size "$(S0FS_POSIX_CI_GIT_FILE_SIZE)" \
+		--bulk-file-count "$(S0FS_POSIX_CI_BULK_FILE_COUNT)" \
+		--bulk-total-bytes "$(S0FS_POSIX_CI_BULK_TOTAL_BYTES)" \
+		--bulk-concurrency "$(S0FS_POSIX_CI_BULK_CONCURRENCY)" \
+		--archive-file-count "$(S0FS_POSIX_CI_ARCHIVE_FILE_COUNT)" \
+		--archive-total-bytes "$(S0FS_POSIX_CI_ARCHIVE_TOTAL_BYTES)" \
+		--archive-concurrency "$(S0FS_POSIX_CI_ARCHIVE_CONCURRENCY)"
 
 test-e2e-netd-cni:
 	@printf "$(CYAN)Running netd CNI E2E tests...$(RESET)\n"

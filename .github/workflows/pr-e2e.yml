@@ -38,6 +38,11 @@ jobs:
           E2E_CLUSTER_NAME: ${{ env.KIND_CLUSTER_NAME }}
         run: make test-e2e
 
+      - name: Run S0FS POSIX suite
+        env:
+          E2E_CLUSTER_NAME: ${{ env.KIND_CLUSTER_NAME }}
+        run: make test-e2e-s0fs-posix
+
       - name: Dump cluster state on failure
         if: failure()
         shell: bash

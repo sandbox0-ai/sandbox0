@@ -1,0 +1,141 @@
+{
+  "schema_version": 1,
+  "purpose": "Initial S0FS POSIX/FUSE known-failure and classification file for issue 611.",
+  "policy": {
+    "allowed_uses": [
+      "classify first-run suite failures",
+      "separate unsupported features from likely S0FS bugs",
+      "link concrete follow-up issues"
+    ],
+    "disallowed_uses": [
+      "hide regressions without review",
+      "treat unsupported features as passing behavior",
+      "close issue 611 without a first-run failure matrix"
+    ]
+  },
+  "unsupported_features_observed_in_code": [
+    {
+      "feature": "xattr",
+      "reason": "S0FS fsserver currently returns unimplemented for xattr operations.",
+      "follow_up_issue": null
+    },
+    {
+      "feature": "posix_locks_and_flock",
+      "reason": "S0FS fsserver currently returns unimplemented for locks.",
+      "follow_up_issue": null
+    },
+    {
+      "feature": "ioctl",
+      "reason": "S0FS fsserver currently returns unimplemented for ioctl.",
+      "follow_up_issue": null
+    },
+    {
+      "feature": "lseek_data_hole",
+      "reason": "S0FS volumefuse currently returns ENOSYS for Lseek.",
+      "follow_up_issue": null
+    }
+  ],
+  "harness_limitations": [
+    {
+      "suite": "filebench",
+      "suite_ref": "22620e602cbbebad90c0bd041896ebccf70dbf5f",
+      "status": "baseline_unusable",
+      "observed_on": "2026-06-27",
+      "environment": "remote kind fullmode sandbox pod",
+      "profile": "200-file generated create/stat WML smoke",
+      "baseline": {
+        "target": "pod-local-overlay",
+        "result": "FAIL",
+        "exit_code": -6,
+        "failure": "Filebench aborted with its own buffer-overflow detection"
+      },
+      "s0fs": {
+        "target": "mounted-s0fs-volume",
+        "result": "FAIL",
+        "exit_code": -6,
+        "failure": "Same Filebench buffer-overflow failure as the overlay baseline"
+      },
+      "notes": "The runner can build and install Filebench from source, but this remote runtime failure is not S0FS evidence until Filebench itself has a passing overlay baseline."
+    }
+  ],
+  "suite_failures": [
+    {
+      "suite": "pjdfstest",
+      "suite_ref": "ededbeb2b44929972898afb87474b0937f78a877",
+      "status": "untriaged_failure",
+      "observed_on": "2026-06-27",
+      "environment": "remote kind fullmode with a mounted RWO SandboxVolume",
+      "baseline": {
+        "target": "pod-local-overlay",
+        "files": 238,
+        "tests": 8798,
+        "result": "PASS"
+      },
+      "s0fs": {
+        "target": "mounted-s0fs-volume",
+        "files": 238,
+        "tests": 8798,
+        "result": "FAIL"
+      },
+      "failure_groups_seen_in_tail": [
+        "rename",
+        "rmdir",
+        "symlink",
+        "truncate",
+        "unlink",
+        "utimensat"
+      ],
+      "notes": "The runner records this as evidence for follow-up triage only. Issue 611 does not fix or suppress these failures."
+    },
+    {
+      "suite": "fsx",
+      "suite_ref": "cac9fe2b8dc3e6dbc0c2383b9e3b4d3c1b9e7dd0",
+      "status": "unsupported_operation",
+      "observed_on": "2026-06-27",
+      "environment": "remote kind fullmode with a mounted RWO SandboxVolume",
+      "profile": "extended operations enabled",
+      "baseline": {
+        "target": "pod-local-overlay",
+        "result": "PASS"
+      },
+      "s0fs": {
+        "target": "mounted-s0fs-volume",
+        "result": "FAIL",
+        "exit_code": 161,
+        "failure": "XFS_IOC_EXCHANGE_RANGE returned Function not implemented"
+      },
+      "notes": "The default fsx profile disables non-core extended operations and passed on S0FS. This entry documents the explicit extended-ops probe only."
+    },
+    {
+      "suite": "bulk-smallfile-integrity",
+      "status": "untriaged_failure",
+      "observed_on": "2026-06-27",
+      "environment": "remote kind fullmode with a mounted RWO SandboxVolume",
+      "profile": "30000 files totaling 500 MiB, 8 concurrent writers/readers, temp-file then rename",
+      "baseline": {
+        "target": "pod-local-overlay",
+        "result": "PASS",
+        "written_files": 30000,
+        "verified_files": 30000,
+        "write_elapsed_seconds": 6.37,
+        "verify_elapsed_seconds": 5.08
+      },
+      "s0fs": {
+        "target": "mounted-s0fs-volume",
+        "result": "FAIL",
+        "written_files": 29963,
+        "verified_files": 30000,
+        "write_error_count": 37,
+        "verify_failure_count": 4430,
+        "write_elapsed_seconds": 376.44,
+        "verify_elapsed_seconds": 92.01,
+        "sample_failures": [
+          "write FileNotFoundError at d008/d001/file08175.bin",
+          "verify FileNotFoundError at d008/d000/file08094.bin",
+          "verify FileNotFoundError at d008/d001/file08101.bin"
+        ]
+      },
+      "notes": "This reproduces an issue-style large small-file workload and exposes missing files on S0FS. It is evidence for follow-up triage only; issue 611 does not determine the issue 609 root cause."
+    }
+  ]
+}

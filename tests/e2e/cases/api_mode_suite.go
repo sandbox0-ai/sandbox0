@@ -269,6 +269,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertNetdTransparentEgressPolicy(env, session, sandboxID)
 				})
 
+				It("resolves cluster DNS over UDP with netd active", func() {
+					assertNetdClusterDNSUDP(env, session, sandboxID)
+				})
+
 				It("enforces Redis-backed team bandwidth through netd", func() {
 					assertNetdRedisTeamBandwidthLimit(env, session, adminPassword)
 				})

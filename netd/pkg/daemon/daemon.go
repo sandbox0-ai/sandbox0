@@ -458,13 +458,15 @@ func (d *Daemon) syncRedirect(
 	}
 
 	dnsCIDRs := clusterDNSCIDRs(d.cfg.ClusterDNSCIDR, services, endpoints)
-	bypassCIDRs := []string{}
+	configuredBypassCIDRs := []string{}
 	if len(d.cfg.PlatformAllowedCIDRs) > 0 {
-		bypassCIDRs = append(bypassCIDRs, excludeCIDRs(d.cfg.PlatformAllowedCIDRs, dnsCIDRs)...)
+		configuredBypassCIDRs = append(configuredBypassCIDRs, d.cfg.PlatformAllowedCIDRs...)
 	}
+	platformBypassCIDRs := []string{}
 	if policyStore != nil {
-		bypassCIDRs = append(bypassCIDRs, excludeCIDRs(policyStore.AllowedPlatformCIDRs(), dnsCIDRs)...)
+		platformBypassCIDRs = append(platformBypassCIDRs, policyStore.AllowedPlatformCIDRs()...)
 	}
+	bypassCIDRs := redirectBypassCIDRs(dnsCIDRs, configuredBypassCIDRs, platformBypassCIDRs)
 
 	d.logger.Info(
 		"Syncing redirect rules",
@@ -495,6 +497,14 @@ func (d *Daemon) syncRedirect(
 	return nil
 }
 
+func redirectBypassCIDRs(dnsCIDRs, configuredCIDRs, platformCIDRs []string) []string {
+	out := make([]string, 0, len(dnsCIDRs)+len(configuredCIDRs)+len(platformCIDRs))
+	out = append(out, dnsCIDRs...)
+	out = append(out, configuredCIDRs...)
+	out = append(out, platformCIDRs...)
+	return out
+}
+
 func clusterDNSCIDRs(configured string, services []*watcher.ServiceInfo, endpoints []*watcher.EndpointsInfo) []string {
 	out := []string{}
 	if strings.TrimSpace(configured) != "" {
@@ -519,43 +529,6 @@ func clusterDNSCIDRs(configured string, services []*watcher.ServiceInfo, endpoin
 		}
 	}
 	return out
-}
-
-func excludeCIDRs(values []string, excluded []string) []string {
-	if len(values) == 0 || len(excluded) == 0 {
-		return append([]string(nil), values...)
-	}
-	exclusionSet := make(map[string]struct{}, len(excluded))
-	for _, value := range excluded {
-		if key := cidrKey(value); key != "" {
-			exclusionSet[key] = struct{}{}
-		}
-	}
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		if _, ok := exclusionSet[cidrKey(value)]; ok {
-			continue
-		}
-		out = append(out, value)
-	}
-	return out
-}
-
-func cidrKey(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	if _, network, err := net.ParseCIDR(value); err == nil && network != nil {
-		return network.String()
-	}
-	if ip := net.ParseIP(value); ip != nil {
-		if ip.To4() != nil {
-			return ip.String() + "/32"
-		}
-		return ip.String() + "/128"
-	}
-	return value
 }
 
 func cleanupTrackedFlows(

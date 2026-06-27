@@ -103,7 +103,7 @@ func (m *Materializer) Materialize(ctx context.Context, state *SnapshotState, ex
 		return nil, fmt.Errorf("%w: snapshot state is required", ErrInvalidInput)
 	}
 
-	inline := cloneState(state)
+	inline := cloneStateForMaterialization(state)
 	normalizeState(inline)
 	defaultSegmentVolumeIDs(inline, m.volumeID)
 	if inline.NextSeq <= 1 {
@@ -460,6 +460,7 @@ func (b *segmentBuilder) ensureCurrent() *materializedSegment {
 		ID:       segmentID,
 		VolumeID: b.volumeID,
 		Key:      fmt.Sprintf("%s/%s.bin", segmentDir, segmentID),
+		Payload:  make([]byte, 0, int(b.targetSize)),
 	}
 	b.segments = append(b.segments, b.current)
 	return b.current
@@ -652,7 +653,9 @@ func (c *segmentCache) put(key string, payload []byte) {
 	} else {
 		c.order = append(c.order, key)
 	}
-	c.entries[key] = append([]byte(nil), payload...)
+	// The cache takes ownership of payload. ReadSegmentRange returns cloned
+	// ranges to callers, so cached segment bytes remain immutable after put.
+	c.entries[key] = payload
 	c.size += int64(len(payload))
 
 	for c.size > c.maxBytes && len(c.order) > 0 {
@@ -698,4 +701,25 @@ func cloneSegment(segment *Segment) *Segment {
 	}
 	copy.InlineData = append([]byte(nil), segment.InlineData...)
 	return &copy
+}
+
+func cloneSegmentForMaterialization(segment *Segment) *Segment {
+	if segment == nil {
+		return nil
+	}
+	clone := *segment
+	if segment.Encryption != nil {
+		enc := *segment.Encryption
+		enc.WrappedKey = append([]byte(nil), segment.Encryption.WrappedKey...)
+		enc.NoncePrefix = append([]byte(nil), segment.Encryption.NoncePrefix...)
+		clone.Encryption = &enc
+	}
+	if isInlineSegment(segment) {
+		// Inline segment payloads are immutable after creation; materialization
+		// snapshots can share the backing bytes while the engine lock is released.
+		clone.InlineData = segment.InlineData
+	} else {
+		clone.InlineData = append([]byte(nil), segment.InlineData...)
+	}
+	return &clone
 }

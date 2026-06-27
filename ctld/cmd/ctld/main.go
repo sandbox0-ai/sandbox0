@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -45,6 +47,9 @@ var (
 	csiSocket              = "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock"
 	podName                = os.Getenv("POD_NAME")
 	podNamespace           = os.Getenv("POD_NAMESPACE")
+	pprofAddr              = ""
+	pprofBlockProfileRate  = 0
+	pprofMutexFraction     = 0
 )
 
 func main() {
@@ -60,6 +65,9 @@ func main() {
 	flag.StringVar(&nodeName, "node-name", os.Getenv("NODE_NAME"), "current node name used to validate local sandbox ownership")
 	flag.StringVar(&portalRoot, "volume-portal-root", "/var/lib/sandbox0/ctld", "host-local root for ctld volume portal WAL and cache")
 	flag.StringVar(&csiSocket, "csi-socket", "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock", "CSI endpoint socket for sandbox volume portals")
+	flag.StringVar(&pprofAddr, "pprof-addr", "", "optional pprof listen address; disabled when empty")
+	flag.IntVar(&pprofBlockProfileRate, "pprof-block-profile-rate", 0, "runtime.SetBlockProfileRate value used when pprof is enabled")
+	flag.IntVar(&pprofMutexFraction, "pprof-mutex-profile-fraction", 0, "runtime.SetMutexProfileFraction value used when pprof is enabled")
 	flag.Parse()
 
 	log.Println("Starting ctld")
@@ -67,6 +75,14 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	pprofServer := startPprofServer()
+	if pprofServer != nil {
+		defer func() {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = pprofServer.Shutdown(shutdownCtx)
+			shutdownCancel()
+		}()
+	}
 
 	zapLogger, err := observability.NewLogger(observability.LoggerConfig{
 		ServiceName: "ctld",
@@ -141,6 +157,30 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	_ = httpServer.Shutdown(shutdownCtx)
 	shutdownCancel()
+}
+
+func startPprofServer() *http.Server {
+	if strings.TrimSpace(pprofAddr) == "" {
+		return nil
+	}
+	if pprofBlockProfileRate > 0 {
+		runtime.SetBlockProfileRate(pprofBlockProfileRate)
+	}
+	if pprofMutexFraction > 0 {
+		runtime.SetMutexProfileFraction(pprofMutexFraction)
+	}
+	server := &http.Server{
+		Addr:              pprofAddr,
+		Handler:           http.DefaultServeMux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		log.Printf("Starting ctld pprof server on %s", pprofAddr)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("ctld pprof server failed: %v", err)
+		}
+	}()
+	return server
 }
 
 func newHTTPServer(addr string, controller ctldserver.Controller) *http.Server {

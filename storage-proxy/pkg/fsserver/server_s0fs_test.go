@@ -107,6 +107,35 @@ func TestS0FSFileLifecycle(t *testing.T) {
 	}
 }
 
+func TestS0FSCreateAppliesActorOwner(t *testing.T) {
+	t.Parallel()
+
+	volCtx := newMountedS0FSVolumeContext(t, "vol-1", "team-a")
+	server := newTestFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, nil)
+	ctx := authContext("team-a", "")
+
+	createResp, err := server.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   1,
+		Name:     "owned.txt",
+		Mode:     0o640,
+		Actor:    &pb.PosixActor{Uid: 1000, Gids: []uint32{2000}},
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if createResp.Attr == nil {
+		t.Fatal("Create() returned nil attr")
+	}
+	if createResp.Attr.Mode&0o7777 != 0o640 || createResp.Attr.Uid != 1000 || createResp.Attr.Gid != 2000 {
+		t.Fatalf("Create() attr = %+v, want mode 0640 owner 1000:2000", createResp.Attr)
+	}
+}
+
 func TestS0FSOpenTruncatesExistingFile(t *testing.T) {
 	t.Parallel()
 
@@ -230,6 +259,73 @@ func TestS0FSFlushSyncsDirtyWrites(t *testing.T) {
 		HandleId: createResp.HandleId,
 	}); err != nil {
 		t.Fatalf("second Flush() error = %v", err)
+	}
+	if got := syncs.Load(); got != 1 {
+		t.Fatalf("sync count after second Flush() = %d, want 1", got)
+	}
+}
+
+func TestS0FSFlushSkipsRedundantWALSyncAfterBatch(t *testing.T) {
+	t.Parallel()
+
+	volCtx, syncs := newMountedS0FSVolumeContextWithSyncCounter(t, "vol-1", "team-a")
+	server := newTestFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, nil)
+	ctx := authContext("team-a", "")
+
+	first, err := server.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   1,
+		Name:     "first.txt",
+		Mode:     0o644,
+	})
+	if err != nil {
+		t.Fatalf("Create(first) error = %v", err)
+	}
+	second, err := server.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   1,
+		Name:     "second.txt",
+		Mode:     0o644,
+	})
+	if err != nil {
+		t.Fatalf("Create(second) error = %v", err)
+	}
+	if _, err := server.Write(ctx, &pb.WriteRequest{
+		VolumeId: "vol-1",
+		Inode:    first.Inode,
+		Offset:   0,
+		Data:     []byte("first"),
+		HandleId: first.HandleId,
+	}); err != nil {
+		t.Fatalf("Write(first) error = %v", err)
+	}
+	if _, err := server.Write(ctx, &pb.WriteRequest{
+		VolumeId: "vol-1",
+		Inode:    second.Inode,
+		Offset:   0,
+		Data:     []byte("second"),
+		HandleId: second.HandleId,
+	}); err != nil {
+		t.Fatalf("Write(second) error = %v", err)
+	}
+	if _, err := server.Flush(ctx, &pb.FlushRequest{
+		VolumeId: "vol-1",
+		HandleId: first.HandleId,
+	}); err != nil {
+		t.Fatalf("Flush(first) error = %v", err)
+	}
+	if got := syncs.Load(); got != 1 {
+		t.Fatalf("sync count after first Flush() = %d, want 1", got)
+	}
+	if _, err := server.Flush(ctx, &pb.FlushRequest{
+		VolumeId: "vol-1",
+		HandleId: second.HandleId,
+	}); err != nil {
+		t.Fatalf("Flush(second) error = %v", err)
 	}
 	if got := syncs.Load(); got != 1 {
 		t.Fatalf("sync count after second Flush() = %d, want 1", got)

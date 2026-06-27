@@ -116,11 +116,20 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 		e.lastCommittedManifest = latestManifest.ManifestSeq
 	}
 
+	appliedRecords := 0
 	for _, record := range records {
+		if record.Seq < e.nextSeq {
+			continue
+		}
+		if record.Seq > e.nextSeq {
+			_ = walFile.close()
+			return nil, fmt.Errorf("replay wal seq %d: %w: missing wal seq %d", record.Seq, ErrInvalidInput, e.nextSeq)
+		}
 		if err := e.apply(record); err != nil {
 			_ = walFile.close()
 			return nil, fmt.Errorf("replay wal seq %d: %w", record.Seq, err)
 		}
+		appliedRecords++
 		if record.Seq >= e.nextSeq {
 			e.nextSeq = record.Seq + 1
 		}
@@ -129,7 +138,7 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 		}
 	}
 	e.collectUnlinkedLocked()
-	if len(records) > 0 {
+	if appliedRecords > 0 {
 		e.dirty = true
 		e.dirtyAt = time.Now().UTC()
 		e.mutationVersion = 1
@@ -182,7 +191,7 @@ func (e *Engine) GetAttr(inode uint64) (*Node, error) {
 }
 
 func (e *Engine) Mkdir(parent uint64, name string, mode uint32) (*Node, error) {
-	return e.create(parent, name, TypeDirectory, mode, "")
+	return e.create(parent, name, TypeDirectory, mode, "", CreateOptions{})
 }
 
 func (e *Engine) ReadDir(inode uint64) ([]DirEntry, error) {
@@ -239,14 +248,18 @@ func (e *Engine) ChildPath(parent uint64, name string) (string, bool) {
 }
 
 func (e *Engine) CreateFile(parent uint64, name string, mode uint32) (*Node, error) {
-	return e.create(parent, name, TypeFile, mode, "")
+	return e.create(parent, name, TypeFile, mode, "", CreateOptions{})
+}
+
+func (e *Engine) CreateFileWithOwner(parent uint64, name string, mode uint32, uid, gid uint32) (*Node, error) {
+	return e.create(parent, name, TypeFile, mode, "", CreateOptions{UID: uid, GID: gid})
 }
 
 func (e *Engine) Symlink(parent uint64, name, target string, mode uint32) (*Node, error) {
 	if target == "" {
 		return nil, fmt.Errorf("%w: symlink target is required", ErrInvalidInput)
 	}
-	return e.create(parent, name, TypeSymlink, mode, target)
+	return e.create(parent, name, TypeSymlink, mode, target, CreateOptions{})
 }
 
 func (e *Engine) Link(inode uint64, newParent uint64, newName string) (*Node, error) {
@@ -294,7 +307,7 @@ func (e *Engine) Write(inode uint64, offset uint64, payload []byte) (int, error)
 	record := e.newRecord("write")
 	record.Inode = inode
 	record.Offset = offset
-	record.Data = slices.Clone(payload)
+	record.Data = payload
 	projectedBytes := estimatedWALRecordBytes(record)
 	end := offset + uint64(len(payload))
 	if end > node.Size {
@@ -507,6 +520,15 @@ func (e *Engine) SnapshotState() *SnapshotState {
 	return cloneState(e.currentStateLocked())
 }
 
+// SnapshotReferenceState returns a metadata snapshot for retaining live object
+// references during GC. Inline payload bytes may be shared with the engine and
+// must be treated as read-only by callers.
+func (e *Engine) SnapshotReferenceState() *SnapshotState {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return cloneStateForMaterialization(e.currentStateLocked())
+}
+
 func (e *Engine) ExportState() (*SnapshotState, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -713,7 +735,7 @@ func (e *Engine) DeleteSnapshot(snapshotID string) error {
 	return nil
 }
 
-func (e *Engine) create(parent uint64, name string, typ FileType, mode uint32, target string) (*Node, error) {
+func (e *Engine) create(parent uint64, name string, typ FileType, mode uint32, target string, opts CreateOptions) (*Node, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if err := e.checkOpen(); err != nil {
@@ -735,6 +757,8 @@ func (e *Engine) create(parent uint64, name string, typ FileType, mode uint32, t
 	record.Name = name
 	record.Type = typ
 	record.Mode = mode
+	record.UID = opts.UID
+	record.GID = opts.GID
 	record.Target = target
 	if err := e.appendAndApplyLocked(record, estimatedWALRecordBytes(record)); err != nil {
 		return nil, err
@@ -917,6 +941,8 @@ func (e *Engine) applyCreate(record walRecord) error {
 		Inode:  record.Inode,
 		Type:   record.Type,
 		Mode:   record.Mode,
+		UID:    record.UID,
+		GID:    record.GID,
 		Nlink:  1,
 		Target: record.Target,
 		Atime:  now,
@@ -1149,7 +1175,7 @@ func (e *Engine) exportStateLocked() (*SnapshotState, error) {
 }
 
 func (e *Engine) materializeStateLocked() (*SnapshotState, error) {
-	state := cloneState(e.currentStateLocked())
+	state := cloneStateForMaterialization(e.currentStateLocked())
 	if len(state.ColdFiles) == 0 {
 		pruneUnreferencedSegments(state)
 		return state, nil

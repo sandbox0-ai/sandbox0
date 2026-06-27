@@ -224,6 +224,44 @@ func TestEngineMaterializeRecoversViaColdRangeRead(t *testing.T) {
 	}
 }
 
+func TestCloneStateForMaterializationSharesOnlyInlinePayload(t *testing.T) {
+	state := &SnapshotState{
+		NextSeq:   2,
+		NextInode: 3,
+		Nodes: map[uint64]*Node{
+			RootInode: {Inode: RootInode, Type: TypeDirectory, Mode: 0o755, Nlink: 1},
+		},
+		Children: map[uint64]map[string]uint64{
+			RootInode: {},
+		},
+		Segments: map[string]*Segment{
+			"inline": {
+				ID:         "inline",
+				Length:     3,
+				InlineData: []byte("abc"),
+			},
+		},
+	}
+
+	regular := cloneState(state)
+	if &regular.Segments["inline"].InlineData[0] == &state.Segments["inline"].InlineData[0] {
+		t.Fatal("cloneState shared inline payload, want deep copy")
+	}
+	regular.Segments["inline"].InlineData[0] = 'z'
+	if got := string(state.Segments["inline"].InlineData); got != "abc" {
+		t.Fatalf("mutating regular clone changed original payload to %q", got)
+	}
+
+	materialized := cloneStateForMaterialization(state)
+	if &materialized.Segments["inline"].InlineData[0] != &state.Segments["inline"].InlineData[0] {
+		t.Fatal("cloneStateForMaterialization deep-copied inline payload, want shared immutable payload")
+	}
+	materialized.Segments["inline"].ID = "changed"
+	if got := state.Segments["inline"].ID; got != "inline" {
+		t.Fatalf("mutating materialization segment metadata changed original ID to %q", got)
+	}
+}
+
 func TestEngineBulkSmallFilesWithFrequentMaterialize(t *testing.T) {
 	ctx := context.Background()
 	store := newPrefixedRecordingStore(t, "vol-bulk")

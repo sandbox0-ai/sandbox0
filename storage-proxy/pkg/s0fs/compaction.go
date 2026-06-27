@@ -37,6 +37,7 @@ func (e *Engine) Compact(ctx context.Context, opts CompactionOptions) (*Manifest
 		e.mu.RUnlock()
 		return nil, nil, nil
 	}
+	version := e.mutationVersion
 	state := cloneState(e.currentStateLocked())
 	expectedManifestSeq := e.lastCommittedManifest
 	if state.NextSeq <= expectedManifestSeq+1 {
@@ -51,7 +52,7 @@ func (e *Engine) Compact(ctx context.Context, opts CompactionOptions) (*Manifest
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.lastCommittedManifest == expectedManifestSeq {
+	if e.mutationVersion == version && e.lastCommittedManifest == expectedManifestSeq {
 		e.replaceStateLocked(cloneState(manifest.State))
 		if err := e.persistCurrentStateLocked(); err != nil {
 			return nil, nil, err

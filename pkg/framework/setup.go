@@ -67,7 +67,7 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 			return nil, nil, err
 		}
 
-		if !cfg.SkipClusterDelete {
+		if !cfg.SkipClusterDelete && !workingCfg.PreserveScenario {
 			appendCleanup(func() {
 				fmt.Printf("Deleting Kind cluster %q...\n", cfg.ClusterName)
 				_ = testCtx.Cluster.DeleteKind(testCtx.Context)
@@ -111,7 +111,7 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 			cleanup()
 			return nil, nil, err
 		}
-		if !workingCfg.SkipOperatorUninstall {
+		if !workingCfg.SkipOperatorUninstall && !workingCfg.PreserveScenario {
 			appendCleanup(func() {
 				if preserveInfraForNamespaceCleanup {
 					fmt.Printf("Skipping infra-operator uninstall because manager-owned namespaces are still terminating; preserving CSI drivers for the next cleanup pass.\n")
@@ -171,25 +171,29 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 			return nil, nil, err
 		}
 	}
-	appendCleanup(func() {
-		// Pods can mount sandbox0 CSI volumes. Delete sandbox namespaces before the
-		// infra manifest so storage-proxy is still available for kubelet unpublish.
-		if err := ScaleScenarioManagerToZero(testCtx.Context, workingCfg.Kubeconfig, env.Infra); err != nil {
-			fmt.Printf("Failed to scale scenario manager down before namespace cleanup: %v\n", err)
-		}
-		if err := CleanupManagerOwnedNamespaces(testCtx.Context, workingCfg.Kubeconfig, managerOwnedNamespaceCleanupTimeout); err != nil {
-			preserveInfraForNamespaceCleanup = true
-			fmt.Printf("Failed to clean up manager-owned namespaces: %v\n", err)
-			fmt.Printf("Preserving scenario infra so CSI drivers remain available for the next cleanup pass.\n")
-			return
-		}
-		if err := KubectlDeleteManifest(testCtx.Context, workingCfg.Kubeconfig, manifestPath); err != nil {
-			fmt.Printf("Failed to delete scenario manifest: %v\n", err)
-		}
-		if err := KubectlWaitForNamespaceDeleted(testCtx.Context, workingCfg.Kubeconfig, scenario.InfraNamespace, "3m"); err != nil {
-			fmt.Printf("Failed to clean up infra namespace %q: %v\n", scenario.InfraNamespace, err)
-		}
-	})
+	if workingCfg.PreserveScenario {
+		fmt.Printf("Preserving scenario %q for follow-up tests.\n", scenario.Name)
+	} else {
+		appendCleanup(func() {
+			// Pods can mount sandbox0 CSI volumes. Delete sandbox namespaces before the
+			// infra manifest so storage-proxy is still available for kubelet unpublish.
+			if err := ScaleScenarioManagerToZero(testCtx.Context, workingCfg.Kubeconfig, env.Infra); err != nil {
+				fmt.Printf("Failed to scale scenario manager down before namespace cleanup: %v\n", err)
+			}
+			if err := CleanupManagerOwnedNamespaces(testCtx.Context, workingCfg.Kubeconfig, managerOwnedNamespaceCleanupTimeout); err != nil {
+				preserveInfraForNamespaceCleanup = true
+				fmt.Printf("Failed to clean up manager-owned namespaces: %v\n", err)
+				fmt.Printf("Preserving scenario infra so CSI drivers remain available for the next cleanup pass.\n")
+				return
+			}
+			if err := KubectlDeleteManifest(testCtx.Context, workingCfg.Kubeconfig, manifestPath); err != nil {
+				fmt.Printf("Failed to delete scenario manifest: %v\n", err)
+			}
+			if err := KubectlWaitForNamespaceDeleted(testCtx.Context, workingCfg.Kubeconfig, scenario.InfraNamespace, "3m"); err != nil {
+				fmt.Printf("Failed to clean up infra namespace %q: %v\n", scenario.InfraNamespace, err)
+			}
+		})
+	}
 
 	return env, cleanup, nil
 }

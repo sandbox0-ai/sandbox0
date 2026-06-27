@@ -111,6 +111,8 @@ func reconcileCtldDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) *a
 	if ds.Spec.Template.Spec.Containers[0].ReadinessProbe == nil || ds.Spec.Template.Spec.Containers[0].LivenessProbe == nil {
 		t.Fatal("expected ctld probes to be configured")
 	}
+	assertCtldProbe(t, "liveness", ds.Spec.Template.Spec.Containers[0].LivenessProbe, "/healthz", 10)
+	assertCtldProbe(t, "readiness", ds.Spec.Template.Spec.Containers[0].ReadinessProbe, "/readyz", 5)
 	if ds.Spec.Template.Spec.ServiceAccountName != "demo-ctld" {
 		t.Fatalf("expected service account demo-ctld, got %q", ds.Spec.Template.Spec.ServiceAccountName)
 	}
@@ -135,6 +137,29 @@ func reconcileCtldDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) *a
 	}
 
 	return ds
+}
+
+func assertCtldProbe(t *testing.T, name string, probe *corev1.Probe, path string, periodSeconds int32) {
+	t.Helper()
+
+	if probe.HTTPGet == nil {
+		t.Fatalf("expected ctld %s probe to use HTTP", name)
+	}
+	if probe.HTTPGet.Path != path {
+		t.Fatalf("expected ctld %s probe path %s, got %s", name, path, probe.HTTPGet.Path)
+	}
+	if probe.HTTPGet.Port.StrVal != "http" {
+		t.Fatalf("expected ctld %s probe to use http port, got %#v", name, probe.HTTPGet.Port)
+	}
+	if probe.PeriodSeconds != periodSeconds {
+		t.Fatalf("expected ctld %s probe period %d, got %d", name, periodSeconds, probe.PeriodSeconds)
+	}
+	if probe.TimeoutSeconds != ctldProbeTimeoutSeconds {
+		t.Fatalf("expected ctld %s probe timeout %d, got %d", name, ctldProbeTimeoutSeconds, probe.TimeoutSeconds)
+	}
+	if probe.FailureThreshold != ctldProbeFailureThreshold {
+		t.Fatalf("expected ctld %s probe failure threshold %d, got %d", name, ctldProbeFailureThreshold, probe.FailureThreshold)
+	}
 }
 
 func TestReconcileUsesDefaultContainerdHostDataRoot(t *testing.T) {

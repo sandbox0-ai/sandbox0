@@ -88,9 +88,9 @@ def apt_install(packages):
     if not packages:
         return []
     if os.geteuid() != 0:
-        return [{"skipped": True, "reason": "not running as root", "packages": packages}]
+        return [{"passed": False, "reason": "not running as root", "packages": packages}]
     if not command_exists("apt-get"):
-        return [{"skipped": True, "reason": "apt-get not found", "packages": packages}]
+        return [{"passed": False, "reason": "apt-get not found", "packages": packages}]
     update = run(["apt-get", "update"], timeout=600)
     install = run(["apt-get", "install", "-y", "--no-install-recommends", *packages], timeout=1200)
     return [trim_command_result(update), trim_command_result(install)]
@@ -173,22 +173,37 @@ def aggregate_manifest(entries):
     return h.hexdigest()
 
 
-def write_bulk_file(root, index, count, total_bytes, salt, use_temp_rename, fsync_every):
+def write_bulk_file(root, index, count, total_bytes, salt, use_temp_rename, fsync_every, post_write_stat):
     rel = bulk_relpath(index)
     size = bulk_size(index, count, total_bytes)
     path = os.path.join(root, rel)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp_path = path + ".tmp-%d" % os.getpid() if use_temp_rename else path
     h = hashlib.sha256()
-    with open(tmp_path, "wb") as handle:
-        for chunk in deterministic_chunks(index, size, salt):
-            handle.write(chunk)
-            h.update(chunk)
-        if fsync_every and index % fsync_every == 0:
-            handle.flush()
-            os.fsync(handle.fileno())
-    if use_temp_rename:
-        os.replace(tmp_path, path)
+    tmp_path = path + ".tmp-%d" % os.getpid() if use_temp_rename else path
+    phase = "mkdir"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        phase = "open"
+        with open(tmp_path, "wb") as handle:
+            phase = "write"
+            for chunk in deterministic_chunks(index, size, salt):
+                handle.write(chunk)
+                h.update(chunk)
+            if fsync_every and index % fsync_every == 0:
+                phase = "fsync"
+                handle.flush()
+                os.fsync(handle.fileno())
+        if use_temp_rename:
+            phase = "replace"
+            os.replace(tmp_path, path)
+        if post_write_stat:
+            phase = "post_stat"
+            st = os.stat(path)
+            if st.st_size != size:
+                raise RuntimeError("post-write size=%d want=%d" % (st.st_size, size))
+            if use_temp_rename and os.path.exists(tmp_path):
+                raise RuntimeError("temporary path still exists after replace: %s" % tmp_path)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("%s: %r" % (phase, exc)) from exc
     return rel, size, h.hexdigest()
 
 
@@ -501,6 +516,7 @@ def run_bulk_target(target, cfg):
                 salt,
                 bool(cfg.get("bulk_temp_rename")),
                 fsync_every,
+                bool(cfg.get("bulk_post_write_stat")),
             ): index
             for index in range(count)
         }
@@ -843,7 +859,7 @@ def run_fsx(cfg):
         return {
             "suite": "fsx",
             "passed": False,
-            "skipped": True,
+            "skipped": False,
             "reason": (build or {}).get("reason", "fsx/fsx-linux binary not found"),
             "dependency_commands": (build or {}).get("dependency_commands", []),
             "commands": (build or {}).get("commands", []),
@@ -874,7 +890,7 @@ def run_fsstress(cfg):
         return {
             "suite": "fsstress",
             "passed": False,
-            "skipped": True,
+            "skipped": False,
             "reason": (build or {}).get("reason", "fsstress binary not found"),
             "dependency_commands": (build or {}).get("dependency_commands", []),
             "commands": (build or {}).get("commands", []),
@@ -1051,7 +1067,7 @@ def run_fio(cfg):
         return {
             "suite": "fio",
             "passed": False,
-            "skipped": True,
+            "skipped": False,
             "reason": reason,
             "dependency_commands": dep_commands,
         }
@@ -1093,7 +1109,7 @@ def run_mdtest(cfg):
         return {
             "suite": "mdtest",
             "passed": False,
-            "skipped": True,
+            "skipped": False,
             "reason": (build or {}).get("reason", "mdtest binary not found"),
             "dependency_commands": (build or {}).get("dependency_commands", []),
             "commands": (build or {}).get("commands", []),
@@ -1264,12 +1280,25 @@ def run_filebench(cfg):
         return {
             "suite": "filebench",
             "passed": False,
-            "skipped": True,
+            "skipped": False,
             "reason": (build or {}).get("reason", "filebench binary not found"),
             "dependency_commands": (build or {}).get("dependency_commands", []),
             "commands": (build or {}).get("commands", []),
         }
-    results = [run_filebench_target(target, binary, cfg) for target in target_roots(cfg)]
+    targets = target_roots(cfg)
+    baseline = run_filebench_target(targets[0], binary, cfg)
+    if not baseline["passed"]:
+        return {
+            "suite": "filebench",
+            "passed": False,
+            "skipped": False,
+            "reason": "filebench failed on the pod-local baseline; treating as a tool/environment failure",
+            "binary": binary,
+            "dependency_commands": (build or {}).get("dependency_commands", []),
+            "commands": (build or {}).get("commands", []),
+            "baseline_result": baseline,
+        }
+    results = [baseline] + [run_filebench_target(target, binary, cfg) for target in targets[1:]]
     return {
         "suite": "filebench",
         "passed": all(item["passed"] for item in results),
@@ -1300,14 +1329,13 @@ def main():
         started = time.time()
         try:
             if suite not in suite_map:
-                item = {"suite": suite, "passed": False, "skipped": True, "reason": "suite is selected in catalog but not implemented by this runner yet"}
+                item = {"suite": suite, "passed": False, "skipped": False, "reason": "suite is selected in catalog but not implemented by this runner yet"}
             else:
                 item = suite_map[suite](cfg)
         except Exception as exc:  # noqa: BLE001
             item = {"suite": suite, "passed": False, "error": repr(exc)}
         item["elapsed_seconds"] = time.time() - started
         results.append(item)
-    completed_results = [item for item in results if not item.get("skipped")]
     payload = {
         "environment": {
             "cwd": os.getcwd(),
@@ -1319,9 +1347,27 @@ def main():
         },
         "config": {key: value for key, value in cfg.items() if key not in {"password"}},
         "results": results,
-        "passed": bool(completed_results) and all(item.get("passed") for item in completed_results),
+        "passed": bool(results) and all(item.get("passed") for item in results),
     }
-    print(json.dumps(payload, indent=2, sort_keys=True))
+    result_path = str(cfg.get("result_path") or "").strip()
+    if result_path:
+        Path(result_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(result_path).write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        print(json.dumps({
+            "passed": payload["passed"],
+            "result_path": result_path,
+            "results": [
+                {
+                    "suite": item.get("suite"),
+                    "passed": bool(item.get("passed")),
+                    "skipped": bool(item.get("skipped")),
+                    "elapsed_seconds": item.get("elapsed_seconds", 0.0),
+                }
+                for item in results
+            ],
+        }, sort_keys=True))
+    else:
+        print(json.dumps(payload, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":
@@ -1387,6 +1433,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mount-path", default="/workspace/s0fs-posix", help="Mounted S0FS path inside the sandbox.")
     parser.add_argument("--local-root", default="/tmp", help="Pod-local baseline root inside the sandbox.")
     parser.add_argument("--container", default="", help="Optional container name for kubectl exec.")
+    parser.add_argument("--volume-access-mode", default="RWO", choices=("RWO", "ROX"), help="SandboxVolume access mode for the mounted S0FS volume.")
     parser.add_argument("--suite", action="append", dest="suites", help="Suite to run. Defaults to smoke and git-integrity.")
     parser.add_argument("--install-deps", action="store_true", help="Install suite dependencies inside the sandbox with apt-get.")
     parser.add_argument("--keep-resources", action="store_true", help="Do not delete created sandbox, template, or volume.")
@@ -1399,6 +1446,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bulk-concurrency", type=int, default=8, help="Concurrent writers/readers for bulk-smallfile-integrity.")
     parser.add_argument("--bulk-fsync-every", type=int, default=0, help="fsync every Nth bulk file; 0 disables per-file fsync.")
     parser.add_argument("--bulk-no-temp-rename", action="store_true", help="Write bulk files directly instead of temp-file then rename.")
+    parser.add_argument("--bulk-post-write-stat", action="store_true", help="Stat each bulk file immediately after writing it.")
     parser.add_argument("--bulk-delete-after", action="store_true", help="Delete bulk-smallfile-integrity files after verification and record statfs.")
     parser.add_argument("--archive-file-count", type=int, default=3000, help="Files generated for archive-copy-rsync.")
     parser.add_argument("--archive-total-bytes", default=str(50 * 1024 * 1024), help="Total bytes generated for archive-copy-rsync.")
@@ -1442,12 +1490,29 @@ def run_command(args: List[str], *, check: bool = True) -> str:
     return completed.stdout.strip()
 
 
-def kubectl(args: List[str], kube_context: str) -> str:
+def kubectl_command(args: List[str], kube_context: str) -> List[str]:
     cmd = ["kubectl"]
     if kube_context:
         cmd += ["--context", kube_context]
     cmd += args
-    return run_command(cmd)
+    return cmd
+
+
+def kubectl(args: List[str], kube_context: str) -> str:
+    return run_command(kubectl_command(args, kube_context))
+
+
+def kubectl_to_file(args: List[str], kube_context: str, output_path: str) -> None:
+    with open(output_path, "w", encoding="utf-8") as handle:
+        completed = subprocess.run(
+            kubectl_command(args, kube_context),
+            check=False,
+            stdout=handle,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+        )
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stderr.strip())
 
 
 def discover_base_url(args: argparse.Namespace) -> str:
@@ -1596,6 +1661,7 @@ def run_remote_suites(args: argparse.Namespace, pod_name: str, namespace: str, s
         "mount_path": args.mount_path,
         "local_root": args.local_root,
         "work_root": "/tmp/s0fs-posix-runner",
+        "result_path": f"/tmp/s0fs-posix-runner/result-{os.getpid()}-{int(time.time() * 1000)}.json",
         "git_file_count": args.git_file_count,
         "git_file_size": args.git_file_size,
         "git_repeats": args.git_repeats,
@@ -1604,6 +1670,7 @@ def run_remote_suites(args: argparse.Namespace, pod_name: str, namespace: str, s
         "bulk_concurrency": args.bulk_concurrency,
         "bulk_fsync_every": args.bulk_fsync_every,
         "bulk_temp_rename": not args.bulk_no_temp_rename,
+        "bulk_post_write_stat": args.bulk_post_write_stat,
         "bulk_delete_after": args.bulk_delete_after,
         "archive_file_count": args.archive_file_count,
         "archive_total_bytes": args.archive_total_bytes,
@@ -1639,7 +1706,28 @@ def run_remote_suites(args: argparse.Namespace, pod_name: str, namespace: str, s
         cmd += ["-c", args.container]
     cmd += ["--", "python3", "-c", REMOTE_RUNNER, json.dumps(cfg)]
     raw = kubectl(cmd, args.kube_context)
-    return json.loads(raw)
+    ack = json.loads(raw)
+    if not ack.get("result_path"):
+        raise RuntimeError(f"remote runner did not return a result path: {ack!r}")
+
+    cat_cmd = ["exec", "-n", namespace, pod_name]
+    if args.container:
+        cat_cmd += ["-c", args.container]
+    cat_cmd += ["--", "cat", str(ack["result_path"])]
+
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
+            tmp_path = handle.name
+        kubectl_to_file(cat_cmd, args.kube_context, tmp_path)
+        with open(tmp_path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
 
 
 def print_markdown(result: Any) -> None:
@@ -1655,6 +1743,25 @@ def print_markdown(result: Any) -> None:
                 elapsed=float(item.get("elapsed_seconds", 0.0)),
             )
         )
+
+
+def compact_result(result: Any, json_output: str = "") -> Dict[str, Any]:
+    return {
+        "passed": bool(result.get("passed")),
+        "json_output": json_output,
+        "sandbox0": result.get("sandbox0", {}),
+        "results": [
+            {
+                "suite": item.get("suite"),
+                "passed": bool(item.get("passed")),
+                "skipped": bool(item.get("skipped")),
+                "elapsed_seconds": item.get("elapsed_seconds", 0.0),
+                "reason": item.get("reason", ""),
+                "error": item.get("error", ""),
+            }
+            for item in result.get("results", [])
+        ],
+    }
 
 
 def main() -> int:
@@ -1694,7 +1801,7 @@ def main() -> int:
                 "POST",
                 "/api/v1/sandboxvolumes",
                 {
-                    "access_mode": "RWO",
+                    "access_mode": args.volume_access_mode,
                     "default_posix_uid": 0,
                     "default_posix_gid": 0,
                 },
@@ -1734,7 +1841,7 @@ def main() -> int:
             "mount_path": args.mount_path,
             "team_id": client.team_id,
         }
-        print(json.dumps(result, indent=2, sort_keys=True))
+        print(json.dumps(compact_result(result, args.json_output), indent=2, sort_keys=True))
         print_markdown(result)
         if args.json_output:
             with open(args.json_output, "w", encoding="utf-8") as handle:

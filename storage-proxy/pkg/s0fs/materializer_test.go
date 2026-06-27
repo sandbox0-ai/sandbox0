@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -60,20 +61,26 @@ func (s *memoryHeadStore) CompareAndSwapCommittedHead(_ context.Context, volumeI
 type blockingHeadStore struct {
 	*memoryHeadStore
 	calls        atomic.Int32
+	blockOn      int32
 	firstEntered chan struct{}
 	releaseFirst chan struct{}
 }
 
 func newBlockingHeadStore() *blockingHeadStore {
+	return newNthBlockingHeadStore(1)
+}
+
+func newNthBlockingHeadStore(blockOn int32) *blockingHeadStore {
 	return &blockingHeadStore{
 		memoryHeadStore: newMemoryHeadStore(),
+		blockOn:         blockOn,
 		firstEntered:    make(chan struct{}),
 		releaseFirst:    make(chan struct{}),
 	}
 }
 
 func (s *blockingHeadStore) CompareAndSwapCommittedHead(ctx context.Context, volumeID string, expectedManifestSeq uint64, head *CommittedHead) error {
-	if s.calls.Add(1) == 1 {
+	if s.calls.Add(1) == s.blockOn {
 		close(s.firstEntered)
 		select {
 		case <-s.releaseFirst:
@@ -214,6 +221,93 @@ func TestEngineMaterializeRecoversViaColdRangeRead(t *testing.T) {
 	}
 	if segmentRead.off != 0 || segmentRead.limit != 11 {
 		t.Fatalf("segment cache read = %+v, want full segment read", *segmentRead)
+	}
+}
+
+func TestEngineBulkSmallFilesWithFrequentMaterialize(t *testing.T) {
+	ctx := context.Background()
+	store := newPrefixedRecordingStore(t, "vol-bulk")
+	heads := newMemoryHeadStore()
+	engine, err := Open(ctx, Config{
+		VolumeID:          "vol-bulk",
+		WALPath:           filepath.Join(t.TempDir(), "engine.wal"),
+		ObjectStore:       store,
+		HeadStore:         heads,
+		SegmentTargetSize: 16 << 10,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	mkdir := func(parent uint64, name string) uint64 {
+		node, err := engine.Mkdir(parent, name, 0o755)
+		if errors.Is(err, ErrExists) {
+			node, err = engine.Lookup(parent, name)
+		}
+		if err != nil {
+			t.Fatalf("Mkdir(%d, %q) error = %v", parent, name, err)
+		}
+		return node.Inode
+	}
+	dirs := make(map[string]uint64)
+	for i := 0; i < 10_000; i++ {
+		topName := fmt.Sprintf("d%03d", (i/1000)%1000)
+		top := dirs[topName]
+		if top == 0 {
+			top = mkdir(RootInode, topName)
+			dirs[topName] = top
+		}
+		subName := fmt.Sprintf("d%03d", (i/100)%10)
+		subKey := topName + "/" + subName
+		sub := dirs[subKey]
+		if sub == 0 {
+			sub = mkdir(top, subName)
+			dirs[subKey] = sub
+		}
+		name := fmt.Sprintf("file%05d.bin", i)
+		node, err := engine.CreateFile(sub, name, 0o644)
+		if err != nil {
+			t.Fatalf("CreateFile(%s/%s) error = %v", subKey, name, err)
+		}
+		payload := []byte(fmt.Sprintf("payload-%05d", i))
+		if _, err := engine.Write(node.Inode, 0, payload); err != nil {
+			t.Fatalf("Write(%s/%s) error = %v", subKey, name, err)
+		}
+		if i%100 == 99 {
+			if _, err := engine.SyncMaterialize(ctx); err != nil {
+				t.Fatalf("SyncMaterialize(%d) error = %v", i, err)
+			}
+		}
+	}
+	if _, err := engine.SyncMaterialize(ctx); err != nil {
+		t.Fatalf("final SyncMaterialize() error = %v", err)
+	}
+
+	for i := 0; i < 10_000; i++ {
+		topName := fmt.Sprintf("d%03d", (i/1000)%1000)
+		top, err := engine.Lookup(RootInode, topName)
+		if err != nil {
+			t.Fatalf("Lookup(%s) error = %v", topName, err)
+		}
+		subName := fmt.Sprintf("d%03d", (i/100)%10)
+		sub, err := engine.Lookup(top.Inode, subName)
+		if err != nil {
+			t.Fatalf("Lookup(%s/%s) error = %v", topName, subName, err)
+		}
+		name := fmt.Sprintf("file%05d.bin", i)
+		node, err := engine.Lookup(sub.Inode, name)
+		if err != nil {
+			t.Fatalf("Lookup(%s/%s/%s) error = %v", topName, subName, name, err)
+		}
+		data, err := engine.Read(node.Inode, 0, 1<<20)
+		if err != nil {
+			t.Fatalf("Read(%s/%s/%s) error = %v", topName, subName, name, err)
+		}
+		want := []byte(fmt.Sprintf("payload-%05d", i))
+		if !bytes.Equal(data, want) {
+			t.Fatalf("Read(%s/%s/%s) = %q, want %q", topName, subName, name, data, want)
+		}
 	}
 }
 
@@ -811,6 +905,113 @@ func TestEngineSyncMaterializeAdvancesCommittedHeadWhenDirtyDuringCommit(t *test
 	}
 	if head.ManifestSeq < 2 {
 		t.Fatalf("committed manifest seq = %d, want at least 2", head.ManifestSeq)
+	}
+}
+
+func TestEngineCompactKeepsConcurrentMutations(t *testing.T) {
+	ctx := context.Background()
+	store := newPrefixedRecordingStore(t, "vol-compact-dirty")
+	heads := newNthBlockingHeadStore(2)
+
+	engine, err := Open(ctx, Config{
+		VolumeID:    "vol-compact-dirty",
+		WALPath:     filepath.Join(t.TempDir(), "engine.wal"),
+		ObjectStore: store,
+		HeadStore:   heads,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	base, err := engine.CreateFile(RootInode, "base.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile(base) error = %v", err)
+	}
+	if _, err := engine.Write(base.Inode, 0, []byte("base-data")); err != nil {
+		t.Fatalf("Write(base) error = %v", err)
+	}
+	baseManifest, err := engine.SyncMaterialize(ctx)
+	if err != nil {
+		t.Fatalf("SyncMaterialize(base) error = %v", err)
+	}
+	var oldSegmentKey string
+	for _, segment := range baseManifest.State.Segments {
+		oldSegmentKey = segment.Key
+	}
+	if oldSegmentKey == "" {
+		t.Fatal("base materialization did not create a segment")
+	}
+
+	type compactResult struct {
+		manifest *Manifest
+		err      error
+	}
+	compacted := make(chan compactResult, 1)
+	go func() {
+		manifest, _, err := engine.Compact(ctx, CompactionOptions{Force: true})
+		compacted <- compactResult{manifest: manifest, err: err}
+	}()
+
+	select {
+	case <-heads.firstEntered:
+	case <-time.After(time.Second):
+		t.Fatal("Compact did not reach committed head CAS")
+	}
+
+	concurrent, err := engine.CreateFile(RootInode, "concurrent.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile(concurrent) error = %v", err)
+	}
+	if _, err := engine.Write(concurrent.Inode, 0, []byte("concurrent-data")); err != nil {
+		t.Fatalf("Write(concurrent) error = %v", err)
+	}
+
+	close(heads.releaseFirst)
+	var compactedManifest *Manifest
+	select {
+	case result := <-compacted:
+		if result.err != nil {
+			t.Fatalf("Compact() error = %v", result.err)
+		}
+		compactedManifest = result.manifest
+	case <-time.After(time.Second):
+		t.Fatal("Compact did not complete")
+	}
+	if compactedManifest == nil || compactedManifest.State == nil {
+		t.Fatal("Compact() returned no manifest")
+	}
+
+	node, err := engine.Lookup(RootInode, "concurrent.txt")
+	if err != nil {
+		t.Fatalf("Lookup(concurrent) after Compact() error = %v", err)
+	}
+	data, err := engine.Read(node.Inode, 0, uint64(len("concurrent-data")))
+	if err != nil {
+		t.Fatalf("Read(concurrent) after Compact() error = %v", err)
+	}
+	if string(data) != "concurrent-data" {
+		t.Fatalf("Read(concurrent) = %q, want %q", data, "concurrent-data")
+	}
+
+	retainedManifests := map[string]struct{}{manifestKey(compactedManifest.ManifestSeq): {}}
+	withoutLiveState, err := engine.materializer.PlanGarbageCollection(ctx, []*SnapshotState{compactedManifest.State}, retainedManifests)
+	if err != nil {
+		t.Fatalf("PlanGarbageCollection(without live state) error = %v", err)
+	}
+	if !slices.Contains(withoutLiveState.Segments, oldSegmentKey) {
+		t.Fatalf("old live segment %s was not collectible without live state retention: %v", oldSegmentKey, withoutLiveState.Segments)
+	}
+	withLiveState, err := engine.materializer.PlanGarbageCollection(ctx, []*SnapshotState{compactedManifest.State, engine.SnapshotState()}, retainedManifests)
+	if err != nil {
+		t.Fatalf("PlanGarbageCollection(with live state) error = %v", err)
+	}
+	if slices.Contains(withLiveState.Segments, oldSegmentKey) {
+		t.Fatalf("old live segment %s was planned for deletion despite live state retention", oldSegmentKey)
+	}
+
+	if _, err := engine.SyncMaterialize(ctx); err != nil {
+		t.Fatalf("SyncMaterialize(concurrent) error = %v", err)
 	}
 }
 

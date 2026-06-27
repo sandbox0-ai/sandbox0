@@ -460,6 +460,7 @@ func (b *segmentBuilder) ensureCurrent() *materializedSegment {
 		ID:       segmentID,
 		VolumeID: b.volumeID,
 		Key:      fmt.Sprintf("%s/%s.bin", segmentDir, segmentID),
+		Payload:  make([]byte, 0, int(b.targetSize)),
 	}
 	b.segments = append(b.segments, b.current)
 	return b.current

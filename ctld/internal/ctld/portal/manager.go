@@ -998,6 +998,9 @@ func (m *Manager) garbageCollectBoundS0FSObjects(ctx context.Context, bound *bou
 		return nil, err
 	}
 	retainedStates := []*s0fs.SnapshotState{manifest.State}
+	if current := bound.volCtx.S0FS.SnapshotState(); current != nil {
+		retainedStates = append(retainedStates, current)
+	}
 	cfg := s0fs.Config{
 		VolumeID:    bound.volumeID,
 		WALPath:     filepath.Join(bound.volCtx.CacheDir, "engine.wal"),

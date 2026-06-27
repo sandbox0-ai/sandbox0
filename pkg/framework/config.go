@@ -16,6 +16,7 @@ type Config struct {
 	SkipClusterDelete     bool
 	SkipOperatorInstall   bool
 	SkipOperatorUninstall bool
+	PreserveScenario      bool
 
 	OperatorChartPath       string
 	OperatorNamespace       string
@@ -47,6 +48,7 @@ func LoadConfig() (Config, error) {
 		SkipClusterDelete:     envBool("E2E_SKIP_CLUSTER_DELETE", false),
 		SkipOperatorInstall:   envBool("E2E_SKIP_OPERATOR_INSTALL", false),
 		SkipOperatorUninstall: envBool("E2E_SKIP_OPERATOR_UNINSTALL", false),
+		PreserveScenario:      envBool("E2E_PRESERVE_SCENARIO", false),
 
 		OperatorChartPath:       envString("E2E_OPERATOR_CHART", defaultOperatorChart),
 		OperatorNamespace:       envString("E2E_OPERATOR_NAMESPACE", "infra-operator"),

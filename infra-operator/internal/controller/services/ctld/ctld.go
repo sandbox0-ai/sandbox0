@@ -31,6 +31,8 @@ const (
 	containerdDataMountPath        = "/host-var-lib/containerd"
 	defaultContainerdHostDataRoot  = "/var/lib/containerd"
 	defaultContainerdHostStateRoot = "/run/containerd"
+	ctldProbeTimeoutSeconds        = 10
+	ctldProbeFailureThreshold      = 6
 )
 
 func NewReconciler(resources *common.ResourceManager) *Reconciler {
@@ -230,6 +232,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 								},
 								InitialDelaySeconds: 5,
 								PeriodSeconds:       10,
+								TimeoutSeconds:      ctldProbeTimeoutSeconds,
+								FailureThreshold:    ctldProbeFailureThreshold,
 							},
 							ReadinessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
@@ -237,6 +241,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 								},
 								InitialDelaySeconds: 2,
 								PeriodSeconds:       5,
+								TimeoutSeconds:      ctldProbeTimeoutSeconds,
+								FailureThreshold:    ctldProbeFailureThreshold,
 							},
 							SecurityContext: &corev1.SecurityContext{
 								Privileged: common.BoolPtr(true),

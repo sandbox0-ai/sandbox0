@@ -184,6 +184,23 @@ func TestReconcileUsesConfiguredContainerdHostDataRoot(t *testing.T) {
 	assertHostPathVolume(t, ds.Spec.Template.Spec.Volumes, "containerd-data", "/var/lib/sandbox0-worker/containerd")
 }
 
+func TestReconcilePassesRootFSObjectCacheConfig(t *testing.T) {
+	infra := newCtldTestInfra()
+	infra.Spec.Services.Ctld = &infrav1alpha1.CtldServiceConfig{
+		RootFSObjectCacheMaxBytes:      "10Gi",
+		RootFSObjectCacheMinFreeBytes:  "2Gi",
+		RootFSObjectCacheMaxAge:        metav1.Duration{Duration: 6 * time.Hour},
+		RootFSObjectCacheSweepInterval: metav1.Duration{Duration: 30 * time.Second},
+	}
+
+	ds := reconcileCtldDaemonSet(t, infra)
+	args := ds.Spec.Template.Spec.Containers[0].Args
+	assertContainsArg(t, args, "-rootfs-object-cache-max-bytes=10Gi")
+	assertContainsArg(t, args, "-rootfs-object-cache-min-free-bytes=2Gi")
+	assertContainsArg(t, args, "-rootfs-object-cache-max-age=6h0m0s")
+	assertContainsArg(t, args, "-rootfs-object-cache-sweep-interval=30s")
+}
+
 func TestReconcileDoesNotPassPauseConfigToCtld(t *testing.T) {
 	infra := newCtldTestInfra()
 	infra.Spec.Services.Manager.Config = &infrav1alpha1.ManagerConfig{

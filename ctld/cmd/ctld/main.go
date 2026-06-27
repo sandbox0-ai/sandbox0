@@ -30,26 +30,31 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	storagedb "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 var (
-	httpAddr               = ":8095"
-	kubeconfig             = ""
-	criEndpoint            = "/host-run/containerd/containerd.sock"
-	containerdEndpoint     = "/host-run/containerd/containerd.sock"
-	containerdRoot         = "/host-run/containerd"
-	containerdHostRoot     = "/run/containerd"
-	containerdDataRoot     = "/host-var-lib/containerd"
-	containerdHostDataRoot = "/var/lib/containerd"
-	containerdNamespace    = "k8s.io"
-	nodeName               = os.Getenv("NODE_NAME")
-	portalRoot             = "/var/lib/sandbox0/ctld"
-	csiSocket              = "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock"
-	podName                = os.Getenv("POD_NAME")
-	podNamespace           = os.Getenv("POD_NAMESPACE")
-	pprofAddr              = ""
-	pprofBlockProfileRate  = 0
-	pprofMutexFraction     = 0
+	httpAddr                       = ":8095"
+	kubeconfig                     = ""
+	criEndpoint                    = "/host-run/containerd/containerd.sock"
+	containerdEndpoint             = "/host-run/containerd/containerd.sock"
+	containerdRoot                 = "/host-run/containerd"
+	containerdHostRoot             = "/run/containerd"
+	containerdDataRoot             = "/host-var-lib/containerd"
+	containerdHostDataRoot         = "/var/lib/containerd"
+	containerdNamespace            = "k8s.io"
+	nodeName                       = os.Getenv("NODE_NAME")
+	portalRoot                     = "/var/lib/sandbox0/ctld"
+	csiSocket                      = "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock"
+	rootFSObjectCacheMaxBytes      = "20Gi"
+	rootFSObjectCacheMinFreeBytes  = "0"
+	rootFSObjectCacheMaxAge        time.Duration
+	rootFSObjectCacheSweepInterval = time.Minute
+	podName                        = os.Getenv("POD_NAME")
+	podNamespace                   = os.Getenv("POD_NAMESPACE")
+	pprofAddr                      = ""
+	pprofBlockProfileRate          = 0
+	pprofMutexFraction             = 0
 )
 
 func main() {
@@ -65,6 +70,10 @@ func main() {
 	flag.StringVar(&nodeName, "node-name", os.Getenv("NODE_NAME"), "current node name used to validate local sandbox ownership")
 	flag.StringVar(&portalRoot, "volume-portal-root", "/var/lib/sandbox0/ctld", "host-local root for ctld volume portal WAL and cache")
 	flag.StringVar(&csiSocket, "csi-socket", "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock", "CSI endpoint socket for sandbox volume portals")
+	flag.StringVar(&rootFSObjectCacheMaxBytes, "rootfs-object-cache-max-bytes", "20Gi", "maximum node-local rootfs object cache size; set to 0 to disable")
+	flag.StringVar(&rootFSObjectCacheMinFreeBytes, "rootfs-object-cache-min-free-bytes", "0", "minimum free bytes to preserve on the rootfs object cache filesystem")
+	flag.DurationVar(&rootFSObjectCacheMaxAge, "rootfs-object-cache-max-age", 0, "maximum age for node-local rootfs cache objects; 0 disables age-based eviction")
+	flag.DurationVar(&rootFSObjectCacheSweepInterval, "rootfs-object-cache-sweep-interval", time.Minute, "interval for node-local rootfs object cache garbage collection")
 	flag.StringVar(&pprofAddr, "pprof-addr", "", "optional pprof listen address; disabled when empty")
 	flag.IntVar(&pprofBlockProfileRate, "pprof-block-profile-rate", 0, "runtime.SetBlockProfileRate value used when pprof is enabled")
 	flag.IntVar(&pprofMutexFraction, "pprof-mutex-profile-fraction", 0, "runtime.SetMutexProfileFraction value used when pprof is enabled")
@@ -138,7 +147,7 @@ func main() {
 	httpServer := newHTTPServer(httpAddr, combinedController{
 		Controller: probeController,
 		Portal:     portalManager,
-		RootFS:     buildRootFSController(storageCfg, portalManager),
+		RootFS:     buildRootFSController(ctx, storageCfg, portalManager),
 	})
 	if obsProvider != nil {
 		httpServer.Handler = httpobs.ServerMiddleware(obsProvider.HTTPServerConfig(zapLogger))(httpServer.Handler)
@@ -218,11 +227,12 @@ func buildProbeController(ctx context.Context, obsProvider *observability.Provid
 	return controller
 }
 
-func buildRootFSController(storageCfg *apiconfig.StorageProxyConfig, portalResolver ctldrootfs.PortalResolver) rootFSHandler {
+func buildRootFSController(ctx context.Context, storageCfg *apiconfig.StorageProxyConfig, portalResolver ctldrootfs.PortalResolver) rootFSHandler {
 	store, err := buildRootFSObjectStore(storageCfg)
 	if err != nil {
 		log.Printf("ctld rootfs object store disabled: %v", err)
 	}
+	objectCache := buildRootFSObjectCache(ctx)
 	return ctldrootfs.NewController(ctldrootfs.Config{
 		Runtime: ctldrootfs.NewContainerdRuntime(ctldrootfs.ContainerdRuntimeConfig{
 			CRIEndpoint:            criEndpoint,
@@ -236,7 +246,51 @@ func buildRootFSController(storageCfg *apiconfig.StorageProxyConfig, portalResol
 		}),
 		Store:          store,
 		PortalResolver: portalResolver,
+		SnapshotDir:    filepath.Join(portalRoot, "rootfs", "prepared"),
+		ObjectCache:    objectCache,
 	})
+}
+
+func buildRootFSObjectCache(ctx context.Context) *ctldrootfs.ObjectCache {
+	maxBytes, err := parseByteQuantity(rootFSObjectCacheMaxBytes)
+	if err != nil {
+		log.Printf("ctld rootfs object cache disabled: %v", err)
+		return nil
+	}
+	minFreeBytes, err := parseByteQuantity(rootFSObjectCacheMinFreeBytes)
+	if err != nil {
+		log.Printf("ctld rootfs object cache disabled: %v", err)
+		return nil
+	}
+	cache := ctldrootfs.NewObjectCache(ctldrootfs.ObjectCacheConfig{
+		Dir:           filepath.Join(portalRoot, "rootfs", "objects"),
+		MaxBytes:      maxBytes,
+		MinFreeBytes:  minFreeBytes,
+		MaxAge:        rootFSObjectCacheMaxAge,
+		SweepInterval: rootFSObjectCacheSweepInterval,
+	})
+	if cache != nil {
+		cache.Start(ctx)
+		log.Printf("ctld rootfs object cache enabled: max_bytes=%d min_free_bytes=%d max_age=%s sweep_interval=%s", maxBytes, minFreeBytes, rootFSObjectCacheMaxAge, rootFSObjectCacheSweepInterval)
+	}
+	return cache
+}
+
+func parseByteQuantity(raw string) (int64, error) {
+	value := strings.TrimSpace(raw)
+	switch strings.ToLower(value) {
+	case "", "0", "off", "disabled", "false":
+		return 0, nil
+	}
+	quantity, err := resource.ParseQuantity(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse %q as byte quantity: %w", raw, err)
+	}
+	bytes := quantity.Value()
+	if bytes < 0 {
+		return 0, fmt.Errorf("byte quantity must be non-negative: %q", raw)
+	}
+	return bytes, nil
 }
 
 func buildRootFSObjectStore(cfg *apiconfig.StorageProxyConfig) (objectstore.Store, error) {

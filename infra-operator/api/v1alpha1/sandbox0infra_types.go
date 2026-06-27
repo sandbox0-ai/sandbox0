@@ -1358,6 +1358,27 @@ type CtldServiceConfig struct {
 	// +kubebuilder:default=/var/lib/containerd
 	// +kubebuilder:validation:Pattern=`^/.*`
 	ContainerdHostDataRoot string `json:"containerdHostDataRoot,omitempty"`
+
+	// RootFSObjectCacheMaxBytes caps the ctld node-local rootfs object cache.
+	// Set 0 to disable the cache.
+	// +kubebuilder:default="20Gi"
+	// +optional
+	RootFSObjectCacheMaxBytes string `json:"rootfsObjectCacheMaxBytes,omitempty"`
+
+	// RootFSObjectCacheMinFreeBytes asks ctld GC to keep at least this much free
+	// space on the cache filesystem.
+	// +optional
+	RootFSObjectCacheMinFreeBytes string `json:"rootfsObjectCacheMinFreeBytes,omitempty"`
+
+	// RootFSObjectCacheMaxAge evicts cache entries older than this age. Zero
+	// disables age-based eviction.
+	// +optional
+	RootFSObjectCacheMaxAge metav1.Duration `json:"rootfsObjectCacheMaxAge,omitempty"`
+
+	// RootFSObjectCacheSweepInterval controls how often ctld sweeps the
+	// node-local rootfs object cache.
+	// +optional
+	RootFSObjectCacheSweepInterval metav1.Duration `json:"rootfsObjectCacheSweepInterval,omitempty"`
 }
 
 // NetdServiceConfig defines configuration for netd service

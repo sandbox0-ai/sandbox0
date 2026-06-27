@@ -7,6 +7,10 @@ on:
       - synchronize
       - reopened
       - ready_for_review
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "**/*.mdx"
 
 concurrency:
   group: pr-quick-check-${{ github.event.pull_request.number || github.ref }}

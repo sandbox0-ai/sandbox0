@@ -652,7 +652,9 @@ func (c *segmentCache) put(key string, payload []byte) {
 	} else {
 		c.order = append(c.order, key)
 	}
-	c.entries[key] = append([]byte(nil), payload...)
+	// The cache takes ownership of payload. ReadSegmentRange returns cloned
+	// ranges to callers, so cached segment bytes remain immutable after put.
+	c.entries[key] = payload
 	c.size += int64(len(payload))
 
 	for c.size > c.maxBytes && len(c.order) > 0 {

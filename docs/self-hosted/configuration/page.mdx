@@ -224,6 +224,20 @@ spec:
             containerdHostDataRoot: /var/lib/containerd/sandbox0
 ```
 
+`ctld` also keeps a disposable node-local rootfs object cache under its host data directory. This cache accelerates pause/resume when the restoring ctld already has the needed rootfs layer objects. The default cap is `20Gi` per ctld node. Set `rootfsObjectCacheMaxBytes: "0"` to disable it, or tune the GC fields to fit your node disk:
+
+```yaml
+spec:
+    services:
+        ctld:
+            rootfsObjectCacheMaxBytes: 20Gi
+            rootfsObjectCacheMinFreeBytes: 5Gi
+            rootfsObjectCacheMaxAge: 24h
+            rootfsObjectCacheSweepInterval: 1m
+```
+
+Cache contents are safe to delete. If a cached object is missing, corrupt, too old, or evicted to preserve free space, `ctld` downloads the rootfs object from configured object storage.
+
 ### Shared Redis Rate Limiting
 
 Gateway request rate limiting defaults to process-local memory. Configure `spec.redis` when gateway replicas need a shared Redis backend. The same Redis backend is also used by `netd` when cluster-scoped team bandwidth limits are configured.

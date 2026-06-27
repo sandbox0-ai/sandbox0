@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	godigest "github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/stretchr/testify/assert"
@@ -140,6 +141,33 @@ func TestControllerSaveRootFSResolvesUnboundPortalPaths(t *testing.T) {
 	}}, runtime.createPortalPaths)
 }
 
+func TestControllerSaveRootFSWarmsObjectCache(t *testing.T) {
+	payload := "rootfs diff"
+	store := objectstore.NewMemoryStore(t.Name())
+	cache := NewObjectCache(ObjectCacheConfig{Dir: t.TempDir(), MaxBytes: 1 << 20})
+	runtime := &fakeRuntime{
+		info:          rootFSInfo("runc"),
+		createDesc:    rootFSDiffDescriptorForPayload("", payload),
+		createContent: payload,
+	}
+	controller := NewController(Config{Runtime: runtime, Store: store, ObjectCache: cache})
+
+	resp, status := controller.SaveRootFS(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.SaveRootFSRequest{
+		Target:    rootFSTarget(),
+		SandboxID: "sandbox-1",
+		TeamID:    "team-1",
+	})
+
+	require.Equal(t, http.StatusOK, status, resp.Error)
+	reader, ok, err := cache.Open(resp.Descriptor)
+	require.NoError(t, err)
+	require.True(t, ok)
+	defer reader.Close()
+	cached, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, payload, string(cached))
+}
+
 func TestControllerSaveRootFSRejectsUnsupportedRuntime(t *testing.T) {
 	runtime := &fakeRuntime{
 		info:          rootFSInfo("kata"),
@@ -156,6 +184,31 @@ func TestControllerSaveRootFSRejectsUnsupportedRuntime(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, status)
 	assert.Contains(t, resp.Error, "runtime \"kata\" is not supported")
 	assert.False(t, runtime.createCalled)
+}
+
+func TestControllerApplyRootFSUsesObjectCache(t *testing.T) {
+	payload := "cached rootfs diff"
+	desc := rootFSDiffDescriptorForPayload("rootfs/diff.tar", payload)
+	cache := NewObjectCache(ObjectCacheConfig{Dir: t.TempDir(), MaxBytes: 1 << 20})
+	require.NoError(t, cache.Put(context.Background(), desc, strings.NewReader(payload)))
+	runtime := &fakeRuntime{
+		info:      rootFSInfo("runc"),
+		applyDesc: desc,
+	}
+	controller := NewController(Config{
+		Runtime:     runtime,
+		Store:       objectstore.NewMemoryStore(t.Name()),
+		ObjectCache: cache,
+	})
+
+	resp, status := controller.ApplyRootFS(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.ApplyRootFSRequest{
+		Target:     rootFSTarget(),
+		Descriptor: desc,
+	})
+
+	require.Equal(t, http.StatusOK, status, resp.Error)
+	assert.True(t, resp.Applied)
+	assert.Equal(t, payload, runtime.applyContent)
 }
 
 func TestControllerApplyRootFSDownloadsAndAppliesDiff(t *testing.T) {
@@ -509,6 +562,15 @@ func rootFSInfo(runtime string) ctldapi.RootFSInfo {
 		SnapshotParentChain: []string{"parent-1", "parent-0"},
 		BaseImageRef:        "docker.io/library/busybox:1.36",
 		BaseImageDigest:     "sha256:base",
+	}
+}
+
+func rootFSDiffDescriptorForPayload(objectKey, payload string) ctldapi.RootFSDiffDescriptor {
+	return ctldapi.RootFSDiffDescriptor{
+		MediaType: "application/vnd.oci.image.layer.v1.tar",
+		Digest:    godigest.FromBytes([]byte(payload)).String(),
+		Size:      int64(len(payload)),
+		ObjectKey: objectKey,
 	}
 }
 

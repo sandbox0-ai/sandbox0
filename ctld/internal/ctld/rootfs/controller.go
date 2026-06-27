@@ -42,6 +42,7 @@ type Config struct {
 	OperationTimeout time.Duration
 	PortalResolver   PortalResolver
 	SnapshotDir      string
+	ObjectCache      *ObjectCache
 }
 
 type Controller struct {
@@ -50,6 +51,7 @@ type Controller struct {
 	operationTimeout time.Duration
 	portalResolver   PortalResolver
 	snapshotDir      string
+	objectCache      *ObjectCache
 }
 
 func NewController(cfg Config) *Controller {
@@ -63,6 +65,7 @@ func NewController(cfg Config) *Controller {
 		operationTimeout: timeout,
 		portalResolver:   cfg.PortalResolver,
 		snapshotDir:      cfg.SnapshotDir,
+		objectCache:      cfg.ObjectCache,
 	}
 }
 
@@ -158,6 +161,9 @@ func (c *Controller) PublishRootFSSnapshot(r *http.Request, req ctldapi.PublishR
 	}
 	desc := prepared.Descriptor
 	desc.ObjectKey = objectKey
+	if c.objectCache != nil {
+		_ = c.objectCache.PutFile(requestContext(r), desc, c.preparedSnapshotContentPath(req.Handle))
+	}
 	_ = c.removePreparedSnapshot(req.Handle)
 	return ctldapi.PublishRootFSSnapshotResponse{Info: prepared.Info, Descriptor: desc, Published: true}, http.StatusOK
 }
@@ -250,7 +256,15 @@ func (c *Controller) applyLayers(ctx context.Context, info ctldapi.RootFSInfo, l
 }
 
 func (c *Controller) applyDescriptor(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, error) {
-	reader, err := c.store.Get(desc.ObjectKey, 0, -1)
+	var (
+		reader io.ReadCloser
+		err    error
+	)
+	if c.objectCache != nil {
+		reader, _, err = c.objectCache.GetOrFetch(ctx, c.store, desc)
+	} else {
+		reader, err = c.store.Get(desc.ObjectKey, 0, -1)
+	}
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("download rootfs diff: %w", err)
 	}

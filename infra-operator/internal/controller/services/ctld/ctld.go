@@ -77,7 +77,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 
 	nodeSelector, tolerations := common.ResolveSandboxNodePlacement(infra)
 	containerdHostDataRoot := ctldContainerdHostDataRoot(infra)
-	args := ctldArgs(containerdHostDataRoot)
+	args := ctldArgs(infra, containerdHostDataRoot)
 	bidirectional := corev1.MountPropagationBidirectional
 	hostPathDirectoryOrCreate := corev1.HostPathDirectoryOrCreate
 	volumeMounts := []corev1.VolumeMount{
@@ -278,7 +278,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	return r.Resources.ApplyDaemonSet(ctx, infra, desired)
 }
 
-func ctldArgs(containerdHostDataRoot string) []string {
+func ctldArgs(infra *infrav1alpha1.Sandbox0Infra, containerdHostDataRoot string) []string {
 	if strings.TrimSpace(containerdHostDataRoot) == "" {
 		containerdHostDataRoot = defaultContainerdHostDataRoot
 	}
@@ -292,6 +292,21 @@ func ctldArgs(containerdHostDataRoot string) []string {
 		"-containerd-host-data-root=" + containerdHostDataRoot,
 		"-volume-portal-root=/var/lib/sandbox0/ctld",
 		"-csi-socket=/csi/csi.sock",
+	}
+	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.Ctld != nil {
+		cfg := infra.Spec.Services.Ctld
+		if value := strings.TrimSpace(cfg.RootFSObjectCacheMaxBytes); value != "" {
+			args = append(args, "-rootfs-object-cache-max-bytes="+value)
+		}
+		if value := strings.TrimSpace(cfg.RootFSObjectCacheMinFreeBytes); value != "" {
+			args = append(args, "-rootfs-object-cache-min-free-bytes="+value)
+		}
+		if cfg.RootFSObjectCacheMaxAge.Duration > 0 {
+			args = append(args, "-rootfs-object-cache-max-age="+cfg.RootFSObjectCacheMaxAge.Duration.String())
+		}
+		if cfg.RootFSObjectCacheSweepInterval.Duration > 0 {
+			args = append(args, "-rootfs-object-cache-sweep-interval="+cfg.RootFSObjectCacheSweepInterval.Duration.String())
+		}
 	}
 	return args
 }

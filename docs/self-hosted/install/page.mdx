@@ -340,6 +340,16 @@ spec:
             containerdHostDataRoot: /var/lib/containerd/sandbox0
 ```
 
+For large writable rootfs checkpoints, ctld uses a disposable node-local object cache capped at `20Gi` per node by default. Tune the cap and free-space floor for your node disk:
+
+```yaml
+spec:
+    services:
+        ctld:
+            rootfsObjectCacheMaxBytes: 20Gi
+            rootfsObjectCacheMinFreeBytes: 5Gi
+```
+
 ### 6) Expose the API Publicly
 
 After the `LoadBalancer` patch above, GKE allocates a public IP for `cluster-gateway`.

@@ -2688,6 +2688,27 @@ spec:
                           sandbox worker data disk.
                         pattern: ^/.*
                         type: string
+                      rootfsObjectCacheMaxAge:
+                        description: |-
+                          RootFSObjectCacheMaxAge evicts cache entries older than this age. Zero
+                          disables age-based eviction.
+                        type: string
+                      rootfsObjectCacheMaxBytes:
+                        default: 20Gi
+                        description: |-
+                          RootFSObjectCacheMaxBytes caps the ctld node-local rootfs object cache.
+                          Set 0 to disable the cache.
+                        type: string
+                      rootfsObjectCacheMinFreeBytes:
+                        description: |-
+                          RootFSObjectCacheMinFreeBytes asks ctld GC to keep at least this much free
+                          space on the cache filesystem.
+                        type: string
+                      rootfsObjectCacheSweepInterval:
+                        description: |-
+                          RootFSObjectCacheSweepInterval controls how often ctld sweeps the
+                          node-local rootfs object cache.
+                        type: string
                     type: object
                   globalGateway:
                     default: {}

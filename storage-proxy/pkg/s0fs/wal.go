@@ -8,16 +8,23 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 )
+
+const walSyncCoalesceDelay = time.Millisecond
 
 type wal struct {
 	path       string
+	mu         sync.Mutex
+	syncCond   *sync.Cond
 	file       *os.File
 	volumeID   string
 	encryption *EncryptionConfig
 	onSync     func()
 	writeGen   uint64
 	syncedGen  uint64
+	syncing    bool
 }
 
 func openWAL(path, volumeID string, encryption *EncryptionConfig, onSync func()) (*wal, []walRecord, error) {
@@ -37,7 +44,9 @@ func openWAL(path, volumeID string, encryption *EncryptionConfig, onSync func())
 	if err != nil {
 		return nil, nil, fmt.Errorf("open wal: %w", err)
 	}
-	return &wal{path: path, file: file, volumeID: volumeID, encryption: encryption, onSync: onSync}, records, nil
+	w := &wal{path: path, file: file, volumeID: volumeID, encryption: encryption, onSync: onSync}
+	w.syncCond = sync.NewCond(&w.mu)
+	return w, records, nil
 }
 
 func readWAL(path, volumeID string, encryption *EncryptionConfig) ([]walRecord, error) {
@@ -80,19 +89,37 @@ func readWAL(path, volumeID string, encryption *EncryptionConfig) ([]walRecord, 
 	}
 }
 
-func (w *wal) append(record walRecord) error {
-	if w == nil || w.file == nil {
-		return ErrClosed
+func (w *wal) prepare(record walRecord) ([]byte, error) {
+	if w == nil {
+		return nil, ErrClosed
+	}
+	w.mu.Lock()
+	closed := w.file == nil
+	w.mu.Unlock()
+	if closed {
+		return nil, ErrClosed
 	}
 	payload, err := json.Marshal(record)
 	if err != nil {
-		return fmt.Errorf("marshal wal record: %w", err)
+		return nil, fmt.Errorf("marshal wal record: %w", err)
 	}
 	payload, err = w.encryption.encryptBlob(payload, walRecordAAD(w.volumeID))
 	if err != nil {
-		return fmt.Errorf("encrypt wal record: %w", err)
+		return nil, fmt.Errorf("encrypt wal record: %w", err)
 	}
 	payload = append(payload, '\n')
+	return payload, nil
+}
+
+func (w *wal) appendPrepared(payload []byte) error {
+	if w == nil {
+		return ErrClosed
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file == nil {
+		return ErrClosed
+	}
 	if _, err := w.file.Write(payload); err != nil {
 		return fmt.Errorf("append wal record: %w", err)
 	}
@@ -100,25 +127,96 @@ func (w *wal) append(record walRecord) error {
 	return nil
 }
 
-func (w *wal) sync() error {
-	if w == nil || w.file == nil {
+func (w *wal) beginSyncCurrent() (func() error, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file == nil {
+		return nil, ErrClosed
+	}
+	target := w.writeGen
+	if target <= w.syncedGen {
+		return nil, nil
+	}
+	if w.syncing {
+		return func() error {
+			return w.waitSync(target)
+		}, nil
+	}
+	w.syncing = true
+	return func() error {
+		return w.runSync(target)
+	}, nil
+}
+
+func (w *wal) waitSync(target uint64) error {
+	for {
+		w.mu.Lock()
+		if w.file == nil {
+			w.mu.Unlock()
+			return ErrClosed
+		}
+		if target <= w.syncedGen {
+			w.mu.Unlock()
+			return nil
+		}
+		if !w.syncing {
+			w.syncing = true
+			w.mu.Unlock()
+			return w.runSync(target)
+		}
+		w.syncCond.Wait()
+		w.mu.Unlock()
+	}
+}
+
+func (w *wal) runSync(target uint64) error {
+	if walSyncCoalesceDelay > 0 {
+		time.Sleep(walSyncCoalesceDelay)
+	}
+
+	w.mu.Lock()
+	if w.file == nil {
+		w.syncing = false
+		w.syncCond.Broadcast()
+		w.mu.Unlock()
 		return ErrClosed
 	}
-	if w.syncedGen == w.writeGen {
-		return nil
+	if w.writeGen > target {
+		target = w.writeGen
 	}
-	if err := w.file.Sync(); err != nil {
+	file := w.file
+	w.mu.Unlock()
+
+	err := file.Sync()
+
+	w.mu.Lock()
+	if err == nil && target > w.syncedGen {
+		w.syncedGen = target
+	}
+	w.syncing = false
+	w.syncCond.Broadcast()
+	onSync := w.onSync
+	w.mu.Unlock()
+
+	if err != nil {
 		return fmt.Errorf("sync wal: %w", err)
 	}
-	w.syncedGen = w.writeGen
-	if w.onSync != nil {
-		w.onSync()
+	if onSync != nil {
+		onSync()
 	}
 	return nil
 }
 
 func (w *wal) close() error {
-	if w == nil || w.file == nil {
+	if w == nil {
+		return nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for w.syncing {
+		w.syncCond.Wait()
+	}
+	if w.file == nil {
 		return nil
 	}
 	err := w.file.Close()
@@ -129,6 +227,11 @@ func (w *wal) close() error {
 func (w *wal) reset() error {
 	if w == nil {
 		return ErrClosed
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for w.syncing {
+		w.syncCond.Wait()
 	}
 	if w.file != nil {
 		if err := w.file.Close(); err != nil {

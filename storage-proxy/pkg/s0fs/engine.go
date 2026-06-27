@@ -116,11 +116,20 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 		e.lastCommittedManifest = latestManifest.ManifestSeq
 	}
 
+	appliedRecords := 0
 	for _, record := range records {
+		if record.Seq < e.nextSeq {
+			continue
+		}
+		if record.Seq > e.nextSeq {
+			_ = walFile.close()
+			return nil, fmt.Errorf("replay wal seq %d: %w: missing wal seq %d", record.Seq, ErrInvalidInput, e.nextSeq)
+		}
 		if err := e.apply(record); err != nil {
 			_ = walFile.close()
 			return nil, fmt.Errorf("replay wal seq %d: %w", record.Seq, err)
 		}
+		appliedRecords++
 		if record.Seq >= e.nextSeq {
 			e.nextSeq = record.Seq + 1
 		}
@@ -129,7 +138,7 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 		}
 	}
 	e.collectUnlinkedLocked()
-	if len(records) > 0 {
+	if appliedRecords > 0 {
 		e.dirty = true
 		e.dirtyAt = time.Now().UTC()
 		e.mutationVersion = 1

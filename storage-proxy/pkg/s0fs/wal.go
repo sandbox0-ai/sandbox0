@@ -55,6 +55,9 @@ func readWAL(path, volumeID string, encryption *EncryptionConfig) ([]walRecord, 
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
+			if errors.Is(err, io.EOF) && line[len(line)-1] != '\n' {
+				return records, nil
+			}
 			payload := line
 			if plaintext, encrypted, err := encryption.decryptBlobIfEncrypted(line, walRecordAAD(volumeID)); encrypted || err != nil {
 				if err != nil {

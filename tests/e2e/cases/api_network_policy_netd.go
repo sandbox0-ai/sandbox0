@@ -79,6 +79,37 @@ func assertNetdTransparentEgressPolicy(env *framework.ScenarioEnv, session *e2eu
 	assertNetdHTTPFixtureEventuallyFails(env, templateNamespace, sandbox.PodName, fixture.DenyIP)
 }
 
+func assertNetdClusterDNSUDP(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {
+	Expect(sandboxID).NotTo(BeEmpty())
+
+	sandbox, status, err := session.GetSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(sandbox).NotTo(BeNil())
+
+	templateNamespace, err := naming.TemplateNamespaceForBuiltin(sandbox.TemplateId)
+	Expect(err).NotTo(HaveOccurred())
+	sandbox = waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
+	waitForSandboxNetworkPolicyApplied(env, templateNamespace, sandbox.PodName)
+
+	dnsIP, err := framework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, "kube-system", "service", "kube-dns", "{.spec.clusterIP}")
+	Expect(err).NotTo(HaveOccurred())
+	dnsIP = strings.TrimSpace(dnsIP)
+	Expect(dnsIP).NotTo(BeEmpty())
+	Expect(strings.EqualFold(dnsIP, "None")).To(BeFalse())
+
+	Eventually(func() error {
+		output, execErr := execInSandboxPod(env, templateNamespace, sandbox.PodName, netdUDPDNSQueryCommand(dnsIP))
+		if execErr != nil {
+			return fmt.Errorf("UDP DNS query to kube-dns %s failed: %w; output=%s", dnsIP, execErr, strings.TrimSpace(output))
+		}
+		if !strings.Contains(output, "rcode=0") {
+			return fmt.Errorf("unexpected UDP DNS query output: %s", strings.TrimSpace(output))
+		}
+		return nil
+	}).WithTimeout(60 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
+}
+
 func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eutils.Session, adminPassword string) {
 	if !netdRedisTeamBandwidthConfigured(env) {
 		Skip("netd Redis team bandwidth limit is not configured for this scenario")
@@ -517,4 +548,31 @@ func netdHTTPFixtureCurlCommand(ip string) string {
 
 func netdHTTPFixtureLargeCurlCommand(ip string) string {
 	return fmt.Sprintf("curl -4 -fsS --connect-timeout 2 --max-time 30 -o /dev/null http://%s:%d/large.bin", ip, netdHTTPFixturePort)
+}
+
+func netdUDPDNSQueryCommand(dnsIP string) string {
+	return fmt.Sprintf(`python3 - <<'PY'
+import socket
+
+server = %q
+name = "kubernetes.default.svc.cluster.local"
+
+def encode_name(value):
+    return b"".join(bytes([len(part)]) + part.encode("ascii") for part in value.split(".")) + b"\0"
+
+query = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + encode_name(name) + b"\x00\x01\x00\x01"
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(3)
+sock.sendto(query, (server, 53))
+data, _ = sock.recvfrom(512)
+if len(data) < 12:
+    raise SystemExit("short dns response")
+if data[:2] != b"\x12\x34":
+    raise SystemExit("dns transaction id mismatch")
+rcode = data[3] & 0x0f
+ancount = int.from_bytes(data[6:8], "big")
+if rcode != 0 or ancount < 1:
+    raise SystemExit("unexpected dns response rcode=%%d ancount=%%d" %% (rcode, ancount))
+print("rcode=0 ancount=%%d" %% ancount)
+PY`, dnsIP)
 }

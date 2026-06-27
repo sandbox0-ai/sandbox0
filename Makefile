@@ -259,7 +259,7 @@ test-e2e-s0fs-posix:
 
 test-e2e-netd-cni:
 	@printf "$(CYAN)Running netd CNI E2E tests...$(RESET)\n"
-	unset http_proxy && unset https_proxy && unset all_proxy && E2E_SINGLE_CLUSTER_SCENARIOS=network-policy $(GO) test -v -count=1 ./tests/e2e/scenarios/single-cluster -run TestSingleCluster -ginkgo.focus="API network policy mode.*(enforces transparent TCP egress through netd|blocks private sandbox traffic while preserving public exposure and cluster service access)" -timeout=30m
+	unset http_proxy && unset https_proxy && unset all_proxy && E2E_SINGLE_CLUSTER_SCENARIOS=network-policy $(GO) test -v -count=1 ./tests/e2e/scenarios/single-cluster -run TestSingleCluster -ginkgo.focus="API network policy mode.*(enforces transparent TCP egress through netd|resolves cluster DNS over UDP with netd active|blocks private sandbox traffic while preserving public exposure and cluster service access)" -timeout=30m
 
 # Prevent make from treating service names as targets
 regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld procd netd infra-operator:

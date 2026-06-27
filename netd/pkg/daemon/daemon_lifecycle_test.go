@@ -58,12 +58,13 @@ func TestShutdownClosesRuntimeResourcesAfterMeteringLoopStops(t *testing.T) {
 	}
 }
 
-func TestExcludeCIDRsRemovesClusterDNSCIDR(t *testing.T) {
-	got := excludeCIDRs(
-		[]string{"10.96.0.10/32", "10.96.0.20/32", "192.168.1.1"},
-		[]string{"10.96.0.10"},
+func TestRedirectBypassCIDRsIncludesClusterDNSCIDRs(t *testing.T) {
+	got := redirectBypassCIDRs(
+		[]string{"10.96.0.10", "10.244.0.53"},
+		[]string{"10.96.0.20/32"},
+		[]string{"192.168.1.1"},
 	)
-	want := []string{"10.96.0.20/32", "192.168.1.1"}
+	want := []string{"10.96.0.10", "10.244.0.53", "10.96.0.20/32", "192.168.1.1"}
 	if len(got) != len(want) {
 		t.Fatalf("cidrs = %#v, want %#v", got, want)
 	}

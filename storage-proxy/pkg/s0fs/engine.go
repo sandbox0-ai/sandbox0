@@ -13,6 +13,7 @@ import (
 
 type Engine struct {
 	mu            sync.RWMutex
+	mutationMu    sync.Mutex
 	materializeMu sync.Mutex
 	volumeID      string
 	wal           *wal
@@ -148,6 +149,9 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 }
 
 func (e *Engine) Close() error {
+	e.mutationMu.Lock()
+	defer e.mutationMu.Unlock()
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
@@ -263,6 +267,9 @@ func (e *Engine) Symlink(parent uint64, name, target string, mode uint32) (*Node
 }
 
 func (e *Engine) Link(inode uint64, newParent uint64, newName string) (*Node, error) {
+	e.mutationMu.Lock()
+	defer e.mutationMu.Unlock()
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if err := e.checkOpen(); err != nil {
@@ -295,13 +302,17 @@ func (e *Engine) Link(inode uint64, newParent uint64, newName string) (*Node, er
 }
 
 func (e *Engine) Write(inode uint64, offset uint64, payload []byte) (int, error) {
+	e.mutationMu.Lock()
+	defer e.mutationMu.Unlock()
+
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	if err := e.checkOpen(); err != nil {
+		e.mu.Unlock()
 		return 0, err
 	}
 	node, err := e.fileNodeLocked(inode)
 	if err != nil {
+		e.mu.Unlock()
 		return 0, err
 	}
 	record := e.newRecord("write")
@@ -313,7 +324,23 @@ func (e *Engine) Write(inode uint64, offset uint64, payload []byte) (int, error)
 	if end > node.Size {
 		projectedBytes += int64(end - node.Size)
 	}
-	if err := e.appendAndApplyLocked(record, projectedBytes); err != nil {
+	if err := e.reserveLocalDiskLocked(projectedBytes); err != nil {
+		e.mu.Unlock()
+		return 0, err
+	}
+	e.mu.Unlock()
+
+	walPayload, err := e.wal.prepare(record)
+	if err != nil {
+		return 0, err
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.checkOpen(); err != nil {
+		return 0, err
+	}
+	if err := e.appendPreparedAndApplyLocked(record, walPayload); err != nil {
 		return 0, err
 	}
 	return len(payload), nil
@@ -346,6 +373,9 @@ func (e *Engine) ReadInto(inode uint64, offset uint64, dest []byte) (int, error)
 }
 
 func (e *Engine) Rename(oldParent uint64, oldName string, newParent uint64, newName string) error {
+	e.mutationMu.Lock()
+	defer e.mutationMu.Unlock()
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if err := e.checkOpen(); err != nil {
@@ -378,6 +408,9 @@ func (e *Engine) Unlink(parent uint64, name string) error {
 
 // UnlinkWithInode removes a file entry and returns the inode that was unlinked.
 func (e *Engine) UnlinkWithInode(parent uint64, name string) (uint64, error) {
+	e.mutationMu.Lock()
+	defer e.mutationMu.Unlock()
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if err := e.checkOpen(); err != nil {
@@ -401,6 +434,9 @@ func (e *Engine) UnlinkWithInode(parent uint64, name string) (uint64, error) {
 }
 
 func (e *Engine) Forget(inode uint64) error {
+	e.mutationMu.Lock()
+	defer e.mutationMu.Unlock()
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if err := e.checkOpen(); err != nil {
@@ -417,6 +453,9 @@ func (e *Engine) Forget(inode uint64) error {
 }
 
 func (e *Engine) RemoveDir(parent uint64, name string) error {
+	e.mutationMu.Lock()
+	defer e.mutationMu.Unlock()
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if err := e.checkOpen(); err != nil {
@@ -446,6 +485,9 @@ func (e *Engine) RemoveDir(parent uint64, name string) error {
 }
 
 func (e *Engine) SetMode(inode uint64, mode uint32) error {
+	e.mutationMu.Lock()
+	defer e.mutationMu.Unlock()
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if err := e.checkOpen(); err != nil {
@@ -464,6 +506,9 @@ func (e *Engine) SetMode(inode uint64, mode uint32) error {
 }
 
 func (e *Engine) SetOwner(inode uint64, uid, gid uint32) error {
+	e.mutationMu.Lock()
+	defer e.mutationMu.Unlock()
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if err := e.checkOpen(); err != nil {
@@ -483,6 +528,9 @@ func (e *Engine) SetOwner(inode uint64, uid, gid uint32) error {
 }
 
 func (e *Engine) Truncate(inode uint64, size uint64) error {
+	e.mutationMu.Lock()
+	defer e.mutationMu.Unlock()
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if err := e.checkOpen(); err != nil {
@@ -507,11 +555,16 @@ func (e *Engine) Truncate(inode uint64, size uint64) error {
 
 func (e *Engine) Fsync(_ uint64) error {
 	e.mu.RLock()
-	defer e.mu.RUnlock()
 	if err := e.checkOpen(); err != nil {
+		e.mu.RUnlock()
 		return err
 	}
-	return e.wal.sync()
+	wait, err := e.wal.beginSyncCurrent()
+	e.mu.RUnlock()
+	if err != nil || wait == nil {
+		return err
+	}
+	return wait()
 }
 
 func (e *Engine) SnapshotState() *SnapshotState {
@@ -575,6 +628,9 @@ func (e *Engine) syncMaterialize(ctx context.Context, force bool) (*Manifest, er
 		return manifest, err
 	}
 
+	e.mutationMu.Lock()
+	defer e.mutationMu.Unlock()
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.mutationVersion == version && e.lastCommittedManifest == expectedManifestSeq {
@@ -621,6 +677,9 @@ func (e *Engine) RefreshMaterialized(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 
+	e.mutationMu.Lock()
+	defer e.mutationMu.Unlock()
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if err := e.checkOpen(); err != nil {
@@ -664,6 +723,9 @@ func (e *Engine) CreateSnapshot(snapshotID string) (*SnapshotState, error) {
 }
 
 func (e *Engine) RestoreSnapshot(snapshotID string) error {
+	e.mutationMu.Lock()
+	defer e.mutationMu.Unlock()
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if err := e.checkOpen(); err != nil {
@@ -696,6 +758,9 @@ func (e *Engine) RestoreSnapshot(snapshotID string) error {
 }
 
 func (e *Engine) ReplaceState(state *SnapshotState) error {
+	e.mutationMu.Lock()
+	defer e.mutationMu.Unlock()
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if err := e.checkOpen(); err != nil {
@@ -736,18 +801,24 @@ func (e *Engine) DeleteSnapshot(snapshotID string) error {
 }
 
 func (e *Engine) create(parent uint64, name string, typ FileType, mode uint32, target string, opts CreateOptions) (*Node, error) {
+	e.mutationMu.Lock()
+	defer e.mutationMu.Unlock()
+
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	if err := e.checkOpen(); err != nil {
+		e.mu.Unlock()
 		return nil, err
 	}
 	if name == "" {
+		e.mu.Unlock()
 		return nil, fmt.Errorf("%w: empty name", ErrInvalidInput)
 	}
 	if err := e.ensureDirLocked(parent); err != nil {
+		e.mu.Unlock()
 		return nil, err
 	}
 	if _, exists := e.children[parent][name]; exists {
+		e.mu.Unlock()
 		return nil, ErrExists
 	}
 
@@ -760,34 +831,63 @@ func (e *Engine) create(parent uint64, name string, typ FileType, mode uint32, t
 	record.UID = opts.UID
 	record.GID = opts.GID
 	record.Target = target
-	if err := e.appendAndApplyLocked(record, estimatedWALRecordBytes(record)); err != nil {
+	if err := e.reserveLocalDiskLocked(estimatedWALRecordBytes(record)); err != nil {
+		e.mu.Unlock()
+		return nil, err
+	}
+	e.mu.Unlock()
+
+	walPayload, err := e.wal.prepare(record)
+	if err != nil {
+		return nil, err
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.checkOpen(); err != nil {
+		return nil, err
+	}
+	if err := e.appendPreparedAndApplyLocked(record, walPayload); err != nil {
 		return nil, err
 	}
 	return cloneNode(e.nodes[record.Inode]), nil
 }
 
 func (e *Engine) newRecord(op string) walRecord {
-	record := walRecord{
+	return walRecord{
 		Seq:      e.nextSeq,
 		Op:       op,
 		TimeUnix: time.Now().UTC().UnixNano(),
 	}
-	e.nextSeq++
-	return record
 }
 
 func (e *Engine) appendAndApplyLocked(record walRecord, projectedBytes int64) error {
 	if err := e.reserveLocalDiskLocked(projectedBytes); err != nil {
 		return err
 	}
-	if err := e.wal.append(record); err != nil {
+	walPayload, err := e.wal.prepare(record)
+	if err != nil {
+		return err
+	}
+	return e.appendPreparedAndApplyLocked(record, walPayload)
+}
+
+func (e *Engine) appendPreparedAndApplyLocked(record walRecord, walPayload []byte) error {
+	if err := e.wal.appendPrepared(walPayload); err != nil {
 		return err
 	}
 	if err := e.apply(record); err != nil {
 		return err
 	}
+	e.advanceSeqLocked(record)
 	e.markDirtyLocked()
 	return nil
+}
+
+func (e *Engine) advanceSeqLocked(record walRecord) {
+	if record.Seq >= e.nextSeq {
+		e.nextSeq = record.Seq + 1
+	}
 }
 
 func (e *Engine) reserveLocalDiskLocked(projectedBytes int64) error {

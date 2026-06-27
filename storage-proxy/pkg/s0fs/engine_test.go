@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -45,6 +47,54 @@ func TestEngineSmallFileReadWriteReplay(t *testing.T) {
 	}
 	if !bytes.Equal(data, []byte("hello")) {
 		t.Fatalf("replayed data = %q, want hello", data)
+	}
+}
+
+func TestEngineConcurrentFsyncCoalescesWALSync(t *testing.T) {
+	var syncs atomic.Int64
+	engine, err := Open(context.Background(), Config{
+		VolumeID: "vol-1",
+		WALPath:  filepath.Join(t.TempDir(), "volume.wal"),
+		WALSyncHook: func() {
+			syncs.Add(1)
+		},
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	node, err := engine.CreateFile(RootInode, "data.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if _, err := engine.Write(node.Inode, 0, []byte("payload")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	const callers = 16
+	start := make(chan struct{})
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for range callers {
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- engine.Fsync(node.Inode)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Fsync() error = %v", err)
+		}
+	}
+	if got := syncs.Load(); got != 1 {
+		t.Fatalf("WAL sync count = %d, want 1", got)
 	}
 }
 

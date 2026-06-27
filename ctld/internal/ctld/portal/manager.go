@@ -998,7 +998,7 @@ func (m *Manager) garbageCollectBoundS0FSObjects(ctx context.Context, bound *bou
 		return nil, err
 	}
 	retainedStates := []*s0fs.SnapshotState{manifest.State}
-	if current := bound.volCtx.S0FS.SnapshotState(); current != nil {
+	if current := bound.volCtx.S0FS.SnapshotReferenceState(); current != nil {
 		retainedStates = append(retainedStates, current)
 	}
 	cfg := s0fs.Config{

@@ -520,6 +520,15 @@ func (e *Engine) SnapshotState() *SnapshotState {
 	return cloneState(e.currentStateLocked())
 }
 
+// SnapshotReferenceState returns a metadata snapshot for retaining live object
+// references during GC. Inline payload bytes may be shared with the engine and
+// must be treated as read-only by callers.
+func (e *Engine) SnapshotReferenceState() *SnapshotState {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return cloneStateForMaterialization(e.currentStateLocked())
+}
+
 func (e *Engine) ExportState() (*SnapshotState, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()

@@ -48,6 +48,57 @@ func TestEngineSmallFileReadWriteReplay(t *testing.T) {
 	}
 }
 
+func TestEngineSnapshotReferenceStateSharesInlinePayload(t *testing.T) {
+	engine, err := Open(context.Background(), Config{
+		VolumeID:    "vol-1",
+		WALPath:     filepath.Join(t.TempDir(), "volume.wal"),
+		ObjectStore: newPrefixedRecordingStore(t, "vol-1"),
+		HeadStore:   newMemoryHeadStore(),
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	node, err := engine.CreateFile(RootInode, "payload.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if _, err := engine.Write(node.Inode, 0, []byte("payload")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	var segmentID string
+	for id, segment := range engine.segments {
+		if len(segment.InlineData) > 0 {
+			segmentID = id
+			break
+		}
+	}
+	if segmentID == "" {
+		t.Fatal("engine did not retain an inline segment")
+	}
+	engineSegment := engine.segments[segmentID]
+
+	full := engine.SnapshotState()
+	fullSegment := full.Segments[segmentID]
+	if fullSegment == nil || len(fullSegment.InlineData) == 0 {
+		t.Fatalf("SnapshotState() missing inline segment %s", segmentID)
+	}
+	if &fullSegment.InlineData[0] == &engineSegment.InlineData[0] {
+		t.Fatal("SnapshotState() shared inline payload with engine")
+	}
+
+	references := engine.SnapshotReferenceState()
+	referenceSegment := references.Segments[segmentID]
+	if referenceSegment == nil || len(referenceSegment.InlineData) == 0 {
+		t.Fatalf("SnapshotReferenceState() missing inline segment %s", segmentID)
+	}
+	if &referenceSegment.InlineData[0] != &engineSegment.InlineData[0] {
+		t.Fatal("SnapshotReferenceState() copied inline payload")
+	}
+}
+
 func TestEngineWriteCopiesCallerBufferBeforeReturn(t *testing.T) {
 	walPath := filepath.Join(t.TempDir(), "volume.wal")
 

@@ -48,6 +48,83 @@ func TestEngineSmallFileReadWriteReplay(t *testing.T) {
 	}
 }
 
+func TestEngineWriteCopiesCallerBufferBeforeReturn(t *testing.T) {
+	walPath := filepath.Join(t.TempDir(), "volume.wal")
+
+	engine, err := Open(context.Background(), Config{VolumeID: "vol-1", WALPath: walPath})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	node, err := engine.CreateFile(RootInode, "data.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	payload := []byte("stable")
+	if _, err := engine.Write(node.Inode, 0, payload); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	copy(payload, "mutate")
+	data, err := engine.Read(node.Inode, 0, 16)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if !bytes.Equal(data, []byte("stable")) {
+		t.Fatalf("read data = %q, want stable", data)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	replayed, err := Open(context.Background(), Config{VolumeID: "vol-1", WALPath: walPath})
+	if err != nil {
+		t.Fatalf("Open(replay) error = %v", err)
+	}
+	defer replayed.Close()
+	replayedNode, err := replayed.Lookup(RootInode, "data.txt")
+	if err != nil {
+		t.Fatalf("Lookup() after replay error = %v", err)
+	}
+	replayedData, err := replayed.Read(replayedNode.Inode, 0, 16)
+	if err != nil {
+		t.Fatalf("Read() after replay error = %v", err)
+	}
+	if !bytes.Equal(replayedData, []byte("stable")) {
+		t.Fatalf("replayed data = %q, want stable", replayedData)
+	}
+}
+
+func TestEngineCreateFileWithOwnerReplay(t *testing.T) {
+	walPath := filepath.Join(t.TempDir(), "volume.wal")
+
+	engine, err := Open(context.Background(), Config{VolumeID: "vol-1", WALPath: walPath})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	node, err := engine.CreateFileWithOwner(RootInode, "owned.txt", 0o640, 1000, 2000)
+	if err != nil {
+		t.Fatalf("CreateFileWithOwner() error = %v", err)
+	}
+	if node.UID != 1000 || node.GID != 2000 {
+		t.Fatalf("created node owner = %d:%d, want 1000:2000", node.UID, node.GID)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	replayed, err := Open(context.Background(), Config{VolumeID: "vol-1", WALPath: walPath})
+	if err != nil {
+		t.Fatalf("Open(replay) error = %v", err)
+	}
+	defer replayed.Close()
+	replayedNode, err := replayed.Lookup(RootInode, "owned.txt")
+	if err != nil {
+		t.Fatalf("Lookup() after replay error = %v", err)
+	}
+	if replayedNode.Mode != 0o640 || replayedNode.UID != 1000 || replayedNode.GID != 2000 {
+		t.Fatalf("replayed node = %+v, want mode 0640 owner 1000:2000", replayedNode)
+	}
+}
+
 func TestEngineLocalDiskGuardRejectsProjectedCacheGrowth(t *testing.T) {
 	dir := t.TempDir()
 	engine, err := Open(context.Background(), Config{

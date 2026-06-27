@@ -140,6 +140,14 @@ func normalizeState(state *SnapshotState) {
 }
 
 func cloneState(state *SnapshotState) *SnapshotState {
+	return cloneStateWithSegmentCloner(state, cloneSegment)
+}
+
+func cloneStateForMaterialization(state *SnapshotState) *SnapshotState {
+	return cloneStateWithSegmentCloner(state, cloneSegmentForMaterialization)
+}
+
+func cloneStateWithSegmentCloner(state *SnapshotState, cloneSegmentFn func(*Segment) *Segment) *SnapshotState {
 	if state == nil {
 		return nil
 	}
@@ -169,8 +177,11 @@ func cloneState(state *SnapshotState) *SnapshotState {
 	for inode, extents := range state.ColdFiles {
 		clone.ColdFiles[inode] = slices.Clone(extents)
 	}
+	if cloneSegmentFn == nil {
+		cloneSegmentFn = cloneSegment
+	}
 	for segmentID, segment := range state.Segments {
-		clone.Segments[segmentID] = cloneSegment(segment)
+		clone.Segments[segmentID] = cloneSegmentFn(segment)
 	}
 	return clone
 }

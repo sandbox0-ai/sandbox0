@@ -16,6 +16,8 @@ type wal struct {
 	volumeID   string
 	encryption *EncryptionConfig
 	onSync     func()
+	writeGen   uint64
+	syncedGen  uint64
 }
 
 func openWAL(path, volumeID string, encryption *EncryptionConfig, onSync func()) (*wal, []walRecord, error) {
@@ -91,6 +93,7 @@ func (w *wal) append(record walRecord) error {
 	if _, err := w.file.Write(payload); err != nil {
 		return fmt.Errorf("append wal record: %w", err)
 	}
+	w.writeGen++
 	return nil
 }
 
@@ -98,9 +101,13 @@ func (w *wal) sync() error {
 	if w == nil || w.file == nil {
 		return ErrClosed
 	}
+	if w.syncedGen == w.writeGen {
+		return nil
+	}
 	if err := w.file.Sync(); err != nil {
 		return fmt.Errorf("sync wal: %w", err)
 	}
+	w.syncedGen = w.writeGen
 	if w.onSync != nil {
 		w.onSync()
 	}
@@ -130,5 +137,7 @@ func (w *wal) reset() error {
 		return fmt.Errorf("reset wal: %w", err)
 	}
 	w.file = file
+	w.writeGen = 0
+	w.syncedGen = 0
 	return nil
 }

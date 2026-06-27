@@ -77,6 +77,11 @@ type DirEntry struct {
 	Type  FileType
 }
 
+type CreateOptions struct {
+	UID uint32
+	GID uint32
+}
+
 func cloneNode(node *Node) *Node {
 	if node == nil {
 		return nil
@@ -95,6 +100,8 @@ type walRecord struct {
 	NewName   string   `json:"new_name,omitempty"`
 	Type      FileType `json:"type,omitempty"`
 	Mode      uint32   `json:"mode,omitempty"`
+	UID       uint32   `json:"uid,omitempty"`
+	GID       uint32   `json:"gid,omitempty"`
 	Offset    uint64   `json:"offset,omitempty"`
 	Data      []byte   `json:"data,omitempty"`
 	Target    string   `json:"target,omitempty"`

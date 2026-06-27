@@ -103,7 +103,7 @@ func (m *Materializer) Materialize(ctx context.Context, state *SnapshotState, ex
 		return nil, fmt.Errorf("%w: snapshot state is required", ErrInvalidInput)
 	}
 
-	inline := cloneState(state)
+	inline := cloneStateForMaterialization(state)
 	normalizeState(inline)
 	defaultSegmentVolumeIDs(inline, m.volumeID)
 	if inline.NextSeq <= 1 {
@@ -698,4 +698,25 @@ func cloneSegment(segment *Segment) *Segment {
 	}
 	copy.InlineData = append([]byte(nil), segment.InlineData...)
 	return &copy
+}
+
+func cloneSegmentForMaterialization(segment *Segment) *Segment {
+	if segment == nil {
+		return nil
+	}
+	clone := *segment
+	if segment.Encryption != nil {
+		enc := *segment.Encryption
+		enc.WrappedKey = append([]byte(nil), segment.Encryption.WrappedKey...)
+		enc.NoncePrefix = append([]byte(nil), segment.Encryption.NoncePrefix...)
+		clone.Encryption = &enc
+	}
+	if isInlineSegment(segment) {
+		// Inline segment payloads are immutable after creation; materialization
+		// snapshots can share the backing bytes while the engine lock is released.
+		clone.InlineData = segment.InlineData
+	} else {
+		clone.InlineData = append([]byte(nil), segment.InlineData...)
+	}
+	return &clone
 }

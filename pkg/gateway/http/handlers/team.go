@@ -10,6 +10,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/teamresources"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/tenantdir"
 	"go.uber.org/zap"
 )
@@ -30,6 +31,11 @@ type teamRepository interface {
 	RemoveTeamMember(ctx context.Context, teamID, userID string) error
 }
 
+// TeamDeletePreflight checks for resources that must be cleared before deleting a team.
+type TeamDeletePreflight interface {
+	GetTeamResourceInventory(ctx context.Context, teamID string) (*teamresources.Inventory, error)
+}
+
 // TeamRegionLookup resolves region directory entries for team validation.
 type TeamRegionLookup interface {
 	GetRegion(ctx context.Context, regionID string) (*tenantdir.Region, error)
@@ -41,6 +47,7 @@ type TeamHandler struct {
 	logger                    *zap.Logger
 	requireHomeRegionOnCreate bool
 	regionLookup              TeamRegionLookup
+	deletePreflight           TeamDeletePreflight
 }
 
 // TeamHandlerOption configures TeamHandler behavior.
@@ -51,6 +58,13 @@ func WithCreateHomeRegionRequired(regionLookup TeamRegionLookup) TeamHandlerOpti
 	return func(h *TeamHandler) {
 		h.requireHomeRegionOnCreate = true
 		h.regionLookup = regionLookup
+	}
+}
+
+// WithTeamDeletePreflight configures the resource inventory used by team deletion.
+func WithTeamDeletePreflight(preflight TeamDeletePreflight) TeamHandlerOption {
+	return func(h *TeamHandler) {
+		h.deletePreflight = preflight
 	}
 }
 
@@ -371,6 +385,19 @@ func (h *TeamHandler) DeleteTeam(c *gin.Context) {
 	if team.OwnerID == nil || *team.OwnerID != authCtx.UserID {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "only team owner can delete team")
 		return
+	}
+
+	if h.deletePreflight != nil {
+		inventory, err := h.deletePreflight.GetTeamResourceInventory(c.Request.Context(), teamID)
+		if err != nil {
+			h.logger.Error("Failed to check team resources before deletion", zap.Error(err), zap.String("team_id", teamID))
+			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to check team resources")
+			return
+		}
+		if inventory.HasBlockingResources() {
+			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "team has resources that must be removed before deletion", inventory)
+			return
+		}
 	}
 
 	if err := h.repo.DeleteTeam(c.Request.Context(), teamID); err != nil {

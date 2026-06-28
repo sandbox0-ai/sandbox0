@@ -288,6 +288,10 @@
         {
           "slug": "configuration",
           "title": "Configuration"
+        },
+        {
+          "slug": "team-deletion",
+          "title": "Team Deletion"
         }
       ]
     }

@@ -25,6 +25,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/public"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/ratelimit"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/teamresources"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
 	"github.com/sandbox0-ai/sandbox0/pkg/metering"
@@ -317,16 +318,21 @@ func (s *Server) setupRoutes() {
 	s.router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	if authModeEnabled(s.cfg.AuthMode, authModePublic) {
+		var teamDeletePreflight gatewayhandlers.TeamDeletePreflight
+		if s.publicIdentityRepo != nil {
+			teamDeletePreflight = teamresources.NewRepository(s.publicIdentityRepo.Pool())
+		}
 		public.RegisterRoutes(s.router, public.Deps{
-			IdentityRepo:    s.publicIdentityRepo,
-			APIKeyRepo:      s.publicAPIKeyRepo,
-			AuthMiddleware:  s.publicAuth,
-			BuiltinProvider: s.publicBuiltin,
-			OIDCManager:     s.publicOIDC,
-			Entitlements:    s.entitlements,
-			JWTIssuer:       s.publicJWT,
-			RegionID:        s.cfg.RegionID,
-			Logger:          s.logger,
+			IdentityRepo:        s.publicIdentityRepo,
+			APIKeyRepo:          s.publicAPIKeyRepo,
+			AuthMiddleware:      s.publicAuth,
+			TeamDeletePreflight: teamDeletePreflight,
+			BuiltinProvider:     s.publicBuiltin,
+			OIDCManager:         s.publicOIDC,
+			Entitlements:        s.entitlements,
+			JWTIssuer:           s.publicJWT,
+			RegionID:            s.cfg.RegionID,
+			Logger:              s.logger,
 		})
 	}
 

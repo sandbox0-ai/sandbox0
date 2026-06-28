@@ -13,6 +13,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/teamresources"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/tenantdir"
 	"go.uber.org/zap"
 )
@@ -36,6 +37,7 @@ type stubTeamRepository struct {
 	searchMembers   []*identity.TeamMemberWithUser
 	searchTeamID    string
 	searchQuery     string
+	deletedTeamID   string
 }
 
 func (s *stubTeamRepository) GetTeamsByUserID(context.Context, string) ([]*identity.Team, error) {
@@ -80,8 +82,26 @@ func (s *stubTeamRepository) UpdateTeam(_ context.Context, team *identity.Team) 
 	return nil
 }
 
-func (s *stubTeamRepository) DeleteTeam(context.Context, string) error {
+func (s *stubTeamRepository) DeleteTeam(_ context.Context, id string) error {
+	s.deletedTeamID = id
 	return nil
+}
+
+type stubTeamDeletePreflight struct {
+	teamID    string
+	inventory *teamresources.Inventory
+	err       error
+}
+
+func (s *stubTeamDeletePreflight) GetTeamResourceInventory(_ context.Context, teamID string) (*teamresources.Inventory, error) {
+	s.teamID = teamID
+	if s.err != nil {
+		return nil, s.err
+	}
+	if s.inventory != nil {
+		return s.inventory, nil
+	}
+	return &teamresources.Inventory{TeamID: teamID}, nil
 }
 
 func (s *stubTeamRepository) TransferTeamOwner(_ context.Context, teamID, userID string) (*identity.Team, error) {
@@ -549,6 +569,82 @@ func TestTeamHandlerRejectsMalformedTeamIDs(t *testing.T) {
 	}
 }
 
+func TestTeamHandlerDeleteTeamReturnsConflictWhenResourcesExist(t *testing.T) {
+	ownerID := testOwnerUserID
+	repo := newTeamManagementRepo(ownerID)
+	preflight := &stubTeamDeletePreflight{
+		inventory: &teamresources.Inventory{
+			TeamID: testTeamID,
+			BlockingResources: []teamresources.ResourceCount{
+				{Category: "sandboxes", Count: 2},
+				{Category: "api_keys", Count: 1},
+			},
+			RetainedResources: []teamresources.ResourceCount{
+				{Category: "usage_events", Count: 3},
+			},
+			RetentionPolicy: teamresources.MeteringRetentionPolicy,
+		},
+	}
+
+	rec := performTeamManagementRequestWithOptions(t, repo, ownerID, http.MethodDelete, "/teams/"+testTeamID, nil, WithTeamDeletePreflight(preflight))
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	if preflight.teamID != testTeamID {
+		t.Fatalf("preflight team id = %q, want %q", preflight.teamID, testTeamID)
+	}
+	if repo.deletedTeamID != "" {
+		t.Fatalf("team was deleted despite blocking resources: %q", repo.deletedTeamID)
+	}
+
+	var payload spec.Response
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Error == nil || payload.Error.Code != spec.CodeConflict {
+		t.Fatalf("error = %#v, want conflict", payload.Error)
+	}
+	details, ok := payload.Error.Details.(map[string]any)
+	if !ok {
+		t.Fatalf("details = %#v, want object", payload.Error.Details)
+	}
+	resources, ok := details["blocking_resources"].([]any)
+	if !ok || len(resources) != 2 {
+		t.Fatalf("blocking_resources = %#v, want two entries", details["blocking_resources"])
+	}
+}
+
+func TestTeamHandlerDeleteTeamReturnsInternalErrorWhenPreflightFails(t *testing.T) {
+	ownerID := testOwnerUserID
+	repo := newTeamManagementRepo(ownerID)
+	preflight := &stubTeamDeletePreflight{err: errors.New("inventory failed")}
+
+	rec := performTeamManagementRequestWithOptions(t, repo, ownerID, http.MethodDelete, "/teams/"+testTeamID, nil, WithTeamDeletePreflight(preflight))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	if repo.deletedTeamID != "" {
+		t.Fatalf("team was deleted after preflight error: %q", repo.deletedTeamID)
+	}
+}
+
+func TestTeamHandlerDeleteTeamRunsAfterEmptyPreflight(t *testing.T) {
+	ownerID := testOwnerUserID
+	repo := newTeamManagementRepo(ownerID)
+	preflight := &stubTeamDeletePreflight{}
+
+	rec := performTeamManagementRequestWithOptions(t, repo, ownerID, http.MethodDelete, "/teams/"+testTeamID, nil, WithTeamDeletePreflight(preflight))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if repo.deletedTeamID != testTeamID {
+		t.Fatalf("deleted team id = %q, want %q", repo.deletedTeamID, testTeamID)
+	}
+}
+
 func TestTeamHandlerRejectsMalformedUserIDs(t *testing.T) {
 	ownerID := testOwnerUserID
 
@@ -753,8 +849,13 @@ func newTeamManagementRepo(ownerID string) *stubTeamRepository {
 
 func performTeamManagementRequest(t *testing.T, repo *stubTeamRepository, authUserID, method, path string, body map[string]any) *httptest.ResponseRecorder {
 	t.Helper()
+	return performTeamManagementRequestWithOptions(t, repo, authUserID, method, path, body)
+}
 
-	handler := NewTeamHandler(repo, zap.NewNop())
+func performTeamManagementRequestWithOptions(t *testing.T, repo *stubTeamRepository, authUserID, method, path string, body map[string]any, opts ...TeamHandlerOption) *httptest.ResponseRecorder {
+	t.Helper()
+
+	handler := NewTeamHandler(repo, zap.NewNop(), opts...)
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
 		c.Set("auth_context", &authn.AuthContext{

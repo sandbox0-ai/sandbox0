@@ -24,6 +24,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/public"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/teamresources"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
 	"github.com/sandbox0-ai/sandbox0/pkg/metering"
@@ -382,16 +383,22 @@ func (s *Server) setupMeteringRoutes() {
 }
 
 func (s *Server) setupPublicRoutes() {
+	var teamDeletePreflight gatewayhandlers.TeamDeletePreflight
+	if s.pool != nil {
+		teamDeletePreflight = teamresources.NewRepository(s.pool)
+	}
+
 	deps := public.Deps{
-		IdentityRepo:    s.identityRepo,
-		APIKeyRepo:      s.apiKeyRepo,
-		AuthMiddleware:  s.authMiddleware,
-		BuiltinProvider: s.builtinProvider,
-		OIDCManager:     s.oidcManager,
-		Entitlements:    s.entitlements,
-		JWTIssuer:       s.jwtIssuer,
-		RegionID:        s.cfg.RegionID,
-		Logger:          s.logger,
+		IdentityRepo:        s.identityRepo,
+		APIKeyRepo:          s.apiKeyRepo,
+		AuthMiddleware:      s.authMiddleware,
+		TeamDeletePreflight: teamDeletePreflight,
+		BuiltinProvider:     s.builtinProvider,
+		OIDCManager:         s.oidcManager,
+		Entitlements:        s.entitlements,
+		JWTIssuer:           s.jwtIssuer,
+		RegionID:            s.cfg.RegionID,
+		Logger:              s.logger,
 	}
 
 	if edgeAuthModeUsesSelfHostedIdentity(s.cfg.AuthMode) {

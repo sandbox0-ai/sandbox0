@@ -71,6 +71,7 @@ type BootstrapMountStatus struct {
 // SandboxConfig represents sandbox configuration
 type SandboxConfig struct {
 	EnvVars    map[string]string              `json:"env_vars,omitempty"`
+	Resources  *SandboxResourceConfig         `json:"resources,omitempty"`
 	TTL        *int32                         `json:"ttl,omitempty"`      // Time-to-live in seconds (0 disables)
 	HardTTL    *int32                         `json:"hard_ttl,omitempty"` // Hard time-to-live in seconds (0 disables)
 	Network    *v1alpha1.SandboxNetworkPolicy `json:"network,omitempty"`
@@ -84,11 +85,18 @@ type SandboxConfig struct {
 // Webhook is excluded because it requires reinitializing the sandbox runtime.
 type SandboxUpdateConfig struct {
 	EnvVars    map[string]string              `json:"env_vars,omitempty"`
+	Resources  *SandboxResourceConfig         `json:"resources,omitempty"`
 	TTL        *int32                         `json:"ttl,omitempty"`
 	HardTTL    *int32                         `json:"hard_ttl,omitempty"`
 	Network    *v1alpha1.SandboxNetworkPolicy `json:"network,omitempty"`
 	AutoResume *bool                          `json:"auto_resume,omitempty"`
 	Services   []SandboxAppService            `json:"services,omitempty"`
+}
+
+// SandboxResourceConfig is an instance-level resource override. Only memory is
+// accepted; CPU is derived from the platform memory-per-CPU ratio.
+type SandboxResourceConfig struct {
+	Memory string `json:"memory,omitempty"`
 }
 
 func int32Ptr(v int32) *int32 {
@@ -101,10 +109,18 @@ func cloneSandboxConfig(cfg *SandboxConfig) *SandboxConfig {
 	}
 	cloned := *cfg
 	cloned.EnvVars = cloneEnvVars(cfg.EnvVars)
+	cloned.Resources = cloneSandboxResourceConfig(cfg.Resources)
 	if cloned.Network != nil {
 		cloned.Network = sanitizedNetworkPolicyForPersistence(cloned.Network)
 	}
 	return &cloned
+}
+
+func cloneSandboxResourceConfig(resources *SandboxResourceConfig) *SandboxResourceConfig {
+	if resources == nil {
+		return nil
+	}
+	return &SandboxResourceConfig{Memory: strings.TrimSpace(resources.Memory)}
 }
 
 func cloneEnvVars(envVars map[string]string) map[string]string {
@@ -398,17 +414,11 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	}
 
 	phaseStarted = time.Now()
-	if err := s.enforceSandboxCPUQuota(ctx, req.TeamID, template); err != nil {
-		s.observeClaimPhase(req.Template, "unknown", "enforce_cpu_quota", phaseStarted, err)
+	if err := s.enforceSandboxResourceQuota(ctx, req.TeamID, template, req.Config); err != nil {
+		s.observeClaimPhase(req.Template, "unknown", "enforce_resource_quota", phaseStarted, err)
 		return nil, err
 	}
-	s.observeClaimPhase(req.Template, "unknown", "enforce_cpu_quota", phaseStarted, nil)
-	phaseStarted = time.Now()
-	if err := s.enforceSandboxMemoryQuota(ctx, req.TeamID, template); err != nil {
-		s.observeClaimPhase(req.Template, "unknown", "enforce_memory_quota", phaseStarted, err)
-		return nil, err
-	}
-	s.observeClaimPhase(req.Template, "unknown", "enforce_memory_quota", phaseStarted, nil)
+	s.observeClaimPhase(req.Template, "unknown", "enforce_resource_quota", phaseStarted, nil)
 
 	phaseStarted = time.Now()
 	if err := validateClaimMountsForTemplate(req, template); err != nil {
@@ -1036,6 +1046,14 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 
 		// Update pod labels and annotations
 		pod = pod.DeepCopy()
+		var resizeQuota *v1alpha1.ResourceQuota
+		if req.Config != nil && req.Config.Resources != nil {
+			resourceQuota, err := s.effectiveSandboxResourceQuota(template, req.Config)
+			if err != nil {
+				return err
+			}
+			resizeQuota = &resourceQuota
+		}
 
 		// Change pool type from idle to active
 		pod.Labels[controller.LabelPoolType] = controller.PoolTypeActive
@@ -1108,6 +1126,22 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			return updateErr
 		}
 
+		if resizeQuota != nil {
+			resizedPod, resizeErr := s.resizeSandboxPodResources(ctx, updatedPod, *resizeQuota)
+			if resizeErr != nil {
+				rollbackStateVolume()
+				if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
+					s.logger.Warn("Failed to roll back credential bindings after hot-claim resize failure",
+						zap.String("sandboxID", sandboxID),
+						zap.Error(rollbackErr),
+					)
+				}
+				s.requestSandboxDeletionAfterClaimFailure(updatedPod, "sandbox resource resize failed")
+				return fmt.Errorf("resize sandbox resources: %w", resizeErr)
+			}
+			updatedPod = mergeSandboxMetadataAfterResize(resizedPod, updatedPod)
+		}
+
 		if applyErr := s.applyNetworkProvider(ctx, updatedPod, req.TeamID, policySpecFromState(networkState)); applyErr != nil {
 			s.requestSandboxDeletionAfterClaimFailure(updatedPod, "network policy apply failed")
 			return fmt.Errorf("apply network policy: %w", applyErr)
@@ -1165,6 +1199,13 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	// Build pod spec before side-effecting resources so claims fail fast when the
 	// sandbox data plane has no ready nodes to receive the pod.
 	spec := v1alpha1.BuildPodSpec(template)
+	resourceQuota, err := s.effectiveSandboxResourceQuota(template, req.Config)
+	if err != nil {
+		return nil, err
+	}
+	if err := applySandboxResourceQuotaToPodSpec(&spec, resourceQuota); err != nil {
+		return nil, err
+	}
 	if err := s.ensureDataPlaneReadyCapacity(spec); err != nil {
 		return nil, err
 	}

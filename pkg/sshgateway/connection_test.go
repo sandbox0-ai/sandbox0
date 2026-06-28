@@ -34,6 +34,7 @@ func TestSandboxToAPIIncludesSSHInfo(t *testing.T) {
 		PodName:       "pod-1",
 		AutoResume:    true,
 		Paused:        false,
+		Resources:     &mgr.SandboxResourceConfig{Memory: "512Mi"},
 		ClaimedAt:     now,
 		CreatedAt:     now,
 		ExpiresAt:     now,
@@ -55,5 +56,8 @@ func TestSandboxToAPIIncludesSSHInfo(t *testing.T) {
 	}
 	if payload.Ssh.Username != sandbox.ID {
 		t.Fatalf("ssh username = %q", payload.Ssh.Username)
+	}
+	if payload.Resources == nil || payload.Resources.Memory == nil || *payload.Resources.Memory != "512Mi" {
+		t.Fatalf("resources = %#v, want memory 512Mi", payload.Resources)
 	}
 }

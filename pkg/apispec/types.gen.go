@@ -1560,6 +1560,9 @@ type Sandbox struct {
 	Paused  bool   `json:"paused"`
 	PodName string `json:"pod_name"`
 
+	// Resources Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio.
+	Resources *SandboxResourceConfig `json:"resources,omitempty"`
+
 	// RuntimeGeneration Monotonically increasing runtime generation. Resume starts a new generation.
 	RuntimeGeneration int64                  `json:"runtime_generation"`
 	Services          *[]SandboxAppService   `json:"services,omitempty"`
@@ -1688,9 +1691,12 @@ type SandboxConfig struct {
 	EnvVars    *map[string]string `json:"env_vars,omitempty"`
 
 	// HardTtl Sandbox hard time-to-live in seconds. When it expires, Sandbox0 deletes the sandbox identity and durable state, including paused rootfs checkpoints.
-	HardTtl  *int32                `json:"hard_ttl,omitempty"`
-	Network  *SandboxNetworkPolicy `json:"network,omitempty"`
-	Services *[]SandboxAppService  `json:"services,omitempty"`
+	HardTtl *int32                `json:"hard_ttl,omitempty"`
+	Network *SandboxNetworkPolicy `json:"network,omitempty"`
+
+	// Resources Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio.
+	Resources *SandboxResourceConfig `json:"resources,omitempty"`
+	Services  *[]SandboxAppService   `json:"services,omitempty"`
 
 	// Ttl Runtime soft time-to-live in seconds. When it expires, Sandbox0 checkpoints the writable rootfs, pauses the sandbox, and releases runtime compute while preserving durable sandbox state.
 	Ttl *int32 `json:"ttl,omitempty"`
@@ -1752,6 +1758,12 @@ type SandboxNetworkPolicyMode string
 type SandboxRefreshRequest struct {
 	// Duration Duration to extend TTL in seconds (optional, defaults to original TTL)
 	Duration *int32 `json:"duration,omitempty"`
+}
+
+// SandboxResourceConfig Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio.
+type SandboxResourceConfig struct {
+	// Memory Sandbox memory limit. Must be at least 128Mi and no more than the platform sandbox maximum, which defaults to 32Gi.
+	Memory *string `json:"memory,omitempty"`
 }
 
 // SandboxResourceUsage defines model for SandboxResourceUsage.
@@ -1880,9 +1892,12 @@ type SandboxUpdateConfig struct {
 	EnvVars *map[string]string `json:"env_vars,omitempty"`
 
 	// HardTtl Sandbox hard time-to-live in seconds. When it expires, Sandbox0 deletes the sandbox identity and durable state, including paused rootfs checkpoints.
-	HardTtl  *int32                `json:"hard_ttl,omitempty"`
-	Network  *SandboxNetworkPolicy `json:"network,omitempty"`
-	Services *[]SandboxAppService  `json:"services,omitempty"`
+	HardTtl *int32                `json:"hard_ttl,omitempty"`
+	Network *SandboxNetworkPolicy `json:"network,omitempty"`
+
+	// Resources Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio.
+	Resources *SandboxResourceConfig `json:"resources,omitempty"`
+	Services  *[]SandboxAppService   `json:"services,omitempty"`
 
 	// Ttl Runtime soft time-to-live in seconds. When it expires, Sandbox0 checkpoints the writable rootfs, pauses the sandbox, and releases runtime compute while preserving durable sandbox state.
 	Ttl *int32 `json:"ttl,omitempty"`

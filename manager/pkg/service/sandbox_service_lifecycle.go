@@ -609,6 +609,7 @@ func cloneSandboxRecordForLifecycle(record *SandboxRecord) *SandboxRecord {
 	if record.Config.Services != nil {
 		clone.Config.Services = append([]SandboxAppService(nil), record.Config.Services...)
 	}
+	clone.Config.Resources = cloneSandboxResourceConfig(record.Config.Resources)
 	return &clone
 }
 
@@ -720,10 +721,12 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 			return err
 		}
 
+		var resizeQuota *v1alpha1.ResourceQuota
 		updatedPod = current.DeepCopy()
 		if updatedPod.Annotations == nil {
 			updatedPod.Annotations = make(map[string]string)
 		}
+		teamID := updatedPod.Annotations[controller.AnnotationTeamID]
 
 		merged := SandboxConfig{}
 		if configJSON := updatedPod.Annotations[controller.AnnotationConfig]; configJSON != "" {
@@ -759,13 +762,28 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 			}
 			merged.Services = services
 		}
+		if cfg.Resources != nil {
+			merged.Resources = cloneSandboxResourceConfig(cfg.Resources)
+			template := s.templateForPod(updatedPod)
+			if template == nil {
+				return fmt.Errorf("template for sandbox pod not found")
+			}
+			resourceQuota, err := s.effectiveSandboxResourceQuota(template, &merged)
+			if err != nil {
+				return err
+			}
+			if err := s.enforceSandboxResourceQuotaIncrease(ctx, teamID, current, resourceQuota); err != nil {
+				return err
+			}
+			resizeQuota = &resourceQuota
+			merged.Resources = &SandboxResourceConfig{Memory: resourceQuota.Memory.String()}
+		}
 
 		if cfg.Network != nil {
 			if s.NetworkPolicyService == nil {
 				return fmt.Errorf("network policy service not configured")
 			}
 
-			teamID := updatedPod.Annotations[controller.AnnotationTeamID]
 			templateSpec, templateBindings := s.templateNetworkDefaults(updatedPod)
 			requestSpec := merged.Network
 			if cfg.Network != nil {
@@ -805,6 +823,22 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 			return fmt.Errorf("marshal sandbox config: %w", err)
 		}
 		updatedPod.Annotations[controller.AnnotationConfig] = string(updatedConfigJSON)
+
+		if resizeQuota != nil {
+			resizedPod, err := s.resizeSandboxPodResources(ctx, current, *resizeQuota)
+			if err != nil {
+				if rollbackBindings != nil {
+					if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
+						s.logger.Warn("Failed to roll back credential bindings after sandbox resize failure",
+							zap.String("sandboxID", sandboxID),
+							zap.Error(rollbackErr),
+						)
+					}
+				}
+				return err
+			}
+			updatedPod = mergeSandboxMetadataAfterResize(resizedPod, updatedPod)
+		}
 
 		updatedPod, err = s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, updatedPod, metav1.UpdateOptions{})
 		if err != nil && rollbackBindings != nil {
@@ -872,6 +906,13 @@ func (s *SandboxService) updatePausedSandboxRecord(ctx context.Context, record *
 			return nil, err
 		}
 		merged.Services = services
+	}
+	if cfg.Resources != nil {
+		memory, err := s.validateSandboxMemory(cfg.Resources.Memory)
+		if err != nil {
+			return nil, err
+		}
+		merged.Resources = &SandboxResourceConfig{Memory: memory.String()}
 	}
 	if cfg.Network != nil {
 		merged.Network = sanitizedNetworkPolicyForPersistence(cfg.Network)
@@ -1085,6 +1126,7 @@ func (s *SandboxService) podToSandbox(ctx context.Context, pod *corev1.Pod, sand
 		Status:            status,
 		Paused:            status == SandboxStatusPaused,
 		AutoResume:        autoResume,
+		Resources:         cloneSandboxResourceConfig(cfg.Resources),
 		Services:          cfg.Services,
 		Mounts:            parseClaimMounts(pod.Annotations[controller.AnnotationMounts]),
 		PodName:           pod.Name,
@@ -1113,6 +1155,7 @@ func (s *SandboxService) recordToSandbox(record *SandboxRecord) *Sandbox {
 		Status:            record.Status,
 		Paused:            record.Status == SandboxStatusPaused,
 		AutoResume:        autoResume,
+		Resources:         cloneSandboxResourceConfig(record.Config.Resources),
 		Services:          record.Config.Services,
 		Mounts:            record.Mounts,
 		PodName:           record.CurrentPodName,

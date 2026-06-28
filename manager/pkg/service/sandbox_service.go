@@ -21,23 +21,24 @@ import (
 
 // Sandbox represents a sandbox instance
 type Sandbox struct {
-	ID                string              `json:"id"`
-	TemplateID        string              `json:"template_id"`
-	TeamID            string              `json:"team_id"`
-	UserID            string              `json:"user_id"`
-	InternalAddr      string              `json:"internal_addr"`
-	Status            string              `json:"status"`
-	Paused            bool                `json:"paused"`
-	AutoResume        bool                `json:"auto_resume"`
-	Services          []SandboxAppService `json:"services,omitempty"`
-	Mounts            []ClaimMount        `json:"mounts,omitempty"`
-	PodName           string              `json:"pod_name"`
-	RuntimeGeneration int64               `json:"runtime_generation"`
-	ExpiresAt         time.Time           `json:"expires_at"`
-	HardExpiresAt     time.Time           `json:"hard_expires_at"`
-	ClaimedAt         time.Time           `json:"claimed_at"`
-	CreatedAt         time.Time           `json:"created_at"`
-	UpdatedAt         time.Time           `json:"updated_at"`
+	ID                string                 `json:"id"`
+	TemplateID        string                 `json:"template_id"`
+	TeamID            string                 `json:"team_id"`
+	UserID            string                 `json:"user_id"`
+	InternalAddr      string                 `json:"internal_addr"`
+	Status            string                 `json:"status"`
+	Paused            bool                   `json:"paused"`
+	AutoResume        bool                   `json:"auto_resume"`
+	Resources         *SandboxResourceConfig `json:"resources,omitempty"`
+	Services          []SandboxAppService    `json:"services,omitempty"`
+	Mounts            []ClaimMount           `json:"mounts,omitempty"`
+	PodName           string                 `json:"pod_name"`
+	RuntimeGeneration int64                  `json:"runtime_generation"`
+	ExpiresAt         time.Time              `json:"expires_at"`
+	HardExpiresAt     time.Time              `json:"hard_expires_at"`
+	ClaimedAt         time.Time              `json:"claimed_at"`
+	CreatedAt         time.Time              `json:"created_at"`
+	UpdatedAt         time.Time              `json:"updated_at"`
 }
 
 // SandboxStatus represents possible sandbox statuses
@@ -76,6 +77,8 @@ var claimIdlePodBackoff = wait.Backoff{
 // SandboxServiceConfig handles configuration for SandboxService
 type SandboxServiceConfig struct {
 	DefaultTTL                          time.Duration
+	SandboxMemoryPerCPU                 string
+	SandboxMaxMemory                    string
 	PauseMinMemoryRequest               string
 	PauseMinMemoryLimit                 string
 	PauseMemoryBufferRatio              float64

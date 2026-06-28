@@ -44,6 +44,31 @@ func TestMemoryForCPU(t *testing.T) {
 	}
 }
 
+func TestCPUForMemory(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		memory string
+		want   string
+	}{
+		{name: "whole cpu", memory: "4Gi", want: "1"},
+		{name: "fractional minimum sandbox memory rounds up to millicpu", memory: "128Mi", want: "32m"},
+		{name: "half cpu", memory: "2Gi", want: "500m"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := CPUForMemory(resource.MustParse(tt.memory), resource.MustParse("4Gi"))
+			want := resource.MustParse(tt.want)
+			if got.Cmp(want) != 0 {
+				t.Fatalf("CPUForMemory(%s) = %s, want %s", tt.memory, got.String(), want.String())
+			}
+		})
+	}
+}
+
 func TestValidateResourceRatio(t *testing.T) {
 	t.Parallel()
 

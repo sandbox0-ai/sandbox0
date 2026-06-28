@@ -326,7 +326,11 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 		Name:            name,
 		Image:           spec.Image,
 		ImagePullPolicy: corev1.PullIfNotPresent,
-		Resources:       buildResourceRequirements(spec.Resources),
+		Resources:       BuildResourceRequirements(spec.Resources),
+		ResizePolicy: []corev1.ContainerResizePolicy{
+			{ResourceName: corev1.ResourceCPU, RestartPolicy: corev1.NotRequired},
+			{ResourceName: corev1.ResourceMemory, RestartPolicy: corev1.NotRequired},
+		},
 	}
 
 	if spec.ImagePullPolicy != "" {
@@ -373,7 +377,9 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 	return container
 }
 
-func buildResourceRequirements(quota ResourceQuota) corev1.ResourceRequirements {
+// BuildResourceRequirements converts a sandbox resource quota into Kubernetes
+// container requests and limits.
+func BuildResourceRequirements(quota ResourceQuota) corev1.ResourceRequirements {
 	requests := corev1.ResourceList{}
 	limits := corev1.ResourceList{}
 	if quota.CPU.Sign() > 0 {

@@ -341,7 +341,7 @@ manager_image: sandbox0/manager:test
 	assertResourceQuantity(t, resources.Limits[corev1.ResourceCPU], "1")
 	assertResourceQuantity(t, resources.Requests[corev1.ResourceMemory], "256Mi")
 	assertResourceQuantity(t, resources.Limits[corev1.ResourceMemory], "1Gi")
-	assertResourceQuantity(t, resources.Requests[corev1.ResourceEphemeralStorage], "8Gi")
+	assertResourceQuantity(t, resources.Requests[corev1.ResourceEphemeralStorage], "1Gi")
 	assertResourceQuantity(t, resources.Limits[corev1.ResourceEphemeralStorage], "8Gi")
 }
 

@@ -24,11 +24,12 @@ const (
 
 	// Template resources remain hard limits; requests reserve a smaller baseline
 	// so warm pools and cold-start sandboxes can be packed efficiently.
-	defaultSandboxCPURequestRatioMillis    = int64(100)
-	defaultSandboxMemoryRequestRatioMillis = int64(250)
-	minSandboxCPURequestMilli              = int64(10)
-	minSandboxMemoryRequestBytes           = int64(64 * 1024 * 1024)
-	minSandboxEphemeralStorageRequestBytes = int64(64 * 1024 * 1024)
+	defaultSandboxCPURequestRatioMillis              = int64(100)
+	defaultSandboxMemoryRequestRatioMillis           = int64(250)
+	defaultSandboxEphemeralStorageRequestRatioMillis = int64(125)
+	minSandboxCPURequestMilli                        = int64(10)
+	minSandboxMemoryRequestBytes                     = int64(64 * 1024 * 1024)
+	minSandboxEphemeralStorageRequestBytes           = int64(64 * 1024 * 1024)
 )
 
 // BuildPodSpec builds a pod spec with every template-declared user volume portal.
@@ -421,7 +422,7 @@ func scaledMemoryRequest(limit resource.Quantity) resource.Quantity {
 
 func scaledEphemeralStorageRequest(limit resource.Quantity) resource.Quantity {
 	limitBytes := limit.Value()
-	requestBytes := scaleResource(limitBytes, 1000, minSandboxEphemeralStorageRequestBytes)
+	requestBytes := scaleResource(limitBytes, defaultSandboxEphemeralStorageRequestRatioMillis, minSandboxEphemeralStorageRequestBytes)
 	return *resource.NewQuantity(requestBytes, resource.BinarySI)
 }
 

@@ -2560,6 +2560,38 @@ type Team struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
+// TeamDeleteConflictDetails defines model for TeamDeleteConflictDetails.
+type TeamDeleteConflictDetails struct {
+	// BlockingResources Resources that must be removed before the team can be deleted.
+	BlockingResources []TeamDeleteResourceCount `json:"blocking_resources"`
+
+	// RetainedResources Historical resources retained by policy. These do not block deletion.
+	RetainedResources *[]TeamDeleteResourceCount `json:"retained_resources,omitempty"`
+
+	// RetentionPolicy Summary of the historical metering retention policy for team deletion.
+	RetentionPolicy *string `json:"retention_policy,omitempty"`
+	TeamId          string  `json:"team_id"`
+}
+
+// TeamDeleteConflictResponse defines model for TeamDeleteConflictResponse.
+type TeamDeleteConflictResponse struct {
+	Error struct {
+		Code    string                     `json:"code"`
+		Details *TeamDeleteConflictDetails `json:"details,omitempty"`
+		Message string                     `json:"message"`
+	} `json:"error"`
+	Success bool `json:"success"`
+}
+
+// TeamDeleteResourceCount defines model for TeamDeleteResourceCount.
+type TeamDeleteResourceCount struct {
+	// Category Machine-readable resource category that still references the team.
+	Category string `json:"category"`
+
+	// Count Number of resources in this category.
+	Count int64 `json:"count"`
+}
+
 // TeamMember defines model for TeamMember.
 type TeamMember struct {
 	// AvatarUrl User avatar URL. Present in team member list responses.

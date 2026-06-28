@@ -1,0 +1,9 @@
+# Team Deletion
+
+Team deletion is conservative. <code>DELETE /teams/{'{id}'}</code> first checks the current region for team-owned resources and returns `409 conflict` when resources still exist.
+
+The conflict response includes `error.details.blocking_resources`, with one entry per category and a count. Clear those resources before retrying team deletion.
+
+Blocking categories include active sandbox records, scheduler templates and allocations, credential sources, egress credential bindings, API keys, team-scoped SSH public keys, sandbox volumes and snapshots, rootfs records, volume handoff state, team quota limits, and discovered non-metering tables with a `team_id` column. Team membership is removed by the final team delete once the preflight passes.
+
+Historical metering records are retained for usage truth and audit. They appear in `error.details.retained_resources` when present, but they do not block team deletion.

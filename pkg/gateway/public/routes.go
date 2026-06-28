@@ -19,6 +19,7 @@ type Deps struct {
 	IdentityRepo            *identity.Repository
 	APIKeyRepo              *apikey.Repository
 	AuthMiddleware          *middleware.AuthMiddleware
+	TeamDeletePreflight     handlers.TeamDeletePreflight
 	BuiltinProvider         *builtin.Provider
 	OIDCManager             *oidc.Manager
 	Entitlements            licensing.Entitlements
@@ -37,9 +38,12 @@ func RegisterRoutes(router gin.IRouter, deps Deps) {
 }
 
 func newTeamHandler(deps Deps) *handlers.TeamHandler {
-	teamOpts := make([]handlers.TeamHandlerOption, 0, 1)
+	teamOpts := make([]handlers.TeamHandlerOption, 0, 2)
 	if deps.RequireCreateHomeRegion {
 		teamOpts = append(teamOpts, handlers.WithCreateHomeRegionRequired(deps.RegionRepo))
+	}
+	if deps.TeamDeletePreflight != nil {
+		teamOpts = append(teamOpts, handlers.WithTeamDeletePreflight(deps.TeamDeletePreflight))
 	}
 	return handlers.NewTeamHandler(deps.IdentityRepo, deps.Logger, teamOpts...)
 }

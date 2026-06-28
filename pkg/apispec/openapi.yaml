@@ -904,6 +904,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "409":
+          description: Team has resources that must be removed before deletion
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamDeleteConflictResponse"
   /teams/{id}/owner:
     put:
       tags: [teams]
@@ -3651,6 +3657,52 @@ components:
           type: string
           format: date-time
       required: [id, name, slug, created_at, updated_at]
+    TeamDeleteResourceCount:
+      type: object
+      properties:
+        category:
+          type: string
+          description: Machine-readable resource category that still references the team.
+        count:
+          type: integer
+          format: int64
+          description: Number of resources in this category.
+      required: [category, count]
+    TeamDeleteConflictDetails:
+      type: object
+      properties:
+        team_id:
+          type: string
+        blocking_resources:
+          type: array
+          description: Resources that must be removed before the team can be deleted.
+          items:
+            $ref: "#/components/schemas/TeamDeleteResourceCount"
+        retained_resources:
+          type: array
+          description: Historical resources retained by policy. These do not block deletion.
+          items:
+            $ref: "#/components/schemas/TeamDeleteResourceCount"
+        retention_policy:
+          type: string
+          description: Summary of the historical metering retention policy for team deletion.
+      required: [team_id, blocking_resources]
+    TeamDeleteConflictResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              $ref: "#/components/schemas/TeamDeleteConflictDetails"
+          required: [code, message]
+      required: [success, error]
     Region:
       type: object
       properties:

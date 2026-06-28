@@ -354,6 +354,11 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 		return pod, err
 	}
 	if claimType == "cold" {
+		networkPod, err := s.waitForColdPodNetworkPolicy(ctx, pod, record.TeamID)
+		if err != nil {
+			return pod, err
+		}
+		pod = networkPod
 		readyPod, err := s.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
 		if err != nil {
 			return pod, fmt.Errorf("wait for pod claim readiness: %w", err)

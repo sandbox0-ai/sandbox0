@@ -96,6 +96,72 @@ func (s *SandboxService) waitForPodClaimReady(ctx context.Context, namespace, na
 	}
 }
 
+func (s *SandboxService) waitForPodNetworkIdentity(ctx context.Context, namespace, name string) (*corev1.Pod, error) {
+	timeout := s.config.ProcdInitTimeout
+	if timeout < defaultPodClaimReadyTimeout {
+		timeout = defaultPodClaimReadyTimeout
+	}
+
+	readyCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	lastReason := "pod network identity is not ready"
+	for {
+		if s.podLister == nil {
+			return nil, fmt.Errorf("pod lister is not configured")
+		}
+		pod, err := s.podLister.Pods(namespace).Get(name)
+		if err != nil {
+			if k8serrors.IsNotFound(err) {
+				lastReason = fmt.Sprintf("pod %s/%s is not visible", namespace, name)
+				select {
+				case <-readyCtx.Done():
+					return nil, fmt.Errorf("pod %s/%s network identity not ready after %s: %s", namespace, name, timeout, lastReason)
+				case <-ticker.C:
+					continue
+				}
+			}
+			return nil, fmt.Errorf("get pod for network identity: %w", err)
+		}
+
+		ready, reason := isPodNetworkIdentityReady(pod)
+		if ready {
+			return pod, nil
+		}
+		if reason != "" {
+			lastReason = reason
+		}
+
+		select {
+		case <-readyCtx.Done():
+			return nil, fmt.Errorf("pod %s/%s network identity not ready after %s: %s", namespace, name, timeout, lastReason)
+		case <-ticker.C:
+		}
+	}
+}
+
+func isPodNetworkIdentityReady(pod *corev1.Pod) (bool, string) {
+	if pod == nil {
+		return false, "pod is nil"
+	}
+	if pod.DeletionTimestamp != nil {
+		return false, "pod is deleting"
+	}
+	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+		return false, fmt.Sprintf("pod phase is terminal: %s", pod.Status.Phase)
+	}
+	if strings.TrimSpace(pod.Spec.NodeName) == "" {
+		return false, "pod node is not assigned"
+	}
+	if strings.TrimSpace(pod.Status.PodIP) == "" {
+		return false, "pod IP is not assigned"
+	}
+	return true, ""
+}
+
 func (s *SandboxService) isPodClaimReady(ctx context.Context, pod *corev1.Pod) (bool, string) {
 	if pod == nil {
 		return false, "pod is nil"

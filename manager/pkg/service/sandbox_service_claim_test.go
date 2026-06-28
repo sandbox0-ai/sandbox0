@@ -461,7 +461,39 @@ func TestWaitForPodClaimReadyUsesSandboxReadinessWithoutPodReady(t *testing.T) {
 	}
 }
 
-func TestCreateNewPodRequestsDeleteAfterNetworkApplyFailure(t *testing.T) {
+func TestWaitForPodNetworkIdentityWaitsForNodeNameAndPodIP(t *testing.T) {
+	pod := newClaimTestPod("ns-a", "cold-pod", "template-a", false)
+	indexer := newClaimTestPodIndexer(t, pod)
+	svc := &SandboxService{
+		podLister: corelisters.NewPodLister(indexer),
+		logger:    zap.NewNop(),
+	}
+
+	go func() {
+		time.Sleep(80 * time.Millisecond)
+		updated := pod.DeepCopy()
+		updated.Spec.NodeName = "node-a"
+		updated.Status.PodIP = "10.244.0.10"
+		if err := indexer.Update(updated); err != nil {
+			t.Errorf("update pod: %v", err)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	readyPod, err := svc.waitForPodNetworkIdentity(ctx, pod.Namespace, pod.Name)
+	if err != nil {
+		t.Fatalf("waitForPodNetworkIdentity() error = %v", err)
+	}
+	if readyPod.Spec.NodeName != "node-a" {
+		t.Fatalf("node name = %q, want node-a", readyPod.Spec.NodeName)
+	}
+	if readyPod.Status.PodIP != "10.244.0.10" {
+		t.Fatalf("pod IP = %q, want 10.244.0.10", readyPod.Status.PodIP)
+	}
+}
+
+func TestCreateNewPodDefersNetworkApplyUntilPodHasNetworkIdentity(t *testing.T) {
 	withClaimTestPublicKey(t)
 
 	template := &v1alpha1.SandboxTemplate{
@@ -473,40 +505,87 @@ func TestCreateNewPodRequestsDeleteAfterNetworkApplyFailure(t *testing.T) {
 			MainContainer: v1alpha1.ContainerSpec{Image: "busybox"},
 		},
 	}
-	applyErr := errors.New("apply failed")
-	removed := make([]string, 0, 1)
+	applyCalls := 0
 	client := fake.NewSimpleClientset()
 	svc := &SandboxService{
 		k8sClient:            client,
 		secretLister:         newClaimTestSecretLister(t),
 		NetworkPolicyService: NewNetworkPolicyService(zap.NewNop()),
-		networkProvider: &assertingNetworkProvider{
-			applyErr: applyErr,
-			removeFunc: func(namespace, sandboxID string) {
-				removed = append(removed, namespace+"/"+sandboxID)
-			},
-		},
+		networkProvider: &assertingNetworkProvider{applyFunc: func(_ network.SandboxPolicyInput) {
+			applyCalls++
+		}},
 		clock:  systemTime{},
 		logger: zap.NewNop(),
 	}
 
-	_, err := svc.createNewPod(context.Background(), template, &ClaimRequest{TeamID: "team-a", UserID: "user-a"})
-	if err == nil {
-		t.Fatal("createNewPod() error = nil, want network apply failure")
+	pod, err := svc.createNewPod(context.Background(), template, &ClaimRequest{TeamID: "team-a", UserID: "user-a"})
+	if err != nil {
+		t.Fatalf("createNewPod() error = %v", err)
 	}
-	if !errors.Is(err, applyErr) {
-		t.Fatalf("createNewPod() error = %v, want wrapped apply failure", err)
+	if applyCalls != 0 {
+		t.Fatalf("network apply calls = %d, want 0 before pod has network identity", applyCalls)
+	}
+	if pod.Annotations[controller.AnnotationNetworkPolicy] == "" {
+		t.Fatal("network policy annotation is empty")
+	}
+	if pod.Annotations[controller.AnnotationNetworkPolicyHash] == "" {
+		t.Fatal("network policy hash annotation is empty")
 	}
 
 	pods, err := client.CoreV1().Pods("ns-a").List(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		t.Fatalf("list pods: %v", err)
 	}
+	if len(pods.Items) != 1 {
+		t.Fatalf("pods after createNewPod() = %d, want 1", len(pods.Items))
+	}
+}
+
+func TestClaimSandboxDeletesColdPodAfterNetworkApplyFailure(t *testing.T) {
+	withClaimTestPublicKey(t)
+
+	templateNamespace, err := naming.TemplateNamespaceForBuiltin("managed-agent-claude")
+	if err != nil {
+		t.Fatalf("template namespace: %v", err)
+	}
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "managed-agent-claude",
+			Namespace: templateNamespace,
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{Image: "busybox"},
+		},
+	}
+	applyErr := errors.New("apply failed")
+	indexer := newClaimTestPodIndexer(t)
+	client := fake.NewSimpleClientset()
+	scheduleCreatedClaimPodInIndexer(t, client, indexer, nil)
+	svc := &SandboxService{
+		k8sClient:            client,
+		podLister:            corelisters.NewPodLister(indexer),
+		secretLister:         newClaimTestSecretLister(t),
+		templateLister:       staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
+		NetworkPolicyService: NewNetworkPolicyService(zap.NewNop()),
+		networkProvider:      &assertingNetworkProvider{applyErr: applyErr},
+		clock:                systemTime{},
+		logger:               zap.NewNop(),
+	}
+
+	_, err = svc.ClaimSandbox(context.Background(), &ClaimRequest{Template: "managed-agent-claude", TeamID: "team-a", UserID: "user-a"})
+	if err == nil {
+		t.Fatal("ClaimSandbox() error = nil, want network apply failure")
+	}
+	if !errors.Is(err, applyErr) {
+		t.Fatalf("ClaimSandbox() error = %v, want wrapped apply failure", err)
+	}
+
+	pods, err := client.CoreV1().Pods(templateNamespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
 	if len(pods.Items) != 0 {
 		t.Fatalf("pods after failed cold claim = %d, want 0", len(pods.Items))
-	}
-	if len(removed) != 0 {
-		t.Fatalf("network policy removals = %d, want 0; lifecycle controller owns delete cleanup", len(removed))
 	}
 }
 
@@ -833,11 +912,15 @@ func TestClaimSandboxCleansColdPodWhenClaimReadinessFails(t *testing.T) {
 			MainContainer: v1alpha1.ContainerSpec{Image: "busybox"},
 		},
 	}
+	indexer := newClaimTestPodIndexer(t)
 	client := fake.NewSimpleClientset()
+	scheduleCreatedClaimPodInIndexer(t, client, indexer, func(pod *corev1.Pod) {
+		pod.Status.ContainerStatuses = nil
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	svc := &SandboxService{
 		k8sClient:            client,
-		podLister:            newClaimTestPodLister(t),
+		podLister:            corelisters.NewPodLister(indexer),
 		secretLister:         newClaimTestSecretLister(t),
 		templateLister:       staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
 		NetworkPolicyService: NewNetworkPolicyService(zap.NewNop()),
@@ -1487,6 +1570,32 @@ func newClaimTestPodIndexer(t *testing.T, pods ...*corev1.Pod) cache.Indexer {
 		}
 	}
 	return indexer
+}
+
+func scheduleCreatedClaimPodInIndexer(t *testing.T, client *fake.Clientset, indexer cache.Indexer, mutate func(*corev1.Pod)) {
+	t.Helper()
+	client.PrependReactor("create", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		createAction, ok := action.(k8stesting.CreateAction)
+		if !ok {
+			return false, nil, nil
+		}
+		pod, ok := createAction.GetObject().(*corev1.Pod)
+		if !ok || pod == nil {
+			return false, nil, nil
+		}
+		indexedPod := pod.DeepCopy()
+		indexedPod.ResourceVersion = "2"
+		indexedPod.Spec.NodeName = "node-a"
+		indexedPod.Status.Phase = corev1.PodRunning
+		indexedPod.Status.PodIP = "10.244.0.10"
+		if mutate != nil {
+			mutate(indexedPod)
+		}
+		if err := indexer.Add(indexedPod); err != nil {
+			return true, nil, err
+		}
+		return false, nil, nil
+	})
 }
 
 func newClaimTestPod(namespace, name, templateID string, ready bool) *corev1.Pod {

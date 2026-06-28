@@ -289,6 +289,12 @@ func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Co
 	if fallbackErr != nil {
 		return pod, fmt.Errorf("%w; create checkpoint base image runtime: %v", err, fallbackErr)
 	}
+	networkPod, fallbackErr := s.waitForColdPodNetworkPolicy(ctx, fallbackPod, req.TeamID)
+	if fallbackErr != nil {
+		s.requestSandboxDeletionAfterClaimFailure(fallbackPod, "checkpoint base image network policy failed")
+		return fallbackPod, fmt.Errorf("%w; prepare checkpoint base image network policy: %v", err, fallbackErr)
+	}
+	fallbackPod = networkPod
 	readyPod, fallbackErr := s.waitForPodClaimReady(ctx, fallbackPod.Namespace, fallbackPod.Name)
 	if fallbackErr != nil {
 		s.requestSandboxDeletionAfterClaimFailure(fallbackPod, "checkpoint base image runtime readiness failed")

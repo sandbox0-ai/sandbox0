@@ -489,9 +489,35 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 
 	// Note: Network policies are stored in pod annotations.
 	// They are set in claimIdlePod() and createNewPod() methods. Hot claims have
-	// already selected a Kubernetes-ready idle pod; cold claims use the faster
-	// claim-ready path below and let Kubernetes PodReady catch up asynchronously.
+	// already selected a Kubernetes-ready idle pod. Cold claims must wait until
+	// the pod has the network identity netd watches before waiting for netd to
+	// patch the applied policy hash.
 	if claimType == "cold" {
+		if s.networkProvider != nil {
+			phaseStarted = time.Now()
+			networkPod, err := s.waitForPodNetworkIdentity(ctx, pod.Namespace, pod.Name)
+			s.observeClaimPhase(req.Template, claimType, "wait_for_pod_network_identity", phaseStarted, err)
+			if err != nil {
+				s.requestSandboxDeletionAfterClaimFailure(pod, "network identity readiness failed")
+				if metrics != nil {
+					metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+				}
+				return nil, fmt.Errorf("wait for pod network identity: %w", err)
+			}
+			pod = networkPod
+
+			phaseStarted = time.Now()
+			err = s.applyNetworkProviderFromPod(ctx, pod, req.TeamID)
+			s.observeClaimPhase(req.Template, claimType, "apply_network_policy", phaseStarted, err)
+			if err != nil {
+				s.requestSandboxDeletionAfterClaimFailure(pod, "network policy apply failed")
+				if metrics != nil {
+					metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+				}
+				return nil, fmt.Errorf("apply network policy: %w", err)
+			}
+		}
+
 		phaseStarted = time.Now()
 		readyPod, err := s.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
 		s.observeClaimPhase(req.Template, claimType, "wait_for_pod_claim_ready", phaseStarted, err)
@@ -1309,11 +1335,6 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 			)
 		}
 		return nil, fmt.Errorf("create pod: %w", err)
-	}
-
-	if err := s.applyNetworkProvider(ctx, createdPod, req.TeamID, policySpecFromState(networkState)); err != nil {
-		s.requestSandboxDeletionAfterClaimFailure(createdPod, "network policy apply failed")
-		return nil, fmt.Errorf("apply network policy: %w", err)
 	}
 
 	s.logger.Info("Created new pod for cold start",

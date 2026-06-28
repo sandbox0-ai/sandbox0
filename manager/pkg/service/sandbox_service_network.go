@@ -519,6 +519,38 @@ func (s *SandboxService) applyNetworkProvider(
 	return nil
 }
 
+func (s *SandboxService) applyNetworkProviderFromPod(ctx context.Context, pod *corev1.Pod, teamID string) error {
+	if s.networkProvider == nil || pod == nil {
+		return nil
+	}
+	annotation := ""
+	if pod.Annotations != nil {
+		annotation = pod.Annotations[controller.AnnotationNetworkPolicy]
+	}
+	networkSpec, err := v1alpha1.ParseNetworkPolicyFromAnnotation(annotation)
+	if err != nil {
+		return fmt.Errorf("parse network policy annotation: %w", err)
+	}
+	return s.applyNetworkProvider(ctx, pod, teamID, networkSpec)
+}
+
+func (s *SandboxService) waitForColdPodNetworkPolicy(ctx context.Context, pod *corev1.Pod, teamID string) (*corev1.Pod, error) {
+	if pod == nil {
+		return nil, fmt.Errorf("pod is nil")
+	}
+	if s.networkProvider == nil {
+		return pod, nil
+	}
+	networkPod, err := s.waitForPodNetworkIdentity(ctx, pod.Namespace, pod.Name)
+	if err != nil {
+		return pod, fmt.Errorf("wait for pod network identity: %w", err)
+	}
+	if err := s.applyNetworkProviderFromPod(ctx, networkPod, teamID); err != nil {
+		return networkPod, fmt.Errorf("apply network policy: %w", err)
+	}
+	return networkPod, nil
+}
+
 // GetNetworkPolicy gets the effective sandbox network policy.
 func (s *SandboxService) GetNetworkPolicy(ctx context.Context, sandboxID string) (*v1alpha1.SandboxNetworkPolicy, error) {
 	pod, err := s.getSandboxPod(ctx, sandboxID)

@@ -68,7 +68,7 @@ func TestEnforceSandboxCPUQuotaRejectsWhenRequestedWouldExceedLimit(t *testing.T
 	}
 	template := newQuotaTestTemplate("default", "500m", "1Gi")
 
-	err := svc.enforceSandboxCPUQuota(context.Background(), "team-1", template)
+	err := svc.enforceSandboxCPUQuota(context.Background(), "team-1", template.Spec.MainContainer.Resources)
 	if !errors.Is(err, ErrQuotaExceeded) {
 		t.Fatalf("enforceSandboxCPUQuota() error = %v, want ErrQuotaExceeded", err)
 	}
@@ -83,7 +83,7 @@ func TestEnforceSandboxCPUQuotaAllowsBelowLimit(t *testing.T) {
 	}
 	template := newQuotaTestTemplate("default", "500m", "1Gi")
 
-	if err := svc.enforceSandboxCPUQuota(context.Background(), "team-1", template); err != nil {
+	if err := svc.enforceSandboxCPUQuota(context.Background(), "team-1", template.Spec.MainContainer.Resources); err != nil {
 		t.Fatalf("enforceSandboxCPUQuota() error = %v, want nil", err)
 	}
 }
@@ -97,7 +97,7 @@ func TestEnforceSandboxMemoryQuotaRejectsWhenRequestedWouldExceedLimit(t *testin
 	}
 	template := newQuotaTestTemplate("default", "500m", "512Mi")
 
-	err := svc.enforceSandboxMemoryQuota(context.Background(), "team-1", template)
+	err := svc.enforceSandboxMemoryQuota(context.Background(), "team-1", template.Spec.MainContainer.Resources)
 	if !errors.Is(err, ErrQuotaExceeded) {
 		t.Fatalf("enforceSandboxMemoryQuota() error = %v, want ErrQuotaExceeded", err)
 	}
@@ -112,7 +112,7 @@ func TestEnforceSandboxMemoryQuotaAllowsBelowLimit(t *testing.T) {
 	}
 	template := newQuotaTestTemplate("default", "500m", "512Mi")
 
-	if err := svc.enforceSandboxMemoryQuota(context.Background(), "team-1", template); err != nil {
+	if err := svc.enforceSandboxMemoryQuota(context.Background(), "team-1", template.Spec.MainContainer.Resources); err != nil {
 		t.Fatalf("enforceSandboxMemoryQuota() error = %v, want nil", err)
 	}
 }

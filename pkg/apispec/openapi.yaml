@@ -4045,6 +4045,8 @@ components:
           type: object
           additionalProperties:
             type: string
+        resources:
+          $ref: "#/components/schemas/SandboxResourceConfig"
         ttl:
           type: integer
           format: int32
@@ -4067,6 +4069,13 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/SandboxAppService"
+    SandboxResourceConfig:
+      type: object
+      description: Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio.
+      properties:
+        memory:
+          type: string
+          description: Sandbox memory limit. Must be at least 128Mi and no more than the platform sandbox maximum, which defaults to 32Gi.
     SandboxAppServiceRouteAuth:
       type: object
       properties:
@@ -4346,6 +4355,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/SandboxAppService"
+        resources:
+          $ref: "#/components/schemas/SandboxResourceConfig"
         mounts:
           type: array
           items:
@@ -4416,6 +4427,8 @@ components:
             Sandbox-level environment variables used as defaults for new procd-managed
             processes. Omitting this field preserves the existing environment map; passing
             an empty object clears it.
+        resources:
+          $ref: "#/components/schemas/SandboxResourceConfig"
         ttl:
           type: integer
           format: int32

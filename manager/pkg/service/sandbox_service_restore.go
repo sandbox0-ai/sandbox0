@@ -111,10 +111,7 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 			if err := s.enforceActiveSandboxQuota(lockCtx, locked.TeamID); err != nil {
 				return err
 			}
-			if err := s.enforceSandboxCPUQuota(lockCtx, locked.TeamID, template); err != nil {
-				return err
-			}
-			if err := s.enforceSandboxMemoryQuota(lockCtx, locked.TeamID, template); err != nil {
+			if err := s.enforceSandboxResourceQuota(lockCtx, locked.TeamID, template, &locked.Config); err != nil {
 				return err
 			}
 			generation := locked.RuntimeGeneration + 1

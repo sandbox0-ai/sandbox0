@@ -71,6 +71,7 @@ Claim a sandbox from a template. The sandbox is created from a pre-warmed pool f
 | `env_vars` | object | Sandbox-level default environment variables for new procd-managed processes |
 | `ttl` | integer | Time to live in seconds (soft limit, triggers auto-pause; default: `0`, disabled) |
 | `hard_ttl` | integer | Hard sandbox lifetime in seconds (deletes identity and durable state; default: `0`, disabled) |
+| `resources` | object | Optional per-sandbox resource override. Only `resources.memory` is accepted; CPU is derived from the platform memory-per-CPU ratio. |
 | `network` | object | `SandboxNetworkPolicy`. Controls traffic rules, protocol controls, credential bindings, and destination-scoped egress auth |
 | `webhook` | object | Webhook configuration |
 | `auto_resume` | boolean | Auto-resume when accessed (default: true) |
@@ -79,6 +80,14 @@ Claim a sandbox from a template. The sandbox is created from a pre-warmed pool f
 See [Network](/docs/sandbox/network) and [Protocol Controls](/docs/sandbox/protocol-controls) for outbound control, [Sandbox Services](/docs/sandbox/services) for public HTTP controls, [Sandbox Functions](/docs/sandbox/functions) for inline public handlers, and [Credential](/docs/sandbox/credential) for outbound auth and secret handling.
 
 Sandbox `env_vars` override template/container environment variables for new contexts, command services, and function executions. Per-context, per-command, service runtime, and function `env_vars` override sandbox `env_vars` for that narrower scope. Warm processes start before the sandbox is claimed, so they do not receive claim-time sandbox `env_vars`.
+
+### Sandbox Resources
+
+Set `config.resources.memory` when one sandbox needs a different memory limit from its template. The minimum is `128Mi`. The platform maximum defaults to `32Gi` and can be changed by the operator with `services.manager.config.sandboxMaxMemory`.
+
+Sandbox0 keeps CPU and memory in the platform-defined ratio. The request only accepts memory; manager derives CPU from `services.manager.config.teamTemplateMemoryPerCpu` and applies the result to the sandbox runtime container. Existing running sandboxes can update memory with the Update Sandbox API.
+
+SDK helpers expose this as `WithSandboxMemory` / `UpdateSandboxMemory` in Go, `memory` / `updateMemory` in TypeScript, `memory` / `update_memory` in Python, and `--memory` in the `s0` CLI.
 
 ### TTL vs Hard TTL
 
@@ -118,6 +127,7 @@ if err != nil {
 // Claim a sandbox from the "default" template
 sandbox, err := client.ClaimSandbox(ctx, "default",
     sandbox0.WithSandboxHardTTL(300),
+    sandbox0.WithSandboxMemory("512Mi"),
     sandbox0.WithSandboxEnvVars(map[string]string{
         "APP_ENV": "development",
     }),
@@ -147,6 +157,7 @@ sandbox = client.claim_sandbox(
         "hard_ttl": 300,
         "env_vars": {"APP_ENV": "development"},
     }),
+    memory="512Mi",
 )
 print(f"Sandbox ID: {sandbox.id}")
 
@@ -166,6 +177,7 @@ const client = new Client({
 // Claim a sandbox from the "default" template
 const sandbox = await client.sandboxes.claim('default', {
     hardTtl: 300,
+    memory: '512Mi',
     envVars: { APP_ENV: 'development' },
 });
 console.log('Sandbox ID:', sandbox.id);
@@ -177,7 +189,7 @@ await client.sandboxes.delete(sandbox.id);`
       label: "CLI",
       language: "bash",
       code: `# Claim a sandbox from the "default" template
-s0 sandbox create --template default --hard-ttl 300`
+s0 sandbox create --template default --hard-ttl 300 --memory 512Mi`
     }
   ]}
 />
@@ -419,6 +431,7 @@ Only the following fields can be updated at runtime:
 |-------|------|-------------|
 | `ttl` | integer | Time to live in seconds (soft limit) |
 | `hard_ttl` | integer | Hard sandbox lifetime in seconds |
+| `resources` | object | Runtime resource override. Only `resources.memory` is accepted. |
 | `network` | object | Network policy configuration |
 | `auto_resume` | boolean | Auto-resume when accessed |
 | `services` | array | Sandbox Services for public HTTP routes, including Sandbox Functions |
@@ -432,12 +445,7 @@ Only the following fields can be updated at runtime:
     {
       label: "Go",
       language: "go",
-      code: `_, err = client.UpdateSandbox(ctx, sandbox.ID, apispec.SandboxUpdateRequest{
-    Config: apispec.NewOptSandboxUpdateConfig(apispec.SandboxUpdateConfig{
-        TTL:        apispec.NewOptInt32(600),
-        AutoResume: apispec.NewOptBool(false),
-    }),
-})
+      code: `_, err = client.UpdateSandboxMemory(ctx, sandbox.ID, "2Gi")
 if err != nil {
     log.Fatal(err)
 }`
@@ -445,28 +453,17 @@ if err != nil {
     {
       label: "Python",
       language: "python",
-      code: `from sandbox0.apispec.models.sandbox_update_config import SandboxUpdateConfig
-from sandbox0.apispec.models.sandbox_update_request import SandboxUpdateRequest
-
-client.sandboxes.update(
-    sandbox.id,
-    SandboxUpdateRequest(config=SandboxUpdateConfig.from_dict({
-        "ttl": 600,
-        "auto_resume": False,
-    })),
-)`
+      code: `client.sandboxes.update_memory(sandbox.id, "2Gi")`
     },
     {
       label: "TypeScript",
       language: "typescript",
-      code: `await client.sandboxes.update(sandbox.id, {
-    config: { ttl: 600, autoResume: false },
-});`
+      code: `await client.sandboxes.updateMemory(sandbox.id, '2Gi');`
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 sandbox update sb_abc123 --ttl 600 --auto-resume false`
+      code: `s0 sandbox update sb_abc123 --memory 2Gi`
     }
   ]}
 />

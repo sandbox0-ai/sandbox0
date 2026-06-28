@@ -345,6 +345,19 @@ manager_image: sandbox0/manager:test
 	assertResourceQuantity(t, resources.Limits[corev1.ResourceEphemeralStorage], "8Gi")
 }
 
+func TestBuildPodSpecUsesRestartFreeResourceResizePolicy(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	spec := BuildPodSpec(newTestTemplate())
+	policies := spec.Containers[0].ResizePolicy
+
+	assertResizePolicy(t, policies, corev1.ResourceCPU, corev1.NotRequired)
+	assertResizePolicy(t, policies, corev1.ResourceMemory, corev1.NotRequired)
+}
+
 func TestBuildPodSpecClampsReducedRequestsToSmallQuota(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
@@ -367,6 +380,19 @@ manager_image: sandbox0/manager:test
 	assertResourceQuantity(t, resources.Limits[corev1.ResourceMemory], "32Mi")
 	assertResourceQuantity(t, resources.Requests[corev1.ResourceEphemeralStorage], "32Mi")
 	assertResourceQuantity(t, resources.Limits[corev1.ResourceEphemeralStorage], "32Mi")
+}
+
+func assertResizePolicy(t *testing.T, policies []corev1.ContainerResizePolicy, resourceName corev1.ResourceName, want corev1.ResourceResizeRestartPolicy) {
+	t.Helper()
+	for _, policy := range policies {
+		if policy.ResourceName == resourceName {
+			if policy.RestartPolicy != want {
+				t.Fatalf("resize policy %s = %s, want %s", resourceName, policy.RestartPolicy, want)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing resize policy for %s", resourceName)
 }
 
 func TestBuildPodSpecAddsSandboxReadinessGate(t *testing.T) {

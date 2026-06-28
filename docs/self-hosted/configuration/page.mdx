@@ -184,6 +184,22 @@ This field only controls the `runtimeClassName` written onto sandbox Pods. The n
 
 `infra-operator` does not install node runtime handlers. It does not install `runsc`, write `/etc/containerd/config.toml`, restart containerd, or create a `gvisor-rootfs` handler. Do that through your node image, node bootstrap automation, or a dedicated privileged node setup process before scheduling sandbox workloads there.
 
+### Sandbox Memory Limits
+
+Sandbox claims and runtime updates can set `config.resources.memory`. The minimum accepted value is `128Mi`. The platform maximum defaults to `32Gi`.
+
+Use `services.manager.config.sandboxMaxMemory` to lower or raise the platform maximum:
+
+```yaml
+spec:
+    services:
+        manager:
+            config:
+                sandboxMaxMemory: 16Gi
+```
+
+Sandbox0 derives CPU from memory using `services.manager.config.teamTemplateMemoryPerCpu`, so callers do not set CPU directly on a sandbox claim or update.
+
 For `gVisor` rootfs checkpoint and restore support on self-managed clusters, use a dedicated containerd handler that points to `runsc` with shared file access and overlay disabled, then create a matching `RuntimeClass`:
 
 ```toml
@@ -450,6 +466,7 @@ Examples:
 
 - `services.clusterGateway.config.authMode` switches between `public`, `internal`, and `both`
 - `services.manager.config.autoscaler.*` tunes pool scale behavior
+- `services.manager.config.sandboxMaxMemory` caps per-sandbox memory overrides; the default is `32Gi`
 - `services.manager.config.allowColdStartWithoutReadyDataPlane` lets cold claims create Pending pods for external node autoscaler scale-from-zero deployments; keep it disabled unless the cluster autoscaler can provision matching sandbox nodes
 - `services.storageProxy.config.filesystem*` tunes filesystem behavior; `services.manager.config.procdConfig.volume*` tunes mounted volume cache sizing
 - `services.storageProxy.config.s0fsSegmentTargetSize` sets the target S0FS segment size for materialized volume data; the default is `4Mi`

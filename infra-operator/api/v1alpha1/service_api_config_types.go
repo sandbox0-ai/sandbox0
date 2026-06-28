@@ -442,6 +442,10 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default="4Gi"
 	TeamTemplateMemoryPerCPU string `json:"teamTemplateMemoryPerCpu,omitempty"`
+	// SandboxMaxMemory is the maximum memory limit accepted for a single sandbox.
+	// +optional
+	// +kubebuilder:default="32Gi"
+	SandboxMaxMemory string `json:"sandboxMaxMemory,omitempty"`
 	// +optional
 	SandboxRuntimeClassName string `json:"sandboxRuntimeClassName,omitempty"`
 	// DefaultTeamQuotas configures region-wide fallback team quota limits.

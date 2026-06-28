@@ -271,6 +271,10 @@ func (s *Server) updateSandbox(c *gin.Context) {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 			return
 		}
+		if errors.Is(err, service.ErrQuotaExceeded) {
+			spec.JSONError(c, http.StatusTooManyRequests, "quota_exceeded", err.Error())
+			return
+		}
 		s.logger.Error("Failed to update sandbox",
 			zap.String("sandboxID", sandboxID),
 			zap.Error(err),

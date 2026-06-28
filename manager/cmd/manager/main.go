@@ -288,6 +288,8 @@ func main() {
 	// Create services
 	cfgForSandbox := service.SandboxServiceConfig{
 		DefaultTTL:                          cfg.DefaultSandboxTTL.Duration,
+		SandboxMemoryPerCPU:                 cfg.TeamTemplateMemoryPerCPU,
+		SandboxMaxMemory:                    cfg.SandboxMaxMemory,
 		PauseMinMemoryRequest:               cfg.PauseMinMemoryRequest,
 		PauseMinMemoryLimit:                 cfg.PauseMinMemoryLimit,
 		PauseMemoryBufferRatio:              pauseMemoryBufferRatio,

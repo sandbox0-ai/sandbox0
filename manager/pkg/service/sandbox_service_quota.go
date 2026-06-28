@@ -32,13 +32,13 @@ func (s *SandboxService) enforceActiveSandboxQuota(ctx context.Context, teamID s
 	return fmt.Errorf("%w: %s", ErrQuotaExceeded, decision.Err())
 }
 
-func (s *SandboxService) enforceSandboxCPUQuota(ctx context.Context, teamID string, template *v1alpha1.SandboxTemplate) error {
-	requested := templateCPUMillicpu(template)
+func (s *SandboxService) enforceSandboxCPUQuota(ctx context.Context, teamID string, resourceQuota v1alpha1.ResourceQuota) error {
+	requested := resourceQuota.CPU.MilliValue()
 	return s.enforceQuota(ctx, teamID, quota.DimensionCPU, requested)
 }
 
-func (s *SandboxService) enforceSandboxMemoryQuota(ctx context.Context, teamID string, template *v1alpha1.SandboxTemplate) error {
-	requested := templateMemoryMiB(template)
+func (s *SandboxService) enforceSandboxMemoryQuota(ctx context.Context, teamID string, resourceQuota v1alpha1.ResourceQuota) error {
+	requested := bytesToMiBRoundUp(resourceQuota.Memory.Value())
 	return s.enforceQuota(ctx, teamID, quota.DimensionMemory, requested)
 }
 
@@ -63,20 +63,6 @@ func (s *SandboxService) enforceQuota(ctx context.Context, teamID string, dimens
 		return nil
 	}
 	return fmt.Errorf("%w: %s", ErrQuotaExceeded, decision.Err())
-}
-
-func templateCPUMillicpu(template *v1alpha1.SandboxTemplate) int64 {
-	if template == nil {
-		return 0
-	}
-	return template.Spec.MainContainer.Resources.CPU.MilliValue()
-}
-
-func templateMemoryMiB(template *v1alpha1.SandboxTemplate) int64 {
-	if template == nil {
-		return 0
-	}
-	return bytesToMiBRoundUp(template.Spec.MainContainer.Resources.Memory.Value())
 }
 
 func bytesToMiBRoundUp(value int64) int64 {

@@ -411,6 +411,7 @@ func cloneSandboxRecord(record *SandboxRecord) *SandboxRecord {
 	if record.Config.Services != nil {
 		clone.Config.Services = append([]SandboxAppService(nil), record.Config.Services...)
 	}
+	clone.Config.Resources = cloneSandboxResourceConfig(record.Config.Resources)
 	return &clone
 }
 

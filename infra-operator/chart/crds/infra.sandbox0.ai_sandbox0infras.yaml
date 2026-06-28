@@ -3192,6 +3192,11 @@ spec:
                           resyncPeriod:
                             default: 30s
                             type: string
+                          sandboxMaxMemory:
+                            default: 32Gi
+                            description: SandboxMaxMemory is the maximum memory limit
+                              accepted for a single sandbox.
+                            type: string
                           sandboxRuntimeClassName:
                             type: string
                           shutdownTimeout:

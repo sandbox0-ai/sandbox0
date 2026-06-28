@@ -66,6 +66,15 @@ func TestToManagerPreservesDefaultTeamQuotas(t *testing.T) {
 	}
 }
 
+func TestToManagerPreservesSandboxMaxMemory(t *testing.T) {
+	cfg := ToManager(&infrav1alpha1.ManagerConfig{
+		SandboxMaxMemory: "16Gi",
+	})
+	if cfg.SandboxMaxMemory != "16Gi" {
+		t.Fatalf("sandbox max memory = %q, want 16Gi", cfg.SandboxMaxMemory)
+	}
+}
+
 func TestToStorageProxyDefaultsObjectEncryptionEnabled(t *testing.T) {
 	cfg := ToStorageProxy(nil)
 	if !cfg.ObjectEncryptionEnabled {

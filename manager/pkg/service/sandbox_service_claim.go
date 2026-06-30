@@ -32,6 +32,8 @@ const (
 	volumePortalBindRetryInterval = 100 * time.Millisecond
 )
 
+var errIdlePodReservationConflict = errors.New("idle pod reservation conflict")
+
 // ClaimRequest represents a sandbox claim request
 type ClaimRequest struct {
 	TeamID     string
@@ -839,6 +841,13 @@ func (s *SandboxService) observeClaimPhase(template, claimType, phase string, st
 	s.metrics.SandboxClaimPhaseDuration.WithLabelValues(template, claimType, phase, status).Observe(time.Since(started).Seconds())
 }
 
+func (s *SandboxService) observeIdleClaim(template, result string) {
+	if s == nil || s.metrics == nil || s.metrics.SandboxIdleClaimsTotal == nil {
+		return
+	}
+	s.metrics.SandboxIdleClaimsTotal.WithLabelValues(template, result).Inc()
+}
+
 func validateClaimMountsForTemplate(req *ClaimRequest, template *v1alpha1.SandboxTemplate) error {
 	allowed := declaredVolumeMountsByPath(template)
 	var mounts []ClaimMount
@@ -1097,7 +1106,10 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 	if err != nil {
 		return nil, fmt.Errorf("compute template hash: %w", err)
 	}
-	err = retry.OnError(claimIdlePodBackoff, k8serrors.IsConflict, func() error {
+	templateID := controller.TemplateLogicalID(template)
+	err = retry.OnError(claimIdlePodBackoff, func(err error) bool {
+		return k8serrors.IsConflict(err) || errors.Is(err, errIdlePodReservationConflict)
+	}, func() error {
 		// Get all idle pods for this template
 		pods, listErr := s.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
 			controller.LabelTemplateID: template.Name,
@@ -1110,18 +1122,35 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		// Filter hot-claimable pods to Kubernetes-ready instances only.
 		var readyPods []*corev1.Pod
 		for _, pod := range pods {
-			if s.isHotClaimableIdlePod(pod, desiredTemplateHash) {
+			if s.isHotClaimableIdlePod(pod, desiredTemplateHash) && !s.isIdlePodReserved(pod) {
 				readyPods = append(readyPods, pod)
 			}
 		}
 
 		if len(readyPods) == 0 {
 			// No idle pod available, not an error - use a special error to stop retry
+			s.observeIdleClaim(templateID, "no_candidate")
 			return errNoIdlePod
 		}
 
 		// Claim an available pod
 		pod := readyPods[rand.Intn(len(readyPods))]
+		if !s.reserveIdlePod(pod) {
+			s.observeIdleClaim(templateID, "reservation_conflict")
+			return errIdlePodReservationConflict
+		}
+		reservationHeld := true
+		releaseReservation := func() {
+			if reservationHeld {
+				s.releaseIdlePodReservation(pod)
+				reservationHeld = false
+			}
+		}
+		keepReservationUntilTTL := func() {
+			reservationHeld = false
+		}
+		defer releaseReservation()
+		s.observeIdleClaim(templateID, "reserved")
 
 		sandboxID := strings.TrimSpace(req.SandboxID)
 		if sandboxID == "" {
@@ -1228,10 +1257,19 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 				)
 			}
 			if isIdlePodLostDuringClaim(updateErr) {
+				s.observeIdleClaim(templateID, "update_conflict")
+				keepReservationUntilTTL()
 				return errNoIdlePod
+			}
+			if k8serrors.IsConflict(updateErr) {
+				s.observeIdleClaim(templateID, "update_conflict")
+				keepReservationUntilTTL()
+			} else {
+				s.observeIdleClaim(templateID, "update_error")
 			}
 			return updateErr
 		}
+		keepReservationUntilTTL()
 
 		if resizeQuota != nil {
 			resizedPod, resizeErr := s.resizeSandboxPodResources(ctx, updatedPod, *resizeQuota)
@@ -1244,6 +1282,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 					)
 				}
 				s.requestSandboxDeletionAfterClaimFailure(updatedPod, "sandbox resource resize failed")
+				s.observeIdleClaim(templateID, "resize_error")
 				return fmt.Errorf("resize sandbox resources: %w", resizeErr)
 			}
 			updatedPod = mergeSandboxMetadataAfterResize(resizedPod, updatedPod)
@@ -1251,6 +1290,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 
 		if applyErr := s.applyNetworkProvider(ctx, updatedPod, req.TeamID, policySpecFromState(networkState)); applyErr != nil {
 			s.requestSandboxDeletionAfterClaimFailure(updatedPod, "network policy apply failed")
+			s.observeIdleClaim(templateID, "network_policy_error")
 			return fmt.Errorf("apply network policy: %w", applyErr)
 		}
 
@@ -1261,6 +1301,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		)
 
 		claimedPod = updatedPod
+		s.observeIdleClaim(templateID, "success")
 		return nil
 	})
 	if err != nil {
@@ -1280,6 +1321,25 @@ func (s *SandboxService) isHotClaimableIdlePod(pod *corev1.Pod, desiredTemplateH
 		return false
 	}
 	return controller.IsPodReady(pod) && s.podDataPlaneReady(pod)
+}
+
+func (s *SandboxService) reserveIdlePod(pod *corev1.Pod) bool {
+	return s.idleReservations().tryReserve(pod, idlePodReservationTTL)
+}
+
+func (s *SandboxService) releaseIdlePodReservation(pod *corev1.Pod) {
+	s.idleReservations().release(pod)
+}
+
+func (s *SandboxService) isIdlePodReserved(pod *corev1.Pod) bool {
+	return s.idleReservations().isReserved(pod)
+}
+
+func (s *SandboxService) idleReservations() *idlePodReservations {
+	if s.idlePodReservations == nil {
+		s.idlePodReservations = newIdlePodReservations()
+	}
+	return s.idlePodReservations
 }
 
 func isIdlePodLostDuringClaim(err error) bool {

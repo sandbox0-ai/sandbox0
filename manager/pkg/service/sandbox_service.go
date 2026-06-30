@@ -125,6 +125,7 @@ type SandboxService struct {
 	sandboxStore           SandboxStore
 	rootFSObjectDeleter    RootFSObjectDeleter
 	resumeGroup            singleflight.Group
+	idlePodReservations    *idlePodReservations
 }
 
 type TeamQuotaLimitStore interface {
@@ -237,6 +238,7 @@ func NewSandboxService(
 		config:                 config,
 		logger:                 logger,
 		metrics:                metrics,
+		idlePodReservations:    newIdlePodReservations(),
 	}
 	return service
 }

@@ -106,6 +106,86 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 	}
 }
 
+func TestClaimIdlePodReservationPreventsStaleCacheReuse(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+	}
+	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
+	reservations := newIdlePodReservations()
+
+	client := fake.NewSimpleClientset(readyPod.DeepCopy())
+	svc := &SandboxService{
+		k8sClient:           client,
+		podLister:           newClaimTestPodLister(t, readyPod),
+		clock:               systemTime{},
+		logger:              zap.NewNop(),
+		idlePodReservations: reservations,
+	}
+
+	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{
+		TeamID: "team-a",
+		UserID: "user-a",
+	})
+	if err != nil {
+		t.Fatalf("first claimIdlePod() error = %v", err)
+	}
+	if pod == nil {
+		t.Fatal("first claimIdlePod() = nil, want ready pod")
+	}
+
+	pod, err = svc.claimIdlePod(context.Background(), template, &ClaimRequest{
+		TeamID: "team-a",
+		UserID: "user-a",
+	})
+	if err != nil {
+		t.Fatalf("second claimIdlePod() error = %v", err)
+	}
+	if pod != nil {
+		t.Fatalf("second claimIdlePod() = %s, want nil while stale idle pod is reserved", pod.Name)
+	}
+}
+
+func TestClaimIdlePodSkipsReservedPod(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+	}
+	podA := newClaimTestPod("ns-a", "idle-a", "template-a", true)
+	podB := newClaimTestPod("ns-a", "idle-b", "template-a", true)
+	reservations := newIdlePodReservations()
+
+	client := fake.NewSimpleClientset(podA.DeepCopy(), podB.DeepCopy())
+	svc := &SandboxService{
+		k8sClient:           client,
+		podLister:           newClaimTestPodLister(t, podA, podB),
+		clock:               systemTime{},
+		logger:              zap.NewNop(),
+		idlePodReservations: reservations,
+	}
+	if !svc.reserveIdlePod(podA) {
+		t.Fatal("reserveIdlePod(podA) = false, want true")
+	}
+
+	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{
+		TeamID: "team-a",
+		UserID: "user-a",
+	})
+	if err != nil {
+		t.Fatalf("claimIdlePod() error = %v", err)
+	}
+	if pod == nil {
+		t.Fatal("claimIdlePod() = nil, want unreserved pod")
+	}
+	if pod.Name != "idle-b" {
+		t.Fatalf("claimIdlePod() selected %q, want idle-b", pod.Name)
+	}
+}
+
 func TestClaimIdlePodAllowsClaimMounts(t *testing.T) {
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1013,6 +1093,28 @@ func TestObserveClaimPhaseRecordsMetric(t *testing.T) {
 	}
 	if got := metric.GetHistogram().GetSampleSum(); got <= 0 {
 		t.Fatalf("claim phase sample sum = %f, want > 0", got)
+	}
+}
+
+func TestObserveIdleClaimRecordsMetric(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	svc := &SandboxService{metrics: obsmetrics.NewManager(registry)}
+
+	svc.observeIdleClaim("managed-agents", "success")
+
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	metric := findMetric(families, "manager_sandbox_idle_claims_total", map[string]string{
+		"template": "managed-agents",
+		"result":   "success",
+	})
+	if metric == nil || metric.GetCounter() == nil {
+		t.Fatal("idle claim counter metric not found")
+	}
+	if got := metric.GetCounter().GetValue(); got != 1 {
+		t.Fatalf("idle claim counter = %f, want 1", got)
 	}
 }
 

@@ -13,6 +13,7 @@ type ManagerMetrics struct {
 	SandboxClaimsTotal             *prometheus.CounterVec
 	SandboxClaimDuration           *prometheus.HistogramVec
 	SandboxClaimPhaseDuration      *prometheus.HistogramVec
+	SandboxIdleClaimsTotal         *prometheus.CounterVec
 	AutoscalerDecisionsTotal       *prometheus.CounterVec
 	AutoscalerPoolReplicas         *prometheus.GaugeVec
 	AutoscalerPoolPods             *prometheus.GaugeVec
@@ -69,6 +70,10 @@ func NewManager(registry prometheus.Registerer) *ManagerMetrics {
 			Help:    "Duration of sandbox claim phases",
 			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120},
 		}, []string{"template", "type", "phase", "status"}), // type: "hot", "cold", or "unknown"
+		SandboxIdleClaimsTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "manager_sandbox_idle_claims_total",
+			Help: "Total number of idle-pool claim attempts by result",
+		}, []string{"template", "result"}),
 		AutoscalerDecisionsTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "manager_autoscaler_decisions_total",
 			Help: "Total number of autoscaler decisions by action, reason, and result",

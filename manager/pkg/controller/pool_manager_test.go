@@ -73,6 +73,18 @@ func TestBuildPodTemplateAnnotatesTeamOwnedWarmPool(t *testing.T) {
 	assert.Equal(t, OwnerKindTeamWarmPool, got.Labels[LabelOwnerKind])
 }
 
+func TestDesiredPoolReplicasPreservesAutoscalerTargetWithinBounds(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		Spec: v1alpha1.SandboxTemplateSpec{
+			Pool: v1alpha1.PoolStrategy{MinIdle: 15, MaxIdle: 50},
+		},
+	}
+
+	assert.Equal(t, int32(15), desiredPoolReplicas(template, 10))
+	assert.Equal(t, int32(30), desiredPoolReplicas(template, 30))
+	assert.Equal(t, int32(50), desiredPoolReplicas(template, 80))
+}
+
 func TestBuildPodTemplatePreMountsUserVolumePortalsForIdlePool(t *testing.T) {
 	pm := &PoolManager{}
 	template := &v1alpha1.SandboxTemplate{

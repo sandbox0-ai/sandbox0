@@ -330,6 +330,7 @@ func main() {
 	sandboxService.SetCredentialStore(credentialStore)
 	sandboxService.SetQuotaStore(quotaRepo)
 	sandboxService.SetSandboxStore(sandboxStore)
+	sandboxService.SetAutoScaler(operator.GetAutoScaler())
 	rootFSObjectStore, rootFSObjectStoreErr := buildRootFSObjectStore(cfg)
 	if rootFSObjectStoreErr != nil {
 		logger.Warn("Rootfs object cleanup disabled; object store is not configured", zap.Error(rootFSObjectStoreErr))

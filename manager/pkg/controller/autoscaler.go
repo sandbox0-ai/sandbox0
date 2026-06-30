@@ -107,6 +107,8 @@ type AutoScaler struct {
 
 	// Rate limiter to prevent over-scaling during concurrent cold claims
 	rateLimiter *scaleRateLimiter
+	// Admission limiter caps cold pods waiting for their first network identity.
+	coldClaims *coldClaimLimiter
 
 	// Configuration
 	config AutoScaleConfig
@@ -146,6 +148,11 @@ type AutoScaleConfig struct {
 	// ScaleDownPercent is the percentage to reduce replicas during scale down.
 	// Default: 10%
 	ScaleDownPercent float64
+
+	// MaxColdClaimInFlight caps per-template cold pod creations that have not
+	// reached network identity yet. Zero derives a conservative limit from
+	// MaxScaleStep and the template pool bounds.
+	MaxColdClaimInFlight int32
 }
 
 // DefaultAutoScaleConfig returns the default configuration.
@@ -185,6 +192,7 @@ func NewAutoScalerWithConfig(
 		replicaSetLister: replicaSetLister,
 		logger:           logger,
 		rateLimiter:      newScaleRateLimiter(config.MinScaleInterval),
+		coldClaims:       newColdClaimLimiter(),
 		config:           config,
 	}
 }
@@ -198,15 +206,98 @@ type ScaleDecision struct {
 	Reason      string // Human-readable reason for the decision
 }
 
+// ColdClaimAdmission is the autoscaler's synchronous decision before the
+// service creates a cold runtime pod.
+type ColdClaimAdmission struct {
+	Admitted       bool
+	Reason         string
+	RetryAfter     time.Duration
+	InFlight       int32
+	Limit          int32
+	NetworkBacklog int32
+	ScaleDecision  *ScaleDecision
+}
+
 // OnColdClaim is called when a cold claim occurs.
 // It makes an immediate scaling decision to replenish the idle pool.
 // This method is designed to be fast and can be called in a goroutine.
 func (s *AutoScaler) OnColdClaim(ctx context.Context, template *v1alpha1.SandboxTemplate) (decision *ScaleDecision, err error) {
+	return s.scaleForClaim(ctx, template, "cold claim")
+}
+
+// OnHotClaim is called after a hot claim removes one ready pod from the idle pool.
+func (s *AutoScaler) OnHotClaim(ctx context.Context, template *v1alpha1.SandboxTemplate) (*ScaleDecision, error) {
+	return s.scaleForClaim(ctx, template, "hot claim")
+}
+
+// AdmitColdClaim applies synchronous backpressure before the service creates a
+// new cold pod. The scaler still replenishes the idle pool first, but admission
+// is denied when either the observed Kubernetes backlog or this manager's
+// in-flight cold claims are already at the template limit.
+func (s *AutoScaler) AdmitColdClaim(ctx context.Context, template *v1alpha1.SandboxTemplate) (*ColdClaimAdmission, error) {
 	if template == nil {
 		return nil, fmt.Errorf("nil template")
 	}
 
-	templateKey := template.Namespace + "/" + template.Name
+	stats, err := s.getPoolStatsDetailed(template)
+	if err != nil {
+		return nil, fmt.Errorf("get pool stats: %w", err)
+	}
+	limit := s.maxColdClaimInFlight(template)
+	if stats.activeWithoutIP >= limit {
+		return &ColdClaimAdmission{
+			Admitted:       false,
+			Reason:         "pod network identity backlog",
+			RetryAfter:     time.Second,
+			Limit:          limit,
+			NetworkBacklog: stats.activeWithoutIP,
+		}, nil
+	}
+
+	templateKey := autoscalerTemplateKey(template)
+	inFlight, ok := s.coldClaims.TryAcquire(templateKey, limit)
+	if !ok {
+		return &ColdClaimAdmission{
+			Admitted:       false,
+			Reason:         "cold claim in-flight limit reached",
+			RetryAfter:     time.Second,
+			InFlight:       inFlight,
+			Limit:          limit,
+			NetworkBacklog: stats.activeWithoutIP,
+		}, nil
+	}
+
+	decision, scaleErr := s.OnColdClaim(ctx, template)
+	if scaleErr != nil {
+		s.coldClaims.Release(templateKey)
+		return nil, scaleErr
+	}
+
+	return &ColdClaimAdmission{
+		Admitted:       true,
+		Reason:         "admitted",
+		InFlight:       inFlight,
+		Limit:          limit,
+		NetworkBacklog: stats.activeWithoutIP,
+		ScaleDecision:  decision,
+	}, nil
+}
+
+// CompleteColdClaim releases a cold admission slot when the pod has either
+// reached network identity or failed before reaching it.
+func (s *AutoScaler) CompleteColdClaim(template *v1alpha1.SandboxTemplate) {
+	if template == nil || s == nil || s.coldClaims == nil {
+		return
+	}
+	s.coldClaims.Release(autoscalerTemplateKey(template))
+}
+
+func (s *AutoScaler) scaleForClaim(ctx context.Context, template *v1alpha1.SandboxTemplate, claimReason string) (decision *ScaleDecision, err error) {
+	if template == nil {
+		return nil, fmt.Errorf("nil template")
+	}
+
+	templateKey := autoscalerTemplateKey(template)
 
 	// Atomic check-and-record: if rate limited, return immediately
 	// This prevents race conditions when multiple goroutines call this method
@@ -225,7 +316,7 @@ func (s *AutoScaler) OnColdClaim(ctx context.Context, template *v1alpha1.Sandbox
 	defer s.rateLimiter.Complete(templateKey)
 
 	// Get current state
-	idleCount, activeCount, err := s.getPoolStats(template)
+	stats, err := s.getPoolStatsDetailed(template)
 	if err != nil {
 		return nil, fmt.Errorf("get pool stats: %w", err)
 	}
@@ -243,7 +334,7 @@ func (s *AutoScaler) OnColdClaim(ctx context.Context, template *v1alpha1.Sandbox
 	}
 
 	// Calculate desired replicas
-	desiredReplicas := s.calculateDesiredReplicas(template, currentReplicas, idleCount, activeCount)
+	desiredReplicas := s.calculateDesiredReplicas(template, currentReplicas, stats.readyIdle, stats.runningActive)
 
 	// Check if we need to scale
 	if desiredReplicas <= currentReplicas {
@@ -252,7 +343,7 @@ func (s *AutoScaler) OnColdClaim(ctx context.Context, template *v1alpha1.Sandbox
 			OldReplicas: currentReplicas,
 			NewReplicas: currentReplicas,
 			Reason: fmt.Sprintf("no scale needed: current=%d, desired=%d, idle=%d, active=%d",
-				currentReplicas, desiredReplicas, idleCount, activeCount),
+				currentReplicas, desiredReplicas, stats.readyIdle, stats.runningActive),
 		}, nil
 	}
 
@@ -266,8 +357,9 @@ func (s *AutoScaler) OnColdClaim(ctx context.Context, template *v1alpha1.Sandbox
 		zap.String("namespace", template.Namespace),
 		zap.Int32("oldReplicas", currentReplicas),
 		zap.Int32("newReplicas", desiredReplicas),
-		zap.Int32("idle", idleCount),
-		zap.Int32("active", activeCount),
+		zap.Int32("idle", stats.readyIdle),
+		zap.Int32("active", stats.runningActive),
+		zap.Int32("activeWithoutIP", stats.activeWithoutIP),
 	)
 
 	return &ScaleDecision{
@@ -275,7 +367,7 @@ func (s *AutoScaler) OnColdClaim(ctx context.Context, template *v1alpha1.Sandbox
 		OldReplicas: currentReplicas,
 		NewReplicas: desiredReplicas,
 		Delta:       desiredReplicas - currentReplicas,
-		Reason:      fmt.Sprintf("cold claim triggered scale: idle=%d, active=%d", idleCount, activeCount),
+		Reason:      fmt.Sprintf("%s triggered scale: idle=%d, active=%d", claimReason, stats.readyIdle, stats.runningActive),
 	}, nil
 }
 
@@ -342,20 +434,43 @@ func (s *AutoScaler) calculateDesiredReplicas(
 	return desired
 }
 
-// getPoolStats returns the current idle and active pod counts.
+type autoScalerPoolStats struct {
+	readyIdle       int32
+	pendingIdle     int32
+	runningActive   int32
+	pendingActive   int32
+	activeWithoutIP int32
+}
+
+// getPoolStats returns the current ready idle and running active pod counts.
 func (s *AutoScaler) getPoolStats(template *v1alpha1.SandboxTemplate) (idle, active int32, err error) {
+	stats, err := s.getPoolStatsDetailed(template)
+	if err != nil {
+		return 0, 0, err
+	}
+	return stats.readyIdle, stats.runningActive, nil
+}
+
+func (s *AutoScaler) getPoolStatsDetailed(template *v1alpha1.SandboxTemplate) (autoScalerPoolStats, error) {
+	var stats autoScalerPoolStats
+
 	// Count idle pods
 	idlePods, err := s.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
 		LabelTemplateID: template.Name,
 		LabelPoolType:   PoolTypeIdle,
 	}))
 	if err != nil {
-		return 0, 0, fmt.Errorf("list idle pods: %w", err)
+		return stats, fmt.Errorf("list idle pods: %w", err)
 	}
 
 	for _, pod := range idlePods {
+		if pod.DeletionTimestamp != nil || isTerminalPodPhase(pod.Status.Phase) {
+			continue
+		}
 		if IsPodReady(pod) {
-			idle++
+			stats.readyIdle++
+		} else {
+			stats.pendingIdle++
 		}
 	}
 
@@ -365,16 +480,28 @@ func (s *AutoScaler) getPoolStats(template *v1alpha1.SandboxTemplate) (idle, act
 		LabelPoolType:   PoolTypeActive,
 	}))
 	if err != nil {
-		return 0, 0, fmt.Errorf("list active pods: %w", err)
+		return stats, fmt.Errorf("list active pods: %w", err)
 	}
 
 	for _, pod := range activePods {
+		if pod.DeletionTimestamp != nil || isTerminalPodPhase(pod.Status.Phase) {
+			continue
+		}
+		if pod.Status.PodIP == "" {
+			stats.activeWithoutIP++
+		}
 		if pod.Status.Phase == corev1.PodRunning {
-			active++
+			stats.runningActive++
+		} else {
+			stats.pendingActive++
 		}
 	}
 
-	return idle, active, nil
+	return stats, nil
+}
+
+func isTerminalPodPhase(phase corev1.PodPhase) bool {
+	return phase == corev1.PodSucceeded || phase == corev1.PodFailed
 }
 
 // getCurrentReplicas returns the current replica count from the ReplicaSet.
@@ -515,4 +642,37 @@ func (s *AutoScaler) getLastClaimTime(template *v1alpha1.SandboxTemplate) time.T
 
 func ptrToInt32(v int32) *int32 {
 	return &v
+}
+
+func autoscalerTemplateKey(template *v1alpha1.SandboxTemplate) string {
+	if template == nil {
+		return ""
+	}
+	return template.Namespace + "/" + template.Name
+}
+
+func (s *AutoScaler) maxColdClaimInFlight(template *v1alpha1.SandboxTemplate) int32 {
+	if s.config.MaxColdClaimInFlight > 0 {
+		return s.config.MaxColdClaimInFlight
+	}
+
+	limit := s.config.MaxScaleStep * 5
+	if limit <= 0 {
+		limit = 50
+	}
+	minRecommended := template.Spec.Pool.MinIdle + s.config.MinIdleBuffer
+	if limit < minRecommended {
+		limit = minRecommended
+	}
+	maxIdle := template.Spec.Pool.MaxIdle
+	if maxIdle < template.Spec.Pool.MinIdle {
+		maxIdle = template.Spec.Pool.MinIdle
+	}
+	if maxIdle > 0 && limit > maxIdle {
+		limit = maxIdle
+	}
+	if limit <= 0 {
+		limit = 1
+	}
+	return limit
 }

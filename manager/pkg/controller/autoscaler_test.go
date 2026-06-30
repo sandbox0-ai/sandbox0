@@ -398,6 +398,106 @@ func TestAutoScaler_CalculateDesiredReplicas(t *testing.T) {
 	}
 }
 
+func TestAutoScaler_AdmitColdClaimLimitsInFlight(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			Pool: v1alpha1.PoolStrategy{MinIdle: 1, MaxIdle: 10},
+		},
+	}
+	rsName, err := naming.ReplicasetName(naming.DefaultClusterID, template.Name)
+	require.NoError(t, err)
+	replicas := int32(1)
+	rs := &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{Name: rsName, Namespace: template.Namespace},
+		Spec:       appsv1.ReplicaSetSpec{Replicas: &replicas},
+	}
+
+	client := fake.NewSimpleClientset(rs)
+	podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	rsIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	require.NoError(t, rsIndexer.Add(rs))
+
+	cfg := DefaultAutoScaleConfig()
+	cfg.MaxColdClaimInFlight = 1
+	scaler := NewAutoScalerWithConfig(
+		client,
+		corelisters.NewPodLister(podIndexer),
+		appslisters.NewReplicaSetLister(rsIndexer),
+		zap.NewNop(),
+		cfg,
+	)
+
+	first, err := scaler.AdmitColdClaim(context.Background(), template)
+	require.NoError(t, err)
+	require.True(t, first.Admitted)
+
+	second, err := scaler.AdmitColdClaim(context.Background(), template)
+	require.NoError(t, err)
+	require.False(t, second.Admitted)
+	assert.Equal(t, "cold claim in-flight limit reached", second.Reason)
+
+	scaler.CompleteColdClaim(template)
+	third, err := scaler.AdmitColdClaim(context.Background(), template)
+	require.NoError(t, err)
+	require.True(t, third.Admitted)
+}
+
+func TestAutoScaler_AdmitColdClaimRejectsNetworkBacklog(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			Pool: v1alpha1.PoolStrategy{MinIdle: 1, MaxIdle: 10},
+		},
+	}
+	activeWithoutIP := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "active-no-ip",
+			Namespace: template.Namespace,
+			Labels: map[string]string{
+				LabelTemplateID: template.Name,
+				LabelPoolType:   PoolTypeActive,
+			},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodPending},
+	}
+	rsName, err := naming.ReplicasetName(naming.DefaultClusterID, template.Name)
+	require.NoError(t, err)
+	replicas := int32(1)
+	rs := &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{Name: rsName, Namespace: template.Namespace},
+		Spec:       appsv1.ReplicaSetSpec{Replicas: &replicas},
+	}
+
+	client := fake.NewSimpleClientset(activeWithoutIP, rs)
+	podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	require.NoError(t, podIndexer.Add(activeWithoutIP))
+	rsIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	require.NoError(t, rsIndexer.Add(rs))
+
+	cfg := DefaultAutoScaleConfig()
+	cfg.MaxColdClaimInFlight = 1
+	scaler := NewAutoScalerWithConfig(
+		client,
+		corelisters.NewPodLister(podIndexer),
+		appslisters.NewReplicaSetLister(rsIndexer),
+		zap.NewNop(),
+		cfg,
+	)
+
+	admission, err := scaler.AdmitColdClaim(context.Background(), template)
+	require.NoError(t, err)
+	require.False(t, admission.Admitted)
+	assert.Equal(t, "pod network identity backlog", admission.Reason)
+	assert.Equal(t, int32(1), admission.NetworkBacklog)
+}
+
 func TestScaleRateLimiter(t *testing.T) {
 	limiter := newScaleRateLimiter(100 * time.Millisecond)
 

@@ -159,15 +159,18 @@ func (pm *PoolManager) ReconcilePool(ctx context.Context, template *v1alpha1.San
 		return fmt.Errorf("repair unhealthy idle pods: %w", err)
 	}
 
-	// 5. Check if replicas match minIdle
-	if rs.Spec.Replicas == nil || *rs.Spec.Replicas != template.Spec.Pool.MinIdle {
+	// 5. Keep replicas inside the template pool bounds without fighting the
+	// autoscaler's current target.
+	currentReplicas := getInt32Value(rs.Spec.Replicas)
+	desiredReplicas := desiredPoolReplicas(template, currentReplicas)
+	if rs.Spec.Replicas == nil || currentReplicas != desiredReplicas {
 		pm.logger.Info("Updating ReplicaSet replicas",
 			zap.String("template", template.Name),
-			zap.Int32("current", getInt32Value(rs.Spec.Replicas)),
-			zap.Int32("desired", template.Spec.Pool.MinIdle),
+			zap.Int32("current", currentReplicas),
+			zap.Int32("desired", desiredReplicas),
 		)
 
-		rs.Spec.Replicas = &template.Spec.Pool.MinIdle
+		rs.Spec.Replicas = &desiredReplicas
 		_, err = pm.k8sClient.AppsV1().ReplicaSets(template.Namespace).Update(ctx, rs, metav1.UpdateOptions{})
 		if err != nil {
 			pm.recorder.Eventf(template, corev1.EventTypeWarning, "ReplicaSetUpdateFailed",
@@ -176,10 +179,25 @@ func (pm *PoolManager) ReconcilePool(ctx context.Context, template *v1alpha1.San
 		}
 
 		pm.recorder.Eventf(template, corev1.EventTypeNormal, "ReplicaSetUpdated",
-			"Updated ReplicaSet replicas to %d", template.Spec.Pool.MinIdle)
+			"Updated ReplicaSet replicas to %d", desiredReplicas)
 	}
 
 	return nil
+}
+
+func desiredPoolReplicas(template *v1alpha1.SandboxTemplate, current int32) int32 {
+	minIdle := template.Spec.Pool.MinIdle
+	maxIdle := template.Spec.Pool.MaxIdle
+	if maxIdle < minIdle {
+		maxIdle = minIdle
+	}
+	if current < minIdle {
+		return minIdle
+	}
+	if current > maxIdle {
+		return maxIdle
+	}
+	return current
 }
 
 // getOrCreateReplicaSet gets or creates the ReplicaSet for a template

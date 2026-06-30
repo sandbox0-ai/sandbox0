@@ -589,6 +589,50 @@ func TestClaimSandboxDeletesColdPodAfterNetworkApplyFailure(t *testing.T) {
 	}
 }
 
+func TestClaimSandboxDoesNotCreateColdPodWhenAdmissionRejects(t *testing.T) {
+	withClaimTestPublicKey(t)
+
+	templateNamespace, err := naming.TemplateNamespaceForBuiltin("managed-agent-claude")
+	if err != nil {
+		t.Fatalf("template namespace: %v", err)
+	}
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "managed-agent-claude",
+			Namespace: templateNamespace,
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{Image: "busybox"},
+		},
+	}
+	client := fake.NewSimpleClientset()
+	svc := &SandboxService{
+		k8sClient:      client,
+		podLister:      corelisters.NewPodLister(newClaimTestPodIndexer(t)),
+		secretLister:   newClaimTestSecretLister(t),
+		templateLister: staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
+		clock:          systemTime{},
+		logger:         zap.NewNop(),
+	}
+	svc.SetAutoScaler(&rejectingColdClaimScaler{})
+
+	_, err = svc.ClaimSandbox(context.Background(), &ClaimRequest{Template: "managed-agent-claude", TeamID: "team-a", UserID: "user-a"})
+	if err == nil {
+		t.Fatal("ClaimSandbox() error = nil, want cold claim capacity error")
+	}
+	if !errors.Is(err, ErrColdClaimCapacityUnavailable) {
+		t.Fatalf("ClaimSandbox() error = %v, want ErrColdClaimCapacityUnavailable", err)
+	}
+
+	pods, err := client.CoreV1().Pods(templateNamespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 0 {
+		t.Fatalf("pods after rejected cold admission = %d, want 0", len(pods.Items))
+	}
+}
+
 func TestCreateNewPodMarksColdPodNonEvictable(t *testing.T) {
 	withClaimTestPublicKey(t)
 
@@ -1597,6 +1641,21 @@ func scheduleCreatedClaimPodInIndexer(t *testing.T, client *fake.Clientset, inde
 		return false, nil, nil
 	})
 }
+
+type rejectingColdClaimScaler struct{}
+
+func (rejectingColdClaimScaler) OnColdClaim(context.Context, *v1alpha1.SandboxTemplate) (*ScaleDecisionResult, error) {
+	return &ScaleDecisionResult{ShouldScale: false}, nil
+}
+
+func (rejectingColdClaimScaler) AdmitColdClaim(context.Context, *v1alpha1.SandboxTemplate) (*ColdClaimAdmissionResult, error) {
+	return &ColdClaimAdmissionResult{
+		Admitted: false,
+		Reason:   "cold claim in-flight limit reached",
+	}, nil
+}
+
+func (rejectingColdClaimScaler) CompleteColdClaim(*v1alpha1.SandboxTemplate) {}
 
 func newClaimTestPod(namespace, name, templateID string, ready bool) *corev1.Pod {
 	status := corev1.ConditionFalse

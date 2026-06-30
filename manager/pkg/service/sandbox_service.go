@@ -55,6 +55,7 @@ var errNoIdlePod = errors.New("no idle pod available")
 var ErrInvalidClaimRequest = errors.New("invalid claim request")
 var ErrClaimConflict = errors.New("claim conflict")
 var ErrDataPlaneNotReady = errors.New("data plane not ready")
+var ErrColdClaimCapacityUnavailable = errors.New("cold claim capacity unavailable")
 var ErrQuotaExceeded = errors.New("quota exceeded")
 var ErrInvalidNetworkPolicy = errors.New("invalid network policy")
 var ErrSandboxCheckpointRequiresCtld = errors.New("sandbox checkpoint pause requires ctld")
@@ -145,6 +146,17 @@ type AutoScalerInterface interface {
 // ScaleDecisionResult represents the result of a scaling decision.
 // This is a local copy to avoid tight coupling with controller package.
 type ScaleDecisionResult = controller.ScaleDecision
+
+type HotClaimAutoScalerInterface interface {
+	OnHotClaim(ctx context.Context, template *v1alpha1.SandboxTemplate) (*ScaleDecisionResult, error)
+}
+
+type ColdClaimAdmissionAutoScalerInterface interface {
+	AdmitColdClaim(ctx context.Context, template *v1alpha1.SandboxTemplate) (*ColdClaimAdmissionResult, error)
+	CompleteColdClaim(template *v1alpha1.SandboxTemplate)
+}
+
+type ColdClaimAdmissionResult = controller.ColdClaimAdmission
 
 // TimeProvider provides time functions, allowing for synchronized time across clusters
 type TimeProvider interface {

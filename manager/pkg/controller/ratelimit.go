@@ -60,3 +60,44 @@ func (r *scaleRateLimiter) Complete(key string) {
 	delete(r.inProgress, key)
 	r.lastCompleteAt[key] = time.Now()
 }
+
+type coldClaimLimiter struct {
+	mu       sync.Mutex
+	inFlight map[string]int32
+}
+
+func newColdClaimLimiter() *coldClaimLimiter {
+	return &coldClaimLimiter{
+		inFlight: make(map[string]int32),
+	}
+}
+
+func (l *coldClaimLimiter) TryAcquire(key string, limit int32) (int32, bool) {
+	if limit <= 0 {
+		limit = 1
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	current := l.inFlight[key]
+	if current >= limit {
+		return current, false
+	}
+	current++
+	l.inFlight[key] = current
+	return current, true
+}
+
+func (l *coldClaimLimiter) Release(key string) int32 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	current := l.inFlight[key]
+	if current <= 1 {
+		delete(l.inFlight, key)
+		return 0
+	}
+	current--
+	l.inFlight[key] = current
+	return current
+}

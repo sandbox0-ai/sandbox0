@@ -122,6 +122,7 @@ func NewOperator(
 	secretLister := corelisters.NewSecretLister(secretInformer.GetIndexer())
 	poolManager := NewPoolManager(k8sClient, podLister, replicaSetLister, secretLister, recorder, logger)
 	autoScaler := NewAutoScalerWithConfig(k8sClient, podLister, replicaSetLister, logger, toAutoScaleConfig(autoscalerConfig))
+	autoScaler.SetMetrics(metrics)
 
 	op := &Operator{
 		k8sClient:        k8sClient,
@@ -594,13 +595,29 @@ func (op *Operator) SetTemplateStatsPublisher(publisher TemplateStatsPublisher) 
 // toAutoScaleConfig converts config.AutoscalerConfig to AutoScaleConfig.
 func toAutoScaleConfig(cfg config.AutoscalerConfig) AutoScaleConfig {
 	defaultCfg := DefaultAutoScaleConfig()
+	minScaleInterval := cfg.MinScaleInterval.Duration
+	if minScaleInterval <= 0 {
+		minScaleInterval = defaultCfg.MinScaleInterval
+	}
+	maxScaleStep := cfg.MaxScaleStep
+	if maxScaleStep <= 0 {
+		maxScaleStep = defaultCfg.MaxScaleStep
+	}
+	minIdleBuffer := cfg.MinIdleBuffer
+	if minIdleBuffer <= 0 {
+		minIdleBuffer = defaultCfg.MinIdleBuffer
+	}
+	noTrafficScaleDownAfter := cfg.NoTrafficScaleDownAfter.Duration
+	if noTrafficScaleDownAfter <= 0 {
+		noTrafficScaleDownAfter = defaultCfg.NoTrafficScaleDownAfter
+	}
 	return AutoScaleConfig{
-		MinScaleInterval:        cfg.MinScaleInterval.Duration,
+		MinScaleInterval:        minScaleInterval,
 		ScaleUpFactor:           cfg.ParsedScaleUpFactor(defaultCfg.ScaleUpFactor),
-		MaxScaleStep:            cfg.MaxScaleStep,
-		MinIdleBuffer:           cfg.MinIdleBuffer,
+		MaxScaleStep:            maxScaleStep,
+		MinIdleBuffer:           minIdleBuffer,
 		TargetIdleRatio:         cfg.ParsedTargetIdleRatio(defaultCfg.TargetIdleRatio),
-		NoTrafficScaleDownAfter: cfg.NoTrafficScaleDownAfter.Duration,
+		NoTrafficScaleDownAfter: noTrafficScaleDownAfter,
 		ScaleDownPercent:        cfg.ParsedScaleDownPercent(defaultCfg.ScaleDownPercent),
 	}
 }

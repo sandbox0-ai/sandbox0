@@ -13,6 +13,11 @@ type ManagerMetrics struct {
 	SandboxClaimsTotal             *prometheus.CounterVec
 	SandboxClaimDuration           *prometheus.HistogramVec
 	SandboxClaimPhaseDuration      *prometheus.HistogramVec
+	AutoscalerDecisionsTotal       *prometheus.CounterVec
+	AutoscalerPoolReplicas         *prometheus.GaugeVec
+	AutoscalerPoolPods             *prometheus.GaugeVec
+	AutoscalerColdClaimsInFlight   *prometheus.GaugeVec
+	AutoscalerScaleDelta           *prometheus.HistogramVec
 	PodsCleanedTotal               *prometheus.CounterVec
 	ReconcileTotal                 *prometheus.CounterVec
 	ReconcileDuration              *prometheus.HistogramVec
@@ -64,6 +69,27 @@ func NewManager(registry prometheus.Registerer) *ManagerMetrics {
 			Help:    "Duration of sandbox claim phases",
 			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120},
 		}, []string{"template", "type", "phase", "status"}), // type: "hot", "cold", or "unknown"
+		AutoscalerDecisionsTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "manager_autoscaler_decisions_total",
+			Help: "Total number of autoscaler decisions by action, reason, and result",
+		}, []string{"template", "action", "reason", "result"}),
+		AutoscalerPoolReplicas: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "manager_autoscaler_pool_replicas",
+			Help: "Autoscaler observed and desired idle pool ReplicaSet replicas",
+		}, []string{"template", "state"}), // state: current or desired
+		AutoscalerPoolPods: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "manager_autoscaler_pool_pods",
+			Help: "Autoscaler observed pod counts by template and state",
+		}, []string{"template", "state"}), // state: ready_idle, pending_idle, active, active_without_ip
+		AutoscalerColdClaimsInFlight: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "manager_autoscaler_cold_claims_in_flight",
+			Help: "Current admitted cold claims waiting for pod network identity",
+		}, []string{"template"}),
+		AutoscalerScaleDelta: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "manager_autoscaler_scale_delta",
+			Help:    "Absolute ReplicaSet replica delta applied by the autoscaler",
+			Buckets: []float64{1, 2, 5, 10, 20, 50, 100},
+		}, []string{"template", "direction"}),
 		PodsCleanedTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "manager_pods_cleaned_total",
 			Help: "Total number of pods cleaned up",

@@ -107,6 +107,18 @@ sandbox_runtime_class_name: kata-shared
 	}
 }
 
+func TestBuildPodSpecDisablesServiceAccountTokenAutomount(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	spec := BuildPodSpec(newTestTemplate())
+	if spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken {
+		t.Fatalf("automountServiceAccountToken = %#v, want false", spec.AutomountServiceAccountToken)
+	}
+}
+
 func TestBuildPodSpecLeavesOrdinarySandboxNonPrivileged(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test

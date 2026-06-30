@@ -13,15 +13,8 @@ const (
 	DefaultTemplateMaxIdle          = int32(5)
 	DefaultTemplateWorkspaceName    = "workspace"
 	DefaultTemplateWorkspaceMount   = "/workspace"
-
-	DockerInSandboxTemplateID          = "dins"
-	DockerInSandboxTemplateDisplayName = "Docker in Sandbox"
-	DockerInSandboxTemplateDescription = "Builtin Docker in Sandbox template installed by infra-operator."
-	DockerInSandboxCPU                 = "1"
-	DockerInSandboxMemory              = "4Gi"
-	DockerInSandboxEphemeralStorage    = "20Gi"
-	DockerInSandboxDockerRoot          = "/var/lib/docker"
-	DockerInSandboxDockerRootSizeLimit = "20Gi"
+	DefaultTemplateDockerRoot       = "/var/lib/docker"
+	DefaultTemplateDockerRootSize   = v1alpha1.DefaultSandboxEphemeralStorage
 
 	OpenClawTemplateID          = "openclaw"
 	OpenClawTemplateImage       = "ghcr.io/openclaw/openclaw:latest"

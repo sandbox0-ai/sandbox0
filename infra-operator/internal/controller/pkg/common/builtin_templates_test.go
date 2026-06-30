@@ -22,6 +22,15 @@ func TestBuildBuiltinTemplateSpecUsesDefaultPreset(t *testing.T) {
 	if spec.MainContainer.Image != template.DefaultTemplateImage {
 		t.Fatalf("image = %q, want %q", spec.MainContainer.Image, template.DefaultTemplateImage)
 	}
+	if spec.MainContainer.Resources.CPU.Cmp(resource.MustParse(template.DefaultTemplateCPU)) != 0 {
+		t.Fatalf("cpu = %s, want %s", spec.MainContainer.Resources.CPU.String(), template.DefaultTemplateCPU)
+	}
+	if spec.MainContainer.Resources.Memory.Cmp(resource.MustParse(template.DefaultTemplateMemory)) != 0 {
+		t.Fatalf("memory = %s, want %s", spec.MainContainer.Resources.Memory.String(), template.DefaultTemplateMemory)
+	}
+	if spec.MainContainer.Resources.EphemeralStorage.Cmp(resource.MustParse(template.DefaultTemplateEphemeralStorage)) != 0 {
+		t.Fatalf("ephemeralStorage = %s, want %s", spec.MainContainer.Resources.EphemeralStorage.String(), template.DefaultTemplateEphemeralStorage)
+	}
 	if len(spec.VolumeMounts) != 1 {
 		t.Fatalf("volumeMounts = %#v, want one workspace mount", spec.VolumeMounts)
 	}
@@ -29,9 +38,25 @@ func TestBuildBuiltinTemplateSpecUsesDefaultPreset(t *testing.T) {
 	if mount.Name != template.DefaultTemplateWorkspaceName || mount.MountPath != template.DefaultTemplateWorkspaceMount || mount.ReadOnly {
 		t.Fatalf("volumeMounts[0] = %#v, want writable %s at %s", mount, template.DefaultTemplateWorkspaceName, template.DefaultTemplateWorkspaceMount)
 	}
+	if spec.MainContainer.SecurityContext == nil || spec.MainContainer.SecurityContext.Privileged == nil || !*spec.MainContainer.SecurityContext.Privileged {
+		t.Fatalf("expected privileged security context, got %#v", spec.MainContainer.SecurityContext)
+	}
+	if spec.MainContainer.SecurityContext.AllowPrivilegeEscalation == nil || !*spec.MainContainer.SecurityContext.AllowPrivilegeEscalation {
+		t.Fatalf("expected allowPrivilegeEscalation=true, got %#v", spec.MainContainer.SecurityContext)
+	}
+	if spec.Pod == nil || len(spec.Pod.EmptyDirMounts) != 1 {
+		t.Fatalf("expected one emptyDir mount, got %#v", spec.Pod)
+	}
+	dockerRoot := spec.Pod.EmptyDirMounts[0]
+	if dockerRoot.MountPath != template.DefaultTemplateDockerRoot {
+		t.Fatalf("emptyDir mount path = %q, want %q", dockerRoot.MountPath, template.DefaultTemplateDockerRoot)
+	}
+	if dockerRoot.SizeLimit == nil || dockerRoot.SizeLimit.Cmp(resource.MustParse(template.DefaultTemplateDockerRootSize)) != 0 {
+		t.Fatalf("emptyDir sizeLimit = %#v, want %s", dockerRoot.SizeLimit, template.DefaultTemplateDockerRootSize)
+	}
 }
 
-func TestBuildBuiltinTemplateSpecDoesNotAddDefaultWorkspaceToGenericPreset(t *testing.T) {
+func TestBuildBuiltinTemplateSpecDoesNotAddDefaultRuntimeShapeToGenericPreset(t *testing.T) {
 	t.Parallel()
 
 	spec := BuildBuiltinTemplateSpec("custom", infrav1alpha1.BuiltinTemplateConfig{})
@@ -39,33 +64,11 @@ func TestBuildBuiltinTemplateSpecDoesNotAddDefaultWorkspaceToGenericPreset(t *te
 	if len(spec.VolumeMounts) != 0 {
 		t.Fatalf("volumeMounts = %#v, want none for generic builtin preset", spec.VolumeMounts)
 	}
-}
-
-func TestBuildBuiltinTemplateSpecUsesDockerInSandboxPreset(t *testing.T) {
-	t.Parallel()
-
-	spec := BuildBuiltinTemplateSpec(template.DockerInSandboxTemplateID, infrav1alpha1.BuiltinTemplateConfig{})
-
-	if spec.DisplayName != template.DockerInSandboxTemplateDisplayName {
-		t.Fatalf("DisplayName = %q, want %q", spec.DisplayName, template.DockerInSandboxTemplateDisplayName)
+	if spec.MainContainer.SecurityContext != nil {
+		t.Fatalf("securityContext = %#v, want nil for generic builtin preset", spec.MainContainer.SecurityContext)
 	}
-	if spec.MainContainer.Image != template.DefaultTemplateImage {
-		t.Fatalf("image = %q, want %q", spec.MainContainer.Image, template.DefaultTemplateImage)
-	}
-	if spec.MainContainer.Resources.CPU.Cmp(resource.MustParse(template.DockerInSandboxCPU)) != 0 {
-		t.Fatalf("cpu = %s, want %s", spec.MainContainer.Resources.CPU.String(), template.DockerInSandboxCPU)
-	}
-	if spec.MainContainer.Resources.Memory.Cmp(resource.MustParse(template.DockerInSandboxMemory)) != 0 {
-		t.Fatalf("memory = %s, want %s", spec.MainContainer.Resources.Memory.String(), template.DockerInSandboxMemory)
-	}
-	if spec.MainContainer.SecurityContext == nil || spec.MainContainer.SecurityContext.Privileged == nil || !*spec.MainContainer.SecurityContext.Privileged {
-		t.Fatalf("expected privileged security context, got %#v", spec.MainContainer.SecurityContext)
-	}
-	if spec.Pod == nil || len(spec.Pod.EmptyDirMounts) != 1 {
-		t.Fatalf("expected one emptyDir mount, got %#v", spec.Pod)
-	}
-	if got := spec.Pod.EmptyDirMounts[0].MountPath; got != template.DockerInSandboxDockerRoot {
-		t.Fatalf("emptyDir mount path = %q, want %q", got, template.DockerInSandboxDockerRoot)
+	if spec.Pod != nil {
+		t.Fatalf("pod = %#v, want nil for generic builtin preset", spec.Pod)
 	}
 }
 
@@ -171,7 +174,6 @@ func TestBuiltinTemplatePresetsSatisfyResourceRatio(t *testing.T) {
 
 	for _, templateID := range []string{
 		template.DefaultTemplateID,
-		template.DockerInSandboxTemplateID,
 		template.OpenClawTemplateID,
 		template.HermesTemplateID,
 	} {

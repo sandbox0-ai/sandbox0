@@ -54,13 +54,6 @@ spec:
       pool:
         minIdle: 1
         maxIdle: 5
-    - templateId: dins
-      image: sandbox0ai/otemplates:default-v0.2.0
-      displayName: Docker in Sandbox
-      description: Builtin Docker in Sandbox template installed by infra-operator.
-      pool:
-        minIdle: 1
-        maxIdle: 5
     - templateId: openclaw
       image: ghcr.io/openclaw/openclaw:latest
       displayName: OpenClaw

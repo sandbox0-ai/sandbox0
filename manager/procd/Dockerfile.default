@@ -167,8 +167,8 @@ RUN python3 -m pip install --no-cache-dir --break-system-packages --ignore-insta
     xarray==2025.4.0 \
     xlrd==2.0.1
 
-# Docker client/daemon support for Docker in Sandbox templates.
-# Docker-in-Sandbox users start dockerd after the sandbox is claimed.
+# Docker client/daemon support for the default sandbox template.
+# Users start dockerd after the sandbox is claimed.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     docker.io \

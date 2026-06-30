@@ -170,8 +170,6 @@ func BuildBuiltinTemplateSpec(templateID string, builtin infrav1alpha1.BuiltinTe
 	var spec templatev1alpha1.SandboxTemplateSpec
 	if builtin.Spec != nil {
 		spec = *builtin.Spec.DeepCopy()
-	} else if templateID == template.DockerInSandboxTemplateID {
-		spec = dockerInSandboxTemplateSpec()
 	} else if templateID == template.OpenClawTemplateID {
 		spec = openClawTemplateSpec()
 	} else if templateID == template.HermesTemplateID {
@@ -210,38 +208,21 @@ func defaultBuiltinTemplateSpec(templateID string) templatev1alpha1.SandboxTempl
 			Name:      template.DefaultTemplateWorkspaceName,
 			MountPath: template.DefaultTemplateWorkspaceMount,
 		}}
+		spec.MainContainer.SecurityContext = &templatev1alpha1.SecurityContext{
+			Privileged:               BoolPtr(true),
+			AllowPrivilegeEscalation: BoolPtr(true),
+		}
+		sizeLimit := resource.MustParse(template.DefaultTemplateDockerRootSize)
+		spec.Pod = &templatev1alpha1.PodSpecOverride{
+			EmptyDirMounts: []templatev1alpha1.EmptyDirMountSpec{
+				{
+					MountPath: template.DefaultTemplateDockerRoot,
+					SizeLimit: &sizeLimit,
+				},
+			},
+		}
 	}
 	return spec
-}
-
-func dockerInSandboxTemplateSpec() templatev1alpha1.SandboxTemplateSpec {
-	sizeLimit := resource.MustParse(template.DockerInSandboxDockerRootSizeLimit)
-	return templatev1alpha1.SandboxTemplateSpec{
-		DisplayName: template.DockerInSandboxTemplateDisplayName,
-		Description: template.DockerInSandboxTemplateDescription,
-		MainContainer: templatev1alpha1.ContainerSpec{
-			Image: template.DefaultTemplateImage,
-			Resources: templatev1alpha1.ResourceQuota{
-				CPU:              resource.MustParse(template.DockerInSandboxCPU),
-				Memory:           resource.MustParse(template.DockerInSandboxMemory),
-				EphemeralStorage: resource.MustParse(template.DockerInSandboxEphemeralStorage),
-			},
-			SecurityContext: &templatev1alpha1.SecurityContext{
-				Privileged:               BoolPtr(true),
-				AllowPrivilegeEscalation: BoolPtr(true),
-			},
-		},
-		Pod: &templatev1alpha1.PodSpecOverride{
-			EmptyDirMounts: []templatev1alpha1.EmptyDirMountSpec{{
-				MountPath: template.DockerInSandboxDockerRoot,
-				SizeLimit: &sizeLimit,
-			}},
-		},
-		Pool: defaultBuiltinTemplatePool(),
-		Network: &templatev1alpha1.SandboxNetworkPolicy{
-			Mode: templatev1alpha1.NetworkModeAllowAll,
-		},
-	}
 }
 
 func openClawTemplateSpec() templatev1alpha1.SandboxTemplateSpec {

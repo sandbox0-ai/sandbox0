@@ -44,9 +44,11 @@ func BuildIdlePodSpec(template *SandboxTemplate) corev1.PodSpec {
 }
 
 func buildPodSpec(template *SandboxTemplate, volumeMounts []VolumeMountSpec) corev1.PodSpec {
+	automountServiceAccountToken := false
 	spec := corev1.PodSpec{
-		RestartPolicy: corev1.RestartPolicyAlways,
-		Containers:    buildContainers(template),
+		RestartPolicy:                corev1.RestartPolicyAlways,
+		AutomountServiceAccountToken: &automountServiceAccountToken,
+		Containers:                   buildContainers(template),
 		ReadinessGates: []corev1.PodReadinessGate{{
 			ConditionType: SandboxPodReadinessConditionType,
 		}},

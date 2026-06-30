@@ -374,29 +374,16 @@ type ProcdConfig struct {
 	WebhookOutboxDir *string `json:"webhookOutboxDir,omitempty"`
 }
 
-// AutoscalerConfig defines manager autoscaler settings.
-type AutoscalerConfig struct {
+// ColdStartConcurrencyConfig defines manager cold claim backpressure settings.
+type ColdStartConcurrencyConfig struct {
 	// +optional
-	// +kubebuilder:default="100ms"
-	MinScaleInterval metav1.Duration `json:"minScaleInterval,omitempty"`
+	Disabled bool `json:"disabled,omitempty"`
 	// +optional
-	// +kubebuilder:default="1.5"
-	ScaleUpFactor string `json:"scaleUpFactor,omitempty"`
+	// +kubebuilder:default=32
+	MaxPerTemplate int `json:"maxPerTemplate,omitempty"`
 	// +optional
-	// +kubebuilder:default=10
-	MaxScaleStep int32 `json:"maxScaleStep,omitempty"`
-	// +optional
-	// +kubebuilder:default=2
-	MinIdleBuffer int32 `json:"minIdleBuffer,omitempty"`
-	// +optional
-	// +kubebuilder:default="0.2"
-	TargetIdleRatio string `json:"targetIdleRatio,omitempty"`
-	// +optional
-	// +kubebuilder:default="10m"
-	NoTrafficScaleDownAfter metav1.Duration `json:"noTrafficScaleDownAfter,omitempty"`
-	// +optional
-	// +kubebuilder:default="0.1"
-	ScaleDownPercent string `json:"scaleDownPercent,omitempty"`
+	// +kubebuilder:default="30s"
+	AcquireTimeout metav1.Duration `json:"acquireTimeout,omitempty"`
 }
 
 // ManagerConfig defines user-facing configuration for manager.
@@ -460,6 +447,11 @@ type ManagerConfig struct {
 	// node autoscaler scale-from-zero deployments.
 	// +optional
 	AllowColdStartWithoutReadyDataPlane bool `json:"allowColdStartWithoutReadyDataPlane,omitempty"`
+	// ColdStartConcurrency bounds concurrent cold claims per template so pod
+	// creation does not overwhelm node-local CNI and runtime startup paths.
+	// +optional
+	// +kubebuilder:default={}
+	ColdStartConcurrency ColdStartConcurrencyConfig `json:"coldStartConcurrency,omitempty"`
 	// +optional
 	// +kubebuilder:default="30s"
 	NetdPolicyApplyTimeout metav1.Duration `json:"netdPolicyApplyTimeout,omitempty"`
@@ -496,9 +488,6 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default={}
 	ProcdConfig ProcdConfig `json:"procdConfig,omitempty"`
-	// +optional
-	// +kubebuilder:default={}
-	Autoscaler AutoscalerConfig `json:"autoscaler,omitempty"`
 }
 
 // TeamQuotaLimitConfig configures a fallback quota limit for teams without a

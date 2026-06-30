@@ -447,6 +447,11 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		return nil, fmt.Errorf("claim idle pod: %w", err)
 	}
 	claimType := "hot"
+	releaseColdClaimSlot := func() {}
+	releaseColdClaimSlotOnce := func() {
+		releaseColdClaimSlot()
+		releaseColdClaimSlot = func() {}
+	}
 
 	// If no idle pod available, create a new one (cold start)
 	if pod == nil {
@@ -455,26 +460,16 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 			zap.String("template", req.Template),
 		)
 
-		// Trigger async scale-up to replenish the idle pool
-		// This runs in a goroutine to not block the cold claim response
-		if s.autoScaler != nil {
-			go func() {
-				scaleCtx := context.Background()
-				scaleDecision, scaleErr := s.autoScaler.OnColdClaim(scaleCtx, template)
-				if scaleErr != nil {
-					s.logger.Warn("Auto scale failed during cold claim",
-						zap.String("template", req.Template),
-						zap.Error(scaleErr),
-					)
-				} else if scaleDecision != nil && scaleDecision.ShouldScale {
-					s.logger.Info("Auto scale triggered",
-						zap.String("template", req.Template),
-						zap.Int32("delta", scaleDecision.Delta),
-						zap.String("reason", scaleDecision.Reason),
-					)
-				}
-			}()
+		phaseStarted = time.Now()
+		releaseColdClaimSlot, err = s.acquireColdClaimSlot(ctx, template)
+		s.observeClaimPhase(req.Template, claimType, "wait_for_cold_claim_slot", phaseStarted, err)
+		if err != nil {
+			if metrics != nil {
+				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+			}
+			return nil, fmt.Errorf("wait for cold claim slot: %w", err)
 		}
+		defer releaseColdClaimSlotOnce()
 
 		phaseStarted = time.Now()
 		pod, err = s.createNewPod(ctx, template, req)
@@ -529,6 +524,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 			return nil, fmt.Errorf("wait for pod claim readiness: %w", err)
 		}
 		pod = readyPod
+		releaseColdClaimSlotOnce()
 		s.refreshSandboxProbeConditionsAsync(pod)
 	}
 

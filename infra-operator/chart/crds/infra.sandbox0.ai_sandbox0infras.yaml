@@ -3028,38 +3028,24 @@ spec:
                               when no sandbox data-plane-ready nodes exist yet. This is required for
                               node autoscaler scale-from-zero deployments.
                             type: boolean
-                          autoscaler:
-                            default: {}
-                            description: AutoscalerConfig defines manager autoscaler
-                              settings.
-                            properties:
-                              maxScaleStep:
-                                default: 10
-                                format: int32
-                                type: integer
-                              minIdleBuffer:
-                                default: 2
-                                format: int32
-                                type: integer
-                              minScaleInterval:
-                                default: 100ms
-                                type: string
-                              noTrafficScaleDownAfter:
-                                default: 10m
-                                type: string
-                              scaleDownPercent:
-                                default: "0.1"
-                                type: string
-                              scaleUpFactor:
-                                default: "1.5"
-                                type: string
-                              targetIdleRatio:
-                                default: "0.2"
-                                type: string
-                            type: object
                           cleanupInterval:
                             default: 60s
                             type: string
+                          coldStartConcurrency:
+                            default: {}
+                            description: |-
+                              ColdStartConcurrency bounds concurrent cold claims per template so pod
+                              creation does not overwhelm node-local CNI and runtime startup paths.
+                            properties:
+                              acquireTimeout:
+                                default: 30s
+                                type: string
+                              disabled:
+                                type: boolean
+                              maxPerTemplate:
+                                default: 32
+                                type: integer
+                            type: object
                           databaseMaxConns:
                             default: 10
                             format: int32

@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
 	egressauth "github.com/sandbox0-ai/sandbox0/pkg/egressauth"
@@ -58,6 +57,7 @@ var ErrDataPlaneNotReady = errors.New("data plane not ready")
 var ErrQuotaExceeded = errors.New("quota exceeded")
 var ErrInvalidNetworkPolicy = errors.New("invalid network policy")
 var ErrSandboxCheckpointRequiresCtld = errors.New("sandbox checkpoint pause requires ctld")
+var ErrColdClaimCapacityUnavailable = errors.New("cold claim capacity unavailable")
 
 const defaultPodClaimReadyTimeout = 90 * time.Second
 const defaultSandboxRestoreTimeout = 5 * time.Minute
@@ -91,6 +91,8 @@ type SandboxServiceConfig struct {
 	ProcdClientTimeout                  time.Duration
 	ProcdHTTPClient                     *http.Client
 	ProcdInitTimeout                    time.Duration
+	ColdClaimMaxConcurrentPerTemplate   int
+	ColdClaimAcquireTimeout             time.Duration
 	AllowColdStartWithoutReadyDataPlane bool
 	RootFSSquashDisabled                bool
 	RootFSSquashMaxChainDepth           int
@@ -114,7 +116,7 @@ type SandboxService struct {
 	config                 SandboxServiceConfig
 	logger                 *zap.Logger
 	metrics                *obsmetrics.ManagerMetrics
-	autoScaler             AutoScalerInterface
+	coldClaimLimiter       *coldClaimLimiter
 	pauseEnqueuer          SandboxPauseEnqueuer
 	credentialStore        egressauth.BindingStore
 	webhookStateVolumes    SandboxSystemVolumeClient
@@ -135,16 +137,6 @@ type TeamQuotaLimitStore interface {
 type SandboxPauseEnqueuer interface {
 	EnqueueSandboxPause(sandboxID string)
 }
-
-// AutoScalerInterface defines the interface for auto scaling.
-// This allows the sandbox service to trigger scale-up during cold claims.
-type AutoScalerInterface interface {
-	OnColdClaim(ctx context.Context, template *v1alpha1.SandboxTemplate) (*ScaleDecisionResult, error)
-}
-
-// ScaleDecisionResult represents the result of a scaling decision.
-// This is a local copy to avoid tight coupling with controller package.
-type ScaleDecisionResult = controller.ScaleDecision
 
 // TimeProvider provides time functions, allowing for synchronized time across clusters
 type TimeProvider interface {
@@ -225,6 +217,7 @@ func NewSandboxService(
 		config:                 config,
 		logger:                 logger,
 		metrics:                metrics,
+		coldClaimLimiter:       newColdClaimLimiter(config.ColdClaimMaxConcurrentPerTemplate, config.ColdClaimAcquireTimeout),
 	}
 	return service
 }
@@ -248,11 +241,6 @@ func (s *SandboxService) SetCtldClient(client *CtldClient) {
 		return
 	}
 	s.ctldClient = client
-}
-
-// SetAutoScaler injects the auto scaler for automatic pool scaling.
-func (s *SandboxService) SetAutoScaler(scaler AutoScalerInterface) {
-	s.autoScaler = scaler
 }
 
 // SetPauseEnqueuer injects the background worker used to complete accepted pause operations.

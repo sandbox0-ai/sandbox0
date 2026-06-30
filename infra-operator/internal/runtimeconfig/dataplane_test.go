@@ -75,6 +75,25 @@ func TestToManagerPreservesSandboxMaxMemory(t *testing.T) {
 	}
 }
 
+func TestToManagerPreservesColdStartConcurrency(t *testing.T) {
+	cfg := ToManager(&infrav1alpha1.ManagerConfig{
+		ColdStartConcurrency: infrav1alpha1.ColdStartConcurrencyConfig{
+			Disabled:       true,
+			MaxPerTemplate: 7,
+			AcquireTimeout: metav1.Duration{Duration: 12 * time.Second},
+		},
+	})
+	if !cfg.ColdStartConcurrency.Disabled {
+		t.Fatal("cold start concurrency disabled = false, want true")
+	}
+	if cfg.ColdStartConcurrency.MaxPerTemplate != 7 {
+		t.Fatalf("cold start max per template = %d, want 7", cfg.ColdStartConcurrency.MaxPerTemplate)
+	}
+	if cfg.ColdStartConcurrency.AcquireTimeout.Duration != 12*time.Second {
+		t.Fatalf("cold start acquire timeout = %s, want 12s", cfg.ColdStartConcurrency.AcquireTimeout.Duration)
+	}
+}
+
 func TestToStorageProxyDefaultsObjectEncryptionEnabled(t *testing.T) {
 	cfg := ToStorageProxy(nil)
 	if !cfg.ObjectEncryptionEnabled {

@@ -193,7 +193,6 @@ func main() {
 		clk,
 		logger,
 		managerMetrics,
-		cfg.Autoscaler,
 	)
 	if pool != nil {
 		operator.SetTemplateStatsPublisher(controller.NewPGTemplateStatsPublisher(pool, cfg.DefaultClusterId, clk, logger))
@@ -302,6 +301,8 @@ func main() {
 		ProcdClientTimeout:                  cfg.ProcdClientTimeout.Duration,
 		ProcdHTTPClient:                     obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration}),
 		ProcdInitTimeout:                    cfg.ProcdInitTimeout.Duration,
+		ColdClaimMaxConcurrentPerTemplate:   coldClaimMaxConcurrentPerTemplate(cfg),
+		ColdClaimAcquireTimeout:             coldClaimAcquireTimeout(cfg),
 		AllowColdStartWithoutReadyDataPlane: cfg.AllowColdStartWithoutReadyDataPlane,
 		RootFSSquashDisabled:                cfg.RootFSMaintenance.SquashDisabled,
 		RootFSSquashMaxChainDepth:           cfg.RootFSMaintenance.SquashMaxChainDepth,
@@ -703,6 +704,20 @@ func rootFSMaintenanceControllerConfig(cfg *config.ManagerConfig) service.RootFS
 			MaxAttempts: cfg.RootFSMaintenance.ObjectDeleteMaxAttempts,
 		},
 	}
+}
+
+func coldClaimMaxConcurrentPerTemplate(cfg *config.ManagerConfig) int {
+	if cfg == nil || cfg.ColdStartConcurrency.Disabled {
+		return 0
+	}
+	return cfg.ColdStartConcurrency.MaxPerTemplate
+}
+
+func coldClaimAcquireTimeout(cfg *config.ManagerConfig) time.Duration {
+	if cfg == nil || cfg.ColdStartConcurrency.Disabled {
+		return 0
+	}
+	return cfg.ColdStartConcurrency.AcquireTimeout.Duration
 }
 
 func buildCredentialStore(ctx context.Context, pool *pgxpool.Pool, cfg *config.ManagerConfig, logger *zap.Logger) (*egressauth.Repository, error) {

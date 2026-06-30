@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/namespacepolicy"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
@@ -37,7 +36,6 @@ type Operator struct {
 	podLister      corelisters.PodLister
 	podsSynced     cache.InformerSynced
 	poolManager    *PoolManager
-	autoScaler     *AutoScaler
 	recorder       record.EventRecorder
 	clock          TimeProvider
 	logger         *zap.Logger
@@ -110,7 +108,6 @@ func NewOperator(
 	clock TimeProvider,
 	logger *zap.Logger,
 	metrics *obsmetrics.ManagerMetrics,
-	autoscalerConfig config.AutoscalerConfig,
 ) *Operator {
 	// Use system time as fallback if clock is nil
 	if clock == nil {
@@ -121,14 +118,12 @@ func NewOperator(
 	replicaSetLister := appslisters.NewReplicaSetLister(replicaSetInformer.GetIndexer())
 	secretLister := corelisters.NewSecretLister(secretInformer.GetIndexer())
 	poolManager := NewPoolManager(k8sClient, podLister, replicaSetLister, secretLister, recorder, logger)
-	autoScaler := NewAutoScalerWithConfig(k8sClient, podLister, replicaSetLister, logger, toAutoScaleConfig(autoscalerConfig))
 
 	op := &Operator{
 		k8sClient:        k8sClient,
 		podLister:        podLister,
 		podsSynced:       podInformer.HasSynced,
 		poolManager:      poolManager,
-		autoScaler:       autoScaler,
 		recorder:         recorder,
 		clock:            clock,
 		logger:           logger,
@@ -267,19 +262,6 @@ func (op *Operator) syncHandler(ctx context.Context, key string) error {
 	}
 	if needsProbeRequeue {
 		op.workqueue.AddAfter(key, sandboxProbeRequeueAfter)
-	}
-
-	// Scale down for idle templates (async, background operation)
-	// Scale up is handled synchronously in SandboxService.OnColdClaim
-	if op.autoScaler != nil {
-		if err := op.autoScaler.ReconcileScaleDown(ctx, template, op.clock.Now()); err != nil {
-			op.logger.Warn("Scale down reconcile failed",
-				zap.String("template", template.Name),
-				zap.String("namespace", template.Namespace),
-				zap.Error(err),
-			)
-			// Don't fail the reconcile; pool + status are still correct.
-		}
 	}
 
 	return nil
@@ -581,26 +563,7 @@ func (op *Operator) GetTemplateLister() TemplateLister {
 	return &op.templateLister
 }
 
-// GetAutoScaler returns the sync scaler for use in sandbox service
-func (op *Operator) GetAutoScaler() *AutoScaler {
-	return op.autoScaler
-}
-
 // SetTemplateStatsPublisher injects a stats publisher (optional).
 func (op *Operator) SetTemplateStatsPublisher(publisher TemplateStatsPublisher) {
 	op.statsPublisher = publisher
-}
-
-// toAutoScaleConfig converts config.AutoscalerConfig to AutoScaleConfig.
-func toAutoScaleConfig(cfg config.AutoscalerConfig) AutoScaleConfig {
-	defaultCfg := DefaultAutoScaleConfig()
-	return AutoScaleConfig{
-		MinScaleInterval:        cfg.MinScaleInterval.Duration,
-		ScaleUpFactor:           cfg.ParsedScaleUpFactor(defaultCfg.ScaleUpFactor),
-		MaxScaleStep:            cfg.MaxScaleStep,
-		MinIdleBuffer:           cfg.MinIdleBuffer,
-		TargetIdleRatio:         cfg.ParsedTargetIdleRatio(defaultCfg.TargetIdleRatio),
-		NoTrafficScaleDownAfter: cfg.NoTrafficScaleDownAfter.Duration,
-		ScaleDownPercent:        cfg.ParsedScaleDownPercent(defaultCfg.ScaleDownPercent),
-	}
 }

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadManagerConfigPreservesDefaultTeamQuotas(t *testing.T) {
@@ -49,5 +50,42 @@ sandbox_max_memory: 16Gi
 	}
 	if cfg.SandboxMaxMemory != "16Gi" {
 		t.Fatalf("sandbox max memory = %q, want 16Gi", cfg.SandboxMaxMemory)
+	}
+}
+
+func TestLoadManagerConfigDefaultsColdStartConcurrency(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "manager.yaml")
+	if err := os.WriteFile(path, []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("write manager config: %v", err)
+	}
+	t.Setenv("CONFIG_PATH", path)
+
+	cfg := LoadManagerConfig()
+	if cfg.ColdStartConcurrency.MaxPerTemplate != 32 {
+		t.Fatalf("cold start max per template = %d, want 32", cfg.ColdStartConcurrency.MaxPerTemplate)
+	}
+	if cfg.ColdStartConcurrency.AcquireTimeout.Duration != 30*time.Second {
+		t.Fatalf("cold start acquire timeout = %s, want 30s", cfg.ColdStartConcurrency.AcquireTimeout.Duration)
+	}
+}
+
+func TestLoadManagerConfigKeepsColdStartConcurrencyDisabled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "manager.yaml")
+	if err := os.WriteFile(path, []byte(`
+cold_start_concurrency:
+  disabled: true
+`), 0o600); err != nil {
+		t.Fatalf("write manager config: %v", err)
+	}
+	t.Setenv("CONFIG_PATH", path)
+
+	cfg := LoadManagerConfig()
+	if !cfg.ColdStartConcurrency.Disabled {
+		t.Fatal("cold start concurrency disabled = false, want true")
+	}
+	if cfg.ColdStartConcurrency.MaxPerTemplate != 0 {
+		t.Fatalf("cold start max per template = %d, want 0 when disabled", cfg.ColdStartConcurrency.MaxPerTemplate)
 	}
 }

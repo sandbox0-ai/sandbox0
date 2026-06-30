@@ -18,24 +18,22 @@ flowchart TB
     end
 
     subgraph cold["Cold path (no idle pod)"]
+        slot["Wait for coldStartConcurrency slot"]
         create["createNewPod(): create active pod directly"]
         sb2["Return sandbox after pod starts"]
-        scale["OnColdClaim(): async scale-up decision"]
-        idle2["ReplicaSet creates extra idle pods (bounded by maxIdle)"]
     end
 
     req --> check
     check -->|Yes| pick --> flip --> sb1
     flip --> rs1 --> idle1
 
-    check -->|No| create --> sb2
-    create --> scale --> idle2
+    check -->|No| slot --> create --> sb2
 ```
 
 When a sandbox is claimed:
 1. The manager first tries to claim a ready idle pod (`claimIdlePod`)
 2. If successful (hot claim), the pod is relabeled to `active` and returned immediately; pool replenishment happens asynchronously via ReplicaSet reconcile
-3. If no idle pod exists (cold claim), the manager directly creates a new active pod (`createNewPod`) and asynchronously triggers scale-up (`OnColdClaim`) to rebuild idle capacity
+3. If no idle pod exists (cold claim), the manager waits for a `coldStartConcurrency` slot and then directly creates a new active pod (`createNewPod`)
 
 As long as `minIdle` idle pods are available, every claim is a **zero-cold-start** operation.
 
@@ -51,7 +49,7 @@ Configure the pool strategy in your template spec under the `pool` key:
 | Field | Type | Description |
 |-------|------|-------------|
 | `minIdle` | integer | Minimum number of idle pods to maintain (ReplicaSet replicas). Claims always succeed instantly while idle pods are available. |
-| `maxIdle` | integer | Maximum number of idle pods allowed for autoscaling decisions. The autoscaler caps scale-up at this value, and template status reports `PoolHealthy=False` if idle pods exceed it. |
+| `maxIdle` | integer | Maximum healthy idle pod count. Template status reports `PoolHealthy=False` if idle pods exceed this value, and cleanup removes excess idle pods. |
 
 ```yaml
 spec:
@@ -94,10 +92,10 @@ Each idle pod consumes CPU and memory as defined in `mainContainer.resources`. S
 
 ## maxIdle — Capping Idle Resources
 
-`maxIdle` puts an upper bound on idle pool size for autoscaling decisions. The autoscaler uses it as a hard cap when deciding target replicas:
+`maxIdle` puts an upper bound on healthy idle pool size:
 
-- Prevents scale-up from growing beyond a configured ceiling
 - Works with template status conditions (`PoolHealthy=False`) to signal idle over-provisioning
+- Allows cleanup to remove excess idle pods
 
 A common pattern: set `maxIdle` to 2–3x `minIdle` to absorb burst traffic while keeping costs bounded.
 

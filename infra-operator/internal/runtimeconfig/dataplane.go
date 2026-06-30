@@ -33,6 +33,11 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 	cfg.SandboxRuntimeClassName = spec.SandboxRuntimeClassName
 	cfg.DefaultTeamQuotas = cloneTeamQuotaLimitConfigs(spec.DefaultTeamQuotas)
 	cfg.AllowColdStartWithoutReadyDataPlane = spec.AllowColdStartWithoutReadyDataPlane
+	cfg.ColdStartConcurrency = apiconfig.ColdStartConcurrencyConfig{
+		Disabled:       spec.ColdStartConcurrency.Disabled,
+		MaxPerTemplate: spec.ColdStartConcurrency.MaxPerTemplate,
+		AcquireTimeout: spec.ColdStartConcurrency.AcquireTimeout,
+	}
 	cfg.NetdPolicyApplyTimeout = spec.NetdPolicyApplyTimeout
 	cfg.NetdPolicyApplyPollInterval = spec.NetdPolicyApplyPollInterval
 	cfg.EgressAuthDefaultResolveTTL = spec.EgressAuthDefaultResolveTTL
@@ -56,15 +61,6 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 		WebhookMaxRetries:      spec.ProcdConfig.WebhookMaxRetries,
 		WebhookBaseBackoff:     spec.ProcdConfig.WebhookBaseBackoff,
 		WebhookOutboxDir:       webhookOutboxDir,
-	}
-	cfg.Autoscaler = apiconfig.AutoscalerConfig{
-		MinScaleInterval:        spec.Autoscaler.MinScaleInterval,
-		ScaleUpFactor:           spec.Autoscaler.ScaleUpFactor,
-		MaxScaleStep:            spec.Autoscaler.MaxScaleStep,
-		MinIdleBuffer:           spec.Autoscaler.MinIdleBuffer,
-		TargetIdleRatio:         spec.Autoscaler.TargetIdleRatio,
-		NoTrafficScaleDownAfter: spec.Autoscaler.NoTrafficScaleDownAfter,
-		ScaleDownPercent:        spec.Autoscaler.ScaleDownPercent,
 	}
 	return cfg
 }

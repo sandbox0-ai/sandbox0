@@ -4,7 +4,6 @@ package config
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -95,6 +94,11 @@ type ManagerConfig struct {
 	// node autoscaler scale-from-zero deployments.
 	// +optional
 	AllowColdStartWithoutReadyDataPlane bool `yaml:"allow_cold_start_without_ready_data_plane" json:"allowColdStartWithoutReadyDataPlane"`
+	// ColdStartConcurrency bounds concurrent cold claims per template so pod
+	// creation does not overwhelm node-local CNI and runtime startup paths.
+	// +optional
+	// +kubebuilder:default={}
+	ColdStartConcurrency ColdStartConcurrencyConfig `yaml:"cold_start_concurrency" json:"coldStartConcurrency"`
 
 	// NetworkPolicyProvider selects the dataplane integration used to enforce sandbox network policy.
 	// +optional
@@ -177,11 +181,6 @@ type ManagerConfig struct {
 	// +optional
 	CredentialStore CredentialStoreConfig `yaml:"credential_store" json:"-"`
 
-	// Autoscaler config for pool scaling behavior
-	// +optional
-	// +kubebuilder:default={}
-	Autoscaler AutoscalerConfig `yaml:"autoscaler" json:"autoscaler"`
-
 	// SandboxPodPlacement configures default scheduling constraints injected into
 	// sandbox/template pool pods by the manager. This is operator-populated and
 	// hidden from the public CRD surface so placement can follow data-plane
@@ -209,6 +208,23 @@ type CredentialStoreConfig struct {
 	DefaultStorageKind string                       `yaml:"default_storage_kind" json:"-"`
 	EncryptedPG        CredentialEncryptedPGConfig  `yaml:"encrypted_pg" json:"-"`
 	Vault              CredentialVaultRuntimeConfig `yaml:"vault" json:"-"`
+}
+
+// ColdStartConcurrencyConfig controls manager-side cold claim backpressure.
+type ColdStartConcurrencyConfig struct {
+	// Disabled turns off manager-side cold claim limiting.
+	// +optional
+	Disabled bool `yaml:"disabled" json:"disabled"`
+	// MaxPerTemplate is the maximum number of concurrent cold claims allowed for
+	// one template. Values <= 0 use the manager default.
+	// +optional
+	// +kubebuilder:default=32
+	MaxPerTemplate int `yaml:"max_per_template" json:"maxPerTemplate"`
+	// AcquireTimeout bounds how long a cold claim waits for capacity before the
+	// API returns a retryable unavailable response.
+	// +optional
+	// +kubebuilder:default="30s"
+	AcquireTimeout metav1.Duration `yaml:"acquire_timeout" json:"acquireTimeout"`
 }
 
 type RootFSMaintenanceConfig struct {
@@ -264,72 +280,6 @@ type CredentialVaultConnectionConfig struct {
 type SandboxPodPlacementConfig struct {
 	NodeSelector map[string]string   `yaml:"node_selector" json:"-"`
 	Tolerations  []corev1.Toleration `yaml:"tolerations" json:"-"`
-}
-
-// AutoscalerConfig holds autoscaler settings for pool scaling behavior.
-type AutoscalerConfig struct {
-	// MinScaleInterval is the minimum time between scale operations for a template.
-	// This prevents thundering herd when multiple cold claims arrive simultaneously.
-	// +optional
-	// +kubebuilder:default="100ms"
-	MinScaleInterval metav1.Duration `yaml:"min_scale_interval" json:"minScaleInterval"`
-
-	// ScaleUpFactor determines how aggressively to scale up.
-	// When cold claim occurs, newReplicas = current * ScaleUpFactor.
-	// +optional
-	// +kubebuilder:default="1.5"
-	ScaleUpFactor string `yaml:"scale_up_factor" json:"scaleUpFactor"`
-
-	// MaxScaleStep caps the maximum pods to add in a single scale operation.
-	// +optional
-	// +kubebuilder:default=10
-	MaxScaleStep int32 `yaml:"max_scale_step" json:"maxScaleStep"`
-
-	// MinIdleBuffer is the minimum number of idle pods to maintain above minIdle.
-	// When idle count drops to minIdle + MinIdleBuffer, proactive scaling kicks in.
-	// +optional
-	// +kubebuilder:default=2
-	MinIdleBuffer int32 `yaml:"min_idle_buffer" json:"minIdleBuffer"`
-
-	// TargetIdleRatio is the target ratio of idle pods to active pods.
-	// Formula: desiredIdle = active * TargetIdleRatio
-	// +optional
-	// +kubebuilder:default="0.2"
-	TargetIdleRatio string `yaml:"target_idle_ratio" json:"targetIdleRatio"`
-
-	// NoTrafficScaleDownAfter is the duration without any claims before scaling down.
-	// Scale down is still async and happens in the background reconcile loop.
-	// +optional
-	// +kubebuilder:default="10m"
-	NoTrafficScaleDownAfter metav1.Duration `yaml:"no_traffic_scale_down_after" json:"noTrafficScaleDownAfter"`
-
-	// ScaleDownPercent is the percentage to reduce replicas during scale down.
-	// +optional
-	// +kubebuilder:default="0.1"
-	ScaleDownPercent string `yaml:"scale_down_percent" json:"scaleDownPercent"`
-}
-
-func (c AutoscalerConfig) ParsedScaleUpFactor(defaultValue float64) float64 {
-	return parseFloatOrDefault(c.ScaleUpFactor, defaultValue)
-}
-
-func (c AutoscalerConfig) ParsedTargetIdleRatio(defaultValue float64) float64 {
-	return parseFloatOrDefault(c.TargetIdleRatio, defaultValue)
-}
-
-func (c AutoscalerConfig) ParsedScaleDownPercent(defaultValue float64) float64 {
-	return parseFloatOrDefault(c.ScaleDownPercent, defaultValue)
-}
-
-func parseFloatOrDefault(value string, defaultValue float64) float64 {
-	if value == "" {
-		return defaultValue
-	}
-	v, err := strconv.ParseFloat(value, 64)
-	if err != nil {
-		return defaultValue
-	}
-	return v
 }
 
 // RegistryConfig holds registry settings for manager.
@@ -478,8 +428,21 @@ func LoadManagerConfig() *ManagerConfig {
 	if cfg.CredentialStore.DefaultStorageKind == "" {
 		cfg.CredentialStore.DefaultStorageKind = "encrypted_pg"
 	}
+	applyColdStartConcurrencyDefaults(cfg)
 	applyRootFSMaintenanceDefaults(cfg)
 	return cfg
+}
+
+func applyColdStartConcurrencyDefaults(cfg *ManagerConfig) {
+	if cfg == nil || cfg.ColdStartConcurrency.Disabled {
+		return
+	}
+	if cfg.ColdStartConcurrency.MaxPerTemplate <= 0 {
+		cfg.ColdStartConcurrency.MaxPerTemplate = 32
+	}
+	if cfg.ColdStartConcurrency.AcquireTimeout.Duration == 0 {
+		cfg.ColdStartConcurrency.AcquireTimeout = metav1.Duration{Duration: 30 * time.Second}
+	}
 }
 
 func applyRootFSMaintenanceDefaults(cfg *ManagerConfig) {

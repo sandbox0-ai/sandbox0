@@ -61,6 +61,11 @@ func (s *Server) claimSandbox(c *gin.Context) {
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
 			return
 		}
+		if errors.Is(err, service.ErrColdClaimCapacityUnavailable) {
+			c.Header("Retry-After", "1")
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
+			return
+		}
 		if errors.Is(err, service.ErrQuotaExceeded) {
 			spec.JSONError(c, http.StatusTooManyRequests, "quota_exceeded", err.Error())
 			return

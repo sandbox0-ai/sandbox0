@@ -90,6 +90,11 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to build Kubernetes config", zap.Error(err))
 	}
+	observeK8sClientRateLimit(managerMetrics, k8sConfig)
+	logger.Info("Kubernetes client rate limit configured",
+		zap.Float32("qps", effectiveK8sClientQPS(k8sConfig)),
+		zap.Int("burst", effectiveK8sClientBurst(k8sConfig)),
+	)
 
 	// Wrap K8s config with observability
 	obsProvider.K8s.WrapConfig(k8sConfig)
@@ -569,6 +574,28 @@ func buildKubeConfig(kubeconfig string) (*rest.Config, error) {
 		return clientcmd.BuildConfigFromFlags("", kubeconfig)
 	}
 	return rest.InClusterConfig()
+}
+
+func observeK8sClientRateLimit(metrics *obsmetrics.ManagerMetrics, config *rest.Config) {
+	if metrics == nil || metrics.K8sClientRateLimit == nil || config == nil {
+		return
+	}
+	metrics.K8sClientRateLimit.WithLabelValues("qps").Set(float64(effectiveK8sClientQPS(config)))
+	metrics.K8sClientRateLimit.WithLabelValues("burst").Set(float64(effectiveK8sClientBurst(config)))
+}
+
+func effectiveK8sClientQPS(config *rest.Config) float32 {
+	if config == nil || config.QPS <= 0 {
+		return rest.DefaultQPS
+	}
+	return config.QPS
+}
+
+func effectiveK8sClientBurst(config *rest.Config) int {
+	if config == nil || config.Burst <= 0 {
+		return rest.DefaultBurst
+	}
+	return config.Burst
 }
 
 // startMetricsServer starts the Prometheus metrics server

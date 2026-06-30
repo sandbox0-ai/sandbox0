@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -134,6 +136,44 @@ func TestApplyNetworkProviderMapsTimeoutToDataPlaneNotReady(t *testing.T) {
 	}
 	if !errors.Is(err, ErrDataPlaneNotReady) {
 		t.Fatalf("applyNetworkProvider() error = %v, want ErrDataPlaneNotReady", err)
+	}
+}
+
+func TestApplyNetworkProviderRecordsMetric(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	svc := &SandboxService{
+		networkProvider: &assertingNetworkProvider{},
+		metrics:         obsmetrics.NewManager(registry),
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "ns-a"}}
+
+	if err := svc.applyNetworkProvider(context.Background(), pod, "team-a", &v1alpha1.NetworkPolicySpec{}); err != nil {
+		t.Fatalf("applyNetworkProvider() error = %v", err)
+	}
+
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	counter := findMetric(families, "manager_network_policy_apply_total", map[string]string{
+		"provider": "test",
+		"result":   "success",
+	})
+	if counter == nil || counter.GetCounter() == nil {
+		t.Fatal("network policy apply counter metric not found")
+	}
+	if got := counter.GetCounter().GetValue(); got != 1 {
+		t.Fatalf("network policy apply counter = %f, want 1", got)
+	}
+	histogram := findMetric(families, "manager_network_policy_apply_duration_seconds", map[string]string{
+		"provider": "test",
+		"result":   "success",
+	})
+	if histogram == nil || histogram.GetHistogram() == nil {
+		t.Fatal("network policy apply duration metric not found")
+	}
+	if got := histogram.GetHistogram().GetSampleCount(); got != 1 {
+		t.Fatalf("network policy apply duration samples = %d, want 1", got)
 	}
 }
 

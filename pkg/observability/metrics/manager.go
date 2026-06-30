@@ -14,6 +14,9 @@ type ManagerMetrics struct {
 	SandboxClaimDuration           *prometheus.HistogramVec
 	SandboxClaimPhaseDuration      *prometheus.HistogramVec
 	SandboxIdleClaimsTotal         *prometheus.CounterVec
+	NetworkPolicyApplyTotal        *prometheus.CounterVec
+	NetworkPolicyApplyDuration     *prometheus.HistogramVec
+	K8sClientRateLimit             *prometheus.GaugeVec
 	AutoscalerDecisionsTotal       *prometheus.CounterVec
 	AutoscalerPoolReplicas         *prometheus.GaugeVec
 	AutoscalerPoolPods             *prometheus.GaugeVec
@@ -74,6 +77,19 @@ func NewManager(registry prometheus.Registerer) *ManagerMetrics {
 			Name: "manager_sandbox_idle_claims_total",
 			Help: "Total number of idle-pool claim attempts by result",
 		}, []string{"template", "result"}),
+		NetworkPolicyApplyTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "manager_network_policy_apply_total",
+			Help: "Total number of network policy apply attempts by provider and result",
+		}, []string{"provider", "result"}),
+		NetworkPolicyApplyDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "manager_network_policy_apply_duration_seconds",
+			Help:    "Duration of network policy apply attempts by provider and result",
+			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30},
+		}, []string{"provider", "result"}),
+		K8sClientRateLimit: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "manager_k8s_client_rate_limit",
+			Help: "Effective Kubernetes client rate limit configuration values",
+		}, []string{"setting"}),
 		AutoscalerDecisionsTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "manager_autoscaler_decisions_total",
 			Help: "Total number of autoscaler decisions by action, reason, and result",

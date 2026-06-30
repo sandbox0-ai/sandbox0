@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
@@ -24,6 +25,25 @@ type webhookInfo struct {
 	URL      string
 	Secret   string
 	WatchDir string
+}
+
+func (s *SandboxService) observeNetworkPolicyApply(provider string, started time.Time, err error) {
+	if s == nil || s.metrics == nil {
+		return
+	}
+	if provider == "" {
+		provider = "unknown"
+	}
+	result := "success"
+	if err != nil {
+		result = "error"
+	}
+	if s.metrics.NetworkPolicyApplyTotal != nil {
+		s.metrics.NetworkPolicyApplyTotal.WithLabelValues(provider, result).Inc()
+	}
+	if s.metrics.NetworkPolicyApplyDuration != nil {
+		s.metrics.NetworkPolicyApplyDuration.WithLabelValues(provider, result).Observe(time.Since(started).Seconds())
+	}
 }
 
 func (s *SandboxService) getWebhookInfo(req *ClaimRequest) *webhookInfo {
@@ -498,6 +518,8 @@ func (s *SandboxService) applyNetworkProvider(
 		return nil
 	}
 
+	providerName := s.networkProvider.Name()
+	started := time.Now()
 	sandboxID := sandboxIDFromPod(pod)
 	if sandboxID == "" {
 		sandboxID = pod.Name
@@ -511,11 +533,13 @@ func (s *SandboxService) applyNetworkProvider(
 		NetworkPolicy: networkSpec,
 	}
 	if err := s.networkProvider.ApplySandboxPolicy(ctx, input); err != nil {
+		s.observeNetworkPolicyApply(providerName, started, err)
 		if errors.Is(err, network.ErrPolicyApplyTimeout) {
 			return fmt.Errorf("%w: %v", ErrDataPlaneNotReady, err)
 		}
 		return err
 	}
+	s.observeNetworkPolicyApply(providerName, started, nil)
 	return nil
 }
 

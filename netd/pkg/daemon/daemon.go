@@ -418,12 +418,21 @@ func (d *Daemon) syncRedirect(
 	tracker *conntrack.Tracker,
 	conntrackManager *conntrack.Manager,
 	proxyServer *proxy.Server,
-) error {
+) (err error) {
+	started := time.Now()
+	defer func() {
+		result := "success"
+		if err != nil {
+			result = "error"
+		}
+		daemonMetrics.RecordRedirectSync(result, time.Since(started))
+	}()
 	if netdWatcher == nil || redirectManager == nil || patcher == nil {
 		return fmt.Errorf("missing watcher or redirect manager or patcher or policy store")
 	}
 	// Redirect rules only need local source pods, while platform peer deny must
 	// know every active sandbox so cross-node private traffic is still blocked.
+	stageStarted := time.Now()
 	localSandboxes := netdWatcher.ListSandboxesByNode(d.cfg.NodeName)
 	allSandboxes := localSandboxes
 	if d.cfg.NodeName != "" {
@@ -438,8 +447,20 @@ func (d *Daemon) syncRedirect(
 		}
 		sandboxIPs = append(sandboxIPs, sandbox.PodIP)
 	}
+	daemonMetrics.RecordRedirectSyncStage("list_inputs", "success", time.Since(stageStarted))
+	daemonMetrics.SetRedirectSyncObjectCount("local_sandboxes", len(localSandboxes))
+	daemonMetrics.SetRedirectSyncObjectCount("total_sandboxes", len(allSandboxes))
+	daemonMetrics.SetRedirectSyncObjectCount("services", len(services))
+	daemonMetrics.SetRedirectSyncObjectCount("endpoints", len(endpoints))
+	daemonMetrics.SetRedirectSyncObjectCount("sandbox_ips", len(sandboxIPs))
+
+	policyChanged := 0
+	policyRemovedIPs := 0
 	if policyStore != nil {
+		stageStarted = time.Now()
 		result := policyStore.ReconcileSandboxes(localSandboxes)
+		policyChanged = len(result.Changed)
+		policyRemovedIPs = len(result.RemovedIPs)
 		for _, podIP := range result.RemovedIPs {
 			if proxyServer != nil {
 				proxyServer.ForgetSandboxDNS(podIP)
@@ -452,9 +473,15 @@ func (d *Daemon) syncRedirect(
 			}
 			cleanupDeniedTrackedFlows(ctx, tracker, conntrackManager, policyStore, change.PodIP)
 		}
+		daemonMetrics.RecordRedirectSyncStage("policy_reconcile", "success", time.Since(stageStarted))
 	}
+	daemonMetrics.SetRedirectSyncObjectCount("policy_changed", policyChanged)
+	daemonMetrics.SetRedirectSyncObjectCount("policy_removed_ips", policyRemovedIPs)
+
 	if platformState != nil {
+		stageStarted = time.Now()
 		platformState.Reconcile(allSandboxes, services, endpoints)
+		daemonMetrics.RecordRedirectSyncStage("platform_reconcile", "success", time.Since(stageStarted))
 	}
 
 	dnsCIDRs := clusterDNSCIDRs(d.cfg.ClusterDNSCIDR, services, endpoints)
@@ -467,6 +494,7 @@ func (d *Daemon) syncRedirect(
 		platformBypassCIDRs = append(platformBypassCIDRs, policyStore.AllowedPlatformCIDRs()...)
 	}
 	bypassCIDRs := redirectBypassCIDRs(dnsCIDRs, configuredBypassCIDRs, platformBypassCIDRs)
+	daemonMetrics.SetRedirectSyncObjectCount("bypass_cidrs", len(bypassCIDRs))
 
 	d.logger.Info(
 		"Syncing redirect rules",
@@ -476,19 +504,27 @@ func (d *Daemon) syncRedirect(
 		zap.Strings("sandbox_ips", sandboxIPs),
 		zap.Strings("bypass_cidrs", bypassCIDRs),
 	)
+	stageStarted = time.Now()
 	if err := redirectManager.Sync(ctx, sandboxIPs, bypassCIDRs); err != nil {
+		daemonMetrics.RecordRedirectSyncStage("redirect_sync", "error", time.Since(stageStarted))
 		return err
 	}
+	daemonMetrics.RecordRedirectSyncStage("redirect_sync", "success", time.Since(stageStarted))
+
 	patchedCount := 0
+	stageStarted = time.Now()
 	if err := patcher.SyncAppliedHashes(ctx, localSandboxes); err != nil {
+		daemonMetrics.RecordRedirectSyncStage("patch_applied_hashes", "error", time.Since(stageStarted))
 		d.logger.Warn("Failed to sync applied hashes", zap.Error(err))
 	} else {
+		daemonMetrics.RecordRedirectSyncStage("patch_applied_hashes", "success", time.Since(stageStarted))
 		for _, sandbox := range localSandboxes {
 			if sandbox.NetworkPolicyHash != "" && sandbox.NetworkPolicyHash == sandbox.NetworkAppliedHash {
 				patchedCount++
 			}
 		}
 	}
+	daemonMetrics.SetRedirectSyncObjectCount("patched_hashes", patchedCount)
 	d.logger.Info("Redirect rules synced",
 		zap.Int("sandboxes_patched", patchedCount),
 		zap.Int("sandboxes_local", len(localSandboxes)),

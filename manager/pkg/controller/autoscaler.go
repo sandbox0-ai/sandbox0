@@ -387,15 +387,6 @@ func (s *AutoScaler) scaleUpStep(deficit int32) int32 {
 	return step
 }
 
-// getPoolStats returns the current ready idle and running active pod counts.
-func (s *AutoScaler) getPoolStats(template *v1alpha1.SandboxTemplate) (idle, active int32, err error) {
-	stats, err := s.getPoolStatsDetailed(template)
-	if err != nil {
-		return 0, 0, err
-	}
-	return stats.readyIdle, stats.runningActive, nil
-}
-
 func (s *AutoScaler) getPoolStatsDetailed(template *v1alpha1.SandboxTemplate) (autoScalerPoolStats, error) {
 	var stats autoScalerPoolStats
 

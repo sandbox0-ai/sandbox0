@@ -81,16 +81,16 @@ func TestValidateResourceRatio(t *testing.T) {
 		},
 	}
 
-	if err := ValidateResourceRatio(spec, resource.MustParse("4Gi"), "builtin template dins"); err != nil {
+	if err := ValidateResourceRatio(spec, resource.MustParse("4Gi"), "builtin template default"); err != nil {
 		t.Fatalf("expected ratio to pass, got %v", err)
 	}
 
 	spec.MainContainer.Resources.Memory = resource.MustParse("1Gi")
-	err := ValidateResourceRatio(spec, resource.MustParse("4Gi"), "builtin template dins")
+	err := ValidateResourceRatio(spec, resource.MustParse("4Gi"), "builtin template default")
 	if err == nil {
 		t.Fatal("expected ratio validation to fail")
 	}
-	if got := err.Error(); !strings.Contains(got, "builtin template dins total memory must equal total cpu * 4Gi") {
+	if got := err.Error(); !strings.Contains(got, "builtin template default total memory must equal total cpu * 4Gi") {
 		t.Fatalf("unexpected error %q", got)
 	}
 }

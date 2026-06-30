@@ -35,7 +35,6 @@ func (p *InfraPlan) BuiltinTemplates() []infrav1alpha1.BuiltinTemplateConfig {
 func defaultBuiltinTemplates() []infrav1alpha1.BuiltinTemplateConfig {
 	return []infrav1alpha1.BuiltinTemplateConfig{
 		{TemplateID: s0template.DefaultTemplateID},
-		{TemplateID: s0template.DockerInSandboxTemplateID},
 		{TemplateID: s0template.OpenClawTemplateID},
 		{TemplateID: s0template.HermesTemplateID},
 	}

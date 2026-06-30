@@ -84,7 +84,7 @@ func (h *Handler) ListTemplates(c *gin.Context) {
 	h.enrichTemplatesStatus(c.Request.Context(), templates)
 
 	spec.JSONSuccess(c, http.StatusOK, gin.H{
-		"templates": templates,
+		"templates": templatesForResponse(templates, claims),
 		"count":     len(templates),
 	})
 }
@@ -132,7 +132,7 @@ func (h *Handler) GetTemplate(c *gin.Context) {
 	}
 	h.enrichTemplatesStatus(c.Request.Context(), []*template.Template{tpl})
 
-	spec.JSONSuccess(c, http.StatusOK, tpl)
+	spec.JSONSuccess(c, http.StatusOK, templateForResponse(tpl, claims))
 }
 
 func (h *Handler) enrichTemplatesStatus(ctx context.Context, templates []*template.Template) {
@@ -186,6 +186,32 @@ func templateNamespaceForScope(scope, teamID, templateID string) (string, error)
 
 func templateStatKey(namespace, templateID string) string {
 	return namespace + "\x00" + templateID
+}
+
+func templatesForResponse(templates []*template.Template, claims *internalauth.Claims) []*template.Template {
+	out := make([]*template.Template, 0, len(templates))
+	for _, tpl := range templates {
+		out = append(out, templateForResponse(tpl, claims))
+	}
+	return out
+}
+
+func templateForResponse(tpl *template.Template, claims *internalauth.Claims) *template.Template {
+	if tpl == nil {
+		return nil
+	}
+	out := *tpl
+	out.Spec = *tpl.Spec.DeepCopy()
+	if tpl.Status != nil {
+		out.Status = tpl.Status.DeepCopy()
+	}
+	if claims == nil || !claims.IsSystemToken() {
+		out.Spec.Pod = nil
+		out.Spec.MainContainer.SecurityContext = nil
+		out.Spec.MainContainer.ImagePullPolicy = ""
+		out.Spec.ClusterId = nil
+	}
+	return &out
 }
 
 func templateScopeForClaims(claims *internalauth.Claims) (string, string, error) {

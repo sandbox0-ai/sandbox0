@@ -1,6 +1,6 @@
 # Docker in Sandbox
 
-Docker in Sandbox lets a sandbox run a Docker daemon inside the sandbox. Use the `dins` template when tests, build steps, or agent tools expect a local Docker socket.
+Docker in Sandbox lets a sandbox run a Docker daemon inside the sandbox. The built-in `default` template includes Docker support for tests, build steps, or agent tools that expect a local Docker socket.
 
 Typical uses:
 
@@ -11,18 +11,18 @@ Typical uses:
 `/var/lib/docker` is ephemeral. Images, containers, layers, and Docker volumes are discarded when the sandbox is deleted. Store source code and durable outputs in Sandbox volumes instead.
 
 <Callout variant="info">
-The examples assume your workspace has a `dins` template. If claiming `dins` returns not found, ask your Sandbox0 operator to enable Docker in Sandbox for your environment.
+The `default` template provides Docker binaries and writable Docker state, but it does not start `dockerd` before the sandbox is claimed. Start `/usr/local/bin/sandbox0-dockerd-entrypoint` from a sandbox command before using `docker`.
 </Callout>
 
-<Callout variant="info">
-The `dins` template provides Docker binaries and writable Docker state, but it does not start `dockerd` before the sandbox is claimed. Start `/usr/local/bin/sandbox0-dockerd-entrypoint` from a sandbox command before using `docker`.
+<Callout variant="warning">
+For multi-tenant production deployments, run sandbox pods with a sandboxed runtime class such as gVisor or Kata. Docker runs inside the sandbox boundary; do not mount host Docker sockets or host paths into sandbox templates.
 </Callout>
 
 ---
 
 ## Start Test Databases
 
-Claim a `dins` sandbox, start Redis and PostgreSQL with Docker, then run tests against `localhost` from inside the sandbox.
+Claim a `default` sandbox, start Redis and PostgreSQL with Docker, then run tests against `localhost` from inside the sandbox.
 
 <Tabs
   tabs={[
@@ -52,7 +52,7 @@ func main() {
         log.Fatal(err)
     }
 
-    sandbox, err := client.ClaimSandbox(ctx, "dins", sandbox0.WithSandboxHardTTL(1800))
+    sandbox, err := client.ClaimSandbox(ctx, "default", sandbox0.WithSandboxHardTTL(1800))
     if err != nil {
         log.Fatal(err)
     }
@@ -125,7 +125,7 @@ client = Client(
 )
 
 sandbox = client.claim_sandbox(
-    template="dins",
+    template="default",
     config=SandboxConfig.from_dict({"hard_ttl": 1800}),
 )
 
@@ -183,7 +183,7 @@ finally:
         baseUrl: process.env.SANDBOX0_BASE_URL || 'https://api.sandbox0.ai',
     });
 
-    const sandbox = await client.sandboxes.claim('dins', { hardTtl: 1800 });
+    const sandbox = await client.sandboxes.claim('default', { hardTtl: 1800 });
 
     try {
         await sandbox.cmd('rm -f /tmp/sandbox0-test-databases.ready');
@@ -243,7 +243,7 @@ main().catch((err) => {
     {
       label: "CLI",
       language: "bash",
-      code: `SANDBOX_ID="$(s0 -o json sandbox create --template dins --hard-ttl 1800 | jq -r '.ID')"
+      code: `SANDBOX_ID="$(s0 -o json sandbox create --template default --hard-ttl 1800 | jq -r '.ID')"
 trap 's0 sandbox delete "$SANDBOX_ID" >/dev/null 2>&1 || true' EXIT
 
 s0 sandbox exec "$SANDBOX_ID" -- rm -f /tmp/sandbox0-test-databases.ready
@@ -331,8 +331,8 @@ Docker build cache also lives under `/var/lib/docker`, so this is best for tempo
     "COPY hello /hello",
     "ENTRYPOINT [\\"/hello\\"]",
     "EOF",
-    "docker build -t sandbox0-dins-test .",
-    "docker run --rm sandbox0-dins-test",
+    "docker build -t sandbox0-docker-test .",
+    "docker run --rm sandbox0-docker-test",
 }, "\\n")
 
 result, err := sandbox.Cmd(ctx, "sh",
@@ -364,8 +364,8 @@ FROM scratch
 COPY hello /hello
 ENTRYPOINT ["/hello"]
 EOF
-docker build -t sandbox0-dins-test .
-docker run --rm sandbox0-dins-test
+docker build -t sandbox0-docker-test .
+docker run --rm sandbox0-docker-test
 """
 
 result = sandbox.cmd(
@@ -394,8 +394,8 @@ print(result.output_raw, end="")`
     'COPY hello /hello',
     'ENTRYPOINT ["/hello"]',
     'EOF',
-    'docker build -t sandbox0-dins-test .',
-    'docker run --rm sandbox0-dins-test',
+    'docker build -t sandbox0-docker-test .',
+    'docker run --rm sandbox0-docker-test',
 ].join('\\n');
 
 const result = await sandbox.cmd('sh', {
@@ -424,8 +424,8 @@ FROM scratch
 COPY hello /hello
 ENTRYPOINT ["/hello"]
 EOF
-docker build -t sandbox0-dins-test .
-docker run --rm sandbox0-dins-test
+docker build -t sandbox0-docker-test .
+docker run --rm sandbox0-docker-test
 '`
     }
   ]}
@@ -438,6 +438,7 @@ docker run --rm sandbox0-dins-test
 - Containers launched by Docker are sandbox-local. Start test dependencies with `-p` and connect to `127.0.0.1` from commands inside the sandbox.
 - Use Sandbox Services when a containerized HTTP service needs to be reachable from outside the sandbox.
 - Docker state is not durable. Use Sandbox Volumes for source, generated files, or database dumps that must survive sandbox cleanup.
+- Docker state uses the default template's ephemeral storage limit. Hosted default sandboxes keep the standard `500m` CPU and `2Gi` memory baseline, so large builds should request larger sandbox resources.
 - Pulling images can take longer than a single synchronous command request. Start long Docker setup commands asynchronously, then poll readiness with short commands.
 - Nested Kubernetes tools such as kind can run in a Docker in Sandbox environment, but node images and cluster data consume the sandbox's ephemeral disk.
 - Long-running containers count against the sandbox resource limits. Stop containers when a test run finishes if the sandbox will stay alive.

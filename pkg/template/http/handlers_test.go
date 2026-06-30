@@ -448,6 +448,138 @@ func TestGetTemplate_SystemWithoutTeamReadsPublicTemplate(t *testing.T) {
 	}
 }
 
+func TestListTemplates_SanitizesSystemOnlyFieldsForRegularTeam(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{
+		listVisibleFn: func(_ context.Context, teamID string) ([]*template.Template, error) {
+			if teamID != "team-1" {
+				t.Fatalf("ListVisibleTemplates teamID = %q, want team-1", teamID)
+			}
+			return []*template.Template{systemOnlyTemplate("default")}, nil
+		},
+	}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	router.GET("/api/v1/templates", h.ListTemplates)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/templates", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var resp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Templates []template.Template `json:"templates"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Data.Templates) != 1 {
+		t.Fatalf("templates len = %d, want 1", len(resp.Data.Templates))
+	}
+	assertSystemOnlyFieldsStripped(t, resp.Data.Templates[0].Spec)
+}
+
+func TestGetTemplate_SanitizesSystemOnlyFieldsForRegularTeam(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{
+		getTemplateForTeamFn: func(_ context.Context, teamID, templateID string) (*template.Template, error) {
+			if teamID != "team-1" || templateID != "default" {
+				t.Fatalf("GetTemplateForTeam team/id = %q/%q, want team-1/default", teamID, templateID)
+			}
+			return systemOnlyTemplate(templateID), nil
+		},
+	}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	router.GET("/api/v1/templates/:id", h.GetTemplate)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/templates/default", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var resp struct {
+		Success bool              `json:"success"`
+		Data    template.Template `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	assertSystemOnlyFieldsStripped(t, resp.Data.Spec)
+}
+
+func TestGetTemplate_PreservesSystemOnlyFieldsForSystemToken(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{
+		getTemplateFn: func(_ context.Context, scope, teamID, templateID string) (*template.Template, error) {
+			if scope != naming.ScopePublic || teamID != "" || templateID != "default" {
+				t.Fatalf("GetTemplate scope/team/id = %q/%q/%q, want public//default", scope, teamID, templateID)
+			}
+			return systemOnlyTemplate(templateID), nil
+		},
+	}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		UserID:   "system",
+		IsSystem: true,
+	}))
+	router.GET("/api/v1/templates/:id", h.GetTemplate)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/templates/default", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var resp struct {
+		Success bool              `json:"success"`
+		Data    template.Template `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Data.Spec.Pod == nil || len(resp.Data.Spec.Pod.EmptyDirMounts) != 1 {
+		t.Fatalf("expected pod emptyDir mounts to be preserved, got %#v", resp.Data.Spec.Pod)
+	}
+	if resp.Data.Spec.MainContainer.SecurityContext == nil ||
+		resp.Data.Spec.MainContainer.SecurityContext.Privileged == nil ||
+		!*resp.Data.Spec.MainContainer.SecurityContext.Privileged {
+		t.Fatalf("expected privileged security context to be preserved, got %#v", resp.Data.Spec.MainContainer.SecurityContext)
+	}
+	if resp.Data.Spec.MainContainer.ImagePullPolicy != "Always" {
+		t.Fatalf("imagePullPolicy = %q, want Always", resp.Data.Spec.MainContainer.ImagePullPolicy)
+	}
+	if resp.Data.Spec.ClusterId == nil || *resp.Data.Spec.ClusterId != "cluster-a" {
+		t.Fatalf("clusterId = %#v, want cluster-a", resp.Data.Spec.ClusterId)
+	}
+}
+
 func TestCreateTemplate_RejectsMissingMainContainerImage(t *testing.T) {
 	t.Parallel()
 
@@ -1231,6 +1363,44 @@ func validTemplateSpec() v1alpha1.SandboxTemplateSpec {
 			},
 		},
 		Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
+	}
+}
+
+func systemOnlyTemplate(templateID string) *template.Template {
+	sizeLimit := resource.MustParse("8Gi")
+	spec := validTemplateSpec()
+	spec.MainContainer.SecurityContext = &v1alpha1.SecurityContext{
+		Privileged:               ptrBool(true),
+		AllowPrivilegeEscalation: ptrBool(true),
+	}
+	spec.MainContainer.ImagePullPolicy = "Always"
+	spec.Pod = &v1alpha1.PodSpecOverride{
+		EmptyDirMounts: []v1alpha1.EmptyDirMountSpec{{
+			MountPath: "/var/lib/docker",
+			SizeLimit: &sizeLimit,
+		}},
+	}
+	spec.ClusterId = ptrString("cluster-a")
+	return &template.Template{
+		TemplateID: templateID,
+		Scope:      naming.ScopePublic,
+		Spec:       spec,
+	}
+}
+
+func assertSystemOnlyFieldsStripped(t *testing.T, spec v1alpha1.SandboxTemplateSpec) {
+	t.Helper()
+	if spec.Pod != nil {
+		t.Fatalf("pod = %#v, want nil", spec.Pod)
+	}
+	if spec.MainContainer.SecurityContext != nil {
+		t.Fatalf("securityContext = %#v, want nil", spec.MainContainer.SecurityContext)
+	}
+	if spec.MainContainer.ImagePullPolicy != "" {
+		t.Fatalf("imagePullPolicy = %q, want empty", spec.MainContainer.ImagePullPolicy)
+	}
+	if spec.ClusterId != nil {
+		t.Fatalf("clusterId = %#v, want nil", spec.ClusterId)
 	}
 }
 

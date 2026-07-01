@@ -17,8 +17,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	k8stesting "k8s.io/client-go/testing"
@@ -29,6 +31,8 @@ type memoryBindingStore struct {
 	records        map[string]*egressauth.BindingRecord
 	sourcesByRef   map[string]*egressauth.CredentialSource
 	sourceVersions map[string]*egressauth.CredentialSourceVersion
+	upsertCalls    int
+	deleteCalls    int
 }
 
 func newMemoryBindingStore() *memoryBindingStore {
@@ -47,11 +51,13 @@ func (s *memoryBindingStore) UpsertBindings(_ context.Context, record *egressaut
 	if record == nil {
 		return nil
 	}
+	s.upsertCalls++
 	s.records[s.bindingKey(record.TeamID, record.SandboxID)] = cloneBindingRecord(record)
 	return nil
 }
 
 func (s *memoryBindingStore) DeleteBindings(_ context.Context, teamID, sandboxID string) error {
+	s.deleteCalls++
 	delete(s.records, s.bindingKey(teamID, sandboxID))
 	return nil
 }
@@ -216,6 +222,9 @@ func testSandboxNetworkPod() *corev1.Pod {
 				controller.AnnotationConfig: "{}",
 			},
 		},
+		Status: corev1.PodStatus{
+			PodIP: "10.0.0.2",
+		},
 	}
 }
 
@@ -295,6 +304,47 @@ func TestUpdateNetworkPolicyRollsBackBindingsWhenPodUpdateFails(t *testing.T) {
 	require.NotNil(t, record)
 	require.Len(t, record.Bindings, 1)
 	assert.Equal(t, "existing-ref", record.Bindings[0].Ref)
+}
+
+func TestUpdateNetworkPolicyDoesNotRollbackBindingsOnTransientConflict(t *testing.T) {
+	ctx := context.Background()
+	pod := testSandboxNetworkPod()
+	store := newMemoryBindingStore()
+	store.addStaticHeadersSource("team-1", "new-ref", 2, 1, map[string]string{"token": "new"})
+	require.NoError(t, store.UpsertBindings(ctx, &egressauth.BindingRecord{
+		SandboxID: pod.Name,
+		TeamID:    "team-1",
+		Bindings: []egressauth.CredentialBinding{{
+			Ref:           "existing-ref",
+			SourceRef:     "existing-ref",
+			SourceID:      1,
+			SourceVersion: 1,
+			Projection:    egressauth.ProjectionSpec{Type: egressauth.CredentialProjectionTypeHTTPHeaders},
+		}},
+	}))
+	initialUpserts := store.upsertCalls
+
+	svc, client, _ := newSandboxServiceForNetworkTests(t, pod, store, network.NewNoopProvider())
+	updates := 0
+	client.PrependReactor("update", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		updates++
+		if updates == 1 {
+			return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, pod.Name, errors.New("stale pod"))
+		}
+		return false, nil, nil
+	})
+
+	_, err := svc.UpdateNetworkPolicy(ctx, pod.Name, testNetworkPolicy("new-ref", "Bearer new"))
+	require.NoError(t, err)
+	assert.Equal(t, 2, updates)
+	assert.Equal(t, initialUpserts+2, store.upsertCalls)
+	assert.Equal(t, 0, store.deleteCalls)
+
+	record, err := store.GetBindings(ctx, "team-1", pod.Name)
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	require.Len(t, record.Bindings, 1)
+	assert.Equal(t, "new-ref", record.Bindings[0].Ref)
 }
 
 func TestUpdateNetworkPolicyRejectsInvalidEgressPolicy(t *testing.T) {
@@ -426,6 +476,49 @@ func TestUpdateSandboxRollsBackBindingsWhenPodUpdateFails(t *testing.T) {
 	require.NotNil(t, record)
 	require.Len(t, record.Bindings, 1)
 	assert.Equal(t, "existing-ref", record.Bindings[0].Ref)
+}
+
+func TestUpdateSandboxDoesNotRollbackBindingsOnTransientConflict(t *testing.T) {
+	ctx := context.Background()
+	pod := testSandboxNetworkPod()
+	store := newMemoryBindingStore()
+	store.addStaticHeadersSource("team-1", "new-ref", 2, 1, map[string]string{"token": "new"})
+	require.NoError(t, store.UpsertBindings(ctx, &egressauth.BindingRecord{
+		SandboxID: pod.Name,
+		TeamID:    "team-1",
+		Bindings: []egressauth.CredentialBinding{{
+			Ref:           "existing-ref",
+			SourceRef:     "existing-ref",
+			SourceID:      1,
+			SourceVersion: 1,
+			Projection:    egressauth.ProjectionSpec{Type: egressauth.CredentialProjectionTypeHTTPHeaders},
+		}},
+	}))
+	initialUpserts := store.upsertCalls
+
+	svc, client, _ := newSandboxServiceForNetworkTests(t, pod, store, network.NewNoopProvider())
+	updates := 0
+	client.PrependReactor("update", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		updates++
+		if updates == 1 {
+			return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, pod.Name, errors.New("stale pod"))
+		}
+		return false, nil, nil
+	})
+
+	_, err := svc.UpdateSandbox(ctx, pod.Name, &SandboxUpdateConfig{
+		Network: testNetworkPolicy("new-ref", "Bearer new"),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, updates)
+	assert.Equal(t, initialUpserts+2, store.upsertCalls)
+	assert.Equal(t, 0, store.deleteCalls)
+
+	record, err := store.GetBindings(ctx, "team-1", pod.Name)
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	require.Len(t, record.Bindings, 1)
+	assert.Equal(t, "new-ref", record.Bindings[0].Ref)
 }
 
 func TestRequestCredentialBindingsUsesNetworkBindings(t *testing.T) {

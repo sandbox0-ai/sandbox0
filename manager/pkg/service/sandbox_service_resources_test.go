@@ -14,8 +14,11 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	k8stesting "k8s.io/client-go/testing"
@@ -129,6 +132,106 @@ func TestClaimIdlePodAppliesMemoryOverride(t *testing.T) {
 	assertQuantity(t, container.Resources.Limits[corev1.ResourceMemory], "2Gi")
 	assertQuantity(t, container.Resources.Limits[corev1.ResourceCPU], "500m")
 	assertResizeSubresourceUpdate(t, client.Actions())
+}
+
+func TestResizeSandboxPodResourcesRetriesConflictWithFreshPod(t *testing.T) {
+	template := newSandboxResourceTestTemplate(t)
+	pod := newSandboxResourceTestActivePod(t, template, "sandbox-1")
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	resizeUpdates := 0
+	client.PrependReactor("update", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() != "resize" {
+			return false, nil, nil
+		}
+		resizeUpdates++
+		if resizeUpdates == 1 {
+			return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, pod.Name, errors.New("stale pod"))
+		}
+		return false, nil, nil
+	})
+	svc := &SandboxService{
+		k8sClient: client,
+		config:    SandboxServiceConfig{SandboxMemoryPerCPU: "4Gi"},
+		logger:    zap.NewNop(),
+	}
+	quota, err := svc.effectiveSandboxResourceQuota(template, &SandboxConfig{
+		Resources: &SandboxResourceConfig{Memory: "2Gi"},
+	})
+	if err != nil {
+		t.Fatalf("effectiveSandboxResourceQuota() error = %v", err)
+	}
+
+	resized, err := svc.resizeSandboxPodResources(context.Background(), pod, quota)
+	if err != nil {
+		t.Fatalf("resizeSandboxPodResources() error = %v", err)
+	}
+	if resizeUpdates != 2 {
+		t.Fatalf("resize update calls = %d, want 2", resizeUpdates)
+	}
+	container := sandboxRuntimeContainer(t, resized)
+	assertQuantity(t, container.Resources.Limits[corev1.ResourceMemory], "2Gi")
+	assertQuantity(t, container.Resources.Limits[corev1.ResourceCPU], "500m")
+}
+
+func TestClaimIdlePodRestoresIdlePodAfterResizeConflict(t *testing.T) {
+	template := newSandboxResourceTestTemplate(t)
+	idlePod := newSandboxResourceTestIdlePod(t, template, "idle-ready")
+	node := newClaimTestNode("node-a", "10.0.0.1")
+	node.Labels = map[string]string{dataplane.NodeDataPlaneReadyLabel: dataplane.ReadyLabelValue}
+	idlePod.Spec.NodeName = node.Name
+	client := fake.NewSimpleClientset(idlePod.DeepCopy(), node.DeepCopy())
+	resizeUpdates := 0
+	deletes := 0
+	client.PrependReactor("update", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() != "resize" {
+			return false, nil, nil
+		}
+		resizeUpdates++
+		return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, idlePod.Name, errors.New("stale pod"))
+	})
+	client.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		deletes++
+		return false, nil, nil
+	})
+	svc := &SandboxService{
+		k8sClient:  client,
+		podLister:  newClaimTestPodLister(t, idlePod),
+		nodeLister: newClaimTestNodeLister(t, node),
+		clock:      systemTime{},
+		config:     SandboxServiceConfig{SandboxMemoryPerCPU: "4Gi"},
+		logger:     zap.NewNop(),
+	}
+
+	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{
+		TeamID: "team-a",
+		UserID: "user-a",
+		Config: &SandboxConfig{Resources: &SandboxResourceConfig{Memory: "2Gi"}},
+	})
+	if err != nil {
+		t.Fatalf("claimIdlePod() error = %v", err)
+	}
+	if pod != nil {
+		t.Fatalf("claimIdlePod() = %s, want nil after resize conflict", pod.Name)
+	}
+	if resizeUpdates == 0 {
+		t.Fatal("resize updates = 0, want at least one resize attempt")
+	}
+	if deletes != 0 {
+		t.Fatalf("delete calls = %d, want 0", deletes)
+	}
+	stored, err := client.CoreV1().Pods(idlePod.Namespace).Get(context.Background(), idlePod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get stored pod: %v", err)
+	}
+	if got := stored.Labels[controller.LabelPoolType]; got != controller.PoolTypeIdle {
+		t.Fatalf("pool-type = %q, want %q", got, controller.PoolTypeIdle)
+	}
+	if got := stored.Labels[controller.LabelSandboxID]; got != "" {
+		t.Fatalf("sandbox label = %q, want empty", got)
+	}
+	if got := stored.Annotations[controller.AnnotationSandboxID]; got != "" {
+		t.Fatalf("sandbox annotation = %q, want empty", got)
+	}
 }
 
 func TestUpdateSandboxAppliesMemoryResourcesAndPersistsConfig(t *testing.T) {

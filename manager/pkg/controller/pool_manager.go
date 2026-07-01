@@ -170,8 +170,7 @@ func (pm *PoolManager) ReconcilePool(ctx context.Context, template *v1alpha1.San
 			zap.Int32("desired", desiredReplicas),
 		)
 
-		rs.Spec.Replicas = &desiredReplicas
-		_, err = pm.k8sClient.AppsV1().ReplicaSets(template.Namespace).Update(ctx, rs, metav1.UpdateOptions{})
+		_, err = pm.updateReplicaSetReplicas(ctx, template.Namespace, rs.Name, desiredReplicas)
 		if err != nil {
 			pm.recorder.Eventf(template, corev1.EventTypeWarning, "ReplicaSetUpdateFailed",
 				"Failed to update ReplicaSet: %v", err)
@@ -183,6 +182,29 @@ func (pm *PoolManager) ReconcilePool(ctx context.Context, template *v1alpha1.San
 	}
 
 	return nil
+}
+
+func (pm *PoolManager) updateReplicaSetReplicas(ctx context.Context, namespace, name string, replicas int32) (*appsv1.ReplicaSet, error) {
+	var updatedRS *appsv1.ReplicaSet
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := pm.k8sClient.AppsV1().ReplicaSets(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		currentReplicas := getInt32Value(current.Spec.Replicas)
+		if current.Spec.Replicas != nil && currentReplicas == replicas {
+			updatedRS = current
+			return nil
+		}
+		updated := current.DeepCopy()
+		updated.Spec.Replicas = &replicas
+		updatedRS, err = pm.k8sClient.AppsV1().ReplicaSets(namespace).Update(ctx, updated, metav1.UpdateOptions{})
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return updatedRS, nil
 }
 
 func desiredPoolReplicas(template *v1alpha1.SandboxTemplate, current int32) int32 {
@@ -403,9 +425,21 @@ func (pm *PoolManager) reconcileReplicaSetTemplate(
 		return nil, fmt.Errorf("build pod template: %w", err)
 	}
 
-	updated := rs.DeepCopy()
-	updated.Spec.Template = newTemplate
-	updatedRS, err := pm.k8sClient.AppsV1().ReplicaSets(template.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
+	var updatedRS *appsv1.ReplicaSet
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := pm.k8sClient.AppsV1().ReplicaSets(template.Namespace).Get(ctx, rs.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if current.Spec.Template.Annotations[AnnotationTemplateSpecHash] == desiredTemplateHash {
+			updatedRS = current
+			return nil
+		}
+		updated := current.DeepCopy()
+		updated.Spec.Template = newTemplate
+		updatedRS, err = pm.k8sClient.AppsV1().ReplicaSets(template.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}

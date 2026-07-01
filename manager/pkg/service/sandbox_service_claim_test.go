@@ -573,6 +573,32 @@ func TestWaitForPodNetworkIdentityWaitsForNodeNameAndPodIP(t *testing.T) {
 	}
 }
 
+func TestWaitForPodNetworkIdentityUsesLivePodWhenInformerStale(t *testing.T) {
+	cachedPod := newClaimTestPod("ns-a", "cold-pod", "template-a", false)
+	livePod := cachedPod.DeepCopy()
+	livePod.Spec.NodeName = "node-a"
+	livePod.Status.PodIP = "10.244.0.10"
+	indexer := newClaimTestPodIndexer(t, cachedPod)
+	svc := &SandboxService{
+		k8sClient: fake.NewSimpleClientset(livePod),
+		podLister: corelisters.NewPodLister(indexer),
+		logger:    zap.NewNop(),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	readyPod, err := svc.waitForPodNetworkIdentity(ctx, cachedPod.Namespace, cachedPod.Name)
+	if err != nil {
+		t.Fatalf("waitForPodNetworkIdentity() error = %v", err)
+	}
+	if readyPod.Spec.NodeName != "node-a" {
+		t.Fatalf("node name = %q, want node-a", readyPod.Spec.NodeName)
+	}
+	if readyPod.Status.PodIP != "10.244.0.10" {
+		t.Fatalf("pod IP = %q, want 10.244.0.10", readyPod.Status.PodIP)
+	}
+}
+
 func TestCreateNewPodDefersNetworkApplyUntilPodHasNetworkIdentity(t *testing.T) {
 	withClaimTestPublicKey(t)
 

@@ -13,7 +13,10 @@ import (
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+const podNetworkIdentityLiveProbeInterval = time.Second
 
 func (s *SandboxService) prodAddress(ctx context.Context, pod *corev1.Pod) (string, error) {
 	if pod == nil {
@@ -109,6 +112,34 @@ func (s *SandboxService) waitForPodNetworkIdentity(ctx context.Context, namespac
 	defer ticker.Stop()
 
 	lastReason := "pod network identity is not ready"
+	var lastLiveProbe time.Time
+	probeLive := func() (*corev1.Pod, bool, string) {
+		if s.k8sClient == nil {
+			return nil, false, ""
+		}
+		now := time.Now()
+		if !lastLiveProbe.IsZero() && now.Sub(lastLiveProbe) < podNetworkIdentityLiveProbeInterval {
+			return nil, false, ""
+		}
+		lastLiveProbe = now
+		pod, err := s.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			if k8serrors.IsNotFound(err) {
+				reason := fmt.Sprintf("pod %s/%s is not visible", namespace, name)
+				s.observePodNetworkIdentityCheck("live", "waiting", reason)
+				return nil, false, reason
+			}
+			s.observePodNetworkIdentityCheck("live", "error", "get pod for network identity")
+			return nil, false, ""
+		}
+		ready, reason := isPodNetworkIdentityReady(pod)
+		if ready {
+			s.observePodNetworkIdentityCheck("live", "ready", "ready")
+			return pod, true, "ready"
+		}
+		s.observePodNetworkIdentityCheck("live", "waiting", reason)
+		return nil, false, reason
+	}
 	for {
 		if s.podLister == nil {
 			return nil, fmt.Errorf("pod lister is not configured")
@@ -117,29 +148,78 @@ func (s *SandboxService) waitForPodNetworkIdentity(ctx context.Context, namespac
 		if err != nil {
 			if k8serrors.IsNotFound(err) {
 				lastReason = fmt.Sprintf("pod %s/%s is not visible", namespace, name)
+				if livePod, ok, liveReason := probeLive(); ok {
+					return livePod, nil
+				} else if liveReason != "" {
+					lastReason = liveReason
+				}
 				select {
 				case <-readyCtx.Done():
+					s.observePodNetworkIdentityCheck("cache", "timeout", lastReason)
 					return nil, fmt.Errorf("pod %s/%s network identity not ready after %s: %s", namespace, name, timeout, lastReason)
 				case <-ticker.C:
 					continue
 				}
 			}
+			s.observePodNetworkIdentityCheck("cache", "error", "get pod for network identity")
 			return nil, fmt.Errorf("get pod for network identity: %w", err)
 		}
 
 		ready, reason := isPodNetworkIdentityReady(pod)
 		if ready {
+			s.observePodNetworkIdentityCheck("cache", "ready", "ready")
 			return pod, nil
 		}
 		if reason != "" {
 			lastReason = reason
 		}
+		if livePod, ok, liveReason := probeLive(); ok {
+			return livePod, nil
+		} else if liveReason != "" {
+			lastReason = liveReason
+		}
 
 		select {
 		case <-readyCtx.Done():
+			s.observePodNetworkIdentityCheck("cache", "timeout", lastReason)
 			return nil, fmt.Errorf("pod %s/%s network identity not ready after %s: %s", namespace, name, timeout, lastReason)
 		case <-ticker.C:
 		}
+	}
+}
+
+func (s *SandboxService) observePodNetworkIdentityCheck(source, result, reason string) {
+	if s == nil || s.metrics == nil || s.metrics.PodNetworkIdentityChecksTotal == nil {
+		return
+	}
+	if source == "" {
+		source = "unknown"
+	}
+	if result == "" {
+		result = "unknown"
+	}
+	s.metrics.PodNetworkIdentityChecksTotal.WithLabelValues(source, result, podNetworkIdentityReasonLabel(reason)).Inc()
+}
+
+func podNetworkIdentityReasonLabel(reason string) string {
+	reason = strings.ToLower(strings.TrimSpace(reason))
+	switch {
+	case reason == "" || reason == "ready":
+		return "ready"
+	case strings.Contains(reason, "not visible") || strings.Contains(reason, "not found"):
+		return "not_found"
+	case strings.Contains(reason, "node is not assigned"):
+		return "node_unassigned"
+	case strings.Contains(reason, "ip is not assigned"):
+		return "ip_unassigned"
+	case strings.Contains(reason, "phase is terminal"):
+		return "terminal"
+	case strings.Contains(reason, "deleting"):
+		return "deleting"
+	case strings.Contains(reason, "get pod"):
+		return "get_error"
+	default:
+		return "not_ready"
 	}
 }
 

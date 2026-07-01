@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -16,8 +17,10 @@ import (
 	"go.uber.org/zap"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	appslisters "k8s.io/client-go/listers/apps/v1"
@@ -108,6 +111,32 @@ func TestDesiredPoolReplicasPreservesAutoscalerTargetWithinBounds(t *testing.T) 
 	assert.Equal(t, int32(15), desiredPoolReplicas(template, 3))
 	assert.Equal(t, int32(25), desiredPoolReplicas(template, 25))
 	assert.Equal(t, int32(50), desiredPoolReplicas(template, 80))
+}
+
+func TestUpdateReplicaSetReplicasRetriesConflict(t *testing.T) {
+	replicas := int32(3)
+	rs := &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "rs-template-a", Namespace: "default"},
+		Spec: appsv1.ReplicaSetSpec{
+			Replicas: &replicas,
+		},
+	}
+	client := fake.NewSimpleClientset(rs)
+	updates := 0
+	client.PrependReactor("update", "replicasets", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		updates++
+		if updates == 1 {
+			return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "replicasets"}, rs.Name, errors.New("stale replicaset"))
+		}
+		return false, nil, nil
+	})
+	pm := &PoolManager{k8sClient: client, logger: zap.NewNop()}
+
+	updated, err := pm.updateReplicaSetReplicas(context.Background(), rs.Namespace, rs.Name, 15)
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	assert.Equal(t, 2, updates)
+	assert.Equal(t, int32(15), getInt32Value(updated.Spec.Replicas))
 }
 
 func findCSIVolumeByPortal(volumes []corev1.Volume, portalName string) *corev1.Volume {

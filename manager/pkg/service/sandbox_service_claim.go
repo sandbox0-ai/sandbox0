@@ -1181,6 +1181,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		}
 
 		// Update pod labels and annotations
+		originalIdlePod := pod.DeepCopy()
 		pod = pod.DeepCopy()
 		var resizeQuota *v1alpha1.ResourceQuota
 		if req.Config != nil && req.Config.Resources != nil {
@@ -1281,8 +1282,22 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 						zap.Error(rollbackErr),
 					)
 				}
-				s.requestSandboxDeletionAfterClaimFailure(updatedPod, "sandbox resource resize failed")
-				s.observeIdleClaim(templateID, "resize_error")
+				if k8serrors.IsConflict(resizeErr) {
+					s.observeIdleClaim(templateID, "resize_conflict")
+					restoreCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					if restoreErr := s.restoreIdlePodAfterHotClaimResizeConflict(restoreCtx, updatedPod, originalIdlePod); restoreErr != nil {
+						s.logger.Warn("Failed to restore idle pod after hot-claim resize conflict",
+							zap.String("sandboxID", sandboxID),
+							zap.String("pod", updatedPod.Name),
+							zap.Error(restoreErr),
+						)
+					}
+					cancel()
+					keepReservationUntilTTL()
+				} else {
+					s.observeIdleClaim(templateID, "resize_error")
+					s.requestSandboxDeletionAfterClaimFailure(updatedPod, "sandbox resource resize failed")
+				}
 				return fmt.Errorf("resize sandbox resources: %w", resizeErr)
 			}
 			updatedPod = mergeSandboxMetadataAfterResize(resizedPod, updatedPod)
@@ -1517,6 +1532,44 @@ func (s *SandboxService) requestSandboxDeletionAfterClaimFailure(pod *corev1.Pod
 			zap.Error(err),
 		)
 	}
+}
+
+func (s *SandboxService) restoreIdlePodAfterHotClaimResizeConflict(ctx context.Context, claimedPod, originalIdlePod *corev1.Pod) error {
+	if s == nil || s.k8sClient == nil || claimedPod == nil || originalIdlePod == nil {
+		return nil
+	}
+	if claimedPod.Namespace == "" || claimedPod.Name == "" {
+		return nil
+	}
+	namespace, name := claimedPod.Namespace, claimedPod.Name
+	claimedSandboxID := sandboxIDFromPod(claimedPod)
+
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := s.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			if k8serrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if current.DeletionTimestamp != nil {
+			return nil
+		}
+		if originalIdlePod.UID != "" && current.UID != "" && originalIdlePod.UID != current.UID {
+			return nil
+		}
+		if claimedSandboxID != "" && sandboxIDFromPod(current) != "" && sandboxIDFromPod(current) != claimedSandboxID {
+			return nil
+		}
+
+		restored := current.DeepCopy()
+		restored.Labels = cloneMetadataMap(originalIdlePod.Labels)
+		restored.Annotations = cloneMetadataMap(originalIdlePod.Annotations)
+		restored.Finalizers = append([]string(nil), originalIdlePod.Finalizers...)
+		restored.OwnerReferences = append([]metav1.OwnerReference(nil), originalIdlePod.OwnerReferences...)
+		_, err = s.k8sClient.CoreV1().Pods(namespace).Update(ctx, restored, metav1.UpdateOptions{})
+		return err
+	})
 }
 
 func (s *SandboxService) podDataPlaneReady(pod *corev1.Pod) bool {

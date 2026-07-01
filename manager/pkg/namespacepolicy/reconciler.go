@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/retry"
 )
 
 const (
@@ -98,25 +99,36 @@ func (r *Reconciler) EnsureBaseline(ctx context.Context, namespace string) error
 }
 
 func (r *Reconciler) ensurePolicy(ctx context.Context, desired *networkingv1.NetworkPolicy) error {
-	existing, err := r.client.NetworkingV1().NetworkPolicies(desired.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
+	_, err := r.client.NetworkingV1().NetworkPolicies(desired.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
 			return fmt.Errorf("get networkpolicy %s/%s: %w", desired.Namespace, desired.Name, err)
 		}
 		if _, err := r.client.NetworkingV1().NetworkPolicies(desired.Namespace).Create(ctx, desired, metav1.CreateOptions{}); err != nil {
-			return fmt.Errorf("create networkpolicy %s/%s: %w", desired.Namespace, desired.Name, err)
+			if !apierrors.IsAlreadyExists(err) {
+				return fmt.Errorf("create networkpolicy %s/%s: %w", desired.Namespace, desired.Name, err)
+			}
+		} else {
+			return nil
 		}
-		return nil
 	}
 
-	updated := existing.DeepCopy()
-	updated.Labels = desired.Labels
-	updated.Spec = desired.Spec
-	if reflect.DeepEqual(existing.Labels, updated.Labels) && reflect.DeepEqual(existing.Spec, updated.Spec) {
-		return nil
-	}
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := r.client.NetworkingV1().NetworkPolicies(desired.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		updated := current.DeepCopy()
+		updated.Labels = desired.Labels
+		updated.Spec = desired.Spec
+		if reflect.DeepEqual(current.Labels, updated.Labels) && reflect.DeepEqual(current.Spec, updated.Spec) {
+			return nil
+		}
 
-	if _, err := r.client.NetworkingV1().NetworkPolicies(desired.Namespace).Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
+		_, err = r.client.NetworkingV1().NetworkPolicies(desired.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
+		return err
+	})
+	if err != nil {
 		return fmt.Errorf("update networkpolicy %s/%s: %w", desired.Namespace, desired.Name, err)
 	}
 	return nil

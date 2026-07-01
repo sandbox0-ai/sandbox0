@@ -827,7 +827,7 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 		if resizeQuota != nil {
 			resizedPod, err := s.resizeSandboxPodResources(ctx, current, *resizeQuota)
 			if err != nil {
-				if rollbackBindings != nil {
+				if rollbackBindings != nil && !k8serrors.IsConflict(err) {
 					if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
 						s.logger.Warn("Failed to roll back credential bindings after sandbox resize failure",
 							zap.String("sandboxID", sandboxID),
@@ -841,7 +841,7 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 		}
 
 		updatedPod, err = s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, updatedPod, metav1.UpdateOptions{})
-		if err != nil && rollbackBindings != nil {
+		if err != nil && rollbackBindings != nil && !k8serrors.IsConflict(err) {
 			if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
 				s.logger.Warn("Failed to roll back credential bindings after sandbox update failure",
 					zap.String("sandboxID", sandboxID),
@@ -1316,63 +1316,77 @@ func (s *SandboxService) RefreshSandbox(ctx context.Context, sandboxID string, r
 		return nil, fmt.Errorf("list pods: %w", err)
 	}
 
-	// Parse original config to get TTL and HardTTL values
-	var originalConfig SandboxConfig
-	if configJSON := pod.Annotations[controller.AnnotationConfig]; configJSON != "" {
-		if err := json.Unmarshal([]byte(configJSON), &originalConfig); err != nil {
-			s.logger.Warn("Failed to parse original config, using defaults", zap.Error(err))
-		}
-	}
-
-	// Update pod annotation
-	podCopy := pod.DeepCopy()
-	if podCopy.Annotations == nil {
-		podCopy.Annotations = make(map[string]string)
-	}
-	now := s.clock.Now()
 	var ttlDuration time.Duration
-
-	// Determine the TTL to apply. Explicit duration enables TTL for that duration; otherwise use original config/default.
-	var ttlToApply *int32
-	if req != nil {
-		if req.Duration < 0 {
-			return nil, fmt.Errorf("%w: duration must be >= 0", ErrInvalidClaimRequest)
-		}
-		if req.Duration > 0 {
-			ttlToApply = int32Ptr(req.Duration)
-		}
-	}
-	if ttlToApply == nil && originalConfig.TTL != nil {
-		ttlToApply = originalConfig.TTL
-	} else if ttlToApply == nil && s.config.DefaultTTL > 0 {
-		ttlToApply = int32Ptr(int32(s.config.DefaultTTL.Seconds()))
-	}
-	if ttlToApply != nil && *ttlToApply > 0 {
-		ttlDuration = time.Duration(*ttlToApply) * time.Second
-	}
-	if err := validateSandboxConfigLifecycle(ttlToApply, originalConfig.HardTTL); err != nil {
-		return nil, err
-	}
-	setExpirationAnnotation(podCopy.Annotations, now, ttlToApply)
-
-	newExpiresAt := parseRFC3339AnnotationTime(podCopy.Annotations, controller.AnnotationExpiresAt)
-
-	// Also refresh HardTTL if configured.
+	var newExpiresAt time.Time
 	var newHardExpiresAt time.Time
-	if originalConfig.HardTTL != nil && *originalConfig.HardTTL > 0 {
-		setHardExpirationAnnotation(podCopy.Annotations, now, originalConfig.HardTTL)
-		newHardExpiresAt = parseRFC3339AnnotationTime(podCopy.Annotations, controller.AnnotationHardExpiresAt)
-		s.logger.Info("Refreshing hard TTL",
-			zap.String("sandboxID", sandboxID),
-			zap.Time("newHardExpiresAt", newHardExpiresAt),
-			zap.Duration("hardTTLDuration", time.Duration(*originalConfig.HardTTL)*time.Second),
-		)
-	} else {
-		delete(podCopy.Annotations, controller.AnnotationHardExpiresAt)
-	}
 
-	// Apply the update
-	_, err = s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, podCopy, metav1.UpdateOptions{})
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := s.k8sClient.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if sandboxIDFromPod(current) != sandboxID {
+			return k8serrors.NewNotFound(schema.GroupResource{Resource: "pod"}, sandboxID)
+		}
+
+		// Parse original config to get TTL and HardTTL values
+		var originalConfig SandboxConfig
+		if configJSON := current.Annotations[controller.AnnotationConfig]; configJSON != "" {
+			if err := json.Unmarshal([]byte(configJSON), &originalConfig); err != nil {
+				s.logger.Warn("Failed to parse original config, using defaults", zap.Error(err))
+			}
+		}
+
+		// Update pod annotation
+		podCopy := current.DeepCopy()
+		if podCopy.Annotations == nil {
+			podCopy.Annotations = make(map[string]string)
+		}
+		now := s.clock.Now()
+
+		// Determine the TTL to apply. Explicit duration enables TTL for that duration; otherwise use original config/default.
+		var ttlToApply *int32
+		if req != nil {
+			if req.Duration < 0 {
+				return fmt.Errorf("%w: duration must be >= 0", ErrInvalidClaimRequest)
+			}
+			if req.Duration > 0 {
+				ttlToApply = int32Ptr(req.Duration)
+			}
+		}
+		if ttlToApply == nil && originalConfig.TTL != nil {
+			ttlToApply = originalConfig.TTL
+		} else if ttlToApply == nil && s.config.DefaultTTL > 0 {
+			ttlToApply = int32Ptr(int32(s.config.DefaultTTL.Seconds()))
+		}
+		if ttlToApply != nil && *ttlToApply > 0 {
+			ttlDuration = time.Duration(*ttlToApply) * time.Second
+		}
+		if err := validateSandboxConfigLifecycle(ttlToApply, originalConfig.HardTTL); err != nil {
+			return err
+		}
+		setExpirationAnnotation(podCopy.Annotations, now, ttlToApply)
+
+		newExpiresAt = parseRFC3339AnnotationTime(podCopy.Annotations, controller.AnnotationExpiresAt)
+
+		// Also refresh HardTTL if configured.
+		newHardExpiresAt = time.Time{}
+		if originalConfig.HardTTL != nil && *originalConfig.HardTTL > 0 {
+			setHardExpirationAnnotation(podCopy.Annotations, now, originalConfig.HardTTL)
+			newHardExpiresAt = parseRFC3339AnnotationTime(podCopy.Annotations, controller.AnnotationHardExpiresAt)
+			s.logger.Info("Refreshing hard TTL",
+				zap.String("sandboxID", sandboxID),
+				zap.Time("newHardExpiresAt", newHardExpiresAt),
+				zap.Duration("hardTTLDuration", time.Duration(*originalConfig.HardTTL)*time.Second),
+			)
+		} else {
+			delete(podCopy.Annotations, controller.AnnotationHardExpiresAt)
+		}
+
+		// Apply the update
+		_, err = s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, podCopy, metav1.UpdateOptions{})
+		return err
+	})
 	if err != nil {
 		return nil, fmt.Errorf("update pod: %w", err)
 	}

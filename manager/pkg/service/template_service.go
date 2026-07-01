@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/util/retry"
 )
 
 const (
@@ -159,14 +160,22 @@ func (s *TemplateService) UpdateTemplate(ctx context.Context, template *v1alpha1
 		return nil, fmt.Errorf("get current template: %w", err)
 	}
 	namespace := current.Namespace
-	template.Namespace = namespace
+	desired := template.DeepCopy()
+	desired.Namespace = namespace
 
-	template.ResourceVersion = current.ResourceVersion
-
-	// Preserve status
-	template.Status = current.Status
-
-	result, err := s.crdClient.Sandbox0V1alpha1().SandboxTemplates(namespace).Update(ctx, template, metav1.UpdateOptions{})
+	var result *v1alpha1.SandboxTemplate
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := s.crdClient.Sandbox0V1alpha1().SandboxTemplates(namespace).Get(ctx, desired.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		updated := desired.DeepCopy()
+		updated.ResourceVersion = current.ResourceVersion
+		// Preserve status
+		updated.Status = current.Status
+		result, err = s.crdClient.Sandbox0V1alpha1().SandboxTemplates(namespace).Update(ctx, updated, metav1.UpdateOptions{})
+		return err
+	})
 	if err != nil {
 		return nil, fmt.Errorf("update template: %w", err)
 	}
@@ -395,24 +404,36 @@ func (s *TemplateService) ensureRegistryPullSecret(ctx context.Context, namespac
 		},
 	}
 
-	existing, err := s.k8sClient.CoreV1().Secrets(namespace).Get(ctx, s.registry.PullSecretName, metav1.GetOptions{})
+	_, err = s.k8sClient.CoreV1().Secrets(namespace).Get(ctx, s.registry.PullSecretName, metav1.GetOptions{})
 	if err != nil {
 		if !errors.IsNotFound(err) {
 			return fmt.Errorf("get registry pull secret: %w", err)
 		}
 		if _, err := s.k8sClient.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
-			return fmt.Errorf("create registry pull secret: %w", err)
+			if !errors.IsAlreadyExists(err) {
+				return fmt.Errorf("create registry pull secret: %w", err)
+			}
+		} else {
+			return s.ensureDefaultServiceAccountPullSecret(ctx, namespace, s.registry.PullSecretName)
 		}
-	} else {
-		updated := existing.DeepCopy()
+	}
+
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := s.k8sClient.CoreV1().Secrets(namespace).Get(ctx, s.registry.PullSecretName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		updated := current.DeepCopy()
 		updated.Type = corev1.SecretTypeDockerConfigJson
 		if updated.Data == nil {
 			updated.Data = map[string][]byte{}
 		}
 		updated.Data[corev1.DockerConfigJsonKey] = creds
-		if _, err := s.k8sClient.CoreV1().Secrets(namespace).Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
-			return fmt.Errorf("update registry pull secret: %w", err)
-		}
+		_, err = s.k8sClient.CoreV1().Secrets(namespace).Update(ctx, updated, metav1.UpdateOptions{})
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("update registry pull secret: %w", err)
 	}
 
 	return s.ensureDefaultServiceAccountPullSecret(ctx, namespace, s.registry.PullSecretName)
@@ -448,12 +469,30 @@ func (s *TemplateService) ensureDefaultServiceAccountPullSecret(ctx context.Cont
 
 	sa.ImagePullSecrets = append(sa.ImagePullSecrets, corev1.LocalObjectReference{Name: secretName})
 	if sa.ResourceVersion == "" {
-		if _, err := s.k8sClient.CoreV1().ServiceAccounts(namespace).Create(ctx, sa, metav1.CreateOptions{}); err != nil && !errors.IsAlreadyExists(err) {
-			return fmt.Errorf("create default serviceaccount: %w", err)
+		if _, err := s.k8sClient.CoreV1().ServiceAccounts(namespace).Create(ctx, sa, metav1.CreateOptions{}); err != nil {
+			if !errors.IsAlreadyExists(err) {
+				return fmt.Errorf("create default serviceaccount: %w", err)
+			}
+		} else {
+			return nil
 		}
-		return nil
 	}
-	if _, err := s.k8sClient.CoreV1().ServiceAccounts(namespace).Update(ctx, sa, metav1.UpdateOptions{}); err != nil {
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := s.k8sClient.CoreV1().ServiceAccounts(namespace).Get(ctx, "default", metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		updated := current.DeepCopy()
+		for _, ref := range updated.ImagePullSecrets {
+			if ref.Name == secretName {
+				return nil
+			}
+		}
+		updated.ImagePullSecrets = append(updated.ImagePullSecrets, corev1.LocalObjectReference{Name: secretName})
+		_, err = s.k8sClient.CoreV1().ServiceAccounts(namespace).Update(ctx, updated, metav1.UpdateOptions{})
+		return err
+	})
+	if err != nil {
 		return fmt.Errorf("update default serviceaccount: %w", err)
 	}
 	return nil

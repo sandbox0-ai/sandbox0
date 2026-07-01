@@ -63,7 +63,7 @@ func EnsureProcdConfigSecret(
 		},
 	}
 
-	existing, err := secretLister.Secrets(template.Namespace).Get(name)
+	_, err = secretLister.Secrets(template.Namespace).Get(name)
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
 			return fmt.Errorf("get procd config secret: %w", err)
@@ -72,29 +72,33 @@ func EnsureProcdConfigSecret(
 			if !apierrors.IsAlreadyExists(err) {
 				return fmt.Errorf("create procd config secret: %w", err)
 			}
-			existing, err = client.CoreV1().Secrets(template.Namespace).Get(ctx, name, metav1.GetOptions{})
-			if err != nil {
-				return fmt.Errorf("get procd config secret after already exists: %w", err)
-			}
 		} else {
 			return nil
 		}
 	}
 
-	updated := existing.DeepCopy()
-	updated.Labels = labels
-	updated.OwnerReferences = ownerRefs
-	updated.Data = desired.Data
-	updated.Type = desired.Type
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := client.CoreV1().Secrets(template.Namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		updated := current.DeepCopy()
+		updated.Labels = labels
+		updated.OwnerReferences = ownerRefs
+		updated.Data = desired.Data
+		updated.Type = desired.Type
 
-	if reflect.DeepEqual(existing.Labels, updated.Labels) &&
-		reflect.DeepEqual(existing.OwnerReferences, updated.OwnerReferences) &&
-		reflect.DeepEqual(existing.Data, updated.Data) &&
-		reflect.DeepEqual(existing.Type, updated.Type) {
-		return nil
-	}
+		if reflect.DeepEqual(current.Labels, updated.Labels) &&
+			reflect.DeepEqual(current.OwnerReferences, updated.OwnerReferences) &&
+			reflect.DeepEqual(current.Data, updated.Data) &&
+			reflect.DeepEqual(current.Type, updated.Type) {
+			return nil
+		}
 
-	if _, err := client.CoreV1().Secrets(template.Namespace).Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
+		_, err = client.CoreV1().Secrets(template.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
+		return err
+	})
+	if err != nil {
 		return fmt.Errorf("update procd config secret: %w", err)
 	}
 	return nil
@@ -342,28 +346,39 @@ func EnsureNetdMITMCASecret(
 		},
 	}
 
-	existing, err := client.CoreV1().Secrets(templateNamespace).Get(ctx, cfg.NetdMITMCASecretName, metav1.GetOptions{})
+	_, err = client.CoreV1().Secrets(templateNamespace).Get(ctx, cfg.NetdMITMCASecretName, metav1.GetOptions{})
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
 			return fmt.Errorf("get target netd MITM CA secret: %w", err)
 		}
 		if _, err := client.CoreV1().Secrets(templateNamespace).Create(ctx, desired, metav1.CreateOptions{}); err != nil {
-			return fmt.Errorf("create target netd MITM CA secret: %w", err)
+			if !apierrors.IsAlreadyExists(err) {
+				return fmt.Errorf("create target netd MITM CA secret: %w", err)
+			}
+		} else {
+			return nil
 		}
-		return nil
 	}
 
-	updated := existing.DeepCopy()
-	updated.Type = desired.Type
-	updated.Data = desired.Data
-	updated.Labels = desired.Labels
-	if reflect.DeepEqual(existing.Type, updated.Type) &&
-		reflect.DeepEqual(existing.Data, updated.Data) &&
-		reflect.DeepEqual(existing.Labels, updated.Labels) {
-		return nil
-	}
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := client.CoreV1().Secrets(templateNamespace).Get(ctx, cfg.NetdMITMCASecretName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		updated := current.DeepCopy()
+		updated.Type = desired.Type
+		updated.Data = desired.Data
+		updated.Labels = desired.Labels
+		if reflect.DeepEqual(current.Type, updated.Type) &&
+			reflect.DeepEqual(current.Data, updated.Data) &&
+			reflect.DeepEqual(current.Labels, updated.Labels) {
+			return nil
+		}
 
-	if _, err := client.CoreV1().Secrets(templateNamespace).Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
+		_, err = client.CoreV1().Secrets(templateNamespace).Update(ctx, updated, metav1.UpdateOptions{})
+		return err
+	})
+	if err != nil {
 		return fmt.Errorf("update target netd MITM CA secret: %w", err)
 	}
 	return nil

@@ -14,6 +14,7 @@ type ManagerMetrics struct {
 	SandboxClaimDuration           *prometheus.HistogramVec
 	SandboxClaimPhaseDuration      *prometheus.HistogramVec
 	SandboxIdleClaimsTotal         *prometheus.CounterVec
+	PodNetworkIdentityChecksTotal  *prometheus.CounterVec
 	NetworkPolicyApplyTotal        *prometheus.CounterVec
 	NetworkPolicyApplyDuration     *prometheus.HistogramVec
 	K8sClientRateLimit             *prometheus.GaugeVec
@@ -77,6 +78,10 @@ func NewManager(registry prometheus.Registerer) *ManagerMetrics {
 			Name: "manager_sandbox_idle_claims_total",
 			Help: "Total number of idle-pool claim attempts by result",
 		}, []string{"template", "result"}),
+		PodNetworkIdentityChecksTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "manager_pod_network_identity_checks_total",
+			Help: "Total number of pod network identity readiness checks by source, result, and reason",
+		}, []string{"source", "result", "reason"}),
 		NetworkPolicyApplyTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "manager_network_policy_apply_total",
 			Help: "Total number of network policy apply attempts by provider and result",

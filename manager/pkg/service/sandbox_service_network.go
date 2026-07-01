@@ -17,6 +17,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 )
@@ -702,7 +703,7 @@ func (s *SandboxService) UpdateNetworkPolicy(
 		}
 
 		updatedPod, err = s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, updatedPod, metav1.UpdateOptions{})
-		if err != nil && rollbackBindings != nil {
+		if err != nil && rollbackBindings != nil && !k8serrors.IsConflict(err) {
 			if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
 				s.logger.Warn("Failed to roll back credential bindings after network policy update failure",
 					zap.String("sandboxID", sandboxID),

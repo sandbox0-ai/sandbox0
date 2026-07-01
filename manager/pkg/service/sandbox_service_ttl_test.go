@@ -17,9 +17,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
 	corelisters "k8s.io/client-go/listers/core/v1"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -366,6 +370,37 @@ func TestRefreshSandboxRejectsInvalidTTLState(t *testing.T) {
 			assert.Equal(t, "2026-03-07T12:10:00Z", stored.Annotations[controller.AnnotationHardExpiresAt])
 		})
 	}
+}
+
+func TestRefreshSandboxRetriesPodUpdateConflict(t *testing.T) {
+	pod := testSandboxPod()
+	pod.Annotations[controller.AnnotationConfig] = `{"ttl":300,"hard_ttl":600}`
+
+	svc, client := newSandboxServiceForTTLTests(t, pod, 0)
+	updates := 0
+	client.PrependReactor("update", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() != "" {
+			return false, nil, nil
+		}
+		updates++
+		if updates == 1 {
+			return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, pod.Name, errors.New("stale pod"))
+		}
+		return false, nil, nil
+	})
+
+	resp, err := svc.RefreshSandbox(context.Background(), pod.Name, &RefreshRequest{Duration: 120})
+	require.NoError(t, err)
+	if updates != 2 {
+		t.Fatalf("pod update calls = %d, want 2", updates)
+	}
+	assert.Equal(t, time.Date(2026, time.March, 7, 12, 2, 0, 0, time.UTC), resp.ExpiresAt)
+	assert.Equal(t, time.Date(2026, time.March, 7, 12, 10, 0, 0, time.UTC), resp.HardExpiresAt)
+
+	stored, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "2026-03-07T12:02:00Z", stored.Annotations[controller.AnnotationExpiresAt])
+	assert.Equal(t, "2026-03-07T12:10:00Z", stored.Annotations[controller.AnnotationHardExpiresAt])
 }
 
 func configurePodForProcdServer(t *testing.T, pod *corev1.Pod, rawURL string) int {

@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 )
 
 const (
@@ -46,16 +47,34 @@ func (s *SandboxService) resizeSandboxPodResources(ctx context.Context, pod *cor
 	if s == nil || s.k8sClient == nil {
 		return nil, fmt.Errorf("%w: kubernetes client is not configured", ErrInvalidClaimRequest)
 	}
-	resized := pod.DeepCopy()
-	if err := s.applySandboxResourceQuota(resized, quota); err != nil {
-		return nil, err
+	if pod == nil || pod.Namespace == "" || pod.Name == "" {
+		return nil, fmt.Errorf("%w: pod is required", ErrInvalidClaimRequest)
 	}
-	updated, err := s.k8sClient.CoreV1().Pods(resized.Namespace).UpdateResize(ctx, resized.Name, resized, metav1.UpdateOptions{})
+
+	namespace, name := pod.Namespace, pod.Name
+	var updated *corev1.Pod
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := s.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		resized := current.DeepCopy()
+		if err := s.applySandboxResourceQuota(resized, quota); err != nil {
+			return err
+		}
+		result, err := s.k8sClient.CoreV1().Pods(namespace).UpdateResize(ctx, name, resized, metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
+		if result == nil || result.Name == "" {
+			updated = resized
+		} else {
+			updated = result
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	if updated == nil || updated.Name == "" {
-		return resized, nil
 	}
 	return updated, nil
 }

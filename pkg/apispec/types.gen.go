@@ -1011,8 +1011,19 @@ type FileInfo struct {
 // FileInfoType defines model for FileInfo.Type.
 type FileInfoType string
 
-// ForkSandboxRequest defines model for ForkSandboxRequest.
-type ForkSandboxRequest = map[string]interface{}
+// ForkSandboxConfig defines model for ForkSandboxConfig.
+type ForkSandboxConfig struct {
+	// HardTtl Sandbox hard time-to-live in seconds for the forked sandbox. Omit to inherit the source setting. Set 0 to disable hard expiration.
+	HardTtl *int32 `json:"hard_ttl,omitempty"`
+
+	// Ttl Runtime soft time-to-live in seconds for the forked sandbox. Omit to inherit the source setting. Set 0 to disable soft expiration.
+	Ttl *int32 `json:"ttl,omitempty"`
+}
+
+// ForkSandboxRequest Optional fork overrides. Omit config to inherit the source sandbox configuration.
+type ForkSandboxRequest struct {
+	Config *ForkSandboxConfig `json:"config,omitempty"`
+}
 
 // ForkSandboxResponse defines model for ForkSandboxResponse.
 type ForkSandboxResponse struct {

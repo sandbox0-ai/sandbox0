@@ -73,7 +73,14 @@ type RestoreSandboxRootFSResponse struct {
 	Status     string `json:"status"`
 }
 
-type ForkSandboxRequest struct{}
+type ForkSandboxRequest struct {
+	Config *ForkSandboxConfig `json:"config,omitempty"`
+}
+
+type ForkSandboxConfig struct {
+	TTL     *int32 `json:"ttl,omitempty"`
+	HardTTL *int32 `json:"hard_ttl,omitempty"`
+}
 
 type ForkSandboxResponse struct {
 	SourceSandboxID string   `json:"source_sandbox_id"`
@@ -225,10 +232,13 @@ func (s *SandboxService) RestoreSandboxRootFS(ctx context.Context, sandboxID, te
 	}, nil
 }
 
-func (s *SandboxService) ForkSandbox(ctx context.Context, sourceSandboxID, teamID, userID string, _ *ForkSandboxRequest) (*ForkSandboxResponse, error) {
+func (s *SandboxService) ForkSandbox(ctx context.Context, sourceSandboxID, teamID, userID string, req *ForkSandboxRequest) (*ForkSandboxResponse, error) {
 	store, err := s.rootFSProductStore()
 	if err != nil {
 		return nil, err
+	}
+	if req == nil {
+		req = &ForkSandboxRequest{}
 	}
 	sourceSandboxID = strings.TrimSpace(sourceSandboxID)
 	teamID = strings.TrimSpace(teamID)
@@ -242,7 +252,7 @@ func (s *SandboxService) ForkSandbox(ctx context.Context, sourceSandboxID, teamI
 
 	var source *SandboxRecord
 	if err := s.sandboxStore.WithSandboxLock(ctx, sourceSandboxID, func(lockCtx context.Context, _ SandboxStoreTx, record *SandboxRecord) error {
-		if err := validateRootFSSandboxRecord(record, sourceSandboxID, teamID, true); err != nil {
+		if err := validateForkSourceSandboxRecord(record, sourceSandboxID, teamID, s.now()); err != nil {
 			return err
 		}
 		source = cloneSandboxRecordForRootFSProduct(record)
@@ -258,8 +268,19 @@ func (s *SandboxService) ForkSandbox(ctx context.Context, sourceSandboxID, teamI
 	if err != nil {
 		return nil, err
 	}
-	now := s.clock.Now().UTC()
+	now := s.now().UTC()
 	targetConfig := cloneSandboxConfigValue(source.Config)
+	if req.Config != nil {
+		if req.Config.TTL != nil {
+			targetConfig.TTL = cloneInt32Ptr(req.Config.TTL)
+		}
+		if req.Config.HardTTL != nil {
+			targetConfig.HardTTL = cloneInt32Ptr(req.Config.HardTTL)
+		}
+	}
+	if err := validateSandboxConfigLifecycle(targetConfig.TTL, targetConfig.HardTTL); err != nil {
+		return nil, err
+	}
 	expiresAt := expirationFromTTL(now, targetConfig.TTL)
 	if expiresAt.IsZero() && targetConfig.TTL == nil {
 		expiresAt = source.ExpiresAt
@@ -286,7 +307,7 @@ func (s *SandboxService) ForkSandbox(ctx context.Context, sourceSandboxID, teamI
 		UpdatedAt:         now,
 	}
 	err = s.sandboxStore.WithSandboxLock(ctx, sourceSandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
-		if err := validateRootFSSandboxRecord(record, sourceSandboxID, teamID, true); err != nil {
+		if err := validateForkSourceSandboxRecord(record, sourceSandboxID, teamID, s.now()); err != nil {
 			return err
 		}
 		upserter := sandboxRecordUpserter(s.sandboxStore)
@@ -311,7 +332,7 @@ func (s *SandboxService) ForkSandbox(ctx context.Context, sourceSandboxID, teamI
 			if txBacked {
 				return err
 			}
-			if cleanupErr := s.sandboxStore.MarkSandboxDeleted(lockCtx, targetID, s.clock.Now().UTC()); cleanupErr != nil && s.logger != nil {
+			if cleanupErr := s.sandboxStore.MarkSandboxDeleted(lockCtx, targetID, s.now().UTC()); cleanupErr != nil && s.logger != nil {
 				s.logger.Warn("Failed to clean up sandbox record after rootfs fork failure",
 					zap.String("sandboxID", targetID),
 					zap.Error(cleanupErr),
@@ -384,6 +405,16 @@ func validateRootFSSandboxRecord(record *SandboxRecord, sandboxID, teamID string
 	}
 	if requirePaused && record.Status != SandboxStatusPaused {
 		return fmt.Errorf("%w: current status is %s", ErrSandboxRootFSRequiresPausedSandbox, record.Status)
+	}
+	return nil
+}
+
+func validateForkSourceSandboxRecord(record *SandboxRecord, sandboxID, teamID string, now time.Time) error {
+	if err := validateRootFSSandboxRecord(record, sandboxID, teamID, true); err != nil {
+		return err
+	}
+	if sandboxHardExpired(record.HardExpiresAt, now) {
+		return apierrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
 	}
 	return nil
 }

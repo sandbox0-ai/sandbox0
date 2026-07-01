@@ -146,6 +146,144 @@ func TestSandboxRootFSProductForkSetsLifecycleExpirations(t *testing.T) {
 	assert.Equal(t, wantHardExpiresAt, stored.HardExpiresAt)
 }
 
+func TestSandboxRootFSProductForkOverridesLifecycleConfig(t *testing.T) {
+	claimedAt := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	forkedAt := claimedAt.Add(5 * time.Minute)
+	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusPaused, claimedAt)
+	source.Config.TTL = int32Ptr(900)
+	source.Config.HardTTL = int32Ptr(1800)
+	source.ExpiresAt = claimedAt.Add(15 * time.Minute)
+	source.HardExpiresAt = claimedAt.Add(30 * time.Minute)
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{
+			"sandbox-1": source,
+		},
+		rootFSStates: map[string]*SandboxRootFSState{
+			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-v1"),
+		},
+	}
+	svc := rootFSProductTestService(store)
+	svc.clock = fixedClock{now: forkedAt}
+	ttl := int32(60)
+	hardTTL := int32(120)
+
+	forkResp, err := svc.ForkSandbox(context.Background(), "sandbox-1", "team-1", "user-2", &ForkSandboxRequest{
+		Config: &ForkSandboxConfig{
+			TTL:     &ttl,
+			HardTTL: &hardTTL,
+		},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, forkResp)
+	require.NotNil(t, forkResp.Sandbox)
+	wantExpiresAt := forkedAt.Add(time.Minute)
+	wantHardExpiresAt := forkedAt.Add(2 * time.Minute)
+	assert.Equal(t, wantExpiresAt, forkResp.Sandbox.ExpiresAt)
+	assert.Equal(t, wantHardExpiresAt, forkResp.Sandbox.HardExpiresAt)
+	stored := store.records[forkResp.Sandbox.ID]
+	require.NotNil(t, stored)
+	require.NotNil(t, stored.Config.TTL)
+	require.NotNil(t, stored.Config.HardTTL)
+	assert.Equal(t, ttl, *stored.Config.TTL)
+	assert.Equal(t, hardTTL, *stored.Config.HardTTL)
+	assert.Equal(t, wantExpiresAt, stored.ExpiresAt)
+	assert.Equal(t, wantHardExpiresAt, stored.HardExpiresAt)
+	assert.Equal(t, int32(900), *store.records["sandbox-1"].Config.TTL)
+	assert.Equal(t, int32(1800), *store.records["sandbox-1"].Config.HardTTL)
+}
+
+func TestSandboxRootFSProductForkCanDisableInheritedLifecycleConfig(t *testing.T) {
+	claimedAt := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	forkedAt := claimedAt.Add(5 * time.Minute)
+	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusPaused, claimedAt)
+	source.Config.TTL = int32Ptr(900)
+	source.Config.HardTTL = int32Ptr(1800)
+	source.ExpiresAt = claimedAt.Add(15 * time.Minute)
+	source.HardExpiresAt = claimedAt.Add(30 * time.Minute)
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{
+			"sandbox-1": source,
+		},
+		rootFSStates: map[string]*SandboxRootFSState{
+			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-v1"),
+		},
+	}
+	svc := rootFSProductTestService(store)
+	svc.clock = fixedClock{now: forkedAt}
+	zero := int32(0)
+
+	forkResp, err := svc.ForkSandbox(context.Background(), "sandbox-1", "team-1", "user-2", &ForkSandboxRequest{
+		Config: &ForkSandboxConfig{
+			TTL:     &zero,
+			HardTTL: &zero,
+		},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, forkResp)
+	require.NotNil(t, forkResp.Sandbox)
+	assert.True(t, forkResp.Sandbox.ExpiresAt.IsZero())
+	assert.True(t, forkResp.Sandbox.HardExpiresAt.IsZero())
+	stored := store.records[forkResp.Sandbox.ID]
+	require.NotNil(t, stored)
+	require.NotNil(t, stored.Config.TTL)
+	require.NotNil(t, stored.Config.HardTTL)
+	assert.Equal(t, int32(0), *stored.Config.TTL)
+	assert.Equal(t, int32(0), *stored.Config.HardTTL)
+	assert.True(t, stored.ExpiresAt.IsZero())
+	assert.True(t, stored.HardExpiresAt.IsZero())
+}
+
+func TestSandboxRootFSProductForkRejectsInvalidLifecycleConfig(t *testing.T) {
+	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusPaused, now)
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{
+			"sandbox-1": source,
+		},
+		rootFSStates: map[string]*SandboxRootFSState{
+			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-v1"),
+		},
+	}
+	svc := rootFSProductTestService(store)
+	ttl := int32(120)
+	hardTTL := int32(60)
+
+	_, err := svc.ForkSandbox(context.Background(), "sandbox-1", "team-1", "user-2", &ForkSandboxRequest{
+		Config: &ForkSandboxConfig{
+			TTL:     &ttl,
+			HardTTL: &hardTTL,
+		},
+	})
+
+	require.ErrorIs(t, err, ErrInvalidClaimRequest)
+	assert.Len(t, store.records, 1)
+}
+
+func TestSandboxRootFSProductForkRejectsHardExpiredSource(t *testing.T) {
+	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusPaused, now.Add(-time.Hour))
+	source.HardExpiresAt = now.Add(-time.Second)
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{
+			"sandbox-1": source,
+		},
+		rootFSStates: map[string]*SandboxRootFSState{
+			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-v1"),
+		},
+	}
+	svc := rootFSProductTestService(store)
+	svc.clock = fixedClock{now: now}
+
+	_, err := svc.ForkSandbox(context.Background(), "sandbox-1", "team-1", "user-2", nil)
+
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("ForkSandbox() error = %v, want not found", err)
+	}
+	assert.Len(t, store.records, 1)
+}
+
 func TestSandboxRootFSProductRejectsExpiredSnapshotExpiration(t *testing.T) {
 	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
 	store := &memorySandboxStore{

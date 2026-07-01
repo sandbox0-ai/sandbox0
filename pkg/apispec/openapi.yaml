@@ -4543,6 +4543,23 @@ components:
     ForkSandboxRequest:
       type: object
       additionalProperties: false
+      properties:
+        config:
+          $ref: "#/components/schemas/ForkSandboxConfig"
+      description: |
+        Optional fork overrides. Omit config to inherit the source sandbox configuration.
+    ForkSandboxConfig:
+      type: object
+      additionalProperties: false
+      properties:
+        ttl:
+          type: integer
+          format: int32
+          description: Runtime soft time-to-live in seconds for the forked sandbox. Omit to inherit the source setting. Set 0 to disable soft expiration.
+        hard_ttl:
+          type: integer
+          format: int32
+          description: Sandbox hard time-to-live in seconds for the forked sandbox. Omit to inherit the source setting. Set 0 to disable hard expiration.
     ForkSandboxResponse:
       type: object
       properties:

@@ -33,7 +33,7 @@ Use [Volumes](/docs/sandbox/volume) when data must be mounted by multiple sandbo
 - `Create snapshot` reads the paused sandbox's current rootfs head and creates a snapshot record.
 - `Claim with snapshot_id` creates a running sandbox and initializes its writable rootfs from the selected snapshot before process APIs are initialized.
 - `Restore` changes a paused target sandbox rootfs head to the selected snapshot and leaves the sandbox paused.
-- `Fork` creates a new paused sandbox with the source sandbox configuration and an isolated rootfs fork.
+- `Fork` creates a new paused sandbox with the source sandbox configuration and an isolated rootfs fork. The fork request can override lifecycle `ttl` and `hard_ttl`.
 - `Resume` is required before reading or writing files through sandbox process and file APIs after restore or fork. A sandbox claimed with `snapshot_id` starts running.
 - Deleting a snapshot does not modify any sandbox already claimed or restored from it, and it does not affect forks created from the same rootfs state.
 
@@ -412,6 +412,15 @@ Fork creates a new paused sandbox from a paused source sandbox rootfs. The fork 
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/fork
 </Endpoint>
+
+Omit the request body to inherit the source sandbox lifecycle configuration. To set a new lifecycle window for the fork, pass `config.ttl` and/or `config.hard_ttl`. Positive values are counted from the fork creation time, and `0` disables that expiration path.
+
+    {
+        "config": {
+            "ttl": 300,
+            "hard_ttl": 3600
+        }
+    }
 
 <Tabs
   tabs={[

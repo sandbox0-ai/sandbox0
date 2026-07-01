@@ -569,7 +569,12 @@ func TestSandboxRootFSProductAPI(t *testing.T) {
 		t.Fatalf("restored rootfs state = %+v, want layer-v1", restoredState)
 	}
 
-	resp, body = doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxes/sandbox-1/fork", env.token, nil)
+	resp, body = doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxes/sandbox-1/fork", env.token, map[string]any{
+		"config": map[string]any{
+			"ttl":      60,
+			"hard_ttl": 120,
+		},
+	})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("fork sandbox status = %d, body = %s", resp.StatusCode, string(body))
 	}
@@ -585,6 +590,13 @@ func TestSandboxRootFSProductAPI(t *testing.T) {
 	}
 	if forkResp.Sandbox.ID == "sandbox-1" || forkResp.Sandbox.Status != service.SandboxStatusPaused {
 		t.Fatalf("unexpected fork sandbox: %+v", forkResp.Sandbox)
+	}
+	forkRecord, err := store.GetSandbox(context.Background(), forkResp.Sandbox.ID)
+	if err != nil {
+		t.Fatalf("get fork sandbox record: %v", err)
+	}
+	if forkRecord.Config.TTL == nil || *forkRecord.Config.TTL != 60 || forkRecord.Config.HardTTL == nil || *forkRecord.Config.HardTTL != 120 {
+		t.Fatalf("fork lifecycle config = %+v, want ttl=60 hard_ttl=120", forkRecord.Config)
 	}
 	forkState, err := store.GetLatestRootFSState(context.Background(), forkResp.Sandbox.ID)
 	if err != nil {

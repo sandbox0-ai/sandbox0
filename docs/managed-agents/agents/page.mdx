@@ -77,6 +77,7 @@ If the MCP server needs credentials, attach a vault to the session. The agent de
 
 - Reserved `sandbox0.managed_agents.*` metadata keys are not accepted on agents.
 - The agent model defaults to the Claude harness unless a session attaches an LLM vault that selects another supported harness.
+- Only custom skills are supported. Use `type: "custom"` with a `skill_*` id from the Skills API.
 - The agent object is copied into the session snapshot. Later agent updates do not mutate existing sessions.
 
 ## Next Steps
@@ -84,6 +85,10 @@ If the MCP server needs credentials, attach a vault to the session. The agent de
 <CardGroup>
   <Card title="Environments" href="/docs/managed-agents/environments" cta="Continue">
     Prepare reusable environments with packages and network policy.
+  </Card>
+
+  <Card title="Skills" href="/docs/managed-agents/skills" cta="Continue">
+    Upload reusable skill bundles and attach versions to agents.
   </Card>
 
   <Card title="Sessions" href="/docs/managed-agents/sessions" cta="Continue">

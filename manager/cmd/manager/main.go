@@ -361,6 +361,7 @@ func main() {
 		logger.Warn("Webhook state volumes disabled; sandbox claims with webhooks will fail until storage-proxy is configured")
 	}
 	sandboxService.SetDeletionWebhookEmitter(service.NewHTTPSandboxDeletionWebhookEmitter(obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration})))
+	podInformer.Informer().AddEventHandler(sandboxService.PodNetworkIdentityEventHandler())
 	sandboxLifecycleController := service.NewSandboxLifecycleController(k8sClient, podLister, sandboxService, logger)
 	podInformer.Informer().AddEventHandler(sandboxLifecycleController.ResourceEventHandler())
 	sandboxPauseController := service.NewSandboxPauseController(sandboxService, logger)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
@@ -17,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
 )
 
 // Sandbox represents a sandbox instance
@@ -126,6 +128,8 @@ type SandboxService struct {
 	rootFSObjectDeleter    RootFSObjectDeleter
 	resumeGroup            singleflight.Group
 	idlePodReservations    *idlePodReservations
+	podNetworkWaiterMu     sync.Mutex
+	podNetworkWaiter       *podNetworkIdentityWaiter
 }
 
 type TeamQuotaLimitStore interface {
@@ -239,8 +243,26 @@ func NewSandboxService(
 		logger:                 logger,
 		metrics:                metrics,
 		idlePodReservations:    newIdlePodReservations(),
+		podNetworkWaiter:       newPodNetworkIdentityWaiter(),
 	}
 	return service
+}
+
+// PodNetworkIdentityEventHandler wakes cold-claim waiters from shared pod informer events.
+func (s *SandboxService) PodNetworkIdentityEventHandler() cache.ResourceEventHandlerFuncs {
+	if s == nil {
+		return cache.ResourceEventHandlerFuncs{}
+	}
+	return s.ensurePodNetworkIdentityWaiter().ResourceEventHandler()
+}
+
+func (s *SandboxService) ensurePodNetworkIdentityWaiter() *podNetworkIdentityWaiter {
+	s.podNetworkWaiterMu.Lock()
+	defer s.podNetworkWaiterMu.Unlock()
+	if s.podNetworkWaiter == nil {
+		s.podNetworkWaiter = newPodNetworkIdentityWaiter()
+	}
+	return s.podNetworkWaiter
 }
 
 // SupportsNetworkPolicy reports whether this deployment has an active network policy provider.

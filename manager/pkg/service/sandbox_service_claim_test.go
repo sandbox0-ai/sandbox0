@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,6 +33,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
@@ -548,20 +551,70 @@ func TestWaitForPodNetworkIdentityWaitsForNodeNameAndPodIP(t *testing.T) {
 		podLister: corelisters.NewPodLister(indexer),
 		logger:    zap.NewNop(),
 	}
+	handler := svc.PodNetworkIdentityEventHandler()
 
 	go func() {
 		time.Sleep(80 * time.Millisecond)
-		updated := pod.DeepCopy()
-		updated.Spec.NodeName = "node-a"
+		nodeOnly := pod.DeepCopy()
+		nodeOnly.Spec.NodeName = "node-a"
+		if err := indexer.Update(nodeOnly); err != nil {
+			t.Errorf("update pod: %v", err)
+		}
+		handler.UpdateFunc(pod, nodeOnly)
+
+		time.Sleep(80 * time.Millisecond)
+		updated := nodeOnly.DeepCopy()
 		updated.Status.PodIP = "10.244.0.10"
 		if err := indexer.Update(updated); err != nil {
 			t.Errorf("update pod: %v", err)
 		}
+		handler.UpdateFunc(nodeOnly, updated)
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	readyPod, err := svc.waitForPodNetworkIdentity(ctx, pod.Namespace, pod.Name)
+	readyPod, err := svc.waitForPodNetworkIdentity(ctx, "template-a", pod.Namespace, pod.Name)
+	if err != nil {
+		t.Fatalf("waitForPodNetworkIdentity() error = %v", err)
+	}
+	if readyPod.Spec.NodeName != "node-a" {
+		t.Fatalf("node name = %q, want node-a", readyPod.Spec.NodeName)
+	}
+	if readyPod.Status.PodIP != "10.244.0.10" {
+		t.Fatalf("pod IP = %q, want 10.244.0.10", readyPod.Status.PodIP)
+	}
+}
+
+func TestWaitForPodNetworkIdentityWaitsForNodeNameWhenPodIPArrivesFirst(t *testing.T) {
+	pod := newClaimTestPod("ns-a", "cold-pod", "template-a", false)
+	indexer := newClaimTestPodIndexer(t, pod)
+	svc := &SandboxService{
+		podLister: corelisters.NewPodLister(indexer),
+		logger:    zap.NewNop(),
+	}
+	handler := svc.PodNetworkIdentityEventHandler()
+
+	go func() {
+		time.Sleep(80 * time.Millisecond)
+		ipOnly := pod.DeepCopy()
+		ipOnly.Status.PodIP = "10.244.0.10"
+		if err := indexer.Update(ipOnly); err != nil {
+			t.Errorf("update pod: %v", err)
+		}
+		handler.UpdateFunc(pod, ipOnly)
+
+		time.Sleep(80 * time.Millisecond)
+		updated := ipOnly.DeepCopy()
+		updated.Spec.NodeName = "node-a"
+		if err := indexer.Update(updated); err != nil {
+			t.Errorf("update pod: %v", err)
+		}
+		handler.UpdateFunc(ipOnly, updated)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	readyPod, err := svc.waitForPodNetworkIdentity(ctx, "template-a", pod.Namespace, pod.Name)
 	if err != nil {
 		t.Fatalf("waitForPodNetworkIdentity() error = %v", err)
 	}
@@ -585,17 +638,19 @@ func TestWaitForPodNetworkIdentityWaitsForInformerWhenLivePodIsReady(t *testing.
 		podLister: corelisters.NewPodLister(indexer),
 		logger:    zap.NewNop(),
 	}
+	handler := svc.PodNetworkIdentityEventHandler()
 
 	go func() {
 		time.Sleep(80 * time.Millisecond)
 		if err := indexer.Update(livePod.DeepCopy()); err != nil {
 			t.Errorf("update pod: %v", err)
 		}
+		handler.UpdateFunc(cachedPod, livePod)
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	readyPod, err := svc.waitForPodNetworkIdentity(ctx, cachedPod.Namespace, cachedPod.Name)
+	readyPod, err := svc.waitForPodNetworkIdentity(ctx, "template-a", cachedPod.Namespace, cachedPod.Name)
 	if err != nil {
 		t.Fatalf("waitForPodNetworkIdentity() error = %v", err)
 	}
@@ -607,6 +662,129 @@ func TestWaitForPodNetworkIdentityWaitsForInformerWhenLivePodIsReady(t *testing.
 	}
 	if actions := client.Actions(); len(actions) != 0 {
 		t.Fatalf("unexpected live Kubernetes client actions while waiting for network identity: %#v", actions)
+	}
+}
+
+func TestWaitForPodNetworkIdentityReturnsReadyFromCache(t *testing.T) {
+	pod := newClaimTestPod("ns-a", "cold-pod", "template-a", false)
+	pod.Spec.NodeName = "node-a"
+	pod.Status.PodIP = "10.244.0.10"
+	indexer := newClaimTestPodIndexer(t, pod)
+	svc := &SandboxService{
+		podLister: corelisters.NewPodLister(indexer),
+		logger:    zap.NewNop(),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	readyPod, err := svc.waitForPodNetworkIdentity(ctx, "template-a", pod.Namespace, pod.Name)
+	if err != nil {
+		t.Fatalf("waitForPodNetworkIdentity() error = %v", err)
+	}
+	if readyPod.Name != pod.Name {
+		t.Fatalf("ready pod = %s, want %s", readyPod.Name, pod.Name)
+	}
+}
+
+func TestWaitForPodNetworkIdentityReturnsOnDeleteOrTerminal(t *testing.T) {
+	tests := []struct {
+		name      string
+		reason    string
+		updatePod func(*testing.T, cache.ResourceEventHandlerFuncs, cache.Indexer, *corev1.Pod)
+	}{
+		{
+			name:   "terminal",
+			reason: "terminal",
+			updatePod: func(t *testing.T, handler cache.ResourceEventHandlerFuncs, indexer cache.Indexer, pod *corev1.Pod) {
+				updated := pod.DeepCopy()
+				updated.Status.Phase = corev1.PodFailed
+				if err := indexer.Update(updated); err != nil {
+					t.Fatalf("update pod: %v", err)
+				}
+				handler.UpdateFunc(pod, updated)
+			},
+		},
+		{
+			name:   "deleted",
+			reason: "deleting",
+			updatePod: func(t *testing.T, handler cache.ResourceEventHandlerFuncs, indexer cache.Indexer, pod *corev1.Pod) {
+				if err := indexer.Delete(pod); err != nil {
+					t.Fatalf("delete pod: %v", err)
+				}
+				handler.DeleteFunc(pod)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := newClaimTestPod("ns-a", "cold-pod", "template-a", false)
+			indexer := newClaimTestPodIndexer(t, pod)
+			svc := &SandboxService{
+				podLister: corelisters.NewPodLister(indexer),
+				logger:    zap.NewNop(),
+			}
+			handler := svc.PodNetworkIdentityEventHandler()
+
+			go func() {
+				time.Sleep(80 * time.Millisecond)
+				tt.updatePod(t, handler, indexer, pod)
+			}()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_, err := svc.waitForPodNetworkIdentity(ctx, "template-a", pod.Namespace, pod.Name)
+			if err == nil {
+				t.Fatal("waitForPodNetworkIdentity() error = nil, want error")
+			}
+			if !strings.Contains(err.Error(), tt.reason) {
+				t.Fatalf("waitForPodNetworkIdentity() error = %v, want reason containing %q", err, tt.reason)
+			}
+		})
+	}
+}
+
+func TestWaitForPodNetworkIdentityTimesOut(t *testing.T) {
+	pod := newClaimTestPod("ns-a", "cold-pod", "template-a", false)
+	indexer := newClaimTestPodIndexer(t, pod)
+	svc := &SandboxService{
+		podLister: corelisters.NewPodLister(indexer),
+		logger:    zap.NewNop(),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := svc.waitForPodNetworkIdentity(ctx, "template-a", pod.Namespace, pod.Name)
+	if err == nil {
+		t.Fatal("waitForPodNetworkIdentity() error = nil, want timeout")
+	}
+	if !strings.Contains(err.Error(), "network identity not ready") {
+		t.Fatalf("waitForPodNetworkIdentity() error = %v, want network identity timeout", err)
+	}
+}
+
+func TestWaitForPodNetworkIdentityUsesCacheRecheckForMissedEventRace(t *testing.T) {
+	notReady := newClaimTestPod("ns-a", "cold-pod", "template-a", false)
+	ready := notReady.DeepCopy()
+	ready.Spec.NodeName = "node-a"
+	ready.Status.PodIP = "10.244.0.10"
+	lister := &sequencePodLister{pods: []*corev1.Pod{notReady, ready}}
+	svc := &SandboxService{
+		podLister: lister,
+		logger:    zap.NewNop(),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	readyPod, err := svc.waitForPodNetworkIdentity(ctx, "template-a", notReady.Namespace, notReady.Name)
+	if err != nil {
+		t.Fatalf("waitForPodNetworkIdentity() error = %v", err)
+	}
+	if readyPod.Status.PodIP != "10.244.0.10" {
+		t.Fatalf("pod IP = %q, want 10.244.0.10", readyPod.Status.PodIP)
+	}
+	if got := lister.callCount(); got != 2 {
+		t.Fatalf("pod lister Get calls = %d, want 2", got)
 	}
 }
 
@@ -1130,6 +1308,33 @@ func TestObserveClaimPhaseRecordsMetric(t *testing.T) {
 	}
 	if got := metric.GetHistogram().GetSampleSum(); got <= 0 {
 		t.Fatalf("claim phase sample sum = %f, want > 0", got)
+	}
+}
+
+func TestObservePodNetworkIdentityStageRecordsMetric(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	svc := &SandboxService{metrics: obsmetrics.NewManager(registry)}
+
+	svc.observePodNetworkIdentityStage("managed-agents", "pod_ip_assigned", "timeout", "pod IP is not assigned", time.Now().Add(-20*time.Millisecond))
+
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	metric := findMetric(families, "manager_pod_network_identity_stage_duration_seconds", map[string]string{
+		"template": "managed-agents",
+		"stage":    "pod_ip_assigned",
+		"status":   "timeout",
+		"reason":   "ip_unassigned",
+	})
+	if metric == nil || metric.GetHistogram() == nil {
+		t.Fatal("pod network identity stage histogram metric not found")
+	}
+	if got := metric.GetHistogram().GetSampleCount(); got != 1 {
+		t.Fatalf("pod network identity stage sample count = %d, want 1", got)
+	}
+	if got := metric.GetHistogram().GetSampleSum(); got <= 0 {
+		t.Fatalf("pod network identity stage sample sum = %f, want > 0", got)
 	}
 }
 
@@ -1923,4 +2128,66 @@ func metricLabelsMatch(metric *dto.Metric, labels map[string]string) bool {
 		}
 	}
 	return true
+}
+
+type sequencePodLister struct {
+	mu    sync.Mutex
+	pods  []*corev1.Pod
+	calls int
+}
+
+func (l *sequencePodLister) List(_ labels.Selector) ([]*corev1.Pod, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.pods) == 0 {
+		return nil, nil
+	}
+	return []*corev1.Pod{l.pods[len(l.pods)-1].DeepCopy()}, nil
+}
+
+func (l *sequencePodLister) Pods(namespace string) corelisters.PodNamespaceLister {
+	return &sequencePodNamespaceLister{parent: l, namespace: namespace}
+}
+
+func (l *sequencePodLister) callCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.calls
+}
+
+type sequencePodNamespaceLister struct {
+	parent    *sequencePodLister
+	namespace string
+}
+
+func (l *sequencePodNamespaceLister) List(_ labels.Selector) ([]*corev1.Pod, error) {
+	pods, err := l.parent.List(labels.Everything())
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*corev1.Pod, 0, len(pods))
+	for _, pod := range pods {
+		if pod.Namespace == l.namespace {
+			out = append(out, pod)
+		}
+	}
+	return out, nil
+}
+
+func (l *sequencePodNamespaceLister) Get(name string) (*corev1.Pod, error) {
+	l.parent.mu.Lock()
+	defer l.parent.mu.Unlock()
+	if len(l.parent.pods) == 0 {
+		return nil, apierrors.NewNotFound(corev1.Resource("pods"), name)
+	}
+	index := l.parent.calls
+	if index >= len(l.parent.pods) {
+		index = len(l.parent.pods) - 1
+	}
+	l.parent.calls++
+	pod := l.parent.pods[index]
+	if pod == nil || pod.Namespace != l.namespace || pod.Name != name {
+		return nil, apierrors.NewNotFound(corev1.Resource("pods"), name)
+	}
+	return pod.DeepCopy(), nil
 }

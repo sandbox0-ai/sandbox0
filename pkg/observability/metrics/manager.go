@@ -7,35 +7,36 @@ import (
 
 // ManagerMetrics holds Prometheus metrics for the manager service.
 type ManagerMetrics struct {
-	TemplatesTotal                 prometheus.Gauge
-	IdlePodsTotal                  *prometheus.GaugeVec
-	ActivePodsTotal                *prometheus.GaugeVec
-	SandboxClaimsTotal             *prometheus.CounterVec
-	SandboxClaimDuration           *prometheus.HistogramVec
-	SandboxClaimPhaseDuration      *prometheus.HistogramVec
-	SandboxIdleClaimsTotal         *prometheus.CounterVec
-	PodNetworkIdentityChecksTotal  *prometheus.CounterVec
-	NetworkPolicyApplyTotal        *prometheus.CounterVec
-	NetworkPolicyApplyDuration     *prometheus.HistogramVec
-	K8sClientRateLimit             *prometheus.GaugeVec
-	AutoscalerDecisionsTotal       *prometheus.CounterVec
-	AutoscalerPoolReplicas         *prometheus.GaugeVec
-	AutoscalerPoolPods             *prometheus.GaugeVec
-	AutoscalerColdClaimsInFlight   *prometheus.GaugeVec
-	AutoscalerScaleDelta           *prometheus.HistogramVec
-	PodsCleanedTotal               *prometheus.CounterVec
-	ReconcileTotal                 *prometheus.CounterVec
-	ReconcileDuration              *prometheus.HistogramVec
-	MeteringEventsTotal            *prometheus.CounterVec
-	MeteringWindowsTotal           *prometheus.CounterVec
-	MeteringErrorsTotal            *prometheus.CounterVec
-	RootFSMaintenanceRunsTotal     *prometheus.CounterVec
-	RootFSMaintenanceDuration      *prometheus.HistogramVec
-	RootFSGCLayersTotal            prometheus.Counter
-	RootFSObjectDeletesTotal       *prometheus.CounterVec
-	RootFSObjectDeletionQueueDepth *prometheus.GaugeVec
-	RootFSStorageBytes             prometheus.Gauge
-	RootFSStorageObjects           prometheus.Gauge
+	TemplatesTotal                  prometheus.Gauge
+	IdlePodsTotal                   *prometheus.GaugeVec
+	ActivePodsTotal                 *prometheus.GaugeVec
+	SandboxClaimsTotal              *prometheus.CounterVec
+	SandboxClaimDuration            *prometheus.HistogramVec
+	SandboxClaimPhaseDuration       *prometheus.HistogramVec
+	SandboxIdleClaimsTotal          *prometheus.CounterVec
+	PodNetworkIdentityChecksTotal   *prometheus.CounterVec
+	PodNetworkIdentityStageDuration *prometheus.HistogramVec
+	NetworkPolicyApplyTotal         *prometheus.CounterVec
+	NetworkPolicyApplyDuration      *prometheus.HistogramVec
+	K8sClientRateLimit              *prometheus.GaugeVec
+	AutoscalerDecisionsTotal        *prometheus.CounterVec
+	AutoscalerPoolReplicas          *prometheus.GaugeVec
+	AutoscalerPoolPods              *prometheus.GaugeVec
+	AutoscalerColdClaimsInFlight    *prometheus.GaugeVec
+	AutoscalerScaleDelta            *prometheus.HistogramVec
+	PodsCleanedTotal                *prometheus.CounterVec
+	ReconcileTotal                  *prometheus.CounterVec
+	ReconcileDuration               *prometheus.HistogramVec
+	MeteringEventsTotal             *prometheus.CounterVec
+	MeteringWindowsTotal            *prometheus.CounterVec
+	MeteringErrorsTotal             *prometheus.CounterVec
+	RootFSMaintenanceRunsTotal      *prometheus.CounterVec
+	RootFSMaintenanceDuration       *prometheus.HistogramVec
+	RootFSGCLayersTotal             prometheus.Counter
+	RootFSObjectDeletesTotal        *prometheus.CounterVec
+	RootFSObjectDeletionQueueDepth  *prometheus.GaugeVec
+	RootFSStorageBytes              prometheus.Gauge
+	RootFSStorageObjects            prometheus.Gauge
 }
 
 // NewManager registers and returns manager metrics.
@@ -82,6 +83,11 @@ func NewManager(registry prometheus.Registerer) *ManagerMetrics {
 			Name: "manager_pod_network_identity_checks_total",
 			Help: "Total number of pod network identity readiness checks by source, result, and reason",
 		}, []string{"source", "result", "reason"}),
+		PodNetworkIdentityStageDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "manager_pod_network_identity_stage_duration_seconds",
+			Help:    "Duration of pod network identity wait stages",
+			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120},
+		}, []string{"template", "stage", "status", "reason"}),
 		NetworkPolicyApplyTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "manager_network_policy_apply_total",
 			Help: "Total number of network policy apply attempts by provider and result",

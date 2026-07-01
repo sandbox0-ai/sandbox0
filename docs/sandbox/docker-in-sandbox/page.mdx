@@ -1,6 +1,6 @@
 # Docker in Sandbox
 
-Docker in Sandbox lets a sandbox run a Docker daemon inside the sandbox. The built-in `default` template includes Docker support for tests, build steps, or agent tools that expect a local Docker socket.
+Docker in Sandbox lets a Sandbox0 Cloud sandbox run a Docker daemon inside the sandbox. Use it when a coding agent or test workflow expects Docker commands such as `docker run` or `docker build`.
 
 Typical uses:
 
@@ -11,12 +11,43 @@ Typical uses:
 `/var/lib/docker` is ephemeral. Images, containers, layers, and Docker volumes are discarded when the sandbox is deleted. Store source code and durable outputs in Sandbox volumes instead.
 
 <Callout variant="info">
-The `default` template provides Docker binaries and writable Docker state, but it does not start `dockerd` before the sandbox is claimed. Start `/usr/local/bin/sandbox0-dockerd-entrypoint` from a sandbox command before using `docker`.
+The built-in `default` template provides Docker binaries and writable Docker state, but it does not start `dockerd` before the sandbox is claimed. The examples below start Docker in a Sandbox0 Cloud-compatible mode before running containers.
 </Callout>
 
 <Callout variant="warning">
-For multi-tenant production deployments, run sandbox pods with a sandboxed runtime class such as gVisor or Kata. Docker runs inside the sandbox boundary; do not mount host Docker sockets or host paths into sandbox templates.
+Docker should run inside the sandbox boundary. Do not mount a host Docker socket into an agent sandbox just to make Docker commands work.
 </Callout>
+
+---
+
+## Cloud Usage Pattern
+
+For Sandbox0 Cloud, use host networking for service containers:
+
+- Start a sandbox-local Docker daemon with Docker-managed bridge networking disabled.
+- Run service containers with `--network=host`.
+- Connect to those services from commands in the same sandbox at `127.0.0.1:<port>`.
+
+Start Docker once per running sandbox:
+
+```bash
+if ! docker info >/dev/null 2>&1; then
+    rm -f /var/run/docker.sock /run/docker.sock /var/run/docker.pid
+    /usr/bin/dockerd \
+        --host=unix:///var/run/docker.sock \
+        --data-root=/var/lib/docker \
+        --exec-root=/var/run/docker \
+        --storage-driver=vfs \
+        --iptables=false \
+        --ip6tables=false \
+        --bridge=none \
+        --ip-forward=false \
+        --ip-masq=false \
+        >/tmp/sandbox0-dockerd.log 2>&1 &
+
+    until docker info >/dev/null 2>&1; do sleep 1; done
+fi
+```
 
 ---
 
@@ -64,14 +95,17 @@ func main() {
 
     startScript := strings.Join([]string{
         "set -e",
-        "/usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &",
+        "if ! docker info >/dev/null 2>&1; then",
+        "rm -f /var/run/docker.sock /run/docker.sock /var/run/docker.pid",
+        "/usr/bin/dockerd --host=unix:///var/run/docker.sock --data-root=/var/lib/docker --exec-root=/var/run/docker --storage-driver=vfs --iptables=false --ip6tables=false --bridge=none --ip-forward=false --ip-masq=false >/tmp/sandbox0-dockerd.log 2>&1 &",
         "until docker info >/dev/null 2>&1; do sleep 1; done",
+        "fi",
         "rm -f /tmp/sandbox0-test-databases.ready",
         "docker rm -f test-redis test-postgres >/dev/null 2>&1 || true",
         "docker pull redis:7-alpine",
         "docker pull postgres:16-alpine",
-        "docker run -d --name test-redis -p 6379:6379 redis:7-alpine",
-        "docker run -d --name test-postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=app_test -p 5432:5432 postgres:16-alpine",
+        "docker run -d --name test-redis --network=host redis:7-alpine",
+        "docker run -d --name test-postgres --network=host -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=app_test postgres:16-alpine",
         "until docker exec test-redis redis-cli ping | grep -q PONG; do sleep 1; done",
         "until docker exec test-postgres pg_isready -U postgres >/dev/null; do sleep 1; done",
         "touch /tmp/sandbox0-test-databases.ready",
@@ -134,14 +168,17 @@ try:
 
     start_script = """
 set -e
-/usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &
-until docker info >/dev/null 2>&1; do sleep 1; done
+if ! docker info >/dev/null 2>&1; then
+  rm -f /var/run/docker.sock /run/docker.sock /var/run/docker.pid
+  /usr/bin/dockerd --host=unix:///var/run/docker.sock --data-root=/var/lib/docker --exec-root=/var/run/docker --storage-driver=vfs --iptables=false --ip6tables=false --bridge=none --ip-forward=false --ip-masq=false >/tmp/sandbox0-dockerd.log 2>&1 &
+  until docker info >/dev/null 2>&1; do sleep 1; done
+fi
 rm -f /tmp/sandbox0-test-databases.ready
 docker rm -f test-redis test-postgres >/dev/null 2>&1 || true
 docker pull redis:7-alpine
 docker pull postgres:16-alpine
-docker run -d --name test-redis -p 6379:6379 redis:7-alpine
-docker run -d --name test-postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=app_test -p 5432:5432 postgres:16-alpine
+docker run -d --name test-redis --network=host redis:7-alpine
+docker run -d --name test-postgres --network=host -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=app_test postgres:16-alpine
 until docker exec test-redis redis-cli ping | grep -q PONG; do sleep 1; done
 until docker exec test-postgres pg_isready -U postgres >/dev/null; do sleep 1; done
 touch /tmp/sandbox0-test-databases.ready
@@ -190,14 +227,17 @@ finally:
 
         const startScript = [
             'set -e',
-            '/usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &',
+            'if ! docker info >/dev/null 2>&1; then',
+            'rm -f /var/run/docker.sock /run/docker.sock /var/run/docker.pid',
+            '/usr/bin/dockerd --host=unix:///var/run/docker.sock --data-root=/var/lib/docker --exec-root=/var/run/docker --storage-driver=vfs --iptables=false --ip6tables=false --bridge=none --ip-forward=false --ip-masq=false >/tmp/sandbox0-dockerd.log 2>&1 &',
             'until docker info >/dev/null 2>&1; do sleep 1; done',
+            'fi',
             'rm -f /tmp/sandbox0-test-databases.ready',
             'docker rm -f test-redis test-postgres >/dev/null 2>&1 || true',
             'docker pull redis:7-alpine',
             'docker pull postgres:16-alpine',
-            'docker run -d --name test-redis -p 6379:6379 redis:7-alpine',
-            'docker run -d --name test-postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=app_test -p 5432:5432 postgres:16-alpine',
+            'docker run -d --name test-redis --network=host redis:7-alpine',
+            'docker run -d --name test-postgres --network=host -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=app_test postgres:16-alpine',
             'until docker exec test-redis redis-cli ping | grep -q PONG; do sleep 1; done',
             'until docker exec test-postgres pg_isready -U postgres >/dev/null; do sleep 1; done',
             'touch /tmp/sandbox0-test-databases.ready',
@@ -250,17 +290,20 @@ s0 sandbox exec "$SANDBOX_ID" -- rm -f /tmp/sandbox0-test-databases.ready
 
 s0 sandbox exec "$SANDBOX_ID" --no-wait --ttl 1800 -- /bin/sh -lc '
 set -e
-/usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &
-until docker info >/dev/null 2>&1; do sleep 1; done
+if ! docker info >/dev/null 2>&1; then
+  rm -f /var/run/docker.sock /run/docker.sock /var/run/docker.pid
+  /usr/bin/dockerd --host=unix:///var/run/docker.sock --data-root=/var/lib/docker --exec-root=/var/run/docker --storage-driver=vfs --iptables=false --ip6tables=false --bridge=none --ip-forward=false --ip-masq=false >/tmp/sandbox0-dockerd.log 2>&1 &
+  until docker info >/dev/null 2>&1; do sleep 1; done
+fi
 rm -f /tmp/sandbox0-test-databases.ready
 docker rm -f test-redis test-postgres >/dev/null 2>&1 || true
 docker pull redis:7-alpine
 docker pull postgres:16-alpine
-docker run -d --name test-redis -p 6379:6379 redis:7-alpine
+docker run -d --name test-redis --network=host redis:7-alpine
 docker run -d --name test-postgres \
+  --network=host \
   -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=app_test \
-  -p 5432:5432 \
   postgres:16-alpine
 until docker exec test-redis redis-cli ping | grep -q PONG; do sleep 1; done
 until docker exec test-postgres pg_isready -U postgres; do sleep 1; done
@@ -318,8 +361,11 @@ Docker build cache also lives under `/var/lib/docker`, so this is best for tempo
       language: "go",
       code: `script := strings.Join([]string{
     "set -e",
-    "/usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &",
+    "if ! docker info >/dev/null 2>&1; then",
+    "rm -f /var/run/docker.sock /run/docker.sock /var/run/docker.pid",
+    "/usr/bin/dockerd --host=unix:///var/run/docker.sock --data-root=/var/lib/docker --exec-root=/var/run/docker --storage-driver=vfs --iptables=false --ip6tables=false --bridge=none --ip-forward=false --ip-masq=false >/tmp/sandbox0-dockerd.log 2>&1 &",
     "until docker info >/dev/null 2>&1; do sleep 1; done",
+    "fi",
     "cat > main.go <<'EOF'",
     "package main",
     "import \\"fmt\\"",
@@ -332,7 +378,7 @@ Docker build cache also lives under `/var/lib/docker`, so this is best for tempo
     "ENTRYPOINT [\\"/hello\\"]",
     "EOF",
     "docker build -t sandbox0-docker-test .",
-    "docker run --rm sandbox0-docker-test",
+    "docker run --rm --network=none sandbox0-docker-test",
 }, "\\n")
 
 result, err := sandbox.Cmd(ctx, "sh",
@@ -351,8 +397,11 @@ fmt.Print(result.OutputRaw)`
       language: "python",
       code: `script = """
 set -e
-/usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &
-until docker info >/dev/null 2>&1; do sleep 1; done
+if ! docker info >/dev/null 2>&1; then
+  rm -f /var/run/docker.sock /run/docker.sock /var/run/docker.pid
+  /usr/bin/dockerd --host=unix:///var/run/docker.sock --data-root=/var/lib/docker --exec-root=/var/run/docker --storage-driver=vfs --iptables=false --ip6tables=false --bridge=none --ip-forward=false --ip-masq=false >/tmp/sandbox0-dockerd.log 2>&1 &
+  until docker info >/dev/null 2>&1; do sleep 1; done
+fi
 cat > main.go <<'EOF'
 package main
 import "fmt"
@@ -365,7 +414,7 @@ COPY hello /hello
 ENTRYPOINT ["/hello"]
 EOF
 docker build -t sandbox0-docker-test .
-docker run --rm sandbox0-docker-test
+docker run --rm --network=none sandbox0-docker-test
 """
 
 result = sandbox.cmd(
@@ -381,8 +430,11 @@ print(result.output_raw, end="")`
       language: "typescript",
       code: `const script = [
     'set -e',
-    '/usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &',
+    'if ! docker info >/dev/null 2>&1; then',
+    'rm -f /var/run/docker.sock /run/docker.sock /var/run/docker.pid',
+    '/usr/bin/dockerd --host=unix:///var/run/docker.sock --data-root=/var/lib/docker --exec-root=/var/run/docker --storage-driver=vfs --iptables=false --ip6tables=false --bridge=none --ip-forward=false --ip-masq=false >/tmp/sandbox0-dockerd.log 2>&1 &',
     'until docker info >/dev/null 2>&1; do sleep 1; done',
+    'fi',
     "cat > main.go <<'EOF'",
     'package main',
     'import "fmt"',
@@ -395,7 +447,7 @@ print(result.output_raw, end="")`
     'ENTRYPOINT ["/hello"]',
     'EOF',
     'docker build -t sandbox0-docker-test .',
-    'docker run --rm sandbox0-docker-test',
+    'docker run --rm --network=none sandbox0-docker-test',
 ].join('\\n');
 
 const result = await sandbox.cmd('sh', {
@@ -411,8 +463,11 @@ process.stdout.write(result.outputRaw);`
       language: "bash",
       code: `s0 sandbox exec "$SANDBOX_ID" --stream -- /bin/sh -lc '
 set -e
-/usr/local/bin/sandbox0-dockerd-entrypoint >/tmp/sandbox0-dockerd.log 2>&1 &
-until docker info >/dev/null 2>&1; do sleep 1; done
+if ! docker info >/dev/null 2>&1; then
+  rm -f /var/run/docker.sock /run/docker.sock /var/run/docker.pid
+  /usr/bin/dockerd --host=unix:///var/run/docker.sock --data-root=/var/lib/docker --exec-root=/var/run/docker --storage-driver=vfs --iptables=false --ip6tables=false --bridge=none --ip-forward=false --ip-masq=false >/tmp/sandbox0-dockerd.log 2>&1 &
+  until docker info >/dev/null 2>&1; do sleep 1; done
+fi
 cat > main.go <<'"'"'EOF'"'"'
 package main
 import "fmt"
@@ -425,7 +480,7 @@ COPY hello /hello
 ENTRYPOINT ["/hello"]
 EOF
 docker build -t sandbox0-docker-test .
-docker run --rm sandbox0-docker-test
+docker run --rm --network=none sandbox0-docker-test
 '`
     }
   ]}
@@ -433,14 +488,23 @@ docker run --rm sandbox0-docker-test
 
 ---
 
+## Nested Kubernetes And kind
+
+Nested Kubernetes tools such as kind and k3d need more than basic Docker command support. They create Kubernetes node containers and expect Docker to support cgroup namespaces plus host-like container networking. If the command fails with an error such as `cgroup namespaces aren't enabled in the kernel`, that sandbox cannot run kind reliably even if ordinary `docker run` and `docker build` commands work.
+
+For projects that require kind, run that part of the workflow in a VM, a CI runner, or another environment with full Docker bridge networking and cgroup namespace support. See the [kind known issues](https://kind.sigs.k8s.io/docs/user/known-issues/#older-linux-distributions) for the cgroup namespace requirement.
+
+---
+
 ## Operational Notes
 
-- Containers launched by Docker are sandbox-local. Start test dependencies with `-p` and connect to `127.0.0.1` from commands inside the sandbox.
+- Containers launched by Docker are sandbox-local. In Sandbox0 Cloud, use `--network=host` for Redis, PostgreSQL, nginx, and similar service containers, then connect to `127.0.0.1` from commands inside the sandbox.
+- If you run against an environment where Docker port publishing works, `-p hostPort:containerPort` is also fine. The Cloud examples use `--network=host` because it avoids relying on Docker bridge/NAT.
 - Use Sandbox Services when a containerized HTTP service needs to be reachable from outside the sandbox.
 - Docker state is not durable. Use Sandbox Volumes for source, generated files, or database dumps that must survive sandbox cleanup.
 - Docker state uses the default template's ephemeral storage limit. Hosted default sandboxes keep the standard `500m` CPU and `2Gi` memory baseline, so large builds should request larger sandbox resources.
 - Pulling images can take longer than a single synchronous command request. Start long Docker setup commands asynchronously, then poll readiness with short commands.
-- Nested Kubernetes tools such as kind can run in a Docker in Sandbox environment, but node images and cluster data consume the sandbox's ephemeral disk.
+- kind and similar nested Kubernetes tools require cgroup namespace and networking support beyond ordinary Docker builds. Use a VM or CI runner when those kernel features are not available.
 - Long-running containers count against the sandbox resource limits. Stop containers when a test run finishes if the sandbox will stay alive.
 
 ---

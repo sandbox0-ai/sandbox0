@@ -573,17 +573,25 @@ func TestWaitForPodNetworkIdentityWaitsForNodeNameAndPodIP(t *testing.T) {
 	}
 }
 
-func TestWaitForPodNetworkIdentityUsesLivePodWhenInformerStale(t *testing.T) {
+func TestWaitForPodNetworkIdentityWaitsForInformerWhenLivePodIsReady(t *testing.T) {
 	cachedPod := newClaimTestPod("ns-a", "cold-pod", "template-a", false)
 	livePod := cachedPod.DeepCopy()
 	livePod.Spec.NodeName = "node-a"
 	livePod.Status.PodIP = "10.244.0.10"
 	indexer := newClaimTestPodIndexer(t, cachedPod)
+	client := fake.NewSimpleClientset(livePod)
 	svc := &SandboxService{
-		k8sClient: fake.NewSimpleClientset(livePod),
+		k8sClient: client,
 		podLister: corelisters.NewPodLister(indexer),
 		logger:    zap.NewNop(),
 	}
+
+	go func() {
+		time.Sleep(80 * time.Millisecond)
+		if err := indexer.Update(livePod.DeepCopy()); err != nil {
+			t.Errorf("update pod: %v", err)
+		}
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -596,6 +604,9 @@ func TestWaitForPodNetworkIdentityUsesLivePodWhenInformerStale(t *testing.T) {
 	}
 	if readyPod.Status.PodIP != "10.244.0.10" {
 		t.Fatalf("pod IP = %q, want 10.244.0.10", readyPod.Status.PodIP)
+	}
+	if actions := client.Actions(); len(actions) != 0 {
+		t.Fatalf("unexpected live Kubernetes client actions while waiting for network identity: %#v", actions)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
+	networkinglisters "k8s.io/client-go/listers/networking/v1"
 	"k8s.io/client-go/util/retry"
 )
 
@@ -45,10 +46,11 @@ type Config struct {
 
 // Reconciler manages template namespace ingress baseline policies.
 type Reconciler struct {
-	client          kubernetes.Interface
-	logger          *zap.Logger
-	systemNamespace string
-	procdPort       int
+	client              kubernetes.Interface
+	networkPolicyLister networkinglisters.NetworkPolicyLister
+	logger              *zap.Logger
+	systemNamespace     string
+	procdPort           int
 }
 
 type systemIngressRule struct {
@@ -57,7 +59,7 @@ type systemIngressRule struct {
 }
 
 // NewReconciler creates a manager-owned template namespace baseline reconciler.
-func NewReconciler(client kubernetes.Interface, cfg Config, logger *zap.Logger) (*Reconciler, error) {
+func NewReconciler(client kubernetes.Interface, networkPolicyLister networkinglisters.NetworkPolicyLister, cfg Config, logger *zap.Logger) (*Reconciler, error) {
 	if client == nil {
 		return nil, fmt.Errorf("k8s client is required")
 	}
@@ -76,10 +78,11 @@ func NewReconciler(client kubernetes.Interface, cfg Config, logger *zap.Logger) 
 	}
 
 	return &Reconciler{
-		client:          client,
-		logger:          logger,
-		systemNamespace: systemNamespace,
-		procdPort:       procdPort,
+		client:              client,
+		networkPolicyLister: networkPolicyLister,
+		logger:              logger,
+		systemNamespace:     systemNamespace,
+		procdPort:           procdPort,
 	}, nil
 }
 
@@ -99,7 +102,10 @@ func (r *Reconciler) EnsureBaseline(ctx context.Context, namespace string) error
 }
 
 func (r *Reconciler) ensurePolicy(ctx context.Context, desired *networkingv1.NetworkPolicy) error {
-	_, err := r.client.NetworkingV1().NetworkPolicies(desired.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
+	current, err := r.getCachedPolicy(ctx, desired.Namespace, desired.Name)
+	if err == nil && networkPolicyMatches(current, desired) {
+		return nil
+	}
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
 			return fmt.Errorf("get networkpolicy %s/%s: %w", desired.Namespace, desired.Name, err)
@@ -132,6 +138,20 @@ func (r *Reconciler) ensurePolicy(ctx context.Context, desired *networkingv1.Net
 		return fmt.Errorf("update networkpolicy %s/%s: %w", desired.Namespace, desired.Name, err)
 	}
 	return nil
+}
+
+func (r *Reconciler) getCachedPolicy(ctx context.Context, namespace, name string) (*networkingv1.NetworkPolicy, error) {
+	if r.networkPolicyLister == nil {
+		return r.client.NetworkingV1().NetworkPolicies(namespace).Get(ctx, name, metav1.GetOptions{})
+	}
+	return r.networkPolicyLister.NetworkPolicies(namespace).Get(name)
+}
+
+func networkPolicyMatches(current, desired *networkingv1.NetworkPolicy) bool {
+	if current == nil || desired == nil {
+		return false
+	}
+	return reflect.DeepEqual(current.Labels, desired.Labels) && reflect.DeepEqual(current.Spec, desired.Spec)
 }
 
 func (r *Reconciler) desiredPolicies(namespace string) []*networkingv1.NetworkPolicy {

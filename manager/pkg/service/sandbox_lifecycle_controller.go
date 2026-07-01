@@ -213,7 +213,7 @@ func (c *SandboxLifecycleController) reconcile(ctx context.Context, item sandbox
 		return nil
 	}
 
-	pod, err := c.k8sClient.CoreV1().Pods(item.Namespace).Get(ctx, item.PodName, metav1.GetOptions{})
+	pod, err := c.getCachedPod(ctx, item.Namespace, item.PodName)
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
 			return c.cleanupDeletedSandbox(ctx, item)
@@ -245,6 +245,13 @@ func (c *SandboxLifecycleController) reconcile(ctx context.Context, item sandbox
 		return fmt.Errorf("remove sandbox cleanup finalizer: %w", err)
 	}
 	return nil
+}
+
+func (c *SandboxLifecycleController) getCachedPod(ctx context.Context, namespace, name string) (*corev1.Pod, error) {
+	if c.podLister != nil {
+		return c.podLister.Pods(namespace).Get(name)
+	}
+	return c.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
 }
 
 func (c *SandboxLifecycleController) ensurePodCleanupFinalizer(ctx context.Context, namespace, name string) error {

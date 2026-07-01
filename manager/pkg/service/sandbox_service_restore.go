@@ -312,19 +312,6 @@ func (s *SandboxService) waitForSandboxRuntimePodDeletion(ctx context.Context, n
 	ticker := time.NewTicker(sandboxLifecycleWaitInterval)
 	defer ticker.Stop()
 	for {
-		apiDeleting := false
-		if s != nil && s.k8sClient != nil {
-			pod, err := s.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
-			switch {
-			case k8serrors.IsNotFound(err):
-			case err != nil:
-				return err
-			case pod != nil && pod.DeletionTimestamp != nil:
-				apiDeleting = true
-			default:
-				return nil
-			}
-		}
 		if s != nil && s.podLister != nil {
 			pod, err := s.podLister.Pods(namespace).Get(name)
 			if k8serrors.IsNotFound(err) {
@@ -333,10 +320,20 @@ func (s *SandboxService) waitForSandboxRuntimePodDeletion(ctx context.Context, n
 			if err != nil {
 				return err
 			}
-			if pod != nil && pod.DeletionTimestamp == nil && !apiDeleting {
+			if pod != nil && pod.DeletionTimestamp == nil {
 				return nil
 			}
-		} else if !apiDeleting {
+		} else if s != nil && s.k8sClient != nil {
+			pod, err := s.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+			switch {
+			case k8serrors.IsNotFound(err):
+				return nil
+			case err != nil:
+				return err
+			case pod != nil && pod.DeletionTimestamp == nil:
+				return nil
+			}
+		} else {
 			return nil
 		}
 

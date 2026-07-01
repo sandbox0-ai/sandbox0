@@ -39,15 +39,18 @@ func (r *recordingTemplateNamespacePolicy) EnsureBaseline(_ context.Context, nam
 	return r.err
 }
 
-func newTemplateServiceForTests() (*TemplateService, *fake.Clientset) {
+func newTemplateServiceForTests(t *testing.T) (*TemplateService, *fake.Clientset) {
 	k8sClient := fake.NewSimpleClientset()
 	crdClient := clientsetfake.NewSimpleClientset()
-	namespaceIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	namespaceLister, podLister, secretLister, serviceAccountLister := newTemplateServiceK8sListers(t, k8sClient)
 	service := NewTemplateService(
 		k8sClient,
 		crdClient,
 		stubTemplateLister{},
-		corelisters.NewNamespaceLister(namespaceIndexer),
+		namespaceLister,
+		podLister,
+		secretLister,
+		serviceAccountLister,
 		nil,
 		config.RegistryConfig{},
 		zap.NewNop(),
@@ -72,7 +75,7 @@ func (l *listBackedTemplateLister) Get(namespace, name string) (*v1alpha1.Sandbo
 	return nil, apierrors.NewNotFound(v1alpha1.Resource("sandboxtemplate"), name)
 }
 
-func newTemplateServiceForDeleteTests(k8sClient *fake.Clientset, templates ...*v1alpha1.SandboxTemplate) (*TemplateService, *clientsetfake.Clientset) {
+func newTemplateServiceForDeleteTests(t *testing.T, k8sClient *fake.Clientset, templates ...*v1alpha1.SandboxTemplate) (*TemplateService, *clientsetfake.Clientset) {
 	crdObjects := make([]runtime.Object, 0, len(templates))
 	listerTemplates := make([]*v1alpha1.SandboxTemplate, 0, len(templates))
 	for _, template := range templates {
@@ -80,12 +83,15 @@ func newTemplateServiceForDeleteTests(k8sClient *fake.Clientset, templates ...*v
 		listerTemplates = append(listerTemplates, template.DeepCopy())
 	}
 	crdClient := clientsetfake.NewSimpleClientset(crdObjects...)
-	namespaceIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	namespaceLister, podLister, secretLister, serviceAccountLister := newTemplateServiceK8sListers(t, k8sClient)
 	service := NewTemplateService(
 		k8sClient,
 		crdClient,
 		&listBackedTemplateLister{templates: listerTemplates},
-		corelisters.NewNamespaceLister(namespaceIndexer),
+		namespaceLister,
+		podLister,
+		secretLister,
+		serviceAccountLister,
 		nil,
 		config.RegistryConfig{},
 		zap.NewNop(),
@@ -94,7 +100,7 @@ func newTemplateServiceForDeleteTests(k8sClient *fake.Clientset, templates ...*v
 }
 
 func TestCreateTemplateEnsuresNamespaceBaseline(t *testing.T) {
-	service, k8sClient := newTemplateServiceForTests()
+	service, k8sClient := newTemplateServiceForTests(t)
 	reconciler := &recordingTemplateNamespacePolicy{}
 	service.SetNamespacePolicyReconciler(reconciler)
 
@@ -111,7 +117,7 @@ func TestCreateTemplateEnsuresNamespaceBaseline(t *testing.T) {
 }
 
 func TestCreateTeamTemplateEnsuresNamespaceBaseline(t *testing.T) {
-	service, k8sClient := newTemplateServiceForTests()
+	service, k8sClient := newTemplateServiceForTests(t)
 	reconciler := &recordingTemplateNamespacePolicy{}
 	service.SetNamespacePolicyReconciler(reconciler)
 
@@ -138,7 +144,7 @@ func TestCreateTeamTemplateEnsuresNamespaceBaseline(t *testing.T) {
 }
 
 func TestCreateTemplateFailsWhenNamespaceBaselineFails(t *testing.T) {
-	service, _ := newTemplateServiceForTests()
+	service, _ := newTemplateServiceForTests(t)
 	reconciler := &recordingTemplateNamespacePolicy{err: errors.New("boom")}
 	service.SetNamespacePolicyReconciler(reconciler)
 
@@ -160,7 +166,7 @@ func TestDeletePublicTemplateDeletesManagedNamespace(t *testing.T) {
 		},
 	}
 	k8sClient := fake.NewSimpleClientset(managedNamespace(namespace))
-	service, _ := newTemplateServiceForDeleteTests(k8sClient, template)
+	service, _ := newTemplateServiceForDeleteTests(t, k8sClient, template)
 
 	err = service.DeleteTemplate(ctx, "demo")
 	require.NoError(t, err)
@@ -172,7 +178,7 @@ func TestDeletePublicTemplateDeletesManagedNamespace(t *testing.T) {
 func TestDeleteMissingTemplateIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	k8sClient := fake.NewSimpleClientset()
-	service, _ := newTemplateServiceForDeleteTests(k8sClient)
+	service, _ := newTemplateServiceForDeleteTests(t, k8sClient)
 
 	err := service.DeleteTemplate(ctx, "missing")
 	require.NoError(t, err)
@@ -196,7 +202,7 @@ func TestDeleteTemplateKeepsUnmanagedNamespaceAndDeletesTemplatePods(t *testing.
 		targetPod,
 		otherPod,
 	)
-	service, crdClient := newTemplateServiceForDeleteTests(k8sClient, template)
+	service, crdClient := newTemplateServiceForDeleteTests(t, k8sClient, template)
 
 	err = service.DeleteTemplate(ctx, "demo")
 	require.NoError(t, err)
@@ -228,12 +234,15 @@ func TestDeleteTemplateCleansPodsWhenCRDAlreadyGone(t *testing.T) {
 		targetPod,
 	)
 	crdClient := clientsetfake.NewSimpleClientset()
-	namespaceIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	namespaceLister, podLister, secretLister, serviceAccountLister := newTemplateServiceK8sListers(t, k8sClient)
 	service := NewTemplateService(
 		k8sClient,
 		crdClient,
 		&listBackedTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
-		corelisters.NewNamespaceLister(namespaceIndexer),
+		namespaceLister,
+		podLister,
+		secretLister,
+		serviceAccountLister,
 		nil,
 		config.RegistryConfig{},
 		zap.NewNop(),
@@ -262,7 +271,7 @@ func TestDeleteTeamTemplateKeepsSharedNamespaceAndDeletesTemplatePods(t *testing
 		targetPod,
 		otherPod,
 	)
-	service, crdClient := newTemplateServiceForDeleteTests(k8sClient, target, other)
+	service, crdClient := newTemplateServiceForDeleteTests(t, k8sClient, target, other)
 
 	err = service.DeleteTemplate(ctx, "demo")
 	require.NoError(t, err)
@@ -290,7 +299,7 @@ func TestDeleteLastTeamTemplateDeletesManagedNamespace(t *testing.T) {
 		managedNamespace(namespace),
 		pod,
 	)
-	service, crdClient := newTemplateServiceForDeleteTests(k8sClient, template)
+	service, crdClient := newTemplateServiceForDeleteTests(t, k8sClient, template)
 
 	err = service.DeleteTemplate(ctx, "demo")
 	require.NoError(t, err)
@@ -312,6 +321,41 @@ func managedNamespace(name string) *corev1.Namespace {
 			},
 		},
 	}
+}
+
+func newTemplateServiceK8sListers(t *testing.T, client *fake.Clientset) (corelisters.NamespaceLister, corelisters.PodLister, corelisters.SecretLister, corelisters.ServiceAccountLister) {
+	t.Helper()
+	ctx := context.Background()
+	namespaceIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	secretIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	serviceAccountIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+
+	namespaces, err := client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	for i := range namespaces.Items {
+		require.NoError(t, namespaceIndexer.Add(namespaces.Items[i].DeepCopy()))
+	}
+	pods, err := client.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	for i := range pods.Items {
+		require.NoError(t, podIndexer.Add(pods.Items[i].DeepCopy()))
+	}
+	secrets, err := client.CoreV1().Secrets(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	for i := range secrets.Items {
+		require.NoError(t, secretIndexer.Add(secrets.Items[i].DeepCopy()))
+	}
+	serviceAccounts, err := client.CoreV1().ServiceAccounts(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	for i := range serviceAccounts.Items {
+		require.NoError(t, serviceAccountIndexer.Add(serviceAccounts.Items[i].DeepCopy()))
+	}
+
+	return corelisters.NewNamespaceLister(namespaceIndexer),
+		corelisters.NewPodLister(podIndexer),
+		corelisters.NewSecretLister(secretIndexer),
+		corelisters.NewServiceAccountLister(serviceAccountIndexer)
 }
 
 func teamTemplate(namespace, name, teamID string) *v1alpha1.SandboxTemplate {

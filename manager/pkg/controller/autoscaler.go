@@ -30,9 +30,10 @@ import (
 //   - cold claims are admitted only while the pod-network backlog is healthy,
 //   - scale-down returns the pool target to minIdle after no traffic.
 type AutoScaler struct {
-	k8sClient kubernetes.Interface
-	podLister corelisters.PodLister
-	logger    *zap.Logger
+	k8sClient        kubernetes.Interface
+	podLister        corelisters.PodLister
+	replicaSetLister appslisters.ReplicaSetLister
+	logger           *zap.Logger
 
 	rateLimiter *scaleRateLimiter
 	coldClaims  *coldClaimLimiter
@@ -125,13 +126,14 @@ func NewAutoScalerWithConfig(
 		logger = zap.NewNop()
 	}
 	return &AutoScaler{
-		k8sClient:   k8sClient,
-		podLister:   podLister,
-		logger:      logger,
-		rateLimiter: newScaleRateLimiter(config.MinScaleInterval),
-		coldClaims:  newColdClaimLimiter(),
-		state:       make(map[string]*autoScalerTemplateState),
-		config:      config,
+		k8sClient:        k8sClient,
+		podLister:        podLister,
+		replicaSetLister: replicaSetLister,
+		logger:           logger,
+		rateLimiter:      newScaleRateLimiter(config.MinScaleInterval),
+		coldClaims:       newColdClaimLimiter(),
+		state:            make(map[string]*autoScalerTemplateState),
+		config:           config,
 	}
 }
 
@@ -441,6 +443,16 @@ func (s *AutoScaler) getCurrentReplicas(ctx context.Context, template *v1alpha1.
 	rsName, err := naming.ReplicasetName(clusterID, template.Name)
 	if err != nil {
 		return 0, fmt.Errorf("generate replicaset name: %w", err)
+	}
+
+	if s.replicaSetLister != nil {
+		rs, err := s.replicaSetLister.ReplicaSets(template.Namespace).Get(rsName)
+		if err == nil {
+			return getInt32Value(rs.Spec.Replicas), nil
+		}
+		if !errors.IsNotFound(err) {
+			return 0, err
+		}
 	}
 
 	rs, err := s.k8sClient.AppsV1().ReplicaSets(template.Namespace).Get(ctx, rsName, metav1.GetOptions{})

@@ -38,6 +38,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	corelisters "k8s.io/client-go/listers/core/v1"
+	networkinglisters "k8s.io/client-go/listers/networking/v1"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -114,10 +115,14 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 	nodeIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
 	secretIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
 	namespaceIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	serviceAccountIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	networkPolicyIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
 	podLister := corelisters.NewPodLister(podIndexer)
 	nodeLister := corelisters.NewNodeLister(nodeIndexer)
 	secretLister := corelisters.NewSecretLister(secretIndexer)
 	namespaceLister := corelisters.NewNamespaceLister(namespaceIndexer)
+	serviceAccountLister := corelisters.NewServiceAccountLister(serviceAccountIndexer)
+	networkPolicyLister := networkinglisters.NewNetworkPolicyLister(networkPolicyIndexer)
 	sandboxIndex := service.NewSandboxIndex()
 
 	templateLister := &testTemplateLister{
@@ -170,11 +175,14 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 		crdClient,
 		templateLister,
 		namespaceLister,
+		podLister,
+		secretLister,
+		serviceAccountLister,
 		nil,
 		managerCfg.Registry,
 		logger,
 	)
-	baselineReconciler, err := namespacepolicy.NewReconciler(k8sClient, namespacepolicy.Config{
+	baselineReconciler, err := namespacepolicy.NewReconciler(k8sClient, networkPolicyLister, namespacepolicy.Config{
 		SystemNamespace: "sandbox0-system",
 		ProcdPort:       49983,
 	}, logger)

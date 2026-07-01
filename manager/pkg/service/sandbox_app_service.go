@@ -312,6 +312,20 @@ func SandboxAppServiceViews(services []SandboxAppService) []SandboxAppServiceVie
 	return SandboxAppServiceViewsForExposure("", "", services)
 }
 
+// SandboxAppDomain returns the public app domain suffix used by sandbox service
+// exposure hosts.
+func SandboxAppDomain(publicRegionID, publicRootDomain string) string {
+	rootDomain := strings.Trim(strings.TrimSpace(publicRootDomain), ".")
+	if rootDomain == "" {
+		rootDomain = "sandbox0.app"
+	}
+	regionID := strings.Trim(strings.TrimSpace(publicRegionID), ".")
+	if regionID == "" {
+		return ""
+	}
+	return regionID + "." + rootDomain
+}
+
 // SandboxAppServiceViewsForExposure adds derived fields that depend on the
 // deployment exposure domain.
 func SandboxAppServiceViewsForExposure(sandboxID, exposureDomain string, services []SandboxAppService) []SandboxAppServiceView {

@@ -36,6 +36,19 @@ const (
 	HermesEphemeralStorage    = "4Gi"
 	HermesDataMount           = "/opt/data"
 	HermesRuntimeHome         = "/workspace/.hermes"
+
+	BrowserTemplateID          = "browser"
+	BrowserTemplateImage       = "ghcr.io/steel-dev/steel-browser:latest"
+	BrowserTemplateDisplayName = "Browser"
+	BrowserTemplateDescription = "Builtin browser automation template installed by infra-operator."
+	BrowserCPU                 = "2"
+	BrowserMemory              = "8Gi"
+	BrowserEphemeralStorage    = "16Gi"
+	BrowserProfileDir          = "/browser/profile"
+	BrowserDownloadsMountName  = "browser-downloads"
+	BrowserDownloadsMount      = "/files"
+	BrowserDevShmMount         = "/dev/shm"
+	BrowserDevShmSizeLimit     = "2Gi"
 )
 
 // ApplyDefaultPool applies default pool values when not explicitly set.

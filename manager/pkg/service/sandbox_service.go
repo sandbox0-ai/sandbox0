@@ -96,6 +96,8 @@ type SandboxServiceConfig struct {
 	RootFSSquashDisabled                bool
 	RootFSSquashMaxChainDepth           int
 	RootFSSquashMaxChainBytes           int64
+	PublicRootDomain                    string
+	PublicRegionID                      string
 }
 
 // SandboxService handles sandbox operations

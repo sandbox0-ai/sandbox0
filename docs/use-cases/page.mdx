@@ -1,8 +1,8 @@
-# Agent in Sandbox
+# Use Cases
 
-Agent in Sandbox runs an agent framework gateway inside a Sandbox0 sandbox instead of on a cloud VM, VPS, or developer workstation.
+Use these patterns when you want to host an agent framework gateway, browser automation API, or similar developer tool inside a Sandbox0 sandbox instead of on a cloud VM, VPS, or developer workstation.
 
-Use this pattern when the agent needs a long-lived workspace, controlled network access, and a service endpoint, but you do not want the sandbox runtime to become the place where broad production credentials live.
+Use these patterns when the runtime needs a long-lived workspace, controlled network access, and a service endpoint, but you do not want the sandbox runtime to become the place where broad production credentials live.
 
 ## Why Not A VM Or VPS?
 
@@ -31,21 +31,23 @@ This is a better fit for agents that process untrusted inputs, run tools, browse
 
 The agent framework still owns its own sessions, memory format, plugins, and application-level APIs. Sandbox0 owns the runtime boundary around it.
 
-## Builtin Agent Templates
+## Builtin Use-Case Templates
 
 Self-hosted deployments seed these public builtin templates when `spec.builtinTemplates` is omitted:
 
 ```bash
 s0 template get openclaw
 s0 template get hermes
+s0 template get browser
 ```
 
-Operators can pin images, tune pools, or remove either template by setting `Sandbox0Infra.spec.builtinTemplates` explicitly. The default builtin images are:
+Operators can pin images, tune pools, or remove a template by setting `Sandbox0Infra.spec.builtinTemplates` explicitly. The default builtin images are:
 
 | Template | Image |
 |----------|-------|
 | `openclaw` | `ghcr.io/openclaw/openclaw:latest` |
 | `hermes` | `nousresearch/hermes-agent:latest` |
+| `browser` | `ghcr.io/steel-dev/steel-browser:latest` |
 
 ## Lifecycle Choice
 
@@ -69,11 +71,15 @@ Prefer one of these patterns:
 ## Guides
 
 <CardGroup>
-  <Card title="OpenClaw" href="/docs/sandbox/agent-in-sandbox/openclaw" cta="Continue">
+  <Card title="Hosting OpenClaw" href="/docs/use-cases/openclaw" cta="Continue">
     Run the OpenClaw gateway from the builtin OpenClaw template with persistent state.
   </Card>
 
-  <Card title="Hermes" href="/docs/sandbox/agent-in-sandbox/hermes" cta="Continue">
+  <Card title="Hosting Hermes" href="/docs/use-cases/hermes" cta="Continue">
     Run the Hermes gateway from the builtin Hermes template with persistent state.
+  </Card>
+
+  <Card title="Hosting Steel Browser" href="/docs/use-cases/browser" cta="Continue">
+    Run Steel Browser from the builtin browser template with CDP and live view.
   </Card>
 </CardGroup>

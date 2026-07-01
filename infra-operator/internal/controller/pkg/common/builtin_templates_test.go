@@ -169,6 +169,57 @@ func TestBuildBuiltinTemplateSpecUsesHermesPreset(t *testing.T) {
 	}
 }
 
+func TestBuildBuiltinTemplateSpecUsesBrowserPreset(t *testing.T) {
+	t.Parallel()
+
+	spec := BuildBuiltinTemplateSpec(template.BrowserTemplateID, infrav1alpha1.BuiltinTemplateConfig{})
+
+	if spec.DisplayName != template.BrowserTemplateDisplayName {
+		t.Fatalf("DisplayName = %q, want %q", spec.DisplayName, template.BrowserTemplateDisplayName)
+	}
+	if spec.MainContainer.Image != template.BrowserTemplateImage {
+		t.Fatalf("image = %q, want %q", spec.MainContainer.Image, template.BrowserTemplateImage)
+	}
+	if spec.MainContainer.Resources.CPU.Cmp(resource.MustParse(template.BrowserCPU)) != 0 {
+		t.Fatalf("cpu = %s, want %s", spec.MainContainer.Resources.CPU.String(), template.BrowserCPU)
+	}
+	if spec.MainContainer.Resources.Memory.Cmp(resource.MustParse(template.BrowserMemory)) != 0 {
+		t.Fatalf("memory = %s, want %s", spec.MainContainer.Resources.Memory.String(), template.BrowserMemory)
+	}
+	if spec.MainContainer.Resources.EphemeralStorage.Cmp(resource.MustParse(template.BrowserEphemeralStorage)) != 0 {
+		t.Fatalf("ephemeralStorage = %s, want %s", spec.MainContainer.Resources.EphemeralStorage.String(), template.BrowserEphemeralStorage)
+	}
+	if len(spec.VolumeMounts) != 1 {
+		t.Fatalf("volumeMounts = %#v, want one downloads mount", spec.VolumeMounts)
+	}
+	mount := spec.VolumeMounts[0]
+	if mount.Name != template.BrowserDownloadsMountName || mount.MountPath != template.BrowserDownloadsMount || mount.ReadOnly {
+		t.Fatalf("volumeMounts[0] = %#v, want writable %s at %s", mount, template.BrowserDownloadsMountName, template.BrowserDownloadsMount)
+	}
+	if spec.Pod == nil || len(spec.Pod.EmptyDirMounts) != 1 {
+		t.Fatalf("emptyDirMounts = %#v, want one /dev/shm mount", spec.Pod)
+	}
+	devShm := spec.Pod.EmptyDirMounts[0]
+	if devShm.MountPath != template.BrowserDevShmMount {
+		t.Fatalf("emptyDir mount path = %q, want %q", devShm.MountPath, template.BrowserDevShmMount)
+	}
+	if devShm.SizeLimit == nil || devShm.SizeLimit.Cmp(resource.MustParse(template.BrowserDevShmSizeLimit)) != 0 {
+		t.Fatalf("emptyDir sizeLimit = %#v, want %s", devShm.SizeLimit, template.BrowserDevShmSizeLimit)
+	}
+	if spec.EnvVars["CHROME_USER_DATA_DIR"] != template.BrowserProfileDir {
+		t.Fatalf("CHROME_USER_DATA_DIR = %q", spec.EnvVars["CHROME_USER_DATA_DIR"])
+	}
+	if spec.EnvVars["HOST"] != "0.0.0.0" {
+		t.Fatalf("HOST = %q, want 0.0.0.0", spec.EnvVars["HOST"])
+	}
+	if spec.Pool.MinIdle != 0 || spec.Pool.MaxIdle != 2 {
+		t.Fatalf("pool = %#v, want 0/2", spec.Pool)
+	}
+	if spec.Network == nil || spec.Network.Mode != templatev1alpha1.NetworkModeAllowAll {
+		t.Fatalf("network = %#v, want allow-all", spec.Network)
+	}
+}
+
 func TestBuiltinTemplatePresetsSatisfyResourceRatio(t *testing.T) {
 	t.Parallel()
 
@@ -176,6 +227,7 @@ func TestBuiltinTemplatePresetsSatisfyResourceRatio(t *testing.T) {
 		template.DefaultTemplateID,
 		template.OpenClawTemplateID,
 		template.HermesTemplateID,
+		template.BrowserTemplateID,
 	} {
 		t.Run(templateID, func(t *testing.T) {
 			t.Parallel()

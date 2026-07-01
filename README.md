@@ -53,7 +53,7 @@ The sandbox is the execution boundary, not the durable source of truth. Sandbox 
 | Path | Use it when | Start here |
 | --- | --- | --- |
 | **Raw Sandboxes** | You want direct control over processes, files, volumes, ports, templates, and network policy. | [Get started](https://sandbox0.ai/docs/get-started) |
-| **Agent in Sandbox** | You want an agent framework gateway to run inside a sandbox, with state on a volume and its API exposed through Sandbox0 routes. | [Agent in Sandbox](https://sandbox0.ai/docs/agent-in-sandbox) |
+| **Use Cases** | You want an agent framework gateway, browser automation API, or similar tool to run inside a sandbox, with state on a volume and its API exposed through Sandbox0 routes. | [Use Cases](https://sandbox0.ai/docs/use-cases) |
 | **Self-hosted** | You need private deployment, data-plane ownership, regional storage boundaries, or custom runtime isolation. | [Self-hosted](https://sandbox0.ai/docs/self-hosted) |
 
 ## Quickstart
@@ -211,7 +211,7 @@ For API changes, `pkg/apispec/openapi.yaml` is the source of truth. Generated SD
 
 ## Known Boundaries
 
-- Sandbox0 is a runtime boundary, not a complete agent framework. Bring your own harness or use Agent in Sandbox when you want a framework gateway to live inside the sandbox boundary.
+- Sandbox0 is a runtime boundary, not a complete agent framework. Bring your own harness or use the documented use-case templates when you want a framework gateway to live inside the sandbox boundary.
 - Pause/resume does not preserve live processes, sockets, or memory. Runtime requests are routed to a committed generation; during lifecycle transitions they may wait for the transaction to commit and continue after resume.
 - Self-hosted production installs require deliberate choices for Kubernetes runtime isolation, CNI, PostgreSQL, S3-compatible storage, registry, ingress, and credential policy.
 - Browser and computer-use workloads require templates and integrations that include the browser/runtime tools you need.

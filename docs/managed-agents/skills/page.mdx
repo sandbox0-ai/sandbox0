@@ -1,0 +1,201 @@
+# Skills
+
+Skills attach reusable, filesystem-backed expertise to a Managed Agents agent. Use them for workflows, reference material, examples, and helper files that should be available across sessions without copying the same instructions into every prompt.
+
+Official references:
+
+- [Claude Managed Agents skills](https://platform.claude.com/docs/en/managed-agents/skills)
+- [Agent Skills overview](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview)
+- [Skill authoring best practices](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices)
+
+<Callout variant="warning">
+Sandbox0 Managed Agents currently supports custom skills uploaded through the Skills API. Anthropic pre-built skills such as `pptx`, `xlsx`, `docx`, and `pdf` are not supported in Sandbox0 Managed Agents.
+</Callout>
+
+## Create A Skill
+
+A custom skill is a directory with a `SKILL.md` file at the root. Upload every file with the same top-level directory prefix.
+
+```typescript
+import { toFile } from "@anthropic-ai/sdk";
+
+const skill = await client.beta.skills.create({
+    display_title: "Repository Review",
+    files: [
+        await toFile(
+            Buffer.from([
+                "---",
+                "name: repository-review",
+                "description: Review repository changes and identify risks before merge.",
+                "---",
+                "",
+                "# Repository Review",
+                "",
+                "Check the changed files, run the relevant tests, and report blocking risks first.",
+                "",
+            ].join("\n")),
+            "repository-review/SKILL.md",
+            { type: "text/markdown" },
+        ),
+        await toFile(
+            Buffer.from("Prefer focused tests before full-suite validation.\n"),
+            "repository-review/guidance.md",
+            { type: "text/markdown" },
+        ),
+    ],
+});
+
+console.log(skill.id, skill.latest_version);
+```
+
+The returned `skill.id` is the `skill_*` identifier used when attaching the skill to an agent. `latest_version` is the first uploaded version.
+
+## Skill Structure
+
+`SKILL.md` must begin with YAML front matter:
+
+```markdown
+---
+name: repository-review
+description: Review repository changes and identify risks before merge.
+---
+
+# Repository Review
+
+## Instructions
+
+Check the changed files, run the relevant tests, and report blocking risks first.
+```
+
+The front matter drives skill discovery. The body and supporting files are loaded by the selected agent harness when the skill is relevant.
+
+Sandbox0 validates the uploaded bundle:
+
+| Requirement | Value |
+|-------------|-------|
+| Descriptor path | Top-level `SKILL.md` inside one skill directory |
+| Required front matter | `name`, `description` |
+| `name` | Lowercase letters, numbers, and hyphens; at most 64 characters |
+| `description` | Non-empty; at most 1024 characters |
+| Reserved names | `anthropic`, `claude`, `codex`, `openai` |
+| Upload size | 30 MiB combined multipart payload |
+
+All uploaded paths must stay within the same top-level directory and must not contain parent directory segments.
+
+## Version A Skill
+
+Create a new version when the skill content changes:
+
+```typescript
+const nextVersion = await client.beta.skills.versions.create(skill.id, {
+    files: [
+        await toFile(
+            Buffer.from([
+                "---",
+                "name: repository-review",
+                "description: Review repository changes and identify risks before merge.",
+                "---",
+                "",
+                "# Repository Review",
+                "",
+                "Check the diff, tests, deployment impact, and rollback path.",
+                "",
+            ].join("\n")),
+            "repository-review/SKILL.md",
+            { type: "text/markdown" },
+        ),
+    ],
+});
+
+console.log(nextVersion.skill_id, nextVersion.version);
+```
+
+List and retrieve versions with the official SDK:
+
+```typescript
+for await (const version of client.beta.skills.versions.list(skill.id, { limit: 20 })) {
+    console.log(version.version, version.description);
+}
+
+const pinned = await client.beta.skills.versions.retrieve(nextVersion.version, {
+    skill_id: skill.id,
+});
+```
+
+Use version pinning when reproducibility matters. If you omit `version` when attaching a custom skill to an agent, Sandbox0 resolves the skill's current `latest_version` during agent creation or update.
+
+## Attach Skills To Agents
+
+Attach skills on the agent definition:
+
+```typescript
+const agent = await client.beta.agents.create({
+    name: "Code Reviewer",
+    model: { id: "claude-sonnet-4-20250514" },
+    system: "Review code changes and keep feedback concise.",
+    tools: [{ type: "agent_toolset_20260401" }],
+    skills: [{
+        type: "custom",
+        skill_id: skill.id,
+        version: nextVersion.version,
+    }],
+});
+```
+
+An agent can reference up to 20 skills. Sessions snapshot the agent definition at creation time, so changing a skill attachment on the agent does not mutate already-created sessions.
+
+## Runtime Behavior
+
+When a session starts, Sandbox0 resolves the agent's custom skill versions, reads the stored bundles from the team asset store, and materializes them into the session workspace for the selected harness.
+
+| Harness | Skill directory |
+|---------|-----------------|
+| `claude` | `<working_directory>/.claude/skills/<skill-directory>/SKILL.md` |
+| `codex` | `<working_directory>/.agents/skills/<skill-directory>/SKILL.md` |
+
+These paths are harness integration details. Application code should attach skills through the agent `skills` field rather than writing directly into those directories.
+
+## List And Delete Skills
+
+List custom skills:
+
+```typescript
+for await (const item of client.beta.skills.list({ source: "custom", limit: 20 })) {
+    console.log(item.id, item.latest_version);
+}
+```
+
+Delete a skill or a single version when it is no longer needed:
+
+```typescript
+await client.beta.skills.versions.delete(nextVersion.version, { skill_id: skill.id });
+await client.beta.skills.delete(skill.id);
+```
+
+Deleting a skill removes all of its versions. Deleting a version removes only that version and updates `latest_version` when an older version remains.
+
+## Compatibility Notes
+
+Sandbox0 accepts `source: "anthropic"` in `skills.list()` for SDK compatibility, but currently returns an empty list. Agent definitions with `type: "anthropic"` skills are rejected because Sandbox0 does not provide Anthropic's pre-built skill catalog.
+
+For direct HTTP calls to `/v1/skills`, include either `anthropic-beta: managed-agents-2026-04-01` or `anthropic-beta: skills-2025-10-02`. SDK users do not need to set these headers manually.
+
+## Security
+
+Treat skills like installed software. Review `SKILL.md`, scripts, examples, and supporting files before uploading them. Be especially careful with skills that instruct the agent to fetch remote content, run shell commands, or handle sensitive data.
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Agents" href="/docs/managed-agents/agents" cta="Continue">
+    Attach skill versions to versioned agent definitions.
+  </Card>
+
+  <Card title="Agent Harnesses" href="/docs/managed-agents/agent-harnesses" cta="Continue">
+    Review how each runtime adapter projects skills into the workspace.
+  </Card>
+
+  <Card title="Compatibility" href="/docs/managed-agents/compatibility" cta="Continue">
+    Check current compatibility boundaries, including pre-built skill support.
+  </Card>
+</CardGroup>

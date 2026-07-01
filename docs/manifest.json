@@ -123,6 +123,10 @@
           "title": "Agents"
         },
         {
+          "slug": "skills",
+          "title": "Skills"
+        },
+        {
           "slug": "environments",
           "title": "Environments"
         },

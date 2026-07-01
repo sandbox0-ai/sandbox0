@@ -228,7 +228,7 @@ func (pm *PoolManager) getOrCreateReplicaSet(ctx context.Context, template *v1al
 	if err := EnsureProcdConfigSecret(ctx, pm.k8sClient, pm.secretLister, template); err != nil {
 		return nil, fmt.Errorf("ensure procd config secret: %w", err)
 	}
-	if err := EnsureNetdMITMCASecret(ctx, pm.k8sClient, template.Namespace); err != nil {
+	if err := EnsureNetdMITMCASecret(ctx, pm.k8sClient, pm.secretLister, template.Namespace); err != nil {
 		return nil, fmt.Errorf("ensure netd MITM CA secret: %w", err)
 	}
 	// Try to get existing ReplicaSet

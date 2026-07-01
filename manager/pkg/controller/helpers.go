@@ -63,7 +63,10 @@ func EnsureProcdConfigSecret(
 		},
 	}
 
-	_, err = secretLister.Secrets(template.Namespace).Get(name)
+	current, err := secretLister.Secrets(template.Namespace).Get(name)
+	if err == nil && secretMatches(current, desired) {
+		return nil
+	}
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
 			return fmt.Errorf("get procd config secret: %w", err)
@@ -307,6 +310,7 @@ func setPodCondition(conditions *[]corev1.PodCondition, condition corev1.PodCond
 func EnsureNetdMITMCASecret(
 	ctx context.Context,
 	client kubernetes.Interface,
+	secretLister corelisters.SecretLister,
 	templateNamespace string,
 ) error {
 	cfg := config.LoadManagerConfig()
@@ -322,7 +326,7 @@ func EnsureNetdMITMCASecret(
 		return err
 	}
 
-	source, err := client.CoreV1().Secrets(sourceNamespace).Get(ctx, cfg.NetdMITMCASecretName, metav1.GetOptions{})
+	source, err := getSecret(ctx, client, secretLister, sourceNamespace, cfg.NetdMITMCASecretName)
 	if err != nil {
 		return fmt.Errorf("get netd MITM CA secret %s/%s: %w", sourceNamespace, cfg.NetdMITMCASecretName, err)
 	}
@@ -346,7 +350,10 @@ func EnsureNetdMITMCASecret(
 		},
 	}
 
-	_, err = client.CoreV1().Secrets(templateNamespace).Get(ctx, cfg.NetdMITMCASecretName, metav1.GetOptions{})
+	current, err := getSecret(ctx, client, secretLister, templateNamespace, cfg.NetdMITMCASecretName)
+	if err == nil && secretMatches(current, desired) {
+		return nil
+	}
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
 			return fmt.Errorf("get target netd MITM CA secret: %w", err)
@@ -382,6 +389,23 @@ func EnsureNetdMITMCASecret(
 		return fmt.Errorf("update target netd MITM CA secret: %w", err)
 	}
 	return nil
+}
+
+func getSecret(ctx context.Context, client kubernetes.Interface, secretLister corelisters.SecretLister, namespace, name string) (*corev1.Secret, error) {
+	if secretLister != nil {
+		return secretLister.Secrets(namespace).Get(name)
+	}
+	return client.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
+func secretMatches(current, desired *corev1.Secret) bool {
+	if current == nil || desired == nil {
+		return false
+	}
+	return reflect.DeepEqual(current.Labels, desired.Labels) &&
+		reflect.DeepEqual(current.OwnerReferences, desired.OwnerReferences) &&
+		reflect.DeepEqual(current.Data, desired.Data) &&
+		reflect.DeepEqual(current.Type, desired.Type)
 }
 
 func resolveNetdMITMCASecretNamespace(cfg *config.ManagerConfig) (string, error) {

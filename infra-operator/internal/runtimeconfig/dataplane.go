@@ -17,6 +17,8 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 
 	cfg.HTTPPort = spec.HTTPPort
 	cfg.KubeConfig = spec.KubeConfig
+	cfg.K8sClientQPS = spec.K8sClientQPS
+	cfg.K8sClientBurst = spec.K8sClientBurst
 	cfg.LeaderElection = spec.LeaderElection
 	cfg.ResyncPeriod = spec.ResyncPeriod
 	cfg.DatabaseMaxConns = spec.DatabaseMaxConns

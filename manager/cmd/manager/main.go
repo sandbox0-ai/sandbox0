@@ -49,6 +49,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/flowcontrol"
 )
 
 func main() {
@@ -90,6 +91,7 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to build Kubernetes config", zap.Error(err))
 	}
+	configureK8sClientRateLimiter(k8sConfig, cfg.K8sClientQPS, cfg.K8sClientBurst)
 	observeK8sClientRateLimit(managerMetrics, k8sConfig)
 	logger.Info("Kubernetes client rate limit configured",
 		zap.Float32("qps", effectiveK8sClientQPS(k8sConfig)),
@@ -167,8 +169,10 @@ func main() {
 	podInformer := informerFactory.Core().V1().Pods()
 	nodeInformer := informerFactory.Core().V1().Nodes().Informer()
 	secretInformer := informerFactory.Core().V1().Secrets().Informer()
-	_ = informerFactory.Core().V1().Namespaces().Informer()
+	namespaceInformer := informerFactory.Core().V1().Namespaces().Informer()
+	serviceAccountInformer := informerFactory.Core().V1().ServiceAccounts().Informer()
 	replicaSetInformer := informerFactory.Apps().V1().ReplicaSets().Informer()
+	networkPolicyInformer := informerFactory.Networking().V1().NetworkPolicies().Informer()
 
 	// Create CRD informer factory using generated clientset
 	crdInformerFactory := externalversions.NewSharedInformerFactory(
@@ -187,6 +191,14 @@ func main() {
 	eventSource := corev1.EventSource{Component: "manager"}
 	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, eventSource)
 
+	// Create listers
+	podLister := informerFactory.Core().V1().Pods().Lister()
+	nodeLister := informerFactory.Core().V1().Nodes().Lister()
+	secretLister := informerFactory.Core().V1().Secrets().Lister()
+	namespaceLister := informerFactory.Core().V1().Namespaces().Lister()
+	serviceAccountLister := informerFactory.Core().V1().ServiceAccounts().Lister()
+	networkPolicyLister := informerFactory.Networking().V1().NetworkPolicies().Lister()
+
 	// Create operator
 	operator := controller.NewOperator(
 		k8sClient,
@@ -203,12 +215,6 @@ func main() {
 	if pool != nil {
 		operator.SetTemplateStatsPublisher(controller.NewPGTemplateStatsPublisher(pool, cfg.DefaultClusterId, clk, logger))
 	}
-
-	// Create listers
-	podLister := informerFactory.Core().V1().Pods().Lister()
-	nodeLister := informerFactory.Core().V1().Nodes().Lister()
-	secretLister := informerFactory.Core().V1().Secrets().Lister()
-	namespaceLister := informerFactory.Core().V1().Namespaces().Lister()
 
 	sandboxIndex := service.NewSandboxIndex()
 	podInformer.Informer().AddEventHandler(sandboxIndex.ResourceEventHandler())
@@ -229,7 +235,7 @@ func main() {
 	// Create network policy service for building policy annotations
 	networkPolicyService := service.NewNetworkPolicyService(logger)
 	var templateNamespacePolicy namespacepolicy.TemplateNamespaceReconciler
-	baselineReconciler, err := namespacepolicy.NewReconciler(k8sClient, namespacepolicy.Config{
+	baselineReconciler, err := namespacepolicy.NewReconciler(k8sClient, networkPolicyLister, namespacepolicy.Config{
 		SystemNamespace: cfg.NetdMITMCASecretNamespace,
 		ProcdPort:       cfg.ProcdConfig.HTTPPort,
 	}, logger)
@@ -379,6 +385,9 @@ func main() {
 		crdClient,
 		operator.GetTemplateLister(),
 		namespaceLister,
+		podLister,
+		secretLister,
+		serviceAccountLister,
 		networkProvider,
 		cfg.Registry,
 		logger,
@@ -483,7 +492,7 @@ func main() {
 
 	// Wait for cache sync
 	logger.Info("Waiting for informer caches to sync")
-	if !cache.WaitForCacheSync(ctx.Done(), podInformer.Informer().HasSynced, nodeInformer.HasSynced, secretInformer.HasSynced, replicaSetInformer.HasSynced, templateInformer.HasSynced) {
+	if !cache.WaitForCacheSync(ctx.Done(), podInformer.Informer().HasSynced, nodeInformer.HasSynced, secretInformer.HasSynced, namespaceInformer.HasSynced, serviceAccountInformer.HasSynced, replicaSetInformer.HasSynced, networkPolicyInformer.HasSynced, templateInformer.HasSynced) {
 		logger.Fatal("Failed to sync informer caches")
 	}
 
@@ -574,6 +583,22 @@ func buildKubeConfig(kubeconfig string) (*rest.Config, error) {
 		return clientcmd.BuildConfigFromFlags("", kubeconfig)
 	}
 	return rest.InClusterConfig()
+}
+
+func configureK8sClientRateLimiter(config *rest.Config, qps int, burst int) {
+	if config == nil {
+		return
+	}
+	rate := float32(qps)
+	if rate <= 0 {
+		rate = rest.DefaultQPS
+	}
+	if burst <= 0 {
+		burst = rest.DefaultBurst
+	}
+	config.QPS = rate
+	config.Burst = burst
+	config.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(rate, burst)
 }
 
 func observeK8sClientRateLimit(metrics *obsmetrics.ManagerMetrics, config *rest.Config) {

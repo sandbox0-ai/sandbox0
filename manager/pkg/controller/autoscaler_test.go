@@ -49,7 +49,7 @@ func TestAutoScalerColdClaimRefillsIdleDeficitByStep(t *testing.T) {
 	assert.Equal(t, int32(25), *rs.Spec.Replicas)
 }
 
-func TestAutoScalerColdClaimUsesLiveReplicaSetTarget(t *testing.T) {
+func TestAutoScalerColdClaimUsesCachedReplicaSetTarget(t *testing.T) {
 	template := autoscalerTestTemplate("template-a", 15, 50)
 	scaler, client := newAutoScalerTestHarness(t, template, 15, nil, AutoScaleConfig{
 		MinScaleInterval:        time.Millisecond,
@@ -69,11 +69,11 @@ func TestAutoScalerColdClaimUsesLiveReplicaSetTarget(t *testing.T) {
 	decision, err := scaler.OnColdClaim(context.Background(), template)
 	require.NoError(t, err)
 	require.True(t, decision.ShouldScale)
-	assert.Equal(t, int32(25), decision.OldReplicas)
-	assert.Equal(t, int32(35), decision.NewReplicas)
+	assert.Equal(t, int32(15), decision.OldReplicas)
+	assert.Equal(t, int32(25), decision.NewReplicas)
 
 	rs = getAutoscalerTestReplicaSet(t, client, template)
-	assert.Equal(t, int32(35), *rs.Spec.Replicas)
+	assert.Equal(t, int32(25), *rs.Spec.Replicas)
 }
 
 func TestAutoScalerHotClaimSkipsWhenPendingIdleCoversTarget(t *testing.T) {

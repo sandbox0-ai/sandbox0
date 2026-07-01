@@ -34,6 +34,9 @@ type TemplateService struct {
 	crdClient       clientset.Interface
 	templateLister  controller.TemplateLister
 	namespaceLister corelisters.NamespaceLister
+	podLister       corelisters.PodLister
+	secretLister    corelisters.SecretLister
+	saLister        corelisters.ServiceAccountLister
 	logger          *zap.Logger
 	network         network.Provider
 	registry        config.RegistryConfig
@@ -46,6 +49,9 @@ func NewTemplateService(
 	crdClient clientset.Interface,
 	templateLister controller.TemplateLister,
 	namespaceLister corelisters.NamespaceLister,
+	podLister corelisters.PodLister,
+	secretLister corelisters.SecretLister,
+	serviceAccountLister corelisters.ServiceAccountLister,
 	networkProvider network.Provider,
 	registryConfig config.RegistryConfig,
 	logger *zap.Logger,
@@ -58,6 +64,9 @@ func NewTemplateService(
 		crdClient:       crdClient,
 		templateLister:  templateLister,
 		namespaceLister: namespaceLister,
+		podLister:       podLister,
+		secretLister:    secretLister,
+		saLister:        serviceAccountLister,
 		logger:          logger,
 		network:         networkProvider,
 		registry:        registryConfig,
@@ -243,7 +252,7 @@ func (s *TemplateService) shouldDeleteNamespaceForTemplate(ctx context.Context, 
 }
 
 func (s *TemplateService) isManagedTemplateNamespace(ctx context.Context, namespace string) (bool, error) {
-	ns, err := s.k8sClient.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+	ns, err := s.getNamespace(ctx, namespace)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return false, nil
@@ -260,6 +269,19 @@ func (s *TemplateService) isManagedTemplateNamespace(ctx context.Context, namesp
 }
 
 func (s *TemplateService) namespaceHasOtherTemplates(ctx context.Context, namespace, deletingName string) (bool, error) {
+	if s.templateLister != nil {
+		templates, err := s.templateLister.List()
+		if err != nil {
+			return false, err
+		}
+		for _, template := range templates {
+			if template.Namespace == namespace && template.Name != deletingName {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+
 	templates, err := s.crdClient.Sandbox0V1alpha1().SandboxTemplates(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
@@ -296,7 +318,7 @@ func (s *TemplateService) deleteTemplatePods(ctx context.Context, namespace, tem
 		return nil
 	}
 	selector := labels.Set{controller.LabelTemplateID: templateID}.AsSelector().String()
-	pods, err := s.k8sClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	pods, err := s.listTemplatePods(ctx, namespace, selector)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return nil
@@ -304,7 +326,7 @@ func (s *TemplateService) deleteTemplatePods(ctx context.Context, namespace, tem
 		return fmt.Errorf("list template pods in namespace %s: %w", namespace, err)
 	}
 
-	for _, pod := range pods.Items {
+	for _, pod := range pods {
 		poolType := pod.Labels[controller.LabelPoolType]
 		if poolType != controller.PoolTypeIdle && poolType != controller.PoolTypeActive {
 			continue
@@ -314,6 +336,32 @@ func (s *TemplateService) deleteTemplatePods(ctx context.Context, namespace, tem
 		}
 	}
 	return nil
+}
+
+func (s *TemplateService) getNamespace(ctx context.Context, namespace string) (*corev1.Namespace, error) {
+	if s.namespaceLister != nil {
+		return s.namespaceLister.Get(namespace)
+	}
+	return s.k8sClient.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+}
+
+func (s *TemplateService) listTemplatePods(ctx context.Context, namespace, selector string) ([]*corev1.Pod, error) {
+	if s.podLister != nil {
+		parsed, err := labels.Parse(selector)
+		if err != nil {
+			return nil, err
+		}
+		return s.podLister.Pods(namespace).List(parsed)
+	}
+	pods, err := s.k8sClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*corev1.Pod, 0, len(pods.Items))
+	for i := range pods.Items {
+		out = append(out, &pods.Items[i])
+	}
+	return out, nil
 }
 
 func (s *TemplateService) resolveTemplateNamespace(template *v1alpha1.SandboxTemplate) (string, error) {
@@ -355,7 +403,7 @@ func (s *TemplateService) ensureNamespace(ctx context.Context, namespace string)
 		if err := s.ensureRegistryPullSecret(ctx, namespace); err != nil {
 			return err
 		}
-		return controller.EnsureNetdMITMCASecret(ctx, s.k8sClient, namespace)
+		return controller.EnsureNetdMITMCASecret(ctx, s.k8sClient, s.secretLister, namespace)
 	} else if !errors.IsNotFound(err) {
 		return fmt.Errorf("get namespace %s from cache: %w", namespace, err)
 	}
@@ -374,7 +422,7 @@ func (s *TemplateService) ensureNamespace(ctx context.Context, namespace string)
 	if err := s.ensureRegistryPullSecret(ctx, namespace); err != nil {
 		return err
 	}
-	return controller.EnsureNetdMITMCASecret(ctx, s.k8sClient, namespace)
+	return controller.EnsureNetdMITMCASecret(ctx, s.k8sClient, s.secretLister, namespace)
 }
 
 func (s *TemplateService) ensureRegistryPullSecret(ctx context.Context, namespace string) error {
@@ -404,7 +452,10 @@ func (s *TemplateService) ensureRegistryPullSecret(ctx context.Context, namespac
 		},
 	}
 
-	_, err = s.k8sClient.CoreV1().Secrets(namespace).Get(ctx, s.registry.PullSecretName, metav1.GetOptions{})
+	current, err := s.getSecret(ctx, namespace, s.registry.PullSecretName)
+	if err == nil && current.Type == corev1.SecretTypeDockerConfigJson && string(current.Data[corev1.DockerConfigJsonKey]) == string(creds) {
+		return s.ensureDefaultServiceAccountPullSecret(ctx, namespace, s.registry.PullSecretName)
+	}
 	if err != nil {
 		if !errors.IsNotFound(err) {
 			return fmt.Errorf("get registry pull secret: %w", err)
@@ -443,7 +494,7 @@ func (s *TemplateService) ensureDefaultServiceAccountPullSecret(ctx context.Cont
 	if secretName == "" {
 		return nil
 	}
-	sa, err := s.k8sClient.CoreV1().ServiceAccounts(namespace).Get(ctx, "default", metav1.GetOptions{})
+	sa, err := s.getServiceAccount(ctx, namespace, "default")
 	if err != nil {
 		if !errors.IsNotFound(err) {
 			return fmt.Errorf("get default serviceaccount: %w", err)
@@ -496,4 +547,18 @@ func (s *TemplateService) ensureDefaultServiceAccountPullSecret(ctx context.Cont
 		return fmt.Errorf("update default serviceaccount: %w", err)
 	}
 	return nil
+}
+
+func (s *TemplateService) getSecret(ctx context.Context, namespace, name string) (*corev1.Secret, error) {
+	if s.secretLister != nil {
+		return s.secretLister.Secrets(namespace).Get(name)
+	}
+	return s.k8sClient.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
+func (s *TemplateService) getServiceAccount(ctx context.Context, namespace, name string) (*corev1.ServiceAccount, error) {
+	if s.saLister != nil {
+		return s.saLister.ServiceAccounts(namespace).Get(name)
+	}
+	return s.k8sClient.CoreV1().ServiceAccounts(namespace).Get(ctx, name, metav1.GetOptions{})
 }

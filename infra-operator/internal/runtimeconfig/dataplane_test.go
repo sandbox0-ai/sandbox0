@@ -75,6 +75,19 @@ func TestToManagerPreservesSandboxMaxMemory(t *testing.T) {
 	}
 }
 
+func TestToManagerPreservesK8sClientRateLimit(t *testing.T) {
+	cfg := ToManager(&infrav1alpha1.ManagerConfig{
+		K8sClientQPS:   25,
+		K8sClientBurst: 50,
+	})
+	if cfg.K8sClientQPS != 25 {
+		t.Fatalf("k8s client qps = %v, want 25", cfg.K8sClientQPS)
+	}
+	if cfg.K8sClientBurst != 50 {
+		t.Fatalf("k8s client burst = %d, want 50", cfg.K8sClientBurst)
+	}
+}
+
 func TestToStorageProxyDefaultsObjectEncryptionEnabled(t *testing.T) {
 	cfg := ToStorageProxy(nil)
 	if !cfg.ObjectEncryptionEnabled {

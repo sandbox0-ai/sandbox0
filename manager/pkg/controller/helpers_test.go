@@ -256,7 +256,7 @@ netd_mitm_ca_secret_namespace: sandbox0-system
 `)
 	t.Setenv("CONFIG_PATH", configPath)
 
-	client := fake.NewSimpleClientset(&corev1.Secret{
+	source := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "fullmode-netd-mitm-ca",
 			Namespace: "sandbox0-system",
@@ -266,9 +266,10 @@ netd_mitm_ca_secret_namespace: sandbox0-system
 			"ca.crt": []byte("test-ca"),
 			"ca.key": []byte("should-not-copy"),
 		},
-	})
+	}
+	client := fake.NewSimpleClientset(source)
 
-	err := EnsureNetdMITMCASecret(context.Background(), client, "tpl-default")
+	err := EnsureNetdMITMCASecret(context.Background(), client, newHelpersSecretLister(t, source), "tpl-default")
 	require.NoError(t, err)
 
 	copied, err := client.CoreV1().Secrets("tpl-default").Get(context.Background(), "fullmode-netd-mitm-ca", metav1.GetOptions{})
@@ -285,12 +286,49 @@ func TestEnsureNetdMITMCASecretNoopsWithoutConfiguredSecret(t *testing.T) {
 	t.Setenv("CONFIG_PATH", configPath)
 
 	client := fake.NewSimpleClientset()
-	err := EnsureNetdMITMCASecret(context.Background(), client, "tpl-default")
+	err := EnsureNetdMITMCASecret(context.Background(), client, newHelpersSecretLister(t), "tpl-default")
 	require.NoError(t, err)
 
 	secrets, err := client.CoreV1().Secrets("tpl-default").List(context.Background(), metav1.ListOptions{})
 	require.NoError(t, err)
 	require.Empty(t, secrets.Items)
+}
+
+func TestEnsureNetdMITMCASecretNoopsWhenCacheMatches(t *testing.T) {
+	configPath := writeHelpersManagerConfig(t, `
+netd_mitm_ca_secret_name: fullmode-netd-mitm-ca
+netd_mitm_ca_secret_namespace: sandbox0-system
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	source := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "fullmode-netd-mitm-ca",
+			Namespace: "sandbox0-system",
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"ca.crt": []byte("test-ca"),
+		},
+	}
+	target := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "fullmode-netd-mitm-ca",
+			Namespace: "tpl-default",
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "sandbox0-manager",
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"ca.crt": []byte("test-ca"),
+		},
+	}
+	client := fake.NewSimpleClientset()
+
+	err := EnsureNetdMITMCASecret(context.Background(), client, newHelpersSecretLister(t, source, target), "tpl-default")
+	require.NoError(t, err)
+	require.Empty(t, client.Actions())
 }
 
 func TestEnsureProcdConfigSecretHandlesAlreadyExistsWhenListerIsStale(t *testing.T) {
@@ -335,6 +373,17 @@ func TestEnsureProcdConfigSecretHandlesAlreadyExistsWhenListerIsStale(t *testing
 	require.Len(t, updated.OwnerReferences, 1)
 	require.Equal(t, "SandboxTemplate", updated.OwnerReferences[0].Kind)
 	require.Equal(t, "template-a", updated.OwnerReferences[0].Name)
+}
+
+func newHelpersSecretLister(t *testing.T, secrets ...*corev1.Secret) corelisters.SecretLister {
+	t.Helper()
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
+		cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
+	})
+	for _, secret := range secrets {
+		require.NoError(t, indexer.Add(secret))
+	}
+	return corelisters.NewSecretLister(indexer)
 }
 
 func writeHelpersManagerConfig(t *testing.T, contents string) string {

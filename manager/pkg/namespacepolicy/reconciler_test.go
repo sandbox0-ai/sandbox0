@@ -12,11 +12,13 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	networkinglisters "k8s.io/client-go/listers/networking/v1"
+	"k8s.io/client-go/tools/cache"
 )
 
 func TestEnsureBaselineCreatesPolicies(t *testing.T) {
 	client := fake.NewSimpleClientset()
-	reconciler, err := NewReconciler(client, Config{SystemNamespace: "sandbox0-system", ProcdPort: 49983}, zap.NewNop())
+	reconciler, err := NewReconciler(client, newNetworkPolicyLister(t), Config{SystemNamespace: "sandbox0-system", ProcdPort: 49983}, zap.NewNop())
 	require.NoError(t, err)
 
 	require.NoError(t, reconciler.EnsureBaseline(context.Background(), "tpl-demo"))
@@ -44,7 +46,7 @@ func TestEnsureBaselineCreatesPolicies(t *testing.T) {
 }
 
 func TestEnsureBaselineRepairsDrift(t *testing.T) {
-	client := fake.NewSimpleClientset(&networkingv1.NetworkPolicy{
+	drifted := &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      policyAllowSystemName,
 			Namespace: "tpl-demo",
@@ -55,9 +57,10 @@ func TestEnsureBaselineRepairsDrift(t *testing.T) {
 				MatchLabels: map[string]string{"app": "wrong"},
 			},
 		},
-	})
+	}
+	client := fake.NewSimpleClientset(drifted)
 
-	reconciler, err := NewReconciler(client, Config{SystemNamespace: "sandbox0-system", ProcdPort: 49983}, zap.NewNop())
+	reconciler, err := NewReconciler(client, newNetworkPolicyLister(t, drifted), Config{SystemNamespace: "sandbox0-system", ProcdPort: 49983}, zap.NewNop())
 	require.NoError(t, err)
 
 	require.NoError(t, reconciler.EnsureBaseline(context.Background(), "tpl-demo"))
@@ -71,4 +74,32 @@ func TestEnsureBaselineRepairsDrift(t *testing.T) {
 	deny, err := client.NetworkingV1().NetworkPolicies("tpl-demo").Get(context.Background(), policyDenyIngressName, metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, sandboxIDLabelKey, deny.Spec.PodSelector.MatchExpressions[0].Key)
+}
+
+func TestEnsureBaselineNoopsWhenCacheMatches(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	policies := desiredPoliciesForTest(t, "tpl-demo")
+	reconciler, err := NewReconciler(client, newNetworkPolicyLister(t, policies...), Config{SystemNamespace: "sandbox0-system", ProcdPort: 49983}, zap.NewNop())
+	require.NoError(t, err)
+
+	require.NoError(t, reconciler.EnsureBaseline(context.Background(), "tpl-demo"))
+	assert.Empty(t, client.Actions())
+}
+
+func desiredPoliciesForTest(t *testing.T, namespace string) []*networkingv1.NetworkPolicy {
+	t.Helper()
+	reconciler, err := NewReconciler(fake.NewSimpleClientset(), nil, Config{SystemNamespace: "sandbox0-system", ProcdPort: 49983}, zap.NewNop())
+	require.NoError(t, err)
+	return reconciler.desiredPolicies(namespace)
+}
+
+func newNetworkPolicyLister(t *testing.T, policies ...*networkingv1.NetworkPolicy) networkinglisters.NetworkPolicyLister {
+	t.Helper()
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
+		cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
+	})
+	for _, policy := range policies {
+		require.NoError(t, indexer.Add(policy))
+	}
+	return networkinglisters.NewNetworkPolicyLister(indexer)
 }

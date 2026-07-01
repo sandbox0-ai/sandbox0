@@ -174,6 +174,8 @@ func BuildBuiltinTemplateSpec(templateID string, builtin infrav1alpha1.BuiltinTe
 		spec = openClawTemplateSpec()
 	} else if templateID == template.HermesTemplateID {
 		spec = hermesTemplateSpec()
+	} else if templateID == template.BrowserTemplateID {
+		spec = browserTemplateSpec()
 	} else {
 		spec = defaultBuiltinTemplateSpec(templateID)
 	}
@@ -304,6 +306,53 @@ func hermesTemplateSpec() templatev1alpha1.SandboxTemplateSpec {
 			"HERMES_HOME":         template.HermesRuntimeHome,
 			"HERMES_PERSIST_HOME": template.HermesDataMount,
 			"HOME":                template.HermesRuntimeHome,
+		},
+		Pool: templatev1alpha1.PoolStrategy{
+			MinIdle: 0,
+			MaxIdle: 2,
+		},
+		Network: &templatev1alpha1.SandboxNetworkPolicy{
+			Mode: templatev1alpha1.NetworkModeAllowAll,
+		},
+	}
+}
+
+func browserTemplateSpec() templatev1alpha1.SandboxTemplateSpec {
+	runAsRoot := int64(0)
+	runAsNonRoot := false
+	devShmSize := resource.MustParse(template.BrowserDevShmSizeLimit)
+	return templatev1alpha1.SandboxTemplateSpec{
+		DisplayName: template.BrowserTemplateDisplayName,
+		Description: template.BrowserTemplateDescription,
+		MainContainer: templatev1alpha1.ContainerSpec{
+			Image: template.BrowserTemplateImage,
+			Resources: templatev1alpha1.ResourceQuota{
+				CPU:              resource.MustParse(template.BrowserCPU),
+				Memory:           resource.MustParse(template.BrowserMemory),
+				EphemeralStorage: resource.MustParse(template.BrowserEphemeralStorage),
+			},
+			SecurityContext: &templatev1alpha1.SecurityContext{
+				RunAsUser:    &runAsRoot,
+				RunAsGroup:   &runAsRoot,
+				RunAsNonRoot: &runAsNonRoot,
+			},
+		},
+		VolumeMounts: []templatev1alpha1.VolumeMountSpec{{
+			Name:      template.BrowserDownloadsMountName,
+			MountPath: template.BrowserDownloadsMount,
+		}},
+		Pod: &templatev1alpha1.PodSpecOverride{
+			EmptyDirMounts: []templatev1alpha1.EmptyDirMountSpec{{
+				MountPath: template.BrowserDevShmMount,
+				SizeLimit: &devShmSize,
+			}},
+		},
+		EnvVars: map[string]string{
+			"CHROME_HEADLESS":      "true",
+			"CHROME_USER_DATA_DIR": template.BrowserProfileDir,
+			"HOST":                 "0.0.0.0",
+			"NODE_ENV":             "production",
+			"PORT":                 "3000",
 		},
 		Pool: templatev1alpha1.PoolStrategy{
 			MinIdle: 0,

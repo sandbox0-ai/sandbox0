@@ -78,6 +78,18 @@ func TestSandboxAppServiceViewsForExposureAddsPublicURL(t *testing.T) {
 	}
 }
 
+func TestSandboxAppDomain(t *testing.T) {
+	if got, want := SandboxAppDomain("aws-us-east-1", ""), "aws-us-east-1.sandbox0.app"; got != want {
+		t.Fatalf("SandboxAppDomain default root = %q, want %q", got, want)
+	}
+	if got, want := SandboxAppDomain(" aws-us-east-1. ", " example.com. "), "aws-us-east-1.example.com"; got != want {
+		t.Fatalf("SandboxAppDomain trims labels = %q, want %q", got, want)
+	}
+	if got := SandboxAppDomain("", "example.com"); got != "" {
+		t.Fatalf("SandboxAppDomain empty region = %q, want empty", got)
+	}
+}
+
 func TestSandboxAppServicePublishBlockersRequirePublicRestartableRuntime(t *testing.T) {
 	service := SandboxAppService{
 		ID:   "api",

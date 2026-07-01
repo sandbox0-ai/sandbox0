@@ -317,6 +317,8 @@ func main() {
 		RootFSSquashDisabled:                cfg.RootFSMaintenance.SquashDisabled,
 		RootFSSquashMaxChainDepth:           cfg.RootFSMaintenance.SquashMaxChainDepth,
 		RootFSSquashMaxChainBytes:           cfg.RootFSMaintenance.SquashMaxChainBytes,
+		PublicRootDomain:                    cfg.PublicRootDomain,
+		PublicRegionID:                      cfg.PublicRegionID,
 	}
 
 	sandboxService := service.NewSandboxService(

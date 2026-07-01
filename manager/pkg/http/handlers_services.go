@@ -3,7 +3,6 @@ package http
 import (
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
@@ -13,14 +12,7 @@ import (
 )
 
 func (s *Server) getExposureDomain() string {
-	rootDomain := strings.TrimSpace(s.publicRootDomain)
-	if rootDomain == "" {
-		rootDomain = "sandbox0.app"
-	}
-	if s.publicRegionID == "" {
-		return ""
-	}
-	return s.publicRegionID + "." + rootDomain
+	return service.SandboxAppDomain(s.publicRegionID, s.publicRootDomain)
 }
 
 func (s *Server) listSandboxServices(c *gin.Context) {

@@ -1,0 +1,98 @@
+# Hosting Steel Browser
+
+Run a browser automation API inside a Sandbox0 sandbox when you want CDP, browser profile state, cookies, downloads, and a live browser view behind Sandbox0 lifecycle and public ingress.
+
+The builtin `browser` template uses the upstream Steel Browser image. It stores Chrome profile data under `/browser/profile` on the sandbox rootfs and declares `/files` as the SandboxVolume mount point for downloads and file exchange.
+
+## Create The Service
+
+Create a SandboxVolume, claim the builtin `browser` template, mount that volume at `/files`, and expose Steel Browser as a `cmd` Sandbox Service. The service command runs the Steel image entrypoint directly; no wrapper image or script is required.
+
+```json
+{
+    "id": "browser",
+    "display_name": "Browser",
+    "port": 3000,
+    "runtime": {
+        "type": "cmd",
+        "command": [
+            "sh",
+            "-lc",
+            "set -eu\nexport PORT=\"${SANDBOX0_SERVICE_PORT}\"\nexport HOST=\"0.0.0.0\"\nif [ -n \"${SANDBOX0_APP_DOMAIN:-}\" ]; then\n    export DOMAIN=\"${SANDBOX0_SANDBOX_ID}--p${SANDBOX0_SERVICE_PORT}.${SANDBOX0_APP_DOMAIN}\"\n    export USE_SSL=true\nfi\nexec /app/api/entrypoint.sh --no-nginx"
+        ]
+    },
+    "ingress": {
+        "public": true,
+        "routes": [
+            {
+                "id": "api",
+                "path_prefix": "/",
+                "rewrite_prefix": "/",
+                "timeout_seconds": 300,
+                "resume": true,
+                "auth": {
+                    "mode": "bearer",
+                    "bearer_token_sha256": "<sha256-of-route-token>"
+                }
+            }
+        ]
+    },
+    "health_check": {
+        "path": "/v1/health"
+    }
+}
+```
+
+`SANDBOX0_SANDBOX_ID`, `SANDBOX0_APP_DOMAIN`, and `SANDBOX0_SERVICE_PORT` are injected by Sandbox0. Steel uses `DOMAIN` and `USE_SSL=true` to return public `https` and `wss` URLs in session responses.
+
+## Use The Browser
+
+After the sandbox is claimed, list the sandbox services and use the `public_url` for the `browser` service as the Steel base URL.
+
+```bash
+export BROWSER_BASE_URL="https://<sandbox-id>--p3000.<region>.<root-domain>"
+export BROWSER_ROUTE_TOKEN="<route-token>"
+
+curl -sS "$BROWSER_BASE_URL/v1/sessions" \
+    -H "Authorization: Bearer $BROWSER_ROUTE_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{}'
+```
+
+The session response includes `websocketUrl` for CDP clients, `debugUrl` for the live browser view, `debuggerUrl` for DevTools, and `sessionViewerUrl` for the Steel session viewer.
+
+When route auth is enabled, CDP and WebSocket clients must send the configured auth header. For human live-view access in a normal browser, open `debugUrl` through a protected frontend that can authenticate the route, or use a route auth mode that matches your access boundary.
+
+Browser automation clients can connect to `websocketUrl` with Playwright or a CDP client:
+
+```js
+import { chromium } from "playwright";
+
+const browser = await chromium.connectOverCDP(session.websocketUrl, {
+    headers: { Authorization: `Bearer ${process.env.BROWSER_ROUTE_TOKEN}` },
+});
+const page = browser.contexts()[0].pages()[0];
+await page.goto("https://example.com");
+```
+
+## Persistence
+
+Chrome profile data, cookies, local storage, and extension state live in `/browser/profile`, which is part of the sandbox rootfs. Downloads and file exchange live under `/files`; mount a SandboxVolume there when the files need to outlive a runtime pod or be shared with other workflows.
+
+Do not pass Steel `persist` or `userDataDir` session options unless you intentionally want to override the template's `CHROME_USER_DATA_DIR`.
+
+Running processes, sockets, and memory are not preserved across pause/resume. Runtime requests are routed to a committed generation and may wait while lifecycle transactions commit.
+
+## Capabilities
+
+The browser API is provided by Steel Browser and Chromium inside the image:
+
+| Capability | Path |
+|------------|------|
+| CDP | Steel returns `websocketUrl` from `/v1/sessions` |
+| Extensions | Pass extension options through the Steel session API |
+| Profiles and cookies | Chrome user data directory at `/browser/profile` |
+| Downloads and files | Steel file service path `/files` |
+| Live view | Steel `debugUrl`, `sessionViewerUrl`, and cast WebSocket routes |
+
+The builtin template is configurable through `Sandbox0Infra.spec.builtinTemplates`. Remove `templateId: browser` from that list to delete the operator-managed public template, or replace its `image`, `pool`, or full `spec` to pin a reviewed Steel Browser image.

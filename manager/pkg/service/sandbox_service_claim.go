@@ -32,6 +32,11 @@ const (
 	volumePortalBindRetryInterval = 100 * time.Millisecond
 )
 
+const (
+	SandboxEnvSandboxID = "SANDBOX0_SANDBOX_ID"
+	SandboxEnvAppDomain = "SANDBOX0_APP_DOMAIN"
+)
+
 var errIdlePodReservationConflict = errors.New("idle pod reservation conflict")
 
 // ClaimRequest represents a sandbox claim request
@@ -1664,7 +1669,13 @@ func (s *SandboxService) initializeProcd(
 	initReq := InitializeRequest{
 		SandboxID: sandboxID,
 		TeamID:    teamID,
-		EnvVars:   sandboxEnvVarsForInitialize(req.Config),
+		EnvVars: sandboxEnvVarsForInitialize(req.Config, sandboxPlatformEnv{
+			SandboxID: sandboxID,
+			AppDomain: SandboxAppDomain(
+				s.config.PublicRegionID,
+				s.config.PublicRootDomain,
+			),
+		}),
 		Webhook:   webhookConfig,
 		MountDirs: declaredVolumeMountDirs(template),
 	}
@@ -1697,9 +1708,27 @@ func (s *SandboxService) initializeProcd(
 	}
 }
 
-func sandboxEnvVarsForInitialize(cfg *SandboxConfig) map[string]string {
-	if cfg == nil {
+type sandboxPlatformEnv struct {
+	SandboxID string
+	AppDomain string
+}
+
+func sandboxEnvVarsForInitialize(cfg *SandboxConfig, platform sandboxPlatformEnv) map[string]string {
+	var envVars map[string]string
+	if cfg != nil {
+		envVars = cloneEnvVars(cfg.EnvVars)
+	}
+	if envVars == nil {
+		envVars = map[string]string{}
+	}
+	if sandboxID := strings.TrimSpace(platform.SandboxID); sandboxID != "" {
+		envVars[SandboxEnvSandboxID] = sandboxID
+	}
+	if appDomain := strings.Trim(strings.TrimSpace(platform.AppDomain), "."); appDomain != "" {
+		envVars[SandboxEnvAppDomain] = appDomain
+	}
+	if len(envVars) == 0 {
 		return nil
 	}
-	return cloneEnvVars(cfg.EnvVars)
+	return envVars
 }

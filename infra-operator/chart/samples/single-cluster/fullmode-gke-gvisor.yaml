@@ -56,6 +56,13 @@ spec:
       pool:
         minIdle: 0
         maxIdle: 2
+    - templateId: browser
+      image: ghcr.io/steel-dev/steel-browser:latest
+      displayName: Browser
+      description: Builtin browser automation template installed by infra-operator.
+      pool:
+        minIdle: 0
+        maxIdle: 2
   # Shared placement for sandbox template Pods plus node-local helpers such as
   # netd and ctld.
   sandboxNodePlacement:

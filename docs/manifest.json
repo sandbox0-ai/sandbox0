@@ -13,8 +13,15 @@
         "volume",
         "credential",
         "integrations",
-        "self-hosted",
-        "agent-in-sandbox"
+        "self-hosted"
+      ]
+    },
+    {
+      "slug": "use-cases",
+      "title": "use-cases",
+      "defaultPage": "use-cases",
+      "sections": [
+        "use-cases"
       ]
     },
     {
@@ -168,20 +175,28 @@
       ]
     },
     {
-      "label": "AGENT IN SANDBOX",
-      "slug": "agent-in-sandbox",
+      "label": "USE CASES",
+      "slug": "use-cases",
+      "aliases": [
+        "agent-in-sandbox",
+        "sandbox/agent-in-sandbox"
+      ],
       "pages": [
         {
           "slug": "",
-          "title": "Overview"
+          "title": "Use Cases"
         },
         {
           "slug": "openclaw",
-          "title": "OpenClaw"
+          "title": "Hosting OpenClaw"
         },
         {
           "slug": "hermes",
-          "title": "Hermes"
+          "title": "Hosting Hermes"
+        },
+        {
+          "slug": "browser",
+          "title": "Hosting Steel Browser"
         }
       ]
     },

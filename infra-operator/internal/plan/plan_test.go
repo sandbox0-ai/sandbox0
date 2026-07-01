@@ -160,13 +160,14 @@ func TestBuiltinTemplatesDefaultsAndOverrides(t *testing.T) {
 	t.Parallel()
 
 	defaults := Compile(&infrav1alpha1.Sandbox0Infra{}).BuiltinTemplates()
-	if len(defaults) != 3 {
-		t.Fatalf("default builtin template count = %d, want 3", len(defaults))
+	if len(defaults) != 4 {
+		t.Fatalf("default builtin template count = %d, want 4", len(defaults))
 	}
 	wantDefaults := []string{
 		template.DefaultTemplateID,
 		template.OpenClawTemplateID,
 		template.HermesTemplateID,
+		template.BrowserTemplateID,
 	}
 	for i, want := range wantDefaults {
 		if defaults[i].TemplateID != want {

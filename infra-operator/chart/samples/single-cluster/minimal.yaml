@@ -64,6 +64,13 @@ spec:
       pool:
         minIdle: 0
         maxIdle: 2
+    - templateId: browser
+      image: ghcr.io/steel-dev/steel-browser:latest
+      displayName: Browser
+      description: Builtin browser automation template installed by infra-operator.
+      pool:
+        minIdle: 0
+        maxIdle: 2
   services:
     clusterGateway:
       enabled: true

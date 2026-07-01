@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -96,7 +97,7 @@ func (s *SandboxService) waitForPodClaimReady(ctx context.Context, namespace, na
 	}
 }
 
-func (s *SandboxService) waitForPodNetworkIdentity(ctx context.Context, namespace, name string) (*corev1.Pod, error) {
+func (s *SandboxService) waitForPodNetworkIdentity(ctx context.Context, template, namespace, name string) (*corev1.Pod, error) {
 	timeout := s.config.ProcdInitTimeout
 	if timeout < defaultPodClaimReadyTimeout {
 		timeout = defaultPodClaimReadyTimeout
@@ -105,44 +106,82 @@ func (s *SandboxService) waitForPodNetworkIdentity(ctx context.Context, namespac
 	readyCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-
+	waiter := s.ensurePodNetworkIdentityWaiter()
+	tracker := newPodNetworkIdentityStageTracker(s, template)
 	lastReason := "pod network identity is not ready"
-	for {
+
+	evaluate := func(source string) (*corev1.Pod, bool, error) {
 		if s.podLister == nil {
-			return nil, fmt.Errorf("pod lister is not configured")
+			return nil, false, fmt.Errorf("pod lister is not configured")
 		}
 		pod, err := s.podLister.Pods(namespace).Get(name)
 		if err != nil {
 			if k8serrors.IsNotFound(err) {
 				lastReason = fmt.Sprintf("pod %s/%s is not visible", namespace, name)
-				select {
-				case <-readyCtx.Done():
-					s.observePodNetworkIdentityCheck("cache", "timeout", lastReason)
-					return nil, fmt.Errorf("pod %s/%s network identity not ready after %s: %s", namespace, name, timeout, lastReason)
-				case <-ticker.C:
-					continue
-				}
+				s.observePodNetworkIdentityCheck(source, "not_ready", lastReason)
+				return nil, false, nil
 			}
-			s.observePodNetworkIdentityCheck("cache", "error", "get pod for network identity")
-			return nil, fmt.Errorf("get pod for network identity: %w", err)
+			reason := "get pod for network identity"
+			s.observePodNetworkIdentityCheck(source, "error", reason)
+			tracker.observeFailure("error", reason)
+			return nil, false, fmt.Errorf("get pod for network identity: %w", err)
 		}
 
+		tracker.observePod(pod)
 		ready, reason := isPodNetworkIdentityReady(pod)
 		if ready {
-			s.observePodNetworkIdentityCheck("cache", "ready", "ready")
-			return pod, nil
+			s.observePodNetworkIdentityCheck(source, "ready", "ready")
+			return pod, true, nil
 		}
 		if reason != "" {
 			lastReason = reason
 		}
+		if isTerminalPodNetworkIdentityReason(lastReason) {
+			s.observePodNetworkIdentityCheck(source, "error", lastReason)
+			tracker.observeFailure("error", lastReason)
+			return nil, false, fmt.Errorf("pod %s/%s network identity not ready: %s", namespace, name, lastReason)
+		}
+		s.observePodNetworkIdentityCheck(source, "not_ready", lastReason)
+		return nil, false, nil
+	}
 
+	if pod, ready, err := evaluate("cache"); err != nil || ready {
+		return pod, err
+	}
+
+	events, unregister := waiter.register(namespace, name)
+	defer unregister()
+
+	// Recheck after registering to avoid missing an informer event that arrives
+	// between the initial cache read and waiter registration.
+	if pod, ready, err := evaluate("cache_recheck"); err != nil || ready {
+		return pod, err
+	}
+
+	for {
 		select {
 		case <-readyCtx.Done():
-			s.observePodNetworkIdentityCheck("cache", "timeout", lastReason)
+			if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(ctxErr, context.DeadlineExceeded) {
+				lastReason = ctxErr.Error()
+				s.observePodNetworkIdentityCheck("context", "canceled", lastReason)
+				tracker.observeFailure("canceled", lastReason)
+				return nil, fmt.Errorf("pod %s/%s network identity wait canceled: %w", namespace, name, ctxErr)
+			}
+			s.observePodNetworkIdentityCheck("informer", "timeout", lastReason)
+			tracker.observeFailure("timeout", lastReason)
 			return nil, fmt.Errorf("pod %s/%s network identity not ready after %s: %s", namespace, name, timeout, lastReason)
-		case <-ticker.C:
+		case event := <-events:
+			if event.deleted {
+				tracker.observePod(event.pod)
+				lastReason = "pod is deleting"
+				s.observePodNetworkIdentityCheck("informer", "error", lastReason)
+				tracker.observeFailure("error", lastReason)
+				return nil, fmt.Errorf("pod %s/%s network identity not ready: %s", namespace, name, lastReason)
+			}
+			pod, ready, err := evaluate("informer")
+			if err != nil || ready {
+				return pod, err
+			}
 		}
 	}
 }
@@ -158,6 +197,29 @@ func (s *SandboxService) observePodNetworkIdentityCheck(source, result, reason s
 		result = "unknown"
 	}
 	s.metrics.PodNetworkIdentityChecksTotal.WithLabelValues(source, result, podNetworkIdentityReasonLabel(reason)).Inc()
+}
+
+func (s *SandboxService) observePodNetworkIdentityStage(template, stage, status, reason string, started time.Time) {
+	s.observePodNetworkIdentityStageDuration(template, stage, status, reason, time.Since(started))
+}
+
+func (s *SandboxService) observePodNetworkIdentityStageDuration(template, stage, status, reason string, duration time.Duration) {
+	if s == nil || s.metrics == nil || s.metrics.PodNetworkIdentityStageDuration == nil {
+		return
+	}
+	if template == "" {
+		template = "unknown"
+	}
+	if stage == "" {
+		stage = "unknown"
+	}
+	if status == "" {
+		status = "unknown"
+	}
+	if duration < 0 {
+		duration = 0
+	}
+	s.metrics.PodNetworkIdentityStageDuration.WithLabelValues(template, stage, status, podNetworkIdentityReasonLabel(reason)).Observe(duration.Seconds())
 }
 
 func podNetworkIdentityReasonLabel(reason string) string {
@@ -177,9 +239,72 @@ func podNetworkIdentityReasonLabel(reason string) string {
 		return "deleting"
 	case strings.Contains(reason, "get pod"):
 		return "get_error"
+	case strings.Contains(reason, "context canceled"):
+		return "context_canceled"
+	case strings.Contains(reason, "deadline exceeded"):
+		return "deadline"
 	default:
 		return "not_ready"
 	}
+}
+
+type podNetworkIdentityStageTracker struct {
+	service   *SandboxService
+	template  string
+	started   time.Time
+	visibleAt time.Time
+	nodeAt    time.Time
+	podIPAt   time.Time
+}
+
+func newPodNetworkIdentityStageTracker(service *SandboxService, template string) *podNetworkIdentityStageTracker {
+	return &podNetworkIdentityStageTracker{
+		service:  service,
+		template: template,
+		started:  time.Now(),
+	}
+}
+
+func (t *podNetworkIdentityStageTracker) observePod(pod *corev1.Pod) {
+	if t == nil || pod == nil {
+		return
+	}
+	now := time.Now()
+	if t.visibleAt.IsZero() {
+		t.service.observePodNetworkIdentityStageDuration(t.template, "cache_visible", "success", "ready", now.Sub(t.started))
+		t.visibleAt = now
+	}
+	if strings.TrimSpace(pod.Spec.NodeName) != "" && t.nodeAt.IsZero() {
+		t.service.observePodNetworkIdentityStageDuration(t.template, "node_assigned", "success", "ready", now.Sub(t.visibleAt))
+		t.nodeAt = now
+	}
+	if strings.TrimSpace(pod.Spec.NodeName) != "" && strings.TrimSpace(pod.Status.PodIP) != "" && t.podIPAt.IsZero() {
+		t.service.observePodNetworkIdentityStageDuration(t.template, "pod_ip_assigned", "success", "ready", now.Sub(t.nodeAt))
+		t.podIPAt = now
+	}
+}
+
+func (t *podNetworkIdentityStageTracker) observeFailure(status, reason string) {
+	if t == nil || !t.podIPAt.IsZero() {
+		return
+	}
+	now := time.Now()
+	stage := "cache_visible"
+	started := t.started
+	if !t.visibleAt.IsZero() {
+		stage = "node_assigned"
+		started = t.visibleAt
+	}
+	if !t.nodeAt.IsZero() {
+		stage = "pod_ip_assigned"
+		started = t.nodeAt
+	}
+	t.service.observePodNetworkIdentityStageDuration(t.template, stage, status, reason, now.Sub(started))
+}
+
+func isTerminalPodNetworkIdentityReason(reason string) bool {
+	label := podNetworkIdentityReasonLabel(reason)
+	return label == "terminal" || label == "deleting"
 }
 
 func isPodNetworkIdentityReady(pod *corev1.Pod) (bool, string) {

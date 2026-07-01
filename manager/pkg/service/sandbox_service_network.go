@@ -566,7 +566,7 @@ func (s *SandboxService) waitForColdPodNetworkPolicy(ctx context.Context, pod *c
 	if s.networkProvider == nil {
 		return pod, nil
 	}
-	networkPod, err := s.waitForPodNetworkIdentity(ctx, pod.Namespace, pod.Name)
+	networkPod, err := s.waitForPodNetworkIdentity(ctx, podNetworkIdentityTemplateLabel(pod), pod.Namespace, pod.Name)
 	if err != nil {
 		return pod, fmt.Errorf("wait for pod network identity: %w", err)
 	}
@@ -574,6 +574,19 @@ func (s *SandboxService) waitForColdPodNetworkPolicy(ctx context.Context, pod *c
 		return networkPod, fmt.Errorf("apply network policy: %w", err)
 	}
 	return networkPod, nil
+}
+
+func podNetworkIdentityTemplateLabel(pod *corev1.Pod) string {
+	if pod == nil || pod.Labels == nil {
+		return "unknown"
+	}
+	if template := strings.TrimSpace(pod.Labels[controller.LabelTemplateID]); template != "" {
+		return template
+	}
+	if template := strings.TrimSpace(pod.Labels[controller.LabelTemplateLogicalID]); template != "" {
+		return template
+	}
+	return "unknown"
 }
 
 // GetNetworkPolicy gets the effective sandbox network policy.

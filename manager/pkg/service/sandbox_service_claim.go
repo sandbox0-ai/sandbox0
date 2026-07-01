@@ -503,7 +503,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		// patch the applied policy hash.
 		if s.networkProvider != nil {
 			phaseStarted = time.Now()
-			networkPod, err := s.waitForPodNetworkIdentity(ctx, pod.Namespace, pod.Name)
+			networkPod, err := s.waitForPodNetworkIdentity(ctx, req.Template, pod.Namespace, pod.Name)
 			s.observeClaimPhase(req.Template, claimType, "wait_for_pod_network_identity", phaseStarted, err)
 			if err != nil {
 				completeColdAdmission()

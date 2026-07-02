@@ -1197,12 +1197,12 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		// Update pod labels and annotations
 		originalIdlePod := pod.DeepCopy()
 		pod = pod.DeepCopy()
+		resourceQuota, err := s.effectiveSandboxResourceQuota(template, req.Config)
+		if err != nil {
+			return err
+		}
 		var resizeQuota *v1alpha1.ResourceQuota
-		if req.Config != nil && req.Config.Resources != nil {
-			resourceQuota, err := s.effectiveSandboxResourceQuota(template, req.Config)
-			if err != nil {
-				return err
-			}
+		if sandboxPodNeedsResourceResize(pod, resourceQuota) {
 			resizeQuota = &resourceQuota
 		}
 

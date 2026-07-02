@@ -357,6 +357,29 @@ manager_image: sandbox0/manager:test
 	assertResourceQuantity(t, resources.Limits[corev1.ResourceEphemeralStorage], "8Gi")
 }
 
+func TestBuildIdlePodSpecUsesLowCPUAndMemoryLimits(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	template := newTestTemplate()
+	template.Spec.MainContainer.Resources = ResourceQuota{
+		CPU:    resource.MustParse("500m"),
+		Memory: resource.MustParse("2Gi"),
+	}
+
+	spec := BuildIdlePodSpec(template)
+	resources := spec.Containers[0].Resources
+
+	assertResourceQuantity(t, resources.Requests[corev1.ResourceCPU], "10m")
+	assertResourceQuantity(t, resources.Limits[corev1.ResourceCPU], "32m")
+	assertResourceQuantity(t, resources.Requests[corev1.ResourceMemory], "64Mi")
+	assertResourceQuantity(t, resources.Limits[corev1.ResourceMemory], "128Mi")
+	assertResourceQuantity(t, resources.Requests[corev1.ResourceEphemeralStorage], "1Gi")
+	assertResourceQuantity(t, resources.Limits[corev1.ResourceEphemeralStorage], "8Gi")
+}
+
 func TestBuildPodSpecUsesRestartFreeResourceResizePolicy(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test

@@ -120,6 +120,44 @@ func applySandboxResourceQuotaToPodSpec(spec *corev1.PodSpec, quota v1alpha1.Res
 	return fmt.Errorf("%w: sandbox runtime container not found", ErrInvalidClaimRequest)
 }
 
+func sandboxPodNeedsResourceResize(pod *corev1.Pod, quota v1alpha1.ResourceQuota) bool {
+	if quota.CPU.Sign() <= 0 && quota.Memory.Sign() <= 0 {
+		return false
+	}
+	if pod == nil {
+		return true
+	}
+	desired := v1alpha1.BuildResourceRequirements(quota)
+	for _, container := range pod.Spec.Containers {
+		if container.Name != "procd" {
+			continue
+		}
+		return !resizeResourcesEqual(container.Resources, desired)
+	}
+	return true
+}
+
+func resizeResourcesEqual(a, b corev1.ResourceRequirements) bool {
+	for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+		if !resourceListQuantityEqual(a.Requests, b.Requests, name) {
+			return false
+		}
+		if !resourceListQuantityEqual(a.Limits, b.Limits, name) {
+			return false
+		}
+	}
+	return true
+}
+
+func resourceListQuantityEqual(a, b corev1.ResourceList, name corev1.ResourceName) bool {
+	aValue, aOK := a[name]
+	bValue, bOK := b[name]
+	if !aOK || aValue.IsZero() {
+		return !bOK || bValue.IsZero()
+	}
+	return bOK && aValue.Cmp(bValue) == 0
+}
+
 func ensureSandboxResizePolicy(container *corev1.Container) {
 	if container == nil {
 		return

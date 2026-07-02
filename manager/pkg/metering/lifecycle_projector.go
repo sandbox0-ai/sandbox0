@@ -265,6 +265,12 @@ func (p *LifecycleProjector) handleDelete(obj any) {
 	templateID := pod.Labels[controller.LabelTemplateID]
 	podUsage := sandboxUsageFromPod(pod)
 	claimedAt, claimedAtSet := parseRFC3339(pod.Annotations[controller.AnnotationClaimedAt])
+	podPaused := pod.Annotations[controller.AnnotationPaused] == "true"
+	podRuntimePaused := podPaused && pod.Annotations[controller.AnnotationPausedState] == controller.AnnotationPausedStateRuntimePaused
+	pauseObservedAt := observedAt
+	if parsedPausedAt, ok := parseRFC3339(pod.Annotations[controller.AnnotationPausedAt]); ok {
+		pauseObservedAt = parsedPausedAt
+	}
 	runtimePaused, lookupErr := p.runtimeDeletionIsPause(ctx, RuntimeDeletionInfo{
 		SandboxID:         sandboxID,
 		Namespace:         pod.Namespace,
@@ -296,26 +302,17 @@ func (p *LifecycleProjector) handleDelete(obj any) {
 			state.ClaimedAt = &claimedAt
 			state.ActiveSince = &claimedAt
 		}
-		if pod.Annotations[controller.AnnotationPaused] == "true" {
-			pausedAt := observedAt
-			if parsedPausedAt, ok := parseRFC3339(pod.Annotations[controller.AnnotationPausedAt]); ok {
-				pausedAt = parsedPausedAt
-			}
-			pendingEvents = append(pendingEvents, p.buildSandboxEvent(sandboxID, teamID, userID, templateID, pausedAt, meteringpkg.EventTypeSandboxPaused, pauseEventID(sandboxID, pausedAt), nil))
-			pendingWindows = append(pendingWindows, p.buildSandboxRuntimeWindow(state, teamID, userID, templateID, state.ActiveSince, pausedAt))
-			state.Paused = true
-			state.PausedAt = &pausedAt
-			state.ActiveSince = nil
-		}
 	}
-	if runtimePaused {
+	if runtimePaused || podPaused {
 		if !state.Paused {
-			pendingWindows = append(pendingWindows, p.buildSandboxRuntimeWindow(state, teamID, userID, templateID, state.ActiveSince, observedAt))
-			pendingEvents = append(pendingEvents, p.buildSandboxEvent(sandboxID, teamID, userID, templateID, observedAt, meteringpkg.EventTypeSandboxPaused, pauseEventID(sandboxID, observedAt), nil))
+			pendingWindows = append(pendingWindows, p.buildSandboxRuntimeWindow(state, teamID, userID, templateID, state.ActiveSince, pauseObservedAt))
+			pendingEvents = append(pendingEvents, p.buildSandboxEvent(sandboxID, teamID, userID, templateID, pauseObservedAt, meteringpkg.EventTypeSandboxPaused, pauseEventID(sandboxID, pauseObservedAt), nil))
 		}
 		state.Paused = true
-		state.PausedAt = &observedAt
+		state.PausedAt = &pauseObservedAt
 		state.ActiveSince = nil
+	}
+	if runtimePaused || podRuntimePaused {
 		state.TerminatedAt = nil
 		state.LastObservedAt = observedAt
 		state.LastResourceVer = pod.ResourceVersion
@@ -330,7 +327,10 @@ func (p *LifecycleProjector) handleDelete(obj any) {
 		}
 		pendingEvents = append(pendingEvents, p.buildSandboxEvent(sandboxID, teamID, userID, templateID, observedAt, meteringpkg.EventTypeSandboxTerminated, terminateEventID(sandboxID, pod.ResourceVersion), nil))
 	}
-	state.Paused = pod.Annotations[controller.AnnotationPaused] == "true"
+	state.Paused = podPaused
+	if !podPaused {
+		state.PausedAt = nil
+	}
 	state.ActiveSince = nil
 	state.LastObservedAt = observedAt
 	state.LastResourceVer = pod.ResourceVersion

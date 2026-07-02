@@ -11,12 +11,20 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+const (
+	// DefaultClientQPS is the Sandbox0 Kubernetes client token bucket rate.
+	DefaultClientQPS float32 = 50
+	// DefaultClientBurst is the Sandbox0 Kubernetes client burst.
+	DefaultClientBurst = 100
+)
+
 // BuildRestConfig creates a Kubernetes rest config using in-cluster config or kubeconfig
 func BuildRestConfig(kubeconfigPath string) (*rest.Config, error) {
 	// If kubeconfigPath is empty, try in-cluster config first
 	if kubeconfigPath == "" {
 		config, err := rest.InClusterConfig()
 		if err == nil {
+			ApplyDefaultRateLimit(config)
 			return config, nil
 		}
 	}
@@ -36,11 +44,25 @@ func BuildRestConfig(kubeconfigPath string) (*rest.Config, error) {
 			if err != nil {
 				return nil, fmt.Errorf("build kubeconfig from %s: %w", kubeconfigPath, err)
 			}
+			ApplyDefaultRateLimit(config)
 			return config, nil
 		}
 	}
 
 	return nil, fmt.Errorf("no Kubernetes config found")
+}
+
+// ApplyDefaultRateLimit sets Sandbox0 Kubernetes client defaults when QPS or burst are unset.
+func ApplyDefaultRateLimit(config *rest.Config) {
+	if config == nil {
+		return
+	}
+	if config.QPS <= 0 {
+		config.QPS = DefaultClientQPS
+	}
+	if config.Burst <= 0 {
+		config.Burst = DefaultClientBurst
+	}
 }
 
 // NewClient creates a new Kubernetes clientset using in-cluster config or kubeconfig

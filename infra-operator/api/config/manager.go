@@ -32,11 +32,11 @@ type ManagerConfig struct {
 	// +optional
 	KubeConfig string `yaml:"kube_config" json:"kubeConfig"`
 	// K8sClientQPS configures the manager-wide Kubernetes client token bucket rate.
-	// When unset, manager uses the client-go default.
+	// When unset, manager uses the Sandbox0 Kubernetes client default.
 	// +optional
 	K8sClientQPS int `yaml:"k8s_client_qps" json:"k8sClientQps"`
 	// K8sClientBurst configures the manager-wide Kubernetes client burst.
-	// When unset, manager uses the client-go default.
+	// When unset, manager uses the Sandbox0 Kubernetes client default.
 	// +optional
 	K8sClientBurst int `yaml:"k8s_client_burst" json:"k8sClientBurst"`
 	// +optional

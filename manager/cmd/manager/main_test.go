@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	s0k8s "github.com/sandbox0-ai/sandbox0/pkg/k8s"
 	"k8s.io/client-go/rest"
 )
 
@@ -27,11 +28,11 @@ func TestConfigureK8sClientRateLimiterDefaultsWhenUnset(t *testing.T) {
 
 	configureK8sClientRateLimiter(cfg, 0, 0)
 
-	if cfg.QPS != rest.DefaultQPS {
-		t.Fatalf("qps = %v, want %v", cfg.QPS, rest.DefaultQPS)
+	if cfg.QPS != s0k8s.DefaultClientQPS {
+		t.Fatalf("qps = %v, want %v", cfg.QPS, s0k8s.DefaultClientQPS)
 	}
-	if cfg.Burst != rest.DefaultBurst {
-		t.Fatalf("burst = %d, want %d", cfg.Burst, rest.DefaultBurst)
+	if cfg.Burst != s0k8s.DefaultClientBurst {
+		t.Fatalf("burst = %d, want %d", cfg.Burst, s0k8s.DefaultClientBurst)
 	}
 	if cfg.RateLimiter == nil {
 		t.Fatal("expected shared rate limiter")

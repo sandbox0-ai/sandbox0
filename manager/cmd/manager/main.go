@@ -29,6 +29,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	egressauthruntime "github.com/sandbox0-ai/sandbox0/pkg/egressauth/runtime"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	s0k8s "github.com/sandbox0-ai/sandbox0/pkg/k8s"
 	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
@@ -588,42 +589,42 @@ func buildKubeConfig(kubeconfig string) (*rest.Config, error) {
 	return rest.InClusterConfig()
 }
 
-func configureK8sClientRateLimiter(config *rest.Config, qps int, burst int) {
-	if config == nil {
+func configureK8sClientRateLimiter(restConfig *rest.Config, qps int, burst int) {
+	if restConfig == nil {
 		return
 	}
 	rate := float32(qps)
 	if rate <= 0 {
-		rate = rest.DefaultQPS
+		rate = s0k8s.DefaultClientQPS
 	}
 	if burst <= 0 {
-		burst = rest.DefaultBurst
+		burst = s0k8s.DefaultClientBurst
 	}
-	config.QPS = rate
-	config.Burst = burst
-	config.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(rate, burst)
+	restConfig.QPS = rate
+	restConfig.Burst = burst
+	restConfig.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(rate, burst)
 }
 
-func observeK8sClientRateLimit(metrics *obsmetrics.ManagerMetrics, config *rest.Config) {
-	if metrics == nil || metrics.K8sClientRateLimit == nil || config == nil {
+func observeK8sClientRateLimit(metrics *obsmetrics.ManagerMetrics, restConfig *rest.Config) {
+	if metrics == nil || metrics.K8sClientRateLimit == nil || restConfig == nil {
 		return
 	}
-	metrics.K8sClientRateLimit.WithLabelValues("qps").Set(float64(effectiveK8sClientQPS(config)))
-	metrics.K8sClientRateLimit.WithLabelValues("burst").Set(float64(effectiveK8sClientBurst(config)))
+	metrics.K8sClientRateLimit.WithLabelValues("qps").Set(float64(effectiveK8sClientQPS(restConfig)))
+	metrics.K8sClientRateLimit.WithLabelValues("burst").Set(float64(effectiveK8sClientBurst(restConfig)))
 }
 
-func effectiveK8sClientQPS(config *rest.Config) float32 {
-	if config == nil || config.QPS <= 0 {
-		return rest.DefaultQPS
+func effectiveK8sClientQPS(restConfig *rest.Config) float32 {
+	if restConfig == nil || restConfig.QPS <= 0 {
+		return s0k8s.DefaultClientQPS
 	}
-	return config.QPS
+	return restConfig.QPS
 }
 
-func effectiveK8sClientBurst(config *rest.Config) int {
-	if config == nil || config.Burst <= 0 {
-		return rest.DefaultBurst
+func effectiveK8sClientBurst(restConfig *rest.Config) int {
+	if restConfig == nil || restConfig.Burst <= 0 {
+		return s0k8s.DefaultClientBurst
 	}
-	return config.Burst
+	return restConfig.Burst
 }
 
 // startMetricsServer starts the Prometheus metrics server

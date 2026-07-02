@@ -407,10 +407,10 @@ type ManagerConfig struct {
 	// +optional
 	KubeConfig string `json:"kubeConfig,omitempty"`
 	// +optional
-	// +kubebuilder:default=5
+	// +kubebuilder:default=50
 	K8sClientQPS int `json:"k8sClientQps,omitempty"`
 	// +optional
-	// +kubebuilder:default=10
+	// +kubebuilder:default=100
 	K8sClientBurst int `json:"k8sClientBurst,omitempty"`
 	// +optional
 	// +kubebuilder:default=true

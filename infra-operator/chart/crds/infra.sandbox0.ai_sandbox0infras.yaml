@@ -3114,10 +3114,10 @@ spec:
                             default: 8080
                             type: integer
                           k8sClientBurst:
-                            default: 10
+                            default: 100
                             type: integer
                           k8sClientQps:
-                            default: 5
+                            default: 50
                             type: integer
                           kubeConfig:
                             type: string

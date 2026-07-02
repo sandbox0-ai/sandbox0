@@ -466,7 +466,7 @@ Examples:
 
 - `services.clusterGateway.config.authMode` switches between `public`, `internal`, and `both`
 - `services.manager.config.autoscaler.*` tunes pool scale behavior
-- `services.manager.config.k8sClientQps` and `k8sClientBurst` tune the manager Kubernetes client token bucket rate limit
+- `services.manager.config.k8sClientQps` and `k8sClientBurst` tune the manager Kubernetes client token bucket rate limit; defaults are `50` and `100`
 - `services.manager.config.sandboxMaxMemory` caps per-sandbox memory overrides; the default is `32Gi`
 - `services.manager.config.allowColdStartWithoutReadyDataPlane` lets cold claims create Pending pods for external node autoscaler scale-from-zero deployments; keep it disabled unless the cluster autoscaler can provision matching sandbox nodes
 - `services.storageProxy.config.filesystem*` tunes filesystem behavior; `services.manager.config.procdConfig.volume*` tunes mounted volume cache sizing

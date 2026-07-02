@@ -38,6 +38,7 @@ const (
 )
 
 var errIdlePodReservationConflict = errors.New("idle pod reservation conflict")
+var errIdlePodClaimLost = errors.New("idle pod claim lost")
 
 // ClaimRequest represents a sandbox claim request
 type ClaimRequest struct {
@@ -1122,7 +1123,9 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 	}
 	templateID := controller.TemplateLogicalID(template)
 	err = retry.OnError(claimIdlePodBackoff, func(err error) bool {
-		return k8serrors.IsConflict(err) || errors.Is(err, errIdlePodReservationConflict)
+		return k8serrors.IsConflict(err) ||
+			errors.Is(err, errIdlePodReservationConflict) ||
+			errors.Is(err, errIdlePodClaimLost)
 	}, func() error {
 		// Get all idle pods for this template
 		pods, listErr := s.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
@@ -1279,6 +1282,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			if k8serrors.IsConflict(updateErr) {
 				s.observeIdleClaim(templateID, "update_conflict")
 				keepReservationUntilTTL()
+				return fmt.Errorf("%w: update pod %s/%s: %w", errIdlePodClaimLost, pod.Namespace, pod.Name, updateErr)
 			} else {
 				s.observeIdleClaim(templateID, "update_error")
 			}
@@ -1308,6 +1312,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 					}
 					cancel()
 					keepReservationUntilTTL()
+					return fmt.Errorf("%w: resize pod %s/%s: %w", errIdlePodClaimLost, updatedPod.Namespace, updatedPod.Name, resizeErr)
 				} else {
 					s.observeIdleClaim(templateID, "resize_error")
 					s.requestSandboxDeletionAfterClaimFailure(updatedPod, "sandbox resource resize failed")
@@ -1334,7 +1339,9 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		return nil
 	})
 	if err != nil {
-		if errors.Is(err, errNoIdlePod) {
+		if errors.Is(err, errNoIdlePod) ||
+			errors.Is(err, errIdlePodReservationConflict) ||
+			errors.Is(err, errIdlePodClaimLost) {
 			return nil, nil // No idle pod available
 		}
 		return nil, err

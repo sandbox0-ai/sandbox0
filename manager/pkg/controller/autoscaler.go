@@ -16,7 +16,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
-	appslisters "k8s.io/client-go/listers/apps/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/util/retry"
 )
@@ -30,10 +29,9 @@ import (
 //   - cold claims are admitted only while the pod-network backlog is healthy,
 //   - scale-down returns the pool target to minIdle after no traffic.
 type AutoScaler struct {
-	k8sClient        kubernetes.Interface
-	podLister        corelisters.PodLister
-	replicaSetLister appslisters.ReplicaSetLister
-	logger           *zap.Logger
+	k8sClient kubernetes.Interface
+	podLister corelisters.PodLister
+	logger    *zap.Logger
 
 	rateLimiter *scaleRateLimiter
 	coldClaims  *coldClaimLimiter
@@ -75,7 +73,9 @@ type AutoScaleConfig struct {
 }
 
 type autoScalerTemplateState struct {
-	lastClaimAt time.Time
+	lastClaimAt           time.Time
+	scaleRetryScheduled   bool
+	pendingScaleClaimType string
 }
 
 type autoScalerPoolStats struct {
@@ -107,17 +107,15 @@ func DefaultAutoScaleConfig() AutoScaleConfig {
 func NewAutoScaler(
 	k8sClient kubernetes.Interface,
 	podLister corelisters.PodLister,
-	replicaSetLister appslisters.ReplicaSetLister,
 	logger *zap.Logger,
 ) *AutoScaler {
-	return NewAutoScalerWithConfig(k8sClient, podLister, replicaSetLister, logger, DefaultAutoScaleConfig())
+	return NewAutoScalerWithConfig(k8sClient, podLister, logger, DefaultAutoScaleConfig())
 }
 
 // NewAutoScalerWithConfig creates a new AutoScaler with custom configuration.
 func NewAutoScalerWithConfig(
 	k8sClient kubernetes.Interface,
 	podLister corelisters.PodLister,
-	replicaSetLister appslisters.ReplicaSetLister,
 	logger *zap.Logger,
 	config AutoScaleConfig,
 ) *AutoScaler {
@@ -126,14 +124,13 @@ func NewAutoScalerWithConfig(
 		logger = zap.NewNop()
 	}
 	return &AutoScaler{
-		k8sClient:        k8sClient,
-		podLister:        podLister,
-		replicaSetLister: replicaSetLister,
-		logger:           logger,
-		rateLimiter:      newScaleRateLimiter(config.MinScaleInterval),
-		coldClaims:       newColdClaimLimiter(),
-		state:            make(map[string]*autoScalerTemplateState),
-		config:           config,
+		k8sClient:   k8sClient,
+		podLister:   podLister,
+		logger:      logger,
+		rateLimiter: newScaleRateLimiter(config.MinScaleInterval),
+		coldClaims:  newColdClaimLimiter(),
+		state:       make(map[string]*autoScalerTemplateState),
+		config:      config,
 	}
 }
 
@@ -250,8 +247,9 @@ func (s *AutoScaler) scaleForClaim(ctx context.Context, template *v1alpha1.Sandb
 
 	key := autoscalerTemplateKey(template)
 	templateName := autoscalerMetricTemplate(template)
-	if !s.rateLimiter.TryAcquire(key) {
+	if acquired, retryAfter := s.rateLimiter.TryAcquire(key); !acquired {
 		s.observeDecision(templateName, "scale_up", "rate_limited", "skipped")
+		s.scheduleScaleRetry(template, claimType, retryAfter)
 		return &ScaleDecision{ShouldScale: false, Reason: "rate limited"}, nil
 	}
 	defer s.rateLimiter.Complete(key)
@@ -445,16 +443,6 @@ func (s *AutoScaler) getCurrentReplicas(ctx context.Context, template *v1alpha1.
 		return 0, fmt.Errorf("generate replicaset name: %w", err)
 	}
 
-	if s.replicaSetLister != nil {
-		rs, err := s.replicaSetLister.ReplicaSets(template.Namespace).Get(rsName)
-		if err == nil {
-			return getInt32Value(rs.Spec.Replicas), nil
-		}
-		if !errors.IsNotFound(err) {
-			return 0, err
-		}
-	}
-
 	rs, err := s.k8sClient.AppsV1().ReplicaSets(template.Namespace).Get(ctx, rsName, metav1.GetOptions{})
 	if err != nil {
 		return 0, err
@@ -488,42 +476,51 @@ func (s *AutoScaler) executeScale(ctx context.Context, template *v1alpha1.Sandbo
 }
 
 // ReconcileScaleDown returns the idle pool target to minIdle after no traffic.
-func (s *AutoScaler) ReconcileScaleDown(ctx context.Context, template *v1alpha1.SandboxTemplate, now time.Time) error {
+// It returns a positive duration when the caller should requeue the template to
+// check again after the recent-traffic window expires.
+func (s *AutoScaler) ReconcileScaleDown(ctx context.Context, template *v1alpha1.SandboxTemplate, now time.Time) (time.Duration, error) {
 	if template == nil {
-		return nil
+		return 0, nil
 	}
 
 	currentReplicas, err := s.getCurrentReplicas(ctx, template)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			return nil
+			return 0, nil
 		}
-		return err
+		return 0, err
 	}
 
 	minIdle, _ := normalizedPoolBounds(template)
 	if currentReplicas <= minIdle {
-		return nil
+		return 0, nil
 	}
 
 	stats, err := s.getPoolStatsDetailed(template)
 	if err != nil {
-		return fmt.Errorf("get pool stats: %w", err)
+		return 0, fmt.Errorf("get pool stats: %w", err)
 	}
 	templateName := autoscalerMetricTemplate(template)
 	s.observePool(templateName, stats, currentReplicas, minIdle)
 	if stats.activeTotal() > 0 {
 		s.observeDecision(templateName, "scale_down", "active_pods", "skipped")
-		return nil
+		return 0, nil
 	}
 
 	lastClaimTime := s.lastClaimTime(template)
 	if observed := s.getLastClaimTime(template); observed.After(lastClaimTime) {
 		lastClaimTime = observed
 	}
-	if !lastClaimTime.IsZero() && now.Sub(lastClaimTime) < s.config.NoTrafficScaleDownAfter {
-		s.observeDecision(templateName, "scale_down", "recent_claim", "skipped")
-		return nil
+	if !lastClaimTime.IsZero() {
+		elapsed := now.Sub(lastClaimTime)
+		if elapsed < s.config.NoTrafficScaleDownAfter {
+			requeueAfter := s.config.NoTrafficScaleDownAfter - elapsed
+			if requeueAfter < time.Second {
+				requeueAfter = time.Second
+			}
+			s.observeDecision(templateName, "scale_down", "recent_claim", "skipped")
+			return requeueAfter, nil
+		}
 	}
 
 	s.logger.Info("Scale down due to no traffic",
@@ -532,11 +529,80 @@ func (s *AutoScaler) ReconcileScaleDown(ctx context.Context, template *v1alpha1.
 		zap.Int32("newReplicas", minIdle),
 	)
 	if err := s.executeScale(ctx, template, minIdle); err != nil {
-		return err
+		return 0, err
 	}
 	s.observeDecision(templateName, "scale_down", "no_recent_claims", "scaled")
 	s.observeScaleDelta(templateName, minIdle-currentReplicas)
-	return nil
+	return 0, nil
+}
+
+func (s *AutoScaler) scheduleScaleRetry(template *v1alpha1.SandboxTemplate, claimType string, retryAfter time.Duration) {
+	if s == nil || template == nil {
+		return
+	}
+	if retryAfter <= 0 {
+		retryAfter = s.config.MinScaleInterval
+	}
+	if retryAfter <= 0 {
+		retryAfter = time.Millisecond
+	}
+
+	key := autoscalerTemplateKey(template)
+	s.stateMu.Lock()
+	state := s.state[key]
+	if state == nil {
+		state = &autoScalerTemplateState{}
+		s.state[key] = state
+	}
+	state.pendingScaleClaimType = mergeScaleRetryClaimType(state.pendingScaleClaimType, claimType)
+	if state.scaleRetryScheduled {
+		s.stateMu.Unlock()
+		return
+	}
+	state.scaleRetryScheduled = true
+	s.stateMu.Unlock()
+
+	templateCopy := template.DeepCopy()
+	go func() {
+		timer := time.NewTimer(retryAfter)
+		defer timer.Stop()
+		<-timer.C
+
+		s.stateMu.Lock()
+		state := s.state[key]
+		pendingClaimType := "hot"
+		if state != nil {
+			pendingClaimType = state.pendingScaleClaimType
+			if pendingClaimType == "" {
+				pendingClaimType = "hot"
+			}
+			state.pendingScaleClaimType = ""
+			state.scaleRetryScheduled = false
+		}
+		s.stateMu.Unlock()
+
+		if _, err := s.scaleForClaim(context.Background(), templateCopy, pendingClaimType); err != nil {
+			s.logger.Warn("Auto scale retry failed",
+				zap.String("template", templateCopy.Name),
+				zap.String("namespace", templateCopy.Namespace),
+				zap.String("claimType", pendingClaimType),
+				zap.Error(err),
+			)
+		}
+	}()
+}
+
+func mergeScaleRetryClaimType(existing, next string) string {
+	if existing == "cold" || next == "cold" {
+		return "cold"
+	}
+	if existing != "" {
+		return existing
+	}
+	if next != "" {
+		return next
+	}
+	return "hot"
 }
 
 func (s *AutoScaler) getLastClaimTime(template *v1alpha1.SandboxTemplate) time.Time {

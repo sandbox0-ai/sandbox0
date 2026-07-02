@@ -121,7 +121,7 @@ func NewOperator(
 	replicaSetLister := appslisters.NewReplicaSetLister(replicaSetInformer.GetIndexer())
 	secretLister := corelisters.NewSecretLister(secretInformer.GetIndexer())
 	poolManager := NewPoolManager(k8sClient, podLister, replicaSetLister, secretLister, recorder, logger)
-	autoScaler := NewAutoScalerWithConfig(k8sClient, podLister, replicaSetLister, logger, toAutoScaleConfig(autoscalerConfig))
+	autoScaler := NewAutoScalerWithConfig(k8sClient, podLister, logger, toAutoScaleConfig(autoscalerConfig))
 	autoScaler.SetMetrics(metrics)
 
 	op := &Operator{
@@ -273,13 +273,16 @@ func (op *Operator) syncHandler(ctx context.Context, key string) error {
 	// Scale down for idle templates (async, background operation)
 	// Scale up is handled synchronously in SandboxService.OnColdClaim
 	if op.autoScaler != nil {
-		if err := op.autoScaler.ReconcileScaleDown(ctx, template, op.clock.Now()); err != nil {
+		requeueAfter, err := op.autoScaler.ReconcileScaleDown(ctx, template, op.clock.Now())
+		if err != nil {
 			op.logger.Warn("Scale down reconcile failed",
 				zap.String("template", template.Name),
 				zap.String("namespace", template.Namespace),
 				zap.Error(err),
 			)
 			// Don't fail the reconcile; pool + status are still correct.
+		} else if requeueAfter > 0 {
+			op.workqueue.AddAfter(key, requeueAfter)
 		}
 	}
 

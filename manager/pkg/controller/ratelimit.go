@@ -26,29 +26,31 @@ func newScaleRateLimiter(minInterval time.Duration) *scaleRateLimiter {
 }
 
 // TryAcquire attempts to acquire the rate limiter for the given key.
-// Returns true if this call should proceed with scaling, false if rate limited.
+// It returns true when this call should proceed with scaling. When it returns
+// false, retryAfter is the earliest useful delay before recomputing the target.
 // Conditions for success:
 // 1. No scale operation is currently in progress for this key
 // 2. Enough time has passed since the last scale COMPLETED (minInterval)
 // This is an atomic check-and-record operation to prevent race conditions.
-func (r *scaleRateLimiter) TryAcquire(key string) bool {
+func (r *scaleRateLimiter) TryAcquire(key string) (bool, time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	// Check if there's an ongoing scale operation
 	if r.inProgress[key] {
-		return false // Previous scale still in progress
+		return false, r.minInterval // Previous scale still in progress
 	}
 
 	// Check time interval since last completion
 	lastComplete, exists := r.lastCompleteAt[key]
-	if exists && time.Since(lastComplete) < r.minInterval {
-		return false // Rate limited by time since last completion
+	elapsed := time.Since(lastComplete)
+	if exists && elapsed < r.minInterval {
+		return false, r.minInterval - elapsed // Rate limited by time since last completion
 	}
 
 	// Mark as in progress
 	r.inProgress[key] = true
-	return true
+	return true, 0
 }
 
 // Complete marks the scale operation as done for the given key.

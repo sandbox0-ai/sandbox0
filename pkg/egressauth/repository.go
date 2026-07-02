@@ -210,7 +210,7 @@ func (r *Repository) UpsertBindings(ctx context.Context, record *BindingRecord) 
 			SourceID:      binding.SourceID,
 			SourceVersion: binding.SourceVersion,
 			Projection:    projectionJSON,
-			CachePolicy:   cachePolicyJSON,
+			CachePolicy:   emptyObjectIfJSONNull(cachePolicyJSON),
 		})
 	}
 
@@ -233,9 +233,9 @@ func (r *Repository) UpsertBindings(ctx context.Context, record *BindingRecord) 
 		INSERT INTO sandbox_egress_credential_bindings (
 			team_id, sandbox_id, ref, source_ref, source_id, source_version, projection, cache_policy, updated_at
 		)
-		SELECT $1, $2, ref, source_ref, source_id, source_version, projection, cache_policy, $4
+		SELECT $1, $2, ref, source_ref, source_id, source_version, COALESCE(projection, '{}'::jsonb), COALESCE(cache_policy, '{}'::jsonb), $4
 		FROM input
-	`, record.TeamID, record.SandboxID, payload, record.UpdatedAt); err != nil {
+		`, record.TeamID, record.SandboxID, payload, record.UpdatedAt); err != nil {
 		return fmt.Errorf("insert bindings: %w", err)
 	}
 
@@ -635,6 +635,13 @@ type credentialBindingRow struct {
 	SourceVersion int64           `json:"source_version"`
 	Projection    json.RawMessage `json:"projection"`
 	CachePolicy   json.RawMessage `json:"cache_policy"`
+}
+
+func emptyObjectIfJSONNull(raw []byte) json.RawMessage {
+	if len(raw) == 0 || string(raw) == "null" {
+		return json.RawMessage(`{}`)
+	}
+	return raw
 }
 
 func (r *Repository) scanSourceMetadata(rows pgx.Rows) (*CredentialSourceMetadata, error) {

@@ -92,6 +92,16 @@ func TestRepositoryPutSourceAdvancesExistingBindings(t *testing.T) {
 	}
 }
 
+func TestEmptyObjectIfJSONNullDefaultsNilCachePolicy(t *testing.T) {
+	raw, err := json.Marshal((*CachePolicySpec)(nil))
+	if err != nil {
+		t.Fatalf("marshal nil cache policy: %v", err)
+	}
+	if got := string(emptyObjectIfJSONNull(raw)); got != "{}" {
+		t.Fatalf("normalized cache policy = %s, want {}", got)
+	}
+}
+
 func TestRepositoryPutSourcePublishesRotationEvent(t *testing.T) {
 	ctx := context.Background()
 	repo, pool := newRepositoryTestStore(t)

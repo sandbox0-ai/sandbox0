@@ -11,7 +11,7 @@ Create a SandboxVolume, claim the builtin `browser` template, mount that volume 
 ```json
 {
     "id": "browser",
-    "display_name": "Browser",
+    "display_name": "Steel Browser",
     "port": 3000,
     "runtime": {
         "type": "cmd",
@@ -45,7 +45,7 @@ Create a SandboxVolume, claim the builtin `browser` template, mount that volume 
 
 `SANDBOX0_SANDBOX_ID`, `SANDBOX0_APP_DOMAIN`, and `SANDBOX0_SERVICE_PORT` are injected by Sandbox0. Steel uses `DOMAIN` and `USE_SSL=true` to return public `https` and `wss` URLs in session responses.
 
-## Use The Browser
+## Use Steel Browser
 
 After the sandbox is claimed, list the sandbox services and use the `public_url` for the `browser` service as the Steel base URL.
 
@@ -63,7 +63,7 @@ The session response includes `websocketUrl` for CDP clients, `debugUrl` for the
 
 When route auth is enabled, CDP and WebSocket clients must send the configured auth header. For human live-view access in a normal browser, open `debugUrl` through a protected frontend that can authenticate the route, or use a route auth mode that matches your access boundary.
 
-Browser automation clients can connect to `websocketUrl` with Playwright or a CDP client:
+Steel Browser automation clients can connect to `websocketUrl` with Playwright or a CDP client:
 
 ```js
 import { chromium } from "playwright";
@@ -96,3 +96,19 @@ The browser API is provided by Steel Browser and Chromium inside the image:
 | Live view | Steel `debugUrl`, `sessionViewerUrl`, and cast WebSocket routes |
 
 The builtin template is configurable through `Sandbox0Infra.spec.builtinTemplates`. Remove `templateId: browser` from that list to delete the operator-managed public template, or replace its `image`, `pool`, or full `spec` to pin a reviewed Steel Browser image.
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Use Cases" href="/docs/sandbox/use-cases" cta="Back">
+    Compare Steel Browser with the other Sandbox0-hosted use cases.
+  </Card>
+
+  <Card title="Sandbox Services" href="/docs/sandbox/services" cta="Continue">
+    Tune route auth, resume behavior, timeouts, and public service exposure.
+  </Card>
+
+  <Card title="Volume Mounts" href="/docs/sandbox/volume/mounts" cta="Continue">
+    Keep downloads and shared browser artifacts on a SandboxVolume.
+  </Card>
+</CardGroup>

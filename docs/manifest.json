@@ -13,14 +13,7 @@
         "volume",
         "credential",
         "integrations",
-        "self-hosted"
-      ]
-    },
-    {
-      "slug": "use-cases",
-      "title": "use-cases",
-      "defaultPage": "use-cases",
-      "sections": [
+        "self-hosted",
         "use-cases"
       ]
     },
@@ -195,8 +188,11 @@
           "title": "Hosting Hermes"
         },
         {
-          "slug": "browser",
-          "title": "Hosting Steel Browser"
+          "slug": "steel-browser",
+          "title": "Steel Browser",
+          "aliases": [
+            "browser"
+          ]
         }
       ]
     },

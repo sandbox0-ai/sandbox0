@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	"fmt"
+	"math/big"
 	"path"
 	"sort"
 	"strings"
@@ -30,6 +31,7 @@ const (
 	minSandboxCPURequestMilli                        = int64(10)
 	minSandboxMemoryRequestBytes                     = int64(64 * 1024 * 1024)
 	minSandboxEphemeralStorageRequestBytes           = int64(64 * 1024 * 1024)
+	defaultIdleSandboxMemoryLimitBytes               = int64(128 * 1024 * 1024)
 )
 
 // BuildPodSpec builds a pod spec with every template-declared user volume portal.
@@ -40,7 +42,9 @@ func BuildPodSpec(template *SandboxTemplate) corev1.PodSpec {
 // BuildIdlePodSpec builds the idle-pool pod spec. User volume portals stay
 // pre-mounted so hot claims can bind selected portals without recreating pods.
 func BuildIdlePodSpec(template *SandboxTemplate) corev1.PodSpec {
-	return BuildPodSpec(template)
+	spec := BuildPodSpec(template)
+	applyIdleResourceQuotaToPodSpec(&spec, template)
+	return spec
 }
 
 func buildPodSpec(template *SandboxTemplate, volumeMounts []VolumeMountSpec) corev1.PodSpec {
@@ -380,6 +384,36 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 	return container
 }
 
+func applyIdleResourceQuotaToPodSpec(spec *corev1.PodSpec, template *SandboxTemplate) {
+	if spec == nil || template == nil {
+		return
+	}
+	quota := idleResourceQuota(template.Spec.MainContainer.Resources)
+	for i := range spec.Containers {
+		if spec.Containers[i].Name != "procd" {
+			continue
+		}
+		spec.Containers[i].Resources = BuildResourceRequirements(quota)
+		return
+	}
+}
+
+func idleResourceQuota(templateQuota ResourceQuota) ResourceQuota {
+	quota := templateQuota.DeepCopy()
+	if quota == nil {
+		return ResourceQuota{}
+	}
+	if quota.Memory.Sign() > 0 {
+		idleMemory := *resource.NewQuantity(defaultIdleSandboxMemoryLimitBytes, resource.BinarySI)
+		if quota.Memory.Cmp(idleMemory) < 0 {
+			idleMemory = quota.Memory.DeepCopy()
+		}
+		quota.CPU = scaledCPUForMemory(quota.CPU, quota.Memory, idleMemory)
+		quota.Memory = idleMemory
+	}
+	return *quota
+}
+
 // BuildResourceRequirements converts a sandbox resource quota into Kubernetes
 // container requests and limits.
 func BuildResourceRequirements(quota ResourceQuota) corev1.ResourceRequirements {
@@ -414,6 +448,22 @@ func scaledCPURequest(limit resource.Quantity) resource.Quantity {
 	limitMilli := limit.MilliValue()
 	requestMilli := scaleResource(limitMilli, defaultSandboxCPURequestRatioMillis, minSandboxCPURequestMilli)
 	return *resource.NewMilliQuantity(requestMilli, resource.DecimalSI)
+}
+
+func scaledCPUForMemory(cpu, fromMemory, toMemory resource.Quantity) resource.Quantity {
+	if cpu.Sign() <= 0 || fromMemory.Sign() <= 0 || toMemory.Sign() <= 0 {
+		return resource.Quantity{}
+	}
+	numerator := big.NewInt(cpu.MilliValue())
+	numerator.Mul(numerator, big.NewInt(toMemory.Value()))
+	quotient, remainder := new(big.Int).QuoRem(numerator, big.NewInt(fromMemory.Value()), new(big.Int))
+	if remainder.Sign() > 0 {
+		quotient.Add(quotient, big.NewInt(1))
+	}
+	if !quotient.IsInt64() {
+		return *resource.NewMilliQuantity(1<<63-1, resource.DecimalSI)
+	}
+	return *resource.NewMilliQuantity(quotient.Int64(), resource.DecimalSI)
 }
 
 func scaledMemoryRequest(limit resource.Quantity) resource.Quantity {

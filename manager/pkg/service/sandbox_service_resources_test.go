@@ -104,6 +104,63 @@ func TestCreateNewPodAppliesClaimMemoryResources(t *testing.T) {
 	assertResizePolicy(t, container.ResizePolicy, corev1.ResourceMemory, corev1.NotRequired)
 }
 
+func TestCreateNewPodAppliesTemplateResourcesByDefault(t *testing.T) {
+	withClaimTestPublicKey(t)
+	template := newSandboxResourceTestTemplate(t)
+	client := fake.NewSimpleClientset()
+	svc := &SandboxService{
+		k8sClient:    client,
+		secretLister: newClaimTestSecretLister(t),
+		clock:        systemTime{},
+		config:       SandboxServiceConfig{SandboxMemoryPerCPU: "4Gi"},
+		logger:       zap.NewNop(),
+	}
+
+	pod, err := svc.createNewPod(context.Background(), template, &ClaimRequest{
+		TeamID: "team-a",
+		UserID: "user-a",
+	})
+	if err != nil {
+		t.Fatalf("createNewPod() error = %v", err)
+	}
+	container := sandboxRuntimeContainer(t, pod)
+	assertQuantity(t, container.Resources.Limits[corev1.ResourceMemory], "1Gi")
+	assertQuantity(t, container.Resources.Limits[corev1.ResourceCPU], "250m")
+	assertQuantity(t, container.Resources.Requests[corev1.ResourceMemory], "256Mi")
+	assertQuantity(t, container.Resources.Requests[corev1.ResourceCPU], "25m")
+}
+
+func TestClaimIdlePodAppliesTemplateResourcesByDefault(t *testing.T) {
+	template := newSandboxResourceTestTemplate(t)
+	idlePod := newSandboxResourceTestIdlePod(t, template, "idle-ready")
+	node := newClaimTestNode("node-a", "10.0.0.1")
+	node.Labels = map[string]string{dataplane.NodeDataPlaneReadyLabel: dataplane.ReadyLabelValue}
+	idlePod.Spec.NodeName = node.Name
+	client := fake.NewSimpleClientset(idlePod.DeepCopy(), node.DeepCopy())
+	svc := &SandboxService{
+		k8sClient:  client,
+		podLister:  newClaimTestPodLister(t, idlePod),
+		nodeLister: newClaimTestNodeLister(t, node),
+		clock:      systemTime{},
+		config:     SandboxServiceConfig{SandboxMemoryPerCPU: "4Gi"},
+		logger:     zap.NewNop(),
+	}
+
+	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{
+		TeamID: "team-a",
+		UserID: "user-a",
+	})
+	if err != nil {
+		t.Fatalf("claimIdlePod() error = %v", err)
+	}
+	container := sandboxRuntimeContainer(t, pod)
+	assertQuantity(t, container.Resources.Limits[corev1.ResourceMemory], "1Gi")
+	assertQuantity(t, container.Resources.Limits[corev1.ResourceCPU], "250m")
+	assertQuantity(t, container.Resources.Requests[corev1.ResourceMemory], "256Mi")
+	assertQuantity(t, container.Resources.Requests[corev1.ResourceCPU], "25m")
+	assertResizeSubresourceUpdate(t, client.Actions())
+}
+
 func TestClaimIdlePodAppliesMemoryOverride(t *testing.T) {
 	template := newSandboxResourceTestTemplate(t)
 	idlePod := newSandboxResourceTestIdlePod(t, template, "idle-ready")
@@ -361,7 +418,7 @@ func newSandboxResourceTestTemplate(t *testing.T) *v1alpha1.SandboxTemplate {
 func newSandboxResourceTestIdlePod(t *testing.T, template *v1alpha1.SandboxTemplate, name string) *corev1.Pod {
 	t.Helper()
 	pod := newClaimTestPod(template.Namespace, name, template.Name, true)
-	pod.Spec = v1alpha1.BuildPodSpec(template)
+	pod.Spec = v1alpha1.BuildIdlePodSpec(template)
 	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
 		Type:   v1alpha1.SandboxPodReadinessConditionType,
 		Status: corev1.ConditionTrue,
@@ -377,6 +434,7 @@ func newSandboxResourceTestIdlePod(t *testing.T, template *v1alpha1.SandboxTempl
 func newSandboxResourceTestActivePod(t *testing.T, template *v1alpha1.SandboxTemplate, name string) *corev1.Pod {
 	t.Helper()
 	pod := newSandboxResourceTestIdlePod(t, template, name)
+	pod.Spec = v1alpha1.BuildPodSpec(template)
 	pod.Labels[controller.LabelPoolType] = controller.PoolTypeActive
 	pod.Labels[controller.LabelSandboxID] = name
 	pod.Annotations[controller.AnnotationSandboxID] = name

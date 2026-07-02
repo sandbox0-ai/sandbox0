@@ -214,6 +214,14 @@ func (p *LifecycleProjector) handleUpsert(obj any) {
 		state.PausedAt = &eventTime
 		state.ActiveSince = nil
 	} else if state.Paused {
+		if pod.DeletionTimestamp != nil {
+			state.LastObservedAt = observedAt
+			state.LastResourceVer = pod.ResourceVersion
+			if err := p.commitProjection(ctx, sandboxID, state, pendingEvents, pendingWindows, observedAt); err != nil {
+				return
+			}
+			return
+		}
 		pendingEvents = append(pendingEvents, p.buildSandboxEvent(sandboxID, teamID, userID, templateID, observedAt, meteringpkg.EventTypeSandboxResumed, resumeEventID(sandboxID, pod.ResourceVersion), nil))
 		state.Paused = false
 		state.PausedAt = nil

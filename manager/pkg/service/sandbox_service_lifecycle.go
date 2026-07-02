@@ -234,6 +234,8 @@ func (s *SandboxService) pauseSandboxRuntime(ctx context.Context, sandboxID stri
 	if s.logger != nil {
 		s.logger.Info("Pausing sandbox runtime", zap.String("sandboxID", sandboxID))
 	}
+	var meteringRecord *SandboxRecord
+	var meteringPausedAt time.Time
 	pause := func(ctx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
 		if record != nil {
 			switch record.Status {
@@ -251,7 +253,9 @@ func (s *SandboxService) pauseSandboxRuntime(ctx context.Context, sandboxID stri
 		if err != nil {
 			if k8serrors.IsNotFound(err) {
 				if tx != nil {
-					return tx.MarkRuntimePaused(ctx, sandboxID, 0, s.clock.Now())
+					meteringPausedAt = s.clock.Now()
+					meteringRecord = cloneSandboxRecordForLifecycle(record)
+					return tx.MarkRuntimePaused(ctx, sandboxID, 0, meteringPausedAt)
 				}
 				return nil
 			}
@@ -275,6 +279,8 @@ func (s *SandboxService) pauseSandboxRuntime(ctx context.Context, sandboxID stri
 			return fmt.Errorf("delete runtime pod: %w", err)
 		}
 		if tx != nil {
+			meteringRecord = cloneSandboxRecordForLifecycle(record)
+			meteringPausedAt = pausedAt
 			return tx.MarkRuntimePaused(ctx, sandboxID, generation, pausedAt)
 		}
 		return nil
@@ -285,6 +291,10 @@ func (s *SandboxService) pauseSandboxRuntime(ctx context.Context, sandboxID stri
 				return pause(ctx, nil, nil)
 			}
 			return err
+		}
+		if meteringRecord != nil {
+			meteringRecord.Status = SandboxStatusPaused
+			s.recordSandboxPausedMetering(ctx, meteringRecord, meteringPausedAt)
 		}
 		return nil
 	}
@@ -475,7 +485,8 @@ func (s *SandboxService) commitPausingRuntimePaused(ctx context.Context, sandbox
 	if pausedAt.IsZero() {
 		pausedAt = s.clock.Now()
 	}
-	return s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
+	var meteringRecord *SandboxRecord
+	if err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
 		activeTxn, err := tx.GetActiveLifecycleTxn(lockCtx, sandboxID)
 		if err != nil {
 			return err
@@ -488,6 +499,7 @@ func (s *SandboxService) commitPausingRuntimePaused(ctx context.Context, sandbox
 				return err
 			}
 		}
+		meteringRecord = cloneSandboxRecordForLifecycle(record)
 		if err := tx.MarkRuntimePaused(lockCtx, sandboxID, generation, pausedAt); err != nil {
 			return err
 		}
@@ -496,7 +508,17 @@ func (s *SandboxService) commitPausingRuntimePaused(ctx context.Context, sandbox
 			preparedHead = rootFSState.LayerID
 		}
 		return tx.CommitLifecycleTxn(lockCtx, txn.ID, preparedHead)
-	})
+	}); err != nil {
+		return err
+	}
+	if meteringRecord != nil {
+		meteringRecord.Status = SandboxStatusPaused
+		if generation > meteringRecord.RuntimeGeneration {
+			meteringRecord.RuntimeGeneration = generation
+		}
+		s.recordSandboxPausedMetering(ctx, meteringRecord, pausedAt)
+	}
+	return nil
 }
 
 func (s *SandboxService) markLifecycleTxnPhase(ctx context.Context, sandboxID, txnID, phase string) error {

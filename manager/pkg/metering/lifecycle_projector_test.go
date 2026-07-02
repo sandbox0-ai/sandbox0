@@ -292,6 +292,41 @@ func TestLifecycleProjectorTreatsStaleRuntimeDeleteAsPause(t *testing.T) {
 	}
 }
 
+func TestLifecycleProjectorDoesNotResumePausedStateFromDeletingPodUpdate(t *testing.T) {
+	now := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
+	pausedAt := now.Add(time.Minute)
+	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{
+		"sb-1": {
+			SandboxID:         "sb-1",
+			Namespace:         "sandbox0",
+			TeamID:            "team-1",
+			UserID:            "user-1",
+			TemplateID:        "tpl-1",
+			ClusterID:         "cluster-a",
+			ResourceMillicpu:  1000,
+			ResourceMemoryMiB: 1024,
+			ClaimedAt:         ptrTime(now),
+			Paused:            true,
+			PausedAt:          ptrTime(pausedAt),
+			LastObservedAt:    pausedAt,
+		},
+	}}
+	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
+	projector.now = func() time.Time { return now.Add(2 * time.Minute) }
+
+	pod := buildSandboxPod(now, false, "", "3")
+	pod.DeletionTimestamp = ptrMetaTime(now.Add(2 * time.Minute))
+	projector.handleUpsert(pod)
+
+	if len(recorder.events) != 0 {
+		t.Fatalf("events = %#v, want none", recorder.events)
+	}
+	state := recorder.states["sb-1"]
+	if state == nil || !state.Paused || state.PausedAt == nil || !state.PausedAt.Equal(pausedAt) {
+		t.Fatalf("state after deleting pod update = %#v, want still paused", state)
+	}
+}
+
 func TestLifecycleProjectorLateRuntimePauseDeleteDoesNotReactivateTerminatedSandbox(t *testing.T) {
 	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
 	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")

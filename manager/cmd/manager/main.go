@@ -347,6 +347,7 @@ func main() {
 	sandboxService.SetCredentialStore(credentialStore)
 	sandboxService.SetQuotaStore(quotaRepo)
 	sandboxService.SetSandboxStore(sandboxStore)
+	sandboxService.SetLifecycleMeteringRecorder(service.NewSandboxLifecycleMeteringRecorder(meteringRepo, cfg.RegionID, cfg.DefaultClusterId))
 	sandboxService.SetAutoScaler(operator.GetAutoScaler())
 	rootFSObjectStore, rootFSObjectStoreErr := buildRootFSObjectStore(cfg)
 	if rootFSObjectStoreErr != nil {

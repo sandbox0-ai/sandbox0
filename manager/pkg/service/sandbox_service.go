@@ -127,6 +127,7 @@ type SandboxService struct {
 	deletionWebhookEmitter SandboxDeletionWebhookEmitter
 	quotaStore             TeamQuotaLimitStore
 	sandboxStore           SandboxStore
+	lifecycleMetering      SandboxLifecycleMeteringRecorder
 	rootFSObjectDeleter    RootFSObjectDeleter
 	resumeGroup            singleflight.Group
 	idlePodReservations    *idlePodReservations

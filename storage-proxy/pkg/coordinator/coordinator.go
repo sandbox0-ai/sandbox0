@@ -769,29 +769,35 @@ func (c *Coordinator) updateHeartbeats(ctx context.Context) {
 	}
 	c.mu.RUnlock()
 
-	for _, volumeID := range volumes {
-		if err := c.repo.UpdateMountHeartbeat(ctx, volumeID, c.clusterID, c.podID); err != nil {
+	missing, err := c.repo.UpdateMountHeartbeats(ctx, volumes, c.clusterID, c.podID)
+	if err != nil {
+		if metrics != nil {
+			for range volumes {
+				metrics.CoordinatorHeartbeatErrors.Inc()
+			}
+		}
+		c.logger.WithError(err).Warn("Failed to update mount heartbeats")
+		return
+	}
+	if metrics != nil {
+		for i := 0; i < len(volumes)-len(missing); i++ {
+			metrics.CoordinatorHeartbeatsTotal.Inc()
+		}
+		for range missing {
+			metrics.CoordinatorHeartbeatErrors.Inc()
+		}
+	}
+	for _, volumeID := range missing {
+		c.logger.WithField("volume_id", volumeID).Debug("Mount record not found, re-registering")
+		c.mu.Lock()
+		delete(c.mountedVolumes, volumeID)
+		c.mu.Unlock()
+
+		if err := c.RegisterMount(ctx, volumeID, volume.MountOptions{}); err != nil {
 			if metrics != nil {
 				metrics.CoordinatorHeartbeatErrors.Inc()
 			}
-			// If update fails (e.g., mount record deleted), re-register
-			if strings.Contains(err.Error(), "not found") {
-				c.logger.WithField("volume_id", volumeID).Debug("Mount record not found, re-registering")
-				c.mu.Lock()
-				delete(c.mountedVolumes, volumeID)
-				c.mu.Unlock()
-
-				// Try to re-register
-				if err := c.RegisterMount(ctx, volumeID, volume.MountOptions{}); err != nil {
-					c.logger.WithError(err).WithField("volume_id", volumeID).Warn("Failed to re-register mount")
-				}
-			} else {
-				c.logger.WithError(err).WithField("volume_id", volumeID).Warn("Failed to update heartbeat")
-			}
-		} else {
-			if metrics != nil {
-				metrics.CoordinatorHeartbeatsTotal.Inc()
-			}
+			c.logger.WithError(err).WithField("volume_id", volumeID).Warn("Failed to re-register mount")
 		}
 	}
 }
@@ -821,7 +827,7 @@ func (c *Coordinator) runCleanup(ctx context.Context) {
 			if err != nil {
 				c.logger.WithError(err).Warn("Failed to list mounts for orphan cleanup")
 			} else {
-				var orphaned int64
+				orphanRefs := make([]db.MountPodRef, 0)
 				seenPods := make(map[string]struct{}, len(mounts))
 				for _, mount := range mounts {
 					podKey := mount.ClusterID + "/" + mount.PodID
@@ -832,16 +838,12 @@ func (c *Coordinator) runCleanup(ctx context.Context) {
 					if c.podExists(ctx, mount.PodID) {
 						continue
 					}
-					if err := c.repo.DeleteMountByPodID(ctx, mount.ClusterID, mount.PodID); err != nil {
-						c.logger.WithError(err).WithFields(logrus.Fields{
-							"cluster_id": mount.ClusterID,
-							"pod_id":     mount.PodID,
-						}).Warn("Failed to delete orphaned mounts by pod")
-						continue
-					}
-					orphaned++
+					orphanRefs = append(orphanRefs, db.MountPodRef{ClusterID: mount.ClusterID, PodID: mount.PodID})
 				}
-				if orphaned > 0 {
+				orphaned, err := c.repo.DeleteMountsByPodID(ctx, orphanRefs)
+				if err != nil {
+					c.logger.WithError(err).Warn("Failed to delete orphaned mounts by pod")
+				} else if orphaned > 0 {
 					c.logger.WithField("orphaned_pods", orphaned).Info("Cleaned up orphaned mounts by pod lookup")
 				}
 			}

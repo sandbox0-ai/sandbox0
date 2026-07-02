@@ -36,19 +36,19 @@ type fakeTxStore struct {
 	states  map[string]*meteringpkg.SandboxProjectionState
 }
 
-func (f *fakeTxStore) AppendEvent(_ context.Context, event *meteringpkg.Event) error {
+func (f *fakeTxStore) AppendEvents(_ context.Context, events []*meteringpkg.Event) error {
 	if f.parent.appendErr != nil {
 		return f.parent.appendErr
 	}
-	f.events = append(f.events, event)
+	f.events = append(f.events, events...)
 	return nil
 }
 
-func (f *fakeTxStore) AppendWindow(_ context.Context, window *meteringpkg.Window) error {
+func (f *fakeTxStore) AppendWindows(_ context.Context, windows []*meteringpkg.Window) error {
 	if f.parent.appendErr != nil {
 		return f.parent.appendErr
 	}
-	f.windows = append(f.windows, window)
+	f.windows = append(f.windows, windows...)
 	return nil
 }
 

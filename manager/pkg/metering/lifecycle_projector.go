@@ -20,8 +20,8 @@ import (
 const sandboxLifecycleProducer = "manager.sandbox_lifecycle"
 
 type txStore interface {
-	AppendEvent(ctx context.Context, event *meteringpkg.Event) error
-	AppendWindow(ctx context.Context, window *meteringpkg.Window) error
+	AppendEvents(ctx context.Context, events []*meteringpkg.Event) error
+	AppendWindows(ctx context.Context, windows []*meteringpkg.Window) error
 	UpsertProducerWatermark(ctx context.Context, producer string, regionID string, completeBefore time.Time) error
 	UpsertSandboxProjectionState(ctx context.Context, state *meteringpkg.SandboxProjectionState) error
 }
@@ -69,12 +69,12 @@ func (s *repositoryStore) RunInTx(ctx context.Context, fn func(tx txStore) error
 	})
 }
 
-func (s *repositoryTxStore) AppendEvent(ctx context.Context, event *meteringpkg.Event) error {
-	return s.repo.AppendEventTx(ctx, s.tx, event)
+func (s *repositoryTxStore) AppendEvents(ctx context.Context, events []*meteringpkg.Event) error {
+	return s.repo.AppendEventsTx(ctx, s.tx, events)
 }
 
-func (s *repositoryTxStore) AppendWindow(ctx context.Context, window *meteringpkg.Window) error {
-	return s.repo.AppendWindowTx(ctx, s.tx, window)
+func (s *repositoryTxStore) AppendWindows(ctx context.Context, windows []*meteringpkg.Window) error {
+	return s.repo.AppendWindowsTx(ctx, s.tx, windows)
 }
 
 func (s *repositoryTxStore) UpsertProducerWatermark(ctx context.Context, producer string, regionID string, completeBefore time.Time) error {
@@ -492,22 +492,14 @@ func (p *LifecycleProjector) commitProjection(ctx context.Context, sandboxID str
 		p.recordError("commit_projection", sandboxID, err)
 		return err
 	}
+	events = compactEvents(events)
+	windows = compactWindows(windows)
 	if err := p.store.RunInTx(ctx, func(tx txStore) error {
-		for _, event := range events {
-			if event == nil {
-				continue
-			}
-			if err := tx.AppendEvent(ctx, event); err != nil {
-				return fmt.Errorf("append event %s: %w", event.EventType, err)
-			}
+		if err := tx.AppendEvents(ctx, events); err != nil {
+			return fmt.Errorf("append events: %w", err)
 		}
-		for _, window := range windows {
-			if window == nil {
-				continue
-			}
-			if err := tx.AppendWindow(ctx, window); err != nil {
-				return fmt.Errorf("append window %s: %w", window.WindowType, err)
-			}
+		if err := tx.AppendWindows(ctx, windows); err != nil {
+			return fmt.Errorf("append windows: %w", err)
 		}
 		if err := tx.UpsertSandboxProjectionState(ctx, state); err != nil {
 			return fmt.Errorf("upsert state: %w", err)
@@ -518,29 +510,41 @@ func (p *LifecycleProjector) commitProjection(ctx context.Context, sandboxID str
 		return nil
 	}); err != nil {
 		for _, event := range events {
-			if event != nil {
-				p.recordEventResult(event.EventType, "error")
-			}
+			p.recordEventResult(event.EventType, "error")
 		}
 		for _, window := range windows {
-			if window != nil {
-				p.recordWindowResult(window.WindowType, "error")
-			}
+			p.recordWindowResult(window.WindowType, "error")
 		}
 		p.recordError("commit_projection", sandboxID, err)
 		return err
 	}
 	for _, event := range events {
-		if event != nil {
-			p.recordEventResult(event.EventType, "success")
-		}
+		p.recordEventResult(event.EventType, "success")
 	}
 	for _, window := range windows {
-		if window != nil {
-			p.recordWindowResult(window.WindowType, "success")
-		}
+		p.recordWindowResult(window.WindowType, "success")
 	}
 	return nil
+}
+
+func compactEvents(events []*meteringpkg.Event) []*meteringpkg.Event {
+	out := events[:0]
+	for _, event := range events {
+		if event != nil {
+			out = append(out, event)
+		}
+	}
+	return out
+}
+
+func compactWindows(windows []*meteringpkg.Window) []*meteringpkg.Window {
+	out := windows[:0]
+	for _, window := range windows {
+		if window != nil {
+			out = append(out, window)
+		}
+	}
+	return out
 }
 
 func (p *LifecycleProjector) recordEventResult(eventType string, result string) {

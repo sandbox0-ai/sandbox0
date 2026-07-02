@@ -132,7 +132,7 @@ type RootFSObjectInspector interface {
 }
 
 type RootFSStorageMeteringRecorder interface {
-	RecordStorageObservation(context.Context, *meteringpkg.StorageObservation) error
+	RecordStorageObservations(context.Context, []*meteringpkg.StorageObservation) error
 }
 
 type rootFSStoreDB interface {
@@ -767,18 +767,20 @@ func (s *PGSandboxStore) RecordRootFSStorageObservations(ctx context.Context, re
 	if err != nil {
 		return nil, err
 	}
+	observations := make([]*meteringpkg.StorageObservation, 0, len(usages))
 	for i := range usages {
 		usages[i].ObservedAt = observedAt
-		if err := recorder.RecordStorageObservation(ctx, &meteringpkg.StorageObservation{
+		observations = append(observations, &meteringpkg.StorageObservation{
 			SubjectType: meteringpkg.SubjectTypeRootFS,
 			SubjectID:   usages[i].TeamID,
 			Product:     meteringpkg.ProductSandbox,
 			TeamID:      usages[i].TeamID,
 			SizeBytes:   usages[i].StorageBytes,
 			ObservedAt:  observedAt,
-		}); err != nil {
-			return usages, fmt.Errorf("record rootfs storage observation for team %q: %w", usages[i].TeamID, err)
-		}
+		})
+	}
+	if err := recorder.RecordStorageObservations(ctx, observations); err != nil {
+		return usages, fmt.Errorf("record rootfs storage observations: %w", err)
 	}
 	return usages, nil
 }

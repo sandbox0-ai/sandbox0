@@ -205,6 +205,127 @@ func TestAppendWindowUsesDefaultPayload(t *testing.T) {
 	}
 }
 
+func TestAppendEventsBatchesRows(t *testing.T) {
+	occurredAt := time.Date(2026, 3, 12, 12, 0, 0, 0, time.UTC)
+	execCalls := 0
+	repo := &Repository{
+		db: &fakeDB{
+			execFn: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+				execCalls++
+				if !strings.Contains(sql, "jsonb_to_recordset") || !strings.Contains(sql, "usage_events") {
+					t.Fatalf("unexpected SQL: %s", sql)
+				}
+				payload, ok := args[0].([]byte)
+				if !ok {
+					t.Fatalf("payload type = %T, want []byte", args[0])
+				}
+				var rows []usageEventRow
+				if err := json.Unmarshal(payload, &rows); err != nil {
+					t.Fatalf("unmarshal payload: %v", err)
+				}
+				if len(rows) != 2 {
+					t.Fatalf("row count = %d, want 2", len(rows))
+				}
+				for _, row := range rows {
+					if string(row.Data) != "{}" {
+						t.Fatalf("row data = %s, want {}", row.Data)
+					}
+				}
+				return pgconn.CommandTag{}, nil
+			},
+		},
+	}
+
+	err := repo.AppendEvents(context.Background(), []*Event{
+		{
+			EventID:     "evt-1",
+			Producer:    "manager.sandbox_lifecycle",
+			EventType:   EventTypeSandboxClaimed,
+			SubjectType: SubjectTypeSandbox,
+			SubjectID:   "sb-1",
+			OccurredAt:  occurredAt,
+		},
+		{
+			EventID:     "evt-2",
+			Producer:    "manager.sandbox_lifecycle",
+			EventType:   EventTypeSandboxTerminated,
+			SubjectType: SubjectTypeSandbox,
+			SubjectID:   "sb-2",
+			OccurredAt:  occurredAt,
+		},
+	})
+	if err != nil {
+		t.Fatalf("AppendEvents: %v", err)
+	}
+	if execCalls != 1 {
+		t.Fatalf("Exec calls = %d, want 1", execCalls)
+	}
+}
+
+func TestAppendWindowsBatchesRows(t *testing.T) {
+	windowStart := time.Date(2026, 3, 12, 12, 0, 0, 0, time.UTC)
+	windowEnd := windowStart.Add(5 * time.Minute)
+	execCalls := 0
+	repo := &Repository{
+		db: &fakeDB{
+			execFn: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+				execCalls++
+				if !strings.Contains(sql, "jsonb_to_recordset") || !strings.Contains(sql, "usage_windows") {
+					t.Fatalf("unexpected SQL: %s", sql)
+				}
+				payload, ok := args[0].([]byte)
+				if !ok {
+					t.Fatalf("payload type = %T, want []byte", args[0])
+				}
+				var rows []usageWindowRow
+				if err := json.Unmarshal(payload, &rows); err != nil {
+					t.Fatalf("unmarshal payload: %v", err)
+				}
+				if len(rows) != 2 {
+					t.Fatalf("row count = %d, want 2", len(rows))
+				}
+				for _, row := range rows {
+					if string(row.Data) != "{}" {
+						t.Fatalf("row data = %s, want {}", row.Data)
+					}
+				}
+				return pgconn.CommandTag{}, nil
+			},
+		},
+	}
+
+	err := repo.AppendWindows(context.Background(), []*Window{
+		{
+			WindowID:    "win-1",
+			Producer:    "manager.sandbox_lifecycle",
+			WindowType:  WindowTypeSandboxRuntimeMiBMilliseconds,
+			SubjectType: SubjectTypeSandbox,
+			SubjectID:   "sb-1",
+			WindowStart: windowStart,
+			WindowEnd:   windowEnd,
+			Value:       300_000,
+			Unit:        WindowUnitMiBMilliseconds,
+		},
+		{
+			WindowID:    "win-2",
+			Producer:    "manager.sandbox_lifecycle",
+			WindowType:  WindowTypeSandboxRuntimeMiBMilliseconds,
+			SubjectType: SubjectTypeSandbox,
+			SubjectID:   "sb-2",
+			WindowStart: windowStart,
+			WindowEnd:   windowEnd,
+			Value:       600_000,
+			Unit:        WindowUnitMiBMilliseconds,
+		},
+	})
+	if err != nil {
+		t.Fatalf("AppendWindows: %v", err)
+	}
+	if execCalls != 1 {
+		t.Fatalf("Exec calls = %d, want 1", execCalls)
+	}
+}
+
 func TestGetStatusUsesMinProducerWatermark(t *testing.T) {
 	earliest := time.Date(2026, 3, 12, 11, 0, 0, 0, time.UTC)
 	rowCall := 0

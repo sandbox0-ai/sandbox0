@@ -36,7 +36,7 @@ func (f *fakeBindingStore) DeleteBindings(context.Context, string, string) error
 	return errors.New("not implemented")
 }
 
-func (f *fakeBindingStore) GetSourceByRef(context.Context, string, string) (*egressauth.CredentialSource, error) {
+func (f *fakeBindingStore) GetSourcesByRef(context.Context, string, []string) (map[string]*egressauth.CredentialSource, error) {
 	return nil, errors.New("not implemented")
 }
 

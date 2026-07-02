@@ -40,6 +40,7 @@ type volumeRepository interface {
 	GetOwnedSandboxVolumeByOwner(ctx context.Context, clusterID, sandboxID, purpose string) (*db.OwnedSandboxVolume, error)
 	GetActiveMounts(ctx context.Context, volumeID string, heartbeatTimeout int) ([]*db.VolumeMount, error)
 	DeleteMount(ctx context.Context, volumeID, clusterID, podID string) error
+	DeleteMounts(ctx context.Context, volumeID string, mounts []*db.VolumeMount) error
 	DeleteSandboxVolumeTx(ctx context.Context, tx pgx.Tx, id string) error
 	MarkOwnedSandboxVolumesForCleanup(ctx context.Context, clusterID, sandboxID, reason string) (int64, error)
 	MarkOwnedSandboxVolumeCleanupAttempt(ctx context.Context, volumeID string, cleanupErr error) error

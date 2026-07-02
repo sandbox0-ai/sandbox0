@@ -17,7 +17,7 @@ import (
 const producerPrefix = "netd.byte_windows"
 
 type txRecorder interface {
-	AppendWindow(ctx context.Context, window *meteringpkg.Window) error
+	AppendWindows(ctx context.Context, windows []*meteringpkg.Window) error
 	UpsertProducerWatermark(ctx context.Context, producer string, regionID string, completeBefore time.Time) error
 }
 
@@ -52,8 +52,8 @@ type repositoryTxAdapter struct {
 	tx   pgx.Tx
 }
 
-func (r *repositoryTxAdapter) AppendWindow(ctx context.Context, window *meteringpkg.Window) error {
-	return r.repo.AppendWindowTx(ctx, r.tx, window)
+func (r *repositoryTxAdapter) AppendWindows(ctx context.Context, windows []*meteringpkg.Window) error {
+	return r.repo.AppendWindowsTx(ctx, r.tx, windows)
 }
 
 func (r *repositoryTxAdapter) UpsertProducerWatermark(ctx context.Context, producer string, regionID string, completeBefore time.Time) error {
@@ -215,18 +215,19 @@ func (a *Aggregator) Flush(ctx context.Context) error {
 		end = start
 	}
 
+	windows := make([]*meteringpkg.Window, 0, len(snapshot)*2)
+	for _, usage := range snapshot {
+		if usage.egress > 0 {
+			windows = append(windows, a.buildWindow(usage, meteringpkg.WindowTypeSandboxEgressBytes, start, end, usage.egress))
+		}
+		if usage.ingress > 0 {
+			windows = append(windows, a.buildWindow(usage, meteringpkg.WindowTypeSandboxIngressBytes, start, end, usage.ingress))
+		}
+	}
+
 	err := a.recorder.RunInTx(ctx, func(tx txRecorder) error {
-		for _, usage := range snapshot {
-			if usage.egress > 0 {
-				if err := tx.AppendWindow(ctx, a.buildWindow(usage, meteringpkg.WindowTypeSandboxEgressBytes, start, end, usage.egress)); err != nil {
-					return err
-				}
-			}
-			if usage.ingress > 0 {
-				if err := tx.AppendWindow(ctx, a.buildWindow(usage, meteringpkg.WindowTypeSandboxIngressBytes, start, end, usage.ingress)); err != nil {
-					return err
-				}
-			}
+		if err := tx.AppendWindows(ctx, windows); err != nil {
+			return err
 		}
 		return tx.UpsertProducerWatermark(ctx, a.producer, a.regionID, end)
 	})

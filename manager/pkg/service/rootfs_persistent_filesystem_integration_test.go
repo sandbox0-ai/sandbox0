@@ -747,8 +747,8 @@ type recordingRootFSStorageMeteringRecorder struct {
 	observations []*meteringpkg.StorageObservation
 }
 
-func (r *recordingRootFSStorageMeteringRecorder) RecordStorageObservation(_ context.Context, observation *meteringpkg.StorageObservation) error {
-	r.observations = append(r.observations, observation)
+func (r *recordingRootFSStorageMeteringRecorder) RecordStorageObservations(_ context.Context, observations []*meteringpkg.StorageObservation) error {
+	r.observations = append(r.observations, observations...)
 	return nil
 }
 

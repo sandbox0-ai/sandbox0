@@ -289,12 +289,17 @@ func toStoreCredentialBindings(
 	if len(in) == 0 {
 		return nil, nil
 	}
+	refs := make([]string, 0, len(in))
+	for _, binding := range in {
+		refs = append(refs, binding.SourceRef)
+	}
+	sources, err := store.GetSourcesByRef(ctx, teamID, refs)
+	if err != nil {
+		return nil, fmt.Errorf("resolve credential sources: %w", err)
+	}
 	out := make([]egressauth.CredentialBinding, 0, len(in))
 	for _, binding := range in {
-		source, err := store.GetSourceByRef(ctx, teamID, binding.SourceRef)
-		if err != nil {
-			return nil, fmt.Errorf("resolve credential source %q: %w", binding.SourceRef, err)
-		}
+		source := sources[binding.SourceRef]
 		if source == nil {
 			return nil, fmt.Errorf("credential source %q not found", binding.SourceRef)
 		}

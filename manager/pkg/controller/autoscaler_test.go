@@ -21,7 +21,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/fake"
-	appslisters "k8s.io/client-go/listers/apps/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 )
@@ -49,7 +48,7 @@ func TestAutoScalerColdClaimRefillsIdleDeficitByStep(t *testing.T) {
 	assert.Equal(t, int32(25), *rs.Spec.Replicas)
 }
 
-func TestAutoScalerColdClaimUsesCachedReplicaSetTarget(t *testing.T) {
+func TestAutoScalerColdClaimUsesLiveReplicaSetTarget(t *testing.T) {
 	template := autoscalerTestTemplate("template-a", 15, 50)
 	scaler, client := newAutoScalerTestHarness(t, template, 15, nil, AutoScaleConfig{
 		MinScaleInterval:        time.Millisecond,
@@ -69,11 +68,11 @@ func TestAutoScalerColdClaimUsesCachedReplicaSetTarget(t *testing.T) {
 	decision, err := scaler.OnColdClaim(context.Background(), template)
 	require.NoError(t, err)
 	require.True(t, decision.ShouldScale)
-	assert.Equal(t, int32(15), decision.OldReplicas)
-	assert.Equal(t, int32(25), decision.NewReplicas)
+	assert.Equal(t, int32(25), decision.OldReplicas)
+	assert.Equal(t, int32(35), decision.NewReplicas)
 
 	rs = getAutoscalerTestReplicaSet(t, client, template)
-	assert.Equal(t, int32(25), *rs.Spec.Replicas)
+	assert.Equal(t, int32(35), *rs.Spec.Replicas)
 }
 
 func TestAutoScalerHotClaimSkipsWhenPendingIdleCoversTarget(t *testing.T) {
@@ -139,11 +138,62 @@ func TestAutoScalerReconcileScaleDownReturnsToMinIdle(t *testing.T) {
 		ScaleDownPercent:        0.1,
 	})
 
-	err := scaler.ReconcileScaleDown(context.Background(), template, time.Now().Add(2*time.Minute))
+	requeueAfter, err := scaler.ReconcileScaleDown(context.Background(), template, time.Now().Add(2*time.Minute))
 	require.NoError(t, err)
+	assert.Zero(t, requeueAfter)
 
 	rs := getAutoscalerTestReplicaSet(t, client, template)
 	assert.Equal(t, int32(15), *rs.Spec.Replicas)
+}
+
+func TestAutoScalerReconcileScaleDownRequestsRequeueAfterRecentClaim(t *testing.T) {
+	template := autoscalerTestTemplate("template-a", 15, 50)
+	scaler, client := newAutoScalerTestHarness(t, template, 30, nil, AutoScaleConfig{
+		MinScaleInterval:        time.Millisecond,
+		ScaleUpFactor:           1.5,
+		MaxScaleStep:            10,
+		MinIdleBuffer:           2,
+		TargetIdleRatio:         0.2,
+		NoTrafficScaleDownAfter: time.Minute,
+		ScaleDownPercent:        0.1,
+	})
+	scaler.recordClaim(template)
+
+	requeueAfter, err := scaler.ReconcileScaleDown(context.Background(), template, time.Now())
+	require.NoError(t, err)
+	assert.Greater(t, requeueAfter, time.Duration(0))
+	assert.LessOrEqual(t, requeueAfter, time.Minute)
+
+	rs := getAutoscalerTestReplicaSet(t, client, template)
+	assert.Equal(t, int32(30), *rs.Spec.Replicas)
+}
+
+func TestAutoScalerRateLimitedScaleUpSchedulesCoalescedRetry(t *testing.T) {
+	template := autoscalerTestTemplate("template-a", 15, 50)
+	scaler, client := newAutoScalerTestHarness(t, template, 15, nil, AutoScaleConfig{
+		MinScaleInterval:        5 * time.Millisecond,
+		ScaleUpFactor:           1.5,
+		MaxScaleStep:            10,
+		MinIdleBuffer:           2,
+		TargetIdleRatio:         0.2,
+		NoTrafficScaleDownAfter: time.Minute,
+		ScaleDownPercent:        0.1,
+	})
+
+	decision, err := scaler.OnColdClaim(context.Background(), template)
+	require.NoError(t, err)
+	require.True(t, decision.ShouldScale)
+	assert.Equal(t, int32(25), decision.NewReplicas)
+
+	decision, err = scaler.OnColdClaim(context.Background(), template)
+	require.NoError(t, err)
+	require.False(t, decision.ShouldScale)
+	assert.Equal(t, "rate limited", decision.Reason)
+
+	assert.Eventually(t, func() bool {
+		rs := getAutoscalerTestReplicaSet(t, client, template)
+		return rs.Spec.Replicas != nil && *rs.Spec.Replicas == 35
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestAutoScalerPoolStatsCountsBacklog(t *testing.T) {
@@ -178,7 +228,6 @@ func TestNewAutoScalerWithConfigAppliesZeroDefaults(t *testing.T) {
 	scaler := NewAutoScalerWithConfig(
 		fake.NewSimpleClientset(),
 		corelisters.NewPodLister(cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})),
-		appslisters.NewReplicaSetLister(cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})),
 		zap.NewNop(),
 		AutoScaleConfig{},
 	)
@@ -194,12 +243,20 @@ func TestScaleRateLimiter(t *testing.T) {
 	limiter := newScaleRateLimiter(100 * time.Millisecond)
 	key := "test-template"
 
-	assert.True(t, limiter.TryAcquire(key))
-	assert.False(t, limiter.TryAcquire(key))
+	acquired, retryAfter := limiter.TryAcquire(key)
+	assert.True(t, acquired)
+	assert.Zero(t, retryAfter)
+	acquired, retryAfter = limiter.TryAcquire(key)
+	assert.False(t, acquired)
+	assert.Equal(t, 100*time.Millisecond, retryAfter)
 	limiter.Complete(key)
-	assert.False(t, limiter.TryAcquire(key))
+	acquired, retryAfter = limiter.TryAcquire(key)
+	assert.False(t, acquired)
+	assert.Greater(t, retryAfter, time.Duration(0))
 	time.Sleep(110 * time.Millisecond)
-	assert.True(t, limiter.TryAcquire(key))
+	acquired, retryAfter = limiter.TryAcquire(key)
+	assert.True(t, acquired)
+	assert.Zero(t, retryAfter)
 }
 
 func TestScaleRateLimiterConcurrency(t *testing.T) {
@@ -212,7 +269,7 @@ func TestScaleRateLimiterConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if limiter.TryAcquire(key) {
+			if acquired, _ := limiter.TryAcquire(key); acquired {
 				successCount++
 			}
 		}()
@@ -267,13 +324,9 @@ func newAutoScalerTestHarness(
 	for _, pod := range pods {
 		require.NoError(t, podIndexer.Add(pod))
 	}
-	rsIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
-	require.NoError(t, rsIndexer.Add(rs))
-
 	return NewAutoScalerWithConfig(
 		client,
 		corelisters.NewPodLister(podIndexer),
-		appslisters.NewReplicaSetLister(rsIndexer),
 		zap.NewNop(),
 		config,
 	), client

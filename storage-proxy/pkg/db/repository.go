@@ -24,8 +24,11 @@ type CoordinatorRepository interface {
 	AcquireMount(ctx context.Context, mount *VolumeMount, heartbeatTimeout int) error
 	CreateMount(ctx context.Context, mount *VolumeMount) error
 	UpdateMountHeartbeat(ctx context.Context, volumeID, clusterID, podID string) error
+	UpdateMountHeartbeats(ctx context.Context, volumeIDs []string, clusterID, podID string) ([]string, error)
 	DeleteMount(ctx context.Context, volumeID, clusterID, podID string) error
+	DeleteMounts(ctx context.Context, volumeID string, mounts []*VolumeMount) error
 	DeleteMountByPodID(ctx context.Context, clusterID, podID string) error
+	DeleteMountsByPodID(ctx context.Context, refs []MountPodRef) (int64, error)
 	GetActiveMounts(ctx context.Context, volumeID string, heartbeatTimeout int) ([]*VolumeMount, error)
 	GetAllMounts(ctx context.Context) ([]*VolumeMount, error)
 	DeleteStaleMounts(ctx context.Context, heartbeatTimeout int) (int64, error)
@@ -41,6 +44,11 @@ type CoordinatorRepository interface {
 
 type mountOptionsEnvelope struct {
 	AccessMode string `json:"access_mode"`
+}
+
+type MountPodRef struct {
+	ClusterID string `json:"cluster_id"`
+	PodID     string `json:"pod_id"`
 }
 
 func normalizeMountAccessMode(value string) string {
@@ -782,6 +790,70 @@ func (r *Repository) UpdateMountHeartbeat(ctx context.Context, volumeID, cluster
 	return nil
 }
 
+func (r *Repository) UpdateMountHeartbeats(ctx context.Context, volumeIDs []string, clusterID, podID string) ([]string, error) {
+	if len(volumeIDs) == 0 {
+		return nil, nil
+	}
+	uniqueVolumeIDs := make([]string, 0, len(volumeIDs))
+	seen := make(map[string]struct{}, len(volumeIDs))
+	for _, volumeID := range volumeIDs {
+		volumeID = strings.TrimSpace(volumeID)
+		if volumeID == "" {
+			continue
+		}
+		if _, ok := seen[volumeID]; ok {
+			continue
+		}
+		seen[volumeID] = struct{}{}
+		uniqueVolumeIDs = append(uniqueVolumeIDs, volumeID)
+	}
+	if len(uniqueVolumeIDs) == 0 {
+		return nil, nil
+	}
+	payload, err := json.Marshal(uniqueVolumeIDs)
+	if err != nil {
+		return nil, fmt.Errorf("marshal mount heartbeat volume ids: %w", err)
+	}
+	rows, err := r.pool.Query(ctx, `
+		WITH input AS (
+			SELECT value AS volume_id
+			FROM jsonb_array_elements_text($1::jsonb)
+		),
+		updated AS (
+			UPDATE sandbox_volume_mounts m
+			SET last_heartbeat = NOW()
+			FROM input
+			WHERE m.volume_id = input.volume_id
+				AND m.cluster_id = $2
+				AND m.pod_id = $3
+			RETURNING m.volume_id
+		)
+		SELECT input.volume_id, updated.volume_id IS NOT NULL
+		FROM input
+		LEFT JOIN updated ON updated.volume_id = input.volume_id
+	`, payload, clusterID, podID)
+	if err != nil {
+		return nil, fmt.Errorf("update mount heartbeats: %w", err)
+	}
+	defer rows.Close()
+
+	var missing []string
+	for rows.Next() {
+		var volumeID string
+		var updated bool
+		if err := rows.Scan(&volumeID, &updated); err != nil {
+			return nil, fmt.Errorf("scan mount heartbeat result: %w", err)
+		}
+		if !updated {
+			missing = append(missing, volumeID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate mount heartbeat results: %w", err)
+	}
+	return missing, nil
+}
+
 // DeleteMount deletes a mount record
 func (r *Repository) DeleteMount(ctx context.Context, volumeID, clusterID, podID string) error {
 	_, err := r.pool.Exec(ctx, `
@@ -796,6 +868,53 @@ func (r *Repository) DeleteMount(ctx context.Context, volumeID, clusterID, podID
 	return nil
 }
 
+func (r *Repository) DeleteMounts(ctx context.Context, volumeID string, mounts []*VolumeMount) error {
+	if len(mounts) == 0 {
+		return nil
+	}
+	refs := make([]MountPodRef, 0, len(mounts))
+	seen := make(map[string]struct{}, len(mounts))
+	for _, mount := range mounts {
+		if mount == nil {
+			continue
+		}
+		ref := MountPodRef{
+			ClusterID: strings.TrimSpace(mount.ClusterID),
+			PodID:     strings.TrimSpace(mount.PodID),
+		}
+		if ref.ClusterID == "" || ref.PodID == "" {
+			continue
+		}
+		key := ref.ClusterID + "\x00" + ref.PodID
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		refs = append(refs, ref)
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	payload, err := json.Marshal(refs)
+	if err != nil {
+		return fmt.Errorf("marshal mount delete refs: %w", err)
+	}
+	if _, err := r.pool.Exec(ctx, `
+		WITH input AS (
+			SELECT *
+			FROM jsonb_to_recordset($2::jsonb) AS ref(cluster_id text, pod_id text)
+		)
+		DELETE FROM sandbox_volume_mounts m
+		USING input
+		WHERE m.volume_id = $1
+			AND m.cluster_id = input.cluster_id
+			AND m.pod_id = input.pod_id
+	`, volumeID, payload); err != nil {
+		return fmt.Errorf("delete mounts: %w", err)
+	}
+	return nil
+}
+
 // DeleteMountByPodID deletes all mount records for a pod in a cluster.
 func (r *Repository) DeleteMountByPodID(ctx context.Context, clusterID, podID string) error {
 	_, err := r.pool.Exec(ctx, `
@@ -806,6 +925,48 @@ func (r *Repository) DeleteMountByPodID(ctx context.Context, clusterID, podID st
 		return fmt.Errorf("delete mount by pod id: %w", err)
 	}
 	return nil
+}
+
+func (r *Repository) DeleteMountsByPodID(ctx context.Context, refs []MountPodRef) (int64, error) {
+	if len(refs) == 0 {
+		return 0, nil
+	}
+	uniqueRefs := make([]MountPodRef, 0, len(refs))
+	seen := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		ref.ClusterID = strings.TrimSpace(ref.ClusterID)
+		ref.PodID = strings.TrimSpace(ref.PodID)
+		if ref.ClusterID == "" || ref.PodID == "" {
+			continue
+		}
+		key := ref.ClusterID + "\x00" + ref.PodID
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		uniqueRefs = append(uniqueRefs, ref)
+	}
+	if len(uniqueRefs) == 0 {
+		return 0, nil
+	}
+	payload, err := json.Marshal(uniqueRefs)
+	if err != nil {
+		return 0, fmt.Errorf("marshal pod mount delete refs: %w", err)
+	}
+	tag, err := r.pool.Exec(ctx, `
+		WITH input AS (
+			SELECT *
+			FROM jsonb_to_recordset($1::jsonb) AS ref(cluster_id text, pod_id text)
+		)
+		DELETE FROM sandbox_volume_mounts m
+		USING input
+		WHERE m.cluster_id = input.cluster_id
+			AND m.pod_id = input.pod_id
+	`, payload)
+	if err != nil {
+		return 0, fmt.Errorf("delete mounts by pod id: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // GetActiveMounts retrieves active mounts for a volume (heartbeat within threshold)

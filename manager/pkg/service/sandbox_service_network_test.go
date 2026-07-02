@@ -62,8 +62,15 @@ func (s *memoryBindingStore) DeleteBindings(_ context.Context, teamID, sandboxID
 	return nil
 }
 
-func (s *memoryBindingStore) GetSourceByRef(_ context.Context, teamID, ref string) (*egressauth.CredentialSource, error) {
-	return cloneCredentialSource(s.sourcesByRef[s.sourceRefKey(teamID, ref)]), nil
+func (s *memoryBindingStore) GetSourcesByRef(_ context.Context, teamID string, refs []string) (map[string]*egressauth.CredentialSource, error) {
+	out := make(map[string]*egressauth.CredentialSource, len(refs))
+	for _, ref := range refs {
+		source := cloneCredentialSource(s.sourcesByRef[s.sourceRefKey(teamID, ref)])
+		if source != nil {
+			out[ref] = source
+		}
+	}
+	return out, nil
 }
 
 func (s *memoryBindingStore) GetSourceVersion(_ context.Context, sourceID, version int64) (*egressauth.CredentialSourceVersion, error) {

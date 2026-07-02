@@ -26,7 +26,7 @@ type BindingStore interface {
 	GetBindings(ctx context.Context, teamID, sandboxID string) (*BindingRecord, error)
 	UpsertBindings(ctx context.Context, record *BindingRecord) error
 	DeleteBindings(ctx context.Context, teamID, sandboxID string) error
-	GetSourceByRef(ctx context.Context, teamID, ref string) (*CredentialSource, error)
+	GetSourcesByRef(ctx context.Context, teamID string, refs []string) (map[string]*CredentialSource, error)
 	GetSourceVersion(ctx context.Context, sourceID, version int64) (*CredentialSourceVersion, error)
 }
 
@@ -187,6 +187,14 @@ func (r *Repository) UpsertBindings(ctx context.Context, record *BindingRecord) 
 		return fmt.Errorf("delete existing bindings: %w", err)
 	}
 
+	if len(record.Bindings) == 0 {
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit binding upsert: %w", err)
+		}
+		return nil
+	}
+
+	bindings := make([]credentialBindingRow, 0, len(record.Bindings))
 	for _, binding := range record.Bindings {
 		projectionJSON, err := json.Marshal(binding.Projection)
 		if err != nil {
@@ -196,14 +204,39 @@ func (r *Repository) UpsertBindings(ctx context.Context, record *BindingRecord) 
 		if err != nil {
 			return fmt.Errorf("marshal cache policy for %q: %w", binding.Ref, err)
 		}
+		bindings = append(bindings, credentialBindingRow{
+			Ref:           binding.Ref,
+			SourceRef:     binding.SourceRef,
+			SourceID:      binding.SourceID,
+			SourceVersion: binding.SourceVersion,
+			Projection:    projectionJSON,
+			CachePolicy:   cachePolicyJSON,
+		})
+	}
 
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO sandbox_egress_credential_bindings (
-				team_id, sandbox_id, ref, source_ref, source_id, source_version, projection, cache_policy, updated_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		`, record.TeamID, record.SandboxID, binding.Ref, binding.SourceRef, binding.SourceID, binding.SourceVersion, projectionJSON, cachePolicyJSON, record.UpdatedAt); err != nil {
-			return fmt.Errorf("insert binding %q: %w", binding.Ref, err)
-		}
+	payload, err := json.Marshal(bindings)
+	if err != nil {
+		return fmt.Errorf("marshal credential binding batch: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		WITH input AS (
+			SELECT *
+			FROM jsonb_to_recordset($3::jsonb) AS binding(
+				ref text,
+				source_ref text,
+				source_id bigint,
+				source_version bigint,
+				projection jsonb,
+				cache_policy jsonb
+			)
+		)
+		INSERT INTO sandbox_egress_credential_bindings (
+			team_id, sandbox_id, ref, source_ref, source_id, source_version, projection, cache_policy, updated_at
+		)
+		SELECT $1, $2, ref, source_ref, source_id, source_version, projection, cache_policy, $4
+		FROM input
+	`, record.TeamID, record.SandboxID, payload, record.UpdatedAt); err != nil {
+		return fmt.Errorf("insert bindings: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -265,6 +298,72 @@ func (r *Repository) GetSourceByRef(ctx context.Context, teamID, ref string) (*C
 		return nil, fmt.Errorf("get source by ref: %w", err)
 	}
 	return &source, nil
+}
+
+func (r *Repository) GetSourcesByRef(ctx context.Context, teamID string, refs []string) (map[string]*CredentialSource, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("binding repository is not configured")
+	}
+	if teamID == "" {
+		return nil, fmt.Errorf("team_id is required")
+	}
+	if len(refs) == 0 {
+		return map[string]*CredentialSource{}, nil
+	}
+	uniqueRefs := make([]string, 0, len(refs))
+	seen := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			return nil, fmt.Errorf("source ref is required")
+		}
+		if _, ok := seen[ref]; ok {
+			continue
+		}
+		seen[ref] = struct{}{}
+		uniqueRefs = append(uniqueRefs, ref)
+	}
+	payload, err := json.Marshal(uniqueRefs)
+	if err != nil {
+		return nil, fmt.Errorf("marshal source refs: %w", err)
+	}
+	rows, err := r.db.Query(ctx, `
+		WITH refs AS (
+			SELECT value AS name
+			FROM jsonb_array_elements_text($2::jsonb)
+		)
+		SELECT s.id, s.team_id, s.name, s.resolver_kind, s.current_version, s.status, s.created_at, s.updated_at
+		FROM credential_sources s
+		JOIN refs ON refs.name = s.name
+		WHERE s.team_id = $1
+		ORDER BY s.name
+	`, teamID, payload)
+	if err != nil {
+		return nil, fmt.Errorf("get sources by ref: %w", err)
+	}
+	defer rows.Close()
+
+	sources := make(map[string]*CredentialSource, len(uniqueRefs))
+	for rows.Next() {
+		source := &CredentialSource{}
+		if err := rows.Scan(
+			&source.ID,
+			&source.TeamID,
+			&source.Name,
+			&source.ResolverKind,
+			&source.CurrentVersion,
+			&source.Status,
+			&source.CreatedAt,
+			&source.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan source by ref: %w", err)
+		}
+		sources[source.Name] = source
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sources by ref: %w", err)
+	}
+	return sources, nil
 }
 
 func (r *Repository) GetSourceVersion(ctx context.Context, sourceID, version int64) (*CredentialSourceVersion, error) {
@@ -527,6 +626,15 @@ func (r *Repository) DeleteSource(ctx context.Context, teamID, name string) erro
 		return fmt.Errorf("delete source record: %w", err)
 	}
 	return nil
+}
+
+type credentialBindingRow struct {
+	Ref           string          `json:"ref"`
+	SourceRef     string          `json:"source_ref"`
+	SourceID      int64           `json:"source_id"`
+	SourceVersion int64           `json:"source_version"`
+	Projection    json.RawMessage `json:"projection"`
+	CachePolicy   json.RawMessage `json:"cache_policy"`
 }
 
 func (r *Repository) scanSourceMetadata(rows pgx.Rows) (*CredentialSourceMetadata, error) {

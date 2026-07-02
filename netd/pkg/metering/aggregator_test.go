@@ -21,11 +21,11 @@ type fakeTxRecorder struct {
 	watermarkErr      error
 }
 
-func (f *fakeTxRecorder) AppendWindow(_ context.Context, window *meteringpkg.Window) error {
+func (f *fakeTxRecorder) AppendWindows(_ context.Context, windows []*meteringpkg.Window) error {
 	if f.appendErr != nil {
 		return f.appendErr
 	}
-	f.windows = append(f.windows, window)
+	f.windows = append(f.windows, windows...)
 	return nil
 }
 

@@ -22,8 +22,11 @@ type MockRepository struct {
 	acquireMountFunc             func(ctx context.Context, mount *db.VolumeMount, heartbeatTimeout int) error
 	createMountFunc              func(ctx context.Context, mount *db.VolumeMount) error
 	updateMountHeartbeatFunc     func(ctx context.Context, volumeID, clusterID, podID string) error
+	updateMountHeartbeatsFunc    func(ctx context.Context, volumeIDs []string, clusterID, podID string) ([]string, error)
 	deleteMountFunc              func(ctx context.Context, volumeID, clusterID, podID string) error
+	deleteMountsFunc             func(ctx context.Context, volumeID string, mounts []*db.VolumeMount) error
 	deleteMountByPodIDFunc       func(ctx context.Context, clusterID, podID string) error
+	deleteMountsByPodIDFunc      func(ctx context.Context, refs []db.MountPodRef) (int64, error)
 	getActiveMountsFunc          func(ctx context.Context, volumeID string, timeout int) ([]*db.VolumeMount, error)
 	getAllMountsFunc             func(ctx context.Context) ([]*db.VolumeMount, error)
 	deleteStaleMountsFunc        func(ctx context.Context, timeout int) (int64, error)
@@ -59,9 +62,33 @@ func (m *MockRepository) UpdateMountHeartbeat(ctx context.Context, volumeID, clu
 	return nil
 }
 
+func (m *MockRepository) UpdateMountHeartbeats(ctx context.Context, volumeIDs []string, clusterID, podID string) ([]string, error) {
+	if m.updateMountHeartbeatsFunc != nil {
+		return m.updateMountHeartbeatsFunc(ctx, volumeIDs, clusterID, podID)
+	}
+	for _, volumeID := range volumeIDs {
+		if err := m.UpdateMountHeartbeat(ctx, volumeID, clusterID, podID); err != nil {
+			return nil, err
+		}
+	}
+	return nil, nil
+}
+
 func (m *MockRepository) DeleteMount(ctx context.Context, volumeID, clusterID, podID string) error {
 	if m.deleteMountFunc != nil {
 		return m.deleteMountFunc(ctx, volumeID, clusterID, podID)
+	}
+	return nil
+}
+
+func (m *MockRepository) DeleteMounts(ctx context.Context, volumeID string, mounts []*db.VolumeMount) error {
+	if m.deleteMountsFunc != nil {
+		return m.deleteMountsFunc(ctx, volumeID, mounts)
+	}
+	for _, mount := range mounts {
+		if err := m.DeleteMount(ctx, volumeID, mount.ClusterID, mount.PodID); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -71,6 +98,20 @@ func (m *MockRepository) DeleteMountByPodID(ctx context.Context, clusterID, podI
 		return m.deleteMountByPodIDFunc(ctx, clusterID, podID)
 	}
 	return nil
+}
+
+func (m *MockRepository) DeleteMountsByPodID(ctx context.Context, refs []db.MountPodRef) (int64, error) {
+	if m.deleteMountsByPodIDFunc != nil {
+		return m.deleteMountsByPodIDFunc(ctx, refs)
+	}
+	var deleted int64
+	for _, ref := range refs {
+		if err := m.DeleteMountByPodID(ctx, ref.ClusterID, ref.PodID); err != nil {
+			return deleted, err
+		}
+		deleted++
+	}
+	return deleted, nil
 }
 
 func (m *MockRepository) GetActiveMounts(ctx context.Context, volumeID string, timeout int) ([]*db.VolumeMount, error) {

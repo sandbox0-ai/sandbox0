@@ -35,7 +35,7 @@ func (s *egressAuthBindingStore) DeleteBindings(context.Context, string, string)
 	return nil
 }
 
-func (s *egressAuthBindingStore) GetSourceByRef(context.Context, string, string) (*egressauth.CredentialSource, error) {
+func (s *egressAuthBindingStore) GetSourcesByRef(context.Context, string, []string) (map[string]*egressauth.CredentialSource, error) {
 	return nil, nil
 }
 

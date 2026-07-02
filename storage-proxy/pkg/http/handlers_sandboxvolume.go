@@ -365,16 +365,13 @@ func (s *Server) deleteSandboxVolume(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(mounts) > 0 && force {
-		for _, mount := range mounts {
-			if err := s.repo.DeleteMount(r.Context(), id, mount.ClusterID, mount.PodID); err != nil {
-				s.logger.WithError(err).WithFields(map[string]any{
-					"volume_id":  id,
-					"cluster_id": mount.ClusterID,
-					"pod_id":     mount.PodID,
-				}).Error("Failed to delete mount during force delete")
-				_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "failed to cleanup mount records")
-				return
-			}
+		if err := s.repo.DeleteMounts(r.Context(), id, mounts); err != nil {
+			s.logger.WithError(err).WithFields(map[string]any{
+				"volume_id": id,
+				"mounts":    len(mounts),
+			}).Error("Failed to delete mounts during force delete")
+			_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "failed to cleanup mount records")
+			return
 		}
 	}
 
@@ -437,10 +434,8 @@ func (s *Server) deleteSandboxVolumeRecord(ctx context.Context, id string, force
 		return nil, errVolumeHasActiveMounts
 	}
 	if len(mounts) > 0 && force {
-		for _, mount := range mounts {
-			if err := s.repo.DeleteMount(ctx, id, mount.ClusterID, mount.PodID); err != nil {
-				return nil, fmt.Errorf("cleanup mount records: %w", err)
-			}
+		if err := s.repo.DeleteMounts(ctx, id, mounts); err != nil {
+			return nil, fmt.Errorf("cleanup mount records: %w", err)
 		}
 	}
 	if err := s.repo.WithTx(ctx, func(tx pgx.Tx) error {

@@ -125,6 +125,18 @@ func (r *fakeHTTPRepo) DeleteMount(ctx context.Context, volumeID, clusterID, pod
 	return nil
 }
 
+func (r *fakeHTTPRepo) DeleteMounts(ctx context.Context, volumeID string, mounts []*db.VolumeMount) error {
+	for _, mount := range mounts {
+		if mount == nil {
+			continue
+		}
+		if err := r.DeleteMount(ctx, volumeID, mount.ClusterID, mount.PodID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *fakeHTTPRepo) DeleteSandboxVolumeTx(ctx context.Context, tx pgx.Tx, id string) error {
 	delete(r.volumes, id)
 	delete(r.owners, id)

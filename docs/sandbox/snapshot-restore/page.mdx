@@ -415,12 +415,14 @@ Fork creates a new paused sandbox from a paused source sandbox rootfs. The fork 
 
 Omit the request body to inherit the source sandbox lifecycle configuration. To set a new lifecycle window for the fork, pass `config.ttl` and/or `config.hard_ttl`. Positive values are counted from the fork creation time, and `0` disables that expiration path.
 
-    {
-        "config": {
-            "ttl": 300,
-            "hard_ttl": 3600
-        }
+```json
+{
+    "config": {
+        "ttl": 300,
+        "hard_ttl": 3600
     }
+}
+```
 
 <Tabs
   tabs={[

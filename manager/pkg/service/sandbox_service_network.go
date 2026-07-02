@@ -737,6 +737,9 @@ func (s *SandboxService) UpdateNetworkPolicy(
 	if err := s.applyNetworkProvider(ctx, updatedPod, teamID, policySpecFromState(networkState)); err != nil {
 		return nil, fmt.Errorf("apply network policy: %w", err)
 	}
+	if err := s.persistUpdatedSandboxPod(ctx, updatedPod); err != nil {
+		return nil, fmt.Errorf("persist sandbox record: %w", err)
+	}
 
 	return sandboxNetworkPolicyFromState(networkState), nil
 }

@@ -1168,7 +1168,7 @@ type memorySandboxStoreTxForManagerIntegration struct {
 	store *memorySandboxStoreForManagerIntegration
 }
 
-func (t memorySandboxStoreTxForManagerIntegration) SaveRuntime(_ context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time) error {
+func (t memorySandboxStoreTxForManagerIntegration) SaveRuntime(_ context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time, metadata service.SandboxRuntimeMetadata) error {
 	record := t.store.records[sandboxID]
 	if record == nil || !record.DeletedAt.IsZero() {
 		return service.ErrSandboxRecordNotFound
@@ -1179,6 +1179,12 @@ func (t memorySandboxStoreTxForManagerIntegration) SaveRuntime(_ context.Context
 	record.RuntimeGeneration = generation
 	record.ExpiresAt = expiresAt
 	record.HardExpiresAt = hardExpiresAt
+	if metadata.WebhookStateVolumeID != "" {
+		record.WebhookStateVolumeID = metadata.WebhookStateVolumeID
+	}
+	if metadata.OwnerKind != "" {
+		record.OwnerKind = metadata.OwnerKind
+	}
 	return nil
 }
 

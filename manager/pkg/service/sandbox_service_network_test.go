@@ -12,6 +12,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -545,6 +546,8 @@ func TestTemplateCredentialBindingsUsesNestedNetworkBindings(t *testing.T) {
 func TestUpdateNetworkPolicyStoresBindingsOutsidePodConfig(t *testing.T) {
 	ctx := context.Background()
 	pod := testSandboxNetworkPod()
+	pod.Labels[controller.LabelTemplateID] = "default"
+	pod.Labels[controller.LabelTemplateLogicalID] = "default"
 	store := newMemoryBindingStore()
 	store.addStaticHeadersSource("team-1", "example-ref", 3, 1, map[string]string{"token": "stored"})
 	provider := &assertingNetworkProvider{
@@ -562,6 +565,13 @@ func TestUpdateNetworkPolicyStoresBindingsOutsidePodConfig(t *testing.T) {
 	}
 
 	svc, client, indexer := newSandboxServiceForNetworkTests(t, pod, store, provider)
+	sandboxStore := &memorySandboxStore{records: map[string]*SandboxRecord{}}
+	templateNamespace, err := naming.TemplateNamespaceForTeam("team-1")
+	require.NoError(t, err)
+	svc.sandboxStore = sandboxStore
+	svc.templateLister = staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: templateNamespace},
+	}}}
 
 	updated, err := svc.UpdateNetworkPolicy(ctx, pod.Name, testNetworkPolicy("example-ref", "Bearer stored"))
 	require.NoError(t, err)
@@ -581,6 +591,13 @@ func TestUpdateNetworkPolicyStoresBindingsOutsidePodConfig(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, effective.CredentialBindings, 1)
 	assert.Equal(t, "example-ref", effective.CredentialBindings[0].Ref)
+
+	record, err := sandboxStore.GetSandbox(ctx, pod.Name)
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	require.NotNil(t, record.Config.Network)
+	assert.Equal(t, v1alpha1.NetworkModeBlockAll, record.Config.Network.Mode)
+	assert.Nil(t, record.Config.Network.CredentialBindings)
 }
 
 func cloneCredentialSource(in *egressauth.CredentialSource) *egressauth.CredentialSource {

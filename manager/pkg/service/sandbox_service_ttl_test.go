@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -207,6 +209,61 @@ func TestPersistUpdatedSandboxPodDoesNotOverwritePausedRecord(t *testing.T) {
 	require.NotNil(t, record.Config.TTL)
 	assert.Equal(t, SandboxStatusPaused, record.Status)
 	assert.Equal(t, int32(300), *record.Config.TTL)
+}
+
+func TestPersistUpdatedSandboxPodStoresRuntimeMetadata(t *testing.T) {
+	pod := testSandboxPod()
+	pod.Labels[controller.LabelTemplateID] = "default"
+	pod.Labels[controller.LabelTemplateLogicalID] = "default"
+	pod.Labels[controller.LabelOwnerKind] = "managed-agent"
+	pod.Annotations[controller.AnnotationOwnerKind] = "managed-agent"
+	pod.Annotations[controller.AnnotationConfig] = `{"ttl":300}`
+	pod.Annotations[controller.AnnotationWebhookStateVolumeID] = "webhook-volume-1"
+
+	svc, _ := newSandboxServiceForTTLTests(t, pod, 0)
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{}}
+	templateNamespace, err := naming.TemplateNamespaceForTeam("team-1")
+	require.NoError(t, err)
+	svc.sandboxStore = store
+	svc.templateLister = staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: templateNamespace},
+	}}}
+
+	require.NoError(t, svc.persistUpdatedSandboxPod(context.Background(), pod))
+	record, err := store.GetSandbox(context.Background(), "sandbox-1")
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	assert.Equal(t, "webhook-volume-1", record.WebhookStateVolumeID)
+	assert.Equal(t, "managed-agent", record.OwnerKind)
+}
+
+func TestRefreshSandboxPersistsExpirationRecord(t *testing.T) {
+	pod := testSandboxPod()
+	pod.Labels[controller.LabelTemplateID] = "default"
+	pod.Labels[controller.LabelTemplateLogicalID] = "default"
+	pod.Annotations[controller.AnnotationConfig] = `{"ttl":60,"hard_ttl":120}`
+	pod.Annotations[controller.AnnotationExpiresAt] = "2026-03-07T12:01:00Z"
+	pod.Annotations[controller.AnnotationHardExpiresAt] = "2026-03-07T12:02:00Z"
+
+	svc, _ := newSandboxServiceForTTLTests(t, pod, 0)
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{}}
+	templateNamespace, err := naming.TemplateNamespaceForTeam("team-1")
+	require.NoError(t, err)
+	svc.sandboxStore = store
+	svc.templateLister = staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: templateNamespace},
+	}}}
+
+	resp, err := svc.RefreshSandbox(context.Background(), "sandbox-1", &RefreshRequest{Duration: 90})
+	require.NoError(t, err)
+
+	record, err := store.GetSandbox(context.Background(), "sandbox-1")
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	assert.Equal(t, resp.ExpiresAt, record.ExpiresAt)
+	assert.Equal(t, resp.HardExpiresAt, record.HardExpiresAt)
+	assert.Equal(t, time.Date(2026, time.March, 7, 12, 1, 30, 0, time.UTC), record.ExpiresAt)
+	assert.Equal(t, time.Date(2026, time.March, 7, 12, 2, 0, 0, time.UTC), record.HardExpiresAt)
 }
 
 func TestUpdateSandboxEnvVarsUpdatesProcdAndConfig(t *testing.T) {

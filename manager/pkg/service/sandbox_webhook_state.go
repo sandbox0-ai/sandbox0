@@ -388,11 +388,15 @@ func (c *StorageProxyVolumeClient) generateToken(teamID, userID, sandboxID strin
 
 type webhookStateVolume struct {
 	VolumeID string
+	Created  bool
 }
 
 func (s *SandboxService) prepareWebhookStateVolume(ctx context.Context, req *ClaimRequest, sandboxID string) (*webhookStateVolume, error) {
 	if s == nil || s.getWebhookInfo(req) == nil {
 		return nil, nil
+	}
+	if existing := strings.TrimSpace(req.WebhookStateVolumeID); existing != "" {
+		return &webhookStateVolume{VolumeID: existing}, nil
 	}
 	if s.webhookStateVolumes == nil {
 		return nil, fmt.Errorf("webhook state volume client is not configured")
@@ -403,6 +407,7 @@ func (s *SandboxService) prepareWebhookStateVolume(ctx context.Context, req *Cla
 	}
 	return &webhookStateVolume{
 		VolumeID: volumeID,
+		Created:  true,
 	}, nil
 }
 

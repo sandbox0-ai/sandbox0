@@ -571,6 +571,42 @@ func TestSystemVolumeReconcilerKeepsActiveOwnedVolume(t *testing.T) {
 	}
 }
 
+func TestSystemVolumeReconcilerKeepsPausedOwnedVolume(t *testing.T) {
+	volumeClient := &recordingSystemVolumeClient{
+		list: []SandboxSystemVolume{{
+			VolumeID:       "volume-a",
+			TeamID:         "team-a",
+			UserID:         "user-a",
+			OwnerSandboxID: "sandbox-a",
+			OwnerClusterID: "cluster-a",
+			Purpose:        "webhook-state",
+		}},
+	}
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	svc := &SandboxService{
+		podLister:           corelisters.NewPodLister(indexer),
+		webhookStateVolumes: volumeClient,
+		sandboxStore: &memorySandboxStore{records: map[string]*SandboxRecord{
+			"sandbox-a": {
+				ID:                   "sandbox-a",
+				TeamID:               "team-a",
+				UserID:               "user-a",
+				Status:               SandboxStatusPaused,
+				WebhookStateVolumeID: "volume-a",
+			},
+		}},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+
+	if err := svc.reconcileSystemVolumes(context.Background()); err != nil {
+		t.Fatalf("reconcileSystemVolumes() error = %v", err)
+	}
+	if len(volumeClient.marked) != 0 {
+		t.Fatalf("marked = %#v, want none", volumeClient.marked)
+	}
+}
+
 func TestSystemVolumeReconcilerDeletesCleanupRequestedVolume(t *testing.T) {
 	cleanupRequestedAt := time.Now().Add(-time.Minute)
 	volumeClient := &recordingSystemVolumeClient{

@@ -253,7 +253,7 @@ func (s *memorySandboxStore) setSandboxStatus(sandboxID, status string) {
 	}
 }
 
-func (t memorySandboxStoreTx) SaveRuntime(_ context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time) error {
+func (t memorySandboxStoreTx) SaveRuntime(_ context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time, metadata SandboxRuntimeMetadata) error {
 	t.store.mu.Lock()
 	defer t.store.mu.Unlock()
 	record := t.store.records[sandboxID]
@@ -266,6 +266,12 @@ func (t memorySandboxStoreTx) SaveRuntime(_ context.Context, sandboxID, namespac
 	record.RuntimeGeneration = generation
 	record.ExpiresAt = expiresAt
 	record.HardExpiresAt = hardExpiresAt
+	if metadata.WebhookStateVolumeID != "" {
+		record.WebhookStateVolumeID = metadata.WebhookStateVolumeID
+	}
+	if metadata.OwnerKind != "" {
+		record.OwnerKind = metadata.OwnerKind
+	}
 	t.store.saves++
 	return nil
 }
@@ -1088,10 +1094,11 @@ func TestResumePausedSandboxRuntimeRejectsHardExpiredRecord(t *testing.T) {
 func TestTerminatePausedSandboxRecordRunsPersistentCleanup(t *testing.T) {
 	store := &memorySandboxStore{records: map[string]*SandboxRecord{
 		"sandbox-a": {
-			ID:     "sandbox-a",
-			TeamID: "team-a",
-			UserID: "user-a",
-			Status: SandboxStatusPaused,
+			ID:                   "sandbox-a",
+			TeamID:               "team-a",
+			UserID:               "user-a",
+			Status:               SandboxStatusPaused,
+			WebhookStateVolumeID: "volume-a",
 			Config: SandboxConfig{Webhook: &WebhookConfig{
 				URL:    "https://example.test/webhook",
 				Secret: "secret",
@@ -1122,6 +1129,9 @@ func TestTerminatePausedSandboxRecordRunsPersistentCleanup(t *testing.T) {
 	}
 	if len(emitter.calls) != 1 {
 		t.Fatalf("webhook calls = %d, want 1", len(emitter.calls))
+	}
+	if emitter.calls[0].WebhookStateVolumeID != "volume-a" {
+		t.Fatalf("webhook state volume = %q, want volume-a", emitter.calls[0].WebhookStateVolumeID)
 	}
 	if len(volumes.marked) != 1 || volumes.marked[0] != "sandbox-a:sandbox_deleted" {
 		t.Fatalf("marked volumes = %#v, want sandbox-a:sandbox_deleted", volumes.marked)

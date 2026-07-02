@@ -26,27 +26,29 @@ const (
 
 // SandboxRecord is the durable sandbox identity and configuration.
 type SandboxRecord struct {
-	ID                  string
-	TeamID              string
-	UserID              string
-	TemplateID          string
-	TemplateName        string
-	TemplateNamespace   string
-	ClusterID           string
-	Status              string
-	Config              SandboxConfig
-	Mounts              []ClaimMount
-	TemplateSpec        v1alpha1.SandboxTemplateSpec
-	CurrentPodName      string
-	CurrentPodNamespace string
-	RuntimeGeneration   int64
-	LifecycleEpoch      int64
-	ClaimedAt           time.Time
-	ExpiresAt           time.Time
-	HardExpiresAt       time.Time
-	DeletedAt           time.Time
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
+	ID                   string
+	TeamID               string
+	UserID               string
+	TemplateID           string
+	TemplateName         string
+	TemplateNamespace    string
+	ClusterID            string
+	Status               string
+	Config               SandboxConfig
+	Mounts               []ClaimMount
+	TemplateSpec         v1alpha1.SandboxTemplateSpec
+	CurrentPodName       string
+	CurrentPodNamespace  string
+	RuntimeGeneration    int64
+	LifecycleEpoch       int64
+	WebhookStateVolumeID string
+	OwnerKind            string
+	ClaimedAt            time.Time
+	ExpiresAt            time.Time
+	HardExpiresAt        time.Time
+	DeletedAt            time.Time
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
 }
 
 // SandboxRootFSState is manager-internal metadata for one persisted sandbox
@@ -139,6 +141,12 @@ type SandboxLifecycleTxn struct {
 	AbortedAt           time.Time
 }
 
+// SandboxRuntimeMetadata is durable metadata projected onto a runtime pod.
+type SandboxRuntimeMetadata struct {
+	WebhookStateVolumeID string
+	OwnerKind            string
+}
+
 // SandboxStore persists sandbox identities independently of runtime pods.
 type SandboxStore interface {
 	UpsertSandbox(ctx context.Context, record *SandboxRecord) error
@@ -155,7 +163,7 @@ type SandboxStore interface {
 
 // SandboxStoreTx is a locked sandbox store transaction.
 type SandboxStoreTx interface {
-	SaveRuntime(ctx context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time) error
+	SaveRuntime(ctx context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time, metadata SandboxRuntimeMetadata) error
 	MarkRuntimePaused(ctx context.Context, sandboxID string, generation int64, pausedAt time.Time) error
 	SaveRootFSState(ctx context.Context, state *SandboxRootFSState) error
 	GetActiveLifecycleTxn(ctx context.Context, sandboxID string) (*SandboxLifecycleTxn, error)
@@ -218,9 +226,10 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 			sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
 			cluster_id, status, config, mounts, template_spec,
 			current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch,
+			webhook_state_volume_id, owner_kind,
 			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, COALESCE($20, NOW()), NOW())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, COALESCE($22, NOW()), NOW())
 		ON CONFLICT (sandbox_id) DO UPDATE SET
 			team_id = EXCLUDED.team_id,
 			user_id = EXCLUDED.user_id,
@@ -236,6 +245,8 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 			current_pod_namespace = EXCLUDED.current_pod_namespace,
 			runtime_generation = EXCLUDED.runtime_generation,
 			lifecycle_epoch = GREATEST(manager.sandboxes.lifecycle_epoch, EXCLUDED.lifecycle_epoch),
+			webhook_state_volume_id = EXCLUDED.webhook_state_volume_id,
+			owner_kind = EXCLUDED.owner_kind,
 			claimed_at = EXCLUDED.claimed_at,
 			expires_at = EXCLUDED.expires_at,
 			hard_expires_at = EXCLUDED.hard_expires_at,
@@ -244,6 +255,7 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 	`, record.ID, record.TeamID, record.UserID, record.TemplateID, record.TemplateName, record.TemplateNamespace,
 		record.ClusterID, record.Status, configJSON, mountsJSON, specJSON,
 		record.CurrentPodName, record.CurrentPodNamespace, record.RuntimeGeneration, record.LifecycleEpoch,
+		strings.TrimSpace(record.WebhookStateVolumeID), strings.TrimSpace(record.OwnerKind),
 		nullableTime(record.ClaimedAt), nullableTime(record.ExpiresAt), nullableTime(record.HardExpiresAt), nullableTime(record.DeletedAt), nullableTime(record.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("upsert sandbox: %w", err)
@@ -517,7 +529,7 @@ type sandboxStoreTx struct {
 	tx pgx.Tx
 }
 
-func (t sandboxStoreTx) SaveRuntime(ctx context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time) error {
+func (t sandboxStoreTx) SaveRuntime(ctx context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time, metadata SandboxRuntimeMetadata) error {
 	tag, err := t.tx.Exec(ctx, `
 		UPDATE manager.sandboxes
 		SET status = $2,
@@ -526,11 +538,13 @@ func (t sandboxStoreTx) SaveRuntime(ctx context.Context, sandboxID, namespace, p
 			runtime_generation = $5,
 			expires_at = $6,
 			hard_expires_at = $7,
+			webhook_state_volume_id = COALESCE(NULLIF($8, ''), webhook_state_volume_id),
+			owner_kind = COALESCE(NULLIF($9, ''), owner_kind),
 			deleted_at = NULL,
 			updated_at = NOW()
 		WHERE sandbox_id = $1
 			AND deleted_at IS NULL
-	`, sandboxID, status, namespace, podName, generation, nullableTime(expiresAt), nullableTime(hardExpiresAt))
+	`, sandboxID, status, namespace, podName, generation, nullableTime(expiresAt), nullableTime(hardExpiresAt), strings.TrimSpace(metadata.WebhookStateVolumeID), strings.TrimSpace(metadata.OwnerKind))
 	if err != nil {
 		return fmt.Errorf("save sandbox runtime: %w", err)
 	}
@@ -779,6 +793,7 @@ func sandboxRecordSelectSQL() string {
 		SELECT sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
 			cluster_id, status, config, mounts, template_spec,
 			current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch,
+			webhook_state_volume_id, owner_kind,
 			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 		FROM manager.sandboxes`
 }
@@ -1126,6 +1141,7 @@ func scanSandboxRecordInto(scanner sandboxRecordScanner) (*SandboxRecord, error)
 		&record.ID, &record.TeamID, &record.UserID, &record.TemplateID, &record.TemplateName, &record.TemplateNamespace,
 		&record.ClusterID, &record.Status, &configJSON, &mountsJSON, &specJSON,
 		&record.CurrentPodName, &record.CurrentPodNamespace, &record.RuntimeGeneration, &record.LifecycleEpoch,
+		&record.WebhookStateVolumeID, &record.OwnerKind,
 		&claimedAt, &expiresAt, &hardExpiresAt, &deletedAt, &record.CreatedAt, &record.UpdatedAt,
 	); err != nil {
 		return nil, err

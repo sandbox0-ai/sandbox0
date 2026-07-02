@@ -76,6 +76,21 @@ func (s *SandboxService) reconcileSystemVolumes(ctx context.Context) error {
 		if s.systemVolumeOwnerPodActive(sandboxID) {
 			continue
 		}
+		exists, err := s.systemVolumeOwnerSandboxExists(ctx, sandboxID)
+		if err != nil {
+			if s.logger != nil {
+				s.logger.Warn("Failed to load system volume owner sandbox",
+					zap.String("sandboxID", sandboxID),
+					zap.String("volumeID", volume.VolumeID),
+					zap.String("purpose", volume.Purpose),
+					zap.Error(err),
+				)
+			}
+			continue
+		}
+		if exists {
+			continue
+		}
 		if err := s.webhookStateVolumes.MarkSandboxForCleanup(ctx, volume.TeamID, volume.UserID, sandboxID, "orphaned_sandbox"); err != nil {
 			if s.logger != nil {
 				s.logger.Warn("Failed to mark orphaned system volume for cleanup",
@@ -109,4 +124,15 @@ func (s *SandboxService) systemVolumeOwnerPodActive(sandboxID string) bool {
 		}
 	}
 	return false
+}
+
+func (s *SandboxService) systemVolumeOwnerSandboxExists(ctx context.Context, sandboxID string) (bool, error) {
+	if s == nil || s.sandboxStore == nil || sandboxID == "" {
+		return false, nil
+	}
+	record, err := s.sandboxStore.GetSandbox(ctx, sandboxID)
+	if err != nil {
+		return false, err
+	}
+	return record != nil && record.Status != SandboxStatusDeleted && record.DeletedAt.IsZero(), nil
 }

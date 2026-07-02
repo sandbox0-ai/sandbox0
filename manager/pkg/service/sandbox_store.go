@@ -325,6 +325,52 @@ func (s *PGSandboxStore) GetActiveLifecycleTxn(ctx context.Context, sandboxID st
 	return getActiveLifecycleTxn(ctx, s.pool, sandboxID)
 }
 
+// RuntimeDeletionMatchesCommittedPause reports whether a runtime pod deletion
+// belongs to a committed pause transaction.
+func (s *PGSandboxStore) RuntimeDeletionMatchesCommittedPause(ctx context.Context, sandboxID, namespace, podName string, runtimeGeneration int64) (bool, error) {
+	if s == nil || s.pool == nil {
+		return false, nil
+	}
+	sandboxID = strings.TrimSpace(sandboxID)
+	namespace = strings.TrimSpace(namespace)
+	podName = strings.TrimSpace(podName)
+	if sandboxID == "" || (runtimeGeneration <= 0 && podName == "") {
+		return false, nil
+	}
+	var txnID string
+	err := s.pool.QueryRow(ctx, `
+		SELECT txn_id
+		FROM manager.sandbox_lifecycle_txns
+		WHERE sandbox_id = $1
+			AND kind = $2
+			AND phase = $3
+			AND committed_at IS NOT NULL
+			AND (
+				(
+					$4::bigint > 0
+					AND from_generation = $4
+					AND ($5::text = '' OR from_pod_name = '' OR from_pod_name = $5)
+					AND ($6::text = '' OR from_pod_namespace = '' OR from_pod_namespace = $6)
+				)
+				OR (
+					$4::bigint <= 0
+					AND $5::text <> ''
+					AND from_pod_name = $5
+					AND ($6::text = '' OR from_pod_namespace = $6)
+				)
+			)
+		ORDER BY committed_at DESC
+		LIMIT 1
+	`, sandboxID, SandboxLifecycleKindPause, SandboxLifecyclePhaseCommitted, runtimeGeneration, podName, namespace).Scan(&txnID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("match committed pause runtime deletion: %w", err)
+	}
+	return txnID != "", nil
+}
+
 func (s *PGSandboxStore) ListHardExpiredSandboxes(ctx context.Context, now time.Time, limit int) ([]*SandboxRecord, error) {
 	if s == nil || s.pool == nil {
 		return nil, nil

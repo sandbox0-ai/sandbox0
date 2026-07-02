@@ -523,52 +523,6 @@ func (s *SandboxService) ensureSandboxDeletionFinalizer(ctx context.Context, pod
 	return updated, nil
 }
 
-func (s *SandboxService) markRuntimePodPausedForMetering(ctx context.Context, pod *corev1.Pod, pausedAt time.Time) (*corev1.Pod, error) {
-	if s == nil || pod == nil || s.k8sClient == nil {
-		return pod, nil
-	}
-	if pausedAt.IsZero() {
-		pausedAt = s.clock.Now()
-	}
-	var updated *corev1.Pod
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		current, err := s.k8sClient.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
-		if err != nil {
-			if k8serrors.IsNotFound(err) {
-				updated = pod
-				return nil
-			}
-			return err
-		}
-		if current.DeletionTimestamp != nil {
-			updated = current
-			return nil
-		}
-		if current.Annotations[controller.AnnotationPaused] == "true" &&
-			current.Annotations[controller.AnnotationPausedAt] != "" &&
-			current.Annotations[controller.AnnotationPausedState] == controller.AnnotationPausedStateRuntimePaused {
-			updated = current
-			return nil
-		}
-		next := current.DeepCopy()
-		if next.Annotations == nil {
-			next.Annotations = map[string]string{}
-		}
-		next.Annotations[controller.AnnotationPaused] = "true"
-		next.Annotations[controller.AnnotationPausedAt] = pausedAt.UTC().Format(time.RFC3339)
-		next.Annotations[controller.AnnotationPausedState] = controller.AnnotationPausedStateRuntimePaused
-		updated, err = s.k8sClient.CoreV1().Pods(next.Namespace).Update(ctx, next, metav1.UpdateOptions{})
-		return err
-	})
-	if err != nil {
-		return pod, err
-	}
-	if updated == nil {
-		return pod, nil
-	}
-	return updated, nil
-}
-
 func sandboxLifecycleItemFromInfo(info SandboxLifecycleInfo, deleted bool) sandboxLifecycleQueueItem {
 	return sandboxLifecycleQueueItem{
 		Namespace:            info.Namespace,

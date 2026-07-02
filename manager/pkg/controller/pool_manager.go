@@ -48,8 +48,6 @@ const (
 	AnnotationMounts                       = "sandbox0.ai/mounts"
 	AnnotationPaused                       = "sandbox0.ai/paused"
 	AnnotationPausedAt                     = "sandbox0.ai/paused-at"
-	AnnotationPausedState                  = "sandbox0.ai/paused-state"
-	AnnotationPausedStateRuntimePaused     = "runtime-paused"
 	AnnotationPowerStateDesired            = "sandbox0.ai/power-state-desired"
 	AnnotationPowerStateDesiredGeneration  = "sandbox0.ai/power-state-desired-generation"
 	AnnotationPowerStateObserved           = "sandbox0.ai/power-state-observed"

@@ -226,10 +226,13 @@ func main() {
 	lifecycleProjector.SetMetrics(managerMetrics)
 	lifecycleProjector.SetRuntimePauseLookup(func(ctx context.Context, info managermetering.RuntimeDeletionInfo) (bool, error) {
 		record, err := sandboxStore.GetSandbox(ctx, info.SandboxID)
-		if err != nil || record == nil {
+		if err != nil {
 			return false, err
 		}
-		return service.SandboxRecordDeletionIsRuntimeOnly(record, info.Namespace, info.PodName, info.RuntimeGeneration), nil
+		if service.SandboxRecordDeletionIsRuntimeOnly(record, info.Namespace, info.PodName, info.RuntimeGeneration) {
+			return true, nil
+		}
+		return sandboxStore.RuntimeDeletionMatchesCommittedPause(ctx, info.SandboxID, info.Namespace, info.PodName, info.RuntimeGeneration)
 	})
 	podInformer.Informer().AddEventHandler(lifecycleProjector.ResourceEventHandler())
 

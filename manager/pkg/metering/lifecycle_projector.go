@@ -266,7 +266,6 @@ func (p *LifecycleProjector) handleDelete(obj any) {
 	podUsage := sandboxUsageFromPod(pod)
 	claimedAt, claimedAtSet := parseRFC3339(pod.Annotations[controller.AnnotationClaimedAt])
 	podPaused := pod.Annotations[controller.AnnotationPaused] == "true"
-	podRuntimePaused := podPaused && pod.Annotations[controller.AnnotationPausedState] == controller.AnnotationPausedStateRuntimePaused
 	pauseObservedAt := observedAt
 	if parsedPausedAt, ok := parseRFC3339(pod.Annotations[controller.AnnotationPausedAt]); ok {
 		pauseObservedAt = parsedPausedAt
@@ -303,17 +302,22 @@ func (p *LifecycleProjector) handleDelete(obj any) {
 			state.ActiveSince = &claimedAt
 		}
 	}
+	alreadyTerminated := state.TerminatedAt != nil
 	if runtimePaused || podPaused {
 		if !state.Paused {
 			pendingWindows = append(pendingWindows, p.buildSandboxRuntimeWindow(state, teamID, userID, templateID, state.ActiveSince, pauseObservedAt))
 			pendingEvents = append(pendingEvents, p.buildSandboxEvent(sandboxID, teamID, userID, templateID, pauseObservedAt, meteringpkg.EventTypeSandboxPaused, pauseEventID(sandboxID, pauseObservedAt), nil))
 		}
-		state.Paused = true
-		state.PausedAt = &pauseObservedAt
-		state.ActiveSince = nil
+		if !alreadyTerminated {
+			state.Paused = true
+			state.PausedAt = &pauseObservedAt
+			state.ActiveSince = nil
+		}
 	}
-	if runtimePaused || podRuntimePaused {
-		state.TerminatedAt = nil
+	if runtimePaused {
+		if !alreadyTerminated {
+			state.TerminatedAt = nil
+		}
 		state.LastObservedAt = observedAt
 		state.LastResourceVer = pod.ResourceVersion
 		if err := p.commitProjection(ctx, sandboxID, state, pendingEvents, pendingWindows, observedAt); err != nil {

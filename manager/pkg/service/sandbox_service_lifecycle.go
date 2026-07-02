@@ -271,10 +271,6 @@ func (s *SandboxService) pauseSandboxRuntime(ctx context.Context, sandboxID stri
 			return fmt.Errorf("ensure sandbox cleanup finalizer: %w", err)
 		}
 		pausedAt := s.clock.Now()
-		pod, err = s.markRuntimePodPausedForMetering(ctx, pod, pausedAt)
-		if err != nil {
-			return fmt.Errorf("mark runtime pod paused for metering: %w", err)
-		}
 		if err := s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 			return fmt.Errorf("delete runtime pod: %w", err)
 		}
@@ -424,17 +420,6 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 	}
 	rootFSCommitted = true
 	barrierActive = false
-	if markedPod, err := s.markRuntimePodPausedForMetering(ctx, pod, pausedAt); err != nil {
-		if s.logger != nil {
-			s.logger.Warn("Committed sandbox pause but failed to mark runtime pod paused for metering",
-				zap.String("sandboxID", sandboxID),
-				zap.String("pod", pod.Name),
-				zap.Error(err),
-			)
-		}
-	} else if markedPod != nil {
-		pod = markedPod
-	}
 	if err := s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 		if s.logger != nil {
 			s.logger.Warn("Committed sandbox pause but failed to delete old runtime pod",

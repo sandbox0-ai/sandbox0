@@ -261,43 +261,6 @@ func TestLifecycleProjectorRecordsPauseFromDurableStatusOnPodDelete(t *testing.T
 	}
 }
 
-func TestLifecycleProjectorTreatsRuntimePausedMarkerDeleteAsPause(t *testing.T) {
-	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
-	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
-	projector.SetRuntimePauseLookup(func(context.Context, RuntimeDeletionInfo) (bool, error) {
-		return false, nil
-	})
-
-	now := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
-	projector.now = func() time.Time { return now }
-	claimedAt := now
-	pod := withSandboxResources(buildSandboxPod(claimedAt, false, "", "1"), "1", "1Gi")
-	projector.handleUpsert(pod)
-
-	pausedAt := now.Add(2 * time.Minute)
-	pausedPod := pod.DeepCopy()
-	pausedPod.ResourceVersion = "2"
-	pausedPod.Annotations[controller.AnnotationPaused] = "true"
-	pausedPod.Annotations[controller.AnnotationPausedAt] = pausedAt.Format(time.RFC3339)
-	pausedPod.Annotations[controller.AnnotationPausedState] = controller.AnnotationPausedStateRuntimePaused
-	projector.now = func() time.Time { return now.Add(3 * time.Minute) }
-	projector.handleDelete(pausedPod)
-
-	if len(recorder.events) != 2 {
-		t.Fatalf("event count = %d, want claim and pause", len(recorder.events))
-	}
-	if recorder.events[1].EventType != meteringpkg.EventTypeSandboxPaused {
-		t.Fatalf("second event type = %q, want pause", recorder.events[1].EventType)
-	}
-	if !recorder.events[1].OccurredAt.Equal(pausedAt) {
-		t.Fatalf("pause occurred_at = %v, want %v", recorder.events[1].OccurredAt, pausedAt)
-	}
-	state := recorder.states["sb-1"]
-	if state == nil || !state.Paused || state.TerminatedAt != nil {
-		t.Fatalf("state after runtime paused marker delete = %#v, want paused without termination", state)
-	}
-}
-
 func TestLifecycleProjectorTreatsStaleRuntimeDeleteAsPause(t *testing.T) {
 	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
 	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
@@ -326,6 +289,46 @@ func TestLifecycleProjectorTreatsStaleRuntimeDeleteAsPause(t *testing.T) {
 	state := recorder.states["sb-1"]
 	if state == nil || !state.Paused || state.TerminatedAt != nil {
 		t.Fatalf("state after stale runtime delete = %#v, want paused", state)
+	}
+}
+
+func TestLifecycleProjectorLateRuntimePauseDeleteDoesNotReactivateTerminatedSandbox(t *testing.T) {
+	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
+	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
+	projector.SetRuntimePauseLookup(func(_ context.Context, info RuntimeDeletionInfo) (bool, error) {
+		return info.RuntimeGeneration == 1, nil
+	})
+
+	now := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
+	projector.now = func() time.Time { return now }
+	oldPod := withSandboxResources(buildSandboxPod(now, false, "", "1"), "1", "1Gi")
+	oldPod.Annotations[controller.AnnotationRuntimeGeneration] = "1"
+	projector.handleUpsert(oldPod)
+
+	currentPod := oldPod.DeepCopy()
+	currentPod.Name = "sb-2"
+	currentPod.ResourceVersion = "2"
+	currentPod.Annotations[controller.AnnotationRuntimeGeneration] = "2"
+	projector.now = func() time.Time { return now.Add(5 * time.Minute) }
+	projector.handleDelete(currentPod)
+
+	state := recorder.states["sb-1"]
+	if state == nil || state.TerminatedAt == nil {
+		t.Fatalf("state after current runtime delete = %#v, want terminated", state)
+	}
+
+	projector.now = func() time.Time { return now.Add(6 * time.Minute) }
+	projector.handleDelete(oldPod)
+
+	if len(recorder.events) != 3 {
+		t.Fatalf("event count = %d, want claim, terminate, late pause", len(recorder.events))
+	}
+	if recorder.events[2].EventType != meteringpkg.EventTypeSandboxPaused {
+		t.Fatalf("third event type = %q, want pause", recorder.events[2].EventType)
+	}
+	state = recorder.states["sb-1"]
+	if state == nil || state.TerminatedAt == nil || state.Paused {
+		t.Fatalf("state after late pause delete = %#v, want still terminated", state)
 	}
 }
 

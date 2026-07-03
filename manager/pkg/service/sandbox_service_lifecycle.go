@@ -110,6 +110,8 @@ func (s *SandboxService) requestPauseSandboxRuntime(ctx context.Context, sandbox
 	}
 
 	status := SandboxStatusRunning
+	var meteringRecord *SandboxRecord
+	var meteringPausedAt time.Time
 	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
 		activeTxn, err := tx.GetActiveLifecycleTxn(lockCtx, sandboxID)
 		if err != nil {
@@ -135,8 +137,11 @@ func (s *SandboxService) requestPauseSandboxRuntime(ctx context.Context, sandbox
 		pod, err := s.getSandboxPod(lockCtx, sandboxID)
 		if err != nil {
 			if k8serrors.IsNotFound(err) {
+				pausedAt := s.clock.Now()
 				status = SandboxStatusPaused
-				return tx.MarkRuntimePaused(lockCtx, sandboxID, 0, s.clock.Now())
+				meteringPausedAt = pausedAt
+				meteringRecord = cloneSandboxRecordForLifecycle(record)
+				return tx.MarkRuntimePaused(lockCtx, sandboxID, 0, pausedAt)
 			}
 			return fmt.Errorf("get pod: %w", err)
 		}
@@ -175,6 +180,10 @@ func (s *SandboxService) requestPauseSandboxRuntime(ctx context.Context, sandbox
 			return SandboxStatusPaused, nil
 		}
 		return "", err
+	}
+	if meteringRecord != nil {
+		meteringRecord.Status = SandboxStatusPaused
+		s.recordSandboxPausedMetering(ctx, meteringRecord, meteringPausedAt)
 	}
 	if status != SandboxStatusPaused {
 		s.enqueueSandboxPause(sandboxID)
@@ -280,6 +289,9 @@ func (s *SandboxService) pauseSandboxRuntime(ctx context.Context, sandboxID stri
 		}
 		if tx != nil {
 			meteringRecord = cloneSandboxRecordForLifecycle(record)
+			if meteringRecord != nil && meteringRecord.CurrentPodNamespace == "" {
+				meteringRecord.CurrentPodNamespace = pod.Namespace
+			}
 			meteringPausedAt = pausedAt
 			return tx.MarkRuntimePaused(ctx, sandboxID, generation, pausedAt)
 		}
@@ -515,6 +527,9 @@ func (s *SandboxService) commitPausingRuntimePaused(ctx context.Context, sandbox
 		meteringRecord.Status = SandboxStatusPaused
 		if generation > meteringRecord.RuntimeGeneration {
 			meteringRecord.RuntimeGeneration = generation
+		}
+		if txn != nil && meteringRecord.CurrentPodNamespace == "" {
+			meteringRecord.CurrentPodNamespace = txn.FromPodNamespace
 		}
 		s.recordSandboxPausedMetering(ctx, meteringRecord, pausedAt)
 	}

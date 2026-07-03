@@ -14,6 +14,7 @@ import (
 )
 
 const sandboxLifecycleMeteringProducer = "manager.sandbox_lifecycle"
+const sandboxLifecycleMeteringUnknownNamespace = "unknown"
 
 // SandboxLifecycleMeteringRecorder records durable sandbox lifecycle facts.
 type SandboxLifecycleMeteringRecorder interface {
@@ -70,7 +71,7 @@ func (r *repositorySandboxLifecycleMeteringRecorder) RecordSandboxPaused(ctx con
 	if state == nil {
 		state = &meteringpkg.SandboxProjectionState{
 			SandboxID:         fact.SandboxID,
-			Namespace:         fact.Namespace,
+			Namespace:         sandboxPauseNamespace(fact.Namespace),
 			TeamID:            fact.TeamID,
 			UserID:            fact.UserID,
 			TemplateID:        fact.TemplateID,
@@ -189,7 +190,7 @@ func mergeSandboxPauseFactIntoState(state *meteringpkg.SandboxProjectionState, f
 		return
 	}
 	if state.Namespace == "" {
-		state.Namespace = fact.Namespace
+		state.Namespace = sandboxPauseNamespace(fact.Namespace)
 	}
 	if state.TeamID == "" {
 		state.TeamID = fact.TeamID
@@ -213,6 +214,10 @@ func mergeSandboxPauseFactIntoState(state *meteringpkg.SandboxProjectionState, f
 		claimedAt := fact.ClaimedAt.UTC()
 		state.ClaimedAt = &claimedAt
 	}
+}
+
+func sandboxPauseNamespace(namespace string) string {
+	return firstNonEmpty(namespace, sandboxLifecycleMeteringUnknownNamespace)
 }
 
 func sandboxPauseActiveSince(state *meteringpkg.SandboxProjectionState, fact *SandboxPauseMeteringFact) *time.Time {

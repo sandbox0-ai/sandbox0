@@ -86,7 +86,6 @@ func TestRepositorySandboxLifecycleMeteringRecorderKeepsPauseEventWhenWindowMiss
 
 	require.NoError(t, recorder.RecordSandboxPaused(ctx, &SandboxPauseMeteringFact{
 		SandboxID:   "sandbox-1",
-		Namespace:   "ns-1",
 		TeamID:      "team-1",
 		UserID:      "user-1",
 		TemplateID:  "template-1",
@@ -107,6 +106,7 @@ func TestRepositorySandboxLifecycleMeteringRecorderKeepsPauseEventWhenWindowMiss
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.True(t, state.Paused)
+	require.Equal(t, sandboxLifecycleMeteringUnknownNamespace, state.Namespace)
 }
 
 func meteringTestHasEvent(events []*meteringpkg.Event, eventType, sandboxID string) bool {

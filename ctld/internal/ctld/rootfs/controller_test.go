@@ -345,15 +345,25 @@ func TestControllerApplyRootFSForceAppliesBaseMismatch(t *testing.T) {
 	assert.Equal(t, "rootfs diff", runtime.applyContent)
 }
 
-func TestControllerApplyRootFSLayerChainRejectsBaseMismatch(t *testing.T) {
+func TestControllerApplyRootFSLayerChainReplaysBaseMismatch(t *testing.T) {
 	store := objectstore.NewMemoryStore(t.Name())
 	require.NoError(t, store.Put("rootfs/diff.tar", strings.NewReader("rootfs diff")))
-	runtime := &fakeRuntime{info: rootFSInfo("runc")}
+	runtime := &fakeRuntime{
+		info: rootFSInfo("runc"),
+		applyDesc: ctldapi.RootFSDiffDescriptor{
+			MediaType: "application/vnd.oci.image.layer.v1.tar",
+			Digest:    "sha256:feedface",
+			Size:      int64(len("rootfs diff")),
+		},
+	}
 	controller := NewController(Config{Runtime: runtime, Store: store})
 
 	resp, status := controller.ApplyRootFS(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.ApplyRootFSRequest{
-		Target:                  rootFSTarget(),
-		ExpectedBaseImageDigest: "sha256:other-base",
+		Target:                      rootFSTarget(),
+		ExpectedBaseImageDigest:     "sha256:other-base",
+		ExpectedSnapshotParent:      "other-parent",
+		ExpectedSnapshotParentChain: []string{"other-parent"},
+		BaselineLayerID:             "layer-1",
 		Layers: []ctldapi.RootFSLayerDescriptor{{
 			LayerID: "layer-1",
 			Descriptor: ctldapi.RootFSDiffDescriptor{
@@ -365,9 +375,12 @@ func TestControllerApplyRootFSLayerChainRejectsBaseMismatch(t *testing.T) {
 		}},
 	})
 
-	require.Equal(t, http.StatusConflict, status)
-	assert.Contains(t, resp.Error, "base image digest mismatch")
-	assert.False(t, runtime.applyCalled)
+	require.Equal(t, http.StatusOK, status, resp.Error)
+	assert.True(t, resp.Applied)
+	assert.True(t, runtime.applyCalled)
+	assert.Equal(t, "rootfs diff", runtime.applyContent)
+	assert.True(t, runtime.captureBaselineCalled)
+	assert.Equal(t, "layer-1", runtime.captureBaselineLayerID)
 }
 
 func TestControllerApplyRootFSRejectsRuntimeMismatch(t *testing.T) {

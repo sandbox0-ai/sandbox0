@@ -205,12 +205,12 @@ func (c *Controller) ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest
 		return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, http.StatusConflict
 	}
 	if layered {
-		if err := validateStrictExpectedBase(info, req); err != nil {
-			return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, http.StatusConflict
-		}
 		if err := validateBaselineLayerID(req); err != nil {
 			return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, http.StatusBadRequest
 		}
+		// The layer chain represents the sandbox's writable rootfs state. Replaying
+		// it across template image upgrades is valid; actual path-level conflicts
+		// are surfaced by the runtime apply step below.
 		portalPaths := c.portalPathsForRequest(info, req.Target, req.ExcludedPaths, req.PortalPaths)
 		applied, err := c.applyLayers(ctx, info, req.Layers, req.ExcludedPaths, portalPaths)
 		if err != nil {
@@ -507,19 +507,6 @@ func validateExpectedBase(info ctldapi.RootFSInfo, req ctldapi.ApplyRootFSReques
 	return nil
 }
 
-func validateStrictExpectedBase(info ctldapi.RootFSInfo, req ctldapi.ApplyRootFSRequest) error {
-	if expected := strings.TrimSpace(req.ExpectedBaseImageDigest); expected != "" && strings.TrimSpace(info.BaseImageDigest) != expected {
-		return fmt.Errorf("%w: base image digest mismatch: expected %s, got %s", ErrConflict, expected, info.BaseImageDigest)
-	}
-	if expected := strings.TrimSpace(req.ExpectedSnapshotParent); expected != "" && strings.TrimSpace(info.SnapshotParent) != expected {
-		return fmt.Errorf("%w: snapshot parent mismatch: expected %s, got %s", ErrConflict, expected, info.SnapshotParent)
-	}
-	if len(req.ExpectedSnapshotParentChain) > 0 && !equalStringSlices(req.ExpectedSnapshotParentChain, info.SnapshotParentChain) {
-		return fmt.Errorf("%w: snapshot parent chain mismatch", ErrConflict)
-	}
-	return nil
-}
-
 func validateBaselineLayerID(req ctldapi.ApplyRootFSRequest) error {
 	if strings.TrimSpace(req.BaselineLayerID) == "" {
 		return nil
@@ -532,18 +519,6 @@ func validateBaselineLayerID(req ctldapi.ApplyRootFSRequest) error {
 		return fmt.Errorf("%w: baseline_layer_id must match the head layer", ErrBadRequest)
 	}
 	return nil
-}
-
-func equalStringSlices(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if strings.TrimSpace(a[i]) != strings.TrimSpace(b[i]) {
-			return false
-		}
-	}
-	return true
 }
 
 func defaultObjectKey(teamID, sandboxID string, generation int64, digest string) (string, error) {

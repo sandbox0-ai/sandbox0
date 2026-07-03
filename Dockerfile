@@ -42,6 +42,11 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/ctld ./ctld/cmd/ctld && \
     CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/netd ./netd/cmd/netd
 
+FROM scratch AS procd-bin
+
+COPY --from=builder /out/procd /usr/local/bin/procd
+COPY --from=builder /out/python-runner /usr/local/bin/python-runner
+
 FROM alpine:3.19
 
 RUN apk add --no-cache ca-certificates tzdata zstd-libs lz4-libs iptables ipset nftables iproute2

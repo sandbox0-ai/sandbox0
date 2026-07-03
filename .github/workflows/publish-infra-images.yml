@@ -79,11 +79,72 @@ jobs:
           TAG: ${{ steps.docker_tag.outputs.tag }}
         run: docker push "${TAG}"
 
+  publish-procd-bin-image:
+    name: Publish procd bin image (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free runner space
+        uses: ./.github/actions/free-runner-space
+
+      - name: Restore shared infra build cache
+        id: infra-build-cache
+        uses: ./.github/actions/restore-infra-build-cache
+        with:
+          cache-key-suffix: ${{ matrix.arch }}-procd-bin
+
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build local binaries
+        run: make build-local-all
+
+      - name: Save shared infra build cache
+        uses: ./.github/actions/save-infra-build-cache
+        with:
+          cache-key-suffix: ${{ matrix.arch }}-procd-bin
+          cache-hit: ${{ steps.infra-build-cache.outputs.cache-hit }}
+
+      - name: Determine arch procd bin image tag
+        id: docker_tag
+        run: |
+          VERSION="${{ inputs.version }}"
+          echo "tag=${IMAGE_REPO}:${VERSION}-${{ matrix.arch }}-procd-bin" >> "$GITHUB_OUTPUT"
+
+      - name: Build procd binary image with Dockerfile.local
+        env:
+          TAG: ${{ steps.docker_tag.outputs.tag }}
+        run: docker build --target procd-bin -t "${TAG}" -f Dockerfile.local .
+
+      - name: Push procd binary image
+        env:
+          TAG: ${{ steps.docker_tag.outputs.tag }}
+        run: docker push "${TAG}"
+
   publish-image-manifest:
     name: Publish infra image manifest
     runs-on: ubuntu-latest
     needs:
       - publish-image
+      - publish-procd-bin-image
     steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -99,15 +160,27 @@ jobs:
           VERSION="${{ inputs.version }}"
           AMD64_IMAGE="${IMAGE_REPO}:${VERSION}-amd64"
           ARM64_IMAGE="${IMAGE_REPO}:${VERSION}-arm64"
+          AMD64_PROCD_BIN_IMAGE="${IMAGE_REPO}:${VERSION}-amd64-procd-bin"
+          ARM64_PROCD_BIN_IMAGE="${IMAGE_REPO}:${VERSION}-arm64-procd-bin"
 
           docker buildx imagetools create \
             -t "${IMAGE_REPO}:${VERSION}" \
             "${AMD64_IMAGE}" \
             "${ARM64_IMAGE}"
 
+          docker buildx imagetools create \
+            -t "${IMAGE_REPO}:${VERSION}-procd-bin" \
+            "${AMD64_PROCD_BIN_IMAGE}" \
+            "${ARM64_PROCD_BIN_IMAGE}"
+
           if [[ "${{ inputs.publish_latest }}" == "true" ]]; then
             docker buildx imagetools create \
               -t "${IMAGE_REPO}:latest" \
               "${AMD64_IMAGE}" \
               "${ARM64_IMAGE}"
+
+            docker buildx imagetools create \
+              -t "${IMAGE_REPO}:latest-procd-bin" \
+              "${AMD64_PROCD_BIN_IMAGE}" \
+              "${ARM64_PROCD_BIN_IMAGE}"
           fi

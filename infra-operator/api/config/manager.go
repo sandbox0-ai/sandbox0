@@ -19,8 +19,10 @@ type ManagerConfig struct {
 	// +kubebuilder:default=8080
 	HTTPPort int `yaml:"http_port" json:"httpPort"`
 
-	// manager docker image, used to copy the procd binary to sandbox pod
+	// ManagerImage is the manager service image.
 	ManagerImage string `yaml:"manager_image" json:"-"`
+	// ProcdBinImageRef is an OCI image mounted read-only at /procd/bin inside sandbox pods.
+	ProcdBinImageRef string `yaml:"procd_bin_image_ref" json:"-"`
 
 	DefaultClusterId string `yaml:"default_cluster_id" json:"-"`
 	RegionID         string `yaml:"region_id" json:"-"`

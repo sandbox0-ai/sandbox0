@@ -33,6 +33,7 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 	cfg.TeamTemplateMemoryPerCPU = spec.TeamTemplateMemoryPerCPU
 	cfg.SandboxMaxMemory = spec.SandboxMaxMemory
 	cfg.SandboxRuntimeClassName = spec.SandboxRuntimeClassName
+	cfg.ProcdBinImageRef = spec.ProcdBinImageRef
 	cfg.DefaultTeamQuotas = cloneTeamQuotaLimitConfigs(spec.DefaultTeamQuotas)
 	cfg.AllowColdStartWithoutReadyDataPlane = spec.AllowColdStartWithoutReadyDataPlane
 	cfg.NetdPolicyApplyTimeout = spec.NetdPolicyApplyTimeout

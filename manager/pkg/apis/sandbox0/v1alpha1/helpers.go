@@ -62,7 +62,7 @@ func buildPodSpec(template *SandboxTemplate, volumeMounts []VolumeMountSpec) cor
 	applyNetdMITMCATrustMaterial(&spec)
 	applyVolumePortals(&spec, volumeMounts)
 	applyEmptyDirMounts(&spec, template)
-	applyProcdInit(&spec)
+	applyProcdBinImageVolume(&spec)
 	applyDefaultSandboxPlacement(&spec)
 
 	if runtimeClassName := configuredSandboxRuntimeClassName(); runtimeClassName != nil {
@@ -368,6 +368,8 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 		Name:      procdBinVolumeName,
 		MountPath: "/procd/bin",
+		SubPath:   "usr/local/bin",
+		ReadOnly:  true,
 	})
 
 	// Security context
@@ -550,30 +552,22 @@ func upsertProcdEnvVar(envIndex map[string]int, envVars *[]corev1.EnvVar, envVar
 	envIndex[envVar.Name] = len(*envVars) - 1
 }
 
-func applyProcdInit(spec *corev1.PodSpec) {
+func applyProcdBinImageVolume(spec *corev1.PodSpec) {
 	cfg := config.LoadManagerConfig()
-	managerImage := cfg.ManagerImage
+	imageRef := ""
+	if cfg != nil {
+		imageRef = strings.TrimSpace(cfg.ProcdBinImageRef)
+	}
+	if imageRef == "" && cfg != nil {
+		imageRef = strings.TrimSpace(cfg.ManagerImage) + "-procd-bin"
+	}
 
 	spec.Volumes = append(spec.Volumes, corev1.Volume{
 		Name: procdBinVolumeName,
 		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{},
-		},
-	})
-
-	spec.InitContainers = append(spec.InitContainers, corev1.Container{
-		Name:            "procd-init",
-		Image:           managerImage,
-		ImagePullPolicy: corev1.PullIfNotPresent,
-		Command: []string{
-			"/bin/sh",
-			"-c",
-			"cp /usr/local/bin/procd /procd/bin/procd && cp /usr/local/bin/python-runner /procd/bin/python-runner && chmod 0755 /procd/bin/procd /procd/bin/python-runner",
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      procdBinVolumeName,
-				MountPath: "/procd/bin",
+			Image: &corev1.ImageVolumeSource{
+				Reference:  imageRef,
+				PullPolicy: corev1.PullIfNotPresent,
 			},
 		},
 	})

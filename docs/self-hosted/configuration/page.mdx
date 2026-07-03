@@ -184,6 +184,24 @@ This field only controls the `runtimeClassName` written onto sandbox Pods. The n
 
 `infra-operator` does not install node runtime handlers. It does not install `runsc`, write `/etc/containerd/config.toml`, restart containerd, or create a `gvisor-rootfs` handler. Do that through your node image, node bootstrap automation, or a dedicated privileged node setup process before scheduling sandbox workloads there.
 
+### Procd Binary Image Volume
+
+Sandbox Pods mount Sandbox0 `procd` binaries from a small OCI artifact image by default. This avoids a per-Pod init container on the sandbox startup path.
+
+When `procdBinImageRef` is omitted, `infra-operator` derives it from the deployed infra image tag by appending `-procd-bin`. For example, `sandbox0ai/infra:v0.8.0` uses `sandbox0ai/infra:v0.8.0-procd-bin`.
+
+Set `procdBinImageRef` only when you publish the procd binary artifact image separately:
+
+```yaml
+spec:
+    services:
+        manager:
+            config:
+                procdBinImageRef: registry.example.com/sandbox0/procd-bin:v0.8.0
+```
+
+Kubernetes image volume support is part of the Sandbox0 cluster baseline. Unsupported runtimes fail sandbox Pod startup instead of falling back inside the Pod.
+
 ### Sandbox Memory Limits
 
 Sandbox claims and runtime updates can set `config.resources.memory`. The minimum accepted value is `128Mi`. The platform maximum defaults to `32Gi`.
@@ -468,6 +486,7 @@ Examples:
 - `services.manager.config.autoscaler.*` tunes pool scale behavior
 - `services.manager.config.k8sClientQps` and `k8sClientBurst` tune the manager Kubernetes client token bucket rate limit; defaults are `50` and `100`
 - `services.manager.config.sandboxMaxMemory` caps per-sandbox memory overrides; the default is `32Gi`
+- `services.manager.config.procdBinImageRef` overrides the derived procd artifact image used by sandbox Pods
 - `services.manager.config.allowColdStartWithoutReadyDataPlane` lets cold claims create Pending pods for external node autoscaler scale-from-zero deployments; keep it disabled unless the cluster autoscaler can provision matching sandbox nodes
 - `services.storageProxy.config.filesystem*` tunes filesystem behavior; `services.manager.config.procdConfig.volume*` tunes mounted volume cache sizing
 - `services.storageProxy.config.s0fsSegmentTargetSize` sets the target S0FS segment size for materialized volume data; the default is `4Mi`

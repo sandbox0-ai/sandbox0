@@ -19,6 +19,17 @@ type sandboxProcessLogReadCloser struct {
 	buffer  []byte
 }
 
+type SandboxProcessLogEvent struct {
+	Message     string `json:"message"`
+	ProcessID   string `json:"process_id"`
+	ProcessType string `json:"process_type"`
+	PID         int    `json:"pid,omitempty"`
+	Alias       string `json:"alias,omitempty"`
+	Source      string `json:"source"`
+	Data        string `json:"data"`
+	Truncated   bool   `json:"truncated,omitempty"`
+}
+
 func newSandboxProcessLogReadCloser(source io.ReadCloser) io.ReadCloser {
 	scanner := bufio.NewScanner(source)
 	scanner.Buffer(make([]byte, 0, process.DefaultContainerLogMaxLineBytes), maxSandboxProcessLogScanBytes)
@@ -59,44 +70,53 @@ func (r *sandboxProcessLogReadCloser) Close() error {
 }
 
 func isSandboxProcessLogLine(line []byte) bool {
-	payload := bytes.TrimSpace(stripKubernetesLogTimestamp(line))
+	_, _, ok := ParseSandboxProcessLogLine(line)
+	return ok
+}
+
+func ParseSandboxProcessLogLine(line []byte) (SandboxProcessLogEvent, time.Time, bool) {
+	timestamp, payload := splitKubernetesLogTimestamp(line)
+	payload = bytes.TrimSpace(payload)
 	if len(payload) == 0 {
-		return false
+		return SandboxProcessLogEvent{}, time.Time{}, false
 	}
 
-	var event sandboxProcessLogEvent
-	if err := json.Unmarshal(payload, &event); err != nil {
-		return false
+	var decoded struct {
+		SandboxProcessLogEvent
+		Data *string `json:"data"`
 	}
-	if event.Message != process.ContainerLogProcessOutputMessage || event.Data == nil {
-		return false
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		return SandboxProcessLogEvent{}, time.Time{}, false
+	}
+	if decoded.Data == nil {
+		return SandboxProcessLogEvent{}, time.Time{}, false
+	}
+	event := decoded.SandboxProcessLogEvent
+	event.Data = *decoded.Data
+	if event.Message != process.ContainerLogProcessOutputMessage {
+		return SandboxProcessLogEvent{}, time.Time{}, false
 	}
 	switch event.Source {
 	case string(process.OutputSourceStdout), string(process.OutputSourceStderr), string(process.OutputSourcePTY):
-		return true
+		return event, timestamp, true
 	default:
-		return false
+		return SandboxProcessLogEvent{}, time.Time{}, false
 	}
 }
 
-func stripKubernetesLogTimestamp(line []byte) []byte {
+func splitKubernetesLogTimestamp(line []byte) (time.Time, []byte) {
 	trimmed := bytes.TrimLeft(line, " \t")
 	if bytes.HasPrefix(trimmed, []byte("{")) {
-		return trimmed
+		return time.Time{}, trimmed
 	}
 
 	idx := bytes.IndexByte(trimmed, ' ')
 	if idx <= 0 {
-		return trimmed
+		return time.Time{}, trimmed
 	}
-	if _, err := time.Parse(time.RFC3339Nano, string(trimmed[:idx])); err != nil {
-		return trimmed
+	timestamp, err := time.Parse(time.RFC3339Nano, string(trimmed[:idx]))
+	if err != nil {
+		return time.Time{}, trimmed
 	}
-	return trimmed[idx+1:]
-}
-
-type sandboxProcessLogEvent struct {
-	Message string  `json:"message"`
-	Source  string  `json:"source"`
-	Data    *string `json:"data"`
+	return timestamp.UTC(), trimmed[idx+1:]
 }

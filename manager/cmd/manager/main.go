@@ -273,6 +273,7 @@ func main() {
 	// Initialize internal auth generator for procd communication
 	var internalTokenGenerator service.TokenGenerator
 	var storageProxyAdminTokenGenerator service.TokenGenerator
+	var internalAuthGen *internalauth.Generator
 	privateKey, err := internalauth.LoadEd25519PrivateKeyFromFile(internalauth.DefaultInternalJWTPrivateKeyPath)
 	if err != nil {
 		logger.Warn("Failed to load internal auth private key, procd and storage-proxy calls will not work",
@@ -280,7 +281,7 @@ func main() {
 			zap.Error(err),
 		)
 	} else {
-		internalAuthGen := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		internalAuthGen = internalauth.NewGenerator(internalauth.GeneratorConfig{
 			Caller:     "manager",
 			PrivateKey: privateKey,
 			TTL:        30 * time.Second,
@@ -370,6 +371,7 @@ func main() {
 	sandboxPauseController := service.NewSandboxPauseController(sandboxService, logger)
 	sandboxService.SetPauseEnqueuer(sandboxPauseController)
 	operator.SetSandboxProbeRunner(sandboxService)
+	sandboxLogWorker, sandboxMetricWorker := buildSandboxObservabilityProducerWorkers(cfg, internalAuthGen, obsProvider, logger)
 	staticAuth := make([]egressauthruntime.StaticAuthConfig, 0, len(cfg.EgressAuthStaticAuth))
 	for _, entry := range cfg.EgressAuthStaticAuth {
 		staticAuth = append(staticAuth, egressauthruntime.StaticAuthConfig{
@@ -509,6 +511,8 @@ func main() {
 			logger.Info("CRD informer cache synced", zap.String("type", typ.String()))
 		}
 	}
+
+	startSandboxObservabilityProducers(ctx, cfg, k8sClient, sandboxService, podLister, sandboxLogWorker, sandboxMetricWorker, logger, clk)
 
 	// Start operator
 	go func() {

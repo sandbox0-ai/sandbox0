@@ -17,6 +17,7 @@ import (
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	redissvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/redis"
+	sandboxobssvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sandboxobservability"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
@@ -85,6 +86,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 	config.ClusterID = compiledPlan.Netd.ClusterID
 	if config.EgressAuthResolverURL == "" {
 		config.EgressAuthResolverURL = compiledPlan.Netd.EgressAuthResolverURL
+	}
+	if err := sandboxobssvc.ApplyNetdConfig(ctx, r.Resources.Client, compiledPlan.Scope.Owner(), compiledPlan.Services.ClusterGateway.URL, config); err != nil {
+		return err
 	}
 	mitmCASecretName, err := r.resolveMITMCASecretName(ctx, compiledPlan, labels)
 	if err != nil {

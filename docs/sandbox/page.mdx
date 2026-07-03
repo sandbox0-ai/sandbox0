@@ -346,6 +346,66 @@ For live streaming, use `sandbox.StreamLogs(...)`, `sandbox.stream_logs(...)`, `
 
 ---
 
+## Live Stats
+
+Get live, best-effort resource usage for a sandbox. This API calls the sandbox runtime and is intended for live debugging, not historical analysis.
+
+<Endpoint method="GET">
+/api/v1/sandboxes/{'{id}'}/stats
+</Endpoint>
+
+The response includes aggregate container and context resource usage. For per-context stats, use `/api/v1/sandboxes/{'{id}'}/contexts/{'{ctx_id}'}/stats`.
+
+---
+
+## Historical Observability and Audit
+
+Historical sandbox observability is separate from live logs and live stats. The query API reads an asynchronous per-sandbox projection that can be backed by ClickHouse or another query store. When no historical backend is configured, these endpoints return `503 unavailable`. When the backend is configured but cannot be queried, the same endpoints return `503 unavailable` with a backend-unavailable error.
+
+<Endpoint method="GET">
+/api/v1/sandboxes/{'{id}'}/observability/events
+</Endpoint>
+
+<Endpoint method="GET">
+/api/v1/sandboxes/{'{id}'}/observability/logs
+</Endpoint>
+
+<Endpoint method="GET">
+/api/v1/sandboxes/{'{id}'}/observability/metrics
+</Endpoint>
+
+<Endpoint method="GET">
+/api/v1/sandboxes/{'{id}'}/audit/events
+</Endpoint>
+
+### Query Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `start_time` | RFC3339 timestamp | Include events that occurred at or after this time |
+| `end_time` | RFC3339 timestamp | Include events that occurred at or before this time |
+| `limit` | integer | Maximum events to return (default: 100, max: 1000) |
+| `cursor` | string | Opaque cursor from a previous response |
+| `context_id` | string | Log and metric context filter |
+| `stream` | string | Log stream filter: `stdout`, `stderr`, or `pty` |
+| `name` | string | Metric name filter; may be repeated |
+| `names` | string | Comma-separated metric name filter |
+| `source` | string | Event producer filter: `manager`, `netd`, or `procd` |
+| `event_type` | string | Event projection filter: `lifecycle`, `network_audit`, or `runtime_stats` |
+| `outcome` | string | Event outcome filter: `completed`, `denied`, `error`, `succeeded`, or `failed` |
+
+Every returned event, log entry, and metric sample includes `team_id`, `sandbox_id`, `region_id`, `cluster_id`, `occurred_at`, `ingested_at`, and `cursor`. Event rows also include `source`, `event_type`, and `watermark`; log rows include `stream` and `message`; metric rows include `name` and `value`. The response cursor is opaque and separate from each producer cursor.
+
+ClickHouse-backed deployments store events, logs, and metric samples in asynchronous per-sandbox projection tables with independent retention TTLs. Netd network audit events arrive through an asynchronous internal ingest sink when enabled by the deployment. Runtime stats history is not sampled by default unless a sandbox metric producer publishes samples to the historical ingest pipeline.
+
+Query endpoints return `503` when the backend is disabled or unavailable.
+
+<Callout variant="info">
+Metering windows remain the PostgreSQL usage truth for quota, showback, and billing export. Historical observability does not store metering windows in ClickHouse. File audit is not part of these endpoints.
+</Callout>
+
+---
+
 ## List Sandboxes
 
 List all sandboxes with optional filters.

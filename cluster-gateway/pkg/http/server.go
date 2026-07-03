@@ -32,8 +32,21 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	"go.uber.org/zap"
 )
+
+type ServerOption func(*serverOptions)
+
+type serverOptions struct {
+	sandboxObservabilityRepo sandboxobservability.Repository
+}
+
+func WithSandboxObservabilityRepository(repo sandboxobservability.Repository) ServerOption {
+	return func(opts *serverOptions) {
+		opts.sandboxObservabilityRepo = repo
+	}
+}
 
 // Server represents the HTTP server for cluster-gateway
 type Server struct {
@@ -43,6 +56,7 @@ type Server struct {
 	proxy2sp              *proxy.Router
 	managerClient         *client.ManagerClient
 	authMiddleware        *middleware.InternalAuthMiddleware
+	netdAuthMiddleware    *middleware.InternalAuthMiddleware
 	publicAuth            *gatewaymiddleware.AuthMiddleware
 	compositeAuth         *middleware.CompositeAuthMiddleware
 	publicIdentityRepo    *gatewayidentity.Repository
@@ -55,6 +69,7 @@ type Server struct {
 	requestLogger         *middleware.RequestLogger
 	logger                *zap.Logger
 	meteringHandler       *gatewayhandlers.MeteringHandler
+	observabilityHandler  *gatewayhandlers.SandboxObservabilityHandler
 	internalAuthGen       *internalauth.Generator
 	entitlements          licensing.Entitlements
 	obsProvider           *observability.Provider
@@ -69,7 +84,15 @@ func NewServer(
 	pool *pgxpool.Pool,
 	logger *zap.Logger,
 	obsProvider *observability.Provider,
+	opts ...ServerOption,
 ) (*Server, error) {
+	options := serverOptions{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&options)
+		}
+	}
+
 	// Set gin mode
 	gin.SetMode(gin.ReleaseMode)
 
@@ -117,20 +140,21 @@ func NewServer(
 
 	publicAuthEnabled := authModeEnabled(cfg.AuthMode, authModePublic)
 
-	// Initialize internal auth keys when control-plane callers are enabled for
-	// this deployment mode.
-	var publicKey ed25519.PublicKey
+	privateKey, err := internalauth.LoadEd25519PrivateKeyFromFile(internalauth.DefaultInternalJWTPrivateKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("load internal JWT private key: %w", err)
+	}
+
+	// Control-plane callers are enabled only in internal auth mode, while netd
+	// audit ingest is a data-plane path and must remain available in public
+	// single-cluster mode.
+	publicKey := privateKey.Public().(ed25519.PublicKey)
 	if authModeEnabled(cfg.AuthMode, authModeInternal) {
 		var err error
 		publicKey, err = internalauth.LoadEd25519PublicKeyFromFile(internalauth.DefaultInternalJWTPublicKeyPath)
 		if err != nil {
 			return nil, fmt.Errorf("load internal JWT public key: %w", err)
 		}
-	}
-
-	privateKey, err := internalauth.LoadEd25519PrivateKeyFromFile(internalauth.DefaultInternalJWTPrivateKeyPath)
-	if err != nil {
-		return nil, fmt.Errorf("load internal JWT private key: %w", err)
 	}
 
 	// Create internal auth validator (for validating tokens from regional-gateway and optionally scheduler)
@@ -147,9 +171,16 @@ func NewServer(
 			ClockSkewTolerance: 10 * time.Second,
 		})
 	}
+	netdValidator := internalauth.NewValidator(internalauth.ValidatorConfig{
+		Target:             "cluster-gateway",
+		PublicKey:          publicKey,
+		AllowedCallers:     []string{"netd", "manager", "procd", "storage-proxy"},
+		ClockSkewTolerance: 10 * time.Second,
+	})
 
 	// Create middleware
 	authMiddleware := middleware.NewInternalAuthMiddleware(validator, logger)
+	netdAuthMiddleware := middleware.NewInternalAuthMiddleware(netdValidator, logger)
 	requestLogger := middleware.NewRequestLogger(logger)
 
 	// Initialize internal auth generator (for downstream services)
@@ -243,6 +274,10 @@ func NewServer(
 		meteringRepo = metering.NewRepository(pool)
 	}
 	meteringHandler := gatewayhandlers.NewMeteringHandler(meteringRepo, cfg.RegionID, logger)
+	observabilityHandler := gatewayhandlers.NewSandboxObservabilityHandler(
+		options.sandboxObservabilityRepo,
+		logger,
+	)
 	sandboxServiceLimiter, err := ratelimit.New(context.Background(), gatewaymiddleware.RateLimitConfigFromGatewayConfig(cfg.GatewayConfig))
 	if err != nil {
 		return nil, fmt.Errorf("create sandbox service rate limiter: %w", err)
@@ -259,6 +294,7 @@ func NewServer(
 		proxy2sp:              proxy2sp,
 		managerClient:         managerClient,
 		authMiddleware:        authMiddleware,
+		netdAuthMiddleware:    netdAuthMiddleware,
 		publicAuth:            publicAuth,
 		compositeAuth:         compositeAuth,
 		publicIdentityRepo:    publicIdentityRepo,
@@ -271,6 +307,7 @@ func NewServer(
 		requestLogger:         requestLogger,
 		logger:                logger,
 		meteringHandler:       meteringHandler,
+		observabilityHandler:  observabilityHandler,
 		internalAuthGen:       internalAuthGen,
 		entitlements:          entitlements,
 		obsProvider:           obsProvider,
@@ -287,6 +324,17 @@ func NewServer(
 // Handler exposes the HTTP handler for tests.
 func (s *Server) Handler() http.Handler {
 	return s.router
+}
+
+func (s *Server) sandboxObservabilityHandler() *gatewayhandlers.SandboxObservabilityHandler {
+	if s.observabilityHandler == nil {
+		logger := zap.NewNop()
+		if s.logger != nil {
+			logger = s.logger
+		}
+		s.observabilityHandler = gatewayhandlers.NewSandboxObservabilityHandler(nil, logger)
+	}
+	return s.observabilityHandler
 }
 
 func (s *Server) outboundHTTPClient() *http.Client {
@@ -351,13 +399,19 @@ func (s *Server) setupRoutes() {
 
 		// === Sandbox Management (→ Manager) ===
 		sandboxes := v1.Group("/sandboxes")
-		sandboxes.Use(s.managerUpstreamMiddleware())
 		{
+			sandboxes.GET("/:id/observability/events", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.sandboxObservabilityHandler().ListEvents)
+			sandboxes.GET("/:id/observability/logs", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.sandboxObservabilityHandler().ListLogs)
+			sandboxes.GET("/:id/observability/metrics", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.sandboxObservabilityHandler().ListMetricSamples)
+			sandboxes.GET("/:id/audit/events", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.sandboxObservabilityHandler().ListAuditEvents)
+
+			sandboxes.Use(s.managerUpstreamMiddleware())
 			sandboxes.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.listSandboxes)
 			sandboxes.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxCreate), s.createSandbox)
 			sandboxes.GET("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.getSandbox)
 			sandboxes.GET("/:id/status", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.getSandboxStatus)
 			sandboxes.GET("/:id/logs", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.getSandboxLogs)
+			sandboxes.GET("/:id/stats", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.getSandboxStats)
 			sandboxes.PUT("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.updateSandbox)
 			sandboxes.DELETE("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxDelete), s.deleteSandbox)
 			sandboxes.POST("/:id/pause", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.pauseSandbox)
@@ -457,6 +511,7 @@ func (s *Server) setupRoutes() {
 	if authModeEnabled(s.cfg.AuthMode, authModeInternal) {
 		s.setupInternalControlPlaneRoutes()
 	}
+	s.setupSandboxObservabilityIngestRoutes()
 
 	// Metering export is region-scoped and must remain available when
 	// cluster-gateway serves as the single-cluster public API entrypoint.
@@ -521,6 +576,16 @@ func (s *Server) setupInternalControlPlaneRoutes() {
 		// Team quota management (→ Manager)
 		internal.PUT("/teams/:team_id/quotas/:dimension", s.proxyInternalSystemQuotaRequest)
 		internal.DELETE("/teams/:team_id/quotas/:dimension", s.proxyInternalSystemQuotaRequest)
+	}
+}
+
+func (s *Server) setupSandboxObservabilityIngestRoutes() {
+	internal := s.router.Group("/internal/v1")
+	internal.Use(s.netdAuthMiddleware.Authenticate())
+	{
+		internal.POST("/sandbox-observability/events", s.netdAuthMiddleware.RequirePermission(gatewayauthn.PermSandboxObservabilityWrite), s.sandboxObservabilityHandler().IngestEvents)
+		internal.POST("/sandbox-observability/logs", s.netdAuthMiddleware.RequirePermission(gatewayauthn.PermSandboxObservabilityWrite), s.sandboxObservabilityHandler().IngestLogs)
+		internal.POST("/sandbox-observability/metrics", s.netdAuthMiddleware.RequirePermission(gatewayauthn.PermSandboxObservabilityWrite), s.sandboxObservabilityHandler().IngestMetricSamples)
 	}
 }
 

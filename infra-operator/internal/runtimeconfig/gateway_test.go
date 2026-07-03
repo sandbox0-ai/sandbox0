@@ -38,3 +38,17 @@ func TestApplyGatewayConfigCopiesJWTKeyFields(t *testing.T) {
 		t.Fatalf("expected public key file to be copied")
 	}
 }
+
+func TestToClusterGatewayLeavesSandboxObservabilityDisabled(t *testing.T) {
+	src := infrav1alpha1.ClusterGatewayConfig{
+		HTTPPort: 9443,
+	}
+
+	cfg := ToClusterGateway(&src)
+	if cfg.HTTPPort != 9443 {
+		t.Fatalf("http port = %d, want 9443", cfg.HTTPPort)
+	}
+	if cfg.SandboxObservability.BackendType() != "disabled" {
+		t.Fatalf("sandbox observability backend = %q, want disabled", cfg.SandboxObservability.BackendType())
+	}
+}

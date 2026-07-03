@@ -87,6 +87,8 @@ const (
 	PermSandboxVolumeFileWrite = "sandboxvolumefile:write"
 
 	PermQuotaRead = "quota:read"
+
+	PermSandboxObservabilityWrite = "sandboxobservability:write"
 )
 
 // RolePermissions maps team roles to their permissions.

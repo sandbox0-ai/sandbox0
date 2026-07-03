@@ -118,6 +118,13 @@ const (
 	MountStatusStatePending  MountStatusState = "pending"
 )
 
+// Defines values for ObservabilityEventSource.
+const (
+	Manager ObservabilityEventSource = "manager"
+	Netd    ObservabilityEventSource = "netd"
+	Procd   ObservabilityEventSource = "procd"
+)
+
 // Defines values for PlaceholderSubstitutionLocation.
 const (
 	PlaceholderSubstitutionLocationBody   PlaceholderSubstitutionLocation = "body"
@@ -191,6 +198,29 @@ const (
 const (
 	AllowAll SandboxNetworkPolicyMode = "allow-all"
 	BlockAll SandboxNetworkPolicyMode = "block-all"
+)
+
+// Defines values for SandboxObservabilityEventType.
+const (
+	Lifecycle    SandboxObservabilityEventType = "lifecycle"
+	NetworkAudit SandboxObservabilityEventType = "network_audit"
+	RuntimeStats SandboxObservabilityEventType = "runtime_stats"
+)
+
+// Defines values for SandboxObservabilityLogStream.
+const (
+	Pty    SandboxObservabilityLogStream = "pty"
+	Stderr SandboxObservabilityLogStream = "stderr"
+	Stdout SandboxObservabilityLogStream = "stdout"
+)
+
+// Defines values for SandboxObservabilityOutcome.
+const (
+	SandboxObservabilityOutcomeCompleted SandboxObservabilityOutcome = "completed"
+	SandboxObservabilityOutcomeDenied    SandboxObservabilityOutcome = "denied"
+	SandboxObservabilityOutcomeError     SandboxObservabilityOutcome = "error"
+	SandboxObservabilityOutcomeFailed    SandboxObservabilityOutcome = "failed"
+	SandboxObservabilityOutcomeSucceeded SandboxObservabilityOutcome = "succeeded"
 )
 
 // Defines values for SeccompProfileType.
@@ -390,6 +420,21 @@ const (
 	SuccessSandboxNetworkPolicyResponseSuccessTrue SuccessSandboxNetworkPolicyResponseSuccess = true
 )
 
+// Defines values for SuccessSandboxObservabilityEventsResponseSuccess.
+const (
+	SuccessSandboxObservabilityEventsResponseSuccessTrue SuccessSandboxObservabilityEventsResponseSuccess = true
+)
+
+// Defines values for SuccessSandboxObservabilityLogsResponseSuccess.
+const (
+	SuccessSandboxObservabilityLogsResponseSuccessTrue SuccessSandboxObservabilityLogsResponseSuccess = true
+)
+
+// Defines values for SuccessSandboxObservabilityMetricsResponseSuccess.
+const (
+	SuccessSandboxObservabilityMetricsResponseSuccessTrue SuccessSandboxObservabilityMetricsResponseSuccess = true
+)
+
 // Defines values for SuccessSandboxResponseSuccess.
 const (
 	SuccessSandboxResponseSuccessTrue SuccessSandboxResponseSuccess = true
@@ -408,6 +453,11 @@ const (
 // Defines values for SuccessSandboxServicesResponseSuccess.
 const (
 	SuccessSandboxServicesResponseSuccessTrue SuccessSandboxServicesResponseSuccess = true
+)
+
+// Defines values for SuccessSandboxStatsResponseSuccess.
+const (
+	SuccessSandboxStatsResponseSuccessTrue SuccessSandboxStatsResponseSuccess = true
 )
 
 // Defines values for SuccessSandboxStatusResponseSuccess.
@@ -1261,6 +1311,9 @@ type NodeSelectorTerm struct {
 	MatchFields      *[]NodeSelectorRequirement `json:"matchFields,omitempty"`
 }
 
+// ObservabilityEventSource defines model for ObservabilityEventSource.
+type ObservabilityEventSource string
+
 // PTYSize defines model for PTYSize.
 type PTYSize struct {
 	Cols *int32 `json:"cols,omitempty"`
@@ -1764,6 +1817,84 @@ type SandboxNetworkPolicy struct {
 
 // SandboxNetworkPolicyMode defines model for SandboxNetworkPolicy.Mode.
 type SandboxNetworkPolicyMode string
+
+// SandboxObservabilityEvent defines model for SandboxObservabilityEvent.
+type SandboxObservabilityEvent struct {
+	Attributes *map[string]interface{}       `json:"attributes,omitempty"`
+	ClusterId  string                        `json:"cluster_id"`
+	Cursor     string                        `json:"cursor"`
+	EventType  SandboxObservabilityEventType `json:"event_type"`
+	IngestedAt time.Time                     `json:"ingested_at"`
+	OccurredAt time.Time                     `json:"occurred_at"`
+	Outcome    *SandboxObservabilityOutcome  `json:"outcome,omitempty"`
+	RegionId   string                        `json:"region_id"`
+	SandboxId  string                        `json:"sandbox_id"`
+	Source     ObservabilityEventSource      `json:"source"`
+	TeamId     string                        `json:"team_id"`
+	Watermark  string                        `json:"watermark"`
+}
+
+// SandboxObservabilityEventType defines model for SandboxObservabilityEventType.
+type SandboxObservabilityEventType string
+
+// SandboxObservabilityEventsResponse defines model for SandboxObservabilityEventsResponse.
+type SandboxObservabilityEventsResponse struct {
+	Events     []SandboxObservabilityEvent `json:"events"`
+	NextCursor *string                     `json:"next_cursor,omitempty"`
+	Watermark  *string                     `json:"watermark,omitempty"`
+}
+
+// SandboxObservabilityLogEntry defines model for SandboxObservabilityLogEntry.
+type SandboxObservabilityLogEntry struct {
+	Attributes *map[string]interface{}        `json:"attributes,omitempty"`
+	ClusterId  string                         `json:"cluster_id"`
+	ContextId  *string                        `json:"context_id,omitempty"`
+	Cursor     string                         `json:"cursor"`
+	IngestedAt time.Time                      `json:"ingested_at"`
+	Message    string                         `json:"message"`
+	OccurredAt time.Time                      `json:"occurred_at"`
+	ProcessId  *string                        `json:"process_id,omitempty"`
+	RegionId   string                         `json:"region_id"`
+	SandboxId  string                         `json:"sandbox_id"`
+	Stream     *SandboxObservabilityLogStream `json:"stream,omitempty"`
+	TeamId     string                         `json:"team_id"`
+}
+
+// SandboxObservabilityLogStream defines model for SandboxObservabilityLogStream.
+type SandboxObservabilityLogStream string
+
+// SandboxObservabilityLogsResponse defines model for SandboxObservabilityLogsResponse.
+type SandboxObservabilityLogsResponse struct {
+	Logs       []SandboxObservabilityLogEntry `json:"logs"`
+	NextCursor *string                        `json:"next_cursor,omitempty"`
+	Watermark  *string                        `json:"watermark,omitempty"`
+}
+
+// SandboxObservabilityMetricSample defines model for SandboxObservabilityMetricSample.
+type SandboxObservabilityMetricSample struct {
+	Attributes *map[string]interface{} `json:"attributes,omitempty"`
+	ClusterId  string                  `json:"cluster_id"`
+	ContextId  *string                 `json:"context_id,omitempty"`
+	Cursor     string                  `json:"cursor"`
+	IngestedAt time.Time               `json:"ingested_at"`
+	Name       string                  `json:"name"`
+	OccurredAt time.Time               `json:"occurred_at"`
+	RegionId   string                  `json:"region_id"`
+	SandboxId  string                  `json:"sandbox_id"`
+	TeamId     string                  `json:"team_id"`
+	Unit       *string                 `json:"unit,omitempty"`
+	Value      float64                 `json:"value"`
+}
+
+// SandboxObservabilityMetricsResponse defines model for SandboxObservabilityMetricsResponse.
+type SandboxObservabilityMetricsResponse struct {
+	NextCursor *string                            `json:"next_cursor,omitempty"`
+	Samples    []SandboxObservabilityMetricSample `json:"samples"`
+	Watermark  *string                            `json:"watermark,omitempty"`
+}
+
+// SandboxObservabilityOutcome defines model for SandboxObservabilityOutcome.
+type SandboxObservabilityOutcome string
 
 // SandboxRefreshRequest defines model for SandboxRefreshRequest.
 type SandboxRefreshRequest struct {
@@ -2377,6 +2508,33 @@ type SuccessSandboxNetworkPolicyResponse struct {
 // SuccessSandboxNetworkPolicyResponseSuccess defines model for SuccessSandboxNetworkPolicyResponse.Success.
 type SuccessSandboxNetworkPolicyResponseSuccess bool
 
+// SuccessSandboxObservabilityEventsResponse defines model for SuccessSandboxObservabilityEventsResponse.
+type SuccessSandboxObservabilityEventsResponse struct {
+	Data    *SandboxObservabilityEventsResponse              `json:"data,omitempty"`
+	Success SuccessSandboxObservabilityEventsResponseSuccess `json:"success"`
+}
+
+// SuccessSandboxObservabilityEventsResponseSuccess defines model for SuccessSandboxObservabilityEventsResponse.Success.
+type SuccessSandboxObservabilityEventsResponseSuccess bool
+
+// SuccessSandboxObservabilityLogsResponse defines model for SuccessSandboxObservabilityLogsResponse.
+type SuccessSandboxObservabilityLogsResponse struct {
+	Data    *SandboxObservabilityLogsResponse              `json:"data,omitempty"`
+	Success SuccessSandboxObservabilityLogsResponseSuccess `json:"success"`
+}
+
+// SuccessSandboxObservabilityLogsResponseSuccess defines model for SuccessSandboxObservabilityLogsResponse.Success.
+type SuccessSandboxObservabilityLogsResponseSuccess bool
+
+// SuccessSandboxObservabilityMetricsResponse defines model for SuccessSandboxObservabilityMetricsResponse.
+type SuccessSandboxObservabilityMetricsResponse struct {
+	Data    *SandboxObservabilityMetricsResponse              `json:"data,omitempty"`
+	Success SuccessSandboxObservabilityMetricsResponseSuccess `json:"success"`
+}
+
+// SuccessSandboxObservabilityMetricsResponseSuccess defines model for SuccessSandboxObservabilityMetricsResponse.Success.
+type SuccessSandboxObservabilityMetricsResponseSuccess bool
+
 // SuccessSandboxResponse defines model for SuccessSandboxResponse.
 type SuccessSandboxResponse struct {
 	Data    *Sandbox                      `json:"data,omitempty"`
@@ -2416,6 +2574,15 @@ type SuccessSandboxServicesResponse struct {
 
 // SuccessSandboxServicesResponseSuccess defines model for SuccessSandboxServicesResponse.Success.
 type SuccessSandboxServicesResponseSuccess bool
+
+// SuccessSandboxStatsResponse defines model for SuccessSandboxStatsResponse.
+type SuccessSandboxStatsResponse struct {
+	Data    *SandboxResourceUsage              `json:"data,omitempty"`
+	Success SuccessSandboxStatsResponseSuccess `json:"success"`
+}
+
+// SuccessSandboxStatsResponseSuccess defines model for SuccessSandboxStatsResponse.Success.
+type SuccessSandboxStatsResponseSuccess bool
 
 // SuccessSandboxStatusResponse defines model for SuccessSandboxStatusResponse.
 type SuccessSandboxStatusResponse struct {
@@ -2862,6 +3029,24 @@ type GetApiV1SandboxesParams struct {
 	Offset *int `form:"offset,omitempty" json:"offset,omitempty"`
 }
 
+// GetApiV1SandboxesIdAuditEventsParams defines parameters for GetApiV1SandboxesIdAuditEvents.
+type GetApiV1SandboxesIdAuditEventsParams struct {
+	// StartTime Include events that occurred at or after this RFC3339 timestamp.
+	StartTime *time.Time `form:"start_time,omitempty" json:"start_time,omitempty"`
+
+	// EndTime Include events that occurred at or before this RFC3339 timestamp.
+	EndTime *time.Time `form:"end_time,omitempty" json:"end_time,omitempty"`
+
+	// Limit Maximum number of events to return. Values above 1000 are capped.
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Cursor Opaque pagination cursor returned by a previous response.
+	Cursor    *string                        `form:"cursor,omitempty" json:"cursor,omitempty"`
+	Source    *ObservabilityEventSource      `form:"source,omitempty" json:"source,omitempty"`
+	EventType *SandboxObservabilityEventType `form:"event_type,omitempty" json:"event_type,omitempty"`
+	Outcome   *SandboxObservabilityOutcome   `form:"outcome,omitempty" json:"outcome,omitempty"`
+}
+
 // DeleteApiV1SandboxesIdFilesParams defines parameters for DeleteApiV1SandboxesIdFiles.
 type DeleteApiV1SandboxesIdFilesParams struct {
 	Path FilePath `form:"path" json:"path"`
@@ -2911,6 +3096,67 @@ type GetApiV1SandboxesIdLogsParams struct {
 
 	// SinceSeconds Only return logs newer than this many seconds.
 	SinceSeconds *int64 `form:"since_seconds,omitempty" json:"since_seconds,omitempty"`
+}
+
+// GetApiV1SandboxesIdObservabilityEventsParams defines parameters for GetApiV1SandboxesIdObservabilityEvents.
+type GetApiV1SandboxesIdObservabilityEventsParams struct {
+	// StartTime Include events that occurred at or after this RFC3339 timestamp.
+	StartTime *time.Time `form:"start_time,omitempty" json:"start_time,omitempty"`
+
+	// EndTime Include events that occurred at or before this RFC3339 timestamp.
+	EndTime *time.Time `form:"end_time,omitempty" json:"end_time,omitempty"`
+
+	// Limit Maximum number of events to return. Values above 1000 are capped.
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Cursor Opaque pagination cursor returned by a previous response.
+	Cursor    *string                        `form:"cursor,omitempty" json:"cursor,omitempty"`
+	Source    *ObservabilityEventSource      `form:"source,omitempty" json:"source,omitempty"`
+	EventType *SandboxObservabilityEventType `form:"event_type,omitempty" json:"event_type,omitempty"`
+	Outcome   *SandboxObservabilityOutcome   `form:"outcome,omitempty" json:"outcome,omitempty"`
+}
+
+// GetApiV1SandboxesIdObservabilityLogsParams defines parameters for GetApiV1SandboxesIdObservabilityLogs.
+type GetApiV1SandboxesIdObservabilityLogsParams struct {
+	// StartTime Include log entries that occurred at or after this RFC3339 timestamp.
+	StartTime *time.Time `form:"start_time,omitempty" json:"start_time,omitempty"`
+
+	// EndTime Include log entries that occurred at or before this RFC3339 timestamp.
+	EndTime *time.Time `form:"end_time,omitempty" json:"end_time,omitempty"`
+
+	// Limit Maximum number of log entries to return. Values above 1000 are capped.
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Cursor Opaque pagination cursor returned by a previous response.
+	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// ContextId Restrict results to a sandbox process context.
+	ContextId *string                        `form:"context_id,omitempty" json:"context_id,omitempty"`
+	Stream    *SandboxObservabilityLogStream `form:"stream,omitempty" json:"stream,omitempty"`
+}
+
+// GetApiV1SandboxesIdObservabilityMetricsParams defines parameters for GetApiV1SandboxesIdObservabilityMetrics.
+type GetApiV1SandboxesIdObservabilityMetricsParams struct {
+	// StartTime Include samples that occurred at or after this RFC3339 timestamp.
+	StartTime *time.Time `form:"start_time,omitempty" json:"start_time,omitempty"`
+
+	// EndTime Include samples that occurred at or before this RFC3339 timestamp.
+	EndTime *time.Time `form:"end_time,omitempty" json:"end_time,omitempty"`
+
+	// Limit Maximum number of samples to return. Values above 1000 are capped.
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Cursor Opaque pagination cursor returned by a previous response.
+	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// ContextId Restrict results to a sandbox process context.
+	ContextId *string `form:"context_id,omitempty" json:"context_id,omitempty"`
+
+	// Name Metric name filter. This parameter may be repeated.
+	Name *[]string `form:"name,omitempty" json:"name,omitempty"`
+
+	// Names Comma-separated metric name filter.
+	Names *string `form:"names,omitempty" json:"names,omitempty"`
 }
 
 // DeleteApiV1SandboxvolumesIdParams defines parameters for DeleteApiV1SandboxvolumesId.

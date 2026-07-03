@@ -21,6 +21,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/observability"
 	redissvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/redis"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
+	sandboxobssvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sandboxobservability"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storage"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 )
@@ -98,6 +99,10 @@ func TestCleanupDisabledServiceResourcesCleansBuiltinDependencies(t *testing.T) 
 		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "demo-manager", Namespace: "sandbox0-system"}},
 		&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "demo-manager"}},
 		&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "demo-manager"}},
+		&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "demo-sandbox-observability-clickhouse", Namespace: "sandbox0-system"}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "demo-sandbox-observability-clickhouse", Namespace: "sandbox0-system"}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "demo-sandbox-observability-clickhouse-credentials", Namespace: "sandbox0-system"}},
+		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "demo-sandbox-observability-clickhouse-data", Namespace: "sandbox0-system"}},
 	)
 
 	resources := common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{})
@@ -111,6 +116,7 @@ func TestCleanupDisabledServiceResourcesCleansBuiltinDependencies(t *testing.T) 
 		storage.NewReconciler(resources),
 		registry.NewReconciler(resources),
 		nil,
+		sandboxobssvc.NewReconciler(resources),
 	)
 	if err != nil {
 		t.Fatalf("cleanup disabled service resources: %v", err)
@@ -142,6 +148,11 @@ func TestCleanupDisabledServiceResourcesCleansBuiltinDependencies(t *testing.T) 
 	assertClientObjectMissing(t, client, types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-manager"}, &corev1.ServiceAccount{})
 	assertClientObjectMissing(t, client, types.NamespacedName{Name: "demo-manager"}, &rbacv1.ClusterRole{})
 	assertClientObjectMissing(t, client, types.NamespacedName{Name: "demo-manager"}, &rbacv1.ClusterRoleBinding{})
+
+	assertClientObjectMissing(t, client, types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-sandbox-observability-clickhouse"}, &appsv1.StatefulSet{})
+	assertClientObjectMissing(t, client, types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-sandbox-observability-clickhouse"}, &corev1.Service{})
+	assertClientObjectPresent(t, client, types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-sandbox-observability-clickhouse-credentials"}, &corev1.Secret{})
+	assertClientObjectPresent(t, client, types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-sandbox-observability-clickhouse-data"}, &corev1.PersistentVolumeClaim{})
 }
 
 func TestCleanupDisabledServiceResourcesAllowsObservabilityOnlySpec(t *testing.T) {
@@ -174,6 +185,7 @@ func TestCleanupDisabledServiceResourcesAllowsObservabilityOnlySpec(t *testing.T
 		storage.NewReconciler(resources),
 		registry.NewReconciler(resources),
 		observability.NewReconciler(resources),
+		sandboxobssvc.NewReconciler(resources),
 	)
 	if err != nil {
 		t.Fatalf("cleanup disabled service resources: %v", err)

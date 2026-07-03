@@ -66,8 +66,22 @@ func main() {
 		}
 	}
 
+	sandboxObservabilityDB, sandboxObservabilityRepo, err := initSandboxObservability(ctx, cfg, logger)
+	if err != nil {
+		logger.Fatal("Failed to initialize sandbox observability backend", zap.Error(err))
+	}
+	if sandboxObservabilityDB != nil {
+		defer sandboxObservabilityDB.Close()
+	}
+
 	// Create HTTP server
-	server, err := http.NewServer(cfg, pool, logger, obsProvider)
+	server, err := http.NewServer(
+		cfg,
+		pool,
+		logger,
+		obsProvider,
+		http.WithSandboxObservabilityRepository(sandboxObservabilityRepo),
+	)
 	if err != nil {
 		logger.Fatal("Failed to create HTTP server", zap.Error(err))
 	}

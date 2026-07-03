@@ -29,6 +29,7 @@ import (
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	redissvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/redis"
+	sandboxobssvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sandboxobservability"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -242,6 +243,11 @@ func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.In
 	}
 	if compiledPlan == nil {
 		return nil, fmt.Errorf("compiled plan is required")
+	}
+	if owner := compiledPlan.Scope.Owner(); owner != nil {
+		if err := sandboxobssvc.ApplyClusterGatewayConfig(ctx, r.Resources.Client, owner, cfg); err != nil {
+			return nil, err
+		}
 	}
 	if cfg.HTTPPort == 0 {
 		cfg.HTTPPort = defaultClusterGatewayHTTPPort

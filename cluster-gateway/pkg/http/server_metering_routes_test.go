@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,6 +75,25 @@ func TestSetupRoutesSkipsControlPlaneEndpointsInPublicMode(t *testing.T) {
 	}
 }
 
+func TestSetupRoutesMountsSandboxObservabilityIngestInPublicMode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server, _, _ := testMeteringRouteServer(t, "public")
+	server.requestLogger = middleware.NewRequestLogger(zap.NewNop())
+	server.obsProvider = newTestMeteringObservability(t)
+	server.setupRoutes()
+
+	for _, path := range []string{
+		"/internal/v1/sandbox-observability/events",
+		"/internal/v1/sandbox-observability/logs",
+		"/internal/v1/sandbox-observability/metrics",
+	} {
+		if !hasRoute(server.router, "POST", path) {
+			t.Fatalf("expected public mode to mount sandbox observability ingest route %s", path)
+		}
+	}
+}
+
 func TestSetupRoutesMountsControlPlaneEndpointsInInternalMode(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -119,6 +139,58 @@ func TestSetupRoutesMountsSandboxLogsEndpoint(t *testing.T) {
 
 	if !hasRoute(server.router, "GET", "/api/v1/sandboxes/:id/logs") {
 		t.Fatal("expected sandbox logs route to be mounted")
+	}
+}
+
+func TestSetupRoutesMountsSandboxStatsAndHistoricalObservabilityEndpoints(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server, _, _ := testMeteringRouteServer(t, "public")
+	server.requestLogger = middleware.NewRequestLogger(zap.NewNop())
+	server.obsProvider = newTestMeteringObservability(t)
+	server.setupRoutes()
+
+	for _, path := range []string{
+		"/api/v1/sandboxes/:id/stats",
+		"/api/v1/sandboxes/:id/observability/events",
+		"/api/v1/sandboxes/:id/observability/logs",
+		"/api/v1/sandboxes/:id/observability/metrics",
+		"/api/v1/sandboxes/:id/audit/events",
+	} {
+		if !hasRoute(server.router, "GET", path) {
+			t.Fatalf("expected route %s to be mounted", path)
+		}
+	}
+}
+
+func TestSandboxObservabilityRouteDoesNotRequireManagerUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server, generator, _ := testMeteringRouteServer(t, authModeInternal)
+	server.requestLogger = middleware.NewRequestLogger(zap.NewNop())
+	server.obsProvider = newTestMeteringObservability(t)
+	server.setupRoutes()
+	if !hasRoute(server.router, "POST", "/internal/v1/sandbox-observability/events") {
+		t.Fatal("expected sandbox observability ingest route to be mounted")
+	}
+
+	token, err := generator.Generate("cluster-gateway", "team-1", "user-1", internalauth.GenerateOptions{
+		Permissions: []string{authn.PermSandboxRead},
+	})
+	if err != nil {
+		t.Fatalf("generate internal token: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/sb-1/observability/events", nil)
+	req.Header.Set(internalauth.DefaultTokenHeader, token)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "sandbox observability backend is disabled") {
+		t.Fatalf("response = %s, want disabled backend error", rec.Body.String())
 	}
 }
 
@@ -226,16 +298,25 @@ func testMeteringRouteServer(t *testing.T, authMode string) (*Server, *internala
 	issuer := authn.NewIssuer("cluster-gateway", "secret", time.Minute, time.Hour)
 	publicAuth := gatewaymiddleware.NewAuthMiddleware(nil, "secret", issuer, zap.NewNop())
 	internalAuth := middleware.NewInternalAuthMiddleware(validator, zap.NewNop())
+	netdValidator := internalauth.NewValidator(internalauth.ValidatorConfig{
+		Target:             "cluster-gateway",
+		PublicKey:          publicKey,
+		AllowedCallers:     []string{"netd"},
+		ClockSkewTolerance: 5 * time.Second,
+	})
+	netdAuth := middleware.NewInternalAuthMiddleware(netdValidator, zap.NewNop())
 
 	server := &Server{
-		router:          gin.New(),
-		cfg:             &config.ClusterGatewayConfig{AuthMode: authMode},
-		authMiddleware:  internalAuth,
-		publicAuth:      publicAuth,
-		compositeAuth:   middleware.NewCompositeAuthMiddleware(internalAuth, publicAuth, zap.NewNop()),
-		publicJWT:       issuer,
-		logger:          zap.NewNop(),
-		meteringHandler: gatewayhandlers.NewMeteringHandler(nil, "aws-us-east-1", zap.NewNop()),
+		router:               gin.New(),
+		cfg:                  &config.ClusterGatewayConfig{AuthMode: authMode},
+		authMiddleware:       internalAuth,
+		netdAuthMiddleware:   netdAuth,
+		publicAuth:           publicAuth,
+		compositeAuth:        middleware.NewCompositeAuthMiddleware(internalAuth, publicAuth, zap.NewNop()),
+		publicJWT:            issuer,
+		logger:               zap.NewNop(),
+		meteringHandler:      gatewayhandlers.NewMeteringHandler(nil, "aws-us-east-1", zap.NewNop()),
+		observabilityHandler: gatewayhandlers.NewSandboxObservabilityHandler(nil, zap.NewNop()),
 	}
 
 	return server, generator, issuer

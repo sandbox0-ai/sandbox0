@@ -4,8 +4,10 @@
 package apispec
 
 import (
+	"encoding/json"
 	"time"
 
+	"github.com/oapi-codegen/runtime"
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
@@ -223,6 +225,16 @@ const (
 	SandboxObservabilityOutcomeSucceeded SandboxObservabilityOutcome = "succeeded"
 )
 
+// Defines values for SandboxObservabilityWatchLineType.
+const (
+	SandboxObservabilityWatchLineTypeError        SandboxObservabilityWatchLineType = "error"
+	SandboxObservabilityWatchLineTypeEvent        SandboxObservabilityWatchLineType = "event"
+	SandboxObservabilityWatchLineTypeHeartbeat    SandboxObservabilityWatchLineType = "heartbeat"
+	SandboxObservabilityWatchLineTypeLog          SandboxObservabilityWatchLineType = "log"
+	SandboxObservabilityWatchLineTypeMetricSample SandboxObservabilityWatchLineType = "metric_sample"
+	SandboxObservabilityWatchLineTypeWatermark    SandboxObservabilityWatchLineType = "watermark"
+)
+
 // Defines values for SeccompProfileType.
 const (
 	SeccompProfileTypeLocalhost      SeccompProfileType = "Localhost"
@@ -258,11 +270,6 @@ const (
 // Defines values for SuccessContextResponseSuccess.
 const (
 	SuccessContextResponseSuccessTrue SuccessContextResponseSuccess = true
-)
-
-// Defines values for SuccessContextStatsResponseSuccess.
-const (
-	SuccessContextStatsResponseSuccessTrue SuccessContextStatsResponseSuccess = true
 )
 
 // Defines values for SuccessCreateAPIKeyResponseSuccess.
@@ -453,11 +460,6 @@ const (
 // Defines values for SuccessSandboxServicesResponseSuccess.
 const (
 	SuccessSandboxServicesResponseSuccessTrue SuccessSandboxServicesResponseSuccess = true
-)
-
-// Defines values for SuccessSandboxStatsResponseSuccess.
-const (
-	SuccessSandboxStatsResponseSuccessTrue SuccessSandboxStatsResponseSuccess = true
 )
 
 // Defines values for SuccessSandboxStatusResponseSuccess.
@@ -756,17 +758,6 @@ type ContextResponse struct {
 	// Stdout Captured stdout for non-PTY CMD contexts when available.
 	Stdout *string     `json:"stdout,omitempty"`
 	Type   ProcessType `json:"type"`
-}
-
-// ContextStatsResponse defines model for ContextStatsResponse.
-type ContextStatsResponse struct {
-	// Alias Alias for the REPL or CLI tool (e.g., python, node, bash, redis-cli)
-	Alias     *string        `json:"alias,omitempty"`
-	ContextId *string        `json:"context_id,omitempty"`
-	Paused    *bool          `json:"paused,omitempty"`
-	Running   *bool          `json:"running,omitempty"`
-	Type      *string        `json:"type,omitempty"`
-	Usage     *ResourceUsage `json:"usage,omitempty"`
 }
 
 // CreateAPIKeyRequest defines model for CreateAPIKeyRequest.
@@ -1896,6 +1887,31 @@ type SandboxObservabilityMetricsResponse struct {
 // SandboxObservabilityOutcome defines model for SandboxObservabilityOutcome.
 type SandboxObservabilityOutcome string
 
+// SandboxObservabilityWatchLine defines model for SandboxObservabilityWatchLine.
+type SandboxObservabilityWatchLine struct {
+	// Cursor Watch resume cursor. Present on watermark lines.
+	Cursor *string                             `json:"cursor,omitempty"`
+	Data   *SandboxObservabilityWatchLine_Data `json:"data,omitempty"`
+
+	// Error Stream error message.
+	Error *string `json:"error,omitempty"`
+
+	// Time Heartbeat timestamp.
+	Time *time.Time                        `json:"time,omitempty"`
+	Type SandboxObservabilityWatchLineType `json:"type"`
+
+	// Watermark Backend watermark for the emitted batch.
+	Watermark *string `json:"watermark,omitempty"`
+}
+
+// SandboxObservabilityWatchLine_Data defines model for SandboxObservabilityWatchLine.Data.
+type SandboxObservabilityWatchLine_Data struct {
+	union json.RawMessage
+}
+
+// SandboxObservabilityWatchLineType defines model for SandboxObservabilityWatchLine.Type.
+type SandboxObservabilityWatchLineType string
+
 // SandboxRefreshRequest defines model for SandboxRefreshRequest.
 type SandboxRefreshRequest struct {
 	// Duration Duration to extend TTL in seconds (optional, defaults to original TTL)
@@ -2187,15 +2203,6 @@ type SuccessContextResponse struct {
 
 // SuccessContextResponseSuccess defines model for SuccessContextResponse.Success.
 type SuccessContextResponseSuccess bool
-
-// SuccessContextStatsResponse defines model for SuccessContextStatsResponse.
-type SuccessContextStatsResponse struct {
-	Data    *ContextStatsResponse              `json:"data,omitempty"`
-	Success SuccessContextStatsResponseSuccess `json:"success"`
-}
-
-// SuccessContextStatsResponseSuccess defines model for SuccessContextStatsResponse.Success.
-type SuccessContextStatsResponseSuccess bool
 
 // SuccessCreateAPIKeyResponse defines model for SuccessCreateAPIKeyResponse.
 type SuccessCreateAPIKeyResponse struct {
@@ -2574,15 +2581,6 @@ type SuccessSandboxServicesResponse struct {
 
 // SuccessSandboxServicesResponseSuccess defines model for SuccessSandboxServicesResponse.Success.
 type SuccessSandboxServicesResponseSuccess bool
-
-// SuccessSandboxStatsResponse defines model for SuccessSandboxStatsResponse.
-type SuccessSandboxStatsResponse struct {
-	Data    *SandboxResourceUsage              `json:"data,omitempty"`
-	Success SuccessSandboxStatsResponseSuccess `json:"success"`
-}
-
-// SuccessSandboxStatsResponseSuccess defines model for SuccessSandboxStatsResponse.Success.
-type SuccessSandboxStatsResponseSuccess bool
 
 // SuccessSandboxStatusResponse defines model for SuccessSandboxStatusResponse.
 type SuccessSandboxStatusResponse struct {
@@ -3040,8 +3038,11 @@ type GetApiV1SandboxesIdAuditEventsParams struct {
 	// Limit Maximum number of events to return. Values above 1000 are capped.
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 
-	// Cursor Opaque pagination cursor returned by a previous response.
-	Cursor    *string                        `form:"cursor,omitempty" json:"cursor,omitempty"`
+	// Cursor Opaque pagination cursor returned by a previous response. When watch is true, this must be a watch resume cursor from an NDJSON watermark line.
+	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// Watch Stream matching records as application/x-ndjson in ingestion order until the client disconnects. When watch is true, end_time is not supported. Without cursor or start_time, streaming starts at request time.
+	Watch     *bool                          `form:"watch,omitempty" json:"watch,omitempty"`
 	Source    *ObservabilityEventSource      `form:"source,omitempty" json:"source,omitempty"`
 	EventType *SandboxObservabilityEventType `form:"event_type,omitempty" json:"event_type,omitempty"`
 	Outcome   *SandboxObservabilityOutcome   `form:"outcome,omitempty" json:"outcome,omitempty"`
@@ -3074,30 +3075,6 @@ type GetApiV1SandboxesIdFilesStatParams struct {
 	Path FilePath `form:"path" json:"path"`
 }
 
-// GetApiV1SandboxesIdLogsParams defines parameters for GetApiV1SandboxesIdLogs.
-type GetApiV1SandboxesIdLogsParams struct {
-	// Container Pod container name. Defaults to the sandbox main container.
-	Container *string `form:"container,omitempty" json:"container,omitempty"`
-
-	// TailLines Maximum number of Kubernetes log lines read from the end of the log before procd service log filtering.
-	TailLines *int64 `form:"tail_lines,omitempty" json:"tail_lines,omitempty"`
-
-	// LimitBytes Maximum response log payload bytes read from Kubernetes. Defaults only apply when follow is false.
-	LimitBytes *int64 `form:"limit_bytes,omitempty" json:"limit_bytes,omitempty"`
-
-	// Follow Stream logs as text/plain until the client disconnects. When false, return a text/plain snapshot.
-	Follow *bool `form:"follow,omitempty" json:"follow,omitempty"`
-
-	// Previous Return logs for the previously terminated container instance.
-	Previous *bool `form:"previous,omitempty" json:"previous,omitempty"`
-
-	// Timestamps Include Kubernetes log timestamps when available.
-	Timestamps *bool `form:"timestamps,omitempty" json:"timestamps,omitempty"`
-
-	// SinceSeconds Only return logs newer than this many seconds.
-	SinceSeconds *int64 `form:"since_seconds,omitempty" json:"since_seconds,omitempty"`
-}
-
 // GetApiV1SandboxesIdObservabilityEventsParams defines parameters for GetApiV1SandboxesIdObservabilityEvents.
 type GetApiV1SandboxesIdObservabilityEventsParams struct {
 	// StartTime Include events that occurred at or after this RFC3339 timestamp.
@@ -3109,8 +3086,11 @@ type GetApiV1SandboxesIdObservabilityEventsParams struct {
 	// Limit Maximum number of events to return. Values above 1000 are capped.
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 
-	// Cursor Opaque pagination cursor returned by a previous response.
-	Cursor    *string                        `form:"cursor,omitempty" json:"cursor,omitempty"`
+	// Cursor Opaque pagination cursor returned by a previous response. When watch is true, this must be a watch resume cursor from an NDJSON watermark line.
+	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// Watch Stream matching records as application/x-ndjson in ingestion order until the client disconnects. When watch is true, end_time is not supported. Without cursor or start_time, streaming starts at request time.
+	Watch     *bool                          `form:"watch,omitempty" json:"watch,omitempty"`
 	Source    *ObservabilityEventSource      `form:"source,omitempty" json:"source,omitempty"`
 	EventType *SandboxObservabilityEventType `form:"event_type,omitempty" json:"event_type,omitempty"`
 	Outcome   *SandboxObservabilityOutcome   `form:"outcome,omitempty" json:"outcome,omitempty"`
@@ -3127,8 +3107,11 @@ type GetApiV1SandboxesIdObservabilityLogsParams struct {
 	// Limit Maximum number of log entries to return. Values above 1000 are capped.
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 
-	// Cursor Opaque pagination cursor returned by a previous response.
+	// Cursor Opaque pagination cursor returned by a previous response. When watch is true, this must be a watch resume cursor from an NDJSON watermark line.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// Watch Stream matching records as application/x-ndjson in ingestion order until the client disconnects. When watch is true, end_time is not supported. Without cursor or start_time, streaming starts at request time.
+	Watch *bool `form:"watch,omitempty" json:"watch,omitempty"`
 
 	// ContextId Restrict results to a sandbox process context.
 	ContextId *string                        `form:"context_id,omitempty" json:"context_id,omitempty"`
@@ -3146,8 +3129,11 @@ type GetApiV1SandboxesIdObservabilityMetricsParams struct {
 	// Limit Maximum number of samples to return. Values above 1000 are capped.
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 
-	// Cursor Opaque pagination cursor returned by a previous response.
+	// Cursor Opaque pagination cursor returned by a previous response. When watch is true, this must be a watch resume cursor from an NDJSON watermark line.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// Watch Stream matching records as application/x-ndjson in ingestion order until the client disconnects. When watch is true, end_time is not supported. Without cursor or start_time, streaming starts at request time.
+	Watch *bool `form:"watch,omitempty" json:"watch,omitempty"`
 
 	// ContextId Restrict results to a sandbox process context.
 	ContextId *string `form:"context_id,omitempty" json:"context_id,omitempty"`
@@ -3333,3 +3319,91 @@ type PutUsersMeJSONRequestBody = UpdateUserRequest
 
 // PostUsersMeSshKeysJSONRequestBody defines body for PostUsersMeSshKeys for application/json ContentType.
 type PostUsersMeSshKeysJSONRequestBody = CreateSSHPublicKeyRequest
+
+// AsSandboxObservabilityEvent returns the union data inside the SandboxObservabilityWatchLine_Data as a SandboxObservabilityEvent
+func (t SandboxObservabilityWatchLine_Data) AsSandboxObservabilityEvent() (SandboxObservabilityEvent, error) {
+	var body SandboxObservabilityEvent
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSandboxObservabilityEvent overwrites any union data inside the SandboxObservabilityWatchLine_Data as the provided SandboxObservabilityEvent
+func (t *SandboxObservabilityWatchLine_Data) FromSandboxObservabilityEvent(v SandboxObservabilityEvent) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSandboxObservabilityEvent performs a merge with any union data inside the SandboxObservabilityWatchLine_Data, using the provided SandboxObservabilityEvent
+func (t *SandboxObservabilityWatchLine_Data) MergeSandboxObservabilityEvent(v SandboxObservabilityEvent) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSandboxObservabilityLogEntry returns the union data inside the SandboxObservabilityWatchLine_Data as a SandboxObservabilityLogEntry
+func (t SandboxObservabilityWatchLine_Data) AsSandboxObservabilityLogEntry() (SandboxObservabilityLogEntry, error) {
+	var body SandboxObservabilityLogEntry
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSandboxObservabilityLogEntry overwrites any union data inside the SandboxObservabilityWatchLine_Data as the provided SandboxObservabilityLogEntry
+func (t *SandboxObservabilityWatchLine_Data) FromSandboxObservabilityLogEntry(v SandboxObservabilityLogEntry) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSandboxObservabilityLogEntry performs a merge with any union data inside the SandboxObservabilityWatchLine_Data, using the provided SandboxObservabilityLogEntry
+func (t *SandboxObservabilityWatchLine_Data) MergeSandboxObservabilityLogEntry(v SandboxObservabilityLogEntry) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSandboxObservabilityMetricSample returns the union data inside the SandboxObservabilityWatchLine_Data as a SandboxObservabilityMetricSample
+func (t SandboxObservabilityWatchLine_Data) AsSandboxObservabilityMetricSample() (SandboxObservabilityMetricSample, error) {
+	var body SandboxObservabilityMetricSample
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSandboxObservabilityMetricSample overwrites any union data inside the SandboxObservabilityWatchLine_Data as the provided SandboxObservabilityMetricSample
+func (t *SandboxObservabilityWatchLine_Data) FromSandboxObservabilityMetricSample(v SandboxObservabilityMetricSample) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSandboxObservabilityMetricSample performs a merge with any union data inside the SandboxObservabilityWatchLine_Data, using the provided SandboxObservabilityMetricSample
+func (t *SandboxObservabilityWatchLine_Data) MergeSandboxObservabilityMetricSample(v SandboxObservabilityMetricSample) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t SandboxObservabilityWatchLine_Data) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *SandboxObservabilityWatchLine_Data) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}

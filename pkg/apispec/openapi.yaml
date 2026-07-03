@@ -1435,146 +1435,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-  /api/v1/sandboxes/{id}/logs:
-    get:
-      tags: [sandboxes]
-      summary: Get sandbox process logs
-      description: |
-        Returns sandbox process output mirrored through the sandbox main container.
-        Procd service logs are filtered out and remain available through Kubernetes pod logs.
-        When `follow=false`, the response is a bounded text/plain snapshot.
-        When `follow=true`, the response is a text/plain stream until the client disconnects.
-        Kubernetes log selection parameters such as `tail_lines` and `limit_bytes`
-        are applied before procd service log filtering.
-      security:
-        - bearerAuth: []
-      x-upstream-service: manager
-      x-upstream-path: /api/v1/sandboxes/{id}/logs
-      parameters:
-        - $ref: "#/components/parameters/SandboxID"
-        - name: container
-          in: query
-          description: Pod container name. Defaults to the sandbox main container.
-          schema:
-            type: string
-            default: procd
-        - name: tail_lines
-          in: query
-          description: Maximum number of Kubernetes log lines read from the end of the log before procd service log filtering.
-          schema:
-            type: integer
-            format: int64
-            default: 200
-            minimum: 1
-            maximum: 5000
-        - name: limit_bytes
-          in: query
-          description: Maximum response log payload bytes read from Kubernetes. Defaults only apply when follow is false.
-          schema:
-            type: integer
-            format: int64
-            default: 1048576
-            minimum: 1
-            maximum: 8388608
-        - name: follow
-          in: query
-          description: Stream logs as text/plain until the client disconnects. When false, return a text/plain snapshot.
-          schema:
-            type: boolean
-            default: false
-        - name: previous
-          in: query
-          description: Return logs for the previously terminated container instance.
-          schema:
-            type: boolean
-            default: false
-        - name: timestamps
-          in: query
-          description: Include Kubernetes log timestamps when available.
-          schema:
-            type: boolean
-            default: false
-        - name: since_seconds
-          in: query
-          description: Only return logs newer than this many seconds.
-          schema:
-            type: integer
-            format: int64
-            minimum: 1
-      responses:
-        "200":
-          description: Sandbox process logs
-          headers:
-            X-Sandbox-ID:
-              description: Sandbox ID for the returned log payload.
-              schema:
-                type: string
-            X-Sandbox-Pod-Name:
-              description: Kubernetes pod name that produced the returned log payload.
-              schema:
-                type: string
-            X-Sandbox-Log-Container:
-              description: Kubernetes container name that produced the returned log payload.
-              schema:
-                type: string
-            X-Sandbox-Log-Previous:
-              description: Whether the returned payload came from a previously terminated container instance.
-              schema:
-                type: boolean
-          content:
-            text/plain:
-              schema:
-                type: string
-        "400":
-          description: Invalid log query parameters
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
-        "403":
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
-        "404":
-          description: Not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
-  /api/v1/sandboxes/{id}/stats:
-    get:
-      tags: [sandboxes]
-      summary: Get live sandbox stats
-      description: |
-        Returns live, best-effort resource stats from the sandbox runtime.
-        This endpoint is for live debugging and does not query historical observability storage.
-      security:
-        - bearerAuth: []
-      x-upstream-service: manager
-      x-upstream-path: /api/v1/sandboxes/{id}/stats
-      parameters:
-        - $ref: "#/components/parameters/SandboxID"
-      responses:
-        "200":
-          description: Live sandbox resource stats
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SuccessSandboxStatsResponse"
-        "403":
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
-        "404":
-          description: Not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
   /api/v1/sandboxes/{id}/observability/events:
     get:
       tags: [observability]
@@ -1610,9 +1470,15 @@ paths:
             maximum: 1000
         - name: cursor
           in: query
-          description: Opaque pagination cursor returned by a previous response.
+          description: Opaque pagination cursor returned by a previous response. When watch is true, this must be a watch resume cursor from an NDJSON watermark line.
           schema:
             type: string
+        - name: watch
+          in: query
+          description: Stream matching records as application/x-ndjson in ingestion order until the client disconnects. When watch is true, end_time is not supported. Without cursor or start_time, streaming starts at request time.
+          schema:
+            type: boolean
+            default: false
         - name: source
           in: query
           schema:
@@ -1632,6 +1498,9 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessSandboxObservabilityEventsResponse"
+            application/x-ndjson:
+              schema:
+                $ref: "#/components/schemas/SandboxObservabilityWatchLine"
         "400":
           description: Invalid query parameters
           content:
@@ -1684,9 +1553,15 @@ paths:
             maximum: 1000
         - name: cursor
           in: query
-          description: Opaque pagination cursor returned by a previous response.
+          description: Opaque pagination cursor returned by a previous response. When watch is true, this must be a watch resume cursor from an NDJSON watermark line.
           schema:
             type: string
+        - name: watch
+          in: query
+          description: Stream matching records as application/x-ndjson in ingestion order until the client disconnects. When watch is true, end_time is not supported. Without cursor or start_time, streaming starts at request time.
+          schema:
+            type: boolean
+            default: false
         - name: context_id
           in: query
           description: Restrict results to a sandbox process context.
@@ -1703,6 +1578,9 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessSandboxObservabilityLogsResponse"
+            application/x-ndjson:
+              schema:
+                $ref: "#/components/schemas/SandboxObservabilityWatchLine"
         "400":
           description: Invalid query parameters
           content:
@@ -1755,9 +1633,15 @@ paths:
             maximum: 1000
         - name: cursor
           in: query
-          description: Opaque pagination cursor returned by a previous response.
+          description: Opaque pagination cursor returned by a previous response. When watch is true, this must be a watch resume cursor from an NDJSON watermark line.
           schema:
             type: string
+        - name: watch
+          in: query
+          description: Stream matching records as application/x-ndjson in ingestion order until the client disconnects. When watch is true, end_time is not supported. Without cursor or start_time, streaming starts at request time.
+          schema:
+            type: boolean
+            default: false
         - name: context_id
           in: query
           description: Restrict results to a sandbox process context.
@@ -1784,6 +1668,9 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessSandboxObservabilityMetricsResponse"
+            application/x-ndjson:
+              schema:
+                $ref: "#/components/schemas/SandboxObservabilityWatchLine"
         "400":
           description: Invalid query parameters
           content:
@@ -1836,9 +1723,15 @@ paths:
             maximum: 1000
         - name: cursor
           in: query
-          description: Opaque pagination cursor returned by a previous response.
+          description: Opaque pagination cursor returned by a previous response. When watch is true, this must be a watch resume cursor from an NDJSON watermark line.
           schema:
             type: string
+        - name: watch
+          in: query
+          description: Stream matching records as application/x-ndjson in ingestion order until the client disconnects. When watch is true, end_time is not supported. Without cursor or start_time, streaming starts at request time.
+          schema:
+            type: boolean
+            default: false
         - name: source
           in: query
           schema:
@@ -1858,6 +1751,9 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessSandboxObservabilityEventsResponse"
+            application/x-ndjson:
+              schema:
+                $ref: "#/components/schemas/SandboxObservabilityWatchLine"
         "400":
           description: Invalid query parameters
           content:
@@ -2453,24 +2349,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessSignaledResponse"
-  /api/v1/sandboxes/{id}/contexts/{ctx_id}/stats:
-    get:
-      tags: [contexts]
-      summary: Get context stats
-      security:
-        - bearerAuth: []
-      x-upstream-service: procd
-      x-upstream-path: /api/v1/contexts/{ctx_id}/stats
-      parameters:
-        - $ref: "#/components/parameters/SandboxID"
-        - $ref: "#/components/parameters/ContextID"
-      responses:
-        "200":
-          description: Context stats
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SuccessContextStatsResponse"
   /api/v1/sandboxes/{id}/contexts/{ctx_id}/ws:
     get:
       tags: [contexts]
@@ -5091,13 +4969,6 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ContextResourceUsage"
-    SuccessSandboxStatsResponse:
-      allOf:
-        - $ref: "#/components/schemas/SuccessEnvelope"
-        - type: object
-          properties:
-            data:
-              $ref: "#/components/schemas/SandboxResourceUsage"
     ObservabilityEventSource:
       type: string
       enum: [manager, netd, procd]
@@ -5267,6 +5138,31 @@ components:
         watermark:
           type: string
       required: [samples]
+    SandboxObservabilityWatchLine:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [event, log, metric_sample, watermark, heartbeat, error]
+        data:
+          oneOf:
+            - $ref: "#/components/schemas/SandboxObservabilityEvent"
+            - $ref: "#/components/schemas/SandboxObservabilityLogEntry"
+            - $ref: "#/components/schemas/SandboxObservabilityMetricSample"
+        cursor:
+          type: string
+          description: Watch resume cursor. Present on watermark lines.
+        watermark:
+          type: string
+          description: Backend watermark for the emitted batch.
+        time:
+          type: string
+          format: date-time
+          description: Heartbeat timestamp.
+        error:
+          type: string
+          description: Stream error message.
+      required: [type]
     SuccessSandboxObservabilityEventsResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
@@ -5513,22 +5409,6 @@ components:
           type: string
           description: Final process state when the underlying process has exited.
       required: [id, type, running, paused, created_at]
-    ContextStatsResponse:
-      type: object
-      properties:
-        context_id:
-          type: string
-        type:
-          type: string
-        alias:
-          type: string
-          description: Alias for the REPL or CLI tool (e.g., python, node, bash, redis-cli)
-        running:
-          type: boolean
-        paused:
-          type: boolean
-        usage:
-          $ref: "#/components/schemas/ResourceUsage"
     ContextInputRequest:
       type: object
       properties:
@@ -5591,13 +5471,6 @@ components:
                   type: array
                   items:
                     $ref: "#/components/schemas/ContextResponse"
-    SuccessContextStatsResponse:
-      allOf:
-        - $ref: "#/components/schemas/SuccessEnvelope"
-        - type: object
-          properties:
-            data:
-              $ref: "#/components/schemas/ContextStatsResponse"
     SuccessContextExecResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"

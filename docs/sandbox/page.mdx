@@ -284,83 +284,9 @@ console.log('Status:', status.status);`
 
 ---
 
-## Get Sandbox Logs
+## Observability and Audit
 
-Read sandbox process output. Procd service logs are filtered out of this API and remain available from Kubernetes pod logs. Snapshot and streaming requests return `text/plain`.
-
-<Endpoint method="GET">
-/api/v1/sandboxes/{'{id}'}/logs
-</Endpoint>
-
-### Query Parameters
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `container` | string | Pod container name (default: `procd`) |
-| `tail_lines` | integer | Number of Kubernetes log lines read from the end of the log before procd service log filtering (default: 200, max: 5000) |
-| `limit_bytes` | integer | Maximum Kubernetes log bytes read before procd service log filtering (default: 1048576 for snapshot responses, max: 8388608) |
-| `follow` | boolean | Stream logs as `text/plain` until the client disconnects |
-| `previous` | boolean | Return logs from the previously terminated container instance |
-| `timestamps` | boolean | Include Kubernetes log timestamps when available |
-| `since_seconds` | integer | Return logs newer than this many seconds |
-
-<Tabs
-  tabs={[
-    {
-      label: "Go",
-      language: "go",
-      code: `tailLines := int64(200)
-logs, err := sandbox.GetLogs(ctx, &sandbox0.SandboxLogsOptions{
-    TailLines: &tailLines,
-})
-if err != nil {
-    log.Fatal(err)
-}
-fmt.Print(logs.Logs)`
-    },
-    {
-      label: "Python",
-      language: "python",
-      code: `from sandbox0.sandbox_logs import SandboxLogsOptions
-
-logs = sandbox.get_logs(SandboxLogsOptions(tail_lines=200))
-print(logs.logs, end="")`
-    },
-    {
-      label: "TypeScript",
-      language: "typescript",
-      code: `const logs = await sandbox.getLogs({ tailLines: 200 });
-process.stdout.write(logs.logs);`
-    },
-    {
-      label: "CLI",
-      language: "bash",
-      code: `s0 sandbox logs sb_abc123 --tail 200`
-    }
-  ]}
-/>
-
-<Callout variant="info">
-For live streaming, use `sandbox.StreamLogs(...)`, `sandbox.stream_logs(...)`, `sandbox.streamLogs(...)`, or `s0 sandbox logs --follow`.
-</Callout>
-
----
-
-## Live Stats
-
-Get live, best-effort resource usage for a sandbox. This API calls the sandbox runtime and is intended for live debugging, not historical analysis.
-
-<Endpoint method="GET">
-/api/v1/sandboxes/{'{id}'}/stats
-</Endpoint>
-
-The response includes aggregate container and context resource usage. For per-context stats, use `/api/v1/sandboxes/{'{id}'}/contexts/{'{ctx_id}'}/stats`.
-
----
-
-## Historical Observability and Audit
-
-Historical sandbox observability is separate from live logs and live stats. The query API reads an asynchronous per-sandbox projection that can be backed by ClickHouse or another query store. When no historical backend is configured, these endpoints return `503 unavailable`. When the backend is configured but cannot be queried, the same endpoints return `503 unavailable` with a backend-unavailable error.
+Sandbox logs, metrics, lifecycle events, and audit events are exposed through one per-sandbox observability API. The query API reads an asynchronous per-sandbox projection that can be backed by ClickHouse or another query store. When no backend is configured, these endpoints return `503 unavailable`. When the backend is configured but cannot be queried, the same endpoints return `503 unavailable` with a backend-unavailable error.
 
 <Endpoint method="GET">
 /api/v1/sandboxes/{'{id}'}/observability/events
@@ -385,7 +311,8 @@ Historical sandbox observability is separate from live logs and live stats. The 
 | `start_time` | RFC3339 timestamp | Include events that occurred at or after this time |
 | `end_time` | RFC3339 timestamp | Include events that occurred at or before this time |
 | `limit` | integer | Maximum events to return (default: 100, max: 1000) |
-| `cursor` | string | Opaque cursor from a previous response |
+| `cursor` | string | Opaque cursor from a previous response; in watch mode, use the cursor from a `watermark` line |
+| `watch` | boolean | Stream matching records as `application/x-ndjson` until the client disconnects |
 | `context_id` | string | Log and metric context filter |
 | `stream` | string | Log stream filter: `stdout`, `stderr`, or `pty` |
 | `name` | string | Metric name filter; may be repeated |
@@ -396,7 +323,9 @@ Historical sandbox observability is separate from live logs and live stats. The 
 
 Every returned event, log entry, and metric sample includes `team_id`, `sandbox_id`, `region_id`, `cluster_id`, `occurred_at`, `ingested_at`, and `cursor`. Event rows also include `source`, `event_type`, and `watermark`; log rows include `stream` and `message`; metric rows include `name` and `value`. The response cursor is opaque and separate from each producer cursor.
 
-ClickHouse-backed deployments store events, logs, and metric samples in asynchronous per-sandbox projection tables with independent retention TTLs. Netd network audit events arrive through an asynchronous internal ingest sink when enabled by the deployment. Runtime stats history is not sampled by default unless a sandbox metric producer publishes samples to the historical ingest pipeline.
+Set `watch=true` to stream matching records as NDJSON in ingestion order. Without `cursor` or `start_time`, a watch stream starts at request time and does not replay historical rows. When `watch=true`, `end_time` is not supported. A watch stream emits record lines (`event`, `log`, or `metric_sample`), `watermark` lines with a resume cursor, periodic `heartbeat` lines, and an `error` line before termination if the backend fails after the stream starts.
+
+ClickHouse-backed deployments store events, logs, and metric samples in asynchronous per-sandbox projection tables with independent retention TTLs. Netd network audit events arrive through an asynchronous internal ingest sink when enabled by the deployment. Runtime stats samples are published by the sandbox runtime metric producer.
 
 Query endpoints return `503` when the backend is disabled or unavailable.
 

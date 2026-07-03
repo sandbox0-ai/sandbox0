@@ -152,15 +152,6 @@ func (s *Server) contextSignal(c *gin.Context) {
 	s.proxyToSandboxProcdPath(c, sandboxID, "/api/v1/contexts/"+ctxID+"/signal")
 }
 
-// contextStats gets stats for a context
-func (s *Server) contextStats(c *gin.Context) {
-	sandboxID, ctxID, ok := requireSandboxContextIDs(c)
-	if !ok {
-		return
-	}
-	s.proxyToSandboxProcdPath(c, sandboxID, "/api/v1/contexts/"+ctxID+"/stats")
-}
-
 // contextWebSocket handles WebSocket connections for context
 func (s *Server) contextWebSocket(c *gin.Context) {
 	sandboxID := c.Param("id")

@@ -163,6 +163,44 @@ func TestAuditListSQLExcludesRuntimeStats(t *testing.T) {
 	}
 }
 
+func TestBuildWatchEventsSQLUsesIngestionOrderCursor(t *testing.T) {
+	repo, _ := mustRepository(t)
+	start := time.Date(2026, 7, 1, 1, 0, 0, 0, time.UTC)
+	after := time.Date(2026, 7, 1, 1, 30, 1, 0, time.UTC)
+	query, limit, cursor, err := normalizeWatchEventQuery(sandboxobservability.EventQuery{
+		TeamID:    "team-1",
+		SandboxID: "sb-1",
+		StartTime: &start,
+		Limit:     10,
+		Source:    sandboxobservability.SourceNetd,
+		EventType: sandboxobservability.EventTypeNetworkAudit,
+	}, sandboxobservability.WatchOptions{
+		AfterIngestedAt: &after,
+	})
+	if err != nil {
+		t.Fatalf("normalizeWatchEventQuery() error = %v", err)
+	}
+
+	sqlQuery, args := repo.buildWatchEventsSQL(query, limit, cursor)
+	for _, want := range []string{
+		"occurred_at >= ?",
+		"source = ?",
+		"event_type = ?",
+		"(ingested_at, source, event_type, cursor) > (?, ?, ?, ?)",
+		"ORDER BY ingested_at ASC, source ASC, event_type ASC, cursor ASC LIMIT 10",
+	} {
+		if !strings.Contains(sqlQuery, want) {
+			t.Fatalf("query missing %q:\n%s", want, sqlQuery)
+		}
+	}
+	if strings.Contains(sqlQuery, "ORDER BY occurred_at") {
+		t.Fatalf("watch query must not order by occurred_at:\n%s", sqlQuery)
+	}
+	if got, ok := args[len(args)-4].(time.Time); !ok || !got.Equal(after) {
+		t.Fatalf("tail ingested_at arg = %#v, want %s", args[len(args)-4], after)
+	}
+}
+
 func TestNormalizeQueryCapsLimitAndRejectsInvalidCursor(t *testing.T) {
 	query, limit, _, err := normalizeQuery(sandboxobservability.EventQuery{
 		TeamID:    "team-1",

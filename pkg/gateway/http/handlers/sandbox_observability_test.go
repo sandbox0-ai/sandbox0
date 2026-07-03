@@ -297,6 +297,32 @@ func TestSandboxObservabilityHandlerRejectsInvalidQuery(t *testing.T) {
 	}
 }
 
+func TestSandboxObservabilityHandlerWatchDisabledBackend(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	handler := NewSandboxObservabilityHandler(nil, zap.NewNop())
+	rec := serveSandboxObservabilityRequest(t, handler.ListLogs, "/api/v1/sandboxes/sb-1/observability/logs?watch=true")
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestSandboxObservabilityHandlerWatchRejectsEndTime(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	repo := &fakeSandboxObservabilityRepo{}
+	handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
+	rec := serveSandboxObservabilityRequest(t, handler.ListEvents, "/api/v1/sandboxes/sb-1/observability/events?watch=true&end_time=2026-07-01T01:02:03Z")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	if repo.eventsCalled {
+		t.Fatal("repository should not be called for invalid watch query")
+	}
+}
+
 func TestSandboxObservabilityHandlerMapsRepositoryError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

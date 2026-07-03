@@ -410,8 +410,6 @@ func (s *Server) setupRoutes() {
 			sandboxes.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxCreate), s.createSandbox)
 			sandboxes.GET("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.getSandbox)
 			sandboxes.GET("/:id/status", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.getSandboxStatus)
-			sandboxes.GET("/:id/logs", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.getSandboxLogs)
-			sandboxes.GET("/:id/stats", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.getSandboxStats)
 			sandboxes.PUT("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.updateSandbox)
 			sandboxes.DELETE("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxDelete), s.deleteSandbox)
 			sandboxes.POST("/:id/pause", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.pauseSandbox)
@@ -534,7 +532,6 @@ func (s *Server) registerSandboxProcdRoutes(sandboxes *gin.RouterGroup) {
 		contexts.POST("/:ctx_id/exec", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.contextExec)
 		contexts.POST("/:ctx_id/resize", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.contextResize)
 		contexts.POST("/:ctx_id/signal", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.contextSignal)
-		contexts.GET("/:ctx_id/stats", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.contextStats)
 		contexts.GET("/:ctx_id/ws", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.contextWebSocket)
 	}
 

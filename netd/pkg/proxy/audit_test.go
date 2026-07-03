@@ -2,14 +2,20 @@ package proxy
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 )
 
 type nopWriteCloser struct {
@@ -116,5 +122,92 @@ func TestAuditLoggerRecordIncludesEgressAuthFields(t *testing.T) {
 	}
 	if event.AuthEnforcement != "cache_hit" || event.AuthRef != "example-api" || event.AuthRuleName != "example-https" {
 		t.Fatalf("unexpected auth enforcement fields: %+v", event)
+	}
+}
+
+func TestHTTPAuditSinkPostsObservabilityEvents(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	generator := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller:     "netd",
+		PrivateKey: privateKey,
+		TTL:        time.Second,
+	})
+
+	received := make(chan []sandboxobservability.Event, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(internalauth.DefaultTokenHeader) == "" {
+			t.Error("missing internal token header")
+		}
+		var req struct {
+			Events []sandboxobservability.Event `json:"events"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		received <- req.Events
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	sink := newHTTPAuditSink(httpAuditSinkOptions{
+		Endpoint:       server.URL,
+		RegionID:       "aws-us-east-1",
+		ClusterID:      "cluster-a",
+		Generator:      generator,
+		QueueSize:      2,
+		BatchSize:      1,
+		FlushInterval:  time.Hour,
+		RequestTimeout: time.Second,
+		MaxRetries:     0,
+		RetryBackoff:   time.Millisecond,
+	})
+	defer sink.Close()
+
+	err = sink.WriteAuditEvent(auditEvent{
+		Timestamp:   time.Date(2026, 7, 1, 1, 2, 3, 0, time.UTC),
+		FlowID:      "tcp-1",
+		TeamID:      "team-1",
+		SandboxID:   "sb-1",
+		DestIP:      "8.8.8.8",
+		DestPort:    443,
+		Transport:   "tcp",
+		Protocol:    "tls",
+		Host:        "example.com",
+		Action:      "use-adapter",
+		Reason:      "allowed",
+		Outcome:     "completed",
+		EgressBytes: 128,
+	})
+	if err != nil {
+		t.Fatalf("WriteAuditEvent() error = %v", err)
+	}
+
+	select {
+	case events := <-received:
+		if len(events) != 1 {
+			t.Fatalf("events = %d, want 1", len(events))
+		}
+		event := events[0]
+		if event.TeamID != "team-1" ||
+			event.SandboxID != "sb-1" ||
+			event.RegionID != "aws-us-east-1" ||
+			event.ClusterID != "cluster-a" ||
+			event.Source != sandboxobservability.SourceNetd ||
+			event.EventType != sandboxobservability.EventTypeNetworkAudit ||
+			event.Outcome != sandboxobservability.OutcomeCompleted ||
+			event.Cursor != "netd:tcp-1:1782867723000000000" ||
+			event.Watermark != event.Cursor {
+			t.Fatalf("projected event = %+v", event)
+		}
+		if event.Attributes["host"] != "example.com" || event.Attributes["egress_bytes"].(float64) != 128 {
+			t.Fatalf("attributes = %#v", event.Attributes)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for ingest request")
 	}
 }

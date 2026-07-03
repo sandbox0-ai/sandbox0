@@ -270,6 +270,56 @@ func TestReconcileUsesCompiledPlanForEgressAuthResolverURL(t *testing.T) {
 	}
 }
 
+func TestReconcileInjectsSandboxObservabilityIngestURL(t *testing.T) {
+	infra := newNetdTestInfra()
+	infra.Spec.Services.ClusterGateway = &infrav1alpha1.ClusterGatewayServiceConfig{
+		WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+			EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+		},
+	}
+	infra.Spec.SandboxObservability = &infrav1alpha1.SandboxObservabilityConfig{
+		Type: infrav1alpha1.SandboxObservabilityTypeExternal,
+		External: &infrav1alpha1.ExternalSandboxObservabilityConfig{
+			ClickHouse: infrav1alpha1.ExternalSandboxObservabilityClickHouseConfig{
+				DSNSecret: infrav1alpha1.SandboxObservabilityClickHouseDSNSecretRef{
+					Name: "clickhouse-dsn",
+					Key:  "dsn",
+				},
+			},
+		},
+		Ingest: infrav1alpha1.SandboxObservabilityIngestConfig{
+			QueueSize: 2048,
+		},
+	}
+
+	client, scheme := newNetdTestClient(t,
+		infra.DeepCopy(),
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "clickhouse-dsn",
+				Namespace: infra.Namespace,
+			},
+			Data: map[string][]byte{
+				"dsn": []byte("clickhouse://secret@clickhouse:9000/default"),
+			},
+		},
+	)
+	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
+	compiled := infraplan.Compile(infra)
+	if err := reconciler.Reconcile(context.Background(), "ghcr.io/sandbox0-ai/sandbox0", "latest", compiled); err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	cfg := getReconciledNetdConfig(t, client, infra)
+	want := compiled.Services.ClusterGateway.URL + "/internal/v1/sandbox-observability/events"
+	if cfg.SandboxObservabilityIngestURL != want {
+		t.Fatalf("sandbox observability ingest url = %q, want %q", cfg.SandboxObservabilityIngestURL, want)
+	}
+	if cfg.SandboxObservabilityIngestQueueSize != 2048 {
+		t.Fatalf("sandbox observability ingest queue size = %d, want 2048", cfg.SandboxObservabilityIngestQueueSize)
+	}
+}
+
 func TestReconcileInjectsRedisConfigForTeamBandwidth(t *testing.T) {
 	failOpen := true
 	infra := newNetdTestInfra()

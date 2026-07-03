@@ -13,8 +13,10 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	sandboxobssvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sandboxobservability"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 )
 
@@ -332,6 +334,73 @@ func newClusterGatewayTestReconciler(t *testing.T, objects ...runtime.Object) (*
 		Build()
 
 	return NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{})), client
+}
+
+func TestApplySandboxObservabilityConfigUsesTopLevelExternalSecret(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			SandboxObservability: &infrav1alpha1.SandboxObservabilityConfig{
+				Type: infrav1alpha1.SandboxObservabilityTypeExternal,
+				External: &infrav1alpha1.ExternalSandboxObservabilityConfig{
+					ClickHouse: infrav1alpha1.ExternalSandboxObservabilityClickHouseConfig{
+						DSNSecret: infrav1alpha1.SandboxObservabilityClickHouseDSNSecretRef{
+							Name: "clickhouse-dsn",
+							Key:  "dsn",
+						},
+						Database:     "sandbox0_obs",
+						EventsTable:  "events_v1",
+						LogsTable:    "logs_v1",
+						MetricsTable: "metrics_v1",
+					},
+				},
+				Retention: infrav1alpha1.SandboxObservabilityRetentionConfig{
+					AuditDays:  14,
+					LogDays:    3,
+					MetricDays: 30,
+				},
+			},
+		},
+	}
+	_, client := newClusterGatewayTestReconciler(t,
+		infra,
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "clickhouse-dsn",
+				Namespace: infra.Namespace,
+			},
+			Data: map[string][]byte{
+				"dsn": []byte("clickhouse://secret@clickhouse:9000/default"),
+			},
+		},
+	)
+	cfg := &apiconfig.ClusterGatewayConfig{
+		SandboxObservability: apiconfig.SandboxObservabilityConfig{
+			ClickHouse: apiconfig.SandboxObservabilityClickHouseConfig{
+				DSN: "clickhouse://inline@clickhouse:9000/default",
+			},
+		},
+	}
+
+	if err := sandboxobssvc.ApplyClusterGatewayConfig(context.Background(), client, infra, cfg); err != nil {
+		t.Fatalf("ApplyClusterGatewayConfig() error = %v", err)
+	}
+	if cfg.SandboxObservability.ClickHouse.DSN != "clickhouse://secret@clickhouse:9000/default" {
+		t.Fatalf("dsn = %q, want secret value", cfg.SandboxObservability.ClickHouse.DSN)
+	}
+	if cfg.SandboxObservability.Backend != apiconfig.SandboxObservabilityBackendClickHouse ||
+		cfg.SandboxObservability.ClickHouse.Database != "sandbox0_obs" ||
+		cfg.SandboxObservability.ClickHouse.EventsTable != "events_v1" ||
+		cfg.SandboxObservability.ClickHouse.LogsTable != "logs_v1" ||
+		cfg.SandboxObservability.ClickHouse.MetricsTable != "metrics_v1" ||
+		cfg.SandboxObservability.ClickHouse.RetentionDays != 14 ||
+		cfg.SandboxObservability.ClickHouse.LogsRetentionDays != 3 ||
+		cfg.SandboxObservability.ClickHouse.MetricsRetentionDays != 30 {
+		t.Fatalf("sandbox observability config = %+v", cfg.SandboxObservability)
+	}
 }
 
 func configMapNameForVolume(t *testing.T, volumes []corev1.Volume, name string) string {

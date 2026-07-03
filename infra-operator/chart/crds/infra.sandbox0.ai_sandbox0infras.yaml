@@ -2401,6 +2401,205 @@ spec:
                       type: object
                     type: array
                 type: object
+              sandboxObservability:
+                default:
+                  type: disabled
+                description: |-
+                  SandboxObservability configures the region-local historical per-sandbox
+                  observability backend and collection pipelines.
+                properties:
+                  builtin:
+                    description: Builtin configures the operator-managed ClickHouse
+                      backend.
+                    properties:
+                      clickHouse:
+                        default: {}
+                        description: ClickHouse configures the operator-managed ClickHouse
+                          instance.
+                        properties:
+                          database:
+                            default: sandbox0_observability
+                            type: string
+                          eventsTable:
+                            default: sandbox_events
+                            type: string
+                          httpPort:
+                            default: 8123
+                            description: HTTPPort is the ClickHouse HTTP port.
+                            format: int32
+                            type: integer
+                            x-kubernetes-validations:
+                            - message: httpPort is immutable after creation
+                              rule: self == oldSelf
+                          image:
+                            default: clickhouse/clickhouse-server:24.8
+                            description: Image is the ClickHouse server image.
+                            type: string
+                          logsTable:
+                            default: sandbox_logs
+                            type: string
+                          metricsTable:
+                            default: sandbox_metric_samples
+                            type: string
+                          nativePort:
+                            default: 9000
+                            description: NativePort is the ClickHouse native TCP port.
+                            format: int32
+                            type: integer
+                            x-kubernetes-validations:
+                            - message: nativePort is immutable after creation
+                              rule: self == oldSelf
+                          persistence:
+                            description: Persistence configures ClickHouse storage.
+                            properties:
+                              size:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                default: 20Gi
+                                description: Size specifies the storage size
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              storageClass:
+                                description: StorageClass specifies the storage class
+                                  (empty for default)
+                                type: string
+                            type: object
+                            x-kubernetes-validations:
+                            - message: persistence is immutable after creation
+                              rule: self == oldSelf
+                          statefulResourcePolicy:
+                            default: Retain
+                            description: |-
+                              StatefulResourcePolicy controls what happens to the builtin PVC and
+                              generated credentials secret when the builtin backend is disabled or
+                              replaced by an external backend.
+                            enum:
+                            - Retain
+                            - Delete
+                            type: string
+                        type: object
+                      enabled:
+                        default: true
+                        description: Enabled enables the built-in backend when type
+                          is builtin.
+                        type: boolean
+                    type: object
+                    x-kubernetes-validations:
+                    - message: clickHouse persistence presence is immutable after
+                        creation
+                      rule: has(self.clickHouse.persistence) == has(oldSelf.clickHouse.persistence)
+                  external:
+                    description: External configures a user-owned ClickHouse backend.
+                    properties:
+                      clickHouse:
+                        description: ClickHouse configures the external query backend.
+                        properties:
+                          connectTimeout:
+                            default: 10s
+                            type: string
+                          database:
+                            default: sandbox0_observability
+                            type: string
+                          dsnSecret:
+                            description: DSNSecret references a secret key containing
+                              the ClickHouse database/sql DSN.
+                            properties:
+                              key:
+                                default: dsn
+                                description: Key is the key in the secret.
+                                type: string
+                              name:
+                                description: Name is the name of the secret.
+                                type: string
+                            type: object
+                          eventsTable:
+                            default: sandbox_events
+                            type: string
+                          logsTable:
+                            default: sandbox_logs
+                            type: string
+                          metricsTable:
+                            default: sandbox_metric_samples
+                            type: string
+                          skipSchemaMigration:
+                            description: SkipSchemaMigration disables cluster-gateway
+                              ClickHouse CREATE/ALTER TABLE statements.
+                            type: boolean
+                        required:
+                        - dsnSecret
+                        type: object
+                    required:
+                    - clickHouse
+                    type: object
+                  ingest:
+                    default: {}
+                    description: Ingest configures bounded async producer-to-gateway
+                      ingestion.
+                    properties:
+                      batchSize:
+                        default: 100
+                        description: BatchSize controls producer POST batch size.
+                        type: integer
+                      flushInterval:
+                        default: 1s
+                        description: FlushInterval controls producer batch flush cadence.
+                        type: string
+                      maxRetries:
+                        default: 3
+                        description: MaxRetries controls producer retry attempts before
+                          dropping a batch.
+                        type: integer
+                      queueSize:
+                        default: 1024
+                        description: QueueSize bounds each producer queue.
+                        type: integer
+                      requestTimeout:
+                        default: 2s
+                        description: RequestTimeout bounds producer POST requests.
+                        type: string
+                      retryBackoff:
+                        default: 100ms
+                        description: RetryBackoff controls producer retry delay.
+                        type: string
+                    type: object
+                  retention:
+                    default: {}
+                    description: Retention configures TTLs for the per-sandbox read
+                      model.
+                    properties:
+                      auditDays:
+                        default: 90
+                        description: AuditDays controls retention for audit and lifecycle
+                          events.
+                        type: integer
+                      logDays:
+                        default: 7
+                        description: LogDays controls retention for sandbox process
+                          logs.
+                        type: integer
+                      metricDays:
+                        default: 30
+                        description: MetricDays controls retention for sandbox metric
+                          samples.
+                        type: integer
+                    type: object
+                  type:
+                    allOf:
+                    - enum:
+                      - disabled
+                      - builtin
+                      - external
+                    - enum:
+                      - disabled
+                      - builtin
+                      - external
+                    default: disabled
+                    description: |-
+                      Type selects the historical query backend mode. Defaults to disabled so
+                      ClickHouse is installed only when explicitly requested.
+                    type: string
+                type: object
               services:
                 default: {}
                 description: Services configures individual services

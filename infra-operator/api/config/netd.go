@@ -175,6 +175,26 @@ type NetdConfig struct {
 	// +kubebuilder:default=5
 	AuditLogMaxBackups int `yaml:"audit_log_max_backups" json:"auditLogMaxBackups"`
 	// +optional
+	SandboxObservabilityIngestURL string `yaml:"sandbox_observability_ingest_url" json:"sandboxObservabilityIngestUrl"`
+	// +optional
+	// +kubebuilder:default=1024
+	SandboxObservabilityIngestQueueSize int `yaml:"sandbox_observability_ingest_queue_size" json:"sandboxObservabilityIngestQueueSize"`
+	// +optional
+	// +kubebuilder:default=100
+	SandboxObservabilityIngestBatchSize int `yaml:"sandbox_observability_ingest_batch_size" json:"sandboxObservabilityIngestBatchSize"`
+	// +optional
+	// +kubebuilder:default="1s"
+	SandboxObservabilityIngestFlushInterval metav1.Duration `yaml:"sandbox_observability_ingest_flush_interval" json:"sandboxObservabilityIngestFlushInterval"`
+	// +optional
+	// +kubebuilder:default="2s"
+	SandboxObservabilityIngestRequestTimeout metav1.Duration `yaml:"sandbox_observability_ingest_request_timeout" json:"sandboxObservabilityIngestRequestTimeout"`
+	// +optional
+	// +kubebuilder:default=3
+	SandboxObservabilityIngestMaxRetries int `yaml:"sandbox_observability_ingest_max_retries" json:"sandboxObservabilityIngestMaxRetries"`
+	// +optional
+	// +kubebuilder:default="100ms"
+	SandboxObservabilityIngestRetryBackoff metav1.Duration `yaml:"sandbox_observability_ingest_retry_backoff" json:"sandboxObservabilityIngestRetryBackoff"`
+	// +optional
 	// +kubebuilder:default="2s"
 	ShutdownDelay metav1.Duration `yaml:"shutdown_delay" json:"shutdownDelay"`
 }
@@ -281,6 +301,24 @@ func applyNetdDefaults(cfg *NetdConfig) {
 	}
 	if cfg.AuditLogMaxBackups == 0 {
 		cfg.AuditLogMaxBackups = 5
+	}
+	if cfg.SandboxObservabilityIngestQueueSize == 0 {
+		cfg.SandboxObservabilityIngestQueueSize = 1024
+	}
+	if cfg.SandboxObservabilityIngestBatchSize == 0 {
+		cfg.SandboxObservabilityIngestBatchSize = 100
+	}
+	if cfg.SandboxObservabilityIngestFlushInterval.Duration == 0 {
+		cfg.SandboxObservabilityIngestFlushInterval = metav1.Duration{Duration: time.Second}
+	}
+	if cfg.SandboxObservabilityIngestRequestTimeout.Duration == 0 {
+		cfg.SandboxObservabilityIngestRequestTimeout = metav1.Duration{Duration: 2 * time.Second}
+	}
+	if cfg.SandboxObservabilityIngestMaxRetries == 0 {
+		cfg.SandboxObservabilityIngestMaxRetries = 3
+	}
+	if cfg.SandboxObservabilityIngestRetryBackoff.Duration == 0 {
+		cfg.SandboxObservabilityIngestRetryBackoff = metav1.Duration{Duration: 100 * time.Millisecond}
 	}
 	if cfg.BurstRatio == "" {
 		cfg.BurstRatio = "0.125"

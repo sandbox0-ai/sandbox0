@@ -4,9 +4,15 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+const (
+	SandboxObservabilityBackendDisabled   = "disabled"
+	SandboxObservabilityBackendClickHouse = "clickhouse"
 )
 
 // ClusterGatewayConfig holds all configuration for cluster-gateway.
@@ -67,10 +73,72 @@ type ClusterGatewayConfig struct {
 	// +optional
 	GatewayConfig `yaml:",inline" json:",inline"`
 
+	// SandboxObservability configures the per-sandbox historical observability
+	// query backend. It is separate from platform telemetry export.
+	// +optional
+	SandboxObservability SandboxObservabilityConfig `yaml:"sandbox_observability" json:"sandboxObservability"`
+
 	// Permissions
 	// +optional
 	// +kubebuilder:default={"*:*"}
 	SchedulerPermissions []string `yaml:"scheduler_permissions" json:"schedulerPermissions"`
+}
+
+type SandboxObservabilityConfig struct {
+	// Backend selects the historical query backend. Supported values: "disabled", "clickhouse".
+	// Empty is treated as "disabled".
+	// +optional
+	// +kubebuilder:validation:Enum=disabled;clickhouse
+	// +kubebuilder:default="disabled"
+	Backend string `yaml:"backend" json:"backend"`
+	// +optional
+	ClickHouse SandboxObservabilityClickHouseConfig `yaml:"clickhouse" json:"clickHouse"`
+}
+
+type SandboxObservabilityClickHouseConfig struct {
+	// DSN is the ClickHouse database/sql connection string. It may include credentials.
+	// +optional
+	DSN string `yaml:"dsn" json:"-"`
+	// +optional
+	// +kubebuilder:default="sandbox0_observability"
+	Database string `yaml:"database" json:"database"`
+	// +optional
+	// +kubebuilder:default="sandbox_events"
+	EventsTable string `yaml:"events_table" json:"eventsTable"`
+	// +optional
+	// +kubebuilder:default="sandbox_logs"
+	LogsTable string `yaml:"logs_table" json:"logsTable"`
+	// +optional
+	// +kubebuilder:default="sandbox_metric_samples"
+	MetricsTable string `yaml:"metrics_table" json:"metricsTable"`
+	// RetentionDays controls ClickHouse TTL for the events table. It is kept as
+	// the runtime alias for audit/lifecycle event retention.
+	// +optional
+	// +kubebuilder:default=90
+	RetentionDays int `yaml:"retention_days" json:"retentionDays"`
+	// LogsRetentionDays controls ClickHouse TTL for sandbox process logs.
+	// +optional
+	// +kubebuilder:default=7
+	LogsRetentionDays int `yaml:"logs_retention_days" json:"logsRetentionDays"`
+	// MetricsRetentionDays controls ClickHouse TTL for metric samples.
+	// +optional
+	// +kubebuilder:default=30
+	MetricsRetentionDays int `yaml:"metrics_retention_days" json:"metricsRetentionDays"`
+	// ConnectTimeout bounds startup connection and schema checks.
+	// +optional
+	// +kubebuilder:default="10s"
+	ConnectTimeout metav1.Duration `yaml:"connect_timeout" json:"connectTimeout"`
+	// SkipSchemaMigration disables CREATE/ALTER TABLE at startup.
+	// +optional
+	SkipSchemaMigration bool `yaml:"skip_schema_migration" json:"skipSchemaMigration"`
+}
+
+func (c SandboxObservabilityConfig) BackendType() string {
+	backend := strings.TrimSpace(c.Backend)
+	if backend == "" {
+		return SandboxObservabilityBackendDisabled
+	}
+	return backend
 }
 
 // LoadClusterGatewayConfig returns the cluster-gateway configuration.

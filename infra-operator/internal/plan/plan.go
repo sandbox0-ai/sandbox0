@@ -43,26 +43,27 @@ type InfraPlan struct {
 }
 
 type ComponentPlan struct {
-	EnableGlobalGateway       bool
-	HasControlPlane           bool
-	HasDataPlane              bool
-	EnableRegionalGateway     bool
-	EnableSSHGateway          bool
-	EnableScheduler           bool
-	EnableClusterGateway      bool
-	EnableManager             bool
-	EnableStorageProxy        bool
-	EnableCtld                bool
-	EnableNetd                bool
-	EnableInternalAuth        bool
-	EnableDatabase            bool
-	EnableRedis               bool
-	EnableCredentialVault     bool
-	EnableStorage             bool
-	EnableRegistry            bool
-	EnableObservability       bool
-	EnableInitUser            bool
-	EnableClusterRegistration bool
+	EnableGlobalGateway        bool
+	HasControlPlane            bool
+	HasDataPlane               bool
+	EnableRegionalGateway      bool
+	EnableSSHGateway           bool
+	EnableScheduler            bool
+	EnableClusterGateway       bool
+	EnableManager              bool
+	EnableStorageProxy         bool
+	EnableCtld                 bool
+	EnableNetd                 bool
+	EnableInternalAuth         bool
+	EnableDatabase             bool
+	EnableRedis                bool
+	EnableCredentialVault      bool
+	EnableStorage              bool
+	EnableRegistry             bool
+	EnableObservability        bool
+	EnableSandboxObservability bool
+	EnableInitUser             bool
+	EnableClusterRegistration  bool
 }
 
 type ValidationPlan struct {
@@ -71,13 +72,14 @@ type ValidationPlan struct {
 }
 
 type CleanupPlan struct {
-	CleanupBuiltinDatabase        bool
-	CleanupBuiltinRedis           bool
-	CleanupBuiltinCredentialVault bool
-	CleanupBuiltinStorage         bool
-	CleanupBuiltinRegistry        bool
-	DeleteNamespaced              []ResourceRef
-	DeleteClusterScoped           []ResourceRef
+	CleanupBuiltinDatabase             bool
+	CleanupBuiltinRedis                bool
+	CleanupBuiltinCredentialVault      bool
+	CleanupBuiltinStorage              bool
+	CleanupBuiltinRegistry             bool
+	CleanupBuiltinSandboxObservability bool
+	DeleteNamespaced                   []ResourceRef
+	DeleteClusterScoped                []ResourceRef
 }
 
 type ResourceRef struct {
@@ -213,26 +215,27 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 	hasDataPlane := enableClusterGateway || enableManager || enableStorageProxy
 
 	return ComponentPlan{
-		EnableGlobalGateway:       enableGlobalGateway,
-		HasControlPlane:           hasControlPlane,
-		HasDataPlane:              hasDataPlane,
-		EnableRegionalGateway:     enableRegionalGateway,
-		EnableSSHGateway:          enableSSHGateway,
-		EnableScheduler:           enableScheduler,
-		EnableClusterGateway:      enableClusterGateway,
-		EnableManager:             enableManager,
-		EnableStorageProxy:        enableStorageProxy,
-		EnableCtld:                enableManager,
-		EnableNetd:                infrav1alpha1.IsNetdEnabled(infra),
-		EnableInternalAuth:        hasControlPlane || hasDataPlane,
-		EnableDatabase:            enableDatabase,
-		EnableRedis:               enableRedis,
-		EnableCredentialVault:     enableCredentialVault,
-		EnableStorage:             infrav1alpha1.IsStorageEnabled(infra),
-		EnableRegistry:            infrav1alpha1.IsRegistryEnabled(infra),
-		EnableObservability:       common.ObservabilityBackendEnabled(infra),
-		EnableInitUser:            enableDatabase && initUserConsumerEnabled(infra),
-		EnableClusterRegistration: hasDataPlane && infra != nil && infra.Spec.Cluster != nil && infra.Spec.ControlPlane != nil,
+		EnableGlobalGateway:        enableGlobalGateway,
+		HasControlPlane:            hasControlPlane,
+		HasDataPlane:               hasDataPlane,
+		EnableRegionalGateway:      enableRegionalGateway,
+		EnableSSHGateway:           enableSSHGateway,
+		EnableScheduler:            enableScheduler,
+		EnableClusterGateway:       enableClusterGateway,
+		EnableManager:              enableManager,
+		EnableStorageProxy:         enableStorageProxy,
+		EnableCtld:                 enableManager,
+		EnableNetd:                 infrav1alpha1.IsNetdEnabled(infra),
+		EnableInternalAuth:         hasControlPlane || hasDataPlane,
+		EnableDatabase:             enableDatabase,
+		EnableRedis:                enableRedis,
+		EnableCredentialVault:      enableCredentialVault,
+		EnableStorage:              infrav1alpha1.IsStorageEnabled(infra),
+		EnableRegistry:             infrav1alpha1.IsRegistryEnabled(infra),
+		EnableObservability:        common.ObservabilityBackendEnabled(infra),
+		EnableSandboxObservability: infrav1alpha1.IsSandboxObservabilityEnabled(infra),
+		EnableInitUser:             enableDatabase && initUserConsumerEnabled(infra),
+		EnableClusterRegistration:  hasDataPlane && infra != nil && infra.Spec.Cluster != nil && infra.Spec.ControlPlane != nil,
 	}
 }
 
@@ -695,6 +698,7 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 	cleanup.CleanupBuiltinCredentialVault = !builtinCredentialVaultActive(infra)
 	cleanup.CleanupBuiltinStorage = !builtinStorageActive(infra)
 	cleanup.CleanupBuiltinRegistry = !builtinRegistryActive(infra)
+	cleanup.CleanupBuiltinSandboxObservability = !builtinSandboxObservabilityActive(infra)
 
 	if !compiled.Components.EnableGlobalGateway {
 		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
@@ -874,6 +878,9 @@ func compileStatusPlan(compiled *InfraPlan) StatusPlan {
 	if components.EnableObservability {
 		expected = append(expected, infrav1alpha1.ConditionTypeObservabilityReady)
 	}
+	if components.EnableSandboxObservability {
+		expected = append(expected, infrav1alpha1.ConditionTypeSandboxObservabilityReady)
+	}
 	if components.EnableGlobalGateway {
 		expected = append(expected, infrav1alpha1.ConditionTypeGlobalGatewayReady)
 	}
@@ -960,6 +967,9 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 	}
 	if compiled.Components.EnableObservability {
 		appendSuccessStep("observability", infrav1alpha1.ConditionTypeObservabilityReady, "ObservabilityReady", "Observability backend integration is ready", "ObservabilityFailed")
+	}
+	if compiled.Components.EnableSandboxObservability {
+		appendSuccessStep("sandbox-observability", infrav1alpha1.ConditionTypeSandboxObservabilityReady, "SandboxObservabilityReady", "Sandbox observability backend is ready", "SandboxObservabilityFailed")
 	}
 	if compiled.Components.EnableGlobalGateway && compiled.Enterprise.GlobalGateway {
 		appendCheckStep("global-gateway-enterprise-license", infrav1alpha1.ConditionTypeGlobalGatewayReady, "EnterpriseLicenseMissing")
@@ -1463,6 +1473,16 @@ func builtinRegistryActive(infra *infrav1alpha1.Sandbox0Infra) bool {
 		return true
 	}
 	return infra.Spec.Registry.Builtin.Enabled
+}
+
+func builtinSandboxObservabilityActive(infra *infrav1alpha1.Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.SandboxObservability == nil || infra.Spec.SandboxObservability.Type != infrav1alpha1.SandboxObservabilityTypeBuiltin {
+		return false
+	}
+	if infra.Spec.SandboxObservability.Builtin == nil {
+		return true
+	}
+	return infra.Spec.SandboxObservability.Builtin.Enabled
 }
 
 func databaseStatefulResourcePolicy(infra *infrav1alpha1.Sandbox0Infra) infrav1alpha1.BuiltinStatefulResourcePolicy {

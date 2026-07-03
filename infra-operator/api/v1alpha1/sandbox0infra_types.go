@@ -176,6 +176,12 @@ type Sandbox0InfraSpec struct {
 	// +optional
 	Observability *ObservabilityConfig `json:"observability,omitempty"`
 
+	// SandboxObservability configures the region-local historical per-sandbox
+	// observability backend and collection pipelines.
+	// +optional
+	// +kubebuilder:default={type:disabled}
+	SandboxObservability *SandboxObservabilityConfig `json:"sandboxObservability,omitempty"`
+
 	// Services configures individual services
 	// +optional
 	// +kubebuilder:default={}
@@ -1527,6 +1533,25 @@ func IsRedisEnabled(infra *Sandbox0Infra) bool {
 	return rediscache.SpecEnabled(true, string(infra.Spec.Redis.Type), builtinEnabled)
 }
 
+// IsSandboxObservabilityEnabled returns true when the region-level per-sandbox
+// historical observability backend should be reconciled and injected.
+func IsSandboxObservabilityEnabled(infra *Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.SandboxObservability == nil {
+		return false
+	}
+	switch infra.Spec.SandboxObservability.Type {
+	case SandboxObservabilityTypeBuiltin:
+		if infra.Spec.SandboxObservability.Builtin != nil {
+			return infra.Spec.SandboxObservability.Builtin.Enabled
+		}
+		return true
+	case SandboxObservabilityTypeExternal:
+		return true
+	default:
+		return false
+	}
+}
+
 // IsCredentialVaultEnabled returns true when a Vault-compatible credential backend should be reconciled.
 func IsCredentialVaultEnabled(infra *Sandbox0Infra) bool {
 	if infra == nil || infra.Spec.CredentialVault == nil {
@@ -1887,27 +1912,28 @@ type LastOperation struct {
 
 // Condition types
 const (
-	ConditionTypeReady                = "Ready"
-	ConditionTypeDatabaseReady        = "DatabaseReady"
-	ConditionTypeRedisReady           = "RedisReady"
-	ConditionTypeCredentialVaultReady = "CredentialVaultReady"
-	ConditionTypeStorageReady         = "StorageReady"
-	ConditionTypeRegistryReady        = "RegistryReady"
-	ConditionTypeObservabilityReady   = "ObservabilityReady"
-	ConditionTypeGlobalGatewayReady   = "GlobalGatewayReady"
-	ConditionTypeRegionalGatewayReady = "RegionalGatewayReady"
-	ConditionTypeSSHGatewayReady      = "SSHGatewayReady"
-	ConditionTypeClusterGatewayReady  = "ClusterGatewayReady"
-	ConditionTypeManagerReady         = "ManagerReady"
-	ConditionTypeStorageProxyReady    = "StorageProxyReady"
-	ConditionTypeCtldReady            = "CtldReady"
-	ConditionTypeNetdReady            = "NetdReady"
-	ConditionTypeSchedulerReady       = "SchedulerReady"
-	ConditionTypeInternalAuthReady    = "InternalAuthReady"
-	ConditionTypeCRDsInstalled        = "CRDsInstalled"
-	ConditionTypeSecretsGenerated     = "SecretsGenerated"
-	ConditionTypeInitUserReady        = "InitUserReady"
-	ConditionTypeClusterRegistered    = "ClusterRegistered"
+	ConditionTypeReady                     = "Ready"
+	ConditionTypeDatabaseReady             = "DatabaseReady"
+	ConditionTypeRedisReady                = "RedisReady"
+	ConditionTypeCredentialVaultReady      = "CredentialVaultReady"
+	ConditionTypeStorageReady              = "StorageReady"
+	ConditionTypeRegistryReady             = "RegistryReady"
+	ConditionTypeObservabilityReady        = "ObservabilityReady"
+	ConditionTypeSandboxObservabilityReady = "SandboxObservabilityReady"
+	ConditionTypeGlobalGatewayReady        = "GlobalGatewayReady"
+	ConditionTypeRegionalGatewayReady      = "RegionalGatewayReady"
+	ConditionTypeSSHGatewayReady           = "SSHGatewayReady"
+	ConditionTypeClusterGatewayReady       = "ClusterGatewayReady"
+	ConditionTypeManagerReady              = "ManagerReady"
+	ConditionTypeStorageProxyReady         = "StorageProxyReady"
+	ConditionTypeCtldReady                 = "CtldReady"
+	ConditionTypeNetdReady                 = "NetdReady"
+	ConditionTypeSchedulerReady            = "SchedulerReady"
+	ConditionTypeInternalAuthReady         = "InternalAuthReady"
+	ConditionTypeCRDsInstalled             = "CRDsInstalled"
+	ConditionTypeSecretsGenerated          = "SecretsGenerated"
+	ConditionTypeInitUserReady             = "InitUserReady"
+	ConditionTypeClusterRegistered         = "ClusterRegistered"
 )
 
 //+kubebuilder:object:root=true

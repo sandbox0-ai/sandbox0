@@ -106,6 +106,18 @@ func (s *Server) getSandboxStatus(c *gin.Context) {
 	s.proxyToManager(c)
 }
 
+// getSandboxStats gets live best-effort sandbox resource stats.
+func (s *Server) getSandboxStats(c *gin.Context) {
+	sandboxID := c.Param("id")
+	if sandboxID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+		return
+	}
+
+	c.Request.URL.Path = "/api/v1/sandboxes/" + sandboxID + "/stats"
+	s.proxyToManager(c)
+}
+
 // getSandboxLogs gets sandbox pod logs
 func (s *Server) getSandboxLogs(c *gin.Context) {
 	sandboxID := c.Param("id")

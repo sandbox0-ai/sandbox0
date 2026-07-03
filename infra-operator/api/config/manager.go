@@ -167,6 +167,31 @@ type ManagerConfig struct {
 	RootFSMaintenance    RootFSMaintenanceConfig   `yaml:"rootfs_maintenance" json:"-"`
 	RootFSObjectStorage  RootFSObjectStorageConfig `yaml:"rootfs_object_storage" json:"-"`
 
+	// SandboxObservabilityLogsIngestURL is the cluster-gateway internal logs ingest endpoint.
+	// It is injected by infra-operator from spec.sandboxObservability.
+	// +optional
+	SandboxObservabilityLogsIngestURL string `yaml:"sandbox_observability_logs_ingest_url" json:"-"`
+	// SandboxObservabilityMetricsIngestURL is the cluster-gateway internal metrics ingest endpoint.
+	// It is injected by infra-operator from spec.sandboxObservability.
+	// +optional
+	SandboxObservabilityMetricsIngestURL string `yaml:"sandbox_observability_metrics_ingest_url" json:"-"`
+	// +optional
+	SandboxObservabilityIngestQueueSize int `yaml:"sandbox_observability_ingest_queue_size" json:"-"`
+	// +optional
+	SandboxObservabilityIngestBatchSize int `yaml:"sandbox_observability_ingest_batch_size" json:"-"`
+	// +optional
+	SandboxObservabilityIngestFlushInterval metav1.Duration `yaml:"sandbox_observability_ingest_flush_interval" json:"-"`
+	// +optional
+	SandboxObservabilityIngestRequestTimeout metav1.Duration `yaml:"sandbox_observability_ingest_request_timeout" json:"-"`
+	// +optional
+	SandboxObservabilityIngestMaxRetries int `yaml:"sandbox_observability_ingest_max_retries" json:"-"`
+	// +optional
+	SandboxObservabilityIngestRetryBackoff metav1.Duration `yaml:"sandbox_observability_ingest_retry_backoff" json:"-"`
+	// +optional
+	SandboxObservabilityLogPollInterval metav1.Duration `yaml:"sandbox_observability_log_poll_interval" json:"-"`
+	// +optional
+	SandboxObservabilityMetricSampleInterval metav1.Duration `yaml:"sandbox_observability_metric_sample_interval" json:"-"`
+
 	// Registry config for image pull secret provisioning
 	// +optional
 	// +kubebuilder:default={}
@@ -489,7 +514,38 @@ func LoadManagerConfig() *ManagerConfig {
 		cfg.CredentialStore.DefaultStorageKind = "encrypted_pg"
 	}
 	applyRootFSMaintenanceDefaults(cfg)
+	applySandboxObservabilityProducerDefaults(cfg)
 	return cfg
+}
+
+func applySandboxObservabilityProducerDefaults(cfg *ManagerConfig) {
+	if cfg == nil {
+		return
+	}
+	if cfg.SandboxObservabilityIngestQueueSize == 0 {
+		cfg.SandboxObservabilityIngestQueueSize = 1024
+	}
+	if cfg.SandboxObservabilityIngestBatchSize == 0 {
+		cfg.SandboxObservabilityIngestBatchSize = 100
+	}
+	if cfg.SandboxObservabilityIngestFlushInterval.Duration == 0 {
+		cfg.SandboxObservabilityIngestFlushInterval = metav1.Duration{Duration: time.Second}
+	}
+	if cfg.SandboxObservabilityIngestRequestTimeout.Duration == 0 {
+		cfg.SandboxObservabilityIngestRequestTimeout = metav1.Duration{Duration: 2 * time.Second}
+	}
+	if cfg.SandboxObservabilityIngestMaxRetries == 0 {
+		cfg.SandboxObservabilityIngestMaxRetries = 3
+	}
+	if cfg.SandboxObservabilityIngestRetryBackoff.Duration == 0 {
+		cfg.SandboxObservabilityIngestRetryBackoff = metav1.Duration{Duration: 100 * time.Millisecond}
+	}
+	if cfg.SandboxObservabilityLogPollInterval.Duration == 0 {
+		cfg.SandboxObservabilityLogPollInterval = metav1.Duration{Duration: 10 * time.Second}
+	}
+	if cfg.SandboxObservabilityMetricSampleInterval.Duration == 0 {
+		cfg.SandboxObservabilityMetricSampleInterval = metav1.Duration{Duration: 15 * time.Second}
+	}
 }
 
 func applyRootFSMaintenanceDefaults(cfg *ManagerConfig) {

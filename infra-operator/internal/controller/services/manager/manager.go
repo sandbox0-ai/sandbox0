@@ -28,6 +28,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	credentialstoresvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/credentialstore"
 	netdservice "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/netd"
+	sandboxobssvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sandboxobservability"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
@@ -291,6 +292,11 @@ func (r *Reconciler) buildConfig(ctx context.Context, imageRepo, imageTag string
 	}
 	if err := credentialstoresvc.ApplyManagerCredentialStoreConfig(ctx, r.Resources, compiledPlan.Scope, cfg); err != nil {
 		return nil, fmt.Errorf("apply credential store config: %w", err)
+	}
+	if owner := compiledPlan.Scope.Owner(); owner != nil {
+		if err := sandboxobssvc.ApplyManagerConfig(ctx, r.Resources.Client, owner, compiledPlan.Services.ClusterGateway.URL, cfg); err != nil {
+			return nil, fmt.Errorf("apply sandbox observability config: %w", err)
+		}
 	}
 
 	cfg.ManagerImage = fmt.Sprintf("%s:%s", imageRepo, imageTag)

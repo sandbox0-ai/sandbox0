@@ -14,10 +14,21 @@ import (
 )
 
 type auditLogger struct {
+	sink auditSink
+	now  func() time.Time
+}
+
+type auditSink interface {
+	WriteAuditEvent(event auditEvent) error
+	Close() error
+}
+
+type multiAuditSink []auditSink
+
+type jsonlAuditSink struct {
 	mu      sync.Mutex
 	writer  io.WriteCloser
 	encoder *json.Encoder
-	now     func() time.Time
 }
 
 type auditEvent struct {
@@ -61,20 +72,68 @@ type flowAudit struct {
 }
 
 func newAuditLogger(cfg *config.NetdConfig) (*auditLogger, error) {
-	if cfg == nil || cfg.AuditLogPath == "" {
+	if cfg == nil {
 		return nil, nil
 	}
-	maxSizeMB := int(cfg.AuditLogMaxBytes / (1024 * 1024))
-	if maxSizeMB <= 0 {
-		maxSizeMB = 1
+	var sinks []auditSink
+	if cfg.AuditLogPath != "" {
+		maxSizeMB := int(cfg.AuditLogMaxBytes / (1024 * 1024))
+		if maxSizeMB <= 0 {
+			maxSizeMB = 1
+		}
+		writer := &lumberjack.Logger{
+			Filename:   cfg.AuditLogPath,
+			MaxSize:    maxSizeMB,
+			MaxBackups: cfg.AuditLogMaxBackups,
+			Compress:   false,
+		}
+		sinks = append(sinks, newJSONLAuditSink(writer))
 	}
-	writer := &lumberjack.Logger{
-		Filename:   cfg.AuditLogPath,
-		MaxSize:    maxSizeMB,
-		MaxBackups: cfg.AuditLogMaxBackups,
-		Compress:   false,
+	httpSink, err := newHTTPAuditSinkFromConfig(cfg)
+	if err != nil {
+		for _, sink := range sinks {
+			_ = sink.Close()
+		}
+		return nil, err
 	}
-	return newAuditLoggerFromWriter(writer), nil
+	if httpSink != nil {
+		sinks = append(sinks, httpSink)
+	}
+	if len(sinks) == 0 {
+		return nil, nil
+	}
+	return &auditLogger{
+		sink: multiAuditSink(sinks),
+		now: func() time.Time {
+			return time.Now().UTC()
+		},
+	}, nil
+}
+
+func (s multiAuditSink) WriteAuditEvent(event auditEvent) error {
+	var firstErr error
+	for _, sink := range s {
+		if sink == nil {
+			continue
+		}
+		if err := sink.WriteAuditEvent(event); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func (s multiAuditSink) Close() error {
+	var firstErr error
+	for _, sink := range s {
+		if sink == nil {
+			continue
+		}
+		if err := sink.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func newAuditLoggerFromWriter(writer io.WriteCloser) *auditLogger {
@@ -82,19 +141,28 @@ func newAuditLoggerFromWriter(writer io.WriteCloser) *auditLogger {
 		return nil
 	}
 	return &auditLogger{
-		writer:  writer,
-		encoder: json.NewEncoder(writer),
+		sink: newJSONLAuditSink(writer),
 		now: func() time.Time {
 			return time.Now().UTC()
 		},
 	}
 }
 
-func (l *auditLogger) Close() error {
-	if l == nil || l.writer == nil {
+func newJSONLAuditSink(writer io.WriteCloser) *jsonlAuditSink {
+	if writer == nil {
 		return nil
 	}
-	return l.writer.Close()
+	return &jsonlAuditSink{
+		writer:  writer,
+		encoder: json.NewEncoder(writer),
+	}
+}
+
+func (l *auditLogger) Close() error {
+	if l == nil || l.sink == nil {
+		return nil
+	}
+	return l.sink.Close()
 }
 
 func (l *auditLogger) Record(req *adapterRequest, decision trafficDecision, adapter proxyAdapter, duration time.Duration, err error) error {
@@ -154,12 +222,29 @@ func (l *auditLogger) Record(req *adapterRequest, decision trafficDecision, adap
 		event.Error = err.Error()
 	}
 
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if encodeErr := l.encoder.Encode(event); encodeErr != nil {
+	if l.sink == nil {
+		return nil
+	}
+	if encodeErr := l.sink.WriteAuditEvent(event); encodeErr != nil {
 		return fmt.Errorf("encode audit event: %w", encodeErr)
 	}
 	return nil
+}
+
+func (s *jsonlAuditSink) WriteAuditEvent(event auditEvent) error {
+	if s == nil || s.encoder == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.encoder.Encode(event)
+}
+
+func (s *jsonlAuditSink) Close() error {
+	if s == nil || s.writer == nil {
+		return nil
+	}
+	return s.writer.Close()
 }
 
 func newFlowAudit(id string, startedAt time.Time) *flowAudit {

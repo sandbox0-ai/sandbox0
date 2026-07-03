@@ -84,6 +84,19 @@ func TestToManagerPreservesSandboxMaxMemory(t *testing.T) {
 	}
 }
 
+func TestToNetdLeavesSandboxObservabilityIngestUnset(t *testing.T) {
+	cfg := ToNetd(&infrav1alpha1.NetdConfig{})
+	if cfg.SandboxObservabilityIngestURL != "" ||
+		cfg.SandboxObservabilityIngestQueueSize != 0 ||
+		cfg.SandboxObservabilityIngestBatchSize != 0 ||
+		cfg.SandboxObservabilityIngestFlushInterval.Duration != 0 ||
+		cfg.SandboxObservabilityIngestRequestTimeout.Duration != 0 ||
+		cfg.SandboxObservabilityIngestMaxRetries != 0 ||
+		cfg.SandboxObservabilityIngestRetryBackoff.Duration != 0 {
+		t.Fatalf("netd sandbox observability ingest config should be operator-derived, got %#v", cfg)
+	}
+}
+
 func TestToManagerPreservesK8sClientRateLimit(t *testing.T) {
 	cfg := ToManager(&infrav1alpha1.ManagerConfig{
 		K8sClientQPS:   25,

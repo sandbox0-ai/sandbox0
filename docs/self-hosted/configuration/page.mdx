@@ -58,7 +58,63 @@ Public template idle pools are platform cost. Team-owned template warm pools are
 
 Sandbox0 platform services emit logs to container stdout and expose Prometheus-compatible metrics on their metrics ports. Configure `spec.observability` when you want the operator to export sandbox0-owned platform telemetry to your observability stack.
 
-Observability is disabled by default. The operator owns collection and export integration only: it can point platform services at an external collector, or install OpenTelemetry Collectors that export to your OTLP endpoint. Sandbox0 does not install or manage an observability storage/query backend. User-facing sandbox observability APIs, query adapters, dashboards, and retention policy remain outside this layer.
+Platform telemetry export is disabled by default. The operator owns collection and export integration only: it can point platform services at an external collector, or install OpenTelemetry Collectors that export to your OTLP endpoint. The per-sandbox historical observability and audit APIs are separate from this platform telemetry layer; they require a configured query backend and return `503 unavailable` when that backend is disabled or unavailable. Sandbox0 does not replace PostgreSQL metering usage truth with the historical observability store.
+
+Per-sandbox historical observability is configured once on the `Sandbox0Infra` CR under `spec.sandboxObservability`. The infra-operator owns backend provisioning and service wiring, the same way it owns built-in or external PostgreSQL and Redis wiring. Do not configure the ClickHouse backend separately on cluster-gateway or netd service configs when deploying through `Sandbox0Infra`.
+
+Use the built-in backend when you want the infra-operator to install ClickHouse for the region:
+
+```yaml
+spec:
+    sandboxObservability:
+        type: builtin
+        builtin:
+            clickHouse:
+                image: clickhouse/clickhouse-server:24.8
+                persistence:
+                    size: 50Gi
+        retention:
+            auditDays: 90
+            logDays: 7
+            metricDays: 30
+        ingest:
+            queueSize: 1024
+            batchSize: 100
+            flushInterval:
+                duration: 1s
+            requestTimeout:
+                duration: 2s
+            maxRetries: 3
+            retryBackoff:
+                duration: 100ms
+```
+
+Use the external backend when you already operate ClickHouse:
+
+```yaml
+spec:
+    sandboxObservability:
+        type: external
+        external:
+            clickHouse:
+                dsnSecret:
+                    name: sandbox-observability-clickhouse
+                    key: dsn
+                database: sandbox0_observability
+                eventsTable: sandbox_events
+                logsTable: sandbox_logs
+                metricsTable: sandbox_metric_samples
+                connectTimeout:
+                    duration: 10s
+        retention:
+            auditDays: 90
+            logDays: 7
+            metricDays: 30
+```
+
+Set `spec.sandboxObservability.type` to `disabled` or omit the field to keep the historical API disabled. Retention deletes ClickHouse observability rows only and never deletes PostgreSQL `metering.usage_events` or `metering.usage_windows`.
+
+Netd receives the generated internal ingest endpoint automatically when the backend is enabled. The sink is asynchronous and bounded: if the queue is full or retries are exhausted, netd drops audit projection events instead of blocking traffic forwarding. Netd exports `sandbox0_netd_audit_ingest_events_total` and `sandbox0_netd_audit_ingest_batches_total` to show enqueue, send, skip, drop, and failed batch results.
 
 In `managedCollector` mode sandbox0 installs collectors for logs, metrics, and traces, then exports to your OTLP endpoint:
 

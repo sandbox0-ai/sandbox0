@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	defaultFunctionRunnerPath = "/procd/bin/python-runner"
+	defaultFunctionRunnerPath = "/procd-image/usr/local/bin/python-runner"
 	defaultFunctionCacheRoot  = "/tmp/sandbox0-functions"
 	defaultFunctionTimeout    = 30 * time.Second
 	maxFunctionTimeout        = 120 * time.Second

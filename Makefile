@@ -1,4 +1,4 @@
-.PHONY: all build test test-all test-integration test-integration-verbose test-e2e test-e2e-kind test-e2e-destroy test-e2e-load-images test-e2e-prepare-kind test-e2e-specific test-e2e-s0fs-posix test-e2e-s0fs-posix-prepare test-e2e-netd-cni lint tidy vendor clean helm-update helm-configs release docker-build docker-build-local build-local-all docker-push proto manifests apispec oapi-codegen
+.PHONY: all build test test-all test-integration test-integration-verbose test-e2e test-e2e-kind test-e2e-destroy test-e2e-load-images test-e2e-prepare-kind test-e2e-setup-gvisor-rootfs test-e2e-specific test-e2e-s0fs-posix test-e2e-s0fs-posix-prepare test-e2e-netd-cni lint tidy vendor clean helm-update helm-configs release docker-build docker-build-local build-local-all docker-push proto manifests apispec oapi-codegen
 
 # Tool Binaries
 LOCALBIN ?= $(shell pwd)/bin
@@ -178,9 +178,14 @@ test-e2e-local:
 	@printf "$(CYAN)Running E2E tests locally...$(RESET)\n"
 	unset http_proxy && unset https_proxy && unset all_proxy && E2E_USE_EXISTING_CLUSTER=true $(GO) test -v -count=1 ./tests/e2e/... -timeout=30m
 
-test-e2e-kind:
+test-e2e-setup-gvisor-rootfs:
+	@printf "$(CYAN)Installing gVisor rootfs runtime files for Kind...$(RESET)\n"
+	unset http_proxy && unset https_proxy && unset all_proxy && bash tests/e2e/setup-gvisor-rootfs.sh
+
+test-e2e-kind: test-e2e-setup-gvisor-rootfs
 	@printf "$(CYAN)Creating Kind cluster...$(RESET)\n"
-	unset http_proxy && unset https_proxy && unset all_proxy && kind create cluster --config tests/e2e/kind-config.yaml --name sandbox0-e2e
+	unset http_proxy && unset https_proxy && unset all_proxy && kind create cluster --config tests/e2e/kind-config.yaml --name "$(E2E_CLUSTER_NAME)"
+	kubectl --context "kind-$(E2E_CLUSTER_NAME)" apply -f tests/e2e/runtimeclasses/gvisor-rootfs.yaml
 
 test-e2e-load-images:
 	@printf "$(CYAN)Loading E2E images into Kind cluster...$(RESET)\n"

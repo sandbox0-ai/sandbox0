@@ -1,12 +1,39 @@
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: sandbox0-e2e
+containerdConfigPatches:
+- |-
+  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor-rootfs]
+    runtime_type = "io.containerd.runsc.v1"
+    pod_annotations = ["dev.gvisor.*"]
+
+  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor-rootfs.options]
+    TypeUrl = "io.containerd.runsc.v1.options"
+    ConfigPath = "/etc/containerd/runsc-rootfs.toml"
+
+  [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.gvisor-rootfs]
+    runtime_type = "io.containerd.runsc.v1"
+    pod_annotations = ["dev.gvisor.*"]
+
+  [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.gvisor-rootfs.options]
+    TypeUrl = "io.containerd.runsc.v1.options"
+    ConfigPath = "/etc/containerd/runsc-rootfs.toml"
 networking:
   disableDefaultCNI: true
   podSubnet: 10.244.0.0/16
 nodes:
 - role: control-plane
   image: kindest/node:v1.35.0
+  extraMounts:
+  - hostPath: /usr/local/bin/runsc
+    containerPath: /usr/local/bin/runsc
+    readOnly: true
+  - hostPath: /usr/local/bin/containerd-shim-runsc-v1
+    containerPath: /usr/local/bin/containerd-shim-runsc-v1
+    readOnly: true
+  - hostPath: /etc/containerd/runsc-rootfs.toml
+    containerPath: /etc/containerd/runsc-rootfs.toml
+    readOnly: true
   kubeadmConfigPatches:
   - |
     kind: ClusterConfiguration
@@ -28,5 +55,25 @@ nodes:
     hostPort: 30500
 - role: worker
   image: kindest/node:v1.35.0
+  extraMounts:
+  - hostPath: /usr/local/bin/runsc
+    containerPath: /usr/local/bin/runsc
+    readOnly: true
+  - hostPath: /usr/local/bin/containerd-shim-runsc-v1
+    containerPath: /usr/local/bin/containerd-shim-runsc-v1
+    readOnly: true
+  - hostPath: /etc/containerd/runsc-rootfs.toml
+    containerPath: /etc/containerd/runsc-rootfs.toml
+    readOnly: true
 - role: worker
   image: kindest/node:v1.35.0
+  extraMounts:
+  - hostPath: /usr/local/bin/runsc
+    containerPath: /usr/local/bin/runsc
+    readOnly: true
+  - hostPath: /usr/local/bin/containerd-shim-runsc-v1
+    containerPath: /usr/local/bin/containerd-shim-runsc-v1
+    readOnly: true
+  - hostPath: /etc/containerd/runsc-rootfs.toml
+    containerPath: /etc/containerd/runsc-rootfs.toml
+    readOnly: true

@@ -78,7 +78,14 @@ jobs:
             --set config.imagePullPolicy=IfNotPresent
 
       - name: Apply infra manifest
-        run: kubectl apply -f "${INFRA_MANIFEST}"
+        shell: bash
+        run: |
+          kubectl apply -f "${INFRA_MANIFEST}"
+          if [[ -n "${E2E_SANDBOX_RUNTIME_CLASS:-}" ]]; then
+            kubectl -n "${INFRA_NAMESPACE}" patch sandbox0infra "${INFRA_NAME}" \
+              --type merge \
+              -p "{\"spec\":{\"services\":{\"manager\":{\"config\":{\"sandboxRuntimeClassName\":\"${E2E_SANDBOX_RUNTIME_CLASS}\"}}}}}"
+          fi
 
       - name: Wait for Sandbox0Infra ready
         run: |

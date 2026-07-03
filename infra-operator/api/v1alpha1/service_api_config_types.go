@@ -454,6 +454,9 @@ type ManagerConfig struct {
 	SandboxMaxMemory string `json:"sandboxMaxMemory,omitempty"`
 	// +optional
 	SandboxRuntimeClassName string `json:"sandboxRuntimeClassName,omitempty"`
+	// ProcdBinImageRef overrides the OCI image used for the procd binary image volume.
+	// +optional
+	ProcdBinImageRef string `json:"procdBinImageRef,omitempty"`
 	// DefaultTeamQuotas configures region-wide fallback team quota limits.
 	// Team-specific quota rows in the database override these defaults.
 	// +optional

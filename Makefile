@@ -38,6 +38,7 @@ S0FS_POSIX_CI_FSSTRESS_PROCESSES ?= 4
 # Default version
 VERSION ?= latest
 TAG ?= $(VERSION)
+PROCD_BIN_TAG ?= $(TAG)-procd-bin
 
 # Colors for output
 YELLOW := \033[1;33m
@@ -94,11 +95,13 @@ build: manifests proto apispec
 docker-build:
 	@printf "$(GREEN)Docker building unified infra image...$(RESET)\n"
 	docker build -t sandbox0ai/infra:$(TAG) -f Dockerfile .
+	docker build --target procd-bin -t sandbox0ai/infra:$(PROCD_BIN_TAG) -f Dockerfile .
 	#docker buildx build --platform=linux/amd64 -t sandbox0ai/infra:$(TAG) -f Dockerfile .
 
 docker-push:
 	@printf "$(GREEN)Docker pushing unified infra image...$(RESET)\n"
 	docker push sandbox0ai/infra:$(TAG)
+	docker push sandbox0ai/infra:$(PROCD_BIN_TAG)
 
 build-local-all: manifests proto apispec
 	@for service in $(SERVICES); do \
@@ -108,6 +111,7 @@ build-local-all: manifests proto apispec
 docker-build-local: build-local-all
 	@printf "$(GREEN)Docker building with local binaries...$(RESET)\n"
 	docker build -t sandbox0ai/infra:$(TAG) -f Dockerfile.local .
+	docker build --target procd-bin -t sandbox0ai/infra:$(PROCD_BIN_TAG) -f Dockerfile.local .
 
 test:
 	@service="$(filter-out build test test-all lint tidy vendor clean helm-update,$(MAKECMDGOALS))"; \
@@ -184,6 +188,10 @@ test-e2e-load-images:
 		echo "sandbox0ai/infra:$(TAG) is missing; run make docker-build-local first"; \
 		exit 1; \
 	fi
+	@if ! docker image inspect sandbox0ai/infra:$(PROCD_BIN_TAG) >/dev/null 2>&1; then \
+		echo "sandbox0ai/infra:$(PROCD_BIN_TAG) is missing; run make docker-build-local first"; \
+		exit 1; \
+	fi
 	@if ! docker image inspect "$(E2E_SSH_FIXTURE_IMAGE)" >/dev/null 2>&1; then \
 		printf "$(YELLOW)Pulling SSH fixture source $(E2E_SSH_FIXTURE_SOURCE_IMAGE)...$(RESET)\n"; \
 		docker pull --platform "$(E2E_IMAGE_PLATFORM)" "$(E2E_SSH_FIXTURE_SOURCE_IMAGE)" || exit 1; \
@@ -197,6 +205,7 @@ test-e2e-load-images:
 		done; \
 	}; \
 	load_image sandbox0ai/infra:$(TAG); \
+	load_image sandbox0ai/infra:$(PROCD_BIN_TAG); \
 	for image in $(E2E_DEPENDENCY_IMAGES); do \
 		if ! docker image inspect "$$image" >/dev/null 2>&1; then \
 			printf "$(YELLOW)Pulling $$image for $(E2E_IMAGE_PLATFORM)...$(RESET)\n"; \

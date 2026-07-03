@@ -36,6 +36,15 @@ func TestToManagerPreservesProcdWebhookOutboxDir(t *testing.T) {
 	}
 }
 
+func TestToManagerPreservesProcdBinImageRef(t *testing.T) {
+	cfg := ToManager(&infrav1alpha1.ManagerConfig{
+		ProcdBinImageRef: "sandbox0ai/infra:test-procd-bin",
+	})
+	if cfg.ProcdBinImageRef != "sandbox0ai/infra:test-procd-bin" {
+		t.Fatalf("procd bin image ref = %q, want sandbox0ai/infra:test-procd-bin", cfg.ProcdBinImageRef)
+	}
+}
+
 func TestToManagerPreservesExplicitEmptyProcdWebhookOutboxDir(t *testing.T) {
 	outboxDir := ""
 	cfg := ToManager(&infrav1alpha1.ManagerConfig{

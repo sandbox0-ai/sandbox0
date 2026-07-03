@@ -3148,6 +3148,10 @@ spec:
                           pauseMinMemoryRequest:
                             default: 10Mi
                             type: string
+                          procdBinImageRef:
+                            description: ProcdBinImageRef overrides the OCI image
+                              used for the procd binary image volume.
+                            type: string
                           procdClientTimeout:
                             default: 30s
                             type: string

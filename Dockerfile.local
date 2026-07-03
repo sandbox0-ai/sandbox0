@@ -1,3 +1,8 @@
+FROM scratch AS procd-bin
+
+COPY bin/procd /usr/local/bin/procd
+COPY bin/python-runner /usr/local/bin/python-runner
+
 FROM debian:bookworm-slim
 
 # Install runtime dependencies

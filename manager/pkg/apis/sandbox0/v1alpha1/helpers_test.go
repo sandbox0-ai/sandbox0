@@ -119,6 +119,66 @@ manager_image: sandbox0/manager:test
 	}
 }
 
+func TestBuildPodSpecUsesProcdImageVolumeByDefault(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	spec := BuildPodSpec(newTestTemplate())
+
+	if len(spec.InitContainers) != 0 {
+		t.Fatalf("expected no init containers, got %#v", spec.InitContainers)
+	}
+	volume := findVolume(spec.Volumes, procdBinVolumeName)
+	if volume == nil || volume.Image == nil {
+		t.Fatalf("expected procd bin image volume, got %#v", volume)
+	}
+	if volume.Image.Reference != "sandbox0/manager:test-procd-bin" {
+		t.Fatalf("image volume reference = %q, want sandbox0/manager:test-procd-bin", volume.Image.Reference)
+	}
+	main := spec.Containers[0]
+	if len(main.Command) != 1 || main.Command[0] != "/procd/bin/procd" {
+		t.Fatalf("main command = %#v, want /procd/bin/procd", main.Command)
+	}
+	mount := findVolumeMount(main.VolumeMounts, procdBinVolumeName)
+	if mount == nil || mount.MountPath != "/procd/bin" || mount.SubPath != "usr/local/bin" || !mount.ReadOnly {
+		t.Fatalf("procd bin mount = %#v, want read-only /procd/bin subPath usr/local/bin", mount)
+	}
+}
+
+func TestBuildPodSpecUsesExplicitProcdImageVolumeRef(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+procd_bin_image_ref: sandbox0/manager:test-procd-bin
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	spec := BuildPodSpec(newTestTemplate())
+
+	if len(spec.InitContainers) != 0 {
+		t.Fatalf("expected no init containers, got %#v", spec.InitContainers)
+	}
+	volume := findVolume(spec.Volumes, procdBinVolumeName)
+	if volume == nil || volume.Image == nil {
+		t.Fatalf("expected procd bin image volume, got %#v", volume)
+	}
+	if volume.Image.Reference != "sandbox0/manager:test-procd-bin" {
+		t.Fatalf("image volume reference = %q, want sandbox0/manager:test-procd-bin", volume.Image.Reference)
+	}
+	if volume.Image.PullPolicy != corev1.PullIfNotPresent {
+		t.Fatalf("image volume pull policy = %q, want %q", volume.Image.PullPolicy, corev1.PullIfNotPresent)
+	}
+	main := spec.Containers[0]
+	if len(main.Command) != 1 || main.Command[0] != "/procd/bin/procd" {
+		t.Fatalf("main command = %#v, want /procd/bin/procd", main.Command)
+	}
+	mount := findVolumeMount(main.VolumeMounts, procdBinVolumeName)
+	if mount == nil || mount.MountPath != "/procd/bin" || mount.SubPath != "usr/local/bin" || !mount.ReadOnly {
+		t.Fatalf("procd bin mount = %#v, want read-only /procd/bin subPath usr/local/bin", mount)
+	}
+}
+
 func TestBuildPodSpecLeavesOrdinarySandboxNonPrivileged(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test

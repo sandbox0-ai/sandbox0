@@ -210,6 +210,81 @@ func TestBuildConfigPreservesSandboxRuntimeClassName(t *testing.T) {
 	}
 }
 
+func TestBuildConfigDerivesProcdBinImageRef(t *testing.T) {
+	reconciler := newManagerTestReconciler(t)
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
+					Enabled:  true,
+					Port:     5432,
+					Username: "sandbox0",
+					Database: "sandbox0",
+					SSLMode:  "disable",
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				Manager: &infrav1alpha1.ManagerServiceConfig{
+					Config: &infrav1alpha1.ManagerConfig{},
+				},
+			},
+		},
+	}
+
+	cfg, err := reconciler.buildConfig(context.Background(), "sandbox0ai/infra", "test", infraplan.Compile(infra))
+	if err != nil {
+		t.Fatalf("buildConfig returned error: %v", err)
+	}
+	if cfg.ManagerImage != "sandbox0ai/infra:test" {
+		t.Fatalf("manager image = %q, want sandbox0ai/infra:test", cfg.ManagerImage)
+	}
+	if cfg.ProcdBinImageRef != "sandbox0ai/infra:test-procd-bin" {
+		t.Fatalf("procd bin image ref = %q, want sandbox0ai/infra:test-procd-bin", cfg.ProcdBinImageRef)
+	}
+}
+
+func TestBuildConfigPreservesExplicitProcdBinImageRef(t *testing.T) {
+	reconciler := newManagerTestReconciler(t)
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
+					Enabled:  true,
+					Port:     5432,
+					Username: "sandbox0",
+					Database: "sandbox0",
+					SSLMode:  "disable",
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				Manager: &infrav1alpha1.ManagerServiceConfig{
+					Config: &infrav1alpha1.ManagerConfig{
+						ProcdBinImageRef: "registry.example.com/procd-bin:v1",
+					},
+				},
+			},
+		},
+	}
+
+	cfg, err := reconciler.buildConfig(context.Background(), "sandbox0ai/infra", "test", infraplan.Compile(infra))
+	if err != nil {
+		t.Fatalf("buildConfig returned error: %v", err)
+	}
+	if cfg.ProcdBinImageRef != "registry.example.com/procd-bin:v1" {
+		t.Fatalf("procd bin image ref = %q, want registry.example.com/procd-bin:v1", cfg.ProcdBinImageRef)
+	}
+}
+
 func TestBuildConfigEnablesCtldWhenManagerIsEnabled(t *testing.T) {
 	reconciler := newManagerTestReconciler(t)
 	infra := &infrav1alpha1.Sandbox0Infra{

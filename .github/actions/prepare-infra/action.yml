@@ -73,7 +73,9 @@ runs:
       shell: bash
       run: |
         kind load docker-image sandbox0ai/infra:latest --name ${{ inputs.kind-cluster-name }}
+        kind load docker-image sandbox0ai/infra:latest-procd-bin --name ${{ inputs.kind-cluster-name }}
         docker image rm sandbox0ai/infra:latest 2>/dev/null || true
+        docker image rm sandbox0ai/infra:latest-procd-bin 2>/dev/null || true
         docker builder prune -af || true
         echo "=== df -h after infra image load ==="
         df -h

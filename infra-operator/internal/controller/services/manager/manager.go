@@ -294,6 +294,9 @@ func (r *Reconciler) buildConfig(ctx context.Context, imageRepo, imageTag string
 	}
 
 	cfg.ManagerImage = fmt.Sprintf("%s:%s", imageRepo, imageTag)
+	if cfg.ProcdBinImageRef == "" {
+		cfg.ProcdBinImageRef = fmt.Sprintf("%s:%s-procd-bin", imageRepo, imageTag)
+	}
 
 	return cfg, nil
 }

@@ -296,7 +296,7 @@ func (r *Repository) appendWindows(ctx context.Context, db DB, windows []*Window
 	_, err = db.Exec(ctx, `
 		WITH input AS (
 			SELECT *
-			FROM jsonb_to_recordset($1::jsonb) AS window(
+			FROM jsonb_to_recordset($1::jsonb) AS usage_window(
 				window_id text,
 				producer text,
 				region_id text,

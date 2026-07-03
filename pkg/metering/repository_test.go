@@ -299,6 +299,9 @@ func TestAppendWindowsBatchesRows(t *testing.T) {
 				if !strings.Contains(sql, "jsonb_to_recordset") || !strings.Contains(sql, "usage_windows") {
 					t.Fatalf("unexpected SQL: %s", sql)
 				}
+				if strings.Contains(sql, " AS window(") {
+					t.Fatalf("batch SQL uses reserved alias: %s", sql)
+				}
 				payload, ok := args[0].([]byte)
 				if !ok {
 					t.Fatalf("payload type = %T, want []byte", args[0])

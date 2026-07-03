@@ -16,6 +16,8 @@ import (
 
 const (
 	procdBinVolumeName = "procd-bin"
+	procdBinMountPath  = "/procd-image"
+	procdPath          = procdBinMountPath + "/usr/local/bin/procd"
 	procdConfigVolume  = "procd-config"
 	netdMITMCAVolume   = "netd-mitm-ca"
 	netdMITMCACertKey  = "ca.crt"
@@ -360,15 +362,14 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 	}
 	envVars = appendProcdConfigEnvVars(envVars)
 	container.Env = envVars
-	container.Command = []string{"/procd/bin/procd"}
+	container.Command = []string{procdPath}
 	container.Ports = append(container.Ports, corev1.ContainerPort{
 		Name:          "http",
 		ContainerPort: int32(procdHTTPPort()),
 	})
 	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 		Name:      procdBinVolumeName,
-		MountPath: "/procd/bin",
-		SubPath:   "usr/local/bin",
+		MountPath: procdBinMountPath,
 		ReadOnly:  true,
 	})
 

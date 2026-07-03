@@ -265,7 +265,7 @@ func validateTemplateClaimNameBudget(scope, teamID, templateID string, spec v1al
 
 func validateReservedMountPath(path, field string) error {
 	reserved := []string{
-		"/procd/bin",
+		"/procd-image",
 		"/config",
 		"/var/run/sandbox0/netd",
 	}

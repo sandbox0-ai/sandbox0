@@ -138,12 +138,12 @@ manager_image: sandbox0/manager:test
 		t.Fatalf("image volume reference = %q, want sandbox0/manager:test-procd-bin", volume.Image.Reference)
 	}
 	main := spec.Containers[0]
-	if len(main.Command) != 1 || main.Command[0] != "/procd/bin/procd" {
-		t.Fatalf("main command = %#v, want /procd/bin/procd", main.Command)
+	if len(main.Command) != 1 || main.Command[0] != "/procd-image/usr/local/bin/procd" {
+		t.Fatalf("main command = %#v, want /procd-image/usr/local/bin/procd", main.Command)
 	}
 	mount := findVolumeMount(main.VolumeMounts, procdBinVolumeName)
-	if mount == nil || mount.MountPath != "/procd/bin" || mount.SubPath != "usr/local/bin" || !mount.ReadOnly {
-		t.Fatalf("procd bin mount = %#v, want read-only /procd/bin subPath usr/local/bin", mount)
+	if mount == nil || mount.MountPath != "/procd-image" || mount.SubPath != "" || !mount.ReadOnly {
+		t.Fatalf("procd bin mount = %#v, want read-only /procd-image without subPath", mount)
 	}
 }
 
@@ -170,12 +170,12 @@ procd_bin_image_ref: sandbox0/manager:test-procd-bin
 		t.Fatalf("image volume pull policy = %q, want %q", volume.Image.PullPolicy, corev1.PullIfNotPresent)
 	}
 	main := spec.Containers[0]
-	if len(main.Command) != 1 || main.Command[0] != "/procd/bin/procd" {
-		t.Fatalf("main command = %#v, want /procd/bin/procd", main.Command)
+	if len(main.Command) != 1 || main.Command[0] != "/procd-image/usr/local/bin/procd" {
+		t.Fatalf("main command = %#v, want /procd-image/usr/local/bin/procd", main.Command)
 	}
 	mount := findVolumeMount(main.VolumeMounts, procdBinVolumeName)
-	if mount == nil || mount.MountPath != "/procd/bin" || mount.SubPath != "usr/local/bin" || !mount.ReadOnly {
-		t.Fatalf("procd bin mount = %#v, want read-only /procd/bin subPath usr/local/bin", mount)
+	if mount == nil || mount.MountPath != "/procd-image" || mount.SubPath != "" || !mount.ReadOnly {
+		t.Fatalf("procd bin mount = %#v, want read-only /procd-image without subPath", mount)
 	}
 }
 

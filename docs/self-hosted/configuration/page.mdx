@@ -186,7 +186,7 @@ This field only controls the `runtimeClassName` written onto sandbox Pods. The n
 
 ### Procd Binary Image Volume
 
-Sandbox Pods mount Sandbox0 `procd` binaries from a small OCI artifact image by default. This avoids a per-Pod init container on the sandbox startup path.
+Sandbox Pods mount Sandbox0 `procd` binaries from a small OCI artifact image at `/procd-image` by default. This avoids a per-Pod init container on the sandbox startup path.
 
 When `procdBinImageRef` is omitted, `infra-operator` derives it from the deployed infra image tag by appending `-procd-bin`. For example, `sandbox0ai/infra:v0.8.0` uses `sandbox0ai/infra:v0.8.0-procd-bin`.
 
@@ -200,7 +200,7 @@ spec:
                 procdBinImageRef: registry.example.com/sandbox0/procd-bin:v0.8.0
 ```
 
-Kubernetes image volume support is part of the Sandbox0 cluster baseline. Unsupported runtimes fail sandbox Pod startup instead of falling back inside the Pod.
+Kubernetes image volume support is part of the Sandbox0 cluster baseline. Unsupported runtimes fail sandbox Pod startup instead of falling back inside the Pod. Sandbox0 mounts the whole image volume and starts `/procd-image/usr/local/bin/procd`, so clusters do not need container-runtime support for image volume `subPath`.
 
 ### Sandbox Memory Limits
 

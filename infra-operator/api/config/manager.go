@@ -21,7 +21,7 @@ type ManagerConfig struct {
 
 	// ManagerImage is the manager service image.
 	ManagerImage string `yaml:"manager_image" json:"-"`
-	// ProcdBinImageRef is an OCI image mounted read-only at /procd/bin inside sandbox pods.
+	// ProcdBinImageRef is an OCI image mounted read-only at /procd-image inside sandbox pods.
 	ProcdBinImageRef string `yaml:"procd_bin_image_ref" json:"-"`
 
 	DefaultClusterId string `yaml:"default_cluster_id" json:"-"`

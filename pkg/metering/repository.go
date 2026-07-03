@@ -639,6 +639,31 @@ func (r *Repository) ListEventsAfter(ctx context.Context, afterSequence int64, l
 	return events, nil
 }
 
+func (r *Repository) EventExists(ctx context.Context, eventID string) (bool, error) {
+	return r.eventExists(ctx, r.db, eventID)
+}
+
+func (r *Repository) EventExistsTx(ctx context.Context, tx pgx.Tx, eventID string) (bool, error) {
+	return r.eventExists(ctx, tx, eventID)
+}
+
+func (r *Repository) eventExists(ctx context.Context, db DB, eventID string) (bool, error) {
+	if eventID == "" {
+		return false, nil
+	}
+	var exists bool
+	if err := db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM metering.usage_events
+			WHERE event_id = $1
+		)
+	`, eventID).Scan(&exists); err != nil {
+		return false, fmt.Errorf("query usage event existence: %w", err)
+	}
+	return exists, nil
+}
+
 func (r *Repository) ListWindowsAfter(ctx context.Context, afterSequence int64, limit int) ([]*Window, error) {
 	if limit <= 0 {
 		limit = 100

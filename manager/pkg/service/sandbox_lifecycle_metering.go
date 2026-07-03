@@ -67,7 +67,6 @@ func (r *repositorySandboxLifecycleMeteringRecorder) RecordSandboxPaused(ctx con
 	}
 
 	pendingEvents := make([]*meteringpkg.Event, 0, 2)
-	pendingWindows := make([]*meteringpkg.Window, 0, 1)
 	if state == nil {
 		state = &meteringpkg.SandboxProjectionState{
 			SandboxID:         fact.SandboxID,
@@ -84,23 +83,14 @@ func (r *repositorySandboxLifecycleMeteringRecorder) RecordSandboxPaused(ctx con
 			claimedAt := fact.ClaimedAt.UTC()
 			state.ClaimedAt = ptrMeteringTime(claimedAt)
 			state.ActiveSince = ptrMeteringTime(firstNonZeroTime(fact.ActiveSince, claimedAt).UTC())
-			pendingEvents = append(pendingEvents, buildSandboxLifecycleEvent(r.regionID, state, claimedAt, meteringpkg.EventTypeSandboxClaimed, sandboxClaimedEventID(fact.SandboxID, claimedAt), sandboxClaimEventData(fact)))
+			pendingEvents = appendMeteringEvent(pendingEvents, buildSandboxLifecycleEvent(r.regionID, state, claimedAt, meteringpkg.EventTypeSandboxClaimed, sandboxClaimedEventID(fact.SandboxID, claimedAt), sandboxClaimEventData(fact)))
 		}
 	} else {
 		mergeSandboxPauseFactIntoState(state, fact, r.clusterID)
 	}
 
-	if !state.Paused {
-		activeSince := state.ActiveSince
-		if activeSince == nil && !fact.ActiveSince.IsZero() {
-			activeSince = ptrMeteringTime(fact.ActiveSince.UTC())
-		}
-		if activeSince == nil && !fact.ClaimedAt.IsZero() {
-			activeSince = ptrMeteringTime(fact.ClaimedAt.UTC())
-		}
-		pendingWindows = append(pendingWindows, buildSandboxLifecycleRuntimeWindow(r.regionID, state, activeSince, pausedAt))
-		pendingEvents = append(pendingEvents, buildSandboxLifecycleEvent(r.regionID, state, pausedAt, meteringpkg.EventTypeSandboxPaused, sandboxPausedEventID(fact.SandboxID, pausedAt), nil))
-	}
+	activeSince := sandboxPauseActiveSince(state, fact)
+	pauseEventID := sandboxPausedEventID(fact.SandboxID, pausedAt)
 
 	state.Paused = true
 	state.PausedAt = ptrMeteringTime(pausedAt)
@@ -109,10 +99,22 @@ func (r *repositorySandboxLifecycleMeteringRecorder) RecordSandboxPaused(ctx con
 	state.LastObservedAt = pausedAt
 
 	return r.repo.InTx(ctx, func(tx pgx.Tx) error {
-		if err := r.repo.AppendEventsTx(ctx, tx, pendingEvents); err != nil {
+		events := append([]*meteringpkg.Event(nil), pendingEvents...)
+		windows := make([]*meteringpkg.Window, 0, 1)
+
+		pauseEventExists, err := r.repo.EventExistsTx(ctx, tx, pauseEventID)
+		if err != nil {
+			return fmt.Errorf("check pause event: %w", err)
+		}
+		if !pauseEventExists {
+			windows = appendMeteringWindow(windows, buildSandboxLifecycleRuntimeWindow(r.regionID, state, activeSince, pausedAt))
+			events = appendMeteringEvent(events, buildSandboxLifecycleEvent(r.regionID, state, pausedAt, meteringpkg.EventTypeSandboxPaused, pauseEventID, nil))
+		}
+
+		if err := r.repo.AppendEventsTx(ctx, tx, events); err != nil {
 			return fmt.Errorf("append lifecycle events: %w", err)
 		}
-		if err := r.repo.AppendWindowsTx(ctx, tx, pendingWindows); err != nil {
+		if err := r.repo.AppendWindowsTx(ctx, tx, windows); err != nil {
 			return fmt.Errorf("append lifecycle windows: %w", err)
 		}
 		if err := r.repo.UpsertSandboxProjectionStateTx(ctx, tx, state); err != nil {
@@ -211,6 +213,33 @@ func mergeSandboxPauseFactIntoState(state *meteringpkg.SandboxProjectionState, f
 		claimedAt := fact.ClaimedAt.UTC()
 		state.ClaimedAt = &claimedAt
 	}
+}
+
+func sandboxPauseActiveSince(state *meteringpkg.SandboxProjectionState, fact *SandboxPauseMeteringFact) *time.Time {
+	if state != nil && state.ActiveSince != nil {
+		return state.ActiveSince
+	}
+	if fact != nil && !fact.ActiveSince.IsZero() {
+		return ptrMeteringTime(fact.ActiveSince.UTC())
+	}
+	if fact != nil && !fact.ClaimedAt.IsZero() {
+		return ptrMeteringTime(fact.ClaimedAt.UTC())
+	}
+	return nil
+}
+
+func appendMeteringEvent(events []*meteringpkg.Event, event *meteringpkg.Event) []*meteringpkg.Event {
+	if event == nil {
+		return events
+	}
+	return append(events, event)
+}
+
+func appendMeteringWindow(windows []*meteringpkg.Window, window *meteringpkg.Window) []*meteringpkg.Window {
+	if window == nil {
+		return windows
+	}
+	return append(windows, window)
 }
 
 func buildSandboxLifecycleEvent(regionID string, state *meteringpkg.SandboxProjectionState, occurredAt time.Time, eventType, eventID string, data any) *meteringpkg.Event {

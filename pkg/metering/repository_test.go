@@ -56,6 +56,8 @@ func (r fakeRow) Scan(dest ...any) error {
 			*typed = r.values[i].(int)
 		case *string:
 			*typed = r.values[i].(string)
+		case *bool:
+			*typed = r.values[i].(bool)
 		case **time.Time:
 			*typed = r.values[i].(*time.Time)
 		case *time.Time:
@@ -259,6 +261,30 @@ func TestAppendEventsBatchesRows(t *testing.T) {
 	}
 	if execCalls != 1 {
 		t.Fatalf("Exec calls = %d, want 1", execCalls)
+	}
+}
+
+func TestEventExistsQueriesByEventID(t *testing.T) {
+	repo := &Repository{
+		db: &fakeDB{
+			queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
+				if !strings.Contains(sql, "usage_events") || !strings.Contains(sql, "event_id = $1") {
+					t.Fatalf("unexpected SQL: %s", sql)
+				}
+				if args[0] != "evt-1" {
+					t.Fatalf("event id arg = %v, want evt-1", args[0])
+				}
+				return fakeRow{values: []any{true}}
+			},
+		},
+	}
+
+	exists, err := repo.EventExists(context.Background(), "evt-1")
+	if err != nil {
+		t.Fatalf("EventExists: %v", err)
+	}
+	if !exists {
+		t.Fatal("EventExists = false, want true")
 	}
 }
 

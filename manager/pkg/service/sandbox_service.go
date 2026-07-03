@@ -130,8 +130,8 @@ type SandboxService struct {
 	rootFSObjectDeleter    RootFSObjectDeleter
 	resumeGroup            singleflight.Group
 	idlePodReservations    *idlePodReservations
-	podNetworkWaiterMu     sync.Mutex
-	podNetworkWaiter       *podNetworkIdentityWaiter
+	podWaiterMu            sync.Mutex
+	podWaiter              *podEventWaiter
 }
 
 type TeamQuotaLimitStore interface {
@@ -245,26 +245,26 @@ func NewSandboxService(
 		logger:                 logger,
 		metrics:                metrics,
 		idlePodReservations:    newIdlePodReservations(),
-		podNetworkWaiter:       newPodNetworkIdentityWaiter(),
+		podWaiter:              newPodEventWaiter(),
 	}
 	return service
 }
 
-// PodNetworkIdentityEventHandler wakes cold-claim waiters from shared pod informer events.
-func (s *SandboxService) PodNetworkIdentityEventHandler() cache.ResourceEventHandlerFuncs {
+// PodEventHandler wakes cold-claim waiters from shared pod informer events.
+func (s *SandboxService) PodEventHandler() cache.ResourceEventHandlerFuncs {
 	if s == nil {
 		return cache.ResourceEventHandlerFuncs{}
 	}
-	return s.ensurePodNetworkIdentityWaiter().ResourceEventHandler()
+	return s.ensurePodEventWaiter().ResourceEventHandler()
 }
 
-func (s *SandboxService) ensurePodNetworkIdentityWaiter() *podNetworkIdentityWaiter {
-	s.podNetworkWaiterMu.Lock()
-	defer s.podNetworkWaiterMu.Unlock()
-	if s.podNetworkWaiter == nil {
-		s.podNetworkWaiter = newPodNetworkIdentityWaiter()
+func (s *SandboxService) ensurePodEventWaiter() *podEventWaiter {
+	s.podWaiterMu.Lock()
+	defer s.podWaiterMu.Unlock()
+	if s.podWaiter == nil {
+		s.podWaiter = newPodEventWaiter()
 	}
-	return s.podNetworkWaiter
+	return s.podWaiter
 }
 
 // SupportsNetworkPolicy reports whether this deployment has an active network policy provider.

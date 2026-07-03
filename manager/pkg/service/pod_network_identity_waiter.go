@@ -7,23 +7,23 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
-type podNetworkIdentityEvent struct {
+type podEvent struct {
 	pod     *corev1.Pod
 	deleted bool
 }
 
-type podNetworkIdentityWaiter struct {
+type podEventWaiter struct {
 	mu      sync.Mutex
-	waiters map[string]map[chan podNetworkIdentityEvent]struct{}
+	waiters map[string]map[chan podEvent]struct{}
 }
 
-func newPodNetworkIdentityWaiter() *podNetworkIdentityWaiter {
-	return &podNetworkIdentityWaiter{
-		waiters: make(map[string]map[chan podNetworkIdentityEvent]struct{}),
+func newPodEventWaiter() *podEventWaiter {
+	return &podEventWaiter{
+		waiters: make(map[string]map[chan podEvent]struct{}),
 	}
 }
 
-func (w *podNetworkIdentityWaiter) ResourceEventHandler() cache.ResourceEventHandlerFuncs {
+func (w *podEventWaiter) ResourceEventHandler() cache.ResourceEventHandlerFuncs {
 	if w == nil {
 		return cache.ResourceEventHandlerFuncs{}
 	}
@@ -40,16 +40,16 @@ func (w *podNetworkIdentityWaiter) ResourceEventHandler() cache.ResourceEventHan
 	}
 }
 
-func (w *podNetworkIdentityWaiter) register(namespace, name string) (<-chan podNetworkIdentityEvent, func()) {
-	ch := make(chan podNetworkIdentityEvent, 1)
+func (w *podEventWaiter) register(namespace, name string) (<-chan podEvent, func()) {
+	ch := make(chan podEvent, 1)
 	if w == nil {
 		return ch, func() {}
 	}
-	key := podNetworkIdentityKey(namespace, name)
+	key := podEventKey(namespace, name)
 
 	w.mu.Lock()
 	if w.waiters[key] == nil {
-		w.waiters[key] = make(map[chan podNetworkIdentityEvent]struct{})
+		w.waiters[key] = make(map[chan podEvent]struct{})
 	}
 	w.waiters[key][ch] = struct{}{}
 	w.mu.Unlock()
@@ -68,7 +68,7 @@ func (w *podNetworkIdentityWaiter) register(namespace, name string) (<-chan podN
 	}
 }
 
-func (w *podNetworkIdentityWaiter) notifyObject(obj any, deleted bool) {
+func (w *podEventWaiter) notifyObject(obj any, deleted bool) {
 	if w == nil {
 		return
 	}
@@ -76,8 +76,8 @@ func (w *podNetworkIdentityWaiter) notifyObject(obj any, deleted bool) {
 	if pod == nil {
 		return
 	}
-	key := podNetworkIdentityKey(pod.Namespace, pod.Name)
-	event := podNetworkIdentityEvent{pod: pod, deleted: deleted}
+	key := podEventKey(pod.Namespace, pod.Name)
+	event := podEvent{pod: pod, deleted: deleted}
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -101,6 +101,6 @@ func podFromInformerObject(obj any) *corev1.Pod {
 	return pod
 }
 
-func podNetworkIdentityKey(namespace, name string) string {
+func podEventKey(namespace, name string) string {
 	return namespace + "/" + name
 }

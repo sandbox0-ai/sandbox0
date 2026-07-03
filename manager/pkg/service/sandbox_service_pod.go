@@ -62,37 +62,59 @@ func (s *SandboxService) waitForPodClaimReady(ctx context.Context, namespace, na
 	readyCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-
+	waiter := s.ensurePodEventWaiter()
 	lastReason := "pod is not ready"
-	for {
+	evaluate := func() (*corev1.Pod, bool, error) {
+		if s.podLister == nil {
+			return nil, false, fmt.Errorf("pod lister is not configured")
+		}
 		pod, err := s.podLister.Pods(namespace).Get(name)
 		if err != nil {
 			if k8serrors.IsNotFound(err) {
 				lastReason = fmt.Sprintf("pod %s/%s is not visible", namespace, name)
-				select {
-				case <-readyCtx.Done():
-					return nil, fmt.Errorf("pod %s/%s not claim-ready after %s: %s", namespace, name, timeout, lastReason)
-				case <-ticker.C:
-					continue
-				}
+				return nil, false, nil
 			}
-			return nil, fmt.Errorf("get pod for claim readiness: %w", err)
+			return nil, false, fmt.Errorf("get pod for claim readiness: %w", err)
 		}
 
 		ready, reason := s.isPodClaimReady(readyCtx, pod)
 		if ready {
-			return pod, nil
+			return pod, true, nil
 		}
 		if reason != "" {
 			lastReason = reason
 		}
+		return nil, false, nil
+	}
 
+	if pod, ready, err := evaluate(); err != nil || ready {
+		return pod, err
+	}
+
+	events, unregister := waiter.register(namespace, name)
+	defer unregister()
+
+	// Recheck after registering to avoid missing an informer event that arrives
+	// between the initial cache read and waiter registration.
+	if pod, ready, err := evaluate(); err != nil || ready {
+		return pod, err
+	}
+
+	for {
 		select {
 		case <-readyCtx.Done():
+			if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(ctxErr, context.DeadlineExceeded) {
+				return nil, fmt.Errorf("pod %s/%s claim readiness wait canceled: %w", namespace, name, ctxErr)
+			}
 			return nil, fmt.Errorf("pod %s/%s not claim-ready after %s: %s", namespace, name, timeout, lastReason)
-		case <-ticker.C:
+		case event := <-events:
+			if event.deleted {
+				return nil, fmt.Errorf("pod %s/%s not claim-ready: pod is deleting", namespace, name)
+			}
+			pod, ready, err := evaluate()
+			if err != nil || ready {
+				return pod, err
+			}
 		}
 	}
 }
@@ -106,7 +128,7 @@ func (s *SandboxService) waitForPodNetworkIdentity(ctx context.Context, template
 	readyCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	waiter := s.ensurePodNetworkIdentityWaiter()
+	waiter := s.ensurePodEventWaiter()
 	tracker := newPodNetworkIdentityStageTracker(s, template)
 	lastReason := "pod network identity is not ready"
 

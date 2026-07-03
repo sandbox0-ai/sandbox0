@@ -596,7 +596,7 @@ func TestWaitForPodNetworkIdentityWaitsForNodeNameAndPodIP(t *testing.T) {
 		podLister: corelisters.NewPodLister(indexer),
 		logger:    zap.NewNop(),
 	}
-	handler := svc.PodNetworkIdentityEventHandler()
+	handler := svc.PodEventHandler()
 
 	go func() {
 		time.Sleep(80 * time.Millisecond)
@@ -637,7 +637,7 @@ func TestWaitForPodNetworkIdentityWaitsForNodeNameWhenPodIPArrivesFirst(t *testi
 		podLister: corelisters.NewPodLister(indexer),
 		logger:    zap.NewNop(),
 	}
-	handler := svc.PodNetworkIdentityEventHandler()
+	handler := svc.PodEventHandler()
 
 	go func() {
 		time.Sleep(80 * time.Millisecond)
@@ -683,7 +683,7 @@ func TestWaitForPodNetworkIdentityWaitsForInformerWhenLivePodIsReady(t *testing.
 		podLister: corelisters.NewPodLister(indexer),
 		logger:    zap.NewNop(),
 	}
-	handler := svc.PodNetworkIdentityEventHandler()
+	handler := svc.PodEventHandler()
 
 	go func() {
 		time.Sleep(80 * time.Millisecond)
@@ -769,7 +769,7 @@ func TestWaitForPodNetworkIdentityReturnsOnDeleteOrTerminal(t *testing.T) {
 				podLister: corelisters.NewPodLister(indexer),
 				logger:    zap.NewNop(),
 			}
-			handler := svc.PodNetworkIdentityEventHandler()
+			handler := svc.PodEventHandler()
 
 			go func() {
 				time.Sleep(80 * time.Millisecond)
@@ -1426,6 +1426,7 @@ func TestWaitForPodClaimReadyWaitsForProcdContainerRunning(t *testing.T) {
 		logger: zap.NewNop(),
 	}
 
+	handler := svc.PodEventHandler()
 	go func() {
 		time.Sleep(80 * time.Millisecond)
 		updated := pod.DeepCopy()
@@ -1436,7 +1437,9 @@ func TestWaitForPodClaimReadyWaitsForProcdContainerRunning(t *testing.T) {
 		}}
 		if err := indexer.Update(updated); err != nil {
 			t.Errorf("update pod: %v", err)
+			return
 		}
+		handler.UpdateFunc(pod, updated)
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -1447,6 +1450,83 @@ func TestWaitForPodClaimReadyWaitsForProcdContainerRunning(t *testing.T) {
 	}
 	if !podContainerRunning(readyPod, "procd") {
 		t.Fatal("waitForPodClaimReady() returned before procd container was running")
+	}
+}
+
+func TestWaitForPodClaimReadyReprobesOnlyAfterInformerEvent(t *testing.T) {
+	pod := newClaimReadyTestPod("ns-a", "cold-pod", "template-a")
+	indexer := newClaimTestPodIndexer(t, pod)
+
+	probeCalls := make(chan struct{}, 8)
+	var probeMu sync.Mutex
+	probeReady := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		probeMu.Lock()
+		ready := probeReady
+		probeMu.Unlock()
+
+		probeCalls <- struct{}{}
+		if ready {
+			_ = json.NewEncoder(w).Encode(sandboxprobe.Passed(sandboxprobe.KindReadiness, "SandboxProbePassed", "sandbox probe passed", nil))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(sandboxprobe.Failed(sandboxprobe.KindReadiness, "SandboxProbePending", "sandbox probe pending", nil))
+	}))
+	defer server.Close()
+	host, port := splitTestServerAddress(t, server)
+
+	svc := &SandboxService{
+		k8sClient:  fake.NewSimpleClientset(pod.DeepCopy(), newClaimTestNode("node-a", host)),
+		podLister:  corelisters.NewPodLister(indexer),
+		ctldClient: NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config: SandboxServiceConfig{
+			CtldPort: port,
+		},
+		logger: zap.NewNop(),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	resultCh := make(chan error, 1)
+	go func() {
+		_, err := svc.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
+		resultCh <- err
+	}()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-probeCalls:
+		case <-time.After(time.Second):
+			t.Fatalf("probe call %d did not happen", i+1)
+		}
+	}
+
+	select {
+	case <-probeCalls:
+		t.Fatal("unexpected readiness probe before informer event")
+	case err := <-resultCh:
+		t.Fatalf("waitForPodClaimReady returned before informer event: %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	probeMu.Lock()
+	probeReady = true
+	probeMu.Unlock()
+
+	updated := pod.DeepCopy()
+	updated.ResourceVersion = "2"
+	if err := indexer.Update(updated); err != nil {
+		t.Fatalf("update pod: %v", err)
+	}
+	svc.PodEventHandler().UpdateFunc(pod, updated)
+
+	select {
+	case err := <-resultCh:
+		if err != nil {
+			t.Fatalf("waitForPodClaimReady() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waitForPodClaimReady did not return after informer event")
 	}
 }
 

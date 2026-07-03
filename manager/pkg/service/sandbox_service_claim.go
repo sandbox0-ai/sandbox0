@@ -55,6 +55,8 @@ type ClaimRequest struct {
 	RuntimeGeneration int64 `json:"-"`
 	// HardExpiresAt preserves the absolute hard deadline when recreating a paused sandbox.
 	HardExpiresAt time.Time `json:"-"`
+	// WebhookStateVolumeID preserves the manager-owned webhook state volume across pod recreation.
+	WebhookStateVolumeID string `json:"-"`
 }
 
 type ClaimMount struct {
@@ -662,24 +664,26 @@ func sandboxRecordForClaimedPod(s *SandboxService, pod *corev1.Pod, template *v1
 	cfg := parseSandboxConfig(pod.Annotations[controller.AnnotationConfig])
 	mounts := parseClaimMounts(pod.Annotations[controller.AnnotationMounts])
 	return &SandboxRecord{
-		ID:                  sandboxID,
-		TeamID:              req.TeamID,
-		UserID:              req.UserID,
-		TemplateID:          controller.TemplateLogicalID(template),
-		TemplateName:        template.Name,
-		TemplateNamespace:   template.Namespace,
-		ClusterID:           naming.ClusterIDOrDefault(template.Spec.ClusterId),
-		Status:              s.podToSandboxStatus(pod),
-		Config:              cfg,
-		Mounts:              mounts,
-		TemplateSpec:        template.Spec,
-		CurrentPodName:      pod.Name,
-		CurrentPodNamespace: pod.Namespace,
-		RuntimeGeneration:   runtimeGenerationFromPod(pod),
-		ClaimedAt:           parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationClaimedAt),
-		ExpiresAt:           parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt),
-		HardExpiresAt:       parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt),
-		CreatedAt:           s.clock.Now(),
+		ID:                   sandboxID,
+		TeamID:               req.TeamID,
+		UserID:               req.UserID,
+		TemplateID:           controller.TemplateLogicalID(template),
+		TemplateName:         template.Name,
+		TemplateNamespace:    template.Namespace,
+		ClusterID:            naming.ClusterIDOrDefault(template.Spec.ClusterId),
+		Status:               s.podToSandboxStatus(pod),
+		Config:               cfg,
+		Mounts:               mounts,
+		TemplateSpec:         template.Spec,
+		CurrentPodName:       pod.Name,
+		CurrentPodNamespace:  pod.Namespace,
+		RuntimeGeneration:    runtimeGenerationFromPod(pod),
+		ClaimedAt:            parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationClaimedAt),
+		ExpiresAt:            parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt),
+		HardExpiresAt:        parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt),
+		WebhookStateVolumeID: webhookStateVolumeIDFromPod(pod),
+		OwnerKind:            ownerKindFromPod(pod),
+		CreatedAt:            s.clock.Now(),
 	}
 }
 
@@ -1183,7 +1187,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			return fmt.Errorf("prepare webhook state volume: %w", err)
 		}
 		rollbackStateVolume := func() {
-			if stateVolume == nil {
+			if stateVolume == nil || !stateVolume.Created {
 				return
 			}
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -1421,7 +1425,7 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		return nil, fmt.Errorf("prepare webhook state volume: %w", err)
 	}
 	rollbackStateVolume := func() {
-		if stateVolume == nil {
+		if stateVolume == nil || !stateVolume.Created {
 			return
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

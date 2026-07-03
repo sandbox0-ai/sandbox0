@@ -984,6 +984,35 @@ func (s *SandboxService) now() time.Time {
 	return time.Now()
 }
 
+func webhookStateVolumeIDFromPod(pod *corev1.Pod) string {
+	if pod == nil || pod.Annotations == nil {
+		return ""
+	}
+	return strings.TrimSpace(pod.Annotations[controller.AnnotationWebhookStateVolumeID])
+}
+
+func ownerKindFromPod(pod *corev1.Pod) string {
+	if pod == nil {
+		return ""
+	}
+	if pod.Labels != nil {
+		if ownerKind := strings.TrimSpace(pod.Labels[controller.LabelOwnerKind]); ownerKind != "" {
+			return ownerKind
+		}
+	}
+	if pod.Annotations != nil {
+		return strings.TrimSpace(pod.Annotations[controller.AnnotationOwnerKind])
+	}
+	return ""
+}
+
+func sandboxRuntimeMetadataFromPod(pod *corev1.Pod) SandboxRuntimeMetadata {
+	return SandboxRuntimeMetadata{
+		WebhookStateVolumeID: webhookStateVolumeIDFromPod(pod),
+		OwnerKind:            ownerKindFromPod(pod),
+	}
+}
+
 func (s *SandboxService) persistUpdatedSandboxPod(ctx context.Context, pod *corev1.Pod) error {
 	if s == nil || s.sandboxStore == nil || pod == nil {
 		return nil
@@ -1013,24 +1042,26 @@ func (s *SandboxService) persistUpdatedSandboxPod(ctx context.Context, pod *core
 		return nil
 	}
 	record := &SandboxRecord{
-		ID:                  sandboxID,
-		TeamID:              pod.Annotations[controller.AnnotationTeamID],
-		UserID:              pod.Annotations[controller.AnnotationUserID],
-		TemplateID:          sandboxTemplateIDFromLabels(pod.Labels),
-		TemplateName:        template.Name,
-		TemplateNamespace:   template.Namespace,
-		ClusterID:           naming.ClusterIDOrDefault(template.Spec.ClusterId),
-		Status:              s.podToSandboxStatus(pod),
-		Config:              parseSandboxConfig(pod.Annotations[controller.AnnotationConfig]),
-		Mounts:              parseClaimMounts(pod.Annotations[controller.AnnotationMounts]),
-		TemplateSpec:        template.Spec,
-		CurrentPodName:      pod.Name,
-		CurrentPodNamespace: pod.Namespace,
-		RuntimeGeneration:   runtimeGenerationFromPod(pod),
-		ClaimedAt:           parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationClaimedAt),
-		ExpiresAt:           parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt),
-		HardExpiresAt:       parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt),
-		CreatedAt:           pod.CreationTimestamp.Time,
+		ID:                   sandboxID,
+		TeamID:               pod.Annotations[controller.AnnotationTeamID],
+		UserID:               pod.Annotations[controller.AnnotationUserID],
+		TemplateID:           sandboxTemplateIDFromLabels(pod.Labels),
+		TemplateName:         template.Name,
+		TemplateNamespace:    template.Namespace,
+		ClusterID:            naming.ClusterIDOrDefault(template.Spec.ClusterId),
+		Status:               s.podToSandboxStatus(pod),
+		Config:               parseSandboxConfig(pod.Annotations[controller.AnnotationConfig]),
+		Mounts:               parseClaimMounts(pod.Annotations[controller.AnnotationMounts]),
+		TemplateSpec:         template.Spec,
+		CurrentPodName:       pod.Name,
+		CurrentPodNamespace:  pod.Namespace,
+		RuntimeGeneration:    runtimeGenerationFromPod(pod),
+		ClaimedAt:            parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationClaimedAt),
+		ExpiresAt:            parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt),
+		HardExpiresAt:        parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt),
+		WebhookStateVolumeID: webhookStateVolumeIDFromPod(pod),
+		OwnerKind:            ownerKindFromPod(pod),
+		CreatedAt:            pod.CreationTimestamp.Time,
 	}
 	return s.sandboxStore.UpsertSandbox(ctx, record)
 }
@@ -1206,12 +1237,13 @@ func sandboxLifecycleInfoFromRecord(record *SandboxRecord) SandboxLifecycleInfo 
 		return SandboxLifecycleInfo{}
 	}
 	info := SandboxLifecycleInfo{
-		Namespace:         record.CurrentPodNamespace,
-		PodName:           record.CurrentPodName,
-		SandboxID:         record.ID,
-		TeamID:            record.TeamID,
-		UserID:            record.UserID,
-		RuntimeGeneration: record.RuntimeGeneration,
+		Namespace:            record.CurrentPodNamespace,
+		PodName:              record.CurrentPodName,
+		SandboxID:            record.ID,
+		TeamID:               record.TeamID,
+		UserID:               record.UserID,
+		WebhookStateVolumeID: record.WebhookStateVolumeID,
+		RuntimeGeneration:    record.RuntimeGeneration,
 	}
 	if record.Config.Webhook != nil {
 		info.WebhookURL = strings.TrimSpace(record.Config.Webhook.URL)
@@ -1319,6 +1351,7 @@ func (s *SandboxService) RefreshSandbox(ctx context.Context, sandboxID string, r
 	var ttlDuration time.Duration
 	var newExpiresAt time.Time
 	var newHardExpiresAt time.Time
+	var updatedPod *corev1.Pod
 
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		current, err := s.k8sClient.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
@@ -1384,11 +1417,14 @@ func (s *SandboxService) RefreshSandbox(ctx context.Context, sandboxID string, r
 		}
 
 		// Apply the update
-		_, err = s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, podCopy, metav1.UpdateOptions{})
+		updatedPod, err = s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, podCopy, metav1.UpdateOptions{})
 		return err
 	})
 	if err != nil {
 		return nil, fmt.Errorf("update pod: %w", err)
+	}
+	if err := s.persistUpdatedSandboxPod(ctx, updatedPod); err != nil {
+		return nil, fmt.Errorf("persist sandbox record: %w", err)
 	}
 
 	s.logger.Info("Sandbox TTL refreshed successfully",

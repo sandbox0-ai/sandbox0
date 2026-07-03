@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -43,6 +44,32 @@ func TestStorageProxyVolumeClientDefaultsClusterID(t *testing.T) {
 	}
 	if gotClusterID != naming.DefaultClusterID {
 		t.Fatalf("clusterID = %q, want %q", gotClusterID, naming.DefaultClusterID)
+	}
+}
+
+func TestPrepareWebhookStateVolumeReusesDurableVolume(t *testing.T) {
+	volumeClient := &recordingSystemVolumeClient{}
+	svc := &SandboxService{webhookStateVolumes: volumeClient}
+
+	volume, err := svc.prepareWebhookStateVolume(context.Background(), &ClaimRequest{
+		TeamID:               "team-1",
+		UserID:               "user-1",
+		WebhookStateVolumeID: "volume-existing",
+		Config: &SandboxConfig{Webhook: &WebhookConfig{
+			URL: "https://example.test/webhook",
+		}},
+	}, "sandbox-1")
+	if err != nil {
+		t.Fatalf("prepareWebhookStateVolume() error = %v", err)
+	}
+	if volume == nil || volume.VolumeID != "volume-existing" {
+		t.Fatalf("volume = %#v, want volume-existing", volume)
+	}
+	if volume.Created {
+		t.Fatal("reused webhook state volume was marked created")
+	}
+	if len(volumeClient.created) != 0 {
+		t.Fatalf("created volumes = %#v, want none", volumeClient.created)
 	}
 }
 

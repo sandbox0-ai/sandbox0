@@ -94,7 +94,7 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 				}
 				pod = existing
 				record = nil
-				return tx.SaveRuntime(lockCtx, sandboxID, existing.Namespace, existing.Name, s.podToSandboxStatus(existing), runtimeGenerationFromPod(existing), parseRFC3339AnnotationTime(existing.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(existing.Annotations, controller.AnnotationHardExpiresAt))
+				return tx.SaveRuntime(lockCtx, sandboxID, existing.Namespace, existing.Name, s.podToSandboxStatus(existing), runtimeGenerationFromPod(existing), parseRFC3339AnnotationTime(existing.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(existing.Annotations, controller.AnnotationHardExpiresAt), sandboxRuntimeMetadataFromPod(existing))
 			}
 			if getErr != nil && !k8serrors.IsNotFound(getErr) {
 				return fmt.Errorf("get current runtime pod: %w", getErr)
@@ -117,14 +117,18 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 			generation := locked.RuntimeGeneration + 1
 			record = cloneSandboxRecordForLifecycle(locked)
 			req = &ClaimRequest{
-				TeamID:            locked.TeamID,
-				UserID:            locked.UserID,
-				Template:          locked.TemplateID,
-				Config:            &locked.Config,
-				Mounts:            locked.Mounts,
-				SandboxID:         locked.ID,
-				RuntimeGeneration: generation,
-				HardExpiresAt:     locked.HardExpiresAt,
+				TeamID:               locked.TeamID,
+				UserID:               locked.UserID,
+				Template:             locked.TemplateID,
+				Config:               &locked.Config,
+				Mounts:               locked.Mounts,
+				SandboxID:            locked.ID,
+				RuntimeGeneration:    generation,
+				HardExpiresAt:        locked.HardExpiresAt,
+				WebhookStateVolumeID: locked.WebhookStateVolumeID,
+			}
+			if strings.TrimSpace(locked.OwnerKind) != "" {
+				req.Metadata = &ClaimMetadata{OwnerKind: locked.OwnerKind}
 			}
 			restoreNeeded = true
 			txn = &SandboxLifecycleTxn{
@@ -262,7 +266,7 @@ func (s *SandboxService) commitResumedSandboxRuntime(ctx context.Context, pod *c
 		if podGeneration != txn.ToGeneration {
 			return fmt.Errorf("resume lifecycle generation changed: txn=%d pod=%d", txn.ToGeneration, podGeneration)
 		}
-		if err := tx.SaveRuntime(lockCtx, record.ID, pod.Namespace, pod.Name, s.podToSandboxStatus(pod), txn.ToGeneration, parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt)); err != nil {
+		if err := tx.SaveRuntime(lockCtx, record.ID, pod.Namespace, pod.Name, s.podToSandboxStatus(pod), txn.ToGeneration, parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt), sandboxRuntimeMetadataFromPod(pod)); err != nil {
 			return err
 		}
 		return tx.CommitLifecycleTxn(lockCtx, txn.ID, "")
@@ -364,13 +368,18 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 		s.refreshSandboxProbeConditionsAsync(pod)
 	}
 	req := &ClaimRequest{
-		TeamID:            record.TeamID,
-		UserID:            record.UserID,
-		Template:          record.TemplateID,
-		Config:            &record.Config,
-		Mounts:            record.Mounts,
-		SandboxID:         record.ID,
-		RuntimeGeneration: record.RuntimeGeneration + 1,
+		TeamID:               record.TeamID,
+		UserID:               record.UserID,
+		Template:             record.TemplateID,
+		Config:               &record.Config,
+		Mounts:               record.Mounts,
+		SandboxID:            record.ID,
+		RuntimeGeneration:    record.RuntimeGeneration + 1,
+		HardExpiresAt:        record.HardExpiresAt,
+		WebhookStateVolumeID: record.WebhookStateVolumeID,
+	}
+	if strings.TrimSpace(record.OwnerKind) != "" {
+		req.Metadata = &ClaimMetadata{OwnerKind: record.OwnerKind}
 	}
 	rootFSState, err := s.latestRootFSState(ctx, record.ID)
 	if err != nil {

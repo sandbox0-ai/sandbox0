@@ -153,6 +153,10 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 		cleanup()
 		return nil, nil, err
 	}
+	if err := PatchScenarioSandboxRuntimeClass(testCtx.Context, workingCfg.Kubeconfig, env.Infra, workingCfg.SandboxRuntimeClassName); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
 	for _, rollout := range scenario.Rollouts {
 		resourceID, err := rollout.ResourceID()
 		if err != nil {

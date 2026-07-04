@@ -38,11 +38,21 @@ runs:
         infra-dir: ${{ inputs.infra-dir }}
         cache-key-suffix: ${{ inputs.cache-key-suffix }}
 
+    - name: Install gVisor rootfs runtime files
+      shell: bash
+      run: tests/e2e/setup-gvisor-rootfs.sh
+
     - uses: helm/kind-action@v1
       with:
         version: v0.30.0
         config: ${{ inputs.kind-config }}
         cluster_name: ${{ inputs.kind-cluster-name }}
+
+    - name: Apply gVisor rootfs RuntimeClass
+      shell: bash
+      run: |
+        kubectl --context "kind-${{ inputs.kind-cluster-name }}" apply -f tests/e2e/runtimeclasses/gvisor-rootfs.yaml
+        echo "E2E_SANDBOX_RUNTIME_CLASS=gvisor-rootfs" >> "${GITHUB_ENV}"
 
     - name: Install Helm
       uses: azure/setup-helm@v4

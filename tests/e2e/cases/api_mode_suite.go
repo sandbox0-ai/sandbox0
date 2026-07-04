@@ -1340,7 +1340,7 @@ func assertSandboxRootFSPersistsAcrossPauseResume(env *framework.ScenarioEnv, se
 	sandbox := waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
 
 	marker := fmt.Sprintf("s0-rootfs-pause-resume-%d", time.Now().UnixNano())
-	rootDir := "/tmp/" + marker
+	rootDir := "/root/" + marker
 	filePath := rootDir + "/marker.txt"
 	nestedPath := rootDir + "/nested/value.txt"
 	linkPath := rootDir + "/marker.link"
@@ -1437,7 +1437,7 @@ func assertSandboxRootFSSnapshotRestoreFork(env *framework.ScenarioEnv, session 
 	source := waitForSandboxPodReadyEventually(env, session, sourceSandboxID, templateNamespace)
 
 	marker := fmt.Sprintf("s0-rootfs-snapshot-%d", time.Now().UnixNano())
-	rootDir := "/tmp/" + marker
+	rootDir := "/root/" + marker
 	filePath := rootDir + "/marker.txt"
 	nestedPath := rootDir + "/nested/value.txt"
 	v1Content := "snapshot v1 " + marker

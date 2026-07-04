@@ -779,49 +779,6 @@ await sandbox.contextSignal(context.id, 'TERM');`
   ]}
 />
 
-### Get Context Stats
-
-Get resource usage statistics for a context.
-
-<Endpoint method="GET">
-/api/v1/sandboxes/{'{id}'}/contexts/{'{ctx_id}'}/stats
-</Endpoint>
-
-<Tabs
-  tabs={[
-    {
-      label: "Go",
-      language: "go",
-      code: `stats, err := sandbox.ContextStats(ctx, ctxResp.ID)
-if err != nil {
-    log.Fatal(err)
-}
-fmt.Printf("Memory: %d bytes\\n", stats.Usage.Value.MemoryRss.Value)
-fmt.Printf("CPU: %.2f%%\\n", stats.Usage.Value.CPUPercent.Value)`
-    },
-    {
-      label: "Python",
-      language: "python",
-      code: `stats = sandbox.context_stats(context.id)
-print(f"Context stats: {stats.usage}")`
-    },
-    {
-      label: "TypeScript",
-      language: "typescript",
-      code: `const stats = await sandbox.contextStats(context.id);
-console.log('Memory:', stats.usage?.memoryRss, 'bytes');
-console.log('CPU:', stats.usage?.cpuPercent, '%');`
-    },
-    {
-      label: "CLI",
-      language: "bash",
-      code: `s0 sandbox context stats ctx-xyz789 -s sb_abc123`
-    }
-  ]}
-/>
-
----
-
 ## Delete Context
 
 Delete a context.

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	"go.uber.org/zap"
 )
@@ -17,7 +19,18 @@ import (
 const (
 	defaultSandboxObservabilityLimit = 100
 	maxSandboxObservabilityLimit     = 1000
+	sandboxObservabilityWatchPoll    = time.Second
+	sandboxObservabilityHeartbeat    = 15 * time.Second
 )
+
+type sandboxObservabilityWatchLine struct {
+	Type      string `json:"type"`
+	Data      any    `json:"data,omitempty"`
+	Cursor    string `json:"cursor,omitempty"`
+	Watermark string `json:"watermark,omitempty"`
+	Time      string `json:"time,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
 
 // SandboxObservabilityHandler serves historical per-sandbox observability queries.
 type SandboxObservabilityHandler struct {
@@ -72,6 +85,14 @@ func (h *SandboxObservabilityHandler) ListLogs(c *gin.Context) {
 	if !ok {
 		return
 	}
+	watch, ok := parseSandboxObservabilityWatch(c)
+	if !ok {
+		return
+	}
+	if watch {
+		h.watchLogs(c, query)
+		return
+	}
 	result, err := h.repo.ListLogs(c.Request.Context(), query)
 	if err != nil {
 		h.writeQueryError(c, err, "failed to list sandbox observability logs", zap.String("sandbox_id", query.SandboxID), zap.String("team_id", query.TeamID))
@@ -89,6 +110,14 @@ func (h *SandboxObservabilityHandler) ListLogs(c *gin.Context) {
 func (h *SandboxObservabilityHandler) ListMetricSamples(c *gin.Context) {
 	query, ok := parseSandboxMetricQuery(c)
 	if !ok {
+		return
+	}
+	watch, ok := parseSandboxObservabilityWatch(c)
+	if !ok {
+		return
+	}
+	if watch {
+		h.watchMetricSamples(c, query)
 		return
 	}
 	result, err := h.repo.ListMetricSamples(c.Request.Context(), query)
@@ -191,6 +220,14 @@ func (h *SandboxObservabilityHandler) list(c *gin.Context, auditOnly bool) {
 	if !ok {
 		return
 	}
+	watch, ok := parseSandboxObservabilityWatch(c)
+	if !ok {
+		return
+	}
+	if watch {
+		h.watchEvents(c, query, auditOnly)
+		return
+	}
 
 	var (
 		result *sandboxobservability.EventListResult
@@ -215,6 +252,248 @@ func (h *SandboxObservabilityHandler) list(c *gin.Context, auditOnly bool) {
 		result.Events = []sandboxobservability.Event{}
 	}
 	spec.JSONSuccess(c, http.StatusOK, result)
+}
+
+func (h *SandboxObservabilityHandler) watchEvents(c *gin.Context, query sandboxobservability.EventQuery, auditOnly bool) {
+	if !validateSandboxObservabilityWatch(c, query.EndTime) {
+		return
+	}
+	watchRepo, ok := h.watchRepository(c)
+	if !ok {
+		return
+	}
+
+	opts := buildSandboxObservabilityWatchOptions(query.Cursor, query.Limit, query.StartTime)
+	fetch := func() (*sandboxobservability.EventListResult, error) {
+		if auditOnly {
+			return watchRepo.WatchAuditEvents(c.Request.Context(), query, opts)
+		}
+		return watchRepo.WatchEvents(c.Request.Context(), query, opts)
+	}
+	result, err := fetch()
+	if err != nil {
+		h.writeQueryError(c, err, "failed to watch sandbox observability events",
+			zap.String("sandbox_id", query.SandboxID),
+			zap.String("team_id", query.TeamID),
+			zap.Bool("audit_only", auditOnly))
+		return
+	}
+
+	encoder, flusher, ok := h.startSandboxObservabilityWatch(c)
+	if !ok {
+		return
+	}
+	lastHeartbeat := time.Now().UTC()
+	for {
+		fullBatch := h.writeWatchEvents(c, encoder, flusher, result, &opts)
+		if result == nil || !fullBatch {
+			if !h.waitForNextWatchPoll(c, encoder, flusher, &lastHeartbeat) {
+				return
+			}
+		}
+		result, err = fetch()
+		if err != nil {
+			h.writeWatchErrorLine(c, encoder, flusher, err, "failed to watch sandbox observability events")
+			return
+		}
+	}
+}
+
+func (h *SandboxObservabilityHandler) watchLogs(c *gin.Context, query sandboxobservability.LogQuery) {
+	if !validateSandboxObservabilityWatch(c, query.EndTime) {
+		return
+	}
+	watchRepo, ok := h.watchRepository(c)
+	if !ok {
+		return
+	}
+
+	opts := buildSandboxObservabilityWatchOptions(query.Cursor, query.Limit, query.StartTime)
+	fetch := func() (*sandboxobservability.LogListResult, error) {
+		return watchRepo.WatchLogs(c.Request.Context(), query, opts)
+	}
+	result, err := fetch()
+	if err != nil {
+		h.writeQueryError(c, err, "failed to watch sandbox observability logs",
+			zap.String("sandbox_id", query.SandboxID),
+			zap.String("team_id", query.TeamID))
+		return
+	}
+
+	encoder, flusher, ok := h.startSandboxObservabilityWatch(c)
+	if !ok {
+		return
+	}
+	lastHeartbeat := time.Now().UTC()
+	for {
+		fullBatch := h.writeWatchLogs(c, encoder, flusher, result, &opts)
+		if result == nil || !fullBatch {
+			if !h.waitForNextWatchPoll(c, encoder, flusher, &lastHeartbeat) {
+				return
+			}
+		}
+		result, err = fetch()
+		if err != nil {
+			h.writeWatchErrorLine(c, encoder, flusher, err, "failed to watch sandbox observability logs")
+			return
+		}
+	}
+}
+
+func (h *SandboxObservabilityHandler) watchMetricSamples(c *gin.Context, query sandboxobservability.MetricQuery) {
+	if !validateSandboxObservabilityWatch(c, query.EndTime) {
+		return
+	}
+	watchRepo, ok := h.watchRepository(c)
+	if !ok {
+		return
+	}
+
+	opts := buildSandboxObservabilityWatchOptions(query.Cursor, query.Limit, query.StartTime)
+	fetch := func() (*sandboxobservability.MetricListResult, error) {
+		return watchRepo.WatchMetricSamples(c.Request.Context(), query, opts)
+	}
+	result, err := fetch()
+	if err != nil {
+		h.writeQueryError(c, err, "failed to watch sandbox observability metric samples",
+			zap.String("sandbox_id", query.SandboxID),
+			zap.String("team_id", query.TeamID))
+		return
+	}
+
+	encoder, flusher, ok := h.startSandboxObservabilityWatch(c)
+	if !ok {
+		return
+	}
+	lastHeartbeat := time.Now().UTC()
+	for {
+		fullBatch := h.writeWatchMetricSamples(c, encoder, flusher, result, &opts)
+		if result == nil || !fullBatch {
+			if !h.waitForNextWatchPoll(c, encoder, flusher, &lastHeartbeat) {
+				return
+			}
+		}
+		result, err = fetch()
+		if err != nil {
+			h.writeWatchErrorLine(c, encoder, flusher, err, "failed to watch sandbox observability metric samples")
+			return
+		}
+	}
+}
+
+func (h *SandboxObservabilityHandler) watchRepository(c *gin.Context) (sandboxobservability.WatchRepository, bool) {
+	watchRepo, ok := h.repo.(sandboxobservability.WatchRepository)
+	if !ok {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox observability watch backend is disabled")
+		return nil, false
+	}
+	return watchRepo, true
+}
+
+func (h *SandboxObservabilityHandler) startSandboxObservabilityWatch(c *gin.Context) (*json.Encoder, http.Flusher, bool) {
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "streaming response is not supported")
+		return nil, nil, false
+	}
+	if err := proxy.DisableResponseWriteDeadline(c.Writer); err != nil {
+		h.logger.Debug("Failed to disable sandbox observability watch write deadline", zap.Error(err))
+	}
+	c.Header("Content-Type", "application/x-ndjson")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("X-Accel-Buffering", "no")
+	c.Status(http.StatusOK)
+	return json.NewEncoder(c.Writer), flusher, true
+}
+
+func (h *SandboxObservabilityHandler) writeWatchEvents(c *gin.Context, encoder *json.Encoder, flusher http.Flusher, result *sandboxobservability.EventListResult, opts *sandboxobservability.WatchOptions) bool {
+	if result == nil {
+		return false
+	}
+	for _, event := range result.Events {
+		if !h.writeWatchLine(c, encoder, flusher, sandboxObservabilityWatchLine{Type: "event", Data: event}) {
+			return false
+		}
+	}
+	h.writeWatchWatermark(c, encoder, flusher, result.NextCursor, result.Watermark, opts)
+	return len(result.Events) >= opts.Limit && opts.Limit > 0
+}
+
+func (h *SandboxObservabilityHandler) writeWatchLogs(c *gin.Context, encoder *json.Encoder, flusher http.Flusher, result *sandboxobservability.LogListResult, opts *sandboxobservability.WatchOptions) bool {
+	if result == nil {
+		return false
+	}
+	for _, entry := range result.Logs {
+		if !h.writeWatchLine(c, encoder, flusher, sandboxObservabilityWatchLine{Type: "log", Data: entry}) {
+			return false
+		}
+	}
+	h.writeWatchWatermark(c, encoder, flusher, result.NextCursor, result.Watermark, opts)
+	return len(result.Logs) >= opts.Limit && opts.Limit > 0
+}
+
+func (h *SandboxObservabilityHandler) writeWatchMetricSamples(c *gin.Context, encoder *json.Encoder, flusher http.Flusher, result *sandboxobservability.MetricListResult, opts *sandboxobservability.WatchOptions) bool {
+	if result == nil {
+		return false
+	}
+	for _, sample := range result.Samples {
+		if !h.writeWatchLine(c, encoder, flusher, sandboxObservabilityWatchLine{Type: "metric_sample", Data: sample}) {
+			return false
+		}
+	}
+	h.writeWatchWatermark(c, encoder, flusher, result.NextCursor, result.Watermark, opts)
+	return len(result.Samples) >= opts.Limit && opts.Limit > 0
+}
+
+func (h *SandboxObservabilityHandler) writeWatchWatermark(c *gin.Context, encoder *json.Encoder, flusher http.Flusher, cursor, watermark string, opts *sandboxobservability.WatchOptions) {
+	if cursor == "" {
+		return
+	}
+	opts.Cursor = cursor
+	_ = h.writeWatchLine(c, encoder, flusher, sandboxObservabilityWatchLine{
+		Type:      "watermark",
+		Cursor:    cursor,
+		Watermark: watermark,
+	})
+}
+
+func (h *SandboxObservabilityHandler) writeWatchErrorLine(c *gin.Context, encoder *json.Encoder, flusher http.Flusher, err error, message string) {
+	h.logger.Error(message, zap.Error(err))
+	_ = h.writeWatchLine(c, encoder, flusher, sandboxObservabilityWatchLine{
+		Type:  "error",
+		Error: message,
+	})
+}
+
+func (h *SandboxObservabilityHandler) waitForNextWatchPoll(c *gin.Context, encoder *json.Encoder, flusher http.Flusher, lastHeartbeat *time.Time) bool {
+	poll := time.NewTimer(sandboxObservabilityWatchPoll)
+	defer poll.Stop()
+
+	select {
+	case <-c.Request.Context().Done():
+		return false
+	case <-poll.C:
+		now := time.Now().UTC()
+		if lastHeartbeat != nil && now.Sub(*lastHeartbeat) >= sandboxObservabilityHeartbeat {
+			*lastHeartbeat = now
+			if !h.writeWatchLine(c, encoder, flusher, sandboxObservabilityWatchLine{
+				Type: "heartbeat",
+				Time: now.Format(time.RFC3339Nano),
+			}) {
+				return false
+			}
+		}
+		return true
+	}
+}
+
+func (h *SandboxObservabilityHandler) writeWatchLine(c *gin.Context, encoder *json.Encoder, flusher http.Flusher, line sandboxObservabilityWatchLine) bool {
+	if err := encoder.Encode(line); err != nil {
+		h.logger.Debug("Failed to write sandbox observability watch line", zap.Error(err))
+		return false
+	}
+	flusher.Flush()
+	return c.Request.Context().Err() == nil
 }
 
 func (h *SandboxObservabilityHandler) writeQueryError(c *gin.Context, err error, message string, fields ...zap.Field) {
@@ -441,6 +720,39 @@ func parseSandboxObservabilityLimit(c *gin.Context) (int, bool) {
 		parsed = maxSandboxObservabilityLimit
 	}
 	return parsed, true
+}
+
+func parseSandboxObservabilityWatch(c *gin.Context) (bool, bool) {
+	value := strings.TrimSpace(c.Query("watch"))
+	if value == "" {
+		return false, true
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid watch")
+		return false, false
+	}
+	return parsed, true
+}
+
+func validateSandboxObservabilityWatch(c *gin.Context, endTime *time.Time) bool {
+	if endTime != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "end_time is not supported when watch=true")
+		return false
+	}
+	return true
+}
+
+func buildSandboxObservabilityWatchOptions(cursor string, limit int, startTime *time.Time) sandboxobservability.WatchOptions {
+	opts := sandboxobservability.WatchOptions{
+		Cursor: strings.TrimSpace(cursor),
+		Limit:  limit,
+	}
+	if opts.Cursor == "" && startTime == nil {
+		after := time.Now().UTC()
+		opts.AfterIngestedAt = &after
+	}
+	return opts
 }
 
 func parseOptionalSourceQuery(c *gin.Context) (sandboxobservability.Source, bool) {

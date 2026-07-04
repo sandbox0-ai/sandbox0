@@ -2,7 +2,6 @@ package http
 
 import (
 	"net/http"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
@@ -69,7 +68,7 @@ func (s *Server) proxySandbox(c *gin.Context) {
 	}
 
 	s.applyInternalHeaders(c, token, authCtx)
-	if sandboxLogsFollowRequested(c) {
+	if sandboxObservabilityWatchRequested(c) {
 		c.Request = proxy.WithUpstreamTimeoutDisabledRequest(c.Request)
 	}
 
@@ -90,7 +89,7 @@ func (s *Server) proxyToScheduler(c *gin.Context, authCtx *authn.AuthContext) {
 	}
 
 	s.applyInternalHeaders(c, token, authCtx)
-	if sandboxLogsFollowRequested(c) {
+	if sandboxObservabilityWatchRequested(c) {
 		c.Request = proxy.WithUpstreamTimeoutDisabledRequest(c.Request)
 	}
 	s.schedulerRouter.ProxyToTarget(c)
@@ -111,18 +110,14 @@ func (s *Server) proxyToDefaultClusterGateway(c *gin.Context) {
 	}
 
 	s.applyInternalHeaders(c, token, authCtx)
-	if sandboxLogsFollowRequested(c) {
+	if sandboxObservabilityWatchRequested(c) {
 		c.Request = proxy.WithUpstreamTimeoutDisabledRequest(c.Request)
 	}
 	s.clusterGatewayRouter.ProxyToTarget(c)
 }
 
-func sandboxLogsFollowRequested(c *gin.Context) bool {
-	if c.Request.Method != http.MethodGet || c.Param("path") != "/logs" {
-		return false
-	}
-	follow, err := strconv.ParseBool(c.Query("follow"))
-	return err == nil && follow
+func sandboxObservabilityWatchRequested(c *gin.Context) bool {
+	return middleware.RequestShouldBeLongLived(c.Request)
 }
 
 func (s *Server) applyInternalHeaders(c *gin.Context, token string, authCtx *authn.AuthContext) {

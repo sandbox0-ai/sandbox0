@@ -129,20 +129,7 @@ func TestSetupRoutesMountsMetadataEndpoint(t *testing.T) {
 	}
 }
 
-func TestSetupRoutesMountsSandboxLogsEndpoint(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	server, _, _ := testMeteringRouteServer(t, "public")
-	server.requestLogger = middleware.NewRequestLogger(zap.NewNop())
-	server.obsProvider = newTestMeteringObservability(t)
-	server.setupRoutes()
-
-	if !hasRoute(server.router, "GET", "/api/v1/sandboxes/:id/logs") {
-		t.Fatal("expected sandbox logs route to be mounted")
-	}
-}
-
-func TestSetupRoutesMountsSandboxStatsAndHistoricalObservabilityEndpoints(t *testing.T) {
+func TestSetupRoutesDoesNotMountLegacySandboxLogsAndStatsEndpoints(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	server, _, _ := testMeteringRouteServer(t, "public")
@@ -151,7 +138,25 @@ func TestSetupRoutesMountsSandboxStatsAndHistoricalObservabilityEndpoints(t *tes
 	server.setupRoutes()
 
 	for _, path := range []string{
+		"/api/v1/sandboxes/:id/logs",
 		"/api/v1/sandboxes/:id/stats",
+		"/api/v1/sandboxes/:id/contexts/:ctx_id/stats",
+	} {
+		if hasRoute(server.router, "GET", path) {
+			t.Fatalf("expected legacy route %s to be removed", path)
+		}
+	}
+}
+
+func TestSetupRoutesMountsSandboxHistoricalObservabilityEndpoints(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server, _, _ := testMeteringRouteServer(t, "public")
+	server.requestLogger = middleware.NewRequestLogger(zap.NewNop())
+	server.obsProvider = newTestMeteringObservability(t)
+	server.setupRoutes()
+
+	for _, path := range []string{
 		"/api/v1/sandboxes/:id/observability/events",
 		"/api/v1/sandboxes/:id/observability/logs",
 		"/api/v1/sandboxes/:id/observability/metrics",

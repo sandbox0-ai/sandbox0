@@ -151,12 +151,26 @@ type MetricListResult struct {
 	Watermark  string         `json:"watermark,omitempty"`
 }
 
+type WatchOptions struct {
+	Cursor          string
+	Limit           int
+	AfterIngestedAt *time.Time
+}
+
 // Repository is the storage/query boundary for historical sandbox observability.
 type Repository interface {
 	ListEvents(ctx context.Context, query EventQuery) (*EventListResult, error)
 	ListAuditEvents(ctx context.Context, query EventQuery) (*EventListResult, error)
 	ListLogs(ctx context.Context, query LogQuery) (*LogListResult, error)
 	ListMetricSamples(ctx context.Context, query MetricQuery) (*MetricListResult, error)
+}
+
+// WatchRepository streams observability records in ingestion order.
+type WatchRepository interface {
+	WatchEvents(ctx context.Context, query EventQuery, opts WatchOptions) (*EventListResult, error)
+	WatchAuditEvents(ctx context.Context, query EventQuery, opts WatchOptions) (*EventListResult, error)
+	WatchLogs(ctx context.Context, query LogQuery, opts WatchOptions) (*LogListResult, error)
+	WatchMetricSamples(ctx context.Context, query MetricQuery, opts WatchOptions) (*MetricListResult, error)
 }
 
 // Writer is the ingest boundary for asynchronous observability projections.
@@ -185,6 +199,22 @@ func (DisabledRepository) ListLogs(context.Context, LogQuery) (*LogListResult, e
 }
 
 func (DisabledRepository) ListMetricSamples(context.Context, MetricQuery) (*MetricListResult, error) {
+	return nil, ErrBackendDisabled
+}
+
+func (DisabledRepository) WatchEvents(context.Context, EventQuery, WatchOptions) (*EventListResult, error) {
+	return nil, ErrBackendDisabled
+}
+
+func (DisabledRepository) WatchAuditEvents(context.Context, EventQuery, WatchOptions) (*EventListResult, error) {
+	return nil, ErrBackendDisabled
+}
+
+func (DisabledRepository) WatchLogs(context.Context, LogQuery, WatchOptions) (*LogListResult, error) {
+	return nil, ErrBackendDisabled
+}
+
+func (DisabledRepository) WatchMetricSamples(context.Context, MetricQuery, WatchOptions) (*MetricListResult, error) {
 	return nil, ErrBackendDisabled
 }
 

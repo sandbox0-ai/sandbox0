@@ -13,13 +13,18 @@ func TestRequestShouldBeLongLived(t *testing.T) {
 		want bool
 	}{
 		{
-			name: "sandbox logs follow stream",
-			req:  httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/sb_123/logs?follow=true", nil),
+			name: "sandbox observability logs watch stream",
+			req:  httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/sb_123/observability/logs?watch=true", nil),
 			want: true,
 		},
 		{
-			name: "sandbox logs snapshot",
-			req:  httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/sb_123/logs", nil),
+			name: "sandbox observability logs snapshot",
+			req:  httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/sb_123/observability/logs", nil),
+			want: false,
+		},
+		{
+			name: "legacy sandbox logs follow is not long-lived",
+			req:  httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/sb_123/logs?follow=true", nil),
 			want: false,
 		},
 		{

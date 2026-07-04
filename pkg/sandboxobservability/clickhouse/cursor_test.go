@@ -43,3 +43,30 @@ func TestPageCursorRejectsInvalidValue(t *testing.T) {
 		t.Fatalf("decodePageCursor() error = %v, want ErrInvalidCursor", err)
 	}
 }
+
+func TestTailCursorRoundTripAndRejectsWrongKind(t *testing.T) {
+	ingestedAt := time.Date(2026, 7, 1, 1, 2, 4, 5, time.FixedZone("offset", 8*60*60))
+	encoded, err := encodeTailCursor(eventTailCursorKind, ingestedAt, string(sandboxobservability.SourceNetd), string(sandboxobservability.EventTypeNetworkAudit), "netd:cursor:1")
+	if err != nil {
+		t.Fatalf("encodeTailCursor() error = %v", err)
+	}
+	decoded, err := decodeTailCursor(encoded, eventTailCursorKind)
+	if err != nil {
+		t.Fatalf("decodeTailCursor() error = %v", err)
+	}
+	if decoded.Kind != eventTailCursorKind ||
+		!decoded.IngestedAt.Equal(ingestedAt) ||
+		decoded.Source != string(sandboxobservability.SourceNetd) ||
+		decoded.EventType != string(sandboxobservability.EventTypeNetworkAudit) ||
+		decoded.Cursor != "netd:cursor:1" {
+		t.Fatalf("decoded cursor = %+v", decoded)
+	}
+	if decoded.IngestedAt.Location() != time.UTC {
+		t.Fatalf("decoded cursor time must be UTC: %+v", decoded)
+	}
+
+	_, err = decodeTailCursor(encoded, logTailCursorKind)
+	if !errors.Is(err, sandboxobservability.ErrInvalidCursor) {
+		t.Fatalf("decodeTailCursor() error = %v, want ErrInvalidCursor", err)
+	}
+}

@@ -29,7 +29,7 @@ runsc_arch() {
       printf 'x86_64\n'
       ;;
     aarch64|arm64)
-      printf 'arm64\n'
+      printf 'aarch64\n'
       ;;
     *)
       echo "unsupported architecture for gVisor runsc: $(uname -m)" >&2

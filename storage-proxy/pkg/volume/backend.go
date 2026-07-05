@@ -11,6 +11,7 @@ import (
 
 const (
 	BackendS0FS = "s0fs"
+	BackendS3   = "s3"
 )
 
 func DefaultBackendType() string {

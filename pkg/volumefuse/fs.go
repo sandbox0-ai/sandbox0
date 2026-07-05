@@ -20,7 +20,7 @@ type FileSystem struct {
 	cacheTTL time.Duration
 }
 
-const fileOpenFlags = fuse.FOPEN_KEEP_CACHE | fuse.FOPEN_NOFLUSH
+const fileOpenFlags = fuse.FOPEN_KEEP_CACHE
 
 func New(volumeID string, cacheTTL time.Duration, session Session) *FileSystem {
 	if cacheTTL < 0 {
@@ -420,7 +420,7 @@ func (fs *FileSystem) Create(cancel <-chan struct{}, input *fuse.CreateIn, name 
 	fs.invalidateKernelAttr(input.NodeId)
 	setEntryOut(&out.EntryOut, resp.Inode, resp.Attr, fs.cacheTTL)
 	out.Fh = resp.HandleId
-	out.OpenFlags = fileOpenFlags
+	out.OpenFlags = sessionOpenFlags(session)
 	return fuse.OK
 }
 
@@ -443,7 +443,7 @@ func (fs *FileSystem) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse
 		return statusToFuse(err)
 	}
 	out.Fh = resp.HandleId
-	out.OpenFlags = fileOpenFlags
+	out.OpenFlags = sessionOpenFlags(session)
 	return fuse.OK
 }
 
@@ -1053,6 +1053,13 @@ func setAttr(out *fuse.Attr, attr *pb.GetAttrResponse) {
 	out.Ctime = uint64(attr.CtimeSec)
 	out.Ctimensec = uint32(attr.CtimeNsec)
 	out.Blksize = 4096
+}
+
+func sessionOpenFlags(session Session) uint32 {
+	if provider, ok := session.(OpenFlagsSession); ok {
+		return provider.OpenFlags()
+	}
+	return fileOpenFlags
 }
 
 func statusToFuse(err error) fuse.Status {

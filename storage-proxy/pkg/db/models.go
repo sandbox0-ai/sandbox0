@@ -2,6 +2,7 @@ package db
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -17,9 +18,73 @@ type SandboxVolume struct {
 	DefaultPosixGID *int64 `json:"default_posix_gid,omitempty"`
 
 	AccessMode string `json:"access_mode"`
+	Backend    string `json:"backend"`
+	// BackendConfig stores backend-specific configuration. It is intentionally
+	// omitted from JSON responses because S3 configs may contain credentials.
+	BackendConfig json.RawMessage `json:"-"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type sandboxVolumeJSON struct {
+	ID              string                     `json:"id"`
+	TeamID          string                     `json:"team_id"`
+	UserID          string                     `json:"user_id"`
+	SourceVolumeID  *string                    `json:"source_volume_id,omitempty"`
+	DefaultPosixUID *int64                     `json:"default_posix_uid,omitempty"`
+	DefaultPosixGID *int64                     `json:"default_posix_gid,omitempty"`
+	AccessMode      string                     `json:"access_mode"`
+	Backend         string                     `json:"backend"`
+	S3              *sandboxVolumeS3PublicJSON `json:"s3,omitempty"`
+	CreatedAt       time.Time                  `json:"created_at"`
+	UpdatedAt       time.Time                  `json:"updated_at"`
+}
+
+type sandboxVolumeS3PublicJSON struct {
+	Provider    string `json:"provider,omitempty"`
+	Bucket      string `json:"bucket,omitempty"`
+	Prefix      string `json:"prefix,omitempty"`
+	Region      string `json:"region,omitempty"`
+	EndpointURL string `json:"endpoint_url,omitempty"`
+}
+
+func (v SandboxVolume) MarshalJSON() ([]byte, error) {
+	backend := strings.TrimSpace(v.Backend)
+	if backend == "" {
+		backend = "s0fs"
+	}
+	out := sandboxVolumeJSON{
+		ID:              v.ID,
+		TeamID:          v.TeamID,
+		UserID:          v.UserID,
+		SourceVolumeID:  v.SourceVolumeID,
+		DefaultPosixUID: v.DefaultPosixUID,
+		DefaultPosixGID: v.DefaultPosixGID,
+		AccessMode:      v.AccessMode,
+		Backend:         backend,
+		CreatedAt:       v.CreatedAt,
+		UpdatedAt:       v.UpdatedAt,
+	}
+	if backend == "s3" && len(v.BackendConfig) > 0 {
+		var cfg struct {
+			Provider    string `json:"provider,omitempty"`
+			Bucket      string `json:"bucket,omitempty"`
+			Prefix      string `json:"prefix,omitempty"`
+			Region      string `json:"region,omitempty"`
+			EndpointURL string `json:"endpoint_url,omitempty"`
+		}
+		if err := json.Unmarshal(v.BackendConfig, &cfg); err == nil {
+			out.S3 = &sandboxVolumeS3PublicJSON{
+				Provider:    cfg.Provider,
+				Bucket:      cfg.Bucket,
+				Prefix:      cfg.Prefix,
+				Region:      cfg.Region,
+				EndpointURL: cfg.EndpointURL,
+			}
+		}
+	}
+	return json.Marshal(out)
 }
 
 // S0FSCommittedHead stores the current committed immutable manifest pointer for one volume.

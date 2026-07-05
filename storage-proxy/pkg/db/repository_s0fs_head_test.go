@@ -152,6 +152,69 @@ func TestListSandboxVolumesBySource(t *testing.T) {
 	}
 }
 
+func TestSandboxVolumeBackendConfigRoundTrip(t *testing.T) {
+	repo := newS0FSCommittedHeadTestRepository(t)
+	if repo == nil {
+		return
+	}
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	defaultID := "vol-" + uuid.NewString()
+	if err := repo.CreateSandboxVolume(ctx, &SandboxVolume{
+		ID:         defaultID,
+		TeamID:     "team-1",
+		UserID:     "user-1",
+		AccessMode: "RWO",
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}); err != nil {
+		t.Fatalf("CreateSandboxVolume(default) error = %v", err)
+	}
+	defaultVol, err := repo.GetSandboxVolume(ctx, defaultID)
+	if err != nil {
+		t.Fatalf("GetSandboxVolume(default) error = %v", err)
+	}
+	if defaultVol.Backend != "s0fs" {
+		t.Fatalf("default backend = %q, want s0fs", defaultVol.Backend)
+	}
+	if string(defaultVol.BackendConfig) != "{}" {
+		t.Fatalf("default backend_config = %s, want {}", string(defaultVol.BackendConfig))
+	}
+
+	s3ID := "vol-" + uuid.NewString()
+	rawConfig := json.RawMessage(`{"provider":"aws","bucket":"sandbox-data","prefix":"team-a/vol-a","access_key":"ak","secret_key":"sk"}`)
+	if err := repo.CreateSandboxVolume(ctx, &SandboxVolume{
+		ID:            s3ID,
+		TeamID:        "team-1",
+		UserID:        "user-1",
+		AccessMode:    "RWO",
+		Backend:       "s3",
+		BackendConfig: rawConfig,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}); err != nil {
+		t.Fatalf("CreateSandboxVolume(s3) error = %v", err)
+	}
+	s3Vol, err := repo.GetSandboxVolume(ctx, s3ID)
+	if err != nil {
+		t.Fatalf("GetSandboxVolume(s3) error = %v", err)
+	}
+	if s3Vol.Backend != "s3" {
+		t.Fatalf("s3 backend = %q, want s3", s3Vol.Backend)
+	}
+	if !json.Valid(s3Vol.BackendConfig) {
+		t.Fatalf("backend_config is not valid JSON: %s", string(s3Vol.BackendConfig))
+	}
+	var decoded map[string]string
+	if err := json.Unmarshal(s3Vol.BackendConfig, &decoded); err != nil {
+		t.Fatalf("unmarshal backend_config: %v", err)
+	}
+	if decoded["bucket"] != "sandbox-data" || decoded["prefix"] != "team-a/vol-a" || decoded["secret_key"] != "sk" {
+		t.Fatalf("backend_config = %#v", decoded)
+	}
+}
+
 func TestAcquireMountRejectsConflictingRWOMount(t *testing.T) {
 	repo := newS0FSCommittedHeadTestRepository(t)
 	if repo == nil {

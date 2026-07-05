@@ -124,9 +124,12 @@ func (s *Server) prepareOrProxyVolumeFileRequest(w http.ResponseWriter, r *http.
 		s.writeVolumeFileError(w, err)
 		return r.Context(), nil, func() {}, true
 	}
-	if err := s.ensureCtldVolumeOwner(r.Context(), volumeRecord); err != nil {
-		s.writeVolumeFileError(w, err)
-		return r.Context(), nil, func() {}, true
+	backend := volume.NormalizeBackend(volumeRecord.Backend)
+	if backend == volume.BackendS0FS {
+		if err := s.ensureCtldVolumeOwner(r.Context(), volumeRecord); err != nil {
+			s.writeVolumeFileError(w, err)
+			return r.Context(), nil, func() {}, true
+		}
 	}
 
 	proxied, err := s.proxyVolumeRequestToOwnerIfNeeded(w, r, volumeRecord)
@@ -136,6 +139,10 @@ func (s *Server) prepareOrProxyVolumeFileRequest(w http.ResponseWriter, r *http.
 	}
 	if proxied {
 		return r.Context(), volumeRecord, func() {}, true
+	}
+	if backend != volume.BackendS0FS {
+		s.writeVolumeFileError(w, errVolumeFileUnsupported)
+		return r.Context(), nil, func() {}, true
 	}
 
 	actor, err := defaultVolumeFileActor(volumeRecord)

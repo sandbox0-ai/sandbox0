@@ -30,6 +30,13 @@ const (
 	AppArmorProfileTypeUnconfined     AppArmorProfileType = "Unconfined"
 )
 
+// Defines values for CreateSandboxVolumeS3ConfigProvider.
+const (
+	CreateSandboxVolumeS3ConfigProviderAli CreateSandboxVolumeS3ConfigProvider = "ali"
+	CreateSandboxVolumeS3ConfigProviderAws CreateSandboxVolumeS3ConfigProvider = "aws"
+	CreateSandboxVolumeS3ConfigProviderR2  CreateSandboxVolumeS3ConfigProvider = "r2"
+)
+
 // Defines values for CredentialProjectionType.
 const (
 	HttpHeaders             CredentialProjectionType = "http_headers"
@@ -233,6 +240,13 @@ const (
 	SandboxObservabilityWatchLineTypeLog          SandboxObservabilityWatchLineType = "log"
 	SandboxObservabilityWatchLineTypeMetricSample SandboxObservabilityWatchLineType = "metric_sample"
 	SandboxObservabilityWatchLineTypeWatermark    SandboxObservabilityWatchLineType = "watermark"
+)
+
+// Defines values for SandboxVolumeS3ConfigProvider.
+const (
+	SandboxVolumeS3ConfigProviderAli SandboxVolumeS3ConfigProvider = "ali"
+	SandboxVolumeS3ConfigProviderAws SandboxVolumeS3ConfigProvider = "aws"
+	SandboxVolumeS3ConfigProviderR2  SandboxVolumeS3ConfigProvider = "r2"
 )
 
 // Defines values for SeccompProfileType.
@@ -586,6 +600,12 @@ const (
 	RWX VolumeAccessMode = "RWX"
 )
 
+// Defines values for VolumeBackend.
+const (
+	S0fs VolumeBackend = "s0fs"
+	S3   VolumeBackend = "s3"
+)
+
 // APIKey defines model for APIKey.
 type APIKey struct {
 	CreatedAt  time.Time  `json:"created_at"`
@@ -840,15 +860,47 @@ type CreateSandboxVolumeRequest struct {
 	// AccessMode Access mode for sandbox volumes. Enforcement is scoped to storage-proxy instances. RWO allows read-write mounts on a single instance; ROX allows read-only mounts across instances; RWX allows read-write mounts across instances.
 	AccessMode *VolumeAccessMode `json:"access_mode,omitempty"`
 
+	// Backend Storage backend for a SandboxVolume. s0fs is the default durable Sandbox0 volume backend. s3 mounts an existing S3-compatible prefix through the volume portal and supports mount-s3-like object projection.
+	Backend *VolumeBackend `json:"backend,omitempty"`
+
 	// DefaultPosixGid Default POSIX GID used by external volume access paths that do not carry caller identity. Defaults to 0 when omitted on create.
 	DefaultPosixGid *int64 `json:"default_posix_gid,omitempty"`
 
 	// DefaultPosixUid Default POSIX UID used by external volume access paths that do not carry caller identity. Defaults to 0 when omitted on create.
-	DefaultPosixUid *int64 `json:"default_posix_uid,omitempty"`
+	DefaultPosixUid *int64                       `json:"default_posix_uid,omitempty"`
+	S3              *CreateSandboxVolumeS3Config `json:"s3,omitempty"`
 
 	// SnapshotId Optional snapshot ID used to initialize the new volume from immutable snapshot state.
 	SnapshotId *string `json:"snapshot_id,omitempty"`
 }
+
+// CreateSandboxVolumeS3Config defines model for CreateSandboxVolumeS3Config.
+type CreateSandboxVolumeS3Config struct {
+	// AccessKey Optional access key override. Must be provided together with secret_key.
+	AccessKey *string `json:"access_key,omitempty"`
+	Bucket    string  `json:"bucket"`
+
+	// EndpointUrl Optional endpoint override. Required for ali and r2.
+	EndpointUrl *string `json:"endpoint_url,omitempty"`
+
+	// Prefix Optional object key prefix to expose as the volume root.
+	Prefix *string `json:"prefix,omitempty"`
+
+	// Provider S3-compatible provider. ali is Aliyun OSS; r2 is Cloudflare R2.
+	Provider *CreateSandboxVolumeS3ConfigProvider `json:"provider,omitempty"`
+
+	// Region Optional region override. Defaults to the storage-proxy S3 region when omitted.
+	Region *string `json:"region,omitempty"`
+
+	// SecretKey Optional secret key override. Must be provided together with access_key.
+	SecretKey *string `json:"secret_key,omitempty"`
+
+	// SessionToken Optional temporary credential session token.
+	SessionToken *string `json:"session_token,omitempty"`
+}
+
+// CreateSandboxVolumeS3ConfigProvider S3-compatible provider. ali is Aliyun OSS; r2 is Cloudflare R2.
+type CreateSandboxVolumeS3ConfigProvider string
 
 // CreateSnapshotRequest defines model for CreateSnapshotRequest.
 type CreateSnapshotRequest struct {
@@ -2071,16 +2123,32 @@ type SandboxUpdateRequest struct {
 // SandboxVolume defines model for SandboxVolume.
 type SandboxVolume struct {
 	// AccessMode Access mode for sandbox volumes. Enforcement is scoped to storage-proxy instances. RWO allows read-write mounts on a single instance; ROX allows read-only mounts across instances; RWX allows read-write mounts across instances.
-	AccessMode      *VolumeAccessMode `json:"access_mode,omitempty"`
-	CreatedAt       time.Time         `json:"created_at"`
-	DefaultPosixGid *int64            `json:"default_posix_gid"`
-	DefaultPosixUid *int64            `json:"default_posix_uid"`
-	Id              string            `json:"id"`
-	SourceVolumeId  *string           `json:"source_volume_id"`
-	TeamId          string            `json:"team_id"`
-	UpdatedAt       time.Time         `json:"updated_at"`
-	UserId          string            `json:"user_id"`
+	AccessMode *VolumeAccessMode `json:"access_mode,omitempty"`
+
+	// Backend Storage backend for a SandboxVolume. s0fs is the default durable Sandbox0 volume backend. s3 mounts an existing S3-compatible prefix through the volume portal and supports mount-s3-like object projection.
+	Backend         VolumeBackend          `json:"backend"`
+	CreatedAt       time.Time              `json:"created_at"`
+	DefaultPosixGid *int64                 `json:"default_posix_gid"`
+	DefaultPosixUid *int64                 `json:"default_posix_uid"`
+	Id              string                 `json:"id"`
+	S3              *SandboxVolumeS3Config `json:"s3,omitempty"`
+	SourceVolumeId  *string                `json:"source_volume_id"`
+	TeamId          string                 `json:"team_id"`
+	UpdatedAt       time.Time              `json:"updated_at"`
+	UserId          string                 `json:"user_id"`
 }
+
+// SandboxVolumeS3Config defines model for SandboxVolumeS3Config.
+type SandboxVolumeS3Config struct {
+	Bucket      string                        `json:"bucket"`
+	EndpointUrl *string                       `json:"endpoint_url,omitempty"`
+	Prefix      *string                       `json:"prefix,omitempty"`
+	Provider    SandboxVolumeS3ConfigProvider `json:"provider"`
+	Region      *string                       `json:"region,omitempty"`
+}
+
+// SandboxVolumeS3ConfigProvider defines model for SandboxVolumeS3Config.Provider.
+type SandboxVolumeS3ConfigProvider string
 
 // SeccompProfile defines model for SeccompProfile.
 type SeccompProfile struct {
@@ -2921,6 +2989,9 @@ type UsernamePasswordProjection = map[string]interface{}
 
 // VolumeAccessMode Access mode for sandbox volumes. Enforcement is scoped to storage-proxy instances. RWO allows read-write mounts on a single instance; ROX allows read-only mounts across instances; RWX allows read-write mounts across instances.
 type VolumeAccessMode string
+
+// VolumeBackend Storage backend for a SandboxVolume. s0fs is the default durable Sandbox0 volume backend. s3 mounts an existing S3-compatible prefix through the volume portal and supports mount-s3-like object projection.
+type VolumeBackend string
 
 // VolumeFileArchiveImportResponse defines model for VolumeFileArchiveImportResponse.
 type VolumeFileArchiveImportResponse struct {

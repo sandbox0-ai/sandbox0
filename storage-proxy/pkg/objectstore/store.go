@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"golang.org/x/oauth2/google"
 )
@@ -45,6 +47,7 @@ type Info struct {
 	Key      string
 	Size     int64
 	Modified time.Time
+	IsPrefix bool
 }
 
 type Store interface {
@@ -126,6 +129,24 @@ func Create(cfg Config) (Store, error) {
 	default:
 		return nil, fmt.Errorf("unsupported object storage type: %s", storageType)
 	}
+}
+
+func IsNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch strings.ToLower(apiErr.ErrorCode()) {
+		case "notfound", "nosuchkey", "nosuchbucket", "404":
+			return true
+		}
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "not found") ||
+		strings.Contains(message, "nosuchkey") ||
+		strings.Contains(message, "no such key") ||
+		strings.Contains(message, "status=404")
 }
 
 func Prefix(store Store, prefix string) Store {
@@ -294,7 +315,7 @@ func (s *s3Store) List(prefix, startAfter, token, delimiter string, limit int64)
 	if err != nil {
 		return nil, false, "", err
 	}
-	objects := make([]Info, 0, len(resp.Contents))
+	objects := make([]Info, 0, len(resp.Contents)+len(resp.CommonPrefixes))
 	for _, item := range resp.Contents {
 		objects = append(objects, Info{
 			Key:      aws.ToString(item.Key),
@@ -302,6 +323,14 @@ func (s *s3Store) List(prefix, startAfter, token, delimiter string, limit int64)
 			Modified: aws.ToTime(item.LastModified),
 		})
 	}
+	for _, item := range resp.CommonPrefixes {
+		prefix := aws.ToString(item.Prefix)
+		if prefix == "" {
+			continue
+		}
+		objects = append(objects, Info{Key: prefix, IsPrefix: true})
+	}
+	sortInfos(objects)
 	return objects, resp.IsTruncated != nil && *resp.IsTruncated, aws.ToString(resp.NextContinuationToken), nil
 }
 
@@ -488,7 +517,7 @@ func (s *gcsStore) List(prefix, startAfter, token, delimiter string, limit int64
 	if err != nil {
 		return nil, false, "", err
 	}
-	objects := make([]Info, 0, len(result.Items))
+	objects := make([]Info, 0, len(result.Items)+len(result.Prefixes))
 	for _, item := range result.Items {
 		if item.Name == "" {
 			continue
@@ -503,6 +532,13 @@ func (s *gcsStore) List(prefix, startAfter, token, delimiter string, limit int64
 			Modified: item.Updated,
 		})
 	}
+	for _, prefix := range result.Prefixes {
+		if prefix == "" {
+			continue
+		}
+		objects = append(objects, Info{Key: gcsObjectName(prefix), IsPrefix: true})
+	}
+	sortInfos(objects)
 	return objects, result.NextPageToken != "", result.NextPageToken, nil
 }
 
@@ -518,6 +554,7 @@ type gcsObjectAttrs struct {
 
 type gcsListResult struct {
 	Items         []gcsObjectAttrs `json:"items"`
+	Prefixes      []string         `json:"prefixes"`
 	NextPageToken string           `json:"nextPageToken"`
 }
 
@@ -632,7 +669,11 @@ func (s *prefixedStore) Head(key string) (Info, error) {
 }
 
 func (s *prefixedStore) List(prefix, startAfter, token, delimiter string, limit int64) ([]Info, bool, string, error) {
-	objects, hasMore, nextToken, err := s.store.List(s.prefixed(prefix), s.prefixed(startAfter), token, delimiter, limit)
+	listPrefix := s.prefixed(prefix)
+	if strings.TrimLeft(strings.TrimSpace(prefix), "/") == "" {
+		listPrefix = s.prefix
+	}
+	objects, hasMore, nextToken, err := s.store.List(listPrefix, s.prefixed(startAfter), token, delimiter, limit)
 	if err != nil {
 		return nil, false, "", err
 	}
@@ -723,39 +764,54 @@ func (s *memoryStore) Head(key string) (Info, error) {
 	}, nil
 }
 
-func (s *memoryStore) List(prefix, startAfter, _ string, _ string, limit int64) ([]Info, bool, string, error) {
+func (s *memoryStore) List(prefix, startAfter, token, delimiter string, limit int64) ([]Info, bool, string, error) {
 	s.state.mu.RLock()
 	defer s.state.mu.RUnlock()
 	prefix = strings.TrimLeft(prefix, "/")
-	startAfter = strings.TrimLeft(startAfter, "/")
-	keys := make([]string, 0, len(s.state.objects))
-	for key := range s.state.objects {
-		if strings.HasPrefix(key, prefix) && key > startAfter {
-			keys = append(keys, key)
-		}
+	cursor := strings.TrimLeft(token, "/")
+	if cursor == "" {
+		cursor = strings.TrimLeft(startAfter, "/")
 	}
-	slicesSort(keys)
-	max := len(keys)
+	delimiter = strings.TrimSpace(delimiter)
+	seenPrefixes := make(map[string]struct{})
+	objects := make([]Info, 0, len(s.state.objects))
+	for key := range s.state.objects {
+		if !strings.HasPrefix(key, prefix) || key <= cursor {
+			continue
+		}
+		if delimiter != "" {
+			suffix := strings.TrimPrefix(key, prefix)
+			if idx := strings.Index(suffix, delimiter); idx >= 0 {
+				dir := prefix + suffix[:idx+len(delimiter)]
+				if dir <= cursor {
+					continue
+				}
+				if _, ok := seenPrefixes[dir]; ok {
+					continue
+				}
+				seenPrefixes[dir] = struct{}{}
+				objects = append(objects, Info{Key: dir, IsPrefix: true})
+				continue
+			}
+		}
+		objects = append(objects, Info{Key: key, Size: int64(len(s.state.objects[key]))})
+	}
+	sortInfos(objects)
+	max := len(objects)
 	hasMore := false
 	nextToken := ""
 	if limit > 0 && int(limit) < max {
 		hasMore = true
 		max = int(limit)
-		nextToken = keys[max-1]
+		nextToken = objects[max-1].Key
 	}
-	objects := make([]Info, 0, max)
-	for _, key := range keys[:max] {
-		objects = append(objects, Info{Key: key, Size: int64(len(s.state.objects[key]))})
-	}
-	return objects, hasMore, nextToken, nil
+	return objects[:max], hasMore, nextToken, nil
 }
 
-func slicesSort(values []string) {
-	for i := 1; i < len(values); i++ {
-		for j := i; j > 0 && values[j] < values[j-1]; j-- {
-			values[j], values[j-1] = values[j-1], values[j]
-		}
-	}
+func sortInfos(values []Info) {
+	sort.Slice(values, func(i, j int) bool {
+		return values[i].Key < values[j].Key
+	})
 }
 
 type observedStore struct {

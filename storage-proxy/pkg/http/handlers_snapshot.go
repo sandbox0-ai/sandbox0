@@ -277,6 +277,8 @@ func (s *Server) handleSnapshotError(w http.ResponseWriter, err error) {
 		_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, "volume is busy, try again later")
 	case errors.Is(err, snapshot.ErrActiveRWXSnapshotUnsupported):
 		_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, "active RWX volume snapshots are not supported")
+	case errors.Is(err, snapshot.ErrUnsupportedBackend):
+		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "volume backend does not support snapshots")
 	case errors.Is(err, snapshot.ErrFlushFailed):
 		_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "failed to flush data")
 	case errors.Is(err, snapshot.ErrCloneFailed):

@@ -112,6 +112,144 @@ func TestCreateSandboxVolumeDefaultsPosixIdentityToRoot(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxVolumeStoresS3BackendConfigAndRedactsResponse(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	server := &Server{
+		logger:       logrus.New(),
+		repo:         repo,
+		meteringRepo: &fakeHTTPMeteringWriter{},
+		snapshotMgr:  &fakeHTTPSnapshotManager{},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes", bytes.NewReader([]byte(`{
+		"access_mode":"RWO",
+		"s3":{
+			"provider":"cloudflare-r2",
+			"bucket":"sandbox-data",
+			"prefix":"/team-a/volume-a/",
+			"region":"",
+			"endpoint_url":"https://account-id.r2.cloudflarestorage.com/",
+			"access_key":"access-secret",
+			"secret_key":"secret-secret"
+		}
+	}`)))
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
+	recorder := httptest.NewRecorder()
+
+	server.createSandboxVolume(recorder, req)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusCreated, recorder.Body.String())
+	}
+	if len(repo.createdVolumes) != 1 {
+		t.Fatalf("created volumes = %d, want 1", len(repo.createdVolumes))
+	}
+	created := repo.createdVolumes[0]
+	if created.Backend != volume.BackendS3 {
+		t.Fatalf("Backend = %q, want %q", created.Backend, volume.BackendS3)
+	}
+	cfg, err := volume.DecodeS3BackendConfig(created.BackendConfig)
+	if err != nil {
+		t.Fatalf("DecodeS3BackendConfig() error = %v", err)
+	}
+	if cfg.Provider != volume.S3ProviderR2 {
+		t.Fatalf("provider = %q, want %q", cfg.Provider, volume.S3ProviderR2)
+	}
+	if cfg.Prefix != "team-a/volume-a" {
+		t.Fatalf("prefix = %q, want team-a/volume-a", cfg.Prefix)
+	}
+	if cfg.EndpointURL != "https://account-id.r2.cloudflarestorage.com" {
+		t.Fatalf("endpoint_url = %q", cfg.EndpointURL)
+	}
+	if cfg.AccessKey != "access-secret" || cfg.SecretKey != "secret-secret" {
+		t.Fatalf("credentials were not stored in backend config")
+	}
+	if bytes.Contains(recorder.Body.Bytes(), []byte("access-secret")) || bytes.Contains(recorder.Body.Bytes(), []byte("secret-secret")) {
+		t.Fatalf("response leaked s3 credentials: %s", recorder.Body.String())
+	}
+	var envelope struct {
+		Data struct {
+			Backend string `json:"backend"`
+			S3      struct {
+				Provider    string `json:"provider"`
+				Bucket      string `json:"bucket"`
+				Prefix      string `json:"prefix"`
+				EndpointURL string `json:"endpoint_url"`
+			} `json:"s3"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Data.Backend != volume.BackendS3 {
+		t.Fatalf("response backend = %q, want %q", envelope.Data.Backend, volume.BackendS3)
+	}
+	if envelope.Data.S3.Provider != volume.S3ProviderR2 || envelope.Data.S3.Bucket != "sandbox-data" || envelope.Data.S3.Prefix != "team-a/volume-a" {
+		t.Fatalf("response s3 config = %+v", envelope.Data.S3)
+	}
+}
+
+func TestCreateSandboxVolumeRejectsUnsupportedS3Combinations(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "snapshot",
+			body: `{
+				"snapshot_id":"snap-1",
+				"s3":{"provider":"aws","bucket":"sandbox-data"}
+			}`,
+		},
+		{
+			name: "rwx",
+			body: `{
+				"access_mode":"RWX",
+				"s3":{"provider":"aws","bucket":"sandbox-data"}
+			}`,
+		},
+		{
+			name: "s0fs with s3 config",
+			body: `{
+				"backend":"s0fs",
+				"s3":{"provider":"aws","bucket":"sandbox-data"}
+			}`,
+		},
+		{
+			name: "missing endpoint for r2",
+			body: `{
+				"s3":{"provider":"r2","bucket":"sandbox-data"}
+			}`,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newFakeHTTPRepo()
+			server := &Server{
+				logger:       logrus.New(),
+				repo:         repo,
+				meteringRepo: &fakeHTTPMeteringWriter{},
+				snapshotMgr:  &fakeHTTPSnapshotManager{},
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes", bytes.NewReader([]byte(tc.body)))
+			req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
+			recorder := httptest.NewRecorder()
+
+			server.createSandboxVolume(recorder, req)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+			}
+			if len(repo.createdVolumes) != 0 {
+				t.Fatalf("created volumes = %d, want 0", len(repo.createdVolumes))
+			}
+		})
+	}
+}
+
 func TestCreateSandboxVolumeRejectsNullOrBlankSnapshotID(t *testing.T) {
 	cases := []struct {
 		name string

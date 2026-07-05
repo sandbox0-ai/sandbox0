@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"io"
+	"sort"
 	"testing"
 )
 
@@ -147,4 +148,91 @@ func TestNewMemoryStoreSharesNamespace(t *testing.T) {
 	if got := string(payload); got != "alpha" {
 		t.Fatalf("payload = %q, want alpha", got)
 	}
+}
+
+func TestMemoryStoreListDelimiterReturnsCommonPrefixes(t *testing.T) {
+	t.Parallel()
+
+	store := NewMemoryStore(t.Name())
+	for key, data := range map[string]string{
+		"root.txt":           "root",
+		"dir/child.txt":      "child",
+		"dir/nested/a.txt":   "nested",
+		"other/another.txt":  "other",
+		"other/deeper/b.txt": "deep",
+	} {
+		if err := store.Put(key, bytes.NewReader([]byte(data))); err != nil {
+			t.Fatalf("Put(%q) error = %v", key, err)
+		}
+	}
+
+	infos, more, _, err := store.List("", "", "", "/", 100)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if more {
+		t.Fatal("List() more = true, want false")
+	}
+	got := make([]string, 0, len(infos))
+	for _, info := range infos {
+		kind := "file"
+		if info.IsPrefix {
+			kind = "prefix"
+		}
+		got = append(got, kind+":"+info.Key)
+	}
+	sort.Strings(got)
+	want := []string{"file:root.txt", "prefix:dir/", "prefix:other/"}
+	if !equalStringSlices(got, want) {
+		t.Fatalf("List() = %#v, want %#v", got, want)
+	}
+}
+
+func TestPrefixedStoreListPreservesCommonPrefixes(t *testing.T) {
+	t.Parallel()
+
+	base := NewMemoryStore(t.Name())
+	store := Prefix(base, "tenant-a/volume-a")
+	if err := store.Put("visible.txt", bytes.NewReader([]byte("visible"))); err != nil {
+		t.Fatalf("Put(visible.txt) error = %v", err)
+	}
+	if err := store.Put("dir/child.txt", bytes.NewReader([]byte("child"))); err != nil {
+		t.Fatalf("Put(dir/child.txt) error = %v", err)
+	}
+	if err := base.Put("tenant-a/other/hidden.txt", bytes.NewReader([]byte("hidden"))); err != nil {
+		t.Fatalf("base.Put(hidden) error = %v", err)
+	}
+
+	infos, more, _, err := store.List("", "", "", "/", 100)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if more {
+		t.Fatal("List() more = true, want false")
+	}
+	got := make([]string, 0, len(infos))
+	for _, info := range infos {
+		kind := "file"
+		if info.IsPrefix {
+			kind = "prefix"
+		}
+		got = append(got, kind+":"+info.Key)
+	}
+	sort.Strings(got)
+	want := []string{"file:visible.txt", "prefix:dir/"}
+	if !equalStringSlices(got, want) {
+		t.Fatalf("List() = %#v, want %#v", got, want)
+	}
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

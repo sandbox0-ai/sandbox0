@@ -191,6 +191,18 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 	}
 	assertS3TestObject(t, store, "from-sandbox/implicit.txt", "implicit")
 
+	nonSequential, err := session.Create(ctx, &pb.CreateRequest{Parent: fromSandbox.Inode, Name: "non-sequential.txt"})
+	if err != nil {
+		t.Fatalf("Create(non-sequential.txt) error = %v", err)
+	}
+	if _, err := session.Write(ctx, &pb.WriteRequest{HandleId: nonSequential.HandleId, Offset: 1, Data: []byte("x")}); fserror.CodeOf(err) != fserror.InvalidArgument {
+		t.Fatalf("Write(non-sequential) error = %v, want InvalidArgument", err)
+	}
+	if _, err := session.Release(ctx, &pb.ReleaseRequest{HandleId: nonSequential.HandleId}); err != nil {
+		t.Fatalf("Release(non-sequential.txt) error = %v", err)
+	}
+	assertS3TestObjectMissing(t, store, "from-sandbox/non-sequential.txt")
+
 	entriesResp, err := session.ReadDir(ctx, &pb.ReadDirRequest{Inode: s3RootInode, Plus: true})
 	if err != nil {
 		t.Fatalf("ReadDir(root) error = %v", err)

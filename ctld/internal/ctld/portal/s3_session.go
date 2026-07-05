@@ -52,6 +52,7 @@ type s3Handle struct {
 	buffer    bytes.Buffer
 	committed bool
 	closed    bool
+	failed    bool
 }
 
 type s3Session struct {
@@ -449,7 +450,11 @@ func (s *s3Session) Write(_ context.Context, req *pb.WriteRequest) (*pb.WriteRes
 	if handle == nil || !handle.writable || handle.closed {
 		return nil, syscall.EBADF
 	}
+	if handle.failed {
+		return nil, syscall.EBADF
+	}
 	if req.Offset != int64(handle.buffer.Len()) {
+		handle.failed = true
 		return nil, fserror.New(fserror.InvalidArgument, "s3 backend only supports sequential writes for new files")
 	}
 	n, err := handle.buffer.Write(req.Data)
@@ -914,6 +919,10 @@ func (s *s3Session) updateNodeSize(inode uint64, size int64) {
 
 func (s *s3Session) commitHandle(_ context.Context, handle *s3Handle) error {
 	if handle == nil || !handle.writable || handle.committed {
+		return nil
+	}
+	if handle.failed {
+		s.forgetPath(handle.path)
 		return nil
 	}
 	if err := s.store.Put(handle.path, bytes.NewReader(handle.buffer.Bytes())); err != nil {

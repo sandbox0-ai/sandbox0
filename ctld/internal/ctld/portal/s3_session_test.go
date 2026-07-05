@@ -107,8 +107,25 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 		t.Fatalf("Write(second) error = %v", err)
 	}
 	assertS3TestObjectMissing(t, store, "from-sandbox/new.txt")
+	lookedUp, err := session.Lookup(ctx, &pb.LookupRequest{Parent: fromSandbox.Inode, Name: "new.txt"})
+	if err != nil {
+		t.Fatalf("Lookup(uncommitted new.txt) error = %v", err)
+	}
+	if lookedUp.Inode != created.Inode {
+		t.Fatalf("Lookup(uncommitted new.txt) inode = %d, want %d", lookedUp.Inode, created.Inode)
+	}
+	entriesDuringWrite, err := session.ReadDir(ctx, &pb.ReadDirRequest{Inode: fromSandbox.Inode})
+	if err != nil {
+		t.Fatalf("ReadDir(from-sandbox during write) error = %v", err)
+	}
+	if got := portalDirEntryNames(entriesDuringWrite.Entries); !equalPortalStringSlices(got, []string{"new.txt"}) {
+		t.Fatalf("ReadDir(from-sandbox during write) = %#v, want new.txt", got)
+	}
 	if _, err := session.Open(ctx, &pb.OpenRequest{Inode: created.Inode}); !errors.Is(err, syscall.EPERM) {
 		t.Fatalf("Open(reader while writer open) error = %v, want EPERM", err)
+	}
+	if _, err := session.Unlink(ctx, &pb.UnlinkRequest{Parent: fromSandbox.Inode, Name: "new.txt"}); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("Unlink(writer open) error = %v, want EPERM", err)
 	}
 	if _, err := session.Release(ctx, &pb.ReleaseRequest{HandleId: created.HandleId}); err != nil {
 		t.Fatalf("Release(new.txt) error = %v", err)
@@ -302,4 +319,13 @@ func equalPortalStringSlices(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func portalDirEntryNames(entries []*pb.DirEntry) []string {
+	out := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, entry.Name)
+	}
+	sort.Strings(out)
+	return out
 }

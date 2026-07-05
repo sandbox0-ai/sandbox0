@@ -267,6 +267,9 @@ func (s *s3Session) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*pb.Empt
 		return nil, err
 	}
 	filePath := joinS3Path(parent.path, name)
+	if node, ok := s.nodeForPath(filePath); ok && s.hasOpenWriter(node.inode) {
+		return nil, syscall.EPERM
+	}
 	node, err := s.resolvePath(ctx, filePath)
 	if err != nil {
 		return nil, err
@@ -531,6 +534,7 @@ func (s *s3Session) ReadDir(ctx context.Context, req *pb.ReadDirRequest) (*pb.Re
 		return nil, err
 	}
 	entriesByName := make(map[string]*pb.DirEntry)
+	s.addLocalDirEntries(node, prefix, req.Plus, entriesByName)
 	for _, info := range infos {
 		if info.Key == prefix {
 			continue
@@ -573,6 +577,49 @@ func (s *s3Session) ReadDir(ctx context.Context, req *pb.ReadDirRequest) (*pb.Re
 		out = append(out, entry)
 	}
 	return &pb.ReadDirResponse{Entries: out, Eof: true}, nil
+}
+
+func (s *s3Session) addLocalDirEntries(node *s3Node, prefix string, plus bool, entriesByName map[string]*pb.DirEntry) {
+	s.mu.Lock()
+	nodes := make([]s3Node, 0, len(s.nodesByInode))
+	for _, entry := range s.nodesByInode {
+		if entry == nil || entry.inode == node.inode || entry.path == "" {
+			continue
+		}
+		copyNode := *entry
+		nodes = append(nodes, copyNode)
+	}
+	s.mu.Unlock()
+
+	for i := range nodes {
+		entryNode := &nodes[i]
+		if !strings.HasPrefix(entryNode.path, prefix) {
+			continue
+		}
+		name, kind, ok := directS3Entry(prefix, objectstore.Info{
+			Key:      entryNode.path,
+			Size:     entryNode.size,
+			Modified: entryNode.modified,
+			IsPrefix: entryNode.kind == s3NodeDir,
+		})
+		if !ok {
+			continue
+		}
+		entryPath := joinS3Path(node.path, name)
+		remembered := s.rememberPath(entryPath, kind, entryNode.size, entryNode.modified)
+		dirEntry := &pb.DirEntry{
+			Inode: remembered.inode,
+			Name:  name,
+			Type:  s3TypeNumber(kind),
+		}
+		if plus {
+			dirEntry.Attr = s.attr(remembered)
+		}
+		if existing := entriesByName[name]; existing != nil && existing.Type&uint32(syscall.S_IFMT) == uint32(syscall.S_IFDIR) {
+			continue
+		}
+		entriesByName[name] = dirEntry
+	}
 }
 
 func (s *s3Session) ReleaseDir(_ context.Context, req *pb.ReleaseDirRequest) (*pb.Empty, error) {
@@ -633,6 +680,9 @@ func (s *s3Session) resolvePath(ctx context.Context, key string) (*s3Node, error
 	key = cleanS3Path(key)
 	if key == "" {
 		return s.rememberPath("", s3NodeDir, 0, time.Now().UTC()), nil
+	}
+	if node, ok := s.nodeForPath(key); ok && s.hasOpenWriter(node.inode) {
+		return node, nil
 	}
 	if info, ok, err := s.dirInfo(ctx, key); err != nil {
 		return nil, err

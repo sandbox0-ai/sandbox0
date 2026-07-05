@@ -158,8 +158,11 @@ func (s *s3Session) SetAttr(ctx context.Context, req *pb.SetAttrRequest) (*pb.Se
 	if err != nil {
 		return nil, err
 	}
-	if req.Valid&fuseFattrSize == 0 {
+	if req.Valid == 0 {
 		return &pb.SetAttrResponse{Attr: s.attr(node)}, nil
+	}
+	if req.Valid&^uint32(fuse.FATTR_SIZE) != 0 {
+		return nil, syscall.EOPNOTSUPP
 	}
 	if err := s.ensureWritable(); err != nil {
 		return nil, err
@@ -170,8 +173,25 @@ func (s *s3Session) SetAttr(ctx context.Context, req *pb.SetAttrRequest) (*pb.Se
 	if req.Attr == nil || req.Attr.Size != 0 {
 		return nil, syscall.EOPNOTSUPP
 	}
-	if _, err := s.resolvePath(ctx, node.path); err != nil {
-		return nil, err
+	if _, ok := s.nodeForPath(node.path); !ok {
+		if _, err := s.resolvePath(ctx, node.path); err != nil {
+			return nil, err
+		}
+	}
+	handle := s.handle(req.HandleId)
+	if handle != nil && handle.writable && !handle.closed {
+		handle.buffer.Reset()
+		handle.committed = false
+		s.updateNodeSize(handle.inode, 0)
+		node = s.rememberPath(handle.path, s3NodeFile, 0, time.Now().UTC())
+		return &pb.SetAttrResponse{Attr: s.attr(node)}, nil
+	}
+	if writer := s.findWritableHandle(node.inode); writer != nil {
+		writer.buffer.Reset()
+		writer.committed = false
+		s.updateNodeSize(writer.inode, 0)
+		node = s.rememberPath(writer.path, s3NodeFile, 0, time.Now().UTC())
+		return &pb.SetAttrResponse{Attr: s.attr(node)}, nil
 	}
 	if err := s.store.Put(node.path, bytes.NewReader(nil)); err != nil {
 		return nil, err
@@ -229,11 +249,8 @@ func (s *s3Session) Create(ctx context.Context, req *pb.CreateRequest) (*pb.Node
 	} else if fserror.CodeOf(err) != fserror.NotFound {
 		return nil, err
 	}
-	if err := s.store.Put(filePath, bytes.NewReader(nil)); err != nil {
-		return nil, err
-	}
 	node := s.rememberPath(filePath, s3NodeFile, 0, time.Now().UTC())
-	handleID := s.newHandle(&s3Handle{inode: node.inode, path: filePath, writable: true, committed: true})
+	handleID := s.newHandle(&s3Handle{inode: node.inode, path: filePath, writable: true})
 	return s.nodeResponse(node, handleID), nil
 }
 
@@ -328,6 +345,17 @@ func (s *s3Session) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResp
 	if err != nil {
 		return nil, err
 	}
+	writable := req.Flags&uint32(syscall.O_ACCMODE) != uint32(syscall.O_RDONLY)
+	if writable {
+		if err := s.ensureWritable(); err != nil {
+			return nil, err
+		}
+		if s.hasOpenReader(node.inode) || s.hasOpenWriter(node.inode) {
+			return nil, syscall.EPERM
+		}
+	} else if s.hasOpenWriter(node.inode) {
+		return nil, syscall.EPERM
+	}
 	node, err = s.resolvePath(ctx, node.path)
 	if err != nil {
 		return nil, err
@@ -335,11 +363,7 @@ func (s *s3Session) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResp
 	if node.kind == s3NodeDir {
 		return nil, syscall.EISDIR
 	}
-	writable := req.Flags&uint32(syscall.O_ACCMODE) != uint32(syscall.O_RDONLY)
 	if writable {
-		if err := s.ensureWritable(); err != nil {
-			return nil, err
-		}
 		if req.Flags&uint32(syscall.O_APPEND) != 0 {
 			return nil, syscall.EOPNOTSUPP
 		}
@@ -371,6 +395,9 @@ func (s *s3Session) ReadInto(ctx context.Context, req *pb.ReadRequest, dest []by
 	node, err := s.nodeForInode(req.Inode)
 	if err != nil {
 		return 0, false, err
+	}
+	if s.hasOpenWriter(node.inode) {
+		return 0, false, syscall.EPERM
 	}
 	node, err = s.resolvePath(ctx, node.path)
 	if err != nil {
@@ -575,7 +602,7 @@ func (s *s3Session) SetXattr(context.Context, *pb.SetXattrRequest) (*pb.Empty, e
 }
 
 func (s *s3Session) ListXattr(context.Context, *pb.ListXattrRequest) (*pb.ListXattrResponse, error) {
-	return &pb.ListXattrResponse{}, nil
+	return nil, syscall.EOPNOTSUPP
 }
 
 func (s *s3Session) RemoveXattr(context.Context, *pb.RemoveXattrRequest) (*pb.Empty, error) {
@@ -681,6 +708,22 @@ func (s *s3Session) nodeForInode(inode uint64) (*s3Node, error) {
 	return &copyNode, nil
 }
 
+func (s *s3Session) nodeForPath(key string) (*s3Node, bool) {
+	key = cleanS3Path(key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	inode := s.inodeByPath[key]
+	if inode == 0 {
+		return nil, false
+	}
+	node := s.nodesByInode[inode]
+	if node == nil {
+		return nil, false
+	}
+	copyNode := *node
+	return &copyNode, true
+}
+
 func (s *s3Session) rememberPath(key string, kind s3NodeKind, size int64, modified time.Time) *s3Node {
 	key = cleanS3Path(key)
 	if modified.IsZero() {
@@ -724,6 +767,35 @@ func (s *s3Session) handle(handleID uint64) *s3Handle {
 	defer s.mu.Unlock()
 	handle := s.handles[handleID]
 	return handle
+}
+
+func (s *s3Session) findWritableHandle(inode uint64) *s3Handle {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, handle := range s.handles {
+		if handle != nil && handle.inode == inode && handle.writable && !handle.closed {
+			return handle
+		}
+	}
+	if handle := s.implicit[inode]; handle != nil && handle.writable && !handle.closed {
+		return handle
+	}
+	return nil
+}
+
+func (s *s3Session) hasOpenWriter(inode uint64) bool {
+	return s.findWritableHandle(inode) != nil
+}
+
+func (s *s3Session) hasOpenReader(inode uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, handle := range s.handles {
+		if handle != nil && handle.inode == inode && !handle.writable && !handle.closed {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *s3Session) takeHandle(handleID uint64) *s3Handle {
@@ -852,7 +924,6 @@ func (s *s3Session) nodeResponse(node *s3Node, handleID uint64) *pb.NodeResponse
 
 func directS3Entry(prefix string, info objectstore.Info) (string, s3NodeKind, bool) {
 	key := strings.TrimPrefix(info.Key, prefix)
-	key = strings.TrimLeft(key, "/")
 	if key == "" {
 		return "", 0, false
 	}

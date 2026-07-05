@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
@@ -98,11 +99,16 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(new.txt) error = %v", err)
 	}
+	assertS3TestObjectMissing(t, store, "from-sandbox/new.txt")
 	if _, err := session.Write(ctx, &pb.WriteRequest{HandleId: created.HandleId, Offset: 0, Data: []byte("first ")}); err != nil {
 		t.Fatalf("Write(first) error = %v", err)
 	}
 	if _, err := session.Write(ctx, &pb.WriteRequest{HandleId: created.HandleId, Offset: 6, Data: []byte("second")}); err != nil {
 		t.Fatalf("Write(second) error = %v", err)
+	}
+	assertS3TestObjectMissing(t, store, "from-sandbox/new.txt")
+	if _, err := session.Open(ctx, &pb.OpenRequest{Inode: created.Inode}); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("Open(reader while writer open) error = %v, want EPERM", err)
 	}
 	if _, err := session.Release(ctx, &pb.ReleaseRequest{HandleId: created.HandleId}); err != nil {
 		t.Fatalf("Release(new.txt) error = %v", err)
@@ -132,6 +138,17 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 		t.Fatalf("SetAttr(truncate) error = %v", err)
 	}
 	assertS3TestObject(t, store, "from-sandbox/new.txt", "")
+
+	if _, err := session.SetAttr(ctx, &pb.SetAttrRequest{
+		Inode: created.Inode,
+		Valid: 1,
+		Attr:  &pb.GetAttrResponse{Mode: s3FileMode | 0o600},
+	}); !errors.Is(err, syscall.EOPNOTSUPP) {
+		t.Fatalf("SetAttr(mode) error = %v, want EOPNOTSUPP", err)
+	}
+	if _, err := session.ListXattr(ctx, &pb.ListXattrRequest{Inode: created.Inode}); !errors.Is(err, syscall.EOPNOTSUPP) {
+		t.Fatalf("ListXattr() error = %v, want EOPNOTSUPP", err)
+	}
 
 	implicitCreated, err := session.Create(ctx, &pb.CreateRequest{Parent: fromSandbox.Inode, Name: "implicit.txt"})
 	if err != nil {
@@ -173,6 +190,28 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 	want := []string{"dir:external", "dir:from-sandbox"}
 	if !equalPortalStringSlices(got, want) {
 		t.Fatalf("ReadDir(root) = %#v, want %#v", got, want)
+	}
+}
+
+func TestS3SessionHidesObjectKeysWithEmptyPathSegments(t *testing.T) {
+	ctx := context.Background()
+	store := objectstore.NewMemoryStore(t.Name())
+	putS3TestObject(t, store, "invalid//hidden.txt", "hidden")
+	session := newS3Session("vol-s3", store, volume.AccessModeRWO, nil)
+
+	dir, err := session.Lookup(ctx, &pb.LookupRequest{Parent: s3RootInode, Name: "invalid"})
+	if err != nil {
+		t.Fatalf("Lookup(invalid) error = %v", err)
+	}
+	entries, err := session.ReadDir(ctx, &pb.ReadDirRequest{Inode: dir.Inode, Plus: true})
+	if err != nil {
+		t.Fatalf("ReadDir(invalid) error = %v", err)
+	}
+	if len(entries.Entries) != 0 {
+		t.Fatalf("ReadDir(invalid) entries = %#v, want none for empty path segment object", entries.Entries)
+	}
+	if _, err := session.Lookup(ctx, &pb.LookupRequest{Parent: dir.Inode, Name: "hidden.txt"}); fserror.CodeOf(err) != fserror.NotFound {
+		t.Fatalf("Lookup(hidden.txt) error = %v, want NotFound", err)
 	}
 }
 
@@ -238,6 +277,18 @@ func assertS3TestObject(t *testing.T, store objectstore.Store, key, want string)
 	}
 	if string(got) != want {
 		t.Fatalf("object %q = %q, want %q", key, string(got), want)
+	}
+}
+
+func assertS3TestObjectMissing(t *testing.T, store objectstore.Store, key string) {
+	t.Helper()
+	reader, err := store.Get(key, 0, -1)
+	if err == nil {
+		_ = reader.Close()
+		t.Fatalf("Get(%q) succeeded, want missing object", key)
+	}
+	if !objectstore.IsNotFound(err) {
+		t.Fatalf("Get(%q) error = %v, want not found", key, err)
 	}
 }
 

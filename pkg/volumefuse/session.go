@@ -46,3 +46,7 @@ type Session interface {
 type ReadIntoSession interface {
 	ReadInto(context.Context, *pb.ReadRequest, []byte) (int, bool, error)
 }
+
+type OpenFlagsSession interface {
+	OpenFlags() uint32
+}

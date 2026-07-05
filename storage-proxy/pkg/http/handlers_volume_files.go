@@ -48,6 +48,7 @@ var (
 	errDirectoryNotEmpty     = errors.New("directory not empty")
 	errInvalidPath           = errors.New("invalid path")
 	errInvalidArchive        = errors.New("invalid archive")
+	errVolumeFileUnsupported = errors.New("volume backend does not support direct file operations without an active owner")
 )
 
 type volumeFileArchiveImportResponse struct {
@@ -1505,7 +1506,7 @@ func (s *Server) writeVolumeFileError(w http.ResponseWriter, err error) {
 		_ = spec.WriteError(w, http.StatusForbidden, spec.CodeForbidden, err.Error())
 	case errors.Is(err, errPathAlreadyExists), errors.Is(err, errPathNotDir), errors.Is(err, errDirectoryNotEmpty):
 		_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, err.Error())
-	case errors.Is(err, errInvalidPath), errors.Is(err, errInvalidArchive):
+	case errors.Is(err, errInvalidPath), errors.Is(err, errInvalidArchive), errors.Is(err, errVolumeFileUnsupported):
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 	case quota.IsExceeded(err):
 		_ = spec.WriteError(w, http.StatusTooManyRequests, "quota_exceeded", err.Error())

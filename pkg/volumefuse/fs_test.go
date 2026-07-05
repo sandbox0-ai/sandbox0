@@ -55,3 +55,35 @@ func TestReadUsesReadIntoSession(t *testing.T) {
 		t.Fatal("Read fallback was called")
 	}
 }
+
+type openFlagsTestSession struct {
+	Session
+	flags uint32
+}
+
+func (s openFlagsTestSession) OpenFlags() uint32 {
+	return s.flags
+}
+
+func (s openFlagsTestSession) Open(context.Context, *pb.OpenRequest) (*pb.OpenResponse, error) {
+	return &pb.OpenResponse{HandleId: 7}, nil
+}
+
+func TestOpenUsesSessionOpenFlags(t *testing.T) {
+	session := openFlagsTestSession{flags: fuse.FOPEN_DIRECT_IO}
+	fs := New("vol-1", time.Second, session)
+
+	var out fuse.OpenOut
+	st := fs.Open(nil, &fuse.OpenIn{
+		InHeader: fuse.InHeader{NodeId: 42},
+	}, &out)
+	if st != fuse.OK {
+		t.Fatalf("Open() status = %v, want OK", st)
+	}
+	if out.Fh != 7 {
+		t.Fatalf("Open() handle = %d, want 7", out.Fh)
+	}
+	if out.OpenFlags != fuse.FOPEN_DIRECT_IO {
+		t.Fatalf("Open() flags = %#x, want DIRECT_IO", out.OpenFlags)
+	}
+}

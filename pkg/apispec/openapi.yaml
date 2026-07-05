@@ -5722,6 +5722,55 @@ components:
       enum: [RWO, ROX, RWX]
       description: >-
         Access mode for sandbox volumes. Enforcement is scoped to storage-proxy instances. RWO allows read-write mounts on a single instance; ROX allows read-only mounts across instances; RWX allows read-write mounts across instances.
+    VolumeBackend:
+      type: string
+      enum: [s0fs, s3]
+      description: >-
+        Storage backend for a SandboxVolume. s0fs is the default durable Sandbox0 volume backend. s3 mounts an existing S3-compatible prefix through the volume portal and supports mount-s3-like object projection.
+    CreateSandboxVolumeS3Config:
+      type: object
+      properties:
+        provider:
+          type: string
+          enum: [aws, ali, r2]
+          default: aws
+          description: S3-compatible provider. ali is Aliyun OSS; r2 is Cloudflare R2.
+        bucket:
+          type: string
+        prefix:
+          type: string
+          description: Optional object key prefix to expose as the volume root.
+        region:
+          type: string
+          description: Optional region override. Defaults to the storage-proxy S3 region when omitted.
+        endpoint_url:
+          type: string
+          description: Optional endpoint override. Required for ali and r2.
+        access_key:
+          type: string
+          description: Optional access key override. Must be provided together with secret_key.
+        secret_key:
+          type: string
+          description: Optional secret key override. Must be provided together with access_key.
+        session_token:
+          type: string
+          description: Optional temporary credential session token.
+      required: [bucket]
+    SandboxVolumeS3Config:
+      type: object
+      properties:
+        provider:
+          type: string
+          enum: [aws, ali, r2]
+        bucket:
+          type: string
+        prefix:
+          type: string
+        region:
+          type: string
+        endpoint_url:
+          type: string
+      required: [provider, bucket]
     MountStatus:
       type: object
       properties:
@@ -5748,6 +5797,12 @@ components:
         snapshot_id:
           type: string
           description: Optional snapshot ID used to initialize the new volume from immutable snapshot state.
+        backend:
+          $ref: "#/components/schemas/VolumeBackend"
+          description: Volume backend. Defaults to s0fs when omitted. If s3 is provided without backend, backend is inferred as s3.
+        s3:
+          $ref: "#/components/schemas/CreateSandboxVolumeS3Config"
+          description: S3-compatible backend configuration. Only valid with backend s3; s3 volumes do not support snapshot_id or RWX access mode.
         default_posix_uid:
           type: integer
           format: int64
@@ -5804,13 +5859,19 @@ components:
         access_mode:
           $ref: "#/components/schemas/VolumeAccessMode"
           description: Configured access mode for the volume.
+        backend:
+          $ref: "#/components/schemas/VolumeBackend"
+          description: Configured storage backend for the volume.
+        s3:
+          $ref: "#/components/schemas/SandboxVolumeS3Config"
+          description: Public S3-compatible backend metadata. Credentials are never returned.
         created_at:
           type: string
           format: date-time
         updated_at:
           type: string
           format: date-time
-      required: [id, team_id, user_id, created_at, updated_at]
+      required: [id, team_id, user_id, backend, created_at, updated_at]
     SuccessSandboxVolumeResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"

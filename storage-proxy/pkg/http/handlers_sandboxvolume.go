@@ -23,10 +23,12 @@ import (
 )
 
 type createSandboxVolumeRequest struct {
-	SnapshotID      string `json:"snapshot_id,omitempty"`
-	AccessMode      string `json:"access_mode"`
-	DefaultPosixUID *int64 `json:"default_posix_uid,omitempty"`
-	DefaultPosixGID *int64 `json:"default_posix_gid,omitempty"`
+	SnapshotID      string                  `json:"snapshot_id,omitempty"`
+	AccessMode      string                  `json:"access_mode"`
+	Backend         string                  `json:"backend,omitempty"`
+	S3              *volume.S3BackendConfig `json:"s3,omitempty"`
+	DefaultPosixUID *int64                  `json:"default_posix_uid,omitempty"`
+	DefaultPosixGID *int64                  `json:"default_posix_gid,omitempty"`
 	snapshotIDSet   bool
 }
 
@@ -36,16 +38,20 @@ func (r *createSandboxVolumeRequest) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	var decoded struct {
-		SnapshotID      string `json:"snapshot_id,omitempty"`
-		AccessMode      string `json:"access_mode"`
-		DefaultPosixUID *int64 `json:"default_posix_uid,omitempty"`
-		DefaultPosixGID *int64 `json:"default_posix_gid,omitempty"`
+		SnapshotID      string                  `json:"snapshot_id,omitempty"`
+		AccessMode      string                  `json:"access_mode"`
+		Backend         string                  `json:"backend,omitempty"`
+		S3              *volume.S3BackendConfig `json:"s3,omitempty"`
+		DefaultPosixUID *int64                  `json:"default_posix_uid,omitempty"`
+		DefaultPosixGID *int64                  `json:"default_posix_gid,omitempty"`
 	}
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
 	r.SnapshotID = decoded.SnapshotID
 	r.AccessMode = decoded.AccessMode
+	r.Backend = decoded.Backend
+	r.S3 = decoded.S3
 	r.DefaultPosixUID = decoded.DefaultPosixUID
 	r.DefaultPosixGID = decoded.DefaultPosixGID
 	_, r.snapshotIDSet = fields["snapshot_id"]
@@ -105,6 +111,52 @@ func validateDefaultPosixIdentity(uid, gid *int64) error {
 	return nil
 }
 
+func validateCreateVolumeBackend(req *createSandboxVolumeRequest) (string, json.RawMessage, error) {
+	if req == nil {
+		return volume.BackendS0FS, json.RawMessage(`{}`), nil
+	}
+	backend := volume.NormalizeBackend(req.Backend)
+	if req.S3 != nil && strings.TrimSpace(req.Backend) == "" {
+		backend = volume.BackendS3
+	}
+	if !volume.IsValidBackend(backend) {
+		return "", nil, fmt.Errorf("invalid backend")
+	}
+	switch backend {
+	case volume.BackendS0FS:
+		if req.S3 != nil {
+			return "", nil, fmt.Errorf("s3 config is only valid when backend is s3")
+		}
+		return volume.BackendS0FS, json.RawMessage(`{}`), nil
+	case volume.BackendS3:
+		if req.snapshotIDSet {
+			return "", nil, fmt.Errorf("snapshot_id is only supported for s0fs volumes")
+		}
+		if req.S3 == nil {
+			return "", nil, fmt.Errorf("s3 config is required")
+		}
+		accessMode := volume.NormalizeAccessMode(req.AccessMode)
+		if req.AccessMode != "" && !volume.IsValidAccessMode(accessMode) {
+			return "", nil, fmt.Errorf("invalid access_mode")
+		}
+		if accessMode == volume.AccessModeRWX {
+			return "", nil, fmt.Errorf("s3 backend does not support RWX access_mode")
+		}
+		cfg := volume.NormalizeS3BackendConfig(*req.S3)
+		if err := volume.ValidateS3BackendConfig(cfg); err != nil {
+			return "", nil, err
+		}
+		raw, err := volume.MarshalS3BackendConfig(cfg)
+		if err != nil {
+			return "", nil, err
+		}
+		*req.S3 = cfg
+		return volume.BackendS3, raw, nil
+	default:
+		return "", nil, fmt.Errorf("invalid backend")
+	}
+}
+
 func (s *Server) createSandboxVolume(w http.ResponseWriter, r *http.Request) {
 	// Get claims from context (populated by middleware)
 	claims := internalauth.ClaimsFromContext(r.Context())
@@ -138,6 +190,11 @@ func (s *Server) createSandboxVolume(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ok {
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "invalid access_mode")
+		return
+	}
+	backend, backendConfig, err := validateCreateVolumeBackend(req)
+	if err != nil {
+		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
 	if err := validateDefaultPosixIdentity(req.DefaultPosixUID, req.DefaultPosixGID); err != nil {
@@ -190,6 +247,8 @@ func (s *Server) createSandboxVolume(w http.ResponseWriter, r *http.Request) {
 		DefaultPosixUID: req.DefaultPosixUID,
 		DefaultPosixGID: req.DefaultPosixGID,
 		AccessMode:      string(accessMode),
+		Backend:         backend,
+		BackendConfig:   backendConfig,
 		CreatedAt:       time.Now(),
 		UpdatedAt:       time.Now(),
 	}
@@ -558,6 +617,8 @@ func (s *Server) createOwnedSandboxVolume(w http.ResponseWriter, r *http.Request
 		DefaultPosixUID: req.DefaultPosixUID,
 		DefaultPosixGID: req.DefaultPosixGID,
 		AccessMode:      string(accessMode),
+		Backend:         volume.BackendS0FS,
+		BackendConfig:   json.RawMessage(`{}`),
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
@@ -885,6 +946,8 @@ func (s *Server) forkVolume(w http.ResponseWriter, r *http.Request) {
 			_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "invalid access_mode")
 		case errors.Is(err, snapshot.ErrMountedCtldOwner), errors.Is(err, errCtldOwnerBusy):
 			_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, "volume has active ctld mounts")
+		case errors.Is(err, snapshot.ErrUnsupportedBackend):
+			_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "volume backend does not support fork")
 		case errors.Is(err, snapshot.ErrCloneFailed):
 			_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "clone operation failed")
 		default:

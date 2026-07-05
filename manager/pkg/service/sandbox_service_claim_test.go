@@ -1774,7 +1774,7 @@ func TestValidateClaimMountsForTemplateAllowsDeclaredMountPoint(t *testing.T) {
 func TestValidateVolumePortalAccessRejectsRWXNodeLocalPortal(t *testing.T) {
 	svc := &SandboxService{volumeMetadata: fakeVolumeMetadataClient{accessMode: "RWX"}}
 
-	err := svc.validateVolumePortalAccess(context.Background(), "team-a", "user-a", "vol-1", v1alpha1.VolumeMountSpec{
+	_, err := svc.validateVolumePortalAccess(context.Background(), "team-a", "user-a", "vol-1", v1alpha1.VolumeMountSpec{
 		Name:      "data",
 		MountPath: "/workspace/data",
 	})
@@ -1789,7 +1789,7 @@ func TestValidateVolumePortalAccessRejectsRWXNodeLocalPortal(t *testing.T) {
 func TestValidateVolumePortalAccessAllowsROXOnlyForReadOnlyTemplateMount(t *testing.T) {
 	svc := &SandboxService{volumeMetadata: fakeVolumeMetadataClient{accessMode: "ROX"}}
 
-	err := svc.validateVolumePortalAccess(context.Background(), "team-a", "user-a", "vol-1", v1alpha1.VolumeMountSpec{
+	_, err := svc.validateVolumePortalAccess(context.Background(), "team-a", "user-a", "vol-1", v1alpha1.VolumeMountSpec{
 		Name:      "data",
 		MountPath: "/workspace/data",
 	})
@@ -1800,7 +1800,7 @@ func TestValidateVolumePortalAccessAllowsROXOnlyForReadOnlyTemplateMount(t *test
 		t.Fatalf("expected ErrInvalidClaimRequest, got %v", err)
 	}
 
-	if err := svc.validateVolumePortalAccess(context.Background(), "team-a", "user-a", "vol-1", v1alpha1.VolumeMountSpec{
+	if _, err := svc.validateVolumePortalAccess(context.Background(), "team-a", "user-a", "vol-1", v1alpha1.VolumeMountSpec{
 		Name:      "data",
 		MountPath: "/workspace/data",
 		ReadOnly:  true,
@@ -1809,8 +1809,36 @@ func TestValidateVolumePortalAccessAllowsROXOnlyForReadOnlyTemplateMount(t *test
 	}
 }
 
+func TestValidateVolumePortalRuntimeCompatibilityRejectsS3WithGVisor(t *testing.T) {
+	runtimeClassName := "gvisor-rootfs"
+	pod := &corev1.Pod{Spec: corev1.PodSpec{RuntimeClassName: &runtimeClassName}}
+	info := &SandboxVolumeInfo{ID: "vol-1", Backend: "s3"}
+
+	err := validateVolumePortalRuntimeCompatibility(pod, info, "/workspace/data")
+	if err == nil {
+		t.Fatal("expected runtime compatibility validation error")
+	}
+	if !errors.Is(err, ErrInvalidClaimRequest) {
+		t.Fatalf("expected ErrInvalidClaimRequest, got %v", err)
+	}
+}
+
+func TestValidateVolumePortalRuntimeCompatibilityAllowsS3WithDefaultOrRunc(t *testing.T) {
+	info := &SandboxVolumeInfo{ID: "vol-1", Backend: "s3"}
+	if err := validateVolumePortalRuntimeCompatibility(&corev1.Pod{}, info, "/workspace/data"); err != nil {
+		t.Fatalf("default runtime compatibility error = %v", err)
+	}
+
+	runtimeClassName := "runc"
+	pod := &corev1.Pod{Spec: corev1.PodSpec{RuntimeClassName: &runtimeClassName}}
+	if err := validateVolumePortalRuntimeCompatibility(pod, info, "/workspace/data"); err != nil {
+		t.Fatalf("runc runtime compatibility error = %v", err)
+	}
+}
+
 type fakeVolumeMetadataClient struct {
 	accessMode string
+	backend    string
 	err        error
 	prepared   []string
 	prepareErr error
@@ -1825,6 +1853,7 @@ func (c fakeVolumeMetadataClient) Get(_ context.Context, teamID, userID, volumeI
 		TeamID:     teamID,
 		UserID:     userID,
 		AccessMode: c.accessMode,
+		Backend:    c.backend,
 	}, nil
 }
 

@@ -69,6 +69,9 @@ func (s *Server) prepareVolumeSnapshotCheckpoint(ctx context.Context, volumeID, 
 	if volumeRecord.TeamID != teamID {
 		return nil, snapshot.ErrVolumeNotFound
 	}
+	if volume.NormalizeBackend(volumeRecord.Backend) != volume.BackendS0FS {
+		return nil, snapshot.ErrUnsupportedBackend
+	}
 
 	mounts, err := s.getActiveVolumeMounts(ctx, volumeID)
 	if err != nil {

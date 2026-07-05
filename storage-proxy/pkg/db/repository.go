@@ -65,6 +65,29 @@ func decodeMountAccessMode(raw *json.RawMessage) string {
 	return normalizeMountAccessMode(opts.AccessMode)
 }
 
+func coalesceVolumeBackend(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "s0fs"
+	}
+	return value
+}
+
+func coalesceVolumeBackendConfig(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return json.RawMessage(`{}`)
+	}
+	return raw
+}
+
+func normalizeSandboxVolumeBackend(v *SandboxVolume) {
+	if v == nil {
+		return
+	}
+	v.Backend = coalesceVolumeBackend(v.Backend)
+	v.BackendConfig = coalesceVolumeBackendConfig(v.BackendConfig)
+}
+
 // Repository provides database access for storage-proxy
 type Repository struct {
 	pool *pgxpool.Pool
@@ -136,24 +159,24 @@ func (r *Repository) CreateSandboxVolumeTx(ctx context.Context, tx pgx.Tx, volum
 
 func (r *Repository) createSandboxVolume(ctx context.Context, db DB, volume *SandboxVolume) error {
 	_, err := db.Exec(ctx, `
-		INSERT INTO sandbox_volumes (
-			id, team_id, user_id,
-			source_volume_id,
-			default_posix_uid, default_posix_gid,
-			access_mode,
-			created_at, updated_at
-		) VALUES (
-			$1, $2, $3,
-			$4,
-			$5, $6,
-			$7,
-			$8, $9
-		)
-	`,
+			INSERT INTO sandbox_volumes (
+				id, team_id, user_id,
+				source_volume_id,
+				default_posix_uid, default_posix_gid,
+				access_mode, backend, backend_config,
+				created_at, updated_at
+			) VALUES (
+				$1, $2, $3,
+				$4,
+				$5, $6,
+				$7, $8, $9,
+				$10, $11
+			)
+		`,
 		volume.ID, volume.TeamID, volume.UserID,
 		volume.SourceVolumeID,
 		volume.DefaultPosixUID, volume.DefaultPosixGID,
-		volume.AccessMode,
+		volume.AccessMode, coalesceVolumeBackend(volume.Backend), coalesceVolumeBackendConfig(volume.BackendConfig),
 		volume.CreatedAt, volume.UpdatedAt,
 	)
 
@@ -185,7 +208,7 @@ func (r *Repository) getSandboxVolume(ctx context.Context, db DB, id string, for
 			id, team_id, user_id,
 			source_volume_id,
 			default_posix_uid, default_posix_gid,
-			access_mode,
+			access_mode, backend, backend_config,
 			created_at, updated_at
 		FROM sandbox_volumes
 		WHERE id = $1
@@ -200,7 +223,7 @@ func (r *Repository) getSandboxVolume(ctx context.Context, db DB, id string, for
 		&v.ID, &v.TeamID, &v.UserID,
 		&v.SourceVolumeID,
 		&v.DefaultPosixUID, &v.DefaultPosixGID,
-		&v.AccessMode,
+		&v.AccessMode, &v.Backend, &v.BackendConfig,
 		&v.CreatedAt, &v.UpdatedAt,
 	)
 
@@ -211,6 +234,7 @@ func (r *Repository) getSandboxVolume(ctx context.Context, db DB, id string, for
 		return nil, fmt.Errorf("query sandbox volume: %w", err)
 	}
 
+	normalizeSandboxVolumeBackend(&v)
 	return &v, nil
 }
 
@@ -221,12 +245,16 @@ func (r *Repository) UpdateSandboxVolume(ctx context.Context, volume *SandboxVol
 			default_posix_uid = $2,
 			default_posix_gid = $3,
 			access_mode = $4,
+			backend = $5,
+			backend_config = $6,
 			updated_at = NOW()
 		WHERE id = $1
 	`,
 		volume.ID,
 		volume.DefaultPosixUID, volume.DefaultPosixGID,
 		volume.AccessMode,
+		coalesceVolumeBackend(volume.Backend),
+		coalesceVolumeBackendConfig(volume.BackendConfig),
 	)
 
 	if err != nil {
@@ -244,11 +272,11 @@ func (r *Repository) UpdateSandboxVolume(ctx context.Context, volume *SandboxVol
 func (r *Repository) ListSandboxVolumesByTeam(ctx context.Context, teamID string) ([]*SandboxVolume, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT
-			id, team_id, user_id,
-			source_volume_id,
-			default_posix_uid, default_posix_gid,
-			access_mode,
-			created_at, updated_at
+				id, team_id, user_id,
+				source_volume_id,
+				default_posix_uid, default_posix_gid,
+				access_mode, backend, backend_config,
+				created_at, updated_at
 		FROM sandbox_volumes
 		WHERE team_id = $1
 			AND NOT EXISTS (
@@ -269,12 +297,13 @@ func (r *Repository) ListSandboxVolumesByTeam(ctx context.Context, teamID string
 			&v.ID, &v.TeamID, &v.UserID,
 			&v.SourceVolumeID,
 			&v.DefaultPosixUID, &v.DefaultPosixGID,
-			&v.AccessMode,
+			&v.AccessMode, &v.Backend, &v.BackendConfig,
 			&v.CreatedAt, &v.UpdatedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan sandbox volume: %w", err)
 		}
+		normalizeSandboxVolumeBackend(&v)
 		volumes = append(volumes, &v)
 	}
 	if err := rows.Err(); err != nil {
@@ -288,11 +317,11 @@ func (r *Repository) ListSandboxVolumesByTeam(ctx context.Context, teamID string
 func (r *Repository) ListSandboxVolumesBySource(ctx context.Context, sourceVolumeID string) ([]*SandboxVolume, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT
-			id, team_id, user_id,
-			source_volume_id,
-			default_posix_uid, default_posix_gid,
-			access_mode,
-			created_at, updated_at
+				id, team_id, user_id,
+				source_volume_id,
+				default_posix_uid, default_posix_gid,
+				access_mode, backend, backend_config,
+				created_at, updated_at
 		FROM sandbox_volumes
 		WHERE source_volume_id = $1
 		ORDER BY created_at DESC
@@ -309,12 +338,13 @@ func (r *Repository) ListSandboxVolumesBySource(ctx context.Context, sourceVolum
 			&v.ID, &v.TeamID, &v.UserID,
 			&v.SourceVolumeID,
 			&v.DefaultPosixUID, &v.DefaultPosixGID,
-			&v.AccessMode,
+			&v.AccessMode, &v.Backend, &v.BackendConfig,
 			&v.CreatedAt, &v.UpdatedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan sandbox volume by source: %w", err)
 		}
+		normalizeSandboxVolumeBackend(&v)
 		volumes = append(volumes, &v)
 	}
 	if err := rows.Err(); err != nil {
@@ -496,12 +526,12 @@ func (r *Repository) MarkOwnedSandboxVolumeCleanupAttempt(ctx context.Context, v
 
 func (r *Repository) queryOwnedSandboxVolumes(ctx context.Context, suffix string, args ...any) (pgx.Rows, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT
-			v.id, v.team_id, v.user_id,
-			v.source_volume_id,
-			v.default_posix_uid, v.default_posix_gid,
-			v.access_mode,
-			v.created_at, v.updated_at,
+			SELECT
+				v.id, v.team_id, v.user_id,
+				v.source_volume_id,
+				v.default_posix_uid, v.default_posix_gid,
+				v.access_mode, v.backend, v.backend_config,
+				v.created_at, v.updated_at,
 			o.volume_id, o.owner_kind, o.owner_sandbox_id, o.owner_cluster_id, o.purpose,
 			o.created_at, o.cleanup_requested_at, o.cleanup_reason,
 			o.last_cleanup_attempt_at, o.last_cleanup_error, o.updated_at
@@ -520,7 +550,7 @@ func scanOwnedSandboxVolume(rows pgx.Rows) (*OwnedSandboxVolume, error) {
 		&item.Volume.ID, &item.Volume.TeamID, &item.Volume.UserID,
 		&item.Volume.SourceVolumeID,
 		&item.Volume.DefaultPosixUID, &item.Volume.DefaultPosixGID,
-		&item.Volume.AccessMode,
+		&item.Volume.AccessMode, &item.Volume.Backend, &item.Volume.BackendConfig,
 		&item.Volume.CreatedAt, &item.Volume.UpdatedAt,
 		&item.Owner.VolumeID, &item.Owner.OwnerKind, &item.Owner.OwnerSandboxID, &item.Owner.OwnerClusterID, &item.Owner.Purpose,
 		&item.Owner.CreatedAt, &item.Owner.CleanupRequestedAt, &item.Owner.CleanupReason,
@@ -529,6 +559,7 @@ func scanOwnedSandboxVolume(rows pgx.Rows) (*OwnedSandboxVolume, error) {
 	if err != nil {
 		return nil, fmt.Errorf("scan owned sandbox volume: %w", err)
 	}
+	normalizeSandboxVolumeBackend(&item.Volume)
 	return &item, nil
 }
 

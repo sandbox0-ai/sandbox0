@@ -464,6 +464,9 @@ func (m *Manager) forkS0FSVolume(ctx context.Context, req *ForkVolumeRequest) (*
 	if sourceVol.TeamID != req.TeamID {
 		return nil, ErrVolumeNotFound
 	}
+	if volume.NormalizeBackend(sourceVol.Backend) != volume.BackendS0FS {
+		return nil, ErrUnsupportedBackend
+	}
 
 	if volume.NormalizeAccessMode(sourceVol.AccessMode) != volume.AccessModeROX {
 		ctldMounted, err := m.hasMountedCtldOwner(ctx, req.SourceVolumeID)
@@ -524,6 +527,8 @@ func (m *Manager) forkS0FSVolume(ctx context.Context, req *ForkVolumeRequest) (*
 		DefaultPosixUID: defaultPosixUID,
 		DefaultPosixGID: defaultPosixGID,
 		AccessMode:      string(accessMode),
+		Backend:         volume.BackendS0FS,
+		BackendConfig:   []byte(`{}`),
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
@@ -605,6 +610,9 @@ func (m *Manager) createS0FSVolumeFromSnapshot(ctx context.Context, req *CreateV
 	if sourceVol.TeamID != req.TeamID {
 		return nil, ErrVolumeNotFound
 	}
+	if volume.NormalizeBackend(sourceVol.Backend) != volume.BackendS0FS {
+		return nil, ErrUnsupportedBackend
+	}
 
 	accessMode := volume.AccessModeRWO
 	if strings.TrimSpace(req.AccessMode) != "" {
@@ -639,6 +647,8 @@ func (m *Manager) createS0FSVolumeFromSnapshot(ctx context.Context, req *CreateV
 		DefaultPosixUID: req.DefaultPosixUID,
 		DefaultPosixGID: req.DefaultPosixGID,
 		AccessMode:      string(accessMode),
+		Backend:         volume.BackendS0FS,
+		BackendConfig:   []byte(`{}`),
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
@@ -772,6 +782,9 @@ func (m *Manager) deleteS0FSSnapshot(ctx context.Context, volumeID, snapshotID s
 
 func (m *Manager) DeleteVolumeObjectsIfUnreferenced(ctx context.Context, vol *db.SandboxVolume) error {
 	if vol == nil || strings.TrimSpace(vol.ID) == "" || strings.TrimSpace(vol.TeamID) == "" {
+		return nil
+	}
+	if volume.NormalizeBackend(vol.Backend) != volume.BackendS0FS {
 		return nil
 	}
 	safe, err := m.canCollectS0FSVolume(ctx, vol.ID)

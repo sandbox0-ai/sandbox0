@@ -95,6 +95,7 @@ type SandboxVolumeInfo struct {
 	TeamID     string `json:"team_id"`
 	UserID     string `json:"user_id"`
 	AccessMode string `json:"access_mode"`
+	Backend    string `json:"backend,omitempty"`
 }
 
 func (c *StorageProxyVolumeClient) Create(ctx context.Context, teamID, userID, sandboxID, purpose string) (string, error) {

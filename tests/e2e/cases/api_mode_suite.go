@@ -36,6 +36,7 @@ type apiModeSuiteOptions struct {
 	includePoolReadinessGate  bool
 	includeNetworkPolicy      bool
 	includeVolumeLifecycle    bool
+	includeMountpointS3Compat bool
 	includeObjectEncryption   bool
 	includeWebhookLifecycle   bool
 	includeRootFSPauseResume  bool
@@ -344,6 +345,12 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 				It("rejects invalid bootstrap mount requests at claim time", func() {
 					assertClaimBootstrapMountValidation(env, session)
 				})
+
+				if opts.includeMountpointS3Compat {
+					It("matches mountpoint-s3 general bucket compatibility semantics", func() {
+						assertMountpointS3Compatibility(env, session)
+					})
+				}
 
 				if opts.includeObjectEncryption {
 					It("keeps encrypted volume objects and local cache opaque", func() {

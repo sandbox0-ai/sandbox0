@@ -79,6 +79,7 @@ var (
 	ErrInvalidAccessMode            = errors.New("invalid access mode")
 	ErrMountedCtldOwner             = errors.New("snapshot operations require ctld-mounted volumes to be unmounted")
 	ErrActiveRWXSnapshotUnsupported = errors.New("active RWX volume snapshots are not supported")
+	ErrUnsupportedBackend           = errors.New("volume backend does not support snapshots")
 )
 
 // Manager handles snapshot operations for SandboxVolumes
@@ -270,6 +271,9 @@ func (m *Manager) CreateSnapshot(ctx context.Context, req *CreateSnapshotRequest
 	}
 	if vol.TeamID != req.TeamID {
 		return nil, ErrVolumeNotFound
+	}
+	if volume.NormalizeBackend(vol.Backend) != volume.BackendS0FS {
+		return nil, ErrUnsupportedBackend
 	}
 	accessMode := volume.NormalizeAccessMode(vol.AccessMode)
 	if accessMode == volume.AccessModeRWX {
@@ -479,6 +483,16 @@ func (m *Manager) RestoreSnapshot(ctx context.Context, req *RestoreSnapshotReque
 
 	if snapshot.VolumeID != req.VolumeID || snapshot.TeamID != req.TeamID {
 		return ErrSnapshotNotBelongToVolume
+	}
+	vol, err := m.repo.GetSandboxVolume(ctx, req.VolumeID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return ErrVolumeNotFound
+		}
+		return fmt.Errorf("get volume: %w", err)
+	}
+	if volume.NormalizeBackend(vol.Backend) != volume.BackendS0FS {
+		return ErrUnsupportedBackend
 	}
 
 	// 2. Acquire volume lock

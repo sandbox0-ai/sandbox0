@@ -1,4 +1,4 @@
-.PHONY: all build test test-all test-integration test-integration-verbose test-e2e test-e2e-kind test-e2e-destroy test-e2e-load-images test-e2e-prepare-kind test-e2e-setup-gvisor-rootfs test-e2e-specific test-e2e-s0fs-posix test-e2e-s0fs-posix-prepare test-e2e-netd-cni lint tidy vendor clean helm-update helm-configs release docker-build docker-build-local build-local-all docker-push proto manifests apispec oapi-codegen
+.PHONY: all build test test-all test-integration test-integration-verbose test-e2e test-e2e-kind test-e2e-destroy test-e2e-load-images test-e2e-prepare-kind test-e2e-setup-gvisor-rootfs test-e2e-specific test-e2e-mountpoint-s3-compat test-e2e-s0fs-posix test-e2e-s0fs-posix-prepare test-e2e-netd-cni lint tidy vendor clean helm-update helm-configs release docker-build docker-build-local build-local-all docker-push proto manifests apispec oapi-codegen
 
 # Tool Binaries
 LOCALBIN ?= $(shell pwd)/bin
@@ -233,6 +233,18 @@ test-e2e-specific:
 	fi
 	@printf "$(CYAN)Running E2E test: $(SPEC)...$(RESET)\n"
 	unset http_proxy && unset https_proxy && unset all_proxy && $(GO) test -v ./tests/e2e/... -focus="$(SPEC)" -timeout=30m
+
+test-e2e-mountpoint-s3-compat:
+	@printf "$(CYAN)Running mountpoint-s3 compatibility E2E suite...$(RESET)\n"
+	unset http_proxy && unset https_proxy && unset all_proxy && \
+		E2E_SINGLE_CLUSTER_SCENARIOS=volumes \
+		E2E_MOUNTPOINT_S3_COMPAT=true \
+		E2E_USE_EXISTING_CLUSTER=true \
+		E2E_SANDBOX_RUNTIME_CLASS= \
+		$(GO) test -v -count=1 ./tests/e2e/scenarios/single-cluster \
+		-run TestSingleCluster \
+		-ginkgo.focus="API volumes mode.*mountpoint-s3 general bucket compatibility semantics" \
+		-timeout=30m
 
 test-e2e-s0fs-posix-prepare:
 	@printf "$(CYAN)Preparing fullmode infra for S0FS POSIX E2E suite...$(RESET)\n"

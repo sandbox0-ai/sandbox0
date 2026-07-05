@@ -47,6 +47,13 @@ jobs:
           E2E_CLUSTER_NAME: ${{ env.KIND_CLUSTER_NAME }}
         run: make test-e2e-s0fs-posix
 
+      - name: Run mountpoint-s3 compatibility suite
+        env:
+          E2E_CLUSTER_NAME: ${{ env.KIND_CLUSTER_NAME }}
+          E2E_USE_EXISTING_CLUSTER: "true"
+          E2E_SANDBOX_RUNTIME_CLASS: ""
+        run: make test-e2e-mountpoint-s3-compat
+
       - name: Dump cluster state on failure
         if: failure()
         shell: bash

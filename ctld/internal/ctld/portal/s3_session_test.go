@@ -226,21 +226,25 @@ func TestS3SessionHidesObjectKeysWithEmptyPathSegments(t *testing.T) {
 	ctx := context.Background()
 	store := objectstore.NewMemoryStore(t.Name())
 	putS3TestObject(t, store, "invalid//hidden.txt", "hidden")
+	putS3TestObject(t, store, "dots/./hidden.txt", "hidden")
+	putS3TestObject(t, store, "parents/../hidden.txt", "hidden")
 	session := newS3Session("vol-s3", store, volume.AccessModeRWO, nil)
 
-	dir, err := session.Lookup(ctx, &pb.LookupRequest{Parent: s3RootInode, Name: "invalid"})
-	if err != nil {
-		t.Fatalf("Lookup(invalid) error = %v", err)
-	}
-	entries, err := session.ReadDir(ctx, &pb.ReadDirRequest{Inode: dir.Inode, Plus: true})
-	if err != nil {
-		t.Fatalf("ReadDir(invalid) error = %v", err)
-	}
-	if len(entries.Entries) != 0 {
-		t.Fatalf("ReadDir(invalid) entries = %#v, want none for empty path segment object", entries.Entries)
-	}
-	if _, err := session.Lookup(ctx, &pb.LookupRequest{Parent: dir.Inode, Name: "hidden.txt"}); fserror.CodeOf(err) != fserror.NotFound {
-		t.Fatalf("Lookup(hidden.txt) error = %v, want NotFound", err)
+	for _, name := range []string{"invalid", "dots", "parents"} {
+		dir, err := session.Lookup(ctx, &pb.LookupRequest{Parent: s3RootInode, Name: name})
+		if err != nil {
+			t.Fatalf("Lookup(%s) error = %v", name, err)
+		}
+		entries, err := session.ReadDir(ctx, &pb.ReadDirRequest{Inode: dir.Inode, Plus: true})
+		if err != nil {
+			t.Fatalf("ReadDir(%s) error = %v", name, err)
+		}
+		if len(entries.Entries) != 0 {
+			t.Fatalf("ReadDir(%s) entries = %#v, want none for invalid path segment object", name, entries.Entries)
+		}
+		if _, err := session.Lookup(ctx, &pb.LookupRequest{Parent: dir.Inode, Name: "hidden.txt"}); fserror.CodeOf(err) != fserror.NotFound {
+			t.Fatalf("Lookup(%s/hidden.txt) error = %v, want NotFound", name, err)
+		}
 	}
 }
 

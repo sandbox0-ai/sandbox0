@@ -198,6 +198,8 @@ func newS3Store(cfg Config) (Store, error) {
 
 	loadOptions := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(region),
+		awsconfig.WithRequestChecksumCalculation(aws.RequestChecksumCalculationWhenRequired),
+		awsconfig.WithResponseChecksumValidation(aws.ResponseChecksumValidationWhenRequired),
 	}
 	if cfg.AccessKey != "" || cfg.SecretKey != "" || cfg.SessionToken != "" {
 		loadOptions = append(loadOptions, awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(

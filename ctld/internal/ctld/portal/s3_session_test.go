@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
@@ -203,6 +204,32 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 	if _, err := session.Write(ctx, &pb.WriteRequest{HandleId: reopened.HandleId, Offset: 0, Data: []byte("replacement")}); err != nil {
 		t.Fatalf("Write(replacement) error = %v", err)
 	}
+	if _, err := session.SetAttr(ctx, &pb.SetAttrRequest{
+		Inode:    created.Inode,
+		HandleId: 0,
+		Valid: uint32(
+			fuse.FATTR_UID |
+				fuse.FATTR_GID,
+		),
+		Attr: &pb.GetAttrResponse{Uid: 1000, Gid: 1000},
+	}); err != nil {
+		t.Fatalf("SetAttr(open-writer metadata no-op without FATTR_FH) error = %v", err)
+	}
+	if _, err := session.SetAttr(ctx, &pb.SetAttrRequest{
+		Inode:    created.Inode,
+		HandleId: reopened.HandleId,
+		Valid: uint32(fuse.FATTR_FH |
+			fuse.FATTR_MODE |
+			fuse.FATTR_UID |
+			fuse.FATTR_GID |
+			fuse.FATTR_ATIME |
+			fuse.FATTR_MTIME |
+			fuse.FATTR_LOCKOWNER |
+			fuse.FATTR_KILL_SUIDGID),
+		Attr: &pb.GetAttrResponse{Mode: s3FileMode | 0o600},
+	}); err != nil {
+		t.Fatalf("SetAttr(handle-scoped metadata no-op) error = %v", err)
+	}
 	if _, err := session.Release(ctx, &pb.ReleaseRequest{HandleId: reopened.HandleId}); err != nil {
 		t.Fatalf("Release(replacement) error = %v", err)
 	}
@@ -224,8 +251,22 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 	}); !errors.Is(err, syscall.EOPNOTSUPP) {
 		t.Fatalf("SetAttr(mode) error = %v, want EOPNOTSUPP", err)
 	}
-	if _, err := session.ListXattr(ctx, &pb.ListXattrRequest{Inode: created.Inode}); !errors.Is(err, syscall.EOPNOTSUPP) {
-		t.Fatalf("ListXattr() error = %v, want EOPNOTSUPP", err)
+	xattrs, err := session.ListXattr(ctx, &pb.ListXattrRequest{Inode: created.Inode})
+	if err != nil {
+		t.Fatalf("ListXattr() error = %v", err)
+	}
+	if len(xattrs.Data) != 0 {
+		t.Fatalf("ListXattr() data = %q, want empty", xattrs.Data)
+	}
+	selinux, err := session.GetXattr(ctx, &pb.GetXattrRequest{Inode: created.Inode, Name: "security.selinux"})
+	if err != nil {
+		t.Fatalf("GetXattr(security.selinux) error = %v", err)
+	}
+	if len(selinux.Value) != 0 {
+		t.Fatalf("GetXattr(security.selinux) value = %q, want empty", selinux.Value)
+	}
+	if _, err := session.GetXattr(ctx, &pb.GetXattrRequest{Inode: created.Inode, Name: "user.test"}); err == nil {
+		t.Fatal("GetXattr(user.test) error = nil, want unsupported error")
 	}
 
 	implicitCreated, err := session.Create(ctx, &pb.CreateRequest{Parent: fromSandbox.Inode, Name: "implicit.txt"})
@@ -280,6 +321,13 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 	want := []string{"dir:external", "dir:from-sandbox"}
 	if !equalPortalStringSlices(got, want) {
 		t.Fatalf("ReadDir(root) = %#v, want %#v", got, want)
+	}
+}
+
+func TestS3SessionOpenFlagsAvoidDirectIO(t *testing.T) {
+	session := newS3Session("vol-s3", objectstore.NewMemoryStore(t.Name()), volume.AccessModeRWO, nil)
+	if got := session.OpenFlags(); got != 0 {
+		t.Fatalf("OpenFlags() = %#x, want 0", got)
 	}
 }
 

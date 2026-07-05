@@ -604,6 +604,9 @@ func (m *Manager) CheckPublished(ctx context.Context, req ctldapi.CheckVolumePor
 	if len(req.Portals) == 0 {
 		return ctldapi.CheckVolumePortalsResponse{Ready: true}, nil
 	}
+	if m == nil || m.repo == nil {
+		return ctldapi.CheckVolumePortalsResponse{}, fmt.Errorf("ctld volume registry unavailable")
+	}
 
 	missing := make([]string, 0)
 	m.mu.Lock()

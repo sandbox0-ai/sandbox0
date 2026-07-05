@@ -49,17 +49,65 @@ Mount path requirements:
 
 The claim request binds existing Volumes to template-declared paths.
 
-```json
-{
-    "template": "default",
-    "mounts": [
-        {
-            "sandboxvolume_id": "vol_123",
-            "mount_point": "/workspace"
-        }
-    ]
+<Endpoint method="POST">
+/api/v1/sandboxes
+</Endpoint>
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `sandbox, err := client.ClaimSandbox(
+    ctx,
+    "default",
+    sandbox0.WithSandboxBootstrapMount(volume.ID, "/workspace"),
+)
+if err != nil {
+    log.Fatal(err)
 }
-```
+for _, mount := range sandbox.BootstrapMounts {
+    fmt.Printf("%s %s\\n", mount.SandboxvolumeID, mount.State)
+}`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.apispec.models.claim_mount_request import ClaimMountRequest
+
+sandbox = client.sandboxes.claim(
+    "default",
+    mounts=[
+        ClaimMountRequest(
+            sandboxvolume_id=volume.id,
+            mount_point="/workspace",
+        )
+    ],
+)
+for mount in sandbox.bootstrap_mounts:
+    print(mount.sandboxvolume_id, mount.state)`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const sandbox = await client.sandboxes.claim("default", {
+    mounts: [{ sandboxvolumeId: volume.id, mountPoint: "/workspace" }],
+});
+for (const mount of sandbox.bootstrapMounts) {
+    console.log(mount.sandboxvolumeId, mount.state);
+}`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `VOLUME_ID="vol_123"
+s0 sandbox create \\
+    --template default \\
+    --mount "$VOLUME_ID:/workspace" \\
+    -o json`
+    }
+  ]}
+/>
 
 `mount_point` must match a path declared in `spec.volumeMounts`. A claim may bind any subset of the declared mount paths.
 
@@ -78,6 +126,8 @@ Only mounts present in the claim request are treated as bound Sandbox Volume pat
 Volumes created with `backend: "s3"` are mounted through the same template-declared volume portal. The mounted path exposes the configured S3-compatible prefix as a filesystem: keys use `/` as directory separators, common prefixes appear as directories, and files created inside the Sandbox are uploaded as S3 objects when the file handle is closed or flushed.
 
 The S3 backend supports `RWO` and `ROX` mounts. Writable opens replace the target object and must write sequentially; random in-place overwrites are not supported. It does not support `RWX`, snapshots, restore, forks, renames, hard links, symlinks, xattrs, file locks, or fallocate. Use it when the desired source of truth is an existing S3/OSS/R2 prefix rather than a Sandbox0-managed `s0fs` volume.
+
+For create-time fields and provider-specific configuration, see [Volume Backends](./backends).
 
 ## Correctness Guarantees
 

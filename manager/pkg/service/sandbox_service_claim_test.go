@@ -1809,33 +1809,6 @@ func TestValidateVolumePortalAccessAllowsROXOnlyForReadOnlyTemplateMount(t *test
 	}
 }
 
-func TestValidateVolumePortalRuntimeCompatibilityRejectsS3WithGVisor(t *testing.T) {
-	runtimeClassName := "gvisor-rootfs"
-	pod := &corev1.Pod{Spec: corev1.PodSpec{RuntimeClassName: &runtimeClassName}}
-	info := &SandboxVolumeInfo{ID: "vol-1", Backend: "s3"}
-
-	err := validateVolumePortalRuntimeCompatibility(pod, info, "/workspace/data")
-	if err == nil {
-		t.Fatal("expected runtime compatibility validation error")
-	}
-	if !errors.Is(err, ErrInvalidClaimRequest) {
-		t.Fatalf("expected ErrInvalidClaimRequest, got %v", err)
-	}
-}
-
-func TestValidateVolumePortalRuntimeCompatibilityAllowsS3WithDefaultOrRunc(t *testing.T) {
-	info := &SandboxVolumeInfo{ID: "vol-1", Backend: "s3"}
-	if err := validateVolumePortalRuntimeCompatibility(&corev1.Pod{}, info, "/workspace/data"); err != nil {
-		t.Fatalf("default runtime compatibility error = %v", err)
-	}
-
-	runtimeClassName := "runc"
-	pod := &corev1.Pod{Spec: corev1.PodSpec{RuntimeClassName: &runtimeClassName}}
-	if err := validateVolumePortalRuntimeCompatibility(pod, info, "/workspace/data"); err != nil {
-		t.Fatalf("runc runtime compatibility error = %v", err)
-	}
-}
-
 type fakeVolumeMetadataClient struct {
 	accessMode string
 	backend    string
@@ -1863,6 +1836,97 @@ func (c *fakeVolumeMetadataClient) PrepareForVolumePortalBind(_ context.Context,
 	}
 	c.prepared = append(c.prepared, req.TeamID+":"+req.UserID+":"+req.VolumeID+":"+req.PodUID)
 	return c.prepareErr
+}
+
+func TestBindVolumePortalsAllowsS3WithGVisorRuntime(t *testing.T) {
+	var bindCalls int
+	var gotReq ctldapi.BindVolumePortalRequest
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/volume-portals/bind" {
+			http.NotFound(w, r)
+			return
+		}
+		bindCalls++
+		if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
+			t.Fatalf("decode bind request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ctldapi.BindVolumePortalResponse{
+			SandboxVolumeID: "vol-1",
+			MountPoint:      "/workspace/data",
+			MountedAt:       "2026-01-01T00:00:00Z",
+		})
+	}))
+	defer ctld.Close()
+
+	ctldURL, err := url.Parse(ctld.URL)
+	if err != nil {
+		t.Fatalf("parse ctld url: %v", err)
+	}
+	ctldPort, err := strconv.Atoi(ctldURL.Port())
+	if err != nil {
+		t.Fatalf("parse ctld port: %v", err)
+	}
+
+	runtimeClassName := "gvisor-rootfs"
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "team-a", UID: "pod-uid"},
+		Spec: corev1.PodSpec{
+			NodeName:         "node-a",
+			RuntimeClassName: &runtimeClassName,
+		},
+	}
+	client := fake.NewSimpleClientset(&corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{{
+				Type:    corev1.NodeInternalIP,
+				Address: ctldURL.Hostname(),
+			}},
+		},
+	})
+	svc := &SandboxService{
+		k8sClient:      client,
+		ctldClient:     NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		volumeMetadata: fakeVolumeMetadataClient{accessMode: "RWO", backend: "s3"},
+		config:         SandboxServiceConfig{CtldPort: ctldPort},
+	}
+	template := &v1alpha1.SandboxTemplate{
+		Spec: v1alpha1.SandboxTemplateSpec{
+			VolumeMounts: []v1alpha1.VolumeMountSpec{{
+				Name:      "data",
+				MountPath: "/workspace/data",
+			}},
+		},
+	}
+	req := &ClaimRequest{
+		TeamID: "team-a",
+		UserID: "user-a",
+		Mounts: []ClaimMount{{
+			SandboxVolumeID: "vol-1",
+			MountPoint:      "/workspace/data",
+		}},
+	}
+
+	mounts, err := svc.bindVolumePortals(context.Background(), pod, req, template)
+	if err != nil {
+		t.Fatalf("bindVolumePortals() error = %v", err)
+	}
+	if bindCalls != 1 {
+		t.Fatalf("bind calls = %d, want 1", bindCalls)
+	}
+	if gotReq.SandboxVolumeID != "vol-1" {
+		t.Fatalf("bind request volume = %q, want vol-1", gotReq.SandboxVolumeID)
+	}
+	if gotReq.PortalName != "data" {
+		t.Fatalf("bind request portal = %q, want data", gotReq.PortalName)
+	}
+	if len(mounts) != 1 {
+		t.Fatalf("mount statuses = %d, want 1", len(mounts))
+	}
+	if mounts[0].State != "mounted" {
+		t.Fatalf("mount state = %q, want mounted", mounts[0].State)
+	}
 }
 
 func TestPrepareVolumePortalBindUsesPreparationClientWhenAvailable(t *testing.T) {

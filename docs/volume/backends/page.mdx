@@ -1,0 +1,299 @@
+# Volume Backends
+
+Volume backends define where a Sandbox Volume stores and reads filesystem data. The backend is selected when the Volume is created and cannot be changed later.
+
+If `backend` is omitted, Sandbox0 creates an `s0fs` Volume.
+
+## Choose A Backend
+
+| Backend | Source of truth | Use when | Notable limits |
+|---------|-----------------|----------|----------------|
+| `s0fs` | Sandbox0-managed metadata and objects in the region object store | You need persistent agent workspaces, direct Volume file APIs, snapshots, restore, or forks | Storage is owned by Sandbox0 |
+| `s3` | An existing S3-compatible bucket prefix | You need an existing S3, OSS, or R2 prefix to appear as a Sandbox filesystem | No snapshots, restore, forks, `RWX`, or direct file API without an active mounted owner |
+
+`s0fs` is the default durable Volume backend. It is POSIX-oriented and supports Sandbox mounts, direct file APIs, snapshots, restore, and forks.
+
+The `s3` backend is mount-s3-like. Object keys are projected into directories using `/`, common prefixes appear as directories, and files written inside the Sandbox are uploaded as S3 objects when the file handle is closed, flushed, or fsynced.
+
+<Callout variant="info">
+SDK examples assume `client` is already configured as shown in [Get Started](/docs/sandbox/get-started). CLI examples assume you already ran `s0 auth login` and selected a current team with `s0 team use <team-id>`.
+</Callout>
+
+## Create An s0fs Volume
+
+Use `s0fs` for normal Sandbox0-managed persistence:
+
+<Endpoint method="POST">
+/api/v1/sandboxvolumes
+</Endpoint>
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `volume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{
+    Backend:    apispec.NewOptVolumeBackend(apispec.VolumeBackendS0fs),
+    AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWO),
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("Volume ID: %s\\n", volume.ID)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.apispec.models.create_sandbox_volume_request import CreateSandboxVolumeRequest
+from sandbox0.apispec.models.volume_access_mode import VolumeAccessMode
+from sandbox0.apispec.models.volume_backend import VolumeBackend
+
+volume = client.volumes.create(CreateSandboxVolumeRequest(
+    backend=VolumeBackend.S0FS,
+    access_mode=VolumeAccessMode.RWO,
+))
+print(f"Volume ID: {volume.id}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `import { models } from "sandbox0";
+
+const volume = await client.volumes.create({
+    backend: models.VolumeBackend.S0fs,
+    accessMode: models.VolumeAccessMode.Rwo,
+});
+console.log("Volume ID:", volume.id);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 volume create --backend s0fs --access-mode RWO -o json`
+    }
+  ]}
+/>
+
+## Create An S3-Backed Volume
+
+Set the S3 fields for the bucket prefix that should appear as the Volume root:
+
+```bash
+export S3_BUCKET=agent-data
+export S3_PREFIX=team-a/workspace-a
+export AWS_REGION=us-east-1
+export AWS_ACCESS_KEY_ID=example-access-key
+export AWS_SECRET_ACCESS_KEY=example-secret-key
+```
+
+Create the Volume with an SDK or the CLI:
+
+<Endpoint method="POST">
+/api/v1/sandboxvolumes
+</Endpoint>
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `s3Config := apispec.CreateSandboxVolumeS3Config{
+    Provider:  apispec.NewOptCreateSandboxVolumeS3ConfigProvider(apispec.CreateSandboxVolumeS3ConfigProviderAWS),
+    Bucket:    os.Getenv("S3_BUCKET"),
+    Prefix:    apispec.NewOptString(os.Getenv("S3_PREFIX")),
+    Region:    apispec.NewOptString(os.Getenv("AWS_REGION")),
+    AccessKey: apispec.NewOptString(os.Getenv("AWS_ACCESS_KEY_ID")),
+    SecretKey: apispec.NewOptString(os.Getenv("AWS_SECRET_ACCESS_KEY")),
+}
+
+volume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{
+    Backend:    apispec.NewOptVolumeBackend(apispec.VolumeBackendS3),
+    AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWO),
+    S3:         apispec.NewOptCreateSandboxVolumeS3Config(s3Config),
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("Volume ID: %s\\n", volume.ID)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `import os
+from sandbox0.apispec.models.create_sandbox_volume_request import CreateSandboxVolumeRequest
+from sandbox0.apispec.models.create_sandbox_volume_s3_config import CreateSandboxVolumeS3Config
+from sandbox0.apispec.models.create_sandbox_volume_s3_config_provider import CreateSandboxVolumeS3ConfigProvider
+from sandbox0.apispec.models.volume_access_mode import VolumeAccessMode
+from sandbox0.apispec.models.volume_backend import VolumeBackend
+
+s3_config = CreateSandboxVolumeS3Config(
+    provider=CreateSandboxVolumeS3ConfigProvider.AWS,
+    bucket=os.environ["S3_BUCKET"],
+    prefix=os.environ["S3_PREFIX"],
+    region=os.environ["AWS_REGION"],
+    access_key=os.environ["AWS_ACCESS_KEY_ID"],
+    secret_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+)
+
+volume = client.volumes.create(CreateSandboxVolumeRequest(
+    backend=VolumeBackend.S3,
+    access_mode=VolumeAccessMode.RWO,
+    s3=s3_config,
+))
+print(f"Volume ID: {volume.id}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `import { models } from "sandbox0";
+
+const volume = await client.volumes.create({
+    backend: models.VolumeBackend.S3,
+    accessMode: models.VolumeAccessMode.Rwo,
+    s3: {
+        provider: models.CreateSandboxVolumeS3ConfigProviderEnum.Aws,
+        bucket: process.env.S3_BUCKET!,
+        prefix: process.env.S3_PREFIX!,
+        region: process.env.AWS_REGION!,
+        accessKey: process.env.AWS_ACCESS_KEY_ID!,
+        secretKey: process.env.AWS_SECRET_ACCESS_KEY!,
+    },
+});
+console.log("Volume ID:", volume.id);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 volume create \\
+    --backend s3 \\
+    --access-mode RWO \\
+    --s3-provider aws \\
+    --s3-bucket "$S3_BUCKET" \\
+    --s3-prefix "$S3_PREFIX" \\
+    --s3-region "$AWS_REGION" \\
+    --s3-access-key "$AWS_ACCESS_KEY_ID" \\
+    --s3-secret-key "$AWS_SECRET_ACCESS_KEY" \\
+    -o json`
+    }
+  ]}
+/>
+
+For Aliyun OSS or Cloudflare R2, set the matching provider and include the endpoint URL. For MinIO or a private S3-compatible gateway, keep the provider as `aws` and include the endpoint URL.
+
+| Client | Endpoint field |
+|--------|----------------|
+| Go | `s3Config.EndpointURL = apispec.NewOptString(os.Getenv("S3_ENDPOINT_URL"))` |
+| Python | `s3_config.endpoint_url = os.environ["S3_ENDPOINT_URL"]` |
+| TypeScript | `endpointUrl: process.env.S3_ENDPOINT_URL!` |
+| CLI | `--s3-endpoint-url "$S3_ENDPOINT_URL"` |
+
+## S3 Fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `provider` | No | `aws`, `ali`, or `r2`. Defaults to AWS-compatible behavior when omitted. Use `ali` for Aliyun OSS and `r2` for Cloudflare R2. |
+| `bucket` | Yes | Bucket name. |
+| `prefix` | No | Object key prefix exposed as the mounted Volume root. |
+| `region` | No | Region override. |
+| `endpoint_url` | Required for `ali` and `r2` | S3-compatible endpoint URL. For AWS S3 with the default regional endpoint, omit it. |
+| `access_key` and `secret_key` | No | Per-Volume credential override. They must be provided together. |
+| `session_token` | No | Temporary credential session token. |
+
+Credentials are accepted only on create. List and get responses return public backend metadata such as provider, bucket, prefix, region, and endpoint URL, but never return credentials.
+
+## S3 Filesystem Semantics
+
+The `s3` backend is designed to match mount-s3 general-purpose bucket semantics where those semantics fit Sandbox0's volume portal.
+
+| Behavior | S3 backend semantics |
+|----------|----------------------|
+| Read existing objects | Supported. |
+| List prefixes as directories | Supported. Directory entries are synthetic unless represented by object keys ending in `/`. |
+| Create files | Supported. The object becomes visible in S3 after close, flush, or fsync. |
+| External S3 writes | Visible through the mount on later lookup, read, or list operations. |
+| External S3 deletes | Visible through the mount on later lookup or list operations. |
+| Overwrite existing files | Supported as whole-object replacement. |
+| Random in-place writes | Not supported. Writes must be sequential. |
+| Rename, hard link, symlink, xattrs, locks, fallocate | Not supported. |
+| `RWX`, snapshots, restore, forks | Not supported. |
+
+<Callout variant="info">
+An S3-backed Volume should be mounted into a Sandbox for filesystem access. Direct Volume file API requests can proxy to the active mounted owner while it exists; when the Volume is not mounted, use S3 APIs directly or mount it first.
+</Callout>
+
+## Mount A Volume
+
+S3-backed Volumes use the same template-declared mount flow as `s0fs` Volumes. The mount point must already be declared by the template. The operator-managed `default` template declares `/workspace`.
+
+<Endpoint method="POST">
+/api/v1/sandboxes
+</Endpoint>
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `sandbox, err := client.ClaimSandbox(
+    ctx,
+    "default",
+    sandbox0.WithSandboxBootstrapMount(volume.ID, "/workspace"),
+)
+if err != nil {
+    log.Fatal(err)
+}
+for _, mount := range sandbox.BootstrapMounts {
+    fmt.Printf("%s %s\\n", mount.SandboxvolumeID, mount.State)
+}`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.apispec.models.claim_mount_request import ClaimMountRequest
+
+sandbox = client.sandboxes.claim(
+    "default",
+    mounts=[
+        ClaimMountRequest(
+            sandboxvolume_id=volume.id,
+            mount_point="/workspace",
+        )
+    ],
+)
+for mount in sandbox.bootstrap_mounts:
+    print(mount.sandboxvolume_id, mount.state)`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const sandbox = await client.sandboxes.claim("default", {
+    mounts: [{ sandboxvolumeId: volume.id, mountPoint: "/workspace" }],
+});
+for (const mount of sandbox.bootstrapMounts) {
+    console.log(mount.sandboxvolumeId, mount.state);
+}`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `VOLUME_ID="vol_123"
+s0 sandbox create \\
+    --template default \\
+    --mount "$VOLUME_ID:/workspace" \\
+    -o json`
+    }
+  ]}
+/>
+
+For template mount declarations and access-mode behavior, see [Volume Mounts](./mounts).
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Mounts" href="/docs/sandbox/volume/mounts" cta="Continue">
+    Bind Volumes to template-declared Sandbox mount points.
+  </Card>
+
+  <Card title="HTTP" href="/docs/sandbox/volume/http" cta="Continue">
+    Use direct Volume file APIs outside a running Sandbox mount.
+  </Card>
+</CardGroup>

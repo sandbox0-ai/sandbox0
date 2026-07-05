@@ -23,11 +23,21 @@ import (
 )
 
 const (
-	s3RootInode       = uint64(fsmeta.RootInode)
-	s3DirMode         = uint32(syscall.S_IFDIR | 0o755)
-	s3FileMode        = uint32(syscall.S_IFREG | 0o644)
-	fuseFattrSize     = uint32(fuse.FATTR_SIZE)
-	fuseFattrNoopMask = uint32(fuse.FATTR_FH | fuse.FATTR_LOCKOWNER | fuse.FATTR_KILL_SUIDGID)
+	s3RootInode           = uint64(fsmeta.RootInode)
+	s3DirMode             = uint32(syscall.S_IFDIR | 0o755)
+	s3FileMode            = uint32(syscall.S_IFREG | 0o644)
+	fuseFattrSize         = uint32(fuse.FATTR_SIZE)
+	fuseFattrNoopMask     = uint32(fuse.FATTR_FH | fuse.FATTR_LOCKOWNER | fuse.FATTR_KILL_SUIDGID)
+	fuseFattrOpenNoopMask = fuseFattrNoopMask | uint32(
+		fuse.FATTR_MODE|
+			fuse.FATTR_UID|
+			fuse.FATTR_GID|
+			fuse.FATTR_ATIME|
+			fuse.FATTR_MTIME|
+			fuse.FATTR_ATIME_NOW|
+			fuse.FATTR_MTIME_NOW|
+			fuse.FATTR_CTIME,
+	)
 )
 
 type s3NodeKind uint8
@@ -91,7 +101,10 @@ func newS3Session(volumeID string, store objectstore.Store, access volume.Access
 }
 
 func (s *s3Session) OpenFlags() uint32 {
-	return fuse.FOPEN_DIRECT_IO
+	// gVisor rootfs presents host mounts through 9p; FOPEN_DIRECT_IO causes
+	// writes through that path to fail with EOPNOTSUPP even though the S3
+	// session supports sequential writes.
+	return 0
 }
 
 func (s *s3Session) Close() {
@@ -163,7 +176,17 @@ func (s *s3Session) SetAttr(ctx context.Context, req *pb.SetAttrRequest) (*pb.Se
 	if req.Valid == 0 {
 		return &pb.SetAttrResponse{Attr: s.attr(node)}, nil
 	}
-	if req.Valid&^(fuseFattrSize|fuseFattrNoopMask) != 0 {
+	supported := fuseFattrSize | fuseFattrNoopMask
+	if req.Valid&uint32(fuse.FATTR_FH) != 0 || s.findWritableHandle(node.inode) != nil {
+		// gVisor's 9p gofer can issue metadata setattr calls tied to the
+		// just-opened file handle while creating files on host FUSE mounts.
+		// It does not always include FATTR_FH, so an open writer is also
+		// enough to identify create/truncate metadata as transient. S3 has no
+		// durable POSIX metadata for these fields, so keep normal chmod/chown
+		// requests unsupported once the writer is closed.
+		supported |= fuseFattrOpenNoopMask
+	}
+	if req.Valid&^supported != 0 {
 		return nil, syscall.EOPNOTSUPP
 	}
 	if req.Valid&fuseFattrSize == 0 {
@@ -662,20 +685,23 @@ func (s *s3Session) StatFs(context.Context, *pb.StatFsRequest) (*pb.StatFsRespon
 	}, nil
 }
 
-func (s *s3Session) GetXattr(context.Context, *pb.GetXattrRequest) (*pb.GetXattrResponse, error) {
-	return nil, syscall.ENODATA
+func (s *s3Session) GetXattr(_ context.Context, req *pb.GetXattrRequest) (*pb.GetXattrResponse, error) {
+	if req != nil && req.Name == "security.selinux" {
+		return &pb.GetXattrResponse{}, nil
+	}
+	return nil, fserror.New(fserror.Unimplemented, "xattr is not implemented for s3")
 }
 
 func (s *s3Session) SetXattr(context.Context, *pb.SetXattrRequest) (*pb.Empty, error) {
-	return nil, syscall.EOPNOTSUPP
+	return nil, fserror.New(fserror.Unimplemented, "xattr is not implemented for s3")
 }
 
 func (s *s3Session) ListXattr(context.Context, *pb.ListXattrRequest) (*pb.ListXattrResponse, error) {
-	return nil, syscall.EOPNOTSUPP
+	return &pb.ListXattrResponse{}, nil
 }
 
 func (s *s3Session) RemoveXattr(context.Context, *pb.RemoveXattrRequest) (*pb.Empty, error) {
-	return nil, syscall.EOPNOTSUPP
+	return nil, fserror.New(fserror.Unimplemented, "xattr is not implemented for s3")
 }
 
 func (s *s3Session) Mknod(context.Context, *pb.MknodRequest) (*pb.NodeResponse, error) {

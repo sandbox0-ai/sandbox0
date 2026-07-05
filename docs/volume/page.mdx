@@ -47,33 +47,14 @@ The default access mode is `RWO`. Sandbox mounts are declared by the template an
 
 The default backend is `s0fs`, Sandbox0's durable POSIX-oriented volume store backed by S3-compatible object storage. `s0fs` supports Sandbox mounts, direct file APIs, snapshots, restore, and forks.
 
-Sandbox0 can also create a `s3` backend volume that exposes an existing S3-compatible bucket prefix through the volume portal:
+Sandbox0 also supports an `s3` backend for mounting an existing S3-compatible bucket prefix through the same volume portal. Use it when the object store prefix is the source of truth and the Sandbox needs a mount-s3-like filesystem view.
 
-```json
-{
-    "backend": "s3",
-    "access_mode": "RWO",
-    "s3": {
-        "provider": "aws",
-        "bucket": "sandbox-data",
-        "prefix": "team-a/workspace-a",
-        "region": "us-east-1"
-    }
-}
-```
+| Backend | Source of truth | Sandbox mounts | Direct file API | Snapshots and forks |
+|---------|-----------------|----------------|-----------------|---------------------|
+| `s0fs` | Sandbox0-managed volume metadata and objects | `RWO`, `ROX` | Yes | Yes |
+| `s3` | Existing S3-compatible bucket prefix | `RWO`, `ROX` | Only through an active mounted owner | No |
 
-`provider` can be `aws`, `ali`, or `r2`. Use `ali` for Aliyun OSS and `r2` for Cloudflare R2. `endpoint_url` is required for `ali` and `r2`; credentials can be provided per volume with `access_key`, `secret_key`, and optional `session_token`, or inherited from the storage-proxy configuration when omitted.
-
-The `s3` backend is mount-s3-like rather than a full `s0fs` replacement:
-
-- object keys are projected into directories using `/`
-- directory entries are synthetic, or represented by zero-byte marker objects ending in `/`
-- new files are written back to S3 on close, flush, or fsync
-- external S3 object changes are visible through the mounted path on later lookup/read/list operations
-- Writable opens replace the target object and must write sequentially; random in-place overwrites are not supported
-- `RWX`, snapshots, restore, forks, direct file APIs without an active mounted owner, rename, hard links, symlinks, xattrs, locks, and fallocate are not supported
-
-When a `s3` volume is actively mounted, direct volume file API requests can still be proxied to that active ctld owner. When it is not mounted, use S3 APIs directly or mount it into a Sandbox first.
+For fields, provider-specific configuration, and compatibility notes, see [Volume Backends](./backends).
 
 ## Correctness Model
 

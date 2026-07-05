@@ -62,9 +62,6 @@ func assertMountpointS3Compatibility(env *framework.ScenarioEnv, session *e2euti
 	if !mountpointS3CompatEnabled() {
 		Skip(fmt.Sprintf("set %s=true to run mountpoint-s3 compatibility probes", mountpointS3CompatEnvVar))
 	}
-	runtimeClass := strings.ToLower(strings.TrimSpace(env.Config.SandboxRuntimeClassName))
-	Expect(runtimeClass == "" || strings.Contains(runtimeClass, "runc")).To(BeTrue(),
-		"mountpoint-s3 compatibility requires a runc-compatible sandbox runtime, got %q", env.Config.SandboxRuntimeClassName)
 	for _, sourceCase := range mountpointS3CompatSourceCases {
 		GinkgoWriter.Printf("mountpoint-s3 compat source: %s\n", sourceCase)
 	}

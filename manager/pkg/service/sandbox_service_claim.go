@@ -929,11 +929,7 @@ func (s *SandboxService) bindVolumePortals(ctx context.Context, pod *corev1.Pod,
 	for _, mount := range req.Mounts {
 		mountPoint := filepath.Clean(mount.MountPoint)
 		decl := declared[mountPoint]
-		info, err := s.validateVolumePortalAccess(ctx, req.TeamID, req.UserID, mount.SandboxVolumeID, decl)
-		if err != nil {
-			return nil, err
-		}
-		if err := validateVolumePortalRuntimeCompatibility(pod, info, mountPoint); err != nil {
+		if _, err := s.validateVolumePortalAccess(ctx, req.TeamID, req.UserID, mount.SandboxVolumeID, decl); err != nil {
 			return nil, err
 		}
 		resp, err := s.bindVolumePortal(ctx, pod, req.TeamID, req.UserID, req.TeamID, mount.SandboxVolumeID, mountPoint, decl.Name)
@@ -976,24 +972,6 @@ func (s *SandboxService) validateVolumePortalAccess(ctx context.Context, teamID,
 	default:
 		return nil, fmt.Errorf("%w: volume %s has invalid access_mode %q", ErrInvalidClaimRequest, volumeID, info.AccessMode)
 	}
-}
-
-func validateVolumePortalRuntimeCompatibility(pod *corev1.Pod, info *SandboxVolumeInfo, mountPoint string) error {
-	if info == nil || strings.ToLower(strings.TrimSpace(info.Backend)) != "s3" {
-		return nil
-	}
-	runtimeClassName := runtimeClassNameForPod(pod)
-	if runtimeClassName == "" || strings.Contains(runtimeClassName, "runc") {
-		return nil
-	}
-	return fmt.Errorf("%w: s3 volume %s requires a runc-compatible sandbox runtime for mount-s3-compatible volume portal semantics; runtimeClassName %q is not supported for mount %s", ErrInvalidClaimRequest, info.ID, runtimeClassName, mountPoint)
-}
-
-func runtimeClassNameForPod(pod *corev1.Pod) string {
-	if pod == nil || pod.Spec.RuntimeClassName == nil {
-		return ""
-	}
-	return strings.ToLower(strings.TrimSpace(*pod.Spec.RuntimeClassName))
 }
 
 func (s *SandboxService) bindWebhookStatePortal(ctx context.Context, pod *corev1.Pod, req *ClaimRequest) error {

@@ -102,7 +102,7 @@ func main() {
 	if storageCfg.DatabaseURL != "" {
 		dbPool, err = initPortalDatabase(ctx, storageCfg, obsProvider)
 		if err != nil {
-			log.Printf("ctld volume registry disabled: %v", err)
+			log.Fatalf("ctld volume registry database unavailable: %v", err)
 		} else {
 			repo = storagedb.NewRepository(dbPool)
 			defer dbPool.Close()

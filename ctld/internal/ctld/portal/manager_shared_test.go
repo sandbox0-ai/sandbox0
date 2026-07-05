@@ -3,6 +3,7 @@ package portal
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 )
 
@@ -100,6 +102,7 @@ func TestUnbindLockedSnapshotKeepsSharedVolumeUntilLastPortal(t *testing.T) {
 func TestCheckPublishedReportsMissingPortals(t *testing.T) {
 	mgr := &Manager{
 		portals: make(map[string]*portalMount),
+		repo:    &db.Repository{},
 	}
 	mgr.portals[portalKey("pod-uid", "workspace")] = &portalMount{
 		podUID: "pod-uid",
@@ -121,6 +124,21 @@ func TestCheckPublishedReportsMissingPortals(t *testing.T) {
 	}
 	if len(resp.Missing) != 1 || resp.Missing[0] != "cache" {
 		t.Fatalf("CheckPublished() missing = %v, want [cache]", resp.Missing)
+	}
+}
+
+func TestCheckPublishedRequiresVolumeRegistryForPortals(t *testing.T) {
+	mgr := &Manager{
+		portals: make(map[string]*portalMount),
+	}
+	_, err := mgr.CheckPublished(context.Background(), ctldapi.CheckVolumePortalsRequest{
+		PodUID: "pod-uid",
+		Portals: []ctldapi.VolumePortalRef{
+			{PortalName: "workspace", MountPath: "/workspace"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "ctld volume registry unavailable") {
+		t.Fatalf("CheckPublished() error = %v, want registry unavailable", err)
 	}
 }
 

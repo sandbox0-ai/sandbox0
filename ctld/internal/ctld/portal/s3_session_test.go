@@ -118,6 +118,7 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 	if _, err := session.Mkdir(ctx, &pb.MkdirRequest{Parent: s3RootInode, Name: "from-sandbox"}); err != nil {
 		t.Fatalf("Mkdir(from-sandbox) error = %v", err)
 	}
+	assertS3TestObjectMissing(t, store, "from-sandbox/")
 	fromSandbox, err := session.Lookup(ctx, &pb.LookupRequest{Parent: s3RootInode, Name: "from-sandbox"})
 	if err != nil {
 		t.Fatalf("Lookup(from-sandbox after mkdir) error = %v", err)
@@ -246,6 +247,50 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 	want := []string{"dir:external", "dir:from-sandbox"}
 	if !equalPortalStringSlices(got, want) {
 		t.Fatalf("ReadDir(root) = %#v, want %#v", got, want)
+	}
+}
+
+func TestS3SessionMkdirUsesMountpointLocalDirectorySemantics(t *testing.T) {
+	ctx := context.Background()
+	store := objectstore.NewMemoryStore(t.Name())
+	putS3TestObject(t, store, "marker/", "")
+	putS3TestObject(t, store, "implicit/file.txt", "payload")
+	session := newS3Session("vol-s3", store, volume.AccessModeRWO, nil)
+
+	local, err := session.Mkdir(ctx, &pb.MkdirRequest{Parent: s3RootInode, Name: "local"})
+	if err != nil {
+		t.Fatalf("Mkdir(local) error = %v", err)
+	}
+	assertS3TestObjectMissing(t, store, "local/")
+	if _, err := session.Lookup(ctx, &pb.LookupRequest{Parent: s3RootInode, Name: "local"}); err != nil {
+		t.Fatalf("Lookup(local) error = %v", err)
+	}
+	if _, err := session.Rmdir(ctx, &pb.RmdirRequest{Parent: s3RootInode, Name: "local"}); err != nil {
+		t.Fatalf("Rmdir(local) error = %v", err)
+	}
+	if _, err := session.Lookup(ctx, &pb.LookupRequest{Parent: s3RootInode, Name: "local"}); fserror.CodeOf(err) != fserror.NotFound {
+		t.Fatalf("Lookup(local after rmdir) error = %v, want NotFound", err)
+	}
+
+	nested, err := session.Mkdir(ctx, &pb.MkdirRequest{Parent: s3RootInode, Name: "nested"})
+	if err != nil {
+		t.Fatalf("Mkdir(nested) error = %v", err)
+	}
+	if _, err := session.Mkdir(ctx, &pb.MkdirRequest{Parent: nested.Inode, Name: "child"}); err != nil {
+		t.Fatalf("Mkdir(nested/child) error = %v", err)
+	}
+	if _, err := session.Rmdir(ctx, &pb.RmdirRequest{Parent: s3RootInode, Name: "nested"}); !errors.Is(err, syscall.ENOTEMPTY) {
+		t.Fatalf("Rmdir(nested) error = %v, want ENOTEMPTY", err)
+	}
+
+	if _, err := session.Rmdir(ctx, &pb.RmdirRequest{Parent: s3RootInode, Name: "marker"}); !errors.Is(err, syscall.ENOTEMPTY) {
+		t.Fatalf("Rmdir(marker) error = %v, want ENOTEMPTY", err)
+	}
+	if _, err := session.Rmdir(ctx, &pb.RmdirRequest{Parent: s3RootInode, Name: "implicit"}); !errors.Is(err, syscall.ENOTEMPTY) {
+		t.Fatalf("Rmdir(implicit) error = %v, want ENOTEMPTY", err)
+	}
+	if _, err := session.Create(ctx, &pb.CreateRequest{Parent: local.Inode, Name: "after-rmdir.txt"}); fserror.CodeOf(err) != fserror.NotFound {
+		t.Fatalf("Create(using removed local inode) error = %v, want NotFound", err)
 	}
 }
 

@@ -38,11 +38,12 @@ const (
 )
 
 type s3Node struct {
-	inode    uint64
-	path     string
-	kind     s3NodeKind
-	size     int64
-	modified time.Time
+	inode     uint64
+	path      string
+	kind      s3NodeKind
+	size      int64
+	modified  time.Time
+	localOnly bool
 }
 
 type s3Handle struct {
@@ -222,10 +223,7 @@ func (s *s3Session) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb.NodeRe
 	} else if fserror.CodeOf(err) != fserror.NotFound {
 		return nil, err
 	}
-	if err := s.store.Put(dirPath+"/", bytes.NewReader(nil)); err != nil {
-		return nil, err
-	}
-	node := s.rememberPath(dirPath, s3NodeDir, 0, time.Now().UTC())
+	node := s.rememberLocalDir(dirPath, time.Now().UTC())
 	return s.nodeResponse(node, 0), nil
 }
 
@@ -298,21 +296,25 @@ func (s *s3Session) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb.Empty,
 		return nil, err
 	}
 	dirPath := joinS3Path(parent.path, name)
-	if _, err := s.resolvePath(ctx, dirPath); err != nil {
-		return nil, err
-	}
-	prefix := dirPath + "/"
-	entries, _, _, err := s.store.List(prefix, "", "", "", 2)
+	node, err := s.resolvePath(ctx, dirPath)
 	if err != nil {
 		return nil, err
 	}
-	for _, entry := range entries {
-		if entry.Key != prefix {
-			return nil, syscall.ENOTEMPTY
-		}
+	if node.kind != s3NodeDir {
+		return nil, syscall.ENOTDIR
 	}
-	if err := s.store.Delete(prefix); err != nil && !objectstore.IsNotFound(err) {
+	if _, exists, err := s.dirInfo(ctx, dirPath); err != nil {
 		return nil, err
+	} else if exists {
+		return nil, syscall.ENOTEMPTY
+	}
+	if !node.localOnly {
+		s.forgetPath(dirPath)
+		return nil, fserror.New(fserror.NotFound, "entry not found")
+	}
+	prefix := dirPath + "/"
+	if s.hasRememberedChild(prefix) {
+		return nil, syscall.ENOTEMPTY
 	}
 	s.forgetPath(dirPath)
 	return &pb.Empty{}, nil
@@ -697,6 +699,14 @@ func (s *s3Session) resolvePath(ctx context.Context, key string) (*s3Node, error
 	if key == "" {
 		return s.rememberPath("", s3NodeDir, 0, time.Now().UTC()), nil
 	}
+	if node, ok := s.nodeForPath(key); ok && node.kind == s3NodeDir && node.localOnly {
+		if info, exists, err := s.dirInfo(ctx, key); err != nil {
+			return nil, err
+		} else if exists {
+			return s.rememberPath(key, s3NodeDir, 0, info.Modified), nil
+		}
+		return node, nil
+	}
 	if node, ok := s.nodeForPath(key); ok && s.hasOpenWriter(node.inode) {
 		return node, nil
 	}
@@ -797,6 +807,14 @@ func (s *s3Session) nodeForPath(key string) (*s3Node, bool) {
 }
 
 func (s *s3Session) rememberPath(key string, kind s3NodeKind, size int64, modified time.Time) *s3Node {
+	return s.rememberPathWithLocal(key, kind, size, modified, false)
+}
+
+func (s *s3Session) rememberLocalDir(key string, modified time.Time) *s3Node {
+	return s.rememberPathWithLocal(key, s3NodeDir, 0, modified, true)
+}
+
+func (s *s3Session) rememberPathWithLocal(key string, kind s3NodeKind, size int64, modified time.Time, localOnly bool) *s3Node {
 	key = cleanS3Path(key)
 	if modified.IsZero() {
 		modified = time.Now().UTC()
@@ -809,7 +827,7 @@ func (s *s3Session) rememberPath(key string, kind s3NodeKind, size int64, modifi
 		s.nextInode++
 		s.inodeByPath[key] = inode
 	}
-	node := &s3Node{inode: inode, path: key, kind: kind, size: size, modified: modified}
+	node := &s3Node{inode: inode, path: key, kind: kind, size: size, modified: modified, localOnly: localOnly}
 	s.nodesByInode[inode] = node
 	copyNode := *node
 	return &copyNode
@@ -824,6 +842,24 @@ func (s *s3Session) forgetPath(key string) {
 		delete(s.nodesByInode, inode)
 	}
 	delete(s.inodeByPath, key)
+}
+
+func (s *s3Session) hasRememberedChild(prefix string) bool {
+	prefix = cleanS3Path(prefix)
+	if prefix != "" {
+		prefix += "/"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, node := range s.nodesByInode {
+		if node == nil || node.path == "" || node.path == strings.TrimSuffix(prefix, "/") {
+			continue
+		}
+		if strings.HasPrefix(node.path, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *s3Session) newHandle(handle *s3Handle) uint64 {

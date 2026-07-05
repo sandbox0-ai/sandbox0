@@ -488,16 +488,16 @@ func (s *s3Session) Release(ctx context.Context, req *pb.ReleaseRequest) (*pb.Em
 	return &pb.Empty{}, nil
 }
 
-func (s *s3Session) Flush(ctx context.Context, req *pb.FlushRequest) (*pb.Empty, error) {
+func (s *s3Session) Flush(_ context.Context, _ *pb.FlushRequest) (*pb.Empty, error) {
+	return &pb.Empty{}, nil
+}
+
+func (s *s3Session) Fsync(ctx context.Context, req *pb.FsyncRequest) (*pb.Empty, error) {
 	handle := s.handle(req.HandleId)
 	if handle == nil || !handle.writable {
 		return &pb.Empty{}, nil
 	}
 	return &pb.Empty{}, s.commitHandle(ctx, handle)
-}
-
-func (s *s3Session) Fsync(ctx context.Context, req *pb.FsyncRequest) (*pb.Empty, error) {
-	return s.Flush(ctx, &pb.FlushRequest{HandleId: req.HandleId})
 }
 
 func (s *s3Session) Fallocate(context.Context, *pb.FallocateRequest) (*pb.Empty, error) {

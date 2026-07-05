@@ -135,6 +135,10 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 		t.Fatalf("Write(second) error = %v", err)
 	}
 	assertS3TestObjectMissing(t, store, "from-sandbox/new.txt")
+	if _, err := session.Flush(ctx, &pb.FlushRequest{HandleId: created.HandleId}); err != nil {
+		t.Fatalf("Flush(new.txt) error = %v", err)
+	}
+	assertS3TestObjectMissing(t, store, "from-sandbox/new.txt")
 	lookedUp, err := session.Lookup(ctx, &pb.LookupRequest{Parent: fromSandbox.Inode, Name: "new.txt"})
 	if err != nil {
 		t.Fatalf("Lookup(uncommitted new.txt) error = %v", err)
@@ -159,6 +163,26 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 		t.Fatalf("Release(new.txt) error = %v", err)
 	}
 	assertS3TestObject(t, store, "from-sandbox/new.txt", "first second")
+
+	fsynced, err := session.Create(ctx, &pb.CreateRequest{Parent: fromSandbox.Inode, Name: "fsynced.txt"})
+	if err != nil {
+		t.Fatalf("Create(fsynced.txt) error = %v", err)
+	}
+	if _, err := session.Write(ctx, &pb.WriteRequest{HandleId: fsynced.HandleId, Offset: 0, Data: []byte("first")}); err != nil {
+		t.Fatalf("Write(fsynced first) error = %v", err)
+	}
+	if _, err := session.Fsync(ctx, &pb.FsyncRequest{HandleId: fsynced.HandleId}); err != nil {
+		t.Fatalf("Fsync(fsynced.txt) error = %v", err)
+	}
+	assertS3TestObject(t, store, "from-sandbox/fsynced.txt", "first")
+	if _, err := session.Write(ctx, &pb.WriteRequest{HandleId: fsynced.HandleId, Offset: 5, Data: []byte(" second")}); err != nil {
+		t.Fatalf("Write(fsynced second) error = %v", err)
+	}
+	assertS3TestObject(t, store, "from-sandbox/fsynced.txt", "first")
+	if _, err := session.Release(ctx, &pb.ReleaseRequest{HandleId: fsynced.HandleId}); err != nil {
+		t.Fatalf("Release(fsynced.txt) error = %v", err)
+	}
+	assertS3TestObject(t, store, "from-sandbox/fsynced.txt", "first second")
 
 	reopened, err := session.Open(ctx, &pb.OpenRequest{
 		Inode: created.Inode,

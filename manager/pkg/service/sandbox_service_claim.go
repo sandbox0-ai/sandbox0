@@ -929,7 +929,11 @@ func (s *SandboxService) bindVolumePortals(ctx context.Context, pod *corev1.Pod,
 	for _, mount := range req.Mounts {
 		mountPoint := filepath.Clean(mount.MountPoint)
 		decl := declared[mountPoint]
-		if err := s.validateVolumePortalAccess(ctx, req.TeamID, req.UserID, mount.SandboxVolumeID, decl); err != nil {
+		info, err := s.validateVolumePortalAccess(ctx, req.TeamID, req.UserID, mount.SandboxVolumeID, decl)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateVolumePortalRuntimeCompatibility(pod, info, mountPoint); err != nil {
 			return nil, err
 		}
 		resp, err := s.bindVolumePortal(ctx, pod, req.TeamID, req.UserID, req.TeamID, mount.SandboxVolumeID, mountPoint, decl.Name)
@@ -947,13 +951,13 @@ func (s *SandboxService) bindVolumePortals(ctx context.Context, pod *corev1.Pod,
 	return out, nil
 }
 
-func (s *SandboxService) validateVolumePortalAccess(ctx context.Context, teamID, userID, volumeID string, mount v1alpha1.VolumeMountSpec) error {
+func (s *SandboxService) validateVolumePortalAccess(ctx context.Context, teamID, userID, volumeID string, mount v1alpha1.VolumeMountSpec) (*SandboxVolumeInfo, error) {
 	if s.volumeMetadata == nil {
-		return fmt.Errorf("volume metadata client is not configured")
+		return nil, fmt.Errorf("volume metadata client is not configured")
 	}
 	info, err := s.volumeMetadata.Get(ctx, teamID, userID, volumeID)
 	if err != nil {
-		return fmt.Errorf("get volume metadata for %s: %w", volumeID, err)
+		return nil, fmt.Errorf("get volume metadata for %s: %w", volumeID, err)
 	}
 	accessMode := strings.ToUpper(strings.TrimSpace(info.AccessMode))
 	if accessMode == "" {
@@ -961,17 +965,35 @@ func (s *SandboxService) validateVolumePortalAccess(ctx context.Context, teamID,
 	}
 	switch accessMode {
 	case "RWO":
-		return nil
+		return info, nil
 	case "ROX":
 		if mount.ReadOnly {
-			return nil
+			return info, nil
 		}
-		return fmt.Errorf("%w: volume %s is ROX but template mount %s is read-write", ErrInvalidClaimRequest, volumeID, mount.MountPath)
+		return nil, fmt.Errorf("%w: volume %s is ROX but template mount %s is read-write", ErrInvalidClaimRequest, volumeID, mount.MountPath)
 	case "RWX":
-		return fmt.Errorf("%w: RWX volumes require the shared correctness path and cannot use node-local volume portals yet", ErrInvalidClaimRequest)
+		return nil, fmt.Errorf("%w: RWX volumes require the shared correctness path and cannot use node-local volume portals yet", ErrInvalidClaimRequest)
 	default:
-		return fmt.Errorf("%w: volume %s has invalid access_mode %q", ErrInvalidClaimRequest, volumeID, info.AccessMode)
+		return nil, fmt.Errorf("%w: volume %s has invalid access_mode %q", ErrInvalidClaimRequest, volumeID, info.AccessMode)
 	}
+}
+
+func validateVolumePortalRuntimeCompatibility(pod *corev1.Pod, info *SandboxVolumeInfo, mountPoint string) error {
+	if info == nil || strings.ToLower(strings.TrimSpace(info.Backend)) != "s3" {
+		return nil
+	}
+	runtimeClassName := runtimeClassNameForPod(pod)
+	if runtimeClassName == "" || strings.Contains(runtimeClassName, "runc") {
+		return nil
+	}
+	return fmt.Errorf("%w: s3 volume %s requires a runc-compatible sandbox runtime for mount-s3-compatible volume portal semantics; runtimeClassName %q is not supported for mount %s", ErrInvalidClaimRequest, info.ID, runtimeClassName, mountPoint)
+}
+
+func runtimeClassNameForPod(pod *corev1.Pod) string {
+	if pod == nil || pod.Spec.RuntimeClassName == nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(*pod.Spec.RuntimeClassName))
 }
 
 func (s *SandboxService) bindWebhookStatePortal(ctx context.Context, pod *corev1.Pod, req *ClaimRequest) error {

@@ -624,7 +624,8 @@ func (s *s3Session) addLocalDirEntries(node *s3Node, prefix string, plus bool, e
 			continue
 		}
 		entryPath := joinS3Path(node.path, name)
-		remembered := s.rememberPath(entryPath, kind, entryNode.size, entryNode.modified)
+		localOnly := entryNode.localOnly && kind == s3NodeDir
+		remembered := s.rememberPathWithLocal(entryPath, kind, entryNode.size, entryNode.modified, localOnly)
 		dirEntry := &pb.DirEntry{
 			Inode: remembered.inode,
 			Name:  name,

@@ -265,6 +265,9 @@ func TestS3SessionMkdirUsesMountpointLocalDirectorySemantics(t *testing.T) {
 	if _, err := session.Lookup(ctx, &pb.LookupRequest{Parent: s3RootInode, Name: "local"}); err != nil {
 		t.Fatalf("Lookup(local) error = %v", err)
 	}
+	if _, err := session.ReadDir(ctx, &pb.ReadDirRequest{Inode: s3RootInode, Plus: true}); err != nil {
+		t.Fatalf("ReadDir(root after local mkdir) error = %v", err)
+	}
 	if _, err := session.Rmdir(ctx, &pb.RmdirRequest{Parent: s3RootInode, Name: "local"}); err != nil {
 		t.Fatalf("Rmdir(local) error = %v", err)
 	}

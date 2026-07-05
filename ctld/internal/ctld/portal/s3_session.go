@@ -23,11 +23,11 @@ import (
 )
 
 const (
-	s3RootInode = uint64(fsmeta.RootInode)
-	s3DirMode   = uint32(syscall.S_IFDIR | 0o755)
-	s3FileMode  = uint32(syscall.S_IFREG | 0o644)
-
-	fuseFattrSize = uint32(1 << 3)
+	s3RootInode       = uint64(fsmeta.RootInode)
+	s3DirMode         = uint32(syscall.S_IFDIR | 0o755)
+	s3FileMode        = uint32(syscall.S_IFREG | 0o644)
+	fuseFattrSize     = uint32(fuse.FATTR_SIZE)
+	fuseFattrNoopMask = uint32(fuse.FATTR_FH | fuse.FATTR_LOCKOWNER | fuse.FATTR_KILL_SUIDGID)
 )
 
 type s3NodeKind uint8
@@ -163,8 +163,11 @@ func (s *s3Session) SetAttr(ctx context.Context, req *pb.SetAttrRequest) (*pb.Se
 	if req.Valid == 0 {
 		return &pb.SetAttrResponse{Attr: s.attr(node)}, nil
 	}
-	if req.Valid&^uint32(fuse.FATTR_SIZE) != 0 {
+	if req.Valid&^(fuseFattrSize|fuseFattrNoopMask) != 0 {
 		return nil, syscall.EOPNOTSUPP
+	}
+	if req.Valid&fuseFattrSize == 0 {
+		return &pb.SetAttrResponse{Attr: s.attr(node)}, nil
 	}
 	if err := s.ensureWritable(); err != nil {
 		return nil, err

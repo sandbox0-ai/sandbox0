@@ -191,6 +191,15 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open(new.txt writable) error = %v", err)
 	}
+	if _, err := session.SetAttr(ctx, &pb.SetAttrRequest{
+		Inode:    created.Inode,
+		HandleId: reopened.HandleId,
+		Valid:    fuseFattrSize | fuseFattrNoopMask,
+		Attr:     &pb.GetAttrResponse{Size: 0},
+	}); err != nil {
+		t.Fatalf("SetAttr(truncate with writable handle) error = %v", err)
+	}
+	assertS3TestObject(t, store, "from-sandbox/new.txt", "first second")
 	if _, err := session.Write(ctx, &pb.WriteRequest{HandleId: reopened.HandleId, Offset: 0, Data: []byte("replacement")}); err != nil {
 		t.Fatalf("Write(replacement) error = %v", err)
 	}

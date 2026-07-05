@@ -62,6 +62,33 @@ func TestS3SessionProjectsObjectsAsDirectoriesAndFiles(t *testing.T) {
 	}
 }
 
+func TestS3SessionReadDirShadowsFileWhenBackendOmitsCommonPrefix(t *testing.T) {
+	ctx := context.Background()
+	base := objectstore.NewMemoryStore(t.Name())
+	putS3TestObject(t, base, "blue", "file-shadowed-by-directory")
+	putS3TestObject(t, base, "blue/image.jpg", "nested")
+	store := commonPrefixBlindStore{Store: base}
+	session := newS3Session("vol-s3", store, volume.AccessModeRWO, nil)
+
+	entriesResp, err := session.ReadDir(ctx, &pb.ReadDirRequest{Inode: s3RootInode, Plus: true})
+	if err != nil {
+		t.Fatalf("ReadDir(root) error = %v", err)
+	}
+	got := make([]string, 0, len(entriesResp.Entries))
+	for _, entry := range entriesResp.Entries {
+		kind := "file"
+		if entry.Type&uint32(syscall.S_IFMT) == uint32(syscall.S_IFDIR) {
+			kind = "dir"
+		}
+		got = append(got, kind+":"+entry.Name)
+	}
+	sort.Strings(got)
+	want := []string{"dir:blue"}
+	if !equalPortalStringSlices(got, want) {
+		t.Fatalf("ReadDir(root) = %#v, want %#v", got, want)
+	}
+}
+
 func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 	ctx := context.Background()
 	store := objectstore.NewMemoryStore(t.Name())
@@ -288,6 +315,24 @@ func (s headErrorForDirectoryMarkersStore) Head(key string) (objectstore.Info, e
 		return objectstore.Info{}, errors.New("bad request")
 	}
 	return s.Store.Head(key)
+}
+
+type commonPrefixBlindStore struct {
+	objectstore.Store
+}
+
+func (s commonPrefixBlindStore) List(prefix, startAfter, token, delimiter string, limit int64) ([]objectstore.Info, bool, string, error) {
+	infos, more, next, err := s.Store.List(prefix, startAfter, token, delimiter, limit)
+	if err != nil || delimiter == "" {
+		return infos, more, next, err
+	}
+	filtered := infos[:0]
+	for _, info := range infos {
+		if !info.IsPrefix {
+			filtered = append(filtered, info)
+		}
+	}
+	return filtered, more, next, nil
 }
 
 func putS3TestObject(t *testing.T, store objectstore.Store, key, value string) {

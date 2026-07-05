@@ -549,6 +549,17 @@ func (s *s3Session) ReadDir(ctx context.Context, req *pb.ReadDirRequest) (*pb.Re
 			continue
 		}
 		entryPath := joinS3Path(node.path, name)
+		if kind == s3NodeFile {
+			dir, exists, err := s.dirInfo(ctx, entryPath)
+			if err != nil {
+				return nil, err
+			}
+			if exists {
+				kind = s3NodeDir
+				info.Size = 0
+				info.Modified = dir.Modified
+			}
+		}
 		entryNode := s.rememberPath(entryPath, kind, info.Size, info.Modified)
 		entry := &pb.DirEntry{
 			Inode: entryNode.inode,
@@ -714,7 +725,13 @@ func (s *s3Session) dirInfo(ctx context.Context, key string) (objectstore.Info, 
 		return objectstore.Info{}, false, err
 	}
 	if len(infos) == 0 {
-		return objectstore.Info{}, false, nil
+		infos, err = s.listAllLimited(ctx, prefix, "", 1)
+		if err != nil {
+			return objectstore.Info{}, false, err
+		}
+		if len(infos) == 0 {
+			return objectstore.Info{}, false, nil
+		}
 	}
 	return infos[0], true, nil
 }

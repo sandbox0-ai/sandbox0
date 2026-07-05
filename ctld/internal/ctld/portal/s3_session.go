@@ -731,21 +731,22 @@ func (s *s3Session) resolvePath(ctx context.Context, key string) (*s3Node, error
 
 func (s *s3Session) dirInfo(ctx context.Context, key string) (objectstore.Info, bool, error) {
 	prefix := strings.TrimRight(key, "/") + "/"
+	infos, err := s.listAllLimited(ctx, prefix, "", 1)
+	if err != nil {
+		return objectstore.Info{}, false, err
+	}
+	if len(infos) > 0 {
+		return infos[0], true, nil
+	}
 	if info, err := s.store.Head(prefix); err == nil {
 		return info, true, nil
 	}
-	infos, err := s.listAllLimited(ctx, prefix, "/", 1)
+	infos, err = s.listAllLimited(ctx, prefix, "/", 1)
 	if err != nil {
 		return objectstore.Info{}, false, err
 	}
 	if len(infos) == 0 {
-		infos, err = s.listAllLimited(ctx, prefix, "", 1)
-		if err != nil {
-			return objectstore.Info{}, false, err
-		}
-		if len(infos) == 0 {
-			return objectstore.Info{}, false, nil
-		}
+		return objectstore.Info{}, false, nil
 	}
 	return infos[0], true, nil
 }

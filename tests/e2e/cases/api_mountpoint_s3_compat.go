@@ -21,8 +21,13 @@ import (
 
 const (
 	mountpointS3CompatEnvVar = "E2E_MOUNTPOINT_S3_COMPAT"
-	mountpointS3Bucket       = "sandbox0"
+	mountpointS3Bucket       = "sandbox0-mountpoint-compat"
 	mountpointS3MountPath    = "/workspace/mountpoint-s3"
+	mountpointS3FixtureImage = "sandbox0ai/otemplates:default-v0.2.0"
+	mountpointS3FixtureName  = "mountpoint-s3-compat-s3"
+	mountpointS3AccessKey    = "mountpointcompat"
+	mountpointS3SecretKey    = "mountpointcompat-secret"
+	mountpointS3Region       = "us-east-1"
 )
 
 var mountpointS3CompatSourceCases = []string{
@@ -44,9 +49,13 @@ var mountpointS3CompatSourceCases = []string{
 }
 
 type mountpointS3CompatStore struct {
-	scoped      objectstore.Store
-	prefix      string
-	stopForward func()
+	scoped         objectstore.Store
+	prefix         string
+	endpointURL    string
+	accessKey      string
+	secretKey      string
+	stopForward    func()
+	cleanupFixture func()
 }
 
 func assertMountpointS3Compatibility(env *framework.ScenarioEnv, session *e2eutils.Session) {
@@ -67,13 +76,18 @@ func assertMountpointS3Compatibility(env *framework.ScenarioEnv, session *e2euti
 	backend := apispec.S3
 	accessMode := apispec.RWO
 	provider := apispec.CreateSandboxVolumeS3ConfigProviderAws
+	region := mountpointS3Region
 	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{
 		Backend:    &backend,
 		AccessMode: &accessMode,
 		S3: &apispec.CreateSandboxVolumeS3Config{
-			Provider: &provider,
-			Bucket:   mountpointS3Bucket,
-			Prefix:   &store.prefix,
+			Provider:    &provider,
+			Bucket:      mountpointS3Bucket,
+			Prefix:      &store.prefix,
+			Region:      &region,
+			EndpointUrl: &store.endpointURL,
+			AccessKey:   &store.accessKey,
+			SecretKey:   &store.secretKey,
 		},
 	})
 	Expect(err).NotTo(HaveOccurred())
@@ -128,32 +142,257 @@ func mountpointS3CompatEnabled() bool {
 }
 
 func openMountpointS3CompatStore(env *framework.ScenarioEnv) *mountpointS3CompatStore {
-	serviceName := env.Infra.Name + "-rustfs"
-	endpoint, stopForward, err := framework.PortForwardService(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, serviceName, 9000)
-	Expect(err).NotTo(HaveOccurred())
-
-	secretName := env.Infra.Name + "-sandbox0-rustfs-credentials"
-	accessKey, err := framework.GetSecretValue(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, secretName, "RUSTFS_ACCESS_KEY")
-	Expect(err).NotTo(HaveOccurred())
-	secretKey, err := framework.GetSecretValue(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, secretName, "RUSTFS_SECRET_KEY")
+	cleanupFixture := ensureMountpointS3Fixture(env)
+	endpoint, stopForward, err := framework.PortForwardService(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, mountpointS3FixtureName, 9000)
 	Expect(err).NotTo(HaveOccurred())
 
 	base, err := objectstore.Create(objectstore.Config{
 		Type:      objectstore.TypeS3,
 		Bucket:    mountpointS3Bucket,
-		Region:    "us-east-1",
+		Region:    mountpointS3Region,
 		Endpoint:  endpoint,
-		AccessKey: accessKey,
-		SecretKey: secretKey,
+		AccessKey: mountpointS3AccessKey,
+		SecretKey: mountpointS3SecretKey,
 	})
 	Expect(err).NotTo(HaveOccurred())
+	createMountpointS3Bucket(base)
 
 	prefix := fmt.Sprintf("e2e/mountpoint-s3-compat/%d", time.Now().UnixNano())
 	return &mountpointS3CompatStore{
-		scoped:      objectstore.Prefix(base, prefix),
-		prefix:      prefix,
-		stopForward: stopForward,
+		scoped:         objectstore.Prefix(base, prefix),
+		prefix:         prefix,
+		endpointURL:    fmt.Sprintf("http://%s.%s.svc.cluster.local:9000", mountpointS3FixtureName, env.Infra.Namespace),
+		accessKey:      mountpointS3AccessKey,
+		secretKey:      mountpointS3SecretKey,
+		stopForward:    stopForward,
+		cleanupFixture: cleanupFixture,
 	}
+}
+
+func ensureMountpointS3Fixture(env *framework.ScenarioEnv) func() {
+	manifest := fmt.Sprintf(`
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: %[1]s
+  namespace: %[2]s
+data:
+  fake_s3.py: |
+    from email.utils import formatdate
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qs, unquote, urlparse
+    from xml.sax.saxutils import escape
+
+    objects = {}
+    buckets = set()
+
+    def http_date():
+        return formatdate(usegmt=True)
+
+    def s3_time():
+        return "2026-01-01T00:00:00.000Z"
+
+    def split_path(path):
+        raw = unquote(urlparse(path).path).lstrip("/")
+        if not raw:
+            return "", ""
+        parts = raw.split("/", 1)
+        bucket = parts[0]
+        key = parts[1] if len(parts) > 1 else ""
+        return bucket, key
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, fmt, *args):
+            return
+
+        def send_empty(self, status):
+            self.send_response(status)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_HEAD(self):
+            bucket, key = split_path(self.path)
+            if bucket and not key:
+                buckets.add(bucket)
+                self.send_empty(200)
+                return
+            body = objects.get((bucket, key))
+            if body is None:
+                self.send_empty(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Last-Modified", http_date())
+            self.send_header("ETag", "\"test\"")
+            self.end_headers()
+
+        def do_PUT(self):
+            bucket, key = split_path(self.path)
+            length = int(self.headers.get("Content-Length") or "0")
+            body = self.rfile.read(length) if length > 0 else b""
+            if bucket and not key:
+                buckets.add(bucket)
+                self.send_empty(200)
+                return
+            buckets.add(bucket)
+            objects[(bucket, key)] = body
+            self.send_response(200)
+            self.send_header("ETag", "\"test\"")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_DELETE(self):
+            bucket, key = split_path(self.path)
+            objects.pop((bucket, key), None)
+            self.send_empty(204)
+
+        def do_GET(self):
+            parsed = urlparse(self.path)
+            query = parse_qs(parsed.query)
+            if query.get("list-type", [""])[0] == "2":
+                self.list_objects_v2(query)
+                return
+            bucket, key = split_path(self.path)
+            body = objects.get((bucket, key))
+            if body is None:
+                self.send_empty(404)
+                return
+            start = 0
+            end = len(body) - 1
+            status = 200
+            range_header = self.headers.get("Range", "")
+            if range_header.startswith("bytes="):
+                status = 206
+                raw_start, _, raw_end = range_header[len("bytes="):].partition("-")
+                start = int(raw_start or "0")
+                end = int(raw_end) if raw_end else len(body) - 1
+                if end >= len(body):
+                    end = len(body) - 1
+            chunk = body[start:end + 1] if body else b""
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(chunk)))
+            self.send_header("Last-Modified", http_date())
+            self.send_header("ETag", "\"test\"")
+            if status == 206:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{len(body)}")
+            self.end_headers()
+            self.wfile.write(chunk)
+
+        def list_objects_v2(self, query):
+            bucket, _ = split_path(self.path)
+            prefix = query.get("prefix", [""])[0]
+            delimiter = query.get("delimiter", [""])[0]
+            start_after = query.get("start-after", [""])[0]
+            max_keys = int(query.get("max-keys", ["1000"])[0])
+            contents = []
+            prefixes = set()
+            for obj_bucket, key in sorted(objects.keys()):
+                if obj_bucket != bucket or not key.startswith(prefix) or key <= start_after:
+                    continue
+                suffix = key[len(prefix):]
+                if delimiter and delimiter in suffix:
+                    prefixes.add(prefix + suffix.split(delimiter, 1)[0] + delimiter)
+                    continue
+                contents.append(key)
+                if len(contents) + len(prefixes) >= max_keys:
+                    break
+            body = ['<?xml version="1.0" encoding="UTF-8"?>',
+                    '<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">',
+                    f'<Name>{escape(bucket)}</Name>',
+                    f'<Prefix>{escape(prefix)}</Prefix>',
+                    f'<KeyCount>{len(contents) + len(prefixes)}</KeyCount>',
+                    f'<MaxKeys>{max_keys}</MaxKeys>',
+                    '<IsTruncated>false</IsTruncated>']
+            for key in contents:
+                value = objects[(bucket, key)]
+                body.extend(['<Contents>',
+                             f'<Key>{escape(key)}</Key>',
+                             f'<LastModified>{s3_time()}</LastModified>',
+                             '<ETag>"test"</ETag>',
+                             f'<Size>{len(value)}</Size>',
+                             '<StorageClass>STANDARD</StorageClass>',
+                             '</Contents>'])
+            for common_prefix in sorted(prefixes):
+                body.extend(['<CommonPrefixes>',
+                             f'<Prefix>{escape(common_prefix)}</Prefix>',
+                             '</CommonPrefixes>'])
+            body.append('</ListBucketResult>')
+            payload = ''.join(body).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/xml")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    ThreadingHTTPServer(("0.0.0.0", 9000), Handler).serve_forever()
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: %[1]s
+  namespace: %[2]s
+spec:
+  selector:
+    app.kubernetes.io/name: %[1]s
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: 9000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: %[1]s
+  namespace: %[2]s
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: %[1]s
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: %[1]s
+    spec:
+      containers:
+        - name: fake-s3
+          image: %[3]s
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - /app/fake_s3.py
+          ports:
+            - name: s3
+              containerPort: 9000
+          readinessProbe:
+            tcpSocket:
+              port: 9000
+            periodSeconds: 2
+            failureThreshold: 30
+          volumeMounts:
+            - name: script
+              mountPath: /app
+      volumes:
+        - name: script
+          configMap:
+            name: %[1]s
+`, mountpointS3FixtureName, env.Infra.Namespace, mountpointS3FixtureImage)
+	Expect(framework.ApplyManifestContent(env.TestCtx.Context, env.Config.Kubeconfig, "sandbox0-e2e-mountpoint-s3-fixture-", manifest)).To(Succeed())
+	Expect(framework.WaitForDeployment(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, mountpointS3FixtureName, "3m")).To(Succeed())
+	return func() {
+		_ = framework.Kubectl(env.TestCtx.Context, env.Config.Kubeconfig, "delete", "deployment/"+mountpointS3FixtureName, "service/"+mountpointS3FixtureName, "configmap/"+mountpointS3FixtureName, "--namespace", env.Infra.Namespace, "--ignore-not-found=true")
+	}
+}
+
+func createMountpointS3Bucket(store objectstore.Store) {
+	err := store.Create()
+	if err == nil {
+		return
+	}
+	message := strings.ToLower(err.Error())
+	Expect(message).To(Or(ContainSubstring("already"), ContainSubstring("bucketalready")), "create bucket failed: %v", err)
 }
 
 func (s *mountpointS3CompatStore) cleanup() {
@@ -165,6 +404,9 @@ func (s *mountpointS3CompatStore) cleanup() {
 	}
 	if s.stopForward != nil {
 		s.stopForward()
+	}
+	if s.cleanupFixture != nil {
+		s.cleanupFixture()
 	}
 }
 
@@ -207,29 +449,50 @@ func assertMountpointS3Projection(env *framework.ScenarioEnv, namespace, podName
 	runMountpointS3Script(env, namespace, podName, fmt.Sprintf(`
 set -eu
 M=%s
+S0_STEP=start
+trap 'code=$?; echo "failed at: $S0_STEP"; ls -la "$M" || true; [ -e "$M/blue" ] && ls -la "$M/blue" || true; [ -e "$M/marker" ] && ls -la "$M/marker" || true; exit $code' EXIT
+step() { S0_STEP="$1"; }
+step "colors directory"
 test -d "$M/colors"
+step "colors blue directory"
 test -d "$M/colors/blue"
+step "colors red directory"
 test -d "$M/colors/red"
+step "colors list content"
 test "$(cat "$M/colors/list.txt")" = "list"
+step "colors blue image content"
 test "$(cat "$M/colors/blue/image.jpg")" = "blue image"
+step "colors red image content"
 test "$(cat "$M/colors/red/image.jpg")" = "red image"
+step "shadowed blue directory"
 test -d "$M/blue"
+step "shadowed blue child content"
 test "$(cat "$M/blue/image.jpg")" = "nested"
+step "shadowed blue is not file"
 test ! -f "$M/blue"
+step "delimiter marker directory"
 test -d "$M/marker"
+step "random ranged read"
 slice="$(dd if="$M/random/read.txt" bs=1 skip=5 count=8 2>/dev/null)"
 test "$slice" = "56789abc"
+step "local mkdir"
 mkdir "$M/local-only"
 test -d "$M/local-only"
+step "remote marker rmdir rejected"
 if rmdir "$M/marker"; then
   echo "rmdir unexpectedly removed S3 directory marker"
   exit 1
 fi
+step "local rmdir"
 rmdir "$M/local-only"
+step "local rmdir hidden"
 test ! -e "$M/local-only"
+step "remove shadowing child"
 rm "$M/blue/image.jpg"
+step "shadowed file reappears"
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   if [ -f "$M/blue" ] && [ "$(cat "$M/blue")" = "shadowed" ]; then
+    trap - EXIT
     exit 0
   fi
   sleep 1

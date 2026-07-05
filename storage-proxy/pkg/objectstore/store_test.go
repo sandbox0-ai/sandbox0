@@ -225,6 +225,35 @@ func TestPrefixedStoreListPreservesCommonPrefixes(t *testing.T) {
 	}
 }
 
+func TestPrefixedStoreListDoesNotInjectStartAfterForEmptyCursor(t *testing.T) {
+	t.Parallel()
+
+	recorder := &recordingListStore{Store: NewMemoryStore(t.Name())}
+	store := Prefix(recorder, "tenant-a/volume-a")
+	if _, _, _, err := store.List("dir/", "", "", "/", 100); err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if recorder.lastPrefix != "tenant-a/volume-a/dir/" {
+		t.Fatalf("List prefix = %q, want tenant-a/volume-a/dir/", recorder.lastPrefix)
+	}
+	if recorder.lastStartAfter != "" {
+		t.Fatalf("List startAfter = %q, want empty", recorder.lastStartAfter)
+	}
+}
+
+type recordingListStore struct {
+	Store
+
+	lastPrefix     string
+	lastStartAfter string
+}
+
+func (s *recordingListStore) List(prefix, startAfter, token, delimiter string, limit int64) ([]Info, bool, string, error) {
+	s.lastPrefix = prefix
+	s.lastStartAfter = startAfter
+	return s.Store.List(prefix, startAfter, token, delimiter, limit)
+}
+
 func equalStringSlices(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

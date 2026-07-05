@@ -675,7 +675,11 @@ func (s *prefixedStore) List(prefix, startAfter, token, delimiter string, limit 
 	if strings.TrimLeft(strings.TrimSpace(prefix), "/") == "" {
 		listPrefix = s.prefix
 	}
-	objects, hasMore, nextToken, err := s.store.List(listPrefix, s.prefixed(startAfter), token, delimiter, limit)
+	listStartAfter := ""
+	if strings.TrimLeft(strings.TrimSpace(startAfter), "/") != "" {
+		listStartAfter = s.prefixed(startAfter)
+	}
+	objects, hasMore, nextToken, err := s.store.List(listPrefix, listStartAfter, token, delimiter, limit)
 	if err != nil {
 		return nil, false, "", err
 	}

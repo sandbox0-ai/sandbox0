@@ -42,6 +42,7 @@ func validateSpecSemantics(ctx context.Context, kubeClient ctrlclient.Client, in
 	}
 	errs = append(errs, validateClusterSemantics(infra)...)
 	errs = append(errs, validateObservabilitySemantics(infra)...)
+	errs = append(errs, validateClickHouseFeatureSemantics(infra)...)
 	errs = append(errs, validateServiceSemantics(infra)...)
 
 	return utilerrors.NewAggregate(errs)
@@ -122,6 +123,25 @@ func validateObservabilitySemantics(infra *infrav1alpha1.Sandbox0Infra) []error 
 		}
 	default:
 		errs = append(errs, fmt.Errorf("spec.observability.backend.type is unsupported: %s", backend.Type))
+	}
+	return errs
+}
+
+func validateClickHouseFeatureSemantics(infra *infrav1alpha1.Sandbox0Infra) []error {
+	if infra == nil {
+		return nil
+	}
+
+	var errs []error
+	clickHouseEnabled := infrav1alpha1.IsClickHouseEnabled(infra)
+	if infrav1alpha1.IsSandboxObservabilityEnabled(infra) && !clickHouseEnabled {
+		errs = append(errs, fmt.Errorf("sandboxObservability backend clickhouse requires spec.clickHouse type builtin or external"))
+	}
+	if infrav1alpha1.IsClickHouseMeteringRequested(infra) {
+		if !clickHouseEnabled {
+			errs = append(errs, fmt.Errorf("metering backend clickhouse requires spec.clickHouse type builtin or external"))
+		}
+		errs = append(errs, fmt.Errorf("metering backend clickhouse is not enabled until ClickHouse metering write-path migration is complete"))
 	}
 	return errs
 }

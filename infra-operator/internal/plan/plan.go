@@ -61,6 +61,7 @@ type ComponentPlan struct {
 	EnableStorage              bool
 	EnableRegistry             bool
 	EnableObservability        bool
+	EnableClickHouse           bool
 	EnableSandboxObservability bool
 	EnableInitUser             bool
 	EnableClusterRegistration  bool
@@ -72,14 +73,14 @@ type ValidationPlan struct {
 }
 
 type CleanupPlan struct {
-	CleanupBuiltinDatabase             bool
-	CleanupBuiltinRedis                bool
-	CleanupBuiltinCredentialVault      bool
-	CleanupBuiltinStorage              bool
-	CleanupBuiltinRegistry             bool
-	CleanupBuiltinSandboxObservability bool
-	DeleteNamespaced                   []ResourceRef
-	DeleteClusterScoped                []ResourceRef
+	CleanupBuiltinDatabase        bool
+	CleanupBuiltinRedis           bool
+	CleanupBuiltinCredentialVault bool
+	CleanupBuiltinStorage         bool
+	CleanupBuiltinRegistry        bool
+	CleanupBuiltinClickHouse      bool
+	DeleteNamespaced              []ResourceRef
+	DeleteClusterScoped           []ResourceRef
 }
 
 type ResourceRef struct {
@@ -233,6 +234,7 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 		EnableStorage:              infrav1alpha1.IsStorageEnabled(infra),
 		EnableRegistry:             infrav1alpha1.IsRegistryEnabled(infra),
 		EnableObservability:        common.ObservabilityBackendEnabled(infra),
+		EnableClickHouse:           infrav1alpha1.IsClickHouseEnabled(infra),
 		EnableSandboxObservability: infrav1alpha1.IsSandboxObservabilityEnabled(infra),
 		EnableInitUser:             enableDatabase && initUserConsumerEnabled(infra),
 		EnableClusterRegistration:  hasDataPlane && infra != nil && infra.Spec.Cluster != nil && infra.Spec.ControlPlane != nil,
@@ -680,6 +682,15 @@ func compileValidationPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPl
 	if compiled != nil && compiled.Components.EnableNetd && netdEgressAuthEnabled(infra) && !compiled.Components.EnableManager {
 		plan.FatalErrors = append(plan.FatalErrors, "netd egress auth requires manager to be enabled")
 	}
+	if compiled != nil && compiled.Components.EnableSandboxObservability && !compiled.Components.EnableClickHouse {
+		plan.FatalErrors = append(plan.FatalErrors, "sandboxObservability backend clickhouse requires spec.clickHouse type builtin or external")
+	}
+	if infrav1alpha1.IsClickHouseMeteringRequested(infra) {
+		if compiled != nil && !compiled.Components.EnableClickHouse {
+			plan.FatalErrors = append(plan.FatalErrors, "metering backend clickhouse requires spec.clickHouse type builtin or external")
+		}
+		plan.FatalErrors = append(plan.FatalErrors, "metering backend clickhouse is not enabled until ClickHouse metering write-path migration is complete")
+	}
 	if infra.Spec.InitUser != nil && (compiled == nil || compiled.Components.EnableDatabase) && !initUserConsumerEnabled(infra) {
 		plan.FatalErrors = append(plan.FatalErrors, "initUser requires globalGateway, regionalGateway.authMode=self_hosted, or clusterGateway authMode public/both")
 	}
@@ -698,7 +709,7 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 	cleanup.CleanupBuiltinCredentialVault = !builtinCredentialVaultActive(infra)
 	cleanup.CleanupBuiltinStorage = !builtinStorageActive(infra)
 	cleanup.CleanupBuiltinRegistry = !builtinRegistryActive(infra)
-	cleanup.CleanupBuiltinSandboxObservability = !builtinSandboxObservabilityActive(infra)
+	cleanup.CleanupBuiltinClickHouse = !builtinClickHouseActive(infra)
 
 	if !compiled.Components.EnableGlobalGateway {
 		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
@@ -878,6 +889,9 @@ func compileStatusPlan(compiled *InfraPlan) StatusPlan {
 	if components.EnableObservability {
 		expected = append(expected, infrav1alpha1.ConditionTypeObservabilityReady)
 	}
+	if components.EnableClickHouse {
+		expected = append(expected, infrav1alpha1.ConditionTypeClickHouseReady)
+	}
 	if components.EnableSandboxObservability {
 		expected = append(expected, infrav1alpha1.ConditionTypeSandboxObservabilityReady)
 	}
@@ -967,6 +981,9 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 	}
 	if compiled.Components.EnableObservability {
 		appendSuccessStep("observability", infrav1alpha1.ConditionTypeObservabilityReady, "ObservabilityReady", "Observability backend integration is ready", "ObservabilityFailed")
+	}
+	if compiled.Components.EnableClickHouse {
+		appendSuccessStep("clickhouse", infrav1alpha1.ConditionTypeClickHouseReady, "ClickHouseReady", "ClickHouse is ready", "ClickHouseFailed")
 	}
 	if compiled.Components.EnableSandboxObservability {
 		appendSuccessStep("sandbox-observability", infrav1alpha1.ConditionTypeSandboxObservabilityReady, "SandboxObservabilityReady", "Sandbox observability backend is ready", "SandboxObservabilityFailed")
@@ -1087,6 +1104,12 @@ func compileRetainedResourceStatusPlan(compiled *InfraPlan) []infrav1alpha1.Reta
 	if infra.Spec.Registry != nil && !builtinRegistryActive(infra) && registryStatefulResourcePolicy(infra) == infrav1alpha1.BuiltinStatefulResourcePolicyRetain {
 		retained = append(retained,
 			common.NewRetainedResourceStatus("registry", "PersistentVolumeClaim", common.BuiltinRegistryPVCName(infra.Name)),
+		)
+	}
+	if infra.Spec.ClickHouse != nil && !builtinClickHouseActive(infra) && clickHouseStatefulResourcePolicy(infra) == infrav1alpha1.BuiltinStatefulResourcePolicyRetain {
+		retained = append(retained,
+			common.NewRetainedResourceStatus("clickhouse", "Secret", fmt.Sprintf("%s-clickhouse-credentials", infra.Name)),
+			common.NewRetainedResourceStatus("clickhouse", "PersistentVolumeClaim", fmt.Sprintf("%s-clickhouse-data", infra.Name)),
 		)
 	}
 	return retained
@@ -1475,8 +1498,20 @@ func builtinRegistryActive(infra *infrav1alpha1.Sandbox0Infra) bool {
 	return infra.Spec.Registry.Builtin.Enabled
 }
 
-func builtinSandboxObservabilityActive(infra *infrav1alpha1.Sandbox0Infra) bool {
-	if infra == nil || infra.Spec.SandboxObservability == nil || infra.Spec.SandboxObservability.Type != infrav1alpha1.SandboxObservabilityTypeBuiltin {
+func builtinClickHouseActive(infra *infrav1alpha1.Sandbox0Infra) bool {
+	if infra == nil {
+		return false
+	}
+	if infra.Spec.ClickHouse != nil {
+		if infra.Spec.ClickHouse.Type != infrav1alpha1.ClickHouseTypeBuiltin {
+			return false
+		}
+		if infra.Spec.ClickHouse.Builtin == nil {
+			return true
+		}
+		return infra.Spec.ClickHouse.Builtin.Enabled
+	}
+	if infra.Spec.SandboxObservability == nil || infra.Spec.SandboxObservability.Type != infrav1alpha1.SandboxObservabilityTypeBuiltin {
 		return false
 	}
 	if infra.Spec.SandboxObservability.Builtin == nil {
@@ -1511,4 +1546,18 @@ func registryStatefulResourcePolicy(infra *infrav1alpha1.Sandbox0Infra) infrav1a
 		return infrav1alpha1.BuiltinStatefulResourcePolicyRetain
 	}
 	return infra.Spec.Registry.Builtin.StatefulResourcePolicy
+}
+
+func clickHouseStatefulResourcePolicy(infra *infrav1alpha1.Sandbox0Infra) infrav1alpha1.BuiltinStatefulResourcePolicy {
+	if infra == nil {
+		return infrav1alpha1.BuiltinStatefulResourcePolicyRetain
+	}
+	if infra.Spec.ClickHouse != nil && infra.Spec.ClickHouse.Builtin != nil && infra.Spec.ClickHouse.Builtin.StatefulResourcePolicy != "" {
+		return infra.Spec.ClickHouse.Builtin.StatefulResourcePolicy
+	}
+	if infra.Spec.SandboxObservability != nil && infra.Spec.SandboxObservability.Builtin != nil &&
+		infra.Spec.SandboxObservability.Builtin.ClickHouse.StatefulResourcePolicy != "" {
+		return infra.Spec.SandboxObservability.Builtin.ClickHouse.StatefulResourcePolicy
+	}
+	return infrav1alpha1.BuiltinStatefulResourcePolicyRetain
 }

@@ -176,11 +176,22 @@ type Sandbox0InfraSpec struct {
 	// +optional
 	Observability *ObservabilityConfig `json:"observability,omitempty"`
 
+	// ClickHouse configures the region-level ClickHouse data component used by
+	// ClickHouse-backed features such as sandbox observability and metering.
+	// +optional
+	// +kubebuilder:default={type:disabled}
+	ClickHouse *ClickHouseConfig `json:"clickHouse,omitempty"`
+
 	// SandboxObservability configures the region-local historical per-sandbox
 	// observability backend and collection pipelines.
 	// +optional
 	// +kubebuilder:default={type:disabled}
 	SandboxObservability *SandboxObservabilityConfig `json:"sandboxObservability,omitempty"`
+
+	// Metering configures the region usage ledger backend.
+	// +optional
+	// +kubebuilder:default={}
+	Metering *MeteringConfig `json:"metering,omitempty"`
 
 	// Services configures individual services
 	// +optional
@@ -1533,9 +1544,70 @@ func IsRedisEnabled(infra *Sandbox0Infra) bool {
 	return rediscache.SpecEnabled(true, string(infra.Spec.Redis.Type), builtinEnabled)
 }
 
+// IsClickHouseEnabled returns true when the region-level ClickHouse component
+// should be reconciled and injected into ClickHouse-backed features.
+func IsClickHouseEnabled(infra *Sandbox0Infra) bool {
+	if infra == nil {
+		return false
+	}
+	if infra.Spec.ClickHouse == nil {
+		return legacySandboxObservabilityUsesClickHouse(infra)
+	}
+	switch infra.Spec.ClickHouse.Type {
+	case ClickHouseTypeBuiltin:
+		if infra.Spec.ClickHouse.Builtin != nil {
+			return infra.Spec.ClickHouse.Builtin.Enabled
+		}
+		return true
+	case ClickHouseTypeExternal:
+		return true
+	default:
+		return false
+	}
+}
+
 // IsSandboxObservabilityEnabled returns true when the region-level per-sandbox
 // historical observability backend should be reconciled and injected.
 func IsSandboxObservabilityEnabled(infra *Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.SandboxObservability == nil {
+		return false
+	}
+	if infra.Spec.SandboxObservability.Enabled != nil {
+		if !*infra.Spec.SandboxObservability.Enabled {
+			return false
+		}
+		backend := infra.Spec.SandboxObservability.Backend
+		return backend == "" || backend == SandboxObservabilityBackendClickHouse
+	}
+	if infra.Spec.SandboxObservability.Backend == SandboxObservabilityBackendClickHouse {
+		return true
+	}
+	switch infra.Spec.SandboxObservability.Type {
+	case SandboxObservabilityTypeBuiltin:
+		if infra.Spec.SandboxObservability.Builtin != nil {
+			return infra.Spec.SandboxObservability.Builtin.Enabled
+		}
+		return true
+	case SandboxObservabilityTypeExternal:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsClickHouseMeteringRequested returns true when ClickHouse has been selected
+// as the metering truth backend.
+func IsClickHouseMeteringRequested(infra *Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.Metering == nil {
+		return false
+	}
+	if infra.Spec.Metering.Enabled != nil && !*infra.Spec.Metering.Enabled {
+		return false
+	}
+	return infra.Spec.Metering.Backend == MeteringBackendClickHouse
+}
+
+func legacySandboxObservabilityUsesClickHouse(infra *Sandbox0Infra) bool {
 	if infra == nil || infra.Spec.SandboxObservability == nil {
 		return false
 	}
@@ -1919,6 +1991,7 @@ const (
 	ConditionTypeStorageReady              = "StorageReady"
 	ConditionTypeRegistryReady             = "RegistryReady"
 	ConditionTypeObservabilityReady        = "ObservabilityReady"
+	ConditionTypeClickHouseReady           = "ClickHouseReady"
 	ConditionTypeSandboxObservabilityReady = "SandboxObservabilityReady"
 	ConditionTypeGlobalGatewayReady        = "GlobalGatewayReady"
 	ConditionTypeRegionalGatewayReady      = "RegionalGatewayReady"

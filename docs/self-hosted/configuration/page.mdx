@@ -48,7 +48,7 @@ Schedulers consume the manager cluster summary fields `claim_start_limit`, `clai
 
 ## Metering Boundary
 
-Sandbox0 records usage truth in the region database and exports it from the region-scoped metering endpoints. Billing systems should rate these exported usage windows outside the open-source data plane.
+Sandbox0 records usage truth in the region usage ledger and exports it from the region-scoped metering endpoints. The default backend is PostgreSQL. The `Sandbox0Infra` CRD includes a ClickHouse metering backend surface, but the operator rejects `spec.metering.backend: clickhouse` until the service write paths have been migrated. Billing systems should rate exported usage windows outside the open-source data plane.
 
 Sandbox compute uses a serverless-style contract:
 
@@ -66,21 +66,28 @@ Public template idle pools are platform cost. Team-owned template warm pools are
 
 Sandbox0 platform services emit logs to container stdout and expose Prometheus-compatible metrics on their metrics ports. Configure `spec.observability` when you want the operator to export sandbox0-owned platform telemetry to your observability stack.
 
-Platform telemetry export is disabled by default. The operator owns collection and export integration only: it can point platform services at an external collector, or install OpenTelemetry Collectors that export to your OTLP endpoint. The per-sandbox historical observability and audit APIs are separate from this platform telemetry layer; they require a configured query backend and return `503 unavailable` when that backend is disabled or unavailable. Sandbox0 does not replace PostgreSQL metering usage truth with the historical observability store.
+Platform telemetry export is disabled by default. The operator owns collection and export integration only: it can point platform services at an external collector, or install OpenTelemetry Collectors that export to your OTLP endpoint. The per-sandbox historical observability and audit APIs are separate from this platform telemetry layer; they require a configured query backend and return `503 unavailable` when that backend is disabled or unavailable. The historical observability tables are separate from the metering usage ledger even when both use the same region ClickHouse component.
 
-Per-sandbox historical observability is configured once on the `Sandbox0Infra` CR under `spec.sandboxObservability`. The infra-operator owns backend provisioning and service wiring, the same way it owns built-in or external PostgreSQL and Redis wiring. Do not configure the ClickHouse backend separately on cluster-gateway or netd service configs when deploying through `Sandbox0Infra`.
+ClickHouse is configured once on the `Sandbox0Infra` CR under `spec.clickHouse`. The infra-operator owns builtin provisioning or external DSN resolution, the same way it owns built-in or external PostgreSQL and Redis wiring. Feature configs such as `spec.sandboxObservability` consume this region component. Do not configure the ClickHouse backend separately on cluster-gateway or netd service configs when deploying through `Sandbox0Infra`.
 
-Use the built-in backend when you want the infra-operator to install ClickHouse for the region:
+Use builtin ClickHouse when you want the infra-operator to install ClickHouse for the region:
 
 ```yaml
 spec:
-    sandboxObservability:
+    clickHouse:
         type: builtin
         builtin:
-            clickHouse:
-                image: clickhouse/clickhouse-server:24.8
-                persistence:
-                    size: 50Gi
+            image: clickhouse/clickhouse-server:24.8
+            persistence:
+                size: 50Gi
+        databases:
+            observability: sandbox0_observability
+            metering: sandbox0_metering
+        schemaMigration:
+            enabled: true
+    sandboxObservability:
+        enabled: true
+        backend: clickhouse
         retention:
             auditDays: 90
             logDays: 7
@@ -101,26 +108,27 @@ Use the external backend when you already operate ClickHouse:
 
 ```yaml
 spec:
-    sandboxObservability:
+    clickHouse:
         type: external
         external:
-            clickHouse:
-                dsnSecret:
-                    name: sandbox-observability-clickhouse
-                    key: dsn
-                database: sandbox0_observability
-                eventsTable: sandbox_events
-                logsTable: sandbox_logs
-                metricsTable: sandbox_metric_samples
-                connectTimeout:
-                    duration: 10s
+            dsnSecret:
+                name: sandbox0-clickhouse
+                key: dsn
+            connectTimeout:
+                duration: 10s
+        databases:
+            observability: sandbox0_observability
+            metering: sandbox0_metering
+    sandboxObservability:
+        enabled: true
+        backend: clickhouse
         retention:
             auditDays: 90
             logDays: 7
             metricDays: 30
 ```
 
-Set `spec.sandboxObservability.type` to `disabled` or omit the field to keep the historical API disabled. Retention deletes ClickHouse observability rows only and never deletes PostgreSQL `metering.usage_events` or `metering.usage_windows`.
+Set `spec.sandboxObservability.enabled` to `false` or omit the field to keep the historical API disabled. Legacy `spec.sandboxObservability.type` fields are still accepted for compatibility, but new installs should use `spec.clickHouse` for ClickHouse provisioning. Retention deletes ClickHouse observability rows only and never deletes metering ledger rows.
 
 Netd receives the generated internal ingest endpoint automatically when the backend is enabled. The sink is asynchronous and bounded: if the queue is full or retries are exhausted, netd drops audit projection events instead of blocking traffic forwarding. Netd exports `sandbox0_netd_audit_ingest_events_total` and `sandbox0_netd_audit_ingest_batches_total` to show enqueue, send, skip, drop, and failed batch results.
 

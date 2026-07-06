@@ -46,6 +46,7 @@ import (
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/rbac"
+	clickhousesvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/clickhouse"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/clustergateway"
 	credentialstoresvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/credentialstore"
 	ctldsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/ctld"
@@ -250,6 +251,7 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	storageReconciler := storage.NewReconciler(resources)
 	registryReconciler := registry.NewReconciler(resources)
 	observabilityReconciler := observability.NewReconciler(resources)
+	clickHouseReconciler := clickhousesvc.NewReconciler(resources)
 	sandboxObservabilityReconciler := sandboxobssvc.NewReconciler(resources)
 	globalGatewayReconciler := globalgateway.NewReconciler(resources)
 	regionalGatewayReconciler := regionalgateway.NewReconciler(resources)
@@ -263,11 +265,11 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	nodeReadinessReconciler := nodereadiness.NewReconciler(resources)
 	rbacReconciler := rbac.NewReconciler(resources)
 
-	if err := r.cleanupDisabledServiceResources(ctx, infra, compiledPlan.Cleanup, dbReconciler, redisReconciler, credentialStoreReconciler, storageReconciler, registryReconciler, observabilityReconciler, sandboxObservabilityReconciler); err != nil {
+	if err := r.cleanupDisabledServiceResources(ctx, infra, compiledPlan.Cleanup, dbReconciler, redisReconciler, credentialStoreReconciler, storageReconciler, registryReconciler, observabilityReconciler, clickHouseReconciler); err != nil {
 		return ctrl.Result{RequeueAfter: requeueInterval}, err
 	}
 
-	steps, err := r.bindWorkflowSteps(infra, compiledPlan, resources, imageRepo, imageTag, authReconciler, dbReconciler, redisReconciler, credentialStoreReconciler, storageReconciler, registryReconciler, observabilityReconciler, sandboxObservabilityReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
+	steps, err := r.bindWorkflowSteps(infra, compiledPlan, resources, imageRepo, imageTag, authReconciler, dbReconciler, redisReconciler, credentialStoreReconciler, storageReconciler, registryReconciler, observabilityReconciler, clickHouseReconciler, sandboxObservabilityReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -286,6 +288,7 @@ func (r *Sandbox0InfraReconciler) bindWorkflowSteps(
 	storageReconciler *storage.Reconciler,
 	registryReconciler *registry.Reconciler,
 	observabilityReconciler *observability.Reconciler,
+	clickHouseReconciler *clickhousesvc.Reconciler,
 	sandboxObservabilityReconciler *sandboxobssvc.Reconciler,
 	globalGatewayReconciler *globalgateway.Reconciler,
 	regionalGatewayReconciler *regionalgateway.Reconciler,
@@ -301,7 +304,7 @@ func (r *Sandbox0InfraReconciler) bindWorkflowSteps(
 ) ([]reconcileStep, error) {
 	steps := make([]reconcileStep, 0, len(compiledPlan.Workflow.Steps))
 	for _, planned := range compiledPlan.Workflow.Steps {
-		run, err := r.workflowStepRunner(infra, compiledPlan, resources, imageRepo, imageTag, planned.Name, authReconciler, dbReconciler, redisReconciler, credentialStoreReconciler, storageReconciler, registryReconciler, observabilityReconciler, sandboxObservabilityReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
+		run, err := r.workflowStepRunner(infra, compiledPlan, resources, imageRepo, imageTag, planned.Name, authReconciler, dbReconciler, redisReconciler, credentialStoreReconciler, storageReconciler, registryReconciler, observabilityReconciler, clickHouseReconciler, sandboxObservabilityReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
 		if err != nil {
 			return nil, err
 		}
@@ -330,6 +333,7 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 	storageReconciler *storage.Reconciler,
 	registryReconciler *registry.Reconciler,
 	observabilityReconciler *observability.Reconciler,
+	clickHouseReconciler *clickhousesvc.Reconciler,
 	sandboxObservabilityReconciler *sandboxobssvc.Reconciler,
 	globalGatewayReconciler *globalgateway.Reconciler,
 	regionalGatewayReconciler *regionalgateway.Reconciler,
@@ -366,6 +370,8 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 		return func(ctx context.Context) error { return registryReconciler.Reconcile(ctx, infra) }, nil
 	case "observability":
 		return func(ctx context.Context) error { return observabilityReconciler.Reconcile(ctx, infra) }, nil
+	case "clickhouse":
+		return func(ctx context.Context) error { return clickHouseReconciler.Reconcile(ctx, infra) }, nil
 	case "sandbox-observability":
 		return func(ctx context.Context) error { return sandboxObservabilityReconciler.Reconcile(ctx, infra) }, nil
 	case "global-gateway-enterprise-license":
@@ -460,7 +466,7 @@ func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(
 	storageReconciler *storage.Reconciler,
 	registryReconciler *registry.Reconciler,
 	observabilityReconciler *observability.Reconciler,
-	sandboxObservabilityReconciler *sandboxobssvc.Reconciler,
+	clickHouseReconciler *clickhousesvc.Reconciler,
 ) error {
 	deleteResource := func(ref infraplan.ResourceRef, obj client.Object) error {
 		key := types.NamespacedName{Name: ref.Name, Namespace: ref.Namespace}
@@ -510,8 +516,8 @@ func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(
 			return err
 		}
 	}
-	if cleanupPlan.CleanupBuiltinSandboxObservability && sandboxObservabilityReconciler != nil {
-		if err := sandboxObservabilityReconciler.CleanupBuiltinResources(ctx, infra); err != nil {
+	if cleanupPlan.CleanupBuiltinClickHouse && clickHouseReconciler != nil {
+		if err := clickHouseReconciler.CleanupBuiltinResources(ctx, infra); err != nil {
 			return err
 		}
 	}

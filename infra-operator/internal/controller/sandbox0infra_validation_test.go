@@ -337,6 +337,54 @@ func TestValidateSpecSemanticsRejectsInvalidClusterID(t *testing.T) {
 	}
 }
 
+func TestValidateSpecSemanticsRejectsSandboxObservabilityWithoutClickHouse(t *testing.T) {
+	enabled := true
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			ClickHouse: &infrav1alpha1.ClickHouseConfig{
+				Type: infrav1alpha1.ClickHouseTypeDisabled,
+			},
+			SandboxObservability: &infrav1alpha1.SandboxObservabilityConfig{
+				Enabled: &enabled,
+				Backend: infrav1alpha1.SandboxObservabilityBackendClickHouse,
+			},
+		},
+	}
+
+	err := validateSpecSemantics(context.Background(), newValidationTestClient(t), infra)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "sandboxObservability backend clickhouse requires spec.clickHouse type builtin or external") {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+}
+
+func TestValidateSpecSemanticsRejectsClickHouseMeteringUntilWritePathMigration(t *testing.T) {
+	enabled := true
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			ClickHouse: &infrav1alpha1.ClickHouseConfig{
+				Type: infrav1alpha1.ClickHouseTypeBuiltin,
+			},
+			Metering: &infrav1alpha1.MeteringConfig{
+				Enabled: &enabled,
+				Backend: infrav1alpha1.MeteringBackendClickHouse,
+			},
+		},
+	}
+
+	err := validateSpecSemantics(context.Background(), newValidationTestClient(t), infra)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "metering backend clickhouse is not enabled until ClickHouse metering write-path migration is complete") {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+}
+
 func TestValidateSpecSemanticsAcceptsValidNodePortServicePort(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},

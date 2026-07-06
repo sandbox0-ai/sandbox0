@@ -1,6 +1,6 @@
 ---
 name: sandbox0
-description: Use this skill when an AI agent developer wants to integrate Sandbox0 sandboxes, templates, volumes, credentials, managed agents, CLI, SDKs, or self-hosted deployment. For current API, CLI, SDK, and Managed Agents details, always consult the live Sandbox0 docs.
+description: Use this skill when an AI agent developer wants to integrate Sandbox0 sandboxes, templates, volumes, credentials, CLI, SDKs, or self-hosted deployment. For current API, CLI, and SDK details, always consult the live Sandbox0 docs.
 ---
 
 # Sandbox0
@@ -9,11 +9,10 @@ Use this skill for Sandbox0 integration guidance for AI agent developers.
 
 ## Source Of Truth
 
-For exact API, CLI, SDK, and Managed Agents behavior, read the live docs first:
+For exact API, CLI, and SDK behavior, read the live docs first:
 
 - https://sandbox0.ai/llms.txt
 - https://sandbox0.ai/docs
-- https://sandbox0.ai/docs/managed-agents
 
 This skill is intentionally thin. Do not rely on local bundled docs for product details.
 
@@ -32,7 +31,7 @@ Start from Sandbox0 Cloud unless the user explicitly needs self-hosting.
 
 If the user is only using the interactive `s0` CLI, `s0 auth login` is usually enough and no API key export is required.
 
-Managed Agents uses `https://agents.sandbox0.ai`. Sandbox, Template, Volume, and Credential APIs use `https://api.sandbox0.ai`.
+Sandbox, Template, Volume, and Credential APIs use `https://api.sandbox0.ai`.
 
 ## Typical triggers
 
@@ -52,7 +51,6 @@ Managed Agents uses `https://agents.sandbox0.ai`. Sandbox, Template, Volume, and
 - For durable workspace state, use Volumes.
 - For restore points, use Volume snapshots.
 - For restricted outbound access, use network policy and credentials.
-- For Claude Managed Agents-compatible flows, use the official Anthropic SDK against Sandbox0 Managed Agents and store model credentials in vaults.
 - Prefer Sandbox0 Cloud unless the user asks for self-hosting, private deployment, or data-plane ownership.
 
 ## Working rules

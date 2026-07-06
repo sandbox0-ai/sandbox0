@@ -16,14 +16,6 @@
         "self-hosted",
         "use-cases"
       ]
-    },
-    {
-      "slug": "managed-agents",
-      "title": "managed-agents",
-      "defaultPage": "managed-agents",
-      "sections": [
-        "managed-agents"
-      ]
     }
   ],
   "sections": [
@@ -103,67 +95,6 @@
         {
           "slug": "webhooks",
           "title": "Webhooks"
-        }
-      ]
-    },
-    {
-      "label": "MANAGED AGENTS",
-      "slug": "managed-agents",
-      "pages": [
-        {
-          "slug": "",
-          "title": "Overview"
-        },
-        {
-          "slug": "sdk",
-          "title": "SDK Usage"
-        },
-        {
-          "slug": "agents",
-          "title": "Agents"
-        },
-        {
-          "slug": "skills",
-          "title": "Skills"
-        },
-        {
-          "slug": "environments",
-          "title": "Environments"
-        },
-        {
-          "slug": "sessions",
-          "title": "Sessions"
-        },
-        {
-          "slug": "files",
-          "title": "Files"
-        },
-        {
-          "slug": "deployments",
-          "title": "Deployments"
-        },
-        {
-          "slug": "events",
-          "title": "Events"
-        },
-        {
-          "slug": "vaults",
-          "title": "Vaults"
-        },
-        {
-          "slug": "agent-harnesses",
-          "title": "Agent Harnesses",
-          "aliases": [
-            "agent-engines"
-          ]
-        },
-        {
-          "slug": "llmproxy",
-          "title": "LLMProxy"
-        },
-        {
-          "slug": "compatibility",
-          "title": "Compatibility"
         }
       ]
     },

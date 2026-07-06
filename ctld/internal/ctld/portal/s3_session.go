@@ -61,6 +61,7 @@ type s3Handle struct {
 	path      string
 	writable  bool
 	actor     *pb.PosixActor
+	read      bool
 	buffer    bytes.Buffer
 	committed bool
 	closed    bool
@@ -277,7 +278,7 @@ func (s *s3Session) Create(ctx context.Context, req *pb.CreateRequest) (*pb.Node
 		if req.Flags&uint32(syscall.O_EXCL) != 0 {
 			return nil, fserror.New(fserror.AlreadyExists, "entry already exists")
 		}
-		if s.hasConflictingOpenReader(existing.inode, req.Actor) || s.hasOpenWriter(existing.inode) {
+		if s.hasConflictingOpenReader(existing.inode, existing.path, req.Actor) || s.hasOpenWriter(existing.inode) {
 			return nil, syscall.EPERM
 		}
 		handleID := s.newHandle(&s3Handle{inode: existing.inode, path: existing.path, writable: true, actor: req.Actor})
@@ -456,7 +457,7 @@ func (s *s3Session) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResp
 		if handleID, ok := s.sameActorWritableHandle(node.inode, req.Actor); ok {
 			return &pb.OpenResponse{HandleId: handleID}, nil
 		}
-		if s.hasConflictingOpenReader(node.inode, req.Actor) || s.hasOpenWriter(node.inode) {
+		if s.hasConflictingOpenReader(node.inode, node.path, req.Actor) || s.hasOpenWriter(node.inode) {
 			return nil, syscall.EPERM
 		}
 		handleID := s.newHandle(&s3Handle{inode: node.inode, path: node.path, writable: true, actor: req.Actor})
@@ -503,6 +504,9 @@ func (s *s3Session) ReadInto(ctx context.Context, req *pb.ReadRequest, dest []by
 	}
 	if req.Offset >= node.size || len(dest) == 0 {
 		return 0, true, nil
+	}
+	if req.HandleId != 0 {
+		s.markReadHandle(req.HandleId, node.inode)
 	}
 	limit := int64(len(dest))
 	if remaining := node.size - req.Offset; remaining < limit {
@@ -1025,15 +1029,28 @@ func (s *s3Session) hasOpenWriter(inode uint64) bool {
 	return s.findWritableHandle(inode) != nil
 }
 
-func (s *s3Session) hasConflictingOpenReader(inode uint64, actor *pb.PosixActor) bool {
+func (s *s3Session) hasConflictingOpenReader(inode uint64, key string, actor *pb.PosixActor) bool {
+	key = cleanS3Path(key)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, handle := range s.handles {
-		if handle != nil && handle.inode == inode && !handle.writable && !handle.closed && !samePosixActor(handle.actor, actor) {
+		if handle == nil || handle.inode != inode || handle.path != key || handle.writable || handle.closed {
+			continue
+		}
+		if handle.read || !samePosixActor(handle.actor, actor) {
 			return true
 		}
 	}
 	return false
+}
+
+func (s *s3Session) markReadHandle(handleID, inode uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	handle := s.handles[handleID]
+	if handle != nil && handle.inode == inode && !handle.writable && !handle.closed {
+		handle.read = true
+	}
 }
 
 func (s *s3Session) sameActorWritableHandle(inode uint64, actor *pb.PosixActor) (uint64, bool) {

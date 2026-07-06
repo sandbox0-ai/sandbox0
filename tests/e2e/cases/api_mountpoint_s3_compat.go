@@ -550,9 +550,9 @@ test "$(cat %s)" = "before-close"
 	runMountpointS3Script(env, namespace, podName, fmt.Sprintf(`
 set -eu
 M=%s
-rm -f /tmp/s3-compat-reader-ready /tmp/s3-compat-reader-done /tmp/s3-compat-reader.log
-nohup sh -c 'exec 3< "$1"; echo ready > /tmp/s3-compat-reader-ready; sleep 20; cat <&3 >/dev/null; exec 3<&-; echo done > /tmp/s3-compat-reader-done' sh "$M/write-lifecycle/open.txt" >/tmp/s3-compat-reader.log 2>&1 &
-`, shellQuote(mountpointS3MountPath)))
+rm -f /tmp/s3-compat-reader-ready /tmp/s3-compat-reader-done /tmp/s3-compat-reader-byte /tmp/s3-compat-reader.log
+nohup sh -c 'exec 3< "$1"; dd bs=1 count=1 <&3 >/tmp/s3-compat-reader-byte 2>/dev/null; echo ready > /tmp/s3-compat-reader-ready; sleep 20; cat <&3 >/dev/null; exec 3<&-; echo done > /tmp/s3-compat-reader-done' sh "$M/write-lifecycle/open.txt" >/tmp/s3-compat-reader.log 2>&1 &
+	`, shellQuote(mountpointS3MountPath)))
 	waitMountpointS3Script(env, namespace, podName, "test -f /tmp/s3-compat-reader-ready", 20*time.Second)
 	runMountpointS3Script(env, namespace, podName, fmt.Sprintf(`
 set -eu

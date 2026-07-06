@@ -290,6 +290,27 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 	}
 	assertS3TestObject(t, store, "from-sandbox/new.txt", "replacement")
 
+	stalePathReader := session.newHandle(&s3Handle{
+		inode: created.Inode,
+		path:  "from-sandbox/stale-reader.txt",
+		actor: &pb.PosixActor{Pid: 300, Uid: 1000, Gids: []uint32{1000}},
+	})
+	writerAfterStalePath, err := session.Open(ctx, &pb.OpenRequest{
+		Inode: created.Inode,
+		Flags: uint32(syscall.O_WRONLY | syscall.O_TRUNC),
+		Actor: &pb.PosixActor{Pid: 400, Uid: 1000, Gids: []uint32{1000}},
+	})
+	if err != nil {
+		t.Fatalf("Open(writer with stale different-path reader) error = %v", err)
+	}
+	if _, err := session.Release(ctx, &pb.ReleaseRequest{HandleId: writerAfterStalePath.HandleId}); err != nil {
+		t.Fatalf("Release(writer with stale different-path reader) error = %v", err)
+	}
+	if _, err := session.Release(ctx, &pb.ReleaseRequest{HandleId: stalePathReader}); err != nil {
+		t.Fatalf("Release(stale different-path reader) error = %v", err)
+	}
+	assertS3TestObject(t, store, "from-sandbox/new.txt", "")
+
 	putS3TestObject(t, store, "from-sandbox/actor-truncate.txt", "actor-base")
 	actorNode, err := session.Lookup(ctx, &pb.LookupRequest{Parent: fromSandbox.Inode, Name: "actor-truncate.txt"})
 	if err != nil {
@@ -329,6 +350,35 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 		t.Fatalf("Release(actor reader) error = %v", err)
 	}
 	assertS3TestObject(t, store, "from-sandbox/actor-truncate.txt", "")
+
+	putS3TestObject(t, store, "from-sandbox/actor-read-blocked.txt", "actor-read-blocked")
+	readBlockedNode, err := session.Lookup(ctx, &pb.LookupRequest{Parent: fromSandbox.Inode, Name: "actor-read-blocked.txt"})
+	if err != nil {
+		t.Fatalf("Lookup(actor-read-blocked.txt) error = %v", err)
+	}
+	readBlockedReader, err := session.Open(ctx, &pb.OpenRequest{Inode: readBlockedNode.Inode, Actor: gvisorActor})
+	if err != nil {
+		t.Fatalf("Open(same actor active reader) error = %v", err)
+	}
+	if _, err := session.Read(ctx, &pb.ReadRequest{
+		Inode:    readBlockedNode.Inode,
+		HandleId: readBlockedReader.HandleId,
+		Size:     1,
+		Actor:    gvisorActor,
+	}); err != nil {
+		t.Fatalf("Read(same actor active reader) error = %v", err)
+	}
+	if _, err := session.Open(ctx, &pb.OpenRequest{
+		Inode: readBlockedNode.Inode,
+		Flags: uint32(syscall.O_WRONLY | syscall.O_TRUNC),
+		Actor: gvisorActor,
+	}); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("Open(same actor writer while active reader open) error = %v, want EPERM", err)
+	}
+	if _, err := session.Release(ctx, &pb.ReleaseRequest{HandleId: readBlockedReader.HandleId}); err != nil {
+		t.Fatalf("Release(same actor active reader) error = %v", err)
+	}
+	assertS3TestObject(t, store, "from-sandbox/actor-read-blocked.txt", "actor-read-blocked")
 
 	putS3TestObject(t, store, "from-sandbox/actor-blocked.txt", "actor-blocked")
 	blockedNode, err := session.Lookup(ctx, &pb.LookupRequest{Parent: fromSandbox.Inode, Name: "actor-blocked.txt"})

@@ -277,9 +277,6 @@ func (s *s3Session) Create(ctx context.Context, req *pb.CreateRequest) (*pb.Node
 		if req.Flags&uint32(syscall.O_EXCL) != 0 {
 			return nil, fserror.New(fserror.AlreadyExists, "entry already exists")
 		}
-		if !existing.localOnly && req.Flags&uint32(syscall.O_TRUNC) == 0 {
-			return nil, syscall.EPERM
-		}
 		if s.hasConflictingOpenReader(existing.inode, req.Actor) || s.hasOpenWriter(existing.inode) {
 			return nil, syscall.EPERM
 		}
@@ -458,9 +455,6 @@ func (s *s3Session) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResp
 		}
 		if handleID, ok := s.sameActorWritableHandle(node.inode, req.Actor); ok {
 			return &pb.OpenResponse{HandleId: handleID}, nil
-		}
-		if !node.localOnly && req.Flags&uint32(syscall.O_TRUNC) == 0 {
-			return nil, syscall.EPERM
 		}
 		if s.hasConflictingOpenReader(node.inode, req.Actor) || s.hasOpenWriter(node.inode) {
 			return nil, syscall.EPERM

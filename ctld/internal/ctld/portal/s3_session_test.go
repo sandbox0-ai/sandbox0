@@ -216,19 +216,27 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 	}
 	assertS3TestObject(t, store, "from-sandbox/new.txt", "replacement")
 
-	_, err = session.Open(ctx, &pb.OpenRequest{
+	failedAppend, err := session.Open(ctx, &pb.OpenRequest{
 		Inode: created.Inode,
 		Flags: uint32(syscall.O_WRONLY),
 	})
-	if !errors.Is(err, syscall.EPERM) {
-		t.Fatalf("Open(new.txt write without O_TRUNC) error = %v, want EPERM", err)
-	}
-	afterWriteWithoutTruncOpen, err := session.GetAttr(ctx, &pb.GetAttrRequest{Inode: created.Inode})
 	if err != nil {
-		t.Fatalf("GetAttr(new.txt after write without O_TRUNC) error = %v", err)
+		t.Fatalf("Open(new.txt failed append simulation) error = %v", err)
 	}
-	if afterWriteWithoutTruncOpen.Size != uint64(len("replacement")) {
-		t.Fatalf("new.txt size after write without O_TRUNC = %d, want %d", afterWriteWithoutTruncOpen.Size, len("replacement"))
+	if _, err := session.Write(ctx, &pb.WriteRequest{
+		Inode:    created.Inode,
+		HandleId: failedAppend.HandleId,
+		Offset:   int64(len("replacement")),
+		Data:     []byte("append"),
+	}); fserror.CodeOf(err) != fserror.InvalidArgument {
+		t.Fatalf("Write(failed append simulation) error = %v, want InvalidArgument", err)
+	}
+	afterFailedAppend, err := session.GetAttr(ctx, &pb.GetAttrRequest{Inode: created.Inode})
+	if err != nil {
+		t.Fatalf("GetAttr(new.txt after failed append simulation) error = %v", err)
+	}
+	if afterFailedAppend.Size != uint64(len("replacement")) {
+		t.Fatalf("new.txt size after failed append simulation = %d, want %d", afterFailedAppend.Size, len("replacement"))
 	}
 	assertS3TestObject(t, store, "from-sandbox/new.txt", "replacement")
 
@@ -255,14 +263,6 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 	})
 	if fserror.CodeOf(err) != fserror.InvalidArgument {
 		t.Fatalf("Create(existing new.txt O_APPEND) error = %v, want InvalidArgument", err)
-	}
-	_, err = session.Create(ctx, &pb.CreateRequest{
-		Parent: fromSandbox.Inode,
-		Name:   "new.txt",
-		Flags:  uint32(syscall.O_WRONLY | syscall.O_CREAT),
-	})
-	if !errors.Is(err, syscall.EPERM) {
-		t.Fatalf("Create(existing new.txt without O_TRUNC) error = %v, want EPERM", err)
 	}
 	_, err = session.Create(ctx, &pb.CreateRequest{
 		Parent: fromSandbox.Inode,

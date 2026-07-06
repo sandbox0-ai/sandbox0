@@ -62,9 +62,6 @@ func assertMountpointS3Compatibility(env *framework.ScenarioEnv, session *e2euti
 	if !mountpointS3CompatEnabled() {
 		Skip(fmt.Sprintf("set %s=true to run mountpoint-s3 compatibility probes", mountpointS3CompatEnvVar))
 	}
-	runtimeClass := strings.ToLower(strings.TrimSpace(env.Config.SandboxRuntimeClassName))
-	Expect(runtimeClass == "" || strings.Contains(runtimeClass, "runc")).To(BeTrue(),
-		"mountpoint-s3 compatibility requires a runc-compatible sandbox runtime, got %q", env.Config.SandboxRuntimeClassName)
 	for _, sourceCase := range mountpointS3CompatSourceCases {
 		GinkgoWriter.Printf("mountpoint-s3 compat source: %s\n", sourceCase)
 	}
@@ -127,9 +124,10 @@ func assertMountpointS3Compatibility(env *framework.ScenarioEnv, session *e2euti
 
 	assertMountpointS3Projection(env, templateNamespace, podName, store.scoped)
 	assertMountpointS3ExternalUpdates(env, templateNamespace, podName, store.scoped)
+	assertMountpointS3Overwrite(env, templateNamespace, podName, store.scoped)
 	assertMountpointS3WriteLifecycle(env, templateNamespace, podName, store.scoped)
-	assertMountpointS3UnsupportedAndOverwrite(env, templateNamespace, podName, store.scoped)
 	assertMountpointS3Deletes(env, templateNamespace, podName, store.scoped)
+	assertMountpointS3UnsupportedOperations(env, templateNamespace, podName, store.scoped)
 }
 
 func mountpointS3CompatEnabled() bool {
@@ -568,56 +566,112 @@ fi
 	expectMountpointS3ObjectEventually(store, "write-lifecycle/open.txt", []byte("before-close"))
 }
 
-func assertMountpointS3UnsupportedAndOverwrite(env *framework.ScenarioEnv, namespace, podName string, store objectstore.Store) {
-	By("rejecting unsupported mountpoint metadata and nonsequential write operations")
+func assertMountpointS3Overwrite(env *framework.ScenarioEnv, namespace, podName string, store objectstore.Store) {
+	By("overwriting existing S3 objects through truncate semantics")
+	putMountpointS3Object(store, "write-lifecycle/truncate.txt", "before-truncate")
 	runMountpointS3Script(env, namespace, podName, fmt.Sprintf(`
 set -eu
 M=%s
-file="$M/write-lifecycle/open.txt"
-if sh -c 'printf "%%s" "append" >> "$1"' sh "$file" 2>/tmp/s3-compat-append.err; then
-  echo "append unexpectedly succeeded for a general-purpose S3 bucket"
-  exit 1
-fi
-if sh -c 'printf x | dd of="$1" bs=1 seek=1 count=1 2>/tmp/s3-compat-nonseq.err' sh "$M/write-lifecycle/non-sequential.txt"; then
-  echo "nonsequential write unexpectedly succeeded"
-  exit 1
-fi
-test ! -e "$M/write-lifecycle/non-sequential.txt"
-if chmod 600 "$file" 2>/tmp/s3-compat-chmod.err; then
-  echo "chmod unexpectedly succeeded"
-  exit 1
-fi
-if ln "$file" "$M/write-lifecycle/hardlink.txt" 2>/tmp/s3-compat-link.err; then
-  echo "hard link unexpectedly succeeded"
-  exit 1
-fi
-if ln -s "$file" "$M/write-lifecycle/symlink.txt" 2>/tmp/s3-compat-symlink.err; then
-  echo "symlink unexpectedly succeeded"
-  exit 1
-fi
-if mv "$file" "$M/write-lifecycle/renamed.txt" 2>/tmp/s3-compat-rename.err; then
-  echo "rename unexpectedly succeeded for a general-purpose S3 bucket"
-  exit 1
-fi
-if command -v python3 >/dev/null 2>&1; then
-  if python3 - "$file" <<'PY'
-import os
-import sys
-os.listxattr(sys.argv[1])
-PY
-  then
-    echo "listxattr unexpectedly succeeded"
-    exit 1
-  fi
-fi
+file="$M/write-lifecycle/truncate.txt"
 truncate -s 0 "$file"
 test ! -s "$file"
 printf "%%s" "replacement" > "$file"
 sync
 test "$(cat "$file")" = "replacement"
 `, shellQuote(mountpointS3MountPath)))
+	expectMountpointS3ObjectEventually(store, "write-lifecycle/truncate.txt", []byte("replacement"))
+}
+
+func assertMountpointS3UnsupportedOperations(env *framework.ScenarioEnv, namespace, podName string, store objectstore.Store) {
+	By("rejecting unsupported mountpoint metadata and nonsequential write operations")
+	putMountpointS3Object(store, "write-lifecycle/append.txt", "append-base")
+	putMountpointS3Object(store, "write-lifecycle/chmod.txt", "chmod-base")
+	putMountpointS3Object(store, "write-lifecycle/link-source.txt", "link-base")
+	putMountpointS3Object(store, "write-lifecycle/rename-source.txt", "rename-base")
+	putMountpointS3Object(store, "write-lifecycle/xattr.txt", "xattr-base")
+	runMountpointS3Script(env, namespace, podName, fmt.Sprintf(`
+set -eu
+M=%s
+chmod_file="$M/write-lifecycle/chmod.txt"
+mode_before="$(stat -c %%a "$chmod_file")"
+if chmod 600 "$chmod_file" 2>/tmp/s3-compat-chmod.err; then
+  mode_after="$(stat -c %%a "$chmod_file")"
+  if [ "$mode_after" != "$mode_before" ]; then
+    echo "chmod unexpectedly changed mode from $mode_before to $mode_after"
+    exit 1
+  fi
+fi
+`, shellQuote(mountpointS3MountPath)))
+	runMountpointS3Script(env, namespace, podName, fmt.Sprintf(`
+set -eu
+M=%s
+if ln "$M/write-lifecycle/link-source.txt" "$M/write-lifecycle/hardlink.txt" 2>/tmp/s3-compat-link.err; then
+  echo "hard link unexpectedly succeeded"
+  exit 1
+fi
+`, shellQuote(mountpointS3MountPath)))
+	runMountpointS3Script(env, namespace, podName, fmt.Sprintf(`
+set -eu
+M=%s
+if ln -s "$M/write-lifecycle/link-source.txt" "$M/write-lifecycle/symlink.txt" 2>/tmp/s3-compat-symlink.err; then
+  echo "symlink unexpectedly succeeded"
+  exit 1
+fi
+`, shellQuote(mountpointS3MountPath)))
+	runMountpointS3Script(env, namespace, podName, fmt.Sprintf(`
+set -eu
+M=%s
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$M/write-lifecycle/xattr.txt" 2>/tmp/s3-compat-listxattr.err <<'PY'
+import os
+import sys
+attrs = os.listxattr(sys.argv[1])
+if attrs:
+    raise SystemExit(f"unexpected xattrs: {attrs!r}")
+PY
+fi
+`, shellQuote(mountpointS3MountPath)))
+	runMountpointS3Script(env, namespace, podName, fmt.Sprintf(`
+set -eu
+M=%s
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "python3 is required for direct rename syscall coverage"
+  exit 1
+fi
+if python3 - "$M/write-lifecycle/rename-source.txt" "$M/write-lifecycle/renamed.txt" 2>/tmp/s3-compat-rename.err <<'PY'
+import os
+import sys
+os.rename(sys.argv[1], sys.argv[2])
+PY
+then
+  echo "rename unexpectedly succeeded for a general-purpose S3 bucket"
+  exit 1
+fi
+`, shellQuote(mountpointS3MountPath)))
+	runMountpointS3Script(env, namespace, podName, fmt.Sprintf(`
+set -eu
+M=%s
+if sh -c 'printf "%%s" "append" >> "$1"' sh "$M/write-lifecycle/append.txt" 2>/tmp/s3-compat-append.err; then
+  echo "append unexpectedly succeeded for a general-purpose S3 bucket"
+  exit 1
+fi
+`, shellQuote(mountpointS3MountPath)))
+	runMountpointS3Script(env, namespace, podName, fmt.Sprintf(`
+set -eu
+M=%s
+if sh -c 'printf x | dd of="$1" bs=1 seek=1 count=1 2>/tmp/s3-compat-nonseq.err' sh "$M/write-lifecycle/non-sequential.txt"; then
+  echo "nonsequential write unexpectedly succeeded"
+  exit 1
+fi
+test ! -e "$M/write-lifecycle/non-sequential.txt"
+`, shellQuote(mountpointS3MountPath)))
 	expectMountpointS3ObjectMissingEventually(store, "write-lifecycle/non-sequential.txt")
-	expectMountpointS3ObjectEventually(store, "write-lifecycle/open.txt", []byte("replacement"))
+	expectMountpointS3ObjectEventually(store, "write-lifecycle/append.txt", []byte("append-base"))
+	expectMountpointS3ObjectEventually(store, "write-lifecycle/chmod.txt", []byte("chmod-base"))
+	expectMountpointS3ObjectEventually(store, "write-lifecycle/link-source.txt", []byte("link-base"))
+	expectMountpointS3ObjectEventually(store, "write-lifecycle/rename-source.txt", []byte("rename-base"))
+	expectMountpointS3ObjectMissingEventually(store, "write-lifecycle/renamed.txt")
+	expectMountpointS3ObjectEventually(store, "write-lifecycle/xattr.txt", []byte("xattr-base"))
 }
 
 func assertMountpointS3Deletes(env *framework.ScenarioEnv, namespace, podName string, store objectstore.Store) {
@@ -646,6 +700,9 @@ exit 1
 
 func runMountpointS3Script(env *framework.ScenarioEnv, namespace, podName, script string) {
 	output, err := execInSandboxPod(env, namespace, podName, script)
+	if err != nil {
+		output += mountpointS3PodLogs(env, namespace, podName)
+	}
 	Expect(err).NotTo(HaveOccurred(), "script failed with output:\n%s", output)
 }
 
@@ -654,6 +711,39 @@ func waitMountpointS3Script(env *framework.ScenarioEnv, namespace, podName, scri
 		_, err := execInSandboxPod(env, namespace, podName, script)
 		return err
 	}).WithTimeout(timeout).WithPolling(1 * time.Second).Should(Succeed())
+}
+
+func mountpointS3PodLogs(env *framework.ScenarioEnv, namespace, podName string) string {
+	var builder strings.Builder
+	output, err := framework.KubectlOutput(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		"logs", podName,
+		"--namespace", namespace,
+		"-c", "procd",
+		"--tail", "200",
+	)
+	if err != nil {
+		builder.WriteString(fmt.Sprintf("\nprocd logs unavailable: %v\n%s", err, output))
+	} else {
+		builder.WriteString("\nprocd logs:\n")
+		builder.WriteString(output)
+	}
+	ctldOutput, ctldErr := framework.KubectlOutput(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		"logs", "daemonset/"+env.Infra.Name+"-ctld",
+		"--namespace", env.Infra.Namespace,
+		"--all-containers",
+		"--tail", "300",
+	)
+	if ctldErr != nil {
+		builder.WriteString(fmt.Sprintf("\nctld logs unavailable: %v\n%s", ctldErr, ctldOutput))
+	} else {
+		builder.WriteString("\nctld logs:\n")
+		builder.WriteString(ctldOutput)
+	}
+	return builder.String()
 }
 
 func putMountpointS3Object(store objectstore.Store, key, value string) {

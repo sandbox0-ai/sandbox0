@@ -194,8 +194,16 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 	if _, err := session.SetAttr(ctx, &pb.SetAttrRequest{
 		Inode:    created.Inode,
 		HandleId: reopened.HandleId,
-		Valid:    fuseFattrSize | fuseFattrNoopMask,
-		Attr:     &pb.GetAttrResponse{Size: 0},
+		Valid:    s3MetadataSetAttrNoopMask,
+		Attr:     &pb.GetAttrResponse{Mode: s3FileMode | 0o600},
+	}); err != nil {
+		t.Fatalf("SetAttr(metadata with writable handle) error = %v", err)
+	}
+	if _, err := session.SetAttr(ctx, &pb.SetAttrRequest{
+		Inode:    created.Inode,
+		HandleId: reopened.HandleId,
+		Valid:    fuseFattrSize | fuseFattrNoopMask | s3MetadataSetAttrNoopMask,
+		Attr:     &pb.GetAttrResponse{Size: 0, Mode: s3FileMode},
 	}); err != nil {
 		t.Fatalf("SetAttr(truncate with writable handle) error = %v", err)
 	}
@@ -207,6 +215,144 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 		t.Fatalf("Release(replacement) error = %v", err)
 	}
 	assertS3TestObject(t, store, "from-sandbox/new.txt", "replacement")
+
+	failedAppend, err := session.Open(ctx, &pb.OpenRequest{
+		Inode: created.Inode,
+		Flags: uint32(syscall.O_WRONLY),
+	})
+	if err != nil {
+		t.Fatalf("Open(new.txt failed append simulation) error = %v", err)
+	}
+	if _, err := session.Write(ctx, &pb.WriteRequest{
+		Inode:    created.Inode,
+		HandleId: failedAppend.HandleId,
+		Offset:   int64(len("replacement")),
+		Data:     []byte("append"),
+	}); fserror.CodeOf(err) != fserror.InvalidArgument {
+		t.Fatalf("Write(failed append simulation) error = %v, want InvalidArgument", err)
+	}
+	afterFailedAppend, err := session.GetAttr(ctx, &pb.GetAttrRequest{Inode: created.Inode})
+	if err != nil {
+		t.Fatalf("GetAttr(new.txt after failed append simulation) error = %v", err)
+	}
+	if afterFailedAppend.Size != uint64(len("replacement")) {
+		t.Fatalf("new.txt size after failed append simulation = %d, want %d", afterFailedAppend.Size, len("replacement"))
+	}
+	assertS3TestObject(t, store, "from-sandbox/new.txt", "replacement")
+
+	_, err = session.Open(ctx, &pb.OpenRequest{
+		Inode: created.Inode,
+		Flags: uint32(syscall.O_WRONLY | syscall.O_APPEND),
+	})
+	if fserror.CodeOf(err) != fserror.InvalidArgument {
+		t.Fatalf("Open(new.txt O_APPEND) error = %v, want InvalidArgument", err)
+	}
+	afterAppendOpen, err := session.GetAttr(ctx, &pb.GetAttrRequest{Inode: created.Inode})
+	if err != nil {
+		t.Fatalf("GetAttr(new.txt after O_APPEND) error = %v", err)
+	}
+	if afterAppendOpen.Size != uint64(len("replacement")) {
+		t.Fatalf("new.txt size after O_APPEND = %d, want %d", afterAppendOpen.Size, len("replacement"))
+	}
+	assertS3TestObject(t, store, "from-sandbox/new.txt", "replacement")
+
+	_, err = session.Create(ctx, &pb.CreateRequest{
+		Parent: fromSandbox.Inode,
+		Name:   "new.txt",
+		Flags:  uint32(syscall.O_WRONLY | syscall.O_CREAT | syscall.O_APPEND),
+	})
+	if fserror.CodeOf(err) != fserror.InvalidArgument {
+		t.Fatalf("Create(existing new.txt O_APPEND) error = %v, want InvalidArgument", err)
+	}
+	_, err = session.Create(ctx, &pb.CreateRequest{
+		Parent: fromSandbox.Inode,
+		Name:   "append-new.txt",
+		Flags:  uint32(syscall.O_WRONLY | syscall.O_CREAT | syscall.O_APPEND),
+	})
+	if fserror.CodeOf(err) != fserror.InvalidArgument {
+		t.Fatalf("Create(new append-new.txt O_APPEND) error = %v, want InvalidArgument", err)
+	}
+	assertS3TestObject(t, store, "from-sandbox/new.txt", "replacement")
+
+	blockingReader, err := session.Open(ctx, &pb.OpenRequest{Inode: created.Inode})
+	if err != nil {
+		t.Fatalf("Open(blocking reader) error = %v", err)
+	}
+	_, err = session.Open(ctx, &pb.OpenRequest{
+		Inode: created.Inode,
+		Flags: uint32(syscall.O_WRONLY | syscall.O_TRUNC),
+	})
+	if !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("Open(writer while reader open) error = %v, want EPERM", err)
+	}
+	if _, err := session.Release(ctx, &pb.ReleaseRequest{HandleId: blockingReader.HandleId}); err != nil {
+		t.Fatalf("Release(blocking reader) error = %v", err)
+	}
+	assertS3TestObject(t, store, "from-sandbox/new.txt", "replacement")
+
+	putS3TestObject(t, store, "from-sandbox/actor-truncate.txt", "actor-base")
+	actorNode, err := session.Lookup(ctx, &pb.LookupRequest{Parent: fromSandbox.Inode, Name: "actor-truncate.txt"})
+	if err != nil {
+		t.Fatalf("Lookup(actor-truncate.txt) error = %v", err)
+	}
+	gvisorActor := &pb.PosixActor{Pid: 42, Uid: 1000, Gids: []uint32{1000}}
+	actorReader, err := session.Open(ctx, &pb.OpenRequest{Inode: actorNode.Inode, Actor: gvisorActor})
+	if err != nil {
+		t.Fatalf("Open(actor reader) error = %v", err)
+	}
+	actorWriter, err := session.Open(ctx, &pb.OpenRequest{
+		Inode: actorNode.Inode,
+		Flags: uint32(syscall.O_WRONLY | syscall.O_TRUNC),
+		Actor: gvisorActor,
+	})
+	if err != nil {
+		t.Fatalf("Open(same actor writer while reader open) error = %v", err)
+	}
+	duplicateActorWriter, err := session.Open(ctx, &pb.OpenRequest{
+		Inode: actorNode.Inode,
+		Flags: uint32(syscall.O_WRONLY | syscall.O_TRUNC),
+		Actor: gvisorActor,
+	})
+	if err != nil {
+		t.Fatalf("Open(same actor duplicate writer) error = %v", err)
+	}
+	if duplicateActorWriter.HandleId != actorWriter.HandleId {
+		t.Fatalf("Open(same actor duplicate writer) handle = %d, want %d", duplicateActorWriter.HandleId, actorWriter.HandleId)
+	}
+	if _, err := session.Release(ctx, &pb.ReleaseRequest{HandleId: actorWriter.HandleId}); err != nil {
+		t.Fatalf("Release(same actor writer) error = %v", err)
+	}
+	if _, err := session.Release(ctx, &pb.ReleaseRequest{HandleId: duplicateActorWriter.HandleId}); err != nil {
+		t.Fatalf("Release(same actor duplicate writer) error = %v", err)
+	}
+	if _, err := session.Release(ctx, &pb.ReleaseRequest{HandleId: actorReader.HandleId}); err != nil {
+		t.Fatalf("Release(actor reader) error = %v", err)
+	}
+	assertS3TestObject(t, store, "from-sandbox/actor-truncate.txt", "")
+
+	putS3TestObject(t, store, "from-sandbox/actor-blocked.txt", "actor-blocked")
+	blockedNode, err := session.Lookup(ctx, &pb.LookupRequest{Parent: fromSandbox.Inode, Name: "actor-blocked.txt"})
+	if err != nil {
+		t.Fatalf("Lookup(actor-blocked.txt) error = %v", err)
+	}
+	otherReader, err := session.Open(ctx, &pb.OpenRequest{
+		Inode: blockedNode.Inode,
+		Actor: &pb.PosixActor{Pid: 100, Uid: 1000, Gids: []uint32{1000}},
+	})
+	if err != nil {
+		t.Fatalf("Open(other actor reader) error = %v", err)
+	}
+	if _, err := session.Open(ctx, &pb.OpenRequest{
+		Inode: blockedNode.Inode,
+		Flags: uint32(syscall.O_WRONLY | syscall.O_TRUNC),
+		Actor: &pb.PosixActor{Pid: 200, Uid: 1000, Gids: []uint32{1000}},
+	}); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("Open(different actor writer while reader open) error = %v, want EPERM", err)
+	}
+	if _, err := session.Release(ctx, &pb.ReleaseRequest{HandleId: otherReader.HandleId}); err != nil {
+		t.Fatalf("Release(other actor reader) error = %v", err)
+	}
+	assertS3TestObject(t, store, "from-sandbox/actor-blocked.txt", "actor-blocked")
 
 	if _, err := session.SetAttr(ctx, &pb.SetAttrRequest{
 		Inode: created.Inode,
@@ -220,13 +366,47 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 	if _, err := session.SetAttr(ctx, &pb.SetAttrRequest{
 		Inode: created.Inode,
 		Valid: 1,
-		Attr:  &pb.GetAttrResponse{Mode: s3FileMode | 0o600},
-	}); !errors.Is(err, syscall.EOPNOTSUPP) {
-		t.Fatalf("SetAttr(mode) error = %v, want EOPNOTSUPP", err)
+		Attr:  &pb.GetAttrResponse{Mode: (s3FileMode &^ 0o777) | 0o600},
+	}); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("SetAttr(mode) error = %v, want EPERM", err)
 	}
-	if _, err := session.ListXattr(ctx, &pb.ListXattrRequest{Inode: created.Inode}); !errors.Is(err, syscall.EOPNOTSUPP) {
-		t.Fatalf("ListXattr() error = %v, want EOPNOTSUPP", err)
+	if _, err := session.SetAttr(ctx, &pb.SetAttrRequest{
+		Inode: created.Inode,
+		Valid: fuseFattrNoopMask,
+		Attr:  &pb.GetAttrResponse{Mode: (s3FileMode &^ 0o777) | 0o600},
+	}); err != nil {
+		t.Fatalf("SetAttr(mode without valid mode bit) error = %v", err)
 	}
+	xattrs, err := session.ListXattr(ctx, &pb.ListXattrRequest{Inode: created.Inode})
+	if err != nil {
+		t.Fatalf("ListXattr() error = %v", err)
+	}
+	if len(xattrs.GetData()) != 0 {
+		t.Fatalf("ListXattr() data = %q, want empty", xattrs.GetData())
+	}
+	if _, err := session.Rename(ctx, &pb.RenameRequest{
+		OldParent: fromSandbox.Inode,
+		OldName:   "new.txt",
+		NewParent: fromSandbox.Inode,
+		NewName:   "renamed.txt",
+	}); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("Rename() error = %v, want EPERM", err)
+	}
+	assertS3TestObject(t, store, "from-sandbox/new.txt", "")
+	assertS3TestObjectMissing(t, store, "from-sandbox/renamed.txt")
+
+	if _, err := session.Write(ctx, &pb.WriteRequest{
+		Inode:    created.Inode,
+		HandleId: 0,
+		Offset:   1,
+		Data:     []byte("x"),
+	}); fserror.CodeOf(err) != fserror.InvalidArgument {
+		t.Fatalf("Write(handle-less non-sequential existing object) error = %v, want InvalidArgument", err)
+	}
+	if _, err := session.Lookup(ctx, &pb.LookupRequest{Parent: fromSandbox.Inode, Name: "new.txt"}); err != nil {
+		t.Fatalf("Lookup(new.txt after failed handle-less write) error = %v", err)
+	}
+	assertS3TestObject(t, store, "from-sandbox/new.txt", "")
 
 	implicitCreated, err := session.Create(ctx, &pb.CreateRequest{Parent: fromSandbox.Inode, Name: "implicit.txt"})
 	if err != nil {
@@ -263,6 +443,30 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 		t.Fatalf("Release(non-sequential.txt) error = %v", err)
 	}
 	assertS3TestObjectMissing(t, store, "from-sandbox/non-sequential.txt")
+	if _, err := session.Lookup(ctx, &pb.LookupRequest{Parent: fromSandbox.Inode, Name: "non-sequential.txt"}); fserror.CodeOf(err) != fserror.NotFound {
+		t.Fatalf("Lookup(non-sequential.txt after failed write) error = %v, want NotFound", err)
+	}
+
+	handlelessPending, err := session.Mknod(ctx, &pb.MknodRequest{
+		Parent: fromSandbox.Inode,
+		Name:   "handleless-non-sequential.txt",
+		Mode:   0o644,
+	})
+	if err != nil {
+		t.Fatalf("Mknod(handleless-non-sequential.txt) error = %v", err)
+	}
+	if _, err := session.Write(ctx, &pb.WriteRequest{
+		Inode:    handlelessPending.Inode,
+		HandleId: 0,
+		Offset:   1,
+		Data:     []byte("x"),
+	}); fserror.CodeOf(err) != fserror.InvalidArgument {
+		t.Fatalf("Write(handle-less non-sequential pending file) error = %v, want InvalidArgument", err)
+	}
+	if _, err := session.Lookup(ctx, &pb.LookupRequest{Parent: fromSandbox.Inode, Name: "handleless-non-sequential.txt"}); fserror.CodeOf(err) != fserror.NotFound {
+		t.Fatalf("Lookup(handleless-non-sequential.txt after failed write) error = %v, want NotFound", err)
+	}
+	assertS3TestObjectMissing(t, store, "from-sandbox/handleless-non-sequential.txt")
 
 	entriesResp, err := session.ReadDir(ctx, &pb.ReadDirRequest{Inode: s3RootInode, Plus: true})
 	if err != nil {
@@ -306,6 +510,83 @@ func TestS3SessionMkdirUsesMountpointLocalDirectorySemantics(t *testing.T) {
 	}
 	if _, err := session.Lookup(ctx, &pb.LookupRequest{Parent: s3RootInode, Name: "local"}); fserror.CodeOf(err) != fserror.NotFound {
 		t.Fatalf("Lookup(local after rmdir) error = %v, want NotFound", err)
+	}
+
+	mknodLocal, err := session.Mknod(ctx, &pb.MknodRequest{
+		Parent: s3RootInode,
+		Name:   "mknod-local",
+		Mode:   uint32(syscall.S_IFDIR | 0o755),
+	})
+	if err != nil {
+		t.Fatalf("Mknod(mknod-local dir) error = %v", err)
+	}
+	if mknodLocal.Attr.Mode&uint32(syscall.S_IFMT) != uint32(syscall.S_IFDIR) {
+		t.Fatalf("mknod-local mode = %#o, want directory", mknodLocal.Attr.Mode)
+	}
+	assertS3TestObjectMissing(t, store, "mknod-local/")
+	if _, err := session.Lookup(ctx, &pb.LookupRequest{Parent: s3RootInode, Name: "mknod-local"}); err != nil {
+		t.Fatalf("Lookup(mknod-local) error = %v", err)
+	}
+	if _, err := session.SetAttr(ctx, &pb.SetAttrRequest{
+		Inode: mknodLocal.Inode,
+		Valid: s3MetadataSetAttrNoopMask,
+		Attr:  &pb.GetAttrResponse{Mode: uint32(syscall.S_IFDIR | 0o700)},
+	}); err != nil {
+		t.Fatalf("SetAttr(mknod-local mode no-op) error = %v", err)
+	}
+	mknodFile, err := session.Mknod(ctx, &pb.MknodRequest{
+		Parent: s3RootInode,
+		Name:   "mknod-file-no-type",
+		Mode:   0o755,
+	})
+	if err != nil {
+		t.Fatalf("Mknod(mknod-file-no-type) error = %v", err)
+	}
+	if mknodFile.Attr.Mode&uint32(syscall.S_IFMT) != uint32(syscall.S_IFREG) {
+		t.Fatalf("mknod-file-no-type mode = %#o, want file", mknodFile.Attr.Mode)
+	}
+	assertS3TestObjectMissing(t, store, "mknod-file-no-type")
+	putS3TestObject(t, store, "mknod-file-no-type", "external overwrite")
+	promoted, err := session.Lookup(ctx, &pb.LookupRequest{Parent: s3RootInode, Name: "mknod-file-no-type"})
+	if err != nil {
+		t.Fatalf("Lookup(mknod-file-no-type promoted from S3) error = %v", err)
+	}
+	if promoted.Attr.Size != uint64(len("external overwrite")) {
+		t.Fatalf("promoted mknod-file-no-type size = %d, want %d", promoted.Attr.Size, len("external overwrite"))
+	}
+	if _, err := session.Unlink(ctx, &pb.UnlinkRequest{Parent: s3RootInode, Name: "mknod-file-no-type"}); err != nil {
+		t.Fatalf("Unlink(promoted mknod-file-no-type) error = %v", err)
+	}
+	mknodFile, err = session.Mknod(ctx, &pb.MknodRequest{
+		Parent: s3RootInode,
+		Name:   "mknod-file-no-type",
+		Mode:   0o755,
+	})
+	if err != nil {
+		t.Fatalf("Mknod(mknod-file-no-type after promoted unlink) error = %v", err)
+	}
+	mknodOpen, err := session.Open(ctx, &pb.OpenRequest{Inode: mknodFile.Inode, Flags: uint32(syscall.O_WRONLY)})
+	if err != nil {
+		t.Fatalf("Open(mknod-file-no-type) error = %v", err)
+	}
+	if _, err := session.Write(ctx, &pb.WriteRequest{
+		Inode:    mknodFile.Inode,
+		HandleId: mknodOpen.HandleId,
+		Data:     []byte("mknod payload"),
+	}); err != nil {
+		t.Fatalf("Write(mknod-file-no-type) error = %v", err)
+	}
+	assertS3TestObjectMissing(t, store, "mknod-file-no-type")
+	if _, err := session.Release(ctx, &pb.ReleaseRequest{Inode: mknodFile.Inode, HandleId: mknodOpen.HandleId}); err != nil {
+		t.Fatalf("Release(mknod-file-no-type) error = %v", err)
+	}
+	assertS3TestObject(t, store, "mknod-file-no-type", "mknod payload")
+	if _, err := session.Mknod(ctx, &pb.MknodRequest{
+		Parent: s3RootInode,
+		Name:   "special-node",
+		Mode:   uint32(syscall.S_IFCHR | 0o600),
+	}); !errors.Is(err, syscall.EOPNOTSUPP) {
+		t.Fatalf("Mknod(special-node) error = %v, want EOPNOTSUPP", err)
 	}
 
 	nested, err := session.Mkdir(ctx, &pb.MkdirRequest{Parent: s3RootInode, Name: "nested"})

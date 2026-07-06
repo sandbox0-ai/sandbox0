@@ -573,7 +573,7 @@ func assertMountpointS3Overwrite(env *framework.ScenarioEnv, namespace, podName 
 set -eu
 M=%s
 file="$M/write-lifecycle/truncate.txt"
-truncate -s 0 "$file"
+: > "$file"
 test ! -s "$file"
 printf "%%s" "replacement" > "$file"
 sync

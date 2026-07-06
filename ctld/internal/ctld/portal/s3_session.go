@@ -174,13 +174,7 @@ func (s *s3Session) SetAttr(ctx context.Context, req *pb.SetAttrRequest) (*pb.Se
 	if req.Valid == 0 {
 		return &pb.SetAttrResponse{Attr: s.attr(node)}, nil
 	}
-	if node.kind == s3NodeFile && !node.localOnly && !s.hasOpenWriter(node.inode) && req.Valid&^(s3MetadataSetAttrNoopMask|fuseFattrNoopMask) == 0 && s.setAttrRequestsModeChange(req, node) {
-		return nil, syscall.EPERM
-	}
-	if node.kind == s3NodeDir && node.localOnly && req.Valid&^(s3MetadataSetAttrNoopMask|fuseFattrNoopMask) == 0 {
-		return &pb.SetAttrResponse{Attr: s.attr(node)}, nil
-	}
-	if node.kind == s3NodeFile && (node.localOnly || s.hasOpenWriter(node.inode)) && req.Valid&^(s3MetadataSetAttrNoopMask|fuseFattrNoopMask) == 0 {
+	if req.Valid&^(s3MetadataSetAttrNoopMask|fuseFattrNoopMask) == 0 {
 		return &pb.SetAttrResponse{Attr: s.attr(node)}, nil
 	}
 	if req.Valid&fuseFattrSize == 0 {
@@ -1177,18 +1171,6 @@ func (s *s3Session) discardFailedWrite(handle *s3Handle) {
 	if info, err := s.store.Head(handle.path); err == nil {
 		s.rememberPath(handle.path, s3NodeFile, info.Size, info.Modified)
 	}
-}
-
-func (s *s3Session) setAttrRequestsModeChange(req *pb.SetAttrRequest, node *s3Node) bool {
-	if req == nil || req.Attr == nil || node == nil {
-		return false
-	}
-	if req.Valid&uint32(fuse.FATTR_MODE) == 0 {
-		return false
-	}
-	currentPerm := s.attr(node).Mode & 0o7777
-	requestedPerm := req.Attr.Mode & 0o7777
-	return requestedPerm != currentPerm
 }
 
 func (s *s3Session) ensureWritable() error {

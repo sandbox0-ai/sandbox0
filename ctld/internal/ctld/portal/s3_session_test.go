@@ -363,12 +363,16 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 	}
 	assertS3TestObject(t, store, "from-sandbox/new.txt", "")
 
-	if _, err := session.SetAttr(ctx, &pb.SetAttrRequest{
+	modeNoop, err := session.SetAttr(ctx, &pb.SetAttrRequest{
 		Inode: created.Inode,
 		Valid: 1,
 		Attr:  &pb.GetAttrResponse{Mode: (s3FileMode &^ 0o777) | 0o600},
-	}); !errors.Is(err, syscall.EPERM) {
-		t.Fatalf("SetAttr(mode) error = %v, want EPERM", err)
+	})
+	if err != nil {
+		t.Fatalf("SetAttr(mode no-op) error = %v", err)
+	}
+	if modeNoop.Attr.Mode != s3FileMode {
+		t.Fatalf("SetAttr(mode no-op) mode = %#o, want %#o", modeNoop.Attr.Mode, s3FileMode)
 	}
 	if _, err := session.SetAttr(ctx, &pb.SetAttrRequest{
 		Inode: created.Inode,

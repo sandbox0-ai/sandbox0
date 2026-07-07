@@ -309,13 +309,15 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertVolumeLifecycle(env, session)
 				})
 
-				It("enforces volume storage quota", func() {
-					assertVolumeStorageQuota(env, session)
-				})
+				if opts.includeUsageQuotaAssertions {
+					It("enforces volume storage quota", func() {
+						assertVolumeStorageQuota(env, session)
+					})
 
-				It("enforces snapshot storage quota", func() {
-					assertSnapshotStorageQuota(env, session)
-				})
+					It("enforces snapshot storage quota", func() {
+						assertSnapshotStorageQuota(env, session)
+					})
+				}
 
 				It("bootstraps an existing volume during claim", func() {
 					assertClaimBootstrapMountLifecycle(env, session)

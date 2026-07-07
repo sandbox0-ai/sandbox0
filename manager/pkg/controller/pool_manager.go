@@ -5,16 +5,18 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"reflect"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/startlimiter"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"go.uber.org/zap"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
@@ -96,12 +98,13 @@ func ClaimedSandboxPodAnnotations(extra map[string]string) map[string]string {
 
 // PoolManager manages the idle pool (ReplicaSet)
 type PoolManager struct {
-	k8sClient        kubernetes.Interface
-	podLister        corelisters.PodLister
-	replicaSetLister appslisters.ReplicaSetLister
-	secretLister     corelisters.SecretLister
-	recorder         record.EventRecorder
-	logger           *zap.Logger
+	k8sClient         kubernetes.Interface
+	podLister         corelisters.PodLister
+	replicaSetLister  appslisters.ReplicaSetLister
+	secretLister      corelisters.SecretLister
+	recorder          record.EventRecorder
+	logger            *zap.Logger
+	claimStartLimiter *startlimiter.Limiter
 }
 
 // NewPoolManager creates a new PoolManager
@@ -121,6 +124,13 @@ func NewPoolManager(
 		recorder:         recorder,
 		logger:           logger,
 	}
+}
+
+func (pm *PoolManager) SetClaimStartLimiter(limiter *startlimiter.Limiter) {
+	if pm == nil {
+		return
+	}
+	pm.claimStartLimiter = limiter
 }
 
 // ReconcilePool reconciles the idle pool for a template
@@ -172,7 +182,26 @@ func (pm *PoolManager) ReconcilePool(ctx context.Context, template *v1alpha1.San
 			zap.Int32("desired", desiredReplicas),
 		)
 
-		_, err = pm.updateReplicaSetReplicas(ctx, template.Namespace, rs.Name, desiredReplicas)
+		updateReplicas := func(updateCtx context.Context) error {
+			_, err = pm.updateReplicaSetReplicas(updateCtx, template.Namespace, rs.Name, desiredReplicas)
+			return err
+		}
+		if desiredReplicas > currentReplicas && pm.claimStartLimiter != nil {
+			_, err = pm.claimStartLimiter.Admit(ctx, startlimiter.ReasonPoolReconcile, desiredReplicas-currentReplicas, updateReplicas)
+			if stderrors.Is(err, startlimiter.ErrThrottled) {
+				pm.logger.Info("Delaying ReplicaSet scale-up due to claim start limit",
+					zap.String("template", template.Name),
+					zap.Int32("current", currentReplicas),
+					zap.Int32("desired", desiredReplicas),
+					zap.Error(err),
+				)
+				pm.recorder.Eventf(template, corev1.EventTypeNormal, "ReplicaSetScaleUpThrottled",
+					"Delayed ReplicaSet scale-up to %d replicas: %v", desiredReplicas, err)
+				return nil
+			}
+		} else {
+			err = updateReplicas(ctx)
+		}
 		if err != nil {
 			pm.recorder.Eventf(template, corev1.EventTypeWarning, "ReplicaSetUpdateFailed",
 				"Failed to update ReplicaSet: %v", err)
@@ -233,12 +262,13 @@ func (pm *PoolManager) getOrCreateReplicaSet(ctx context.Context, template *v1al
 		return pm.reconcileReplicaSetMetadata(ctx, template, rs)
 	}
 
-	if !errors.IsNotFound(err) {
+	if !apierrors.IsNotFound(err) {
 		return nil, err
 	}
 
 	// Create new ReplicaSet
 	pm.logger.Info("Creating new ReplicaSet", zap.String("name", rsName))
+	initialReplicas := int32(0)
 	hash, err := TemplateSpecHash(template)
 	if err != nil {
 		return nil, fmt.Errorf("compute template hash: %w", err)
@@ -260,7 +290,7 @@ func (pm *PoolManager) getOrCreateReplicaSet(ctx context.Context, template *v1al
 			},
 		},
 		Spec: appsv1.ReplicaSetSpec{
-			Replicas: &template.Spec.Pool.MinIdle,
+			Replicas: &initialReplicas,
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					LabelTemplateID: template.Name,
@@ -273,7 +303,7 @@ func (pm *PoolManager) getOrCreateReplicaSet(ctx context.Context, template *v1al
 
 	rs, err = pm.k8sClient.AppsV1().ReplicaSets(template.Namespace).Create(ctx, rs, metav1.CreateOptions{})
 	if err != nil {
-		if errors.IsAlreadyExists(err) {
+		if apierrors.IsAlreadyExists(err) {
 			existing, getErr := pm.k8sClient.AppsV1().ReplicaSets(template.Namespace).Get(ctx, rsName, metav1.GetOptions{})
 			if getErr != nil {
 				return nil, fmt.Errorf("get replicaset after already exists: %w", getErr)
@@ -286,7 +316,7 @@ func (pm *PoolManager) getOrCreateReplicaSet(ctx context.Context, template *v1al
 	}
 
 	pm.recorder.Eventf(template, corev1.EventTypeNormal, "ReplicaSetCreated",
-		"Created ReplicaSet with %d replicas", template.Spec.Pool.MinIdle)
+		"Created ReplicaSet with %d replicas", initialReplicas)
 
 	return rs, nil
 }
@@ -543,11 +573,11 @@ func shouldRepairUnhealthyIdlePod(pod *corev1.Pod, now time.Time) bool {
 func (pm *PoolManager) deleteUnhealthyIdlePodWithRetry(ctx context.Context, namespace, podName, desiredTemplateHash string) (bool, error) {
 	deleted := false
 	retryErr := retry.OnError(retry.DefaultRetry, func(err error) bool {
-		return errors.IsConflict(err) || errors.IsInvalid(err)
+		return apierrors.IsConflict(err) || apierrors.IsInvalid(err)
 	}, func() error {
 		pod, err := pm.k8sClient.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
 		if err != nil {
-			if errors.IsNotFound(err) {
+			if apierrors.IsNotFound(err) {
 				return nil
 			}
 			return err
@@ -567,7 +597,7 @@ func (pm *PoolManager) deleteUnhealthyIdlePodWithRetry(ctx context.Context, name
 				ResourceVersion: &resourceVersion,
 			},
 		})
-		if err != nil && !errors.IsNotFound(err) {
+		if err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
 		deleted = err == nil
@@ -583,11 +613,11 @@ func (pm *PoolManager) deleteStaleIdlePodWithRetry(ctx context.Context, namespac
 	deleted := false
 	// Retry small transient races while still validating the pod is stale+idle.
 	retryErr := retry.OnError(retry.DefaultRetry, func(err error) bool {
-		return errors.IsConflict(err) || errors.IsInvalid(err)
+		return apierrors.IsConflict(err) || apierrors.IsInvalid(err)
 	}, func() error {
 		pod, err := pm.k8sClient.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
 		if err != nil {
-			if errors.IsNotFound(err) {
+			if apierrors.IsNotFound(err) {
 				return nil
 			}
 			return err
@@ -608,7 +638,7 @@ func (pm *PoolManager) deleteStaleIdlePodWithRetry(ctx context.Context, namespac
 				ResourceVersion: &resourceVersion,
 			},
 		})
-		if err != nil && !errors.IsNotFound(err) {
+		if err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
 		deleted = err == nil

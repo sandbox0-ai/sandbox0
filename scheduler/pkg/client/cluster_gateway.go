@@ -40,14 +40,19 @@ func NewClusterGatewayClient(internalAuthGen *internalauth.Generator, logger *za
 
 // ClusterSummary represents the cluster capacity and status
 type ClusterSummary struct {
-	ClusterID             string `json:"cluster_id"`
-	NodeCount             int    `json:"node_count"`
-	TotalNodeCount        int    `json:"total_node_count"`
-	SandboxNodeCount      int    `json:"sandbox_node_count"`
-	IdlePodCount          int32  `json:"idle_pod_count"`
-	ActivePodCount        int32  `json:"active_pod_count"`
-	PendingActivePodCount int32  `json:"pending_active_pod_count"`
-	TotalPodCount         int32  `json:"total_pod_count"`
+	ClusterID                 string `json:"cluster_id"`
+	NodeCount                 int    `json:"node_count"`
+	TotalNodeCount            int    `json:"total_node_count"`
+	SandboxNodeCount          int    `json:"sandbox_node_count"`
+	WarmReadySandboxNodeCount int    `json:"warm_ready_sandbox_node_count"`
+	ClaimStartLimit           int32  `json:"claim_start_limit"`
+	ClaimStartInFlight        int32  `json:"claim_start_in_flight"`
+	ClaimStartAvailable       int32  `json:"claim_start_available"`
+	ClaimStartLimiterBackend  string `json:"claim_start_limiter_backend,omitempty"`
+	IdlePodCount              int32  `json:"idle_pod_count"`
+	ActivePodCount            int32  `json:"active_pod_count"`
+	PendingActivePodCount     int32  `json:"pending_active_pod_count"`
+	TotalPodCount             int32  `json:"total_pod_count"`
 }
 
 // TemplateStat represents statistics for a single template

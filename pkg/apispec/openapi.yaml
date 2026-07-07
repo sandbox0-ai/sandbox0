@@ -1298,6 +1298,17 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          description: Cluster claim/start capacity temporarily unavailable
+          headers:
+            Retry-After:
+              description: Suggested retry delay in seconds
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
   /api/v1/quotas/{dimension}:
     get:
       tags: [quotas]

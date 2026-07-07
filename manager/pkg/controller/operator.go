@@ -8,6 +8,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/namespacepolicy"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/startlimiter"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"go.uber.org/zap"
@@ -67,6 +68,13 @@ func (op *Operator) SetNamespacePolicyReconciler(reconciler namespacepolicy.Temp
 
 func (op *Operator) SetSandboxProbeRunner(runner SandboxProbeRunner) {
 	op.probeRunner = runner
+}
+
+func (op *Operator) SetClaimStartLimiter(limiter *startlimiter.Limiter) {
+	if op == nil || op.poolManager == nil {
+		return
+	}
+	op.poolManager.SetClaimStartLimiter(limiter)
 }
 
 // TemplateListerImpl implements TemplateLister

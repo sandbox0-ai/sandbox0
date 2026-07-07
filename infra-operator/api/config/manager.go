@@ -57,6 +57,15 @@ type ManagerConfig struct {
 	// +kubebuilder:default=2
 	DatabaseMinConns int32 `yaml:"database_min_conns" json:"databaseMinConns"`
 
+	// RedisURL configures the Redis backend used for manager-wide admission locks.
+	// When empty, manager falls back to PostgreSQL advisory locks.
+	// +optional
+	RedisURL string `yaml:"redis_url" json:"-"`
+	// +optional
+	RedisKeyPrefix string `yaml:"redis_key_prefix" json:"-"`
+	// +optional
+	RedisTimeout metav1.Duration `yaml:"redis_timeout" json:"-"`
+
 	// Cleanup Controller
 	// +optional
 	// +kubebuilder:default="60s"
@@ -223,6 +232,10 @@ type ManagerConfig struct {
 	// topology without requiring users to duplicate netd settings per template.
 	// +optional
 	SandboxPodPlacement SandboxPodPlacementConfig `yaml:"sandbox_pod_placement" json:"-"`
+	// ClaimStartLimiter configures cluster-wide admission for claim and pool
+	// starts. Defaults to min(30 * ready sandbox nodes, 80).
+	// +optional
+	ClaimStartLimiter ClaimStartLimiterConfig `yaml:"claim_start_limiter" json:"-"`
 }
 
 // TeamQuotaLimitConfig configures a fallback quota limit for teams without a
@@ -299,6 +312,14 @@ type CredentialVaultConnectionConfig struct {
 type SandboxPodPlacementConfig struct {
 	NodeSelector map[string]string   `yaml:"node_selector" json:"-"`
 	Tolerations  []corev1.Toleration `yaml:"tolerations" json:"-"`
+}
+
+// ClaimStartLimiterConfig defines cluster-wide start admission limits.
+type ClaimStartLimiterConfig struct {
+	PerSandboxNode int32           `yaml:"per_sandbox_node" json:"-"`
+	MaxLimit       int32           `yaml:"max_limit" json:"-"`
+	LockTTL        metav1.Duration `yaml:"lock_ttl" json:"-"`
+	AcquireTimeout metav1.Duration `yaml:"acquire_timeout" json:"-"`
 }
 
 // AutoscalerConfig holds autoscaler settings for pool scaling behavior.
@@ -515,7 +536,29 @@ func LoadManagerConfig() *ManagerConfig {
 	}
 	applyRootFSMaintenanceDefaults(cfg)
 	applySandboxObservabilityProducerDefaults(cfg)
+	applyClaimStartLimiterDefaults(cfg)
 	return cfg
+}
+
+func applyClaimStartLimiterDefaults(cfg *ManagerConfig) {
+	if cfg == nil {
+		return
+	}
+	if cfg.RedisURL != "" && cfg.RedisTimeout.Duration == 0 {
+		cfg.RedisTimeout = metav1.Duration{Duration: 100 * time.Millisecond}
+	}
+	if cfg.ClaimStartLimiter.PerSandboxNode <= 0 {
+		cfg.ClaimStartLimiter.PerSandboxNode = 30
+	}
+	if cfg.ClaimStartLimiter.MaxLimit <= 0 {
+		cfg.ClaimStartLimiter.MaxLimit = 80
+	}
+	if cfg.ClaimStartLimiter.LockTTL.Duration == 0 {
+		cfg.ClaimStartLimiter.LockTTL = metav1.Duration{Duration: 5 * time.Second}
+	}
+	if cfg.ClaimStartLimiter.AcquireTimeout.Duration == 0 {
+		cfg.ClaimStartLimiter.AcquireTimeout = metav1.Duration{Duration: 250 * time.Millisecond}
+	}
 }
 
 func applySandboxObservabilityProducerDefaults(cfg *ManagerConfig) {

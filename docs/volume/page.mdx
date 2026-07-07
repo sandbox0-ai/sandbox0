@@ -131,6 +131,8 @@ console.log("S3 volume ID:", volume.id);`
   ]}
 />
 
+The bucket in these examples must already exist and be reachable by the inherited storage-proxy credentials or the per-volume credentials you provide. The prefix can be empty or pre-existing.
+
 `provider` can be `aws`, `ali`, or `r2`. Use `ali` for Aliyun OSS and `r2` for Cloudflare R2. `endpoint_url` is required for `ali` and `r2`; credentials can be provided per volume with `access_key`, `secret_key`, and optional `session_token`, or inherited from the storage-proxy configuration when omitted.
 
 The `s3` backend is mount-s3-like rather than a full `s0fs` replacement:

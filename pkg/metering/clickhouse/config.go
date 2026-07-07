@@ -66,12 +66,3 @@ func quoteIdentifier(value string) string {
 func qualified(database, table string) string {
 	return quoteIdentifier(database) + "." + quoteIdentifier(table)
 }
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
-}

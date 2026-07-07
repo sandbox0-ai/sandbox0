@@ -13,11 +13,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 )
 
-type noopLogger struct{}
-
-func (noopLogger) Printf(string, ...any) {}
-func (noopLogger) Fatalf(string, ...any) {}
-
 func TestUpWithSchemaRestoresPoolSearchPath(t *testing.T) {
 	dbURL := os.Getenv("INTEGRATION_DATABASE_URL")
 	if dbURL == "" {

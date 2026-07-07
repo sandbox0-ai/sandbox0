@@ -539,7 +539,7 @@ spec:
 Examples:
 
 - `services.clusterGateway.config.authMode` switches between `public`, `internal`, and `both`
-- `services.manager.config.autoscaler.*` tunes pool scale behavior
+- `services.manager.config.autoscaler.*` is preserved for config compatibility; the current manager keeps warm pools at `minIdle`
 - `services.manager.config.k8sClientQps` and `k8sClientBurst` tune the manager Kubernetes client token bucket rate limit; defaults are `50` and `100`
 - `services.manager.config.sandboxMaxMemory` caps per-sandbox memory overrides; the default is `32Gi`
 - `services.manager.config.procdBinImageRef` overrides the derived procd artifact image used by sandbox Pods

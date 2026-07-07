@@ -55,7 +55,7 @@ func (s *Server) claimSandbox(c *gin.Context) {
 			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
 			return
 		}
-		if errors.Is(err, service.ErrDataPlaneNotReady) || errors.Is(err, service.ErrColdClaimCapacityUnavailable) {
+		if errors.Is(err, service.ErrDataPlaneNotReady) {
 			c.Header("Retry-After", "1")
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
 			return

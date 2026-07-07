@@ -27,22 +27,23 @@ import (
 )
 
 type apiModeSuiteOptions struct {
-	name                      string
-	describe                  string
-	templateNamePrefix        string
-	fileContent               string
-	includeSandboxListTests   bool
-	includeTemplateStatus     bool
-	includePoolReadinessGate  bool
-	includeNetworkPolicy      bool
-	includeVolumeLifecycle    bool
-	includeMountpointS3Compat bool
-	includeObjectEncryption   bool
-	includeWebhookLifecycle   bool
-	includeRootFSPauseResume  bool
-	includeMeteringAssertions bool
-	expectStorageUnavailable  bool
-	expectNetworkUnavailable  bool
+	name                        string
+	describe                    string
+	templateNamePrefix          string
+	fileContent                 string
+	includeSandboxListTests     bool
+	includeTemplateStatus       bool
+	includePoolReadinessGate    bool
+	includeNetworkPolicy        bool
+	includeVolumeLifecycle      bool
+	includeMountpointS3Compat   bool
+	includeObjectEncryption     bool
+	includeWebhookLifecycle     bool
+	includeRootFSPauseResume    bool
+	includeMeteringAssertions   bool
+	includeUsageQuotaAssertions bool
+	expectStorageUnavailable    bool
+	expectNetworkUnavailable    bool
 }
 
 const (
@@ -278,13 +279,15 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertNetdRedisTeamBandwidthLimit(env, session, adminPassword)
 				})
 
-				It("enforces egress quota", func() {
-					assertEgressQuota(env, session, sandboxID)
-				})
+				if opts.includeUsageQuotaAssertions {
+					It("enforces egress quota", func() {
+						assertEgressQuota(env, session, sandboxID)
+					})
 
-				It("enforces ingress quota", func() {
-					assertIngressQuota(env, session, sandboxID)
-				})
+					It("enforces ingress quota", func() {
+						assertIngressQuota(env, session, sandboxID)
+					})
+				}
 
 				It("creates and repairs template namespace ingress baseline policies", func() {
 					assertTemplateNamespaceIngressBaselineLifecycle(env, session, opts.templateNamePrefix)

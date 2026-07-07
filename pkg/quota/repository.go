@@ -23,6 +23,8 @@ type Repository struct {
 	usageStore    UsageStore
 }
 
+var ErrUsageStoreNotConfigured = errors.New("quota usage store is not configured")
+
 type UsageStore interface {
 	CurrentUsage(ctx context.Context, teamID string, dimension Dimension) (int64, error)
 	ProjectedStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType, subjectID string, sizeBytes int64) (int64, error)
@@ -137,7 +139,7 @@ func (r *Repository) CurrentUsage(ctx context.Context, teamID string, dimension 
 	if r != nil && r.usageStore != nil {
 		return r.usageStore.CurrentUsage(ctx, teamID, dimension)
 	}
-	return 0, fmt.Errorf("quota usage store is not configured")
+	return 0, ErrUsageStoreNotConfigured
 }
 
 func (r *Repository) CheckProjectedStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType, subjectID string, sizeBytes int64) (Decision, error) {
@@ -201,7 +203,7 @@ func (r *Repository) ProjectedStorageUsageGB(ctx context.Context, teamID string,
 	if r != nil && r.usageStore != nil {
 		return r.usageStore.ProjectedStorageUsageGB(ctx, teamID, dimension, subjectType, subjectID, sizeBytes)
 	}
-	return 0, fmt.Errorf("quota usage store is not configured")
+	return 0, ErrUsageStoreNotConfigured
 }
 
 func (r *Repository) AdditionalStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType string, additionalBytes int64) (int64, error) {
@@ -218,7 +220,7 @@ func (r *Repository) AdditionalStorageUsageGB(ctx context.Context, teamID string
 	if r != nil && r.usageStore != nil {
 		return r.usageStore.AdditionalStorageUsageGB(ctx, teamID, dimension, subjectType, additionalBytes)
 	}
-	return 0, fmt.Errorf("quota usage store is not configured")
+	return 0, ErrUsageStoreNotConfigured
 }
 
 func storageDimensionMatchesSubjectType(dimension Dimension, subjectType string) bool {

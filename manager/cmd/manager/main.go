@@ -135,10 +135,8 @@ func main() {
 	if err := runTemplateMigrations(ctx, pool, logger); err != nil {
 		logger.Fatal("Failed to run template migrations", zap.Error(err))
 	}
-	if cfg.Metering.Enabled {
-		if err := runQuotaMigrations(ctx, pool, logger); err != nil {
-			logger.Fatal("Failed to run quota migrations", zap.Error(err))
-		}
+	if err := runQuotaMigrations(ctx, pool, logger); err != nil {
+		logger.Fatal("Failed to run quota migrations", zap.Error(err))
 	}
 	if err := runEgressAuthMigrations(ctx, pool, logger); err != nil {
 		logger.Fatal("Failed to run egress auth migrations", zap.Error(err))
@@ -753,14 +751,13 @@ func initMetering(ctx context.Context, cfg *config.ManagerConfig, logger *zap.Lo
 }
 
 func buildQuotaRepository(pool *pgxpool.Pool, cfg *config.ManagerConfig, usageStore quota.UsageStore) (*quota.Repository, error) {
-	if usageStore == nil {
-		return nil, nil
-	}
 	repo, err := quota.NewRepositoryWithDefaults(pool, defaultTeamQuotaLimits(cfg))
 	if err != nil || repo == nil {
 		return repo, err
 	}
-	repo.SetUsageStore(usageStore)
+	if usageStore != nil {
+		repo.SetUsageStore(usageStore)
+	}
 	return repo, nil
 }
 

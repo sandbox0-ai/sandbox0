@@ -2,11 +2,16 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/labels"
 )
 
 func (s *SandboxService) enforceActiveSandboxQuota(ctx context.Context, teamID string) error {
@@ -21,7 +26,7 @@ func (s *SandboxService) enforceActiveSandboxQuota(ctx context.Context, teamID s
 	if limit == nil {
 		return nil
 	}
-	current, err := s.quotaStore.CurrentUsage(ctx, teamID, quota.DimensionActiveSandboxes)
+	current, err := s.currentQuotaUsage(ctx, teamID, quota.DimensionActiveSandboxes)
 	if err != nil {
 		return fmt.Errorf("load active sandbox usage: %w", err)
 	}
@@ -54,7 +59,7 @@ func (s *SandboxService) enforceQuota(ctx context.Context, teamID string, dimens
 	if limit == nil {
 		return nil
 	}
-	current, err := s.quotaStore.CurrentUsage(ctx, teamID, dimension)
+	current, err := s.currentQuotaUsage(ctx, teamID, dimension)
 	if err != nil {
 		return fmt.Errorf("load %s usage: %w", dimension, err)
 	}
@@ -63,6 +68,106 @@ func (s *SandboxService) enforceQuota(ctx context.Context, teamID string, dimens
 		return nil
 	}
 	return fmt.Errorf("%w: %s", ErrQuotaExceeded, decision.Err())
+}
+
+func (s *SandboxService) currentQuotaUsage(ctx context.Context, teamID string, dimension quota.Dimension) (int64, error) {
+	current, err := s.quotaStore.CurrentUsage(ctx, teamID, dimension)
+	if err == nil {
+		return current, nil
+	}
+	if !errors.Is(err, quota.ErrUsageStoreNotConfigured) {
+		return 0, err
+	}
+	current, ok, liveErr := s.currentLiveQuotaUsage(teamID, dimension)
+	if liveErr != nil {
+		return 0, liveErr
+	}
+	if ok {
+		return current, nil
+	}
+	return 0, err
+}
+
+func (s *SandboxService) currentLiveQuotaUsage(teamID string, dimension quota.Dimension) (int64, bool, error) {
+	switch dimension {
+	case quota.DimensionActiveSandboxes, quota.DimensionCPU, quota.DimensionMemory:
+	default:
+		return 0, false, nil
+	}
+	if s == nil || s.podLister == nil {
+		return 0, false, nil
+	}
+	pods, err := s.podLister.List(labels.SelectorFromSet(map[string]string{
+		controller.LabelPoolType: controller.PoolTypeActive,
+	}))
+	if err != nil {
+		return 0, true, fmt.Errorf("list active sandbox pods: %w", err)
+	}
+	var total int64
+	for _, pod := range pods {
+		if !liveQuotaPodMatchesTeam(pod, teamID) {
+			continue
+		}
+		switch dimension {
+		case quota.DimensionActiveSandboxes:
+			total++
+		case quota.DimensionCPU, quota.DimensionMemory:
+			total += liveQuotaPodResourceUsage(pod, dimension)
+		}
+	}
+	return total, true, nil
+}
+
+func liveQuotaPodMatchesTeam(pod *corev1.Pod, teamID string) bool {
+	if pod == nil || pod.DeletionTimestamp != nil {
+		return false
+	}
+	if pod.Labels[controller.LabelPoolType] != controller.PoolTypeActive {
+		return false
+	}
+	if pod.Labels[controller.LabelSandboxID] == "" && pod.Annotations[controller.AnnotationSandboxID] == "" {
+		return false
+	}
+	if strings.TrimSpace(pod.Annotations[controller.AnnotationTeamID]) != teamID {
+		return false
+	}
+	return pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodPending
+}
+
+func liveQuotaPodResourceUsage(pod *corev1.Pod, dimension quota.Dimension) int64 {
+	if pod == nil {
+		return 0
+	}
+	var total int64
+	for _, container := range pod.Spec.Containers {
+		switch dimension {
+		case quota.DimensionCPU:
+			total += quotaCPUUsageMilli(container.Resources.Limits.Cpu(), container.Resources.Requests.Cpu())
+		case quota.DimensionMemory:
+			total += quotaMemoryUsageMiB(container.Resources.Limits.Memory(), container.Resources.Requests.Memory())
+		}
+	}
+	return total
+}
+
+func quotaCPUUsageMilli(limit, request *resource.Quantity) int64 {
+	if limit != nil && limit.Sign() > 0 {
+		return limit.MilliValue()
+	}
+	if request != nil && request.Sign() > 0 {
+		return request.MilliValue()
+	}
+	return 0
+}
+
+func quotaMemoryUsageMiB(limit, request *resource.Quantity) int64 {
+	if limit != nil && limit.Sign() > 0 {
+		return bytesToMiBRoundUp(limit.Value())
+	}
+	if request != nil && request.Sign() > 0 {
+		return bytesToMiBRoundUp(request.Value())
+	}
+	return 0
 }
 
 func bytesToMiBRoundUp(value int64) int64 {

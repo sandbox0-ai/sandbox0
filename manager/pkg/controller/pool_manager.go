@@ -159,10 +159,12 @@ func (pm *PoolManager) ReconcilePool(ctx context.Context, template *v1alpha1.San
 		return fmt.Errorf("repair unhealthy idle pods: %w", err)
 	}
 
-	// 5. Keep replicas inside the template pool bounds without fighting the
-	// autoscaler's current target.
+	// 5. Keep the warm pool fixed at minIdle. Template autoscaling is disabled
+	// because burst cold claims can already stress the data plane; expanding the
+	// idle pool at the same time compounds that pressure and may create unused
+	// pods after the burst ends.
 	currentReplicas := getInt32Value(rs.Spec.Replicas)
-	desiredReplicas := desiredPoolReplicas(template, currentReplicas)
+	desiredReplicas := desiredPoolReplicas(template)
 	if rs.Spec.Replicas == nil || currentReplicas != desiredReplicas {
 		pm.logger.Info("Updating ReplicaSet replicas",
 			zap.String("template", template.Name),
@@ -207,15 +209,9 @@ func (pm *PoolManager) updateReplicaSetReplicas(ctx context.Context, namespace, 
 	return updatedRS, nil
 }
 
-func desiredPoolReplicas(template *v1alpha1.SandboxTemplate, current int32) int32 {
-	minIdle, maxIdle := normalizedPoolBounds(template)
-	if current < minIdle {
-		return minIdle
-	}
-	if current > maxIdle {
-		return maxIdle
-	}
-	return current
+func desiredPoolReplicas(template *v1alpha1.SandboxTemplate) int32 {
+	minIdle, _ := normalizedPoolBounds(template)
+	return minIdle
 }
 
 // getOrCreateReplicaSet gets or creates the ReplicaSet for a template

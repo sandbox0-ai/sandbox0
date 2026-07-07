@@ -466,9 +466,6 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		return nil, fmt.Errorf("claim idle pod: %w", err)
 	}
 	claimType := "hot"
-	if pod != nil {
-		s.triggerHotClaimScale(template, req.Template)
-	}
 
 	// If no idle pod available, create a new one (cold start)
 	if pod == nil {
@@ -478,26 +475,9 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		)
 
 		phaseStarted = time.Now()
-		coldClaimAdmitter, coldClaimAdmitted, err := s.admitColdClaim(ctx, template, req.Template)
-		s.observeClaimPhase(req.Template, claimType, "admit_cold_claim", phaseStarted, err)
-		if err != nil {
-			if metrics != nil {
-				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
-			}
-			return nil, err
-		}
-		completeColdAdmission := func() {
-			if coldClaimAdmitted && coldClaimAdmitter != nil {
-				coldClaimAdmitter.CompleteColdClaim(template)
-				coldClaimAdmitted = false
-			}
-		}
-
-		phaseStarted = time.Now()
 		pod, err = s.createNewPod(ctx, template, req)
 		s.observeClaimPhase(req.Template, claimType, "create_new_pod", phaseStarted, err)
 		if err != nil {
-			completeColdAdmission()
 			if metrics != nil {
 				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
 			}
@@ -514,7 +494,6 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 			networkPod, err := s.waitForPodNetworkIdentity(ctx, req.Template, pod.Namespace, pod.Name)
 			s.observeClaimPhase(req.Template, claimType, "wait_for_pod_network_identity", phaseStarted, err)
 			if err != nil {
-				completeColdAdmission()
 				s.requestSandboxDeletionAfterClaimFailure(pod, "network identity readiness failed")
 				if metrics != nil {
 					metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
@@ -522,7 +501,6 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 				return nil, fmt.Errorf("wait for pod network identity: %w", err)
 			}
 			pod = networkPod
-			completeColdAdmission()
 
 			phaseStarted = time.Now()
 			err = s.applyNetworkProviderFromPod(ctx, pod, req.TeamID)
@@ -540,14 +518,12 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		readyPod, err := s.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
 		s.observeClaimPhase(req.Template, claimType, "wait_for_pod_claim_ready", phaseStarted, err)
 		if err != nil {
-			completeColdAdmission()
 			s.requestSandboxDeletionAfterClaimFailure(pod, "claim readiness failed")
 			if metrics != nil {
 				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
 			}
 			return nil, fmt.Errorf("wait for pod claim readiness: %w", err)
 		}
-		completeColdAdmission()
 		pod = readyPod
 		s.refreshSandboxProbeConditionsAsync(pod)
 	}
@@ -764,86 +740,6 @@ func (s *SandboxService) generateStableSandboxID(template *v1alpha1.SandboxTempl
 	}
 	clusterID := naming.ClusterIDOrDefault(template.Spec.ClusterId)
 	return naming.SandboxName(clusterID, template.Name, utilrand.String(5))
-}
-
-func (s *SandboxService) triggerHotClaimScale(template *v1alpha1.SandboxTemplate, templateID string) {
-	scaler, ok := s.autoScaler.(HotClaimAutoScalerInterface)
-	if !ok || scaler == nil {
-		return
-	}
-	go func() {
-		decision, err := scaler.OnHotClaim(context.Background(), template)
-		if err != nil {
-			s.logger.Warn("Auto scale failed during hot claim",
-				zap.String("template", templateID),
-				zap.Error(err),
-			)
-			return
-		}
-		if decision != nil && decision.ShouldScale {
-			s.logger.Info("Auto scale triggered",
-				zap.String("template", templateID),
-				zap.Int32("delta", decision.Delta),
-				zap.String("reason", decision.Reason),
-			)
-		}
-	}()
-}
-
-func (s *SandboxService) admitColdClaim(
-	ctx context.Context,
-	template *v1alpha1.SandboxTemplate,
-	templateID string,
-) (ColdClaimAdmissionAutoScalerInterface, bool, error) {
-	admitter, ok := s.autoScaler.(ColdClaimAdmissionAutoScalerInterface)
-	if !ok || admitter == nil {
-		s.triggerLegacyColdClaimScale(template, templateID)
-		return nil, false, nil
-	}
-
-	admission, err := admitter.AdmitColdClaim(ctx, template)
-	if err != nil {
-		return nil, false, fmt.Errorf("admit cold claim: %w", err)
-	}
-	if admission != nil && !admission.Admitted {
-		s.logger.Warn("Cold claim capacity unavailable",
-			zap.String("template", templateID),
-			zap.String("reason", admission.Reason),
-			zap.Int32("inFlight", admission.InFlight),
-			zap.Int32("limit", admission.Limit),
-			zap.Int32("networkBacklog", admission.NetworkBacklog),
-		)
-		return nil, false, fmt.Errorf("%w: %s", ErrColdClaimCapacityUnavailable, admission.Reason)
-	}
-	if admission != nil && admission.ScaleDecision != nil && admission.ScaleDecision.ShouldScale {
-		s.logger.Info("Auto scale triggered",
-			zap.String("template", templateID),
-			zap.Int32("delta", admission.ScaleDecision.Delta),
-			zap.String("reason", admission.ScaleDecision.Reason),
-		)
-	}
-	return admitter, true, nil
-}
-
-func (s *SandboxService) triggerLegacyColdClaimScale(template *v1alpha1.SandboxTemplate, templateID string) {
-	if s.autoScaler == nil {
-		return
-	}
-	go func() {
-		scaleDecision, scaleErr := s.autoScaler.OnColdClaim(context.Background(), template)
-		if scaleErr != nil {
-			s.logger.Warn("Auto scale failed during cold claim",
-				zap.String("template", templateID),
-				zap.Error(scaleErr),
-			)
-		} else if scaleDecision != nil && scaleDecision.ShouldScale {
-			s.logger.Info("Auto scale triggered",
-				zap.String("template", templateID),
-				zap.Int32("delta", scaleDecision.Delta),
-				zap.String("reason", scaleDecision.Reason),
-			)
-		}
-	}()
 }
 
 func (s *SandboxService) observeClaimPhase(template, claimType, phase string, started time.Time, err error) {

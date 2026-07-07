@@ -103,7 +103,7 @@ Warm pool configuration. See [Warm Pool](/docs/sandbox/template/pool) for a deta
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `minIdle` | integer | — | Minimum idle pods to pre-warm. Required (`>= 0`). |
-| `maxIdle` | integer | — | Maximum idle pods allowed. Required (`>= minIdle`). |
+| `maxIdle` | integer | — | Compatibility ceiling for idle pods and status health. Required (`>= minIdle`). |
 
 Only ready idle pods count toward pool capacity.
 

@@ -98,7 +98,7 @@ func TestBuildPodTemplatePreMountsUserVolumePortalsForIdlePool(t *testing.T) {
 	assert.NotNil(t, findCSIVolumeByPortal(got.Spec.Volumes, volumeportal.WebhookStatePortalName))
 }
 
-func TestDesiredPoolReplicasPreservesAutoscalerTargetWithinBounds(t *testing.T) {
+func TestDesiredPoolReplicasUsesMinIdle(t *testing.T) {
 	template := &v1alpha1.SandboxTemplate{
 		Spec: v1alpha1.SandboxTemplateSpec{
 			Pool: v1alpha1.PoolStrategy{
@@ -108,9 +108,7 @@ func TestDesiredPoolReplicasPreservesAutoscalerTargetWithinBounds(t *testing.T) 
 		},
 	}
 
-	assert.Equal(t, int32(15), desiredPoolReplicas(template, 3))
-	assert.Equal(t, int32(25), desiredPoolReplicas(template, 25))
-	assert.Equal(t, int32(50), desiredPoolReplicas(template, 80))
+	assert.Equal(t, int32(15), desiredPoolReplicas(template))
 }
 
 func TestUpdateReplicaSetReplicasRetriesConflict(t *testing.T) {

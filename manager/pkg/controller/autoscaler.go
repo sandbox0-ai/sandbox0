@@ -3,94 +3,44 @@ package controller
 import (
 	"context"
 	"fmt"
-	"math"
-	"sync"
 	"time"
 
+	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
-	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"go.uber.org/zap"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
-	"k8s.io/client-go/util/retry"
 )
 
-// AutoScaler owns the idle pool replica target for a SandboxTemplate.
+const autoscalerDisabledReason = "template autoscaler disabled"
+
+// AutoScaler is currently a compatibility shim.
 //
-// The external contract is still template pool minIdle/maxIdle plus the
-// OnColdClaim hook. Internally the scaler is deliberately small:
-//   - claim events update the recent-traffic timestamp,
-//   - hot/cold claims ask for a bounded idle-pool refill,
-//   - cold claims are admitted only while the pod-network backlog is healthy,
-//   - scale-down returns the pool target to minIdle after no traffic.
+// Template autoscaling is intentionally disabled. Burst cold claims already
+// create active pods; expanding the idle pool in parallel compounds Kubernetes
+// and runtime pressure, makes cold starts slower, and can leave unused warm pods
+// after the burst ends. Until the replacement autoscaler has explicit
+// backpressure semantics, PoolManager reconciles warm-pool ReplicaSets directly
+// to spec.pool.minIdle.
 type AutoScaler struct {
-	k8sClient kubernetes.Interface
-	podLister corelisters.PodLister
-	logger    *zap.Logger
-
-	rateLimiter *scaleRateLimiter
-	coldClaims  *coldClaimLimiter
-
-	stateMu sync.Mutex
-	state   map[string]*autoScalerTemplateState
-
-	metrics *obsmetrics.ManagerMetrics
-	config  AutoScaleConfig
+	config AutoScaleConfig
 }
 
-// AutoScaleConfig holds configuration for pool scaling behavior.
+// AutoScaleConfig is preserved for manager config compatibility.
 type AutoScaleConfig struct {
-	// MinScaleInterval is the minimum time between scale writes for a template.
-	MinScaleInterval time.Duration
-
-	// ScaleUpFactor adds headroom to observed idle-pool deficits.
-	ScaleUpFactor float64
-
-	// MaxScaleStep caps the maximum replicas added in one scale-up write.
-	MaxScaleStep int32
-
-	// MinIdleBuffer is the extra idle target used during urgent refills.
-	MinIdleBuffer int32
-
-	// TargetIdleRatio keeps idle capacity proportional to active sandboxes.
-	TargetIdleRatio float64
-
-	// NoTrafficScaleDownAfter is the idle period before returning to minIdle.
+	MinScaleInterval        time.Duration
+	ScaleUpFactor           float64
+	MaxScaleStep            int32
+	MinIdleBuffer           int32
+	TargetIdleRatio         float64
 	NoTrafficScaleDownAfter time.Duration
-
-	// ScaleDownPercent is kept for config compatibility. Scale-down now returns
-	// directly to minIdle after the idle window.
-	ScaleDownPercent float64
-
-	// MaxColdClaimInFlight caps per-template cold pods that have not reached
-	// network identity yet. Zero derives a cap from MaxScaleStep and pool bounds.
-	MaxColdClaimInFlight int32
+	ScaleDownPercent        float64
+	MaxColdClaimInFlight    int32
 }
 
-type autoScalerTemplateState struct {
-	lastClaimAt           time.Time
-	scaleRetryScheduled   bool
-	pendingScaleClaimType string
-}
-
-type autoScalerPoolStats struct {
-	readyIdle       int32
-	pendingIdle     int32
-	runningActive   int32
-	pendingActive   int32
-	activeWithoutIP int32
-}
-
-func (s autoScalerPoolStats) activeTotal() int32 {
-	return s.runningActive + s.pendingActive
-}
-
-// DefaultAutoScaleConfig returns the default configuration.
+// DefaultAutoScaleConfig returns the legacy autoscaler defaults. The values are
+// still normalized so existing config can round-trip while the scaler is off.
 func DefaultAutoScaleConfig() AutoScaleConfig {
 	return AutoScaleConfig{
 		MinScaleInterval:        100 * time.Millisecond,
@@ -103,41 +53,30 @@ func DefaultAutoScaleConfig() AutoScaleConfig {
 	}
 }
 
-// NewAutoScaler creates a new AutoScaler.
+// NewAutoScaler creates a disabled autoscaler compatibility shim.
 func NewAutoScaler(
-	k8sClient kubernetes.Interface,
-	podLister corelisters.PodLister,
+	_ kubernetes.Interface,
+	_ corelisters.PodLister,
 	logger *zap.Logger,
 ) *AutoScaler {
-	return NewAutoScalerWithConfig(k8sClient, podLister, logger, DefaultAutoScaleConfig())
+	return NewAutoScalerWithConfig(nil, nil, logger, DefaultAutoScaleConfig())
 }
 
-// NewAutoScalerWithConfig creates a new AutoScaler with custom configuration.
+// NewAutoScalerWithConfig creates a disabled autoscaler compatibility shim.
 func NewAutoScalerWithConfig(
-	k8sClient kubernetes.Interface,
-	podLister corelisters.PodLister,
-	logger *zap.Logger,
+	_ kubernetes.Interface,
+	_ corelisters.PodLister,
+	_ *zap.Logger,
 	config AutoScaleConfig,
 ) *AutoScaler {
-	config = normalizeAutoScaleConfig(config)
-	if logger == nil {
-		logger = zap.NewNop()
-	}
 	return &AutoScaler{
-		k8sClient:   k8sClient,
-		podLister:   podLister,
-		logger:      logger,
-		rateLimiter: newScaleRateLimiter(config.MinScaleInterval),
-		coldClaims:  newColdClaimLimiter(),
-		state:       make(map[string]*autoScalerTemplateState),
-		config:      config,
+		config: normalizeAutoScaleConfig(config),
 	}
 }
 
-// SetMetrics attaches manager metrics. Nil disables autoscaler metrics.
-func (s *AutoScaler) SetMetrics(metrics *obsmetrics.ManagerMetrics) {
-	s.metrics = metrics
-}
+// SetMetrics preserves the legacy injection point. The disabled scaler does not
+// emit autoscaler metrics.
+func (s *AutoScaler) SetMetrics(_ *obsmetrics.ManagerMetrics) {}
 
 // ScaleDecision represents the result of a scaling decision.
 type ScaleDecision struct {
@@ -160,478 +99,51 @@ type ColdClaimAdmission struct {
 	ScaleDecision  *ScaleDecision
 }
 
-// OnColdClaim preserves the existing autoscaler hook for cold claims.
-func (s *AutoScaler) OnColdClaim(ctx context.Context, template *v1alpha1.SandboxTemplate) (*ScaleDecision, error) {
-	s.recordClaim(template)
-	return s.scaleForClaim(ctx, template, "cold")
-}
-
-// OnHotClaim is called after a hot claim removes one ready pod from the pool.
-func (s *AutoScaler) OnHotClaim(ctx context.Context, template *v1alpha1.SandboxTemplate) (*ScaleDecision, error) {
-	s.recordClaim(template)
-	return s.scaleForClaim(ctx, template, "hot")
-}
-
-// AdmitColdClaim applies backpressure before the service creates a cold pod.
-func (s *AutoScaler) AdmitColdClaim(ctx context.Context, template *v1alpha1.SandboxTemplate) (*ColdClaimAdmission, error) {
+// OnColdClaim preserves the legacy hook but never scales.
+func (s *AutoScaler) OnColdClaim(_ context.Context, template *v1alpha1.SandboxTemplate) (*ScaleDecision, error) {
 	if template == nil {
 		return nil, fmt.Errorf("nil template")
 	}
-	s.recordClaim(template)
+	return disabledScaleDecision(), nil
+}
 
-	stats, err := s.getPoolStatsDetailed(template)
-	if err != nil {
-		return nil, fmt.Errorf("get pool stats: %w", err)
+// OnHotClaim preserves the legacy hook but never scales.
+func (s *AutoScaler) OnHotClaim(_ context.Context, template *v1alpha1.SandboxTemplate) (*ScaleDecision, error) {
+	if template == nil {
+		return nil, fmt.Errorf("nil template")
 	}
-	templateName := autoscalerMetricTemplate(template)
-	limit := s.maxColdClaimInFlight(template)
-	s.observePool(templateName, stats, 0, 0)
+	return disabledScaleDecision(), nil
+}
 
-	if stats.activeWithoutIP >= limit {
-		s.observeDecision(templateName, "admit_cold_claim", "pod_network_identity_backlog", "rejected")
-		return &ColdClaimAdmission{
-			Admitted:       false,
-			Reason:         "pod network identity backlog",
-			RetryAfter:     time.Second,
-			Limit:          limit,
-			NetworkBacklog: stats.activeWithoutIP,
-		}, nil
+// AdmitColdClaim preserves the legacy admission hook and always admits. Cold
+// claim backpressure must live in a replacement design that does not couple
+// admission to idle-pool scale-up writes.
+func (s *AutoScaler) AdmitColdClaim(_ context.Context, template *v1alpha1.SandboxTemplate) (*ColdClaimAdmission, error) {
+	if template == nil {
+		return nil, fmt.Errorf("nil template")
 	}
-
-	key := autoscalerTemplateKey(template)
-	inFlight, ok := s.coldClaims.TryAcquire(key, limit)
-	s.observeColdClaimsInFlight(templateName, inFlight)
-	if !ok {
-		s.observeDecision(templateName, "admit_cold_claim", "in_flight_limit", "rejected")
-		return &ColdClaimAdmission{
-			Admitted:       false,
-			Reason:         "cold claim in-flight limit reached",
-			RetryAfter:     time.Second,
-			InFlight:       inFlight,
-			Limit:          limit,
-			NetworkBacklog: stats.activeWithoutIP,
-		}, nil
-	}
-
-	decision, err := s.scaleForClaim(ctx, template, "cold")
-	if err != nil {
-		remaining := s.coldClaims.Release(key)
-		s.observeColdClaimsInFlight(templateName, remaining)
-		return nil, err
-	}
-
-	s.observeDecision(templateName, "admit_cold_claim", "admitted", "admitted")
 	return &ColdClaimAdmission{
-		Admitted:       true,
-		Reason:         "admitted",
-		InFlight:       inFlight,
-		Limit:          limit,
-		NetworkBacklog: stats.activeWithoutIP,
-		ScaleDecision:  decision,
+		Admitted:      true,
+		Reason:        autoscalerDisabledReason,
+		ScaleDecision: disabledScaleDecision(),
 	}, nil
 }
 
-// CompleteColdClaim releases a cold admission slot.
-func (s *AutoScaler) CompleteColdClaim(template *v1alpha1.SandboxTemplate) {
-	if s == nil || template == nil || s.coldClaims == nil {
-		return
-	}
-	remaining := s.coldClaims.Release(autoscalerTemplateKey(template))
-	s.observeColdClaimsInFlight(autoscalerMetricTemplate(template), remaining)
-}
+// CompleteColdClaim preserves the legacy release hook. There are no tracked
+// cold-claim slots while autoscaling is disabled.
+func (s *AutoScaler) CompleteColdClaim(_ *v1alpha1.SandboxTemplate) {}
 
-func (s *AutoScaler) scaleForClaim(ctx context.Context, template *v1alpha1.SandboxTemplate, claimType string) (*ScaleDecision, error) {
-	if template == nil {
-		return nil, fmt.Errorf("nil template")
-	}
-
-	key := autoscalerTemplateKey(template)
-	templateName := autoscalerMetricTemplate(template)
-	if acquired, retryAfter := s.rateLimiter.TryAcquire(key); !acquired {
-		s.observeDecision(templateName, "scale_up", "rate_limited", "skipped")
-		s.scheduleScaleRetry(template, claimType, retryAfter)
-		return &ScaleDecision{ShouldScale: false, Reason: "rate limited"}, nil
-	}
-	defer s.rateLimiter.Complete(key)
-
-	stats, err := s.getPoolStatsDetailed(template)
-	if err != nil {
-		return nil, fmt.Errorf("get pool stats: %w", err)
-	}
-
-	currentReplicas, err := s.getCurrentReplicas(ctx, template)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			s.observeDecision(templateName, "scale_up", "replicaset_not_found", "skipped")
-			return &ScaleDecision{ShouldScale: false, Reason: "replicaset not found"}, nil
-		}
-		return nil, fmt.Errorf("get current replicas: %w", err)
-	}
-
-	desiredReplicas, reason := s.calculateScaleUpTarget(template, currentReplicas, stats, claimType)
-	s.observePool(templateName, stats, currentReplicas, desiredReplicas)
-	if desiredReplicas <= currentReplicas {
-		s.observeDecision(templateName, "scale_up", reason, "skipped")
-		return &ScaleDecision{
-			ShouldScale: false,
-			OldReplicas: currentReplicas,
-			NewReplicas: currentReplicas,
-			Reason: fmt.Sprintf("no scale needed: current=%d desired=%d ready_idle=%d pending_idle=%d active=%d",
-				currentReplicas, desiredReplicas, stats.readyIdle, stats.pendingIdle, stats.activeTotal()),
-		}, nil
-	}
-
-	if err := s.executeScale(ctx, template, desiredReplicas); err != nil {
-		return nil, fmt.Errorf("execute scale: %w", err)
-	}
-
-	s.logger.Info("Auto scale up completed",
-		zap.String("template", template.Name),
-		zap.String("namespace", template.Namespace),
-		zap.Int32("oldReplicas", currentReplicas),
-		zap.Int32("newReplicas", desiredReplicas),
-		zap.Int32("readyIdle", stats.readyIdle),
-		zap.Int32("pendingIdle", stats.pendingIdle),
-		zap.Int32("active", stats.activeTotal()),
-		zap.String("reason", reason),
-	)
-	s.observeDecision(templateName, "scale_up", reason, "scaled")
-	s.observeScaleDelta(templateName, desiredReplicas-currentReplicas)
-
-	return &ScaleDecision{
-		ShouldScale: true,
-		OldReplicas: currentReplicas,
-		NewReplicas: desiredReplicas,
-		Delta:       desiredReplicas - currentReplicas,
-		Reason:      reason,
-	}, nil
-}
-
-func (s *AutoScaler) calculateScaleUpTarget(
-	template *v1alpha1.SandboxTemplate,
-	currentReplicas int32,
-	stats autoScalerPoolStats,
-	claimType string,
-) (int32, string) {
-	minIdle, maxIdle := normalizedPoolBounds(template)
-	desired := currentReplicas
-	reason := "within_target"
-	if desired < minIdle {
-		desired = minIdle
-		reason = "min_idle"
-	}
-
-	activeTarget := int32(math.Ceil(float64(stats.activeTotal()) * s.config.TargetIdleRatio))
-	if activeTarget < minIdle {
-		activeTarget = minIdle
-	}
-	if activeTarget > desired {
-		desired = activeTarget
-		reason = "active_ratio"
-	}
-
-	availableIdle := stats.readyIdle + stats.pendingIdle
-	urgentIdleTarget := minIdle + s.config.MinIdleBuffer
-	if urgentIdleTarget < minIdle {
-		urgentIdleTarget = minIdle
-	}
-	switch claimType {
-	case "cold":
-		if availableIdle < urgentIdleTarget {
-			deficit := urgentIdleTarget - availableIdle
-			target := currentReplicas + s.scaleUpStep(deficit)
-			if target > desired {
-				desired = target
-				reason = "cold_idle_deficit"
-			}
-		}
-	case "hot":
-		lowWatermark := minIdle / 2
-		if lowWatermark < 1 && minIdle > 0 {
-			lowWatermark = 1
-		}
-		if stats.readyIdle <= lowWatermark && availableIdle < urgentIdleTarget {
-			deficit := urgentIdleTarget - availableIdle
-			target := currentReplicas + s.scaleUpStep(deficit)
-			if target > desired {
-				desired = target
-				reason = "hot_low_watermark"
-			}
-		}
-	}
-
-	if desired < minIdle {
-		desired = minIdle
-	}
-	if desired > maxIdle {
-		desired = maxIdle
-	}
-	return desired, reason
-}
-
-func (s *AutoScaler) scaleUpStep(deficit int32) int32 {
-	if deficit < 1 {
-		deficit = 1
-	}
-	factor := s.config.ScaleUpFactor
-	if factor < 1 {
-		factor = 1
-	}
-	step := int32(math.Ceil(float64(deficit) * factor))
-	if step < 1 {
-		step = 1
-	}
-	if s.config.MaxScaleStep > 0 && step > s.config.MaxScaleStep {
-		step = s.config.MaxScaleStep
-	}
-	return step
-}
-
-func (s *AutoScaler) getPoolStatsDetailed(template *v1alpha1.SandboxTemplate) (autoScalerPoolStats, error) {
-	var stats autoScalerPoolStats
-
-	idlePods, err := s.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
-		LabelTemplateID: template.Name,
-		LabelPoolType:   PoolTypeIdle,
-	}))
-	if err != nil {
-		return stats, fmt.Errorf("list idle pods: %w", err)
-	}
-	for _, pod := range idlePods {
-		if pod.DeletionTimestamp != nil || isTerminalPodPhase(pod.Status.Phase) {
-			continue
-		}
-		if IsPodReady(pod) {
-			stats.readyIdle++
-		} else {
-			stats.pendingIdle++
-		}
-	}
-
-	activePods, err := s.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
-		LabelTemplateID: template.Name,
-		LabelPoolType:   PoolTypeActive,
-	}))
-	if err != nil {
-		return stats, fmt.Errorf("list active pods: %w", err)
-	}
-	for _, pod := range activePods {
-		if pod.DeletionTimestamp != nil || isTerminalPodPhase(pod.Status.Phase) {
-			continue
-		}
-		if pod.Status.PodIP == "" {
-			stats.activeWithoutIP++
-		}
-		if pod.Status.Phase == corev1.PodRunning {
-			stats.runningActive++
-		} else {
-			stats.pendingActive++
-		}
-	}
-
-	return stats, nil
-}
-
-func isTerminalPodPhase(phase corev1.PodPhase) bool {
-	return phase == corev1.PodSucceeded || phase == corev1.PodFailed
-}
-
-func (s *AutoScaler) getCurrentReplicas(ctx context.Context, template *v1alpha1.SandboxTemplate) (int32, error) {
-	clusterID := naming.ClusterIDOrDefault(template.Spec.ClusterId)
-	rsName, err := naming.ReplicasetName(clusterID, template.Name)
-	if err != nil {
-		return 0, fmt.Errorf("generate replicaset name: %w", err)
-	}
-
-	rs, err := s.k8sClient.AppsV1().ReplicaSets(template.Namespace).Get(ctx, rsName, metav1.GetOptions{})
-	if err != nil {
-		return 0, err
-	}
-	if rs.Spec.Replicas == nil {
-		return 0, nil
-	}
-	return *rs.Spec.Replicas, nil
-}
-
-func (s *AutoScaler) executeScale(ctx context.Context, template *v1alpha1.SandboxTemplate, replicas int32) error {
-	clusterID := naming.ClusterIDOrDefault(template.Spec.ClusterId)
-	rsName, err := naming.ReplicasetName(clusterID, template.Name)
-	if err != nil {
-		return fmt.Errorf("generate replicaset name: %w", err)
-	}
-
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		rs, err := s.k8sClient.AppsV1().ReplicaSets(template.Namespace).Get(ctx, rsName, metav1.GetOptions{})
-		if err != nil {
-			if errors.IsNotFound(err) {
-				return nil
-			}
-			return err
-		}
-		updated := rs.DeepCopy()
-		updated.Spec.Replicas = ptrToInt32(replicas)
-		_, err = s.k8sClient.AppsV1().ReplicaSets(updated.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
-		return err
-	})
-}
-
-// ReconcileScaleDown returns the idle pool target to minIdle after no traffic.
-// It returns a positive duration when the caller should requeue the template to
-// check again after the recent-traffic window expires.
-func (s *AutoScaler) ReconcileScaleDown(ctx context.Context, template *v1alpha1.SandboxTemplate, now time.Time) (time.Duration, error) {
-	if template == nil {
-		return 0, nil
-	}
-
-	currentReplicas, err := s.getCurrentReplicas(ctx, template)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			return 0, nil
-		}
-		return 0, err
-	}
-
-	minIdle, _ := normalizedPoolBounds(template)
-	if currentReplicas <= minIdle {
-		return 0, nil
-	}
-
-	stats, err := s.getPoolStatsDetailed(template)
-	if err != nil {
-		return 0, fmt.Errorf("get pool stats: %w", err)
-	}
-	templateName := autoscalerMetricTemplate(template)
-	s.observePool(templateName, stats, currentReplicas, minIdle)
-	if stats.activeTotal() > 0 {
-		s.observeDecision(templateName, "scale_down", "active_pods", "skipped")
-		return 0, nil
-	}
-
-	lastClaimTime := s.lastClaimTime(template)
-	if observed := s.getLastClaimTime(template); observed.After(lastClaimTime) {
-		lastClaimTime = observed
-	}
-	if !lastClaimTime.IsZero() {
-		elapsed := now.Sub(lastClaimTime)
-		if elapsed < s.config.NoTrafficScaleDownAfter {
-			requeueAfter := s.config.NoTrafficScaleDownAfter - elapsed
-			if requeueAfter < time.Second {
-				requeueAfter = time.Second
-			}
-			s.observeDecision(templateName, "scale_down", "recent_claim", "skipped")
-			return requeueAfter, nil
-		}
-	}
-
-	s.logger.Info("Scale down due to no traffic",
-		zap.String("template", template.Name),
-		zap.Int32("oldReplicas", currentReplicas),
-		zap.Int32("newReplicas", minIdle),
-	)
-	if err := s.executeScale(ctx, template, minIdle); err != nil {
-		return 0, err
-	}
-	s.observeDecision(templateName, "scale_down", "no_recent_claims", "scaled")
-	s.observeScaleDelta(templateName, minIdle-currentReplicas)
+// ReconcileScaleDown is a no-op while PoolManager keeps ReplicaSet replicas at
+// minIdle on every template reconcile.
+func (s *AutoScaler) ReconcileScaleDown(_ context.Context, _ *v1alpha1.SandboxTemplate, _ time.Time) (time.Duration, error) {
 	return 0, nil
 }
 
-func (s *AutoScaler) scheduleScaleRetry(template *v1alpha1.SandboxTemplate, claimType string, retryAfter time.Duration) {
-	if s == nil || template == nil {
-		return
+func disabledScaleDecision() *ScaleDecision {
+	return &ScaleDecision{
+		ShouldScale: false,
+		Reason:      autoscalerDisabledReason,
 	}
-	if retryAfter <= 0 {
-		retryAfter = s.config.MinScaleInterval
-	}
-	if retryAfter <= 0 {
-		retryAfter = time.Millisecond
-	}
-
-	key := autoscalerTemplateKey(template)
-	s.stateMu.Lock()
-	state := s.state[key]
-	if state == nil {
-		state = &autoScalerTemplateState{}
-		s.state[key] = state
-	}
-	state.pendingScaleClaimType = mergeScaleRetryClaimType(state.pendingScaleClaimType, claimType)
-	if state.scaleRetryScheduled {
-		s.stateMu.Unlock()
-		return
-	}
-	state.scaleRetryScheduled = true
-	s.stateMu.Unlock()
-
-	templateCopy := template.DeepCopy()
-	go func() {
-		timer := time.NewTimer(retryAfter)
-		defer timer.Stop()
-		<-timer.C
-
-		s.stateMu.Lock()
-		state := s.state[key]
-		pendingClaimType := "hot"
-		if state != nil {
-			pendingClaimType = state.pendingScaleClaimType
-			if pendingClaimType == "" {
-				pendingClaimType = "hot"
-			}
-			state.pendingScaleClaimType = ""
-			state.scaleRetryScheduled = false
-		}
-		s.stateMu.Unlock()
-
-		if _, err := s.scaleForClaim(context.Background(), templateCopy, pendingClaimType); err != nil {
-			s.logger.Warn("Auto scale retry failed",
-				zap.String("template", templateCopy.Name),
-				zap.String("namespace", templateCopy.Namespace),
-				zap.String("claimType", pendingClaimType),
-				zap.Error(err),
-			)
-		}
-	}()
-}
-
-func mergeScaleRetryClaimType(existing, next string) string {
-	if existing == "cold" || next == "cold" {
-		return "cold"
-	}
-	if existing != "" {
-		return existing
-	}
-	if next != "" {
-		return next
-	}
-	return "hot"
-}
-
-func (s *AutoScaler) getLastClaimTime(template *v1alpha1.SandboxTemplate) time.Time {
-	activePods, err := s.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
-		LabelTemplateID: template.Name,
-		LabelPoolType:   PoolTypeActive,
-	}))
-	if err != nil {
-		return time.Time{}
-	}
-
-	var lastClaim time.Time
-	for _, pod := range activePods {
-		if pod.Annotations == nil {
-			continue
-		}
-		claimedAtStr := pod.Annotations[AnnotationClaimedAt]
-		if claimedAtStr == "" {
-			continue
-		}
-		claimedAt, err := time.Parse(time.RFC3339, claimedAtStr)
-		if err != nil {
-			continue
-		}
-		if claimedAt.After(lastClaim) {
-			lastClaim = claimedAt
-		}
-	}
-	return lastClaim
 }
 
 func normalizeAutoScaleConfig(cfg AutoScaleConfig) AutoScaleConfig {
@@ -660,6 +172,37 @@ func normalizeAutoScaleConfig(cfg AutoScaleConfig) AutoScaleConfig {
 	return cfg
 }
 
+// toAutoScaleConfig converts config.AutoscalerConfig to AutoScaleConfig without
+// changing the external config surface.
+func toAutoScaleConfig(cfg apiconfig.AutoscalerConfig) AutoScaleConfig {
+	defaultCfg := DefaultAutoScaleConfig()
+	minScaleInterval := cfg.MinScaleInterval.Duration
+	if minScaleInterval <= 0 {
+		minScaleInterval = defaultCfg.MinScaleInterval
+	}
+	maxScaleStep := cfg.MaxScaleStep
+	if maxScaleStep <= 0 {
+		maxScaleStep = defaultCfg.MaxScaleStep
+	}
+	minIdleBuffer := cfg.MinIdleBuffer
+	if minIdleBuffer <= 0 {
+		minIdleBuffer = defaultCfg.MinIdleBuffer
+	}
+	noTrafficScaleDownAfter := cfg.NoTrafficScaleDownAfter.Duration
+	if noTrafficScaleDownAfter <= 0 {
+		noTrafficScaleDownAfter = defaultCfg.NoTrafficScaleDownAfter
+	}
+	return AutoScaleConfig{
+		MinScaleInterval:        minScaleInterval,
+		ScaleUpFactor:           cfg.ParsedScaleUpFactor(defaultCfg.ScaleUpFactor),
+		MaxScaleStep:            maxScaleStep,
+		MinIdleBuffer:           minIdleBuffer,
+		TargetIdleRatio:         cfg.ParsedTargetIdleRatio(defaultCfg.TargetIdleRatio),
+		NoTrafficScaleDownAfter: noTrafficScaleDownAfter,
+		ScaleDownPercent:        cfg.ParsedScaleDownPercent(defaultCfg.ScaleDownPercent),
+	}
+}
+
 func normalizedPoolBounds(template *v1alpha1.SandboxTemplate) (minIdle, maxIdle int32) {
 	if template == nil {
 		return 0, 0
@@ -673,110 +216,4 @@ func normalizedPoolBounds(template *v1alpha1.SandboxTemplate) (minIdle, maxIdle 
 		maxIdle = minIdle
 	}
 	return minIdle, maxIdle
-}
-
-func (s *AutoScaler) maxColdClaimInFlight(template *v1alpha1.SandboxTemplate) int32 {
-	if s.config.MaxColdClaimInFlight > 0 {
-		return s.config.MaxColdClaimInFlight
-	}
-	minIdle, maxIdle := normalizedPoolBounds(template)
-	limit := s.config.MaxScaleStep * 3
-	if limit < minIdle+s.config.MinIdleBuffer {
-		limit = minIdle + s.config.MinIdleBuffer
-	}
-	if limit <= 0 {
-		limit = 1
-	}
-	if maxIdle > 0 && limit > maxIdle {
-		limit = maxIdle
-	}
-	return limit
-}
-
-func autoscalerTemplateKey(template *v1alpha1.SandboxTemplate) string {
-	if template == nil {
-		return ""
-	}
-	return template.Namespace + "/" + template.Name
-}
-
-func autoscalerMetricTemplate(template *v1alpha1.SandboxTemplate) string {
-	if template == nil {
-		return ""
-	}
-	return template.Name
-}
-
-func (s *AutoScaler) recordClaim(template *v1alpha1.SandboxTemplate) {
-	if s == nil || template == nil {
-		return
-	}
-	key := autoscalerTemplateKey(template)
-	s.stateMu.Lock()
-	defer s.stateMu.Unlock()
-	state := s.state[key]
-	if state == nil {
-		state = &autoScalerTemplateState{}
-		s.state[key] = state
-	}
-	state.lastClaimAt = time.Now()
-}
-
-func (s *AutoScaler) lastClaimTime(template *v1alpha1.SandboxTemplate) time.Time {
-	if s == nil || template == nil {
-		return time.Time{}
-	}
-	key := autoscalerTemplateKey(template)
-	s.stateMu.Lock()
-	defer s.stateMu.Unlock()
-	if state := s.state[key]; state != nil {
-		return state.lastClaimAt
-	}
-	return time.Time{}
-}
-
-func (s *AutoScaler) observeDecision(template, action, reason, result string) {
-	if s == nil || s.metrics == nil || s.metrics.AutoscalerDecisionsTotal == nil {
-		return
-	}
-	s.metrics.AutoscalerDecisionsTotal.WithLabelValues(template, action, reason, result).Inc()
-}
-
-func (s *AutoScaler) observePool(template string, stats autoScalerPoolStats, currentReplicas, desiredReplicas int32) {
-	if s == nil || s.metrics == nil {
-		return
-	}
-	if s.metrics.AutoscalerPoolReplicas != nil {
-		s.metrics.AutoscalerPoolReplicas.WithLabelValues(template, "current").Set(float64(currentReplicas))
-		s.metrics.AutoscalerPoolReplicas.WithLabelValues(template, "desired").Set(float64(desiredReplicas))
-	}
-	if s.metrics.AutoscalerPoolPods != nil {
-		s.metrics.AutoscalerPoolPods.WithLabelValues(template, "ready_idle").Set(float64(stats.readyIdle))
-		s.metrics.AutoscalerPoolPods.WithLabelValues(template, "pending_idle").Set(float64(stats.pendingIdle))
-		s.metrics.AutoscalerPoolPods.WithLabelValues(template, "active").Set(float64(stats.activeTotal()))
-		s.metrics.AutoscalerPoolPods.WithLabelValues(template, "active_without_ip").Set(float64(stats.activeWithoutIP))
-	}
-}
-
-func (s *AutoScaler) observeColdClaimsInFlight(template string, count int32) {
-	if s == nil || s.metrics == nil || s.metrics.AutoscalerColdClaimsInFlight == nil {
-		return
-	}
-	s.metrics.AutoscalerColdClaimsInFlight.WithLabelValues(template).Set(float64(count))
-}
-
-func (s *AutoScaler) observeScaleDelta(template string, delta int32) {
-	if s == nil || s.metrics == nil || s.metrics.AutoscalerScaleDelta == nil || delta == 0 {
-		return
-	}
-	direction := "up"
-	if delta < 0 {
-		direction = "down"
-		delta = -delta
-	}
-	s.metrics.AutoscalerScaleDelta.WithLabelValues(template, direction).Observe(float64(delta))
-}
-
-func ptrToInt32(v int32) *int32 {
-	return &v
 }

@@ -20,8 +20,6 @@ flowchart TB
     subgraph cold["Cold path (no idle pod)"]
         create["createNewPod(): create active pod directly"]
         sb2["Return sandbox after pod starts"]
-        scale["OnColdClaim(): async scale-up decision"]
-        idle2["ReplicaSet creates extra idle pods (bounded by maxIdle)"]
     end
 
     req --> check
@@ -29,13 +27,12 @@ flowchart TB
     flip --> rs1 --> idle1
 
     check -->|No| create --> sb2
-    create --> scale --> idle2
 ```
 
 When a sandbox is claimed:
 1. The manager first tries to claim a ready idle pod (`claimIdlePod`)
 2. If successful (hot claim), the pod is relabeled to `active` and returned immediately; pool replenishment happens asynchronously via ReplicaSet reconcile
-3. If no idle pod exists (cold claim), the manager directly creates a new active pod (`createNewPod`) and asynchronously triggers scale-up (`OnColdClaim`) to rebuild idle capacity
+3. If no idle pod exists (cold claim), the manager directly creates a new active pod (`createNewPod`); the warm pool remains reconciled to `minIdle` and does not expand for the burst
 
 As long as `minIdle` idle pods are available, every claim is a **zero-cold-start** operation.
 
@@ -51,7 +48,7 @@ Configure the pool strategy in your template spec under the `pool` key:
 | Field | Type | Description |
 |-------|------|-------------|
 | `minIdle` | integer | Minimum number of idle pods to maintain (ReplicaSet replicas). Claims always succeed instantly while idle pods are available. |
-| `maxIdle` | integer | Maximum number of idle pods allowed for autoscaling decisions. The autoscaler caps scale-up at this value, and template status reports `PoolHealthy=False` if idle pods exceed it. |
+| `maxIdle` | integer | Compatibility ceiling for the pool contract. The current manager does not autoscale above `minIdle`; template status still reports `PoolHealthy=False` if idle pods exceed `maxIdle`. |
 
 ```yaml
 spec:
@@ -92,19 +89,19 @@ Idle pods use a fixed low CPU and memory allocation while they wait in the warm 
 
 ---
 
-## maxIdle — Capping Idle Resources
+## maxIdle — Compatibility Ceiling
 
-`maxIdle` puts an upper bound on idle pool size for autoscaling decisions. The autoscaler uses it as a hard cap when deciding target replicas:
+`maxIdle` remains part of the template contract and must be greater than or equal to `minIdle`, but the current manager keeps warm-pool ReplicaSets at `minIdle`.
 
-- Prevents scale-up from growing beyond a configured ceiling
-- Works with template status conditions (`PoolHealthy=False`) to signal idle over-provisioning
+- It preserves compatibility for clients and future autoscaler behavior
+- It works with template status conditions (`PoolHealthy=False`) to signal idle over-provisioning
 
-A common pattern: set `maxIdle` to 2–3x `minIdle` to absorb burst traffic while keeping costs bounded.
+For guaranteed burst capacity today, increase `minIdle` to the number of sandboxes you want pre-warmed.
 
 ```yaml
 pool:
     minIdle: 3
-    maxIdle: 9   # burst headroom = 3x minIdle
+    maxIdle: 3
 ```
 
 ---

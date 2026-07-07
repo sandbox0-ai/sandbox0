@@ -83,6 +83,39 @@ func TestEnforceActiveSandboxQuotaUsesLivePodsWhenUsageStoreDisabled(t *testing.
 	}
 }
 
+func TestEnforceActiveSandboxQuotaUsesSandboxStoreWhenUsageStoreDisabled(t *testing.T) {
+	svc := &SandboxService{
+		quotaStore: fakeQuotaLimitStore{
+			limit:    &quota.Limit{TeamID: "team-1", Dimension: quota.DimensionActiveSandboxes, LimitValue: 1},
+			usageErr: quota.ErrUsageStoreNotConfigured,
+		},
+		sandboxStore: &memorySandboxStore{
+			records: map[string]*SandboxRecord{
+				"sandbox-1": {
+					ID:     "sandbox-1",
+					TeamID: "team-1",
+					Status: SandboxStatusRunning,
+				},
+				"paused": {
+					ID:     "paused",
+					TeamID: "team-1",
+					Status: SandboxStatusPaused,
+				},
+				"other-team": {
+					ID:     "other-team",
+					TeamID: "team-2",
+					Status: SandboxStatusRunning,
+				},
+			},
+		},
+	}
+
+	err := svc.enforceActiveSandboxQuota(context.Background(), "team-1")
+	if !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("enforceActiveSandboxQuota() error = %v, want ErrQuotaExceeded", err)
+	}
+}
+
 func TestEnforceActiveSandboxQuotaIgnoresNonActiveLivePods(t *testing.T) {
 	deleting := newQuotaTestPod("default", "deleting", "team-1", corev1.PodRunning, "500m", "512Mi")
 	now := metav1.Now()
@@ -145,6 +178,21 @@ func TestEnforceSandboxCPUQuotaUsesLivePodsWhenUsageStoreDisabled(t *testing.T) 
 		},
 		newQuotaTestPod("default", "sandbox-1", "team-1", corev1.PodRunning, "750m", "512Mi"),
 	)
+	template := newQuotaTestTemplate("default", "500m", "1Gi")
+
+	err := svc.enforceSandboxCPUQuota(context.Background(), "team-1", template.Spec.MainContainer.Resources)
+	if !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("enforceSandboxCPUQuota() error = %v, want ErrQuotaExceeded", err)
+	}
+}
+
+func TestEnforceSandboxCPUQuotaRejectsWithoutUsageWhenRequestExceedsLimit(t *testing.T) {
+	svc := &SandboxService{
+		quotaStore: fakeQuotaLimitStore{
+			limit:    &quota.Limit{TeamID: "team-1", Dimension: quota.DimensionCPU, LimitValue: 0},
+			usageErr: quota.ErrUsageStoreNotConfigured,
+		},
+	}
 	template := newQuotaTestTemplate("default", "500m", "1Gi")
 
 	err := svc.enforceSandboxCPUQuota(context.Background(), "team-1", template.Spec.MainContainer.Resources)

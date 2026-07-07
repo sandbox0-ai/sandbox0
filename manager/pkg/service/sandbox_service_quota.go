@@ -59,6 +59,10 @@ func (s *SandboxService) enforceQuota(ctx context.Context, teamID string, dimens
 	if limit == nil {
 		return nil
 	}
+	if requested > 0 && requested > limit.LimitValue {
+		decision := quota.Check(teamID, dimension, 0, requested, limit)
+		return fmt.Errorf("%w: %s", ErrQuotaExceeded, decision.Err())
+	}
 	current, err := s.currentQuotaUsage(ctx, teamID, dimension)
 	if err != nil {
 		return fmt.Errorf("load %s usage: %w", dimension, err)
@@ -78,7 +82,7 @@ func (s *SandboxService) currentQuotaUsage(ctx context.Context, teamID string, d
 	if !errors.Is(err, quota.ErrUsageStoreNotConfigured) {
 		return 0, err
 	}
-	current, ok, liveErr := s.currentLiveQuotaUsage(teamID, dimension)
+	current, ok, liveErr := s.currentLiveQuotaUsage(ctx, teamID, dimension)
 	if liveErr != nil {
 		return 0, liveErr
 	}
@@ -88,11 +92,17 @@ func (s *SandboxService) currentQuotaUsage(ctx context.Context, teamID string, d
 	return 0, err
 }
 
-func (s *SandboxService) currentLiveQuotaUsage(teamID string, dimension quota.Dimension) (int64, bool, error) {
+func (s *SandboxService) currentLiveQuotaUsage(ctx context.Context, teamID string, dimension quota.Dimension) (int64, bool, error) {
 	switch dimension {
 	case quota.DimensionActiveSandboxes, quota.DimensionCPU, quota.DimensionMemory:
 	default:
 		return 0, false, nil
+	}
+	if dimension == quota.DimensionActiveSandboxes {
+		current, ok, err := s.currentSandboxStoreActiveQuotaUsage(ctx, teamID)
+		if err != nil || ok {
+			return current, ok, err
+		}
 	}
 	if s == nil || s.podLister == nil {
 		return 0, false, nil
@@ -116,6 +126,35 @@ func (s *SandboxService) currentLiveQuotaUsage(teamID string, dimension quota.Di
 		}
 	}
 	return total, true, nil
+}
+
+func (s *SandboxService) currentSandboxStoreActiveQuotaUsage(ctx context.Context, teamID string) (int64, bool, error) {
+	if s == nil || s.sandboxStore == nil {
+		return 0, false, nil
+	}
+	records, err := s.sandboxStore.ListSandboxes(ctx, &ListSandboxesRequest{TeamID: teamID})
+	if err != nil {
+		return 0, true, fmt.Errorf("list sandbox records: %w", err)
+	}
+	var total int64
+	for _, record := range records {
+		if sandboxRecordCountsForActiveQuota(record) {
+			total++
+		}
+	}
+	return total, true, nil
+}
+
+func sandboxRecordCountsForActiveQuota(record *SandboxRecord) bool {
+	if record == nil || !record.DeletedAt.IsZero() {
+		return false
+	}
+	switch record.Status {
+	case SandboxStatusStarting, SandboxStatusRunning:
+		return true
+	default:
+		return false
+	}
 }
 
 func liveQuotaPodMatchesTeam(pod *corev1.Pod, teamID string) bool {

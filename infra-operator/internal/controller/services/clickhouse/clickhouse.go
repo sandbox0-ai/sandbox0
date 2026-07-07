@@ -30,6 +30,7 @@ const (
 	defaultHTTPPort        = int32(8123)
 	defaultSecretKey       = "dsn"
 	defaultUsername        = "sandbox0"
+	defaultConnectDatabase = "default"
 	defaultDataVolume      = "data"
 	defaultPersistenceSize = "50Gi"
 	DefaultMeteringDB      = "sandbox0_metering"
@@ -147,27 +148,63 @@ func (r *Reconciler) reconcileBuiltinSecret(ctx context.Context, infra *infrav1a
 	}
 	if errors.IsNotFound(err) {
 		password := common.GenerateRandomString(32)
-		observabilityDB := firstNonEmpty(cfg.Databases.Observability, obsclickhouse.DefaultDatabase)
+		secretData := builtinSecretData(infra, cfg, defaultUsername, password)
 		secret = &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: infra.Namespace},
 			Type:       corev1.SecretTypeOpaque,
-			StringData: map[string]string{
-				"username":               defaultUsername,
-				"password":               password,
-				"database":               observabilityDB,
-				"observability_database": observabilityDB,
-				"metering_database":      firstNonEmpty(cfg.Databases.Metering, DefaultMeteringDB),
-				"host":                   builtinHost(infra),
-				"port":                   fmt.Sprintf("%d", firstNonZero(cfg.Builtin.NativePort, defaultNativePort)),
-				"dsn":                    buildClickHouseDSN(defaultUsername, password, builtinHost(infra), firstNonZero(cfg.Builtin.NativePort, defaultNativePort), observabilityDB),
-			},
+			Data:       secretDataBytes(secretData),
 		}
 		if err := ctrl.SetControllerReference(infra, secret, r.Resources.Scheme); err != nil {
 			return err
 		}
 		return r.Resources.Client.Create(ctx, secret)
 	}
+	username := firstNonEmpty(string(secret.Data["username"]), defaultUsername)
+	password := string(secret.Data["password"])
+	if password == "" {
+		password = common.GenerateRandomString(32)
+	}
+	desired := builtinSecretData(infra, cfg, username, password)
+	changed := false
+	if secret.Data == nil {
+		secret.Data = map[string][]byte{}
+	}
+	for key, value := range desired {
+		if string(secret.Data[key]) == value {
+			continue
+		}
+		secret.Data[key] = []byte(value)
+		changed = true
+	}
+	if changed {
+		return r.Resources.Client.Update(ctx, secret)
+	}
 	return nil
+}
+
+func secretDataBytes(values map[string]string) map[string][]byte {
+	data := make(map[string][]byte, len(values))
+	for key, value := range values {
+		data[key] = []byte(value)
+	}
+	return data
+}
+
+func builtinSecretData(infra *infrav1alpha1.Sandbox0Infra, cfg resolvedConfig, username, password string) map[string]string {
+	observabilityDB := firstNonEmpty(cfg.Databases.Observability, obsclickhouse.DefaultDatabase)
+	meteringDB := firstNonEmpty(cfg.Databases.Metering, DefaultMeteringDB)
+	host := builtinHost(infra)
+	port := firstNonZero(cfg.Builtin.NativePort, defaultNativePort)
+	return map[string]string{
+		"username":               username,
+		"password":               password,
+		"database":               defaultConnectDatabase,
+		"observability_database": observabilityDB,
+		"metering_database":      meteringDB,
+		"host":                   host,
+		"port":                   fmt.Sprintf("%d", port),
+		"dsn":                    buildClickHouseDSN(username, password, host, port, defaultConnectDatabase),
+	}
 }
 
 func (r *Reconciler) reconcileBuiltinPVC(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, cfg resolvedConfig) error {

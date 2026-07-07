@@ -361,7 +361,30 @@ func TestValidateSpecSemanticsRejectsSandboxObservabilityWithoutClickHouse(t *te
 	}
 }
 
-func TestValidateSpecSemanticsRejectsClickHouseMeteringUntilWritePathMigration(t *testing.T) {
+func TestValidateSpecSemanticsRejectsMeteringWithoutClickHouse(t *testing.T) {
+	enabled := true
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			ClickHouse: &infrav1alpha1.ClickHouseConfig{
+				Type: infrav1alpha1.ClickHouseTypeDisabled,
+			},
+			Metering: &infrav1alpha1.MeteringConfig{
+				Enabled: &enabled,
+			},
+		},
+	}
+
+	err := validateSpecSemantics(context.Background(), newValidationTestClient(t), infra)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "metering requires spec.clickHouse type builtin or external") {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+}
+
+func TestValidateSpecSemanticsAcceptsMeteringWithClickHouse(t *testing.T) {
 	enabled := true
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
@@ -371,17 +394,12 @@ func TestValidateSpecSemanticsRejectsClickHouseMeteringUntilWritePathMigration(t
 			},
 			Metering: &infrav1alpha1.MeteringConfig{
 				Enabled: &enabled,
-				Backend: infrav1alpha1.MeteringBackendClickHouse,
 			},
 		},
 	}
 
-	err := validateSpecSemantics(context.Background(), newValidationTestClient(t), infra)
-	if err == nil {
-		t.Fatal("expected validation error")
-	}
-	if !strings.Contains(err.Error(), "metering backend clickhouse is not enabled until ClickHouse metering write-path migration is complete") {
-		t.Fatalf("unexpected validation error: %v", err)
+	if err := validateSpecSemantics(context.Background(), newValidationTestClient(t), infra); err != nil {
+		t.Fatalf("expected metering with clickhouse to be valid, got: %v", err)
 	}
 }
 

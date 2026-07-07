@@ -63,6 +63,7 @@ type ComponentPlan struct {
 	EnableObservability        bool
 	EnableClickHouse           bool
 	EnableSandboxObservability bool
+	EnableMetering             bool
 	EnableInitUser             bool
 	EnableClusterRegistration  bool
 }
@@ -236,6 +237,7 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 		EnableObservability:        common.ObservabilityBackendEnabled(infra),
 		EnableClickHouse:           infrav1alpha1.IsClickHouseEnabled(infra),
 		EnableSandboxObservability: infrav1alpha1.IsSandboxObservabilityEnabled(infra),
+		EnableMetering:             infrav1alpha1.IsMeteringEnabled(infra),
 		EnableInitUser:             enableDatabase && initUserConsumerEnabled(infra),
 		EnableClusterRegistration:  hasDataPlane && infra != nil && infra.Spec.Cluster != nil && infra.Spec.ControlPlane != nil,
 	}
@@ -685,11 +687,10 @@ func compileValidationPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPl
 	if compiled != nil && compiled.Components.EnableSandboxObservability && !compiled.Components.EnableClickHouse {
 		plan.FatalErrors = append(plan.FatalErrors, "sandboxObservability backend clickhouse requires spec.clickHouse type builtin or external")
 	}
-	if infrav1alpha1.IsClickHouseMeteringRequested(infra) {
+	if infrav1alpha1.IsMeteringEnabled(infra) {
 		if compiled != nil && !compiled.Components.EnableClickHouse {
-			plan.FatalErrors = append(plan.FatalErrors, "metering backend clickhouse requires spec.clickHouse type builtin or external")
+			plan.FatalErrors = append(plan.FatalErrors, "metering requires spec.clickHouse type builtin or external")
 		}
-		plan.FatalErrors = append(plan.FatalErrors, "metering backend clickhouse is not enabled until ClickHouse metering write-path migration is complete")
 	}
 	if infra.Spec.InitUser != nil && (compiled == nil || compiled.Components.EnableDatabase) && !initUserConsumerEnabled(infra) {
 		plan.FatalErrors = append(plan.FatalErrors, "initUser requires globalGateway, regionalGateway.authMode=self_hosted, or clusterGateway authMode public/both")
@@ -892,6 +893,9 @@ func compileStatusPlan(compiled *InfraPlan) StatusPlan {
 	if components.EnableClickHouse {
 		expected = append(expected, infrav1alpha1.ConditionTypeClickHouseReady)
 	}
+	if components.EnableMetering {
+		expected = append(expected, infrav1alpha1.ConditionTypeMeteringReady)
+	}
 	if components.EnableSandboxObservability {
 		expected = append(expected, infrav1alpha1.ConditionTypeSandboxObservabilityReady)
 	}
@@ -984,6 +988,9 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 	}
 	if compiled.Components.EnableClickHouse {
 		appendSuccessStep("clickhouse", infrav1alpha1.ConditionTypeClickHouseReady, "ClickHouseReady", "ClickHouse is ready", "ClickHouseFailed")
+	}
+	if compiled.Components.EnableMetering {
+		appendSuccessStep("metering", infrav1alpha1.ConditionTypeMeteringReady, "MeteringReady", "Metering backend is ready", "MeteringFailed")
 	}
 	if compiled.Components.EnableSandboxObservability {
 		appendSuccessStep("sandbox-observability", infrav1alpha1.ConditionTypeSandboxObservabilityReady, "SandboxObservabilityReady", "Sandbox observability backend is ready", "SandboxObservabilityFailed")

@@ -137,11 +137,10 @@ func validateClickHouseFeatureSemantics(infra *infrav1alpha1.Sandbox0Infra) []er
 	if infrav1alpha1.IsSandboxObservabilityEnabled(infra) && !clickHouseEnabled {
 		errs = append(errs, fmt.Errorf("sandboxObservability backend clickhouse requires spec.clickHouse type builtin or external"))
 	}
-	if infrav1alpha1.IsClickHouseMeteringRequested(infra) {
+	if infrav1alpha1.IsMeteringEnabled(infra) {
 		if !clickHouseEnabled {
-			errs = append(errs, fmt.Errorf("metering backend clickhouse requires spec.clickHouse type builtin or external"))
+			errs = append(errs, fmt.Errorf("metering requires spec.clickHouse type builtin or external"))
 		}
-		errs = append(errs, fmt.Errorf("metering backend clickhouse is not enabled until ClickHouse metering write-path migration is complete"))
 	}
 	return errs
 }

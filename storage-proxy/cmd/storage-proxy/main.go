@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"os"
@@ -15,7 +16,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/k8s"
-	"github.com/sandbox0-ai/sandbox0/pkg/metering"
+	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
+	meteringclickhouse "github.com/sandbox0-ai/sandbox0/pkg/metering/clickhouse"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
@@ -83,7 +85,7 @@ func main() {
 
 	// Initialize database connection pool
 	var repo *db.Repository
-	var meteringRepo *metering.Repository
+	var meteringRepo *meteringclickhouse.Repository
 	var quotaRepo *quota.Repository
 	var pool *pgxpool.Pool
 	var sharedClock *clock.Clock
@@ -106,18 +108,28 @@ func main() {
 		if err := runMigrations(context.Background(), pool, cfg.DatabaseSchema, zapLogger); err != nil {
 			zapLogger.Fatal("Failed to run database migrations", zap.Error(err))
 		}
-		if err := metering.RunMigrations(context.Background(), pool, observability.NewMigrateLogger(zapLogger)); err != nil {
-			zapLogger.Fatal("Failed to run metering migrations", zap.Error(err))
-		}
-		if err := quota.RunMigrations(context.Background(), pool, observability.NewMigrateLogger(zapLogger)); err != nil {
-			zapLogger.Fatal("Failed to run quota migrations", zap.Error(err))
+		if cfg.Metering.Enabled {
+			if err := quota.RunMigrations(context.Background(), pool, observability.NewMigrateLogger(zapLogger)); err != nil {
+				zapLogger.Fatal("Failed to run quota migrations", zap.Error(err))
+			}
 		}
 
 		repo = db.NewRepository(pool)
-		meteringRepo = metering.NewRepository(pool)
-		quotaRepo = quota.NewRepository(pool)
+		if cfg.Metering.Enabled {
+			quotaRepo = quota.NewRepository(pool)
+		}
 	} else {
 		zapLogger.Warn("DATABASE_URL not set, running without database persistence")
+	}
+	meteringDB, meteringRepo, err := initMetering(context.Background(), cfg, zapLogger)
+	if err != nil {
+		zapLogger.Fatal("Failed to initialize metering backend", zap.Error(err))
+	}
+	if meteringDB != nil {
+		defer meteringDB.Close()
+	}
+	if quotaRepo != nil {
+		quotaRepo.SetUsageStore(meteringRepo)
 	}
 
 	// Create volume manager
@@ -365,7 +377,42 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, logge
 	return nil
 }
 
-func runStorageMeteringFlushLoop(ctx context.Context, repo *metering.Repository, regionID string, logger *zap.Logger) {
+func initMetering(ctx context.Context, cfg *config.StorageProxyConfig, logger *zap.Logger) (*sql.DB, *meteringclickhouse.Repository, error) {
+	if cfg == nil || !cfg.Metering.Enabled {
+		return nil, nil, nil
+	}
+	ch := cfg.Metering.ClickHouse
+	timeout := ch.ConnectTimeout.Duration
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	connectCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	db, repo, err := meteringclickhouse.Open(connectCtx, meteringclickhouse.OpenConfig{
+		DSN: ch.DSN,
+		Schema: meteringclickhouse.Config{
+			Database:          ch.Database,
+			EventsTable:       ch.EventsTable,
+			WindowsTable:      ch.WindowsTable,
+			WatermarksTable:   ch.WatermarksTable,
+			SandboxStateTable: ch.SandboxStateTable,
+			StorageStateTable: ch.StorageStateTable,
+		},
+		Migrate: !ch.SkipSchemaMigration,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("initialize clickhouse metering backend: %w", err)
+	}
+	logger.Info("Metering ClickHouse backend initialized",
+		zap.String("database", ch.Database),
+		zap.String("events_table", ch.EventsTable),
+		zap.String("windows_table", ch.WindowsTable),
+		zap.Bool("schema_migration", !ch.SkipSchemaMigration),
+	)
+	return db, repo, nil
+}
+
+func runStorageMeteringFlushLoop(ctx context.Context, repo *meteringclickhouse.Repository, regionID string, logger *zap.Logger) {
 	const (
 		flushInterval = time.Minute
 		flushBatch    = 500
@@ -384,7 +431,7 @@ func runStorageMeteringFlushLoop(ctx context.Context, repo *metering.Repository,
 					logger.Warn("Failed to flush storage metering windows", zap.Error(err))
 					break
 				}
-				if err := repo.UpsertProducerWatermark(ctx, metering.ProducerStorage, regionID, before); err != nil {
+				if err := repo.UpsertProducerWatermark(ctx, meteringpkg.ProducerStorage, regionID, before); err != nil {
 					logger.Warn("Failed to update storage metering watermark", zap.Error(err))
 					break
 				}

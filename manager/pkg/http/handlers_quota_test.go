@@ -20,7 +20,6 @@ import (
 
 type quotaHandlerFakeDB struct {
 	limit     *quota.Limit
-	current   int64
 	putLimit  *quota.Limit
 	deletedID string
 }
@@ -48,11 +47,25 @@ func (db *quotaHandlerFakeDB) QueryRow(_ context.Context, sql string, _ ...any) 
 			return quotaHandlerFakeRow{err: pgx.ErrNoRows}
 		}
 		return quotaHandlerFakeRow{values: []any{db.limit.TeamID, db.limit.Dimension, db.limit.LimitValue}}
-	case strings.Contains(sql, "manager_sandbox_projection_state"):
-		return quotaHandlerFakeRow{values: []any{db.current}}
 	default:
 		return quotaHandlerFakeRow{err: errors.New("unexpected query")}
 	}
+}
+
+type quotaHandlerUsageStore struct {
+	current int64
+}
+
+func (s quotaHandlerUsageStore) CurrentUsage(context.Context, string, quota.Dimension) (int64, error) {
+	return s.current, nil
+}
+
+func (s quotaHandlerUsageStore) ProjectedStorageUsageGB(context.Context, string, quota.Dimension, string, string, int64) (int64, error) {
+	return 0, nil
+}
+
+func (s quotaHandlerUsageStore) AdditionalStorageUsageGB(context.Context, string, quota.Dimension, string, int64) (int64, error) {
+	return 0, nil
 }
 
 type quotaHandlerFakeRow struct {
@@ -82,12 +95,13 @@ func (r quotaHandlerFakeRow) Scan(dest ...any) error {
 func TestGetTeamQuotaReturnsUsageStatus(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
+	repo := quota.NewRepositoryWithDB(&quotaHandlerFakeDB{
+		limit: &quota.Limit{TeamID: "team-1", Dimension: quota.DimensionActiveSandboxes, LimitValue: 5},
+	})
+	repo.SetUsageStore(quotaHandlerUsageStore{current: 2})
 	server := &Server{
-		quotaRepo: quota.NewRepositoryWithDB(&quotaHandlerFakeDB{
-			limit:   &quota.Limit{TeamID: "team-1", Dimension: quota.DimensionActiveSandboxes, LimitValue: 5},
-			current: 2,
-		}),
-		logger: zap.NewNop(),
+		quotaRepo: repo,
+		logger:    zap.NewNop(),
 	}
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
@@ -119,8 +133,10 @@ func TestGetTeamQuotaReturnsUsageStatus(t *testing.T) {
 func TestGetTeamQuotaReturnsUnlimitedWhenLimitIsUnset(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
+	repo := quota.NewRepositoryWithDB(&quotaHandlerFakeDB{})
+	repo.SetUsageStore(quotaHandlerUsageStore{current: 7})
 	server := &Server{
-		quotaRepo: quota.NewRepositoryWithDB(&quotaHandlerFakeDB{current: 7}),
+		quotaRepo: repo,
 		logger:    zap.NewNop(),
 	}
 	recorder := httptest.NewRecorder()
@@ -151,12 +167,13 @@ func TestGetTeamQuotaReturnsDefaultLimitWhenDBLimitIsUnset(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	repo, err := quota.NewRepositoryWithDBDefaults(
-		&quotaHandlerFakeDB{current: 1},
+		&quotaHandlerFakeDB{},
 		[]quota.DefaultLimit{{Dimension: quota.DimensionActiveSandboxes, LimitValue: 3}},
 	)
 	if err != nil {
 		t.Fatalf("NewRepositoryWithDBDefaults: %v", err)
 	}
+	repo.SetUsageStore(quotaHandlerUsageStore{current: 1})
 	server := &Server{
 		quotaRepo: repo,
 		logger:    zap.NewNop(),

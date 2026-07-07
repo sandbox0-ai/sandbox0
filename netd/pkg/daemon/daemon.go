@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net"
@@ -23,7 +24,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/watcher"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
-	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
+	meteringclickhouse "github.com/sandbox0-ai/sandbox0/pkg/metering/clickhouse"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
@@ -48,6 +49,24 @@ type Daemon struct {
 
 type runtimeResource interface {
 	Close()
+}
+
+type sqlRuntimeResource struct {
+	db *sql.DB
+}
+
+func (r sqlRuntimeResource) Close() {
+	if r.db != nil {
+		_ = r.db.Close()
+	}
+}
+
+type multiRuntimeResource []runtimeResource
+
+func (m multiRuntimeResource) Close() {
+	for _, resource := range m {
+		closeRuntimeResource(resource)
+	}
 }
 
 func New(cfg *config.NetdConfig, logger *zap.Logger, obsProvider *observability.Provider) *Daemon {
@@ -125,14 +144,18 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 	}
 	tracker := conntrack.NewTracker()
 	var usageAggregator *netdmetering.Aggregator
-	var meteringPool *pgxpool.Pool
+	var databasePool *pgxpool.Pool
+	var meteringDB runtimeResource
 	runtimeResourcesRegistered := false
 	defer func() {
 		if runtimeResourcesRegistered {
 			return
 		}
-		if meteringPool != nil {
-			meteringPool.Close()
+		if meteringDB != nil {
+			meteringDB.Close()
+		}
+		if databasePool != nil {
+			databasePool.Close()
 		}
 		if conntrackManager != nil {
 			conntrackManager.Close()
@@ -148,21 +171,29 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 		if err != nil {
 			return fmt.Errorf("create netd database pool: %w", err)
 		}
-		meteringPool = pool
-		if err := meteringpkg.RunMigrations(ctx, meteringPool, observability.NewMigrateLogger(d.logger)); err != nil {
-			return fmt.Errorf("run metering migrations: %w", err)
-		}
-		if err := quota.RunMigrations(ctx, meteringPool, observability.NewMigrateLogger(d.logger)); err != nil {
+		databasePool = pool
+		if err := quota.RunMigrations(ctx, databasePool, observability.NewMigrateLogger(d.logger)); err != nil {
 			return fmt.Errorf("run quota migrations: %w", err)
 		}
+	}
+	if d.cfg.Metering.Enabled {
+		db, repo, err := d.openMetering(ctx)
+		if err != nil {
+			return err
+		}
+		meteringDB = sqlRuntimeResource{db: db}
 		usageAggregator = netdmetering.NewAggregator(
-			netdmetering.NewRecorder(meteringpkg.NewRepository(meteringPool)),
+			netdmetering.NewRecorder(repo),
 			d.cfg.RegionID,
 			d.cfg.ClusterID,
 			d.cfg.NodeName,
 			d.logger,
 		)
-		usageAggregator.SetQuotaStore(quota.NewRepository(meteringPool))
+		if databasePool != nil {
+			quotaRepo := quota.NewRepository(databasePool)
+			quotaRepo.SetUsageStore(repo)
+			usageAggregator.SetQuotaStore(quotaRepo)
+		}
 	}
 	syncTrigger := make(chan struct{}, 1)
 	triggerSync := func() {
@@ -228,8 +259,8 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 		return err
 	}
 	d.proxyServer = proxyServer
-	if d.cfg.EgressAuthResolverURL != "" && meteringPool != nil {
-		startCredentialSourceRotationListener(ctx, meteringPool, d.logger, proxyServer)
+	if d.cfg.EgressAuthResolverURL != "" && databasePool != nil {
+		startCredentialSourceRotationListener(ctx, databasePool, d.logger, proxyServer)
 	}
 	proxyServer.Start(ctx)
 	if proxyExitCh != nil {
@@ -286,8 +317,15 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 			conntrackCloser = conntrackManager
 		}
 		var meteringCloser runtimeResource
-		if meteringPool != nil {
-			meteringCloser = meteringPool
+		if meteringDB != nil {
+			meteringCloser = multiRuntimeResource{meteringDB}
+		}
+		if databasePool != nil {
+			if meteringCloser == nil {
+				meteringCloser = databasePool
+			} else {
+				meteringCloser = append(meteringCloser.(multiRuntimeResource), databasePool)
+			}
 		}
 		d.registerRuntimeResources(conntrackCloser, meteringCloser)
 		if usageAggregator != nil {
@@ -305,6 +343,41 @@ func (d *Daemon) dbConfigModifier() func(*pgxpool.Config) error {
 		return nil
 	}
 	return d.obsProvider.Pgx.ConfigModifier()
+}
+
+func (d *Daemon) openMetering(ctx context.Context) (*sql.DB, *meteringclickhouse.Repository, error) {
+	if d == nil || d.cfg == nil || !d.cfg.Metering.Enabled {
+		return nil, nil, nil
+	}
+	ch := d.cfg.Metering.ClickHouse
+	timeout := ch.ConnectTimeout.Duration
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	connectCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	db, repo, err := meteringclickhouse.Open(connectCtx, meteringclickhouse.OpenConfig{
+		DSN: strings.TrimSpace(ch.DSN),
+		Schema: meteringclickhouse.Config{
+			Database:          ch.Database,
+			EventsTable:       ch.EventsTable,
+			WindowsTable:      ch.WindowsTable,
+			WatermarksTable:   ch.WatermarksTable,
+			SandboxStateTable: ch.SandboxStateTable,
+			StorageStateTable: ch.StorageStateTable,
+		},
+		Migrate: !ch.SkipSchemaMigration,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("initialize clickhouse metering backend: %w", err)
+	}
+	d.logger.Info("Metering ClickHouse backend initialized",
+		zap.String("database", ch.Database),
+		zap.String("events_table", ch.EventsTable),
+		zap.String("windows_table", ch.WindowsTable),
+		zap.Bool("schema_migration", !ch.SkipSchemaMigration),
+	)
+	return db, repo, nil
 }
 
 func (d *Daemon) egressAuthHTTPClient() *http.Client {

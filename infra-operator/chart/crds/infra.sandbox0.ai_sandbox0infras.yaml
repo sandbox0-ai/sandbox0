@@ -1737,20 +1737,6 @@ spec:
                 default: {}
                 description: Metering configures the region usage ledger backend.
                 properties:
-                  backend:
-                    allOf:
-                    - enum:
-                      - postgres
-                      - clickhouse
-                    - enum:
-                      - postgres
-                      - clickhouse
-                    default: postgres
-                    description: |-
-                      Backend selects the usage ledger backend. PostgreSQL is the current default.
-                      ClickHouse is accepted by the CRD surface but guarded until write-path
-                      migration is complete.
-                    type: string
                   clickHouse:
                     default: {}
                     description: ClickHouse configures table names and write policy
@@ -1806,8 +1792,9 @@ spec:
                         type: object
                     type: object
                   enabled:
-                    description: Enabled enables metering. When omitted, existing
-                      PostgreSQL metering behavior is retained.
+                    default: false
+                    description: Enabled enables ClickHouse-backed metering. Metering
+                      is disabled by default.
                     type: boolean
                 type: object
               observability:

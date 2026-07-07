@@ -56,8 +56,7 @@ type fakeHTTPSharedVolumeBarrier struct {
 }
 
 type fakeQuotaDB struct {
-	limit        *quota.Limit
-	currentBytes int64
+	limit *quota.Limit
 }
 
 type fakeQuotaRow struct {
@@ -76,11 +75,26 @@ func (db *fakeQuotaDB) QueryRow(_ context.Context, sql string, _ ...any) pgx.Row
 			return fakeQuotaRow{err: pgx.ErrNoRows}
 		}
 		return fakeQuotaRow{values: []any{db.limit.TeamID, db.limit.Dimension, db.limit.LimitValue}}
-	case strings.Contains(sql, "metering.storage_projection_state"):
-		return fakeQuotaRow{values: []any{db.currentBytes}}
 	default:
 		return fakeQuotaRow{err: errors.New("unexpected quota query")}
 	}
+}
+
+type fakeQuotaUsageStore struct {
+	projectedGB  int64
+	additionalGB int64
+}
+
+func (s fakeQuotaUsageStore) CurrentUsage(context.Context, string, quota.Dimension) (int64, error) {
+	return 0, nil
+}
+
+func (s fakeQuotaUsageStore) ProjectedStorageUsageGB(context.Context, string, quota.Dimension, string, string, int64) (int64, error) {
+	return s.projectedGB, nil
+}
+
+func (s fakeQuotaUsageStore) AdditionalStorageUsageGB(context.Context, string, quota.Dimension, string, int64) (int64, error) {
+	return s.additionalGB, nil
 }
 
 func (r fakeQuotaRow) Scan(dest ...any) error {
@@ -721,13 +735,15 @@ func TestWriteVolumeFileChecksQuotaBeforeProxyingToOwner(t *testing.T) {
 
 	fileRPC := &fakeHTTPVolumeFileRPC{}
 	server, volMgr := newVolumeFileTestServer(fileRPC)
-	server.quotaRepo = quota.NewRepositoryWithDB(&fakeQuotaDB{
+	quotaRepo := quota.NewRepositoryWithDB(&fakeQuotaDB{
 		limit: &quota.Limit{
 			TeamID:     "team-a",
 			Dimension:  quota.DimensionVolumeStorageGB,
 			LimitValue: 0,
 		},
 	})
+	quotaRepo.SetUsageStore(fakeQuotaUsageStore{additionalGB: 1})
+	server.quotaRepo = quotaRepo
 	repo := server.repo.(*fakeHTTPRepo)
 	repo.activeMounts["vol-1"] = []*db.VolumeMount{
 		{

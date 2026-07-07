@@ -30,11 +30,17 @@ type quotaStore interface {
 	CurrentUsage(ctx context.Context, teamID string, dimension quota.Dimension) (int64, error)
 }
 
-type repositoryAdapter struct {
-	repo *meteringpkg.Repository
+type repository interface {
+	InTx(ctx context.Context, fn func(tx pgx.Tx) error) error
+	AppendWindowTx(ctx context.Context, tx pgx.Tx, window *meteringpkg.Window) error
+	UpsertProducerWatermarkTx(ctx context.Context, tx pgx.Tx, producer string, regionID string, completeBefore time.Time) error
 }
 
-func NewRecorder(repo *meteringpkg.Repository) Recorder {
+type repositoryAdapter struct {
+	repo repository
+}
+
+func NewRecorder(repo repository) Recorder {
 	if repo == nil {
 		return nil
 	}
@@ -48,7 +54,7 @@ func (r *repositoryAdapter) RunInTx(ctx context.Context, fn func(tx txRecorder) 
 }
 
 type repositoryTxAdapter struct {
-	repo *meteringpkg.Repository
+	repo repository
 	tx   pgx.Tx
 }
 

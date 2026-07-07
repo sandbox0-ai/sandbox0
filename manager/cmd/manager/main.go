@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"os"
@@ -31,7 +32,7 @@ import (
 	egressauthruntime "github.com/sandbox0-ai/sandbox0/pkg/egressauth/runtime"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	s0k8s "github.com/sandbox0-ai/sandbox0/pkg/k8s"
-	"github.com/sandbox0-ai/sandbox0/pkg/metering"
+	meteringclickhouse "github.com/sandbox0-ai/sandbox0/pkg/metering/clickhouse"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
@@ -134,11 +135,10 @@ func main() {
 	if err := runTemplateMigrations(ctx, pool, logger); err != nil {
 		logger.Fatal("Failed to run template migrations", zap.Error(err))
 	}
-	if err := runMeteringMigrations(ctx, pool, logger); err != nil {
-		logger.Fatal("Failed to run metering migrations", zap.Error(err))
-	}
-	if err := runQuotaMigrations(ctx, pool, logger); err != nil {
-		logger.Fatal("Failed to run quota migrations", zap.Error(err))
+	if cfg.Metering.Enabled {
+		if err := runQuotaMigrations(ctx, pool, logger); err != nil {
+			logger.Fatal("Failed to run quota migrations", zap.Error(err))
+		}
 	}
 	if err := runEgressAuthMigrations(ctx, pool, logger); err != nil {
 		logger.Fatal("Failed to run egress auth migrations", zap.Error(err))
@@ -247,19 +247,27 @@ func main() {
 
 	sandboxIndex := service.NewSandboxIndex()
 	podInformer.Informer().AddEventHandler(sandboxIndex.ResourceEventHandler())
-	meteringRepo := metering.NewRepository(pool)
+	meteringDB, meteringRepo, err := initMetering(ctx, cfg, logger)
+	if err != nil {
+		logger.Fatal("Failed to initialize metering backend", zap.Error(err))
+	}
+	if meteringDB != nil {
+		defer meteringDB.Close()
+	}
 	sandboxStore := service.NewPGSandboxStore(pool)
-	lifecycleProjector := managermetering.NewLifecycleProjector(managermetering.NewStore(meteringRepo), cfg.RegionID, cfg.DefaultClusterId)
-	lifecycleProjector.SetLogger(logger)
-	lifecycleProjector.SetMetrics(managerMetrics)
-	lifecycleProjector.SetRuntimePauseLookup(func(ctx context.Context, info managermetering.RuntimeDeletionInfo) (bool, error) {
-		record, err := sandboxStore.GetSandbox(ctx, info.SandboxID)
-		if err != nil || record == nil {
-			return false, err
-		}
-		return service.SandboxRecordDeletionIsRuntimeOnly(record, info.Namespace, info.PodName, info.RuntimeGeneration), nil
-	})
-	podInformer.Informer().AddEventHandler(lifecycleProjector.ResourceEventHandler())
+	if meteringRepo != nil {
+		lifecycleProjector := managermetering.NewLifecycleProjector(managermetering.NewStore(meteringRepo), cfg.RegionID, cfg.DefaultClusterId)
+		lifecycleProjector.SetLogger(logger)
+		lifecycleProjector.SetMetrics(managerMetrics)
+		lifecycleProjector.SetRuntimePauseLookup(func(ctx context.Context, info managermetering.RuntimeDeletionInfo) (bool, error) {
+			record, err := sandboxStore.GetSandbox(ctx, info.SandboxID)
+			if err != nil || record == nil {
+				return false, err
+			}
+			return service.SandboxRecordDeletionIsRuntimeOnly(record, info.Namespace, info.PodName, info.RuntimeGeneration), nil
+		})
+		podInformer.Informer().AddEventHandler(lifecycleProjector.ResourceEventHandler())
+	}
 
 	// Create network policy service for building policy annotations
 	networkPolicyService := service.NewNetworkPolicyService(logger)
@@ -366,7 +374,7 @@ func main() {
 		logger,
 		managerMetrics,
 	)
-	quotaRepo, err := buildQuotaRepository(pool, cfg)
+	quotaRepo, err := buildQuotaRepository(pool, cfg, meteringRepo)
 	if err != nil {
 		logger.Fatal("Invalid quota configuration", zap.Error(err))
 	}
@@ -687,17 +695,6 @@ func runTemplateMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.
 	return nil
 }
 
-func runMeteringMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {
-	logger.Info("Running metering migrations")
-
-	if err := metering.RunMigrations(ctx, pool, observability.NewMigrateLogger(logger)); err != nil {
-		return fmt.Errorf("metering migrations: %w", err)
-	}
-
-	logger.Info("Metering migrations completed successfully")
-	return nil
-}
-
 func runQuotaMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {
 	logger.Info("Running quota migrations")
 
@@ -720,8 +717,51 @@ func runEgressAuthMigrations(ctx context.Context, pool *pgxpool.Pool, logger *za
 	return nil
 }
 
-func buildQuotaRepository(pool *pgxpool.Pool, cfg *config.ManagerConfig) (*quota.Repository, error) {
-	return quota.NewRepositoryWithDefaults(pool, defaultTeamQuotaLimits(cfg))
+func initMetering(ctx context.Context, cfg *config.ManagerConfig, logger *zap.Logger) (*sql.DB, *meteringclickhouse.Repository, error) {
+	if cfg == nil || !cfg.Metering.Enabled {
+		return nil, nil, nil
+	}
+	ch := cfg.Metering.ClickHouse
+	timeout := ch.ConnectTimeout.Duration
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	connectCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	db, repo, err := meteringclickhouse.Open(connectCtx, meteringclickhouse.OpenConfig{
+		DSN: strings.TrimSpace(ch.DSN),
+		Schema: meteringclickhouse.Config{
+			Database:          ch.Database,
+			EventsTable:       ch.EventsTable,
+			WindowsTable:      ch.WindowsTable,
+			WatermarksTable:   ch.WatermarksTable,
+			SandboxStateTable: ch.SandboxStateTable,
+			StorageStateTable: ch.StorageStateTable,
+		},
+		Migrate: !ch.SkipSchemaMigration,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("initialize clickhouse metering backend: %w", err)
+	}
+	logger.Info("Metering ClickHouse backend initialized",
+		zap.String("database", ch.Database),
+		zap.String("events_table", ch.EventsTable),
+		zap.String("windows_table", ch.WindowsTable),
+		zap.Bool("schema_migration", !ch.SkipSchemaMigration),
+	)
+	return db, repo, nil
+}
+
+func buildQuotaRepository(pool *pgxpool.Pool, cfg *config.ManagerConfig, usageStore quota.UsageStore) (*quota.Repository, error) {
+	if usageStore == nil {
+		return nil, nil
+	}
+	repo, err := quota.NewRepositoryWithDefaults(pool, defaultTeamQuotaLimits(cfg))
+	if err != nil || repo == nil {
+		return repo, err
+	}
+	repo.SetUsageStore(usageStore)
+	return repo, nil
 }
 
 func defaultTeamQuotaLimits(cfg *config.ManagerConfig) []quota.DefaultLimit {

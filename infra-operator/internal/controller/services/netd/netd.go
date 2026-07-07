@@ -16,6 +16,7 @@ import (
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	meteringsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/metering"
 	redissvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/redis"
 	sandboxobssvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sandboxobservability"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
@@ -84,6 +85,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 	}
 	config.RegionID = compiledPlan.Netd.RegionID
 	config.ClusterID = compiledPlan.Netd.ClusterID
+	if err := meteringsvc.ApplyNetdConfig(ctx, r.Resources.Client, compiledPlan.Scope.Owner(), config); err != nil {
+		return err
+	}
 	if config.EgressAuthResolverURL == "" {
 		config.EgressAuthResolverURL = compiledPlan.Netd.EgressAuthResolverURL
 	}

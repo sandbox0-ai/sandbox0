@@ -516,32 +516,16 @@ type ClickHouseSchemaMigrationConfig struct {
 
 // MeteringConfig defines the region usage ledger backend.
 type MeteringConfig struct {
-	// Enabled enables metering. When omitted, existing PostgreSQL metering behavior is retained.
+	// Enabled enables ClickHouse-backed metering. Metering is disabled by default.
 	// +optional
+	// +kubebuilder:default=false
 	Enabled *bool `json:"enabled,omitempty"`
-
-	// Backend selects the usage ledger backend. PostgreSQL is the current default.
-	// ClickHouse is accepted by the CRD surface but guarded until write-path
-	// migration is complete.
-	// +optional
-	// +kubebuilder:validation:Enum=postgres;clickhouse
-	// +kubebuilder:default=postgres
-	Backend MeteringBackend `json:"backend,omitempty"`
 
 	// ClickHouse configures table names and write policy for ClickHouse metering.
 	// +optional
 	// +kubebuilder:default={}
 	ClickHouse MeteringClickHouseConfig `json:"clickHouse,omitempty"`
 }
-
-// MeteringBackend selects the usage ledger backend.
-// +kubebuilder:validation:Enum=postgres;clickhouse
-type MeteringBackend string
-
-const (
-	MeteringBackendPostgres   MeteringBackend = "postgres"
-	MeteringBackendClickHouse MeteringBackend = "clickhouse"
-)
 
 // MeteringClickHouseConfig defines ClickHouse metering table and durability settings.
 type MeteringClickHouseConfig struct {

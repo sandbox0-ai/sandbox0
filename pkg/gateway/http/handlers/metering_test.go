@@ -15,20 +15,22 @@ import (
 )
 
 type fakeMeteringReader struct {
-	status         *metering.Status
-	statusErr      error
-	events         []*metering.Event
-	eventsErr      error
-	windows        []*metering.Window
-	windowsErr     error
-	gotFallback    string
-	gotAfter       int64
-	gotLimit       int
-	gotWindowAfter int64
-	gotWindowLimit int
-	statusCalls    int
-	listEventCalls int
-	listWinCalls   int
+	status          *metering.Status
+	statusErr       error
+	events          []*metering.Event
+	eventsErr       error
+	windows         []*metering.Window
+	windowsErr      error
+	nextCursor      string
+	nextWinCursor   string
+	gotFallback     string
+	gotCursor       string
+	gotLimit        int
+	gotWindowCursor string
+	gotWindowLimit  int
+	statusCalls     int
+	listEventCalls  int
+	listWinCalls    int
 }
 
 func (f *fakeMeteringReader) GetStatus(_ context.Context, fallbackRegionID string) (*metering.Status, error) {
@@ -40,32 +42,34 @@ func (f *fakeMeteringReader) GetStatus(_ context.Context, fallbackRegionID strin
 	return f.status, nil
 }
 
-func (f *fakeMeteringReader) ListEventsAfter(_ context.Context, afterSequence int64, limit int) ([]*metering.Event, error) {
+func (f *fakeMeteringReader) ListEvents(_ context.Context, cursor string, limit int) ([]*metering.Event, string, error) {
 	f.listEventCalls++
-	f.gotAfter = afterSequence
+	f.gotCursor = cursor
 	f.gotLimit = limit
 	if f.eventsErr != nil {
-		return nil, f.eventsErr
+		return nil, "", f.eventsErr
 	}
-	return f.events, nil
+	return f.events, f.nextCursor, nil
 }
 
-func (f *fakeMeteringReader) ListWindowsAfter(_ context.Context, afterSequence int64, limit int) ([]*metering.Window, error) {
+func (f *fakeMeteringReader) ListWindows(_ context.Context, cursor string, limit int) ([]*metering.Window, string, error) {
 	f.listWinCalls++
-	f.gotWindowAfter = afterSequence
+	f.gotWindowCursor = cursor
 	f.gotWindowLimit = limit
 	if f.windowsErr != nil {
-		return nil, f.windowsErr
+		return nil, "", f.windowsErr
 	}
-	return f.windows, nil
+	return f.windows, f.nextWinCursor, nil
 }
 
 type meteringEventsResponse struct {
-	Events []*metering.Event `json:"events"`
+	Events     []*metering.Event `json:"events"`
+	NextCursor string            `json:"next_cursor"`
 }
 
 type meteringWindowsResponse struct {
-	Windows []*metering.Window `json:"windows"`
+	Windows    []*metering.Window `json:"windows"`
+	NextCursor string             `json:"next_cursor"`
 }
 
 func TestMeteringHandlerGetStatus(t *testing.T) {
@@ -89,11 +93,11 @@ func TestMeteringHandlerGetStatus(t *testing.T) {
 		completeBefore := time.Date(2026, 3, 12, 8, 0, 0, 0, time.UTC)
 		repo := &fakeMeteringReader{
 			status: &metering.Status{
-				RegionID:             "aws-us-east-1",
-				LatestEventSequence:  42,
-				LatestWindowSequence: 18,
-				CompleteBefore:       &completeBefore,
-				ProducerCount:        2,
+				RegionID:           "aws-us-east-1",
+				LatestEventCursor:  "event-cursor",
+				LatestWindowCursor: "window-cursor",
+				CompleteBefore:     &completeBefore,
+				ProducerCount:      2,
 			},
 		}
 		handler := NewMeteringHandler(repo, "aws-us-east-1", zap.NewNop())
@@ -118,11 +122,11 @@ func TestMeteringHandlerGetStatus(t *testing.T) {
 		if apiErr != nil {
 			t.Fatalf("unexpected api error: %+v", apiErr)
 		}
-		if resp.LatestEventSequence != 42 {
-			t.Fatalf("latest_event_sequence = %d, want 42", resp.LatestEventSequence)
+		if resp.LatestEventCursor != "event-cursor" {
+			t.Fatalf("latest_event_cursor = %q, want event-cursor", resp.LatestEventCursor)
 		}
-		if resp.LatestWindowSequence != 18 {
-			t.Fatalf("latest_window_sequence = %d, want 18", resp.LatestWindowSequence)
+		if resp.LatestWindowCursor != "window-cursor" {
+			t.Fatalf("latest_window_cursor = %q, want window-cursor", resp.LatestWindowCursor)
 		}
 		if resp.ProducerCount != 2 {
 			t.Fatalf("producer_count = %d, want 2", resp.ProducerCount)
@@ -150,45 +154,28 @@ func TestMeteringHandlerGetStatus(t *testing.T) {
 func TestMeteringHandlerListEvents(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	t.Run("rejects invalid after_sequence", func(t *testing.T) {
-		repo := &fakeMeteringReader{}
+	t.Run("rejects invalid cursor from repository", func(t *testing.T) {
+		repo := &fakeMeteringReader{eventsErr: errors.New("invalid cursor: bad")}
 		handler := NewMeteringHandler(repo, "", zap.NewNop())
 
 		recorder := httptest.NewRecorder()
 		ctx, _ := gin.CreateTestContext(recorder)
-		ctx.Request = httptest.NewRequest(http.MethodGet, "/internal/v1/metering/events?after_sequence=bad", nil)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/internal/v1/metering/events?cursor=bad", nil)
 
 		handler.ListEvents(ctx)
 
 		if recorder.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
 		}
-		if repo.listEventCalls != 0 {
-			t.Fatalf("list events should not be called for invalid after_sequence")
-		}
-	})
-
-	t.Run("rejects negative after_sequence", func(t *testing.T) {
-		repo := &fakeMeteringReader{}
-		handler := NewMeteringHandler(repo, "", zap.NewNop())
-
-		recorder := httptest.NewRecorder()
-		ctx, _ := gin.CreateTestContext(recorder)
-		ctx.Request = httptest.NewRequest(http.MethodGet, "/internal/v1/metering/events?after_sequence=-1", nil)
-
-		handler.ListEvents(ctx)
-
-		if recorder.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
-		}
-		if repo.listEventCalls != 0 {
-			t.Fatalf("list events should not be called for negative after_sequence")
+		if repo.listEventCalls != 1 {
+			t.Fatalf("list events calls = %d, want 1", repo.listEventCalls)
 		}
 	})
 
 	t.Run("clamps limit and returns events", func(t *testing.T) {
 		occurredAt := time.Date(2026, 3, 12, 9, 30, 0, 0, time.UTC)
 		repo := &fakeMeteringReader{
+			nextCursor: "next-events",
 			events: []*metering.Event{
 				{
 					Sequence:    11,
@@ -209,15 +196,15 @@ func TestMeteringHandlerListEvents(t *testing.T) {
 
 		recorder := httptest.NewRecorder()
 		ctx, _ := gin.CreateTestContext(recorder)
-		ctx.Request = httptest.NewRequest(http.MethodGet, "/internal/v1/metering/events?after_sequence=10&limit=5000", nil)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/internal/v1/metering/events?cursor=event-cursor&limit=5000", nil)
 
 		handler.ListEvents(ctx)
 
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
 		}
-		if repo.gotAfter != 10 {
-			t.Fatalf("after_sequence = %d, want 10", repo.gotAfter)
+		if repo.gotCursor != "event-cursor" {
+			t.Fatalf("cursor = %q, want event-cursor", repo.gotCursor)
 		}
 		if repo.gotLimit != 1000 {
 			t.Fatalf("limit = %d, want 1000", repo.gotLimit)
@@ -232,6 +219,9 @@ func TestMeteringHandlerListEvents(t *testing.T) {
 		}
 		if len(resp.Events) != 1 {
 			t.Fatalf("event count = %d, want 1", len(resp.Events))
+		}
+		if resp.NextCursor != "next-events" {
+			t.Fatalf("next_cursor = %q, want next-events", resp.NextCursor)
 		}
 		if resp.Events[0].Sequence != 11 {
 			t.Fatalf("event sequence = %d, want 11", resp.Events[0].Sequence)
@@ -279,6 +269,7 @@ func TestMeteringHandlerListWindows(t *testing.T) {
 		windowEnd := windowStart.Add(5 * time.Minute)
 		recordedAt := windowEnd.Add(5 * time.Second)
 		repo := &fakeMeteringReader{
+			nextWinCursor: "next-windows",
 			windows: []*metering.Window{
 				{
 					Sequence:    3,
@@ -302,15 +293,15 @@ func TestMeteringHandlerListWindows(t *testing.T) {
 
 		recorder := httptest.NewRecorder()
 		ctx, _ := gin.CreateTestContext(recorder)
-		ctx.Request = httptest.NewRequest(http.MethodGet, "/internal/v1/metering/windows?after_sequence=2&limit=5000", nil)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/internal/v1/metering/windows?cursor=window-cursor&limit=5000", nil)
 
 		handler.ListWindows(ctx)
 
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
 		}
-		if repo.gotWindowAfter != 2 {
-			t.Fatalf("after_sequence = %d, want 2", repo.gotWindowAfter)
+		if repo.gotWindowCursor != "window-cursor" {
+			t.Fatalf("cursor = %q, want window-cursor", repo.gotWindowCursor)
 		}
 		if repo.gotWindowLimit != 1000 {
 			t.Fatalf("limit = %d, want 1000", repo.gotWindowLimit)
@@ -325,6 +316,9 @@ func TestMeteringHandlerListWindows(t *testing.T) {
 		}
 		if len(resp.Windows) != 1 {
 			t.Fatalf("window count = %d, want 1", len(resp.Windows))
+		}
+		if resp.NextCursor != "next-windows" {
+			t.Fatalf("next_cursor = %q, want next-windows", resp.NextCursor)
 		}
 		if resp.Windows[0].Sequence != 3 {
 			t.Fatalf("window sequence = %d, want 3", resp.Windows[0].Sequence)

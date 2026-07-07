@@ -13,7 +13,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	gatewaymigrations "github.com/sandbox0-ai/sandbox0/pkg/gateway/migrations"
-	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	"go.uber.org/zap"
@@ -60,18 +59,19 @@ func main() {
 			logger.Fatal("Failed to run database migrations", zap.Error(err))
 		}
 	}
-	if pool != nil {
-		if err := metering.RunMigrations(ctx, pool, observability.NewMigrateLogger(logger)); err != nil {
-			logger.Fatal("Failed to run metering migrations", zap.Error(err))
-		}
-	}
-
 	sandboxObservabilityDB, sandboxObservabilityRepo, err := initSandboxObservability(ctx, cfg, logger)
 	if err != nil {
 		logger.Fatal("Failed to initialize sandbox observability backend", zap.Error(err))
 	}
 	if sandboxObservabilityDB != nil {
 		defer sandboxObservabilityDB.Close()
+	}
+	meteringDB, meteringRepo, err := initMetering(ctx, cfg, logger)
+	if err != nil {
+		logger.Fatal("Failed to initialize metering backend", zap.Error(err))
+	}
+	if meteringDB != nil {
+		defer meteringDB.Close()
 	}
 
 	// Create HTTP server
@@ -81,6 +81,7 @@ func main() {
 		logger,
 		obsProvider,
 		http.WithSandboxObservabilityRepository(sandboxObservabilityRepo),
+		http.WithMeteringReader(meteringRepo),
 	)
 	if err != nil {
 		logger.Fatal("Failed to create HTTP server", zap.Error(err))

@@ -127,6 +127,10 @@ type StorageProxyConfig struct {
 	DefaultClusterId string `yaml:"default_cluster_id" json:"-"`
 	RegionID         string `yaml:"region_id" json:"-"`
 
+	// Metering configures the optional region usage ledger.
+	// +optional
+	Metering MeteringConfig `yaml:"metering" json:"metering"`
+
 	// Monitoring
 	// +optional
 	// +kubebuilder:default=true

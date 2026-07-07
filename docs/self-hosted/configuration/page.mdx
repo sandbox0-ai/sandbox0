@@ -48,7 +48,7 @@ Schedulers consume the manager cluster summary fields `claim_start_limit`, `clai
 
 ## Metering Boundary
 
-Sandbox0 records usage truth in the region usage ledger and exports it from the region-scoped metering endpoints. The default backend is PostgreSQL. The `Sandbox0Infra` CRD includes a ClickHouse metering backend surface, but the operator rejects `spec.metering.backend: clickhouse` until the service write paths have been migrated. Billing systems should rate exported usage windows outside the open-source data plane.
+Sandbox0 records usage truth in the region usage ledger and exports it from the region-scoped metering endpoints. Metering is disabled by default. When `spec.metering.enabled` is `true`, metering requires `spec.clickHouse.type` to be `builtin` or `external` and writes usage truth only to ClickHouse. PostgreSQL remains the control-plane and data-plane state database; it is not a metering backend. Billing systems should rate exported usage windows outside the open-source data plane.
 
 Sandbox compute uses a serverless-style contract:
 
@@ -68,7 +68,7 @@ Sandbox0 platform services emit logs to container stdout and expose Prometheus-c
 
 Platform telemetry export is disabled by default. The operator owns collection and export integration only: it can point platform services at an external collector, or install OpenTelemetry Collectors that export to your OTLP endpoint. The per-sandbox historical observability and audit APIs are separate from this platform telemetry layer; they require a configured query backend and return `503 unavailable` when that backend is disabled or unavailable. The historical observability tables are separate from the metering usage ledger even when both use the same region ClickHouse component.
 
-ClickHouse is configured once on the `Sandbox0Infra` CR under `spec.clickHouse`. The infra-operator owns builtin provisioning or external DSN resolution, the same way it owns built-in or external PostgreSQL and Redis wiring. Feature configs such as `spec.sandboxObservability` consume this region component. Do not configure the ClickHouse backend separately on cluster-gateway or netd service configs when deploying through `Sandbox0Infra`.
+ClickHouse is configured once on the `Sandbox0Infra` CR under `spec.clickHouse`. The infra-operator owns builtin provisioning or external DSN resolution, the same way it owns built-in or external PostgreSQL and Redis wiring. Feature configs such as `spec.sandboxObservability` and `spec.metering` consume this region component. Do not configure the ClickHouse backend separately on cluster-gateway, manager, storage-proxy, or netd service configs when deploying through `Sandbox0Infra`.
 
 Use builtin ClickHouse when you want the infra-operator to install ClickHouse for the region:
 
@@ -102,6 +102,14 @@ spec:
             maxRetries: 3
             retryBackoff:
                 duration: 100ms
+    metering:
+        enabled: true
+        clickHouse:
+            eventsTable: usage_events
+            windowsTable: usage_windows
+            watermarksTable: producer_watermarks
+            sandboxStateTable: sandbox_projection_state
+            storageStateTable: storage_projection_state
 ```
 
 Use the external backend when you already operate ClickHouse:
@@ -126,9 +134,11 @@ spec:
             auditDays: 90
             logDays: 7
             metricDays: 30
+    metering:
+        enabled: true
 ```
 
-Set `spec.sandboxObservability.enabled` to `false` or omit the field to keep the historical API disabled. Legacy `spec.sandboxObservability.type` fields are still accepted for compatibility, but new installs should use `spec.clickHouse` for ClickHouse provisioning. Retention deletes ClickHouse observability rows only and never deletes metering ledger rows.
+Set `spec.sandboxObservability.enabled` to `false` or omit the field to keep the historical API disabled. Set `spec.metering.enabled` to `false` or omit `spec.metering` to keep metering producers, quota usage reads, and metering export readers disabled. Legacy `spec.sandboxObservability.type` fields are still accepted for compatibility, but new installs should use `spec.clickHouse` for ClickHouse provisioning. Retention deletes ClickHouse observability rows only and never deletes metering ledger rows.
 
 Netd receives the generated internal ingest endpoint automatically when the backend is enabled. The sink is asynchronous and bounded: if the queue is full or retries are exhausted, netd drops audit projection events instead of blocking traffic forwarding. Netd exports `sandbox0_netd_audit_ingest_events_total` and `sandbox0_netd_audit_ingest_batches_total` to show enqueue, send, skip, drop, and failed batch results.
 

@@ -44,15 +44,24 @@ type RuntimeDeletionInfo struct {
 type RuntimePauseLookup func(ctx context.Context, info RuntimeDeletionInfo) (bool, error)
 
 type repositoryStore struct {
-	repo *meteringpkg.Repository
+	repo repository
 }
 
 type repositoryTxStore struct {
-	repo *meteringpkg.Repository
+	repo repository
 	tx   pgx.Tx
 }
 
-func NewStore(repo *meteringpkg.Repository) Store {
+type repository interface {
+	InTx(ctx context.Context, fn func(tx pgx.Tx) error) error
+	GetSandboxProjectionState(ctx context.Context, sandboxID string) (*meteringpkg.SandboxProjectionState, error)
+	AppendEventTx(ctx context.Context, tx pgx.Tx, event *meteringpkg.Event) error
+	AppendWindowTx(ctx context.Context, tx pgx.Tx, window *meteringpkg.Window) error
+	UpsertProducerWatermarkTx(ctx context.Context, tx pgx.Tx, producer string, regionID string, completeBefore time.Time) error
+	UpsertSandboxProjectionStateTx(ctx context.Context, tx pgx.Tx, state *meteringpkg.SandboxProjectionState) error
+}
+
+func NewStore(repo repository) Store {
 	if repo == nil {
 		return nil
 	}

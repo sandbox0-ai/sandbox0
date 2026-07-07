@@ -17,88 +17,53 @@ import (
 )
 
 func TestClusterGatewayIntegration_MeteringExportContract(t *testing.T) {
-	ctx := context.Background()
-	pool, _ := newIsolatedTestDatabasePool(t, "intgw_metering")
-	if err := metering.RunMigrations(ctx, pool, testMigrateLogger{t: t}); err != nil {
-		t.Fatalf("migrate metering schema: %v", err)
-	}
-	repo := metering.NewRepository(pool)
-
 	baseTime := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
 	completeBefore := baseTime.Add(10 * time.Minute)
-
-	if err := repo.AppendEvent(ctx, &metering.Event{
-		EventID:     "sandbox/sb-1/claimed/1",
-		Producer:    "manager.sandbox_lifecycle",
-		RegionID:    "aws-us-east-1",
-		EventType:   metering.EventTypeSandboxClaimed,
-		SubjectType: metering.SubjectTypeSandbox,
-		SubjectID:   "sb-1",
-		TeamID:      "team-1",
-		UserID:      "user-1",
-		SandboxID:   "sb-1",
-		TemplateID:  "tpl-1",
-		ClusterID:   "cluster-a",
-		OccurredAt:  baseTime,
-	}); err != nil {
-		t.Fatalf("append first event: %v", err)
-	}
-	if err := repo.AppendEvent(ctx, &metering.Event{
-		EventID:     "sandbox/sb-1/paused/2",
-		Producer:    "manager.sandbox_lifecycle",
-		RegionID:    "aws-us-east-1",
-		EventType:   metering.EventTypeSandboxPaused,
-		SubjectType: metering.SubjectTypeSandbox,
-		SubjectID:   "sb-1",
-		TeamID:      "team-1",
-		UserID:      "user-1",
-		SandboxID:   "sb-1",
-		TemplateID:  "tpl-1",
-		ClusterID:   "cluster-a",
-		OccurredAt:  baseTime.Add(5 * time.Minute),
-	}); err != nil {
-		t.Fatalf("append second event: %v", err)
-	}
-	if err := repo.AppendWindow(ctx, &metering.Window{
-		WindowID:    "sandbox/sb-1/egress/1",
-		Producer:    "netd.byte_windows/node-a",
-		RegionID:    "aws-us-east-1",
-		WindowType:  metering.WindowTypeSandboxEgressBytes,
-		SubjectType: metering.SubjectTypeSandbox,
-		SubjectID:   "sb-1",
-		TeamID:      "team-1",
-		UserID:      "user-1",
-		SandboxID:   "sb-1",
-		TemplateID:  "tpl-1",
-		ClusterID:   "cluster-a",
-		WindowStart: baseTime,
-		WindowEnd:   baseTime.Add(time.Minute),
-		Value:       512,
-		Unit:        metering.WindowUnitBytes,
-	}); err != nil {
-		t.Fatalf("append first window: %v", err)
-	}
-	if err := repo.AppendWindow(ctx, &metering.Window{
-		WindowID:    "sandbox/sb-1/runtime/2",
-		Producer:    "manager.sandbox_lifecycle",
-		RegionID:    "aws-us-east-1",
-		WindowType:  metering.WindowTypeSandboxRuntimeMiBMilliseconds,
-		SubjectType: metering.SubjectTypeSandbox,
-		SubjectID:   "sb-1",
-		TeamID:      "team-1",
-		UserID:      "user-1",
-		SandboxID:   "sb-1",
-		TemplateID:  "tpl-1",
-		ClusterID:   "cluster-a",
-		WindowStart: baseTime.Add(5 * time.Minute),
-		WindowEnd:   baseTime.Add(7 * time.Minute),
-		Value:       120_000,
-		Unit:        metering.WindowUnitMiBMilliseconds,
-	}); err != nil {
-		t.Fatalf("append second window: %v", err)
-	}
-	if err := repo.UpsertProducerWatermark(ctx, "manager.sandbox_lifecycle", "aws-us-east-1", completeBefore); err != nil {
-		t.Fatalf("upsert watermark: %v", err)
+	reader := &testMeteringReader{
+		status: &metering.Status{
+			RegionID:           "aws-us-east-1",
+			LatestEventCursor:  "event-2",
+			LatestWindowCursor: "window-2",
+			CompleteBefore:     &completeBefore,
+			ProducerCount:      1,
+		},
+		events: []*metering.Event{
+			{
+				Sequence:    2,
+				EventID:     "sandbox/sb-1/paused/2",
+				Producer:    "manager.sandbox_lifecycle",
+				RegionID:    "aws-us-east-1",
+				EventType:   metering.EventTypeSandboxPaused,
+				SubjectType: metering.SubjectTypeSandbox,
+				SubjectID:   "sb-1",
+				TeamID:      "team-1",
+				UserID:      "user-1",
+				SandboxID:   "sb-1",
+				TemplateID:  "tpl-1",
+				ClusterID:   "cluster-a",
+				OccurredAt:  baseTime.Add(5 * time.Minute),
+			},
+		},
+		windows: []*metering.Window{
+			{
+				Sequence:    2,
+				WindowID:    "sandbox/sb-1/runtime/2",
+				Producer:    "manager.sandbox_lifecycle",
+				RegionID:    "aws-us-east-1",
+				WindowType:  metering.WindowTypeSandboxRuntimeMiBMilliseconds,
+				SubjectType: metering.SubjectTypeSandbox,
+				SubjectID:   "sb-1",
+				TeamID:      "team-1",
+				UserID:      "user-1",
+				SandboxID:   "sb-1",
+				TemplateID:  "tpl-1",
+				ClusterID:   "cluster-a",
+				WindowStart: baseTime.Add(5 * time.Minute),
+				WindowEnd:   baseTime.Add(7 * time.Minute),
+				Value:       120_000,
+				Unit:        metering.WindowUnitMiBMilliseconds,
+			},
+		},
 	}
 
 	keys := gatewayKeyPair{}
@@ -117,7 +82,7 @@ func TestClusterGatewayIntegration_MeteringExportContract(t *testing.T) {
 		},
 	}
 	obsProvider := newTestObservability(t, "cluster-gateway-metering-test")
-	server, err := gatewayhttp.NewServer(cfg, pool, zap.NewNop(), obsProvider)
+	server, err := gatewayhttp.NewServer(cfg, nil, zap.NewNop(), obsProvider, gatewayhttp.WithMeteringReader(reader))
 	if err != nil {
 		t.Fatalf("create cluster-gateway server: %v", err)
 	}
@@ -138,11 +103,11 @@ func TestClusterGatewayIntegration_MeteringExportContract(t *testing.T) {
 	if apiErr != nil {
 		t.Fatalf("unexpected status api error: %+v", apiErr)
 	}
-	if status.LatestEventSequence != 2 {
-		t.Fatalf("latest_event_sequence = %d, want 2", status.LatestEventSequence)
+	if status.LatestEventCursor != "event-2" {
+		t.Fatalf("latest_event_cursor = %q, want event-2", status.LatestEventCursor)
 	}
-	if status.LatestWindowSequence != 2 {
-		t.Fatalf("latest_window_sequence = %d, want 2", status.LatestWindowSequence)
+	if status.LatestWindowCursor != "window-2" {
+		t.Fatalf("latest_window_cursor = %q, want window-2", status.LatestWindowCursor)
 	}
 	if status.ProducerCount != 1 {
 		t.Fatalf("producer_count = %d, want 1", status.ProducerCount)
@@ -151,7 +116,7 @@ func TestClusterGatewayIntegration_MeteringExportContract(t *testing.T) {
 		t.Fatalf("complete_before = %v, want %v", status.CompleteBefore, completeBefore)
 	}
 
-	resp, body = doGatewayRequest(t, httpServer.Client(), http.MethodGet, httpServer.URL+"/internal/v1/metering/events?after_sequence=1&limit=10", token, nil)
+	resp, body = doGatewayRequest(t, httpServer.Client(), http.MethodGet, httpServer.URL+"/internal/v1/metering/events?cursor=event-1&limit=10", token, nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("events endpoint returned %d: %s", resp.StatusCode, string(body))
 	}
@@ -167,11 +132,14 @@ func TestClusterGatewayIntegration_MeteringExportContract(t *testing.T) {
 	if len(eventsResp.Events) != 1 {
 		t.Fatalf("event count = %d, want 1", len(eventsResp.Events))
 	}
+	if reader.eventCursor != "event-1" {
+		t.Fatalf("event cursor = %q, want event-1", reader.eventCursor)
+	}
 	if eventsResp.Events[0].Sequence != 2 || eventsResp.Events[0].EventType != metering.EventTypeSandboxPaused {
 		t.Fatalf("unexpected event: %+v", eventsResp.Events[0])
 	}
 
-	resp, body = doGatewayRequest(t, httpServer.Client(), http.MethodGet, httpServer.URL+"/internal/v1/metering/windows?after_sequence=1&limit=10", token, nil)
+	resp, body = doGatewayRequest(t, httpServer.Client(), http.MethodGet, httpServer.URL+"/internal/v1/metering/windows?cursor=window-1&limit=10", token, nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("windows endpoint returned %d: %s", resp.StatusCode, string(body))
 	}
@@ -187,19 +155,34 @@ func TestClusterGatewayIntegration_MeteringExportContract(t *testing.T) {
 	if len(windowsResp.Windows) != 1 {
 		t.Fatalf("window count = %d, want 1", len(windowsResp.Windows))
 	}
+	if reader.windowCursor != "window-1" {
+		t.Fatalf("window cursor = %q, want window-1", reader.windowCursor)
+	}
 	if windowsResp.Windows[0].Sequence != 2 || windowsResp.Windows[0].WindowType != metering.WindowTypeSandboxRuntimeMiBMilliseconds {
 		t.Fatalf("unexpected window: %+v", windowsResp.Windows[0])
 	}
 }
 
-type testMigrateLogger struct {
-	t *testing.T
+type testMeteringReader struct {
+	status       *metering.Status
+	events       []*metering.Event
+	windows      []*metering.Window
+	eventCursor  string
+	windowCursor string
 }
 
-func (l testMigrateLogger) Printf(string, ...any) {}
+func (r *testMeteringReader) GetStatus(context.Context, string) (*metering.Status, error) {
+	return r.status, nil
+}
 
-func (l testMigrateLogger) Fatalf(format string, args ...any) {
-	l.t.Fatalf(format, args...)
+func (r *testMeteringReader) ListEvents(_ context.Context, cursor string, _ int) ([]*metering.Event, string, error) {
+	r.eventCursor = cursor
+	return r.events, "", nil
+}
+
+func (r *testMeteringReader) ListWindows(_ context.Context, cursor string, _ int) ([]*metering.Window, string, error) {
+	r.windowCursor = cursor
+	return r.windows, "", nil
 }
 
 func internalauthGenerator(privateKey internalauth.PrivateKeyType) *internalauth.Generator {

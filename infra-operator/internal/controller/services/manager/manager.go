@@ -28,6 +28,7 @@ import (
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	credentialstoresvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/credentialstore"
+	meteringsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/metering"
 	netdservice "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/netd"
 	redissvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/redis"
 	sandboxobssvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sandboxobservability"
@@ -296,6 +297,9 @@ func (r *Reconciler) buildConfig(ctx context.Context, imageRepo, imageTag string
 		return nil, fmt.Errorf("apply credential store config: %w", err)
 	}
 	if owner := compiledPlan.Scope.Owner(); owner != nil {
+		if err := meteringsvc.ApplyManagerConfig(ctx, r.Resources.Client, owner, cfg); err != nil {
+			return nil, fmt.Errorf("apply metering config: %w", err)
+		}
 		if err := sandboxobssvc.ApplyManagerConfig(ctx, r.Resources.Client, owner, compiledPlan.Services.ClusterGateway.URL, cfg); err != nil {
 			return nil, fmt.Errorf("apply sandbox observability config: %w", err)
 		}

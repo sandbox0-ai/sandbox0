@@ -330,7 +330,7 @@ ClickHouse-backed deployments store events, logs, and metric samples in asynchro
 Query endpoints return `503` when the backend is disabled or unavailable.
 
 <Callout variant="info">
-Metering windows are separate usage-ledger records for quota, showback, and billing export. Historical observability tables do not store metering windows, even when the deployment also uses the same region ClickHouse component for metering. The current operator rejects ClickHouse metering backend selection until all metering write paths have been migrated. File audit is not part of these endpoints.
+Metering windows are separate usage-ledger records for quota, showback, and billing export. Historical observability tables do not store metering windows, even when the deployment also enables metering on the same region ClickHouse component. Metering is optional and disabled by default; when enabled, it writes usage truth to ClickHouse only. File audit is not part of these endpoints.
 </Callout>
 
 ---

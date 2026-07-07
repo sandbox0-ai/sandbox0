@@ -20,6 +20,13 @@ type DB interface {
 type Repository struct {
 	db            DB
 	defaultLimits map[Dimension]int64
+	usageStore    UsageStore
+}
+
+type UsageStore interface {
+	CurrentUsage(ctx context.Context, teamID string, dimension Dimension) (int64, error)
+	ProjectedStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType, subjectID string, sizeBytes int64) (int64, error)
+	AdditionalStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType string, additionalBytes int64) (int64, error)
 }
 
 func NewRepository(pool *pgxpool.Pool) *Repository {
@@ -52,6 +59,13 @@ func NewRepositoryWithDBDefaults(db DB, defaults []DefaultLimit) (*Repository, e
 		return nil, err
 	}
 	return &Repository{db: db, defaultLimits: defaultLimits}, nil
+}
+
+func (r *Repository) SetUsageStore(store UsageStore) {
+	if r == nil {
+		return
+	}
+	r.usageStore = store
 }
 
 func buildDefaultLimitMap(defaults []DefaultLimit) (map[Dimension]int64, error) {
@@ -113,69 +127,17 @@ func (r *Repository) defaultLimit(teamID string, dimension Dimension) *Limit {
 }
 
 func (r *Repository) CurrentUsage(ctx context.Context, teamID string, dimension Dimension) (int64, error) {
-	if r == nil || r.db == nil {
-		return 0, nil
-	}
 	teamID = strings.TrimSpace(teamID)
 	if teamID == "" {
 		return 0, fmt.Errorf("team_id is required")
 	}
-	switch dimension {
-	case DimensionActiveSandboxes:
-		var current int64
-		if err := r.db.QueryRow(ctx, `
-			SELECT COUNT(*)
-			FROM metering.manager_sandbox_projection_state
-			WHERE team_id = $1
-				AND claimed_at IS NOT NULL
-				AND terminated_at IS NULL
-		`, teamID).Scan(&current); err != nil {
-			return 0, fmt.Errorf("query active sandbox usage: %w", err)
-		}
-		return current, nil
-	case DimensionCPU:
-		var current int64
-		if err := r.db.QueryRow(ctx, `
-			SELECT COALESCE(SUM(resource_millicpu), 0)
-			FROM metering.manager_sandbox_projection_state
-			WHERE team_id = $1
-				AND claimed_at IS NOT NULL
-				AND terminated_at IS NULL
-		`, teamID).Scan(&current); err != nil {
-			return 0, fmt.Errorf("query cpu quota usage: %w", err)
-		}
-		return current, nil
-	case DimensionMemory:
-		var current int64
-		if err := r.db.QueryRow(ctx, `
-			SELECT COALESCE(SUM(resource_memory_mib), 0)
-			FROM metering.manager_sandbox_projection_state
-			WHERE team_id = $1
-				AND claimed_at IS NOT NULL
-				AND terminated_at IS NULL
-		`, teamID).Scan(&current); err != nil {
-			return 0, fmt.Errorf("query memory quota usage: %w", err)
-		}
-		return current, nil
-	case DimensionVolumeStorageGB:
-		current, err := r.currentStorageUsageBytes(ctx, teamID, metering.SubjectTypeVolume)
-		if err != nil {
-			return 0, err
-		}
-		return BytesToGBRoundUp(current), nil
-	case DimensionSnapshotGB:
-		current, err := r.currentStorageUsageBytes(ctx, teamID, metering.SubjectTypeSnapshot)
-		if err != nil {
-			return 0, err
-		}
-		return BytesToGBRoundUp(current), nil
-	case DimensionEgress:
-		return r.currentNetworkUsage(ctx, teamID, metering.WindowTypeSandboxEgressBytes)
-	case DimensionIngress:
-		return r.currentNetworkUsage(ctx, teamID, metering.WindowTypeSandboxIngressBytes)
-	default:
-		return 0, fmt.Errorf("unsupported quota usage dimension %q", dimension)
+	if dimension == "" {
+		return 0, fmt.Errorf("dimension is required")
 	}
+	if r != nil && r.usageStore != nil {
+		return r.usageStore.CurrentUsage(ctx, teamID, dimension)
+	}
+	return 0, fmt.Errorf("quota usage store is not configured")
 }
 
 func (r *Repository) CheckProjectedStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType, subjectID string, sizeBytes int64) (Decision, error) {
@@ -222,9 +184,6 @@ func (r *Repository) CheckAdditionalStorageUsageGB(ctx context.Context, teamID s
 }
 
 func (r *Repository) ProjectedStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType, subjectID string, sizeBytes int64) (int64, error) {
-	if r == nil || r.db == nil {
-		return 0, nil
-	}
 	teamID = strings.TrimSpace(teamID)
 	subjectID = strings.TrimSpace(subjectID)
 	if teamID == "" {
@@ -239,24 +198,13 @@ func (r *Repository) ProjectedStorageUsageGB(ctx context.Context, teamID string,
 	if !storageDimensionMatchesSubjectType(dimension, subjectType) {
 		return 0, fmt.Errorf("quota dimension %q does not match storage subject_type %q", dimension, subjectType)
 	}
-
-	var otherBytes int64
-	if err := r.db.QueryRow(ctx, `
-		SELECT COALESCE(SUM(size_bytes), 0)
-		FROM metering.storage_projection_state
-		WHERE team_id = $1
-			AND subject_type = $2
-			AND subject_id <> $3
-	`, teamID, subjectType, subjectID).Scan(&otherBytes); err != nil {
-		return 0, fmt.Errorf("query projected storage quota usage: %w", err)
+	if r != nil && r.usageStore != nil {
+		return r.usageStore.ProjectedStorageUsageGB(ctx, teamID, dimension, subjectType, subjectID, sizeBytes)
 	}
-	return BytesToGBRoundUp(otherBytes + sizeBytes), nil
+	return 0, fmt.Errorf("quota usage store is not configured")
 }
 
 func (r *Repository) AdditionalStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType string, additionalBytes int64) (int64, error) {
-	if r == nil || r.db == nil {
-		return 0, nil
-	}
 	teamID = strings.TrimSpace(teamID)
 	if teamID == "" {
 		return 0, fmt.Errorf("team_id is required")
@@ -267,47 +215,10 @@ func (r *Repository) AdditionalStorageUsageGB(ctx context.Context, teamID string
 	if !storageDimensionMatchesSubjectType(dimension, subjectType) {
 		return 0, fmt.Errorf("quota dimension %q does not match storage subject_type %q", dimension, subjectType)
 	}
-	current, err := r.currentStorageUsageBytes(ctx, teamID, subjectType)
-	if err != nil {
-		return 0, err
+	if r != nil && r.usageStore != nil {
+		return r.usageStore.AdditionalStorageUsageGB(ctx, teamID, dimension, subjectType, additionalBytes)
 	}
-	return BytesToGBRoundUp(current + additionalBytes), nil
-}
-
-func (r *Repository) currentStorageUsageBytes(ctx context.Context, teamID, subjectType string) (int64, error) {
-	var current int64
-	if err := r.db.QueryRow(ctx, `
-		SELECT COALESCE(SUM(size_bytes), 0)
-		FROM metering.storage_projection_state
-		WHERE team_id = $1
-			AND subject_type = $2
-	`, teamID, subjectType).Scan(&current); err != nil {
-		return 0, fmt.Errorf("query storage quota usage: %w", err)
-	}
-	return current, nil
-}
-
-func (r *Repository) currentNetworkUsage(ctx context.Context, teamID string, windowTypes ...string) (int64, error) {
-	if len(windowTypes) == 0 {
-		return 0, fmt.Errorf("window type is required")
-	}
-	args := make([]any, 0, len(windowTypes)+1)
-	args = append(args, teamID)
-	placeholders := make([]string, 0, len(windowTypes))
-	for i, windowType := range windowTypes {
-		args = append(args, windowType)
-		placeholders = append(placeholders, fmt.Sprintf("$%d", i+2))
-	}
-	var current int64
-	if err := r.db.QueryRow(ctx, fmt.Sprintf(`
-		SELECT COALESCE(SUM(value), 0)
-		FROM metering.usage_windows
-		WHERE team_id = $1
-			AND window_type IN (%s)
-	`, strings.Join(placeholders, ", ")), args...).Scan(&current); err != nil {
-		return 0, fmt.Errorf("query network quota usage: %w", err)
-	}
-	return current, nil
+	return 0, fmt.Errorf("quota usage store is not configured")
 }
 
 func storageDimensionMatchesSubjectType(dimension Dimension, subjectType string) bool {

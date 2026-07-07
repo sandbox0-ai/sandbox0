@@ -129,54 +129,82 @@ func TestNewRepositoryWithDBDefaultsRejectsInvalidLimits(t *testing.T) {
 	}
 }
 
-func TestCurrentUsageReturnsStorageGB(t *testing.T) {
-	tests := []struct {
-		name        string
-		dimension   Dimension
-		subjectType string
-	}{
-		{name: "volume", dimension: DimensionVolumeStorageGB, subjectType: metering.SubjectTypeVolume},
-		{name: "snapshot", dimension: DimensionSnapshotGB, subjectType: metering.SubjectTypeSnapshot},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			repo := NewRepositoryWithDB(&fakeDB{
-				queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
-					if !strings.Contains(sql, "storage_projection_state") {
-						t.Fatalf("sql = %s, want storage projection query", sql)
-					}
-					if args[0] != "team-1" || args[1] != tt.subjectType {
-						t.Fatalf("args = %#v, want team and storage subject", args)
-					}
-					return fakeRow{values: []any{BytesPerGB + 1}}
-				},
-			})
-
-			got, err := repo.CurrentUsage(context.Background(), "team-1", tt.dimension)
-			if err != nil {
-				t.Fatalf("CurrentUsage: %v", err)
-			}
-			if got != 2 {
-				t.Fatalf("CurrentUsage = %d, want 2", got)
-			}
-		})
-	}
+type fakeUsageStore struct {
+	currentFn    func(ctx context.Context, teamID string, dimension Dimension) (int64, error)
+	projectedFn  func(ctx context.Context, teamID string, dimension Dimension, subjectType, subjectID string, sizeBytes int64) (int64, error)
+	additionalFn func(ctx context.Context, teamID string, dimension Dimension, subjectType string, additionalBytes int64) (int64, error)
 }
 
-func TestProjectedStorageUsageGBExcludesCurrentSubject(t *testing.T) {
-	repo := NewRepositoryWithDB(&fakeDB{
-		queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
-			if !strings.Contains(sql, "subject_id <> $3") {
-				t.Fatalf("sql = %s, want current subject exclusion", sql)
+func (f *fakeUsageStore) CurrentUsage(ctx context.Context, teamID string, dimension Dimension) (int64, error) {
+	if f.currentFn != nil {
+		return f.currentFn(ctx, teamID, dimension)
+	}
+	return 0, nil
+}
+
+func (f *fakeUsageStore) ProjectedStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType, subjectID string, sizeBytes int64) (int64, error) {
+	if f.projectedFn != nil {
+		return f.projectedFn(ctx, teamID, dimension, subjectType, subjectID, sizeBytes)
+	}
+	return 0, nil
+}
+
+func (f *fakeUsageStore) AdditionalStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType string, additionalBytes int64) (int64, error) {
+	if f.additionalFn != nil {
+		return f.additionalFn(ctx, teamID, dimension, subjectType, additionalBytes)
+	}
+	return 0, nil
+}
+
+func TestCurrentUsageDelegatesToUsageStore(t *testing.T) {
+	repo := NewRepositoryWithDB(&fakeDB{})
+	repo.SetUsageStore(&fakeUsageStore{
+		currentFn: func(_ context.Context, teamID string, dimension Dimension) (int64, error) {
+			if teamID != "team-1" {
+				t.Fatalf("teamID = %q, want trimmed team-1", teamID)
 			}
-			if args[2] != "vol-1" {
-				t.Fatalf("subject id arg = %v, want vol-1", args[2])
+			if dimension != DimensionEgress {
+				t.Fatalf("dimension = %q, want egress", dimension)
 			}
-			return fakeRow{values: []any{BytesPerGB}}
+			return 1024, nil
 		},
 	})
 
-	got, err := repo.ProjectedStorageUsageGB(context.Background(), "team-1", DimensionVolumeStorageGB, metering.SubjectTypeVolume, "vol-1", 1)
+	got, err := repo.CurrentUsage(context.Background(), " team-1 ", DimensionEgress)
+	if err != nil {
+		t.Fatalf("CurrentUsage: %v", err)
+	}
+	if got != 1024 {
+		t.Fatalf("CurrentUsage = %d, want 1024", got)
+	}
+}
+
+func TestCurrentUsageWithoutUsageStoreReturnsUnavailable(t *testing.T) {
+	repo := NewRepositoryWithDB(&fakeDB{
+		queryRowFn: func(context.Context, string, ...any) pgx.Row {
+			t.Fatal("CurrentUsage must not query PostgreSQL usage tables")
+			return fakeRow{}
+		},
+	})
+
+	_, err := repo.CurrentUsage(context.Background(), "team-1", DimensionCPU)
+	if err == nil || !strings.Contains(err.Error(), "quota usage store is not configured") {
+		t.Fatalf("CurrentUsage error = %v, want usage store unavailable", err)
+	}
+}
+
+func TestProjectedStorageUsageGBDelegatesToUsageStore(t *testing.T) {
+	repo := NewRepositoryWithDB(&fakeDB{})
+	repo.SetUsageStore(&fakeUsageStore{
+		projectedFn: func(_ context.Context, teamID string, dimension Dimension, subjectType, subjectID string, sizeBytes int64) (int64, error) {
+			if teamID != "team-1" || dimension != DimensionVolumeStorageGB || subjectType != metering.SubjectTypeVolume || subjectID != "vol-1" || sizeBytes != 1 {
+				t.Fatalf("unexpected args: team=%q dimension=%q subjectType=%q subjectID=%q size=%d", teamID, dimension, subjectType, subjectID, sizeBytes)
+			}
+			return 2, nil
+		},
+	})
+
+	got, err := repo.ProjectedStorageUsageGB(context.Background(), " team-1 ", DimensionVolumeStorageGB, metering.SubjectTypeVolume, " vol-1 ", 1)
 	if err != nil {
 		t.Fatalf("ProjectedStorageUsageGB: %v", err)
 	}
@@ -185,55 +213,22 @@ func TestProjectedStorageUsageGBExcludesCurrentSubject(t *testing.T) {
 	}
 }
 
-func TestAdditionalStorageUsageGBAddsToCurrentTeamStorage(t *testing.T) {
-	repo := NewRepositoryWithDB(&fakeDB{
-		queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
-			if !strings.Contains(sql, "storage_projection_state") {
-				t.Fatalf("sql = %s, want storage projection query", sql)
+func TestAdditionalStorageUsageGBDelegatesToUsageStore(t *testing.T) {
+	repo := NewRepositoryWithDB(&fakeDB{})
+	repo.SetUsageStore(&fakeUsageStore{
+		additionalFn: func(_ context.Context, teamID string, dimension Dimension, subjectType string, additionalBytes int64) (int64, error) {
+			if teamID != "team-1" || dimension != DimensionSnapshotGB || subjectType != metering.SubjectTypeSnapshot || additionalBytes != 1 {
+				t.Fatalf("unexpected args: team=%q dimension=%q subjectType=%q additional=%d", teamID, dimension, subjectType, additionalBytes)
 			}
-			return fakeRow{values: []any{BytesPerGB}}
+			return 3, nil
 		},
 	})
 
-	got, err := repo.AdditionalStorageUsageGB(context.Background(), "team-1", DimensionVolumeStorageGB, metering.SubjectTypeVolume, 1)
+	got, err := repo.AdditionalStorageUsageGB(context.Background(), " team-1 ", DimensionSnapshotGB, metering.SubjectTypeSnapshot, 1)
 	if err != nil {
 		t.Fatalf("AdditionalStorageUsageGB: %v", err)
 	}
-	if got != 2 {
-		t.Fatalf("AdditionalStorageUsageGB = %d, want 2", got)
-	}
-}
-
-func TestCurrentUsageReturnsNetworkBytes(t *testing.T) {
-	tests := []struct {
-		name        string
-		dimension   Dimension
-		windowTypes []string
-	}{
-		{name: "egress", dimension: DimensionEgress, windowTypes: []string{metering.WindowTypeSandboxEgressBytes}},
-		{name: "ingress", dimension: DimensionIngress, windowTypes: []string{metering.WindowTypeSandboxIngressBytes}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			repo := NewRepositoryWithDB(&fakeDB{
-				queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
-					if !strings.Contains(sql, "usage_windows") {
-						t.Fatalf("sql = %s, want usage windows query", sql)
-					}
-					if args[0] != "team-1" || args[1] != tt.windowTypes[0] {
-						t.Fatalf("args = %#v, want team and network window types", args)
-					}
-					return fakeRow{values: []any{int64(1024)}}
-				},
-			})
-
-			got, err := repo.CurrentUsage(context.Background(), "team-1", tt.dimension)
-			if err != nil {
-				t.Fatalf("CurrentUsage: %v", err)
-			}
-			if got != 1024 {
-				t.Fatalf("CurrentUsage = %d, want 1024", got)
-			}
-		})
+	if got != 3 {
+		t.Fatalf("AdditionalStorageUsageGB = %d, want 3", got)
 	}
 }

@@ -78,6 +78,10 @@ type ClusterGatewayConfig struct {
 	// +optional
 	SandboxObservability SandboxObservabilityConfig `yaml:"sandbox_observability" json:"sandboxObservability"`
 
+	// Metering configures the optional region usage ledger.
+	// +optional
+	Metering MeteringConfig `yaml:"metering" json:"metering"`
+
 	// Permissions
 	// +optional
 	// +kubebuilder:default={"*:*"}

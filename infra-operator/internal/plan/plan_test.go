@@ -241,7 +241,7 @@ func TestCompileEnablesClickHouseBeforeSandboxObservability(t *testing.T) {
 	}
 }
 
-func TestCompileRejectsClickHouseMeteringUntilWritePathMigration(t *testing.T) {
+func TestCompileEnablesMeteringAfterClickHouse(t *testing.T) {
 	enabled := true
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
@@ -254,7 +254,6 @@ func TestCompileRejectsClickHouseMeteringUntilWritePathMigration(t *testing.T) {
 			},
 			Metering: &infrav1alpha1.MeteringConfig{
 				Enabled: &enabled,
-				Backend: infrav1alpha1.MeteringBackendClickHouse,
 			},
 		},
 	}
@@ -264,15 +263,52 @@ func TestCompileRejectsClickHouseMeteringUntilWritePathMigration(t *testing.T) {
 	if !compiled.Components.EnableClickHouse {
 		t.Fatalf("expected clickhouse component to be enabled")
 	}
+	if !compiled.Components.EnableMetering {
+		t.Fatalf("expected metering component to be enabled")
+	}
+	if len(compiled.Validation.FatalErrors) != 0 {
+		t.Fatalf("fatal errors = %#v, want none", compiled.Validation.FatalErrors)
+	}
+	clickHouseIndex := -1
+	meteringIndex := -1
+	for i, step := range compiled.Workflow.Steps {
+		switch step.Name {
+		case "clickhouse":
+			clickHouseIndex = i
+		case "metering":
+			meteringIndex = i
+		}
+	}
+	if clickHouseIndex < 0 || meteringIndex < 0 || clickHouseIndex > meteringIndex {
+		t.Fatalf("expected clickhouse step before metering, got clickhouse=%d metering=%d steps=%#v", clickHouseIndex, meteringIndex, compiled.Workflow.Steps)
+	}
+	if !containsString(compiled.Status.ExpectedConditions, infrav1alpha1.ConditionTypeMeteringReady) {
+		t.Fatalf("expected MeteringReady condition, got %#v", compiled.Status.ExpectedConditions)
+	}
+}
+
+func TestCompileRejectsMeteringWithoutClickHouse(t *testing.T) {
+	enabled := true
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Metering: &infrav1alpha1.MeteringConfig{
+				Enabled: &enabled,
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+
 	found := false
 	for _, msg := range compiled.Validation.FatalErrors {
-		if strings.Contains(msg, "metering backend clickhouse is not enabled") {
+		if strings.Contains(msg, "metering requires spec.clickHouse type builtin or external") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("expected clickhouse metering guard error, got %#v", compiled.Validation.FatalErrors)
+		t.Fatalf("expected metering clickhouse dependency error, got %#v", compiled.Validation.FatalErrors)
 	}
 }
 

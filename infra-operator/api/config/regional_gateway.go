@@ -87,6 +87,10 @@ type RegionalGatewayConfig struct {
 	// +optional
 	GatewayConfig `yaml:",inline" json:",inline"`
 
+	// Metering configures the optional region usage ledger.
+	// +optional
+	Metering MeteringConfig `yaml:"metering" json:"metering"`
+
 	// Registry config for control-plane image push credentials.
 	// +optional
 	// +kubebuilder:default={}

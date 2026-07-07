@@ -201,6 +201,10 @@ type ManagerConfig struct {
 	// +optional
 	SandboxObservabilityMetricSampleInterval metav1.Duration `yaml:"sandbox_observability_metric_sample_interval" json:"-"`
 
+	// Metering configures the optional region usage ledger.
+	// +optional
+	Metering MeteringConfig `yaml:"metering" json:"metering"`
+
 	// Registry config for image pull secret provisioning
 	// +optional
 	// +kubebuilder:default={}

@@ -1595,16 +1595,13 @@ func IsSandboxObservabilityEnabled(infra *Sandbox0Infra) bool {
 	}
 }
 
-// IsClickHouseMeteringRequested returns true when ClickHouse has been selected
-// as the metering truth backend.
-func IsClickHouseMeteringRequested(infra *Sandbox0Infra) bool {
+// IsMeteringEnabled returns true when the region usage ledger should be
+// reconciled and injected. Metering is disabled by default.
+func IsMeteringEnabled(infra *Sandbox0Infra) bool {
 	if infra == nil || infra.Spec.Metering == nil {
 		return false
 	}
-	if infra.Spec.Metering.Enabled != nil && !*infra.Spec.Metering.Enabled {
-		return false
-	}
-	return infra.Spec.Metering.Backend == MeteringBackendClickHouse
+	return infra.Spec.Metering.Enabled != nil && *infra.Spec.Metering.Enabled
 }
 
 func legacySandboxObservabilityUsesClickHouse(infra *Sandbox0Infra) bool {
@@ -1992,6 +1989,7 @@ const (
 	ConditionTypeRegistryReady             = "RegistryReady"
 	ConditionTypeObservabilityReady        = "ObservabilityReady"
 	ConditionTypeClickHouseReady           = "ClickHouseReady"
+	ConditionTypeMeteringReady             = "MeteringReady"
 	ConditionTypeSandboxObservabilityReady = "SandboxObservabilityReady"
 	ConditionTypeGlobalGatewayReady        = "GlobalGatewayReady"
 	ConditionTypeRegionalGatewayReady      = "RegionalGatewayReady"

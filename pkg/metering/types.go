@@ -7,8 +7,6 @@ import (
 )
 
 const (
-	SchemaName = "metering"
-
 	ProductSandbox      = "sandbox"
 	ProductManagedAgent = "managed_agent"
 
@@ -73,6 +71,8 @@ type Status struct {
 	RegionID             string     `json:"region_id,omitempty"`
 	LatestEventSequence  int64      `json:"latest_event_sequence"`
 	LatestWindowSequence int64      `json:"latest_window_sequence"`
+	LatestEventCursor    string     `json:"latest_event_cursor,omitempty"`
+	LatestWindowCursor   string     `json:"latest_window_cursor,omitempty"`
 	CompleteBefore       *time.Time `json:"complete_before,omitempty"`
 	ProducerCount        int        `json:"producer_count"`
 }

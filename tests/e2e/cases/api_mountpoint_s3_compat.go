@@ -574,11 +574,17 @@ set -eu
 M=%s
 file="$M/write-lifecycle/truncate.txt"
 : > "$file"
-test ! -s "$file"
+sync
+	`, shellQuote(mountpointS3MountPath)))
+	expectMountpointS3ObjectEventually(store, "write-lifecycle/truncate.txt", []byte(""))
+	runMountpointS3Script(env, namespace, podName, fmt.Sprintf(`
+set -eu
+M=%s
+file="$M/write-lifecycle/truncate.txt"
 printf "%%s" "replacement" > "$file"
 sync
 test "$(cat "$file")" = "replacement"
-`, shellQuote(mountpointS3MountPath)))
+	`, shellQuote(mountpointS3MountPath)))
 	expectMountpointS3ObjectEventually(store, "write-lifecycle/truncate.txt", []byte("replacement"))
 }
 

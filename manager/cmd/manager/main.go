@@ -592,7 +592,9 @@ func main() {
 				managerMetrics,
 			)
 			rootFSMaintenanceController.SetObjectInspector(rootFSObjectStoreInspector{store: rootFSObjectStore})
-			rootFSMaintenanceController.SetStorageMeteringRecorder(meteringRepo)
+			if meteringRepo != nil {
+				rootFSMaintenanceController.SetStorageMeteringRecorder(meteringRepo)
+			}
 			go func() {
 				if err := rootFSMaintenanceController.Run(ctx); err != nil && err != context.Canceled {
 					logger.Error("Rootfs maintenance controller failed", zap.Error(err))

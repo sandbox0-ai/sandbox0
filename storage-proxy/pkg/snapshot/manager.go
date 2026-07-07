@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
@@ -57,6 +58,20 @@ type meteringRecorder interface {
 	CloseStorageObservationTx(context.Context, pgx.Tx, *meteringpkg.StorageObservation) error
 	UpsertProducerWatermark(context.Context, string, string, time.Time) error
 	UpsertProducerWatermarkTx(context.Context, pgx.Tx, string, string, time.Time) error
+}
+
+func configuredMeteringRecorder(recorder meteringRecorder) (meteringRecorder, bool) {
+	if recorder == nil {
+		return nil, false
+	}
+	value := reflect.ValueOf(recorder)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		if value.IsNil() {
+			return nil, false
+		}
+	}
+	return recorder, true
 }
 
 // FlushCoordinator handles distributed flush coordination across storage-proxy instances
@@ -140,69 +155,75 @@ func (m *Manager) SetQuotaRepository(repo *quota.Repository) {
 }
 
 func (m *Manager) appendMeteringEvent(ctx context.Context, event *meteringpkg.Event) error {
-	if m.meteringRepo == nil || event == nil {
+	recorder, ok := configuredMeteringRecorder(m.meteringRepo)
+	if !ok || event == nil {
 		return nil
 	}
-	if err := m.meteringRepo.AppendEvent(ctx, event); err != nil {
+	if err := recorder.AppendEvent(ctx, event); err != nil {
 		return err
 	}
-	return m.meteringRepo.UpsertProducerWatermark(ctx, event.Producer, event.RegionID, event.OccurredAt)
+	return recorder.UpsertProducerWatermark(ctx, event.Producer, event.RegionID, event.OccurredAt)
 }
 
 func (m *Manager) appendMeteringEventTx(ctx context.Context, tx pgx.Tx, event *meteringpkg.Event) error {
-	if m.meteringRepo == nil || event == nil {
+	recorder, ok := configuredMeteringRecorder(m.meteringRepo)
+	if !ok || event == nil {
 		return nil
 	}
-	if err := m.meteringRepo.AppendEventTx(ctx, tx, event); err != nil {
+	if err := recorder.AppendEventTx(ctx, tx, event); err != nil {
 		return err
 	}
-	return m.meteringRepo.UpsertProducerWatermarkTx(ctx, tx, event.Producer, event.RegionID, event.OccurredAt)
+	return recorder.UpsertProducerWatermarkTx(ctx, tx, event.Producer, event.RegionID, event.OccurredAt)
 }
 
 func (m *Manager) appendStorageObservation(ctx context.Context, observation *meteringpkg.StorageObservation) error {
-	if m.meteringRepo == nil || observation == nil {
+	recorder, ok := configuredMeteringRecorder(m.meteringRepo)
+	if !ok || observation == nil {
 		return nil
 	}
 	if err := m.enforceStorageObservationQuota(ctx, observation); err != nil {
 		return err
 	}
-	if err := m.meteringRepo.RecordStorageObservation(ctx, observation); err != nil {
+	if err := recorder.RecordStorageObservation(ctx, observation); err != nil {
 		return err
 	}
-	return m.meteringRepo.UpsertProducerWatermark(ctx, meteringpkg.ProducerStorage, observation.RegionID, observation.ObservedAt)
+	return recorder.UpsertProducerWatermark(ctx, meteringpkg.ProducerStorage, observation.RegionID, observation.ObservedAt)
 }
 
 func (m *Manager) appendStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *meteringpkg.StorageObservation) error {
-	if m.meteringRepo == nil || observation == nil {
+	recorder, ok := configuredMeteringRecorder(m.meteringRepo)
+	if !ok || observation == nil {
 		return nil
 	}
 	if err := m.enforceStorageObservationQuota(ctx, observation); err != nil {
 		return err
 	}
-	if err := m.meteringRepo.RecordStorageObservationTx(ctx, tx, observation); err != nil {
+	if err := recorder.RecordStorageObservationTx(ctx, tx, observation); err != nil {
 		return err
 	}
-	return m.meteringRepo.UpsertProducerWatermarkTx(ctx, tx, meteringpkg.ProducerStorage, observation.RegionID, observation.ObservedAt)
+	return recorder.UpsertProducerWatermarkTx(ctx, tx, meteringpkg.ProducerStorage, observation.RegionID, observation.ObservedAt)
 }
 
 func (m *Manager) closeStorageObservation(ctx context.Context, observation *meteringpkg.StorageObservation) error {
-	if m.meteringRepo == nil || observation == nil {
+	recorder, ok := configuredMeteringRecorder(m.meteringRepo)
+	if !ok || observation == nil {
 		return nil
 	}
-	if err := m.meteringRepo.CloseStorageObservation(ctx, observation); err != nil {
+	if err := recorder.CloseStorageObservation(ctx, observation); err != nil {
 		return err
 	}
-	return m.meteringRepo.UpsertProducerWatermark(ctx, meteringpkg.ProducerStorage, observation.RegionID, observation.ObservedAt)
+	return recorder.UpsertProducerWatermark(ctx, meteringpkg.ProducerStorage, observation.RegionID, observation.ObservedAt)
 }
 
 func (m *Manager) closeStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *meteringpkg.StorageObservation) error {
-	if m.meteringRepo == nil || observation == nil {
+	recorder, ok := configuredMeteringRecorder(m.meteringRepo)
+	if !ok || observation == nil {
 		return nil
 	}
-	if err := m.meteringRepo.CloseStorageObservationTx(ctx, tx, observation); err != nil {
+	if err := recorder.CloseStorageObservationTx(ctx, tx, observation); err != nil {
 		return err
 	}
-	return m.meteringRepo.UpsertProducerWatermarkTx(ctx, tx, meteringpkg.ProducerStorage, observation.RegionID, observation.ObservedAt)
+	return recorder.UpsertProducerWatermarkTx(ctx, tx, meteringpkg.ProducerStorage, observation.RegionID, observation.ObservedAt)
 }
 
 func (m *Manager) regionID() string {

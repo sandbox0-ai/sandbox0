@@ -47,20 +47,91 @@ The default access mode is `RWO`. Sandbox mounts are declared by the template an
 
 The default backend is `s0fs`, Sandbox0's durable POSIX-oriented volume store backed by S3-compatible object storage. `s0fs` supports Sandbox mounts, direct file APIs, snapshots, restore, and forks.
 
-Sandbox0 can also create a `s3` backend volume that exposes an existing S3-compatible bucket prefix through the volume portal:
+Use `s0fs` when Sandbox0 should own the durable filesystem state, snapshots, and forks. Use `s3` when the source of truth is an existing S3-compatible bucket prefix and the Sandbox should see that prefix through the same ctld volume portal used by normal Sandbox mounts.
 
-```json
-{
-    "backend": "s3",
-    "access_mode": "RWO",
-    "s3": {
-        "provider": "aws",
-        "bucket": "sandbox-data",
-        "prefix": "team-a/workspace-a",
-        "region": "us-east-1"
-    }
+| Backend | Source of truth | Best for | Snapshot and fork support |
+|---------|-----------------|----------|---------------------------|
+| `s0fs` | Sandbox0-managed volume data | POSIX-oriented agent workspaces, small-file write-heavy state, snapshots, forks, direct volume file APIs | Yes |
+| `s3` | Existing S3/OSS/R2 bucket prefix | Bidirectional access to object storage from a Sandbox mount | No |
+
+Create an S3 backend volume with the SDKs or CLI:
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `volume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{
+    Backend:    apispec.NewOptVolumeBackend(apispec.VolumeBackendS3),
+    AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWO),
+    S3: apispec.NewOptCreateSandboxVolumeS3Config(apispec.CreateSandboxVolumeS3Config{
+        Provider: apispec.NewOptCreateSandboxVolumeS3ConfigProvider(
+            apispec.CreateSandboxVolumeS3ConfigProviderAWS,
+        ),
+        Bucket: "sandbox-data",
+        Prefix: apispec.NewOptString("team-a/workspace-a"),
+        Region: apispec.NewOptString("us-east-1"),
+    }),
+})
+if err != nil {
+    log.Fatal(err)
 }
-```
+fmt.Printf("S3 volume ID: %s\\n", volume.ID)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.apispec.models.create_sandbox_volume_request import CreateSandboxVolumeRequest
+from sandbox0.apispec.models.create_sandbox_volume_s3_config import CreateSandboxVolumeS3Config
+from sandbox0.apispec.models.create_sandbox_volume_s3_config_provider import CreateSandboxVolumeS3ConfigProvider
+from sandbox0.apispec.models.volume_access_mode import VolumeAccessMode
+from sandbox0.apispec.models.volume_backend import VolumeBackend
+
+volume = client.volumes.create(CreateSandboxVolumeRequest(
+    backend=VolumeBackend.S3,
+    access_mode=VolumeAccessMode.RWO,
+    s3=CreateSandboxVolumeS3Config(
+        provider=CreateSandboxVolumeS3ConfigProvider.AWS,
+        bucket="sandbox-data",
+        prefix="team-a/workspace-a",
+        region="us-east-1",
+    ),
+))
+print(f"S3 volume ID: {volume.id}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `import { models } from "sandbox0";
+
+const volume = await client.volumes.create({
+    backend: models.VolumeBackend.S3,
+    accessMode: models.VolumeAccessMode.Rwo,
+    s3: {
+        provider: models.CreateSandboxVolumeS3ConfigProviderEnum.Aws,
+        bucket: "sandbox-data",
+        prefix: "team-a/workspace-a",
+        region: "us-east-1",
+    },
+});
+console.log("S3 volume ID:", volume.id);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 volume create \\
+  --backend s3 \\
+  --access-mode RWO \\
+  --s3-provider aws \\
+  --s3-bucket sandbox-data \\
+  --s3-prefix team-a/workspace-a \\
+  --s3-region us-east-1 \\
+  -o json`
+    }
+  ]}
+/>
+
+The bucket in these examples must already exist and be reachable by the inherited storage-proxy credentials or the per-volume credentials you provide. The prefix can be empty or pre-existing.
 
 `provider` can be `aws`, `ali`, or `r2`. Use `ali` for Aliyun OSS and `r2` for Cloudflare R2. `endpoint_url` is required for `ali` and `r2`; credentials can be provided per volume with `access_key`, `secret_key`, and optional `session_token`, or inherited from the storage-proxy configuration when omitted.
 
@@ -196,19 +267,19 @@ Retrieve a specific volume by ID.
 if err != nil {
     log.Fatal(err)
 }
-fmt.Printf("Volume: %s (mode: %s)\\n", vol.ID, vol.AccessMode.Value)`
+fmt.Printf("Volume: %s (backend: %s)\\n", vol.ID, vol.Backend)`
     },
     {
       label: "Python",
       language: "python",
       code: `vol = client.volumes.get(volume.id)
-print(f"Volume: {vol.id} (mode: {vol.access_mode})")`
+print(f"Volume: {vol.id} (backend: {vol.backend})")`
     },
     {
       label: "TypeScript",
       language: "typescript",
       code: `const vol = await client.volumes.get(volume.id);
-console.log("Volume:", vol.id, "mode:", vol.accessMode);`
+console.log("Volume:", vol.id, "backend:", vol.backend);`
     },
     {
       label: "CLI",
@@ -238,7 +309,7 @@ if err != nil {
     log.Fatal(err)
 }
 for _, v := range volumes {
-    fmt.Printf("- %s (%s)\\n", v.ID, v.AccessMode.Value)
+    fmt.Printf("- %s (%s)\\n", v.ID, v.Backend)
 }`
     },
     {
@@ -246,14 +317,14 @@ for _, v := range volumes {
       language: "python",
       code: `volumes = client.volumes.list()
 for vol in volumes:
-    print(f"- {vol.id} ({vol.access_mode})")`
+    print(f"- {vol.id} ({vol.backend})")`
     },
     {
       label: "TypeScript",
       language: "typescript",
       code: `const volumes = await client.volumes.list();
 for (const vol of volumes) {
-    console.log(\`- \${vol.id} (\${vol.accessMode})\`);
+    console.log(vol.id, vol.backend);
 }`
     },
     {

@@ -75,9 +75,7 @@ func TestWorkerFlushesBatchBySize(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for batch flush")
 	}
-	if stats := worker.Stats(); stats.InsertedEvents != 2 || stats.DroppedEvents != 0 {
-		t.Fatalf("stats = %+v", stats)
-	}
+	waitWorkerStats(t, worker, Stats{InsertedEvents: 2})
 }
 
 func TestWorkerDropsWhenQueueIsFull(t *testing.T) {
@@ -128,5 +126,26 @@ func TestWorkerDropsBatchAfterRetries(t *testing.T) {
 	}
 	if stats := worker.Stats(); stats.InsertedEvents != 0 || stats.DroppedEvents != 2 || stats.FailedBatches != 1 {
 		t.Fatalf("stats = %+v", stats)
+	}
+}
+
+func waitWorkerStats(t *testing.T, worker *Worker, want Stats) {
+	t.Helper()
+
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.NewTimer(time.Second)
+	defer timeout.Stop()
+
+	for {
+		got := worker.Stats()
+		if got == want {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-timeout.C:
+			t.Fatalf("stats = %+v, want %+v", got, want)
+		}
 	}
 }

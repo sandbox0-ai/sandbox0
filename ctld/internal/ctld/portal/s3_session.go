@@ -23,11 +23,21 @@ import (
 )
 
 const (
-	s3RootInode       = uint64(fsmeta.RootInode)
-	s3DirMode         = uint32(syscall.S_IFDIR | 0o755)
-	s3FileMode        = uint32(syscall.S_IFREG | 0o644)
-	fuseFattrSize     = uint32(fuse.FATTR_SIZE)
-	fuseFattrNoopMask = uint32(fuse.FATTR_FH | fuse.FATTR_LOCKOWNER | fuse.FATTR_KILL_SUIDGID)
+	s3RootInode               = uint64(fsmeta.RootInode)
+	s3DirMode                 = uint32(syscall.S_IFDIR | 0o777)
+	s3FileMode                = uint32(syscall.S_IFREG | 0o666)
+	fuseFattrSize             = uint32(fuse.FATTR_SIZE)
+	fuseFattrNoopMask         = uint32(fuse.FATTR_FH | fuse.FATTR_LOCKOWNER | fuse.FATTR_KILL_SUIDGID)
+	s3MetadataSetAttrNoopMask = uint32(
+		fuse.FATTR_MODE |
+			fuse.FATTR_UID |
+			fuse.FATTR_GID |
+			fuse.FATTR_ATIME |
+			fuse.FATTR_MTIME |
+			fuse.FATTR_ATIME_NOW |
+			fuse.FATTR_MTIME_NOW |
+			fuse.FATTR_CTIME,
+	)
 )
 
 type s3NodeKind uint8
@@ -50,6 +60,8 @@ type s3Handle struct {
 	inode     uint64
 	path      string
 	writable  bool
+	actor     *pb.PosixActor
+	read      bool
 	buffer    bytes.Buffer
 	committed bool
 	closed    bool
@@ -163,11 +175,17 @@ func (s *s3Session) SetAttr(ctx context.Context, req *pb.SetAttrRequest) (*pb.Se
 	if req.Valid == 0 {
 		return &pb.SetAttrResponse{Attr: s.attr(node)}, nil
 	}
-	if req.Valid&^(fuseFattrSize|fuseFattrNoopMask) != 0 {
-		return nil, syscall.EOPNOTSUPP
+	if req.Valid&^(s3MetadataSetAttrNoopMask|fuseFattrNoopMask) == 0 {
+		return &pb.SetAttrResponse{Attr: s.attr(node)}, nil
 	}
 	if req.Valid&fuseFattrSize == 0 {
+		if req.Valid&^fuseFattrNoopMask != 0 {
+			return nil, syscall.EOPNOTSUPP
+		}
 		return &pb.SetAttrResponse{Attr: s.attr(node)}, nil
+	}
+	if req.Valid&^(fuseFattrSize|fuseFattrNoopMask|s3MetadataSetAttrNoopMask) != 0 {
+		return nil, syscall.EOPNOTSUPP
 	}
 	if err := s.ensureWritable(); err != nil {
 		return nil, err
@@ -206,17 +224,21 @@ func (s *s3Session) SetAttr(ctx context.Context, req *pb.SetAttrRequest) (*pb.Se
 }
 
 func (s *s3Session) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb.NodeResponse, error) {
+	return s.createLocalDir(ctx, req.Parent, req.Name)
+}
+
+func (s *s3Session) createLocalDir(ctx context.Context, parentInode uint64, name string) (*pb.NodeResponse, error) {
 	if err := s.ensureWritable(); err != nil {
 		return nil, err
 	}
-	parent, err := s.nodeForInode(req.Parent)
+	parent, err := s.nodeForInode(parentInode)
 	if err != nil {
 		return nil, err
 	}
 	if parent.kind != s3NodeDir {
 		return nil, syscall.ENOTDIR
 	}
-	name, err := cleanS3Name(req.Name)
+	name, err = cleanS3Name(name)
 	if err != nil {
 		return nil, err
 	}
@@ -246,14 +268,60 @@ func (s *s3Session) Create(ctx context.Context, req *pb.CreateRequest) (*pb.Node
 		return nil, err
 	}
 	filePath := joinS3Path(parent.path, name)
+	if req.Flags&uint32(syscall.O_APPEND) != 0 {
+		return nil, fserror.New(fserror.InvalidArgument, "s3 backend does not support append writes")
+	}
+	if existing, err := s.resolvePath(ctx, filePath); err == nil {
+		if existing.kind != s3NodeFile {
+			return nil, syscall.EISDIR
+		}
+		if req.Flags&uint32(syscall.O_EXCL) != 0 {
+			return nil, fserror.New(fserror.AlreadyExists, "entry already exists")
+		}
+		if s.hasConflictingOpenReader(existing.inode, existing.path, req.Actor) || s.hasOpenWriter(existing.inode) {
+			return nil, syscall.EPERM
+		}
+		handleID := s.newHandle(&s3Handle{inode: existing.inode, path: existing.path, writable: true, actor: req.Actor})
+		s.updateNodeSize(existing.inode, 0)
+		return s.nodeResponse(existing, handleID), nil
+	} else if fserror.CodeOf(err) != fserror.NotFound {
+		return nil, err
+	}
+	node := s.rememberLocalFile(filePath, time.Now().UTC())
+	handleID := s.newHandle(&s3Handle{
+		inode:    node.inode,
+		path:     node.path,
+		writable: true,
+		actor:    req.Actor,
+	})
+	return s.nodeResponse(node, handleID), nil
+}
+
+func (s *s3Session) createFileNode(ctx context.Context, parentInode uint64, name string, localOnly bool) (*s3Node, error) {
+	if err := s.ensureWritable(); err != nil {
+		return nil, err
+	}
+	parent, err := s.nodeForInode(parentInode)
+	if err != nil {
+		return nil, err
+	}
+	if parent.kind != s3NodeDir {
+		return nil, syscall.ENOTDIR
+	}
+	name, err = cleanS3Name(name)
+	if err != nil {
+		return nil, err
+	}
+	filePath := joinS3Path(parent.path, name)
 	if _, err := s.resolvePath(ctx, filePath); err == nil {
 		return nil, fserror.New(fserror.AlreadyExists, "entry already exists")
 	} else if fserror.CodeOf(err) != fserror.NotFound {
 		return nil, err
 	}
-	node := s.rememberPath(filePath, s3NodeFile, 0, time.Now().UTC())
-	handleID := s.newHandle(&s3Handle{inode: node.inode, path: filePath, writable: true})
-	return s.nodeResponse(node, handleID), nil
+	if localOnly {
+		return s.rememberLocalFile(filePath, time.Now().UTC()), nil
+	}
+	return s.rememberPath(filePath, s3NodeFile, 0, time.Now().UTC()), nil
 }
 
 func (s *s3Session) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*pb.Empty, error) {
@@ -323,16 +391,31 @@ func (s *s3Session) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb.Empty,
 	return &pb.Empty{}, nil
 }
 
-func (s *s3Session) Rename(context.Context, *pb.RenameRequest) (*pb.Empty, error) {
-	return nil, syscall.EOPNOTSUPP
+func (s *s3Session) Rename(_ context.Context, req *pb.RenameRequest) (*pb.Empty, error) {
+	if req == nil {
+		return nil, syscall.EOPNOTSUPP
+	}
+	if _, err := s.nodeForInode(req.OldParent); err != nil {
+		return nil, err
+	}
+	if _, err := s.nodeForInode(req.NewParent); err != nil {
+		return nil, err
+	}
+	if _, err := cleanS3Name(req.OldName); err != nil {
+		return nil, err
+	}
+	if _, err := cleanS3Name(req.NewName); err != nil {
+		return nil, err
+	}
+	return nil, syscall.EPERM
 }
 
 func (s *s3Session) Link(context.Context, *pb.LinkRequest) (*pb.NodeResponse, error) {
-	return nil, syscall.EOPNOTSUPP
+	return nil, syscall.EPERM
 }
 
 func (s *s3Session) Symlink(context.Context, *pb.SymlinkRequest) (*pb.NodeResponse, error) {
-	return nil, syscall.EOPNOTSUPP
+	return nil, syscall.EPERM
 }
 
 func (s *s3Session) Readlink(context.Context, *pb.ReadlinkRequest) (*pb.ReadlinkResponse, error) {
@@ -359,11 +442,6 @@ func (s *s3Session) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResp
 		if err := s.ensureWritable(); err != nil {
 			return nil, err
 		}
-		if s.hasOpenReader(node.inode) || s.hasOpenWriter(node.inode) {
-			return nil, syscall.EPERM
-		}
-	} else if s.hasOpenWriter(node.inode) {
-		return nil, syscall.EPERM
 	}
 	node, err = s.resolvePath(ctx, node.path)
 	if err != nil {
@@ -374,13 +452,22 @@ func (s *s3Session) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResp
 	}
 	if writable {
 		if req.Flags&uint32(syscall.O_APPEND) != 0 {
-			return nil, syscall.EOPNOTSUPP
+			return nil, fserror.New(fserror.InvalidArgument, "s3 backend does not support append writes")
 		}
-		handleID := s.newHandle(&s3Handle{inode: node.inode, path: node.path, writable: true})
+		if handleID, ok := s.sameActorWritableHandle(node.inode, req.Actor); ok {
+			return &pb.OpenResponse{HandleId: handleID}, nil
+		}
+		if s.hasConflictingOpenReader(node.inode, node.path, req.Actor) || s.hasOpenWriter(node.inode) {
+			return nil, syscall.EPERM
+		}
+		handleID := s.newHandle(&s3Handle{inode: node.inode, path: node.path, writable: true, actor: req.Actor})
 		s.updateNodeSize(node.inode, 0)
 		return &pb.OpenResponse{HandleId: handleID}, nil
 	}
-	handleID := s.newHandle(&s3Handle{inode: node.inode, path: node.path})
+	if s.hasOpenWriter(node.inode) {
+		return nil, syscall.EPERM
+	}
+	handleID := s.newHandle(&s3Handle{inode: node.inode, path: node.path, actor: req.Actor})
 	return &pb.OpenResponse{HandleId: handleID}, nil
 }
 
@@ -418,6 +505,9 @@ func (s *s3Session) ReadInto(ctx context.Context, req *pb.ReadRequest, dest []by
 	if req.Offset >= node.size || len(dest) == 0 {
 		return 0, true, nil
 	}
+	if req.HandleId != 0 {
+		s.markReadHandle(req.HandleId, node.inode)
+	}
 	limit := int64(len(dest))
 	if remaining := node.size - req.Offset; remaining < limit {
 		limit = remaining
@@ -445,10 +535,20 @@ func (s *s3Session) Write(_ context.Context, req *pb.WriteRequest) (*pb.WriteRes
 	handle := s.handle(req.HandleId)
 	implicit := false
 	if handle == nil && req.HandleId == 0 {
+		if existing := s.findWritableHandle(req.Inode); existing != nil {
+			handle = existing
+		} else if req.Offset != 0 {
+			if node, err := s.nodeForInode(req.Inode); err == nil && node.localOnly {
+				s.forgetPath(node.path)
+			}
+			return nil, fserror.New(fserror.InvalidArgument, "s3 backend only supports sequential writes for new files")
+		}
 		var err error
-		handle, err = s.handlelessWritableHandle(req.Inode)
-		if err != nil {
-			return nil, err
+		if handle == nil {
+			handle, err = s.handlelessWritableHandle(req.Inode, req.Actor)
+			if err != nil {
+				return nil, err
+			}
 		}
 		implicit = true
 	}
@@ -460,6 +560,8 @@ func (s *s3Session) Write(_ context.Context, req *pb.WriteRequest) (*pb.WriteRes
 	}
 	if req.Offset != int64(handle.buffer.Len()) {
 		handle.failed = true
+		s.discardFailedWrite(handle)
+		s.dropFailedHandle(req.HandleId, req.Inode, handle)
 		return nil, fserror.New(fserror.InvalidArgument, "s3 backend only supports sequential writes for new files")
 	}
 	n, err := handle.buffer.Write(req.Data)
@@ -627,7 +729,7 @@ func (s *s3Session) addLocalDirEntries(node *s3Node, prefix string, plus bool, e
 			continue
 		}
 		entryPath := joinS3Path(node.path, name)
-		localOnly := entryNode.localOnly && kind == s3NodeDir
+		localOnly := entryNode.localOnly
 		remembered := s.rememberPathWithLocal(entryPath, kind, entryNode.size, entryNode.modified, localOnly)
 		dirEntry := &pb.DirEntry{
 			Inode: remembered.inode,
@@ -671,15 +773,27 @@ func (s *s3Session) SetXattr(context.Context, *pb.SetXattrRequest) (*pb.Empty, e
 }
 
 func (s *s3Session) ListXattr(context.Context, *pb.ListXattrRequest) (*pb.ListXattrResponse, error) {
-	return nil, syscall.EOPNOTSUPP
+	return &pb.ListXattrResponse{}, nil
 }
 
 func (s *s3Session) RemoveXattr(context.Context, *pb.RemoveXattrRequest) (*pb.Empty, error) {
 	return nil, syscall.EOPNOTSUPP
 }
 
-func (s *s3Session) Mknod(context.Context, *pb.MknodRequest) (*pb.NodeResponse, error) {
-	return nil, syscall.EOPNOTSUPP
+func (s *s3Session) Mknod(ctx context.Context, req *pb.MknodRequest) (*pb.NodeResponse, error) {
+	nodeType := req.Mode & uint32(syscall.S_IFMT)
+	switch nodeType {
+	case uint32(syscall.S_IFDIR):
+		return s.createLocalDir(ctx, req.Parent, req.Name)
+	case 0, uint32(syscall.S_IFREG):
+		node, err := s.createFileNode(ctx, req.Parent, req.Name, true)
+		if err != nil {
+			return nil, err
+		}
+		return s.nodeResponse(node, 0), nil
+	default:
+		return nil, syscall.EOPNOTSUPP
+	}
 }
 
 func (s *s3Session) GetLk(context.Context, *pb.GetLkRequest) (*pb.GetLkResponse, error) {
@@ -708,6 +822,17 @@ func (s *s3Session) resolvePath(ctx context.Context, key string) (*s3Node, error
 			return nil, err
 		} else if exists {
 			return s.rememberPath(key, s3NodeDir, 0, info.Modified), nil
+		}
+		return node, nil
+	}
+	if node, ok := s.nodeForPath(key); ok && node.kind == s3NodeFile && node.localOnly {
+		if s.hasOpenWriter(node.inode) {
+			return node, nil
+		}
+		if info, err := s.store.Head(key); err == nil {
+			return s.rememberPath(key, s3NodeFile, info.Size, info.Modified), nil
+		} else if !objectstore.IsNotFound(err) {
+			return nil, err
 		}
 		return node, nil
 	}
@@ -819,6 +944,10 @@ func (s *s3Session) rememberLocalDir(key string, modified time.Time) *s3Node {
 	return s.rememberPathWithLocal(key, s3NodeDir, 0, modified, true)
 }
 
+func (s *s3Session) rememberLocalFile(key string, modified time.Time) *s3Node {
+	return s.rememberPathWithLocal(key, s3NodeFile, 0, modified, true)
+}
+
 func (s *s3Session) rememberPathWithLocal(key string, kind s3NodeKind, size int64, modified time.Time, localOnly bool) *s3Node {
 	key = cleanS3Path(key)
 	if modified.IsZero() {
@@ -886,11 +1015,11 @@ func (s *s3Session) findWritableHandle(inode uint64) *s3Handle {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, handle := range s.handles {
-		if handle != nil && handle.inode == inode && handle.writable && !handle.closed {
+		if handle != nil && handle.inode == inode && handle.writable && !handle.closed && !handle.failed {
 			return handle
 		}
 	}
-	if handle := s.implicit[inode]; handle != nil && handle.writable && !handle.closed {
+	if handle := s.implicit[inode]; handle != nil && handle.writable && !handle.closed && !handle.failed {
 		return handle
 	}
 	return nil
@@ -900,15 +1029,39 @@ func (s *s3Session) hasOpenWriter(inode uint64) bool {
 	return s.findWritableHandle(inode) != nil
 }
 
-func (s *s3Session) hasOpenReader(inode uint64) bool {
+func (s *s3Session) hasConflictingOpenReader(inode uint64, key string, actor *pb.PosixActor) bool {
+	key = cleanS3Path(key)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, handle := range s.handles {
-		if handle != nil && handle.inode == inode && !handle.writable && !handle.closed {
+		if handle == nil || handle.inode != inode || handle.path != key || handle.writable || handle.closed {
+			continue
+		}
+		if handle.read || !samePosixActor(handle.actor, actor) {
 			return true
 		}
 	}
 	return false
+}
+
+func (s *s3Session) markReadHandle(handleID, inode uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	handle := s.handles[handleID]
+	if handle != nil && handle.inode == inode && !handle.writable && !handle.closed {
+		handle.read = true
+	}
+}
+
+func (s *s3Session) sameActorWritableHandle(inode uint64, actor *pb.PosixActor) (uint64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, handle := range s.handles {
+		if handle != nil && handle.inode == inode && handle.writable && !handle.closed && !handle.failed && samePosixActor(handle.actor, actor) {
+			return id, true
+		}
+	}
+	return 0, false
 }
 
 func (s *s3Session) takeHandle(handleID uint64) *s3Handle {
@@ -919,7 +1072,7 @@ func (s *s3Session) takeHandle(handleID uint64) *s3Handle {
 	return handle
 }
 
-func (s *s3Session) handlelessWritableHandle(inode uint64) (*s3Handle, error) {
+func (s *s3Session) handlelessWritableHandle(inode uint64, actor *pb.PosixActor) (*s3Handle, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if handle := s.implicit[inode]; handle != nil {
@@ -945,7 +1098,7 @@ func (s *s3Session) handlelessWritableHandle(inode uint64) (*s3Handle, error) {
 	if node.kind != s3NodeFile {
 		return nil, syscall.EISDIR
 	}
-	handle := &s3Handle{inode: inode, path: node.path, writable: true}
+	handle := &s3Handle{inode: inode, path: node.path, writable: true, actor: actor}
 	s.implicit[inode] = handle
 	return handle, nil
 }
@@ -966,6 +1119,39 @@ func (s *s3Session) takeHandlelessWritableHandle(inode uint64) *s3Handle {
 	return nil
 }
 
+func (s *s3Session) dropFailedHandle(handleID, inode uint64, target *s3Handle) {
+	if target == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if handleID != 0 {
+		if s.handles[handleID] == target {
+			delete(s.handles, handleID)
+		}
+	}
+	if s.implicit[inode] == target {
+		delete(s.implicit, inode)
+	}
+	for id, handle := range s.handles {
+		if handle == target {
+			delete(s.handles, id)
+		}
+	}
+	for handleInode, handle := range s.implicit {
+		if handle == target {
+			delete(s.implicit, handleInode)
+		}
+	}
+}
+
+func samePosixActor(a, b *pb.PosixActor) bool {
+	if a == nil || b == nil || a.Pid == 0 || b.Pid == 0 {
+		return false
+	}
+	return a.Pid == b.Pid
+}
+
 func (s *s3Session) updateNodeSize(inode uint64, size int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -980,7 +1166,7 @@ func (s *s3Session) commitHandle(_ context.Context, handle *s3Handle) error {
 		return nil
 	}
 	if handle.failed {
-		s.forgetPath(handle.path)
+		s.discardFailedWrite(handle)
 		return nil
 	}
 	if err := s.store.Put(handle.path, bytes.NewReader(handle.buffer.Bytes())); err != nil {
@@ -989,6 +1175,19 @@ func (s *s3Session) commitHandle(_ context.Context, handle *s3Handle) error {
 	handle.committed = true
 	s.rememberPath(handle.path, s3NodeFile, int64(handle.buffer.Len()), time.Now().UTC())
 	return nil
+}
+
+func (s *s3Session) discardFailedWrite(handle *s3Handle) {
+	if handle == nil {
+		return
+	}
+	if node, ok := s.nodeForPath(handle.path); ok && node.inode == handle.inode && node.localOnly {
+		s.forgetPath(handle.path)
+		return
+	}
+	if info, err := s.store.Head(handle.path); err == nil {
+		s.rememberPath(handle.path, s3NodeFile, info.Size, info.Modified)
+	}
 }
 
 func (s *s3Session) ensureWritable() error {

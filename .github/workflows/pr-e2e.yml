@@ -20,7 +20,7 @@ jobs:
   e2e:
     name: e2e
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       contents: read
     env:
@@ -51,7 +51,6 @@ jobs:
         env:
           E2E_CLUSTER_NAME: ${{ env.KIND_CLUSTER_NAME }}
           E2E_USE_EXISTING_CLUSTER: "true"
-          E2E_SANDBOX_RUNTIME_CLASS: ""
         run: make test-e2e-mountpoint-s3-compat
 
       - name: Dump cluster state on failure

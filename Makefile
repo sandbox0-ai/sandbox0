@@ -240,7 +240,6 @@ test-e2e-mountpoint-s3-compat:
 		E2E_SINGLE_CLUSTER_SCENARIOS=volumes \
 		E2E_MOUNTPOINT_S3_COMPAT=true \
 		E2E_USE_EXISTING_CLUSTER=true \
-		E2E_SANDBOX_RUNTIME_CLASS= \
 		$(GO) test -v -count=1 ./tests/e2e/scenarios/single-cluster \
 		-run TestSingleCluster \
 		-ginkgo.focus="API volumes mode.*mountpoint-s3 general bucket compatibility semantics" \

@@ -372,7 +372,11 @@ func main() {
 		logger,
 		managerMetrics,
 	)
-	quotaRepo, err := buildQuotaRepository(pool, cfg, meteringRepo)
+	var quotaUsageStore quota.UsageStore
+	if meteringRepo != nil {
+		quotaUsageStore = meteringRepo
+	}
+	quotaRepo, err := buildQuotaRepository(pool, cfg, quotaUsageStore)
 	if err != nil {
 		logger.Fatal("Invalid quota configuration", zap.Error(err))
 	}

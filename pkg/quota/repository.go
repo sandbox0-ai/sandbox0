@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -67,7 +68,31 @@ func (r *Repository) SetUsageStore(store UsageStore) {
 	if r == nil {
 		return
 	}
+	if !usageStoreConfigured(store) {
+		r.usageStore = nil
+		return
+	}
 	r.usageStore = store
+}
+
+func usageStoreConfigured(store UsageStore) bool {
+	if store == nil {
+		return false
+	}
+	value := reflect.ValueOf(store)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return !value.IsNil()
+	default:
+		return true
+	}
+}
+
+func (r *Repository) configuredUsageStore() (UsageStore, bool) {
+	if r == nil || !usageStoreConfigured(r.usageStore) {
+		return nil, false
+	}
+	return r.usageStore, true
 }
 
 func buildDefaultLimitMap(defaults []DefaultLimit) (map[Dimension]int64, error) {
@@ -136,8 +161,8 @@ func (r *Repository) CurrentUsage(ctx context.Context, teamID string, dimension 
 	if dimension == "" {
 		return 0, fmt.Errorf("dimension is required")
 	}
-	if r != nil && r.usageStore != nil {
-		return r.usageStore.CurrentUsage(ctx, teamID, dimension)
+	if store, ok := r.configuredUsageStore(); ok {
+		return store.CurrentUsage(ctx, teamID, dimension)
 	}
 	return 0, ErrUsageStoreNotConfigured
 }
@@ -200,8 +225,8 @@ func (r *Repository) ProjectedStorageUsageGB(ctx context.Context, teamID string,
 	if !storageDimensionMatchesSubjectType(dimension, subjectType) {
 		return 0, fmt.Errorf("quota dimension %q does not match storage subject_type %q", dimension, subjectType)
 	}
-	if r != nil && r.usageStore != nil {
-		return r.usageStore.ProjectedStorageUsageGB(ctx, teamID, dimension, subjectType, subjectID, sizeBytes)
+	if store, ok := r.configuredUsageStore(); ok {
+		return store.ProjectedStorageUsageGB(ctx, teamID, dimension, subjectType, subjectID, sizeBytes)
 	}
 	return 0, ErrUsageStoreNotConfigured
 }
@@ -217,8 +242,8 @@ func (r *Repository) AdditionalStorageUsageGB(ctx context.Context, teamID string
 	if !storageDimensionMatchesSubjectType(dimension, subjectType) {
 		return 0, fmt.Errorf("quota dimension %q does not match storage subject_type %q", dimension, subjectType)
 	}
-	if r != nil && r.usageStore != nil {
-		return r.usageStore.AdditionalStorageUsageGB(ctx, teamID, dimension, subjectType, additionalBytes)
+	if store, ok := r.configuredUsageStore(); ok {
+		return store.AdditionalStorageUsageGB(ctx, teamID, dimension, subjectType, additionalBytes)
 	}
 	return 0, ErrUsageStoreNotConfigured
 }

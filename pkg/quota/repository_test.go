@@ -193,6 +193,17 @@ func TestCurrentUsageWithoutUsageStoreReturnsUnavailable(t *testing.T) {
 	}
 }
 
+func TestCurrentUsageWithTypedNilUsageStoreReturnsUnavailable(t *testing.T) {
+	repo := NewRepositoryWithDB(&fakeDB{})
+	var store *fakeUsageStore
+	repo.SetUsageStore(store)
+
+	_, err := repo.CurrentUsage(context.Background(), "team-1", DimensionCPU)
+	if !errors.Is(err, ErrUsageStoreNotConfigured) {
+		t.Fatalf("CurrentUsage error = %v, want ErrUsageStoreNotConfigured", err)
+	}
+}
+
 func TestProjectedStorageUsageGBDelegatesToUsageStore(t *testing.T) {
 	repo := NewRepositoryWithDB(&fakeDB{})
 	repo.SetUsageStore(&fakeUsageStore{

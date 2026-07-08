@@ -15,8 +15,8 @@ import (
 // MeteringReader defines the read-only metering contract shared by gateway surfaces.
 type MeteringReader interface {
 	GetStatus(ctx context.Context, fallbackRegionID string) (*metering.Status, error)
-	ListEventsAfter(ctx context.Context, afterSequence int64, limit int) ([]*metering.Event, error)
-	ListWindowsAfter(ctx context.Context, afterSequence int64, limit int) ([]*metering.Window, error)
+	ListEvents(ctx context.Context, cursor string, limit int) ([]*metering.Event, string, error)
+	ListWindows(ctx context.Context, cursor string, limit int) ([]*metering.Window, string, error)
 }
 
 // MeteringHandler serves region-scoped metering export endpoints.
@@ -62,20 +62,25 @@ func (h *MeteringHandler) ListEvents(c *gin.Context) {
 		return
 	}
 
-	afterSequence, limit, ok := parseMeteringCursor(c)
+	cursor, limit, ok := parseMeteringCursor(c)
 	if !ok {
 		return
 	}
 
-	events, err := h.repo.ListEventsAfter(c.Request.Context(), afterSequence, limit)
+	events, nextCursor, err := h.repo.ListEvents(c.Request.Context(), cursor, limit)
 	if err != nil {
 		h.logger.Error("Failed to list metering events", zap.Error(err))
+		if strings.Contains(err.Error(), "invalid cursor") {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid cursor")
+			return
+		}
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to list metering events")
 		return
 	}
 
 	spec.JSONSuccess(c, http.StatusOK, gin.H{
-		"events": events,
+		"events":      events,
+		"next_cursor": nextCursor,
 	})
 }
 
@@ -86,40 +91,36 @@ func (h *MeteringHandler) ListWindows(c *gin.Context) {
 		return
 	}
 
-	afterSequence, limit, ok := parseMeteringCursor(c)
+	cursor, limit, ok := parseMeteringCursor(c)
 	if !ok {
 		return
 	}
 
-	windows, err := h.repo.ListWindowsAfter(c.Request.Context(), afterSequence, limit)
+	windows, nextCursor, err := h.repo.ListWindows(c.Request.Context(), cursor, limit)
 	if err != nil {
 		h.logger.Error("Failed to list metering windows", zap.Error(err))
+		if strings.Contains(err.Error(), "invalid cursor") {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid cursor")
+			return
+		}
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to list metering windows")
 		return
 	}
 
 	spec.JSONSuccess(c, http.StatusOK, gin.H{
-		"windows": windows,
+		"windows":     windows,
+		"next_cursor": nextCursor,
 	})
 }
 
-func parseMeteringCursor(c *gin.Context) (int64, int, bool) {
-	afterSequence := int64(0)
-	if value := c.Query("after_sequence"); value != "" {
-		parsed, err := strconv.ParseInt(value, 10, 64)
-		if err != nil || parsed < 0 {
-			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid after_sequence")
-			return 0, 0, false
-		}
-		afterSequence = parsed
-	}
-
+func parseMeteringCursor(c *gin.Context) (string, int, bool) {
+	cursor := strings.TrimSpace(c.Query("cursor"))
 	limit := 100
 	if value := c.Query("limit"); value != "" {
 		parsed, err := strconv.Atoi(value)
 		if err != nil || parsed <= 0 {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid limit")
-			return 0, 0, false
+			return "", 0, false
 		}
 		if parsed > 1000 {
 			parsed = 1000
@@ -127,5 +128,5 @@ func parseMeteringCursor(c *gin.Context) (int64, int, bool) {
 		limit = parsed
 	}
 
-	return afterSequence, limit, true
+	return cursor, limit, true
 }

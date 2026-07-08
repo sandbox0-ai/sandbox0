@@ -30,6 +30,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
+	meteringsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/metering"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storage"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -278,6 +279,9 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	}
 	cfg.MetaURL = metaURL
 	cfg.RegionID = common.ResolveRegionID(infra)
+	if err := meteringsvc.ApplyStorageProxyConfig(ctx, r.Resources.Client, infra, cfg); err != nil {
+		return nil, fmt.Errorf("apply metering config: %w", err)
+	}
 
 	storageConfig, err := storage.GetStorageConfig(ctx, r.Resources.Client, infra)
 	if err != nil {

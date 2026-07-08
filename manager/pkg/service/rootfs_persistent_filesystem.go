@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -133,6 +134,20 @@ type RootFSObjectInspector interface {
 
 type RootFSStorageMeteringRecorder interface {
 	RecordStorageObservation(context.Context, *meteringpkg.StorageObservation) error
+}
+
+func configuredRootFSStorageMeteringRecorder(recorder RootFSStorageMeteringRecorder) (RootFSStorageMeteringRecorder, bool) {
+	if recorder == nil {
+		return nil, false
+	}
+	value := reflect.ValueOf(recorder)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		if value.IsNil() {
+			return nil, false
+		}
+	}
+	return recorder, true
 }
 
 type rootFSStoreDB interface {
@@ -755,7 +770,8 @@ func (s *PGSandboxStore) ListRootFSStorageUsage(ctx context.Context, teamID stri
 }
 
 func (s *PGSandboxStore) RecordRootFSStorageObservations(ctx context.Context, recorder RootFSStorageMeteringRecorder, teamID string, observedAt time.Time) ([]RootFSStorageUsage, error) {
-	if recorder == nil {
+	recorder, ok := configuredRootFSStorageMeteringRecorder(recorder)
+	if !ok {
 		return nil, nil
 	}
 	if observedAt.IsZero() {

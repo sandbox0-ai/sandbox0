@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"reflect"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -50,6 +51,20 @@ type meteringWriter interface {
 	RecordStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *meteringpkg.StorageObservation) error
 	CloseStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *meteringpkg.StorageObservation) error
 	UpsertProducerWatermarkTx(ctx context.Context, tx pgx.Tx, producer string, regionID string, completeBefore time.Time) error
+}
+
+func configuredMeteringWriter(writer meteringWriter) (meteringWriter, bool) {
+	if writer == nil {
+		return nil, false
+	}
+	value := reflect.ValueOf(writer)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		if value.IsNil() {
+			return nil, false
+		}
+	}
+	return writer, true
 }
 
 type snapshotManager interface {
@@ -290,34 +305,37 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) appendMeteringEventTx(ctx context.Context, tx pgx.Tx, event *meteringpkg.Event) error {
-	if s.meteringRepo == nil || event == nil {
+	writer, ok := configuredMeteringWriter(s.meteringRepo)
+	if !ok || event == nil {
 		return nil
 	}
-	if err := s.meteringRepo.AppendEventTx(ctx, tx, event); err != nil {
+	if err := writer.AppendEventTx(ctx, tx, event); err != nil {
 		return err
 	}
-	return s.meteringRepo.UpsertProducerWatermarkTx(ctx, tx, event.Producer, event.RegionID, event.OccurredAt)
+	return writer.UpsertProducerWatermarkTx(ctx, tx, event.Producer, event.RegionID, event.OccurredAt)
 }
 
 func (s *Server) appendStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *meteringpkg.StorageObservation) error {
-	if s.meteringRepo == nil || observation == nil {
+	writer, ok := configuredMeteringWriter(s.meteringRepo)
+	if !ok || observation == nil {
 		return nil
 	}
 	if err := s.enforceStorageObservationQuota(ctx, observation); err != nil {
 		return err
 	}
-	if err := s.meteringRepo.RecordStorageObservationTx(ctx, tx, observation); err != nil {
+	if err := writer.RecordStorageObservationTx(ctx, tx, observation); err != nil {
 		return err
 	}
-	return s.meteringRepo.UpsertProducerWatermarkTx(ctx, tx, meteringpkg.ProducerStorage, observation.RegionID, observation.ObservedAt)
+	return writer.UpsertProducerWatermarkTx(ctx, tx, meteringpkg.ProducerStorage, observation.RegionID, observation.ObservedAt)
 }
 
 func (s *Server) closeStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *meteringpkg.StorageObservation) error {
-	if s.meteringRepo == nil || observation == nil {
+	writer, ok := configuredMeteringWriter(s.meteringRepo)
+	if !ok || observation == nil {
 		return nil
 	}
-	if err := s.meteringRepo.CloseStorageObservationTx(ctx, tx, observation); err != nil {
+	if err := writer.CloseStorageObservationTx(ctx, tx, observation); err != nil {
 		return err
 	}
-	return s.meteringRepo.UpsertProducerWatermarkTx(ctx, tx, meteringpkg.ProducerStorage, observation.RegionID, observation.ObservedAt)
+	return writer.UpsertProducerWatermarkTx(ctx, tx, meteringpkg.ProducerStorage, observation.RegionID, observation.ObservedAt)
 }

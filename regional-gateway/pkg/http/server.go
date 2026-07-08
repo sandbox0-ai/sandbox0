@@ -27,12 +27,23 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/teamresources"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
-	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
 )
+
+type ServerOption func(*serverOptions)
+
+type serverOptions struct {
+	meteringReader gatewayhandlers.MeteringReader
+}
+
+func WithMeteringReader(reader gatewayhandlers.MeteringReader) ServerOption {
+	return func(opts *serverOptions) {
+		opts.meteringReader = reader
+	}
+}
 
 // Server represents the HTTP server for regional-gateway
 type Server struct {
@@ -79,8 +90,15 @@ func NewServer(
 	pool *pgxpool.Pool,
 	logger *zap.Logger,
 	obsProvider *observability.Provider,
+	opts ...ServerOption,
 ) (*Server, error) {
 	ctx := context.Background()
+	options := serverOptions{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&options)
+		}
+	}
 
 	// Set gin mode
 	gin.SetMode(gin.ReleaseMode)
@@ -91,10 +109,6 @@ func NewServer(
 	// Create repository
 	identityRepo := identity.NewRepository(pool)
 	apiKeyRepo := apikey.NewRepository(pool)
-	var meteringRepo *metering.Repository
-	if pool != nil {
-		meteringRepo = metering.NewRepository(pool)
-	}
 	registryProvider, err := registryprovider.NewProvider(cfg.Registry, nil, logger)
 	if err != nil {
 		logger.Warn("Registry provider disabled", zap.Error(err))
@@ -241,7 +255,7 @@ func NewServer(
 		requestLogger:         requestLogger,
 		logger:                logger,
 		internalAuthGen:       internalAuthGen,
-		meteringHandler:       gatewayhandlers.NewMeteringHandler(meteringRepo, cfg.RegionID, logger),
+		meteringHandler:       gatewayhandlers.NewMeteringHandler(options.meteringReader, cfg.RegionID, logger),
 		obsProvider:           obsProvider,
 		httpClient:            httpClient,
 		clusterGatewayProxies: make(map[string]*proxy.Router),

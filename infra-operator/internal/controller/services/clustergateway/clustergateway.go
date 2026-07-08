@@ -28,6 +28,7 @@ import (
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	meteringsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/metering"
 	redissvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/redis"
 	sandboxobssvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sandboxobservability"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
@@ -245,6 +246,9 @@ func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.In
 		return nil, fmt.Errorf("compiled plan is required")
 	}
 	if owner := compiledPlan.Scope.Owner(); owner != nil {
+		if err := meteringsvc.ApplyClusterGatewayConfig(ctx, r.Resources.Client, owner, cfg); err != nil {
+			return nil, fmt.Errorf("apply metering config: %w", err)
+		}
 		if err := sandboxobssvc.ApplyClusterGatewayConfig(ctx, r.Resources.Client, owner, cfg); err != nil {
 			return nil, err
 		}

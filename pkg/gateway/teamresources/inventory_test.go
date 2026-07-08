@@ -70,23 +70,10 @@ func TestRepositoryBlockingQueriesCoverTeamScopedStores(t *testing.T) {
 	}
 }
 
-func TestRepositoryRetainedQueriesDocumentMeteringPolicy(t *testing.T) {
+func TestRepositoryDoesNotQueryPostgresMeteringForRetainedUsage(t *testing.T) {
 	repo := NewRepository(nil)
-	got := map[string]bool{}
-	for _, query := range repo.retainedQueries() {
-		got[query.category] = true
-	}
-
-	want := []string{
-		"usage_events",
-		"usage_windows",
-		"manager_sandbox_projection_state",
-		"storage_projection_state",
-	}
-	for _, category := range want {
-		if !got[category] {
-			t.Fatalf("missing retained query category %q", category)
-		}
+	if got := repo.retainedQueries(); len(got) != 0 {
+		t.Fatalf("retained queries = %#v, want none because metering truth is ClickHouse-backed", got)
 	}
 	if MeteringRetentionPolicy == "" {
 		t.Fatal("metering retention policy must be explicit")

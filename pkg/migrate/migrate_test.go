@@ -10,14 +10,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
-	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 )
-
-type noopLogger struct{}
-
-func (noopLogger) Printf(string, ...any) {}
-func (noopLogger) Fatalf(string, ...any) {}
 
 func TestUpWithSchemaRestoresPoolSearchPath(t *testing.T) {
 	dbURL := os.Getenv("INTEGRATION_DATABASE_URL")
@@ -30,6 +24,7 @@ func TestUpWithSchemaRestoresPoolSearchPath(t *testing.T) {
 
 	ctx := context.Background()
 	appSchema := fmt.Sprintf("migrate_test_%s", strings.ReplaceAll(uuid.NewString(), "-", ""))
+	otherSchema := fmt.Sprintf("migrate_other_test_%s", strings.ReplaceAll(uuid.NewString(), "-", ""))
 
 	pool, err := dbpool.New(ctx, dbpool.Options{
 		DatabaseURL: dbURL,
@@ -42,7 +37,7 @@ func TestUpWithSchemaRestoresPoolSearchPath(t *testing.T) {
 
 	t.Cleanup(func() {
 		_, _ = pool.Exec(ctx, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", appSchema))
-		_, _ = pool.Exec(ctx, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", metering.SchemaName))
+		_, _ = pool.Exec(ctx, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", otherSchema))
 	})
 
 	migrationsDir := t.TempDir()
@@ -62,8 +57,19 @@ DROP TABLE IF EXISTS users;
 	if err := migrate.Up(ctx, pool, migrationsDir, migrate.WithSchema(appSchema)); err != nil {
 		t.Fatalf("run app migrations: %v", err)
 	}
-	if err := metering.RunMigrations(ctx, pool, noopLogger{}); err != nil {
-		t.Fatalf("run metering migrations: %v", err)
+	otherMigrationsDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(otherMigrationsDir, "00001_create_other.sql"), []byte(`-- +goose Up
+CREATE TABLE IF NOT EXISTS other_records (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid()
+);
+
+-- +goose Down
+DROP TABLE IF EXISTS other_records;
+`), 0o644); err != nil {
+		t.Fatalf("write other migration: %v", err)
+	}
+	if err := migrate.Up(ctx, pool, otherMigrationsDir, migrate.WithSchema(otherSchema)); err != nil {
+		t.Fatalf("run other schema migrations: %v", err)
 	}
 
 	var count int

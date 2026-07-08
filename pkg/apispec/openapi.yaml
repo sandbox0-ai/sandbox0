@@ -1453,7 +1453,7 @@ paths:
       description: |
         Queries the asynchronous per-sandbox observability projection for lifecycle,
         network audit, and runtime stats events. This endpoint does not expose backend SQL
-        and does not replace the metering usage truth stored in PostgreSQL.
+        and reads tables that are separate from the metering usage ledger.
       security:
         - bearerAuth: []
       x-upstream-service: cluster-gateway
@@ -1616,7 +1616,7 @@ paths:
       summary: Query historical sandbox metric samples
       description: |
         Queries the asynchronous per-sandbox metric sample projection. This endpoint is
-        separate from platform service metrics and PostgreSQL metering usage truth.
+        separate from platform service metrics and metering usage truth.
       security:
         - bearerAuth: []
       x-upstream-service: cluster-gateway

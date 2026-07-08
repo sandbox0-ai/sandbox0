@@ -55,7 +55,11 @@ func (c *RootFSMaintenanceController) SetStorageMeteringRecorder(recorder RootFS
 	if c == nil {
 		return
 	}
-	c.meteringRecorder = recorder
+	if recorder, ok := configuredRootFSStorageMeteringRecorder(recorder); ok {
+		c.meteringRecorder = recorder
+		return
+	}
+	c.meteringRecorder = nil
 }
 
 func (c *RootFSMaintenanceController) SetObjectInspector(inspector RootFSObjectInspector) {

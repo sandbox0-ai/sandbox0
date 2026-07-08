@@ -1119,3 +1119,21 @@ func TestListSnapshotCompatibilityIssuesDetectsWindowsReservedNames(t *testing.T
 		t.Fatalf("issue path = %q, want /CON.txt", issues[0].Path)
 	}
 }
+
+func TestConfiguredMeteringRecorderRejectsTypedNil(t *testing.T) {
+	var recorder *fakeMeteringRecorder
+	if _, ok := configuredMeteringRecorder(recorder); ok {
+		t.Fatal("typed-nil metering recorder should be treated as disabled")
+	}
+}
+
+func TestAppendStorageObservationIgnoresTypedNilMeteringRecorder(t *testing.T) {
+	var recorder *fakeMeteringRecorder
+	mgr := &Manager{}
+	mgr.SetMeteringRepository(recorder)
+
+	err := mgr.appendStorageObservation(context.Background(), &metering.StorageObservation{})
+	if err != nil {
+		t.Fatalf("appendStorageObservation() error = %v", err)
+	}
+}

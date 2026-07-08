@@ -1129,6 +1129,142 @@ spec:
                   - templateId
                   type: object
                 type: array
+              clickHouse:
+                default:
+                  type: disabled
+                description: |-
+                  ClickHouse configures the region-level ClickHouse data component used by
+                  ClickHouse-backed features such as sandbox observability and metering.
+                properties:
+                  builtin:
+                    description: Builtin configures the operator-managed ClickHouse
+                      instance.
+                    properties:
+                      enabled:
+                        default: true
+                        description: Enabled enables the built-in ClickHouse instance
+                          when type is builtin.
+                        type: boolean
+                      httpPort:
+                        default: 8123
+                        description: HTTPPort is the ClickHouse HTTP port.
+                        format: int32
+                        type: integer
+                        x-kubernetes-validations:
+                        - message: httpPort is immutable after creation
+                          rule: self == oldSelf
+                      image:
+                        default: clickhouse/clickhouse-server:24.8
+                        description: Image is the ClickHouse server image.
+                        type: string
+                      nativePort:
+                        default: 9000
+                        description: NativePort is the ClickHouse native TCP port.
+                        format: int32
+                        type: integer
+                        x-kubernetes-validations:
+                        - message: nativePort is immutable after creation
+                          rule: self == oldSelf
+                      persistence:
+                        description: Persistence configures ClickHouse storage.
+                        properties:
+                          size:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            default: 20Gi
+                            description: Size specifies the storage size
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          storageClass:
+                            description: StorageClass specifies the storage class
+                              (empty for default)
+                            type: string
+                        type: object
+                        x-kubernetes-validations:
+                        - message: persistence is immutable after creation
+                          rule: self == oldSelf
+                      statefulResourcePolicy:
+                        default: Retain
+                        description: |-
+                          StatefulResourcePolicy controls what happens to the builtin PVC and
+                          generated credentials secret when the builtin backend is disabled or
+                          replaced by an external backend.
+                        enum:
+                        - Retain
+                        - Delete
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: persistence presence is immutable after creation
+                      rule: has(self.persistence) == has(oldSelf.persistence)
+                  databases:
+                    default: {}
+                    description: Databases configures logical ClickHouse databases
+                      used by Sandbox0 features.
+                    properties:
+                      metering:
+                        default: sandbox0_metering
+                        description: Metering is the database for the regional usage
+                          ledger.
+                        type: string
+                      observability:
+                        default: sandbox0_observability
+                        description: Observability is the database for per-sandbox
+                          historical observability.
+                        type: string
+                    type: object
+                  external:
+                    description: External configures a user-owned ClickHouse instance.
+                    properties:
+                      connectTimeout:
+                        default: 10s
+                        description: ConnectTimeout bounds startup connection and
+                          schema checks.
+                        type: string
+                      dsnSecret:
+                        description: DSNSecret references a secret key containing
+                          the ClickHouse database/sql DSN.
+                        properties:
+                          key:
+                            default: dsn
+                            description: Key is the key in the secret.
+                            type: string
+                          name:
+                            description: Name is the name of the secret.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    required:
+                    - dsnSecret
+                    type: object
+                  schemaMigration:
+                    default: {}
+                    description: SchemaMigration configures whether services run ClickHouse
+                      schema migrations.
+                    properties:
+                      enabled:
+                        default: true
+                        description: Enabled allows Sandbox0 services to run ClickHouse
+                          CREATE/ALTER statements.
+                        type: boolean
+                    type: object
+                  type:
+                    allOf:
+                    - enum:
+                      - disabled
+                      - builtin
+                      - external
+                    - enum:
+                      - disabled
+                      - builtin
+                      - external
+                    default: disabled
+                    description: Type selects whether ClickHouse is disabled, operator-managed,
+                      or external.
+                    type: string
+                type: object
               cluster:
                 description: Cluster configures cluster identification and capacity
                 properties:
@@ -1595,6 +1731,70 @@ spec:
                   shareWithMain:
                     default: true
                     description: ShareWithMain uses the main database for S0FS metadata
+                    type: boolean
+                type: object
+              metering:
+                default: {}
+                description: Metering configures the region usage ledger backend.
+                properties:
+                  clickHouse:
+                    default: {}
+                    description: ClickHouse configures table names and write policy
+                      for ClickHouse metering.
+                    properties:
+                      eventsTable:
+                        default: usage_events
+                        type: string
+                      retention:
+                        default: {}
+                        description: MeteringClickHouseRetentionConfig configures
+                          usage ledger retention.
+                        properties:
+                          eventsDays:
+                            default: 400
+                            type: integer
+                          windowsDays:
+                            default: 400
+                            type: integer
+                        type: object
+                      sandboxStateTable:
+                        default: sandbox_projection_state
+                        type: string
+                      storageStateTable:
+                        default: storage_projection_state
+                        type: string
+                      watermarksTable:
+                        default: producer_watermarks
+                        type: string
+                      windowsTable:
+                        default: usage_windows
+                        type: string
+                      write:
+                        default: {}
+                        description: MeteringClickHouseWriteConfig configures ClickHouse
+                          metering write behavior.
+                        properties:
+                          failPolicy:
+                            default: buffer
+                            description: FailPolicy selects behavior when durable
+                              writes cannot complete.
+                            enum:
+                            - buffer
+                            - fail-closed
+                            type: string
+                          mode:
+                            default: durable
+                            description: Mode selects durable write semantics. Only
+                              durable is accepted.
+                            enum:
+                            - durable
+                            type: string
+                        type: object
+                    type: object
+                  enabled:
+                    default: false
+                    description: Enabled enables ClickHouse-backed metering. Metering
+                      is disabled by default.
                     type: boolean
                 type: object
               observability:
@@ -2408,6 +2608,20 @@ spec:
                   SandboxObservability configures the region-local historical per-sandbox
                   observability backend and collection pipelines.
                 properties:
+                  backend:
+                    allOf:
+                    - enum:
+                      - disabled
+                      - clickhouse
+                    - enum:
+                      - disabled
+                      - clickhouse
+                    default: disabled
+                    description: |-
+                      Backend selects the historical query backend. New configurations should
+                      use clickhouse with spec.clickHouse. The legacy type field is still
+                      accepted for compatibility.
+                    type: string
                   builtin:
                     description: Builtin configures the operator-managed ClickHouse
                       backend.
@@ -2489,6 +2703,11 @@ spec:
                     - message: clickHouse persistence presence is immutable after
                         creation
                       rule: has(self.clickHouse.persistence) == has(oldSelf.clickHouse.persistence)
+                  enabled:
+                    description: |-
+                      Enabled enables the per-sandbox historical observability feature. When
+                      omitted, the legacy type field controls enablement.
+                    type: boolean
                   external:
                     description: External configures a user-owned ClickHouse backend.
                     properties:

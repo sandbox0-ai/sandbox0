@@ -166,6 +166,9 @@ type NetdConfig struct {
 	// +optional
 	// +kubebuilder:default="10s"
 	MeteringReportInterval metav1.Duration `yaml:"metering_report_interval" json:"meteringReportInterval"`
+	// Metering configures the optional region usage ledger.
+	// +optional
+	Metering MeteringConfig `yaml:"metering" json:"metering"`
 	// +optional
 	AuditLogPath string `yaml:"audit_log_path" json:"auditLogPath"`
 	// +optional

@@ -59,9 +59,16 @@ func main() {
 	if err := runMigrations(ctx, pool, logger); err != nil {
 		logger.Fatal("Failed to run database migrations", zap.Error(err))
 	}
+	meteringDB, meteringRepo, err := initMetering(ctx, cfg, logger)
+	if err != nil {
+		logger.Fatal("Failed to initialize metering backend", zap.Error(err))
+	}
+	if meteringDB != nil {
+		defer meteringDB.Close()
+	}
 
 	// Create HTTP server
-	server, err := http.NewServer(cfg, pool, logger, obsProvider)
+	server, err := http.NewServer(cfg, pool, logger, obsProvider, http.WithMeteringReader(meteringRepo))
 	if err != nil {
 		logger.Fatal("Failed to create HTTP server", zap.Error(err))
 	}

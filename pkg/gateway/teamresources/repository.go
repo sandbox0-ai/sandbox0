@@ -18,7 +18,6 @@ type SchemaConfig struct {
 	Manager      string
 	StorageProxy string
 	Quota        string
-	Metering     string
 }
 
 // DefaultSchemaConfig returns the deployment defaults used by sandbox0 services.
@@ -28,7 +27,6 @@ func DefaultSchemaConfig() SchemaConfig {
 		Manager:      "manager",
 		StorageProxy: "storage_proxy",
 		Quota:        "quota",
-		Metering:     "metering",
 	}
 }
 
@@ -376,33 +374,7 @@ func (r *Repository) blockingQueries() []countQuery {
 }
 
 func (r *Repository) retainedQueries() []countQuery {
-	usageEvents := tableRef(r.schemas.Metering, "usage_events")
-	usageWindows := tableRef(r.schemas.Metering, "usage_windows")
-	managerProjection := tableRef(r.schemas.Metering, "manager_sandbox_projection_state")
-	storageProjection := tableRef(r.schemas.Metering, "storage_projection_state")
-
-	return []countQuery{
-		{
-			category: "usage_events",
-			table:    usageEvents,
-			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, usageEvents),
-		},
-		{
-			category: "usage_windows",
-			table:    usageWindows,
-			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, usageWindows),
-		},
-		{
-			category: "manager_sandbox_projection_state",
-			table:    managerProjection,
-			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, managerProjection),
-		},
-		{
-			category: "storage_projection_state",
-			table:    storageProjection,
-			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, storageProjection),
-		},
-	}
+	return nil
 }
 
 func (r *Repository) countOptional(ctx context.Context, table, query, teamID string) (int64, error) {
@@ -485,7 +457,7 @@ func (r *Repository) blockingDiscoverySchemas(ctx context.Context) ([]string, er
 }
 
 func (r *Repository) retainedDiscoverySchemas() []string {
-	return []string{r.schemas.Metering}
+	return nil
 }
 
 func (r *Repository) currentSchema(ctx context.Context) (string, error) {

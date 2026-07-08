@@ -80,3 +80,44 @@ func TestApplyManagerConfigClearsIngestURLsWhenDisabled(t *testing.T) {
 	assert.Empty(t, cfg.SandboxObservabilityLogsIngestURL)
 	assert.Empty(t, cfg.SandboxObservabilityMetricsIngestURL)
 }
+
+func TestGetRuntimeConfigUsesRegionClickHouse(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, infrav1alpha1.AddToScheme(scheme))
+
+	enabled := true
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox0", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			ClickHouse: &infrav1alpha1.ClickHouseConfig{
+				Type: infrav1alpha1.ClickHouseTypeExternal,
+				External: &infrav1alpha1.ExternalClickHouseConfig{
+					DSNSecret: infrav1alpha1.ClickHouseDSNSecretRef{Name: "clickhouse-dsn"},
+				},
+				Databases: infrav1alpha1.ClickHouseDatabaseConfig{
+					Observability: "sandbox0_obs",
+				},
+			},
+			SandboxObservability: &infrav1alpha1.SandboxObservabilityConfig{
+				Enabled: &enabled,
+				Backend: infrav1alpha1.SandboxObservabilityBackendClickHouse,
+			},
+		},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		infra,
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "clickhouse-dsn", Namespace: "sandbox0-system"},
+			Data:       map[string][]byte{"dsn": []byte("clickhouse://sandbox0:password@clickhouse:9000/sandbox0_obs")},
+		},
+	).Build()
+
+	cfg, ok, err := GetRuntimeConfig(context.Background(), client, infra)
+
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "clickhouse://sandbox0:password@clickhouse:9000/sandbox0_obs", cfg.DSN)
+	assert.Equal(t, "sandbox0_obs", cfg.Database)
+	assert.Equal(t, "sandbox_events", cfg.EventsTable)
+}

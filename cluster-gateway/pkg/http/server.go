@@ -28,7 +28,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/teamresources"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
-	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
@@ -40,11 +39,18 @@ type ServerOption func(*serverOptions)
 
 type serverOptions struct {
 	sandboxObservabilityRepo sandboxobservability.Repository
+	meteringReader           gatewayhandlers.MeteringReader
 }
 
 func WithSandboxObservabilityRepository(repo sandboxobservability.Repository) ServerOption {
 	return func(opts *serverOptions) {
 		opts.sandboxObservabilityRepo = repo
+	}
+}
+
+func WithMeteringReader(reader gatewayhandlers.MeteringReader) ServerOption {
+	return func(opts *serverOptions) {
+		opts.meteringReader = reader
 	}
 }
 
@@ -269,11 +275,7 @@ func NewServer(
 		publicJWT = jwtIssuer
 	}
 
-	var meteringRepo *metering.Repository
-	if pool != nil {
-		meteringRepo = metering.NewRepository(pool)
-	}
-	meteringHandler := gatewayhandlers.NewMeteringHandler(meteringRepo, cfg.RegionID, logger)
+	meteringHandler := gatewayhandlers.NewMeteringHandler(options.meteringReader, cfg.RegionID, logger)
 	observabilityHandler := gatewayhandlers.NewSandboxObservabilityHandler(
 		options.sandboxObservabilityRepo,
 		logger,

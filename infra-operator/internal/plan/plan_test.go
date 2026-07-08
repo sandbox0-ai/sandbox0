@@ -200,6 +200,118 @@ func TestBuiltinTemplatesDefaultsAndOverrides(t *testing.T) {
 	}
 }
 
+func TestCompileEnablesClickHouseBeforeSandboxObservability(t *testing.T) {
+	enabled := true
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			ClickHouse: &infrav1alpha1.ClickHouseConfig{
+				Type: infrav1alpha1.ClickHouseTypeExternal,
+				External: &infrav1alpha1.ExternalClickHouseConfig{
+					DSNSecret: infrav1alpha1.ClickHouseDSNSecretRef{Name: "clickhouse-dsn"},
+				},
+			},
+			SandboxObservability: &infrav1alpha1.SandboxObservabilityConfig{
+				Enabled: &enabled,
+				Backend: infrav1alpha1.SandboxObservabilityBackendClickHouse,
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+
+	if !compiled.Components.EnableClickHouse {
+		t.Fatalf("expected clickhouse component to be enabled")
+	}
+	if !compiled.Components.EnableSandboxObservability {
+		t.Fatalf("expected sandbox observability to be enabled")
+	}
+	clickHouseIndex := -1
+	sandboxObsIndex := -1
+	for i, step := range compiled.Workflow.Steps {
+		switch step.Name {
+		case "clickhouse":
+			clickHouseIndex = i
+		case "sandbox-observability":
+			sandboxObsIndex = i
+		}
+	}
+	if clickHouseIndex < 0 || sandboxObsIndex < 0 || clickHouseIndex > sandboxObsIndex {
+		t.Fatalf("expected clickhouse step before sandbox-observability, got clickhouse=%d sandbox-observability=%d steps=%#v", clickHouseIndex, sandboxObsIndex, compiled.Workflow.Steps)
+	}
+}
+
+func TestCompileEnablesMeteringAfterClickHouse(t *testing.T) {
+	enabled := true
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			ClickHouse: &infrav1alpha1.ClickHouseConfig{
+				Type: infrav1alpha1.ClickHouseTypeExternal,
+				External: &infrav1alpha1.ExternalClickHouseConfig{
+					DSNSecret: infrav1alpha1.ClickHouseDSNSecretRef{Name: "clickhouse-dsn"},
+				},
+			},
+			Metering: &infrav1alpha1.MeteringConfig{
+				Enabled: &enabled,
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+
+	if !compiled.Components.EnableClickHouse {
+		t.Fatalf("expected clickhouse component to be enabled")
+	}
+	if !compiled.Components.EnableMetering {
+		t.Fatalf("expected metering component to be enabled")
+	}
+	if len(compiled.Validation.FatalErrors) != 0 {
+		t.Fatalf("fatal errors = %#v, want none", compiled.Validation.FatalErrors)
+	}
+	clickHouseIndex := -1
+	meteringIndex := -1
+	for i, step := range compiled.Workflow.Steps {
+		switch step.Name {
+		case "clickhouse":
+			clickHouseIndex = i
+		case "metering":
+			meteringIndex = i
+		}
+	}
+	if clickHouseIndex < 0 || meteringIndex < 0 || clickHouseIndex > meteringIndex {
+		t.Fatalf("expected clickhouse step before metering, got clickhouse=%d metering=%d steps=%#v", clickHouseIndex, meteringIndex, compiled.Workflow.Steps)
+	}
+	if !containsString(compiled.Status.ExpectedConditions, infrav1alpha1.ConditionTypeMeteringReady) {
+		t.Fatalf("expected MeteringReady condition, got %#v", compiled.Status.ExpectedConditions)
+	}
+}
+
+func TestCompileRejectsMeteringWithoutClickHouse(t *testing.T) {
+	enabled := true
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Metering: &infrav1alpha1.MeteringConfig{
+				Enabled: &enabled,
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+
+	found := false
+	for _, msg := range compiled.Validation.FatalErrors {
+		if strings.Contains(msg, "metering requires spec.clickHouse type builtin or external") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected metering clickhouse dependency error, got %#v", compiled.Validation.FatalErrors)
+	}
+}
+
 func TestCompileDefaultsDataPlaneIdentityFromPublicExposure(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{

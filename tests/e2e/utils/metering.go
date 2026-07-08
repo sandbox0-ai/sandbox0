@@ -29,11 +29,11 @@ func (s *Session) GetMeteringStatus(ctx context.Context) (*metering.Status, int,
 	return resp, status, nil
 }
 
-func (s *Session) ListMeteringEvents(ctx context.Context, afterSequence int64, limit int) ([]*metering.Event, int, error) {
+func (s *Session) ListMeteringEvents(ctx context.Context, cursor string, limit int) ([]*metering.Event, string, int, error) {
 	path := "/internal/v1/metering/events"
 	query := url.Values{}
-	if afterSequence > 0 {
-		query.Set("after_sequence", fmt.Sprintf("%d", afterSequence))
+	if cursor != "" {
+		query.Set("cursor", cursor)
 	}
 	if limit > 0 {
 		query.Set("limit", fmt.Sprintf("%d", limit))
@@ -44,28 +44,29 @@ func (s *Session) ListMeteringEvents(ctx context.Context, afterSequence int64, l
 
 	status, body, err := s.doJSONRequest(ctx, http.MethodGet, path, nil, true)
 	if err != nil {
-		return nil, status, err
+		return nil, "", status, err
 	}
 	if status != http.StatusOK {
-		return nil, status, fmt.Errorf("list metering events failed with status %d: %s", status, formatAPIError(body))
+		return nil, "", status, fmt.Errorf("list metering events failed with status %d: %s", status, formatAPIError(body))
 	}
 	resp, apiErr, err := gatewayspec.DecodeResponse[struct {
-		Events []*metering.Event `json:"events"`
+		Events     []*metering.Event `json:"events"`
+		NextCursor string            `json:"next_cursor"`
 	}](bytes.NewReader(body))
 	if err != nil {
-		return nil, status, err
+		return nil, "", status, err
 	}
 	if apiErr != nil {
-		return nil, status, fmt.Errorf("list metering events failed: %s", apiErr.Message)
+		return nil, "", status, fmt.Errorf("list metering events failed: %s", apiErr.Message)
 	}
-	return resp.Events, status, nil
+	return resp.Events, resp.NextCursor, status, nil
 }
 
-func (s *Session) ListMeteringWindows(ctx context.Context, afterSequence int64, limit int) ([]*metering.Window, int, error) {
+func (s *Session) ListMeteringWindows(ctx context.Context, cursor string, limit int) ([]*metering.Window, string, int, error) {
 	path := "/internal/v1/metering/windows"
 	query := url.Values{}
-	if afterSequence > 0 {
-		query.Set("after_sequence", fmt.Sprintf("%d", afterSequence))
+	if cursor != "" {
+		query.Set("cursor", cursor)
 	}
 	if limit > 0 {
 		query.Set("limit", fmt.Sprintf("%d", limit))
@@ -76,21 +77,22 @@ func (s *Session) ListMeteringWindows(ctx context.Context, afterSequence int64, 
 
 	status, body, err := s.doJSONRequest(ctx, http.MethodGet, path, nil, true)
 	if err != nil {
-		return nil, status, err
+		return nil, "", status, err
 	}
 	if status != http.StatusOK {
-		return nil, status, fmt.Errorf("list metering windows failed with status %d: %s", status, formatAPIError(body))
+		return nil, "", status, fmt.Errorf("list metering windows failed with status %d: %s", status, formatAPIError(body))
 	}
 	resp, apiErr, err := gatewayspec.DecodeResponse[struct {
-		Windows []*metering.Window `json:"windows"`
+		Windows    []*metering.Window `json:"windows"`
+		NextCursor string             `json:"next_cursor"`
 	}](bytes.NewReader(body))
 	if err != nil {
-		return nil, status, err
+		return nil, "", status, err
 	}
 	if apiErr != nil {
-		return nil, status, fmt.Errorf("list metering windows failed: %s", apiErr.Message)
+		return nil, "", status, fmt.Errorf("list metering windows failed: %s", apiErr.Message)
 	}
-	return resp.Windows, status, nil
+	return resp.Windows, resp.NextCursor, status, nil
 }
 
 func (s *Session) ListAllMeteringEvents(ctx context.Context, batchSize int) ([]*metering.Event, error) {
@@ -99,11 +101,11 @@ func (s *Session) ListAllMeteringEvents(ctx context.Context, batchSize int) ([]*
 	}
 
 	var (
-		afterSequence int64
-		out           []*metering.Event
+		cursor string
+		out    []*metering.Event
 	)
 	for {
-		events, _, err := s.ListMeteringEvents(ctx, afterSequence, batchSize)
+		events, nextCursor, _, err := s.ListMeteringEvents(ctx, cursor, batchSize)
 		if err != nil {
 			return nil, err
 		}
@@ -111,14 +113,10 @@ func (s *Session) ListAllMeteringEvents(ctx context.Context, batchSize int) ([]*
 			return out, nil
 		}
 		out = append(out, events...)
-		lastSequence := events[len(events)-1].Sequence
-		if lastSequence <= afterSequence {
+		if nextCursor == "" || nextCursor == cursor {
 			return out, nil
 		}
-		afterSequence = lastSequence
-		if len(events) < batchSize {
-			return out, nil
-		}
+		cursor = nextCursor
 	}
 }
 
@@ -128,11 +126,11 @@ func (s *Session) ListAllMeteringWindows(ctx context.Context, batchSize int) ([]
 	}
 
 	var (
-		afterSequence int64
-		out           []*metering.Window
+		cursor string
+		out    []*metering.Window
 	)
 	for {
-		windows, _, err := s.ListMeteringWindows(ctx, afterSequence, batchSize)
+		windows, nextCursor, _, err := s.ListMeteringWindows(ctx, cursor, batchSize)
 		if err != nil {
 			return nil, err
 		}
@@ -140,13 +138,9 @@ func (s *Session) ListAllMeteringWindows(ctx context.Context, batchSize int) ([]
 			return out, nil
 		}
 		out = append(out, windows...)
-		lastSequence := windows[len(windows)-1].Sequence
-		if lastSequence <= afterSequence {
+		if nextCursor == "" || nextCursor == cursor {
 			return out, nil
 		}
-		afterSequence = lastSequence
-		if len(windows) < batchSize {
-			return out, nil
-		}
+		cursor = nextCursor
 	}
 }

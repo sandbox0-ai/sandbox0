@@ -16,12 +16,12 @@ import (
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	clickhousesvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/clickhouse"
 	credentialstoresvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/credentialstore"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/observability"
 	redissvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/redis"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
-	sandboxobssvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sandboxobservability"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storage"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 )
@@ -116,7 +116,7 @@ func TestCleanupDisabledServiceResourcesCleansBuiltinDependencies(t *testing.T) 
 		storage.NewReconciler(resources),
 		registry.NewReconciler(resources),
 		nil,
-		sandboxobssvc.NewReconciler(resources),
+		clickhousesvc.NewReconciler(resources),
 	)
 	if err != nil {
 		t.Fatalf("cleanup disabled service resources: %v", err)
@@ -185,7 +185,7 @@ func TestCleanupDisabledServiceResourcesAllowsObservabilityOnlySpec(t *testing.T
 		storage.NewReconciler(resources),
 		registry.NewReconciler(resources),
 		observability.NewReconciler(resources),
-		sandboxobssvc.NewReconciler(resources),
+		clickhousesvc.NewReconciler(resources),
 	)
 	if err != nil {
 		t.Fatalf("cleanup disabled service resources: %v", err)

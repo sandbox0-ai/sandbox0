@@ -525,3 +525,20 @@ func TestDeleteSandboxVolumeReturnsConflictWhenDirectMountStillInflight(t *testi
 		t.Fatalf("delete should not proceed, got deleted volume %v", repo.deletedVolume)
 	}
 }
+
+func TestConfiguredMeteringWriterRejectsTypedNil(t *testing.T) {
+	var writer *fakeHTTPMeteringWriter
+	if _, ok := configuredMeteringWriter(writer); ok {
+		t.Fatal("typed-nil metering writer should be treated as disabled")
+	}
+}
+
+func TestAppendStorageObservationTxIgnoresTypedNilMeteringWriter(t *testing.T) {
+	var writer *fakeHTTPMeteringWriter
+	server := &Server{meteringRepo: writer}
+
+	err := server.appendStorageObservationTx(context.Background(), nil, &metering.StorageObservation{})
+	if err != nil {
+		t.Fatalf("appendStorageObservationTx() error = %v", err)
+	}
+}

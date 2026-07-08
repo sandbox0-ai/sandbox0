@@ -17,6 +17,7 @@ import (
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	credentialstoresvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/credentialstore"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storage"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
@@ -59,6 +60,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			return err
 		}
 		storageConfig.ObjectEncryptionKeyPath = common.ObjectEncryptionKeyPath
+	}
+	if err := credentialstoresvc.ApplyEncryptedPGCredentialStoreConfig(ctx, r.Resources, common.NewObjectScope(infra), &storageConfig.CredentialStore); err != nil {
+		return err
 	}
 	configRef, err := r.Resources.ReconcileHashedServiceConfigMap(ctx, infra, name, labels, storageConfig)
 	if err != nil {
@@ -143,6 +147,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			},
 		},
 	}
+	credentialStoreMounts, credentialStoreVolumes := credentialstoresvc.CredentialStoreVolumes(common.NewObjectScope(infra), &storageConfig.CredentialStore)
+	volumeMounts = append(volumeMounts, credentialStoreMounts...)
+	volumes = append(volumes, credentialStoreVolumes...)
 	if storageConfig.ObjectEncryptionEnabled {
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
 			Name:      "object-encryption-key",

@@ -1,0 +1,169 @@
+# Volume Backends
+
+Volume backend selection controls where Volume data lives and which storage operations are available.
+
+The default backend is `s0fs`. It stores Sandbox0-managed filesystem state in S3-compatible object storage and keeps filesystem metadata under Sandbox0 control. Use `s0fs` for agent workspaces that need direct file APIs, snapshots, restore, forks, and small-file write-heavy behavior.
+
+The `s3` backend mounts an existing S3-compatible bucket prefix through the same ctld volume portal used by normal Sandbox mounts. Use `s3` when the bucket prefix is the source of truth and a Sandbox should read or write objects through a mounted filesystem path.
+
+<Callout variant="info">
+Backend is selected when the Volume is created. Existing Volumes do not switch backend in place.
+</Callout>
+
+## Compatibility
+
+| Capability | `s0fs` backend | `s3` backend |
+|------------|----------------|--------------|
+| Source of truth | Sandbox0-managed Volume state | Existing S3/OSS/R2 bucket prefix |
+| Sandbox mount | Yes | Yes |
+| Mount access modes | `RWO`, `ROX`; `RWX` is not accepted by the current ctld mount path | `RWO`, `ROX`; `RWX` is rejected |
+| Direct Volume file API without an active mount | Yes | No |
+| Direct Volume file API through an active ctld mount owner | Yes | Yes |
+| Volume snapshots | Yes | No |
+| Restore Volume snapshot | Yes | No |
+| Create Volume from `snapshot_id` | Yes | No |
+| Fork Volume | Yes | No |
+| Application-layer S0FS encryption | Yes | No; use bucket-side encryption and credential controls |
+| External object changes visible through mount | No; Sandbox0 owns the namespace | Yes, on later lookup, read, or list |
+
+Snapshot, restore, and fork APIs are `s0fs`-only. Calling them on an `s3` backend Volume returns a bad request because the backend does not support those operations.
+
+## S0FS Backend
+
+`s0fs` is the default backend when `backend` is omitted. It is the backend behind Sandbox0's normal persistent Volume behavior:
+
+- durable filesystem metadata and file segments are stored in object storage
+- direct Volume file APIs can operate without a running Sandbox
+- snapshots record immutable point-in-time Volume state
+- restore moves a Volume back to a snapshot state
+- fork creates an independent child Volume with copy-on-write sharing
+- persisted S0FS objects and node-local cache state can be protected with Sandbox0 application-layer encryption
+
+Create an `s0fs` Volume by omitting `backend`:
+
+```bash
+s0 volume create --access-mode RWO
+```
+
+## S3 Backend
+
+The `s3` backend projects object keys into a filesystem-like tree. It is useful when data already lives in object storage and the Sandbox should work against that bucket prefix directly.
+
+Create an S3 backend volume with the SDKs or CLI:
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `volume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{
+    Backend:    apispec.NewOptVolumeBackend(apispec.VolumeBackendS3),
+    AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWO),
+    S3: apispec.NewOptCreateSandboxVolumeS3Config(apispec.CreateSandboxVolumeS3Config{
+        Provider: apispec.NewOptCreateSandboxVolumeS3ConfigProvider(
+            apispec.CreateSandboxVolumeS3ConfigProviderAWS,
+        ),
+        Bucket: "sandbox-data",
+        Prefix: apispec.NewOptString("team-a/workspace-a"),
+        Region: apispec.NewOptString("us-east-1"),
+        AccessKey: os.Getenv("AWS_ACCESS_KEY_ID"),
+        SecretKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
+    }),
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("S3 volume ID: %s\\n", volume.ID)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `import os
+
+from sandbox0.apispec.models.create_sandbox_volume_request import CreateSandboxVolumeRequest
+from sandbox0.apispec.models.create_sandbox_volume_s3_config import CreateSandboxVolumeS3Config
+from sandbox0.apispec.models.create_sandbox_volume_s3_config_provider import CreateSandboxVolumeS3ConfigProvider
+from sandbox0.apispec.models.volume_access_mode import VolumeAccessMode
+from sandbox0.apispec.models.volume_backend import VolumeBackend
+
+volume = client.volumes.create(CreateSandboxVolumeRequest(
+    backend=VolumeBackend.S3,
+    access_mode=VolumeAccessMode.RWO,
+    s3=CreateSandboxVolumeS3Config(
+        provider=CreateSandboxVolumeS3ConfigProvider.AWS,
+        bucket="sandbox-data",
+        prefix="team-a/workspace-a",
+        region="us-east-1",
+        access_key=os.environ["AWS_ACCESS_KEY_ID"],
+        secret_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+    ),
+))
+print(f"S3 volume ID: {volume.id}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `import { models } from "sandbox0";
+
+const volume = await client.volumes.create({
+    backend: models.VolumeBackend.S3,
+    accessMode: models.VolumeAccessMode.Rwo,
+    s3: {
+        provider: models.CreateSandboxVolumeS3ConfigProviderEnum.Aws,
+        bucket: "sandbox-data",
+        prefix: "team-a/workspace-a",
+        region: "us-east-1",
+        accessKey: process.env.AWS_ACCESS_KEY_ID!,
+        secretKey: process.env.AWS_SECRET_ACCESS_KEY!,
+    },
+});
+console.log("S3 volume ID:", volume.id);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 volume create \\
+  --backend s3 \\
+  --access-mode RWO \\
+  --s3-provider aws \\
+  --s3-bucket sandbox-data \\
+  --s3-prefix team-a/workspace-a \\
+  --s3-region us-east-1 \\
+  --s3-access-key "$AWS_ACCESS_KEY_ID" \\
+  --s3-secret-key "$AWS_SECRET_ACCESS_KEY" \\
+  -o json`
+    }
+  ]}
+/>
+
+The bucket must already exist and be reachable with the per-Volume credentials you provide. The prefix can be empty or pre-existing.
+
+`provider` can be `aws`, `ali`, or `r2`. Use `ali` for Aliyun OSS and `r2` for Cloudflare R2. `endpoint_url` is required for `ali` and `r2`. For `aws`, provide `region` or an S3-compatible `endpoint_url`. `access_key` and `secret_key` are required; `session_token` is optional for temporary credentials.
+
+<Callout variant="info">
+The S3 backend is for customer-owned object storage. Sandbox0 stores the per-Volume credentials as encrypted `encrypted_pg` payloads so `ctld` can mount the bucket prefix later. API responses never include `access_key`, `secret_key`, or `session_token`.
+</Callout>
+
+The `s3` backend is mount-s3-like rather than a full `s0fs` replacement:
+
+- object keys are projected into directories using `/`
+- directory entries are synthetic, or represented by zero-byte marker objects ending in `/`
+- new files are written back to S3 on close, release, or fsync
+- external S3 object changes are visible through the mounted path on later lookup, read, or list operations
+- writable opens replace the target object and must write sequentially
+- append writes and random in-place overwrites are not supported
+- `RWX`, snapshots, restore, forks, direct file APIs without an active mounted owner, rename, hard links, symlinks, xattrs, locks, `fallocate`, and `copy_file_range` are not supported
+
+When an `s3` Volume is actively mounted, direct Volume file API requests can still be proxied to that active ctld owner. When it is not mounted, use S3 APIs directly or mount it into a Sandbox first.
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Mounts" href="/docs/sandbox/volume/mounts" cta="Continue">
+    Mount Volumes into sandbox templates and claims.
+  </Card>
+
+  <Card title="Snapshots" href="/docs/sandbox/volume/snapshots" cta="Continue">
+    Use snapshot and restore workflows with `s0fs` Volumes.
+  </Card>
+</CardGroup>

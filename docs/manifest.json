@@ -66,10 +66,6 @@
           "title": "Network"
         },
         {
-          "slug": "quota",
-          "title": "Quotas"
-        },
-        {
           "slug": "protocol-controls",
           "title": "Protocol Controls"
         },
@@ -182,6 +178,10 @@
         {
           "slug": "http",
           "title": "HTTP"
+        },
+        {
+          "slug": "backends",
+          "title": "Backends"
         },
         {
           "slug": "snapshots",

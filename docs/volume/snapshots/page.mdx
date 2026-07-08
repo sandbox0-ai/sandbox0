@@ -2,6 +2,10 @@
 
 A Snapshot is a point-in-time, read-only copy of a Volume. Snapshots are designed for backup, rollback, and reproducible environments.
 
+<Callout variant="info">
+Volume snapshots, restore, and creating a Volume from `snapshot_id` are supported only for the `s0fs` backend. `s3` backend Volumes return a bad request because they expose an external object prefix rather than Sandbox0-managed snapshot state. See [Volume Backends](/docs/sandbox/volume/backends) for the compatibility matrix.
+</Callout>
+
 ## Snapshot Features
 
 - **Instant Creation**: Built on Copy-on-Write semantics, snapshot creation is near-instant
@@ -357,11 +361,11 @@ Deleting a snapshot does not affect current Volume data. The live Volume state r
 ## Next Steps
 
 <CardGroup>
-  <Card title="Fork" href="/docs/sandbox/volume/fork" cta="Continue">
-    Fork volumes when workflows need isolated writable branches.
+  <Card title="Backends" href="/docs/sandbox/volume/backends" cta="Continue">
+    Check which Volume operations are available for each backend.
   </Card>
 
-  <Card title="Overview" href="/docs/sandbox/integrations" cta="Continue">
-    Connect Sandbox0 with external developer workflows.
+  <Card title="Fork" href="/docs/sandbox/volume/fork" cta="Continue">
+    Fork volumes when workflows need isolated writable branches.
   </Card>
 </CardGroup>

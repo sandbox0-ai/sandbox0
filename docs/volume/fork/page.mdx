@@ -2,6 +2,10 @@
 
 Volume Fork creates a new Volume from an existing Volume using s0fs Copy-on-Write (COW) clone.
 
+<Callout variant="info">
+Volume fork is supported only for the `s0fs` backend. Forking an `s3` backend Volume returns a bad request because the external bucket prefix remains the source of truth. See [Volume Backends](/docs/sandbox/volume/backends) for the compatibility matrix.
+</Callout>
+
 ## Why Use Fork?
 
 - **Fast Clone**: Create a new Volume quickly without copying all data blocks
@@ -124,11 +128,11 @@ Fork does not require the source Volume to be mounted.
 ## Next Steps
 
 <CardGroup>
-  <Card title="Overview" href="/docs/sandbox/integrations" cta="Continue">
-    Connect Sandbox0 with external developer workflows.
+  <Card title="Backends" href="/docs/sandbox/volume/backends" cta="Continue">
+    Check which Volume operations are available for each backend.
   </Card>
 
-  <Card title="GitHub CI" href="/docs/sandbox/integrations/github-ci" cta="Continue">
-    Build Sandbox0 templates from GitHub Actions and CI pipelines.
+  <Card title="Snapshots" href="/docs/sandbox/volume/snapshots" cta="Continue">
+    Create restore points before branching Volume state.
   </Card>
 </CardGroup>

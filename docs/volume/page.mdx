@@ -15,7 +15,7 @@ The default Sandbox writable filesystem is checkpointed across pause/resume for 
 | Storage surface | Survives pause/resume | Survives sandbox delete or `hard_ttl` | Shareable | Snapshots and forks | Direct file API |
 |-----------------|-----------------------|----------------------------------------|-----------|---------------------|-----------------|
 | Sandbox root filesystem | Yes, after checkpointed pause | Only through named rootfs snapshots or forks | No | Yes, through [Snapshot And Restore](/docs/sandbox/snapshot-restore) | Through the Sandbox file API while the Sandbox exists |
-| Sandbox Volume | Yes | Yes, until the Volume is deleted | Yes | Yes | Yes |
+| Sandbox Volume | Yes | Yes, until the Volume is deleted | Yes | Backend-dependent; `s0fs` only | Backend-dependent; `s0fs` always, `s3` only through an active mount owner |
 
 ## Volume and Sandbox Relationship
 
@@ -45,106 +45,11 @@ The default access mode is `RWO`. Sandbox mounts are declared by the template an
 
 ## Volume Backends
 
-The default backend is `s0fs`, Sandbox0's durable POSIX-oriented volume store backed by S3-compatible object storage. `s0fs` supports Sandbox mounts, direct file APIs, snapshots, restore, and forks.
+The default backend is `s0fs`, Sandbox0's durable POSIX-oriented volume store backed by S3-compatible object storage. Sandbox0 also supports an `s3` backend for mounting an existing S3-compatible bucket prefix into a Sandbox.
 
-Use `s0fs` when Sandbox0 should own the durable filesystem state, snapshots, and forks. Use `s3` when the source of truth is an existing S3-compatible bucket prefix and the Sandbox should see that prefix through the same ctld volume portal used by normal Sandbox mounts.
+Backend choice controls which operations are available. `s0fs` supports snapshots, restore, forks, and direct file APIs without a running Sandbox. `s3` is a mount-oriented object prefix projection and does not support snapshots, restore, or forks.
 
-| Backend | Source of truth | Best for | Snapshot and fork support |
-|---------|-----------------|----------|---------------------------|
-| `s0fs` | Sandbox0-managed volume data | POSIX-oriented agent workspaces, small-file write-heavy state, snapshots, forks, direct volume file APIs | Yes |
-| `s3` | Existing S3/OSS/R2 bucket prefix | Bidirectional access to object storage from a Sandbox mount | No |
-
-Create an S3 backend volume with the SDKs or CLI:
-
-<Tabs
-  tabs={[
-    {
-      label: "Go",
-      language: "go",
-      code: `volume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{
-    Backend:    apispec.NewOptVolumeBackend(apispec.VolumeBackendS3),
-    AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWO),
-    S3: apispec.NewOptCreateSandboxVolumeS3Config(apispec.CreateSandboxVolumeS3Config{
-        Provider: apispec.NewOptCreateSandboxVolumeS3ConfigProvider(
-            apispec.CreateSandboxVolumeS3ConfigProviderAWS,
-        ),
-        Bucket: "sandbox-data",
-        Prefix: apispec.NewOptString("team-a/workspace-a"),
-        Region: apispec.NewOptString("us-east-1"),
-    }),
-})
-if err != nil {
-    log.Fatal(err)
-}
-fmt.Printf("S3 volume ID: %s\\n", volume.ID)`
-    },
-    {
-      label: "Python",
-      language: "python",
-      code: `from sandbox0.apispec.models.create_sandbox_volume_request import CreateSandboxVolumeRequest
-from sandbox0.apispec.models.create_sandbox_volume_s3_config import CreateSandboxVolumeS3Config
-from sandbox0.apispec.models.create_sandbox_volume_s3_config_provider import CreateSandboxVolumeS3ConfigProvider
-from sandbox0.apispec.models.volume_access_mode import VolumeAccessMode
-from sandbox0.apispec.models.volume_backend import VolumeBackend
-
-volume = client.volumes.create(CreateSandboxVolumeRequest(
-    backend=VolumeBackend.S3,
-    access_mode=VolumeAccessMode.RWO,
-    s3=CreateSandboxVolumeS3Config(
-        provider=CreateSandboxVolumeS3ConfigProvider.AWS,
-        bucket="sandbox-data",
-        prefix="team-a/workspace-a",
-        region="us-east-1",
-    ),
-))
-print(f"S3 volume ID: {volume.id}")`
-    },
-    {
-      label: "TypeScript",
-      language: "typescript",
-      code: `import { models } from "sandbox0";
-
-const volume = await client.volumes.create({
-    backend: models.VolumeBackend.S3,
-    accessMode: models.VolumeAccessMode.Rwo,
-    s3: {
-        provider: models.CreateSandboxVolumeS3ConfigProviderEnum.Aws,
-        bucket: "sandbox-data",
-        prefix: "team-a/workspace-a",
-        region: "us-east-1",
-    },
-});
-console.log("S3 volume ID:", volume.id);`
-    },
-    {
-      label: "CLI",
-      language: "bash",
-      code: `s0 volume create \\
-  --backend s3 \\
-  --access-mode RWO \\
-  --s3-provider aws \\
-  --s3-bucket sandbox-data \\
-  --s3-prefix team-a/workspace-a \\
-  --s3-region us-east-1 \\
-  -o json`
-    }
-  ]}
-/>
-
-The bucket in these examples must already exist and be reachable by the inherited storage-proxy credentials or the per-volume credentials you provide. The prefix can be empty or pre-existing.
-
-`provider` can be `aws`, `ali`, or `r2`. Use `ali` for Aliyun OSS and `r2` for Cloudflare R2. `endpoint_url` is required for `ali` and `r2`; credentials can be provided per volume with `access_key`, `secret_key`, and optional `session_token`, or inherited from the storage-proxy configuration when omitted.
-
-The `s3` backend is mount-s3-like rather than a full `s0fs` replacement:
-
-- object keys are projected into directories using `/`
-- directory entries are synthetic, or represented by zero-byte marker objects ending in `/`
-- new files are written back to S3 on close, flush, or fsync
-- external S3 object changes are visible through the mounted path on later lookup/read/list operations
-- Writable opens replace the target object and must write sequentially; random in-place overwrites are not supported
-- `RWX`, snapshots, restore, forks, direct file APIs without an active mounted owner, rename, hard links, symlinks, xattrs, locks, and fallocate are not supported
-
-When a `s3` volume is actively mounted, direct volume file API requests can still be proxied to that active ctld owner. When it is not mounted, use S3 APIs directly or mount it into a Sandbox first.
+For the full compatibility matrix and S3 backend examples, see [Volume Backends](/docs/sandbox/volume/backends).
 
 ## Correctness Model
 
@@ -152,9 +57,9 @@ For mounted `RWO` volumes, Sandbox0 keeps one active writable owner at a time.
 
 - when a sandbox mounts an `RWO` volume, the node-local mount owner becomes authoritative for reads and writes
 - direct volume file API requests are routed to that mounted owner instead of opening a second writable mount
-- when the volume is not mounted into a sandbox, `storage-proxy` serves direct file API requests itself
+- for `s0fs` volumes that are not mounted into a sandbox, `storage-proxy` serves direct file API requests itself
 
-This keeps the mounted filesystem view and the direct volume API view consistent in both directions.
+This keeps the mounted filesystem view and the direct volume API view consistent in both directions. For `s3` backend Volumes, direct file API requests require an active ctld mount owner; otherwise use S3 APIs directly or mount the Volume into a Sandbox first.
 
 ## Application-Layer Encryption
 
@@ -170,12 +75,12 @@ For self-hosted deployments, see [Self-hosted Configuration](/docs/sandbox/self-
 
 ## Direct File Operations
 
-You can operate on files in a Volume directly by volume ID, without mounting the Volume into a Sandbox first.
+For `s0fs` Volumes, you can operate on files directly by Volume ID without mounting the Volume into a Sandbox first.
 
 This is useful for SDK workflows, developer tooling, and small control-plane style file tasks where starting or reusing a Sandbox would only add latency.
 
 <Callout variant="info">
-Direct volume file APIs still go through the normal gateway chain and team-scoped auth. When a volume is already mounted into a sandbox, the API request is served by that mounted owner. When it is not mounted, `storage-proxy` lazily attaches the volume on demand and reclaims idle direct mounts later.
+Direct volume file APIs still go through the normal gateway chain and team-scoped auth. When an `s0fs` volume is already mounted into a sandbox, the API request is served by that mounted owner. When it is not mounted, `storage-proxy` lazily attaches the volume on demand and reclaims idle direct mounts later. `s3` backend Volumes require an active mounted owner for direct file API requests.
 </Callout>
 
 The direct file API surface mirrors the Sandbox file API:
@@ -383,5 +288,9 @@ console.log("Volume deleted");`
 
   <Card title="HTTP" href="/docs/sandbox/volume/http" cta="Continue">
     Use direct volume file APIs outside a running sandbox mount.
+  </Card>
+
+  <Card title="Backends" href="/docs/sandbox/volume/backends" cta="Continue">
+    Choose between `s0fs` and S3-compatible backend behavior.
   </Card>
 </CardGroup>

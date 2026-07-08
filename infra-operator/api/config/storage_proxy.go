@@ -130,6 +130,9 @@ type StorageProxyConfig struct {
 	// Metering configures the optional region usage ledger.
 	// +optional
 	Metering MeteringConfig `yaml:"metering" json:"metering"`
+	// CredentialStore configures secret storage for volume backend credentials.
+	// +optional
+	CredentialStore CredentialStoreConfig `yaml:"credential_store" json:"-"`
 
 	// Monitoring
 	// +optional

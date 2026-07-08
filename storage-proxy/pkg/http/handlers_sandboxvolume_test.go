@@ -115,10 +115,11 @@ func TestCreateSandboxVolumeDefaultsPosixIdentityToRoot(t *testing.T) {
 func TestCreateSandboxVolumeStoresS3BackendConfigAndRedactsResponse(t *testing.T) {
 	repo := newFakeHTTPRepo()
 	server := &Server{
-		logger:       logrus.New(),
-		repo:         repo,
-		meteringRepo: &fakeHTTPMeteringWriter{},
-		snapshotMgr:  &fakeHTTPSnapshotManager{},
+		logger:            logrus.New(),
+		repo:              repo,
+		meteringRepo:      &fakeHTTPMeteringWriter{},
+		snapshotMgr:       &fakeHTTPSnapshotManager{},
+		s3CredentialCodec: testHTTPS3BackendCredentialCodec(t),
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes", bytes.NewReader([]byte(`{
@@ -161,8 +162,21 @@ func TestCreateSandboxVolumeStoresS3BackendConfigAndRedactsResponse(t *testing.T
 	if cfg.EndpointURL != "https://account-id.r2.cloudflarestorage.com" {
 		t.Fatalf("endpoint_url = %q", cfg.EndpointURL)
 	}
+	if cfg.AccessKey != "" || cfg.SecretKey != "" || cfg.SessionToken != "" {
+		t.Fatalf("stored config contains plaintext credentials: %+v", cfg)
+	}
+	if cfg.EncryptedCredentials == nil {
+		t.Fatal("stored config missing encrypted credentials")
+	}
+	if bytes.Contains(created.BackendConfig, []byte("access-secret")) || bytes.Contains(created.BackendConfig, []byte("secret-secret")) {
+		t.Fatalf("backend config leaked s3 credentials: %s", created.BackendConfig)
+	}
+	cfg, err = volume.DecodeS3BackendConfigWithCredentials(req.Context(), created.TeamID, created.ID, created.BackendConfig, server.s3CredentialCodec)
+	if err != nil {
+		t.Fatalf("DecodeS3BackendConfigWithCredentials() error = %v", err)
+	}
 	if cfg.AccessKey != "access-secret" || cfg.SecretKey != "secret-secret" {
-		t.Fatalf("credentials were not stored in backend config")
+		t.Fatalf("credentials did not round trip through encrypted backend config")
 	}
 	if bytes.Contains(recorder.Body.Bytes(), []byte("access-secret")) || bytes.Contains(recorder.Body.Bytes(), []byte("secret-secret")) {
 		t.Fatalf("response leaked s3 credentials: %s", recorder.Body.String())
@@ -187,6 +201,17 @@ func TestCreateSandboxVolumeStoresS3BackendConfigAndRedactsResponse(t *testing.T
 	if envelope.Data.S3.Provider != volume.S3ProviderR2 || envelope.Data.S3.Bucket != "sandbox-data" || envelope.Data.S3.Prefix != "team-a/volume-a" {
 		t.Fatalf("response s3 config = %+v", envelope.Data.S3)
 	}
+}
+
+func testHTTPS3BackendCredentialCodec(t *testing.T) *volume.S3BackendCredentialCodec {
+	t.Helper()
+	codec, err := volume.NewS3BackendCredentialCodec("test", map[string][]byte{
+		"test": []byte("01234567890123456789012345678901"),
+	})
+	if err != nil {
+		t.Fatalf("NewS3BackendCredentialCodec() error = %v", err)
+	}
+	return codec
 }
 
 func TestCreateSandboxVolumeRejectsUnsupportedS3Combinations(t *testing.T) {
@@ -221,6 +246,12 @@ func TestCreateSandboxVolumeRejectsUnsupportedS3Combinations(t *testing.T) {
 				"s3":{"provider":"r2","bucket":"sandbox-data"}
 			}`,
 		},
+		{
+			name: "missing credentials",
+			body: `{
+				"s3":{"provider":"aws","bucket":"sandbox-data","region":"us-east-1"}
+			}`,
+		},
 	}
 
 	for _, tc := range cases {
@@ -247,6 +278,37 @@ func TestCreateSandboxVolumeRejectsUnsupportedS3Combinations(t *testing.T) {
 				t.Fatalf("created volumes = %d, want 0", len(repo.createdVolumes))
 			}
 		})
+	}
+}
+
+func TestCreateSandboxVolumeRejectsS3BackendWithoutCredentialCodec(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	server := &Server{
+		logger:       logrus.New(),
+		repo:         repo,
+		meteringRepo: &fakeHTTPMeteringWriter{},
+		snapshotMgr:  &fakeHTTPSnapshotManager{},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes", bytes.NewReader([]byte(`{
+		"s3":{
+			"provider":"aws",
+			"bucket":"sandbox-data",
+			"region":"us-east-1",
+			"access_key":"access-secret",
+			"secret_key":"secret-secret"
+		}
+	}`)))
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
+	recorder := httptest.NewRecorder()
+
+	server.createSandboxVolume(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+	if len(repo.createdVolumes) != 0 {
+		t.Fatalf("created volumes = %d, want 0", len(repo.createdVolumes))
 	}
 }
 

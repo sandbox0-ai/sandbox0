@@ -122,24 +122,26 @@ type volumeEventHub interface {
 
 // Server provides HTTP management API for health checks and metrics
 type Server struct {
-	logger         *logrus.Logger
-	mux            *http.ServeMux
-	cfg            *config.StorageProxyConfig
-	repo           volumeRepository
-	meteringRepo   meteringWriter
-	quotaRepo      *quota.Repository
-	regionID       string
-	authenticator  *auth.HTTPAuthenticator
-	snapshotMgr    snapshotManager
-	barrier        volumeMutationBarrier
-	volMgr         volumeMountManager
-	fileRPC        volumeFileRPC
-	eventHub       volumeEventHub
-	podResolver    volumeFilePodResolver
-	ctldResolver   volumeCtldResolver
-	ctldHTTPClient *http.Client
-	selfPodID      string
-	selfClusterID  string
+	logger               *logrus.Logger
+	mux                  *http.ServeMux
+	cfg                  *config.StorageProxyConfig
+	repo                 volumeRepository
+	meteringRepo         meteringWriter
+	quotaRepo            *quota.Repository
+	regionID             string
+	authenticator        *auth.HTTPAuthenticator
+	snapshotMgr          snapshotManager
+	barrier              volumeMutationBarrier
+	volMgr               volumeMountManager
+	fileRPC              volumeFileRPC
+	eventHub             volumeEventHub
+	s3CredentialCodec    *volume.S3BackendCredentialCodec
+	s3CredentialCodecErr error
+	podResolver          volumeFilePodResolver
+	ctldResolver         volumeCtldResolver
+	ctldHTTPClient       *http.Client
+	selfPodID            string
+	selfClusterID        string
 }
 
 func (s *Server) SetQuotaRepository(repo *quota.Repository) {
@@ -152,22 +154,25 @@ func NewServer(logger *logrus.Logger, cfg *config.StorageProxyConfig, k8sClient 
 	if err != nil {
 		selfPodID = ""
 	}
+	s3CredentialCodec, s3CredentialCodecErr := volume.NewS3BackendCredentialCodecFromConfig(cfg)
 
 	s := &Server{
-		logger:        logger,
-		mux:           http.NewServeMux(),
-		cfg:           cfg,
-		repo:          repo,
-		meteringRepo:  meteringRepo,
-		regionID:      regionID,
-		authenticator: authenticator,
-		snapshotMgr:   snapshotMgr,
-		barrier:       barrier,
-		volMgr:        volMgr,
-		fileRPC:       fileRPC,
-		eventHub:      eventHub,
-		podResolver:   newKubernetesVolumeFilePodResolver(logger, k8sClient, cfg),
-		ctldResolver:  newKubernetesVolumeCtldResolver(k8sClient, selfPodID),
+		logger:               logger,
+		mux:                  http.NewServeMux(),
+		cfg:                  cfg,
+		repo:                 repo,
+		meteringRepo:         meteringRepo,
+		regionID:             regionID,
+		authenticator:        authenticator,
+		snapshotMgr:          snapshotMgr,
+		barrier:              barrier,
+		volMgr:               volMgr,
+		fileRPC:              fileRPC,
+		eventHub:             eventHub,
+		s3CredentialCodec:    s3CredentialCodec,
+		s3CredentialCodecErr: s3CredentialCodecErr,
+		podResolver:          newKubernetesVolumeFilePodResolver(logger, k8sClient, cfg),
+		ctldResolver:         newKubernetesVolumeCtldResolver(k8sClient, selfPodID),
 		ctldHTTPClient: &http.Client{
 			Timeout: ctldapi.DefaultRequestTimeout,
 		},

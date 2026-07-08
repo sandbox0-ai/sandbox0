@@ -111,7 +111,7 @@ func validateDefaultPosixIdentity(uid, gid *int64) error {
 	return nil
 }
 
-func validateCreateVolumeBackend(req *createSandboxVolumeRequest) (string, json.RawMessage, error) {
+func (s *Server) validateCreateVolumeBackend(ctx context.Context, req *createSandboxVolumeRequest, teamID, volumeID string) (string, json.RawMessage, error) {
 	if req == nil {
 		return volume.BackendS0FS, json.RawMessage(`{}`), nil
 	}
@@ -146,7 +146,14 @@ func validateCreateVolumeBackend(req *createSandboxVolumeRequest) (string, json.
 		if err := volume.ValidateS3BackendConfig(cfg); err != nil {
 			return "", nil, err
 		}
-		raw, err := volume.MarshalS3BackendConfig(cfg)
+		if s != nil && s.s3CredentialCodecErr != nil {
+			return "", nil, fmt.Errorf("s3 backend credential encryption is not configured")
+		}
+		var codec *volume.S3BackendCredentialCodec
+		if s != nil {
+			codec = s.s3CredentialCodec
+		}
+		raw, err := volume.MarshalEncryptedS3BackendConfig(ctx, teamID, volumeID, cfg, codec)
 		if err != nil {
 			return "", nil, err
 		}
@@ -192,7 +199,8 @@ func (s *Server) createSandboxVolume(w http.ResponseWriter, r *http.Request) {
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "invalid access_mode")
 		return
 	}
-	backend, backendConfig, err := validateCreateVolumeBackend(req)
+	volumeID := uuid.New().String()
+	backend, backendConfig, err := s.validateCreateVolumeBackend(r.Context(), req, teamId, volumeID)
 	if err != nil {
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
@@ -241,7 +249,7 @@ func (s *Server) createSandboxVolume(w http.ResponseWriter, r *http.Request) {
 	}
 
 	vol := &db.SandboxVolume{
-		ID:              uuid.New().String(),
+		ID:              volumeID,
 		TeamID:          teamId,
 		UserID:          userId,
 		DefaultPosixUID: req.DefaultPosixUID,

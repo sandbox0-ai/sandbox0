@@ -77,6 +77,8 @@ Claim a sandbox from a template. The sandbox is created from a pre-warmed pool f
 | `auto_resume` | boolean | Auto-resume when accessed (default: true) |
 | `services` | array | Sandbox Services for public HTTP routes, including Sandbox Functions |
 
+When the cluster claim/start admission budget is full, the claim API returns `429` with `error.code` set to `claim_start_throttled` and a `Retry-After` header in seconds. Retry after that delay. Team quota failures also return `429`, but use `error.code` set to `quota_exceeded`.
+
 See [Network](/docs/sandbox/network) and [Protocol Controls](/docs/sandbox/protocol-controls) for outbound control, [Sandbox Services](/docs/sandbox/services) for public HTTP controls, [Sandbox Functions](/docs/sandbox/functions) for inline public handlers, and [Credential](/docs/sandbox/credential) for outbound auth and secret handling.
 
 Sandbox `env_vars` override template/container environment variables for new contexts, command services, and function executions. Per-context, per-command, service runtime, and function `env_vars` override sandbox `env_vars` for that narrower scope. Warm processes start before the sandbox is claimed, so they do not receive claim-time sandbox `env_vars`.

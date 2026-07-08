@@ -1293,13 +1293,18 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "429":
-          description: Team quota exceeded
+          description: Team quota exceeded or claim/start admission throttled
+          headers:
+            Retry-After:
+              description: Suggested retry delay in seconds when claim/start admission is throttled
+              schema:
+                type: integer
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "503":
-          description: Cluster claim/start capacity temporarily unavailable
+          description: Data plane temporarily unavailable
           headers:
             Retry-After:
               description: Suggested retry delay in seconds

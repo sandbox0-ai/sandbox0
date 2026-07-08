@@ -22,6 +22,8 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/client-go/kubernetes"
+	appslisters "k8s.io/client-go/listers/apps/v1"
+	corelisters "k8s.io/client-go/listers/core/v1"
 )
 
 const (
@@ -106,6 +108,9 @@ type Snapshot struct {
 type Config struct {
 	ClusterID           string
 	K8sClient           kubernetes.Interface
+	NodeLister          corelisters.NodeLister
+	PodLister           corelisters.PodLister
+	ReplicaSetLister    appslisters.ReplicaSetLister
 	PGPool              *pgxpool.Pool
 	Redis               rediscache.Config
 	PerSandboxNode      int32
@@ -119,6 +124,9 @@ type Config struct {
 
 type Limiter struct {
 	k8sClient           kubernetes.Interface
+	nodeLister          corelisters.NodeLister
+	podLister           corelisters.PodLister
+	replicaSetLister    appslisters.ReplicaSetLister
 	pgLocker            *pglock.Locker
 	redisClient         *redis.Client
 	redisTimeout        time.Duration
@@ -168,8 +176,8 @@ func (r *Reservation) Release() {
 
 // New creates a cluster-wide limiter for claim and warm-pool pod starts.
 func New(ctx context.Context, cfg Config) (*Limiter, error) {
-	if cfg.K8sClient == nil {
-		return nil, fmt.Errorf("kubernetes client is required")
+	if cfg.K8sClient == nil && !hasCachedListers(cfg) {
+		return nil, fmt.Errorf("kubernetes client or cached listers are required")
 	}
 	if cfg.PerSandboxNode <= 0 {
 		cfg.PerSandboxNode = defaultPerSandboxNode
@@ -198,6 +206,9 @@ func New(ctx context.Context, cfg Config) (*Limiter, error) {
 
 	limiter := &Limiter{
 		k8sClient:          cfg.K8sClient,
+		nodeLister:         cfg.NodeLister,
+		podLister:          cfg.PodLister,
+		replicaSetLister:   cfg.ReplicaSetLister,
 		pgLocker:           pglock.New(cfg.PGPool),
 		backend:            BackendPostgres,
 		lockResource:       fmt.Sprintf("manager:claim-start:%s", cfg.ClusterID),
@@ -437,23 +448,23 @@ type activeReservationSnapshot struct {
 }
 
 func (l *Limiter) snapshotLockedWithReservations(ctx context.Context, reservations *activeReservationSnapshot) (*Snapshot, error) {
-	nodes, err := l.k8sClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	nodes, err := l.listNodes(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list nodes for claim start limiter: %w", err)
 	}
-	warmReadyNodes := countWarmReadySandboxNodes(nodes.Items, l.sandboxSelector, l.sandboxTolerations)
+	warmReadyNodes := countWarmReadySandboxNodes(nodes, l.sandboxSelector, l.sandboxTolerations)
 	limit := l.limitForNodes(warmReadyNodes)
 
-	pods, err := l.k8sClient.CoreV1().Pods("").List(ctx, metav1.ListOptions{LabelSelector: l.podSelector})
+	pods, err := l.listPods(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list sandbox pods for claim start limiter: %w", err)
 	}
-	replicaSets, err := l.k8sClient.AppsV1().ReplicaSets("").List(ctx, metav1.ListOptions{LabelSelector: l.replicaSetSelector})
+	replicaSets, err := l.listReplicaSets(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list pool replicasets for claim start limiter: %w", err)
 	}
 
-	inFlight := startPressure(pods.Items, replicaSets.Items, reservationTokens(reservations))
+	inFlight := startPressure(pods, replicaSets, reservationTokens(reservations))
 	if reservations != nil {
 		inFlight += reservations.units
 	}
@@ -515,6 +526,59 @@ func (l *Limiter) activeReservations(ctx context.Context) (*activeReservationSna
 		snapshot.units += units
 	}
 	return snapshot, nil
+}
+
+func (l *Limiter) listNodes(ctx context.Context) ([]*corev1.Node, error) {
+	if l.nodeLister != nil {
+		return l.nodeLister.List(labels.Everything())
+	}
+	nodes, err := l.k8sClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*corev1.Node, 0, len(nodes.Items))
+	for idx := range nodes.Items {
+		out = append(out, &nodes.Items[idx])
+	}
+	return out, nil
+}
+
+func (l *Limiter) listPods(ctx context.Context) ([]*corev1.Pod, error) {
+	selector, err := labels.Parse(l.podSelector)
+	if err != nil {
+		return nil, err
+	}
+	if l.podLister != nil {
+		return l.podLister.List(selector)
+	}
+	pods, err := l.k8sClient.CoreV1().Pods("").List(ctx, metav1.ListOptions{LabelSelector: l.podSelector})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*corev1.Pod, 0, len(pods.Items))
+	for idx := range pods.Items {
+		out = append(out, &pods.Items[idx])
+	}
+	return out, nil
+}
+
+func (l *Limiter) listReplicaSets(ctx context.Context) ([]*appsv1.ReplicaSet, error) {
+	selector, err := labels.Parse(l.replicaSetSelector)
+	if err != nil {
+		return nil, err
+	}
+	if l.replicaSetLister != nil {
+		return l.replicaSetLister.List(selector)
+	}
+	replicaSets, err := l.k8sClient.AppsV1().ReplicaSets("").List(ctx, metav1.ListOptions{LabelSelector: l.replicaSetSelector})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*appsv1.ReplicaSet, 0, len(replicaSets.Items))
+	for idx := range replicaSets.Items {
+		out = append(out, &replicaSets.Items[idx])
+	}
+	return out, nil
 }
 
 func (l *Limiter) addReservation(ctx context.Context, token string, units int32) error {
@@ -603,13 +667,12 @@ type poolKey struct {
 	templateID string
 }
 
-func startPressure(pods []corev1.Pod, replicaSets []appsv1.ReplicaSet, activeReservations map[string]struct{}) int32 {
+func startPressure(pods []*corev1.Pod, replicaSets []*appsv1.ReplicaSet, activeReservations map[string]struct{}) int32 {
 	readyIdleByPool := make(map[poolKey]int32)
 	startingIdleByPool := make(map[poolKey]int32)
 	var inFlight int32
 
-	for i := range pods {
-		pod := &pods[i]
+	for _, pod := range pods {
 		if !countsForStartPressure(pod) {
 			continue
 		}
@@ -632,9 +695,8 @@ func startPressure(pods []corev1.Pod, replicaSets []appsv1.ReplicaSet, activeRes
 		}
 	}
 
-	for i := range replicaSets {
-		rs := &replicaSets[i]
-		if rs.DeletionTimestamp != nil {
+	for _, rs := range replicaSets {
+		if rs == nil || rs.DeletionTimestamp != nil {
 			continue
 		}
 		key := poolKey{namespace: rs.Namespace, templateID: rs.Labels[labelTemplateID]}
@@ -720,10 +782,9 @@ func hasSandboxReadinessGate(pod *corev1.Pod) bool {
 	return false
 }
 
-func countWarmReadySandboxNodes(nodes []corev1.Node, selector map[string]string, tolerations []corev1.Toleration) int {
+func countWarmReadySandboxNodes(nodes []*corev1.Node, selector map[string]string, tolerations []corev1.Toleration) int {
 	count := 0
-	for i := range nodes {
-		node := &nodes[i]
+	for _, node := range nodes {
 		if node == nil || node.Spec.Unschedulable {
 			continue
 		}
@@ -818,6 +879,10 @@ func randomToken() (string, error) {
 		return "", fmt.Errorf("generate claim start lock token: %w", err)
 	}
 	return hex.EncodeToString(b[:]), nil
+}
+
+func hasCachedListers(cfg Config) bool {
+	return cfg.NodeLister != nil && cfg.PodLister != nil && cfg.ReplicaSetLister != nil
 }
 
 func cloneStringMap(src map[string]string) map[string]string {

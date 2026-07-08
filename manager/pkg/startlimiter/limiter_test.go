@@ -12,6 +12,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	appslisters "k8s.io/client-go/listers/apps/v1"
+	corelisters "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
 )
 
 func TestSnapshotCountsWarmReadyNodesAndStartPressure(t *testing.T) {
@@ -92,6 +95,45 @@ func TestAdmitThrottlesWhenBudgetIsFull(t *testing.T) {
 	}
 	if called {
 		t.Fatal("Admit() called mutation despite full budget")
+	}
+}
+
+func TestSnapshotUsesCachedListersWhenConfigured(t *testing.T) {
+	ctx := context.Background()
+	nodeLister, podLister, replicaSetLister := cachedListers(t,
+		[]*corev1.Node{readyNode("sandbox-a", map[string]string{"role": "sandbox"}, nil)},
+		nil,
+		[]*appsv1.ReplicaSet{replicaSet("default", "tmpl-a-rs", "tmpl-a", 2)},
+	)
+	limiter, err := New(ctx, Config{
+		NodeLister:       nodeLister,
+		PodLister:        podLister,
+		ReplicaSetLister: replicaSetLister,
+		PerSandboxNode:   10,
+		MaxLimit:         10,
+		SandboxNodeSelector: map[string]string{
+			"role": "sandbox",
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	snapshot, err := limiter.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if snapshot.WarmReadySandboxNodes != 1 {
+		t.Fatalf("WarmReadySandboxNodes = %d, want 1", snapshot.WarmReadySandboxNodes)
+	}
+	if snapshot.Limit != 10 {
+		t.Fatalf("Limit = %d, want 10", snapshot.Limit)
+	}
+	if snapshot.InFlight != 2 {
+		t.Fatalf("InFlight = %d, want ReplicaSet desired gap 2", snapshot.InFlight)
+	}
+	if snapshot.Available != 8 {
+		t.Fatalf("Available = %d, want 8", snapshot.Available)
 	}
 }
 
@@ -336,4 +378,29 @@ func replicaSet(namespace, name, templateID string, replicas int32) *appsv1.Repl
 		},
 		Spec: appsv1.ReplicaSetSpec{Replicas: &replicas},
 	}
+}
+
+func cachedListers(t *testing.T, nodes []*corev1.Node, pods []*corev1.Pod, replicaSets []*appsv1.ReplicaSet) (corelisters.NodeLister, corelisters.PodLister, appslisters.ReplicaSetLister) {
+	t.Helper()
+	nodeIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	for _, node := range nodes {
+		if err := nodeIndexer.Add(node); err != nil {
+			t.Fatalf("add node to indexer: %v", err)
+		}
+	}
+	podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	for _, pod := range pods {
+		if err := podIndexer.Add(pod); err != nil {
+			t.Fatalf("add pod to indexer: %v", err)
+		}
+	}
+	replicaSetIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	for _, replicaSet := range replicaSets {
+		if err := replicaSetIndexer.Add(replicaSet); err != nil {
+			t.Fatalf("add ReplicaSet to indexer: %v", err)
+		}
+	}
+	return corelisters.NewNodeLister(nodeIndexer),
+		corelisters.NewPodLister(podIndexer),
+		appslisters.NewReplicaSetLister(replicaSetIndexer)
 }

@@ -38,6 +38,14 @@ When `spec.builtinTemplates` is omitted, infra-operator seeds public builtin tem
 | Multi-cluster control plane | `services.regionalGateway`, `services.scheduler` | You coordinate multiple data-plane clusters in one region |
 | Multi-cluster data plane | `controlPlane`, `cluster`, `services.clusterGateway`, `services.manager`, optional `storageProxy`/`netd` | You attach a cluster to an external control plane |
 
+## Cold Claim Admission
+
+Manager enforces one cluster-wide admission budget for every sandbox claim that can trigger pod startup pressure: hot claims from warm pool, cold pod creates, and asynchronous warm-pool ReplicaSet replenishment. The default budget is `min(30 * N, 80)`, where `N` is the number of ready, schedulable sandbox nodes. Sandbox node eligibility follows the manager `sandboxPodPlacement` selector and tolerations, so ordinary control-plane or unschedulable nodes do not increase the claim budget.
+
+When `spec.redis` is enabled, manager uses Redis as the distributed lock backend for this admission check. Without Redis, manager falls back to PostgreSQL advisory locks. The lock is held only around the Kubernetes mutation that changes start pressure, while the pressure source of truth stays in Kubernetes pod, ReplicaSet, and node state.
+
+Schedulers consume the manager cluster summary fields `claim_start_limit`, `claim_start_in_flight`, and `claim_start_available`. In multi-cluster routing, a cluster with no fresh claim-start capacity is skipped before weighted fallback routing.
+
 ## Metering Boundary
 
 Sandbox0 records usage truth in the region database and exports it from the region-scoped metering endpoints. Billing systems should rate these exported usage windows outside the open-source data plane.

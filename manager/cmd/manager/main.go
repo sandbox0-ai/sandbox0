@@ -24,6 +24,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
 	registryprovider "github.com/sandbox0-ai/sandbox0/manager/pkg/registry"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/startlimiter"
 	"github.com/sandbox0-ai/sandbox0/pkg/clock"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
@@ -36,6 +37,7 @@ import (
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
+	"github.com/sandbox0-ai/sandbox0/pkg/rediscache"
 	templmigrations "github.com/sandbox0-ai/sandbox0/pkg/template/migrations"
 	templreconciler "github.com/sandbox0-ai/sandbox0/pkg/template/reconciler"
 	templstorepg "github.com/sandbox0-ai/sandbox0/pkg/template/store/pg"
@@ -215,6 +217,33 @@ func main() {
 	if pool != nil {
 		operator.SetTemplateStatsPublisher(controller.NewPGTemplateStatsPublisher(pool, cfg.DefaultClusterId, clk, logger))
 	}
+	claimStartLimiter, err := startlimiter.New(ctx, startlimiter.Config{
+		ClusterID: cfg.DefaultClusterId,
+		K8sClient: k8sClient,
+		PGPool:    pool,
+		Redis: rediscache.Config{
+			URL:       cfg.RedisURL,
+			KeyPrefix: cfg.RedisKeyPrefix,
+			Timeout:   cfg.RedisTimeout.Duration,
+			FailOpen:  false,
+		},
+		PerSandboxNode:      cfg.ClaimStartLimiter.PerSandboxNode,
+		MaxLimit:            cfg.ClaimStartLimiter.MaxLimit,
+		LockTTL:             cfg.ClaimStartLimiter.LockTTL.Duration,
+		AcquireTimeout:      cfg.ClaimStartLimiter.AcquireTimeout.Duration,
+		SandboxNodeSelector: cfg.SandboxPodPlacement.NodeSelector,
+		SandboxTolerations:  cfg.SandboxPodPlacement.Tolerations,
+		Logger:              logger,
+	})
+	if err != nil {
+		logger.Fatal("Failed to initialize claim start limiter", zap.Error(err))
+	}
+	operator.SetClaimStartLimiter(claimStartLimiter)
+	logger.Info("Claim start limiter enabled",
+		zap.String("backend", claimStartLimiter.Backend()),
+		zap.Int32("perSandboxNode", cfg.ClaimStartLimiter.PerSandboxNode),
+		zap.Int32("maxLimit", cfg.ClaimStartLimiter.MaxLimit),
+	)
 
 	sandboxIndex := service.NewSandboxIndex()
 	podInformer.Informer().AddEventHandler(sandboxIndex.ResourceEventHandler())
@@ -344,6 +373,7 @@ func main() {
 	sandboxService.SetCredentialStore(credentialStore)
 	sandboxService.SetQuotaStore(quotaRepo)
 	sandboxService.SetSandboxStore(sandboxStore)
+	sandboxService.SetClaimStartLimiter(claimStartLimiter)
 	rootFSObjectStore, rootFSObjectStoreErr := buildRootFSObjectStore(cfg)
 	if rootFSObjectStoreErr != nil {
 		logger.Warn("Rootfs object cleanup disabled; object store is not configured", zap.Error(rootFSObjectStoreErr))
@@ -434,6 +464,7 @@ func main() {
 		operator.GetTemplateLister(),
 		logger,
 	)
+	clusterService.SetClaimStartLimiter(claimStartLimiter)
 
 	// Create cleanup controller
 	cleanupController := controller.NewCleanupController(

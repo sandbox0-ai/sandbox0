@@ -14,6 +14,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/startlimiter"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -1014,7 +1015,6 @@ func isVolumePortalPendingPublicationError(resp *ctldapi.BindVolumePortalRespons
 	return strings.Contains(message, "is not published")
 }
 
-// claimIdlePod claims an idle pod from the pool
 func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.SandboxTemplate, req *ClaimRequest) (*corev1.Pod, error) {
 	var claimedPod *corev1.Pod
 	desiredTemplateHash, err := controller.TemplateSpecHash(template)
@@ -1165,7 +1165,18 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		}
 
 		// Update the pod
-		updatedPod, updateErr := s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
+		var updatedPod *corev1.Pod
+		updatePod := func(updateCtx context.Context) error {
+			var updateErr error
+			updatedPod, updateErr = s.k8sClient.CoreV1().Pods(pod.Namespace).Update(updateCtx, pod, metav1.UpdateOptions{})
+			return updateErr
+		}
+		var updateErr error
+		if s.claimStartLimiter != nil {
+			_, updateErr = s.claimStartLimiter.Admit(ctx, startlimiter.ReasonHotClaim, 1, updatePod)
+		} else {
+			updateErr = updatePod(ctx)
+		}
 		if updateErr != nil {
 			rollbackStateVolume()
 			if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
@@ -1290,7 +1301,6 @@ func isIdlePodLostDuringClaim(err error) bool {
 		strings.Contains(msg, "no new finalizers can be added if the object is being deleted")
 }
 
-// createNewPod creates a new pod for cold start
 func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.SandboxTemplate, req *ClaimRequest) (*corev1.Pod, error) {
 	// Simulate K8s pod name generation: rs-name + "-" + 5 random chars
 	clusterID := naming.ClusterIDOrDefault(template.Spec.ClusterId)
@@ -1402,7 +1412,17 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	}
 
 	// Create the pod
-	createdPod, err := s.k8sClient.CoreV1().Pods(template.ObjectMeta.Namespace).Create(ctx, pod, metav1.CreateOptions{})
+	var createdPod *corev1.Pod
+	createPod := func(createCtx context.Context) error {
+		var createErr error
+		createdPod, createErr = s.k8sClient.CoreV1().Pods(template.ObjectMeta.Namespace).Create(createCtx, pod, metav1.CreateOptions{})
+		return createErr
+	}
+	if s.claimStartLimiter != nil {
+		_, err = s.claimStartLimiter.Admit(ctx, startlimiter.ReasonColdCreate, 1, createPod)
+	} else {
+		err = createPod(ctx)
+	}
 	if err != nil {
 		rollbackStateVolume()
 		if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {

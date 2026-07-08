@@ -5,6 +5,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/startlimiter"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -14,14 +15,19 @@ import (
 
 // ClusterSummary represents cluster-level sandbox capacity and demand signals.
 type ClusterSummary struct {
-	ClusterID             string `json:"cluster_id"`
-	NodeCount             int    `json:"node_count"`
-	TotalNodeCount        int    `json:"total_node_count"`
-	SandboxNodeCount      int    `json:"sandbox_node_count"`
-	IdlePodCount          int32  `json:"idle_pod_count"`
-	ActivePodCount        int32  `json:"active_pod_count"`
-	PendingActivePodCount int32  `json:"pending_active_pod_count"`
-	TotalPodCount         int32  `json:"total_pod_count"`
+	ClusterID                 string `json:"cluster_id"`
+	NodeCount                 int    `json:"node_count"`
+	TotalNodeCount            int    `json:"total_node_count"`
+	SandboxNodeCount          int    `json:"sandbox_node_count"`
+	WarmReadySandboxNodeCount int    `json:"warm_ready_sandbox_node_count"`
+	ClaimStartLimit           int32  `json:"claim_start_limit"`
+	ClaimStartInFlight        int32  `json:"claim_start_in_flight"`
+	ClaimStartAvailable       int32  `json:"claim_start_available"`
+	ClaimStartLimiterBackend  string `json:"claim_start_limiter_backend,omitempty"`
+	IdlePodCount              int32  `json:"idle_pod_count"`
+	ActivePodCount            int32  `json:"active_pod_count"`
+	PendingActivePodCount     int32  `json:"pending_active_pod_count"`
+	TotalPodCount             int32  `json:"total_pod_count"`
 }
 
 // TemplateStat represents per-template sandbox demand signals.
@@ -42,11 +48,12 @@ type TemplateStats struct {
 
 // ClusterService handles cluster-related operations
 type ClusterService struct {
-	k8sClient      kubernetes.Interface
-	podLister      corelisters.PodLister
-	nodeLister     corelisters.NodeLister
-	templateLister controller.TemplateLister
-	logger         *zap.Logger
+	k8sClient         kubernetes.Interface
+	podLister         corelisters.PodLister
+	nodeLister        corelisters.NodeLister
+	templateLister    controller.TemplateLister
+	claimStartLimiter *startlimiter.Limiter
+	logger            *zap.Logger
 }
 
 // NewClusterService creates a new ClusterService
@@ -64,6 +71,13 @@ func NewClusterService(
 		templateLister: templateLister,
 		logger:         logger,
 	}
+}
+
+func (s *ClusterService) SetClaimStartLimiter(limiter *startlimiter.Limiter) {
+	if s == nil {
+		return
+	}
+	s.claimStartLimiter = limiter
 }
 
 // GetClusterSummary returns the cluster summary including capacity and pod counts
@@ -115,7 +129,7 @@ func (s *ClusterService) GetClusterSummary(ctx context.Context) (*ClusterSummary
 		}
 	}
 
-	return &ClusterSummary{
+	summary := &ClusterSummary{
 		ClusterID:             cfg.DefaultClusterId,
 		NodeCount:             nodeCount,
 		TotalNodeCount:        nodeCount,
@@ -124,7 +138,20 @@ func (s *ClusterService) GetClusterSummary(ctx context.Context) (*ClusterSummary
 		ActivePodCount:        activeCount,
 		PendingActivePodCount: pendingActiveCount,
 		TotalPodCount:         idleCount + activeCount,
-	}, nil
+	}
+	if s.claimStartLimiter != nil {
+		snapshot, err := s.claimStartLimiter.Snapshot(ctx)
+		if err != nil {
+			s.logger.Warn("Failed to read claim start limiter snapshot", zap.Error(err))
+		} else if snapshot != nil {
+			summary.WarmReadySandboxNodeCount = snapshot.WarmReadySandboxNodes
+			summary.ClaimStartLimit = snapshot.Limit
+			summary.ClaimStartInFlight = snapshot.InFlight
+			summary.ClaimStartAvailable = snapshot.Available
+			summary.ClaimStartLimiterBackend = snapshot.Backend
+		}
+	}
+	return summary, nil
 }
 
 // GetTemplateStats returns statistics for all templates

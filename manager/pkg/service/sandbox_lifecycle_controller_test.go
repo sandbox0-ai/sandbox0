@@ -11,9 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -131,6 +133,44 @@ func TestSandboxLifecycleControllerCleansAndRemovesFinalizer(t *testing.T) {
 	}
 }
 
+func TestSandboxLifecycleControllerRecordsFinalizerRemovalMetric(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	deletionTime := metav1.NewTime(time.Now().UTC())
+	pod := newLifecycleTestPod()
+	pod.Finalizers = []string{sandboxCleanupFinalizer}
+	pod.DeletionTimestamp = &deletionTime
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	cleaner := &recordingSandboxCleaner{}
+	controller := NewSandboxLifecycleController(client, nil, cleaner, zap.NewNop())
+	controller.SetMetrics(obsmetrics.NewManager(registry))
+
+	err := controller.reconcile(context.Background(), sandboxLifecycleItemFromInfo(SandboxLifecycleInfo{
+		Namespace: pod.Namespace,
+		PodName:   pod.Name,
+		SandboxID: pod.Name,
+		TeamID:    "team-a",
+	}, false))
+	if err != nil {
+		t.Fatalf("reconcile() error = %v", err)
+	}
+
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	metric := findMetric(families, "manager_sandbox_delete_cleanup_phase_duration_seconds", map[string]string{
+		"phase":  "remove_cleanup_finalizer",
+		"status": "success",
+		"scope":  "unknown",
+	})
+	if metric == nil || metric.GetHistogram() == nil {
+		t.Fatal("delete cleanup finalizer metric not found")
+	}
+	if got := metric.GetHistogram().GetSampleCount(); got != 1 {
+		t.Fatalf("finalizer cleanup sample count = %d, want 1", got)
+	}
+}
+
 func TestSandboxLifecycleControllerRetriesCleanupBeforeRemovingFinalizer(t *testing.T) {
 	deletionTime := metav1.NewTime(time.Now().UTC())
 	pod := newLifecycleTestPod()
@@ -229,6 +269,50 @@ func TestSandboxServiceCleanupDeletedSandboxRemovesExternalState(t *testing.T) {
 	}
 	if store.deleteCalls != 1 {
 		t.Fatalf("DeleteBindings calls = %d, want 1", store.deleteCalls)
+	}
+}
+
+func TestSandboxServiceCleanupDeletedSandboxRecordsPhaseMetrics(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	store := &deleteRecordingBindingStore{}
+	svc := &SandboxService{
+		networkProvider: &assertingNetworkProvider{},
+		credentialStore: store,
+		logger:          zap.NewNop(),
+		metrics:         obsmetrics.NewManager(registry),
+	}
+
+	err := svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
+		Namespace: "ns-a",
+		PodName:   "sandbox-a",
+		SandboxID: "sandbox-a",
+		TeamID:    "team-a",
+	})
+	if err != nil {
+		t.Fatalf("CleanupDeletedSandbox() error = %v", err)
+	}
+
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	for _, phase := range []string{
+		"classify_runtime_deletion",
+		"remove_network_policy",
+		"delete_credential_bindings",
+		"cleanup_total",
+	} {
+		metric := findMetric(families, "manager_sandbox_delete_cleanup_phase_duration_seconds", map[string]string{
+			"phase":  phase,
+			"status": "success",
+			"scope":  "sandbox_delete",
+		})
+		if metric == nil || metric.GetHistogram() == nil {
+			t.Fatalf("delete cleanup phase metric %q not found", phase)
+		}
+		if got := metric.GetHistogram().GetSampleCount(); got != 1 {
+			t.Fatalf("delete cleanup phase %q sample count = %d, want 1", phase, got)
+		}
 	}
 }
 

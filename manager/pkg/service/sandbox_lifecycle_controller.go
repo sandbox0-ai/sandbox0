@@ -11,6 +11,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -29,6 +30,10 @@ import (
 const (
 	sandboxCleanupFinalizer             = "sandbox0.ai/sandbox-cleanup"
 	defaultSandboxLifecycleResyncPeriod = 30 * time.Second
+
+	sandboxDeleteCleanupScopeSandboxDelete = "sandbox_delete"
+	sandboxDeleteCleanupScopeRuntimeOnly   = "runtime_only"
+	sandboxDeleteCleanupScopeUnknown       = "unknown"
 )
 
 // SandboxLifecycleInfo carries the durable identity needed to clean sandbox-scoped state.
@@ -83,6 +88,7 @@ type SandboxLifecycleController struct {
 	podLister      corelisters.PodLister
 	cleaner        SandboxDeletionCleaner
 	logger         *zap.Logger
+	metrics        *obsmetrics.ManagerMetrics
 	queue          workqueue.TypedRateLimitingInterface[sandboxLifecycleQueueItem]
 	resyncInterval time.Duration
 }
@@ -104,6 +110,13 @@ func NewSandboxLifecycleController(
 		queue:          workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[sandboxLifecycleQueueItem]()),
 		resyncInterval: defaultSandboxLifecycleResyncPeriod,
 	}
+}
+
+func (c *SandboxLifecycleController) SetMetrics(metrics *obsmetrics.ManagerMetrics) {
+	if c == nil {
+		return
+	}
+	c.metrics = metrics
 }
 
 func (c *SandboxLifecycleController) ResourceEventHandler() cache.ResourceEventHandlerFuncs {
@@ -241,9 +254,12 @@ func (c *SandboxLifecycleController) reconcile(ctx context.Context, item sandbox
 	if !hasSandboxCleanupFinalizer(pod) {
 		return nil
 	}
+	started := time.Now()
 	if err := c.removeSandboxCleanupFinalizer(ctx, pod.Namespace, pod.Name); err != nil {
+		observeSandboxDeleteCleanupPhase(c.metrics, "remove_cleanup_finalizer", sandboxDeleteCleanupScopeUnknown, started, err)
 		return fmt.Errorf("remove sandbox cleanup finalizer: %w", err)
 	}
+	observeSandboxDeleteCleanupPhase(c.metrics, "remove_cleanup_finalizer", sandboxDeleteCleanupScopeUnknown, started, nil)
 	return nil
 }
 
@@ -330,14 +346,20 @@ func (s *SandboxService) CleanupDeletedSandbox(ctx context.Context, info Sandbox
 		return nil
 	}
 
+	classifyStarted := time.Now()
 	runtimePaused, err := s.runtimeDeletionIsPause(ctx, info)
+	scope := sandboxDeleteCleanupScope(runtimePaused)
+	if err != nil {
+		scope = sandboxDeleteCleanupScopeUnknown
+	}
+	observeSandboxDeleteCleanupPhase(s.metrics, "classify_runtime_deletion", scope, classifyStarted, err)
 	if err != nil {
 		return err
 	}
 	return s.cleanupDeletedSandbox(ctx, info, runtimePaused)
 }
 
-func (s *SandboxService) cleanupDeletedSandbox(ctx context.Context, info SandboxLifecycleInfo, runtimePaused bool) error {
+func (s *SandboxService) cleanupDeletedSandbox(ctx context.Context, info SandboxLifecycleInfo, runtimePaused bool) (cleanupErr error) {
 	logger := s.logger
 	if logger == nil {
 		logger = zap.NewNop()
@@ -349,19 +371,40 @@ func (s *SandboxService) cleanupDeletedSandbox(ctx context.Context, info Sandbox
 	if sandboxID == "" {
 		return nil
 	}
+	scope := sandboxDeleteCleanupScope(runtimePaused)
+	cleanupStarted := time.Now()
+	logger.Info("Cleaning sandbox deletion state",
+		zap.String("sandboxID", sandboxID),
+		zap.String("namespace", info.Namespace),
+		zap.String("pod", info.PodName),
+		zap.String("scope", scope),
+	)
+	defer func() {
+		observeSandboxDeleteCleanupPhase(s.metrics, "cleanup_total", scope, cleanupStarted, cleanupErr)
+		fields := []zap.Field{
+			zap.String("sandboxID", sandboxID),
+			zap.String("namespace", info.Namespace),
+			zap.String("pod", info.PodName),
+			zap.String("scope", scope),
+			zap.Duration("duration", time.Since(cleanupStarted)),
+		}
+		if cleanupErr != nil {
+			logger.Warn("Sandbox deletion state cleanup failed", append(fields, zap.Error(cleanupErr))...)
+			return
+		}
+		logger.Info("Sandbox deletion state cleanup completed", fields...)
+	}()
 
 	var errs []error
 	if !runtimePaused && s.deletionWebhookEmitter != nil && strings.TrimSpace(info.WebhookURL) != "" {
-		if err := s.deletionWebhookEmitter.EmitSandboxDeleted(ctx, info); err != nil {
-			logger.Warn("Failed to emit sandbox.deleted webhook",
-				zap.String("sandboxID", sandboxID),
-				zap.String("namespace", info.Namespace),
-				zap.Error(err),
-			)
-		}
+		_ = s.runSandboxDeleteCleanupPhase(ctx, info, scope, "emit_deletion_webhook", func() error {
+			return s.deletionWebhookEmitter.EmitSandboxDeleted(ctx, info)
+		})
 	}
 	if s.networkProvider != nil && info.Namespace != "" {
-		if err := s.networkProvider.RemoveSandboxPolicy(ctx, info.Namespace, sandboxID); err != nil {
+		if err := s.runSandboxDeleteCleanupPhase(ctx, info, scope, "remove_network_policy", func() error {
+			return s.networkProvider.RemoveSandboxPolicy(ctx, info.Namespace, sandboxID)
+		}); err != nil {
 			errs = append(errs, fmt.Errorf("remove network policy: %w", err))
 		}
 	}
@@ -372,19 +415,60 @@ func (s *SandboxService) cleanupDeletedSandbox(ctx context.Context, info Sandbox
 				zap.String("sandboxID", sandboxID),
 				zap.String("namespace", info.Namespace),
 			)
-		} else if err := s.credentialStore.DeleteBindings(ctx, teamID, sandboxID); err != nil {
+		} else if err := s.runSandboxDeleteCleanupPhase(ctx, info, scope, "delete_credential_bindings", func() error {
+			return s.credentialStore.DeleteBindings(ctx, teamID, sandboxID)
+		}); err != nil {
 			errs = append(errs, fmt.Errorf("delete credential bindings: %w", err))
 		}
 	}
-	if !runtimePaused {
-		if err := s.deleteWebhookStateVolume(ctx, info); err != nil {
+	if !runtimePaused && shouldDeleteWebhookStateVolume(info) {
+		if err := s.runSandboxDeleteCleanupPhase(ctx, info, scope, "mark_webhook_state_volume_cleanup", func() error {
+			return s.deleteWebhookStateVolume(ctx, info)
+		}); err != nil {
 			errs = append(errs, fmt.Errorf("delete webhook state volume: %w", err))
 		}
 	}
-	if err := s.unbindDeletedSandboxVolumePortals(ctx, info); err != nil {
-		errs = append(errs, fmt.Errorf("unbind sandbox volume portals: %w", err))
+	if s.shouldUnbindDeletedSandboxVolumePortals(info) {
+		if err := s.runSandboxDeleteCleanupPhase(ctx, info, scope, "unbind_volume_portals", func() error {
+			return s.unbindDeletedSandboxVolumePortals(ctx, info)
+		}); err != nil {
+			errs = append(errs, fmt.Errorf("unbind sandbox volume portals: %w", err))
+		}
 	}
-	return errors.Join(errs...)
+	cleanupErr = errors.Join(errs...)
+	return cleanupErr
+}
+
+func (s *SandboxService) runSandboxDeleteCleanupPhase(_ context.Context, info SandboxLifecycleInfo, scope, phase string, fn func() error) error {
+	started := time.Now()
+	err := fn()
+	observeSandboxDeleteCleanupPhase(s.metrics, phase, scope, started, err)
+	logger := s.logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	fields := []zap.Field{
+		zap.String("sandboxID", strings.TrimSpace(info.SandboxID)),
+		zap.String("namespace", info.Namespace),
+		zap.String("pod", info.PodName),
+		zap.String("phase", phase),
+		zap.String("scope", scope),
+		zap.Duration("duration", time.Since(started)),
+	}
+	if err != nil {
+		logger.Warn("Sandbox delete cleanup phase failed", append(fields, zap.Error(err))...)
+		return err
+	}
+	logger.Debug("Sandbox delete cleanup phase completed", fields...)
+	return nil
+}
+
+func shouldDeleteWebhookStateVolume(info SandboxLifecycleInfo) bool {
+	return strings.TrimSpace(info.WebhookStateVolumeID) != "" || strings.TrimSpace(info.WebhookURL) != ""
+}
+
+func (s *SandboxService) shouldUnbindDeletedSandboxVolumePortals(info SandboxLifecycleInfo) bool {
+	return s != nil && s.config.CtldEnabled && len(info.VolumePortals) > 0
 }
 
 func (s *SandboxService) runtimeDeletionIsPause(ctx context.Context, info SandboxLifecycleInfo) (bool, error) {
@@ -686,4 +770,30 @@ func removeFinalizer(finalizers []string, target string) []string {
 		}
 	}
 	return out
+}
+
+func observeSandboxDeleteCleanupPhase(metrics *obsmetrics.ManagerMetrics, phase, scope string, started time.Time, err error) {
+	if metrics == nil || metrics.SandboxDeleteCleanupPhase == nil {
+		return
+	}
+	phase = strings.TrimSpace(phase)
+	if phase == "" {
+		phase = "unknown"
+	}
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		scope = sandboxDeleteCleanupScopeUnknown
+	}
+	status := "success"
+	if err != nil {
+		status = "error"
+	}
+	metrics.SandboxDeleteCleanupPhase.WithLabelValues(phase, status, scope).Observe(time.Since(started).Seconds())
+}
+
+func sandboxDeleteCleanupScope(runtimePaused bool) string {
+	if runtimePaused {
+		return sandboxDeleteCleanupScopeRuntimeOnly
+	}
+	return sandboxDeleteCleanupScopeSandboxDelete
 }

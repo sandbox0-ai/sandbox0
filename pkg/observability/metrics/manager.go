@@ -13,6 +13,7 @@ type ManagerMetrics struct {
 	SandboxClaimsTotal              *prometheus.CounterVec
 	SandboxClaimDuration            *prometheus.HistogramVec
 	SandboxClaimPhaseDuration       *prometheus.HistogramVec
+	SandboxDeleteCleanupPhase       *prometheus.HistogramVec
 	SandboxIdleClaimsTotal          *prometheus.CounterVec
 	PodNetworkIdentityChecksTotal   *prometheus.CounterVec
 	PodNetworkIdentityStageDuration *prometheus.HistogramVec
@@ -75,6 +76,11 @@ func NewManager(registry prometheus.Registerer) *ManagerMetrics {
 			Help:    "Duration of sandbox claim phases",
 			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120},
 		}, []string{"template", "type", "phase", "status"}), // type: "hot", "cold", or "unknown"
+		SandboxDeleteCleanupPhase: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "manager_sandbox_delete_cleanup_phase_duration_seconds",
+			Help:    "Duration of sandbox deletion cleanup phases",
+			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120, 300},
+		}, []string{"phase", "status", "scope"}), // scope: "sandbox_delete", "runtime_only", or "unknown"
 		SandboxIdleClaimsTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "manager_sandbox_idle_claims_total",
 			Help: "Total number of idle-pool claim attempts by result",

@@ -61,7 +61,7 @@ func (s *Server) claimSandbox(c *gin.Context) {
 				retryAfter = 1
 			}
 			c.Header("Retry-After", strconv.Itoa(retryAfter))
-			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
+			spec.JSONError(c, http.StatusTooManyRequests, spec.CodeClaimStartThrottled, err.Error())
 			return
 		}
 		if errors.Is(err, service.ErrDataPlaneNotReady) {

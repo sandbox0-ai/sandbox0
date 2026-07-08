@@ -16,17 +16,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/startlimiter"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/pkg/rediscache"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
@@ -878,6 +881,62 @@ func TestCreateNewPodDefersNetworkApplyUntilPodHasNetworkIdentity(t *testing.T) 
 	}
 	if len(pods.Items) != 1 {
 		t.Fatalf("pods after createNewPod() = %d, want 1", len(pods.Items))
+	}
+}
+
+func TestCreateNewPodAnnotatesClaimStartReservation(t *testing.T) {
+	withClaimTestPublicKey(t)
+
+	redisServer := miniredis.RunT(t)
+	client := fake.NewSimpleClientset(&corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a"},
+		Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{
+			Type:   corev1.NodeReady,
+			Status: corev1.ConditionTrue,
+		}}},
+	})
+	limiter, err := startlimiter.New(context.Background(), startlimiter.Config{
+		ClusterID:      "cluster-a",
+		K8sClient:      client,
+		PerSandboxNode: 1,
+		MaxLimit:       1,
+		Redis: rediscache.Config{
+			URL:       "redis://" + redisServer.Addr() + "/0",
+			KeyPrefix: "test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create claim start limiter: %v", err)
+	}
+	reservation, _, err := limiter.Reserve(context.Background(), startlimiter.ReasonColdCreate, 1)
+	if err != nil {
+		t.Fatalf("Reserve() error = %v", err)
+	}
+	defer reservation.Release()
+
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{Image: "busybox"},
+		},
+	}
+	svc := &SandboxService{
+		k8sClient:            client,
+		secretLister:         newClaimTestSecretLister(t),
+		NetworkPolicyService: NewNetworkPolicyService(zap.NewNop()),
+		clock:                systemTime{},
+		logger:               zap.NewNop(),
+	}
+
+	pod, err := svc.createNewPodWithReservation(context.Background(), template, &ClaimRequest{TeamID: "team-a", UserID: "user-a"}, reservation)
+	if err != nil {
+		t.Fatalf("createNewPodWithReservation() error = %v", err)
+	}
+	if got := pod.Annotations[controller.AnnotationClaimStartReservation]; got != reservation.Token() {
+		t.Fatalf("claim start reservation annotation = %q, want %q", got, reservation.Token())
 	}
 }
 

@@ -199,6 +199,7 @@ func main() {
 	namespaceLister := informerFactory.Core().V1().Namespaces().Lister()
 	serviceAccountLister := informerFactory.Core().V1().ServiceAccounts().Lister()
 	networkPolicyLister := informerFactory.Networking().V1().NetworkPolicies().Lister()
+	replicaSetLister := informerFactory.Apps().V1().ReplicaSets().Lister()
 
 	// Create operator
 	operator := controller.NewOperator(
@@ -216,9 +217,12 @@ func main() {
 		operator.SetTemplateStatsPublisher(controller.NewPGTemplateStatsPublisher(pool, cfg.DefaultClusterId, clk, logger))
 	}
 	claimStartLimiter, err := startlimiter.New(ctx, startlimiter.Config{
-		ClusterID: cfg.DefaultClusterId,
-		K8sClient: k8sClient,
-		PGPool:    pool,
+		ClusterID:        cfg.DefaultClusterId,
+		K8sClient:        k8sClient,
+		NodeLister:       nodeLister,
+		PodLister:        podLister,
+		ReplicaSetLister: replicaSetLister,
+		PGPool:           pool,
 		Redis: rediscache.Config{
 			URL:       cfg.RedisURL,
 			KeyPrefix: cfg.RedisKeyPrefix,

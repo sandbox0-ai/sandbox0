@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/sandbox0-ai/sandbox0/pkg/rediscache"
@@ -11,6 +12,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	appslisters "k8s.io/client-go/listers/apps/v1"
+	corelisters "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
 )
 
 func TestSnapshotCountsWarmReadyNodesAndStartPressure(t *testing.T) {
@@ -94,6 +98,45 @@ func TestAdmitThrottlesWhenBudgetIsFull(t *testing.T) {
 	}
 }
 
+func TestSnapshotUsesCachedListersWhenConfigured(t *testing.T) {
+	ctx := context.Background()
+	nodeLister, podLister, replicaSetLister := cachedListers(t,
+		[]*corev1.Node{readyNode("sandbox-a", map[string]string{"role": "sandbox"}, nil)},
+		nil,
+		[]*appsv1.ReplicaSet{replicaSet("default", "tmpl-a-rs", "tmpl-a", 2)},
+	)
+	limiter, err := New(ctx, Config{
+		NodeLister:       nodeLister,
+		PodLister:        podLister,
+		ReplicaSetLister: replicaSetLister,
+		PerSandboxNode:   10,
+		MaxLimit:         10,
+		SandboxNodeSelector: map[string]string{
+			"role": "sandbox",
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	snapshot, err := limiter.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if snapshot.WarmReadySandboxNodes != 1 {
+		t.Fatalf("WarmReadySandboxNodes = %d, want 1", snapshot.WarmReadySandboxNodes)
+	}
+	if snapshot.Limit != 10 {
+		t.Fatalf("Limit = %d, want 10", snapshot.Limit)
+	}
+	if snapshot.InFlight != 2 {
+		t.Fatalf("InFlight = %d, want ReplicaSet desired gap 2", snapshot.InFlight)
+	}
+	if snapshot.Available != 8 {
+		t.Fatalf("Available = %d, want 8", snapshot.Available)
+	}
+}
+
 func TestNewUsesRedisWhenConfigured(t *testing.T) {
 	ctx := context.Background()
 	redisServer := miniredis.RunT(t)
@@ -111,6 +154,154 @@ func TestNewUsesRedisWhenConfigured(t *testing.T) {
 	}
 	if got := limiter.Backend(); got != BackendRedis {
 		t.Fatalf("Backend() = %q, want %q", got, BackendRedis)
+	}
+}
+
+func TestRedisReserveHoldsBudgetUntilReleased(t *testing.T) {
+	ctx := context.Background()
+	redisServer := miniredis.RunT(t)
+	client := fake.NewSimpleClientset(readyNode("sandbox-a", nil, nil))
+	limiter, err := New(ctx, Config{
+		ClusterID:      "cluster-a",
+		K8sClient:      client,
+		PerSandboxNode: 1,
+		MaxLimit:       1,
+		Redis: rediscache.Config{
+			URL:       "redis://" + redisServer.Addr() + "/0",
+			KeyPrefix: "test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	reservation, snapshot, err := limiter.Reserve(ctx, ReasonColdCreate, 1)
+	if err != nil {
+		t.Fatalf("Reserve() error = %v", err)
+	}
+	defer reservation.Release()
+	if reservation.Token() == "" {
+		t.Fatal("Reservation token is empty")
+	}
+	if snapshot.Available != 1 {
+		t.Fatalf("pre-reservation Available = %d, want 1", snapshot.Available)
+	}
+
+	snapshot, err = limiter.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if snapshot.InFlight != 1 || snapshot.Available != 0 {
+		t.Fatalf("Snapshot() inFlight/available = %d/%d, want 1/0", snapshot.InFlight, snapshot.Available)
+	}
+
+	called := false
+	_, err = limiter.Admit(ctx, ReasonColdCreate, 1, func(context.Context) error {
+		called = true
+		return nil
+	})
+	if !errors.Is(err, ErrThrottled) {
+		t.Fatalf("Admit() error = %v, want ErrThrottled", err)
+	}
+	if called {
+		t.Fatal("Admit() called mutation while reservation held all budget")
+	}
+
+	reservation.Release()
+	_, err = limiter.Admit(ctx, ReasonColdCreate, 1, func(context.Context) error {
+		called = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Admit() after release error = %v", err)
+	}
+	if !called {
+		t.Fatal("Admit() after release did not call mutation")
+	}
+}
+
+func TestRedisReservationAvoidsDoubleCountingAnnotatedPod(t *testing.T) {
+	ctx := context.Background()
+	redisServer := miniredis.RunT(t)
+	client := fake.NewSimpleClientset(readyNode("sandbox-a", nil, nil))
+	limiter, err := New(ctx, Config{
+		ClusterID:      "cluster-a",
+		K8sClient:      client,
+		PerSandboxNode: 10,
+		MaxLimit:       10,
+		Redis: rediscache.Config{
+			URL:       "redis://" + redisServer.Addr() + "/0",
+			KeyPrefix: "test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	reservation, _, err := limiter.Reserve(ctx, ReasonColdCreate, 1)
+	if err != nil {
+		t.Fatalf("Reserve() error = %v", err)
+	}
+	defer reservation.Release()
+
+	pod := startingActivePod("default", "active-starting", "tmpl-a")
+	pod.Annotations = map[string]string{
+		AnnotationClaimStartReservation: reservation.Token(),
+	}
+	if _, err := client.CoreV1().Pods(pod.Namespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create pod: %v", err)
+	}
+
+	snapshot, err := limiter.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if snapshot.InFlight != 1 {
+		t.Fatalf("InFlight with active reservation and annotated pod = %d, want 1", snapshot.InFlight)
+	}
+
+	reservation.Release()
+	snapshot, err = limiter.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot() after release error = %v", err)
+	}
+	if snapshot.InFlight != 1 {
+		t.Fatalf("InFlight after reservation release = %d, want pod pressure 1", snapshot.InFlight)
+	}
+}
+
+func TestRedisLockBusyReturnsThrottled(t *testing.T) {
+	ctx := context.Background()
+	redisServer := miniredis.RunT(t)
+	client := fake.NewSimpleClientset(readyNode("sandbox-a", nil, nil))
+	limiter, err := New(ctx, Config{
+		ClusterID:      "cluster-a",
+		K8sClient:      client,
+		PerSandboxNode: 1,
+		MaxLimit:       1,
+		AcquireTimeout: time.Millisecond,
+		Redis: rediscache.Config{
+			URL:       "redis://" + redisServer.Addr() + "/0",
+			KeyPrefix: "test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if err := limiter.redisClient.Set(ctx, limiter.lockKey, "busy", time.Minute).Err(); err != nil {
+		t.Fatalf("seed redis lock: %v", err)
+	}
+
+	called := false
+	_, err = limiter.Admit(ctx, ReasonColdCreate, 1, func(context.Context) error {
+		called = true
+		return nil
+	})
+	if !errors.Is(err, ErrThrottled) {
+		t.Fatalf("Admit() error = %v, want ErrThrottled", err)
+	}
+	if called {
+		t.Fatal("Admit() called mutation while redis lock was busy")
 	}
 }
 
@@ -187,4 +378,29 @@ func replicaSet(namespace, name, templateID string, replicas int32) *appsv1.Repl
 		},
 		Spec: appsv1.ReplicaSetSpec{Replicas: &replicas},
 	}
+}
+
+func cachedListers(t *testing.T, nodes []*corev1.Node, pods []*corev1.Pod, replicaSets []*appsv1.ReplicaSet) (corelisters.NodeLister, corelisters.PodLister, appslisters.ReplicaSetLister) {
+	t.Helper()
+	nodeIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	for _, node := range nodes {
+		if err := nodeIndexer.Add(node); err != nil {
+			t.Fatalf("add node to indexer: %v", err)
+		}
+	}
+	podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	for _, pod := range pods {
+		if err := podIndexer.Add(pod); err != nil {
+			t.Fatalf("add pod to indexer: %v", err)
+		}
+	}
+	replicaSetIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	for _, replicaSet := range replicaSets {
+		if err := replicaSetIndexer.Add(replicaSet); err != nil {
+			t.Fatalf("add ReplicaSet to indexer: %v", err)
+		}
+	}
+	return corelisters.NewNodeLister(nodeIndexer),
+		corelisters.NewPodLister(podIndexer),
+		appslisters.NewReplicaSetLister(replicaSetIndexer)
 }

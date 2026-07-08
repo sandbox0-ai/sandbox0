@@ -37,6 +37,8 @@ type Manager struct {
 	logger                 *zap.Logger
 	logrus                 *logrus.Logger
 	storage                *apiconfig.StorageProxyConfig
+	s3CredentialCodec      *volume.S3BackendCredentialCodec
+	s3CredentialCodecErr   error
 	repo                   *db.Repository
 	clusterID              string
 	podName                string
@@ -113,6 +115,7 @@ func NewManager(cfg Config) *Manager {
 	if storageConfig == nil {
 		storageConfig = apiconfig.LoadStorageProxyConfig()
 	}
+	s3CredentialCodec, s3CredentialCodecErr := volume.NewS3BackendCredentialCodecFromConfig(storageConfig)
 	heartbeatInterval, _ := time.ParseDuration(storageConfig.HeartbeatInterval)
 	if heartbeatInterval <= 0 {
 		heartbeatInterval = 5 * time.Second
@@ -126,6 +129,8 @@ func NewManager(cfg Config) *Manager {
 		logger:                 logger,
 		logrus:                 l,
 		storage:                storageConfig,
+		s3CredentialCodec:      s3CredentialCodec,
+		s3CredentialCodecErr:   s3CredentialCodecErr,
 		repo:                   cfg.Repository,
 		clusterID:              naming.ClusterIDOrDefault(&storageConfig.DefaultClusterId),
 		podName:                strings.TrimSpace(cfg.PodName),
@@ -536,7 +541,10 @@ func (m *Manager) openS3BoundVolume(req ctldapi.BindVolumePortalRequest, volumeR
 	if accessMode == volume.AccessModeRWX {
 		return nil, nil, fmt.Errorf("s3 backend does not support RWX access_mode")
 	}
-	cfg, err := volume.DecodeS3BackendConfig(volumeRecord.BackendConfig)
+	if m.s3CredentialCodecErr != nil {
+		return nil, nil, fmt.Errorf("s3 backend credential encryption is not configured")
+	}
+	cfg, err := volume.DecodeS3BackendConfigWithCredentials(context.Background(), volumeRecord.TeamID, volumeRecord.ID, volumeRecord.BackendConfig, m.s3CredentialCodec)
 	if err != nil {
 		return nil, nil, err
 	}

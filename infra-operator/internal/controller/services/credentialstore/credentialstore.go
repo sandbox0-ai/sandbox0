@@ -553,20 +553,20 @@ func ApplyManagerCredentialStoreConfig(ctx context.Context, resources *common.Re
 	if cfg == nil {
 		return nil
 	}
-	infra := scope.Owner()
-	keyRef, err := EnsureEncryptedPGKey(ctx, resources, scope)
-	if err != nil {
+	return ApplyCredentialStoreConfig(ctx, resources, scope, &cfg.CredentialStore)
+}
+
+func ApplyCredentialStoreConfig(ctx context.Context, resources *common.ResourceManager, scope common.ObjectScope, cfg *apiconfig.CredentialStoreConfig) error {
+	if err := ApplyEncryptedPGCredentialStoreConfig(ctx, resources, scope, cfg); err != nil {
 		return err
 	}
-	cfg.CredentialStore.DefaultStorageKind = "encrypted_pg"
-	if infrav1alpha1.IsCredentialVaultEnabled(infra) {
-		cfg.CredentialStore.DefaultStorageKind = "hashicorp_vault"
+	if cfg == nil {
+		return nil
 	}
-	cfg.CredentialStore.EncryptedPG.KeyID = keyRef.KeyID
-	cfg.CredentialStore.EncryptedPG.KeyFile = EncryptedPGKeyFilePath
-	cfg.CredentialStore.EncryptedPG.Key = ""
-
-	cfg.CredentialStore.Vault.Connections = nil
+	infra := scope.Owner()
+	if infrav1alpha1.IsCredentialVaultEnabled(infra) {
+		cfg.DefaultStorageKind = "hashicorp_vault"
+	}
 	if !infrav1alpha1.IsCredentialVaultEnabled(infra) || infra.Spec.CredentialVault == nil {
 		return nil
 	}
@@ -574,7 +574,7 @@ func ApplyManagerCredentialStoreConfig(ctx context.Context, resources *common.Re
 	switch infra.Spec.CredentialVault.Type {
 	case infrav1alpha1.CredentialVaultTypeBuiltin, "":
 		builtin := resolveBuiltinCredentialVaultConfig(infra)
-		cfg.CredentialStore.Vault.Connections = []apiconfig.CredentialVaultConnectionConfig{
+		cfg.Vault.Connections = []apiconfig.CredentialVaultConnectionConfig{
 			{
 				Name:                "default",
 				Provider:            "hashicorp_vault",
@@ -604,12 +604,36 @@ func ApplyManagerCredentialStoreConfig(ctx context.Context, resources *common.Re
 		if external.CACertSecret != nil && strings.TrimSpace(external.CACertSecret.Name) != "" {
 			conn.CACertFile = VaultCAFilePath("default")
 		}
-		cfg.CredentialStore.Vault.Connections = []apiconfig.CredentialVaultConnectionConfig{conn}
+		cfg.Vault.Connections = []apiconfig.CredentialVaultConnectionConfig{conn}
 	}
 	return nil
 }
 
+func ApplyEncryptedPGCredentialStoreConfig(ctx context.Context, resources *common.ResourceManager, scope common.ObjectScope, cfg *apiconfig.CredentialStoreConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	keyRef, err := EnsureEncryptedPGKey(ctx, resources, scope)
+	if err != nil {
+		return err
+	}
+	cfg.DefaultStorageKind = "encrypted_pg"
+	cfg.EncryptedPG.KeyID = keyRef.KeyID
+	cfg.EncryptedPG.KeyFile = EncryptedPGKeyFilePath
+	cfg.EncryptedPG.Key = ""
+
+	cfg.Vault.Connections = nil
+	return nil
+}
+
 func ManagerCredentialStoreVolumes(scope common.ObjectScope, cfg *apiconfig.ManagerConfig) ([]corev1.VolumeMount, []corev1.Volume) {
+	if cfg == nil {
+		return nil, nil
+	}
+	return CredentialStoreVolumes(scope, &cfg.CredentialStore)
+}
+
+func CredentialStoreVolumes(scope common.ObjectScope, cfg *apiconfig.CredentialStoreConfig) ([]corev1.VolumeMount, []corev1.Volume) {
 	if cfg == nil {
 		return nil, nil
 	}
@@ -640,11 +664,11 @@ func ManagerCredentialStoreVolumes(scope common.ObjectScope, cfg *apiconfig.Mana
 		})
 	}
 
-	if cfg.CredentialStore.EncryptedPG.KeyFile == EncryptedPGKeyFilePath {
+	if cfg.EncryptedPG.KeyFile == EncryptedPGKeyFilePath {
 		addSecretFile("credential-store-encrypted-pg", EncryptedPGKeySecretName(scope.Name), encryptedPGKeyKey, EncryptedPGKeyFilePath)
 	}
 
-	if infra == nil || infra.Spec.CredentialVault == nil || len(cfg.CredentialStore.Vault.Connections) == 0 {
+	if infra == nil || infra.Spec.CredentialVault == nil || len(cfg.Vault.Connections) == 0 {
 		return mounts, volumes
 	}
 

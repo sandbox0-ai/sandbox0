@@ -5753,20 +5753,20 @@ components:
           description: Optional object key prefix to expose as the volume root.
         region:
           type: string
-          description: Optional region override. Defaults to the storage-proxy S3 region when omitted.
+          description: AWS region for the target bucket. Required for provider aws unless endpoint_url is provided.
         endpoint_url:
           type: string
-          description: Optional endpoint override. Required for ali and r2.
+          description: Optional endpoint override. Required for ali and r2. For aws, endpoint_url can be used instead of region for S3-compatible endpoints.
         access_key:
           type: string
-          description: Optional access key override. Must be provided together with secret_key.
+          description: Access key for this S3 backend volume. Required with secret_key. Stored encrypted and omitted from API responses.
         secret_key:
           type: string
-          description: Optional secret key override. Must be provided together with access_key.
+          description: Secret key for this S3 backend volume. Required with access_key. Stored encrypted and omitted from API responses.
         session_token:
           type: string
           description: Optional temporary credential session token.
-      required: [bucket]
+      required: [bucket, access_key, secret_key]
     SandboxVolumeS3Config:
       type: object
       properties:
@@ -5813,7 +5813,7 @@ components:
           description: Volume backend. Defaults to s0fs when omitted. If s3 is provided without backend, backend is inferred as s3.
         s3:
           $ref: "#/components/schemas/CreateSandboxVolumeS3Config"
-          description: S3-compatible backend configuration. Only valid with backend s3; s3 volumes do not support snapshot_id or RWX access mode.
+          description: S3-compatible backend configuration. Only valid with backend s3; per-volume access_key and secret_key are required, stored encrypted, and omitted from API responses; s3 volumes do not support snapshot_id or RWX access mode.
         default_posix_uid:
           type: integer
           format: int64

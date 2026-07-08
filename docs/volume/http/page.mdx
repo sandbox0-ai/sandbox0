@@ -5,7 +5,7 @@ Use direct Volume file operations to operate on files in a Volume by volume ID, 
 Start with the Go, Python, TypeScript SDKs, or the `s0` CLI. The endpoint reference below is for advanced integrations and custom clients that need to call the HTTP and WebSocket API directly.
 
 <Callout variant="info">
-Requests still go through the normal gateway chain and team-scoped auth. Internally, `storage-proxy` lazily attaches the Volume and reclaims idle direct mounts later.
+Requests still go through the normal gateway chain and team-scoped auth. For `s0fs` Volumes, `storage-proxy` lazily attaches the Volume and reclaims idle direct mounts later. For `s3` backend Volumes, direct file requests are supported only while an active ctld mount owner can serve the request. See [Volume Backends](/docs/sandbox/volume/backends).
 </Callout>
 
 ## Base Model
@@ -16,7 +16,7 @@ Requests still go through the normal gateway chain and team-scoped auth. Interna
 - Write, move, mkdir, and delete operations use `sandboxvolumefile:write`.
 
 <Callout variant="info">
-The client helpers below call the same `SandboxVolume file` HTTP endpoints documented on this page. They do not require mounting the Volume into a Sandbox first.
+The client helpers below call the same `SandboxVolume file` HTTP endpoints documented on this page. They do not require mounting an `s0fs` Volume into a Sandbox first.
 </Callout>
 
 ## SDK and CLI Quick Start

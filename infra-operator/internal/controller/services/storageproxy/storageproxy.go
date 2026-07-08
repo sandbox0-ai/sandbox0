@@ -28,6 +28,7 @@ import (
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	credentialstoresvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/credentialstore"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	meteringsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/metering"
@@ -80,6 +81,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			return err
 		}
 		config.ObjectEncryptionKeyPath = common.ObjectEncryptionKeyPath
+	}
+	if err := credentialstoresvc.ApplyEncryptedPGCredentialStoreConfig(ctx, r.Resources, common.NewObjectScope(infra), &config.CredentialStore); err != nil {
+		return err
 	}
 	cacheSizeLimit, err := parseSizeLimit(config.CacheSizeLimit, defaultCacheSizeLimit, "storage-proxy cache size limit")
 	if err != nil {
@@ -163,6 +167,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			},
 		},
 	}
+	credentialStoreMounts, credentialStoreVolumes := credentialstoresvc.CredentialStoreVolumes(common.NewObjectScope(infra), &config.CredentialStore)
+	volumeMounts = append(volumeMounts, credentialStoreMounts...)
+	volumes = append(volumes, credentialStoreVolumes...)
 	if config.ObjectEncryptionEnabled {
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
 			Name:      "object-encryption-key",

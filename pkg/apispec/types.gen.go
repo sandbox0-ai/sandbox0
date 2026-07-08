@@ -876,11 +876,11 @@ type CreateSandboxVolumeRequest struct {
 
 // CreateSandboxVolumeS3Config defines model for CreateSandboxVolumeS3Config.
 type CreateSandboxVolumeS3Config struct {
-	// AccessKey Optional access key override. Must be provided together with secret_key.
-	AccessKey *string `json:"access_key,omitempty"`
-	Bucket    string  `json:"bucket"`
+	// AccessKey Access key for this S3 backend volume. Required with secret_key. Stored encrypted and omitted from API responses.
+	AccessKey string `json:"access_key"`
+	Bucket    string `json:"bucket"`
 
-	// EndpointUrl Optional endpoint override. Required for ali and r2.
+	// EndpointUrl Optional endpoint override. Required for ali and r2. For aws, endpoint_url can be used instead of region for S3-compatible endpoints.
 	EndpointUrl *string `json:"endpoint_url,omitempty"`
 
 	// Prefix Optional object key prefix to expose as the volume root.
@@ -889,11 +889,11 @@ type CreateSandboxVolumeS3Config struct {
 	// Provider S3-compatible provider. ali is Aliyun OSS; r2 is Cloudflare R2.
 	Provider *CreateSandboxVolumeS3ConfigProvider `json:"provider,omitempty"`
 
-	// Region Optional region override. Defaults to the storage-proxy S3 region when omitted.
+	// Region AWS region for the target bucket. Required for provider aws unless endpoint_url is provided.
 	Region *string `json:"region,omitempty"`
 
-	// SecretKey Optional secret key override. Must be provided together with access_key.
-	SecretKey *string `json:"secret_key,omitempty"`
+	// SecretKey Secret key for this S3 backend volume. Required with access_key. Stored encrypted and omitted from API responses.
+	SecretKey string `json:"secret_key"`
 
 	// SessionToken Optional temporary credential session token.
 	SessionToken *string `json:"session_token,omitempty"`

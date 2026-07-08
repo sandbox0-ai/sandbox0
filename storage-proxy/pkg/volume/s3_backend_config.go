@@ -17,14 +17,23 @@ const (
 )
 
 type S3BackendConfig struct {
-	Provider     string `json:"provider,omitempty"`
-	Bucket       string `json:"bucket,omitempty"`
-	Prefix       string `json:"prefix,omitempty"`
-	Region       string `json:"region,omitempty"`
-	EndpointURL  string `json:"endpoint_url,omitempty"`
-	AccessKey    string `json:"access_key,omitempty"`
-	SecretKey    string `json:"secret_key,omitempty"`
-	SessionToken string `json:"session_token,omitempty"`
+	Provider             string                         `json:"provider,omitempty"`
+	Bucket               string                         `json:"bucket,omitempty"`
+	Prefix               string                         `json:"prefix,omitempty"`
+	Region               string                         `json:"region,omitempty"`
+	EndpointURL          string                         `json:"endpoint_url,omitempty"`
+	AccessKey            string                         `json:"access_key,omitempty"`
+	SecretKey            string                         `json:"secret_key,omitempty"`
+	SessionToken         string                         `json:"session_token,omitempty"`
+	EncryptedCredentials *S3BackendEncryptedCredentials `json:"encrypted_credentials,omitempty"`
+}
+
+type S3BackendEncryptedCredentials struct {
+	Version    int    `json:"version"`
+	Algorithm  string `json:"algorithm"`
+	KeyID      string `json:"key_id"`
+	Nonce      string `json:"nonce"`
+	Ciphertext string `json:"ciphertext"`
 }
 
 func NormalizeBackend(value string) string {
@@ -69,6 +78,12 @@ func NormalizeS3BackendConfig(cfg S3BackendConfig) S3BackendConfig {
 	cfg.AccessKey = strings.TrimSpace(cfg.AccessKey)
 	cfg.SecretKey = strings.TrimSpace(cfg.SecretKey)
 	cfg.SessionToken = strings.TrimSpace(cfg.SessionToken)
+	if cfg.EncryptedCredentials != nil {
+		cfg.EncryptedCredentials.KeyID = strings.TrimSpace(cfg.EncryptedCredentials.KeyID)
+		cfg.EncryptedCredentials.Algorithm = strings.TrimSpace(cfg.EncryptedCredentials.Algorithm)
+		cfg.EncryptedCredentials.Nonce = strings.TrimSpace(cfg.EncryptedCredentials.Nonce)
+		cfg.EncryptedCredentials.Ciphertext = strings.TrimSpace(cfg.EncryptedCredentials.Ciphertext)
+	}
 	return cfg
 }
 
@@ -88,6 +103,12 @@ func ValidateS3BackendConfig(cfg S3BackendConfig) error {
 	if cfg.Provider == S3ProviderR2 && cfg.EndpointURL == "" {
 		return fmt.Errorf("s3.endpoint_url is required for provider r2")
 	}
+	if cfg.Provider == S3ProviderAWS && cfg.Region == "" && cfg.EndpointURL == "" {
+		return fmt.Errorf("s3.region or s3.endpoint_url is required for provider aws")
+	}
+	if cfg.AccessKey == "" && cfg.SecretKey == "" && !hasS3BackendEncryptedCredentials(cfg) {
+		return fmt.Errorf("s3.access_key and s3.secret_key are required")
+	}
 	if (cfg.AccessKey == "") != (cfg.SecretKey == "") {
 		return fmt.Errorf("s3.access_key and s3.secret_key must be set together")
 	}
@@ -104,6 +125,10 @@ func MarshalS3BackendConfig(cfg S3BackendConfig) (json.RawMessage, error) {
 }
 
 func DecodeS3BackendConfig(raw json.RawMessage) (S3BackendConfig, error) {
+	return decodeS3BackendConfig(raw, true)
+}
+
+func decodeS3BackendConfig(raw json.RawMessage, validate bool) (S3BackendConfig, error) {
 	if len(raw) == 0 {
 		return S3BackendConfig{}, fmt.Errorf("s3 backend config is required")
 	}
@@ -112,8 +137,10 @@ func DecodeS3BackendConfig(raw json.RawMessage) (S3BackendConfig, error) {
 		return S3BackendConfig{}, fmt.Errorf("decode s3 backend config: %w", err)
 	}
 	cfg = NormalizeS3BackendConfig(cfg)
-	if err := ValidateS3BackendConfig(cfg); err != nil {
-		return S3BackendConfig{}, err
+	if validate {
+		if err := ValidateS3BackendConfig(cfg); err != nil {
+			return S3BackendConfig{}, err
+		}
 	}
 	return cfg, nil
 }
@@ -123,10 +150,20 @@ func SanitizeS3BackendConfig(cfg S3BackendConfig) S3BackendConfig {
 	cfg.AccessKey = ""
 	cfg.SecretKey = ""
 	cfg.SessionToken = ""
+	cfg.EncryptedCredentials = nil
 	return cfg
 }
 
-func S3ObjectStoreConfig(cfg S3BackendConfig, fallback *config.StorageProxyConfig, metrics *obsmetrics.StorageProxyMetrics) objectstore.Config {
+func hasS3BackendEncryptedCredentials(cfg S3BackendConfig) bool {
+	return cfg.EncryptedCredentials != nil &&
+		cfg.EncryptedCredentials.Version != 0 &&
+		cfg.EncryptedCredentials.Algorithm != "" &&
+		cfg.EncryptedCredentials.KeyID != "" &&
+		cfg.EncryptedCredentials.Nonce != "" &&
+		cfg.EncryptedCredentials.Ciphertext != ""
+}
+
+func S3ObjectStoreConfig(cfg S3BackendConfig, _ *config.StorageProxyConfig, metrics *obsmetrics.StorageProxyMetrics) objectstore.Config {
 	cfg = NormalizeS3BackendConfig(cfg)
 	storeType := objectstore.TypeS3
 	if cfg.Provider == S3ProviderAli {
@@ -141,19 +178,6 @@ func S3ObjectStoreConfig(cfg S3BackendConfig, fallback *config.StorageProxyConfi
 		SecretKey:    cfg.SecretKey,
 		SessionToken: cfg.SessionToken,
 		Metrics:      metrics,
-	}
-	if fallback != nil {
-		if out.Region == "" {
-			out.Region = fallback.S3Region
-		}
-		if out.Endpoint == "" {
-			out.Endpoint = fallback.S3Endpoint
-		}
-		if out.AccessKey == "" && out.SecretKey == "" && out.SessionToken == "" {
-			out.AccessKey = fallback.S3AccessKey
-			out.SecretKey = fallback.S3SecretKey
-			out.SessionToken = fallback.S3SessionToken
-		}
 	}
 	if cfg.Provider == S3ProviderR2 && out.Region == "" {
 		out.Region = "auto"

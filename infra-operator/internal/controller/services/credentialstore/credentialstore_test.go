@@ -87,6 +87,35 @@ func TestApplyManagerCredentialStoreConfigForBuiltinVault(t *testing.T) {
 	}
 }
 
+func TestApplyEncryptedPGCredentialStoreConfigIgnoresVaultRuntime(t *testing.T) {
+	ctx := context.Background()
+	infra, resources := testCredentialStoreResources(t)
+	infra.Spec.CredentialVault = &infrav1alpha1.CredentialVaultConfig{
+		Type: infrav1alpha1.CredentialVaultTypeBuiltin,
+		Builtin: &infrav1alpha1.BuiltinCredentialVaultConfig{
+			Enabled: true,
+			Mount:   "sandbox0",
+		},
+	}
+	cfg := &apiconfig.CredentialStoreConfig{}
+	if err := ApplyEncryptedPGCredentialStoreConfig(ctx, resources, common.NewObjectScope(infra), cfg); err != nil {
+		t.Fatalf("apply encrypted_pg config: %v", err)
+	}
+	if cfg.DefaultStorageKind != "encrypted_pg" {
+		t.Fatalf("default storage kind = %q", cfg.DefaultStorageKind)
+	}
+	if cfg.EncryptedPG.KeyFile != EncryptedPGKeyFilePath {
+		t.Fatalf("key file = %q", cfg.EncryptedPG.KeyFile)
+	}
+	if len(cfg.Vault.Connections) != 0 {
+		t.Fatalf("vault connections = %d, want 0", len(cfg.Vault.Connections))
+	}
+	mounts, volumes := CredentialStoreVolumes(common.NewObjectScope(infra), cfg)
+	if len(mounts) != 1 || len(volumes) != 1 {
+		t.Fatalf("mounts=%d volumes=%d, want 1/1", len(mounts), len(volumes))
+	}
+}
+
 func TestApplyManagerCredentialStoreConfigDefaultsToEncryptedPG(t *testing.T) {
 	ctx := context.Background()
 	infra, resources := testCredentialStoreResources(t)

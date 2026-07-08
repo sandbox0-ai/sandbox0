@@ -83,8 +83,8 @@ func assertMountpointS3Compatibility(env *framework.ScenarioEnv, session *e2euti
 			Prefix:      &store.prefix,
 			Region:      &region,
 			EndpointUrl: &store.endpointURL,
-			AccessKey:   &store.accessKey,
-			SecretKey:   &store.secretKey,
+			AccessKey:   store.accessKey,
+			SecretKey:   store.secretKey,
 		},
 	})
 	Expect(err).NotTo(HaveOccurred())

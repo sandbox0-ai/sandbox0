@@ -1217,6 +1217,21 @@ func sandboxLifecycleTxnCancelRequested(txn *SandboxLifecycleTxn) bool {
 	return txn != nil && !txn.CancelRequestedAt.IsZero()
 }
 
+func sandboxLifecycleRootFSSourceCheckpointTxnStale(txn *SandboxLifecycleTxn, now time.Time) bool {
+	if txn == nil || txn.UpdatedAt.IsZero() {
+		return false
+	}
+	switch txn.Kind {
+	case SandboxLifecycleKindFork, SandboxLifecycleKindSnapshot:
+	default:
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	return now.Sub(txn.UpdatedAt) > sandboxRootFSSourceCheckpointLifecycleStaleAfter
+}
+
 func sandboxLifecycleTxnCancelableAutoPause(txn *SandboxLifecycleTxn) bool {
 	if txn == nil {
 		return false

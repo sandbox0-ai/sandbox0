@@ -6,7 +6,7 @@ Use this integration when you want Eve's agent runtime and tool model, but want 
 
 The adapter implements Eve's `SandboxBackend` lifecycle:
 
-- Eve `prewarm()` claims a Sandbox0 sandbox, runs `bootstrap`, writes seed files, pauses the sandbox, and captures a Sandbox0 rootfs snapshot
+- Eve `prewarm()` claims a Sandbox0 sandbox, runs `bootstrap`, writes seed files, and captures a Sandbox0 rootfs snapshot
 - Eve `create()` claims a fresh Sandbox0 sandbox from the prewarmed rootfs snapshot
 - Eve durable session metadata stores the Sandbox0 `sandboxId`, so later turns can resume the same sandbox
 - Eve file, command, and network policy calls are translated to Sandbox0 SDK calls
@@ -89,14 +89,13 @@ The Sandbox0 adapter performs this sequence:
 1. Claim a Sandbox0 sandbox from the configured template.
 2. Run Eve `bootstrap` inside that sandbox.
 3. Write Eve seed files into `/workspace`.
-4. Pause the sandbox and wait until Sandbox0 reports it as paused.
-5. Create a Sandbox0 rootfs snapshot.
-6. Store the mapping from Eve `templateKey` to Sandbox0 `snapshotId` under `.eve/sandbox0/`.
+4. Create a Sandbox0 rootfs snapshot from the prepared sandbox.
+5. Store the mapping from Eve `templateKey` to Sandbox0 `snapshotId` under `.eve/sandbox0/`.
 
 At runtime, Eve calls `create()` with the same `templateKey`. The adapter reads the stored mapping and claims a new Sandbox0 sandbox with `snapshotId`.
 
 <Callout variant="warning">
-Rootfs snapshot creation requires a paused Sandbox0 sandbox. The adapter handles the pause and polling step before snapshot creation.
+Sandbox0 rootfs snapshot creation accepts a running or paused source sandbox. A running prewarm sandbox is briefly checkpointed and remains running after snapshot creation.
 </Callout>
 
 ## Session Persistence

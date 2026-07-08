@@ -100,8 +100,10 @@ type SandboxRootFSLayer struct {
 }
 
 const (
-	SandboxLifecycleKindPause  = "pause"
-	SandboxLifecycleKindResume = "resume"
+	SandboxLifecycleKindPause    = "pause"
+	SandboxLifecycleKindResume   = "resume"
+	SandboxLifecycleKindFork     = "fork"
+	SandboxLifecycleKindSnapshot = "snapshot"
 
 	SandboxLifecycleSourceManual = "manual"
 	SandboxLifecycleSourceAuto   = "auto"

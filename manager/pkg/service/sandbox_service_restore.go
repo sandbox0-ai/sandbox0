@@ -274,9 +274,10 @@ func (s *SandboxService) commitResumedSandboxRuntime(ctx context.Context, pod *c
 }
 
 var (
-	errSandboxLifecyclePausing  = errors.New("sandbox lifecycle pause is in progress")
-	errSandboxLifecycleResuming = errors.New("sandbox lifecycle resume is in progress")
-	errSandboxRuntimeDeleting   = errors.New("sandbox runtime pod deletion is in progress")
+	errSandboxLifecyclePausing             = errors.New("sandbox lifecycle pause is in progress")
+	errSandboxLifecycleResuming            = errors.New("sandbox lifecycle resume is in progress")
+	errSandboxLifecycleRootFSCheckpointing = errors.New("sandbox lifecycle rootfs checkpoint is in progress")
+	errSandboxRuntimeDeleting              = errors.New("sandbox runtime pod deletion is in progress")
 )
 
 type sandboxRuntimePodRef struct {
@@ -300,6 +301,19 @@ func (s *SandboxService) waitForSandboxLifecycleTxnExit(ctx context.Context, san
 		}
 		if txn == nil {
 			return nil
+		}
+		if sandboxLifecycleRootFSSourceCheckpointTxnStale(txn, s.now()) {
+			reason := "stale rootfs checkpoint transaction"
+			switch txn.Kind {
+			case SandboxLifecycleKindFork:
+				reason = "stale fork transaction"
+			case SandboxLifecycleKindSnapshot:
+				reason = "stale snapshot transaction"
+			}
+			if err := s.abortLifecycleTxn(ctx, sandboxID, txn.ID, reason); err != nil {
+				return err
+			}
+			continue
 		}
 		select {
 		case <-ctx.Done():

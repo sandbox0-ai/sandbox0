@@ -628,7 +628,7 @@ func TestSandboxRootFSProductAPI(t *testing.T) {
 	store.records["sandbox-1"].Status = service.SandboxStatusRunning
 	store.mu.Unlock()
 	resp, body = doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxes/sandbox-1/snapshots", env.token, nil)
-	if resp.StatusCode != http.StatusConflict {
+	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("running rootfs snapshot status = %d, body = %s", resp.StatusCode, string(body))
 	}
 }

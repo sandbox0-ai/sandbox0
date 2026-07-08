@@ -405,6 +405,7 @@ func main() {
 	sandboxService.SetDeletionWebhookEmitter(service.NewHTTPSandboxDeletionWebhookEmitter(obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration})))
 	podInformer.Informer().AddEventHandler(sandboxService.PodEventHandler())
 	sandboxLifecycleController := service.NewSandboxLifecycleController(k8sClient, podLister, sandboxService, logger)
+	sandboxLifecycleController.SetMetrics(managerMetrics)
 	podInformer.Informer().AddEventHandler(sandboxLifecycleController.ResourceEventHandler())
 	sandboxPauseController := service.NewSandboxPauseController(sandboxService, logger)
 	sandboxService.SetPauseEnqueuer(sandboxPauseController)

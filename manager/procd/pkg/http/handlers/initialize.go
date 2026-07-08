@@ -11,6 +11,7 @@ import (
 
 	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/webhook"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
@@ -21,6 +22,7 @@ type InitializeHandler struct {
 	dispatcher     *webhook.Dispatcher
 	fileManager    *file.Manager
 	contextManager *ctxpkg.Manager
+	processManager *process.SessionManager
 	httpPort       int
 	logger         *zap.Logger
 	readyMu        sync.Mutex
@@ -39,6 +41,11 @@ func NewInitializeHandler(dispatcher *webhook.Dispatcher, fileManager *file.Mana
 		httpPort:       httpPort,
 		logger:         logger,
 	}
+}
+
+// SetProcessSessionManager wires process sessions into sandbox initialization.
+func (h *InitializeHandler) SetProcessSessionManager(manager *process.SessionManager) {
+	h.processManager = manager
 }
 
 // InitializeRequest is the request body for initializing sandbox settings.
@@ -118,6 +125,9 @@ func (h *InitializeHandler) Initialize(w http.ResponseWriter, r *http.Request) {
 	if h.contextManager != nil {
 		h.contextManager.SetSandboxEnvVars(req.EnvVars)
 	}
+	if h.processManager != nil {
+		h.processManager.SetSandboxEnvVars(req.EnvVars)
+	}
 
 	h.dispatcher.SetConfig(webhookURL, webhookSecret)
 	h.dispatcher.SetIdentity(req.SandboxID, teamID)
@@ -186,6 +196,14 @@ func (h *InitializeHandler) UpdateSandboxEnvVars(w http.ResponseWriter, r *http.
 		h.contextManager.SetSandboxEnvVars(req.EnvVars)
 		if current := h.contextManager.SandboxEnvVars(); current != nil {
 			envVars = current
+		}
+	}
+	if h.processManager != nil {
+		h.processManager.SetSandboxEnvVars(req.EnvVars)
+		if len(envVars) == 0 {
+			if current := h.processManager.SandboxEnvVars(); current != nil {
+				envVars = current
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, UpdateSandboxEnvVarsResponse{EnvVars: envVars})

@@ -1,0 +1,155 @@
+# Process Sessions
+
+Process sessions are broker-owned user processes inside a sandbox. They are lower
+level than contexts: a process session declares protocol channels, accepts
+idempotent input events, and exposes replayable output events over SSE.
+
+Use process sessions when the client connection should not own the child process
+transport. If the client disconnects from the SSE stream, `procd` keeps the
+process and its broker-owned stdin/stdout/stderr pipes, HTTP requests, or
+websocket connection alive until the process exits, is deleted, or reaches its
+cleanup policy.
+
+## Resource Model
+
+| Resource | Description |
+|----------|-------------|
+| Process session | A running command plus lifecycle state, PID, cleanup policy, and event log |
+| Channel | A named protocol surface: `stdio`, `pty`, `http`, or `websocket` |
+| Event | A monotonic `seq` item for input acceptance, output, lifecycle, errors, or cursor loss |
+| Subscription | A client SSE connection reading replayed and live events from a cursor |
+
+`stdio` channels use real child pipes and are appropriate for JSONL, JSON-RPC,
+MCP stdio servers, language servers, and app-server style processes. `pty`
+channels use terminal semantics and are appropriate for shells and interactive
+REPLs.
+
+## Create Process Session
+
+<Endpoint method="POST">
+/api/v1/sandboxes/{'{id}'}/processes
+</Endpoint>
+
+    {
+      "alias": "codex-app-server",
+      "command": ["codex", "app-server", "--listen", "stdio://"],
+      "cwd": "/workspace",
+      "env_vars": {
+        "CODEX_HOME": "/var/lib/sandbox0/codex"
+      },
+      "channels": [
+        {
+          "name": "rpc",
+          "kind": "stdio",
+          "framing": "jsonl",
+          "stdin": true,
+          "stdout": true,
+          "stderr": true
+        }
+      ],
+      "cleanup": {
+        "idle_timeout_sec": 1800
+      }
+    }
+
+The response data contains `process.id`, `state`, `pid`, declared `channels`,
+and `event_log` replay metadata.
+
+## Send Input Event
+
+<Endpoint method="POST">
+/api/v1/sandboxes/{'{id}'}/processes/{'{process_id}'}/events
+</Endpoint>
+
+    {
+      "event_id": "evt_client_001",
+      "channel": "rpc",
+      "type": "stdin.write",
+      "payload": {
+        "data": "{\"id\":1,\"method\":\"initialize\",\"params\":{}}\n"
+      }
+    }
+
+`event_id` is required. Repeating the same event with the same payload returns
+the original accepted event. Reusing the same `event_id` with a different payload
+is rejected.
+
+Input backpressure is explicit. If `procd` has not accepted the event, the
+client can retry with the same `event_id`.
+
+## Stream Events
+
+<Endpoint method="GET">
+/api/v1/sandboxes/{'{id}'}/processes/{'{process_id}'}/events?cursor=42
+</Endpoint>
+
+The response is `text/event-stream`. Each SSE `data` field contains a
+`ProcessEvent` JSON object.
+
+    id: 43
+    event: stdout.line
+    data: {"seq":43,"process_id":"proc_...","channel":"rpc","type":"stdout.line","payload":{"data":"..."}}
+
+Use `cursor` as the last event `seq` observed by the client. If the requested
+cursor is older than the retained event log, `procd` emits `cursor_lost` with
+the oldest available sequence.
+
+## Stop Process Session
+
+<Endpoint method="DELETE">
+/api/v1/sandboxes/{'{id}'}/processes/{'{process_id}'}
+</Endpoint>
+
+Deleting a process session terminates the process, closes broker-owned channels,
+and removes it from `procd`.
+
+## Signals And PTY Resize
+
+<Endpoint method="POST">
+/api/v1/sandboxes/{'{id}'}/processes/{'{process_id}'}/signal
+</Endpoint>
+
+    {
+      "signal": "TERM"
+    }
+
+<Endpoint method="PUT">
+/api/v1/sandboxes/{'{id}'}/processes/{'{process_id}'}/channels/{'{channel}'}/pty-size
+</Endpoint>
+
+    {
+      "rows": 40,
+      "cols": 120
+    }
+
+PTY resize is valid only for `pty` channels.
+
+## Codex App Server Over Stdio
+
+Codex app-server can run as a normal process session. `procd` does not need a
+Codex-specific adapter.
+
+    {
+      "alias": "codex-app-server",
+      "command": ["codex", "app-server", "--listen", "stdio://"],
+      "cwd": "/workspace",
+      "channels": [
+        {
+          "name": "rpc",
+          "kind": "stdio",
+          "framing": "jsonl",
+          "stdin": true,
+          "stdout": true,
+          "stderr": true
+        }
+      ]
+    }
+
+The SDK sends JSON-RPC messages as `stdin.write` events and reads JSONL output
+through SSE. A client disconnect closes only the SSE subscription; it does not
+send EOF to the Codex app-server child process.
+
+If the child process exits or crashes, application-level recovery still belongs
+to that protocol. For Codex, that usually means reconnecting to a new app-server
+process and using Codex thread resume semantics.
+

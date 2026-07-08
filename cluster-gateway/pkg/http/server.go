@@ -537,6 +537,18 @@ func (s *Server) registerSandboxProcdRoutes(sandboxes *gin.RouterGroup) {
 		contexts.GET("/:ctx_id/ws", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.contextWebSocket)
 	}
 
+	processes := sandboxes.Group("/:id/processes")
+	{
+		processes.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.createProcess)
+		processes.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.listProcesses)
+		processes.GET("/:process_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.getProcess)
+		processes.DELETE("/:process_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.deleteProcess)
+		processes.POST("/:process_id/events", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.sendProcessEvent)
+		processes.GET("/:process_id/events", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.streamProcessEvents)
+		processes.POST("/:process_id/signal", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.processSignal)
+		processes.PUT("/:process_id/channels/:channel/pty-size", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.processPTYSize)
+	}
+
 	// === File System (→ Procd) ===
 	files := sandboxes.Group("/:id/files")
 	{

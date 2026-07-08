@@ -16,6 +16,7 @@ import (
 	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/http/handlers"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/webhook"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -36,6 +37,7 @@ type Server struct {
 
 	// Managers
 	contextManager *ctxpkg.Manager
+	processManager *process.SessionManager
 	fileManager    *file.Manager
 
 	// Internal auth validator
@@ -52,6 +54,7 @@ type Server struct {
 func NewServer(
 	cfg *config.ProcdConfig,
 	contextManager *ctxpkg.Manager,
+	processManager *process.SessionManager,
 	fileManager *file.Manager,
 	authValidator *internalauth.Validator,
 	webhookDispatcher *webhook.Dispatcher,
@@ -63,6 +66,7 @@ func NewServer(
 		router:            mux.NewRouter(),
 		cfg:               cfg,
 		contextManager:    contextManager,
+		processManager:    processManager,
 		fileManager:       fileManager,
 		authValidator:     authValidator,
 		barrier:           newLifecycleBarrier(),
@@ -123,6 +127,16 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/contexts/{id}/stats", contextHandler.Stats).Methods("GET")
 	api.HandleFunc("/contexts/{id}/ws", contextHandler.WebSocket).Methods("GET")
 
+	processHandler := handlers.NewProcessHandler(s.processManager, s.logger)
+	api.HandleFunc("/processes", processHandler.List).Methods("GET")
+	api.HandleFunc("/processes", processHandler.Create).Methods("POST")
+	api.HandleFunc("/processes/{id}", processHandler.Get).Methods("GET")
+	api.HandleFunc("/processes/{id}", processHandler.Delete).Methods("DELETE")
+	api.HandleFunc("/processes/{id}/events", processHandler.SendEvent).Methods("POST")
+	api.HandleFunc("/processes/{id}/events", processHandler.StreamEvents).Methods("GET")
+	api.HandleFunc("/processes/{id}/signal", processHandler.SendSignal).Methods("POST")
+	api.HandleFunc("/processes/{id}/channels/{channel}/pty-size", processHandler.ResizePTY).Methods("PUT")
+
 	functionHandler := handlers.NewFunctionHandler(s.logger)
 	if s.contextManager != nil {
 		functionHandler.SetSandboxEnvVarsProvider(s.contextManager.SandboxEnvVars)
@@ -133,6 +147,7 @@ func (s *Server) setupRoutes() {
 
 	// Initialize handler
 	initializeHandler := handlers.NewInitializeHandler(s.webhookDispatcher, s.fileManager, s.contextManager, s.cfg.HTTPPort, s.logger)
+	initializeHandler.SetProcessSessionManager(s.processManager)
 	api.HandleFunc("/initialize", initializeHandler.Initialize).Methods("POST")
 	api.HandleFunc("/sandbox/env_vars", initializeHandler.UpdateSandboxEnvVars).Methods("PUT")
 

@@ -76,6 +76,11 @@ func main() {
 		MaxLifetime: cfg.ContextMaxLifetime.Duration,
 		FinishedTTL: cfg.ContextFinishedTTL.Duration,
 	})
+	processManager := process.NewSessionManager()
+	processManager.SetDefaultCleanupPolicy(process.ProcessCleanupSpec{
+		IdleTimeoutSec: int32(cfg.ContextIdleTimeout.Duration / time.Second),
+		TTLSec:         int32(cfg.ContextMaxLifetime.Duration / time.Second),
+	})
 
 	webhookDispatcher := webhook.NewDispatcher(webhook.Options{
 		QueueSize:      cfg.WebhookQueueSize,
@@ -162,6 +167,7 @@ func main() {
 	server := procdhttp.NewServer(
 		cfg,
 		contextManager,
+		processManager,
 		fileManager,
 		authValidator,
 		webhookDispatcher,
@@ -172,6 +178,7 @@ func main() {
 
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 	contextManager.StartCleanup(cleanupCtx, cfg.ContextCleanupInterval.Duration)
+	processManager.StartCleanup(cleanupCtx, cfg.ContextCleanupInterval.Duration)
 
 	// Handle shutdown signals
 	done := make(chan bool, 1)
@@ -205,6 +212,7 @@ func main() {
 
 		// Cleanup managers
 		contextManager.Cleanup()
+		processManager.Cleanup()
 		fileManager.Close()
 
 		if err := webhookDispatcher.Shutdown(context.Background()); err != nil {

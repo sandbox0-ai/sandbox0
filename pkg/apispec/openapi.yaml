@@ -16,6 +16,7 @@ tags:
   - name: api-keys
   - name: sandboxes
   - name: contexts
+  - name: processes
   - name: observability
   - name: audit
   - name: files
@@ -2395,6 +2396,188 @@ paths:
       responses:
         "101":
           description: Switching Protocols
+  /api/v1/sandboxes/{id}/processes:
+    post:
+      tags: [processes]
+      summary: Create a process session
+      description: Creates a broker-owned process session with declared protocol channels. Client disconnects from event subscriptions do not close child process descriptors.
+      security:
+        - bearerAuth: []
+      x-upstream-service: procd
+      x-upstream-path: /api/v1/processes
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProcessSpec"
+      responses:
+        "201":
+          description: Process session created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessProcessSessionResponse"
+    get:
+      tags: [processes]
+      summary: List process sessions
+      security:
+        - bearerAuth: []
+      x-upstream-service: procd
+      x-upstream-path: /api/v1/processes
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+      responses:
+        "200":
+          description: Process session list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessProcessSessionListResponse"
+  /api/v1/sandboxes/{id}/processes/{process_id}:
+    get:
+      tags: [processes]
+      summary: Get process session
+      security:
+        - bearerAuth: []
+      x-upstream-service: procd
+      x-upstream-path: /api/v1/processes/{process_id}
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - $ref: "#/components/parameters/ProcessID"
+      responses:
+        "200":
+          description: Process session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessProcessSessionResponse"
+    delete:
+      tags: [processes]
+      summary: Delete process session
+      description: Stops the process session, closes broker-owned channels, and removes it from procd.
+      security:
+        - bearerAuth: []
+      x-upstream-service: procd
+      x-upstream-path: /api/v1/processes/{process_id}
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - $ref: "#/components/parameters/ProcessID"
+      responses:
+        "200":
+          description: Process session deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessDeletedResponse"
+  /api/v1/sandboxes/{id}/processes/{process_id}/events:
+    post:
+      tags: [processes]
+      summary: Send process input event
+      description: Sends an idempotent input event to one process channel. event_id is required and repeated identical events return the original accepted event.
+      security:
+        - bearerAuth: []
+      x-upstream-service: procd
+      x-upstream-path: /api/v1/processes/{process_id}/events
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - $ref: "#/components/parameters/ProcessID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProcessInputEvent"
+      responses:
+        "202":
+          description: Process input event accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessProcessEventResponse"
+        "409":
+          description: Input backpressure or process state conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+    get:
+      tags: [processes]
+      summary: Stream process events
+      description: Streams replayed and live process events as Server-Sent Events. cursor is the last observed event seq; procd emits cursor_lost if the requested cursor is older than the retained log.
+      security:
+        - bearerAuth: []
+      x-upstream-service: procd
+      x-upstream-path: /api/v1/processes/{process_id}/events
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - $ref: "#/components/parameters/ProcessID"
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+      responses:
+        "200":
+          description: Process event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE stream whose data field contains a ProcessEvent JSON object.
+  /api/v1/sandboxes/{id}/processes/{process_id}/signal:
+    post:
+      tags: [processes]
+      summary: Send signal to process session
+      security:
+        - bearerAuth: []
+      x-upstream-service: procd
+      x-upstream-path: /api/v1/processes/{process_id}/signal
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - $ref: "#/components/parameters/ProcessID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignalContextRequest"
+      responses:
+        "200":
+          description: Signal sent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessSignaledResponse"
+  /api/v1/sandboxes/{id}/processes/{process_id}/channels/{channel}/pty-size:
+    put:
+      tags: [processes]
+      summary: Resize process PTY channel
+      security:
+        - bearerAuth: []
+      x-upstream-service: procd
+      x-upstream-path: /api/v1/processes/{process_id}/channels/{channel}/pty-size
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - $ref: "#/components/parameters/ProcessID"
+        - $ref: "#/components/parameters/ProcessChannel"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResizeContextRequest"
+      responses:
+        "200":
+          description: Resized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResizedResponse"
   /api/v1/sandboxes/{id}/files/move:
     post:
       tags: [files]
@@ -3281,6 +3464,18 @@ components:
         type: string
     ContextID:
       name: ctx_id
+      in: path
+      required: true
+      schema:
+        type: string
+    ProcessID:
+      name: process_id
+      in: path
+      required: true
+      schema:
+        type: string
+    ProcessChannel:
+      name: channel
       in: path
       required: true
       schema:
@@ -5494,6 +5689,264 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/ContextExecResponse"
+    ProcessSessionState:
+      type: string
+      enum: [created, starting, running, paused, stopping, stopped, killed, crashed]
+      x-enum-varnames:
+        - ProcessSessionStateCreated
+        - ProcessSessionStateStarting
+        - ProcessSessionStateRunning
+        - ProcessSessionStatePaused
+        - ProcessSessionStateStopping
+        - ProcessSessionStateStopped
+        - ProcessSessionStateKilled
+        - ProcessSessionStateCrashed
+    ProcessChannelKind:
+      type: string
+      enum: [stdio, pty, http, websocket]
+    ProcessChannelFraming:
+      type: string
+      enum: [raw, line, jsonl, jsonrpc]
+    HTTPChannelSpec:
+      type: object
+      properties:
+        base_url:
+          type: string
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        timeout_sec:
+          type: integer
+          format: int32
+      required: [base_url]
+    WebSocketChannelSpec:
+      type: object
+      properties:
+        url:
+          type: string
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+      required: [url]
+    ProcessChannelSpec:
+      type: object
+      properties:
+        name:
+          type: string
+        kind:
+          $ref: "#/components/schemas/ProcessChannelKind"
+        framing:
+          $ref: "#/components/schemas/ProcessChannelFraming"
+        stdin:
+          type: boolean
+        stdout:
+          type: boolean
+        stderr:
+          type: boolean
+        pty_size:
+          $ref: "#/components/schemas/PTYSize"
+        http:
+          $ref: "#/components/schemas/HTTPChannelSpec"
+        websocket:
+          $ref: "#/components/schemas/WebSocketChannelSpec"
+      required: [name, kind]
+    ProcessCleanupSpec:
+      type: object
+      properties:
+        idle_timeout_sec:
+          type: integer
+          format: int32
+        ttl_sec:
+          type: integer
+          format: int32
+    ProcessRestartSpec:
+      type: object
+      properties:
+        policy:
+          type: string
+          enum: [never]
+        max_restarts:
+          type: integer
+          format: int32
+    ProcessSpec:
+      type: object
+      properties:
+        alias:
+          type: string
+        command:
+          type: array
+          items:
+            type: string
+          description: argv array. procd does not shell-expand command strings.
+        cwd:
+          type: string
+        env_vars:
+          type: object
+          additionalProperties:
+            type: string
+        channels:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProcessChannelSpec"
+        cleanup:
+          $ref: "#/components/schemas/ProcessCleanupSpec"
+        restart:
+          $ref: "#/components/schemas/ProcessRestartSpec"
+        event_buffer_size:
+          type: integer
+          format: int32
+        input_buffer_size:
+          type: integer
+          format: int32
+      required: [command, channels]
+    ProcessEventLogSnapshot:
+      type: object
+      properties:
+        next_seq:
+          type: integer
+          format: int64
+        oldest_seq:
+          type: integer
+          format: int64
+        capacity:
+          type: integer
+          format: int32
+      required: [next_seq, oldest_seq, capacity]
+    ProcessSession:
+      type: object
+      properties:
+        id:
+          type: string
+        alias:
+          type: string
+        command:
+          type: array
+          items:
+            type: string
+        cwd:
+          type: string
+        env_vars:
+          type: object
+          additionalProperties:
+            type: string
+        state:
+          $ref: "#/components/schemas/ProcessSessionState"
+        pid:
+          type: integer
+          format: int32
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        exited_at:
+          type: string
+          format: date-time
+        exit_code:
+          type: integer
+          format: int32
+        channels:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProcessChannelSpec"
+        event_log:
+          $ref: "#/components/schemas/ProcessEventLogSnapshot"
+        cleanup:
+          $ref: "#/components/schemas/ProcessCleanupSpec"
+        restart:
+          $ref: "#/components/schemas/ProcessRestartSpec"
+      required: [id, command, state, created_at, channels, event_log]
+    ProcessEventType:
+      type: string
+      enum:
+        - process.started
+        - process.exited
+        - process.crashed
+        - process.stopped
+        - stdin.write
+        - stdout.chunk
+        - stdout.line
+        - stderr.chunk
+        - stderr.line
+        - pty.input
+        - pty.output
+        - http.request
+        - http.response
+        - websocket.open
+        - websocket.message
+        - websocket.close
+        - error
+        - cursor_lost
+    ProcessEvent:
+      type: object
+      properties:
+        seq:
+          type: integer
+          format: int64
+        event_id:
+          type: string
+        process_id:
+          type: string
+        channel:
+          type: string
+        type:
+          $ref: "#/components/schemas/ProcessEventType"
+        timestamp:
+          type: string
+          format: date-time
+        payload:
+          type: object
+          additionalProperties: true
+      required: [seq, process_id, type, timestamp]
+    ProcessInputEvent:
+      type: object
+      properties:
+        event_id:
+          type: string
+          description: Idempotency key for retries.
+        channel:
+          type: string
+        type:
+          $ref: "#/components/schemas/ProcessEventType"
+        payload:
+          type: object
+          additionalProperties: true
+      required: [event_id, channel, type]
+    SuccessProcessSessionResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                process:
+                  $ref: "#/components/schemas/ProcessSession"
+    SuccessProcessSessionListResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                processes:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/ProcessSession"
+    SuccessProcessEventResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                event:
+                  $ref: "#/components/schemas/ProcessEvent"
     FileInfo:
       type: object
       properties:

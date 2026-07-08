@@ -141,6 +141,61 @@ const (
 	PlaceholderSubstitutionLocationQuery  PlaceholderSubstitutionLocation = "query"
 )
 
+// Defines values for ProcessChannelFraming.
+const (
+	Jsonl   ProcessChannelFraming = "jsonl"
+	Jsonrpc ProcessChannelFraming = "jsonrpc"
+	Line    ProcessChannelFraming = "line"
+	Raw     ProcessChannelFraming = "raw"
+)
+
+// Defines values for ProcessChannelKind.
+const (
+	ProcessChannelKindHttp      ProcessChannelKind = "http"
+	ProcessChannelKindPty       ProcessChannelKind = "pty"
+	ProcessChannelKindStdio     ProcessChannelKind = "stdio"
+	ProcessChannelKindWebsocket ProcessChannelKind = "websocket"
+)
+
+// Defines values for ProcessEventType.
+const (
+	ProcessEventTypeCursorLost       ProcessEventType = "cursor_lost"
+	ProcessEventTypeError            ProcessEventType = "error"
+	ProcessEventTypeHttpRequest      ProcessEventType = "http.request"
+	ProcessEventTypeHttpResponse     ProcessEventType = "http.response"
+	ProcessEventTypeProcessCrashed   ProcessEventType = "process.crashed"
+	ProcessEventTypeProcessExited    ProcessEventType = "process.exited"
+	ProcessEventTypeProcessStarted   ProcessEventType = "process.started"
+	ProcessEventTypeProcessStopped   ProcessEventType = "process.stopped"
+	ProcessEventTypePtyInput         ProcessEventType = "pty.input"
+	ProcessEventTypePtyOutput        ProcessEventType = "pty.output"
+	ProcessEventTypeStderrChunk      ProcessEventType = "stderr.chunk"
+	ProcessEventTypeStderrLine       ProcessEventType = "stderr.line"
+	ProcessEventTypeStdinWrite       ProcessEventType = "stdin.write"
+	ProcessEventTypeStdoutChunk      ProcessEventType = "stdout.chunk"
+	ProcessEventTypeStdoutLine       ProcessEventType = "stdout.line"
+	ProcessEventTypeWebsocketClose   ProcessEventType = "websocket.close"
+	ProcessEventTypeWebsocketMessage ProcessEventType = "websocket.message"
+	ProcessEventTypeWebsocketOpen    ProcessEventType = "websocket.open"
+)
+
+// Defines values for ProcessRestartSpecPolicy.
+const (
+	Never ProcessRestartSpecPolicy = "never"
+)
+
+// Defines values for ProcessSessionState.
+const (
+	ProcessSessionStateCrashed  ProcessSessionState = "crashed"
+	ProcessSessionStateCreated  ProcessSessionState = "created"
+	ProcessSessionStateKilled   ProcessSessionState = "killed"
+	ProcessSessionStatePaused   ProcessSessionState = "paused"
+	ProcessSessionStateRunning  ProcessSessionState = "running"
+	ProcessSessionStateStarting ProcessSessionState = "starting"
+	ProcessSessionStateStopped  ProcessSessionState = "stopped"
+	ProcessSessionStateStopping ProcessSessionState = "stopping"
+)
+
 // Defines values for ProcessType.
 const (
 	ProcessTypeCmd  ProcessType = "cmd"
@@ -218,9 +273,9 @@ const (
 
 // Defines values for SandboxObservabilityLogStream.
 const (
-	Pty    SandboxObservabilityLogStream = "pty"
-	Stderr SandboxObservabilityLogStream = "stderr"
-	Stdout SandboxObservabilityLogStream = "stdout"
+	SandboxObservabilityLogStreamPty    SandboxObservabilityLogStream = "pty"
+	SandboxObservabilityLogStreamStderr SandboxObservabilityLogStream = "stderr"
+	SandboxObservabilityLogStreamStdout SandboxObservabilityLogStream = "stdout"
 )
 
 // Defines values for SandboxObservabilityOutcome.
@@ -379,6 +434,21 @@ const (
 // Defines values for SuccessPauseSandboxResponseSuccess.
 const (
 	SuccessPauseSandboxResponseSuccessTrue SuccessPauseSandboxResponseSuccess = true
+)
+
+// Defines values for SuccessProcessEventResponseSuccess.
+const (
+	SuccessProcessEventResponseSuccessTrue SuccessProcessEventResponseSuccess = true
+)
+
+// Defines values for SuccessProcessSessionListResponseSuccess.
+const (
+	SuccessProcessSessionListResponseSuccessTrue SuccessProcessSessionListResponseSuccess = true
+)
+
+// Defines values for SuccessProcessSessionResponseSuccess.
+const (
+	SuccessProcessSessionResponseSuccessTrue SuccessProcessSessionResponseSuccess = true
 )
 
 // Defines values for SuccessRefreshResponseSuccess.
@@ -553,7 +623,7 @@ const (
 
 // Defines values for SuccessWrittenResponseSuccess.
 const (
-	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
+	True SuccessWrittenResponseSuccess = true
 )
 
 // Defines values for TeamQuotaUnit.
@@ -1145,6 +1215,13 @@ type GatewayMetadata struct {
 // GatewayMetadataGatewayMode defines model for GatewayMetadata.GatewayMode.
 type GatewayMetadataGatewayMode string
 
+// HTTPChannelSpec defines model for HTTPChannelSpec.
+type HTTPChannelSpec struct {
+	BaseUrl    string             `json:"base_url"`
+	Headers    *map[string]string `json:"headers,omitempty"`
+	TimeoutSec *int32             `json:"timeout_sec,omitempty"`
+}
+
 // HTTPHeadersProjection defines model for HTTPHeadersProjection.
 type HTTPHeadersProjection struct {
 	// Headers Outbound headers synthesized from the resolved credential source.
@@ -1434,6 +1511,108 @@ type PortSpec struct {
 type PreferredSchedulingTerm struct {
 	Preference NodeSelectorTerm `json:"preference"`
 	Weight     int32            `json:"weight"`
+}
+
+// ProcessChannelFraming defines model for ProcessChannelFraming.
+type ProcessChannelFraming string
+
+// ProcessChannelKind defines model for ProcessChannelKind.
+type ProcessChannelKind string
+
+// ProcessChannelSpec defines model for ProcessChannelSpec.
+type ProcessChannelSpec struct {
+	Framing   *ProcessChannelFraming `json:"framing,omitempty"`
+	Http      *HTTPChannelSpec       `json:"http,omitempty"`
+	Kind      ProcessChannelKind     `json:"kind"`
+	Name      string                 `json:"name"`
+	PtySize   *PTYSize               `json:"pty_size,omitempty"`
+	Stderr    *bool                  `json:"stderr,omitempty"`
+	Stdin     *bool                  `json:"stdin,omitempty"`
+	Stdout    *bool                  `json:"stdout,omitempty"`
+	Websocket *WebSocketChannelSpec  `json:"websocket,omitempty"`
+}
+
+// ProcessCleanupSpec defines model for ProcessCleanupSpec.
+type ProcessCleanupSpec struct {
+	IdleTimeoutSec *int32 `json:"idle_timeout_sec,omitempty"`
+	TtlSec         *int32 `json:"ttl_sec,omitempty"`
+}
+
+// ProcessEvent defines model for ProcessEvent.
+type ProcessEvent struct {
+	Channel   *string                 `json:"channel,omitempty"`
+	EventId   *string                 `json:"event_id,omitempty"`
+	Payload   *map[string]interface{} `json:"payload,omitempty"`
+	ProcessId string                  `json:"process_id"`
+	Seq       int64                   `json:"seq"`
+	Timestamp time.Time               `json:"timestamp"`
+	Type      ProcessEventType        `json:"type"`
+}
+
+// ProcessEventLogSnapshot defines model for ProcessEventLogSnapshot.
+type ProcessEventLogSnapshot struct {
+	Capacity  int32 `json:"capacity"`
+	NextSeq   int64 `json:"next_seq"`
+	OldestSeq int64 `json:"oldest_seq"`
+}
+
+// ProcessEventType defines model for ProcessEventType.
+type ProcessEventType string
+
+// ProcessInputEvent defines model for ProcessInputEvent.
+type ProcessInputEvent struct {
+	Channel string `json:"channel"`
+
+	// EventId Idempotency key for retries.
+	EventId string                  `json:"event_id"`
+	Payload *map[string]interface{} `json:"payload,omitempty"`
+	Type    ProcessEventType        `json:"type"`
+}
+
+// ProcessRestartSpec defines model for ProcessRestartSpec.
+type ProcessRestartSpec struct {
+	MaxRestarts *int32                    `json:"max_restarts,omitempty"`
+	Policy      *ProcessRestartSpecPolicy `json:"policy,omitempty"`
+}
+
+// ProcessRestartSpecPolicy defines model for ProcessRestartSpec.Policy.
+type ProcessRestartSpecPolicy string
+
+// ProcessSession defines model for ProcessSession.
+type ProcessSession struct {
+	Alias     *string                 `json:"alias,omitempty"`
+	Channels  []ProcessChannelSpec    `json:"channels"`
+	Cleanup   *ProcessCleanupSpec     `json:"cleanup,omitempty"`
+	Command   []string                `json:"command"`
+	CreatedAt time.Time               `json:"created_at"`
+	Cwd       *string                 `json:"cwd,omitempty"`
+	EnvVars   *map[string]string      `json:"env_vars,omitempty"`
+	EventLog  ProcessEventLogSnapshot `json:"event_log"`
+	ExitCode  *int32                  `json:"exit_code,omitempty"`
+	ExitedAt  *time.Time              `json:"exited_at,omitempty"`
+	Id        string                  `json:"id"`
+	Pid       *int32                  `json:"pid,omitempty"`
+	Restart   *ProcessRestartSpec     `json:"restart,omitempty"`
+	StartedAt *time.Time              `json:"started_at,omitempty"`
+	State     ProcessSessionState     `json:"state"`
+}
+
+// ProcessSessionState defines model for ProcessSessionState.
+type ProcessSessionState string
+
+// ProcessSpec defines model for ProcessSpec.
+type ProcessSpec struct {
+	Alias    *string              `json:"alias,omitempty"`
+	Channels []ProcessChannelSpec `json:"channels"`
+	Cleanup  *ProcessCleanupSpec  `json:"cleanup,omitempty"`
+
+	// Command argv array. procd does not shell-expand command strings.
+	Command         []string            `json:"command"`
+	Cwd             *string             `json:"cwd,omitempty"`
+	EnvVars         *map[string]string  `json:"env_vars,omitempty"`
+	EventBufferSize *int32              `json:"event_buffer_size,omitempty"`
+	InputBufferSize *int32              `json:"input_buffer_size,omitempty"`
+	Restart         *ProcessRestartSpec `json:"restart,omitempty"`
 }
 
 // ProcessType defines model for ProcessType.
@@ -2460,6 +2639,39 @@ type SuccessPauseSandboxResponse struct {
 // SuccessPauseSandboxResponseSuccess defines model for SuccessPauseSandboxResponse.Success.
 type SuccessPauseSandboxResponseSuccess bool
 
+// SuccessProcessEventResponse defines model for SuccessProcessEventResponse.
+type SuccessProcessEventResponse struct {
+	Data *struct {
+		Event *ProcessEvent `json:"event,omitempty"`
+	} `json:"data,omitempty"`
+	Success SuccessProcessEventResponseSuccess `json:"success"`
+}
+
+// SuccessProcessEventResponseSuccess defines model for SuccessProcessEventResponse.Success.
+type SuccessProcessEventResponseSuccess bool
+
+// SuccessProcessSessionListResponse defines model for SuccessProcessSessionListResponse.
+type SuccessProcessSessionListResponse struct {
+	Data *struct {
+		Processes *[]ProcessSession `json:"processes,omitempty"`
+	} `json:"data,omitempty"`
+	Success SuccessProcessSessionListResponseSuccess `json:"success"`
+}
+
+// SuccessProcessSessionListResponseSuccess defines model for SuccessProcessSessionListResponse.Success.
+type SuccessProcessSessionListResponseSuccess bool
+
+// SuccessProcessSessionResponse defines model for SuccessProcessSessionResponse.
+type SuccessProcessSessionResponse struct {
+	Data *struct {
+		Process *ProcessSession `json:"process,omitempty"`
+	} `json:"data,omitempty"`
+	Success SuccessProcessSessionResponseSuccess `json:"success"`
+}
+
+// SuccessProcessSessionResponseSuccess defines model for SuccessProcessSessionResponse.Success.
+type SuccessProcessSessionResponseSuccess bool
+
 // SuccessRefreshResponse defines model for SuccessRefreshResponse.
 type SuccessRefreshResponse struct {
 	Data    *RefreshResponse              `json:"data,omitempty"`
@@ -3017,6 +3229,12 @@ type WebLoginExchangeRequest struct {
 	ReturnUrl string `json:"return_url"`
 }
 
+// WebSocketChannelSpec defines model for WebSocketChannelSpec.
+type WebSocketChannelSpec struct {
+	Headers *map[string]string `json:"headers,omitempty"`
+	Url     string             `json:"url"`
+}
+
 // WebhookConfig Per-sandbox webhook configuration. Sandbox0 delivers webhook events at least once and consumers should deduplicate by event_id. For sandbox lifecycle events, procd persists signed delivery records to a manager-owned SandboxVolume outside the workspace before dispatch; manager also emits sandbox.deleted during pod deletion cleanup.
 type WebhookConfig struct {
 	// Secret Optional. Shared secret used to sign webhook payloads.
@@ -3049,6 +3267,12 @@ type IdentityID = string
 
 // OIDCProvider defines model for OIDCProvider.
 type OIDCProvider = string
+
+// ProcessChannel defines model for ProcessChannel.
+type ProcessChannel = string
+
+// ProcessID defines model for ProcessID.
+type ProcessID = string
 
 // QueryMkdir defines model for QueryMkdir.
 type QueryMkdir = bool
@@ -3216,6 +3440,11 @@ type GetApiV1SandboxesIdObservabilityMetricsParams struct {
 	Names *string `form:"names,omitempty" json:"names,omitempty"`
 }
 
+// GetApiV1SandboxesIdProcessesProcessIdEventsParams defines parameters for GetApiV1SandboxesIdProcessesProcessIdEvents.
+type GetApiV1SandboxesIdProcessesProcessIdEventsParams struct {
+	Cursor *int64 `form:"cursor,omitempty" json:"cursor,omitempty"`
+}
+
 // DeleteApiV1SandboxvolumesIdParams defines parameters for DeleteApiV1SandboxvolumesId.
 type DeleteApiV1SandboxvolumesIdParams struct {
 	// Force Force delete even if volume has active mounts
@@ -3315,6 +3544,18 @@ type PostApiV1SandboxesIdForkJSONRequestBody = ForkSandboxRequest
 
 // PutApiV1SandboxesIdNetworkJSONRequestBody defines body for PutApiV1SandboxesIdNetwork for application/json ContentType.
 type PutApiV1SandboxesIdNetworkJSONRequestBody = SandboxNetworkPolicy
+
+// PostApiV1SandboxesIdProcessesJSONRequestBody defines body for PostApiV1SandboxesIdProcesses for application/json ContentType.
+type PostApiV1SandboxesIdProcessesJSONRequestBody = ProcessSpec
+
+// PutApiV1SandboxesIdProcessesProcessIdChannelsChannelPtySizeJSONRequestBody defines body for PutApiV1SandboxesIdProcessesProcessIdChannelsChannelPtySize for application/json ContentType.
+type PutApiV1SandboxesIdProcessesProcessIdChannelsChannelPtySizeJSONRequestBody = ResizeContextRequest
+
+// PostApiV1SandboxesIdProcessesProcessIdEventsJSONRequestBody defines body for PostApiV1SandboxesIdProcessesProcessIdEvents for application/json ContentType.
+type PostApiV1SandboxesIdProcessesProcessIdEventsJSONRequestBody = ProcessInputEvent
+
+// PostApiV1SandboxesIdProcessesProcessIdSignalJSONRequestBody defines body for PostApiV1SandboxesIdProcessesProcessIdSignal for application/json ContentType.
+type PostApiV1SandboxesIdProcessesProcessIdSignalJSONRequestBody = SignalContextRequest
 
 // PostApiV1SandboxesIdRefreshJSONRequestBody defines body for PostApiV1SandboxesIdRefresh for application/json ContentType.
 type PostApiV1SandboxesIdRefreshJSONRequestBody = SandboxRefreshRequest

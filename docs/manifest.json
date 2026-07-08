@@ -54,6 +54,10 @@
           "title": "Contexts"
         },
         {
+          "slug": "processes",
+          "title": "Process Sessions"
+        },
+        {
           "slug": "files",
           "title": "Files"
         },

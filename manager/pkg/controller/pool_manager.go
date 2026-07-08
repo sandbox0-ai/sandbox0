@@ -61,6 +61,7 @@ const (
 	AnnotationNetworkPolicyAppliedHash     = "sandbox0.ai/network-policy-applied-hash"
 	AnnotationSandboxID                    = "sandbox0.ai/sandbox-id"
 	AnnotationRuntimeGeneration            = "sandbox0.ai/runtime-generation"
+	AnnotationClaimStartReservation        = startlimiter.AnnotationClaimStartReservation
 	AnnotationWebhookStateVolumeID         = "sandbox0.ai/webhook-state-volume-id"
 	AnnotationTemplateSpecHash             = "sandbox0.ai/template-spec-hash"
 	AnnotationTemplateTeamID               = "sandbox0.ai/template-team-id"

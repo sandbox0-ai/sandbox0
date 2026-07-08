@@ -475,8 +475,20 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 			zap.String("template", req.Template),
 		)
 
+		var claimStartReservation *startlimiter.Reservation
+		if s.claimStartLimiter != nil && s.claimStartLimiter.SupportsReservations() {
+			claimStartReservation, _, err = s.claimStartLimiter.Reserve(ctx, startlimiter.ReasonColdCreate, 1)
+			if err != nil {
+				if metrics != nil {
+					metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+				}
+				return nil, fmt.Errorf("create new pod: reserve claim start budget: %w", err)
+			}
+			defer claimStartReservation.Release()
+		}
+
 		phaseStarted = time.Now()
-		pod, err = s.createNewPod(ctx, template, req)
+		pod, err = s.createNewPodWithReservation(ctx, template, req, claimStartReservation)
 		s.observeClaimPhase(req.Template, claimType, "create_new_pod", phaseStarted, err)
 		if err != nil {
 			if metrics != nil {
@@ -1302,6 +1314,10 @@ func isIdlePodLostDuringClaim(err error) bool {
 }
 
 func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.SandboxTemplate, req *ClaimRequest) (*corev1.Pod, error) {
+	return s.createNewPodWithReservation(ctx, template, req, nil)
+}
+
+func (s *SandboxService) createNewPodWithReservation(ctx context.Context, template *v1alpha1.SandboxTemplate, req *ClaimRequest, reservation *startlimiter.Reservation) (*corev1.Pod, error) {
 	// Simulate K8s pod name generation: rs-name + "-" + 5 random chars
 	clusterID := naming.ClusterIDOrDefault(template.Spec.ClusterId)
 	podName, err := naming.SandboxName(clusterID, template.Name, utilrand.String(5))
@@ -1360,6 +1376,9 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		controller.AnnotationClaimedAt:         s.clock.Now().Format(time.RFC3339),
 		controller.AnnotationClaimType:         "cold",
 	})
+	if token := reservation.Token(); token != "" {
+		annotations[controller.AnnotationClaimStartReservation] = token
+	}
 	if stateVolume != nil {
 		annotations[controller.AnnotationWebhookStateVolumeID] = stateVolume.VolumeID
 	}
@@ -1418,7 +1437,9 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		createdPod, createErr = s.k8sClient.CoreV1().Pods(template.ObjectMeta.Namespace).Create(createCtx, pod, metav1.CreateOptions{})
 		return createErr
 	}
-	if s.claimStartLimiter != nil {
+	if reservation != nil {
+		err = createPod(ctx)
+	} else if s.claimStartLimiter != nil {
 		_, err = s.claimStartLimiter.Admit(ctx, startlimiter.ReasonColdCreate, 1, createPod)
 	} else {
 		err = createPod(ctx)

@@ -5,7 +5,7 @@ level than contexts: a process session declares protocol channels, accepts
 idempotent input events, and exposes replayable output events over SSE.
 
 Use process sessions when the client connection should not own the child process
-transport. If the client disconnects from the SSE stream, `procd` keeps the
+transport. If the client disconnects from the event stream, `procd` keeps the
 process and its broker-owned stdin/stdout/stderr pipes, HTTP requests, or
 websocket connection alive until the process exits, is deleted, or reaches its
 cleanup policy.
@@ -30,30 +30,97 @@ REPLs.
 /api/v1/sandboxes/{'{id}'}/processes
 </Endpoint>
 
-    {
-      "alias": "codex-app-server",
-      "command": ["codex", "app-server", "--listen", "stdio://"],
-      "cwd": "/workspace",
-      "env_vars": {
-        "CODEX_HOME": "/var/lib/sandbox0/codex"
-      },
-      "channels": [
-        {
-          "name": "rpc",
-          "kind": "stdio",
-          "framing": "jsonl",
-          "stdin": true,
-          "stdout": true,
-          "stderr": true
-        }
-      ],
-      "cleanup": {
-        "idle_timeout_sec": 1800
-      }
-    }
+Create a process by declaring the command and channel protocol. The response data
+contains `process.id`, `state`, `pid`, declared `channels`, and `event_log`
+replay metadata.
 
-The response data contains `process.id`, `state`, `pid`, declared `channels`,
-and `event_log` replay metadata.
+<Tabs
+  tabs={[
+    {
+      label: "CLI",
+      language: "bash",
+      code: `SANDBOX_ID=sb_abc123
+
+s0 sandbox process create "$SANDBOX_ID" \\
+    --alias codex-app-server \\
+    --cwd /workspace \\
+    --channel rpc \\
+    --kind stdio \\
+    --framing jsonl \\
+    --event-buffer-size 1024 \\
+    --input-buffer-size 1024 \\
+    -- codex app-server --listen stdio://`
+    },
+    {
+      label: "Go",
+      language: "go",
+      code: `spec := sandbox0.StdioProcessSpec([]string{"codex", "app-server", "--listen", "stdio://"})
+spec.Alias = apispec.NewOptString("codex-app-server")
+spec.Cwd = apispec.NewOptString("/workspace")
+spec.EventBufferSize = apispec.NewOptInt32(1024)
+spec.InputBufferSize = apispec.NewOptInt32(1024)
+spec.Channels[0].Name = "rpc"
+spec.Channels[0].Framing = apispec.NewOptProcessChannelFraming(apispec.ProcessChannelFramingJsonl)
+
+session, err := sandbox.CreateProcess(ctx, spec)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(session.ID)`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const session = await sandbox.createProcess({
+    alias: 'codex-app-server',
+    command: ['codex', 'app-server', '--listen', 'stdio://'],
+    cwd: '/workspace',
+    eventBufferSize: 1024,
+    inputBufferSize: 1024,
+    channels: [
+        {
+            name: 'rpc',
+            kind: 'stdio',
+            framing: 'jsonl',
+            stdin: true,
+            stdout: true,
+            stderr: true,
+        },
+    ],
+});
+
+console.log(session.id);`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.apispec.models.process_channel_framing import ProcessChannelFraming
+from sandbox0.apispec.models.process_channel_kind import ProcessChannelKind
+from sandbox0.apispec.models.process_channel_spec import ProcessChannelSpec
+from sandbox0.apispec.models.process_spec import ProcessSpec
+
+session = sandbox.create_process(ProcessSpec(
+    alias="codex-app-server",
+    command=["codex", "app-server", "--listen", "stdio://"],
+    cwd="/workspace",
+    event_buffer_size=1024,
+    input_buffer_size=1024,
+    channels=[
+        ProcessChannelSpec(
+            name="rpc",
+            kind=ProcessChannelKind.STDIO,
+            framing=ProcessChannelFraming.JSONL,
+            stdin=True,
+            stdout=True,
+            stderr=True,
+        )
+    ],
+))
+
+print(session.id)`
+    }
+  ]}
+/>
 
 ## Send Input Event
 
@@ -61,38 +128,172 @@ and `event_log` replay metadata.
 /api/v1/sandboxes/{'{id}'}/processes/{'{process_id}'}/events
 </Endpoint>
 
-    {
-      "event_id": "evt_client_001",
-      "channel": "rpc",
-      "type": "stdin.write",
-      "payload": {
-        "data": "{\"id\":1,\"method\":\"initialize\",\"params\":{}}\n"
-      }
-    }
+Input events are idempotent. Repeating the same `event_id` with the same payload
+returns the original accepted event. Reusing the same `event_id` with a
+different payload is rejected.
 
-`event_id` is required. Repeating the same event with the same payload returns
-the original accepted event. Reusing the same `event_id` with a different payload
-is rejected.
+<Tabs
+  tabs={[
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox process input "$SANDBOX_ID" "$PROCESS_ID" \\
+    --channel rpc \\
+    --event-id evt_client_001 \\
+    --data $'{"id":1,"method":"initialize","params":{}}\\n'`
+    },
+    {
+      label: "Go",
+      language: "go",
+      code: `event, err := sandbox0.NewProcessStdinEvent(
+    "evt_client_001",
+    "rpc",
+    "{\\"id\\":1,\\"method\\":\\"initialize\\",\\"params\\":{}}\\n",
+)
+if err != nil {
+    log.Fatal(err)
+}
+
+accepted, err := sandbox.SendProcessEvent(ctx, session.ID, event)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(accepted.Seq)`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const accepted = await sandbox.sendProcessEvent(session.id, {
+    eventId: 'evt_client_001',
+    channel: 'rpc',
+    type: 'stdin.write',
+    payload: {
+        data: '{"id":1,"method":"initialize","params":{}}\\n',
+    },
+});
+
+console.log(accepted.seq);`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.apispec.models.process_event_type import ProcessEventType
+from sandbox0.apispec.models.process_input_event import ProcessInputEvent
+from sandbox0.apispec.models.process_input_event_payload import ProcessInputEventPayload
+
+payload = ProcessInputEventPayload()
+payload["data"] = '{"id":1,"method":"initialize","params":{}}\\n'
+
+accepted = sandbox.send_process_event(session.id, ProcessInputEvent(
+    event_id="evt_client_001",
+    channel="rpc",
+    type_=ProcessEventType.STDIN_WRITE,
+    payload=payload,
+))
+
+print(accepted.seq)`
+    }
+  ]}
+/>
 
 Input backpressure is explicit. If `procd` has not accepted the event, the
 client can retry with the same `event_id`.
 
-## Stream Events
+## Stream And Reconnect
 
 <Endpoint method="GET">
 /api/v1/sandboxes/{'{id}'}/processes/{'{process_id}'}/events?cursor=42
 </Endpoint>
 
 The response is `text/event-stream`. Each SSE `data` field contains a
-`ProcessEvent` JSON object.
+`ProcessEvent` JSON object. Use `cursor` as the last event `seq` observed by the
+client. If the requested cursor is older than the retained event log, `procd`
+emits `cursor_lost` with the oldest available sequence.
 
-    id: 43
-    event: stdout.line
-    data: {"seq":43,"process_id":"proc_...","channel":"rpc","type":"stdout.line","payload":{"data":"..."}}
+<Tabs
+  tabs={[
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox process events "$SANDBOX_ID" "$PROCESS_ID" > events.jsonl
 
-Use `cursor` as the last event `seq` observed by the client. If the requested
-cursor is older than the retained event log, `procd` emits `cursor_lost` with
-the oldest available sequence.
+LAST_SEQ=$(tail -n 1 events.jsonl | jq -r '.seq')
+s0 sandbox process events "$SANDBOX_ID" "$PROCESS_ID" --cursor "$LAST_SEQ"`
+    },
+    {
+      label: "Go",
+      language: "go",
+      code: `stream, err := sandbox.WatchProcessEvents(ctx, session.ID, nil)
+if err != nil {
+    log.Fatal(err)
+}
+
+event, err := stream.Recv()
+if err != nil {
+    log.Fatal(err)
+}
+lastSeq := event.Seq
+_ = stream.Close()
+
+resume, err := sandbox.WatchProcessEvents(ctx, session.ID, &sandbox0.ProcessEventWatchOptions{
+    Cursor: &lastSeq,
+})
+if err != nil {
+    log.Fatal(err)
+}
+defer resume.Close()
+
+for {
+    event, err := resume.Recv()
+    if errors.Is(err, io.EOF) {
+        break
+    }
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("%d %s\\n", event.Seq, event.Type)
+}`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const stream = await sandbox.watchProcessEvents(session.id);
+let lastSeq = 0;
+
+for await (const event of stream) {
+    lastSeq = event.seq;
+    break;
+}
+await stream.body.cancel();
+
+const resumed = await sandbox.watchProcessEvents(session.id, { cursor: lastSeq });
+for await (const event of resumed) {
+    console.log(event.seq, event.type);
+}`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0 import ProcessEventWatchOptions
+
+with sandbox.watch_process_events(session.id) as stream:
+    first = next(stream.iter_events())
+
+last_seq = first.seq
+
+with sandbox.watch_process_events(
+    session.id,
+    ProcessEventWatchOptions(cursor=last_seq),
+) as stream:
+    for event in stream.iter_events():
+        print(event.seq, event.type_)`
+    }
+  ]}
+/>
+
+Closing the stream closes only the client subscription. It does not send EOF to
+the child process or close broker-owned channels. The client can send more input
+while disconnected and later resume from its last observed `seq`.
 
 ## Stop Process Session
 
@@ -103,53 +304,90 @@ the oldest available sequence.
 Deleting a process session terminates the process, closes broker-owned channels,
 and removes it from `procd`.
 
+<Tabs
+  tabs={[
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox process delete "$SANDBOX_ID" "$PROCESS_ID"`
+    },
+    {
+      label: "Go",
+      language: "go",
+      code: `_, err := sandbox.DeleteProcess(ctx, session.ID)
+if err != nil {
+    log.Fatal(err)
+}`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `await sandbox.deleteProcess(session.id);`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `sandbox.delete_process(session.id)`
+    }
+  ]}
+/>
+
 ## Signals And PTY Resize
 
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/processes/{'{process_id}'}/signal
 </Endpoint>
 
-    {
-      "signal": "TERM"
-    }
-
 <Endpoint method="PUT">
 /api/v1/sandboxes/{'{id}'}/processes/{'{process_id}'}/channels/{'{channel}'}/pty-size
 </Endpoint>
 
-    {
-      "rows": 40,
-      "cols": 120
-    }
-
 PTY resize is valid only for `pty` channels.
+
+<Tabs
+  tabs={[
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox process signal "$SANDBOX_ID" "$PROCESS_ID" TERM
+s0 sandbox process resize "$SANDBOX_ID" "$PROCESS_ID" --channel pty --rows 40 --cols 120`
+    },
+    {
+      label: "Go",
+      language: "go",
+      code: `_, err := sandbox.SignalProcess(ctx, session.ID, "TERM")
+if err != nil {
+    log.Fatal(err)
+}
+
+_, err = sandbox.ResizeProcessPTY(ctx, session.ID, "pty", 40, 120)
+if err != nil {
+    log.Fatal(err)
+}`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `await sandbox.signalProcess(session.id, 'TERM');
+await sandbox.resizeProcessPty(session.id, 'pty', 40, 120);`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `sandbox.signal_process(session.id, "TERM")
+sandbox.resize_process_pty(session.id, "pty", 40, 120)`
+    }
+  ]}
+/>
 
 ## Codex App Server Over Stdio
 
 Codex app-server can run as a normal process session. `procd` does not need a
-Codex-specific adapter.
+Codex-specific adapter. The SDK sends JSON-RPC messages as `stdin.write` events
+and reads JSONL output through SSE.
 
-    {
-      "alias": "codex-app-server",
-      "command": ["codex", "app-server", "--listen", "stdio://"],
-      "cwd": "/workspace",
-      "channels": [
-        {
-          "name": "rpc",
-          "kind": "stdio",
-          "framing": "jsonl",
-          "stdin": true,
-          "stdout": true,
-          "stderr": true
-        }
-      ]
-    }
-
-The SDK sends JSON-RPC messages as `stdin.write` events and reads JSONL output
-through SSE. A client disconnect closes only the SSE subscription; it does not
-send EOF to the Codex app-server child process.
-
-If the child process exits or crashes, application-level recovery still belongs
-to that protocol. For Codex, that usually means reconnecting to a new app-server
-process and using Codex thread resume semantics.
-
+A client disconnect closes only the SSE subscription; it does not send EOF to
+the Codex app-server child process. If the child process exits or crashes,
+application-level recovery still belongs to that protocol. For Codex, that
+usually means reconnecting to a new app-server process and using Codex thread
+resume semantics.

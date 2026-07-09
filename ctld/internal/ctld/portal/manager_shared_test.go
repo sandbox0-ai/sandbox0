@@ -186,8 +186,8 @@ func TestShutdownDrainsPublishedAndOwnerOnlyVolumes(t *testing.T) {
 			t.Fatalf("GetVolume(%q) after Shutdown error = nil, want removed", volumeID)
 		}
 	}
-	if _, err := os.Stat(pm.rootfsBackingPath); !os.IsNotExist(err) {
-		t.Fatalf("rootfs backing stat error = %v, want not exist", err)
+	if _, err := os.Stat(pm.rootfsBackingPath); err != nil {
+		t.Fatalf("rootfs backing stat error = %v, want preserved", err)
 	}
 }
 

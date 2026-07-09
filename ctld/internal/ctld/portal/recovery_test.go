@@ -112,6 +112,101 @@ func TestCleanupStaleCSIMountsCleansBrokenActivePodMount(t *testing.T) {
 	}
 }
 
+func TestCleanupStaleCSIMountsRecoversBrokenActivePodMount(t *testing.T) {
+	root := t.TempDir()
+	volumeName := "sandbox0-volume-1-workspace"
+	target := filepath.Join(root, "pod-a", "volumes", kubeletCSIVolumeDir, volumeName, "mount")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", target, err)
+	}
+
+	var recovered RecoverablePortal
+	var recoveredRuntime RuntimeRecoveryTarget
+	var portalsRecovered bool
+	mgr := NewManager(Config{
+		RootDir:         t.TempDir(),
+		KubeletPodsRoot: root,
+		ActivePodPortalLister: func(context.Context) (map[string]ActivePodPortals, error) {
+			return map[string]ActivePodPortals{
+				"pod-a": {Portals: map[string]RecoverablePortal{
+					volumeName: {
+						VolumeName: volumeName,
+						Namespace:  "tpl-default",
+						PodName:    "sandbox-a",
+						PodUID:     "pod-a",
+						PortalName: "workspace",
+						MountPath:  "/workspace",
+					},
+				}, RuntimeRecovery: &RuntimeRecoveryTarget{
+					Namespace:       "tpl-default",
+					PodName:         "sandbox-a",
+					PodUID:          "pod-a",
+					ContainerName:   "procd",
+					StateVolumeName: "sandbox0-volume-0-state",
+				}},
+			}, nil
+		},
+		StaleMountChecker: func(string) (bool, error) { return true, nil },
+		StaleMountCleaner: func(path string) error { return os.RemoveAll(path) },
+		StaleMountRecoverer: func(_ context.Context, path string, portal RecoverablePortal) error {
+			if path != target {
+				t.Fatalf("recovery path = %q, want %q", path, target)
+			}
+			recovered = portal
+			return nil
+		},
+		ActivePodRuntimeRecoverer: func(_ context.Context, target RuntimeRecoveryTarget, rebuilt bool) error {
+			recoveredRuntime = target
+			portalsRecovered = rebuilt
+			return nil
+		},
+	})
+	if err := mgr.CleanupStaleCSIMounts(context.Background()); err != nil {
+		t.Fatalf("CleanupStaleCSIMounts() error = %v", err)
+	}
+	if recovered.PodUID != "pod-a" || recovered.VolumeName != volumeName {
+		t.Fatalf("recovered portal = %#v", recovered)
+	}
+	if recoveredRuntime.PodUID != "pod-a" || !portalsRecovered {
+		t.Fatalf("runtime recovery = %#v, portals recovered = %v", recoveredRuntime, portalsRecovered)
+	}
+}
+
+func TestCleanupStaleCSIMountsChecksPendingRuntimeWithoutRebuildingPortal(t *testing.T) {
+	var called bool
+	mgr := NewManager(Config{
+		RootDir:         t.TempDir(),
+		KubeletPodsRoot: t.TempDir(),
+		ActivePodPortalLister: func(context.Context) (map[string]ActivePodPortals, error) {
+			return map[string]ActivePodPortals{
+				"pod-a": {
+					Portals: map[string]RecoverablePortal{},
+					RuntimeRecovery: &RuntimeRecoveryTarget{
+						Namespace:       "tpl-default",
+						PodName:         "sandbox-a",
+						PodUID:          "pod-a",
+						ContainerName:   "procd",
+						StateVolumeName: "sandbox0-volume-0-state",
+					},
+				},
+			}, nil
+		},
+		ActivePodRuntimeRecoverer: func(_ context.Context, _ RuntimeRecoveryTarget, rebuilt bool) error {
+			called = true
+			if rebuilt {
+				t.Fatal("rebuilt = true, want false")
+			}
+			return nil
+		},
+	})
+	if err := mgr.CleanupStaleCSIMounts(context.Background()); err != nil {
+		t.Fatalf("CleanupStaleCSIMounts() error = %v", err)
+	}
+	if !called {
+		t.Fatal("runtime recoverer was not called")
+	}
+}
+
 func TestShouldCleanSandboxCSIMountCleansBrokenActivePodMount(t *testing.T) {
 	info := csiMountPathInfo{podUID: "pod-a"}
 	activePods := map[string]struct{}{"pod-a": {}}

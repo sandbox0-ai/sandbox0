@@ -10,10 +10,123 @@ import (
 	"testing"
 
 	ctldserver "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/server"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/fake"
 )
+
+func TestActivePodPortalListerBuildsRecoveryBindings(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "tpl-default",
+			Name:      "sandbox-a",
+			UID:       types.UID("pod-uid"),
+			Labels: map[string]string{
+				controller.LabelPoolType: controller.PoolTypeActive,
+			},
+			Annotations: map[string]string{
+				controller.AnnotationTeamID:               "team-a",
+				controller.AnnotationSandboxID:            "sandbox-a",
+				controller.AnnotationMounts:               `[{"sandboxvolume_id":"vol-workspace","mount_point":"/workspace"}]`,
+				controller.AnnotationWebhookStateVolumeID: "vol-state",
+			},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		Spec: corev1.PodSpec{
+			NodeName: "node-a",
+			Volumes: []corev1.Volume{
+				{
+					Name: "sandbox0-volume-0-sandbox0-webhook-state",
+					VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{
+						Driver: volumeportal.DriverName,
+						VolumeAttributes: map[string]string{
+							volumeportal.AttributePortalName: volumeportal.WebhookStatePortalName,
+							volumeportal.AttributeMountPath:  volumeportal.WebhookStateMountPath,
+						},
+					}},
+				},
+				{
+					Name: "sandbox0-volume-1-workspace",
+					VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{
+						Driver: volumeportal.DriverName,
+						VolumeAttributes: map[string]string{
+							volumeportal.AttributePortalName: "workspace",
+							volumeportal.AttributeMountPath:  "/workspace",
+						},
+					}},
+				},
+			},
+		},
+	}
+	lister := activePodPortalLister(fake.NewSimpleClientset(pod), "node-a")
+	require.NotNil(t, lister)
+
+	active, err := lister(context.Background())
+	require.NoError(t, err)
+	require.Contains(t, active, "pod-uid")
+	portals := active["pod-uid"].Portals
+	require.Len(t, portals, 2)
+	assert.Equal(t, "vol-workspace", portals["sandbox0-volume-1-workspace"].SandboxVolumeID)
+	assert.Equal(t, "vol-state", portals["sandbox0-volume-0-sandbox0-webhook-state"].SandboxVolumeID)
+	assert.Equal(t, "team-a", portals["sandbox0-volume-1-workspace"].TeamID)
+	require.NotNil(t, active["pod-uid"].RuntimeRecovery)
+	assert.Equal(t, "procd", active["pod-uid"].RuntimeRecovery.ContainerName)
+	assert.Equal(t, "sandbox0-volume-0-sandbox0-webhook-state", active["pod-uid"].RuntimeRecovery.StateVolumeName)
+	assert.True(t, active["pod-uid"].RuntimeRecovery.ReplayProcesses)
+}
+
+func TestActivePodPortalListerDoesNotRecoverIdlePodRuntime(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "tpl-default",
+			Name:      "sandbox-idle",
+			UID:       types.UID("pod-idle"),
+			Labels:    map[string]string{controller.LabelPoolType: controller.PoolTypeIdle},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-a",
+			Volumes: []corev1.Volume{{
+				Name: "sandbox0-volume-0-sandbox0-webhook-state",
+				VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{
+					Driver: volumeportal.DriverName,
+					VolumeAttributes: map[string]string{
+						volumeportal.AttributePortalName: volumeportal.WebhookStatePortalName,
+						volumeportal.AttributeMountPath:  volumeportal.WebhookStateMountPath,
+					},
+				}},
+			}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	active, err := activePodPortalLister(fake.NewSimpleClientset(pod), "node-a")(context.Background())
+	require.NoError(t, err)
+	require.Contains(t, active, "pod-idle")
+	require.NotNil(t, active["pod-idle"].RuntimeRecovery)
+	assert.False(t, active["pod-idle"].RuntimeRecovery.ReplayProcesses)
+}
+
+func TestActivePodPortalListerRejectsMalformedRecoveryBindings(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   "tpl-default",
+			Name:        "sandbox-a",
+			UID:         types.UID("pod-uid"),
+			Annotations: map[string]string{controller.AnnotationMounts: "{"},
+		},
+		Spec: corev1.PodSpec{NodeName: "node-a"},
+	}
+	active, err := activePodPortalLister(fake.NewSimpleClientset(pod), "node-a")(context.Background())
+	require.NoError(t, err)
+	require.Contains(t, active, "pod-uid")
+	require.Error(t, active["pod-uid"].RecoveryError)
+	assert.Contains(t, active["pod-uid"].RecoveryError.Error(), controller.AnnotationMounts)
+}
 
 func TestCtldHealthEndpoints(t *testing.T) {
 	server := newHTTPServer(":0", nil)

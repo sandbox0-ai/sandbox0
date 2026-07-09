@@ -35,27 +35,30 @@ const defaultS0FSMaterializerConcurrency = 16
 const defaultVolumeMaterializeInterval = 2 * time.Second
 
 type Manager struct {
-	nodeName               string
-	rootDir                string
-	kubeletPodsRoot        string
-	logger                 *zap.Logger
-	logrus                 *logrus.Logger
-	storage                *apiconfig.StorageProxyConfig
-	s3CredentialCodec      *volume.S3BackendCredentialCodec
-	s3CredentialCodecErr   error
-	repo                   *db.Repository
-	clusterID              string
-	podName                string
-	podNamespace           string
-	heartbeatInterval      time.Duration
-	ownerOnlyIdleTTL       time.Duration
-	portalCacheMaxBytes    int64
-	portalRootMinFreeBytes int64
-	volumeAPI              http.Handler
-	staleMountCleaner      staleMountCleaner
-	staleMountChecker      staleMountChecker
-	activePodUIDLister     ActivePodUIDLister
-	materializerLimiter    chan struct{}
+	nodeName                  string
+	rootDir                   string
+	kubeletPodsRoot           string
+	logger                    *zap.Logger
+	logrus                    *logrus.Logger
+	storage                   *apiconfig.StorageProxyConfig
+	s3CredentialCodec         *volume.S3BackendCredentialCodec
+	s3CredentialCodecErr      error
+	repo                      *db.Repository
+	clusterID                 string
+	podName                   string
+	podNamespace              string
+	heartbeatInterval         time.Duration
+	ownerOnlyIdleTTL          time.Duration
+	portalCacheMaxBytes       int64
+	portalRootMinFreeBytes    int64
+	volumeAPI                 http.Handler
+	staleMountCleaner         staleMountCleaner
+	staleMountChecker         staleMountChecker
+	activePodUIDLister        ActivePodUIDLister
+	activePodPortalLister     ActivePodPortalLister
+	activePodRuntimeRecoverer ActivePodRuntimeRecoverer
+	staleMountRecoverer       staleMountRecoverer
+	materializerLimiter       chan struct{}
 
 	mu              sync.Mutex
 	portals         map[string]*portalMount
@@ -107,18 +110,21 @@ type boundVolumeCleanup struct {
 }
 
 type Config struct {
-	NodeName                string
-	RootDir                 string
-	KubeletPodsRoot         string
-	Logger                  *zap.Logger
-	StorageConfig           *apiconfig.StorageProxyConfig
-	Repository              *db.Repository
-	PodName                 string
-	PodNamespace            string
-	StaleMountCleaner       staleMountCleaner
-	StaleMountChecker       staleMountChecker
-	ActivePodUIDLister      ActivePodUIDLister
-	MaterializerConcurrency int
+	NodeName                  string
+	RootDir                   string
+	KubeletPodsRoot           string
+	Logger                    *zap.Logger
+	StorageConfig             *apiconfig.StorageProxyConfig
+	Repository                *db.Repository
+	PodName                   string
+	PodNamespace              string
+	StaleMountCleaner         staleMountCleaner
+	StaleMountChecker         staleMountChecker
+	ActivePodUIDLister        ActivePodUIDLister
+	ActivePodPortalLister     ActivePodPortalLister
+	ActivePodRuntimeRecoverer ActivePodRuntimeRecoverer
+	StaleMountRecoverer       staleMountRecoverer
+	MaterializerConcurrency   int
 }
 
 func NewManager(cfg Config) *Manager {
@@ -161,30 +167,36 @@ func NewManager(cfg Config) *Manager {
 		materializerConcurrency = defaultS0FSMaterializerConcurrency
 	}
 	manager := &Manager{
-		nodeName:               strings.TrimSpace(cfg.NodeName),
-		rootDir:                rootDir,
-		kubeletPodsRoot:        kubeletPodsRoot,
-		logger:                 logger,
-		logrus:                 l,
-		storage:                storageConfig,
-		s3CredentialCodec:      s3CredentialCodec,
-		s3CredentialCodecErr:   s3CredentialCodecErr,
-		repo:                   cfg.Repository,
-		clusterID:              naming.ClusterIDOrDefault(&storageConfig.DefaultClusterId),
-		podName:                strings.TrimSpace(cfg.PodName),
-		podNamespace:           strings.TrimSpace(cfg.PodNamespace),
-		heartbeatInterval:      heartbeatInterval,
-		ownerOnlyIdleTTL:       ownerOnlyIdleTTL,
-		portalCacheMaxBytes:    portalCacheMaxBytes,
-		portalRootMinFreeBytes: portalRootMinFreeBytes,
-		staleMountCleaner:      staleCleaner,
-		staleMountChecker:      staleChecker,
-		activePodUIDLister:     cfg.ActivePodUIDLister,
-		materializerLimiter:    make(chan struct{}, materializerConcurrency),
-		portals:                make(map[string]*portalMount),
-		portalsByTarget:        make(map[string]*portalMount),
-		boundVolumes:           make(map[string]*boundVolume),
-		volumes:                newLocalVolumeManager(),
+		nodeName:                  strings.TrimSpace(cfg.NodeName),
+		rootDir:                   rootDir,
+		kubeletPodsRoot:           kubeletPodsRoot,
+		logger:                    logger,
+		logrus:                    l,
+		storage:                   storageConfig,
+		s3CredentialCodec:         s3CredentialCodec,
+		s3CredentialCodecErr:      s3CredentialCodecErr,
+		repo:                      cfg.Repository,
+		clusterID:                 naming.ClusterIDOrDefault(&storageConfig.DefaultClusterId),
+		podName:                   strings.TrimSpace(cfg.PodName),
+		podNamespace:              strings.TrimSpace(cfg.PodNamespace),
+		heartbeatInterval:         heartbeatInterval,
+		ownerOnlyIdleTTL:          ownerOnlyIdleTTL,
+		portalCacheMaxBytes:       portalCacheMaxBytes,
+		portalRootMinFreeBytes:    portalRootMinFreeBytes,
+		staleMountCleaner:         staleCleaner,
+		staleMountChecker:         staleChecker,
+		activePodUIDLister:        cfg.ActivePodUIDLister,
+		activePodPortalLister:     cfg.ActivePodPortalLister,
+		activePodRuntimeRecoverer: cfg.ActivePodRuntimeRecoverer,
+		materializerLimiter:       make(chan struct{}, materializerConcurrency),
+		portals:                   make(map[string]*portalMount),
+		portalsByTarget:           make(map[string]*portalMount),
+		boundVolumes:              make(map[string]*boundVolume),
+		volumes:                   newLocalVolumeManager(),
+	}
+	manager.staleMountRecoverer = cfg.StaleMountRecoverer
+	if manager.staleMountRecoverer == nil {
+		manager.staleMountRecoverer = manager.recoverStaleMount
 	}
 	manager.volumeAPI = newMountedVolumeAPIHandler(storageConfig, cfg.Repository, manager.volumes, l)
 	return manager
@@ -258,7 +270,7 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 			}
 			break
 		}
-		if err := m.unpublishPortalContext(ctx, target, true); err != nil && firstErr == nil {
+		if err := m.unpublishPortalContext(ctx, target, true, true); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -360,10 +372,10 @@ func (m *Manager) UnpublishPortal(targetPath string) error {
 }
 
 func (m *Manager) UnpublishPortalContext(ctx context.Context, targetPath string) error {
-	return m.unpublishPortalContext(ctx, targetPath, false)
+	return m.unpublishPortalContext(ctx, targetPath, false, false)
 }
 
-func (m *Manager) unpublishPortalContext(ctx context.Context, targetPath string, detach bool) error {
+func (m *Manager) unpublishPortalContext(ctx context.Context, targetPath string, detach, preserveRootFSBacking bool) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -394,7 +406,7 @@ func (m *Manager) unpublishPortalContext(ctx context.Context, targetPath string,
 	if pm.rootfsSession != nil {
 		pm.rootfsSession.Close()
 	}
-	if pm.rootfsBackingPath != "" {
+	if pm.rootfsBackingPath != "" && !preserveRootFSBacking {
 		if err := os.RemoveAll(pm.rootfsBackingPath); err != nil && firstErr == nil {
 			firstErr = err
 		}

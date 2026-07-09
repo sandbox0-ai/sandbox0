@@ -40,6 +40,7 @@ type apiModeSuiteOptions struct {
 	includeObjectEncryption     bool
 	includeWebhookLifecycle     bool
 	includeRootFSPauseResume    bool
+	includeCtldRestartRecovery  bool
 	includeMeteringAssertions   bool
 	includeUsageQuotaAssertions bool
 	expectStorageUnavailable    bool
@@ -240,6 +241,12 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 			It("performs file operations and process management", func() {
 				assertFilesystemAndProcessCapabilities(env, session, sandboxID, opts.name, opts.fileContent)
 			})
+
+			if opts.includeCtldRestartRecovery {
+				It("recovers process definitions after ctld restarts", func() {
+					assertProcessRecoveryAfterCtldRestart(env, session, sandboxID)
+				})
+			}
 		})
 
 		if opts.includeNetworkPolicy {
@@ -1729,6 +1736,117 @@ func assertFilesystemAndProcessCapabilities(env *framework.ScenarioEnv, session 
 	status, err = session.DeleteContext(env.TestCtx.Context, GinkgoT(), sandboxID, ctxResp.Id)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
+}
+
+func assertProcessRecoveryAfterCtldRestart(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {
+	templateNamespace, err := naming.TemplateNamespaceForBuiltin("default")
+	Expect(err).NotTo(HaveOccurred())
+	sandbox := waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
+
+	markerPath := fmt.Sprintf("/workspace/ctld-recovery-%d.log", time.Now().UnixNano())
+	processType := apispec.ProcessTypeCmd
+	ttlSec := int32(300)
+	ctxResp, status, err := session.CreateContext(env.TestCtx.Context, GinkgoT(), sandboxID, apispec.CreateContextRequest{
+		Type: &processType,
+		Cmd: &apispec.CreateCMDContextRequest{Command: []string{
+			"/bin/sh", "-lc", fmt.Sprintf("printf 'start\\n' >> %s; while :; do sleep 1; done", shellQuote(markerPath)),
+		}},
+		TtlSec: &ttlSec,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(ctxResp).NotTo(BeNil())
+	DeferCleanup(func() {
+		_, _ = session.DeleteContext(env.TestCtx.Context, GinkgoT(), sandboxID, ctxResp.Id)
+	})
+
+	Eventually(func() (string, error) {
+		body, _, readErr := session.ReadFile(env.TestCtx.Context, GinkgoT(), sandboxID, markerPath)
+		return string(body), readErr
+	}).WithTimeout(30 * time.Second).WithPolling(time.Second).Should(Equal("start\n"))
+
+	nodeName, err := framework.KubectlGetJSONPath(
+		env.TestCtx.Context, env.Config.Kubeconfig, templateNamespace, "pod", sandbox.PodName, "{.spec.nodeName}",
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(nodeName).NotTo(BeEmpty())
+	originalContainerID, err := framework.KubectlGetJSONPath(
+		env.TestCtx.Context, env.Config.Kubeconfig, templateNamespace, "pod", sandbox.PodName,
+		`{.status.containerStatuses[?(@.name=="procd")].containerID}`,
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(originalContainerID).NotTo(BeEmpty())
+
+	selector := fmt.Sprintf("app.kubernetes.io/instance=%s,app.kubernetes.io/component=ctld", env.Infra.Name)
+	ctldPod, err := framework.KubectlOutput(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		"get", "pods",
+		"--namespace", env.Infra.Namespace,
+		"--selector", selector,
+		"--field-selector", "spec.nodeName="+nodeName,
+		"-o", "jsonpath={.items[0].metadata.name}",
+	)
+	Expect(err).NotTo(HaveOccurred())
+	ctldPod = strings.TrimSpace(ctldPod)
+	Expect(ctldPod).NotTo(BeEmpty())
+	Expect(framework.Kubectl(
+		env.TestCtx.Context, env.Config.Kubeconfig,
+		"delete", "pod", ctldPod, "--namespace", env.Infra.Namespace, "--wait=true", "--timeout=2m",
+	)).To(Succeed())
+
+	Eventually(func() error {
+		replacement, getErr := framework.KubectlOutput(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			"get", "pods",
+			"--namespace", env.Infra.Namespace,
+			"--selector", selector,
+			"--field-selector", "spec.nodeName="+nodeName,
+			"-o", "jsonpath={.items[0].metadata.name}",
+		)
+		if getErr != nil {
+			return getErr
+		}
+		replacement = strings.TrimSpace(replacement)
+		if replacement == "" || replacement == ctldPod {
+			return fmt.Errorf("ctld replacement pod is not ready")
+		}
+		return framework.KubectlWaitForCondition(
+			env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, "pod", replacement, "Ready", "10s",
+		)
+	}).WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
+
+	Eventually(func() error {
+		containerID, getErr := framework.KubectlGetJSONPath(
+			env.TestCtx.Context, env.Config.Kubeconfig, templateNamespace, "pod", sandbox.PodName,
+			`{.status.containerStatuses[?(@.name=="procd")].containerID}`,
+		)
+		if getErr != nil {
+			return getErr
+		}
+		if containerID == "" || containerID == originalContainerID {
+			return fmt.Errorf("procd container has not been replaced")
+		}
+		contexts, listStatus, listErr := session.ListContexts(env.TestCtx.Context, GinkgoT(), sandboxID)
+		if listErr != nil {
+			return listErr
+		}
+		if listStatus != http.StatusOK {
+			return fmt.Errorf("list contexts status = %d", listStatus)
+		}
+		for _, recovered := range contexts {
+			if recovered.Id == ctxResp.Id && recovered.Running {
+				return nil
+			}
+		}
+		return fmt.Errorf("running recovered context %s not found", ctxResp.Id)
+	}).WithTimeout(3 * time.Minute).WithPolling(3 * time.Second).Should(Succeed())
+
+	Eventually(func() (int, error) {
+		body, _, readErr := session.ReadFile(env.TestCtx.Context, GinkgoT(), sandboxID, markerPath)
+		return strings.Count(string(body), "start\n"), readErr
+	}).WithTimeout(30 * time.Second).WithPolling(time.Second).Should(BeNumerically(">=", 2))
 }
 
 func assertSandboxNetworkIsolation(env *framework.ScenarioEnv, session *e2eutils.Session) {

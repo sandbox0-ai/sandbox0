@@ -20,6 +20,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/webhook"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdstate"
 	"go.uber.org/zap"
 )
 
@@ -71,6 +72,11 @@ func main() {
 	configureProcessOutputForwarding(logger)
 
 	contextManager := ctxpkg.NewManager()
+	contextStateStore, err := ctxpkg.NewFileStateStore(procdstate.ContextStateDir)
+	if err != nil {
+		logger.Fatal("Failed to initialize context state store", zap.Error(err))
+	}
+	contextManager.SetStateStore(contextStateStore)
 	contextManager.SetDefaultCleanupPolicy(ctxpkg.CleanupPolicy{
 		IdleTimeout: cfg.ContextIdleTimeout.Duration,
 		MaxLifetime: cfg.ContextMaxLifetime.Duration,
@@ -135,6 +141,11 @@ func main() {
 	fileManager, err := file.NewManager(cfg.RootPath)
 	if err != nil {
 		logger.Fatal("Failed to create file manager", zap.Error(err))
+	}
+
+	if err := initializeContextRecovery(contextManager, contextStateStore, logger); err != nil {
+		contextManager.CleanupPreservingState()
+		logger.Fatal("Failed to recover contexts", zap.Error(err))
 	}
 
 	// Initialize internal auth validator
@@ -204,7 +215,7 @@ func main() {
 		}
 
 		// Cleanup managers
-		contextManager.Cleanup()
+		contextManager.CleanupPreservingState()
 		fileManager.Close()
 
 		if err := webhookDispatcher.Shutdown(context.Background()); err != nil {
@@ -221,4 +232,29 @@ func main() {
 
 	<-done
 	logger.Info("Procd shutdown complete")
+}
+
+func initializeContextRecovery(manager *ctxpkg.Manager, store *ctxpkg.FileStateStore, logger *zap.Logger) error {
+	requested, err := store.RecoveryRequested()
+	if err != nil {
+		return err
+	}
+	if !requested {
+		return store.Clear()
+	}
+	restored, err := manager.RestoreContexts()
+	if err != nil {
+		return err
+	}
+	consumed, err := store.ConsumeRecoveryRequest()
+	if err != nil {
+		return err
+	}
+	if !consumed {
+		return errors.New("context recovery request disappeared before completion")
+	}
+	if logger != nil {
+		logger.Info("Recovered procd contexts", zap.Int("contexts", len(restored)))
+	}
+	return nil
 }

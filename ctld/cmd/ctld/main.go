@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,15 +18,18 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	ctldportal "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal"
 	ctldpower "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/power"
+	ctldprocessrecovery "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/processrecovery"
 	ctldrootfs "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/rootfs"
 	ctldserver "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/server"
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/k8s"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	storagedb "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	corev1 "k8s.io/api/core/v1"
@@ -127,21 +131,39 @@ func main() {
 		}
 	}
 
-	podUIDLister := activePodUIDLister(k8sClient, nodeName)
+	podPortalLister := activePodPortalLister(k8sClient, nodeName)
+	processRecoverer := ctldprocessrecovery.New(ctldprocessrecovery.Config{
+		CRIEndpoint:     criEndpoint,
+		KubeletPodsRoot: kubeletPodsRoot,
+		PendingDir:      filepath.Join(portalRoot, "process-recovery"),
+	})
 	portalManager := ctldportal.NewManager(ctldportal.Config{
-		NodeName:           nodeName,
-		RootDir:            portalRoot,
-		KubeletPodsRoot:    kubeletPodsRoot,
-		Logger:             zapLogger,
-		StorageConfig:      storageCfg,
-		Repository:         repo,
-		PodName:            podName,
-		PodNamespace:       podNamespace,
-		ActivePodUIDLister: podUIDLister,
+		NodeName:              nodeName,
+		RootDir:               portalRoot,
+		KubeletPodsRoot:       kubeletPodsRoot,
+		Logger:                zapLogger,
+		StorageConfig:         storageCfg,
+		Repository:            repo,
+		PodName:               podName,
+		PodNamespace:          podNamespace,
+		ActivePodPortalLister: podPortalLister,
+		ActivePodRuntimeRecoverer: func(ctx context.Context, target ctldportal.RuntimeRecoveryTarget, portalsRecovered bool) error {
+			return processRecoverer.Recover(ctx, ctldprocessrecovery.Target{
+				Namespace:       target.Namespace,
+				PodName:         target.PodName,
+				PodUID:          target.PodUID,
+				ContainerName:   target.ContainerName,
+				StateVolumeName: target.StateVolumeName,
+				ReplayProcesses: target.ReplayProcesses,
+			}, portalsRecovered)
+		},
 	})
 	cleanupCtx, cleanupCancel := context.WithTimeout(ctx, 30*time.Second)
 	if err := portalManager.CleanupStaleCSIMounts(cleanupCtx); err != nil && cleanupCtx.Err() == nil {
 		log.Printf("ctld stale CSI mount cleanup completed with errors: %v", err)
+	}
+	if err := processRecoverer.Close(); err != nil {
+		log.Printf("ctld process recovery CRI close failed: %v", err)
 	}
 	cleanupCancel()
 	go portalManager.Run(ctx)
@@ -218,28 +240,103 @@ func buildProbeController(ctx context.Context, k8sClient kubernetes.Interface, o
 	return controller
 }
 
-func activePodUIDLister(k8sClient kubernetes.Interface, nodeName string) ctldportal.ActivePodUIDLister {
+type recoveryClaimMount struct {
+	SandboxVolumeID string `json:"sandboxvolume_id"`
+	MountPoint      string `json:"mount_point"`
+}
+
+func activePodPortalLister(k8sClient kubernetes.Interface, nodeName string) ctldportal.ActivePodPortalLister {
 	nodeName = strings.TrimSpace(nodeName)
 	if k8sClient == nil || nodeName == "" {
 		return nil
 	}
-	return func(ctx context.Context) (map[string]struct{}, error) {
+	return func(ctx context.Context) (map[string]ctldportal.ActivePodPortals, error) {
 		pods, err := k8sClient.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{
 			FieldSelector: fields.OneTermEqualSelector("spec.nodeName", nodeName).String(),
 		})
 		if err != nil {
 			return nil, err
 		}
-		active := make(map[string]struct{}, len(pods.Items))
+		active := make(map[string]ctldportal.ActivePodPortals, len(pods.Items))
 		for i := range pods.Items {
 			pod := &pods.Items[i]
 			if podTerminalForMountCleanup(pod) || pod.UID == "" {
 				continue
 			}
-			active[string(pod.UID)] = struct{}{}
+			podUID := string(pod.UID)
+			portalSet := ctldportal.ActivePodPortals{Portals: map[string]ctldportal.RecoverablePortal{}}
+			bindings, err := recoveryVolumeBindings(pod)
+			if err != nil {
+				portalSet.RecoveryError = fmt.Errorf("read recovery bindings for pod %s/%s: %w", pod.Namespace, pod.Name, err)
+				active[podUID] = portalSet
+				continue
+			}
+			teamID := strings.TrimSpace(pod.Annotations[controller.AnnotationTeamID])
+			stateVolumeName := ""
+			for _, volume := range pod.Spec.Volumes {
+				if volume.CSI == nil || volume.CSI.Driver != volumeportal.DriverName {
+					continue
+				}
+				mountPath := strings.TrimSpace(volume.CSI.VolumeAttributes[volumeportal.AttributeMountPath])
+				portalName := volumeportal.NormalizePortalName(volume.CSI.VolumeAttributes[volumeportal.AttributePortalName], mountPath)
+				if portalName == "" || mountPath == "" {
+					continue
+				}
+				portalSet.Portals[volume.Name] = ctldportal.RecoverablePortal{
+					VolumeName:      volume.Name,
+					Namespace:       pod.Namespace,
+					PodName:         pod.Name,
+					PodUID:          podUID,
+					PortalName:      portalName,
+					MountPath:       mountPath,
+					TeamID:          teamID,
+					SandboxVolumeID: bindings[mountPath],
+				}
+				if portalName == volumeportal.WebhookStatePortalName && mountPath == volumeportal.WebhookStateMountPath {
+					stateVolumeName = volume.Name
+				}
+			}
+			poolType := pod.Labels[controller.LabelPoolType]
+			activeSandbox := poolType == controller.PoolTypeActive && strings.TrimSpace(pod.Annotations[controller.AnnotationSandboxID]) != ""
+			if pod.Status.Phase == corev1.PodRunning && pod.DeletionTimestamp == nil && stateVolumeName != "" &&
+				(poolType == controller.PoolTypeIdle || activeSandbox) {
+				portalSet.RuntimeRecovery = &ctldportal.RuntimeRecoveryTarget{
+					Namespace:       pod.Namespace,
+					PodName:         pod.Name,
+					PodUID:          podUID,
+					ContainerName:   "procd",
+					StateVolumeName: stateVolumeName,
+					ReplayProcesses: activeSandbox,
+				}
+			}
+			active[podUID] = portalSet
 		}
 		return active, nil
 	}
+}
+
+func recoveryVolumeBindings(pod *corev1.Pod) (map[string]string, error) {
+	bindings := map[string]string{}
+	if pod == nil || pod.Annotations == nil {
+		return bindings, nil
+	}
+	var mounts []recoveryClaimMount
+	if raw := strings.TrimSpace(pod.Annotations[controller.AnnotationMounts]); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &mounts); err != nil {
+			return nil, fmt.Errorf("decode %s annotation: %w", controller.AnnotationMounts, err)
+		}
+	}
+	for _, mount := range mounts {
+		mountPath := filepath.Clean(strings.TrimSpace(mount.MountPoint))
+		volumeID := strings.TrimSpace(mount.SandboxVolumeID)
+		if filepath.IsAbs(mountPath) && volumeID != "" {
+			bindings[mountPath] = volumeID
+		}
+	}
+	if volumeID := strings.TrimSpace(pod.Annotations[controller.AnnotationWebhookStateVolumeID]); volumeID != "" {
+		bindings[volumeportal.WebhookStateMountPath] = volumeID
+	}
+	return bindings, nil
 }
 
 func podTerminalForMountCleanup(pod *corev1.Pod) bool {

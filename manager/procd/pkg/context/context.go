@@ -27,7 +27,10 @@ type Context struct {
 	FinishedAt     *time.Time          `json:"-"`
 	CleanupPolicy  CleanupPolicy       `json:"-"`
 
-	mu sync.RWMutex
+	processConfig process.ProcessConfig
+	replConfig    *repl.REPLConfig
+	persistence   *contextPersistence
+	mu            sync.RWMutex
 }
 
 // CleanupPolicy defines when a context should be cleaned up.
@@ -43,7 +46,21 @@ func (p CleanupPolicy) isZero() bool {
 
 // NewContext creates a new context with the given configuration.
 func NewContext(config process.ProcessConfig, replConfig *repl.REPLConfig, exitHandler process.ExitHandler, startHandler process.StartHandler) (*Context, error) {
-	id := "ctx-" + uuid.New().String()[:8]
+	return newContextWithID(newContextID(), time.Time{}, config, replConfig, exitHandler, startHandler)
+}
+
+func newContextID() string {
+	return "ctx-" + uuid.New().String()[:8]
+}
+
+func newContextWithID(id string, createdAt time.Time, config process.ProcessConfig, replConfig *repl.REPLConfig, exitHandler process.ExitHandler, startHandler process.StartHandler) (*Context, error) {
+	if id == "" {
+		return nil, fmt.Errorf("context id is required")
+	}
+	config = cloneProcessConfig(config)
+	if replConfig != nil {
+		replConfig = replConfig.Clone()
+	}
 
 	var proc process.Process
 	var err error
@@ -69,17 +86,22 @@ func NewContext(config process.ProcessConfig, replConfig *repl.REPLConfig, exitH
 	}
 
 	now := time.Now()
+	if createdAt.IsZero() {
+		createdAt = now
+	}
 	ctx := &Context{
 		ID:             id,
 		Type:           config.Type,
 		Alias:          config.Alias,
 		Command:        append([]string(nil), config.Command...),
 		CWD:            config.CWD,
-		EnvVars:        config.EnvVars,
+		EnvVars:        process.CloneEnvVars(config.EnvVars),
 		MainProcess:    proc,
-		CreatedAt:      now,
+		CreatedAt:      createdAt,
 		UpdatedAt:      now,
 		LastActivityAt: now,
+		processConfig:  cloneProcessConfig(config),
+		replConfig:     replConfig,
 	}
 
 	proc.AddExitHandler(func(event process.ExitEvent) {
@@ -97,6 +119,32 @@ func NewContext(config process.ProcessConfig, replConfig *repl.REPLConfig, exitH
 	}
 
 	return ctx, nil
+}
+
+func cloneProcessConfig(config process.ProcessConfig) process.ProcessConfig {
+	config.Command = append([]string(nil), config.Command...)
+	config.EnvVars = process.CloneEnvVars(config.EnvVars)
+	if config.PTYSize != nil {
+		ptySize := *config.PTYSize
+		config.PTYSize = &ptySize
+	}
+	return config
+}
+
+func (ctx *Context) persistedState(state process.ProcessState) persistedContext {
+	ctx.mu.RLock()
+	defer ctx.mu.RUnlock()
+	record := persistedContext{
+		ID:            ctx.ID,
+		Config:        cloneProcessConfig(ctx.processConfig),
+		CleanupPolicy: ctx.CleanupPolicy,
+		DesiredState:  state,
+		CreatedAt:     ctx.CreatedAt,
+	}
+	if ctx.replConfig != nil {
+		record.REPLConfig = ctx.replConfig.Clone()
+	}
+	return record
 }
 
 // Stop stops the context and its main process.

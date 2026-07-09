@@ -9,6 +9,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -116,10 +117,20 @@ func reconcileCtldDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) *a
 	if ds.Spec.Template.Spec.ServiceAccountName != "demo-ctld" {
 		t.Fatalf("expected service account demo-ctld, got %q", ds.Spec.Template.Spec.ServiceAccountName)
 	}
+	if ds.Spec.Template.Spec.TerminationGracePeriodSeconds == nil || *ds.Spec.Template.Spec.TerminationGracePeriodSeconds != ctldTerminationGraceSeconds {
+		t.Fatalf("expected ctld termination grace %ds, got %#v", ctldTerminationGraceSeconds, ds.Spec.Template.Spec.TerminationGracePeriodSeconds)
+	}
 	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-cri-endpoint=/host-run/containerd/containerd.sock")
 	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-containerd-data-root=/host-var-lib/containerd")
+	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-kubelet-pods-root=/var/lib/kubelet/pods")
 	if ds.Spec.Template.Spec.Containers[0].SecurityContext == nil || ds.Spec.Template.Spec.Containers[0].SecurityContext.Privileged == nil || !*ds.Spec.Template.Spec.Containers[0].SecurityContext.Privileged {
 		t.Fatal("expected ctld container to run privileged")
+	}
+	if got := ds.Spec.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]; got.Cmp(resource.MustParse(ctldCPURequest)) != 0 {
+		t.Fatalf("expected ctld cpu request %s, got %s", ctldCPURequest, got.String())
+	}
+	if got := ds.Spec.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceMemory]; got.Cmp(resource.MustParse(ctldMemoryRequest)) != 0 {
+		t.Fatalf("expected ctld memory request %s, got %s", ctldMemoryRequest, got.String())
 	}
 	if len(ds.Spec.Template.Spec.Containers) != 2 || ds.Spec.Template.Spec.Containers[1].Name != "csi-node-driver-registrar" {
 		t.Fatalf("expected csi node-driver-registrar sidecar, got %#v", ds.Spec.Template.Spec.Containers)

@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -32,8 +33,11 @@ const (
 	containerdDataMountPath        = "/host-var-lib/containerd"
 	defaultContainerdHostDataRoot  = "/var/lib/containerd"
 	defaultContainerdHostStateRoot = "/run/containerd"
-	ctldProbeTimeoutSeconds        = 10
-	ctldProbeFailureThreshold      = 6
+	ctldProbeTimeoutSeconds        = 15
+	ctldProbeFailureThreshold      = 12
+	ctldTerminationGraceSeconds    = int64(120)
+	ctldCPURequest                 = "250m"
+	ctldMemoryRequest              = "256Mi"
 )
 
 func NewReconciler(resources *common.ResourceManager) *Reconciler {
@@ -82,6 +86,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	nodeSelector, tolerations := common.ResolveSandboxNodePlacement(infra)
 	containerdHostDataRoot := ctldContainerdHostDataRoot(infra)
 	args := ctldArgs(infra, containerdHostDataRoot)
+	terminationGraceSeconds := ctldTerminationGraceSeconds
 	bidirectional := corev1.MountPropagationBidirectional
 	hostPathDirectoryOrCreate := corev1.HostPathDirectoryOrCreate
 	volumeMounts := []corev1.VolumeMount{
@@ -185,12 +190,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 					Annotations: common.EnsurePodTemplateAnnotations(podAnnotations),
 				},
 				Spec: corev1.PodSpec{
-					HostPID:            true,
-					ServiceAccountName: name,
-					NodeSelector:       nodeSelector,
-					Tolerations:        tolerations,
-					HostNetwork:        true,
-					DNSPolicy:          corev1.DNSClusterFirstWithHostNet,
+					HostPID:                       true,
+					ServiceAccountName:            name,
+					NodeSelector:                  nodeSelector,
+					Tolerations:                   tolerations,
+					HostNetwork:                   true,
+					DNSPolicy:                     corev1.DNSClusterFirstWithHostNet,
+					TerminationGracePeriodSeconds: &terminationGraceSeconds,
 					Containers: []corev1.Container{
 						{
 							Name:            "ctld",
@@ -254,6 +260,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 							SecurityContext: &corev1.SecurityContext{
 								Privileged: common.BoolPtr(true),
 							},
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse(ctldCPURequest),
+									corev1.ResourceMemory: resource.MustParse(ctldMemoryRequest),
+								},
+							},
 							VolumeMounts: volumeMounts,
 						},
 						{
@@ -298,6 +310,7 @@ func ctldArgs(infra *infrav1alpha1.Sandbox0Infra, containerdHostDataRoot string)
 		"-containerd-data-root=" + containerdDataMountPath,
 		"-containerd-host-data-root=" + containerdHostDataRoot,
 		"-volume-portal-root=/var/lib/sandbox0/ctld",
+		"-kubelet-pods-root=/var/lib/kubelet/pods",
 		"-csi-socket=/csi/csi.sock",
 	}
 	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.Ctld != nil {

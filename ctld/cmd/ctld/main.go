@@ -43,6 +43,7 @@ var (
 	containerdNamespace            = "k8s.io"
 	nodeName                       = os.Getenv("NODE_NAME")
 	portalRoot                     = "/var/lib/sandbox0/ctld"
+	kubeletPodsRoot                = "/var/lib/kubelet/pods"
 	csiSocket                      = "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock"
 	rootFSObjectCacheMaxBytes      = "20Gi"
 	rootFSObjectCacheMinFreeBytes  = "0"
@@ -64,6 +65,7 @@ func main() {
 	flag.StringVar(&containerdNamespace, "containerd-namespace", "k8s.io", "containerd namespace used by Kubernetes")
 	flag.StringVar(&nodeName, "node-name", os.Getenv("NODE_NAME"), "current node name used to validate local sandbox ownership")
 	flag.StringVar(&portalRoot, "volume-portal-root", "/var/lib/sandbox0/ctld", "host-local root for ctld volume portal WAL and cache")
+	flag.StringVar(&kubeletPodsRoot, "kubelet-pods-root", "/var/lib/kubelet/pods", "host kubelet pod directory used to recover stale sandbox0 CSI mounts")
 	flag.StringVar(&csiSocket, "csi-socket", "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock", "CSI endpoint socket for sandbox volume portals")
 	flag.StringVar(&rootFSObjectCacheMaxBytes, "rootfs-object-cache-max-bytes", "20Gi", "maximum node-local rootfs object cache size; set to 0 to disable")
 	flag.StringVar(&rootFSObjectCacheMinFreeBytes, "rootfs-object-cache-min-free-bytes", "0", "minimum free bytes to preserve on the rootfs object cache filesystem")
@@ -110,14 +112,20 @@ func main() {
 	}
 
 	portalManager := ctldportal.NewManager(ctldportal.Config{
-		NodeName:      nodeName,
-		RootDir:       portalRoot,
-		Logger:        zapLogger,
-		StorageConfig: storageCfg,
-		Repository:    repo,
-		PodName:       podName,
-		PodNamespace:  podNamespace,
+		NodeName:        nodeName,
+		RootDir:         portalRoot,
+		KubeletPodsRoot: kubeletPodsRoot,
+		Logger:          zapLogger,
+		StorageConfig:   storageCfg,
+		Repository:      repo,
+		PodName:         podName,
+		PodNamespace:    podNamespace,
 	})
+	cleanupCtx, cleanupCancel := context.WithTimeout(ctx, 30*time.Second)
+	if err := portalManager.CleanupStaleCSIMounts(cleanupCtx); err != nil && cleanupCtx.Err() == nil {
+		log.Printf("ctld stale CSI mount cleanup completed with errors: %v", err)
+	}
+	cleanupCancel()
 	go portalManager.Run(ctx)
 	csiServer := ctldportal.NewCSIServer(nodeName, portalManager)
 	go func() {
@@ -147,8 +155,12 @@ func main() {
 	s := <-sigs
 	log.Printf("Received signal \"%v\", shutting down.", s)
 	cancel()
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 90*time.Second)
 	_ = httpServer.Shutdown(shutdownCtx)
+	csiServer.Stop()
+	if err := portalManager.Shutdown(shutdownCtx); err != nil {
+		log.Printf("ctld volume portal shutdown completed with errors: %v", err)
+	}
 	shutdownCancel()
 }
 

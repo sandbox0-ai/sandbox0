@@ -53,6 +53,7 @@ type Manager struct {
 	portalRootMinFreeBytes int64
 	volumeAPI              http.Handler
 	staleMountCleaner      staleMountCleaner
+	activePodUIDLister     ActivePodUIDLister
 	materializerLimiter    chan struct{}
 
 	mu              sync.Mutex
@@ -114,6 +115,7 @@ type Config struct {
 	PodName                 string
 	PodNamespace            string
 	StaleMountCleaner       staleMountCleaner
+	ActivePodUIDLister      ActivePodUIDLister
 	MaterializerConcurrency int
 }
 
@@ -170,6 +172,7 @@ func NewManager(cfg Config) *Manager {
 		portalCacheMaxBytes:    portalCacheMaxBytes,
 		portalRootMinFreeBytes: portalRootMinFreeBytes,
 		staleMountCleaner:      staleCleaner,
+		activePodUIDLister:     cfg.ActivePodUIDLister,
 		materializerLimiter:    make(chan struct{}, materializerConcurrency),
 		portals:                make(map[string]*portalMount),
 		portalsByTarget:        make(map[string]*portalMount),

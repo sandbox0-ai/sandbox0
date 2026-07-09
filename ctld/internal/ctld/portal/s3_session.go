@@ -278,7 +278,7 @@ func (s *s3Session) Create(ctx context.Context, req *pb.CreateRequest) (*pb.Node
 		if req.Flags&uint32(syscall.O_EXCL) != 0 {
 			return nil, fserror.New(fserror.AlreadyExists, "entry already exists")
 		}
-		if s.hasConflictingOpenReader(existing.inode, existing.path, req.Actor) || s.hasOpenWriter(existing.inode) {
+		if s.hasActiveReader(existing.inode, existing.path) || s.hasOpenWriter(existing.inode) {
 			return nil, syscall.EPERM
 		}
 		handleID := s.newHandle(&s3Handle{inode: existing.inode, path: existing.path, writable: true, actor: req.Actor})
@@ -457,7 +457,7 @@ func (s *s3Session) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResp
 		if handleID, ok := s.sameActorWritableHandle(node.inode, req.Actor); ok {
 			return &pb.OpenResponse{HandleId: handleID}, nil
 		}
-		if s.hasConflictingOpenReader(node.inode, node.path, req.Actor) || s.hasOpenWriter(node.inode) {
+		if s.hasActiveReader(node.inode, node.path) || s.hasOpenWriter(node.inode) {
 			return nil, syscall.EPERM
 		}
 		handleID := s.newHandle(&s3Handle{inode: node.inode, path: node.path, writable: true, actor: req.Actor})
@@ -1029,7 +1029,7 @@ func (s *s3Session) hasOpenWriter(inode uint64) bool {
 	return s.findWritableHandle(inode) != nil
 }
 
-func (s *s3Session) hasConflictingOpenReader(inode uint64, key string, actor *pb.PosixActor) bool {
+func (s *s3Session) hasActiveReader(inode uint64, key string) bool {
 	key = cleanS3Path(key)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1037,7 +1037,7 @@ func (s *s3Session) hasConflictingOpenReader(inode uint64, key string, actor *pb
 		if handle == nil || handle.inode != inode || handle.path != key || handle.writable || handle.closed {
 			continue
 		}
-		if handle.read || !samePosixActor(handle.actor, actor) {
+		if handle.read {
 			return true
 		}
 	}

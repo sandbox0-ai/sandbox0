@@ -278,6 +278,13 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open(blocking reader) error = %v", err)
 	}
+	if _, err := session.Read(ctx, &pb.ReadRequest{
+		Inode:    created.Inode,
+		HandleId: blockingReader.HandleId,
+		Size:     1,
+	}); err != nil {
+		t.Fatalf("Read(blocking reader) error = %v", err)
+	}
 	_, err = session.Open(ctx, &pb.OpenRequest{
 		Inode: created.Inode,
 		Flags: uint32(syscall.O_WRONLY | syscall.O_TRUNC),
@@ -392,17 +399,53 @@ func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open(other actor reader) error = %v", err)
 	}
-	if _, err := session.Open(ctx, &pb.OpenRequest{
+	otherWriter, err := session.Open(ctx, &pb.OpenRequest{
 		Inode: blockedNode.Inode,
 		Flags: uint32(syscall.O_WRONLY | syscall.O_TRUNC),
 		Actor: &pb.PosixActor{Pid: 200, Uid: 1000, Gids: []uint32{1000}},
-	}); !errors.Is(err, syscall.EPERM) {
-		t.Fatalf("Open(different actor writer while reader open) error = %v, want EPERM", err)
+	})
+	if err != nil {
+		t.Fatalf("Open(different actor writer while unread reader open) error = %v", err)
+	}
+	if _, err := session.Release(ctx, &pb.ReleaseRequest{HandleId: otherWriter.HandleId}); err != nil {
+		t.Fatalf("Release(other actor writer) error = %v", err)
 	}
 	if _, err := session.Release(ctx, &pb.ReleaseRequest{HandleId: otherReader.HandleId}); err != nil {
 		t.Fatalf("Release(other actor reader) error = %v", err)
 	}
-	assertS3TestObject(t, store, "from-sandbox/actor-blocked.txt", "actor-blocked")
+	assertS3TestObject(t, store, "from-sandbox/actor-blocked.txt", "")
+
+	putS3TestObject(t, store, "from-sandbox/actor-active-blocked.txt", "actor-active-blocked")
+	activeBlockedNode, err := session.Lookup(ctx, &pb.LookupRequest{Parent: fromSandbox.Inode, Name: "actor-active-blocked.txt"})
+	if err != nil {
+		t.Fatalf("Lookup(actor-active-blocked.txt) error = %v", err)
+	}
+	activeOtherReader, err := session.Open(ctx, &pb.OpenRequest{
+		Inode: activeBlockedNode.Inode,
+		Actor: &pb.PosixActor{Pid: 300, Uid: 1000, Gids: []uint32{1000}},
+	})
+	if err != nil {
+		t.Fatalf("Open(other actor active reader) error = %v", err)
+	}
+	if _, err := session.Read(ctx, &pb.ReadRequest{
+		Inode:    activeBlockedNode.Inode,
+		HandleId: activeOtherReader.HandleId,
+		Size:     1,
+		Actor:    &pb.PosixActor{Pid: 300, Uid: 1000, Gids: []uint32{1000}},
+	}); err != nil {
+		t.Fatalf("Read(other actor active reader) error = %v", err)
+	}
+	if _, err := session.Open(ctx, &pb.OpenRequest{
+		Inode: activeBlockedNode.Inode,
+		Flags: uint32(syscall.O_WRONLY | syscall.O_TRUNC),
+		Actor: &pb.PosixActor{Pid: 400, Uid: 1000, Gids: []uint32{1000}},
+	}); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("Open(different actor writer while active reader open) error = %v, want EPERM", err)
+	}
+	if _, err := session.Release(ctx, &pb.ReleaseRequest{HandleId: activeOtherReader.HandleId}); err != nil {
+		t.Fatalf("Release(other actor active reader) error = %v", err)
+	}
+	assertS3TestObject(t, store, "from-sandbox/actor-active-blocked.txt", "actor-active-blocked")
 
 	if _, err := session.SetAttr(ctx, &pb.SetAttrRequest{
 		Inode: created.Inode,

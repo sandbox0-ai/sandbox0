@@ -35,7 +35,7 @@ const (
 	defaultContainerdHostStateRoot = "/run/containerd"
 	ctldProbeTimeoutSeconds        = 15
 	ctldProbeFailureThreshold      = 12
-	ctldTerminationGraceSeconds    = int64(120)
+	ctldTerminationGraceSeconds    = int64(30)
 	ctldCPURequest                 = "250m"
 	ctldMemoryRequest              = "256Mi"
 )

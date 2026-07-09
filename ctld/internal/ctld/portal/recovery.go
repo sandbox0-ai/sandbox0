@@ -19,6 +19,9 @@ const sandboxVolumeNamePrefix = "sandbox0-volume-"
 
 type staleMountCleaner func(string) error
 
+// ActivePodUIDLister returns pod UIDs that still belong to live pods on this node.
+type ActivePodUIDLister func(context.Context) (map[string]struct{}, error)
+
 func defaultStaleMountCleaner(path string) error {
 	if err := unix.Unmount(path, unix.MNT_DETACH); err != nil &&
 		!errors.Is(err, unix.EINVAL) &&
@@ -43,6 +46,7 @@ func (m *Manager) CleanupStaleCSIMounts(ctx context.Context) error {
 	if cleaner == nil {
 		cleaner = defaultStaleMountCleaner
 	}
+	activePods, activeReliable := m.activePodUIDs(ctx)
 
 	var firstErr error
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -53,7 +57,10 @@ func (m *Manager) CleanupStaleCSIMounts(ctx context.Context) error {
 			if errors.Is(err, os.ErrNotExist) {
 				return nil
 			}
-			if isSandboxCSIMountPath(root, path) {
+			if info, ok := sandboxCSIMountPathInfo(root, path); ok {
+				if !shouldCleanSandboxCSIMount(info, activePods, activeReliable, true) {
+					return filepath.SkipDir
+				}
 				if cleanupErr := cleaner(path); cleanupErr != nil {
 					if firstErr == nil {
 						firstErr = cleanupErr
@@ -79,6 +86,10 @@ func (m *Manager) CleanupStaleCSIMounts(ctx context.Context) error {
 		if !isSandboxCSIMountPath(root, path) {
 			return nil
 		}
+		info, _ := sandboxCSIMountPathInfo(root, path)
+		if !shouldCleanSandboxCSIMount(info, activePods, activeReliable, false) {
+			return filepath.SkipDir
+		}
 		if err := cleaner(path); err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -99,17 +110,54 @@ func (m *Manager) CleanupStaleCSIMounts(ctx context.Context) error {
 	return firstErr
 }
 
+func (m *Manager) activePodUIDs(ctx context.Context) (map[string]struct{}, bool) {
+	if m == nil || m.activePodUIDLister == nil {
+		return nil, false
+	}
+	activePods, err := m.activePodUIDLister(ctx)
+	if err != nil {
+		if m.logger != nil {
+			m.logger.Warn("ctld stale CSI mount cleanup could not list active pods", zap.Error(err))
+		}
+		return nil, false
+	}
+	if activePods == nil {
+		activePods = map[string]struct{}{}
+	}
+	return activePods, true
+}
+
+type csiMountPathInfo struct {
+	podUID string
+}
+
+func shouldCleanSandboxCSIMount(info csiMountPathInfo, activePods map[string]struct{}, activeReliable bool, broken bool) bool {
+	if info.podUID != "" && activeReliable {
+		_, active := activePods[info.podUID]
+		return !active
+	}
+	return broken
+}
+
 func isSandboxCSIMountPath(root, path string) bool {
+	_, ok := sandboxCSIMountPathInfo(root, path)
+	return ok
+}
+
+func sandboxCSIMountPathInfo(root, path string) (csiMountPathInfo, bool) {
 	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return false
+		return csiMountPathInfo{}, false
 	}
 	parts := strings.Split(rel, string(os.PathSeparator))
 	if len(parts) != 5 {
-		return false
+		return csiMountPathInfo{}, false
 	}
-	return parts[1] == "volumes" &&
+	if parts[1] == "volumes" &&
 		parts[2] == kubeletCSIVolumeDir &&
 		strings.HasPrefix(parts[3], sandboxVolumeNamePrefix) &&
-		parts[4] == "mount"
+		parts[4] == "mount" {
+		return csiMountPathInfo{podUID: parts[0]}, true
+	}
+	return csiMountPathInfo{}, false
 }

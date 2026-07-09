@@ -24,6 +24,9 @@ func TestCleanupStaleCSIMountsCleansOnlySandboxCSIMounts(t *testing.T) {
 	mgr := NewManager(Config{
 		RootDir:         t.TempDir(),
 		KubeletPodsRoot: root,
+		ActivePodUIDLister: func(context.Context) (map[string]struct{}, error) {
+			return map[string]struct{}{}, nil
+		},
 		StaleMountCleaner: func(path string) error {
 			cleaned = append(cleaned, path)
 			return os.RemoveAll(path)
@@ -42,6 +45,71 @@ func TestCleanupStaleCSIMountsCleansOnlySandboxCSIMounts(t *testing.T) {
 	for _, path := range []string{otherCSI, otherPlugin} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected non-sandbox mount %q to remain, stat error = %v", path, err)
+		}
+	}
+}
+
+func TestCleanupStaleCSIMountsSkipsActivePodMounts(t *testing.T) {
+	root := t.TempDir()
+	inactive := filepath.Join(root, "pod-a", "volumes", kubeletCSIVolumeDir, "sandbox0-volume-0-state", "mount")
+	active := filepath.Join(root, "pod-b", "volumes", kubeletCSIVolumeDir, "sandbox0-volume-1-workspace", "mount")
+	for _, path := range []string{inactive, active} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+
+	var cleaned []string
+	mgr := NewManager(Config{
+		RootDir:         t.TempDir(),
+		KubeletPodsRoot: root,
+		ActivePodUIDLister: func(context.Context) (map[string]struct{}, error) {
+			return map[string]struct{}{"pod-b": {}}, nil
+		},
+		StaleMountCleaner: func(path string) error {
+			cleaned = append(cleaned, path)
+			return os.RemoveAll(path)
+		},
+	})
+	if err := mgr.CleanupStaleCSIMounts(context.Background()); err != nil {
+		t.Fatalf("CleanupStaleCSIMounts() error = %v", err)
+	}
+	if !slices.Equal(cleaned, []string{inactive}) {
+		t.Fatalf("cleaned paths = %#v, want %#v", cleaned, []string{inactive})
+	}
+	if _, err := os.Stat(active); err != nil {
+		t.Fatalf("expected active mount %q to remain, stat error = %v", active, err)
+	}
+}
+
+func TestCleanupStaleCSIMountsDoesNotCleanReadableMountsWithoutActivePods(t *testing.T) {
+	root := t.TempDir()
+	valid := filepath.Join(root, "pod-a", "volumes", kubeletCSIVolumeDir, "sandbox0-volume-0-state", "mount")
+	otherCSI := filepath.Join(root, "pod-b", "volumes", kubeletCSIVolumeDir, "other-volume", "mount")
+	for _, path := range []string{valid, otherCSI} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+
+	var cleaned []string
+	mgr := NewManager(Config{
+		RootDir:         t.TempDir(),
+		KubeletPodsRoot: root,
+		StaleMountCleaner: func(path string) error {
+			cleaned = append(cleaned, path)
+			return os.RemoveAll(path)
+		},
+	})
+	if err := mgr.CleanupStaleCSIMounts(context.Background()); err != nil {
+		t.Fatalf("CleanupStaleCSIMounts() error = %v", err)
+	}
+	if len(cleaned) != 0 {
+		t.Fatalf("cleaned paths = %#v, want none", cleaned)
+	}
+	for _, path := range []string{valid, otherCSI} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected mount %q to remain, stat error = %v", path, err)
 		}
 	}
 }

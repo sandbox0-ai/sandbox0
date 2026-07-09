@@ -28,7 +28,11 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	storagedb "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/client-go/kubernetes"
 )
 
 var (
@@ -98,6 +102,13 @@ func main() {
 		}
 	}
 
+	var k8sClient kubernetes.Interface
+	if client, err := k8s.NewClientWithObservability(kubeconfig, obsProvider); err != nil {
+		log.Printf("ctld kubernetes client disabled: %v", err)
+	} else {
+		k8sClient = client
+	}
+
 	storageCfg := apiconfig.LoadStorageProxyConfig()
 	var repo *storagedb.Repository
 	var dbPool *pgxpool.Pool
@@ -111,15 +122,17 @@ func main() {
 		}
 	}
 
+	podUIDLister := activePodUIDLister(k8sClient, nodeName)
 	portalManager := ctldportal.NewManager(ctldportal.Config{
-		NodeName:        nodeName,
-		RootDir:         portalRoot,
-		KubeletPodsRoot: kubeletPodsRoot,
-		Logger:          zapLogger,
-		StorageConfig:   storageCfg,
-		Repository:      repo,
-		PodName:         podName,
-		PodNamespace:    podNamespace,
+		NodeName:           nodeName,
+		RootDir:            portalRoot,
+		KubeletPodsRoot:    kubeletPodsRoot,
+		Logger:             zapLogger,
+		StorageConfig:      storageCfg,
+		Repository:         repo,
+		PodName:            podName,
+		PodNamespace:       podNamespace,
+		ActivePodUIDLister: podUIDLister,
 	})
 	cleanupCtx, cleanupCancel := context.WithTimeout(ctx, 30*time.Second)
 	if err := portalManager.CleanupStaleCSIMounts(cleanupCtx); err != nil && cleanupCtx.Err() == nil {
@@ -135,7 +148,7 @@ func main() {
 	}()
 	defer csiServer.Stop()
 
-	probeController := buildProbeController(ctx, obsProvider)
+	probeController := buildProbeController(ctx, k8sClient, obsProvider)
 	httpServer := newHTTPServer(httpAddr, combinedController{
 		Controller: probeController,
 		Portal:     portalManager,
@@ -155,7 +168,7 @@ func main() {
 	s := <-sigs
 	log.Printf("Received signal \"%v\", shutting down.", s)
 	cancel()
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 25*time.Second)
 	_ = httpServer.Shutdown(shutdownCtx)
 	csiServer.Stop()
 	if err := portalManager.Shutdown(shutdownCtx); err != nil {
@@ -168,13 +181,12 @@ func newHTTPServer(addr string, controller ctldserver.Controller) *http.Server {
 	return &http.Server{Addr: addr, Handler: ctldserver.NewMux(controller)}
 }
 
-func buildProbeController(ctx context.Context, obsProvider *observability.Provider) ctldserver.Controller {
+func buildProbeController(ctx context.Context, k8sClient kubernetes.Interface, obsProvider *observability.Provider) ctldserver.Controller {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	k8sClient, err := k8s.NewClientWithObservability(kubeconfig, obsProvider)
-	if err != nil {
-		log.Printf("ctld probe control disabled: build kubernetes client: %v", err)
+	if k8sClient == nil {
+		log.Printf("ctld probe control disabled: kubernetes client unavailable")
 		return ctldserver.NotImplementedController{}
 	}
 	resolver := ctldpower.NewPodResolver(k8sClient, nodeName)
@@ -197,6 +209,37 @@ func buildProbeController(ctx context.Context, obsProvider *observability.Provid
 		}()
 	}
 	return controller
+}
+
+func activePodUIDLister(k8sClient kubernetes.Interface, nodeName string) ctldportal.ActivePodUIDLister {
+	nodeName = strings.TrimSpace(nodeName)
+	if k8sClient == nil || nodeName == "" {
+		return nil
+	}
+	return func(ctx context.Context) (map[string]struct{}, error) {
+		pods, err := k8sClient.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{
+			FieldSelector: fields.OneTermEqualSelector("spec.nodeName", nodeName).String(),
+		})
+		if err != nil {
+			return nil, err
+		}
+		active := make(map[string]struct{}, len(pods.Items))
+		for i := range pods.Items {
+			pod := &pods.Items[i]
+			if podTerminalForMountCleanup(pod) || pod.UID == "" {
+				continue
+			}
+			active[string(pod.UID)] = struct{}{}
+		}
+		return active, nil
+	}
+}
+
+func podTerminalForMountCleanup(pod *corev1.Pod) bool {
+	if pod == nil {
+		return true
+	}
+	return pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed
 }
 
 func buildRootFSController(ctx context.Context, storageCfg *apiconfig.StorageProxyConfig, portalResolver ctldrootfs.PortalResolver) rootFSHandler {

@@ -2,17 +2,22 @@ package service
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
-func TestSandboxRootFSProductRequiresPausedSandbox(t *testing.T) {
+func TestSandboxRootFSProductRequiresPausedSandboxForRestore(t *testing.T) {
 	now := time.Now().UTC()
 	store := &memorySandboxStore{
 		records: map[string]*SandboxRecord{
@@ -35,13 +40,13 @@ func TestSandboxRootFSProductRequiresPausedSandbox(t *testing.T) {
 	svc := rootFSProductTestService(store)
 
 	_, err := svc.CreateSandboxRootFSSnapshot(context.Background(), "sandbox-1", "team-1", nil)
-	require.ErrorIs(t, err, ErrSandboxRootFSRequiresPausedSandbox)
+	require.ErrorIs(t, err, ErrSandboxCheckpointRequiresCtld)
 
 	_, err = svc.RestoreSandboxRootFS(context.Background(), "sandbox-1", "team-1", &RestoreSandboxRootFSRequest{SnapshotID: "snapshot-1"})
 	require.ErrorIs(t, err, ErrSandboxRootFSRequiresPausedSandbox)
 
 	_, err = svc.ForkSandbox(context.Background(), "sandbox-1", "team-1", "user-1", nil)
-	require.ErrorIs(t, err, ErrSandboxRootFSRequiresPausedSandbox)
+	require.ErrorIs(t, err, ErrSandboxCheckpointRequiresCtld)
 }
 
 func TestSandboxRootFSProductSnapshotsRestoresAndForksPausedSandbox(t *testing.T) {
@@ -110,6 +115,287 @@ func TestSandboxRootFSProductSnapshotsRestoresAndForksPausedSandbox(t *testing.T
 	require.NoError(t, svc.DeleteSandboxRootFSSnapshot(context.Background(), snapshot.ID, "team-1"))
 	_, err = svc.GetSandboxRootFSSnapshot(context.Background(), snapshot.ID, "team-1")
 	require.ErrorIs(t, err, ErrRootFSSnapshotNotFound)
+}
+
+func TestSandboxRootFSProductSnapshotRunningSandboxCheckpointsWithoutPausingSource(t *testing.T) {
+	now := time.Now().UTC()
+	var prepareReq ctldapi.PrepareRootFSSnapshotRequest
+	var publishReq ctldapi.PublishRootFSSnapshotRequest
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/rootfs/snapshots/prepare":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&prepareReq))
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{
+				Handle: "handle-1",
+				Info: ctldapi.RootFSInfo{
+					Runtime:             "runc",
+					RuntimeHandler:      "io.containerd.runc.v2",
+					BaseImageRef:        "docker.io/library/busybox:1.36",
+					BaseImageDigest:     "sha256:base",
+					Snapshotter:         "overlayfs",
+					SnapshotParent:      "parent-1",
+					SnapshotParentChain: []string{"parent-1", "parent-0"},
+				},
+				Descriptor: ctldapi.RootFSDiffDescriptor{
+					MediaType: "application/vnd.oci.image.layer.v1.tar",
+					Digest:    "sha256:diff-v2",
+					Size:      456,
+				},
+			}))
+		case "/api/v1/rootfs/snapshots/publish":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&publishReq))
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.PublishRootFSSnapshotResponse{
+				Published: true,
+				Info: ctldapi.RootFSInfo{
+					Runtime:             "runc",
+					RuntimeHandler:      "io.containerd.runc.v2",
+					BaseImageRef:        "docker.io/library/busybox:1.36",
+					BaseImageDigest:     "sha256:base",
+					Snapshotter:         "overlayfs",
+					SnapshotParent:      "parent-1",
+					SnapshotParentChain: []string{"parent-1", "parent-0"},
+				},
+				Descriptor: ctldapi.RootFSDiffDescriptor{
+					MediaType: "application/vnd.oci.image.layer.v1.tar",
+					Digest:    "sha256:diff-v2",
+					Size:      456,
+					ObjectKey: "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff-v2.tar",
+				},
+			}))
+		default:
+			t.Fatalf("unexpected ctld path %s", r.URL.Path)
+		}
+	}))
+	defer ctld.Close()
+	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+
+	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
+	pod.Status.HostIP = ctldURL.Hostname()
+	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusRunning, now)
+	source.CurrentPodNamespace = pod.Namespace
+	source.CurrentPodName = pod.Name
+	source.RuntimeGeneration = runtimeGenerationFromPod(pod)
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{
+			"sandbox-1": source,
+		},
+		rootFSStates: map[string]*SandboxRootFSState{
+			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-v1"),
+		},
+	}
+	svc := &SandboxService{
+		k8sClient:    fake.NewSimpleClientset(pod),
+		podLister:    newTestPodLister(t, pod),
+		sandboxStore: store,
+		ctldClient:   NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config:       SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+		clock:        systemTime{},
+		logger:       zap.NewNop(),
+	}
+	var procdCalls []string
+	defer attachRootFSTestProcd(t, pod, svc, &procdCalls)()
+
+	snapshot, err := svc.CreateSandboxRootFSSnapshot(context.Background(), "sandbox-1", "team-1", &CreateSandboxRootFSSnapshotRequest{
+		Name: "running-state",
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, snapshot)
+	assert.Equal(t, "sandbox-1", snapshot.SandboxID)
+	assert.Equal(t, "running-state", snapshot.Name)
+	assert.Equal(t, "layer-v1", prepareReq.ParentLayerID)
+	assert.Equal(t, "sandbox-1", publishReq.SandboxID)
+	assert.Equal(t, int64(3), publishReq.ExpectedRuntimeGeneration)
+	assert.Equal(t, []string{"barrier:true", "pause", "resume", "barrier:false"}, procdCalls)
+
+	sourceRecord := store.records["sandbox-1"]
+	require.NotNil(t, sourceRecord)
+	assert.Equal(t, SandboxStatusRunning, sourceRecord.Status)
+	assert.Equal(t, pod.Name, sourceRecord.CurrentPodName)
+	assert.Equal(t, pod.Namespace, sourceRecord.CurrentPodNamespace)
+	assert.Equal(t, 0, store.pauses)
+
+	sourceState := store.rootFSStates["sandbox-1"]
+	require.NotNil(t, sourceState)
+	assert.NotEqual(t, "layer-v1", sourceState.LayerID)
+	assert.Equal(t, int64(3), sourceState.RuntimeGeneration)
+	assert.Equal(t, "sha256:diff-v2", sourceState.DiffDigest)
+	storedSnapshot := store.rootFSSnapshots[snapshot.ID]
+	require.NotNil(t, storedSnapshot)
+	assert.Equal(t, sourceState.LayerID, storedSnapshot.HeadLayerID)
+
+	activeTxn, err := store.GetActiveLifecycleTxn(context.Background(), "sandbox-1")
+	require.NoError(t, err)
+	assert.Nil(t, activeTxn)
+}
+
+func TestSandboxRootFSProductForkRunningSandboxCheckpointsWithoutPausingSource(t *testing.T) {
+	now := time.Now().UTC()
+	var prepareReq ctldapi.PrepareRootFSSnapshotRequest
+	var publishReq ctldapi.PublishRootFSSnapshotRequest
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/rootfs/snapshots/prepare":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&prepareReq))
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{
+				Handle: "handle-1",
+				Info: ctldapi.RootFSInfo{
+					Runtime:             "runc",
+					RuntimeHandler:      "io.containerd.runc.v2",
+					BaseImageRef:        "docker.io/library/busybox:1.36",
+					BaseImageDigest:     "sha256:base",
+					Snapshotter:         "overlayfs",
+					SnapshotParent:      "parent-1",
+					SnapshotParentChain: []string{"parent-1", "parent-0"},
+				},
+				Descriptor: ctldapi.RootFSDiffDescriptor{
+					MediaType: "application/vnd.oci.image.layer.v1.tar",
+					Digest:    "sha256:diff-v2",
+					Size:      456,
+				},
+			}))
+		case "/api/v1/rootfs/snapshots/publish":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&publishReq))
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.PublishRootFSSnapshotResponse{
+				Published: true,
+				Info: ctldapi.RootFSInfo{
+					Runtime:             "runc",
+					RuntimeHandler:      "io.containerd.runc.v2",
+					BaseImageRef:        "docker.io/library/busybox:1.36",
+					BaseImageDigest:     "sha256:base",
+					Snapshotter:         "overlayfs",
+					SnapshotParent:      "parent-1",
+					SnapshotParentChain: []string{"parent-1", "parent-0"},
+				},
+				Descriptor: ctldapi.RootFSDiffDescriptor{
+					MediaType: "application/vnd.oci.image.layer.v1.tar",
+					Digest:    "sha256:diff-v2",
+					Size:      456,
+					ObjectKey: "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff-v2.tar",
+				},
+			}))
+		default:
+			t.Fatalf("unexpected ctld path %s", r.URL.Path)
+		}
+	}))
+	defer ctld.Close()
+	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+
+	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
+	pod.Status.HostIP = ctldURL.Hostname()
+	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusRunning, now)
+	source.CurrentPodNamespace = pod.Namespace
+	source.CurrentPodName = pod.Name
+	source.RuntimeGeneration = runtimeGenerationFromPod(pod)
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{
+			"sandbox-1": source,
+		},
+		rootFSStates: map[string]*SandboxRootFSState{
+			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-v1"),
+		},
+	}
+	svc := &SandboxService{
+		k8sClient:    fake.NewSimpleClientset(pod),
+		podLister:    newTestPodLister(t, pod),
+		sandboxStore: store,
+		ctldClient:   NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config:       SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+		clock:        systemTime{},
+		logger:       zap.NewNop(),
+	}
+	var procdCalls []string
+	defer attachRootFSTestProcd(t, pod, svc, &procdCalls)()
+
+	forkResp, err := svc.ForkSandbox(context.Background(), "sandbox-1", "team-1", "user-2", nil)
+
+	require.NoError(t, err)
+	require.NotNil(t, forkResp)
+	require.NotNil(t, forkResp.Sandbox)
+	assert.Equal(t, "sandbox-1", forkResp.SourceSandboxID)
+	assert.Equal(t, SandboxStatusPaused, forkResp.Sandbox.Status)
+	assert.Equal(t, "user-2", forkResp.Sandbox.UserID)
+	assert.Equal(t, "layer-v1", prepareReq.ParentLayerID)
+	assert.Equal(t, "sandbox-1", publishReq.SandboxID)
+	assert.Equal(t, int64(3), publishReq.ExpectedRuntimeGeneration)
+	assert.Equal(t, []string{"barrier:true", "pause", "resume", "barrier:false"}, procdCalls)
+
+	sourceRecord := store.records["sandbox-1"]
+	require.NotNil(t, sourceRecord)
+	assert.Equal(t, SandboxStatusRunning, sourceRecord.Status)
+	assert.Equal(t, pod.Name, sourceRecord.CurrentPodName)
+	assert.Equal(t, pod.Namespace, sourceRecord.CurrentPodNamespace)
+	assert.Equal(t, 0, store.pauses)
+
+	sourceState := store.rootFSStates["sandbox-1"]
+	require.NotNil(t, sourceState)
+	assert.NotEqual(t, "layer-v1", sourceState.LayerID)
+	assert.Equal(t, int64(3), sourceState.RuntimeGeneration)
+	assert.Equal(t, "sha256:diff-v2", sourceState.DiffDigest)
+	forkState := store.rootFSStates[forkResp.Sandbox.ID]
+	require.NotNil(t, forkState)
+	assert.Equal(t, sourceState.LayerID, forkState.LayerID)
+	assert.Equal(t, "team-1", forkState.TeamID)
+
+	activeTxn, err := store.GetActiveLifecycleTxn(context.Background(), "sandbox-1")
+	require.NoError(t, err)
+	assert.Nil(t, activeTxn)
+}
+
+func TestSandboxRootFSProductWaitAbortsStaleForkTxn(t *testing.T) {
+	now := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{
+			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusRunning, now),
+		},
+		lifecycleTxns: map[string]*SandboxLifecycleTxn{
+			"txn-1": {
+				ID:        "txn-1",
+				SandboxID: "sandbox-1",
+				Kind:      SandboxLifecycleKindFork,
+				Phase:     SandboxLifecyclePhasePublishing,
+				UpdatedAt: now.Add(-sandboxRootFSSourceCheckpointLifecycleStaleAfter - time.Second),
+			},
+		},
+	}
+	svc := rootFSProductTestService(store)
+	svc.clock = fixedClock{now: now}
+
+	err := svc.waitForSandboxLifecycleTxnExit(context.Background(), "sandbox-1")
+
+	require.NoError(t, err)
+	txn := store.lifecycleTxns["txn-1"]
+	require.NotNil(t, txn)
+	assert.Equal(t, SandboxLifecyclePhaseAborted, txn.Phase)
+	assert.Equal(t, "stale fork transaction", txn.Error)
+}
+
+func TestSandboxRootFSProductWaitAbortsStaleSnapshotTxn(t *testing.T) {
+	now := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{
+			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusRunning, now),
+		},
+		lifecycleTxns: map[string]*SandboxLifecycleTxn{
+			"txn-1": {
+				ID:        "txn-1",
+				SandboxID: "sandbox-1",
+				Kind:      SandboxLifecycleKindSnapshot,
+				Phase:     SandboxLifecyclePhasePublishing,
+				UpdatedAt: now.Add(-sandboxRootFSSourceCheckpointLifecycleStaleAfter - time.Second),
+			},
+		},
+	}
+	svc := rootFSProductTestService(store)
+	svc.clock = fixedClock{now: now}
+
+	err := svc.waitForSandboxLifecycleTxnExit(context.Background(), "sandbox-1")
+
+	require.NoError(t, err)
+	txn := store.lifecycleTxns["txn-1"]
+	require.NotNil(t, txn)
+	assert.Equal(t, SandboxLifecyclePhaseAborted, txn.Phase)
+	assert.Equal(t, "stale snapshot transaction", txn.Error)
 }
 
 func TestSandboxRootFSProductForkSetsLifecycleExpirations(t *testing.T) {

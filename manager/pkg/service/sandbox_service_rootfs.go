@@ -21,6 +21,7 @@ import (
 const sandboxRootFSContainerName = "procd"
 
 const sandboxRootFSOperationTimeout = 5 * time.Minute
+const sandboxRootFSSourceCheckpointLifecycleStaleAfter = sandboxRootFSOperationTimeout + time.Minute
 const sandboxRootFSUncommittedObjectDeleteDelay = 15 * time.Minute
 const sandboxRootFSUncommittedObjectDeleteTimeout = 30 * time.Second
 

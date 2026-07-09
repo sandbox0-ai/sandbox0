@@ -59,7 +59,7 @@ var ErrClaimConflict = errors.New("claim conflict")
 var ErrDataPlaneNotReady = errors.New("data plane not ready")
 var ErrQuotaExceeded = errors.New("quota exceeded")
 var ErrInvalidNetworkPolicy = errors.New("invalid network policy")
-var ErrSandboxCheckpointRequiresCtld = errors.New("sandbox checkpoint pause requires ctld")
+var ErrSandboxCheckpointRequiresCtld = errors.New("sandbox checkpoint requires ctld")
 var ErrClaimStartThrottled = startlimiter.ErrThrottled
 
 const defaultPodClaimReadyTimeout = 90 * time.Second

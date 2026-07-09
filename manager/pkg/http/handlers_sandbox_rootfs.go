@@ -149,12 +149,18 @@ func (s *Server) writeSandboxRootFSError(c *gin.Context, action, sandboxID strin
 		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "not found")
 	case apierrors.IsForbidden(err):
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "forbidden")
+	case apierrors.IsConflict(err):
+		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
 	case errors.Is(err, service.ErrSandboxRootFSRequiresPausedSandbox):
 		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "sandbox rootfs operation requires a paused sandbox")
+	case errors.Is(err, service.ErrSandboxRootFSSourceRequiresRunningOrPaused):
+		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "sandbox rootfs source operation requires a running or paused sandbox")
 	case errors.Is(err, service.ErrRootFSSnapshotExpired):
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 	case errors.Is(err, service.ErrRootFSFilesystemConflict), errors.Is(err, service.ErrRootFSHeadConflict), errors.Is(err, service.ErrRootFSFilesystemNotFound):
 		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
+	case errors.Is(err, service.ErrSandboxCheckpointRequiresCtld):
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox checkpoint requires ctld")
 	case errors.Is(err, service.ErrSandboxRootFSStoreUnavailable):
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox rootfs store is unavailable")
 	default:

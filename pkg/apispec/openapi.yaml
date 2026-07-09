@@ -1880,6 +1880,11 @@ paths:
     post:
       tags: [sandbox-rootfs]
       summary: Create sandbox rootfs snapshot
+      description: |
+        Creates an immutable snapshot record from the source sandbox writable
+        rootfs. A paused source is snapshotted from its current rootfs head. A
+        running source is briefly barriered and checkpointed first; the source
+        sandbox remains running after the snapshot operation completes.
       security:
         - bearerAuth: []
       x-upstream-service: manager
@@ -1900,7 +1905,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/SuccessSandboxRootFSSnapshotResponse"
         "409":
-          description: Sandbox is not paused or rootfs state is unavailable
+          description: Source sandbox is not running or paused, another lifecycle operation is active, or rootfs state is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          description: Running-source snapshot requires ctld checkpoint support
           content:
             application/json:
               schema:
@@ -1971,7 +1982,12 @@ paths:
   /api/v1/sandboxes/{id}/fork:
     post:
       tags: [sandbox-rootfs]
-      summary: Fork sandbox from paused rootfs
+      summary: Fork sandbox rootfs
+      description: |
+        Forks the source sandbox writable rootfs into a new paused sandbox. A paused
+        source is forked from its current rootfs head. A running source is briefly
+        barriered and checkpointed first; the source sandbox remains running after
+        the fork operation completes.
       security:
         - bearerAuth: []
       x-upstream-service: manager
@@ -1992,7 +2008,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/SuccessForkSandboxResponse"
         "409":
-          description: Source sandbox is not paused or rootfs state is unavailable
+          description: Source sandbox is not running or paused, another lifecycle operation is active, or rootfs state is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          description: Running-source fork requires ctld checkpoint support
           content:
             application/json:
               schema:
@@ -4715,6 +4737,9 @@ components:
               $ref: "#/components/schemas/Sandbox"
     CreateSandboxRootFSSnapshotRequest:
       type: object
+      description: |
+        Optional snapshot metadata. The source sandbox may be running or paused;
+        running sources are checkpointed before the snapshot record is created.
       properties:
         name:
           type: string
@@ -4777,6 +4802,8 @@ components:
           $ref: "#/components/schemas/ForkSandboxConfig"
       description: |
         Optional fork overrides. Omit config to inherit the source sandbox configuration.
+        The source sandbox may be running or paused; running sources are checkpointed
+        before the paused child sandbox is created.
     ForkSandboxConfig:
       type: object
       additionalProperties: false

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net"
 	"net/http"
 	"os"
@@ -30,10 +31,13 @@ import (
 const defaultRootDir = "/var/lib/sandbox0/ctld"
 const defaultVolumePortalCacheSizeLimit = "20Gi"
 const defaultVolumePortalRootMinFree = "5Gi"
+const defaultS0FSMaterializerConcurrency = 16
+const defaultVolumeMaterializeInterval = 2 * time.Second
 
 type Manager struct {
 	nodeName               string
 	rootDir                string
+	kubeletPodsRoot        string
 	logger                 *zap.Logger
 	logrus                 *logrus.Logger
 	storage                *apiconfig.StorageProxyConfig
@@ -48,6 +52,10 @@ type Manager struct {
 	portalCacheMaxBytes    int64
 	portalRootMinFreeBytes int64
 	volumeAPI              http.Handler
+	staleMountCleaner      staleMountCleaner
+	staleMountChecker      staleMountChecker
+	activePodUIDLister     ActivePodUIDLister
+	materializerLimiter    chan struct{}
 
 	mu              sync.Mutex
 	portals         map[string]*portalMount
@@ -88,22 +96,39 @@ type boundVolume struct {
 
 	materializeCancel context.CancelFunc
 	materializeDone   chan struct{}
+	closing           bool
+}
+
+type boundVolumeCleanup struct {
+	volumeID          string
+	bound             *boundVolume
+	materializeCancel context.CancelFunc
+	materializeDone   chan struct{}
 }
 
 type Config struct {
-	NodeName      string
-	RootDir       string
-	Logger        *zap.Logger
-	StorageConfig *apiconfig.StorageProxyConfig
-	Repository    *db.Repository
-	PodName       string
-	PodNamespace  string
+	NodeName                string
+	RootDir                 string
+	KubeletPodsRoot         string
+	Logger                  *zap.Logger
+	StorageConfig           *apiconfig.StorageProxyConfig
+	Repository              *db.Repository
+	PodName                 string
+	PodNamespace            string
+	StaleMountCleaner       staleMountCleaner
+	StaleMountChecker       staleMountChecker
+	ActivePodUIDLister      ActivePodUIDLister
+	MaterializerConcurrency int
 }
 
 func NewManager(cfg Config) *Manager {
 	rootDir := strings.TrimSpace(cfg.RootDir)
 	if rootDir == "" {
 		rootDir = defaultRootDir
+	}
+	kubeletPodsRoot := strings.TrimSpace(cfg.KubeletPodsRoot)
+	if kubeletPodsRoot == "" {
+		kubeletPodsRoot = defaultKubeletPodsRoot
 	}
 	logger := cfg.Logger
 	if logger == nil {
@@ -123,9 +148,22 @@ func NewManager(cfg Config) *Manager {
 	ownerOnlyIdleTTL, _ := time.ParseDuration(storageConfig.DirectVolumeFileIdleTTL)
 	portalCacheMaxBytes := parseQuantityBytesOrDefault(storageConfig.VolumePortalCacheSizeLimit, defaultVolumePortalCacheSizeLimit)
 	portalRootMinFreeBytes := parseQuantityBytesOrDefault(storageConfig.VolumePortalRootMinFree, defaultVolumePortalRootMinFree)
+	staleCleaner := cfg.StaleMountCleaner
+	if staleCleaner == nil {
+		staleCleaner = defaultStaleMountCleaner
+	}
+	staleChecker := cfg.StaleMountChecker
+	if staleChecker == nil {
+		staleChecker = defaultStaleMountChecker
+	}
+	materializerConcurrency := cfg.MaterializerConcurrency
+	if materializerConcurrency <= 0 {
+		materializerConcurrency = defaultS0FSMaterializerConcurrency
+	}
 	manager := &Manager{
 		nodeName:               strings.TrimSpace(cfg.NodeName),
 		rootDir:                rootDir,
+		kubeletPodsRoot:        kubeletPodsRoot,
 		logger:                 logger,
 		logrus:                 l,
 		storage:                storageConfig,
@@ -139,6 +177,10 @@ func NewManager(cfg Config) *Manager {
 		ownerOnlyIdleTTL:       ownerOnlyIdleTTL,
 		portalCacheMaxBytes:    portalCacheMaxBytes,
 		portalRootMinFreeBytes: portalRootMinFreeBytes,
+		staleMountCleaner:      staleCleaner,
+		staleMountChecker:      staleChecker,
+		activePodUIDLister:     cfg.ActivePodUIDLister,
+		materializerLimiter:    make(chan struct{}, materializerConcurrency),
 		portals:                make(map[string]*portalMount),
 		portalsByTarget:        make(map[string]*portalMount),
 		boundVolumes:           make(map[string]*boundVolume),
@@ -184,6 +226,54 @@ func (m *Manager) Run(ctx context.Context) {
 			m.cleanupIdleOwnerOnlyVolumes(ctx)
 		}
 	}
+}
+
+// Shutdown detaches portal mounts without waiting on FUSE servers that may already be unresponsive.
+func (m *Manager) Shutdown(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.mu.Lock()
+	targets := make([]string, 0, len(m.portalsByTarget))
+	for target := range m.portalsByTarget {
+		targets = append(targets, target)
+	}
+	ownerOnlyVolumeIDs := make([]string, 0, len(m.boundVolumes))
+	for volumeID, bound := range m.boundVolumes {
+		if bound == nil || bound.refCount > 0 || bound.closing {
+			continue
+		}
+		ownerOnlyVolumeIDs = append(ownerOnlyVolumeIDs, volumeID)
+	}
+	m.mu.Unlock()
+
+	var firstErr error
+	for _, target := range targets {
+		if err := ctx.Err(); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			break
+		}
+		if err := m.unpublishPortalContext(ctx, target, true); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	for _, volumeID := range ownerOnlyVolumeIDs {
+		if err := ctx.Err(); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			break
+		}
+		if err := m.releaseOwnerOnlyVolumeNow(ctx, volumeID); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func (m *Manager) PublishPortal(ctx context.Context, req publishRequest) error {
@@ -266,33 +356,64 @@ func mountPortalFS(fs *volumefuse.FileSystem, targetPath string) (*fuse.Server, 
 }
 
 func (m *Manager) UnpublishPortal(targetPath string) error {
+	return m.UnpublishPortalContext(context.Background(), targetPath)
+}
+
+func (m *Manager) UnpublishPortalContext(ctx context.Context, targetPath string) error {
+	return m.unpublishPortalContext(ctx, targetPath, false)
+}
+
+func (m *Manager) unpublishPortalContext(ctx context.Context, targetPath string, detach bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	m.mu.Lock()
 	pm := m.portalsByTarget[targetPath]
-	var unbindErr error
+	var cleanup *boundVolumeCleanup
 	if pm != nil {
 		delete(m.portalsByTarget, targetPath)
 		delete(m.portals, portalKey(pm.podUID, pm.name))
-		unbindErr = m.unbindLockedSnapshot(pm)
+		cleanup = m.unbindLockedSnapshot(pm)
 	}
 	m.mu.Unlock()
 	if pm == nil {
-		return nil
+		return m.cleanUnknownStaleMountTarget(targetPath)
 	}
-	if unbindErr != nil {
-		return unbindErr
-	}
-	if pm.server != nil {
+	var firstErr error
+	if detach {
+		if err := m.cleanStaleMountTarget(pm.targetPath); err != nil {
+			firstErr = err
+		}
+	} else if pm.server != nil {
 		if err := pm.server.Unmount(); err != nil {
-			return err
+			if cleanupErr := m.cleanStaleMountTarget(pm.targetPath); cleanupErr != nil {
+				firstErr = err
+			}
 		}
 	}
 	if pm.rootfsSession != nil {
 		pm.rootfsSession.Close()
 	}
 	if pm.rootfsBackingPath != "" {
-		return os.RemoveAll(pm.rootfsBackingPath)
+		if err := os.RemoveAll(pm.rootfsBackingPath); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
-	return nil
+	if err := m.finishBoundVolumeCleanup(ctx, cleanup); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
+
+func (m *Manager) cleanStaleMountTarget(targetPath string) error {
+	if strings.TrimSpace(targetPath) == "" {
+		return nil
+	}
+	cleaner := defaultStaleMountCleaner
+	if m != nil && m.staleMountCleaner != nil {
+		cleaner = m.staleMountCleaner
+	}
+	return cleaner(targetPath)
 }
 
 func (m *Manager) RootFSPortalPaths(podUID string) []ctldapi.RootFSPortalPath {
@@ -375,6 +496,10 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		return response, nil
 	}
 	if bound := m.boundVolumes[req.SandboxVolumeID]; bound != nil {
+		if bound.closing {
+			m.mu.Unlock()
+			return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume %s is closing", req.SandboxVolumeID)
+		}
 		if bound.refCount == 0 {
 			m.attachPortalLocked(pm, bound, mountedAt)
 			bound.refCount = 1
@@ -422,6 +547,11 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		return response, nil
 	}
 	if bound := m.boundVolumes[req.SandboxVolumeID]; bound != nil {
+		if bound.closing {
+			m.mu.Unlock()
+			cleanupNewBound()
+			return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume %s is closing", req.SandboxVolumeID)
+		}
 		if bound.refCount == 0 {
 			m.attachPortalLocked(pm, bound, mountedAt)
 			bound.refCount = 1
@@ -594,9 +724,9 @@ func (m *Manager) Unbind(ctx context.Context, req ctldapi.UnbindVolumePortalRequ
 		m.mu.Unlock()
 		return ctldapi.UnbindVolumePortalResponse{Unbound: true}, nil
 	}
-	err := m.unbindLockedSnapshot(pm)
+	cleanup := m.unbindLockedSnapshot(pm)
 	m.mu.Unlock()
-	if err != nil {
+	if err := m.finishBoundVolumeCleanup(ctx, cleanup); err != nil {
 		return ctldapi.UnbindVolumePortalResponse{}, err
 	}
 	return ctldapi.UnbindVolumePortalResponse{Unbound: true}, nil
@@ -655,6 +785,10 @@ func (m *Manager) AttachOwner(ctx context.Context, req ctldapi.AttachVolumeOwner
 
 	m.mu.Lock()
 	if bound := m.boundVolumes[req.SandboxVolumeID]; bound != nil {
+		if bound.closing {
+			m.mu.Unlock()
+			return ctldapi.AttachVolumeOwnerResponse{}, fmt.Errorf("volume %s is closing", req.SandboxVolumeID)
+		}
 		m.mu.Unlock()
 		m.volumes.touch(req.SandboxVolumeID)
 		return ctldapi.AttachVolumeOwnerResponse{Attached: true}, nil
@@ -707,6 +841,11 @@ func (m *Manager) AttachOwner(ctx context.Context, req ctldapi.AttachVolumeOwner
 
 	m.mu.Lock()
 	if bound := m.boundVolumes[req.SandboxVolumeID]; bound != nil {
+		if bound.closing {
+			m.mu.Unlock()
+			_ = engine.Close()
+			return ctldapi.AttachVolumeOwnerResponse{}, fmt.Errorf("volume %s is closing", req.SandboxVolumeID)
+		}
 		m.mu.Unlock()
 		_ = engine.Close()
 		m.volumes.touch(req.SandboxVolumeID)
@@ -750,6 +889,11 @@ func (m *Manager) ReleaseOwner(ctx context.Context, req ctldapi.ReleaseVolumeOwn
 		m.mu.Unlock()
 		return ctldapi.ReleaseVolumeOwnerResponse{Released: true}, nil
 	}
+	if bound.closing {
+		m.mu.Unlock()
+		err := fmt.Errorf("volume %s is closing", volumeID)
+		return ctldapi.ReleaseVolumeOwnerResponse{Busy: true, Error: err.Error()}, err
+	}
 	if bound.refCount > 0 {
 		m.mu.Unlock()
 		err := fmt.Errorf("volume %s is actively bound to a portal", volumeID)
@@ -760,11 +904,11 @@ func (m *Manager) ReleaseOwner(ctx context.Context, req ctldapi.ReleaseVolumeOwn
 		err := fmt.Errorf("volume %s %s", volumeID, reason)
 		return ctldapi.ReleaseVolumeOwnerResponse{Busy: true, Error: err.Error()}, err
 	}
-	if err := m.releaseOwnerOnlyVolumeLocked(ctx, volumeID, bound); err != nil {
-		m.mu.Unlock()
+	cleanup := m.releaseOwnerOnlyVolumeLocked(volumeID, bound)
+	m.mu.Unlock()
+	if err := m.finishBoundVolumeCleanup(ctx, cleanup); err != nil {
 		return ctldapi.ReleaseVolumeOwnerResponse{}, err
 	}
-	m.mu.Unlock()
 	return ctldapi.ReleaseVolumeOwnerResponse{Released: true}, nil
 }
 
@@ -775,9 +919,13 @@ func (m *Manager) PrepareSnapshotCheckpoint(ctx context.Context, req ctldapi.Pre
 	}
 	m.mu.Lock()
 	bound := m.boundVolumes[volumeID]
+	closing := bound != nil && bound.closing
 	m.mu.Unlock()
 	if bound == nil || bound.volCtx == nil || bound.volCtx.S0FS == nil {
 		return ctldapi.PrepareVolumeSnapshotCheckpointResponse{}, fmt.Errorf("volume %s is not owned by this ctld", volumeID)
+	}
+	if closing {
+		return ctldapi.PrepareVolumeSnapshotCheckpointResponse{}, fmt.Errorf("volume %s is closing", volumeID)
 	}
 	if err := m.volumes.prepareSnapshotCheckpoint(ctx, volumeID); err != nil {
 		return ctldapi.PrepareVolumeSnapshotCheckpointResponse{}, err
@@ -816,7 +964,7 @@ func (m *Manager) cleanupIdleOwnerOnlyVolumes(ctx context.Context) {
 	m.mu.Lock()
 	volumeIDs := make([]string, 0, len(m.boundVolumes))
 	for volumeID, bound := range m.boundVolumes {
-		if bound == nil || bound.refCount > 0 || !m.volumes.canCleanupOwnerOnly(volumeID, cutoff) {
+		if bound == nil || bound.closing || bound.refCount > 0 || !m.volumes.canCleanupOwnerOnly(volumeID, cutoff) {
 			continue
 		}
 		volumeIDs = append(volumeIDs, volumeID)
@@ -833,38 +981,52 @@ func (m *Manager) cleanupIdleOwnerOnlyVolumes(ctx context.Context) {
 func (m *Manager) releaseOwnerOnlyVolume(ctx context.Context, volumeID string) error {
 	m.mu.Lock()
 	bound := m.boundVolumes[volumeID]
-	if bound == nil || bound.refCount > 0 || !m.volumes.canCleanupOwnerOnly(volumeID, time.Now().UTC().Add(-m.ownerOnlyIdleTTL)) {
+	if bound == nil || bound.closing || bound.refCount > 0 || !m.volumes.canCleanupOwnerOnly(volumeID, time.Now().UTC().Add(-m.ownerOnlyIdleTTL)) {
 		m.mu.Unlock()
 		return nil
 	}
-	if err := m.releaseOwnerOnlyVolumeLocked(ctx, volumeID, bound); err != nil {
-		m.mu.Unlock()
-		return err
-	}
+	cleanup := m.releaseOwnerOnlyVolumeLocked(volumeID, bound)
 	m.mu.Unlock()
-	return nil
+	return m.finishBoundVolumeCleanup(ctx, cleanup)
 }
 
-func (m *Manager) releaseOwnerOnlyVolumeLocked(ctx context.Context, volumeID string, bound *boundVolume) error {
-	if bound.materializeCancel != nil {
-		bound.materializeCancel()
-		bound.materializeCancel = nil
+func (m *Manager) releaseOwnerOnlyVolumeNow(ctx context.Context, volumeID string) error {
+	m.mu.Lock()
+	bound := m.boundVolumes[volumeID]
+	if bound == nil || bound.closing {
+		m.mu.Unlock()
+		return nil
 	}
-	done := bound.materializeDone
+	if bound.refCount > 0 {
+		m.mu.Unlock()
+		return fmt.Errorf("volume %s is actively bound to a portal", volumeID)
+	}
+	if ok, reason := m.volumes.canReleaseOwnerOnly(volumeID); !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("volume %s %s", volumeID, reason)
+	}
+	cleanup := m.releaseOwnerOnlyVolumeLocked(volumeID, bound)
+	m.mu.Unlock()
+	return m.finishBoundVolumeCleanup(ctx, cleanup)
+}
+
+func (m *Manager) releaseOwnerOnlyVolumeLocked(volumeID string, bound *boundVolume) *boundVolumeCleanup {
+	if bound == nil {
+		return nil
+	}
+	bound.closing = true
+	cleanup := &boundVolumeCleanup{
+		volumeID:          volumeID,
+		bound:             bound,
+		materializeCancel: bound.materializeCancel,
+		materializeDone:   bound.materializeDone,
+	}
+	bound.materializeCancel = nil
 	bound.materializeDone = nil
-	if done != nil {
-		<-done
-	}
-	closeBoundSession(bound)
-	if err := m.volumes.UnmountVolume(ctx, volumeID, ""); err != nil {
-		return err
-	}
-	delete(m.boundVolumes, volumeID)
-	m.unregisterOwner(bound)
-	return nil
+	return cleanup
 }
 
-func (m *Manager) unbindLockedSnapshot(pm *portalMount) error {
+func (m *Manager) unbindLockedSnapshot(pm *portalMount) *boundVolumeCleanup {
 	volumeID := pm.volumeID
 	m.clearPortalLocked(pm)
 	if volumeID == "" {
@@ -878,21 +1040,55 @@ func (m *Manager) unbindLockedSnapshot(pm *portalMount) error {
 		bound.refCount--
 		return nil
 	}
-	if bound.materializeCancel != nil {
-		bound.materializeCancel()
-		bound.materializeCancel = nil
+	bound.refCount = 0
+	return m.releaseOwnerOnlyVolumeLocked(volumeID, bound)
+}
+
+func (m *Manager) finishBoundVolumeCleanup(ctx context.Context, cleanup *boundVolumeCleanup) error {
+	if cleanup == nil || cleanup.bound == nil || strings.TrimSpace(cleanup.volumeID) == "" {
+		return nil
 	}
-	if bound.materializeDone != nil {
-		<-bound.materializeDone
-		bound.materializeDone = nil
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	closeBoundSession(bound)
-	if err := m.volumes.UnmountVolume(context.Background(), volumeID, ""); err != nil {
+	if cleanup.materializeCancel != nil {
+		cleanup.materializeCancel()
+	}
+	if cleanup.materializeDone != nil {
+		select {
+		case <-cleanup.materializeDone:
+		case <-ctx.Done():
+			m.markBoundVolumeCleanupFailed(cleanup)
+			return ctx.Err()
+		}
+	}
+	closeBoundSession(cleanup.bound)
+	if err := m.volumes.UnmountVolume(ctx, cleanup.volumeID, ""); err != nil {
+		m.markBoundVolumeCleanupFailed(cleanup)
 		return err
 	}
-	delete(m.boundVolumes, volumeID)
-	m.unregisterOwner(bound)
+	unregister := false
+	m.mu.Lock()
+	if m.boundVolumes[cleanup.volumeID] == cleanup.bound {
+		delete(m.boundVolumes, cleanup.volumeID)
+		unregister = true
+	}
+	m.mu.Unlock()
+	if unregister {
+		m.unregisterOwner(cleanup.bound)
+	}
 	return nil
+}
+
+func (m *Manager) markBoundVolumeCleanupFailed(cleanup *boundVolumeCleanup) {
+	if m == nil || cleanup == nil || cleanup.bound == nil || strings.TrimSpace(cleanup.volumeID) == "" {
+		return
+	}
+	m.mu.Lock()
+	if m.boundVolumes[cleanup.volumeID] == cleanup.bound {
+		cleanup.bound.closing = false
+	}
+	m.mu.Unlock()
 }
 
 type publishRequest struct {
@@ -971,7 +1167,16 @@ func (m *Manager) startMaterializer(bound *boundVolume) {
 	bound.materializeDone = done
 	go func(volumeID string) {
 		defer close(done)
-		ticker := time.NewTicker(2 * time.Second)
+		if jitter := materializerInitialJitter(volumeID); jitter > 0 {
+			timer := time.NewTimer(jitter)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+		}
+		ticker := time.NewTicker(defaultVolumeMaterializeInterval)
 		defer ticker.Stop()
 		var compactionTicker *time.Ticker
 		var compactionC <-chan time.Time
@@ -985,14 +1190,35 @@ func (m *Manager) startMaterializer(bound *boundVolume) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				manifest, err := bound.volCtx.S0FS.SyncMaterialize(ctx)
-				if err != nil && m.logger != nil {
-					m.logger.Warn("ctld volume materialize failed", zap.String("volume_id", volumeID), zap.Error(err))
+				ran, err := m.tryRunMaterializer(ctx, func() error {
+					manifest, err := bound.volCtx.S0FS.SyncMaterialize(ctx)
+					if err != nil {
+						return err
+					}
+					m.garbageCollectBoundS0FS(ctx, bound, manifest)
+					return nil
+				})
+				if !ran {
 					continue
 				}
-				m.garbageCollectBoundS0FS(ctx, bound, manifest)
+				if err != nil && m.logger != nil {
+					m.logger.Warn("ctld volume materialize failed", zap.String("volume_id", volumeID), zap.Error(err))
+				}
 			case <-compactionC:
-				resultManifest, result, err := bound.volCtx.S0FS.Compact(ctx, compactionOptions)
+				var result *s0fs.CompactionResult
+				ran, err := m.tryRunMaterializer(ctx, func() error {
+					var resultManifest *s0fs.Manifest
+					var compactErr error
+					resultManifest, result, compactErr = bound.volCtx.S0FS.Compact(ctx, compactionOptions)
+					if compactErr != nil {
+						return compactErr
+					}
+					m.garbageCollectBoundS0FS(ctx, bound, resultManifest)
+					return nil
+				})
+				if !ran {
+					continue
+				}
 				if err != nil && m.logger != nil {
 					m.logger.Warn("ctld volume compaction failed", zap.String("volume_id", volumeID), zap.Error(err))
 					continue
@@ -1005,10 +1231,40 @@ func (m *Manager) startMaterializer(bound *boundVolume) {
 						zap.Uint64("reclaimable_bytes", result.ReclaimableBytes),
 					)
 				}
-				m.garbageCollectBoundS0FS(ctx, bound, resultManifest)
 			}
 		}
 	}(bound.volumeID)
+}
+
+func (m *Manager) tryRunMaterializer(ctx context.Context, fn func() error) (bool, error) {
+	if fn == nil {
+		return true, nil
+	}
+	if m == nil || m.materializerLimiter == nil {
+		return true, fn()
+	}
+	select {
+	case m.materializerLimiter <- struct{}{}:
+		defer func() { <-m.materializerLimiter }()
+	case <-ctx.Done():
+		return true, ctx.Err()
+	default:
+		return false, nil
+	}
+	return true, fn()
+}
+
+func materializerInitialJitter(volumeID string) time.Duration {
+	if strings.TrimSpace(volumeID) == "" || defaultVolumeMaterializeInterval <= time.Millisecond {
+		return 0
+	}
+	slots := uint32(defaultVolumeMaterializeInterval / time.Millisecond)
+	if slots == 0 {
+		return 0
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(volumeID))
+	return time.Duration(h.Sum32()%slots) * time.Millisecond
 }
 
 func (m *Manager) garbageCollectBoundS0FS(ctx context.Context, bound *boundVolume, manifest *s0fs.Manifest) {

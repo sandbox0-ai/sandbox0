@@ -2,6 +2,7 @@ package portal
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -69,8 +70,9 @@ func TestUnbindLockedSnapshotKeepsSharedVolumeUntilLastPortal(t *testing.T) {
 		fs:        volumefuse.New("portal-b", time.Second, unboundSession{}),
 	}
 
-	if err := mgr.unbindLockedSnapshot(pmA); err != nil {
-		t.Fatalf("unbindLockedSnapshot(first) error = %v", err)
+	cleanup := mgr.unbindLockedSnapshot(pmA)
+	if cleanup != nil {
+		t.Fatalf("unbindLockedSnapshot(first) cleanup = %+v, want nil", cleanup)
 	}
 	if pmA.volumeID != "" {
 		t.Fatalf("first portal volumeID = %q, want cleared", pmA.volumeID)
@@ -86,8 +88,9 @@ func TestUnbindLockedSnapshotKeepsSharedVolumeUntilLastPortal(t *testing.T) {
 		t.Fatalf("GetVolume() after first unbind error = %v, want mounted volume to remain", err)
 	}
 
-	if err := mgr.unbindLockedSnapshot(pmB); err != nil {
-		t.Fatalf("unbindLockedSnapshot(last) error = %v", err)
+	cleanup = mgr.unbindLockedSnapshot(pmB)
+	if err := mgr.finishBoundVolumeCleanup(context.Background(), cleanup); err != nil {
+		t.Fatalf("finishBoundVolumeCleanup(last) error = %v", err)
 	}
 	if _, ok := mgr.boundVolumes["vol-1"]; ok {
 		t.Fatal("bound volume still present after last unbind")
@@ -121,6 +124,70 @@ func TestCheckPublishedReportsMissingPortals(t *testing.T) {
 	}
 	if len(resp.Missing) != 1 || resp.Missing[0] != "cache" {
 		t.Fatalf("CheckPublished() missing = %v, want [cache]", resp.Missing)
+	}
+}
+
+func TestShutdownDrainsPublishedAndOwnerOnlyVolumes(t *testing.T) {
+	rootDir := t.TempDir()
+	var detachedTarget string
+	mgr := &Manager{
+		staleMountCleaner: func(path string) error {
+			detachedTarget = path
+			return os.RemoveAll(path)
+		},
+		portals:         make(map[string]*portalMount),
+		portalsByTarget: make(map[string]*portalMount),
+		boundVolumes:    make(map[string]*boundVolume),
+		volumes:         newLocalVolumeManager(),
+	}
+	portalVolCtx := &volume.VolumeContext{VolumeID: "vol-portal"}
+	ownerVolCtx := &volume.VolumeContext{VolumeID: "vol-owner"}
+	mgr.volumes.add(portalVolCtx)
+	mgr.volumes.add(ownerVolCtx)
+	pm := &portalMount{
+		podUID:            "pod-1",
+		name:              "workspace",
+		targetPath:        filepath.Join(rootDir, "target"),
+		rootfsBackingPath: filepath.Join(rootDir, "rootfs"),
+		volumeID:          "vol-portal",
+	}
+	mgr.portals[portalKey(pm.podUID, pm.name)] = pm
+	mgr.portalsByTarget[pm.targetPath] = pm
+	mgr.boundVolumes["vol-portal"] = &boundVolume{
+		volumeID: "vol-portal",
+		refCount: 1,
+		volCtx:   portalVolCtx,
+	}
+	mgr.boundVolumes["vol-owner"] = &boundVolume{
+		volumeID: "vol-owner",
+		refCount: 0,
+		volCtx:   ownerVolCtx,
+	}
+	for _, path := range []string{pm.targetPath, pm.rootfsBackingPath} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+
+	if err := mgr.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	if len(mgr.portals) != 0 || len(mgr.portalsByTarget) != 0 {
+		t.Fatalf("portals after Shutdown = %d/%d, want empty", len(mgr.portals), len(mgr.portalsByTarget))
+	}
+	if len(mgr.boundVolumes) != 0 {
+		t.Fatalf("boundVolumes after Shutdown = %#v, want empty", mgr.boundVolumes)
+	}
+	if detachedTarget != pm.targetPath {
+		t.Fatalf("detached target = %q, want %q", detachedTarget, pm.targetPath)
+	}
+	for _, volumeID := range []string{"vol-portal", "vol-owner"} {
+		if _, err := mgr.volumes.GetVolume(volumeID); err == nil {
+			t.Fatalf("GetVolume(%q) after Shutdown error = nil, want removed", volumeID)
+		}
+	}
+	if _, err := os.Stat(pm.rootfsBackingPath); !os.IsNotExist(err) {
+		t.Fatalf("rootfs backing stat error = %v, want not exist", err)
 	}
 }
 

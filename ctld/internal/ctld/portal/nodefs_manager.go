@@ -15,7 +15,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"go.uber.org/zap"
 )
@@ -538,21 +537,7 @@ func (m *Manager) completeNodeFSUnpublish(ctx context.Context, runtime *nodeFSRu
 }
 
 func (m *Manager) bindNodeFSPortal(ctx context.Context, req ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, error) {
-	portalName := volumeportal.NormalizePortalName(req.PortalName, req.MountPath)
-	if portalName == "" {
-		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("portal name or mount path is required")
-	}
-	if req.PodUID == "" || req.SandboxVolumeID == "" || req.TeamID == "" {
-		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("pod_uid, sandboxvolume_id and team_id are required")
-	}
-	volumeRecord, err := m.validateBindableVolume(ctx, ctldBindContext{
-		volumeID: req.SandboxVolumeID,
-		teamID:   req.TeamID,
-	})
-	if err != nil {
-		return ctldapi.BindVolumePortalResponse{}, err
-	}
-	accessMode, err := validateBindableAccessMode(volumeRecord.AccessMode)
+	portalName, volumeRecord, accessMode, err := m.validatePortalBindRequest(ctx, req)
 	if err != nil {
 		return ctldapi.BindVolumePortalResponse{}, err
 	}
@@ -586,25 +571,25 @@ func (m *Manager) bindNodeFSPortal(ctx context.Context, req ctldapi.BindVolumePo
 	}
 	m.mu.Unlock()
 
-	bound, created, err := m.reserveNodeFSBoundVolume(ctx, req, volumeRecord, accessMode)
+	bound, created, err := m.reserveBoundVolume(ctx, req, volumeRecord, accessMode, key)
 	if err != nil {
 		return ctldapi.BindVolumePortalResponse{}, err
 	}
 	mountedAt := time.Now().UTC()
 	backend := volume.NormalizeBackend(volumeRecord.Backend)
 	if err := runtime.journal.UpdatePortalBinding(key, backend, req.SandboxVolumeID, req.TeamID, mountedAt); err != nil {
-		cleanupErr := m.rollbackNodeFSBoundReservation(ctx, bound, created)
+		cleanupErr := m.rollbackBoundVolumeReservation(ctx, bound, created)
 		return ctldapi.BindVolumePortalResponse{}, errors.Join(err, cleanupErr)
 	}
 	shard, err := runtime.shard(pm.nodeFSShard)
 	if err != nil {
-		_ = m.rollbackNodeFSBoundReservation(ctx, bound, false)
+		_ = m.rollbackBoundVolumeReservation(ctx, bound, false)
 		return ctldapi.BindVolumePortalResponse{}, err
 	}
 	if _, err := shard.mux.UpdatePortalSession(pm.nodeFSRouteName, bound.volumeID, bound.session); err != nil {
 		// The journal intentionally remains on the desired backend. A retry or
 		// process recovery will complete the switch.
-		_ = m.rollbackNodeFSBoundReservation(ctx, bound, false)
+		_ = m.rollbackBoundVolumeReservation(ctx, bound, false)
 		return ctldapi.BindVolumePortalResponse{}, err
 	}
 	m.mu.Lock()
@@ -613,98 +598,6 @@ func (m *Manager) bindNodeFSPortal(ctx context.Context, req ctldapi.BindVolumePo
 	pm.mountedAt = mountedAt
 	m.mu.Unlock()
 	return boundResponse(pm), nil
-}
-
-func (m *Manager) reserveNodeFSBoundVolume(
-	ctx context.Context,
-	req ctldapi.BindVolumePortalRequest,
-	volumeRecord *db.SandboxVolume,
-	accessMode volume.AccessMode,
-) (*boundVolume, bool, error) {
-	m.mu.Lock()
-	if bound := m.boundVolumes[req.SandboxVolumeID]; bound != nil {
-		if err := validateNodeFSBoundReservation(bound, req, accessMode); err != nil {
-			m.mu.Unlock()
-			return nil, false, err
-		}
-		bound.refCount++
-		m.mu.Unlock()
-		return bound, false, nil
-	}
-	if existing := findBoundPortalForVolume(m.portals, req.SandboxVolumeID, ""); existing != nil {
-		conflictPath := existing.mountPath
-		m.mu.Unlock()
-		return nil, false, fmt.Errorf("volume %s is already bound to %s", req.SandboxVolumeID, conflictPath)
-	}
-	m.mu.Unlock()
-
-	mountedAt := time.Now().UTC()
-	newBound, cleanupNewBound, err := m.openBoundVolume(ctx, req, volumeRecord, accessMode, mountedAt)
-	if err != nil {
-		return nil, false, err
-	}
-	m.mu.Lock()
-	if bound := m.boundVolumes[req.SandboxVolumeID]; bound != nil {
-		if err := validateNodeFSBoundReservation(bound, req, accessMode); err != nil {
-			m.mu.Unlock()
-			cleanupNewBound()
-			return nil, false, err
-		}
-		bound.refCount++
-		m.mu.Unlock()
-		cleanupNewBound()
-		return bound, false, nil
-	}
-	m.boundVolumes[req.SandboxVolumeID] = newBound
-	m.volumes.add(newBound.volCtx)
-	if err := m.registerOwner(ctx, newBound); err != nil {
-		delete(m.boundVolumes, req.SandboxVolumeID)
-		m.volumes.remove(req.SandboxVolumeID)
-		m.mu.Unlock()
-		cleanupNewBound()
-		return nil, false, fmt.Errorf("register ctld volume owner: %w", err)
-	}
-	m.startMaterializer(newBound)
-	m.mu.Unlock()
-	return newBound, true, nil
-}
-
-func validateNodeFSBoundReservation(bound *boundVolume, req ctldapi.BindVolumePortalRequest, accessMode volume.AccessMode) error {
-	if bound == nil {
-		return fmt.Errorf("volume %s binding is unavailable", req.SandboxVolumeID)
-	}
-	if bound.closing {
-		return fmt.Errorf("volume %s is closing", req.SandboxVolumeID)
-	}
-	if bound.teamID != req.TeamID {
-		return fmt.Errorf("volume %s belongs to team %s", req.SandboxVolumeID, bound.teamID)
-	}
-	if bound.access != accessMode {
-		return fmt.Errorf("volume %s access mode changed from %s to %s", req.SandboxVolumeID, bound.access, accessMode)
-	}
-	if bound.refCount > 0 && accessMode != volume.AccessModeROX {
-		return fmt.Errorf("volume %s is already bound", req.SandboxVolumeID)
-	}
-	if bound.session == nil {
-		return fmt.Errorf("volume %s session is unavailable", req.SandboxVolumeID)
-	}
-	return nil
-}
-
-func (m *Manager) rollbackNodeFSBoundReservation(ctx context.Context, bound *boundVolume, removeIfUnused bool) error {
-	if bound == nil {
-		return nil
-	}
-	m.mu.Lock()
-	if bound.refCount > 0 {
-		bound.refCount--
-	}
-	var cleanup *boundVolumeCleanup
-	if removeIfUnused && bound.refCount == 0 && m.boundVolumes[bound.volumeID] == bound && !bound.closing {
-		cleanup = m.releaseOwnerOnlyVolumeLocked(bound.volumeID, bound)
-	}
-	m.mu.Unlock()
-	return m.finishBoundVolumeCleanup(ctx, cleanup)
 }
 
 func (m *Manager) unbindNodeFSPortal(ctx context.Context, req ctldapi.UnbindVolumePortalRequest) (ctldapi.UnbindVolumePortalResponse, error) {

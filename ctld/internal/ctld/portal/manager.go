@@ -477,21 +477,7 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 	if m != nil && m.nodeFSShardCount > 0 {
 		return m.bindNodeFSPortal(ctx, req)
 	}
-	portalName := volumeportal.NormalizePortalName(req.PortalName, req.MountPath)
-	if portalName == "" {
-		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("portal name or mount path is required")
-	}
-	if req.PodUID == "" || req.SandboxVolumeID == "" || req.TeamID == "" {
-		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("pod_uid, sandboxvolume_id and team_id are required")
-	}
-	volumeRecord, err := m.validateBindableVolume(ctx, ctldBindContext{
-		volumeID: req.SandboxVolumeID,
-		teamID:   req.TeamID,
-	})
-	if err != nil {
-		return ctldapi.BindVolumePortalResponse{}, err
-	}
-	accessMode, err := validateBindableAccessMode(volumeRecord.AccessMode)
+	portalName, volumeRecord, accessMode, err := m.validatePortalBindRequest(ctx, req)
 	if err != nil {
 		return ctldapi.BindVolumePortalResponse{}, err
 	}
@@ -499,132 +485,45 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 	key := portalKey(req.PodUID, portalName)
 	m.mu.Lock()
 	pm := m.portals[key]
-	m.mu.Unlock()
 	if pm == nil {
+		m.mu.Unlock()
 		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume portal %s for pod %s is not published", portalName, req.PodUID)
 	}
 	if pm.volumeID != "" && pm.volumeID != req.SandboxVolumeID {
-		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume portal already bound to %s", pm.volumeID)
+		volumeID := pm.volumeID
+		m.mu.Unlock()
+		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume portal already bound to %s", volumeID)
 	}
 	if pm.volumeID == req.SandboxVolumeID {
-		return boundResponse(pm), nil
-	}
-
-	mountedAt := time.Now().UTC()
-	m.mu.Lock()
-	pm = m.portals[key]
-	if pm == nil {
-		m.mu.Unlock()
-		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume portal %s for pod %s is not published", portalName, req.PodUID)
-	}
-	if pm.volumeID != "" {
-		response := boundResponse(pm)
-		m.mu.Unlock()
-		if response.SandboxVolumeID != req.SandboxVolumeID {
-			return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume portal already bound to %s", response.SandboxVolumeID)
-		}
-		return response, nil
-	}
-	if bound := m.boundVolumes[req.SandboxVolumeID]; bound != nil {
-		if bound.closing {
-			m.mu.Unlock()
-			return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume %s is closing", req.SandboxVolumeID)
-		}
-		if bound.refCount == 0 {
-			m.attachPortalLocked(pm, bound, mountedAt)
-			bound.refCount = 1
-			response := boundResponse(pm)
-			m.mu.Unlock()
-			return response, nil
-		}
-		if accessMode != volume.AccessModeROX {
-			conflictPath := boundMountPath(m.portals, req.SandboxVolumeID, key)
-			m.mu.Unlock()
-			return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume %s is already bound to %s", req.SandboxVolumeID, conflictPath)
-		}
-		m.attachPortalLocked(pm, bound, mountedAt)
-		bound.refCount++
 		response := boundResponse(pm)
 		m.mu.Unlock()
 		return response, nil
-	}
-	if existing := findBoundPortalForVolume(m.portals, req.SandboxVolumeID, key); existing != nil {
-		conflictPath := existing.mountPath
-		m.mu.Unlock()
-		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume %s is already bound to %s", req.SandboxVolumeID, conflictPath)
 	}
 	m.mu.Unlock()
 
-	newBound, cleanupNewBound, err := m.openBoundVolume(ctx, req, volumeRecord, accessMode, mountedAt)
+	bound, created, err := m.reserveBoundVolume(ctx, req, volumeRecord, accessMode, key)
 	if err != nil {
 		return ctldapi.BindVolumePortalResponse{}, err
 	}
-
 	m.mu.Lock()
 	pm = m.portals[key]
 	if pm == nil {
 		m.mu.Unlock()
-		cleanupNewBound()
-		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume portal %s for pod %s is not published", portalName, req.PodUID)
+		bindErr := fmt.Errorf("volume portal %s for pod %s is not published", portalName, req.PodUID)
+		return ctldapi.BindVolumePortalResponse{}, errors.Join(bindErr, m.rollbackBoundVolumeReservation(ctx, bound, created))
 	}
 	if pm.volumeID != "" {
 		response := boundResponse(pm)
 		m.mu.Unlock()
-		cleanupNewBound()
+		cleanupErr := m.rollbackBoundVolumeReservation(ctx, bound, created)
 		if response.SandboxVolumeID != req.SandboxVolumeID {
-			return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume portal already bound to %s", response.SandboxVolumeID)
+			return ctldapi.BindVolumePortalResponse{}, errors.Join(fmt.Errorf("volume portal already bound to %s", response.SandboxVolumeID), cleanupErr)
 		}
-		return response, nil
+		return response, cleanupErr
 	}
-	if bound := m.boundVolumes[req.SandboxVolumeID]; bound != nil {
-		if bound.closing {
-			m.mu.Unlock()
-			cleanupNewBound()
-			return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume %s is closing", req.SandboxVolumeID)
-		}
-		if bound.refCount == 0 {
-			m.attachPortalLocked(pm, bound, mountedAt)
-			bound.refCount = 1
-			response := boundResponse(pm)
-			m.mu.Unlock()
-			cleanupNewBound()
-			return response, nil
-		}
-		if accessMode != volume.AccessModeROX {
-			conflictPath := boundMountPath(m.portals, req.SandboxVolumeID, key)
-			m.mu.Unlock()
-			cleanupNewBound()
-			return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume %s is already bound to %s", req.SandboxVolumeID, conflictPath)
-		}
-		m.attachPortalLocked(pm, bound, mountedAt)
-		bound.refCount++
-		response := boundResponse(pm)
-		m.mu.Unlock()
-		cleanupNewBound()
-		return response, nil
-	}
-	if existing := findBoundPortalForVolume(m.portals, req.SandboxVolumeID, key); existing != nil {
-		conflictPath := existing.mountPath
-		m.mu.Unlock()
-		cleanupNewBound()
-		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume %s is already bound to %s", req.SandboxVolumeID, conflictPath)
-	}
-	bound := newBound
-	m.boundVolumes[req.SandboxVolumeID] = bound
-	m.volumes.add(bound.volCtx)
-	m.attachPortalLocked(pm, bound, mountedAt)
-	if err := m.registerOwner(ctx, bound); err != nil {
-		m.clearPortalLocked(pm)
-		delete(m.boundVolumes, req.SandboxVolumeID)
-		m.volumes.remove(req.SandboxVolumeID)
-		m.mu.Unlock()
-		cleanupNewBound()
-		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("register ctld volume owner: %w", err)
-	}
-	m.startMaterializer(bound)
+	m.attachPortalLocked(pm, bound, time.Now().UTC())
 	response := boundResponse(pm)
 	m.mu.Unlock()
-
 	return response, nil
 }
 

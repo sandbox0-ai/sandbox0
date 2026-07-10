@@ -354,6 +354,20 @@ spec:
 
 Cache contents are safe to delete. If a cached object is missing, corrupt, too old, or evicted to preserve free space, `ctld` downloads the rootfs object from configured object storage.
 
+For high-density nodes, `ctld` can serve all volume portals through a fixed set of node-wide FUSE connections instead of creating one connection per Sandbox:
+
+```yaml
+spec:
+    services:
+        ctld:
+            nodeFSShardCount: 8
+            requireFUSERecovery: true
+```
+
+This mode does not deploy another service. `ctld` owns the shard connections, keeps their lifecycle journal on its existing host data path, and bind-mounts each portal subtree into the CSI target. It works with both gVisor and host runtimes such as runc because the runtime receives a normal CSI mount.
+
+`requireFUSERecovery: true` is the production-safe setting. It requires a kernel with Sandbox0's ANCK FUSE recovery patch set and refuses to publish portals if the kernel does not negotiate both recovery and request resend. The maintained kernel branch and immutable tags are published in [`sandbox0-ai/anck-kernel`](https://github.com/sandbox0-ai/anck-kernel). Install and boot that kernel on a drained canary node before enabling the setting. Drain a node before enabling nodefs, disabling it, or changing `nodeFSShardCount`; the shard count is immutable while that node has committed portals.
+
 ### Shared Redis Rate Limiting
 
 Gateway request rate limiting defaults to process-local memory. Configure `spec.redis` when gateway replicas need a shared Redis backend. The same Redis backend is also used by `netd` when cluster-scoped team bandwidth limits are configured.

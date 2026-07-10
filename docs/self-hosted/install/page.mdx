@@ -350,6 +350,18 @@ spec:
             rootfsObjectCacheMinFreeBytes: 5Gi
 ```
 
+High-density nodes can opt into fixed, recoverable ctld FUSE shards after booting a compatible kernel:
+
+```yaml
+spec:
+    services:
+        ctld:
+            nodeFSShardCount: 8
+            requireFUSERecovery: true
+```
+
+Use this only after draining and upgrading a canary node with the maintained [`sandbox0-ai/anck-kernel`](https://github.com/sandbox0-ai/anck-kernel) recovery build. ctld fails closed if recovery and resend are not negotiated. See [Self-hosted Configuration](/docs/self-hosted/configuration) for the lifecycle and shard-count constraints.
+
 ### 6) Expose the API Publicly
 
 After the `LoadBalancer` patch above, GKE allocates a public IP for `cluster-gateway`.

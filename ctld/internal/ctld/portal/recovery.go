@@ -88,7 +88,7 @@ func (m *Manager) CleanupStaleCSIMounts(ctx context.Context) error {
 				if !shouldCleanSandboxCSIMount(info, activePods, activeReliable, true) {
 					return filepath.SkipDir
 				}
-				if cleanupErr := cleaner(path); cleanupErr != nil {
+				if cleanupErr := m.cleanupStaleCSIMountTarget(ctx, path, cleaner); cleanupErr != nil {
 					if firstErr == nil {
 						firstErr = cleanupErr
 					}
@@ -124,7 +124,7 @@ func (m *Manager) CleanupStaleCSIMounts(ctx context.Context) error {
 		if !shouldCleanSandboxCSIMount(info, activePods, activeReliable, broken) {
 			return filepath.SkipDir
 		}
-		if err := cleaner(path); err != nil {
+		if err := m.cleanupStaleCSIMountTarget(ctx, path, cleaner); err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -142,6 +142,30 @@ func (m *Manager) CleanupStaleCSIMounts(ctx context.Context) error {
 		return walkErr
 	}
 	return firstErr
+}
+
+// cleanupStaleCSIMountTarget keeps the nodefs journal, router, and backend
+// references consistent when the generic kubelet scan finds a committed
+// target. Unknown targets still use the caller's stale mount cleaner.
+func (m *Manager) cleanupStaleCSIMountTarget(ctx context.Context, targetPath string, cleaner staleMountCleaner) error {
+	if cleaner == nil {
+		cleaner = defaultStaleMountCleaner
+	}
+	if m == nil || m.nodeFSShardCount <= 0 {
+		return cleaner(targetPath)
+	}
+	runtime, err := m.requireNodeFS()
+	if err != nil {
+		return fmt.Errorf("refusing nodefs stale mount cleanup before initialization: %w", err)
+	}
+	targetPath = filepath.Clean(targetPath)
+	for _, portal := range runtime.journal.Snapshot().Portals {
+		if filepath.Clean(portal.TargetPath) != targetPath {
+			continue
+		}
+		return m.unpublishNodeFSPortal(ctx, portal.TargetPath)
+	}
+	return cleaner(targetPath)
 }
 
 func (m *Manager) activePodUIDs(ctx context.Context) (map[string]struct{}, bool) {

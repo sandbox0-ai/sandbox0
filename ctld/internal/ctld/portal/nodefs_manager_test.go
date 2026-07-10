@@ -184,6 +184,118 @@ func TestNodeFSInitializeRecoversPublishedPortalBeforeReturning(t *testing.T) {
 	}
 }
 
+func TestNodeFSRecoveryStaleCleanupCompletesCommittedPortal(t *testing.T) {
+	rootDir := t.TempDir()
+	firstFactory, _ := newNodeFSTestFactory(false)
+	first := newNodeFSTestManager(t, rootDir, &fakeNodeFSMounter{}, firstFactory)
+	if err := first.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	pm, state := publishNodeFSTestPortal(t, first)
+	if err := os.MkdirAll(pm.targetPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	releaseNodeFSTestProcess(t, first)
+
+	mounter := &fakeNodeFSMounter{}
+	secondFactory, _ := newNodeFSTestFactory(true)
+	second := newNodeFSTestManager(t, rootDir, mounter, secondFactory)
+	second.activePodUIDLister = func(context.Context) (map[string]struct{}, error) {
+		return map[string]struct{}{}, nil
+	}
+	rawCleanerCalled := false
+	second.staleMountCleaner = func(string) error {
+		rawCleanerCalled = true
+		return nil
+	}
+	if err := second.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer releaseNodeFSTestProcess(t, second)
+
+	if err := second.CleanupStaleCSIMounts(context.Background()); err != nil {
+		t.Fatalf("CleanupStaleCSIMounts() error = %v", err)
+	}
+	if rawCleanerCalled {
+		t.Fatal("committed nodefs target used the raw stale mount cleaner")
+	}
+	if len(mounter.unmounts) != 1 || mounter.unmounts[0] != pm.targetPath {
+		t.Fatalf("nodefs unmounts = %v, want %s", mounter.unmounts, pm.targetPath)
+	}
+	if _, ok := second.nodeFS.journal.Portal(state.PortalKey); ok {
+		t.Fatal("stale recovered portal remains in journal")
+	}
+	second.mu.Lock()
+	restored := second.portals[state.PortalKey]
+	byTarget := second.portalsByTarget[pm.targetPath]
+	second.mu.Unlock()
+	if restored != nil || byTarget != nil {
+		t.Fatalf("stale recovered portal remains registered: portal=%v target=%v", restored, byTarget)
+	}
+	if _, err := os.Stat(pm.rootfsBackingPath); !os.IsNotExist(err) {
+		t.Fatalf("rootfs backing stat error = %v, want not exist", err)
+	}
+}
+
+func TestNodeFSStaleCleanupReleasesBoundVolume(t *testing.T) {
+	rootDir := t.TempDir()
+	mounter := &fakeNodeFSMounter{}
+	factory, _ := newNodeFSTestFactory(false)
+	mgr := newNodeFSTestManager(t, rootDir, mounter, factory)
+	mgr.activePodUIDLister = func(context.Context) (map[string]struct{}, error) {
+		return map[string]struct{}{}, nil
+	}
+	if err := mgr.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer releaseNodeFSTestProcess(t, mgr)
+	pm, state := publishNodeFSTestPortal(t, mgr)
+	if err := os.MkdirAll(pm.targetPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	backendSession := &closeTrackingSession{Session: unboundSession{}}
+	bound := &boundVolume{
+		volumeID:  "volume-a",
+		teamID:    "team-a",
+		access:    volume.AccessModeRWO,
+		mountedAt: time.Now().UTC(),
+		refCount:  1,
+		volCtx:    &volume.VolumeContext{VolumeID: "volume-a", TeamID: "team-a"},
+		session:   backendSession,
+	}
+	mgr.mu.Lock()
+	mgr.boundVolumes[bound.volumeID] = bound
+	mgr.volumes.add(bound.volCtx)
+	pm.volumeID = bound.volumeID
+	pm.teamID = bound.teamID
+	pm.mountedAt = bound.mountedAt
+	mgr.mu.Unlock()
+	if err := mgr.nodeFS.journal.UpdatePortalBinding(state.PortalKey, volume.BackendS0FS, bound.volumeID, bound.teamID, bound.mountedAt); err != nil {
+		t.Fatal(err)
+	}
+	shard := &mgr.nodeFS.shards[pm.nodeFSShard]
+	if _, err := shard.mux.UpdatePortalSession(pm.nodeFSRouteName, bound.volumeID, bound.session); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := mgr.CleanupStaleCSIMounts(context.Background()); err != nil {
+		t.Fatalf("CleanupStaleCSIMounts() error = %v", err)
+	}
+	if !backendSession.closed.Load() {
+		t.Fatal("stale cleanup did not close the final backend session")
+	}
+	mgr.mu.Lock()
+	remaining := mgr.boundVolumes[bound.volumeID]
+	mgr.mu.Unlock()
+	if remaining != nil {
+		t.Fatalf("stale cleanup retained bound volume: %+v", remaining)
+	}
+	if _, ok := mgr.nodeFS.journal.Portal(state.PortalKey); ok {
+		t.Fatal("stale bound portal remains in journal")
+	}
+}
+
 func TestNodeFSRecoveryFailsClosedWhenPublishedBackingIsMissing(t *testing.T) {
 	rootDir := t.TempDir()
 	firstFactory, _ := newNodeFSTestFactory(false)

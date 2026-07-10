@@ -507,6 +507,10 @@ func (s *rootFSBackedSession) orphanDirectoryPath() string {
 	return filepath.Join(s.stateDirectoryPath(), rootFSOrphanDirectory)
 }
 
+func (s *rootFSBackedSession) resendLedgerPath() string {
+	return filepath.Join(s.stateDirectoryPath(), rootFSResendLedgerFileName)
+}
+
 func rootFSOrphanPath(inode uint64) string {
 	return filepath.ToSlash(filepath.Join(rootFSStateDirectoryName, rootFSOrphanDirectory, strconv.FormatUint(inode, 10)))
 }

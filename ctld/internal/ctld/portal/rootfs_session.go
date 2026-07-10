@@ -26,6 +26,7 @@ const rootFSBackedSessionRoot = ""
 type rootFSBackedSession struct {
 	root string
 
+	mutationMu      sync.Mutex
 	mu              sync.Mutex
 	inodeByPath     map[string]uint64
 	pathByInode     map[uint64]string
@@ -33,13 +34,22 @@ type rootFSBackedSession struct {
 	handles         map[uint64]*rootFSOpenHandle
 	orphans         map[uint64]rootFSOrphanRecord
 	recovered       bool
+	resendLedger    *rootFSResendLedger
 	initErr         error
 	closed          bool
+
+	// Tests use these hooks to terminate a subprocess in the two recovery
+	// windows. Production sessions leave both nil.
+	afterMutationApply  func(rootFSMutationOperation)
+	afterMutationCommit func(rootFSMutationOperation)
 }
 
 func newRootFSBackedSession(root string) *rootFSBackedSession {
 	session := &rootFSBackedSession{root: filepath.Clean(root)}
 	session.initErr = session.initializeState()
+	if session.initErr == nil {
+		session.resendLedger, session.initErr = openRootFSResendLedger(session.resendLedgerPath())
+	}
 	return session
 }
 
@@ -47,9 +57,11 @@ func (s *rootFSBackedSession) Close() {
 	if s == nil {
 		return
 	}
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return
 	}
 	s.closed = true
@@ -57,6 +69,10 @@ func (s *rootFSBackedSession) Close() {
 		closeRootFSHandleFiles(handle)
 		delete(s.handles, id)
 	}
+	ledger := s.resendLedger
+	s.resendLedger = nil
+	s.mu.Unlock()
+	_ = ledger.Close()
 }
 
 // InitError reports recovery failures before the session is mounted or routed.
@@ -104,7 +120,7 @@ func (s *rootFSBackedSession) GetAttr(_ context.Context, req *pb.GetAttrRequest)
 	return attrFromFileInfo(req.GetInode(), info), nil
 }
 
-func (s *rootFSBackedSession) SetAttr(_ context.Context, req *pb.SetAttrRequest) (*pb.SetAttrResponse, error) {
+func (s *rootFSBackedSession) setAttrOnce(req *pb.SetAttrRequest, fixedAtime, fixedMtime time.Time) (*pb.SetAttrResponse, error) {
 	rel, err := s.relForInode(req.GetInode())
 	if err != nil {
 		return nil, err
@@ -136,9 +152,17 @@ func (s *rootFSBackedSession) SetAttr(_ context.Context, req *pb.SetAttrRequest)
 		}
 	}
 	if valid&(fuse.FATTR_ATIME|fuse.FATTR_MTIME|fuse.FATTR_ATIME_NOW|fuse.FATTR_MTIME_NOW) != 0 {
-		now := time.Now()
-		atime := now
-		mtime := now
+		if fixedAtime.IsZero() || fixedMtime.IsZero() {
+			now := time.Now()
+			if fixedAtime.IsZero() {
+				fixedAtime = now
+			}
+			if fixedMtime.IsZero() {
+				fixedMtime = now
+			}
+		}
+		atime := fixedAtime
+		mtime := fixedMtime
 		if valid&fuse.FATTR_ATIME != 0 {
 			atime = time.Unix(attr.GetAtimeSec(), attr.GetAtimeNsec())
 		}
@@ -156,7 +180,7 @@ func (s *rootFSBackedSession) SetAttr(_ context.Context, req *pb.SetAttrRequest)
 	return &pb.SetAttrResponse{Attr: attrFromFileInfo(req.GetInode(), info)}, nil
 }
 
-func (s *rootFSBackedSession) Mkdir(_ context.Context, req *pb.MkdirRequest) (*pb.NodeResponse, error) {
+func (s *rootFSBackedSession) mkdirOnce(req *pb.MkdirRequest) (*pb.NodeResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	parent, err := s.relForInodeLocked(req.GetParent())
@@ -189,7 +213,7 @@ func (s *rootFSBackedSession) Mkdir(_ context.Context, req *pb.MkdirRequest) (*p
 	return &pb.NodeResponse{Inode: inode, Generation: 1, Attr: attrFromFileInfo(inode, info)}, nil
 }
 
-func (s *rootFSBackedSession) Create(_ context.Context, req *pb.CreateRequest) (*pb.NodeResponse, error) {
+func (s *rootFSBackedSession) createOnce(req *pb.CreateRequest) (*pb.NodeResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	parent, err := s.relForInodeLocked(req.GetParent())
@@ -226,7 +250,7 @@ func (s *rootFSBackedSession) Create(_ context.Context, req *pb.CreateRequest) (
 	return &pb.NodeResponse{Inode: inode, Generation: 1, Attr: attrFromFileInfo(inode, info), HandleId: handleID}, nil
 }
 
-func (s *rootFSBackedSession) Unlink(_ context.Context, req *pb.UnlinkRequest) (*pb.Empty, error) {
+func (s *rootFSBackedSession) unlinkOnce(req *pb.UnlinkRequest) (*pb.Empty, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	parent, err := s.relForInodeLocked(req.GetParent())
@@ -240,7 +264,7 @@ func (s *rootFSBackedSession) Unlink(_ context.Context, req *pb.UnlinkRequest) (
 	return s.removePathLocked(rel, false)
 }
 
-func (s *rootFSBackedSession) Rmdir(_ context.Context, req *pb.RmdirRequest) (*pb.Empty, error) {
+func (s *rootFSBackedSession) rmdirOnce(req *pb.RmdirRequest) (*pb.Empty, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	parent, err := s.relForInodeLocked(req.GetParent())
@@ -254,7 +278,7 @@ func (s *rootFSBackedSession) Rmdir(_ context.Context, req *pb.RmdirRequest) (*p
 	return s.removePathLocked(rel, true)
 }
 
-func (s *rootFSBackedSession) Rename(_ context.Context, req *pb.RenameRequest) (*pb.Empty, error) {
+func (s *rootFSBackedSession) renameOnce(req *pb.RenameRequest) (*pb.Empty, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	oldParent, err := s.relForInodeLocked(req.GetOldParent())
@@ -357,7 +381,7 @@ func (s *rootFSBackedSession) Rename(_ context.Context, req *pb.RenameRequest) (
 	return &pb.Empty{}, nil
 }
 
-func (s *rootFSBackedSession) Link(_ context.Context, req *pb.LinkRequest) (*pb.NodeResponse, error) {
+func (s *rootFSBackedSession) linkOnce(req *pb.LinkRequest) (*pb.NodeResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sourceRel, err := s.relForInodeLocked(req.GetInode())
@@ -387,7 +411,7 @@ func (s *rootFSBackedSession) Link(_ context.Context, req *pb.LinkRequest) (*pb.
 	return &pb.NodeResponse{Inode: inode, Generation: 1, Attr: attrFromFileInfo(inode, info)}, nil
 }
 
-func (s *rootFSBackedSession) Symlink(_ context.Context, req *pb.SymlinkRequest) (*pb.NodeResponse, error) {
+func (s *rootFSBackedSession) symlinkOnce(req *pb.SymlinkRequest) (*pb.NodeResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	parentRel, err := s.relForInodeLocked(req.GetParent())
@@ -475,7 +499,7 @@ func (s *rootFSBackedSession) Read(_ context.Context, req *pb.ReadRequest) (*pb.
 	return &pb.ReadResponse{Data: buf[:n], Eof: errors.Is(err, io.EOF)}, nil
 }
 
-func (s *rootFSBackedSession) Write(_ context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
+func (s *rootFSBackedSession) writeOnce(req *pb.WriteRequest) (*pb.WriteResponse, error) {
 	handle, release, err := s.handleForWrite(req.GetInode(), req.GetHandleId())
 	if err != nil {
 		return nil, err
@@ -488,7 +512,7 @@ func (s *rootFSBackedSession) Write(_ context.Context, req *pb.WriteRequest) (*p
 	return &pb.WriteResponse{BytesWritten: int64(n)}, nil
 }
 
-func (s *rootFSBackedSession) Release(_ context.Context, req *pb.ReleaseRequest) (*pb.Empty, error) {
+func (s *rootFSBackedSession) releaseOnce(req *pb.ReleaseRequest) (*pb.Empty, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.releaseHandleLocked(req.GetHandleId(), false)
@@ -514,7 +538,7 @@ func (s *rootFSBackedSession) Fsync(_ context.Context, req *pb.FsyncRequest) (*p
 	return s.Flush(context.Background(), &pb.FlushRequest{HandleId: req.GetHandleId()})
 }
 
-func (s *rootFSBackedSession) Fallocate(_ context.Context, req *pb.FallocateRequest) (*pb.Empty, error) {
+func (s *rootFSBackedSession) fallocateOnce(req *pb.FallocateRequest) (*pb.Empty, error) {
 	handle, release, err := s.handleForWrite(req.GetInode(), req.GetHandleId())
 	if err != nil {
 		return nil, err
@@ -614,7 +638,7 @@ func (s *rootFSBackedSession) ReadDir(_ context.Context, req *pb.ReadDirRequest)
 	return &pb.ReadDirResponse{Entries: out, Eof: true}, nil
 }
 
-func (s *rootFSBackedSession) ReleaseDir(_ context.Context, req *pb.ReleaseDirRequest) (*pb.Empty, error) {
+func (s *rootFSBackedSession) releaseDirOnce(req *pb.ReleaseDirRequest) (*pb.Empty, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.releaseHandleLocked(req.GetHandleId(), true)
@@ -661,7 +685,7 @@ func (s *rootFSBackedSession) GetXattr(_ context.Context, req *pb.GetXattrReques
 	return &pb.GetXattrResponse{Value: buf}, nil
 }
 
-func (s *rootFSBackedSession) SetXattr(_ context.Context, req *pb.SetXattrRequest) (*pb.Empty, error) {
+func (s *rootFSBackedSession) setXattrOnce(req *pb.SetXattrRequest) (*pb.Empty, error) {
 	rel, err := s.relForInode(req.GetInode())
 	if err != nil {
 		return nil, err
@@ -690,7 +714,7 @@ func (s *rootFSBackedSession) ListXattr(_ context.Context, req *pb.ListXattrRequ
 	return &pb.ListXattrResponse{Data: buf}, nil
 }
 
-func (s *rootFSBackedSession) RemoveXattr(_ context.Context, req *pb.RemoveXattrRequest) (*pb.Empty, error) {
+func (s *rootFSBackedSession) removeXattrOnce(req *pb.RemoveXattrRequest) (*pb.Empty, error) {
 	rel, err := s.relForInode(req.GetInode())
 	if err != nil {
 		return nil, err
@@ -701,7 +725,7 @@ func (s *rootFSBackedSession) RemoveXattr(_ context.Context, req *pb.RemoveXattr
 	return &pb.Empty{}, nil
 }
 
-func (s *rootFSBackedSession) Mknod(_ context.Context, req *pb.MknodRequest) (*pb.NodeResponse, error) {
+func (s *rootFSBackedSession) mknodOnce(req *pb.MknodRequest) (*pb.NodeResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	parent, err := s.relForInodeLocked(req.GetParent())

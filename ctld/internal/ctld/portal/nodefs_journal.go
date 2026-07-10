@@ -293,6 +293,16 @@ func (s *nodeFSJournalStore) AllocatePortal(portal nodeFSPortalState) (nodeFSPor
 		}
 
 		shard := nodeFSShardForPortal(portal.PortalKey, state.ShardCount)
+		initialized := false
+		for _, shardState := range state.Shards {
+			if shardState.Index == shard && len(shardState.SessionState) > 0 {
+				initialized = true
+				break
+			}
+		}
+		if !initialized {
+			return fmt.Errorf("nodefs shard %d is not initialized", shard)
+		}
 		slot := state.NextSlotByShard[shard]
 		if slot == 0 || slot > uint64(nodefs.MaxSlot) {
 			return fmt.Errorf("nodefs shard %d exhausted portal slots", shard)

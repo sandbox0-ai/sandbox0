@@ -168,10 +168,7 @@ func TestNodeFSJournalFailedUpdateDoesNotMutateCommittedState(t *testing.T) {
 }
 
 func TestNodeFSJournalPortalLifecycleNeverReusesSlot(t *testing.T) {
-	store, err := openNodeFSJournal(t.TempDir(), "node-a", 1)
-	if err != nil {
-		t.Fatalf("openNodeFSJournal() error = %v", err)
-	}
+	store := openInitializedNodeFSJournal(t)
 	first, err := store.AllocatePortal(nodeFSPortalState{
 		PortalKey:  portalKey("pod-a", "workspace"),
 		PodUID:     "pod-a",
@@ -225,10 +222,7 @@ func TestNodeFSJournalPortalLifecycleNeverReusesSlot(t *testing.T) {
 }
 
 func TestNodeFSJournalRejectsPortalAllocationConflict(t *testing.T) {
-	store, err := openNodeFSJournal(t.TempDir(), "node-a", 1)
-	if err != nil {
-		t.Fatalf("openNodeFSJournal() error = %v", err)
-	}
+	store := openInitializedNodeFSJournal(t)
 	portal := nodeFSPortalState{PortalKey: "portal-a", PodUID: "pod-a", Name: "workspace", TargetPath: "/target-a"}
 	if _, err := store.AllocatePortal(portal); err != nil {
 		t.Fatalf("AllocatePortal() error = %v", err)
@@ -237,6 +231,34 @@ func TestNodeFSJournalRejectsPortalAllocationConflict(t *testing.T) {
 	if _, err := store.AllocatePortal(portal); err == nil {
 		t.Fatal("AllocatePortal(conflict) error = nil")
 	}
+}
+
+func TestNodeFSJournalRejectsPortalBeforeShardInit(t *testing.T) {
+	store, err := openNodeFSJournal(t.TempDir(), "node-a", 1)
+	if err != nil {
+		t.Fatalf("openNodeFSJournal() error = %v", err)
+	}
+	if _, err := store.AllocatePortal(nodeFSPortalState{
+		PortalKey: "portal-a", PodUID: "pod-a", Name: "workspace", TargetPath: "/target-a",
+	}); err == nil {
+		t.Fatal("AllocatePortal(uninitialized shard) error = nil")
+	}
+}
+
+func openInitializedNodeFSJournal(t *testing.T) *nodeFSJournalStore {
+	t.Helper()
+	root := t.TempDir()
+	store, err := openNodeFSJournal(root, "node-a", 1)
+	if err != nil {
+		t.Fatalf("openNodeFSJournal() error = %v", err)
+	}
+	if err := store.PrepareShards(root); err != nil {
+		t.Fatalf("PrepareShards() error = %v", err)
+	}
+	if err := store.CommitShardSession(0, []byte(`{"ready":true}`)); err != nil {
+		t.Fatalf("CommitShardSession() error = %v", err)
+	}
+	return store
 }
 
 func TestNodeFSJournalRejectsDuplicateSlots(t *testing.T) {

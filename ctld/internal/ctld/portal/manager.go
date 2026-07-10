@@ -667,9 +667,10 @@ func (m *Manager) openS0FSBoundVolume(ctx context.Context, req ctldapi.BindVolum
 		ObjectStoreForVolume: func(volumeID string) (objectstore.Store, error) {
 			return m.createObjectStore(req.TeamID, volumeID)
 		},
-		HeadStore:      db.NewS0FSHeadStore(m.repo),
-		Encryption:     encryption,
-		LocalDiskGuard: m.localDiskGuard(cacheDir),
+		HeadStore:         db.NewS0FSHeadStore(m.repo),
+		Encryption:        encryption,
+		LocalDiskGuard:    m.localDiskGuard(cacheDir),
+		RetainAllUnlinked: true,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("open local s0fs engine: %w", err)
@@ -853,9 +854,10 @@ func (m *Manager) AttachOwner(ctx context.Context, req ctldapi.AttachVolumeOwner
 		ObjectStoreForVolume: func(volumeID string) (objectstore.Store, error) {
 			return m.createObjectStore(req.TeamID, volumeID)
 		},
-		HeadStore:      db.NewS0FSHeadStore(m.repo),
-		Encryption:     encryption,
-		LocalDiskGuard: m.localDiskGuard(cacheDir),
+		HeadStore:         db.NewS0FSHeadStore(m.repo),
+		Encryption:        encryption,
+		LocalDiskGuard:    m.localDiskGuard(cacheDir),
+		RetainAllUnlinked: true,
 	})
 	if err != nil {
 		return ctldapi.AttachVolumeOwnerResponse{}, fmt.Errorf("open local s0fs engine: %w", err)

@@ -220,6 +220,9 @@ func (m *localVolumeManager) UnmountVolume(ctx context.Context, volumeID, _ stri
 		m.remove(volumeID)
 		return nil
 	}
+	if err := volCtx.FinalizeRecoverableHandles(); err != nil {
+		return err
+	}
 	if _, err := volCtx.S0FS.SyncMaterialize(ctx); err != nil {
 		return err
 	}

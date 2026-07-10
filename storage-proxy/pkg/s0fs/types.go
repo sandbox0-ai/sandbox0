@@ -27,6 +27,9 @@ type Config struct {
 	SegmentTargetSize    uint64
 	WALSyncHook          func()
 	LocalDiskGuard       *LocalDiskGuard
+	// RetainAllUnlinked keeps nlink=0 files addressable until the caller
+	// explicitly finalizes recoverable handles at volume unmount.
+	RetainAllUnlinked bool
 }
 
 type ObjectStoreResolver func(volumeID string) (objectstore.Store, error)

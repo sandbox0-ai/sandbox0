@@ -36,9 +36,6 @@ type VolumeContext struct {
 	Observer  StorageObserver
 
 	handleMu      sync.Mutex
-	nextHandleID  uint64
-	fileHandles   map[uint64]uint64
-	dirHandleIDs  map[uint64]uint64
 	openFileCount map[uint64]int
 	unlinkedFiles map[uint64]struct{}
 

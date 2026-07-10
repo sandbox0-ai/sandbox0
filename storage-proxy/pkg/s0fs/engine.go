@@ -30,6 +30,7 @@ type Engine struct {
 	materializer            *Materializer
 	encryption              *EncryptionConfig
 	localDiskGuard          *LocalDiskGuard
+	retainAllUnlinked       bool
 	mutationVersion         uint64
 	lastCommittedManifest   uint64
 	lastMaterializedVersion uint64
@@ -100,18 +101,19 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 	}
 
 	e := &Engine{
-		volumeID:       cfg.VolumeID,
-		wal:            walFile,
-		nextSeq:        state.NextSeq,
-		nextInode:      state.NextInode,
-		nodes:          state.Nodes,
-		children:       state.Children,
-		data:           state.Data,
-		coldFiles:      state.ColdFiles,
-		segments:       state.Segments,
-		materializer:   materializer,
-		encryption:     cfg.Encryption,
-		localDiskGuard: cfg.LocalDiskGuard,
+		volumeID:          cfg.VolumeID,
+		wal:               walFile,
+		nextSeq:           state.NextSeq,
+		nextInode:         state.NextInode,
+		nodes:             state.Nodes,
+		children:          state.Children,
+		data:              state.Data,
+		coldFiles:         state.ColdFiles,
+		segments:          state.Segments,
+		materializer:      materializer,
+		encryption:        cfg.Encryption,
+		localDiskGuard:    cfg.LocalDiskGuard,
+		retainAllUnlinked: cfg.RetainAllUnlinked,
 	}
 	if latestManifest != nil {
 		e.lastCommittedManifest = latestManifest.ManifestSeq
@@ -138,7 +140,7 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 			e.nextInode = record.Inode + 1
 		}
 	}
-	e.collectUnlinkedLocked()
+	e.collectUnlinkedLocked(cfg.RetainAllUnlinked)
 	if appliedRecords > 0 {
 		e.dirty = true
 		e.dirtyAt = time.Now().UTC()
@@ -442,6 +444,9 @@ func (e *Engine) Forget(inode uint64) error {
 	if err := e.checkOpen(); err != nil {
 		return err
 	}
+	if e.retainAllUnlinked {
+		return nil
+	}
 	node, ok := e.nodes[inode]
 	if !ok || node == nil || node.Nlink != 0 {
 		return nil
@@ -449,6 +454,40 @@ func (e *Engine) Forget(inode uint64) error {
 	delete(e.children, inode)
 	delete(e.nodes, inode)
 	delete(e.data, inode)
+	return nil
+}
+
+// RetainsUnlinked reports whether this engine defers nlink=0 reclamation for
+// process-recoverable FUSE handles.
+func (e *Engine) RetainsUnlinked() bool {
+	if e == nil {
+		return false
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return !e.closed && e.retainAllUnlinked
+}
+
+// CollectUnlinked durably reclaims retained nlink=0 inodes after the final
+// portal has been unpublished. Recoverable handles must not be served later.
+func (e *Engine) CollectUnlinked() error {
+	e.mutationMu.Lock()
+	defer e.mutationMu.Unlock()
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.checkOpen(); err != nil {
+		return err
+	}
+	if !e.hasUnlinkedLocked() {
+		e.retainAllUnlinked = false
+		return nil
+	}
+	record := e.newRecord("collect_unlinked")
+	if err := e.appendAndApplyLocked(record, estimatedWALRecordBytes(record)); err != nil {
+		return err
+	}
+	e.retainAllUnlinked = false
 	return nil
 }
 
@@ -957,7 +996,7 @@ func (e *Engine) replaceStateLocked(state *SnapshotState) {
 	e.data = state.Data
 	e.coldFiles = state.ColdFiles
 	e.segments = state.Segments
-	e.collectUnlinkedLocked()
+	e.collectUnlinkedLocked(e.retainAllUnlinked)
 }
 
 func (e *Engine) persistCurrentStateLocked() error {
@@ -1021,6 +1060,9 @@ func (e *Engine) apply(record walRecord) error {
 		return e.applyTruncate(record)
 	case "unlink":
 		return e.applyUnlink(record)
+	case "collect_unlinked":
+		e.collectUnlinkedLocked(false)
+		return nil
 	default:
 		return fmt.Errorf("unknown wal op %q", record.Op)
 	}
@@ -1458,7 +1500,11 @@ func (e *Engine) pathLocked(target uint64) (string, bool) {
 	return "", false
 }
 
-func (e *Engine) collectUnlinkedLocked() {
+func (e *Engine) collectUnlinkedLocked(retainAll bool) bool {
+	if retainAll {
+		return false
+	}
+	collected := false
 	for inode, node := range e.nodes {
 		if inode == RootInode || node == nil || node.Nlink != 0 {
 			continue
@@ -1467,5 +1513,16 @@ func (e *Engine) collectUnlinkedLocked() {
 		delete(e.nodes, inode)
 		delete(e.data, inode)
 		delete(e.coldFiles, inode)
+		collected = true
 	}
+	return collected
+}
+
+func (e *Engine) hasUnlinkedLocked() bool {
+	for inode, node := range e.nodes {
+		if inode != RootInode && node != nil && node.Nlink == 0 {
+			return true
+		}
+	}
+	return false
 }

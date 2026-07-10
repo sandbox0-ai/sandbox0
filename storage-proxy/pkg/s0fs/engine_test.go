@@ -50,6 +50,100 @@ func TestEngineSmallFileReadWriteReplay(t *testing.T) {
 	}
 }
 
+func TestEngineRetainsUnlinkedInodeUntilDurableCollection(t *testing.T) {
+	walPath := filepath.Join(t.TempDir(), "volume.wal")
+	engine, err := Open(context.Background(), Config{
+		VolumeID:          "vol-1",
+		WALPath:           walPath,
+		RetainAllUnlinked: true,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	node, err := engine.CreateFile(RootInode, "open.txt", 0o600)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if _, err := engine.Write(node.Inode, 0, []byte("payload")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if err := engine.Unlink(RootInode, "open.txt"); err != nil {
+		t.Fatalf("Unlink() error = %v", err)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	recovered, err := Open(context.Background(), Config{
+		VolumeID:          "vol-1",
+		WALPath:           walPath,
+		RetainAllUnlinked: true,
+	})
+	if err != nil {
+		t.Fatalf("Open(recovered) error = %v", err)
+	}
+	if _, err := recovered.GetAttr(node.Inode); err != nil {
+		t.Fatalf("GetAttr(retained inode) error = %v", err)
+	}
+	if err := recovered.CollectUnlinked(); err != nil {
+		t.Fatalf("CollectUnlinked() error = %v", err)
+	}
+	if err := recovered.Close(); err != nil {
+		t.Fatalf("Close(recovered) error = %v", err)
+	}
+
+	final, err := Open(context.Background(), Config{
+		VolumeID:          "vol-1",
+		WALPath:           walPath,
+		RetainAllUnlinked: true,
+	})
+	if err != nil {
+		t.Fatalf("Open(final) error = %v", err)
+	}
+	defer final.Close()
+	if _, err := final.GetAttr(node.Inode); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetAttr(collected inode) error = %v, want %v", err, ErrNotFound)
+	}
+}
+
+func TestEngineCollectUnlinkedAdvancesMaterializedHead(t *testing.T) {
+	engine, err := Open(context.Background(), Config{
+		VolumeID:          "vol-1",
+		WALPath:           filepath.Join(t.TempDir(), "volume.wal"),
+		ObjectStore:       newPrefixedRecordingStore(t, "vol-1"),
+		HeadStore:         newMemoryHeadStore(),
+		RetainAllUnlinked: true,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+	node, err := engine.CreateFile(RootInode, "open.txt", 0o600)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if err := engine.Unlink(RootInode, "open.txt"); err != nil {
+		t.Fatalf("Unlink() error = %v", err)
+	}
+	retained, err := engine.SyncMaterialize(context.Background())
+	if err != nil {
+		t.Fatalf("SyncMaterialize(retained) error = %v", err)
+	}
+	if err := engine.CollectUnlinked(); err != nil {
+		t.Fatalf("CollectUnlinked() error = %v", err)
+	}
+	collected, err := engine.SyncMaterialize(context.Background())
+	if err != nil {
+		t.Fatalf("SyncMaterialize(collected) error = %v", err)
+	}
+	if retained == nil || collected == nil || collected.ManifestSeq <= retained.ManifestSeq {
+		t.Fatalf("manifest seq retained=%v collected=%v, want advancing collection", retained, collected)
+	}
+	if collected.State.Nodes[node.Inode] != nil {
+		t.Fatalf("collected manifest still contains inode %d", node.Inode)
+	}
+}
+
 func TestEngineConcurrentFsyncCoalescesWALSync(t *testing.T) {
 	var syncs atomic.Int64
 	engine, err := Open(context.Background(), Config{

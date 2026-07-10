@@ -470,7 +470,11 @@ func (s *FileSystemServer) Read(ctx context.Context, req *pb.ReadRequest) (*pb.R
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
-		data, err := volCtx.S0FS.Read(req.Inode, uint64(req.Offset), uint64(req.Size))
+		inode, ok := volCtx.ResolveFileHandle(req.HandleId, req.Inode)
+		if !ok {
+			return nil, fserror.New(fserror.FailedPrecondition, "unknown or mismatched file handle")
+		}
+		data, err := volCtx.S0FS.Read(inode, uint64(req.Offset), uint64(req.Size))
 		if err != nil {
 			return nil, mapS0FSError(err)
 		}
@@ -487,12 +491,16 @@ func (s *FileSystemServer) Read(ctx context.Context, req *pb.ReadRequest) (*pb.R
 func (s *FileSystemServer) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.WriteResponse, error) {
 		if isS0FSVolume(volCtx) {
-			if _, err := volCtx.S0FS.Write(req.Inode, uint64(req.Offset), req.Data); err != nil {
+			inode, ok := volCtx.ResolveFileHandle(req.HandleId, req.Inode)
+			if !ok {
+				return nil, fserror.New(fserror.FailedPrecondition, "unknown or mismatched file handle")
+			}
+			if _, err := volCtx.S0FS.Write(inode, uint64(req.Offset), req.Data); err != nil {
 				return nil, mapS0FSError(err)
 			}
-			s.markDirtyWrite(req.VolumeId, req.Inode, req.HandleId)
+			s.markDirtyWrite(req.VolumeId, inode, req.HandleId)
 			if s.shouldPublishEvents() {
-				path := resolveInodePath(volCtx, req.Inode)
+				path := resolveInodePath(volCtx, inode)
 				eventType := pb.WatchEventType_WATCH_EVENT_TYPE_WRITE
 				if path == "" {
 					eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
@@ -501,7 +509,7 @@ func (s *FileSystemServer) Write(ctx context.Context, req *pb.WriteRequest) (*pb
 					VolumeId:  req.VolumeId,
 					EventType: eventType,
 					Path:      path,
-					Inode:     req.Inode,
+					Inode:     inode,
 				})
 			}
 			return &pb.WriteResponse{BytesWritten: int64(len(req.Data))}, nil

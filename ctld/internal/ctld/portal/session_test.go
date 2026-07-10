@@ -625,8 +625,8 @@ func TestLocalSessionOpenUsesMountedS0FS(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Release() error = %v", err)
 	}
-	if _, ok := volCtx.HandleInode(resp.HandleId); ok {
-		t.Fatal("HandleInode() still tracks read-only handle after Release")
+	if got := volCtx.FileOpenCount(node.Inode); got != 0 {
+		t.Fatalf("FileOpenCount() after Release = %d, want 0", got)
 	}
 	if len(session.readOnlyHandles) != 0 {
 		t.Fatalf("read-only handle count after Release = %d, want 0", len(session.readOnlyHandles))

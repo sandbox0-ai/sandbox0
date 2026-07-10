@@ -301,6 +301,7 @@ message PrimaryRedirect {
 message StatFsRequest {
   string volume_id = 1;  // Volume identifier
   PosixActor actor = 2;  // Caller POSIX identity
+  uint64 inode = 3;      // Inode whose filesystem should be queried
 }
 
 message StatFsResponse {

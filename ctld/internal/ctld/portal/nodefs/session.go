@@ -1,0 +1,1101 @@
+package nodefs
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+
+	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
+	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
+)
+
+const (
+	defaultPortalRootInode = uint64(1)
+	maxPortalRouteNameLen  = 255
+)
+
+var (
+	ErrInvalidPortalRoute = errors.New("invalid nodefs portal route")
+	ErrPortalRouteExists  = errors.New("nodefs portal route already exists")
+	ErrPortalRouteMissing = errors.New("nodefs portal route not found")
+)
+
+// PortalSpec describes one portal subtree below a nodefs shard root. Name is a
+// shard-unique path component, normally derived from the durable slot rather
+// than from a user-visible mount name.
+type PortalSpec struct {
+	Name      string
+	Slot      Slot
+	VolumeID  string
+	RootInode uint64
+	Session   volumefuse.Session
+}
+
+type portalSessionRoute struct {
+	name string
+	slot Slot
+
+	rootInode uint64
+	binding   atomic.Pointer[portalSessionBinding]
+}
+
+type portalSessionBinding struct {
+	volumeID string
+	session  volumefuse.Session
+}
+
+type portalSessionSnapshot struct {
+	volumeID  string
+	rootInode uint64
+	session   volumefuse.Session
+}
+
+func (r *portalSessionRoute) snapshot() portalSessionSnapshot {
+	binding := r.binding.Load()
+	if binding == nil {
+		return portalSessionSnapshot{rootInode: r.rootInode}
+	}
+	return portalSessionSnapshot{
+		volumeID:  binding.volumeID,
+		rootInode: r.rootInode,
+		session:   binding.session,
+	}
+}
+
+// SessionMux implements one volumefuse session for a fixed nodefs shard. The
+// synthetic root exposes portal route names, while every portal operation is
+// decoded and forwarded to exactly one backend session.
+type SessionMux struct {
+	mu     sync.RWMutex
+	byName map[string]*portalSessionRoute
+	router *Router[*portalSessionRoute]
+}
+
+var _ volumefuse.Session = (*SessionMux)(nil)
+var _ volumefuse.ReadIntoSession = (*SessionMux)(nil)
+var _ volumefuse.OpenFlagsForHandleSession = (*SessionMux)(nil)
+
+// NewSessionMux constructs an empty shard namespace.
+func NewSessionMux() *SessionMux {
+	return &SessionMux{
+		byName: make(map[string]*portalSessionRoute),
+		router: NewRouter[*portalSessionRoute](),
+	}
+}
+
+// RegisterPortal publishes a route below the synthetic shard root.
+func (m *SessionMux) RegisterPortal(spec PortalSpec) error {
+	if m == nil {
+		return fmt.Errorf("%w: session mux is nil", ErrInvalidPortalRoute)
+	}
+	name, err := validatePortalRouteName(spec.Name)
+	if err != nil {
+		return err
+	}
+	if _, err := NewSlot(uint64(spec.Slot)); err != nil {
+		return err
+	}
+	if strings.TrimSpace(spec.VolumeID) == "" {
+		return fmt.Errorf("%w: volume id is required", ErrInvalidPortalRoute)
+	}
+	if spec.Session == nil {
+		return fmt.Errorf("%w: session is required", ErrInvalidPortalRoute)
+	}
+	if spec.RootInode == 0 {
+		spec.RootInode = defaultPortalRootInode
+	}
+	if spec.RootInode > MaxLocalID {
+		return fmt.Errorf("%w: root inode %d exceeds %d", ErrInvalidPortalRoute, spec.RootInode, MaxLocalID)
+	}
+
+	route := &portalSessionRoute{
+		name:      name,
+		slot:      spec.Slot,
+		rootInode: spec.RootInode,
+	}
+	route.binding.Store(&portalSessionBinding{volumeID: spec.VolumeID, session: spec.Session})
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.byName == nil {
+		m.byName = make(map[string]*portalSessionRoute)
+	}
+	if m.router == nil {
+		m.router = NewRouter[*portalSessionRoute]()
+	}
+	if _, exists := m.byName[name]; exists {
+		return fmt.Errorf("%w: %s", ErrPortalRouteExists, name)
+	}
+	if err := m.router.Register(spec.Slot, route); err != nil {
+		return err
+	}
+	m.byName[name] = route
+	return nil
+}
+
+// UpdatePortalSession atomically changes the backend session used by future
+// requests without changing the portal's slot or root inode. The caller owns
+// the lifetime of the previous session and must keep it alive for requests that
+// already acquired it.
+func (m *SessionMux) UpdatePortalSession(name, volumeID string, session volumefuse.Session) error {
+	if m == nil {
+		return fmt.Errorf("%w: session mux is nil", ErrPortalRouteMissing)
+	}
+	name = strings.TrimSpace(name)
+	if volumeID = strings.TrimSpace(volumeID); volumeID == "" {
+		return fmt.Errorf("%w: volume id is required", ErrInvalidPortalRoute)
+	}
+	if session == nil {
+		return fmt.Errorf("%w: session is required", ErrInvalidPortalRoute)
+	}
+	m.mu.RLock()
+	route := m.byName[name]
+	m.mu.RUnlock()
+	if route == nil {
+		return fmt.Errorf("%w: %s", ErrPortalRouteMissing, name)
+	}
+	route.binding.Store(&portalSessionBinding{volumeID: volumeID, session: session})
+	return nil
+}
+
+// DrainPortal removes the route name, rejects new requests for its slot, and
+// waits for requests that already acquired the route.
+func (m *SessionMux) DrainPortal(ctx context.Context, name string) (PortalSpec, error) {
+	if m == nil {
+		return PortalSpec{}, fmt.Errorf("%w: session mux is nil", ErrPortalRouteMissing)
+	}
+	name = strings.TrimSpace(name)
+	m.mu.Lock()
+	route := m.byName[name]
+	if route == nil {
+		m.mu.Unlock()
+		return PortalSpec{}, fmt.Errorf("%w: %s", ErrPortalRouteMissing, name)
+	}
+	m.mu.Unlock()
+
+	drained, err := m.router.Drain(ctx, route.slot)
+	if err != nil {
+		return PortalSpec{}, mapRouteError(err)
+	}
+	m.mu.Lock()
+	if m.byName[name] == route {
+		delete(m.byName, name)
+	}
+	m.mu.Unlock()
+	snapshot := drained.snapshot()
+	return PortalSpec{
+		Name:      drained.name,
+		Slot:      drained.slot,
+		VolumeID:  snapshot.volumeID,
+		RootInode: snapshot.rootInode,
+		Session:   snapshot.session,
+	}, nil
+}
+
+// RetireSlot imports a durable deleted-slot high-water mark into the router.
+func (m *SessionMux) RetireSlot(slot Slot) error {
+	if m == nil {
+		return fmt.Errorf("retire slot %d: session mux is nil", slot)
+	}
+	return m.router.Retire(slot)
+}
+
+// Close intentionally does not close backend sessions. They may be shared by
+// multiple read-only portals and are owned by the portal manager.
+func (m *SessionMux) Close() {}
+
+func (m *SessionMux) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.NodeResponse, error) {
+	if req.Parent == ShardRootNodeID {
+		return m.lookupPortalRoot(ctx, req)
+	}
+	lease, route, localParent, err := m.acquireNode(req.Parent)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Parent = localParent
+	resp, err := route.session.Lookup(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if err := encodeNodeResponse(lease.Slot, resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func (m *SessionMux) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAttrResponse, error) {
+	if req.Inode == ShardRootNodeID {
+		return syntheticRootAttr(), nil
+	}
+	lease, route, localNode, err := m.acquireNode(req.Inode)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Inode = localNode
+	resp, err := route.session.GetAttr(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if err := encodeAttr(lease.Slot, localNode, resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func (m *SessionMux) SetAttr(ctx context.Context, req *pb.SetAttrRequest) (*pb.SetAttrResponse, error) {
+	if req.Inode == ShardRootNodeID {
+		return nil, syscall.EROFS
+	}
+	lease, route, localNode, localHandle, err := m.acquireNodeHandle(req.Inode, req.HandleId)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Inode = localNode
+	req.HandleId = localHandle
+	if req.Attr != nil {
+		req.Attr.Ino = localNode
+	}
+	resp, err := route.session.SetAttr(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if resp != nil {
+		if err := encodeAttr(lease.Slot, localNode, resp.Attr); err != nil {
+			return nil, err
+		}
+	}
+	return resp, nil
+}
+
+func (m *SessionMux) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb.NodeResponse, error) {
+	if req.Parent == ShardRootNodeID {
+		return nil, syscall.EROFS
+	}
+	lease, route, localParent, err := m.acquireNode(req.Parent)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Parent = localParent
+	resp, err := route.session.Mkdir(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if err := encodeNodeResponse(lease.Slot, resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func (m *SessionMux) Create(ctx context.Context, req *pb.CreateRequest) (*pb.NodeResponse, error) {
+	if req.Parent == ShardRootNodeID {
+		return nil, syscall.EROFS
+	}
+	lease, route, localParent, err := m.acquireNode(req.Parent)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Parent = localParent
+	resp, err := route.session.Create(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if err := encodeNodeResponse(lease.Slot, resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func (m *SessionMux) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*pb.Empty, error) {
+	if req.Parent == ShardRootNodeID {
+		return nil, syscall.EROFS
+	}
+	lease, route, localParent, err := m.acquireNode(req.Parent)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Parent = localParent
+	return route.session.Unlink(ctx, req)
+}
+
+func (m *SessionMux) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb.Empty, error) {
+	if req.Parent == ShardRootNodeID {
+		return nil, syscall.EROFS
+	}
+	lease, route, localParent, err := m.acquireNode(req.Parent)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Parent = localParent
+	return route.session.Rmdir(ctx, req)
+}
+
+func (m *SessionMux) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.Empty, error) {
+	if req.OldParent == ShardRootNodeID || req.NewParent == ShardRootNodeID {
+		if req.OldParent == req.NewParent {
+			return nil, syscall.EROFS
+		}
+		return nil, newRouteStatusError(ErrCrossPortal, syscall.EXDEV)
+	}
+	lease, oldParent, newParent, err := m.router.AcquireNodes(req.OldParent, req.NewParent)
+	if err != nil {
+		return nil, mapRouteError(err)
+	}
+	defer lease.Release()
+	route := lease.Target.snapshot()
+	if route.session == nil {
+		return nil, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
+	}
+	req.VolumeId = route.volumeID
+	req.OldParent = oldParent
+	req.NewParent = newParent
+	return route.session.Rename(ctx, req)
+}
+
+func (m *SessionMux) Link(ctx context.Context, req *pb.LinkRequest) (*pb.NodeResponse, error) {
+	if req.Inode == ShardRootNodeID || req.NewParent == ShardRootNodeID {
+		return nil, newRouteStatusError(ErrCrossPortal, syscall.EXDEV)
+	}
+	lease, localNode, localParent, err := m.router.AcquireNodes(req.Inode, req.NewParent)
+	if err != nil {
+		return nil, mapRouteError(err)
+	}
+	defer lease.Release()
+	route := lease.Target.snapshot()
+	if route.session == nil {
+		return nil, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
+	}
+	req.VolumeId = route.volumeID
+	req.Inode = localNode
+	req.NewParent = localParent
+	resp, err := route.session.Link(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if err := encodeNodeResponse(lease.Slot, resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func (m *SessionMux) Symlink(ctx context.Context, req *pb.SymlinkRequest) (*pb.NodeResponse, error) {
+	if req.Parent == ShardRootNodeID {
+		return nil, syscall.EROFS
+	}
+	lease, route, localParent, err := m.acquireNode(req.Parent)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Parent = localParent
+	resp, err := route.session.Symlink(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if err := encodeNodeResponse(lease.Slot, resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func (m *SessionMux) Readlink(ctx context.Context, req *pb.ReadlinkRequest) (*pb.ReadlinkResponse, error) {
+	if req.Inode == ShardRootNodeID {
+		return nil, syscall.EINVAL
+	}
+	lease, route, localNode, err := m.acquireNode(req.Inode)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Inode = localNode
+	return route.session.Readlink(ctx, req)
+}
+
+func (m *SessionMux) Access(ctx context.Context, req *pb.AccessRequest) (*pb.Empty, error) {
+	if req.Inode == ShardRootNodeID {
+		if req.Mask&2 != 0 {
+			return nil, syscall.EROFS
+		}
+		return &pb.Empty{}, nil
+	}
+	lease, route, localNode, err := m.acquireNode(req.Inode)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Inode = localNode
+	return route.session.Access(ctx, req)
+}
+
+func (m *SessionMux) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResponse, error) {
+	if req.Inode == ShardRootNodeID {
+		return nil, syscall.EISDIR
+	}
+	lease, route, localNode, err := m.acquireNode(req.Inode)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Inode = localNode
+	resp, err := route.session.Open(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if err := encodeOpenHandle(lease.Slot, resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func (m *SessionMux) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadResponse, error) {
+	if req.Inode == ShardRootNodeID {
+		return nil, syscall.EISDIR
+	}
+	lease, route, localNode, localHandle, err := m.acquireNodeHandle(req.Inode, req.HandleId)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Inode = localNode
+	req.HandleId = localHandle
+	return route.session.Read(ctx, req)
+}
+
+func (m *SessionMux) ReadInto(ctx context.Context, req *pb.ReadRequest, dest []byte) (int, bool, error) {
+	if req.Inode == ShardRootNodeID {
+		return 0, false, syscall.EISDIR
+	}
+	lease, route, localNode, localHandle, err := m.acquireNodeHandle(req.Inode, req.HandleId)
+	if err != nil {
+		return 0, false, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Inode = localNode
+	req.HandleId = localHandle
+	if reader, ok := route.session.(volumefuse.ReadIntoSession); ok {
+		return reader.ReadInto(ctx, req, dest)
+	}
+	resp, err := route.session.Read(ctx, req)
+	if err != nil {
+		return 0, false, err
+	}
+	n := copy(dest, resp.GetData())
+	return n, resp.GetEof() || n < len(dest), nil
+}
+
+func (m *SessionMux) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
+	if req.Inode == ShardRootNodeID {
+		return nil, syscall.EISDIR
+	}
+	lease, route, localNode, localHandle, err := m.acquireNodeHandle(req.Inode, req.HandleId)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Inode = localNode
+	req.HandleId = localHandle
+	return route.session.Write(ctx, req)
+}
+
+func (m *SessionMux) Release(ctx context.Context, req *pb.ReleaseRequest) (*pb.Empty, error) {
+	if req.Inode == ShardRootNodeID {
+		return &pb.Empty{}, nil
+	}
+	lease, route, localNode, localHandle, err := m.acquireNodeHandle(req.Inode, req.HandleId)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Inode = localNode
+	req.HandleId = localHandle
+	return route.session.Release(ctx, req)
+}
+
+func (m *SessionMux) Flush(ctx context.Context, req *pb.FlushRequest) (*pb.Empty, error) {
+	if req.HandleId == 0 {
+		return &pb.Empty{}, nil
+	}
+	lease, route, localHandle, err := m.acquireHandle(req.HandleId)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.HandleId = localHandle
+	return route.session.Flush(ctx, req)
+}
+
+func (m *SessionMux) Fsync(ctx context.Context, req *pb.FsyncRequest) (*pb.Empty, error) {
+	if req.HandleId == 0 {
+		return &pb.Empty{}, nil
+	}
+	lease, route, localHandle, err := m.acquireHandle(req.HandleId)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.HandleId = localHandle
+	return route.session.Fsync(ctx, req)
+}
+
+func (m *SessionMux) Fallocate(ctx context.Context, req *pb.FallocateRequest) (*pb.Empty, error) {
+	if req.Inode == ShardRootNodeID {
+		return nil, syscall.EISDIR
+	}
+	lease, route, localNode, localHandle, err := m.acquireNodeHandle(req.Inode, req.HandleId)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Inode = localNode
+	req.HandleId = localHandle
+	return route.session.Fallocate(ctx, req)
+}
+
+func (m *SessionMux) CopyFileRange(ctx context.Context, req *pb.CopyFileRangeRequest) (*pb.CopyFileRangeResponse, error) {
+	if req.InodeIn == ShardRootNodeID || req.InodeOut == ShardRootNodeID {
+		return nil, newRouteStatusError(ErrCrossPortal, syscall.EXDEV)
+	}
+	lease, inodeIn, handleIn, inodeOut, handleOut, err := m.router.AcquireCopy(
+		req.InodeIn, req.HandleIn, req.InodeOut, req.HandleOut,
+	)
+	if err != nil {
+		return nil, mapRouteError(err)
+	}
+	defer lease.Release()
+	route := lease.Target.snapshot()
+	if route.session == nil {
+		return nil, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
+	}
+	req.VolumeId = route.volumeID
+	req.InodeIn = inodeIn
+	req.HandleIn = handleIn
+	req.InodeOut = inodeOut
+	req.HandleOut = handleOut
+	return route.session.CopyFileRange(ctx, req)
+}
+
+func (m *SessionMux) OpenDir(ctx context.Context, req *pb.OpenDirRequest) (*pb.OpenDirResponse, error) {
+	if req.Inode == ShardRootNodeID {
+		return &pb.OpenDirResponse{}, nil
+	}
+	lease, route, localNode, err := m.acquireNode(req.Inode)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Inode = localNode
+	resp, err := route.session.OpenDir(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if resp != nil && resp.HandleId != 0 {
+		resp.HandleId, err = EncodeHandleID(lease.Slot, resp.HandleId)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return resp, nil
+}
+
+func (m *SessionMux) ReadDir(ctx context.Context, req *pb.ReadDirRequest) (*pb.ReadDirResponse, error) {
+	if req.Inode == ShardRootNodeID {
+		return m.readSyntheticRoot(ctx, req)
+	}
+	lease, route, localNode, localHandle, err := m.acquireNodeHandle(req.Inode, req.HandleId)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Inode = localNode
+	req.HandleId = localHandle
+	resp, err := route.session.ReadDir(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if err := encodeDirEntries(lease.Slot, resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func (m *SessionMux) ReleaseDir(ctx context.Context, req *pb.ReleaseDirRequest) (*pb.Empty, error) {
+	if req.Inode == ShardRootNodeID {
+		return &pb.Empty{}, nil
+	}
+	lease, route, localNode, localHandle, err := m.acquireNodeHandle(req.Inode, req.HandleId)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Inode = localNode
+	req.HandleId = localHandle
+	return route.session.ReleaseDir(ctx, req)
+}
+
+func (m *SessionMux) StatFs(ctx context.Context, req *pb.StatFsRequest) (*pb.StatFsResponse, error) {
+	if req.Inode == ShardRootNodeID || req.Inode == 0 {
+		return syntheticRootStatFS(), nil
+	}
+	lease, route, localNode, err := m.acquireNode(req.Inode)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Inode = localNode
+	return route.session.StatFs(ctx, req)
+}
+
+func (m *SessionMux) GetXattr(ctx context.Context, req *pb.GetXattrRequest) (*pb.GetXattrResponse, error) {
+	if req.Inode == ShardRootNodeID {
+		return nil, syscall.ENODATA
+	}
+	lease, route, localNode, err := m.acquireNode(req.Inode)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Inode = localNode
+	return route.session.GetXattr(ctx, req)
+}
+
+func (m *SessionMux) SetXattr(ctx context.Context, req *pb.SetXattrRequest) (*pb.Empty, error) {
+	if req.Inode == ShardRootNodeID {
+		return nil, syscall.EROFS
+	}
+	lease, route, localNode, err := m.acquireNode(req.Inode)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Inode = localNode
+	return route.session.SetXattr(ctx, req)
+}
+
+func (m *SessionMux) ListXattr(ctx context.Context, req *pb.ListXattrRequest) (*pb.ListXattrResponse, error) {
+	if req.Inode == ShardRootNodeID {
+		return &pb.ListXattrResponse{}, nil
+	}
+	lease, route, localNode, err := m.acquireNode(req.Inode)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Inode = localNode
+	return route.session.ListXattr(ctx, req)
+}
+
+func (m *SessionMux) RemoveXattr(ctx context.Context, req *pb.RemoveXattrRequest) (*pb.Empty, error) {
+	if req.Inode == ShardRootNodeID {
+		return nil, syscall.EROFS
+	}
+	lease, route, localNode, err := m.acquireNode(req.Inode)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Inode = localNode
+	return route.session.RemoveXattr(ctx, req)
+}
+
+func (m *SessionMux) Mknod(ctx context.Context, req *pb.MknodRequest) (*pb.NodeResponse, error) {
+	if req.Parent == ShardRootNodeID {
+		return nil, syscall.EROFS
+	}
+	lease, route, localParent, err := m.acquireNode(req.Parent)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Parent = localParent
+	resp, err := route.session.Mknod(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if err := encodeNodeResponse(lease.Slot, resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func (m *SessionMux) GetLk(ctx context.Context, req *pb.GetLkRequest) (*pb.GetLkResponse, error) {
+	if req.Inode == ShardRootNodeID {
+		return nil, syscall.EBADF
+	}
+	lease, route, localNode, localHandle, err := m.acquireNodeHandle(req.Inode, req.HandleId)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Inode = localNode
+	req.HandleId = localHandle
+	return route.session.GetLk(ctx, req)
+}
+
+func (m *SessionMux) SetLk(ctx context.Context, req *pb.SetLkRequest) (*pb.Empty, error) {
+	return m.setLk(ctx, req, false)
+}
+
+func (m *SessionMux) SetLkw(ctx context.Context, req *pb.SetLkRequest) (*pb.Empty, error) {
+	return m.setLk(ctx, req, true)
+}
+
+func (m *SessionMux) Flock(ctx context.Context, req *pb.FlockRequest) (*pb.Empty, error) {
+	if req.Inode == ShardRootNodeID {
+		return nil, syscall.EBADF
+	}
+	lease, route, localNode, localHandle, err := m.acquireNodeHandle(req.Inode, req.HandleId)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Inode = localNode
+	req.HandleId = localHandle
+	return route.session.Flock(ctx, req)
+}
+
+func (m *SessionMux) OpenFlagsForHandle(handleID uint64) (uint32, bool) {
+	if m == nil || handleID == 0 {
+		return 0, false
+	}
+	lease, route, localHandle, err := m.acquireHandle(handleID)
+	if err != nil {
+		return 0, false
+	}
+	defer lease.Release()
+	if provider, ok := route.session.(volumefuse.OpenFlagsForHandleSession); ok {
+		return provider.OpenFlagsForHandle(localHandle)
+	}
+	if provider, ok := route.session.(volumefuse.OpenFlagsSession); ok {
+		return provider.OpenFlags(), true
+	}
+	return 0, false
+}
+
+func (m *SessionMux) setLk(ctx context.Context, req *pb.SetLkRequest, wait bool) (*pb.Empty, error) {
+	if req.Inode == ShardRootNodeID {
+		return nil, syscall.EBADF
+	}
+	lease, route, localNode, localHandle, err := m.acquireNodeHandle(req.Inode, req.HandleId)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	req.VolumeId = route.volumeID
+	req.Inode = localNode
+	req.HandleId = localHandle
+	if wait {
+		return route.session.SetLkw(ctx, req)
+	}
+	return route.session.SetLk(ctx, req)
+}
+
+func (m *SessionMux) lookupPortalRoot(ctx context.Context, req *pb.LookupRequest) (*pb.NodeResponse, error) {
+	name := strings.TrimSpace(req.Name)
+	m.mu.RLock()
+	route := m.byName[name]
+	m.mu.RUnlock()
+	if route == nil {
+		return nil, syscall.ENOENT
+	}
+	snapshot := route.snapshot()
+	globalRoot, err := EncodeNodeID(route.slot, snapshot.rootInode)
+	if err != nil {
+		return nil, err
+	}
+	lease, _, err := m.router.AcquireNode(globalRoot)
+	if err != nil {
+		return nil, mapRouteError(err)
+	}
+	defer lease.Release()
+	snapshot = lease.Target.snapshot()
+	if snapshot.session == nil {
+		return nil, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
+	}
+	attr, err := snapshot.session.GetAttr(ctx, &pb.GetAttrRequest{
+		VolumeId: snapshot.volumeID,
+		Inode:    snapshot.rootInode,
+		Actor:    req.Actor,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := encodeAttr(lease.Slot, snapshot.rootInode, attr); err != nil {
+		return nil, err
+	}
+	return &pb.NodeResponse{Inode: globalRoot, Generation: 1, Attr: attr}, nil
+}
+
+func (m *SessionMux) readSyntheticRoot(ctx context.Context, req *pb.ReadDirRequest) (*pb.ReadDirResponse, error) {
+	m.mu.RLock()
+	routes := make([]*portalSessionRoute, 0, len(m.byName))
+	for _, route := range m.byName {
+		routes = append(routes, route)
+	}
+	m.mu.RUnlock()
+	sort.Slice(routes, func(i, j int) bool { return routes[i].name < routes[j].name })
+	start := int(req.Offset)
+	if start < 0 {
+		start = 0
+	}
+	if start > len(routes) {
+		start = len(routes)
+	}
+	entries := make([]*pb.DirEntry, 0, len(routes)-start)
+	for index, route := range routes[start:] {
+		snapshot := route.snapshot()
+		globalRoot, err := EncodeNodeID(route.slot, snapshot.rootInode)
+		if err != nil {
+			return nil, err
+		}
+		lease, _, err := m.router.AcquireNode(globalRoot)
+		if err != nil {
+			if errors.Is(err, ErrSlotDraining) || errors.Is(err, ErrSlotNotFound) {
+				continue
+			}
+			return nil, mapRouteError(err)
+		}
+		snapshot = lease.Target.snapshot()
+		entry := &pb.DirEntry{
+			Inode:  globalRoot,
+			Offset: uint64(start + index + 1),
+			Name:   route.name,
+			Type:   uint32(syscall.S_IFDIR),
+		}
+		if req.Plus {
+			entry.Attr, err = snapshot.session.GetAttr(ctx, &pb.GetAttrRequest{
+				VolumeId: snapshot.volumeID,
+				Inode:    snapshot.rootInode,
+				Actor:    req.Actor,
+			})
+			if err == nil {
+				err = encodeAttr(lease.Slot, snapshot.rootInode, entry.Attr)
+			}
+		}
+		lease.Release()
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return &pb.ReadDirResponse{Entries: entries, Eof: true}, nil
+}
+
+func (m *SessionMux) acquireNode(nodeID uint64) (Lease[*portalSessionRoute], portalSessionSnapshot, uint64, error) {
+	var zero Lease[*portalSessionRoute]
+	if m == nil || m.router == nil {
+		return zero, portalSessionSnapshot{}, 0, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
+	}
+	lease, localNode, err := m.router.AcquireNode(nodeID)
+	if err != nil {
+		return zero, portalSessionSnapshot{}, 0, mapRouteError(err)
+	}
+	route := lease.Target.snapshot()
+	if route.session == nil {
+		lease.Release()
+		return zero, portalSessionSnapshot{}, 0, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
+	}
+	return lease, route, localNode, nil
+}
+
+func (m *SessionMux) acquireHandle(handleID uint64) (Lease[*portalSessionRoute], portalSessionSnapshot, uint64, error) {
+	var zero Lease[*portalSessionRoute]
+	if m == nil || m.router == nil {
+		return zero, portalSessionSnapshot{}, 0, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
+	}
+	lease, localHandle, err := m.router.AcquireHandle(handleID)
+	if err != nil {
+		return zero, portalSessionSnapshot{}, 0, mapRouteError(err)
+	}
+	route := lease.Target.snapshot()
+	if route.session == nil {
+		lease.Release()
+		return zero, portalSessionSnapshot{}, 0, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
+	}
+	return lease, route, localHandle, nil
+}
+
+func (m *SessionMux) acquireNodeHandle(nodeID, handleID uint64) (Lease[*portalSessionRoute], portalSessionSnapshot, uint64, uint64, error) {
+	var zero Lease[*portalSessionRoute]
+	if m == nil || m.router == nil {
+		return zero, portalSessionSnapshot{}, 0, 0, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
+	}
+	lease, localNode, localHandle, err := m.router.AcquireNodeHandle(nodeID, handleID)
+	if err != nil {
+		return zero, portalSessionSnapshot{}, 0, 0, mapRouteError(err)
+	}
+	route := lease.Target.snapshot()
+	if route.session == nil {
+		lease.Release()
+		return zero, portalSessionSnapshot{}, 0, 0, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
+	}
+	return lease, route, localNode, localHandle, nil
+}
+
+func encodeNodeResponse(slot Slot, resp *pb.NodeResponse) error {
+	if resp == nil || resp.Inode == 0 {
+		return syscall.EIO
+	}
+	localNode := resp.Inode
+	globalNode, err := EncodeNodeID(slot, localNode)
+	if err != nil {
+		return err
+	}
+	resp.Inode = globalNode
+	if err := encodeAttr(slot, localNode, resp.Attr); err != nil {
+		return err
+	}
+	if resp.HandleId != 0 {
+		resp.HandleId, err = EncodeHandleID(slot, resp.HandleId)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func encodeOpenHandle(slot Slot, resp *pb.OpenResponse) error {
+	if resp == nil || resp.HandleId == 0 {
+		return syscall.EIO
+	}
+	globalHandle, err := EncodeHandleID(slot, resp.HandleId)
+	if err != nil {
+		return err
+	}
+	resp.HandleId = globalHandle
+	return nil
+}
+
+func encodeAttr(slot Slot, fallbackLocal uint64, attr *pb.GetAttrResponse) error {
+	if attr == nil {
+		return nil
+	}
+	localNode := attr.Ino
+	if localNode == 0 {
+		localNode = fallbackLocal
+	}
+	globalNode, err := EncodeNodeID(slot, localNode)
+	if err != nil {
+		return err
+	}
+	attr.Ino = globalNode
+	return nil
+}
+
+func encodeDirEntries(slot Slot, resp *pb.ReadDirResponse) error {
+	if resp == nil {
+		return syscall.EIO
+	}
+	for _, entry := range resp.Entries {
+		if entry == nil || entry.Inode == 0 {
+			return syscall.EIO
+		}
+		localNode := entry.Inode
+		globalNode, err := EncodeNodeID(slot, localNode)
+		if err != nil {
+			return err
+		}
+		entry.Inode = globalNode
+		if err := encodeAttr(slot, localNode, entry.Attr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func syntheticRootAttr() *pb.GetAttrResponse {
+	return &pb.GetAttrResponse{
+		Ino:   ShardRootNodeID,
+		Mode:  uint32(syscall.S_IFDIR | 0o555),
+		Nlink: 2,
+		Uid:   0,
+		Gid:   0,
+		Size:  4096,
+	}
+}
+
+func syntheticRootStatFS() *pb.StatFsResponse {
+	return &pb.StatFsResponse{Bsize: 4096, Frsize: 4096, Namelen: maxPortalRouteNameLen}
+}
+
+func validatePortalRouteName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || name == "." || name == ".." || len(name) > maxPortalRouteNameLen || strings.ContainsAny(name, "/\x00") {
+		return "", fmt.Errorf("%w: unsafe route name %q", ErrInvalidPortalRoute, name)
+	}
+	return name, nil
+}
+
+type routeStatusError struct {
+	cause error
+	errno syscall.Errno
+}
+
+func newRouteStatusError(cause error, errno syscall.Errno) error {
+	return &routeStatusError{cause: cause, errno: errno}
+}
+
+func (e *routeStatusError) Error() string {
+	return fmt.Sprintf("%v: %v", e.cause, e.errno)
+}
+
+func (e *routeStatusError) Unwrap() error {
+	return e.cause
+}
+
+func (e *routeStatusError) FuseErrno() syscall.Errno {
+	return e.errno
+}
+
+func mapRouteError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, ErrCrossPortal):
+		return newRouteStatusError(err, syscall.EXDEV)
+	case errors.Is(err, ErrSlotDraining):
+		return newRouteStatusError(err, syscall.EAGAIN)
+	case errors.Is(err, ErrSlotNotFound), errors.Is(err, ErrSyntheticNode), errors.Is(err, ErrInvalidSlot), errors.Is(err, ErrInvalidLocalID):
+		return newRouteStatusError(err, syscall.ESTALE)
+	default:
+		return err
+	}
+}

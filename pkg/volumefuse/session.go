@@ -50,3 +50,9 @@ type ReadIntoSession interface {
 type OpenFlagsSession interface {
 	OpenFlags() uint32
 }
+
+// OpenFlagsForHandleSession lets a multiplexed session select FUSE open flags
+// after it has routed an encoded handle to the owning backend session.
+type OpenFlagsForHandleSession interface {
+	OpenFlagsForHandle(handleID uint64) (uint32, bool)
+}

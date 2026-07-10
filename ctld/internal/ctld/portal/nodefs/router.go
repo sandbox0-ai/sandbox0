@@ -26,14 +26,13 @@ type routeEntry[T any] struct {
 type Router[T any] struct {
 	mu      sync.RWMutex
 	entries map[Slot]*routeEntry[T]
-	retired map[Slot]struct{}
+	retired []uint64
 }
 
 // NewRouter constructs an empty portal router.
 func NewRouter[T any]() *Router[T] {
 	return &Router[T]{
 		entries: make(map[Slot]*routeEntry[T]),
-		retired: make(map[Slot]struct{}),
 	}
 }
 
@@ -50,10 +49,7 @@ func (r *Router[T]) Register(slot Slot, target T) error {
 	if r.entries == nil {
 		r.entries = make(map[Slot]*routeEntry[T])
 	}
-	if r.retired == nil {
-		r.retired = make(map[Slot]struct{})
-	}
-	if _, retired := r.retired[slot]; retired {
+	if r.isRetiredLocked(slot) {
 		return fmt.Errorf("%w: %d", ErrSlotRetired, slot)
 	}
 	if _, exists := r.entries[slot]; exists {
@@ -78,26 +74,23 @@ func (r *Router[T]) Retire(slot Slot) error {
 	if _, exists := r.entries[slot]; exists {
 		return fmt.Errorf("%w: %d", ErrSlotRegistered, slot)
 	}
-	if r.retired == nil {
-		r.retired = make(map[Slot]struct{})
-	}
-	r.retired[slot] = struct{}{}
+	r.setRetiredLocked(slot)
 	return nil
 }
 
-// Lease pins one portal target while a routed request is in flight. Lease must
-// not be copied after first use. Release is idempotent.
+// Lease pins one portal target while a routed request is in flight. A
+// successful acquisition must be released exactly once. Keeping the token a
+// small value lets request handlers defer Release without a heap allocation.
 type Lease[T any] struct {
 	Slot   Slot
 	Target T
 
-	entry    *routeEntry[T]
-	released uint32
+	entry *routeEntry[T]
 }
 
 // Release allows a draining portal to finish once the request is complete.
-func (l *Lease[T]) Release() {
-	if l == nil || l.entry == nil || !atomic.CompareAndSwapUint32(&l.released, 0, 1) {
+func (l Lease[T]) Release() {
+	if l.entry == nil {
 		return
 	}
 	remaining := l.entry.inFlight.Add(^uint64(0))
@@ -287,10 +280,24 @@ func (r *Router[T]) retireLocked(slot Slot, expected *routeEntry[T]) {
 	if r.entries[slot] == expected {
 		delete(r.entries, slot)
 	}
-	if r.retired == nil {
-		r.retired = make(map[Slot]struct{})
+	r.setRetiredLocked(slot)
+}
+
+func (r *Router[T]) isRetiredLocked(slot Slot) bool {
+	word, bit := retirementBit(slot)
+	return word < len(r.retired) && r.retired[word]&(uint64(1)<<bit) != 0
+}
+
+func (r *Router[T]) setRetiredLocked(slot Slot) {
+	word, bit := retirementBit(slot)
+	if len(r.retired) == 0 {
+		r.retired = make([]uint64, (uint64(MaxSlot)+64)/64)
 	}
-	r.retired[slot] = struct{}{}
+	r.retired[word] |= uint64(1) << bit
+}
+
+func retirementBit(slot Slot) (int, uint) {
+	return int(uint32(slot) / 64), uint(uint32(slot) % 64)
 }
 
 func decodeOptionalHandleForSlot(slot Slot, handleID uint64) (uint64, error) {

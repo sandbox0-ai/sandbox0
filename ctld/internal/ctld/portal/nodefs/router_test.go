@@ -181,7 +181,6 @@ func TestRouterDrainWaitsForInFlightLease(t *testing.T) {
 	}
 
 	lease.Release()
-	lease.Release()
 	select {
 	case <-drained:
 	case <-time.After(time.Second):

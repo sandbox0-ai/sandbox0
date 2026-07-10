@@ -87,3 +87,32 @@ func TestOpenUsesSessionOpenFlags(t *testing.T) {
 		t.Fatalf("Open() flags = %#x, want DIRECT_IO", out.OpenFlags)
 	}
 }
+
+type openFlagsForHandleTestSession struct {
+	openFlagsTestSession
+	handleID uint64
+}
+
+func (s openFlagsForHandleTestSession) OpenFlagsForHandle(handleID uint64) (uint32, bool) {
+	if handleID != s.handleID {
+		return 0, false
+	}
+	return fuse.FOPEN_NONSEEKABLE, true
+}
+
+func TestOpenUsesHandleSpecificSessionOpenFlags(t *testing.T) {
+	session := openFlagsForHandleTestSession{
+		openFlagsTestSession: openFlagsTestSession{flags: fuse.FOPEN_DIRECT_IO},
+		handleID:             7,
+	}
+	fs := New("vol-1", time.Second, session)
+
+	var out fuse.OpenOut
+	st := fs.Open(nil, &fuse.OpenIn{InHeader: fuse.InHeader{NodeId: 42}}, &out)
+	if st != fuse.OK {
+		t.Fatalf("Open() status = %v, want OK", st)
+	}
+	if out.OpenFlags != fuse.FOPEN_NONSEEKABLE {
+		t.Fatalf("Open() flags = %#x, want NONSEEKABLE", out.OpenFlags)
+	}
+}

@@ -420,7 +420,7 @@ func (fs *FileSystem) Create(cancel <-chan struct{}, input *fuse.CreateIn, name 
 	fs.invalidateKernelAttr(input.NodeId)
 	setEntryOut(&out.EntryOut, resp.Inode, resp.Attr, fs.cacheTTL)
 	out.Fh = resp.HandleId
-	out.OpenFlags = sessionOpenFlags(session)
+	out.OpenFlags = sessionOpenFlags(session, out.Fh)
 	return fuse.OK
 }
 
@@ -443,7 +443,7 @@ func (fs *FileSystem) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse
 		return statusToFuse(err)
 	}
 	out.Fh = resp.HandleId
-	out.OpenFlags = sessionOpenFlags(session)
+	out.OpenFlags = sessionOpenFlags(session, out.Fh)
 	return fuse.OK
 }
 
@@ -716,6 +716,7 @@ func (fs *FileSystem) StatFs(cancel <-chan struct{}, input *fuse.InHeader, out *
 	}
 	req := &pb.StatFsRequest{
 		VolumeId: fs.volumeID,
+		Inode:    input.NodeId,
 		Actor:    actorFromHeader(input),
 	}
 	session, st := fs.requireSession()
@@ -1055,7 +1056,12 @@ func setAttr(out *fuse.Attr, attr *pb.GetAttrResponse) {
 	out.Blksize = 4096
 }
 
-func sessionOpenFlags(session Session) uint32 {
+func sessionOpenFlags(session Session, handleID uint64) uint32 {
+	if provider, ok := session.(OpenFlagsForHandleSession); ok {
+		if flags, found := provider.OpenFlagsForHandle(handleID); found {
+			return flags
+		}
+	}
 	if provider, ok := session.(OpenFlagsSession); ok {
 		return provider.OpenFlags()
 	}
@@ -1093,7 +1099,12 @@ func statusToFuse(err error) fuse.Status {
 			return fuse.EIO
 		}
 	}
-	if errno, ok := err.(syscall.Errno); ok {
+	var errnoProvider interface{ FuseErrno() syscall.Errno }
+	if errors.As(err, &errnoProvider) {
+		return fuse.Status(errnoProvider.FuseErrno())
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
 		return fuse.Status(errno)
 	}
 	return fuse.EIO

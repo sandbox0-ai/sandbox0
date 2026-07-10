@@ -521,6 +521,12 @@ func (m *Manager) publishNodeFSPortal(ctx context.Context, req publishRequest) e
 		rootfsSession.Close()
 		return fmt.Errorf("initialize rootfs session: %w", err)
 	}
+	keepRootFSSession := false
+	defer func() {
+		if !keepRootFSSession {
+			rootfsSession.Close()
+		}
+	}()
 	routeName := nodeFSRouteName(allocated.Slot)
 	slot, err := nodefs.NewSlot(allocated.Slot)
 	if err != nil {
@@ -533,7 +539,9 @@ func (m *Manager) publishNodeFSPortal(ctx context.Context, req publishRequest) e
 	if shard.connection == nil {
 		return fmt.Errorf("nodefs shard %d connection is unavailable", allocated.Shard)
 	}
-	if err := shard.connection.invalidateCacheDomain(rootNodeID, nodefs.PortalNodeIDMask, allocated.BindingGeneration); err != nil {
+	// The route is not visible yet, so the kernel can register this empty
+	// domain without scanning unrelated inodes on a dense shared connection.
+	if err := shard.connection.registerCacheDomain(rootNodeID, nodefs.PortalNodeIDMask, allocated.BindingGeneration); err != nil {
 		return err
 	}
 	if err := shard.mux.RegisterPortal(nodefs.PortalSpec{
@@ -546,6 +554,7 @@ func (m *Manager) publishNodeFSPortal(ctx context.Context, req publishRequest) e
 	}); err != nil {
 		return err
 	}
+	keepRootFSSession = true
 	pm := &portalMount{
 		namespace:               req.Namespace,
 		podName:                 req.PodName,

@@ -13,8 +13,10 @@ type fakeNodeFUSEServer struct {
 	state         fuse.ConnectionState
 	detached      bool
 	invalidations int
+	registrations int
 	lastDomain    nodeFSCacheDomain
 	invalidateErr error
+	registerErr   error
 	waitErr       error
 	started       chan struct{}
 	startOnce     sync.Once
@@ -30,6 +32,11 @@ func (s *fakeNodeFUSEServer) InvalidateCacheDomain(rootNodeID, _ uint64, generat
 	s.invalidations++
 	s.lastDomain = nodeFSCacheDomain{rootNodeID: rootNodeID, generation: generation}
 	return s.invalidateErr
+}
+func (s *fakeNodeFUSEServer) RegisterCacheDomain(rootNodeID, _ uint64, generation uint64) error {
+	s.registrations++
+	s.lastDomain = nodeFSCacheDomain{rootNodeID: rootNodeID, generation: generation}
+	return s.registerErr
 }
 func (s *fakeNodeFUSEServer) ConnectionState() fuse.ConnectionState { return s.state }
 
@@ -224,6 +231,21 @@ func TestStartNodeFSConnectionRejectsKernelWithoutCacheDomainCapability(t *testi
 		t.Fatal("startNodeFSConnection() error = nil")
 	}
 	if !server.detached || server.invalidations != 0 || len(store.Snapshot().Shards[0].SessionState) != 0 {
+		t.Fatalf("server=%+v journal=%+v", server, store.Snapshot().Shards[0])
+	}
+}
+
+func TestStartNodeFSConnectionRejectsKernelWithoutCacheDomainRegistrationCapability(t *testing.T) {
+	store, state, shard := preparedNodeFSJournal(t, true)
+	connectionState := recoveryConnectionState()
+	connectionState.InitResponse.Flags2 &^= uint32(fuse.CAP_HAS_CACHE_DOMAIN_REGISTER >> 32)
+	server := newFakeNodeFUSEServer(connectionState)
+	factory := &fakeNodeFSConnectionFactory{newServer: server}
+
+	if _, _, err := startNodeFSConnection(store, state, shard, 0, nil, fuse.NewDefaultRawFileSystem(), factory); err == nil {
+		t.Fatal("startNodeFSConnection() error = nil")
+	}
+	if !server.detached || server.registrations != 0 || len(store.Snapshot().Shards[0].SessionState) != 0 {
 		t.Fatalf("server=%+v journal=%+v", server, store.Snapshot().Shards[0])
 	}
 }

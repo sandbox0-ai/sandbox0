@@ -360,7 +360,7 @@ spec:
             requireFUSERecovery: true
 ```
 
-Use this only after draining and upgrading a canary node with the maintained [`sandbox0-ai/anck-kernel`](https://github.com/sandbox0-ai/anck-kernel) recovery build. `requireFUSERecovery` is mandatory for fixed shards, and ctld fails closed unless recovery, resend, recovered-request status, and cache-domain invalidation are available. See [Self-hosted Configuration](/docs/self-hosted/configuration) for lifecycle, capacity metrics, and shard-count constraints.
+Use this only after draining and upgrading a canary node with the maintained [`sandbox0-ai/anck-kernel`](https://github.com/sandbox0-ai/anck-kernel) recovery build. `requireFUSERecovery` is mandatory for fixed shards, and ctld fails closed unless recovery, resend, recovered-request status, cache-domain invalidation, and empty-domain registration are available. See [Self-hosted Configuration](/docs/self-hosted/configuration) for lifecycle, capacity metrics, and shard-count constraints.
 
 ### 6) Expose the API Publicly
 

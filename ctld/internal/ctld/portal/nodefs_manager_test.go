@@ -125,7 +125,7 @@ func TestNodeFSInitializeRejectsInvalidConfiguration(t *testing.T) {
 func TestNodeFSInitializePublishAndUnpublishLifecycle(t *testing.T) {
 	rootDir := t.TempDir()
 	mounter := &fakeNodeFSMounter{}
-	factory, _ := newNodeFSTestFactory(false)
+	factory, server := newNodeFSTestFactory(false)
 	mgr := newNodeFSTestManager(t, rootDir, mounter, factory)
 	if err := mgr.Initialize(context.Background()); err != nil {
 		t.Fatalf("Initialize() error = %v", err)
@@ -138,6 +138,9 @@ func TestNodeFSInitializePublishAndUnpublishLifecycle(t *testing.T) {
 	}
 	if pm.nodeFSRouteName != nodeFSRouteName(state.Slot) || pm.nodeFSSourcePath == "" {
 		t.Fatalf("portal nodefs identity = %+v, journal = %+v", pm, state)
+	}
+	if server.registrations != 1 || server.invalidations != 0 {
+		t.Fatalf("cache domain calls registrations=%d invalidations=%d", server.registrations, server.invalidations)
 	}
 	if _, err := os.Stat(pm.rootfsBackingPath); err != nil {
 		t.Fatalf("stat rootfs backing: %v", err)
@@ -153,6 +156,47 @@ func TestNodeFSInitializePublishAndUnpublishLifecycle(t *testing.T) {
 	}
 	if len(mounter.binds) != 1 || len(mounter.unmounts) != 1 {
 		t.Fatalf("mounter calls binds=%v unmounts=%v", mounter.binds, mounter.unmounts)
+	}
+}
+
+func TestNodeFSPublishRetriesFailedCacheDomainRegistration(t *testing.T) {
+	rootDir := t.TempDir()
+	mounter := &fakeNodeFSMounter{}
+	factory, server := newNodeFSTestFactory(false)
+	mgr := newNodeFSTestManager(t, rootDir, mounter, factory)
+	if err := mgr.Initialize(context.Background()); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	defer releaseNodeFSTestProcess(t, mgr)
+
+	server.registerErr = errors.New("temporary registration failure")
+	target := filepath.Join(mgr.kubeletPodsRoot, "pod-a", "volumes", kubeletCSIVolumeDir, "sandbox0-volume-0-workspace", "mount")
+	err := mgr.PublishPortal(context.Background(), publishRequest{
+		Namespace:  "default",
+		PodName:    "sandbox-a",
+		PodUID:     "pod-a",
+		Name:       "workspace",
+		MountPath:  "/workspace",
+		TargetPath: target,
+	})
+	if err == nil {
+		t.Fatal("PublishPortal() error = nil")
+	}
+	state, ok := mgr.nodeFS.journal.Portal(portalKey("pod-a", "workspace"))
+	if !ok || state.Phase != nodeFSPortalAllocating {
+		t.Fatalf("journal after failed registration = %+v, found=%v", state, ok)
+	}
+	mgr.mu.Lock()
+	registered := mgr.portals[state.PortalKey]
+	mgr.mu.Unlock()
+	if registered != nil || server.registrations != 1 || server.invalidations != 0 {
+		t.Fatalf("portal=%+v registrations=%d invalidations=%d", registered, server.registrations, server.invalidations)
+	}
+
+	server.registerErr = nil
+	_, completed := publishNodeFSTestPortal(t, mgr)
+	if completed.Slot != state.Slot || server.registrations != 2 {
+		t.Fatalf("retry state=%+v registrations=%d", completed, server.registrations)
 	}
 }
 

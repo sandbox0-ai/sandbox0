@@ -225,6 +225,6 @@ replace github.com/dgrijalva/jwt-go v3.2.0+incompatible => github.com/golang-jwt
 
 // sandbox0's fork adds resumable, externally recovered FUSE connections.
 // Keep this replacement pinned to an immutable tag based on upstream v2.10.1.
-replace github.com/hanwen/go-fuse/v2 => github.com/sandbox0-ai/go-fuse/v2 v2.10.1-sandbox0.3
+replace github.com/hanwen/go-fuse/v2 => github.com/sandbox0-ai/go-fuse/v2 v2.10.1-sandbox0.5
 
 replace xorm.io/xorm v1.0.7 => gitea.com/davies/xorm v1.0.8-0.20220528043536-552d84d1b34a

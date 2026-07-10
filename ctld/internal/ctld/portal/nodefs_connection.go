@@ -15,7 +15,11 @@ import (
 
 const (
 	fuseCapabilityInvalidateCacheInFailover = uint64(1) << 60
-	nodeFSRequiredKernelCapabilities        = fuse.CAP_HAS_RESEND | fuseCapabilityRecovery | fuseCapabilityInvalidateCacheInFailover | fuse.CAP_HAS_CACHE_DOMAINS
+	nodeFSRequiredKernelCapabilities        = fuse.CAP_HAS_RESEND |
+		fuseCapabilityRecovery |
+		fuseCapabilityInvalidateCacheInFailover |
+		fuse.CAP_HAS_CACHE_DOMAINS |
+		fuse.CAP_HAS_CACHE_DOMAIN_REGISTER
 )
 
 type nodeFSCacheDomain struct {
@@ -28,6 +32,7 @@ type nodeFUSEServer interface {
 	WaitMount() error
 	Detach() error
 	InvalidateCacheDomain(rootNodeID, nodeIDMask, generation uint64) error
+	RegisterCacheDomain(rootNodeID, nodeIDMask, generation uint64) error
 	ConnectionState() fuse.ConnectionState
 }
 
@@ -87,6 +92,17 @@ func (c *nodeFSConnection) invalidateCacheDomain(rootNodeID, nodeIDMask, generat
 	}
 	if err := c.server.InvalidateCacheDomain(rootNodeID, nodeIDMask, generation); err != nil {
 		return fmt.Errorf("invalidate nodefs kernel cache domain %#x/%#x generation %d: %w",
+			rootNodeID, nodeIDMask, generation, err)
+	}
+	return nil
+}
+
+func (c *nodeFSConnection) registerCacheDomain(rootNodeID, nodeIDMask, generation uint64) error {
+	if c == nil || c.server == nil {
+		return fmt.Errorf("nodefs FUSE server is not initialized")
+	}
+	if err := c.server.RegisterCacheDomain(rootNodeID, nodeIDMask, generation); err != nil {
+		return fmt.Errorf("register nodefs kernel cache domain %#x/%#x generation %d: %w",
 			rootNodeID, nodeIDMask, generation, err)
 	}
 	return nil
@@ -180,7 +196,7 @@ func startNodeFSConnection(
 	if journalState.RecoveryRequired && state.InitResponse.Flags64()&nodeFSRequiredKernelCapabilities != nodeFSRequiredKernelCapabilities {
 		cleanupErr := detachUnstartedNodeFSConnection(server, shard.MountPath, factory)
 		return nil, false, errors.Join(
-			fmt.Errorf("nodefs shard %d kernel did not negotiate FUSE recovery, resend, and cache-domain support", shard.Index),
+			fmt.Errorf("nodefs shard %d kernel did not negotiate FUSE recovery, resend, cache-domain invalidation, and empty-domain registration", shard.Index),
 			cleanupErr,
 		)
 	}

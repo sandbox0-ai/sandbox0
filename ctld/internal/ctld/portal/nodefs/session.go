@@ -42,6 +42,7 @@ type portalSessionRoute struct {
 
 	rootInode uint64
 	binding   atomic.Pointer[portalSessionBinding]
+	callMu    sync.RWMutex
 }
 
 type portalSessionBinding struct {
@@ -65,6 +66,14 @@ func (r *portalSessionRoute) snapshot() portalSessionSnapshot {
 		rootInode: r.rootInode,
 		session:   binding.session,
 	}
+}
+
+func (r *portalSessionRoute) acquireRouteLease() {
+	r.callMu.RLock()
+}
+
+func (r *portalSessionRoute) releaseRouteLease() {
+	r.callMu.RUnlock()
 }
 
 // SessionMux implements one volumefuse session for a fixed nodefs shard. The
@@ -137,29 +146,34 @@ func (m *SessionMux) RegisterPortal(spec PortalSpec) error {
 	return nil
 }
 
-// UpdatePortalSession atomically changes the backend session used by future
-// requests without changing the portal's slot or root inode. The caller owns
-// the lifetime of the previous session and must keep it alive for requests that
-// already acquired it.
-func (m *SessionMux) UpdatePortalSession(name, volumeID string, session volumefuse.Session) error {
+// UpdatePortalSession changes the backend session without changing the slot or
+// root inode. It waits for calls using the previous binding and returns that
+// session, so the caller may close it immediately after this method returns.
+func (m *SessionMux) UpdatePortalSession(name, volumeID string, session volumefuse.Session) (volumefuse.Session, error) {
 	if m == nil {
-		return fmt.Errorf("%w: session mux is nil", ErrPortalRouteMissing)
+		return nil, fmt.Errorf("%w: session mux is nil", ErrPortalRouteMissing)
 	}
 	name = strings.TrimSpace(name)
 	if volumeID = strings.TrimSpace(volumeID); volumeID == "" {
-		return fmt.Errorf("%w: volume id is required", ErrInvalidPortalRoute)
+		return nil, fmt.Errorf("%w: volume id is required", ErrInvalidPortalRoute)
 	}
 	if session == nil {
-		return fmt.Errorf("%w: session is required", ErrInvalidPortalRoute)
+		return nil, fmt.Errorf("%w: session is required", ErrInvalidPortalRoute)
 	}
 	m.mu.RLock()
 	route := m.byName[name]
 	m.mu.RUnlock()
 	if route == nil {
-		return fmt.Errorf("%w: %s", ErrPortalRouteMissing, name)
+		return nil, fmt.Errorf("%w: %s", ErrPortalRouteMissing, name)
 	}
+	route.callMu.Lock()
+	previous := route.binding.Load()
 	route.binding.Store(&portalSessionBinding{volumeID: volumeID, session: session})
-	return nil
+	route.callMu.Unlock()
+	if previous == nil {
+		return nil, nil
+	}
+	return previous.session, nil
 }
 
 // DrainPortal removes the route name, rejects new requests for its slot, and
@@ -186,7 +200,9 @@ func (m *SessionMux) DrainPortal(ctx context.Context, name string) (PortalSpec, 
 		delete(m.byName, name)
 	}
 	m.mu.Unlock()
+	drained.callMu.RLock()
 	snapshot := drained.snapshot()
+	drained.callMu.RUnlock()
 	return PortalSpec{
 		Name:      drained.name,
 		Slot:      drained.slot,

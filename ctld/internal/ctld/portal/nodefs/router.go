@@ -16,6 +16,14 @@ type routeEntry[T any] struct {
 	drainEnd sync.Once
 }
 
+// routeLeaseHooks lets a route target extend the router lease over target-local
+// state. SessionMux uses it to keep a backend binding quiescent while a file
+// operation is in flight.
+type routeLeaseHooks interface {
+	acquireRouteLease()
+	releaseRouteLease()
+}
+
 // Router maps encoded FUSE IDs to portal-local IDs and an opaque backend
 // target. The success paths use only a shared map lock and atomic refcount; they
 // do not allocate. Portal removal waits for all acquired requests to finish.
@@ -92,6 +100,9 @@ type Lease[T any] struct {
 func (l Lease[T]) Release() {
 	if l.entry == nil {
 		return
+	}
+	if hooks, ok := any(l.entry.target).(routeLeaseHooks); ok {
+		hooks.releaseRouteLease()
 	}
 	remaining := l.entry.inFlight.Add(^uint64(0))
 	if remaining == 0 && l.entry.draining.Load() {
@@ -272,6 +283,9 @@ func (r *Router[T]) acquireSlot(slot Slot) (Lease[T], error) {
 	}
 	entry.inFlight.Add(1)
 	target := entry.target
+	if hooks, ok := any(target).(routeLeaseHooks); ok {
+		hooks.acquireRouteLease()
+	}
 	r.mu.RUnlock()
 	return Lease[T]{Slot: slot, Target: target, entry: entry}, nil
 }

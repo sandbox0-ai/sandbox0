@@ -224,8 +224,12 @@ func TestSessionMuxUpdatesBackendWithoutChangingEncodedRoot(t *testing.T) {
 	second := &muxTestSession{}
 	registerMuxTestPortal(t, mux, first, "slot-16", 16)
 	root := mustNodeID(t, 16, 1)
-	if err := mux.UpdatePortalSession("slot-16", "replacement-volume", second); err != nil {
+	previous, err := mux.UpdatePortalSession("slot-16", "replacement-volume", second)
+	if err != nil {
 		t.Fatalf("UpdatePortalSession() error = %v", err)
+	}
+	if previous != first {
+		t.Fatalf("UpdatePortalSession() previous = %T, want first backend", previous)
 	}
 	attr, err := mux.GetAttr(context.Background(), &pb.GetAttrRequest{Inode: root})
 	if err != nil {
@@ -239,6 +243,51 @@ func TestSessionMuxUpdatesBackendWithoutChangingEncodedRoot(t *testing.T) {
 	}
 	if attr.Ino != root {
 		t.Fatalf("GetAttr() inode = %d, want stable encoded root %d", attr.Ino, root)
+	}
+}
+
+func TestSessionMuxUpdateWaitsForPreviousBackendCalls(t *testing.T) {
+	t.Parallel()
+	mux := NewSessionMux()
+	previous := &blockingGetAttrSession{started: make(chan struct{}), release: make(chan struct{})}
+	next := &muxTestSession{}
+	registerMuxTestPortal(t, mux, previous, "slot-17", 17)
+	requestDone := make(chan error, 1)
+	go func() {
+		_, err := mux.GetAttr(context.Background(), &pb.GetAttrRequest{Inode: mustNodeID(t, 17, 1)})
+		requestDone <- err
+	}()
+	<-previous.started
+
+	updateDone := make(chan struct{})
+	var replaced volumefuse.Session
+	var updateErr error
+	go func() {
+		replaced, updateErr = mux.UpdatePortalSession("slot-17", "next-volume", next)
+		close(updateDone)
+	}()
+	select {
+	case <-updateDone:
+		t.Fatal("UpdatePortalSession() returned while the previous backend call was in flight")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(previous.release)
+	if err := <-requestDone; err != nil {
+		t.Fatalf("previous backend request error = %v", err)
+	}
+	select {
+	case <-updateDone:
+	case <-time.After(time.Second):
+		t.Fatal("UpdatePortalSession() did not finish after the previous call drained")
+	}
+	if updateErr != nil || replaced != previous {
+		t.Fatalf("UpdatePortalSession() = (%T, %v), want previous backend", replaced, updateErr)
+	}
+	if _, err := mux.GetAttr(context.Background(), &pb.GetAttrRequest{Inode: mustNodeID(t, 17, 1)}); err != nil {
+		t.Fatalf("next backend GetAttr() error = %v", err)
+	}
+	if next.lastGetAttr == nil || next.lastGetAttr.VolumeId != "next-volume" {
+		t.Fatalf("next backend request = %+v", next.lastGetAttr)
 	}
 }
 

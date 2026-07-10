@@ -40,6 +40,7 @@ type apiModeSuiteOptions struct {
 	includeObjectEncryption     bool
 	includeWebhookLifecycle     bool
 	includeRootFSPauseResume    bool
+	includeNodeFSRecovery       bool
 	includeMeteringAssertions   bool
 	includeUsageQuotaAssertions bool
 	expectStorageUnavailable    bool
@@ -330,6 +331,17 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 				It("keeps claim-mounted volumes writable", func() {
 					assertClaimMountedVolumeWritable(env, session)
 				})
+
+				if opts.includeNodeFSRecovery {
+					It("keeps rootfs and mounted volumes writable across a ctld restart", func() {
+						enabled, err := nodeFSRecoveryEnabled(env)
+						Expect(err).NotTo(HaveOccurred())
+						if !enabled {
+							Skip("ctld nodefs recovery is not enabled for this scenario")
+						}
+						assertNodeFSRecoveryAcrossCtldRestart(env, session)
+					})
+				}
 
 				It("persists large-file partial rewrites across remounts", func() {
 					assertS0FSLargeFilePartialRewriteAcrossRemount(env, session)

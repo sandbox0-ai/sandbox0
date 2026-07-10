@@ -144,6 +144,9 @@ func openNodeFSJournal(rootDir, nodeIdentity string, shardCount int) (*nodeFSJou
 	data, err := loadNodeFSJournal(path)
 	if errors.Is(err, os.ErrNotExist) {
 		data = newNodeFSJournal(nodeIdentity, shardCount)
+		if err := validateNodeFSJournal(data); err != nil {
+			return nil, fmt.Errorf("validate new nodefs journal: %w", err)
+		}
 		if err := writeNodeFSJournal(path, data); err != nil {
 			return nil, err
 		}
@@ -777,11 +780,12 @@ func validateNodeFSJournal(state nodeFSJournal) error {
 	return nil
 }
 
+// writeNodeFSJournal atomically persists state that its caller has validated.
 func writeNodeFSJournal(path string, state nodeFSJournal) (retErr error) {
-	if err := validateNodeFSJournal(state); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(state, "", "  ")
+	// Callers validate before entering the durability boundary. Keeping that
+	// validation outside this helper avoids a second O(portals) pass on every
+	// lifecycle transition at high node density.
+	data, err := json.Marshal(state)
 	if err != nil {
 		return fmt.Errorf("encode nodefs journal: %w", err)
 	}

@@ -2,6 +2,7 @@ package portal
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,55 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal/nodefs"
 )
+
+func BenchmarkNodeFSJournalUpdateAtDensity(b *testing.B) {
+	for _, portalCount := range []int{100, 1000} {
+		b.Run(fmt.Sprintf("portals-%d", portalCount), func(b *testing.B) {
+			const shardCount = 8
+			state := newNodeFSJournal("node-a", shardCount)
+			for index := 0; index < portalCount; index++ {
+				shard := index % shardCount
+				slot := uint64(index/shardCount + 1)
+				state.Portals = append(state.Portals, nodeFSPortalState{
+					PortalKey:         fmt.Sprintf("pod-%d/workspace", index),
+					PodUID:            fmt.Sprintf("pod-%d", index),
+					Namespace:         "tpl-default",
+					PodName:           fmt.Sprintf("sandbox-%d", index),
+					Name:              "workspace",
+					TargetPath:        fmt.Sprintf("/var/lib/kubelet/pods/pod-%d/volumes/kubernetes.io~csi/workspace/mount", index),
+					Shard:             shard,
+					Slot:              slot,
+					BindingGeneration: 1,
+					RootFSBacking:     fmt.Sprintf("/var/lib/sandbox0/ctld/rootfs-portals/pod-%d/workspace", index),
+					Backend:           nodeFSRootBackend,
+					Phase:             nodeFSPortalPublished,
+				})
+				state.NextSlotByShard[shard] = slot + 1
+			}
+
+			path := filepath.Join(b.TempDir(), nodeFSStateFileName)
+			if err := validateNodeFSJournal(state); err != nil {
+				b.Fatalf("validateNodeFSJournal() setup error = %v", err)
+			}
+			if err := writeNodeFSJournal(path, state); err != nil {
+				b.Fatalf("writeNodeFSJournal() setup error = %v", err)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				b.Fatalf("stat journal: %v", err)
+			}
+			b.SetBytes(info.Size())
+			b.ReportAllocs()
+			store := &nodeFSJournalStore{path: path, data: state}
+			b.ResetTimer()
+			for b.Loop() {
+				if err := store.Update(func(*nodeFSJournal) error { return nil }); err != nil {
+					b.Fatalf("Update() error = %v", err)
+				}
+			}
+		})
+	}
+}
 
 func TestNodeFSJournalRoundTrip(t *testing.T) {
 	root := t.TempDir()

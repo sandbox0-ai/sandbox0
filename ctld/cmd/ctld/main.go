@@ -86,7 +86,7 @@ func main() {
 	flag.DurationVar(&rootFSObjectCacheMaxAge, "rootfs-object-cache-max-age", 0, "maximum age for node-local rootfs cache objects; 0 disables age-based eviction")
 	flag.DurationVar(&rootFSObjectCacheSweepInterval, "rootfs-object-cache-sweep-interval", time.Minute, "interval for node-local rootfs object cache garbage collection")
 	flag.IntVar(&nodeFSShardCount, "nodefs-shards", 0, "fixed node-wide FUSE shard count; 0 keeps per-portal FUSE mounts")
-	flag.BoolVar(&nodeFSRequireRecovery, "nodefs-require-recovery", false, "require kernel FUSE recovery and resend support for nodefs shards")
+	flag.BoolVar(&nodeFSRequireRecovery, "nodefs-require-recovery", false, "require kernel FUSE recovery, request resend status, and cache-domain invalidation; mandatory with nodefs shards")
 	flag.Parse()
 
 	log.Println("Starting ctld")

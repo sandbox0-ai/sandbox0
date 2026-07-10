@@ -1367,6 +1367,8 @@ type StorageProxyServiceConfig struct {
 }
 
 // CtldServiceConfig defines configuration for the ctld daemonset.
+// +kubebuilder:validation:XValidation:rule="!has(self.nodeFSShardCount) || self.nodeFSShardCount == 0 || (has(self.requireFUSERecovery) && self.requireFUSERecovery)",message="nodeFSShardCount requires requireFUSERecovery"
+// +kubebuilder:validation:XValidation:rule="!has(self.requireFUSERecovery) || !self.requireFUSERecovery || (has(self.nodeFSShardCount) && self.nodeFSShardCount > 0)",message="requireFUSERecovery requires nodeFSShardCount"
 type CtldServiceConfig struct {
 	// ContainerdHostDataRoot is the containerd data root path on the host.
 	// Set this when nodes use a non-default containerd root such as a dedicated
@@ -1385,9 +1387,10 @@ type CtldServiceConfig struct {
 	// +optional
 	NodeFSShardCount int32 `json:"nodeFSShardCount,omitempty"`
 
-	// RequireFUSERecovery requires kernel-supported FUSE connection recovery
-	// before ctld publishes portals. Enable this in production together with
-	// NodeFSShardCount after the recovery-capable node image is installed.
+	// RequireFUSERecovery requires kernel-supported FUSE connection recovery,
+	// resend acknowledgements, recovered-request status, and cache-domain
+	// invalidation before ctld publishes portals. It is mandatory when
+	// NodeFSShardCount is positive.
 	// +kubebuilder:default=false
 	// +optional
 	RequireFUSERecovery bool `json:"requireFUSERecovery,omitempty"`

@@ -3119,9 +3119,10 @@ spec:
                       requireFUSERecovery:
                         default: false
                         description: |-
-                          RequireFUSERecovery requires kernel-supported FUSE connection recovery
-                          before ctld publishes portals. Enable this in production together with
-                          NodeFSShardCount after the recovery-capable node image is installed.
+                          RequireFUSERecovery requires kernel-supported FUSE connection recovery,
+                          resend acknowledgements, recovered-request status, and cache-domain
+                          invalidation before ctld publishes portals. It is mandatory when
+                          NodeFSShardCount is positive.
                         type: boolean
                       rootfsObjectCacheMaxAge:
                         description: |-
@@ -3145,6 +3146,14 @@ spec:
                           node-local rootfs object cache.
                         type: string
                     type: object
+                    x-kubernetes-validations:
+                    - message: nodeFSShardCount requires requireFUSERecovery
+                      rule: '!has(self.nodeFSShardCount) || self.nodeFSShardCount
+                        == 0 || (has(self.requireFUSERecovery) && self.requireFUSERecovery)'
+                    - message: requireFUSERecovery requires nodeFSShardCount
+                      rule: '!has(self.requireFUSERecovery) || !self.requireFUSERecovery
+                        || (has(self.nodeFSShardCount) && self.nodeFSShardCount >
+                        0)'
                   globalGateway:
                     default: {}
                     description: GlobalGateway configures the global-gateway service

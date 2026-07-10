@@ -366,7 +366,9 @@ spec:
 
 This mode does not deploy another service. `ctld` owns the shard connections, keeps their lifecycle journal on its existing host data path, and bind-mounts each portal subtree into the CSI target. It works with both gVisor and host runtimes such as runc because the runtime receives a normal CSI mount.
 
-`requireFUSERecovery: true` is the production-safe setting. It requires a kernel with Sandbox0's ANCK FUSE recovery patch set and refuses to publish portals if the kernel does not negotiate both recovery and request resend. The maintained kernel branch and immutable tags are published in [`sandbox0-ai/anck-kernel`](https://github.com/sandbox0-ai/anck-kernel). Install and boot that kernel on a drained canary node before enabling the setting. Drain a node before enabling nodefs, disabling it, or changing `nodeFSShardCount`; the shard count is immutable while that node has committed portals.
+`requireFUSERecovery: true` is mandatory whenever `nodeFSShardCount` is positive. It requires a kernel with Sandbox0's ANCK FUSE recovery patch set and refuses to start nodefs if the kernel does not negotiate recovery, request resend, recovered-request status, and cache-domain invalidation. The maintained kernel branch and immutable tags are published in [`sandbox0-ai/anck-kernel`](https://github.com/sandbox0-ai/anck-kernel). Install and boot that kernel on a drained canary node before enabling the setting. Drain a node before enabling nodefs, disabling it, or changing `nodeFSShardCount`; the shard count is immutable while that node has committed portals.
+
+Monitor `sandbox0_ctld_nodefs_slot_remaining`, `sandbox0_ctld_nodefs_portals_active`, and `sandbox0_ctld_nodefs_binding_generation_remaining`. On startup, ctld automatically rotates the connection generation when the shard set is empty and 75% of its portal slots have been consumed. Drain and restart a running node before `nodefs_slot_remaining` reaches zero; draining also provides the rollback boundary for a kernel or shard-count change.
 
 ### Shared Redis Rate Limiting
 

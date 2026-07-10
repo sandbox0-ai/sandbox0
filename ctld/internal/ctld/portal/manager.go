@@ -308,9 +308,14 @@ func (m *Manager) PublishPortal(ctx context.Context, req publishRequest) error {
 		return fmt.Errorf("create unbound portal rootfs backing dir: %w", err)
 	}
 	rootfsSession := newRootFSBackedSession(rootfsBackingPath)
+	if err := rootfsSession.InitError(); err != nil {
+		rootfsSession.Close()
+		return fmt.Errorf("initialize unbound portal rootfs session: %w", err)
+	}
 	fs := volumefuse.New(key, time.Second, rootfsSession)
 	server, err := mountPortalFS(fs, req.TargetPath)
 	if err != nil {
+		rootfsSession.Close()
 		return err
 	}
 	pm := &portalMount{

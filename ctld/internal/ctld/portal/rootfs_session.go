@@ -26,24 +26,21 @@ const rootFSBackedSessionRoot = ""
 type rootFSBackedSession struct {
 	root string
 
-	mu          sync.Mutex
-	nextInode   uint64
-	inodeByPath map[string]uint64
-	pathByInode map[uint64]string
-	nextHandle  uint64
-	handles     map[uint64]*os.File
-	closed      bool
+	mu              sync.Mutex
+	inodeByPath     map[string]uint64
+	pathByInode     map[uint64]string
+	identityByInode map[uint64]rootFSHostIdentity
+	handles         map[uint64]*rootFSOpenHandle
+	orphans         map[uint64]rootFSOrphanRecord
+	recovered       bool
+	initErr         error
+	closed          bool
 }
 
 func newRootFSBackedSession(root string) *rootFSBackedSession {
-	return &rootFSBackedSession{
-		root:        filepath.Clean(root),
-		nextInode:   s0fs.RootInode + 1,
-		inodeByPath: map[string]uint64{rootFSBackedSessionRoot: s0fs.RootInode},
-		pathByInode: map[uint64]string{s0fs.RootInode: rootFSBackedSessionRoot},
-		nextHandle:  1,
-		handles:     make(map[uint64]*os.File),
-	}
+	session := &rootFSBackedSession{root: filepath.Clean(root)}
+	session.initErr = session.initializeState()
+	return session
 }
 
 func (s *rootFSBackedSession) Close() {
@@ -57,13 +54,25 @@ func (s *rootFSBackedSession) Close() {
 	}
 	s.closed = true
 	for id, handle := range s.handles {
-		_ = handle.Close()
+		closeRootFSHandleFiles(handle)
 		delete(s.handles, id)
 	}
 }
 
+// InitError reports recovery failures before the session is mounted or routed.
+func (s *rootFSBackedSession) InitError() error {
+	if s == nil {
+		return fserror.New(fserror.FailedPrecondition, "rootfs-backed portal session is nil")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.initErr
+}
+
 func (s *rootFSBackedSession) Lookup(_ context.Context, req *pb.LookupRequest) (*pb.NodeResponse, error) {
-	parent, err := s.relForInode(req.GetParent())
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	parent, err := s.relForInodeLocked(req.GetParent())
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +84,10 @@ func (s *rootFSBackedSession) Lookup(_ context.Context, req *pb.LookupRequest) (
 	if err != nil {
 		return nil, mapRootFSBackedError(err)
 	}
-	inode := s.inodeForPath(rel)
+	inode, err := s.inodeForExistingPathLocked(rel, info)
+	if err != nil {
+		return nil, err
+	}
 	return &pb.NodeResponse{Inode: inode, Generation: 1, Attr: attrFromFileInfo(inode, info)}, nil
 }
 
@@ -145,7 +157,9 @@ func (s *rootFSBackedSession) SetAttr(_ context.Context, req *pb.SetAttrRequest)
 }
 
 func (s *rootFSBackedSession) Mkdir(_ context.Context, req *pb.MkdirRequest) (*pb.NodeResponse, error) {
-	parent, err := s.relForInode(req.GetParent())
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	parent, err := s.relForInodeLocked(req.GetParent())
 	if err != nil {
 		return nil, err
 	}
@@ -167,12 +181,18 @@ func (s *rootFSBackedSession) Mkdir(_ context.Context, req *pb.MkdirRequest) (*p
 	if err != nil {
 		return nil, mapRootFSBackedError(err)
 	}
-	inode := s.inodeForPath(rel)
+	inode, err := s.inodeForExistingPathLocked(rel, info)
+	if err != nil {
+		_ = os.Remove(s.hostPath(rel))
+		return nil, err
+	}
 	return &pb.NodeResponse{Inode: inode, Generation: 1, Attr: attrFromFileInfo(inode, info)}, nil
 }
 
 func (s *rootFSBackedSession) Create(_ context.Context, req *pb.CreateRequest) (*pb.NodeResponse, error) {
-	parent, err := s.relForInode(req.GetParent())
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	parent, err := s.relForInodeLocked(req.GetParent())
 	if err != nil {
 		return nil, err
 	}
@@ -197,13 +217,19 @@ func (s *rootFSBackedSession) Create(_ context.Context, req *pb.CreateRequest) (
 		_ = handle.Close()
 		return nil, mapRootFSBackedError(err)
 	}
-	inode := s.inodeForPath(rel)
-	handleID := s.trackHandle(handle)
+	inode, err := s.inodeForExistingPathLocked(rel, info)
+	if err != nil {
+		_ = handle.Close()
+		return nil, err
+	}
+	handleID := s.openHandleLocked(inode, false, handle, flags)
 	return &pb.NodeResponse{Inode: inode, Generation: 1, Attr: attrFromFileInfo(inode, info), HandleId: handleID}, nil
 }
 
 func (s *rootFSBackedSession) Unlink(_ context.Context, req *pb.UnlinkRequest) (*pb.Empty, error) {
-	parent, err := s.relForInode(req.GetParent())
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	parent, err := s.relForInodeLocked(req.GetParent())
 	if err != nil {
 		return nil, err
 	}
@@ -211,15 +237,13 @@ func (s *rootFSBackedSession) Unlink(_ context.Context, req *pb.UnlinkRequest) (
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Remove(s.hostPath(rel)); err != nil {
-		return nil, mapRootFSBackedError(err)
-	}
-	s.dropPath(rel)
-	return &pb.Empty{}, nil
+	return s.removePathLocked(rel, false)
 }
 
 func (s *rootFSBackedSession) Rmdir(_ context.Context, req *pb.RmdirRequest) (*pb.Empty, error) {
-	parent, err := s.relForInode(req.GetParent())
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	parent, err := s.relForInodeLocked(req.GetParent())
 	if err != nil {
 		return nil, err
 	}
@@ -227,19 +251,17 @@ func (s *rootFSBackedSession) Rmdir(_ context.Context, req *pb.RmdirRequest) (*p
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Remove(s.hostPath(rel)); err != nil {
-		return nil, mapRootFSBackedError(err)
-	}
-	s.dropPathTree(rel)
-	return &pb.Empty{}, nil
+	return s.removePathLocked(rel, true)
 }
 
 func (s *rootFSBackedSession) Rename(_ context.Context, req *pb.RenameRequest) (*pb.Empty, error) {
-	oldParent, err := s.relForInode(req.GetOldParent())
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	oldParent, err := s.relForInodeLocked(req.GetOldParent())
 	if err != nil {
 		return nil, err
 	}
-	newParent, err := s.relForInode(req.GetNewParent())
+	newParent, err := s.relForInodeLocked(req.GetNewParent())
 	if err != nil {
 		return nil, err
 	}
@@ -251,19 +273,98 @@ func (s *rootFSBackedSession) Rename(_ context.Context, req *pb.RenameRequest) (
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Rename(s.hostPath(oldRel), s.hostPath(newRel)); err != nil {
+	oldInfo, err := os.Lstat(s.hostPath(oldRel))
+	if err != nil {
 		return nil, mapRootFSBackedError(err)
 	}
-	s.renamePathTree(oldRel, newRel)
+	oldIdentity, err := rootFSIdentityFromInfo(oldInfo)
+	if err != nil {
+		return nil, err
+	}
+	newInfo, newInfoErr := os.Lstat(s.hostPath(newRel))
+	if newInfoErr != nil && !errors.Is(newInfoErr, os.ErrNotExist) {
+		return nil, mapRootFSBackedError(newInfoErr)
+	}
+	if newInfoErr == nil {
+		newIdentity, identityErr := rootFSIdentityFromInfo(newInfo)
+		if identityErr != nil {
+			return nil, identityErr
+		}
+		if newIdentity == oldIdentity {
+			return &pb.Empty{}, nil
+		}
+	}
+
+	targetInode := uint64(0)
+	targetOrphan := ""
+	targetMoved := false
+	targetLinked := false
+	if newInfoErr == nil {
+		targetInode, err = s.inodeForExistingPathLocked(newRel, newInfo)
+		if err != nil {
+			return nil, err
+		}
+		if s.otherVisiblePathLocked(targetInode, newRel) == "" && (s.hasHandlesForInodeLocked(targetInode) || s.recovered) {
+			targetOrphan = rootFSOrphanPath(targetInode)
+			if s.inodeByPath[targetOrphan] == targetInode {
+				// An earlier crash already left a private recovery anchor.
+			} else if newInfo.IsDir() {
+				err = renameRootFSNoReplace(s.hostPath(newRel), s.hostPath(targetOrphan))
+				targetMoved = err == nil
+			} else {
+				err = os.Link(s.hostPath(newRel), s.hostPath(targetOrphan))
+				targetLinked = err == nil
+			}
+			if err != nil {
+				return nil, mapRootFSBackedError(err)
+			}
+		}
+	}
+	if err := os.Rename(s.hostPath(oldRel), s.hostPath(newRel)); err != nil {
+		if targetMoved {
+			_ = os.Rename(s.hostPath(targetOrphan), s.hostPath(newRel))
+		} else if targetLinked {
+			_ = os.Remove(s.hostPath(targetOrphan))
+		}
+		return nil, mapRootFSBackedError(err)
+	}
+
+	if newInfoErr == nil {
+		if targetOrphan != "" {
+			delete(s.inodeByPath, newRel)
+			s.inodeByPath[targetOrphan] = targetInode
+			s.pathByInode[targetInode] = targetOrphan
+			identity, _ := rootFSIdentityFromInfo(newInfo)
+			openCount := uint64(0)
+			if handle := s.handles[targetInode]; handle != nil {
+				openCount = handle.openCount
+			}
+			s.orphans[targetInode] = rootFSOrphanRecord{
+				Inode: targetInode, Identity: identity, OpenCount: openCount, Directory: newInfo.IsDir(), Retain: s.recovered,
+			}
+		} else if newInfo.IsDir() {
+			s.dropPathTreeLocked(newRel)
+		} else {
+			s.dropPathLocked(newRel)
+		}
+	}
+	s.renamePathTreeLocked(oldRel, newRel)
+	if targetOrphan != "" {
+		if err := s.commitOrphansLocked("rename over open target"); err != nil {
+			return nil, err
+		}
+	}
 	return &pb.Empty{}, nil
 }
 
 func (s *rootFSBackedSession) Link(_ context.Context, req *pb.LinkRequest) (*pb.NodeResponse, error) {
-	sourceRel, err := s.relForInode(req.GetInode())
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sourceRel, err := s.relForInodeLocked(req.GetInode())
 	if err != nil {
 		return nil, err
 	}
-	parentRel, err := s.relForInode(req.GetNewParent())
+	parentRel, err := s.relForInodeLocked(req.GetNewParent())
 	if err != nil {
 		return nil, err
 	}
@@ -278,12 +379,18 @@ func (s *rootFSBackedSession) Link(_ context.Context, req *pb.LinkRequest) (*pb.
 	if err != nil {
 		return nil, mapRootFSBackedError(err)
 	}
-	inode := s.inodeForPath(newRel)
+	inode, err := s.inodeForExistingPathLocked(newRel, info)
+	if err != nil {
+		_ = os.Remove(s.hostPath(newRel))
+		return nil, err
+	}
 	return &pb.NodeResponse{Inode: inode, Generation: 1, Attr: attrFromFileInfo(inode, info)}, nil
 }
 
 func (s *rootFSBackedSession) Symlink(_ context.Context, req *pb.SymlinkRequest) (*pb.NodeResponse, error) {
-	parentRel, err := s.relForInode(req.GetParent())
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	parentRel, err := s.relForInodeLocked(req.GetParent())
 	if err != nil {
 		return nil, err
 	}
@@ -298,7 +405,11 @@ func (s *rootFSBackedSession) Symlink(_ context.Context, req *pb.SymlinkRequest)
 	if err != nil {
 		return nil, mapRootFSBackedError(err)
 	}
-	inode := s.inodeForPath(rel)
+	inode, err := s.inodeForExistingPathLocked(rel, info)
+	if err != nil {
+		_ = os.Remove(s.hostPath(rel))
+		return nil, err
+	}
 	return &pb.NodeResponse{Inode: inode, Generation: 1, Attr: attrFromFileInfo(inode, info)}, nil
 }
 
@@ -326,7 +437,9 @@ func (s *rootFSBackedSession) Access(_ context.Context, req *pb.AccessRequest) (
 }
 
 func (s *rootFSBackedSession) Open(_ context.Context, req *pb.OpenRequest) (*pb.OpenResponse, error) {
-	rel, err := s.relForInode(req.GetInode())
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rel, err := s.relForInodeLocked(req.GetInode())
 	if err != nil {
 		return nil, err
 	}
@@ -334,7 +447,18 @@ func (s *rootFSBackedSession) Open(_ context.Context, req *pb.OpenRequest) (*pb.
 	if err != nil {
 		return nil, mapRootFSBackedError(err)
 	}
-	return &pb.OpenResponse{HandleId: s.trackHandle(handle)}, nil
+	info, err := handle.Stat()
+	if err != nil {
+		_ = handle.Close()
+		return nil, mapRootFSBackedError(err)
+	}
+	identity, err := rootFSIdentityFromInfo(info)
+	if err != nil || identity != s.identityByInode[normalizeRootFSInode(req.GetInode())] {
+		_ = handle.Close()
+		return nil, fserror.New(fserror.FailedPrecondition, "rootfs inode host identity changed before open")
+	}
+	handleID := s.openHandleLocked(normalizeRootFSInode(req.GetInode()), false, handle, int(req.GetFlags()))
+	return &pb.OpenResponse{HandleId: handleID}, nil
 }
 
 func (s *rootFSBackedSession) Read(_ context.Context, req *pb.ReadRequest) (*pb.ReadResponse, error) {
@@ -365,19 +489,23 @@ func (s *rootFSBackedSession) Write(_ context.Context, req *pb.WriteRequest) (*p
 }
 
 func (s *rootFSBackedSession) Release(_ context.Context, req *pb.ReleaseRequest) (*pb.Empty, error) {
-	if handle := s.takeHandle(req.GetHandleId()); handle != nil {
-		if err := handle.Close(); err != nil {
-			return nil, mapRootFSBackedError(err)
-		}
-	}
-	return &pb.Empty{}, nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.releaseHandleLocked(req.GetHandleId(), false)
 }
 
 func (s *rootFSBackedSession) Flush(_ context.Context, req *pb.FlushRequest) (*pb.Empty, error) {
-	if handle := s.lookupHandle(req.GetHandleId()); handle != nil {
-		if err := handle.Sync(); err != nil {
-			return nil, mapRootFSBackedError(err)
-		}
+	rel, err := s.relForInode(req.GetHandleId())
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.Open(s.hostPath(rel))
+	if err != nil {
+		return nil, mapRootFSBackedError(err)
+	}
+	defer file.Close()
+	if err := file.Sync(); err != nil {
+		return nil, mapRootFSBackedError(err)
 	}
 	return &pb.Empty{}, nil
 }
@@ -403,7 +531,9 @@ func (s *rootFSBackedSession) CopyFileRange(context.Context, *pb.CopyFileRangeRe
 }
 
 func (s *rootFSBackedSession) OpenDir(_ context.Context, req *pb.OpenDirRequest) (*pb.OpenDirResponse, error) {
-	rel, err := s.relForInode(req.GetInode())
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rel, err := s.relForInodeLocked(req.GetInode())
 	if err != nil {
 		return nil, err
 	}
@@ -414,21 +544,48 @@ func (s *rootFSBackedSession) OpenDir(_ context.Context, req *pb.OpenDirRequest)
 	if !info.IsDir() {
 		return nil, syscall.ENOTDIR
 	}
-	return &pb.OpenDirResponse{HandleId: s.nextSyntheticHandle()}, nil
+	handle, err := os.Open(s.hostPath(rel))
+	if err != nil {
+		return nil, mapRootFSBackedError(err)
+	}
+	openedInfo, err := handle.Stat()
+	if err != nil {
+		_ = handle.Close()
+		return nil, mapRootFSBackedError(err)
+	}
+	identity, err := rootFSIdentityFromInfo(openedInfo)
+	if err != nil || identity != s.identityByInode[normalizeRootFSInode(req.GetInode())] {
+		_ = handle.Close()
+		return nil, fserror.New(fserror.FailedPrecondition, "rootfs directory host identity changed before open")
+	}
+	handleID := s.openHandleLocked(normalizeRootFSInode(req.GetInode()), true, handle, int(req.GetFlags()))
+	return &pb.OpenDirResponse{HandleId: handleID}, nil
 }
 
 func (s *rootFSBackedSession) ReadDir(_ context.Context, req *pb.ReadDirRequest) (*pb.ReadDirResponse, error) {
-	rel, err := s.relForInode(req.GetInode())
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rel, err := s.relForInodeLocked(req.GetInode())
 	if err != nil {
 		return nil, err
+	}
+	if req.GetHandleId() != 0 && req.GetHandleId() != normalizeRootFSInode(req.GetInode()) {
+		return nil, fserror.New(fserror.NotFound, fmt.Sprintf("directory handle %d not found", req.GetHandleId()))
 	}
 	entries, err := os.ReadDir(s.hostPath(rel))
 	if err != nil {
 		return nil, mapRootFSBackedError(err)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-	out := make([]*pb.DirEntry, 0, len(entries))
-	for i, entry := range entries {
+	visibleEntries := entries[:0]
+	for _, entry := range entries {
+		if rel == rootFSBackedSessionRoot && entry.Name() == rootFSStateDirectoryName {
+			continue
+		}
+		visibleEntries = append(visibleEntries, entry)
+	}
+	out := make([]*pb.DirEntry, 0, len(visibleEntries))
+	for i, entry := range visibleEntries {
 		offset := uint64(i + 1)
 		if int64(offset) <= req.GetOffset() {
 			continue
@@ -441,7 +598,10 @@ func (s *rootFSBackedSession) ReadDir(_ context.Context, req *pb.ReadDirRequest)
 		if err != nil {
 			return nil, mapRootFSBackedError(err)
 		}
-		inode := s.inodeForPath(child)
+		inode, err := s.inodeForExistingPathLocked(child, info)
+		if err != nil {
+			return nil, err
+		}
 		attr := attrFromFileInfo(inode, info)
 		out = append(out, &pb.DirEntry{
 			Inode:  inode,
@@ -454,11 +614,19 @@ func (s *rootFSBackedSession) ReadDir(_ context.Context, req *pb.ReadDirRequest)
 	return &pb.ReadDirResponse{Entries: out, Eof: true}, nil
 }
 
-func (s *rootFSBackedSession) ReleaseDir(context.Context, *pb.ReleaseDirRequest) (*pb.Empty, error) {
-	return &pb.Empty{}, nil
+func (s *rootFSBackedSession) ReleaseDir(_ context.Context, req *pb.ReleaseDirRequest) (*pb.Empty, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.releaseHandleLocked(req.GetHandleId(), true)
 }
 
 func (s *rootFSBackedSession) StatFs(_ context.Context, _ *pb.StatFsRequest) (*pb.StatFsResponse, error) {
+	s.mu.Lock()
+	if err := s.ensureOpenLocked(); err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	s.mu.Unlock()
 	var stat unix.Statfs_t
 	if err := unix.Statfs(s.root, &stat); err != nil {
 		return nil, mapRootFSBackedError(err)
@@ -534,7 +702,9 @@ func (s *rootFSBackedSession) RemoveXattr(_ context.Context, req *pb.RemoveXattr
 }
 
 func (s *rootFSBackedSession) Mknod(_ context.Context, req *pb.MknodRequest) (*pb.NodeResponse, error) {
-	parent, err := s.relForInode(req.GetParent())
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	parent, err := s.relForInodeLocked(req.GetParent())
 	if err != nil {
 		return nil, err
 	}
@@ -552,35 +722,59 @@ func (s *rootFSBackedSession) Mknod(_ context.Context, req *pb.MknodRequest) (*p
 	if err != nil {
 		return nil, mapRootFSBackedError(err)
 	}
-	inode := s.inodeForPath(rel)
+	inode, err := s.inodeForExistingPathLocked(rel, info)
+	if err != nil {
+		_ = os.Remove(s.hostPath(rel))
+		return nil, err
+	}
 	return &pb.NodeResponse{Inode: inode, Generation: 1, Attr: attrFromFileInfo(inode, info)}, nil
 }
 
 func (s *rootFSBackedSession) GetLk(context.Context, *pb.GetLkRequest) (*pb.GetLkResponse, error) {
+	if err := s.sessionStateError(); err != nil {
+		return nil, err
+	}
 	return &pb.GetLkResponse{}, nil
 }
 
 func (s *rootFSBackedSession) SetLk(context.Context, *pb.SetLkRequest) (*pb.Empty, error) {
+	if err := s.sessionStateError(); err != nil {
+		return nil, err
+	}
 	return &pb.Empty{}, nil
 }
 
 func (s *rootFSBackedSession) SetLkw(context.Context, *pb.SetLkRequest) (*pb.Empty, error) {
+	if err := s.sessionStateError(); err != nil {
+		return nil, err
+	}
 	return &pb.Empty{}, nil
 }
 
 func (s *rootFSBackedSession) Flock(context.Context, *pb.FlockRequest) (*pb.Empty, error) {
+	if err := s.sessionStateError(); err != nil {
+		return nil, err
+	}
 	return &pb.Empty{}, nil
 }
 
-func (s *rootFSBackedSession) relForInode(inode uint64) (string, error) {
-	if inode == 0 {
-		inode = s0fs.RootInode
-	}
+func (s *rootFSBackedSession) sessionStateError() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
-		return "", fserror.New(fserror.FailedPrecondition, "rootfs-backed portal is closed")
+	return s.ensureOpenLocked()
+}
+
+func (s *rootFSBackedSession) relForInode(inode uint64) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.relForInodeLocked(inode)
+}
+
+func (s *rootFSBackedSession) relForInodeLocked(inode uint64) (string, error) {
+	if err := s.ensureOpenLocked(); err != nil {
+		return "", err
 	}
+	inode = normalizeRootFSInode(inode)
 	rel, ok := s.pathByInode[inode]
 	if !ok {
 		return "", fserror.New(fserror.NotFound, fmt.Sprintf("inode %d not found", inode))
@@ -588,91 +782,58 @@ func (s *rootFSBackedSession) relForInode(inode uint64) (string, error) {
 	return rel, nil
 }
 
-func (s *rootFSBackedSession) inodeForPath(rel string) uint64 {
-	rel = cleanRootFSBackedRel(rel)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.inodeForPathLocked(rel)
-}
-
-func (s *rootFSBackedSession) inodeForPathLocked(rel string) uint64 {
-	if inode, ok := s.inodeByPath[rel]; ok {
-		return inode
-	}
-	inode := s.nextInode
-	s.nextInode++
-	if inode <= s0fs.RootInode {
-		inode = s.nextInode
-		s.nextInode++
-	}
-	s.inodeByPath[rel] = inode
-	s.pathByInode[inode] = rel
-	return inode
-}
-
-func (s *rootFSBackedSession) trackHandle(handle *os.File) uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		_ = handle.Close()
-		return 0
-	}
-	id := s.nextHandle
-	s.nextHandle++
-	s.handles[id] = handle
-	return id
-}
-
-func (s *rootFSBackedSession) nextSyntheticHandle() uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	id := s.nextHandle
-	s.nextHandle++
-	return id
-}
-
-func (s *rootFSBackedSession) lookupHandle(id uint64) *os.File {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.handles[id]
-}
-
-func (s *rootFSBackedSession) takeHandle(id uint64) *os.File {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	handle := s.handles[id]
-	delete(s.handles, id)
-	return handle
-}
-
 func (s *rootFSBackedSession) handleForRead(inode, handleID uint64) (*os.File, func(), error) {
-	if handle := s.lookupHandle(handleID); handle != nil {
-		return handle, func() {}, nil
+	inode = normalizeRootFSInode(inode)
+	if handleID != 0 && handleID != inode {
+		return nil, nil, fserror.New(fserror.NotFound, fmt.Sprintf("file handle %d not found", handleID))
 	}
-	rel, err := s.relForInode(inode)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if handle := s.handles[inode]; handle != nil && handle.readFile != nil {
+		return handle.readFile, func() {}, nil
+	}
+	rel, err := s.relForInodeLocked(inode)
 	if err != nil {
 		return nil, nil, err
 	}
-	handle, err := os.OpenFile(s.hostPath(rel), os.O_RDONLY, 0)
+	file, err := os.OpenFile(s.hostPath(rel), os.O_RDONLY, 0)
 	if err != nil {
 		return nil, nil, mapRootFSBackedError(err)
 	}
-	return handle, func() { _ = handle.Close() }, nil
+	handle := s.handles[inode]
+	if handle == nil {
+		handle = &rootFSOpenHandle{}
+		s.handles[inode] = handle
+	}
+	cacheRootFSFile(handle, file, os.O_RDONLY)
+	return handle.readFile, func() {}, nil
 }
 
 func (s *rootFSBackedSession) handleForWrite(inode, handleID uint64) (*os.File, func(), error) {
-	if handle := s.lookupHandle(handleID); handle != nil {
-		return handle, func() {}, nil
+	inode = normalizeRootFSInode(inode)
+	if handleID != 0 && handleID != inode {
+		return nil, nil, fserror.New(fserror.NotFound, fmt.Sprintf("file handle %d not found", handleID))
 	}
-	rel, err := s.relForInode(inode)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if handle := s.handles[inode]; handle != nil && handle.writeFile != nil {
+		return handle.writeFile, func() {}, nil
+	}
+	rel, err := s.relForInodeLocked(inode)
 	if err != nil {
 		return nil, nil, err
 	}
-	handle, err := os.OpenFile(s.hostPath(rel), os.O_WRONLY, 0)
+	file, err := os.OpenFile(s.hostPath(rel), os.O_WRONLY, 0)
 	if err != nil {
 		return nil, nil, mapRootFSBackedError(err)
 	}
-	return handle, func() { _ = handle.Close() }, nil
+	handle := s.handles[inode]
+	if handle == nil {
+		handle = &rootFSOpenHandle{}
+		s.handles[inode] = handle
+	}
+	cacheRootFSFile(handle, file, os.O_WRONLY)
+	return handle.writeFile, func() {}, nil
 }
 
 func (s *rootFSBackedSession) hostPath(rel string) string {
@@ -687,49 +848,28 @@ func (s *rootFSBackedSession) dropPathIfMissing(rel string, err error) {
 	if !errors.Is(err, os.ErrNotExist) {
 		return
 	}
-	s.dropPath(rel)
-}
-
-func (s *rootFSBackedSession) dropPath(rel string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.initErr != nil || s.closed {
+		return
+	}
 	rel = cleanRootFSBackedRel(rel)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if inode, ok := s.inodeByPath[rel]; ok {
-		delete(s.inodeByPath, rel)
-		delete(s.pathByInode, inode)
+	inode, ok := s.inodeByPath[rel]
+	if !ok {
+		return
 	}
+	if s.hasHandlesForInodeLocked(inode) && s.countPathsForInodeLocked(inode) == 1 {
+		s.initErr = fmt.Errorf("rootfs inode %d lost its only recoverable path %q", inode, rel)
+		return
+	}
+	s.dropPathLocked(rel)
 }
 
-func (s *rootFSBackedSession) dropPathTree(rel string) {
-	rel = cleanRootFSBackedRel(rel)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for path, inode := range s.inodeByPath {
-		if path == rel || strings.HasPrefix(path, rel+"/") {
-			delete(s.inodeByPath, path)
-			delete(s.pathByInode, inode)
-		}
+func normalizeRootFSInode(inode uint64) uint64 {
+	if inode == 0 {
+		return s0fs.RootInode
 	}
-}
-
-func (s *rootFSBackedSession) renamePathTree(oldRel, newRel string) {
-	oldRel = cleanRootFSBackedRel(oldRel)
-	newRel = cleanRootFSBackedRel(newRel)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	updates := make(map[string]uint64)
-	for path, inode := range s.inodeByPath {
-		if path != oldRel && !strings.HasPrefix(path, oldRel+"/") {
-			continue
-		}
-		nextPath := newRel + strings.TrimPrefix(path, oldRel)
-		updates[nextPath] = inode
-		delete(s.inodeByPath, path)
-	}
-	for path, inode := range updates {
-		s.inodeByPath[path] = inode
-		s.pathByInode[inode] = path
-	}
+	return inode
 }
 
 func childRel(parent, name string) (string, error) {
@@ -737,6 +877,9 @@ func childRel(parent, name string) (string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" || name == "." || name == ".." || strings.Contains(name, "/") || strings.ContainsRune(name, filepath.Separator) {
 		return "", fserror.New(fserror.InvalidArgument, "invalid path name")
+	}
+	if parent == rootFSBackedSessionRoot && name == rootFSStateDirectoryName {
+		return "", fserror.New(fserror.PermissionDenied, "reserved rootfs path")
 	}
 	if parent == rootFSBackedSessionRoot {
 		return name, nil

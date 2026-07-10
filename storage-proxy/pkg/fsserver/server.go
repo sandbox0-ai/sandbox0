@@ -11,6 +11,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
@@ -325,6 +326,24 @@ func withAuthorizedVolumeMutation[T any](s *FileSystemServer, ctx context.Contex
 	return out, nil
 }
 
+func applyRecoverableS0FSMutation(ctx context.Context, engine *s0fs.Engine, mutation s0fs.RequestMutation) (s0fs.RequestMutationResult, bool, error) {
+	identity, ok := volumefuse.RequestIdentityFromContext(ctx)
+	if !ok || engine == nil {
+		return s0fs.RequestMutationResult{}, false, nil
+	}
+	key := s0fs.RequestKey{Scope: identity.Scope, Unique: identity.Unique}
+	if !volumefuse.AttachRequestCompletionToken(ctx, volumefuse.RequestCompletionTokenFunc(func() {
+		_ = engine.AcknowledgeRequest(key)
+	})) {
+		return s0fs.RequestMutationResult{}, true, s0fs.ErrRequestCompletionUnavailable
+	}
+	result, _, err := engine.ApplyRecoverableRequestMutation(key, mutation, identity.Resend)
+	if err != nil {
+		return s0fs.RequestMutationResult{}, true, err
+	}
+	return result, true, nil
+}
+
 func (s *FileSystemServer) authorizeVolumeMount(ctx context.Context, volumeID string) (*db.SandboxVolume, error) {
 	claims := internalauth.ClaimsFromContext(ctx)
 	if claims == nil || claims.TeamID == "" {
@@ -495,7 +514,18 @@ func (s *FileSystemServer) Write(ctx context.Context, req *pb.WriteRequest) (*pb
 			if !ok {
 				return nil, fserror.New(fserror.FailedPrecondition, "unknown or mismatched file handle")
 			}
-			if _, err := volCtx.S0FS.Write(inode, uint64(req.Offset), req.Data); err != nil {
+			bytesWritten := len(req.Data)
+			if result, handled, err := applyRecoverableS0FSMutation(runCtx, volCtx.S0FS, s0fs.RequestMutation{
+				Kind:   s0fs.RequestWrite,
+				Inode:  inode,
+				Offset: uint64(req.Offset),
+				Data:   req.Data,
+			}); handled {
+				if err != nil {
+					return nil, mapS0FSError(err)
+				}
+				bytesWritten = int(result.BytesWritten)
+			} else if _, err := volCtx.S0FS.Write(inode, uint64(req.Offset), req.Data); err != nil {
 				return nil, mapS0FSError(err)
 			}
 			s.markDirtyWrite(req.VolumeId, inode, req.HandleId)
@@ -512,7 +542,7 @@ func (s *FileSystemServer) Write(ctx context.Context, req *pb.WriteRequest) (*pb
 					Inode:     inode,
 				})
 			}
-			return &pb.WriteResponse{BytesWritten: int64(len(req.Data))}, nil
+			return &pb.WriteResponse{BytesWritten: int64(bytesWritten)}, nil
 		}
 		return nil, unsupportedVolumeBackend(volCtx)
 	})
@@ -527,8 +557,18 @@ func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*
 			}
 			var node *s0fs.Node
 			var err error
+			uid, gid := uint32(0), uint32(0)
 			if req.Actor != nil && len(req.Actor.Gids) > 0 {
-				node, err = volCtx.S0FS.CreateFileWithOwner(req.Parent, req.Name, req.Mode, req.Actor.Uid, req.Actor.Gids[0])
+				uid, gid = req.Actor.Uid, req.Actor.Gids[0]
+			}
+			if result, handled, applyErr := applyRecoverableS0FSMutation(runCtx, volCtx.S0FS, s0fs.RequestMutation{
+				Kind: s0fs.RequestCreate, Parent: req.Parent, Name: req.Name, Type: s0fs.TypeFile,
+				Mode: req.Mode, UID: uid, GID: gid,
+			}); handled {
+				err = applyErr
+				node = result.Node
+			} else if req.Actor != nil && len(req.Actor.Gids) > 0 {
+				node, err = volCtx.S0FS.CreateFileWithOwner(req.Parent, req.Name, req.Mode, uid, gid)
 			} else {
 				node, err = volCtx.S0FS.CreateFile(req.Parent, req.Name, req.Mode)
 			}
@@ -564,17 +604,33 @@ func (s *FileSystemServer) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb
 			if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, fsmeta.Ino(req.Parent)); err != nil {
 				return nil, fserror.New(fserror.Internal, err.Error())
 			}
-			node, err := volCtx.S0FS.Mkdir(req.Parent, req.Name, req.Mode)
-			if err != nil {
-				return nil, mapS0FSError(err)
-			}
+			uid, gid := uint32(0), uint32(0)
 			if req.Actor != nil && len(req.Actor.Gids) > 0 {
-				if err := volCtx.S0FS.SetOwner(node.Inode, req.Actor.Uid, req.Actor.Gids[0]); err != nil {
-					return nil, fserror.New(fserror.Internal, err.Error())
-				}
-				node, err = volCtx.S0FS.GetAttr(node.Inode)
+				uid, gid = req.Actor.Uid, req.Actor.Gids[0]
+			}
+			var node *s0fs.Node
+			result, handled, err := applyRecoverableS0FSMutation(runCtx, volCtx.S0FS, s0fs.RequestMutation{
+				Kind: s0fs.RequestMkdir, Parent: req.Parent, Name: req.Name, Type: s0fs.TypeDirectory,
+				Mode: req.Mode, UID: uid, GID: gid,
+			})
+			if handled {
 				if err != nil {
 					return nil, mapS0FSError(err)
+				}
+				node = result.Node
+			} else {
+				node, err = volCtx.S0FS.Mkdir(req.Parent, req.Name, req.Mode)
+				if err != nil {
+					return nil, mapS0FSError(err)
+				}
+				if req.Actor != nil && len(req.Actor.Gids) > 0 {
+					if err := volCtx.S0FS.SetOwner(node.Inode, uid, gid); err != nil {
+						return nil, fserror.New(fserror.Internal, err.Error())
+					}
+					node, err = volCtx.S0FS.GetAttr(node.Inode)
+					if err != nil {
+						return nil, mapS0FSError(err)
+					}
 				}
 			}
 			if s.shouldPublishEvents() {
@@ -603,25 +659,72 @@ func (s *FileSystemServer) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb
 func (s *FileSystemServer) Mknod(ctx context.Context, req *pb.MknodRequest) (*pb.NodeResponse, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.NodeResponse, error) {
 		if isS0FSVolume(volCtx) {
-			return nil, fserror.New(fserror.Unimplemented, "mknod is not implemented for s0fs")
+			fileType := req.Mode & uint32(syscall.S_IFMT)
+			if fileType != 0 && fileType != uint32(syscall.S_IFREG) {
+				return nil, fserror.New(fserror.Unimplemented, "s0fs mknod only supports regular files")
+			}
+			if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, fsmeta.Ino(req.Parent)); err != nil {
+				return nil, fserror.New(fserror.Internal, err.Error())
+			}
+			uid, gid := uint32(0), uint32(0)
+			if req.Actor != nil && len(req.Actor.Gids) > 0 {
+				uid, gid = req.Actor.Uid, req.Actor.Gids[0]
+			}
+			mutation := s0fs.RequestMutation{
+				Kind: s0fs.RequestMknod, Parent: req.Parent, Name: req.Name, Type: s0fs.TypeFile,
+				Mode: req.Mode & 0o7777, UID: uid, GID: gid,
+			}
+			if result, handled, err := applyRecoverableS0FSMutation(runCtx, volCtx.S0FS, mutation); handled {
+				if err != nil {
+					return nil, mapS0FSError(err)
+				}
+				return s0fsNodeResponse(result.Node, 0), nil
+			}
+			node, err := volCtx.S0FS.CreateFileWithOwner(req.Parent, req.Name, mutation.Mode, uid, gid)
+			if err != nil {
+				return nil, mapS0FSError(err)
+			}
+			return s0fsNodeResponse(node, 0), nil
 		}
 		return nil, unsupportedVolumeBackend(volCtx)
 	})
 }
 
 func (s *FileSystemServer) openS0FS(ctx context.Context, volCtx *volume.VolumeContext, req *pb.OpenRequest) (*pb.OpenResponse, error) {
-	node, err := volCtx.S0FS.GetAttr(req.Inode)
-	if err != nil {
-		return nil, mapS0FSError(err)
+	truncate := req.Flags&uint32(syscall.O_TRUNC) != 0
+	replayedTruncate := false
+	if truncate {
+		if identity, ok := volumefuse.RequestIdentityFromContext(ctx); ok && identity.Resend {
+			if _, handled, err := applyRecoverableS0FSMutation(ctx, volCtx.S0FS, s0fs.RequestMutation{
+				Kind: s0fs.RequestTruncate, Inode: req.Inode, Offset: 0,
+			}); handled {
+				if err != nil {
+					return nil, mapS0FSError(err)
+				}
+				replayedTruncate = true
+			}
+		}
 	}
-	if node.Type == s0fs.TypeDirectory {
-		return nil, fserror.New(fserror.FailedPrecondition, "inode is a directory")
+	if !replayedTruncate {
+		node, err := volCtx.S0FS.GetAttr(req.Inode)
+		if err != nil {
+			return nil, mapS0FSError(err)
+		}
+		if node.Type == s0fs.TypeDirectory {
+			return nil, fserror.New(fserror.FailedPrecondition, "inode is a directory")
+		}
+		if err := checkS0FSAccess(node, req.Actor, s0fsOpenAccessMask(req.Flags)); err != nil {
+			return nil, err
+		}
 	}
-	if err := checkS0FSAccess(node, req.Actor, s0fsOpenAccessMask(req.Flags)); err != nil {
-		return nil, err
-	}
-	if req.Flags&uint32(syscall.O_TRUNC) != 0 {
-		if err := volCtx.S0FS.Truncate(req.Inode, 0); err != nil {
+	if truncate && !replayedTruncate {
+		if _, handled, err := applyRecoverableS0FSMutation(ctx, volCtx.S0FS, s0fs.RequestMutation{
+			Kind: s0fs.RequestTruncate, Inode: req.Inode, Offset: 0,
+		}); handled {
+			if err != nil {
+				return nil, mapS0FSError(err)
+			}
+		} else if err := volCtx.S0FS.Truncate(req.Inode, 0); err != nil {
 			return nil, mapS0FSError(err)
 		}
 		if s.shouldPublishEvents() {
@@ -638,16 +741,27 @@ func (s *FileSystemServer) openS0FS(ctx context.Context, volCtx *volume.VolumeCo
 			})
 		}
 	}
-	return &pb.OpenResponse{HandleId: volCtx.OpenFileHandle(node.Inode)}, nil
+	return &pb.OpenResponse{HandleId: volCtx.OpenFileHandle(req.Inode)}, nil
 }
 
 // Unlink implements FUSE unlink
 func (s *FileSystemServer) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*pb.Empty, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.Empty, error) {
 		if isS0FSVolume(volCtx) {
-			inode, err := volCtx.S0FS.UnlinkWithInode(req.Parent, req.Name)
-			if err != nil {
-				return nil, mapS0FSError(err)
+			var inode uint64
+			if result, handled, err := applyRecoverableS0FSMutation(runCtx, volCtx.S0FS, s0fs.RequestMutation{
+				Kind: s0fs.RequestUnlink, Parent: req.Parent, Name: req.Name,
+			}); handled {
+				if err != nil {
+					return nil, mapS0FSError(err)
+				}
+				inode = result.Inode
+			} else {
+				var err error
+				inode, err = volCtx.S0FS.UnlinkWithInode(req.Parent, req.Name)
+				if err != nil {
+					return nil, mapS0FSError(err)
+				}
 			}
 			if !volCtx.MarkUnlinkedFileIfOpen(inode) {
 				_ = volCtx.S0FS.Forget(inode)
@@ -747,7 +861,14 @@ func (s *FileSystemServer) ReleaseDir(ctx context.Context, req *pb.ReleaseDirReq
 func (s *FileSystemServer) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.Empty, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.Empty, error) {
 		if isS0FSVolume(volCtx) {
-			if err := volCtx.S0FS.Rename(req.OldParent, req.OldName, req.NewParent, req.NewName); err != nil {
+			if _, handled, err := applyRecoverableS0FSMutation(runCtx, volCtx.S0FS, s0fs.RequestMutation{
+				Kind: s0fs.RequestRename, Parent: req.OldParent, Name: req.OldName,
+				NewParent: req.NewParent, NewName: req.NewName,
+			}); handled {
+				if err != nil {
+					return nil, mapS0FSError(err)
+				}
+			} else if err := volCtx.S0FS.Rename(req.OldParent, req.OldName, req.NewParent, req.NewName); err != nil {
 				return nil, mapS0FSError(err)
 			}
 			if s.shouldPublishEvents() {
@@ -778,36 +899,48 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 			if attr == nil {
 				attr = &pb.GetAttrResponse{}
 			}
-			if req.Valid&uint32(fsmeta.SetAttrMode) != 0 {
-				if err := volCtx.S0FS.SetMode(req.Inode, attr.Mode&0o7777); err != nil {
-					return nil, mapS0FSError(err)
-				}
-			}
-			if req.Valid&(uint32(fsmeta.SetAttrUID)|uint32(fsmeta.SetAttrGID)) != 0 {
-				current, err := volCtx.S0FS.GetAttr(req.Inode)
+			var updated *s0fs.Node
+			if result, handled, err := applyRecoverableS0FSMutation(runCtx, volCtx.S0FS, s0fs.RequestMutation{
+				Kind: s0fs.RequestSetAttr, Inode: req.Inode, SetAttrValid: req.Valid,
+				Mode: attr.Mode & 0o7777, UID: attr.Uid, GID: attr.Gid, Offset: attr.Size,
+			}); handled {
 				if err != nil {
 					return nil, mapS0FSError(err)
 				}
-				uid := current.UID
-				gid := current.GID
-				if req.Valid&uint32(fsmeta.SetAttrUID) != 0 {
-					uid = attr.Uid
+				updated = result.Node
+			} else {
+				if req.Valid&uint32(fsmeta.SetAttrMode) != 0 {
+					if err := volCtx.S0FS.SetMode(req.Inode, attr.Mode&0o7777); err != nil {
+						return nil, mapS0FSError(err)
+					}
 				}
-				if req.Valid&uint32(fsmeta.SetAttrGID) != 0 {
-					gid = attr.Gid
+				if req.Valid&(uint32(fsmeta.SetAttrUID)|uint32(fsmeta.SetAttrGID)) != 0 {
+					current, err := volCtx.S0FS.GetAttr(req.Inode)
+					if err != nil {
+						return nil, mapS0FSError(err)
+					}
+					uid := current.UID
+					gid := current.GID
+					if req.Valid&uint32(fsmeta.SetAttrUID) != 0 {
+						uid = attr.Uid
+					}
+					if req.Valid&uint32(fsmeta.SetAttrGID) != 0 {
+						gid = attr.Gid
+					}
+					if err := volCtx.S0FS.SetOwner(req.Inode, uid, gid); err != nil {
+						return nil, mapS0FSError(err)
+					}
 				}
-				if err := volCtx.S0FS.SetOwner(req.Inode, uid, gid); err != nil {
+				if req.Valid&uint32(fsmeta.SetAttrSize) != 0 {
+					if err := volCtx.S0FS.Truncate(req.Inode, attr.Size); err != nil {
+						return nil, mapS0FSError(err)
+					}
+				}
+				var err error
+				updated, err = volCtx.S0FS.GetAttr(req.Inode)
+				if err != nil {
 					return nil, mapS0FSError(err)
 				}
-			}
-			if req.Valid&uint32(fsmeta.SetAttrSize) != 0 {
-				if err := volCtx.S0FS.Truncate(req.Inode, attr.Size); err != nil {
-					return nil, mapS0FSError(err)
-				}
-			}
-			updated, err := volCtx.S0FS.GetAttr(req.Inode)
-			if err != nil {
-				return nil, mapS0FSError(err)
 			}
 			if s.shouldPublishEvents() {
 				path := resolveInodePath(volCtx, req.Inode)
@@ -906,7 +1039,13 @@ func (s *FileSystemServer) Release(ctx context.Context, req *pb.ReleaseRequest) 
 func (s *FileSystemServer) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb.Empty, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.Empty, error) {
 		if isS0FSVolume(volCtx) {
-			if err := volCtx.S0FS.RemoveDir(req.Parent, req.Name); err != nil {
+			if _, handled, err := applyRecoverableS0FSMutation(runCtx, volCtx.S0FS, s0fs.RequestMutation{
+				Kind: s0fs.RequestRmdir, Parent: req.Parent, Name: req.Name,
+			}); handled {
+				if err != nil {
+					return nil, mapS0FSError(err)
+				}
+			} else if err := volCtx.S0FS.RemoveDir(req.Parent, req.Name); err != nil {
 				return nil, mapS0FSError(err)
 			}
 			if s.shouldPublishEvents() {
@@ -956,17 +1095,33 @@ func (s *FileSystemServer) Symlink(ctx context.Context, req *pb.SymlinkRequest) 
 			if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, fsmeta.Ino(req.Parent)); err != nil {
 				return nil, fserror.New(fserror.Internal, err.Error())
 			}
-			node, err := volCtx.S0FS.Symlink(req.Parent, req.Name, req.Target, 0o777)
-			if err != nil {
-				return nil, mapS0FSError(err)
-			}
+			uid, gid := uint32(0), uint32(0)
 			if req.Actor != nil && len(req.Actor.Gids) > 0 {
-				if err := volCtx.S0FS.SetOwner(node.Inode, req.Actor.Uid, req.Actor.Gids[0]); err != nil {
-					return nil, fserror.New(fserror.Internal, err.Error())
-				}
-				node, err = volCtx.S0FS.GetAttr(node.Inode)
+				uid, gid = req.Actor.Uid, req.Actor.Gids[0]
+			}
+			var node *s0fs.Node
+			result, handled, err := applyRecoverableS0FSMutation(runCtx, volCtx.S0FS, s0fs.RequestMutation{
+				Kind: s0fs.RequestSymlink, Parent: req.Parent, Name: req.Name, Type: s0fs.TypeSymlink,
+				Mode: 0o777, UID: uid, GID: gid, Target: req.Target,
+			})
+			if handled {
 				if err != nil {
 					return nil, mapS0FSError(err)
+				}
+				node = result.Node
+			} else {
+				node, err = volCtx.S0FS.Symlink(req.Parent, req.Name, req.Target, 0o777)
+				if err != nil {
+					return nil, mapS0FSError(err)
+				}
+				if req.Actor != nil && len(req.Actor.Gids) > 0 {
+					if err := volCtx.S0FS.SetOwner(node.Inode, uid, gid); err != nil {
+						return nil, fserror.New(fserror.Internal, err.Error())
+					}
+					node, err = volCtx.S0FS.GetAttr(node.Inode)
+					if err != nil {
+						return nil, mapS0FSError(err)
+					}
 				}
 			}
 			if s.shouldPublishEvents() {
@@ -1015,9 +1170,20 @@ func (s *FileSystemServer) Readlink(ctx context.Context, req *pb.ReadlinkRequest
 func (s *FileSystemServer) Link(ctx context.Context, req *pb.LinkRequest) (*pb.NodeResponse, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.NodeResponse, error) {
 		if isS0FSVolume(volCtx) {
-			node, err := volCtx.S0FS.Link(req.Inode, req.NewParent, req.NewName)
-			if err != nil {
-				return nil, mapS0FSError(err)
+			var node *s0fs.Node
+			if result, handled, err := applyRecoverableS0FSMutation(runCtx, volCtx.S0FS, s0fs.RequestMutation{
+				Kind: s0fs.RequestLink, Inode: req.Inode, NewParent: req.NewParent, NewName: req.NewName,
+			}); handled {
+				if err != nil {
+					return nil, mapS0FSError(err)
+				}
+				node = result.Node
+			} else {
+				var err error
+				node, err = volCtx.S0FS.Link(req.Inode, req.NewParent, req.NewName)
+				if err != nil {
+					return nil, mapS0FSError(err)
+				}
 			}
 			if s.shouldPublishEvents() {
 				path := resolveChildPath(volCtx, req.NewParent, req.NewName)
@@ -1151,7 +1317,11 @@ func (s *FileSystemServer) GetXattr(ctx context.Context, req *pb.GetXattrRequest
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
-		return nil, fserror.New(fserror.Unimplemented, "xattr is not implemented for s0fs")
+		value, err := volCtx.S0FS.GetXattr(req.Inode, req.Name)
+		if err != nil {
+			return nil, mapS0FSError(err)
+		}
+		return &pb.GetXattrResponse{Value: value}, nil
 	}
 
 	return nil, unsupportedVolumeBackend(volCtx)
@@ -1161,7 +1331,15 @@ func (s *FileSystemServer) GetXattr(ctx context.Context, req *pb.GetXattrRequest
 func (s *FileSystemServer) SetXattr(ctx context.Context, req *pb.SetXattrRequest) (*pb.Empty, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.Empty, error) {
 		if isS0FSVolume(volCtx) {
-			return nil, fserror.New(fserror.Unimplemented, "xattr is not implemented for s0fs")
+			if _, handled, err := applyRecoverableS0FSMutation(runCtx, volCtx.S0FS, s0fs.RequestMutation{
+				Kind: s0fs.RequestSetXattr, Inode: req.Inode, Name: req.Name, Data: req.Value, Mode: req.Flags,
+			}); handled {
+				if err != nil {
+					return nil, mapS0FSError(err)
+				}
+				return &pb.Empty{}, nil
+			}
+			return nil, fserror.New(fserror.Unimplemented, "recoverable request identity is required for s0fs setxattr")
 		}
 		return nil, unsupportedVolumeBackend(volCtx)
 	})
@@ -1174,7 +1352,16 @@ func (s *FileSystemServer) ListXattr(ctx context.Context, req *pb.ListXattrReque
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
-		return nil, fserror.New(fserror.Unimplemented, "xattr is not implemented for s0fs")
+		names, err := volCtx.S0FS.ListXattrs(req.Inode)
+		if err != nil {
+			return nil, mapS0FSError(err)
+		}
+		var data []byte
+		for _, name := range names {
+			data = append(data, name...)
+			data = append(data, 0)
+		}
+		return &pb.ListXattrResponse{Data: data}, nil
 	}
 
 	return nil, unsupportedVolumeBackend(volCtx)
@@ -1184,7 +1371,15 @@ func (s *FileSystemServer) ListXattr(ctx context.Context, req *pb.ListXattrReque
 func (s *FileSystemServer) RemoveXattr(ctx context.Context, req *pb.RemoveXattrRequest) (*pb.Empty, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.Empty, error) {
 		if isS0FSVolume(volCtx) {
-			return nil, fserror.New(fserror.Unimplemented, "xattr is not implemented for s0fs")
+			if _, handled, err := applyRecoverableS0FSMutation(runCtx, volCtx.S0FS, s0fs.RequestMutation{
+				Kind: s0fs.RequestRemoveXattr, Inode: req.Inode, Name: req.Name,
+			}); handled {
+				if err != nil {
+					return nil, mapS0FSError(err)
+				}
+				return &pb.Empty{}, nil
+			}
+			return nil, fserror.New(fserror.Unimplemented, "recoverable request identity is required for s0fs removexattr")
 		}
 		return nil, unsupportedVolumeBackend(volCtx)
 	})
@@ -1369,6 +1564,14 @@ func mapS0FSError(err error) error {
 		return fserror.New(fserror.InvalidArgument, err.Error())
 	case errors.Is(err, s0fs.ErrNoSpace):
 		return fserror.New(fserror.ResourceExhausted, err.Error())
+	case errors.Is(err, s0fs.ErrRequestCapacity):
+		return fserror.New(fserror.ResourceExhausted, err.Error())
+	case errors.Is(err, s0fs.ErrRequestResultMissing):
+		return fserror.New(fserror.FailedPrecondition, err.Error())
+	case errors.Is(err, s0fs.ErrRequestCompletionUnavailable):
+		return fserror.New(fserror.FailedPrecondition, err.Error())
+	case errors.Is(err, s0fs.ErrXattrNotFound):
+		return syscall.ENODATA
 	case errors.Is(err, s0fs.ErrClosed):
 		return fserror.New(fserror.FailedPrecondition, err.Error())
 	default:

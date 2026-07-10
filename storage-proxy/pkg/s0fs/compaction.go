@@ -57,7 +57,7 @@ func (e *Engine) Compact(ctx context.Context, opts CompactionOptions) (*Manifest
 		if err := e.persistCurrentStateLocked(); err != nil {
 			return nil, nil, err
 		}
-		if err := e.wal.reset(); err != nil {
+		if err := e.resetWALLocked(); err != nil {
 			return nil, nil, err
 		}
 		e.refreshLocalDiskGuardLocked()
@@ -188,6 +188,7 @@ func buildCompactedState(ctx context.Context, materializer *Materializer, manife
 		Data:      make(map[uint64][]byte),
 		ColdFiles: make(map[uint64][]FileExtent),
 		Segments:  make(map[string]*Segment),
+		Xattrs:    cloneXattrMap(state.Xattrs),
 	}
 	builder := newSegmentBuilder(manifestSeq, volumeID, targetSize)
 	inodes := make([]uint64, 0, len(state.ColdFiles)+len(state.Data))

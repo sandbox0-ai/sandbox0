@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
@@ -17,6 +18,62 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 )
+
+func TestLocalSessionPreservesRecoverableRequestIdentityAndCompletion(t *testing.T) {
+	engine, err := s0fs.Open(context.Background(), s0fs.Config{
+		VolumeID: "vol-1",
+		WALPath:  filepath.Join(t.TempDir(), "volume.wal"),
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+	mgr := newLocalVolumeManager()
+	mgr.add(&volume.VolumeContext{
+		VolumeID: "vol-1", TeamID: "team-a", Backend: volume.BackendS0FS, S0FS: engine,
+		Access: volume.AccessModeRWO, MountedAt: time.Now().UTC(), RootInode: 1, RootPath: "/",
+	})
+	session := newLocalSession("vol-1", mgr, nil)
+
+	var completion volumefuse.RequestCompletionToken
+	ctx := volumefuse.ContextWithRequestIdentity(context.Background(), volumefuse.RequestIdentity{
+		Scope: "nodefs-shard-0", Unique: 77,
+	}, func(token volumefuse.RequestCompletionToken) {
+		if completion == nil {
+			completion = token
+		}
+	})
+	request := &pb.CreateRequest{Parent: 1, Name: "once.txt", Mode: 0o640}
+	first, err := session.Create(ctx, request)
+	if err != nil {
+		t.Fatalf("Create(first) error = %v", err)
+	}
+	resendCtx := volumefuse.ContextWithRequestIdentity(context.Background(), volumefuse.RequestIdentity{
+		Scope: "nodefs-shard-0", Unique: 77, Resend: true,
+	}, func(token volumefuse.RequestCompletionToken) {
+		if completion == nil {
+			completion = token
+		}
+	})
+	second, err := session.Create(resendCtx, &pb.CreateRequest{Parent: 1, Name: "once.txt", Mode: 0o640})
+	if err != nil {
+		t.Fatalf("Create(resend) error = %v", err)
+	}
+	if first.Inode != second.Inode || first.Attr.Mode != second.Attr.Mode {
+		t.Fatalf("Create responses first=%+v second=%+v", first, second)
+	}
+	entries, err := engine.ReadDir(1)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("ReadDir() entries=%+v error=%v, want one entry", entries, err)
+	}
+	if completion == nil {
+		t.Fatal("completion token was not routed through localSession.ctx")
+	}
+	completion.RequestAcknowledged()
+	if unacked, acked := engine.RequestReplayCounts(); unacked != 0 || acked != 1 {
+		t.Fatalf("RequestReplayCounts()=(%d,%d), want (0,1)", unacked, acked)
+	}
+}
 
 type rejectingHeadStore struct{}
 

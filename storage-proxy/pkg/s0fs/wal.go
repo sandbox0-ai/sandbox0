@@ -99,6 +99,10 @@ func (w *wal) prepare(record walRecord) ([]byte, error) {
 	if closed {
 		return nil, ErrClosed
 	}
+	return w.encode(record)
+}
+
+func (w *wal) encode(record walRecord) ([]byte, error) {
 	payload, err := json.Marshal(record)
 	if err != nil {
 		return nil, fmt.Errorf("marshal wal record: %w", err)
@@ -224,26 +228,82 @@ func (w *wal) close() error {
 	return err
 }
 
-func (w *wal) reset() error {
+func (w *wal) reset(records ...walRecord) error {
 	if w == nil {
 		return ErrClosed
+	}
+	payloads := make([][]byte, 0, len(records))
+	for _, record := range records {
+		payload, err := w.encode(record)
+		if err != nil {
+			return err
+		}
+		payloads = append(payloads, payload)
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	for w.syncing {
 		w.syncCond.Wait()
 	}
-	if w.file != nil {
-		if err := w.file.Close(); err != nil {
-			return err
+	if w.file == nil {
+		return ErrClosed
+	}
+	temp, err := os.CreateTemp(filepath.Dir(w.path), ".wal-reset-*")
+	if err != nil {
+		return fmt.Errorf("create replacement wal: %w", err)
+	}
+	tempPath := temp.Name()
+	cleanupTemp := true
+	defer func() {
+		if cleanupTemp {
+			_ = os.Remove(tempPath)
+		}
+	}()
+	for _, payload := range payloads {
+		if _, err := temp.Write(payload); err != nil {
+			_ = temp.Close()
+			return fmt.Errorf("rewrite retained wal record: %w", err)
 		}
 	}
-	file, err := os.OpenFile(w.path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("reset wal: %w", err)
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("sync replacement wal: %w", err)
 	}
-	w.file = file
-	w.writeGen = 0
-	w.syncedGen = 0
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("close replacement wal: %w", err)
+	}
+	replacement, err := os.OpenFile(tempPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("reopen replacement wal: %w", err)
+	}
+	if err := os.Rename(tempPath, w.path); err != nil {
+		_ = replacement.Close()
+		return fmt.Errorf("replace wal: %w", err)
+	}
+	cleanupTemp = false
+	oldFile := w.file
+	w.file = replacement
+	// Generations must remain monotonic across replacement. A delayed fsync
+	// waiter may still carry a target from the previous file generation.
+	w.writeGen++
+	w.syncedGen = w.writeGen
+	if err := oldFile.Close(); err != nil {
+		return fmt.Errorf("close replaced wal: %w", err)
+	}
+	if err := syncWALParent(w.path); err != nil {
+		return err
+	}
+	return nil
+}
+
+func syncWALParent(path string) error {
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("open wal directory: %w", err)
+	}
+	defer dir.Close()
+	if err := dir.Sync(); err != nil {
+		return fmt.Errorf("sync wal directory: %w", err)
+	}
 	return nil
 }

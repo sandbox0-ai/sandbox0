@@ -3,12 +3,14 @@ package fsserver
 import (
 	"bytes"
 	"context"
+	"errors"
 	"path/filepath"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/router"
@@ -17,6 +19,128 @@ import (
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"google.golang.org/protobuf/proto"
 )
+
+func TestS0FSRecoverableMknodAndXattrs(t *testing.T) {
+	volCtx := newMountedS0FSVolumeContext(t, "vol-recoverable-meta", "team-a")
+	server := newTestFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{"vol-recoverable-meta": volCtx},
+	}, nil, nil)
+	requestContext := func(unique uint64) context.Context {
+		return volumefuse.ContextWithRequestIdentity(authContext("team-a", ""), volumefuse.RequestIdentity{
+			Scope: "nodefs-shard-0", Unique: unique,
+		}, func(volumefuse.RequestCompletionToken) {})
+	}
+
+	mknodReq := &pb.MknodRequest{VolumeId: "vol-recoverable-meta", Parent: 1, Name: "regular", Mode: uint32(syscall.S_IFREG | 0o640)}
+	first, err := server.Mknod(requestContext(1), mknodReq)
+	if err != nil {
+		t.Fatalf("Mknod(first) error = %v", err)
+	}
+	second, err := server.Mknod(requestContext(1), mknodReq)
+	if err != nil || second.Inode != first.Inode {
+		t.Fatalf("Mknod(resend) response=%+v error=%v, want inode %d", second, err, first.Inode)
+	}
+	beforeRejected, _ := volCtx.S0FS.RequestReplayCounts()
+	if _, err := server.Mknod(requestContext(2), &pb.MknodRequest{
+		VolumeId: "vol-recoverable-meta", Parent: 1, Name: "fifo", Mode: uint32(syscall.S_IFIFO | 0o600),
+	}); fserror.CodeOf(err) != fserror.Unimplemented {
+		t.Fatalf("Mknod(fifo) error=%v, want unimplemented", err)
+	}
+	afterRejected, _ := volCtx.S0FS.RequestReplayCounts()
+	if afterRejected != beforeRejected {
+		t.Fatalf("rejected Mknod changed replay ledger from %d to %d", beforeRejected, afterRejected)
+	}
+	if _, err := server.Lookup(authContext("team-a", ""), &pb.LookupRequest{
+		VolumeId: "vol-recoverable-meta", Parent: 1, Name: "fifo",
+	}); fserror.CodeOf(err) != fserror.NotFound {
+		t.Fatalf("Lookup(fifo) error=%v, want not found", err)
+	}
+
+	setReq := &pb.SetXattrRequest{VolumeId: "vol-recoverable-meta", Inode: first.Inode, Name: "user.test", Value: []byte("value")}
+	if _, err := server.SetXattr(requestContext(3), setReq); err != nil {
+		t.Fatalf("SetXattr(first) error = %v", err)
+	}
+	if _, err := server.SetXattr(requestContext(3), setReq); err != nil {
+		t.Fatalf("SetXattr(resend) error = %v", err)
+	}
+	get, err := server.GetXattr(authContext("team-a", ""), &pb.GetXattrRequest{
+		VolumeId: "vol-recoverable-meta", Inode: first.Inode, Name: "user.test",
+	})
+	if err != nil || !bytes.Equal(get.Value, []byte("value")) {
+		t.Fatalf("GetXattr() response=%+v error=%v", get, err)
+	}
+	list, err := server.ListXattr(authContext("team-a", ""), &pb.ListXattrRequest{
+		VolumeId: "vol-recoverable-meta", Inode: first.Inode,
+	})
+	if err != nil || !bytes.Equal(list.Data, []byte("user.test\x00")) {
+		t.Fatalf("ListXattr() response=%+v error=%v", list, err)
+	}
+	removeReq := &pb.RemoveXattrRequest{VolumeId: "vol-recoverable-meta", Inode: first.Inode, Name: "user.test"}
+	if _, err := server.RemoveXattr(requestContext(4), removeReq); err != nil {
+		t.Fatalf("RemoveXattr(first) error = %v", err)
+	}
+	if _, err := server.RemoveXattr(requestContext(4), removeReq); err != nil {
+		t.Fatalf("RemoveXattr(resend) error = %v", err)
+	}
+}
+
+func TestS0FSRecoverableMutationFailsBeforeApplyWithoutCompletionRoute(t *testing.T) {
+	volCtx := newMountedS0FSVolumeContext(t, "vol-no-completion", "team-a")
+	server := newTestFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{"vol-no-completion": volCtx},
+	}, nil, nil)
+	ctx := volumefuse.ContextWithRequestIdentity(authContext("team-a", ""), volumefuse.RequestIdentity{
+		Scope: "nodefs-shard-0", Unique: 1,
+	}, nil)
+
+	_, err := server.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-no-completion", Parent: 1, Name: "must-not-exist", Mode: 0o600,
+	})
+	if fserror.CodeOf(err) != fserror.FailedPrecondition {
+		t.Fatalf("Create() error=%v, want failed precondition", err)
+	}
+	if _, err := volCtx.S0FS.Lookup(1, "must-not-exist"); !errors.Is(err, s0fs.ErrNotFound) {
+		t.Fatalf("Lookup() error=%v, want %v", err, s0fs.ErrNotFound)
+	}
+}
+
+func TestS0FSRecoverableTruncateReplaysBeforeCurrentAccessChecks(t *testing.T) {
+	volCtx := newMountedS0FSVolumeContext(t, "vol-truncate-replay", "team-a")
+	node, err := volCtx.S0FS.CreateFileWithOwner(1, "data", 0o600, 1001, 1001)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := volCtx.S0FS.Write(node.Inode, 0, []byte("payload")); err != nil {
+		t.Fatal(err)
+	}
+	server := newTestFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{"vol-truncate-replay": volCtx},
+	}, nil, nil)
+	request := &pb.OpenRequest{
+		VolumeId: "vol-truncate-replay", Inode: node.Inode,
+		Flags: uint32(syscall.O_WRONLY | syscall.O_TRUNC),
+		Actor: &pb.PosixActor{Uid: 1001, Gids: []uint32{1001}},
+	}
+	requestContext := func(resend bool) context.Context {
+		return volumefuse.ContextWithRequestIdentity(authContext("team-a", ""), volumefuse.RequestIdentity{
+			Scope: "nodefs-shard-0", Unique: 9, Resend: resend,
+		}, func(volumefuse.RequestCompletionToken) {})
+	}
+	first, err := server.Open(requestContext(false), request)
+	if err != nil {
+		t.Fatalf("Open(first) error=%v", err)
+	}
+	if err := volCtx.S0FS.SetMode(node.Inode, 0); err != nil {
+		t.Fatal(err)
+	}
+	second, err := server.Open(requestContext(true), request)
+	if err != nil {
+		t.Fatalf("Open(resend) error=%v", err)
+	}
+	if first.HandleId != node.Inode || second.HandleId != first.HandleId {
+		t.Fatalf("Open() handles first=%d second=%d, want stable inode %d", first.HandleId, second.HandleId, node.Inode)
+	}
+}
 
 func TestS0FSFileLifecycle(t *testing.T) {
 	t.Parallel()

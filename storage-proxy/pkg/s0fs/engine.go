@@ -26,6 +26,13 @@ type Engine struct {
 	data      map[uint64][]byte
 	coldFiles map[uint64][]FileExtent
 	segments  map[string]*Segment
+	xattrs    map[uint64]map[string][]byte
+
+	requestReplayCapacity int
+	requestResults        map[requestLedgerKey]requestReplayEntry
+	requestOrder          []requestLedgerKey
+	requestOrderHead      int
+	pendingRequestAcks    []requestLedgerKey
 
 	materializer            *Materializer
 	encryption              *EncryptionConfig
@@ -97,23 +104,37 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 			Data:      make(map[uint64][]byte),
 			ColdFiles: make(map[uint64][]FileExtent),
 			Segments:  make(map[string]*Segment),
+			Xattrs:    make(map[uint64]map[string][]byte),
 		}
 	}
 
+	requestReplayCapacity := cfg.RequestReplayCapacity
+	if requestReplayCapacity == 0 {
+		requestReplayCapacity = DefaultRequestReplayCapacity
+	}
+	if requestReplayCapacity < 1 {
+		_ = walFile.close()
+		return nil, fmt.Errorf("%w: request replay capacity must be positive", ErrInvalidInput)
+	}
 	e := &Engine{
-		volumeID:          cfg.VolumeID,
-		wal:               walFile,
-		nextSeq:           state.NextSeq,
-		nextInode:         state.NextInode,
-		nodes:             state.Nodes,
-		children:          state.Children,
-		data:              state.Data,
-		coldFiles:         state.ColdFiles,
-		segments:          state.Segments,
-		materializer:      materializer,
-		encryption:        cfg.Encryption,
-		localDiskGuard:    cfg.LocalDiskGuard,
-		retainAllUnlinked: cfg.RetainAllUnlinked,
+		volumeID:              cfg.VolumeID,
+		wal:                   walFile,
+		nextSeq:               state.NextSeq,
+		nextInode:             state.NextInode,
+		nodes:                 state.Nodes,
+		children:              state.Children,
+		data:                  state.Data,
+		coldFiles:             state.ColdFiles,
+		segments:              state.Segments,
+		xattrs:                state.Xattrs,
+		requestReplayCapacity: requestReplayCapacity,
+		requestResults:        make(map[requestLedgerKey]requestReplayEntry, min(requestReplayCapacity, RecoverableFUSEMaxBackground)),
+		requestOrder:          make([]requestLedgerKey, 0, min(requestReplayCapacity, RecoverableFUSEMaxBackground)),
+		pendingRequestAcks:    make([]requestLedgerKey, 0, min(requestReplayCapacity, RecoverableFUSEMaxBackground)),
+		materializer:          materializer,
+		encryption:            cfg.Encryption,
+		localDiskGuard:        cfg.LocalDiskGuard,
+		retainAllUnlinked:     cfg.RetainAllUnlinked,
 	}
 	if latestManifest != nil {
 		e.lastCommittedManifest = latestManifest.ManifestSeq
@@ -121,6 +142,22 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 
 	appliedRecords := 0
 	for _, record := range records {
+		if record.Op == requestAckWALOperation {
+			if err := e.replayRequestAckLocked(record); err != nil {
+				_ = walFile.close()
+				return nil, fmt.Errorf("replay request acknowledgement: %w", err)
+			}
+			continue
+		}
+		if record.RequestScope != "" || record.RequestUnique != 0 {
+			if err := e.replayRequestResultLocked(record); err != nil {
+				_ = walFile.close()
+				return nil, fmt.Errorf("replay request result: %w", err)
+			}
+		}
+		if record.Op == requestResultWALOperation {
+			continue
+		}
 		if record.Seq < e.nextSeq {
 			continue
 		}
@@ -162,7 +199,7 @@ func (e *Engine) Close() error {
 	if err := e.persistCurrentStateLocked(); err != nil {
 		return err
 	}
-	if err := e.wal.reset(); err != nil {
+	if err := e.resetWALLocked(); err != nil {
 		return err
 	}
 	e.refreshLocalDiskGuardLocked()
@@ -454,6 +491,7 @@ func (e *Engine) Forget(inode uint64) error {
 	delete(e.children, inode)
 	delete(e.nodes, inode)
 	delete(e.data, inode)
+	delete(e.xattrs, inode)
 	return nil
 }
 
@@ -593,6 +631,21 @@ func (e *Engine) Truncate(inode uint64, size uint64) error {
 }
 
 func (e *Engine) Fsync(_ uint64) error {
+	e.mutationMu.Lock()
+	e.mu.Lock()
+	if err := e.checkOpen(); err != nil {
+		e.mu.Unlock()
+		e.mutationMu.Unlock()
+		return err
+	}
+	if err := e.persistAcknowledgedRequestsLocked(); err != nil {
+		e.mu.Unlock()
+		e.mutationMu.Unlock()
+		return err
+	}
+	e.mu.Unlock()
+	e.mutationMu.Unlock()
+
 	e.mu.RLock()
 	if err := e.checkOpen(); err != nil {
 		e.mu.RUnlock()
@@ -679,7 +732,7 @@ func (e *Engine) syncMaterialize(ctx context.Context, force bool) (*Manifest, er
 		if err := e.persistCurrentStateLocked(); err != nil {
 			return nil, err
 		}
-		if err := e.wal.reset(); err != nil {
+		if err := e.resetWALLocked(); err != nil {
 			return nil, err
 		}
 		e.refreshLocalDiskGuardLocked()
@@ -731,7 +784,7 @@ func (e *Engine) RefreshMaterialized(ctx context.Context) (bool, error) {
 	if err := e.persistCurrentStateLocked(); err != nil {
 		return false, err
 	}
-	if err := e.wal.reset(); err != nil {
+	if err := e.resetWALLocked(); err != nil {
 		return false, err
 	}
 	e.refreshLocalDiskGuardLocked()
@@ -788,7 +841,7 @@ func (e *Engine) RestoreSnapshot(snapshotID string) error {
 	if err := e.persistCurrentStateLockedWithReserve(false); err != nil {
 		return err
 	}
-	if err := e.wal.reset(); err != nil {
+	if err := e.resetWALLocked(); err != nil {
 		return err
 	}
 	e.refreshLocalDiskGuardLocked()
@@ -812,7 +865,7 @@ func (e *Engine) ReplaceState(state *SnapshotState) error {
 	if err := e.persistCurrentStateLockedWithReserve(false); err != nil {
 		return err
 	}
-	if err := e.wal.reset(); err != nil {
+	if err := e.resetWALLocked(); err != nil {
 		return err
 	}
 	e.refreshLocalDiskGuardLocked()
@@ -944,6 +997,12 @@ func (e *Engine) refreshLocalDiskGuardLocked() {
 
 func estimatedWALRecordBytes(record walRecord) int64 {
 	size := int64(512 + len(record.Name) + len(record.NewName) + len(record.Target))
+	if record.RequestScope != "" {
+		size += int64(len(record.RequestScope))
+	}
+	if record.RequestResultNode != nil {
+		size += 512 + int64(len(record.RequestResultNode.Target))
+	}
 	if len(record.Data) > 0 {
 		size += int64(len(record.Data) * 2)
 	}
@@ -966,6 +1025,11 @@ func estimatedStateBytes(state *SnapshotState) int64 {
 	for _, children := range state.Children {
 		total += int64(128 + len(children)*128)
 	}
+	for _, attrs := range state.Xattrs {
+		for name, value := range attrs {
+			total += int64(128 + len(name) + len(value)*2)
+		}
+	}
 	return total
 }
 
@@ -978,6 +1042,7 @@ func (e *Engine) currentStateLocked() *SnapshotState {
 		Data:      e.data,
 		ColdFiles: e.coldFiles,
 		Segments:  e.segments,
+		Xattrs:    e.xattrs,
 	}
 }
 
@@ -996,6 +1061,7 @@ func (e *Engine) replaceStateLocked(state *SnapshotState) {
 	e.data = state.Data
 	e.coldFiles = state.ColdFiles
 	e.segments = state.Segments
+	e.xattrs = state.Xattrs
 	e.collectUnlinkedLocked(e.retainAllUnlinked)
 }
 
@@ -1058,6 +1124,12 @@ func (e *Engine) apply(record walRecord) error {
 		return e.applySetOwner(record)
 	case "truncate":
 		return e.applyTruncate(record)
+	case "setattr":
+		return e.applyRequestSetAttr(record)
+	case "setxattr":
+		return e.applySetXattr(record)
+	case "removexattr":
+		return e.applyRemoveXattr(record)
 	case "unlink":
 		return e.applyUnlink(record)
 	case "collect_unlinked":
@@ -1078,22 +1150,7 @@ func (e *Engine) applyCreate(record walRecord) error {
 	if _, exists := e.children[record.Parent][record.Name]; exists {
 		return ErrExists
 	}
-	now := time.Unix(0, record.TimeUnix).UTC()
-	node := &Node{
-		Inode:  record.Inode,
-		Type:   record.Type,
-		Mode:   record.Mode,
-		UID:    record.UID,
-		GID:    record.GID,
-		Nlink:  1,
-		Target: record.Target,
-		Atime:  now,
-		Mtime:  now,
-		Ctime:  now,
-	}
-	if node.Type == "" {
-		node.Type = TypeFile
-	}
+	node := nodeFromCreateRecord(record)
 	if node.Type == TypeDirectory {
 		e.children[node.Inode] = map[string]uint64{}
 	}
@@ -1103,6 +1160,26 @@ func (e *Engine) applyCreate(record walRecord) error {
 		e.nextInode = record.Inode + 1
 	}
 	return nil
+}
+
+func nodeFromCreateRecord(record walRecord) *Node {
+	now := time.Unix(0, record.TimeUnix).UTC()
+	typ := record.Type
+	if typ == "" {
+		typ = TypeFile
+	}
+	return &Node{
+		Inode:  record.Inode,
+		Type:   typ,
+		Mode:   record.Mode,
+		UID:    record.UID,
+		GID:    record.GID,
+		Nlink:  1,
+		Target: record.Target,
+		Atime:  now,
+		Mtime:  now,
+		Ctime:  now,
+	}
 }
 
 func (e *Engine) applyLink(record walRecord) error {
@@ -1189,6 +1266,7 @@ func (e *Engine) applyRemoveDir(record walRecord) error {
 	delete(e.children[record.Parent], record.Name)
 	delete(e.children, inode)
 	delete(e.nodes, inode)
+	delete(e.xattrs, inode)
 	return nil
 }
 
@@ -1513,6 +1591,7 @@ func (e *Engine) collectUnlinkedLocked(retainAll bool) bool {
 		delete(e.nodes, inode)
 		delete(e.data, inode)
 		delete(e.coldFiles, inode)
+		delete(e.xattrs, inode)
 		collected = true
 	}
 	return collected

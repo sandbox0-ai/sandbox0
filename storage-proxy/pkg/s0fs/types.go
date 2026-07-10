@@ -30,6 +30,9 @@ type Config struct {
 	// RetainAllUnlinked keeps nlink=0 files addressable until the caller
 	// explicitly finalizes recoverable handles at volume unmount.
 	RetainAllUnlinked bool
+	// RequestReplayCapacity bounds durable FUSE request results retained until
+	// the kernel acknowledges their replies. Zero uses the safe default.
+	RequestReplayCapacity int
 }
 
 type ObjectStoreResolver func(volumeID string) (objectstore.Store, error)
@@ -42,6 +45,7 @@ type SnapshotState struct {
 	Data      map[uint64][]byte            `json:"data,omitempty"`
 	ColdFiles map[uint64][]FileExtent      `json:"cold_files,omitempty"`
 	Segments  map[string]*Segment          `json:"segments,omitempty"`
+	Xattrs    map[uint64]map[string][]byte `json:"xattrs,omitempty"`
 }
 
 type FileExtent struct {
@@ -109,4 +113,12 @@ type walRecord struct {
 	Data      []byte   `json:"data,omitempty"`
 	Target    string   `json:"target,omitempty"`
 	TimeUnix  int64    `json:"time_unix"`
+
+	SetAttrValid       uint32             `json:"setattr_valid,omitempty"`
+	RequestScope       string             `json:"request_scope,omitempty"`
+	RequestUnique      uint64             `json:"request_unique,omitempty"`
+	RequestResultNode  *Node              `json:"request_result_node,omitempty"`
+	RequestResultInode uint64             `json:"request_result_inode,omitempty"`
+	RequestResultBytes uint64             `json:"request_result_bytes,omitempty"`
+	RequestAcks        []requestLedgerKey `json:"request_acks,omitempty"`
 }

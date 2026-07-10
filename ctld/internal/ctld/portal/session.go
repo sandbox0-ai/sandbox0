@@ -345,6 +345,22 @@ func (s *localSession) ctx(ctx context.Context) context.Context {
 	})
 }
 
+func (s *localSession) mutationCtx(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s != nil && s.baseCtx != nil {
+		if claims := internalauth.ClaimsFromContext(s.baseCtx); claims != nil {
+			return internalauth.WithClaims(ctx, claims)
+		}
+	}
+	return internalauth.WithClaims(ctx, &internalauth.Claims{
+		Caller:   internalauth.ServiceCtld,
+		Target:   internalauth.ServiceCtld,
+		IsSystem: true,
+	})
+}
+
 func (s *localSession) fix(volumeID *string) {
 	if volumeID != nil {
 		*volumeID = s.volumeID
@@ -373,7 +389,7 @@ func (s *localSession) SetAttr(ctx context.Context, req *pb.SetAttrRequest) (*pb
 		return nil, err
 	}
 	defer release()
-	resp, err := s.fs.SetAttr(s.ctx(ctx), req)
+	resp, err := s.fs.SetAttr(s.mutationCtx(ctx), req)
 	if err != nil {
 		return nil, err
 	}
@@ -396,7 +412,7 @@ func (s *localSession) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb.Nod
 		return nil, err
 	}
 	defer release()
-	return s.fs.Mkdir(s.ctx(ctx), req)
+	return s.fs.Mkdir(s.mutationCtx(ctx), req)
 }
 func (s *localSession) Create(ctx context.Context, req *pb.CreateRequest) (*pb.NodeResponse, error) {
 	s.fix(&req.VolumeId)
@@ -405,7 +421,7 @@ func (s *localSession) Create(ctx context.Context, req *pb.CreateRequest) (*pb.N
 		return nil, err
 	}
 	defer release()
-	return s.fs.Create(s.ctx(ctx), req)
+	return s.fs.Create(s.mutationCtx(ctx), req)
 }
 func (s *localSession) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*pb.Empty, error) {
 	s.fix(&req.VolumeId)
@@ -414,7 +430,7 @@ func (s *localSession) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*pb.E
 		return nil, err
 	}
 	defer release()
-	return s.fs.Unlink(s.ctx(ctx), req)
+	return s.fs.Unlink(s.mutationCtx(ctx), req)
 }
 func (s *localSession) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb.Empty, error) {
 	s.fix(&req.VolumeId)
@@ -423,7 +439,7 @@ func (s *localSession) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb.Emp
 		return nil, err
 	}
 	defer release()
-	return s.fs.Rmdir(s.ctx(ctx), req)
+	return s.fs.Rmdir(s.mutationCtx(ctx), req)
 }
 func (s *localSession) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.Empty, error) {
 	s.fix(&req.VolumeId)
@@ -432,7 +448,7 @@ func (s *localSession) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.E
 		return nil, err
 	}
 	defer release()
-	return s.fs.Rename(s.ctx(ctx), req)
+	return s.fs.Rename(s.mutationCtx(ctx), req)
 }
 func (s *localSession) Link(ctx context.Context, req *pb.LinkRequest) (*pb.NodeResponse, error) {
 	s.fix(&req.VolumeId)
@@ -441,7 +457,7 @@ func (s *localSession) Link(ctx context.Context, req *pb.LinkRequest) (*pb.NodeR
 		return nil, err
 	}
 	defer release()
-	return s.fs.Link(s.ctx(ctx), req)
+	return s.fs.Link(s.mutationCtx(ctx), req)
 }
 func (s *localSession) Symlink(ctx context.Context, req *pb.SymlinkRequest) (*pb.NodeResponse, error) {
 	s.fix(&req.VolumeId)
@@ -450,7 +466,7 @@ func (s *localSession) Symlink(ctx context.Context, req *pb.SymlinkRequest) (*pb
 		return nil, err
 	}
 	defer release()
-	return s.fs.Symlink(s.ctx(ctx), req)
+	return s.fs.Symlink(s.mutationCtx(ctx), req)
 }
 func (s *localSession) Readlink(ctx context.Context, req *pb.ReadlinkRequest) (*pb.ReadlinkResponse, error) {
 	s.fix(&req.VolumeId)
@@ -474,7 +490,11 @@ func (s *localSession) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenR
 		}
 		defer release()
 	}
-	resp, err := s.fs.Open(s.ctx(ctx), req)
+	requestCtx := s.ctx(ctx)
+	if req.Flags&uint32(syscall.O_TRUNC) != 0 {
+		requestCtx = s.mutationCtx(ctx)
+	}
+	resp, err := s.fs.Open(requestCtx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -532,7 +552,7 @@ func (s *localSession) Write(ctx context.Context, req *pb.WriteRequest) (*pb.Wri
 		return nil, err
 	}
 	defer release()
-	resp, err := s.fs.Write(s.ctx(ctx), req)
+	resp, err := s.fs.Write(s.mutationCtx(ctx), req)
 	if err != nil {
 		return nil, err
 	}
@@ -637,7 +657,7 @@ func (s *localSession) SetXattr(ctx context.Context, req *pb.SetXattrRequest) (*
 		return nil, err
 	}
 	defer release()
-	return s.fs.SetXattr(s.ctx(ctx), req)
+	return s.fs.SetXattr(s.mutationCtx(ctx), req)
 }
 func (s *localSession) ListXattr(ctx context.Context, req *pb.ListXattrRequest) (*pb.ListXattrResponse, error) {
 	s.fix(&req.VolumeId)
@@ -650,7 +670,7 @@ func (s *localSession) RemoveXattr(ctx context.Context, req *pb.RemoveXattrReque
 		return nil, err
 	}
 	defer release()
-	return s.fs.RemoveXattr(s.ctx(ctx), req)
+	return s.fs.RemoveXattr(s.mutationCtx(ctx), req)
 }
 func (s *localSession) Mknod(ctx context.Context, req *pb.MknodRequest) (*pb.NodeResponse, error) {
 	s.fix(&req.VolumeId)
@@ -659,7 +679,7 @@ func (s *localSession) Mknod(ctx context.Context, req *pb.MknodRequest) (*pb.Nod
 		return nil, err
 	}
 	defer release()
-	return s.fs.Mknod(s.ctx(ctx), req)
+	return s.fs.Mknod(s.mutationCtx(ctx), req)
 }
 func (s *localSession) GetLk(ctx context.Context, req *pb.GetLkRequest) (*pb.GetLkResponse, error) {
 	s.fix(&req.VolumeId)

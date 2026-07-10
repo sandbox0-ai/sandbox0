@@ -132,6 +132,9 @@ func normalizeState(state *SnapshotState) {
 	if state.Segments == nil {
 		state.Segments = make(map[string]*Segment)
 	}
+	if state.Xattrs == nil {
+		state.Xattrs = make(map[uint64]map[string][]byte)
+	}
 	for inode, children := range state.Children {
 		if children == nil {
 			state.Children[inode] = make(map[string]uint64)
@@ -160,6 +163,7 @@ func cloneStateWithSegmentCloner(state *SnapshotState, cloneSegmentFn func(*Segm
 		Data:      make(map[uint64][]byte, len(state.Data)),
 		ColdFiles: make(map[uint64][]FileExtent, len(state.ColdFiles)),
 		Segments:  make(map[string]*Segment, len(state.Segments)),
+		Xattrs:    make(map[uint64]map[string][]byte, len(state.Xattrs)),
 	}
 	for inode, node := range state.Nodes {
 		clone.Nodes[inode] = cloneNode(node)
@@ -182,6 +186,25 @@ func cloneStateWithSegmentCloner(state *SnapshotState, cloneSegmentFn func(*Segm
 	}
 	for segmentID, segment := range state.Segments {
 		clone.Segments[segmentID] = cloneSegmentFn(segment)
+	}
+	for inode, attrs := range state.Xattrs {
+		attrClone := make(map[string][]byte, len(attrs))
+		for name, value := range attrs {
+			attrClone[name] = slices.Clone(value)
+		}
+		clone.Xattrs[inode] = attrClone
+	}
+	return clone
+}
+
+func cloneXattrMap(xattrs map[uint64]map[string][]byte) map[uint64]map[string][]byte {
+	clone := make(map[uint64]map[string][]byte, len(xattrs))
+	for inode, attrs := range xattrs {
+		attrClone := make(map[string][]byte, len(attrs))
+		for name, value := range attrs {
+			attrClone[name] = slices.Clone(value)
+		}
+		clone[inode] = attrClone
 	}
 	return clone
 }

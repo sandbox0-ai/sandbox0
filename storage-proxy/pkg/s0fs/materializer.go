@@ -296,6 +296,7 @@ func buildMaterializedState(manifestSeq uint64, volumeID string, state *Snapshot
 		Data:      make(map[uint64][]byte),
 		ColdFiles: make(map[uint64][]FileExtent),
 		Segments:  make(map[string]*Segment),
+		Xattrs:    cloneXattrMap(state.Xattrs),
 	}
 
 	builder := newSegmentBuilder(manifestSeq, volumeID, targetSize)

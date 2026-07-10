@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"path"
 	"sort"
@@ -130,6 +131,48 @@ func (s *s3Session) Close() {
 			s.logger.WithError(err).WithField("key", handle.path).Warn("Failed to commit s3 handle during close")
 		}
 	}
+}
+
+// FinalizeRecoverableHandles uploads every recoverable writer before the
+// portal journal drops its reference to this backend. The caller must first
+// quiesce the portal route so no new writes can race with this checkpoint.
+func (s *s3Session) FinalizeRecoverableHandles(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.mu.Lock()
+	seen := make(map[*s3Handle]struct{}, len(s.handles)+len(s.implicit))
+	handles := make([]*s3Handle, 0, len(s.handles)+len(s.implicit))
+	collect := func(handle *s3Handle) {
+		if handle == nil || !handle.writable || handle.closed {
+			return
+		}
+		if _, ok := seen[handle]; ok {
+			return
+		}
+		seen[handle] = struct{}{}
+		handles = append(handles, handle)
+	}
+	for _, handle := range s.handles {
+		collect(handle)
+	}
+	for _, handle := range s.implicit {
+		collect(handle)
+	}
+	s.mu.Unlock()
+
+	for _, handle := range handles {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := s.commitHandle(ctx, handle); err != nil {
+			return fmt.Errorf("commit recoverable s3 writer %q: %w", handle.path, err)
+		}
+	}
+	return nil
 }
 
 func (s *s3Session) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.NodeResponse, error) {

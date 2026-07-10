@@ -230,42 +230,55 @@ func (m *Manager) restoreNodeFSPortal(ctx context.Context, runtime *nodeFSRuntim
 		rootfsSession = restored
 	}
 	pm := &portalMount{
-		namespace:         state.Namespace,
-		podName:           state.PodName,
-		podUID:            state.PodUID,
-		name:              state.Name,
-		mountPath:         state.MountPath,
-		targetPath:        state.TargetPath,
-		rootfsBackingPath: rootfsBackingPath,
-		rootfsSession:     rootfsSession,
-		nodeFSShard:       state.Shard,
-		nodeFSSlot:        state.Slot,
-		nodeFSRouteName:   nodeFSRouteName(state.Slot),
+		namespace:               state.Namespace,
+		podName:                 state.PodName,
+		podUID:                  state.PodUID,
+		name:                    state.Name,
+		mountPath:               state.MountPath,
+		targetPath:              state.TargetPath,
+		rootfsBackingPath:       rootfsBackingPath,
+		rootfsSession:           rootfsSession,
+		nodeFSShard:             state.Shard,
+		nodeFSSlot:              state.Slot,
+		nodeFSBindingGeneration: state.BindingGeneration,
+		nodeFSRouteName:         nodeFSRouteName(state.Slot),
 	}
 	pm.nodeFSSourcePath = filepath.Join(shard.state.MountPath, pm.nodeFSRouteName)
-	session := rootfsSession
+	var session volumefuse.Session = rootfsSession
 	volumeID := state.PortalKey
-	if state.Phase != nodeFSPortalUnpublishing && normalizeNodeFSBackend(state.Backend) != nodeFSRootBackend {
+	if normalizeNodeFSBackend(state.Backend) != nodeFSRootBackend {
 		bound, err := m.restoreNodeFSBoundVolume(ctx, state)
 		if err != nil {
 			return err
 		}
-		session = bound.session
-		volumeID = bound.volumeID
 		pm.volumeID = bound.volumeID
 		pm.teamID = bound.teamID
 		pm.mountedAt = state.MountedAt
+		switch state.Phase {
+		case nodeFSPortalUnbinding:
+			// The durable intent is rootfs. Keep the source volume owned only
+			// so reconciliation can finalize it; never expose it again.
+			pm.nodeFSBindingGeneration = state.PendingBindingGeneration
+		case nodeFSPortalUnpublishing:
+			// The target is being removed. Fail closed while the old backend is
+			// finalized instead of briefly re-exposing it after recovery.
+			session = unboundSession{}
+		default:
+			session = bound.session
+			volumeID = bound.volumeID
+		}
 	}
 	slot, err := nodefs.NewSlot(state.Slot)
 	if err != nil {
 		return err
 	}
 	if err := shard.mux.RegisterPortal(nodefs.PortalSpec{
-		Name:      pm.nodeFSRouteName,
-		Slot:      slot,
-		VolumeID:  volumeID,
-		RootInode: 1,
-		Session:   session,
+		Name:       pm.nodeFSRouteName,
+		Slot:       slot,
+		Generation: pm.nodeFSBindingGeneration,
+		VolumeID:   volumeID,
+		RootInode:  1,
+		Session:    session,
 	}); err != nil {
 		return err
 	}
@@ -356,6 +369,12 @@ func (m *Manager) reconcileNodeFSPortals(ctx context.Context, runtime *nodeFSRun
 		if pm == nil {
 			return fmt.Errorf("nodefs portal %q was not restored", portal.PortalKey)
 		}
+		if portal.Phase == nodeFSPortalUnbinding {
+			if err := m.completeNodeFSUnbind(ctx, runtime, portal, pm); err != nil {
+				return err
+			}
+			continue
+		}
 		if portal.Phase == nodeFSPortalUnpublishing {
 			if err := m.completeNodeFSUnpublish(ctx, runtime, portal.PortalKey, pm); err != nil {
 				return err
@@ -445,27 +464,29 @@ func (m *Manager) publishNodeFSPortal(ctx context.Context, req publishRequest) e
 		return err
 	}
 	if err := shard.mux.RegisterPortal(nodefs.PortalSpec{
-		Name:      routeName,
-		Slot:      slot,
-		VolumeID:  key,
-		RootInode: 1,
-		Session:   rootfsSession,
+		Name:       routeName,
+		Slot:       slot,
+		Generation: allocated.BindingGeneration,
+		VolumeID:   key,
+		RootInode:  1,
+		Session:    rootfsSession,
 	}); err != nil {
 		return err
 	}
 	pm := &portalMount{
-		namespace:         req.Namespace,
-		podName:           req.PodName,
-		podUID:            req.PodUID,
-		name:              req.Name,
-		mountPath:         req.MountPath,
-		targetPath:        req.TargetPath,
-		rootfsBackingPath: rootfsBackingPath,
-		rootfsSession:     rootfsSession,
-		nodeFSShard:       allocated.Shard,
-		nodeFSSlot:        allocated.Slot,
-		nodeFSRouteName:   routeName,
-		nodeFSSourcePath:  filepath.Join(shard.state.MountPath, routeName),
+		namespace:               req.Namespace,
+		podName:                 req.PodName,
+		podUID:                  req.PodUID,
+		name:                    req.Name,
+		mountPath:               req.MountPath,
+		targetPath:              req.TargetPath,
+		rootfsBackingPath:       rootfsBackingPath,
+		rootfsSession:           rootfsSession,
+		nodeFSShard:             allocated.Shard,
+		nodeFSSlot:              allocated.Slot,
+		nodeFSBindingGeneration: allocated.BindingGeneration,
+		nodeFSRouteName:         routeName,
+		nodeFSSourcePath:        filepath.Join(shard.state.MountPath, routeName),
 	}
 	m.mu.Lock()
 	m.portals[key] = pm
@@ -506,6 +527,13 @@ func (m *Manager) unpublishNodeFSPortal(ctx context.Context, targetPath string) 
 }
 
 func (m *Manager) completeNodeFSUnpublish(ctx context.Context, runtime *nodeFSRuntime, key string, pm *portalMount) error {
+	state, ok := runtime.journal.Portal(key)
+	if !ok {
+		return nil
+	}
+	if state.Phase != nodeFSPortalUnpublishing {
+		return fmt.Errorf("nodefs portal %q is not unpublishing", key)
+	}
 	if err := runtime.mounter.Unmount(pm.targetPath); err != nil {
 		return err
 	}
@@ -516,15 +544,16 @@ func (m *Manager) completeNodeFSUnpublish(ctx context.Context, runtime *nodeFSRu
 	if _, err := shard.mux.DrainPortal(ctx, pm.nodeFSRouteName); err != nil && !errors.Is(err, nodefs.ErrPortalRouteMissing) {
 		return err
 	}
-	// The portal is no longer reachable after the bind is detached and its
-	// route drained. Remove desired state before best-effort local GC so a
-	// cleanup failure cannot make restart depend on already-deleted backing.
+	// The target and route are quiescent, but the durable journal must keep
+	// naming the source backend until all recoverable writes are finalized.
+	if err := m.finishNodeFSBoundDetach(ctx, pm, state); err != nil {
+		return err
+	}
 	if err := runtime.journal.RemovePortal(key); err != nil {
 		return err
 	}
 
 	m.mu.Lock()
-	cleanup := m.unbindLockedSnapshot(pm)
 	delete(m.portalsByTarget, pm.targetPath)
 	delete(m.portals, key)
 	m.mu.Unlock()
@@ -532,8 +561,7 @@ func (m *Manager) completeNodeFSUnpublish(ctx context.Context, runtime *nodeFSRu
 		pm.rootfsSession.Close()
 	}
 	backingErr := removeNodeFSRootFSBacking(m.rootDir, pm.rootfsBackingPath)
-	cleanupErr := m.finishBoundVolumeCleanup(ctx, cleanup)
-	return errors.Join(backingErr, cleanupErr)
+	return backingErr
 }
 
 func (m *Manager) bindNodeFSPortal(ctx context.Context, req ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, error) {
@@ -577,7 +605,8 @@ func (m *Manager) bindNodeFSPortal(ctx context.Context, req ctldapi.BindVolumePo
 	}
 	mountedAt := time.Now().UTC()
 	backend := volume.NormalizeBackend(volumeRecord.Backend)
-	if err := runtime.journal.UpdatePortalBinding(key, backend, req.SandboxVolumeID, req.TeamID, mountedAt); err != nil {
+	state, err := runtime.journal.UpdatePortalBinding(key, backend, req.SandboxVolumeID, req.TeamID, mountedAt)
+	if err != nil {
 		cleanupErr := m.rollbackBoundVolumeReservation(ctx, bound, created)
 		return ctldapi.BindVolumePortalResponse{}, errors.Join(err, cleanupErr)
 	}
@@ -586,16 +615,19 @@ func (m *Manager) bindNodeFSPortal(ctx context.Context, req ctldapi.BindVolumePo
 		_ = m.rollbackBoundVolumeReservation(ctx, bound, false)
 		return ctldapi.BindVolumePortalResponse{}, err
 	}
-	if _, err := shard.mux.UpdatePortalSession(pm.nodeFSRouteName, bound.volumeID, bound.session); err != nil {
-		// The journal intentionally remains on the desired backend. A retry or
-		// process recovery will complete the switch.
-		_ = m.rollbackBoundVolumeReservation(ctx, bound, false)
-		return ctldapi.BindVolumePortalResponse{}, err
+	if pm.nodeFSBindingGeneration != state.BindingGeneration {
+		if _, err := shard.mux.UpdatePortalSession(pm.nodeFSRouteName, bound.volumeID, state.BindingGeneration, bound.session); err != nil {
+			// The journal intentionally remains on the desired backend. A retry or
+			// process recovery will complete the switch.
+			_ = m.rollbackBoundVolumeReservation(ctx, bound, false)
+			return ctldapi.BindVolumePortalResponse{}, err
+		}
 	}
 	m.mu.Lock()
 	pm.volumeID = bound.volumeID
 	pm.teamID = bound.teamID
 	pm.mountedAt = mountedAt
+	pm.nodeFSBindingGeneration = state.BindingGeneration
 	m.mu.Unlock()
 	return boundResponse(pm), nil
 }
@@ -617,28 +649,101 @@ func (m *Manager) unbindNodeFSPortal(ctx context.Context, req ctldapi.UnbindVolu
 	key := portalKey(req.PodUID, portalName)
 	m.mu.Lock()
 	pm := m.portals[key]
-	if pm == nil || pm.volumeID == "" {
-		m.mu.Unlock()
+	m.mu.Unlock()
+	state, ok := runtime.journal.Portal(key)
+	if !ok {
 		return ctldapi.UnbindVolumePortalResponse{Unbound: true}, nil
 	}
-	m.mu.Unlock()
-	if err := runtime.journal.UpdatePortalBinding(key, nodeFSRootBackend, "", "", time.Time{}); err != nil {
-		return ctldapi.UnbindVolumePortalResponse{}, err
+	if pm == nil {
+		return ctldapi.UnbindVolumePortalResponse{}, fmt.Errorf("nodefs portal %q is committed but not restored", key)
 	}
-	shard, err := runtime.shard(pm.nodeFSShard)
-	if err != nil {
-		return ctldapi.UnbindVolumePortalResponse{}, err
+	switch state.Phase {
+	case nodeFSPortalPublished:
+		if normalizeNodeFSBackend(state.Backend) == nodeFSRootBackend {
+			return ctldapi.UnbindVolumePortalResponse{Unbound: true}, nil
+		}
+		state, err = runtime.journal.BeginPortalUnbind(key)
+		if err != nil {
+			return ctldapi.UnbindVolumePortalResponse{}, err
+		}
+	case nodeFSPortalUnbinding:
+		// Resume the durable transition below.
+	default:
+		return ctldapi.UnbindVolumePortalResponse{}, fmt.Errorf("nodefs portal %q is %s", key, state.Phase)
 	}
-	if _, err := shard.mux.UpdatePortalSession(pm.nodeFSRouteName, key, pm.rootfsSession); err != nil {
-		return ctldapi.UnbindVolumePortalResponse{}, err
-	}
-	m.mu.Lock()
-	cleanup := m.unbindLockedSnapshot(pm)
-	m.mu.Unlock()
-	if err := m.finishBoundVolumeCleanup(ctx, cleanup); err != nil {
+	if err := m.completeNodeFSUnbind(ctx, runtime, state, pm); err != nil {
 		return ctldapi.UnbindVolumePortalResponse{}, err
 	}
 	return ctldapi.UnbindVolumePortalResponse{Unbound: true}, nil
+}
+
+func (m *Manager) completeNodeFSUnbind(ctx context.Context, runtime *nodeFSRuntime, state nodeFSPortalState, pm *portalMount) error {
+	if state.Phase != nodeFSPortalUnbinding || state.PendingBindingGeneration == 0 {
+		return fmt.Errorf("nodefs portal %q is not durably unbinding", state.PortalKey)
+	}
+	shard, err := runtime.shard(pm.nodeFSShard)
+	if err != nil {
+		return err
+	}
+	if pm.nodeFSBindingGeneration != state.PendingBindingGeneration {
+		if _, err := shard.mux.UpdatePortalSession(
+			pm.nodeFSRouteName,
+			state.PortalKey,
+			state.PendingBindingGeneration,
+			pm.rootfsSession,
+		); err != nil {
+			return err
+		}
+		pm.nodeFSBindingGeneration = state.PendingBindingGeneration
+	}
+	if err := m.finishNodeFSBoundDetach(ctx, pm, state); err != nil {
+		return err
+	}
+	completed, err := runtime.journal.CompletePortalUnbind(state.PortalKey)
+	if err != nil {
+		return err
+	}
+	pm.nodeFSBindingGeneration = completed.BindingGeneration
+	return nil
+}
+
+// finishNodeFSBoundDetach drops the in-memory owner only after the route has
+// switched away from it or been drained. The journal still names state.VolumeID
+// until this function succeeds, so restart can always reopen and retry it.
+func (m *Manager) finishNodeFSBoundDetach(ctx context.Context, pm *portalMount, state nodeFSPortalState) error {
+	if pm == nil || pm.volumeID == "" {
+		return nil
+	}
+	if pm.volumeID != state.VolumeID || pm.teamID != state.TeamID {
+		return fmt.Errorf("portal %q bound identity changed during cleanup", state.PortalKey)
+	}
+	m.mu.Lock()
+	bound := m.boundVolumes[pm.volumeID]
+	if bound == nil {
+		m.mu.Unlock()
+		return fmt.Errorf("portal %q bound volume %s is unavailable", state.PortalKey, pm.volumeID)
+	}
+	cleanup := m.unbindLockedSnapshot(pm)
+	m.mu.Unlock()
+	if err := m.finishBoundVolumeCleanup(ctx, cleanup); err != nil {
+		m.mu.Lock()
+		var restoreErr error
+		if pm.volumeID == "" {
+			pm.volumeID = state.VolumeID
+			pm.teamID = state.TeamID
+			pm.mountedAt = state.MountedAt
+			if current := m.boundVolumes[state.VolumeID]; current == bound {
+				if current.refCount == 0 {
+					current.refCount = 1
+				}
+				current.closing = false
+				restoreErr = m.ensureBoundVolumeSessionLocked(current)
+			}
+		}
+		m.mu.Unlock()
+		return errors.Join(err, restoreErr)
+	}
+	return nil
 }
 
 func (m *Manager) shutdownNodeFS(ctx context.Context) error {

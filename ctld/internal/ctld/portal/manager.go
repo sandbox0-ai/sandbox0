@@ -86,10 +86,11 @@ type portalMount struct {
 	teamID    string
 	mountedAt time.Time
 
-	nodeFSShard      int
-	nodeFSSlot       uint64
-	nodeFSRouteName  string
-	nodeFSSourcePath string
+	nodeFSShard             int
+	nodeFSSlot              uint64
+	nodeFSBindingGeneration uint64
+	nodeFSRouteName         string
+	nodeFSSourcePath        string
 }
 
 type boundVolume struct {
@@ -114,6 +115,7 @@ type boundVolumeCleanup struct {
 	bound             *boundVolume
 	materializeCancel context.CancelFunc
 	materializeDone   chan struct{}
+	prepared          bool
 }
 
 type Config struct {
@@ -618,7 +620,12 @@ func (m *Manager) openS3BoundVolume(req ctldapi.BindVolumePortalRequest, volumeR
 	if store == nil {
 		return nil, nil, fmt.Errorf("s3 object storage is not configured")
 	}
-	session := newS3Session(req.SandboxVolumeID, store, accessMode, m.logrus)
+	cacheDir := filepath.Join(m.rootDir, "volumes", safePath(req.TeamID), safePath(req.SandboxVolumeID))
+	session := newS3SessionWithStateDir(req.SandboxVolumeID, filepath.Join(cacheDir, "s3-session"), store, accessMode, m.logrus)
+	if err := session.InitError(); err != nil {
+		session.Close()
+		return nil, nil, fmt.Errorf("initialize recoverable s3 session: %w", err)
+	}
 	volCtx := &volume.VolumeContext{
 		VolumeID:  req.SandboxVolumeID,
 		TeamID:    volumeRecord.TeamID,
@@ -627,6 +634,7 @@ func (m *Manager) openS3BoundVolume(req ctldapi.BindVolumePortalRequest, volumeR
 		MountedAt: mountedAt,
 		RootInode: 1,
 		RootPath:  "/",
+		CacheDir:  cacheDir,
 	}
 	bound := &boundVolume{
 		volumeID:  req.SandboxVolumeID,
@@ -985,19 +993,12 @@ func (m *Manager) finishBoundVolumeCleanup(ctx context.Context, cleanup *boundVo
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if cleanup.materializeCancel != nil {
-		cleanup.materializeCancel()
-	}
-	if cleanup.materializeDone != nil {
-		select {
-		case <-cleanup.materializeDone:
-		case <-ctx.Done():
-			m.markBoundVolumeCleanupFailed(cleanup)
-			return ctx.Err()
-		}
+	if err := m.prepareBoundVolumeCleanup(ctx, cleanup); err != nil {
+		m.markBoundVolumeCleanupFailed(cleanup)
+		return err
 	}
 	closeBoundSession(cleanup.bound)
-	if err := m.volumes.UnmountVolume(ctx, cleanup.volumeID, ""); err != nil {
+	if err := m.volumes.UnmountPreparedVolume(cleanup.volumeID); err != nil {
 		m.markBoundVolumeCleanupFailed(cleanup)
 		return err
 	}
@@ -1014,6 +1015,38 @@ func (m *Manager) finishBoundVolumeCleanup(ctx context.Context, cleanup *boundVo
 	return nil
 }
 
+type recoverableSessionFinalizer interface {
+	FinalizeRecoverableHandles(context.Context) error
+}
+
+func (m *Manager) prepareBoundVolumeCleanup(ctx context.Context, cleanup *boundVolumeCleanup) error {
+	if cleanup == nil || cleanup.bound == nil || cleanup.prepared {
+		return nil
+	}
+	if cleanup.materializeCancel != nil {
+		cleanup.materializeCancel()
+		cleanup.materializeCancel = nil
+	}
+	if cleanup.materializeDone != nil {
+		select {
+		case <-cleanup.materializeDone:
+			cleanup.materializeDone = nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if finalizer, ok := cleanup.bound.session.(recoverableSessionFinalizer); ok {
+		if err := finalizer.FinalizeRecoverableHandles(ctx); err != nil {
+			return err
+		}
+	}
+	if err := m.volumes.PrepareUnmountVolume(ctx, cleanup.volumeID); err != nil {
+		return err
+	}
+	cleanup.prepared = true
+	return nil
+}
+
 func (m *Manager) markBoundVolumeCleanupFailed(cleanup *boundVolumeCleanup) {
 	if m == nil || cleanup == nil || cleanup.bound == nil || strings.TrimSpace(cleanup.volumeID) == "" {
 		return
@@ -1021,6 +1054,9 @@ func (m *Manager) markBoundVolumeCleanupFailed(cleanup *boundVolumeCleanup) {
 	m.mu.Lock()
 	if m.boundVolumes[cleanup.volumeID] == cleanup.bound {
 		cleanup.bound.closing = false
+		if !cleanup.prepared && cleanup.bound.materializeCancel == nil && cleanup.bound.materializeDone == nil {
+			m.startMaterializer(cleanup.bound)
+		}
 	}
 	m.mu.Unlock()
 }

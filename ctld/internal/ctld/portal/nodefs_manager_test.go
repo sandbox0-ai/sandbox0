@@ -2,6 +2,7 @@ package portal
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,9 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal/nodefs"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
+	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 )
 
 type fakeNodeFSMounter struct {
@@ -271,13 +274,15 @@ func TestNodeFSStaleCleanupReleasesBoundVolume(t *testing.T) {
 	pm.teamID = bound.teamID
 	pm.mountedAt = bound.mountedAt
 	mgr.mu.Unlock()
-	if err := mgr.nodeFS.journal.UpdatePortalBinding(state.PortalKey, volume.BackendS0FS, bound.volumeID, bound.teamID, bound.mountedAt); err != nil {
+	updated, err := mgr.nodeFS.journal.UpdatePortalBinding(state.PortalKey, volume.BackendS0FS, bound.volumeID, bound.teamID, bound.mountedAt)
+	if err != nil {
 		t.Fatal(err)
 	}
 	shard := &mgr.nodeFS.shards[pm.nodeFSShard]
-	if _, err := shard.mux.UpdatePortalSession(pm.nodeFSRouteName, bound.volumeID, bound.session); err != nil {
+	if _, err := shard.mux.UpdatePortalSession(pm.nodeFSRouteName, bound.volumeID, updated.BindingGeneration, bound.session); err != nil {
 		t.Fatal(err)
 	}
+	pm.nodeFSBindingGeneration = updated.BindingGeneration
 
 	if err := mgr.CleanupStaleCSIMounts(context.Background()); err != nil {
 		t.Fatalf("CleanupStaleCSIMounts() error = %v", err)
@@ -511,13 +516,15 @@ func TestNodeFSUnbindCommitsRootFSAndReleasesLastBackend(t *testing.T) {
 	pm.teamID = bound.teamID
 	pm.mountedAt = bound.mountedAt
 	mgr.mu.Unlock()
-	if err := mgr.nodeFS.journal.UpdatePortalBinding(state.PortalKey, volume.BackendS0FS, bound.volumeID, bound.teamID, bound.mountedAt); err != nil {
+	updated, err := mgr.nodeFS.journal.UpdatePortalBinding(state.PortalKey, volume.BackendS0FS, bound.volumeID, bound.teamID, bound.mountedAt)
+	if err != nil {
 		t.Fatal(err)
 	}
 	shard := &mgr.nodeFS.shards[pm.nodeFSShard]
-	if _, err := shard.mux.UpdatePortalSession(pm.nodeFSRouteName, bound.volumeID, bound.session); err != nil {
+	if _, err := shard.mux.UpdatePortalSession(pm.nodeFSRouteName, bound.volumeID, updated.BindingGeneration, bound.session); err != nil {
 		t.Fatal(err)
 	}
+	pm.nodeFSBindingGeneration = updated.BindingGeneration
 
 	response, err := mgr.Unbind(context.Background(), ctldapi.UnbindVolumePortalRequest{
 		PodUID:     pm.podUID,
@@ -536,6 +543,107 @@ func TestNodeFSUnbindCommitsRootFSAndReleasesLastBackend(t *testing.T) {
 	if _, ok := mgr.boundVolumes[bound.volumeID]; ok {
 		t.Fatal("last bound volume remains after Unbind")
 	}
+}
+
+func TestNodeFSUnbindKeepsDurableSourceOnFinalizeFailure(t *testing.T) {
+	rootDir := t.TempDir()
+	factory, _ := newNodeFSTestFactory(false)
+	mgr := newNodeFSTestManager(t, rootDir, &fakeNodeFSMounter{}, factory)
+	if err := mgr.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer releaseNodeFSTestProcess(t, mgr)
+	t.Cleanup(func() { _ = mgr.Shutdown(context.Background()) })
+	pm, state := publishNodeFSTestPortal(t, mgr)
+	bound := attachDirtyConflictNodeFSVolume(t, mgr, pm, state)
+
+	_, err := mgr.Unbind(context.Background(), ctldapi.UnbindVolumePortalRequest{
+		PodUID: pm.podUID, PortalName: pm.name,
+	})
+	if err == nil {
+		t.Fatal("Unbind() error = nil, want materialize conflict")
+	}
+	pending, ok := mgr.nodeFS.journal.Portal(state.PortalKey)
+	if !ok || pending.Phase != nodeFSPortalUnbinding || pending.Backend != volume.BackendS0FS || pending.VolumeID != bound.volumeID || pending.TeamID != bound.teamID || pending.PendingBindingGeneration != pending.BindingGeneration+1 {
+		t.Fatalf("journal after failed unbind = %+v, found=%v", pending, ok)
+	}
+	if pm.volumeID != bound.volumeID || bound.refCount != 1 || bound.closing || bound.session == nil {
+		t.Fatalf("binding after failed unbind: portal=%+v bound=%+v", pm, bound)
+	}
+	oldNode, encodeErr := nodefs.EncodeBindingNodeID(nodefs.Slot(pm.nodeFSSlot), pending.BindingGeneration, 2)
+	if encodeErr != nil {
+		t.Fatal(encodeErr)
+	}
+	shard := &mgr.nodeFS.shards[pm.nodeFSShard]
+	if _, routeErr := shard.mux.GetAttr(context.Background(), &pb.GetAttrRequest{Inode: oldNode}); !errors.Is(routeErr, nodefs.ErrStaleBindingGeneration) {
+		t.Fatalf("old backend node error = %v, want stale generation", routeErr)
+	}
+}
+
+func TestNodeFSUnpublishKeepsJournalOnFinalizeFailure(t *testing.T) {
+	rootDir := t.TempDir()
+	mounter := &fakeNodeFSMounter{}
+	factory, _ := newNodeFSTestFactory(false)
+	mgr := newNodeFSTestManager(t, rootDir, mounter, factory)
+	if err := mgr.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer releaseNodeFSTestProcess(t, mgr)
+	t.Cleanup(func() { _ = mgr.Shutdown(context.Background()) })
+	pm, state := publishNodeFSTestPortal(t, mgr)
+	bound := attachDirtyConflictNodeFSVolume(t, mgr, pm, state)
+
+	if err := mgr.UnpublishPortalContext(context.Background(), pm.targetPath); err == nil {
+		t.Fatal("UnpublishPortalContext() error = nil, want materialize conflict")
+	}
+	pending, ok := mgr.nodeFS.journal.Portal(state.PortalKey)
+	if !ok || pending.Phase != nodeFSPortalUnpublishing || pending.VolumeID != bound.volumeID || pending.TeamID != bound.teamID {
+		t.Fatalf("journal after failed unpublish = %+v, found=%v", pending, ok)
+	}
+	if pm.volumeID != bound.volumeID || bound.refCount != 1 || bound.closing || bound.session == nil {
+		t.Fatalf("binding after failed unpublish: portal=%+v bound=%+v", pm, bound)
+	}
+	if _, statErr := os.Stat(pm.rootfsBackingPath); statErr != nil {
+		t.Fatalf("backing removed before durable cleanup: %v", statErr)
+	}
+	if len(mounter.unmounts) != 1 {
+		t.Fatalf("unmount calls = %v, want one", mounter.unmounts)
+	}
+}
+
+func attachDirtyConflictNodeFSVolume(t *testing.T, mgr *Manager, pm *portalMount, state nodeFSPortalState) *boundVolume {
+	t.Helper()
+	engine, cacheDir := newDirtyConflictS0FSEngine(t, "volume-a")
+	t.Cleanup(func() { _ = engine.Close() })
+	volCtx := &volume.VolumeContext{
+		VolumeID: "volume-a", TeamID: "team-a", Backend: volume.BackendS0FS,
+		S0FS: engine, Access: volume.AccessModeRWO, MountedAt: time.Now().UTC(),
+		RootInode: 1, RootPath: "/", CacheDir: cacheDir,
+	}
+	bound := &boundVolume{
+		volumeID: "volume-a", teamID: "team-a", access: volume.AccessModeRWO,
+		mountedAt: volCtx.MountedAt, refCount: 1, volCtx: volCtx,
+		session: newLocalSession("volume-a", mgr.volumes, nil),
+	}
+	mgr.mu.Lock()
+	mgr.boundVolumes[bound.volumeID] = bound
+	mgr.volumes.add(volCtx)
+	pm.volumeID = bound.volumeID
+	pm.teamID = bound.teamID
+	pm.mountedAt = bound.mountedAt
+	mgr.mu.Unlock()
+	updated, err := mgr.nodeFS.journal.UpdatePortalBinding(
+		state.PortalKey, volume.BackendS0FS, bound.volumeID, bound.teamID, bound.mountedAt,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shard := &mgr.nodeFS.shards[pm.nodeFSShard]
+	if _, err := shard.mux.UpdatePortalSession(pm.nodeFSRouteName, bound.volumeID, updated.BindingGeneration, bound.session); err != nil {
+		t.Fatal(err)
+	}
+	pm.nodeFSBindingGeneration = updated.BindingGeneration
+	return bound
 }
 
 func TestNodeFSRequiredRecoveryRejectsS3Session(t *testing.T) {

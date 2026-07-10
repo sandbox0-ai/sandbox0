@@ -210,6 +210,13 @@ func (m *localVolumeManager) MountVolume(_ context.Context, _ string, volumeID s
 }
 
 func (m *localVolumeManager) UnmountVolume(ctx context.Context, volumeID, _ string) error {
+	if err := m.PrepareUnmountVolume(ctx, volumeID); err != nil {
+		return err
+	}
+	return m.UnmountPreparedVolume(volumeID)
+}
+
+func (m *localVolumeManager) PrepareUnmountVolume(ctx context.Context, volumeID string) error {
 	m.mu.RLock()
 	volCtx, ok := m.volumes[volumeID]
 	m.mu.RUnlock()
@@ -217,7 +224,6 @@ func (m *localVolumeManager) UnmountVolume(ctx context.Context, volumeID, _ stri
 		return nil
 	}
 	if volCtx.S0FS == nil {
-		m.remove(volumeID)
 		return nil
 	}
 	if err := volCtx.FinalizeRecoverableHandles(); err != nil {
@@ -226,15 +232,27 @@ func (m *localVolumeManager) UnmountVolume(ctx context.Context, volumeID, _ stri
 	if _, err := volCtx.S0FS.SyncMaterialize(ctx); err != nil {
 		return err
 	}
-	if err := volCtx.S0FS.Close(); err != nil {
-		return err
+	return nil
+}
+
+func (m *localVolumeManager) UnmountPreparedVolume(volumeID string) error {
+	m.mu.RLock()
+	volCtx, ok := m.volumes[volumeID]
+	m.mu.RUnlock()
+	if !ok || volCtx == nil {
+		return nil
 	}
-	if volCtx.CacheDir != "" {
-		if err := os.RemoveAll(volCtx.CacheDir); err != nil {
+	if volCtx.S0FS != nil {
+		if err := volCtx.S0FS.Close(); err != nil {
 			return err
 		}
 	}
 	m.remove(volumeID)
+	if volCtx.CacheDir != "" {
+		// The backend is already durably finalized and closed. Cache deletion is
+		// best-effort GC; retaining it is safer than resurrecting a closed owner.
+		_ = os.RemoveAll(volCtx.CacheDir)
+	}
 	return nil
 }
 

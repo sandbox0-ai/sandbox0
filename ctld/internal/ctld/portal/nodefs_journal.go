@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	nodeFSJournalVersion = 1
+	nodeFSJournalVersion = 2
 	nodeFSStateDirName   = "nodefs"
 	nodeFSStateFileName  = "state.json"
 	nodeFSLockFileName   = "ctld.lock"
@@ -30,6 +30,7 @@ type nodeFSPortalPhase string
 const (
 	nodeFSPortalAllocating   nodeFSPortalPhase = "allocating"
 	nodeFSPortalPublished    nodeFSPortalPhase = "published"
+	nodeFSPortalUnbinding    nodeFSPortalPhase = "unbinding"
 	nodeFSPortalUnpublishing nodeFSPortalPhase = "unpublishing"
 )
 
@@ -73,21 +74,28 @@ type nodeFSShardState struct {
 }
 
 type nodeFSPortalState struct {
-	PortalKey     string            `json:"portal_key"`
-	PodUID        string            `json:"pod_uid"`
-	Namespace     string            `json:"namespace"`
-	PodName       string            `json:"pod_name"`
-	Name          string            `json:"name"`
-	MountPath     string            `json:"mount_path"`
-	TargetPath    string            `json:"target_path"`
-	Shard         int               `json:"shard"`
-	Slot          uint64            `json:"slot"`
-	RootFSBacking string            `json:"rootfs_backing_path"`
-	Backend       string            `json:"backend"`
-	VolumeID      string            `json:"volume_id,omitempty"`
-	TeamID        string            `json:"team_id,omitempty"`
-	MountedAt     time.Time         `json:"mounted_at,omitempty"`
-	Phase         nodeFSPortalPhase `json:"phase"`
+	PortalKey  string `json:"portal_key"`
+	PodUID     string `json:"pod_uid"`
+	Namespace  string `json:"namespace"`
+	PodName    string `json:"pod_name"`
+	Name       string `json:"name"`
+	MountPath  string `json:"mount_path"`
+	TargetPath string `json:"target_path"`
+	Shard      int    `json:"shard"`
+	Slot       uint64 `json:"slot"`
+	// BindingGeneration fences inode and file-handle identities when a
+	// published portal switches between rootfs and a volume backend.
+	BindingGeneration uint64 `json:"binding_generation"`
+	// PendingBindingGeneration is durable intent for an in-progress unbind.
+	// Backend and volume identity continue to describe the source backend
+	// until its recoverable state has been finalized.
+	PendingBindingGeneration uint64            `json:"pending_binding_generation,omitempty"`
+	RootFSBacking            string            `json:"rootfs_backing_path"`
+	Backend                  string            `json:"backend"`
+	VolumeID                 string            `json:"volume_id,omitempty"`
+	TeamID                   string            `json:"team_id,omitempty"`
+	MountedAt                time.Time         `json:"mounted_at,omitempty"`
+	Phase                    nodeFSPortalPhase `json:"phase"`
 }
 
 type nodeFSJournalStore struct {
@@ -338,6 +346,8 @@ func (s *nodeFSJournalStore) AllocatePortal(portal nodeFSPortalState) (nodeFSPor
 		state.NextSlotByShard[shard] = slot + 1
 		portal.Shard = shard
 		portal.Slot = slot
+		portal.BindingGeneration = 1
+		portal.PendingBindingGeneration = 0
 		portal.Phase = nodeFSPortalAllocating
 		if strings.TrimSpace(portal.Backend) == "" {
 			portal.Backend = "rootfs"
@@ -372,8 +382,12 @@ func nodeFSShardForPortal(portalKey string, shardCount int) int {
 
 func (s *nodeFSJournalStore) MarkPortalPublished(portalKey string) error {
 	return s.updatePortal(portalKey, func(portal *nodeFSPortalState) error {
-		if portal.Phase == nodeFSPortalUnpublishing {
-			return fmt.Errorf("portal %q is unpublishing", portalKey)
+		switch portal.Phase {
+		case nodeFSPortalAllocating, nodeFSPortalPublished:
+		case nodeFSPortalUnbinding, nodeFSPortalUnpublishing:
+			return fmt.Errorf("portal %q is %s", portalKey, portal.Phase)
+		default:
+			return fmt.Errorf("portal %q has invalid phase %q", portalKey, portal.Phase)
 		}
 		portal.Phase = nodeFSPortalPublished
 		return nil
@@ -382,25 +396,86 @@ func (s *nodeFSJournalStore) MarkPortalPublished(portalKey string) error {
 
 // UpdatePortalBinding commits desired backend state before the in-memory
 // router changes session, allowing recovery to finish an interrupted bind.
-func (s *nodeFSJournalStore) UpdatePortalBinding(portalKey, backend, volumeID, teamID string, mountedAt time.Time) error {
+func (s *nodeFSJournalStore) UpdatePortalBinding(portalKey, backend, volumeID, teamID string, mountedAt time.Time) (nodeFSPortalState, error) {
 	backend = strings.TrimSpace(backend)
 	if backend == "" {
-		return fmt.Errorf("portal backend is required")
+		return nodeFSPortalState{}, fmt.Errorf("portal backend is required")
 	}
-	return s.updatePortal(portalKey, func(portal *nodeFSPortalState) error {
+	var updated nodeFSPortalState
+	err := s.updatePortal(portalKey, func(portal *nodeFSPortalState) error {
 		if portal.Phase != nodeFSPortalPublished {
 			return fmt.Errorf("portal %q is not published", portalKey)
 		}
+		if normalizeNodeFSBackend(portal.Backend) == normalizeNodeFSBackend(backend) &&
+			strings.TrimSpace(portal.VolumeID) == strings.TrimSpace(volumeID) &&
+			strings.TrimSpace(portal.TeamID) == strings.TrimSpace(teamID) {
+			updated = *portal
+			return nil
+		}
+		if portal.BindingGeneration >= nodefs.MaxBindingGeneration {
+			return fmt.Errorf("portal %q exhausted binding generations", portalKey)
+		}
+		portal.BindingGeneration++
+		portal.PendingBindingGeneration = 0
 		portal.Backend = backend
 		portal.VolumeID = strings.TrimSpace(volumeID)
 		portal.TeamID = strings.TrimSpace(teamID)
 		portal.MountedAt = mountedAt.UTC()
+		updated = *portal
 		return nil
 	})
+	return updated, err
+}
+
+// BeginPortalUnbind records a recoverable transition while retaining the
+// source backend identity. Recovery must reopen and finalize that backend
+// before CompletePortalUnbind can expose rootfs as committed state.
+func (s *nodeFSJournalStore) BeginPortalUnbind(portalKey string) (nodeFSPortalState, error) {
+	var updated nodeFSPortalState
+	err := s.updatePortal(portalKey, func(portal *nodeFSPortalState) error {
+		if portal.Phase == nodeFSPortalUnbinding {
+			updated = *portal
+			return nil
+		}
+		if portal.Phase != nodeFSPortalPublished {
+			return fmt.Errorf("portal %q is not published", portalKey)
+		}
+		if normalizeNodeFSBackend(portal.Backend) == nodeFSRootBackend || strings.TrimSpace(portal.VolumeID) == "" {
+			return fmt.Errorf("portal %q is not bound", portalKey)
+		}
+		if portal.BindingGeneration >= nodefs.MaxBindingGeneration {
+			return fmt.Errorf("portal %q exhausted binding generations", portalKey)
+		}
+		portal.PendingBindingGeneration = portal.BindingGeneration + 1
+		portal.Phase = nodeFSPortalUnbinding
+		updated = *portal
+		return nil
+	})
+	return updated, err
+}
+
+func (s *nodeFSJournalStore) CompletePortalUnbind(portalKey string) (nodeFSPortalState, error) {
+	var updated nodeFSPortalState
+	err := s.updatePortal(portalKey, func(portal *nodeFSPortalState) error {
+		if portal.Phase != nodeFSPortalUnbinding {
+			return fmt.Errorf("portal %q is not unbinding", portalKey)
+		}
+		portal.BindingGeneration = portal.PendingBindingGeneration
+		portal.PendingBindingGeneration = 0
+		portal.Backend = nodeFSRootBackend
+		portal.VolumeID = ""
+		portal.TeamID = ""
+		portal.MountedAt = time.Time{}
+		portal.Phase = nodeFSPortalPublished
+		updated = *portal
+		return nil
+	})
+	return updated, err
 }
 
 func (s *nodeFSJournalStore) BeginPortalUnpublish(portalKey string) error {
 	return s.updatePortal(portalKey, func(portal *nodeFSPortalState) error {
+		portal.PendingBindingGeneration = 0
 		portal.Phase = nodeFSPortalUnpublishing
 		return nil
 	})
@@ -529,6 +604,17 @@ func validateNodeFSJournal(state nodeFSJournal) error {
 		if portal.Shard < 0 || portal.Shard >= state.ShardCount || portal.Slot == 0 {
 			return fmt.Errorf("portal %q has invalid shard/slot %d/%d", portal.PortalKey, portal.Shard, portal.Slot)
 		}
+		if portal.BindingGeneration == 0 || portal.BindingGeneration > nodefs.MaxBindingGeneration {
+			return fmt.Errorf("portal %q has invalid binding generation %d", portal.PortalKey, portal.BindingGeneration)
+		}
+		backend := normalizeNodeFSBackend(portal.Backend)
+		if backend == nodeFSRootBackend {
+			if strings.TrimSpace(portal.VolumeID) != "" || strings.TrimSpace(portal.TeamID) != "" {
+				return fmt.Errorf("portal %q rootfs binding has volume identity", portal.PortalKey)
+			}
+		} else if strings.TrimSpace(portal.VolumeID) == "" || strings.TrimSpace(portal.TeamID) == "" {
+			return fmt.Errorf("portal %q backend %s is missing volume identity", portal.PortalKey, backend)
+		}
 		slotKey := fmt.Sprintf("%d/%d", portal.Shard, portal.Slot)
 		if owner, exists := slots[slotKey]; exists {
 			return fmt.Errorf("slot %s is shared by %q and %q", slotKey, owner, portal.PortalKey)
@@ -536,7 +622,21 @@ func validateNodeFSJournal(state nodeFSJournal) error {
 		slots[slotKey] = portal.PortalKey
 		maxSlotByShard[portal.Shard] = max(maxSlotByShard[portal.Shard], portal.Slot)
 		switch portal.Phase {
-		case nodeFSPortalAllocating, nodeFSPortalPublished, nodeFSPortalUnpublishing:
+		case nodeFSPortalAllocating, nodeFSPortalPublished:
+			if portal.PendingBindingGeneration != 0 {
+				return fmt.Errorf("portal %q has unexpected pending binding generation", portal.PortalKey)
+			}
+		case nodeFSPortalUnbinding:
+			if normalizeNodeFSBackend(portal.Backend) == nodeFSRootBackend || strings.TrimSpace(portal.VolumeID) == "" || strings.TrimSpace(portal.TeamID) == "" {
+				return fmt.Errorf("portal %q unbind is missing source backend identity", portal.PortalKey)
+			}
+			if portal.PendingBindingGeneration != portal.BindingGeneration+1 || portal.PendingBindingGeneration > nodefs.MaxBindingGeneration {
+				return fmt.Errorf("portal %q has invalid pending binding generation %d", portal.PortalKey, portal.PendingBindingGeneration)
+			}
+		case nodeFSPortalUnpublishing:
+			if portal.PendingBindingGeneration != 0 {
+				return fmt.Errorf("portal %q has unexpected pending binding generation", portal.PortalKey)
+			}
 		default:
 			return fmt.Errorf("portal %q has invalid phase %q", portal.PortalKey, portal.Phase)
 		}

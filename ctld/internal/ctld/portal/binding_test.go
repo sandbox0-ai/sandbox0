@@ -97,11 +97,12 @@ func TestNodeFSRebindRestoresSessionAfterCleanupFailure(t *testing.T) {
 	mgr, pm, bound := cleanupFailedS0FSBinding(t)
 	mux := nodefs.NewSessionMux()
 	if err := mux.RegisterPortal(nodefs.PortalSpec{
-		Name:      "p00001",
-		Slot:      1,
-		VolumeID:  portalKey(pm.podUID, pm.name),
-		RootInode: 1,
-		Session:   unboundSession{},
+		Name:       "p00001",
+		Slot:       1,
+		Generation: 1,
+		VolumeID:   portalKey(pm.podUID, pm.name),
+		RootInode:  1,
+		Session:    unboundSession{},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +114,7 @@ func TestNodeFSRebindRestoresSessionAfterCleanupFailure(t *testing.T) {
 	if reserved != bound || created || bound.session == nil {
 		t.Fatalf("reservation = (%p, %v), session=%T", reserved, created, bound.session)
 	}
-	if _, err := mux.UpdatePortalSession("p00001", bound.volumeID, bound.session); err != nil {
+	if _, err := mux.UpdatePortalSession("p00001", bound.volumeID, 2, bound.session); err != nil {
 		t.Fatalf("UpdatePortalSession() error = %v", err)
 	}
 	root, err := nodefs.EncodeNodeID(1, s0fs.RootInode)
@@ -227,7 +228,7 @@ func cleanupFailedS0FSBinding(t *testing.T) (*Manager, *portalMount, *boundVolum
 	if err := mgr.finishBoundVolumeCleanup(context.Background(), cleanup); err == nil {
 		t.Fatal("finishBoundVolumeCleanup() error = nil, want materialize conflict")
 	}
-	if bound.closing || bound.refCount != 0 || bound.session != nil {
+	if bound.closing || bound.refCount != 0 || bound.session == nil || bound.materializeCancel == nil || bound.materializeDone == nil {
 		t.Fatalf("bound after failed cleanup = %+v", bound)
 	}
 	return mgr, pm, bound

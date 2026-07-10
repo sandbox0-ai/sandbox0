@@ -48,6 +48,7 @@ func (m *Manager) reserveBoundVolume(
 ) (*boundVolume, bool, error) {
 	m.mu.Lock()
 	if bound := m.boundVolumes[req.SandboxVolumeID]; bound != nil {
+		ownerOnly := bound.refCount == 0
 		conflictPath := boundMountPath(m.portals, req.SandboxVolumeID, exceptPortalKey)
 		if err := validateBoundVolumeReservation(bound, req, accessMode, conflictPath); err != nil {
 			m.mu.Unlock()
@@ -58,6 +59,9 @@ func (m *Manager) reserveBoundVolume(
 			return nil, false, err
 		}
 		bound.refCount++
+		if ownerOnly && bound.materializeCancel == nil && bound.materializeDone == nil {
+			m.startMaterializer(bound)
+		}
 		m.mu.Unlock()
 		return bound, false, nil
 	}
@@ -75,6 +79,7 @@ func (m *Manager) reserveBoundVolume(
 	}
 	m.mu.Lock()
 	if bound := m.boundVolumes[req.SandboxVolumeID]; bound != nil {
+		ownerOnly := bound.refCount == 0
 		conflictPath := boundMountPath(m.portals, req.SandboxVolumeID, exceptPortalKey)
 		if err := validateBoundVolumeReservation(bound, req, accessMode, conflictPath); err != nil {
 			m.mu.Unlock()
@@ -87,6 +92,9 @@ func (m *Manager) reserveBoundVolume(
 			return nil, false, err
 		}
 		bound.refCount++
+		if ownerOnly && bound.materializeCancel == nil && bound.materializeDone == nil {
+			m.startMaterializer(bound)
+		}
 		m.mu.Unlock()
 		cleanupNewBound()
 		return bound, false, nil

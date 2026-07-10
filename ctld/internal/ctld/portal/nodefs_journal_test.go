@@ -26,18 +26,19 @@ func TestNodeFSJournalRoundTrip(t *testing.T) {
 	err = store.Update(func(state *nodeFSJournal) error {
 		state.NextSlotByShard[1] = 8
 		state.Portals = append(state.Portals, nodeFSPortalState{
-			PortalKey:     portalKey("pod-1", "workspace"),
-			PodUID:        "pod-1",
-			Namespace:     "tpl-default",
-			PodName:       "sandbox-a",
-			Name:          "workspace",
-			MountPath:     "/workspace",
-			TargetPath:    "/var/lib/kubelet/pods/pod-1/volumes/kubernetes.io~csi/sandbox0-volume-1-workspace/mount",
-			Shard:         1,
-			Slot:          7,
-			RootFSBacking: "/var/lib/sandbox0/ctld/rootfs-portals/pod-1/workspace",
-			Backend:       "rootfs",
-			Phase:         nodeFSPortalPublished,
+			PortalKey:         portalKey("pod-1", "workspace"),
+			PodUID:            "pod-1",
+			Namespace:         "tpl-default",
+			PodName:           "sandbox-a",
+			Name:              "workspace",
+			MountPath:         "/workspace",
+			TargetPath:        "/var/lib/kubelet/pods/pod-1/volumes/kubernetes.io~csi/sandbox0-volume-1-workspace/mount",
+			Shard:             1,
+			Slot:              7,
+			BindingGeneration: 1,
+			RootFSBacking:     "/var/lib/sandbox0/ctld/rootfs-portals/pod-1/workspace",
+			Backend:           "rootfs",
+			Phase:             nodeFSPortalPublished,
 		})
 		return nil
 	})
@@ -240,7 +241,7 @@ func TestNodeFSJournalPortalLifecycleNeverReusesSlot(t *testing.T) {
 		t.Fatalf("MarkPortalPublished() error = %v", err)
 	}
 	mountedAt := time.Now().UTC().Truncate(time.Nanosecond)
-	if err := store.UpdatePortalBinding(first.PortalKey, "s0fs", "vol-a", "team-a", mountedAt); err != nil {
+	if _, err := store.UpdatePortalBinding(first.PortalKey, "s0fs", "vol-a", "team-a", mountedAt); err != nil {
 		t.Fatalf("UpdatePortalBinding() error = %v", err)
 	}
 	bound, ok := store.Portal(first.PortalKey)
@@ -264,6 +265,63 @@ func TestNodeFSJournalPortalLifecycleNeverReusesSlot(t *testing.T) {
 	}
 	if second.Slot != 2 {
 		t.Fatalf("second slot = %d, want 2", second.Slot)
+	}
+}
+
+func TestNodeFSJournalUnbindRetainsSourceUntilCompletion(t *testing.T) {
+	store := openInitializedNodeFSJournal(t)
+	portal, err := store.AllocatePortal(nodeFSPortalState{
+		PortalKey:  portalKey("pod-a", "workspace"),
+		PodUID:     "pod-a",
+		Name:       "workspace",
+		TargetPath: "/kubelet/pod-a/workspace",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if portal.BindingGeneration != 1 {
+		t.Fatalf("initial binding generation = %d, want 1", portal.BindingGeneration)
+	}
+	if err := store.MarkPortalPublished(portal.PortalKey); err != nil {
+		t.Fatal(err)
+	}
+	mountedAt := time.Now().UTC()
+	bound, err := store.UpdatePortalBinding(portal.PortalKey, "s0fs", "vol-a", "team-a", mountedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound.BindingGeneration != 2 {
+		t.Fatalf("bound generation = %d, want 2", bound.BindingGeneration)
+	}
+	idempotent, err := store.UpdatePortalBinding(portal.PortalKey, "s0fs", "vol-a", "team-a", mountedAt.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idempotent.BindingGeneration != 2 || !idempotent.MountedAt.Equal(mountedAt) {
+		t.Fatalf("idempotent binding = %+v", idempotent)
+	}
+
+	pending, err := store.BeginPortalUnbind(portal.PortalKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Phase != nodeFSPortalUnbinding || pending.BindingGeneration != 2 || pending.PendingBindingGeneration != 3 || pending.VolumeID != "vol-a" || pending.TeamID != "team-a" {
+		t.Fatalf("pending unbind = %+v", pending)
+	}
+	if err := store.MarkPortalPublished(portal.PortalKey); err == nil {
+		t.Fatal("MarkPortalPublished() completed a pending unbind")
+	}
+	resumed, err := store.BeginPortalUnbind(portal.PortalKey)
+	if err != nil || resumed.PendingBindingGeneration != pending.PendingBindingGeneration {
+		t.Fatalf("BeginPortalUnbind(resume) = %+v, %v", resumed, err)
+	}
+
+	completed, err := store.CompletePortalUnbind(portal.PortalKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Phase != nodeFSPortalPublished || completed.BindingGeneration != 3 || completed.PendingBindingGeneration != 0 || normalizeNodeFSBackend(completed.Backend) != nodeFSRootBackend || completed.VolumeID != "" || completed.TeamID != "" {
+		t.Fatalf("completed unbind = %+v", completed)
 	}
 }
 

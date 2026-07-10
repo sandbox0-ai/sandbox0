@@ -185,7 +185,7 @@ func (s *rootFSBackedSession) registerPathLocked(rel string, info os.FileInfo) (
 		return 0, err
 	}
 	inode := identity.Inode
-	if inode <= s0fs.RootInode || inode > nodefs.MaxLocalID {
+	if inode <= s0fs.RootInode || inode > nodefs.MaxBackendLocalID {
 		return 0, fmt.Errorf("rootfs host inode %d for %q is outside nodefs local id range", inode, rel)
 	}
 	if existing, ok := s.identityByInode[inode]; ok && existing != identity {
@@ -227,7 +227,7 @@ func (s *rootFSBackedSession) loadOrphansLocked(state *rootFSPersistedState) err
 	}
 	s.orphans = state.Orphans
 	for inode, orphan := range s.orphans {
-		if inode <= s0fs.RootInode || inode > nodefs.MaxLocalID || orphan.Inode != inode {
+		if inode <= s0fs.RootInode || inode > nodefs.MaxBackendLocalID || orphan.Inode != inode {
 			return fmt.Errorf("invalid rootfs orphan inode %d", inode)
 		}
 	}

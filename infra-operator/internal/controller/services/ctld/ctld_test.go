@@ -172,6 +172,22 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 	return ds, client
 }
 
+func TestCtldArgsEnableRecoverableNodeFS(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Services: &infrav1alpha1.ServicesConfig{
+				Ctld: &infrav1alpha1.CtldServiceConfig{
+					NodeFSShardCount:    8,
+					RequireFUSERecovery: true,
+				},
+			},
+		},
+	}
+	args := ctldArgs(infra, "")
+	assertContainsArg(t, args, "-nodefs-shards=8")
+	assertContainsArg(t, args, "-nodefs-require-recovery=true")
+}
+
 func assertCtldProbe(t *testing.T, name string, probe *corev1.Probe, path string, periodSeconds int32) {
 	t.Helper()
 

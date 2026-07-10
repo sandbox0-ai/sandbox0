@@ -343,6 +343,12 @@ func ctldArgs(infra *infrav1alpha1.Sandbox0Infra, containerdHostDataRoot string)
 	}
 	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.Ctld != nil {
 		cfg := infra.Spec.Services.Ctld
+		if cfg.NodeFSShardCount > 0 {
+			args = append(args, fmt.Sprintf("-nodefs-shards=%d", cfg.NodeFSShardCount))
+		}
+		if cfg.RequireFUSERecovery {
+			args = append(args, "-nodefs-require-recovery=true")
+		}
 		if value := strings.TrimSpace(cfg.RootFSObjectCacheMaxBytes); value != "" {
 			args = append(args, "-rootfs-object-cache-max-bytes="+value)
 		}

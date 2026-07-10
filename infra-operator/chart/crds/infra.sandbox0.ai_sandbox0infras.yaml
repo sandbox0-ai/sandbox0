@@ -3106,6 +3106,23 @@ spec:
                           sandbox worker data disk.
                         pattern: ^/.*
                         type: string
+                      nodeFSShardCount:
+                        default: 0
+                        description: |-
+                          NodeFSShardCount enables the fixed node-wide FUSE shard architecture.
+                          Zero keeps the legacy one-connection-per-portal mode. Once enabled on a
+                          node, drain that node before changing the shard count.
+                        format: int32
+                        maximum: 64
+                        minimum: 0
+                        type: integer
+                      requireFUSERecovery:
+                        default: false
+                        description: |-
+                          RequireFUSERecovery requires kernel-supported FUSE connection recovery
+                          before ctld publishes portals. Enable this in production together with
+                          NodeFSShardCount after the recovery-capable node image is installed.
+                        type: boolean
                       rootfsObjectCacheMaxAge:
                         description: |-
                           RootFSObjectCacheMaxAge evicts cache entries older than this age. Zero

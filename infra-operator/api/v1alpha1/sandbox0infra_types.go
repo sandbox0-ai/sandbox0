@@ -1376,6 +1376,22 @@ type CtldServiceConfig struct {
 	// +kubebuilder:validation:Pattern=`^/.*`
 	ContainerdHostDataRoot string `json:"containerdHostDataRoot,omitempty"`
 
+	// NodeFSShardCount enables the fixed node-wide FUSE shard architecture.
+	// Zero keeps the legacy one-connection-per-portal mode. Once enabled on a
+	// node, drain that node before changing the shard count.
+	// +kubebuilder:default=0
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=64
+	// +optional
+	NodeFSShardCount int32 `json:"nodeFSShardCount,omitempty"`
+
+	// RequireFUSERecovery requires kernel-supported FUSE connection recovery
+	// before ctld publishes portals. Enable this in production together with
+	// NodeFSShardCount after the recovery-capable node image is installed.
+	// +kubebuilder:default=false
+	// +optional
+	RequireFUSERecovery bool `json:"requireFUSERecovery,omitempty"`
+
 	// RootFSObjectCacheMaxBytes caps the ctld node-local rootfs object cache.
 	// Set 0 to disable the cache.
 	// +kubebuilder:default="20Gi"

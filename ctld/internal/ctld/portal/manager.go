@@ -56,6 +56,11 @@ type Manager struct {
 	staleMountChecker      staleMountChecker
 	activePodUIDLister     ActivePodUIDLister
 	materializerLimiter    chan struct{}
+	nodeFSShardCount       int
+	nodeFSRequireRecovery  bool
+	nodeFSFactory          nodeFSConnectionFactory
+	nodeFSMounter          nodeFSMounter
+	nodeFS                 *nodeFSRuntime
 
 	mu              sync.Mutex
 	portals         map[string]*portalMount
@@ -80,6 +85,11 @@ type portalMount struct {
 	volumeID  string
 	teamID    string
 	mountedAt time.Time
+
+	nodeFSShard      int
+	nodeFSSlot       uint64
+	nodeFSRouteName  string
+	nodeFSSourcePath string
 }
 
 type boundVolume struct {
@@ -119,6 +129,8 @@ type Config struct {
 	StaleMountChecker       staleMountChecker
 	ActivePodUIDLister      ActivePodUIDLister
 	MaterializerConcurrency int
+	NodeFSShardCount        int
+	NodeFSRequireRecovery   bool
 }
 
 func NewManager(cfg Config) *Manager {
@@ -181,6 +193,10 @@ func NewManager(cfg Config) *Manager {
 		staleMountChecker:      staleChecker,
 		activePodUIDLister:     cfg.ActivePodUIDLister,
 		materializerLimiter:    make(chan struct{}, materializerConcurrency),
+		nodeFSShardCount:       cfg.NodeFSShardCount,
+		nodeFSRequireRecovery:  cfg.NodeFSRequireRecovery,
+		nodeFSFactory:          systemNodeFSConnectionFactory{},
+		nodeFSMounter:          systemNodeFSMounter{kubeletPodsRoot: kubeletPodsRoot},
 		portals:                make(map[string]*portalMount),
 		portalsByTarget:        make(map[string]*portalMount),
 		boundVolumes:           make(map[string]*boundVolume),
@@ -236,6 +252,9 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if m.nodeFSShardCount > 0 {
+		return m.shutdownNodeFS(ctx)
+	}
 	m.mu.Lock()
 	targets := make([]string, 0, len(m.portalsByTarget))
 	for target := range m.portalsByTarget {
@@ -279,6 +298,9 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 func (m *Manager) PublishPortal(ctx context.Context, req publishRequest) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if m != nil && m.nodeFSShardCount > 0 {
+		return m.publishNodeFSPortal(ctx, req)
 	}
 	if req.TargetPath == "" {
 		return fmt.Errorf("target path is required")
@@ -372,6 +394,9 @@ func (m *Manager) unpublishPortalContext(ctx context.Context, targetPath string,
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if m != nil && m.nodeFSShardCount > 0 {
+		return m.unpublishNodeFSPortal(ctx, targetPath)
+	}
 	m.mu.Lock()
 	pm := m.portalsByTarget[targetPath]
 	var cleanup *boundVolumeCleanup
@@ -448,6 +473,9 @@ func (m *Manager) RootFSPortalPaths(podUID string) []ctldapi.RootFSPortalPath {
 func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return ctldapi.BindVolumePortalResponse{}, err
+	}
+	if m != nil && m.nodeFSShardCount > 0 {
+		return m.bindNodeFSPortal(ctx, req)
 	}
 	portalName := volumeportal.NormalizePortalName(req.PortalName, req.MountPath)
 	if portalName == "" {
@@ -715,6 +743,9 @@ func (m *Manager) openS3BoundVolume(req ctldapi.BindVolumePortalRequest, volumeR
 func (m *Manager) Unbind(ctx context.Context, req ctldapi.UnbindVolumePortalRequest) (ctldapi.UnbindVolumePortalResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return ctldapi.UnbindVolumePortalResponse{}, err
+	}
+	if m != nil && m.nodeFSShardCount > 0 {
+		return m.unbindNodeFSPortal(ctx, req)
 	}
 	portalName := volumeportal.NormalizePortalName(req.PortalName, req.MountPath)
 	if req.PodUID == "" || portalName == "" {

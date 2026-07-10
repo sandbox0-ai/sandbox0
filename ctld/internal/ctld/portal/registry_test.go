@@ -46,6 +46,35 @@ func TestFindBoundPortalForVolumeReturnsOtherPortal(t *testing.T) {
 	}
 }
 
+func TestOwnerPodIDUsesStableNodeIdentityForNodeFS(t *testing.T) {
+	mgr := &Manager{
+		nodeName:         "worker-a",
+		nodeFSShardCount: 4,
+		podNamespace:     "sandbox0-system",
+		podName:          "ctld-random-suffix",
+	}
+	if got, want := mgr.ownerPodID(), "ctld-node/worker-a"; got != want {
+		t.Fatalf("ownerPodID() = %q, want %q", got, want)
+	}
+}
+
+func TestIsSupersededNodeFSOwnerMatchesOnlySameNode(t *testing.T) {
+	mgr := &Manager{nodeName: "worker-a", nodeFSShardCount: 1, clusterID: "cluster-a"}
+	sameNode := &db.VolumeMount{
+		ClusterID:    "cluster-a",
+		PodID:        "sandbox0-system/ctld-old",
+		MountOptions: mustRegistryMountOptions(t, volume.MountOptions{OwnerKind: volume.OwnerKindCtld, NodeName: "worker-a"}),
+	}
+	if !mgr.isSupersededNodeFSOwner(sameNode, "ctld-node/worker-a") {
+		t.Fatal("same-node legacy ctld owner was not recognized as superseded")
+	}
+	otherNode := *sameNode
+	otherNode.MountOptions = mustRegistryMountOptions(t, volume.MountOptions{OwnerKind: volume.OwnerKindCtld, NodeName: "worker-b"})
+	if mgr.isSupersededNodeFSOwner(&otherNode, "ctld-node/worker-a") {
+		t.Fatal("other-node ctld owner was recognized as superseded")
+	}
+}
+
 func TestFindBoundPortalForVolumeIgnoresExcludedPortal(t *testing.T) {
 	portals := map[string]*portalMount{
 		"portal-a": {mountPath: "/workspace/a", volumeID: "vol-1"},

@@ -17,6 +17,8 @@ func (m *Manager) ownerPodID() string {
 	switch {
 	case m == nil:
 		return ""
+	case m.nodeFSShardCount > 0 && m.nodeName != "":
+		return "ctld-node/" + m.nodeName
 	case m.podNamespace != "" && m.podName != "":
 		return m.podNamespace + "/" + m.podName
 	case m.podName != "":
@@ -55,12 +57,23 @@ func (m *Manager) validateBindableVolume(ctx context.Context, req ctldBindContex
 	}
 	selfPodID := m.ownerPodID()
 	for _, mount := range mounts {
+		if m.isSupersededNodeFSOwner(mount, selfPodID) {
+			continue
+		}
 		if !isConflictingMountForCtldBind(mount, m.clusterID, selfPodID) {
 			continue
 		}
 		return nil, fmt.Errorf("volume %s already has an active owner on %s/%s", req.volumeID, mount.ClusterID, mount.PodID)
 	}
 	return vol, nil
+}
+
+func (m *Manager) isSupersededNodeFSOwner(mount *db.VolumeMount, currentOwner string) bool {
+	if m == nil || m.nodeFSShardCount <= 0 || mount == nil || mount.ClusterID != m.clusterID || mount.PodID == currentOwner {
+		return false
+	}
+	opts := volume.DecodeMountOptions(mount.MountOptions)
+	return opts.OwnerKind == volume.OwnerKindCtld && strings.TrimSpace(opts.NodeName) == m.nodeName
 }
 
 func validateBindableAccessMode(raw string) (volume.AccessMode, error) {
@@ -140,6 +153,9 @@ func (m *Manager) registerOwner(ctx context.Context, bound *boundVolume) error {
 	if m.storage != nil && m.storage.HeartbeatTimeout > 0 {
 		heartbeatTimeout = m.storage.HeartbeatTimeout
 	}
+	if err := m.removeSupersededNodeFSOwner(ctx, bound.volumeID, heartbeatTimeout); err != nil {
+		return err
+	}
 	if err := m.repo.AcquireMount(ctx, mount, heartbeatTimeout); err != nil {
 		return err
 	}
@@ -167,6 +183,30 @@ func (m *Manager) registerOwner(ctx context.Context, bound *boundVolume) error {
 			}
 		}
 	}(bound.volumeID)
+	return nil
+}
+
+func (m *Manager) removeSupersededNodeFSOwner(ctx context.Context, volumeID string, heartbeatTimeout int) error {
+	if m == nil || m.nodeFSShardCount <= 0 || m.repo == nil || strings.TrimSpace(m.nodeName) == "" {
+		return nil
+	}
+	mounts, err := m.repo.GetActiveMounts(ctx, volumeID, heartbeatTimeout)
+	if err != nil {
+		return err
+	}
+	currentOwner := m.ownerPodID()
+	for _, mount := range mounts {
+		if mount == nil || mount.ClusterID != m.clusterID || mount.PodID == currentOwner {
+			continue
+		}
+		opts := volume.DecodeMountOptions(mount.MountOptions)
+		if opts.OwnerKind != volume.OwnerKindCtld || strings.TrimSpace(opts.NodeName) != m.nodeName {
+			continue
+		}
+		if err := m.repo.DeleteMount(ctx, volumeID, mount.ClusterID, mount.PodID); err != nil {
+			return fmt.Errorf("remove superseded ctld owner %s: %w", mount.PodID, err)
+		}
+	}
 	return nil
 }
 

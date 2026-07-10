@@ -9,22 +9,32 @@ import (
 	"syscall"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal/nodefs"
 	"golang.org/x/sys/unix"
 )
 
-const nodeFSRequiredKernelCapabilities = fuse.CAP_HAS_RESEND | fuseCapabilityRecovery
+const (
+	fuseCapabilityInvalidateCacheInFailover = uint64(1) << 60
+	nodeFSRequiredKernelCapabilities        = fuse.CAP_HAS_RESEND | fuseCapabilityRecovery | fuseCapabilityInvalidateCacheInFailover | fuse.CAP_HAS_CACHE_DOMAINS
+)
+
+type nodeFSCacheDomain struct {
+	rootNodeID uint64
+	generation uint64
+}
 
 type nodeFUSEServer interface {
 	Serve()
 	WaitMount() error
 	Detach() error
+	InvalidateCacheDomain(rootNodeID, nodeIDMask, generation uint64) error
 	ConnectionState() fuse.ConnectionState
 }
 
 type nodeFSConnectionFactory interface {
 	New(fuse.RawFileSystem, string, *fuse.MountOptions) (nodeFUSEServer, error)
 	Resume(fuse.RawFileSystem, string, int, fuse.ConnectionState, *fuse.MountOptions) (nodeFUSEServer, error)
-	Recover(string) (int, uint64, error)
+	Recover(string) (int, uint64, uint64, error)
 	CleanMount(string) error
 }
 
@@ -38,7 +48,7 @@ func (systemNodeFSConnectionFactory) Resume(fs fuse.RawFileSystem, mountPath str
 	return fuse.ResumeServerFromFD(fs, mountPath, fd, state, opts)
 }
 
-func (systemNodeFSConnectionFactory) Recover(tag string) (int, uint64, error) {
+func (systemNodeFSConnectionFactory) Recover(tag string) (int, uint64, uint64, error) {
 	return recoverFUSEConnection(tag)
 }
 
@@ -51,8 +61,9 @@ func (systemNodeFSConnectionFactory) CleanMount(mountPath string) error {
 }
 
 type nodeFSConnection struct {
-	server nodeFUSEServer
-	done   chan struct{}
+	server          nodeFUSEServer
+	recoveryResends uint64
+	done            chan struct{}
 }
 
 func (c *nodeFSConnection) serve() error {
@@ -66,6 +77,17 @@ func (c *nodeFSConnection) serve() error {
 	}()
 	if err := c.server.WaitMount(); err != nil {
 		return fmt.Errorf("wait for nodefs shard mount: %w", err)
+	}
+	return nil
+}
+
+func (c *nodeFSConnection) invalidateCacheDomain(rootNodeID, nodeIDMask, generation uint64) error {
+	if c == nil || c.server == nil {
+		return fmt.Errorf("nodefs FUSE server is not initialized")
+	}
+	if err := c.server.InvalidateCacheDomain(rootNodeID, nodeIDMask, generation); err != nil {
+		return fmt.Errorf("invalidate nodefs kernel cache domain %#x/%#x generation %d: %w",
+			rootNodeID, nodeIDMask, generation, err)
 	}
 	return nil
 }
@@ -93,6 +115,7 @@ func startNodeFSConnection(
 	journalState nodeFSJournal,
 	shard nodeFSShardState,
 	portalCount int,
+	domains []nodeFSCacheDomain,
 	fs fuse.RawFileSystem,
 	factory nodeFSConnectionFactory,
 ) (*nodeFSConnection, bool, error) {
@@ -107,6 +130,20 @@ func startNodeFSConnection(
 	if len(shard.SessionState) > 0 && journalState.RecoveryRequired {
 		connection, err := resumeNodeFSConnection(shard, fs, opts, factory)
 		if err == nil {
+			if connection.recoveryResends > 0 {
+				drainer, ok := fs.(interface{ BeginRecoveryDrain(uint64) error })
+				if !ok {
+					return nil, false, fmt.Errorf("nodefs shard %d filesystem cannot drain recovered requests", shard.Index)
+				}
+				if err := drainer.BeginRecoveryDrain(connection.recoveryResends); err != nil {
+					return nil, false, fmt.Errorf("initialize nodefs shard %d recovery drain: %w", shard.Index, err)
+				}
+			}
+			for _, domain := range domains {
+				if err := connection.invalidateCacheDomain(domain.rootNodeID, nodefs.PortalNodeIDMask, domain.generation); err != nil {
+					return nil, false, err
+				}
+			}
 			if err := connection.serve(); err != nil {
 				return nil, false, err
 			}
@@ -143,7 +180,7 @@ func startNodeFSConnection(
 	if journalState.RecoveryRequired && state.InitResponse.Flags64()&nodeFSRequiredKernelCapabilities != nodeFSRequiredKernelCapabilities {
 		cleanupErr := detachUnstartedNodeFSConnection(server, shard.MountPath, factory)
 		return nil, false, errors.Join(
-			fmt.Errorf("nodefs shard %d kernel did not negotiate FUSE recovery and resend", shard.Index),
+			fmt.Errorf("nodefs shard %d kernel did not negotiate FUSE recovery, resend, and cache-domain support", shard.Index),
 			cleanupErr,
 		)
 	}
@@ -178,7 +215,7 @@ func resumeNodeFSConnection(shard nodeFSShardState, fs fuse.RawFileSystem, opts 
 	if state.InitResponse.Flags64()&nodeFSRequiredKernelCapabilities != nodeFSRequiredKernelCapabilities {
 		return nil, fmt.Errorf("nodefs shard %d saved connection lacks recovery capabilities", shard.Index)
 	}
-	fd, _, err := factory.Recover(shard.Tag)
+	fd, _, recoveryResends, err := factory.Recover(shard.Tag)
 	if err != nil {
 		return nil, err
 	}
@@ -186,5 +223,5 @@ func resumeNodeFSConnection(shard nodeFSShardState, fs fuse.RawFileSystem, opts 
 	if err != nil {
 		return nil, fmt.Errorf("resume nodefs shard %d server: %w", shard.Index, err)
 	}
-	return &nodeFSConnection{server: server}, nil
+	return &nodeFSConnection{server: server, recoveryResends: recoveryResends}, nil
 }

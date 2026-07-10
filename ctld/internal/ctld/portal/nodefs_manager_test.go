@@ -113,6 +113,7 @@ func TestNodeFSInitializeRejectsInvalidConfiguration(t *testing.T) {
 		{NodeFSShardCount: -1},
 		{NodeFSShardCount: 65},
 		{NodeFSRequireRecovery: true},
+		{NodeFSShardCount: 1},
 	} {
 		mgr := NewManager(cfg)
 		if err := mgr.Initialize(context.Background()); err == nil {
@@ -184,6 +185,32 @@ func TestNodeFSInitializeRecoversPublishedPortalBeforeReturning(t *testing.T) {
 	}
 	if len(secondMounter.binds) != 1 || secondMounter.binds[0][1] != pm.targetPath {
 		t.Fatalf("recovery binds = %v", secondMounter.binds)
+	}
+}
+
+func TestNodeFSInitializeDrainsRecoveredRepliesBeforeReconcile(t *testing.T) {
+	rootDir := t.TempDir()
+	firstFactory, _ := newNodeFSTestFactory(false)
+	first := newNodeFSTestManager(t, rootDir, &fakeNodeFSMounter{}, firstFactory)
+	if err := first.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	publishNodeFSTestPortal(t, first)
+	releaseNodeFSTestProcess(t, first)
+
+	mounter := &fakeNodeFSMounter{}
+	secondFactory, _ := newNodeFSTestFactory(true)
+	secondFactory.recoveryResends = 1
+	second := newNodeFSTestManager(t, rootDir, mounter, secondFactory)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := second.Initialize(ctx)
+	defer releaseNodeFSTestProcess(t, second)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Initialize() error = %v, want deadline while draining replies", err)
+	}
+	if len(mounter.binds) != 0 || second.nodeFS.ready.Load() {
+		t.Fatalf("reconciled before recovered replies: binds=%v ready=%v", mounter.binds, second.nodeFS.ready.Load())
 	}
 }
 
@@ -274,7 +301,7 @@ func TestNodeFSStaleCleanupReleasesBoundVolume(t *testing.T) {
 	pm.teamID = bound.teamID
 	pm.mountedAt = bound.mountedAt
 	mgr.mu.Unlock()
-	updated, err := mgr.nodeFS.journal.UpdatePortalBinding(state.PortalKey, volume.BackendS0FS, bound.volumeID, bound.teamID, bound.mountedAt)
+	updated, err := commitNodeFSTestBinding(mgr.nodeFS.journal, state.PortalKey, volume.BackendS0FS, bound.volumeID, bound.teamID, bound.mountedAt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -516,7 +543,7 @@ func TestNodeFSUnbindCommitsRootFSAndReleasesLastBackend(t *testing.T) {
 	pm.teamID = bound.teamID
 	pm.mountedAt = bound.mountedAt
 	mgr.mu.Unlock()
-	updated, err := mgr.nodeFS.journal.UpdatePortalBinding(state.PortalKey, volume.BackendS0FS, bound.volumeID, bound.teamID, bound.mountedAt)
+	updated, err := commitNodeFSTestBinding(mgr.nodeFS.journal, state.PortalKey, volume.BackendS0FS, bound.volumeID, bound.teamID, bound.mountedAt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -542,6 +569,56 @@ func TestNodeFSUnbindCommitsRootFSAndReleasesLastBackend(t *testing.T) {
 	}
 	if _, ok := mgr.boundVolumes[bound.volumeID]; ok {
 		t.Fatal("last bound volume remains after Unbind")
+	}
+}
+
+func TestNodeFSBindingRetiresAndReopensRootFSHandles(t *testing.T) {
+	rootDir := t.TempDir()
+	factory, _ := newNodeFSTestFactory(false)
+	mgr := newNodeFSTestManager(t, rootDir, &fakeNodeFSMounter{}, factory)
+	if err := mgr.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer releaseNodeFSTestProcess(t, mgr)
+	pm, state := publishNodeFSTestPortal(t, mgr)
+	rootfsSession, ok := pm.rootfsSession.(*rootFSBackedSession)
+	if !ok {
+		t.Fatalf("rootfs session type = %T", pm.rootfsSession)
+	}
+
+	bound := &boundVolume{
+		volumeID: "volume-a", teamID: "team-a", access: volume.AccessModeRWO,
+		mountedAt: time.Now().UTC(), refCount: 1,
+		volCtx:  &volume.VolumeContext{VolumeID: "volume-a", TeamID: "team-a"},
+		session: unboundSession{},
+	}
+	mgr.mu.Lock()
+	mgr.boundVolumes[bound.volumeID] = bound
+	mgr.volumes.add(bound.volCtx)
+	mgr.mu.Unlock()
+	pending, err := mgr.nodeFS.journal.BeginPortalBind(
+		state.PortalKey, volume.BackendS0FS, bound.volumeID, bound.teamID, bound.mountedAt,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.completeNodeFSBind(context.Background(), mgr.nodeFS, pending, pm); err != nil {
+		t.Fatal(err)
+	}
+	if !rootfsSession.closed || pm.rootfsSession != nil {
+		t.Fatalf("retired rootfs session closed=%v current=%T", rootfsSession.closed, pm.rootfsSession)
+	}
+
+	pending, err = mgr.nodeFS.journal.BeginPortalUnbind(state.PortalKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.completeNodeFSUnbind(context.Background(), mgr.nodeFS, pending, pm); err != nil {
+		t.Fatal(err)
+	}
+	reopened, ok := pm.rootfsSession.(*rootFSBackedSession)
+	if !ok || reopened == rootfsSession || reopened.closed {
+		t.Fatalf("reopened rootfs session = %#v", pm.rootfsSession)
 	}
 }
 
@@ -577,6 +654,56 @@ func TestNodeFSUnbindKeepsDurableSourceOnFinalizeFailure(t *testing.T) {
 	shard := &mgr.nodeFS.shards[pm.nodeFSShard]
 	if _, routeErr := shard.mux.GetAttr(context.Background(), &pb.GetAttrRequest{Inode: oldNode}); !errors.Is(routeErr, nodefs.ErrStaleBindingGeneration) {
 		t.Fatalf("old backend node error = %v, want stale generation", routeErr)
+	}
+}
+
+func TestNodeFSUnbindRetriesCacheGenerationInvalidation(t *testing.T) {
+	rootDir := t.TempDir()
+	factory, server := newNodeFSTestFactory(false)
+	mgr := newNodeFSTestManager(t, rootDir, &fakeNodeFSMounter{}, factory)
+	if err := mgr.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer releaseNodeFSTestProcess(t, mgr)
+	pm, state := publishNodeFSTestPortal(t, mgr)
+	bound := &boundVolume{
+		volumeID: "volume-a", teamID: "team-a", access: volume.AccessModeRWO,
+		mountedAt: time.Now().UTC(), refCount: 1,
+		volCtx:  &volume.VolumeContext{VolumeID: "volume-a", TeamID: "team-a"},
+		session: unboundSession{},
+	}
+	mgr.mu.Lock()
+	mgr.boundVolumes[bound.volumeID] = bound
+	mgr.volumes.add(bound.volCtx)
+	pm.volumeID, pm.teamID, pm.mountedAt = bound.volumeID, bound.teamID, bound.mountedAt
+	mgr.mu.Unlock()
+	updated, err := commitNodeFSTestBinding(mgr.nodeFS.journal, state.PortalKey, volume.BackendS0FS, bound.volumeID, bound.teamID, bound.mountedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shard := &mgr.nodeFS.shards[pm.nodeFSShard]
+	if _, err := shard.mux.UpdatePortalSession(pm.nodeFSRouteName, bound.volumeID, updated.BindingGeneration, bound.session); err != nil {
+		t.Fatal(err)
+	}
+	pm.nodeFSBindingGeneration = updated.BindingGeneration
+
+	server.invalidateErr = errors.New("temporary ioctl failure")
+	request := ctldapi.UnbindVolumePortalRequest{PodUID: pm.podUID, PortalName: pm.name}
+	if _, err := mgr.Unbind(context.Background(), request); err == nil {
+		t.Fatal("Unbind() error = nil, want cache invalidation failure")
+	}
+	pending, ok := mgr.nodeFS.journal.Portal(state.PortalKey)
+	if !ok || pending.Phase != nodeFSPortalUnbinding || pending.RouteSwitched || pm.volumeID != bound.volumeID || bound.refCount != 1 {
+		t.Fatalf("failed invalidation state: journal=%+v portal=%+v bound=%+v", pending, pm, bound)
+	}
+
+	server.invalidateErr = nil
+	if _, err := mgr.Unbind(context.Background(), request); err != nil {
+		t.Fatalf("Unbind(retry) error = %v", err)
+	}
+	completed, ok := mgr.nodeFS.journal.Portal(state.PortalKey)
+	if !ok || completed.Phase != nodeFSPortalPublished || normalizeNodeFSBackend(completed.Backend) != nodeFSRootBackend {
+		t.Fatalf("completed invalidation state: journal=%+v portal=%+v", completed, pm)
 	}
 }
 
@@ -632,7 +759,7 @@ func attachDirtyConflictNodeFSVolume(t *testing.T, mgr *Manager, pm *portalMount
 	pm.teamID = bound.teamID
 	pm.mountedAt = bound.mountedAt
 	mgr.mu.Unlock()
-	updated, err := mgr.nodeFS.journal.UpdatePortalBinding(
+	updated, err := commitNodeFSTestBinding(mgr.nodeFS.journal,
 		state.PortalKey, volume.BackendS0FS, bound.volumeID, bound.teamID, bound.mountedAt,
 	)
 	if err != nil {

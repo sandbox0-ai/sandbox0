@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
@@ -20,10 +21,12 @@ const (
 )
 
 var (
-	ErrInvalidPortalRoute     = errors.New("invalid nodefs portal route")
-	ErrPortalRouteExists      = errors.New("nodefs portal route already exists")
-	ErrPortalRouteMissing     = errors.New("nodefs portal route not found")
-	ErrStaleBindingGeneration = errors.New("stale nodefs binding generation")
+	ErrInvalidPortalRoute       = errors.New("invalid nodefs portal route")
+	ErrPortalRouteExists        = errors.New("nodefs portal route already exists")
+	ErrPortalRouteMissing       = errors.New("nodefs portal route not found")
+	ErrStaleBindingGeneration   = errors.New("stale nodefs binding generation")
+	ErrReplyTrackingUnavailable = errors.New("nodefs reply tracking unavailable")
+	ErrRouteSwitchFenced        = errors.New("nodefs route switch remains fenced")
 )
 
 // PortalSpec describes one portal subtree below a nodefs shard root. Name is a
@@ -45,7 +48,7 @@ type portalSessionRoute struct {
 	rootInode uint64
 	binding   atomic.Pointer[portalSessionBinding]
 	callMu    sync.RWMutex
-	switching bool
+	switching atomic.Bool
 	replies   *responseBarrier
 }
 
@@ -58,18 +61,19 @@ func newResponseBarrier() *responseBarrier {
 	return &responseBarrier{wake: make(chan struct{}, 1)}
 }
 
-func (b *responseBarrier) track(ctx context.Context) {
+func (b *responseBarrier) track(ctx context.Context) error {
 	if b == nil {
-		return
+		return nil
 	}
 	if _, ok := volumefuse.RequestIdentityFromContext(ctx); !ok {
-		return
+		return nil
 	}
 	b.pending.Add(1)
 	if volumefuse.AttachRequestCompletionToken(ctx, b) {
-		return
+		return nil
 	}
 	b.RequestAcknowledged()
+	return newRouteStatusError(ErrReplyTrackingUnavailable, syscall.EAGAIN)
 }
 
 func (b *responseBarrier) RequestAcknowledged() {
@@ -133,7 +137,7 @@ func (r *portalSessionRoute) snapshot() portalSessionSnapshot {
 
 func (r *portalSessionRoute) acquireRouteLease() bool {
 	r.callMu.RLock()
-	if r.switching {
+	if r.switching.Load() {
 		r.callMu.RUnlock()
 		return false
 	}
@@ -142,6 +146,38 @@ func (r *portalSessionRoute) acquireRouteLease() bool {
 
 func (r *portalSessionRoute) releaseRouteLease() {
 	r.callMu.RUnlock()
+}
+
+func (r *portalSessionRoute) beginSwitch(ctx context.Context) error {
+	if r == nil {
+		return ErrSlotSwitching
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !r.switching.CompareAndSwap(false, true) {
+		return ErrSlotSwitching
+	}
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if r.callMu.TryLock() {
+			r.callMu.Unlock()
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			r.switching.Store(false)
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (r *portalSessionRoute) endSwitch() {
+	if r != nil {
+		r.switching.Store(false)
+	}
 }
 
 // SessionMux implements one volumefuse session for a fixed nodefs shard. The
@@ -264,30 +300,26 @@ func (m *SessionMux) SwitchPortalSession(
 	if route == nil {
 		return nil, fmt.Errorf("%w: %s", ErrPortalRouteMissing, name)
 	}
-	route.callMu.Lock()
-	previous := route.binding.Load()
-	if route.switching {
-		route.callMu.Unlock()
-		return nil, fmt.Errorf("%w: %s", ErrSlotSwitching, name)
+	if err := route.beginSwitch(ctx); err != nil {
+		if errors.Is(err, ErrSlotSwitching) {
+			return nil, fmt.Errorf("%w: %s", ErrSlotSwitching, name)
+		}
+		return nil, fmt.Errorf("fence nodefs portal %s: %w", name, err)
 	}
+	previous := route.binding.Load()
 	if previous != nil && generation <= previous.generation {
-		route.callMu.Unlock()
+		route.endSwitch()
 		return nil, fmt.Errorf(
 			"%w: update generation %d must exceed current generation %d",
 			ErrInvalidBindingGeneration, generation, previous.generation,
 		)
 	}
-	route.switching = true
-	route.callMu.Unlock()
-
 	committed := false
 	defer func() {
 		if committed {
 			return
 		}
-		route.callMu.Lock()
-		route.switching = false
-		route.callMu.Unlock()
+		route.endSwitch()
 	}()
 	if err := route.replies.wait(ctx); err != nil {
 		return nil, fmt.Errorf("wait for nodefs portal %s replies: %w", name, err)
@@ -298,16 +330,17 @@ func (m *SessionMux) SwitchPortalSession(
 	}
 	if invalidate != nil {
 		if err := invalidate(rootNodeID, PortalNodeIDMask, generation); err != nil {
+			if errors.Is(err, ErrRouteSwitchFenced) {
+				committed = true
+			}
 			return nil, err
 		}
 	}
 
-	route.callMu.Lock()
 	route.binding.Store(&portalSessionBinding{
 		volumeID: volumeID, generation: generation, session: session,
 	})
-	route.switching = false
-	route.callMu.Unlock()
+	route.endSwitch()
 	committed = true
 	if previous == nil {
 		return nil, nil
@@ -315,11 +348,25 @@ func (m *SessionMux) SwitchPortalSession(
 	return previous.session, nil
 }
 
-// DrainPortal removes the route name, rejects new requests for its slot, and
-// waits for requests that already acquired the route.
+// DrainPortal removes the route name after every backend call and kernel reply
+// has drained.
 func (m *SessionMux) DrainPortal(ctx context.Context, name string) (PortalSpec, error) {
+	return m.DrainPortalWithCommit(ctx, name, nil)
+}
+
+// DrainPortalWithCommit fences the route, waits until all replies have reached
+// the kernel, commits the caller's durable removal intent, and only then
+// retires the slot. A failed commit reopens the unchanged route.
+func (m *SessionMux) DrainPortalWithCommit(
+	ctx context.Context,
+	name string,
+	commit func() error,
+) (PortalSpec, error) {
 	if m == nil {
 		return PortalSpec{}, fmt.Errorf("%w: session mux is nil", ErrPortalRouteMissing)
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	name = strings.TrimSpace(name)
 	m.mu.Lock()
@@ -330,7 +377,32 @@ func (m *SessionMux) DrainPortal(ctx context.Context, name string) (PortalSpec, 
 	}
 	m.mu.Unlock()
 
-	drained, err := m.router.Drain(ctx, route.slot)
+	if err := route.beginSwitch(ctx); err != nil {
+		return PortalSpec{}, fmt.Errorf("fence nodefs portal %s: %w", name, err)
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		route.endSwitch()
+	}()
+	if err := route.replies.wait(ctx); err != nil {
+		return PortalSpec{}, fmt.Errorf("wait for nodefs portal %s replies: %w", name, err)
+	}
+	if commit != nil {
+		if err := commit(); err != nil {
+			if errors.Is(err, ErrRouteSwitchFenced) {
+				committed = true
+			}
+			return PortalSpec{}, err
+		}
+	}
+	committed = true
+
+	// Once the durable removal is committed, cancellation must not leave a
+	// live in-memory route that recovery will intentionally restore unbound.
+	drained, err := m.router.Drain(context.Background(), route.slot)
 	if err != nil {
 		return PortalSpec{}, mapRouteError(err)
 	}
@@ -994,7 +1066,9 @@ func (m *SessionMux) lookupPortalRoot(ctx context.Context, req *pb.LookupRequest
 	if snapshot.session == nil {
 		return nil, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
 	}
-	lease.Target.replies.track(ctx)
+	if err := lease.Target.replies.track(ctx); err != nil {
+		return nil, err
+	}
 	attr, err := snapshot.session.GetAttr(ctx, &pb.GetAttrRequest{
 		VolumeId: snapshot.volumeID,
 		Inode:    snapshot.rootInode,
@@ -1046,7 +1120,10 @@ func (m *SessionMux) readSyntheticRoot(ctx context.Context, req *pb.ReadDirReque
 			Type:   uint32(syscall.S_IFDIR),
 		}
 		if req.Plus {
-			lease.Target.replies.track(ctx)
+			if err := lease.Target.replies.track(ctx); err != nil {
+				lease.Release()
+				return nil, err
+			}
 			entry.Attr, err = snapshot.session.GetAttr(ctx, &pb.GetAttrRequest{
 				VolumeId: snapshot.volumeID,
 				Inode:    snapshot.rootInode,
@@ -1084,7 +1161,10 @@ func (m *SessionMux) acquireNode(ctx context.Context, nodeID uint64) (Lease[*por
 		lease.Release()
 		return zero, portalSessionSnapshot{}, 0, err
 	}
-	lease.Target.replies.track(ctx)
+	if err := lease.Target.replies.track(ctx); err != nil {
+		lease.Release()
+		return zero, portalSessionSnapshot{}, 0, err
+	}
 	return lease, route, localNode, nil
 }
 
@@ -1107,7 +1187,10 @@ func (m *SessionMux) acquireHandle(ctx context.Context, handleID uint64) (Lease[
 		lease.Release()
 		return zero, portalSessionSnapshot{}, 0, err
 	}
-	lease.Target.replies.track(ctx)
+	if err := lease.Target.replies.track(ctx); err != nil {
+		lease.Release()
+		return zero, portalSessionSnapshot{}, 0, err
+	}
 	return lease, route, localHandle, nil
 }
 
@@ -1138,7 +1221,10 @@ func (m *SessionMux) acquireNodeHandle(ctx context.Context, nodeID, handleID uin
 			return zero, portalSessionSnapshot{}, 0, 0, err
 		}
 	}
-	lease.Target.replies.track(ctx)
+	if err := lease.Target.replies.track(ctx); err != nil {
+		lease.Release()
+		return zero, portalSessionSnapshot{}, 0, 0, err
+	}
 	return lease, route, localNode, localHandle, nil
 }
 
@@ -1168,7 +1254,10 @@ func (m *SessionMux) acquireNodes(
 		lease.Release()
 		return zero, portalSessionSnapshot{}, 0, 0, err
 	}
-	lease.Target.replies.track(ctx)
+	if err := lease.Target.replies.track(ctx); err != nil {
+		lease.Release()
+		return zero, portalSessionSnapshot{}, 0, 0, err
+	}
 	return lease, route, first, second, nil
 }
 
@@ -1210,7 +1299,10 @@ func (m *SessionMux) acquireCopy(
 		lease.Release()
 		return zero, portalSessionSnapshot{}, 0, 0, 0, 0, err
 	}
-	lease.Target.replies.track(ctx)
+	if err := lease.Target.replies.track(ctx); err != nil {
+		lease.Release()
+		return zero, portalSessionSnapshot{}, 0, 0, 0, 0, err
+	}
 	return lease, route, inputNode, inputHandle, outputNode, outputHandle, nil
 }
 

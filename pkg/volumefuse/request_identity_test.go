@@ -3,6 +3,7 @@ package volumefuse
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
@@ -12,6 +13,52 @@ func TestContextForHeaderPreservesResendIdentity(t *testing.T) {
 	identity, ok := RequestIdentityFromContext(contextForHeader("shard-1", header, nil))
 	if !ok || identity.Scope != "shard-1" || identity.Unique != 42 || !identity.Resend {
 		t.Fatalf("identity = %+v, ok=%v", identity, ok)
+	}
+}
+
+func TestFileSystemWaitsForEveryRecoveredReply(t *testing.T) {
+	fs := NewWithRequestScope("volume", "scope", time.Second, nil)
+	if err := fs.BeginRecoveryDrain(2); err != nil {
+		t.Fatal(err)
+	}
+	first := &fuse.InHeader{Unique: 41 | fuse.UNIQUE_RESEND}
+	second := &fuse.InHeader{Unique: 42 | fuse.UNIQUE_RESEND}
+	_ = fs.requestContext(first)
+	_ = fs.requestContext(second)
+
+	done := make(chan error, 1)
+	go func() { done <- fs.WaitRecoveryDrain(context.Background()) }()
+	fs.RequestAcknowledged(first)
+	select {
+	case err := <-done:
+		t.Fatalf("WaitRecoveryDrain() returned after one reply: %v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+	fs.RequestAcknowledged(second)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WaitRecoveryDrain() did not observe both replies")
+	}
+}
+
+func TestFileSystemRecoveryDrainFailsClosed(t *testing.T) {
+	fs := NewWithRequestScope("volume", "scope", time.Second, nil)
+	if err := fs.WaitRecoveryDrain(context.Background()); err == nil {
+		t.Fatal("WaitRecoveryDrain() error = nil before initialization")
+	}
+	if err := fs.BeginRecoveryDrain(0); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.BeginRecoveryDrain(0); err == nil {
+		t.Fatal("BeginRecoveryDrain() error = nil after initialization")
+	}
+	_ = fs.requestContext(&fuse.InHeader{Unique: 41 | fuse.UNIQUE_RESEND})
+	if err := fs.WaitRecoveryDrain(context.Background()); err == nil {
+		t.Fatal("WaitRecoveryDrain() error = nil after unexpected resend")
 	}
 }
 
@@ -122,6 +169,28 @@ func TestFileSystemCompletionTableResolvesModuloCollisions(t *testing.T) {
 	fs.RequestAcknowledged(first)
 	if !firstAcknowledged {
 		t.Fatal("colliding first completion was not acknowledged")
+	}
+}
+
+func TestFileSystemCompletionTableReusesCollisionTombstone(t *testing.T) {
+	fs := New("connection-generation", 0, nil)
+	first := &fuse.InHeader{Unique: 42}
+	second := &fuse.InHeader{Unique: 42 + requestCompletionSlotCount}
+	if !AttachRequestCompletionToken(fs.requestContext(first), RequestCompletionTokenFunc(func() {})) ||
+		!AttachRequestCompletionToken(fs.requestContext(second), RequestCompletionTokenFunc(func() {})) {
+		t.Fatal("failed to attach colliding completion tokens")
+	}
+	fs.RequestAcknowledged(first)
+
+	acknowledgements := 0
+	if !AttachRequestCompletionToken(fs.requestContext(second), RequestCompletionTokenFunc(func() {
+		acknowledgements++
+	})) {
+		t.Fatal("failed to attach completion behind a tombstone")
+	}
+	fs.RequestAcknowledged(second)
+	if acknowledgements != 1 || fs.pendingCount != 0 {
+		t.Fatalf("acknowledgements=%d pending=%d, want 1/0", acknowledgements, fs.pendingCount)
 	}
 }
 

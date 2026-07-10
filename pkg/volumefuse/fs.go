@@ -22,6 +22,12 @@ type FileSystem struct {
 	completionMu      sync.Mutex
 	pendingCount      int
 	pendingCompletion [requestCompletionSlotCount]requestCompletionEntry
+	recoveryMu        sync.Mutex
+	recoveryExpected  uint64
+	recoverySeen      uint64
+	recoveryAcked     uint64
+	recoveryWake      chan struct{}
+	recoveryErr       error
 }
 
 const (
@@ -30,8 +36,9 @@ const (
 )
 
 type requestCompletionEntry struct {
-	unique uint64
-	tokens requestCompletionTokens
+	unique    uint64
+	tombstone bool
+	tokens    requestCompletionTokens
 }
 
 type requestCompletionTokens struct {
@@ -104,13 +111,134 @@ func (fs *FileSystem) OnUnmount() {
 	clear(fs.pendingCompletion[:])
 	fs.pendingCount = 0
 	fs.completionMu.Unlock()
+	fs.recoveryMu.Lock()
+	fs.recoveryExpected = 0
+	fs.recoverySeen = 0
+	fs.recoveryAcked = 0
+	fs.recoveryWake = nil
+	fs.recoveryErr = nil
+	fs.recoveryMu.Unlock()
 }
 
 func (fs *FileSystem) requestContext(header *fuse.InHeader) context.Context {
 	if fs == nil {
 		return context.Background()
 	}
-	return contextForHeader(fs.requestScope, header, fs)
+	ctx := contextForHeader(fs.requestScope, header, fs)
+	if header != nil && header.IsResend() {
+		if fs.reserveRecoveryResend() && !AttachRequestCompletionToken(ctx, recoveryResendCompletion{fs: fs}) {
+			fs.failRecoveryDrain(errors.New("register recovered FUSE request completion"))
+		}
+	}
+	return ctx
+}
+
+type recoveryResendCompletion struct {
+	fs *FileSystem
+}
+
+func (c recoveryResendCompletion) RequestAcknowledged() {
+	if c.fs == nil {
+		return
+	}
+	c.fs.recoveryMu.Lock()
+	c.fs.recoveryAcked++
+	c.fs.signalRecoveryDrainLocked()
+	c.fs.recoveryMu.Unlock()
+}
+
+// BeginRecoveryDrain records the exact number of kernel requests that were
+// delivered to the previous daemon and will be resent on this connection.
+// It must be called before Serve starts reading the recovered descriptor.
+func (fs *FileSystem) BeginRecoveryDrain(expected uint64) error {
+	if fs == nil {
+		return errors.New("filesystem is required")
+	}
+	if expected > requestCompletionSlotCount {
+		return errors.New("recovered FUSE request count exceeds completion capacity")
+	}
+	fs.recoveryMu.Lock()
+	defer fs.recoveryMu.Unlock()
+	if fs.recoveryWake != nil || fs.recoveryExpected != 0 || fs.recoverySeen != 0 || fs.recoveryAcked != 0 {
+		return errors.New("recovered FUSE request drain is already initialized")
+	}
+	fs.recoveryExpected = expected
+	fs.recoveryWake = make(chan struct{}, 1)
+	fs.recoveryErr = nil
+	return nil
+}
+
+func (fs *FileSystem) reserveRecoveryResend() bool {
+	fs.recoveryMu.Lock()
+	defer fs.recoveryMu.Unlock()
+	if fs.recoveryWake == nil {
+		if fs.recoveryErr == nil {
+			fs.recoveryErr = errors.New("recovered FUSE request drain is not initialized")
+		}
+		return false
+	}
+	if fs.recoverySeen >= fs.recoveryExpected {
+		if fs.recoveryErr == nil {
+			fs.recoveryErr = errors.New("received more recovered FUSE requests than the kernel reported")
+		}
+		fs.signalRecoveryDrainLocked()
+		return false
+	}
+	fs.recoverySeen++
+	return true
+}
+
+func (fs *FileSystem) failRecoveryDrain(err error) {
+	fs.recoveryMu.Lock()
+	if fs.recoveryErr == nil {
+		fs.recoveryErr = err
+	}
+	fs.signalRecoveryDrainLocked()
+	fs.recoveryMu.Unlock()
+}
+
+func (fs *FileSystem) signalRecoveryDrainLocked() {
+	if fs.recoveryWake == nil {
+		return
+	}
+	select {
+	case fs.recoveryWake <- struct{}{}:
+	default:
+	}
+}
+
+// WaitRecoveryDrain waits until every recovered request reply has reached the
+// kernel. New, previously unsent requests are deliberately outside this fence.
+func (fs *FileSystem) WaitRecoveryDrain(ctx context.Context) error {
+	if fs == nil {
+		return errors.New("filesystem is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		fs.recoveryMu.Lock()
+		expected := fs.recoveryExpected
+		seen := fs.recoverySeen
+		acked := fs.recoveryAcked
+		err := fs.recoveryErr
+		wake := fs.recoveryWake
+		fs.recoveryMu.Unlock()
+		if wake == nil {
+			return errors.New("recovered FUSE request drain is not initialized")
+		}
+		if err != nil {
+			return err
+		}
+		if acked == expected && seen == expected {
+			return nil
+		}
+		select {
+		case <-wake:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 func (fs *FileSystem) registerRequestCompletion(identity RequestIdentity, token RequestCompletionToken) bool {
@@ -120,6 +248,7 @@ func (fs *FileSystem) registerRequestCompletion(identity RequestIdentity, token 
 	fs.completionMu.Lock()
 	defer fs.completionMu.Unlock()
 	start := int(identity.Unique % uint64(len(fs.pendingCompletion)))
+	firstTombstone := -1
 	for offset := range len(fs.pendingCompletion) {
 		index := (start + offset) % len(fs.pendingCompletion)
 		entry := &fs.pendingCompletion[index]
@@ -127,12 +256,31 @@ func (fs *FileSystem) registerRequestCompletion(identity RequestIdentity, token 
 			entry.tokens.add(token)
 			return true
 		}
-		if entry.unique == 0 {
-			entry.unique = identity.Unique
-			entry.tokens.add(token)
-			fs.pendingCount++
-			return true
+		if entry.unique != 0 {
+			continue
 		}
+		if entry.tombstone {
+			if firstTombstone < 0 {
+				firstTombstone = index
+			}
+			continue
+		}
+		if firstTombstone >= 0 {
+			entry = &fs.pendingCompletion[firstTombstone]
+		}
+		entry.unique = identity.Unique
+		entry.tombstone = false
+		entry.tokens.add(token)
+		fs.pendingCount++
+		return true
+	}
+	if firstTombstone >= 0 {
+		entry := &fs.pendingCompletion[firstTombstone]
+		entry.unique = identity.Unique
+		entry.tombstone = false
+		entry.tokens.add(token)
+		fs.pendingCount++
+		return true
 	}
 	return false
 }
@@ -155,12 +303,18 @@ func (fs *FileSystem) RequestAcknowledged(header *fuse.InHeader) {
 	for offset := range len(fs.pendingCompletion) {
 		index := (start + offset) % len(fs.pendingCompletion)
 		entry := &fs.pendingCompletion[index]
+		if entry.unique == 0 && !entry.tombstone {
+			break
+		}
 		if entry.unique != unique {
 			continue
 		}
 		tokens = entry.tokens
-		*entry = requestCompletionEntry{}
+		*entry = requestCompletionEntry{tombstone: true}
 		fs.pendingCount--
+		if fs.pendingCount == 0 {
+			clear(fs.pendingCompletion[:])
+		}
 		break
 	}
 	fs.completionMu.Unlock()

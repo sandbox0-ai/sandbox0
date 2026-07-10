@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal/nodefs"
 )
 
 func TestNodeFSJournalRoundTrip(t *testing.T) {
@@ -241,7 +243,7 @@ func TestNodeFSJournalPortalLifecycleNeverReusesSlot(t *testing.T) {
 		t.Fatalf("MarkPortalPublished() error = %v", err)
 	}
 	mountedAt := time.Now().UTC().Truncate(time.Nanosecond)
-	if _, err := store.UpdatePortalBinding(first.PortalKey, "s0fs", "vol-a", "team-a", mountedAt); err != nil {
+	if _, err := commitNodeFSTestBinding(store, first.PortalKey, "s0fs", "vol-a", "team-a", mountedAt); err != nil {
 		t.Fatalf("UpdatePortalBinding() error = %v", err)
 	}
 	bound, ok := store.Portal(first.PortalKey)
@@ -286,14 +288,14 @@ func TestNodeFSJournalUnbindRetainsSourceUntilCompletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	mountedAt := time.Now().UTC()
-	bound, err := store.UpdatePortalBinding(portal.PortalKey, "s0fs", "vol-a", "team-a", mountedAt)
+	bound, err := commitNodeFSTestBinding(store, portal.PortalKey, "s0fs", "vol-a", "team-a", mountedAt)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if bound.BindingGeneration != 2 {
 		t.Fatalf("bound generation = %d, want 2", bound.BindingGeneration)
 	}
-	idempotent, err := store.UpdatePortalBinding(portal.PortalKey, "s0fs", "vol-a", "team-a", mountedAt.Add(time.Hour))
+	idempotent, err := commitNodeFSTestBinding(store, portal.PortalKey, "s0fs", "vol-a", "team-a", mountedAt.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,12 +318,134 @@ func TestNodeFSJournalUnbindRetainsSourceUntilCompletion(t *testing.T) {
 		t.Fatalf("BeginPortalUnbind(resume) = %+v, %v", resumed, err)
 	}
 
+	if _, err := store.MarkPortalRouteSwitched(portal.PortalKey); err != nil {
+		t.Fatal(err)
+	}
 	completed, err := store.CompletePortalUnbind(portal.PortalKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if completed.Phase != nodeFSPortalPublished || completed.BindingGeneration != 3 || completed.PendingBindingGeneration != 0 || normalizeNodeFSBackend(completed.Backend) != nodeFSRootBackend || completed.VolumeID != "" || completed.TeamID != "" {
 		t.Fatalf("completed unbind = %+v", completed)
+	}
+}
+
+func TestNodeFSJournalRecoverySelectsCommittedRouteSide(t *testing.T) {
+	root := t.TempDir()
+	store, err := openNodeFSJournal(root, "node-a", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PrepareShards(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CommitShardSession(0, []byte(`{"ready":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	portal, err := store.AllocatePortal(nodeFSPortalState{
+		PortalKey: "portal-a", PodUID: "pod-a", Name: "workspace", TargetPath: "/target-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkPortalPublished(portal.PortalKey); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.BeginPortalBind(portal.PortalKey, "s0fs", "volume-a", "team-a", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if effective := effectiveNodeFSBindingState(pending); normalizeNodeFSBackend(effective.Backend) != nodeFSRootBackend || effective.BindingGeneration != 1 {
+		t.Fatalf("bind before route commit recovered %+v", effective)
+	}
+
+	reopened, err := openNodeFSJournal(root, "node-a", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, _ = reopened.Portal(portal.PortalKey)
+	if effective := effectiveNodeFSBindingState(pending); normalizeNodeFSBackend(effective.Backend) != nodeFSRootBackend || effective.BindingGeneration != 1 {
+		t.Fatalf("reopened bind source = %+v", effective)
+	}
+	if _, err := reopened.MarkPortalRouteSwitched(portal.PortalKey); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err = openNodeFSJournal(root, "node-a", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, _ = reopened.Portal(portal.PortalKey)
+	if effective := effectiveNodeFSBindingState(pending); effective.Backend != "s0fs" || effective.VolumeID != "volume-a" || effective.BindingGeneration != 2 {
+		t.Fatalf("reopened bind target = %+v", effective)
+	}
+	if _, err := reopened.CompletePortalBind(portal.PortalKey); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = reopened.BeginPortalUnbind(portal.PortalKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if effective := effectiveNodeFSBindingState(pending); effective.Backend != "s0fs" || effective.BindingGeneration != 2 {
+		t.Fatalf("unbind before route commit recovered %+v", effective)
+	}
+	if _, err := reopened.MarkPortalRouteSwitched(portal.PortalKey); err != nil {
+		t.Fatal(err)
+	}
+	pending, _ = reopened.Portal(portal.PortalKey)
+	if effective := effectiveNodeFSBindingState(pending); normalizeNodeFSBackend(effective.Backend) != nodeFSRootBackend || effective.BindingGeneration != 3 {
+		t.Fatalf("unbind after route commit recovered %+v", effective)
+	}
+}
+
+func TestNodeFSJournalUnpublishRevokesCacheGeneration(t *testing.T) {
+	store := openInitializedNodeFSJournal(t)
+	portal, err := store.AllocatePortal(nodeFSPortalState{
+		PortalKey: "portal-a", PodUID: "pod-a", Name: "workspace", TargetPath: "/target-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkPortalPublished(portal.PortalKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BeginPortalUnpublish(portal.PortalKey); err != nil {
+		t.Fatal(err)
+	}
+	committed, ok := store.Portal(portal.PortalKey)
+	if !ok || committed.Phase != nodeFSPortalUnpublishing || committed.BindingGeneration != portal.BindingGeneration+1 {
+		t.Fatalf("unpublish state = %+v, found=%v", committed, ok)
+	}
+	if err := store.BeginPortalUnpublish(portal.PortalKey); err != nil {
+		t.Fatal(err)
+	}
+	idempotent, _ := store.Portal(portal.PortalKey)
+	if idempotent.BindingGeneration != committed.BindingGeneration {
+		t.Fatalf("idempotent unpublish generation = %d, want %d", idempotent.BindingGeneration, committed.BindingGeneration)
+	}
+
+	terminal := openInitializedNodeFSJournal(t)
+	portal, err = terminal.AllocatePortal(nodeFSPortalState{
+		PortalKey: "portal-terminal", PodUID: "pod-terminal", Name: "workspace", TargetPath: "/target-terminal",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := terminal.MarkPortalPublished(portal.PortalKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := terminal.Update(func(state *nodeFSJournal) error {
+		state.Portals[0].BindingGeneration = nodefs.MaxBindingGeneration
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := terminal.BeginPortalUnpublish(portal.PortalKey); err != nil {
+		t.Fatalf("BeginPortalUnpublish(terminal generation) error = %v", err)
+	}
+	committed, _ = terminal.Portal(portal.PortalKey)
+	if committed.Phase != nodeFSPortalUnpublishing || committed.BindingGeneration != nodefs.MaxBindingGeneration {
+		t.Fatalf("terminal unpublish state = %+v", committed)
 	}
 }
 
@@ -349,6 +473,45 @@ func TestNodeFSJournalRejectsPortalBeforeShardInit(t *testing.T) {
 	}
 }
 
+func TestNodeFSJournalRotatesOnlyWhenEmpty(t *testing.T) {
+	store := openInitializedNodeFSJournal(t)
+	before := store.Snapshot()
+	if err := store.Update(func(state *nodeFSJournal) error {
+		state.NextSlotByShard[0] = nodeFSRotationSlotThreshold + 1
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !store.NeedsConnectionRotation() {
+		t.Fatal("NeedsConnectionRotation() = false above threshold")
+	}
+	if err := store.RotateEmptyConnectionGeneration(); err != nil {
+		t.Fatal(err)
+	}
+	rotated := store.Snapshot()
+	if rotated.ConnectionGeneration == before.ConnectionGeneration || rotated.NextSlotByShard[0] != 1 || len(rotated.Shards) != 0 {
+		t.Fatalf("rotated journal = %+v", rotated)
+	}
+
+	if err := store.PrepareShards(filepath.Dir(filepath.Dir(store.path))); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CommitShardSession(0, []byte(`{"ready":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AllocatePortal(nodeFSPortalState{
+		PortalKey: "portal-a", PodUID: "pod-a", Name: "workspace", TargetPath: "/target-a",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if store.NeedsConnectionRotation() {
+		t.Fatal("NeedsConnectionRotation() = true with committed portal")
+	}
+	if err := store.RotateEmptyConnectionGeneration(); err == nil {
+		t.Fatal("RotateEmptyConnectionGeneration() error = nil with committed portal")
+	}
+}
+
 func openInitializedNodeFSJournal(t *testing.T) *nodeFSJournalStore {
 	t.Helper()
 	root := t.TempDir()
@@ -363,6 +526,25 @@ func openInitializedNodeFSJournal(t *testing.T) *nodeFSJournalStore {
 		t.Fatalf("CommitShardSession() error = %v", err)
 	}
 	return store
+}
+
+func commitNodeFSTestBinding(
+	store *nodeFSJournalStore,
+	portalKey, backend, volumeID, teamID string,
+	mountedAt time.Time,
+) (nodeFSPortalState, error) {
+	if current, ok := store.Portal(portalKey); ok && current.Phase == nodeFSPortalPublished &&
+		normalizeNodeFSBackend(current.Backend) == normalizeNodeFSBackend(backend) &&
+		current.VolumeID == volumeID && current.TeamID == teamID {
+		return current, nil
+	}
+	if _, err := store.BeginPortalBind(portalKey, backend, volumeID, teamID, mountedAt); err != nil {
+		return nodeFSPortalState{}, err
+	}
+	if _, err := store.MarkPortalRouteSwitched(portalKey); err != nil {
+		return nodeFSPortalState{}, err
+	}
+	return store.CompletePortalBind(portalKey)
 }
 
 func TestNodeFSJournalRejectsDuplicateSlots(t *testing.T) {

@@ -10,11 +10,14 @@ import (
 )
 
 type fakeNodeFUSEServer struct {
-	state     fuse.ConnectionState
-	detached  bool
-	waitErr   error
-	started   chan struct{}
-	startOnce sync.Once
+	state         fuse.ConnectionState
+	detached      bool
+	invalidations int
+	lastDomain    nodeFSCacheDomain
+	invalidateErr error
+	waitErr       error
+	started       chan struct{}
+	startOnce     sync.Once
 }
 
 func (s *fakeNodeFUSEServer) Serve() { s.startOnce.Do(func() { close(s.started) }) }
@@ -22,7 +25,12 @@ func (s *fakeNodeFUSEServer) WaitMount() error {
 	<-s.started
 	return s.waitErr
 }
-func (s *fakeNodeFUSEServer) Detach() error                         { s.detached = true; return nil }
+func (s *fakeNodeFUSEServer) Detach() error { s.detached = true; return nil }
+func (s *fakeNodeFUSEServer) InvalidateCacheDomain(rootNodeID, _ uint64, generation uint64) error {
+	s.invalidations++
+	s.lastDomain = nodeFSCacheDomain{rootNodeID: rootNodeID, generation: generation}
+	return s.invalidateErr
+}
 func (s *fakeNodeFUSEServer) ConnectionState() fuse.ConnectionState { return s.state }
 
 func newFakeNodeFUSEServer(state fuse.ConnectionState) *fakeNodeFUSEServer {
@@ -39,14 +47,25 @@ func (s *fakeNodeFUSEServer) didServe() bool {
 }
 
 type fakeNodeFSConnectionFactory struct {
-	newServer    *fakeNodeFUSEServer
-	resumeServer *fakeNodeFUSEServer
-	newCalls     int
-	resumeCalls  int
-	recoverCalls int
-	cleanCalls   int
-	recoverErr   error
-	lastOptions  *fuse.MountOptions
+	newServer       *fakeNodeFUSEServer
+	resumeServer    *fakeNodeFUSEServer
+	newCalls        int
+	resumeCalls     int
+	recoverCalls    int
+	recoveryResends uint64
+	cleanCalls      int
+	recoverErr      error
+	lastOptions     *fuse.MountOptions
+}
+
+type recoveryDrainRawFS struct {
+	fuse.RawFileSystem
+	expected uint64
+}
+
+func (f *recoveryDrainRawFS) BeginRecoveryDrain(expected uint64) error {
+	f.expected = expected
+	return nil
 }
 
 func (f *fakeNodeFSConnectionFactory) New(_ fuse.RawFileSystem, _ string, opts *fuse.MountOptions) (nodeFUSEServer, error) {
@@ -61,12 +80,12 @@ func (f *fakeNodeFSConnectionFactory) Resume(_ fuse.RawFileSystem, _ string, _ i
 	return f.resumeServer, nil
 }
 
-func (f *fakeNodeFSConnectionFactory) Recover(string) (int, uint64, error) {
+func (f *fakeNodeFSConnectionFactory) Recover(string) (int, uint64, uint64, error) {
 	f.recoverCalls++
 	if f.recoverErr != nil {
-		return -1, 0, f.recoverErr
+		return -1, 0, 0, f.recoverErr
 	}
-	return 42, 7, nil
+	return 42, 7, f.recoveryResends, nil
 }
 
 func (f *fakeNodeFSConnectionFactory) CleanMount(string) error {
@@ -104,7 +123,7 @@ func TestStartNodeFSConnectionCommitsStateBeforeServing(t *testing.T) {
 	server := newFakeNodeFUSEServer(recoveryConnectionState())
 	factory := &fakeNodeFSConnectionFactory{newServer: server}
 
-	connection, recovered, err := startNodeFSConnection(store, state, shard, 0, fuse.NewDefaultRawFileSystem(), factory)
+	connection, recovered, err := startNodeFSConnection(store, state, shard, 0, nil, fuse.NewDefaultRawFileSystem(), factory)
 	if err != nil {
 		t.Fatalf("startNodeFSConnection() error = %v", err)
 	}
@@ -136,7 +155,7 @@ func TestStartNodeFSConnectionResumesCommittedConnection(t *testing.T) {
 	server := newFakeNodeFUSEServer(recoveryConnectionState())
 	factory := &fakeNodeFSConnectionFactory{resumeServer: server}
 
-	_, recovered, err := startNodeFSConnection(store, state, shard, 1, fuse.NewDefaultRawFileSystem(), factory)
+	_, recovered, err := startNodeFSConnection(store, state, shard, 1, nil, fuse.NewDefaultRawFileSystem(), factory)
 	if err != nil {
 		t.Fatalf("startNodeFSConnection() error = %v", err)
 	}
@@ -155,7 +174,7 @@ func TestStartNodeFSConnectionFailsClosedWithActivePortals(t *testing.T) {
 	shard = state.Shards[0]
 	factory := &fakeNodeFSConnectionFactory{recoverErr: errors.New("connection missing")}
 
-	if _, _, err := startNodeFSConnection(store, state, shard, 1, fuse.NewDefaultRawFileSystem(), factory); err == nil {
+	if _, _, err := startNodeFSConnection(store, state, shard, 1, nil, fuse.NewDefaultRawFileSystem(), factory); err == nil {
 		t.Fatal("startNodeFSConnection() error = nil")
 	}
 	if factory.cleanCalls != 0 || factory.newCalls != 0 {
@@ -171,10 +190,88 @@ func TestStartNodeFSConnectionRejectsKernelWithoutRecovery(t *testing.T) {
 	server := newFakeNodeFUSEServer(fuse.ConnectionState{InitResponse: fuse.InitOut{Major: 7, Minor: 38}})
 	factory := &fakeNodeFSConnectionFactory{newServer: server}
 
-	if _, _, err := startNodeFSConnection(store, state, shard, 0, fuse.NewDefaultRawFileSystem(), factory); err == nil {
+	if _, _, err := startNodeFSConnection(store, state, shard, 0, nil, fuse.NewDefaultRawFileSystem(), factory); err == nil {
 		t.Fatal("startNodeFSConnection() error = nil")
 	}
 	if !server.detached || factory.cleanCalls != 2 || len(store.Snapshot().Shards[0].SessionState) != 0 {
 		t.Fatalf("server=%+v journal=%+v", server, store.Snapshot().Shards[0])
+	}
+}
+
+func TestStartNodeFSConnectionRejectsKernelWithoutCacheInvalidationCapability(t *testing.T) {
+	store, state, shard := preparedNodeFSJournal(t, true)
+	connectionState := recoveryConnectionState()
+	connectionState.InitResponse.Flags2 &^= uint32(fuseCapabilityInvalidateCacheInFailover >> 32)
+	server := newFakeNodeFUSEServer(connectionState)
+	factory := &fakeNodeFSConnectionFactory{newServer: server}
+
+	if _, _, err := startNodeFSConnection(store, state, shard, 0, nil, fuse.NewDefaultRawFileSystem(), factory); err == nil {
+		t.Fatal("startNodeFSConnection() error = nil")
+	}
+	if !server.detached || server.invalidations != 0 || len(store.Snapshot().Shards[0].SessionState) != 0 {
+		t.Fatalf("server=%+v journal=%+v", server, store.Snapshot().Shards[0])
+	}
+}
+
+func TestStartNodeFSConnectionRejectsKernelWithoutCacheDomainCapability(t *testing.T) {
+	store, state, shard := preparedNodeFSJournal(t, true)
+	connectionState := recoveryConnectionState()
+	connectionState.InitResponse.Flags2 &^= uint32(fuse.CAP_HAS_CACHE_DOMAINS >> 32)
+	server := newFakeNodeFUSEServer(connectionState)
+	factory := &fakeNodeFSConnectionFactory{newServer: server}
+
+	if _, _, err := startNodeFSConnection(store, state, shard, 0, nil, fuse.NewDefaultRawFileSystem(), factory); err == nil {
+		t.Fatal("startNodeFSConnection() error = nil")
+	}
+	if !server.detached || server.invalidations != 0 || len(store.Snapshot().Shards[0].SessionState) != 0 {
+		t.Fatalf("server=%+v journal=%+v", server, store.Snapshot().Shards[0])
+	}
+}
+
+func TestStartNodeFSConnectionInvalidatesRecoveredDomainsBeforeServing(t *testing.T) {
+	store, state, shard := preparedNodeFSJournal(t, true)
+	encoded, err := json.Marshal(recoveryConnectionState())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CommitShardSession(0, encoded); err != nil {
+		t.Fatal(err)
+	}
+	state = store.Snapshot()
+	shard = state.Shards[0]
+	server := newFakeNodeFUSEServer(recoveryConnectionState())
+	server.invalidateErr = errors.New("unsupported cache domain ioctl")
+	factory := &fakeNodeFSConnectionFactory{resumeServer: server}
+	domain := nodeFSCacheDomain{rootNodeID: 0x100000000001, generation: 7}
+
+	if _, _, err := startNodeFSConnection(store, state, shard, 1, []nodeFSCacheDomain{domain}, fuse.NewDefaultRawFileSystem(), factory); err == nil {
+		t.Fatal("startNodeFSConnection() error = nil")
+	}
+	if server.didServe() || server.invalidations != 1 || server.lastDomain != domain {
+		t.Fatalf("server started=%v invalidations=%d", server.didServe(), server.invalidations)
+	}
+}
+
+func TestStartNodeFSConnectionInitializesRecoveredReplyDrainBeforeServing(t *testing.T) {
+	store, state, shard := preparedNodeFSJournal(t, true)
+	encoded, err := json.Marshal(recoveryConnectionState())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CommitShardSession(0, encoded); err != nil {
+		t.Fatal(err)
+	}
+	state = store.Snapshot()
+	shard = state.Shards[0]
+	server := newFakeNodeFUSEServer(recoveryConnectionState())
+	factory := &fakeNodeFSConnectionFactory{resumeServer: server, recoveryResends: 3}
+	filesystem := &recoveryDrainRawFS{RawFileSystem: fuse.NewDefaultRawFileSystem()}
+
+	connection, recovered, err := startNodeFSConnection(store, state, shard, 1, nil, filesystem, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !recovered || connection.recoveryResends != 3 || filesystem.expected != 3 || !server.didServe() {
+		t.Fatalf("recovered=%v connection=%+v expected=%d served=%v", recovered, connection, filesystem.expected, server.didServe())
 	}
 }

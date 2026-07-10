@@ -23,6 +23,10 @@ const (
 	nodeFSStateDirName   = "nodefs"
 	nodeFSStateFileName  = "state.json"
 	nodeFSLockFileName   = "ctld.lock"
+	// Rotate an empty shard generation during ctld startup before allocation
+	// reaches the hard slot ceiling. A running node is drained and restarted
+	// based on the exported remaining-slot metric before it reaches this threshold.
+	nodeFSRotationSlotThreshold = uint64(nodefs.MaxSlot) * 3 / 4
 )
 
 type nodeFSPortalPhase string
@@ -30,6 +34,7 @@ type nodeFSPortalPhase string
 const (
 	nodeFSPortalAllocating   nodeFSPortalPhase = "allocating"
 	nodeFSPortalPublished    nodeFSPortalPhase = "published"
+	nodeFSPortalBinding      nodeFSPortalPhase = "binding"
 	nodeFSPortalUnbinding    nodeFSPortalPhase = "unbinding"
 	nodeFSPortalUnpublishing nodeFSPortalPhase = "unpublishing"
 )
@@ -89,13 +94,20 @@ type nodeFSPortalState struct {
 	// PendingBindingGeneration is durable intent for an in-progress unbind.
 	// Backend and volume identity continue to describe the source backend
 	// until its recoverable state has been finalized.
-	PendingBindingGeneration uint64            `json:"pending_binding_generation,omitempty"`
-	RootFSBacking            string            `json:"rootfs_backing_path"`
-	Backend                  string            `json:"backend"`
-	VolumeID                 string            `json:"volume_id,omitempty"`
-	TeamID                   string            `json:"team_id,omitempty"`
-	MountedAt                time.Time         `json:"mounted_at,omitempty"`
-	Phase                    nodeFSPortalPhase `json:"phase"`
+	PendingBindingGeneration uint64    `json:"pending_binding_generation,omitempty"`
+	PendingBackend           string    `json:"pending_backend,omitempty"`
+	PendingVolumeID          string    `json:"pending_volume_id,omitempty"`
+	PendingTeamID            string    `json:"pending_team_id,omitempty"`
+	PendingMountedAt         time.Time `json:"pending_mounted_at,omitempty"`
+	// RouteSwitched is committed only after the source route and all of its
+	// replies have drained. Recovery selects the pending route when true.
+	RouteSwitched bool              `json:"route_switched,omitempty"`
+	RootFSBacking string            `json:"rootfs_backing_path"`
+	Backend       string            `json:"backend"`
+	VolumeID      string            `json:"volume_id,omitempty"`
+	TeamID        string            `json:"team_id,omitempty"`
+	MountedAt     time.Time         `json:"mounted_at,omitempty"`
+	Phase         nodeFSPortalPhase `json:"phase"`
 }
 
 type nodeFSJournalStore struct {
@@ -150,6 +162,7 @@ func openNodeFSJournal(rootDir, nodeIdentity string, shardCount int) (*nodeFSJou
 	if err := validateNodeFSShardIdentity(data, rootDir); err != nil {
 		return nil, fmt.Errorf("validate nodefs shard identity: %w", err)
 	}
+	recordNodeFSJournalMetrics(data)
 	return &nodeFSJournalStore{path: path, data: data}, nil
 }
 
@@ -212,7 +225,37 @@ func (s *nodeFSJournalStore) Update(update func(*nodeFSJournal) error) error {
 		return err
 	}
 	s.data = next
+	recordNodeFSJournalMetrics(next)
 	return nil
+}
+
+func (s *nodeFSJournalStore) NeedsConnectionRotation() bool {
+	state := s.Snapshot()
+	if len(state.Portals) != 0 {
+		return false
+	}
+	for _, next := range state.NextSlotByShard {
+		if next > nodeFSRotationSlotThreshold {
+			return true
+		}
+	}
+	return false
+}
+
+// RotateEmptyConnectionGeneration resets tags and slot high-water marks only
+// after every old shard mount has been detached and no portal remains.
+func (s *nodeFSJournalStore) RotateEmptyConnectionGeneration() error {
+	return s.Update(func(state *nodeFSJournal) error {
+		if len(state.Portals) != 0 {
+			return fmt.Errorf("cannot rotate nodefs connection generation with committed portals")
+		}
+		state.ConnectionGeneration = uuid.NewString()
+		for shard := range state.NextSlotByShard {
+			state.NextSlotByShard[shard] = 1
+		}
+		state.Shards = nil
+		return nil
+	})
 }
 
 // PrepareShards durably records the stable connection tags and host mount
@@ -394,33 +437,44 @@ func (s *nodeFSJournalStore) MarkPortalPublished(portalKey string) error {
 	})
 }
 
-// UpdatePortalBinding commits desired backend state before the in-memory
-// router changes session, allowing recovery to finish an interrupted bind.
-func (s *nodeFSJournalStore) UpdatePortalBinding(portalKey, backend, volumeID, teamID string, mountedAt time.Time) (nodeFSPortalState, error) {
+// BeginPortalBind records the target backend while retaining rootfs as the
+// recoverable source route until MarkPortalRouteSwitched commits the fence.
+func (s *nodeFSJournalStore) BeginPortalBind(portalKey, backend, volumeID, teamID string, mountedAt time.Time) (nodeFSPortalState, error) {
 	backend = strings.TrimSpace(backend)
-	if backend == "" {
+	volumeID = strings.TrimSpace(volumeID)
+	teamID = strings.TrimSpace(teamID)
+	if backend == "" || normalizeNodeFSBackend(backend) == nodeFSRootBackend {
 		return nodeFSPortalState{}, fmt.Errorf("portal backend is required")
+	}
+	if volumeID == "" || teamID == "" {
+		return nodeFSPortalState{}, fmt.Errorf("portal volume and team identity are required")
 	}
 	var updated nodeFSPortalState
 	err := s.updatePortal(portalKey, func(portal *nodeFSPortalState) error {
+		if portal.Phase == nodeFSPortalBinding {
+			if normalizeNodeFSBackend(portal.PendingBackend) != normalizeNodeFSBackend(backend) ||
+				portal.PendingVolumeID != volumeID || portal.PendingTeamID != teamID {
+				return fmt.Errorf("portal %q is binding a different backend", portalKey)
+			}
+			updated = *portal
+			return nil
+		}
 		if portal.Phase != nodeFSPortalPublished {
 			return fmt.Errorf("portal %q is not published", portalKey)
 		}
-		if normalizeNodeFSBackend(portal.Backend) == normalizeNodeFSBackend(backend) &&
-			strings.TrimSpace(portal.VolumeID) == strings.TrimSpace(volumeID) &&
-			strings.TrimSpace(portal.TeamID) == strings.TrimSpace(teamID) {
-			updated = *portal
-			return nil
+		if normalizeNodeFSBackend(portal.Backend) != nodeFSRootBackend {
+			return fmt.Errorf("portal %q is already bound", portalKey)
 		}
 		if portal.BindingGeneration >= nodefs.MaxBindingGeneration {
 			return fmt.Errorf("portal %q exhausted binding generations", portalKey)
 		}
-		portal.BindingGeneration++
-		portal.PendingBindingGeneration = 0
-		portal.Backend = backend
-		portal.VolumeID = strings.TrimSpace(volumeID)
-		portal.TeamID = strings.TrimSpace(teamID)
-		portal.MountedAt = mountedAt.UTC()
+		portal.PendingBindingGeneration = portal.BindingGeneration + 1
+		portal.PendingBackend = backend
+		portal.PendingVolumeID = volumeID
+		portal.PendingTeamID = teamID
+		portal.PendingMountedAt = mountedAt.UTC()
+		portal.RouteSwitched = false
+		portal.Phase = nodeFSPortalBinding
 		updated = *portal
 		return nil
 	})
@@ -447,7 +501,41 @@ func (s *nodeFSJournalStore) BeginPortalUnbind(portalKey string) (nodeFSPortalSt
 			return fmt.Errorf("portal %q exhausted binding generations", portalKey)
 		}
 		portal.PendingBindingGeneration = portal.BindingGeneration + 1
+		portal.PendingBackend = nodeFSRootBackend
+		portal.PendingVolumeID = ""
+		portal.PendingTeamID = ""
+		portal.PendingMountedAt = time.Time{}
+		portal.RouteSwitched = false
 		portal.Phase = nodeFSPortalUnbinding
+		updated = *portal
+		return nil
+	})
+	return updated, err
+}
+
+// MarkPortalRouteSwitched is the durable linearization point between the
+// source and pending routes. Callers must fence source requests and kernel
+// replies before committing it.
+func (s *nodeFSJournalStore) MarkPortalRouteSwitched(portalKey string) (nodeFSPortalState, error) {
+	var updated nodeFSPortalState
+	err := s.updatePortal(portalKey, func(portal *nodeFSPortalState) error {
+		if portal.Phase != nodeFSPortalBinding && portal.Phase != nodeFSPortalUnbinding {
+			return fmt.Errorf("portal %q has no pending route switch", portalKey)
+		}
+		portal.RouteSwitched = true
+		updated = *portal
+		return nil
+	})
+	return updated, err
+}
+
+func (s *nodeFSJournalStore) CompletePortalBind(portalKey string) (nodeFSPortalState, error) {
+	var updated nodeFSPortalState
+	err := s.updatePortal(portalKey, func(portal *nodeFSPortalState) error {
+		if portal.Phase != nodeFSPortalBinding || !portal.RouteSwitched {
+			return fmt.Errorf("portal %q binding route is not committed", portalKey)
+		}
+		completeNodeFSPendingBinding(portal)
 		updated = *portal
 		return nil
 	})
@@ -457,25 +545,46 @@ func (s *nodeFSJournalStore) BeginPortalUnbind(portalKey string) (nodeFSPortalSt
 func (s *nodeFSJournalStore) CompletePortalUnbind(portalKey string) (nodeFSPortalState, error) {
 	var updated nodeFSPortalState
 	err := s.updatePortal(portalKey, func(portal *nodeFSPortalState) error {
-		if portal.Phase != nodeFSPortalUnbinding {
-			return fmt.Errorf("portal %q is not unbinding", portalKey)
+		if portal.Phase != nodeFSPortalUnbinding || !portal.RouteSwitched {
+			return fmt.Errorf("portal %q unbinding route is not committed", portalKey)
 		}
-		portal.BindingGeneration = portal.PendingBindingGeneration
-		portal.PendingBindingGeneration = 0
-		portal.Backend = nodeFSRootBackend
-		portal.VolumeID = ""
-		portal.TeamID = ""
-		portal.MountedAt = time.Time{}
-		portal.Phase = nodeFSPortalPublished
+		completeNodeFSPendingBinding(portal)
 		updated = *portal
 		return nil
 	})
 	return updated, err
 }
 
+func completeNodeFSPendingBinding(portal *nodeFSPortalState) {
+	portal.BindingGeneration = portal.PendingBindingGeneration
+	portal.Backend = portal.PendingBackend
+	portal.VolumeID = portal.PendingVolumeID
+	portal.TeamID = portal.PendingTeamID
+	portal.MountedAt = portal.PendingMountedAt
+	portal.PendingBindingGeneration = 0
+	portal.PendingBackend = ""
+	portal.PendingVolumeID = ""
+	portal.PendingTeamID = ""
+	portal.PendingMountedAt = time.Time{}
+	portal.RouteSwitched = false
+	portal.Phase = nodeFSPortalPublished
+}
+
 func (s *nodeFSJournalStore) BeginPortalUnpublish(portalKey string) error {
 	return s.updatePortal(portalKey, func(portal *nodeFSPortalState) error {
-		portal.PendingBindingGeneration = 0
+		if portal.Phase == nodeFSPortalUnpublishing {
+			return nil
+		}
+		if portal.Phase != nodeFSPortalPublished {
+			return fmt.Errorf("portal %q is %s", portalKey, portal.Phase)
+		}
+		// Advancing the route generation makes old IDs stale during normal
+		// removal. At the terminal generation the route is still removable:
+		// callers invalidate the kernel with generation+1, fence the route,
+		// and recovery invalidates back to this final routable generation.
+		if portal.BindingGeneration < nodefs.MaxBindingGeneration {
+			portal.BindingGeneration++
+		}
 		portal.Phase = nodeFSPortalUnpublishing
 		return nil
 	})
@@ -621,21 +730,40 @@ func validateNodeFSJournal(state nodeFSJournal) error {
 		}
 		slots[slotKey] = portal.PortalKey
 		maxSlotByShard[portal.Shard] = max(maxSlotByShard[portal.Shard], portal.Slot)
+		pendingEmpty := portal.PendingBindingGeneration == 0 &&
+			strings.TrimSpace(portal.PendingBackend) == "" &&
+			strings.TrimSpace(portal.PendingVolumeID) == "" &&
+			strings.TrimSpace(portal.PendingTeamID) == "" &&
+			portal.PendingMountedAt.IsZero() && !portal.RouteSwitched
 		switch portal.Phase {
 		case nodeFSPortalAllocating, nodeFSPortalPublished:
-			if portal.PendingBindingGeneration != 0 {
-				return fmt.Errorf("portal %q has unexpected pending binding generation", portal.PortalKey)
+			if !pendingEmpty {
+				return fmt.Errorf("portal %q has unexpected pending binding state", portal.PortalKey)
+			}
+		case nodeFSPortalBinding:
+			if backend != nodeFSRootBackend {
+				return fmt.Errorf("portal %q bind source must be rootfs", portal.PortalKey)
+			}
+			pendingBackend := normalizeNodeFSBackend(portal.PendingBackend)
+			if pendingBackend == nodeFSRootBackend || strings.TrimSpace(portal.PendingVolumeID) == "" || strings.TrimSpace(portal.PendingTeamID) == "" {
+				return fmt.Errorf("portal %q bind is missing target backend identity", portal.PortalKey)
+			}
+			if portal.PendingBindingGeneration != portal.BindingGeneration+1 || portal.PendingBindingGeneration > nodefs.MaxBindingGeneration {
+				return fmt.Errorf("portal %q has invalid pending binding generation %d", portal.PortalKey, portal.PendingBindingGeneration)
 			}
 		case nodeFSPortalUnbinding:
-			if normalizeNodeFSBackend(portal.Backend) == nodeFSRootBackend || strings.TrimSpace(portal.VolumeID) == "" || strings.TrimSpace(portal.TeamID) == "" {
+			if backend == nodeFSRootBackend || strings.TrimSpace(portal.VolumeID) == "" || strings.TrimSpace(portal.TeamID) == "" {
 				return fmt.Errorf("portal %q unbind is missing source backend identity", portal.PortalKey)
+			}
+			if normalizeNodeFSBackend(portal.PendingBackend) != nodeFSRootBackend || strings.TrimSpace(portal.PendingVolumeID) != "" || strings.TrimSpace(portal.PendingTeamID) != "" || !portal.PendingMountedAt.IsZero() {
+				return fmt.Errorf("portal %q unbind target must be rootfs", portal.PortalKey)
 			}
 			if portal.PendingBindingGeneration != portal.BindingGeneration+1 || portal.PendingBindingGeneration > nodefs.MaxBindingGeneration {
 				return fmt.Errorf("portal %q has invalid pending binding generation %d", portal.PortalKey, portal.PendingBindingGeneration)
 			}
 		case nodeFSPortalUnpublishing:
-			if portal.PendingBindingGeneration != 0 {
-				return fmt.Errorf("portal %q has unexpected pending binding generation", portal.PortalKey)
+			if !pendingEmpty {
+				return fmt.Errorf("portal %q has unexpected pending binding state", portal.PortalKey)
 			}
 		default:
 			return fmt.Errorf("portal %q has invalid phase %q", portal.PortalKey, portal.Phase)

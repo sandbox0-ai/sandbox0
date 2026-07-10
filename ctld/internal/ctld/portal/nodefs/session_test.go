@@ -566,6 +566,24 @@ func TestSessionMuxUpdateWaitsForPreviousBackendCalls(t *testing.T) {
 	}
 }
 
+func TestSessionMuxFailsClosedWhenReplyTrackingIsUnavailable(t *testing.T) {
+	t.Parallel()
+	mux := NewSessionMux()
+	backend := &muxTestSession{}
+	registerMuxTestPortal(t, mux, backend, "slot-17", 17)
+	ctx := volumefuse.ContextWithRequestIdentity(context.Background(), volumefuse.RequestIdentity{
+		Scope: "shard-1", Unique: 91,
+	}, nil)
+
+	_, err := mux.GetAttr(ctx, &pb.GetAttrRequest{Inode: mustNodeID(t, 17, 1)})
+	if !errors.Is(err, ErrReplyTrackingUnavailable) {
+		t.Fatalf("GetAttr() error = %v, want %v", err, ErrReplyTrackingUnavailable)
+	}
+	if backend.lastGetAttr != nil {
+		t.Fatalf("backend request = %+v, want no call", backend.lastGetAttr)
+	}
+}
+
 func TestSessionMuxMapsAttrRequestsAndResponses(t *testing.T) {
 	t.Parallel()
 	mux := NewSessionMux()
@@ -789,21 +807,21 @@ func TestSessionMuxMapsMissingAndDrainingRoutes(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for {
 		probe, _, err := mux.router.AcquireNode(mustNodeID(t, 10, 1))
-		if errors.Is(err, ErrSlotDraining) {
+		if errors.Is(err, ErrSlotSwitching) {
 			break
 		}
 		if err == nil {
 			probe.Release()
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("router did not enter draining state, last error = %v", err)
+			t.Fatalf("router did not enter switching state, last error = %v", err)
 		}
 		time.Sleep(time.Millisecond)
 	}
 	if _, err := mux.GetAttr(context.Background(), &pb.GetAttrRequest{Inode: mustNodeID(t, 10, 1)}); err == nil {
 		t.Fatal("GetAttr(draining route) error = nil")
 	} else {
-		assertRouteStatus(t, err, ErrSlotDraining, syscall.EAGAIN)
+		assertRouteStatus(t, err, ErrSlotSwitching, syscall.EAGAIN)
 	}
 	cancel()
 	if err := <-drainDone; !errors.Is(err, context.Canceled) {

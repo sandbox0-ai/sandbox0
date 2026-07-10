@@ -14,10 +14,12 @@ import (
 
 type FileSystem struct {
 	fuse.RawFileSystem
-	mu       sync.RWMutex
-	volumeID string
-	session  Session
-	cacheTTL time.Duration
+	mu                sync.RWMutex
+	volumeID          string
+	session           Session
+	cacheTTL          time.Duration
+	completionMu      sync.Mutex
+	pendingCompletion map[uint64]RequestCompletionToken
 }
 
 const fileOpenFlags = fuse.FOPEN_KEEP_CACHE
@@ -27,10 +29,11 @@ func New(volumeID string, cacheTTL time.Duration, session Session) *FileSystem {
 		cacheTTL = time.Second
 	}
 	return &FileSystem{
-		RawFileSystem: fuse.NewDefaultRawFileSystem(),
-		volumeID:      volumeID,
-		session:       session,
-		cacheTTL:      cacheTTL,
+		RawFileSystem:     fuse.NewDefaultRawFileSystem(),
+		volumeID:          volumeID,
+		session:           session,
+		cacheTTL:          cacheTTL,
+		pendingCompletion: make(map[uint64]RequestCompletionToken),
 	}
 }
 
@@ -46,6 +49,44 @@ func (fs *FileSystem) Init(server *fuse.Server) {
 }
 
 func (fs *FileSystem) OnUnmount() {
+	fs.completionMu.Lock()
+	clear(fs.pendingCompletion)
+	fs.completionMu.Unlock()
+}
+
+func (fs *FileSystem) requestContext(header *fuse.InHeader) context.Context {
+	if fs == nil {
+		return context.Background()
+	}
+	return contextForHeader(fs.volumeID, header, fs.registerRequestCompletion)
+}
+
+func (fs *FileSystem) registerRequestCompletion(identity RequestIdentity, token RequestCompletionToken) {
+	if fs == nil || identity.Scope != fs.volumeID || identity.Unique == 0 || token == nil {
+		return
+	}
+	fs.completionMu.Lock()
+	defer fs.completionMu.Unlock()
+	if _, exists := fs.pendingCompletion[identity.Unique]; !exists {
+		fs.pendingCompletion[identity.Unique] = token
+	}
+}
+
+// RequestAcknowledged is called by go-fuse after the reply has been written
+// to the kernel. The captured token deliberately targets the backend that
+// committed the request rather than whichever session is currently routed.
+func (fs *FileSystem) RequestAcknowledged(header *fuse.InHeader) {
+	if fs == nil || header == nil {
+		return
+	}
+	unique := header.OriginalUnique()
+	fs.completionMu.Lock()
+	token := fs.pendingCompletion[unique]
+	delete(fs.pendingCompletion, unique)
+	fs.completionMu.Unlock()
+	if token != nil {
+		token.RequestAcknowledged()
+	}
 }
 
 func (fs *FileSystem) SetSession(session Session) {
@@ -116,7 +157,7 @@ func (fs *FileSystem) Lookup(cancel <-chan struct{}, header *fuse.InHeader, name
 	if st != fuse.OK {
 		return st
 	}
-	resp, err := session.Lookup(contextForHeader(header), req)
+	resp, err := session.Lookup(fs.requestContext(header), req)
 	if err != nil {
 		return statusToFuse(err)
 	}
@@ -138,7 +179,7 @@ func (fs *FileSystem) GetAttr(cancel <-chan struct{}, input *fuse.GetAttrIn, out
 	if st != fuse.OK {
 		return st
 	}
-	resp, err := session.GetAttr(contextForHeader(&input.InHeader), req)
+	resp, err := session.GetAttr(fs.requestContext(&input.InHeader), req)
 	if err != nil {
 		return statusToFuse(err)
 	}
@@ -184,7 +225,7 @@ func (fs *FileSystem) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out
 	if sizeChanged {
 		fs.invalidateKernelInode(input.NodeId)
 	}
-	resp, err := session.SetAttr(contextForHeader(&input.InHeader), req)
+	resp, err := session.SetAttr(fs.requestContext(&input.InHeader), req)
 	if err != nil {
 		return statusToFuse(err)
 	}
@@ -213,7 +254,7 @@ func (fs *FileSystem) Mkdir(cancel <-chan struct{}, input *fuse.MkdirIn, name st
 	if st != fuse.OK {
 		return st
 	}
-	resp, err := session.Mkdir(contextForHeader(&input.InHeader), req)
+	resp, err := session.Mkdir(fs.requestContext(&input.InHeader), req)
 	if err != nil {
 		return statusToFuse(err)
 	}
@@ -238,7 +279,7 @@ func (fs *FileSystem) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name
 		return st
 	}
 	fs.invalidateKernelEntry(header.NodeId, name)
-	_, err := session.Unlink(contextForHeader(header), req)
+	_, err := session.Unlink(fs.requestContext(header), req)
 	if err != nil {
 		return statusToFuse(err)
 	}
@@ -262,7 +303,7 @@ func (fs *FileSystem) Rmdir(cancel <-chan struct{}, header *fuse.InHeader, name 
 		return st
 	}
 	fs.invalidateKernelEntry(header.NodeId, name)
-	_, err := session.Rmdir(contextForHeader(header), req)
+	_, err := session.Rmdir(fs.requestContext(header), req)
 	if err != nil {
 		return statusToFuse(err)
 	}
@@ -290,7 +331,7 @@ func (fs *FileSystem) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldNa
 	}
 	fs.invalidateKernelEntry(input.NodeId, oldName)
 	fs.invalidateKernelEntry(input.Newdir, newName)
-	_, err := session.Rename(contextForHeader(&input.InHeader), req)
+	_, err := session.Rename(fs.requestContext(&input.InHeader), req)
 	if err != nil {
 		return statusToFuse(err)
 	}
@@ -311,7 +352,7 @@ func (fs *FileSystem) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename 
 	if st != fuse.OK {
 		return st
 	}
-	resp, err := session.Link(contextForHeader(&input.InHeader), &pb.LinkRequest{
+	resp, err := session.Link(fs.requestContext(&input.InHeader), &pb.LinkRequest{
 		VolumeId:  fs.volumeID,
 		Inode:     input.Oldnodeid,
 		NewParent: input.NodeId,
@@ -342,7 +383,7 @@ func (fs *FileSystem) Symlink(cancel <-chan struct{}, header *fuse.InHeader, poi
 	if st != fuse.OK {
 		return st
 	}
-	resp, err := session.Symlink(contextForHeader(header), req)
+	resp, err := session.Symlink(fs.requestContext(header), req)
 	if err != nil {
 		return statusToFuse(err)
 	}
@@ -365,7 +406,7 @@ func (fs *FileSystem) Readlink(cancel <-chan struct{}, header *fuse.InHeader) ([
 	if st != fuse.OK {
 		return nil, st
 	}
-	resp, err := session.Readlink(contextForHeader(header), req)
+	resp, err := session.Readlink(fs.requestContext(header), req)
 	if err != nil {
 		return nil, statusToFuse(err)
 	}
@@ -388,7 +429,7 @@ func (fs *FileSystem) Access(cancel <-chan struct{}, input *fuse.AccessIn) fuse.
 	if st != fuse.OK {
 		return st
 	}
-	_, err := session.Access(contextForHeader(&input.InHeader), req)
+	_, err := session.Access(fs.requestContext(&input.InHeader), req)
 	if err != nil {
 		return statusToFuse(err)
 	}
@@ -412,7 +453,7 @@ func (fs *FileSystem) Create(cancel <-chan struct{}, input *fuse.CreateIn, name 
 	if st != fuse.OK {
 		return st
 	}
-	resp, err := session.Create(contextForHeader(&input.InHeader), req)
+	resp, err := session.Create(fs.requestContext(&input.InHeader), req)
 	if err != nil {
 		return statusToFuse(err)
 	}
@@ -438,7 +479,7 @@ func (fs *FileSystem) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse
 	if st != fuse.OK {
 		return st
 	}
-	resp, err := session.Open(contextForHeader(&input.InHeader), req)
+	resp, err := session.Open(fs.requestContext(&input.InHeader), req)
 	if err != nil {
 		return statusToFuse(err)
 	}
@@ -471,13 +512,13 @@ func (fs *FileSystem) Read(cancel <-chan struct{}, input *fuse.ReadIn, buf []byt
 		return fuse.ReadResultData(nil), fuse.OK
 	}
 	if reader, ok := session.(ReadIntoSession); ok && len(readBuf) > 0 {
-		n, _, err := reader.ReadInto(contextForHeader(&input.InHeader), req, readBuf)
+		n, _, err := reader.ReadInto(fs.requestContext(&input.InHeader), req, readBuf)
 		if err != nil {
 			return nil, statusToFuse(err)
 		}
 		return fuse.ReadResultData(readBuf[:n]), fuse.OK
 	}
-	resp, err := session.Read(contextForHeader(&input.InHeader), req)
+	resp, err := session.Read(fs.requestContext(&input.InHeader), req)
 	if err != nil {
 		return nil, statusToFuse(err)
 	}
@@ -501,7 +542,7 @@ func (fs *FileSystem) Write(cancel <-chan struct{}, input *fuse.WriteIn, data []
 		return 0, st
 	}
 	fs.invalidateKernelData(input.NodeId, int64(input.Offset), int64(len(data)))
-	resp, err := session.Write(contextForHeader(&input.InHeader), req)
+	resp, err := session.Write(fs.requestContext(&input.InHeader), req)
 	if err != nil {
 		return 0, statusToFuse(err)
 	}
@@ -527,7 +568,7 @@ func (fs *FileSystem) Release(cancel <-chan struct{}, input *fuse.ReleaseIn) {
 	if st != fuse.OK {
 		return
 	}
-	_, _ = session.Release(contextForHeader(&input.InHeader), req)
+	_, _ = session.Release(fs.requestContext(&input.InHeader), req)
 }
 
 func (fs *FileSystem) Flush(cancel <-chan struct{}, input *fuse.FlushIn) fuse.Status {
@@ -543,7 +584,7 @@ func (fs *FileSystem) Flush(cancel <-chan struct{}, input *fuse.FlushIn) fuse.St
 	if st != fuse.OK {
 		return st
 	}
-	_, err := session.Flush(contextForHeader(&input.InHeader), req)
+	_, err := session.Flush(fs.requestContext(&input.InHeader), req)
 	if err != nil {
 		return statusToFuse(err)
 	}
@@ -564,7 +605,7 @@ func (fs *FileSystem) Fsync(cancel <-chan struct{}, input *fuse.FsyncIn) fuse.St
 	if st != fuse.OK {
 		return st
 	}
-	_, err := session.Fsync(contextForHeader(&input.InHeader), req)
+	_, err := session.Fsync(fs.requestContext(&input.InHeader), req)
 	if err != nil {
 		return statusToFuse(err)
 	}
@@ -580,7 +621,7 @@ func (fs *FileSystem) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn)
 		return st
 	}
 	fs.invalidateKernelInode(input.NodeId)
-	_, err := session.Fallocate(contextForHeader(&input.InHeader), &pb.FallocateRequest{
+	_, err := session.Fallocate(fs.requestContext(&input.InHeader), &pb.FallocateRequest{
 		VolumeId: fs.volumeID,
 		Inode:    input.NodeId,
 		Mode:     input.Mode,
@@ -610,7 +651,7 @@ func (fs *FileSystem) OpenDir(cancel <-chan struct{}, input *fuse.OpenIn, out *f
 	if st != fuse.OK {
 		return st
 	}
-	resp, err := session.OpenDir(contextForHeader(&input.InHeader), req)
+	resp, err := session.OpenDir(fs.requestContext(&input.InHeader), req)
 	if err != nil {
 		return statusToFuse(err)
 	}
@@ -635,7 +676,7 @@ func (fs *FileSystem) ReadDir(cancel <-chan struct{}, input *fuse.ReadIn, out *f
 	if st != fuse.OK {
 		return st
 	}
-	resp, err := session.ReadDir(contextForHeader(&input.InHeader), req)
+	resp, err := session.ReadDir(fs.requestContext(&input.InHeader), req)
 	if err != nil {
 		return statusToFuse(err)
 	}
@@ -673,7 +714,7 @@ func (fs *FileSystem) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, ou
 	if st != fuse.OK {
 		return st
 	}
-	resp, err := session.ReadDir(contextForHeader(&input.InHeader), req)
+	resp, err := session.ReadDir(fs.requestContext(&input.InHeader), req)
 	if err != nil {
 		return statusToFuse(err)
 	}
@@ -707,7 +748,7 @@ func (fs *FileSystem) ReleaseDir(input *fuse.ReleaseIn) {
 	if st != fuse.OK {
 		return
 	}
-	_, _ = session.ReleaseDir(contextForHeader(&input.InHeader), req)
+	_, _ = session.ReleaseDir(fs.requestContext(&input.InHeader), req)
 }
 
 func (fs *FileSystem) StatFs(cancel <-chan struct{}, input *fuse.InHeader, out *fuse.StatfsOut) fuse.Status {
@@ -723,7 +764,7 @@ func (fs *FileSystem) StatFs(cancel <-chan struct{}, input *fuse.InHeader, out *
 	if st != fuse.OK {
 		return st
 	}
-	resp, err := session.StatFs(contextForHeader(input), req)
+	resp, err := session.StatFs(fs.requestContext(input), req)
 	if err != nil {
 		return statusToFuse(err)
 	}
@@ -746,7 +787,7 @@ func (fs *FileSystem) GetXAttr(cancel <-chan struct{}, header *fuse.InHeader, at
 	if st != fuse.OK {
 		return 0, st
 	}
-	resp, err := session.GetXattr(contextForHeader(header), &pb.GetXattrRequest{
+	resp, err := session.GetXattr(fs.requestContext(header), &pb.GetXattrRequest{
 		VolumeId: fs.volumeID,
 		Inode:    header.NodeId,
 		Name:     attr,
@@ -774,7 +815,7 @@ func (fs *FileSystem) ListXAttr(cancel <-chan struct{}, header *fuse.InHeader, d
 	if st != fuse.OK {
 		return 0, st
 	}
-	resp, err := session.ListXattr(contextForHeader(header), &pb.ListXattrRequest{
+	resp, err := session.ListXattr(fs.requestContext(header), &pb.ListXattrRequest{
 		VolumeId: fs.volumeID,
 		Inode:    header.NodeId,
 		Size:     int32(len(dest)),
@@ -801,7 +842,7 @@ func (fs *FileSystem) SetXAttr(cancel <-chan struct{}, input *fuse.SetXAttrIn, a
 	if st != fuse.OK {
 		return st
 	}
-	_, err := session.SetXattr(contextForHeader(&input.InHeader), &pb.SetXattrRequest{
+	_, err := session.SetXattr(fs.requestContext(&input.InHeader), &pb.SetXattrRequest{
 		VolumeId: fs.volumeID,
 		Inode:    input.NodeId,
 		Name:     attr,
@@ -823,7 +864,7 @@ func (fs *FileSystem) RemoveXAttr(cancel <-chan struct{}, header *fuse.InHeader,
 	if st != fuse.OK {
 		return st
 	}
-	_, err := session.RemoveXattr(contextForHeader(header), &pb.RemoveXattrRequest{
+	_, err := session.RemoveXattr(fs.requestContext(header), &pb.RemoveXattrRequest{
 		VolumeId: fs.volumeID,
 		Inode:    header.NodeId,
 		Name:     attr,
@@ -843,7 +884,7 @@ func (fs *FileSystem) Mknod(cancel <-chan struct{}, input *fuse.MknodIn, name st
 	if st != fuse.OK {
 		return st
 	}
-	resp, err := session.Mknod(contextForHeader(&input.InHeader), &pb.MknodRequest{
+	resp, err := session.Mknod(fs.requestContext(&input.InHeader), &pb.MknodRequest{
 		VolumeId: fs.volumeID,
 		Parent:   input.NodeId,
 		Name:     name,
@@ -874,7 +915,7 @@ func (fs *FileSystem) GetLk(cancel <-chan struct{}, input *fuse.LkIn, out *fuse.
 		return st
 	}
 
-	resp, err := session.GetLk(contextForHeader(&input.InHeader), &pb.GetLkRequest{
+	resp, err := session.GetLk(fs.requestContext(&input.InHeader), &pb.GetLkRequest{
 		VolumeId: fs.volumeID,
 		Inode:    input.NodeId,
 		HandleId: input.Fh,
@@ -908,7 +949,7 @@ func (fs *FileSystem) CopyFileRange(cancel <-chan struct{}, input *fuse.CopyFile
 		return 0, st
 	}
 	fs.invalidateKernelInode(input.NodeIdOut)
-	resp, err := session.CopyFileRange(contextForHeader(&input.InHeader), &pb.CopyFileRangeRequest{
+	resp, err := session.CopyFileRange(fs.requestContext(&input.InHeader), &pb.CopyFileRangeRequest{
 		VolumeId:  fs.volumeID,
 		InodeIn:   input.NodeId,
 		HandleIn:  input.FhIn,
@@ -953,7 +994,7 @@ func (fs *FileSystem) setLk(cancel <-chan struct{}, input *fuse.LkIn, block bool
 	}
 
 	if input.LkFlags&fuse.FUSE_LK_FLOCK != 0 {
-		_, err := session.Flock(contextForHeader(&input.InHeader), &pb.FlockRequest{
+		_, err := session.Flock(fs.requestContext(&input.InHeader), &pb.FlockRequest{
 			VolumeId: fs.volumeID,
 			Inode:    input.NodeId,
 			HandleId: input.Fh,
@@ -979,9 +1020,9 @@ func (fs *FileSystem) setLk(cancel <-chan struct{}, input *fuse.LkIn, block bool
 	}
 	var err error
 	if block {
-		_, err = session.SetLkw(contextForHeader(&input.InHeader), req)
+		_, err = session.SetLkw(fs.requestContext(&input.InHeader), req)
 	} else {
-		_, err = session.SetLk(contextForHeader(&input.InHeader), req)
+		_, err = session.SetLk(fs.requestContext(&input.InHeader), req)
 	}
 	if err != nil {
 		return statusToFuse(err)

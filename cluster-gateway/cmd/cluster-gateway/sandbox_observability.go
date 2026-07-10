@@ -34,13 +34,13 @@ func initSandboxObservability(ctx context.Context, cfg *config.ClusterGatewayCon
 		db, repo, err := obsclickhouse.Open(connectCtx, obsclickhouse.OpenConfig{
 			DSN: strings.TrimSpace(clickHouseCfg.DSN),
 			Schema: obsclickhouse.Config{
-				Database:             clickHouseCfg.Database,
-				EventsTable:          clickHouseCfg.EventsTable,
-				LogsTable:            clickHouseCfg.LogsTable,
-				MetricsTable:         clickHouseCfg.MetricsTable,
-				RetentionDays:        clickHouseCfg.RetentionDays,
-				LogsRetentionDays:    clickHouseCfg.LogsRetentionDays,
-				MetricsRetentionDays: clickHouseCfg.MetricsRetentionDays,
+				Database:                    clickHouseCfg.Database,
+				EventsTable:                 clickHouseCfg.EventsTable,
+				LogsTable:                   clickHouseCfg.LogsTable,
+				RuntimeSamplesTable:         clickHouseCfg.RuntimeSamplesTable,
+				RetentionDays:               clickHouseCfg.RetentionDays,
+				LogsRetentionDays:           clickHouseCfg.LogsRetentionDays,
+				RuntimeSamplesRetentionDays: clickHouseCfg.RuntimeSamplesRetentionDays,
 			},
 			Migrate: !clickHouseCfg.SkipSchemaMigration,
 		})
@@ -51,10 +51,10 @@ func initSandboxObservability(ctx context.Context, cfg *config.ClusterGatewayCon
 			zap.String("database", repo.Database()),
 			zap.String("events_table", repo.EventsTable()),
 			zap.String("logs_table", repo.LogsTable()),
-			zap.String("metrics_table", repo.MetricsTable()),
+			zap.String("runtime_samples_table", repo.RuntimeSamplesTable()),
 			zap.Int("retention_days", repo.RetentionDays()),
 			zap.Int("logs_retention_days", repo.LogsRetentionDays()),
-			zap.Int("metrics_retention_days", repo.MetricsRetentionDays()),
+			zap.Int("runtime_samples_retention_days", repo.RuntimeSamplesRetentionDays()),
 			zap.Bool("schema_migration", !clickHouseCfg.SkipSchemaMigration),
 		)
 		return db, repo, nil

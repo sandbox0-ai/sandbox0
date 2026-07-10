@@ -16,13 +16,15 @@ type fakeWriter struct {
 	batches   [][]sandboxobservability.Event
 	inserted  chan int
 	callCount int
+	ctxErrs   []error
 }
 
-func (f *fakeWriter) InsertEvents(_ context.Context, events []sandboxobservability.Event) error {
+func (f *fakeWriter) InsertEvents(ctx context.Context, events []sandboxobservability.Event) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	f.callCount++
+	f.ctxErrs = append(f.ctxErrs, ctx.Err())
 	if len(f.errs) > 0 {
 		err := f.errs[0]
 		f.errs = f.errs[1:]
@@ -42,7 +44,7 @@ func (f *fakeWriter) InsertLogs(context.Context, []sandboxobservability.LogEntry
 	return nil
 }
 
-func (f *fakeWriter) InsertMetricSamples(context.Context, []sandboxobservability.MetricSample) error {
+func (f *fakeWriter) InsertRuntimeSamples(context.Context, []sandboxobservability.RuntimeSample) error {
 	return nil
 }
 
@@ -126,6 +128,44 @@ func TestWorkerDropsBatchAfterRetries(t *testing.T) {
 	}
 	if stats := worker.Stats(); stats.InsertedEvents != 0 || stats.DroppedEvents != 2 || stats.FailedBatches != 1 {
 		t.Fatalf("stats = %+v", stats)
+	}
+}
+
+func TestWorkerFlushesQueuedItemsWithLiveContextOnShutdown(t *testing.T) {
+	writer := &fakeWriter{inserted: make(chan int, 1)}
+	worker, err := NewWorker(writer, Config{QueueSize: 4, BatchSize: 10, FlushInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("NewWorker() error = %v", err)
+	}
+	if !worker.TryEnqueue(sandboxobservability.Event{Cursor: "shutdown"}) {
+		t.Fatal("TryEnqueue() returned false")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		worker.Run(ctx)
+		close(done)
+	}()
+	cancel()
+
+	select {
+	case count := <-writer.inserted:
+		if count != 1 {
+			t.Fatalf("inserted count = %d, want 1", count)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for shutdown flush")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not stop")
+	}
+
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	if len(writer.ctxErrs) != 1 || writer.ctxErrs[0] != nil {
+		t.Fatalf("shutdown insert contexts = %v, want one live context", writer.ctxErrs)
 	}
 }
 

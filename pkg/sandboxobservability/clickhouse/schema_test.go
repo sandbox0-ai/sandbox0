@@ -7,9 +7,9 @@ import (
 
 func TestSchemaStatementsUseReplacingMergeTreeAndRetentionTTL(t *testing.T) {
 	statements, err := SchemaStatements(Config{
-		RetentionDays:        7,
-		LogsRetentionDays:    3,
-		MetricsRetentionDays: 14,
+		RetentionDays:               7,
+		LogsRetentionDays:           3,
+		RuntimeSamplesRetentionDays: 14,
 	})
 	if err != nil {
 		t.Fatalf("SchemaStatements() error = %v", err)
@@ -39,15 +39,20 @@ func TestSchemaStatementsUseReplacingMergeTreeAndRetentionTTL(t *testing.T) {
 			t.Fatalf("create logs table statement missing %q:\n%s", want, createLogsTable)
 		}
 	}
-	createMetricsTable := statements[3]
+	createRuntimeSamplesTable := statements[3]
 	for _, want := range []string{
-		"CREATE TABLE IF NOT EXISTS `sandbox0_observability`.`sandbox_metric_samples`",
-		"ENGINE = MergeTree",
-		"ORDER BY (team_id, sandbox_id, name, occurred_at, context_id, cursor)",
-		"TTL toDateTime(occurred_at) + INTERVAL 14 DAY DELETE",
+		"CREATE TABLE IF NOT EXISTS `sandbox0_observability`.`sandbox_runtime_samples`",
+		"runtime_generation Int64",
+		"series_epoch String",
+		"cpu_utilization Nullable(Float64)",
+		"network_receive_bytes Nullable(UInt64)",
+		"missing String",
+		"ENGINE = ReplacingMergeTree(version)",
+		"ORDER BY (team_id, sandbox_id, observed_at, runtime_generation, series_epoch, sample_id)",
+		"TTL toDateTime(observed_at) + INTERVAL 14 DAY DELETE",
 	} {
-		if !strings.Contains(createMetricsTable, want) {
-			t.Fatalf("create metrics table statement missing %q:\n%s", want, createMetricsTable)
+		if !strings.Contains(createRuntimeSamplesTable, want) {
+			t.Fatalf("create runtime samples table statement missing %q:\n%s", want, createRuntimeSamplesTable)
 		}
 	}
 	if !strings.Contains(statements[4], "ALTER TABLE `sandbox0_observability`.`sandbox_events` MODIFY TTL toDateTime(occurred_at) + INTERVAL 7 DAY DELETE") {
@@ -56,8 +61,8 @@ func TestSchemaStatementsUseReplacingMergeTreeAndRetentionTTL(t *testing.T) {
 	if !strings.Contains(statements[5], "ALTER TABLE `sandbox0_observability`.`sandbox_logs` MODIFY TTL toDateTime(occurred_at) + INTERVAL 3 DAY DELETE") {
 		t.Fatalf("logs alter ttl statement = %q", statements[5])
 	}
-	if !strings.Contains(statements[6], "ALTER TABLE `sandbox0_observability`.`sandbox_metric_samples` MODIFY TTL toDateTime(occurred_at) + INTERVAL 14 DAY DELETE") {
-		t.Fatalf("metrics alter ttl statement = %q", statements[6])
+	if !strings.Contains(statements[6], "ALTER TABLE `sandbox0_observability`.`sandbox_runtime_samples` MODIFY TTL toDateTime(observed_at) + INTERVAL 14 DAY DELETE") {
+		t.Fatalf("runtime samples alter ttl statement = %q", statements[6])
 	}
 }
 
@@ -71,7 +76,7 @@ func TestSchemaStatementsRejectUnsafeIdentifiers(t *testing.T) {
 	if _, err := SchemaStatements(Config{LogsTable: "logs;DROP"}); err == nil {
 		t.Fatal("SchemaStatements() error = nil, want unsafe logs table identifier rejection")
 	}
-	if _, err := SchemaStatements(Config{MetricsTable: "metrics.v2"}); err == nil {
-		t.Fatal("SchemaStatements() error = nil, want unsafe metrics table identifier rejection")
+	if _, err := SchemaStatements(Config{RuntimeSamplesTable: "runtime.v2"}); err == nil {
+		t.Fatal("SchemaStatements() error = nil, want unsafe runtime samples table identifier rejection")
 	}
 }

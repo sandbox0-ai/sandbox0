@@ -14,22 +14,22 @@ import (
 )
 
 type HTTPWriterOptions struct {
-	EventsURL      string
-	LogsURL        string
-	MetricsURL     string
-	Client         *http.Client
-	TokenProvider  func(context.Context) (string, error)
-	RequestTimeout time.Duration
+	EventsURL         string
+	LogsURL           string
+	RuntimeSamplesURL string
+	Client            *http.Client
+	TokenProvider     func(context.Context) (string, error)
+	RequestTimeout    time.Duration
 }
 
 // HTTPWriter posts observability ingest batches to cluster-gateway internal APIs.
 type HTTPWriter struct {
-	eventsURL      string
-	logsURL        string
-	metricsURL     string
-	client         *http.Client
-	tokenProvider  func(context.Context) (string, error)
-	requestTimeout time.Duration
+	eventsURL         string
+	logsURL           string
+	runtimeSamplesURL string
+	client            *http.Client
+	tokenProvider     func(context.Context) (string, error)
+	requestTimeout    time.Duration
 }
 
 func NewHTTPWriter(opts HTTPWriterOptions) *HTTPWriter {
@@ -38,12 +38,12 @@ func NewHTTPWriter(opts HTTPWriterOptions) *HTTPWriter {
 		client = &http.Client{}
 	}
 	return &HTTPWriter{
-		eventsURL:      strings.TrimSpace(opts.EventsURL),
-		logsURL:        strings.TrimSpace(opts.LogsURL),
-		metricsURL:     strings.TrimSpace(opts.MetricsURL),
-		client:         client,
-		tokenProvider:  opts.TokenProvider,
-		requestTimeout: opts.RequestTimeout,
+		eventsURL:         strings.TrimSpace(opts.EventsURL),
+		logsURL:           strings.TrimSpace(opts.LogsURL),
+		runtimeSamplesURL: strings.TrimSpace(opts.RuntimeSamplesURL),
+		client:            client,
+		tokenProvider:     opts.TokenProvider,
+		requestTimeout:    opts.RequestTimeout,
 	}
 }
 
@@ -65,12 +65,12 @@ func (w *HTTPWriter) InsertLogs(ctx context.Context, logs []LogEntry) error {
 	}{Logs: logs})
 }
 
-func (w *HTTPWriter) InsertMetricSamples(ctx context.Context, samples []MetricSample) error {
+func (w *HTTPWriter) InsertRuntimeSamples(ctx context.Context, samples []RuntimeSample) error {
 	if len(samples) == 0 {
 		return nil
 	}
-	return w.post(ctx, w.metricsURL, struct {
-		Samples []MetricSample `json:"samples"`
+	return w.post(ctx, w.runtimeSamplesURL, struct {
+		Samples []RuntimeSample `json:"samples"`
 	}{Samples: samples})
 }
 

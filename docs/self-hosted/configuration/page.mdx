@@ -68,7 +68,7 @@ Sandbox0 platform services emit logs to container stdout and expose Prometheus-c
 
 Platform telemetry export is disabled by default. The operator owns collection and export integration only: it can point platform services at an external collector, or install OpenTelemetry Collectors that export to your OTLP endpoint. The per-sandbox historical observability APIs are separate from this platform telemetry layer; they require a configured query backend and return `503 unavailable` when that backend is disabled or unavailable. The historical observability tables are separate from the metering usage ledger even when both use the same region ClickHouse component.
 
-ClickHouse is configured once on the `Sandbox0Infra` CR under `spec.clickHouse`. The infra-operator owns builtin provisioning or external DSN resolution, the same way it owns built-in or external PostgreSQL and Redis wiring. Feature configs such as `spec.sandboxObservability` and `spec.metering` consume this region component. Do not configure the ClickHouse backend separately on cluster-gateway, manager, storage-proxy, or netd service configs when deploying through `Sandbox0Infra`.
+ClickHouse is configured once on the `Sandbox0Infra` CR under `spec.clickHouse`. The infra-operator owns builtin provisioning or external DSN resolution, the same way it owns built-in or external PostgreSQL and Redis wiring. Feature configs such as `spec.sandboxObservability` and `spec.metering` consume this region component. Do not configure the ClickHouse backend separately on cluster-gateway, ctld, manager, storage-proxy, or netd service configs when deploying through `Sandbox0Infra`.
 
 Use builtin ClickHouse when you want the infra-operator to install ClickHouse for the region:
 
@@ -91,7 +91,7 @@ spec:
         retention:
             auditDays: 90
             logDays: 7
-            metricDays: 30
+            runtimeSampleDays: 30
         ingest:
             queueSize: 1024
             batchSize: 100
@@ -133,14 +133,14 @@ spec:
         retention:
             auditDays: 90
             logDays: 7
-            metricDays: 30
+            runtimeSampleDays: 30
     metering:
         enabled: true
 ```
 
 Set `spec.sandboxObservability.enabled` to `false` or omit the field to keep the historical API disabled. Set `spec.metering.enabled` to `false` or omit `spec.metering` to keep metering producers, quota usage reads, and metering export readers disabled. Legacy `spec.sandboxObservability.type` fields are still accepted for compatibility, but new installs should use `spec.clickHouse` for ClickHouse provisioning. Retention deletes ClickHouse observability rows only and never deletes metering ledger rows.
 
-Netd receives the generated internal ingest endpoint automatically when the backend is enabled. The sink is asynchronous and bounded: if the queue is full or retries are exhausted, netd drops audit projection events instead of blocking traffic forwarding. Netd exports `sandbox0_netd_audit_ingest_events_total` and `sandbox0_netd_audit_ingest_batches_total` to show enqueue, send, skip, drop, and failed batch results.
+When the backend is enabled, infra-operator injects bounded internal ingest endpoints into the producers automatically: ctld sends sandbox-wide CRI runtime samples, manager sends historical logs, and netd sends network audit events. Producer queues never block the sandbox data path; a full queue or exhausted retry budget drops projection data instead. Netd exports `sandbox0_netd_audit_ingest_events_total` and `sandbox0_netd_audit_ingest_batches_total` to show enqueue, send, skip, drop, and failed batch results.
 
 In `managedCollector` mode sandbox0 installs collectors for logs, metrics, and traces, then exports to your OTLP endpoint:
 

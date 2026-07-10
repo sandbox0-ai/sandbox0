@@ -2652,9 +2652,6 @@ spec:
                           logsTable:
                             default: sandbox_logs
                             type: string
-                          metricsTable:
-                            default: sandbox_metric_samples
-                            type: string
                           nativePort:
                             default: 9000
                             description: NativePort is the ClickHouse native TCP port.
@@ -2682,6 +2679,9 @@ spec:
                             x-kubernetes-validations:
                             - message: persistence is immutable after creation
                               rule: self == oldSelf
+                          runtimeSamplesTable:
+                            default: sandbox_runtime_samples
+                            type: string
                           statefulResourcePolicy:
                             default: Retain
                             description: |-
@@ -2738,8 +2738,8 @@ spec:
                           logsTable:
                             default: sandbox_logs
                             type: string
-                          metricsTable:
-                            default: sandbox_metric_samples
+                          runtimeSamplesTable:
+                            default: sandbox_runtime_samples
                             type: string
                           skipSchemaMigration:
                             description: SkipSchemaMigration disables cluster-gateway
@@ -2797,10 +2797,10 @@ spec:
                         description: LogDays controls retention for sandbox process
                           logs.
                         type: integer
-                      metricDays:
+                      runtimeSampleDays:
                         default: 30
-                        description: MetricDays controls retention for sandbox metric
-                          samples.
+                        description: RuntimeSampleDays controls retention for sandbox
+                          runtime samples.
                         type: integer
                     type: object
                   type:

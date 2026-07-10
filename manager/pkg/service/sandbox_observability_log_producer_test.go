@@ -89,7 +89,7 @@ func (w *recordingSandboxObservabilityWriter) InsertLogs(_ context.Context, logs
 	return nil
 }
 
-func (w *recordingSandboxObservabilityWriter) InsertMetricSamples(context.Context, []sandboxobservability.MetricSample) error {
+func (w *recordingSandboxObservabilityWriter) InsertRuntimeSamples(context.Context, []sandboxobservability.RuntimeSample) error {
 	return nil
 }
 

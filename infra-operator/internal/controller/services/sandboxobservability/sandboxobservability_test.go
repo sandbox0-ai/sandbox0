@@ -15,7 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func TestApplyManagerConfigInjectsLogsAndMetricsIngestURLs(t *testing.T) {
+func TestApplyManagerConfigInjectsLogsIngestURL(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, infrav1alpha1.AddToScheme(scheme))
@@ -54,7 +54,6 @@ func TestApplyManagerConfigInjectsLogsAndMetricsIngestURLs(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, "http://cluster-gateway.svc/internal/v1/sandbox-observability/logs", cfg.SandboxObservabilityLogsIngestURL)
-	assert.Equal(t, "http://cluster-gateway.svc/internal/v1/sandbox-observability/metrics", cfg.SandboxObservabilityMetricsIngestURL)
 	assert.Equal(t, 11, cfg.SandboxObservabilityIngestQueueSize)
 	assert.Equal(t, 7, cfg.SandboxObservabilityIngestBatchSize)
 	assert.Equal(t, 2*time.Second, cfg.SandboxObservabilityIngestFlushInterval.Duration)
@@ -65,8 +64,7 @@ func TestApplyManagerConfigInjectsLogsAndMetricsIngestURLs(t *testing.T) {
 
 func TestApplyManagerConfigClearsIngestURLsWhenDisabled(t *testing.T) {
 	cfg := &apiconfig.ManagerConfig{
-		SandboxObservabilityLogsIngestURL:    "http://old/logs",
-		SandboxObservabilityMetricsIngestURL: "http://old/metrics",
+		SandboxObservabilityLogsIngestURL: "http://old/logs",
 	}
 	infra := &infrav1alpha1.Sandbox0Infra{
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
@@ -78,7 +76,67 @@ func TestApplyManagerConfigClearsIngestURLsWhenDisabled(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Empty(t, cfg.SandboxObservabilityLogsIngestURL)
-	assert.Empty(t, cfg.SandboxObservabilityMetricsIngestURL)
+}
+
+func TestApplyCtldConfigInjectsRuntimeSamplesIngestURL(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, infrav1alpha1.AddToScheme(scheme))
+
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox0", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			SandboxObservability: &infrav1alpha1.SandboxObservabilityConfig{
+				Type: infrav1alpha1.SandboxObservabilityTypeExternal,
+				External: &infrav1alpha1.ExternalSandboxObservabilityConfig{
+					ClickHouse: infrav1alpha1.ExternalSandboxObservabilityClickHouseConfig{
+						DSNSecret: infrav1alpha1.SandboxObservabilityClickHouseDSNSecretRef{Name: "sandbox-observability-dsn"},
+					},
+				},
+				Ingest: infrav1alpha1.SandboxObservabilityIngestConfig{
+					QueueSize:      23,
+					BatchSize:      9,
+					FlushInterval:  metav1.Duration{Duration: 2 * time.Second},
+					RequestTimeout: metav1.Duration{Duration: 3 * time.Second},
+					MaxRetries:     4,
+					RetryBackoff:   metav1.Duration{Duration: 250 * time.Millisecond},
+				},
+			},
+		},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		infra,
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "sandbox-observability-dsn", Namespace: "sandbox0-system"},
+			Data:       map[string][]byte{"dsn": []byte("clickhouse://sandbox0:password@clickhouse:9000/sandbox0_observability")},
+		},
+	).Build()
+	cfg := &apiconfig.CtldConfig{}
+
+	err := ApplyCtldConfig(context.Background(), client, infra, "http://cluster-gateway.svc/", cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, "http://cluster-gateway.svc/internal/v1/sandbox-observability/runtime-samples", cfg.SandboxObservabilityRuntimeSamplesIngestURL)
+	assert.Equal(t, 23, cfg.SandboxObservabilityIngestQueueSize)
+	assert.Equal(t, 9, cfg.SandboxObservabilityIngestBatchSize)
+	assert.Equal(t, 2*time.Second, cfg.SandboxObservabilityIngestFlushInterval.Duration)
+	assert.Equal(t, 3*time.Second, cfg.SandboxObservabilityIngestRequestTimeout.Duration)
+	assert.Equal(t, 4, cfg.SandboxObservabilityIngestMaxRetries)
+	assert.Equal(t, 250*time.Millisecond, cfg.SandboxObservabilityIngestRetryBackoff.Duration)
+}
+
+func TestApplyCtldConfigClearsIngestURLWhenDisabled(t *testing.T) {
+	cfg := &apiconfig.CtldConfig{SandboxObservabilityRuntimeSamplesIngestURL: "http://old/runtime-samples"}
+	infra := &infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			SandboxObservability: &infrav1alpha1.SandboxObservabilityConfig{Type: infrav1alpha1.SandboxObservabilityTypeDisabled},
+		},
+	}
+
+	err := ApplyCtldConfig(context.Background(), nil, infra, "http://cluster-gateway.svc", cfg)
+
+	require.NoError(t, err)
+	assert.Empty(t, cfg.SandboxObservabilityRuntimeSamplesIngestURL)
 }
 
 func TestGetRuntimeConfigUsesRegionClickHouse(t *testing.T) {

@@ -414,7 +414,7 @@ func main() {
 	sandboxPauseController := service.NewSandboxPauseController(sandboxService, logger)
 	sandboxService.SetPauseEnqueuer(sandboxPauseController)
 	operator.SetSandboxProbeRunner(sandboxService)
-	sandboxLogWorker, sandboxMetricWorker := buildSandboxObservabilityProducerWorkers(cfg, internalAuthGen, obsProvider, logger)
+	sandboxLogWorker := buildSandboxObservabilityLogWorker(cfg, internalAuthGen, obsProvider, logger)
 	staticAuth := make([]egressauthruntime.StaticAuthConfig, 0, len(cfg.EgressAuthStaticAuth))
 	for _, entry := range cfg.EgressAuthStaticAuth {
 		staticAuth = append(staticAuth, egressauthruntime.StaticAuthConfig{
@@ -556,7 +556,7 @@ func main() {
 		}
 	}
 
-	startSandboxObservabilityProducers(ctx, cfg, k8sClient, sandboxService, podLister, sandboxLogWorker, sandboxMetricWorker, logger, clk)
+	startSandboxObservabilityLogProducer(ctx, cfg, k8sClient, podLister, sandboxLogWorker, logger, clk)
 
 	// Start operator
 	go func() {

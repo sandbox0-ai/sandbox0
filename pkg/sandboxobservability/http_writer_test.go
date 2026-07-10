@@ -15,7 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestHTTPWriterPostsLogsAndMetricSamples(t *testing.T) {
+func TestHTTPWriterPostsLogsAndRuntimeSamples(t *testing.T) {
 	type recordedRequest struct {
 		path  string
 		token string
@@ -35,8 +35,8 @@ func TestHTTPWriterPostsLogsAndMetricSamples(t *testing.T) {
 	defer server.Close()
 
 	writer := NewHTTPWriter(HTTPWriterOptions{
-		LogsURL:    server.URL + "/logs",
-		MetricsURL: server.URL + "/metrics",
+		LogsURL:           server.URL + "/logs",
+		RuntimeSamplesURL: server.URL + "/runtime-samples",
 		TokenProvider: func(context.Context) (string, error) {
 			return "internal-token", nil
 		},
@@ -53,14 +53,15 @@ func TestHTTPWriterPostsLogsAndMetricSamples(t *testing.T) {
 	}})
 	require.NoError(t, err)
 
-	err = writer.InsertMetricSamples(context.Background(), []MetricSample{{
-		TeamID:     "team-1",
-		SandboxID:  "sandbox-1",
-		OccurredAt: time.Unix(101, 0).UTC(),
-		Name:       "process.cpu.percent",
-		Unit:       "percent",
-		Value:      12.5,
-		Cursor:     "metric-cursor",
+	cpuUsage := 0.5
+	err = writer.InsertRuntimeSamples(context.Background(), []RuntimeSample{{
+		TeamID:            "team-1",
+		SandboxID:         "sandbox-1",
+		RuntimeGeneration: 2,
+		SeriesEpoch:       "epoch-1",
+		ObservedAt:        time.Unix(101, 0).UTC(),
+		SampleID:          "runtime-sample-1",
+		CPU:               &RuntimeCPUValues{Usage: &cpuUsage},
 	}})
 	require.NoError(t, err)
 
@@ -74,14 +75,17 @@ func TestHTTPWriterPostsLogsAndMetricSamples(t *testing.T) {
 	require.Len(t, logsBody.Logs, 1)
 	assert.Equal(t, "hello", logsBody.Logs[0].Message)
 
-	assert.Equal(t, "/metrics", requests[1].path)
+	assert.Equal(t, "/runtime-samples", requests[1].path)
 	assert.Equal(t, "internal-token", requests[1].token)
 	var metricsBody struct {
-		Samples []MetricSample `json:"samples"`
+		Samples []RuntimeSample `json:"samples"`
 	}
 	require.NoError(t, json.Unmarshal(requests[1].body, &metricsBody))
 	require.Len(t, metricsBody.Samples, 1)
-	assert.Equal(t, "process.cpu.percent", metricsBody.Samples[0].Name)
+	assert.Equal(t, "runtime-sample-1", metricsBody.Samples[0].SampleID)
+	require.NotNil(t, metricsBody.Samples[0].CPU)
+	require.NotNil(t, metricsBody.Samples[0].CPU.Usage)
+	assert.Equal(t, 0.5, *metricsBody.Samples[0].CPU.Usage)
 }
 
 func TestHTTPWriterReturnsBackendDisabledWhenEndpointMissing(t *testing.T) {

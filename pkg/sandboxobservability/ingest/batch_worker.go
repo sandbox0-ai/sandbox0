@@ -13,6 +13,8 @@ type BatchStats struct {
 	FailedBatches uint64
 }
 
+const shutdownFlushTimeout = 5 * time.Second
+
 type batchWorker[T any] struct {
 	insertBatch   func(context.Context, []T) error
 	cfg           Config
@@ -61,26 +63,38 @@ func (w *batchWorker[T]) Run(ctx context.Context) {
 	defer ticker.Stop()
 
 	batch := make([]T, 0, w.cfg.BatchSize)
-	flush := func() {
+	flush := func(flushCtx context.Context) {
 		if len(batch) == 0 {
 			return
 		}
-		w.flushBatch(ctx, batch)
+		w.flushBatch(flushCtx, batch)
 		batch = make([]T, 0, w.cfg.BatchSize)
 	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			flush()
-			return
+			shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownFlushTimeout)
+			for {
+				select {
+				case item := <-w.queue:
+					batch = append(batch, item)
+					if len(batch) >= w.cfg.BatchSize {
+						flush(shutdownCtx)
+					}
+				default:
+					flush(shutdownCtx)
+					cancel()
+					return
+				}
+			}
 		case item := <-w.queue:
 			batch = append(batch, item)
 			if len(batch) >= w.cfg.BatchSize {
-				flush()
+				flush(ctx)
 			}
 		case <-ticker.C:
-			flush()
+			flush(ctx)
 		}
 	}
 }

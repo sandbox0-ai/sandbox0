@@ -20,23 +20,23 @@ import (
 type fakeSandboxObservabilityRepo struct {
 	eventsResult        *sandboxobservability.EventListResult
 	logsResult          *sandboxobservability.LogListResult
-	metricsResult       *sandboxobservability.MetricListResult
+	runtimeResult       *sandboxobservability.RuntimeSeriesResult
 	eventsErr           error
 	logsErr             error
-	metricsErr          error
+	runtimeErr          error
 	ingestErr           error
 	lastQuery           sandboxobservability.EventQuery
 	lastLogQuery        sandboxobservability.LogQuery
-	lastMetricQuery     sandboxobservability.MetricQuery
+	lastRuntimeQuery    sandboxobservability.RuntimeSeriesQuery
 	ingestEvents        []sandboxobservability.Event
 	ingestLogs          []sandboxobservability.LogEntry
-	ingestMetrics       []sandboxobservability.MetricSample
+	ingestRuntime       []sandboxobservability.RuntimeSample
 	eventsCalled        bool
 	logsCalled          bool
-	metricsCalled       bool
+	runtimeCalled       bool
 	ingestCalled        bool
 	ingestLogsCalled    bool
-	ingestMetricsCalled bool
+	ingestRuntimeCalled bool
 }
 
 func (f *fakeSandboxObservabilityRepo) ListEvents(_ context.Context, query sandboxobservability.EventQuery) (*sandboxobservability.EventListResult, error) {
@@ -51,10 +51,10 @@ func (f *fakeSandboxObservabilityRepo) ListLogs(_ context.Context, query sandbox
 	return f.logsResult, f.logsErr
 }
 
-func (f *fakeSandboxObservabilityRepo) ListMetricSamples(_ context.Context, query sandboxobservability.MetricQuery) (*sandboxobservability.MetricListResult, error) {
-	f.metricsCalled = true
-	f.lastMetricQuery = query
-	return f.metricsResult, f.metricsErr
+func (f *fakeSandboxObservabilityRepo) ListRuntimeSeries(_ context.Context, query sandboxobservability.RuntimeSeriesQuery) (*sandboxobservability.RuntimeSeriesResult, error) {
+	f.runtimeCalled = true
+	f.lastRuntimeQuery = query
+	return f.runtimeResult, f.runtimeErr
 }
 
 func (f *fakeSandboxObservabilityRepo) InsertEvents(_ context.Context, events []sandboxobservability.Event) error {
@@ -69,9 +69,9 @@ func (f *fakeSandboxObservabilityRepo) InsertLogs(_ context.Context, logs []sand
 	return f.ingestErr
 }
 
-func (f *fakeSandboxObservabilityRepo) InsertMetricSamples(_ context.Context, samples []sandboxobservability.MetricSample) error {
-	f.ingestMetricsCalled = true
-	f.ingestMetrics = append(f.ingestMetrics, samples...)
+func (f *fakeSandboxObservabilityRepo) InsertRuntimeSamples(_ context.Context, samples []sandboxobservability.RuntimeSample) error {
+	f.ingestRuntimeCalled = true
+	f.ingestRuntime = append(f.ingestRuntime, samples...)
 	return f.ingestErr
 }
 
@@ -178,44 +178,81 @@ func TestSandboxObservabilityHandlerParsesLogQuery(t *testing.T) {
 	}
 }
 
-func TestSandboxObservabilityHandlerParsesMetricQuery(t *testing.T) {
+func TestSandboxObservabilityHandlerParsesRuntimeMetricQuery(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	repo := &fakeSandboxObservabilityRepo{
-		metricsResult: &sandboxobservability.MetricListResult{
-			Samples: []sandboxobservability.MetricSample{{
-				TeamID:     "team-1",
-				SandboxID:  "sb-1",
-				OccurredAt: time.Date(2026, 7, 1, 1, 2, 3, 0, time.UTC),
-				IngestedAt: time.Date(2026, 7, 1, 1, 2, 4, 0, time.UTC),
-				Name:       "cpu.usage",
-				Unit:       "cores",
-				Value:      0.5,
-				Cursor:     "metric:1",
-			}},
+		runtimeResult: &sandboxobservability.RuntimeSeriesResult{
+			StartTime:   time.Date(2026, 7, 1, 1, 0, 0, 0, time.UTC),
+			EndTime:     time.Date(2026, 7, 1, 2, 0, 0, 0, time.UTC),
+			StepSeconds: 15,
+			Series:      []sandboxobservability.RuntimeSeries{},
+			Freshness:   sandboxobservability.RuntimeSeriesFreshness{Status: sandboxobservability.RuntimeSeriesFreshnessMissing},
+			Gaps:        []sandboxobservability.RuntimeSeriesGap{},
+			Partial:     true,
 		},
 	}
 	handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
-	rec := serveSandboxObservabilityRequest(t, handler.ListMetricSamples, "/api/v1/sandboxes/sb-1/observability/metrics?name=cpu.usage&names=memory.bytes,network.rx_bytes&context_id=ctx-1")
+	rec := serveSandboxObservabilityRequest(t, handler.GetRuntimeMetrics, "/api/v1/sandboxes/sb-1/metrics?start_time=2026-07-01T01:00:00Z&end_time=2026-07-01T02:00:00Z&metrics=sandbox.cpu.utilization,sandbox.network.io&step_seconds=15&statistic=maximum&max_points=120")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if !repo.metricsCalled {
-		t.Fatal("expected ListMetricSamples to be called")
+	if !repo.runtimeCalled {
+		t.Fatal("expected ListRuntimeSeries to be called")
 	}
-	if repo.lastMetricQuery.TeamID != "team-1" || repo.lastMetricQuery.SandboxID != "sb-1" ||
-		repo.lastMetricQuery.ContextID != "ctx-1" {
-		t.Fatalf("unexpected metric query identity: %+v", repo.lastMetricQuery)
+	if repo.lastRuntimeQuery.TeamID != "team-1" || repo.lastRuntimeQuery.SandboxID != "sb-1" ||
+		repo.lastRuntimeQuery.Step != 15*time.Second || repo.lastRuntimeQuery.MaxPoints != 120 ||
+		repo.lastRuntimeQuery.Statistic != sandboxobservability.RuntimeMetricStatisticMaximum {
+		t.Fatalf("unexpected runtime query: %+v", repo.lastRuntimeQuery)
 	}
-	wantNames := []string{"cpu.usage", "memory.bytes", "network.rx_bytes"}
-	if len(repo.lastMetricQuery.Names) != len(wantNames) {
-		t.Fatalf("metric names = %+v, want %+v", repo.lastMetricQuery.Names, wantNames)
+	wantNames := []sandboxobservability.RuntimeMetricName{sandboxobservability.RuntimeMetricCPUUtilization, sandboxobservability.RuntimeMetricNetworkIO}
+	if len(repo.lastRuntimeQuery.Metrics) != len(wantNames) {
+		t.Fatalf("metric names = %+v, want %+v", repo.lastRuntimeQuery.Metrics, wantNames)
 	}
 	for i, want := range wantNames {
-		if repo.lastMetricQuery.Names[i] != want {
-			t.Fatalf("metric names = %+v, want %+v", repo.lastMetricQuery.Names, wantNames)
+		if repo.lastRuntimeQuery.Metrics[i] != want {
+			t.Fatalf("metric names = %+v, want %+v", repo.lastRuntimeQuery.Metrics, wantNames)
 		}
+	}
+}
+
+func TestSandboxObservabilityHandlerReturnsRuntimeMetricCatalogWithoutBackend(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := NewSandboxObservabilityHandler(nil, zap.NewNop())
+	rec := serveSandboxObservabilityRequest(t, handler.GetRuntimeMetricsCatalog, "/api/v1/sandboxes/sb-1/metrics/catalog")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), string(sandboxobservability.RuntimeMetricCPUUtilization)) {
+		t.Fatalf("catalog response missing CPU metric: %s", rec.Body.String())
+	}
+}
+
+func TestSandboxObservabilityHandlerRejectsInvalidRuntimeMetricQuery(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+	}{
+		{name: "unknown metric", query: "metrics=sandbox.cpu.unknown"},
+		{name: "invalid statistic", query: "statistic=sum"},
+		{name: "zero step", query: "step_seconds=0"},
+		{name: "too many points", query: "max_points=1001"},
+		{name: "empty window", query: "start_time=2026-07-01T01:00:00Z&end_time=2026-07-01T01:00:00Z"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			repo := &fakeSandboxObservabilityRepo{}
+			handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
+			rec := serveSandboxObservabilityRequest(t, handler.GetRuntimeMetrics, "/api/v1/sandboxes/sb-1/metrics?"+tt.query)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+			}
+			if repo.runtimeCalled {
+				t.Fatal("repository should not be called for invalid runtime query")
+			}
+		})
 	}
 }
 
@@ -326,18 +363,18 @@ func TestSandboxObservabilityHandlerIngestLogs(t *testing.T) {
 	}
 }
 
-func TestSandboxObservabilityHandlerIngestMetricSamples(t *testing.T) {
+func TestSandboxObservabilityHandlerIngestRuntimeSamples(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	repo := &fakeSandboxObservabilityRepo{}
 	handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
-	rec := serveSandboxObservabilityIngestRequest(t, "/internal/v1/sandbox-observability/metrics", handler.IngestMetricSamples, `{"samples":[{"team_id":"team-1","sandbox_id":"sb-1","occurred_at":"2026-07-01T01:02:03Z","name":"cpu.usage","unit":"cores","value":0.5,"cursor":"metric:1"}]}`)
+	rec := serveSandboxObservabilityIngestRequest(t, "/internal/v1/sandbox-observability/runtime-samples", handler.IngestRuntimeSamples, `{"samples":[{"team_id":"team-1","sandbox_id":"sb-1","region_id":"region-1","cluster_id":"cluster-1","runtime_generation":2,"series_epoch":"epoch-1","observed_at":"2026-07-01T01:02:03Z","sample_id":"sample-1","cpu":{"usage":0.5}}]}`)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
-	if !repo.ingestMetricsCalled || len(repo.ingestMetrics) != 1 {
-		t.Fatalf("ingest metrics called=%v samples=%d", repo.ingestMetricsCalled, len(repo.ingestMetrics))
+	if !repo.ingestRuntimeCalled || len(repo.ingestRuntime) != 1 {
+		t.Fatalf("ingest runtime called=%v samples=%d", repo.ingestRuntimeCalled, len(repo.ingestRuntime))
 	}
 }
 
@@ -358,7 +395,8 @@ func serveSandboxObservabilityRequest(t *testing.T, h gin.HandlerFunc, target st
 	router := gin.New()
 	router.GET("/api/v1/sandboxes/:id/observability/events", withTestAuth(h))
 	router.GET("/api/v1/sandboxes/:id/observability/logs", withTestAuth(h))
-	router.GET("/api/v1/sandboxes/:id/observability/metrics", withTestAuth(h))
+	router.GET("/api/v1/sandboxes/:id/metrics", withTestAuth(h))
+	router.GET("/api/v1/sandboxes/:id/metrics/catalog", withTestAuth(h))
 
 	req := httptest.NewRequest(http.MethodGet, target, nil)
 	rec := httptest.NewRecorder()

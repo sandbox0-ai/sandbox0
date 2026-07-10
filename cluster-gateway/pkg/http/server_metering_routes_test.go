@@ -86,7 +86,7 @@ func TestSetupRoutesMountsSandboxObservabilityIngestInPublicMode(t *testing.T) {
 	for _, path := range []string{
 		"/internal/v1/sandbox-observability/events",
 		"/internal/v1/sandbox-observability/logs",
-		"/internal/v1/sandbox-observability/metrics",
+		"/internal/v1/sandbox-observability/runtime-samples",
 	} {
 		if !hasRoute(server.router, "POST", path) {
 			t.Fatalf("expected public mode to mount sandbox observability ingest route %s", path)
@@ -142,6 +142,7 @@ func TestSetupRoutesDoesNotMountRemovedSandboxEndpoints(t *testing.T) {
 		"/api/v1/sandboxes/:id/stats",
 		"/api/v1/sandboxes/:id/contexts/:ctx_id/stats",
 		"/api/v1/sandboxes/:id/audit/events",
+		"/api/v1/sandboxes/:id/observability/metrics",
 	} {
 		if hasRoute(server.router, "GET", path) {
 			t.Fatalf("expected legacy route %s to be removed", path)
@@ -149,7 +150,7 @@ func TestSetupRoutesDoesNotMountRemovedSandboxEndpoints(t *testing.T) {
 	}
 }
 
-func TestSetupRoutesMountsSandboxHistoricalObservabilityEndpoints(t *testing.T) {
+func TestSetupRoutesMountsSandboxObservabilityEndpoints(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	server, _, _ := testMeteringRouteServer(t, "public")
@@ -160,7 +161,8 @@ func TestSetupRoutesMountsSandboxHistoricalObservabilityEndpoints(t *testing.T) 
 	for _, path := range []string{
 		"/api/v1/sandboxes/:id/observability/events",
 		"/api/v1/sandboxes/:id/observability/logs",
-		"/api/v1/sandboxes/:id/observability/metrics",
+		"/api/v1/sandboxes/:id/metrics",
+		"/api/v1/sandboxes/:id/metrics/catalog",
 	} {
 		if !hasRoute(server.router, "GET", path) {
 			t.Fatalf("expected route %s to be mounted", path)
@@ -196,6 +198,104 @@ func TestSandboxObservabilityRouteDoesNotRequireManagerUpstream(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "sandbox observability backend is disabled") {
 		t.Fatalf("response = %s, want disabled backend error", rec.Body.String())
+	}
+}
+
+func TestSandboxRuntimeSampleIngestAcceptsCtldToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server, _, _ := testMeteringRouteServer(t, authModeInternal)
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ed25519 key: %v", err)
+	}
+	validator := internalauth.NewValidator(internalauth.ValidatorConfig{
+		Target:             "cluster-gateway",
+		PublicKey:          publicKey,
+		AllowedCallers:     []string{"ctld"},
+		ClockSkewTolerance: 5 * time.Second,
+	})
+	server.sandboxObservabilityIngestAuthMiddleware = middleware.NewInternalAuthMiddleware(validator, zap.NewNop())
+	server.requestLogger = middleware.NewRequestLogger(zap.NewNop())
+	server.obsProvider = newTestMeteringObservability(t)
+	server.setupRoutes()
+
+	generator := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller:     "ctld",
+		PrivateKey: privateKey,
+		TTL:        time.Minute,
+	})
+	token, err := generator.Generate("cluster-gateway", "team-1", "ctld", internalauth.GenerateOptions{
+		Permissions: []string{authn.PermSandboxObservabilityWrite},
+	})
+	if err != nil {
+		t.Fatalf("generate ctld token: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/sandbox-observability/runtime-samples", strings.NewReader(`{"samples":[]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(internalauth.DefaultTokenHeader, token)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want backend response after ctld auth: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "permission denied") || strings.Contains(rec.Body.String(), "invalid internal token") {
+		t.Fatalf("ctld token was rejected: %s", rec.Body.String())
+	}
+}
+
+func TestInternalAuthValidatorsKeepControlAndDataPlaneTrustRootsSeparate(t *testing.T) {
+	controlPublicKey, controlPrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate control-plane key: %v", err)
+	}
+	dataPublicKey, dataPrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate data-plane key: %v", err)
+	}
+
+	controlValidator, ingestValidator := newInternalAuthValidators(
+		authModeInternal,
+		[]string{"regional-gateway"},
+		controlPublicKey,
+		dataPublicKey,
+	)
+	regionalGenerator := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller:     "regional-gateway",
+		PrivateKey: controlPrivateKey,
+		TTL:        time.Minute,
+	})
+	ctldGenerator := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller:     "ctld",
+		PrivateKey: dataPrivateKey,
+		TTL:        time.Minute,
+	})
+	regionalToken, err := regionalGenerator.Generate("cluster-gateway", "team-1", "user-1", internalauth.GenerateOptions{
+		Permissions: []string{authn.PermSandboxRead},
+	})
+	if err != nil {
+		t.Fatalf("generate regional token: %v", err)
+	}
+	ctldToken, err := ctldGenerator.Generate("cluster-gateway", "team-1", "ctld", internalauth.GenerateOptions{
+		Permissions: []string{authn.PermSandboxObservabilityWrite},
+	})
+	if err != nil {
+		t.Fatalf("generate ctld token: %v", err)
+	}
+
+	if _, err := controlValidator.Validate(regionalToken); err != nil {
+		t.Fatalf("control-plane validator rejected regional token: %v", err)
+	}
+	if _, err := ingestValidator.Validate(ctldToken); err != nil {
+		t.Fatalf("ingest validator rejected ctld token: %v", err)
+	}
+	if _, err := ingestValidator.Validate(regionalToken); err == nil {
+		t.Fatal("ingest validator accepted control-plane token")
+	}
+	if _, err := controlValidator.Validate(ctldToken); err == nil {
+		t.Fatal("control-plane validator accepted data-plane token")
 	}
 }
 
@@ -303,25 +403,25 @@ func testMeteringRouteServer(t *testing.T, authMode string) (*Server, *internala
 	issuer := authn.NewIssuer("cluster-gateway", "secret", time.Minute, time.Hour)
 	publicAuth := gatewaymiddleware.NewAuthMiddleware(nil, "secret", issuer, zap.NewNop())
 	internalAuth := middleware.NewInternalAuthMiddleware(validator, zap.NewNop())
-	netdValidator := internalauth.NewValidator(internalauth.ValidatorConfig{
+	sandboxObservabilityIngestValidator := internalauth.NewValidator(internalauth.ValidatorConfig{
 		Target:             "cluster-gateway",
 		PublicKey:          publicKey,
 		AllowedCallers:     []string{"netd"},
 		ClockSkewTolerance: 5 * time.Second,
 	})
-	netdAuth := middleware.NewInternalAuthMiddleware(netdValidator, zap.NewNop())
+	sandboxObservabilityIngestAuth := middleware.NewInternalAuthMiddleware(sandboxObservabilityIngestValidator, zap.NewNop())
 
 	server := &Server{
-		router:               gin.New(),
-		cfg:                  &config.ClusterGatewayConfig{AuthMode: authMode},
-		authMiddleware:       internalAuth,
-		netdAuthMiddleware:   netdAuth,
-		publicAuth:           publicAuth,
-		compositeAuth:        middleware.NewCompositeAuthMiddleware(internalAuth, publicAuth, zap.NewNop()),
-		publicJWT:            issuer,
-		logger:               zap.NewNop(),
-		meteringHandler:      gatewayhandlers.NewMeteringHandler(nil, "aws-us-east-1", zap.NewNop()),
-		observabilityHandler: gatewayhandlers.NewSandboxObservabilityHandler(nil, zap.NewNop()),
+		router:                                   gin.New(),
+		cfg:                                      &config.ClusterGatewayConfig{AuthMode: authMode},
+		authMiddleware:                           internalAuth,
+		sandboxObservabilityIngestAuthMiddleware: sandboxObservabilityIngestAuth,
+		publicAuth:                               publicAuth,
+		compositeAuth:                            middleware.NewCompositeAuthMiddleware(internalAuth, publicAuth, zap.NewNop()),
+		publicJWT:                                issuer,
+		logger:                                   zap.NewNop(),
+		meteringHandler:                          gatewayhandlers.NewMeteringHandler(nil, "aws-us-east-1", zap.NewNop()),
+		observabilityHandler:                     gatewayhandlers.NewSandboxObservabilityHandler(nil, zap.NewNop()),
 	}
 
 	return server, generator, issuer

@@ -6,6 +6,10 @@ import (
 	"testing"
 	"time"
 
+	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -13,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
@@ -71,7 +76,22 @@ func TestReconcileFallsBackToLegacyNetdPlacement(t *testing.T) {
 	}
 }
 
+func TestCtldTerminationGraceCoversStaticShutdownBudget(t *testing.T) {
+	const (
+		shutdownBudgetSeconds = int64(5 + 7 + 25)
+		shutdownMarginSeconds = int64(5)
+	)
+
+	assert.LessOrEqual(t, shutdownBudgetSeconds+shutdownMarginSeconds, ctldTerminationGraceSeconds)
+}
+
 func reconcileCtldDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) *appsv1.DaemonSet {
+	t.Helper()
+	ds, _ := reconcileCtldResources(t, infra)
+	return ds
+}
+
+func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, extraObjects ...ctrlclient.Object) (*appsv1.DaemonSet, ctrlclient.Client) {
 	t.Helper()
 
 	scheme := runtime.NewScheme()
@@ -88,13 +108,15 @@ func reconcileCtldDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) *a
 		t.Fatalf("add infra scheme: %v", err)
 	}
 
+	objects := []ctrlclient.Object{infra.DeepCopy()}
+	objects = append(objects, extraObjects...)
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(infra.DeepCopy()).
+		WithObjects(objects...).
 		Build()
 
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
-	if err := reconciler.Reconcile(context.Background(), infra, "ghcr.io/sandbox0-ai/sandbox0", "latest"); err != nil {
+	if err := reconciler.Reconcile(context.Background(), infra, "ghcr.io/sandbox0-ai/sandbox0", "latest", "http://demo-cluster-gateway:8443"); err != nil {
 		t.Fatalf("reconcile returned error: %v", err)
 	}
 
@@ -147,7 +169,7 @@ func reconcileCtldDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) *a
 		t.Fatal("expected csi driver podInfoOnMount=true")
 	}
 
-	return ds
+	return ds, client
 }
 
 func assertCtldProbe(t *testing.T, name string, probe *corev1.Probe, path string, periodSeconds int32) {
@@ -244,6 +266,59 @@ func TestReconcileMountsObjectEncryptionKeyWhenEnabled(t *testing.T) {
 	assertPodVolume(t, ds.Spec.Template.Spec.Volumes, "object-encryption-key")
 }
 
+func TestReconcileDoesNotMountInternalJWTKeyWhenRuntimeSamplesDisabled(t *testing.T) {
+	ds := reconcileCtldDaemonSet(t, newCtldTestInfra())
+
+	assertNoContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "internal-jwt-private-key")
+}
+
+func TestReconcileInjectsRuntimeSampleProducerConfigAndJWTKey(t *testing.T) {
+	infra := newCtldTestInfra()
+	infra.Spec.SandboxObservability = &infrav1alpha1.SandboxObservabilityConfig{
+		Type: infrav1alpha1.SandboxObservabilityTypeExternal,
+		External: &infrav1alpha1.ExternalSandboxObservabilityConfig{
+			ClickHouse: infrav1alpha1.ExternalSandboxObservabilityClickHouseConfig{
+				DSNSecret: infrav1alpha1.SandboxObservabilityClickHouseDSNSecretRef{Name: "sandbox-observability-dsn"},
+			},
+		},
+		Ingest: infrav1alpha1.SandboxObservabilityIngestConfig{
+			QueueSize:      2048,
+			BatchSize:      64,
+			FlushInterval:  metav1.Duration{Duration: 2 * time.Second},
+			RequestTimeout: metav1.Duration{Duration: 3 * time.Second},
+			MaxRetries:     4,
+			RetryBackoff:   metav1.Duration{Duration: 250 * time.Millisecond},
+		},
+	}
+	dsnSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-observability-dsn", Namespace: infra.Namespace},
+		Data:       map[string][]byte{"dsn": []byte("clickhouse://sandbox0:password@clickhouse:9000/sandbox0_observability")},
+	}
+
+	ds, client := reconcileCtldResources(t, infra, dsnSecret)
+	ctldContainer := ds.Spec.Template.Spec.Containers[0]
+	assertContainerVolumeMount(t, ctldContainer.VolumeMounts, "internal-jwt-private-key", "/secrets/internal_jwt_private.key")
+	assertSecretVolume(t, ds.Spec.Template.Spec.Volumes, "internal-jwt-private-key")
+
+	configMapName := ""
+	for _, volume := range ds.Spec.Template.Spec.Volumes {
+		if volume.Name == "config" && volume.ConfigMap != nil {
+			configMapName = volume.ConfigMap.Name
+			break
+		}
+	}
+	require.NotEmpty(t, configMapName)
+	configMap := &corev1.ConfigMap{}
+	require.NoError(t, client.Get(context.Background(), types.NamespacedName{Name: configMapName, Namespace: infra.Namespace}, configMap))
+	cfg := &apiconfig.CtldConfig{}
+	require.NoError(t, yaml.Unmarshal([]byte(configMap.Data["config.yaml"]), cfg))
+	assert.Equal(t, "http://demo-cluster-gateway:8443/internal/v1/sandbox-observability/runtime-samples", cfg.SandboxObservabilityRuntimeSamplesIngestURL)
+	assert.Equal(t, 2048, cfg.SandboxObservabilityIngestQueueSize)
+	assert.Equal(t, 64, cfg.SandboxObservabilityIngestBatchSize)
+	assert.Equal(t, 2*time.Second, cfg.SandboxObservabilityIngestFlushInterval.Duration)
+	assert.Equal(t, 3*time.Second, cfg.SandboxObservabilityIngestRequestTimeout.Duration)
+}
+
 func TestBuildStorageConfigDefaultsDataPlaneIdentity(t *testing.T) {
 	infra := newCtldTestInfra()
 	infra.Spec.PublicExposure = &infrav1alpha1.PublicExposureConfig{
@@ -295,6 +370,15 @@ func assertContainerVolumeMount(t *testing.T, mounts []corev1.VolumeMount, name,
 	t.Fatalf("expected volume mount %q, got %#v", name, mounts)
 }
 
+func assertNoContainerVolumeMount(t *testing.T, mounts []corev1.VolumeMount, name string) {
+	t.Helper()
+	for _, mount := range mounts {
+		if mount.Name == name {
+			t.Fatalf("expected volume mount %q to be absent, got %#v", name, mounts)
+		}
+	}
+}
+
 func assertPodVolume(t *testing.T, volumes []corev1.Volume, name string) {
 	t.Helper()
 	for _, volume := range volumes {
@@ -320,6 +404,20 @@ func assertHostPathVolume(t *testing.T, volumes []corev1.Volume, name, path stri
 		return
 	}
 	t.Fatalf("expected volume %q, got %#v", name, volumes)
+}
+
+func assertSecretVolume(t *testing.T, volumes []corev1.Volume, name string) {
+	t.Helper()
+	for _, volume := range volumes {
+		if volume.Name != name {
+			continue
+		}
+		if volume.Secret == nil || volume.Secret.SecretName == "" {
+			t.Fatalf("volume %q is not backed by a secret: %#v", name, volume)
+		}
+		return
+	}
+	t.Fatalf("expected secret volume %q, got %#v", name, volumes)
 }
 
 func newCtldTestInfra() *infrav1alpha1.Sandbox0Infra {

@@ -429,7 +429,7 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 			if err := rbacReconciler.ReconcileCtldRBAC(ctx, infra); err != nil {
 				return err
 			}
-			return ctldReconciler.Reconcile(ctx, infra, imageRepo, imageTag)
+			return ctldReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan.Services.ClusterGateway.URL)
 		}, nil
 	case "manager-rbac":
 		return func(ctx context.Context) error { return rbacReconciler.ReconcileManagerRBAC(ctx, infra) }, nil

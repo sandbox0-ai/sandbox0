@@ -8,12 +8,21 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	ctldserver "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/server"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestCtldShutdownBudgetFitsDeploymentGracePeriod(t *testing.T) {
+	const deployedTerminationGrace = 45 * time.Second
+
+	shutdownBudget := httpShutdownTimeout + runtimeMetricsShutdownTimeout + portalShutdownTimeout
+	assert.LessOrEqual(t, shutdownBudget+shutdownGraceMargin, deployedTerminationGrace)
+	assert.Equal(t, minimumTerminationGrace, shutdownBudget+shutdownGraceMargin)
+}
 
 func TestCtldHealthEndpoints(t *testing.T) {
 	server := newHTTPServer(":0", nil)

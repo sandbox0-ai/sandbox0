@@ -80,26 +80,38 @@ func (w *Worker) Run(ctx context.Context) {
 	defer ticker.Stop()
 
 	batch := make([]sandboxobservability.Event, 0, w.cfg.BatchSize)
-	flush := func() {
+	flush := func(flushCtx context.Context) {
 		if len(batch) == 0 {
 			return
 		}
-		w.flushBatch(ctx, batch)
+		w.flushBatch(flushCtx, batch)
 		batch = make([]sandboxobservability.Event, 0, w.cfg.BatchSize)
 	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			flush()
-			return
+			shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownFlushTimeout)
+			for {
+				select {
+				case event := <-w.queue:
+					batch = append(batch, event)
+					if len(batch) >= w.cfg.BatchSize {
+						flush(shutdownCtx)
+					}
+				default:
+					flush(shutdownCtx)
+					cancel()
+					return
+				}
+			}
 		case event := <-w.queue:
 			batch = append(batch, event)
 			if len(batch) >= w.cfg.BatchSize {
-				flush()
+				flush(ctx)
 			}
 		case <-ticker.C:
-			flush()
+			flush(ctx)
 		}
 	}
 }

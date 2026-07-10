@@ -1614,13 +1614,17 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-  /api/v1/sandboxes/{id}/observability/metrics:
+  /api/v1/sandboxes/{id}/metrics:
     get:
+      operationId: getSandboxRuntimeMetrics
       tags: [observability]
-      summary: Query historical sandbox metric samples
+      summary: Query chart-ready sandbox runtime metrics
       description: |
-        Queries the asynchronous per-sandbox metric sample projection. This endpoint is
-        separate from platform service metrics and metering usage truth.
+        Returns bounded, downsampled sandbox-wide runtime series. When timestamps are
+        omitted, the query covers the hour ending now. The maximum range is 30 days.
+        Counter rates never cross a runtime reset boundary. Missing data is reported
+        as gaps and is never synthesized as zero. This endpoint is separate from
+        platform service metrics and metering usage truth.
       security:
         - bearerAuth: []
       x-upstream-service: cluster-gateway
@@ -1628,64 +1632,48 @@ paths:
         - $ref: "#/components/parameters/SandboxID"
         - name: start_time
           in: query
-          description: Include samples that occurred at or after this RFC3339 timestamp.
+          description: Query observations at or after this RFC3339 timestamp. Defaults to one hour before end_time.
           schema:
             type: string
             format: date-time
         - name: end_time
           in: query
-          description: Include samples that occurred at or before this RFC3339 timestamp.
+          description: Query observations at or before this RFC3339 timestamp. Defaults to the current time.
           schema:
             type: string
             format: date-time
-        - name: limit
+        - name: metrics
           in: query
-          description: Maximum number of samples to return. Values above 1000 are capped.
+          description: Comma-separated canonical metric names. Defaults to CPU utilization, memory utilization, and network I/O.
+          schema:
+            type: string
+        - name: step_seconds
+          in: query
+          description: Requested bucket width in seconds. The effective step is at least 15 seconds and may be increased to honor max_points.
           schema:
             type: integer
-            default: 100
+            minimum: 1
+            maximum: 86400
+        - name: statistic
+          in: query
+          description: Aggregation applied within each output bucket. Auto uses average for gauges and rate for counters.
+          schema:
+            $ref: "#/components/schemas/SandboxRuntimeMetricStatistic"
+        - name: max_points
+          in: query
+          description: Maximum points per returned series. The server may increase step_seconds to honor this bound.
+          schema:
+            type: integer
+            default: 240
             minimum: 1
             maximum: 1000
-        - name: cursor
-          in: query
-          description: Opaque pagination cursor returned by a previous response. When watch is true, this must be a watch resume cursor from an NDJSON watermark line.
-          schema:
-            type: string
-        - name: watch
-          in: query
-          description: Stream matching records as application/x-ndjson in ingestion order until the client disconnects. When watch is true, end_time is not supported. Without cursor or start_time, streaming starts at request time.
-          schema:
-            type: boolean
-            default: false
-        - name: context_id
-          in: query
-          description: Restrict results to a sandbox process context.
-          schema:
-            type: string
-        - name: name
-          in: query
-          description: Metric name filter. This parameter may be repeated.
-          schema:
-            type: array
-            items:
-              type: string
-          style: form
-          explode: true
-        - name: names
-          in: query
-          description: Comma-separated metric name filter.
-          schema:
-            type: string
       responses:
         "200":
-          description: Historical sandbox metric samples
+          description: Chart-ready sandbox runtime metric series
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SuccessSandboxObservabilityMetricsResponse"
-            application/x-ndjson:
-              schema:
-                $ref: "#/components/schemas/SandboxObservabilityWatchLine"
+                $ref: "#/components/schemas/SuccessSandboxRuntimeMetricsResponse"
         "400":
           description: Invalid query parameters
           content:
@@ -1700,6 +1688,30 @@ paths:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "503":
           description: Historical observability backend disabled or unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/sandboxes/{id}/metrics/catalog:
+    get:
+      operationId: getSandboxRuntimeMetricsCatalog
+      tags: [observability]
+      summary: Get the sandbox runtime metric catalog
+      description: Returns the bounded canonical metric names, kinds, units, and dimensions supported by the runtime metrics API.
+      security:
+        - bearerAuth: []
+      x-upstream-service: cluster-gateway
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+      responses:
+        "200":
+          description: Sandbox runtime metric catalog
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessSandboxRuntimeMetricsCatalogResponse"
+        "403":
+          description: Forbidden
           content:
             application/json:
               schema:
@@ -5044,70 +5056,169 @@ components:
         watermark:
           type: string
       required: [logs]
-    SandboxObservabilityMetricSample:
+    SandboxRuntimeMetricName:
+      type: string
+      enum:
+        - sandbox.cpu.utilization
+        - sandbox.cpu.usage
+        - sandbox.cpu.time
+        - sandbox.cpu.limit
+        - sandbox.memory.usage
+        - sandbox.memory.working_set
+        - sandbox.memory.available
+        - sandbox.memory.limit
+        - sandbox.memory.utilization
+        - sandbox.network.io
+        - sandbox.network.errors
+        - sandbox.process.count
+        - sandbox.rootfs.writable.usage
+        - sandbox.rootfs.writable.inodes
+    SandboxRuntimeMetricKind:
+      type: string
+      enum: [gauge, counter]
+    SandboxRuntimeMetricUnit:
+      type: string
+      enum: [ratio, cores, seconds, bytes, count, bytes_per_second, count_per_second]
+    SandboxRuntimeMetricStatistic:
+      type: string
+      enum: [auto, average, minimum, maximum, last, rate]
+    SandboxRuntimeMetricGapReason:
+      type: string
+      enum: [unavailable, unsupported, collection_error, no_data, series_reset]
+    SandboxRuntimeMetricFreshnessStatus:
+      type: string
+      enum: [fresh, stale, missing]
+    SandboxRuntimeMetricDescriptor:
       type: object
       properties:
-        team_id:
-          type: string
-        sandbox_id:
-          type: string
-        region_id:
-          type: string
-        cluster_id:
-          type: string
-        context_id:
-          type: string
-        occurred_at:
-          type: string
-          format: date-time
-        ingested_at:
-          type: string
-          format: date-time
         name:
-          type: string
+          $ref: "#/components/schemas/SandboxRuntimeMetricName"
+        kind:
+          $ref: "#/components/schemas/SandboxRuntimeMetricKind"
         unit:
+          $ref: "#/components/schemas/SandboxRuntimeMetricUnit"
+        dimensions:
+          type: array
+          items:
+            type: string
+        description:
           type: string
+      required: [name, kind, unit, dimensions, description]
+    SandboxRuntimeMetricsCatalogResponse:
+      type: object
+      properties:
+        metrics:
+          type: array
+          items:
+            $ref: "#/components/schemas/SandboxRuntimeMetricDescriptor"
+      required: [metrics]
+    SandboxRuntimeMetricPoint:
+      type: object
+      properties:
+        time:
+          type: string
+          format: date-time
         value:
           type: number
           format: double
-        cursor:
-          type: string
-        attributes:
-          type: object
-          additionalProperties: true
-      required:
-        - team_id
-        - sandbox_id
-        - region_id
-        - cluster_id
-        - occurred_at
-        - ingested_at
-        - name
-        - value
-        - cursor
-    SandboxObservabilityMetricsResponse:
+      required: [time, value]
+    SandboxRuntimeMetricSegment:
       type: object
+      description: A continuous series segment. Runtime restarts and collector counter resets start a new segment without exposing internal topology identifiers.
       properties:
-        samples:
+        points:
           type: array
           items:
-            $ref: "#/components/schemas/SandboxObservabilityMetricSample"
-        next_cursor:
+            $ref: "#/components/schemas/SandboxRuntimeMetricPoint"
+      required: [points]
+    SandboxRuntimeMetricSeries:
+      type: object
+      properties:
+        metric:
+          $ref: "#/components/schemas/SandboxRuntimeMetricName"
+        kind:
+          $ref: "#/components/schemas/SandboxRuntimeMetricKind"
+        unit:
+          $ref: "#/components/schemas/SandboxRuntimeMetricUnit"
+        statistic:
+          $ref: "#/components/schemas/SandboxRuntimeMetricStatistic"
+        dimensions:
+          type: object
+          additionalProperties:
+            type: string
+        segments:
+          type: array
+          items:
+            $ref: "#/components/schemas/SandboxRuntimeMetricSegment"
+      required: [metric, kind, unit, statistic, segments]
+    SandboxRuntimeMetricGap:
+      type: object
+      properties:
+        metric:
+          $ref: "#/components/schemas/SandboxRuntimeMetricName"
+        dimensions:
+          type: object
+          additionalProperties:
+            type: string
+        start_time:
           type: string
-        watermark:
+          format: date-time
+        end_time:
           type: string
-      required: [samples]
+          format: date-time
+        reason:
+          $ref: "#/components/schemas/SandboxRuntimeMetricGapReason"
+      required: [metric, start_time, end_time, reason]
+    SandboxRuntimeMetricFreshness:
+      type: object
+      description: Freshness is measured relative to the requested end_time, including for historical queries.
+      properties:
+        newest_observed_at:
+          type: string
+          format: date-time
+        age_seconds:
+          type: number
+          format: double
+          minimum: 0
+        status:
+          $ref: "#/components/schemas/SandboxRuntimeMetricFreshnessStatus"
+      required: [status]
+    SandboxRuntimeMetricsResponse:
+      type: object
+      properties:
+        start_time:
+          type: string
+          format: date-time
+        end_time:
+          type: string
+          format: date-time
+        step_seconds:
+          type: integer
+          format: int64
+          minimum: 15
+        series:
+          type: array
+          items:
+            $ref: "#/components/schemas/SandboxRuntimeMetricSeries"
+        freshness:
+          $ref: "#/components/schemas/SandboxRuntimeMetricFreshness"
+        gaps:
+          type: array
+          items:
+            $ref: "#/components/schemas/SandboxRuntimeMetricGap"
+        partial:
+          type: boolean
+      required: [start_time, end_time, step_seconds, series, freshness, gaps, partial]
     SandboxObservabilityWatchLine:
       type: object
       properties:
         type:
           type: string
-          enum: [event, log, metric_sample, watermark, heartbeat, error]
+          enum: [event, log, watermark, heartbeat, error]
         data:
           oneOf:
             - $ref: "#/components/schemas/SandboxObservabilityEvent"
             - $ref: "#/components/schemas/SandboxObservabilityLogEntry"
-            - $ref: "#/components/schemas/SandboxObservabilityMetricSample"
         cursor:
           type: string
           description: Watch resume cursor. Present on watermark lines.
@@ -5136,13 +5247,20 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/SandboxObservabilityLogsResponse"
-    SuccessSandboxObservabilityMetricsResponse:
+    SuccessSandboxRuntimeMetricsResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
           properties:
             data:
-              $ref: "#/components/schemas/SandboxObservabilityMetricsResponse"
+              $ref: "#/components/schemas/SandboxRuntimeMetricsResponse"
+    SuccessSandboxRuntimeMetricsCatalogResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/SandboxRuntimeMetricsCatalogResponse"
     PauseSandboxResponse:
       type: object
       properties:

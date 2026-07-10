@@ -113,8 +113,8 @@ type SandboxObservabilityClickHouseConfig struct {
 	// +kubebuilder:default="sandbox_logs"
 	LogsTable string `yaml:"logs_table" json:"logsTable"`
 	// +optional
-	// +kubebuilder:default="sandbox_metric_samples"
-	MetricsTable string `yaml:"metrics_table" json:"metricsTable"`
+	// +kubebuilder:default="sandbox_runtime_samples"
+	RuntimeSamplesTable string `yaml:"runtime_samples_table" json:"runtimeSamplesTable"`
 	// RetentionDays controls ClickHouse TTL for the events table. It is kept as
 	// the runtime alias for audit/lifecycle event retention.
 	// +optional
@@ -124,10 +124,10 @@ type SandboxObservabilityClickHouseConfig struct {
 	// +optional
 	// +kubebuilder:default=7
 	LogsRetentionDays int `yaml:"logs_retention_days" json:"logsRetentionDays"`
-	// MetricsRetentionDays controls ClickHouse TTL for metric samples.
+	// RuntimeSamplesRetentionDays controls ClickHouse TTL for runtime samples.
 	// +optional
 	// +kubebuilder:default=30
-	MetricsRetentionDays int `yaml:"metrics_retention_days" json:"metricsRetentionDays"`
+	RuntimeSamplesRetentionDays int `yaml:"runtime_samples_retention_days" json:"runtimeSamplesRetentionDays"`
 	// ConnectTimeout bounds startup connection and schema checks.
 	// +optional
 	// +kubebuilder:default="10s"

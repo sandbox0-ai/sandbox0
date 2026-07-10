@@ -93,8 +93,24 @@ func TestNodeFSJournalPreparesStableShardsAndCommitsSession(t *testing.T) {
 	if err := store.CommitShardSession(0, []byte("not-json")); err == nil {
 		t.Fatal("CommitShardSession(invalid) error = nil")
 	}
+	if err := store.ConfigureRecovery(true); err == nil {
+		t.Fatal("ConfigureRecovery(after session) error = nil")
+	}
 	if err := store.ClearShardSession(0); err != nil {
 		t.Fatalf("ClearShardSession() error = %v", err)
+	}
+}
+
+func TestNodeFSJournalConfiguresRecoveryBeforeShardInit(t *testing.T) {
+	store, err := openNodeFSJournal(t.TempDir(), "node-a", 1)
+	if err != nil {
+		t.Fatalf("openNodeFSJournal() error = %v", err)
+	}
+	if err := store.ConfigureRecovery(true); err != nil {
+		t.Fatalf("ConfigureRecovery() error = %v", err)
+	}
+	if !store.Snapshot().RecoveryRequired {
+		t.Fatal("recovery_required = false")
 	}
 }
 

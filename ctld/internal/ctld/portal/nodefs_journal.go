@@ -38,9 +38,31 @@ type nodeFSJournal struct {
 	NodeIdentity         string              `json:"node_identity"`
 	ConnectionGeneration string              `json:"connection_generation"`
 	ShardCount           int                 `json:"shard_count"`
+	RecoveryRequired     bool                `json:"recovery_required"`
 	NextSlotByShard      []uint64            `json:"next_slot_by_shard"`
 	Shards               []nodeFSShardState  `json:"shards"`
 	Portals              []nodeFSPortalState `json:"portals"`
+}
+
+// ConfigureRecovery makes the recovery contract immutable once a shard has
+// completed INIT or a portal has been allocated. This prevents a rollout from
+// silently replacing recoverable connections with ordinary FUSE mounts.
+func (s *nodeFSJournalStore) ConfigureRecovery(required bool) error {
+	return s.Update(func(state *nodeFSJournal) error {
+		if state.RecoveryRequired == required {
+			return nil
+		}
+		for _, shard := range state.Shards {
+			if len(shard.SessionState) > 0 {
+				return fmt.Errorf("cannot change nodefs recovery mode after shard initialization")
+			}
+		}
+		if len(state.Portals) > 0 {
+			return fmt.Errorf("cannot change nodefs recovery mode with committed portals")
+		}
+		state.RecoveryRequired = required
+		return nil
+	})
 }
 
 type nodeFSShardState struct {

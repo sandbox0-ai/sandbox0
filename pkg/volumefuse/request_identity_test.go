@@ -61,6 +61,70 @@ func TestFileSystemAcknowledgesOriginalCompletionOnce(t *testing.T) {
 	}
 }
 
+func TestFileSystemAcknowledgesEveryCapturedCompletion(t *testing.T) {
+	fs := New("connection-generation", 0, nil)
+	header := &fuse.InHeader{Unique: 43}
+	ctx := fs.requestContext(header)
+	acknowledgements := make([]int, 4)
+	for index := range acknowledgements {
+		index := index
+		if !AttachRequestCompletionToken(ctx, RequestCompletionTokenFunc(func() {
+			acknowledgements[index]++
+		})) {
+			t.Fatalf("AttachRequestCompletionToken(%d) = false", index)
+		}
+	}
+
+	fs.RequestAcknowledged(header)
+	fs.RequestAcknowledged(header)
+	for index, count := range acknowledgements {
+		if count != 1 {
+			t.Fatalf("acknowledgements[%d] = %d, want 1", index, count)
+		}
+	}
+}
+
+func TestFileSystemCompletionTableFailsClosedAtCapacity(t *testing.T) {
+	fs := New("connection-generation", 0, nil)
+	token := RequestCompletionTokenFunc(func() {})
+	for unique := uint64(1); unique <= requestCompletionSlotCount; unique++ {
+		if !AttachRequestCompletionToken(fs.requestContext(&fuse.InHeader{Unique: unique}), token) {
+			t.Fatalf("AttachRequestCompletionToken(%d) = false", unique)
+		}
+	}
+	if AttachRequestCompletionToken(fs.requestContext(&fuse.InHeader{Unique: requestCompletionSlotCount + 1}), token) {
+		t.Fatal("AttachRequestCompletionToken(over capacity) = true")
+	}
+	fs.RequestAcknowledged(&fuse.InHeader{Unique: 1})
+	if !AttachRequestCompletionToken(fs.requestContext(&fuse.InHeader{Unique: requestCompletionSlotCount + 1}), token) {
+		t.Fatal("AttachRequestCompletionToken(after release) = false")
+	}
+}
+
+func TestFileSystemCompletionTableResolvesModuloCollisions(t *testing.T) {
+	fs := New("connection-generation", 0, nil)
+	first := &fuse.InHeader{Unique: 42}
+	second := &fuse.InHeader{Unique: 42 + requestCompletionSlotCount}
+	firstAcknowledged := false
+	secondAcknowledged := false
+	if !AttachRequestCompletionToken(fs.requestContext(first), RequestCompletionTokenFunc(func() {
+		firstAcknowledged = true
+	})) || !AttachRequestCompletionToken(fs.requestContext(second), RequestCompletionTokenFunc(func() {
+		secondAcknowledged = true
+	})) {
+		t.Fatal("failed to attach colliding completion tokens")
+	}
+
+	fs.RequestAcknowledged(second)
+	if firstAcknowledged || !secondAcknowledged {
+		t.Fatalf("after second ack first=%v second=%v", firstAcknowledged, secondAcknowledged)
+	}
+	fs.RequestAcknowledged(first)
+	if !firstAcknowledged {
+		t.Fatal("colliding first completion was not acknowledged")
+	}
+}
+
 func BenchmarkContextForHeader(b *testing.B) {
 	header := &fuse.InHeader{Unique: 42}
 	fs := New("connection-generation", 0, nil)
@@ -71,5 +135,15 @@ func BenchmarkContextForHeader(b *testing.B) {
 		if _, ok := RequestIdentityFromContext(ctx); !ok {
 			b.Fatal("request identity missing")
 		}
+	}
+}
+
+func BenchmarkRequestAcknowledgedEmpty(b *testing.B) {
+	fs := New("connection-generation", 0, nil)
+	header := &fuse.InHeader{Unique: 42}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		fs.RequestAcknowledged(header)
 	}
 }

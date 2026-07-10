@@ -20,10 +20,50 @@ type FileSystem struct {
 	session           Session
 	cacheTTL          time.Duration
 	completionMu      sync.Mutex
-	pendingCompletion map[uint64]RequestCompletionToken
+	pendingCount      int
+	pendingCompletion [requestCompletionSlotCount]requestCompletionEntry
 }
 
-const fileOpenFlags = fuse.FOPEN_KEEP_CACHE
+const (
+	fileOpenFlags              = fuse.FOPEN_KEEP_CACHE
+	requestCompletionSlotCount = 256
+)
+
+type requestCompletionEntry struct {
+	unique uint64
+	tokens requestCompletionTokens
+}
+
+type requestCompletionTokens struct {
+	inline   [2]RequestCompletionToken
+	overflow []RequestCompletionToken
+}
+
+func (t *requestCompletionTokens) add(token RequestCompletionToken) {
+	if token == nil {
+		return
+	}
+	for index := range t.inline {
+		if t.inline[index] == nil {
+			t.inline[index] = token
+			return
+		}
+	}
+	t.overflow = append(t.overflow, token)
+}
+
+func (t requestCompletionTokens) acknowledge() {
+	for _, token := range t.inline {
+		if token != nil {
+			token.RequestAcknowledged()
+		}
+	}
+	for _, token := range t.overflow {
+		if token != nil {
+			token.RequestAcknowledged()
+		}
+	}
+}
 
 func New(volumeID string, cacheTTL time.Duration, session Session) *FileSystem {
 	return NewWithRequestScope(volumeID, volumeID, cacheTTL, session)
@@ -40,12 +80,11 @@ func NewWithRequestScope(volumeID, requestScope string, cacheTTL time.Duration, 
 		requestScope = volumeID
 	}
 	return &FileSystem{
-		RawFileSystem:     fuse.NewDefaultRawFileSystem(),
-		volumeID:          volumeID,
-		requestScope:      requestScope,
-		session:           session,
-		cacheTTL:          cacheTTL,
-		pendingCompletion: make(map[uint64]RequestCompletionToken),
+		RawFileSystem: fuse.NewDefaultRawFileSystem(),
+		volumeID:      volumeID,
+		requestScope:  requestScope,
+		session:       session,
+		cacheTTL:      cacheTTL,
 	}
 }
 
@@ -62,7 +101,8 @@ func (fs *FileSystem) Init(server *fuse.Server) {
 
 func (fs *FileSystem) OnUnmount() {
 	fs.completionMu.Lock()
-	clear(fs.pendingCompletion)
+	clear(fs.pendingCompletion[:])
+	fs.pendingCount = 0
 	fs.completionMu.Unlock()
 }
 
@@ -73,15 +113,28 @@ func (fs *FileSystem) requestContext(header *fuse.InHeader) context.Context {
 	return contextForHeader(fs.requestScope, header, fs)
 }
 
-func (fs *FileSystem) registerRequestCompletion(identity RequestIdentity, token RequestCompletionToken) {
+func (fs *FileSystem) registerRequestCompletion(identity RequestIdentity, token RequestCompletionToken) bool {
 	if fs == nil || identity.Scope != fs.requestScope || identity.Unique == 0 || token == nil {
-		return
+		return false
 	}
 	fs.completionMu.Lock()
 	defer fs.completionMu.Unlock()
-	if _, exists := fs.pendingCompletion[identity.Unique]; !exists {
-		fs.pendingCompletion[identity.Unique] = token
+	start := int(identity.Unique % uint64(len(fs.pendingCompletion)))
+	for offset := range len(fs.pendingCompletion) {
+		index := (start + offset) % len(fs.pendingCompletion)
+		entry := &fs.pendingCompletion[index]
+		if entry.unique == identity.Unique {
+			entry.tokens.add(token)
+			return true
+		}
+		if entry.unique == 0 {
+			entry.unique = identity.Unique
+			entry.tokens.add(token)
+			fs.pendingCount++
+			return true
+		}
 	}
+	return false
 }
 
 // RequestAcknowledged is called by go-fuse after the reply has been written
@@ -93,12 +146,25 @@ func (fs *FileSystem) RequestAcknowledged(header *fuse.InHeader) {
 	}
 	unique := header.OriginalUnique()
 	fs.completionMu.Lock()
-	token := fs.pendingCompletion[unique]
-	delete(fs.pendingCompletion, unique)
-	fs.completionMu.Unlock()
-	if token != nil {
-		token.RequestAcknowledged()
+	if fs.pendingCount == 0 {
+		fs.completionMu.Unlock()
+		return
 	}
+	var tokens requestCompletionTokens
+	start := int(unique % uint64(len(fs.pendingCompletion)))
+	for offset := range len(fs.pendingCompletion) {
+		index := (start + offset) % len(fs.pendingCompletion)
+		entry := &fs.pendingCompletion[index]
+		if entry.unique != unique {
+			continue
+		}
+		tokens = entry.tokens
+		*entry = requestCompletionEntry{}
+		fs.pendingCount--
+		break
+	}
+	fs.completionMu.Unlock()
+	tokens.acknowledge()
 }
 
 func (fs *FileSystem) SetSession(session Session) {

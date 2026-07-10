@@ -3,6 +3,7 @@ package nodefs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"syscall"
 	"testing"
@@ -161,7 +162,7 @@ func (s *muxTestSession) OpenFlagsForHandle(handleID uint64) (uint32, bool) {
 	return fuse.FOPEN_DIRECT_IO, handleID == 24
 }
 
-func registerMuxTestPortal(t *testing.T, mux *SessionMux, session volumefuse.Session, name string, slot Slot) {
+func registerMuxTestPortal(t testing.TB, mux *SessionMux, session volumefuse.Session, name string, slot Slot) {
 	t.Helper()
 	if err := mux.RegisterPortal(PortalSpec{
 		Name:       name,
@@ -264,6 +265,93 @@ func TestSessionMuxUpdatesBackendWithoutChangingEncodedRoot(t *testing.T) {
 	}
 	if attr.Ino != root {
 		t.Fatalf("GetAttr() inode = %d, want stable encoded root %d", attr.Ino, root)
+	}
+}
+
+func TestSessionMuxSwitchWaitsForReplyBeforeInvalidatingPortal(t *testing.T) {
+	mux := NewSessionMux()
+	first := &muxTestSession{}
+	second := &muxTestSession{}
+	registerMuxTestPortal(t, mux, first, "slot-21", 21)
+	root := mustNodeID(t, 21, 1)
+	var completions []volumefuse.RequestCompletionToken
+	requestCtx := volumefuse.ContextWithRequestIdentity(context.Background(), volumefuse.RequestIdentity{
+		Scope: "connection-generation", Unique: 42,
+	}, func(token volumefuse.RequestCompletionToken) {
+		completions = append(completions, token)
+	})
+	if _, err := mux.GetAttr(requestCtx, &pb.GetAttrRequest{Inode: root}); err != nil {
+		t.Fatalf("GetAttr() error = %v", err)
+	}
+	if len(completions) != 1 {
+		t.Fatalf("captured completions = %d, want 1", len(completions))
+	}
+
+	invalidated := make(chan struct{})
+	switchDone := make(chan error, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	go func() {
+		_, err := mux.SwitchPortalSession(ctx, "slot-21", "replacement", 2, second,
+			func(rootNodeID, nodeIDMask, generation uint64) error {
+				if rootNodeID != root || nodeIDMask != PortalNodeIDMask || generation != 2 {
+					return fmt.Errorf("invalidate args = (%d, %#x, %d)", rootNodeID, nodeIDMask, generation)
+				}
+				close(invalidated)
+				return nil
+			})
+		switchDone <- err
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		_, err := mux.GetAttr(context.Background(), &pb.GetAttrRequest{Inode: root})
+		if errors.Is(err, ErrSlotSwitching) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("route did not enter switching state; last error = %v", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-invalidated:
+		t.Fatal("cache invalidated before the previous reply was acknowledged")
+	default:
+	}
+	completions[0].RequestAcknowledged()
+	if err := <-switchDone; err != nil {
+		t.Fatalf("SwitchPortalSession() error = %v", err)
+	}
+	select {
+	case <-invalidated:
+	default:
+		t.Fatal("portal cache was not invalidated")
+	}
+	if _, err := mux.GetAttr(context.Background(), &pb.GetAttrRequest{Inode: root}); err != nil {
+		t.Fatalf("GetAttr(after switch) error = %v", err)
+	}
+	if second.lastGetAttr == nil || second.lastGetAttr.VolumeId != "replacement" {
+		t.Fatalf("replacement backend request = %+v", second.lastGetAttr)
+	}
+}
+
+func TestSessionMuxSwitchInvalidationFailureKeepsPreviousBackend(t *testing.T) {
+	mux := NewSessionMux()
+	first := &muxTestSession{}
+	second := &muxTestSession{}
+	registerMuxTestPortal(t, mux, first, "slot-22", 22)
+	wantErr := errors.New("page cache is busy")
+	if _, err := mux.SwitchPortalSession(context.Background(), "slot-22", "replacement", 2, second,
+		func(uint64, uint64, uint64) error { return wantErr }); !errors.Is(err, wantErr) {
+		t.Fatalf("SwitchPortalSession() error = %v, want %v", err, wantErr)
+	}
+	root := mustNodeID(t, 22, 1)
+	if _, err := mux.GetAttr(context.Background(), &pb.GetAttrRequest{Inode: root}); err != nil {
+		t.Fatalf("GetAttr() error = %v", err)
+	}
+	if first.lastGetAttr == nil || second.lastGetAttr != nil {
+		t.Fatalf("old backend=%+v replacement=%+v", first.lastGetAttr, second.lastGetAttr)
 	}
 }
 
@@ -824,5 +912,37 @@ func BenchmarkSessionMuxAccess(b *testing.B) {
 		if _, err := mux.Access(context.Background(), req); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func BenchmarkVolumefuseNodeFSAccessAcknowledged(b *testing.B) {
+	mux := NewSessionMux()
+	registerMuxTestPortal(b, mux, muxAccessBenchmarkSession{}, "slot-1", 1)
+	fs := volumefuse.NewWithRequestScope("nodefs-shard-0", "connection-generation", 0, mux)
+	input := &fuse.AccessIn{
+		InHeader: fuse.InHeader{NodeId: mustBindingNodeID(b, 1, 1, 11), Unique: 42},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		if status := fs.Access(nil, input); status != fuse.OK {
+			b.Fatal(status)
+		}
+		fs.RequestAcknowledged(&input.InHeader)
+	}
+}
+
+func BenchmarkVolumefuseAccessAcknowledgedBaseline(b *testing.B) {
+	fs := volumefuse.New("volume", 0, muxAccessBenchmarkSession{})
+	input := &fuse.AccessIn{
+		InHeader: fuse.InHeader{NodeId: 11, Unique: 42},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		if status := fs.Access(nil, input); status != fuse.OK {
+			b.Fatal(status)
+		}
+		fs.RequestAcknowledged(&input.InHeader)
 	}
 }

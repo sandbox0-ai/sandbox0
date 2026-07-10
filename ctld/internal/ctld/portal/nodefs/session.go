@@ -45,6 +45,64 @@ type portalSessionRoute struct {
 	rootInode uint64
 	binding   atomic.Pointer[portalSessionBinding]
 	callMu    sync.RWMutex
+	switching bool
+	replies   *responseBarrier
+}
+
+type responseBarrier struct {
+	pending atomic.Int64
+	wake    chan struct{}
+}
+
+func newResponseBarrier() *responseBarrier {
+	return &responseBarrier{wake: make(chan struct{}, 1)}
+}
+
+func (b *responseBarrier) track(ctx context.Context) {
+	if b == nil {
+		return
+	}
+	if _, ok := volumefuse.RequestIdentityFromContext(ctx); !ok {
+		return
+	}
+	b.pending.Add(1)
+	if volumefuse.AttachRequestCompletionToken(ctx, b) {
+		return
+	}
+	b.RequestAcknowledged()
+}
+
+func (b *responseBarrier) RequestAcknowledged() {
+	if b == nil {
+		return
+	}
+	remaining := b.pending.Add(-1)
+	if remaining < 0 {
+		panic("nodefs response barrier acknowledged without a pending request")
+	}
+	if remaining == 0 {
+		select {
+		case b.wake <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (b *responseBarrier) wait(ctx context.Context) error {
+	if b == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for b.pending.Load() != 0 {
+		select {
+		case <-b.wake:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
 }
 
 type portalSessionBinding struct {
@@ -73,8 +131,13 @@ func (r *portalSessionRoute) snapshot() portalSessionSnapshot {
 	}
 }
 
-func (r *portalSessionRoute) acquireRouteLease() {
+func (r *portalSessionRoute) acquireRouteLease() bool {
 	r.callMu.RLock()
+	if r.switching {
+		r.callMu.RUnlock()
+		return false
+	}
+	return true
 }
 
 func (r *portalSessionRoute) releaseRouteLease() {
@@ -134,6 +197,7 @@ func (m *SessionMux) RegisterPortal(spec PortalSpec) error {
 		name:      name,
 		slot:      spec.Slot,
 		rootInode: spec.RootInode,
+		replies:   newResponseBarrier(),
 	}
 	route.binding.Store(&portalSessionBinding{
 		volumeID: spec.VolumeID, generation: spec.Generation, session: spec.Session,
@@ -156,18 +220,33 @@ func (m *SessionMux) RegisterPortal(spec PortalSpec) error {
 	return nil
 }
 
-// UpdatePortalSession changes the backend session and its durable generation
-// without changing the slot or root inode. It waits for calls using the
-// previous binding and returns that session, so the caller may close it
-// immediately after this method returns. Generations only move forward and
-// cannot wrap within a portal slot.
+// UpdatePortalSession changes the backend session without a kernel cache
+// transition. Runtime code should use SwitchPortalSession so late replies and
+// cached pages cannot cross a backend generation.
 func (m *SessionMux) UpdatePortalSession(
 	name, volumeID string,
 	generation uint64,
 	session volumefuse.Session,
 ) (volumefuse.Session, error) {
+	return m.SwitchPortalSession(context.Background(), name, volumeID, generation, session, nil)
+}
+
+// SwitchPortalSession rejects new route calls, waits until every reply from
+// the previous backend has reached the kernel, invalidates that portal's cache
+// domain, and then publishes the new binding. A failed invalidation leaves the
+// old binding active after the short fail-fast switching window.
+func (m *SessionMux) SwitchPortalSession(
+	ctx context.Context,
+	name, volumeID string,
+	generation uint64,
+	session volumefuse.Session,
+	invalidate func(rootNodeID, nodeIDMask, generation uint64) error,
+) (volumefuse.Session, error) {
 	if m == nil {
 		return nil, fmt.Errorf("%w: session mux is nil", ErrPortalRouteMissing)
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	name = strings.TrimSpace(name)
 	if volumeID = strings.TrimSpace(volumeID); volumeID == "" {
@@ -187,6 +266,10 @@ func (m *SessionMux) UpdatePortalSession(
 	}
 	route.callMu.Lock()
 	previous := route.binding.Load()
+	if route.switching {
+		route.callMu.Unlock()
+		return nil, fmt.Errorf("%w: %s", ErrSlotSwitching, name)
+	}
 	if previous != nil && generation <= previous.generation {
 		route.callMu.Unlock()
 		return nil, fmt.Errorf(
@@ -194,10 +277,38 @@ func (m *SessionMux) UpdatePortalSession(
 			ErrInvalidBindingGeneration, generation, previous.generation,
 		)
 	}
+	route.switching = true
+	route.callMu.Unlock()
+
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		route.callMu.Lock()
+		route.switching = false
+		route.callMu.Unlock()
+	}()
+	if err := route.replies.wait(ctx); err != nil {
+		return nil, fmt.Errorf("wait for nodefs portal %s replies: %w", name, err)
+	}
+	rootNodeID, err := EncodeNodeID(route.slot, route.rootInode)
+	if err != nil {
+		return nil, err
+	}
+	if invalidate != nil {
+		if err := invalidate(rootNodeID, PortalNodeIDMask, generation); err != nil {
+			return nil, err
+		}
+	}
+
+	route.callMu.Lock()
 	route.binding.Store(&portalSessionBinding{
 		volumeID: volumeID, generation: generation, session: session,
 	})
+	route.switching = false
 	route.callMu.Unlock()
+	committed = true
 	if previous == nil {
 		return nil, nil
 	}
@@ -257,7 +368,7 @@ func (m *SessionMux) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.Nod
 	if req.Parent == ShardRootNodeID {
 		return m.lookupPortalRoot(ctx, req)
 	}
-	lease, route, localParent, err := m.acquireNode(req.Parent)
+	lease, route, localParent, err := m.acquireNode(ctx, req.Parent)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +389,7 @@ func (m *SessionMux) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.G
 	if req.Inode == ShardRootNodeID {
 		return syntheticRootAttr(), nil
 	}
-	lease, route, localNode, err := m.acquireNode(req.Inode)
+	lease, route, localNode, err := m.acquireNode(ctx, req.Inode)
 	if err != nil {
 		return nil, err
 	}
@@ -299,7 +410,7 @@ func (m *SessionMux) SetAttr(ctx context.Context, req *pb.SetAttrRequest) (*pb.S
 	if req.Inode == ShardRootNodeID {
 		return nil, syscall.EROFS
 	}
-	lease, route, localNode, localHandle, err := m.acquireNodeHandle(req.Inode, req.HandleId)
+	lease, route, localNode, localHandle, err := m.acquireNodeHandle(ctx, req.Inode, req.HandleId)
 	if err != nil {
 		return nil, err
 	}
@@ -326,7 +437,7 @@ func (m *SessionMux) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb.NodeR
 	if req.Parent == ShardRootNodeID {
 		return nil, syscall.EROFS
 	}
-	lease, route, localParent, err := m.acquireNode(req.Parent)
+	lease, route, localParent, err := m.acquireNode(ctx, req.Parent)
 	if err != nil {
 		return nil, err
 	}
@@ -347,7 +458,7 @@ func (m *SessionMux) Create(ctx context.Context, req *pb.CreateRequest) (*pb.Nod
 	if req.Parent == ShardRootNodeID {
 		return nil, syscall.EROFS
 	}
-	lease, route, localParent, err := m.acquireNode(req.Parent)
+	lease, route, localParent, err := m.acquireNode(ctx, req.Parent)
 	if err != nil {
 		return nil, err
 	}
@@ -368,7 +479,7 @@ func (m *SessionMux) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*pb.Emp
 	if req.Parent == ShardRootNodeID {
 		return nil, syscall.EROFS
 	}
-	lease, route, localParent, err := m.acquireNode(req.Parent)
+	lease, route, localParent, err := m.acquireNode(ctx, req.Parent)
 	if err != nil {
 		return nil, err
 	}
@@ -382,7 +493,7 @@ func (m *SessionMux) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb.Empty
 	if req.Parent == ShardRootNodeID {
 		return nil, syscall.EROFS
 	}
-	lease, route, localParent, err := m.acquireNode(req.Parent)
+	lease, route, localParent, err := m.acquireNode(ctx, req.Parent)
 	if err != nil {
 		return nil, err
 	}
@@ -399,7 +510,7 @@ func (m *SessionMux) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.Emp
 		}
 		return nil, newRouteStatusError(ErrCrossPortal, syscall.EXDEV)
 	}
-	lease, route, oldParent, newParent, err := m.acquireNodes(req.OldParent, req.NewParent)
+	lease, route, oldParent, newParent, err := m.acquireNodes(ctx, req.OldParent, req.NewParent)
 	if err != nil {
 		return nil, err
 	}
@@ -414,7 +525,7 @@ func (m *SessionMux) Link(ctx context.Context, req *pb.LinkRequest) (*pb.NodeRes
 	if req.Inode == ShardRootNodeID || req.NewParent == ShardRootNodeID {
 		return nil, newRouteStatusError(ErrCrossPortal, syscall.EXDEV)
 	}
-	lease, route, localNode, localParent, err := m.acquireNodes(req.Inode, req.NewParent)
+	lease, route, localNode, localParent, err := m.acquireNodes(ctx, req.Inode, req.NewParent)
 	if err != nil {
 		return nil, err
 	}
@@ -436,7 +547,7 @@ func (m *SessionMux) Symlink(ctx context.Context, req *pb.SymlinkRequest) (*pb.N
 	if req.Parent == ShardRootNodeID {
 		return nil, syscall.EROFS
 	}
-	lease, route, localParent, err := m.acquireNode(req.Parent)
+	lease, route, localParent, err := m.acquireNode(ctx, req.Parent)
 	if err != nil {
 		return nil, err
 	}
@@ -457,7 +568,7 @@ func (m *SessionMux) Readlink(ctx context.Context, req *pb.ReadlinkRequest) (*pb
 	if req.Inode == ShardRootNodeID {
 		return nil, syscall.EINVAL
 	}
-	lease, route, localNode, err := m.acquireNode(req.Inode)
+	lease, route, localNode, err := m.acquireNode(ctx, req.Inode)
 	if err != nil {
 		return nil, err
 	}
@@ -474,7 +585,7 @@ func (m *SessionMux) Access(ctx context.Context, req *pb.AccessRequest) (*pb.Emp
 		}
 		return &pb.Empty{}, nil
 	}
-	lease, route, localNode, err := m.acquireNode(req.Inode)
+	lease, route, localNode, err := m.acquireNode(ctx, req.Inode)
 	if err != nil {
 		return nil, err
 	}
@@ -488,7 +599,7 @@ func (m *SessionMux) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRes
 	if req.Inode == ShardRootNodeID {
 		return nil, syscall.EISDIR
 	}
-	lease, route, localNode, err := m.acquireNode(req.Inode)
+	lease, route, localNode, err := m.acquireNode(ctx, req.Inode)
 	if err != nil {
 		return nil, err
 	}
@@ -509,7 +620,7 @@ func (m *SessionMux) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadRes
 	if req.Inode == ShardRootNodeID {
 		return nil, syscall.EISDIR
 	}
-	lease, route, localNode, localHandle, err := m.acquireNodeHandle(req.Inode, req.HandleId)
+	lease, route, localNode, localHandle, err := m.acquireNodeHandle(ctx, req.Inode, req.HandleId)
 	if err != nil {
 		return nil, err
 	}
@@ -524,7 +635,7 @@ func (m *SessionMux) ReadInto(ctx context.Context, req *pb.ReadRequest, dest []b
 	if req.Inode == ShardRootNodeID {
 		return 0, false, syscall.EISDIR
 	}
-	lease, route, localNode, localHandle, err := m.acquireNodeHandle(req.Inode, req.HandleId)
+	lease, route, localNode, localHandle, err := m.acquireNodeHandle(ctx, req.Inode, req.HandleId)
 	if err != nil {
 		return 0, false, err
 	}
@@ -547,7 +658,7 @@ func (m *SessionMux) Write(ctx context.Context, req *pb.WriteRequest) (*pb.Write
 	if req.Inode == ShardRootNodeID {
 		return nil, syscall.EISDIR
 	}
-	lease, route, localNode, localHandle, err := m.acquireNodeHandle(req.Inode, req.HandleId)
+	lease, route, localNode, localHandle, err := m.acquireNodeHandle(ctx, req.Inode, req.HandleId)
 	if err != nil {
 		return nil, err
 	}
@@ -562,7 +673,7 @@ func (m *SessionMux) Release(ctx context.Context, req *pb.ReleaseRequest) (*pb.E
 	if req.Inode == ShardRootNodeID {
 		return &pb.Empty{}, nil
 	}
-	lease, route, localNode, localHandle, err := m.acquireNodeHandle(req.Inode, req.HandleId)
+	lease, route, localNode, localHandle, err := m.acquireNodeHandle(ctx, req.Inode, req.HandleId)
 	if err != nil {
 		return nil, err
 	}
@@ -577,7 +688,7 @@ func (m *SessionMux) Flush(ctx context.Context, req *pb.FlushRequest) (*pb.Empty
 	if req.HandleId == 0 {
 		return &pb.Empty{}, nil
 	}
-	lease, route, localHandle, err := m.acquireHandle(req.HandleId)
+	lease, route, localHandle, err := m.acquireHandle(ctx, req.HandleId)
 	if err != nil {
 		return nil, err
 	}
@@ -591,7 +702,7 @@ func (m *SessionMux) Fsync(ctx context.Context, req *pb.FsyncRequest) (*pb.Empty
 	if req.HandleId == 0 {
 		return &pb.Empty{}, nil
 	}
-	lease, route, localHandle, err := m.acquireHandle(req.HandleId)
+	lease, route, localHandle, err := m.acquireHandle(ctx, req.HandleId)
 	if err != nil {
 		return nil, err
 	}
@@ -605,7 +716,7 @@ func (m *SessionMux) Fallocate(ctx context.Context, req *pb.FallocateRequest) (*
 	if req.Inode == ShardRootNodeID {
 		return nil, syscall.EISDIR
 	}
-	lease, route, localNode, localHandle, err := m.acquireNodeHandle(req.Inode, req.HandleId)
+	lease, route, localNode, localHandle, err := m.acquireNodeHandle(ctx, req.Inode, req.HandleId)
 	if err != nil {
 		return nil, err
 	}
@@ -620,7 +731,7 @@ func (m *SessionMux) CopyFileRange(ctx context.Context, req *pb.CopyFileRangeReq
 	if req.InodeIn == ShardRootNodeID || req.InodeOut == ShardRootNodeID {
 		return nil, newRouteStatusError(ErrCrossPortal, syscall.EXDEV)
 	}
-	lease, route, inodeIn, handleIn, inodeOut, handleOut, err := m.acquireCopy(
+	lease, route, inodeIn, handleIn, inodeOut, handleOut, err := m.acquireCopy(ctx,
 		req.InodeIn, req.HandleIn, req.InodeOut, req.HandleOut,
 	)
 	if err != nil {
@@ -639,7 +750,7 @@ func (m *SessionMux) OpenDir(ctx context.Context, req *pb.OpenDirRequest) (*pb.O
 	if req.Inode == ShardRootNodeID {
 		return &pb.OpenDirResponse{}, nil
 	}
-	lease, route, localNode, err := m.acquireNode(req.Inode)
+	lease, route, localNode, err := m.acquireNode(ctx, req.Inode)
 	if err != nil {
 		return nil, err
 	}
@@ -663,7 +774,7 @@ func (m *SessionMux) ReadDir(ctx context.Context, req *pb.ReadDirRequest) (*pb.R
 	if req.Inode == ShardRootNodeID {
 		return m.readSyntheticRoot(ctx, req)
 	}
-	lease, route, localNode, localHandle, err := m.acquireNodeHandle(req.Inode, req.HandleId)
+	lease, route, localNode, localHandle, err := m.acquireNodeHandle(ctx, req.Inode, req.HandleId)
 	if err != nil {
 		return nil, err
 	}
@@ -685,7 +796,7 @@ func (m *SessionMux) ReleaseDir(ctx context.Context, req *pb.ReleaseDirRequest) 
 	if req.Inode == ShardRootNodeID {
 		return &pb.Empty{}, nil
 	}
-	lease, route, localNode, localHandle, err := m.acquireNodeHandle(req.Inode, req.HandleId)
+	lease, route, localNode, localHandle, err := m.acquireNodeHandle(ctx, req.Inode, req.HandleId)
 	if err != nil {
 		return nil, err
 	}
@@ -700,7 +811,7 @@ func (m *SessionMux) StatFs(ctx context.Context, req *pb.StatFsRequest) (*pb.Sta
 	if req.Inode == ShardRootNodeID || req.Inode == 0 {
 		return syntheticRootStatFS(), nil
 	}
-	lease, route, localNode, err := m.acquireNode(req.Inode)
+	lease, route, localNode, err := m.acquireNode(ctx, req.Inode)
 	if err != nil {
 		return nil, err
 	}
@@ -714,7 +825,7 @@ func (m *SessionMux) GetXattr(ctx context.Context, req *pb.GetXattrRequest) (*pb
 	if req.Inode == ShardRootNodeID {
 		return nil, syscall.ENODATA
 	}
-	lease, route, localNode, err := m.acquireNode(req.Inode)
+	lease, route, localNode, err := m.acquireNode(ctx, req.Inode)
 	if err != nil {
 		return nil, err
 	}
@@ -728,7 +839,7 @@ func (m *SessionMux) SetXattr(ctx context.Context, req *pb.SetXattrRequest) (*pb
 	if req.Inode == ShardRootNodeID {
 		return nil, syscall.EROFS
 	}
-	lease, route, localNode, err := m.acquireNode(req.Inode)
+	lease, route, localNode, err := m.acquireNode(ctx, req.Inode)
 	if err != nil {
 		return nil, err
 	}
@@ -742,7 +853,7 @@ func (m *SessionMux) ListXattr(ctx context.Context, req *pb.ListXattrRequest) (*
 	if req.Inode == ShardRootNodeID {
 		return &pb.ListXattrResponse{}, nil
 	}
-	lease, route, localNode, err := m.acquireNode(req.Inode)
+	lease, route, localNode, err := m.acquireNode(ctx, req.Inode)
 	if err != nil {
 		return nil, err
 	}
@@ -756,7 +867,7 @@ func (m *SessionMux) RemoveXattr(ctx context.Context, req *pb.RemoveXattrRequest
 	if req.Inode == ShardRootNodeID {
 		return nil, syscall.EROFS
 	}
-	lease, route, localNode, err := m.acquireNode(req.Inode)
+	lease, route, localNode, err := m.acquireNode(ctx, req.Inode)
 	if err != nil {
 		return nil, err
 	}
@@ -770,7 +881,7 @@ func (m *SessionMux) Mknod(ctx context.Context, req *pb.MknodRequest) (*pb.NodeR
 	if req.Parent == ShardRootNodeID {
 		return nil, syscall.EROFS
 	}
-	lease, route, localParent, err := m.acquireNode(req.Parent)
+	lease, route, localParent, err := m.acquireNode(ctx, req.Parent)
 	if err != nil {
 		return nil, err
 	}
@@ -791,7 +902,7 @@ func (m *SessionMux) GetLk(ctx context.Context, req *pb.GetLkRequest) (*pb.GetLk
 	if req.Inode == ShardRootNodeID {
 		return nil, syscall.EBADF
 	}
-	lease, route, localNode, localHandle, err := m.acquireNodeHandle(req.Inode, req.HandleId)
+	lease, route, localNode, localHandle, err := m.acquireNodeHandle(ctx, req.Inode, req.HandleId)
 	if err != nil {
 		return nil, err
 	}
@@ -814,7 +925,7 @@ func (m *SessionMux) Flock(ctx context.Context, req *pb.FlockRequest) (*pb.Empty
 	if req.Inode == ShardRootNodeID {
 		return nil, syscall.EBADF
 	}
-	lease, route, localNode, localHandle, err := m.acquireNodeHandle(req.Inode, req.HandleId)
+	lease, route, localNode, localHandle, err := m.acquireNodeHandle(ctx, req.Inode, req.HandleId)
 	if err != nil {
 		return nil, err
 	}
@@ -829,7 +940,7 @@ func (m *SessionMux) OpenFlagsForHandle(handleID uint64) (uint32, bool) {
 	if m == nil || handleID == 0 {
 		return 0, false
 	}
-	lease, route, localHandle, err := m.acquireHandle(handleID)
+	lease, route, localHandle, err := m.acquireHandle(nil, handleID)
 	if err != nil {
 		return 0, false
 	}
@@ -847,7 +958,7 @@ func (m *SessionMux) setLk(ctx context.Context, req *pb.SetLkRequest, wait bool)
 	if req.Inode == ShardRootNodeID {
 		return nil, syscall.EBADF
 	}
-	lease, route, localNode, localHandle, err := m.acquireNodeHandle(req.Inode, req.HandleId)
+	lease, route, localNode, localHandle, err := m.acquireNodeHandle(ctx, req.Inode, req.HandleId)
 	if err != nil {
 		return nil, err
 	}
@@ -883,6 +994,7 @@ func (m *SessionMux) lookupPortalRoot(ctx context.Context, req *pb.LookupRequest
 	if snapshot.session == nil {
 		return nil, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
 	}
+	lease.Target.replies.track(ctx)
 	attr, err := snapshot.session.GetAttr(ctx, &pb.GetAttrRequest{
 		VolumeId: snapshot.volumeID,
 		Inode:    snapshot.rootInode,
@@ -921,7 +1033,7 @@ func (m *SessionMux) readSyntheticRoot(ctx context.Context, req *pb.ReadDirReque
 		}
 		lease, _, err := m.router.AcquireNode(globalRoot)
 		if err != nil {
-			if errors.Is(err, ErrSlotDraining) || errors.Is(err, ErrSlotNotFound) {
+			if errors.Is(err, ErrSlotDraining) || errors.Is(err, ErrSlotSwitching) || errors.Is(err, ErrSlotNotFound) {
 				continue
 			}
 			return nil, mapRouteError(err)
@@ -934,6 +1046,7 @@ func (m *SessionMux) readSyntheticRoot(ctx context.Context, req *pb.ReadDirReque
 			Type:   uint32(syscall.S_IFDIR),
 		}
 		if req.Plus {
+			lease.Target.replies.track(ctx)
 			entry.Attr, err = snapshot.session.GetAttr(ctx, &pb.GetAttrRequest{
 				VolumeId: snapshot.volumeID,
 				Inode:    snapshot.rootInode,
@@ -952,7 +1065,7 @@ func (m *SessionMux) readSyntheticRoot(ctx context.Context, req *pb.ReadDirReque
 	return &pb.ReadDirResponse{Entries: entries, Eof: true}, nil
 }
 
-func (m *SessionMux) acquireNode(nodeID uint64) (Lease[*portalSessionRoute], portalSessionSnapshot, uint64, error) {
+func (m *SessionMux) acquireNode(ctx context.Context, nodeID uint64) (Lease[*portalSessionRoute], portalSessionSnapshot, uint64, error) {
 	var zero Lease[*portalSessionRoute]
 	if m == nil || m.router == nil {
 		return zero, portalSessionSnapshot{}, 0, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
@@ -971,10 +1084,11 @@ func (m *SessionMux) acquireNode(nodeID uint64) (Lease[*portalSessionRoute], por
 		lease.Release()
 		return zero, portalSessionSnapshot{}, 0, err
 	}
+	lease.Target.replies.track(ctx)
 	return lease, route, localNode, nil
 }
 
-func (m *SessionMux) acquireHandle(handleID uint64) (Lease[*portalSessionRoute], portalSessionSnapshot, uint64, error) {
+func (m *SessionMux) acquireHandle(ctx context.Context, handleID uint64) (Lease[*portalSessionRoute], portalSessionSnapshot, uint64, error) {
 	var zero Lease[*portalSessionRoute]
 	if m == nil || m.router == nil {
 		return zero, portalSessionSnapshot{}, 0, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
@@ -993,10 +1107,11 @@ func (m *SessionMux) acquireHandle(handleID uint64) (Lease[*portalSessionRoute],
 		lease.Release()
 		return zero, portalSessionSnapshot{}, 0, err
 	}
+	lease.Target.replies.track(ctx)
 	return lease, route, localHandle, nil
 }
 
-func (m *SessionMux) acquireNodeHandle(nodeID, handleID uint64) (Lease[*portalSessionRoute], portalSessionSnapshot, uint64, uint64, error) {
+func (m *SessionMux) acquireNodeHandle(ctx context.Context, nodeID, handleID uint64) (Lease[*portalSessionRoute], portalSessionSnapshot, uint64, uint64, error) {
 	var zero Lease[*portalSessionRoute]
 	if m == nil || m.router == nil {
 		return zero, portalSessionSnapshot{}, 0, 0, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
@@ -1023,11 +1138,12 @@ func (m *SessionMux) acquireNodeHandle(nodeID, handleID uint64) (Lease[*portalSe
 			return zero, portalSessionSnapshot{}, 0, 0, err
 		}
 	}
+	lease.Target.replies.track(ctx)
 	return lease, route, localNode, localHandle, nil
 }
 
 func (m *SessionMux) acquireNodes(
-	firstNodeID, secondNodeID uint64,
+	ctx context.Context, firstNodeID, secondNodeID uint64,
 ) (Lease[*portalSessionRoute], portalSessionSnapshot, uint64, uint64, error) {
 	var zero Lease[*portalSessionRoute]
 	if m == nil || m.router == nil {
@@ -1052,11 +1168,12 @@ func (m *SessionMux) acquireNodes(
 		lease.Release()
 		return zero, portalSessionSnapshot{}, 0, 0, err
 	}
+	lease.Target.replies.track(ctx)
 	return lease, route, first, second, nil
 }
 
 func (m *SessionMux) acquireCopy(
-	inputNodeID, inputHandleID, outputNodeID, outputHandleID uint64,
+	ctx context.Context, inputNodeID, inputHandleID, outputNodeID, outputHandleID uint64,
 ) (Lease[*portalSessionRoute], portalSessionSnapshot, uint64, uint64, uint64, uint64, error) {
 	var zero Lease[*portalSessionRoute]
 	if m == nil || m.router == nil {
@@ -1093,6 +1210,7 @@ func (m *SessionMux) acquireCopy(
 		lease.Release()
 		return zero, portalSessionSnapshot{}, 0, 0, 0, 0, err
 	}
+	lease.Target.replies.track(ctx)
 	return lease, route, inputNode, inputHandle, outputNode, outputHandle, nil
 }
 
@@ -1273,7 +1391,7 @@ func mapRouteError(err error) error {
 		return nil
 	case errors.Is(err, ErrCrossPortal):
 		return newRouteStatusError(err, syscall.EXDEV)
-	case errors.Is(err, ErrSlotDraining):
+	case errors.Is(err, ErrSlotDraining), errors.Is(err, ErrSlotSwitching):
 		return newRouteStatusError(err, syscall.EAGAIN)
 	case errors.Is(err, ErrSlotNotFound),
 		errors.Is(err, ErrSyntheticNode),

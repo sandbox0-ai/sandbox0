@@ -20,7 +20,7 @@ type routeEntry[T any] struct {
 // state. SessionMux uses it to keep a backend binding quiescent while a file
 // operation is in flight.
 type routeLeaseHooks interface {
-	acquireRouteLease()
+	acquireRouteLease() bool
 	releaseRouteLease()
 }
 
@@ -284,7 +284,11 @@ func (r *Router[T]) acquireSlot(slot Slot) (Lease[T], error) {
 	entry.inFlight.Add(1)
 	target := entry.target
 	if hooks, ok := any(target).(routeLeaseHooks); ok {
-		hooks.acquireRouteLease()
+		if !hooks.acquireRouteLease() {
+			entry.inFlight.Add(^uint64(0))
+			r.mu.RUnlock()
+			return zero, fmt.Errorf("%w: %d", ErrSlotSwitching, slot)
+		}
 	}
 	r.mu.RUnlock()
 	return Lease[T]{Slot: slot, Target: target, entry: entry}, nil

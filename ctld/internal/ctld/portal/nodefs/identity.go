@@ -23,6 +23,10 @@ const (
 	MaxLocalID           = uint64(1<<LocalIDBits - 1)
 	MaxBackendLocalID    = uint64(1<<BackendLocalIDBits - 1)
 	MaxBindingGeneration = uint64(1<<BindingGenerationBits - 1)
+	// PortalNodeIDMask selects the stable portal slot from an encoded inode.
+	// The recovery kernel uses the same mask to invalidate exactly one portal
+	// cache domain before its backend generation changes.
+	PortalNodeIDMask = ^uint64(MaxLocalID)
 
 	// ShardRootNodeID is the FUSE root of a nodefs shard. It belongs to the
 	// synthetic shard namespace rather than to a portal slot.
@@ -41,6 +45,7 @@ var (
 	ErrSlotRegistered           = errors.New("nodefs portal slot already registered")
 	ErrSlotRetired              = errors.New("nodefs portal slot is retired")
 	ErrSlotDraining             = errors.New("nodefs portal slot is draining")
+	ErrSlotSwitching            = errors.New("nodefs portal slot is switching backends")
 )
 
 // Slot identifies a portal within one FUSE connection generation. Slots must

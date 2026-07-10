@@ -40,17 +40,18 @@ type requestCompletionSlot struct {
 	onCompletion func(RequestCompletionToken)
 }
 
-func (s *requestCompletionSlot) attach(token RequestCompletionToken) {
+func (s *requestCompletionSlot) attach(token RequestCompletionToken) bool {
 	if s == nil || token == nil {
-		return
+		return false
 	}
 	if s.target != nil {
-		s.target.registerRequestCompletion(s.identity, token)
-		return
+		return s.target.registerRequestCompletion(s.identity, token)
 	}
 	if s.onCompletion != nil {
 		s.onCompletion(token)
+		return true
 	}
+	return false
 }
 
 type requestContext struct {
@@ -148,6 +149,5 @@ func AttachRequestCompletionToken(ctx context.Context, token RequestCompletionTo
 	if slot == nil || (slot.target == nil && slot.onCompletion == nil) {
 		return false
 	}
-	slot.attach(token)
-	return true
+	return slot.attach(token)
 }

@@ -16,6 +16,7 @@ type FileSystem struct {
 	fuse.RawFileSystem
 	mu                sync.RWMutex
 	volumeID          string
+	requestScope      string
 	session           Session
 	cacheTTL          time.Duration
 	completionMu      sync.Mutex
@@ -25,12 +26,23 @@ type FileSystem struct {
 const fileOpenFlags = fuse.FOPEN_KEEP_CACHE
 
 func New(volumeID string, cacheTTL time.Duration, session Session) *FileSystem {
+	return NewWithRequestScope(volumeID, volumeID, cacheTTL, session)
+}
+
+// NewWithRequestScope creates a filesystem whose request identities are
+// scoped to one kernel connection generation. Recoverable node-wide shards
+// should pass their durable FUSE recovery tag as requestScope.
+func NewWithRequestScope(volumeID, requestScope string, cacheTTL time.Duration, session Session) *FileSystem {
 	if cacheTTL < 0 {
 		cacheTTL = time.Second
+	}
+	if requestScope == "" {
+		requestScope = volumeID
 	}
 	return &FileSystem{
 		RawFileSystem:     fuse.NewDefaultRawFileSystem(),
 		volumeID:          volumeID,
+		requestScope:      requestScope,
 		session:           session,
 		cacheTTL:          cacheTTL,
 		pendingCompletion: make(map[uint64]RequestCompletionToken),
@@ -58,11 +70,11 @@ func (fs *FileSystem) requestContext(header *fuse.InHeader) context.Context {
 	if fs == nil {
 		return context.Background()
 	}
-	return contextForHeader(fs.volumeID, header, fs.registerRequestCompletion)
+	return contextForHeader(fs.requestScope, header, fs)
 }
 
 func (fs *FileSystem) registerRequestCompletion(identity RequestIdentity, token RequestCompletionToken) {
-	if fs == nil || identity.Scope != fs.volumeID || identity.Unique == 0 || token == nil {
+	if fs == nil || identity.Scope != fs.requestScope || identity.Unique == 0 || token == nil {
 		return
 	}
 	fs.completionMu.Lock()

@@ -35,10 +35,45 @@ func (f RequestCompletionTokenFunc) RequestAcknowledged() {
 }
 
 type requestCompletionSlot struct {
-	register func(RequestIdentity, RequestCompletionToken)
+	identity     RequestIdentity
+	target       *FileSystem
+	onCompletion func(RequestCompletionToken)
 }
 
-func contextForHeader(scope string, header *fuse.InHeader, register func(RequestIdentity, RequestCompletionToken)) context.Context {
+func (s *requestCompletionSlot) attach(token RequestCompletionToken) {
+	if s == nil || token == nil {
+		return
+	}
+	if s.target != nil {
+		s.target.registerRequestCompletion(s.identity, token)
+		return
+	}
+	if s.onCompletion != nil {
+		s.onCompletion(token)
+	}
+}
+
+type requestContext struct {
+	context.Context
+	identity   RequestIdentity
+	completion requestCompletionSlot
+}
+
+func (c *requestContext) Value(key any) any {
+	if c == nil {
+		return nil
+	}
+	switch key.(type) {
+	case requestIdentityContextKey:
+		return c.identity
+	case requestCompletionContextKey:
+		return &c.completion
+	default:
+		return c.Context.Value(key)
+	}
+}
+
+func contextForHeader(scope string, header *fuse.InHeader, target *FileSystem) context.Context {
 	if header == nil || header.Unique == 0 {
 		return context.Background()
 	}
@@ -47,11 +82,14 @@ func contextForHeader(scope string, header *fuse.InHeader, register func(Request
 		Unique: header.OriginalUnique(),
 		Resend: header.IsResend(),
 	}
-	return ContextWithRequestIdentity(context.Background(), identity, func(token RequestCompletionToken) {
-		if register != nil {
-			register(identity, token)
-		}
-	})
+	return &requestContext{
+		Context:  context.Background(),
+		identity: identity,
+		completion: requestCompletionSlot{
+			identity: identity,
+			target:   target,
+		},
+	}
 }
 
 // ContextWithRequestIdentity attaches a stable FUSE request identity and an
@@ -64,14 +102,14 @@ func ContextWithRequestIdentity(ctx context.Context, identity RequestIdentity, o
 	if identity.Scope == "" || identity.Unique == 0 {
 		return ctx
 	}
-	ctx = context.WithValue(ctx, requestIdentityContextKey{}, identity)
-	return context.WithValue(ctx, requestCompletionContextKey{}, &requestCompletionSlot{
-		register: func(_ RequestIdentity, token RequestCompletionToken) {
-			if onCompletion != nil {
-				onCompletion(token)
-			}
+	return &requestContext{
+		Context:  ctx,
+		identity: identity,
+		completion: requestCompletionSlot{
+			identity:     identity,
+			onCompletion: onCompletion,
 		},
-	})
+	}
 }
 
 // RequestIdentityFromContext returns the kernel request identity attached by
@@ -79,6 +117,10 @@ func ContextWithRequestIdentity(ctx context.Context, identity RequestIdentity, o
 func RequestIdentityFromContext(ctx context.Context) (RequestIdentity, bool) {
 	if ctx == nil {
 		return RequestIdentity{}, false
+	}
+	if requestCtx, ok := ctx.(*requestContext); ok {
+		identity := requestCtx.identity
+		return identity, identity.Scope != "" && identity.Unique != 0
 	}
 	identity, ok := ctx.Value(requestIdentityContextKey{}).(RequestIdentity)
 	return identity, ok && identity.Scope != "" && identity.Unique != 0
@@ -91,14 +133,21 @@ func AttachRequestCompletionToken(ctx context.Context, token RequestCompletionTo
 	if ctx == nil || token == nil {
 		return false
 	}
-	identity, ok := RequestIdentityFromContext(ctx)
-	if !ok {
+	var slot *requestCompletionSlot
+	if requestCtx, ok := ctx.(*requestContext); ok {
+		if requestCtx.identity.Scope == "" || requestCtx.identity.Unique == 0 {
+			return false
+		}
+		slot = &requestCtx.completion
+	} else {
+		if _, ok := RequestIdentityFromContext(ctx); !ok {
+			return false
+		}
+		slot, _ = ctx.Value(requestCompletionContextKey{}).(*requestCompletionSlot)
+	}
+	if slot == nil || (slot.target == nil && slot.onCompletion == nil) {
 		return false
 	}
-	slot, ok := ctx.Value(requestCompletionContextKey{}).(*requestCompletionSlot)
-	if !ok || slot == nil || slot.register == nil {
-		return false
-	}
-	slot.register(identity, token)
+	slot.attach(token)
 	return true
 }

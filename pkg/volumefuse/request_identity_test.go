@@ -40,9 +40,13 @@ func TestRequestCompletionTokenTargetsCapturedBackend(t *testing.T) {
 }
 
 func TestFileSystemAcknowledgesOriginalCompletionOnce(t *testing.T) {
-	fs := New("shard-1", 0, nil)
+	fs := NewWithRequestScope("shard-1", "recovery-tag-generation-7", 0, nil)
 	header := &fuse.InHeader{Unique: 42}
 	ctx := fs.requestContext(header)
+	identity, ok := RequestIdentityFromContext(ctx)
+	if !ok || identity.Scope != "recovery-tag-generation-7" {
+		t.Fatalf("identity = %+v, ok=%v", identity, ok)
+	}
 	acknowledgements := 0
 	if !AttachRequestCompletionToken(ctx, RequestCompletionTokenFunc(func() {
 		acknowledgements++
@@ -54,5 +58,18 @@ func TestFileSystemAcknowledgesOriginalCompletionOnce(t *testing.T) {
 	fs.RequestAcknowledged(header)
 	if acknowledgements != 1 {
 		t.Fatalf("acknowledgements = %d, want 1", acknowledgements)
+	}
+}
+
+func BenchmarkContextForHeader(b *testing.B) {
+	header := &fuse.InHeader{Unique: 42}
+	fs := New("connection-generation", 0, nil)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		ctx := fs.requestContext(header)
+		if _, ok := RequestIdentityFromContext(ctx); !ok {
+			b.Fatal("request identity missing")
+		}
 	}
 }

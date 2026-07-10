@@ -18,20 +18,20 @@ import (
 	corelisters "k8s.io/client-go/listers/core/v1"
 )
 
-func buildSandboxObservabilityProducerWorkers(cfg *config.ManagerConfig, internalAuthGen *internalauth.Generator, obsProvider *observability.Provider, logger *zap.Logger) (*sandboxobsingest.LogWorker, *sandboxobsingest.MetricWorker) {
+func buildSandboxObservabilityLogWorker(cfg *config.ManagerConfig, internalAuthGen *internalauth.Generator, obsProvider *observability.Provider, logger *zap.Logger) *sandboxobsingest.LogWorker {
 	if cfg == nil {
-		return nil, nil
+		return nil
 	}
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	if strings.TrimSpace(cfg.SandboxObservabilityLogsIngestURL) == "" && strings.TrimSpace(cfg.SandboxObservabilityMetricsIngestURL) == "" {
-		logger.Info("Sandbox observability producers disabled")
-		return nil, nil
+	if strings.TrimSpace(cfg.SandboxObservabilityLogsIngestURL) == "" {
+		logger.Info("Sandbox log observability producer disabled")
+		return nil
 	}
 	if internalAuthGen == nil {
 		logger.Warn("Sandbox observability producers disabled; internal auth generator is not configured")
-		return nil, nil
+		return nil
 	}
 	httpClient := &http.Client{Timeout: cfg.SandboxObservabilityIngestRequestTimeout.Duration}
 	if obsProvider != nil {
@@ -39,7 +39,6 @@ func buildSandboxObservabilityProducerWorkers(cfg *config.ManagerConfig, interna
 	}
 	writer := sandboxobservability.NewHTTPWriter(sandboxobservability.HTTPWriterOptions{
 		LogsURL:        cfg.SandboxObservabilityLogsIngestURL,
-		MetricsURL:     cfg.SandboxObservabilityMetricsIngestURL,
 		Client:         httpClient,
 		RequestTimeout: cfg.SandboxObservabilityIngestRequestTimeout.Duration,
 		TokenProvider: func(context.Context) (string, error) {
@@ -55,53 +54,29 @@ func buildSandboxObservabilityProducerWorkers(cfg *config.ManagerConfig, interna
 		MaxRetries:    cfg.SandboxObservabilityIngestMaxRetries,
 		RetryBackoff:  cfg.SandboxObservabilityIngestRetryBackoff.Duration,
 	}
-	var logWorker *sandboxobsingest.LogWorker
-	if strings.TrimSpace(cfg.SandboxObservabilityLogsIngestURL) != "" {
-		worker, err := sandboxobsingest.NewLogWorker(writer, ingestCfg)
-		if err != nil {
-			logger.Warn("Sandbox log observability producer disabled", zap.Error(err))
-		} else {
-			logWorker = worker
-		}
+	worker, err := sandboxobsingest.NewLogWorker(writer, ingestCfg)
+	if err != nil {
+		logger.Warn("Sandbox log observability producer disabled", zap.Error(err))
+		return nil
 	}
-	var metricWorker *sandboxobsingest.MetricWorker
-	if strings.TrimSpace(cfg.SandboxObservabilityMetricsIngestURL) != "" {
-		worker, err := sandboxobsingest.NewMetricWorker(writer, ingestCfg)
-		if err != nil {
-			logger.Warn("Sandbox runtime metric observability producer disabled", zap.Error(err))
-		} else {
-			metricWorker = worker
-		}
-	}
-	return logWorker, metricWorker
+	return worker
 }
 
-func startSandboxObservabilityProducers(ctx context.Context, cfg *config.ManagerConfig, k8sClient kubernetes.Interface, sandboxService *service.SandboxService, podLister corelisters.PodLister, logWorker *sandboxobsingest.LogWorker, metricWorker *sandboxobsingest.MetricWorker, logger *zap.Logger, clock service.TimeProvider) {
+func startSandboxObservabilityLogProducer(ctx context.Context, cfg *config.ManagerConfig, k8sClient kubernetes.Interface, podLister corelisters.PodLister, logWorker *sandboxobsingest.LogWorker, logger *zap.Logger, clock service.TimeProvider) {
 	if cfg == nil {
 		return
 	}
-	if logWorker != nil {
-		go logWorker.Run(ctx)
-		producer := service.NewSandboxLogProducer(k8sClient, podLister, logWorker, service.SandboxLogProducerConfig{
-			RegionID:     cfg.RegionID,
-			ClusterID:    cfg.DefaultClusterId,
-			PollInterval: cfg.SandboxObservabilityLogPollInterval.Duration,
-		}, logger, clock)
-		go producer.Run(ctx)
-		logger.Info("Sandbox log observability producer started",
-			zap.Duration("poll_interval", cfg.SandboxObservabilityLogPollInterval.Duration),
-		)
+	if logWorker == nil {
+		return
 	}
-	if metricWorker != nil {
-		go metricWorker.Run(ctx)
-		sampler := service.NewSandboxRuntimeMetricSampler(sandboxService, podLister, metricWorker, service.SandboxRuntimeMetricSamplerConfig{
-			RegionID:  cfg.RegionID,
-			ClusterID: cfg.DefaultClusterId,
-			Interval:  cfg.SandboxObservabilityMetricSampleInterval.Duration,
-		}, logger, clock)
-		go sampler.Run(ctx)
-		logger.Info("Sandbox runtime metric observability sampler started",
-			zap.Duration("sample_interval", cfg.SandboxObservabilityMetricSampleInterval.Duration),
-		)
-	}
+	go logWorker.Run(ctx)
+	producer := service.NewSandboxLogProducer(k8sClient, podLister, logWorker, service.SandboxLogProducerConfig{
+		RegionID:     cfg.RegionID,
+		ClusterID:    cfg.DefaultClusterId,
+		PollInterval: cfg.SandboxObservabilityLogPollInterval.Duration,
+	}, logger, clock)
+	go producer.Run(ctx)
+	logger.Info("Sandbox log observability producer started",
+		zap.Duration("poll_interval", cfg.SandboxObservabilityLogPollInterval.Duration),
+	)
 }

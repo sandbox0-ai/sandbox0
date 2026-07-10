@@ -20,17 +20,17 @@ type Reconciler struct {
 }
 
 type RuntimeConfig struct {
-	DSN                  string
-	Database             string
-	EventsTable          string
-	LogsTable            string
-	MetricsTable         string
-	RetentionDays        int
-	LogsRetentionDays    int
-	MetricsRetentionDays int
-	ConnectTimeout       metav1.Duration
-	SkipSchemaMigration  bool
-	Ingest               infrav1alpha1.SandboxObservabilityIngestConfig
+	DSN                         string
+	Database                    string
+	EventsTable                 string
+	LogsTable                   string
+	RuntimeSamplesTable         string
+	RetentionDays               int
+	LogsRetentionDays           int
+	RuntimeSamplesRetentionDays int
+	ConnectTimeout              metav1.Duration
+	SkipSchemaMigration         bool
+	Ingest                      infrav1alpha1.SandboxObservabilityIngestConfig
 }
 
 func NewReconciler(resources *common.ResourceManager) *Reconciler {
@@ -70,16 +70,16 @@ func ApplyClusterGatewayConfig(ctx context.Context, c client.Client, infra *infr
 	cfg.SandboxObservability = apiconfig.SandboxObservabilityConfig{
 		Backend: apiconfig.SandboxObservabilityBackendClickHouse,
 		ClickHouse: apiconfig.SandboxObservabilityClickHouseConfig{
-			DSN:                  runtimeCfg.DSN,
-			Database:             runtimeCfg.Database,
-			EventsTable:          runtimeCfg.EventsTable,
-			LogsTable:            runtimeCfg.LogsTable,
-			MetricsTable:         runtimeCfg.MetricsTable,
-			RetentionDays:        runtimeCfg.RetentionDays,
-			LogsRetentionDays:    runtimeCfg.LogsRetentionDays,
-			MetricsRetentionDays: runtimeCfg.MetricsRetentionDays,
-			ConnectTimeout:       runtimeCfg.ConnectTimeout,
-			SkipSchemaMigration:  runtimeCfg.SkipSchemaMigration,
+			DSN:                         runtimeCfg.DSN,
+			Database:                    runtimeCfg.Database,
+			EventsTable:                 runtimeCfg.EventsTable,
+			LogsTable:                   runtimeCfg.LogsTable,
+			RuntimeSamplesTable:         runtimeCfg.RuntimeSamplesTable,
+			RetentionDays:               runtimeCfg.RetentionDays,
+			LogsRetentionDays:           runtimeCfg.LogsRetentionDays,
+			RuntimeSamplesRetentionDays: runtimeCfg.RuntimeSamplesRetentionDays,
+			ConnectTimeout:              runtimeCfg.ConnectTimeout,
+			SkipSchemaMigration:         runtimeCfg.SkipSchemaMigration,
 		},
 	}
 	return nil
@@ -112,13 +112,30 @@ func ApplyManagerConfig(ctx context.Context, c client.Client, infra *infrav1alph
 	}
 	if !ok || strings.TrimSpace(clusterGatewayURL) == "" {
 		cfg.SandboxObservabilityLogsIngestURL = ""
-		cfg.SandboxObservabilityMetricsIngestURL = ""
 		return nil
 	}
 	base := strings.TrimRight(clusterGatewayURL, "/") + "/internal/v1/sandbox-observability"
 	cfg.SandboxObservabilityLogsIngestURL = base + "/logs"
-	cfg.SandboxObservabilityMetricsIngestURL = base + "/metrics"
 	applyManagerIngestConfig(runtimeCfg.Ingest, cfg)
+	return nil
+}
+
+// ApplyCtldConfig injects the node-local runtime sample producer endpoint and
+// bounded ingest settings into ctld's runtime configuration.
+func ApplyCtldConfig(ctx context.Context, c client.Client, infra *infrav1alpha1.Sandbox0Infra, clusterGatewayURL string, cfg *apiconfig.CtldConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	runtimeCfg, ok, err := GetRuntimeConfig(ctx, c, infra)
+	if err != nil {
+		return err
+	}
+	if !ok || strings.TrimSpace(clusterGatewayURL) == "" {
+		cfg.SandboxObservabilityRuntimeSamplesIngestURL = ""
+		return nil
+	}
+	cfg.SandboxObservabilityRuntimeSamplesIngestURL = strings.TrimRight(clusterGatewayURL, "/") + "/internal/v1/sandbox-observability/runtime-samples"
+	applyCtldIngestConfig(runtimeCfg.Ingest, cfg)
 	return nil
 }
 
@@ -131,20 +148,20 @@ func GetRuntimeConfig(ctx context.Context, c client.Client, infra *infrav1alpha1
 		return RuntimeConfig{}, ok, err
 	}
 	cfg := RuntimeConfig{
-		DSN:                  clickHouseCfg.DSN,
-		Database:             firstNonEmpty(clickHouseCfg.Databases.Observability, obsclickhouse.DefaultDatabase),
-		EventsTable:          obsclickhouse.DefaultEventsTable,
-		LogsTable:            obsclickhouse.DefaultLogsTable,
-		MetricsTable:         obsclickhouse.DefaultMetricsTable,
-		RetentionDays:        obsclickhouse.DefaultRetentionDays,
-		LogsRetentionDays:    obsclickhouse.DefaultLogsRetentionDays,
-		MetricsRetentionDays: obsclickhouse.DefaultMetricsRetentionDays,
-		ConnectTimeout:       clickHouseCfg.ConnectTimeout,
-		SkipSchemaMigration:  !clickHouseCfg.SchemaMigrationEnabled,
-		Ingest:               resolveIngestConfig(infra),
+		DSN:                         clickHouseCfg.DSN,
+		Database:                    firstNonEmpty(clickHouseCfg.Databases.Observability, obsclickhouse.DefaultDatabase),
+		EventsTable:                 obsclickhouse.DefaultEventsTable,
+		LogsTable:                   obsclickhouse.DefaultLogsTable,
+		RuntimeSamplesTable:         obsclickhouse.DefaultRuntimeSamplesTable,
+		RetentionDays:               obsclickhouse.DefaultRetentionDays,
+		LogsRetentionDays:           obsclickhouse.DefaultLogsRetentionDays,
+		RuntimeSamplesRetentionDays: obsclickhouse.DefaultRuntimeSamplesRetentionDays,
+		ConnectTimeout:              clickHouseCfg.ConnectTimeout,
+		SkipSchemaMigration:         !clickHouseCfg.SchemaMigrationEnabled,
+		Ingest:                      resolveIngestConfig(infra),
 	}
 	applyRetentionConfig(infra, &cfg)
-	applyLegacyTableOverrides(infra, &cfg)
+	applyTableOverrides(infra, &cfg)
 	return cfg, true, nil
 }
 
@@ -156,12 +173,12 @@ func applyRetentionConfig(infra *infrav1alpha1.Sandbox0Infra, cfg *RuntimeConfig
 	if retention.LogDays > 0 {
 		cfg.LogsRetentionDays = retention.LogDays
 	}
-	if retention.MetricDays > 0 {
-		cfg.MetricsRetentionDays = retention.MetricDays
+	if retention.RuntimeSampleDays > 0 {
+		cfg.RuntimeSamplesRetentionDays = retention.RuntimeSampleDays
 	}
 }
 
-func applyLegacyTableOverrides(infra *infrav1alpha1.Sandbox0Infra, cfg *RuntimeConfig) {
+func applyTableOverrides(infra *infrav1alpha1.Sandbox0Infra, cfg *RuntimeConfig) {
 	if infra == nil || infra.Spec.SandboxObservability == nil || cfg == nil {
 		return
 	}
@@ -174,7 +191,7 @@ func applyLegacyTableOverrides(infra *infrav1alpha1.Sandbox0Infra, cfg *RuntimeC
 		cfg.Database = firstNonEmpty(ch.Database, cfg.Database)
 		cfg.EventsTable = firstNonEmpty(ch.EventsTable, cfg.EventsTable)
 		cfg.LogsTable = firstNonEmpty(ch.LogsTable, cfg.LogsTable)
-		cfg.MetricsTable = firstNonEmpty(ch.MetricsTable, cfg.MetricsTable)
+		cfg.RuntimeSamplesTable = firstNonEmpty(ch.RuntimeSamplesTable, cfg.RuntimeSamplesTable)
 	case infrav1alpha1.SandboxObservabilityTypeExternal:
 		if infra.Spec.SandboxObservability.External == nil {
 			return
@@ -183,7 +200,7 @@ func applyLegacyTableOverrides(infra *infrav1alpha1.Sandbox0Infra, cfg *RuntimeC
 		cfg.Database = firstNonEmpty(ch.Database, cfg.Database)
 		cfg.EventsTable = firstNonEmpty(ch.EventsTable, cfg.EventsTable)
 		cfg.LogsTable = firstNonEmpty(ch.LogsTable, cfg.LogsTable)
-		cfg.MetricsTable = firstNonEmpty(ch.MetricsTable, cfg.MetricsTable)
+		cfg.RuntimeSamplesTable = firstNonEmpty(ch.RuntimeSamplesTable, cfg.RuntimeSamplesTable)
 		cfg.ConnectTimeout = ch.ConnectTimeout
 		cfg.SkipSchemaMigration = ch.SkipSchemaMigration
 	}
@@ -199,6 +216,15 @@ func applyIngestConfig(ingest infrav1alpha1.SandboxObservabilityIngestConfig, cf
 }
 
 func applyManagerIngestConfig(ingest infrav1alpha1.SandboxObservabilityIngestConfig, cfg *apiconfig.ManagerConfig) {
+	cfg.SandboxObservabilityIngestQueueSize = ingest.QueueSize
+	cfg.SandboxObservabilityIngestBatchSize = ingest.BatchSize
+	cfg.SandboxObservabilityIngestFlushInterval = ingest.FlushInterval
+	cfg.SandboxObservabilityIngestRequestTimeout = ingest.RequestTimeout
+	cfg.SandboxObservabilityIngestMaxRetries = ingest.MaxRetries
+	cfg.SandboxObservabilityIngestRetryBackoff = ingest.RetryBackoff
+}
+
+func applyCtldIngestConfig(ingest infrav1alpha1.SandboxObservabilityIngestConfig, cfg *apiconfig.CtldConfig) {
 	cfg.SandboxObservabilityIngestQueueSize = ingest.QueueSize
 	cfg.SandboxObservabilityIngestBatchSize = ingest.BatchSize
 	cfg.SandboxObservabilityIngestFlushInterval = ingest.FlushInterval

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
@@ -41,6 +42,7 @@ const (
 
 type criRuntimeService interface {
 	ListContainers(ctx context.Context, in *runtimeapi.ListContainersRequest, opts ...grpc.CallOption) (*runtimeapi.ListContainersResponse, error)
+	ListPodSandboxStats(ctx context.Context, in *runtimeapi.ListPodSandboxStatsRequest, opts ...grpc.CallOption) (*runtimeapi.ListPodSandboxStatsResponse, error)
 }
 
 type ContainerdRuntimeConfig struct {
@@ -70,6 +72,9 @@ type ContainerdRuntime struct {
 	dialTimeout            time.Duration
 	criClient              criRuntimeService
 	criDialContext         func(ctx context.Context, endpoint string) (*grpc.ClientConn, error)
+	criMu                  sync.Mutex
+	criConn                *grpc.ClientConn
+	connectedCRIClient     criRuntimeService
 	containerdClient       containerdClient
 }
 
@@ -351,12 +356,9 @@ func (r *ContainerdRuntime) rootFSBaselinePath(info ctldapi.RootFSInfo, baseline
 }
 
 func (r *ContainerdRuntime) resolveContainerID(ctx context.Context, target ctldapi.RootFSContainerRef) (string, string, error) {
-	client, conn, err := r.runtimeClient(ctx)
+	client, err := r.runtimeClient(ctx)
 	if err != nil {
 		return "", "", err
-	}
-	if conn != nil {
-		defer conn.Close()
 	}
 	resp, err := client.ListContainers(ctx, &runtimeapi.ListContainersRequest{
 		Filter: &runtimeapi.ContainerFilter{
@@ -387,29 +389,69 @@ func (r *ContainerdRuntime) resolveContainerID(ctx context.Context, target ctlda
 	return "", "", fmt.Errorf("%w: running container %s in pod %s/%s", ErrNotFound, target.ContainerName, target.Namespace, target.PodName)
 }
 
-func (r *ContainerdRuntime) runtimeClient(ctx context.Context) (criRuntimeService, *grpc.ClientConn, error) {
+// ListPodSandboxStats returns one bulk node-local CRI stats snapshot.
+func (r *ContainerdRuntime) ListPodSandboxStats(ctx context.Context) ([]*runtimeapi.PodSandboxStats, error) {
+	client, err := r.runtimeClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.ListPodSandboxStats(ctx, &runtimeapi.ListPodSandboxStatsRequest{})
+	if err != nil {
+		return nil, fmt.Errorf("list CRI pod sandbox stats: %w", err)
+	}
+	return resp.GetStats(), nil
+}
+
+// Close releases the cached CRI connection. Injected CRI clients are not owned
+// by ContainerdRuntime and are left open.
+func (r *ContainerdRuntime) Close() error {
+	if r == nil {
+		return nil
+	}
+	r.criMu.Lock()
+	conn := r.criConn
+	r.criConn = nil
+	r.connectedCRIClient = nil
+	r.criMu.Unlock()
+	if conn == nil {
+		return nil
+	}
+	return conn.Close()
+}
+
+func (r *ContainerdRuntime) runtimeClient(ctx context.Context) (criRuntimeService, error) {
 	if r != nil && r.criClient != nil {
-		return r.criClient, nil, nil
+		return r.criClient, nil
+	}
+	if r == nil {
+		return nil, fmt.Errorf("containerd runtime is nil")
+	}
+	r.criMu.Lock()
+	defer r.criMu.Unlock()
+	if r.connectedCRIClient != nil {
+		return r.connectedCRIClient, nil
 	}
 	endpoint := defaultCRIEndpoint
-	if r != nil && strings.TrimSpace(r.criEndpoint) != "" {
+	if strings.TrimSpace(r.criEndpoint) != "" {
 		endpoint = r.criEndpoint
 	}
 	timeout := defaultDialTimeout
-	if r != nil && r.dialTimeout > 0 {
+	if r.dialTimeout > 0 {
 		timeout = r.dialTimeout
 	}
 	dialCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	dialer := dialCRIEndpoint
-	if r != nil && r.criDialContext != nil {
+	if r.criDialContext != nil {
 		dialer = r.criDialContext
 	}
 	conn, err := dialer(dialCtx, normalizeCRIEndpoint(endpoint))
 	if err != nil {
-		return nil, nil, fmt.Errorf("dial cri endpoint %s: %w", endpoint, err)
+		return nil, fmt.Errorf("dial cri endpoint %s: %w", endpoint, err)
 	}
-	return runtimeapi.NewRuntimeServiceClient(conn), conn, nil
+	r.criConn = conn
+	r.connectedCRIClient = runtimeapi.NewRuntimeServiceClient(conn)
+	return r.connectedCRIClient, nil
 }
 
 func (r *ContainerdRuntime) client(ctx context.Context) (containerdClient, func(), error) {

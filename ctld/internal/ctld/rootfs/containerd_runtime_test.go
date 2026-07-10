@@ -4,14 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
@@ -122,6 +128,74 @@ func TestResolveContainerIDReturnsNotFound(t *testing.T) {
 	assert.True(t, errors.Is(err, ErrNotFound))
 }
 
+func TestListPodSandboxStatsUsesBulkCRIRequest(t *testing.T) {
+	want := []*runtimeapi.PodSandboxStats{{
+		Attributes: &runtimeapi.PodSandboxAttributes{Id: "sandbox-1"},
+	}}
+	runtime := NewContainerdRuntime(ContainerdRuntimeConfig{CRIClient: fakeCRIClient{stats: want}})
+
+	got, err := runtime.ListPodSandboxStats(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
+func TestListPodSandboxStatsWrapsCRIError(t *testing.T) {
+	runtime := NewContainerdRuntime(ContainerdRuntimeConfig{CRIClient: fakeCRIClient{err: errors.New("unavailable")}})
+
+	_, err := runtime.ListPodSandboxStats(context.Background())
+
+	require.ErrorContains(t, err, "list CRI pod sandbox stats")
+}
+
+func TestContainerdRuntimeReusesAndClosesCRIConnection(t *testing.T) {
+	listener := bufconn.Listen(1024 * 1024)
+	server := grpc.NewServer()
+	runtimeapi.RegisterRuntimeServiceServer(server, &fakeRuntimeServiceServer{})
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() {
+		server.Stop()
+		_ = listener.Close()
+	})
+
+	var dialCount atomic.Int32
+	var connMu sync.Mutex
+	var dialedConn *grpc.ClientConn
+	runtime := NewContainerdRuntime(ContainerdRuntimeConfig{
+		CRIEndpoint: "bufnet",
+		CRIDialContext: func(ctx context.Context, _ string) (*grpc.ClientConn, error) {
+			dialCount.Add(1)
+			conn, err := grpc.DialContext(ctx, "bufnet",
+				grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+					return listener.DialContext(ctx)
+				}),
+				grpc.WithTransportCredentials(insecure.NewCredentials()),
+				grpc.WithBlock(),
+			)
+			if err == nil {
+				connMu.Lock()
+				dialedConn = conn
+				connMu.Unlock()
+			}
+			return conn, err
+		},
+	})
+
+	_, err := runtime.ListPodSandboxStats(context.Background())
+	require.NoError(t, err)
+	_, err = runtime.ListPodSandboxStats(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), dialCount.Load())
+
+	require.NoError(t, runtime.Close())
+	connMu.Lock()
+	closedConn := dialedConn
+	connMu.Unlock()
+	require.NotNil(t, closedConn)
+	assert.Equal(t, connectivity.Shutdown, closedConn.GetState())
+	require.NoError(t, runtime.Close())
+}
+
 func TestFindLiveRootFSByTaskAnnotations(t *testing.T) {
 	taskRoot := t.TempDir()
 	hostTaskRoot := filepath.Join(string(filepath.Separator), "run", "containerd", "io.containerd.runtime.v2.task", "k8s.io")
@@ -183,7 +257,18 @@ func TestNormalizeCRIEndpoint(t *testing.T) {
 
 type fakeCRIClient struct {
 	containers []*runtimeapi.Container
+	stats      []*runtimeapi.PodSandboxStats
 	err        error
+}
+
+type fakeRuntimeServiceServer struct {
+	runtimeapi.UnimplementedRuntimeServiceServer
+}
+
+func (*fakeRuntimeServiceServer) ListPodSandboxStats(context.Context, *runtimeapi.ListPodSandboxStatsRequest) (*runtimeapi.ListPodSandboxStatsResponse, error) {
+	return &runtimeapi.ListPodSandboxStatsResponse{Stats: []*runtimeapi.PodSandboxStats{{
+		Attributes: &runtimeapi.PodSandboxAttributes{Id: "sandbox-1"},
+	}}}, nil
 }
 
 func (c fakeCRIClient) ListContainers(_ context.Context, _ *runtimeapi.ListContainersRequest, _ ...grpc.CallOption) (*runtimeapi.ListContainersResponse, error) {
@@ -191,6 +276,13 @@ func (c fakeCRIClient) ListContainers(_ context.Context, _ *runtimeapi.ListConta
 		return nil, c.err
 	}
 	return &runtimeapi.ListContainersResponse{Containers: c.containers}, nil
+}
+
+func (c fakeCRIClient) ListPodSandboxStats(_ context.Context, _ *runtimeapi.ListPodSandboxStatsRequest, _ ...grpc.CallOption) (*runtimeapi.ListPodSandboxStatsResponse, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	return &runtimeapi.ListPodSandboxStatsResponse{Stats: c.stats}, nil
 }
 
 func writeTaskConfig(t *testing.T, taskDir string, annotations map[string]string) {

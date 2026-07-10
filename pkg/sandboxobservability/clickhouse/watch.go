@@ -9,9 +9,8 @@ import (
 )
 
 const (
-	eventTailCursorKind  = "event"
-	logTailCursorKind    = "log"
-	metricTailCursorKind = "metric"
+	eventTailCursorKind = "event"
+	logTailCursorKind   = "log"
 )
 
 func (r *Repository) WatchEvents(ctx context.Context, query sandboxobservability.EventQuery, opts sandboxobservability.WatchOptions) (*sandboxobservability.EventListResult, error) {
@@ -46,37 +45,6 @@ func (r *Repository) WatchLogs(ctx context.Context, query sandboxobservability.L
 		Logs:       logs,
 		NextCursor: nextCursor,
 		Watermark:  lastLogWatermark(logs),
-	}, nil
-}
-
-func (r *Repository) WatchMetricSamples(ctx context.Context, query sandboxobservability.MetricQuery, opts sandboxobservability.WatchOptions) (*sandboxobservability.MetricListResult, error) {
-	normalized, limit, cursor, err := normalizeWatchMetricQuery(query, opts)
-	if err != nil {
-		return nil, err
-	}
-	sqlQuery, args := r.buildWatchMetricsSQL(normalized, limit, cursor)
-	rows, err := r.db.QueryContext(ctx, sqlQuery, args...)
-	if err != nil {
-		return nil, fmt.Errorf("%w: watch metric samples: %v", sandboxobservability.ErrBackendUnavailable, err)
-	}
-	defer rows.Close()
-
-	samples, err := scanMetricSamples(rows)
-	if err != nil {
-		return nil, fmt.Errorf("%w: scan metric samples: %v", sandboxobservability.ErrBackendUnavailable, err)
-	}
-	nextCursor := ""
-	if len(samples) > 0 {
-		last := samples[len(samples)-1]
-		nextCursor, err = encodeTailCursor(metricTailCursorKind, last.IngestedAt, last.Name, "", last.Cursor)
-		if err != nil {
-			return nil, fmt.Errorf("%w: encode cursor: %v", sandboxobservability.ErrBackendUnavailable, err)
-		}
-	}
-	return &sandboxobservability.MetricListResult{
-		Samples:    samples,
-		NextCursor: nextCursor,
-		Watermark:  lastMetricWatermark(samples),
 	}, nil
 }
 
@@ -181,46 +149,6 @@ func (r *Repository) buildWatchLogsSQL(query sandboxobservability.LogQuery, limi
 	return builder.String(), args
 }
 
-func (r *Repository) buildWatchMetricsSQL(query sandboxobservability.MetricQuery, limit int, cursor *tailCursor) (string, []any) {
-	var builder strings.Builder
-	builder.WriteString("SELECT team_id, sandbox_id, region_id, cluster_id, context_id, occurred_at, ingested_at, name, unit, value, cursor, attributes FROM ")
-	builder.WriteString(r.metricsTable)
-	builder.WriteString(" WHERE team_id = ? AND sandbox_id = ?")
-
-	args := []any{query.TeamID, query.SandboxID}
-	if query.StartTime != nil {
-		builder.WriteString(" AND occurred_at >= ?")
-		args = append(args, query.StartTime.UTC())
-	}
-	if query.EndTime != nil {
-		builder.WriteString(" AND occurred_at <= ?")
-		args = append(args, query.EndTime.UTC())
-	}
-	if query.ContextID != "" {
-		builder.WriteString(" AND context_id = ?")
-		args = append(args, query.ContextID)
-	}
-	if len(query.Names) > 0 {
-		builder.WriteString(" AND name IN (")
-		for i, name := range query.Names {
-			if i > 0 {
-				builder.WriteString(", ")
-			}
-			builder.WriteString("?")
-			args = append(args, name)
-		}
-		builder.WriteString(")")
-	}
-	if cursor != nil {
-		builder.WriteString(" AND (ingested_at, name, cursor) > (?, ?, ?)")
-		args = append(args, cursor.IngestedAt, cursor.Source, cursor.Cursor)
-	}
-
-	builder.WriteString(" ORDER BY ingested_at ASC, name ASC, cursor ASC")
-	builder.WriteString(fmt.Sprintf(" LIMIT %d", limit))
-	return builder.String(), args
-}
-
 func normalizeWatchEventQuery(query sandboxobservability.EventQuery, opts sandboxobservability.WatchOptions) (sandboxobservability.EventQuery, int, *tailCursor, error) {
 	query.Cursor = ""
 	if opts.Limit > 0 {
@@ -249,22 +177,6 @@ func normalizeWatchLogQuery(query sandboxobservability.LogQuery, opts sandboxobs
 	cursor, err := normalizeWatchCursor(opts, logTailCursorKind)
 	if err != nil {
 		return sandboxobservability.LogQuery{}, 0, nil, err
-	}
-	return normalized, limit, cursor, nil
-}
-
-func normalizeWatchMetricQuery(query sandboxobservability.MetricQuery, opts sandboxobservability.WatchOptions) (sandboxobservability.MetricQuery, int, *tailCursor, error) {
-	query.Cursor = ""
-	if opts.Limit > 0 {
-		query.Limit = opts.Limit
-	}
-	normalized, limit, _, err := normalizeMetricQuery(query)
-	if err != nil {
-		return sandboxobservability.MetricQuery{}, 0, nil, err
-	}
-	cursor, err := normalizeWatchCursor(opts, metricTailCursorKind)
-	if err != nil {
-		return sandboxobservability.MetricQuery{}, 0, nil, err
 	}
 	return normalized, limit, cursor, nil
 }

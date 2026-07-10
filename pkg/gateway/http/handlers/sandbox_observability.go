@@ -129,31 +129,44 @@ func (h *SandboxObservabilityHandler) ListLogs(c *gin.Context) {
 	spec.JSONSuccess(c, http.StatusOK, result)
 }
 
-func (h *SandboxObservabilityHandler) ListMetricSamples(c *gin.Context) {
-	query, ok := parseSandboxMetricQuery(c)
+func (h *SandboxObservabilityHandler) GetRuntimeMetrics(c *gin.Context) {
+	query, ok := parseSandboxRuntimeSeriesQuery(c)
 	if !ok {
 		return
 	}
-	watch, ok := parseSandboxObservabilityWatch(c)
-	if !ok {
-		return
-	}
-	if watch {
-		h.watchMetricSamples(c, query)
-		return
-	}
-	result, err := h.repo.ListMetricSamples(c.Request.Context(), query)
+	result, err := h.repo.ListRuntimeSeries(c.Request.Context(), query)
 	if err != nil {
-		h.writeQueryError(c, err, "failed to list sandbox observability metric samples", zap.String("sandbox_id", query.SandboxID), zap.String("team_id", query.TeamID))
+		h.writeQueryError(c, err, "failed to query sandbox runtime metrics", zap.String("sandbox_id", query.SandboxID), zap.String("team_id", query.TeamID))
 		return
 	}
 	if result == nil {
-		result = &sandboxobservability.MetricListResult{Samples: []sandboxobservability.MetricSample{}}
+		result = &sandboxobservability.RuntimeSeriesResult{Series: []sandboxobservability.RuntimeSeries{}, Gaps: []sandboxobservability.RuntimeSeriesGap{}, Freshness: sandboxobservability.RuntimeSeriesFreshness{Status: sandboxobservability.RuntimeSeriesFreshnessMissing}, Partial: true}
 	}
-	if result.Samples == nil {
-		result.Samples = []sandboxobservability.MetricSample{}
+	if result.Series == nil {
+		result.Series = []sandboxobservability.RuntimeSeries{}
+	}
+	if result.Gaps == nil {
+		result.Gaps = []sandboxobservability.RuntimeSeriesGap{}
+	}
+	for i := range result.Series {
+		if result.Series[i].Segments == nil {
+			result.Series[i].Segments = []sandboxobservability.RuntimeSeriesSegment{}
+		}
+		for j := range result.Series[i].Segments {
+			if result.Series[i].Segments[j].Points == nil {
+				result.Series[i].Segments[j].Points = []sandboxobservability.RuntimeSeriesPoint{}
+			}
+		}
 	}
 	spec.JSONSuccess(c, http.StatusOK, result)
+}
+
+func (h *SandboxObservabilityHandler) GetRuntimeMetricsCatalog(c *gin.Context) {
+	if _, _, ok := parseSandboxAndTeam(c); !ok {
+		return
+	}
+	catalog := sandboxobservability.RuntimeMetricCatalogSnapshot()
+	spec.JSONSuccess(c, http.StatusOK, catalog)
 }
 
 func (h *SandboxObservabilityHandler) IngestEvents(c *gin.Context) {
@@ -214,24 +227,24 @@ func (h *SandboxObservabilityHandler) IngestLogs(c *gin.Context) {
 	spec.JSONSuccess(c, http.StatusAccepted, gin.H{"inserted": len(req.Logs)})
 }
 
-func (h *SandboxObservabilityHandler) IngestMetricSamples(c *gin.Context) {
+func (h *SandboxObservabilityHandler) IngestRuntimeSamples(c *gin.Context) {
 	if h.writer == nil {
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox observability ingest backend is disabled")
 		return
 	}
 	var req struct {
-		Samples []sandboxobservability.MetricSample `json:"samples"`
+		Samples []sandboxobservability.RuntimeSample `json:"samples"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
 		return
 	}
 	if len(req.Samples) > maxSandboxObservabilityLimit {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "too many metric samples")
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "too many runtime samples")
 		return
 	}
-	if err := h.writer.InsertMetricSamples(c.Request.Context(), req.Samples); err != nil {
-		h.writeIngestError(c, err, "failed to ingest sandbox observability metric samples", zap.Int("sample_count", len(req.Samples)))
+	if err := h.writer.InsertRuntimeSamples(c.Request.Context(), req.Samples); err != nil {
+		h.writeIngestError(c, err, "failed to ingest sandbox runtime samples", zap.Int("sample_count", len(req.Samples)))
 		return
 	}
 	spec.JSONSuccess(c, http.StatusAccepted, gin.H{"inserted": len(req.Samples)})
@@ -319,47 +332,6 @@ func (h *SandboxObservabilityHandler) watchLogs(c *gin.Context, query sandboxobs
 	}
 }
 
-func (h *SandboxObservabilityHandler) watchMetricSamples(c *gin.Context, query sandboxobservability.MetricQuery) {
-	if !validateSandboxObservabilityWatch(c, query.EndTime) {
-		return
-	}
-	watchRepo, ok := h.watchRepository(c)
-	if !ok {
-		return
-	}
-
-	opts := buildSandboxObservabilityWatchOptions(query.Cursor, query.Limit, query.StartTime)
-	fetch := func() (*sandboxobservability.MetricListResult, error) {
-		return watchRepo.WatchMetricSamples(c.Request.Context(), query, opts)
-	}
-	result, err := fetch()
-	if err != nil {
-		h.writeQueryError(c, err, "failed to watch sandbox observability metric samples",
-			zap.String("sandbox_id", query.SandboxID),
-			zap.String("team_id", query.TeamID))
-		return
-	}
-
-	encoder, flusher, ok := h.startSandboxObservabilityWatch(c)
-	if !ok {
-		return
-	}
-	lastHeartbeat := time.Now().UTC()
-	for {
-		fullBatch := h.writeWatchMetricSamples(c, encoder, flusher, result, &opts)
-		if result == nil || !fullBatch {
-			if !h.waitForNextWatchPoll(c, encoder, flusher, &lastHeartbeat) {
-				return
-			}
-		}
-		result, err = fetch()
-		if err != nil {
-			h.writeWatchErrorLine(c, encoder, flusher, err, "failed to watch sandbox observability metric samples")
-			return
-		}
-	}
-}
-
 func (h *SandboxObservabilityHandler) watchRepository(c *gin.Context) (sandboxobservability.WatchRepository, bool) {
 	watchRepo, ok := h.repo.(sandboxobservability.WatchRepository)
 	if !ok {
@@ -409,19 +381,6 @@ func (h *SandboxObservabilityHandler) writeWatchLogs(c *gin.Context, encoder *js
 	}
 	h.writeWatchWatermark(c, encoder, flusher, result.NextCursor, result.Watermark, opts)
 	return len(result.Logs) >= opts.Limit && opts.Limit > 0
-}
-
-func (h *SandboxObservabilityHandler) writeWatchMetricSamples(c *gin.Context, encoder *json.Encoder, flusher http.Flusher, result *sandboxobservability.MetricListResult, opts *sandboxobservability.WatchOptions) bool {
-	if result == nil {
-		return false
-	}
-	for _, sample := range result.Samples {
-		if !h.writeWatchLine(c, encoder, flusher, sandboxObservabilityWatchLine{Type: "metric_sample", Data: sample}) {
-			return false
-		}
-	}
-	h.writeWatchWatermark(c, encoder, flusher, result.NextCursor, result.Watermark, opts)
-	return len(result.Samples) >= opts.Limit && opts.Limit > 0
 }
 
 func (h *SandboxObservabilityHandler) writeWatchWatermark(c *gin.Context, encoder *json.Encoder, flusher http.Flusher, cursor, watermark string, opts *sandboxobservability.WatchOptions) {
@@ -486,6 +445,10 @@ func (h *SandboxObservabilityHandler) writeQueryError(c *gin.Context, err error,
 	}
 	if errors.Is(err, sandboxobservability.ErrInvalidCursor) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid cursor")
+		return
+	}
+	if errors.Is(err, sandboxobservability.ErrInvalidQuery) {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
 	fields = append(fields, zap.Error(err))
@@ -606,37 +569,60 @@ func parseSandboxLogQuery(c *gin.Context) (sandboxobservability.LogQuery, bool) 
 	}, true
 }
 
-func parseSandboxMetricQuery(c *gin.Context) (sandboxobservability.MetricQuery, bool) {
+func parseSandboxRuntimeSeriesQuery(c *gin.Context) (sandboxobservability.RuntimeSeriesQuery, bool) {
 	sandboxID, teamID, ok := parseSandboxAndTeam(c)
 	if !ok {
-		return sandboxobservability.MetricQuery{}, false
+		return sandboxobservability.RuntimeSeriesQuery{}, false
 	}
 	startTime, ok := parseOptionalTimeQuery(c, "start_time")
 	if !ok {
-		return sandboxobservability.MetricQuery{}, false
+		return sandboxobservability.RuntimeSeriesQuery{}, false
 	}
 	endTime, ok := parseOptionalTimeQuery(c, "end_time")
 	if !ok {
-		return sandboxobservability.MetricQuery{}, false
+		return sandboxobservability.RuntimeSeriesQuery{}, false
 	}
-	if startTime != nil && endTime != nil && endTime.Before(*startTime) {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "end_time must be greater than or equal to start_time")
-		return sandboxobservability.MetricQuery{}, false
+	if startTime != nil && endTime != nil && !endTime.After(*startTime) {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "end_time must be greater than start_time")
+		return sandboxobservability.RuntimeSeriesQuery{}, false
 	}
-	limit, ok := parseSandboxObservabilityLimit(c)
+	step, ok := parseOptionalPositiveIntegerQuery(c, "step_seconds", 86400)
 	if !ok {
-		return sandboxobservability.MetricQuery{}, false
+		return sandboxobservability.RuntimeSeriesQuery{}, false
 	}
-	return sandboxobservability.MetricQuery{
+	maxPoints, ok := parseOptionalPositiveIntegerQuery(c, "max_points", 1000)
+	if !ok {
+		return sandboxobservability.RuntimeSeriesQuery{}, false
+	}
+	statistic := sandboxobservability.RuntimeMetricStatistic(strings.TrimSpace(c.Query("statistic")))
+	if statistic == "" {
+		statistic = sandboxobservability.RuntimeMetricStatisticAuto
+	}
+	if !sandboxobservability.ValidRuntimeMetricStatistic(statistic) {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid statistic")
+		return sandboxobservability.RuntimeSeriesQuery{}, false
+	}
+	query := sandboxobservability.RuntimeSeriesQuery{
 		TeamID:    teamID,
 		SandboxID: sandboxID,
-		StartTime: startTime,
-		EndTime:   endTime,
-		Limit:     limit,
-		Cursor:    strings.TrimSpace(c.Query("cursor")),
-		Names:     parseMetricNames(c),
-		ContextID: strings.TrimSpace(c.Query("context_id")),
-	}, true
+		Metrics:   parseRuntimeMetricNames(c.Query("metrics")),
+		Step:      time.Duration(step) * time.Second,
+		Statistic: statistic,
+		MaxPoints: maxPoints,
+	}
+	if startTime != nil {
+		query.StartTime = *startTime
+	}
+	if endTime != nil {
+		query.EndTime = *endTime
+	}
+	for _, name := range query.Metrics {
+		if !sandboxobservability.ValidRuntimeMetricName(name) {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "unknown metric "+string(name))
+			return sandboxobservability.RuntimeSeriesQuery{}, false
+		}
+	}
+	return query, true
 }
 
 func parseSandboxAndTeam(c *gin.Context) (string, string, bool) {
@@ -769,21 +755,32 @@ func parseOptionalLogStreamQuery(c *gin.Context) (sandboxobservability.LogStream
 	return value, true
 }
 
-func parseMetricNames(c *gin.Context) []string {
-	var names []string
-	for _, value := range c.QueryArray("name") {
-		names = appendMetricNames(names, value)
+func parseRuntimeMetricNames(value string) []sandboxobservability.RuntimeMetricName {
+	var names []sandboxobservability.RuntimeMetricName
+	seen := map[sandboxobservability.RuntimeMetricName]struct{}{}
+	for _, part := range strings.Split(value, ",") {
+		name := sandboxobservability.RuntimeMetricName(strings.TrimSpace(part))
+		if name == "" {
+			continue
+		}
+		if _, duplicate := seen[name]; duplicate {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
 	}
-	names = appendMetricNames(names, c.Query("names"))
 	return names
 }
 
-func appendMetricNames(dst []string, value string) []string {
-	for _, part := range strings.Split(value, ",") {
-		name := strings.TrimSpace(part)
-		if name != "" {
-			dst = append(dst, name)
-		}
+func parseOptionalPositiveIntegerQuery(c *gin.Context, name string, maximum int) (int, bool) {
+	value := strings.TrimSpace(c.Query(name))
+	if value == "" {
+		return 0, true
 	}
-	return dst
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 || (maximum > 0 && parsed > maximum) {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid "+name)
+		return 0, false
+	}
+	return parsed, true
 }

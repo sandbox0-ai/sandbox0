@@ -619,8 +619,8 @@ type BuiltinSandboxObservabilityClickHouseConfig struct {
 	// +kubebuilder:default="sandbox_logs"
 	LogsTable string `json:"logsTable,omitempty"`
 	// +optional
-	// +kubebuilder:default="sandbox_metric_samples"
-	MetricsTable string `json:"metricsTable,omitempty"`
+	// +kubebuilder:default="sandbox_runtime_samples"
+	RuntimeSamplesTable string `json:"runtimeSamplesTable,omitempty"`
 
 	// Persistence configures ClickHouse storage.
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="persistence is immutable after creation"
@@ -656,8 +656,8 @@ type ExternalSandboxObservabilityClickHouseConfig struct {
 	// +kubebuilder:default="sandbox_logs"
 	LogsTable string `json:"logsTable,omitempty"`
 	// +optional
-	// +kubebuilder:default="sandbox_metric_samples"
-	MetricsTable string `json:"metricsTable,omitempty"`
+	// +kubebuilder:default="sandbox_runtime_samples"
+	RuntimeSamplesTable string `json:"runtimeSamplesTable,omitempty"`
 
 	// +optional
 	// +kubebuilder:default="10s"
@@ -690,10 +690,10 @@ type SandboxObservabilityRetentionConfig struct {
 	// +optional
 	LogDays int `json:"logDays,omitempty"`
 
-	// MetricDays controls retention for sandbox metric samples.
+	// RuntimeSampleDays controls retention for sandbox runtime samples.
 	// +kubebuilder:default=30
 	// +optional
-	MetricDays int `json:"metricDays,omitempty"`
+	RuntimeSampleDays int `json:"runtimeSampleDays,omitempty"`
 }
 
 // SandboxObservabilityIngestConfig configures bounded producer ingestion.

@@ -58,8 +58,11 @@ var (
 )
 
 const (
-	httpShutdownTimeout   = 5 * time.Second
-	portalShutdownTimeout = 25 * time.Second
+	httpShutdownTimeout           = 5 * time.Second
+	runtimeMetricsShutdownTimeout = 7 * time.Second
+	portalShutdownTimeout         = 25 * time.Second
+	shutdownGraceMargin           = 5 * time.Second
+	minimumTerminationGrace       = httpShutdownTimeout + runtimeMetricsShutdownTimeout + portalShutdownTimeout + shutdownGraceMargin
 )
 
 func main() {
@@ -114,7 +117,8 @@ func main() {
 		k8sClient = client
 	}
 
-	storageCfg := apiconfig.LoadStorageProxyConfig()
+	ctldCfg := apiconfig.LoadCtldConfig()
+	storageCfg := &ctldCfg.StorageProxyConfig
 	var repo *storagedb.Repository
 	var dbPool *pgxpool.Pool
 	if storageCfg.DatabaseURL != "" {
@@ -153,11 +157,15 @@ func main() {
 	}()
 	defer csiServer.Stop()
 
-	probeController := buildProbeController(ctx, k8sClient, obsProvider)
+	podCache := buildNodePodCache(ctx, k8sClient)
+	probeController := buildProbeController(k8sClient, obsProvider, podCache)
+	containerdRuntime := buildContainerdRuntime()
+	defer containerdRuntime.Close()
+	runtimeMetricsHandle := startCtldRuntimeMetrics(ctx, ctldCfg, containerdRuntime, podCache, obsProvider, zapLogger)
 	httpServer := newHTTPServer(httpAddr, combinedController{
 		Controller: probeController,
 		Portal:     portalManager,
-		RootFS:     buildRootFSController(ctx, storageCfg, portalManager),
+		RootFS:     buildRootFSController(ctx, storageCfg, portalManager, containerdRuntime),
 	})
 	if obsProvider != nil {
 		httpServer.Handler = httpobs.ServerMiddleware(obsProvider.HTTPServerConfig(zapLogger))(httpServer.Handler)
@@ -177,6 +185,11 @@ func main() {
 	httpShutdownCtx, httpShutdownCancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
 	_ = httpServer.Shutdown(httpShutdownCtx)
 	httpShutdownCancel()
+	runtimeMetricsShutdownCtx, runtimeMetricsShutdownCancel := context.WithTimeout(context.Background(), runtimeMetricsShutdownTimeout)
+	if err := runtimeMetricsHandle.Shutdown(runtimeMetricsShutdownCtx); err != nil {
+		log.Printf("ctld runtime metric producer shutdown completed with errors: %v", err)
+	}
+	runtimeMetricsShutdownCancel()
 	csiServer.Stop()
 	portalShutdownCtx, portalShutdownCancel := context.WithTimeout(context.Background(), portalShutdownTimeout)
 	if err := portalManager.Shutdown(portalShutdownCtx); err != nil {
@@ -189,10 +202,7 @@ func newHTTPServer(addr string, controller ctldserver.Controller) *http.Server {
 	return &http.Server{Addr: addr, Handler: ctldserver.NewMux(controller)}
 }
 
-func buildProbeController(ctx context.Context, k8sClient kubernetes.Interface, obsProvider *observability.Provider) ctldserver.Controller {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func buildProbeController(k8sClient kubernetes.Interface, obsProvider *observability.Provider, podCache *ctldpower.PodCache) ctldserver.Controller {
 	if k8sClient == nil {
 		log.Printf("ctld probe control disabled: kubernetes client unavailable")
 		return ctldserver.NotImplementedController{}
@@ -203,20 +213,30 @@ func buildProbeController(ctx context.Context, k8sClient kubernetes.Interface, o
 		controller.HTTPClient = obsProvider.HTTP.NewClient(httpobs.Config{Timeout: 2 * time.Second})
 	}
 
-	if podCache, err := ctldpower.NewNodePodCache(k8sClient, nodeName, 0); err != nil {
-		log.Printf("ctld pod cache disabled: %v", err)
-	} else {
-		podCache.Start(ctx)
+	if podCache != nil {
 		resolver.SetPodCache(podCache.PodLister(), podCache.PodIndexer())
-		go func() {
-			syncCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			defer cancel()
-			if !podCache.WaitForSync(syncCtx) && ctx.Err() == nil {
-				log.Printf("ctld pod cache did not sync before timeout; live kubernetes lookups remain enabled")
-			}
-		}()
 	}
 	return controller
+}
+
+func buildNodePodCache(ctx context.Context, k8sClient kubernetes.Interface) *ctldpower.PodCache {
+	if k8sClient == nil {
+		return nil
+	}
+	podCache, err := ctldpower.NewNodePodCache(k8sClient, nodeName, 0)
+	if err != nil {
+		log.Printf("ctld pod cache disabled: %v", err)
+		return nil
+	}
+	podCache.Start(ctx)
+	go func() {
+		syncCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if !podCache.WaitForSync(syncCtx) && ctx.Err() == nil {
+			log.Printf("ctld pod cache did not sync before timeout; live kubernetes lookups remain enabled")
+		}
+	}()
+	return podCache
 }
 
 func activePodUIDLister(k8sClient kubernetes.Interface, nodeName string) ctldportal.ActivePodUIDLister {
@@ -250,27 +270,31 @@ func podTerminalForMountCleanup(pod *corev1.Pod) bool {
 	return pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed
 }
 
-func buildRootFSController(ctx context.Context, storageCfg *apiconfig.StorageProxyConfig, portalResolver ctldrootfs.PortalResolver) rootFSHandler {
+func buildRootFSController(ctx context.Context, storageCfg *apiconfig.StorageProxyConfig, portalResolver ctldrootfs.PortalResolver, runtime *ctldrootfs.ContainerdRuntime) rootFSHandler {
 	store, err := buildRootFSObjectStore(storageCfg)
 	if err != nil {
 		log.Printf("ctld rootfs object store disabled: %v", err)
 	}
 	objectCache := buildRootFSObjectCache(ctx)
 	return ctldrootfs.NewController(ctldrootfs.Config{
-		Runtime: ctldrootfs.NewContainerdRuntime(ctldrootfs.ContainerdRuntimeConfig{
-			CRIEndpoint:            criEndpoint,
-			ContainerdEndpoint:     containerdEndpoint,
-			ContainerdRoot:         containerdRoot,
-			ContainerdHostRoot:     containerdHostRoot,
-			ContainerdDataRoot:     containerdDataRoot,
-			ContainerdHostDataRoot: containerdHostDataRoot,
-			RootFSCacheDir:         filepath.Join(portalRoot, "rootfs"),
-			Namespace:              containerdNamespace,
-		}),
+		Runtime:        runtime,
 		Store:          store,
 		PortalResolver: portalResolver,
 		SnapshotDir:    filepath.Join(portalRoot, "rootfs", "prepared"),
 		ObjectCache:    objectCache,
+	})
+}
+
+func buildContainerdRuntime() *ctldrootfs.ContainerdRuntime {
+	return ctldrootfs.NewContainerdRuntime(ctldrootfs.ContainerdRuntimeConfig{
+		CRIEndpoint:            criEndpoint,
+		ContainerdEndpoint:     containerdEndpoint,
+		ContainerdRoot:         containerdRoot,
+		ContainerdHostRoot:     containerdHostRoot,
+		ContainerdDataRoot:     containerdDataRoot,
+		ContainerdHostDataRoot: containerdHostDataRoot,
+		RootFSCacheDir:         filepath.Join(portalRoot, "rootfs"),
+		Namespace:              containerdNamespace,
 	})
 }
 

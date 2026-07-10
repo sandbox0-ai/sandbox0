@@ -40,35 +40,35 @@ func (w *LogWorker) Stats() BatchStats {
 	return w.worker.Stats()
 }
 
-type MetricWorker struct {
-	worker *batchWorker[sandboxobservability.MetricSample]
+type RuntimeSampleWorker struct {
+	worker *batchWorker[sandboxobservability.RuntimeSample]
 }
 
-func NewMetricWorker(writer sandboxobservability.Writer, cfg Config) (*MetricWorker, error) {
+func NewRuntimeSampleWorker(writer sandboxobservability.Writer, cfg Config) (*RuntimeSampleWorker, error) {
 	if writer == nil {
 		return nil, fmt.Errorf("writer is nil")
 	}
-	worker, err := newBatchWorker(func(ctx context.Context, samples []sandboxobservability.MetricSample) error {
-		return writer.InsertMetricSamples(ctx, samples)
+	worker, err := newBatchWorker(func(ctx context.Context, samples []sandboxobservability.RuntimeSample) error {
+		return writer.InsertRuntimeSamples(ctx, samples)
 	}, cfg)
 	if err != nil {
 		return nil, err
 	}
-	return &MetricWorker{worker: worker}, nil
+	return &RuntimeSampleWorker{worker: worker}, nil
 }
 
-func (w *MetricWorker) Enqueue(ctx context.Context, sample sandboxobservability.MetricSample) error {
+func (w *RuntimeSampleWorker) Enqueue(ctx context.Context, sample sandboxobservability.RuntimeSample) error {
 	return w.worker.Enqueue(ctx, sample)
 }
 
-func (w *MetricWorker) TryEnqueue(sample sandboxobservability.MetricSample) bool {
+func (w *RuntimeSampleWorker) TryEnqueue(sample sandboxobservability.RuntimeSample) bool {
 	return w.worker.TryEnqueue(sample)
 }
 
-func (w *MetricWorker) Run(ctx context.Context) {
+func (w *RuntimeSampleWorker) Run(ctx context.Context) {
 	w.worker.Run(ctx)
 }
 
-func (w *MetricWorker) Stats() BatchStats {
+func (w *RuntimeSampleWorker) Stats() BatchStats {
 	return w.worker.Stats()
 }

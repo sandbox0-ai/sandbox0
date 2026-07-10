@@ -288,7 +288,7 @@ console.log('Status:', status.status);`
 
 ## Observability
 
-Sandbox logs, metrics, lifecycle events, and network audit events are exposed through the per-sandbox observability API. The query API reads an asynchronous per-sandbox projection that can be backed by ClickHouse or another query store. When no backend is configured, these endpoints return `503 unavailable`. When the backend is configured but cannot be queried, the same endpoints return `503 unavailable` with a backend-unavailable error.
+Sandbox0 exposes chart-ready runtime metrics alongside historical logs, lifecycle events, and network audit events. These APIs read asynchronous per-sandbox projections and never wake a paused sandbox. They are separate from platform service telemetry and the metering usage ledger.
 
 <Endpoint method="GET">
 /api/v1/sandboxes/{'{id}'}/observability/events
@@ -299,10 +299,63 @@ Sandbox logs, metrics, lifecycle events, and network audit events are exposed th
 </Endpoint>
 
 <Endpoint method="GET">
-/api/v1/sandboxes/{'{id}'}/observability/metrics
+/api/v1/sandboxes/{'{id}'}/metrics
 </Endpoint>
 
-### Query Parameters
+<Endpoint method="GET">
+/api/v1/sandboxes/{'{id}'}/metrics/catalog
+</Endpoint>
+
+### Runtime metrics
+
+The metrics endpoint returns bounded, server-downsampled series ready for charts. The default query covers the last hour and requests CPU utilization, memory utilization, and network I/O. A query cannot span more than 30 days.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `start_time` | RFC3339 timestamp | Start of the window; defaults to one hour before `end_time` |
+| `end_time` | RFC3339 timestamp | End of the window; defaults to the current time |
+| `metrics` | comma-separated string | Canonical metric names from the catalog |
+| `step_seconds` | integer | Requested bucket width; the server uses at least 15 seconds and may increase it to honor `max_points` |
+| `statistic` | string | `auto`, `average`, `minimum`, `maximum`, `last`, or `rate`; `auto` averages gauges and rates counters |
+| `max_points` | integer | Maximum points per series (default: 240, max: 1000) |
+
+The built-in catalog is intentionally bounded:
+
+| Metric | Kind | Unit | Meaning |
+|--------|------|------|---------|
+| `sandbox.cpu.utilization` | gauge | ratio | CPU usage divided by the configured CPU limit |
+| `sandbox.cpu.usage` | gauge | cores | CPU cores currently used |
+| `sandbox.cpu.time` | counter | seconds | Cumulative CPU time; `auto` returns its rate in cores |
+| `sandbox.cpu.limit` | gauge | cores | Configured CPU limit |
+| `sandbox.memory.usage` | gauge | bytes | Cgroup memory usage |
+| `sandbox.memory.working_set` | gauge | bytes | Memory working set |
+| `sandbox.memory.available` | gauge | bytes | Memory available within the sandbox limit |
+| `sandbox.memory.limit` | gauge | bytes | Configured memory limit |
+| `sandbox.memory.utilization` | gauge | ratio | Working set divided by the configured memory limit |
+| `sandbox.network.io` | counter | bytes | Receive or transmit bytes, selected by the `direction` dimension; `auto` returns bytes per second |
+| `sandbox.network.errors` | counter | count | Receive or transmit errors, selected by the `direction` dimension; `auto` returns errors per second |
+| `sandbox.process.count` | gauge | count | Current sandbox process count |
+| `sandbox.rootfs.writable.usage` | gauge | bytes | Main runtime container writable-layer usage when the CRI reports it |
+| `sandbox.rootfs.writable.inodes` | gauge | count | Main runtime container writable-layer inodes when the CRI reports them |
+
+Each series contains zero or more continuous `segments`. Runtime resets and collection gaps start a new segment, so clients must not connect lines across segments. The response also reports typed `gaps`, freshness relative to the requested `end_time`, the effective `step_seconds`, and whether the result is `partial`. Missing or unsupported observations are omitted and never synthesized as zero.
+
+```typescript
+import { Client, SandboxRuntimeMetricName } from "sandbox0";
+
+const client = new Client({ token: process.env.SANDBOX0_TOKEN! });
+const metrics = await client.sandbox("sb_abc123").getMetrics({
+    startTime: new Date(Date.now() - 60 * 60 * 1000),
+    metrics: [
+        SandboxRuntimeMetricName.SandboxCpuUtilization,
+        SandboxRuntimeMetricName.SandboxMemoryWorkingSet,
+        SandboxRuntimeMetricName.SandboxNetworkIo,
+    ],
+    maxPoints: 120,
+});
+```
+
+### Logs and events
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -311,24 +364,22 @@ Sandbox logs, metrics, lifecycle events, and network audit events are exposed th
 | `limit` | integer | Maximum events to return (default: 100, max: 1000) |
 | `cursor` | string | Opaque cursor from a previous response; in watch mode, use the cursor from a `watermark` line |
 | `watch` | boolean | Stream matching records as `application/x-ndjson` until the client disconnects |
-| `context_id` | string | Log and metric context filter |
+| `context_id` | string | Log context filter |
 | `stream` | string | Log stream filter: `stdout`, `stderr`, or `pty` |
-| `name` | string | Metric name filter; may be repeated |
-| `names` | string | Comma-separated metric name filter |
 | `source` | string | Event producer filter: `manager`, `netd`, or `procd` |
 | `event_type` | string | Event projection filter: `lifecycle`, `network_audit`, or `runtime_stats` |
 | `outcome` | string | Event outcome filter: `completed`, `denied`, `error`, `succeeded`, or `failed` |
 
-Every returned event, log entry, and metric sample includes `team_id`, `sandbox_id`, `region_id`, `cluster_id`, `occurred_at`, `ingested_at`, and `cursor`. Event rows also include `source`, `event_type`, and `watermark`; log rows include `stream` and `message`; metric rows include `name` and `value`. The response cursor is opaque and separate from each producer cursor.
+Every returned event and log entry includes `team_id`, `sandbox_id`, `region_id`, `cluster_id`, `occurred_at`, `ingested_at`, and `cursor`. Event rows also include `source`, `event_type`, and `watermark`; log rows include `stream` and `message`. The response cursor is opaque and separate from each producer cursor.
 
-Set `watch=true` to stream matching records as NDJSON in ingestion order. Without `cursor` or `start_time`, a watch stream starts at request time and does not replay historical rows. When `watch=true`, `end_time` is not supported. A watch stream emits record lines (`event`, `log`, or `metric_sample`), `watermark` lines with a resume cursor, periodic `heartbeat` lines, and an `error` line before termination if the backend fails after the stream starts.
+Set `watch=true` to stream matching log or event records as NDJSON in ingestion order. Without `cursor` or `start_time`, a watch stream starts at request time and does not replay historical rows. When `watch=true`, `end_time` is not supported. A watch stream emits `event` or `log` lines, `watermark` lines with a resume cursor, periodic `heartbeat` lines, and an `error` line before termination if the backend fails after the stream starts. Runtime metrics are queried as bounded time series and do not expose a watch mode.
 
-ClickHouse-backed deployments store events, logs, and metric samples in asynchronous per-sandbox projection tables with independent retention TTLs. Netd network audit events arrive through an asynchronous internal ingest sink when enabled by the deployment. Runtime stats samples are published by the sandbox runtime metric producer.
+ClickHouse-backed deployments store events, logs, and wide runtime samples in asynchronous per-sandbox projection tables with independent retention TTLs. Netd publishes network audit events, manager publishes logs, and node-local ctld instances collect sandbox-wide CRI runtime samples every 15 seconds with jitter.
 
-Query endpoints return `503` when the backend is disabled or unavailable.
+Historical data query endpoints return `503` when the backend is disabled or unavailable. The static metric catalog remains available so clients can build selectors without probing storage.
 
 <Callout variant="info">
-Metering windows are separate usage-ledger records for quota, showback, and billing export. Historical observability tables do not store metering windows, even when the deployment also enables metering on the same region ClickHouse component. Metering is optional and disabled by default; when enabled, it writes usage truth to ClickHouse only. File audit is not part of these endpoints.
+Metering windows are separate usage-ledger records for quota, showback, and billing export. Historical observability tables do not store metering windows, even when both use the same region ClickHouse component. File audit and SandboxVolume usage are not part of these endpoints. Writable rootfs metrics describe only the runtime container layer and are omitted when the CRI cannot report them.
 </Callout>
 
 ---

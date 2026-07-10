@@ -19,12 +19,14 @@ type sqlBackend interface {
 }
 
 type Repository struct {
-	db           sqlBackend
-	cfg          Config
-	eventsTable  string
-	logsTable    string
-	metricsTable string
-	now          func() time.Time
+	db                  sqlBackend
+	cfg                 Config
+	eventsTable         string
+	logsTable           string
+	runtimeSamplesTable string
+	runtimeQuerySlots   chan struct{}
+	loadRuntimeMetric   runtimeMetricLoader
+	now                 func() time.Time
 }
 
 func NewRepository(db sqlBackend, cfg Config) (*Repository, error) {
@@ -35,16 +37,19 @@ func NewRepository(db sqlBackend, cfg Config) (*Repository, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Repository{
-		db:           db,
-		cfg:          normalized,
-		eventsTable:  qualifiedEventsTable(normalized),
-		logsTable:    qualifiedLogsTable(normalized),
-		metricsTable: qualifiedMetricsTable(normalized),
+	repository := &Repository{
+		db:                  db,
+		cfg:                 normalized,
+		eventsTable:         qualifiedEventsTable(normalized),
+		logsTable:           qualifiedLogsTable(normalized),
+		runtimeSamplesTable: qualifiedRuntimeSamplesTable(normalized),
+		runtimeQuerySlots:   make(chan struct{}, normalized.RuntimeQueryConcurrency),
 		now: func() time.Time {
 			return time.Now().UTC()
 		},
-	}, nil
+	}
+	repository.loadRuntimeMetric = repository.queryRuntimeMetric
+	return repository, nil
 }
 
 func (r *Repository) Database() string {
@@ -59,8 +64,8 @@ func (r *Repository) LogsTable() string {
 	return r.cfg.LogsTable
 }
 
-func (r *Repository) MetricsTable() string {
-	return r.cfg.MetricsTable
+func (r *Repository) RuntimeSamplesTable() string {
+	return r.cfg.RuntimeSamplesTable
 }
 
 func (r *Repository) RetentionDays() int {
@@ -71,8 +76,8 @@ func (r *Repository) LogsRetentionDays() int {
 	return r.cfg.LogsRetentionDays
 }
 
-func (r *Repository) MetricsRetentionDays() int {
-	return r.cfg.MetricsRetentionDays
+func (r *Repository) RuntimeSamplesRetentionDays() int {
+	return r.cfg.RuntimeSamplesRetentionDays
 }
 
 func (r *Repository) ListEvents(ctx context.Context, query sandboxobservability.EventQuery) (*sandboxobservability.EventListResult, error) {

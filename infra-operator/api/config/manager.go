@@ -180,10 +180,6 @@ type ManagerConfig struct {
 	// It is injected by infra-operator from spec.sandboxObservability.
 	// +optional
 	SandboxObservabilityLogsIngestURL string `yaml:"sandbox_observability_logs_ingest_url" json:"-"`
-	// SandboxObservabilityMetricsIngestURL is the cluster-gateway internal metrics ingest endpoint.
-	// It is injected by infra-operator from spec.sandboxObservability.
-	// +optional
-	SandboxObservabilityMetricsIngestURL string `yaml:"sandbox_observability_metrics_ingest_url" json:"-"`
 	// +optional
 	SandboxObservabilityIngestQueueSize int `yaml:"sandbox_observability_ingest_queue_size" json:"-"`
 	// +optional
@@ -198,8 +194,6 @@ type ManagerConfig struct {
 	SandboxObservabilityIngestRetryBackoff metav1.Duration `yaml:"sandbox_observability_ingest_retry_backoff" json:"-"`
 	// +optional
 	SandboxObservabilityLogPollInterval metav1.Duration `yaml:"sandbox_observability_log_poll_interval" json:"-"`
-	// +optional
-	SandboxObservabilityMetricSampleInterval metav1.Duration `yaml:"sandbox_observability_metric_sample_interval" json:"-"`
 
 	// Metering configures the optional region usage ledger.
 	// +optional
@@ -589,9 +583,6 @@ func applySandboxObservabilityProducerDefaults(cfg *ManagerConfig) {
 	}
 	if cfg.SandboxObservabilityLogPollInterval.Duration == 0 {
 		cfg.SandboxObservabilityLogPollInterval = metav1.Duration{Duration: 10 * time.Second}
-	}
-	if cfg.SandboxObservabilityMetricSampleInterval.Duration == 0 {
-		cfg.SandboxObservabilityMetricSampleInterval = metav1.Duration{Duration: 15 * time.Second}
 	}
 }
 

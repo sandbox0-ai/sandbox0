@@ -56,32 +56,32 @@ func WithMeteringReader(reader gatewayhandlers.MeteringReader) ServerOption {
 
 // Server represents the HTTP server for cluster-gateway
 type Server struct {
-	router                *gin.Engine
-	cfg                   *config.ClusterGatewayConfig
-	proxy2Mgr             *proxy.Router
-	proxy2sp              *proxy.Router
-	managerClient         *client.ManagerClient
-	authMiddleware        *middleware.InternalAuthMiddleware
-	netdAuthMiddleware    *middleware.InternalAuthMiddleware
-	publicAuth            *gatewaymiddleware.AuthMiddleware
-	compositeAuth         *middleware.CompositeAuthMiddleware
-	publicIdentityRepo    *gatewayidentity.Repository
-	publicAPIKeyRepo      *gatewayapikey.Repository
-	rateLimiter           *gatewaymiddleware.RateLimiter
-	externalLimiter       *middleware.ExternalRateLimiter
-	publicBuiltin         *gatewaybuiltin.Provider
-	publicOIDC            *gatewayoidc.Manager
-	publicJWT             *gatewayauthn.Issuer
-	requestLogger         *middleware.RequestLogger
-	logger                *zap.Logger
-	meteringHandler       *gatewayhandlers.MeteringHandler
-	observabilityHandler  *gatewayhandlers.SandboxObservabilityHandler
-	internalAuthGen       *internalauth.Generator
-	entitlements          licensing.Entitlements
-	obsProvider           *observability.Provider
-	httpClient            *http.Client
-	sandboxServiceLimiter ratelimit.Limiter
-	sandboxInternalCache  sandboxInternalCache
+	router                                   *gin.Engine
+	cfg                                      *config.ClusterGatewayConfig
+	proxy2Mgr                                *proxy.Router
+	proxy2sp                                 *proxy.Router
+	managerClient                            *client.ManagerClient
+	authMiddleware                           *middleware.InternalAuthMiddleware
+	sandboxObservabilityIngestAuthMiddleware *middleware.InternalAuthMiddleware
+	publicAuth                               *gatewaymiddleware.AuthMiddleware
+	compositeAuth                            *middleware.CompositeAuthMiddleware
+	publicIdentityRepo                       *gatewayidentity.Repository
+	publicAPIKeyRepo                         *gatewayapikey.Repository
+	rateLimiter                              *gatewaymiddleware.RateLimiter
+	externalLimiter                          *middleware.ExternalRateLimiter
+	publicBuiltin                            *gatewaybuiltin.Provider
+	publicOIDC                               *gatewayoidc.Manager
+	publicJWT                                *gatewayauthn.Issuer
+	requestLogger                            *middleware.RequestLogger
+	logger                                   *zap.Logger
+	meteringHandler                          *gatewayhandlers.MeteringHandler
+	observabilityHandler                     *gatewayhandlers.SandboxObservabilityHandler
+	internalAuthGen                          *internalauth.Generator
+	entitlements                             licensing.Entitlements
+	obsProvider                              *observability.Provider
+	httpClient                               *http.Client
+	sandboxServiceLimiter                    ratelimit.Limiter
+	sandboxInternalCache                     sandboxInternalCache
 }
 
 // NewServer creates a new HTTP server
@@ -151,13 +151,14 @@ func NewServer(
 		return nil, fmt.Errorf("load internal JWT private key: %w", err)
 	}
 
-	// Control-plane callers are enabled only in internal auth mode, while netd
-	// audit ingest is a data-plane path and must remain available in public
-	// single-cluster mode.
-	publicKey := privateKey.Public().(ed25519.PublicKey)
+	// Control-plane requests and data-plane ingest use different key pairs in a
+	// regional deployment. The private key mounted here belongs to the data
+	// plane and is also the trust root for node-local ingest callers.
+	dataPlanePublicKey := privateKey.Public().(ed25519.PublicKey)
+	var controlPlanePublicKey ed25519.PublicKey
 	if authModeEnabled(cfg.AuthMode, authModeInternal) {
 		var err error
-		publicKey, err = internalauth.LoadEd25519PublicKeyFromFile(internalauth.DefaultInternalJWTPublicKeyPath)
+		controlPlanePublicKey, err = internalauth.LoadEd25519PublicKeyFromFile(internalauth.DefaultInternalJWTPublicKeyPath)
 		if err != nil {
 			return nil, fmt.Errorf("load internal JWT public key: %w", err)
 		}
@@ -168,25 +169,16 @@ func NewServer(
 	if len(allowedCallers) == 0 {
 		allowedCallers = []string{"regional-gateway", "scheduler", "cluster-gateway"}
 	}
-	var validator *internalauth.Validator
-	if authModeEnabled(cfg.AuthMode, authModeInternal) {
-		validator = internalauth.NewValidator(internalauth.ValidatorConfig{
-			Target:             "cluster-gateway",
-			PublicKey:          publicKey,
-			AllowedCallers:     allowedCallers,
-			ClockSkewTolerance: 10 * time.Second,
-		})
-	}
-	netdValidator := internalauth.NewValidator(internalauth.ValidatorConfig{
-		Target:             "cluster-gateway",
-		PublicKey:          publicKey,
-		AllowedCallers:     []string{"netd", "manager", "procd", "storage-proxy"},
-		ClockSkewTolerance: 10 * time.Second,
-	})
+	validator, sandboxObservabilityIngestValidator := newInternalAuthValidators(
+		cfg.AuthMode,
+		allowedCallers,
+		controlPlanePublicKey,
+		dataPlanePublicKey,
+	)
 
 	// Create middleware
 	authMiddleware := middleware.NewInternalAuthMiddleware(validator, logger)
-	netdAuthMiddleware := middleware.NewInternalAuthMiddleware(netdValidator, logger)
+	sandboxObservabilityIngestAuthMiddleware := middleware.NewInternalAuthMiddleware(sandboxObservabilityIngestValidator, logger)
 	requestLogger := middleware.NewRequestLogger(logger)
 
 	// Initialize internal auth generator (for downstream services)
@@ -290,32 +282,32 @@ func NewServer(
 	}
 
 	server := &Server{
-		router:                router,
-		cfg:                   cfg,
-		proxy2Mgr:             proxy2Mgr,
-		proxy2sp:              proxy2sp,
-		managerClient:         managerClient,
-		authMiddleware:        authMiddleware,
-		netdAuthMiddleware:    netdAuthMiddleware,
-		publicAuth:            publicAuth,
-		compositeAuth:         compositeAuth,
-		publicIdentityRepo:    publicIdentityRepo,
-		publicAPIKeyRepo:      publicAPIKeyRepo,
-		rateLimiter:           rateLimiter,
-		externalLimiter:       externalLimiter,
-		publicBuiltin:         publicBuiltin,
-		publicOIDC:            publicOIDC,
-		publicJWT:             publicJWT,
-		requestLogger:         requestLogger,
-		logger:                logger,
-		meteringHandler:       meteringHandler,
-		observabilityHandler:  observabilityHandler,
-		internalAuthGen:       internalAuthGen,
-		entitlements:          entitlements,
-		obsProvider:           obsProvider,
-		httpClient:            httpClient,
-		sandboxServiceLimiter: sandboxServiceLimiter,
-		sandboxInternalCache:  sandboxInternalCache,
+		router:                                   router,
+		cfg:                                      cfg,
+		proxy2Mgr:                                proxy2Mgr,
+		proxy2sp:                                 proxy2sp,
+		managerClient:                            managerClient,
+		authMiddleware:                           authMiddleware,
+		sandboxObservabilityIngestAuthMiddleware: sandboxObservabilityIngestAuthMiddleware,
+		publicAuth:                               publicAuth,
+		compositeAuth:                            compositeAuth,
+		publicIdentityRepo:                       publicIdentityRepo,
+		publicAPIKeyRepo:                         publicAPIKeyRepo,
+		rateLimiter:                              rateLimiter,
+		externalLimiter:                          externalLimiter,
+		publicBuiltin:                            publicBuiltin,
+		publicOIDC:                               publicOIDC,
+		publicJWT:                                publicJWT,
+		requestLogger:                            requestLogger,
+		logger:                                   logger,
+		meteringHandler:                          meteringHandler,
+		observabilityHandler:                     observabilityHandler,
+		internalAuthGen:                          internalAuthGen,
+		entitlements:                             entitlements,
+		obsProvider:                              obsProvider,
+		httpClient:                               httpClient,
+		sandboxServiceLimiter:                    sandboxServiceLimiter,
+		sandboxInternalCache:                     sandboxInternalCache,
 	}
 
 	server.setupRoutes()
@@ -404,7 +396,8 @@ func (s *Server) setupRoutes() {
 		{
 			sandboxes.GET("/:id/observability/events", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.sandboxObservabilityHandler().ListEvents)
 			sandboxes.GET("/:id/observability/logs", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.sandboxObservabilityHandler().ListLogs)
-			sandboxes.GET("/:id/observability/metrics", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.sandboxObservabilityHandler().ListMetricSamples)
+			sandboxes.GET("/:id/metrics", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.sandboxObservabilityHandler().GetRuntimeMetrics)
+			sandboxes.GET("/:id/metrics/catalog", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.sandboxObservabilityHandler().GetRuntimeMetricsCatalog)
 
 			sandboxes.Use(s.managerUpstreamMiddleware())
 			sandboxes.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.listSandboxes)
@@ -579,11 +572,11 @@ func (s *Server) setupInternalControlPlaneRoutes() {
 
 func (s *Server) setupSandboxObservabilityIngestRoutes() {
 	internal := s.router.Group("/internal/v1")
-	internal.Use(s.netdAuthMiddleware.Authenticate())
+	internal.Use(s.sandboxObservabilityIngestAuthMiddleware.Authenticate())
 	{
-		internal.POST("/sandbox-observability/events", s.netdAuthMiddleware.RequirePermission(gatewayauthn.PermSandboxObservabilityWrite), s.sandboxObservabilityHandler().IngestEvents)
-		internal.POST("/sandbox-observability/logs", s.netdAuthMiddleware.RequirePermission(gatewayauthn.PermSandboxObservabilityWrite), s.sandboxObservabilityHandler().IngestLogs)
-		internal.POST("/sandbox-observability/metrics", s.netdAuthMiddleware.RequirePermission(gatewayauthn.PermSandboxObservabilityWrite), s.sandboxObservabilityHandler().IngestMetricSamples)
+		internal.POST("/sandbox-observability/events", s.sandboxObservabilityIngestAuthMiddleware.RequirePermission(gatewayauthn.PermSandboxObservabilityWrite), s.sandboxObservabilityHandler().IngestEvents)
+		internal.POST("/sandbox-observability/logs", s.sandboxObservabilityIngestAuthMiddleware.RequirePermission(gatewayauthn.PermSandboxObservabilityWrite), s.sandboxObservabilityHandler().IngestLogs)
+		internal.POST("/sandbox-observability/runtime-samples", s.sandboxObservabilityIngestAuthMiddleware.RequirePermission(gatewayauthn.PermSandboxObservabilityWrite), s.sandboxObservabilityHandler().IngestRuntimeSamples)
 	}
 }
 
@@ -746,6 +739,30 @@ func (s *Server) requireUpstream(
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, clientMessage, detail)
 		c.Abort()
 	}
+}
+
+func newInternalAuthValidators(
+	authMode string,
+	allowedControlPlaneCallers []string,
+	controlPlanePublicKey ed25519.PublicKey,
+	dataPlanePublicKey ed25519.PublicKey,
+) (*internalauth.Validator, *internalauth.Validator) {
+	var controlPlaneValidator *internalauth.Validator
+	if authModeEnabled(authMode, authModeInternal) {
+		controlPlaneValidator = internalauth.NewValidator(internalauth.ValidatorConfig{
+			Target:             "cluster-gateway",
+			PublicKey:          controlPlanePublicKey,
+			AllowedCallers:     allowedControlPlaneCallers,
+			ClockSkewTolerance: 10 * time.Second,
+		})
+	}
+	dataPlaneIngestValidator := internalauth.NewValidator(internalauth.ValidatorConfig{
+		Target:             "cluster-gateway",
+		PublicKey:          dataPlanePublicKey,
+		AllowedCallers:     []string{"netd", "ctld", "manager", "procd", "storage-proxy"},
+		ClockSkewTolerance: 10 * time.Second,
+	})
+	return controlPlaneValidator, dataPlaneIngestValidator
 }
 
 const (

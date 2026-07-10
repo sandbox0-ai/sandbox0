@@ -234,12 +234,72 @@ const (
 
 // Defines values for SandboxObservabilityWatchLineType.
 const (
-	SandboxObservabilityWatchLineTypeError        SandboxObservabilityWatchLineType = "error"
-	SandboxObservabilityWatchLineTypeEvent        SandboxObservabilityWatchLineType = "event"
-	SandboxObservabilityWatchLineTypeHeartbeat    SandboxObservabilityWatchLineType = "heartbeat"
-	SandboxObservabilityWatchLineTypeLog          SandboxObservabilityWatchLineType = "log"
-	SandboxObservabilityWatchLineTypeMetricSample SandboxObservabilityWatchLineType = "metric_sample"
-	SandboxObservabilityWatchLineTypeWatermark    SandboxObservabilityWatchLineType = "watermark"
+	SandboxObservabilityWatchLineTypeError     SandboxObservabilityWatchLineType = "error"
+	SandboxObservabilityWatchLineTypeEvent     SandboxObservabilityWatchLineType = "event"
+	SandboxObservabilityWatchLineTypeHeartbeat SandboxObservabilityWatchLineType = "heartbeat"
+	SandboxObservabilityWatchLineTypeLog       SandboxObservabilityWatchLineType = "log"
+	SandboxObservabilityWatchLineTypeWatermark SandboxObservabilityWatchLineType = "watermark"
+)
+
+// Defines values for SandboxRuntimeMetricFreshnessStatus.
+const (
+	Fresh   SandboxRuntimeMetricFreshnessStatus = "fresh"
+	Missing SandboxRuntimeMetricFreshnessStatus = "missing"
+	Stale   SandboxRuntimeMetricFreshnessStatus = "stale"
+)
+
+// Defines values for SandboxRuntimeMetricGapReason.
+const (
+	CollectionError SandboxRuntimeMetricGapReason = "collection_error"
+	NoData          SandboxRuntimeMetricGapReason = "no_data"
+	SeriesReset     SandboxRuntimeMetricGapReason = "series_reset"
+	Unavailable     SandboxRuntimeMetricGapReason = "unavailable"
+	Unsupported     SandboxRuntimeMetricGapReason = "unsupported"
+)
+
+// Defines values for SandboxRuntimeMetricKind.
+const (
+	Counter SandboxRuntimeMetricKind = "counter"
+	Gauge   SandboxRuntimeMetricKind = "gauge"
+)
+
+// Defines values for SandboxRuntimeMetricName.
+const (
+	SandboxCpuLimit             SandboxRuntimeMetricName = "sandbox.cpu.limit"
+	SandboxCpuTime              SandboxRuntimeMetricName = "sandbox.cpu.time"
+	SandboxCpuUsage             SandboxRuntimeMetricName = "sandbox.cpu.usage"
+	SandboxCpuUtilization       SandboxRuntimeMetricName = "sandbox.cpu.utilization"
+	SandboxMemoryAvailable      SandboxRuntimeMetricName = "sandbox.memory.available"
+	SandboxMemoryLimit          SandboxRuntimeMetricName = "sandbox.memory.limit"
+	SandboxMemoryUsage          SandboxRuntimeMetricName = "sandbox.memory.usage"
+	SandboxMemoryUtilization    SandboxRuntimeMetricName = "sandbox.memory.utilization"
+	SandboxMemoryWorkingSet     SandboxRuntimeMetricName = "sandbox.memory.working_set"
+	SandboxNetworkErrors        SandboxRuntimeMetricName = "sandbox.network.errors"
+	SandboxNetworkIo            SandboxRuntimeMetricName = "sandbox.network.io"
+	SandboxProcessCount         SandboxRuntimeMetricName = "sandbox.process.count"
+	SandboxRootfsWritableInodes SandboxRuntimeMetricName = "sandbox.rootfs.writable.inodes"
+	SandboxRootfsWritableUsage  SandboxRuntimeMetricName = "sandbox.rootfs.writable.usage"
+)
+
+// Defines values for SandboxRuntimeMetricStatistic.
+const (
+	Auto    SandboxRuntimeMetricStatistic = "auto"
+	Average SandboxRuntimeMetricStatistic = "average"
+	Last    SandboxRuntimeMetricStatistic = "last"
+	Maximum SandboxRuntimeMetricStatistic = "maximum"
+	Minimum SandboxRuntimeMetricStatistic = "minimum"
+	Rate    SandboxRuntimeMetricStatistic = "rate"
+)
+
+// Defines values for SandboxRuntimeMetricUnit.
+const (
+	SandboxRuntimeMetricUnitBytes          SandboxRuntimeMetricUnit = "bytes"
+	SandboxRuntimeMetricUnitBytesPerSecond SandboxRuntimeMetricUnit = "bytes_per_second"
+	SandboxRuntimeMetricUnitCores          SandboxRuntimeMetricUnit = "cores"
+	SandboxRuntimeMetricUnitCount          SandboxRuntimeMetricUnit = "count"
+	SandboxRuntimeMetricUnitCountPerSecond SandboxRuntimeMetricUnit = "count_per_second"
+	SandboxRuntimeMetricUnitRatio          SandboxRuntimeMetricUnit = "ratio"
+	SandboxRuntimeMetricUnitSeconds        SandboxRuntimeMetricUnit = "seconds"
 )
 
 // Defines values for SandboxVolumeS3ConfigProvider.
@@ -451,11 +511,6 @@ const (
 	SuccessSandboxObservabilityLogsResponseSuccessTrue SuccessSandboxObservabilityLogsResponseSuccess = true
 )
 
-// Defines values for SuccessSandboxObservabilityMetricsResponseSuccess.
-const (
-	SuccessSandboxObservabilityMetricsResponseSuccessTrue SuccessSandboxObservabilityMetricsResponseSuccess = true
-)
-
 // Defines values for SuccessSandboxResponseSuccess.
 const (
 	SuccessSandboxResponseSuccessTrue SuccessSandboxResponseSuccess = true
@@ -469,6 +524,16 @@ const (
 // Defines values for SuccessSandboxRootFSSnapshotResponseSuccess.
 const (
 	SuccessSandboxRootFSSnapshotResponseSuccessTrue SuccessSandboxRootFSSnapshotResponseSuccess = true
+)
+
+// Defines values for SuccessSandboxRuntimeMetricsCatalogResponseSuccess.
+const (
+	SuccessSandboxRuntimeMetricsCatalogResponseSuccessTrue SuccessSandboxRuntimeMetricsCatalogResponseSuccess = true
+)
+
+// Defines values for SuccessSandboxRuntimeMetricsResponseSuccess.
+const (
+	SuccessSandboxRuntimeMetricsResponseSuccessTrue SuccessSandboxRuntimeMetricsResponseSuccess = true
 )
 
 // Defines values for SuccessSandboxServicesResponseSuccess.
@@ -553,16 +618,16 @@ const (
 
 // Defines values for SuccessWrittenResponseSuccess.
 const (
-	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
+	True SuccessWrittenResponseSuccess = true
 )
 
 // Defines values for TeamQuotaUnit.
 const (
-	Bytes    TeamQuotaUnit = "bytes"
-	Count    TeamQuotaUnit = "count"
-	GB       TeamQuotaUnit = "GB"
-	MiB      TeamQuotaUnit = "MiB"
-	Millicpu TeamQuotaUnit = "millicpu"
+	TeamQuotaUnitBytes    TeamQuotaUnit = "bytes"
+	TeamQuotaUnitCount    TeamQuotaUnit = "count"
+	TeamQuotaUnitGB       TeamQuotaUnit = "GB"
+	TeamQuotaUnitMiB      TeamQuotaUnit = "MiB"
+	TeamQuotaUnitMillicpu TeamQuotaUnit = "millicpu"
 )
 
 // Defines values for TrafficRuleAction.
@@ -1916,29 +1981,6 @@ type SandboxObservabilityLogsResponse struct {
 	Watermark  *string                        `json:"watermark,omitempty"`
 }
 
-// SandboxObservabilityMetricSample defines model for SandboxObservabilityMetricSample.
-type SandboxObservabilityMetricSample struct {
-	Attributes *map[string]interface{} `json:"attributes,omitempty"`
-	ClusterId  string                  `json:"cluster_id"`
-	ContextId  *string                 `json:"context_id,omitempty"`
-	Cursor     string                  `json:"cursor"`
-	IngestedAt time.Time               `json:"ingested_at"`
-	Name       string                  `json:"name"`
-	OccurredAt time.Time               `json:"occurred_at"`
-	RegionId   string                  `json:"region_id"`
-	SandboxId  string                  `json:"sandbox_id"`
-	TeamId     string                  `json:"team_id"`
-	Unit       *string                 `json:"unit,omitempty"`
-	Value      float64                 `json:"value"`
-}
-
-// SandboxObservabilityMetricsResponse defines model for SandboxObservabilityMetricsResponse.
-type SandboxObservabilityMetricsResponse struct {
-	NextCursor *string                            `json:"next_cursor,omitempty"`
-	Samples    []SandboxObservabilityMetricSample `json:"samples"`
-	Watermark  *string                            `json:"watermark,omitempty"`
-}
-
 // SandboxObservabilityOutcome defines model for SandboxObservabilityOutcome.
 type SandboxObservabilityOutcome string
 
@@ -2012,6 +2054,88 @@ type SandboxRootFSSnapshot struct {
 type SandboxRootFSSnapshotList struct {
 	Count     int                     `json:"count"`
 	Snapshots []SandboxRootFSSnapshot `json:"snapshots"`
+}
+
+// SandboxRuntimeMetricDescriptor defines model for SandboxRuntimeMetricDescriptor.
+type SandboxRuntimeMetricDescriptor struct {
+	Description string                   `json:"description"`
+	Dimensions  []string                 `json:"dimensions"`
+	Kind        SandboxRuntimeMetricKind `json:"kind"`
+	Name        SandboxRuntimeMetricName `json:"name"`
+	Unit        SandboxRuntimeMetricUnit `json:"unit"`
+}
+
+// SandboxRuntimeMetricFreshness Freshness is measured relative to the requested end_time, including for historical queries.
+type SandboxRuntimeMetricFreshness struct {
+	AgeSeconds       *float64                            `json:"age_seconds,omitempty"`
+	NewestObservedAt *time.Time                          `json:"newest_observed_at,omitempty"`
+	Status           SandboxRuntimeMetricFreshnessStatus `json:"status"`
+}
+
+// SandboxRuntimeMetricFreshnessStatus defines model for SandboxRuntimeMetricFreshnessStatus.
+type SandboxRuntimeMetricFreshnessStatus string
+
+// SandboxRuntimeMetricGap defines model for SandboxRuntimeMetricGap.
+type SandboxRuntimeMetricGap struct {
+	Dimensions *map[string]string            `json:"dimensions,omitempty"`
+	EndTime    time.Time                     `json:"end_time"`
+	Metric     SandboxRuntimeMetricName      `json:"metric"`
+	Reason     SandboxRuntimeMetricGapReason `json:"reason"`
+	StartTime  time.Time                     `json:"start_time"`
+}
+
+// SandboxRuntimeMetricGapReason defines model for SandboxRuntimeMetricGapReason.
+type SandboxRuntimeMetricGapReason string
+
+// SandboxRuntimeMetricKind defines model for SandboxRuntimeMetricKind.
+type SandboxRuntimeMetricKind string
+
+// SandboxRuntimeMetricName defines model for SandboxRuntimeMetricName.
+type SandboxRuntimeMetricName string
+
+// SandboxRuntimeMetricPoint defines model for SandboxRuntimeMetricPoint.
+type SandboxRuntimeMetricPoint struct {
+	Time  time.Time `json:"time"`
+	Value float64   `json:"value"`
+}
+
+// SandboxRuntimeMetricSegment A continuous series segment. Runtime restarts and collector counter resets start a new segment without exposing internal topology identifiers.
+type SandboxRuntimeMetricSegment struct {
+	Points []SandboxRuntimeMetricPoint `json:"points"`
+}
+
+// SandboxRuntimeMetricSeries defines model for SandboxRuntimeMetricSeries.
+type SandboxRuntimeMetricSeries struct {
+	Dimensions *map[string]string            `json:"dimensions,omitempty"`
+	Kind       SandboxRuntimeMetricKind      `json:"kind"`
+	Metric     SandboxRuntimeMetricName      `json:"metric"`
+	Segments   []SandboxRuntimeMetricSegment `json:"segments"`
+	Statistic  SandboxRuntimeMetricStatistic `json:"statistic"`
+	Unit       SandboxRuntimeMetricUnit      `json:"unit"`
+}
+
+// SandboxRuntimeMetricStatistic defines model for SandboxRuntimeMetricStatistic.
+type SandboxRuntimeMetricStatistic string
+
+// SandboxRuntimeMetricUnit defines model for SandboxRuntimeMetricUnit.
+type SandboxRuntimeMetricUnit string
+
+// SandboxRuntimeMetricsCatalogResponse defines model for SandboxRuntimeMetricsCatalogResponse.
+type SandboxRuntimeMetricsCatalogResponse struct {
+	Metrics []SandboxRuntimeMetricDescriptor `json:"metrics"`
+}
+
+// SandboxRuntimeMetricsResponse defines model for SandboxRuntimeMetricsResponse.
+type SandboxRuntimeMetricsResponse struct {
+	EndTime time.Time `json:"end_time"`
+
+	// Freshness Freshness is measured relative to the requested end_time, including for historical queries.
+	Freshness   SandboxRuntimeMetricFreshness `json:"freshness"`
+	Gaps        []SandboxRuntimeMetricGap     `json:"gaps"`
+	Partial     bool                          `json:"partial"`
+	Series      []SandboxRuntimeMetricSeries  `json:"series"`
+	StartTime   time.Time                     `json:"start_time"`
+	StepSeconds int64                         `json:"step_seconds"`
 }
 
 // SandboxSSHConnection defines model for SandboxSSHConnection.
@@ -2604,15 +2728,6 @@ type SuccessSandboxObservabilityLogsResponse struct {
 // SuccessSandboxObservabilityLogsResponseSuccess defines model for SuccessSandboxObservabilityLogsResponse.Success.
 type SuccessSandboxObservabilityLogsResponseSuccess bool
 
-// SuccessSandboxObservabilityMetricsResponse defines model for SuccessSandboxObservabilityMetricsResponse.
-type SuccessSandboxObservabilityMetricsResponse struct {
-	Data    *SandboxObservabilityMetricsResponse              `json:"data,omitempty"`
-	Success SuccessSandboxObservabilityMetricsResponseSuccess `json:"success"`
-}
-
-// SuccessSandboxObservabilityMetricsResponseSuccess defines model for SuccessSandboxObservabilityMetricsResponse.Success.
-type SuccessSandboxObservabilityMetricsResponseSuccess bool
-
 // SuccessSandboxResponse defines model for SuccessSandboxResponse.
 type SuccessSandboxResponse struct {
 	Data    *Sandbox                      `json:"data,omitempty"`
@@ -2639,6 +2754,24 @@ type SuccessSandboxRootFSSnapshotResponse struct {
 
 // SuccessSandboxRootFSSnapshotResponseSuccess defines model for SuccessSandboxRootFSSnapshotResponse.Success.
 type SuccessSandboxRootFSSnapshotResponseSuccess bool
+
+// SuccessSandboxRuntimeMetricsCatalogResponse defines model for SuccessSandboxRuntimeMetricsCatalogResponse.
+type SuccessSandboxRuntimeMetricsCatalogResponse struct {
+	Data    *SandboxRuntimeMetricsCatalogResponse              `json:"data,omitempty"`
+	Success SuccessSandboxRuntimeMetricsCatalogResponseSuccess `json:"success"`
+}
+
+// SuccessSandboxRuntimeMetricsCatalogResponseSuccess defines model for SuccessSandboxRuntimeMetricsCatalogResponse.Success.
+type SuccessSandboxRuntimeMetricsCatalogResponseSuccess bool
+
+// SuccessSandboxRuntimeMetricsResponse defines model for SuccessSandboxRuntimeMetricsResponse.
+type SuccessSandboxRuntimeMetricsResponse struct {
+	Data    *SandboxRuntimeMetricsResponse              `json:"data,omitempty"`
+	Success SuccessSandboxRuntimeMetricsResponseSuccess `json:"success"`
+}
+
+// SuccessSandboxRuntimeMetricsResponseSuccess defines model for SuccessSandboxRuntimeMetricsResponse.Success.
+type SuccessSandboxRuntimeMetricsResponseSuccess bool
 
 // SuccessSandboxServicesResponse defines model for SuccessSandboxServicesResponse.
 type SuccessSandboxServicesResponse struct {
@@ -3128,6 +3261,27 @@ type GetApiV1SandboxesIdFilesStatParams struct {
 	Path FilePath `form:"path" json:"path"`
 }
 
+// GetSandboxRuntimeMetricsParams defines parameters for GetSandboxRuntimeMetrics.
+type GetSandboxRuntimeMetricsParams struct {
+	// StartTime Query observations at or after this RFC3339 timestamp. Defaults to one hour before end_time.
+	StartTime *time.Time `form:"start_time,omitempty" json:"start_time,omitempty"`
+
+	// EndTime Query observations at or before this RFC3339 timestamp. Defaults to the current time.
+	EndTime *time.Time `form:"end_time,omitempty" json:"end_time,omitempty"`
+
+	// Metrics Comma-separated canonical metric names. Defaults to CPU utilization, memory utilization, and network I/O.
+	Metrics *string `form:"metrics,omitempty" json:"metrics,omitempty"`
+
+	// StepSeconds Requested bucket width in seconds. The effective step is at least 15 seconds and may be increased to honor max_points.
+	StepSeconds *int `form:"step_seconds,omitempty" json:"step_seconds,omitempty"`
+
+	// Statistic Aggregation applied within each output bucket. Auto uses average for gauges and rate for counters.
+	Statistic *SandboxRuntimeMetricStatistic `form:"statistic,omitempty" json:"statistic,omitempty"`
+
+	// MaxPoints Maximum points per returned series. The server may increase step_seconds to honor this bound.
+	MaxPoints *int `form:"max_points,omitempty" json:"max_points,omitempty"`
+}
+
 // GetApiV1SandboxesIdObservabilityEventsParams defines parameters for GetApiV1SandboxesIdObservabilityEvents.
 type GetApiV1SandboxesIdObservabilityEventsParams struct {
 	// StartTime Include events that occurred at or after this RFC3339 timestamp.
@@ -3169,33 +3323,6 @@ type GetApiV1SandboxesIdObservabilityLogsParams struct {
 	// ContextId Restrict results to a sandbox process context.
 	ContextId *string                        `form:"context_id,omitempty" json:"context_id,omitempty"`
 	Stream    *SandboxObservabilityLogStream `form:"stream,omitempty" json:"stream,omitempty"`
-}
-
-// GetApiV1SandboxesIdObservabilityMetricsParams defines parameters for GetApiV1SandboxesIdObservabilityMetrics.
-type GetApiV1SandboxesIdObservabilityMetricsParams struct {
-	// StartTime Include samples that occurred at or after this RFC3339 timestamp.
-	StartTime *time.Time `form:"start_time,omitempty" json:"start_time,omitempty"`
-
-	// EndTime Include samples that occurred at or before this RFC3339 timestamp.
-	EndTime *time.Time `form:"end_time,omitempty" json:"end_time,omitempty"`
-
-	// Limit Maximum number of samples to return. Values above 1000 are capped.
-	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
-
-	// Cursor Opaque pagination cursor returned by a previous response. When watch is true, this must be a watch resume cursor from an NDJSON watermark line.
-	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
-
-	// Watch Stream matching records as application/x-ndjson in ingestion order until the client disconnects. When watch is true, end_time is not supported. Without cursor or start_time, streaming starts at request time.
-	Watch *bool `form:"watch,omitempty" json:"watch,omitempty"`
-
-	// ContextId Restrict results to a sandbox process context.
-	ContextId *string `form:"context_id,omitempty" json:"context_id,omitempty"`
-
-	// Name Metric name filter. This parameter may be repeated.
-	Name *[]string `form:"name,omitempty" json:"name,omitempty"`
-
-	// Names Comma-separated metric name filter.
-	Names *string `form:"names,omitempty" json:"names,omitempty"`
 }
 
 // DeleteApiV1SandboxvolumesIdParams defines parameters for DeleteApiV1SandboxvolumesId.
@@ -3415,32 +3542,6 @@ func (t *SandboxObservabilityWatchLine_Data) FromSandboxObservabilityLogEntry(v 
 
 // MergeSandboxObservabilityLogEntry performs a merge with any union data inside the SandboxObservabilityWatchLine_Data, using the provided SandboxObservabilityLogEntry
 func (t *SandboxObservabilityWatchLine_Data) MergeSandboxObservabilityLogEntry(v SandboxObservabilityLogEntry) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsSandboxObservabilityMetricSample returns the union data inside the SandboxObservabilityWatchLine_Data as a SandboxObservabilityMetricSample
-func (t SandboxObservabilityWatchLine_Data) AsSandboxObservabilityMetricSample() (SandboxObservabilityMetricSample, error) {
-	var body SandboxObservabilityMetricSample
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromSandboxObservabilityMetricSample overwrites any union data inside the SandboxObservabilityWatchLine_Data as the provided SandboxObservabilityMetricSample
-func (t *SandboxObservabilityWatchLine_Data) FromSandboxObservabilityMetricSample(v SandboxObservabilityMetricSample) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeSandboxObservabilityMetricSample performs a merge with any union data inside the SandboxObservabilityWatchLine_Data, using the provided SandboxObservabilityMetricSample
-func (t *SandboxObservabilityWatchLine_Data) MergeSandboxObservabilityMetricSample(v SandboxObservabilityMetricSample) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err

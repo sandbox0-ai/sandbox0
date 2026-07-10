@@ -20,8 +20,11 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	credentialstoresvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/credentialstore"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
+	internalauthsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
+	sandboxobssvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sandboxobservability"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storage"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
+	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 )
 
@@ -35,7 +38,7 @@ const (
 	defaultContainerdHostStateRoot = "/run/containerd"
 	ctldProbeTimeoutSeconds        = 15
 	ctldProbeFailureThreshold      = 12
-	ctldTerminationGraceSeconds    = int64(30)
+	ctldTerminationGraceSeconds    = int64(45)
 	ctldCPURequest                 = "250m"
 	ctldMemoryRequest              = "256Mi"
 )
@@ -44,7 +47,7 @@ func NewReconciler(resources *common.ResourceManager) *Reconciler {
 	return &Reconciler{Resources: resources}
 }
 
-func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, imageRepo, imageTag string) error {
+func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, imageRepo, imageTag, clusterGatewayURL string) error {
 	logger := log.FromContext(ctx)
 	if !infrav1alpha1.HasDataPlaneServices(infra) {
 		logger.Info("Data-plane services are disabled, skipping ctld")
@@ -68,7 +71,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if err := credentialstoresvc.ApplyEncryptedPGCredentialStoreConfig(ctx, r.Resources, common.NewObjectScope(infra), &storageConfig.CredentialStore); err != nil {
 		return err
 	}
-	configRef, err := r.Resources.ReconcileHashedServiceConfigMap(ctx, infra, name, labels, storageConfig)
+	config := &apiconfig.CtldConfig{StorageProxyConfig: *storageConfig}
+	if err := sandboxobssvc.ApplyCtldConfig(ctx, r.Resources.Client, infra, clusterGatewayURL, config); err != nil {
+		return err
+	}
+	configRef, err := r.Resources.ReconcileHashedServiceConfigMap(ctx, infra, name, labels, config)
 	if err != nil {
 		return err
 	}
@@ -151,6 +158,27 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 				HostPath: &corev1.HostPathVolumeSource{Path: containerdHostDataRoot},
 			},
 		},
+	}
+	if strings.TrimSpace(config.SandboxObservabilityRuntimeSamplesIngestURL) != "" {
+		keySecretName, privateKeyKey, _ := internalauthsvc.GetDataPlaneKeyRefs(infra)
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "internal-jwt-private-key",
+			MountPath: pkginternalauth.DefaultInternalJWTPrivateKeyPath,
+			SubPath:   "internal_jwt_private.key",
+			ReadOnly:  true,
+		})
+		volumes = append(volumes, corev1.Volume{
+			Name: "internal-jwt-private-key",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: keySecretName,
+					Items: []corev1.KeyToPath{{
+						Key:  privateKeyKey,
+						Path: "internal_jwt_private.key",
+					}},
+				},
+			},
+		})
 	}
 	credentialStoreMounts, credentialStoreVolumes := credentialstoresvc.CredentialStoreVolumes(common.NewObjectScope(infra), &storageConfig.CredentialStore)
 	volumeMounts = append(volumeMounts, credentialStoreMounts...)

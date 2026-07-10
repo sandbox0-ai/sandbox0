@@ -61,6 +61,16 @@ func TestLookupTracksCrossServiceDerivedFields(t *testing.T) {
 			owner:     "plan",
 			consumers: []string{"global-gateway", "cluster-gateway", "manager"},
 		},
+		{
+			path:      "spec.sandboxObservability.ingest.queueSize",
+			owner:     "sandbox-observability",
+			consumers: []string{"ctld", "manager", "netd"},
+		},
+		{
+			path:      "spec.internalAuth.dataPlane.secretRef.name",
+			owner:     "internal-auth",
+			consumers: []string{"ctld"},
+		},
 	}
 
 	for _, tc := range cases {

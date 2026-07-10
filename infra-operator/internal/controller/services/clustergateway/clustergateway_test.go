@@ -351,16 +351,16 @@ func TestApplySandboxObservabilityConfigUsesTopLevelExternalSecret(t *testing.T)
 							Name: "clickhouse-dsn",
 							Key:  "dsn",
 						},
-						Database:     "sandbox0_obs",
-						EventsTable:  "events_v1",
-						LogsTable:    "logs_v1",
-						MetricsTable: "metrics_v1",
+						Database:            "sandbox0_obs",
+						EventsTable:         "events_v1",
+						LogsTable:           "logs_v1",
+						RuntimeSamplesTable: "runtime_samples_v1",
 					},
 				},
 				Retention: infrav1alpha1.SandboxObservabilityRetentionConfig{
-					AuditDays:  14,
-					LogDays:    3,
-					MetricDays: 30,
+					AuditDays:         14,
+					LogDays:           3,
+					RuntimeSampleDays: 30,
 				},
 			},
 		},
@@ -395,10 +395,10 @@ func TestApplySandboxObservabilityConfigUsesTopLevelExternalSecret(t *testing.T)
 		cfg.SandboxObservability.ClickHouse.Database != "sandbox0_obs" ||
 		cfg.SandboxObservability.ClickHouse.EventsTable != "events_v1" ||
 		cfg.SandboxObservability.ClickHouse.LogsTable != "logs_v1" ||
-		cfg.SandboxObservability.ClickHouse.MetricsTable != "metrics_v1" ||
+		cfg.SandboxObservability.ClickHouse.RuntimeSamplesTable != "runtime_samples_v1" ||
 		cfg.SandboxObservability.ClickHouse.RetentionDays != 14 ||
 		cfg.SandboxObservability.ClickHouse.LogsRetentionDays != 3 ||
-		cfg.SandboxObservability.ClickHouse.MetricsRetentionDays != 30 {
+		cfg.SandboxObservability.ClickHouse.RuntimeSamplesRetentionDays != 30 {
 		t.Fatalf("sandbox observability config = %+v", cfg.SandboxObservability)
 	}
 }

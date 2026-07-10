@@ -104,3 +104,106 @@ func TestNewSlotRejectsOverflowBeforeConversion(t *testing.T) {
 		t.Fatalf("NewSlot(max) = (%d, %v), want (%d, nil)", slot, err, MaxSlot)
 	}
 }
+
+func TestBindingIDsRoundTripAtBoundaries(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		slot       Slot
+		generation uint64
+		localID    uint64
+	}{
+		{name: "minimum", slot: 1, generation: 1, localID: 1},
+		{name: "maximum backend id", slot: 1, generation: 1, localID: MaxBackendLocalID},
+		{name: "maximum generation", slot: 1, generation: MaxBindingGeneration, localID: 1},
+		{name: "maximum encoded id", slot: Slot(MaxSlot), generation: MaxBindingGeneration, localID: MaxBackendLocalID},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			nodeID, err := EncodeBindingNodeID(tt.slot, tt.generation, tt.localID)
+			if err != nil {
+				t.Fatalf("EncodeBindingNodeID() error = %v", err)
+			}
+			slot, generation, localID, err := DecodeBindingNodeID(nodeID)
+			if err != nil {
+				t.Fatalf("DecodeBindingNodeID() error = %v", err)
+			}
+			if slot != tt.slot || generation != tt.generation || localID != tt.localID {
+				t.Fatalf(
+					"DecodeBindingNodeID() = (%d, %d, %d), want (%d, %d, %d)",
+					slot, generation, localID, tt.slot, tt.generation, tt.localID,
+				)
+			}
+
+			handleID, err := EncodeBindingHandleID(tt.slot, tt.generation, tt.localID)
+			if err != nil {
+				t.Fatalf("EncodeBindingHandleID() error = %v", err)
+			}
+			slot, generation, localID, err = DecodeBindingHandleID(handleID)
+			if err != nil {
+				t.Fatalf("DecodeBindingHandleID() error = %v", err)
+			}
+			if slot != tt.slot || generation != tt.generation || localID != tt.localID {
+				t.Fatalf(
+					"DecodeBindingHandleID() = (%d, %d, %d), want (%d, %d, %d)",
+					slot, generation, localID, tt.slot, tt.generation, tt.localID,
+				)
+			}
+		})
+	}
+}
+
+func TestBindingIDRejectsInvalidGenerationAndBackendID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		generation uint64
+		localID    uint64
+		wantErr    error
+	}{
+		{name: "generation zero", generation: 0, localID: 1, wantErr: ErrInvalidBindingGeneration},
+		{name: "generation overflow", generation: MaxBindingGeneration + 1, localID: 1, wantErr: ErrInvalidBindingGeneration},
+		{name: "backend id zero", generation: 1, localID: 0, wantErr: ErrInvalidBackendLocalID},
+		{name: "backend id overflow", generation: 1, localID: MaxBackendLocalID + 1, wantErr: ErrInvalidBackendLocalID},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := EncodeBindingNodeID(1, tt.generation, tt.localID); !errors.Is(err, tt.wantErr) {
+				t.Fatalf("EncodeBindingNodeID() error = %v, want %v", err, tt.wantErr)
+			}
+			if _, err := EncodeBindingHandleID(1, tt.generation, tt.localID); !errors.Is(err, tt.wantErr) {
+				t.Fatalf("EncodeBindingHandleID() error = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestBindingIDCannotCollideWithPortalRootRange(t *testing.T) {
+	t.Parallel()
+	root, err := EncodeNodeID(7, MaxBackendLocalID)
+	if err != nil {
+		t.Fatalf("EncodeNodeID(root) error = %v", err)
+	}
+	child, err := EncodeBindingNodeID(7, 1, 1)
+	if err != nil {
+		t.Fatalf("EncodeBindingNodeID(child) error = %v", err)
+	}
+	if child <= root {
+		t.Fatalf("binding NodeID %d overlaps root range ending at %d", child, root)
+	}
+}
+
+func BenchmarkBindingNodeIDRoundTrip(b *testing.B) {
+	b.ReportAllocs()
+	for range b.N {
+		encoded, err := EncodeBindingNodeID(7, 19, 42)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if _, _, _, err := DecodeBindingNodeID(encoded); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

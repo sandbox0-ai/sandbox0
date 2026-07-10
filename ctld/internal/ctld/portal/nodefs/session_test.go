@@ -33,6 +33,26 @@ type muxTestSession struct {
 	lastReadInto      *pb.ReadRequest
 }
 
+type oversizedNodeSession struct {
+	volumefuse.Session
+}
+
+func (*oversizedNodeSession) Lookup(context.Context, *pb.LookupRequest) (*pb.NodeResponse, error) {
+	return &pb.NodeResponse{Inode: MaxBackendLocalID + 1}, nil
+}
+
+func (*oversizedNodeSession) GetAttr(context.Context, *pb.GetAttrRequest) (*pb.GetAttrResponse, error) {
+	return &pb.GetAttrResponse{Ino: MaxBackendLocalID + 1}, nil
+}
+
+func (*oversizedNodeSession) Open(context.Context, *pb.OpenRequest) (*pb.OpenResponse, error) {
+	return &pb.OpenResponse{HandleId: MaxBackendLocalID + 1}, nil
+}
+
+func (*oversizedNodeSession) ReadDir(context.Context, *pb.ReadDirRequest) (*pb.ReadDirResponse, error) {
+	return &pb.ReadDirResponse{Entries: []*pb.DirEntry{{Inode: MaxBackendLocalID + 1}}}, nil
+}
+
 func (s *muxTestSession) Lookup(_ context.Context, req *pb.LookupRequest) (*pb.NodeResponse, error) {
 	s.mu.Lock()
 	s.lastLookup = req
@@ -144,11 +164,12 @@ func (s *muxTestSession) OpenFlagsForHandle(handleID uint64) (uint32, bool) {
 func registerMuxTestPortal(t *testing.T, mux *SessionMux, session volumefuse.Session, name string, slot Slot) {
 	t.Helper()
 	if err := mux.RegisterPortal(PortalSpec{
-		Name:      name,
-		Slot:      slot,
-		VolumeID:  "volume-" + name,
-		RootInode: 1,
-		Session:   session,
+		Name:       name,
+		Slot:       slot,
+		VolumeID:   "volume-" + name,
+		RootInode:  1,
+		Generation: 1,
+		Session:    session,
 	}); err != nil {
 		t.Fatalf("RegisterPortal() error = %v", err)
 	}
@@ -200,7 +221,7 @@ func TestSessionMuxMapsNodeResponseAttrAndHandle(t *testing.T) {
 
 	resp, err := mux.Lookup(context.Background(), &pb.LookupRequest{
 		VolumeId: "shard",
-		Parent:   mustNodeID(t, 7, 10),
+		Parent:   mustBindingNodeID(t, 7, 1, 10),
 		Name:     "child",
 	})
 	if err != nil {
@@ -209,7 +230,7 @@ func TestSessionMuxMapsNodeResponseAttrAndHandle(t *testing.T) {
 	if backend.lastLookup == nil || backend.lastLookup.VolumeId != "volume-slot-7" || backend.lastLookup.Parent != 10 {
 		t.Fatalf("backend Lookup request = %+v, want volume-slot-7/local parent 10", backend.lastLookup)
 	}
-	if resp.Inode != mustNodeID(t, 7, 11) || resp.Attr.GetIno() != mustNodeID(t, 7, 11) || resp.HandleId != mustHandleID(t, 7, 21) {
+	if resp.Inode != mustBindingNodeID(t, 7, 1, 11) || resp.Attr.GetIno() != mustBindingNodeID(t, 7, 1, 11) || resp.HandleId != mustBindingHandleID(t, 7, 1, 21) {
 		t.Fatalf("Lookup response = %+v, want all IDs encoded", resp)
 	}
 	if resp.Generation != 3 {
@@ -224,7 +245,7 @@ func TestSessionMuxUpdatesBackendWithoutChangingEncodedRoot(t *testing.T) {
 	second := &muxTestSession{}
 	registerMuxTestPortal(t, mux, first, "slot-16", 16)
 	root := mustNodeID(t, 16, 1)
-	previous, err := mux.UpdatePortalSession("slot-16", "replacement-volume", second)
+	previous, err := mux.UpdatePortalSession("slot-16", "replacement-volume", 2, second)
 	if err != nil {
 		t.Fatalf("UpdatePortalSession() error = %v", err)
 	}
@@ -246,6 +267,172 @@ func TestSessionMuxUpdatesBackendWithoutChangingEncodedRoot(t *testing.T) {
 	}
 }
 
+func TestSessionMuxFencesStaleBindingGenerationAcrossRouteShapes(t *testing.T) {
+	t.Parallel()
+	mux := NewSessionMux()
+	first := &muxTestSession{}
+	second := &muxTestSession{}
+	registerMuxTestPortal(t, mux, first, "slot-18", 18)
+	root := mustNodeID(t, 18, 1)
+	oldNode := mustBindingNodeID(t, 18, 1, 30)
+	oldPeer := mustBindingNodeID(t, 18, 1, 31)
+	oldHandle := mustBindingHandleID(t, 18, 1, 40)
+
+	if _, err := mux.UpdatePortalSession("slot-18", "next-volume", 2, second); err != nil {
+		t.Fatalf("UpdatePortalSession() error = %v", err)
+	}
+
+	rootAttr, err := mux.GetAttr(context.Background(), &pb.GetAttrRequest{Inode: root})
+	if err != nil {
+		t.Fatalf("GetAttr(stable root) error = %v", err)
+	}
+	if rootAttr.Ino != root || second.lastGetAttr == nil || second.lastGetAttr.Inode != 1 {
+		t.Fatalf("GetAttr(stable root) request=%+v response=%+v", second.lastGetAttr, rootAttr)
+	}
+	lookup, err := mux.Lookup(context.Background(), &pb.LookupRequest{Parent: root, Name: "current"})
+	if err != nil {
+		t.Fatalf("Lookup(current root) error = %v", err)
+	}
+	if lookup.Inode != mustBindingNodeID(t, 18, 2, 11) ||
+		lookup.Attr.GetIno() != mustBindingNodeID(t, 18, 2, 11) ||
+		lookup.HandleId != mustBindingHandleID(t, 18, 2, 21) {
+		t.Fatalf("Lookup(current root) = %+v, want generation 2 IDs", lookup)
+	}
+
+	_, err = mux.GetAttr(context.Background(), &pb.GetAttrRequest{Inode: oldNode})
+	assertRouteStatus(t, err, ErrStaleBindingGeneration, syscall.ESTALE)
+	if second.lastGetAttr.Inode != 1 {
+		t.Fatalf("stale node reached replacement GetAttr: %+v", second.lastGetAttr)
+	}
+
+	_, err = mux.Flush(context.Background(), &pb.FlushRequest{HandleId: oldHandle})
+	assertRouteStatus(t, err, ErrStaleBindingGeneration, syscall.ESTALE)
+	if second.lastFlush != nil {
+		t.Fatalf("stale handle reached replacement Flush: %+v", second.lastFlush)
+	}
+
+	_, err = mux.SetAttr(context.Background(), &pb.SetAttrRequest{
+		Inode: oldNode, HandleId: oldHandle, Attr: &pb.GetAttrResponse{Ino: oldNode},
+	})
+	assertRouteStatus(t, err, ErrStaleBindingGeneration, syscall.ESTALE)
+	if second.lastSetAttr != nil {
+		t.Fatalf("stale node and handle reached replacement SetAttr: %+v", second.lastSetAttr)
+	}
+
+	_, err = mux.Rename(context.Background(), &pb.RenameRequest{
+		OldParent: oldNode,
+		NewParent: mustBindingNodeID(t, 18, 2, 32),
+	})
+	assertRouteStatus(t, err, ErrStaleBindingGeneration, syscall.ESTALE)
+	if second.lastRename != nil {
+		t.Fatalf("stale cross-node request reached replacement Rename: %+v", second.lastRename)
+	}
+
+	_, err = mux.Link(context.Background(), &pb.LinkRequest{
+		Inode: oldPeer, NewParent: mustBindingNodeID(t, 18, 2, 32),
+	})
+	assertRouteStatus(t, err, ErrStaleBindingGeneration, syscall.ESTALE)
+	if second.lastLink != nil {
+		t.Fatalf("stale cross-node request reached replacement Link: %+v", second.lastLink)
+	}
+
+	_, err = mux.CopyFileRange(context.Background(), &pb.CopyFileRangeRequest{
+		InodeIn:   mustBindingNodeID(t, 18, 2, 30),
+		HandleIn:  mustBindingHandleID(t, 18, 2, 40),
+		InodeOut:  oldPeer,
+		HandleOut: oldHandle,
+	})
+	assertRouteStatus(t, err, ErrStaleBindingGeneration, syscall.ESTALE)
+	if second.lastCopyFileRange != nil {
+		t.Fatalf("stale copy request reached replacement backend: %+v", second.lastCopyFileRange)
+	}
+
+	_, err = mux.ReadDir(context.Background(), &pb.ReadDirRequest{Inode: root, HandleId: oldHandle})
+	assertRouteStatus(t, err, ErrStaleBindingGeneration, syscall.ESTALE)
+	if second.lastReadDir != nil {
+		t.Fatalf("stale directory handle reached replacement backend: %+v", second.lastReadDir)
+	}
+
+	if flags, ok := mux.OpenFlagsForHandle(oldHandle); ok || flags != 0 {
+		t.Fatalf("OpenFlagsForHandle(stale) = (%#x, %v), want (0, false)", flags, ok)
+	}
+	currentHandle := mustBindingHandleID(t, 18, 2, 24)
+	if flags, ok := mux.OpenFlagsForHandle(currentHandle); !ok || flags != fuse.FOPEN_DIRECT_IO {
+		t.Fatalf("OpenFlagsForHandle(current) = (%#x, %v), want DIRECT_IO", flags, ok)
+	}
+
+	dir, err := mux.ReadDir(context.Background(), &pb.ReadDirRequest{Inode: root, Plus: true})
+	if err != nil {
+		t.Fatalf("ReadDir(current root) error = %v", err)
+	}
+	wantDirNode := mustBindingNodeID(t, 18, 2, 14)
+	if len(dir.Entries) != 1 || dir.Entries[0].Inode != wantDirNode || dir.Entries[0].Attr.GetIno() != wantDirNode {
+		t.Fatalf("ReadDir(current root) = %+v, want generation 2 entries", dir.Entries)
+	}
+}
+
+func TestSessionMuxRejectsInvalidOrReusedBindingGeneration(t *testing.T) {
+	t.Parallel()
+	for _, generation := range []uint64{0, MaxBindingGeneration + 1} {
+		err := NewSessionMux().RegisterPortal(PortalSpec{
+			Name: "slot-19", Slot: 19, VolumeID: "volume", RootInode: 1,
+			Generation: generation, Session: &muxTestSession{},
+		})
+		if !errors.Is(err, ErrInvalidBindingGeneration) {
+			t.Fatalf("RegisterPortal(generation %d) error = %v, want %v", generation, err, ErrInvalidBindingGeneration)
+		}
+	}
+
+	mux := NewSessionMux()
+	backend := &muxTestSession{}
+	registerMuxTestPortal(t, mux, backend, "slot-19", 19)
+	for _, generation := range []uint64{0, 1, MaxBindingGeneration + 1} {
+		_, err := mux.UpdatePortalSession("slot-19", "invalid", generation, &muxTestSession{})
+		if !errors.Is(err, ErrInvalidBindingGeneration) {
+			t.Fatalf("UpdatePortalSession(generation %d) error = %v, want %v", generation, err, ErrInvalidBindingGeneration)
+		}
+	}
+	if _, err := mux.UpdatePortalSession("slot-19", "generation-3", 3, &muxTestSession{}); err != nil {
+		t.Fatalf("UpdatePortalSession(generation 3) error = %v", err)
+	}
+	if _, err := mux.UpdatePortalSession("slot-19", "generation-2", 2, &muxTestSession{}); !errors.Is(err, ErrInvalidBindingGeneration) {
+		t.Fatalf("UpdatePortalSession(regression) error = %v, want %v", err, ErrInvalidBindingGeneration)
+	}
+}
+
+func TestSessionMuxRejectsOversizedRootAndBackendIDs(t *testing.T) {
+	t.Parallel()
+	mux := NewSessionMux()
+	err := mux.RegisterPortal(PortalSpec{
+		Name: "slot-20", Slot: 20, VolumeID: "volume", RootInode: MaxBackendLocalID + 1,
+		Generation: 1, Session: &muxTestSession{},
+	})
+	if !errors.Is(err, ErrInvalidPortalRoute) {
+		t.Fatalf("RegisterPortal(oversized root) error = %v, want %v", err, ErrInvalidPortalRoute)
+	}
+
+	overflow := &oversizedNodeSession{}
+	registerMuxTestPortal(t, mux, overflow, "slot-20", 20)
+	_, err = mux.Lookup(context.Background(), &pb.LookupRequest{
+		Parent: mustNodeID(t, 20, 1), Name: "overflow",
+	})
+	if !errors.Is(err, ErrInvalidBackendLocalID) {
+		t.Fatalf("Lookup(oversized backend inode) error = %v, want %v", err, ErrInvalidBackendLocalID)
+	}
+	_, err = mux.GetAttr(context.Background(), &pb.GetAttrRequest{Inode: mustNodeID(t, 20, 1)})
+	if !errors.Is(err, ErrInvalidBackendLocalID) {
+		t.Fatalf("GetAttr(oversized attr inode) error = %v, want %v", err, ErrInvalidBackendLocalID)
+	}
+	_, err = mux.Open(context.Background(), &pb.OpenRequest{Inode: mustNodeID(t, 20, 1)})
+	if !errors.Is(err, ErrInvalidBackendLocalID) {
+		t.Fatalf("Open(oversized backend handle) error = %v, want %v", err, ErrInvalidBackendLocalID)
+	}
+	_, err = mux.ReadDir(context.Background(), &pb.ReadDirRequest{Inode: mustNodeID(t, 20, 1)})
+	if !errors.Is(err, ErrInvalidBackendLocalID) {
+		t.Fatalf("ReadDir(oversized entry inode) error = %v, want %v", err, ErrInvalidBackendLocalID)
+	}
+}
+
 func TestSessionMuxUpdateWaitsForPreviousBackendCalls(t *testing.T) {
 	t.Parallel()
 	mux := NewSessionMux()
@@ -263,7 +450,7 @@ func TestSessionMuxUpdateWaitsForPreviousBackendCalls(t *testing.T) {
 	var replaced volumefuse.Session
 	var updateErr error
 	go func() {
-		replaced, updateErr = mux.UpdatePortalSession("slot-17", "next-volume", next)
+		replaced, updateErr = mux.UpdatePortalSession("slot-17", "next-volume", 2, next)
 		close(updateDone)
 	}()
 	select {
@@ -296,8 +483,8 @@ func TestSessionMuxMapsAttrRequestsAndResponses(t *testing.T) {
 	mux := NewSessionMux()
 	backend := &muxTestSession{}
 	registerMuxTestPortal(t, mux, backend, "slot-3", 3)
-	nodeID := mustNodeID(t, 3, 30)
-	handleID := mustHandleID(t, 3, 40)
+	nodeID := mustBindingNodeID(t, 3, 1, 30)
+	handleID := mustBindingHandleID(t, 3, 1, 40)
 
 	attr, err := mux.GetAttr(context.Background(), &pb.GetAttrRequest{Inode: nodeID})
 	if err != nil {
@@ -333,15 +520,15 @@ func TestSessionMuxMapsOpenCreateAndDirectoryHandles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
-	if backend.lastCreate.Parent != 1 || created.Inode != mustNodeID(t, 4, 13) || created.Attr.GetIno() != mustNodeID(t, 4, 13) || created.HandleId != mustHandleID(t, 4, 23) {
+	if backend.lastCreate.Parent != 1 || created.Inode != mustBindingNodeID(t, 4, 1, 13) || created.Attr.GetIno() != mustBindingNodeID(t, 4, 1, 13) || created.HandleId != mustBindingHandleID(t, 4, 1, 23) {
 		t.Fatalf("Create mapping request=%+v response=%+v", backend.lastCreate, created)
 	}
 
-	opened, err := mux.Open(context.Background(), &pb.OpenRequest{Inode: mustNodeID(t, 4, 13)})
+	opened, err := mux.Open(context.Background(), &pb.OpenRequest{Inode: mustBindingNodeID(t, 4, 1, 13)})
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	if backend.lastOpen.Inode != 13 || opened.HandleId != mustHandleID(t, 4, 24) {
+	if backend.lastOpen.Inode != 13 || opened.HandleId != mustBindingHandleID(t, 4, 1, 24) {
 		t.Fatalf("Open mapping request=%+v response=%+v", backend.lastOpen, opened)
 	}
 	flags, ok := mux.OpenFlagsForHandle(opened.HandleId)
@@ -353,7 +540,7 @@ func TestSessionMuxMapsOpenCreateAndDirectoryHandles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenDir() error = %v", err)
 	}
-	if backend.lastOpenDir.Inode != 1 || openedDir.HandleId != mustHandleID(t, 4, 25) {
+	if backend.lastOpenDir.Inode != 1 || openedDir.HandleId != mustBindingHandleID(t, 4, 1, 25) {
 		t.Fatalf("OpenDir mapping request=%+v response=%+v", backend.lastOpenDir, openedDir)
 	}
 	dir, err := mux.ReadDir(context.Background(), &pb.ReadDirRequest{Inode: root, HandleId: openedDir.HandleId, Plus: true})
@@ -363,7 +550,7 @@ func TestSessionMuxMapsOpenCreateAndDirectoryHandles(t *testing.T) {
 	if backend.lastReadDir.Inode != 1 || backend.lastReadDir.HandleId != 25 {
 		t.Fatalf("backend ReadDir request = %+v, want local IDs", backend.lastReadDir)
 	}
-	if len(dir.Entries) != 1 || dir.Entries[0].Inode != mustNodeID(t, 4, 14) || dir.Entries[0].Attr.GetIno() != mustNodeID(t, 4, 14) {
+	if len(dir.Entries) != 1 || dir.Entries[0].Inode != mustBindingNodeID(t, 4, 1, 14) || dir.Entries[0].Attr.GetIno() != mustBindingNodeID(t, 4, 1, 14) {
 		t.Fatalf("ReadDir response entries = %+v, want encoded IDs", dir.Entries)
 	}
 }
@@ -374,17 +561,17 @@ func TestSessionMuxMapsHandleOnlyCopyAndStatFSRequests(t *testing.T) {
 	backend := &muxTestSession{}
 	registerMuxTestPortal(t, mux, backend, "slot-5", 5)
 
-	if _, err := mux.Flush(context.Background(), &pb.FlushRequest{HandleId: mustHandleID(t, 5, 51)}); err != nil {
+	if _, err := mux.Flush(context.Background(), &pb.FlushRequest{HandleId: mustBindingHandleID(t, 5, 1, 51)}); err != nil {
 		t.Fatalf("Flush() error = %v", err)
 	}
 	if backend.lastFlush.VolumeId != "volume-slot-5" || backend.lastFlush.HandleId != 51 {
 		t.Fatalf("backend Flush request = %+v, want local handle", backend.lastFlush)
 	}
 	copyResp, err := mux.CopyFileRange(context.Background(), &pb.CopyFileRangeRequest{
-		InodeIn:   mustNodeID(t, 5, 31),
-		HandleIn:  mustHandleID(t, 5, 41),
-		InodeOut:  mustNodeID(t, 5, 32),
-		HandleOut: mustHandleID(t, 5, 42),
+		InodeIn:   mustBindingNodeID(t, 5, 1, 31),
+		HandleIn:  mustBindingHandleID(t, 5, 1, 41),
+		InodeOut:  mustBindingNodeID(t, 5, 1, 32),
+		HandleOut: mustBindingHandleID(t, 5, 1, 42),
 		Length:    123,
 	})
 	if err != nil {
@@ -393,7 +580,7 @@ func TestSessionMuxMapsHandleOnlyCopyAndStatFSRequests(t *testing.T) {
 	if copyResp.BytesCopied != 123 || backend.lastCopyFileRange.InodeIn != 31 || backend.lastCopyFileRange.HandleIn != 41 || backend.lastCopyFileRange.InodeOut != 32 || backend.lastCopyFileRange.HandleOut != 42 {
 		t.Fatalf("backend CopyFileRange request = %+v, response = %+v", backend.lastCopyFileRange, copyResp)
 	}
-	stat, err := mux.StatFs(context.Background(), &pb.StatFsRequest{Inode: mustNodeID(t, 5, 33)})
+	stat, err := mux.StatFs(context.Background(), &pb.StatFsRequest{Inode: mustBindingNodeID(t, 5, 1, 33)})
 	if err != nil {
 		t.Fatalf("StatFs() error = %v", err)
 	}
@@ -408,8 +595,8 @@ func TestSessionMuxMapsTwoNodeRequestsAndLinkResponse(t *testing.T) {
 	backend := &muxTestSession{}
 	registerMuxTestPortal(t, mux, backend, "slot-15", 15)
 	if _, err := mux.Rename(context.Background(), &pb.RenameRequest{
-		OldParent: mustNodeID(t, 15, 71),
-		NewParent: mustNodeID(t, 15, 72),
+		OldParent: mustBindingNodeID(t, 15, 1, 71),
+		NewParent: mustBindingNodeID(t, 15, 1, 72),
 		OldName:   "old",
 		NewName:   "new",
 	}); err != nil {
@@ -419,14 +606,14 @@ func TestSessionMuxMapsTwoNodeRequestsAndLinkResponse(t *testing.T) {
 		t.Fatalf("backend Rename request = %+v, want local parents", backend.lastRename)
 	}
 	linked, err := mux.Link(context.Background(), &pb.LinkRequest{
-		Inode:     mustNodeID(t, 15, 73),
-		NewParent: mustNodeID(t, 15, 74),
+		Inode:     mustBindingNodeID(t, 15, 1, 73),
+		NewParent: mustBindingNodeID(t, 15, 1, 74),
 		NewName:   "linked",
 	})
 	if err != nil {
 		t.Fatalf("Link() error = %v", err)
 	}
-	if backend.lastLink.Inode != 73 || backend.lastLink.NewParent != 74 || linked.Inode != mustNodeID(t, 15, 15) || linked.Attr.GetIno() != mustNodeID(t, 15, 15) {
+	if backend.lastLink.Inode != 73 || backend.lastLink.NewParent != 74 || linked.Inode != mustBindingNodeID(t, 15, 1, 15) || linked.Attr.GetIno() != mustBindingNodeID(t, 15, 1, 15) {
 		t.Fatalf("Link mapping request=%+v response=%+v", backend.lastLink, linked)
 	}
 }
@@ -438,8 +625,8 @@ func TestSessionMuxPreservesReadIntoFastPath(t *testing.T) {
 	registerMuxTestPortal(t, mux, backend, "slot-6", 6)
 	dest := make([]byte, 8)
 	n, eof, err := mux.ReadInto(context.Background(), &pb.ReadRequest{
-		Inode:    mustNodeID(t, 6, 61),
-		HandleId: mustHandleID(t, 6, 62),
+		Inode:    mustBindingNodeID(t, 6, 1, 61),
+		HandleId: mustBindingHandleID(t, 6, 1, 62),
 		Size:     int64(len(dest)),
 	}, dest)
 	if err != nil {
@@ -465,15 +652,15 @@ func TestSessionMuxRejectsCrossPortalOperationsWithEXDEV(t *testing.T) {
 	})
 	assertRouteStatus(t, err, ErrCrossPortal, syscall.EXDEV)
 	_, err = mux.Link(context.Background(), &pb.LinkRequest{
-		Inode:     mustNodeID(t, 8, 2),
+		Inode:     mustBindingNodeID(t, 8, 1, 2),
 		NewParent: mustNodeID(t, 9, 1),
 	})
 	assertRouteStatus(t, err, ErrCrossPortal, syscall.EXDEV)
 	_, err = mux.CopyFileRange(context.Background(), &pb.CopyFileRangeRequest{
-		InodeIn:   mustNodeID(t, 8, 2),
-		HandleIn:  mustHandleID(t, 8, 3),
-		InodeOut:  mustNodeID(t, 9, 2),
-		HandleOut: mustHandleID(t, 9, 3),
+		InodeIn:   mustBindingNodeID(t, 8, 1, 2),
+		HandleIn:  mustBindingHandleID(t, 8, 1, 3),
+		InodeOut:  mustBindingNodeID(t, 9, 1, 2),
+		HandleOut: mustBindingHandleID(t, 9, 1, 3),
 	})
 	assertRouteStatus(t, err, ErrCrossPortal, syscall.EXDEV)
 
@@ -553,10 +740,14 @@ func TestSessionMuxRejectsUnsafeNamesAndSlotReuse(t *testing.T) {
 		}
 	}
 	registerMuxTestPortal(t, mux, &muxTestSession{}, "slot-11", 11)
-	if _, err := mux.DrainPortal(context.Background(), "slot-11"); err != nil {
+	drained, err := mux.DrainPortal(context.Background(), "slot-11")
+	if err != nil {
 		t.Fatalf("DrainPortal() error = %v", err)
 	}
-	err := mux.RegisterPortal(PortalSpec{Name: "replacement", Slot: 11, VolumeID: "vol", Session: &muxTestSession{}})
+	if drained.Generation != 1 {
+		t.Fatalf("DrainPortal() generation = %d, want 1", drained.Generation)
+	}
+	err = mux.RegisterPortal(PortalSpec{Name: "replacement", Slot: 11, VolumeID: "vol", Generation: 1, Session: &muxTestSession{}})
 	if !errors.Is(err, ErrSlotRetired) {
 		t.Fatalf("RegisterPortal(reused slot) error = %v, want %v", err, ErrSlotRetired)
 	}
@@ -569,7 +760,7 @@ func TestVolumefuseStatFsPassesNodeIDToSession(t *testing.T) {
 	registerMuxTestPortal(t, mux, backend, "slot-12", 12)
 	fs := volumefuse.New("shard", time.Second, mux)
 	var out fuse.StatfsOut
-	status := fs.StatFs(nil, &fuse.InHeader{NodeId: mustNodeID(t, 12, 71)}, &out)
+	status := fs.StatFs(nil, &fuse.InHeader{NodeId: mustBindingNodeID(t, 12, 1, 71)}, &out)
 	if status != fuse.OK {
 		t.Fatalf("StatFs() status = %v, want OK", status)
 	}
@@ -615,15 +806,16 @@ func (muxAccessBenchmarkSession) Access(context.Context, *pb.AccessRequest) (*pb
 func BenchmarkSessionMuxAccess(b *testing.B) {
 	mux := NewSessionMux()
 	if err := mux.RegisterPortal(PortalSpec{
-		Name:      "slot-1",
-		Slot:      1,
-		VolumeID:  "volume-1",
-		RootInode: 1,
-		Session:   muxAccessBenchmarkSession{},
+		Name:       "slot-1",
+		Slot:       1,
+		VolumeID:   "volume-1",
+		RootInode:  1,
+		Generation: 1,
+		Session:    muxAccessBenchmarkSession{},
 	}); err != nil {
 		b.Fatal(err)
 	}
-	nodeID := mustNodeID(b, 1, 11)
+	nodeID := mustBindingNodeID(b, 1, 1, 11)
 	req := &pb.AccessRequest{}
 	b.ReportAllocs()
 	b.ResetTimer()

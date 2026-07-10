@@ -25,6 +25,24 @@ func mustHandleID(t testing.TB, slot Slot, localID uint64) uint64 {
 	return id
 }
 
+func mustBindingNodeID(t testing.TB, slot Slot, generation, localID uint64) uint64 {
+	t.Helper()
+	id, err := EncodeBindingNodeID(slot, generation, localID)
+	if err != nil {
+		t.Fatalf("EncodeBindingNodeID(%d, %d, %d) error = %v", slot, generation, localID, err)
+	}
+	return id
+}
+
+func mustBindingHandleID(t testing.TB, slot Slot, generation, localID uint64) uint64 {
+	t.Helper()
+	id, err := EncodeBindingHandleID(slot, generation, localID)
+	if err != nil {
+		t.Fatalf("EncodeBindingHandleID(%d, %d, %d) error = %v", slot, generation, localID, err)
+	}
+	return id
+}
+
 func TestRouterAcquireNodeHandleDecodesOnePortalRequest(t *testing.T) {
 	t.Parallel()
 	router := NewRouter[string]()

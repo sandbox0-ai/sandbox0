@@ -20,20 +20,22 @@ const (
 )
 
 var (
-	ErrInvalidPortalRoute = errors.New("invalid nodefs portal route")
-	ErrPortalRouteExists  = errors.New("nodefs portal route already exists")
-	ErrPortalRouteMissing = errors.New("nodefs portal route not found")
+	ErrInvalidPortalRoute     = errors.New("invalid nodefs portal route")
+	ErrPortalRouteExists      = errors.New("nodefs portal route already exists")
+	ErrPortalRouteMissing     = errors.New("nodefs portal route not found")
+	ErrStaleBindingGeneration = errors.New("stale nodefs binding generation")
 )
 
 // PortalSpec describes one portal subtree below a nodefs shard root. Name is a
 // shard-unique path component, normally derived from the durable slot rather
 // than from a user-visible mount name.
 type PortalSpec struct {
-	Name      string
-	Slot      Slot
-	VolumeID  string
-	RootInode uint64
-	Session   volumefuse.Session
+	Name       string
+	Slot       Slot
+	VolumeID   string
+	RootInode  uint64
+	Generation uint64
+	Session    volumefuse.Session
 }
 
 type portalSessionRoute struct {
@@ -46,14 +48,16 @@ type portalSessionRoute struct {
 }
 
 type portalSessionBinding struct {
-	volumeID string
-	session  volumefuse.Session
+	volumeID   string
+	generation uint64
+	session    volumefuse.Session
 }
 
 type portalSessionSnapshot struct {
-	volumeID  string
-	rootInode uint64
-	session   volumefuse.Session
+	volumeID   string
+	rootInode  uint64
+	generation uint64
+	session    volumefuse.Session
 }
 
 func (r *portalSessionRoute) snapshot() portalSessionSnapshot {
@@ -62,9 +66,10 @@ func (r *portalSessionRoute) snapshot() portalSessionSnapshot {
 		return portalSessionSnapshot{rootInode: r.rootInode}
 	}
 	return portalSessionSnapshot{
-		volumeID:  binding.volumeID,
-		rootInode: r.rootInode,
-		session:   binding.session,
+		volumeID:   binding.volumeID,
+		rootInode:  r.rootInode,
+		generation: binding.generation,
+		session:    binding.session,
 	}
 }
 
@@ -118,8 +123,11 @@ func (m *SessionMux) RegisterPortal(spec PortalSpec) error {
 	if spec.RootInode == 0 {
 		spec.RootInode = defaultPortalRootInode
 	}
-	if spec.RootInode > MaxLocalID {
-		return fmt.Errorf("%w: root inode %d exceeds %d", ErrInvalidPortalRoute, spec.RootInode, MaxLocalID)
+	if spec.RootInode > MaxBackendLocalID {
+		return fmt.Errorf("%w: root inode %d exceeds %d", ErrInvalidPortalRoute, spec.RootInode, MaxBackendLocalID)
+	}
+	if err := validateBindingGeneration(spec.Generation); err != nil {
+		return err
 	}
 
 	route := &portalSessionRoute{
@@ -127,7 +135,9 @@ func (m *SessionMux) RegisterPortal(spec PortalSpec) error {
 		slot:      spec.Slot,
 		rootInode: spec.RootInode,
 	}
-	route.binding.Store(&portalSessionBinding{volumeID: spec.VolumeID, session: spec.Session})
+	route.binding.Store(&portalSessionBinding{
+		volumeID: spec.VolumeID, generation: spec.Generation, session: spec.Session,
+	})
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.byName == nil {
@@ -146,10 +156,16 @@ func (m *SessionMux) RegisterPortal(spec PortalSpec) error {
 	return nil
 }
 
-// UpdatePortalSession changes the backend session without changing the slot or
-// root inode. It waits for calls using the previous binding and returns that
-// session, so the caller may close it immediately after this method returns.
-func (m *SessionMux) UpdatePortalSession(name, volumeID string, session volumefuse.Session) (volumefuse.Session, error) {
+// UpdatePortalSession changes the backend session and its durable generation
+// without changing the slot or root inode. It waits for calls using the
+// previous binding and returns that session, so the caller may close it
+// immediately after this method returns. Generations only move forward and
+// cannot wrap within a portal slot.
+func (m *SessionMux) UpdatePortalSession(
+	name, volumeID string,
+	generation uint64,
+	session volumefuse.Session,
+) (volumefuse.Session, error) {
 	if m == nil {
 		return nil, fmt.Errorf("%w: session mux is nil", ErrPortalRouteMissing)
 	}
@@ -160,6 +176,9 @@ func (m *SessionMux) UpdatePortalSession(name, volumeID string, session volumefu
 	if session == nil {
 		return nil, fmt.Errorf("%w: session is required", ErrInvalidPortalRoute)
 	}
+	if err := validateBindingGeneration(generation); err != nil {
+		return nil, err
+	}
 	m.mu.RLock()
 	route := m.byName[name]
 	m.mu.RUnlock()
@@ -168,7 +187,16 @@ func (m *SessionMux) UpdatePortalSession(name, volumeID string, session volumefu
 	}
 	route.callMu.Lock()
 	previous := route.binding.Load()
-	route.binding.Store(&portalSessionBinding{volumeID: volumeID, session: session})
+	if previous != nil && generation <= previous.generation {
+		route.callMu.Unlock()
+		return nil, fmt.Errorf(
+			"%w: update generation %d must exceed current generation %d",
+			ErrInvalidBindingGeneration, generation, previous.generation,
+		)
+	}
+	route.binding.Store(&portalSessionBinding{
+		volumeID: volumeID, generation: generation, session: session,
+	})
 	route.callMu.Unlock()
 	if previous == nil {
 		return nil, nil
@@ -204,11 +232,12 @@ func (m *SessionMux) DrainPortal(ctx context.Context, name string) (PortalSpec, 
 	snapshot := drained.snapshot()
 	drained.callMu.RUnlock()
 	return PortalSpec{
-		Name:      drained.name,
-		Slot:      drained.slot,
-		VolumeID:  snapshot.volumeID,
-		RootInode: snapshot.rootInode,
-		Session:   snapshot.session,
+		Name:       drained.name,
+		Slot:       drained.slot,
+		VolumeID:   snapshot.volumeID,
+		RootInode:  snapshot.rootInode,
+		Generation: snapshot.generation,
+		Session:    snapshot.session,
 	}, nil
 }
 
@@ -239,7 +268,7 @@ func (m *SessionMux) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.Nod
 	if err != nil {
 		return nil, err
 	}
-	if err := encodeNodeResponse(lease.Slot, resp); err != nil {
+	if err := encodeNodeResponse(lease.Slot, route, resp); err != nil {
 		return nil, err
 	}
 	return resp, nil
@@ -260,7 +289,7 @@ func (m *SessionMux) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.G
 	if err != nil {
 		return nil, err
 	}
-	if err := encodeAttr(lease.Slot, localNode, resp); err != nil {
+	if err := encodeAttr(lease.Slot, route, localNode, resp); err != nil {
 		return nil, err
 	}
 	return resp, nil
@@ -286,7 +315,7 @@ func (m *SessionMux) SetAttr(ctx context.Context, req *pb.SetAttrRequest) (*pb.S
 		return nil, err
 	}
 	if resp != nil {
-		if err := encodeAttr(lease.Slot, localNode, resp.Attr); err != nil {
+		if err := encodeAttr(lease.Slot, route, localNode, resp.Attr); err != nil {
 			return nil, err
 		}
 	}
@@ -308,7 +337,7 @@ func (m *SessionMux) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb.NodeR
 	if err != nil {
 		return nil, err
 	}
-	if err := encodeNodeResponse(lease.Slot, resp); err != nil {
+	if err := encodeNodeResponse(lease.Slot, route, resp); err != nil {
 		return nil, err
 	}
 	return resp, nil
@@ -329,7 +358,7 @@ func (m *SessionMux) Create(ctx context.Context, req *pb.CreateRequest) (*pb.Nod
 	if err != nil {
 		return nil, err
 	}
-	if err := encodeNodeResponse(lease.Slot, resp); err != nil {
+	if err := encodeNodeResponse(lease.Slot, route, resp); err != nil {
 		return nil, err
 	}
 	return resp, nil
@@ -370,15 +399,11 @@ func (m *SessionMux) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.Emp
 		}
 		return nil, newRouteStatusError(ErrCrossPortal, syscall.EXDEV)
 	}
-	lease, oldParent, newParent, err := m.router.AcquireNodes(req.OldParent, req.NewParent)
+	lease, route, oldParent, newParent, err := m.acquireNodes(req.OldParent, req.NewParent)
 	if err != nil {
-		return nil, mapRouteError(err)
+		return nil, err
 	}
 	defer lease.Release()
-	route := lease.Target.snapshot()
-	if route.session == nil {
-		return nil, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
-	}
 	req.VolumeId = route.volumeID
 	req.OldParent = oldParent
 	req.NewParent = newParent
@@ -389,15 +414,11 @@ func (m *SessionMux) Link(ctx context.Context, req *pb.LinkRequest) (*pb.NodeRes
 	if req.Inode == ShardRootNodeID || req.NewParent == ShardRootNodeID {
 		return nil, newRouteStatusError(ErrCrossPortal, syscall.EXDEV)
 	}
-	lease, localNode, localParent, err := m.router.AcquireNodes(req.Inode, req.NewParent)
+	lease, route, localNode, localParent, err := m.acquireNodes(req.Inode, req.NewParent)
 	if err != nil {
-		return nil, mapRouteError(err)
+		return nil, err
 	}
 	defer lease.Release()
-	route := lease.Target.snapshot()
-	if route.session == nil {
-		return nil, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
-	}
 	req.VolumeId = route.volumeID
 	req.Inode = localNode
 	req.NewParent = localParent
@@ -405,7 +426,7 @@ func (m *SessionMux) Link(ctx context.Context, req *pb.LinkRequest) (*pb.NodeRes
 	if err != nil {
 		return nil, err
 	}
-	if err := encodeNodeResponse(lease.Slot, resp); err != nil {
+	if err := encodeNodeResponse(lease.Slot, route, resp); err != nil {
 		return nil, err
 	}
 	return resp, nil
@@ -426,7 +447,7 @@ func (m *SessionMux) Symlink(ctx context.Context, req *pb.SymlinkRequest) (*pb.N
 	if err != nil {
 		return nil, err
 	}
-	if err := encodeNodeResponse(lease.Slot, resp); err != nil {
+	if err := encodeNodeResponse(lease.Slot, route, resp); err != nil {
 		return nil, err
 	}
 	return resp, nil
@@ -478,7 +499,7 @@ func (m *SessionMux) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenRes
 	if err != nil {
 		return nil, err
 	}
-	if err := encodeOpenHandle(lease.Slot, resp); err != nil {
+	if err := encodeOpenHandle(lease.Slot, route, resp); err != nil {
 		return nil, err
 	}
 	return resp, nil
@@ -599,17 +620,13 @@ func (m *SessionMux) CopyFileRange(ctx context.Context, req *pb.CopyFileRangeReq
 	if req.InodeIn == ShardRootNodeID || req.InodeOut == ShardRootNodeID {
 		return nil, newRouteStatusError(ErrCrossPortal, syscall.EXDEV)
 	}
-	lease, inodeIn, handleIn, inodeOut, handleOut, err := m.router.AcquireCopy(
+	lease, route, inodeIn, handleIn, inodeOut, handleOut, err := m.acquireCopy(
 		req.InodeIn, req.HandleIn, req.InodeOut, req.HandleOut,
 	)
 	if err != nil {
-		return nil, mapRouteError(err)
+		return nil, err
 	}
 	defer lease.Release()
-	route := lease.Target.snapshot()
-	if route.session == nil {
-		return nil, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
-	}
 	req.VolumeId = route.volumeID
 	req.InodeIn = inodeIn
 	req.HandleIn = handleIn
@@ -634,7 +651,7 @@ func (m *SessionMux) OpenDir(ctx context.Context, req *pb.OpenDirRequest) (*pb.O
 		return nil, err
 	}
 	if resp != nil && resp.HandleId != 0 {
-		resp.HandleId, err = EncodeHandleID(lease.Slot, resp.HandleId)
+		resp.HandleId, err = EncodeBindingHandleID(lease.Slot, route.generation, resp.HandleId)
 		if err != nil {
 			return nil, err
 		}
@@ -658,7 +675,7 @@ func (m *SessionMux) ReadDir(ctx context.Context, req *pb.ReadDirRequest) (*pb.R
 	if err != nil {
 		return nil, err
 	}
-	if err := encodeDirEntries(lease.Slot, resp); err != nil {
+	if err := encodeDirEntries(lease.Slot, route, resp); err != nil {
 		return nil, err
 	}
 	return resp, nil
@@ -764,7 +781,7 @@ func (m *SessionMux) Mknod(ctx context.Context, req *pb.MknodRequest) (*pb.NodeR
 	if err != nil {
 		return nil, err
 	}
-	if err := encodeNodeResponse(lease.Slot, resp); err != nil {
+	if err := encodeNodeResponse(lease.Slot, route, resp); err != nil {
 		return nil, err
 	}
 	return resp, nil
@@ -874,7 +891,7 @@ func (m *SessionMux) lookupPortalRoot(ctx context.Context, req *pb.LookupRequest
 	if err != nil {
 		return nil, err
 	}
-	if err := encodeAttr(lease.Slot, snapshot.rootInode, attr); err != nil {
+	if err := encodeAttr(lease.Slot, snapshot, snapshot.rootInode, attr); err != nil {
 		return nil, err
 	}
 	return &pb.NodeResponse{Inode: globalRoot, Generation: 1, Attr: attr}, nil
@@ -923,7 +940,7 @@ func (m *SessionMux) readSyntheticRoot(ctx context.Context, req *pb.ReadDirReque
 				Actor:    req.Actor,
 			})
 			if err == nil {
-				err = encodeAttr(lease.Slot, snapshot.rootInode, entry.Attr)
+				err = encodeAttr(lease.Slot, snapshot, snapshot.rootInode, entry.Attr)
 			}
 		}
 		lease.Release()
@@ -940,7 +957,7 @@ func (m *SessionMux) acquireNode(nodeID uint64) (Lease[*portalSessionRoute], por
 	if m == nil || m.router == nil {
 		return zero, portalSessionSnapshot{}, 0, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
 	}
-	lease, localNode, err := m.router.AcquireNode(nodeID)
+	lease, encodedLocalNode, err := m.router.AcquireNode(nodeID)
 	if err != nil {
 		return zero, portalSessionSnapshot{}, 0, mapRouteError(err)
 	}
@@ -948,6 +965,11 @@ func (m *SessionMux) acquireNode(nodeID uint64) (Lease[*portalSessionRoute], por
 	if route.session == nil {
 		lease.Release()
 		return zero, portalSessionSnapshot{}, 0, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
+	}
+	localNode, err := decodePortalNode(route, encodedLocalNode)
+	if err != nil {
+		lease.Release()
+		return zero, portalSessionSnapshot{}, 0, err
 	}
 	return lease, route, localNode, nil
 }
@@ -957,7 +979,7 @@ func (m *SessionMux) acquireHandle(handleID uint64) (Lease[*portalSessionRoute],
 	if m == nil || m.router == nil {
 		return zero, portalSessionSnapshot{}, 0, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
 	}
-	lease, localHandle, err := m.router.AcquireHandle(handleID)
+	lease, encodedLocalHandle, err := m.router.AcquireHandle(handleID)
 	if err != nil {
 		return zero, portalSessionSnapshot{}, 0, mapRouteError(err)
 	}
@@ -965,6 +987,11 @@ func (m *SessionMux) acquireHandle(handleID uint64) (Lease[*portalSessionRoute],
 	if route.session == nil {
 		lease.Release()
 		return zero, portalSessionSnapshot{}, 0, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
+	}
+	localHandle, err := decodePortalHandle(route, encodedLocalHandle)
+	if err != nil {
+		lease.Release()
+		return zero, portalSessionSnapshot{}, 0, err
 	}
 	return lease, route, localHandle, nil
 }
@@ -974,7 +1001,7 @@ func (m *SessionMux) acquireNodeHandle(nodeID, handleID uint64) (Lease[*portalSe
 	if m == nil || m.router == nil {
 		return zero, portalSessionSnapshot{}, 0, 0, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
 	}
-	lease, localNode, localHandle, err := m.router.AcquireNodeHandle(nodeID, handleID)
+	lease, encodedLocalNode, encodedLocalHandle, err := m.router.AcquireNodeHandle(nodeID, handleID)
 	if err != nil {
 		return zero, portalSessionSnapshot{}, 0, 0, mapRouteError(err)
 	}
@@ -983,24 +1010,139 @@ func (m *SessionMux) acquireNodeHandle(nodeID, handleID uint64) (Lease[*portalSe
 		lease.Release()
 		return zero, portalSessionSnapshot{}, 0, 0, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
 	}
+	localNode, err := decodePortalNode(route, encodedLocalNode)
+	if err != nil {
+		lease.Release()
+		return zero, portalSessionSnapshot{}, 0, 0, err
+	}
+	localHandle := uint64(0)
+	if encodedLocalHandle != 0 {
+		localHandle, err = decodePortalHandle(route, encodedLocalHandle)
+		if err != nil {
+			lease.Release()
+			return zero, portalSessionSnapshot{}, 0, 0, err
+		}
+	}
 	return lease, route, localNode, localHandle, nil
 }
 
-func encodeNodeResponse(slot Slot, resp *pb.NodeResponse) error {
+func (m *SessionMux) acquireNodes(
+	firstNodeID, secondNodeID uint64,
+) (Lease[*portalSessionRoute], portalSessionSnapshot, uint64, uint64, error) {
+	var zero Lease[*portalSessionRoute]
+	if m == nil || m.router == nil {
+		return zero, portalSessionSnapshot{}, 0, 0, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
+	}
+	lease, encodedFirst, encodedSecond, err := m.router.AcquireNodes(firstNodeID, secondNodeID)
+	if err != nil {
+		return zero, portalSessionSnapshot{}, 0, 0, mapRouteError(err)
+	}
+	route := lease.Target.snapshot()
+	if route.session == nil {
+		lease.Release()
+		return zero, portalSessionSnapshot{}, 0, 0, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
+	}
+	first, err := decodePortalNode(route, encodedFirst)
+	if err != nil {
+		lease.Release()
+		return zero, portalSessionSnapshot{}, 0, 0, err
+	}
+	second, err := decodePortalNode(route, encodedSecond)
+	if err != nil {
+		lease.Release()
+		return zero, portalSessionSnapshot{}, 0, 0, err
+	}
+	return lease, route, first, second, nil
+}
+
+func (m *SessionMux) acquireCopy(
+	inputNodeID, inputHandleID, outputNodeID, outputHandleID uint64,
+) (Lease[*portalSessionRoute], portalSessionSnapshot, uint64, uint64, uint64, uint64, error) {
+	var zero Lease[*portalSessionRoute]
+	if m == nil || m.router == nil {
+		return zero, portalSessionSnapshot{}, 0, 0, 0, 0, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
+	}
+	lease, encodedInputNode, encodedInputHandle, encodedOutputNode, encodedOutputHandle, err := m.router.AcquireCopy(
+		inputNodeID, inputHandleID, outputNodeID, outputHandleID,
+	)
+	if err != nil {
+		return zero, portalSessionSnapshot{}, 0, 0, 0, 0, mapRouteError(err)
+	}
+	route := lease.Target.snapshot()
+	if route.session == nil {
+		lease.Release()
+		return zero, portalSessionSnapshot{}, 0, 0, 0, 0, newRouteStatusError(ErrSlotNotFound, syscall.ESTALE)
+	}
+	inputNode, err := decodePortalNode(route, encodedInputNode)
+	if err != nil {
+		lease.Release()
+		return zero, portalSessionSnapshot{}, 0, 0, 0, 0, err
+	}
+	outputNode, err := decodePortalNode(route, encodedOutputNode)
+	if err != nil {
+		lease.Release()
+		return zero, portalSessionSnapshot{}, 0, 0, 0, 0, err
+	}
+	inputHandle, err := decodeOptionalPortalHandle(route, encodedInputHandle)
+	if err != nil {
+		lease.Release()
+		return zero, portalSessionSnapshot{}, 0, 0, 0, 0, err
+	}
+	outputHandle, err := decodeOptionalPortalHandle(route, encodedOutputHandle)
+	if err != nil {
+		lease.Release()
+		return zero, portalSessionSnapshot{}, 0, 0, 0, 0, err
+	}
+	return lease, route, inputNode, inputHandle, outputNode, outputHandle, nil
+}
+
+func decodePortalNode(route portalSessionSnapshot, encodedLocalID uint64) (uint64, error) {
+	if encodedLocalID == route.rootInode {
+		return route.rootInode, nil
+	}
+	generation, backendLocalID, err := decodeBindingLocalID(encodedLocalID)
+	if err != nil {
+		return 0, mapRouteError(err)
+	}
+	if generation != route.generation {
+		return 0, staleBindingGenerationError(generation, route.generation)
+	}
+	return backendLocalID, nil
+}
+
+func decodePortalHandle(route portalSessionSnapshot, encodedLocalID uint64) (uint64, error) {
+	generation, backendLocalID, err := decodeBindingLocalID(encodedLocalID)
+	if err != nil {
+		return 0, mapRouteError(err)
+	}
+	if generation != route.generation {
+		return 0, staleBindingGenerationError(generation, route.generation)
+	}
+	return backendLocalID, nil
+}
+
+func decodeOptionalPortalHandle(route portalSessionSnapshot, encodedLocalID uint64) (uint64, error) {
+	if encodedLocalID == 0 {
+		return 0, nil
+	}
+	return decodePortalHandle(route, encodedLocalID)
+}
+
+func encodeNodeResponse(slot Slot, route portalSessionSnapshot, resp *pb.NodeResponse) error {
 	if resp == nil || resp.Inode == 0 {
 		return syscall.EIO
 	}
 	localNode := resp.Inode
-	globalNode, err := EncodeNodeID(slot, localNode)
+	globalNode, err := encodePortalNodeID(slot, route, localNode)
 	if err != nil {
 		return err
 	}
 	resp.Inode = globalNode
-	if err := encodeAttr(slot, localNode, resp.Attr); err != nil {
+	if err := encodeAttr(slot, route, localNode, resp.Attr); err != nil {
 		return err
 	}
 	if resp.HandleId != 0 {
-		resp.HandleId, err = EncodeHandleID(slot, resp.HandleId)
+		resp.HandleId, err = EncodeBindingHandleID(slot, route.generation, resp.HandleId)
 		if err != nil {
 			return err
 		}
@@ -1008,11 +1150,11 @@ func encodeNodeResponse(slot Slot, resp *pb.NodeResponse) error {
 	return nil
 }
 
-func encodeOpenHandle(slot Slot, resp *pb.OpenResponse) error {
+func encodeOpenHandle(slot Slot, route portalSessionSnapshot, resp *pb.OpenResponse) error {
 	if resp == nil || resp.HandleId == 0 {
 		return syscall.EIO
 	}
-	globalHandle, err := EncodeHandleID(slot, resp.HandleId)
+	globalHandle, err := EncodeBindingHandleID(slot, route.generation, resp.HandleId)
 	if err != nil {
 		return err
 	}
@@ -1020,7 +1162,7 @@ func encodeOpenHandle(slot Slot, resp *pb.OpenResponse) error {
 	return nil
 }
 
-func encodeAttr(slot Slot, fallbackLocal uint64, attr *pb.GetAttrResponse) error {
+func encodeAttr(slot Slot, route portalSessionSnapshot, fallbackLocal uint64, attr *pb.GetAttrResponse) error {
 	if attr == nil {
 		return nil
 	}
@@ -1028,7 +1170,7 @@ func encodeAttr(slot Slot, fallbackLocal uint64, attr *pb.GetAttrResponse) error
 	if localNode == 0 {
 		localNode = fallbackLocal
 	}
-	globalNode, err := EncodeNodeID(slot, localNode)
+	globalNode, err := encodePortalNodeID(slot, route, localNode)
 	if err != nil {
 		return err
 	}
@@ -1036,7 +1178,7 @@ func encodeAttr(slot Slot, fallbackLocal uint64, attr *pb.GetAttrResponse) error
 	return nil
 }
 
-func encodeDirEntries(slot Slot, resp *pb.ReadDirResponse) error {
+func encodeDirEntries(slot Slot, route portalSessionSnapshot, resp *pb.ReadDirResponse) error {
 	if resp == nil {
 		return syscall.EIO
 	}
@@ -1045,16 +1187,40 @@ func encodeDirEntries(slot Slot, resp *pb.ReadDirResponse) error {
 			return syscall.EIO
 		}
 		localNode := entry.Inode
-		globalNode, err := EncodeNodeID(slot, localNode)
+		globalNode, err := encodePortalNodeID(slot, route, localNode)
 		if err != nil {
 			return err
 		}
 		entry.Inode = globalNode
-		if err := encodeAttr(slot, localNode, entry.Attr); err != nil {
+		if err := encodeAttr(slot, route, localNode, entry.Attr); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func encodePortalNodeID(slot Slot, route portalSessionSnapshot, backendLocalID uint64) (uint64, error) {
+	if backendLocalID == route.rootInode {
+		return EncodeNodeID(slot, route.rootInode)
+	}
+	return EncodeBindingNodeID(slot, route.generation, backendLocalID)
+}
+
+func validateBindingGeneration(generation uint64) error {
+	if generation == 0 || generation > MaxBindingGeneration {
+		return fmt.Errorf(
+			"%w: %d is outside [1,%d]",
+			ErrInvalidBindingGeneration, generation, MaxBindingGeneration,
+		)
+	}
+	return nil
+}
+
+func staleBindingGenerationError(received, current uint64) error {
+	return newRouteStatusError(
+		fmt.Errorf("%w: request generation %d, current generation %d", ErrStaleBindingGeneration, received, current),
+		syscall.ESTALE,
+	)
 }
 
 func syntheticRootAttr() *pb.GetAttrResponse {
@@ -1109,7 +1275,13 @@ func mapRouteError(err error) error {
 		return newRouteStatusError(err, syscall.EXDEV)
 	case errors.Is(err, ErrSlotDraining):
 		return newRouteStatusError(err, syscall.EAGAIN)
-	case errors.Is(err, ErrSlotNotFound), errors.Is(err, ErrSyntheticNode), errors.Is(err, ErrInvalidSlot), errors.Is(err, ErrInvalidLocalID):
+	case errors.Is(err, ErrSlotNotFound),
+		errors.Is(err, ErrSyntheticNode),
+		errors.Is(err, ErrInvalidSlot),
+		errors.Is(err, ErrInvalidLocalID),
+		errors.Is(err, ErrInvalidBackendLocalID),
+		errors.Is(err, ErrInvalidBindingGeneration),
+		errors.Is(err, ErrStaleBindingGeneration):
 		return newRouteStatusError(err, syscall.ESTALE)
 	default:
 		return err

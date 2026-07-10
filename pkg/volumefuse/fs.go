@@ -31,8 +31,11 @@ type FileSystem struct {
 }
 
 const (
-	fileOpenFlags              = fuse.FOPEN_KEEP_CACHE
-	requestCompletionSlotCount = 256
+	fileOpenFlags = fuse.FOPEN_KEEP_CACHE
+	// Completion tracking is per nodefs shard, not per portal. Keep enough
+	// bounded headroom for synchronous requests from many sandboxes in addition
+	// to the connection's 128 background requests.
+	requestCompletionSlotCount = 4096
 )
 
 type requestCompletionEntry struct {

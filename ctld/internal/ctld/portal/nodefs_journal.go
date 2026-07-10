@@ -139,6 +139,9 @@ func openNodeFSJournal(rootDir, nodeIdentity string, shardCount int) (*nodeFSJou
 	if err := validateNodeFSJournal(data); err != nil {
 		return nil, fmt.Errorf("validate nodefs journal: %w", err)
 	}
+	if err := validateNodeFSShardIdentity(data, rootDir); err != nil {
+		return nil, fmt.Errorf("validate nodefs shard identity: %w", err)
+	}
 	return &nodeFSJournalStore{path: path, data: data}, nil
 }
 
@@ -225,11 +228,36 @@ func (s *nodeFSJournalStore) PrepareShards(rootDir string) error {
 			state.Shards[index] = nodeFSShardState{
 				Index:     index,
 				Tag:       nodeFSConnectionTag(state.NodeIdentity, state.ConnectionGeneration, index),
-				MountPath: filepath.Join(rootDir, nodeFSStateDirName, "shards", fmt.Sprintf("%d", index), "mount"),
+				MountPath: nodeFSShardMountPath(rootDir, index),
 			}
 		}
 		return nil
 	})
+}
+
+func nodeFSShardMountPath(rootDir string, index int) string {
+	return filepath.Clean(filepath.Join(rootDir, nodeFSStateDirName, "shards", fmt.Sprintf("%d", index), "mount"))
+}
+
+// validateNodeFSShardIdentity binds recovery tags and cleanup paths to this
+// journal generation. Startup must reject modified state before attempting a
+// recovery ioctl or unmounting any path from the journal.
+func validateNodeFSShardIdentity(state nodeFSJournal, rootDir string) error {
+	rootDir = filepath.Clean(strings.TrimSpace(rootDir))
+	if rootDir == "." || !filepath.IsAbs(rootDir) {
+		return fmt.Errorf("nodefs shard root must be absolute")
+	}
+	for _, shard := range state.Shards {
+		expectedTag := nodeFSConnectionTag(state.NodeIdentity, state.ConnectionGeneration, shard.Index)
+		if shard.Tag != expectedTag {
+			return fmt.Errorf("shard %d recovery tag does not match journal generation", shard.Index)
+		}
+		expectedMountPath := nodeFSShardMountPath(rootDir, shard.Index)
+		if shard.MountPath != expectedMountPath {
+			return fmt.Errorf("shard %d mount path %q does not match %q", shard.Index, shard.MountPath, expectedMountPath)
+		}
+	}
+	return nil
 }
 
 func nodeFSConnectionTag(nodeIdentity, generation string, shard int) string {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -146,6 +147,51 @@ func TestNodeFSJournalRejectsIncompatibleNodeAndShardCount(t *testing.T) {
 	}
 	if _, err := openNodeFSJournal(root, "node-a", 3); err == nil {
 		t.Fatal("openNodeFSJournal(other shard count) error = nil")
+	}
+}
+
+func TestNodeFSJournalRejectsModifiedShardIdentity(t *testing.T) {
+	tests := []struct {
+		name      string
+		modify    func(*nodeFSShardState, string)
+		wantError string
+	}{
+		{
+			name: "recovery tag",
+			modify: func(shard *nodeFSShardState, _ string) {
+				shard.Tag = "sandbox0-unrelated-generation-0"
+			},
+			wantError: "recovery tag does not match journal generation",
+		},
+		{
+			name: "mount path",
+			modify: func(shard *nodeFSShardState, root string) {
+				shard.MountPath = filepath.Join(root, "unrelated-mount")
+			},
+			wantError: "mount path",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			store, err := openNodeFSJournal(root, "node-a", 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.PrepareShards(root); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Update(func(state *nodeFSJournal) error {
+				tt.modify(&state.Shards[0], root)
+				return nil
+			}); err != nil {
+				t.Fatalf("write modified journal: %v", err)
+			}
+			_, err = openNodeFSJournal(root, "node-a", 1)
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("openNodeFSJournal() error = %v, want %q", err, tt.wantError)
+			}
+		})
 	}
 }
 

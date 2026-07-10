@@ -161,7 +161,6 @@ func (r *Repository) ListRuntimeSeries(ctx context.Context, query sandboxobserva
 			return nil, fmt.Errorf("%w: query runtime metric %s: %v", sandboxobservability.ErrBackendUnavailable, descriptor.Name, loadErr)
 		}
 		state.addLoad(descriptor, loaded)
-		loaded = runtimeMetricLoad{}
 	}
 	return state.result(), nil
 }

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal/nodefs"
 	"golang.org/x/sys/unix"
 )
 
@@ -21,7 +22,6 @@ const (
 	nodeFSStateDirName   = "nodefs"
 	nodeFSStateFileName  = "state.json"
 	nodeFSLockFileName   = "ctld.lock"
-	nodeFSMaxPortalSlot  = (1 << 20) - 1
 )
 
 type nodeFSPortalPhase string
@@ -200,7 +200,7 @@ func (s *nodeFSJournalStore) AllocatePortal(portal nodeFSPortalState) (nodeFSPor
 
 		shard := nodeFSShardForPortal(portal.PortalKey, state.ShardCount)
 		slot := state.NextSlotByShard[shard]
-		if slot == 0 || slot > nodeFSMaxPortalSlot {
+		if slot == 0 || slot > uint64(nodefs.MaxSlot) {
 			return fmt.Errorf("nodefs shard %d exhausted portal slots", shard)
 		}
 		state.NextSlotByShard[shard] = slot + 1
@@ -363,6 +363,7 @@ func validateNodeFSJournal(state nodeFSJournal) error {
 	}
 
 	portalKeys := make(map[string]struct{}, len(state.Portals))
+	targetPaths := make(map[string]string, len(state.Portals))
 	slots := make(map[string]string, len(state.Portals))
 	maxSlotByShard := make([]uint64, state.ShardCount)
 	for _, portal := range state.Portals {
@@ -373,6 +374,14 @@ func validateNodeFSJournal(state nodeFSJournal) error {
 			return fmt.Errorf("duplicate portal key %q", portal.PortalKey)
 		}
 		portalKeys[portal.PortalKey] = struct{}{}
+		targetPath := filepath.Clean(strings.TrimSpace(portal.TargetPath))
+		if targetPath == "." || !filepath.IsAbs(targetPath) {
+			return fmt.Errorf("portal %q has invalid target path %q", portal.PortalKey, portal.TargetPath)
+		}
+		if owner, exists := targetPaths[targetPath]; exists {
+			return fmt.Errorf("portal target path %q is already owned by %q", targetPath, owner)
+		}
+		targetPaths[targetPath] = portal.PortalKey
 		if portal.Shard < 0 || portal.Shard >= state.ShardCount || portal.Slot == 0 {
 			return fmt.Errorf("portal %q has invalid shard/slot %d/%d", portal.PortalKey, portal.Shard, portal.Slot)
 		}

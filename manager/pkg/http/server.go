@@ -253,6 +253,7 @@ func (s *Server) Start(ctx context.Context) error {
 		Addr:    addr,
 		Handler: s.router,
 	}
+	server.ConnState = httpobs.NewConnStateTracker(s.obsProvider.HTTPServerConfig(nil)).Wrap(server.ConnState)
 
 	// Start server in a goroutine
 	errChan := make(chan error, 1)

@@ -649,6 +649,7 @@ func (s *Server) Start(ctx context.Context) error {
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
+	server.ConnState = httpobs.NewConnStateTracker(s.obsProvider.HTTPServerConfig(nil)).Wrap(server.ConnState)
 
 	// Start server in a goroutine
 	errChan := make(chan error, 1)

@@ -212,6 +212,7 @@ func (s *Server) Start(ctx context.Context) error {
 		WriteTimeout: s.cfg.WriteTimeout.Duration,
 		IdleTimeout:  s.cfg.IdleTimeout.Duration,
 	}
+	server.ConnState = httpobs.NewConnStateTracker(s.obsProvider.HTTPServerConfig(nil)).Wrap(server.ConnState)
 
 	// Apply defaults if not set
 	if server.ReadTimeout == 0 {

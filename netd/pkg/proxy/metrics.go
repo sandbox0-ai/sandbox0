@@ -14,12 +14,13 @@ type proxyMetricsRegistry struct {
 	egressAuthCacheEntries    prometheus.Gauge
 	auditIngestEventsTotal    *prometheus.CounterVec
 	auditIngestBatchesTotal   *prometheus.CounterVec
+	proxyConnectionsActive    *prometheus.GaugeVec
 }
 
 var proxyMetrics = newProxyMetricsRegistry()
 
 func newProxyMetricsRegistry() *proxyMetricsRegistry {
-	return &proxyMetricsRegistry{
+	registry := &proxyMetricsRegistry{
 		egressAuthResolveTotal: promauto.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "sandbox0",
 			Subsystem: "netd",
@@ -57,7 +58,29 @@ func newProxyMetricsRegistry() *proxyMetricsRegistry {
 			Name:      "audit_ingest_batches_total",
 			Help:      "Total number of netd audit ingest batches by result.",
 		}, []string{"result"}),
+		proxyConnectionsActive: promauto.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "netd_proxy_connections_active",
+			Help: "Current number of active downstream TCP proxy connections by listener.",
+		}, []string{"listener"}),
 	}
+	for _, listener := range []string{"http", "https"} {
+		registry.proxyConnectionsActive.WithLabelValues(listener)
+	}
+	return registry
+}
+
+func (m *proxyMetricsRegistry) IncProxyConnectionsActive(listener string) {
+	if m == nil || m.proxyConnectionsActive == nil {
+		return
+	}
+	m.proxyConnectionsActive.WithLabelValues(metricValue(listener, "unknown")).Inc()
+}
+
+func (m *proxyMetricsRegistry) DecProxyConnectionsActive(listener string) {
+	if m == nil || m.proxyConnectionsActive == nil {
+		return
+	}
+	m.proxyConnectionsActive.WithLabelValues(metricValue(listener, "unknown")).Dec()
 }
 
 func (m *proxyMetricsRegistry) RecordEgressAuthResolve(protocol, result string, duration time.Duration) {

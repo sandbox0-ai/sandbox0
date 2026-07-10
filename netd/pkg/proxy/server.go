@@ -46,6 +46,7 @@ type Server struct {
 	upstreamTLSConfig *tls.Config
 	auditor           *auditLogger
 	bandwidthLimiter  *bandwidthLimiter
+	metrics           *proxyMetricsRegistry
 	auditSeq          uint64
 	udpSessionMu      sync.Mutex
 	udpSessions       map[udpSessionKey]*udpSession
@@ -182,6 +183,7 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 		udpReplyDialer:   dialUDPTransparent,
 		auditor:          auditor,
 		bandwidthLimiter: bandwidthLimiter,
+		metrics:          proxyMetrics,
 		exitCh:           make(chan error, 1),
 	}
 	if cfg.EgressAuthResolverURL != "" {
@@ -216,10 +218,10 @@ func (s *Server) Start(ctx context.Context) {
 		s.exitCh = make(chan error, 1)
 	}
 	go s.runLoop(ctx, "http accept loop", func() {
-		s.acceptLoop(ctx, s.httpListener, s.handleTCPConn)
+		s.acceptLoop(ctx, "http", s.httpListener, s.handleTCPConn)
 	})
 	go s.runLoop(ctx, "https accept loop", func() {
-		s.acceptLoop(ctx, s.httpsListener, s.handleTCPConn)
+		s.acceptLoop(ctx, "https", s.httpsListener, s.handleTCPConn)
 	})
 	if s.udpHTTPConn != nil {
 		go s.runLoop(ctx, "udp http handler", func() {
@@ -302,7 +304,7 @@ func (s *Server) signalExit(err error) {
 	})
 }
 
-func (s *Server) acceptLoop(ctx context.Context, ln net.Listener, handler func(net.Conn)) {
+func (s *Server) acceptLoop(ctx context.Context, listener string, ln net.Listener, handler func(net.Conn)) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -317,7 +319,11 @@ func (s *Server) acceptLoop(ctx context.Context, ln net.Listener, handler func(n
 			}
 			continue
 		}
-		go handler(conn)
+		s.metrics.IncProxyConnectionsActive(listener)
+		go func() {
+			defer s.metrics.DecProxyConnectionsActive(listener)
+			handler(conn)
+		}()
 	}
 }
 

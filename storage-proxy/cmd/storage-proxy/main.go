@@ -284,6 +284,7 @@ func main() {
 		WriteTimeout: writeTimeout,
 		IdleTimeout:  idleTimeout,
 	}
+	httpServer.ConnState = httpobs.NewConnStateTracker(obsProvider.HTTPServerConfig(nil)).Wrap(httpServer.ConnState)
 
 	go func() {
 		logrusLogger.WithField("address", httpAddr).Info("Starting HTTP server")

@@ -620,12 +620,7 @@ func (m *Manager) openS3BoundVolume(req ctldapi.BindVolumePortalRequest, volumeR
 	if store == nil {
 		return nil, nil, fmt.Errorf("s3 object storage is not configured")
 	}
-	cacheDir := filepath.Join(m.rootDir, "volumes", safePath(req.TeamID), safePath(req.SandboxVolumeID))
-	session := newS3SessionWithStateDir(req.SandboxVolumeID, filepath.Join(cacheDir, "s3-session"), store, accessMode, m.logrus)
-	if err := session.InitError(); err != nil {
-		session.Close()
-		return nil, nil, fmt.Errorf("initialize recoverable s3 session: %w", err)
-	}
+	session := newS3Session(req.SandboxVolumeID, store, accessMode, m.logrus)
 	volCtx := &volume.VolumeContext{
 		VolumeID:  req.SandboxVolumeID,
 		TeamID:    volumeRecord.TeamID,
@@ -634,7 +629,6 @@ func (m *Manager) openS3BoundVolume(req ctldapi.BindVolumePortalRequest, volumeR
 		MountedAt: mountedAt,
 		RootInode: 1,
 		RootPath:  "/",
-		CacheDir:  cacheDir,
 	}
 	bound := &boundVolume{
 		volumeID:  req.SandboxVolumeID,

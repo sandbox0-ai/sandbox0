@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/session"
+	"go.uber.org/zap"
 )
 
 // TestNewManager tests manager creation.
@@ -23,6 +25,50 @@ func TestNewManager(t *testing.T) {
 	}
 	if len(ctxs) != 0 {
 		t.Errorf("ListContexts() returned %d contexts, want 0", len(ctxs))
+	}
+}
+
+func TestManagerWithSupervisorUsesSharedLifecycle(t *testing.T) {
+	store, err := session.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor, err := session.NewSupervisor(store, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer supervisor.Close()
+
+	manager := NewManagerWithSupervisor(supervisor)
+	ctx, err := manager.CreateContext(process.ProcessConfig{
+		Type:    process.ProcessTypeCMD,
+		Command: []string{"/bin/sleep", "30"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Cleanup()
+	if !ctx.IsRunning() {
+		t.Fatal("supervisor did not start transient context process")
+	}
+
+	if err := supervisor.PauseAll(); err != nil {
+		t.Fatal(err)
+	}
+	if !ctx.IsPaused() {
+		t.Fatal("supervisor did not pause transient context process")
+	}
+	if err := supervisor.ResumeAll(); err != nil {
+		t.Fatal(err)
+	}
+	if ctx.IsPaused() {
+		t.Fatal("supervisor did not resume transient context process")
+	}
+	if err := manager.DeleteContext(ctx.ID); err != nil {
+		t.Fatal(err)
+	}
+	if ctx.IsRunning() {
+		t.Fatal("context process is still running after compatibility view deletion")
 	}
 }
 

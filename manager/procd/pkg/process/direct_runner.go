@@ -3,11 +3,14 @@ package process
 import (
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/reaper"
 )
 
 // DirectRunner manages non-PTY process execution with stdout/stderr pipes.
@@ -66,13 +69,28 @@ func (r *DirectRunner) Start(cmd *exec.Cmd) error {
 		source: OutputSourceStderr,
 		buffer: r.stderr,
 	}
+	var stdin io.WriteCloser
+	if r.base.GetConfig().PipeStdin {
+		var err error
+		stdin, err = cmd.StdinPipe()
+		if err != nil {
+			r.base.SetState(ProcessStateCrashed)
+			return fmt.Errorf("create stdin pipe: %w", err)
+		}
+	}
 
-	if err := cmd.Start(); err != nil {
+	if err := reaper.StartManaged(cmd.Start, func() int { return cmd.Process.Pid }); err != nil {
+		if stdin != nil {
+			_ = stdin.Close()
+		}
 		r.base.SetState(ProcessStateCrashed)
 		return fmt.Errorf("%w: %v", ErrProcessStartFailed, err)
 	}
 
 	r.cmd = cmd
+	if stdin != nil {
+		r.base.SetInput(stdin)
+	}
 	r.base.SetPID(cmd.Process.Pid)
 	r.base.SetStartTime(time.Now())
 	r.base.SetState(ProcessStateRunning)
@@ -105,6 +123,7 @@ func (r *DirectRunner) Stop() error {
 			_ = r.cmd.Process.Kill()
 		}
 	}
+	_ = r.base.CloseInput()
 
 	r.base.SetState(ProcessStateStopped)
 	r.base.CloseOutput()
@@ -122,6 +141,7 @@ func (r *DirectRunner) monitorProcess() {
 		return
 	}
 
+	defer reaper.Untrack(r.cmd.Process.Pid)
 	err := r.cmd.Wait()
 
 	exitCode := 0
@@ -167,6 +187,7 @@ func (r *DirectRunner) monitorProcess() {
 		Config:        r.base.GetConfig(),
 	})
 
+	_ = r.base.CloseInput()
 	r.base.CloseOutput()
 }
 

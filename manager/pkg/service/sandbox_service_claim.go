@@ -1615,8 +1615,9 @@ func (s *SandboxService) initializeProcd(
 	}
 
 	initReq := InitializeRequest{
-		SandboxID: sandboxID,
-		TeamID:    teamID,
+		SandboxID:         sandboxID,
+		TeamID:            teamID,
+		RuntimeGeneration: req.RuntimeGeneration,
 		EnvVars: sandboxEnvVarsForInitialize(req.Config, sandboxPlatformEnv{
 			SandboxID: sandboxID,
 			AppDomain: SandboxAppDomain(

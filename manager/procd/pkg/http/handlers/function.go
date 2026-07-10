@@ -21,6 +21,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/reaper"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxfunction"
@@ -388,7 +389,11 @@ func (h *FunctionHandler) run(ctx context.Context, modulePath, handler string, e
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
-	err := cmd.Run()
+	err := reaper.StartManaged(cmd.Start, func() int { return cmd.Process.Pid })
+	if err == nil {
+		err = cmd.Wait()
+		reaper.Untrack(cmd.Process.Pid)
+	}
 	return stdout.Bytes(), stderr.String(), functionRunTruncation{
 		stdout: stdout.Truncated(),
 		stderr: stderr.Truncated(),
@@ -427,9 +432,10 @@ func (h *FunctionHandler) runStream(ctx context.Context, w http.ResponseWriter, 
 	if err != nil {
 		return err
 	}
-	if err := cmd.Start(); err != nil {
+	if err := reaper.StartManaged(cmd.Start, func() int { return cmd.Process.Pid }); err != nil {
 		return err
 	}
+	defer reaper.Untrack(cmd.Process.Pid)
 	_, _ = stdin.Write(payload)
 	_, _ = stdin.Write([]byte("\n"))
 	_ = stdin.Close()
@@ -541,9 +547,10 @@ func (h *FunctionHandler) runWebSocket(ctx context.Context, conn *websocket.Conn
 	if err != nil {
 		return err
 	}
-	if err := cmd.Start(); err != nil {
+	if err := reaper.StartManaged(cmd.Start, func() int { return cmd.Process.Pid }); err != nil {
 		return err
 	}
+	defer reaper.Untrack(cmd.Process.Pid)
 	_, _ = stdin.Write(payload)
 	_, _ = stdin.Write([]byte("\n"))
 

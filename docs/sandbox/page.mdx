@@ -81,7 +81,7 @@ When the cluster claim/start admission budget is full, the claim API returns `42
 
 See [Network](/docs/sandbox/network) and [Protocol Controls](/docs/sandbox/protocol-controls) for outbound control, [Sandbox Services](/docs/sandbox/services) for public HTTP controls, [Sandbox Functions](/docs/sandbox/functions) for inline public handlers, and [Credential](/docs/sandbox/credential) for outbound auth and secret handling.
 
-Sandbox `env_vars` override template/container environment variables for new contexts, command services, and function executions. Per-context, per-command, service runtime, and function `env_vars` override sandbox `env_vars` for that narrower scope. Warm processes start before the sandbox is claimed, so they do not receive claim-time sandbox `env_vars`.
+Sandbox `env_vars` override template/container environment variables for new contexts, supervised session attempts, command services, and function executions. Per-context, per-session, per-command, service runtime, and function `env_vars` override sandbox `env_vars` for that narrower scope. Warm processes start before the sandbox is claimed, so they do not receive claim-time sandbox `env_vars`.
 
 ### Sandbox Resources
 
@@ -648,5 +648,9 @@ console.log('Sandbox deleted');`
 
   <Card title="Contexts" href="/docs/sandbox/contexts" cta="Continue">
     Run REPL and command contexts inside a sandbox and stream process output.
+  </Card>
+
+  <Card title="Session Supervisor" href="/docs/sandbox/session-supervisor" cta="Continue">
+    Run reconnect-safe processes with stable identities, attempts, and retained events.
   </Card>
 </CardGroup>

@@ -54,6 +54,10 @@
           "title": "Contexts"
         },
         {
+          "slug": "session-supervisor",
+          "title": "Session Supervisor"
+        },
+        {
           "slug": "files",
           "title": "Files"
         },

@@ -514,6 +514,24 @@ func (s *Server) setupRoutes() {
 }
 
 func (s *Server) registerSandboxProcdRoutes(sandboxes *gin.RouterGroup) {
+	// === Durable execution sessions (→ Procd) ===
+	sessions := sandboxes.Group("/:id/sessions")
+	{
+		sessions.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.proxySessionCollection)
+		sessions.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.proxySessionCollection)
+		sessions.GET("/:session_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.proxySessionItem)
+		sessions.PUT("/:session_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.proxySessionItem)
+		sessions.DELETE("/:session_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.proxySessionItem)
+		sessions.PUT("/:session_id/desired-state", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.proxySessionDesiredState)
+		sessions.POST("/:session_id/attempts", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.proxySessionAttempts)
+		sessions.POST("/:session_id/inputs", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.proxySessionInputs)
+		sessions.POST("/:session_id/signals", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.proxySessionSignals)
+		sessions.PUT("/:session_id/terminal", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.proxySessionTerminal)
+		sessions.GET("/:session_id/events", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.proxySessionEvents)
+		sessions.GET("/:session_id/events/stream", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.proxySessionEventStream)
+		sessions.GET("/:session_id/ws", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.proxySessionWebSocket)
+	}
+
 	// === Process/Context Management (→ Procd) ===
 	contexts := sandboxes.Group("/:id/contexts")
 	{

@@ -177,17 +177,19 @@ console.log("runtimeGeneration=", sb.runtimeGeneration);`
 
 Common auto-resume entrypoints:
 
-- sandbox runtime APIs such as files and contexts
+- sandbox runtime APIs such as files, contexts, and supervised sessions
 - service routes configured with `resume: true`; public service requests require sandbox `auto_resume: true`, route `resume: true`, and a restartable service runtime (`cmd` or `function`)
 - SSH access through Sandbox0 SSH Gateway
 
 For a paused sandbox, auto-resume creates a new runtime pod for the same sandbox identity and restores the saved rootfs checkpoint before the sandbox is used. Public service URLs remain stable until the sandbox is explicitly deleted or `hard_ttl` expires.
 
+Running PIDs, memory, sockets, and client attachments do not survive pause. A [supervised session](/docs/sandbox/session-supervisor) keeps its logical identity and retained journal, then follows its `runtime_recovery` policy in the new runtime generation.
+
 See [Sandbox Services](/docs/sandbox/services), [Sandbox Functions](/docs/sandbox/functions), and [SSH](/docs/sandbox/ssh) for the user-facing flows.
 
 ## Typical Pattern
 
-For long-running agent workflows, a common pattern is:
+For long-running workflows, a common pattern is:
 
 1. claim a sandbox with `ttl` set
 2. do active work through contexts and files
@@ -200,6 +202,10 @@ For long-running agent workflows, a common pattern is:
 <CardGroup>
   <Card title="Contexts" href="/docs/sandbox/contexts" cta="Continue">
     Run REPL and command contexts inside a sandbox and stream process output.
+  </Card>
+
+  <Card title="Session Supervisor" href="/docs/sandbox/session-supervisor" cta="Continue">
+    Preserve logical process identity and replayable events across reconnects and runtime replacement.
   </Card>
 
   <Card title="Files" href="/docs/sandbox/files" cta="Continue">

@@ -101,6 +101,59 @@ const (
 	False ErrorEnvelopeSuccess = false
 )
 
+// Defines values for ExecutionSessionDesiredState.
+const (
+	ExecutionSessionDesiredStateRunning ExecutionSessionDesiredState = "running"
+	ExecutionSessionDesiredStateStopped ExecutionSessionDesiredState = "stopped"
+)
+
+// Defines values for ExecutionSessionEventStream.
+const (
+	ExecutionSessionEventStreamPty    ExecutionSessionEventStream = "pty"
+	ExecutionSessionEventStreamStderr ExecutionSessionEventStream = "stderr"
+	ExecutionSessionEventStreamStdout ExecutionSessionEventStream = "stdout"
+)
+
+// Defines values for ExecutionSessionIOMode.
+const (
+	ExecutionSessionIOModePTY   ExecutionSessionIOMode = "pty"
+	ExecutionSessionIOModePipes ExecutionSessionIOMode = "pipes"
+)
+
+// Defines values for ExecutionSessionPhase.
+const (
+	ExecutionSessionPhaseBackoff   ExecutionSessionPhase = "backoff"
+	ExecutionSessionPhaseExited    ExecutionSessionPhase = "exited"
+	ExecutionSessionPhaseFailed    ExecutionSessionPhase = "failed"
+	ExecutionSessionPhasePaused    ExecutionSessionPhase = "paused"
+	ExecutionSessionPhasePending   ExecutionSessionPhase = "pending"
+	ExecutionSessionPhaseRunning   ExecutionSessionPhase = "running"
+	ExecutionSessionPhaseStarting  ExecutionSessionPhase = "starting"
+	ExecutionSessionPhaseStopped   ExecutionSessionPhase = "stopped"
+	ExecutionSessionPhaseStopping  ExecutionSessionPhase = "stopping"
+	ExecutionSessionPhaseSuspended ExecutionSessionPhase = "suspended"
+)
+
+// Defines values for ExecutionSessionReadinessType.
+const (
+	ExecutionSessionReadinessDelay   ExecutionSessionReadinessType = "delay"
+	ExecutionSessionReadinessOutput  ExecutionSessionReadinessType = "output"
+	ExecutionSessionReadinessProcess ExecutionSessionReadinessType = "process"
+)
+
+// Defines values for ExecutionSessionRestartPolicy.
+const (
+	ExecutionSessionRestartPolicyAlways    ExecutionSessionRestartPolicy = "always"
+	ExecutionSessionRestartPolicyNever     ExecutionSessionRestartPolicy = "never"
+	ExecutionSessionRestartPolicyOnFailure ExecutionSessionRestartPolicy = "on_failure"
+)
+
+// Defines values for ExecutionSessionRuntimeRecoveryPolicy.
+const (
+	ExecutionSessionRuntimeRecoveryRestart ExecutionSessionRuntimeRecoveryPolicy = "restart"
+	ExecutionSessionRuntimeRecoveryStop    ExecutionSessionRuntimeRecoveryPolicy = "stop"
+)
+
 // Defines values for FileContentResponseEncoding.
 const (
 	Base64 FileContentResponseEncoding = "base64"
@@ -218,9 +271,9 @@ const (
 
 // Defines values for SandboxObservabilityLogStream.
 const (
-	Pty    SandboxObservabilityLogStream = "pty"
-	Stderr SandboxObservabilityLogStream = "stderr"
-	Stdout SandboxObservabilityLogStream = "stdout"
+	SandboxObservabilityLogStreamPty    SandboxObservabilityLogStream = "pty"
+	SandboxObservabilityLogStreamStderr SandboxObservabilityLogStream = "stderr"
+	SandboxObservabilityLogStreamStdout SandboxObservabilityLogStream = "stdout"
 )
 
 // Defines values for SandboxObservabilityOutcome.
@@ -321,6 +374,11 @@ const (
 	SuccessAPIKeyListResponseSuccessTrue SuccessAPIKeyListResponseSuccess = true
 )
 
+// Defines values for SuccessAcceptedResponseSuccess.
+const (
+	SuccessAcceptedResponseSuccessTrue SuccessAcceptedResponseSuccess = true
+)
+
 // Defines values for SuccessAuthProvidersResponseSuccess.
 const (
 	SuccessAuthProvidersResponseSuccessTrue SuccessAuthProvidersResponseSuccess = true
@@ -389,6 +447,26 @@ const (
 // Defines values for SuccessEnvelopeSuccess.
 const (
 	SuccessEnvelopeSuccessTrue SuccessEnvelopeSuccess = true
+)
+
+// Defines values for SuccessExecutionSessionEventPageResponseSuccess.
+const (
+	SuccessExecutionSessionEventPageResponseSuccessTrue SuccessExecutionSessionEventPageResponseSuccess = true
+)
+
+// Defines values for SuccessExecutionSessionInputResponseSuccess.
+const (
+	SuccessExecutionSessionInputResponseSuccessTrue SuccessExecutionSessionInputResponseSuccess = true
+)
+
+// Defines values for SuccessExecutionSessionListResponseSuccess.
+const (
+	SuccessExecutionSessionListResponseSuccessTrue SuccessExecutionSessionListResponseSuccess = true
+)
+
+// Defines values for SuccessExecutionSessionResponseSuccess.
+const (
+	SuccessExecutionSessionResponseSuccessTrue SuccessExecutionSessionResponseSuccess = true
 )
 
 // Defines values for SuccessFileListResponseSuccess.
@@ -618,7 +696,7 @@ const (
 
 // Defines values for SuccessWrittenResponseSuccess.
 const (
-	True SuccessWrittenResponseSuccess = true
+	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
 )
 
 // Defines values for TeamQuotaUnit.
@@ -888,6 +966,11 @@ type CreateContextRequest struct {
 	WaitUntilDone  *bool                     `json:"wait_until_done,omitempty"`
 }
 
+// CreateExecutionSessionAttemptRequest defines model for CreateExecutionSessionAttemptRequest.
+type CreateExecutionSessionAttemptRequest struct {
+	ReplaceCurrent *bool `json:"replace_current,omitempty"`
+}
+
 // CreateREPLContextRequest defines model for CreateREPLContextRequest.
 type CreateREPLContextRequest struct {
 	// Alias Alias for the REPL or CLI tool (e.g., python, node, bash, redis-cli)
@@ -1144,6 +1227,181 @@ type ErrorEnvelopeSuccess bool
 type ExecCandidate struct {
 	Args *[]string `json:"args,omitempty"`
 	Name string    `json:"name"`
+}
+
+// ExecutionSession defines model for ExecutionSession.
+type ExecutionSession struct {
+	Attempt           *ExecutionSessionAttempt    `json:"attempt,omitempty"`
+	CreatedAt         time.Time                   `json:"created_at"`
+	Cursor            ExecutionSessionEventCursor `json:"cursor"`
+	Id                string                      `json:"id"`
+	LastActivityAt    time.Time                   `json:"last_activity_at"`
+	Phase             ExecutionSessionPhase       `json:"phase"`
+	RestartCount      int32                       `json:"restart_count"`
+	RuntimeGeneration int64                       `json:"runtime_generation"`
+
+	// Spec Generic process-backed session specification. The supervisor does not interpret application protocols.
+	Spec        ExecutionSessionSpec `json:"spec"`
+	SpecVersion int64                `json:"spec_version"`
+	UpdatedAt   time.Time            `json:"updated_at"`
+}
+
+// ExecutionSessionAttempt defines model for ExecutionSessionAttempt.
+type ExecutionSessionAttempt struct {
+	ExitCode          *int32     `json:"exit_code,omitempty"`
+	FinishedAt        *time.Time `json:"finished_at,omitempty"`
+	Id                string     `json:"id"`
+	Number            int64      `json:"number"`
+	Pid               *int32     `json:"pid,omitempty"`
+	Reason            *string    `json:"reason,omitempty"`
+	RuntimeGeneration int64      `json:"runtime_generation"`
+	StartedAt         *time.Time `json:"started_at,omitempty"`
+}
+
+// ExecutionSessionDesiredState defines model for ExecutionSessionDesiredState.
+type ExecutionSessionDesiredState string
+
+// ExecutionSessionDesiredStateRequest defines model for ExecutionSessionDesiredStateRequest.
+type ExecutionSessionDesiredStateRequest struct {
+	State ExecutionSessionDesiredState `json:"state"`
+}
+
+// ExecutionSessionEvent defines model for ExecutionSessionEvent.
+type ExecutionSessionEvent struct {
+	AttemptId *string `json:"attempt_id,omitempty"`
+
+	// DataBase64 Base64-encoded event bytes.
+	DataBase64        *string                      `json:"data_base64,omitempty"`
+	ExitCode          *int32                       `json:"exit_code,omitempty"`
+	OccurredAt        time.Time                    `json:"occurred_at"`
+	Reason            *string                      `json:"reason,omitempty"`
+	RuntimeGeneration int64                        `json:"runtime_generation"`
+	Seq               int64                        `json:"seq"`
+	SessionId         string                       `json:"session_id"`
+	Stream            *ExecutionSessionEventStream `json:"stream,omitempty"`
+	Type              string                       `json:"type"`
+}
+
+// ExecutionSessionEventStream defines model for ExecutionSessionEvent.Stream.
+type ExecutionSessionEventStream string
+
+// ExecutionSessionEventCursor defines model for ExecutionSessionEventCursor.
+type ExecutionSessionEventCursor struct {
+	Earliest int64 `json:"earliest"`
+	Latest   int64 `json:"latest"`
+}
+
+// ExecutionSessionEventPage defines model for ExecutionSessionEventPage.
+type ExecutionSessionEventPage struct {
+	Cursor ExecutionSessionEventCursor `json:"cursor"`
+	Events []ExecutionSessionEvent     `json:"events"`
+}
+
+// ExecutionSessionEventRetentionSpec defines model for ExecutionSessionEventRetentionSpec.
+type ExecutionSessionEventRetentionSpec struct {
+	MaxAgeSeconds *int64 `json:"max_age_seconds,omitempty"`
+	MaxBytes      *int64 `json:"max_bytes,omitempty"`
+}
+
+// ExecutionSessionIOMode defines model for ExecutionSessionIOMode.
+type ExecutionSessionIOMode string
+
+// ExecutionSessionIOSpec defines model for ExecutionSessionIOSpec.
+type ExecutionSessionIOSpec struct {
+	Mode     *ExecutionSessionIOMode       `json:"mode,omitempty"`
+	Terminal *ExecutionSessionTerminalSpec `json:"terminal,omitempty"`
+}
+
+// ExecutionSessionInputRequest defines model for ExecutionSessionInputRequest.
+type ExecutionSessionInputRequest struct {
+	// DataBase64 Base64-encoded input bytes accepted into the current attempt input queue. WebSocket closure never implies EOF.
+	DataBase64        *string `json:"data_base64,omitempty"`
+	Eof               *bool   `json:"eof,omitempty"`
+	ExpectedAttemptId *string `json:"expected_attempt_id,omitempty"`
+
+	// InputId Client-generated operation identifier used to deduplicate recorded retries.
+	InputId string `json:"input_id"`
+}
+
+// ExecutionSessionInputResponse defines model for ExecutionSessionInputResponse.
+type ExecutionSessionInputResponse struct {
+	Accepted  bool   `json:"accepted"`
+	AttemptId string `json:"attempt_id"`
+	Duplicate bool   `json:"duplicate"`
+	InputId   string `json:"input_id"`
+}
+
+// ExecutionSessionLifecycleSpec defines model for ExecutionSessionLifecycleSpec.
+type ExecutionSessionLifecycleSpec struct {
+	DesiredState           *ExecutionSessionDesiredState          `json:"desired_state,omitempty"`
+	IdleTimeoutSeconds     *int64                                 `json:"idle_timeout_seconds,omitempty"`
+	MaxLifetimeSeconds     *int64                                 `json:"max_lifetime_seconds,omitempty"`
+	Restart                *ExecutionSessionRestartSpec           `json:"restart,omitempty"`
+	RuntimeRecovery        *ExecutionSessionRuntimeRecoveryPolicy `json:"runtime_recovery,omitempty"`
+	StopGracePeriodSeconds *int32                                 `json:"stop_grace_period_seconds,omitempty"`
+}
+
+// ExecutionSessionPhase defines model for ExecutionSessionPhase.
+type ExecutionSessionPhase string
+
+// ExecutionSessionReadinessSpec defines model for ExecutionSessionReadinessSpec.
+type ExecutionSessionReadinessSpec struct {
+	DelayMs *int32 `json:"delay_ms,omitempty"`
+
+	// Output Byte sequence whose appearance in process output marks the attempt ready when type is output.
+	Output    *string                        `json:"output,omitempty"`
+	TimeoutMs *int32                         `json:"timeout_ms,omitempty"`
+	Type      *ExecutionSessionReadinessType `json:"type,omitempty"`
+}
+
+// ExecutionSessionReadinessType defines model for ExecutionSessionReadinessType.
+type ExecutionSessionReadinessType string
+
+// ExecutionSessionRestartPolicy defines model for ExecutionSessionRestartPolicy.
+type ExecutionSessionRestartPolicy string
+
+// ExecutionSessionRestartSpec defines model for ExecutionSessionRestartSpec.
+type ExecutionSessionRestartSpec struct {
+	InitialBackoffMs *int32                         `json:"initial_backoff_ms,omitempty"`
+	MaxBackoffMs     *int32                         `json:"max_backoff_ms,omitempty"`
+	MaxRestarts      *int32                         `json:"max_restarts,omitempty"`
+	Policy           *ExecutionSessionRestartPolicy `json:"policy,omitempty"`
+	WindowSeconds    *int32                         `json:"window_seconds,omitempty"`
+}
+
+// ExecutionSessionRuntimeRecoveryPolicy defines model for ExecutionSessionRuntimeRecoveryPolicy.
+type ExecutionSessionRuntimeRecoveryPolicy string
+
+// ExecutionSessionSignalRequest defines model for ExecutionSessionSignalRequest.
+type ExecutionSessionSignalRequest struct {
+	ExpectedAttemptId *string `json:"expected_attempt_id,omitempty"`
+	Signal            string  `json:"signal"`
+}
+
+// ExecutionSessionSpec Generic process-backed session specification. The supervisor does not interpret application protocols.
+type ExecutionSessionSpec struct {
+	Command        []string                            `json:"command"`
+	Cwd            *string                             `json:"cwd,omitempty"`
+	Env            *map[string]string                  `json:"env,omitempty"`
+	EventRetention *ExecutionSessionEventRetentionSpec `json:"event_retention,omitempty"`
+	Io             *ExecutionSessionIOSpec             `json:"io,omitempty"`
+	Lifecycle      *ExecutionSessionLifecycleSpec      `json:"lifecycle,omitempty"`
+	Name           *string                             `json:"name,omitempty"`
+	Readiness      *ExecutionSessionReadinessSpec      `json:"readiness,omitempty"`
+}
+
+// ExecutionSessionTerminalResizeRequest defines model for ExecutionSessionTerminalResizeRequest.
+type ExecutionSessionTerminalResizeRequest struct {
+	Cols              int32   `json:"cols"`
+	ExpectedAttemptId *string `json:"expected_attempt_id,omitempty"`
+	Rows              int32   `json:"rows"`
+}
+
+// ExecutionSessionTerminalSpec defines model for ExecutionSessionTerminalSpec.
+type ExecutionSessionTerminalSpec struct {
+	Cols *int32  `json:"cols,omitempty"`
+	Rows *int32  `json:"rows,omitempty"`
+	Term *string `json:"term,omitempty"`
 }
 
 // FileContentResponse defines model for FileContentResponse.
@@ -2350,6 +2608,17 @@ type SuccessAPIKeyListResponse struct {
 // SuccessAPIKeyListResponseSuccess defines model for SuccessAPIKeyListResponse.Success.
 type SuccessAPIKeyListResponseSuccess bool
 
+// SuccessAcceptedResponse defines model for SuccessAcceptedResponse.
+type SuccessAcceptedResponse struct {
+	Data *struct {
+		Accepted bool `json:"accepted"`
+	} `json:"data,omitempty"`
+	Success SuccessAcceptedResponseSuccess `json:"success"`
+}
+
+// SuccessAcceptedResponseSuccess defines model for SuccessAcceptedResponse.Success.
+type SuccessAcceptedResponseSuccess bool
+
 // SuccessAuthProvidersResponse defines model for SuccessAuthProvidersResponse.
 type SuccessAuthProvidersResponse struct {
 	Data *struct {
@@ -2485,6 +2754,44 @@ type SuccessEnvelope struct {
 
 // SuccessEnvelopeSuccess defines model for SuccessEnvelope.Success.
 type SuccessEnvelopeSuccess bool
+
+// SuccessExecutionSessionEventPageResponse defines model for SuccessExecutionSessionEventPageResponse.
+type SuccessExecutionSessionEventPageResponse struct {
+	Data    *ExecutionSessionEventPage                      `json:"data,omitempty"`
+	Success SuccessExecutionSessionEventPageResponseSuccess `json:"success"`
+}
+
+// SuccessExecutionSessionEventPageResponseSuccess defines model for SuccessExecutionSessionEventPageResponse.Success.
+type SuccessExecutionSessionEventPageResponseSuccess bool
+
+// SuccessExecutionSessionInputResponse defines model for SuccessExecutionSessionInputResponse.
+type SuccessExecutionSessionInputResponse struct {
+	Data    *ExecutionSessionInputResponse              `json:"data,omitempty"`
+	Success SuccessExecutionSessionInputResponseSuccess `json:"success"`
+}
+
+// SuccessExecutionSessionInputResponseSuccess defines model for SuccessExecutionSessionInputResponse.Success.
+type SuccessExecutionSessionInputResponseSuccess bool
+
+// SuccessExecutionSessionListResponse defines model for SuccessExecutionSessionListResponse.
+type SuccessExecutionSessionListResponse struct {
+	Data *struct {
+		Sessions []ExecutionSession `json:"sessions"`
+	} `json:"data,omitempty"`
+	Success SuccessExecutionSessionListResponseSuccess `json:"success"`
+}
+
+// SuccessExecutionSessionListResponseSuccess defines model for SuccessExecutionSessionListResponse.Success.
+type SuccessExecutionSessionListResponseSuccess bool
+
+// SuccessExecutionSessionResponse defines model for SuccessExecutionSessionResponse.
+type SuccessExecutionSessionResponse struct {
+	Data    *ExecutionSession                      `json:"data,omitempty"`
+	Success SuccessExecutionSessionResponseSuccess `json:"success"`
+}
+
+// SuccessExecutionSessionResponseSuccess defines model for SuccessExecutionSessionResponse.Success.
+type SuccessExecutionSessionResponseSuccess bool
 
 // SuccessFileListResponse defines model for SuccessFileListResponse.
 type SuccessFileListResponse struct {
@@ -3204,6 +3511,9 @@ type SandboxID = string
 // SandboxVolumeID defines model for SandboxVolumeID.
 type SandboxVolumeID = string
 
+// SessionID defines model for SessionID.
+type SessionID = string
+
 // SnapshotID defines model for SnapshotID.
 type SnapshotID = string
 
@@ -3325,6 +3635,29 @@ type GetApiV1SandboxesIdObservabilityLogsParams struct {
 	Stream    *SandboxObservabilityLogStream `form:"stream,omitempty" json:"stream,omitempty"`
 }
 
+// PostApiV1SandboxesIdSessionsParams defines parameters for PostApiV1SandboxesIdSessions.
+type PostApiV1SandboxesIdSessionsParams struct {
+	// IdempotencyKey Optional key for retrying creation without creating a duplicate session.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
+}
+
+// GetApiV1SandboxesIdSessionsSessionIdEventsParams defines parameters for GetApiV1SandboxesIdSessionsSessionIdEvents.
+type GetApiV1SandboxesIdSessionsSessionIdEventsParams struct {
+	After *int64 `form:"after,omitempty" json:"after,omitempty"`
+	Limit *int   `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// GetApiV1SandboxesIdSessionsSessionIdEventsStreamParams defines parameters for GetApiV1SandboxesIdSessionsSessionIdEventsStream.
+type GetApiV1SandboxesIdSessionsSessionIdEventsStreamParams struct {
+	After       *int64  `form:"after,omitempty" json:"after,omitempty"`
+	LastEventID *string `json:"Last-Event-ID,omitempty"`
+}
+
+// GetApiV1SandboxesIdSessionsSessionIdWsParams defines parameters for GetApiV1SandboxesIdSessionsSessionIdWs.
+type GetApiV1SandboxesIdSessionsSessionIdWsParams struct {
+	After *int64 `form:"after,omitempty" json:"after,omitempty"`
+}
+
 // DeleteApiV1SandboxvolumesIdParams defines parameters for DeleteApiV1SandboxvolumesId.
 type DeleteApiV1SandboxvolumesIdParams struct {
 	// Force Force delete even if volume has active mounts
@@ -3433,6 +3766,27 @@ type PostApiV1SandboxesIdRootfsRestoreJSONRequestBody = RestoreSandboxRootFSRequ
 
 // PutApiV1SandboxesIdServicesJSONRequestBody defines body for PutApiV1SandboxesIdServices for application/json ContentType.
 type PutApiV1SandboxesIdServicesJSONRequestBody = SandboxServicesUpdateRequest
+
+// PostApiV1SandboxesIdSessionsJSONRequestBody defines body for PostApiV1SandboxesIdSessions for application/json ContentType.
+type PostApiV1SandboxesIdSessionsJSONRequestBody = ExecutionSessionSpec
+
+// PutApiV1SandboxesIdSessionsSessionIdJSONRequestBody defines body for PutApiV1SandboxesIdSessionsSessionId for application/json ContentType.
+type PutApiV1SandboxesIdSessionsSessionIdJSONRequestBody = ExecutionSessionSpec
+
+// PostApiV1SandboxesIdSessionsSessionIdAttemptsJSONRequestBody defines body for PostApiV1SandboxesIdSessionsSessionIdAttempts for application/json ContentType.
+type PostApiV1SandboxesIdSessionsSessionIdAttemptsJSONRequestBody = CreateExecutionSessionAttemptRequest
+
+// PutApiV1SandboxesIdSessionsSessionIdDesiredStateJSONRequestBody defines body for PutApiV1SandboxesIdSessionsSessionIdDesiredState for application/json ContentType.
+type PutApiV1SandboxesIdSessionsSessionIdDesiredStateJSONRequestBody = ExecutionSessionDesiredStateRequest
+
+// PostApiV1SandboxesIdSessionsSessionIdInputsJSONRequestBody defines body for PostApiV1SandboxesIdSessionsSessionIdInputs for application/json ContentType.
+type PostApiV1SandboxesIdSessionsSessionIdInputsJSONRequestBody = ExecutionSessionInputRequest
+
+// PostApiV1SandboxesIdSessionsSessionIdSignalsJSONRequestBody defines body for PostApiV1SandboxesIdSessionsSessionIdSignals for application/json ContentType.
+type PostApiV1SandboxesIdSessionsSessionIdSignalsJSONRequestBody = ExecutionSessionSignalRequest
+
+// PutApiV1SandboxesIdSessionsSessionIdTerminalJSONRequestBody defines body for PutApiV1SandboxesIdSessionsSessionIdTerminal for application/json ContentType.
+type PutApiV1SandboxesIdSessionsSessionIdTerminalJSONRequestBody = ExecutionSessionTerminalResizeRequest
 
 // PostApiV1SandboxesIdSnapshotsJSONRequestBody defines body for PostApiV1SandboxesIdSnapshots for application/json ContentType.
 type PostApiV1SandboxesIdSnapshotsJSONRequestBody = CreateSandboxRootFSSnapshotRequest

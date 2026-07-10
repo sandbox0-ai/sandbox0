@@ -41,8 +41,17 @@ func (p CleanupPolicy) isZero() bool {
 	return p.IdleTimeout == 0 && p.MaxLifetime == 0 && p.FinishedTTL == 0
 }
 
-// NewContext creates a new context with the given configuration.
+// NewContext creates and starts a new context with the given configuration.
 func NewContext(config process.ProcessConfig, replConfig *repl.REPLConfig, exitHandler process.ExitHandler, startHandler process.StartHandler) (*Context, error) {
+	return newContext(config, replConfig, exitHandler, startHandler, true)
+}
+
+// NewUnstartedContext creates a context whose process lifecycle is owned by a caller.
+func NewUnstartedContext(config process.ProcessConfig, replConfig *repl.REPLConfig, exitHandler process.ExitHandler, startHandler process.StartHandler) (*Context, error) {
+	return newContext(config, replConfig, exitHandler, startHandler, false)
+}
+
+func newContext(config process.ProcessConfig, replConfig *repl.REPLConfig, exitHandler process.ExitHandler, startHandler process.StartHandler, start bool) (*Context, error) {
 	id := "ctx-" + uuid.New().String()[:8]
 
 	var proc process.Process
@@ -92,8 +101,10 @@ func NewContext(config process.ProcessConfig, replConfig *repl.REPLConfig, exitH
 		proc.AddStartHandler(startHandler)
 	}
 
-	if err := proc.Start(); err != nil {
-		return nil, err
+	if start {
+		if err := proc.Start(); err != nil {
+			return nil, err
+		}
 	}
 
 	return ctx, nil

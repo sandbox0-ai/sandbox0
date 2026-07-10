@@ -59,6 +59,7 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 		WebhookMaxRetries:      spec.ProcdConfig.WebhookMaxRetries,
 		WebhookBaseBackoff:     spec.ProcdConfig.WebhookBaseBackoff,
 		WebhookOutboxDir:       webhookOutboxDir,
+		SessionStateDir:        apiconfig.DefaultSessionStateDir,
 	}
 	cfg.Autoscaler = apiconfig.AutoscalerConfig{
 		MinScaleInterval:        spec.Autoscaler.MinScaleInterval,

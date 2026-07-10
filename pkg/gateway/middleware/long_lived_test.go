@@ -28,6 +28,16 @@ func TestRequestShouldBeLongLived(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "session event stream",
+			req:  httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/sb_123/sessions/ses_123/events/stream?after=4", nil),
+			want: true,
+		},
+		{
+			name: "session event page",
+			req:  httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/sb_123/sessions/ses_123/events", nil),
+			want: false,
+		},
+		{
 			name: "websocket context stream",
 			req: func() *http.Request {
 				req := httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/sb_123/contexts/ctx_123/ws", nil)

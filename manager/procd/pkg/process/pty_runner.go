@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/reaper"
 )
 
 // PTYRunner manages PTY lifecycle for exec-based processes.
@@ -51,10 +52,15 @@ func (r *PTYRunner) Start(cmd *exec.Cmd, size *PTYSize) error {
 		ptySize = &PTYSize{Rows: 100, Cols: 500}
 	}
 
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
-		Rows: ptySize.Rows,
-		Cols: ptySize.Cols,
-	})
+	var ptmx *os.File
+	err := reaper.StartManaged(func() error {
+		var startErr error
+		ptmx, startErr = pty.StartWithSize(cmd, &pty.Winsize{
+			Rows: ptySize.Rows,
+			Cols: ptySize.Cols,
+		})
+		return startErr
+	}, func() int { return cmd.Process.Pid })
 	if err != nil {
 		r.base.SetState(ProcessStateCrashed)
 		return fmt.Errorf("%w: %v", ErrProcessStartFailed, err)
@@ -94,16 +100,12 @@ func (r *PTYRunner) Stop() error {
 		r.onStop()
 	}
 
-	r.base.stopInputWriter()
+	_ = r.base.CloseInput()
 
 	if r.cmd != nil && r.cmd.Process != nil {
 		if err := r.cmd.Process.Signal(syscall.SIGTERM); err != nil {
 			_ = r.cmd.Process.Kill()
 		}
-	}
-
-	if ptyFile := r.base.GetPTY(); ptyFile != nil {
-		ptyFile.Close()
 	}
 
 	r.waitReaderDone()
@@ -149,6 +151,7 @@ func (r *PTYRunner) monitorProcess() {
 		return
 	}
 
+	defer reaper.Untrack(r.cmd.Process.Pid)
 	err := r.cmd.Wait()
 
 	exitCode := 0
@@ -192,6 +195,7 @@ func (r *PTYRunner) monitorProcess() {
 
 	r.base.stopInputWriter()
 	r.waitReaderDone()
+	_ = r.base.CloseInput()
 	r.closeOutput()
 }
 

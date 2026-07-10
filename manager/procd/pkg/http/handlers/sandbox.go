@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/session"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/webhook"
 	"go.uber.org/zap"
 )
@@ -12,14 +13,16 @@ import (
 // SandboxHandler handles sandbox-level HTTP requests.
 type SandboxHandler struct {
 	manager    *ctxpkg.Manager
+	supervisor *session.Supervisor
 	dispatcher *webhook.Dispatcher
 	logger     *zap.Logger
 }
 
 // NewSandboxHandler creates a new sandbox handler.
-func NewSandboxHandler(manager *ctxpkg.Manager, dispatcher *webhook.Dispatcher, logger *zap.Logger) *SandboxHandler {
+func NewSandboxHandler(manager *ctxpkg.Manager, supervisor *session.Supervisor, dispatcher *webhook.Dispatcher, logger *zap.Logger) *SandboxHandler {
 	return &SandboxHandler{
 		manager:    manager,
+		supervisor: supervisor,
 		dispatcher: dispatcher,
 		logger:     logger,
 	}
@@ -52,7 +55,12 @@ func (h *SandboxHandler) Pause(w http.ResponseWriter, r *http.Request) {
 	// Get resource usage before pausing (while processes are still running)
 	resourceUsage := h.manager.GetAllResourceUsage()
 
-	err := h.manager.PauseAll()
+	var err error
+	if h.supervisor != nil {
+		err = h.supervisor.PauseAll()
+	} else {
+		err = h.manager.PauseAll()
+	}
 	if err != nil {
 		h.logger.Error("Failed to pause all contexts", zap.Error(err))
 		writeJSON(w, http.StatusInternalServerError, PauseAllResponse{
@@ -99,7 +107,12 @@ func (h *SandboxHandler) Stats(w http.ResponseWriter, r *http.Request) {
 func (h *SandboxHandler) Resume(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("Resuming all contexts")
 
-	err := h.manager.ResumeAll()
+	var err error
+	if h.supervisor != nil {
+		err = h.supervisor.ResumeAll()
+	} else {
+		err = h.manager.ResumeAll()
+	}
 	if err != nil {
 		h.logger.Error("Failed to resume all contexts", zap.Error(err))
 		writeJSON(w, http.StatusInternalServerError, ResumeAllResponse{

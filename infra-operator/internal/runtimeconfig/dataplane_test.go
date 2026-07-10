@@ -22,6 +22,9 @@ func TestToManagerLeavesProcdWebhookOutboxDirUnsetWhenOmitted(t *testing.T) {
 	if cfg.ProcdConfig.WebhookOutboxDir != "" {
 		t.Fatalf("webhook outbox dir = %q, want empty path", cfg.ProcdConfig.WebhookOutboxDir)
 	}
+	if cfg.ProcdConfig.SessionStateDir != "/var/lib/sandbox0/procd/sessions" {
+		t.Fatalf("session state dir = %q, want persistent procd path", cfg.ProcdConfig.SessionStateDir)
+	}
 }
 
 func TestToManagerPreservesProcdWebhookOutboxDir(t *testing.T) {

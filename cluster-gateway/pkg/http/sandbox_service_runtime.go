@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -29,29 +28,37 @@ const (
 
 var errSandboxServiceReadinessTimeout = errors.New("sandbox service did not become ready")
 
-type procdContextListResponse struct {
-	Contexts []procdContextResponse `json:"contexts"`
+type procdSessionListResponse struct {
+	Sessions []procdSessionResponse `json:"sessions"`
 }
 
-type procdContextResponse struct {
-	ID      string            `json:"id"`
-	Type    string            `json:"type"`
-	Command []string          `json:"command,omitempty"`
-	CWD     string            `json:"cwd"`
-	EnvVars map[string]string `json:"env_vars"`
-	Running bool              `json:"running"`
-	Paused  bool              `json:"paused"`
+type procdSessionResponse struct {
+	ID    string           `json:"id"`
+	Spec  procdSessionSpec `json:"spec"`
+	Phase string           `json:"phase"`
 }
 
-type procdCreateContextRequest struct {
-	Type    string                        `json:"type"`
-	Cmd     *procdCreateCMDContextRequest `json:"cmd,omitempty"`
-	CWD     string                        `json:"cwd,omitempty"`
-	EnvVars map[string]string             `json:"env_vars,omitempty"`
+type procdSessionSpec struct {
+	Name      string                `json:"name,omitempty"`
+	Command   []string              `json:"command"`
+	CWD       string                `json:"cwd,omitempty"`
+	Env       map[string]string     `json:"env,omitempty"`
+	IO        procdSessionIO        `json:"io,omitempty"`
+	Lifecycle procdSessionLifecycle `json:"lifecycle,omitempty"`
 }
 
-type procdCreateCMDContextRequest struct {
-	Command []string `json:"command"`
+type procdSessionIO struct {
+	Mode string `json:"mode"`
+}
+
+type procdSessionLifecycle struct {
+	DesiredState    string              `json:"desired_state"`
+	Restart         procdSessionRestart `json:"restart"`
+	RuntimeRecovery string              `json:"runtime_recovery"`
+}
+
+type procdSessionRestart struct {
+	Policy string `json:"policy"`
 }
 
 func (s *Server) ensureSandboxServiceRuntime(ctx context.Context, sandbox *mgr.Sandbox, service *mgr.SandboxAppService, route *mgr.SandboxAppServiceRoute) error {
@@ -63,14 +70,8 @@ func (s *Server) ensureSandboxServiceRuntime(ctx context.Context, sandbox *mgr.S
 		if len(service.Runtime.Command) == 0 {
 			return errors.New("cmd runtime command is required")
 		}
-		running, err := s.sandboxServiceCMDContextRunning(ctx, sandbox, service)
-		if err != nil {
+		if err := s.ensureSandboxServiceCMDSession(ctx, sandbox, service); err != nil {
 			return err
-		}
-		if !running {
-			if err := s.createSandboxServiceCMDContext(ctx, sandbox, service); err != nil {
-				return err
-			}
 		}
 		return s.waitSandboxServiceReady(ctx, sandbox, service, route)
 	default:
@@ -78,46 +79,81 @@ func (s *Server) ensureSandboxServiceRuntime(ctx context.Context, sandbox *mgr.S
 	}
 }
 
-func (s *Server) sandboxServiceCMDContextRunning(ctx context.Context, sandbox *mgr.Sandbox, service *mgr.SandboxAppService) (bool, error) {
-	var list procdContextListResponse
-	if err := s.doSandboxProcdJSON(ctx, sandbox, http.MethodGet, "/api/v1/contexts", nil, &list); err != nil {
-		return false, err
+func (s *Server) ensureSandboxServiceCMDSession(ctx context.Context, sandbox *mgr.Sandbox, service *mgr.SandboxAppService) error {
+	var list procdSessionListResponse
+	if err := s.doSandboxProcdJSON(ctx, sandbox, http.MethodGet, "/api/v1/sessions", nil, &list); err != nil {
+		return err
 	}
-	for _, candidate := range list.Contexts {
-		if sandboxServiceContextMatchesCMD(candidate, service) {
-			return true, nil
+	desired := sandboxServiceCMDSessionSpec(service)
+	for _, candidate := range list.Sessions {
+		if candidate.Spec.Name != desired.Name {
+			continue
+		}
+		if !sandboxServiceSessionSpecMatches(candidate.Spec, desired) {
+			var updated procdSessionResponse
+			return s.doSandboxProcdJSON(ctx, sandbox, http.MethodPut, "/api/v1/sessions/"+url.PathEscape(candidate.ID), desired, &updated)
+		}
+		switch candidate.Phase {
+		case "pending", "starting", "running", "backoff":
+			return nil
+		default:
+			request := map[string]string{"state": "running"}
+			var updated procdSessionResponse
+			return s.doSandboxProcdJSON(ctx, sandbox, http.MethodPut, "/api/v1/sessions/"+url.PathEscape(candidate.ID)+"/desired-state", request, &updated)
 		}
 	}
-	return false, nil
+	return s.createSandboxServiceCMDSession(ctx, sandbox, service)
 }
 
-func sandboxServiceContextMatchesCMD(ctx procdContextResponse, service *mgr.SandboxAppService) bool {
-	if service == nil || service.Runtime == nil {
+func sandboxServiceSessionSpecMatches(value, desired procdSessionSpec) bool {
+	if value.Name != desired.Name || !equalStrings(value.Command, desired.Command) {
 		return false
 	}
-	if ctx.Type != "cmd" || !ctx.Running || ctx.Paused {
+	if strings.TrimSpace(value.CWD) != strings.TrimSpace(desired.CWD) || value.IO.Mode != desired.IO.Mode {
 		return false
 	}
-	if ctx.EnvVars[sandboxServiceRuntimeServiceIDEnv] != service.ID {
+	if value.Lifecycle.DesiredState != desired.Lifecycle.DesiredState ||
+		value.Lifecycle.Restart.Policy != desired.Lifecycle.Restart.Policy ||
+		value.Lifecycle.RuntimeRecovery != desired.Lifecycle.RuntimeRecovery {
 		return false
 	}
-	if !slices.Equal(ctx.Command, service.Runtime.Command) {
+	if len(value.Env) != len(desired.Env) {
 		return false
 	}
-	return strings.TrimSpace(ctx.CWD) == strings.TrimSpace(service.Runtime.CWD)
+	for key, desiredValue := range desired.Env {
+		if value.Env[key] != desiredValue {
+			return false
+		}
+	}
+	return true
 }
 
-func (s *Server) createSandboxServiceCMDContext(ctx context.Context, sandbox *mgr.Sandbox, service *mgr.SandboxAppService) error {
-	req := procdCreateContextRequest{
-		Type: "cmd",
-		Cmd: &procdCreateCMDContextRequest{
-			Command: service.Runtime.Command,
-		},
+func sandboxServiceCMDSessionSpec(service *mgr.SandboxAppService) procdSessionSpec {
+	return procdSessionSpec{
+		Name:    sandboxServiceRuntimeSessionName(service.ID),
+		Command: service.Runtime.Command,
 		CWD:     service.Runtime.CWD,
-		EnvVars: sandboxServiceRuntimeEnvVars(service),
+		Env:     sandboxServiceRuntimeEnvVars(service),
+		IO:      procdSessionIO{Mode: "pipes"},
+		Lifecycle: procdSessionLifecycle{
+			DesiredState: "running",
+			Restart: procdSessionRestart{
+				Policy: "on_failure",
+			},
+			RuntimeRecovery: "restart",
+		},
 	}
-	var created procdContextResponse
-	return s.doSandboxProcdJSON(ctx, sandbox, http.MethodPost, "/api/v1/contexts", req, &created)
+}
+
+func (s *Server) createSandboxServiceCMDSession(ctx context.Context, sandbox *mgr.Sandbox, service *mgr.SandboxAppService) error {
+	req := sandboxServiceCMDSessionSpec(service)
+	var created procdSessionResponse
+	headers := http.Header{"Idempotency-Key": []string{"sandbox-service-runtime:" + service.ID}}
+	return s.doSandboxProcdJSONWithHeaders(ctx, sandbox, http.MethodPost, "/api/v1/sessions", req, headers, &created)
+}
+
+func sandboxServiceRuntimeSessionName(serviceID string) string {
+	return "sandbox-service:" + serviceID
 }
 
 func sandboxServiceRuntimeEnvVars(service *mgr.SandboxAppService) map[string]string {
@@ -132,6 +168,10 @@ func sandboxServiceRuntimeEnvVars(service *mgr.SandboxAppService) map[string]str
 }
 
 func (s *Server) doSandboxProcdJSON(ctx context.Context, sandbox *mgr.Sandbox, method, path string, payload any, out any) error {
+	return s.doSandboxProcdJSONWithHeaders(ctx, sandbox, method, path, payload, nil, out)
+}
+
+func (s *Server) doSandboxProcdJSONWithHeaders(ctx context.Context, sandbox *mgr.Sandbox, method, path string, payload any, headers http.Header, out any) error {
 	if sandbox == nil {
 		return errors.New("sandbox is required")
 	}
@@ -157,6 +197,11 @@ func (s *Server) doSandboxProcdJSON(ctx context.Context, sandbox *mgr.Sandbox, m
 	}
 	req.Header.Set(internalauth.DefaultTokenHeader, token)
 	req.Header.Set("Content-Type", "application/json")
+	for key, values := range headers {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
 
 	resp, err := s.outboundHTTPClient().Do(req)
 	if err != nil {
@@ -188,6 +233,18 @@ func (s *Server) doSandboxProcdJSON(ctx context.Context, sandbox *mgr.Sandbox, m
 		return err
 	}
 	return nil
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) waitSandboxServiceReady(ctx context.Context, sandbox *mgr.Sandbox, service *mgr.SandboxAppService, route *mgr.SandboxAppServiceRoute) error {

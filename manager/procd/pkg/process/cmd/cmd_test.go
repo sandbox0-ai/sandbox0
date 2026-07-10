@@ -483,10 +483,11 @@ func TestCMD_WithEnvironment(t *testing.T) {
 	}
 }
 
-// TestCMD_WriteInputNoPTY tests writing input to a non-PTY command.
+// TestCMD_WriteInputNoPTY tests pipe-backed input for a non-PTY command.
 func TestCMD_WriteInputNoPTY(t *testing.T) {
 	config := process.ProcessConfig{
-		Type: process.ProcessTypeCMD,
+		Type:      process.ProcessTypeCMD,
+		PipeStdin: true,
 	}
 
 	cmd, err := NewCMD("test-input", config, []string{"/bin/cat"})
@@ -499,13 +500,40 @@ func TestCMD_WriteInputNoPTY(t *testing.T) {
 		t.Fatalf("Start() failed = %v", err)
 	}
 
-	// Writing to a non-PTY command should fail
-	err = cmd.WriteInput([]byte("test input"))
-	if err != process.ErrProcessNotRunning {
-		t.Errorf("WriteInput() error = %v, want %v", err, process.ErrProcessNotRunning)
+	if err := cmd.WriteInput([]byte("test input")); err != nil {
+		t.Fatalf("WriteInput() failed = %v", err)
 	}
+	if err := cmd.CloseInput(); err != nil {
+		t.Fatalf("CloseInput() failed = %v", err)
+	}
+	for i := 0; i < 100 && cmd.IsRunning(); i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	stdout, stderr := cmd.GetOutput()
+	if stdout != "test input" || stderr != "" {
+		t.Fatalf("output = (%q, %q), want (%q, %q)", stdout, stderr, "test input", "")
+	}
+}
 
-	cmd.Stop()
+func TestCMD_NoPTYKeepsLegacyClosedStdinByDefault(t *testing.T) {
+	config := process.ProcessConfig{Type: process.ProcessTypeCMD}
+	cmd, err := NewCMD("test-closed-input", config, []string{"/bin/cat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 100 && cmd.IsRunning(); i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if cmd.IsRunning() {
+		_ = cmd.Stop()
+		t.Fatal("pipe stdin stayed open without PipeStdin")
+	}
+	if err := cmd.WriteInput([]byte("unexpected")); err != process.ErrProcessNotRunning {
+		t.Fatalf("WriteInput() error = %v, want %v", err, process.ErrProcessNotRunning)
+	}
 }
 
 // TestCMD_CommandWithSpaces tests command with spaces in arguments.

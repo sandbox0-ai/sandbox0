@@ -340,8 +340,8 @@ func TestNodeFSShutdownPreservesMountsJournalAndBacking(t *testing.T) {
 	if err := mgr.Shutdown(context.Background()); err != nil {
 		t.Fatalf("Shutdown() error = %v", err)
 	}
-	if server.unmounted {
-		t.Fatal("Shutdown() unmounted nodefs shard")
+	if server.detached {
+		t.Fatal("Shutdown() detached active nodefs shard")
 	}
 	if len(mounter.unmounts) != 0 {
 		t.Fatalf("Shutdown() unmounted CSI targets: %v", mounter.unmounts)

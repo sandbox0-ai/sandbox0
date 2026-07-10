@@ -17,7 +17,7 @@ const nodeFSRequiredKernelCapabilities = fuse.CAP_HAS_RESEND | fuseCapabilityRec
 type nodeFUSEServer interface {
 	Serve()
 	WaitMount() error
-	Unmount() error
+	Detach() error
 	ConnectionState() fuse.ConnectionState
 }
 
@@ -136,27 +136,38 @@ func startNodeFSConnection(
 
 	server, err := factory.New(fs, shard.MountPath, opts)
 	if err != nil {
-		return nil, false, fmt.Errorf("create nodefs shard %d: %w", shard.Index, err)
+		cleanErr := factory.CleanMount(shard.MountPath)
+		return nil, false, errors.Join(fmt.Errorf("create nodefs shard %d: %w", shard.Index, err), cleanErr)
 	}
 	state := server.ConnectionState()
 	if journalState.RecoveryRequired && state.InitResponse.Flags64()&nodeFSRequiredKernelCapabilities != nodeFSRequiredKernelCapabilities {
-		_ = server.Unmount()
-		return nil, false, fmt.Errorf("nodefs shard %d kernel did not negotiate FUSE recovery and resend", shard.Index)
+		cleanupErr := detachUnstartedNodeFSConnection(server, shard.MountPath, factory)
+		return nil, false, errors.Join(
+			fmt.Errorf("nodefs shard %d kernel did not negotiate FUSE recovery and resend", shard.Index),
+			cleanupErr,
+		)
 	}
 	encoded, err := json.Marshal(state)
 	if err != nil {
-		_ = server.Unmount()
-		return nil, false, fmt.Errorf("encode nodefs shard connection state: %w", err)
+		cleanupErr := detachUnstartedNodeFSConnection(server, shard.MountPath, factory)
+		return nil, false, errors.Join(fmt.Errorf("encode nodefs shard connection state: %w", err), cleanupErr)
 	}
 	if err := journal.CommitShardSession(shard.Index, encoded); err != nil {
-		_ = server.Unmount()
-		return nil, false, fmt.Errorf("commit nodefs shard connection state: %w", err)
+		cleanupErr := detachUnstartedNodeFSConnection(server, shard.MountPath, factory)
+		return nil, false, errors.Join(fmt.Errorf("commit nodefs shard connection state: %w", err), cleanupErr)
 	}
 	connection := &nodeFSConnection{server: server}
 	if err := connection.serve(); err != nil {
 		return nil, false, err
 	}
 	return connection, false, nil
+}
+
+func detachUnstartedNodeFSConnection(server nodeFUSEServer, mountPath string, factory nodeFSConnectionFactory) error {
+	if server == nil {
+		return factory.CleanMount(mountPath)
+	}
+	return errors.Join(server.Detach(), factory.CleanMount(mountPath))
 }
 
 func resumeNodeFSConnection(shard nodeFSShardState, fs fuse.RawFileSystem, opts *fuse.MountOptions, factory nodeFSConnectionFactory) (*nodeFSConnection, error) {

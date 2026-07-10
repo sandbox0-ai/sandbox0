@@ -11,7 +11,7 @@ import (
 
 type fakeNodeFUSEServer struct {
 	state     fuse.ConnectionState
-	unmounted bool
+	detached  bool
 	waitErr   error
 	started   chan struct{}
 	startOnce sync.Once
@@ -22,7 +22,7 @@ func (s *fakeNodeFUSEServer) WaitMount() error {
 	<-s.started
 	return s.waitErr
 }
-func (s *fakeNodeFUSEServer) Unmount() error                        { s.unmounted = true; return nil }
+func (s *fakeNodeFUSEServer) Detach() error                         { s.detached = true; return nil }
 func (s *fakeNodeFUSEServer) ConnectionState() fuse.ConnectionState { return s.state }
 
 func newFakeNodeFUSEServer(state fuse.ConnectionState) *fakeNodeFUSEServer {
@@ -174,7 +174,7 @@ func TestStartNodeFSConnectionRejectsKernelWithoutRecovery(t *testing.T) {
 	if _, _, err := startNodeFSConnection(store, state, shard, 0, fuse.NewDefaultRawFileSystem(), factory); err == nil {
 		t.Fatal("startNodeFSConnection() error = nil")
 	}
-	if !server.unmounted || len(store.Snapshot().Shards[0].SessionState) != 0 {
+	if !server.detached || factory.cleanCalls != 2 || len(store.Snapshot().Shards[0].SessionState) != 0 {
 		t.Fatalf("server=%+v journal=%+v", server, store.Snapshot().Shards[0])
 	}
 }

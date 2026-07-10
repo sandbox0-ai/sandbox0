@@ -17,6 +17,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
+	"go.uber.org/zap"
 )
 
 const nodeFSRootBackend = "rootfs"
@@ -170,11 +171,25 @@ func (m *Manager) Initialize(ctx context.Context) error {
 		}
 		shard.connection = connection
 		shard.recovered = recovered
+		if m.logger != nil {
+			m.logger.Info("ctld nodefs shard ready",
+				zap.Int("shard", index),
+				zap.Bool("recovered", recovered),
+				zap.Int("portals", portalCounts[index]),
+			)
+		}
 	}
 	if err := m.reconcileNodeFSPortals(ctx, runtime, state); err != nil {
 		return err
 	}
 	runtime.ready.Store(true)
+	if m.logger != nil {
+		m.logger.Info("ctld nodefs initialized",
+			zap.Int("shards", state.ShardCount),
+			zap.Int("portals", len(state.Portals)),
+			zap.Bool("recovery_required", state.RecoveryRequired),
+		)
+	}
 	return nil
 }
 

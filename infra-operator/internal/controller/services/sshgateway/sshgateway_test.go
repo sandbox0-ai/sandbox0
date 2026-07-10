@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
@@ -75,16 +76,23 @@ func TestReconcileCreatesSSHGatewayResources(t *testing.T) {
 	if got := volumeSecrets["data-plane-internal-jwt-private-key"]; got != dataPlaneSecretName {
 		t.Fatalf("data-plane internal auth secret = %q, want %q", got, dataPlaneSecretName)
 	}
-	if deployment.Spec.Template.Spec.Containers[0].Ports[0].ContainerPort != 2222 {
-		t.Fatalf("container port = %d, want 2222", deployment.Spec.Template.Spec.Containers[0].Ports[0].ContainerPort)
+	containerPorts := make(map[string]int32)
+	for _, port := range deployment.Spec.Template.Spec.Containers[0].Ports {
+		containerPorts[port.Name] = port.ContainerPort
+	}
+	if got := containerPorts["ssh"]; got != 2222 {
+		t.Fatalf("SSH container port = %d, want 2222", got)
+	}
+	if got := containerPorts["metrics"]; got != apiconfig.DefaultSSHGatewayMetricsPort {
+		t.Fatalf("metrics container port = %d, want %d", got, apiconfig.DefaultSSHGatewayMetricsPort)
 	}
 
 	service := &corev1.Service{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-ssh-gateway", Namespace: infra.Namespace}, service); err != nil {
 		t.Fatalf("get service: %v", err)
 	}
-	if service.Spec.Ports[0].Port != 2222 {
-		t.Fatalf("service port = %d, want 2222", service.Spec.Ports[0].Port)
+	if len(service.Spec.Ports) != 1 || service.Spec.Ports[0].Name != "ssh" || service.Spec.Ports[0].Port != 2222 {
+		t.Fatalf("service ports = %#v, want only SSH port 2222", service.Spec.Ports)
 	}
 
 	configMap := &corev1.ConfigMap{}

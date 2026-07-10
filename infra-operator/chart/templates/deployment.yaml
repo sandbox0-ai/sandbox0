@@ -20,6 +20,7 @@ spec:
       labels:
         {{- include "infra-operator.selectorLabels" . | nindent 8 }}
         control-plane: controller-manager
+        app.kubernetes.io/component: infra-operator
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -32,6 +33,10 @@ spec:
           {{- toYaml .Values.securityContext | nindent 12 }}
         image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
         imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - name: metrics
+          containerPort: 8080
+          protocol: TCP
         env:
         - name: SERVICE
           value: infra-operator

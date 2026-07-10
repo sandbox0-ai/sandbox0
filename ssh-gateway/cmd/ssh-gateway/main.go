@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
@@ -17,6 +20,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	sshserver "github.com/sandbox0-ai/sandbox0/ssh-gateway/pkg/server"
 	"go.uber.org/zap"
 )
@@ -42,6 +46,7 @@ func main() {
 		logger.Fatal("Failed to initialize observability", zap.Error(err))
 	}
 	defer obsProvider.Shutdown(ctx)
+	sshGatewayMetrics := obsmetrics.NewSSHGateway(obsProvider.MetricsRegistryOrNil())
 
 	pool, err := initDatabase(ctx, cfg, logger, obsProvider)
 	if err != nil {
@@ -85,7 +90,7 @@ func main() {
 	resolver := sshserver.NewRegionalSandboxResolver(cfg.RegionalGatewayURL, controlPlaneAuthGen, logger, cfg.ResumeTimeout.Duration)
 	resolver.SetHTTPClient(obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ResumeTimeout.Duration}))
 	authorizer := sshserver.NewAuthenticator(repo, resolver, cfg.ResumeTimeout.Duration, cfg.ResumePollInterval.Duration, logger)
-	server, err := sshserver.NewServer(cfg, authorizer, dataPlaneAuthGen, logger)
+	server, err := sshserver.NewServer(cfg, authorizer, dataPlaneAuthGen, logger, sshserver.WithMetrics(sshGatewayMetrics))
 	if err != nil {
 		logger.Fatal("Failed to create ssh-gateway server", zap.Error(err))
 	}
@@ -97,15 +102,49 @@ func main() {
 	go func() {
 		errCh <- server.Start(ctx)
 	}()
+	metricsServer := newMetricsServer()
+	metricsErrCh := make(chan error, 1)
+	go func() {
+		logger.Info("Starting metrics server", zap.String("addr", metricsServer.Addr))
+		metricsErrCh <- metricsServer.ListenAndServe()
+	}()
 
+	var runErr error
 	select {
 	case sig := <-sigChan:
 		logger.Info("Received shutdown signal", zap.String("signal", sig.String()))
-		cancel()
 	case err := <-errCh:
 		if err != nil {
-			logger.Fatal("ssh-gateway exited with error", zap.Error(err))
+			runErr = fmt.Errorf("ssh-gateway: %w", err)
 		}
+	case err := <-metricsErrCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			runErr = fmt.Errorf("metrics server: %w", err)
+		}
+	}
+	cancel()
+
+	shutdownTimeout := cfg.ShutdownTimeout.Duration
+	if shutdownTimeout <= 0 {
+		shutdownTimeout = 30 * time.Second
+	}
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer shutdownCancel()
+	if err := metricsServer.Shutdown(shutdownCtx); err != nil && runErr == nil {
+		runErr = fmt.Errorf("shutdown metrics server: %w", err)
+	}
+	if runErr != nil {
+		logger.Fatal("ssh-gateway exited with error", zap.Error(runErr))
+	}
+}
+
+func newMetricsServer() *http.Server {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	return &http.Server{
+		Addr:              fmt.Sprintf(":%d", config.DefaultSSHGatewayMetricsPort),
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
 	}
 }
 

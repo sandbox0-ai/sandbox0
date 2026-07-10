@@ -145,6 +145,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		Ports: []corev1.ContainerPort{{
 			Name:          "ssh",
 			ContainerPort: sshPort,
+		}, {
+			Name:          "metrics",
+			ContainerPort: apiconfig.DefaultSSHGatewayMetricsPort,
 		}},
 		Image: fmt.Sprintf("%s:%s", imageRepo, imageTag),
 		EnvVars: common.AppendObservabilityEnvVars([]corev1.EnvVar{

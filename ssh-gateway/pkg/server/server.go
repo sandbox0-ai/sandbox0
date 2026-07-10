@@ -14,6 +14,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/ssh"
 )
@@ -53,10 +54,21 @@ type Server struct {
 	hostSigner       ssh.Signer
 	httpClient       *http.Client
 	sshConfig        *ssh.ServerConfig
+	metrics          *obsmetrics.SSHGatewayMetrics
+}
+
+// Option configures optional ssh-gateway server behavior.
+type Option func(*Server)
+
+// WithMetrics enables ssh-gateway service metrics on the server.
+func WithMetrics(metrics *obsmetrics.SSHGatewayMetrics) Option {
+	return func(server *Server) {
+		server.metrics = metrics
+	}
 }
 
 // NewServer creates a new ssh-gateway server.
-func NewServer(cfg *config.SSHGatewayConfig, authorizer SessionAuthorizer, dataPlaneAuthGen *internalauth.Generator, logger *zap.Logger) (*Server, error) {
+func NewServer(cfg *config.SSHGatewayConfig, authorizer SessionAuthorizer, dataPlaneAuthGen *internalauth.Generator, logger *zap.Logger, opts ...Option) (*Server, error) {
 	if cfg == nil {
 		cfg = &config.SSHGatewayConfig{}
 	}
@@ -84,6 +96,11 @@ func NewServer(cfg *config.SSHGatewayConfig, authorizer SessionAuthorizer, dataP
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(server)
+		}
 	}
 	server.sshConfig = &ssh.ServerConfig{
 		ServerVersion: "SSH-2.0-sandbox0",
@@ -151,7 +168,15 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 			}
 			return fmt.Errorf("accept ssh connection: %w", err)
 		}
-		go s.handleConn(ctx, conn)
+		if s.metrics != nil {
+			s.metrics.ConnectionsActive.Inc()
+		}
+		go func() {
+			if s.metrics != nil {
+				defer s.metrics.ConnectionsActive.Dec()
+			}
+			s.handleConn(ctx, conn)
+		}()
 	}
 }
 

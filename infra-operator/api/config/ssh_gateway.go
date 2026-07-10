@@ -9,6 +9,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// DefaultSSHGatewayMetricsPort is the internal Prometheus metrics port shared
+// by the ssh-gateway process and its Kubernetes workload definition.
+const DefaultSSHGatewayMetricsPort = 9090
+
 // SSHGatewayConfig holds all configuration for ssh-gateway.
 type SSHGatewayConfig struct {
 	// Server configuration

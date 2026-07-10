@@ -21,10 +21,13 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pkg/sftp"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	procdfile "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 	sshcrypto "golang.org/x/crypto/ssh"
@@ -349,6 +352,78 @@ func TestServerSCPUpload(t *testing.T) {
 	if string(content) != "hello over scp\n" {
 		t.Fatalf("uploaded content = %q", string(content))
 	}
+}
+
+func TestServeTracksActiveConnections(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	metrics := obsmetrics.NewSSHGateway(registry)
+	server, err := NewServer(&config.SSHGatewayConfig{
+		SSHHostKeyPath: writeTestHostKey(t),
+	}, &staticAuthorizer{}, nil, zaptest.NewLogger(t), WithMetrics(metrics))
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	if got := testutil.ToFloat64(metrics.ConnectionsActive); got != 0 {
+		t.Fatalf("initial active connections = %v, want 0", got)
+	}
+	if err := testutil.GatherAndCompare(registry, strings.NewReader(`# HELP ssh_gateway_connections_active Current number of accepted downstream SSH TCP connections being handled
+# TYPE ssh_gateway_connections_active gauge
+ssh_gateway_connections_active 0
+`), "ssh_gateway_connections_active"); err != nil {
+		t.Fatalf("gather active connection metric: %v", err)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- server.Serve(ctx, listener) }()
+
+	const connectionCount = 4
+	clients := make([]net.Conn, 0, connectionCount)
+	defer func() {
+		for _, conn := range clients {
+			_ = conn.Close()
+		}
+		cancel()
+		_ = listener.Close()
+	}()
+	for range connectionCount {
+		conn, err := net.Dial("tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatalf("net.Dial() error = %v", err)
+		}
+		clients = append(clients, conn)
+	}
+	waitForGaugeValue(t, metrics.ConnectionsActive, connectionCount)
+
+	for _, conn := range clients {
+		if err := conn.Close(); err != nil {
+			t.Fatalf("close client connection: %v", err)
+		}
+	}
+	clients = nil
+	waitForGaugeValue(t, metrics.ConnectionsActive, 0)
+
+	cancel()
+	_ = listener.Close()
+	if err := <-errCh; err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+}
+
+func waitForGaugeValue(t *testing.T, gauge prometheus.Gauge, want float64) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := testutil.ToFloat64(gauge); got == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("gauge value = %v, want %v", testutil.ToFloat64(gauge), want)
 }
 
 func startTestSSHGateway(t *testing.T, hostKeyPath, procdURL string, internalAuthGen *internalauth.Generator, logger *zap.Logger) (*Server, net.Listener, func()) {

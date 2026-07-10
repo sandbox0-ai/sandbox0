@@ -1,5 +1,5 @@
-// Package sandboxobservability defines the per-sandbox historical observability
-// and audit query contract.
+// Package sandboxobservability defines the per-sandbox historical event, log,
+// and metric query contract.
 //
 // The package intentionally contains only domain types and repository/writer
 // interfaces. Backends such as ClickHouse implement Repository outside API

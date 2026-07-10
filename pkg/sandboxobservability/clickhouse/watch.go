@@ -15,12 +15,6 @@ const (
 )
 
 func (r *Repository) WatchEvents(ctx context.Context, query sandboxobservability.EventQuery, opts sandboxobservability.WatchOptions) (*sandboxobservability.EventListResult, error) {
-	query.AuditOnly = false
-	return r.watchEvents(ctx, query, opts)
-}
-
-func (r *Repository) WatchAuditEvents(ctx context.Context, query sandboxobservability.EventQuery, opts sandboxobservability.WatchOptions) (*sandboxobservability.EventListResult, error) {
-	query.AuditOnly = true
 	return r.watchEvents(ctx, query, opts)
 }
 
@@ -143,14 +137,6 @@ func (r *Repository) buildWatchEventsSQL(query sandboxobservability.EventQuery, 
 	if query.Outcome != "" {
 		builder.WriteString(" AND outcome = ?")
 		args = append(args, string(query.Outcome))
-	}
-	if query.AuditOnly {
-		if query.EventType != "" && query.EventType != sandboxobservability.EventTypeNetworkAudit {
-			builder.WriteString(" AND 0 = 1")
-		} else if query.EventType == "" {
-			builder.WriteString(" AND event_type = ?")
-			args = append(args, string(sandboxobservability.EventTypeNetworkAudit))
-		}
 	}
 	if cursor != nil {
 		builder.WriteString(" AND (ingested_at, source, event_type, cursor) > (?, ?, ?, ?)")

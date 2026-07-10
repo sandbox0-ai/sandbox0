@@ -42,8 +42,7 @@ func isSandboxObservabilityWatchRequest(req *http.Request) bool {
 	}
 	if !strings.HasSuffix(path, "/observability/events") &&
 		!strings.HasSuffix(path, "/observability/logs") &&
-		!strings.HasSuffix(path, "/observability/metrics") &&
-		!strings.HasSuffix(path, "/audit/events") {
+		!strings.HasSuffix(path, "/observability/metrics") {
 		return false
 	}
 	watch, err := strconv.ParseBool(req.URL.Query().Get("watch"))

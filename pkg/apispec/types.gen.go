@@ -3101,27 +3101,6 @@ type GetApiV1SandboxesParams struct {
 	Offset *int `form:"offset,omitempty" json:"offset,omitempty"`
 }
 
-// GetApiV1SandboxesIdAuditEventsParams defines parameters for GetApiV1SandboxesIdAuditEvents.
-type GetApiV1SandboxesIdAuditEventsParams struct {
-	// StartTime Include events that occurred at or after this RFC3339 timestamp.
-	StartTime *time.Time `form:"start_time,omitempty" json:"start_time,omitempty"`
-
-	// EndTime Include events that occurred at or before this RFC3339 timestamp.
-	EndTime *time.Time `form:"end_time,omitempty" json:"end_time,omitempty"`
-
-	// Limit Maximum number of events to return. Values above 1000 are capped.
-	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
-
-	// Cursor Opaque pagination cursor returned by a previous response. When watch is true, this must be a watch resume cursor from an NDJSON watermark line.
-	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
-
-	// Watch Stream matching records as application/x-ndjson in ingestion order until the client disconnects. When watch is true, end_time is not supported. Without cursor or start_time, streaming starts at request time.
-	Watch     *bool                          `form:"watch,omitempty" json:"watch,omitempty"`
-	Source    *ObservabilityEventSource      `form:"source,omitempty" json:"source,omitempty"`
-	EventType *SandboxObservabilityEventType `form:"event_type,omitempty" json:"event_type,omitempty"`
-	Outcome   *SandboxObservabilityOutcome   `form:"outcome,omitempty" json:"outcome,omitempty"`
-}
-
 // DeleteApiV1SandboxesIdFilesParams defines parameters for DeleteApiV1SandboxesIdFiles.
 type DeleteApiV1SandboxesIdFilesParams struct {
 	Path FilePath `form:"path" json:"path"`

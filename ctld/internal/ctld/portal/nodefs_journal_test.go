@@ -18,14 +18,12 @@ func TestNodeFSJournalRoundTrip(t *testing.T) {
 	if initial.ConnectionGeneration == "" {
 		t.Fatal("connection generation is empty")
 	}
+	if err := store.PrepareShards(root); err != nil {
+		t.Fatalf("PrepareShards() error = %v", err)
+	}
 
 	err = store.Update(func(state *nodeFSJournal) error {
 		state.NextSlotByShard[1] = 8
-		state.Shards = append(state.Shards, nodeFSShardState{
-			Index:     1,
-			Tag:       "ctld:node-a:1",
-			MountPath: "/var/lib/kubelet/plugins/volume.sandbox0.ai/nodefs/shard-1",
-		})
 		state.Portals = append(state.Portals, nodeFSPortalState{
 			PortalKey:     portalKey("pod-1", "workspace"),
 			PodUID:        "pod-1",
@@ -63,6 +61,62 @@ func TestNodeFSJournalRoundTrip(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("journal mode = %o, want 600", info.Mode().Perm())
+	}
+}
+
+func TestNodeFSJournalPreparesStableShardsAndCommitsSession(t *testing.T) {
+	root := t.TempDir()
+	store, err := openNodeFSJournal(root, "node-a", 2)
+	if err != nil {
+		t.Fatalf("openNodeFSJournal() error = %v", err)
+	}
+	if err := store.PrepareShards(root); err != nil {
+		t.Fatalf("PrepareShards() error = %v", err)
+	}
+	first := store.Snapshot()
+	if len(first.Shards) != 2 || first.Shards[0].Tag == first.Shards[1].Tag {
+		t.Fatalf("prepared shards = %+v", first.Shards)
+	}
+	if err := store.PrepareShards(root); err != nil {
+		t.Fatalf("PrepareShards(idempotent) error = %v", err)
+	}
+	if got := store.Snapshot().Shards[0].Tag; got != first.Shards[0].Tag {
+		t.Fatalf("stable tag = %q, want %q", got, first.Shards[0].Tag)
+	}
+	state := []byte(`{"kernel_settings":{"Major":7},"init_response":{"Major":7}}`)
+	if err := store.CommitShardSession(0, state); err != nil {
+		t.Fatalf("CommitShardSession() error = %v", err)
+	}
+	if got := string(store.Snapshot().Shards[0].SessionState); got != string(state) {
+		t.Fatalf("session state = %s, want %s", got, state)
+	}
+	if err := store.CommitShardSession(0, []byte("not-json")); err == nil {
+		t.Fatal("CommitShardSession(invalid) error = nil")
+	}
+	if err := store.ClearShardSession(0); err != nil {
+		t.Fatalf("ClearShardSession() error = %v", err)
+	}
+}
+
+func TestNodeFSJournalRefusesToReplaceShardWithPortal(t *testing.T) {
+	root := t.TempDir()
+	store, err := openNodeFSJournal(root, "node-a", 1)
+	if err != nil {
+		t.Fatalf("openNodeFSJournal() error = %v", err)
+	}
+	if err := store.PrepareShards(root); err != nil {
+		t.Fatalf("PrepareShards() error = %v", err)
+	}
+	if err := store.CommitShardSession(0, []byte(`{"ready":true}`)); err != nil {
+		t.Fatalf("CommitShardSession() error = %v", err)
+	}
+	if _, err := store.AllocatePortal(nodeFSPortalState{
+		PortalKey: "portal-a", PodUID: "pod-a", Name: "workspace", TargetPath: "/target-a",
+	}); err != nil {
+		t.Fatalf("AllocatePortal() error = %v", err)
+	}
+	if err := store.ClearShardSession(0); err == nil {
+		t.Fatal("ClearShardSession(with portal) error = nil")
 	}
 }
 

@@ -1,6 +1,7 @@
 package portal
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -179,6 +180,77 @@ func (s *nodeFSJournalStore) Update(update func(*nodeFSJournal) error) error {
 	}
 	s.data = next
 	return nil
+}
+
+// PrepareShards durably records the stable connection tags and host mount
+// paths before any FUSE connection is created. A crash before the INIT state
+// is committed is safe because portals cannot be allocated until all shards
+// have completed initialization.
+func (s *nodeFSJournalStore) PrepareShards(rootDir string) error {
+	rootDir = strings.TrimSpace(rootDir)
+	if rootDir == "" {
+		return fmt.Errorf("nodefs shard root is required")
+	}
+	return s.Update(func(state *nodeFSJournal) error {
+		if len(state.Shards) > 0 {
+			if len(state.Shards) != state.ShardCount {
+				return fmt.Errorf("nodefs journal has %d of %d shards", len(state.Shards), state.ShardCount)
+			}
+			return nil
+		}
+		state.Shards = make([]nodeFSShardState, state.ShardCount)
+		for index := range state.Shards {
+			state.Shards[index] = nodeFSShardState{
+				Index:     index,
+				Tag:       nodeFSConnectionTag(state.NodeIdentity, state.ConnectionGeneration, index),
+				MountPath: filepath.Join(rootDir, nodeFSStateDirName, "shards", fmt.Sprintf("%d", index), "mount"),
+			}
+		}
+		return nil
+	})
+}
+
+func nodeFSConnectionTag(nodeIdentity, generation string, shard int) string {
+	digest := sha256.Sum256([]byte(nodeIdentity + "\x00" + generation + "\x00" + fmt.Sprint(shard)))
+	return fmt.Sprintf("sandbox0-%x-%d", digest[:20], shard)
+}
+
+func (s *nodeFSJournalStore) CommitShardSession(index int, session json.RawMessage) error {
+	if len(session) == 0 || !json.Valid(session) {
+		return fmt.Errorf("nodefs shard %d session state is not valid JSON", index)
+	}
+	return s.updateShard(index, func(shard *nodeFSShardState) error {
+		shard.SessionState = slices.Clone(session)
+		return nil
+	})
+}
+
+func (s *nodeFSJournalStore) ClearShardSession(index int) error {
+	return s.Update(func(state *nodeFSJournal) error {
+		for _, portal := range state.Portals {
+			if portal.Shard == index {
+				return fmt.Errorf("cannot replace nodefs shard %d with committed portals", index)
+			}
+		}
+		for i := range state.Shards {
+			if state.Shards[i].Index == index {
+				state.Shards[i].SessionState = nil
+				return nil
+			}
+		}
+		return fmt.Errorf("nodefs shard %d is not prepared", index)
+	})
+}
+
+func (s *nodeFSJournalStore) updateShard(index int, update func(*nodeFSShardState) error) error {
+	return s.Update(func(state *nodeFSJournal) error {
+		for i := range state.Shards {
+			if state.Shards[i].Index == index {
+				return update(&state.Shards[i])
+			}
+		}
+		return fmt.Errorf("nodefs shard %d is not prepared", index)
+	})
 }
 
 // AllocatePortal reserves a stable shard and slot before any mount becomes
@@ -360,6 +432,18 @@ func validateNodeFSJournal(state nodeFSJournal) error {
 		if strings.TrimSpace(shard.Tag) == "" || strings.TrimSpace(shard.MountPath) == "" {
 			return fmt.Errorf("shard %d tag and mount path are required", shard.Index)
 		}
+		if len(shard.Tag) >= 128 || strings.ContainsAny(shard.Tag, "\x00,") {
+			return fmt.Errorf("shard %d has invalid recovery tag", shard.Index)
+		}
+		if !filepath.IsAbs(filepath.Clean(shard.MountPath)) {
+			return fmt.Errorf("shard %d mount path must be absolute", shard.Index)
+		}
+		if len(shard.SessionState) > 0 && !json.Valid(shard.SessionState) {
+			return fmt.Errorf("shard %d has invalid session state", shard.Index)
+		}
+	}
+	if len(state.Shards) != 0 && len(state.Shards) != state.ShardCount {
+		return fmt.Errorf("journal has %d of %d shard records", len(state.Shards), state.ShardCount)
 	}
 
 	portalKeys := make(map[string]struct{}, len(state.Portals))

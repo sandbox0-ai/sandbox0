@@ -286,9 +286,9 @@ console.log('Status:', status.status);`
 
 ---
 
-## Observability and Audit
+## Observability
 
-Sandbox logs, metrics, lifecycle events, and audit events are exposed through one per-sandbox observability API. The query API reads an asynchronous per-sandbox projection that can be backed by ClickHouse or another query store. When no backend is configured, these endpoints return `503 unavailable`. When the backend is configured but cannot be queried, the same endpoints return `503 unavailable` with a backend-unavailable error.
+Sandbox logs, metrics, lifecycle events, and network audit events are exposed through the per-sandbox observability API. The query API reads an asynchronous per-sandbox projection that can be backed by ClickHouse or another query store. When no backend is configured, these endpoints return `503 unavailable`. When the backend is configured but cannot be queried, the same endpoints return `503 unavailable` with a backend-unavailable error.
 
 <Endpoint method="GET">
 /api/v1/sandboxes/{'{id}'}/observability/events
@@ -300,10 +300,6 @@ Sandbox logs, metrics, lifecycle events, and audit events are exposed through on
 
 <Endpoint method="GET">
 /api/v1/sandboxes/{'{id}'}/observability/metrics
-</Endpoint>
-
-<Endpoint method="GET">
-/api/v1/sandboxes/{'{id}'}/audit/events
 </Endpoint>
 
 ### Query Parameters

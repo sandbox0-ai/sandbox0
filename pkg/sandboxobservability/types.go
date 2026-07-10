@@ -41,7 +41,7 @@ const (
 	OutcomeFailed    Outcome = "failed"
 )
 
-// Event is the durable per-sandbox historical observability and audit projection.
+// Event is the durable per-sandbox historical observability projection.
 type Event struct {
 	TeamID     string         `json:"team_id"`
 	SandboxID  string         `json:"sandbox_id"`
@@ -68,7 +68,6 @@ type EventQuery struct {
 	Source    Source
 	EventType EventType
 	Outcome   Outcome
-	AuditOnly bool
 }
 
 type EventListResult struct {
@@ -160,7 +159,6 @@ type WatchOptions struct {
 // Repository is the storage/query boundary for historical sandbox observability.
 type Repository interface {
 	ListEvents(ctx context.Context, query EventQuery) (*EventListResult, error)
-	ListAuditEvents(ctx context.Context, query EventQuery) (*EventListResult, error)
 	ListLogs(ctx context.Context, query LogQuery) (*LogListResult, error)
 	ListMetricSamples(ctx context.Context, query MetricQuery) (*MetricListResult, error)
 }
@@ -168,7 +166,6 @@ type Repository interface {
 // WatchRepository streams observability records in ingestion order.
 type WatchRepository interface {
 	WatchEvents(ctx context.Context, query EventQuery, opts WatchOptions) (*EventListResult, error)
-	WatchAuditEvents(ctx context.Context, query EventQuery, opts WatchOptions) (*EventListResult, error)
 	WatchLogs(ctx context.Context, query LogQuery, opts WatchOptions) (*LogListResult, error)
 	WatchMetricSamples(ctx context.Context, query MetricQuery, opts WatchOptions) (*MetricListResult, error)
 }
@@ -190,10 +187,6 @@ func (DisabledRepository) ListEvents(context.Context, EventQuery) (*EventListRes
 	return nil, ErrBackendDisabled
 }
 
-func (DisabledRepository) ListAuditEvents(context.Context, EventQuery) (*EventListResult, error) {
-	return nil, ErrBackendDisabled
-}
-
 func (DisabledRepository) ListLogs(context.Context, LogQuery) (*LogListResult, error) {
 	return nil, ErrBackendDisabled
 }
@@ -203,10 +196,6 @@ func (DisabledRepository) ListMetricSamples(context.Context, MetricQuery) (*Metr
 }
 
 func (DisabledRepository) WatchEvents(context.Context, EventQuery, WatchOptions) (*EventListResult, error) {
-	return nil, ErrBackendDisabled
-}
-
-func (DisabledRepository) WatchAuditEvents(context.Context, EventQuery, WatchOptions) (*EventListResult, error) {
 	return nil, ErrBackendDisabled
 }
 

@@ -337,7 +337,7 @@ func (s *Server) setupRoutes() {
 			// GET /:id is handled by regional-gateway so it can enrich the response with
 			// region-scoped connection details. Mutating exact-ID operations proxy to the
 			// owning cluster-gateway. Query subresources, including sandbox observability
-			// and audit read APIs, also route through this sandbox-ID aware proxy so
+			// APIs, also route through this sandbox-ID aware proxy so
 			// multi-cluster regions hit the owning data-plane cluster.
 			sandboxes.DELETE("/:id", s.proxySandbox)
 			sandboxes.PUT("/:id", s.proxySandbox)

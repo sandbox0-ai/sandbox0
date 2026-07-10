@@ -73,11 +73,33 @@ func NewSandboxObservabilityHandler(repo sandboxobservability.Repository, logger
 }
 
 func (h *SandboxObservabilityHandler) ListEvents(c *gin.Context) {
-	h.list(c, false)
-}
+	query, ok := parseSandboxObservabilityQuery(c)
+	if !ok {
+		return
+	}
+	watch, ok := parseSandboxObservabilityWatch(c)
+	if !ok {
+		return
+	}
+	if watch {
+		h.watchEvents(c, query)
+		return
+	}
 
-func (h *SandboxObservabilityHandler) ListAuditEvents(c *gin.Context) {
-	h.list(c, true)
+	result, err := h.repo.ListEvents(c.Request.Context(), query)
+	if err != nil {
+		h.writeQueryError(c, err, "failed to list sandbox observability events",
+			zap.String("sandbox_id", query.SandboxID),
+			zap.String("team_id", query.TeamID))
+		return
+	}
+	if result == nil {
+		result = &sandboxobservability.EventListResult{Events: []sandboxobservability.Event{}}
+	}
+	if result.Events == nil {
+		result.Events = []sandboxobservability.Event{}
+	}
+	spec.JSONSuccess(c, http.StatusOK, result)
 }
 
 func (h *SandboxObservabilityHandler) ListLogs(c *gin.Context) {
@@ -215,46 +237,7 @@ func (h *SandboxObservabilityHandler) IngestMetricSamples(c *gin.Context) {
 	spec.JSONSuccess(c, http.StatusAccepted, gin.H{"inserted": len(req.Samples)})
 }
 
-func (h *SandboxObservabilityHandler) list(c *gin.Context, auditOnly bool) {
-	query, ok := parseSandboxObservabilityQuery(c, auditOnly)
-	if !ok {
-		return
-	}
-	watch, ok := parseSandboxObservabilityWatch(c)
-	if !ok {
-		return
-	}
-	if watch {
-		h.watchEvents(c, query, auditOnly)
-		return
-	}
-
-	var (
-		result *sandboxobservability.EventListResult
-		err    error
-	)
-	if auditOnly {
-		result, err = h.repo.ListAuditEvents(c.Request.Context(), query)
-	} else {
-		result, err = h.repo.ListEvents(c.Request.Context(), query)
-	}
-	if err != nil {
-		h.writeQueryError(c, err, "failed to list sandbox observability events",
-			zap.String("sandbox_id", query.SandboxID),
-			zap.String("team_id", query.TeamID),
-			zap.Bool("audit_only", auditOnly))
-		return
-	}
-	if result == nil {
-		result = &sandboxobservability.EventListResult{Events: []sandboxobservability.Event{}}
-	}
-	if result.Events == nil {
-		result.Events = []sandboxobservability.Event{}
-	}
-	spec.JSONSuccess(c, http.StatusOK, result)
-}
-
-func (h *SandboxObservabilityHandler) watchEvents(c *gin.Context, query sandboxobservability.EventQuery, auditOnly bool) {
+func (h *SandboxObservabilityHandler) watchEvents(c *gin.Context, query sandboxobservability.EventQuery) {
 	if !validateSandboxObservabilityWatch(c, query.EndTime) {
 		return
 	}
@@ -265,17 +248,13 @@ func (h *SandboxObservabilityHandler) watchEvents(c *gin.Context, query sandboxo
 
 	opts := buildSandboxObservabilityWatchOptions(query.Cursor, query.Limit, query.StartTime)
 	fetch := func() (*sandboxobservability.EventListResult, error) {
-		if auditOnly {
-			return watchRepo.WatchAuditEvents(c.Request.Context(), query, opts)
-		}
 		return watchRepo.WatchEvents(c.Request.Context(), query, opts)
 	}
 	result, err := fetch()
 	if err != nil {
 		h.writeQueryError(c, err, "failed to watch sandbox observability events",
 			zap.String("sandbox_id", query.SandboxID),
-			zap.String("team_id", query.TeamID),
-			zap.Bool("audit_only", auditOnly))
+			zap.String("team_id", query.TeamID))
 		return
 	}
 
@@ -528,7 +507,7 @@ func (h *SandboxObservabilityHandler) writeIngestError(c *gin.Context, err error
 	spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, message)
 }
 
-func parseSandboxObservabilityQuery(c *gin.Context, auditOnly bool) (sandboxobservability.EventQuery, bool) {
+func parseSandboxObservabilityQuery(c *gin.Context) (sandboxobservability.EventQuery, bool) {
 	sandboxID := strings.TrimSpace(c.Param("id"))
 	if sandboxID == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
@@ -572,18 +551,6 @@ func parseSandboxObservabilityQuery(c *gin.Context, auditOnly bool) (sandboxobse
 	if !ok {
 		return sandboxobservability.EventQuery{}, false
 	}
-	if auditOnly {
-		if source != "" && source != sandboxobservability.SourceNetd {
-			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "audit events only support netd source")
-			return sandboxobservability.EventQuery{}, false
-		}
-		if eventType == "" {
-			eventType = sandboxobservability.EventTypeNetworkAudit
-		} else if eventType != sandboxobservability.EventTypeNetworkAudit {
-			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "audit events only support network_audit event_type")
-			return sandboxobservability.EventQuery{}, false
-		}
-	}
 	outcome, ok := parseOptionalOutcomeQuery(c)
 	if !ok {
 		return sandboxobservability.EventQuery{}, false
@@ -599,7 +566,6 @@ func parseSandboxObservabilityQuery(c *gin.Context, auditOnly bool) (sandboxobse
 		Source:    source,
 		EventType: eventType,
 		Outcome:   outcome,
-		AuditOnly: auditOnly,
 	}, true
 }
 

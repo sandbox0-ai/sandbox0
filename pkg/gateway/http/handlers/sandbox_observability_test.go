@@ -19,11 +19,9 @@ import (
 
 type fakeSandboxObservabilityRepo struct {
 	eventsResult        *sandboxobservability.EventListResult
-	auditResult         *sandboxobservability.EventListResult
 	logsResult          *sandboxobservability.LogListResult
 	metricsResult       *sandboxobservability.MetricListResult
 	eventsErr           error
-	auditErr            error
 	logsErr             error
 	metricsErr          error
 	ingestErr           error
@@ -34,7 +32,6 @@ type fakeSandboxObservabilityRepo struct {
 	ingestLogs          []sandboxobservability.LogEntry
 	ingestMetrics       []sandboxobservability.MetricSample
 	eventsCalled        bool
-	auditCalled         bool
 	logsCalled          bool
 	metricsCalled       bool
 	ingestCalled        bool
@@ -46,12 +43,6 @@ func (f *fakeSandboxObservabilityRepo) ListEvents(_ context.Context, query sandb
 	f.eventsCalled = true
 	f.lastQuery = query
 	return f.eventsResult, f.eventsErr
-}
-
-func (f *fakeSandboxObservabilityRepo) ListAuditEvents(_ context.Context, query sandboxobservability.EventQuery) (*sandboxobservability.EventListResult, error) {
-	f.auditCalled = true
-	f.lastQuery = query
-	return f.auditResult, f.auditErr
 }
 
 func (f *fakeSandboxObservabilityRepo) ListLogs(_ context.Context, query sandboxobservability.LogQuery) (*sandboxobservability.LogListResult, error) {
@@ -153,39 +144,6 @@ func TestSandboxObservabilityHandlerParsesTypedQuery(t *testing.T) {
 	}
 }
 
-func TestSandboxObservabilityHandlerAuditEndpointUsesAuditRepositoryMethod(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	repo := &fakeSandboxObservabilityRepo{auditResult: &sandboxobservability.EventListResult{}}
-	handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
-	rec := serveSandboxObservabilityRequest(t, handler.ListAuditEvents, "/api/v1/sandboxes/sb-1/audit/events?event_type=network_audit")
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-	if !repo.auditCalled || repo.eventsCalled {
-		t.Fatalf("calls: events=%v audit=%v", repo.eventsCalled, repo.auditCalled)
-	}
-	if !repo.lastQuery.AuditOnly {
-		t.Fatalf("AuditOnly = false, want true")
-	}
-}
-
-func TestSandboxObservabilityHandlerAuditEndpointDefaultsToNetworkAudit(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	repo := &fakeSandboxObservabilityRepo{auditResult: &sandboxobservability.EventListResult{}}
-	handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
-	rec := serveSandboxObservabilityRequest(t, handler.ListAuditEvents, "/api/v1/sandboxes/sb-1/audit/events")
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-	if !repo.auditCalled || repo.lastQuery.EventType != sandboxobservability.EventTypeNetworkAudit {
-		t.Fatalf("audit query = %+v", repo.lastQuery)
-	}
-}
-
 func TestSandboxObservabilityHandlerParsesLogQuery(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -257,27 +215,6 @@ func TestSandboxObservabilityHandlerParsesMetricQuery(t *testing.T) {
 	for i, want := range wantNames {
 		if repo.lastMetricQuery.Names[i] != want {
 			t.Fatalf("metric names = %+v, want %+v", repo.lastMetricQuery.Names, wantNames)
-		}
-	}
-}
-
-func TestSandboxObservabilityHandlerAuditEndpointRejectsNonAuditFilters(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	tests := []string{
-		"/api/v1/sandboxes/sb-1/audit/events?event_type=lifecycle",
-		"/api/v1/sandboxes/sb-1/audit/events?source=metering",
-	}
-	for _, path := range tests {
-		repo := &fakeSandboxObservabilityRepo{auditResult: &sandboxobservability.EventListResult{}}
-		handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
-		rec := serveSandboxObservabilityRequest(t, handler.ListAuditEvents, path)
-
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("%s status = %d, want %d: %s", path, rec.Code, http.StatusBadRequest, rec.Body.String())
-		}
-		if repo.auditCalled || repo.eventsCalled {
-			t.Fatalf("%s called repository: events=%v audit=%v", path, repo.eventsCalled, repo.auditCalled)
 		}
 	}
 }
@@ -422,7 +359,6 @@ func serveSandboxObservabilityRequest(t *testing.T, h gin.HandlerFunc, target st
 	router.GET("/api/v1/sandboxes/:id/observability/events", withTestAuth(h))
 	router.GET("/api/v1/sandboxes/:id/observability/logs", withTestAuth(h))
 	router.GET("/api/v1/sandboxes/:id/observability/metrics", withTestAuth(h))
-	router.GET("/api/v1/sandboxes/:id/audit/events", withTestAuth(h))
 
 	req := httptest.NewRequest(http.MethodGet, target, nil)
 	rec := httptest.NewRecorder()

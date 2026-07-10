@@ -129,7 +129,7 @@ func TestSetupRoutesMountsMetadataEndpoint(t *testing.T) {
 	}
 }
 
-func TestSetupRoutesDoesNotMountLegacySandboxLogsAndStatsEndpoints(t *testing.T) {
+func TestSetupRoutesDoesNotMountRemovedSandboxEndpoints(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	server, _, _ := testMeteringRouteServer(t, "public")
@@ -141,6 +141,7 @@ func TestSetupRoutesDoesNotMountLegacySandboxLogsAndStatsEndpoints(t *testing.T)
 		"/api/v1/sandboxes/:id/logs",
 		"/api/v1/sandboxes/:id/stats",
 		"/api/v1/sandboxes/:id/contexts/:ctx_id/stats",
+		"/api/v1/sandboxes/:id/audit/events",
 	} {
 		if hasRoute(server.router, "GET", path) {
 			t.Fatalf("expected legacy route %s to be removed", path)
@@ -160,7 +161,6 @@ func TestSetupRoutesMountsSandboxHistoricalObservabilityEndpoints(t *testing.T) 
 		"/api/v1/sandboxes/:id/observability/events",
 		"/api/v1/sandboxes/:id/observability/logs",
 		"/api/v1/sandboxes/:id/observability/metrics",
-		"/api/v1/sandboxes/:id/audit/events",
 	} {
 		if !hasRoute(server.router, "GET", path) {
 			t.Fatalf("expected route %s to be mounted", path)

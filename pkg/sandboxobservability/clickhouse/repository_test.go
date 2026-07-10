@@ -94,7 +94,7 @@ func TestInsertEventsRequiresProducerCursor(t *testing.T) {
 	}
 }
 
-func TestBuildListSQLAppliesTypedFiltersAuditScopeAndCursor(t *testing.T) {
+func TestBuildListSQLAppliesTypedFiltersAndCursor(t *testing.T) {
 	repo, _ := mustRepository(t)
 	start := time.Date(2026, 7, 1, 1, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 7, 1, 2, 0, 0, 0, time.UTC)
@@ -117,8 +117,8 @@ func TestBuildListSQLAppliesTypedFiltersAuditScopeAndCursor(t *testing.T) {
 		Limit:     10,
 		Cursor:    cursorValue,
 		Source:    sandboxobservability.SourceNetd,
+		EventType: sandboxobservability.EventTypeNetworkAudit,
 		Outcome:   sandboxobservability.OutcomeDenied,
-		AuditOnly: true,
 	})
 	if err != nil {
 		t.Fatalf("normalizeQuery() error = %v", err)
@@ -140,26 +140,8 @@ func TestBuildListSQLAppliesTypedFiltersAuditScopeAndCursor(t *testing.T) {
 	if len(args) != 12 {
 		t.Fatalf("args count = %d, want 12: %#v", len(args), args)
 	}
-	if args[6] != string(sandboxobservability.EventTypeNetworkAudit) {
-		t.Fatalf("audit event_type arg = %#v, want network_audit", args[6])
-	}
-}
-
-func TestAuditListSQLExcludesRuntimeStats(t *testing.T) {
-	repo, _ := mustRepository(t)
-	query, limit, cursor, err := normalizeQuery(sandboxobservability.EventQuery{
-		TeamID:    "team-1",
-		SandboxID: "sb-1",
-		EventType: sandboxobservability.EventTypeRuntimeStats,
-		AuditOnly: true,
-	})
-	if err != nil {
-		t.Fatalf("normalizeQuery() error = %v", err)
-	}
-
-	sqlQuery, _ := repo.buildListSQL(query, limit+1, cursor)
-	if !strings.Contains(sqlQuery, "event_type = ?") || !strings.Contains(sqlQuery, "AND 0 = 1") {
-		t.Fatalf("audit runtime_stats query should be impossible:\n%s", sqlQuery)
+	if args[5] != string(sandboxobservability.EventTypeNetworkAudit) {
+		t.Fatalf("event_type arg = %#v, want network_audit", args[5])
 	}
 }
 

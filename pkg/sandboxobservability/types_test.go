@@ -12,9 +12,6 @@ func TestDisabledRepositoryReturnsBackendDisabled(t *testing.T) {
 	if _, err := repo.ListEvents(context.Background(), EventQuery{}); !errors.Is(err, ErrBackendDisabled) {
 		t.Fatalf("ListEvents error = %v, want ErrBackendDisabled", err)
 	}
-	if _, err := repo.ListAuditEvents(context.Background(), EventQuery{}); !errors.Is(err, ErrBackendDisabled) {
-		t.Fatalf("ListAuditEvents error = %v, want ErrBackendDisabled", err)
-	}
 }
 
 func TestFilterValidation(t *testing.T) {

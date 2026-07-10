@@ -76,12 +76,6 @@ func (r *Repository) MetricsRetentionDays() int {
 }
 
 func (r *Repository) ListEvents(ctx context.Context, query sandboxobservability.EventQuery) (*sandboxobservability.EventListResult, error) {
-	query.AuditOnly = false
-	return r.listEvents(ctx, query)
-}
-
-func (r *Repository) ListAuditEvents(ctx context.Context, query sandboxobservability.EventQuery) (*sandboxobservability.EventListResult, error) {
-	query.AuditOnly = true
 	return r.listEvents(ctx, query)
 }
 
@@ -212,14 +206,6 @@ func (r *Repository) buildListSQL(query sandboxobservability.EventQuery, limit i
 	if query.Outcome != "" {
 		builder.WriteString(" AND outcome = ?")
 		args = append(args, string(query.Outcome))
-	}
-	if query.AuditOnly {
-		if query.EventType != "" && query.EventType != sandboxobservability.EventTypeNetworkAudit {
-			builder.WriteString(" AND 0 = 1")
-		} else if query.EventType == "" {
-			builder.WriteString(" AND event_type = ?")
-			args = append(args, string(sandboxobservability.EventTypeNetworkAudit))
-		}
 	}
 	if cursor != nil {
 		builder.WriteString(" AND (occurred_at, ingested_at, source, event_type, cursor) > (?, ?, ?, ?, ?)")

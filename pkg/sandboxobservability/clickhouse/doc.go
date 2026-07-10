@@ -1,5 +1,5 @@
-// Package clickhouse implements the ClickHouse query backend
-// for per-sandbox historical observability and audit events.
+// Package clickhouse implements the ClickHouse query backend for per-sandbox
+// historical observability events, logs, and metric samples.
 //
 // The repository implements sandboxobservability.Repository for typed queries
 // and sandboxobservability.Writer for asynchronous ingest. It is intentionally a

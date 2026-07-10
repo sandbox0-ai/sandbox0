@@ -53,6 +53,8 @@ var (
 	rootFSObjectCacheMinFreeBytes  = "0"
 	rootFSObjectCacheMaxAge        time.Duration
 	rootFSObjectCacheSweepInterval = time.Minute
+	nodeFSShardCount               int
+	nodeFSRequireRecovery          bool
 	podName                        = os.Getenv("POD_NAME")
 	podNamespace                   = os.Getenv("POD_NAMESPACE")
 )
@@ -83,6 +85,8 @@ func main() {
 	flag.StringVar(&rootFSObjectCacheMinFreeBytes, "rootfs-object-cache-min-free-bytes", "0", "minimum free bytes to preserve on the rootfs object cache filesystem")
 	flag.DurationVar(&rootFSObjectCacheMaxAge, "rootfs-object-cache-max-age", 0, "maximum age for node-local rootfs cache objects; 0 disables age-based eviction")
 	flag.DurationVar(&rootFSObjectCacheSweepInterval, "rootfs-object-cache-sweep-interval", time.Minute, "interval for node-local rootfs object cache garbage collection")
+	flag.IntVar(&nodeFSShardCount, "nodefs-shards", 0, "fixed node-wide FUSE shard count; 0 keeps per-portal FUSE mounts")
+	flag.BoolVar(&nodeFSRequireRecovery, "nodefs-require-recovery", false, "require kernel FUSE recovery and resend support for nodefs shards")
 	flag.Parse()
 
 	log.Println("Starting ctld")
@@ -133,16 +137,21 @@ func main() {
 
 	podUIDLister := activePodUIDLister(k8sClient, nodeName)
 	portalManager := ctldportal.NewManager(ctldportal.Config{
-		NodeName:           nodeName,
-		RootDir:            portalRoot,
-		KubeletPodsRoot:    kubeletPodsRoot,
-		Logger:             zapLogger,
-		StorageConfig:      storageCfg,
-		Repository:         repo,
-		PodName:            podName,
-		PodNamespace:       podNamespace,
-		ActivePodUIDLister: podUIDLister,
+		NodeName:              nodeName,
+		RootDir:               portalRoot,
+		KubeletPodsRoot:       kubeletPodsRoot,
+		Logger:                zapLogger,
+		StorageConfig:         storageCfg,
+		Repository:            repo,
+		PodName:               podName,
+		PodNamespace:          podNamespace,
+		ActivePodUIDLister:    podUIDLister,
+		NodeFSShardCount:      nodeFSShardCount,
+		NodeFSRequireRecovery: nodeFSRequireRecovery,
 	})
+	if err := portalManager.Initialize(ctx); err != nil {
+		log.Fatalf("ctld nodefs initialization failed; committed mounts were preserved: %v", err)
+	}
 	cleanupCtx, cleanupCancel := context.WithTimeout(ctx, 30*time.Second)
 	if err := portalManager.CleanupStaleCSIMounts(cleanupCtx); err != nil && cleanupCtx.Err() == nil {
 		log.Printf("ctld stale CSI mount cleanup completed with errors: %v", err)

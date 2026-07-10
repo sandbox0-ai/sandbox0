@@ -65,7 +65,13 @@ func (m *Manager) Initialize(ctx context.Context) error {
 	if m == nil {
 		return fmt.Errorf("portal manager is required")
 	}
-	if m.nodeFSShardCount <= 0 {
+	if m.nodeFSShardCount < 0 || m.nodeFSShardCount > 64 {
+		return fmt.Errorf("nodefs shard count %d is outside [0,64]", m.nodeFSShardCount)
+	}
+	if m.nodeFSShardCount == 0 {
+		if m.nodeFSRequireRecovery {
+			return fmt.Errorf("nodefs recovery requires a positive shard count")
+		}
 		return nil
 	}
 	if ctx == nil {

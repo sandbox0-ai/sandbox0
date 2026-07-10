@@ -105,6 +105,19 @@ func releaseNodeFSTestProcess(t *testing.T, mgr *Manager) {
 	}
 }
 
+func TestNodeFSInitializeRejectsInvalidConfiguration(t *testing.T) {
+	for _, cfg := range []Config{
+		{NodeFSShardCount: -1},
+		{NodeFSShardCount: 65},
+		{NodeFSRequireRecovery: true},
+	} {
+		mgr := NewManager(cfg)
+		if err := mgr.Initialize(context.Background()); err == nil {
+			t.Fatalf("Initialize(%+v) error = nil", cfg)
+		}
+	}
+}
+
 func TestNodeFSInitializePublishAndUnpublishLifecycle(t *testing.T) {
 	rootDir := t.TempDir()
 	mounter := &fakeNodeFSMounter{}

@@ -41,6 +41,8 @@ const (
 	ctldTerminationGraceSeconds    = int64(45)
 	ctldCPURequest                 = "250m"
 	ctldMemoryRequest              = "256Mi"
+	ctldHASlotLabel                = "sandbox0.ai/ctld-ha-slot"
+	ctldHAProbeSocket              = "/run/sandbox0/ctld-ha.sock"
 )
 
 func NewReconciler(resources *common.ResourceManager) *Reconciler {
@@ -53,8 +55,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		logger.Info("Data-plane services are disabled, skipping ctld")
 		return nil
 	}
-
-	const ctldHTTPPort = 8095
 
 	name := fmt.Sprintf("%s-ctld", infra.Name)
 	labels := common.GetServiceLabels(infra.Name, "ctld")
@@ -103,6 +103,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		{Name: "ctld-data", MountPath: "/var/lib/sandbox0/ctld"},
 		{Name: "containerd-sock", MountPath: "/host-run/containerd"},
 		{Name: "containerd-data", MountPath: containerdDataMountPath, ReadOnly: true},
+		{Name: "ha-run", MountPath: "/run/sandbox0"},
 	}
 	volumes := []corev1.Volume{
 		{
@@ -158,6 +159,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 				HostPath: &corev1.HostPathVolumeSource{Path: containerdHostDataRoot},
 			},
 		},
+		{
+			Name:         "ha-run",
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		},
 	}
 	if strings.TrimSpace(config.SandboxObservabilityRuntimeSamplesIngestURL) != "" {
 		keySecretName, privateKeyKey, _ := internalauthsvc.GetDataPlaneKeyRefs(infra)
@@ -203,126 +208,168 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		})
 	}
 
-	desired := &appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: infra.Namespace,
+	if err := r.removeLegacyDaemonSet(ctx, infra, name); err != nil {
+		return err
+	}
+	for _, slot := range []string{"a", "b"} {
+		desired := buildCtldDaemonSet(ctldDaemonSetConfig{
+			Name:                    name,
+			Namespace:               infra.Namespace,
+			Slot:                    slot,
+			Labels:                  labels,
+			PodAnnotations:          podAnnotations,
+			Image:                   image,
+			PullPolicy:              pullPolicy,
+			Args:                    args,
+			NodeSelector:            nodeSelector,
+			Tolerations:             tolerations,
+			TerminationGraceSeconds: terminationGraceSeconds,
+			VolumeMounts:            volumeMounts,
+			Volumes:                 volumes,
+			Infra:                   infra,
+			IncludeRegistrar:        slot == "a",
+		})
+		if err := r.Resources.ApplyDaemonSet(ctx, infra, desired); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type ctldDaemonSetConfig struct {
+	Name                    string
+	Namespace               string
+	Slot                    string
+	Labels                  map[string]string
+	PodAnnotations          map[string]string
+	Image                   string
+	PullPolicy              corev1.PullPolicy
+	Args                    []string
+	NodeSelector            map[string]string
+	Tolerations             []corev1.Toleration
+	TerminationGraceSeconds int64
+	VolumeMounts            []corev1.VolumeMount
+	Volumes                 []corev1.Volume
+	Infra                   *infrav1alpha1.Sandbox0Infra
+	IncludeRegistrar        bool
+}
+
+func buildCtldDaemonSet(cfg ctldDaemonSetConfig) *appsv1.DaemonSet {
+	labels := make(map[string]string, len(cfg.Labels)+1)
+	for key, value := range cfg.Labels {
+		labels[key] = value
+	}
+	labels[ctldHASlotLabel] = cfg.Slot
+	args := append([]string(nil), cfg.Args...)
+	args = append(args,
+		"-ha-enabled=true",
+		"-ha-slot="+cfg.Slot,
+		"-ha-probe-socket="+ctldHAProbeSocket,
+	)
+	probeCommand := func(kind string) []string {
+		return []string{
+			"/usr/local/bin/ctld",
+			"-ha-probe=" + kind,
+			"-ha-probe-socket=" + ctldHAProbeSocket,
+			"-http-addr=:8095",
+		}
+	}
+	ctldContainer := corev1.Container{
+		Name:            "ctld",
+		Image:           cfg.Image,
+		ImagePullPolicy: cfg.PullPolicy,
+		Args:            args,
+		Env: common.AppendObservabilityEnvVars([]corev1.EnvVar{
+			{Name: "SERVICE", Value: "ctld"},
+			{Name: "CONFIG_PATH", Value: "/config/config.yaml"},
+			{Name: "CTLD_HA_SLOT", Value: cfg.Slot},
+			{Name: "NODE_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"}}},
+			{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
+			{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}}},
+		}, cfg.Infra, common.ObservabilityEnvConfig{
+			ServiceName: "ctld",
+			RegionID:    common.ResolveRegionID(cfg.Infra),
+			ClusterID:   common.ResolveClusterID(cfg.Infra),
+		}),
+		LivenessProbe: &corev1.Probe{
+			ProbeHandler:        corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: probeCommand("live")}},
+			InitialDelaySeconds: 5,
+			PeriodSeconds:       10,
+			TimeoutSeconds:      ctldProbeTimeoutSeconds,
+			FailureThreshold:    ctldProbeFailureThreshold,
 		},
-		Spec: appsv1.DaemonSetSpec{
-			Selector: &metav1.LabelSelector{
-				MatchLabels: labels,
+		ReadinessProbe: &corev1.Probe{
+			ProbeHandler:        corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: probeCommand("ready")}},
+			InitialDelaySeconds: 2,
+			PeriodSeconds:       5,
+			TimeoutSeconds:      ctldProbeTimeoutSeconds,
+			FailureThreshold:    ctldProbeFailureThreshold,
+		},
+		SecurityContext: &corev1.SecurityContext{Privileged: common.BoolPtr(true)},
+		Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse(ctldCPURequest),
+			corev1.ResourceMemory: resource.MustParse(ctldMemoryRequest),
+		}},
+		VolumeMounts: cfg.VolumeMounts,
+	}
+	containers := []corev1.Container{ctldContainer}
+	if cfg.IncludeRegistrar {
+		containers = append(containers, corev1.Container{
+			Name:            "csi-node-driver-registrar",
+			Image:           "registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0",
+			ImagePullPolicy: corev1.PullIfNotPresent,
+			Args: []string{
+				"--csi-address=/csi/csi.sock",
+				"--kubelet-registration-path=/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock",
 			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels:      labels,
-					Annotations: common.EnsurePodTemplateAnnotations(podAnnotations),
+			VolumeMounts: []corev1.VolumeMount{
+				{Name: "csi-plugin", MountPath: "/csi"},
+				{Name: "plugin-registration", MountPath: "/registration"},
+			},
+		})
+	}
+	maxUnavailable := intstr.FromInt(0)
+	maxSurge := intstr.FromInt(1)
+	return &appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{Name: cfg.Name + "-" + cfg.Slot, Namespace: cfg.Namespace},
+		Spec: appsv1.DaemonSetSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: labels},
+			UpdateStrategy: appsv1.DaemonSetUpdateStrategy{
+				Type: appsv1.RollingUpdateDaemonSetStrategyType,
+				RollingUpdate: &appsv1.RollingUpdateDaemonSet{
+					MaxUnavailable: &maxUnavailable,
+					MaxSurge:       &maxSurge,
 				},
+			},
+			MinReadySeconds: 2,
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: common.EnsurePodTemplateAnnotations(cfg.PodAnnotations)},
 				Spec: corev1.PodSpec{
 					HostPID:                       true,
-					ServiceAccountName:            name,
-					NodeSelector:                  nodeSelector,
-					Tolerations:                   tolerations,
+					ServiceAccountName:            cfg.Name,
+					NodeSelector:                  cfg.NodeSelector,
+					Tolerations:                   cfg.Tolerations,
 					HostNetwork:                   true,
 					DNSPolicy:                     corev1.DNSClusterFirstWithHostNet,
-					TerminationGracePeriodSeconds: &terminationGraceSeconds,
-					Containers: []corev1.Container{
-						{
-							Name:            "ctld",
-							Image:           image,
-							ImagePullPolicy: pullPolicy,
-							Args:            args,
-							Env: common.AppendObservabilityEnvVars([]corev1.EnvVar{
-								{
-									Name:  "SERVICE",
-									Value: "ctld",
-								},
-								{
-									Name:  "CONFIG_PATH",
-									Value: "/config/config.yaml",
-								},
-								{
-									Name: "NODE_NAME",
-									ValueFrom: &corev1.EnvVarSource{
-										FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"},
-									},
-								},
-								{
-									Name: "POD_NAME",
-									ValueFrom: &corev1.EnvVarSource{
-										FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
-									},
-								},
-								{
-									Name: "POD_NAMESPACE",
-									ValueFrom: &corev1.EnvVarSource{
-										FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
-									},
-								},
-							}, infra, common.ObservabilityEnvConfig{
-								ServiceName: "ctld",
-								RegionID:    common.ResolveRegionID(infra),
-								ClusterID:   common.ResolveClusterID(infra),
-							}),
-							Ports: []corev1.ContainerPort{{
-								Name:          "http",
-								ContainerPort: ctldHTTPPort,
-							}},
-							LivenessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromString("http")},
-								},
-								InitialDelaySeconds: 5,
-								PeriodSeconds:       10,
-								TimeoutSeconds:      ctldProbeTimeoutSeconds,
-								FailureThreshold:    ctldProbeFailureThreshold,
-							},
-							ReadinessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									HTTPGet: &corev1.HTTPGetAction{Path: "/readyz", Port: intstr.FromString("http")},
-								},
-								InitialDelaySeconds: 2,
-								PeriodSeconds:       5,
-								TimeoutSeconds:      ctldProbeTimeoutSeconds,
-								FailureThreshold:    ctldProbeFailureThreshold,
-							},
-							SecurityContext: &corev1.SecurityContext{
-								Privileged: common.BoolPtr(true),
-							},
-							Resources: corev1.ResourceRequirements{
-								Requests: corev1.ResourceList{
-									corev1.ResourceCPU:    resource.MustParse(ctldCPURequest),
-									corev1.ResourceMemory: resource.MustParse(ctldMemoryRequest),
-								},
-							},
-							VolumeMounts: volumeMounts,
-						},
-						{
-							Name:            "csi-node-driver-registrar",
-							Image:           "registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0",
-							ImagePullPolicy: corev1.PullIfNotPresent,
-							Args: []string{
-								"--csi-address=/csi/csi.sock",
-								"--kubelet-registration-path=/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock",
-							},
-							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      "csi-plugin",
-									MountPath: "/csi",
-								},
-								{
-									Name:      "plugin-registration",
-									MountPath: "/registration",
-								},
-							},
-						},
-					},
-					Volumes: volumes,
+					TerminationGracePeriodSeconds: &cfg.TerminationGraceSeconds,
+					Containers:                    containers,
+					Volumes:                       cfg.Volumes,
 				},
 			},
 		},
 	}
+}
 
-	return r.Resources.ApplyDaemonSet(ctx, infra, desired)
+func (r *Reconciler) removeLegacyDaemonSet(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string) error {
+	legacy := &appsv1.DaemonSet{}
+	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, legacy)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return r.Resources.Client.Delete(ctx, legacy)
 }
 
 func ctldArgs(infra *infrav1alpha1.Sandbox0Infra, containerdHostDataRoot string) []string {

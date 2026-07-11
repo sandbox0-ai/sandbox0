@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hanwen/go-fuse/v2/fuse"
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -14,6 +15,13 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 )
+
+func TestPortalMountOptionsDisableUnsupportedIDMapCapability(t *testing.T) {
+	opts := portalMountOptions()
+	if opts.DisabledCapabilities&fuse.CAP_ALLOW_IDMAP == 0 {
+		t.Fatal("portal mount options enable FUSE_ALLOW_IDMAP without default_permissions")
+	}
+}
 
 func TestNewManagerConfiguresLocalDiskGuard(t *testing.T) {
 	mgr := NewManager(Config{

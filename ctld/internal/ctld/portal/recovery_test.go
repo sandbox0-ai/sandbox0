@@ -215,3 +215,32 @@ func TestIsSandboxCSIMountPathRequiresExactKubeletShape(t *testing.T) {
 		}
 	}
 }
+
+func TestRestorePortalRetainsChannelWhenBackendRecoveryFails(t *testing.T) {
+	root := t.TempDir()
+	mgr := NewManager(Config{RootDir: root})
+	channel, err := os.CreateTemp(t.TempDir(), "fuse-channel-*")
+	if err != nil {
+		t.Fatalf("CreateTemp(channel) error = %v", err)
+	}
+	defer channel.Close()
+	manifest := RecoveryManifest{
+		Version:           portalRecoveryVersion,
+		Key:               "pod-a/workspace",
+		PodUID:            "pod-a",
+		Name:              "workspace",
+		TargetPath:        filepath.Join(root, "target"),
+		RootFSBackingPath: filepath.Join(root, "rootfs"),
+		RootFSStatePath:   filepath.Join(root, "rootfs-state.jsonl"),
+		VolumeID:          "volume-a",
+		TeamID:            "team-a",
+		InitRequest:       []byte{1},
+	}
+
+	if err := mgr.RestorePortal(context.Background(), manifest, channel); err == nil {
+		t.Fatal("RestorePortal() error = nil, want unavailable registry error")
+	}
+	if _, err := channel.Stat(); err != nil {
+		t.Fatalf("RestorePortal() closed caller channel on retryable error: %v", err)
+	}
+}

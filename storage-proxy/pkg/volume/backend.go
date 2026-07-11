@@ -30,6 +30,13 @@ type StorageObserver interface {
 	ObserveVolumeState(ctx context.Context, volumeID, teamID string, state *s0fs.SnapshotState, observedAt time.Time) error
 }
 
+type HandleState struct {
+	NextHandleID  uint64            `json:"next_handle_id"`
+	FileHandles   map[uint64]uint64 `json:"file_handles,omitempty"`
+	DirHandles    map[uint64]uint64 `json:"dir_handles,omitempty"`
+	UnlinkedFiles []uint64          `json:"unlinked_files,omitempty"`
+}
+
 // BackendMountRequest is the storage-engine input for mounting a volume.
 type BackendMountRequest struct {
 	S3Prefix        string
@@ -142,4 +149,50 @@ func (v *VolumeContext) HandleInode(handleID uint64) (uint64, bool) {
 	defer v.handleMu.Unlock()
 	inode, ok := v.fileHandles[handleID]
 	return inode, ok
+}
+
+func (v *VolumeContext) SnapshotHandleState() HandleState {
+	if v == nil {
+		return HandleState{}
+	}
+	v.handleMu.Lock()
+	defer v.handleMu.Unlock()
+	state := HandleState{
+		NextHandleID: v.nextHandleID,
+		FileHandles:  make(map[uint64]uint64, len(v.fileHandles)),
+		DirHandles:   make(map[uint64]uint64, len(v.dirHandleIDs)),
+	}
+	for handle, inode := range v.fileHandles {
+		state.FileHandles[handle] = inode
+	}
+	for handle, inode := range v.dirHandleIDs {
+		state.DirHandles[handle] = inode
+	}
+	for inode := range v.unlinkedFiles {
+		state.UnlinkedFiles = append(state.UnlinkedFiles, inode)
+	}
+	return state
+}
+
+func (v *VolumeContext) RestoreHandleState(state HandleState) {
+	if v == nil {
+		return
+	}
+	v.handleMu.Lock()
+	defer v.handleMu.Unlock()
+	v.nextHandleID = state.NextHandleID
+	v.fileHandles = make(map[uint64]uint64, len(state.FileHandles))
+	v.dirHandleIDs = make(map[uint64]uint64, len(state.DirHandles))
+	v.openFileCount = make(map[uint64]int)
+	v.unlinkedFiles = make(map[uint64]struct{}, len(state.UnlinkedFiles))
+	for handle, inode := range state.FileHandles {
+		v.fileHandles[handle] = inode
+		v.openFileCount[inode]++
+	}
+	for handle, inode := range state.DirHandles {
+		v.dirHandleIDs[handle] = inode
+	}
+	for _, inode := range state.UnlinkedFiles {
+		v.unlinkedFiles[inode] = struct{}{}
+	}
 }

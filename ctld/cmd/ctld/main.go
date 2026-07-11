@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	ctldha "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/ha"
 	ctldportal "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal"
 	ctldpower "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/power"
 	ctldrootfs "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/rootfs"
@@ -55,6 +57,10 @@ var (
 	rootFSObjectCacheSweepInterval = time.Minute
 	podName                        = os.Getenv("POD_NAME")
 	podNamespace                   = os.Getenv("POD_NAMESPACE")
+	haEnabled                      bool
+	haSlot                         = os.Getenv("CTLD_HA_SLOT")
+	haProbe                        string
+	haProbeSocket                  = "/run/sandbox0/ctld-ha.sock"
 )
 
 const (
@@ -83,12 +89,70 @@ func main() {
 	flag.StringVar(&rootFSObjectCacheMinFreeBytes, "rootfs-object-cache-min-free-bytes", "0", "minimum free bytes to preserve on the rootfs object cache filesystem")
 	flag.DurationVar(&rootFSObjectCacheMaxAge, "rootfs-object-cache-max-age", 0, "maximum age for node-local rootfs cache objects; 0 disables age-based eviction")
 	flag.DurationVar(&rootFSObjectCacheSweepInterval, "rootfs-object-cache-sweep-interval", time.Minute, "interval for node-local rootfs object cache garbage collection")
+	flag.BoolVar(&haEnabled, "ha-enabled", false, "enable node-local primary/standby ctld coordination")
+	flag.StringVar(&haSlot, "ha-slot", os.Getenv("CTLD_HA_SLOT"), "stable ctld HA deployment slot")
+	flag.StringVar(&haProbe, "ha-probe", "", "run one ctld HA probe (live or ready) and exit")
+	flag.StringVar(&haProbeSocket, "ha-probe-socket", "/run/sandbox0/ctld-ha.sock", "container-local ctld HA probe socket")
 	flag.Parse()
 
 	log.Println("Starting ctld")
 	defer func() { log.Println("Stopped ctld") }()
+	if err := run(); err != nil {
+		log.Fatalf("ctld stopped with error: %v", err)
+	}
+}
 
-	ctx, cancel := context.WithCancel(context.Background())
+func run() error {
+	if haProbe != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		return ctldha.RunProbe(ctx, haProbeSocket, haProbe, httpAddr)
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+	defer cancel()
+	if !haEnabled {
+		return runPrimary(ctx, primaryRunOptions{})
+	}
+	coordinator, err := ctldha.NewCoordinator(ctldha.Config{RootDir: portalRoot, Slot: haSlot})
+	if err != nil {
+		return err
+	}
+	probeServer, err := ctldha.StartProbeServer(ctx, haProbeSocket, coordinator)
+	if err != nil {
+		return err
+	}
+	defer probeServer.Close()
+	lease, err := coordinator.WaitForPrimary(ctx)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		return err
+	}
+	defer lease.Close()
+	ownerID := ""
+	if strings.TrimSpace(nodeName) != "" {
+		ownerID = "ctld-node/" + strings.TrimSpace(nodeName)
+	}
+	return runPrimary(ctx, primaryRunOptions{
+		replicator:     lease.Replicator,
+		requireStandby: true,
+		ownerID:        ownerID,
+		recovery:       lease.Recovery,
+		setReady:       probeServer.SetServiceReady,
+	})
+}
+
+type primaryRunOptions struct {
+	replicator     *ctldha.Replicator
+	requireStandby bool
+	ownerID        string
+	recovery       []ctldha.RecoveredPortal
+	setReady       func(bool)
+}
+
+func runPrimary(parent context.Context, options primaryRunOptions) error {
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
 	zapLogger, err := observability.NewLogger(observability.LoggerConfig{
@@ -141,8 +205,34 @@ func main() {
 		Repository:         repo,
 		PodName:            podName,
 		PodNamespace:       podNamespace,
+		OwnerID:            options.ownerID,
 		ActivePodUIDLister: podUIDLister,
+		Replicator:         options.replicator,
+		RequireStandby:     options.requireStandby,
 	})
+	for i := range options.recovery {
+		recovered := &options.recovery[i]
+		for {
+			err := portalManager.RestorePortal(ctx, recovered.Manifest, recovered.Channel)
+			if err == nil {
+				recovered.Channel = nil
+				break
+			}
+			log.Printf("ctld portal %q recovery failed; retrying: %v", recovered.Manifest.Key, err)
+			timer := time.NewTimer(time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil
+			case <-timer.C:
+			}
+		}
+	}
+	if options.replicator != nil {
+		options.replicator.SetSnapshotProvider(func(ctx context.Context, target ctldportal.PortalReplicator) error {
+			return portalManager.SyncTo(ctx, target)
+		})
+	}
 	cleanupCtx, cleanupCancel := context.WithTimeout(ctx, 30*time.Second)
 	if err := portalManager.CleanupStaleCSIMounts(cleanupCtx); err != nil && cleanupCtx.Err() == nil {
 		log.Printf("ctld stale CSI mount cleanup completed with errors: %v", err)
@@ -150,9 +240,10 @@ func main() {
 	cleanupCancel()
 	go portalManager.Run(ctx)
 	csiServer := ctldportal.NewCSIServer(nodeName, portalManager)
+	serviceErrors := make(chan error, 2)
 	go func() {
 		if err := csiServer.Serve(csiSocket); err != nil && ctx.Err() == nil {
-			log.Fatalf("ctld volume portal CSI server failed: %v", err)
+			serviceErrors <- fmt.Errorf("ctld volume portal CSI server: %w", err)
 		}
 	}()
 	defer csiServer.Stop()
@@ -171,16 +262,39 @@ func main() {
 		httpServer.Handler = httpobs.ServerMiddleware(obsProvider.HTTPServerConfig(zapLogger))(httpServer.Handler)
 		httpServer.ConnState = httpobs.NewConnStateTracker(obsProvider.HTTPServerConfig(nil)).Wrap(httpServer.ConnState)
 	}
+	httpListener, err := net.Listen("tcp", httpAddr)
+	if err != nil {
+		return fmt.Errorf("listen for ctld HTTP server: %w", err)
+	}
 	go func() {
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("ctld http server failed: %v", err)
+		if err := httpServer.Serve(httpListener); err != nil && !errors.Is(err, http.ErrServerClosed) && ctx.Err() == nil {
+			serviceErrors <- fmt.Errorf("ctld HTTP server: %w", err)
 		}
 	}()
 
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-	s := <-sigs
-	log.Printf("Received signal \"%v\", shutting down.", s)
+	if options.setReady != nil {
+		options.setReady(portalManager.RecoveryError() == nil)
+		defer options.setReady(false)
+		go func() {
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					options.setReady(portalManager.RecoveryError() == nil)
+				}
+			}
+		}()
+	}
+	var runErr error
+	select {
+	case <-parent.Done():
+		log.Printf("ctld primary shutting down: %v", parent.Err())
+	case runErr = <-serviceErrors:
+		log.Printf("ctld primary service failed: %v", runErr)
+	}
 	cancel()
 	httpShutdownCtx, httpShutdownCancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
 	_ = httpServer.Shutdown(httpShutdownCtx)
@@ -196,6 +310,7 @@ func main() {
 		log.Printf("ctld volume portal shutdown completed with errors: %v", err)
 	}
 	portalShutdownCancel()
+	return runErr
 }
 
 func newHTTPServer(addr string, controller ctldserver.Controller) *http.Server {

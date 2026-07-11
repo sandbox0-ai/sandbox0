@@ -824,6 +824,9 @@ func (c *Coordinator) runCleanup(ctx context.Context) {
 				var orphaned int64
 				seenPods := make(map[string]struct{}, len(mounts))
 				for _, mount := range mounts {
+					if !mountOwnerUsesPodLiveness(mount) {
+						continue
+					}
 					podKey := mount.ClusterID + "/" + mount.PodID
 					if _, ok := seenPods[podKey]; ok {
 						continue
@@ -857,6 +860,14 @@ func (c *Coordinator) runCleanup(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func mountOwnerUsesPodLiveness(mount *db.VolumeMount) bool {
+	if mount == nil {
+		return false
+	}
+	opts := volume.DecodeMountOptions(mount.MountOptions)
+	return opts.OwnerKind != volume.OwnerKindCtld
 }
 
 func (c *Coordinator) podExists(ctx context.Context, podID string) bool {

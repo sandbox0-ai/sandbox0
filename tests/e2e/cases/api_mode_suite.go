@@ -2407,7 +2407,9 @@ func assertObjectEncryptionLifecycle(env *framework.ScenarioEnv, session *e2euti
 	Expect(privateKey).To(ContainSubstring("BEGIN"))
 
 	assertWorkloadConfigMapContains(env, "deployment", env.Infra.Name+"-storage-proxy", "object_encryption_enabled: true")
-	assertWorkloadConfigMapContains(env, "daemonset", env.Infra.Name+"-ctld", "object_encryption_enabled: true")
+	for _, slot := range []string{"a", "b"} {
+		assertWorkloadConfigMapContains(env, "daemonset", env.Infra.Name+"-ctld-"+slot, "object_encryption_enabled: true")
+	}
 
 	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{})
 	Expect(err).NotTo(HaveOccurred())

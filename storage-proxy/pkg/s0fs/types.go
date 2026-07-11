@@ -27,6 +27,7 @@ type Config struct {
 	SegmentTargetSize    uint64
 	WALSyncHook          func()
 	LocalDiskGuard       *LocalDiskGuard
+	RetainUnlinked       bool
 }
 
 type ObjectStoreResolver func(volumeID string) (objectstore.Store, error)

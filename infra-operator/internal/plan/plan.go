@@ -802,6 +802,8 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 	if !compiled.Components.EnableCtld {
 		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
 			namespacedRef("DaemonSet", infra.Namespace, fmt.Sprintf("%s-ctld", infra.Name)),
+			namespacedRef("DaemonSet", infra.Namespace, fmt.Sprintf("%s-ctld-a", infra.Name)),
+			namespacedRef("DaemonSet", infra.Namespace, fmt.Sprintf("%s-ctld-b", infra.Name)),
 			namespacedRef("ServiceAccount", infra.Namespace, fmt.Sprintf("%s-ctld", infra.Name)),
 		)
 		cleanup.DeleteClusterScoped = append(cleanup.DeleteClusterScoped,

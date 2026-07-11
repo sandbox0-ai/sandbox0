@@ -60,7 +60,6 @@ func TestS0FSFileLifecycle(t *testing.T) {
 
 	readResp, err := server.Read(ctx, &pb.ReadRequest{
 		VolumeId: "vol-1",
-		Inode:    createResp.Inode,
 		Offset:   0,
 		Size:     16,
 		HandleId: createResp.HandleId,
@@ -623,6 +622,25 @@ func TestS0FSUnlinkAfterOpenUntilRelease(t *testing.T) {
 	}
 	if !bytes.Equal(readResp.Data, []byte("payload")) {
 		t.Fatalf("Read() on unlinked open file = %q, want payload", readResp.Data)
+	}
+	if _, err := server.Write(ctx, &pb.WriteRequest{
+		VolumeId: "vol-1",
+		Offset:   int64(len("payload")),
+		Data:     []byte("-after"),
+		HandleId: createResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Write() on unlinked open file error = %v", err)
+	}
+	readResp, err = server.Read(ctx, &pb.ReadRequest{
+		VolumeId: "vol-1",
+		Size:     32,
+		HandleId: createResp.HandleId,
+	})
+	if err != nil {
+		t.Fatalf("Read() after handle-only write error = %v", err)
+	}
+	if !bytes.Equal(readResp.Data, []byte("payload-after")) {
+		t.Fatalf("Read() after handle-only write = %q, want payload-after", readResp.Data)
 	}
 	if _, err := server.Release(ctx, &pb.ReleaseRequest{
 		VolumeId: "vol-1",

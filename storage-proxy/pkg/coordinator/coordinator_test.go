@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -585,6 +586,28 @@ func TestPodExists(t *testing.T) {
 	}
 	if coord.podExists(ctx, "ns-1/missing") {
 		t.Fatalf("expected missing pod to return false")
+	}
+}
+
+func TestMountOwnerUsesPodLiveness(t *testing.T) {
+	ctldOptions := json.RawMessage(`{"owner_kind":"ctld"}`)
+	storageProxyOptions := json.RawMessage(`{"owner_kind":"storage-proxy"}`)
+	tests := []struct {
+		name  string
+		mount *db.VolumeMount
+		want  bool
+	}{
+		{name: "nil", want: false},
+		{name: "legacy", mount: &db.VolumeMount{}, want: true},
+		{name: "storage proxy", mount: &db.VolumeMount{MountOptions: &storageProxyOptions}, want: true},
+		{name: "ctld", mount: &db.VolumeMount{MountOptions: &ctldOptions}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := mountOwnerUsesPodLiveness(test.mount); got != test.want {
+				t.Fatalf("mountOwnerUsesPodLiveness() = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 

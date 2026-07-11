@@ -161,6 +161,7 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 		t.Fatalf("expected ctld config, csi, kubelet, data, containerd socket, and containerd data mounts, got %#v", ds.Spec.Template.Spec.Containers[0].VolumeMounts)
 	}
 	assertContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "containerd-data", "/host-var-lib/containerd")
+	assertBidirectionalVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "ctld-data")
 	driver := &storagev1.CSIDriver{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: "volume.sandbox0.ai"}, driver); err != nil {
 		t.Fatalf("expected csi driver to be created: %v", err)
@@ -170,6 +171,20 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 	}
 
 	return ds, client
+}
+
+func assertBidirectionalVolumeMount(t *testing.T, mounts []corev1.VolumeMount, name string) {
+	t.Helper()
+	for _, mount := range mounts {
+		if mount.Name != name {
+			continue
+		}
+		if mount.MountPropagation == nil || *mount.MountPropagation != corev1.MountPropagationBidirectional {
+			t.Fatalf("expected %s mount propagation to be Bidirectional, got %#v", name, mount.MountPropagation)
+		}
+		return
+	}
+	t.Fatalf("expected volume mount %s", name)
 }
 
 func TestCtldArgsEnableRecoverableNodeFS(t *testing.T) {

@@ -138,9 +138,6 @@ func startNodeFSConnection(
 	if journal == nil || fs == nil || factory == nil {
 		return nil, false, fmt.Errorf("nodefs connection dependencies are required")
 	}
-	if err := os.MkdirAll(shard.MountPath, 0o700); err != nil {
-		return nil, false, fmt.Errorf("create nodefs shard mount path: %w", err)
-	}
 	opts := nodeFSMountOptions(shard, journalState.RecoveryRequired)
 
 	if len(shard.SessionState) > 0 && journalState.RecoveryRequired {
@@ -185,6 +182,14 @@ func startNodeFSConnection(
 	}
 	if err := factory.CleanMount(shard.MountPath); err != nil {
 		return nil, false, err
+	}
+	// A recoverable shard path may itself be a FUSE mount whose userspace
+	// server has not been reattached yet. Do not stat or create it before the
+	// recovery attempt above; path resolution would block in the disconnected
+	// filesystem. New connections only reach this point after stale mounts are
+	// detached.
+	if err := os.MkdirAll(shard.MountPath, 0o700); err != nil {
+		return nil, false, fmt.Errorf("create nodefs shard mount path: %w", err)
 	}
 
 	server, err := factory.New(fs, shard.MountPath, opts)
@@ -235,7 +240,12 @@ func resumeNodeFSConnection(shard nodeFSShardState, fs fuse.RawFileSystem, opts 
 	if err != nil {
 		return nil, err
 	}
-	server, err := factory.Resume(fs, shard.MountPath, fd, state, opts)
+	// The propagated shard mount already anchors the recovered superblock in
+	// the node mount namespace. Passing its path to go-fuse would make
+	// WaitMount issue a fresh poll request before recovered requests are
+	// drained, which can deadlock recovery. The shard path remains available to
+	// ctld for subsequent portal bind mounts; go-fuse does not need it here.
+	server, err := factory.Resume(fs, "", fd, state, opts)
 	if err != nil {
 		return nil, fmt.Errorf("resume nodefs shard %d server: %w", shard.Index, err)
 	}

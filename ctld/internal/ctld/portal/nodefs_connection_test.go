@@ -3,6 +3,7 @@ package portal
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"sync"
 	"testing"
 
@@ -63,6 +64,7 @@ type fakeNodeFSConnectionFactory struct {
 	cleanCalls      int
 	recoverErr      error
 	lastOptions     *fuse.MountOptions
+	resumeMountPath string
 }
 
 type recoveryDrainRawFS struct {
@@ -81,9 +83,10 @@ func (f *fakeNodeFSConnectionFactory) New(_ fuse.RawFileSystem, _ string, opts *
 	return f.newServer, nil
 }
 
-func (f *fakeNodeFSConnectionFactory) Resume(_ fuse.RawFileSystem, _ string, _ int, _ fuse.ConnectionState, opts *fuse.MountOptions) (nodeFUSEServer, error) {
+func (f *fakeNodeFSConnectionFactory) Resume(_ fuse.RawFileSystem, mountPath string, _ int, _ fuse.ConnectionState, opts *fuse.MountOptions) (nodeFUSEServer, error) {
 	f.resumeCalls++
 	f.lastOptions = opts
+	f.resumeMountPath = mountPath
 	return f.resumeServer, nil
 }
 
@@ -159,6 +162,9 @@ func TestStartNodeFSConnectionResumesCommittedConnection(t *testing.T) {
 	}
 	state = store.Snapshot()
 	shard = state.Shards[0]
+	if err := os.RemoveAll(shard.MountPath); err != nil {
+		t.Fatal(err)
+	}
 	server := newFakeNodeFUSEServer(recoveryConnectionState())
 	factory := &fakeNodeFSConnectionFactory{resumeServer: server}
 
@@ -168,6 +174,12 @@ func TestStartNodeFSConnectionResumesCommittedConnection(t *testing.T) {
 	}
 	if !recovered || !server.didServe() || factory.recoverCalls != 1 || factory.resumeCalls != 1 || factory.newCalls != 0 || factory.cleanCalls != 0 {
 		t.Fatalf("recovered=%v server=%+v factory=%+v", recovered, server, factory)
+	}
+	if factory.resumeMountPath != "" {
+		t.Fatalf("resume mount path = %q, want empty to avoid pre-drain polling", factory.resumeMountPath)
+	}
+	if _, err := os.Stat(shard.MountPath); !os.IsNotExist(err) {
+		t.Fatalf("recovery touched disconnected mount path: stat error = %v", err)
 	}
 }
 

@@ -100,7 +100,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		{Name: "config", MountPath: "/config/config.yaml", SubPath: "config.yaml", ReadOnly: true},
 		{Name: "csi-plugin", MountPath: "/csi"},
 		{Name: "kubelet", MountPath: "/var/lib/kubelet", MountPropagation: &bidirectional},
-		{Name: "ctld-data", MountPath: "/var/lib/sandbox0/ctld"},
+		{Name: "ctld-data", MountPath: "/var/lib/sandbox0/ctld", MountPropagation: &bidirectional},
 		{Name: "containerd-sock", MountPath: "/host-run/containerd"},
 		{Name: "containerd-data", MountPath: containerdDataMountPath, ReadOnly: true},
 	}

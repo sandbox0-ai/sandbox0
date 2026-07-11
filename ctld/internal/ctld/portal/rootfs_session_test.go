@@ -145,14 +145,14 @@ func TestRootFSBackedSessionRestoresOpenUnlinkedHandle(t *testing.T) {
 	if _, err := second.Lookup(ctx, &pb.LookupRequest{Parent: s0fs.RootInode, Name: "transient.txt"}); fserror.CodeOf(err) != fserror.NotFound {
 		t.Fatalf("Lookup(unlinked path) error = %v, want not found", err)
 	}
-	read, err := second.Read(ctx, &pb.ReadRequest{Inode: created.Inode, HandleId: created.HandleId, Size: 64})
+	read, err := second.Read(ctx, &pb.ReadRequest{HandleId: created.HandleId, Size: 64})
 	if err != nil {
 		t.Fatalf("Read(restored handle) error = %v", err)
 	}
 	if string(read.Data) != "before" {
 		t.Fatalf("Read(restored handle) = %q, want before", string(read.Data))
 	}
-	if _, err := second.Write(ctx, &pb.WriteRequest{Inode: created.Inode, HandleId: created.HandleId, Offset: int64(len("before")), Data: []byte("-after")}); err != nil {
+	if _, err := second.Write(ctx, &pb.WriteRequest{HandleId: created.HandleId, Offset: int64(len("before")), Data: []byte("-after")}); err != nil {
 		t.Fatalf("Write(restored handle) error = %v", err)
 	}
 	if _, err := second.Release(ctx, &pb.ReleaseRequest{Inode: created.Inode, HandleId: created.HandleId}); err != nil {

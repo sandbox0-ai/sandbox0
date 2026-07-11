@@ -790,6 +790,9 @@ func (s *rootFSBackedSession) handleForRead(inode, handleID uint64) (*os.File, f
 	if handle := s.lookupHandle(handleID); handle != nil {
 		return handle, func() {}, nil
 	}
+	if recoveredInode := s.inodeForHandle(handleID); recoveredInode != 0 {
+		inode = recoveredInode
+	}
 	rel, err := s.relForInode(inode)
 	if err != nil {
 		return nil, nil, err
@@ -804,6 +807,9 @@ func (s *rootFSBackedSession) handleForRead(inode, handleID uint64) (*os.File, f
 func (s *rootFSBackedSession) handleForWrite(inode, handleID uint64) (*os.File, func(), error) {
 	if handle := s.lookupHandle(handleID); handle != nil {
 		return handle, func() {}, nil
+	}
+	if recoveredInode := s.inodeForHandle(handleID); recoveredInode != 0 {
+		inode = recoveredInode
 	}
 	rel, err := s.relForInode(inode)
 	if err != nil {

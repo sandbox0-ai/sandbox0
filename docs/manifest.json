@@ -111,6 +111,10 @@
           "title": "Use Cases"
         },
         {
+          "slug": "coding-agents",
+          "title": "Coding Agents"
+        },
+        {
           "slug": "openclaw",
           "title": "Hosting OpenClaw"
         },

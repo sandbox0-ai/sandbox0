@@ -72,6 +72,58 @@ func TestBuildBuiltinTemplateSpecDoesNotAddDefaultRuntimeShapeToGenericPreset(t 
 	}
 }
 
+func TestBuildBuiltinTemplateSpecUsesCodingAgentPreset(t *testing.T) {
+	t.Parallel()
+
+	spec := BuildBuiltinTemplateSpec(template.CodingAgentTemplateID, infrav1alpha1.BuiltinTemplateConfig{})
+
+	if spec.DisplayName != template.CodingAgentTemplateDisplayName {
+		t.Fatalf("DisplayName = %q, want %q", spec.DisplayName, template.CodingAgentTemplateDisplayName)
+	}
+	if spec.MainContainer.Image != template.CodingAgentTemplateImage {
+		t.Fatalf("image = %q, want %q", spec.MainContainer.Image, template.CodingAgentTemplateImage)
+	}
+	if spec.MainContainer.Resources.CPU.Cmp(resource.MustParse(template.CodingAgentCPU)) != 0 {
+		t.Fatalf("cpu = %s, want %s", spec.MainContainer.Resources.CPU.String(), template.CodingAgentCPU)
+	}
+	if spec.MainContainer.Resources.Memory.Cmp(resource.MustParse(template.CodingAgentMemory)) != 0 {
+		t.Fatalf("memory = %s, want %s", spec.MainContainer.Resources.Memory.String(), template.CodingAgentMemory)
+	}
+	if spec.MainContainer.Resources.EphemeralStorage.Cmp(resource.MustParse(template.CodingAgentEphemeralStorage)) != 0 {
+		t.Fatalf("ephemeralStorage = %s, want %s", spec.MainContainer.Resources.EphemeralStorage.String(), template.CodingAgentEphemeralStorage)
+	}
+	if len(spec.VolumeMounts) != 1 {
+		t.Fatalf("volumeMounts = %#v, want one workspace mount", spec.VolumeMounts)
+	}
+	if spec.VolumeMounts[0].Name != template.DefaultTemplateWorkspaceName || spec.VolumeMounts[0].MountPath != template.DefaultTemplateWorkspaceMount {
+		t.Fatalf("volumeMounts[0] = %#v, want workspace mount", spec.VolumeMounts[0])
+	}
+	security := spec.MainContainer.SecurityContext
+	if security == nil || security.RunAsUser == nil || *security.RunAsUser != 0 || security.RunAsNonRoot == nil || *security.RunAsNonRoot {
+		t.Fatalf("securityContext = %#v, want root without privileged mode", security)
+	}
+	if security.Privileged != nil || security.AllowPrivilegeEscalation != nil {
+		t.Fatalf("securityContext = %#v, want no privileged settings", security)
+	}
+	for key, want := range map[string]string{
+		"DISABLE_AUTOUPDATER":         "1",
+		"HOME":                        template.DefaultTemplateWorkspaceMount,
+		"OPENCODE_DISABLE_AUTOUPDATE": "1",
+		"PI_SKIP_VERSION_CHECK":       "1",
+		"PI_TELEMETRY":                "0",
+	} {
+		if spec.EnvVars[key] != want {
+			t.Fatalf("EnvVars[%q] = %q, want %q", key, spec.EnvVars[key], want)
+		}
+	}
+	if spec.Pool.MinIdle != 0 || spec.Pool.MaxIdle != 2 {
+		t.Fatalf("pool = %#v, want 0/2", spec.Pool)
+	}
+	if spec.Network == nil || spec.Network.Mode != templatev1alpha1.NetworkModeAllowAll {
+		t.Fatalf("network = %#v, want allow-all", spec.Network)
+	}
+}
+
 func TestBuildBuiltinTemplateSpecAllowsFullSpecOverride(t *testing.T) {
 	t.Parallel()
 
@@ -225,6 +277,7 @@ func TestBuiltinTemplatePresetsSatisfyResourceRatio(t *testing.T) {
 
 	for _, templateID := range []string{
 		template.DefaultTemplateID,
+		template.CodingAgentTemplateID,
 		template.OpenClawTemplateID,
 		template.HermesTemplateID,
 		template.BrowserTemplateID,

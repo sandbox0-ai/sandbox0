@@ -170,6 +170,8 @@ func BuildBuiltinTemplateSpec(templateID string, builtin infrav1alpha1.BuiltinTe
 	var spec templatev1alpha1.SandboxTemplateSpec
 	if builtin.Spec != nil {
 		spec = *builtin.Spec.DeepCopy()
+	} else if templateID == template.CodingAgentTemplateID {
+		spec = codingAgentTemplateSpec()
 	} else if templateID == template.OpenClawTemplateID {
 		spec = openClawTemplateSpec()
 	} else if templateID == template.HermesTemplateID {
@@ -182,6 +184,48 @@ func BuildBuiltinTemplateSpec(templateID string, builtin infrav1alpha1.BuiltinTe
 
 	applyBuiltinTemplateConfig(&spec, templateID, builtin)
 	return spec
+}
+
+func codingAgentTemplateSpec() templatev1alpha1.SandboxTemplateSpec {
+	runAsRoot := int64(0)
+	runAsNonRoot := false
+	return templatev1alpha1.SandboxTemplateSpec{
+		DisplayName: template.CodingAgentTemplateDisplayName,
+		Description: template.CodingAgentTemplateDescription,
+		MainContainer: templatev1alpha1.ContainerSpec{
+			Image: template.CodingAgentTemplateImage,
+			Resources: templatev1alpha1.ResourceQuota{
+				CPU:              resource.MustParse(template.CodingAgentCPU),
+				Memory:           resource.MustParse(template.CodingAgentMemory),
+				EphemeralStorage: resource.MustParse(template.CodingAgentEphemeralStorage),
+			},
+			SecurityContext: &templatev1alpha1.SecurityContext{
+				RunAsUser:    &runAsRoot,
+				RunAsGroup:   &runAsRoot,
+				RunAsNonRoot: &runAsNonRoot,
+			},
+		},
+		VolumeMounts: []templatev1alpha1.VolumeMountSpec{
+			{
+				Name:      template.DefaultTemplateWorkspaceName,
+				MountPath: template.DefaultTemplateWorkspaceMount,
+			},
+		},
+		EnvVars: map[string]string{
+			"DISABLE_AUTOUPDATER":         "1",
+			"HOME":                        template.DefaultTemplateWorkspaceMount,
+			"OPENCODE_DISABLE_AUTOUPDATE": "1",
+			"PI_SKIP_VERSION_CHECK":       "1",
+			"PI_TELEMETRY":                "0",
+		},
+		Pool: templatev1alpha1.PoolStrategy{
+			MinIdle: 0,
+			MaxIdle: 2,
+		},
+		Network: &templatev1alpha1.SandboxNetworkPolicy{
+			Mode: templatev1alpha1.NetworkModeAllowAll,
+		},
+	}
 }
 
 func defaultBuiltinTemplateSpec(templateID string) templatev1alpha1.SandboxTemplateSpec {

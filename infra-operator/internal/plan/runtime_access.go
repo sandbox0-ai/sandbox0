@@ -38,6 +38,7 @@ func defaultBuiltinTemplates() []infrav1alpha1.BuiltinTemplateConfig {
 		{TemplateID: s0template.OpenClawTemplateID},
 		{TemplateID: s0template.HermesTemplateID},
 		{TemplateID: s0template.BrowserTemplateID},
+		{TemplateID: s0template.CodingAgentTemplateID},
 	}
 }
 

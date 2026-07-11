@@ -89,6 +89,13 @@ spec:
       pool:
         minIdle: 0
         maxIdle: 2
+    - templateId: coding-agent
+      image: sandbox0ai/otemplates:coding-agent-v0.1.0
+      displayName: Coding Agents
+      description: Builtin coding-agent template with Codex, Claude Code, OpenCode, and Pi installed by infra-operator.
+      pool:
+        minIdle: 0
+        maxIdle: 2
   services:
     clusterGateway:
       enabled: true

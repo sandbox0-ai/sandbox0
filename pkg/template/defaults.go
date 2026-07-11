@@ -16,6 +16,14 @@ const (
 	DefaultTemplateDockerRoot       = "/var/lib/docker"
 	DefaultTemplateDockerRootSize   = v1alpha1.DefaultSandboxEphemeralStorage
 
+	CodingAgentTemplateID          = "coding-agent"
+	CodingAgentTemplateImage       = "sandbox0ai/otemplates:coding-agent-v0.1.0"
+	CodingAgentTemplateDisplayName = "Coding Agents"
+	CodingAgentTemplateDescription = "Builtin coding-agent template with Codex, Claude Code, OpenCode, and Pi installed by infra-operator."
+	CodingAgentCPU                 = "1"
+	CodingAgentMemory              = "4Gi"
+	CodingAgentEphemeralStorage    = "16Gi"
+
 	OpenClawTemplateID          = "openclaw"
 	OpenClawTemplateImage       = "ghcr.io/openclaw/openclaw:latest"
 	OpenClawTemplateDisplayName = "OpenClaw"

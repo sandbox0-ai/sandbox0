@@ -413,6 +413,8 @@ func portalMountOptions() *fuse.MountOptions {
 		AllowOther:    os.Getuid() == 0,
 		DirectMount:   true,
 		MaxWrite:      256 * 1024,
+		// Linux 6.17 rejects ALLOW_IDMAP without default_permissions.
+		DisabledCapabilities: fuse.CAP_ALLOW_IDMAP,
 	}
 }
 

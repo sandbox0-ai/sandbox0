@@ -21,6 +21,7 @@ type FileSystem struct {
 	cacheTTL          time.Duration
 	completionMu      sync.Mutex
 	pendingCount      int
+	completionEpoch   uint64
 	pendingCompletion [requestCompletionSlotCount]requestCompletionEntry
 	recoveryMu        sync.Mutex
 	recoveryExpected  uint64
@@ -39,6 +40,7 @@ const (
 )
 
 type requestCompletionEntry struct {
+	epoch     uint64
 	unique    uint64
 	tombstone bool
 	tokens    requestCompletionTokens
@@ -113,6 +115,7 @@ func (fs *FileSystem) OnUnmount() {
 	fs.completionMu.Lock()
 	clear(fs.pendingCompletion[:])
 	fs.pendingCount = 0
+	fs.completionEpoch = 0
 	fs.completionMu.Unlock()
 	fs.recoveryMu.Lock()
 	fs.recoveryExpected = 0
@@ -250,11 +253,25 @@ func (fs *FileSystem) registerRequestCompletion(identity RequestIdentity, token 
 	}
 	fs.completionMu.Lock()
 	defer fs.completionMu.Unlock()
+	epoch := fs.completionEpoch
+	if epoch == 0 {
+		epoch = 1
+		fs.completionEpoch = epoch
+	}
 	start := int(identity.Unique % uint64(len(fs.pendingCompletion)))
 	firstTombstone := -1
 	for offset := range len(fs.pendingCompletion) {
 		index := (start + offset) % len(fs.pendingCompletion)
 		entry := &fs.pendingCompletion[index]
+		if entry.epoch != epoch {
+			if firstTombstone >= 0 {
+				entry = &fs.pendingCompletion[firstTombstone]
+			}
+			*entry = requestCompletionEntry{epoch: epoch, unique: identity.Unique}
+			entry.tokens.add(token)
+			fs.pendingCount++
+			return true
+		}
 		if entry.unique == identity.Unique {
 			entry.tokens.add(token)
 			return true
@@ -271,16 +288,14 @@ func (fs *FileSystem) registerRequestCompletion(identity RequestIdentity, token 
 		if firstTombstone >= 0 {
 			entry = &fs.pendingCompletion[firstTombstone]
 		}
-		entry.unique = identity.Unique
-		entry.tombstone = false
+		*entry = requestCompletionEntry{epoch: epoch, unique: identity.Unique}
 		entry.tokens.add(token)
 		fs.pendingCount++
 		return true
 	}
 	if firstTombstone >= 0 {
 		entry := &fs.pendingCompletion[firstTombstone]
-		entry.unique = identity.Unique
-		entry.tombstone = false
+		*entry = requestCompletionEntry{epoch: epoch, unique: identity.Unique}
 		entry.tokens.add(token)
 		fs.pendingCount++
 		return true
@@ -301,11 +316,15 @@ func (fs *FileSystem) RequestAcknowledged(header *fuse.InHeader) {
 		fs.completionMu.Unlock()
 		return
 	}
+	epoch := fs.completionEpoch
 	var tokens requestCompletionTokens
 	start := int(unique % uint64(len(fs.pendingCompletion)))
 	for offset := range len(fs.pendingCompletion) {
 		index := (start + offset) % len(fs.pendingCompletion)
 		entry := &fs.pendingCompletion[index]
+		if entry.epoch != epoch {
+			break
+		}
 		if entry.unique == 0 && !entry.tombstone {
 			break
 		}
@@ -313,10 +332,16 @@ func (fs *FileSystem) RequestAcknowledged(header *fuse.InHeader) {
 			continue
 		}
 		tokens = entry.tokens
-		*entry = requestCompletionEntry{tombstone: true}
+		*entry = requestCompletionEntry{epoch: epoch, tombstone: true}
 		fs.pendingCount--
 		if fs.pendingCount == 0 {
-			clear(fs.pendingCompletion[:])
+			// Advancing the epoch makes every tombstone logically empty without
+			// clearing the full fixed-size table on the sequential request path.
+			fs.completionEpoch++
+			if fs.completionEpoch == 0 {
+				clear(fs.pendingCompletion[:])
+				fs.completionEpoch = 1
+			}
 		}
 		break
 	}

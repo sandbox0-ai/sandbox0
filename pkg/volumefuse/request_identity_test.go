@@ -108,6 +108,24 @@ func TestFileSystemAcknowledgesOriginalCompletionOnce(t *testing.T) {
 	}
 }
 
+func TestFileSystemReusesUniqueAfterCompletionTableDrains(t *testing.T) {
+	fs := New("connection-generation", 0, nil)
+	header := &fuse.InHeader{Unique: 42}
+	acknowledgements := 0
+	for request := 0; request < 2; request++ {
+		ctx := fs.requestContext(header)
+		if !AttachRequestCompletionToken(ctx, RequestCompletionTokenFunc(func() {
+			acknowledgements++
+		})) {
+			t.Fatalf("AttachRequestCompletionToken(%d) = false", request)
+		}
+		fs.RequestAcknowledged(header)
+	}
+	if acknowledgements != 2 || fs.pendingCount != 0 {
+		t.Fatalf("acknowledgements=%d pending=%d, want 2/0", acknowledgements, fs.pendingCount)
+	}
+}
+
 func TestFileSystemAcknowledgesEveryCapturedCompletion(t *testing.T) {
 	fs := New("connection-generation", 0, nil)
 	header := &fuse.InHeader{Unique: 43}

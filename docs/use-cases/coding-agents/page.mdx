@@ -3,293 +3,603 @@
 Use the builtin `coding-agent` template when an application needs to run Codex, Claude Code, OpenCode, or Pi inside the same Sandbox0 execution environment. The template installs all four native CLIs and declares two writable mount points:
 
 - `/workspace` for the repository and generated files
-- `/agent-state` for harness configuration, credentials, and native conversation state
+- `/agent-state` for harness configuration and native conversation state
 
 Each coding agent remains a native subprocess. Session Supervisor owns process lifetime, stdin/stdout transport, restart attempts, and the replayable event journal; it does not translate one harness protocol into another.
 
-| Harness | Installed command | Native supervised transport |
-|---------|-------------------|-----------------------------|
-| Codex | `codex app-server --stdio` | Codex JSON-RPC messages over JSONL |
+| Harness | Native command | Protocol |
+|---------|----------------|----------|
+| Codex | `codex app-server --stdio` | Codex JSON-RPC over JSONL |
 | Claude Code | `claude -p --input-format stream-json --output-format stream-json` | Claude Code stream-json |
 | OpenCode | `opencode acp --cwd /workspace` | Agent Client Protocol over nd-JSON |
 | Pi | `pi --mode rpc` | Pi RPC over JSONL |
 
 <Callout variant="warning">
-The example grants the selected coding agent broad control inside its sandbox. Keep model credentials narrow, restrict network policy for production workloads, and do not mount a developer home directory or host Docker socket into the sandbox.
+The examples grant the selected coding agent broad control inside its sandbox. Keep model credentials narrow, restrict network policy for production workloads, and do not mount a developer home directory or host Docker socket into the sandbox.
 </Callout>
 
 ## Create The Environment
 
-The template has a zero-sized warm pool by default because the image is large and not every deployment needs a coding agent. Claiming it pulls the image on demand.
+The SDK snippets assume you already configured a `client` as shown in [Get Started](/docs/get-started). They create separate SandboxVolumes for repository and harness state, then claim the builtin template. The examples leave `ttl` and `hard_ttl` unset.
 
-Create separate volumes for the repository and harness state, then claim the template:
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `workspaceVolume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{
+    AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWO),
+})
+if err != nil {
+    log.Fatal(err)
+}
 
-```bash
-WORKSPACE_VOLUME_ID="$(s0 -o json volume create --access-mode RWO | jq -r '.id')"
+agentStateVolume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{
+    AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWO),
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+sandbox, err := client.ClaimSandbox(ctx, "coding-agent",
+    sandbox0.WithSandboxBootstrapMount(workspaceVolume.ID, "/workspace"),
+    sandbox0.WithSandboxBootstrapMount(agentStateVolume.ID, "/agent-state"),
+)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println("Sandbox ID:", sandbox.ID)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.apispec.models.claim_mount_request import ClaimMountRequest
+from sandbox0.apispec.models.create_sandbox_volume_request import CreateSandboxVolumeRequest
+
+workspace_volume = client.volumes.create(CreateSandboxVolumeRequest.from_dict({
+    "access_mode": "RWO",
+}))
+agent_state_volume = client.volumes.create(CreateSandboxVolumeRequest.from_dict({
+    "access_mode": "RWO",
+}))
+
+sandbox = client.sandboxes.claim(
+    "coding-agent",
+    mounts=[
+        ClaimMountRequest(
+            sandboxvolume_id=workspace_volume.id,
+            mount_point="/workspace",
+        ),
+        ClaimMountRequest(
+            sandboxvolume_id=agent_state_volume.id,
+            mount_point="/agent-state",
+        ),
+    ],
+)
+print("Sandbox ID:", sandbox.id)`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `import { models } from "sandbox0";
+
+const workspaceVolume = await client.volumes.create({
+    accessMode: models.VolumeAccessMode.Rwo,
+});
+const agentStateVolume = await client.volumes.create({
+    accessMode: models.VolumeAccessMode.Rwo,
+});
+
+const sandbox = await client.sandboxes.claim("coding-agent", {
+    mounts: [
+        {
+            sandboxvolumeId: workspaceVolume.id,
+            mountPoint: "/workspace",
+        },
+        {
+            sandboxvolumeId: agentStateVolume.id,
+            mountPoint: "/agent-state",
+        },
+    ],
+});
+console.log("Sandbox ID:", sandbox.id);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `WORKSPACE_VOLUME_ID="$(s0 -o json volume create --access-mode RWO | jq -r '.id')"
 AGENT_STATE_VOLUME_ID="$(s0 -o json volume create --access-mode RWO | jq -r '.id')"
 
-SANDBOX_ID="$(s0 -o json sandbox create \
-    --template coding-agent \
-    --mount "$WORKSPACE_VOLUME_ID:/workspace" \
-    --mount "$AGENT_STATE_VOLUME_ID:/agent-state" \
+SANDBOX_ID="$(s0 -o json sandbox create \\
+    --template coding-agent \\
+    --mount "$WORKSPACE_VOLUME_ID:/workspace" \\
+    --mount "$AGENT_STATE_VOLUME_ID:/agent-state" \\
     | jq -r '.id')"
 
-export SANDBOX_ID
-```
+printf 'Sandbox ID: %s\\n' "$SANDBOX_ID"`
+    }
+  ]}
+/>
 
-The volumes are optional. If they are omitted, both paths are writable directories in the sandbox rootfs and follow that sandbox identity's checkpoint lifecycle. Use volumes when workspace or harness state must be managed independently from the sandbox.
+The volumes are optional. If omitted, both paths are writable directories in the sandbox rootfs and follow that sandbox identity's checkpoint lifecycle. Use volumes when repository or harness state must be managed independently from the sandbox.
 
-Do not bake provider credentials into the template image. For a local test, add the required provider environment variables to the supervised session. For production, prefer [egress auth](/docs/credential/egress-auth), LLMProxy, or another narrowly scoped external model proxy. Session environment variables are part of the session specification and should not be treated as a secret store.
+Do not bake provider credentials into the template image. For production, prefer [egress auth](/docs/credential/egress-auth), LLMProxy, or another narrowly scoped external model proxy. Session environment variables are returned as part of the session specification and should not be treated as a secret store.
 
-## Read And Write Native JSONL
+## Start A Native Harness
 
-Run this in a second terminal to replay retained output and then follow live output. The CLI decodes the event payload for display:
+Select one harness and create one pipe-based supervised session. These examples use Codex; replace `harnessName` with `claude-code`, `opencode`, or `pi` to select another native command from the same map.
 
-```bash
-s0 sandbox session events "$SANDBOX_ID" "$SESSION_ID" --follow
-```
-
-Use this helper in the examples below to write one or more newline-delimited native messages:
-
-```bash
-send_jsonl() {
-    local session_id="$1"
-    local input_id="$2"
-    s0 sandbox session input "$SANDBOX_ID" "$session_id" \
-        --input-id "$input_id" \
-        --file -
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `type harnessSpec struct {
+    Command []string
+    Env     apispec.ExecutionSessionSpecEnv
 }
-```
 
-Applications should consume the SDK event stream instead of parsing the CLI table. Output events contain base64-encoded byte chunks, and chunk boundaries are not JSONL record boundaries. Buffer stdout bytes until LF before decoding a native message:
+harnesses := map[string]harnessSpec{
+    "codex": {
+        Command: []string{"codex", "app-server", "--stdio"},
+        Env: apispec.ExecutionSessionSpecEnv{
+            "CODEX_HOME": "/agent-state/codex",
+        },
+    },
+    "claude-code": {
+        Command: []string{
+            "claude", "-p",
+            "--input-format", "stream-json",
+            "--output-format", "stream-json",
+            "--verbose",
+            "--replay-user-messages",
+            "--permission-mode", "bypassPermissions",
+            "--dangerously-skip-permissions",
+        },
+        Env: apispec.ExecutionSessionSpecEnv{
+            "CLAUDE_CONFIG_DIR": "/agent-state/claude",
+        },
+    },
+    "opencode": {
+        Command: []string{"opencode", "acp", "--cwd", "/workspace"},
+        Env: apispec.ExecutionSessionSpecEnv{
+            "XDG_CONFIG_HOME": "/agent-state/opencode/config",
+            "XDG_DATA_HOME":   "/agent-state/opencode/data",
+            "XDG_CACHE_HOME":  "/agent-state/opencode/cache",
+        },
+    },
+    "pi": {
+        Command: []string{
+            "pi", "--mode", "rpc",
+            "--session-dir", "/agent-state/pi/sessions",
+            "--approve",
+        },
+        Env: apispec.ExecutionSessionSpecEnv{
+            "PI_CODING_AGENT_DIR":         "/agent-state/pi",
+            "PI_CODING_AGENT_SESSION_DIR": "/agent-state/pi/sessions",
+        },
+    },
+}
 
-```typescript
-import type { Sandbox } from 'sandbox0';
+harnessName := "codex"
+harness := harnesses[harnessName]
+session, err := sandbox.CreateSession(ctx, apispec.ExecutionSessionSpec{
+    Name:    apispec.NewOptString(harnessName),
+    Command: harness.Command,
+    Cwd:     apispec.NewOptString("/workspace"),
+    Env:     apispec.NewOptExecutionSessionSpecEnv(harness.Env),
+    Lifecycle: apispec.NewOptExecutionSessionLifecycleSpec(
+        apispec.ExecutionSessionLifecycleSpec{
+            Restart: apispec.NewOptExecutionSessionRestartSpec(
+                apispec.ExecutionSessionRestartSpec{
+                    Policy: apispec.NewOptExecutionSessionRestartPolicy(
+                        apispec.ExecutionSessionRestartPolicyOnFailure,
+                    ),
+                },
+            ),
+            RuntimeRecovery: apispec.NewOptExecutionSessionRuntimeRecoveryPolicy(
+                apispec.ExecutionSessionRuntimeRecoveryPolicyRestart,
+            ),
+        },
+    ),
+    Readiness: apispec.NewOptExecutionSessionReadinessSpec(
+        apispec.ExecutionSessionReadinessSpec{
+            Type: apispec.NewOptExecutionSessionReadinessType(
+                apispec.ExecutionSessionReadinessTypeProcess,
+            ),
+        },
+    ),
+}, &sandbox0.CreateSessionOptions{
+    IdempotencyKey: "coding-agent-" + harnessName + "-v1",
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println("Session ID:", session.ID)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0 import SessionCreateOptions
+from sandbox0.apispec.models.execution_session_spec import ExecutionSessionSpec
 
-export async function writeJsonLine(
+harnesses = {
+    "codex": {
+        "command": ["codex", "app-server", "--stdio"],
+        "env": {"CODEX_HOME": "/agent-state/codex"},
+    },
+    "claude-code": {
+        "command": [
+            "claude", "-p",
+            "--input-format", "stream-json",
+            "--output-format", "stream-json",
+            "--verbose",
+            "--replay-user-messages",
+            "--permission-mode", "bypassPermissions",
+            "--dangerously-skip-permissions",
+        ],
+        "env": {"CLAUDE_CONFIG_DIR": "/agent-state/claude"},
+    },
+    "opencode": {
+        "command": ["opencode", "acp", "--cwd", "/workspace"],
+        "env": {
+            "XDG_CONFIG_HOME": "/agent-state/opencode/config",
+            "XDG_DATA_HOME": "/agent-state/opencode/data",
+            "XDG_CACHE_HOME": "/agent-state/opencode/cache",
+        },
+    },
+    "pi": {
+        "command": [
+            "pi", "--mode", "rpc",
+            "--session-dir", "/agent-state/pi/sessions",
+            "--approve",
+        ],
+        "env": {
+            "PI_CODING_AGENT_DIR": "/agent-state/pi",
+            "PI_CODING_AGENT_SESSION_DIR": "/agent-state/pi/sessions",
+        },
+    },
+}
+
+harness_name = "codex"
+harness = harnesses[harness_name]
+session = sandbox.create_session(
+    ExecutionSessionSpec.from_dict({
+        "name": harness_name,
+        "command": harness["command"],
+        "cwd": "/workspace",
+        "env": harness["env"],
+        "lifecycle": {
+            "restart": {"policy": "on_failure"},
+            "runtime_recovery": "restart",
+        },
+        "readiness": {"type": "process"},
+    }),
+    SessionCreateOptions(
+        idempotency_key="coding-agent-" + harness_name + "-v1",
+    ),
+)
+print("Session ID:", session.id)`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `type HarnessSpec = {
+    command: string[];
+    env: Record<string, string>;
+};
+
+const harnesses: Record<string, HarnessSpec> = {
+    codex: {
+        command: ["codex", "app-server", "--stdio"],
+        env: { CODEX_HOME: "/agent-state/codex" },
+    },
+    "claude-code": {
+        command: [
+            "claude", "-p",
+            "--input-format", "stream-json",
+            "--output-format", "stream-json",
+            "--verbose",
+            "--replay-user-messages",
+            "--permission-mode", "bypassPermissions",
+            "--dangerously-skip-permissions",
+        ],
+        env: { CLAUDE_CONFIG_DIR: "/agent-state/claude" },
+    },
+    opencode: {
+        command: ["opencode", "acp", "--cwd", "/workspace"],
+        env: {
+            XDG_CONFIG_HOME: "/agent-state/opencode/config",
+            XDG_DATA_HOME: "/agent-state/opencode/data",
+            XDG_CACHE_HOME: "/agent-state/opencode/cache",
+        },
+    },
+    pi: {
+        command: [
+            "pi", "--mode", "rpc",
+            "--session-dir", "/agent-state/pi/sessions",
+            "--approve",
+        ],
+        env: {
+            PI_CODING_AGENT_DIR: "/agent-state/pi",
+            PI_CODING_AGENT_SESSION_DIR: "/agent-state/pi/sessions",
+        },
+    },
+};
+
+const harnessName = "codex";
+const harness = harnesses[harnessName];
+const session = await sandbox.createSession({
+    name: harnessName,
+    command: harness.command,
+    cwd: "/workspace",
+    env: harness.env,
+    lifecycle: {
+        restart: { policy: "on_failure" },
+        runtimeRecovery: "restart",
+    },
+    readiness: { type: "process" },
+}, {
+    idempotencyKey: "coding-agent-" + harnessName + "-v1",
+});
+console.log("Session ID:", session.id);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `HARNESS="codex"
+
+case "$HARNESS" in
+    codex)
+        ENV_ARGS=(--env CODEX_HOME=/agent-state/codex)
+        COMMAND=(codex app-server --stdio)
+        ;;
+    claude-code)
+        ENV_ARGS=(--env CLAUDE_CONFIG_DIR=/agent-state/claude)
+        COMMAND=(claude -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages --permission-mode bypassPermissions --dangerously-skip-permissions)
+        ;;
+    opencode)
+        ENV_ARGS=(--env XDG_CONFIG_HOME=/agent-state/opencode/config --env XDG_DATA_HOME=/agent-state/opencode/data --env XDG_CACHE_HOME=/agent-state/opencode/cache)
+        COMMAND=(opencode acp --cwd /workspace)
+        ;;
+    pi)
+        ENV_ARGS=(--env PI_CODING_AGENT_DIR=/agent-state/pi --env PI_CODING_AGENT_SESSION_DIR=/agent-state/pi/sessions)
+        COMMAND=(pi --mode rpc --session-dir /agent-state/pi/sessions --approve)
+        ;;
+esac
+
+SESSION_ID="$(s0 -o json sandbox session create "$SANDBOX_ID" \\
+    --name "$HARNESS" \\
+    --cwd /workspace \\
+    --idempotency-key "coding-agent-$HARNESS-v1" \\
+    --restart on_failure \\
+    --runtime-recovery restart \\
+    --readiness process \\
+    "\${ENV_ARGS[@]}" \\
+    -- "\${COMMAND[@]}" \\
+    | jq -r '.id')"
+
+printf 'Session ID: %s\\n' "$SESSION_ID"`
+    }
+  ]}
+/>
+
+Use one active coding agent per workspace. Multiple supervised sessions can run in one sandbox, but concurrent writers can race on repository files and the Git index.
+
+## Exchange Native Messages
+
+All four commands use pipes, not a PTY. Write one LF-terminated native record at a time and fence the write to the current process attempt. The helper below accepts any JSON-compatible value; each harness section provides the native messages to send.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `func writeJSONLine(
+    ctx context.Context,
+    sandbox *sandbox0.Sandbox,
+    sessionID string,
+    value any,
+) error {
+    session, err := sandbox.GetSession(ctx, sessionID)
+    if err != nil {
+        return err
+    }
+    attempt, ok := session.Attempt.Get()
+    if !ok {
+        return fmt.Errorf("session has no running attempt")
+    }
+
+    data, err := json.Marshal(value)
+    if err != nil {
+        return err
+    }
+    data = append(data, '\\n')
+
+    _, err = sandbox.WriteSessionInput(ctx, sessionID, apispec.ExecutionSessionInputRequest{
+        InputID:           uuid.NewString(),
+        ExpectedAttemptID: apispec.NewOptString(attempt.ID),
+        DataBase64:        apispec.NewOptString(base64.StdEncoding.EncodeToString(data)),
+    })
+    return err
+}`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `import base64
+import json
+from uuid import uuid4
+
+from sandbox0.apispec.models.execution_session_input_request import ExecutionSessionInputRequest
+
+def write_json_line(sandbox, session_id: str, value: object) -> None:
+    session = sandbox.get_session(session_id)
+    attempt = session.to_dict().get("attempt")
+    if not attempt:
+        raise RuntimeError("session has no running attempt")
+
+    data = (json.dumps(value, separators=(",", ":")) + "\\n").encode()
+    sandbox.write_session_input(
+        session_id,
+        ExecutionSessionInputRequest(
+            input_id=str(uuid4()),
+            expected_attempt_id=attempt["id"],
+            data_base64=base64.b64encode(data).decode(),
+        ),
+    )`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `import type { Sandbox } from "sandbox0";
+
+async function writeJsonLine(
     sandbox: Sandbox,
     sessionId: string,
     value: unknown,
 ) {
     const session = await sandbox.getSession(sessionId);
-    if (!session.attempt) throw new Error('session has no running attempt');
+    if (!session.attempt) throw new Error("session has no running attempt");
 
     await sandbox.writeSessionInput(sessionId, {
         inputId: crypto.randomUUID(),
         expectedAttemptId: session.attempt.id,
-        dataBase64: Buffer.from(`${JSON.stringify(value)}\n`).toString('base64'),
+        dataBase64: Buffer.from(JSON.stringify(value) + "\\n").toString("base64"),
     });
+}`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `send_jsonl() {
+    session_id="$1"
+    input_id="$2"
+    s0 sandbox session input "$SANDBOX_ID" "$session_id" \\
+        --input-id "$input_id" \\
+        --file -
 }
 
-export async function* readJsonLines(
-    sandbox: Sandbox,
-    sessionId: string,
-    after = 0,
-) {
-    const stream = await sandbox.watchSessionEvents(sessionId, { after });
-    let buffered = '';
-
-    try {
-        for await (const event of stream) {
-            if (event.stream !== 'stdout' || !event.dataBase64) continue;
-            buffered += Buffer.from(event.dataBase64, 'base64').toString('utf8');
-
-            for (;;) {
-                const newline = buffered.indexOf('\n');
-                if (newline < 0) break;
-                const record = buffered.slice(0, newline).replace(/\r$/, '');
-                buffered = buffered.slice(newline + 1);
-                if (record) yield { seq: event.seq, message: JSON.parse(record) };
-            }
-        }
-    } finally {
-        await stream.close();
+send_jsonl "$SESSION_ID" native-request-1 <<'JSON'
+{"replace":"with a native harness message"}
+JSON`
     }
-}
-```
+  ]}
+/>
 
-Commit the last processed event `seq` outside the sandbox and reconnect with `after`. Also put a native request ID in messages where the harness supports one. Sandbox0 can make input submission idempotent, but it cannot guarantee that a subprocess consumes a message exactly once.
+Consume output through the resumable session event stream. Events contain base64-encoded byte chunks, and chunk boundaries are not native protocol record boundaries. Buffer stdout bytes until LF before parsing JSON. The complete Go, Python, TypeScript, and CLI event-stream examples are in [Supervised Sessions](/docs/sandbox/session-supervisor#follow-output-and-reconnect).
 
-## Codex App Server
+Commit the last processed event `seq` outside the sandbox and reconnect with `after`. Put a native request ID in messages where the harness supports one. Sandbox0 can deduplicate an input submission, but it cannot guarantee that the subprocess consumed that input exactly once.
 
-Create a pipe-based Session Supervisor session. `CODEX_HOME` keeps Codex configuration and native thread history separate from the repository:
+## Drive The Selected Harness
 
-```bash
-SESSION_ID="$(s0 -o json sandbox session create "$SANDBOX_ID" \
-    --name codex \
-    --cwd /workspace \
-    --env CODEX_HOME=/agent-state/codex \
-    --idempotency-key coding-agent-codex-v1 \
-    --restart on_failure \
-    --runtime-recovery restart \
-    --readiness process \
-    -- codex app-server --stdio \
-    | jq -r '.id')"
-export SESSION_ID
-```
+Use the native message shape for the command you selected. Send the initialization records first, wait for their responses, save the returned native thread or session ID, and then send the prompt record with that ID.
 
-Initialize the native app-server connection, acknowledge initialization, and start a Codex thread:
-
-```bash
-send_jsonl "$SESSION_ID" codex-bootstrap-1 <<'JSON'
-{"method":"initialize","id":1,"params":{"clientInfo":{"name":"sandpi","title":"SandPi","version":"0.1.0"}}}
+<Tabs
+  tabs={[
+    {
+      label: "Codex",
+      language: "json",
+      code: `{"method":"initialize","id":1,"params":{"clientInfo":{"name":"sandpi","title":"SandPi","version":"0.1.0"}}}
 {"method":"initialized","params":{}}
 {"method":"thread/start","id":2,"params":{"cwd":"/workspace","approvalPolicy":"never","sandbox":"dangerFullAccess"}}
-JSON
-```
 
-Read the response with `id: 2`, save `result.thread.id`, and use it for turns:
+{"method":"turn/start","id":3,"params":{"threadId":"<thread-id-from-response-2>","clientUserMessageId":"task-1","input":[{"type":"text","text":"Inspect this repository and run the relevant tests."}]}}`
+    },
+    {
+      label: "Claude Code",
+      language: "json",
+      code: `{"type":"user","message":{"role":"user","content":"Inspect this repository and run the relevant tests."}}`
+    },
+    {
+      label: "OpenCode",
+      language: "json",
+      code: `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"sandpi","version":"0.1.0"}}}
+{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/workspace","mcpServers":[]}}
 
-```bash
-CODEX_THREAD_ID="replace-with-thread-id"
+{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"<session-id-from-response-2>","prompt":[{"type":"text","text":"Inspect this repository and run the relevant tests."}]}}`
+    },
+    {
+      label: "Pi",
+      language: "json",
+      code: `{"id":"state-1","type":"get_state"}
+{"id":"prompt-1","type":"prompt","message":"Inspect this repository and run the relevant tests."}
 
-send_jsonl "$SESSION_ID" codex-turn-1 <<JSON
-{"method":"turn/start","id":3,"params":{"threadId":"$CODEX_THREAD_ID","clientUserMessageId":"task-1","input":[{"type":"text","text":"Inspect this repository and run the relevant tests."}]}}
-JSON
-```
+{"id":"steer-1","type":"steer","message":"Focus on the failing integration test first."}
+{"id":"follow-up-1","type":"follow_up","message":"After the fix, summarize the changed files."}
+{"id":"abort-1","type":"abort"}`
+    }
+  ]}
+/>
 
-The outer Sandbox0 sandbox is the isolation boundary in this example, so Codex is configured with `dangerFullAccess` inside that boundary. If the process attempt changes, send `initialize` and `initialized` again, then use `thread/resume` with the saved native thread ID before starting another turn. See the upstream [Codex app-server protocol](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md) for approval requests and the complete event schema.
+### Codex
 
-## Claude Code Stream JSON
+Codex requires `initialize` followed by `initialized` once per app-server process. Save `result.thread.id` from `thread/start`. After a new process attempt, initialize again and call `thread/resume` with the saved thread ID. The outer Sandbox0 sandbox is the isolation boundary in this example, so Codex uses `dangerFullAccess` inside that boundary. See the upstream [Codex app-server protocol](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md).
 
-Claude Code requires a native UUID for reliable conversation recovery. The small shell condition below only selects Claude Code's native `--session-id` or `--resume` flag; it does not translate the stream-json protocol.
+### Claude Code
 
-```bash
-CLAUDE_NATIVE_SESSION_ID="$(uuidgen)"
-
-SESSION_ID="$(s0 -o json sandbox session create "$SANDBOX_ID" \
-    --name claude-code \
-    --cwd /workspace \
-    --env CLAUDE_CONFIG_DIR=/agent-state/claude \
-    --env CLAUDE_NATIVE_SESSION_ID="$CLAUDE_NATIVE_SESSION_ID" \
-    --idempotency-key coding-agent-claude-v1 \
-    --restart on_failure \
-    --runtime-recovery restart \
-    --readiness process \
-    -- /bin/sh -lc '
-        if find "$CLAUDE_CONFIG_DIR/projects" -name "$CLAUDE_NATIVE_SESSION_ID.jsonl" -print -quit 2>/dev/null | grep -q .; then
-            session_flag="--resume"
-        else
-            session_flag="--session-id"
-        fi
-        exec claude -p \
-            --input-format stream-json \
-            --output-format stream-json \
-            --verbose \
-            --replay-user-messages \
-            --permission-mode bypassPermissions \
-            --dangerously-skip-permissions \
-            "$session_flag" "$CLAUDE_NATIVE_SESSION_ID"
-    ' | jq -r '.id')"
-export SESSION_ID
-```
-
-Send Claude Code's native streaming user message:
-
-```bash
-send_jsonl "$SESSION_ID" claude-prompt-1 <<'JSON'
-{"type":"user","message":{"role":"user","content":"Inspect this repository and run the relevant tests."}}
-JSON
-```
-
-The first stdout record is normally a `system` message with subtype `init`; record its `session_id`. Subsequent records include user acknowledgements, assistant messages, tool activity, and a final `result`. See the upstream [Claude Code headless documentation](https://code.claude.com/docs/en/headless) for the current stream-json contract.
+The first stdout record is normally a `system` message with subtype `init`; save its `session_id`. Subsequent records include user acknowledgements, assistant messages, tool activity, and a final `result`. To continue after replacing the supervised session, append `--resume` and the saved native session ID to the Claude command. See the upstream [Claude Code headless documentation](https://code.claude.com/docs/en/headless).
 
 <Callout variant="warning">
 Claude Code's package is not published under an open-source license. Review the license bundled with the package and Anthropic's applicable terms before publicly redistributing a derived template image. Use API-key or supported cloud-provider authentication for third-party products; do not proxy a user's Claude subscription login.
 </Callout>
 
-## OpenCode ACP
+### OpenCode
 
-OpenCode exposes the standard Agent Client Protocol over nd-JSON. Keep its XDG state below the agent-state mount:
+OpenCode implements Agent Client Protocol. An ACP client must handle server requests such as permission decisions instead of assuming stdout only contains responses and notifications. After a new process attempt, initialize ACP again and call `session/load` or `session/resume` with the saved native session ID. See the upstream [OpenCode ACP command](https://opencode.ai/docs/cli/#acp) and [Agent Client Protocol](https://agentclientprotocol.com/).
 
-```bash
-SESSION_ID="$(s0 -o json sandbox session create "$SANDBOX_ID" \
-    --name opencode \
-    --cwd /workspace \
-    --env XDG_CONFIG_HOME=/agent-state/opencode/config \
-    --env XDG_DATA_HOME=/agent-state/opencode/data \
-    --env XDG_CACHE_HOME=/agent-state/opencode/cache \
-    --idempotency-key coding-agent-opencode-v1 \
-    --restart on_failure \
-    --runtime-recovery restart \
-    --readiness process \
-    -- opencode acp --cwd /workspace \
-    | jq -r '.id')"
-export SESSION_ID
-```
+### Pi
 
-Initialize ACP and create its native session:
-
-```bash
-send_jsonl "$SESSION_ID" opencode-bootstrap-1 <<'JSON'
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"sandpi","version":"0.1.0"}}}
-{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/workspace","mcpServers":[]}}
-JSON
-```
-
-Save `result.sessionId` from response `id: 2`, then submit a prompt:
-
-```bash
-OPENCODE_SESSION_ID="replace-with-session-id"
-
-send_jsonl "$SESSION_ID" opencode-prompt-1 <<JSON
-{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"$OPENCODE_SESSION_ID","prompt":[{"type":"text","text":"Inspect this repository and run the relevant tests."}]}}
-JSON
-```
-
-An ACP client must also handle native server requests such as permission decisions instead of assuming stdout only contains responses and notifications. After a process attempt changes, initialize ACP again and call `session/load` or `session/resume` with the saved native session ID. See the upstream [OpenCode ACP command](https://opencode.ai/docs/cli/#acp) and the [Agent Client Protocol](https://agentclientprotocol.com/) for the complete contract.
-
-## Pi RPC
-
-Pi provides a direct JSONL RPC mode with request IDs, steering, follow-up, abort, model selection, and state inspection:
-
-```bash
-SESSION_ID="$(s0 -o json sandbox session create "$SANDBOX_ID" \
-    --name pi \
-    --cwd /workspace \
-    --env PI_CODING_AGENT_DIR=/agent-state/pi \
-    --env PI_CODING_AGENT_SESSION_DIR=/agent-state/pi/sessions \
-    --idempotency-key coding-agent-pi-v1 \
-    --restart on_failure \
-    --runtime-recovery restart \
-    --readiness process \
-    -- pi --mode rpc --session-dir /agent-state/pi/sessions --approve \
-    | jq -r '.id')"
-export SESSION_ID
-```
-
-Inspect native state and submit a prompt:
-
-```bash
-send_jsonl "$SESSION_ID" pi-state-1 <<'JSON'
-{"id":"state-1","type":"get_state"}
-JSON
-
-send_jsonl "$SESSION_ID" pi-prompt-1 <<'JSON'
-{"id":"prompt-1","type":"prompt","message":"Inspect this repository and run the relevant tests."}
-JSON
-```
-
-While Pi is running, its native protocol can steer, enqueue a follow-up, or abort:
-
-```json
-{"id":"steer-1","type":"steer","message":"Focus on the failing integration test first."}
-{"id":"follow-up-1","type":"follow_up","message":"After the fix, summarize the changed files."}
-{"id":"abort-1","type":"abort"}
-```
-
-Persist the `sessionFile` or `sessionId` returned by `get_state` and use Pi's native session options when recovering a conversation. See the upstream [Pi RPC protocol](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md) for all commands and streamed event types.
+Pi RPC supports request IDs, state inspection, prompting, steering, follow-up, and abort without an additional adapter. Save the `sessionFile` or `sessionId` returned by `get_state`, then use Pi's native `--session` or `--session-id` option when creating a replacement supervised session. See the upstream [Pi RPC protocol](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md).
 
 ## Switch Harnesses
 
-Use one active writer per workspace. Stop and delete the current supervised session before starting another harness:
+Stop and delete the current supervised session before starting another harness against the same sandbox.
 
-```bash
-s0 sandbox session stop "$SANDBOX_ID" "$SESSION_ID"
-s0 sandbox session delete "$SANDBOX_ID" "$SESSION_ID"
-```
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `_, err := sandbox.SetSessionDesiredState(
+    ctx,
+    session.ID,
+    apispec.ExecutionSessionDesiredStateStopped,
+)
+if err != nil {
+    log.Fatal(err)
+}
+if _, err := sandbox.DeleteSession(ctx, session.ID); err != nil {
+    log.Fatal(err)
+}`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.apispec.models.execution_session_desired_state import ExecutionSessionDesiredState
 
-Then create the next harness session against the same sandbox. `/workspace` preserves the repository, while each harness keeps its native state in a separate directory below `/agent-state`.
+sandbox.set_session_desired_state(
+    session.id,
+    ExecutionSessionDesiredState.STOPPED,
+)
+sandbox.delete_session(session.id)`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `await sandbox.setSessionDesiredState(session.id, "stopped");
+await sandbox.deleteSession(session.id);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox session stop "$SANDBOX_ID" "$SESSION_ID"
+s0 sandbox session delete "$SANDBOX_ID" "$SESSION_ID"`
+    }
+  ]}
+/>
+
+Then select the next entry from the harness map and create a new supervised session. `/workspace` preserves the repository, while each harness keeps native state in a separate directory below `/agent-state`.
 
 Do not replace a Codex session specification with a Claude Code, OpenCode, or Pi command. A new supervised session keeps each event journal, process attempt history, and native protocol stream internally consistent.
 

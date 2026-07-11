@@ -23,8 +23,6 @@ const (
 	CodingAgentCPU                 = "1"
 	CodingAgentMemory              = "4Gi"
 	CodingAgentEphemeralStorage    = "16Gi"
-	CodingAgentStateMountName      = "agent-state"
-	CodingAgentStateMount          = "/agent-state"
 
 	OpenClawTemplateID          = "openclaw"
 	OpenClawTemplateImage       = "ghcr.io/openclaw/openclaw:latest"

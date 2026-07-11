@@ -92,14 +92,11 @@ func TestBuildBuiltinTemplateSpecUsesCodingAgentPreset(t *testing.T) {
 	if spec.MainContainer.Resources.EphemeralStorage.Cmp(resource.MustParse(template.CodingAgentEphemeralStorage)) != 0 {
 		t.Fatalf("ephemeralStorage = %s, want %s", spec.MainContainer.Resources.EphemeralStorage.String(), template.CodingAgentEphemeralStorage)
 	}
-	if len(spec.VolumeMounts) != 2 {
-		t.Fatalf("volumeMounts = %#v, want workspace and agent state mounts", spec.VolumeMounts)
+	if len(spec.VolumeMounts) != 1 {
+		t.Fatalf("volumeMounts = %#v, want one workspace mount", spec.VolumeMounts)
 	}
 	if spec.VolumeMounts[0].Name != template.DefaultTemplateWorkspaceName || spec.VolumeMounts[0].MountPath != template.DefaultTemplateWorkspaceMount {
 		t.Fatalf("volumeMounts[0] = %#v, want workspace mount", spec.VolumeMounts[0])
-	}
-	if spec.VolumeMounts[1].Name != template.CodingAgentStateMountName || spec.VolumeMounts[1].MountPath != template.CodingAgentStateMount {
-		t.Fatalf("volumeMounts[1] = %#v, want agent state mount", spec.VolumeMounts[1])
 	}
 	security := spec.MainContainer.SecurityContext
 	if security == nil || security.RunAsUser == nil || *security.RunAsUser != 0 || security.RunAsNonRoot == nil || *security.RunAsNonRoot {
@@ -110,6 +107,7 @@ func TestBuildBuiltinTemplateSpecUsesCodingAgentPreset(t *testing.T) {
 	}
 	for key, want := range map[string]string{
 		"DISABLE_AUTOUPDATER":         "1",
+		"HOME":                        template.DefaultTemplateWorkspaceMount,
 		"OPENCODE_DISABLE_AUTOUPDATE": "1",
 		"PI_SKIP_VERSION_CHECK":       "1",
 		"PI_TELEMETRY":                "0",

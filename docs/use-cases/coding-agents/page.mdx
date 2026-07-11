@@ -1,13 +1,10 @@
 # Run Coding Agents With Supervised Sessions
 
-Use the builtin `coding-agent` template when an application needs to run Codex, Claude Code, OpenCode, or Pi inside the same Sandbox0 execution environment. The template installs all four native CLIs and declares two writable mount points:
-
-- `/workspace` as every harness's process working directory, containing the repository and generated files
-- `/agent-state` for harness configuration and native conversation state
+Use the builtin `coding-agent` template when an application needs to run Codex, Claude Code, OpenCode, or Pi inside the same Sandbox0 execution environment. The template installs all four native CLIs and declares `/workspace` as its writable mount point.
 
 Each coding agent remains a native subprocess. Session Supervisor owns process lifetime, stdin/stdout transport, restart attempts, and the replayable event journal; it does not translate one harness protocol into another.
 
-The template declares `/workspace` as a SandboxVolume mount point. A claim binds the selected workspace Volume there, and every supervised session sets its `cwd` to the same path. `/agent-state` is separate native harness state; it is not the coding workspace. The container's operating-system `HOME` remains `/root` and is not used as the coding workspace.
+The template sets both the container's operating-system `HOME` and every supervised session's `cwd` to `/workspace`. A claim binds the selected workspace Volume there, so the repository and each harness's native home-relative state share the same persistent mount. For example, Codex uses `/workspace/.codex`, Claude Code uses `/workspace/.claude`, OpenCode follows XDG defaults below `/workspace`, and Pi uses `/workspace/.pi/agent`.
 
 | Harness | Native command | Protocol |
 |---------|----------------|----------|
@@ -22,7 +19,7 @@ The examples grant the selected coding agent broad control inside its sandbox. K
 
 ## Create The Environment
 
-The SDK snippets assume you already configured a `client` as shown in [Get Started](/docs/get-started). They create separate SandboxVolumes for repository and harness state, then claim the builtin template. The examples leave `ttl` and `hard_ttl` unset.
+The SDK snippets assume you already configured a `client` as shown in [Get Started](/docs/get-started). They create one SandboxVolume for the complete workspace, then claim the builtin template. The examples leave `ttl` and `hard_ttl` unset.
 
 <Tabs
   tabs={[
@@ -36,16 +33,8 @@ if err != nil {
     log.Fatal(err)
 }
 
-agentStateVolume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{
-    AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWO),
-})
-if err != nil {
-    log.Fatal(err)
-}
-
 sandbox, err := client.ClaimSandbox(ctx, "coding-agent",
     sandbox0.WithSandboxBootstrapMount(workspaceVolume.ID, "/workspace"),
-    sandbox0.WithSandboxBootstrapMount(agentStateVolume.ID, "/agent-state"),
 )
 if err != nil {
     log.Fatal(err)
@@ -61,20 +50,12 @@ from sandbox0.apispec.models.create_sandbox_volume_request import CreateSandboxV
 workspace_volume = client.volumes.create(CreateSandboxVolumeRequest.from_dict({
     "access_mode": "RWO",
 }))
-agent_state_volume = client.volumes.create(CreateSandboxVolumeRequest.from_dict({
-    "access_mode": "RWO",
-}))
-
 sandbox = client.sandboxes.claim(
     "coding-agent",
     mounts=[
         ClaimMountRequest(
             sandboxvolume_id=workspace_volume.id,
             mount_point="/workspace",
-        ),
-        ClaimMountRequest(
-            sandboxvolume_id=agent_state_volume.id,
-            mount_point="/agent-state",
         ),
     ],
 )
@@ -88,19 +69,11 @@ print("Sandbox ID:", sandbox.id)`
 const workspaceVolume = await client.volumes.create({
     accessMode: models.VolumeAccessMode.Rwo,
 });
-const agentStateVolume = await client.volumes.create({
-    accessMode: models.VolumeAccessMode.Rwo,
-});
-
 const sandbox = await client.sandboxes.claim("coding-agent", {
     mounts: [
         {
             sandboxvolumeId: workspaceVolume.id,
             mountPoint: "/workspace",
-        },
-        {
-            sandboxvolumeId: agentStateVolume.id,
-            mountPoint: "/agent-state",
         },
     ],
 });
@@ -110,12 +83,9 @@ console.log("Sandbox ID:", sandbox.id);`
       label: "CLI",
       language: "bash",
       code: `WORKSPACE_VOLUME_ID="$(s0 -o json volume create --access-mode RWO | jq -r '.id')"
-AGENT_STATE_VOLUME_ID="$(s0 -o json volume create --access-mode RWO | jq -r '.id')"
-
 SANDBOX_ID="$(s0 -o json sandbox create \\
     --template coding-agent \\
     --mount "$WORKSPACE_VOLUME_ID:/workspace" \\
-    --mount "$AGENT_STATE_VOLUME_ID:/agent-state" \\
     | jq -r '.id')"
 
 printf 'Sandbox ID: %s\\n' "$SANDBOX_ID"`
@@ -123,7 +93,7 @@ printf 'Sandbox ID: %s\\n' "$SANDBOX_ID"`
   ]}
 />
 
-The volumes are optional. If omitted, both paths are writable directories in the sandbox rootfs and follow that sandbox identity's checkpoint lifecycle. Use volumes when repository or harness state must be managed independently from the sandbox.
+The Volume is optional. If omitted, `/workspace` is a writable directory in the sandbox rootfs and follows that sandbox identity's checkpoint lifecycle. Use a Volume when the repository and native harness state must persist independently from the sandbox.
 
 Do not bake provider credentials into the template image. For production, prefer [egress auth](/docs/credential/egress-auth), LLMProxy, or another narrowly scoped external model proxy. Session environment variables are returned as part of the session specification and should not be treated as a secret store.
 
@@ -145,7 +115,7 @@ harnesses := map[string]harnessSpec{
     "codex": {
         Command: []string{"codex", "app-server", "--stdio"},
         Env: apispec.ExecutionSessionSpecEnv{
-            "CODEX_HOME": "/agent-state/codex",
+            "HOME": "/workspace",
         },
     },
     "claude-code": {
@@ -159,26 +129,19 @@ harnesses := map[string]harnessSpec{
             "--dangerously-skip-permissions",
         },
         Env: apispec.ExecutionSessionSpecEnv{
-            "CLAUDE_CONFIG_DIR": "/agent-state/claude",
+            "HOME": "/workspace",
         },
     },
     "opencode": {
         Command: []string{"opencode", "acp", "--cwd", "/workspace"},
         Env: apispec.ExecutionSessionSpecEnv{
-            "XDG_CONFIG_HOME": "/agent-state/opencode/config",
-            "XDG_DATA_HOME":   "/agent-state/opencode/data",
-            "XDG_CACHE_HOME":  "/agent-state/opencode/cache",
+            "HOME": "/workspace",
         },
     },
     "pi": {
-        Command: []string{
-            "pi", "--mode", "rpc",
-            "--session-dir", "/agent-state/pi/sessions",
-            "--approve",
-        },
+        Command: []string{"pi", "--mode", "rpc", "--approve"},
         Env: apispec.ExecutionSessionSpecEnv{
-            "PI_CODING_AGENT_DIR":         "/agent-state/pi",
-            "PI_CODING_AGENT_SESSION_DIR": "/agent-state/pi/sessions",
+            "HOME": "/workspace",
         },
     },
 }
@@ -228,7 +191,7 @@ from sandbox0.apispec.models.execution_session_spec import ExecutionSessionSpec
 harnesses = {
     "codex": {
         "command": ["codex", "app-server", "--stdio"],
-        "env": {"CODEX_HOME": "/agent-state/codex"},
+        "env": {"HOME": "/workspace"},
     },
     "claude-code": {
         "command": [
@@ -240,26 +203,15 @@ harnesses = {
             "--permission-mode", "bypassPermissions",
             "--dangerously-skip-permissions",
         ],
-        "env": {"CLAUDE_CONFIG_DIR": "/agent-state/claude"},
+        "env": {"HOME": "/workspace"},
     },
     "opencode": {
         "command": ["opencode", "acp", "--cwd", "/workspace"],
-        "env": {
-            "XDG_CONFIG_HOME": "/agent-state/opencode/config",
-            "XDG_DATA_HOME": "/agent-state/opencode/data",
-            "XDG_CACHE_HOME": "/agent-state/opencode/cache",
-        },
+        "env": {"HOME": "/workspace"},
     },
     "pi": {
-        "command": [
-            "pi", "--mode", "rpc",
-            "--session-dir", "/agent-state/pi/sessions",
-            "--approve",
-        ],
-        "env": {
-            "PI_CODING_AGENT_DIR": "/agent-state/pi",
-            "PI_CODING_AGENT_SESSION_DIR": "/agent-state/pi/sessions",
-        },
+        "command": ["pi", "--mode", "rpc", "--approve"],
+        "env": {"HOME": "/workspace"},
     },
 }
 
@@ -294,7 +246,7 @@ print("Session ID:", session.id)`
 const harnesses: Record<string, HarnessSpec> = {
     codex: {
         command: ["codex", "app-server", "--stdio"],
-        env: { CODEX_HOME: "/agent-state/codex" },
+        env: { HOME: "/workspace" },
     },
     "claude-code": {
         command: [
@@ -306,26 +258,15 @@ const harnesses: Record<string, HarnessSpec> = {
             "--permission-mode", "bypassPermissions",
             "--dangerously-skip-permissions",
         ],
-        env: { CLAUDE_CONFIG_DIR: "/agent-state/claude" },
+        env: { HOME: "/workspace" },
     },
     opencode: {
         command: ["opencode", "acp", "--cwd", "/workspace"],
-        env: {
-            XDG_CONFIG_HOME: "/agent-state/opencode/config",
-            XDG_DATA_HOME: "/agent-state/opencode/data",
-            XDG_CACHE_HOME: "/agent-state/opencode/cache",
-        },
+        env: { HOME: "/workspace" },
     },
     pi: {
-        command: [
-            "pi", "--mode", "rpc",
-            "--session-dir", "/agent-state/pi/sessions",
-            "--approve",
-        ],
-        env: {
-            PI_CODING_AGENT_DIR: "/agent-state/pi",
-            PI_CODING_AGENT_SESSION_DIR: "/agent-state/pi/sessions",
-        },
+        command: ["pi", "--mode", "rpc", "--approve"],
+        env: { HOME: "/workspace" },
     },
 };
 
@@ -353,22 +294,20 @@ console.log("Session ID:", session.id);`
 
 case "$HARNESS" in
     codex)
-        ENV_ARGS=(--env CODEX_HOME=/agent-state/codex)
         COMMAND=(codex app-server --stdio)
         ;;
     claude-code)
-        ENV_ARGS=(--env CLAUDE_CONFIG_DIR=/agent-state/claude)
         COMMAND=(claude -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages --permission-mode bypassPermissions --dangerously-skip-permissions)
         ;;
     opencode)
-        ENV_ARGS=(--env XDG_CONFIG_HOME=/agent-state/opencode/config --env XDG_DATA_HOME=/agent-state/opencode/data --env XDG_CACHE_HOME=/agent-state/opencode/cache)
         COMMAND=(opencode acp --cwd /workspace)
         ;;
     pi)
-        ENV_ARGS=(--env PI_CODING_AGENT_DIR=/agent-state/pi --env PI_CODING_AGENT_SESSION_DIR=/agent-state/pi/sessions)
-        COMMAND=(pi --mode rpc --session-dir /agent-state/pi/sessions --approve)
+        COMMAND=(pi --mode rpc --approve)
         ;;
 esac
+
+ENV_ARGS=(--env HOME=/workspace)
 
 SESSION_ID="$(s0 -o json sandbox session create "$SANDBOX_ID" \\
     --name "$HARNESS" \\
@@ -601,7 +540,7 @@ s0 sandbox session delete "$SANDBOX_ID" "$SESSION_ID"`
   ]}
 />
 
-Then select the next entry from the harness map and create a new supervised session. `/workspace` preserves the repository, while each harness keeps native state in a separate directory below `/agent-state`.
+Then select the next entry from the harness map and create a new supervised session. The same `/workspace` Volume preserves both the repository and each harness's native home-relative state. Decide which metadata belongs in version control, and keep credentials and caches out of the repository.
 
 Do not replace a Codex session specification with a Claude Code, OpenCode, or Pi command. A new supervised session keeps each event journal, process attempt history, and native protocol stream internally consistent.
 

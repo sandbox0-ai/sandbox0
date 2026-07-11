@@ -35,13 +35,9 @@ RUN npm ci --omit=dev \
   && pi --version \
   && npm cache clean --force
 
-RUN mkdir -p \
-    /workspace \
-    /agent-state/codex \
-    /agent-state/claude \
-    /agent-state/opencode/config \
-    /agent-state/opencode/data \
-    /agent-state/pi/sessions
+RUN mkdir -p /workspace
+
+ENV HOME=/workspace
 
 WORKDIR /workspace
 

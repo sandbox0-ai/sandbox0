@@ -210,13 +210,10 @@ func codingAgentTemplateSpec() templatev1alpha1.SandboxTemplateSpec {
 				Name:      template.DefaultTemplateWorkspaceName,
 				MountPath: template.DefaultTemplateWorkspaceMount,
 			},
-			{
-				Name:      template.CodingAgentStateMountName,
-				MountPath: template.CodingAgentStateMount,
-			},
 		},
 		EnvVars: map[string]string{
 			"DISABLE_AUTOUPDATER":         "1",
+			"HOME":                        template.DefaultTemplateWorkspaceMount,
 			"OPENCODE_DISABLE_AUTOUPDATE": "1",
 			"PI_SKIP_VERSION_CHECK":       "1",
 			"PI_TELEMETRY":                "0",

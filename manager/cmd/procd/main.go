@@ -16,6 +16,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
 	procdhttp "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/http"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/reaper"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/session"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/trust"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/webhook"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -24,9 +26,6 @@ import (
 )
 
 func main() {
-	// // Start the reaper to clean up zombie processes
-	// go reaper.Reap()
-
 	// Load configuration
 	cfg := config.LoadProcdConfig()
 
@@ -45,6 +44,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer logger.Sync()
+	reaperCtx, reaperCancel := context.WithCancel(context.Background())
+	defer reaperCancel()
+	go reaper.Run(reaperCtx, logger)
 
 	logger.Info("Starting Procd",
 		zap.String("version", "1.0.0"),
@@ -70,7 +72,15 @@ func main() {
 	// Initialize managers
 	configureProcessOutputForwarding(logger)
 
-	contextManager := ctxpkg.NewManager()
+	sessionStore, err := session.NewFileStore(cfg.SessionStateDir)
+	if err != nil {
+		logger.Fatal("Failed to create session state store", zap.Error(err))
+	}
+	sessionSupervisor, err := session.NewSupervisor(sessionStore, logger)
+	if err != nil {
+		logger.Fatal("Failed to create session supervisor", zap.Error(err))
+	}
+	contextManager := ctxpkg.NewManagerWithSupervisor(sessionSupervisor)
 	contextManager.SetDefaultCleanupPolicy(ctxpkg.CleanupPolicy{
 		IdleTimeout: cfg.ContextIdleTimeout.Duration,
 		MaxLifetime: cfg.ContextMaxLifetime.Duration,
@@ -162,6 +172,7 @@ func main() {
 	server := procdhttp.NewServer(
 		cfg,
 		contextManager,
+		sessionSupervisor,
 		fileManager,
 		authValidator,
 		webhookDispatcher,
@@ -183,6 +194,7 @@ func main() {
 		logger.Info("Received shutdown signal", zap.String("signal", sig.String()))
 
 		cleanupCancel()
+		reaperCancel()
 
 		if _, err := webhookDispatcher.Enqueue(webhook.Event{
 			EventType: webhook.EventTypeSandboxKilled,
@@ -205,6 +217,9 @@ func main() {
 
 		// Cleanup managers
 		contextManager.Cleanup()
+		if err := sessionSupervisor.Close(); err != nil {
+			logger.Warn("Session supervisor shutdown error", zap.Error(err))
+		}
 		fileManager.Close()
 
 		if err := webhookDispatcher.Shutdown(context.Background()); err != nil {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process/repl"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/session"
 )
 
 // ContextResourceUsage represents resource usage for a single context.
@@ -55,6 +56,7 @@ type Manager struct {
 	onStart              process.StartHandler
 	defaultCleanupPolicy CleanupPolicy
 	cleanupOnce          sync.Once
+	supervisor           *session.Supervisor
 }
 
 // NewManager creates a new context manager.
@@ -62,6 +64,14 @@ func NewManager() *Manager {
 	return &Manager{
 		contexts: make(map[string]*Context),
 	}
+}
+
+// NewManagerWithSupervisor creates a compatibility context manager whose
+// process lifecycle is owned by the shared session supervisor.
+func NewManagerWithSupervisor(supervisor *session.Supervisor) *Manager {
+	manager := NewManager()
+	manager.supervisor = supervisor
+	return manager
 }
 
 // SetExitHandler sets a global exit handler for new contexts.
@@ -138,10 +148,22 @@ func (m *Manager) CreateContextWithPolicyAndREPLConfig(config process.ProcessCon
 		}
 	}
 
-	ctx, err := NewContext(config, replConfig, exitHandler, startHandler)
+	var ctx *Context
+	var err error
+	if m.supervisor == nil {
+		ctx, err = NewContext(config, replConfig, exitHandler, startHandler)
+	} else {
+		ctx, err = NewUnstartedContext(config, replConfig, exitHandler, startHandler)
+	}
 	if err != nil {
 		m.mu.Unlock()
 		return nil, err
+	}
+	if m.supervisor != nil {
+		if err := m.supervisor.StartTransient(ctx.ID, ctx.MainProcess); err != nil {
+			m.mu.Unlock()
+			return nil, err
+		}
 	}
 
 	if policy.isZero() {
@@ -190,7 +212,11 @@ func (m *Manager) DeleteContext(id string) error {
 		return ErrContextNotFound
 	}
 
-	_ = ctx.Stop()
+	if m.supervisor != nil {
+		_ = m.supervisor.DeleteTransient(id)
+	} else {
+		_ = ctx.Stop()
+	}
 
 	delete(m.contexts, id)
 	return nil
@@ -206,10 +232,17 @@ func (m *Manager) RestartContext(id string) (*Context, error) {
 		return nil, ErrContextNotFound
 	}
 
-	if err := ctx.Restart(); err != nil {
+	var err error
+	if m.supervisor != nil {
+		err = m.supervisor.RestartTransient(id)
+	} else {
+		err = ctx.Restart()
+	}
+	if err != nil {
 		m.mu.Unlock()
 		return nil, err
 	}
+	ctx.Touch()
 
 	m.mu.Unlock()
 	return ctx, nil
@@ -281,6 +314,26 @@ func (m *Manager) ReadOutput(contextID string) (<-chan process.ProcessOutput, er
 	return ctx.MainProcess.ReadOutput(), nil
 }
 
+// SubscribeOutput returns a cancellable output subscription for a context.
+func (m *Manager) SubscribeOutput(contextID string) (<-chan process.ProcessOutput, func(), error) {
+	ctx, err := m.GetContext(contextID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if ctx.MainProcess == nil {
+		return nil, nil, process.ErrProcessNotRunning
+	}
+	if subscriber, ok := ctx.MainProcess.(interface {
+		SubscribeOutput() (<-chan process.ProcessOutput, func())
+	}); ok {
+		output, cancel := subscriber.SubscribeOutput()
+		return output, cancel, nil
+	}
+
+	return ctx.MainProcess.ReadOutput(), func() {}, nil
+}
+
 // ResizePTY resizes the PTY for a context.
 func (m *Manager) ResizePTY(contextID string, size process.PTYSize) error {
 	ctx, err := m.GetContext(contextID)
@@ -307,7 +360,11 @@ func (m *Manager) Cleanup() {
 	defer m.mu.Unlock()
 
 	for _, ctx := range m.contexts {
-		ctx.Stop()
+		if m.supervisor != nil {
+			_ = m.supervisor.DeleteTransient(ctx.ID)
+		} else {
+			_ = ctx.Stop()
+		}
 	}
 
 	m.contexts = make(map[string]*Context)

@@ -2,6 +2,7 @@ package process
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"syscall"
@@ -60,6 +61,7 @@ type ProcessConfig struct {
 	PTYSize    *PTYSize          `json:"pty_size"`
 	Term       string            `json:"term"`
 	BufferSize int               `json:"buffer_size"` // Number of messages to buffer for the output multiplexer, default is 64 if not set
+	PipeStdin  bool              `json:"-"`           // Keep a pipe-backed stdin open for explicit input and EOF operations.
 }
 
 // ProcessDescriptor identifies the process that emitted an output event.
@@ -202,6 +204,8 @@ type BaseProcess struct {
 	pid             int
 	exitCode        int
 	pty             *os.File
+	input           io.WriteCloser
+	reliableOutput  chan ProcessOutput
 	outputMultiplex *MultiplexedChannel[ProcessOutput]
 	outputForwarder OutputForwarder
 	startTime       time.Time
@@ -214,12 +218,18 @@ type BaseProcess struct {
 
 	mu sync.RWMutex
 
-	inputQueue      chan []byte
+	inputQueue      chan inputOperation
 	inputReady      chan struct{}
 	inputStop       chan struct{}
 	inputReadyOnce  sync.Once
 	inputWriterOnce sync.Once
 	inputStopOnce   sync.Once
+}
+
+type inputOperation struct {
+	data  []byte
+	close bool
+	done  chan error
 }
 
 // NewBaseProcess creates a new base process.
@@ -235,7 +245,7 @@ func NewBaseProcess(id string, processType ProcessType, config ProcessConfig) *B
 		outputMultiplex: NewMultiplexedChannel[ProcessOutput](config.BufferSize),
 		outputForwarder: defaultOutputForwarderSnapshot(),
 		cpuTracker:      newCPUTracker(),
-		inputQueue:      make(chan []byte, config.BufferSize),
+		inputQueue:      make(chan inputOperation, config.BufferSize),
 		inputReady:      make(chan struct{}),
 		inputStop:       make(chan struct{}),
 	}
@@ -430,16 +440,30 @@ func (bp *BaseProcess) ReadOutput() <-chan ProcessOutput {
 	return ch
 }
 
+// SubscribeOutput returns a cancellable subscription to process output.
+func (bp *BaseProcess) SubscribeOutput() (<-chan ProcessOutput, func()) {
+	return bp.outputMultiplex.Fork()
+}
+
+// SetReliableOutput installs a lossless output sink for a process owner. The
+// process applies backpressure when the sink cannot keep up; ordinary fan-out
+// subscribers retain their existing best-effort behavior.
+func (bp *BaseProcess) SetReliableOutput(output chan ProcessOutput) {
+	bp.mu.Lock()
+	bp.reliableOutput = output
+	bp.mu.Unlock()
+}
+
 // WriteInput writes data to the process input.
 func (bp *BaseProcess) WriteInput(data []byte) error {
 	bp.mu.RLock()
-	pty := bp.pty
+	input := bp.input
 	bp.mu.RUnlock()
 
 	if len(data) == 0 {
 		return nil
 	}
-	if pty == nil {
+	if input == nil {
 		return ErrProcessNotRunning
 	}
 	if bp.IsFinished() {
@@ -450,10 +474,42 @@ func (bp *BaseProcess) WriteInput(data []byte) error {
 	copy(payload, data)
 
 	select {
-	case bp.inputQueue <- payload:
+	case bp.inputQueue <- inputOperation{data: payload}:
 		return nil
 	default:
 		return ErrInputBufferFull
+	}
+}
+
+// CloseInput closes the process stdin without stopping the process.
+func (bp *BaseProcess) CloseInput() error {
+	bp.mu.RLock()
+	input := bp.input
+	bp.mu.RUnlock()
+	if input == nil {
+		return nil
+	}
+	select {
+	case <-bp.inputStop:
+		bp.mu.Lock()
+		if bp.input == input {
+			bp.input = nil
+		}
+		bp.mu.Unlock()
+		return input.Close()
+	default:
+	}
+	done := make(chan error, 1)
+	select {
+	case bp.inputQueue <- inputOperation{close: true, done: done}:
+	case <-bp.inputStop:
+		return nil
+	}
+	select {
+	case err := <-done:
+		return err
+	case <-bp.inputStop:
+		return nil
 	}
 }
 
@@ -504,9 +560,19 @@ func (bp *BaseProcess) SetState(state ProcessState) {
 // SetPTY sets the PTY file descriptor.
 func (bp *BaseProcess) SetPTY(pty *os.File) {
 	bp.mu.Lock()
-	defer bp.mu.Unlock()
 	bp.pty = pty
-	bp.startInputWriter(pty)
+	bp.mu.Unlock()
+	bp.SetInput(pty)
+}
+
+// SetInput attaches a writable stdin stream to the process.
+func (bp *BaseProcess) SetInput(input io.WriteCloser) {
+	bp.mu.Lock()
+	bp.input = input
+	bp.mu.Unlock()
+	if input != nil {
+		bp.startInputWriter(input)
+	}
 }
 
 func (bp *BaseProcess) signalInputReady() {
@@ -526,7 +592,7 @@ func (bp *BaseProcess) stopInputWriter() {
 	})
 }
 
-func (bp *BaseProcess) startInputWriter(pty *os.File) {
+func (bp *BaseProcess) startInputWriter(input io.WriteCloser) {
 	bp.inputWriterOnce.Do(func() {
 		go func() {
 			select {
@@ -538,15 +604,33 @@ func (bp *BaseProcess) startInputWriter(pty *os.File) {
 				select {
 				case <-bp.inputStop:
 					return
-				case data := <-bp.inputQueue:
-					if len(data) == 0 {
+				case operation := <-bp.inputQueue:
+					if operation.close {
+						err := bp.closeInputWriter(input)
+						if operation.done != nil {
+							operation.done <- err
+						}
+						bp.stopInputWriter()
+						return
+					}
+					if len(operation.data) == 0 {
 						continue
 					}
-					_, _ = pty.Write(data)
+					_, _ = input.Write(operation.data)
 				}
 			}
 		}()
 	})
+}
+
+func (bp *BaseProcess) closeInputWriter(input io.WriteCloser) error {
+	err := input.Close()
+	bp.mu.Lock()
+	if bp.input == input {
+		bp.input = nil
+	}
+	bp.mu.Unlock()
+	return err
 }
 
 // SetPID sets the system process ID.
@@ -607,6 +691,11 @@ func (bp *BaseProcess) NotifyStart(event StartEvent) {
 
 // PublishOutput publishes output to all subscribers.
 func (bp *BaseProcess) PublishOutput(output ProcessOutput) {
+	bp.mu.RLock()
+	if bp.reliableOutput != nil {
+		bp.reliableOutput <- output
+	}
+	bp.mu.RUnlock()
 	bp.outputMultiplex.Publish(output)
 	if forwarder := bp.outputForwarderSnapshot(); forwarder != nil {
 		forwarder.ForwardOutput(bp.descriptor(), output)
@@ -618,6 +707,12 @@ func (bp *BaseProcess) CloseOutput() {
 	if forwarder, ok := bp.outputForwarderSnapshot().(FlushableOutputForwarder); ok && forwarder != nil {
 		forwarder.FlushProcessOutput(bp.descriptor())
 	}
+	bp.mu.Lock()
+	if bp.reliableOutput != nil {
+		close(bp.reliableOutput)
+		bp.reliableOutput = nil
+	}
+	bp.mu.Unlock()
 	bp.outputMultiplex.Close()
 }
 

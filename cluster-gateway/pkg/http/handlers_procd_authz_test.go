@@ -37,6 +37,36 @@ func TestSandboxProcdRoutesRequireReadWritePermissions(t *testing.T) {
 			permissions: []string{gatewayauthn.PermSandboxRead},
 		},
 		{
+			name:        "session create requires sandbox write",
+			method:      http.MethodPost,
+			path:        "/api/v1/sandboxes/sb-1/sessions",
+			permissions: []string{gatewayauthn.PermSandboxRead},
+		},
+		{
+			name:        "session input requires sandbox write",
+			method:      http.MethodPost,
+			path:        "/api/v1/sandboxes/sb-1/sessions/ses-1/inputs",
+			permissions: []string{gatewayauthn.PermSandboxRead},
+		},
+		{
+			name:        "session websocket requires sandbox write",
+			method:      http.MethodGet,
+			path:        "/api/v1/sandboxes/sb-1/sessions/ses-1/ws",
+			permissions: []string{gatewayauthn.PermSandboxRead},
+		},
+		{
+			name:        "session list requires sandbox read",
+			method:      http.MethodGet,
+			path:        "/api/v1/sandboxes/sb-1/sessions",
+			permissions: []string{gatewayauthn.PermSandboxWrite},
+		},
+		{
+			name:        "session event stream requires sandbox read",
+			method:      http.MethodGet,
+			path:        "/api/v1/sandboxes/sb-1/sessions/ses-1/events/stream",
+			permissions: []string{gatewayauthn.PermSandboxWrite},
+		},
+		{
 			name:        "context delete requires sandbox write",
 			method:      http.MethodDelete,
 			path:        "/api/v1/sandboxes/sb-1/contexts/ctx-1",

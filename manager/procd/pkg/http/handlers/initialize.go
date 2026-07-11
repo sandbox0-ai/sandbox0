@@ -11,6 +11,7 @@ import (
 
 	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/session"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/webhook"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
@@ -18,16 +19,17 @@ import (
 
 // InitializeHandler handles sandbox initialization requests.
 type InitializeHandler struct {
-	dispatcher     *webhook.Dispatcher
-	fileManager    *file.Manager
-	contextManager *ctxpkg.Manager
-	httpPort       int
-	logger         *zap.Logger
-	readyMu        sync.Mutex
-	readySentKey   string
-	watchMu        sync.Mutex
-	watchPath      string
-	unsubscribe    func() error
+	dispatcher        *webhook.Dispatcher
+	fileManager       *file.Manager
+	contextManager    *ctxpkg.Manager
+	sessionSupervisor *session.Supervisor
+	httpPort          int
+	logger            *zap.Logger
+	readyMu           sync.Mutex
+	readySentKey      string
+	watchMu           sync.Mutex
+	watchPath         string
+	unsubscribe       func() error
 }
 
 // NewInitializeHandler creates a new initialize handler.
@@ -43,11 +45,17 @@ func NewInitializeHandler(dispatcher *webhook.Dispatcher, fileManager *file.Mana
 
 // InitializeRequest is the request body for initializing sandbox settings.
 type InitializeRequest struct {
-	SandboxID string             `json:"sandbox_id"`
-	TeamID    string             `json:"team_id,omitempty"`
-	EnvVars   map[string]string  `json:"env_vars,omitempty"`
-	Webhook   *InitializeWebhook `json:"webhook,omitempty"`
-	MountDirs []string           `json:"mount_dirs,omitempty"`
+	SandboxID         string             `json:"sandbox_id"`
+	TeamID            string             `json:"team_id,omitempty"`
+	RuntimeGeneration int64              `json:"runtime_generation,omitempty"`
+	EnvVars           map[string]string  `json:"env_vars,omitempty"`
+	Webhook           *InitializeWebhook `json:"webhook,omitempty"`
+	MountDirs         []string           `json:"mount_dirs,omitempty"`
+}
+
+// SetSessionSupervisor configures persisted session reconciliation during initialization.
+func (h *InitializeHandler) SetSessionSupervisor(supervisor *session.Supervisor) {
+	h.sessionSupervisor = supervisor
 }
 
 // InitializeWebhook represents webhook configuration.
@@ -118,6 +126,12 @@ func (h *InitializeHandler) Initialize(w http.ResponseWriter, r *http.Request) {
 	if h.contextManager != nil {
 		h.contextManager.SetSandboxEnvVars(req.EnvVars)
 	}
+	if h.sessionSupervisor != nil {
+		if err := h.sessionSupervisor.Initialize(req.SandboxID, req.RuntimeGeneration, req.EnvVars); err != nil {
+			writeError(w, http.StatusInternalServerError, "session_initialize_failed", err.Error())
+			return
+		}
+	}
 
 	h.dispatcher.SetConfig(webhookURL, webhookSecret)
 	h.dispatcher.SetIdentity(req.SandboxID, teamID)
@@ -186,6 +200,14 @@ func (h *InitializeHandler) UpdateSandboxEnvVars(w http.ResponseWriter, r *http.
 		h.contextManager.SetSandboxEnvVars(req.EnvVars)
 		if current := h.contextManager.SandboxEnvVars(); current != nil {
 			envVars = current
+		}
+	}
+	if h.sessionSupervisor != nil {
+		h.sessionSupervisor.SetSandboxEnvVars(req.EnvVars)
+	}
+	if h.contextManager == nil {
+		for key, value := range req.EnvVars {
+			envVars[key] = value
 		}
 	}
 	writeJSON(w, http.StatusOK, UpdateSandboxEnvVarsResponse{EnvVars: envVars})

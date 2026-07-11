@@ -16,6 +16,7 @@ import (
 	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/http/handlers"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/session"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/webhook"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -35,8 +36,9 @@ type Server struct {
 	obsProvider *observability.Provider
 
 	// Managers
-	contextManager *ctxpkg.Manager
-	fileManager    *file.Manager
+	contextManager    *ctxpkg.Manager
+	sessionSupervisor *session.Supervisor
+	fileManager       *file.Manager
 
 	// Internal auth validator
 	authValidator *internalauth.Validator
@@ -52,6 +54,7 @@ type Server struct {
 func NewServer(
 	cfg *config.ProcdConfig,
 	contextManager *ctxpkg.Manager,
+	sessionSupervisor *session.Supervisor,
 	fileManager *file.Manager,
 	authValidator *internalauth.Validator,
 	webhookDispatcher *webhook.Dispatcher,
@@ -63,6 +66,7 @@ func NewServer(
 		router:            mux.NewRouter(),
 		cfg:               cfg,
 		contextManager:    contextManager,
+		sessionSupervisor: sessionSupervisor,
 		fileManager:       fileManager,
 		authValidator:     authValidator,
 		barrier:           newLifecycleBarrier(),
@@ -103,7 +107,7 @@ func (s *Server) setupRoutes() {
 	api.Use(s.barrier.middleware)
 
 	// Sandbox-level handlers (pause/resume all processes)
-	sandboxHandler := handlers.NewSandboxHandler(s.contextManager, s.webhookDispatcher, s.logger)
+	sandboxHandler := handlers.NewSandboxHandler(s.contextManager, s.sessionSupervisor, s.webhookDispatcher, s.logger)
 	api.HandleFunc("/lifecycle/barrier", s.lifecycleBarrierHandler).Methods("PUT")
 	api.HandleFunc("/sandbox/pause", sandboxHandler.Pause).Methods("POST")
 	api.HandleFunc("/sandbox/resume", sandboxHandler.Resume).Methods("POST")
@@ -123,6 +127,23 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/contexts/{id}/stats", contextHandler.Stats).Methods("GET")
 	api.HandleFunc("/contexts/{id}/ws", contextHandler.WebSocket).Methods("GET")
 
+	if s.sessionSupervisor != nil {
+		sessionHandler := handlers.NewSessionHandler(s.sessionSupervisor, s.logger)
+		api.HandleFunc("/sessions", sessionHandler.List).Methods("GET")
+		api.HandleFunc("/sessions", sessionHandler.Create).Methods("POST")
+		api.HandleFunc("/sessions/{id}", sessionHandler.Get).Methods("GET")
+		api.HandleFunc("/sessions/{id}", sessionHandler.Update).Methods("PUT")
+		api.HandleFunc("/sessions/{id}", sessionHandler.Delete).Methods("DELETE")
+		api.HandleFunc("/sessions/{id}/desired-state", sessionHandler.SetDesiredState).Methods("PUT")
+		api.HandleFunc("/sessions/{id}/attempts", sessionHandler.CreateAttempt).Methods("POST")
+		api.HandleFunc("/sessions/{id}/inputs", sessionHandler.WriteInput).Methods("POST")
+		api.HandleFunc("/sessions/{id}/signals", sessionHandler.SendSignal).Methods("POST")
+		api.HandleFunc("/sessions/{id}/terminal", sessionHandler.ResizeTerminal).Methods("PUT")
+		api.HandleFunc("/sessions/{id}/events", sessionHandler.Events).Methods("GET")
+		api.HandleFunc("/sessions/{id}/events/stream", sessionHandler.EventStream).Methods("GET")
+		api.HandleFunc("/sessions/{id}/ws", sessionHandler.WebSocket).Methods("GET")
+	}
+
 	functionHandler := handlers.NewFunctionHandler(s.logger)
 	if s.contextManager != nil {
 		functionHandler.SetSandboxEnvVarsProvider(s.contextManager.SandboxEnvVars)
@@ -133,6 +154,7 @@ func (s *Server) setupRoutes() {
 
 	// Initialize handler
 	initializeHandler := handlers.NewInitializeHandler(s.webhookDispatcher, s.fileManager, s.contextManager, s.cfg.HTTPPort, s.logger)
+	initializeHandler.SetSessionSupervisor(s.sessionSupervisor)
 	api.HandleFunc("/initialize", initializeHandler.Initialize).Methods("POST")
 	api.HandleFunc("/sandbox/env_vars", initializeHandler.UpdateSandboxEnvVars).Methods("PUT")
 

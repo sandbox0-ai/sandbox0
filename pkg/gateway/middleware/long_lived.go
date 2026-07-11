@@ -29,7 +29,15 @@ func RequestShouldBeLongLived(req *http.Request) bool {
 	if proxy.IsWebSocketUpgrade(req) {
 		return true
 	}
-	return isSandboxObservabilityWatchRequest(req)
+	return isSandboxObservabilityWatchRequest(req) || isSandboxSessionEventStreamRequest(req)
+}
+
+func isSandboxSessionEventStreamRequest(req *http.Request) bool {
+	if req.Method != http.MethodGet || req.URL == nil {
+		return false
+	}
+	path := strings.TrimRight(req.URL.Path, "/")
+	return strings.HasPrefix(path, "/api/v1/sandboxes/") && strings.HasSuffix(path, "/events/stream") && strings.Contains(path, "/sessions/")
 }
 
 func isSandboxObservabilityWatchRequest(req *http.Request) bool {

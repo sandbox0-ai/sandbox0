@@ -428,9 +428,6 @@ func (m *Manager) RootFSPortalPaths(podUID string) []ctldapi.RootFSPortalPath {
 		if pm == nil || pm.podUID != podUID || pm.volumeID != "" {
 			continue
 		}
-		if pm.name == volumeportal.WebhookStatePortalName || pm.mountPath == volumeportal.WebhookStateMountPath {
-			continue
-		}
 		if strings.TrimSpace(pm.mountPath) == "" || strings.TrimSpace(pm.rootfsBackingPath) == "" {
 			continue
 		}

@@ -57,11 +57,15 @@ type ProcdConfig struct {
 	// +optional
 	// +kubebuilder:default="/var/lib/sandbox0/procd/webhook-outbox"
 	WebhookOutboxDir string `yaml:"webhook_outbox_dir" json:"webhookOutboxDir"`
+	// +optional
+	// +kubebuilder:default="/var/lib/sandbox0/procd/sessions"
+	SessionStateDir string `yaml:"session_state_dir" json:"sessionStateDir"`
 
 	setKeys map[string]bool `yaml:"-" json:"-"`
 }
 
 const DefaultWebhookOutboxDir = "/var/lib/sandbox0/procd/webhook-outbox"
+const DefaultSessionStateDir = "/var/lib/sandbox0/procd/sessions"
 
 // UnmarshalYAML captures configured keys without hardcoding them.
 func (c *ProcdConfig) UnmarshalYAML(value *yaml.Node) error {
@@ -128,13 +132,23 @@ var (
 // LoadProcdConfig returns the procd configuration.
 func LoadProcdConfig() *ProcdConfig {
 	procdCfgOnce.Do(func() {
-		cfg := ProcdConfig{WebhookOutboxDir: DefaultWebhookOutboxDir}
+		cfg := ProcdConfig{
+			WebhookOutboxDir: DefaultWebhookOutboxDir,
+			SessionStateDir:  DefaultSessionStateDir,
+		}
 		if err := applyProcdEnvOverrides(&cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to apply procd env overrides: %v\n", err)
 		}
+		cfg.applyDefaults()
 		procdCfg = &cfg
 	})
 	return procdCfg
+}
+
+func (c *ProcdConfig) applyDefaults() {
+	if strings.TrimSpace(c.SessionStateDir) == "" {
+		c.SessionStateDir = DefaultSessionStateDir
+	}
 }
 
 // Validate checks if the configuration is valid.

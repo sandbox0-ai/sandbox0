@@ -928,10 +928,11 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get output channel
-	outputCh, err := h.manager.ReadOutput(id)
+	outputCh, cancelOutput, err := h.manager.SubscribeOutput(id)
 	if err != nil {
 		return
 	}
+	defer cancelOutput()
 
 	// Write output to WebSocket
 	go func() {

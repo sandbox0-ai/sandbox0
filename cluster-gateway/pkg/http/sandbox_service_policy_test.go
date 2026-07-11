@@ -587,25 +587,23 @@ func TestSandboxFunctionServiceProxiesWebSocketAfterPausedAutoResume(t *testing.
 	}
 }
 
-func TestSandboxCMDServiceStartsContextBeforeProxy(t *testing.T) {
+func TestSandboxCMDServiceStartsSessionBeforeProxy(t *testing.T) {
 	var created atomic.Bool
-	var createReq procdCreateContextRequest
+	var createReq procdSessionSpec
 	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/contexts":
-			_ = spec.WriteSuccess(w, http.StatusOK, procdContextListResponse{})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/contexts":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sessions":
+			_ = spec.WriteSuccess(w, http.StatusOK, procdSessionListResponse{})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions":
 			if err := json.NewDecoder(r.Body).Decode(&createReq); err != nil {
-				t.Fatalf("decode create context request: %v", err)
+				t.Fatalf("decode create session request: %v", err)
+			}
+			if got := r.Header.Get("Idempotency-Key"); got != "sandbox-service-runtime:api" {
+				t.Fatalf("Idempotency-Key = %q", got)
 			}
 			created.Store(true)
-			_ = spec.WriteSuccess(w, http.StatusCreated, procdContextResponse{
-				ID:      "ctx-service",
-				Type:    "cmd",
-				Command: createReq.Cmd.Command,
-				CWD:     createReq.CWD,
-				EnvVars: createReq.EnvVars,
-				Running: true,
+			_ = spec.WriteSuccess(w, http.StatusCreated, procdSessionResponse{
+				ID: "ses-service", Spec: createReq, Phase: "running",
 			})
 		default:
 			t.Fatalf("unexpected procd request %s %s", r.Method, r.URL.Path)
@@ -615,7 +613,7 @@ func TestSandboxCMDServiceStartsContextBeforeProxy(t *testing.T) {
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !created.Load() {
-			t.Fatalf("upstream hit before cmd context was created")
+			t.Fatalf("upstream hit before cmd session was created")
 		}
 		if r.URL.Path == "/healthz" {
 			w.WriteHeader(http.StatusNoContent)
@@ -672,14 +670,115 @@ func TestSandboxCMDServiceStartsContextBeforeProxy(t *testing.T) {
 	if string(body) != "cmd ok" {
 		t.Fatalf("body = %q, want cmd ok", string(body))
 	}
-	if createReq.Type != "cmd" || createReq.Cmd == nil || len(createReq.Cmd.Command) == 0 {
-		t.Fatalf("create context request = %+v, want cmd command", createReq)
+	if createReq.Name != "sandbox-service:api" || len(createReq.Command) == 0 || createReq.IO.Mode != "pipes" {
+		t.Fatalf("create session request = %+v, want supervised pipe command", createReq)
 	}
-	if createReq.EnvVars[sandboxServiceRuntimeServiceIDEnv] != "api" || createReq.EnvVars[sandboxServiceRuntimePortEnv] != strconv.Itoa(port) {
-		t.Fatalf("service env vars = %#v, want service identity and port", createReq.EnvVars)
+	if createReq.Env[sandboxServiceRuntimeServiceIDEnv] != "api" || createReq.Env[sandboxServiceRuntimePortEnv] != strconv.Itoa(port) {
+		t.Fatalf("service env vars = %#v, want service identity and port", createReq.Env)
 	}
-	if createReq.EnvVars["APP_ENV"] != "test" {
-		t.Fatalf("APP_ENV = %q, want test", createReq.EnvVars["APP_ENV"])
+	if createReq.Env["APP_ENV"] != "test" {
+		t.Fatalf("APP_ENV = %q, want test", createReq.Env["APP_ENV"])
+	}
+	if createReq.Lifecycle.Restart.Policy != "on_failure" || createReq.Lifecycle.RuntimeRecovery != "restart" {
+		t.Fatalf("lifecycle = %#v, want restartable session", createReq.Lifecycle)
+	}
+}
+
+func TestEnsureSandboxCMDServiceReconcilesExistingSession(t *testing.T) {
+	service := &mgr.SandboxAppService{
+		ID:   "api",
+		Port: 8080,
+		Runtime: &mgr.SandboxAppServiceRuntime{
+			Type:    mgr.SandboxAppServiceRuntimeCMD,
+			Command: []string{"server", "--port", "8080"},
+			CWD:     "/workspace",
+			EnvVars: map[string]string{"APP_ENV": "test"},
+		},
+	}
+	desired := sandboxServiceCMDSessionSpec(service)
+
+	tests := []struct {
+		name          string
+		candidate     procdSessionResponse
+		wantPath      string
+		assertRequest func(*testing.T, *http.Request)
+	}{
+		{
+			name:      "restart exited matching session",
+			candidate: procdSessionResponse{ID: "ses-service", Spec: desired, Phase: "exited"},
+			wantPath:  "/api/v1/sessions/ses-service/desired-state",
+			assertRequest: func(t *testing.T, r *http.Request) {
+				var request map[string]string
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Fatal(err)
+				}
+				if request["state"] != "running" {
+					t.Fatalf("desired state request = %#v", request)
+				}
+			},
+		},
+		{
+			name: "replace drifted session spec",
+			candidate: procdSessionResponse{
+				ID: "ses-service",
+				Spec: procdSessionSpec{
+					Name:      desired.Name,
+					Command:   []string{"old-server"},
+					CWD:       desired.CWD,
+					Env:       desired.Env,
+					IO:        desired.IO,
+					Lifecycle: desired.Lifecycle,
+				},
+				Phase: "running",
+			},
+			wantPath: "/api/v1/sessions/ses-service",
+			assertRequest: func(t *testing.T, r *http.Request) {
+				var request procdSessionSpec
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Fatal(err)
+				}
+				if !sandboxServiceSessionSpecMatches(request, desired) {
+					t.Fatalf("updated spec = %#v, want %#v", request, desired)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var reconciled atomic.Bool
+			procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sessions":
+					_ = spec.WriteSuccess(w, http.StatusOK, procdSessionListResponse{Sessions: []procdSessionResponse{tt.candidate}})
+				case r.Method == http.MethodPut && r.URL.Path == tt.wantPath:
+					tt.assertRequest(t, r)
+					reconciled.Store(true)
+					_ = spec.WriteSuccess(w, http.StatusOK, procdSessionResponse{ID: tt.candidate.ID, Spec: desired, Phase: "running"})
+				default:
+					t.Fatalf("unexpected procd request %s %s", r.Method, r.URL.Path)
+				}
+			}))
+			defer procd.Close()
+
+			_, privateKey, err := ed25519.GenerateKey(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := &Server{
+				logger: zap.NewNop(),
+				internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{
+					Caller: "cluster-gateway", PrivateKey: privateKey, TTL: time.Minute,
+				}),
+			}
+			sandbox := &mgr.Sandbox{ID: "sb-demo", TeamID: "team-1", UserID: "user-1", InternalAddr: procd.URL}
+			if err := server.ensureSandboxServiceCMDSession(t.Context(), sandbox, service); err != nil {
+				t.Fatal(err)
+			}
+			if !reconciled.Load() {
+				t.Fatal("existing session was not reconciled")
+			}
+		})
 	}
 }
 
@@ -687,11 +786,11 @@ func TestSandboxCMDServiceStartsAfterPausedAutoResume(t *testing.T) {
 	var created atomic.Bool
 	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/contexts":
-			_ = spec.WriteSuccess(w, http.StatusOK, procdContextListResponse{})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/contexts":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sessions":
+			_ = spec.WriteSuccess(w, http.StatusOK, procdSessionListResponse{})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions":
 			created.Store(true)
-			_ = spec.WriteSuccess(w, http.StatusCreated, procdContextResponse{ID: "ctx-service", Type: "cmd", Running: true})
+			_ = spec.WriteSuccess(w, http.StatusCreated, procdSessionResponse{ID: "ses-service", Phase: "running"})
 		default:
 			t.Fatalf("unexpected procd request %s %s", r.Method, r.URL.Path)
 		}
@@ -700,7 +799,7 @@ func TestSandboxCMDServiceStartsAfterPausedAutoResume(t *testing.T) {
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !created.Load() {
-			t.Fatalf("upstream hit before cmd context was created")
+			t.Fatalf("upstream hit before cmd session was created")
 		}
 		_, _ = w.Write([]byte("resumed cmd ok"))
 	}))
@@ -764,7 +863,7 @@ func TestSandboxCMDServiceStartsAfterPausedAutoResume(t *testing.T) {
 		t.Fatal("manager resume was not called")
 	}
 	if !created.Load() {
-		t.Fatal("cmd context was not created after resume")
+		t.Fatal("cmd session was not created after resume")
 	}
 }
 

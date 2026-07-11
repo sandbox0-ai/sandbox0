@@ -4,9 +4,22 @@ Run Codex, Claude Code, OpenCode, or Pi inside a Sandbox0 sandbox when you want 
 
 The builtin `coding-agent` template installs all four native CLIs and declares `/workspace` as its writable mount point.
 
+## Why Supervised Sessions?
+
+A coding agent can run much longer than any one client connection. The client process can restart, a developer laptop can sleep, or an intermediary can drop an SSE or WebSocket connection. None of those events should end the coding agent process or discard output produced while the client is offline.
+
+A supervised session makes the coding agent a sandbox-owned resource. The client drives it through explicit operations and consumes a retained event stream instead of owning the process through one live network connection:
+
+1. disconnecting an SDK event stream, SSE connection, or WebSocket only detaches that client; the current process attempt keeps running
+2. process output and lifecycle changes are appended to an ordered event journal with a monotonically increasing `seq`
+3. the client commits its last processed `seq`, reconnects with `after`, replays missed events, and then continues with live events
+4. input, signals, stop, and EOF remain explicit operations, so a network disconnect is not interpreted as EOF or session shutdown
+
+This event-driven boundary separates connection continuity from coding agent availability. It does not preserve a running process when the entire sandbox runtime is replaced: `runtime_recovery: restart` starts a new attempt, after which the client must initialize the native harness protocol again and resume its saved native thread or session ID where supported.
+
 ## Choose A Coding Agent
 
-Each coding agent remains a native subprocess. Session Supervisor owns process lifetime, stdin/stdout transport, restart attempts, and the replayable event journal; it does not translate one agent protocol into another.
+Each coding agent remains a native subprocess and keeps its native protocol; Session Supervisor does not translate one agent protocol into another.
 
 The template sets both the container's operating-system `HOME` and every supervised session's `cwd` to `/workspace`. A claim binds the selected workspace Volume there, so the repository and each harness's native home-relative state share the same persistent mount. For example, Codex uses `/workspace/.codex`, Claude Code uses `/workspace/.claude`, OpenCode follows XDG defaults below `/workspace`, and Pi uses `/workspace/.pi/agent`.
 

@@ -735,19 +735,22 @@ func mountpointS3PodLogs(env *framework.ScenarioEnv, namespace, podName string) 
 		builder.WriteString("\nprocd logs:\n")
 		builder.WriteString(output)
 	}
-	ctldOutput, ctldErr := framework.KubectlOutput(
-		env.TestCtx.Context,
-		env.Config.Kubeconfig,
-		"logs", "daemonset/"+env.Infra.Name+"-ctld",
-		"--namespace", env.Infra.Namespace,
-		"--all-containers",
-		"--tail", "300",
-	)
-	if ctldErr != nil {
-		builder.WriteString(fmt.Sprintf("\nctld logs unavailable: %v\n%s", ctldErr, ctldOutput))
-	} else {
-		builder.WriteString("\nctld logs:\n")
-		builder.WriteString(ctldOutput)
+	for _, slot := range []string{"a", "b"} {
+		name := env.Infra.Name + "-ctld-" + slot
+		ctldOutput, ctldErr := framework.KubectlOutput(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			"logs", "daemonset/"+name,
+			"--namespace", env.Infra.Namespace,
+			"--all-containers",
+			"--tail", "300",
+		)
+		if ctldErr != nil {
+			builder.WriteString(fmt.Sprintf("\n%s logs unavailable: %v\n%s", name, ctldErr, ctldOutput))
+		} else {
+			builder.WriteString("\n" + name + " logs:\n")
+			builder.WriteString(ctldOutput)
+		}
 	}
 	return builder.String()
 }

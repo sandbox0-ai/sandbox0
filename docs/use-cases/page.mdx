@@ -39,12 +39,14 @@ Self-hosted deployments seed these public builtin templates when `spec.builtinTe
 s0 template get openclaw
 s0 template get hermes
 s0 template get browser
+s0 template get coding-agent
 ```
 
 Operators can pin images, tune pools, or remove a template by setting `Sandbox0Infra.spec.builtinTemplates` explicitly. The default builtin images are:
 
 | Template | Image |
 |----------|-------|
+| `coding-agent` | `sandbox0ai/otemplates:coding-agent-v0.1.0` |
 | `openclaw` | `ghcr.io/openclaw/openclaw:latest` |
 | `hermes` | `nousresearch/hermes-agent:latest` |
 | `browser` | `ghcr.io/steel-dev/steel-browser:latest` |
@@ -71,6 +73,10 @@ Prefer one of these patterns:
 ## Guides
 
 <CardGroup>
+  <Card title="Coding Agents" href="/docs/sandbox/use-cases/coding-agents" cta="Continue">
+    Drive Codex, Claude Code, OpenCode, or Pi through native protocols and supervised sessions.
+  </Card>
+
   <Card title="Hosting OpenClaw" href="/docs/sandbox/use-cases/openclaw" cta="Continue">
     Run the OpenClaw gateway from the builtin OpenClaw template with persistent state.
   </Card>

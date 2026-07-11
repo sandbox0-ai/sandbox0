@@ -1,0 +1,13 @@
+{
+  "name": "sandbox0-coding-agents",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pinned coding agents installed in the Sandbox0 coding-agent template.",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.207",
+    "@earendil-works/pi-coding-agent": "0.80.6",
+    "@openai/codex": "0.144.1",
+    "opencode-ai": "1.17.18"
+  }
+}

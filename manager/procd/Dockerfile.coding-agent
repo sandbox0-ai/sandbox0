@@ -1,0 +1,48 @@
+# Sandbox0 coding-agent template.
+# This image intentionally does NOT define an ENTRYPOINT/CMD. The platform
+# injects and starts procd, then Session Supervisor owns each coding agent.
+
+FROM sandbox0ai/otemplates:default-v0.2.0
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    DISABLE_AUTOUPDATER=1 \
+    OPENCODE_DISABLE_AUTOUPDATE=1 \
+    PI_SKIP_VERSION_CHECK=1 \
+    PI_TELEMETRY=0
+
+# Claude Code and Pi require Node.js 22. Pi currently requires Node.js 22.19+
+# specifically, so fail the build if the repository ever resolves an older 22.x.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+  && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+  && apt-get install -y --no-install-recommends nodejs \
+  && node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 22 || (major === 22 && minor < 19)) process.exit(1)' \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/coding-agents
+
+COPY manager/procd/coding-agents/package.json manager/procd/coding-agents/package-lock.json ./
+COPY manager/procd/coding-agents/THIRD_PARTY.md ./
+
+RUN npm ci --omit=dev \
+  && for agent in codex claude opencode pi; do ln -sf "/opt/coding-agents/node_modules/.bin/$agent" "/usr/local/bin/$agent"; done \
+  && codex --version \
+  && claude --version \
+  && opencode --version \
+  && pi --version \
+  && npm cache clean --force
+
+RUN mkdir -p \
+    /workspace \
+    /agent-state/codex \
+    /agent-state/claude \
+    /agent-state/opencode/config \
+    /agent-state/opencode/data \
+    /agent-state/pi/sessions
+
+WORKDIR /workspace
+
+# Intentionally no ENTRYPOINT/CMD here.

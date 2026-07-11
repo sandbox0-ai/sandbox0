@@ -3,6 +3,7 @@ package portal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -116,7 +117,41 @@ func (m *Manager) registerOwner(ctx context.Context, bound *boundVolume) error {
 	if ownerPodID == "" {
 		return fmt.Errorf("ctld pod identity unavailable")
 	}
+	if err := m.acquireOwner(ctx, bound, ownerPodID); err != nil {
+		return err
+	}
 
+	interval := m.heartbeatInterval
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	heartbeatCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	bound.heartbeatCancel = cancel
+	bound.heartbeatDone = done
+	go func(volumeID string) {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				err := m.repo.UpdateMountHeartbeat(context.Background(), volumeID, m.clusterID, ownerPodID)
+				if errors.Is(err, db.ErrNotFound) {
+					err = m.acquireOwner(context.Background(), bound, ownerPodID)
+				}
+				if err != nil && m.logger != nil {
+					m.logger.Warn("ctld volume owner heartbeat failed", zap.String("volume_id", volumeID), zap.Error(err))
+				}
+			}
+		}
+	}(bound.volumeID)
+	return nil
+}
+
+func (m *Manager) acquireOwner(ctx context.Context, bound *boundVolume, ownerPodID string) error {
 	opts := volume.MountOptions{
 		AccessMode:   bound.access,
 		OwnerKind:    volume.OwnerKindCtld,
@@ -145,30 +180,6 @@ func (m *Manager) registerOwner(ctx context.Context, bound *boundVolume) error {
 	if err := m.repo.AcquireMount(ctx, mount, heartbeatTimeout); err != nil {
 		return err
 	}
-
-	interval := m.heartbeatInterval
-	if interval <= 0 {
-		interval = 5 * time.Second
-	}
-	heartbeatCtx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	bound.heartbeatCancel = cancel
-	bound.heartbeatDone = done
-	go func(volumeID string) {
-		defer close(done)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-heartbeatCtx.Done():
-				return
-			case <-ticker.C:
-				if err := m.repo.UpdateMountHeartbeat(context.Background(), volumeID, m.clusterID, ownerPodID); err != nil && m.logger != nil {
-					m.logger.Warn("ctld volume owner heartbeat failed", zap.String("volume_id", volumeID), zap.Error(err))
-				}
-			}
-		}
-	}(bound.volumeID)
 	return nil
 }
 

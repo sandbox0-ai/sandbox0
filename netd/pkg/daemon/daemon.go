@@ -134,6 +134,7 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 	if err != nil {
 		return fmt.Errorf("create k8s client: %w", err)
 	}
+	warnIfCiliumMayBypassNetd(ctx, client, d.cfg.NodeName, d.logger)
 
 	netdWatcher := watcher.NewWatcher(client, d.cfg.ResyncPeriod.Duration, d.logger)
 	policyStore := policy.NewStore(d.logger)

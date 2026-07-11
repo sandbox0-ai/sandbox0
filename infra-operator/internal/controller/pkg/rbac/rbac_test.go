@@ -127,6 +127,37 @@ func TestReconcileManagerRBACIncludesPodLogsReadPermission(t *testing.T) {
 	assert.True(t, found, "expected manager cluster role to include pods/log read permission")
 }
 
+func TestReconcileNetdRBACLimitsCNIConfigMapRead(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, rbacv1.AddToScheme(scheme))
+	require.NoError(t, infrav1alpha1.AddToScheme(scheme))
+
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(infra).Build()
+	reconciler := NewReconciler(&common.ResourceManager{Client: client, Scheme: scheme})
+
+	require.NoError(t, reconciler.ReconcileNetdRBAC(context.Background(), infra))
+
+	role := &rbacv1.ClusterRole{}
+	require.NoError(t, client.Get(context.Background(), types.NamespacedName{Name: "demo-netd"}, role))
+
+	for _, rule := range role.Rules {
+		if !contains(rule.APIGroups, "") || !contains(rule.Resources, "configmaps") {
+			continue
+		}
+		assert.ElementsMatch(t, []string{"get"}, rule.Verbs)
+		assert.ElementsMatch(t, []string{"cilium-config", "eni-config"}, rule.ResourceNames)
+		return
+	}
+	t.Fatal("expected netd cluster role to include limited CNI ConfigMap read permission")
+}
+
 func TestReconcileCtldRBACIncludesPodReadPermissions(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))

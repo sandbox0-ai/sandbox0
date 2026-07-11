@@ -121,6 +121,12 @@ func (r *Reconciler) ReconcileNetdRBAC(ctx context.Context, infra *infrav1alpha1
 			Verbs:     []string{"get", "list", "watch", "patch"},
 		},
 		{
+			APIGroups:     []string{""},
+			Resources:     []string{"configmaps"},
+			ResourceNames: []string{"cilium-config", "eni-config"},
+			Verbs:         []string{"get"},
+		},
+		{
 			APIGroups: []string{"discovery.k8s.io"},
 			Resources: []string{"endpointslices"},
 			Verbs:     []string{"get", "list", "watch"},

@@ -125,8 +125,10 @@ harnesses := map[string]harnessSpec{
             "--output-format", "stream-json",
             "--verbose",
             "--replay-user-messages",
-            "--permission-mode", "bypassPermissions",
-            "--dangerously-skip-permissions",
+            "--permission-mode", "dontAsk",
+            "--allowedTools",
+            "Bash", "Edit", "Write", "Read", "Glob", "Grep",
+            "WebFetch", "WebSearch", "Agent",
         },
         Env: apispec.ExecutionSessionSpecEnv{
             "HOME": "/workspace",
@@ -200,8 +202,10 @@ harnesses = {
             "--output-format", "stream-json",
             "--verbose",
             "--replay-user-messages",
-            "--permission-mode", "bypassPermissions",
-            "--dangerously-skip-permissions",
+            "--permission-mode", "dontAsk",
+            "--allowedTools",
+            "Bash", "Edit", "Write", "Read", "Glob", "Grep",
+            "WebFetch", "WebSearch", "Agent",
         ],
         "env": {"HOME": "/workspace"},
     },
@@ -255,8 +259,10 @@ const harnesses: Record<string, HarnessSpec> = {
             "--output-format", "stream-json",
             "--verbose",
             "--replay-user-messages",
-            "--permission-mode", "bypassPermissions",
-            "--dangerously-skip-permissions",
+            "--permission-mode", "dontAsk",
+            "--allowedTools",
+            "Bash", "Edit", "Write", "Read", "Glob", "Grep",
+            "WebFetch", "WebSearch", "Agent",
         ],
         env: { HOME: "/workspace" },
     },
@@ -297,7 +303,15 @@ case "$HARNESS" in
         COMMAND=(codex app-server --stdio)
         ;;
     claude-code)
-        COMMAND=(claude -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages --permission-mode bypassPermissions --dangerously-skip-permissions)
+        COMMAND=(
+            claude -p
+            --input-format stream-json
+            --output-format stream-json
+            --verbose
+            --replay-user-messages
+            --permission-mode dontAsk
+            --allowedTools Bash Edit Write Read Glob Grep WebFetch WebSearch Agent
+        )
         ;;
     opencode)
         COMMAND=(opencode acp --cwd /workspace)
@@ -443,7 +457,7 @@ Use the native message shape for the command you selected. Send the initializati
       language: "json",
       code: `{"method":"initialize","id":1,"params":{"clientInfo":{"name":"sandpi","title":"SandPi","version":"0.1.0"}}}
 {"method":"initialized","params":{}}
-{"method":"thread/start","id":2,"params":{"cwd":"/workspace","approvalPolicy":"never","sandbox":"dangerFullAccess"}}
+{"method":"thread/start","id":2,"params":{"cwd":"/workspace","approvalPolicy":"never","sandbox":"danger-full-access"}}
 
 {"method":"turn/start","id":3,"params":{"threadId":"<thread-id-from-response-2>","clientUserMessageId":"task-1","input":[{"type":"text","text":"Inspect this repository and run the relevant tests."}]}}`
     },
@@ -475,11 +489,13 @@ Use the native message shape for the command you selected. Send the initializati
 
 ### Codex
 
-Codex requires `initialize` followed by `initialized` once per app-server process. Save `result.thread.id` from `thread/start`. After a new process attempt, initialize again and call `thread/resume` with the saved thread ID. The outer Sandbox0 sandbox is the isolation boundary in this example, so Codex uses `dangerFullAccess` inside that boundary. See the upstream [Codex app-server protocol](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md).
+Codex requires `initialize` followed by `initialized` once per app-server process. Save `result.thread.id` from `thread/start`. After a new process attempt, initialize again and call `thread/resume` with the saved thread ID. The outer Sandbox0 sandbox is the isolation boundary in this example, so Codex uses `danger-full-access` inside that boundary. See the upstream [Codex app-server protocol](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md).
 
 ### Claude Code
 
 The first stdout record is normally a `system` message with subtype `init`; save its `session_id`. Subsequent records include user acknowledgements, assistant messages, tool activity, and a final `result`. To continue after replacing the supervised session, append `--resume` and the saved native session ID to the Claude command. See the upstream [Claude Code headless documentation](https://code.claude.com/docs/en/headless).
+
+The builtin template currently runs supervised processes as root. Claude Code [refuses `bypassPermissions` and its equivalent `--dangerously-skip-permissions` when running as root](https://code.claude.com/docs/en/permission-modes#skip-all-checks-with-bypasspermissions-mode), so the example uses native `dontAsk` mode with an explicit coding-tool allowlist. Add project-specific MCP tools to that allowlist when needed; unlisted permission requests are denied instead of blocking a headless session.
 
 <Callout variant="warning">
 Claude Code's package is not published under an open-source license. Review the license bundled with the package and Anthropic's applicable terms before publicly redistributing a derived template image. Use API-key or supported cloud-provider authentication for third-party products; do not proxy a user's Claude subscription login.

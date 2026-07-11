@@ -176,6 +176,9 @@ func (s *FileStore) sessionDir(id string) (string, error) {
 
 func writeFileAtomic(path string, data []byte, mode fs.FileMode) error {
 	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
 	tmp, err := os.CreateTemp(dir, ".state-*.tmp")
 	if err != nil {
 		return err

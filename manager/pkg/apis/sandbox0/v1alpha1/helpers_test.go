@@ -202,6 +202,21 @@ manager_image: sandbox0/manager:test
 	}
 }
 
+func TestBuildPodSpecUsesIfNotPresentForMainContainerByDefault(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	spec := BuildPodSpec(newTestTemplate())
+	if len(spec.Containers) == 0 {
+		t.Fatal("expected at least one container")
+	}
+	if spec.Containers[0].ImagePullPolicy != corev1.PullIfNotPresent {
+		t.Fatalf("main container image pull policy = %q, want %q", spec.Containers[0].ImagePullPolicy, corev1.PullIfNotPresent)
+	}
+}
+
 func TestBuildPodSpecAppliesMainContainerSecurityContext(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test

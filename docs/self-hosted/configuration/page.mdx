@@ -29,6 +29,30 @@ In local-password mode it bootstraps the first admin credentials; in OIDC-only m
 
 When `spec.builtinTemplates` is omitted, infra-operator seeds public builtin templates for `default`, `openclaw`, `hermes`, and `browser`. Set `spec.builtinTemplates` explicitly when you want to pin images, adjust pools, disable one of the builtins, or provide a full template `spec` for a runtime-specific setup. Set it to `[]` to remove all operator-managed builtin templates.
 
+## Pin Builtin Images for Predictable Startup
+
+The self-hosted `openclaw`, `hermes`, and `browser` presets use upstream mutable `latest` tags by default. Sandbox0 sets the effective main-container pull policy to `IfNotPresent` unless a system template overrides it. A claim on a node that already has the image does not download it again, but a new or cache-miss node resolves the tag and pulls the current image. That pull can add substantial cold-start latency for large images, and different nodes can keep different digests for the same mutable tag.
+
+For production self-hosted deployments, replace the complete builtin template list and pin each mutable image to a reviewed digest:
+
+```yaml
+spec:
+    builtinTemplates:
+        - templateId: default
+        - templateId: openclaw
+          image: ghcr.io/openclaw/openclaw@sha256:<openclaw-digest>
+        - templateId: hermes
+          image: nousresearch/hermes-agent@sha256:<hermes-digest>
+        - templateId: browser
+          image: ghcr.io/steel-dev/steel-browser@sha256:<browser-digest>
+```
+
+`spec.builtinTemplates` has replacement semantics, so omitting an entry removes that operator-managed builtin. A version tag is easier to read than a digest but remains mutable if its publisher retags it. A digest is the immutable choice.
+
+Pinning makes the runtime version deterministic; it does not eliminate the first pull on an empty node. If image-pull latency is part of your cold-start budget, preload the pinned digests into node images or use a node-level pre-puller before admitting sandbox workloads.
+
+Sandbox0 Cloud handles the mutable-tag policy at the platform layer: managed-region configuration pins these images by digest and rolls upstream digest changes through deployment automation. Cloud users therefore do not maintain these pins themselves. A genuinely cold node can still need a missing pinned image, but cache and prewarming operations remain the managed platform's responsibility rather than part of the customer template configuration.
+
 ## Deployment Profiles
 
 | Profile | Typical fields | Use when |

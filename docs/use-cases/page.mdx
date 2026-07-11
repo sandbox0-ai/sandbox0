@@ -49,6 +49,10 @@ Operators can pin images, tune pools, or remove a template by setting `Sandbox0I
 | `hermes` | `nousresearch/hermes-agent:latest` |
 | `browser` | `ghcr.io/steel-dev/steel-browser:latest` |
 
+<Callout variant="warning">
+These are self-hosted convenience defaults, not immutable production pins. Sandbox0 uses `IfNotPresent`, so cached nodes reuse their local image; new or cache-miss nodes pull whichever digest `latest` currently names, which can add cold-start latency and create version drift between nodes. Pin reviewed digests in production. Sandbox0 Cloud manages digest pins and their rollout at the platform layer. See [Pin Builtin Images for Predictable Startup](/docs/self-hosted/configuration#pin-builtin-images-for-predictable-startup).
+</Callout>
+
 ## Lifecycle Choice
 
 The examples in this section deliberately do not set `ttl` or `hard_ttl`.

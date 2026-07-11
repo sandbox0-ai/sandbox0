@@ -144,7 +144,53 @@ func (p *LifecycleProjector) handleUpdate(oldObj, newObj any) {
 	if isTeamOwnedIdlePoolPod(oldPod) && !isTeamOwnedIdlePoolPod(newPod) {
 		p.handleWarmPoolDelete(oldPod)
 	}
+	// Warm-pool updates advance runtime windows, so they intentionally keep the
+	// resync behavior. Claimed sandboxes only need a projection write when an
+	// input used by metering changes; kubelet status updates are otherwise pure
+	// ClickHouse write amplification.
+	if isTeamOwnedIdlePoolPod(newPod) {
+		p.handleUpsert(newObj)
+		return
+	}
+	if isClaimedActiveSandbox(oldPod) && isClaimedActiveSandbox(newPod) &&
+		activeSandboxProjectionInput(oldPod) == activeSandboxProjectionInput(newPod) {
+		return
+	}
 	p.handleUpsert(newObj)
+}
+
+type activeSandboxProjectionInputs struct {
+	sandboxID         string
+	namespace         string
+	teamID            string
+	userID            string
+	templateID        string
+	claimedAt         string
+	paused            string
+	pausedAt          string
+	ownerKind         string
+	resourceMillicpu  int64
+	resourceMemoryMiB int64
+}
+
+func activeSandboxProjectionInput(pod *corev1.Pod) activeSandboxProjectionInputs {
+	if pod == nil {
+		return activeSandboxProjectionInputs{}
+	}
+	usage := sandboxUsageFromPod(pod)
+	return activeSandboxProjectionInputs{
+		sandboxID:         meteringSandboxIDFromPod(pod),
+		namespace:         pod.Namespace,
+		teamID:            pod.Annotations[controller.AnnotationTeamID],
+		userID:            pod.Annotations[controller.AnnotationUserID],
+		templateID:        pod.Labels[controller.LabelTemplateID],
+		claimedAt:         pod.Annotations[controller.AnnotationClaimedAt],
+		paused:            pod.Annotations[controller.AnnotationPaused],
+		pausedAt:          pod.Annotations[controller.AnnotationPausedAt],
+		ownerKind:         usage.OwnerKind,
+		resourceMillicpu:  usage.ResourceMillicpu,
+		resourceMemoryMiB: usage.ResourceMemoryMiB,
+	}
 }
 
 func (p *LifecycleProjector) handleUpsert(obj any) {

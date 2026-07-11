@@ -1,8 +1,12 @@
-# Run Coding Agents With Supervised Sessions
+# Running Coding Agents
 
-Use the builtin `coding-agent` template when an application needs to run Codex, Claude Code, OpenCode, or Pi inside the same Sandbox0 execution environment. The template installs all four native CLIs and declares `/workspace` as its writable mount point.
+Run Codex, Claude Code, OpenCode, or Pi inside a Sandbox0 sandbox when you want an isolated, persistent workspace with supervised process recovery and replayable I/O.
 
-Each coding agent remains a native subprocess. Session Supervisor owns process lifetime, stdin/stdout transport, restart attempts, and the replayable event journal; it does not translate one harness protocol into another.
+The builtin `coding-agent` template installs all four native CLIs and declares `/workspace` as its writable mount point.
+
+## Choose A Coding Agent
+
+Each coding agent remains a native subprocess. Session Supervisor owns process lifetime, stdin/stdout transport, restart attempts, and the replayable event journal; it does not translate one agent protocol into another.
 
 The template sets both the container's operating-system `HOME` and every supervised session's `cwd` to `/workspace`. A claim binds the selected workspace Volume there, so the repository and each harness's native home-relative state share the same persistent mount. For example, Codex uses `/workspace/.codex`, Claude Code uses `/workspace/.claude`, OpenCode follows XDG defaults below `/workspace`, and Pi uses `/workspace/.pi/agent`.
 
@@ -17,7 +21,7 @@ The template sets both the container's operating-system `HOME` and every supervi
 The examples grant the selected coding agent broad control inside its sandbox. Keep model credentials narrow, restrict network policy for production workloads, and do not mount a developer home directory or host Docker socket into the sandbox.
 </Callout>
 
-## Create The Environment
+## Create The Sandbox
 
 The SDK snippets assume you already configured a `client` as shown in [Get Started](/docs/get-started). They create one SandboxVolume for the complete workspace, then claim the builtin template. The examples leave `ttl` and `hard_ttl` unset.
 
@@ -95,9 +99,7 @@ printf 'Sandbox ID: %s\\n' "$SANDBOX_ID"`
 
 The Volume is optional. If omitted, `/workspace` is a writable directory in the sandbox rootfs and follows that sandbox identity's checkpoint lifecycle. Use a Volume when the repository and native harness state must persist independently from the sandbox.
 
-Do not bake provider credentials into the template image. For production, prefer [egress auth](/docs/credential/egress-auth), LLMProxy, or another narrowly scoped external model proxy. Session environment variables are returned as part of the session specification and should not be treated as a secret store.
-
-## Start A Native Harness
+## Start A Coding Agent
 
 Select one harness and create one pipe-based supervised session. These examples use Codex; replace `harnessName` with `claude-code`, `opencode`, or `pi` to select another native command from the same map.
 
@@ -341,7 +343,7 @@ printf 'Session ID: %s\\n' "$SESSION_ID"`
 
 Use one active coding agent per workspace. Multiple supervised sessions can run in one sandbox, but concurrent writers can race on repository files and the Git index.
 
-## Exchange Native Messages
+## Exchange Messages
 
 All four commands use pipes, not a PTY. Write one LF-terminated native record at a time and fence the write to the current process attempt. The helper below accepts any JSON-compatible value; each harness section provides the native messages to send.
 
@@ -446,7 +448,7 @@ Consume output through the resumable session event stream. Events contain base64
 
 Commit the last processed event `seq` outside the sandbox and reconnect with `after`. Put a native request ID in messages where the harness supports one. Sandbox0 can deduplicate an input submission, but it cannot guarantee that the subprocess consumed that input exactly once.
 
-## Drive The Selected Harness
+## Send A Prompt
 
 Use the native message shape for the command you selected. Send the initialization records first, wait for their responses, save the returned native thread or session ID, and then send the prompt record with that ID.
 
@@ -509,7 +511,7 @@ OpenCode implements Agent Client Protocol. An ACP client must handle server requ
 
 Pi RPC supports request IDs, state inspection, prompting, steering, follow-up, and abort without an additional adapter. Save the `sessionFile` or `sessionId` returned by `get_state`, then use Pi's native `--session` or `--session-id` option when creating a replacement supervised session. See the upstream [Pi RPC protocol](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md).
 
-## Switch Harnesses
+## Switch Coding Agents
 
 Stop and delete the current supervised session before starting another harness against the same sandbox.
 
@@ -560,7 +562,7 @@ Then select the next entry from the harness map and create a new supervised sess
 
 Do not replace a Codex session specification with a Claude Code, OpenCode, or Pi command. A new supervised session keeps each event journal, process attempt history, and native protocol stream internally consistent.
 
-## Recovery Responsibilities
+## Recover A Session
 
 Session Supervisor restores the process, not the harness connection. When an event reports a new `attempt_id` or `runtime_generation`:
 
@@ -571,3 +573,27 @@ Session Supervisor restores the process, not the harness connection. When an eve
 5. reconcile any request whose acceptance was ambiguous before retrying it
 
 See [Supervised Sessions](/docs/sandbox/session-supervisor) for attempt fencing, event retention, reconnect cursors, and input-delivery semantics.
+
+## Secret Boundary
+
+Do not bake provider credentials into the template image. For production, prefer [egress auth](/docs/credential/egress-auth), LLMProxy, or another narrowly scoped external model proxy. Session environment variables are returned as part of the session specification and should not be treated as a secret store.
+
+## Operator Notes
+
+The builtin template is configurable through `Sandbox0Infra.spec.builtinTemplates`. Remove `templateId: coding-agent` from that list to delete the operator-managed public template, or replace its `image`, `pool`, or full `spec` to pin a reviewed coding-agent image.
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Supervised Sessions" href="/docs/sandbox/session-supervisor" cta="Continue">
+    Handle process recovery, replayable events, reconnect cursors, and input fencing.
+  </Card>
+
+  <Card title="Volume Mounts" href="/docs/sandbox/volume/mounts" cta="Continue">
+    Keep repositories and native coding-agent state on a persistent workspace Volume.
+  </Card>
+
+  <Card title="Egress Auth" href="/docs/credential/egress-auth" cta="Continue">
+    Keep model credentials outside the sandbox and inject them only for approved destinations.
+  </Card>
+</CardGroup>

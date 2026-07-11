@@ -43,7 +43,7 @@ type requestLedgerKey struct {
 }
 
 func ledgerKey(key RequestKey) requestLedgerKey {
-	return requestLedgerKey{Scope: key.Scope, Unique: key.Unique}
+	return requestLedgerKey(key)
 }
 
 // RequestMutationKind identifies one logical FUSE mutation. Several metadata

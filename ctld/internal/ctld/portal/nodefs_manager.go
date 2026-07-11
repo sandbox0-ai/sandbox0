@@ -310,7 +310,7 @@ func (m *Manager) restoreNodeFSPortal(ctx context.Context, runtime *nodeFSRuntim
 			pm.mountedAt = state.PendingMountedAt
 		}
 	}
-	var session volumefuse.Session = rootfsSession
+	session := rootfsSession
 	volumeID := state.PortalKey
 	if state.Phase == nodeFSPortalUnpublishing {
 		session = unboundSession{}

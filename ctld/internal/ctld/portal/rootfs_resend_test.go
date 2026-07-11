@@ -692,12 +692,12 @@ func BenchmarkRootFSFileSystemWrite(b *testing.B) {
 			}
 			filesystem := volumefuse.NewWithRequestScope("benchmark", "benchmark-scope", 0, backend)
 			input := fuse.WriteIn{Fh: file.HandleId}
-			input.InHeader.NodeId = file.Inode
+			input.NodeId = file.Inode
 			data := make([]byte, 4096)
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				input.InHeader.Unique = uint64(i + 1)
+				input.Unique = uint64(i + 1)
 				written, status := filesystem.Write(nil, &input, data)
 				if status != fuse.OK || written != uint32(len(data)) {
 					b.Fatalf("Write() = (%d, %v)", written, status)

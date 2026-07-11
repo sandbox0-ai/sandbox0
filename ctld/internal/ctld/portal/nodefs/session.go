@@ -1012,7 +1012,7 @@ func (m *SessionMux) OpenFlagsForHandle(handleID uint64) (uint32, bool) {
 	if m == nil || handleID == 0 {
 		return 0, false
 	}
-	lease, route, localHandle, err := m.acquireHandle(nil, handleID)
+	lease, route, localHandle, err := m.acquireHandle(context.TODO(), handleID)
 	if err != nil {
 		return 0, false
 	}

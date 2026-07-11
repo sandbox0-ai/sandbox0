@@ -184,13 +184,13 @@ func TestStartNodeFSConnectionResumesCommittedConnection(t *testing.T) {
 }
 
 func TestStartNodeFSConnectionFailsClosedWithActivePortals(t *testing.T) {
-	store, state, shard := preparedNodeFSJournal(t, true)
+	store, _, _ := preparedNodeFSJournal(t, true)
 	encoded, _ := json.Marshal(recoveryConnectionState())
 	if err := store.CommitShardSession(0, encoded); err != nil {
 		t.Fatal(err)
 	}
-	state = store.Snapshot()
-	shard = state.Shards[0]
+	state := store.Snapshot()
+	shard := state.Shards[0]
 	factory := &fakeNodeFSConnectionFactory{recoverErr: errors.New("connection missing")}
 
 	if _, _, err := startNodeFSConnection(store, state, shard, 1, nil, fuse.NewDefaultRawFileSystem(), factory); err == nil {
@@ -263,7 +263,7 @@ func TestStartNodeFSConnectionRejectsKernelWithoutCacheDomainRegistrationCapabil
 }
 
 func TestStartNodeFSConnectionInvalidatesRecoveredDomainsBeforeServing(t *testing.T) {
-	store, state, shard := preparedNodeFSJournal(t, true)
+	store, _, _ := preparedNodeFSJournal(t, true)
 	encoded, err := json.Marshal(recoveryConnectionState())
 	if err != nil {
 		t.Fatal(err)
@@ -271,8 +271,8 @@ func TestStartNodeFSConnectionInvalidatesRecoveredDomainsBeforeServing(t *testin
 	if err := store.CommitShardSession(0, encoded); err != nil {
 		t.Fatal(err)
 	}
-	state = store.Snapshot()
-	shard = state.Shards[0]
+	state := store.Snapshot()
+	shard := state.Shards[0]
 	server := newFakeNodeFUSEServer(recoveryConnectionState())
 	server.invalidateErr = errors.New("unsupported cache domain ioctl")
 	factory := &fakeNodeFSConnectionFactory{resumeServer: server}
@@ -287,7 +287,7 @@ func TestStartNodeFSConnectionInvalidatesRecoveredDomainsBeforeServing(t *testin
 }
 
 func TestStartNodeFSConnectionInitializesRecoveredReplyDrainBeforeServing(t *testing.T) {
-	store, state, shard := preparedNodeFSJournal(t, true)
+	store, _, _ := preparedNodeFSJournal(t, true)
 	encoded, err := json.Marshal(recoveryConnectionState())
 	if err != nil {
 		t.Fatal(err)
@@ -295,8 +295,8 @@ func TestStartNodeFSConnectionInitializesRecoveredReplyDrainBeforeServing(t *tes
 	if err := store.CommitShardSession(0, encoded); err != nil {
 		t.Fatal(err)
 	}
-	state = store.Snapshot()
-	shard = state.Shards[0]
+	state := store.Snapshot()
+	shard := state.Shards[0]
 	server := newFakeNodeFUSEServer(recoveryConnectionState())
 	factory := &fakeNodeFSConnectionFactory{resumeServer: server, recoveryResends: 3}
 	filesystem := &recoveryDrainRawFS{RawFileSystem: fuse.NewDefaultRawFileSystem()}

@@ -21,6 +21,7 @@ var errCtldOwnerBusy = errors.New("ctld volume owner is busy")
 
 type volumeCtldResolver interface {
 	ResolveLocalCtldURL(ctx context.Context) (string, error)
+	ResolveCtldURL(ctx context.Context, nodeName, podNamespace string) (string, error)
 }
 
 type kubernetesVolumeCtldResolver struct {
@@ -61,16 +62,51 @@ func (r *kubernetesVolumeCtldResolver) ResolveLocalCtldURL(ctx context.Context) 
 		return "", fmt.Errorf("storage-proxy pod %q is not scheduled", r.selfPodID)
 	}
 
-	candidates, err := r.listCtldCandidates(ctx, selfPod)
+	return r.resolveCtldURL(ctx, selfPod, selfPod.Spec.NodeName, selfPod.Namespace, true)
+}
+
+func (r *kubernetesVolumeCtldResolver) ResolveCtldURL(ctx context.Context, nodeName, podNamespace string) (string, error) {
+	if r == nil || r.client == nil {
+		return "", fmt.Errorf("ctld resolver unavailable")
+	}
+	nodeName = strings.TrimSpace(nodeName)
+	if nodeName == "" {
+		return "", fmt.Errorf("ctld owner node is required")
+	}
+	selfPod, err := resolveKubernetesPod(ctx, r.client, r.selfPodID)
+	if err != nil {
+		return "", err
+	}
+	if selfPod == nil {
+		return "", fmt.Errorf("storage-proxy pod %q not found", r.selfPodID)
+	}
+	podNamespace = strings.TrimSpace(podNamespace)
+	if podNamespace == "" {
+		podNamespace = selfPod.Namespace
+	}
+	return r.resolveCtldURL(ctx, selfPod, nodeName, podNamespace, false)
+}
+
+func (r *kubernetesVolumeCtldResolver) resolveCtldURL(
+	ctx context.Context,
+	selfPod *corev1.Pod,
+	nodeName string,
+	podNamespace string,
+	allowFallback bool,
+) (string, error) {
+	candidates, err := r.listCtldCandidates(ctx, selfPod, podNamespace)
 	if err != nil {
 		return "", err
 	}
 	for _, candidate := range candidates {
-		if candidate.Spec.NodeName == selfPod.Spec.NodeName {
+		if candidate.Spec.NodeName == nodeName {
 			if addr, ok := podInternalURL(candidate, r.port); ok {
 				return addr, nil
 			}
 		}
+	}
+	if !allowFallback {
+		return "", fmt.Errorf("no ready ctld pod available on node %q", nodeName)
 	}
 	for _, candidate := range candidates {
 		if addr, ok := podInternalURL(candidate, r.port); ok {
@@ -101,9 +137,13 @@ func resolveKubernetesPod(ctx context.Context, client kubernetes.Interface, podI
 	return &pods.Items[0], nil
 }
 
-func (r *kubernetesVolumeCtldResolver) listCtldCandidates(ctx context.Context, selfPod *corev1.Pod) ([]corev1.Pod, error) {
+func (r *kubernetesVolumeCtldResolver) listCtldCandidates(ctx context.Context, selfPod *corev1.Pod, podNamespace string) ([]corev1.Pod, error) {
 	if r == nil || r.client == nil || selfPod == nil {
 		return nil, fmt.Errorf("ctld resolver unavailable")
+	}
+	podNamespace = strings.TrimSpace(podNamespace)
+	if podNamespace == "" {
+		podNamespace = selfPod.Namespace
 	}
 
 	labelSelector := ctldNameLabel + "=" + ctldComponentName
@@ -111,7 +151,7 @@ func (r *kubernetesVolumeCtldResolver) listCtldCandidates(ctx context.Context, s
 		labelSelector += "," + ctldInstanceLabel + "=" + instance
 	}
 
-	pods, err := r.client.CoreV1().Pods(selfPod.Namespace).List(ctx, metav1.ListOptions{
+	pods, err := r.client.CoreV1().Pods(podNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: labelSelector,
 	})
 	if err != nil {
@@ -197,7 +237,7 @@ func (s *Server) ensureCtldVolumeOwner(ctx context.Context, volumeRecord *db.San
 }
 
 func (s *Server) releaseReleasableCtldVolumeOwners(ctx context.Context, volumeID string) error {
-	if s == nil || s.repo == nil || s.podResolver == nil || strings.TrimSpace(volumeID) == "" {
+	if s == nil || s.repo == nil || (s.podResolver == nil && s.ctldResolver == nil) || strings.TrimSpace(volumeID) == "" {
 		return nil
 	}
 	heartbeatTimeout := 15

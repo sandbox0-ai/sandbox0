@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
@@ -11,18 +12,34 @@ import (
 )
 
 func (s *Server) resolveVolumeMountURL(ctx context.Context, mount *db.VolumeMount) (*url.URL, error) {
-	if s == nil || s.podResolver == nil || mount == nil || mount.PodID == "" {
+	if s == nil || mount == nil || mount.PodID == "" {
 		return nil, nil
 	}
-	targetURL, err := s.podResolver.ResolvePodURL(ctx, mount.PodID)
-	if err != nil {
-		return nil, err
+	opts := volume.DecodeMountOptions(mount.MountOptions)
+	var targetURL *url.URL
+	if opts.OwnerKind == volume.OwnerKindCtld && strings.TrimSpace(opts.NodeName) != "" && s.ctldResolver != nil {
+		addr, err := s.ctldResolver.ResolveCtldURL(ctx, opts.NodeName, opts.PodNamespace)
+		if err != nil {
+			return nil, err
+		}
+		targetURL, err = url.Parse(addr)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		if s.podResolver == nil {
+			return nil, nil
+		}
+		resolved, err := s.podResolver.ResolvePodURL(ctx, mount.PodID)
+		if err != nil {
+			return nil, err
+		}
+		targetURL = resolved
 	}
 	if targetURL == nil {
 		return nil, nil
 	}
 	targetURL = cloneURL(targetURL)
-	opts := volume.DecodeMountOptions(mount.MountOptions)
 	ownerPort := opts.OwnerPort
 	if ownerPort == 0 && opts.OwnerKind == volume.OwnerKindCtld {
 		ownerPort = 8095

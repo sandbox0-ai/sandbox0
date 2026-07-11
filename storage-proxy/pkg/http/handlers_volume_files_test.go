@@ -1066,16 +1066,20 @@ func TestHandleVolumeFileMoveProxiesBodyToCtldOwner(t *testing.T) {
 	repo := server.repo.(*fakeHTTPRepo)
 	repo.activeMounts["vol-1"] = []*db.VolumeMount{
 		{
-			VolumeID:     "vol-1",
-			ClusterID:    "cluster-a",
-			PodID:        "sandbox0-system/ctld-node-a",
-			MountedAt:    time.Unix(10, 0),
-			MountOptions: mustMountOptionsRaw(t, volume.MountOptions{AccessMode: volume.AccessModeRWO, OwnerKind: volume.OwnerKindCtld, OwnerPort: remotePort}),
+			VolumeID:  "vol-1",
+			ClusterID: "cluster-a",
+			PodID:     "ctld-node/node-a",
+			MountedAt: time.Unix(10, 0),
+			MountOptions: mustMountOptionsRaw(t, volume.MountOptions{
+				AccessMode:   volume.AccessModeRWO,
+				OwnerKind:    volume.OwnerKindCtld,
+				OwnerPort:    remotePort,
+				NodeName:     "node-a",
+				PodNamespace: "sandbox0-system",
+			}),
 		},
 	}
-	server.podResolver = &fakeVolumeFilePodResolver{
-		urls: map[string]string{"sandbox0-system/ctld-node-a": "http://127.0.0.1"},
-	}
+	server.ctldResolver = fakeCtldResolver{url: "http://127.0.0.1"}
 
 	reqBody := []byte(`{"source":"/docs/report.txt","destination":"/archive/report-old.txt"}`)
 	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/files/move", bytes.NewReader(reqBody))
@@ -1093,8 +1097,8 @@ func TestHandleVolumeFileMoveProxiesBodyToCtldOwner(t *testing.T) {
 	}
 	select {
 	case seen := <-remoteSeen:
-		if got := seen.header.Get(volumeFileAffinityRoutedPodHeader); got != "sandbox0-system/ctld-node-a" {
-			t.Fatalf("routed pod header = %q, want %q", got, "sandbox0-system/ctld-node-a")
+		if got := seen.header.Get(volumeFileAffinityRoutedPodHeader); got != "ctld-node/node-a" {
+			t.Fatalf("routed pod header = %q, want %q", got, "ctld-node/node-a")
 		}
 		if got := seen.header.Get(volumeFileAffinityTeamHeader); got != "team-a" {
 			t.Fatalf("team header = %q, want %q", got, "team-a")

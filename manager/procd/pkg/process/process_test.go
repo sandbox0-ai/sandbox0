@@ -2,6 +2,7 @@
 package process
 
 import (
+	"errors"
 	"io"
 	"os"
 	"sync"
@@ -489,6 +490,25 @@ func TestBaseProcess_WriteInputFinished(t *testing.T) {
 	}
 
 	bp.stopInputWriter()
+}
+
+func TestBaseProcess_CloseInputBeforeReadyIsBounded(t *testing.T) {
+	bp := NewBaseProcess("not-ready", ProcessTypeREPL, ProcessConfig{Type: ProcessTypeREPL})
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	bp.SetPTY(w)
+
+	started := time.Now()
+	err = bp.closeInput(25 * time.Millisecond)
+	if !errors.Is(err, ErrInputCloseTimeout) {
+		t.Fatalf("closeInput() error = %v, want %v", err, ErrInputCloseTimeout)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("closeInput() took %s, want a bounded close", elapsed)
+	}
 }
 
 // BenchmarkBaseProcess_StateRead benchmarks concurrent state reading.

@@ -1,6 +1,7 @@
 package process
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/creack/pty"
 )
+
+const defaultInputCloseTimeout = 5 * time.Second
 
 // ProcessType defines the type of process.
 type ProcessType string
@@ -171,6 +174,7 @@ type Process interface {
 
 	// Lifecycle
 	Start() error
+	// Stop must terminate the process tree and return without unbounded waits.
 	Stop() error
 	Restart() error
 	IsRunning() bool
@@ -483,6 +487,10 @@ func (bp *BaseProcess) WriteInput(data []byte) error {
 
 // CloseInput closes the process stdin without stopping the process.
 func (bp *BaseProcess) CloseInput() error {
+	return bp.closeInput(defaultInputCloseTimeout)
+}
+
+func (bp *BaseProcess) closeInput(timeout time.Duration) error {
 	bp.mu.RLock()
 	input := bp.input
 	bp.mu.RUnlock()
@@ -499,18 +507,39 @@ func (bp *BaseProcess) CloseInput() error {
 		return input.Close()
 	default:
 	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	done := make(chan error, 1)
 	select {
 	case bp.inputQueue <- inputOperation{close: true, done: done}:
 	case <-bp.inputStop:
 		return nil
+	case <-timer.C:
+		return errors.Join(ErrInputCloseTimeout, bp.forceCloseInput())
 	}
 	select {
 	case err := <-done:
 		return err
 	case <-bp.inputStop:
 		return nil
+	case <-timer.C:
+		return errors.Join(ErrInputCloseTimeout, bp.forceCloseInput())
 	}
+}
+
+func (bp *BaseProcess) forceCloseInput() error {
+	bp.stopInputWriter()
+	bp.mu.Lock()
+	input := bp.input
+	bp.input = nil
+	if ptyFile, ok := input.(*os.File); ok && bp.pty == ptyFile {
+		bp.pty = nil
+	}
+	bp.mu.Unlock()
+	if input == nil {
+		return nil
+	}
+	return input.Close()
 }
 
 // ResizePTY resizes the attached PTY, if present.

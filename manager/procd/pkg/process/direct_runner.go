@@ -26,6 +26,7 @@ type DirectRunner struct {
 	stderrBytes  int64
 	stdoutChunks int64
 	stderrChunks int64
+	stopMu       sync.Mutex
 }
 
 var _ OutputProvider = (*DirectRunner)(nil)
@@ -110,25 +111,18 @@ func (r *DirectRunner) Start(cmd *exec.Cmd) error {
 
 // Stop terminates the direct process.
 func (r *DirectRunner) Stop() error {
-	if !r.base.IsRunning() {
-		return nil
-	}
+	return r.StopWithOptions(StopOptions{})
+}
 
-	if r.onStop != nil {
-		r.onStop()
-	}
+// StopWithOptions terminates the direct process group without unbounded waits.
+func (r *DirectRunner) StopWithOptions(options StopOptions) error {
+	r.stopMu.Lock()
+	defer r.stopMu.Unlock()
 
-	if r.cmd != nil && r.cmd.Process != nil {
-		if err := r.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-			_ = r.cmd.Process.Kill()
-		}
-	}
-	_ = r.base.CloseInput()
-
-	r.base.SetState(ProcessStateStopped)
+	_ = r.base.forceCloseInput()
+	err := terminateProcess(r.base, r.onStop, options)
 	r.base.CloseOutput()
-
-	return nil
+	return err
 }
 
 // GetOutput returns the captured stdout and stderr.
@@ -187,7 +181,7 @@ func (r *DirectRunner) monitorProcess() {
 		Config:        r.base.GetConfig(),
 	})
 
-	_ = r.base.CloseInput()
+	_ = r.base.forceCloseInput()
 	r.base.CloseOutput()
 }
 

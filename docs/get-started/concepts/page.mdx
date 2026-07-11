@@ -4,28 +4,30 @@ This page explains Sandbox0 from an AI agent developer perspective: how to think
 
 ## The Mental Model
 
-Think in five building blocks:
+Think in six building blocks:
 
 | Concept | What It Is | Why Agent Developers Care |
 |-------|-------------|---------------------------|
 | `Template` | The runtime blueprint (image, resources, defaults). | Defines your agent's execution environment and startup behavior. |
 | `Sandbox` | Durable identity and configuration for an isolated environment. | The agent's working machine identity across runtime generations. |
 | Root filesystem | The sandbox writable filesystem checkpointed during pause/resume. | Keeps files written inside the sandbox available when compute is released and later restored. |
-| `Context` | A process/session inside the sandbox (for example REPL-like or one-shot execution). | Controls whether state is preserved across turns or reset each run. |
+| `Context` | A one-shot command or stateful REPL process inside the sandbox. | Provides direct command and REPL execution for active work. |
+| Supervised session | A stable process identity with attempts, lifecycle policy, and a replayable event journal. | Keeps long-running work controllable across client reconnects and sandbox runtime replacement. |
 | `Volume` | Persistent storage decoupled from sandbox lifecycle. | Keeps knowledge, artifacts, and checkpoints across sandbox recreation. |
 
 The key idea is separation of concerns:
 - Use `Template` for environment consistency.
 - Use `Sandbox` for isolated execution.
 - Use the root filesystem for same-sandbox file continuity across pause/resume.
-- Use `Context` for process-level interaction patterns.
+- Use `Context` for one-shot commands and REPL interaction.
+- Use supervised sessions for long-running, reconnectable, restartable processes.
 - Use `Volume` for durable, shareable, or snapshot-ready memory.
 
 ## Agent Runtime vs Agent Memory
 
 A common confusion is mixing compute state and durable state.
 
-- Process state lives in the sandbox runtime and disappears when the runtime is paused or deleted.
+- Process state lives in the sandbox runtime and disappears when the runtime is paused or replaced. A supervised session can preserve its identity, specification, and journal, then start a new attempt; it does not preserve process memory or sockets.
 - Sandbox0 restores the writable root filesystem checkpoint for paused sandboxes, so files written outside mounted volumes survive pause/resume for the same sandbox identity.
 - The rootfs checkpoint is not a Volume. It is not shareable across sandboxes, does not expose volume snapshot/fork APIs, and is deleted with the sandbox identity.
 - Durable state that must survive sandbox delete or `hard_ttl`, needs snapshots, or needs sharing outside the sandbox identity should be written to volumes or external systems.
@@ -64,12 +66,14 @@ Choose execution style based on task shape:
 
 | Pattern | Best For | Tradeoff |
 |--------|----------|----------|
-| Stateful session | Multi-step reasoning with intermediate variables/process state. | Higher complexity in lifecycle and cleanup. |
-| One-shot execution | Deterministic, idempotent, task-based jobs. | No in-process continuity between runs. |
+| REPL context | Multi-step evaluation with intermediate variables and working-directory state. | The REPL process does not recover across runtime replacement. |
+| One-shot context | Deterministic, idempotent, task-based jobs. | No in-process continuity between runs. |
+| Supervised session | Long-running workers, reconnectable terminals, and restartable processes. | The application must tolerate new process attempts after runtime replacement. |
 
 In practice, many agents combine both:
-- Stateful loop during active reasoning.
+- REPL context during active reasoning.
 - One-shot jobs for isolated tools or side effects.
+- Supervised sessions for workers that must remain independently controllable.
 
 ## Multi-Agent and Parallelism
 

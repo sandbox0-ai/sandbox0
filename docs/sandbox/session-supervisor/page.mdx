@@ -1,335 +1,479 @@
-# Session Supervisor
+# Supervised Sessions
 
-The Session Supervisor runs and observes long-lived processes inside a sandbox. A session has a stable identity, one current process attempt, and a retained event journal. Client connections are attachments to that state; they do not own it.
+A supervised session runs a process as a sandbox-owned resource instead of tying the process to one client connection. The session keeps a stable identity and a replayable event journal while its current operating-system process is represented by an attempt.
 
-Use a supervised session when a process must continue across API reconnects, expose replayable output, accept explicit stdin and EOF, or recover after the sandbox runtime is replaced. Use [Contexts](/docs/sandbox/contexts) for short-lived command execution and REPL-oriented workflows that do not need a durable event journal.
+Use supervised sessions for:
+
+- background workers and agent runtimes that must outlive an SDK call
+- processes whose output must be replayed after a client reconnects
+- interactive PTY workloads with explicit input, signals, and terminal resize
+- processes that should restart after failure or after the sandbox runtime is replaced
+
+Use [Contexts](/docs/sandbox/contexts) for one-shot commands and REPL workflows. Use [Sandbox Services](/docs/sandbox/services) when the workload needs a public HTTP entrypoint; a supervised session does not create a public URL by itself.
 
 <Callout variant="info">
-Closing an HTTP response, SSE stream, or WebSocket never stops the session and never closes process stdin. Stop, delete, signal, and EOF are explicit operations.
+Closing an SDK event stream, SSE connection, or WebSocket only detaches that client. It does not stop the session and does not close process stdin. Stop, delete, signal, and EOF are explicit operations.
 </Callout>
 
-## Execution Model
+## Choose The Right Execution Primitive
+
+| Primitive | Best For | Process Ownership |
+|-----------|----------|-------------------|
+| Context | One-shot commands and stateful REPL calls | The context API owns one command or REPL process |
+| Supervised session | Long-running, reconnectable, restartable processes | The sandbox owns a stable session and its current attempt |
+| Sandbox Service | Public HTTP routes, route policy, and on-demand command or function execution | The service runtime or your application owns the backing process |
+| SSH | Human shell access and standard file transfer | The SSH connection owns the interactive shell |
+
+## Mental Model
 
 | Object | Lifetime | Meaning |
 |--------|----------|---------|
-| Session | Stable until deleted, sandbox hard TTL, or sandbox deletion | Desired process specification and lifecycle policy |
-| Attempt | One operating-system process execution | Changes after a restart, replacement, or runtime recovery |
-| Event | Retained according to the session policy | Ordered state, output, control, and exit record |
-| Attachment | One SSE or WebSocket connection | Ephemeral view over retained and live events |
+| Session | Until explicitly deleted, sandbox deletion, or sandbox `hard_ttl` | Stable identity, process specification, desired state, and lifecycle policy |
+| Attempt | One operating-system process execution | Replaced after a restart, explicit replacement, specification change, or runtime recovery |
+| Attachment | One SDK event stream or WebSocket connection | Temporary view over retained and live events |
+| Event | Retained according to the session policy | Ordered record of lifecycle, output, input acknowledgement, and control activity |
 
-Every event has a monotonically increasing `seq`. Process-bound operations can include `expected_attempt_id` so stale clients cannot write to, signal, or resize a newer attempt accidentally.
+The important distinction is between two kinds of continuity:
 
-### Connection Choice
+- **Connection continuity:** disconnecting a client leaves the same attempt running.
+- **Runtime continuity:** replacing the sandbox runtime ends the old attempt. The session identity and journal remain, and `runtime_recovery` decides whether Sandbox0 starts a new attempt.
 
-| Connection | Use it for | Reconnect behavior |
-|------------|------------|--------------------|
-| HTTP | Create, inspect, update, stop, delete, input, signal, resize, and paged event reads | Retry normal requests; use `Idempotency-Key`, `input_id`, and `expected_attempt_id` where applicable |
-| SSE | One-way retained and live event consumption | Reconnect with `Last-Event-ID` or `after`; deduplicate by `seq` |
-| WebSocket | Duplex input/control plus retained and live events | Reconnect with `after`; the session and stdin remain unchanged while disconnected |
+Every event has a monotonically increasing `seq`. An attempt has its own `attempt_id`, and events also include `runtime_generation` so clients can distinguish output produced before and after sandbox runtime replacement.
 
-SSE is the simplest default for output consumers. WebSocket is useful for interactive PTY attachments, but it does not change the lifecycle or delivery model.
+## Create A Long-Running Session
 
-## SDK Quickstart
+The following examples create a worker that prints `READY`, emits one line per second, restarts after a non-zero exit, and starts a new attempt when the sandbox runtime is replaced.
 
-These examples attach to an existing sandbox from `SANDBOX0_SANDBOX_ID`, start `/bin/cat`, send one input followed by explicit EOF, consume the journal, then prove the session still exists after the stream is closed.
+The SDK snippets assume you already created a client and selected a `sandbox` as shown in [Get Started](/docs/get-started).
 
 <Tabs
   tabs={[
     {
       label: "Go",
       language: "go",
-      code: `package main
+      code: `session, err := sandbox.CreateSession(ctx, apispec.ExecutionSessionSpec{
+    Name:    apispec.NewOptString("docs-worker"),
+    Command: []string{"/bin/sh", "-lc", "echo READY; i=0; while true; do i=$((i+1)); echo tick-$i; sleep 1; done"},
+    Lifecycle: apispec.NewOptExecutionSessionLifecycleSpec(
+        apispec.ExecutionSessionLifecycleSpec{
+            Restart: apispec.NewOptExecutionSessionRestartSpec(
+                apispec.ExecutionSessionRestartSpec{
+                    Policy: apispec.NewOptExecutionSessionRestartPolicy(
+                        apispec.ExecutionSessionRestartPolicyOnFailure,
+                    ),
+                },
+            ),
+            RuntimeRecovery: apispec.NewOptExecutionSessionRuntimeRecoveryPolicy(
+                apispec.ExecutionSessionRuntimeRecoveryPolicyRestart,
+            ),
+        },
+    ),
+    Readiness: apispec.NewOptExecutionSessionReadinessSpec(
+        apispec.ExecutionSessionReadinessSpec{
+            Type: apispec.NewOptExecutionSessionReadinessType(
+                apispec.ExecutionSessionReadinessTypeOutput,
+            ),
+            Output:    apispec.NewOptString("READY"),
+            TimeoutMs: apispec.NewOptInt32(30_000),
+        },
+    ),
+}, &sandbox0.CreateSessionOptions{
+    IdempotencyKey: "docs-worker-v1",
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(session.ID)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0 import SessionCreateOptions
+from sandbox0.apispec.models.execution_session_spec import ExecutionSessionSpec
 
-import (
-    "context"
-    "encoding/base64"
-    "fmt"
-    "io"
-    "log"
-    "os"
-    "time"
-
-    sandbox0 "github.com/sandbox0-ai/sdk-go"
-    "github.com/sandbox0-ai/sdk-go/pkg/apispec"
+session = sandbox.create_session(
+    ExecutionSessionSpec.from_dict({
+        "name": "docs-worker",
+        "command": [
+            "/bin/sh",
+            "-lc",
+            "echo READY; i=0; while true; do i=$((i+1)); echo tick-$i; sleep 1; done",
+        ],
+        "lifecycle": {
+            "restart": {"policy": "on_failure"},
+            "runtime_recovery": "restart",
+        },
+        "readiness": {
+            "type": "output",
+            "output": "READY",
+            "timeout_ms": 30000,
+        },
+    }),
+    SessionCreateOptions(idempotency_key="docs-worker-v1"),
 )
+print(session.id)`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const session = await sandbox.createSession({
+    name: 'docs-worker',
+    command: [
+        '/bin/sh',
+        '-lc',
+        'echo READY; i=0; while true; do i=$((i+1)); echo tick-$i; sleep 1; done',
+    ],
+    lifecycle: {
+        restart: { policy: 'on_failure' },
+        runtimeRecovery: 'restart',
+    },
+    readiness: {
+        type: 'output',
+        output: 'READY',
+        timeoutMs: 30000,
+    },
+}, {
+    idempotencyKey: 'docs-worker-v1',
+});
+console.log(session.id);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `SESSION_JSON="$(s0 -o json sandbox session create "$SANDBOX_ID" \\
+    --name docs-worker \\
+    --idempotency-key docs-worker-v1 \\
+    --restart on_failure \\
+    --runtime-recovery restart \\
+    --readiness output \\
+    --ready-output READY \\
+    -- /bin/sh -lc \\
+    'echo READY; i=0; while true; do i=$((i+1)); echo tick-$i; sleep 1; done')"
 
-func main() {
-    ctx := context.Background()
-    options := []sandbox0.Option{
-        sandbox0.WithToken(os.Getenv("SANDBOX0_TOKEN")),
+SESSION_ID="$(jq -r '.id' <<<"$SESSION_JSON")"
+printf 'Session ID: %s\\n' "$SESSION_ID"`
     }
-    if baseURL := os.Getenv("SANDBOX0_BASE_URL"); baseURL != "" {
-        options = append(options, sandbox0.WithBaseURL(baseURL))
-    }
-    client, err := sandbox0.NewClient(options...)
+  ]}
+/>
+
+Creation defaults to `desired_state: running`, so the first attempt starts immediately. An `Idempotency-Key` lets a client safely retry the same creation request: the same key and normalized specification return the existing session, while reusing the key with a different specification returns a conflict.
+
+## Follow Output And Reconnect
+
+Use the SDK event stream for one-way output consumption. The stream first replays retained events after the requested cursor and then continues with live events.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `stream, err := sandbox.WatchSessionEvents(ctx, session.ID, nil)
+if err != nil {
+    log.Fatal(err)
+}
+
+var lastSeq int64
+outputCount := 0
+for outputCount < 2 {
+    event, err := stream.Recv()
     if err != nil {
         log.Fatal(err)
     }
-    sandbox := client.Sandbox(os.Getenv("SANDBOX0_SANDBOX_ID"))
-
-    created, err := sandbox.CreateSession(ctx, apispec.ExecutionSessionSpec{
-        Name:    apispec.NewOptString("docs-pipe"),
-        Command: []string{"/bin/cat"},
-        Io: apispec.NewOptExecutionSessionIOSpec(apispec.ExecutionSessionIOSpec{
-            Mode: apispec.NewOptExecutionSessionIOMode(apispec.ExecutionSessionIOModePipes),
-        }),
-    }, &sandbox0.CreateSessionOptions{
-        IdempotencyKey: fmt.Sprintf("docs-%d", time.Now().UnixNano()),
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer sandbox.DeleteSession(ctx, created.ID)
-
-    attempt, ok := created.Attempt.Get()
-    if !ok {
-        log.Fatal("session has no current attempt")
-    }
-    stream, err := sandbox.WatchSessionEvents(ctx, created.ID, nil)
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    _, err = sandbox.WriteSessionInput(ctx, created.ID, apispec.ExecutionSessionInputRequest{
-        InputID:           fmt.Sprintf("input-%d", time.Now().UnixNano()),
-        ExpectedAttemptID: apispec.NewOptString(attempt.ID),
-        DataBase64:        apispec.NewOptString(base64.StdEncoding.EncodeToString([]byte("hello from Go\\n"))),
-        EOF:               apispec.NewOptBool(true),
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    var lastSeq int64
-    for {
-        event, err := stream.Recv()
+    lastSeq = event.Seq
+    if encoded, ok := event.DataBase64.Get(); ok {
+        data, err := base64.StdEncoding.DecodeString(encoded)
         if err != nil {
-            if err == io.EOF {
-                break
-            }
             log.Fatal(err)
         }
-        lastSeq = event.Seq
-        if encoded, ok := event.DataBase64.Get(); ok {
-            data, err := base64.StdEncoding.DecodeString(encoded)
-            if err != nil {
-                log.Fatal(err)
-            }
-            fmt.Print(string(data))
-        }
-        if event.Type == "attempt.exited" {
-            break
-        }
+        fmt.Print(string(data))
+        outputCount++
     }
-    if err := stream.Close(); err != nil {
-        log.Fatal(err)
-    }
-    current, err := sandbox.GetSession(ctx, created.ID)
-    if err != nil {
-        log.Fatal(err)
-    }
-    fmt.Printf("session=%s phase=%s cursor=%d\\n", current.ID, current.Phase, lastSeq)
+}
+if err := stream.Close(); err != nil {
+    log.Fatal(err)
+}
+
+// Closing the stream did not stop the session. Reattach after the last
+// processed sequence to receive only newer events.
+stream, err = sandbox.WatchSessionEvents(ctx, session.ID, &sandbox0.SessionEventStreamOptions{
+    After: lastSeq,
+})
+if err != nil {
+    log.Fatal(err)
+}
+event, err := stream.Recv()
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("reattached at seq=%d\\n", event.Seq)
+if err := stream.Close(); err != nil {
+    log.Fatal(err)
 }`
     },
     {
       label: "Python",
       language: "python",
       code: `import base64
-import os
-import time
 
-from sandbox0 import Client, SessionCreateOptions
-from sandbox0.apispec.models.execution_session_input_request import ExecutionSessionInputRequest
-from sandbox0.apispec.models.execution_session_io_mode import ExecutionSessionIOMode
-from sandbox0.apispec.models.execution_session_io_spec import ExecutionSessionIOSpec
-from sandbox0.apispec.models.execution_session_spec import ExecutionSessionSpec
+from sandbox0 import SessionEventStreamOptions
 
-with Client(
-    token=os.environ["SANDBOX0_TOKEN"],
-    base_url=os.environ.get("SANDBOX0_BASE_URL", "https://api.sandbox0.ai"),
-) as client:
-    sandbox = client.sandbox(os.environ["SANDBOX0_SANDBOX_ID"])
-    session = sandbox.create_session(
-        ExecutionSessionSpec(
-            name="docs-pipe",
-            command=["/bin/cat"],
-            io=ExecutionSessionIOSpec(mode=ExecutionSessionIOMode.PIPES),
-        ),
-        SessionCreateOptions(idempotency_key=f"docs-{time.time_ns()}"),
-    )
-    try:
-        attempt_id = session.to_dict()["attempt"]["id"]
-        stream = sandbox.watch_session_events(session.id)
-        sandbox.write_session_input(
-            session.id,
-            ExecutionSessionInputRequest(
-                input_id=f"input-{time.time_ns()}",
-                expected_attempt_id=attempt_id,
-                data_base64=base64.b64encode(b"hello from Python\\n").decode(),
-                eof=True,
-            ),
-        )
+last_seq = 0
+output_count = 0
+with sandbox.watch_session_events(session.id) as stream:
+    for event in stream.iter_events():
+        value = event.to_dict()
+        last_seq = value["seq"]
+        if "data_base64" in value:
+            print(base64.b64decode(value["data_base64"]).decode(), end="")
+            output_count += 1
+        if output_count == 2:
+            break
 
-        last_seq = 0
-        with stream:
-            for event in stream.iter_events():
-                value = event.to_dict()
-                last_seq = value["seq"]
-                if "data_base64" in value:
-                    print(base64.b64decode(value["data_base64"]).decode(), end="")
-                if value["type"] == "attempt.exited":
-                    break
-
-        current = sandbox.get_session(session.id)
-        print(f"session={current.id} phase={current.phase} cursor={last_seq}")
-    finally:
-        sandbox.delete_session(session.id)`
+# Closing the stream did not stop the session. Resume after last_seq.
+with sandbox.watch_session_events(
+    session.id,
+    SessionEventStreamOptions(after=last_seq),
+) as resumed:
+    event = next(resumed.iter_events())
+    print(f"reattached at seq={event.seq}")`
     },
     {
       label: "TypeScript",
       language: "typescript",
-      code: `import { randomUUID } from 'node:crypto';
-import { Client } from 'sandbox0';
+      code: `let lastSeq = 0;
+let outputCount = 0;
+const stream = await sandbox.watchSessionEvents(session.id);
 
-const client = new Client({
-    token: process.env.SANDBOX0_TOKEN!,
-    baseUrl: process.env.SANDBOX0_BASE_URL || 'https://api.sandbox0.ai',
-});
-const sandbox = client.sandbox(process.env.SANDBOX0_SANDBOX_ID!);
-
-const session = await sandbox.createSession({
-    name: 'docs-pipe',
-    command: ['/bin/cat'],
-    io: { mode: 'pipes' },
-}, { idempotencyKey: \`docs-\${randomUUID()}\` });
-
-try {
-    const attemptId = session.attempt?.id;
-    if (!attemptId) throw new Error('session has no current attempt');
-    const stream = await sandbox.watchSessionEvents(session.id);
-    await sandbox.writeSessionInput(session.id, {
-        inputId: \`input-\${randomUUID()}\`,
-        expectedAttemptId: attemptId,
-        dataBase64: Buffer.from('hello from TypeScript\\n').toString('base64'),
-        eof: true,
-    });
-
-    let lastSeq = 0;
-    for await (const event of stream) {
-        lastSeq = event.seq;
-        if (event.dataBase64) {
-            process.stdout.write(Buffer.from(event.dataBase64, 'base64'));
-        }
-        if (event.type === 'attempt.exited') break;
+for await (const event of stream) {
+    lastSeq = event.seq;
+    if (event.dataBase64) {
+        process.stdout.write(Buffer.from(event.dataBase64, 'base64'));
+        outputCount++;
     }
-    await stream.close();
-    const current = await sandbox.getSession(session.id);
-    console.log(\`session=\${current.id} phase=\${current.phase} cursor=\${lastSeq}\`);
-} finally {
-    await sandbox.deleteSession(session.id);
-}`
+    if (outputCount === 2) break;
+}
+await stream.close();
+
+// Closing the stream did not stop the session. Resume after lastSeq.
+const resumed = await sandbox.watchSessionEvents(session.id, {
+    after: lastSeq,
+});
+for await (const event of resumed) {
+    console.log('reattached at seq=' + event.seq);
+    break;
+}
+await resumed.close();`
     },
     {
       label: "CLI",
       language: "bash",
-      code: `set -euo pipefail
+      code: `s0 sandbox session events "$SANDBOX_ID" "$SESSION_ID" --follow
 
-SANDBOX_ID="\${SANDBOX0_SANDBOX_ID}"
-SESSION_ID=""
-cleanup() {
-    if [[ -n "\${SESSION_ID}" ]]; then
-        s0 sandbox session delete "\${SANDBOX_ID}" "\${SESSION_ID}" >/dev/null || true
-    fi
-}
-trap cleanup EXIT
+# Press Ctrl-C to detach. The first column is the event sequence.
+s0 sandbox session get "$SANDBOX_ID" "$SESSION_ID"
 
-created="$(s0 -o json sandbox session create "\${SANDBOX_ID}" \\
-    --name docs-pipe --idempotency-key "docs-\${RANDOM}-$$" -- /bin/cat)"
-SESSION_ID="$(jq -r '.id' <<<"\${created}")"
-ATTEMPT_ID="$(jq -r '.attempt.id' <<<"\${created}")"
-
-s0 sandbox session input "\${SANDBOX_ID}" "\${SESSION_ID}" \\
-    --attempt-id "\${ATTEMPT_ID}" --input-id "input-\${RANDOM}-$$" \\
-    --data $'hello from CLI\\n' --eof
-
-for _ in $(seq 1 50); do
-    phase="$(s0 -o json sandbox session get "\${SANDBOX_ID}" "\${SESSION_ID}" | jq -r '.phase')"
-    [[ "\${phase}" == "exited" ]] && break
-    sleep 0.1
-done
-
-s0 -o json sandbox session events "\${SANDBOX_ID}" "\${SESSION_ID}" \\
-    | jq -r '.events[] | select(.type == "output") | .data_base64' \\
-    | base64 -d`
+# Replace 8 with the last sequence your consumer committed.
+s0 sandbox session events "$SANDBOX_ID" "$SESSION_ID" --after 8 --follow`
     }
   ]}
 />
 
-## Input, EOF, and Attempt Fencing
+Commit your application side effect before saving `seq`. On reconnect, replay is expected, so consumers should deduplicate events by sequence.
 
-`POST /inputs` accepts base64-encoded bytes, explicit EOF, or both. The response means the operation was accepted into the current attempt's input queue; it does not mean the application consumed the bytes.
+### Paged Events, SSE, And WebSocket
+
+| SDK Operation | Use It For | Reconnect Behavior |
+|---------------|------------|--------------------|
+| `ListSessionEvents` / `list_session_events` / `listSessionEvents` | Bounded, paged reads | Continue after the final processed `seq` |
+| `WatchSessionEvents` / `watch_session_events` / `watchSessionEvents` | Retained plus live events over SSE | Reopen with `after` or `Last-Event-ID` |
+| `ConnectSession` / `connect_session` / `connectSession` | Duplex input, signal, resize, and events over WebSocket | Reopen with `after`; disconnect does not imply EOF |
+
+SSE is the simplest default for workers and log consumers. Use WebSocket when one attachment needs both event delivery and interactive PTY control.
+
+## Inspect And Manage Sessions
+
+Session lifecycle is controlled independently from attachments.
+
+| Task | Go | Python | TypeScript | CLI |
+|------|----|--------|------------|-----|
+| List | `ListSessions` | `list_sessions` | `listSessions` | `s0 sandbox session list` |
+| Inspect | `GetSession` | `get_session` | `getSession` | `s0 sandbox session get` |
+| Stop | `SetSessionDesiredState(..., apispec.ExecutionSessionDesiredStateStopped)` | `set_session_desired_state(..., ExecutionSessionDesiredState.STOPPED)` | `setSessionDesiredState(..., 'stopped')` | `s0 sandbox session stop` |
+| Start | `SetSessionDesiredState(..., apispec.ExecutionSessionDesiredStateRunning)` | `set_session_desired_state(..., ExecutionSessionDesiredState.RUNNING)` | `setSessionDesiredState(..., 'running')` | `s0 sandbox session start` |
+| Replace attempt | `CreateSessionAttempt` | `create_session_attempt` | `createSessionAttempt` | `s0 sandbox session attempt --replace` |
+| Delete | `DeleteSession` | `delete_session` | `deleteSession` | `s0 sandbox session delete` |
+
+Stopping sets the desired state to `stopped` and ends the current attempt while retaining the session and journal. Starting creates a new attempt. Deleting stops the current attempt and removes the session identity and retained events.
+
+<Callout variant="warning">
+Do not use a signal as a replacement for stop when you want the session to remain stopped. A signal can make the process exit, after which its restart policy may create another attempt. Set the desired state to `stopped` instead.
+</Callout>
+
+## Send Input And EOF
+
+Pipe and PTY sessions can accept binary-safe input. The examples below assume `session` is a running process that reads stdin, such as `/bin/cat`.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `attempt, ok := session.Attempt.Get()
+if !ok {
+    log.Fatal("session has no current attempt")
+}
+
+_, err := sandbox.WriteSessionInput(ctx, session.ID, apispec.ExecutionSessionInputRequest{
+    InputID:           "input-1",
+    ExpectedAttemptID: apispec.NewOptString(attempt.ID),
+    DataBase64:        apispec.NewOptString(base64.StdEncoding.EncodeToString([]byte("hello\\n"))),
+    EOF:               apispec.NewOptBool(true),
+})
+if err != nil {
+    log.Fatal(err)
+}`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `import base64
+
+from sandbox0.apispec.models.execution_session_input_request import ExecutionSessionInputRequest
+
+attempt_id = session.to_dict()["attempt"]["id"]
+sandbox.write_session_input(
+    session.id,
+    ExecutionSessionInputRequest(
+        input_id="input-1",
+        expected_attempt_id=attempt_id,
+        data_base64=base64.b64encode(b"hello\\n").decode(),
+        eof=True,
+    ),
+)`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `if (!session.attempt) throw new Error('session has no current attempt');
+
+await sandbox.writeSessionInput(session.id, {
+    inputId: 'input-1',
+    expectedAttemptId: session.attempt.id,
+    dataBase64: Buffer.from('hello\\n').toString('base64'),
+    eof: true,
+});`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `ATTEMPT_ID="$(s0 -o json sandbox session get "$SANDBOX_ID" "$SESSION_ID" \\
+    | jq -r '.attempt.id')"
+
+s0 sandbox session input "$SANDBOX_ID" "$SESSION_ID" \\
+    --attempt-id "$ATTEMPT_ID" \\
+    --input-id input-1 \\
+    --data $'hello\\n' \\
+    --eof`
+    }
+  ]}
+/>
+
+Input acceptance means the bytes entered the current attempt's input queue; it does not prove that the application consumed them.
 
 - Generate a unique `input_id` for each logical write.
-- Reuse the same `input_id` and content when retrying an ambiguous request. Once its receipt is durable, the server returns `duplicate: true` without queueing it again.
-- Include `expected_attempt_id` when input belongs to a particular process attempt. A newer attempt causes `409 session_conflict` instead of receiving stale input.
-- Set `eof: true` to close stdin after earlier queued bytes. Disconnecting an attachment is never EOF.
+- Retry an ambiguous request with the same `input_id` and identical content.
+- Include `expected_attempt_id` when input belongs to one specific process attempt.
+- Set `eof: true` to close stdin after earlier queued bytes. Detaching a client is never EOF.
 
-No process API can provide exactly-once application consumption. If the runtime fails after bytes reach the process but before the input receipt is durable, a retry can replay them. Design the application protocol to tolerate this ambiguity when it matters.
+No process API can guarantee exactly-once application consumption. If the process receives bytes before the input receipt becomes durable, retrying after a transport failure can replay them. Use an application-level request ID when duplicate consumption would be unsafe.
 
-## Retained Events and Reconnect
+## Pipes And PTY
 
-Paged reads and streams share the same journal cursor:
+| Mode | Output | Best For |
+|------|--------|----------|
+| `pipes` | Separate `stdout` and `stderr` events | Workers, servers, and non-interactive commands |
+| `pty` | Combined `pty` output | Shells and terminal applications |
 
-1. Process each event and remember its `seq` after the side effect commits.
-2. Reconnect SSE with `Last-Event-ID: <seq>` or reconnect SSE/WebSocket with `?after=<seq>`.
-3. Deduplicate by `seq`; replay is expected.
+For PTY sessions, configure initial `rows`, `cols`, and `term`, then use `ResizeSessionTerminal`, `resize_session_terminal`, `resizeSessionTerminal`, or `s0 sandbox session resize` when the terminal size changes. Include the expected attempt ID so a stale terminal attachment cannot resize a replacement attempt.
 
-For a limited HTTP page, continue with the final event's `seq`. The page's `cursor.earliest` and `cursor.latest` describe the full retained window, not the next-page position.
+## Lifecycle And Recovery
 
-The default retention is 64 MiB and 24 hours per session. A cursor older than retained history returns `410 event_cursor_expired` and reports the earliest sequence in the retained window. Reconcile current session state with `GET /sessions/{'{session_id}'}`, then resume with `after=earliest-1` (or `after=latest` when the retained window is empty), or apply application-specific recovery.
+### Desired State And Phase
 
-Slow live subscribers can be detached when their in-memory delivery buffer fills. This does not lose retained journal data; reconnect from the last committed sequence.
+`lifecycle.desired_state` is the state requested by the user. `phase` is the supervisor's current observation.
 
-## Attempts, Restart, and Runtime Recovery
+| Phase | Meaning |
+|-------|---------|
+| `pending`, `starting` | The session is waiting for or starting an attempt |
+| `running` | The current attempt passed readiness |
+| `backoff` | A restart is scheduled after a failed attempt |
+| `stopping`, `stopped` | The session is stopping or has no running attempt by request |
+| `exited` | The attempt exited and restart policy did not restart it |
+| `failed` | Startup, readiness, or restart limits failed |
+| `paused`, `suspended` | The attempt was paused or ended during sandbox runtime replacement |
 
-An attempt ID identifies one process execution. It changes when:
+### Restart Policy
 
-- the restart policy starts the process again after exit
-- a client creates or replaces an attempt
-- an execution-relevant session specification is replaced
-- a paused or replaced sandbox runtime is restored and `runtime_recovery` is `restart`
+Restart policy applies when a process exits inside the current sandbox runtime.
 
-The session ID and event sequence remain stable across these boundaries. `runtime_generation` distinguishes events and attempts produced by different sandbox runtime instances.
+| Policy | Behavior |
+|--------|----------|
+| `never` | Do not restart after exit |
+| `on_failure` | Restart only after a non-zero exit |
+| `always` | Restart after any exit unless the session is being stopped or deleted |
 
-| Policy | Values | Default behavior |
-|--------|--------|------------------|
-| `restart.policy` | `never`, `on_failure`, `always` | `never` |
-| `restart.max_restarts` | Non-negative integer | 5 restarts within the window |
-| `restart.window_seconds` | Non-negative integer | 60 seconds |
-| `restart.initial_backoff_ms` / `max_backoff_ms` | Non-negative integers | Exponential backoff from 250 ms to 5 s |
-| `runtime_recovery` | `restart`, `stop` | Start a new attempt after runtime replacement |
-| `idle_timeout_seconds` | 0 or positive integer | 0 disables session idle expiry |
-| `max_lifetime_seconds` | 0 or positive integer | 0 disables session lifetime expiry |
+The default restart window allows five restarts within 60 seconds with exponential backoff from 250 ms to 5 seconds.
 
-Sandbox pause stops the current runtime after flushing session state into the checkpointed root filesystem. Resume creates a new runtime generation. It does not restore the old PID, memory, sockets, or terminal connection; it either creates a new attempt or leaves the session stopped according to `runtime_recovery`.
+### Runtime Recovery
 
-## Readiness
+Runtime recovery applies after pause/resume or another sandbox runtime replacement.
 
-Readiness controls when an attempt moves from `starting` to `running`:
+| Policy | Behavior |
+|--------|----------|
+| `restart` | Start a new attempt when the session was active before replacement |
+| `stop` | Keep the session and journal but change the desired state to stopped |
 
-| Type | Ready when |
+<Callout variant="warning">
+Runtime recovery is process restart, not process checkpoint/restore. The old PID, memory, sockets, terminal connection, and in-flight requests do not survive runtime replacement.
+</Callout>
+
+The session is scoped to one sandbox identity. A fork receives filesystem state from its source, but copied supervised sessions are cleared before the fork starts so it cannot execute the source sandbox's processes. Sandbox deletion and `hard_ttl` delete the session and journal.
+
+### Readiness
+
+Readiness controls when an attempt moves from `starting` to `running`.
+
+| Type | Ready When |
 |------|------------|
 | `process` | The operating-system process starts |
-| `delay` | `delay_ms` elapses while the attempt remains alive |
-| `output` | The configured byte sequence appears across stdout, stderr, or PTY output |
+| `delay` | `delay_ms` elapses while the attempt stays alive |
+| `output` | The configured byte sequence appears in stdout, stderr, or PTY output |
 
-For `delay` and `output`, `timeout_ms` terminates an attempt that never becomes ready. Readiness observes process bytes only; it does not interpret an application protocol.
+For `delay` and `output`, `timeout_ms` terminates an attempt that never becomes ready. Readiness observes process bytes only; it does not perform HTTP, TCP, or application-protocol health checks.
 
-## PTY Sessions
+`idle_timeout_seconds` measures session activity such as process output, accepted input, signals, and terminal resize. Merely keeping an attachment open or reading session metadata does not keep an otherwise idle session active. `max_lifetime_seconds` is measured from session creation. Set either value to `0` to disable that limit.
 
-Set `io.mode` to `pty` with initial `rows`, `cols`, and `term`. Use `PUT /terminal` or a WebSocket `resize` message to update the terminal size. Use `expected_attempt_id` on resize and signal messages to prevent a stale terminal attachment from controlling a replacement attempt.
+## Event Journal And Delivery
 
-PTY output is emitted as `stream: "pty"`. Pipe sessions keep stdout and stderr separate.
+The journal contains lifecycle events, process output, accepted input receipts, signals, and terminal resize events. Common event groups are:
+
+| Group | Examples |
+|-------|----------|
+| Session lifecycle | `session.created`, `session.ready`, `session.backoff`, `session.failed`, `session.expired` |
+| Attempt lifecycle | `attempt.starting`, `attempt.started`, `attempt.stopping`, `attempt.exited` |
+| Process output | `output` with `stream: stdout`, `stderr`, or `pty` and base64-encoded bytes |
+| Control | `input.accepted`, `signal.sent`, `terminal.resized` |
+
+Delivery is cursor-based and at least once:
+
+1. Process an event and commit its application side effect.
+2. Save the event's `seq`.
+3. Reconnect after that sequence.
+4. Deduplicate replayed events by `seq`.
+
+The default retention is 64 MiB and 24 hours per session. If a requested cursor is older than retained history, the SDK returns `event_cursor_expired` with the earliest available sequence. Read the current session state, reconcile it with your application, and continue from the retained window.
+
+A slow live subscriber can be detached when its in-memory buffer fills. Retained journal data remains available, so reconnect from the last committed sequence.
 
 ## CLI Reference
 
@@ -337,33 +481,29 @@ PTY output is emitted as `stream: "pty"`. Pipe sessions keep stdout and stderr s
 |---------|---------|
 | `s0 sandbox session list <sandbox-id>` | List sessions |
 | `s0 sandbox session create <sandbox-id> -- <command...>` | Create and start a session |
-| `s0 sandbox session create <sandbox-id> --spec-file session.yaml` | Create from the complete API specification |
+| `s0 sandbox session create <sandbox-id> --spec-file session.yaml` | Create from a complete specification |
 | `s0 sandbox session get <sandbox-id> <session-id>` | Inspect phase, attempt, generation, and cursor |
-| `s0 sandbox session update <sandbox-id> <session-id> --spec-file session.yaml` | Replace the specification with `PUT` semantics |
-| `s0 sandbox session start\|stop <sandbox-id> <session-id>` | Set desired state |
-| `s0 sandbox session attempt <sandbox-id> <session-id> --replace` | Replace the current attempt explicitly |
-| `s0 sandbox session input <sandbox-id> <session-id> ...` | Queue UTF-8, base64, or file input and optional EOF |
+| `s0 sandbox session update <sandbox-id> <session-id> --spec-file session.yaml` | Replace the complete specification |
+| `s0 sandbox session start\|stop <sandbox-id> <session-id>` | Change desired state |
+| `s0 sandbox session attempt <sandbox-id> <session-id> --replace` | Replace the current attempt |
+| `s0 sandbox session input <sandbox-id> <session-id> ...` | Send input or explicit EOF |
 | `s0 sandbox session signal <sandbox-id> <session-id> TERM` | Signal the current attempt |
 | `s0 sandbox session resize <sandbox-id> <session-id> <rows> <cols>` | Resize a PTY |
-| `s0 sandbox session events <sandbox-id> <session-id> --after <seq>` | Read retained events |
-| `s0 sandbox session events <sandbox-id> <session-id> --follow --last-event-id <seq>` | Follow retained and live events over SSE |
-| `s0 sandbox session delete <sandbox-id> <session-id>` | Stop and delete the identity and journal |
+| `s0 sandbox session events <sandbox-id> <session-id> --follow` | Replay and follow events |
+| `s0 sandbox session delete <sandbox-id> <session-id>` | Stop and delete the session and journal |
 
-## HTTP API
+## Next Steps
 
-All public paths are scoped by sandbox:
+<CardGroup>
+  <Card title="Contexts" href="/docs/sandbox/contexts" cta="Continue">
+    Run one-shot commands and stateful REPL workflows.
+  </Card>
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| `GET`, `POST` | `/api/v1/sandboxes/{'{id}'}/sessions` | List or create |
-| `GET`, `PUT`, `DELETE` | `/api/v1/sandboxes/{'{id}'}/sessions/{'{session_id}'}` | Inspect, replace, or delete |
-| `PUT` | `/api/v1/sandboxes/{'{id}'}/sessions/{'{session_id}'}/desired-state` | Start or stop |
-| `POST` | `/api/v1/sandboxes/{'{id}'}/sessions/{'{session_id}'}/attempts` | Create or replace an attempt |
-| `POST` | `/api/v1/sandboxes/{'{id}'}/sessions/{'{session_id}'}/inputs` | Queue input or EOF |
-| `POST` | `/api/v1/sandboxes/{'{id}'}/sessions/{'{session_id}'}/signals` | Send a signal |
-| `PUT` | `/api/v1/sandboxes/{'{id}'}/sessions/{'{session_id}'}/terminal` | Resize a PTY |
-| `GET` | `/api/v1/sandboxes/{'{id}'}/sessions/{'{session_id}'}/events` | Read retained events |
-| `GET` | `/api/v1/sandboxes/{'{id}'}/sessions/{'{session_id}'}/events/stream` | Attach with SSE |
-| `GET` | `/api/v1/sandboxes/{'{id}'}/sessions/{'{session_id}'}/ws` | Attach with WebSocket |
+  <Card title="Pause And Resume" href="/docs/sandbox/pause-resume" cta="Continue">
+    Understand what survives when Sandbox0 releases and replaces a runtime.
+  </Card>
 
-Deleting the sandbox or reaching its hard TTL deletes its sessions. Deleting an individual session stops its current attempt and removes its retained state.
+  <Card title="Sandbox Services" href="/docs/sandbox/services" cta="Continue">
+    Expose workloads through public HTTP routes with auth, CORS, and rate limits.
+  </Card>
+</CardGroup>

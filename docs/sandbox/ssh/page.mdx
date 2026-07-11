@@ -127,7 +127,7 @@ sftp -i ~/.ssh/sandbox0_ed25519 -P "$SSH_PORT" "$SSH_USER@$SSH_HOST"
 - SSH authorization stays at the platform layer. You do not manage `authorized_keys` inside each sandbox.
 - Uploaded SSH public keys belong to the user account, not to one sandbox.
 - A key can access any sandbox that the user is authorized to access in that region.
-- SSH is best for human shell access and standard file transfer. For programmatic process control, use [Contexts](/docs/sandbox/contexts), or use the [Session Supervisor](/docs/sandbox/session-supervisor) when reconnect and runtime recovery matter.
+- SSH is best for human shell access and standard file transfer. For programmatic process control, use [Contexts](/docs/sandbox/contexts), or use [Supervised Sessions](/docs/sandbox/session-supervisor) when reconnect and runtime recovery matter.
 
 ---
 

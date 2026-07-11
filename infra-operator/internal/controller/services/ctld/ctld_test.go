@@ -183,6 +183,9 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 		t.Fatalf("unexpected ctld HA slot labels: primary=%q standby=%q", ds.Spec.Template.Labels[ctldHASlotLabel], standby.Spec.Template.Labels[ctldHASlotLabel])
 	}
 	for _, workload := range []*appsv1.DaemonSet{ds, standby} {
+		if len(workload.Spec.Template.Spec.Containers[0].Ports) != 0 {
+			t.Fatalf("ctld hostNetwork pod %s reserves node ports: %#v", workload.Name, workload.Spec.Template.Spec.Containers[0].Ports)
+		}
 		if workload.Spec.UpdateStrategy.RollingUpdate == nil || workload.Spec.UpdateStrategy.RollingUpdate.MaxSurge == nil || workload.Spec.UpdateStrategy.RollingUpdate.MaxSurge.IntValue() != 1 {
 			t.Fatalf("expected ctld maxSurge=1, got %#v", workload.Spec.UpdateStrategy)
 		}

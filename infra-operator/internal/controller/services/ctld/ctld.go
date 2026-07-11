@@ -291,7 +291,6 @@ func buildCtldDaemonSet(cfg ctldDaemonSetConfig) *appsv1.DaemonSet {
 			RegionID:    common.ResolveRegionID(cfg.Infra),
 			ClusterID:   common.ResolveClusterID(cfg.Infra),
 		}),
-		Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: 8095}},
 		LivenessProbe: &corev1.Probe{
 			ProbeHandler:        corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: probeCommand("live")}},
 			InitialDelaySeconds: 5,

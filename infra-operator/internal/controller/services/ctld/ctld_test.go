@@ -13,6 +13,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -85,6 +86,17 @@ func TestCtldTerminationGraceCoversStaticShutdownBudget(t *testing.T) {
 	assert.LessOrEqual(t, shutdownBudgetSeconds+shutdownMarginSeconds, ctldTerminationGraceSeconds)
 }
 
+func TestReconcileRemovesLegacySingleDaemonSet(t *testing.T) {
+	infra := newCtldTestInfra()
+	legacy := &appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Name: infra.Name + "-ctld", Namespace: infra.Namespace}}
+	_, client := reconcileCtldResources(t, infra, legacy)
+	got := &appsv1.DaemonSet{}
+	err := client.Get(context.Background(), types.NamespacedName{Name: legacy.Name, Namespace: legacy.Namespace}, got)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("legacy daemonset still exists: %v", err)
+	}
+}
+
 func reconcileCtldDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) *appsv1.DaemonSet {
 	t.Helper()
 	ds, _ := reconcileCtldResources(t, infra)
@@ -122,10 +134,17 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 
 	ds := &appsv1.DaemonSet{}
 	if err := client.Get(context.Background(), types.NamespacedName{
-		Name:      infra.Name + "-ctld",
+		Name:      infra.Name + "-ctld-a",
 		Namespace: infra.Namespace,
 	}, ds); err != nil {
 		t.Fatalf("expected daemonset to be created: %v", err)
+	}
+	standby := &appsv1.DaemonSet{}
+	if err := client.Get(context.Background(), types.NamespacedName{
+		Name:      infra.Name + "-ctld-b",
+		Namespace: infra.Namespace,
+	}, standby); err != nil {
+		t.Fatalf("expected standby daemonset to be created: %v", err)
 	}
 
 	if got := ds.Spec.Template.Spec.Containers[0].Env[0].Value; got != "ctld" {
@@ -134,8 +153,8 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 	if ds.Spec.Template.Spec.Containers[0].ReadinessProbe == nil || ds.Spec.Template.Spec.Containers[0].LivenessProbe == nil {
 		t.Fatal("expected ctld probes to be configured")
 	}
-	assertCtldProbe(t, "liveness", ds.Spec.Template.Spec.Containers[0].LivenessProbe, "/healthz", 10)
-	assertCtldProbe(t, "readiness", ds.Spec.Template.Spec.Containers[0].ReadinessProbe, "/readyz", 5)
+	assertCtldProbe(t, "liveness", ds.Spec.Template.Spec.Containers[0].LivenessProbe, "live", 10)
+	assertCtldProbe(t, "readiness", ds.Spec.Template.Spec.Containers[0].ReadinessProbe, "ready", 5)
 	if ds.Spec.Template.Spec.ServiceAccountName != "demo-ctld" {
 		t.Fatalf("expected service account demo-ctld, got %q", ds.Spec.Template.Spec.ServiceAccountName)
 	}
@@ -157,7 +176,21 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 	if len(ds.Spec.Template.Spec.Containers) != 2 || ds.Spec.Template.Spec.Containers[1].Name != "csi-node-driver-registrar" {
 		t.Fatalf("expected csi node-driver-registrar sidecar, got %#v", ds.Spec.Template.Spec.Containers)
 	}
-	if len(ds.Spec.Template.Spec.Containers[0].VolumeMounts) < 6 {
+	if len(standby.Spec.Template.Spec.Containers) != 1 {
+		t.Fatalf("expected standby slot to omit the registrar, got %#v", standby.Spec.Template.Spec.Containers)
+	}
+	if ds.Spec.Template.Labels[ctldHASlotLabel] != "a" || standby.Spec.Template.Labels[ctldHASlotLabel] != "b" {
+		t.Fatalf("unexpected ctld HA slot labels: primary=%q standby=%q", ds.Spec.Template.Labels[ctldHASlotLabel], standby.Spec.Template.Labels[ctldHASlotLabel])
+	}
+	for _, workload := range []*appsv1.DaemonSet{ds, standby} {
+		if workload.Spec.UpdateStrategy.RollingUpdate == nil || workload.Spec.UpdateStrategy.RollingUpdate.MaxSurge == nil || workload.Spec.UpdateStrategy.RollingUpdate.MaxSurge.IntValue() != 1 {
+			t.Fatalf("expected ctld maxSurge=1, got %#v", workload.Spec.UpdateStrategy)
+		}
+		if workload.Spec.UpdateStrategy.RollingUpdate.MaxUnavailable == nil || workload.Spec.UpdateStrategy.RollingUpdate.MaxUnavailable.IntValue() != 0 {
+			t.Fatalf("expected ctld maxUnavailable=0, got %#v", workload.Spec.UpdateStrategy)
+		}
+	}
+	if len(ds.Spec.Template.Spec.Containers[0].VolumeMounts) < 7 {
 		t.Fatalf("expected ctld config, csi, kubelet, data, containerd socket, and containerd data mounts, got %#v", ds.Spec.Template.Spec.Containers[0].VolumeMounts)
 	}
 	assertContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "containerd-data", "/host-var-lib/containerd")
@@ -172,17 +205,21 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 	return ds, client
 }
 
-func assertCtldProbe(t *testing.T, name string, probe *corev1.Probe, path string, periodSeconds int32) {
+func assertCtldProbe(t *testing.T, name string, probe *corev1.Probe, kind string, periodSeconds int32) {
 	t.Helper()
 
-	if probe.HTTPGet == nil {
-		t.Fatalf("expected ctld %s probe to use HTTP", name)
+	if probe.Exec == nil {
+		t.Fatalf("expected ctld %s probe to use exec", name)
 	}
-	if probe.HTTPGet.Path != path {
-		t.Fatalf("expected ctld %s probe path %s, got %s", name, path, probe.HTTPGet.Path)
+	wantArg := "-ha-probe=" + kind
+	found := false
+	for _, arg := range probe.Exec.Command {
+		if arg == wantArg {
+			found = true
+		}
 	}
-	if probe.HTTPGet.Port.StrVal != "http" {
-		t.Fatalf("expected ctld %s probe to use http port, got %#v", name, probe.HTTPGet.Port)
+	if !found {
+		t.Fatalf("expected ctld %s probe command to contain %q, got %#v", name, wantArg, probe.Exec.Command)
 	}
 	if probe.PeriodSeconds != periodSeconds {
 		t.Fatalf("expected ctld %s probe period %d, got %d", name, periodSeconds, probe.PeriodSeconds)

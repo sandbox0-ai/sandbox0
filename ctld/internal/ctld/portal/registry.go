@@ -17,6 +17,8 @@ func (m *Manager) ownerPodID() string {
 	switch {
 	case m == nil:
 		return ""
+	case m.ownerID != "":
+		return m.ownerID
 	case m.podNamespace != "" && m.podName != "":
 		return m.podNamespace + "/" + m.podName
 	case m.podName != "":
@@ -174,6 +176,19 @@ func (m *Manager) unregisterOwner(bound *boundVolume) {
 	if m == nil || bound == nil {
 		return
 	}
+	m.stopOwnerHeartbeat(bound)
+	if m.repo == nil || bound.volumeID == "" {
+		return
+	}
+	if err := m.repo.DeleteMount(context.Background(), bound.volumeID, m.clusterID, m.ownerPodID()); err != nil && m.logger != nil {
+		m.logger.Warn("ctld volume owner unregister failed", zap.String("volume_id", bound.volumeID), zap.Error(err))
+	}
+}
+
+func (m *Manager) stopOwnerHeartbeat(bound *boundVolume) {
+	if bound == nil {
+		return
+	}
 	if bound.heartbeatCancel != nil {
 		bound.heartbeatCancel()
 		bound.heartbeatCancel = nil
@@ -181,11 +196,5 @@ func (m *Manager) unregisterOwner(bound *boundVolume) {
 	if bound.heartbeatDone != nil {
 		<-bound.heartbeatDone
 		bound.heartbeatDone = nil
-	}
-	if m.repo == nil || bound.volumeID == "" {
-		return
-	}
-	if err := m.repo.DeleteMount(context.Background(), bound.volumeID, m.clusterID, m.ownerPodID()); err != nil && m.logger != nil {
-		m.logger.Warn("ctld volume owner unregister failed", zap.String("volume_id", bound.volumeID), zap.Error(err))
 	}
 }

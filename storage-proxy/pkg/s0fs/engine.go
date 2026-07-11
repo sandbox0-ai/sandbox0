@@ -138,7 +138,9 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 			e.nextInode = record.Inode + 1
 		}
 	}
-	e.collectUnlinkedLocked()
+	if !cfg.RetainUnlinked {
+		e.collectUnlinkedLocked()
+	}
 	if appliedRecords > 0 {
 		e.dirty = true
 		e.dirtyAt = time.Now().UTC()
@@ -166,6 +168,28 @@ func (e *Engine) Close() error {
 	e.refreshLocalDiskGuardLocked()
 	e.closed = true
 	return e.wal.close()
+}
+
+// PruneUnlinked removes recovered zero-link inodes that have no restored open
+// file handle. It is used after an HA owner restores its handle table.
+func (e *Engine) PruneUnlinked(retain map[uint64]struct{}) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for inode, node := range e.nodes {
+		if inode == RootInode || node == nil || node.Nlink != 0 {
+			continue
+		}
+		if _, ok := retain[inode]; ok {
+			continue
+		}
+		delete(e.children, inode)
+		delete(e.nodes, inode)
+		delete(e.data, inode)
+		delete(e.coldFiles, inode)
+	}
 }
 
 func (e *Engine) Lookup(parent uint64, name string) (*Node, error) {

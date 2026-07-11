@@ -89,6 +89,8 @@ Mounted `RWO` volumes use one active writable owner at a time.
 
 This is what keeps file changes visible both from inside the sandbox and through the volume file API.
 
+Operator-managed deployments keep one active and one synchronized standby ctld process on each sandbox node. The standby holds a second channel for every kernel FUSE connection and the backend recovery state needed to take over without unpublishing the portal. This protects existing mounts from a single ctld process or Pod failure; it does not preserve mounts across a node reboot or simultaneous loss of both processes.
+
 ## File Operations
 
 After claim completes, use the mounted path like a normal filesystem:

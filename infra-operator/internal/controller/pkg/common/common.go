@@ -366,6 +366,13 @@ func (r *ResourceManager) ApplyDaemonSetWithScope(ctx context.Context, scope Obj
 			current.OwnerReferences = desired.OwnerReferences
 			current.Spec.Selector = desired.Spec.Selector
 			current.Spec.Template = desired.Spec.Template
+			if desired.Spec.UpdateStrategy.Type != "" {
+				current.Spec.UpdateStrategy = desired.Spec.UpdateStrategy
+				current.Spec.MinReadySeconds = desired.Spec.MinReadySeconds
+			}
+			if desired.Spec.RevisionHistoryLimit != nil {
+				current.Spec.RevisionHistoryLimit = desired.Spec.RevisionHistoryLimit
+			}
 		})
 	})
 }

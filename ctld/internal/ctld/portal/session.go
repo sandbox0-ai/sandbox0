@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -235,6 +236,24 @@ func (m *localVolumeManager) UnmountVolume(ctx context.Context, volumeID, _ stri
 	return nil
 }
 
+// HandoffVolume closes the local engine while preserving its recovery state
+// for the promoted ctld process on the same node.
+func (m *localVolumeManager) HandoffVolume(volumeID string) error {
+	m.mu.RLock()
+	volCtx, ok := m.volumes[volumeID]
+	m.mu.RUnlock()
+	if !ok || volCtx == nil {
+		return nil
+	}
+	if volCtx.S0FS != nil {
+		if err := volCtx.S0FS.Close(); err != nil {
+			return err
+		}
+	}
+	m.remove(volumeID)
+	return nil
+}
+
 func (m *localVolumeManager) AckInvalidate(string, string, string, bool, string) error {
 	return nil
 }
@@ -288,6 +307,9 @@ type localSession struct {
 	readCacheMu      sync.RWMutex
 	readCache        map[string][]byte
 	readCacheBytes   int
+	statePath        string
+	stateMu          sync.Mutex
+	stateErr         error
 }
 
 func newLocalSession(volumeID string, mgr *localVolumeManager, logger *logrus.Logger) *localSession {
@@ -308,7 +330,38 @@ func newLocalSession(volumeID string, mgr *localVolumeManager, logger *logrus.Lo
 	}
 }
 
-func (s *localSession) Close() {}
+func (s *localSession) Close() { _ = s.persistRecoveryState() }
+
+func (s *localSession) Handoff() error {
+	return s.persistRecoveryState()
+}
+
+func (s *localSession) RecoveryError() error {
+	if s == nil {
+		return nil
+	}
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return s.stateErr
+}
+
+func (s *localSession) persistRecoveryState() error {
+	if s == nil || strings.TrimSpace(s.statePath) == "" || s.mgr == nil {
+		return nil
+	}
+	volCtx, err := s.mgr.GetVolume(s.volumeID)
+	if err != nil {
+		s.stateMu.Lock()
+		s.stateErr = err
+		s.stateMu.Unlock()
+		return err
+	}
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	err = persistS0FSHandleState(s.statePath, s.volumeID, volCtx.SnapshotHandleState())
+	s.stateErr = err
+	return err
+}
 
 func (s *localSession) ctx(ctx context.Context) context.Context {
 	if s != nil && s.baseCtx != nil {
@@ -384,7 +437,14 @@ func (s *localSession) Create(ctx context.Context, req *pb.CreateRequest) (*pb.N
 		return nil, err
 	}
 	defer release()
-	return s.fs.Create(s.ctx(ctx), req)
+	resp, err := s.fs.Create(s.ctx(ctx), req)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.persistRecoveryState(); err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 func (s *localSession) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*pb.Empty, error) {
 	s.fix(&req.VolumeId)
@@ -393,7 +453,14 @@ func (s *localSession) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*pb.E
 		return nil, err
 	}
 	defer release()
-	return s.fs.Unlink(s.ctx(ctx), req)
+	resp, err := s.fs.Unlink(s.ctx(ctx), req)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.persistRecoveryState(); err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 func (s *localSession) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb.Empty, error) {
 	s.fix(&req.VolumeId)
@@ -461,6 +528,9 @@ func (s *localSession) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenR
 		if volCtx, err := s.localS0FSVolume(req.VolumeId); err == nil && volCtx != nil {
 			s.trackReadOnlyHandle(req.VolumeId, resp.HandleId)
 		}
+	}
+	if err := s.persistRecoveryState(); err != nil {
+		return nil, err
 	}
 	return resp, nil
 }
@@ -536,10 +606,20 @@ func (s *localSession) Release(ctx context.Context, req *pb.ReleaseRequest) (*pb
 				s.evictReadCache(volCtx, inode)
 				_ = volCtx.S0FS.Forget(inode)
 			}
+			if err := s.persistRecoveryState(); err != nil {
+				return nil, err
+			}
 			return &pb.Empty{}, nil
 		}
 	}
-	return s.fs.Release(s.ctx(ctx), req)
+	resp, err := s.fs.Release(s.ctx(ctx), req)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.persistRecoveryState(); err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 func (s *localSession) Flush(ctx context.Context, req *pb.FlushRequest) (*pb.Empty, error) {
 	s.fix(&req.VolumeId)
@@ -591,7 +671,14 @@ func (s *localSession) CopyFileRange(ctx context.Context, req *pb.CopyFileRangeR
 }
 func (s *localSession) OpenDir(ctx context.Context, req *pb.OpenDirRequest) (*pb.OpenDirResponse, error) {
 	s.fix(&req.VolumeId)
-	return s.fs.OpenDir(s.ctx(ctx), req)
+	resp, err := s.fs.OpenDir(s.ctx(ctx), req)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.persistRecoveryState(); err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 func (s *localSession) ReadDir(ctx context.Context, req *pb.ReadDirRequest) (*pb.ReadDirResponse, error) {
 	s.fix(&req.VolumeId)
@@ -599,7 +686,14 @@ func (s *localSession) ReadDir(ctx context.Context, req *pb.ReadDirRequest) (*pb
 }
 func (s *localSession) ReleaseDir(ctx context.Context, req *pb.ReleaseDirRequest) (*pb.Empty, error) {
 	s.fix(&req.VolumeId)
-	return s.fs.ReleaseDir(s.ctx(ctx), req)
+	resp, err := s.fs.ReleaseDir(s.ctx(ctx), req)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.persistRecoveryState(); err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 func (s *localSession) StatFs(ctx context.Context, req *pb.StatFsRequest) (*pb.StatFsResponse, error) {
 	s.fix(&req.VolumeId)

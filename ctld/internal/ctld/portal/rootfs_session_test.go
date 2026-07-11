@@ -2,10 +2,13 @@ package portal
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/stretchr/testify/assert"
@@ -61,6 +64,111 @@ func TestRootFSBackedSessionWritesThroughBackingDir(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, list.Entries, 1)
 	assert.Equal(t, "state.txt", list.Entries[0].Name)
+}
+
+func TestRootFSBackedSessionRestoresKernelInodeMapping(t *testing.T) {
+	backing := t.TempDir()
+	statePath := filepath.Join(t.TempDir(), "portal.jsonl")
+	ctx := context.Background()
+
+	primary, err := newRootFSBackedSessionWithState(backing, statePath)
+	require.NoError(t, err)
+	dir, err := primary.Mkdir(ctx, &pb.MkdirRequest{
+		Parent: s0fs.RootInode,
+		Name:   "before",
+		Mode:   0o755,
+	})
+	require.NoError(t, err)
+	file, err := primary.Create(ctx, &pb.CreateRequest{
+		Parent: dir.Inode,
+		Name:   "state.txt",
+		Mode:   0o644,
+		Flags:  uint32(os.O_RDWR),
+	})
+	require.NoError(t, err)
+	_, err = primary.Write(ctx, &pb.WriteRequest{
+		Inode:    file.Inode,
+		HandleId: file.HandleId,
+		Data:     []byte("survives"),
+	})
+	require.NoError(t, err)
+	_, err = primary.Release(ctx, &pb.ReleaseRequest{HandleId: file.HandleId})
+	require.NoError(t, err)
+	_, err = primary.Rename(ctx, &pb.RenameRequest{
+		OldParent: s0fs.RootInode,
+		OldName:   "before",
+		NewParent: s0fs.RootInode,
+		NewName:   "after",
+	})
+	require.NoError(t, err)
+	primary.Close()
+
+	standby, err := newRootFSBackedSessionWithState(backing, statePath)
+	require.NoError(t, err)
+	defer standby.Close()
+	attr, err := standby.GetAttr(ctx, &pb.GetAttrRequest{Inode: file.Inode})
+	require.NoError(t, err)
+	assert.Equal(t, file.Inode, attr.Ino)
+	read, err := standby.Read(ctx, &pb.ReadRequest{Inode: file.Inode, Size: 64})
+	require.NoError(t, err)
+	assert.Equal(t, "survives", string(read.Data))
+	lookup, err := standby.Lookup(ctx, &pb.LookupRequest{Parent: s0fs.RootInode, Name: "after"})
+	require.NoError(t, err)
+	assert.Equal(t, dir.Inode, lookup.Inode)
+}
+
+func TestRootFSBackedSessionRestoresOpenUnlinkedHandle(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	statePath := filepath.Join(t.TempDir(), "rootfs-state.jsonl")
+	first, err := newRootFSBackedSessionWithState(root, statePath)
+	if err != nil {
+		t.Fatalf("newRootFSBackedSessionWithState(first) error = %v", err)
+	}
+	created, err := first.Create(ctx, &pb.CreateRequest{Parent: s0fs.RootInode, Name: "transient.txt", Flags: uint32(os.O_RDWR)})
+	if err != nil {
+		t.Fatalf("Create(transient.txt) error = %v", err)
+	}
+	if _, err := first.Write(ctx, &pb.WriteRequest{Inode: created.Inode, HandleId: created.HandleId, Data: []byte("before")}); err != nil {
+		t.Fatalf("Write(before) error = %v", err)
+	}
+	if _, err := first.Unlink(ctx, &pb.UnlinkRequest{Parent: s0fs.RootInode, Name: "transient.txt"}); err != nil {
+		t.Fatalf("Unlink(transient.txt) error = %v", err)
+	}
+	first.Close()
+
+	second, err := newRootFSBackedSessionWithState(root, statePath)
+	if err != nil {
+		t.Fatalf("newRootFSBackedSessionWithState(second) error = %v", err)
+	}
+	defer second.Close()
+	if _, err := second.Lookup(ctx, &pb.LookupRequest{Parent: s0fs.RootInode, Name: "transient.txt"}); fserror.CodeOf(err) != fserror.NotFound {
+		t.Fatalf("Lookup(unlinked path) error = %v, want not found", err)
+	}
+	read, err := second.Read(ctx, &pb.ReadRequest{Inode: created.Inode, HandleId: created.HandleId, Size: 64})
+	if err != nil {
+		t.Fatalf("Read(restored handle) error = %v", err)
+	}
+	if string(read.Data) != "before" {
+		t.Fatalf("Read(restored handle) = %q, want before", string(read.Data))
+	}
+	if _, err := second.Write(ctx, &pb.WriteRequest{Inode: created.Inode, HandleId: created.HandleId, Offset: int64(len("before")), Data: []byte("-after")}); err != nil {
+		t.Fatalf("Write(restored handle) error = %v", err)
+	}
+	if _, err := second.Release(ctx, &pb.ReleaseRequest{Inode: created.Inode, HandleId: created.HandleId}); err != nil {
+		t.Fatalf("Release(restored handle) error = %v", err)
+	}
+	orphan := filepath.Join(root, rootFSRecoveryDir, "orphans", strconv.FormatUint(created.Inode, 10))
+	if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("orphan still exists after release: %v", err)
+	}
+	entries, err := second.ReadDir(ctx, &pb.ReadDirRequest{Inode: s0fs.RootInode})
+	if err != nil {
+		t.Fatalf("ReadDir(root) error = %v", err)
+	}
+	if len(entries.Entries) != 0 {
+		t.Fatalf("ReadDir(root) exposed recovery entries: %#v", entries.Entries)
+	}
 }
 
 func assertFileContentForPortalTest(t *testing.T, path, want string) {

@@ -679,3 +679,92 @@ func TestLocalSessionOpenUsesFSServerPermissions(t *testing.T) {
 		t.Fatalf("read-only handle count = %d, want 0 after denied open", len(session.readOnlyHandles))
 	}
 }
+
+func TestLocalSessionRestoresOpenUnlinkedS0FSHandle(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	walPath := filepath.Join(dir, "engine.wal")
+	statePath := filepath.Join(dir, "handles.json")
+	firstEngine, err := s0fs.Open(ctx, s0fs.Config{VolumeID: "vol-1", WALPath: walPath, RetainUnlinked: true})
+	if err != nil {
+		t.Fatalf("Open(first) error = %v", err)
+	}
+	firstManager := newLocalVolumeManager()
+	firstVolume := &volume.VolumeContext{
+		VolumeID: "vol-1", TeamID: "team-a", Backend: volume.BackendS0FS,
+		S0FS: firstEngine, Access: volume.AccessModeRWO, RootInode: 1, RootPath: "/", CacheDir: dir,
+	}
+	firstManager.add(firstVolume)
+	firstSession := newLocalSession("vol-1", firstManager, nil)
+	firstSession.statePath = statePath
+	created, err := firstSession.Create(ctx, &pb.CreateRequest{Parent: s0fs.RootInode, Name: "transient.txt", Mode: 0o644})
+	if err != nil {
+		t.Fatalf("Create(transient.txt) error = %v", err)
+	}
+	if _, err := firstSession.Write(ctx, &pb.WriteRequest{Inode: created.Inode, HandleId: created.HandleId, Data: []byte("survives")}); err != nil {
+		t.Fatalf("Write(transient.txt) error = %v", err)
+	}
+	if _, err := firstSession.Unlink(ctx, &pb.UnlinkRequest{Parent: s0fs.RootInode, Name: "transient.txt"}); err != nil {
+		t.Fatalf("Unlink(transient.txt) error = %v", err)
+	}
+	if err := firstSession.Handoff(); err != nil {
+		t.Fatalf("Handoff() error = %v", err)
+	}
+	if err := firstEngine.Close(); err != nil {
+		t.Fatalf("Close(first) error = %v", err)
+	}
+
+	handleState, err := loadS0FSHandleState(statePath, "vol-1")
+	if err != nil {
+		t.Fatalf("loadS0FSHandleState() error = %v", err)
+	}
+	secondEngine, err := s0fs.Open(ctx, s0fs.Config{VolumeID: "vol-1", WALPath: walPath, RetainUnlinked: true})
+	if err != nil {
+		t.Fatalf("Open(second) error = %v", err)
+	}
+	defer secondEngine.Close()
+	secondVolume := &volume.VolumeContext{
+		VolumeID: "vol-1", TeamID: "team-a", Backend: volume.BackendS0FS,
+		S0FS: secondEngine, Access: volume.AccessModeRWO, RootInode: 1, RootPath: "/", CacheDir: dir,
+	}
+	secondVolume.RestoreHandleState(handleState)
+	secondEngine.PruneUnlinked(retainedUnlinkedInodes(handleState))
+	secondManager := newLocalVolumeManager()
+	secondManager.add(secondVolume)
+	secondSession := newLocalSession("vol-1", secondManager, nil)
+	secondSession.statePath = statePath
+	read, err := secondSession.Read(ctx, &pb.ReadRequest{Inode: created.Inode, HandleId: created.HandleId, Size: 64})
+	if err != nil {
+		t.Fatalf("Read(restored handle) error = %v", err)
+	}
+	if string(read.Data) != "survives" {
+		t.Fatalf("Read(restored handle) = %q, want survives", string(read.Data))
+	}
+	if _, err := secondSession.Release(ctx, &pb.ReleaseRequest{Inode: created.Inode, HandleId: created.HandleId}); err != nil {
+		t.Fatalf("Release(restored handle) error = %v", err)
+	}
+	if _, err := secondEngine.GetAttr(created.Inode); !errors.Is(err, s0fs.ErrNotFound) {
+		t.Fatalf("GetAttr(released unlinked inode) error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestLocalVolumeManagerHandoffPreservesS0FSCache(t *testing.T) {
+	cacheDir := t.TempDir()
+	walPath := filepath.Join(cacheDir, "engine.wal")
+	engine, err := s0fs.Open(context.Background(), s0fs.Config{VolumeID: "vol-1", WALPath: walPath})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	mgr := newLocalVolumeManager()
+	mgr.add(&volume.VolumeContext{VolumeID: "vol-1", S0FS: engine, CacheDir: cacheDir})
+
+	if err := mgr.HandoffVolume("vol-1"); err != nil {
+		t.Fatalf("HandoffVolume() error = %v", err)
+	}
+	if _, err := os.Stat(walPath); err != nil {
+		t.Fatalf("handoff removed recovery WAL: %v", err)
+	}
+	if _, err := mgr.GetVolume("vol-1"); err == nil {
+		t.Fatal("handoff kept volume registered in old manager")
+	}
+}

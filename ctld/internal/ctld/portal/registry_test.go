@@ -34,6 +34,17 @@ func TestIsConflictingMountForCtldBindBlocksCtldOwners(t *testing.T) {
 	}
 }
 
+func TestOwnerPodIDPrefersStableNodeIdentity(t *testing.T) {
+	mgr := &Manager{
+		ownerID:      "ctld-node/node-a",
+		podNamespace: "sandbox0-system",
+		podName:      "ctld-a-random",
+	}
+	if got := mgr.ownerPodID(); got != "ctld-node/node-a" {
+		t.Fatalf("ownerPodID() = %q, want stable node identity", got)
+	}
+}
+
 func TestFindBoundPortalForVolumeReturnsOtherPortal(t *testing.T) {
 	portals := map[string]*portalMount{
 		"portal-a": {mountPath: "/workspace/a", volumeID: "vol-1"},

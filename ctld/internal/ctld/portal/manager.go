@@ -2,9 +2,12 @@ package portal
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -16,6 +19,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/fuseportal"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
@@ -47,6 +51,7 @@ type Manager struct {
 	clusterID              string
 	podName                string
 	podNamespace           string
+	ownerID                string
 	heartbeatInterval      time.Duration
 	ownerOnlyIdleTTL       time.Duration
 	portalCacheMaxBytes    int64
@@ -56,6 +61,9 @@ type Manager struct {
 	staleMountChecker      staleMountChecker
 	activePodUIDLister     ActivePodUIDLister
 	materializerLimiter    chan struct{}
+	recoveryStore          *portalRecoveryStore
+	replicator             PortalReplicator
+	requireStandby         bool
 
 	mu              sync.Mutex
 	portals         map[string]*portalMount
@@ -72,13 +80,16 @@ type portalMount struct {
 	mountPath  string
 	targetPath string
 	fs         *volumefuse.FileSystem
-	server     *fuse.Server
+	server     *fuseportal.Server
 
 	rootfsBackingPath string
+	rootfsStatePath   string
 	rootfsSession     volumefuse.Session
+	volumeStatePath   string
 
 	volumeID  string
 	teamID    string
+	access    volume.AccessMode
 	mountedAt time.Time
 }
 
@@ -90,6 +101,7 @@ type boundVolume struct {
 	refCount  int
 	volCtx    *volume.VolumeContext
 	session   volumefuse.Session
+	statePath string
 
 	heartbeatCancel context.CancelFunc
 	heartbeatDone   chan struct{}
@@ -115,10 +127,13 @@ type Config struct {
 	Repository              *db.Repository
 	PodName                 string
 	PodNamespace            string
+	OwnerID                 string
 	StaleMountCleaner       staleMountCleaner
 	StaleMountChecker       staleMountChecker
 	ActivePodUIDLister      ActivePodUIDLister
 	MaterializerConcurrency int
+	Replicator              PortalReplicator
+	RequireStandby          bool
 }
 
 func NewManager(cfg Config) *Manager {
@@ -173,6 +188,7 @@ func NewManager(cfg Config) *Manager {
 		clusterID:              naming.ClusterIDOrDefault(&storageConfig.DefaultClusterId),
 		podName:                strings.TrimSpace(cfg.PodName),
 		podNamespace:           strings.TrimSpace(cfg.PodNamespace),
+		ownerID:                strings.TrimSpace(cfg.OwnerID),
 		heartbeatInterval:      heartbeatInterval,
 		ownerOnlyIdleTTL:       ownerOnlyIdleTTL,
 		portalCacheMaxBytes:    portalCacheMaxBytes,
@@ -181,6 +197,9 @@ func NewManager(cfg Config) *Manager {
 		staleMountChecker:      staleChecker,
 		activePodUIDLister:     cfg.ActivePodUIDLister,
 		materializerLimiter:    make(chan struct{}, materializerConcurrency),
+		recoveryStore:          newPortalRecoveryStore(rootDir),
+		replicator:             cfg.Replicator,
+		requireStandby:         cfg.RequireStandby,
 		portals:                make(map[string]*portalMount),
 		portalsByTarget:        make(map[string]*portalMount),
 		boundVolumes:           make(map[string]*boundVolume),
@@ -195,6 +214,39 @@ func (m *Manager) MountedVolumeHandler() http.Handler {
 		return nil
 	}
 	return m.volumeAPI
+}
+
+type recoveryErrorReporter interface {
+	RecoveryError() error
+}
+
+func (m *Manager) RecoveryError() error {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for key, pm := range m.portals {
+		if pm == nil {
+			continue
+		}
+		if reporter, ok := pm.rootfsSession.(recoveryErrorReporter); ok {
+			if err := reporter.RecoveryError(); err != nil {
+				return fmt.Errorf("portal %s rootfs recovery state: %w", key, err)
+			}
+		}
+	}
+	for volumeID, bound := range m.boundVolumes {
+		if bound == nil {
+			continue
+		}
+		if reporter, ok := bound.session.(recoveryErrorReporter); ok {
+			if err := reporter.RecoveryError(); err != nil {
+				return fmt.Errorf("volume %s recovery state: %w", volumeID, err)
+			}
+		}
+	}
+	return nil
 }
 
 func (m *Manager) localDiskGuard(cacheDir string) *s0fs.LocalDiskGuard {
@@ -307,7 +359,11 @@ func (m *Manager) PublishPortal(ctx context.Context, req publishRequest) error {
 	if err := os.MkdirAll(rootfsBackingPath, 0o755); err != nil {
 		return fmt.Errorf("create unbound portal rootfs backing dir: %w", err)
 	}
-	rootfsSession := newRootFSBackedSession(rootfsBackingPath)
+	rootfsStatePath := m.rootFSStatePath(key)
+	rootfsSession, err := newRootFSBackedSessionWithState(rootfsBackingPath, rootfsStatePath)
+	if err != nil {
+		return fmt.Errorf("open rootfs portal recovery state: %w", err)
+	}
 	fs := volumefuse.New(key, time.Second, rootfsSession)
 	server, err := mountPortalFS(fs, req.TargetPath)
 	if err != nil {
@@ -323,7 +379,13 @@ func (m *Manager) PublishPortal(ctx context.Context, req publishRequest) error {
 		fs:                fs,
 		server:            server,
 		rootfsBackingPath: rootfsBackingPath,
+		rootfsStatePath:   rootfsStatePath,
 		rootfsSession:     rootfsSession,
+	}
+	if err := m.publishRecoveryState(ctx, pm); err != nil {
+		_ = server.Unmount()
+		rootfsSession.Close()
+		return err
 	}
 
 	m.mu.Lock()
@@ -333,8 +395,17 @@ func (m *Manager) PublishPortal(ctx context.Context, req publishRequest) error {
 	return nil
 }
 
-func mountPortalFS(fs *volumefuse.FileSystem, targetPath string) (*fuse.Server, error) {
-	opts := &fuse.MountOptions{
+func mountPortalFS(fs *volumefuse.FileSystem, targetPath string) (*fuseportal.Server, error) {
+	server, err := fuseportal.Mount(fs, targetPath, portalMountOptions())
+	if err != nil {
+		return nil, fmt.Errorf("mount volume portal fuse: %w", err)
+	}
+	servePortalFS(server)
+	return server, nil
+}
+
+func portalMountOptions() *fuse.MountOptions {
+	return &fuse.MountOptions{
 		FsName:        "sandbox0-volume-portal",
 		Name:          "sandbox0-volume",
 		MaxBackground: 128,
@@ -343,16 +414,192 @@ func mountPortalFS(fs *volumefuse.FileSystem, targetPath string) (*fuse.Server, 
 		DirectMount:   true,
 		MaxWrite:      256 * 1024,
 	}
-	server, err := fuse.NewServer(fs, targetPath, opts)
+}
+
+func servePortalFS(server *fuseportal.Server) {
+	go func() {
+		if err := server.Serve(); err != nil {
+			log.Printf("volume portal FUSE server stopped with error: %v", err)
+		}
+	}()
+}
+
+// RestorePortal promotes a synchronized standby channel into an active portal.
+// The caller must hold the node primary lock before invoking this method. The
+// channel remains caller-owned on error and is consumed after a successful
+// attach so transient backend failures can be retried without losing the last
+// userspace reference to the kernel FUSE connection.
+func (m *Manager) RestorePortal(ctx context.Context, manifest RecoveryManifest, channel *os.File) error {
+	if err := validateRecoveryManifest(manifest); err != nil {
+		return err
+	}
+	if channel == nil {
+		return fmt.Errorf("portal recovery channel is required")
+	}
+	m.mu.Lock()
+	if existing := m.portals[manifest.Key]; existing != nil {
+		m.mu.Unlock()
+		_ = channel.Close()
+		return nil
+	}
+	m.mu.Unlock()
+
+	if err := os.MkdirAll(manifest.RootFSBackingPath, 0o755); err != nil {
+		return fmt.Errorf("restore rootfs portal backing directory: %w", err)
+	}
+	statePath := strings.TrimSpace(manifest.RootFSStatePath)
+	if statePath == "" {
+		statePath = m.rootFSStatePath(manifest.Key)
+	}
+	manifest.RootFSStatePath = statePath
+	if manifest.VolumeID != "" && strings.TrimSpace(manifest.VolumeStatePath) == "" {
+		manifest.VolumeStatePath = m.volumeStatePath(manifest.VolumeID)
+	}
+	if err := m.recoveryStore.Put(manifest); err != nil {
+		return fmt.Errorf("persist restored portal recovery state: %w", err)
+	}
+	rootfsSession, err := newRootFSBackedSessionWithState(manifest.RootFSBackingPath, statePath)
 	if err != nil {
-		return nil, fmt.Errorf("mount volume portal fuse: %w", err)
+		return fmt.Errorf("restore rootfs portal state: %w", err)
 	}
-	go server.Serve()
-	if err := server.WaitMount(); err != nil {
-		_ = server.Unmount()
-		return nil, fmt.Errorf("wait for volume portal mount: %w", err)
+	fs := volumefuse.New(manifest.Key, time.Second, rootfsSession)
+	pm := &portalMount{
+		namespace:         manifest.Namespace,
+		podName:           manifest.PodName,
+		podUID:            manifest.PodUID,
+		name:              manifest.Name,
+		mountPath:         manifest.MountPath,
+		targetPath:        manifest.TargetPath,
+		fs:                fs,
+		rootfsBackingPath: manifest.RootFSBackingPath,
+		rootfsStatePath:   statePath,
+		rootfsSession:     rootfsSession,
+		volumeStatePath:   manifest.VolumeStatePath,
 	}
-	return server, nil
+
+	var cleanupNewBound func()
+	boundAttached := false
+	if manifest.VolumeID != "" {
+		volumeRecord, err := m.validateBindableVolume(ctx, ctldBindContext{volumeID: manifest.VolumeID, teamID: manifest.TeamID})
+		if err != nil {
+			rootfsSession.Close()
+			return fmt.Errorf("validate restored portal volume: %w", err)
+		}
+		accessMode, err := validateBindableAccessMode(volumeRecord.AccessMode)
+		if err != nil {
+			rootfsSession.Close()
+			return err
+		}
+		mountedAt := manifest.MountedAt
+		if mountedAt.IsZero() {
+			mountedAt = time.Now().UTC()
+		}
+		m.mu.Lock()
+		bound := m.boundVolumes[manifest.VolumeID]
+		m.mu.Unlock()
+		newlyOwned := bound == nil
+		if newlyOwned {
+			bound, cleanupNewBound, err = m.openBoundVolume(ctx, ctldapi.BindVolumePortalRequest{
+				PodUID:          manifest.PodUID,
+				PortalName:      manifest.Name,
+				MountPath:       manifest.MountPath,
+				SandboxVolumeID: manifest.VolumeID,
+				TeamID:          manifest.TeamID,
+			}, volumeRecord, accessMode, mountedAt)
+			if err != nil {
+				rootfsSession.Close()
+				return fmt.Errorf("open restored portal volume: %w", err)
+			}
+		}
+		m.mu.Lock()
+		if existing := m.boundVolumes[manifest.VolumeID]; existing != nil {
+			bound = existing
+			newlyOwned = false
+			if cleanupNewBound != nil {
+				cleanupNewBound()
+			}
+		} else {
+			m.boundVolumes[manifest.VolumeID] = bound
+			m.volumes.add(bound.volCtx)
+			if err := m.registerOwner(ctx, bound); err != nil {
+				delete(m.boundVolumes, manifest.VolumeID)
+				m.volumes.remove(manifest.VolumeID)
+				m.mu.Unlock()
+				cleanupNewBound()
+				rootfsSession.Close()
+				return fmt.Errorf("register restored portal owner: %w", err)
+			}
+			m.startMaterializer(bound)
+		}
+		m.attachPortalLocked(pm, bound, mountedAt)
+		if !newlyOwned {
+			bound.refCount++
+		}
+		m.mu.Unlock()
+		boundAttached = true
+	}
+
+	server, err := fuseportal.Attach(fs, channel, manifest.TargetPath, manifest.InitRequest, portalMountOptions())
+	if err != nil {
+		if boundAttached {
+			m.mu.Lock()
+			cleanup := m.unbindLockedSnapshot(pm)
+			m.mu.Unlock()
+			if cleanupErr := m.finishBoundVolumeHandoff(ctx, cleanup); cleanupErr != nil {
+				m.logger.Warn("Failed to preserve bound volume after FUSE attach failure", zap.Error(cleanupErr), zap.String("volume_id", manifest.VolumeID))
+			}
+		}
+		rootfsSession.Close()
+		return fmt.Errorf("attach restored FUSE portal: %w", err)
+	}
+	_ = channel.Close()
+	pm.server = server
+
+	m.mu.Lock()
+	m.portals[manifest.Key] = pm
+	m.portalsByTarget[manifest.TargetPath] = pm
+	m.mu.Unlock()
+	servePortalFS(server)
+	return nil
+}
+
+// SyncStandby sends every active portal and a fresh cloned channel to the
+// currently connected standby.
+func (m *Manager) SyncStandby(ctx context.Context) error {
+	if m == nil || m.replicator == nil || !m.replicator.Ready() {
+		return fmt.Errorf("ctld standby is not synchronized")
+	}
+	return m.SyncTo(ctx, m.replicator)
+}
+
+// SyncTo sends a point-in-time portal snapshot to one standby transport.
+// The transport serializes this snapshot with subsequent incremental updates.
+func (m *Manager) SyncTo(ctx context.Context, target PortalReplicator) error {
+	if m == nil || target == nil || !target.Ready() {
+		return fmt.Errorf("ctld standby is not synchronized")
+	}
+	m.mu.Lock()
+	portals := make([]*portalMount, 0, len(m.portals))
+	for _, pm := range m.portals {
+		portals = append(portals, pm)
+	}
+	m.mu.Unlock()
+	for _, pm := range portals {
+		if pm == nil || pm.server == nil {
+			continue
+		}
+		channel, err := pm.server.CloneChannel()
+		if err != nil {
+			return err
+		}
+		manifest := m.snapshotRecoveryManifest(pm)
+		err = target.Publish(ctx, manifest, channel)
+		_ = channel.Close()
+		if err != nil {
+			return fmt.Errorf("sync portal %s to standby: %w", manifest.Key, err)
+		}
+	}
+	return nil
 }
 
 func (m *Manager) UnpublishPortal(targetPath string) error {
@@ -380,26 +627,126 @@ func (m *Manager) unpublishPortalContext(ctx context.Context, targetPath string,
 		return m.cleanUnknownStaleMountTarget(targetPath)
 	}
 	var firstErr error
-	if detach {
-		if err := m.cleanStaleMountTarget(pm.targetPath); err != nil {
+	handoff := detach && m.replicator != nil && m.replicator.Ready()
+	if !handoff {
+		if err := m.removeRecoveryState(ctx, pm); err != nil {
 			firstErr = err
 		}
-	} else if pm.server != nil {
-		if err := pm.server.Unmount(); err != nil {
-			if cleanupErr := m.cleanStaleMountTarget(pm.targetPath); cleanupErr != nil {
+	}
+	if detach {
+		if pm.server != nil {
+			if err := pm.server.Detach(); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+			}
+		}
+		if !handoff {
+			if err := m.cleanStaleMountTarget(pm.targetPath); err != nil && firstErr == nil {
 				firstErr = err
 			}
+		}
+	} else if pm.server != nil {
+		if err := pm.server.Unmount(); err != nil && firstErr == nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+		if cleanupErr := m.cleanStaleMountTarget(pm.targetPath); cleanupErr != nil && firstErr == nil {
+			firstErr = cleanupErr
 		}
 	}
 	if pm.rootfsSession != nil {
 		pm.rootfsSession.Close()
 	}
-	if pm.rootfsBackingPath != "" {
+	if !handoff && pm.rootfsBackingPath != "" {
 		if err := os.RemoveAll(pm.rootfsBackingPath); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
-	if err := m.finishBoundVolumeCleanup(ctx, cleanup); err != nil && firstErr == nil {
+	if !handoff && pm.rootfsStatePath != "" {
+		if err := os.Remove(pm.rootfsStatePath); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
+			firstErr = err
+		}
+	}
+	var cleanupErr error
+	if handoff {
+		cleanupErr = m.finishBoundVolumeHandoff(ctx, cleanup)
+	} else {
+		cleanupErr = m.finishBoundVolumeCleanup(ctx, cleanup)
+	}
+	if cleanupErr != nil && firstErr == nil {
+		firstErr = cleanupErr
+	}
+	return firstErr
+}
+
+func (m *Manager) publishRecoveryState(ctx context.Context, pm *portalMount) error {
+	manifest := recoveryManifest(pm)
+	if err := m.recoveryStore.Put(manifest); err != nil {
+		return fmt.Errorf("persist portal recovery state: %w", err)
+	}
+	if m.replicator == nil {
+		if m.requireStandby {
+			_ = m.recoveryStore.Delete(manifest.Key)
+			return fmt.Errorf("ctld standby is required but unavailable")
+		}
+		return nil
+	}
+	if !m.replicator.Ready() {
+		if m.requireStandby {
+			_ = m.recoveryStore.Delete(manifest.Key)
+			return fmt.Errorf("ctld standby is not synchronized")
+		}
+		return nil
+	}
+	channel, err := pm.server.CloneChannel()
+	if err != nil {
+		return err
+	}
+	defer channel.Close()
+	if err := m.replicator.Publish(ctx, manifest, channel); err != nil {
+		return fmt.Errorf("replicate portal recovery state: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) updateRecoveryState(ctx context.Context, pm *portalMount) error {
+	manifest := m.snapshotRecoveryManifest(pm)
+	if err := m.recoveryStore.Put(manifest); err != nil {
+		return fmt.Errorf("persist portal recovery state: %w", err)
+	}
+	if m.replicator != nil && m.replicator.Ready() {
+		if err := m.replicator.Update(ctx, manifest); err != nil {
+			return fmt.Errorf("replicate portal recovery state: %w", err)
+		}
+	} else if m.requireStandby {
+		return fmt.Errorf("ctld standby is not synchronized")
+	}
+	return nil
+}
+
+func (m *Manager) snapshotRecoveryManifest(pm *portalMount) RecoveryManifest {
+	if m == nil {
+		return RecoveryManifest{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return recoveryManifest(pm)
+}
+
+func (m *Manager) removeRecoveryState(ctx context.Context, pm *portalMount) error {
+	if pm == nil {
+		return nil
+	}
+	key := portalKey(pm.podUID, pm.name)
+	var firstErr error
+	if m.replicator != nil && m.replicator.Ready() {
+		if err := m.replicator.Remove(ctx, key); err != nil {
+			firstErr = fmt.Errorf("remove replicated portal recovery state: %w", err)
+		}
+	}
+	if err := m.recoveryStore.Delete(key); err != nil && firstErr == nil {
 		firstErr = err
 	}
 	return firstErr
@@ -474,7 +821,8 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume portal already bound to %s", pm.volumeID)
 	}
 	if pm.volumeID == req.SandboxVolumeID {
-		return boundResponse(pm), nil
+		response := boundResponse(pm)
+		return m.finishBindRecovery(ctx, pm, response)
 	}
 
 	mountedAt := time.Now().UTC()
@@ -490,7 +838,7 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		if response.SandboxVolumeID != req.SandboxVolumeID {
 			return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume portal already bound to %s", response.SandboxVolumeID)
 		}
-		return response, nil
+		return m.finishBindRecovery(ctx, pm, response)
 	}
 	if bound := m.boundVolumes[req.SandboxVolumeID]; bound != nil {
 		if bound.closing {
@@ -502,7 +850,7 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 			bound.refCount = 1
 			response := boundResponse(pm)
 			m.mu.Unlock()
-			return response, nil
+			return m.finishBindRecovery(ctx, pm, response)
 		}
 		if accessMode != volume.AccessModeROX {
 			conflictPath := boundMountPath(m.portals, req.SandboxVolumeID, key)
@@ -513,7 +861,7 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		bound.refCount++
 		response := boundResponse(pm)
 		m.mu.Unlock()
-		return response, nil
+		return m.finishBindRecovery(ctx, pm, response)
 	}
 	if existing := findBoundPortalForVolume(m.portals, req.SandboxVolumeID, key); existing != nil {
 		conflictPath := existing.mountPath
@@ -541,7 +889,7 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		if response.SandboxVolumeID != req.SandboxVolumeID {
 			return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume portal already bound to %s", response.SandboxVolumeID)
 		}
-		return response, nil
+		return m.finishBindRecovery(ctx, pm, response)
 	}
 	if bound := m.boundVolumes[req.SandboxVolumeID]; bound != nil {
 		if bound.closing {
@@ -555,7 +903,7 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 			response := boundResponse(pm)
 			m.mu.Unlock()
 			cleanupNewBound()
-			return response, nil
+			return m.finishBindRecovery(ctx, pm, response)
 		}
 		if accessMode != volume.AccessModeROX {
 			conflictPath := boundMountPath(m.portals, req.SandboxVolumeID, key)
@@ -568,7 +916,7 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		response := boundResponse(pm)
 		m.mu.Unlock()
 		cleanupNewBound()
-		return response, nil
+		return m.finishBindRecovery(ctx, pm, response)
 	}
 	if existing := findBoundPortalForVolume(m.portals, req.SandboxVolumeID, key); existing != nil {
 		conflictPath := existing.mountPath
@@ -592,6 +940,13 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 	response := boundResponse(pm)
 	m.mu.Unlock()
 
+	return m.finishBindRecovery(ctx, pm, response)
+}
+
+func (m *Manager) finishBindRecovery(ctx context.Context, pm *portalMount, response ctldapi.BindVolumePortalResponse) (ctldapi.BindVolumePortalResponse, error) {
+	if err := m.updateRecoveryState(ctx, pm); err != nil {
+		return response, err
+	}
 	return response, nil
 }
 
@@ -611,6 +966,11 @@ func (m *Manager) openBoundVolume(ctx context.Context, req ctldapi.BindVolumePor
 
 func (m *Manager) openS0FSBoundVolume(ctx context.Context, req ctldapi.BindVolumePortalRequest, volumeRecord *db.SandboxVolume, accessMode volume.AccessMode, mountedAt time.Time) (*boundVolume, func(), error) {
 	cacheDir := filepath.Join(m.rootDir, "volumes", safePath(req.TeamID), safePath(req.SandboxVolumeID))
+	statePath := m.volumeStatePath(req.SandboxVolumeID)
+	handleState, err := loadS0FSHandleState(statePath, req.SandboxVolumeID)
+	if err != nil {
+		return nil, nil, err
+	}
 	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
 		return nil, nil, fmt.Errorf("create local volume dir: %w", err)
 	}
@@ -637,6 +997,7 @@ func (m *Manager) openS0FSBoundVolume(ctx context.Context, req ctldapi.BindVolum
 		HeadStore:      db.NewS0FSHeadStore(m.repo),
 		Encryption:     encryption,
 		LocalDiskGuard: m.localDiskGuard(cacheDir),
+		RetainUnlinked: true,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("open local s0fs engine: %w", err)
@@ -652,6 +1013,14 @@ func (m *Manager) openS0FSBoundVolume(ctx context.Context, req ctldapi.BindVolum
 		RootPath:  "/",
 		CacheDir:  cacheDir,
 	}
+	volCtx.RestoreHandleState(handleState)
+	engine.PruneUnlinked(retainedUnlinkedInodes(handleState))
+	session := newLocalSession(req.SandboxVolumeID, m.volumes, m.logrus)
+	session.statePath = statePath
+	if err := persistS0FSHandleState(statePath, req.SandboxVolumeID, volCtx.SnapshotHandleState()); err != nil {
+		_ = engine.Close()
+		return nil, nil, err
+	}
 	bound := &boundVolume{
 		volumeID:  req.SandboxVolumeID,
 		teamID:    volumeRecord.TeamID,
@@ -659,7 +1028,8 @@ func (m *Manager) openS0FSBoundVolume(ctx context.Context, req ctldapi.BindVolum
 		mountedAt: mountedAt,
 		refCount:  1,
 		volCtx:    volCtx,
-		session:   newLocalSession(req.SandboxVolumeID, m.volumes, m.logrus),
+		session:   session,
+		statePath: statePath,
 	}
 	return bound, func() { _ = engine.Close() }, nil
 }
@@ -685,7 +1055,11 @@ func (m *Manager) openS3BoundVolume(req ctldapi.BindVolumePortalRequest, volumeR
 	if store == nil {
 		return nil, nil, fmt.Errorf("s3 object storage is not configured")
 	}
-	session := newS3Session(req.SandboxVolumeID, store, accessMode, m.logrus)
+	statePath := m.volumeStatePath(req.SandboxVolumeID)
+	session, err := newS3SessionWithState(req.SandboxVolumeID, store, accessMode, m.logrus, statePath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open s3 portal recovery state: %w", err)
+	}
 	volCtx := &volume.VolumeContext{
 		VolumeID:  req.SandboxVolumeID,
 		TeamID:    volumeRecord.TeamID,
@@ -703,8 +1077,9 @@ func (m *Manager) openS3BoundVolume(req ctldapi.BindVolumePortalRequest, volumeR
 		refCount:  1,
 		volCtx:    volCtx,
 		session:   session,
+		statePath: statePath,
 	}
-	return bound, session.Close, nil
+	return bound, func() { _ = session.Handoff() }, nil
 }
 
 func (m *Manager) Unbind(ctx context.Context, req ctldapi.UnbindVolumePortalRequest) (ctldapi.UnbindVolumePortalResponse, error) {
@@ -723,6 +1098,9 @@ func (m *Manager) Unbind(ctx context.Context, req ctldapi.UnbindVolumePortalRequ
 	}
 	cleanup := m.unbindLockedSnapshot(pm)
 	m.mu.Unlock()
+	if err := m.updateRecoveryState(ctx, pm); err != nil {
+		return ctldapi.UnbindVolumePortalResponse{}, err
+	}
 	if err := m.finishBoundVolumeCleanup(ctx, cleanup); err != nil {
 		return ctldapi.UnbindVolumePortalResponse{}, err
 	}
@@ -1074,6 +1452,43 @@ func (m *Manager) finishBoundVolumeCleanup(ctx context.Context, cleanup *boundVo
 	if unregister {
 		m.unregisterOwner(cleanup.bound)
 	}
+	if cleanup.bound.statePath != "" {
+		if err := os.Remove(cleanup.bound.statePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *Manager) finishBoundVolumeHandoff(ctx context.Context, cleanup *boundVolumeCleanup) error {
+	if cleanup == nil || cleanup.bound == nil || strings.TrimSpace(cleanup.volumeID) == "" {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if cleanup.materializeCancel != nil {
+		cleanup.materializeCancel()
+	}
+	if cleanup.materializeDone != nil {
+		select {
+		case <-cleanup.materializeDone:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if err := handoffBoundSession(cleanup.bound); err != nil {
+		return err
+	}
+	if err := m.volumes.HandoffVolume(cleanup.volumeID); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if m.boundVolumes[cleanup.volumeID] == cleanup.bound {
+		delete(m.boundVolumes, cleanup.volumeID)
+	}
+	m.mu.Unlock()
+	m.stopOwnerHeartbeat(cleanup.bound)
 	return nil
 }
 
@@ -1389,13 +1804,18 @@ func (m *Manager) attachPortalLocked(pm *portalMount, bound *boundVolume, mounte
 		session := bound.session
 		if session == nil {
 			session = newLocalSession(bound.volumeID, m.volumes, m.logrus)
+			if local, ok := session.(*localSession); ok {
+				local.statePath = bound.statePath
+			}
 			bound.session = session
 		}
 		pm.fs.SetSession(session)
 	}
 	pm.volumeID = bound.volumeID
 	pm.teamID = bound.teamID
+	pm.access = bound.access
 	pm.mountedAt = mountedAt
+	pm.volumeStatePath = bound.statePath
 }
 
 func (m *Manager) clearPortalLocked(pm *portalMount) {
@@ -1407,7 +1827,9 @@ func (m *Manager) clearPortalLocked(pm *portalMount) {
 	}
 	pm.volumeID = ""
 	pm.teamID = ""
+	pm.access = ""
 	pm.mountedAt = time.Time{}
+	pm.volumeStatePath = ""
 }
 
 func closeBoundSession(bound *boundVolume) {
@@ -1416,6 +1838,25 @@ func closeBoundSession(bound *boundVolume) {
 	}
 	bound.session.Close()
 	bound.session = nil
+}
+
+type handoffSession interface {
+	Handoff() error
+}
+
+func handoffBoundSession(bound *boundVolume) error {
+	if bound == nil || bound.session == nil {
+		return nil
+	}
+	if session, ok := bound.session.(handoffSession); ok {
+		if err := session.Handoff(); err != nil {
+			return err
+		}
+	} else {
+		bound.session.Close()
+	}
+	bound.session = nil
+	return nil
 }
 
 func boundResponse(pm *portalMount) ctldapi.BindVolumePortalResponse {
@@ -1450,6 +1891,16 @@ func (m *Manager) unboundRootFSBackingPath(podUID, portalName string) string {
 		rootDir = m.rootDir
 	}
 	return filepath.Join(rootDir, "rootfs-portals", safePath(podUID), safePath(portalName))
+}
+
+func (m *Manager) rootFSStatePath(key string) string {
+	digest := sha256.Sum256([]byte(key))
+	return filepath.Join(m.rootDir, "ha", "rootfs", hex.EncodeToString(digest[:])+".jsonl")
+}
+
+func (m *Manager) volumeStatePath(volumeID string) string {
+	digest := sha256.Sum256([]byte(volumeID))
+	return filepath.Join(m.rootDir, "ha", "volumes", hex.EncodeToString(digest[:])+".json")
 }
 
 func parseQuantityBytesOrDefault(value, fallback string) int64 {

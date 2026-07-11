@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -15,6 +17,99 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 )
+
+func TestS3SessionRestoresInodesAndWritableHandle(t *testing.T) {
+	ctx := context.Background()
+	store := objectstore.NewMemoryStore(t.Name())
+	statePath := filepath.Join(t.TempDir(), "s3-state.json")
+	first, err := newS3SessionWithState("vol-s3", store, volume.AccessModeRWO, nil, statePath)
+	if err != nil {
+		t.Fatalf("newS3SessionWithState(first) error = %v", err)
+	}
+	dir, err := first.Mkdir(ctx, &pb.MkdirRequest{Parent: s3RootInode, Name: "workspace"})
+	if err != nil {
+		t.Fatalf("Mkdir(workspace) error = %v", err)
+	}
+	created, err := first.Create(ctx, &pb.CreateRequest{Parent: dir.Inode, Name: "state.txt"})
+	if err != nil {
+		t.Fatalf("Create(state.txt) error = %v", err)
+	}
+	if _, err := first.Write(ctx, &pb.WriteRequest{Inode: created.Inode, HandleId: created.HandleId, Offset: 0, Data: []byte("before-")}); err != nil {
+		t.Fatalf("Write(before) error = %v", err)
+	}
+	assertS3TestObjectMissing(t, store, "workspace/state.txt")
+	if err := first.Handoff(); err != nil {
+		t.Fatalf("Handoff() error = %v", err)
+	}
+
+	second, err := newS3SessionWithState("vol-s3", store, volume.AccessModeRWO, nil, statePath)
+	if err != nil {
+		t.Fatalf("newS3SessionWithState(second) error = %v", err)
+	}
+	attr, err := second.GetAttr(ctx, &pb.GetAttrRequest{Inode: created.Inode})
+	if err != nil {
+		t.Fatalf("GetAttr(restored inode) error = %v", err)
+	}
+	if attr.Size != uint64(len("before-")) {
+		t.Fatalf("restored size = %d, want %d", attr.Size, len("before-"))
+	}
+	if _, err := second.Write(ctx, &pb.WriteRequest{Inode: created.Inode, HandleId: created.HandleId, Offset: int64(len("before-")), Data: []byte("after")}); err != nil {
+		t.Fatalf("Write(after promotion) error = %v", err)
+	}
+	if _, err := second.Release(ctx, &pb.ReleaseRequest{Inode: created.Inode, HandleId: created.HandleId}); err != nil {
+		t.Fatalf("Release(after promotion) error = %v", err)
+	}
+	assertS3TestObject(t, store, "workspace/state.txt", "before-after")
+}
+
+func TestS3SessionStoresRecoveryWriteBufferOutOfLine(t *testing.T) {
+	ctx := context.Background()
+	store := objectstore.NewMemoryStore(t.Name())
+	statePath := filepath.Join(t.TempDir(), "s3-state.json")
+	session, err := newS3SessionWithState("vol-s3", store, volume.AccessModeRWO, nil, statePath)
+	if err != nil {
+		t.Fatalf("newS3SessionWithState() error = %v", err)
+	}
+	created, err := session.Create(ctx, &pb.CreateRequest{Parent: s3RootInode, Name: "large.bin"})
+	if err != nil {
+		t.Fatalf("Create(large.bin) error = %v", err)
+	}
+	chunk := bytes.Repeat([]byte("x"), 4096)
+	for offset := int64(0); offset < 128*1024; offset += int64(len(chunk)) {
+		if _, err := session.Write(ctx, &pb.WriteRequest{
+			Inode: created.Inode, HandleId: created.HandleId, Offset: offset, Data: chunk,
+		}); err != nil {
+			t.Fatalf("Write(offset=%d) error = %v", offset, err)
+		}
+	}
+
+	state, err := loadS3RecoveryState(statePath)
+	if err != nil {
+		t.Fatalf("loadS3RecoveryState() error = %v", err)
+	}
+	handle := state.Handles[created.HandleId]
+	if handle.BufferSize != 128*1024 {
+		t.Fatalf("recovery buffer size = %d, want %d", handle.BufferSize, 128*1024)
+	}
+	stateInfo, err := os.Stat(statePath)
+	if err != nil {
+		t.Fatalf("Stat(state) error = %v", err)
+	}
+	if stateInfo.Size() > 16*1024 {
+		t.Fatalf("recovery metadata size = %d, want <= %d", stateInfo.Size(), 16*1024)
+	}
+	dataPath, err := session.recoveryDataPath(handle.RecoveryKey)
+	if err != nil {
+		t.Fatalf("recoveryDataPath() error = %v", err)
+	}
+	dataInfo, err := os.Stat(dataPath)
+	if err != nil {
+		t.Fatalf("Stat(recovery data) error = %v", err)
+	}
+	if dataInfo.Size() != handle.BufferSize {
+		t.Fatalf("recovery data size = %d, want %d", dataInfo.Size(), handle.BufferSize)
+	}
+}
 
 func TestS3SessionProjectsObjectsAsDirectoriesAndFiles(t *testing.T) {
 	ctx := context.Background()

@@ -488,6 +488,24 @@ def find_pod_namespace(kube_context: str, pod_name: str) -> str:
     return matches[0]
 
 
+def wait_for_pod_deleted(kube_context: str, namespace: str, pod_name: str, timeout_seconds: int = 180) -> None:
+    if not namespace or not pod_name:
+        raise ValueError("pod namespace and name are required for cleanup")
+    deadline = time.time() + timeout_seconds
+    while True:
+        cmd = ["kubectl"]
+        if kube_context:
+            cmd += ["--context", kube_context]
+        cmd += ["-n", namespace, "get", "pod", pod_name]
+        completed = subprocess.run(cmd, text=True, capture_output=True, check=False)
+        if completed.returncode != 0 and "NotFound" in completed.stderr:
+            return
+        if time.time() > deadline:
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            raise TimeoutError(f"pod {namespace}/{pod_name} was not deleted: {detail}")
+        time.sleep(1)
+
+
 def run_remote_benchmark(args: argparse.Namespace, pod_name: str, namespace: str) -> Any:
     cfg = {
         "file_count": args.file_count,
@@ -540,6 +558,8 @@ def main() -> int:
     template_id = args.template_id or f"volume-bench-{int(time.time())}"
     sandbox_id = ""
     volume_id = ""
+    pod_name = ""
+    namespace = ""
     created_template = False
     try:
         base = data(client.json_request("GET", f"/api/v1/templates/{args.template_base}"))
@@ -594,22 +614,31 @@ def main() -> int:
         return 0
     finally:
         if not args.keep_resources:
+            sandbox_portals_released = not sandbox_id
             if sandbox_id:
                 try:
                     client.json_request("DELETE", f"/api/v1/sandboxes/{sandbox_id}", expected=(200, 404))
+                    wait_for_pod_deleted(args.kube_context, namespace, pod_name)
+                    sandbox_portals_released = True
                 except Exception as exc:  # noqa: BLE001
-                    print(f"warning: delete sandbox {sandbox_id} failed: {exc}", file=sys.stderr)
+                    print(f"warning: delete sandbox {sandbox_id} or release its portals failed: {exc}", file=sys.stderr)
             if volume_id:
-                deadline = time.time() + 60
-                while True:
-                    try:
-                        client.json_request("DELETE", f"/api/v1/sandboxvolumes/{volume_id}", expected=(200, 404))
-                        break
-                    except Exception as exc:  # noqa: BLE001
-                        if time.time() > deadline:
-                            print(f"warning: delete volume {volume_id} failed: {exc}", file=sys.stderr)
+                if not sandbox_portals_released:
+                    print(
+                        f"warning: keeping volume {volume_id} because sandbox portal cleanup did not finish",
+                        file=sys.stderr,
+                    )
+                else:
+                    deadline = time.time() + 60
+                    while True:
+                        try:
+                            client.json_request("DELETE", f"/api/v1/sandboxvolumes/{volume_id}", expected=(200, 404))
                             break
-                        time.sleep(2)
+                        except Exception as exc:  # noqa: BLE001
+                            if time.time() > deadline:
+                                print(f"warning: delete volume {volume_id} failed: {exc}", file=sys.stderr)
+                                break
+                            time.sleep(2)
             if created_template:
                 try:
                     client.json_request("DELETE", f"/api/v1/templates/{template_id}", expected=(200, 404))

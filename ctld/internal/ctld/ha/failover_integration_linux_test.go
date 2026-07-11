@@ -90,6 +90,20 @@ func (fs *processFailoverFS) Read(_ <-chan struct{}, input *fuse.ReadIn, _ []byt
 	return fuse.ReadResultData(append([]byte(nil), fs.data[input.Offset:end]...)), fuse.OK
 }
 
+func (fs *processFailoverFS) Write(_ <-chan struct{}, input *fuse.WriteIn, data []byte) (uint32, fuse.Status) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if input.NodeId != 2 || input.Fh != 1 {
+		return 0, fuse.EBADF
+	}
+	end := int(input.Offset) + len(data)
+	if end > len(fs.data) {
+		fs.data = append(fs.data, make([]byte, end-len(fs.data))...)
+	}
+	copy(fs.data[int(input.Offset):], data)
+	return uint32(len(data)), fuse.OK
+}
+
 func TestCtldHAProcessFailoverKeepsFuseMount(t *testing.T) {
 	if os.Getenv(processFailoverChildEnv) == "1" {
 		runProcessFailoverChild(t)
@@ -138,6 +152,10 @@ func TestCtldHAProcessFailoverKeepsFuseMount(t *testing.T) {
 	})
 	waitForPath(t, readyPath)
 	assertProcessFailoverContents(t, filepath.Join(mountPoint, "value"), "primary")
+	openBeforeFailover, err := os.OpenFile(filepath.Join(mountPoint, "value"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open value before failover: %v", err)
+	}
 
 	standbyCoordinator := newTestCoordinator(t, root, "b")
 	standbyResult := waitForPrimaryAsync(context.Background(), standbyCoordinator)
@@ -166,6 +184,13 @@ func TestCtldHAProcessFailoverKeepsFuseMount(t *testing.T) {
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve() }()
 	assertProcessFailoverContents(t, filepath.Join(mountPoint, "value"), "standby")
+	if _, err := openBeforeFailover.WriteAt([]byte("resumed"), 0); err != nil {
+		t.Fatalf("write through pre-failover file descriptor: %v", err)
+	}
+	assertProcessFailoverContents(t, filepath.Join(mountPoint, "value"), "resumed")
+	if err := openBeforeFailover.Close(); err != nil {
+		t.Fatalf("close pre-failover file descriptor: %v", err)
+	}
 	if err := server.Unmount(); err != nil {
 		t.Fatalf("Unmount(promoted) error = %v", err)
 	}

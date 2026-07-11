@@ -3,6 +3,7 @@ package volumefuse
 import (
 	"context"
 	"errors"
+	"log"
 	"sync"
 	"syscall"
 	"time"
@@ -503,6 +504,7 @@ func (fs *FileSystem) Write(cancel <-chan struct{}, input *fuse.WriteIn, data []
 	fs.invalidateKernelData(input.NodeId, int64(input.Offset), int64(len(data)))
 	resp, err := session.Write(context.Background(), req)
 	if err != nil {
+		log.Printf("volume FUSE write failed volume_id=%q inode=%d handle_id=%d offset=%d size=%d: %v", fs.volumeID, input.NodeId, input.Fh, input.Offset, len(data), err)
 		return 0, statusToFuse(err)
 	}
 	written := int(resp.BytesWritten)

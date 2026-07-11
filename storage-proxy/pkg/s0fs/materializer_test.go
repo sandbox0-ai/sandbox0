@@ -224,6 +224,68 @@ func TestEngineMaterializeRecoversViaColdRangeRead(t *testing.T) {
 	}
 }
 
+func TestEngineMaterializeRetainsUnlinkedInodeWhenConfigured(t *testing.T) {
+	ctx := context.Background()
+	walPath := filepath.Join(t.TempDir(), "engine.wal")
+	store := newPrefixedRecordingStore(t, "vol-retained-unlinked")
+	heads := newMemoryHeadStore()
+	config := Config{
+		VolumeID:       "vol-retained-unlinked",
+		WALPath:        walPath,
+		ObjectStore:    store,
+		HeadStore:      heads,
+		RetainUnlinked: true,
+	}
+	engine, err := Open(ctx, config)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	node, err := engine.CreateFile(RootInode, "open.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if _, err := engine.Write(node.Inode, 0, []byte("before")); err != nil {
+		t.Fatalf("Write(before unlink) error = %v", err)
+	}
+	if err := engine.Unlink(RootInode, "open.txt"); err != nil {
+		t.Fatalf("Unlink() error = %v", err)
+	}
+	if _, err := engine.SyncMaterialize(ctx); err != nil {
+		t.Fatalf("SyncMaterialize() error = %v", err)
+	}
+
+	if _, err := engine.Write(node.Inode, 6, []byte("-after")); err != nil {
+		t.Fatalf("Write(after materialize) error = %v", err)
+	}
+	data, err := engine.Read(node.Inode, 0, 64)
+	if err != nil {
+		t.Fatalf("Read(after materialize) error = %v", err)
+	}
+	if got, want := string(data), "before-after"; got != want {
+		t.Fatalf("Read(after materialize) = %q, want %q", got, want)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	reopened, err := Open(ctx, config)
+	if err != nil {
+		t.Fatalf("Open(reopened) error = %v", err)
+	}
+	defer reopened.Close()
+	if _, err := reopened.Write(node.Inode, 12, []byte("-reopened")); err != nil {
+		t.Fatalf("Write(after reopen) error = %v", err)
+	}
+	data, err = reopened.Read(node.Inode, 0, 64)
+	if err != nil {
+		t.Fatalf("Read(after reopen) error = %v", err)
+	}
+	if got, want := string(data), "before-after-reopened"; got != want {
+		t.Fatalf("Read(after reopen) = %q, want %q", got, want)
+	}
+}
+
 func TestCloneStateForMaterializationSharesOnlyInlinePayload(t *testing.T) {
 	state := &SnapshotState{
 		NextSeq:   2,

@@ -30,6 +30,7 @@ type Engine struct {
 	materializer            *Materializer
 	encryption              *EncryptionConfig
 	localDiskGuard          *LocalDiskGuard
+	retainUnlinked          bool
 	mutationVersion         uint64
 	lastCommittedManifest   uint64
 	lastMaterializedVersion uint64
@@ -112,6 +113,7 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 		materializer:   materializer,
 		encryption:     cfg.Encryption,
 		localDiskGuard: cfg.LocalDiskGuard,
+		retainUnlinked: cfg.RetainUnlinked,
 	}
 	if latestManifest != nil {
 		e.lastCommittedManifest = latestManifest.ManifestSeq
@@ -138,7 +140,7 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 			e.nextInode = record.Inode + 1
 		}
 	}
-	if !cfg.RetainUnlinked {
+	if !e.retainUnlinked {
 		e.collectUnlinkedLocked()
 	}
 	if appliedRecords > 0 {
@@ -981,7 +983,9 @@ func (e *Engine) replaceStateLocked(state *SnapshotState) {
 	e.data = state.Data
 	e.coldFiles = state.ColdFiles
 	e.segments = state.Segments
-	e.collectUnlinkedLocked()
+	if !e.retainUnlinked {
+		e.collectUnlinkedLocked()
+	}
 }
 
 func (e *Engine) persistCurrentStateLocked() error {

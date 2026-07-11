@@ -2,10 +2,12 @@
 
 Use the builtin `coding-agent` template when an application needs to run Codex, Claude Code, OpenCode, or Pi inside the same Sandbox0 execution environment. The template installs all four native CLIs and declares two writable mount points:
 
-- `/workspace` for the repository and generated files
+- `/workspace` as every harness's process working directory, containing the repository and generated files
 - `/agent-state` for harness configuration and native conversation state
 
 Each coding agent remains a native subprocess. Session Supervisor owns process lifetime, stdin/stdout transport, restart attempts, and the replayable event journal; it does not translate one harness protocol into another.
+
+The template declares `/workspace` as a SandboxVolume mount point. A claim binds the selected workspace Volume there, and every supervised session sets its `cwd` to the same path. `/agent-state` is separate native harness state; it is not the coding workspace. The container's operating-system `HOME` remains `/root` and is not used as the coding workspace.
 
 | Harness | Native command | Protocol |
 |---------|----------------|----------|

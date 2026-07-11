@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -208,5 +207,5 @@ func waitHandlerSessionPhase(t *testing.T, supervisor *session.Supervisor, id st
 		time.Sleep(10 * time.Millisecond)
 	}
 	value, _ := supervisor.Get(id)
-	t.Fatal(fmt.Sprintf("phase = %s, want %s; session=%#v", value.Phase, expected, value))
+	t.Fatalf("phase = %s, want %s; session=%#v", value.Phase, expected, value)
 }

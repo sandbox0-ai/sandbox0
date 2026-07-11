@@ -29,7 +29,7 @@ type fuseRecoveryStatus struct {
 	Reserved      [3]uint64
 }
 
-// recoverFUSEConnection asks an ANCK recovery-capable kernel to attach a new
+// recoverFUSEConnection asks a recovery-capable kernel to attach a new
 // /dev/fuse descriptor to the initialized connection identified by tag. The
 // returned descriptor is owned by the caller.
 func recoverFUSEConnection(tag string) (int, uint64, uint64, error) {

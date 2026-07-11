@@ -59,4 +59,13 @@ var (
 
 	// ErrInputBufferFull is returned when the input queue is full.
 	ErrInputBufferFull = errors.New("input buffer full")
+
+	// ErrInputCloseTimeout is returned when queued input cannot be drained before closing.
+	ErrInputCloseTimeout = errors.New("input close timed out")
+
+	// ErrProcessStopTimeout is returned when a process survives graceful and forced termination.
+	ErrProcessStopTimeout = errors.New("process stop timed out")
+
+	// ErrProcessIOCloseTimeout is returned when process I/O does not drain after termination.
+	ErrProcessIOCloseTimeout = errors.New("process I/O close timed out")
 )

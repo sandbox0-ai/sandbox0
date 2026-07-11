@@ -2,12 +2,15 @@ package http
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"go.uber.org/zap"
 )
 
 const defaultLifecycleBarrierWaitTimeout = 30 * time.Second
@@ -18,7 +21,15 @@ type lifecycleBarrier struct {
 	active            bool
 	epoch             int64
 	runtimeGeneration int64
-	inFlight          int
+	nextOperationID   uint64
+	inFlight          map[uint64]lifecycleBarrierOperation
+}
+
+type lifecycleBarrierOperation struct {
+	ID        uint64    `json:"id"`
+	Method    string    `json:"method"`
+	Path      string    `json:"path"`
+	StartedAt time.Time `json:"started_at"`
 }
 
 type lifecycleBarrierRequest struct {
@@ -29,14 +40,15 @@ type lifecycleBarrierRequest struct {
 }
 
 type lifecycleBarrierResponse struct {
-	Active            bool  `json:"active"`
-	Epoch             int64 `json:"epoch,omitempty"`
-	RuntimeGeneration int64 `json:"runtime_generation,omitempty"`
-	InFlight          int   `json:"in_flight"`
+	Active            bool                        `json:"active"`
+	Epoch             int64                       `json:"epoch,omitempty"`
+	RuntimeGeneration int64                       `json:"runtime_generation,omitempty"`
+	InFlight          int                         `json:"in_flight"`
+	Operations        []lifecycleBarrierOperation `json:"operations,omitempty"`
 }
 
 func newLifecycleBarrier() *lifecycleBarrier {
-	b := &lifecycleBarrier{}
+	b := &lifecycleBarrier{inFlight: make(map[uint64]lifecycleBarrierOperation)}
 	b.cond = sync.NewCond(&b.mu)
 	return b
 }
@@ -50,7 +62,7 @@ func (b *lifecycleBarrier) middleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		release, ok := b.enter()
+		release, ok := b.enter(r)
 		if !ok {
 			_ = spec.WriteError(w, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox lifecycle barrier is active")
 			return
@@ -60,20 +72,30 @@ func (b *lifecycleBarrier) middleware(next http.Handler) http.Handler {
 	})
 }
 
-func (b *lifecycleBarrier) enter() (func(), bool) {
+func (b *lifecycleBarrier) enter(r *http.Request) (func(), bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.active {
 		return nil, false
 	}
-	b.inFlight++
+	if b.inFlight == nil {
+		b.inFlight = make(map[uint64]lifecycleBarrierOperation)
+	}
+	b.nextOperationID++
+	operationID := b.nextOperationID
+	operation := lifecycleBarrierOperation{ID: operationID, StartedAt: time.Now().UTC()}
+	if r != nil {
+		operation.Method = r.Method
+		if r.URL != nil {
+			operation.Path = r.URL.Path
+		}
+	}
+	b.inFlight[operationID] = operation
 	return func() {
 		b.mu.Lock()
 		defer b.mu.Unlock()
-		if b.inFlight > 0 {
-			b.inFlight--
-		}
-		if b.inFlight == 0 {
+		delete(b.inFlight, operationID)
+		if len(b.inFlight) == 0 {
 			b.cond.Broadcast()
 		}
 	}, true
@@ -122,20 +144,22 @@ func (b *lifecycleBarrier) setActive(r *http.Request, req lifecycleBarrierReques
 	}()
 	defer close(done)
 
-	for b.inFlight > 0 {
+	for len(b.inFlight) > 0 {
 		if err := r.Context().Err(); err != nil {
+			waitErr := b.waitErrorLocked(err)
 			b.active = false
 			b.epoch = 0
 			b.runtimeGeneration = 0
 			b.cond.Broadcast()
-			return b.snapshotLocked(), err
+			return b.snapshotLocked(), waitErr
 		}
 		if !deadline.IsZero() && time.Now().After(deadline) {
+			waitErr := b.waitErrorLocked(http.ErrHandlerTimeout)
 			b.active = false
 			b.epoch = 0
 			b.runtimeGeneration = 0
 			b.cond.Broadcast()
-			return b.snapshotLocked(), http.ErrHandlerTimeout
+			return b.snapshotLocked(), waitErr
 		}
 		b.cond.Wait()
 	}
@@ -143,12 +167,28 @@ func (b *lifecycleBarrier) setActive(r *http.Request, req lifecycleBarrierReques
 }
 
 func (b *lifecycleBarrier) snapshotLocked() lifecycleBarrierResponse {
+	operations := make([]lifecycleBarrierOperation, 0, len(b.inFlight))
+	for _, operation := range b.inFlight {
+		operations = append(operations, operation)
+	}
+	sort.Slice(operations, func(i, j int) bool { return operations[i].ID < operations[j].ID })
 	return lifecycleBarrierResponse{
 		Active:            b.active,
 		Epoch:             b.epoch,
 		RuntimeGeneration: b.runtimeGeneration,
-		InFlight:          b.inFlight,
+		InFlight:          len(operations),
+		Operations:        operations,
 	}
+}
+
+func (b *lifecycleBarrier) waitErrorLocked(cause error) error {
+	operations := b.snapshotLocked().Operations
+	details := make([]string, 0, len(operations))
+	now := time.Now()
+	for _, operation := range operations {
+		details = append(details, fmt.Sprintf("%s %s active for %s", operation.Method, operation.Path, now.Sub(operation.StartedAt).Round(time.Millisecond)))
+	}
+	return fmt.Errorf("%w waiting for %d runtime operation(s): %s", cause, len(operations), strings.Join(details, ", "))
 }
 
 func (s *Server) lifecycleBarrierHandler(w http.ResponseWriter, r *http.Request) {
@@ -159,6 +199,13 @@ func (s *Server) lifecycleBarrierHandler(w http.ResponseWriter, r *http.Request)
 	}
 	resp, err := s.barrier.setActive(r, req)
 	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("Lifecycle barrier wait failed",
+				zap.Error(err),
+				zap.Int("in_flight", resp.InFlight),
+				zap.Any("operations", resp.Operations),
+			)
+		}
 		_ = spec.WriteError(w, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
 		return
 	}

@@ -137,31 +137,28 @@ func (m *Manager) CreateContext(config process.ProcessConfig) (*Context, error) 
 
 // CreateContextWithPolicyAndREPLConfig creates a new context with a cleanup policy and optional REPL config.
 func (m *Manager) CreateContextWithPolicyAndREPLConfig(config process.ProcessConfig, replConfig *repl.REPLConfig, policy CleanupPolicy) (*Context, error) {
-	m.mu.Lock()
+	m.mu.RLock()
 	startHandler := m.onStart
+	exitHandler := m.onExit
 	defaultPolicy := m.defaultCleanupPolicy
-	config.EnvVars = process.MergeEnvVars(m.sandboxEnvVars, config.EnvVars)
-	// Define exit handler for the new context
-	exitHandler := func(event process.ExitEvent) {
-		if m.onExit != nil {
-			m.onExit(event)
-		}
-	}
+	sandboxEnvVars := process.CloneEnvVars(m.sandboxEnvVars)
+	supervisor := m.supervisor
+	m.mu.RUnlock()
+
+	config.EnvVars = process.MergeEnvVars(sandboxEnvVars, config.EnvVars)
 
 	var ctx *Context
 	var err error
-	if m.supervisor == nil {
+	if supervisor == nil {
 		ctx, err = NewContext(config, replConfig, exitHandler, startHandler)
 	} else {
 		ctx, err = NewUnstartedContext(config, replConfig, exitHandler, startHandler)
 	}
 	if err != nil {
-		m.mu.Unlock()
 		return nil, err
 	}
-	if m.supervisor != nil {
-		if err := m.supervisor.StartTransient(ctx.ID, ctx.MainProcess); err != nil {
-			m.mu.Unlock()
+	if supervisor != nil {
+		if err := supervisor.StartTransient(ctx.ID, ctx.MainProcess); err != nil {
 			return nil, err
 		}
 	}
@@ -171,6 +168,7 @@ func (m *Manager) CreateContextWithPolicyAndREPLConfig(config process.ProcessCon
 	}
 	ctx.SetCleanupPolicy(policy)
 
+	m.mu.Lock()
 	m.contexts[ctx.ID] = ctx
 	m.mu.Unlock()
 	return ctx, nil
@@ -205,62 +203,77 @@ func (m *Manager) ListContexts() []*Context {
 // DeleteContext deletes a context.
 func (m *Manager) DeleteContext(id string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	ctx, exists := m.contexts[id]
 	if !exists {
+		m.mu.Unlock()
 		return ErrContextNotFound
 	}
-
-	if m.supervisor != nil {
-		_ = m.supervisor.DeleteTransient(id)
-	} else {
-		_ = ctx.Stop()
-	}
-
 	delete(m.contexts, id)
-	return nil
+	supervisor := m.supervisor
+	m.mu.Unlock()
+
+	ctx.lifecycleMu.Lock()
+	defer ctx.lifecycleMu.Unlock()
+	var err error
+	if supervisor != nil {
+		err = supervisor.DeleteTransient(id)
+	} else {
+		err = ctx.Stop()
+	}
+	if err != nil {
+		m.mu.Lock()
+		if _, exists := m.contexts[id]; !exists {
+			m.contexts[id] = ctx
+		}
+		m.mu.Unlock()
+	}
+	return err
 }
 
 // RestartContext restarts a context.
 func (m *Manager) RestartContext(id string) (*Context, error) {
-	m.mu.Lock()
-
+	m.mu.RLock()
 	ctx, exists := m.contexts[id]
+	supervisor := m.supervisor
+	m.mu.RUnlock()
 	if !exists {
-		m.mu.Unlock()
+		return nil, ErrContextNotFound
+	}
+
+	ctx.lifecycleMu.Lock()
+	defer ctx.lifecycleMu.Unlock()
+	if !m.hasContext(id, ctx) {
 		return nil, ErrContextNotFound
 	}
 
 	var err error
-	if m.supervisor != nil {
-		err = m.supervisor.RestartTransient(id)
+	if supervisor != nil {
+		err = supervisor.RestartTransient(id)
 	} else {
 		err = ctx.Restart()
 	}
 	if err != nil {
-		m.mu.Unlock()
 		return nil, err
 	}
 	ctx.Touch()
 
-	m.mu.Unlock()
 	return ctx, nil
 }
 
 // PauseAll pauses all running contexts and their child processes.
 // Returns an error if any context fails to pause.
 func (m *Manager) PauseAll() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	contexts := m.contextSnapshot()
 
 	var errs []error
-	for _, ctx := range m.contexts {
+	for _, ctx := range contexts {
+		ctx.lifecycleMu.Lock()
 		if ctx.IsRunning() {
 			if err := ctx.Pause(); err != nil {
 				errs = append(errs, fmt.Errorf("context %s: %w", ctx.ID, err))
 			}
 		}
+		ctx.lifecycleMu.Unlock()
 	}
 
 	return errors.Join(errs...)
@@ -269,16 +282,17 @@ func (m *Manager) PauseAll() error {
 // ResumeAll resumes all paused contexts and their child processes.
 // Returns an error if any context fails to resume.
 func (m *Manager) ResumeAll() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	contexts := m.contextSnapshot()
 
 	var errs []error
-	for _, ctx := range m.contexts {
+	for _, ctx := range contexts {
+		ctx.lifecycleMu.Lock()
 		if ctx.IsPaused() {
 			if err := ctx.Resume(); err != nil {
 				errs = append(errs, fmt.Errorf("context %s: %w", ctx.ID, err))
 			}
 		}
+		ctx.lifecycleMu.Unlock()
 	}
 	return errors.Join(errs...)
 }
@@ -357,17 +371,23 @@ func (m *Manager) SendSignal(contextID string, sig syscall.Signal) error {
 // Cleanup cleans up all contexts.
 func (m *Manager) Cleanup() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	contexts := make([]*Context, 0, len(m.contexts))
 	for _, ctx := range m.contexts {
-		if m.supervisor != nil {
-			_ = m.supervisor.DeleteTransient(ctx.ID)
+		contexts = append(contexts, ctx)
+	}
+	m.contexts = make(map[string]*Context)
+	supervisor := m.supervisor
+	m.mu.Unlock()
+
+	for _, ctx := range contexts {
+		ctx.lifecycleMu.Lock()
+		if supervisor != nil {
+			_ = supervisor.DeleteTransient(ctx.ID)
 		} else {
 			_ = ctx.Stop()
 		}
+		ctx.lifecycleMu.Unlock()
 	}
-
-	m.contexts = make(map[string]*Context)
 }
 
 func (m *Manager) cleanupExpired() {
@@ -390,9 +410,8 @@ func (m *Manager) cleanupExpired() {
 // GetResourceUsage returns resource usage for a specific context.
 func (m *Manager) GetResourceUsage(contextID string) (*ContextResourceUsage, error) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	ctx, exists := m.contexts[contextID]
+	m.mu.RUnlock()
 	if !exists {
 		return nil, ErrContextNotFound
 	}
@@ -409,11 +428,10 @@ func (m *Manager) GetResourceUsage(contextID string) (*ContextResourceUsage, err
 
 // GetAllResourceUsage returns aggregated resource usage for the entire sandbox.
 func (m *Manager) GetAllResourceUsage() *SandboxResourceUsage {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	contexts := m.contextSnapshot()
 
 	result := &SandboxResourceUsage{
-		Contexts: make([]ContextResourceUsage, 0, len(m.contexts)),
+		Contexts: make([]ContextResourceUsage, 0, len(contexts)),
 	}
 
 	if containerStats, err := process.GetContainerResourceUsage(); err == nil {
@@ -422,7 +440,7 @@ func (m *Manager) GetAllResourceUsage() *SandboxResourceUsage {
 		result.ContainerMemoryWorkingSet = containerStats.WorkingSet
 	}
 
-	for _, ctx := range m.contexts {
+	for _, ctx := range contexts {
 		usage := ctx.ResourceUsage()
 
 		ctxUsage := ContextResourceUsage{
@@ -454,4 +472,21 @@ func (m *Manager) GetAllResourceUsage() *SandboxResourceUsage {
 	}
 
 	return result
+}
+
+func (m *Manager) contextSnapshot() []*Context {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	contexts := make([]*Context, 0, len(m.contexts))
+	for _, ctx := range m.contexts {
+		contexts = append(contexts, ctx)
+	}
+	return contexts
+}
+
+func (m *Manager) hasContext(id string, ctx *Context) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.contexts[id] == ctx
 }

@@ -1,11 +1,11 @@
 package process
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/creack/pty"
@@ -21,6 +21,7 @@ type PTYRunner struct {
 	exitResolver func(error) (int, bool)
 
 	mu              sync.RWMutex
+	stopMu          sync.Mutex
 	readerDone      chan struct{}
 	closeOutputOnce sync.Once
 }
@@ -92,27 +93,22 @@ func (r *PTYRunner) Start(cmd *exec.Cmd, size *PTYSize) error {
 
 // Stop terminates the PTY-backed process.
 func (r *PTYRunner) Stop() error {
-	if !r.base.IsRunning() {
-		return nil
+	return r.StopWithOptions(StopOptions{})
+}
+
+// StopWithOptions terminates the PTY process group without unbounded waits.
+func (r *PTYRunner) StopWithOptions(options StopOptions) error {
+	r.stopMu.Lock()
+	defer r.stopMu.Unlock()
+	options = options.normalized()
+
+	_ = r.base.forceCloseInput()
+	stopErr := terminateProcess(r.base, r.onStop, options)
+	if !r.waitReaderDone(options.KillWait) {
+		stopErr = errors.Join(stopErr, ErrProcessIOCloseTimeout)
 	}
-
-	if r.onStop != nil {
-		r.onStop()
-	}
-
-	_ = r.base.CloseInput()
-
-	if r.cmd != nil && r.cmd.Process != nil {
-		if err := r.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-			_ = r.cmd.Process.Kill()
-		}
-	}
-
-	r.waitReaderDone()
-	r.base.SetState(ProcessStateStopped)
 	r.closeOutput()
-
-	return nil
+	return stopErr
 }
 
 func (r *PTYRunner) readOutput(ptmx *os.File) {
@@ -194,8 +190,12 @@ func (r *PTYRunner) monitorProcess() {
 	})
 
 	r.base.stopInputWriter()
-	r.waitReaderDone()
-	_ = r.base.CloseInput()
+	if !r.waitReaderDone(defaultStopKillWait) {
+		_ = r.base.forceCloseInput()
+		r.waitReaderDone(defaultStopKillWait)
+	} else {
+		_ = r.base.forceCloseInput()
+	}
 	r.closeOutput()
 }
 
@@ -208,12 +208,20 @@ func (r *PTYRunner) markReaderDone() {
 	}
 }
 
-func (r *PTYRunner) waitReaderDone() {
+func (r *PTYRunner) waitReaderDone(timeout time.Duration) bool {
 	r.mu.RLock()
 	done := r.readerDone
 	r.mu.RUnlock()
-	if done != nil {
-		<-done
+	if done == nil {
+		return true
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
 	}
 }
 

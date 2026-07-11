@@ -110,17 +110,18 @@ func (c *CMD) prepareExecCmd(ctx context.Context) *exec.Cmd {
 
 // Stop stops the command execution.
 func (c *CMD) Stop() error {
-	if !c.IsRunning() {
-		return nil
-	}
+	return c.StopWithOptions(process.StopOptions{})
+}
 
+// StopWithOptions stops the command with bounded graceful and forced termination.
+func (c *CMD) StopWithOptions(options process.StopOptions) error {
 	ptyRunner, directRunner := c.runners()
 	if ptyRunner != nil {
-		return ptyRunner.Stop()
+		return ptyRunner.StopWithOptions(options)
 	}
 
 	if directRunner != nil {
-		return directRunner.Stop()
+		return directRunner.StopWithOptions(options)
 	}
 
 	return nil

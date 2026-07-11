@@ -149,16 +149,21 @@ func (s *Supervisor) StartTransient(id string, proc process.Process) error {
 
 // DeleteTransient stops and removes a transient process.
 func (s *Supervisor) DeleteTransient(id string) error {
-	s.mu.Lock()
+	s.mu.RLock()
 	proc, exists := s.transients[id]
-	if exists {
-		delete(s.transients, id)
-	}
-	s.mu.Unlock()
+	s.mu.RUnlock()
 	if !exists {
 		return ErrSessionNotFound
 	}
-	return proc.Stop()
+	if err := proc.Stop(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	if s.transients[id] == proc {
+		delete(s.transients, id)
+	}
+	s.mu.Unlock()
+	return nil
 }
 
 // RestartTransient restarts a transient process without changing its identity.

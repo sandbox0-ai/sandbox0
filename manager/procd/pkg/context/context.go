@@ -27,7 +27,8 @@ type Context struct {
 	FinishedAt     *time.Time          `json:"-"`
 	CleanupPolicy  CleanupPolicy       `json:"-"`
 
-	mu sync.RWMutex
+	mu          sync.RWMutex
+	lifecycleMu sync.Mutex
 }
 
 // CleanupPolicy defines when a context should be cleaned up.

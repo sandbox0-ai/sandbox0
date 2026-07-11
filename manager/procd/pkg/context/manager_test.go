@@ -267,6 +267,99 @@ func TestManager_DeleteContext(t *testing.T) {
 	m.Cleanup()
 }
 
+func TestManager_DeleteContextDoesNotHoldRegistryLockWhileStopping(t *testing.T) {
+	m := NewManager()
+	proc := newBlockingStopProcess("blocking-stop")
+	ctx := &Context{ID: "ctx-blocking", MainProcess: proc}
+	m.contexts[ctx.ID] = ctx
+
+	deleteDone := make(chan error, 1)
+	go func() {
+		deleteDone <- m.DeleteContext(ctx.ID)
+	}()
+
+	select {
+	case <-proc.stopStarted:
+	case <-time.After(time.Second):
+		t.Fatal("DeleteContext did not start stopping the process")
+	}
+
+	listDone := make(chan int, 1)
+	go func() {
+		listDone <- len(m.ListContexts())
+	}()
+
+	select {
+	case count := <-listDone:
+		if count != 0 {
+			t.Fatalf("ListContexts() count = %d, want deleted context hidden", count)
+		}
+	case <-time.After(200 * time.Millisecond):
+		close(proc.releaseStop)
+		<-deleteDone
+		t.Fatal("ListContexts blocked behind process shutdown")
+	}
+
+	close(proc.releaseStop)
+	if err := <-deleteDone; err != nil {
+		t.Fatalf("DeleteContext() failed = %v", err)
+	}
+}
+
+func TestManager_DeleteContextRestoresOwnershipWhenStopFails(t *testing.T) {
+	m := NewManager()
+	proc := newBlockingStopProcess("failed-stop")
+	proc.stopErr = process.ErrProcessStopTimeout
+	close(proc.releaseStop)
+	ctx := &Context{ID: "ctx-failed-stop", MainProcess: proc}
+	m.contexts[ctx.ID] = ctx
+
+	if err := m.DeleteContext(ctx.ID); err != process.ErrProcessStopTimeout {
+		t.Fatalf("DeleteContext() error = %v, want %v", err, process.ErrProcessStopTimeout)
+	}
+	got, err := m.GetContext(ctx.ID)
+	if err != nil {
+		t.Fatalf("GetContext() failed after stop error: %v", err)
+	}
+	if got != ctx {
+		t.Fatal("GetContext() returned a different context after stop error")
+	}
+}
+
+type blockingStopProcess struct {
+	*process.BaseProcess
+	stopStarted chan struct{}
+	releaseStop chan struct{}
+	stopOnce    sync.Once
+	stopErr     error
+}
+
+func newBlockingStopProcess(id string) *blockingStopProcess {
+	base := process.NewBaseProcess(id, process.ProcessTypeCMD, process.ProcessConfig{Type: process.ProcessTypeCMD})
+	base.SetState(process.ProcessStateRunning)
+	return &blockingStopProcess{
+		BaseProcess: base,
+		stopStarted: make(chan struct{}),
+		releaseStop: make(chan struct{}),
+	}
+}
+
+func (p *blockingStopProcess) Start() error {
+	p.SetState(process.ProcessStateRunning)
+	return nil
+}
+
+func (p *blockingStopProcess) Stop() error {
+	p.stopOnce.Do(func() { close(p.stopStarted) })
+	<-p.releaseStop
+	p.SetState(process.ProcessStateStopped)
+	return p.stopErr
+}
+
+func (p *blockingStopProcess) Restart() error {
+	return nil
+}
+
 // TestManager_ListContexts tests listing all contexts.
 func TestManager_ListContexts(t *testing.T) {
 	m := NewManager()

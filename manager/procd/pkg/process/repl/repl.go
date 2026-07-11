@@ -131,7 +131,12 @@ func (r *REPL) buildEnvVars(processConfig process.ProcessConfig) map[string]stri
 
 // Stop stops the REPL process.
 func (r *REPL) Stop() error {
-	return r.runner.Stop()
+	return r.StopWithOptions(process.StopOptions{})
+}
+
+// StopWithOptions stops the REPL with bounded graceful and forced termination.
+func (r *REPL) StopWithOptions(options process.StopOptions) error {
+	return r.runner.StopWithOptions(options)
 }
 func (r *REPL) WriteInput(data []byte) error {
 	return r.BaseProcess.WriteInput(data)

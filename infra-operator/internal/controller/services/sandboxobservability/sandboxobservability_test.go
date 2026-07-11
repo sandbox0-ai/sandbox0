@@ -62,6 +62,48 @@ func TestApplyManagerConfigInjectsLogsIngestURL(t *testing.T) {
 	assert.Equal(t, 250*time.Millisecond, cfg.SandboxObservabilityIngestRetryBackoff.Duration)
 }
 
+func TestApplyNetdConfigInjectsAuditIngestURLOnlyWhenLicensedAuditIsEnabled(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, infrav1alpha1.AddToScheme(scheme))
+
+	enabled := true
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox0", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			ClickHouse: &infrav1alpha1.ClickHouseConfig{
+				Type: infrav1alpha1.ClickHouseTypeExternal,
+				External: &infrav1alpha1.ExternalClickHouseConfig{
+					DSNSecret: infrav1alpha1.ClickHouseDSNSecretRef{Name: "clickhouse-dsn"},
+				},
+			},
+			SandboxObservability: &infrav1alpha1.SandboxObservabilityConfig{
+				Enabled: &enabled,
+				Backend: infrav1alpha1.SandboxObservabilityBackendClickHouse,
+				Audit:   &infrav1alpha1.SandboxObservabilityAuditConfig{Enabled: true},
+			},
+		},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		infra,
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "clickhouse-dsn", Namespace: infra.Namespace},
+			Data:       map[string][]byte{"dsn": []byte("clickhouse://sandbox0:password@clickhouse:9000/default")},
+		},
+	).Build()
+	cfg := &apiconfig.NetdConfig{}
+
+	err := ApplyNetdConfig(context.Background(), client, infra, "http://cluster-gateway.svc/", cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, "http://cluster-gateway.svc/internal/v1/sandbox-observability/events", cfg.SandboxObservabilityIngestURL)
+
+	infra.Spec.SandboxObservability.Audit.Enabled = false
+	err = ApplyNetdConfig(context.Background(), client, infra, "http://cluster-gateway.svc/", cfg)
+	require.NoError(t, err)
+	assert.Empty(t, cfg.SandboxObservabilityIngestURL)
+}
+
 func TestApplyManagerConfigClearsIngestURLsWhenDisabled(t *testing.T) {
 	cfg := &apiconfig.ManagerConfig{
 		SandboxObservabilityLogsIngestURL: "http://old/logs",

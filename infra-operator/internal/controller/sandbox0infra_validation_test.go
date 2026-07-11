@@ -112,6 +112,23 @@ func TestGeneratedCRDDefaultsObjectEncryptionEnabled(t *testing.T) {
 	}
 }
 
+func TestValidateSpecSemanticsRejectsAuditWithoutSandboxObservability(t *testing.T) {
+	disabled := false
+	infra := &infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			SandboxObservability: &infrav1alpha1.SandboxObservabilityConfig{
+				Enabled: &disabled,
+				Audit:   &infrav1alpha1.SandboxObservabilityAuditConfig{Enabled: true},
+			},
+		},
+	}
+
+	err := validateSpecSemantics(context.Background(), nil, infra)
+	if err == nil || !strings.Contains(err.Error(), "sandboxObservability.audit requires sandboxObservability to be enabled") {
+		t.Fatalf("error = %v, want audit enablement validation", err)
+	}
+}
+
 func TestValidateSpecSemanticsRejectsBuiltinDatabaseCreateOnceChanges(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},

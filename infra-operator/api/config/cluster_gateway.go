@@ -58,8 +58,8 @@ type ClusterGatewayConfig struct {
 
 	// Public gateway (external auth) configuration
 	DatabaseURL string `yaml:"database_url" json:"-"`
-	// License file path used to unlock enterprise SSO features.
-	// Required when OIDC providers are configured.
+	// License file path used to unlock cluster-gateway enterprise features.
+	// Required when OIDC providers or centralized sandbox audit are enabled.
 	// +optional
 	LicenseFile string `yaml:"license_file" json:"-"`
 	// +optional
@@ -95,6 +95,10 @@ type SandboxObservabilityConfig struct {
 	// +kubebuilder:validation:Enum=disabled;clickhouse
 	// +kubebuilder:default="disabled"
 	Backend string `yaml:"backend" json:"backend"`
+	// AuditEnabled enables licensed centralized per-sandbox audit ingest and query.
+	// +optional
+	// +kubebuilder:default=false
+	AuditEnabled bool `yaml:"audit_enabled" json:"auditEnabled"`
 	// +optional
 	ClickHouse SandboxObservabilityClickHouseConfig `yaml:"clickhouse" json:"clickHouse"`
 }

@@ -28,6 +28,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/teamresources"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
+	licensinghttp "github.com/sandbox0-ai/sandbox0/pkg/licensing/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
@@ -78,6 +79,7 @@ type Server struct {
 	observabilityHandler                     *gatewayhandlers.SandboxObservabilityHandler
 	internalAuthGen                          *internalauth.Generator
 	entitlements                             licensing.Entitlements
+	sandboxAuditEntitlements                 licensing.Entitlements
 	obsProvider                              *observability.Provider
 	httpClient                               *http.Client
 	sandboxServiceLimiter                    ratelimit.Limiter
@@ -145,6 +147,11 @@ func NewServer(
 	}
 
 	publicAuthEnabled := authModeEnabled(cfg.AuthMode, authModePublic)
+	oidcConfigured := publicAuthEnabled && config.HasEnabledOIDCProviders(cfg.OIDCProviders)
+	publicEntitlements, sandboxAuditEntitlements, err := resolveClusterGatewayEntitlements(cfg, oidcConfigured)
+	if err != nil {
+		return nil, err
+	}
 
 	privateKey, err := internalauth.LoadEd25519PrivateKeyFromFile(internalauth.DefaultInternalJWTPrivateKeyPath)
 	if err != nil {
@@ -203,7 +210,6 @@ func NewServer(
 	var externalLimiter *middleware.ExternalRateLimiter
 	var publicBuiltin *gatewaybuiltin.Provider
 	var publicOIDC *gatewayoidc.Manager
-	entitlements := licensing.NewStaticEntitlements(licensing.FeatureSSO)
 	var publicJWT *gatewayauthn.Issuer
 
 	if pool != nil {
@@ -229,17 +235,6 @@ func NewServer(
 		}
 
 		builtinProvider := gatewaybuiltin.NewProvider(publicIdentityRepo, &cfg.BuiltInAuth, cfg.DefaultTeamName)
-		oidcConfigured := config.HasEnabledOIDCProviders(cfg.OIDCProviders)
-		if oidcConfigured {
-			if err := licensing.RequireLicenseFile(cfg.LicenseFile); err != nil {
-				return nil, fmt.Errorf("license_file is required when OIDC providers are configured: %w", err)
-			}
-			entitlements = licensing.LoadFileEntitlements(cfg.LicenseFile)
-			if err := entitlements.Require(licensing.FeatureSSO); err != nil {
-				return nil, fmt.Errorf("enterprise SSO feature is required when OIDC providers are configured: %w", err)
-			}
-		}
-
 		var oidcManager *gatewayoidc.Manager
 		if oidcConfigured {
 			oidcManager, err = gatewayoidc.NewManager(context.Background(), edgeCfg, publicIdentityRepo, logger)
@@ -303,7 +298,8 @@ func NewServer(
 		meteringHandler:                          meteringHandler,
 		observabilityHandler:                     observabilityHandler,
 		internalAuthGen:                          internalAuthGen,
-		entitlements:                             entitlements,
+		entitlements:                             publicEntitlements,
+		sandboxAuditEntitlements:                 sandboxAuditEntitlements,
 		obsProvider:                              obsProvider,
 		httpClient:                               httpClient,
 		sandboxServiceLimiter:                    sandboxServiceLimiter,
@@ -313,6 +309,47 @@ func NewServer(
 	server.setupRoutes()
 
 	return server, nil
+}
+
+func resolveClusterGatewayEntitlements(cfg *config.ClusterGatewayConfig, oidcConfigured bool) (licensing.Entitlements, licensing.Entitlements, error) {
+	return resolveClusterGatewayEntitlementsWithLoader(cfg, oidcConfigured, licensing.LoadFileEntitlements)
+}
+
+func resolveClusterGatewayEntitlementsWithLoader(
+	cfg *config.ClusterGatewayConfig,
+	oidcConfigured bool,
+	load func(string) licensing.Entitlements,
+) (licensing.Entitlements, licensing.Entitlements, error) {
+	publicEntitlements := licensing.NewStaticEntitlements(licensing.FeatureSSO)
+	auditEntitlements := licensing.NewStaticEntitlements()
+	auditConfigured := cfg != nil && cfg.SandboxObservability.AuditEnabled
+	if !oidcConfigured && !auditConfigured {
+		return publicEntitlements, auditEntitlements, nil
+	}
+	if cfg == nil {
+		return nil, nil, fmt.Errorf("cluster-gateway config is required")
+	}
+	if err := licensing.RequireLicenseFile(cfg.LicenseFile); err != nil {
+		return nil, nil, fmt.Errorf("license_file is required when enterprise features are configured: %w", err)
+	}
+	if load == nil {
+		return nil, nil, fmt.Errorf("enterprise entitlement loader is required")
+	}
+
+	licenseEntitlements := load(cfg.LicenseFile)
+	if oidcConfigured {
+		if err := licenseEntitlements.Require(licensing.FeatureSSO); err != nil {
+			return nil, nil, fmt.Errorf("enterprise SSO feature is required when OIDC providers are configured: %w", err)
+		}
+		publicEntitlements = licenseEntitlements
+	}
+	if auditConfigured {
+		if err := licenseEntitlements.Require(licensing.FeatureSandboxAudit); err != nil {
+			return nil, nil, fmt.Errorf("enterprise sandbox audit feature is required when sandbox audit is enabled: %w", err)
+		}
+		auditEntitlements = licenseEntitlements
+	}
+	return publicEntitlements, auditEntitlements, nil
 }
 
 // Handler exposes the HTTP handler for tests.
@@ -394,7 +431,7 @@ func (s *Server) setupRoutes() {
 		// === Sandbox Management (→ Manager) ===
 		sandboxes := v1.Group("/sandboxes")
 		{
-			sandboxes.GET("/:id/observability/events", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.sandboxObservabilityHandler().ListEvents)
+			sandboxes.GET("/:id/observability/events", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), licensinghttp.RequireFeature(s.sandboxAuditEntitlements, licensing.FeatureSandboxAudit, s.logger), s.sandboxObservabilityHandler().ListEvents)
 			sandboxes.GET("/:id/observability/logs", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.sandboxObservabilityHandler().ListLogs)
 			sandboxes.GET("/:id/metrics", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.sandboxObservabilityHandler().GetRuntimeMetrics)
 			sandboxes.GET("/:id/metrics/catalog", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.sandboxObservabilityHandler().GetRuntimeMetricsCatalog)
@@ -592,7 +629,7 @@ func (s *Server) setupSandboxObservabilityIngestRoutes() {
 	internal := s.router.Group("/internal/v1")
 	internal.Use(s.sandboxObservabilityIngestAuthMiddleware.Authenticate())
 	{
-		internal.POST("/sandbox-observability/events", s.sandboxObservabilityIngestAuthMiddleware.RequirePermission(gatewayauthn.PermSandboxObservabilityWrite), s.sandboxObservabilityHandler().IngestEvents)
+		internal.POST("/sandbox-observability/events", s.sandboxObservabilityIngestAuthMiddleware.RequirePermission(gatewayauthn.PermSandboxObservabilityWrite), licensinghttp.RequireFeature(s.sandboxAuditEntitlements, licensing.FeatureSandboxAudit, s.logger), s.sandboxObservabilityHandler().IngestEvents)
 		internal.POST("/sandbox-observability/logs", s.sandboxObservabilityIngestAuthMiddleware.RequirePermission(gatewayauthn.PermSandboxObservabilityWrite), s.sandboxObservabilityHandler().IngestLogs)
 		internal.POST("/sandbox-observability/runtime-samples", s.sandboxObservabilityIngestAuthMiddleware.RequirePermission(gatewayauthn.PermSandboxObservabilityWrite), s.sandboxObservabilityHandler().IngestRuntimeSamples)
 	}

@@ -842,6 +842,41 @@ func TestCompileTracksEnterpriseLicenseRequirements(t *testing.T) {
 	}
 }
 
+func TestCompileRequiresClusterGatewayEnterpriseLicenseForSandboxAudit(t *testing.T) {
+	enabled := true
+	infra := &infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			SandboxObservability: &infrav1alpha1.SandboxObservabilityConfig{
+				Enabled: &enabled,
+				Backend: infrav1alpha1.SandboxObservabilityBackendClickHouse,
+				Audit:   &infrav1alpha1.SandboxObservabilityAuditConfig{Enabled: true},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+
+	if !compiled.Enterprise.ClusterGateway {
+		t.Fatal("expected sandbox audit to require a cluster-gateway enterprise license")
+	}
+	if !containsString(workflowStepNames(compiled.Workflow.Steps), "cluster-gateway-enterprise-license") {
+		t.Fatalf("expected enterprise license workflow step, got %#v", workflowStepNames(compiled.Workflow.Steps))
+	}
+
+	infra.Spec.SandboxObservability.Audit.Enabled = false
+	compiled = Compile(infra)
+	if compiled.Enterprise.ClusterGateway {
+		t.Fatal("did not expect observability without audit to require a cluster-gateway enterprise license")
+	}
+}
+
 func TestCompileInfersRegionalGatewayEnterpriseLicenseFromCompiledSchedulerRouting(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{

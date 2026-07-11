@@ -1455,9 +1455,11 @@ paths:
       tags: [observability]
       summary: Query historical sandbox observability events
       description: |
-        Queries the asynchronous per-sandbox observability projection for lifecycle,
-        network audit, and runtime stats events. This endpoint does not expose backend SQL
-        and reads tables that are separate from the metering usage ledger.
+        Queries the licensed asynchronous per-sandbox audit projection. The current producer
+        publishes network audit events. This endpoint requires the enterprise sandbox_audit
+        feature, does not expose backend SQL, and reads tables that are separate from the
+        metering usage ledger.
+      x-enterprise-feature: sandbox_audit
       security:
         - bearerAuth: []
       x-upstream-service: cluster-gateway
@@ -1523,7 +1525,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "403":
-          description: Forbidden
+          description: Forbidden or sandbox_audit is not licensed
           content:
             application/json:
               schema:

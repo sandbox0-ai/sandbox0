@@ -134,6 +134,12 @@ func validateClickHouseFeatureSemantics(infra *infrav1alpha1.Sandbox0Infra) []er
 
 	var errs []error
 	clickHouseEnabled := infrav1alpha1.IsClickHouseEnabled(infra)
+	auditEnabled := infra.Spec.SandboxObservability != nil &&
+		infra.Spec.SandboxObservability.Audit != nil &&
+		infra.Spec.SandboxObservability.Audit.Enabled
+	if auditEnabled && !infrav1alpha1.IsSandboxObservabilityEnabled(infra) {
+		errs = append(errs, fmt.Errorf("sandboxObservability.audit requires sandboxObservability to be enabled"))
+	}
 	if infrav1alpha1.IsSandboxObservabilityEnabled(infra) && !clickHouseEnabled {
 		errs = append(errs, fmt.Errorf("sandboxObservability backend clickhouse requires spec.clickHouse type builtin or external"))
 	}

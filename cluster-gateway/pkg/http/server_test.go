@@ -3,12 +3,66 @@ package http
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
 	"go.uber.org/zap"
 )
+
+func TestResolveClusterGatewayEntitlements(t *testing.T) {
+	publicEntitlements, auditEntitlements, err := resolveClusterGatewayEntitlements(&config.ClusterGatewayConfig{}, false)
+	if err != nil {
+		t.Fatalf("resolve entitlements: %v", err)
+	}
+	if !publicEntitlements.Enabled(licensing.FeatureSSO) {
+		t.Fatal("expected unconfigured public auth routes to preserve built-in SSO route behavior")
+	}
+	if auditEntitlements.Enabled(licensing.FeatureSandboxAudit) {
+		t.Fatal("did not expect sandbox audit entitlement without explicit configuration")
+	}
+
+	_, _, err = resolveClusterGatewayEntitlements(&config.ClusterGatewayConfig{
+		SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true},
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "license_file is required") {
+		t.Fatalf("error = %v, want required license_file", err)
+	}
+
+	licensedConfig := &config.ClusterGatewayConfig{
+		LicenseFile:          "test.lic",
+		SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true},
+	}
+	publicEntitlements, auditEntitlements, err = resolveClusterGatewayEntitlementsWithLoader(
+		licensedConfig,
+		false,
+		func(string) licensing.Entitlements {
+			return licensing.NewStaticEntitlements(licensing.FeatureSandboxAudit)
+		},
+	)
+	if err != nil {
+		t.Fatalf("resolve licensed sandbox audit: %v", err)
+	}
+	if !auditEntitlements.Enabled(licensing.FeatureSandboxAudit) {
+		t.Fatal("expected licensed sandbox audit entitlement")
+	}
+	if !publicEntitlements.Enabled(licensing.FeatureSSO) {
+		t.Fatal("expected built-in public auth route behavior to remain unchanged")
+	}
+
+	_, _, err = resolveClusterGatewayEntitlementsWithLoader(
+		licensedConfig,
+		false,
+		func(string) licensing.Entitlements {
+			return licensing.NewStaticEntitlements(licensing.FeatureSSO)
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), string(licensing.FeatureSandboxAudit)) {
+		t.Fatalf("error = %v, want missing sandbox audit feature", err)
+	}
+}
 
 func TestRequireUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)

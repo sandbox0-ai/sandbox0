@@ -16,6 +16,7 @@ import (
 	gatewayhandlers "github.com/sandbox0-ai/sandbox0/pkg/gateway/http/handlers"
 	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	"go.uber.org/zap"
 )
@@ -176,6 +177,7 @@ func TestSandboxObservabilityRouteDoesNotRequireManagerUpstream(t *testing.T) {
 	server, generator, _ := testMeteringRouteServer(t, authModeInternal)
 	server.requestLogger = middleware.NewRequestLogger(zap.NewNop())
 	server.obsProvider = newTestMeteringObservability(t)
+	server.sandboxAuditEntitlements = licensing.NewStaticEntitlements(licensing.FeatureSandboxAudit)
 	server.setupRoutes()
 	if !hasRoute(server.router, "POST", "/internal/v1/sandbox-observability/events") {
 		t.Fatal("expected sandbox observability ingest route to be mounted")
@@ -198,6 +200,45 @@ func TestSandboxObservabilityRouteDoesNotRequireManagerUpstream(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "sandbox observability backend is disabled") {
 		t.Fatalf("response = %s, want disabled backend error", rec.Body.String())
+	}
+}
+
+func TestSandboxAuditRouteRequiresEnterpriseFeatureWithoutBlockingOtherSignals(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server, generator, _ := testMeteringRouteServer(t, authModeInternal)
+	server.requestLogger = middleware.NewRequestLogger(zap.NewNop())
+	server.obsProvider = newTestMeteringObservability(t)
+	server.setupRoutes()
+
+	token, err := generator.Generate("cluster-gateway", "team-1", "user-1", internalauth.GenerateOptions{
+		Permissions: []string{authn.PermSandboxRead},
+	})
+	if err != nil {
+		t.Fatalf("generate internal token: %v", err)
+	}
+
+	for _, tc := range []struct {
+		path       string
+		wantStatus int
+		wantBody   string
+	}{
+		{path: "/api/v1/sandboxes/sb-1/observability/events", wantStatus: http.StatusForbidden, wantBody: "feature_not_licensed"},
+		{path: "/api/v1/sandboxes/sb-1/observability/logs", wantStatus: http.StatusServiceUnavailable, wantBody: "sandbox observability backend is disabled"},
+		{path: "/api/v1/sandboxes/sb-1/metrics", wantStatus: http.StatusServiceUnavailable, wantBody: "sandbox observability backend is disabled"},
+		{path: "/api/v1/sandboxes/sb-1/metrics/catalog", wantStatus: http.StatusOK, wantBody: "sandbox.cpu.utilization"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		req.Header.Set(internalauth.DefaultTokenHeader, token)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		if rec.Code != tc.wantStatus {
+			t.Fatalf("%s status = %d, want %d: %s", tc.path, rec.Code, tc.wantStatus, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), tc.wantBody) {
+			t.Fatalf("%s response = %s, want %q", tc.path, rec.Body.String(), tc.wantBody)
+		}
 	}
 }
 
@@ -244,6 +285,16 @@ func TestSandboxRuntimeSampleIngestAcceptsCtldToken(t *testing.T) {
 	if strings.Contains(rec.Body.String(), "permission denied") || strings.Contains(rec.Body.String(), "invalid internal token") {
 		t.Fatalf("ctld token was rejected: %s", rec.Body.String())
 	}
+
+	auditReq := httptest.NewRequest(http.MethodPost, "/internal/v1/sandbox-observability/events", strings.NewReader(`{"events":[]}`))
+	auditReq.Header.Set("Content-Type", "application/json")
+	auditReq.Header.Set(internalauth.DefaultTokenHeader, token)
+	auditRec := httptest.NewRecorder()
+	server.router.ServeHTTP(auditRec, auditReq)
+	if auditRec.Code != http.StatusForbidden || !strings.Contains(auditRec.Body.String(), string(licensing.FeatureSandboxAudit)) {
+		t.Fatalf("audit ingest response = %d %s, want enterprise feature denial", auditRec.Code, auditRec.Body.String())
+	}
+
 }
 
 func TestInternalAuthValidatorsKeepControlAndDataPlaneTrustRootsSeparate(t *testing.T) {
@@ -422,6 +473,7 @@ func testMeteringRouteServer(t *testing.T, authMode string) (*Server, *internala
 		logger:                                   zap.NewNop(),
 		meteringHandler:                          gatewayhandlers.NewMeteringHandler(nil, "aws-us-east-1", zap.NewNop()),
 		observabilityHandler:                     gatewayhandlers.NewSandboxObservabilityHandler(nil, zap.NewNop()),
+		sandboxAuditEntitlements:                 licensing.NewStaticEntitlements(),
 	}
 
 	return server, generator, issuer

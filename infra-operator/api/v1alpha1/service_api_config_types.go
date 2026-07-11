@@ -367,6 +367,11 @@ type SandboxObservabilityConfig struct {
 	// +optional
 	External *ExternalSandboxObservabilityConfig `json:"external,omitempty"`
 
+	// Audit configures the licensed centralized per-sandbox audit signal. Audit
+	// collection and query remain disabled unless explicitly enabled.
+	// +optional
+	Audit *SandboxObservabilityAuditConfig `json:"audit,omitempty"`
+
 	// Retention configures TTLs for the per-sandbox read model.
 	// +optional
 	// +kubebuilder:default={}
@@ -376,6 +381,15 @@ type SandboxObservabilityConfig struct {
 	// +optional
 	// +kubebuilder:default={}
 	Ingest SandboxObservabilityIngestConfig `json:"ingest,omitempty"`
+}
+
+// SandboxObservabilityAuditConfig configures centralized per-sandbox audit
+// collection and query. The current audit signal is netd network audit.
+type SandboxObservabilityAuditConfig struct {
+	// Enabled enables the enterprise sandbox_audit feature.
+	// +optional
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
 }
 
 // SandboxObservabilityType selects the backend provisioning mode.

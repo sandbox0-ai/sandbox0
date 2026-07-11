@@ -344,7 +344,8 @@ func TestApplySandboxObservabilityConfigUsesTopLevelExternalSecret(t *testing.T)
 		},
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
 			SandboxObservability: &infrav1alpha1.SandboxObservabilityConfig{
-				Type: infrav1alpha1.SandboxObservabilityTypeExternal,
+				Type:  infrav1alpha1.SandboxObservabilityTypeExternal,
+				Audit: &infrav1alpha1.SandboxObservabilityAuditConfig{Enabled: true},
 				External: &infrav1alpha1.ExternalSandboxObservabilityConfig{
 					ClickHouse: infrav1alpha1.ExternalSandboxObservabilityClickHouseConfig{
 						DSNSecret: infrav1alpha1.SandboxObservabilityClickHouseDSNSecretRef{
@@ -392,6 +393,7 @@ func TestApplySandboxObservabilityConfigUsesTopLevelExternalSecret(t *testing.T)
 		t.Fatalf("dsn = %q, want secret value", cfg.SandboxObservability.ClickHouse.DSN)
 	}
 	if cfg.SandboxObservability.Backend != apiconfig.SandboxObservabilityBackendClickHouse ||
+		!cfg.SandboxObservability.AuditEnabled ||
 		cfg.SandboxObservability.ClickHouse.Database != "sandbox0_obs" ||
 		cfg.SandboxObservability.ClickHouse.EventsTable != "events_v1" ||
 		cfg.SandboxObservability.ClickHouse.LogsTable != "logs_v1" ||

@@ -98,7 +98,11 @@ For cold-start diagnosis, manager exposes `manager_pod_lifecycle_stage_duration_
 
 ClickHouse is configured once on the `Sandbox0Infra` CR under `spec.clickHouse`. The infra-operator owns builtin provisioning or external DSN resolution, the same way it owns built-in or external PostgreSQL and Redis wiring. Feature configs such as `spec.sandboxObservability` and `spec.metering` consume this region component. Do not configure the ClickHouse backend separately on cluster-gateway, ctld, manager, storage-proxy, or netd service configs when deploying through `Sandbox0Infra`.
 
-Historical logs and runtime metrics are available whenever sandbox observability is enabled. Centralized sandbox audit is an enterprise feature: set `spec.sandboxObservability.audit.enabled` to `true` and provide a signed enterprise license containing the `sandbox_audit` feature. The license is mounted only into cluster-gateway, which authorizes both network-audit ingestion and the public events query/watch API.
+Historical logs and runtime metrics are available whenever sandbox observability is enabled. Centralized sandbox audit is an enterprise feature: set `spec.sandboxObservability.audit.enabled` to `true` and provide a signed enterprise license containing the `sandbox_audit` feature. The license is mounted only into cluster-gateway, which authorizes audit ingestion and the public query, watch, and verification APIs.
+
+ClickHouse is the canonical audit store. Audit facts are written to `sandbox_audit_events` with stable event IDs, trusted actor and producer identity, a canonical payload digest, and an Ed25519 gateway signature. PostgreSQL is not a second audit store. The infra-operator creates separate netd producer and audit-signing key pairs: netd receives only the producer private key, while cluster-gateway receives its public key and the independent signing key. Fsync-backed buffers are delivery state, not competing audit ledgers; records are deleted only after ClickHouse acknowledges the exact event. Cluster-gateway uses a persistent volume claim for pending result events, while each node-local netd instance keeps its flow buffer on that node.
+
+The v2 audit schema deliberately uses a new `sandbox_audit_events` table. Older `sandbox_events` rows do not have trustworthy actor or signature data and are retained as legacy observability history rather than being retroactively signed. Existing CRs whose persisted table value is the old default are routed to the new canonical table. At startup, audit-enabled cluster-gateway validates the actual ClickHouse engine, partition key, sorting key, and required columns, and refuses to serve audit operations against an old or incompatible custom table.
 
 Use builtin ClickHouse when you want the infra-operator to install ClickHouse for the region:
 
@@ -124,6 +128,8 @@ spec:
         backend: clickhouse
         audit:
             enabled: true
+            deliveryPersistence:
+                size: 1Gi
         retention:
             auditDays: 90
             logDays: 7
@@ -147,6 +153,8 @@ spec:
             sandboxStateTable: sandbox_projection_state
             storageStateTable: storage_projection_state
 ```
+
+Audit retention is measured from the cluster-gateway-owned `ingested_at` timestamp, not the producer's potentially delayed `occurred_at` timestamp. Backlogged events therefore receive the configured retention period after ClickHouse accepts them.
 
 Use the external backend when you already operate ClickHouse:
 
@@ -172,6 +180,8 @@ spec:
         backend: clickhouse
         audit:
             enabled: true
+            deliveryPersistence:
+                size: 1Gi
         retention:
             auditDays: 90
             logDays: 7
@@ -180,9 +190,15 @@ spec:
         enabled: true
 ```
 
-Set `spec.sandboxObservability.enabled` to `false` or omit the field to keep all historical APIs disabled. Leave `spec.sandboxObservability.audit.enabled` unset or `false` to keep centralized audit ingestion and event queries disabled while retaining historical logs and runtime metrics. Set `spec.metering.enabled` to `false` or omit `spec.metering` to keep metering producers, quota usage reads, and metering export readers disabled. Legacy `spec.sandboxObservability.type` fields are still accepted for compatibility, but new installs should use `spec.clickHouse` for ClickHouse provisioning. Disabling audit stops new network-audit projection but does not delete existing rows; ClickHouse TTL performs eventual retention cleanup. Retention deletes ClickHouse observability rows only and never deletes metering ledger rows.
+Set `spec.sandboxObservability.enabled` to `false` or omit the field to keep all historical APIs disabled. Leave `spec.sandboxObservability.audit.enabled` unset or `false` to keep canonical audit ingestion and event queries disabled while retaining historical logs and runtime metrics. Set `spec.metering.enabled` to `false` or omit `spec.metering` to keep metering producers, quota usage reads, and metering export readers disabled. Legacy `spec.sandboxObservability.type` fields are still accepted for compatibility, but new installs should use `spec.clickHouse` for ClickHouse provisioning. Disabling audit stops new facts but does not delete existing rows. `retention.auditDays` is the retention policy for the canonical ClickHouse audit table; set it to the period required by your organization before enabling audit in production. Metering remains a separate ledger.
 
-When the backend is enabled, infra-operator injects bounded internal ingest endpoints into ctld for sandbox-wide CRI runtime samples and manager for historical logs. When licensed audit is also enabled, it injects the network-audit endpoint into netd. Producer queues never block the sandbox data path; a full queue or exhausted retry budget drops projection data instead. Netd exports `sandbox0_netd_audit_ingest_events_total` and `sandbox0_netd_audit_ingest_batches_total` to show enqueue, send, skip, drop, and failed batch results. Treat this ClickHouse data as a historical projection rather than an immutable compliance ledger.
+When the backend is enabled, infra-operator injects bounded internal ingest endpoints into ctld for sandbox-wide CRI runtime samples and manager for historical logs. When licensed audit is also enabled, it injects durable delivery-spool configuration into cluster-gateway and netd. Netd fsyncs an allow attempt before opening the upstream connection and waits for cluster-gateway to commit that attempt to ClickHouse. If the canonical store cannot acknowledge it, the connection is denied. Gateway mutation responses are held until their signed result is acknowledged; pending results return `503` and replay from disk.
+
+Audit currently requires `spec.services.clusterGateway.replicas: 1`. Infra-operator mounts a `ReadWriteOnce` result-delivery PVC and uses the `Recreate` deployment strategy so the same buffer is detached and reattached before a replacement gateway starts. In production, set `audit.deliveryPersistence.storageClass` to durable, encrypted storage that supports cross-node volume reattachment; the cluster default is used when it is omitted. Netd flow buffers remain node-local and survive same-node Pod restarts, but not permanent node loss. All delivery records are removed only after ClickHouse acknowledgement. Preserve the generated audit-signing Secret for the full retention period; the built-in verifier currently uses that active public key, so destructive key replacement requires retaining the previous public key outside the cluster for historical offline verification.
+
+Netd exports `sandbox0_netd_audit_ingest_events_total` and `sandbox0_netd_audit_ingest_batches_total`; alert on `persist_failed`, `corrupt`, `retrying`, `replay_failed`, and `ack_failed` results. Synchronous allow-attempt commits add one cluster-local ClickHouse round trip to each new audited flow. HTTP requests multiplexed over one existing connection remain protocol operations beneath that flow rather than independent network connections.
+
+The built-in controls provide durable delivery, authenticated producer identity, tenant scoping, append-only application behavior, and tamper-evident row signatures. Regulatory certification still depends on deployment controls outside the process: highly available ClickHouse storage, restricted ClickHouse mutation credentials, encrypted backups, tested restore procedures, retention and legal-hold policy, clock synchronization, and independent preservation of signing public keys or exported checkpoints. A database administrator who can rewrite the complete table and its backups is outside the protection of a per-row signature alone.
 
 In `managedCollector` mode sandbox0 installs collectors for logs, metrics, and traces, then exports to your OTLP endpoint:
 

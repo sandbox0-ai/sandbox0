@@ -19,10 +19,11 @@ func TestSchemaStatementsUseReplacingMergeTreeAndRetentionTTL(t *testing.T) {
 	}
 	createEventsTable := statements[1]
 	for _, want := range []string{
-		"CREATE TABLE IF NOT EXISTS `sandbox0_observability`.`sandbox_events`",
+		"CREATE TABLE IF NOT EXISTS `sandbox0_observability`.`sandbox_audit_events`",
 		"ENGINE = ReplacingMergeTree(version)",
-		"ORDER BY (team_id, sandbox_id, occurred_at, source, event_type, cursor)",
-		"TTL toDateTime(occurred_at) + INTERVAL 7 DAY DELETE",
+		"PARTITION BY toYYYYMM(ingested_at)",
+		"ORDER BY (team_id, sandbox_id, occurred_at, event_id, payload_hash)",
+		"TTL toDateTime(ingested_at) + INTERVAL 7 DAY DELETE",
 	} {
 		if !strings.Contains(createEventsTable, want) {
 			t.Fatalf("create events table statement missing %q:\n%s", want, createEventsTable)
@@ -55,7 +56,7 @@ func TestSchemaStatementsUseReplacingMergeTreeAndRetentionTTL(t *testing.T) {
 			t.Fatalf("create runtime samples table statement missing %q:\n%s", want, createRuntimeSamplesTable)
 		}
 	}
-	if !strings.Contains(statements[4], "ALTER TABLE `sandbox0_observability`.`sandbox_events` MODIFY TTL toDateTime(occurred_at) + INTERVAL 7 DAY DELETE") {
+	if !strings.Contains(statements[4], "ALTER TABLE `sandbox0_observability`.`sandbox_audit_events` MODIFY TTL toDateTime(ingested_at) + INTERVAL 7 DAY DELETE") {
 		t.Fatalf("events alter ttl statement = %q", statements[4])
 	}
 	if !strings.Contains(statements[5], "ALTER TABLE `sandbox0_observability`.`sandbox_logs` MODIFY TTL toDateTime(occurred_at) + INTERVAL 3 DAY DELETE") {
@@ -78,5 +79,29 @@ func TestSchemaStatementsRejectUnsafeIdentifiers(t *testing.T) {
 	}
 	if _, err := SchemaStatements(Config{RuntimeSamplesTable: "runtime.v2"}); err == nil {
 		t.Fatal("SchemaStatements() error = nil, want unsafe runtime samples table identifier rejection")
+	}
+}
+
+func TestValidateAuditEventTableMetadataRejectsLegacySchema(t *testing.T) {
+	legacyColumns := []string{"team_id", "sandbox_id", "occurred_at", "ingested_at", "source", "event_type"}
+	if err := validateAuditEventTableMetadata(
+		"ReplacingMergeTree",
+		"team_id, sandbox_id, occurred_at, source, event_type, cursor",
+		"toYYYYMM(occurred_at)",
+		legacyColumns,
+	); err == nil {
+		t.Fatal("validateAuditEventTableMetadata() error = nil, want legacy schema rejection")
+	}
+}
+
+func TestValidateAuditEventTableMetadataAcceptsCanonicalSchema(t *testing.T) {
+	columns := strings.Split("event_id schema_version team_id sandbox_id region_id cluster_id occurred_at ingested_at source event_type phase outcome actor_kind actor_id actor_user_id actor_api_key_id actor_auth_method action resource_type resource_id resource_subresource operation_id parent_event_id producer_service producer_instance producer_sequence request_id trace_id source_ip user_agent http_method route status_code cursor watermark attributes integrity_algorithm payload_hash signature signing_key_id version", " ")
+	if err := validateAuditEventTableMetadata(
+		"ReplacingMergeTree",
+		"team_id, sandbox_id, occurred_at, event_id, payload_hash",
+		"toYYYYMM(ingested_at)",
+		columns,
+	); err != nil {
+		t.Fatalf("validateAuditEventTableMetadata() error = %v", err)
 	}
 }

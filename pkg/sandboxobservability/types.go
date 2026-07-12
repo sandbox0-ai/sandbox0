@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+const CurrentEventSchemaVersion = 2
+
 // ErrBackendDisabled is returned when historical sandbox observability storage is not configured.
 var ErrBackendDisabled = errors.New("sandbox observability backend is disabled")
 
@@ -21,9 +23,12 @@ var ErrInvalidQuery = errors.New("invalid sandbox observability query")
 type Source string
 
 const (
-	SourceManager Source = "manager"
-	SourceNetd    Source = "netd"
-	SourceProcd   Source = "procd"
+	SourceClusterGateway Source = "cluster_gateway"
+	SourceManager        Source = "manager"
+	SourceNetd           Source = "netd"
+	SourceProcd          Source = "procd"
+	SourceCtld           Source = "ctld"
+	SourceStorageProxy   Source = "storage_proxy"
 )
 
 type EventType string
@@ -32,6 +37,9 @@ const (
 	EventTypeLifecycle    EventType = "lifecycle"
 	EventTypeNetworkAudit EventType = "network_audit"
 	EventTypeRuntimeStats EventType = "runtime_stats"
+	EventTypeAPIAccess    EventType = "api_access"
+	EventTypeProcess      EventType = "process"
+	EventTypeFile         EventType = "file"
 )
 
 type Outcome string
@@ -42,35 +50,126 @@ const (
 	OutcomeError     Outcome = "error"
 	OutcomeSucceeded Outcome = "succeeded"
 	OutcomeFailed    Outcome = "failed"
+	OutcomeAccepted  Outcome = "accepted"
+	OutcomeUnknown   Outcome = "unknown"
 )
 
-// Event is the durable per-sandbox historical observability projection.
+// EventPhase distinguishes an attempted operation from its eventual result or
+// an independently observed effect.
+type EventPhase string
+
+const (
+	EventPhaseAttempt EventPhase = "attempt"
+	EventPhaseResult  EventPhase = "result"
+	EventPhaseEffect  EventPhase = "effect"
+)
+
+// ActorKind identifies the trusted principal responsible for an audit event.
+type ActorKind string
+
+const (
+	ActorKindHuman              ActorKind = "human"
+	ActorKindAPIKey             ActorKind = "api_key"
+	ActorKindService            ActorKind = "service"
+	ActorKindSandboxWorkload    ActorKind = "sandbox_workload"
+	ActorKindSSHUser            ActorKind = "ssh_user"
+	ActorKindExposureCredential ActorKind = "exposure_credential"
+	ActorKindAnonymous          ActorKind = "anonymous"
+)
+
+// AuditActor is derived from authenticated server-side identity. Producers
+// must never populate it from untrusted request bodies or headers.
+type AuditActor struct {
+	Kind       ActorKind `json:"kind"`
+	ID         string    `json:"id,omitempty"`
+	UserID     string    `json:"user_id,omitempty"`
+	APIKeyID   string    `json:"api_key_id,omitempty"`
+	AuthMethod string    `json:"auth_method,omitempty"`
+}
+
+// AuditResource identifies the object affected by an audit action.
+type AuditResource struct {
+	Type        string `json:"type"`
+	ID          string `json:"id"`
+	Subresource string `json:"subresource,omitempty"`
+}
+
+// AuditRequest carries bounded request correlation metadata. It intentionally
+// excludes request and response bodies, credentials, and authorization values.
+type AuditRequest struct {
+	RequestID  string `json:"request_id,omitempty"`
+	TraceID    string `json:"trace_id,omitempty"`
+	SourceIP   string `json:"source_ip,omitempty"`
+	UserAgent  string `json:"user_agent,omitempty"`
+	HTTPMethod string `json:"http_method,omitempty"`
+	Route      string `json:"route,omitempty"`
+	StatusCode int    `json:"status_code,omitempty"`
+}
+
+// AuditProducer identifies the authenticated component that observed an event.
+type AuditProducer struct {
+	Service  string `json:"service"`
+	Instance string `json:"instance,omitempty"`
+	Sequence uint64 `json:"sequence,omitempty"`
+}
+
+// AuditIntegrity protects the canonical event payload. Signatures are created
+// only after cluster-gateway has replaced producer-controlled identity fields.
+type AuditIntegrity struct {
+	Algorithm    string `json:"algorithm"`
+	PayloadHash  string `json:"payload_hash"`
+	Signature    string `json:"signature"`
+	SigningKeyID string `json:"signing_key_id"`
+	Status       string `json:"status,omitempty"`
+}
+
+// Event is a canonical per-sandbox audit fact stored in ClickHouse. IngestedAt,
+// Cursor, and Watermark are storage/query transport metadata; the semantic
+// event payload is signed independently and cursor fields are derived from
+// EventID when rows are read.
 type Event struct {
-	TeamID     string         `json:"team_id"`
-	SandboxID  string         `json:"sandbox_id"`
-	RegionID   string         `json:"region_id"`
-	ClusterID  string         `json:"cluster_id"`
-	OccurredAt time.Time      `json:"occurred_at"`
-	IngestedAt time.Time      `json:"ingested_at"`
-	Source     Source         `json:"source"`
-	EventType  EventType      `json:"event_type"`
-	Outcome    Outcome        `json:"outcome,omitempty"`
-	Cursor     string         `json:"cursor"`
-	Watermark  string         `json:"watermark"`
-	Attributes map[string]any `json:"attributes,omitempty"`
+	EventID       string         `json:"event_id"`
+	SchemaVersion int            `json:"schema_version"`
+	TeamID        string         `json:"team_id"`
+	SandboxID     string         `json:"sandbox_id"`
+	RegionID      string         `json:"region_id"`
+	ClusterID     string         `json:"cluster_id"`
+	OccurredAt    time.Time      `json:"occurred_at"`
+	IngestedAt    time.Time      `json:"ingested_at"`
+	Source        Source         `json:"source"`
+	EventType     EventType      `json:"event_type"`
+	Phase         EventPhase     `json:"phase"`
+	Outcome       Outcome        `json:"outcome,omitempty"`
+	Actor         AuditActor     `json:"actor"`
+	Action        string         `json:"action"`
+	Resource      AuditResource  `json:"resource"`
+	OperationID   string         `json:"operation_id,omitempty"`
+	ParentEventID string         `json:"parent_event_id,omitempty"`
+	Producer      AuditProducer  `json:"producer"`
+	Request       AuditRequest   `json:"request,omitempty"`
+	Integrity     AuditIntegrity `json:"integrity"`
+	Cursor        string         `json:"cursor"`
+	Watermark     string         `json:"watermark"`
+	Attributes    map[string]any `json:"attributes,omitempty"`
 }
 
 // EventQuery describes typed filters accepted by the public historical query API.
 type EventQuery struct {
-	TeamID    string
-	SandboxID string
-	StartTime *time.Time
-	EndTime   *time.Time
-	Limit     int
-	Cursor    string
-	Source    Source
-	EventType EventType
-	Outcome   Outcome
+	TeamID       string
+	SandboxID    string
+	StartTime    *time.Time
+	EndTime      *time.Time
+	Limit        int
+	Cursor       string
+	Source       Source
+	EventType    EventType
+	Outcome      Outcome
+	ActorKind    ActorKind
+	ActorID      string
+	Action       string
+	ResourceType string
+	OperationID  string
+	EventID      string
 }
 
 type EventListResult struct {
@@ -398,7 +497,7 @@ func (DisabledRepository) InsertRuntimeSamples(context.Context, []RuntimeSample)
 
 func ValidSource(source Source) bool {
 	switch source {
-	case SourceManager, SourceNetd, SourceProcd:
+	case SourceClusterGateway, SourceManager, SourceNetd, SourceProcd, SourceCtld, SourceStorageProxy:
 		return true
 	default:
 		return false
@@ -416,7 +515,7 @@ func ValidLogStream(stream LogStream) bool {
 
 func ValidEventType(eventType EventType) bool {
 	switch eventType {
-	case EventTypeLifecycle, EventTypeNetworkAudit, EventTypeRuntimeStats:
+	case EventTypeLifecycle, EventTypeNetworkAudit, EventTypeRuntimeStats, EventTypeAPIAccess, EventTypeProcess, EventTypeFile:
 		return true
 	default:
 		return false
@@ -425,7 +524,26 @@ func ValidEventType(eventType EventType) bool {
 
 func ValidOutcome(outcome Outcome) bool {
 	switch outcome {
-	case OutcomeCompleted, OutcomeDenied, OutcomeError, OutcomeSucceeded, OutcomeFailed:
+	case OutcomeCompleted, OutcomeDenied, OutcomeError, OutcomeSucceeded, OutcomeFailed, OutcomeAccepted, OutcomeUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func ValidEventPhase(phase EventPhase) bool {
+	switch phase {
+	case EventPhaseAttempt, EventPhaseResult, EventPhaseEffect:
+		return true
+	default:
+		return false
+	}
+}
+
+func ValidActorKind(kind ActorKind) bool {
+	switch kind {
+	case ActorKindHuman, ActorKindAPIKey, ActorKindService, ActorKindSandboxWorkload,
+		ActorKindSSHUser, ActorKindExposureCredential, ActorKindAnonymous:
 		return true
 	default:
 		return false

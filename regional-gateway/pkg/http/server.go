@@ -312,6 +312,7 @@ func (s *Server) setupRoutes() {
 	{
 		// Apply auth and rate limiting to all API routes
 		api.Use(s.authMiddleware.Authenticate())
+		api.Use(attachAuditCorrelation())
 		api.Use(s.rateLimiter.RateLimit())
 
 		// If scheduler is enabled, route /api/v1/templates* to scheduler

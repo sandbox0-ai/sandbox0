@@ -21,7 +21,7 @@ func TestFilterValidation(t *testing.T) {
 	if !ValidEventType(EventTypeNetworkAudit) || ValidEventType(EventType("usage_window")) || ValidEventType(EventType("file_audit")) {
 		t.Fatal("event type validation mismatch")
 	}
-	if !ValidOutcome(OutcomeDenied) || ValidOutcome(Outcome("unknown")) {
+	if !ValidOutcome(OutcomeDenied) || !ValidOutcome(OutcomeUnknown) || ValidOutcome(Outcome("pending")) {
 		t.Fatal("outcome validation mismatch")
 	}
 }

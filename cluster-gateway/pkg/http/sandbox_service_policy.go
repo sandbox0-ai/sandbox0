@@ -16,6 +16,9 @@ import (
 	"go.uber.org/zap"
 )
 
+const exposureRouteAuthenticatedKey = "sandbox0_exposure_route_authenticated"
+const exposureAuditPanickedKey = "sandbox0_exposure_audit_panicked"
+
 type sandboxServiceMatch struct {
 	service       *mgr.SandboxAppService
 	route         *mgr.SandboxAppServiceRoute
@@ -224,6 +227,7 @@ func (s *Server) authorizeSandboxServiceRoute(c *gin.Context, route *mgr.Sandbox
 		spec.JSONError(c, nethttp.StatusForbidden, spec.CodeForbidden, "unsupported route auth")
 		return false
 	}
+	c.Set(exposureRouteAuthenticatedKey, true)
 	return true
 }
 

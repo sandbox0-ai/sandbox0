@@ -319,6 +319,40 @@ func TestReconcileInjectsSandboxObservabilityIngestURL(t *testing.T) {
 	if cfg.SandboxObservabilityIngestQueueSize != 2048 {
 		t.Fatalf("sandbox observability ingest queue size = %d, want 2048", cfg.SandboxObservabilityIngestQueueSize)
 	}
+	ds := &appsv1.DaemonSet{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: infra.Name + "-netd", Namespace: infra.Namespace}, ds); err != nil {
+		t.Fatalf("get netd daemonset: %v", err)
+	}
+	if !netdHasVolume(ds, "audit-spool") || !netdHasVolume(ds, "audit-jwt-private-key") || !netdHasMount(ds, "audit-spool") || !netdHasMount(ds, "audit-jwt-private-key") {
+		t.Fatalf("audit volumes or mounts missing: volumes=%#v mounts=%#v", ds.Spec.Template.Spec.Volumes, ds.Spec.Template.Spec.Containers[0].VolumeMounts)
+	}
+}
+
+func TestReconcileOmitsAuditHostAccessWhenAuditDisabled(t *testing.T) {
+	ds := reconcileNetdDaemonSet(t, newNetdTestInfra())
+	for _, name := range []string{"audit-spool", "audit-jwt-private-key"} {
+		if netdHasVolume(ds, name) || netdHasMount(ds, name) {
+			t.Fatalf("audit-disabled netd unexpectedly has %q volume or mount", name)
+		}
+	}
+}
+
+func netdHasVolume(ds *appsv1.DaemonSet, name string) bool {
+	for _, volume := range ds.Spec.Template.Spec.Volumes {
+		if volume.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func netdHasMount(ds *appsv1.DaemonSet, name string) bool {
+	for _, mount := range ds.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if mount.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func TestReconcileInjectsRedisConfigForTeamBandwidth(t *testing.T) {

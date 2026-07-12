@@ -84,6 +84,9 @@ func ApplyClusterGatewayConfig(ctx context.Context, c client.Client, infra *infr
 			SkipSchemaMigration:         runtimeCfg.SkipSchemaMigration,
 		},
 	}
+	if runtimeCfg.AuditEnabled {
+		cfg.SandboxObservability.AuditSpoolDir = "/var/lib/sandbox0/cluster-gateway/audit-spool"
+	}
 	return nil
 }
 
@@ -97,9 +100,11 @@ func ApplyNetdConfig(ctx context.Context, c client.Client, infra *infrav1alpha1.
 	}
 	if !ok || !runtimeCfg.AuditEnabled || strings.TrimSpace(clusterGatewayURL) == "" {
 		cfg.SandboxObservabilityIngestURL = ""
+		cfg.SandboxObservabilityAuditSpoolDir = ""
 		return nil
 	}
 	cfg.SandboxObservabilityIngestURL = strings.TrimRight(clusterGatewayURL, "/") + "/internal/v1/sandbox-observability/events"
+	cfg.SandboxObservabilityAuditSpoolDir = "/var/lib/sandbox0/netd/audit-spool"
 	applyIngestConfig(runtimeCfg.Ingest, cfg)
 	return nil
 }
@@ -165,6 +170,12 @@ func GetRuntimeConfig(ctx context.Context, c client.Client, infra *infrav1alpha1
 	}
 	applyRetentionConfig(infra, &cfg)
 	applyTableOverrides(infra, &cfg)
+	// Older CRDs defaulted eventsTable to sandbox_events. Audit v2 uses a new
+	// canonical table because ClickHouse cannot change the legacy ORDER BY key
+	// in place. Treat the persisted legacy default as an upgrade marker.
+	if cfg.AuditEnabled && cfg.EventsTable == obsclickhouse.LegacyEventsTable {
+		cfg.EventsTable = obsclickhouse.DefaultEventsTable
+	}
 	return cfg, true, nil
 }
 

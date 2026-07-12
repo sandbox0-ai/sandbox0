@@ -74,6 +74,7 @@ func (g *Generator) Generate(target, teamID, userID string, opts GenerateOptions
 		UserID:      userID,
 		SandboxID:   opts.SandboxID,
 		Permissions: opts.Permissions,
+		Audit:       cloneAuditContext(opts.Audit),
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
@@ -132,6 +133,7 @@ func (g *Generator) GenerateSystem(target string, opts GenerateOptions) (string,
 		Target:      target,
 		IsSystem:    true,
 		Permissions: opts.Permissions,
+		Audit:       cloneAuditContext(opts.Audit),
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
@@ -141,6 +143,14 @@ func (g *Generator) GenerateSystem(target string, opts GenerateOptions) (string,
 	}
 
 	return signed, nil
+}
+
+func cloneAuditContext(value *AuditContext) *AuditContext {
+	if value == nil {
+		return nil
+	}
+	copyValue := *value
+	return &copyValue
 }
 
 // MustGenerateSystem is like GenerateSystem but panics on error.

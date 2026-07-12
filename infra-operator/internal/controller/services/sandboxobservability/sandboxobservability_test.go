@@ -80,6 +80,7 @@ func TestApplyNetdConfigInjectsAuditIngestURLOnlyWhenLicensedAuditIsEnabled(t *t
 			SandboxObservability: &infrav1alpha1.SandboxObservabilityConfig{
 				Enabled: &enabled,
 				Backend: infrav1alpha1.SandboxObservabilityBackendClickHouse,
+				Type:    infrav1alpha1.SandboxObservabilityTypeExternal,
 				Audit:   &infrav1alpha1.SandboxObservabilityAuditConfig{Enabled: true},
 			},
 		},
@@ -219,5 +220,44 @@ func TestGetRuntimeConfigUsesRegionClickHouse(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "clickhouse://sandbox0:password@clickhouse:9000/sandbox0_obs", cfg.DSN)
 	assert.Equal(t, "sandbox0_obs", cfg.Database)
-	assert.Equal(t, "sandbox_events", cfg.EventsTable)
+	assert.Equal(t, "sandbox_audit_events", cfg.EventsTable)
+}
+
+func TestGetRuntimeConfigMovesPersistedLegacyAuditDefaultToCanonicalTable(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, infrav1alpha1.AddToScheme(scheme))
+	enabled := true
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox0", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			ClickHouse: &infrav1alpha1.ClickHouseConfig{
+				Type: infrav1alpha1.ClickHouseTypeExternal,
+				External: &infrav1alpha1.ExternalClickHouseConfig{
+					DSNSecret: infrav1alpha1.ClickHouseDSNSecretRef{Name: "clickhouse-dsn"},
+				},
+			},
+			SandboxObservability: &infrav1alpha1.SandboxObservabilityConfig{
+				Enabled: &enabled,
+				Backend: infrav1alpha1.SandboxObservabilityBackendClickHouse,
+				Type:    infrav1alpha1.SandboxObservabilityTypeExternal,
+				Audit:   &infrav1alpha1.SandboxObservabilityAuditConfig{Enabled: true},
+				External: &infrav1alpha1.ExternalSandboxObservabilityConfig{
+					ClickHouse: infrav1alpha1.ExternalSandboxObservabilityClickHouseConfig{
+						DSNSecret:   infrav1alpha1.SandboxObservabilityClickHouseDSNSecretRef{Name: "clickhouse-dsn"},
+						EventsTable: "sandbox_events",
+					},
+				},
+			},
+		},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		infra,
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "clickhouse-dsn", Namespace: infra.Namespace}, Data: map[string][]byte{"dsn": []byte("clickhouse://sandbox0@clickhouse:9000/default")}},
+	).Build()
+
+	cfg, ok, err := GetRuntimeConfig(context.Background(), client, infra)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "sandbox_audit_events", cfg.EventsTable)
 }

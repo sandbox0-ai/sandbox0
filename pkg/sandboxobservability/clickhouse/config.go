@@ -7,8 +7,9 @@ import (
 )
 
 const (
+	LegacyEventsTable                  = "sandbox_events"
 	DefaultDatabase                    = "sandbox0_observability"
-	DefaultEventsTable                 = "sandbox_events"
+	DefaultEventsTable                 = "sandbox_audit_events"
 	DefaultLogsTable                   = "sandbox_logs"
 	DefaultRuntimeSamplesTable         = "sandbox_runtime_samples"
 	DefaultRetentionDays               = 90

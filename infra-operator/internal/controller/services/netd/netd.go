@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"path/filepath"
 
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
@@ -99,6 +100,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		return err
 	}
 	keySecretName, privateKeyKey, _ := compiledPlan.DataPlaneKeyRefs()
+	auditKeySecretName, auditPrivateKeyKey, _ := compiledPlan.AuditNetdKeyRefs()
 	if mitmCASecretName != "" {
 		if config.MITMCACertPath == "" {
 			config.MITMCACertPath = "/tls/ca.crt"
@@ -159,6 +161,26 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 			},
 		},
 	}
+	if config.SandboxObservabilityIngestURL != "" {
+		volumes = append(volumes,
+			corev1.Volume{
+				Name: "audit-spool",
+				VolumeSource: corev1.VolumeSource{
+					HostPath: &corev1.HostPathVolumeSource{
+						Path: filepath.Join("/var/lib/sandbox0/netd", scope.Namespace, scope.Name),
+						Type: func() *corev1.HostPathType { t := corev1.HostPathDirectoryOrCreate; return &t }(),
+					},
+				},
+			},
+			corev1.Volume{
+				Name: "audit-jwt-private-key",
+				VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+					SecretName: auditKeySecretName,
+					Items:      []corev1.KeyToPath{{Key: auditPrivateKeyKey, Path: "audit_jwt_private.key"}},
+				}},
+			},
+		)
+	}
 	if mitmCASecretName != "" {
 		volumes = append(volumes, corev1.Volume{
 			Name: "mitm-ca",
@@ -196,6 +218,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 			SubPath:   "internal_jwt_private.key",
 			ReadOnly:  true,
 		},
+	}
+	if config.SandboxObservabilityIngestURL != "" {
+		volumeMounts = append(volumeMounts,
+			corev1.VolumeMount{
+				Name:      "audit-spool",
+				MountPath: "/var/lib/sandbox0/netd",
+			},
+			corev1.VolumeMount{
+				Name:      "audit-jwt-private-key",
+				MountPath: pkginternalauth.DefaultAuditJWTPrivateKeyPath,
+				SubPath:   "audit_jwt_private.key",
+				ReadOnly:  true,
+			},
+		)
 	}
 	if mitmCASecretName != "" {
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{

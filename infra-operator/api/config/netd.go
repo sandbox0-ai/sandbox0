@@ -179,6 +179,9 @@ type NetdConfig struct {
 	AuditLogMaxBackups int `yaml:"audit_log_max_backups" json:"auditLogMaxBackups"`
 	// +optional
 	SandboxObservabilityIngestURL string `yaml:"sandbox_observability_ingest_url" json:"sandboxObservabilityIngestUrl"`
+	// SandboxObservabilityAuditSpoolDir is the fsync-backed node-local delivery
+	// spool. Records are removed only after cluster-gateway acknowledges them.
+	SandboxObservabilityAuditSpoolDir string `yaml:"sandbox_observability_audit_spool_dir" json:"sandboxObservabilityAuditSpoolDir"`
 	// +optional
 	// +kubebuilder:default=1024
 	SandboxObservabilityIngestQueueSize int `yaml:"sandbox_observability_ingest_queue_size" json:"sandboxObservabilityIngestQueueSize"`

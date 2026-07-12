@@ -129,6 +129,30 @@ func TestValidateSpecSemanticsRejectsAuditWithoutSandboxObservability(t *testing
 	}
 }
 
+func TestValidateSpecSemanticsRejectsAuditWithMultipleClusterGateways(t *testing.T) {
+	enabled := true
+	infra := &infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			ClickHouse: &infrav1alpha1.ClickHouseConfig{Type: infrav1alpha1.ClickHouseTypeBuiltin},
+			SandboxObservability: &infrav1alpha1.SandboxObservabilityConfig{
+				Enabled: &enabled,
+				Backend: infrav1alpha1.SandboxObservabilityBackendClickHouse,
+				Audit:   &infrav1alpha1.SandboxObservabilityAuditConfig{Enabled: true},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{Replicas: 2},
+				},
+			},
+		},
+	}
+
+	err := validateSpecSemantics(context.Background(), nil, infra)
+	if err == nil || !strings.Contains(err.Error(), "sandboxObservability.audit requires spec.services.clusterGateway.replicas to be 1") {
+		t.Fatalf("error = %v, want cluster-gateway replica validation", err)
+	}
+}
+
 func TestValidateSpecSemanticsRejectsBuiltinDatabaseCreateOnceChanges(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},

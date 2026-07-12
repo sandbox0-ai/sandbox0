@@ -63,6 +63,7 @@ type Server struct {
 	proxy2sp                                 *proxy.Router
 	managerClient                            *client.ManagerClient
 	authMiddleware                           *middleware.InternalAuthMiddleware
+	sandboxAuditIngestAuthMiddleware         *middleware.InternalAuthMiddleware
 	sandboxObservabilityIngestAuthMiddleware *middleware.InternalAuthMiddleware
 	publicAuth                               *gatewaymiddleware.AuthMiddleware
 	compositeAuth                            *middleware.CompositeAuthMiddleware
@@ -77,6 +78,9 @@ type Server struct {
 	logger                                   *zap.Logger
 	meteringHandler                          *gatewayhandlers.MeteringHandler
 	observabilityHandler                     *gatewayhandlers.SandboxObservabilityHandler
+	auditWriter                              sandboxobservability.Writer
+	auditSigningKey                          ed25519.PrivateKey
+	auditResults                             *auditResultDelivery
 	internalAuthGen                          *internalauth.Generator
 	entitlements                             licensing.Entitlements
 	sandboxAuditEntitlements                 licensing.Entitlements
@@ -170,22 +174,44 @@ func NewServer(
 			return nil, fmt.Errorf("load internal JWT public key: %w", err)
 		}
 	}
+	var auditNetdPublicKey ed25519.PublicKey
+	var auditSigningPrivateKey ed25519.PrivateKey
+	var auditSigningPublicKey ed25519.PublicKey
+	if cfg.SandboxObservability.AuditEnabled {
+		auditNetdPublicKey, err = internalauth.LoadEd25519PublicKeyFromFile(internalauth.DefaultAuditJWTPublicKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("load dedicated netd audit JWT public key: %w", err)
+		}
+		auditSigningPrivateKey, err = internalauth.LoadEd25519PrivateKeyFromFile(internalauth.DefaultAuditSigningPrivateKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("load dedicated audit signing private key: %w", err)
+		}
+		auditSigningPublicKey, err = internalauth.LoadEd25519PublicKeyFromFile(internalauth.DefaultAuditSigningPublicKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("load dedicated audit signing public key: %w", err)
+		}
+		if !auditSigningPrivateKey.Public().(ed25519.PublicKey).Equal(auditSigningPublicKey) {
+			return nil, fmt.Errorf("audit signing key pair does not match")
+		}
+	}
 
 	// Create internal auth validator (for validating tokens from regional-gateway and optionally scheduler)
 	allowedCallers := cfg.AllowedCallers
 	if len(allowedCallers) == 0 {
 		allowedCallers = []string{"regional-gateway", "scheduler", "cluster-gateway"}
 	}
-	validator, sandboxObservabilityIngestValidator := newInternalAuthValidators(
+	validator, sandboxObservabilityIngestValidator, sandboxAuditIngestValidator := newInternalAuthValidators(
 		cfg.AuthMode,
 		allowedCallers,
 		controlPlanePublicKey,
 		dataPlanePublicKey,
+		auditNetdPublicKey,
 	)
 
 	// Create middleware
 	authMiddleware := middleware.NewInternalAuthMiddleware(validator, logger)
 	sandboxObservabilityIngestAuthMiddleware := middleware.NewInternalAuthMiddleware(sandboxObservabilityIngestValidator, logger)
+	sandboxAuditIngestAuthMiddleware := middleware.NewInternalAuthMiddleware(sandboxAuditIngestValidator, logger)
 	requestLogger := middleware.NewRequestLogger(logger)
 
 	// Initialize internal auth generator (for downstream services)
@@ -263,10 +289,30 @@ func NewServer(
 	}
 
 	meteringHandler := gatewayhandlers.NewMeteringHandler(options.meteringReader, cfg.RegionID, logger)
-	observabilityHandler := gatewayhandlers.NewSandboxObservabilityHandler(
-		options.sandboxObservabilityRepo,
-		logger,
-	)
+	observabilityOptions := []gatewayhandlers.SandboxObservabilityHandlerOption(nil)
+	if cfg.SandboxObservability.AuditEnabled {
+		observabilityOptions = append(observabilityOptions, gatewayhandlers.WithAuditIngestPolicy(gatewayhandlers.AuditIngestPolicy{
+			RegionID:        cfg.RegionID,
+			ClusterID:       cfg.ClusterID,
+			SigningKey:      auditSigningPrivateKey,
+			VerificationKey: auditSigningPublicKey,
+		}))
+	}
+	observabilityHandler := gatewayhandlers.NewSandboxObservabilityHandler(options.sandboxObservabilityRepo, logger, observabilityOptions...)
+	var auditWriter sandboxobservability.Writer
+	if writer, ok := options.sandboxObservabilityRepo.(sandboxobservability.Writer); ok {
+		auditWriter = writer
+	}
+	var auditResults *auditResultDelivery
+	if cfg.SandboxObservability.AuditEnabled {
+		if strings.TrimSpace(cfg.SandboxObservability.AuditSpoolDir) == "" {
+			return nil, fmt.Errorf("sandbox audit requires audit_spool_dir")
+		}
+		auditResults, err = newAuditResultDelivery(cfg.SandboxObservability.AuditSpoolDir, auditWriter, logger, auditSigningPublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("initialize sandbox audit result delivery: %w", err)
+		}
+	}
 	sandboxServiceLimiter, err := ratelimit.New(context.Background(), gatewaymiddleware.RateLimitConfigFromGatewayConfig(cfg.GatewayConfig))
 	if err != nil {
 		return nil, fmt.Errorf("create sandbox service rate limiter: %w", err)
@@ -283,6 +329,7 @@ func NewServer(
 		proxy2sp:                                 proxy2sp,
 		managerClient:                            managerClient,
 		authMiddleware:                           authMiddleware,
+		sandboxAuditIngestAuthMiddleware:         sandboxAuditIngestAuthMiddleware,
 		sandboxObservabilityIngestAuthMiddleware: sandboxObservabilityIngestAuthMiddleware,
 		publicAuth:                               publicAuth,
 		compositeAuth:                            compositeAuth,
@@ -297,6 +344,9 @@ func NewServer(
 		logger:                                   logger,
 		meteringHandler:                          meteringHandler,
 		observabilityHandler:                     observabilityHandler,
+		auditWriter:                              auditWriter,
+		auditSigningKey:                          auditSigningPrivateKey,
+		auditResults:                             auditResults,
 		internalAuthGen:                          internalAuthGen,
 		entitlements:                             publicEntitlements,
 		sandboxAuditEntitlements:                 sandboxAuditEntitlements,
@@ -431,7 +481,11 @@ func (s *Server) setupRoutes() {
 		// === Sandbox Management (→ Manager) ===
 		sandboxes := v1.Group("/sandboxes")
 		{
-			sandboxes.GET("/:id/observability/events", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), licensinghttp.RequireFeature(s.sandboxAuditEntitlements, licensing.FeatureSandboxAudit, s.logger), s.sandboxObservabilityHandler().ListEvents)
+			sandboxes.Use(s.auditSandboxRequests())
+			auditRead := []gin.HandlerFunc{s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxAuditRead), licensinghttp.RequireFeature(s.sandboxAuditEntitlements, licensing.FeatureSandboxAudit, s.logger), s.sandboxObservabilityHandler().ListEvents}
+			sandboxes.GET("/:id/audit/events", auditRead...)
+			sandboxes.GET("/:id/observability/events", auditRead...)
+			sandboxes.GET("/:id/audit/events/:event_id/verify", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxAuditRead), licensinghttp.RequireFeature(s.sandboxAuditEntitlements, licensing.FeatureSandboxAudit, s.logger), s.sandboxObservabilityHandler().VerifyEvent)
 			sandboxes.GET("/:id/observability/logs", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.sandboxObservabilityHandler().ListLogs)
 			sandboxes.GET("/:id/metrics", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.sandboxObservabilityHandler().GetRuntimeMetrics)
 			sandboxes.GET("/:id/metrics/catalog", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.sandboxObservabilityHandler().GetRuntimeMetricsCatalog)
@@ -626,10 +680,15 @@ func (s *Server) setupInternalControlPlaneRoutes() {
 }
 
 func (s *Server) setupSandboxObservabilityIngestRoutes() {
+	audit := s.router.Group("/internal/v1")
+	audit.Use(s.sandboxAuditIngestAuthMiddleware.Authenticate())
+	{
+		audit.POST("/sandbox-observability/events", s.sandboxAuditIngestAuthMiddleware.RequirePermission(gatewayauthn.PermSandboxObservabilityWrite), licensinghttp.RequireFeature(s.sandboxAuditEntitlements, licensing.FeatureSandboxAudit, s.logger), s.sandboxObservabilityHandler().IngestEvents)
+	}
+
 	internal := s.router.Group("/internal/v1")
 	internal.Use(s.sandboxObservabilityIngestAuthMiddleware.Authenticate())
 	{
-		internal.POST("/sandbox-observability/events", s.sandboxObservabilityIngestAuthMiddleware.RequirePermission(gatewayauthn.PermSandboxObservabilityWrite), licensinghttp.RequireFeature(s.sandboxAuditEntitlements, licensing.FeatureSandboxAudit, s.logger), s.sandboxObservabilityHandler().IngestEvents)
 		internal.POST("/sandbox-observability/logs", s.sandboxObservabilityIngestAuthMiddleware.RequirePermission(gatewayauthn.PermSandboxObservabilityWrite), s.sandboxObservabilityHandler().IngestLogs)
 		internal.POST("/sandbox-observability/runtime-samples", s.sandboxObservabilityIngestAuthMiddleware.RequirePermission(gatewayauthn.PermSandboxObservabilityWrite), s.sandboxObservabilityHandler().IngestRuntimeSamples)
 	}
@@ -683,6 +742,9 @@ func requireMeteringAccess() gin.HandlerFunc {
 
 // Start starts the HTTP server
 func (s *Server) Start(ctx context.Context) error {
+	if s.auditResults != nil {
+		s.auditResults.Start(ctx)
+	}
 	addr := fmt.Sprintf(":%d", s.cfg.HTTPPort)
 	s.logger.Info("Starting HTTP server",
 		zap.String("addr", addr),
@@ -801,7 +863,8 @@ func newInternalAuthValidators(
 	allowedControlPlaneCallers []string,
 	controlPlanePublicKey ed25519.PublicKey,
 	dataPlanePublicKey ed25519.PublicKey,
-) (*internalauth.Validator, *internalauth.Validator) {
+	auditNetdPublicKey ed25519.PublicKey,
+) (*internalauth.Validator, *internalauth.Validator, *internalauth.Validator) {
 	var controlPlaneValidator *internalauth.Validator
 	if authModeEnabled(authMode, authModeInternal) {
 		controlPlaneValidator = internalauth.NewValidator(internalauth.ValidatorConfig{
@@ -814,10 +877,19 @@ func newInternalAuthValidators(
 	dataPlaneIngestValidator := internalauth.NewValidator(internalauth.ValidatorConfig{
 		Target:             "cluster-gateway",
 		PublicKey:          dataPlanePublicKey,
-		AllowedCallers:     []string{"netd", "ctld", "manager", "procd", "storage-proxy"},
+		AllowedCallers:     []string{"ctld", "manager", "procd", "storage-proxy"},
 		ClockSkewTolerance: 10 * time.Second,
 	})
-	return controlPlaneValidator, dataPlaneIngestValidator
+	var auditIngestValidator *internalauth.Validator
+	if len(auditNetdPublicKey) == ed25519.PublicKeySize {
+		auditIngestValidator = internalauth.NewValidator(internalauth.ValidatorConfig{
+			Target:             "cluster-gateway",
+			PublicKey:          auditNetdPublicKey,
+			AllowedCallers:     []string{"netd"},
+			ClockSkewTolerance: 10 * time.Second,
+		})
+	}
+	return controlPlaneValidator, dataPlaneIngestValidator, auditIngestValidator
 }
 
 const (

@@ -161,9 +161,9 @@ const (
 
 // Defines values for FileInfoType.
 const (
-	Dir     FileInfoType = "dir"
-	File    FileInfoType = "file"
-	Symlink FileInfoType = "symlink"
+	FileInfoTypeDir     FileInfoType = "dir"
+	FileInfoTypeFile    FileInfoType = "file"
+	FileInfoTypeSymlink FileInfoType = "symlink"
 )
 
 // Defines values for GatewayMetadataGatewayMode.
@@ -182,9 +182,12 @@ const (
 
 // Defines values for ObservabilityEventSource.
 const (
-	Manager ObservabilityEventSource = "manager"
-	Netd    ObservabilityEventSource = "netd"
-	Procd   ObservabilityEventSource = "procd"
+	ClusterGateway ObservabilityEventSource = "cluster_gateway"
+	Ctld           ObservabilityEventSource = "ctld"
+	Manager        ObservabilityEventSource = "manager"
+	Netd           ObservabilityEventSource = "netd"
+	Procd          ObservabilityEventSource = "procd"
+	StorageProxy   ObservabilityEventSource = "storage_proxy"
 )
 
 // Defines values for PlaceholderSubstitutionLocation.
@@ -237,6 +240,32 @@ const (
 	SandboxAppServiceRuntimeTypeManual   SandboxAppServiceRuntimeType = "manual"
 )
 
+// Defines values for SandboxAuditActorKind.
+const (
+	Anonymous          SandboxAuditActorKind = "anonymous"
+	ApiKey             SandboxAuditActorKind = "api_key"
+	ExposureCredential SandboxAuditActorKind = "exposure_credential"
+	Human              SandboxAuditActorKind = "human"
+	SandboxWorkload    SandboxAuditActorKind = "sandbox_workload"
+	Service            SandboxAuditActorKind = "service"
+	SshUser            SandboxAuditActorKind = "ssh_user"
+)
+
+// Defines values for SandboxAuditEventPhase.
+const (
+	Attempt SandboxAuditEventPhase = "attempt"
+	Effect  SandboxAuditEventPhase = "effect"
+	Result  SandboxAuditEventPhase = "result"
+)
+
+// Defines values for SandboxAuditIntegrityStatus.
+const (
+	SandboxAuditIntegrityStatusConflict    SandboxAuditIntegrityStatus = "conflict"
+	SandboxAuditIntegrityStatusInvalid     SandboxAuditIntegrityStatus = "invalid"
+	SandboxAuditIntegrityStatusUnavailable SandboxAuditIntegrityStatus = "unavailable"
+	SandboxAuditIntegrityStatusVerified    SandboxAuditIntegrityStatus = "verified"
+)
+
 // Defines values for SandboxFunctionRuntime.
 const (
 	Python SandboxFunctionRuntime = "python"
@@ -264,9 +293,12 @@ const (
 
 // Defines values for SandboxObservabilityEventType.
 const (
-	Lifecycle    SandboxObservabilityEventType = "lifecycle"
-	NetworkAudit SandboxObservabilityEventType = "network_audit"
-	RuntimeStats SandboxObservabilityEventType = "runtime_stats"
+	SandboxObservabilityEventTypeApiAccess    SandboxObservabilityEventType = "api_access"
+	SandboxObservabilityEventTypeFile         SandboxObservabilityEventType = "file"
+	SandboxObservabilityEventTypeLifecycle    SandboxObservabilityEventType = "lifecycle"
+	SandboxObservabilityEventTypeNetworkAudit SandboxObservabilityEventType = "network_audit"
+	SandboxObservabilityEventTypeProcess      SandboxObservabilityEventType = "process"
+	SandboxObservabilityEventTypeRuntimeStats SandboxObservabilityEventType = "runtime_stats"
 )
 
 // Defines values for SandboxObservabilityLogStream.
@@ -278,11 +310,13 @@ const (
 
 // Defines values for SandboxObservabilityOutcome.
 const (
+	SandboxObservabilityOutcomeAccepted  SandboxObservabilityOutcome = "accepted"
 	SandboxObservabilityOutcomeCompleted SandboxObservabilityOutcome = "completed"
 	SandboxObservabilityOutcomeDenied    SandboxObservabilityOutcome = "denied"
 	SandboxObservabilityOutcomeError     SandboxObservabilityOutcome = "error"
 	SandboxObservabilityOutcomeFailed    SandboxObservabilityOutcome = "failed"
 	SandboxObservabilityOutcomeSucceeded SandboxObservabilityOutcome = "succeeded"
+	SandboxObservabilityOutcomeUnknown   SandboxObservabilityOutcome = "unknown"
 )
 
 // Defines values for SandboxObservabilityWatchLineType.
@@ -303,11 +337,11 @@ const (
 
 // Defines values for SandboxRuntimeMetricGapReason.
 const (
-	CollectionError SandboxRuntimeMetricGapReason = "collection_error"
-	NoData          SandboxRuntimeMetricGapReason = "no_data"
-	SeriesReset     SandboxRuntimeMetricGapReason = "series_reset"
-	Unavailable     SandboxRuntimeMetricGapReason = "unavailable"
-	Unsupported     SandboxRuntimeMetricGapReason = "unsupported"
+	SandboxRuntimeMetricGapReasonCollectionError SandboxRuntimeMetricGapReason = "collection_error"
+	SandboxRuntimeMetricGapReasonNoData          SandboxRuntimeMetricGapReason = "no_data"
+	SandboxRuntimeMetricGapReasonSeriesReset     SandboxRuntimeMetricGapReason = "series_reset"
+	SandboxRuntimeMetricGapReasonUnavailable     SandboxRuntimeMetricGapReason = "unavailable"
+	SandboxRuntimeMetricGapReasonUnsupported     SandboxRuntimeMetricGapReason = "unsupported"
 )
 
 // Defines values for SandboxRuntimeMetricKind.
@@ -2116,6 +2150,58 @@ type SandboxAppServiceView struct {
 	Runtime         *SandboxAppServiceRuntime `json:"runtime,omitempty"`
 }
 
+// SandboxAuditActor defines model for SandboxAuditActor.
+type SandboxAuditActor struct {
+	ApiKeyId   *string               `json:"api_key_id,omitempty"`
+	AuthMethod *string               `json:"auth_method,omitempty"`
+	Id         *string               `json:"id,omitempty"`
+	Kind       SandboxAuditActorKind `json:"kind"`
+	UserId     *string               `json:"user_id,omitempty"`
+}
+
+// SandboxAuditActorKind defines model for SandboxAuditActorKind.
+type SandboxAuditActorKind string
+
+// SandboxAuditEventPhase defines model for SandboxAuditEventPhase.
+type SandboxAuditEventPhase string
+
+// SandboxAuditIntegrity defines model for SandboxAuditIntegrity.
+type SandboxAuditIntegrity struct {
+	Algorithm    string                       `json:"algorithm"`
+	PayloadHash  string                       `json:"payload_hash"`
+	Signature    string                       `json:"signature"`
+	SigningKeyId string                       `json:"signing_key_id"`
+	Status       *SandboxAuditIntegrityStatus `json:"status,omitempty"`
+}
+
+// SandboxAuditIntegrityStatus defines model for SandboxAuditIntegrity.Status.
+type SandboxAuditIntegrityStatus string
+
+// SandboxAuditProducer defines model for SandboxAuditProducer.
+type SandboxAuditProducer struct {
+	Instance *string `json:"instance,omitempty"`
+	Sequence *int64  `json:"sequence,omitempty"`
+	Service  string  `json:"service"`
+}
+
+// SandboxAuditRequest defines model for SandboxAuditRequest.
+type SandboxAuditRequest struct {
+	HttpMethod *string `json:"http_method,omitempty"`
+	RequestId  *string `json:"request_id,omitempty"`
+	Route      *string `json:"route,omitempty"`
+	SourceIp   *string `json:"source_ip,omitempty"`
+	StatusCode *int    `json:"status_code,omitempty"`
+	TraceId    *string `json:"trace_id,omitempty"`
+	UserAgent  *string `json:"user_agent,omitempty"`
+}
+
+// SandboxAuditResource defines model for SandboxAuditResource.
+type SandboxAuditResource struct {
+	Id          string  `json:"id"`
+	Subresource *string `json:"subresource,omitempty"`
+	Type        string  `json:"type"`
+}
+
 // SandboxConfig defines model for SandboxConfig.
 type SandboxConfig struct {
 	// AutoResume Sandbox-level resume gate for paused sandboxes. When false, any inbound request
@@ -2189,18 +2275,29 @@ type SandboxNetworkPolicyMode string
 
 // SandboxObservabilityEvent defines model for SandboxObservabilityEvent.
 type SandboxObservabilityEvent struct {
-	Attributes *map[string]interface{}       `json:"attributes,omitempty"`
-	ClusterId  string                        `json:"cluster_id"`
-	Cursor     string                        `json:"cursor"`
-	EventType  SandboxObservabilityEventType `json:"event_type"`
-	IngestedAt time.Time                     `json:"ingested_at"`
-	OccurredAt time.Time                     `json:"occurred_at"`
-	Outcome    *SandboxObservabilityOutcome  `json:"outcome,omitempty"`
-	RegionId   string                        `json:"region_id"`
-	SandboxId  string                        `json:"sandbox_id"`
-	Source     ObservabilityEventSource      `json:"source"`
-	TeamId     string                        `json:"team_id"`
-	Watermark  string                        `json:"watermark"`
+	Action        string                        `json:"action"`
+	Actor         SandboxAuditActor             `json:"actor"`
+	Attributes    *map[string]interface{}       `json:"attributes,omitempty"`
+	ClusterId     string                        `json:"cluster_id"`
+	Cursor        string                        `json:"cursor"`
+	EventId       openapi_types.UUID            `json:"event_id"`
+	EventType     SandboxObservabilityEventType `json:"event_type"`
+	IngestedAt    time.Time                     `json:"ingested_at"`
+	Integrity     SandboxAuditIntegrity         `json:"integrity"`
+	OccurredAt    time.Time                     `json:"occurred_at"`
+	OperationId   *string                       `json:"operation_id,omitempty"`
+	Outcome       SandboxObservabilityOutcome   `json:"outcome"`
+	ParentEventId *openapi_types.UUID           `json:"parent_event_id,omitempty"`
+	Phase         SandboxAuditEventPhase        `json:"phase"`
+	Producer      SandboxAuditProducer          `json:"producer"`
+	RegionId      string                        `json:"region_id"`
+	Request       *SandboxAuditRequest          `json:"request,omitempty"`
+	Resource      SandboxAuditResource          `json:"resource"`
+	SandboxId     string                        `json:"sandbox_id"`
+	SchemaVersion int                           `json:"schema_version"`
+	Source        ObservabilityEventSource      `json:"source"`
+	TeamId        string                        `json:"team_id"`
+	Watermark     string                        `json:"watermark"`
 }
 
 // SandboxObservabilityEventType defines model for SandboxObservabilityEventType.
@@ -3544,6 +3641,24 @@ type GetApiV1SandboxesParams struct {
 	Offset *int `form:"offset,omitempty" json:"offset,omitempty"`
 }
 
+// GetApiV1SandboxesIdAuditEventsParams defines parameters for GetApiV1SandboxesIdAuditEvents.
+type GetApiV1SandboxesIdAuditEventsParams struct {
+	StartTime    *time.Time                     `form:"start_time,omitempty" json:"start_time,omitempty"`
+	EndTime      *time.Time                     `form:"end_time,omitempty" json:"end_time,omitempty"`
+	Limit        *int                           `form:"limit,omitempty" json:"limit,omitempty"`
+	Cursor       *string                        `form:"cursor,omitempty" json:"cursor,omitempty"`
+	Watch        *bool                          `form:"watch,omitempty" json:"watch,omitempty"`
+	Source       *ObservabilityEventSource      `form:"source,omitempty" json:"source,omitempty"`
+	EventType    *SandboxObservabilityEventType `form:"event_type,omitempty" json:"event_type,omitempty"`
+	Outcome      *SandboxObservabilityOutcome   `form:"outcome,omitempty" json:"outcome,omitempty"`
+	ActorKind    *SandboxAuditActorKind         `form:"actor_kind,omitempty" json:"actor_kind,omitempty"`
+	ActorId      *string                        `form:"actor_id,omitempty" json:"actor_id,omitempty"`
+	Action       *string                        `form:"action,omitempty" json:"action,omitempty"`
+	ResourceType *string                        `form:"resource_type,omitempty" json:"resource_type,omitempty"`
+	OperationId  *string                        `form:"operation_id,omitempty" json:"operation_id,omitempty"`
+	EventId      *openapi_types.UUID            `form:"event_id,omitempty" json:"event_id,omitempty"`
+}
+
 // DeleteApiV1SandboxesIdFilesParams defines parameters for DeleteApiV1SandboxesIdFiles.
 type DeleteApiV1SandboxesIdFilesParams struct {
 	Path FilePath `form:"path" json:"path"`
@@ -3607,10 +3722,16 @@ type GetApiV1SandboxesIdObservabilityEventsParams struct {
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 
 	// Watch Stream matching records as application/x-ndjson in ingestion order until the client disconnects. When watch is true, end_time is not supported. Without cursor or start_time, streaming starts at request time.
-	Watch     *bool                          `form:"watch,omitempty" json:"watch,omitempty"`
-	Source    *ObservabilityEventSource      `form:"source,omitempty" json:"source,omitempty"`
-	EventType *SandboxObservabilityEventType `form:"event_type,omitempty" json:"event_type,omitempty"`
-	Outcome   *SandboxObservabilityOutcome   `form:"outcome,omitempty" json:"outcome,omitempty"`
+	Watch        *bool                          `form:"watch,omitempty" json:"watch,omitempty"`
+	Source       *ObservabilityEventSource      `form:"source,omitempty" json:"source,omitempty"`
+	EventType    *SandboxObservabilityEventType `form:"event_type,omitempty" json:"event_type,omitempty"`
+	Outcome      *SandboxObservabilityOutcome   `form:"outcome,omitempty" json:"outcome,omitempty"`
+	ActorKind    *SandboxAuditActorKind         `form:"actor_kind,omitempty" json:"actor_kind,omitempty"`
+	ActorId      *string                        `form:"actor_id,omitempty" json:"actor_id,omitempty"`
+	Action       *string                        `form:"action,omitempty" json:"action,omitempty"`
+	ResourceType *string                        `form:"resource_type,omitempty" json:"resource_type,omitempty"`
+	OperationId  *string                        `form:"operation_id,omitempty" json:"operation_id,omitempty"`
+	EventId      *openapi_types.UUID            `form:"event_id,omitempty" json:"event_id,omitempty"`
 }
 
 // GetApiV1SandboxesIdObservabilityLogsParams defines parameters for GetApiV1SandboxesIdObservabilityLogs.

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	lumberjack "gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -32,6 +33,9 @@ type jsonlAuditSink struct {
 }
 
 type auditEvent struct {
+	EventID            string                   `json:"event_id,omitempty"`
+	ProducerSequence   uint64                   `json:"producer_sequence,omitempty"`
+	Phase              string                   `json:"phase,omitempty"`
 	Timestamp          time.Time                `json:"timestamp"`
 	FlowID             string                   `json:"flow_id,omitempty"`
 	SandboxID          string                   `json:"sandbox_id,omitempty"`
@@ -69,6 +73,17 @@ type flowAudit struct {
 	StartedAt    time.Time
 	egressBytes  int64
 	ingressBytes int64
+	attempted    atomic.Bool
+}
+
+func (a *flowAudit) startAttempt() bool {
+	return a != nil && a.attempted.CompareAndSwap(false, true)
+}
+
+func (a *flowAudit) resetAttempt() {
+	if a != nil {
+		a.attempted.Store(false)
+	}
 }
 
 func newAuditLogger(cfg *config.NetdConfig) (*auditLogger, error) {
@@ -166,10 +181,19 @@ func (l *auditLogger) Close() error {
 }
 
 func (l *auditLogger) Record(req *adapterRequest, decision trafficDecision, adapter proxyAdapter, duration time.Duration, err error) error {
+	return l.recordWithPhase(req, decision, adapter, duration, err, string(sandboxobservability.EventPhaseResult))
+}
+
+func (l *auditLogger) RecordAttempt(req *adapterRequest, decision trafficDecision, adapter proxyAdapter) error {
+	return l.recordWithPhase(req, decision, adapter, 0, nil, string(sandboxobservability.EventPhaseAttempt))
+}
+
+func (l *auditLogger) recordWithPhase(req *adapterRequest, decision trafficDecision, adapter proxyAdapter, duration time.Duration, err error, phase string) error {
 	if l == nil {
 		return nil
 	}
 	event := auditEvent{
+		Phase:             phase,
 		Timestamp:         l.now(),
 		SrcIP:             "",
 		DestIP:            "",
@@ -184,6 +208,9 @@ func (l *auditLogger) Record(req *adapterRequest, decision trafficDecision, adap
 		DurationMS:        duration.Milliseconds(),
 		Adapter:           adapterName(adapter),
 		AdapterCapability: string(adapterCapabilityOf(adapter)),
+	}
+	if phase == string(sandboxobservability.EventPhaseAttempt) {
+		event.Outcome = string(sandboxobservability.OutcomeAccepted)
 	}
 	if req != nil {
 		if req.Audit != nil {

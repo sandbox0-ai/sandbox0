@@ -2613,12 +2613,39 @@ spec:
                       Audit configures the licensed centralized per-sandbox audit signal. Audit
                       collection and query remain disabled unless explicitly enabled.
                     properties:
+                      deliveryPersistence:
+                        description: |-
+                          DeliveryPersistence configures the durable, non-canonical result delivery
+                          buffer used while ClickHouse is unavailable. The current implementation
+                          requires one cluster-gateway replica and a storage class whose volume can
+                          be reattached after cross-node rescheduling.
+                        properties:
+                          size:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            default: 1Gi
+                            description: Size specifies the delivery buffer capacity.
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          storageClass:
+                            description: |-
+                              StorageClass selects a durable Kubernetes storage class. Empty uses the
+                              cluster default.
+                            type: string
+                        type: object
+                        x-kubernetes-validations:
+                        - message: audit delivery persistence is immutable after creation
+                          rule: self == oldSelf
                       enabled:
                         default: false
                         description: Enabled enables the enterprise sandbox_audit
                           feature.
                         type: boolean
                     type: object
+                    x-kubernetes-validations:
+                    - message: deliveryPersistence presence is immutable after creation
+                      rule: has(self.deliveryPersistence) == has(oldSelf.deliveryPersistence)
                   backend:
                     allOf:
                     - enum:
@@ -2646,7 +2673,7 @@ spec:
                             default: sandbox0_observability
                             type: string
                           eventsTable:
-                            default: sandbox_events
+                            default: sandbox_audit_events
                             type: string
                           httpPort:
                             default: 8123
@@ -2744,7 +2771,7 @@ spec:
                                 type: string
                             type: object
                           eventsTable:
-                            default: sandbox_events
+                            default: sandbox_audit_events
                             type: string
                           logsTable:
                             default: sandbox_logs

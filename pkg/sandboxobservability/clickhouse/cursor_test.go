@@ -46,7 +46,7 @@ func TestPageCursorRejectsInvalidValue(t *testing.T) {
 
 func TestTailCursorRoundTripAndRejectsWrongKind(t *testing.T) {
 	ingestedAt := time.Date(2026, 7, 1, 1, 2, 4, 5, time.FixedZone("offset", 8*60*60))
-	encoded, err := encodeTailCursor(eventTailCursorKind, ingestedAt, string(sandboxobservability.SourceNetd), string(sandboxobservability.EventTypeNetworkAudit), "netd:cursor:1")
+	encoded, err := encodeTailCursor(eventTailCursorKind, ingestedAt, string(sandboxobservability.SourceNetd), string(sandboxobservability.EventTypeNetworkAudit), "netd:cursor:1", "hash-1")
 	if err != nil {
 		t.Fatalf("encodeTailCursor() error = %v", err)
 	}

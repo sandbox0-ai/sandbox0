@@ -142,7 +142,6 @@ func TestSetupRoutesDoesNotMountRemovedSandboxEndpoints(t *testing.T) {
 		"/api/v1/sandboxes/:id/logs",
 		"/api/v1/sandboxes/:id/stats",
 		"/api/v1/sandboxes/:id/contexts/:ctx_id/stats",
-		"/api/v1/sandboxes/:id/audit/events",
 		"/api/v1/sandboxes/:id/observability/metrics",
 	} {
 		if hasRoute(server.router, "GET", path) {
@@ -160,6 +159,7 @@ func TestSetupRoutesMountsSandboxObservabilityEndpoints(t *testing.T) {
 	server.setupRoutes()
 
 	for _, path := range []string{
+		"/api/v1/sandboxes/:id/audit/events",
 		"/api/v1/sandboxes/:id/observability/events",
 		"/api/v1/sandboxes/:id/observability/logs",
 		"/api/v1/sandboxes/:id/metrics",
@@ -167,6 +167,26 @@ func TestSetupRoutesMountsSandboxObservabilityEndpoints(t *testing.T) {
 	} {
 		if !hasRoute(server.router, "GET", path) {
 			t.Fatalf("expected route %s to be mounted", path)
+		}
+	}
+}
+
+func TestEverySandboxRouteHasExplicitAuditAction(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	server, _, _ := testMeteringRouteServer(t, "public")
+	server.requestLogger = middleware.NewRequestLogger(zap.NewNop())
+	server.obsProvider = newTestMeteringObservability(t)
+	server.setupRoutes()
+	for _, route := range server.router.Routes() {
+		if !strings.HasPrefix(route.Path, "/api/v1/sandboxes") {
+			continue
+		}
+		if route.Method == http.MethodGet && route.Path == "/api/v1/sandboxes" {
+			continue
+		}
+		key := route.Method + " " + route.Path
+		if sandboxAuditActions[key] == "" {
+			t.Errorf("sandbox route %s has no explicit audit action", key)
 		}
 	}
 }
@@ -184,7 +204,7 @@ func TestSandboxObservabilityRouteDoesNotRequireManagerUpstream(t *testing.T) {
 	}
 
 	token, err := generator.Generate("cluster-gateway", "team-1", "user-1", internalauth.GenerateOptions{
-		Permissions: []string{authn.PermSandboxRead},
+		Permissions: []string{authn.PermSandboxRead, authn.PermSandboxAuditRead},
 	})
 	if err != nil {
 		t.Fatalf("generate internal token: %v", err)
@@ -212,7 +232,7 @@ func TestSandboxAuditRouteRequiresEnterpriseFeatureWithoutBlockingOtherSignals(t
 	server.setupRoutes()
 
 	token, err := generator.Generate("cluster-gateway", "team-1", "user-1", internalauth.GenerateOptions{
-		Permissions: []string{authn.PermSandboxRead},
+		Permissions: []string{authn.PermSandboxRead, authn.PermSandboxAuditRead},
 	})
 	if err != nil {
 		t.Fatalf("generate internal token: %v", err)
@@ -291,8 +311,8 @@ func TestSandboxRuntimeSampleIngestAcceptsCtldToken(t *testing.T) {
 	auditReq.Header.Set(internalauth.DefaultTokenHeader, token)
 	auditRec := httptest.NewRecorder()
 	server.router.ServeHTTP(auditRec, auditReq)
-	if auditRec.Code != http.StatusForbidden || !strings.Contains(auditRec.Body.String(), string(licensing.FeatureSandboxAudit)) {
-		t.Fatalf("audit ingest response = %d %s, want enterprise feature denial", auditRec.Code, auditRec.Body.String())
+	if auditRec.Code != http.StatusUnauthorized {
+		t.Fatalf("audit ingest response = %d %s, want dedicated audit-key rejection", auditRec.Code, auditRec.Body.String())
 	}
 
 }
@@ -306,12 +326,17 @@ func TestInternalAuthValidatorsKeepControlAndDataPlaneTrustRootsSeparate(t *test
 	if err != nil {
 		t.Fatalf("generate data-plane key: %v", err)
 	}
+	auditPublicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate audit key: %v", err)
+	}
 
-	controlValidator, ingestValidator := newInternalAuthValidators(
+	controlValidator, ingestValidator, _ := newInternalAuthValidators(
 		authModeInternal,
 		[]string{"regional-gateway"},
 		controlPublicKey,
 		dataPublicKey,
+		auditPublicKey,
 	)
 	regionalGenerator := internalauth.NewGenerator(internalauth.GeneratorConfig{
 		Caller:     "regional-gateway",
@@ -466,6 +491,7 @@ func testMeteringRouteServer(t *testing.T, authMode string) (*Server, *internala
 		router:                                   gin.New(),
 		cfg:                                      &config.ClusterGatewayConfig{AuthMode: authMode},
 		authMiddleware:                           internalAuth,
+		sandboxAuditIngestAuthMiddleware:         sandboxObservabilityIngestAuth,
 		sandboxObservabilityIngestAuthMiddleware: sandboxObservabilityIngestAuth,
 		publicAuth:                               publicAuth,
 		compositeAuth:                            middleware.NewCompositeAuthMiddleware(internalAuth, publicAuth, zap.NewNop()),

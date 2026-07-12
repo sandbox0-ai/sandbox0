@@ -36,7 +36,7 @@ func (r *Repository) WatchLogs(ctx context.Context, query sandboxobservability.L
 	nextCursor := ""
 	if len(logs) > 0 {
 		last := logs[len(logs)-1]
-		nextCursor, err = encodeTailCursor(logTailCursorKind, last.IngestedAt, string(last.Stream), "", last.Cursor)
+		nextCursor, err = encodeTailCursor(logTailCursorKind, last.IngestedAt, string(last.Stream), "", last.Cursor, "")
 		if err != nil {
 			return nil, fmt.Errorf("%w: encode cursor: %v", sandboxobservability.ErrBackendUnavailable, err)
 		}
@@ -67,7 +67,7 @@ func (r *Repository) watchEvents(ctx context.Context, query sandboxobservability
 	nextCursor := ""
 	if len(events) > 0 {
 		last := events[len(events)-1]
-		nextCursor, err = encodeTailCursor(eventTailCursorKind, last.IngestedAt, string(last.Source), string(last.EventType), last.Cursor)
+		nextCursor, err = encodeTailCursor(eventTailCursorKind, last.IngestedAt, string(last.Source), string(last.EventType), last.Cursor, last.Integrity.PayloadHash)
 		if err != nil {
 			return nil, fmt.Errorf("%w: encode cursor: %v", sandboxobservability.ErrBackendUnavailable, err)
 		}
@@ -81,7 +81,9 @@ func (r *Repository) watchEvents(ctx context.Context, query sandboxobservability
 
 func (r *Repository) buildWatchEventsSQL(query sandboxobservability.EventQuery, limit int, cursor *tailCursor) (string, []any) {
 	var builder strings.Builder
-	builder.WriteString("SELECT team_id, sandbox_id, region_id, cluster_id, occurred_at, ingested_at, source, event_type, outcome, cursor, watermark, attributes FROM ")
+	builder.WriteString("SELECT ")
+	builder.WriteString(eventSelectColumns)
+	builder.WriteString(" FROM ")
 	builder.WriteString(r.eventsTable)
 	builder.WriteString(" FINAL WHERE team_id = ? AND sandbox_id = ?")
 
@@ -106,12 +108,36 @@ func (r *Repository) buildWatchEventsSQL(query sandboxobservability.EventQuery, 
 		builder.WriteString(" AND outcome = ?")
 		args = append(args, string(query.Outcome))
 	}
+	if query.ActorKind != "" {
+		builder.WriteString(" AND actor_kind = ?")
+		args = append(args, string(query.ActorKind))
+	}
+	if query.ActorID != "" {
+		builder.WriteString(" AND actor_id = ?")
+		args = append(args, query.ActorID)
+	}
+	if query.Action != "" {
+		builder.WriteString(" AND action = ?")
+		args = append(args, query.Action)
+	}
+	if query.ResourceType != "" {
+		builder.WriteString(" AND resource_type = ?")
+		args = append(args, query.ResourceType)
+	}
+	if query.OperationID != "" {
+		builder.WriteString(" AND operation_id = ?")
+		args = append(args, query.OperationID)
+	}
+	if query.EventID != "" {
+		builder.WriteString(" AND event_id = ?")
+		args = append(args, query.EventID)
+	}
 	if cursor != nil {
-		builder.WriteString(" AND (ingested_at, source, event_type, cursor) > (?, ?, ?, ?)")
-		args = append(args, cursor.IngestedAt, cursor.Source, cursor.EventType, cursor.Cursor)
+		builder.WriteString(" AND (ingested_at, source, event_type, event_id, payload_hash) > (?, ?, ?, ?, ?)")
+		args = append(args, cursor.IngestedAt, cursor.Source, cursor.EventType, cursor.Cursor, cursor.PayloadHash)
 	}
 
-	builder.WriteString(" ORDER BY ingested_at ASC, source ASC, event_type ASC, cursor ASC")
+	builder.WriteString(" ORDER BY ingested_at ASC, source ASC, event_type ASC, event_id ASC, payload_hash ASC")
 	builder.WriteString(fmt.Sprintf(" LIMIT %d", limit))
 	return builder.String(), args
 }

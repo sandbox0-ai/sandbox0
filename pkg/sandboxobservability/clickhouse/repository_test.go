@@ -2,6 +2,7 @@ package clickhouse
 
 import (
 	"context"
+	"crypto/ed25519"
 	"database/sql"
 	"strings"
 	"testing"
@@ -41,39 +42,51 @@ func TestInsertEventsBuildsBatchInsertAndSerializesAttributes(t *testing.T) {
 	repo.now = func() time.Time { return now }
 	occurredAt := time.Date(2026, 7, 1, 1, 2, 3, 0, time.FixedZone("offset", 8*60*60))
 
-	err := repo.InsertEvents(context.Background(), []sandboxobservability.Event{{
-		TeamID:     " team-1 ",
-		SandboxID:  " sb-1 ",
-		RegionID:   "aws-us-east-1",
-		ClusterID:  "cluster-a",
-		OccurredAt: occurredAt,
-		Source:     sandboxobservability.SourceNetd,
-		EventType:  sandboxobservability.EventTypeNetworkAudit,
-		Outcome:    sandboxobservability.OutcomeDenied,
-		Cursor:     "netd:1",
-		Watermark:  "netd:1",
-		Attributes: map[string]any{"destination": "example.com"},
-	}})
+	event := sandboxobservability.Event{
+		EventID:       "11111111-1111-4111-8111-111111111111",
+		SchemaVersion: sandboxobservability.CurrentEventSchemaVersion,
+		TeamID:        " team-1 ",
+		SandboxID:     " sb-1 ",
+		RegionID:      "aws-us-east-1",
+		ClusterID:     "cluster-a",
+		OccurredAt:    occurredAt,
+		Source:        sandboxobservability.SourceNetd,
+		EventType:     sandboxobservability.EventTypeNetworkAudit,
+		Phase:         sandboxobservability.EventPhaseEffect,
+		Outcome:       sandboxobservability.OutcomeDenied,
+		Actor:         sandboxobservability.AuditActor{Kind: sandboxobservability.ActorKindSandboxWorkload, ID: "sb-1"},
+		Action:        "network.deny",
+		Resource:      sandboxobservability.AuditResource{Type: "sandbox_network", ID: "sb-1"},
+		Producer:      sandboxobservability.AuditProducer{Service: "netd", Instance: "node-1", Sequence: 1},
+		Cursor:        "netd:1",
+		Watermark:     "netd:1",
+		Attributes:    map[string]any{"destination": "example.com"},
+	}
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	if err := sandboxobservability.SignEvent(&event, key); err != nil {
+		t.Fatalf("SignEvent() error = %v", err)
+	}
+	err := repo.InsertEvents(context.Background(), []sandboxobservability.Event{event})
 	if err != nil {
 		t.Fatalf("InsertEvents() error = %v", err)
 	}
-	if !strings.HasPrefix(db.execQuery, "INSERT INTO `sandbox0_observability`.`sandbox_events`") {
+	if !strings.HasPrefix(db.execQuery, "INSERT INTO `sandbox0_observability`.`sandbox_audit_events`") {
 		t.Fatalf("exec query = %s", db.execQuery)
 	}
-	if len(db.execArgs) != 12 {
-		t.Fatalf("exec args count = %d, want 12", len(db.execArgs))
+	if len(db.execArgs) != 40 {
+		t.Fatalf("exec args count = %d, want 40", len(db.execArgs))
 	}
-	if db.execArgs[0] != "team-1" || db.execArgs[1] != "sb-1" {
-		t.Fatalf("identity args = %#v", db.execArgs[:2])
+	if db.execArgs[2] != "team-1" || db.execArgs[3] != "sb-1" {
+		t.Fatalf("identity args = %#v", db.execArgs[2:4])
 	}
-	if got, ok := db.execArgs[4].(time.Time); !ok || got.Location() != time.UTC || !got.Equal(occurredAt) {
-		t.Fatalf("occurred_at arg = %#v", db.execArgs[4])
+	if got, ok := db.execArgs[6].(time.Time); !ok || got.Location() != time.UTC || !got.Equal(occurredAt) {
+		t.Fatalf("occurred_at arg = %#v", db.execArgs[6])
 	}
-	if got, ok := db.execArgs[5].(time.Time); !ok || !got.Equal(now) {
-		t.Fatalf("ingested_at arg = %#v", db.execArgs[5])
+	if got, ok := db.execArgs[7].(time.Time); !ok || !got.Equal(now) {
+		t.Fatalf("ingested_at arg = %#v", db.execArgs[7])
 	}
-	if attributes, ok := db.execArgs[11].(string); !ok || !strings.Contains(attributes, `"destination":"example.com"`) {
-		t.Fatalf("attributes arg = %#v", db.execArgs[11])
+	if attributes, ok := db.execArgs[35].(string); !ok || !strings.Contains(attributes, `"destination":"example.com"`) {
+		t.Fatalf("attributes arg = %#v", db.execArgs[35])
 	}
 }
 
@@ -99,11 +112,13 @@ func TestBuildListSQLAppliesTypedFiltersAndCursor(t *testing.T) {
 	start := time.Date(2026, 7, 1, 1, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 7, 1, 2, 0, 0, 0, time.UTC)
 	cursorValue, err := encodePageCursor(sandboxobservability.Event{
+		EventID:    "11111111-1111-4111-8111-111111111111",
 		OccurredAt: time.Date(2026, 7, 1, 1, 30, 0, 0, time.UTC),
 		IngestedAt: time.Date(2026, 7, 1, 1, 30, 1, 0, time.UTC),
 		Source:     sandboxobservability.SourceNetd,
 		EventType:  sandboxobservability.EventTypeNetworkAudit,
-		Cursor:     "netd:10",
+		Cursor:     "11111111-1111-4111-8111-111111111111",
+		Integrity:  sandboxobservability.AuditIntegrity{PayloadHash: strings.Repeat("a", 64)},
 	})
 	if err != nil {
 		t.Fatalf("encodePageCursor() error = %v", err)
@@ -126,19 +141,19 @@ func TestBuildListSQLAppliesTypedFiltersAndCursor(t *testing.T) {
 
 	sqlQuery, args := repo.buildListSQL(query, limit+1, cursor)
 	for _, want := range []string{
-		"FROM `sandbox0_observability`.`sandbox_events` FINAL WHERE team_id = ? AND sandbox_id = ?",
+		"FROM `sandbox0_observability`.`sandbox_audit_events` FINAL WHERE team_id = ? AND sandbox_id = ?",
 		"source = ?",
 		"outcome = ?",
 		"event_type = ?",
-		"(occurred_at, ingested_at, source, event_type, cursor) > (?, ?, ?, ?, ?)",
-		"ORDER BY occurred_at ASC, ingested_at ASC, source ASC, event_type ASC, cursor ASC LIMIT 11",
+		"(occurred_at, ingested_at, source, event_type, event_id, payload_hash) > (?, ?, ?, ?, ?, ?)",
+		"ORDER BY occurred_at ASC, ingested_at ASC, source ASC, event_type ASC, event_id ASC, payload_hash ASC LIMIT 11",
 	} {
 		if !strings.Contains(sqlQuery, want) {
 			t.Fatalf("query missing %q:\n%s", want, sqlQuery)
 		}
 	}
-	if len(args) != 12 {
-		t.Fatalf("args count = %d, want 12: %#v", len(args), args)
+	if len(args) != 13 {
+		t.Fatalf("args count = %d, want 13: %#v", len(args), args)
 	}
 	if args[5] != string(sandboxobservability.EventTypeNetworkAudit) {
 		t.Fatalf("event_type arg = %#v, want network_audit", args[5])
@@ -168,8 +183,8 @@ func TestBuildWatchEventsSQLUsesIngestionOrderCursor(t *testing.T) {
 		"occurred_at >= ?",
 		"source = ?",
 		"event_type = ?",
-		"(ingested_at, source, event_type, cursor) > (?, ?, ?, ?)",
-		"ORDER BY ingested_at ASC, source ASC, event_type ASC, cursor ASC LIMIT 10",
+		"(ingested_at, source, event_type, event_id, payload_hash) > (?, ?, ?, ?, ?)",
+		"ORDER BY ingested_at ASC, source ASC, event_type ASC, event_id ASC, payload_hash ASC LIMIT 10",
 	} {
 		if !strings.Contains(sqlQuery, want) {
 			t.Fatalf("query missing %q:\n%s", want, sqlQuery)
@@ -178,8 +193,8 @@ func TestBuildWatchEventsSQLUsesIngestionOrderCursor(t *testing.T) {
 	if strings.Contains(sqlQuery, "ORDER BY occurred_at") {
 		t.Fatalf("watch query must not order by occurred_at:\n%s", sqlQuery)
 	}
-	if got, ok := args[len(args)-4].(time.Time); !ok || !got.Equal(after) {
-		t.Fatalf("tail ingested_at arg = %#v, want %s", args[len(args)-4], after)
+	if got, ok := args[len(args)-5].(time.Time); !ok || !got.Equal(after) {
+		t.Fatalf("tail ingested_at arg = %#v, want %s", args[len(args)-5], after)
 	}
 }
 

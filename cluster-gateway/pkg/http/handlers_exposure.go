@@ -59,6 +59,18 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 		return
 	}
 	route := match.route
+	finishAudit, ok := s.beginExposureAudit(c, sandbox, match.service, route)
+	if !ok {
+		return
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			c.Set(exposureAuditPanickedKey, true)
+			finishAudit()
+			panic(recovered)
+		}
+		finishAudit()
+	}()
 	if c.Request.Method == http.MethodOptions && route.CORS != nil {
 		if !s.enforceSandboxServiceRoute(c, sandboxID, sandbox.TeamID, route) {
 			return

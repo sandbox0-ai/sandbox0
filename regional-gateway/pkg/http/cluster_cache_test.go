@@ -116,6 +116,12 @@ func TestGenerateInternalTokenUsesSelectedTeamForPlatformAPIKey(t *testing.T) {
 	if len(claims.Permissions) != 1 || claims.Permissions[0] != "*" {
 		t.Fatalf("Permissions = %v, want [*]", claims.Permissions)
 	}
+	if claims.Audit == nil || claims.Audit.Actor.Kind != string(authn.PrincipalKindAPIKey) || claims.Audit.Actor.ID != "key-1" || claims.Audit.Actor.APIKeyID != "key-1" {
+		t.Fatalf("Audit actor = %#v, want API key key-1", claims.Audit)
+	}
+	if claims.Audit.OperationID == "" || claims.Audit.RequestID == "" {
+		t.Fatalf("Audit correlation = %#v, want generated IDs", claims.Audit)
+	}
 }
 
 func TestGenerateInternalTokenUsesSystemTokenWithoutSelectedTeam(t *testing.T) {

@@ -99,6 +99,20 @@ func (p *InfraPlan) DataPlaneKeyRefs() (string, string, string) {
 	return controllerinternalauth.GetDataPlaneKeyRefs(p.infra)
 }
 
+func (p *InfraPlan) AuditNetdKeyRefs() (string, string, string) {
+	if p == nil || p.infra == nil {
+		return "", "", ""
+	}
+	return controllerinternalauth.GetAuditNetdKeyRefs(p.infra)
+}
+
+func (p *InfraPlan) AuditSigningKeyRefs() (string, string, string) {
+	if p == nil || p.infra == nil {
+		return "", "", ""
+	}
+	return controllerinternalauth.GetAuditSigningKeyRefs(p.infra)
+}
+
 func (p *InfraPlan) ControlPlanePublicKeyRef() (string, string) {
 	if p == nil || p.infra == nil {
 		return "", ""

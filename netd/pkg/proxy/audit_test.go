@@ -199,8 +199,10 @@ func TestHTTPAuditSinkPostsObservabilityEvents(t *testing.T) {
 			event.ClusterID != "cluster-a" ||
 			event.Source != sandboxobservability.SourceNetd ||
 			event.EventType != sandboxobservability.EventTypeNetworkAudit ||
+			event.Phase != sandboxobservability.EventPhaseResult ||
 			event.Outcome != sandboxobservability.OutcomeCompleted ||
-			event.Cursor != "netd:tcp-1:1782867723000000000" ||
+			event.EventID == "" ||
+			event.Cursor != event.EventID ||
 			event.Watermark != event.Cursor {
 			t.Fatalf("projected event = %+v", event)
 		}

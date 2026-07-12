@@ -17,6 +17,8 @@ const (
 
 // ClusterGatewayConfig holds all configuration for cluster-gateway.
 type ClusterGatewayConfig struct {
+	// ClusterID is the trusted data-plane cluster identity attached to audit facts.
+	ClusterID string `yaml:"cluster_id" json:"-"`
 	// Server configuration
 	// +optional
 	// +kubebuilder:default=8443
@@ -99,6 +101,11 @@ type SandboxObservabilityConfig struct {
 	// +optional
 	// +kubebuilder:default=false
 	AuditEnabled bool `yaml:"audit_enabled" json:"auditEnabled"`
+	// AuditSpoolDir is the fsync-backed local delivery buffer for canonical
+	// result events that could not be acknowledged by ClickHouse immediately.
+	// It is not an audit system of record.
+	// +optional
+	AuditSpoolDir string `yaml:"audit_spool_dir" json:"-"`
 	// +optional
 	ClickHouse SandboxObservabilityClickHouseConfig `yaml:"clickhouse" json:"clickHouse"`
 }
@@ -111,7 +118,7 @@ type SandboxObservabilityClickHouseConfig struct {
 	// +kubebuilder:default="sandbox0_observability"
 	Database string `yaml:"database" json:"database"`
 	// +optional
-	// +kubebuilder:default="sandbox_events"
+	// +kubebuilder:default="sandbox_audit_events"
 	EventsTable string `yaml:"events_table" json:"eventsTable"`
 	// +optional
 	// +kubebuilder:default="sandbox_logs"

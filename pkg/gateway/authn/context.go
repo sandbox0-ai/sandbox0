@@ -21,17 +21,22 @@ const (
 type PrincipalKind string
 
 const (
-	PrincipalKindHuman    PrincipalKind = "human"
-	PrincipalKindAPIKey   PrincipalKind = "api_key"
-	PrincipalKindInternal PrincipalKind = "internal"
+	PrincipalKindHuman           PrincipalKind = "human"
+	PrincipalKindAPIKey          PrincipalKind = "api_key"
+	PrincipalKindInternal        PrincipalKind = "internal"
+	PrincipalKindService         PrincipalKind = "service"
+	PrincipalKindSandboxWorkload PrincipalKind = "sandbox_workload"
 )
 
 // Principal is a transport-agnostic identity for authorization decisions.
 type Principal struct {
-	Kind     PrincipalKind
-	TeamID   string
-	UserID   string
-	APIKeyID string
+	Kind       PrincipalKind
+	ID         string
+	TeamID     string
+	UserID     string
+	APIKeyID   string
+	Service    string
+	AuthMethod AuthMethod
 }
 
 // AuthContext contains authentication information for a request.
@@ -44,17 +49,30 @@ type AuthContext struct {
 	TeamRole      string
 	IsSystemAdmin bool
 	Permissions   []string
+
+	// Caller is the authenticated service for the current internal transport.
+	Caller string
+	// OriginalPrincipal is the signed edge principal delegated across internal
+	// hops. It never changes authorization semantics.
+	OriginalPrincipal *Principal
+	OperationID       string
+	RequestID         string
 }
 
 // Principal returns the normalized principal for this auth context.
 func (ac *AuthContext) Principal() Principal {
+	if ac.OriginalPrincipal != nil {
+		principal := *ac.OriginalPrincipal
+		principal.TeamID = ac.TeamID
+		return principal
+	}
 	switch ac.AuthMethod {
 	case AuthMethodAPIKey:
-		return Principal{Kind: PrincipalKindAPIKey, TeamID: ac.TeamID, APIKeyID: ac.APIKeyID}
+		return Principal{Kind: PrincipalKindAPIKey, ID: ac.APIKeyID, TeamID: ac.TeamID, UserID: ac.UserID, APIKeyID: ac.APIKeyID, AuthMethod: ac.AuthMethod}
 	case AuthMethodInternal:
-		return Principal{Kind: PrincipalKindInternal, TeamID: ac.TeamID, UserID: ac.UserID}
+		return Principal{Kind: PrincipalKindService, ID: ac.Caller, TeamID: ac.TeamID, UserID: ac.UserID, Service: ac.Caller, AuthMethod: ac.AuthMethod}
 	default:
-		return Principal{Kind: PrincipalKindHuman, TeamID: ac.TeamID, UserID: ac.UserID}
+		return Principal{Kind: PrincipalKindHuman, ID: ac.UserID, TeamID: ac.TeamID, UserID: ac.UserID, AuthMethod: ac.AuthMethod}
 	}
 }
 
@@ -89,6 +107,7 @@ const (
 	PermQuotaRead = "quota:read"
 
 	PermSandboxObservabilityWrite = "sandboxobservability:write"
+	PermSandboxAuditRead          = "sandboxaudit:read"
 )
 
 // RolePermissions maps team roles to their permissions.
@@ -114,6 +133,7 @@ var RolePermissions = map[string][]string{
 		PermSandboxVolumeFileRead,
 		PermSandboxVolumeFileWrite,
 		PermQuotaRead,
+		PermSandboxAuditRead,
 	},
 	"developer": {
 		PermSandboxCreate,

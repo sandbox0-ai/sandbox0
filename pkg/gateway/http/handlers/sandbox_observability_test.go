@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	"go.uber.org/zap"
 )
@@ -337,14 +339,56 @@ func TestSandboxObservabilityHandlerIngestEvents(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	repo := &fakeSandboxObservabilityRepo{}
-	handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
-	rec := serveSandboxObservabilityIngestRequest(t, "/internal/v1/sandbox-observability/events", handler.IngestEvents, `{"events":[{"team_id":"team-1","sandbox_id":"sb-1","occurred_at":"2026-07-01T01:02:03Z","source":"netd","event_type":"network_audit","cursor":"netd:1","watermark":"netd:1"}]}`)
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	handler := NewSandboxObservabilityHandler(repo, zap.NewNop(), WithAuditIngestPolicy(AuditIngestPolicy{
+		RegionID: "region-1", ClusterID: "cluster-1", SigningKey: key,
+		Now: func() time.Time { return time.Date(2026, 7, 1, 1, 3, 0, 0, time.UTC) },
+	}))
+	rec := serveSandboxObservabilityIngestRequest(t, "/internal/v1/sandbox-observability/events", handler.IngestEvents, `{"events":[{"event_id":"11111111-1111-4111-8111-111111111111","team_id":"team-1","sandbox_id":"sb-1","occurred_at":"2026-07-01T01:02:03Z","source":"netd","event_type":"network_audit","phase":"effect","outcome":"completed","producer":{"service":"netd"},"attributes":{"action":"use-adapter"}}]}`)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 	if !repo.ingestCalled || len(repo.ingestEvents) != 1 {
 		t.Fatalf("ingest called=%v events=%d", repo.ingestCalled, len(repo.ingestEvents))
+	}
+	event := repo.ingestEvents[0]
+	if event.Source != sandboxobservability.SourceNetd || event.Actor.Kind != sandboxobservability.ActorKindSandboxWorkload || event.Action != "network.connect" {
+		t.Fatalf("normalized event = %+v", event)
+	}
+	if err := sandboxobservability.VerifyEventIntegrity(event, key.Public().(ed25519.PublicKey)); err != nil {
+		t.Fatalf("event integrity = %v", err)
+	}
+}
+
+func TestSandboxObservabilityHandlerRejectsUnscopedOrSpoofedAuditIngest(t *testing.T) {
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	handler := NewSandboxObservabilityHandler(&fakeSandboxObservabilityRepo{}, zap.NewNop(), WithAuditIngestPolicy(AuditIngestPolicy{
+		RegionID: "region-1", ClusterID: "cluster-1", SigningKey: key,
+		Now: func() time.Time { return time.Date(2026, 7, 1, 1, 3, 0, 0, time.UTC) },
+	}))
+	base := sandboxobservability.Event{
+		EventID: "11111111-1111-4111-8111-111111111111", TeamID: "team-1", SandboxID: "sb-1",
+		OccurredAt: time.Date(2026, 7, 1, 1, 2, 3, 0, time.UTC), EventType: sandboxobservability.EventTypeNetworkAudit,
+	}
+
+	tests := []struct {
+		name   string
+		claims *internalauth.Claims
+		event  sandboxobservability.Event
+	}{
+		{name: "system token", claims: &internalauth.Claims{Caller: "netd", IsSystem: true}, event: base},
+		{name: "team spoof", claims: &internalauth.Claims{Caller: "netd", TeamID: "team-2", SandboxID: "sb-1"}, event: base},
+		{name: "sandbox spoof", claims: &internalauth.Claims{Caller: "netd", TeamID: "team-1", SandboxID: "sb-2"}, event: base},
+		{name: "caller spoof", claims: &internalauth.Claims{Caller: "ctld", TeamID: "team-1", SandboxID: "sb-1"}, event: base},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := internalauth.WithClaims(context.Background(), tt.claims)
+			if err := handler.normalizeAuditEvents(ctx, []sandboxobservability.Event{tt.event}); err == nil {
+				t.Fatal("normalizeAuditEvents() error = nil")
+			}
+		})
 	}
 }
 
@@ -425,6 +469,9 @@ func withTestAuth(next gin.HandlerFunc) gin.HandlerFunc {
 			Permissions: []string{authn.PermSandboxRead},
 		}
 		c.Request = c.Request.WithContext(authn.WithAuthContext(c.Request.Context(), authCtx))
+		c.Request = c.Request.WithContext(internalauth.WithClaims(c.Request.Context(), &internalauth.Claims{
+			Caller: "netd", TeamID: "team-1", SandboxID: "sb-1",
+		}))
 		next(c)
 	}
 }

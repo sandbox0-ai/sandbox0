@@ -1,6 +1,9 @@
 package v1alpha1
 
-import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+import (
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
 
 // GatewayConfig defines user-facing gateway settings shared by global,
 // regional, and cluster gateway services.
@@ -384,12 +387,35 @@ type SandboxObservabilityConfig struct {
 }
 
 // SandboxObservabilityAuditConfig configures centralized per-sandbox audit
-// collection and query. The current audit signal is netd network audit.
+// collection and query.
+// +kubebuilder:validation:XValidation:rule="has(self.deliveryPersistence) == has(oldSelf.deliveryPersistence)",message="deliveryPersistence presence is immutable after creation"
 type SandboxObservabilityAuditConfig struct {
 	// Enabled enables the enterprise sandbox_audit feature.
 	// +optional
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
+
+	// DeliveryPersistence configures the durable, non-canonical result delivery
+	// buffer used while ClickHouse is unavailable. The current implementation
+	// requires one cluster-gateway replica and a storage class whose volume can
+	// be reattached after cross-node rescheduling.
+	// +optional
+	DeliveryPersistence *SandboxAuditDeliveryPersistenceConfig `json:"deliveryPersistence,omitempty"`
+}
+
+// SandboxAuditDeliveryPersistenceConfig configures cluster-gateway's audit
+// result delivery PVC. ClickHouse remains the only audit system of record.
+// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="audit delivery persistence is immutable after creation"
+type SandboxAuditDeliveryPersistenceConfig struct {
+	// Size specifies the delivery buffer capacity.
+	// +optional
+	// +kubebuilder:default="1Gi"
+	Size resource.Quantity `json:"size,omitempty"`
+
+	// StorageClass selects a durable Kubernetes storage class. Empty uses the
+	// cluster default.
+	// +optional
+	StorageClass string `json:"storageClass,omitempty"`
 }
 
 // SandboxObservabilityType selects the backend provisioning mode.
@@ -627,7 +653,7 @@ type BuiltinSandboxObservabilityClickHouseConfig struct {
 	// +kubebuilder:default="sandbox0_observability"
 	Database string `json:"database,omitempty"`
 	// +optional
-	// +kubebuilder:default="sandbox_events"
+	// +kubebuilder:default="sandbox_audit_events"
 	EventsTable string `json:"eventsTable,omitempty"`
 	// +optional
 	// +kubebuilder:default="sandbox_logs"
@@ -664,7 +690,7 @@ type ExternalSandboxObservabilityClickHouseConfig struct {
 	// +kubebuilder:default="sandbox0_observability"
 	Database string `json:"database,omitempty"`
 	// +optional
-	// +kubebuilder:default="sandbox_events"
+	// +kubebuilder:default="sandbox_audit_events"
 	EventsTable string `json:"eventsTable,omitempty"`
 	// +optional
 	// +kubebuilder:default="sandbox_logs"

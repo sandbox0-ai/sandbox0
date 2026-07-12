@@ -81,6 +81,7 @@ func (s *Server) createSandbox(c *gin.Context) {
 		claims.UserID,
 		internalauth.GenerateOptions{
 			Permissions: claims.Permissions,
+			Audit:       claims.Audit,
 		},
 	)
 	if err != nil {
@@ -154,6 +155,7 @@ func (s *Server) proxySandbox(c *gin.Context) {
 		claims.UserID,
 		internalauth.GenerateOptions{
 			Permissions: claims.Permissions,
+			Audit:       claims.Audit,
 		},
 	)
 	if err != nil {

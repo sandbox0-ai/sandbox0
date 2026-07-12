@@ -87,6 +87,19 @@ func (m *InternalAuthMiddleware) authenticateRequest(c *gin.Context, allowAuthHe
 		TeamID:      claims.TeamID,
 		UserID:      claims.UserID,
 		Permissions: claims.Permissions,
+		Caller:      claims.Caller,
+	}
+	if claims.Audit != nil {
+		authCtx.OriginalPrincipal = &authn.Principal{
+			Kind:       authn.PrincipalKind(claims.Audit.Actor.Kind),
+			ID:         claims.Audit.Actor.ID,
+			TeamID:     claims.TeamID,
+			UserID:     claims.Audit.Actor.UserID,
+			APIKeyID:   claims.Audit.Actor.APIKeyID,
+			AuthMethod: authn.AuthMethod(claims.Audit.Actor.AuthMethod),
+		}
+		authCtx.OperationID = claims.Audit.OperationID
+		authCtx.RequestID = claims.Audit.RequestID
 	}
 
 	return authCtx, claims, nil

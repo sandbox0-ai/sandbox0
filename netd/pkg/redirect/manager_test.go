@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/vishvananda/netlink"
 )
 
 func TestBuildIPTablesRestoreInputRoutesSpecificAndGenericTraffic(t *testing.T) {
@@ -133,6 +135,49 @@ func TestNormalizeInputsDeduplicateAndTrim(t *testing.T) {
 	cidrs := normalizeCIDRs([]string{" 10.0.0.0/8 ", "", "10.0.0.0/8", "192.168.0.0/16"})
 	if len(cidrs) != 2 || cidrs[0] != "10.0.0.0/8" || cidrs[1] != "192.168.0.0/16" {
 		t.Fatalf("unexpected normalized cidrs: %#v", cidrs)
+	}
+}
+
+func TestRuleExistsRequiresPriorityBeforeCNISourceRules(t *testing.T) {
+	mask := uint32(1)
+	rules := []netlink.Rule{
+		{Mark: 1, Mask: &mask, Table: ruleTableID, Priority: 32765},
+	}
+
+	if ruleExists(rules, 1, 1, ruleTableID, policyRulePriority) {
+		t.Fatal("late fallback rule must not satisfy the required TPROXY policy rule")
+	}
+
+	rules = append(rules, netlink.Rule{
+		Mark:     1,
+		Mask:     &mask,
+		Table:    ruleTableID,
+		Priority: policyRulePriority,
+	})
+	if !ruleExists(rules, 1, 1, ruleTableID, policyRulePriority) {
+		t.Fatal("expected the high-priority TPROXY policy rule to match")
+	}
+}
+
+func TestRuleMatchesRequiresExactMarkMaskAndTable(t *testing.T) {
+	mask := uint32(1)
+	rule := netlink.Rule{Mark: 1, Mask: &mask, Table: ruleTableID}
+
+	if !ruleMatches(rule, 1, 1, ruleTableID) {
+		t.Fatal("expected exact rule signature to match")
+	}
+	if ruleMatches(rule, 2, 1, ruleTableID) {
+		t.Fatal("unexpected mark match")
+	}
+	if ruleMatches(rule, 1, 2, ruleTableID) {
+		t.Fatal("unexpected mask match")
+	}
+	if ruleMatches(rule, 1, 1, ruleTableID+1) {
+		t.Fatal("unexpected table match")
+	}
+	rule.Mask = nil
+	if ruleMatches(rule, 1, 1, ruleTableID) {
+		t.Fatal("rule without a mask must not match")
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -138,10 +139,16 @@ func (s *Server) auditSandboxRequests() gin.HandlerFunc {
 				cancel()
 			}
 			if resultErr != nil {
-				s.logger.Error("Failed to durably persist sandbox audit result",
+				fields := []zap.Field{
 					zap.String("action", action),
 					zap.String("operation_id", operationID),
-					zap.Error(resultErr))
+					zap.Error(resultErr),
+				}
+				if errors.Is(resultErr, errAuditResultPending) {
+					s.logger.Warn("Canonical sandbox audit result is pending durable replay", fields...)
+				} else {
+					s.logger.Error("Sandbox audit result is unrecorded", fields...)
+				}
 			}
 			if buffered != nil {
 				c.Writer = buffered.ResponseWriter
@@ -149,11 +156,31 @@ func (s *Server) auditSandboxRequests() gin.HandlerFunc {
 				case recovered != nil:
 					// Gin recovery owns the final 500 response. The successful
 					// handler response has never reached the client.
-				case resultErr != nil || buffered.err != nil:
+				case errors.Is(resultErr, errAuditResultPending):
 					buffered.discardHeaders()
 					spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "operation may have completed; canonical audit result is pending", gin.H{
 						"operation_id": operationID,
 						"outcome":      "unknown",
+						"audit_result": "pending",
+					})
+				case resultErr != nil:
+					buffered.discardHeaders()
+					spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "operation may have completed; audit result could not be durably recorded", gin.H{
+						"operation_id": operationID,
+						"outcome":      "unknown",
+						"audit_result": "unrecorded",
+					})
+				case buffered.err != nil:
+					buffered.discardHeaders()
+					s.logger.Error("Sandbox response could not be safely delivered after its audit result was recorded",
+						zap.String("action", action),
+						zap.String("operation_id", operationID),
+						zap.Error(buffered.err),
+					)
+					spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "operation may have completed; response could not be safely delivered", gin.H{
+						"operation_id": operationID,
+						"outcome":      "unknown",
+						"audit_result": "recorded",
 					})
 				default:
 					if commitErr := buffered.commit(); commitErr != nil {
@@ -201,9 +228,12 @@ func (s *Server) persistAuditResult(ctx context.Context, event sandboxobservabil
 		return s.auditResults.Persist(ctx, event)
 	}
 	if s.auditWriter == nil {
-		return fmt.Errorf("sandbox audit writer is unavailable")
+		return fmt.Errorf("%w: sandbox audit writer is unavailable", errAuditResultUnrecorded)
 	}
-	return s.auditWriter.InsertEvents(ctx, []sandboxobservability.Event{event})
+	if err := s.auditWriter.InsertEvents(ctx, []sandboxobservability.Event{event}); err != nil {
+		return fmt.Errorf("%w: canonical insert failed: %v", errAuditResultUnrecorded, err)
+	}
+	return nil
 }
 
 func (s *Server) newSandboxAPIEvent(c *gin.Context, authCtx *gatewayauthn.AuthContext, action, operationID, parentEventID string, phase sandboxobservability.EventPhase, outcome sandboxobservability.Outcome) (sandboxobservability.Event, error) {
@@ -492,7 +522,12 @@ func (s *Server) beginExposureAudit(c *gin.Context, sandbox *mgr.Sandbox, servic
 			cancel()
 		}
 		if resultErr != nil {
-			s.logger.Error("Failed to persist public exposure audit result", zap.String("operation_id", operationID), zap.Error(resultErr))
+			fields := []zap.Field{zap.String("operation_id", operationID), zap.Error(resultErr)}
+			if errors.Is(resultErr, errAuditResultPending) {
+				s.logger.Warn("Canonical public exposure audit result is pending durable replay", fields...)
+			} else {
+				s.logger.Error("Public exposure audit result is unrecorded", fields...)
+			}
 		}
 	}, true
 }

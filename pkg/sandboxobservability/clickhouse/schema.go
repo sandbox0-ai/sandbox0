@@ -70,7 +70,7 @@ func SchemaStatements(cfg Config) ([]string, error) {
 	version UInt64 MATERIALIZED toUnixTimestamp64Nano(ingested_at)
 )
 	ENGINE = ReplacingMergeTree(version)
-	PARTITION BY toYYYYMM(ingested_at)
+	PARTITION BY toYYYYMM(occurred_at)
 	ORDER BY (team_id, sandbox_id, occurred_at, event_id, payload_hash)
 	TTL %s
 	SETTINGS index_granularity = 8192`, eventsTable, eventsTTL),

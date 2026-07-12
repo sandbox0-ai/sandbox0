@@ -21,7 +21,7 @@ func TestSchemaStatementsUseReplacingMergeTreeAndRetentionTTL(t *testing.T) {
 	for _, want := range []string{
 		"CREATE TABLE IF NOT EXISTS `sandbox0_observability`.`sandbox_audit_events`",
 		"ENGINE = ReplacingMergeTree(version)",
-		"PARTITION BY toYYYYMM(ingested_at)",
+		"PARTITION BY toYYYYMM(occurred_at)",
 		"ORDER BY (team_id, sandbox_id, occurred_at, event_id, payload_hash)",
 		"TTL toDateTime(ingested_at) + INTERVAL 7 DAY DELETE",
 	} {
@@ -67,6 +67,20 @@ func TestSchemaStatementsUseReplacingMergeTreeAndRetentionTTL(t *testing.T) {
 	}
 }
 
+func TestAuditPartitionKeyIsStableAcrossDeliveryRetries(t *testing.T) {
+	statements, err := SchemaStatements(Config{})
+	if err != nil {
+		t.Fatalf("SchemaStatements() error = %v", err)
+	}
+	createEventsTable := statements[1]
+	if !strings.Contains(createEventsTable, "PARTITION BY toYYYYMM(occurred_at)") {
+		t.Fatalf("audit partition must use signed occurred_at:\n%s", createEventsTable)
+	}
+	if strings.Contains(createEventsTable, "PARTITION BY toYYYYMM(ingested_at)") {
+		t.Fatalf("audit partition must not change when a retry receives a new ingested_at:\n%s", createEventsTable)
+	}
+}
+
 func TestSchemaStatementsRejectUnsafeIdentifiers(t *testing.T) {
 	if _, err := SchemaStatements(Config{Database: "sandbox0;DROP"}); err == nil {
 		t.Fatal("SchemaStatements() error = nil, want unsafe database identifier rejection")
@@ -99,7 +113,7 @@ func TestValidateAuditEventTableMetadataAcceptsCanonicalSchema(t *testing.T) {
 	if err := validateAuditEventTableMetadata(
 		"ReplacingMergeTree",
 		"team_id, sandbox_id, occurred_at, event_id, payload_hash",
-		"toYYYYMM(ingested_at)",
+		"toYYYYMM(occurred_at)",
 		columns,
 	); err != nil {
 		t.Fatalf("validateAuditEventTableMetadata() error = %v", err)

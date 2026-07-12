@@ -11,6 +11,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
+	"go.uber.org/zap"
 	lumberjack "gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -86,7 +87,7 @@ func (a *flowAudit) resetAttempt() {
 	}
 }
 
-func newAuditLogger(cfg *config.NetdConfig) (*auditLogger, error) {
+func newAuditLogger(cfg *config.NetdConfig, logger *zap.Logger) (*auditLogger, error) {
 	if cfg == nil {
 		return nil, nil
 	}
@@ -104,7 +105,7 @@ func newAuditLogger(cfg *config.NetdConfig) (*auditLogger, error) {
 		}
 		sinks = append(sinks, newJSONLAuditSink(writer))
 	}
-	httpSink, err := newHTTPAuditSinkFromConfig(cfg)
+	httpSink, err := newHTTPAuditSinkFromConfig(cfg, logger)
 	if err != nil {
 		for _, sink := range sinks {
 			_ = sink.Close()

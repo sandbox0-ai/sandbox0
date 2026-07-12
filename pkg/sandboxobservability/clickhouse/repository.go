@@ -15,6 +15,7 @@ import (
 const maxInsertBatchSize = 500
 const maxAuditAttributesBytes = 64 * 1024
 const dateTime64NanoPlaceholder = "toDateTime64(?, 9, 'UTC')"
+const auditInsertReliabilitySettings = " SETTINGS async_insert = 0, wait_for_async_insert = 1"
 
 const eventSelectColumns = "event_id, schema_version, team_id, sandbox_id, region_id, cluster_id, occurred_at, ingested_at, source, event_type, phase, outcome, actor_kind, actor_id, actor_user_id, actor_api_key_id, actor_auth_method, action, resource_type, resource_id, resource_subresource, operation_id, parent_event_id, producer_service, producer_instance, producer_sequence, request_id, trace_id, source_ip, user_agent, http_method, route, status_code, cursor, watermark, attributes, integrity_algorithm, payload_hash, signature, signing_key_id"
 
@@ -161,7 +162,9 @@ func (r *Repository) buildInsertSQL(events []sandboxobservability.Event) (string
 	builder.WriteString(r.eventsTable)
 	builder.WriteString(" (")
 	builder.WriteString(eventSelectColumns)
-	builder.WriteString(") VALUES ")
+	builder.WriteString(")")
+	builder.WriteString(auditInsertReliabilitySettings)
+	builder.WriteString(" VALUES ")
 
 	args := make([]any, 0, len(events)*40)
 	for i, event := range events {

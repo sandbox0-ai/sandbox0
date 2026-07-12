@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -28,6 +29,7 @@ type failAfterAuditWriter struct {
 	calls        int
 	succeedFor   int
 	storedEvents []sandboxobservability.Event
+	onSuccess    func(call int)
 }
 
 func (w *failAfterAuditWriter) InsertEvents(_ context.Context, events []sandboxobservability.Event) error {
@@ -36,6 +38,9 @@ func (w *failAfterAuditWriter) InsertEvents(_ context.Context, events []sandboxo
 		return errors.New("clickhouse unavailable")
 	}
 	w.storedEvents = append(w.storedEvents, events...)
+	if w.onSuccess != nil {
+		w.onSuccess(w.calls)
+	}
 	return nil
 }
 
@@ -262,6 +267,9 @@ func TestSandboxAuditMiddlewareWithholdsSuccessUntilResultCanonicalACK(t *testin
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503 while canonical result is pending: %s", recorder.Code, recorder.Body.String())
 	}
+	if body := recorder.Body.String(); !strings.Contains(body, "canonical audit result is pending") || !strings.Contains(body, `"audit_result":"pending"`) {
+		t.Fatalf("pending response body = %s", body)
+	}
 	entries, err := os.ReadDir(delivery.dir)
 	if err != nil {
 		t.Fatalf("ReadDir() error = %v", err)
@@ -271,5 +279,83 @@ func TestSandboxAuditMiddlewareWithholdsSuccessUntilResultCanonicalACK(t *testin
 	}
 	if len(writer.storedEvents) != 1 || writer.storedEvents[0].Phase != sandboxobservability.EventPhaseAttempt {
 		t.Fatalf("canonical events = %#v, want only attempt before recovery", writer.storedEvents)
+	}
+}
+
+func TestSandboxAuditMiddlewareReportsUnrecordedWhenSpoolAndCanonicalFallbackFail(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	writer := &failAfterAuditWriter{succeedFor: 1}
+	dir := t.TempDir()
+	delivery, err := newAuditResultDelivery(dir, writer, zap.NewNop())
+	if err != nil {
+		t.Fatalf("newAuditResultDelivery() error = %v", err)
+	}
+	replaceAuditSpoolDirectoryWithFile(t, dir)
+	server := &Server{
+		cfg:         &config.ClusterGatewayConfig{SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true}},
+		auditWriter: writer, auditSigningKey: key, auditResults: delivery, logger: zap.NewNop(),
+	}
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Request = c.Request.WithContext(authn.WithAuthContext(c.Request.Context(), &authn.AuthContext{
+			AuthMethod: authn.AuthMethodJWT, TeamID: "team-1", UserID: "user-1",
+		}))
+		c.Next()
+	})
+	router.POST("/api/v1/sandboxes/:id/pause", server.auditSandboxRequests(), func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "paused"})
+	})
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sb-1/pause", nil))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 for unrecorded audit result: %s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "audit result could not be durably recorded") || !strings.Contains(body, `"audit_result":"unrecorded"`) {
+		t.Fatalf("unrecorded response body = %s", body)
+	}
+	if strings.Contains(body, "pending") {
+		t.Fatalf("unrecorded response must not claim pending: %s", body)
+	}
+}
+
+func TestSandboxAuditMiddlewareKeepsSuccessAfterCanonicalACKWhenSpoolCleanupFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	dir := t.TempDir()
+	writer := &failAfterAuditWriter{succeedFor: 2}
+	writer.onSuccess = func(call int) {
+		if call == 2 {
+			replaceAuditSpoolDirectoryWithFile(t, dir)
+		}
+	}
+	delivery, err := newAuditResultDelivery(dir, writer, zap.NewNop())
+	if err != nil {
+		t.Fatalf("newAuditResultDelivery() error = %v", err)
+	}
+	server := &Server{
+		cfg:         &config.ClusterGatewayConfig{SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true}},
+		auditWriter: writer, auditSigningKey: key, auditResults: delivery, logger: zap.NewNop(),
+	}
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Request = c.Request.WithContext(authn.WithAuthContext(c.Request.Context(), &authn.AuthContext{
+			AuthMethod: authn.AuthMethodJWT, TeamID: "team-1", UserID: "user-1",
+		}))
+		c.Next()
+	})
+	router.POST("/api/v1/sandboxes/:id/pause", server.auditSandboxRequests(), func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "paused"})
+	})
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sb-1/pause", nil))
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"status":"paused"`) {
+		t.Fatalf("response after canonical ACK = %d %s", recorder.Code, recorder.Body.String())
+	}
+	if len(writer.storedEvents) != 2 || writer.storedEvents[1].Phase != sandboxobservability.EventPhaseResult {
+		t.Fatalf("canonical events = %#v, want attempt and result", writer.storedEvents)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,12 @@ import (
 )
 
 const auditResultReplayInterval = time.Second
+
+var (
+	errAuditResultPending    = errors.New("canonical audit result is pending")
+	errAuditResultUnrecorded = errors.New("audit result is unrecorded")
+	errAuditResultSpoolWrite = errors.New("audit result spool write failed")
+)
 
 // auditResultDelivery is an fsync-backed delivery buffer. ClickHouse remains
 // the sole canonical store; files are removed only after ClickHouse ACKs the
@@ -66,21 +73,56 @@ func (d *auditResultDelivery) Start(ctx context.Context) {
 
 func (d *auditResultDelivery) Persist(ctx context.Context, event sandboxobservability.Event) error {
 	if d == nil {
-		return fmt.Errorf("audit result delivery is not configured")
+		return fmt.Errorf("%w: audit result delivery is not configured", errAuditResultUnrecorded)
 	}
 	d.mu.Lock()
-	if err := d.putLocked(event); err != nil {
-		d.mu.Unlock()
-		return err
-	}
+	spoolErr := d.putLocked(event)
 	d.mu.Unlock()
+	if spoolErr != nil {
+		if !errors.Is(spoolErr, errAuditResultSpoolWrite) {
+			d.logger.Error("Sandbox audit result was rejected before delivery",
+				zap.String("event_id", event.EventID),
+				zap.Error(spoolErr),
+			)
+			return fmt.Errorf("%w: durable spool rejected the result: %v", errAuditResultUnrecorded, spoolErr)
+		}
+
+		d.logger.Error("Failed to persist sandbox audit result to the durable spool; attempting canonical fallback",
+			zap.String("event_id", event.EventID),
+			zap.Error(spoolErr),
+		)
+		if canonicalErr := d.writer.InsertEvents(ctx, []sandboxobservability.Event{event}); canonicalErr != nil {
+			d.logger.Error("Sandbox audit result is unrecorded after spool and canonical delivery both failed",
+				zap.String("event_id", event.EventID),
+				zap.Error(spoolErr),
+				zap.NamedError("canonical_error", canonicalErr),
+			)
+			return fmt.Errorf("%w: durable spool failed: %v; canonical insert failed: %v", errAuditResultUnrecorded, spoolErr, canonicalErr)
+		}
+		d.logger.Warn("Sandbox audit result reached the canonical store through the synchronous spool fallback",
+			zap.String("event_id", event.EventID),
+			zap.Error(spoolErr),
+		)
+		return nil
+	}
 	if err := d.writer.InsertEvents(ctx, []sandboxobservability.Event{event}); err != nil {
 		d.logger.Warn("Sandbox audit result buffered for retry", zap.String("event_id", event.EventID), zap.Error(err))
-		return fmt.Errorf("canonical audit result is buffered but not yet acknowledged: %w", err)
+		return fmt.Errorf("%w: result is durably buffered but not yet acknowledged: %v", errAuditResultPending, err)
 	}
 	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.removeLocked(event.EventID)
+	removeErr := d.removeLocked(event.EventID)
+	d.mu.Unlock()
+	if removeErr != nil {
+		// The canonical insert already succeeded. Leaving the record in place can
+		// cause a duplicate retry, but the stable event ID makes that safe and is
+		// preferable to withholding a successful response with a false pending
+		// status.
+		d.logger.Error("Canonical sandbox audit result was acknowledged but spool cleanup failed",
+			zap.String("event_id", event.EventID),
+			zap.Error(removeErr),
+		)
+	}
+	return nil
 }
 
 func (d *auditResultDelivery) run(ctx context.Context) {
@@ -142,11 +184,11 @@ func (d *auditResultDelivery) putLocked(event sandboxobservability.Event) error 
 		}
 		return nil
 	} else if !os.IsNotExist(readErr) {
-		return fmt.Errorf("read audit result spool record: %w", readErr)
+		return auditResultSpoolWriteError("read existing record", readErr)
 	}
 	tmp, err := os.CreateTemp(d.dir, ".audit-result-*.tmp")
 	if err != nil {
-		return fmt.Errorf("create audit result temp file: %w", err)
+		return auditResultSpoolWriteError("create temp file", err)
 	}
 	tmpPath := tmp.Name()
 	committed := false
@@ -157,25 +199,29 @@ func (d *auditResultDelivery) putLocked(event sandboxobservability.Event) error 
 		}
 	}()
 	if err := tmp.Chmod(0o600); err != nil {
-		return err
+		return auditResultSpoolWriteError("chmod temp file", err)
 	}
 	if _, err := tmp.Write(payload); err != nil {
-		return err
+		return auditResultSpoolWriteError("write temp file", err)
 	}
 	if err := tmp.Sync(); err != nil {
-		return err
+		return auditResultSpoolWriteError("fsync temp file", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return err
+		return auditResultSpoolWriteError("close temp file", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		return err
+		return auditResultSpoolWriteError("commit record", err)
 	}
 	if err := syncAuditResultDirectory(d.dir); err != nil {
-		return err
+		return auditResultSpoolWriteError("fsync directory", err)
 	}
 	committed = true
 	return nil
+}
+
+func auditResultSpoolWriteError(operation string, err error) error {
+	return fmt.Errorf("%w: %s: %v", errAuditResultSpoolWrite, operation, err)
 }
 
 func (d *auditResultDelivery) loadLocked() ([]sandboxobservability.Event, error) {

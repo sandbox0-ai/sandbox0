@@ -14,11 +14,12 @@ import (
 )
 
 type auditDeliveryWriter struct {
-	mu      sync.Mutex
-	events  []sandboxobservability.Event
-	err     error
-	started chan struct{}
-	block   chan struct{}
+	mu       sync.Mutex
+	events   []sandboxobservability.Event
+	err      error
+	started  chan struct{}
+	block    chan struct{}
+	onInsert func()
 }
 
 func (w *auditDeliveryWriter) InsertEvents(_ context.Context, events []sandboxobservability.Event) error {
@@ -37,6 +38,9 @@ func (w *auditDeliveryWriter) InsertEvents(_ context.Context, events []sandboxob
 		return w.err
 	}
 	w.events = append(w.events, events...)
+	if w.onInsert != nil {
+		w.onInsert()
+	}
 	return nil
 }
 
@@ -67,8 +71,8 @@ func TestAuditResultDeliveryPersistsBeforeClickHouseAndReplaysAfterRestart(t *te
 		t.Fatalf("result was not fsynced before ClickHouse call: %v", err)
 	}
 	close(blocked.block)
-	if err := <-done; err == nil {
-		t.Fatal("Persist() error = nil, want missing canonical ACK to reach the caller")
+	if err := <-done; err == nil || !errors.Is(err, errAuditResultPending) {
+		t.Fatalf("Persist() error = %v, want pending canonical result", err)
 	}
 
 	recovered := &auditDeliveryWriter{}
@@ -87,6 +91,56 @@ func TestAuditResultDeliveryPersistsBeforeClickHouseAndReplaysAfterRestart(t *te
 	}
 }
 
+func TestAuditResultDeliveryFallsBackToCanonicalInsertWhenSpoolWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{}
+	delivery, err := newAuditResultDelivery(dir, writer, zap.NewNop())
+	if err != nil {
+		t.Fatalf("newAuditResultDelivery() error = %v", err)
+	}
+	replaceAuditSpoolDirectoryWithFile(t, dir)
+	event := sandboxobservability.Event{EventID: "22222222-2222-4222-8222-222222222222"}
+	if err := delivery.Persist(context.Background(), event); err != nil {
+		t.Fatalf("Persist() fallback error = %v", err)
+	}
+	if len(writer.events) != 1 || writer.events[0].EventID != event.EventID {
+		t.Fatalf("canonical fallback events = %#v", writer.events)
+	}
+}
+
+func TestAuditResultDeliveryReportsUnrecordedWhenSpoolAndCanonicalInsertFail(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{err: errors.New("clickhouse unavailable")}
+	delivery, err := newAuditResultDelivery(dir, writer, zap.NewNop())
+	if err != nil {
+		t.Fatalf("newAuditResultDelivery() error = %v", err)
+	}
+	replaceAuditSpoolDirectoryWithFile(t, dir)
+	err = delivery.Persist(context.Background(), sandboxobservability.Event{EventID: "33333333-3333-4333-8333-333333333333"})
+	if err == nil || !errors.Is(err, errAuditResultUnrecorded) {
+		t.Fatalf("Persist() error = %v, want unrecorded result", err)
+	}
+}
+
+func TestAuditResultDeliveryDoesNotDowngradeCanonicalACKWhenSpoolCleanupFails(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{}
+	delivery, err := newAuditResultDelivery(dir, writer, zap.NewNop())
+	if err != nil {
+		t.Fatalf("newAuditResultDelivery() error = %v", err)
+	}
+	writer.onInsert = func() {
+		replaceAuditSpoolDirectoryWithFile(t, dir)
+	}
+	event := sandboxobservability.Event{EventID: "44444444-4444-4444-8444-444444444444"}
+	if err := delivery.Persist(context.Background(), event); err != nil {
+		t.Fatalf("Persist() error after canonical ACK = %v", err)
+	}
+	if len(writer.events) != 1 || writer.events[0].EventID != event.EventID {
+		t.Fatalf("canonical events = %#v", writer.events)
+	}
+}
+
 func TestAuditResultDeliveryRejectsCorruptOrUnsafeIdentity(t *testing.T) {
 	dir := t.TempDir()
 	writer := &auditDeliveryWriter{}
@@ -97,10 +151,23 @@ func TestAuditResultDeliveryRejectsCorruptOrUnsafeIdentity(t *testing.T) {
 	if err := delivery.Persist(context.Background(), sandboxobservability.Event{EventID: "../escape"}); err == nil {
 		t.Fatal("Persist() error = nil, want unsafe event ID rejection")
 	}
+	if len(writer.events) != 0 {
+		t.Fatalf("unsafe event reached canonical fallback: %#v", writer.events)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "broken.json"), []byte("{"), 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 	if _, err := newAuditResultDelivery(dir, writer, zap.NewNop()); err == nil {
 		t.Fatal("newAuditResultDelivery() error = nil, want corrupt spool startup failure")
+	}
+}
+
+func replaceAuditSpoolDirectoryWithFile(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("RemoveAll(%q) error = %v", dir, err)
+	}
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", dir, err)
 	}
 }

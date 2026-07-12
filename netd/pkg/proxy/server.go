@@ -77,7 +77,7 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	auditor, err := newAuditLogger(cfg)
+	auditor, err := newAuditLogger(cfg, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -1037,7 +1037,7 @@ func (s *Server) recordAuditEvent(req *adapterRequest, decision trafficDecision,
 		return
 	}
 	if auditErr := s.auditor.Record(req, decision, adapter, duration, err); auditErr != nil {
-		s.logger.Warn("Failed to record audit event", zap.Error(auditErr))
+		s.logger.Error("Failed to record canonical audit result", zap.Error(auditErr))
 	}
 }
 

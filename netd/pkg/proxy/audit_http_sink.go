@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
+	"go.uber.org/zap"
 )
 
 type httpAuditSink struct {
@@ -26,6 +28,7 @@ type httpAuditSink struct {
 	producerInstance string
 	client           *http.Client
 	generator        *internalauth.Generator
+	logger           *zap.Logger
 	queue            chan auditEvent
 	spool            *auditSpool
 	queuedMu         sync.Mutex
@@ -48,6 +51,7 @@ type httpAuditSinkOptions struct {
 	Spool            *auditSpool
 	Client           *http.Client
 	Generator        *internalauth.Generator
+	Logger           *zap.Logger
 	QueueSize        int
 	BatchSize        int
 	FlushInterval    time.Duration
@@ -56,7 +60,7 @@ type httpAuditSinkOptions struct {
 	RetryBackoff     time.Duration
 }
 
-func newHTTPAuditSinkFromConfig(cfg *config.NetdConfig) (*httpAuditSink, error) {
+func newHTTPAuditSinkFromConfig(cfg *config.NetdConfig, logger *zap.Logger) (*httpAuditSink, error) {
 	if cfg == nil || strings.TrimSpace(cfg.SandboxObservabilityIngestURL) == "" {
 		return nil, nil
 	}
@@ -84,6 +88,7 @@ func newHTTPAuditSinkFromConfig(cfg *config.NetdConfig) (*httpAuditSink, error) 
 		Spool:            spool,
 		Client:           &http.Client{},
 		Generator:        generator,
+		Logger:           logger,
 		QueueSize:        cfg.SandboxObservabilityIngestQueueSize,
 		BatchSize:        cfg.SandboxObservabilityIngestBatchSize,
 		FlushInterval:    cfg.SandboxObservabilityIngestFlushInterval.Duration,
@@ -118,6 +123,10 @@ func newHTTPAuditSink(opts httpAuditSinkOptions) *httpAuditSink {
 	if client == nil {
 		client = &http.Client{}
 	}
+	logger := opts.Logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	sink := &httpAuditSink{
 		endpoint:         strings.TrimSpace(opts.Endpoint),
@@ -126,6 +135,7 @@ func newHTTPAuditSink(opts httpAuditSinkOptions) *httpAuditSink {
 		producerInstance: strings.TrimSpace(opts.ProducerInstance),
 		client:           client,
 		generator:        opts.Generator,
+		logger:           logger,
 		queue:            make(chan auditEvent, queueSize),
 		spool:            opts.Spool,
 		queued:           make(map[string]struct{}),
@@ -163,9 +173,18 @@ func (s *httpAuditSink) WriteAuditEvent(event auditEvent) error {
 			sequence, err := s.spool.NextSequence()
 			if err != nil {
 				proxyMetrics.RecordAuditIngestEvents("persist_failed", 1)
-				return fmt.Errorf("allocate audit producer sequence: %w", err)
+				event.ProducerSequence = uint64(event.Timestamp.UnixNano())
+				if event.ProducerSequence == 0 {
+					event.ProducerSequence = 1
+				}
+				s.auditLog().Error("Failed to persist netd audit producer sequence; continuing with event timestamp sequence",
+					zap.String("event_id", event.EventID),
+					zap.String("sandbox_id", event.SandboxID),
+					zap.Error(err),
+				)
+			} else {
+				event.ProducerSequence = sequence
 			}
-			event.ProducerSequence = sequence
 		} else {
 			event.ProducerSequence = uint64(event.Timestamp.UnixNano())
 		}
@@ -174,9 +193,36 @@ func (s *httpAuditSink) WriteAuditEvent(event auditEvent) error {
 		event.Phase = string(sandboxobservability.EventPhaseResult)
 	}
 	if s.spool != nil {
-		if err := s.spool.Put(event); err != nil {
+		if spoolErr := s.spool.Put(event); spoolErr != nil {
 			proxyMetrics.RecordAuditIngestEvents("persist_failed", 1)
-			return fmt.Errorf("persist audit event: %w", err)
+			if !errors.Is(spoolErr, errAuditSpoolWrite) {
+				return fmt.Errorf("persist audit event: %w", spoolErr)
+			}
+			if event.Phase != string(sandboxobservability.EventPhaseAttempt) && event.Phase != string(sandboxobservability.EventPhaseResult) {
+				return fmt.Errorf("persist audit event: %w", spoolErr)
+			}
+			canonicalErr := s.deliverCanonical(event)
+			if canonicalErr != nil {
+				proxyMetrics.RecordAuditIngestBatch("failed")
+				proxyMetrics.RecordAuditIngestEvents("unrecorded", 1)
+				s.auditLog().Error("Netd audit event is unrecorded after spool and canonical delivery both failed",
+					zap.String("event_id", event.EventID),
+					zap.String("sandbox_id", event.SandboxID),
+					zap.String("phase", event.Phase),
+					zap.Error(spoolErr),
+					zap.NamedError("canonical_error", canonicalErr),
+				)
+				return fmt.Errorf("audit %s is unrecorded: durable spool persistence failed: %v; canonical fallback failed: %v", event.Phase, spoolErr, canonicalErr)
+			}
+			proxyMetrics.RecordAuditIngestBatch("fallback_sent")
+			proxyMetrics.RecordAuditIngestEvents("fallback_sent", 1)
+			s.auditLog().Warn("Netd audit event reached the canonical store through the synchronous spool fallback",
+				zap.String("event_id", event.EventID),
+				zap.String("sandbox_id", event.SandboxID),
+				zap.String("phase", event.Phase),
+				zap.Error(spoolErr),
+			)
+			return nil
 		}
 	}
 	if event.Phase == string(sandboxobservability.EventPhaseAttempt) {
@@ -204,31 +250,59 @@ func (s *httpAuditSink) WriteAuditEvent(event auditEvent) error {
 }
 
 func (s *httpAuditSink) deliverAttempt(event auditEvent) error {
+	if err := s.deliverCanonical(event); err != nil {
+		return fmt.Errorf("persist audit attempt in canonical store: %w", err)
+	}
+	if err := s.spool.Remove(event.EventID); err != nil {
+		// The canonical store already acknowledged the attempt. Keep the local
+		// record for idempotent replay, but do not block the connection with a
+		// false delivery failure.
+		proxyMetrics.RecordAuditIngestEvents("ack_failed", 1)
+		s.auditLog().Error("Canonical netd audit attempt was acknowledged but spool cleanup failed",
+			zap.String("event_id", event.EventID),
+			zap.String("sandbox_id", event.SandboxID),
+			zap.Error(err),
+		)
+	}
+	return nil
+}
+
+func (s *httpAuditSink) deliverCanonical(event auditEvent) error {
 	projected, ok := s.toObservabilityEvent(event)
 	if !ok {
-		return fmt.Errorf("invalid audit attempt")
+		return fmt.Errorf("invalid audit event")
 	}
 	body, err := json.Marshal(struct {
 		Events []sandboxobservability.Event `json:"events"`
 	}{Events: []sandboxobservability.Event{projected}})
 	if err != nil {
-		return fmt.Errorf("marshal audit attempt: %w", err)
+		return fmt.Errorf("marshal audit event: %w", err)
 	}
 	ctx := context.Background()
+	var lastErr error
 	for attempt := 0; attempt <= s.maxRetries; attempt++ {
-		if err := s.postEvents(ctx, projected.TeamID, projected.SandboxID, body); err == nil {
-			if err := s.spool.Remove(event.EventID); err != nil {
-				return fmt.Errorf("acknowledge durable audit attempt: %w", err)
-			}
+		lastErr = s.postEvents(ctx, projected.TeamID, projected.SandboxID, body)
+		if lastErr == nil {
 			return nil
-		} else if attempt == s.maxRetries {
-			return fmt.Errorf("persist audit attempt in canonical store: %w", err)
+		}
+		if attempt == s.maxRetries {
+			break
 		}
 		if !sleepWithContext(ctx, s.retryBackoff) {
-			return fmt.Errorf("persist audit attempt canceled")
+			return fmt.Errorf("canonical audit delivery canceled")
 		}
 	}
-	return fmt.Errorf("persist audit attempt failed")
+	if lastErr == nil {
+		lastErr = fmt.Errorf("canonical audit delivery exhausted without an attempt")
+	}
+	return lastErr
+}
+
+func (s *httpAuditSink) auditLog() *zap.Logger {
+	if s == nil || s.logger == nil {
+		return zap.NewNop()
+	}
+	return s.logger
 }
 
 func (s *httpAuditSink) tryEnqueue(event auditEvent) bool {
@@ -396,6 +470,11 @@ func (s *httpAuditSink) completeAuditGroup(events []auditEvent, delivered bool) 
 	}
 	if err := s.spool.Remove(ids...); err != nil {
 		proxyMetrics.RecordAuditIngestEvents("ack_failed", len(events))
+		s.auditLog().Error("Canonical netd audit results were acknowledged but spool cleanup failed",
+			zap.Int("event_count", len(events)),
+			zap.Strings("event_ids", ids),
+			zap.Error(err),
+		)
 	}
 }
 

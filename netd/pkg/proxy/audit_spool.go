@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/google/uuid"
 )
+
+var errAuditSpoolWrite = errors.New("audit spool write failed")
 
 type auditSpool struct {
 	dir      string
@@ -105,11 +108,11 @@ func (s *auditSpool) Put(event auditEvent) error {
 		}
 		return nil
 	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("read audit spool record: %w", err)
+		return auditSpoolWriteError("read existing record", err)
 	}
 	tmp, err := os.CreateTemp(s.dir, ".audit-*.tmp")
 	if err != nil {
-		return fmt.Errorf("create audit spool temp file: %w", err)
+		return auditSpoolWriteError("create temp file", err)
 	}
 	tmpPath := tmp.Name()
 	committed := false
@@ -120,25 +123,29 @@ func (s *auditSpool) Put(event auditEvent) error {
 		}
 	}()
 	if err := tmp.Chmod(0o600); err != nil {
-		return fmt.Errorf("chmod audit spool temp file: %w", err)
+		return auditSpoolWriteError("chmod temp file", err)
 	}
 	if _, err := tmp.Write(payload); err != nil {
-		return fmt.Errorf("write audit spool record: %w", err)
+		return auditSpoolWriteError("write temp file", err)
 	}
 	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("sync audit spool record: %w", err)
+		return auditSpoolWriteError("fsync temp file", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close audit spool record: %w", err)
+		return auditSpoolWriteError("close temp file", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("commit audit spool record: %w", err)
+		return auditSpoolWriteError("commit record", err)
 	}
 	if err := syncDirectory(s.dir); err != nil {
-		return err
+		return auditSpoolWriteError("fsync directory", err)
 	}
 	committed = true
 	return nil
+}
+
+func auditSpoolWriteError(operation string, err error) error {
+	return fmt.Errorf("%w: %s: %v", errAuditSpoolWrite, operation, err)
 }
 
 func (s *auditSpool) Load(limit int) ([]auditEvent, error) {

@@ -8,11 +8,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestAuditSpoolPersistsLoadsAndRemoves(t *testing.T) {
@@ -128,6 +131,170 @@ func TestHTTPAuditSinkFailsClosedWhenAttemptCannotReachCanonicalStore(t *testing
 	waitForAuditSpoolCount(t, spool, 1)
 }
 
+func TestHTTPAuditSinkFallsBackToCanonicalWhenSpoolPutFails(t *testing.T) {
+	for _, phase := range []sandboxobservability.EventPhase{
+		sandboxobservability.EventPhaseAttempt,
+		sandboxobservability.EventPhaseResult,
+	} {
+		t.Run(string(phase), func(t *testing.T) {
+			dir := t.TempDir()
+			spool, err := newAuditSpool(dir)
+			if err != nil {
+				t.Fatalf("newAuditSpool() error = %v", err)
+			}
+			received := make(chan sandboxobservability.Event, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body struct {
+					Events []sandboxobservability.Event `json:"events"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Events) != 1 {
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				received <- body.Events[0]
+				w.WriteHeader(http.StatusAccepted)
+			}))
+			defer server.Close()
+			sink := directHTTPAuditSink(server.URL, server.Client(), spool, zap.NewNop())
+			replaceNetdAuditSpoolDirectoryWithFile(t, dir)
+			event := auditEvent{
+				EventID:   "33333333-3333-4333-8333-333333333333",
+				Timestamp: time.Now().UTC(), TeamID: "team-1", SandboxID: "sb-1", FlowID: "tcp-1",
+				Transport: "tcp", Action: "pass-through", Outcome: "completed", Phase: string(phase),
+			}
+			if err := sink.WriteAuditEvent(event); err != nil {
+				t.Fatalf("WriteAuditEvent() fallback error = %v", err)
+			}
+			select {
+			case got := <-received:
+				if got.EventID != event.EventID || got.Phase != phase || got.Producer.Sequence == 0 {
+					t.Fatalf("canonical fallback event = %#v", got)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for canonical fallback")
+			}
+		})
+	}
+}
+
+func TestHTTPAuditSinkReportsUnrecordedWhenSpoolAndCanonicalFallbackFail(t *testing.T) {
+	for _, phase := range []sandboxobservability.EventPhase{
+		sandboxobservability.EventPhaseAttempt,
+		sandboxobservability.EventPhaseResult,
+	} {
+		t.Run(string(phase), func(t *testing.T) {
+			dir := t.TempDir()
+			spool, err := newAuditSpool(dir)
+			if err != nil {
+				t.Fatalf("newAuditSpool() error = %v", err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusServiceUnavailable)
+			}))
+			defer server.Close()
+			sink := directHTTPAuditSink(server.URL, server.Client(), spool, zap.NewNop())
+			replaceNetdAuditSpoolDirectoryWithFile(t, dir)
+			err = sink.WriteAuditEvent(auditEvent{
+				EventID:   "44444444-4444-4444-8444-444444444444",
+				Timestamp: time.Now().UTC(), TeamID: "team-1", SandboxID: "sb-1", FlowID: "tcp-1",
+				Transport: "tcp", Action: "pass-through", Outcome: "completed", Phase: string(phase),
+			})
+			if err == nil || !strings.Contains(err.Error(), "audit "+string(phase)+" is unrecorded") || !strings.Contains(err.Error(), "canonical fallback failed") {
+				t.Fatalf("WriteAuditEvent() error = %v, want explicit dual-delivery failure", err)
+			}
+		})
+	}
+}
+
+func TestHTTPAuditSinkDoesNotFailAttemptAfterCanonicalACKWhenSpoolCleanupFails(t *testing.T) {
+	dir := t.TempDir()
+	spool, err := newAuditSpool(dir)
+	if err != nil {
+		t.Fatalf("newAuditSpool() error = %v", err)
+	}
+	core, observed := observer.New(zap.ErrorLevel)
+	logger := zap.New(core)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if err := os.RemoveAll(dir); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	sink := directHTTPAuditSink(server.URL, server.Client(), spool, logger)
+	if err := sink.WriteAuditEvent(auditEvent{
+		EventID:   "55555555-5555-4555-8555-555555555555",
+		Timestamp: time.Now().UTC(), TeamID: "team-1", SandboxID: "sb-1", FlowID: "tcp-1",
+		Transport: "tcp", Action: "pass-through", Outcome: "accepted", Phase: string(sandboxobservability.EventPhaseAttempt),
+	}); err != nil {
+		t.Fatalf("WriteAuditEvent() error after canonical ACK = %v", err)
+	}
+	if observed.FilterMessage("Canonical netd audit attempt was acknowledged but spool cleanup failed").Len() != 1 {
+		t.Fatalf("cleanup failure logs = %#v", observed.All())
+	}
+}
+
+func TestHTTPAuditSinkLogsResultCleanupFailureAfterCanonicalACK(t *testing.T) {
+	dir := t.TempDir()
+	spool, err := newAuditSpool(dir)
+	if err != nil {
+		t.Fatalf("newAuditSpool() error = %v", err)
+	}
+	event := auditEvent{
+		EventID: "66666666-6666-4666-8666-666666666666", ProducerSequence: 1,
+		Timestamp: time.Now().UTC(), TeamID: "team-1", SandboxID: "sb-1", FlowID: "tcp-1",
+		Transport: "tcp", Action: "pass-through", Outcome: "completed", Phase: string(sandboxobservability.EventPhaseResult),
+	}
+	if err := spool.Put(event); err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+	core, observed := observer.New(zap.ErrorLevel)
+	sink := directHTTPAuditSink("http://unused", http.DefaultClient, spool, zap.New(core))
+	replaceNetdAuditSpoolDirectoryWithFile(t, dir)
+	sink.completeAuditGroup([]auditEvent{event}, true)
+	if observed.FilterMessage("Canonical netd audit results were acknowledged but spool cleanup failed").Len() != 1 {
+		t.Fatalf("cleanup failure logs = %#v", observed.All())
+	}
+}
+
+func TestHTTPAuditSinkDoesNotFallbackOnSpoolIdentityCollision(t *testing.T) {
+	dir := t.TempDir()
+	spool, err := newAuditSpool(dir)
+	if err != nil {
+		t.Fatalf("newAuditSpool() error = %v", err)
+	}
+	event := auditEvent{
+		EventID: "77777777-7777-4777-8777-777777777777", ProducerSequence: 1,
+		Timestamp: time.Now().UTC(), TeamID: "team-1", SandboxID: "sb-1", FlowID: "tcp-1",
+		Transport: "tcp", Action: "pass-through", Outcome: "completed", Phase: string(sandboxobservability.EventPhaseResult),
+	}
+	if err := spool.Put(event); err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+	canonicalCalled := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		canonicalCalled <- struct{}{}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	sink := directHTTPAuditSink(server.URL, server.Client(), spool, zap.NewNop())
+	event.Outcome = "error"
+	err = sink.WriteAuditEvent(event)
+	if err == nil || !strings.Contains(err.Error(), "event_id collision") {
+		t.Fatalf("WriteAuditEvent() error = %v, want spool identity collision", err)
+	}
+	select {
+	case <-canonicalCalled:
+		t.Fatal("identity collision must not reach canonical fallback")
+	default:
+	}
+}
+
 func TestAuditSpoolFailsClosedOnCorruptRecord(t *testing.T) {
 	dir := t.TempDir()
 	spool, err := newAuditSpool(dir)
@@ -158,4 +325,21 @@ func waitForAuditSpoolCount(t *testing.T, spool *auditSpool, want int) {
 	}
 	events, err := spool.Load(100)
 	t.Fatalf("spool count = %d, want %d: %v", len(events), want, err)
+}
+
+func directHTTPAuditSink(endpoint string, client *http.Client, spool *auditSpool, logger *zap.Logger) *httpAuditSink {
+	return &httpAuditSink{
+		endpoint: endpoint, client: client, spool: spool, logger: logger,
+		requestTimeout: time.Second, maxRetries: 0, retryBackoff: time.Millisecond,
+	}
+}
+
+func replaceNetdAuditSpoolDirectoryWithFile(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("RemoveAll(%q) error = %v", dir, err)
+	}
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", dir, err)
+	}
 }

@@ -17,6 +17,7 @@ type ManagerMetrics struct {
 	SandboxIdleClaimsTotal          *prometheus.CounterVec
 	PodNetworkIdentityChecksTotal   *prometheus.CounterVec
 	PodNetworkIdentityStageDuration *prometheus.HistogramVec
+	PodLifecycleStageDuration       *prometheus.HistogramVec
 	NetworkPolicyApplyTotal         *prometheus.CounterVec
 	NetworkPolicyApplyDuration      *prometheus.HistogramVec
 	K8sClientRateLimit              *prometheus.GaugeVec
@@ -98,6 +99,11 @@ func NewManager(registry prometheus.Registerer) *ManagerMetrics {
 			Help:    "Duration of pod network identity wait stages",
 			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120},
 		}, []string{"template", "stage", "status", "reason"}),
+		PodLifecycleStageDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "manager_pod_lifecycle_stage_duration_seconds",
+			Help:    "Duration between Kubernetes pod lifecycle timestamps and manager observations",
+			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600},
+		}, []string{"template", "stage"}),
 		NetworkPolicyApplyTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "manager_network_policy_apply_total",
 			Help: "Total number of network policy apply attempts by provider and result",

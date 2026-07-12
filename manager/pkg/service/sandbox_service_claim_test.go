@@ -1398,6 +1398,88 @@ func TestObservePodNetworkIdentityStageRecordsMetric(t *testing.T) {
 	}
 }
 
+func TestPodLifecycleStageTrackerRecordsCompletedStagesOnce(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	svc := &SandboxService{metrics: obsmetrics.NewManager(registry)}
+	tracker := newPodLifecycleStageTracker(svc, "managed-agents")
+	createdAt := time.Now().UTC().Add(-time.Minute)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "cold-pod",
+			Namespace:         "tpl-managed-agents",
+			CreationTimestamp: metav1.NewTime(createdAt),
+		},
+		Status: corev1.PodStatus{
+			PodIP: "10.0.0.10",
+			Conditions: []corev1.PodCondition{
+				{
+					Type:               corev1.PodScheduled,
+					Status:             corev1.ConditionTrue,
+					LastTransitionTime: metav1.NewTime(createdAt.Add(time.Second)),
+				},
+				{
+					Type:               corev1.PodReadyToStartContainers,
+					Status:             corev1.ConditionTrue,
+					LastTransitionTime: metav1.NewTime(createdAt.Add(4 * time.Second)),
+				},
+				{
+					Type:               v1alpha1.SandboxPodStartupConditionType,
+					Status:             corev1.ConditionTrue,
+					LastTransitionTime: metav1.NewTime(createdAt.Add(8 * time.Second)),
+				},
+				{
+					Type:               v1alpha1.SandboxPodReadinessConditionType,
+					Status:             corev1.ConditionTrue,
+					LastTransitionTime: metav1.NewTime(createdAt.Add(8500 * time.Millisecond)),
+				},
+			},
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name: "procd",
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{
+						StartedAt: metav1.NewTime(createdAt.Add(6 * time.Second)),
+					}},
+				},
+			},
+		},
+	}
+
+	tracker.observePodAt(pod, createdAt.Add(7*time.Second))
+	tracker.observePodAt(pod, createdAt.Add(8*time.Second))
+	tracker.observeClaimReadyAt(pod, createdAt.Add(9*time.Second))
+	tracker.observeClaimReadyAt(pod, createdAt.Add(10*time.Second))
+
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	want := map[string]float64{
+		"created_to_scheduled":                     1,
+		"scheduled_to_sandbox_ready":               3,
+		"sandbox_ready_to_procd_started":           2,
+		"procd_started_to_sandbox_startup_ready":   2,
+		"procd_started_to_sandbox_readiness_ready": 2.5,
+		"scheduled_to_pod_ip_observed":             6,
+		"sandbox_ready_to_pod_ip_observed":         3,
+		"procd_started_to_claim_ready_observed":    3,
+	}
+	for stage, wantSeconds := range want {
+		metric := findMetric(families, "manager_pod_lifecycle_stage_duration_seconds", map[string]string{
+			"template": "managed-agents",
+			"stage":    stage,
+		})
+		if metric == nil || metric.GetHistogram() == nil {
+			t.Fatalf("pod lifecycle stage metric %q not found", stage)
+		}
+		if got := metric.GetHistogram().GetSampleCount(); got != 1 {
+			t.Fatalf("pod lifecycle stage %q sample count = %d, want 1", stage, got)
+		}
+		if got := metric.GetHistogram().GetSampleSum(); got != wantSeconds {
+			t.Fatalf("pod lifecycle stage %q sample sum = %f, want %f", stage, got, wantSeconds)
+		}
+	}
+}
+
 func TestObserveIdleClaimRecordsMetric(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	svc := &SandboxService{metrics: obsmetrics.NewManager(registry)}

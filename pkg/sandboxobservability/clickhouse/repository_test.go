@@ -38,15 +38,15 @@ func mustRepository(t *testing.T) (*Repository, *captureDB) {
 
 func TestInsertEventsBuildsBatchInsertAndSerializesAttributes(t *testing.T) {
 	repo, db := mustRepository(t)
-	now := time.Date(2026, 7, 1, 1, 2, 4, 0, time.UTC)
+	now := time.Date(2026, 7, 1, 1, 2, 4, 987654321, time.UTC)
 	repo.now = func() time.Time { return now }
-	occurredAt := time.Date(2026, 7, 1, 1, 2, 3, 0, time.FixedZone("offset", 8*60*60))
+	occurredAt := time.Date(2026, 7, 1, 1, 2, 3, 123456789, time.FixedZone("offset", 8*60*60))
 
 	event := sandboxobservability.Event{
 		EventID:       "11111111-1111-4111-8111-111111111111",
 		SchemaVersion: sandboxobservability.CurrentEventSchemaVersion,
-		TeamID:        " team-1 ",
-		SandboxID:     " sb-1 ",
+		TeamID:        "team-1",
+		SandboxID:     "sb-1",
 		RegionID:      "aws-us-east-1",
 		ClusterID:     "cluster-a",
 		OccurredAt:    occurredAt,
@@ -73,20 +73,48 @@ func TestInsertEventsBuildsBatchInsertAndSerializesAttributes(t *testing.T) {
 	if !strings.HasPrefix(db.execQuery, "INSERT INTO `sandbox0_observability`.`sandbox_audit_events`") {
 		t.Fatalf("exec query = %s", db.execQuery)
 	}
+	if strings.Count(db.execQuery, dateTime64NanoPlaceholder) != 2 {
+		t.Fatalf("exec query must preserve both DateTime64 values at nanosecond precision: %s", db.execQuery)
+	}
 	if len(db.execArgs) != 40 {
 		t.Fatalf("exec args count = %d, want 40", len(db.execArgs))
 	}
 	if db.execArgs[2] != "team-1" || db.execArgs[3] != "sb-1" {
 		t.Fatalf("identity args = %#v", db.execArgs[2:4])
 	}
-	if got, ok := db.execArgs[6].(time.Time); !ok || got.Location() != time.UTC || !got.Equal(occurredAt) {
-		t.Fatalf("occurred_at arg = %#v", db.execArgs[6])
+	if got := db.execArgs[6]; got != dateTime64NanoArg(occurredAt) {
+		t.Fatalf("occurred_at arg = %#v, want Unix nanoseconds", got)
 	}
-	if got, ok := db.execArgs[7].(time.Time); !ok || !got.Equal(now) {
-		t.Fatalf("ingested_at arg = %#v", db.execArgs[7])
+	if got := db.execArgs[7]; got != dateTime64NanoArg(now) {
+		t.Fatalf("ingested_at arg = %#v, want Unix nanoseconds", got)
 	}
 	if attributes, ok := db.execArgs[35].(string); !ok || !strings.Contains(attributes, `"destination":"example.com"`) {
 		t.Fatalf("attributes arg = %#v", db.execArgs[35])
+	}
+}
+
+func TestInsertEventsRejectsMutationOfSignedIdentityWhitespace(t *testing.T) {
+	repo, db := mustRepository(t)
+	event := sandboxobservability.Event{
+		EventID:       "11111111-1111-4111-8111-111111111111",
+		SchemaVersion: sandboxobservability.CurrentEventSchemaVersion,
+		TeamID:        " team-1",
+		SandboxID:     "sb-1",
+		OccurredAt:    time.Now().UTC(),
+		Source:        sandboxobservability.SourceNetd,
+		EventType:     sandboxobservability.EventTypeNetworkAudit,
+		Phase:         sandboxobservability.EventPhaseEffect,
+		Actor:         sandboxobservability.AuditActor{Kind: sandboxobservability.ActorKindSandboxWorkload},
+		Action:        "network.connect",
+		Resource:      sandboxobservability.AuditResource{Type: "sandbox_network", ID: "sb-1"},
+		Producer:      sandboxobservability.AuditProducer{Service: "netd"},
+		Cursor:        "cursor-1",
+	}
+	if err := repo.InsertEvents(context.Background(), []sandboxobservability.Event{event}); err == nil || !strings.Contains(err.Error(), "team_id must not contain surrounding whitespace") {
+		t.Fatalf("InsertEvents() error = %v, want non-canonical signed field rejection", err)
+	}
+	if db.execQuery != "" {
+		t.Fatalf("exec query = %q, want no insert", db.execQuery)
 	}
 }
 
@@ -145,7 +173,7 @@ func TestBuildListSQLAppliesTypedFiltersAndCursor(t *testing.T) {
 		"source = ?",
 		"outcome = ?",
 		"event_type = ?",
-		"(occurred_at, ingested_at, source, event_type, event_id, payload_hash) > (?, ?, ?, ?, ?, ?)",
+		"(occurred_at, ingested_at, source, event_type, event_id, payload_hash) > (toDateTime64(?, 9, 'UTC'), toDateTime64(?, 9, 'UTC'), ?, ?, ?, ?)",
 		"ORDER BY occurred_at ASC, ingested_at ASC, source ASC, event_type ASC, event_id ASC, payload_hash ASC LIMIT 11",
 	} {
 		if !strings.Contains(sqlQuery, want) {
@@ -180,10 +208,10 @@ func TestBuildWatchEventsSQLUsesIngestionOrderCursor(t *testing.T) {
 
 	sqlQuery, args := repo.buildWatchEventsSQL(query, limit, cursor)
 	for _, want := range []string{
-		"occurred_at >= ?",
+		"occurred_at >= toDateTime64(?, 9, 'UTC')",
 		"source = ?",
 		"event_type = ?",
-		"(ingested_at, source, event_type, event_id, payload_hash) > (?, ?, ?, ?, ?)",
+		"(ingested_at, source, event_type, event_id, payload_hash) > (toDateTime64(?, 9, 'UTC'), ?, ?, ?, ?)",
 		"ORDER BY ingested_at ASC, source ASC, event_type ASC, event_id ASC, payload_hash ASC LIMIT 10",
 	} {
 		if !strings.Contains(sqlQuery, want) {
@@ -193,7 +221,7 @@ func TestBuildWatchEventsSQLUsesIngestionOrderCursor(t *testing.T) {
 	if strings.Contains(sqlQuery, "ORDER BY occurred_at") {
 		t.Fatalf("watch query must not order by occurred_at:\n%s", sqlQuery)
 	}
-	if got, ok := args[len(args)-5].(time.Time); !ok || !got.Equal(after) {
+	if got := args[len(args)-5]; got != dateTime64NanoArg(after) {
 		t.Fatalf("tail ingested_at arg = %#v, want %s", args[len(args)-5], after)
 	}
 }

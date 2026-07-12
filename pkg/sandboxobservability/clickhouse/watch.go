@@ -89,12 +89,12 @@ func (r *Repository) buildWatchEventsSQL(query sandboxobservability.EventQuery, 
 
 	args := []any{query.TeamID, query.SandboxID}
 	if query.StartTime != nil {
-		builder.WriteString(" AND occurred_at >= ?")
-		args = append(args, query.StartTime.UTC())
+		builder.WriteString(" AND occurred_at >= " + dateTime64NanoPlaceholder)
+		args = append(args, dateTime64NanoArg(*query.StartTime))
 	}
 	if query.EndTime != nil {
-		builder.WriteString(" AND occurred_at <= ?")
-		args = append(args, query.EndTime.UTC())
+		builder.WriteString(" AND occurred_at <= " + dateTime64NanoPlaceholder)
+		args = append(args, dateTime64NanoArg(*query.EndTime))
 	}
 	if query.Source != "" {
 		builder.WriteString(" AND source = ?")
@@ -133,8 +133,9 @@ func (r *Repository) buildWatchEventsSQL(query sandboxobservability.EventQuery, 
 		args = append(args, query.EventID)
 	}
 	if cursor != nil {
-		builder.WriteString(" AND (ingested_at, source, event_type, event_id, payload_hash) > (?, ?, ?, ?, ?)")
-		args = append(args, cursor.IngestedAt, cursor.Source, cursor.EventType, cursor.Cursor, cursor.PayloadHash)
+		builder.WriteString(" AND (ingested_at, source, event_type, event_id, payload_hash) > (")
+		builder.WriteString(dateTime64NanoPlaceholder + ", ?, ?, ?, ?)")
+		args = append(args, dateTime64NanoArg(cursor.IngestedAt), cursor.Source, cursor.EventType, cursor.Cursor, cursor.PayloadHash)
 	}
 
 	builder.WriteString(" ORDER BY ingested_at ASC, source ASC, event_type ASC, event_id ASC, payload_hash ASC")

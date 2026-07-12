@@ -186,13 +186,9 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 		if len(workload.Spec.Template.Spec.Containers[0].Ports) != 0 {
 			t.Fatalf("ctld hostNetwork pod %s reserves node ports: %#v", workload.Name, workload.Spec.Template.Spec.Containers[0].Ports)
 		}
-		if workload.Spec.UpdateStrategy.RollingUpdate == nil || workload.Spec.UpdateStrategy.RollingUpdate.MaxSurge == nil || workload.Spec.UpdateStrategy.RollingUpdate.MaxSurge.IntValue() != 1 {
-			t.Fatalf("expected ctld maxSurge=1, got %#v", workload.Spec.UpdateStrategy)
-		}
-		if workload.Spec.UpdateStrategy.RollingUpdate.MaxUnavailable == nil || workload.Spec.UpdateStrategy.RollingUpdate.MaxUnavailable.IntValue() != 0 {
-			t.Fatalf("expected ctld maxUnavailable=0, got %#v", workload.Spec.UpdateStrategy)
-		}
 	}
+	assertCtldRollingUpdate(t, ds, 1, 0)
+	assertCtldRollingUpdate(t, standby, 0, 1)
 	if len(ds.Spec.Template.Spec.Containers[0].VolumeMounts) < 7 {
 		t.Fatalf("expected ctld config, csi, kubelet, data, containerd socket, and containerd data mounts, got %#v", ds.Spec.Template.Spec.Containers[0].VolumeMounts)
 	}
@@ -206,6 +202,21 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 	}
 
 	return ds, client
+}
+
+func assertCtldRollingUpdate(t *testing.T, daemonSet *appsv1.DaemonSet, maxUnavailable, maxSurge int) {
+	t.Helper()
+
+	rollingUpdate := daemonSet.Spec.UpdateStrategy.RollingUpdate
+	if rollingUpdate == nil || rollingUpdate.MaxUnavailable == nil || rollingUpdate.MaxSurge == nil {
+		t.Fatalf("expected ctld rolling update strategy, got %#v", daemonSet.Spec.UpdateStrategy)
+	}
+	if got := rollingUpdate.MaxUnavailable.IntValue(); got != maxUnavailable {
+		t.Fatalf("expected %s maxUnavailable=%d, got %d", daemonSet.Name, maxUnavailable, got)
+	}
+	if got := rollingUpdate.MaxSurge.IntValue(); got != maxSurge {
+		t.Fatalf("expected %s maxSurge=%d, got %d", daemonSet.Name, maxSurge, got)
+	}
 }
 
 func assertCtldProbe(t *testing.T, name string, probe *corev1.Probe, kind string, periodSeconds int32) {

@@ -330,6 +330,12 @@ func buildCtldDaemonSet(cfg ctldDaemonSetConfig) *appsv1.DaemonSet {
 	}
 	maxUnavailable := intstr.FromInt(0)
 	maxSurge := intstr.FromInt(1)
+	if cfg.IncludeRegistrar {
+		// The registrar owns one node-global socket. If slot A surges, the old
+		// sidecar can unlink the new sidecar's socket while it terminates.
+		maxUnavailable = intstr.FromInt(1)
+		maxSurge = intstr.FromInt(0)
+	}
 	return &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{Name: cfg.Name + "-" + cfg.Slot, Namespace: cfg.Namespace},
 		Spec: appsv1.DaemonSetSpec{

@@ -1406,7 +1406,13 @@ func globalGatewayEnterpriseLicenseRequired(infra *infrav1alpha1.Sandbox0Infra) 
 }
 
 func clusterGatewayEnterpriseLicenseRequired(infra *infrav1alpha1.Sandbox0Infra) bool {
-	if !infrav1alpha1.IsClusterGatewayEnabled(infra) || infra == nil || infra.Spec.Services == nil || infra.Spec.Services.ClusterGateway == nil {
+	if infra == nil || !infrav1alpha1.IsClusterGatewayEnabled(infra) {
+		return false
+	}
+	if infrav1alpha1.IsSandboxAuditEnabled(infra) {
+		return true
+	}
+	if infra.Spec.Services == nil || infra.Spec.Services.ClusterGateway == nil {
 		return false
 	}
 

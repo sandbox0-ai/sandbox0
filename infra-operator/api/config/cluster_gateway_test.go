@@ -24,6 +24,7 @@ func TestLoadClusterGatewayConfigSandboxObservabilityClickHouse(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`
 sandbox_observability:
     backend: clickhouse
+    audit_enabled: true
     clickhouse:
         dsn: ${TEST_CLICKHOUSE_DSN}
         database: sandbox0_obs_test
@@ -42,6 +43,9 @@ sandbox_observability:
 	}
 	if cfg.SandboxObservability.BackendType() != SandboxObservabilityBackendClickHouse {
 		t.Fatalf("backend = %q, want clickhouse", cfg.SandboxObservability.BackendType())
+	}
+	if !cfg.SandboxObservability.AuditEnabled {
+		t.Fatal("expected sandbox audit to be enabled")
 	}
 	ch := cfg.SandboxObservability.ClickHouse
 	if ch.DSN != "clickhouse://default:pass@clickhouse:9000/default" ||

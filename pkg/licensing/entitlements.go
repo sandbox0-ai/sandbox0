@@ -11,6 +11,7 @@ type Feature string
 const (
 	FeatureMultiCluster Feature = "multi_cluster"
 	FeatureSSO          Feature = "sso"
+	FeatureSandboxAudit Feature = "sandbox_audit"
 )
 
 // Entitlements exposes licensed feature checks without leaking license internals.

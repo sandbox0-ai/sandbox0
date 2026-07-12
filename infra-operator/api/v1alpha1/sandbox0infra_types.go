@@ -1595,6 +1595,15 @@ func IsSandboxObservabilityEnabled(infra *Sandbox0Infra) bool {
 	}
 }
 
+// IsSandboxAuditEnabled returns true when centralized per-sandbox audit
+// collection and query are explicitly enabled with the observability backend.
+func IsSandboxAuditEnabled(infra *Sandbox0Infra) bool {
+	if !IsSandboxObservabilityEnabled(infra) || infra.Spec.SandboxObservability.Audit == nil {
+		return false
+	}
+	return infra.Spec.SandboxObservability.Audit.Enabled
+}
+
 // IsMeteringEnabled returns true when the region usage ledger should be
 // reconciled and injected. Metering is disabled by default.
 func IsMeteringEnabled(infra *Sandbox0Infra) bool {

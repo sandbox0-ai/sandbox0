@@ -288,7 +288,7 @@ console.log('Status:', status.status);`
 
 ## Observability
 
-Sandbox0 exposes chart-ready runtime metrics alongside historical logs, lifecycle events, and network audit events. These APIs read asynchronous per-sandbox projections and never wake a paused sandbox. They are separate from platform service telemetry and the metering usage ledger.
+Sandbox0 exposes chart-ready runtime metrics alongside historical logs and network audit events. These APIs read asynchronous per-sandbox projections and never wake a paused sandbox. They are separate from platform service telemetry and the metering usage ledger. Centralized network audit collection and the events query/watch API require the enterprise `sandbox_audit` feature; logs, runtime metrics, and the metric catalog do not.
 
 <Endpoint method="GET">
 /api/v1/sandboxes/{'{id}'}/observability/events
@@ -357,6 +357,8 @@ const metrics = await client.sandbox("sb_abc123").getMetrics({
 
 ### Logs and events
 
+The events endpoint returns `403 feature_not_licensed` unless centralized audit is explicitly enabled and cluster-gateway has a valid enterprise license containing `sandbox_audit`.
+
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `start_time` | RFC3339 timestamp | Include events that occurred at or after this time |
@@ -374,7 +376,7 @@ Every returned event and log entry includes `team_id`, `sandbox_id`, `region_id`
 
 Set `watch=true` to stream matching log or event records as NDJSON in ingestion order. Without `cursor` or `start_time`, a watch stream starts at request time and does not replay historical rows. When `watch=true`, `end_time` is not supported. A watch stream emits `event` or `log` lines, `watermark` lines with a resume cursor, periodic `heartbeat` lines, and an `error` line before termination if the backend fails after the stream starts. Runtime metrics are queried as bounded time series and do not expose a watch mode.
 
-ClickHouse-backed deployments store events, logs, and wide runtime samples in asynchronous per-sandbox projection tables with independent retention TTLs. Netd publishes network audit events, manager publishes logs, and node-local ctld instances collect sandbox-wide CRI runtime samples every 15 seconds with jitter.
+ClickHouse-backed deployments store events, logs, and wide runtime samples in asynchronous per-sandbox projection tables with independent retention TTLs. When enterprise audit is enabled, netd publishes network audit events. Manager publishes logs, and node-local ctld instances collect sandbox-wide CRI runtime samples every 15 seconds with jitter regardless of the audit entitlement.
 
 Historical data query endpoints return `503` when the backend is disabled or unavailable. The static metric catalog remains available so clients can build selectors without probing storage.
 

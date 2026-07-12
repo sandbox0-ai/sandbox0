@@ -278,7 +278,8 @@ func TestReconcileInjectsSandboxObservabilityIngestURL(t *testing.T) {
 		},
 	}
 	infra.Spec.SandboxObservability = &infrav1alpha1.SandboxObservabilityConfig{
-		Type: infrav1alpha1.SandboxObservabilityTypeExternal,
+		Type:  infrav1alpha1.SandboxObservabilityTypeExternal,
+		Audit: &infrav1alpha1.SandboxObservabilityAuditConfig{Enabled: true},
 		External: &infrav1alpha1.ExternalSandboxObservabilityConfig{
 			ClickHouse: infrav1alpha1.ExternalSandboxObservabilityClickHouseConfig{
 				DSNSecret: infrav1alpha1.SandboxObservabilityClickHouseDSNSecretRef{

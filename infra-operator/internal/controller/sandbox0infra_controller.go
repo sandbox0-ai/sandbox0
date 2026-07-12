@@ -418,7 +418,7 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 	case "cluster-gateway-enterprise-license":
 		return func(ctx context.Context) error {
 			licenseFile := ""
-			return common.EnsureEnterpriseLicense(ctx, resources, infra, &licenseFile, true, "OIDC SSO")
+			return common.EnsureEnterpriseLicense(ctx, resources, infra, &licenseFile, true, "cluster-gateway enterprise features")
 		}, nil
 	case "cluster-gateway":
 		return func(ctx context.Context) error {

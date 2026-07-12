@@ -2608,6 +2608,17 @@ spec:
                   SandboxObservability configures the region-local historical per-sandbox
                   observability backend and collection pipelines.
                 properties:
+                  audit:
+                    description: |-
+                      Audit configures the licensed centralized per-sandbox audit signal. Audit
+                      collection and query remain disabled unless explicitly enabled.
+                    properties:
+                      enabled:
+                        default: false
+                        description: Enabled enables the enterprise sandbox_audit
+                          feature.
+                        type: boolean
+                    type: object
                   backend:
                     allOf:
                     - enum:

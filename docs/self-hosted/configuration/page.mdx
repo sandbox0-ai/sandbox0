@@ -94,10 +94,16 @@ Platform telemetry export is disabled by default. The operator owns collection a
 
 ClickHouse is configured once on the `Sandbox0Infra` CR under `spec.clickHouse`. The infra-operator owns builtin provisioning or external DSN resolution, the same way it owns built-in or external PostgreSQL and Redis wiring. Feature configs such as `spec.sandboxObservability` and `spec.metering` consume this region component. Do not configure the ClickHouse backend separately on cluster-gateway, ctld, manager, storage-proxy, or netd service configs when deploying through `Sandbox0Infra`.
 
+Historical logs and runtime metrics are available whenever sandbox observability is enabled. Centralized sandbox audit is an enterprise feature: set `spec.sandboxObservability.audit.enabled` to `true` and provide a signed enterprise license containing the `sandbox_audit` feature. The license is mounted only into cluster-gateway, which authorizes both network-audit ingestion and the public events query/watch API.
+
 Use builtin ClickHouse when you want the infra-operator to install ClickHouse for the region:
 
 ```yaml
 spec:
+    enterpriseLicense:
+        secretRef:
+            name: sandbox0-enterprise-license
+            key: license.lic
     clickHouse:
         type: builtin
         builtin:
@@ -112,6 +118,8 @@ spec:
     sandboxObservability:
         enabled: true
         backend: clickhouse
+        audit:
+            enabled: true
         retention:
             auditDays: 90
             logDays: 7
@@ -140,6 +148,10 @@ Use the external backend when you already operate ClickHouse:
 
 ```yaml
 spec:
+    enterpriseLicense:
+        secretRef:
+            name: sandbox0-enterprise-license
+            key: license.lic
     clickHouse:
         type: external
         external:
@@ -154,6 +166,8 @@ spec:
     sandboxObservability:
         enabled: true
         backend: clickhouse
+        audit:
+            enabled: true
         retention:
             auditDays: 90
             logDays: 7
@@ -162,9 +176,9 @@ spec:
         enabled: true
 ```
 
-Set `spec.sandboxObservability.enabled` to `false` or omit the field to keep the historical API disabled. Set `spec.metering.enabled` to `false` or omit `spec.metering` to keep metering producers, quota usage reads, and metering export readers disabled. Legacy `spec.sandboxObservability.type` fields are still accepted for compatibility, but new installs should use `spec.clickHouse` for ClickHouse provisioning. Retention deletes ClickHouse observability rows only and never deletes metering ledger rows.
+Set `spec.sandboxObservability.enabled` to `false` or omit the field to keep all historical APIs disabled. Leave `spec.sandboxObservability.audit.enabled` unset or `false` to keep centralized audit ingestion and event queries disabled while retaining historical logs and runtime metrics. Set `spec.metering.enabled` to `false` or omit `spec.metering` to keep metering producers, quota usage reads, and metering export readers disabled. Legacy `spec.sandboxObservability.type` fields are still accepted for compatibility, but new installs should use `spec.clickHouse` for ClickHouse provisioning. Disabling audit stops new network-audit projection but does not delete existing rows; ClickHouse TTL performs eventual retention cleanup. Retention deletes ClickHouse observability rows only and never deletes metering ledger rows.
 
-When the backend is enabled, infra-operator injects bounded internal ingest endpoints into the producers automatically: ctld sends sandbox-wide CRI runtime samples, manager sends historical logs, and netd sends network audit events. Producer queues never block the sandbox data path; a full queue or exhausted retry budget drops projection data instead. Netd exports `sandbox0_netd_audit_ingest_events_total` and `sandbox0_netd_audit_ingest_batches_total` to show enqueue, send, skip, drop, and failed batch results.
+When the backend is enabled, infra-operator injects bounded internal ingest endpoints into ctld for sandbox-wide CRI runtime samples and manager for historical logs. When licensed audit is also enabled, it injects the network-audit endpoint into netd. Producer queues never block the sandbox data path; a full queue or exhausted retry budget drops projection data instead. Netd exports `sandbox0_netd_audit_ingest_events_total` and `sandbox0_netd_audit_ingest_batches_total` to show enqueue, send, skip, drop, and failed batch results. Treat this ClickHouse data as a historical projection rather than an immutable compliance ledger.
 
 In `managedCollector` mode sandbox0 installs collectors for logs, metrics, and traces, then exports to your OTLP endpoint:
 

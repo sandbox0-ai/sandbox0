@@ -8,13 +8,16 @@ import (
 func TestStaticEntitlements(t *testing.T) {
 	t.Parallel()
 
-	entitlements := NewStaticEntitlements(FeatureSSO)
+	entitlements := NewStaticEntitlements(FeatureSSO, FeatureSandboxAudit)
 
 	if !entitlements.Enabled(FeatureSSO) {
 		t.Fatalf("expected %q to be enabled", FeatureSSO)
 	}
 	if entitlements.Enabled(FeatureMultiCluster) {
 		t.Fatalf("expected %q to be disabled", FeatureMultiCluster)
+	}
+	if !entitlements.Enabled(FeatureSandboxAudit) {
+		t.Fatalf("expected %q to be enabled", FeatureSandboxAudit)
 	}
 	if err := entitlements.Require(FeatureMultiCluster); err == nil {
 		t.Fatalf("expected missing feature error")

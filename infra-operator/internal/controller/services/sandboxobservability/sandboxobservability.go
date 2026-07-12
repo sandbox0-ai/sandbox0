@@ -21,6 +21,7 @@ type Reconciler struct {
 
 type RuntimeConfig struct {
 	DSN                         string
+	AuditEnabled                bool
 	Database                    string
 	EventsTable                 string
 	LogsTable                   string
@@ -68,7 +69,8 @@ func ApplyClusterGatewayConfig(ctx context.Context, c client.Client, infra *infr
 		return nil
 	}
 	cfg.SandboxObservability = apiconfig.SandboxObservabilityConfig{
-		Backend: apiconfig.SandboxObservabilityBackendClickHouse,
+		Backend:      apiconfig.SandboxObservabilityBackendClickHouse,
+		AuditEnabled: runtimeCfg.AuditEnabled,
 		ClickHouse: apiconfig.SandboxObservabilityClickHouseConfig{
 			DSN:                         runtimeCfg.DSN,
 			Database:                    runtimeCfg.Database,
@@ -93,7 +95,7 @@ func ApplyNetdConfig(ctx context.Context, c client.Client, infra *infrav1alpha1.
 	if err != nil {
 		return err
 	}
-	if !ok || strings.TrimSpace(clusterGatewayURL) == "" {
+	if !ok || !runtimeCfg.AuditEnabled || strings.TrimSpace(clusterGatewayURL) == "" {
 		cfg.SandboxObservabilityIngestURL = ""
 		return nil
 	}
@@ -149,6 +151,7 @@ func GetRuntimeConfig(ctx context.Context, c client.Client, infra *infrav1alpha1
 	}
 	cfg := RuntimeConfig{
 		DSN:                         clickHouseCfg.DSN,
+		AuditEnabled:                infrav1alpha1.IsSandboxAuditEnabled(infra),
 		Database:                    firstNonEmpty(clickHouseCfg.Databases.Observability, obsclickhouse.DefaultDatabase),
 		EventsTable:                 obsclickhouse.DefaultEventsTable,
 		LogsTable:                   obsclickhouse.DefaultLogsTable,

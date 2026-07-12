@@ -23,12 +23,12 @@ const auditResultReplayInterval = time.Second
 // the sole canonical store; files are removed only after ClickHouse ACKs the
 // exact signed event.
 type auditResultDelivery struct {
-	dir    string
-	writer sandboxobservability.Writer
-	logger *zap.Logger
+	dir             string
+	writer          sandboxobservability.Writer
+	logger          *zap.Logger
 	verificationKey ed25519.PublicKey
-	mu     sync.Mutex
-	once   sync.Once
+	mu              sync.Mutex
+	once            sync.Once
 }
 
 func newAuditResultDelivery(dir string, writer sandboxobservability.Writer, logger *zap.Logger, verificationKeys ...ed25519.PublicKey) (*auditResultDelivery, error) {

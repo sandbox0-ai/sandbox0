@@ -29,7 +29,7 @@ func TestReconcileCreatesSeparatedAuditProducerAndSigningKeys(t *testing.T) {
 				WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true}},
 			}},
 			SandboxObservability: &infrav1alpha1.SandboxObservabilityConfig{
-				Type: infrav1alpha1.SandboxObservabilityTypeExternal,
+				Type:  infrav1alpha1.SandboxObservabilityTypeExternal,
 				Audit: &infrav1alpha1.SandboxObservabilityAuditConfig{Enabled: true},
 			},
 		},

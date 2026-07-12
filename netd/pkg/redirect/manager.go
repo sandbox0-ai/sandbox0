@@ -16,9 +16,10 @@ import (
 )
 
 const (
-	ruleTableID = 100
-	mangleTable = "mangle"
-	natTable    = "nat"
+	ruleTableID        = 100
+	policyRulePriority = 100
+	mangleTable        = "mangle"
+	natTable           = "nat"
 )
 
 type iptablesManager struct {
@@ -206,13 +207,26 @@ func (m *iptablesManager) ensurePolicyRouting(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if !ruleExists(rules, uint32(1), uint32(1), ruleTableID) {
+	if !ruleExists(rules, uint32(1), uint32(1), ruleTableID, policyRulePriority) {
 		rule := netlink.NewRule()
 		rule.Mark = 1
 		mask := uint32(1)
 		rule.Mask = &mask
 		rule.Table = ruleTableID
+		// The TPROXY mark must win before CNI source-based rules. Terway installs
+		// per-pod source rules at priority 2048, while an unspecified priority is
+		// assigned near 32765 and routes marked packets away from the local proxy.
+		rule.Priority = policyRulePriority
 		if err := netlink.RuleAdd(rule); err != nil && !isExist(err) {
+			return err
+		}
+	}
+	for i := range rules {
+		rule := rules[i]
+		if !ruleMatches(rule, uint32(1), uint32(1), ruleTableID) || rule.Priority == policyRulePriority {
+			continue
+		}
+		if err := netlink.RuleDel(&rule); err != nil && !isNotExist(err) {
 			return err
 		}
 	}
@@ -245,19 +259,17 @@ func (m *iptablesManager) ensurePolicyRouting(ctx context.Context) error {
 	return nil
 }
 
-func ruleExists(rules []netlink.Rule, mark, mask uint32, table int) bool {
+func ruleExists(rules []netlink.Rule, mark, mask uint32, table, priority int) bool {
 	for _, rule := range rules {
-		if rule.Table != table || rule.Mark != mark {
-			continue
-		}
-		if rule.Mask == nil {
-			continue
-		}
-		if *rule.Mask == mask {
+		if ruleMatches(rule, mark, mask, table) && rule.Priority == priority {
 			return true
 		}
 	}
 	return false
+}
+
+func ruleMatches(rule netlink.Rule, mark, mask uint32, table int) bool {
+	return rule.Table == table && rule.Mark == mark && rule.Mask != nil && *rule.Mask == mask
 }
 
 func localRouteExists(routes []netlink.Route) bool {
@@ -303,4 +315,12 @@ func isExist(err error) bool {
 		return false
 	}
 	return strings.Contains(strings.ToLower(err.Error()), "exists")
+}
+
+func isNotExist(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "no such") || strings.Contains(message, "not found")
 }

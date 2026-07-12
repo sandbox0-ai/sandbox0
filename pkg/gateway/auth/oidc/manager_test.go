@@ -16,6 +16,7 @@ type fakeIdentityStore struct {
 	identitiesByKey     map[string]*identity.UserIdentity
 	createUserCalls     int
 	createIdentityCalls int
+	updateUserCalls     int
 }
 
 func newFakeIdentityStore() *fakeIdentityStore {
@@ -46,6 +47,17 @@ func (f *fakeIdentityStore) GetUserByID(_ context.Context, id string) (*identity
 	}
 	copied := *user
 	return &copied, nil
+}
+
+func (f *fakeIdentityStore) UpdateUser(_ context.Context, user *identity.User) error {
+	if _, ok := f.usersByID[user.ID]; !ok {
+		return identity.ErrUserNotFound
+	}
+	f.updateUserCalls++
+	copied := *user
+	f.usersByID[user.ID] = &copied
+	f.usersByEmail[user.Email] = &copied
+	return nil
 }
 
 func (f *fakeIdentityStore) UpdateUserIdentityClaims(_ context.Context, id string, rawClaims []byte) error {
@@ -132,5 +144,77 @@ func TestManagerFindOrCreateUserAutoProvisionCreatesUserWithoutDefaultTeam(t *te
 	}
 	if record.UserID != user.ID {
 		t.Fatalf("identity user id = %q, want %q", record.UserID, user.ID)
+	}
+}
+
+func TestManagerFindOrCreateUserPromotesVerifiedOIDCClaims(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeIdentityStore()
+	store.usersByID["user-1"] = &identity.User{
+		ID:            "user-1",
+		Email:         "invitee@example.com",
+		Name:          "Old Name",
+		EmailVerified: false,
+	}
+	store.usersByEmail["invitee@example.com"] = store.usersByID["user-1"]
+	store.identitiesByKey[identityKey("auth0", "subject-1")] = &identity.UserIdentity{
+		ID:       "identity-1",
+		UserID:   "user-1",
+		Provider: "auth0",
+		Subject:  "subject-1",
+	}
+	manager := &Manager{repo: store, logger: zap.NewNop()}
+	provider := &Provider{id: "auth0"}
+
+	user, err := manager.findOrCreateUser(context.Background(), provider, &UserInfo{
+		Subject:       "subject-1",
+		Email:         "invitee@example.com",
+		Name:          "Updated Name",
+		Picture:       "https://example.com/avatar.png",
+		EmailVerified: true,
+		RawClaims:     json.RawMessage(`{"sub":"subject-1","email_verified":true}`),
+	})
+	if err != nil {
+		t.Fatalf("findOrCreateUser: %v", err)
+	}
+	if !user.EmailVerified || user.Name != "Updated Name" || user.AvatarURL != "https://example.com/avatar.png" {
+		t.Fatalf("user claims were not synchronized: %+v", user)
+	}
+	if store.updateUserCalls != 1 {
+		t.Fatalf("expected one user update, got %d", store.updateUserCalls)
+	}
+}
+
+func TestManagerFindOrCreateUserDoesNotVerifyDifferentStoredEmail(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeIdentityStore()
+	store.usersByID["user-1"] = &identity.User{
+		ID:            "user-1",
+		Email:         "old@example.com",
+		EmailVerified: false,
+	}
+	store.identitiesByKey[identityKey("auth0", "subject-1")] = &identity.UserIdentity{
+		ID:       "identity-1",
+		UserID:   "user-1",
+		Provider: "auth0",
+		Subject:  "subject-1",
+	}
+	manager := &Manager{repo: store, logger: zap.NewNop()}
+
+	user, err := manager.findOrCreateUser(context.Background(), &Provider{id: "auth0"}, &UserInfo{
+		Subject:       "subject-1",
+		Email:         "new@example.com",
+		EmailVerified: true,
+	})
+	if err != nil {
+		t.Fatalf("findOrCreateUser: %v", err)
+	}
+	if user.EmailVerified {
+		t.Fatal("different stored email must not inherit verified status")
+	}
+	if store.updateUserCalls != 0 {
+		t.Fatalf("unexpected user update count %d", store.updateUserCalls)
 	}
 }

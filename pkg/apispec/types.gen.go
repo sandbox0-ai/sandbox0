@@ -749,6 +749,11 @@ const (
 	S3   VolumeBackend = "s3"
 )
 
+// Defines values for GetAuthOidcProviderLoginParamsScreenHint.
+const (
+	Signup GetAuthOidcProviderLoginParamsScreenHint = "signup"
+)
+
 // APIKey defines model for APIKey.
 type APIKey struct {
 	CreatedAt  time.Time  `json:"created_at"`
@@ -3708,7 +3713,16 @@ type GetAuthOidcProviderLoginParams struct {
 
 	// WebLogin When true, the OIDC callback redirects to return_url with a short-lived login_code for server-side exchange.
 	WebLogin *bool `form:"web_login,omitempty" json:"web_login,omitempty"`
+
+	// LoginHint Optional login identifier forwarded to the OIDC provider for account prefilling.
+	LoginHint *string `form:"login_hint,omitempty" json:"login_hint,omitempty"`
+
+	// ScreenHint Optional provider hint that starts a supported hosted login flow on its signup screen.
+	ScreenHint *GetAuthOidcProviderLoginParamsScreenHint `form:"screen_hint,omitempty" json:"screen_hint,omitempty"`
 }
+
+// GetAuthOidcProviderLoginParamsScreenHint defines parameters for GetAuthOidcProviderLogin.
+type GetAuthOidcProviderLoginParamsScreenHint string
 
 // GetTeamsIdMembersParams defines parameters for GetTeamsIdMembers.
 type GetTeamsIdMembersParams struct {

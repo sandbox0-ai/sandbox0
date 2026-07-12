@@ -445,6 +445,12 @@ func (h *AuthHandler) OIDCLogin(c *gin.Context) {
 	if isTruthyQuery(c.Query("web_login")) {
 		authOpts = append(authOpts, oidc.WithWebLoginHandoff())
 	}
+	if loginHint := strings.TrimSpace(c.Query("login_hint")); loginHint != "" {
+		authOpts = append(authOpts, oidc.WithLoginHint(loginHint))
+	}
+	if strings.EqualFold(strings.TrimSpace(c.Query("screen_hint")), "signup") {
+		authOpts = append(authOpts, oidc.WithSignupScreen())
+	}
 	authURL, err := h.oidcManager.GenerateAuthURL(providerID, returnURL, authOpts...)
 	if err != nil {
 		status := http.StatusBadRequest

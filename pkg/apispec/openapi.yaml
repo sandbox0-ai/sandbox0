@@ -213,6 +213,20 @@ paths:
             type: boolean
           required: false
           description: When true, the OIDC callback redirects to return_url with a short-lived login_code for server-side exchange.
+        - name: login_hint
+          in: query
+          schema:
+            type: string
+            maxLength: 320
+          required: false
+          description: Optional login identifier forwarded to the OIDC provider for account prefilling.
+        - name: screen_hint
+          in: query
+          schema:
+            type: string
+            enum: [signup]
+          required: false
+          description: Optional provider hint that starts a supported hosted login flow on its signup screen.
       responses:
         "302":
           description: Redirect to OIDC provider

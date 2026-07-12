@@ -35,7 +35,10 @@ func TestProviderAuthURLIncludesPKCEChallenge(t *testing.T) {
 		verifier = "verifier-123"
 	)
 
-	authURL := provider.AuthURL(state, verifier)
+	authURL := provider.AuthURL(state, verifier, authorizationHints{
+		LoginHint:  "invitee@example.com",
+		ScreenHint: "signup",
+	})
 	parsed, err := url.Parse(authURL)
 	if err != nil {
 		t.Fatalf("parse auth url: %v", err)
@@ -50,6 +53,12 @@ func TestProviderAuthURLIncludesPKCEChallenge(t *testing.T) {
 	}
 	if got := query.Get("code_challenge"); got == "" {
 		t.Fatal("expected code_challenge to be present")
+	}
+	if got := query.Get("login_hint"); got != "invitee@example.com" {
+		t.Fatalf("unexpected login_hint %q", got)
+	}
+	if got := query.Get("screen_hint"); got != "signup" {
+		t.Fatalf("unexpected screen_hint %q", got)
 	}
 }
 
@@ -570,7 +579,12 @@ func TestManagerGenerateAuthURLStoresVerifierInState(t *testing.T) {
 		states:   map[string]*StateData{},
 	}
 
-	authURL, err := manager.GenerateAuthURL("supabase", "/")
+	authURL, err := manager.GenerateAuthURL(
+		"supabase",
+		"/",
+		WithLoginHint(" invitee@example.com "),
+		WithSignupScreen(),
+	)
 	if err != nil {
 		t.Fatalf("generate auth url: %v", err)
 	}
@@ -582,6 +596,12 @@ func TestManagerGenerateAuthURLStoresVerifierInState(t *testing.T) {
 	state := parsed.Query().Get("state")
 	if state == "" {
 		t.Fatal("expected state query parameter")
+	}
+	if got := parsed.Query().Get("login_hint"); got != "invitee@example.com" {
+		t.Fatalf("unexpected login_hint %q", got)
+	}
+	if got := parsed.Query().Get("screen_hint"); got != "signup" {
+		t.Fatalf("unexpected screen_hint %q", got)
 	}
 
 	stateData, err := manager.ValidateState(state)

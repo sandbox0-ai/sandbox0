@@ -37,6 +37,7 @@ type CallbackResult struct {
 type identityStore interface {
 	GetUserIdentityByProviderSubject(ctx context.Context, provider, subject string) (*identity.UserIdentity, error)
 	GetUserByID(ctx context.Context, id string) (*identity.User, error)
+	UpdateUser(ctx context.Context, user *identity.User) error
 	UpdateUserIdentityClaims(ctx context.Context, id string, rawClaims []byte) error
 	GetUserByEmail(ctx context.Context, email string) (*identity.User, error)
 	CreateUser(ctx context.Context, user *identity.User) error
@@ -124,6 +125,8 @@ func (m *Manager) ListProviders() []*Provider {
 
 type authURLConfig struct {
 	webLoginHandoff bool
+	loginHint       string
+	screenHint      string
 }
 
 // AuthURLOption configures OIDC authorization URL generation.
@@ -133,6 +136,20 @@ type AuthURLOption func(*authURLConfig)
 func WithWebLoginHandoff() AuthURLOption {
 	return func(cfg *authURLConfig) {
 		cfg.webLoginHandoff = true
+	}
+}
+
+// WithLoginHint asks the upstream provider to prefill the login identifier.
+func WithLoginHint(value string) AuthURLOption {
+	return func(cfg *authURLConfig) {
+		cfg.loginHint = strings.TrimSpace(value)
+	}
+}
+
+// WithSignupScreen asks providers that support screen_hint to start on signup.
+func WithSignupScreen() AuthURLOption {
+	return func(cfg *authURLConfig) {
+		cfg.screenHint = "signup"
 	}
 }
 
@@ -150,6 +167,9 @@ func (m *Manager) GenerateAuthURL(providerID, returnURL string, opts ...AuthURLO
 	}
 	if cfg.webLoginHandoff && !m.IsAllowedWebReturnURL(returnURL) {
 		return "", ErrInvalidReturnURL
+	}
+	if len(cfg.loginHint) > 320 || strings.ContainsAny(cfg.loginHint, "\r\n") {
+		return "", ErrInvalidAuthorizationHint
 	}
 
 	// Generate state
@@ -172,7 +192,10 @@ func (m *Manager) GenerateAuthURL(providerID, returnURL string, opts ...AuthURLO
 	}
 	m.statesMu.Unlock()
 
-	return provider.AuthURL(state, verifier), nil
+	return provider.AuthURL(state, verifier, authorizationHints{
+		LoginHint:  cfg.loginHint,
+		ScreenHint: cfg.screenHint,
+	}), nil
 }
 
 // GenerateLogoutURL builds a provider logout URL for browser logout flows.
@@ -360,6 +383,10 @@ func (m *Manager) findOrCreateUser(ctx context.Context, provider *Provider, user
 			return nil, fmt.Errorf("get user: %w", err)
 		}
 
+		if err := m.syncUserClaims(ctx, user, userInfo); err != nil {
+			return nil, err
+		}
+
 		// Update claims
 		_ = m.repo.UpdateUserIdentityClaims(ctx, identityRecord.ID, userInfo.RawClaims)
 
@@ -373,6 +400,9 @@ func (m *Manager) findOrCreateUser(ctx context.Context, provider *Provider, user
 	// Check if user exists by email
 	user, err := m.repo.GetUserByEmail(ctx, userInfo.Email)
 	if err == nil {
+		if err := m.syncUserClaims(ctx, user, userInfo); err != nil {
+			return nil, err
+		}
 		// User exists, link identity
 		identityRecord := &identity.UserIdentity{
 			UserID:    user.ID,
@@ -420,6 +450,34 @@ func (m *Manager) findOrCreateUser(ctx context.Context, provider *Provider, user
 	}
 
 	return user, nil
+}
+
+// syncUserClaims promotes provider-verified state only when the stored and
+// asserted emails match, while refreshing non-security profile fields.
+func (m *Manager) syncUserClaims(ctx context.Context, user *identity.User, userInfo *UserInfo) error {
+	changed := false
+	if name := strings.TrimSpace(userInfo.Name); name != "" && name != user.Name {
+		user.Name = name
+		changed = true
+	}
+	if picture := strings.TrimSpace(userInfo.Picture); picture != "" && picture != user.AvatarURL {
+		user.AvatarURL = picture
+		changed = true
+	}
+	if userInfo.EmailVerified && !user.EmailVerified && strings.EqualFold(
+		strings.TrimSpace(user.Email),
+		strings.TrimSpace(userInfo.Email),
+	) {
+		user.EmailVerified = true
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	if err := m.repo.UpdateUser(ctx, user); err != nil {
+		return fmt.Errorf("update user from OIDC claims: %w", err)
+	}
+	return nil
 }
 
 // cleanupStates periodically cleans up expired states

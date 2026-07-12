@@ -23,6 +23,7 @@ var (
 	ErrInvalidState                = errors.New("invalid OAuth state")
 	ErrInvalidCode                 = errors.New("invalid authorization code")
 	ErrInvalidReturnURL            = errors.New("invalid return URL")
+	ErrInvalidAuthorizationHint    = errors.New("invalid authorization hint")
 	ErrProviderLogoutNotSupported  = errors.New("OIDC provider logout is not supported")
 	ErrMissingEmail                = errors.New("email not provided by IdP")
 	ErrHomeRegionNotRoutable       = errors.New("home region is not routable")
@@ -42,6 +43,11 @@ type UserInfo struct {
 	Name          string          `json:"name"`
 	Picture       string          `json:"picture"`
 	RawClaims     json.RawMessage `json:"raw_claims"`
+}
+
+type authorizationHints struct {
+	LoginHint  string
+	ScreenHint string
 }
 
 // Provider represents a configured OIDC provider
@@ -221,13 +227,20 @@ func (p *Provider) Config() *config.OIDCProviderConfig {
 	return p.config
 }
 
-// AuthURL returns the authorization URL with the given state and PKCE verifier.
-func (p *Provider) AuthURL(state, verifier string) string {
-	return p.oauth2Config.AuthCodeURL(
-		state,
+// AuthURL returns the authorization URL with the given state, PKCE verifier,
+// and optional provider-neutral login hints.
+func (p *Provider) AuthURL(state, verifier string, hints authorizationHints) string {
+	options := []oauth2.AuthCodeOption{
 		oauth2.AccessTypeOffline,
 		oauth2.S256ChallengeOption(verifier),
-	)
+	}
+	if hints.LoginHint != "" {
+		options = append(options, oauth2.SetAuthURLParam("login_hint", hints.LoginHint))
+	}
+	if hints.ScreenHint != "" {
+		options = append(options, oauth2.SetAuthURLParam("screen_hint", hints.ScreenHint))
+	}
+	return p.oauth2Config.AuthCodeURL(state, options...)
 }
 
 // Exchange exchanges an authorization code for tokens

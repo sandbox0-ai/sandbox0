@@ -72,7 +72,9 @@ Schedulers consume the manager cluster summary fields `claim_start_limit`, `clai
 
 ## Metering Boundary
 
-Sandbox0 records usage truth in the region usage ledger and exports it from the region-scoped metering endpoints. Metering is disabled by default. When `spec.metering.enabled` is `true`, metering requires `spec.clickHouse.type` to be `builtin` or `external` and writes usage truth only to ClickHouse. PostgreSQL remains the control-plane and data-plane state database; it is not a metering backend. Billing systems should rate exported usage windows outside the open-source data plane.
+Sandbox0 records usage truth in the region usage ledger and exports it from the region-scoped metering endpoints. Metering is disabled by default. When `spec.metering.enabled` is `true`, metering requires `spec.clickHouse.type` to be `builtin` or `external`. ClickHouse is the long-term usage ledger and the only metering query/export backend. PostgreSQL holds only a compact transactional delivery outbox and producer projection state; it is not a second queryable usage ledger. Producers capture stable, idempotent ClickHouse operations in that outbox, storage mutations use the same PostgreSQL business transaction, and manager retries the oldest transaction batch until ClickHouse accepts it.
+
+Metering export is therefore eventually consistent. Manager lifecycle events and storage mutations are normally visible after the projector poll (about two seconds). Netd byte windows add `meteringReportInterval` (10 seconds by default), while periodic storage byte-hour windows add up to one minute. A ClickHouse outage increases this delay without discarding committed outbox operations; after the one-time projection-state bootstrap has completed, producers can also restart while ClickHouse is unavailable. Export watermarks advance only after all older batches have been delivered. Monitor `manager_metering_outbox_pending_operations` and `manager_metering_outbox_oldest_pending_age_seconds` for delivery backlog. Billing systems should consume the exported watermark and rate usage windows outside the open-source data plane.
 
 Sandbox compute uses a serverless-style contract:
 

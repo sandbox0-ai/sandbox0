@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -33,6 +34,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	s0k8s "github.com/sandbox0-ai/sandbox0/pkg/k8s"
 	meteringclickhouse "github.com/sandbox0-ai/sandbox0/pkg/metering/clickhouse"
+	meteringoutbox "github.com/sandbox0-ai/sandbox0/pkg/metering/outbox"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
@@ -140,6 +142,11 @@ func main() {
 	}
 	if err := runEgressAuthMigrations(ctx, pool, logger); err != nil {
 		logger.Fatal("Failed to run egress auth migrations", zap.Error(err))
+	}
+	if cfg.Metering.Enabled {
+		if err := meteringoutbox.RunMigrations(ctx, pool, observability.NewMigrateLogger(logger)); err != nil {
+			logger.Fatal("Failed to run metering outbox migrations", zap.Error(err))
+		}
 	}
 	if err := runSandboxStoreMigrations(ctx, pool, logger); err != nil {
 		logger.Fatal("Failed to run sandbox store migrations", zap.Error(err))
@@ -249,7 +256,7 @@ func main() {
 
 	sandboxIndex := service.NewSandboxIndex()
 	podInformer.Informer().AddEventHandler(sandboxIndex.ResourceEventHandler())
-	meteringDB, meteringRepo, err := initMetering(ctx, cfg, logger)
+	meteringDB, meteringSink, meteringSinkReady, err := initMetering(ctx, cfg, logger)
 	if err != nil {
 		logger.Fatal("Failed to initialize metering backend", zap.Error(err))
 	}
@@ -257,6 +264,39 @@ func main() {
 		defer meteringDB.Close()
 	}
 	sandboxStore := service.NewPGSandboxStore(pool)
+	var meteringRepo *meteringoutbox.Repository
+	if cfg.Metering.Enabled {
+		meteringRepo = meteringoutbox.NewRepository(pool)
+	}
+	if meteringRepo != nil && meteringSink != nil {
+		bootstrapCompleted, err := meteringRepo.ProjectionBootstrapCompleted(ctx)
+		if err != nil {
+			logger.Fatal("Failed to inspect metering projection bootstrap", zap.Error(err))
+		}
+		if !meteringSinkReady && !bootstrapCompleted {
+			logger.Fatal("ClickHouse must be reachable for the initial metering projection bootstrap")
+		}
+		if meteringSinkReady {
+			bootstrap, err := meteringRepo.BootstrapProjectionStates(ctx, meteringSink)
+			if err != nil {
+				logger.Fatal("Failed to bootstrap metering projection state", zap.Error(err))
+			}
+			logger.Info("Metering projection state bootstrapped",
+				zap.Int64("sandbox_states", bootstrap.SandboxStates),
+				zap.Int64("storage_states", bootstrap.StorageStates),
+			)
+		} else {
+			logger.Warn("Starting with deferred ClickHouse metering delivery; projection bootstrap is already complete")
+		}
+		projector := meteringoutbox.NewProjector(meteringRepo, meteringSink, meteringoutbox.ProjectorConfig{}, logger)
+		projector.SetMetrics(managerMetrics)
+		go func() {
+			if err := projector.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("Metering outbox projector stopped", zap.Error(err))
+			}
+		}()
+		logger.Info("Metering PostgreSQL outbox projector started")
+	}
 	if meteringRepo != nil {
 		lifecycleProjector := managermetering.NewLifecycleProjector(managermetering.NewStore(meteringRepo), cfg.RegionID, cfg.DefaultClusterId)
 		lifecycleProjector.SetLogger(logger)
@@ -377,8 +417,8 @@ func main() {
 		managerMetrics,
 	)
 	var quotaUsageStore quota.UsageStore
-	if meteringRepo != nil {
-		quotaUsageStore = meteringRepo
+	if meteringSink != nil {
+		quotaUsageStore = meteringSink
 	}
 	quotaRepo, err := buildQuotaRepository(pool, cfg, quotaUsageStore)
 	if err != nil {
@@ -726,9 +766,9 @@ func runEgressAuthMigrations(ctx context.Context, pool *pgxpool.Pool, logger *za
 	return nil
 }
 
-func initMetering(ctx context.Context, cfg *config.ManagerConfig, logger *zap.Logger) (*sql.DB, *meteringclickhouse.Repository, error) {
+func initMetering(ctx context.Context, cfg *config.ManagerConfig, logger *zap.Logger) (*sql.DB, *meteringclickhouse.Repository, bool, error) {
 	if cfg == nil || !cfg.Metering.Enabled {
-		return nil, nil, nil
+		return nil, nil, false, nil
 	}
 	ch := cfg.Metering.ClickHouse
 	timeout := ch.ConnectTimeout.Duration
@@ -737,7 +777,7 @@ func initMetering(ctx context.Context, cfg *config.ManagerConfig, logger *zap.Lo
 	}
 	connectCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	db, repo, err := meteringclickhouse.Open(connectCtx, meteringclickhouse.OpenConfig{
+	openConfig := meteringclickhouse.OpenConfig{
 		DSN: strings.TrimSpace(ch.DSN),
 		Schema: meteringclickhouse.Config{
 			Database:          ch.Database,
@@ -748,9 +788,15 @@ func initMetering(ctx context.Context, cfg *config.ManagerConfig, logger *zap.Lo
 			StorageStateTable: ch.StorageStateTable,
 		},
 		Migrate: !ch.SkipSchemaMigration,
-	})
+	}
+	db, repo, err := meteringclickhouse.Open(connectCtx, openConfig)
 	if err != nil {
-		return nil, nil, fmt.Errorf("initialize clickhouse metering backend: %w", err)
+		deferredDB, deferredRepo, deferredErr := meteringclickhouse.OpenDeferred(openConfig)
+		if deferredErr != nil {
+			return nil, nil, false, fmt.Errorf("initialize deferred clickhouse metering backend after %v: %w", err, deferredErr)
+		}
+		logger.Warn("Metering ClickHouse backend is unavailable; delivery will retry from PostgreSQL", zap.Error(err))
+		return deferredDB, deferredRepo, false, nil
 	}
 	logger.Info("Metering ClickHouse backend initialized",
 		zap.String("database", ch.Database),
@@ -758,7 +804,7 @@ func initMetering(ctx context.Context, cfg *config.ManagerConfig, logger *zap.Lo
 		zap.String("windows_table", ch.WindowsTable),
 		zap.Bool("schema_migration", !ch.SkipSchemaMigration),
 	)
-	return db, repo, nil
+	return db, repo, true, nil
 }
 
 func buildQuotaRepository(pool *pgxpool.Pool, cfg *config.ManagerConfig, usageStore quota.UsageStore) (*quota.Repository, error) {

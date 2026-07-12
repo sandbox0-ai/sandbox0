@@ -144,12 +144,32 @@ func TestAggregatorFlushFailureRetainsUsage(t *testing.T) {
 	}
 
 	agg.mu.Lock()
-	defer agg.mu.Unlock()
-	if agg.usage["sb-1"] == nil || agg.usage["sb-1"].egress != 50 {
-		t.Fatalf("usage not retained after failure: %#v", agg.usage["sb-1"])
+	if agg.pending == nil || agg.pending.usage["sb-1"] == nil || agg.pending.usage["sb-1"].egress != 50 {
+		t.Fatalf("pending usage not retained after failure: %#v", agg.pending)
 	}
-	if !agg.windowStart.Equal(start) {
-		t.Fatalf("window start advanced on failure: %v", agg.windowStart)
+	failedStart := agg.pending.start
+	failedEnd := agg.pending.end
+	agg.mu.Unlock()
+	if !failedStart.Equal(start) || !failedEnd.Equal(end) {
+		t.Fatalf("failed window = [%v, %v], want [%v, %v]", failedStart, failedEnd, start, end)
+	}
+
+	nextEnd := end.Add(10 * time.Second)
+	agg.now = func() time.Time { return nextEnd }
+	agg.RecordEgress(&policypkg.CompiledPolicy{SandboxID: "sb-1", TeamID: "team-1"}, 25)
+	recorder.tx.appendErr = nil
+	if err := agg.Flush(context.Background()); err != nil {
+		t.Fatalf("retry Flush: %v", err)
+	}
+	if len(recorder.tx.windows) != 2 {
+		t.Fatalf("window count after retry = %d, want 2", len(recorder.tx.windows))
+	}
+	first, second := recorder.tx.windows[0], recorder.tx.windows[1]
+	if first.Value != 50 || !first.WindowStart.Equal(start) || !first.WindowEnd.Equal(end) {
+		t.Fatalf("retried window = %#v, want stable failed interval", first)
+	}
+	if second.Value != 25 || !second.WindowStart.Equal(end) || !second.WindowEnd.Equal(nextEnd) {
+		t.Fatalf("residual window = %#v, want separate next interval", second)
 	}
 }
 

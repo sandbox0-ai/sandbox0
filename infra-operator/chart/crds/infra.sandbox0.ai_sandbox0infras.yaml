@@ -1793,8 +1793,8 @@ spec:
                     type: object
                   enabled:
                     default: false
-                    description: Enabled enables ClickHouse-backed metering. Metering
-                      is disabled by default.
+                    description: Enabled enables PostgreSQL-buffered, ClickHouse-backed
+                      metering. Metering is disabled by default.
                     type: boolean
                 type: object
               observability:

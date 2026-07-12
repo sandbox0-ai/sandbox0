@@ -31,6 +31,10 @@ type ManagerMetrics struct {
 	MeteringEventsTotal             *prometheus.CounterVec
 	MeteringWindowsTotal            *prometheus.CounterVec
 	MeteringErrorsTotal             *prometheus.CounterVec
+	MeteringOutboxBatchesTotal      *prometheus.CounterVec
+	MeteringOutboxOperationsTotal   *prometheus.CounterVec
+	MeteringOutboxPendingOperations prometheus.Gauge
+	MeteringOutboxOldestPendingAge  prometheus.Gauge
 	RootFSMaintenanceRunsTotal      *prometheus.CounterVec
 	RootFSMaintenanceDuration       *prometheus.HistogramVec
 	RootFSGCLayersTotal             prometheus.Counter
@@ -153,6 +157,22 @@ func NewManager(registry prometheus.Registerer) *ManagerMetrics {
 			Name: "manager_metering_errors_total",
 			Help: "Total number of manager metering projector errors",
 		}, []string{"operation"}),
+		MeteringOutboxBatchesTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "manager_metering_outbox_batches_total",
+			Help: "Total number of PostgreSQL metering outbox batches by delivery result",
+		}, []string{"result"}),
+		MeteringOutboxOperationsTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "manager_metering_outbox_operations_total",
+			Help: "Total number of metering outbox operation delivery attempts by type and result",
+		}, []string{"operation_type", "result"}),
+		MeteringOutboxPendingOperations: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "manager_metering_outbox_pending_operations",
+			Help: "Number of metering outbox operations awaiting ClickHouse delivery",
+		}),
+		MeteringOutboxOldestPendingAge: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "manager_metering_outbox_oldest_pending_age_seconds",
+			Help: "Age in seconds of the oldest metering outbox operation awaiting ClickHouse delivery",
+		}),
 		RootFSMaintenanceRunsTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "manager_rootfs_maintenance_runs_total",
 			Help: "Total number of rootfs maintenance cycles",

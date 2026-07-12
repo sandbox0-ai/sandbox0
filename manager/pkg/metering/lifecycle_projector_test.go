@@ -187,6 +187,33 @@ func TestLifecycleProjectorIgnoresStatusOnlySandboxUpdates(t *testing.T) {
 	}
 }
 
+func TestLifecycleProjectorRetriesStatusOnlyUpdateAfterFailedProjection(t *testing.T) {
+	recorder := &fakeRecorder{
+		states: map[string]*meteringpkg.SandboxProjectionState{},
+		txErr:  errors.New("postgres unavailable"),
+	}
+	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
+	claimedAt := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
+	oldPod := withSandboxResources(buildSandboxPod(claimedAt, false, "", "1"), "1", "1Gi")
+	projector.handleUpsert(oldPod)
+
+	recorder.txErr = nil
+	newPod := oldPod.DeepCopy()
+	newPod.ResourceVersion = "2"
+	newPod.Status.Phase = corev1.PodRunning
+	projector.handleUpdate(oldPod, newPod)
+
+	if recorder.transactionCalls != 1 {
+		t.Fatalf("successful transaction calls = %d, want 1 retry", recorder.transactionCalls)
+	}
+	if len(recorder.events) != 1 || recorder.events[0].EventType != meteringpkg.EventTypeSandboxClaimed {
+		t.Fatalf("events after retry = %#v, want claimed event", recorder.events)
+	}
+	if state := recorder.states["sb-1"]; state == nil || state.LastResourceVer != "2" {
+		t.Fatalf("state after retry = %#v, want resource version 2", state)
+	}
+}
+
 func TestLifecycleProjectorPersistsMeteringRelevantSandboxUpdates(t *testing.T) {
 	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
 	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")

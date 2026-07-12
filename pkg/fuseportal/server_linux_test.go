@@ -4,7 +4,11 @@ package fuseportal
 
 import (
 	"encoding/binary"
+	"errors"
+	"io"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -262,4 +266,155 @@ func TestHandleAndReplyReturnsProtocolErrorToKernel(t *testing.T) {
 	if got := int32(binary.LittleEndian.Uint32(response[4:8])); got != -int32(fuse.ENOSYS) {
 		t.Fatalf("response error = %d, want %d", got, -int32(fuse.ENOSYS))
 	}
+}
+
+func TestSharedEpollMultiplexesPortalChannels(t *testing.T) {
+	mux, err := sharedEpollMultiplexer()
+	if err != nil {
+		t.Fatalf("sharedEpollMultiplexer() error = %v", err)
+	}
+	baseline := mux.activeCount()
+	baselineThreads, threadCountErr := processThreadCount()
+	const serverCount = 128
+	portalFS := newTakeoverTestFS("")
+	type portalPair struct {
+		server *Server
+		peerFD int
+		done   chan error
+	}
+	pairs := make([]portalPair, 0, serverCount)
+	for i := 0; i < serverCount; i++ {
+		fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+		if err != nil {
+			t.Fatalf("Socketpair(%d) error = %v", i, err)
+		}
+		server, err := newServer(portalFS, fds[0], "", &fuse.MountOptions{})
+		if err != nil {
+			_ = unix.Close(fds[0])
+			_ = unix.Close(fds[1])
+			t.Fatalf("newServer(%d) error = %v", i, err)
+		}
+		readTimeout := unix.NsecToTimeval((3 * time.Second).Nanoseconds())
+		if err := unix.SetsockoptTimeval(fds[1], unix.SOL_SOCKET, unix.SO_RCVTIMEO, &readTimeout); err != nil {
+			_ = server.Detach()
+			_ = unix.Close(fds[1])
+			t.Fatalf("SetsockoptTimeval(%d) error = %v", i, err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- server.Serve() }()
+		pairs = append(pairs, portalPair{server: server, peerFD: fds[1], done: done})
+	}
+	t.Cleanup(func() {
+		for _, pair := range pairs {
+			_ = pair.server.Detach()
+			if pair.peerFD >= 0 {
+				_ = unix.Close(pair.peerFD)
+			}
+		}
+	})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for mux.activeCount() != baseline+serverCount {
+		if time.Now().After(deadline) {
+			t.Fatalf("active epoll registrations = %d, want %d", mux.activeCount(), baseline+serverCount)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if threadCountErr == nil {
+		threads, err := processThreadCount()
+		if err != nil {
+			t.Fatalf("processThreadCount() error = %v", err)
+		}
+		if delta := threads - baselineThreads; delta > 32 {
+			t.Fatalf("OS thread count grew by %d for %d idle portals; want at most 32", delta, serverCount)
+		}
+	}
+
+	request := make([]byte, int(unsafe.Sizeof(fuse.GetAttrIn{})))
+	binary.LittleEndian.PutUint32(request[0:4], uint32(len(request)))
+	binary.LittleEndian.PutUint32(request[4:8], opGetattr)
+	binary.LittleEndian.PutUint64(request[16:24], fuseRootID)
+	for i, pair := range pairs {
+		binary.LittleEndian.PutUint64(request[8:16], uint64(i+1))
+		if _, err := unix.Write(pair.peerFD, request); err != nil {
+			t.Fatalf("Write(request %d) error = %v", i, err)
+		}
+	}
+	for i, pair := range pairs {
+		response, err := readTestResponse(pair.peerFD)
+		if err != nil {
+			t.Fatalf("Read(response %d) error = %v", i, err)
+		}
+		if got := binary.LittleEndian.Uint64(response[8:16]); got != uint64(i+1) {
+			t.Fatalf("response %d unique = %d, want %d", i, got, i+1)
+		}
+		if got := int32(binary.LittleEndian.Uint32(response[4:8])); got != 0 {
+			t.Fatalf("response %d error = %d, want 0", i, got)
+		}
+	}
+	for i, pair := range pairs {
+		if err := pair.server.Detach(); err != nil {
+			t.Fatalf("Detach(%d) error = %v", i, err)
+		}
+		if err := <-pair.done; err != nil {
+			t.Fatalf("Serve(%d) error = %v", i, err)
+		}
+		_ = unix.Close(pair.peerFD)
+		pairs[i].peerFD = -1
+	}
+	if got := mux.activeCount(); got != baseline {
+		t.Fatalf("active epoll registrations after detach = %d, want %d", got, baseline)
+	}
+}
+
+func readTestResponse(fd int) ([]byte, error) {
+	header := make([]byte, fuseOutSize)
+	if err := readFullFD(fd, header); err != nil {
+		return nil, err
+	}
+	length := int(binary.LittleEndian.Uint32(header[:4]))
+	if length < fuseOutSize || length > 1<<20 {
+		return nil, syscall.EPROTO
+	}
+	response := make([]byte, length)
+	copy(response, header)
+	if err := readFullFD(fd, response[fuseOutSize:]); err != nil {
+		return nil, err
+	}
+	return response, nil
+}
+
+func readFullFD(fd int, buffer []byte) error {
+	for len(buffer) > 0 {
+		count, err := unix.Read(fd, buffer)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			return io.ErrUnexpectedEOF
+		}
+		buffer = buffer[count:]
+	}
+	return nil
+}
+
+func processThreadCount() (int, error) {
+	payload, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return 0, err
+	}
+	for _, line := range strings.Split(string(payload), "\n") {
+		if !strings.HasPrefix(line, "Threads:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			return 0, syscall.EINVAL
+		}
+		return strconv.Atoi(fields[1])
+	}
+	return 0, syscall.ENOENT
 }

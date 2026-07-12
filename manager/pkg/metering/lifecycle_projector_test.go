@@ -163,6 +163,50 @@ func TestLifecycleProjectorRecordsClaimPauseResumeTerminate(t *testing.T) {
 	}
 }
 
+func TestLifecycleProjectorIgnoresStatusOnlySandboxUpdates(t *testing.T) {
+	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
+	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
+	claimedAt := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
+	oldPod := withSandboxResources(buildSandboxPod(claimedAt, false, "", "1"), "1", "1Gi")
+	projector.handleUpsert(oldPod)
+
+	newPod := oldPod.DeepCopy()
+	newPod.ResourceVersion = "2"
+	newPod.Status.Phase = corev1.PodRunning
+	newPod.Status.PodIP = "10.0.0.10"
+	projector.handleUpdate(oldPod, newPod)
+
+	if recorder.transactionCalls != 1 {
+		t.Fatalf("transaction calls = %d, want 1 after status-only update", recorder.transactionCalls)
+	}
+	if recorder.watermarkHits != 1 {
+		t.Fatalf("watermark writes = %d, want 1 after status-only update", recorder.watermarkHits)
+	}
+	if state := recorder.states["sb-1"]; state == nil || state.LastResourceVer != "1" {
+		t.Fatalf("state after status-only update = %#v, want original resource version", state)
+	}
+}
+
+func TestLifecycleProjectorPersistsMeteringRelevantSandboxUpdates(t *testing.T) {
+	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
+	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
+	claimedAt := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
+	oldPod := withSandboxResources(buildSandboxPod(claimedAt, false, "", "1"), "1", "1Gi")
+	projector.handleUpsert(oldPod)
+
+	newPod := withSandboxResources(oldPod.DeepCopy(), "2", "2Gi")
+	newPod.ResourceVersion = "2"
+	projector.handleUpdate(oldPod, newPod)
+
+	if recorder.transactionCalls != 2 {
+		t.Fatalf("transaction calls = %d, want 2 after resource update", recorder.transactionCalls)
+	}
+	state := recorder.states["sb-1"]
+	if state == nil || state.ResourceMillicpu != 2000 || state.ResourceMemoryMiB != 2048 || state.LastResourceVer != "2" {
+		t.Fatalf("state after resource update = %#v", state)
+	}
+}
+
 func TestLifecycleProjectorRecordsErrorsInMetrics(t *testing.T) {
 	recorder := &fakeRecorder{
 		states: map[string]*meteringpkg.SandboxProjectionState{},

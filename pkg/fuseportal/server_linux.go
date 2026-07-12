@@ -69,10 +69,13 @@ type Server struct {
 	mountPoint  string
 	initRequest []byte
 	fd          int
-	wakeFD      int
 	fdMu        sync.Mutex
 	serving     bool
 	serveMu     sync.Mutex
+	mux         *epollMultiplexer
+	muxToken    uint64
+	serveResult chan error
+	stopOnce    sync.Once
 	requests    sync.WaitGroup
 	done        chan struct{}
 	doneOnce    sync.Once
@@ -163,18 +166,19 @@ func Attach(fs fuse.RawFileSystem, channel *os.File, mountPoint string, initRequ
 }
 
 func newServer(fs fuse.RawFileSystem, fd int, mountPoint string, opts *fuse.MountOptions) (*Server, error) {
-	wakeFD, err := unix.Eventfd(0, unix.EFD_CLOEXEC|unix.EFD_NONBLOCK)
+	mux, err := sharedEpollMultiplexer()
 	if err != nil {
-		return nil, fmt.Errorf("create FUSE wake event: %w", err)
+		return nil, err
 	}
 	return &Server{
-		fs:         fs,
-		protocol:   fuse.NewProtocolServer(fs, opts),
-		opts:       *opts,
-		mountPoint: mountPoint,
-		fd:         fd,
-		wakeFD:     wakeFD,
-		done:       make(chan struct{}),
+		fs:          fs,
+		protocol:    fuse.NewProtocolServer(fs, opts),
+		opts:        *opts,
+		mountPoint:  mountPoint,
+		fd:          fd,
+		mux:         mux,
+		serveResult: make(chan error, 1),
+		done:        make(chan struct{}),
 	}, nil
 }
 
@@ -190,52 +194,16 @@ func (s *Server) Serve() error {
 		return fmt.Errorf("FUSE server is already serving")
 	}
 	s.serving = true
+	if err := s.mux.add(s); err != nil {
+		s.serveMu.Unlock()
+		s.finish()
+		return err
+	}
 	s.serveMu.Unlock()
 
-	defer s.finish()
-	s.fdMu.Lock()
-	channelFD := s.fd
-	wakeFD := s.wakeFD
-	s.fdMu.Unlock()
-	pollFDs := []unix.PollFd{
-		{Fd: int32(channelFD), Events: unix.POLLIN},
-		{Fd: int32(wakeFD), Events: unix.POLLIN},
-	}
-	for {
-		_, err := unix.Poll(pollFDs, -1)
-		if errors.Is(err, unix.EINTR) {
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("poll FUSE channel: %w", err)
-		}
-		if pollFDs[1].Revents != 0 {
-			return nil
-		}
-		if pollFDs[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
-			return nil
-		}
-		if pollFDs[0].Revents&unix.POLLIN == 0 {
-			continue
-		}
-		request, err := readRequest(channelFD, s.opts.MaxWrite)
-		if errors.Is(err, unix.ENODEV) || errors.Is(err, unix.EBADF) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("read FUSE request: %w", err)
-		}
-		s.requests.Add(1)
-		go func() {
-			defer s.requests.Done()
-			if err := s.handleAndReply(request); err != nil {
-				if s.opts.Logger != nil {
-					s.opts.Logger.Printf("handle FUSE request: %v", err)
-				}
-				_ = s.replyError(request, fuse.EIO)
-			}
-		}()
-	}
+	err := <-s.serveResult
+	s.finish()
+	return err
 }
 
 // CloneChannel creates a second device channel attached to the same kernel
@@ -281,7 +249,7 @@ func (s *Server) Detach() error {
 	if s.stopIdle() {
 		return nil
 	}
-	s.wake()
+	s.requestStop(nil)
 	<-s.done
 	return nil
 }
@@ -300,7 +268,7 @@ func (s *Server) Unmount() error {
 	if s.stopIdle() {
 		return unmountErr
 	}
-	s.wake()
+	s.requestStop(nil)
 	<-s.done
 	return unmountErr
 }
@@ -312,22 +280,21 @@ func (s *Server) stopIdle() bool {
 		return false
 	}
 	s.serving = true
+	s.requestStop(nil)
 	s.finish()
 	return true
 }
 
-func (s *Server) wake() {
+func (s *Server) requestStop(err error) {
 	if s == nil {
 		return
 	}
-	s.fdMu.Lock()
-	defer s.fdMu.Unlock()
-	if s.wakeFD < 0 {
-		return
-	}
-	var value [8]byte
-	binary.LittleEndian.PutUint64(value[:], 1)
-	_, _ = unix.Write(s.wakeFD, value[:])
+	s.stopOnce.Do(func() {
+		if s.mux != nil {
+			s.mux.remove(s)
+		}
+		s.serveResult <- err
+	})
 }
 
 func (s *Server) finish() {
@@ -347,13 +314,43 @@ func (s *Server) closeDescriptors() error {
 		}
 		s.fd = -1
 	}
-	if s.wakeFD >= 0 {
-		if err := unix.Close(s.wakeFD); err != nil && !errors.Is(err, unix.EBADF) && firstErr == nil {
-			firstErr = err
-		}
-		s.wakeFD = -1
-	}
 	return firstErr
+}
+
+func (s *Server) handleReady(events uint32) (bool, error) {
+	if events&uint32(unix.EPOLLIN) == 0 {
+		if events&uint32(unix.EPOLLERR|unix.EPOLLHUP) != 0 {
+			return true, nil
+		}
+		return false, nil
+	}
+	s.fdMu.Lock()
+	channelFD := s.fd
+	s.fdMu.Unlock()
+	if channelFD < 0 {
+		return true, nil
+	}
+	request, err := readRequest(channelFD, s.opts.MaxWrite)
+	if errors.Is(err, unix.ENODEV) || errors.Is(err, unix.EBADF) {
+		return true, nil
+	}
+	if err != nil {
+		return true, fmt.Errorf("read FUSE request: %w", err)
+	}
+	s.requests.Add(1)
+	go func() {
+		defer s.requests.Done()
+		if err := s.handleAndReply(request); err != nil {
+			if s.opts.Logger != nil {
+				s.opts.Logger.Printf("handle FUSE request: %v", err)
+			}
+			_ = s.replyError(request, fuse.EIO)
+		}
+	}()
+	if events&uint32(unix.EPOLLERR|unix.EPOLLHUP) != 0 {
+		return true, nil
+	}
+	return false, nil
 }
 
 func (s *Server) initializeProtocol(request []byte) error {

@@ -319,13 +319,9 @@ LIMIT ?
 	if err := rows.Err(); err != nil {
 		return nil, "", fmt.Errorf("iterate usage events: %w", err)
 	}
-	next := ""
-	if len(events) == limit {
-		last := events[len(events)-1]
-		next, err = encodeCursor(last.RecordedAt, last.Producer, last.EventID)
-		if err != nil {
-			return nil, "", err
-		}
+	next, err := nextEventCursor(events)
+	if err != nil {
+		return nil, "", err
 	}
 	return events, next, nil
 }
@@ -380,15 +376,33 @@ LIMIT ?
 	if err := rows.Err(); err != nil {
 		return nil, "", fmt.Errorf("iterate usage windows: %w", err)
 	}
-	next := ""
-	if len(windows) == limit {
-		last := windows[len(windows)-1]
-		next, err = encodeCursor(last.RecordedAt, last.Producer, last.WindowID)
-		if err != nil {
-			return nil, "", err
-		}
+	next, err := nextWindowCursor(windows)
+	if err != nil {
+		return nil, "", err
 	}
 	return windows, next, nil
+}
+
+func nextEventCursor(events []*metering.Event) (string, error) {
+	if len(events) == 0 {
+		return "", nil
+	}
+	last := events[len(events)-1]
+	if last == nil {
+		return "", fmt.Errorf("last usage event is nil")
+	}
+	return encodeCursor(last.RecordedAt, last.Producer, last.EventID)
+}
+
+func nextWindowCursor(windows []*metering.Window) (string, error) {
+	if len(windows) == 0 {
+		return "", nil
+	}
+	last := windows[len(windows)-1]
+	if last == nil {
+		return "", fmt.Errorf("last usage window is nil")
+	}
+	return encodeCursor(last.RecordedAt, last.Producer, last.WindowID)
 }
 
 func cursorWhere(cursor *pageCursor, idColumn string) (string, []any) {

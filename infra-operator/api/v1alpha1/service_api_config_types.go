@@ -530,7 +530,7 @@ type ClickHouseSchemaMigrationConfig struct {
 
 // MeteringConfig defines the region usage ledger backend.
 type MeteringConfig struct {
-	// Enabled enables ClickHouse-backed metering. Metering is disabled by default.
+	// Enabled enables PostgreSQL-buffered, ClickHouse-backed metering. Metering is disabled by default.
 	// +optional
 	// +kubebuilder:default=false
 	Enabled *bool `json:"enabled,omitempty"`

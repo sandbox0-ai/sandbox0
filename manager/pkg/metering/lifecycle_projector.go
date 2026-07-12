@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -102,14 +103,17 @@ type LifecycleProjector struct {
 	logger             *zap.Logger
 	metrics            *obsmetrics.ManagerMetrics
 	now                func() time.Time
+	projectionMu       sync.RWMutex
+	activeProjections  map[string]activeSandboxProjectionInputs
 }
 
 func NewLifecycleProjector(store Store, regionID string, clusterID string) *LifecycleProjector {
 	return &LifecycleProjector{
-		store:     store,
-		regionID:  regionID,
-		clusterID: clusterID,
-		logger:    zap.NewNop(),
+		store:             store,
+		regionID:          regionID,
+		clusterID:         clusterID,
+		logger:            zap.NewNop(),
+		activeProjections: make(map[string]activeSandboxProjectionInputs),
 		now: func() time.Time {
 			return time.Now().UTC()
 		},
@@ -152,8 +156,7 @@ func (p *LifecycleProjector) handleUpdate(oldObj, newObj any) {
 		p.handleUpsert(newObj)
 		return
 	}
-	if isClaimedActiveSandbox(oldPod) && isClaimedActiveSandbox(newPod) &&
-		activeSandboxProjectionInput(oldPod) == activeSandboxProjectionInput(newPod) {
+	if isClaimedActiveSandbox(newPod) && p.activeProjectionSucceeded(newPod) {
 		return
 	}
 	p.handleUpsert(newObj)
@@ -291,6 +294,7 @@ func (p *LifecycleProjector) handleUpsert(obj any) {
 	if err := p.commitProjection(ctx, sandboxID, state, pendingEvents, pendingWindows, observedAt); err != nil {
 		return
 	}
+	p.rememberActiveProjection(pod)
 }
 
 func (p *LifecycleProjector) handleDelete(obj any) {
@@ -377,6 +381,7 @@ func (p *LifecycleProjector) handleDelete(obj any) {
 		if err := p.commitProjection(ctx, sandboxID, state, pendingEvents, pendingWindows, observedAt); err != nil {
 			return
 		}
+		p.forgetActiveProjection(sandboxID)
 		return
 	}
 	if state.TerminatedAt == nil {
@@ -393,6 +398,37 @@ func (p *LifecycleProjector) handleDelete(obj any) {
 	if err := p.commitProjection(ctx, sandboxID, state, pendingEvents, pendingWindows, observedAt); err != nil {
 		return
 	}
+	p.forgetActiveProjection(sandboxID)
+}
+
+func (p *LifecycleProjector) activeProjectionSucceeded(pod *corev1.Pod) bool {
+	input := activeSandboxProjectionInput(pod)
+	if input.sandboxID == "" {
+		return false
+	}
+	p.projectionMu.RLock()
+	projected, ok := p.activeProjections[input.sandboxID]
+	p.projectionMu.RUnlock()
+	return ok && projected == input
+}
+
+func (p *LifecycleProjector) rememberActiveProjection(pod *corev1.Pod) {
+	input := activeSandboxProjectionInput(pod)
+	if input.sandboxID == "" {
+		return
+	}
+	p.projectionMu.Lock()
+	p.activeProjections[input.sandboxID] = input
+	p.projectionMu.Unlock()
+}
+
+func (p *LifecycleProjector) forgetActiveProjection(sandboxID string) {
+	if sandboxID == "" {
+		return
+	}
+	p.projectionMu.Lock()
+	delete(p.activeProjections, sandboxID)
+	p.projectionMu.Unlock()
 }
 
 func (p *LifecycleProjector) runtimeDeletionIsPause(ctx context.Context, info RuntimeDeletionInfo) (bool, error) {

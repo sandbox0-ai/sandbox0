@@ -25,6 +25,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	meteringclickhouse "github.com/sandbox0-ai/sandbox0/pkg/metering/clickhouse"
+	meteringoutbox "github.com/sandbox0-ai/sandbox0/pkg/metering/outbox"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
@@ -177,13 +178,16 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 		}
 	}
 	if d.cfg.Metering.Enabled {
-		db, repo, err := d.openMetering(ctx)
+		if databasePool == nil {
+			return fmt.Errorf("DATABASE_URL is required when metering is enabled")
+		}
+		db, usageStore, err := d.openMetering(ctx)
 		if err != nil {
 			return err
 		}
 		meteringDB = sqlRuntimeResource{db: db}
 		usageAggregator = netdmetering.NewAggregator(
-			netdmetering.NewRecorder(repo),
+			netdmetering.NewRecorder(meteringoutbox.NewRepository(databasePool)),
 			d.cfg.RegionID,
 			d.cfg.ClusterID,
 			d.cfg.NodeName,
@@ -191,7 +195,7 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 		)
 		if databasePool != nil {
 			quotaRepo := quota.NewRepository(databasePool)
-			quotaRepo.SetUsageStore(repo)
+			quotaRepo.SetUsageStore(usageStore)
 			usageAggregator.SetQuotaStore(quotaRepo)
 		}
 	}
@@ -356,7 +360,7 @@ func (d *Daemon) openMetering(ctx context.Context) (*sql.DB, *meteringclickhouse
 	}
 	connectCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	db, repo, err := meteringclickhouse.Open(connectCtx, meteringclickhouse.OpenConfig{
+	openConfig := meteringclickhouse.OpenConfig{
 		DSN: strings.TrimSpace(ch.DSN),
 		Schema: meteringclickhouse.Config{
 			Database:          ch.Database,
@@ -367,9 +371,15 @@ func (d *Daemon) openMetering(ctx context.Context) (*sql.DB, *meteringclickhouse
 			StorageStateTable: ch.StorageStateTable,
 		},
 		Migrate: !ch.SkipSchemaMigration,
-	})
+	}
+	db, repo, err := meteringclickhouse.Open(connectCtx, openConfig)
 	if err != nil {
-		return nil, nil, fmt.Errorf("initialize clickhouse metering backend: %w", err)
+		deferredDB, deferredRepo, deferredErr := meteringclickhouse.OpenDeferred(openConfig)
+		if deferredErr != nil {
+			return nil, nil, fmt.Errorf("initialize deferred clickhouse metering backend after %v: %w", err, deferredErr)
+		}
+		d.logger.Warn("Metering ClickHouse backend is unavailable; usage capture will continue in PostgreSQL", zap.Error(err))
+		return deferredDB, deferredRepo, nil
 	}
 	d.logger.Info("Metering ClickHouse backend initialized",
 		zap.String("database", ch.Database),

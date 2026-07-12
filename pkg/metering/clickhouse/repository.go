@@ -5,11 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"math"
-	"math/big"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	metering "github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 )
@@ -31,18 +28,7 @@ func NewRepository(db *sql.DB, cfg Config) *Repository {
 	}
 }
 
-func (r *Repository) InTx(ctx context.Context, fn func(pgx.Tx) error) error {
-	if fn == nil {
-		return nil
-	}
-	return fn(nil)
-}
-
 func (r *Repository) AppendEvent(ctx context.Context, event *metering.Event) error {
-	return r.appendEvent(ctx, event)
-}
-
-func (r *Repository) AppendEventTx(ctx context.Context, _ pgx.Tx, event *metering.Event) error {
 	return r.appendEvent(ctx, event)
 }
 
@@ -100,10 +86,6 @@ INSERT INTO %s (
 }
 
 func (r *Repository) AppendWindow(ctx context.Context, window *metering.Window) error {
-	return r.appendWindow(ctx, window)
-}
-
-func (r *Repository) AppendWindowTx(ctx context.Context, _ pgx.Tx, window *metering.Window) error {
 	return r.appendWindow(ctx, window)
 }
 
@@ -172,10 +154,6 @@ INSERT INTO %s (
 }
 
 func (r *Repository) UpsertProducerWatermark(ctx context.Context, producer string, regionID string, completeBefore time.Time) error {
-	return r.upsertProducerWatermark(ctx, producer, regionID, completeBefore)
-}
-
-func (r *Repository) UpsertProducerWatermarkTx(ctx context.Context, _ pgx.Tx, producer string, regionID string, completeBefore time.Time) error {
 	return r.upsertProducerWatermark(ctx, producer, regionID, completeBefore)
 }
 
@@ -448,11 +426,49 @@ LIMIT 1
 	return state, nil
 }
 
-func (r *Repository) UpsertSandboxProjectionState(ctx context.Context, state *metering.SandboxProjectionState) error {
-	return r.upsertSandboxProjectionState(ctx, state)
+// ListActiveSandboxProjectionStates returns current producer state needed to
+// bootstrap the PostgreSQL delivery outbox during an upgrade.
+func (r *Repository) ListActiveSandboxProjectionStates(ctx context.Context) ([]*metering.SandboxProjectionState, error) {
+	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
+SELECT
+    sandbox_id, namespace, team_id, user_id, template_id, cluster_id,
+    owner_kind, resource_millicpu, resource_memory_mib,
+    claimed_at, active_since, paused, paused_at, terminated_at,
+    last_observed_at, last_resource_version
+FROM %s FINAL
+WHERE terminated_at IS NULL
+`, qualified(r.cfg.Database, r.cfg.SandboxStateTable)))
+	if err != nil {
+		return nil, fmt.Errorf("query active sandbox projection states: %w", err)
+	}
+	defer rows.Close()
+	states := make([]*metering.SandboxProjectionState, 0)
+	for rows.Next() {
+		state := &metering.SandboxProjectionState{}
+		var paused uint8
+		var claimedAt, activeSince, pausedAt, terminatedAt sql.NullTime
+		if err := rows.Scan(
+			&state.SandboxID, &state.Namespace, &state.TeamID, &state.UserID, &state.TemplateID, &state.ClusterID,
+			&state.OwnerKind, &state.ResourceMillicpu, &state.ResourceMemoryMiB,
+			&claimedAt, &activeSince, &paused, &pausedAt, &terminatedAt,
+			&state.LastObservedAt, &state.LastResourceVer,
+		); err != nil {
+			return nil, fmt.Errorf("scan active sandbox projection state: %w", err)
+		}
+		state.Paused = paused != 0
+		state.ClaimedAt = nullableTimePtr(claimedAt)
+		state.ActiveSince = nullableTimePtr(activeSince)
+		state.PausedAt = nullableTimePtr(pausedAt)
+		state.TerminatedAt = nullableTimePtr(terminatedAt)
+		states = append(states, state)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate active sandbox projection states: %w", err)
+	}
+	return states, nil
 }
 
-func (r *Repository) UpsertSandboxProjectionStateTx(ctx context.Context, _ pgx.Tx, state *metering.SandboxProjectionState) error {
+func (r *Repository) UpsertSandboxProjectionState(ctx context.Context, state *metering.SandboxProjectionState) error {
 	return r.upsertSandboxProjectionState(ctx, state)
 }
 
@@ -488,209 +504,6 @@ INSERT INTO %s (
 	return nil
 }
 
-func (r *Repository) RecordStorageObservation(ctx context.Context, observation *metering.StorageObservation) error {
-	return r.recordStorageObservation(ctx, observation)
-}
-
-func (r *Repository) RecordStorageObservationTx(ctx context.Context, _ pgx.Tx, observation *metering.StorageObservation) error {
-	return r.recordStorageObservation(ctx, observation)
-}
-
-func (r *Repository) recordStorageObservation(ctx context.Context, observation *metering.StorageObservation) error {
-	state, err := r.normalizeStorageObservation(ctx, observation)
-	if err != nil {
-		return err
-	}
-	previous, err := r.getStorageProjectionState(ctx, state.SubjectType, state.SubjectID)
-	if err != nil {
-		return err
-	}
-	if previous != nil {
-		if state.ObservedAt.Before(previous.ObservedAt) {
-			return nil
-		}
-		window, remainder := storageWindowFromStateWithRemainder(previous, state.ObservedAt)
-		if window != nil {
-			if err := r.appendWindow(ctx, window); err != nil {
-				return err
-			}
-		}
-		state.UnbilledByteNanoseconds = remainder
-	}
-	return r.upsertStorageProjectionState(ctx, state)
-}
-
-func (r *Repository) CloseStorageObservation(ctx context.Context, observation *metering.StorageObservation) error {
-	return r.closeStorageObservation(ctx, observation)
-}
-
-func (r *Repository) CloseStorageObservationTx(ctx context.Context, _ pgx.Tx, observation *metering.StorageObservation) error {
-	return r.closeStorageObservation(ctx, observation)
-}
-
-func (r *Repository) closeStorageObservation(ctx context.Context, observation *metering.StorageObservation) error {
-	state, err := r.normalizeStorageObservation(ctx, observation)
-	if err != nil {
-		return err
-	}
-	previous, err := r.getStorageProjectionState(ctx, state.SubjectType, state.SubjectID)
-	if err != nil {
-		return err
-	}
-	if previous == nil {
-		if observation.ResourceCreatedAt.IsZero() || !state.ObservedAt.After(observation.ResourceCreatedAt) {
-			return nil
-		}
-		end := state.ObservedAt
-		state.ObservedAt = observation.ResourceCreatedAt.UTC()
-		if window, _ := storageWindowFromStateWithRemainder(state, end); window != nil {
-			return r.appendWindow(ctx, window)
-		}
-		return nil
-	}
-	if state.ObservedAt.Before(previous.ObservedAt) {
-		return r.deleteStorageProjectionState(ctx, previous, state.ObservedAt)
-	}
-	if window, _ := storageWindowFromStateWithRemainder(previous, state.ObservedAt); window != nil {
-		if err := r.appendWindow(ctx, window); err != nil {
-			return err
-		}
-	}
-	return r.deleteStorageProjectionState(ctx, previous, state.ObservedAt)
-}
-
-func (r *Repository) FlushStorageProjectionWindows(ctx context.Context, before time.Time, limit int) (int, error) {
-	if before.IsZero() {
-		before = r.now()
-	} else {
-		before = before.UTC()
-	}
-	if limit <= 0 {
-		limit = 500
-	}
-	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-SELECT
-    subject_type, subject_id, product, owner_kind,
-    team_id, user_id, sandbox_id, volume_id,
-    snapshot_id, cluster_id, region_id,
-    size_bytes, observed_at, unbilled_byte_nanoseconds
-FROM %s FINAL
-WHERE deleted = 0 AND observed_at < ?
-ORDER BY observed_at ASC
-LIMIT ?
-`, qualified(r.cfg.Database, r.cfg.StorageStateTable)), before, limit)
-	if err != nil {
-		return 0, fmt.Errorf("query storage projection states: %w", err)
-	}
-	defer rows.Close()
-	states := make([]*metering.StorageProjectionState, 0, limit)
-	for rows.Next() {
-		state := &metering.StorageProjectionState{}
-		if err := rows.Scan(
-			&state.SubjectType, &state.SubjectID, &state.Product, &state.OwnerKind,
-			&state.TeamID, &state.UserID, &state.SandboxID, &state.VolumeID,
-			&state.SnapshotID, &state.ClusterID, &state.RegionID,
-			&state.SizeBytes, &state.ObservedAt, &state.UnbilledByteNanoseconds,
-		); err != nil {
-			return 0, fmt.Errorf("scan storage projection state: %w", err)
-		}
-		states = append(states, state)
-	}
-	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("iterate storage projection states: %w", err)
-	}
-	for _, state := range states {
-		window, remainder := storageWindowFromStateWithRemainder(state, before)
-		if window != nil {
-			if err := r.appendWindow(ctx, window); err != nil {
-				return 0, err
-			}
-		}
-		state.ObservedAt = before
-		state.UnbilledByteNanoseconds = remainder
-		if err := r.upsertStorageProjectionState(ctx, state); err != nil {
-			return 0, err
-		}
-	}
-	return len(states), nil
-}
-
-func (r *Repository) normalizeStorageObservation(ctx context.Context, observation *metering.StorageObservation) (*metering.StorageProjectionState, error) {
-	if observation == nil {
-		return nil, fmt.Errorf("storage observation is nil")
-	}
-	if observation.SubjectType == "" || observation.SubjectID == "" {
-		return nil, fmt.Errorf("storage subject_type and subject_id are required")
-	}
-	if observation.SubjectType != metering.SubjectTypeVolume && observation.SubjectType != metering.SubjectTypeSnapshot && observation.SubjectType != metering.SubjectTypeRootFS {
-		return nil, fmt.Errorf("unsupported storage subject_type %q", observation.SubjectType)
-	}
-	if observation.SizeBytes < 0 {
-		return nil, fmt.Errorf("storage size_bytes must be non-negative")
-	}
-	observedAt := observation.ObservedAt
-	if observedAt.IsZero() {
-		observedAt = r.now()
-	} else {
-		observedAt = observedAt.UTC()
-	}
-	product := observation.Product
-	if product == "" {
-		product = metering.ProductSandbox
-	}
-	state := &metering.StorageProjectionState{
-		SubjectType: observation.SubjectType,
-		SubjectID:   observation.SubjectID,
-		Product:     product,
-		OwnerKind:   observation.OwnerKind,
-		TeamID:      observation.TeamID,
-		UserID:      observation.UserID,
-		SandboxID:   observation.SandboxID,
-		VolumeID:    observation.VolumeID,
-		SnapshotID:  observation.SnapshotID,
-		ClusterID:   observation.ClusterID,
-		RegionID:    observation.RegionID,
-		SizeBytes:   observation.SizeBytes,
-		ObservedAt:  observedAt,
-	}
-	if state.SandboxID != "" {
-		sandbox, err := r.GetSandboxProjectionState(ctx, state.SandboxID)
-		if err != nil {
-			return nil, err
-		}
-		if sandbox != nil && state.OwnerKind == "" {
-			state.OwnerKind = sandbox.OwnerKind
-		}
-	}
-	return state, nil
-}
-
-func (r *Repository) getStorageProjectionState(ctx context.Context, subjectType, subjectID string) (*metering.StorageProjectionState, error) {
-	state := &metering.StorageProjectionState{}
-	err := r.db.QueryRowContext(ctx, fmt.Sprintf(`
-SELECT
-    subject_type, subject_id, product, owner_kind,
-    team_id, user_id, sandbox_id, volume_id,
-    snapshot_id, cluster_id, region_id,
-    size_bytes, observed_at, unbilled_byte_nanoseconds
-FROM %s FINAL
-WHERE subject_type = ? AND subject_id = ? AND deleted = 0
-LIMIT 1
-`, qualified(r.cfg.Database, r.cfg.StorageStateTable)), subjectType, subjectID).Scan(
-		&state.SubjectType, &state.SubjectID, &state.Product, &state.OwnerKind,
-		&state.TeamID, &state.UserID, &state.SandboxID, &state.VolumeID,
-		&state.SnapshotID, &state.ClusterID, &state.RegionID,
-		&state.SizeBytes, &state.ObservedAt, &state.UnbilledByteNanoseconds,
-	)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("query storage projection state: %w", err)
-	}
-	return state, nil
-}
-
 func (r *Repository) upsertStorageProjectionState(ctx context.Context, state *metering.StorageProjectionState) error {
 	_, err := r.db.ExecContext(ctx, fmt.Sprintf(`
 INSERT INTO %s (
@@ -709,6 +522,50 @@ INSERT INTO %s (
 		return fmt.Errorf("upsert storage projection state: %w", err)
 	}
 	return nil
+}
+
+// UpsertStorageProjectionState applies an idempotent storage-state mutation
+// captured by the PostgreSQL metering outbox.
+func (r *Repository) UpsertStorageProjectionState(ctx context.Context, state *metering.StorageProjectionState) error {
+	if state == nil {
+		return fmt.Errorf("storage projection state is nil")
+	}
+	return r.upsertStorageProjectionState(ctx, state)
+}
+
+// ListActiveStorageProjectionStates returns current producer state needed to
+// bootstrap the PostgreSQL delivery outbox during an upgrade.
+func (r *Repository) ListActiveStorageProjectionStates(ctx context.Context) ([]*metering.StorageProjectionState, error) {
+	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
+SELECT
+    subject_type, subject_id, product, owner_kind,
+    team_id, user_id, sandbox_id, volume_id,
+    snapshot_id, cluster_id, region_id,
+    size_bytes, observed_at, unbilled_byte_nanoseconds
+FROM %s FINAL
+WHERE deleted = 0
+`, qualified(r.cfg.Database, r.cfg.StorageStateTable)))
+	if err != nil {
+		return nil, fmt.Errorf("query active storage projection states: %w", err)
+	}
+	defer rows.Close()
+	states := make([]*metering.StorageProjectionState, 0)
+	for rows.Next() {
+		state := &metering.StorageProjectionState{}
+		if err := rows.Scan(
+			&state.SubjectType, &state.SubjectID, &state.Product, &state.OwnerKind,
+			&state.TeamID, &state.UserID, &state.SandboxID, &state.VolumeID,
+			&state.SnapshotID, &state.ClusterID, &state.RegionID,
+			&state.SizeBytes, &state.ObservedAt, &state.UnbilledByteNanoseconds,
+		); err != nil {
+			return nil, fmt.Errorf("scan active storage projection state: %w", err)
+		}
+		states = append(states, state)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate active storage projection states: %w", err)
+	}
+	return states, nil
 }
 
 func (r *Repository) deleteStorageProjectionState(ctx context.Context, state *metering.StorageProjectionState, deletedAt time.Time) error {
@@ -732,6 +589,15 @@ INSERT INTO %s (
 		return fmt.Errorf("delete storage projection state: %w", err)
 	}
 	return nil
+}
+
+// DeleteStorageProjectionState applies an idempotent storage-state tombstone
+// captured by the PostgreSQL metering outbox.
+func (r *Repository) DeleteStorageProjectionState(ctx context.Context, state *metering.StorageProjectionState, deletedAt time.Time) error {
+	if state == nil {
+		return fmt.Errorf("storage projection state is nil")
+	}
+	return r.deleteStorageProjectionState(ctx, state, deletedAt)
 }
 
 func (r *Repository) CurrentUsage(ctx context.Context, teamID string, dimension quota.Dimension) (int64, error) {
@@ -839,89 +705,6 @@ func (r *Repository) currentScalar(ctx context.Context, query string, args ...an
 		return 0, err
 	}
 	return value, nil
-}
-
-func storageWindowFromStateWithRemainder(state *metering.StorageProjectionState, end time.Time) (*metering.Window, int64) {
-	if state == nil {
-		return nil, 0
-	}
-	remainder := normalizeStorageRemainder(state.UnbilledByteNanoseconds)
-	end = end.UTC()
-	start := state.ObservedAt.UTC()
-	if !end.After(start) {
-		return nil, remainder
-	}
-	value, remainder := storageByteHoursWithRemainder(state.SizeBytes, end.Sub(start), remainder)
-	if value <= 0 {
-		return nil, remainder
-	}
-	windowType := metering.WindowTypeSandboxVolumeByteHours
-	switch state.SubjectType {
-	case metering.SubjectTypeRootFS:
-		windowType = metering.WindowTypeSandboxRootFSByteHours
-	}
-	return &metering.Window{
-		WindowID:    fmt.Sprintf("storage/%s/%s/%d/%d", state.SubjectType, state.SubjectID, start.UnixNano(), end.UnixNano()),
-		Producer:    metering.ProducerStorage,
-		RegionID:    state.RegionID,
-		WindowType:  windowType,
-		SubjectType: state.SubjectType,
-		SubjectID:   state.SubjectID,
-		TeamID:      state.TeamID,
-		UserID:      state.UserID,
-		SandboxID:   state.SandboxID,
-		VolumeID:    state.VolumeID,
-		SnapshotID:  state.SnapshotID,
-		ClusterID:   state.ClusterID,
-		WindowStart: start,
-		WindowEnd:   end,
-		Value:       value,
-		Unit:        metering.WindowUnitByteHours,
-		Data:        storageWindowData(state, end.Sub(start)),
-	}, remainder
-}
-
-func storageByteHoursWithRemainder(sizeBytes int64, duration time.Duration, previousRemainder int64) (int64, int64) {
-	remainder := normalizeStorageRemainder(previousRemainder)
-	if sizeBytes <= 0 || duration <= 0 {
-		return 0, remainder
-	}
-	accumulator := big.NewInt(remainder)
-	var usage big.Int
-	usage.Mul(big.NewInt(sizeBytes), big.NewInt(duration.Nanoseconds()))
-	accumulator.Add(accumulator, &usage)
-
-	hourNanos := big.NewInt(int64(time.Hour))
-	var quotient big.Int
-	var modulo big.Int
-	quotient.QuoRem(accumulator, hourNanos, &modulo)
-	if !quotient.IsInt64() {
-		return math.MaxInt64, 0
-	}
-	return quotient.Int64(), modulo.Int64()
-}
-
-func normalizeStorageRemainder(value int64) int64 {
-	if value <= 0 {
-		return 0
-	}
-	return value % int64(time.Hour)
-}
-
-func storageWindowData(state *metering.StorageProjectionState, duration time.Duration) json.RawMessage {
-	data := map[string]any{
-		"product":               state.Product,
-		"size_bytes":            state.SizeBytes,
-		"duration_milliseconds": duration.Milliseconds(),
-	}
-	if state.OwnerKind != "" {
-		data["owner_kind"] = state.OwnerKind
-	}
-	raw, err := json.Marshal(data)
-	if err != nil {
-		return json.RawMessage(`{}`)
-	}
-	return raw
 }
 
 func storageDimensionMatchesSubjectType(dimension quota.Dimension, subjectType string) bool {

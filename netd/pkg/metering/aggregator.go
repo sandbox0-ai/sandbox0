@@ -74,6 +74,12 @@ type usageTotals struct {
 	ingress   int64
 }
 
+type usageBatch struct {
+	start time.Time
+	end   time.Time
+	usage map[string]*usageTotals
+}
+
 type Aggregator struct {
 	recorder    Recorder
 	regionID    string
@@ -86,6 +92,7 @@ type Aggregator struct {
 	mu          sync.Mutex
 	windowStart time.Time
 	usage       map[string]*usageTotals
+	pending     *usageBatch
 }
 
 func NewAggregator(recorder Recorder, regionID, clusterID, nodeName string, logger *zap.Logger) *Aggregator {
@@ -189,15 +196,23 @@ func (a *Aggregator) allowNetworkUsage(ctx context.Context, compiled *policypkg.
 
 func (a *Aggregator) localNetworkUsageLocked(teamID string, dimension quota.Dimension) int64 {
 	var total int64
-	for _, usage := range a.usage {
+	add := func(usage *usageTotals) {
 		if usage == nil || usage.teamID != teamID {
-			continue
+			return
 		}
 		switch dimension {
 		case quota.DimensionEgress:
 			total += usage.egress
 		case quota.DimensionIngress:
 			total += usage.ingress
+		}
+	}
+	for _, usage := range a.usage {
+		add(usage)
+	}
+	if a.pending != nil {
+		for _, usage := range a.pending.usage {
+			add(usage)
 		}
 	}
 	return total
@@ -208,63 +223,67 @@ func (a *Aggregator) Flush(ctx context.Context) error {
 		return nil
 	}
 
-	end := a.now()
+	for {
+		batch, retrying := a.pendingBatch()
+		err := a.recorder.RunInTx(ctx, func(tx txRecorder) error {
+			for _, usage := range batch.usage {
+				if usage.egress > 0 {
+					if err := tx.AppendWindow(ctx, a.buildWindow(usage, meteringpkg.WindowTypeSandboxEgressBytes, batch.start, batch.end, usage.egress)); err != nil {
+						return err
+					}
+				}
+				if usage.ingress > 0 {
+					if err := tx.AppendWindow(ctx, a.buildWindow(usage, meteringpkg.WindowTypeSandboxIngressBytes, batch.start, batch.end, usage.ingress)); err != nil {
+						return err
+					}
+				}
+			}
+			return tx.UpsertProducerWatermark(ctx, a.producer, a.regionID, batch.end)
+		})
+		if err != nil {
+			a.logger.Error("Failed to flush netd metering windows",
+				zap.String("producer", a.producer),
+				zap.Time("window_start", batch.start),
+				zap.Time("window_end", batch.end),
+				zap.Error(err),
+			)
+			return err
+		}
+
+		a.mu.Lock()
+		if a.pending == batch {
+			a.pending = nil
+		}
+		hasResidual := len(a.usage) > 0
+		a.mu.Unlock()
+		if !retrying || !hasResidual {
+			return nil
+		}
+	}
+}
+
+func (a *Aggregator) pendingBatch() (*usageBatch, bool) {
 	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.pending != nil {
+		return a.pending, true
+	}
+	end := a.now()
 	start := a.windowStart
 	if start.IsZero() {
 		start = end
 	}
-	snapshot := cloneUsage(a.usage)
-	a.mu.Unlock()
-
 	if end.Before(start) {
 		end = start
 	}
-
-	err := a.recorder.RunInTx(ctx, func(tx txRecorder) error {
-		for _, usage := range snapshot {
-			if usage.egress > 0 {
-				if err := tx.AppendWindow(ctx, a.buildWindow(usage, meteringpkg.WindowTypeSandboxEgressBytes, start, end, usage.egress)); err != nil {
-					return err
-				}
-			}
-			if usage.ingress > 0 {
-				if err := tx.AppendWindow(ctx, a.buildWindow(usage, meteringpkg.WindowTypeSandboxIngressBytes, start, end, usage.ingress)); err != nil {
-					return err
-				}
-			}
-		}
-		return tx.UpsertProducerWatermark(ctx, a.producer, a.regionID, end)
-	})
-	if err != nil {
-		a.logger.Error("Failed to flush netd metering windows",
-			zap.String("producer", a.producer),
-			zap.Error(err),
-		)
-		return err
+	a.pending = &usageBatch{
+		start: start,
+		end:   end,
+		usage: a.usage,
 	}
-
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.usage = make(map[string]*usageTotals)
 	a.windowStart = end
-	for sandboxID, usage := range snapshot {
-		current := a.usage[sandboxID]
-		if current == nil {
-			continue
-		}
-		current.egress -= usage.egress
-		current.ingress -= usage.ingress
-		if current.egress < 0 {
-			current.egress = 0
-		}
-		if current.ingress < 0 {
-			current.ingress = 0
-		}
-		if current.egress == 0 && current.ingress == 0 {
-			delete(a.usage, sandboxID)
-		}
-	}
-	return nil
+	return a.pending, false
 }
 
 func (a *Aggregator) buildWindow(usage *usageTotals, windowType string, start, end time.Time, value int64) *meteringpkg.Window {
@@ -305,18 +324,6 @@ func producerName(nodeName string) string {
 
 func windowID(producer, sandboxID, windowType string, start, end time.Time) string {
 	return fmt.Sprintf("%s/%s/%s/%d/%d", producer, sandboxID, windowType, start.UTC().UnixNano(), end.UTC().UnixNano())
-}
-
-func cloneUsage(in map[string]*usageTotals) map[string]*usageTotals {
-	out := make(map[string]*usageTotals, len(in))
-	for key, value := range in {
-		if value == nil {
-			continue
-		}
-		copied := *value
-		out[key] = &copied
-	}
-	return out
 }
 
 func mustJSON(value any) json.RawMessage {

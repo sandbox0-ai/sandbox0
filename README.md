@@ -184,7 +184,7 @@ Sandbox0 separates region-scoped control-plane services from cluster-scoped data
 | Control plane | Optional `regional-gateway`, optional `scheduler` | Tenant/API key management, cluster selection, internal routing, template distribution |
 | Data plane | `cluster-gateway`, `manager`, `ctld`, optional `storage-proxy`, optional `netd` | Sandbox lifecycle, rootfs checkpoints, process/file APIs, volume storage, network enforcement |
 | In-pod runtime | `procd` | PID 1 inside each sandbox pod, process abstraction, file I/O, volume mount operations |
-| Storage | PostgreSQL plus S3-compatible object storage | Metadata, usage truth, events, rootfs/volume data |
+| Storage | PostgreSQL, ClickHouse, and S3-compatible object storage | Transactional metadata and metering delivery, long-term usage truth, rootfs/volume data |
 
 Self-hosting is operator-first:
 

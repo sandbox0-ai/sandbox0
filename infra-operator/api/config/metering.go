@@ -6,7 +6,7 @@ import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 // MeteringConfig is the runtime configuration for the optional region usage
 // ledger. When disabled, services must not emit usage records.
 type MeteringConfig struct {
-	// Enabled enables ClickHouse-backed metering.
+	// Enabled enables PostgreSQL-buffered, ClickHouse-backed metering.
 	// +optional
 	// +kubebuilder:default=false
 	Enabled bool `yaml:"enabled" json:"enabled"`
@@ -15,7 +15,7 @@ type MeteringConfig struct {
 	ClickHouse MeteringClickHouseConfig `yaml:"clickhouse" json:"clickHouse"`
 }
 
-// MeteringClickHouseConfig names the ClickHouse tables used for metering truth.
+// MeteringClickHouseConfig names the ClickHouse tables used for long-term metering truth.
 type MeteringClickHouseConfig struct {
 	// DSN is the ClickHouse database/sql connection string. It may include credentials.
 	// +optional

@@ -75,8 +75,8 @@ func TestCanonicalAuditClickHouseIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRepository() error = %v", err)
 	}
-	occurredAt := time.Now().UTC().Add(-2 * time.Second).Truncate(time.Second).Add(123456789 * time.Nanosecond)
-	ingestedAt := occurredAt.Add(987654321 * time.Nanosecond)
+	occurredAt := time.Date(1960, time.July, 1, 1, 2, 3, 123456789, time.UTC)
+	ingestedAt := time.Now().UTC().Add(-2 * time.Second).Truncate(time.Second).Add(987654321 * time.Nanosecond)
 	eventID := "11111111-1111-4111-8111-111111111111"
 	parentEventID := "22222222-2222-4222-8222-222222222222"
 	event := sandboxobservability.Event{
@@ -137,10 +137,13 @@ func TestCanonicalAuditClickHouseIntegration(t *testing.T) {
 		t.Fatalf("ingested_at UnixNano = %d, want %d", gotIngestedAt.UnixNano(), ingestedAt.UnixNano())
 	}
 
+	startTime := occurredAt.Add(-time.Nanosecond)
+	endTime := occurredAt.Add(time.Nanosecond)
 	result, err := repo.ListEvents(ctx, sandboxobservability.EventQuery{
 		TeamID:    event.TeamID,
 		SandboxID: event.SandboxID,
-		EventID:   eventID,
+		StartTime: &startTime,
+		EndTime:   &endTime,
 	})
 	if err != nil {
 		t.Fatalf("ListEvents() error = %v", err)

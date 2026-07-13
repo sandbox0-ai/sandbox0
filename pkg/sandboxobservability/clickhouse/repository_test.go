@@ -99,6 +99,16 @@ func TestInsertEventsBuildsBatchInsertAndSerializesAttributes(t *testing.T) {
 	}
 }
 
+func TestDateTime64NanoBindingPreservesPreEpochValues(t *testing.T) {
+	value := time.Date(1960, time.July, 1, 1, 2, 3, 123456789, time.UTC)
+	if dateTime64NanoPlaceholder != "fromUnixTimestamp64Nano(?, 'UTC')" {
+		t.Fatalf("dateTime64NanoPlaceholder = %q", dateTime64NanoPlaceholder)
+	}
+	if got := dateTime64NanoArg(value); got != value.UnixNano() || got >= 0 {
+		t.Fatalf("dateTime64NanoArg(%s) = %d, want negative Unix nanoseconds %d", value, got, value.UnixNano())
+	}
+}
+
 func TestInsertEventsRejectsMutationOfSignedIdentityWhitespace(t *testing.T) {
 	repo, db := mustRepository(t)
 	event := sandboxobservability.Event{
@@ -160,7 +170,7 @@ func TestBuildListSQLAppliesTypedFiltersAndCursor(t *testing.T) {
 		"source = ?",
 		"outcome = ?",
 		"event_type = ?",
-		"(occurred_at, ingested_at, source, event_type, event_id, payload_hash) > (toDateTime64(?, 9, 'UTC'), toDateTime64(?, 9, 'UTC'), ?, ?, ?, ?)",
+		"(occurred_at, ingested_at, source, event_type, event_id, payload_hash) > (" + dateTime64NanoPlaceholder + ", " + dateTime64NanoPlaceholder + ", ?, ?, ?, ?)",
 		"ORDER BY occurred_at ASC, ingested_at ASC, source ASC, event_type ASC, event_id ASC, payload_hash ASC LIMIT 11",
 	} {
 		if !strings.Contains(sqlQuery, want) {
@@ -195,10 +205,10 @@ func TestBuildWatchEventsSQLUsesIngestionOrderCursor(t *testing.T) {
 
 	sqlQuery, args := repo.buildWatchEventsSQL(query, limit, cursor)
 	for _, want := range []string{
-		"occurred_at >= toDateTime64(?, 9, 'UTC')",
+		"occurred_at >= " + dateTime64NanoPlaceholder,
 		"source = ?",
 		"event_type = ?",
-		"(ingested_at, source, event_type, event_id, payload_hash) > (toDateTime64(?, 9, 'UTC'), ?, ?, ?, ?)",
+		"(ingested_at, source, event_type, event_id, payload_hash) > (" + dateTime64NanoPlaceholder + ", ?, ?, ?, ?)",
 		"ORDER BY ingested_at ASC, source ASC, event_type ASC, event_id ASC, payload_hash ASC LIMIT 10",
 	} {
 		if !strings.Contains(sqlQuery, want) {

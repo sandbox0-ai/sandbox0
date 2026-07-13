@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -13,7 +12,7 @@ import (
 )
 
 const maxInsertBatchSize = 500
-const dateTime64NanoPlaceholder = "toDateTime64(?, 9, 'UTC')"
+const dateTime64NanoPlaceholder = "fromUnixTimestamp64Nano(?, 'UTC')"
 const auditInsertReliabilitySettings = " SETTINGS async_insert = 0, wait_for_async_insert = 1"
 
 type sqlBackend interface {
@@ -344,10 +343,10 @@ func normalizeEventForInsert(event sandboxobservability.Event, now time.Time) (s
 
 // dateTime64NanoArg preserves the exact timestamp protected by the audit
 // signature. clickhouse-go binds a bare time.Time positional argument as a
-// whole-second DateTime; passing Unix nanoseconds through an explicit
-// toDateTime64 expression avoids that lossy conversion.
-func dateTime64NanoArg(value time.Time) string {
-	return strconv.FormatInt(value.UTC().UnixNano(), 10)
+// whole-second DateTime; passing signed Unix nanoseconds through
+// fromUnixTimestamp64Nano also preserves pre-epoch DateTime64(9) values.
+func dateTime64NanoArg(value time.Time) int64 {
+	return value.UTC().UnixNano()
 }
 
 func scanEvents(rows *sql.Rows) ([]sandboxobservability.Event, error) {

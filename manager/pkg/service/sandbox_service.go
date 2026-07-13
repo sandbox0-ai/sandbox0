@@ -98,6 +98,8 @@ type SandboxServiceConfig struct {
 	RootFSSquashDisabled                bool
 	RootFSSquashMaxChainDepth           int
 	RootFSSquashMaxChainBytes           int64
+	RootFSSquashMinDeletedBytes         int64
+	RootFSSquashMinDeletedRatio         float64
 	PublicRootDomain                    string
 	PublicRegionID                      string
 }
@@ -194,6 +196,12 @@ func NewSandboxService(
 	}
 	if config.RootFSSquashMaxChainBytes <= 0 {
 		config.RootFSSquashMaxChainBytes = 512 * 1024 * 1024
+	}
+	if config.RootFSSquashMinDeletedBytes <= 0 {
+		config.RootFSSquashMinDeletedBytes = 8 * 1024 * 1024
+	}
+	if config.RootFSSquashMinDeletedRatio <= 0 {
+		config.RootFSSquashMinDeletedRatio = 0.25
 	}
 	if networkProvider == nil {
 		networkProvider = network.NewNoopProvider()

@@ -397,6 +397,8 @@ func main() {
 		RootFSSquashDisabled:                cfg.RootFSMaintenance.SquashDisabled,
 		RootFSSquashMaxChainDepth:           cfg.RootFSMaintenance.SquashMaxChainDepth,
 		RootFSSquashMaxChainBytes:           cfg.RootFSMaintenance.SquashMaxChainBytes,
+		RootFSSquashMinDeletedBytes:         cfg.RootFSMaintenance.SquashMinDeletedBytes,
+		RootFSSquashMinDeletedRatio:         cfg.RootFSMaintenance.SquashMinDeletedRatio,
 		PublicRootDomain:                    cfg.PublicRootDomain,
 		PublicRegionID:                      cfg.PublicRegionID,
 	}

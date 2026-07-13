@@ -270,6 +270,8 @@ type RootFSMaintenanceConfig struct {
 	SquashDisabled          bool            `yaml:"squash_disabled" json:"-"`
 	SquashMaxChainDepth     int             `yaml:"squash_max_chain_depth" json:"-"`
 	SquashMaxChainBytes     int64           `yaml:"squash_max_chain_bytes" json:"-"`
+	SquashMinDeletedBytes   int64           `yaml:"squash_min_deleted_bytes" json:"-"`
+	SquashMinDeletedRatio   float64         `yaml:"squash_min_deleted_ratio" json:"-"`
 }
 
 type RootFSObjectStorageConfig struct {
@@ -616,6 +618,12 @@ func applyRootFSMaintenanceDefaults(cfg *ManagerConfig) {
 	}
 	if cfg.RootFSMaintenance.SquashMaxChainBytes <= 0 {
 		cfg.RootFSMaintenance.SquashMaxChainBytes = 512 * 1024 * 1024
+	}
+	if cfg.RootFSMaintenance.SquashMinDeletedBytes <= 0 {
+		cfg.RootFSMaintenance.SquashMinDeletedBytes = 8 * 1024 * 1024
+	}
+	if cfg.RootFSMaintenance.SquashMinDeletedRatio <= 0 {
+		cfg.RootFSMaintenance.SquashMinDeletedRatio = 0.25
 	}
 }
 

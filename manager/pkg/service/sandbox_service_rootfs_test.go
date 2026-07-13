@@ -259,6 +259,153 @@ func TestPauseSandboxRuntimeSavesChildLayerFromParentHead(t *testing.T) {
 	assert.Equal(t, "sha256:child", state.DiffDigest)
 }
 
+func TestPrepareSandboxRootFSCheckpointUsesDeletionAwareSquashSafely(t *testing.T) {
+	const deletedBytes = int64(10 * 1024 * 1024)
+	tests := []struct {
+		name                string
+		squashPrepareFails  bool
+		discardCleanupFails bool
+		wantCalls           []string
+		wantParentLayerID   string
+		wantDigest          string
+	}{
+		{
+			name:       "publishes parentless replacement before cleaning incremental",
+			wantCalls:  []string{"prepare:layer-parent", "prepare:", "publish:squashed-handle", "abort:incremental-handle"},
+			wantDigest: "sha256:squashed",
+		},
+		{
+			name:                "cleanup failure does not discard replacement",
+			discardCleanupFails: true,
+			wantCalls:           []string{"prepare:layer-parent", "prepare:", "publish:squashed-handle", "abort:incremental-handle"},
+			wantDigest:          "sha256:squashed",
+		},
+		{
+			name:               "replacement prepare failure publishes intact incremental",
+			squashPrepareFails: true,
+			wantCalls:          []string{"prepare:layer-parent", "prepare:", "publish:incremental-handle"},
+			wantParentLayerID:  "layer-parent",
+			wantDigest:         "sha256:incremental",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls []string
+			ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/rootfs/snapshots/prepare":
+					var req ctldapi.PrepareRootFSSnapshotRequest
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+					calls = append(calls, "prepare:"+req.ParentLayerID)
+					if req.ParentLayerID == "" {
+						if tt.squashPrepareFails {
+							w.WriteHeader(http.StatusInternalServerError)
+							_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{Error: "replacement prepare failed"})
+							return
+						}
+						_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{
+							Handle:     "squashed-handle",
+							Descriptor: ctldapi.RootFSDiffDescriptor{MediaType: "application/vnd.oci.image.layer.v1.tar", Digest: "sha256:squashed", Size: 1024},
+						})
+						return
+					}
+					_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{
+						Handle:     "incremental-handle",
+						Descriptor: ctldapi.RootFSDiffDescriptor{MediaType: "application/vnd.oci.image.layer.v1.tar", Digest: "sha256:incremental", Size: 1536},
+						DiffStats:  &ctldapi.RootFSDiffStats{DeletedBytes: deletedBytes},
+					})
+				case "/api/v1/rootfs/snapshots/publish":
+					var req ctldapi.PublishRootFSSnapshotRequest
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+					calls = append(calls, "publish:"+req.Handle)
+					digest := strings.TrimSuffix(req.Handle, "-handle")
+					_ = json.NewEncoder(w).Encode(ctldapi.PublishRootFSSnapshotResponse{
+						Published: true,
+						Descriptor: ctldapi.RootFSDiffDescriptor{
+							MediaType: "application/vnd.oci.image.layer.v1.tar",
+							Digest:    "sha256:" + digest,
+							Size:      1024,
+							ObjectKey: "sandbox-rootfs/team-1/sandbox-1/3/sha256/" + digest + ".tar",
+						},
+					})
+				case "/api/v1/rootfs/snapshots/abort":
+					var req ctldapi.AbortRootFSSnapshotRequest
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+					calls = append(calls, "abort:"+req.Handle)
+					if tt.discardCleanupFails {
+						w.WriteHeader(http.StatusInternalServerError)
+						_ = json.NewEncoder(w).Encode(ctldapi.AbortRootFSSnapshotResponse{Error: "temporary cleanup failure"})
+						return
+					}
+					_ = json.NewEncoder(w).Encode(ctldapi.AbortRootFSSnapshotResponse{Aborted: true})
+				default:
+					t.Fatalf("unexpected ctld path %s", r.URL.Path)
+				}
+			}))
+			defer ctld.Close()
+			ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+
+			pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
+			pod.Status.HostIP = ctldURL.Hostname()
+			store := &memorySandboxStore{rootFSStates: map[string]*SandboxRootFSState{
+				"sandbox-1": {
+					LayerID:       "layer-parent",
+					SandboxID:     "sandbox-1",
+					TeamID:        "team-1",
+					DiffSize:      deletedBytes,
+					DiffObjectKey: "sandbox-rootfs/team-1/sandbox-1/2/sha256/parent.tar",
+				},
+			}}
+			svc := &SandboxService{
+				sandboxStore: store,
+				ctldClient:   NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+				config: SandboxServiceConfig{
+					CtldEnabled:                 true,
+					CtldPort:                    ctldPort,
+					RootFSSquashMinDeletedBytes: 8 * 1024 * 1024,
+					RootFSSquashMinDeletedRatio: 0.25,
+				},
+				clock:  systemTime{},
+				logger: zap.NewNop(),
+			}
+
+			state, err := svc.prepareSandboxRootFSCheckpoint(context.Background(), pod, &SandboxRecord{ID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 3})
+			require.NoError(t, err)
+			require.NotNil(t, state)
+			assert.Equal(t, tt.wantCalls, calls)
+			assert.Equal(t, tt.wantParentLayerID, state.ParentLayerID)
+			assert.Equal(t, "layer-parent", state.ExpectedHeadLayerID)
+			assert.Equal(t, tt.wantDigest, state.DiffDigest)
+		})
+	}
+}
+
+func TestShouldSquashSandboxRootFSDeletion(t *testing.T) {
+	state := &SandboxRootFSState{LayerID: "layer-parent", DiffSize: 40 * 1024 * 1024}
+	svc := &SandboxService{config: SandboxServiceConfig{
+		RootFSSquashMinDeletedBytes: 8 * 1024 * 1024,
+		RootFSSquashMinDeletedRatio: 0.25,
+	}}
+
+	tests := []struct {
+		name  string
+		stats *ctldapi.RootFSDiffStats
+		want  bool
+	}{
+		{name: "unsupported stats", stats: nil},
+		{name: "below byte threshold", stats: &ctldapi.RootFSDiffStats{DeletedBytes: 4 * 1024 * 1024}},
+		{name: "below ratio threshold", stats: &ctldapi.RootFSDiffStats{DeletedBytes: 8 * 1024 * 1024}},
+		{name: "meets thresholds", stats: &ctldapi.RootFSDiffStats{DeletedBytes: 10 * 1024 * 1024}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _ := svc.shouldSquashSandboxRootFSDeletion(state, tt.stats)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestCompletePausingSandboxRuntimeDoesNotCommitStaleCheckpoint(t *testing.T) {
 	store := &memorySandboxStore{
 		records: map[string]*SandboxRecord{

@@ -24,12 +24,14 @@ var (
 	ErrBadRequest = errors.New("invalid rootfs request")
 )
 
+const preparedRootFSSnapshotTTL = 15 * time.Minute
+
 type Runtime interface {
 	Inspect(ctx context.Context, target ctldapi.RootFSContainerRef) (ctldapi.RootFSInfo, error)
-	CreateDiff(ctx context.Context, info ctldapi.RootFSInfo, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error)
-	CreateDiffFromBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error)
-	ApplyDiff(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, content io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, error)
-	CaptureBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) error
+	CreateDiff(ctx context.Context, info ctldapi.RootFSInfo, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, *ctldapi.RootFSDiffStats, io.ReadSeekCloser, error)
+	CreateDiffFromBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, *ctldapi.RootFSDiffStats, io.ReadSeekCloser, error)
+	ApplyDiff(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, content io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, []rootFSFileChange, error)
+	CaptureBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath, fileSizes rootFSFileSizeIndex) error
 }
 
 type PortalResolver interface {
@@ -59,7 +61,7 @@ func NewController(cfg Config) *Controller {
 	if timeout <= 0 {
 		timeout = 2 * time.Minute
 	}
-	return &Controller{
+	controller := &Controller{
 		runtime:          cfg.Runtime,
 		store:            cfg.Store,
 		operationTimeout: timeout,
@@ -67,6 +69,8 @@ func NewController(cfg Config) *Controller {
 		snapshotDir:      cfg.SnapshotDir,
 		objectCache:      cfg.ObjectCache,
 	}
+	_ = controller.cleanupStalePreparedSnapshots(time.Now().UTC())
+	return controller
 }
 
 func (c *Controller) InspectRootFS(r *http.Request, req ctldapi.InspectRootFSRequest) (ctldapi.InspectRootFSResponse, int) {
@@ -112,6 +116,7 @@ func (c *Controller) PrepareRootFSSnapshot(r *http.Request, req ctldapi.PrepareR
 	if err := validateTarget(req.Target); err != nil {
 		return ctldapi.PrepareRootFSSnapshotResponse{Error: err.Error()}, http.StatusBadRequest
 	}
+	_ = c.cleanupStalePreparedSnapshots(time.Now().UTC())
 	ctx, cancel := c.operationContext(requestContext(r))
 	defer cancel()
 
@@ -123,7 +128,7 @@ func (c *Controller) PrepareRootFSSnapshot(r *http.Request, req ctldapi.PrepareR
 		return ctldapi.PrepareRootFSSnapshotResponse{Info: info, Error: err.Error()}, http.StatusBadRequest
 	}
 	portalPaths := c.portalPathsForRequest(info, req.Target, req.ExcludedPaths, req.PortalPaths)
-	desc, reader, err := c.createDiff(ctx, info, strings.TrimSpace(req.ParentLayerID), req.ExcludedPaths, portalPaths)
+	desc, stats, reader, err := c.createDiff(ctx, info, strings.TrimSpace(req.ParentLayerID), req.ExcludedPaths, portalPaths)
 	if err != nil {
 		return ctldapi.PrepareRootFSSnapshotResponse{Info: info, Error: fmt.Sprintf("create rootfs diff: %v", err)}, statusForError(err)
 	}
@@ -133,7 +138,7 @@ func (c *Controller) PrepareRootFSSnapshot(r *http.Request, req ctldapi.PrepareR
 	if err := c.writePreparedSnapshot(handle, info, desc, reader); err != nil {
 		return ctldapi.PrepareRootFSSnapshotResponse{Info: info, Error: fmt.Sprintf("prepare rootfs snapshot: %v", err)}, http.StatusInternalServerError
 	}
-	return ctldapi.PrepareRootFSSnapshotResponse{Handle: handle, Info: info, Descriptor: desc}, http.StatusOK
+	return ctldapi.PrepareRootFSSnapshotResponse{Handle: handle, Info: info, Descriptor: desc, DiffStats: stats}, http.StatusOK
 }
 
 func (c *Controller) PublishRootFSSnapshot(r *http.Request, req ctldapi.PublishRootFSSnapshotRequest) (ctldapi.PublishRootFSSnapshotResponse, int) {
@@ -212,12 +217,12 @@ func (c *Controller) ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest
 		// it across template image upgrades is valid; actual path-level conflicts
 		// are surfaced by the runtime apply step below.
 		portalPaths := c.portalPathsForRequest(info, req.Target, req.ExcludedPaths, req.PortalPaths)
-		applied, err := c.applyLayers(ctx, info, req.Layers, req.ExcludedPaths, portalPaths)
+		applied, fileSizes, err := c.applyLayers(ctx, info, req.Layers, req.ExcludedPaths, portalPaths)
 		if err != nil {
 			return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, statusForError(err)
 		}
 		if req.BaselineLayerID != "" {
-			if err := c.runtime.CaptureBaseline(ctx, info, req.BaselineLayerID, req.ExcludedPaths, portalPaths); err != nil {
+			if err := c.runtime.CaptureBaseline(ctx, info, req.BaselineLayerID, req.ExcludedPaths, portalPaths, fileSizes); err != nil {
 				return ctldapi.ApplyRootFSResponse{Info: info, Error: fmt.Sprintf("capture rootfs baseline: %v", err)}, statusForError(err)
 			}
 		}
@@ -225,26 +230,32 @@ func (c *Controller) ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest
 	}
 
 	portalPaths := c.portalPathsForRequest(info, req.Target, req.ExcludedPaths, req.PortalPaths)
-	applied, err := c.applyDescriptor(ctx, info, req.Descriptor, req.ExcludedPaths, portalPaths)
+	applied, _, err := c.applyDescriptor(ctx, info, req.Descriptor, req.ExcludedPaths, portalPaths)
 	if err != nil {
 		return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, statusForError(err)
 	}
 	return ctldapi.ApplyRootFSResponse{Info: info, Descriptor: applied, Applied: true}, http.StatusOK
 }
 
-func (c *Controller) createDiff(ctx context.Context, info ctldapi.RootFSInfo, parentLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+func (c *Controller) createDiff(ctx context.Context, info ctldapi.RootFSInfo, parentLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, *ctldapi.RootFSDiffStats, io.ReadSeekCloser, error) {
 	if parentLayerID != "" {
 		return c.runtime.CreateDiffFromBaseline(ctx, info, parentLayerID, excludedPaths, portalPaths)
 	}
 	return c.runtime.CreateDiff(ctx, info, excludedPaths, portalPaths)
 }
 
-func (c *Controller) applyLayers(ctx context.Context, info ctldapi.RootFSInfo, layers []ctldapi.RootFSLayerDescriptor, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) ([]ctldapi.RootFSLayerDescriptor, error) {
+func (c *Controller) applyLayers(ctx context.Context, info ctldapi.RootFSInfo, layers []ctldapi.RootFSLayerDescriptor, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) ([]ctldapi.RootFSLayerDescriptor, rootFSFileSizeIndex, error) {
 	applied := make([]ctldapi.RootFSLayerDescriptor, 0, len(layers))
+	fileSizes := make(rootFSFileSizeIndex)
 	for _, layer := range layers {
-		desc, err := c.applyDescriptor(ctx, info, layer.Descriptor, excludedPaths, portalPaths)
+		desc, changes, err := c.applyDescriptor(ctx, info, layer.Descriptor, excludedPaths, portalPaths)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
+		}
+		if changes == nil {
+			fileSizes = nil
+		} else if fileSizes != nil && !fileSizes.Apply(changes) {
+			fileSizes = nil
 		}
 		applied = append(applied, ctldapi.RootFSLayerDescriptor{
 			LayerID:       layer.LayerID,
@@ -252,10 +263,10 @@ func (c *Controller) applyLayers(ctx context.Context, info ctldapi.RootFSInfo, l
 			Descriptor:    desc,
 		})
 	}
-	return applied, nil
+	return applied, fileSizes, nil
 }
 
-func (c *Controller) applyDescriptor(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, error) {
+func (c *Controller) applyDescriptor(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, []rootFSFileChange, error) {
 	var (
 		reader io.ReadCloser
 		err    error
@@ -266,16 +277,16 @@ func (c *Controller) applyDescriptor(ctx context.Context, info ctldapi.RootFSInf
 		reader, err = c.store.Get(desc.ObjectKey, 0, -1)
 	}
 	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("download rootfs diff: %w", err)
+		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("download rootfs diff: %w", err)
 	}
 	defer reader.Close()
 
-	applied, err := c.runtime.ApplyDiff(ctx, info, desc, reader, excludedPaths, portalPaths)
+	applied, changes, err := c.runtime.ApplyDiff(ctx, info, desc, reader, excludedPaths, portalPaths)
 	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("apply rootfs diff: %w", err)
+		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("apply rootfs diff: %w", err)
 	}
 	applied.ObjectKey = desc.ObjectKey
-	return applied, nil
+	return applied, changes, nil
 }
 
 type preparedRootFSSnapshot struct {
@@ -375,6 +386,72 @@ func (c *Controller) removePreparedSnapshot(handle string) error {
 		return os.ErrNotExist
 	}
 	return nil
+}
+
+// cleanupStalePreparedSnapshots bounds node-local disk retained by interrupted
+// prepare/publish/abort sequences, including partially written handle files.
+func (c *Controller) cleanupStalePreparedSnapshots(now time.Time) error {
+	dir := c.preparedSnapshotDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	cutoff := now.Add(-preparedRootFSSnapshotTTL)
+	staleHandles := make(map[string]struct{})
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		handle, ok := preparedSnapshotHandleFromFilename(entry.Name())
+		if !ok {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		stale := info.ModTime().Before(cutoff)
+		if !stale && strings.HasSuffix(entry.Name(), ".json") {
+			metaFile, err := os.Open(filepath.Join(dir, entry.Name()))
+			if err == nil {
+				var prepared preparedRootFSSnapshot
+				decodeErr := json.NewDecoder(metaFile).Decode(&prepared)
+				_ = metaFile.Close()
+				stale = decodeErr == nil && !prepared.CreatedAt.IsZero() && prepared.CreatedAt.Before(cutoff)
+			}
+		}
+		if stale {
+			staleHandles[handle] = struct{}{}
+		}
+	}
+
+	var cleanupErr error
+	for handle := range staleHandles {
+		for _, path := range []string{
+			c.preparedSnapshotContentPath(handle),
+			c.preparedSnapshotMetaPath(handle),
+			c.preparedSnapshotContentPath(handle) + ".tmp",
+			c.preparedSnapshotMetaPath(handle) + ".tmp",
+		} {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				cleanupErr = errors.Join(cleanupErr, err)
+			}
+		}
+	}
+	return cleanupErr
+}
+
+func preparedSnapshotHandleFromFilename(name string) (string, bool) {
+	for _, suffix := range []string{".tar.tmp", ".json.tmp", ".tar", ".json"} {
+		if strings.HasSuffix(name, suffix) {
+			handle := strings.TrimSuffix(name, suffix)
+			return handle, handle != "" && filepath.Base(handle) == handle
+		}
+	}
+	return "", false
 }
 
 func (c *Controller) preparedSnapshotContentPath(handle string) string {

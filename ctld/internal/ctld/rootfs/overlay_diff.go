@@ -145,11 +145,8 @@ func writeOverlayUpperDiff(ctx context.Context, upperdir string, excludedPaths [
 	return appendPortalRootFSToDiff(desc, reader, portalPaths)
 }
 
-func writeOverlayUpperDiffFromBaseline(ctx context.Context, baselineDir, upperdir string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath, fileSizes rootFSFileSizeIndex) (ctldapi.RootFSDiffDescriptor, *ctldapi.RootFSDiffStats, io.ReadSeekCloser, error) {
+func writeOverlayUpperDiffFromBaseline(ctx context.Context, baselineDir, upperdir string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
 	filter := newRootFSPathFilter(rootFSExcludedPathsWithPortals(excludedPaths, portalPaths))
-	persistedFilter := newRootFSPathFilter(excludedPaths)
-	stats := &ctldapi.RootFSDiffStats{}
-	countedDeletedFiles := make(map[string]struct{})
 	desc, reader, err := writeOverlayDiffTar(upperdir, filter, func(changeFn fs.ChangeFunc) error {
 		return fs.Changes(ctx, baselineDir, upperdir, func(kind fs.ChangeKind, path string, info os.FileInfo, err error) error {
 			if err != nil {
@@ -164,40 +161,13 @@ func writeOverlayUpperDiffFromBaseline(ctx context.Context, baselineDir, upperdi
 				if filter.Excludes(path) {
 					return nil
 				}
-				deletedBytes, err := rootFSDeletedLogicalBytes(ctx, baselineDir, path, filter, fileSizes, countedDeletedFiles)
-				if err != nil {
-					return err
-				}
-				stats.DeletedBytes += deletedBytes
 				return changeFn(kind, path, nil, nil)
 			}
 			if filter.Excludes(path) {
 				return nil
 			}
 			if isOverlayWhiteout(info) {
-				deletedBytes, err := rootFSDeletedLogicalBytes(ctx, baselineDir, path, filter, fileSizes, countedDeletedFiles)
-				if err != nil {
-					return err
-				}
-				stats.DeletedBytes += deletedBytes
 				return changeFn(fs.ChangeKindDelete, path, nil, nil)
-			}
-			if info != nil {
-				deletedBytes := fileSizes.replacementDeletedBytes(path, info.IsDir(), info.Mode().IsRegular(), filter, countedDeletedFiles)
-				if kind == fs.ChangeKindModify {
-					baselineInfo, err := os.Lstat(rootFSBaselinePath(baselineDir, path))
-					if err != nil && !os.IsNotExist(err) {
-						return fmt.Errorf("inspect replaced rootfs baseline path %s: %w", path, err)
-					}
-					if err == nil && baselineInfo.Mode().Type() != info.Mode().Type() {
-						baselineDeletedBytes, err := rootFSDeletedLogicalBytes(ctx, baselineDir, path, filter, nil, countedDeletedFiles)
-						if err != nil {
-							return err
-						}
-						deletedBytes += baselineDeletedBytes
-					}
-				}
-				stats.DeletedBytes += deletedBytes
 			}
 			if info != nil && info.IsDir() {
 				sourcePath := filepath.Join(upperdir, strings.TrimPrefix(path, string(filepath.Separator)))
@@ -215,143 +185,9 @@ func writeOverlayUpperDiffFromBaseline(ctx context.Context, baselineDir, upperdi
 		})
 	})
 	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, nil, err
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
 	}
-	desc, reader, err = appendPortalRootFSToDiff(desc, reader, portalPaths)
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, nil, err
-	}
-	portalDeletedBytes, err := rootFSPortalDeletedLogicalBytes(ctx, portalPaths, fileSizes, persistedFilter, countedDeletedFiles)
-	if err != nil {
-		_ = reader.Close()
-		return ctldapi.RootFSDiffDescriptor{}, nil, nil, err
-	}
-	stats.DeletedBytes += portalDeletedBytes
-	return desc, stats, reader, nil
-}
-
-func rootFSPortalDeletedLogicalBytes(ctx context.Context, portalPaths []ctldapi.RootFSPortalPath, fileSizes rootFSFileSizeIndex, filter rootFSPathFilter, counted map[string]struct{}) (int64, error) {
-	if len(fileSizes) == 0 {
-		return 0, nil
-	}
-	var total int64
-	for _, portal := range filterRootFSPortalPaths(portalPaths, nil) {
-		mountPath := cleanRootFSPath(portal.MountPath)
-		backingPath := filepath.Clean(strings.TrimSpace(portal.BackingPath))
-		currentRegularFiles := make(map[string]struct{})
-		err := filepath.Walk(backingPath, func(current string, info os.FileInfo, walkErr error) error {
-			if walkErr != nil {
-				if os.IsNotExist(walkErr) {
-					return nil
-				}
-				return walkErr
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-			if !info.Mode().IsRegular() {
-				return nil
-			}
-			rel, err := filepath.Rel(backingPath, current)
-			if err != nil {
-				return err
-			}
-			currentPath := cleanRootFSPath(path.Join(mountPath, filepath.ToSlash(rel)))
-			if !filter.Excludes(currentPath) {
-				currentRegularFiles[currentPath] = struct{}{}
-			}
-			return nil
-		})
-		if err != nil && !os.IsNotExist(err) {
-			return 0, fmt.Errorf("inspect rootfs portal backing path %s: %w", backingPath, err)
-		}
-		prefix := strings.TrimSuffix(mountPath, "/") + "/"
-		for filePath, size := range fileSizes {
-			if size <= 0 || filePath != mountPath && !strings.HasPrefix(filePath, prefix) || filter.Excludes(filePath) {
-				continue
-			}
-			if _, ok := currentRegularFiles[filePath]; ok {
-				continue
-			}
-			if _, ok := counted[filePath]; ok {
-				continue
-			}
-			counted[filePath] = struct{}{}
-			total += size
-		}
-	}
-	return total, nil
-}
-
-// rootFSDeletedLogicalBytes measures regular-file bytes removed from a baseline
-// subtree while honoring paths that are stored outside the rootfs checkpoint.
-func rootFSDeletedLogicalBytes(ctx context.Context, baselineDir, changePath string, filter rootFSPathFilter, fileSizes rootFSFileSizeIndex, counted map[string]struct{}) (int64, error) {
-	clean := cleanRootFSPath(changePath)
-	if filter.Excludes(clean) {
-		return 0, nil
-	}
-	if counted == nil {
-		counted = make(map[string]struct{})
-	}
-	total := fileSizes.deletedBytes(clean, true, filter, counted)
-	target := rootFSBaselinePath(baselineDir, clean)
-	info, err := os.Lstat(target)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return total, nil
-		}
-		return 0, fmt.Errorf("inspect deleted rootfs baseline path %s: %w", clean, err)
-	}
-	if !info.IsDir() {
-		if info.Mode().IsRegular() && info.Size() > 0 {
-			if _, ok := counted[clean]; !ok {
-				counted[clean] = struct{}{}
-				total += info.Size()
-			}
-		}
-		return total, nil
-	}
-
-	err = filepath.Walk(target, func(current string, currentInfo os.FileInfo, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		rel, err := filepath.Rel(baselineDir, current)
-		if err != nil {
-			return err
-		}
-		currentPath := string(filepath.Separator) + filepath.ToSlash(rel)
-		if filter.Excludes(currentPath) {
-			if currentInfo.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if currentInfo.Mode().IsRegular() && currentInfo.Size() > 0 {
-			if _, ok := counted[currentPath]; !ok {
-				counted[currentPath] = struct{}{}
-				total += currentInfo.Size()
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return 0, fmt.Errorf("measure deleted rootfs baseline path %s: %w", clean, err)
-	}
-	return total, nil
-}
-
-func rootFSBaselinePath(baselineDir, changePath string) string {
-	clean := cleanRootFSPath(changePath)
-	relative := strings.TrimPrefix(clean, string(filepath.Separator))
-	return filepath.Join(baselineDir, filepath.FromSlash(relative))
+	return appendPortalRootFSToDiff(desc, reader, portalPaths)
 }
 
 func writeOverlayDiffTar(source string, filter rootFSPathFilter, walkChanges func(fs.ChangeFunc) error) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
@@ -626,17 +462,16 @@ func filterRootFSDiffTarForSave(desc ctldapi.RootFSDiffDescriptor, reader io.Rea
 	return appendPortalRootFSToDiff(filteredDesc, filteredReader, portalPaths)
 }
 
-func filterRootFSDiffTarForApply(desc ctldapi.RootFSDiffDescriptor, reader io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, []rootFSFileChange, error) {
+func filterRootFSDiffTarForApply(desc ctldapi.RootFSDiffDescriptor, reader io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
 	portalPaths = filterRootFSPortalPaths(portalPaths, excludedPaths)
 	if !shouldFilterRootFSDiffTar(desc) {
-		return desc, noopReadSeekCloser{Reader: reader}, nil, nil
+		return desc, noopReadSeekCloser{Reader: reader}, nil
 	}
 	filter := newRootFSPathFilter(rootFSExcludedPathsWithPortals(excludedPaths, portalPaths))
-	excludedFilter := newRootFSPathFilter(excludedPaths)
 
 	tmp, err := os.CreateTemp("", "sandbox0-rootfs-apply-filtered-diff-*.tar")
 	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, nil, err
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
 	}
 	removeOnError := true
 	defer func() {
@@ -651,8 +486,6 @@ func filterRootFSDiffTarForApply(desc ctldapi.RootFSDiffDescriptor, reader io.Re
 	tarWriter := tar.NewWriter(writer)
 	tarReader := tar.NewReader(reader)
 	restored := make(map[string]struct{}, len(portalPaths))
-	indexedPortals := make(map[string]struct{}, len(portalPaths))
-	changes := make([]rootFSFileChange, 0)
 	for {
 		header, err := tarReader.Next()
 		if err == io.EOF {
@@ -660,57 +493,40 @@ func filterRootFSDiffTarForApply(desc ctldapi.RootFSDiffDescriptor, reader io.Re
 		}
 		if err != nil {
 			_ = tarWriter.Close()
-			return ctldapi.RootFSDiffDescriptor{}, nil, nil, err
-		}
-		if excludedFilter.ExcludesTarHeader(header.Name) {
-			continue
+			return ctldapi.RootFSDiffDescriptor{}, nil, err
 		}
 		if portal, rel, ok := matchRootFSPortalHeader(header.Name, portalPaths); ok {
-			mountPath := cleanRootFSPath(portal.MountPath)
-			if _, indexed := indexedPortals[mountPath]; !indexed {
-				// Portal contents are appended as a full snapshot on every layer.
-				// Mirror restoreRootFSPortalHeader's backing-directory reset so the
-				// logical-size index does not retain files omitted by a newer layer.
-				changes = append(changes, rootFSFileChange{Path: mountPath, Delete: true, Opaque: true})
-				indexedPortals[mountPath] = struct{}{}
-			}
-			if change, ok := rootFSFileChangeFromTarHeader(header); ok {
-				changes = append(changes, change)
-			}
 			if err := restoreRootFSPortalHeader(tarReader, header, portal, rel, restored); err != nil {
 				_ = tarWriter.Close()
-				return ctldapi.RootFSDiffDescriptor{}, nil, nil, err
+				return ctldapi.RootFSDiffDescriptor{}, nil, err
 			}
 			continue
 		}
 		if filter.ExcludesTarHeader(header.Name) {
 			continue
 		}
-		if change, ok := rootFSFileChangeFromTarHeader(header); ok {
-			changes = append(changes, change)
-		}
 
 		headerCopy := *header
 		if err := tarWriter.WriteHeader(&headerCopy); err != nil {
 			_ = tarWriter.Close()
-			return ctldapi.RootFSDiffDescriptor{}, nil, nil, err
+			return ctldapi.RootFSDiffDescriptor{}, nil, err
 		}
 		if header.Size > 0 {
 			if _, err := io.Copy(tarWriter, tarReader); err != nil {
 				_ = tarWriter.Close()
-				return ctldapi.RootFSDiffDescriptor{}, nil, nil, err
+				return ctldapi.RootFSDiffDescriptor{}, nil, err
 			}
 		}
 	}
 	if err := tarWriter.Close(); err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, nil, err
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
 	}
 	stat, err := tmp.Stat()
 	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, nil, err
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
 	}
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, nil, err
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
 	}
 
 	desc.Digest = digester.Digest().String()
@@ -719,7 +535,7 @@ func filterRootFSDiffTarForApply(desc ctldapi.RootFSDiffDescriptor, reader io.Re
 		desc.MediaType = ocispec.MediaTypeImageLayer
 	}
 	removeOnError = false
-	return desc, removeOnCloseFile{File: tmp}, changes, nil
+	return desc, removeOnCloseFile{File: tmp}, nil
 }
 
 func appendPortalRootFSToDiff(desc ctldapi.RootFSDiffDescriptor, reader io.ReadSeekCloser, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {

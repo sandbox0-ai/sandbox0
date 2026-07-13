@@ -209,13 +209,11 @@ func TestWriteOverlayUpperDiffFromBaselineAppliesAsChildDelta(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(current, "etc", "added"), []byte("added"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(current, "etc", "same"), []byte("same"), 0o644))
 
-	desc, stats, reader, err := writeOverlayUpperDiffFromBaseline(ctx, baseline, current, nil, nil, nil)
+	desc, reader, err := writeOverlayUpperDiffFromBaseline(ctx, baseline, current, nil, nil)
 	require.NoError(t, err)
 	defer reader.Close()
 	require.NotEmpty(t, desc.Digest)
 	require.Positive(t, desc.Size)
-	require.NotNil(t, stats)
-	assert.Equal(t, int64(len("removed")), stats.DeletedBytes)
 
 	applied := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(applied, "etc"), 0o755))
@@ -232,54 +230,6 @@ func TestWriteOverlayUpperDiffFromBaselineAppliesAsChildDelta(t *testing.T) {
 	assert.True(t, os.IsNotExist(err))
 }
 
-func TestWriteOverlayUpperDiffFromBaselineUsesPersistedFileSizeIndexForRestoredWhiteout(t *testing.T) {
-	baseline := t.TempDir()
-	current := t.TempDir()
-	restoredPath := filepath.Join(current, "workspace", "restored.bin")
-	require.NoError(t, os.MkdirAll(filepath.Dir(restoredPath), 0o755))
-	if err := unix.Mknod(restoredPath, unix.S_IFCHR, 0); err != nil {
-		if err == unix.EPERM || err == unix.EACCES {
-			t.Skipf("creating overlay whiteout device is not permitted: %v", err)
-		}
-		require.NoError(t, err)
-	}
-
-	_, stats, reader, err := writeOverlayUpperDiffFromBaseline(
-		context.Background(),
-		baseline,
-		current,
-		nil,
-		nil,
-		rootFSFileSizeIndex{"/workspace/restored.bin": 10 * 1024 * 1024},
-	)
-	require.NoError(t, err)
-	defer reader.Close()
-	require.NotNil(t, stats)
-	assert.Equal(t, int64(10*1024*1024), stats.DeletedBytes)
-	assert.Contains(t, readTarEntries(t, reader), "workspace/.wh.restored.bin")
-}
-
-func TestRootFSDeletedLogicalBytesMergesBaselineAndIndexWithoutDoubleCounting(t *testing.T) {
-	baseline := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(baseline, "workspace"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(baseline, "workspace", "shared.bin"), make([]byte, 10), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(baseline, "workspace", "baseline-only.bin"), make([]byte, 20), 0o644))
-
-	deletedBytes, err := rootFSDeletedLogicalBytes(
-		context.Background(),
-		baseline,
-		"/workspace",
-		newRootFSPathFilter(nil),
-		rootFSFileSizeIndex{
-			"/workspace/shared.bin":   10,
-			"/workspace/restored.bin": 30,
-		},
-		make(map[string]struct{}),
-	)
-	require.NoError(t, err)
-	assert.Equal(t, int64(60), deletedBytes)
-}
-
 func TestWriteOverlayUpperDiffFromBaselineExcludesConfiguredVolumePaths(t *testing.T) {
 	ctx := context.Background()
 	baseline := t.TempDir()
@@ -294,71 +244,15 @@ func TestWriteOverlayUpperDiffFromBaselineExcludesConfiguredVolumePaths(t *testi
 	require.NoError(t, os.MkdirAll(filepath.Join(current, "workspace", "database"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(current, "workspace", "database", "same"), []byte("changed"), 0o644))
 
-	_, stats, reader, err := writeOverlayUpperDiffFromBaseline(ctx, baseline, current, []string{"/workspace/data"}, nil, nil)
+	_, reader, err := writeOverlayUpperDiffFromBaseline(ctx, baseline, current, []string{"/workspace/data"}, nil)
 	require.NoError(t, err)
 	defer reader.Close()
-	require.NotNil(t, stats)
-	assert.Zero(t, stats.DeletedBytes)
 
 	entries := readTarEntries(t, reader)
 	assert.NotContains(t, entries, "workspace/data/")
 	assert.NotContains(t, entries, "workspace/data/old-volume.txt")
 	assert.NotContains(t, entries, "workspace/data/new-volume.txt")
 	assert.Contains(t, entries, "workspace/database/same")
-}
-
-func TestWriteOverlayUpperDiffFromBaselineCountsDeletedDirectoryBytesAndSkipsExcludedPaths(t *testing.T) {
-	ctx := context.Background()
-	baseline := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(baseline, "workspace", "removed", "nested"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(baseline, "workspace", "removed", "first"), []byte("1234"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(baseline, "workspace", "removed", "nested", "second"), []byte("123456"), 0o644))
-	require.NoError(t, os.MkdirAll(filepath.Join(baseline, "workspace", "removed", "excluded"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(baseline, "workspace", "removed", "excluded", "volume"), []byte("not-rootfs"), 0o644))
-
-	current := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(current, "workspace"), 0o755))
-
-	_, stats, reader, err := writeOverlayUpperDiffFromBaseline(ctx, baseline, current, []string{"/workspace/removed/excluded"}, nil, nil)
-	require.NoError(t, err)
-	defer reader.Close()
-	require.NotNil(t, stats)
-	assert.Equal(t, int64(10), stats.DeletedBytes)
-}
-
-func TestWriteOverlayUpperDiffFromBaselineCountsDirectoryReplacedByFile(t *testing.T) {
-	ctx := context.Background()
-	baseline := t.TempDir()
-	replaced := filepath.Join(baseline, "workspace", "replaced")
-	require.NoError(t, os.MkdirAll(replaced, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(replaced, "first"), []byte("1234"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(replaced, "second"), []byte("123456"), 0o644))
-
-	current := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(current, "workspace"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(current, "workspace", "replaced"), []byte("replacement"), 0o644))
-
-	_, stats, reader, err := writeOverlayUpperDiffFromBaseline(ctx, baseline, current, nil, nil, nil)
-	require.NoError(t, err)
-	defer reader.Close()
-	require.NotNil(t, stats)
-	assert.Equal(t, int64(10), stats.DeletedBytes)
-}
-
-func TestWriteOverlayUpperDiffFromBaselineCountsFileReplacedByDirectory(t *testing.T) {
-	ctx := context.Background()
-	baseline := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(baseline, "workspace"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(baseline, "workspace", "replaced"), []byte("1234567890"), 0o644))
-
-	current := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(current, "workspace", "replaced"), 0o755))
-
-	_, stats, reader, err := writeOverlayUpperDiffFromBaseline(ctx, baseline, current, nil, nil, nil)
-	require.NoError(t, err)
-	defer reader.Close()
-	require.NotNil(t, stats)
-	assert.Equal(t, int64(10), stats.DeletedBytes)
 }
 
 func TestFilterRootFSDiffTarForApplyRestoresPortalBacking(t *testing.T) {
@@ -372,7 +266,7 @@ func TestFilterRootFSDiffTarForApplyRestoresPortalBacking(t *testing.T) {
 	backing := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(backing, "stale.txt"), []byte("stale"), 0o644))
 
-	desc, reader, changes, err := filterRootFSDiffTarForApply(rootFSDiffDescriptorForTest(), bytes.NewReader(buf.Bytes()), nil, []ctldapi.RootFSPortalPath{{
+	desc, reader, err := filterRootFSDiffTarForApply(rootFSDiffDescriptorForTest(), bytes.NewReader(buf.Bytes()), nil, []ctldapi.RootFSPortalPath{{
 		PortalName:  "cache",
 		MountPath:   "/workspace/cache",
 		BackingPath: backing,
@@ -385,33 +279,9 @@ func TestFilterRootFSDiffTarForApplyRestoresPortalBacking(t *testing.T) {
 	assert.Contains(t, entries, "workspace/root.txt")
 	assert.NotContains(t, entries, "workspace/cache/")
 	assert.NotContains(t, entries, "workspace/cache/old.txt")
-	index := make(rootFSFileSizeIndex)
-	require.True(t, index.Apply(changes))
-	assert.Equal(t, rootFSFileSizeIndex{
-		"/workspace/cache/old.txt": int64(len("new")),
-		"/workspace/root.txt":      int64(len("rootfs")),
-	}, index)
 	assertFileContent(t, filepath.Join(backing, "old.txt"), "new")
 	_, err = os.Stat(filepath.Join(backing, "stale.txt"))
 	assert.True(t, os.IsNotExist(err))
-}
-
-func TestRootFSPortalDeletedLogicalBytesCountsMissingIndexedFiles(t *testing.T) {
-	backing := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(backing, "survivor.bin"), make([]byte, 30), 0o644))
-
-	deletedBytes, err := rootFSPortalDeletedLogicalBytes(
-		context.Background(),
-		[]ctldapi.RootFSPortalPath{{MountPath: "/workspace", BackingPath: backing}},
-		rootFSFileSizeIndex{
-			"/workspace/deleted.bin":  10,
-			"/workspace/survivor.bin": 30,
-		},
-		newRootFSPathFilter(nil),
-		make(map[string]struct{}),
-	)
-	require.NoError(t, err)
-	assert.Equal(t, int64(10), deletedBytes)
 }
 
 func TestFilterRootFSDiffTarExcludesRuntimePaths(t *testing.T) {

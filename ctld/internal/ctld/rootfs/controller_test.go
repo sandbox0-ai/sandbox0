@@ -6,10 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
-	"time"
 
 	godigest "github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
@@ -106,62 +104,6 @@ func TestControllerSaveRootFSUsesParentBaseline(t *testing.T) {
 	payload, err := io.ReadAll(reader)
 	require.NoError(t, err)
 	assert.Equal(t, "child diff", string(payload))
-}
-
-func TestControllerPrepareRootFSSnapshotReturnsBaselineStats(t *testing.T) {
-	runtime := &fakeRuntime{
-		info: rootFSInfo("runc"),
-		createBaselineDesc: ctldapi.RootFSDiffDescriptor{
-			MediaType: "application/vnd.oci.image.layer.v1.tar",
-			Digest:    "sha256:child",
-			Size:      int64(len("child diff")),
-		},
-		createBaselineStats:   &ctldapi.RootFSDiffStats{DeletedBytes: 10 * 1024 * 1024},
-		createBaselineContent: "child diff",
-	}
-	controller := NewController(Config{Runtime: runtime, SnapshotDir: t.TempDir()})
-
-	resp, status := controller.PrepareRootFSSnapshot(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.PrepareRootFSSnapshotRequest{
-		Target:        rootFSTarget(),
-		ParentLayerID: "layer-parent",
-	})
-
-	require.Equal(t, http.StatusOK, status, resp.Error)
-	require.NotNil(t, resp.DiffStats)
-	assert.Equal(t, int64(10*1024*1024), resp.DiffStats.DeletedBytes)
-	_, abortStatus := controller.AbortRootFSSnapshot(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.AbortRootFSSnapshotRequest{Handle: resp.Handle})
-	assert.Equal(t, http.StatusOK, abortStatus)
-}
-
-func TestControllerCleanupStalePreparedSnapshots(t *testing.T) {
-	dir := t.TempDir()
-	controller := NewController(Config{SnapshotDir: dir})
-	desc := ctldapi.RootFSDiffDescriptor{MediaType: "application/vnd.oci.image.layer.v1.tar", Digest: "sha256:diff", Size: 4}
-	require.NoError(t, controller.writePreparedSnapshot("stale", ctldapi.RootFSInfo{}, desc, strings.NewReader("data")))
-	require.NoError(t, controller.writePreparedSnapshot("fresh", ctldapi.RootFSInfo{}, desc, strings.NewReader("data")))
-
-	now := time.Now().UTC()
-	staleTime := now.Add(-preparedRootFSSnapshotTTL - time.Minute)
-	for _, path := range []string{controller.preparedSnapshotContentPath("stale"), controller.preparedSnapshotMetaPath("stale")} {
-		require.NoError(t, os.Chtimes(path, staleTime, staleTime))
-	}
-	orphanPath := controller.preparedSnapshotContentPath("orphan") + ".tmp"
-	require.NoError(t, os.WriteFile(orphanPath, []byte("partial"), 0o600))
-	require.NoError(t, os.Chtimes(orphanPath, staleTime, staleTime))
-
-	require.NoError(t, controller.cleanupStalePreparedSnapshots(now))
-	for _, path := range []string{
-		controller.preparedSnapshotContentPath("stale"),
-		controller.preparedSnapshotMetaPath("stale"),
-		orphanPath,
-	} {
-		_, err := os.Stat(path)
-		assert.ErrorIs(t, err, os.ErrNotExist)
-	}
-	for _, path := range []string{controller.preparedSnapshotContentPath("fresh"), controller.preparedSnapshotMetaPath("fresh")} {
-		_, err := os.Stat(path)
-		assert.NoError(t, err)
-	}
 }
 
 func TestControllerSaveRootFSResolvesUnboundPortalPaths(t *testing.T) {
@@ -319,16 +261,6 @@ func TestControllerApplyRootFSAppliesLayerChainAndCapturesBaseline(t *testing.T)
 			Digest:    "sha256:applied",
 			Size:      int64(len("applied")),
 		},
-		applyChangeCalls: [][]rootFSFileChange{
-			{
-				{Path: "/workspace/removed.bin", Regular: true, Size: 10},
-				{Path: "/workspace/kept.bin", Regular: true, Size: 20},
-			},
-			{
-				{Path: "/workspace/removed.bin", Delete: true},
-				{Path: "/workspace/added.bin", Regular: true, Size: 30},
-			},
-		},
 	}
 	controller := NewController(Config{Runtime: runtime, Store: store})
 
@@ -379,10 +311,6 @@ func TestControllerApplyRootFSAppliesLayerChainAndCapturesBaseline(t *testing.T)
 	assert.Equal(t, "layer-child", runtime.captureBaselineLayerID)
 	assert.Equal(t, []string{"/workspace/data"}, runtime.captureBaselineExcludedPaths)
 	assert.Equal(t, rootFSInfo("runc"), runtime.captureInfo)
-	assert.Equal(t, rootFSFileSizeIndex{
-		"/workspace/added.bin": 30,
-		"/workspace/kept.bin":  20,
-	}, runtime.captureBaselineFileSizes)
 }
 
 func TestControllerApplyRootFSForceAppliesBaseMismatch(t *testing.T) {
@@ -529,16 +457,12 @@ type fakeRuntime struct {
 	info                  ctldapi.RootFSInfo
 	inspectErr            error
 	createDesc            ctldapi.RootFSDiffDescriptor
-	createStats           *ctldapi.RootFSDiffStats
 	createContent         string
 	createErr             error
 	createBaselineDesc    ctldapi.RootFSDiffDescriptor
-	createBaselineStats   *ctldapi.RootFSDiffStats
 	createBaselineContent string
 	createBaselineErr     error
 	applyDesc             ctldapi.RootFSDiffDescriptor
-	applyChanges          []rootFSFileChange
-	applyChangeCalls      [][]rootFSFileChange
 	applyErr              error
 	captureBaselineErr    error
 
@@ -567,7 +491,6 @@ type fakeRuntime struct {
 	captureBaselineLayerID       string
 	captureBaselineExcludedPaths []string
 	captureBaselinePortalPaths   []ctldapi.RootFSPortalPath
-	captureBaselineFileSizes     rootFSFileSizeIndex
 }
 
 func (r *fakeRuntime) Inspect(_ context.Context, target ctldapi.RootFSContainerRef) (ctldapi.RootFSInfo, error) {
@@ -575,30 +498,30 @@ func (r *fakeRuntime) Inspect(_ context.Context, target ctldapi.RootFSContainerR
 	return r.info, r.inspectErr
 }
 
-func (r *fakeRuntime) CreateDiff(_ context.Context, info ctldapi.RootFSInfo, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, *ctldapi.RootFSDiffStats, io.ReadSeekCloser, error) {
+func (r *fakeRuntime) CreateDiff(_ context.Context, info ctldapi.RootFSInfo, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
 	r.createCalled = true
 	r.createInfo = info
 	r.createExcludedPaths = append([]string(nil), excludedPaths...)
 	r.createPortalPaths = append([]ctldapi.RootFSPortalPath(nil), portalPaths...)
 	if r.createErr != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, nil, r.createErr
+		return ctldapi.RootFSDiffDescriptor{}, nil, r.createErr
 	}
-	return r.createDesc, r.createStats, readSeekNopCloser{Reader: strings.NewReader(r.createContent)}, nil
+	return r.createDesc, readSeekNopCloser{Reader: strings.NewReader(r.createContent)}, nil
 }
 
-func (r *fakeRuntime) CreateDiffFromBaseline(_ context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, *ctldapi.RootFSDiffStats, io.ReadSeekCloser, error) {
+func (r *fakeRuntime) CreateDiffFromBaseline(_ context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
 	r.createBaselineCalled = true
 	r.createBaselineInfo = info
 	r.createBaselineLayerID = baselineLayerID
 	r.createBaselineExcludedPaths = append([]string(nil), excludedPaths...)
 	r.createBaselinePortalPaths = append([]ctldapi.RootFSPortalPath(nil), portalPaths...)
 	if r.createBaselineErr != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, nil, r.createBaselineErr
+		return ctldapi.RootFSDiffDescriptor{}, nil, r.createBaselineErr
 	}
-	return r.createBaselineDesc, r.createBaselineStats, readSeekNopCloser{Reader: strings.NewReader(r.createBaselineContent)}, nil
+	return r.createBaselineDesc, readSeekNopCloser{Reader: strings.NewReader(r.createBaselineContent)}, nil
 }
 
-func (r *fakeRuntime) ApplyDiff(_ context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, content io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, []rootFSFileChange, error) {
+func (r *fakeRuntime) ApplyDiff(_ context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, content io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, error) {
 	r.applyCalled = true
 	r.applyInfo = info
 	r.applyInputDesc = desc
@@ -609,34 +532,22 @@ func (r *fakeRuntime) ApplyDiff(_ context.Context, info ctldapi.RootFSInfo, desc
 	r.applyPortalPathCalls = append(r.applyPortalPathCalls, append([]ctldapi.RootFSPortalPath(nil), portalPaths...))
 	payload, err := io.ReadAll(content)
 	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, err
+		return ctldapi.RootFSDiffDescriptor{}, err
 	}
 	r.applyContent = string(payload)
 	r.applyContents = append(r.applyContents, string(payload))
 	if r.applyErr != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, r.applyErr
+		return ctldapi.RootFSDiffDescriptor{}, r.applyErr
 	}
-	changes := r.applyChanges
-	callIndex := len(r.applyContents) - 1
-	if callIndex >= 0 && callIndex < len(r.applyChangeCalls) {
-		changes = r.applyChangeCalls[callIndex]
-	}
-	if changes == nil {
-		return r.applyDesc, nil, nil
-	}
-	return r.applyDesc, append([]rootFSFileChange{}, changes...), nil
+	return r.applyDesc, nil
 }
 
-func (r *fakeRuntime) CaptureBaseline(_ context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath, fileSizes rootFSFileSizeIndex) error {
+func (r *fakeRuntime) CaptureBaseline(_ context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) error {
 	r.captureBaselineCalled = true
 	r.captureInfo = info
 	r.captureBaselineLayerID = baselineLayerID
 	r.captureBaselineExcludedPaths = append([]string(nil), excludedPaths...)
 	r.captureBaselinePortalPaths = append([]ctldapi.RootFSPortalPath(nil), portalPaths...)
-	r.captureBaselineFileSizes = make(rootFSFileSizeIndex, len(fileSizes))
-	for filePath, size := range fileSizes {
-		r.captureBaselineFileSizes[filePath] = size
-	}
 	return r.captureBaselineErr
 }
 

@@ -158,114 +158,96 @@ func (r *ContainerdRuntime) Inspect(ctx context.Context, target ctldapi.RootFSCo
 	return info, nil
 }
 
-func (r *ContainerdRuntime) CreateDiff(ctx context.Context, info ctldapi.RootFSInfo, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, *ctldapi.RootFSDiffStats, io.ReadSeekCloser, error) {
+func (r *ContainerdRuntime) CreateDiff(ctx context.Context, info ctldapi.RootFSInfo, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
 	if strings.TrimSpace(info.SnapshotKey) == "" || strings.TrimSpace(info.Snapshotter) == "" {
-		return ctldapi.RootFSDiffDescriptor{}, nil, nil, fmt.Errorf("%w: snapshot key and snapshotter are required", ErrBadRequest)
+		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("%w: snapshot key and snapshotter are required", ErrBadRequest)
 	}
 	client, closeClient, err := r.client(ctx)
 	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, nil, err
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
 	}
 
 	if desc, reader, ok, fastErr := r.createOverlayUpperDiff(ctx, client, info, excludedPaths, portalPaths); ok && fastErr == nil {
 		closeClient()
-		return desc, nil, reader, nil
+		return desc, reader, nil
 	} else if ok && fastErr != nil {
 		desc, err := crootfs.CreateDiff(ctx, info.SnapshotKey, client.SnapshotService(info.Snapshotter), client.DiffService())
 		if err != nil {
 			closeClient()
-			return ctldapi.RootFSDiffDescriptor{}, nil, nil, fmt.Errorf("overlayfs fast diff: %v; containerd diff: %w", fastErr, err)
+			return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("overlayfs fast diff: %v; containerd diff: %w", fastErr, err)
 		}
 		rootDesc, reader, needsClient, err := rootFSDiffReaderFromContent(ctx, client, desc, excludedPaths, portalPaths)
 		if err != nil {
 			closeClient()
-			return ctldapi.RootFSDiffDescriptor{}, nil, nil, err
+			return ctldapi.RootFSDiffDescriptor{}, nil, err
 		}
 		if !needsClient {
 			closeClient()
-			return rootDesc, nil, reader, nil
+			return rootDesc, reader, nil
 		}
-		return rootDesc, nil, closeReadSeekWithFunc{ReadSeekCloser: reader, closeFunc: closeClient}, nil
+		return rootDesc, closeReadSeekWithFunc{ReadSeekCloser: reader, closeFunc: closeClient}, nil
 	}
 
 	desc, err := crootfs.CreateDiff(ctx, info.SnapshotKey, client.SnapshotService(info.Snapshotter), client.DiffService())
 	if err != nil {
 		closeClient()
-		return ctldapi.RootFSDiffDescriptor{}, nil, nil, err
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
 	}
 	rootDesc, reader, needsClient, err := rootFSDiffReaderFromContent(ctx, client, desc, excludedPaths, portalPaths)
 	if err != nil {
 		closeClient()
-		return ctldapi.RootFSDiffDescriptor{}, nil, nil, err
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
 	}
 	if !needsClient {
 		closeClient()
-		return rootDesc, nil, reader, nil
+		return rootDesc, reader, nil
 	}
-	return rootDesc, nil, closeReadSeekWithFunc{ReadSeekCloser: reader, closeFunc: closeClient}, nil
+	return rootDesc, closeReadSeekWithFunc{ReadSeekCloser: reader, closeFunc: closeClient}, nil
 }
 
-func (r *ContainerdRuntime) CreateDiffFromBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, *ctldapi.RootFSDiffStats, io.ReadSeekCloser, error) {
+func (r *ContainerdRuntime) CreateDiffFromBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
 	if strings.TrimSpace(baselineLayerID) == "" {
-		return ctldapi.RootFSDiffDescriptor{}, nil, nil, fmt.Errorf("%w: baseline layer id is required", ErrBadRequest)
+		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("%w: baseline layer id is required", ErrBadRequest)
 	}
 	client, closeClient, err := r.client(ctx)
 	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, nil, err
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
 	}
 	defer closeClient()
 
 	upperdir, err := r.activeOverlayUpperdir(ctx, client, info)
 	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, nil, err
+		return ctldapi.RootFSDiffDescriptor{}, nil, err
 	}
-	baselineStateDir := r.rootFSBaselineStatePath(info, baselineLayerID)
-	baselineDir := filepath.Join(baselineStateDir, "upper")
-	indexPath := rootFSFileSizeIndexPath(baselineStateDir)
+	baselineDir := r.rootFSBaselinePath(info, baselineLayerID)
 	if st, err := os.Stat(baselineDir); err != nil {
 		if os.IsNotExist(err) {
-			baselineDir = r.rootFSLegacyBaselinePath(info, baselineLayerID)
-			indexPath = ""
-			if legacy, legacyErr := os.Stat(baselineDir); legacyErr != nil {
-				if os.IsNotExist(legacyErr) {
-					return ctldapi.RootFSDiffDescriptor{}, nil, nil, fmt.Errorf("%w: rootfs baseline %s is not captured", ErrNotFound, baselineLayerID)
-				}
-				return ctldapi.RootFSDiffDescriptor{}, nil, nil, fmt.Errorf("inspect rootfs baseline: %w", legacyErr)
-			} else if !legacy.IsDir() {
-				return ctldapi.RootFSDiffDescriptor{}, nil, nil, fmt.Errorf("%w: rootfs baseline path is not a directory", ErrConflict)
-			}
-		} else {
-			return ctldapi.RootFSDiffDescriptor{}, nil, nil, fmt.Errorf("inspect rootfs baseline: %w", err)
+			return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("%w: rootfs baseline %s is not captured", ErrNotFound, baselineLayerID)
 		}
+		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("inspect rootfs baseline: %w", err)
 	} else if !st.IsDir() {
-		return ctldapi.RootFSDiffDescriptor{}, nil, nil, fmt.Errorf("%w: rootfs baseline path is not a directory", ErrConflict)
+		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("%w: rootfs baseline path is not a directory", ErrConflict)
 	}
-	var fileSizes rootFSFileSizeIndex
-	if indexPath != "" {
-		// The index is advisory. Missing, corrupt, or newer metadata falls back to
-		// the legacy baseline filesystem walk without blocking pause.
-		fileSizes, _ = loadRootFSFileSizeIndex(indexPath)
-	}
-	return writeOverlayUpperDiffFromBaseline(ctx, baselineDir, upperdir, excludedPaths, portalPaths, fileSizes)
+	return writeOverlayUpperDiffFromBaseline(ctx, baselineDir, upperdir, excludedPaths, portalPaths)
 }
 
-func (r *ContainerdRuntime) ApplyDiff(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, reader io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, []rootFSFileChange, error) {
+func (r *ContainerdRuntime) ApplyDiff(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, reader io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, error) {
 	if strings.TrimSpace(info.ContainerID) == "" {
-		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("%w: container id is required", ErrBadRequest)
+		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("%w: container id is required", ErrBadRequest)
 	}
 	client, closeClient, err := r.client(ctx)
 	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, err
+		return ctldapi.RootFSDiffDescriptor{}, err
 	}
 	defer closeClient()
 
 	liveRootFS, err := liveRootFSPath(r.containerdRoot, r.containerdHostRoot, r.namespace, info)
 	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, err
+		return ctldapi.RootFSDiffDescriptor{}, err
 	}
-	filteredDesc, filteredReader, changes, err := filterRootFSDiffTarForApply(desc, reader, excludedPaths, portalPaths)
+	filteredDesc, filteredReader, err := filterRootFSDiffTarForApply(desc, reader, excludedPaths, portalPaths)
 	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("filter rootfs diff: %w", err)
+		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("filter rootfs diff: %w", err)
 	}
 	defer filteredReader.Close()
 	desc = filteredDesc
@@ -273,11 +255,11 @@ func (r *ContainerdRuntime) ApplyDiff(ctx context.Context, info ctldapi.RootFSIn
 
 	ociDesc, err := descriptorToOCI(desc)
 	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, err
+		return ctldapi.RootFSDiffDescriptor{}, err
 	}
 	ref := "sandbox0-rootfs-apply-" + strings.ReplaceAll(ociDesc.Digest.String(), ":", "-")
 	if err := content.WriteBlob(ctx, client.ContentStore(), ref, reader, ociDesc); err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("write rootfs diff into containerd content store: %w", err)
+		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("write rootfs diff into containerd content store: %w", err)
 	}
 	applied, err := client.DiffService().Apply(ctx, ociDesc, []mount.Mount{{
 		Type:    "bind",
@@ -285,12 +267,12 @@ func (r *ContainerdRuntime) ApplyDiff(ctx context.Context, info ctldapi.RootFSIn
 		Options: []string{"rbind", "rw"},
 	}})
 	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, err
+		return ctldapi.RootFSDiffDescriptor{}, err
 	}
-	return descriptorFromOCI(applied), changes, nil
+	return descriptorFromOCI(applied), nil
 }
 
-func (r *ContainerdRuntime) CaptureBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath, fileSizes rootFSFileSizeIndex) error {
+func (r *ContainerdRuntime) CaptureBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) error {
 	if strings.TrimSpace(baselineLayerID) == "" {
 		return fmt.Errorf("%w: baseline layer id is required", ErrBadRequest)
 	}
@@ -304,7 +286,7 @@ func (r *ContainerdRuntime) CaptureBaseline(ctx context.Context, info ctldapi.Ro
 	if err != nil {
 		return err
 	}
-	target := r.rootFSBaselineStatePath(info, baselineLayerID)
+	target := r.rootFSBaselinePath(info, baselineLayerID)
 	parent := filepath.Dir(target)
 	if err := os.MkdirAll(parent, 0o700); err != nil {
 		return fmt.Errorf("create rootfs baseline parent: %w", err)
@@ -319,23 +301,11 @@ func (r *ContainerdRuntime) CaptureBaseline(ctx context.Context, info ctldapi.Ro
 			_ = os.RemoveAll(tmp)
 		}
 	}()
-	upperTmp := filepath.Join(tmp, "upper")
-	if err := os.MkdirAll(upperTmp, 0o700); err != nil {
-		return fmt.Errorf("create rootfs baseline upper directory: %w", err)
-	}
-	if err := fs.CopyDir(upperTmp, upperdir); err != nil {
+	if err := fs.CopyDir(tmp, upperdir); err != nil {
 		return fmt.Errorf("copy rootfs baseline: %w", err)
 	}
-	if err := newRootFSPathFilter(rootFSExcludedPathsWithPortals(excludedPaths, portalPaths)).RemoveAll(upperTmp); err != nil {
+	if err := newRootFSPathFilter(rootFSExcludedPathsWithPortals(excludedPaths, portalPaths)).RemoveAll(tmp); err != nil {
 		return fmt.Errorf("filter rootfs baseline: %w", err)
-	}
-	if fileSizes != nil {
-		indexTmp, err := writeRootFSFileSizeIndexTemp(tmp, fileSizes)
-		if err == nil {
-			if err := os.Rename(indexTmp, rootFSFileSizeIndexPath(tmp)); err != nil {
-				_ = os.Remove(indexTmp)
-			}
-		}
 	}
 	if err := os.RemoveAll(target); err != nil {
 		return fmt.Errorf("replace rootfs baseline: %w", err)
@@ -369,23 +339,11 @@ func rootFSDiffReaderFromContent(ctx context.Context, client containerdClient, d
 	return filteredDesc, filteredReader, false, nil
 }
 
-func (r *ContainerdRuntime) rootFSBaselineStatePath(info ctldapi.RootFSInfo, baselineLayerID string) string {
-	return filepath.Join(r.rootFSBaselineRoot(), "baselines", "v2", rootFSBaselineKey(info, baselineLayerID))
-}
-
-func (r *ContainerdRuntime) rootFSLegacyBaselinePath(info ctldapi.RootFSInfo, baselineLayerID string) string {
-	return filepath.Join(r.rootFSBaselineRoot(), "baselines", rootFSBaselineKey(info, baselineLayerID))
-}
-
-func (r *ContainerdRuntime) rootFSBaselineRoot() string {
+func (r *ContainerdRuntime) rootFSBaselinePath(info ctldapi.RootFSInfo, baselineLayerID string) string {
 	root := defaultRootFSCacheDir
 	if r != nil && strings.TrimSpace(r.rootFSCacheDir) != "" {
 		root = r.rootFSCacheDir
 	}
-	return root
-}
-
-func rootFSBaselineKey(info ctldapi.RootFSInfo, baselineLayerID string) string {
 	sum := sha256.Sum256([]byte(strings.Join([]string{
 		info.PodNamespace,
 		info.PodName,
@@ -394,7 +352,7 @@ func rootFSBaselineKey(info ctldapi.RootFSInfo, baselineLayerID string) string {
 		info.ContainerID,
 		strings.TrimSpace(baselineLayerID),
 	}, "\x00")))
-	return hex.EncodeToString(sum[:])
+	return filepath.Join(root, "baselines", hex.EncodeToString(sum[:]))
 }
 
 func (r *ContainerdRuntime) resolveContainerID(ctx context.Context, target ctldapi.RootFSContainerRef) (string, string, error) {

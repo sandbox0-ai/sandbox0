@@ -51,26 +51,3 @@ sandbox_max_memory: 16Gi
 		t.Fatalf("sandbox max memory = %q, want 16Gi", cfg.SandboxMaxMemory)
 	}
 }
-
-func TestLoadManagerConfigRootFSSquashDeletionThresholds(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "manager.yaml")
-	if err := os.WriteFile(path, []byte(`
-rootfs_maintenance:
-  squash_min_deleted_bytes: 16777216
-  squash_min_deleted_ratio: 0.5
-`), 0o600); err != nil {
-		t.Fatalf("write manager config: %v", err)
-	}
-
-	cfg, err := loadManagerConfig(path)
-	if err != nil {
-		t.Fatalf("loadManagerConfig: %v", err)
-	}
-	if cfg.RootFSMaintenance.SquashMinDeletedBytes != 16*1024*1024 {
-		t.Fatalf("minimum deleted bytes = %d, want %d", cfg.RootFSMaintenance.SquashMinDeletedBytes, 16*1024*1024)
-	}
-	if cfg.RootFSMaintenance.SquashMinDeletedRatio != 0.5 {
-		t.Fatalf("minimum deleted ratio = %f, want 0.5", cfg.RootFSMaintenance.SquashMinDeletedRatio)
-	}
-}

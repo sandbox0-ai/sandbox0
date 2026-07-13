@@ -30,8 +30,6 @@ The rootfs checkpoint covers files written inside the sandbox filesystem, includ
 
 On nodes using the containerd overlayfs snapshotter, `ctld` checkpoints only the active snapshot upperdir and stores it as a standard OCI layer diff. Other snapshotters, or nodes where the overlayfs upperdir is not readable by `ctld`, fall back to containerd's built-in diff path.
 
-Files created and deleted between checkpoints, without being included in an earlier checkpoint, are not retained as rootfs content. A file deleted after an earlier pause can remain in an immutable parent layer until the chain is compacted and garbage-collected. Sandbox0 detects large deletions while preparing an incremental checkpoint, discards that incremental layer, and uploads a parentless replacement; unreachable parent objects are removed asynchronously. Named snapshots and forks can keep older layers reachable for as long as they reference them.
-
 ## Pause A Sandbox
 
 Pause a sandbox to release compute while keeping its identity, configuration, services, mounted durable storage, and latest writable rootfs checkpoint available for a later resume.

@@ -67,13 +67,6 @@ type RootFSDiffDescriptor struct {
 	ObjectKey string `json:"object_key,omitempty"`
 }
 
-// RootFSDiffStats describes logical regular-file bytes removed by a rootfs
-// diff. These values are advisory and are not part of the immutable OCI
-// descriptor.
-type RootFSDiffStats struct {
-	DeletedBytes int64 `json:"deleted_bytes,omitempty"`
-}
-
 // RootFSLayerDescriptor identifies one immutable rootfs diff layer in a
 // sandbox rootfs head chain.
 type RootFSLayerDescriptor struct {
@@ -127,7 +120,6 @@ type PrepareRootFSSnapshotResponse struct {
 	Handle     string               `json:"handle,omitempty"`
 	Info       RootFSInfo           `json:"info,omitempty"`
 	Descriptor RootFSDiffDescriptor `json:"descriptor,omitempty"`
-	DiffStats  *RootFSDiffStats     `json:"diff_stats,omitempty"`
 	Error      string               `json:"error,omitempty"`
 }
 

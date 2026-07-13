@@ -21,7 +21,6 @@ import (
 const sandboxRootFSContainerName = "procd"
 
 const sandboxRootFSOperationTimeout = 5 * time.Minute
-const sandboxRootFSAbortTimeout = 5 * time.Second
 const sandboxRootFSSourceCheckpointLifecycleStaleAfter = sandboxRootFSOperationTimeout + time.Minute
 const sandboxRootFSUncommittedObjectDeleteDelay = 15 * time.Minute
 const sandboxRootFSUncommittedObjectDeleteTimeout = 30 * time.Second
@@ -72,11 +71,9 @@ func (s *SandboxService) prepareSandboxRootFSCheckpoint(ctx context.Context, pod
 	generation := runtimeGenerationFromPod(pod)
 	parentLayerID := ""
 	expectedHeadLayerID := ""
-	var parentState *SandboxRootFSState
-	if loadedParentState, err := s.latestRootFSState(ctx, sandboxID); err != nil {
+	if parentState, err := s.latestRootFSState(ctx, sandboxID); err != nil {
 		return nil, fmt.Errorf("load current rootfs head: %w", err)
-	} else if loadedParentState != nil {
-		parentState = loadedParentState
+	} else if parentState != nil {
 		expectedHeadLayerID = strings.TrimSpace(parentState.LayerID)
 		if squash, reason := s.shouldSquashSandboxRootFSCheckpoint(parentState); squash {
 			if s.logger != nil {
@@ -96,53 +93,11 @@ func (s *SandboxService) prepareSandboxRootFSCheckpoint(ctx context.Context, pod
 		ExcludedPaths: rootFSExcludedPathsForPod(pod),
 	}
 	layerID := uuid.NewString()
-	prepared, err := s.ctldClient.PrepareRootFSSnapshotWithTimeout(ctx, ctldAddress, prepareReq, sandboxRootFSOperationTimeout)
-	if err != nil && parentLayerID != "" && rootFSBaselineMissing(err, prepareRootFSError(prepared)) {
+	resp, err := s.prepareAndPublishSandboxRootFSSnapshot(ctx, ctldAddress, prepareReq, sandboxID, teamID, generation, layerID)
+	if err != nil && parentLayerID != "" && rootFSBaselineMissing(err, resp) {
 		parentLayerID = ""
 		prepareReq.ParentLayerID = ""
-		prepared, err = s.ctldClient.PrepareRootFSSnapshotWithTimeout(ctx, ctldAddress, prepareReq, sandboxRootFSOperationTimeout)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("save sandbox rootfs checkpoint: %w", rootFSResponseError(err, prepareRootFSError(prepared)))
-	}
-	var discardedPrepared *ctldapi.PrepareRootFSSnapshotResponse
-	if parentLayerID != "" {
-		if squash, reason := s.shouldSquashSandboxRootFSDeletion(parentState, prepared.DiffStats); squash {
-			squashReq := prepareReq
-			squashReq.ParentLayerID = ""
-			squashedPrepared, squashErr := s.ctldClient.PrepareRootFSSnapshotWithTimeout(ctx, ctldAddress, squashReq, sandboxRootFSOperationTimeout)
-			if squashErr != nil {
-				if s.logger != nil {
-					s.logger.Warn("Skipping sandbox rootfs deletion squash because the replacement snapshot could not be prepared",
-						zap.String("sandboxID", sandboxID),
-						zap.String("headLayerID", expectedHeadLayerID),
-						zap.String("reason", reason),
-						zap.Error(rootFSResponseError(squashErr, prepareRootFSError(squashedPrepared))),
-					)
-				}
-			} else {
-				if s.logger != nil {
-					s.logger.Info("Squashing sandbox rootfs checkpoint after a large deletion",
-						zap.String("sandboxID", sandboxID),
-						zap.String("headLayerID", expectedHeadLayerID),
-						zap.String("reason", reason),
-					)
-				}
-				discardedPrepared = prepared
-				prepared = squashedPrepared
-				parentLayerID = ""
-			}
-		}
-	}
-	resp, err := s.publishPreparedSandboxRootFSSnapshot(ctx, ctldAddress, prepared, sandboxID, teamID, generation, layerID)
-	if discardedPrepared != nil {
-		if cleanupErr := s.abortPreparedSandboxRootFSSnapshot(ctldAddress, discardedPrepared); cleanupErr != nil && s.logger != nil {
-			s.logger.Warn("Failed to clean up discarded incremental sandbox rootfs snapshot",
-				zap.String("sandboxID", sandboxID),
-				zap.String("headLayerID", expectedHeadLayerID),
-				zap.Error(cleanupErr),
-			)
-		}
+		resp, err = s.prepareAndPublishSandboxRootFSSnapshot(ctx, ctldAddress, prepareReq, sandboxID, teamID, generation, layerID)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("save sandbox rootfs checkpoint: %w", rootFSResponseError(err, saveRootFSError(resp)))
@@ -157,18 +112,25 @@ func (s *SandboxService) prepareSandboxRootFSCheckpoint(ctx context.Context, pod
 	return state, nil
 }
 
-func (s *SandboxService) publishPreparedSandboxRootFSSnapshot(ctx context.Context, ctldAddress string, prepared *ctldapi.PrepareRootFSSnapshotResponse, sandboxID, teamID string, generation int64, layerID string) (*ctldapi.SaveRootFSResponse, error) {
-	if prepared == nil {
-		return nil, fmt.Errorf("prepared rootfs snapshot is nil")
+func (s *SandboxService) prepareAndPublishSandboxRootFSSnapshot(ctx context.Context, ctldAddress string, prepareReq ctldapi.PrepareRootFSSnapshotRequest, sandboxID, teamID string, generation int64, layerID string) (*ctldapi.SaveRootFSResponse, error) {
+	prepared, err := s.ctldClient.PrepareRootFSSnapshotWithTimeout(ctx, ctldAddress, prepareReq, sandboxRootFSOperationTimeout)
+	if err != nil {
+		resp := &ctldapi.SaveRootFSResponse{}
+		if prepared != nil {
+			resp.Info = prepared.Info
+			resp.Descriptor = prepared.Descriptor
+			resp.Error = prepared.Error
+		}
+		return resp, err
 	}
 	objectKey, err := defaultSandboxRootFSObjectKey(teamID, sandboxID, generation, prepared.Descriptor.Digest)
 	if err != nil {
-		_ = s.abortPreparedSandboxRootFSSnapshot(ctldAddress, prepared)
+		_, _ = s.ctldClient.AbortRootFSSnapshotWithTimeout(context.Background(), ctldAddress, ctldapi.AbortRootFSSnapshotRequest{Handle: prepared.Handle}, sandboxRootFSOperationTimeout)
 		return &ctldapi.SaveRootFSResponse{Info: prepared.Info, Descriptor: prepared.Descriptor}, err
 	}
 	pendingState := rootFSStateFromPreparedSnapshot(sandboxID, teamID, generation, layerID, objectKey, prepared)
 	if err := s.queueUncommittedRootFSObjectDeletion(ctx, pendingState, s.now().Add(sandboxRootFSUncommittedObjectDeleteDelay)); err != nil {
-		_ = s.abortPreparedSandboxRootFSSnapshot(ctldAddress, prepared)
+		_, _ = s.ctldClient.AbortRootFSSnapshotWithTimeout(context.Background(), ctldAddress, ctldapi.AbortRootFSSnapshotRequest{Handle: prepared.Handle}, sandboxRootFSOperationTimeout)
 		return &ctldapi.SaveRootFSResponse{Info: prepared.Info, Descriptor: prepared.Descriptor}, err
 	}
 	published, err := s.ctldClient.PublishRootFSSnapshotWithTimeout(ctx, ctldAddress, ctldapi.PublishRootFSSnapshotRequest{
@@ -179,7 +141,7 @@ func (s *SandboxService) publishPreparedSandboxRootFSSnapshot(ctx context.Contex
 		ObjectKey:                 objectKey,
 	}, sandboxRootFSOperationTimeout)
 	if err != nil {
-		_ = s.abortPreparedSandboxRootFSSnapshot(ctldAddress, prepared)
+		_, _ = s.ctldClient.AbortRootFSSnapshotWithTimeout(context.Background(), ctldAddress, ctldapi.AbortRootFSSnapshotRequest{Handle: prepared.Handle}, sandboxRootFSOperationTimeout)
 		s.deleteUncommittedRootFSObject(pendingState, "rootfs snapshot publish failed")
 		resp := &ctldapi.SaveRootFSResponse{Info: prepared.Info, Descriptor: prepared.Descriptor}
 		if published != nil {
@@ -196,22 +158,6 @@ func (s *SandboxService) publishPreparedSandboxRootFSSnapshot(ctx context.Contex
 	}, nil
 }
 
-func (s *SandboxService) abortPreparedSandboxRootFSSnapshot(ctldAddress string, prepared *ctldapi.PrepareRootFSSnapshotResponse) error {
-	if prepared == nil || strings.TrimSpace(prepared.Handle) == "" {
-		return fmt.Errorf("prepared rootfs snapshot handle is empty")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), sandboxRootFSAbortTimeout)
-	defer cancel()
-	resp, err := s.ctldClient.AbortRootFSSnapshotWithTimeout(ctx, ctldAddress, ctldapi.AbortRootFSSnapshotRequest{Handle: prepared.Handle}, sandboxRootFSAbortTimeout)
-	if err != nil {
-		return rootFSResponseError(err, abortRootFSError(resp))
-	}
-	if resp == nil || !resp.Aborted {
-		return fmt.Errorf("ctld did not report the prepared rootfs snapshot as aborted")
-	}
-	return nil
-}
-
 func (s *SandboxService) shouldSquashSandboxRootFSCheckpoint(state *SandboxRootFSState) (bool, string) {
 	if s == nil || s.config.RootFSSquashDisabled || state == nil {
 		return false, ""
@@ -224,48 +170,20 @@ func (s *SandboxService) shouldSquashSandboxRootFSCheckpoint(state *SandboxRootF
 		return true, fmt.Sprintf("chain_depth:%d", depth)
 	}
 	if maxBytes := s.config.RootFSSquashMaxChainBytes; maxBytes > 0 {
-		totalBytes := sandboxRootFSChainBytes(state)
+		var totalBytes int64
+		for _, layer := range state.LayerChain {
+			if layer != nil && layer.DiffSize > 0 {
+				totalBytes += layer.DiffSize
+			}
+		}
+		if totalBytes == 0 && state.DiffSize > 0 {
+			totalBytes = state.DiffSize
+		}
 		if totalBytes >= maxBytes {
 			return true, fmt.Sprintf("chain_bytes:%d", totalBytes)
 		}
 	}
 	return false, ""
-}
-
-// shouldSquashSandboxRootFSDeletion decides whether the current deletion delta
-// is large enough to justify replacing the reachable chain with a full layer.
-func (s *SandboxService) shouldSquashSandboxRootFSDeletion(state *SandboxRootFSState, stats *ctldapi.RootFSDiffStats) (bool, string) {
-	if s == nil || s.config.RootFSSquashDisabled || state == nil || stats == nil || stats.DeletedBytes <= 0 {
-		return false, ""
-	}
-	if minBytes := s.config.RootFSSquashMinDeletedBytes; minBytes <= 0 || stats.DeletedBytes < minBytes {
-		return false, ""
-	}
-	chainBytes := sandboxRootFSChainBytes(state)
-	if chainBytes <= 0 {
-		return false, ""
-	}
-	ratio := float64(stats.DeletedBytes) / float64(chainBytes)
-	if minRatio := s.config.RootFSSquashMinDeletedRatio; minRatio <= 0 || ratio < minRatio {
-		return false, ""
-	}
-	return true, fmt.Sprintf("deleted_bytes:%d,chain_bytes:%d,ratio:%.4f", stats.DeletedBytes, chainBytes, ratio)
-}
-
-func sandboxRootFSChainBytes(state *SandboxRootFSState) int64 {
-	if state == nil {
-		return 0
-	}
-	var totalBytes int64
-	for _, layer := range state.LayerChain {
-		if layer != nil && layer.DiffSize > 0 {
-			totalBytes += layer.DiffSize
-		}
-	}
-	if totalBytes == 0 && state.DiffSize > 0 {
-		totalBytes = state.DiffSize
-	}
-	return totalBytes
 }
 
 func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *corev1.Pod, state *SandboxRootFSState) error {
@@ -659,20 +577,6 @@ func saveRootFSError(resp *ctldapi.SaveRootFSResponse) string {
 	return strings.TrimSpace(resp.Error)
 }
 
-func prepareRootFSError(resp *ctldapi.PrepareRootFSSnapshotResponse) string {
-	if resp == nil {
-		return ""
-	}
-	return strings.TrimSpace(resp.Error)
-}
-
-func abortRootFSError(resp *ctldapi.AbortRootFSSnapshotResponse) string {
-	if resp == nil {
-		return ""
-	}
-	return strings.TrimSpace(resp.Error)
-}
-
 func applyRootFSError(resp *ctldapi.ApplyRootFSResponse) string {
 	if resp == nil {
 		return ""
@@ -680,12 +584,12 @@ func applyRootFSError(resp *ctldapi.ApplyRootFSResponse) string {
 	return strings.TrimSpace(resp.Error)
 }
 
-func rootFSBaselineMissing(err error, message string) bool {
+func rootFSBaselineMissing(err error, resp *ctldapi.SaveRootFSResponse) bool {
 	var reqErr *ctldapi.RequestError
 	if !errors.As(err, &reqErr) || reqErr == nil || reqErr.StatusCode != http.StatusNotFound {
 		return false
 	}
-	message = strings.ToLower(strings.TrimSpace(message))
+	message := strings.ToLower(saveRootFSError(resp))
 	return strings.Contains(message, "baseline") && strings.Contains(message, "not captured")
 }
 

@@ -7,6 +7,7 @@ import (
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
+	sandboxobstypes "github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -81,7 +82,10 @@ func TestApplyNetdConfigInjectsAuditIngestURLOnlyWhenLicensedAuditIsEnabled(t *t
 				Enabled: &enabled,
 				Backend: infrav1alpha1.SandboxObservabilityBackendClickHouse,
 				Type:    infrav1alpha1.SandboxObservabilityTypeExternal,
-				Audit:   &infrav1alpha1.SandboxObservabilityAuditConfig{Enabled: true},
+				Audit: &infrav1alpha1.SandboxObservabilityAuditConfig{
+					Enabled:      true,
+					DeliveryMode: sandboxobstypes.AuditDeliveryModeCanonicalSync,
+				},
 			},
 		},
 	}
@@ -98,11 +102,14 @@ func TestApplyNetdConfigInjectsAuditIngestURLOnlyWhenLicensedAuditIsEnabled(t *t
 
 	require.NoError(t, err)
 	assert.Equal(t, "http://cluster-gateway.svc/internal/v1/sandbox-observability/events", cfg.SandboxObservabilityIngestURL)
+	assert.Equal(t, sandboxobstypes.AuditDeliveryModeCanonicalSync, cfg.SandboxObservabilityAuditDeliveryMode)
 
 	infra.Spec.SandboxObservability.Audit.Enabled = false
 	err = ApplyNetdConfig(context.Background(), client, infra, "http://cluster-gateway.svc/", cfg)
 	require.NoError(t, err)
 	assert.Empty(t, cfg.SandboxObservabilityIngestURL)
+	assert.Empty(t, cfg.SandboxObservabilityAuditSpoolDir)
+	assert.Empty(t, cfg.SandboxObservabilityAuditDeliveryMode)
 }
 
 func TestApplyManagerConfigClearsIngestURLsWhenDisabled(t *testing.T) {
@@ -221,6 +228,7 @@ func TestGetRuntimeConfigUsesRegionClickHouse(t *testing.T) {
 	assert.Equal(t, "clickhouse://sandbox0:password@clickhouse:9000/sandbox0_obs", cfg.DSN)
 	assert.Equal(t, "sandbox0_obs", cfg.Database)
 	assert.Equal(t, "sandbox_audit_events", cfg.EventsTable)
+	assert.Equal(t, sandboxobstypes.AuditDeliveryModeDurableAsync, cfg.AuditDeliveryMode)
 }
 
 func TestGetRuntimeConfigMovesPersistedLegacyAuditDefaultToCanonicalTable(t *testing.T) {

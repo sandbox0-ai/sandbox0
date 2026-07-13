@@ -17,9 +17,16 @@ import (
 var errAuditSpoolWrite = errors.New("audit spool write failed")
 
 type auditSpool struct {
-	dir      string
-	mu       sync.Mutex
-	sequence uint64
+	dir string
+	mu  sync.Mutex
+	// putMu makes the read-before-rename collision check atomic for concurrent
+	// writes of the same event ID without serializing Put behind Load.
+	putMu sync.Mutex
+	// recordsMu lets atomic Put and read-only Load run together while excluding
+	// Remove, so replay cannot classify a concurrently acknowledged record as
+	// corrupt without adding a full spool scan to admission latency.
+	recordsMu sync.RWMutex
+	sequence  uint64
 }
 
 func newAuditSpool(dir string) (*auditSpool, error) {
@@ -91,6 +98,10 @@ func (s *auditSpool) Put(event auditEvent) error {
 	if s == nil {
 		return nil
 	}
+	s.putMu.Lock()
+	defer s.putMu.Unlock()
+	s.recordsMu.RLock()
+	defer s.recordsMu.RUnlock()
 	if strings.TrimSpace(event.EventID) == "" {
 		return fmt.Errorf("audit event_id is required")
 	}
@@ -152,6 +163,8 @@ func (s *auditSpool) Load(limit int) ([]auditEvent, error) {
 	if s == nil || limit <= 0 {
 		return nil, nil
 	}
+	s.recordsMu.RLock()
+	defer s.recordsMu.RUnlock()
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return nil, fmt.Errorf("read audit spool: %w", err)
@@ -170,6 +183,9 @@ func (s *auditSpool) Load(limit int) ([]auditEvent, error) {
 		}
 		payload, err := os.ReadFile(filepath.Join(s.dir, name))
 		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
 			return nil, fmt.Errorf("read audit spool record: %w", err)
 		}
 		var event auditEvent
@@ -190,6 +206,8 @@ func (s *auditSpool) Remove(eventIDs ...string) error {
 	if s == nil {
 		return nil
 	}
+	s.recordsMu.Lock()
+	defer s.recordsMu.Unlock()
 	for _, eventID := range eventIDs {
 		if _, err := uuid.Parse(eventID); err != nil {
 			return fmt.Errorf("audit event_id is invalid")

@@ -78,9 +78,8 @@ type Server struct {
 	logger                                   *zap.Logger
 	meteringHandler                          *gatewayhandlers.MeteringHandler
 	observabilityHandler                     *gatewayhandlers.SandboxObservabilityHandler
-	auditWriter                              sandboxobservability.Writer
 	auditSigningKey                          ed25519.PrivateKey
-	auditResults                             *auditResultDelivery
+	auditDelivery                            *auditDelivery
 	internalAuthGen                          *internalauth.Generator
 	entitlements                             licensing.Entitlements
 	sandboxAuditEntitlements                 licensing.Entitlements
@@ -303,14 +302,14 @@ func NewServer(
 	if writer, ok := options.sandboxObservabilityRepo.(sandboxobservability.Writer); ok {
 		auditWriter = writer
 	}
-	var auditResults *auditResultDelivery
+	var delivery *auditDelivery
 	if cfg.SandboxObservability.AuditEnabled {
 		if strings.TrimSpace(cfg.SandboxObservability.AuditSpoolDir) == "" {
 			return nil, fmt.Errorf("sandbox audit requires audit_spool_dir")
 		}
-		auditResults, err = newAuditResultDelivery(cfg.SandboxObservability.AuditSpoolDir, auditWriter, logger, auditSigningPublicKey)
+		delivery, err = newAuditDelivery(cfg.SandboxObservability.AuditSpoolDir, auditWriter, logger, auditSigningPublicKey)
 		if err != nil {
-			return nil, fmt.Errorf("initialize sandbox audit result delivery: %w", err)
+			return nil, fmt.Errorf("initialize sandbox audit delivery: %w", err)
 		}
 	}
 	sandboxServiceLimiter, err := ratelimit.New(context.Background(), gatewaymiddleware.RateLimitConfigFromGatewayConfig(cfg.GatewayConfig))
@@ -344,9 +343,8 @@ func NewServer(
 		logger:                                   logger,
 		meteringHandler:                          meteringHandler,
 		observabilityHandler:                     observabilityHandler,
-		auditWriter:                              auditWriter,
 		auditSigningKey:                          auditSigningPrivateKey,
-		auditResults:                             auditResults,
+		auditDelivery:                            delivery,
 		internalAuthGen:                          internalAuthGen,
 		entitlements:                             publicEntitlements,
 		sandboxAuditEntitlements:                 sandboxAuditEntitlements,
@@ -742,8 +740,8 @@ func requireMeteringAccess() gin.HandlerFunc {
 
 // Start starts the HTTP server
 func (s *Server) Start(ctx context.Context) error {
-	if s.auditResults != nil {
-		s.auditResults.Start(ctx)
+	if s.auditDelivery != nil {
+		s.auditDelivery.Start(ctx)
 	}
 	addr := fmt.Sprintf(":%d", s.cfg.HTTPPort)
 	s.logger.Info("Starting HTTP server",

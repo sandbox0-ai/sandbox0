@@ -8,6 +8,27 @@ import (
 
 const CurrentEventSchemaVersion = 2
 
+// AuditDeliveryMode controls when an audited operation may proceed. ClickHouse
+// remains canonical in every mode; durable_async only acknowledges the local
+// delivery buffer before continuing.
+type AuditDeliveryMode string
+
+const (
+	AuditDeliveryModeDurableAsync  AuditDeliveryMode = "durable_async"
+	AuditDeliveryModeCanonicalSync AuditDeliveryMode = "canonical_sync"
+)
+
+// NormalizeAuditDeliveryMode applies the low-latency default used for
+// non-mutating API requests and data-plane flows.
+func NormalizeAuditDeliveryMode(mode AuditDeliveryMode) AuditDeliveryMode {
+	switch mode {
+	case "", AuditDeliveryModeDurableAsync:
+		return AuditDeliveryModeDurableAsync
+	default:
+		return AuditDeliveryModeCanonicalSync
+	}
+}
+
 // ErrBackendDisabled is returned when historical sandbox observability storage is not configured.
 var ErrBackendDisabled = errors.New("sandbox observability backend is disabled")
 

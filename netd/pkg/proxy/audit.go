@@ -25,7 +25,13 @@ type auditSink interface {
 	Close() error
 }
 
-type multiAuditSink []auditSink
+const maxFlowProtocolOperations = sandboxobservability.MaxNetworkAuditProtocolOperations
+
+type multiAuditSink struct {
+	bestEffort []auditSink
+	required   auditSink
+	logger     *zap.Logger
+}
 
 type jsonlAuditSink struct {
 	mu      sync.Mutex
@@ -66,15 +72,21 @@ type auditEvent struct {
 	AuthCacheHit       bool                     `json:"auth_cache_hit,omitempty"`
 	AuthResolveError   string                   `json:"auth_resolve_error,omitempty"`
 	ProtocolOperations []protocolOperationAudit `json:"protocol_operations,omitempty"`
-	Error              string                   `json:"error,omitempty"`
+	// ProtocolOperationsTruncated records that the bounded protocol-operation
+	// snapshot omitted operations or field content.
+	ProtocolOperationsTruncated bool   `json:"protocol_operations_truncated,omitempty"`
+	Error                       string `json:"error,omitempty"`
 }
 
 type flowAudit struct {
-	ID           string
-	StartedAt    time.Time
-	egressBytes  int64
-	ingressBytes int64
-	attempted    atomic.Bool
+	ID                 string
+	StartedAt          time.Time
+	egressBytes        int64
+	ingressBytes       int64
+	attempted          atomic.Bool
+	protocolMu         sync.Mutex
+	protocolOperations []protocolOperationAudit
+	protocolTruncated  bool
 }
 
 func (a *flowAudit) startAttempt() bool {
@@ -87,11 +99,60 @@ func (a *flowAudit) resetAttempt() {
 	}
 }
 
+func (a *flowAudit) appendProtocolOperations(entries ...protocolOperationAudit) {
+	if a == nil || len(entries) == 0 {
+		return
+	}
+	a.protocolMu.Lock()
+	defer a.protocolMu.Unlock()
+	remaining := maxFlowProtocolOperations - len(a.protocolOperations)
+	if remaining <= 0 {
+		a.protocolTruncated = true
+		return
+	}
+	if len(entries) > remaining {
+		a.protocolTruncated = true
+		entries = entries[:remaining]
+	}
+	for _, entry := range entries {
+		bounded, truncated := boundProtocolOperationAudit(entry)
+		if truncated {
+			a.protocolTruncated = true
+		}
+		a.protocolOperations = append(a.protocolOperations, bounded)
+	}
+}
+
+func boundProtocolOperationAudit(entry protocolOperationAudit) (protocolOperationAudit, bool) {
+	truncated := false
+	bound := func(value string) string {
+		value, changed := sandboxobservability.TruncateJSONStringContent(value, sandboxobservability.MaxNetworkAuditProtocolFieldEncodedBytes)
+		truncated = truncated || changed
+		return value
+	}
+	entry.RuleName = bound(entry.RuleName)
+	entry.Protocol = bound(entry.Protocol)
+	entry.Operation = bound(entry.Operation)
+	entry.Object = bound(entry.Object)
+	entry.Action = bound(entry.Action)
+	entry.Reason = bound(entry.Reason)
+	return entry, truncated
+}
+
+func (a *flowAudit) protocolOperationsSnapshot() ([]protocolOperationAudit, bool) {
+	if a == nil {
+		return nil, false
+	}
+	a.protocolMu.Lock()
+	defer a.protocolMu.Unlock()
+	return append([]protocolOperationAudit(nil), a.protocolOperations...), a.protocolTruncated
+}
+
 func newAuditLogger(cfg *config.NetdConfig, logger *zap.Logger) (*auditLogger, error) {
 	if cfg == nil {
 		return nil, nil
 	}
-	var sinks []auditSink
+	var localSinks []auditSink
 	if cfg.AuditLogPath != "" {
 		maxSizeMB := int(cfg.AuditLogMaxBytes / (1024 * 1024))
 		if maxSizeMB <= 0 {
@@ -103,49 +164,74 @@ func newAuditLogger(cfg *config.NetdConfig, logger *zap.Logger) (*auditLogger, e
 			MaxBackups: cfg.AuditLogMaxBackups,
 			Compress:   false,
 		}
-		sinks = append(sinks, newJSONLAuditSink(writer))
+		localSinks = append(localSinks, newJSONLAuditSink(writer))
 	}
 	httpSink, err := newHTTPAuditSinkFromConfig(cfg, logger)
 	if err != nil {
-		for _, sink := range sinks {
+		for _, sink := range localSinks {
 			_ = sink.Close()
 		}
 		return nil, err
 	}
-	if httpSink != nil {
-		sinks = append(sinks, httpSink)
-	}
-	if len(sinks) == 0 {
+	if len(localSinks) == 0 && httpSink == nil {
 		return nil, nil
 	}
 	return &auditLogger{
-		sink: multiAuditSink(sinks),
+		sink: &multiAuditSink{bestEffort: localSinks, required: httpSink, logger: logger},
 		now: func() time.Time {
 			return time.Now().UTC()
 		},
 	}, nil
 }
 
-func (s multiAuditSink) WriteAuditEvent(event auditEvent) error {
-	var firstErr error
-	for _, sink := range s {
+func (s *multiAuditSink) WriteAuditEvent(event auditEvent) error {
+	if s == nil {
+		return nil
+	}
+	var localErr error
+	for _, sink := range s.bestEffort {
 		if sink == nil {
 			continue
 		}
-		if err := sink.WriteAuditEvent(event); err != nil && firstErr == nil {
-			firstErr = err
+		if err := sink.WriteAuditEvent(event); err != nil && localErr == nil {
+			localErr = err
 		}
 	}
-	return firstErr
+	if s.required == nil {
+		return localErr
+	}
+	if err := s.required.WriteAuditEvent(event); err != nil {
+		return err
+	}
+	if localErr != nil {
+		logger := s.logger
+		if logger == nil {
+			logger = zap.NewNop()
+		}
+		logger.Warn("Legacy JSONL audit sink failed after durable HTTP delivery",
+			zap.String("event_id", event.EventID),
+			zap.String("phase", event.Phase),
+			zap.Error(localErr),
+		)
+	}
+	return nil
 }
 
-func (s multiAuditSink) Close() error {
+func (s *multiAuditSink) Close() error {
+	if s == nil {
+		return nil
+	}
 	var firstErr error
-	for _, sink := range s {
+	for _, sink := range s.bestEffort {
 		if sink == nil {
 			continue
 		}
 		if err := sink.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if s.required != nil {
+		if err := s.required.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -218,6 +304,7 @@ func (l *auditLogger) recordWithPhase(req *adapterRequest, decision trafficDecis
 			event.FlowID = req.Audit.ID
 			event.EgressBytes = req.Audit.EgressBytes()
 			event.IngressBytes = req.Audit.IngressBytes()
+			event.ProtocolOperations, event.ProtocolOperationsTruncated = req.Audit.protocolOperationsSnapshot()
 		}
 		event.SrcIP = req.SrcIP
 		event.DestIP = ipString(req.DestIP)
@@ -241,9 +328,6 @@ func (l *auditLogger) recordWithPhase(req *adapterRequest, decision trafficDecis
 			if req.EgressAuth.ResolveError != nil {
 				event.AuthResolveError = req.EgressAuth.ResolveError.Error()
 			}
-		}
-		if len(req.ProtocolAudit) > 0 {
-			event.ProtocolOperations = append(event.ProtocolOperations, req.ProtocolAudit...)
 		}
 	}
 	if err != nil {

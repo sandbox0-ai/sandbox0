@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	"gopkg.in/yaml.v3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -101,8 +102,14 @@ type SandboxObservabilityConfig struct {
 	// +optional
 	// +kubebuilder:default=false
 	AuditEnabled bool `yaml:"audit_enabled" json:"auditEnabled"`
-	// AuditSpoolDir is the fsync-backed local delivery buffer for canonical
-	// result events that could not be acknowledged by ClickHouse immediately.
+	// AuditDeliveryMode controls non-mutating API and public exposure admission.
+	// Mutations always require canonical ClickHouse acknowledgement.
+	// +optional
+	// +kubebuilder:validation:Enum=durable_async;canonical_sync
+	// +kubebuilder:default="durable_async"
+	AuditDeliveryMode sandboxobservability.AuditDeliveryMode `yaml:"audit_delivery_mode" json:"auditDeliveryMode"`
+	// AuditSpoolDir is the fsync-backed local delivery buffer for signed audit
+	// events that have not yet been acknowledged by ClickHouse.
 	// It is not an audit system of record.
 	// +optional
 	AuditSpoolDir string `yaml:"audit_spool_dir" json:"-"`
@@ -168,12 +175,14 @@ func LoadClusterGatewayConfig() *ClusterGatewayConfig {
 		fmt.Fprintf(os.Stderr, "Failed to load config from %s: %v, using empty config\n", path, err)
 		cfg = &ClusterGatewayConfig{}
 	}
+	applyClusterGatewayDefaults(cfg)
 	return cfg
 }
 
 func loadClusterGatewayConfig(path string) (*ClusterGatewayConfig, error) {
 	cfg := &ClusterGatewayConfig{}
 	if path == "" {
+		applyClusterGatewayDefaults(cfg)
 		return cfg, nil
 	}
 
@@ -189,5 +198,13 @@ func loadClusterGatewayConfig(path string) (*ClusterGatewayConfig, error) {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
+	applyClusterGatewayDefaults(cfg)
 	return cfg, nil
+}
+
+func applyClusterGatewayDefaults(cfg *ClusterGatewayConfig) {
+	if cfg == nil {
+		return
+	}
+	cfg.SandboxObservability.AuditDeliveryMode = sandboxobservability.NormalizeAuditDeliveryMode(cfg.SandboxObservability.AuditDeliveryMode)
 }

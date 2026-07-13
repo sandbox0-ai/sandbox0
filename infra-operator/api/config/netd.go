@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	"gopkg.in/yaml.v3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -182,6 +183,12 @@ type NetdConfig struct {
 	// SandboxObservabilityAuditSpoolDir is the fsync-backed node-local delivery
 	// spool. Records are removed only after cluster-gateway acknowledges them.
 	SandboxObservabilityAuditSpoolDir string `yaml:"sandbox_observability_audit_spool_dir" json:"sandboxObservabilityAuditSpoolDir"`
+	// SandboxObservabilityAuditDeliveryMode controls whether a durable local
+	// enqueue or canonical ClickHouse acknowledgement admits a new flow.
+	// +optional
+	// +kubebuilder:validation:Enum=durable_async;canonical_sync
+	// +kubebuilder:default="durable_async"
+	SandboxObservabilityAuditDeliveryMode sandboxobservability.AuditDeliveryMode `yaml:"sandbox_observability_audit_delivery_mode" json:"sandboxObservabilityAuditDeliveryMode"`
 	// +optional
 	// +kubebuilder:default=1024
 	SandboxObservabilityIngestQueueSize int `yaml:"sandbox_observability_ingest_queue_size" json:"sandboxObservabilityIngestQueueSize"`
@@ -244,6 +251,9 @@ func loadNetdConfig(path string) (*NetdConfig, error) {
 }
 
 func applyNetdDefaults(cfg *NetdConfig) {
+	if cfg == nil {
+		return
+	}
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "info"
 	}
@@ -326,6 +336,7 @@ func applyNetdDefaults(cfg *NetdConfig) {
 	if cfg.SandboxObservabilityIngestRetryBackoff.Duration == 0 {
 		cfg.SandboxObservabilityIngestRetryBackoff = metav1.Duration{Duration: 100 * time.Millisecond}
 	}
+	cfg.SandboxObservabilityAuditDeliveryMode = sandboxobservability.NormalizeAuditDeliveryMode(cfg.SandboxObservabilityAuditDeliveryMode)
 	if cfg.BurstRatio == "" {
 		cfg.BurstRatio = "0.125"
 	}

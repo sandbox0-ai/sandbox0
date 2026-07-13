@@ -14,6 +14,7 @@ import (
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 )
 
 const (
@@ -137,6 +138,14 @@ func validateClickHouseFeatureSemantics(infra *infrav1alpha1.Sandbox0Infra) []er
 	auditEnabled := infra.Spec.SandboxObservability != nil &&
 		infra.Spec.SandboxObservability.Audit != nil &&
 		infra.Spec.SandboxObservability.Audit.Enabled
+	if infra.Spec.SandboxObservability != nil && infra.Spec.SandboxObservability.Audit != nil {
+		deliveryMode := infra.Spec.SandboxObservability.Audit.DeliveryMode
+		switch deliveryMode {
+		case "", sandboxobservability.AuditDeliveryModeDurableAsync, sandboxobservability.AuditDeliveryModeCanonicalSync:
+		default:
+			errs = append(errs, fmt.Errorf("spec.sandboxObservability.audit.deliveryMode must be durable_async or canonical_sync"))
+		}
+	}
 	if auditEnabled && !infrav1alpha1.IsSandboxObservabilityEnabled(infra) {
 		errs = append(errs, fmt.Errorf("sandboxObservability.audit requires sandboxObservability to be enabled"))
 	}

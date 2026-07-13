@@ -436,57 +436,108 @@ func networkAuditAction(attributes map[string]any) string {
 	return "network.connect"
 }
 
+var networkAuditStringAttributes = map[string]struct{}{
+	"flow_id": {}, "src_ip": {}, "dest_ip": {}, "transport": {},
+	"protocol": {}, "host": {}, "classifier_result": {}, "action": {},
+	"reason": {}, "outcome": {}, "adapter": {}, "adapter_capability": {},
+	"auth_rule_name": {}, "auth_ref": {}, "auth_failure_policy": {},
+	"auth_bypass_reason": {}, "auth_enforcement": {},
+}
+
+var networkAuditNumberAttributes = map[string]struct{}{
+	"dest_port": {}, "duration_ms": {}, "egress_bytes": {}, "ingress_bytes": {},
+}
+
+var networkAuditBoolAttributes = map[string]struct{}{
+	"auth_bypassed": {}, "auth_resolved": {}, "auth_cache_hit": {},
+}
+
+var networkAuditProtocolOperationFields = map[string]struct{}{
+	"rule_name": {}, "protocol": {}, "operation": {},
+	"object": {}, "action": {}, "reason": {},
+}
+
 func sanitizeNetworkAuditAttributes(attributes map[string]any) map[string]any {
-	allowed := map[string]struct{}{
-		"flow_id": {}, "src_ip": {}, "dest_ip": {}, "dest_port": {}, "transport": {},
-		"protocol": {}, "host": {}, "classifier_result": {}, "action": {}, "reason": {},
-		"outcome": {}, "duration_ms": {}, "egress_bytes": {}, "ingress_bytes": {},
-		"adapter": {}, "adapter_capability": {}, "auth_rule_name": {}, "auth_ref": {},
-		"auth_failure_policy": {}, "auth_bypassed": {}, "auth_bypass_reason": {},
-		"auth_enforcement": {}, "auth_resolved": {}, "auth_cache_hit": {},
-		"protocol_operations": {},
-	}
 	sanitized := make(map[string]any, len(attributes))
 	for key, value := range attributes {
-		if _, ok := allowed[key]; ok {
-			sanitized[key] = sanitizeAuditValue(value, 0)
+		if _, ok := networkAuditStringAttributes[key]; ok {
+			if text, ok := value.(string); ok {
+				sanitized[key], _ = sandboxobservability.TruncateJSONStringContent(text, sandboxobservability.MaxNetworkAuditScalarFieldEncodedBytes)
+			}
+			continue
 		}
+		if _, ok := networkAuditNumberAttributes[key]; ok {
+			if number, ok := sanitizeAuditNumber(value); ok {
+				sanitized[key] = number
+			}
+			continue
+		}
+		if _, ok := networkAuditBoolAttributes[key]; ok {
+			if flag, ok := value.(bool); ok {
+				sanitized[key] = flag
+			}
+		}
+	}
+	operations, operationsTruncated := sanitizeNetworkAuditProtocolOperations(attributes["protocol_operations"])
+	if len(operations) > 0 {
+		sanitized["protocol_operations"] = operations
+	}
+	explicitTruncation, _ := attributes["protocol_operations_truncated"].(bool)
+	if explicitTruncation || operationsTruncated {
+		sanitized["protocol_operations_truncated"] = true
 	}
 	return sanitized
 }
 
-func sanitizeAuditValue(value any, depth int) any {
-	if depth >= 4 {
-		return "[truncated]"
+func sanitizeAuditNumber(value any) (any, bool) {
+	switch value.(type) {
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, json.Number:
+		encoded, err := json.Marshal(value)
+		return value, err == nil && len(encoded) <= 32
+	default:
+		return nil, false
 	}
-	switch typed := value.(type) {
-	case string:
-		if len(typed) > 1024 {
-			return typed[:1024]
+}
+
+func sanitizeNetworkAuditProtocolOperations(value any) ([]any, bool) {
+	if value == nil {
+		return nil, false
+	}
+	operations, ok := value.([]any)
+	if !ok {
+		return nil, true
+	}
+	limit := len(operations)
+	truncated := false
+	if limit > sandboxobservability.MaxNetworkAuditProtocolOperations {
+		limit = sandboxobservability.MaxNetworkAuditProtocolOperations
+		truncated = true
+	}
+	sanitized := make([]any, 0, limit)
+	for _, rawOperation := range operations[:limit] {
+		operation, ok := rawOperation.(map[string]any)
+		if !ok {
+			truncated = true
+			continue
 		}
-		return typed
-	case []any:
-		limit := len(typed)
-		if limit > 64 {
-			limit = 64
-		}
-		out := make([]any, 0, limit)
-		for _, item := range typed[:limit] {
-			out = append(out, sanitizeAuditValue(item, depth+1))
-		}
-		return out
-	case map[string]any:
-		out := make(map[string]any, len(typed))
-		for key, item := range typed {
-			if len(key) > 128 {
+		bounded := make(map[string]any, len(networkAuditProtocolOperationFields))
+		for key, value := range operation {
+			if _, ok := networkAuditProtocolOperationFields[key]; !ok {
+				truncated = true
 				continue
 			}
-			out[key] = sanitizeAuditValue(item, depth+1)
+			text, ok := value.(string)
+			if !ok {
+				truncated = true
+				continue
+			}
+			boundedText, changed := sandboxobservability.TruncateJSONStringContent(text, sandboxobservability.MaxNetworkAuditProtocolFieldEncodedBytes)
+			truncated = truncated || changed
+			bounded[key] = boundedText
 		}
-		return out
-	default:
-		return value
+		sanitized = append(sanitized, bounded)
 	}
+	return sanitized, truncated
 }
 
 func (h *SandboxObservabilityHandler) IngestLogs(c *gin.Context) {

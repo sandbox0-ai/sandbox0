@@ -19,6 +19,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	sandboxobssvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sandboxobservability"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 )
 
 func TestReconcileKeepsHTTPBackendForHTTPSBaseURL(t *testing.T) {
@@ -345,8 +346,11 @@ func TestApplySandboxObservabilityConfigUsesTopLevelExternalSecret(t *testing.T)
 		},
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
 			SandboxObservability: &infrav1alpha1.SandboxObservabilityConfig{
-				Type:  infrav1alpha1.SandboxObservabilityTypeExternal,
-				Audit: &infrav1alpha1.SandboxObservabilityAuditConfig{Enabled: true},
+				Type: infrav1alpha1.SandboxObservabilityTypeExternal,
+				Audit: &infrav1alpha1.SandboxObservabilityAuditConfig{
+					Enabled:      true,
+					DeliveryMode: sandboxobservability.AuditDeliveryModeCanonicalSync,
+				},
 				External: &infrav1alpha1.ExternalSandboxObservabilityConfig{
 					ClickHouse: infrav1alpha1.ExternalSandboxObservabilityClickHouseConfig{
 						DSNSecret: infrav1alpha1.SandboxObservabilityClickHouseDSNSecretRef{
@@ -395,6 +399,7 @@ func TestApplySandboxObservabilityConfigUsesTopLevelExternalSecret(t *testing.T)
 	}
 	if cfg.SandboxObservability.Backend != apiconfig.SandboxObservabilityBackendClickHouse ||
 		!cfg.SandboxObservability.AuditEnabled ||
+		cfg.SandboxObservability.AuditDeliveryMode != sandboxobservability.AuditDeliveryModeCanonicalSync ||
 		cfg.SandboxObservability.AuditSpoolDir != "/var/lib/sandbox0/cluster-gateway/audit-spool" ||
 		cfg.SandboxObservability.ClickHouse.Database != "sandbox0_obs" ||
 		cfg.SandboxObservability.ClickHouse.EventsTable != "events_v1" ||

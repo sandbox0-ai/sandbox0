@@ -181,9 +181,6 @@ func TestEverySandboxRouteHasExplicitAuditAction(t *testing.T) {
 		if !strings.HasPrefix(route.Path, "/api/v1/sandboxes") {
 			continue
 		}
-		if route.Method == http.MethodGet && route.Path == "/api/v1/sandboxes" {
-			continue
-		}
 		key := route.Method + " " + route.Path
 		if sandboxAuditActions[key] == "" {
 			t.Errorf("sandbox route %s has no explicit audit action", key)

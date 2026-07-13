@@ -12,6 +12,7 @@ import (
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	clickhousesvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/clickhouse"
+	sandboxobstypes "github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	obsclickhouse "github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability/clickhouse"
 )
 
@@ -22,6 +23,7 @@ type Reconciler struct {
 type RuntimeConfig struct {
 	DSN                         string
 	AuditEnabled                bool
+	AuditDeliveryMode           sandboxobstypes.AuditDeliveryMode
 	Database                    string
 	EventsTable                 string
 	LogsTable                   string
@@ -69,8 +71,9 @@ func ApplyClusterGatewayConfig(ctx context.Context, c client.Client, infra *infr
 		return nil
 	}
 	cfg.SandboxObservability = apiconfig.SandboxObservabilityConfig{
-		Backend:      apiconfig.SandboxObservabilityBackendClickHouse,
-		AuditEnabled: runtimeCfg.AuditEnabled,
+		Backend:           apiconfig.SandboxObservabilityBackendClickHouse,
+		AuditEnabled:      runtimeCfg.AuditEnabled,
+		AuditDeliveryMode: runtimeCfg.AuditDeliveryMode,
 		ClickHouse: apiconfig.SandboxObservabilityClickHouseConfig{
 			DSN:                         runtimeCfg.DSN,
 			Database:                    runtimeCfg.Database,
@@ -101,10 +104,12 @@ func ApplyNetdConfig(ctx context.Context, c client.Client, infra *infrav1alpha1.
 	if !ok || !runtimeCfg.AuditEnabled || strings.TrimSpace(clusterGatewayURL) == "" {
 		cfg.SandboxObservabilityIngestURL = ""
 		cfg.SandboxObservabilityAuditSpoolDir = ""
+		cfg.SandboxObservabilityAuditDeliveryMode = ""
 		return nil
 	}
 	cfg.SandboxObservabilityIngestURL = strings.TrimRight(clusterGatewayURL, "/") + "/internal/v1/sandbox-observability/events"
 	cfg.SandboxObservabilityAuditSpoolDir = "/var/lib/sandbox0/netd/audit-spool"
+	cfg.SandboxObservabilityAuditDeliveryMode = runtimeCfg.AuditDeliveryMode
 	applyIngestConfig(runtimeCfg.Ingest, cfg)
 	return nil
 }
@@ -157,6 +162,7 @@ func GetRuntimeConfig(ctx context.Context, c client.Client, infra *infrav1alpha1
 	cfg := RuntimeConfig{
 		DSN:                         clickHouseCfg.DSN,
 		AuditEnabled:                infrav1alpha1.IsSandboxAuditEnabled(infra),
+		AuditDeliveryMode:           sandboxobstypes.AuditDeliveryModeDurableAsync,
 		Database:                    firstNonEmpty(clickHouseCfg.Databases.Observability, obsclickhouse.DefaultDatabase),
 		EventsTable:                 obsclickhouse.DefaultEventsTable,
 		LogsTable:                   obsclickhouse.DefaultLogsTable,
@@ -167,6 +173,9 @@ func GetRuntimeConfig(ctx context.Context, c client.Client, infra *infrav1alpha1
 		ConnectTimeout:              clickHouseCfg.ConnectTimeout,
 		SkipSchemaMigration:         !clickHouseCfg.SchemaMigrationEnabled,
 		Ingest:                      resolveIngestConfig(infra),
+	}
+	if infra.Spec.SandboxObservability.Audit != nil {
+		cfg.AuditDeliveryMode = sandboxobstypes.NormalizeAuditDeliveryMode(infra.Spec.SandboxObservability.Audit.DeliveryMode)
 	}
 	applyRetentionConfig(infra, &cfg)
 	applyTableOverrides(infra, &cfg)

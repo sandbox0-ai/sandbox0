@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
@@ -30,6 +31,25 @@ type failAfterAuditWriter struct {
 	succeedFor   int
 	storedEvents []sandboxobservability.Event
 	onSuccess    func(call int)
+}
+
+type contextBlockingAuditWriter struct {
+	deadline chan time.Time
+}
+
+func (w *contextBlockingAuditWriter) InsertEvents(ctx context.Context, _ []sandboxobservability.Event) error {
+	deadline, _ := ctx.Deadline()
+	w.deadline <- deadline
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (*contextBlockingAuditWriter) InsertLogs(context.Context, []sandboxobservability.LogEntry) error {
+	return nil
+}
+
+func (*contextBlockingAuditWriter) InsertRuntimeSamples(context.Context, []sandboxobservability.RuntimeSample) error {
+	return nil
 }
 
 func (w *failAfterAuditWriter) InsertEvents(_ context.Context, events []sandboxobservability.Event) error {
@@ -68,17 +88,27 @@ func (*recordingAuditWriter) InsertRuntimeSamples(context.Context, []sandboxobse
 	return nil
 }
 
+func mustNewAuditDelivery(t *testing.T, writer sandboxobservability.Writer) *auditDelivery {
+	t.Helper()
+	delivery, err := newAuditDelivery(t.TempDir(), writer, zap.NewNop())
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+	return delivery
+}
+
 func TestSandboxAuditMiddlewarePersistsTrustedAttemptAndResult(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	writer := &recordingAuditWriter{}
+	delivery := mustNewAuditDelivery(t, writer)
 	server := &Server{
 		cfg: &config.ClusterGatewayConfig{
 			ClusterID:            "cluster-1",
 			GatewayConfig:        config.GatewayConfig{RegionID: "region-1"},
 			SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true},
 		},
-		auditWriter: writer, auditSigningKey: key, logger: zap.NewNop(),
+		auditSigningKey: key, auditDelivery: delivery, logger: zap.NewNop(),
 	}
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
@@ -123,9 +153,10 @@ func TestSandboxAuditMiddlewareRecordsUnknownResultOnPanic(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	writer := &recordingAuditWriter{}
+	delivery := mustNewAuditDelivery(t, writer)
 	server := &Server{
-		cfg:         &config.ClusterGatewayConfig{SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true}},
-		auditWriter: writer, auditSigningKey: key, logger: zap.NewNop(),
+		cfg:             &config.ClusterGatewayConfig{SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true}},
+		auditSigningKey: key, auditDelivery: delivery, logger: zap.NewNop(),
 	}
 	router := gin.New()
 	router.Use(gin.Recovery())
@@ -153,12 +184,16 @@ func TestPublicExposureAuditAttributesActorOnlyAfterCredentialVerification(t *te
 	gin.SetMode(gin.TestMode)
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	writer := &recordingAuditWriter{}
+	delivery := mustNewAuditDelivery(t, writer)
 	server := &Server{
 		cfg: &config.ClusterGatewayConfig{
 			GatewayConfig: config.GatewayConfig{RegionID: "region-1"},
-			ClusterID:     "cluster-1", SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true},
+			ClusterID:     "cluster-1", SandboxObservability: config.SandboxObservabilityConfig{
+				AuditEnabled:      true,
+				AuditDeliveryMode: sandboxobservability.AuditDeliveryModeCanonicalSync,
+			},
 		},
-		auditWriter: writer, auditSigningKey: key, logger: zap.NewNop(),
+		auditSigningKey: key, auditDelivery: delivery, logger: zap.NewNop(),
 	}
 	tokenHash := sha256.Sum256([]byte("valid-token"))
 	route := &mgr.SandboxAppServiceRoute{
@@ -204,15 +239,16 @@ func TestPublicExposureAuditAttributesActorOnlyAfterCredentialVerification(t *te
 	}
 }
 
-func TestSandboxAuditMiddlewareFailsClosedBeforeOperation(t *testing.T) {
+func TestSandboxAuditMiddlewareMutationRemainsCanonicalWithDefaultMode(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	writer := &recordingAuditWriter{err: errors.New("clickhouse unavailable")}
 	server := &Server{
 		cfg: &config.ClusterGatewayConfig{
 			SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true},
 		},
-		auditWriter:     &recordingAuditWriter{err: errors.New("clickhouse unavailable")},
 		auditSigningKey: key,
+		auditDelivery:   mustNewAuditDelivery(t, writer),
 		logger:          zap.NewNop(),
 	}
 	called := false
@@ -239,17 +275,212 @@ func TestSandboxAuditMiddlewareFailsClosedBeforeOperation(t *testing.T) {
 	}
 }
 
+func TestSandboxAuditAttemptBoundsBlockingCanonicalWriter(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		method     string
+		path       string
+		breakSpool bool
+	}{
+		{name: "canonical mutation", method: http.MethodDelete, path: "/api/v1/sandboxes/sb-1"},
+		{name: "durable GET canonical fallback", method: http.MethodGet, path: "/api/v1/sandboxes/sb-1", breakSpool: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+			writer := &contextBlockingAuditWriter{deadline: make(chan time.Time, 1)}
+			dir := t.TempDir()
+			delivery, err := newAuditDelivery(dir, writer, zap.NewNop())
+			if err != nil {
+				t.Fatalf("newAuditDelivery() error = %v", err)
+			}
+			if tc.breakSpool {
+				replaceAuditSpoolDirectoryWithFile(t, dir)
+			}
+			server := &Server{
+				cfg:             &config.ClusterGatewayConfig{SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true}},
+				auditSigningKey: key,
+				auditDelivery:   delivery,
+				logger:          zap.NewNop(),
+			}
+			called := false
+			router := gin.New()
+			router.Use(func(c *gin.Context) {
+				c.Request = c.Request.WithContext(authn.WithAuthContext(c.Request.Context(), &authn.AuthContext{
+					AuthMethod: authn.AuthMethodJWT, TeamID: "team-1", UserID: "user-1",
+				}))
+				c.Next()
+			})
+			router.Handle(tc.method, "/api/v1/sandboxes/:id", server.auditSandboxRequests(), func(c *gin.Context) {
+				called = true
+				c.Status(http.StatusNoContent)
+			})
+
+			requestCtx, cancelRequest := context.WithCancel(context.Background())
+			defer cancelRequest()
+			request := httptest.NewRequest(tc.method, tc.path, nil).WithContext(requestCtx)
+			recorder := httptest.NewRecorder()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				router.ServeHTTP(recorder, request)
+			}()
+
+			select {
+			case deadline := <-writer.deadline:
+				remaining := time.Until(deadline)
+				if deadline.IsZero() || remaining <= 0 || remaining > auditCanonicalDeliveryTimeout+time.Second {
+					t.Fatalf("canonical writer deadline = %v, remaining = %v", deadline, remaining)
+				}
+				cancelRequest()
+			case <-time.After(time.Second):
+				t.Fatal("blocking canonical writer was not called")
+			}
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("audit attempt did not stop after its context was canceled")
+			}
+			if called {
+				t.Fatal("handler ran while canonical audit was blocked")
+			}
+			if recorder.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503", recorder.Code)
+			}
+		})
+	}
+}
+
+func TestSandboxAuditMiddlewareGETUsesDurableAsyncWhenClickHouseIsDown(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	writer := &recordingAuditWriter{err: errors.New("clickhouse unavailable")}
+	delivery := mustNewAuditDelivery(t, writer)
+	server := &Server{
+		cfg: &config.ClusterGatewayConfig{
+			SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true},
+		},
+		auditSigningKey: key, auditDelivery: delivery, logger: zap.NewNop(),
+	}
+	called := false
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Request = c.Request.WithContext(authn.WithAuthContext(c.Request.Context(), &authn.AuthContext{
+			AuthMethod: authn.AuthMethodJWT, TeamID: "team-1", UserID: "user-1",
+		}))
+		c.Next()
+	})
+	router.GET("/api/v1/sandboxes/:id", server.auditSandboxRequests(), func(c *gin.Context) {
+		called = true
+		c.JSON(http.StatusOK, gin.H{"id": c.Param("id")})
+	})
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/sb-1", nil))
+	if !called || recorder.Code != http.StatusOK {
+		t.Fatalf("durable GET response = %d %s, handler called = %t", recorder.Code, recorder.Body.String(), called)
+	}
+	events, err := delivery.loadLocked()
+	if err != nil {
+		t.Fatalf("loadLocked() error = %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("durable audit events = %#v, want attempt and result", events)
+	}
+	phases := map[sandboxobservability.EventPhase]bool{}
+	for _, event := range events {
+		phases[event.Phase] = true
+	}
+	if !phases[sandboxobservability.EventPhaseAttempt] || !phases[sandboxobservability.EventPhaseResult] {
+		t.Fatalf("durable audit phases = %#v", phases)
+	}
+}
+
+func TestSandboxAuditMiddlewareGETCanonicalSyncOverrideFailsClosed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	writer := &recordingAuditWriter{err: errors.New("clickhouse unavailable")}
+	delivery := mustNewAuditDelivery(t, writer)
+	server := &Server{
+		cfg: &config.ClusterGatewayConfig{SandboxObservability: config.SandboxObservabilityConfig{
+			AuditEnabled:      true,
+			AuditDeliveryMode: sandboxobservability.AuditDeliveryModeCanonicalSync,
+		}},
+		auditSigningKey: key, auditDelivery: delivery, logger: zap.NewNop(),
+	}
+	called := false
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Request = c.Request.WithContext(authn.WithAuthContext(c.Request.Context(), &authn.AuthContext{
+			AuthMethod: authn.AuthMethodJWT, TeamID: "team-1", UserID: "user-1",
+		}))
+		c.Next()
+	})
+	router.GET("/api/v1/sandboxes/:id", server.auditSandboxRequests(), func(c *gin.Context) {
+		called = true
+		c.Status(http.StatusNoContent)
+	})
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/sb-1", nil))
+	if called {
+		t.Fatal("GET handler ran without canonical audit acknowledgement")
+	}
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("strict GET status = %d, want 503", recorder.Code)
+	}
+}
+
+func TestPublicExposureAuditUsesDurableAsyncWhenClickHouseIsDown(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	writer := &recordingAuditWriter{err: errors.New("clickhouse unavailable")}
+	delivery := mustNewAuditDelivery(t, writer)
+	server := &Server{
+		cfg: &config.ClusterGatewayConfig{
+			GatewayConfig:        config.GatewayConfig{RegionID: "region-1"},
+			ClusterID:            "cluster-1",
+			SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true},
+		},
+		auditSigningKey: key, auditDelivery: delivery, logger: zap.NewNop(),
+	}
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "http://sandbox.example/api", nil)
+	finish, ok := server.beginExposureAudit(c,
+		&mgr.Sandbox{ID: "sb-1", TeamID: "team-1"},
+		&mgr.SandboxAppService{ID: "service-1"},
+		&mgr.SandboxAppServiceRoute{ID: "route-1", PathPrefix: "/api"},
+	)
+	if !ok {
+		t.Fatalf("beginExposureAudit() rejected durable event: %d %s", recorder.Code, recorder.Body.String())
+	}
+	c.Status(http.StatusNoContent)
+	c.Writer.WriteHeaderNow()
+	finish()
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("public exposure response = %d %s", recorder.Code, recorder.Body.String())
+	}
+	events, err := delivery.loadLocked()
+	if err != nil {
+		t.Fatalf("loadLocked() error = %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("public exposure durable events = %#v, want attempt and result", events)
+	}
+}
+
 func TestSandboxAuditMiddlewareWithholdsSuccessUntilResultCanonicalACK(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	writer := &failAfterAuditWriter{succeedFor: 1}
-	delivery, err := newAuditResultDelivery(t.TempDir(), writer, zap.NewNop())
+	delivery, err := newAuditDelivery(t.TempDir(), writer, zap.NewNop())
 	if err != nil {
-		t.Fatalf("newAuditResultDelivery() error = %v", err)
+		t.Fatalf("newAuditDelivery() error = %v", err)
 	}
 	server := &Server{
-		cfg:         &config.ClusterGatewayConfig{SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true}},
-		auditWriter: writer, auditSigningKey: key, auditResults: delivery, logger: zap.NewNop(),
+		cfg:             &config.ClusterGatewayConfig{SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true}},
+		auditSigningKey: key, auditDelivery: delivery, logger: zap.NewNop(),
 	}
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
@@ -287,14 +518,14 @@ func TestSandboxAuditMiddlewareReportsUnrecordedWhenSpoolAndCanonicalFallbackFai
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	writer := &failAfterAuditWriter{succeedFor: 1}
 	dir := t.TempDir()
-	delivery, err := newAuditResultDelivery(dir, writer, zap.NewNop())
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop())
 	if err != nil {
-		t.Fatalf("newAuditResultDelivery() error = %v", err)
+		t.Fatalf("newAuditDelivery() error = %v", err)
 	}
 	replaceAuditSpoolDirectoryWithFile(t, dir)
 	server := &Server{
-		cfg:         &config.ClusterGatewayConfig{SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true}},
-		auditWriter: writer, auditSigningKey: key, auditResults: delivery, logger: zap.NewNop(),
+		cfg:             &config.ClusterGatewayConfig{SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true}},
+		auditSigningKey: key, auditDelivery: delivery, logger: zap.NewNop(),
 	}
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
@@ -331,13 +562,13 @@ func TestSandboxAuditMiddlewareKeepsSuccessAfterCanonicalACKWhenSpoolCleanupFail
 			replaceAuditSpoolDirectoryWithFile(t, dir)
 		}
 	}
-	delivery, err := newAuditResultDelivery(dir, writer, zap.NewNop())
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop())
 	if err != nil {
-		t.Fatalf("newAuditResultDelivery() error = %v", err)
+		t.Fatalf("newAuditDelivery() error = %v", err)
 	}
 	server := &Server{
-		cfg:         &config.ClusterGatewayConfig{SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true}},
-		auditWriter: writer, auditSigningKey: key, auditResults: delivery, logger: zap.NewNop(),
+		cfg:             &config.ClusterGatewayConfig{SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true}},
+		auditSigningKey: key, auditDelivery: delivery, logger: zap.NewNop(),
 	}
 	router := gin.New()
 	router.Use(func(c *gin.Context) {

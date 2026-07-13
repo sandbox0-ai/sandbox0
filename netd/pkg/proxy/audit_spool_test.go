@@ -43,6 +43,53 @@ func TestAuditSpoolPersistsLoadsAndRemoves(t *testing.T) {
 	}
 }
 
+func TestAuditSpoolConcurrentPutPreservesEventIDCollision(t *testing.T) {
+	spool, err := newAuditSpool(t.TempDir())
+	if err != nil {
+		t.Fatalf("newAuditSpool() error = %v", err)
+	}
+	base := auditEvent{
+		EventID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", TeamID: "team-1", SandboxID: "sb-1",
+		Timestamp: time.Date(2026, 7, 1, 1, 2, 3, 0, time.UTC), Outcome: "completed",
+	}
+	conflicting := base
+	conflicting.Outcome = "error"
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, event := range []auditEvent{base, conflicting} {
+		event := event
+		go func() {
+			<-start
+			results <- spool.Put(event)
+		}()
+	}
+	close(start)
+
+	successes := 0
+	collisions := 0
+	for range 2 {
+		err := <-results
+		switch {
+		case err == nil:
+			successes++
+		case strings.Contains(err.Error(), "event_id collision"):
+			collisions++
+		default:
+			t.Fatalf("Put() unexpected error = %v", err)
+		}
+	}
+	if successes != 1 || collisions != 1 {
+		t.Fatalf("concurrent Put results = %d success, %d collision; want one each", successes, collisions)
+	}
+	events, err := spool.Load(10)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(events) != 1 || (events[0].Outcome != base.Outcome && events[0].Outcome != conflicting.Outcome) {
+		t.Fatalf("persisted events = %#v, want exactly one complete payload", events)
+	}
+}
+
 func TestHTTPAuditSinkReplaysSpoolAfterRestart(t *testing.T) {
 	dir := t.TempDir()
 	spool, err := newAuditSpool(dir)
@@ -119,6 +166,7 @@ func TestHTTPAuditSinkFailsClosedWhenAttemptCannotReachCanonicalStore(t *testing
 	sink := newHTTPAuditSink(httpAuditSinkOptions{
 		Endpoint: server.URL, Generator: generator, Spool: spool, QueueSize: 1,
 		BatchSize: 1, RequestTimeout: 100 * time.Millisecond, MaxRetries: 0,
+		DeliveryMode: sandboxobservability.AuditDeliveryModeCanonicalSync,
 	})
 	defer sink.Close()
 	err = sink.WriteAuditEvent(auditEvent{
@@ -313,6 +361,25 @@ func TestAuditSpoolFailsClosedOnCorruptRecord(t *testing.T) {
 	}
 }
 
+func TestAuditSpoolLoadIgnoresRecordThatVanishedAfterDirectoryListing(t *testing.T) {
+	dir := t.TempDir()
+	spool, err := newAuditSpool(dir)
+	if err != nil {
+		t.Fatalf("newAuditSpool() error = %v", err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "already-removed.json"), filepath.Join(dir, "vanished.json")); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	events, err := spool.Load(10)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("Load() events = %#v, want none", events)
+	}
+}
+
 func waitForAuditSpoolCount(t *testing.T, spool *auditSpool, want int) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -331,6 +398,7 @@ func directHTTPAuditSink(endpoint string, client *http.Client, spool *auditSpool
 	return &httpAuditSink{
 		endpoint: endpoint, client: client, spool: spool, logger: logger,
 		requestTimeout: time.Second, maxRetries: 0, retryBackoff: time.Millisecond,
+		deliveryMode: sandboxobservability.AuditDeliveryModeCanonicalSync,
 	}
 }
 

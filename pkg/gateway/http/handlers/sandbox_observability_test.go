@@ -344,7 +344,7 @@ func TestSandboxObservabilityHandlerIngestEvents(t *testing.T) {
 		RegionID: "region-1", ClusterID: "cluster-1", SigningKey: key,
 		Now: func() time.Time { return time.Date(2026, 7, 1, 1, 3, 0, 0, time.UTC) },
 	}))
-	rec := serveSandboxObservabilityIngestRequest(t, "/internal/v1/sandbox-observability/events", handler.IngestEvents, `{"events":[{"event_id":"11111111-1111-4111-8111-111111111111","team_id":"team-1","sandbox_id":"sb-1","occurred_at":"2026-07-01T01:02:03Z","source":"netd","event_type":"network_audit","phase":"effect","outcome":"completed","producer":{"service":"netd"},"attributes":{"action":"use-adapter"}}]}`)
+	rec := serveSandboxObservabilityIngestRequest(t, "/internal/v1/sandbox-observability/events", handler.IngestEvents, `{"events":[{"event_id":"11111111-1111-4111-8111-111111111111","team_id":"team-1","sandbox_id":"sb-1","occurred_at":"2026-07-01T01:02:03Z","source":"netd","event_type":"network_audit","phase":"effect","outcome":"completed","producer":{"service":"netd"},"attributes":{"action":"use-adapter","protocol_operations_truncated":true,"not_allowed":"drop-me"}}]}`)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusAccepted, rec.Body.String())
@@ -356,8 +356,117 @@ func TestSandboxObservabilityHandlerIngestEvents(t *testing.T) {
 	if event.Source != sandboxobservability.SourceNetd || event.Actor.Kind != sandboxobservability.ActorKindSandboxWorkload || event.Action != "network.connect" {
 		t.Fatalf("normalized event = %+v", event)
 	}
+	if truncated, _ := event.Attributes["protocol_operations_truncated"].(bool); !truncated {
+		t.Fatalf("protocol_operations_truncated = %#v, want true", event.Attributes["protocol_operations_truncated"])
+	}
+	if _, ok := event.Attributes["not_allowed"]; ok {
+		t.Fatalf("disallowed audit attribute was retained: %#v", event.Attributes)
+	}
 	if err := sandboxobservability.VerifyEventIntegrity(event, key.Public().(ed25519.PublicKey)); err != nil {
 		t.Fatalf("event integrity = %v", err)
+	}
+}
+
+func TestSanitizeNetworkAuditAttributesBoundsEncodedSize(t *testing.T) {
+	longValue := strings.Repeat("\x01\x02<&/very-long-path-and-reason", 4096)
+	attributes := make(map[string]any)
+	for key := range networkAuditStringAttributes {
+		attributes[key] = longValue
+	}
+	for key := range networkAuditNumberAttributes {
+		attributes[key] = 1.7976931348623157e+308
+	}
+	for key := range networkAuditBoolAttributes {
+		attributes[key] = true
+	}
+	operations := make([]any, sandboxobservability.MaxNetworkAuditProtocolOperations)
+	for i := range operations {
+		operation := make(map[string]any, len(networkAuditProtocolOperationFields))
+		for key := range networkAuditProtocolOperationFields {
+			operation[key] = longValue
+		}
+		operations[i] = operation
+	}
+	attributes["protocol_operations"] = operations
+
+	sanitized := sanitizeNetworkAuditAttributes(attributes)
+	truncated, _ := sanitized["protocol_operations_truncated"].(bool)
+	if !truncated {
+		t.Fatal("protocol operation field truncation was not recorded")
+	}
+	boundedOperations, ok := sanitized["protocol_operations"].([]any)
+	if !ok || len(boundedOperations) != sandboxobservability.MaxNetworkAuditProtocolOperations {
+		t.Fatalf("protocol operations = %#v, want %d entries", sanitized["protocol_operations"], sandboxobservability.MaxNetworkAuditProtocolOperations)
+	}
+	firstOperation, ok := boundedOperations[0].(map[string]any)
+	if !ok {
+		t.Fatalf("first protocol operation = %#v", boundedOperations[0])
+	}
+	for _, key := range []string{"object", "reason"} {
+		encoded, err := json.Marshal(firstOperation[key])
+		if err != nil {
+			t.Fatalf("marshal %s: %v", key, err)
+		}
+		if contentBytes := len(encoded) - 2; contentBytes > sandboxobservability.MaxNetworkAuditProtocolFieldEncodedBytes {
+			t.Fatalf("encoded %s bytes = %d, want <= %d", key, contentBytes, sandboxobservability.MaxNetworkAuditProtocolFieldEncodedBytes)
+		}
+	}
+	encoded, err := json.Marshal(sanitized)
+	if err != nil {
+		t.Fatalf("marshal sanitized attributes: %v", err)
+	}
+	if len(encoded) >= 64*1024 {
+		t.Fatalf("sanitized attributes = %d bytes, want less than ClickHouse 64 KiB limit", len(encoded))
+	}
+}
+
+func TestNormalizeNetdAuditReplayKeepsStableReplacingKey(t *testing.T) {
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	now := time.Date(2026, 7, 1, 1, 3, 0, 0, time.UTC)
+	handler := NewSandboxObservabilityHandler(&fakeSandboxObservabilityRepo{}, zap.NewNop(), WithAuditIngestPolicy(AuditIngestPolicy{
+		RegionID: "region-1", ClusterID: "cluster-1", SigningKey: key,
+		Now: func() time.Time { return now },
+	}))
+	raw := sandboxobservability.Event{
+		EventID: "88888888-8888-4888-8888-888888888888", TeamID: "team-1", SandboxID: "sb-1",
+		OccurredAt: time.Date(2026, 7, 1, 1, 2, 3, 456789000, time.UTC),
+		EventType:  sandboxobservability.EventTypeNetworkAudit,
+		Phase:      sandboxobservability.EventPhaseAttempt, Outcome: sandboxobservability.OutcomeAccepted,
+		Producer:   sandboxobservability.AuditProducer{Sequence: 42},
+		Attributes: map[string]any{"action": "use-adapter", "host": "example.com"},
+	}
+	ctx := internalauth.WithClaims(context.Background(), &internalauth.Claims{Caller: "netd", TeamID: "team-1", SandboxID: "sb-1"})
+	first := []sandboxobservability.Event{raw}
+	if err := handler.normalizeAuditEvents(ctx, first); err != nil {
+		t.Fatalf("first normalizeAuditEvents() error = %v", err)
+	}
+	now = now.Add(2 * time.Hour)
+	second := []sandboxobservability.Event{raw}
+	if err := handler.normalizeAuditEvents(ctx, second); err != nil {
+		t.Fatalf("second normalizeAuditEvents() error = %v", err)
+	}
+
+	if first[0].IngestedAt.Equal(second[0].IngestedAt) {
+		t.Fatalf("gateway receipt versions unexpectedly match: %s", first[0].IngestedAt)
+	}
+	if first[0].Integrity.PayloadHash != second[0].Integrity.PayloadHash {
+		t.Fatalf("payload hashes differ: %q != %q", first[0].Integrity.PayloadHash, second[0].Integrity.PayloadHash)
+	}
+	if first[0].Integrity.Signature != second[0].Integrity.Signature {
+		t.Fatalf("signatures differ: %q != %q", first[0].Integrity.Signature, second[0].Integrity.Signature)
+	}
+	type replacingKey struct {
+		TeamID, SandboxID, EventID, PayloadHash string
+		OccurredAt                              int64
+	}
+	keyFor := func(event sandboxobservability.Event) replacingKey {
+		return replacingKey{
+			TeamID: event.TeamID, SandboxID: event.SandboxID, EventID: event.EventID,
+			PayloadHash: event.Integrity.PayloadHash, OccurredAt: event.OccurredAt.UnixNano(),
+		}
+	}
+	if keyFor(first[0]) != keyFor(second[0]) {
+		t.Fatalf("ReplacingMergeTree keys differ: %#v != %#v", keyFor(first[0]), keyFor(second[0]))
 	}
 }
 

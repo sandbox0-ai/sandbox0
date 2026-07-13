@@ -2613,12 +2613,22 @@ spec:
                       Audit configures the licensed centralized per-sandbox audit signal. Audit
                       collection and query remain disabled unless explicitly enabled.
                     properties:
+                      deliveryMode:
+                        default: durable_async
+                        description: |-
+                          DeliveryMode controls admission for non-mutating API requests, public
+                          exposure requests, and netd flows. ClickHouse remains the only canonical
+                          audit store in both modes. Mutating APIs always use canonical_sync.
+                        enum:
+                        - durable_async
+                        - canonical_sync
+                        type: string
                       deliveryPersistence:
                         description: |-
-                          DeliveryPersistence configures the durable, non-canonical result delivery
-                          buffer used while ClickHouse is unavailable. The current implementation
-                          requires one cluster-gateway replica and a storage class whose volume can
-                          be reattached after cross-node rescheduling.
+                          DeliveryPersistence configures the durable, non-canonical audit event
+                          delivery buffer used while ClickHouse is unavailable. The current
+                          implementation requires one cluster-gateway replica and a storage class
+                          whose volume can be reattached after cross-node rescheduling.
                         properties:
                           size:
                             anyOf:

@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -395,16 +396,24 @@ type SandboxObservabilityAuditConfig struct {
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
 
-	// DeliveryPersistence configures the durable, non-canonical result delivery
-	// buffer used while ClickHouse is unavailable. The current implementation
-	// requires one cluster-gateway replica and a storage class whose volume can
-	// be reattached after cross-node rescheduling.
+	// DeliveryMode controls admission for non-mutating API requests, public
+	// exposure requests, and netd flows. ClickHouse remains the only canonical
+	// audit store in both modes. Mutating APIs always use canonical_sync.
+	// +optional
+	// +kubebuilder:validation:Enum=durable_async;canonical_sync
+	// +kubebuilder:default=durable_async
+	DeliveryMode sandboxobservability.AuditDeliveryMode `json:"deliveryMode,omitempty"`
+
+	// DeliveryPersistence configures the durable, non-canonical audit event
+	// delivery buffer used while ClickHouse is unavailable. The current
+	// implementation requires one cluster-gateway replica and a storage class
+	// whose volume can be reattached after cross-node rescheduling.
 	// +optional
 	DeliveryPersistence *SandboxAuditDeliveryPersistenceConfig `json:"deliveryPersistence,omitempty"`
 }
 
 // SandboxAuditDeliveryPersistenceConfig configures cluster-gateway's audit
-// result delivery PVC. ClickHouse remains the only audit system of record.
+// event delivery PVC. ClickHouse remains the only audit system of record.
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="audit delivery persistence is immutable after creation"
 type SandboxAuditDeliveryPersistenceConfig struct {
 	// Size specifies the delivery buffer capacity.

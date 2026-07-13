@@ -21,7 +21,10 @@ import (
 	"go.uber.org/zap"
 )
 
-const maxAuditBufferedResponseBytes = 8 << 20
+const (
+	maxAuditBufferedResponseBytes = 8 << 20
+	auditCanonicalDeliveryTimeout = 5 * time.Second
+)
 
 var sandboxAuditActions = map[string]string{
 	"GET /api/v1/sandboxes/:id/audit/events":                       "audit.read",
@@ -30,6 +33,7 @@ var sandboxAuditActions = map[string]string{
 	"GET /api/v1/sandboxes/:id/observability/logs":                 "logs.read",
 	"GET /api/v1/sandboxes/:id/metrics":                            "metrics.read",
 	"GET /api/v1/sandboxes/:id/metrics/catalog":                    "metrics.catalog.read",
+	"GET /api/v1/sandboxes":                                        "sandbox.list",
 	"POST /api/v1/sandboxes":                                       "sandbox.create",
 	"GET /api/v1/sandboxes/:id":                                    "sandbox.read",
 	"GET /api/v1/sandboxes/:id/status":                             "sandbox.status.read",
@@ -89,7 +93,7 @@ func (s *Server) auditSandboxRequests() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		if s.auditWriter == nil {
+		if s.auditDelivery == nil {
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox audit backend is unavailable")
 			c.Abort()
 			return
@@ -105,9 +109,14 @@ func (s *Server) auditSandboxRequests() gin.HandlerFunc {
 			operationID = uuid.NewString()
 			authCtx.OperationID = operationID
 		}
+		deliveryMode := s.auditDeliveryModeForRequest(c)
 		attempt, err := s.newSandboxAPIEvent(c, authCtx, action, operationID, "", sandboxobservability.EventPhaseAttempt, sandboxobservability.OutcomeAccepted)
 		if err == nil {
-			err = s.auditWriter.InsertEvents(c.Request.Context(), []sandboxobservability.Event{attempt})
+			// The spool fsync itself is not context-cancelable, but any canonical
+			// insert (strict mode or durable fallback) is bounded.
+			attemptCtx, cancel := context.WithTimeout(c.Request.Context(), auditCanonicalDeliveryTimeout)
+			err = s.deliverAuditEvent(attemptCtx, attempt, deliveryMode)
+			cancel()
 		}
 		if err != nil {
 			s.logger.Error("Failed to persist sandbox audit attempt", zap.String("action", action), zap.Error(err))
@@ -134,8 +143,8 @@ func (s *Server) auditSandboxRequests() gin.HandlerFunc {
 			}
 			result, resultErr := s.newSandboxAPIEvent(c, authCtx, action, operationID, attempt.EventID, sandboxobservability.EventPhaseResult, outcome)
 			if resultErr == nil {
-				resultCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 5*time.Second)
-				resultErr = s.persistAuditResult(resultCtx, result)
+				resultCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), auditCanonicalDeliveryTimeout)
+				resultErr = s.deliverAuditEvent(resultCtx, result, deliveryMode)
 				cancel()
 			}
 			if resultErr != nil {
@@ -144,7 +153,7 @@ func (s *Server) auditSandboxRequests() gin.HandlerFunc {
 					zap.String("operation_id", operationID),
 					zap.Error(resultErr),
 				}
-				if errors.Is(resultErr, errAuditResultPending) {
+				if errors.Is(resultErr, errAuditDeliveryPending) {
 					s.logger.Warn("Canonical sandbox audit result is pending durable replay", fields...)
 				} else {
 					s.logger.Error("Sandbox audit result is unrecorded", fields...)
@@ -154,9 +163,9 @@ func (s *Server) auditSandboxRequests() gin.HandlerFunc {
 				c.Writer = buffered.ResponseWriter
 				switch {
 				case recovered != nil:
-					// Gin recovery owns the final 500 response. The successful
-					// handler response has never reached the client.
-				case errors.Is(resultErr, errAuditResultPending):
+				// Gin recovery owns the final 500 response. The successful
+				// handler response has never reached the client.
+				case errors.Is(resultErr, errAuditDeliveryPending):
 					buffered.discardHeaders()
 					spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "operation may have completed; canonical audit result is pending", gin.H{
 						"operation_id": operationID,
@@ -208,6 +217,20 @@ func auditShouldBufferResponse(c *gin.Context) bool {
 	}
 }
 
+func (s *Server) configuredAuditDeliveryMode() sandboxobservability.AuditDeliveryMode {
+	if s == nil || s.cfg == nil {
+		return sandboxobservability.AuditDeliveryModeDurableAsync
+	}
+	return sandboxobservability.NormalizeAuditDeliveryMode(s.cfg.SandboxObservability.AuditDeliveryMode)
+}
+
+func (s *Server) auditDeliveryModeForRequest(c *gin.Context) sandboxobservability.AuditDeliveryMode {
+	if auditShouldBufferResponse(c) {
+		return sandboxobservability.AuditDeliveryModeCanonicalSync
+	}
+	return s.configuredAuditDeliveryMode()
+}
+
 func auditOutcomeForStatus(status int) sandboxobservability.Outcome {
 	switch {
 	case status == http.StatusAccepted:
@@ -223,17 +246,14 @@ func auditOutcomeForStatus(status int) sandboxobservability.Outcome {
 	}
 }
 
-func (s *Server) persistAuditResult(ctx context.Context, event sandboxobservability.Event) error {
-	if s.auditResults != nil {
-		return s.auditResults.Persist(ctx, event)
+func (s *Server) deliverAuditEvent(ctx context.Context, event sandboxobservability.Event, mode sandboxobservability.AuditDeliveryMode) error {
+	if s == nil || s.auditDelivery == nil {
+		return fmt.Errorf("%w: sandbox audit delivery is unavailable", errAuditUnrecorded)
 	}
-	if s.auditWriter == nil {
-		return fmt.Errorf("%w: sandbox audit writer is unavailable", errAuditResultUnrecorded)
+	if sandboxobservability.NormalizeAuditDeliveryMode(mode) == sandboxobservability.AuditDeliveryModeCanonicalSync {
+		return s.auditDelivery.PersistCanonical(ctx, event)
 	}
-	if err := s.auditWriter.InsertEvents(ctx, []sandboxobservability.Event{event}); err != nil {
-		return fmt.Errorf("%w: canonical insert failed: %v", errAuditResultUnrecorded, err)
-	}
-	return nil
+	return s.auditDelivery.EnqueueDurable(ctx, event)
 }
 
 func (s *Server) newSandboxAPIEvent(c *gin.Context, authCtx *gatewayauthn.AuthContext, action, operationID, parentEventID string, phase sandboxobservability.EventPhase, outcome sandboxobservability.Outcome) (sandboxobservability.Event, error) {
@@ -439,7 +459,7 @@ func (s *Server) beginExposureAudit(c *gin.Context, sandbox *mgr.Sandbox, servic
 	if s == nil || s.cfg == nil || !s.cfg.SandboxObservability.AuditEnabled {
 		return noop, true
 	}
-	if s.auditWriter == nil || sandbox == nil || service == nil || route == nil {
+	if s.auditDelivery == nil || sandbox == nil || service == nil || route == nil {
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox audit backend is unavailable")
 		return noop, false
 	}
@@ -503,7 +523,11 @@ func (s *Server) beginExposureAudit(c *gin.Context, sandbox *mgr.Sandbox, servic
 	}
 	attempt, err := newEvent(sandboxobservability.EventPhaseAttempt, sandboxobservability.OutcomeAccepted, "")
 	if err == nil {
-		err = s.auditWriter.InsertEvents(c.Request.Context(), []sandboxobservability.Event{attempt})
+		// The spool fsync itself is not context-cancelable, but any canonical
+		// insert (strict mode or durable fallback) is bounded.
+		attemptCtx, cancel := context.WithTimeout(c.Request.Context(), auditCanonicalDeliveryTimeout)
+		err = s.deliverAuditEvent(attemptCtx, attempt, s.configuredAuditDeliveryMode())
+		cancel()
 	}
 	if err != nil {
 		s.logger.Error("Failed to persist public exposure audit attempt", zap.Error(err))
@@ -517,13 +541,13 @@ func (s *Server) beginExposureAudit(c *gin.Context, sandbox *mgr.Sandbox, servic
 		}
 		result, resultErr := newEvent(sandboxobservability.EventPhaseResult, outcome, attempt.EventID)
 		if resultErr == nil {
-			resultCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 5*time.Second)
-			resultErr = s.persistAuditResult(resultCtx, result)
+			resultCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), auditCanonicalDeliveryTimeout)
+			resultErr = s.deliverAuditEvent(resultCtx, result, s.configuredAuditDeliveryMode())
 			cancel()
 		}
 		if resultErr != nil {
 			fields := []zap.Field{zap.String("operation_id", operationID), zap.Error(resultErr)}
-			if errors.Is(resultErr, errAuditResultPending) {
+			if errors.Is(resultErr, errAuditDeliveryPending) {
 				s.logger.Warn("Canonical public exposure audit result is pending durable replay", fields...)
 			} else {
 				s.logger.Error("Public exposure audit result is unrecorded", fields...)

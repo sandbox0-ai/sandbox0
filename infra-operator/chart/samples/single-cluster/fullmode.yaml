@@ -28,6 +28,26 @@ spec:
   #     passwordSecret:
   #       name: db-credentials
   #       key: password
+  # Optional licensed, ClickHouse-backed audit. durable_async is the default;
+  # use canonical_sync when every audited admission must wait for ClickHouse.
+  # enterpriseLicense:
+  #   secretRef:
+  #     name: fullmode-enterprise-license
+  #     key: license.lic
+  # clickHouse:
+  #   type: builtin
+  #   builtin:
+  #     enabled: true
+  #     persistence:
+  #       size: "20Gi"
+  # sandboxObservability:
+  #   enabled: true
+  #   backend: clickhouse
+  #   audit:
+  #     enabled: true
+  #     deliveryMode: durable_async
+  #     deliveryPersistence:
+  #       size: "1Gi"
   publicExposure:
     enabled: true
     rootDomain: sandbox0.app

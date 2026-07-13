@@ -20,32 +20,20 @@ func SchemaStatements(cfg Config) ([]string, error) {
 	eventsTable := qualifiedEventsTable(cfg)
 	logsTable := qualifiedLogsTable(cfg)
 	runtimeSamplesTable := qualifiedRuntimeSamplesTable(cfg)
-	eventsTTL := fmt.Sprintf("toDateTime(occurred_at) + INTERVAL %d DAY DELETE", cfg.RetentionDays)
+	eventsTTL := fmt.Sprintf("toDateTime(ingested_at) + INTERVAL %d DAY DELETE", cfg.RetentionDays)
 	logsTTL := fmt.Sprintf("toDateTime(occurred_at) + INTERVAL %d DAY DELETE", cfg.LogsRetentionDays)
 	runtimeSamplesTTL := fmt.Sprintf("toDateTime(observed_at) + INTERVAL %d DAY DELETE", cfg.RuntimeSamplesRetentionDays)
 
 	return []string{
 		fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", database),
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
-	team_id String,
-	sandbox_id String,
-	region_id LowCardinality(String),
-	cluster_id LowCardinality(String),
-	occurred_at DateTime64(9, 'UTC'),
-	ingested_at DateTime64(9, 'UTC'),
-	source LowCardinality(String),
-	event_type LowCardinality(String),
-	outcome LowCardinality(String),
-	cursor String,
-	watermark String,
-	attributes String,
-	version UInt64 MATERIALIZED toUnixTimestamp64Nano(ingested_at)
+%s
 )
 	ENGINE = ReplacingMergeTree(version)
 	PARTITION BY toYYYYMM(occurred_at)
-	ORDER BY (team_id, sandbox_id, occurred_at, source, event_type, cursor)
+	ORDER BY (team_id, sandbox_id, occurred_at, event_id, payload_hash)
 	TTL %s
-	SETTINGS index_granularity = 8192`, eventsTable, eventsTTL),
+	SETTINGS index_granularity = 8192`, eventsTable, auditEventColumnDefinitions(), eventsTTL),
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 	team_id String,
 	sandbox_id String,

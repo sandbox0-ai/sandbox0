@@ -23,6 +23,7 @@ import (
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 )
 
 func TestReconcileUsesSharedSandboxNodePlacement(t *testing.T) {
@@ -278,8 +279,11 @@ func TestReconcileInjectsSandboxObservabilityIngestURL(t *testing.T) {
 		},
 	}
 	infra.Spec.SandboxObservability = &infrav1alpha1.SandboxObservabilityConfig{
-		Type:  infrav1alpha1.SandboxObservabilityTypeExternal,
-		Audit: &infrav1alpha1.SandboxObservabilityAuditConfig{Enabled: true},
+		Type: infrav1alpha1.SandboxObservabilityTypeExternal,
+		Audit: &infrav1alpha1.SandboxObservabilityAuditConfig{
+			Enabled:      true,
+			DeliveryMode: sandboxobservability.AuditDeliveryModeCanonicalSync,
+		},
 		External: &infrav1alpha1.ExternalSandboxObservabilityConfig{
 			ClickHouse: infrav1alpha1.ExternalSandboxObservabilityClickHouseConfig{
 				DSNSecret: infrav1alpha1.SandboxObservabilityClickHouseDSNSecretRef{
@@ -319,6 +323,43 @@ func TestReconcileInjectsSandboxObservabilityIngestURL(t *testing.T) {
 	if cfg.SandboxObservabilityIngestQueueSize != 2048 {
 		t.Fatalf("sandbox observability ingest queue size = %d, want 2048", cfg.SandboxObservabilityIngestQueueSize)
 	}
+	if cfg.SandboxObservabilityAuditDeliveryMode != sandboxobservability.AuditDeliveryModeCanonicalSync {
+		t.Fatalf("sandbox observability audit delivery mode = %q, want canonical_sync", cfg.SandboxObservabilityAuditDeliveryMode)
+	}
+	ds := &appsv1.DaemonSet{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: infra.Name + "-netd", Namespace: infra.Namespace}, ds); err != nil {
+		t.Fatalf("get netd daemonset: %v", err)
+	}
+	if !netdHasVolume(ds, "audit-spool") || !netdHasVolume(ds, "audit-jwt-private-key") || !netdHasMount(ds, "audit-spool") || !netdHasMount(ds, "audit-jwt-private-key") {
+		t.Fatalf("audit volumes or mounts missing: volumes=%#v mounts=%#v", ds.Spec.Template.Spec.Volumes, ds.Spec.Template.Spec.Containers[0].VolumeMounts)
+	}
+}
+
+func TestReconcileOmitsAuditHostAccessWhenAuditDisabled(t *testing.T) {
+	ds := reconcileNetdDaemonSet(t, newNetdTestInfra())
+	for _, name := range []string{"audit-spool", "audit-jwt-private-key"} {
+		if netdHasVolume(ds, name) || netdHasMount(ds, name) {
+			t.Fatalf("audit-disabled netd unexpectedly has %q volume or mount", name)
+		}
+	}
+}
+
+func netdHasVolume(ds *appsv1.DaemonSet, name string) bool {
+	for _, volume := range ds.Spec.Template.Spec.Volumes {
+		if volume.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func netdHasMount(ds *appsv1.DaemonSet, name string) bool {
+	for _, mount := range ds.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if mount.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func TestReconcileInjectsRedisConfigForTeamBandwidth(t *testing.T) {

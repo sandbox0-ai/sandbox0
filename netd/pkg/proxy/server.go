@@ -77,7 +77,7 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	auditor, err := newAuditLogger(cfg)
+	auditor, err := newAuditLogger(cfg, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -366,7 +366,11 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 	if result.Apply != nil {
 		result.Apply(req)
 	}
-	result.Classification = s.probeServerFirstSSH(req, result.Classification, ctx)
+	result.Classification, err = s.probeServerFirstSSH(req, result.Classification, ctx)
+	if err != nil {
+		s.logger.Warn("Server-first SSH probe blocked", zap.Error(err))
+		return
+	}
 	result.Classification = s.applyCachedDNSHost(req, result.Classification)
 	result.Classification = verifyClassifiedHost(s.hostVerifier, p, result.Classification)
 	decision := decideTraffic(p, result.Classification)
@@ -529,6 +533,12 @@ func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision
 		}
 		baseFields = append(baseFields, zap.String("adapter", adapter.Name()), zap.String("adapter_capability", string(adapter.Capability())))
 		s.logger.Info("TCP decision pass-through", baseFields...)
+		if auditErr := s.recordAuditAttempt(req, decision, adapter); auditErr != nil {
+			closeProbedUpstream(req)
+			s.logger.Error("TCP decision blocked because audit persistence failed", append(baseFields, zap.Error(auditErr))...)
+			s.recordAuditEvent(req, decision, adapter, 0, fmt.Errorf("canonical audit unavailable: %w", auditErr))
+			return
+		}
 		start := time.Now()
 		err := s.runAdapter(adapter, req)
 		s.recordAuditEvent(req, decision, adapter, time.Since(start), err)
@@ -560,6 +570,12 @@ func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision
 		}
 		baseFields = append(baseFields, zap.String("adapter", adapter.Name()), zap.String("adapter_capability", string(adapter.Capability())))
 		s.logger.Debug("TCP decision use adapter", baseFields...)
+		if auditErr := s.recordAuditAttempt(req, decision, adapter); auditErr != nil {
+			closeProbedUpstream(req)
+			s.logger.Error("TCP decision blocked because audit persistence failed", append(baseFields, zap.Error(auditErr))...)
+			s.recordAuditEvent(req, decision, adapter, 0, fmt.Errorf("canonical audit unavailable: %w", auditErr))
+			return
+		}
 		start := time.Now()
 		err := s.runAdapter(adapter, req)
 		s.recordAuditEvent(req, decision, adapter, time.Since(start), err)
@@ -635,26 +651,36 @@ func (s *Server) relayTCPConnWithUpstream(
 	return s.pipeWithReaders(client, upstream, reader, upstreamReader, compiled, audit)
 }
 
-func (s *Server) probeServerFirstSSH(req *adapterRequest, classification trafficClassification, ctx *tcpClassifyContext) trafficClassification {
+func (s *Server) probeServerFirstSSH(req *adapterRequest, classification trafficClassification, ctx *tcpClassifyContext) (trafficClassification, error) {
 	if s == nil || req == nil || ctx == nil {
-		return classification
+		return classification, nil
 	}
 	if classification.Transport != "tcp" || classification.UnknownReason == "" {
-		return classification
+		return classification, nil
 	}
 	if req.UpstreamConn != nil || req.DestIP == nil || req.DestPort <= 0 {
-		return classification
+		return classification, nil
 	}
 	if !policy.HasTrafficRuleAppProtocol(req.Compiled, "ssh") {
-		return classification
+		return classification, nil
+	}
+	if req.Audit == nil {
+		req.Audit = s.newFlowAudit("tcp")
+	}
+	probeDecision := trafficDecision{
+		Action: decisionActionPassThrough, Transport: "tcp", Protocol: "ssh", Reason: "server_first_probe",
+	}
+	if err := s.recordAuditAttempt(req, probeDecision, nil); err != nil {
+		return classification, fmt.Errorf("persist SSH probe audit attempt: %w", err)
 	}
 
 	upstream, upstreamPrefix, err := s.probeTCPUpstreamForRequest(req, ctx.headerLimit(), ctx.firstByteTimeout(), ctx.classificationTimeout())
 	if err != nil {
-		return classification
+		s.recordAuditEvent(req, probeDecision, nil, 0, err)
+		return classification, err
 	}
 	if upstream == nil {
-		return classification
+		return classification, nil
 	}
 
 	req.UpstreamConn = upstream
@@ -662,9 +688,9 @@ func (s *Server) probeServerFirstSSH(req *adapterRequest, classification traffic
 		req.UpstreamPrefix = bytes.NewReader(upstreamPrefix)
 	}
 	if banner, decision := parseSSHBannerClassification(upstreamPrefix, true, ctx.headerLimit()); decision == tcpClassifierMatched && banner != "" {
-		return classifyKnownTraffic("tcp", "ssh", req.DestIP, req.DestPort, "")
+		return classifyKnownTraffic("tcp", "ssh", req.DestIP, req.DestPort, ""), nil
 	}
-	return classification
+	return classification, nil
 }
 
 func (s *Server) probeTCPUpstreamForRequest(req *adapterRequest, headerLimit int, firstByteTimeout time.Duration, readTimeout time.Duration) (net.Conn, []byte, error) {
@@ -930,6 +956,14 @@ func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision
 			return
 		}
 		s.logger.Info("UDP decision pass-through", fields...)
+		if auditErr := s.recordAuditAttempt(req, decision, adapter); auditErr != nil {
+			s.logger.Error("UDP decision blocked because audit persistence failed", append(fields, zap.Error(auditErr))...)
+			s.recordAuditEvent(req, decision, adapter, 0, fmt.Errorf("canonical audit unavailable: %w", auditErr))
+			if req.UDPSession != nil {
+				req.UDPSession.closeWithError(auditErr)
+			}
+			return
+		}
 		start := time.Now()
 		err := s.runAdapter(adapter, req)
 		if err != nil {
@@ -971,6 +1005,14 @@ func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision
 		}
 		fields = append(fields, zap.String("adapter", adapter.Name()), zap.String("adapter_capability", string(adapter.Capability())))
 		s.logger.Debug("UDP decision use adapter", fields...)
+		if auditErr := s.recordAuditAttempt(req, decision, adapter); auditErr != nil {
+			s.logger.Error("UDP decision blocked because audit persistence failed", append(fields, zap.Error(auditErr))...)
+			s.recordAuditEvent(req, decision, adapter, 0, fmt.Errorf("canonical audit unavailable: %w", auditErr))
+			if req.UDPSession != nil {
+				req.UDPSession.closeWithError(auditErr)
+			}
+			return
+		}
 		start := time.Now()
 		err := s.runAdapter(adapter, req)
 		if err != nil {
@@ -995,8 +1037,22 @@ func (s *Server) recordAuditEvent(req *adapterRequest, decision trafficDecision,
 		return
 	}
 	if auditErr := s.auditor.Record(req, decision, adapter, duration, err); auditErr != nil {
-		s.logger.Warn("Failed to record audit event", zap.Error(auditErr))
+		s.logger.Error("Failed to record canonical audit result", zap.Error(auditErr))
 	}
+}
+
+func (s *Server) recordAuditAttempt(req *adapterRequest, decision trafficDecision, adapter proxyAdapter) error {
+	if s == nil || s.auditor == nil {
+		return nil
+	}
+	if req == nil || req.Audit == nil || !req.Audit.startAttempt() {
+		return nil
+	}
+	if err := s.auditor.RecordAttempt(req, decision, adapter); err != nil {
+		req.Audit.resetAttempt()
+		return err
+	}
+	return nil
 }
 
 func (s *Server) resolveAdapter(decision trafficDecision) (proxyAdapter, error) {

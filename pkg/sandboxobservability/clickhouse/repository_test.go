@@ -2,7 +2,9 @@ package clickhouse
 
 import (
 	"context"
+	"crypto/ed25519"
 	"database/sql"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -37,57 +39,94 @@ func mustRepository(t *testing.T) (*Repository, *captureDB) {
 
 func TestInsertEventsBuildsBatchInsertAndSerializesAttributes(t *testing.T) {
 	repo, db := mustRepository(t)
-	now := time.Date(2026, 7, 1, 1, 2, 4, 0, time.UTC)
+	now := time.Date(2026, 7, 1, 1, 2, 4, 987654321, time.UTC)
 	repo.now = func() time.Time { return now }
-	occurredAt := time.Date(2026, 7, 1, 1, 2, 3, 0, time.FixedZone("offset", 8*60*60))
+	occurredAt := time.Date(2026, 7, 1, 1, 2, 3, 123456789, time.FixedZone("offset", 8*60*60))
 
-	err := repo.InsertEvents(context.Background(), []sandboxobservability.Event{{
-		TeamID:     " team-1 ",
-		SandboxID:  " sb-1 ",
-		RegionID:   "aws-us-east-1",
-		ClusterID:  "cluster-a",
-		OccurredAt: occurredAt,
-		Source:     sandboxobservability.SourceNetd,
-		EventType:  sandboxobservability.EventTypeNetworkAudit,
-		Outcome:    sandboxobservability.OutcomeDenied,
-		Cursor:     "netd:1",
-		Watermark:  "netd:1",
-		Attributes: map[string]any{"destination": "example.com"},
-	}})
+	event := sandboxobservability.Event{
+		EventID:       "11111111-1111-4111-8111-111111111111",
+		SchemaVersion: sandboxobservability.CurrentEventSchemaVersion,
+		TeamID:        "team-1",
+		SandboxID:     "sb-1",
+		RegionID:      "aws-us-east-1",
+		ClusterID:     "cluster-a",
+		OccurredAt:    occurredAt,
+		Source:        sandboxobservability.SourceNetd,
+		EventType:     sandboxobservability.EventTypeNetworkAudit,
+		Phase:         sandboxobservability.EventPhaseEffect,
+		Outcome:       sandboxobservability.OutcomeDenied,
+		Actor:         sandboxobservability.AuditActor{Kind: sandboxobservability.ActorKindSandboxWorkload, ID: "sb-1"},
+		Action:        "network.deny",
+		Resource:      sandboxobservability.AuditResource{Type: "sandbox_network", ID: "sb-1"},
+		OperationID:   "operation-1",
+		Producer:      sandboxobservability.AuditProducer{Service: "netd", Instance: "node-1", Sequence: 1},
+		Attributes:    map[string]any{"destination": "example.com"},
+	}
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	if err := sandboxobservability.SignEvent(&event, key); err != nil {
+		t.Fatalf("SignEvent() error = %v", err)
+	}
+	err := repo.InsertEvents(context.Background(), []sandboxobservability.Event{event})
 	if err != nil {
 		t.Fatalf("InsertEvents() error = %v", err)
 	}
-	if !strings.HasPrefix(db.execQuery, "INSERT INTO `sandbox0_observability`.`sandbox_events`") {
+	if !strings.HasPrefix(db.execQuery, "INSERT INTO `sandbox0_observability`.`sandbox_audit_events`") {
 		t.Fatalf("exec query = %s", db.execQuery)
 	}
-	if len(db.execArgs) != 12 {
-		t.Fatalf("exec args count = %d, want 12", len(db.execArgs))
+	if !strings.Contains(db.execQuery, ") SETTINGS async_insert = 0, wait_for_async_insert = 1 VALUES") {
+		t.Fatalf("exec query must require a durable ClickHouse acknowledgement: %s", db.execQuery)
 	}
-	if db.execArgs[0] != "team-1" || db.execArgs[1] != "sb-1" {
-		t.Fatalf("identity args = %#v", db.execArgs[:2])
+	if strings.Count(db.execQuery, dateTime64NanoPlaceholder) != 2 {
+		t.Fatalf("exec query must preserve both DateTime64 values at nanosecond precision: %s", db.execQuery)
 	}
-	if got, ok := db.execArgs[4].(time.Time); !ok || got.Location() != time.UTC || !got.Equal(occurredAt) {
-		t.Fatalf("occurred_at arg = %#v", db.execArgs[4])
+	if len(db.execArgs) != 38 {
+		t.Fatalf("exec args count = %d, want 38", len(db.execArgs))
 	}
-	if got, ok := db.execArgs[5].(time.Time); !ok || !got.Equal(now) {
-		t.Fatalf("ingested_at arg = %#v", db.execArgs[5])
+	if db.execArgs[2] != "team-1" || db.execArgs[3] != "sb-1" {
+		t.Fatalf("identity args = %#v", db.execArgs[2:4])
 	}
-	if attributes, ok := db.execArgs[11].(string); !ok || !strings.Contains(attributes, `"destination":"example.com"`) {
-		t.Fatalf("attributes arg = %#v", db.execArgs[11])
+	if got := db.execArgs[6]; got != dateTime64NanoArg(occurredAt) {
+		t.Fatalf("occurred_at arg = %#v, want Unix nanoseconds", got)
+	}
+	if got := db.execArgs[7]; got != dateTime64NanoArg(now) {
+		t.Fatalf("ingested_at arg = %#v, want Unix nanoseconds", got)
+	}
+	if attributes, ok := db.execArgs[33].(string); !ok || !strings.Contains(attributes, `"destination":"example.com"`) {
+		t.Fatalf("attributes arg = %#v", db.execArgs[33])
+	}
+	if strings.Contains(auditEventSelectColumns, "cursor") || strings.Contains(auditEventSelectColumns, "watermark") {
+		t.Fatalf("audit event storage columns contain query transport fields: %s", auditEventSelectColumns)
 	}
 }
 
-func TestInsertEventsRequiresProducerCursor(t *testing.T) {
+func TestDateTime64NanoBindingPreservesPreEpochValues(t *testing.T) {
+	value := time.Date(1960, time.July, 1, 1, 2, 3, 123456789, time.UTC)
+	if dateTime64NanoPlaceholder != "fromUnixTimestamp64Nano(?, 'UTC')" {
+		t.Fatalf("dateTime64NanoPlaceholder = %q", dateTime64NanoPlaceholder)
+	}
+	if got := dateTime64NanoArg(value); got != value.UnixNano() || got >= 0 {
+		t.Fatalf("dateTime64NanoArg(%s) = %d, want negative Unix nanoseconds %d", value, got, value.UnixNano())
+	}
+}
+
+func TestInsertEventsRejectsMutationOfSignedIdentityWhitespace(t *testing.T) {
 	repo, db := mustRepository(t)
-	err := repo.InsertEvents(context.Background(), []sandboxobservability.Event{{
-		TeamID:     "team-1",
-		SandboxID:  "sb-1",
-		OccurredAt: time.Now(),
-		Source:     sandboxobservability.SourceNetd,
-		EventType:  sandboxobservability.EventTypeNetworkAudit,
-	}})
-	if err == nil {
-		t.Fatal("InsertEvents() error = nil, want missing cursor error")
+	event := sandboxobservability.Event{
+		EventID:       "11111111-1111-4111-8111-111111111111",
+		SchemaVersion: sandboxobservability.CurrentEventSchemaVersion,
+		TeamID:        " team-1",
+		SandboxID:     "sb-1",
+		OccurredAt:    time.Now().UTC(),
+		Source:        sandboxobservability.SourceNetd,
+		EventType:     sandboxobservability.EventTypeNetworkAudit,
+		Phase:         sandboxobservability.EventPhaseEffect,
+		Actor:         sandboxobservability.AuditActor{Kind: sandboxobservability.ActorKindSandboxWorkload},
+		Action:        "network.connect",
+		Resource:      sandboxobservability.AuditResource{Type: "sandbox_network", ID: "sb-1"},
+		Producer:      sandboxobservability.AuditProducer{Service: "netd"},
+	}
+	if err := repo.InsertEvents(context.Background(), []sandboxobservability.Event{event}); err == nil || !strings.Contains(err.Error(), "team_id must not contain surrounding whitespace") {
+		t.Fatalf("InsertEvents() error = %v, want non-canonical signed field rejection", err)
 	}
 	if db.execQuery != "" {
 		t.Fatalf("exec query = %q, want no insert", db.execQuery)
@@ -99,11 +138,12 @@ func TestBuildListSQLAppliesTypedFiltersAndCursor(t *testing.T) {
 	start := time.Date(2026, 7, 1, 1, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 7, 1, 2, 0, 0, 0, time.UTC)
 	cursorValue, err := encodePageCursor(sandboxobservability.Event{
+		EventID:    "11111111-1111-4111-8111-111111111111",
 		OccurredAt: time.Date(2026, 7, 1, 1, 30, 0, 0, time.UTC),
 		IngestedAt: time.Date(2026, 7, 1, 1, 30, 1, 0, time.UTC),
 		Source:     sandboxobservability.SourceNetd,
 		EventType:  sandboxobservability.EventTypeNetworkAudit,
-		Cursor:     "netd:10",
+		Integrity:  sandboxobservability.AuditIntegrity{PayloadHash: strings.Repeat("a", 64)},
 	})
 	if err != nil {
 		t.Fatalf("encodePageCursor() error = %v", err)
@@ -126,19 +166,19 @@ func TestBuildListSQLAppliesTypedFiltersAndCursor(t *testing.T) {
 
 	sqlQuery, args := repo.buildListSQL(query, limit+1, cursor)
 	for _, want := range []string{
-		"FROM `sandbox0_observability`.`sandbox_events` FINAL WHERE team_id = ? AND sandbox_id = ?",
+		"FROM `sandbox0_observability`.`sandbox_audit_events` FINAL WHERE team_id = ? AND sandbox_id = ?",
 		"source = ?",
 		"outcome = ?",
 		"event_type = ?",
-		"(occurred_at, ingested_at, source, event_type, cursor) > (?, ?, ?, ?, ?)",
-		"ORDER BY occurred_at ASC, ingested_at ASC, source ASC, event_type ASC, cursor ASC LIMIT 11",
+		"(occurred_at, ingested_at, source, event_type, event_id, payload_hash) > (" + dateTime64NanoPlaceholder + ", " + dateTime64NanoPlaceholder + ", ?, ?, ?, ?)",
+		"ORDER BY occurred_at ASC, ingested_at ASC, source ASC, event_type ASC, event_id ASC, payload_hash ASC LIMIT 11",
 	} {
 		if !strings.Contains(sqlQuery, want) {
 			t.Fatalf("query missing %q:\n%s", want, sqlQuery)
 		}
 	}
-	if len(args) != 12 {
-		t.Fatalf("args count = %d, want 12: %#v", len(args), args)
+	if len(args) != 13 {
+		t.Fatalf("args count = %d, want 13: %#v", len(args), args)
 	}
 	if args[5] != string(sandboxobservability.EventTypeNetworkAudit) {
 		t.Fatalf("event_type arg = %#v, want network_audit", args[5])
@@ -165,11 +205,11 @@ func TestBuildWatchEventsSQLUsesIngestionOrderCursor(t *testing.T) {
 
 	sqlQuery, args := repo.buildWatchEventsSQL(query, limit, cursor)
 	for _, want := range []string{
-		"occurred_at >= ?",
+		"occurred_at >= " + dateTime64NanoPlaceholder,
 		"source = ?",
 		"event_type = ?",
-		"(ingested_at, source, event_type, cursor) > (?, ?, ?, ?)",
-		"ORDER BY ingested_at ASC, source ASC, event_type ASC, cursor ASC LIMIT 10",
+		"(ingested_at, source, event_type, event_id, payload_hash) > (" + dateTime64NanoPlaceholder + ", ?, ?, ?, ?)",
+		"ORDER BY ingested_at ASC, source ASC, event_type ASC, event_id ASC, payload_hash ASC LIMIT 10",
 	} {
 		if !strings.Contains(sqlQuery, want) {
 			t.Fatalf("query missing %q:\n%s", want, sqlQuery)
@@ -178,8 +218,8 @@ func TestBuildWatchEventsSQLUsesIngestionOrderCursor(t *testing.T) {
 	if strings.Contains(sqlQuery, "ORDER BY occurred_at") {
 		t.Fatalf("watch query must not order by occurred_at:\n%s", sqlQuery)
 	}
-	if got, ok := args[len(args)-4].(time.Time); !ok || !got.Equal(after) {
-		t.Fatalf("tail ingested_at arg = %#v, want %s", args[len(args)-4], after)
+	if got := args[len(args)-5]; got != dateTime64NanoArg(after) {
+		t.Fatalf("tail ingested_at arg = %#v, want %s", args[len(args)-5], after)
 	}
 }
 
@@ -205,5 +245,111 @@ func TestNormalizeQueryCapsLimitAndRejectsInvalidCursor(t *testing.T) {
 		Cursor:    "bad",
 	}); err == nil {
 		t.Fatal("normalizeQuery() error = nil, want invalid cursor error")
+	}
+}
+
+func TestNormalizeQueryRejectsDateTime64NanoOverflow(t *testing.T) {
+	tests := []struct {
+		name  string
+		query sandboxobservability.EventQuery
+		field string
+	}{
+		{
+			name: "start before minimum",
+			query: sandboxobservability.EventQuery{
+				StartTime: timePointer(time.Date(1899, time.December, 31, 23, 59, 59, 999999999, time.UTC)),
+			},
+			field: "start_time",
+		},
+		{
+			name: "end after maximum",
+			query: sandboxobservability.EventQuery{
+				EndTime: timePointer(time.Date(2300, time.January, 1, 0, 0, 0, 0, time.UTC)),
+			},
+			field: "end_time",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.query.TeamID = "team-1"
+			tt.query.SandboxID = "sb-1"
+			_, _, _, err := normalizeQuery(tt.query)
+			if !errors.Is(err, sandboxobservability.ErrInvalidQuery) || !strings.Contains(err.Error(), tt.field+" is outside the DateTime64(9) range") {
+				t.Fatalf("normalizeQuery() error = %v, want ErrInvalidQuery for %s", err, tt.field)
+			}
+		})
+	}
+}
+
+func TestNormalizeEventCursorsRejectDateTime64NanoOverflow(t *testing.T) {
+	outside := time.Date(1899, time.December, 31, 23, 59, 59, 0, time.UTC)
+	page, err := encodePageCursor(sandboxobservability.Event{
+		EventID:    "11111111-1111-4111-8111-111111111111",
+		OccurredAt: outside,
+		IngestedAt: time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC),
+		Source:     sandboxobservability.SourceNetd,
+		EventType:  sandboxobservability.EventTypeNetworkAudit,
+	})
+	if err != nil {
+		t.Fatalf("encodePageCursor() error = %v", err)
+	}
+	_, _, _, err = normalizeQuery(sandboxobservability.EventQuery{
+		TeamID: "team-1", SandboxID: "sb-1", Cursor: page,
+	})
+	if !errors.Is(err, sandboxobservability.ErrInvalidCursor) {
+		t.Fatalf("normalizeQuery() error = %v, want ErrInvalidCursor", err)
+	}
+
+	tail, err := encodeTailCursor(eventTailCursorKind, outside, string(sandboxobservability.SourceNetd), string(sandboxobservability.EventTypeNetworkAudit), "11111111-1111-4111-8111-111111111111", "")
+	if err != nil {
+		t.Fatalf("encodeTailCursor() error = %v", err)
+	}
+	_, _, _, err = normalizeWatchEventQuery(sandboxobservability.EventQuery{
+		TeamID: "team-1", SandboxID: "sb-1",
+	}, sandboxobservability.WatchOptions{Cursor: tail})
+	if !errors.Is(err, sandboxobservability.ErrInvalidCursor) {
+		t.Fatalf("normalizeWatchEventQuery() error = %v, want ErrInvalidCursor", err)
+	}
+}
+
+func timePointer(value time.Time) *time.Time {
+	return &value
+}
+
+func TestNormalizeQueryRejectsEventIDWithOtherFilters(t *testing.T) {
+	_, _, _, err := normalizeQuery(sandboxobservability.EventQuery{
+		TeamID:    "team-1",
+		SandboxID: "sb-1",
+		EventID:   "11111111-1111-4111-8111-111111111111",
+		Action:    "sandbox.pause",
+	})
+	if err == nil || !strings.Contains(err.Error(), "event_id cannot be combined") {
+		t.Fatalf("normalizeQuery() error = %v, want incompatible filter error", err)
+	}
+}
+
+func TestNormalizeQueryBoundsExactEventLookupToTwoPayloadVariants(t *testing.T) {
+	_, limit, _, err := normalizeQuery(sandboxobservability.EventQuery{
+		TeamID:    "team-1",
+		SandboxID: "sb-1",
+		EventID:   "11111111-1111-4111-8111-111111111111",
+		Limit:     100,
+	})
+	if err != nil {
+		t.Fatalf("normalizeQuery() error = %v", err)
+	}
+	if limit != 2 {
+		t.Fatalf("limit = %d, want 2", limit)
+	}
+}
+
+func TestNormalizeWatchEventQueryRejectsEventID(t *testing.T) {
+	_, _, _, err := normalizeWatchEventQuery(sandboxobservability.EventQuery{
+		TeamID:    "team-1",
+		SandboxID: "sb-1",
+		EventID:   "11111111-1111-4111-8111-111111111111",
+	}, sandboxobservability.WatchOptions{})
+	if err == nil || !strings.Contains(err.Error(), "event_id cannot be combined with watch") {
+		t.Fatalf("normalizeWatchEventQuery() error = %v, want exact watch error", err)
 	}
 }

@@ -8,7 +8,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
+	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/schedulerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -155,6 +158,7 @@ func (s *Server) generateInternalToken(authCtx *authn.AuthContext, target string
 			target,
 			internalauth.GenerateOptions{
 				Permissions: authCtx.Permissions,
+				Audit:       delegatedAuditContext(authCtx, "regional-gateway"),
 			},
 		)
 	}
@@ -164,6 +168,52 @@ func (s *Server) generateInternalToken(authCtx *authn.AuthContext, target string
 		authCtx.UserID,
 		internalauth.GenerateOptions{
 			Permissions: authCtx.Permissions,
+			Audit:       delegatedAuditContext(authCtx, "regional-gateway"),
 		},
 	)
+}
+
+func delegatedAuditContext(authCtx *authn.AuthContext, origin string) *internalauth.AuditContext {
+	if authCtx == nil {
+		return nil
+	}
+	if authCtx.OperationID == "" {
+		authCtx.OperationID = uuid.NewString()
+	}
+	if authCtx.RequestID == "" {
+		authCtx.RequestID = authCtx.OperationID
+	}
+	principal := authCtx.Principal()
+	return &internalauth.AuditContext{
+		Actor: internalauth.AuditActor{
+			Kind:       string(principal.Kind),
+			ID:         principal.ID,
+			UserID:     principal.UserID,
+			APIKeyID:   principal.APIKeyID,
+			AuthMethod: string(principal.AuthMethod),
+		},
+		OperationID: authCtx.OperationID,
+		RequestID:   authCtx.RequestID,
+		Origin:      origin,
+	}
+}
+
+func attachAuditCorrelation() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		authCtx := gatewaymiddleware.GetAuthContext(c)
+		if authCtx != nil {
+			if authCtx.OperationID == "" {
+				authCtx.OperationID = uuid.NewString()
+			}
+			requestID := strings.TrimSpace(c.GetHeader("X-Request-ID"))
+			if len(requestID) > 128 {
+				requestID = requestID[:128]
+			}
+			if requestID == "" {
+				requestID = authCtx.OperationID
+			}
+			authCtx.RequestID = requestID
+		}
+		c.Next()
+	}
 }

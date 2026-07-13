@@ -7,6 +7,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -18,6 +19,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	sandboxobssvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sandboxobservability"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 )
 
 func TestReconcileKeepsHTTPBackendForHTTPSBaseURL(t *testing.T) {
@@ -344,8 +346,11 @@ func TestApplySandboxObservabilityConfigUsesTopLevelExternalSecret(t *testing.T)
 		},
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
 			SandboxObservability: &infrav1alpha1.SandboxObservabilityConfig{
-				Type:  infrav1alpha1.SandboxObservabilityTypeExternal,
-				Audit: &infrav1alpha1.SandboxObservabilityAuditConfig{Enabled: true},
+				Type: infrav1alpha1.SandboxObservabilityTypeExternal,
+				Audit: &infrav1alpha1.SandboxObservabilityAuditConfig{
+					Enabled:      true,
+					DeliveryMode: sandboxobservability.AuditDeliveryModeCanonicalSync,
+				},
 				External: &infrav1alpha1.ExternalSandboxObservabilityConfig{
 					ClickHouse: infrav1alpha1.ExternalSandboxObservabilityClickHouseConfig{
 						DSNSecret: infrav1alpha1.SandboxObservabilityClickHouseDSNSecretRef{
@@ -394,6 +399,8 @@ func TestApplySandboxObservabilityConfigUsesTopLevelExternalSecret(t *testing.T)
 	}
 	if cfg.SandboxObservability.Backend != apiconfig.SandboxObservabilityBackendClickHouse ||
 		!cfg.SandboxObservability.AuditEnabled ||
+		cfg.SandboxObservability.AuditDeliveryMode != sandboxobservability.AuditDeliveryModeCanonicalSync ||
+		cfg.SandboxObservability.AuditSpoolDir != "/var/lib/sandbox0/cluster-gateway/audit-spool" ||
 		cfg.SandboxObservability.ClickHouse.Database != "sandbox0_obs" ||
 		cfg.SandboxObservability.ClickHouse.EventsTable != "events_v1" ||
 		cfg.SandboxObservability.ClickHouse.LogsTable != "logs_v1" ||
@@ -402,6 +409,83 @@ func TestApplySandboxObservabilityConfigUsesTopLevelExternalSecret(t *testing.T)
 		cfg.SandboxObservability.ClickHouse.LogsRetentionDays != 3 ||
 		cfg.SandboxObservability.ClickHouse.RuntimeSamplesRetentionDays != 30 {
 		t.Fatalf("sandbox observability config = %+v", cfg.SandboxObservability)
+	}
+}
+
+func TestReconcileAuditMountsSeparatedKeysAndResultSpool(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Services: &infrav1alpha1.ServicesConfig{ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+				WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true}, Replicas: 1},
+			}},
+			SandboxObservability: &infrav1alpha1.SandboxObservabilityConfig{
+				Type: infrav1alpha1.SandboxObservabilityTypeExternal,
+				Audit: &infrav1alpha1.SandboxObservabilityAuditConfig{
+					Enabled: true,
+					DeliveryPersistence: &infrav1alpha1.SandboxAuditDeliveryPersistenceConfig{
+						Size:         resource.MustParse("2Gi"),
+						StorageClass: "durable-audit",
+					},
+				},
+				External: &infrav1alpha1.ExternalSandboxObservabilityConfig{ClickHouse: infrav1alpha1.ExternalSandboxObservabilityClickHouseConfig{
+					DSNSecret: infrav1alpha1.SandboxObservabilityClickHouseDSNSecretRef{Name: "clickhouse-dsn", Key: "dsn"},
+				}},
+			},
+		},
+	}
+	reconciler, client := newClusterGatewayTestReconciler(t,
+		infra.DeepCopy(),
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "clickhouse-dsn", Namespace: infra.Namespace}, Data: map[string][]byte{"dsn": []byte("clickhouse://sandbox0@clickhouse:9000/default")}},
+	)
+	if err := reconciler.Reconcile(context.Background(), "sandbox0ai/infra", "latest", infraplan.Compile(infra)); err != nil && !strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("reconcile returned unexpected error: %v", err)
+	}
+	deployment := &appsv1.Deployment{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-cluster-gateway", Namespace: infra.Namespace}, deployment); err != nil {
+		t.Fatalf("get cluster gateway deployment: %v", err)
+	}
+	for _, name := range []string{"audit-result-spool", "audit-jwt-public-key", "audit-signing-private-key", "audit-signing-public-key"} {
+		if !hasVolume(deployment.Spec.Template.Spec.Volumes, name) {
+			t.Fatalf("expected audit volume %q, got %#v", name, deployment.Spec.Template.Spec.Volumes)
+		}
+		if !hasVolumeMount(deployment.Spec.Template.Spec.Containers[0].VolumeMounts, name) {
+			t.Fatalf("expected audit mount %q, got %#v", name, deployment.Spec.Template.Spec.Containers[0].VolumeMounts)
+		}
+	}
+	if hasVolume(deployment.Spec.Template.Spec.Volumes, "audit-jwt-private-key") {
+		t.Fatal("cluster-gateway must not receive the netd audit producer private key")
+	}
+	if deployment.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
+		t.Fatalf("deployment strategy = %q, want Recreate for single-writer audit delivery PVC", deployment.Spec.Strategy.Type)
+	}
+	var spoolVolume *corev1.Volume
+	for i := range deployment.Spec.Template.Spec.Volumes {
+		if deployment.Spec.Template.Spec.Volumes[i].Name == auditResultSpoolVolumeName {
+			spoolVolume = &deployment.Spec.Template.Spec.Volumes[i]
+			break
+		}
+	}
+	if spoolVolume == nil || spoolVolume.PersistentVolumeClaim == nil {
+		t.Fatalf("audit result spool volume = %#v, want persistent volume claim", spoolVolume)
+	}
+	if spoolVolume.HostPath != nil {
+		t.Fatal("audit result spool must not use node-local hostPath")
+	}
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: auditResultSpoolPVCName(infra.Name), Namespace: infra.Namespace}, pvc); err != nil {
+		t.Fatalf("get audit result spool PVC: %v", err)
+	}
+	wantSize := resource.MustParse("2Gi")
+	gotSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+	if gotSize.Cmp(wantSize) != 0 {
+		t.Fatalf("audit result spool PVC size = %s, want %s", gotSize.String(), wantSize.String())
+	}
+	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != "durable-audit" {
+		t.Fatalf("audit result spool storage class = %#v, want durable-audit", pvc.Spec.StorageClassName)
+	}
+	if len(pvc.Spec.AccessModes) != 1 || pvc.Spec.AccessModes[0] != corev1.ReadWriteOnce {
+		t.Fatalf("audit result spool access modes = %v, want ReadWriteOnce", pvc.Spec.AccessModes)
 	}
 }
 
@@ -419,6 +503,15 @@ func configMapNameForVolume(t *testing.T, volumes []corev1.Volume, name string) 
 func hasVolume(volumes []corev1.Volume, name string) bool {
 	for _, volume := range volumes {
 		if volume.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func hasVolumeMount(mounts []corev1.VolumeMount, name string) bool {
+	for _, mount := range mounts {
+		if mount.Name == name {
 			return true
 		}
 	}

@@ -105,6 +105,28 @@ type Claims struct {
 	// IsSystem indicates this is a system-level token for internal service communication.
 	// System tokens have full access and are not bound to a specific team.
 	IsSystem bool `json:"is_system,omitempty"`
+
+	// Audit carries the original authenticated actor across trusted gateway
+	// hops. It is independent from the authorization subject above.
+	Audit *AuditContext `json:"audit,omitempty"`
+}
+
+// AuditActor is the signed, transport-independent origin principal.
+type AuditActor struct {
+	Kind       string `json:"kind"`
+	ID         string `json:"id,omitempty"`
+	UserID     string `json:"user_id,omitempty"`
+	APIKeyID   string `json:"api_key_id,omitempty"`
+	AuthMethod string `json:"auth_method,omitempty"`
+}
+
+// AuditContext preserves actor and correlation identity while each service
+// still issues a new short-lived authorization token for the next hop.
+type AuditContext struct {
+	Actor       AuditActor `json:"actor"`
+	OperationID string     `json:"operation_id,omitempty"`
+	RequestID   string     `json:"request_id,omitempty"`
+	Origin      string     `json:"origin,omitempty"`
 }
 
 // GetExpirationTime implements jwt.Claims interface.

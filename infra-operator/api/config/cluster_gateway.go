@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	"gopkg.in/yaml.v3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -17,6 +18,8 @@ const (
 
 // ClusterGatewayConfig holds all configuration for cluster-gateway.
 type ClusterGatewayConfig struct {
+	// ClusterID is the trusted data-plane cluster identity attached to audit facts.
+	ClusterID string `yaml:"cluster_id" json:"-"`
 	// Server configuration
 	// +optional
 	// +kubebuilder:default=8443
@@ -99,6 +102,17 @@ type SandboxObservabilityConfig struct {
 	// +optional
 	// +kubebuilder:default=false
 	AuditEnabled bool `yaml:"audit_enabled" json:"auditEnabled"`
+	// AuditDeliveryMode controls non-mutating API and public exposure admission.
+	// Mutations always require canonical ClickHouse acknowledgement.
+	// +optional
+	// +kubebuilder:validation:Enum=durable_async;canonical_sync
+	// +kubebuilder:default="durable_async"
+	AuditDeliveryMode sandboxobservability.AuditDeliveryMode `yaml:"audit_delivery_mode" json:"auditDeliveryMode"`
+	// AuditSpoolDir is the fsync-backed local delivery buffer for signed audit
+	// events that have not yet been acknowledged by ClickHouse.
+	// It is not an audit system of record.
+	// +optional
+	AuditSpoolDir string `yaml:"audit_spool_dir" json:"-"`
 	// +optional
 	ClickHouse SandboxObservabilityClickHouseConfig `yaml:"clickhouse" json:"clickHouse"`
 }
@@ -111,7 +125,7 @@ type SandboxObservabilityClickHouseConfig struct {
 	// +kubebuilder:default="sandbox0_observability"
 	Database string `yaml:"database" json:"database"`
 	// +optional
-	// +kubebuilder:default="sandbox_events"
+	// +kubebuilder:default="sandbox_audit_events"
 	EventsTable string `yaml:"events_table" json:"eventsTable"`
 	// +optional
 	// +kubebuilder:default="sandbox_logs"
@@ -161,12 +175,14 @@ func LoadClusterGatewayConfig() *ClusterGatewayConfig {
 		fmt.Fprintf(os.Stderr, "Failed to load config from %s: %v, using empty config\n", path, err)
 		cfg = &ClusterGatewayConfig{}
 	}
+	applyClusterGatewayDefaults(cfg)
 	return cfg
 }
 
 func loadClusterGatewayConfig(path string) (*ClusterGatewayConfig, error) {
 	cfg := &ClusterGatewayConfig{}
 	if path == "" {
+		applyClusterGatewayDefaults(cfg)
 		return cfg, nil
 	}
 
@@ -182,5 +198,13 @@ func loadClusterGatewayConfig(path string) (*ClusterGatewayConfig, error) {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
+	applyClusterGatewayDefaults(cfg)
 	return cfg, nil
+}
+
+func applyClusterGatewayDefaults(cfg *ClusterGatewayConfig) {
+	if cfg == nil {
+		return
+	}
+	cfg.SandboxObservability.AuditDeliveryMode = sandboxobservability.NormalizeAuditDeliveryMode(cfg.SandboxObservability.AuditDeliveryMode)
 }

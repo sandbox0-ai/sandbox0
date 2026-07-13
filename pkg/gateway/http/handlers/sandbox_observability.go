@@ -1,16 +1,22 @@
 package handlers
 
 import (
+	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	"go.uber.org/zap"
@@ -19,6 +25,7 @@ import (
 const (
 	defaultSandboxObservabilityLimit = 100
 	maxSandboxObservabilityLimit     = 1000
+	maxSandboxAuditIngestBodyBytes   = 8 << 20
 	sandboxObservabilityWatchPoll    = time.Second
 	sandboxObservabilityHeartbeat    = 15 * time.Second
 )
@@ -37,6 +44,18 @@ type SandboxObservabilityHandler struct {
 	repo   sandboxobservability.Repository
 	writer sandboxobservability.Writer
 	logger *zap.Logger
+	audit  *AuditIntegrityPolicy
+}
+
+// AuditIntegrityPolicy defines cluster-gateway-owned audit identity, signing,
+// and query-time verification. Producer-controlled identity fields are
+// replaced before ClickHouse insert.
+type AuditIntegrityPolicy struct {
+	RegionID        string
+	ClusterID       string
+	SigningKey      ed25519.PrivateKey
+	VerificationKey ed25519.PublicKey
+	Now             func() time.Time
 }
 
 type SandboxObservabilityHandlerOption func(*SandboxObservabilityHandler)
@@ -47,6 +66,19 @@ func WithSandboxObservabilityWriter(writer sandboxobservability.Writer) SandboxO
 			return
 		}
 		h.writer = writer
+	}
+}
+
+func WithAuditIntegrityPolicy(policy AuditIntegrityPolicy) SandboxObservabilityHandlerOption {
+	return func(h *SandboxObservabilityHandler) {
+		copyPolicy := policy
+		if len(copyPolicy.VerificationKey) != ed25519.PublicKeySize && len(copyPolicy.SigningKey) == ed25519.PrivateKeySize {
+			copyPolicy.VerificationKey = copyPolicy.SigningKey.Public().(ed25519.PublicKey)
+		}
+		if copyPolicy.Now == nil {
+			copyPolicy.Now = func() time.Time { return time.Now().UTC() }
+		}
+		h.audit = &copyPolicy
 	}
 }
 
@@ -81,6 +113,10 @@ func (h *SandboxObservabilityHandler) ListEvents(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if watch && query.EventID != "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "event_id cannot be combined with watch")
+		return
+	}
 	if watch {
 		h.watchEvents(c, query)
 		return
@@ -99,7 +135,57 @@ func (h *SandboxObservabilityHandler) ListEvents(c *gin.Context) {
 	if result.Events == nil {
 		result.Events = []sandboxobservability.Event{}
 	}
+	if query.EventID != "" {
+		result.NextCursor = ""
+	}
+	for i := range result.Events {
+		h.verifyEventStatus(&result.Events[i])
+	}
+	markEventConflicts(result.Events)
 	spec.JSONSuccess(c, http.StatusOK, result)
+}
+
+func (h *SandboxObservabilityHandler) verifyEventStatus(event *sandboxobservability.Event) {
+	if event == nil {
+		return
+	}
+	if h.audit == nil || len(h.audit.VerificationKey) != ed25519.PublicKeySize {
+		event.Integrity.SignatureStatus = sandboxobservability.AuditSignatureStatusUnavailable
+		return
+	}
+	if err := sandboxobservability.ValidateSignedEvent(*event); err != nil {
+		event.Integrity.SignatureStatus = sandboxobservability.AuditSignatureStatusInvalid
+		h.logger.Error("Sandbox audit integrity envelope is invalid", zap.String("event_id", event.EventID), zap.Error(err))
+		return
+	}
+	keyID, err := sandboxobservability.AuditSigningKeyID(h.audit.VerificationKey)
+	if err != nil || event.Integrity.SigningKeyID != keyID {
+		event.Integrity.SignatureStatus = sandboxobservability.AuditSignatureStatusUnavailable
+		return
+	}
+	if err := sandboxobservability.VerifyEventIntegrity(*event, h.audit.VerificationKey); err != nil {
+		event.Integrity.SignatureStatus = sandboxobservability.AuditSignatureStatusInvalid
+		h.logger.Error("Sandbox audit integrity verification failed", zap.String("event_id", event.EventID), zap.Error(err))
+		return
+	}
+	event.Integrity.SignatureStatus = sandboxobservability.AuditSignatureStatusVerified
+}
+
+func markEventConflicts(events []sandboxobservability.Event) {
+	hashes := make(map[string]string, len(events))
+	conflicts := make(map[string]struct{})
+	for _, event := range events {
+		if previous, ok := hashes[event.EventID]; ok && previous != event.Integrity.PayloadHash {
+			conflicts[event.EventID] = struct{}{}
+			continue
+		}
+		hashes[event.EventID] = event.Integrity.PayloadHash
+	}
+	for i := range events {
+		if _, ok := conflicts[events[i].EventID]; ok {
+			events[i].Integrity.EventIDConflict = true
+		}
+	}
 }
 
 func (h *SandboxObservabilityHandler) ListLogs(c *gin.Context) {
@@ -177,13 +263,26 @@ func (h *SandboxObservabilityHandler) IngestEvents(c *gin.Context) {
 	var req struct {
 		Events []sandboxobservability.Event `json:"events"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxSandboxAuditIngestBodyBytes)
+	decoder := json.NewDecoder(c.Request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
+		return
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
 		return
 	}
 	if len(req.Events) > maxSandboxObservabilityLimit {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "too many events")
 		return
+	}
+	if len(req.Events) > 0 {
+		if err := h.normalizeAuditEvents(c.Request.Context(), req.Events); err != nil {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+			return
+		}
 	}
 	if err := h.writer.InsertEvents(c.Request.Context(), req.Events); err != nil {
 		if errors.Is(err, sandboxobservability.ErrBackendDisabled) {
@@ -202,6 +301,72 @@ func (h *SandboxObservabilityHandler) IngestEvents(c *gin.Context) {
 		return
 	}
 	spec.JSONSuccess(c, http.StatusAccepted, gin.H{"inserted": len(req.Events)})
+}
+
+func ensureJSONEOF(decoder *json.Decoder) error {
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+func (h *SandboxObservabilityHandler) normalizeAuditEvents(ctx context.Context, events []sandboxobservability.Event) error {
+	if h.audit == nil || len(h.audit.SigningKey) != ed25519.PrivateKeySize {
+		return fmt.Errorf("audit ingest policy is not configured")
+	}
+	claims := internalauth.ClaimsFromContext(ctx)
+	if claims == nil || claims.IsSystem || strings.TrimSpace(claims.TeamID) == "" || strings.TrimSpace(claims.SandboxID) == "" {
+		return fmt.Errorf("audit ingest requires a team and sandbox scoped token")
+	}
+	if strings.TrimSpace(claims.Caller) != "netd" {
+		return fmt.Errorf("audit producer is not allowed")
+	}
+	now := h.audit.Now().UTC()
+	for i := range events {
+		event := &events[i]
+		if event.TeamID != claims.TeamID || event.SandboxID != claims.SandboxID {
+			return fmt.Errorf("event %d is outside the authenticated team or sandbox", i)
+		}
+		if _, err := uuid.Parse(event.EventID); err != nil {
+			return fmt.Errorf("event %d has invalid event_id", i)
+		}
+		if event.EventType != sandboxobservability.EventTypeNetworkAudit {
+			return fmt.Errorf("event %d type is not allowed for producer %s", i, claims.Caller)
+		}
+		if event.OccurredAt.IsZero() || event.OccurredAt.After(now.Add(5*time.Minute)) {
+			return fmt.Errorf("event %d has invalid occurred_at", i)
+		}
+		if !sandboxobservability.ValidEventPhase(event.Phase) {
+			return fmt.Errorf("event %d has invalid phase", i)
+		}
+		event.SchemaVersion = sandboxobservability.CurrentEventSchemaVersion
+		event.RegionID = strings.TrimSpace(h.audit.RegionID)
+		event.ClusterID = strings.TrimSpace(h.audit.ClusterID)
+		event.IngestedAt = now
+		event.Source = sandboxobservability.SourceNetd
+		event.Producer.Service = claims.Caller
+		event.Actor = sandboxobservability.AuditActor{
+			Kind:       sandboxobservability.ActorKindSandboxWorkload,
+			ID:         event.SandboxID,
+			AuthMethod: "workload_token",
+		}
+		event.EventType = sandboxobservability.EventTypeNetworkAudit
+		// netd observes a network flow, not an HTTP API response. Request
+		// metadata is gateway-owned and must not be accepted from this producer.
+		event.Request = sandboxobservability.AuditRequest{}
+		attributes := sandboxobservability.SanitizeNetworkAuditAttributes(event.Attributes)
+		event.Action = sandboxobservability.NetworkAuditAction(attributes)
+		event.Resource = sandboxobservability.AuditResource{Type: "sandbox_network", ID: event.SandboxID}
+		event.Attributes = attributes.CanonicalMap()
+		if err := sandboxobservability.SignEvent(event, h.audit.SigningKey); err != nil {
+			return fmt.Errorf("event %d integrity: %w", i, err)
+		}
+	}
+	return nil
 }
 
 func (h *SandboxObservabilityHandler) IngestLogs(c *gin.Context) {
@@ -361,6 +526,10 @@ func (h *SandboxObservabilityHandler) writeWatchEvents(c *gin.Context, encoder *
 	if result == nil {
 		return false
 	}
+	for i := range result.Events {
+		h.verifyEventStatus(&result.Events[i])
+	}
+	markEventConflicts(result.Events)
 	for _, event := range result.Events {
 		if !h.writeWatchLine(c, encoder, flusher, sandboxObservabilityWatchLine{Type: "event", Data: event}) {
 			return false
@@ -518,17 +687,47 @@ func parseSandboxObservabilityQuery(c *gin.Context) (sandboxobservability.EventQ
 	if !ok {
 		return sandboxobservability.EventQuery{}, false
 	}
+	actorKind := sandboxobservability.ActorKind(strings.TrimSpace(c.Query("actor_kind")))
+	if actorKind != "" && !sandboxobservability.ValidActorKind(actorKind) {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid actor_kind")
+		return sandboxobservability.EventQuery{}, false
+	}
+	cursor := strings.TrimSpace(c.Query("cursor"))
+	actorID := strings.TrimSpace(c.Query("actor_id"))
+	action := strings.TrimSpace(c.Query("action"))
+	resourceType := strings.TrimSpace(c.Query("resource_type"))
+	operationID := strings.TrimSpace(c.Query("operation_id"))
+	eventID := strings.TrimSpace(c.Query("event_id"))
+	if eventID != "" {
+		if _, err := uuid.Parse(eventID); err != nil {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid event_id")
+			return sandboxobservability.EventQuery{}, false
+		}
+		if startTime != nil || endTime != nil || cursor != "" || source != "" || eventType != "" || outcome != "" || actorKind != "" || actorID != "" || action != "" || resourceType != "" || operationID != "" {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "event_id cannot be combined with other event filters or cursor")
+			return sandboxobservability.EventQuery{}, false
+		}
+		// An exact lookup returns at most two payload variants. Two are enough
+		// to prove that the stable ID has conflicting canonical facts.
+		limit = 2
+	}
 
 	return sandboxobservability.EventQuery{
-		TeamID:    teamID,
-		SandboxID: sandboxID,
-		StartTime: startTime,
-		EndTime:   endTime,
-		Limit:     limit,
-		Cursor:    strings.TrimSpace(c.Query("cursor")),
-		Source:    source,
-		EventType: eventType,
-		Outcome:   outcome,
+		TeamID:       teamID,
+		SandboxID:    sandboxID,
+		StartTime:    startTime,
+		EndTime:      endTime,
+		Limit:        limit,
+		Cursor:       cursor,
+		Source:       source,
+		EventType:    eventType,
+		Outcome:      outcome,
+		ActorKind:    actorKind,
+		ActorID:      actorID,
+		Action:       action,
+		ResourceType: resourceType,
+		OperationID:  operationID,
+		EventID:      eventID,
 	}, true
 }
 

@@ -64,8 +64,8 @@ func TestWorkerFlushesBatchBySize(t *testing.T) {
 	defer cancel()
 	go worker.Run(ctx)
 
-	if !worker.TryEnqueue(sandboxobservability.Event{Cursor: "1"}) ||
-		!worker.TryEnqueue(sandboxobservability.Event{Cursor: "2"}) {
+	if !worker.TryEnqueue(sandboxobservability.Event{EventID: "1"}) ||
+		!worker.TryEnqueue(sandboxobservability.Event{EventID: "2"}) {
 		t.Fatal("TryEnqueue() returned false")
 	}
 
@@ -86,10 +86,10 @@ func TestWorkerDropsWhenQueueIsFull(t *testing.T) {
 		t.Fatalf("NewWorker() error = %v", err)
 	}
 
-	if !worker.TryEnqueue(sandboxobservability.Event{Cursor: "1"}) {
+	if !worker.TryEnqueue(sandboxobservability.Event{EventID: "1"}) {
 		t.Fatal("first TryEnqueue() returned false")
 	}
-	if worker.TryEnqueue(sandboxobservability.Event{Cursor: "2"}) {
+	if worker.TryEnqueue(sandboxobservability.Event{EventID: "2"}) {
 		t.Fatal("second TryEnqueue() returned true, want queue-full drop")
 	}
 	if stats := worker.Stats(); stats.DroppedEvents != 1 {
@@ -104,7 +104,7 @@ func TestWorkerRetriesTransientInsertFailure(t *testing.T) {
 		t.Fatalf("NewWorker() error = %v", err)
 	}
 
-	worker.flushBatch(context.Background(), []sandboxobservability.Event{{Cursor: "1"}})
+	worker.flushBatch(context.Background(), []sandboxobservability.Event{{EventID: "1"}})
 
 	if writer.callCount != 2 {
 		t.Fatalf("call count = %d, want 2", writer.callCount)
@@ -121,7 +121,7 @@ func TestWorkerDropsBatchAfterRetries(t *testing.T) {
 		t.Fatalf("NewWorker() error = %v", err)
 	}
 
-	worker.flushBatch(context.Background(), []sandboxobservability.Event{{Cursor: "1"}, {Cursor: "2"}})
+	worker.flushBatch(context.Background(), []sandboxobservability.Event{{EventID: "1"}, {EventID: "2"}})
 
 	if writer.callCount != 2 {
 		t.Fatalf("call count = %d, want 2", writer.callCount)
@@ -137,7 +137,7 @@ func TestWorkerFlushesQueuedItemsWithLiveContextOnShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWorker() error = %v", err)
 	}
-	if !worker.TryEnqueue(sandboxobservability.Event{Cursor: "shutdown"}) {
+	if !worker.TryEnqueue(sandboxobservability.Event{EventID: "shutdown"}) {
 		t.Fatal("TryEnqueue() returned false")
 	}
 	ctx, cancel := context.WithCancel(context.Background())

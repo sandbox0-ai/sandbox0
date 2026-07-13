@@ -12,6 +12,8 @@ import (
 )
 
 const maxInsertBatchSize = 500
+const dateTime64NanoPlaceholder = "fromUnixTimestamp64Nano(?, 'UTC')"
+const auditInsertReliabilitySettings = " SETTINGS async_insert = 0, wait_for_async_insert = 1"
 
 type sqlBackend interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
@@ -154,32 +156,30 @@ func (r *Repository) buildInsertSQL(events []sandboxobservability.Event) (string
 	var builder strings.Builder
 	builder.WriteString("INSERT INTO ")
 	builder.WriteString(r.eventsTable)
-	builder.WriteString(" (team_id, sandbox_id, region_id, cluster_id, occurred_at, ingested_at, source, event_type, outcome, cursor, watermark, attributes) VALUES ")
+	builder.WriteString(" (")
+	builder.WriteString(auditEventSelectColumns)
+	builder.WriteString(")")
+	builder.WriteString(auditInsertReliabilitySettings)
+	builder.WriteString(" VALUES ")
 
-	args := make([]any, 0, len(events)*12)
+	columnCount := auditEventInsertColumnCount()
+	args := make([]any, 0, len(events)*columnCount)
 	for i, event := range events {
 		if i > 0 {
 			builder.WriteString(", ")
 		}
-		builder.WriteString("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-		attributes, err := encodeAttributes(event.Attributes)
+		builder.WriteString("(")
+		builder.WriteString(auditEventInsertPlaceholders)
+		builder.WriteString(")")
+		row, err := newAuditEventRow(event)
 		if err != nil {
-			return "", nil, fmt.Errorf("encode attributes: %w", err)
+			return "", nil, err
 		}
-		args = append(args,
-			event.TeamID,
-			event.SandboxID,
-			event.RegionID,
-			event.ClusterID,
-			event.OccurredAt.UTC(),
-			event.IngestedAt.UTC(),
-			string(event.Source),
-			string(event.EventType),
-			string(event.Outcome),
-			event.Cursor,
-			event.Watermark,
-			attributes,
-		)
+		values := row.insertValues()
+		if len(values) != columnCount {
+			return "", nil, fmt.Errorf("audit event row has %d values for %d insert columns", len(values), columnCount)
+		}
+		args = append(args, values...)
 	}
 
 	return builder.String(), args, nil
@@ -187,18 +187,40 @@ func (r *Repository) buildInsertSQL(events []sandboxobservability.Event) (string
 
 func (r *Repository) buildListSQL(query sandboxobservability.EventQuery, limit int, cursor *pageCursor) (string, []any) {
 	var builder strings.Builder
-	builder.WriteString("SELECT team_id, sandbox_id, region_id, cluster_id, occurred_at, ingested_at, source, event_type, outcome, cursor, watermark, attributes FROM ")
+	builder.WriteString("SELECT ")
+	builder.WriteString(auditEventSelectColumns)
+	builder.WriteString(" FROM ")
 	builder.WriteString(r.eventsTable)
-	builder.WriteString(" FINAL WHERE team_id = ? AND sandbox_id = ?")
+	builder.WriteString(" FINAL WHERE ")
 
+	args := appendEventFilters(&builder, query)
+	if query.EventID != "" {
+		builder.WriteString(" AND event_id = ?")
+		args = append(args, query.EventID)
+	}
+	if cursor != nil {
+		builder.WriteString(" AND (occurred_at, ingested_at, source, event_type, event_id, payload_hash) > (")
+		builder.WriteString(dateTime64NanoPlaceholder + ", " + dateTime64NanoPlaceholder + ", ?, ?, ?, ?)")
+		args = append(args, dateTime64NanoArg(cursor.OccurredAt), dateTime64NanoArg(cursor.IngestedAt), cursor.Source, cursor.EventType, cursor.Cursor, cursor.PayloadHash)
+	}
+
+	builder.WriteString(" ORDER BY occurred_at ASC, ingested_at ASC, source ASC, event_type ASC, event_id ASC, payload_hash ASC")
+	builder.WriteString(fmt.Sprintf(" LIMIT %d", limit))
+	return builder.String(), args
+}
+
+// appendEventFilters writes the filters shared by historical list and watch
+// queries. Exact event ID lookup remains list-only.
+func appendEventFilters(builder *strings.Builder, query sandboxobservability.EventQuery) []any {
+	builder.WriteString("team_id = ? AND sandbox_id = ?")
 	args := []any{query.TeamID, query.SandboxID}
 	if query.StartTime != nil {
-		builder.WriteString(" AND occurred_at >= ?")
-		args = append(args, query.StartTime.UTC())
+		builder.WriteString(" AND occurred_at >= " + dateTime64NanoPlaceholder)
+		args = append(args, dateTime64NanoArg(*query.StartTime))
 	}
 	if query.EndTime != nil {
-		builder.WriteString(" AND occurred_at <= ?")
-		args = append(args, query.EndTime.UTC())
+		builder.WriteString(" AND occurred_at <= " + dateTime64NanoPlaceholder)
+		args = append(args, dateTime64NanoArg(*query.EndTime))
 	}
 	if query.Source != "" {
 		builder.WriteString(" AND source = ?")
@@ -212,14 +234,27 @@ func (r *Repository) buildListSQL(query sandboxobservability.EventQuery, limit i
 		builder.WriteString(" AND outcome = ?")
 		args = append(args, string(query.Outcome))
 	}
-	if cursor != nil {
-		builder.WriteString(" AND (occurred_at, ingested_at, source, event_type, cursor) > (?, ?, ?, ?, ?)")
-		args = append(args, cursor.OccurredAt, cursor.IngestedAt, cursor.Source, cursor.EventType, cursor.Cursor)
+	if query.ActorKind != "" {
+		builder.WriteString(" AND actor_kind = ?")
+		args = append(args, string(query.ActorKind))
 	}
-
-	builder.WriteString(" ORDER BY occurred_at ASC, ingested_at ASC, source ASC, event_type ASC, cursor ASC")
-	builder.WriteString(fmt.Sprintf(" LIMIT %d", limit))
-	return builder.String(), args
+	if query.ActorID != "" {
+		builder.WriteString(" AND actor_id = ?")
+		args = append(args, query.ActorID)
+	}
+	if query.Action != "" {
+		builder.WriteString(" AND action = ?")
+		args = append(args, query.Action)
+	}
+	if query.ResourceType != "" {
+		builder.WriteString(" AND resource_type = ?")
+		args = append(args, query.ResourceType)
+	}
+	if query.OperationID != "" {
+		builder.WriteString(" AND operation_id = ?")
+		args = append(args, query.OperationID)
+	}
+	return args
 }
 
 func normalizeQuery(query sandboxobservability.EventQuery) (sandboxobservability.EventQuery, int, *pageCursor, error) {
@@ -234,10 +269,16 @@ func normalizeQuery(query sandboxobservability.EventQuery) (sandboxobservability
 	}
 	if query.StartTime != nil {
 		start := query.StartTime.UTC()
+		if !sandboxobservability.ValidDateTime64Nano(start) {
+			return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("%w: start_time is outside the DateTime64(9) range", sandboxobservability.ErrInvalidQuery)
+		}
 		query.StartTime = &start
 	}
 	if query.EndTime != nil {
 		end := query.EndTime.UTC()
+		if !sandboxobservability.ValidDateTime64Nano(end) {
+			return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("%w: end_time is outside the DateTime64(9) range", sandboxobservability.ErrInvalidQuery)
+		}
 		query.EndTime = &end
 	}
 	if query.StartTime != nil && query.EndTime != nil && query.EndTime.Before(*query.StartTime) {
@@ -252,12 +293,24 @@ func normalizeQuery(query sandboxobservability.EventQuery) (sandboxobservability
 	if query.Outcome != "" && !sandboxobservability.ValidOutcome(query.Outcome) {
 		return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("invalid outcome")
 	}
+	query.ActorID = strings.TrimSpace(query.ActorID)
+	query.Action = strings.TrimSpace(query.Action)
+	query.ResourceType = strings.TrimSpace(query.ResourceType)
+	query.OperationID = strings.TrimSpace(query.OperationID)
+	query.EventID = strings.TrimSpace(query.EventID)
+	if query.ActorKind != "" && !sandboxobservability.ValidActorKind(query.ActorKind) {
+		return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("invalid actor_kind")
+	}
+	if query.EventID != "" && (query.StartTime != nil || query.EndTime != nil || query.Cursor != "" || query.Source != "" || query.EventType != "" || query.Outcome != "" || query.ActorKind != "" || query.ActorID != "" || query.Action != "" || query.ResourceType != "" || query.OperationID != "") {
+		return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("event_id cannot be combined with other event filters or cursor")
+	}
 
 	limit := query.Limit
-	if limit <= 0 {
+	if query.EventID != "" {
+		limit = 2
+	} else if limit <= 0 {
 		limit = DefaultQueryLimit
-	}
-	if limit > MaxQueryLimit {
+	} else if limit > MaxQueryLimit {
 		limit = MaxQueryLimit
 	}
 
@@ -267,6 +320,9 @@ func normalizeQuery(query sandboxobservability.EventQuery) (sandboxobservability
 		if err != nil {
 			return sandboxobservability.EventQuery{}, 0, nil, err
 		}
+		if !sandboxobservability.ValidDateTime64Nano(decoded.OccurredAt) || !sandboxobservability.ValidDateTime64Nano(decoded.IngestedAt) {
+			return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("%w: timestamp is outside the DateTime64(9) range", sandboxobservability.ErrInvalidCursor)
+		}
 		cursor = decoded
 	}
 
@@ -274,33 +330,8 @@ func normalizeQuery(query sandboxobservability.EventQuery) (sandboxobservability
 }
 
 func normalizeEventForInsert(event sandboxobservability.Event, now time.Time) (sandboxobservability.Event, error) {
-	event.TeamID = strings.TrimSpace(event.TeamID)
-	event.SandboxID = strings.TrimSpace(event.SandboxID)
-	event.RegionID = strings.TrimSpace(event.RegionID)
-	event.ClusterID = strings.TrimSpace(event.ClusterID)
-	event.Cursor = strings.TrimSpace(event.Cursor)
-	event.Watermark = strings.TrimSpace(event.Watermark)
-
-	if event.TeamID == "" {
-		return sandboxobservability.Event{}, fmt.Errorf("team_id is required")
-	}
-	if event.SandboxID == "" {
-		return sandboxobservability.Event{}, fmt.Errorf("sandbox_id is required")
-	}
-	if event.OccurredAt.IsZero() {
-		return sandboxobservability.Event{}, fmt.Errorf("occurred_at is required")
-	}
-	if !sandboxobservability.ValidSource(event.Source) {
-		return sandboxobservability.Event{}, fmt.Errorf("invalid source")
-	}
-	if !sandboxobservability.ValidEventType(event.EventType) {
-		return sandboxobservability.Event{}, fmt.Errorf("invalid event_type")
-	}
-	if event.Outcome != "" && !sandboxobservability.ValidOutcome(event.Outcome) {
-		return sandboxobservability.Event{}, fmt.Errorf("invalid outcome")
-	}
-	if event.Cursor == "" {
-		return sandboxobservability.Event{}, fmt.Errorf("cursor is required")
+	if err := sandboxobservability.ValidateSignedEvent(event); err != nil {
+		return sandboxobservability.Event{}, err
 	}
 	event.OccurredAt = event.OccurredAt.UTC()
 	if event.IngestedAt.IsZero() {
@@ -310,42 +341,25 @@ func normalizeEventForInsert(event sandboxobservability.Event, now time.Time) (s
 	return event, nil
 }
 
+// dateTime64NanoArg preserves the exact timestamp protected by the audit
+// signature. clickhouse-go binds a bare time.Time positional argument as a
+// whole-second DateTime; passing signed Unix nanoseconds through
+// fromUnixTimestamp64Nano also preserves pre-epoch DateTime64(9) values.
+func dateTime64NanoArg(value time.Time) int64 {
+	return value.UTC().UnixNano()
+}
+
 func scanEvents(rows *sql.Rows) ([]sandboxobservability.Event, error) {
 	var events []sandboxobservability.Event
 	for rows.Next() {
-		var (
-			event          sandboxobservability.Event
-			source         string
-			eventType      string
-			outcome        string
-			attributesJSON string
-		)
-		if err := rows.Scan(
-			&event.TeamID,
-			&event.SandboxID,
-			&event.RegionID,
-			&event.ClusterID,
-			&event.OccurredAt,
-			&event.IngestedAt,
-			&source,
-			&eventType,
-			&outcome,
-			&event.Cursor,
-			&event.Watermark,
-			&attributesJSON,
-		); err != nil {
+		var row auditEventRow
+		if err := rows.Scan(row.scanDestinations()...); err != nil {
 			return nil, err
 		}
-		attributes, err := decodeAttributes(attributesJSON)
+		event, err := row.toEvent()
 		if err != nil {
 			return nil, err
 		}
-		event.OccurredAt = event.OccurredAt.UTC()
-		event.IngestedAt = event.IngestedAt.UTC()
-		event.Source = sandboxobservability.Source(source)
-		event.EventType = sandboxobservability.EventType(eventType)
-		event.Outcome = sandboxobservability.Outcome(outcome)
-		event.Attributes = attributes
 		events = append(events, event)
 	}
 	if err := rows.Err(); err != nil {
@@ -383,10 +397,8 @@ func decodeAttributes(value string) (map[string]any, error) {
 }
 
 func lastWatermark(events []sandboxobservability.Event) string {
-	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].Watermark != "" {
-			return events[i].Watermark
-		}
+	if len(events) == 0 {
+		return ""
 	}
-	return ""
+	return events[len(events)-1].EventID
 }

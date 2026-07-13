@@ -14,6 +14,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+type failingAuditSink struct{}
+
+func (failingAuditSink) WriteAuditEvent(auditEvent) error {
+	return errors.New("canonical audit unavailable")
+}
+func (failingAuditSink) Close() error { return nil }
+
 type trackingAdapter struct {
 	name       string
 	transport  string
@@ -164,11 +171,14 @@ func TestProbeServerFirstSSHReclassifiesUnknownTraffic(t *testing.T) {
 		DestIP:   upstreamAddr.IP,
 		DestPort: upstreamAddr.Port,
 	}
-	classification := server.probeServerFirstSSH(req, classifyUnknownTraffic("tcp", "unknown", upstreamAddr.IP, upstreamAddr.Port, "client_idle"), &tcpClassifyContext{
+	classification, err := server.probeServerFirstSSH(req, classifyUnknownTraffic("tcp", "unknown", upstreamAddr.IP, upstreamAddr.Port, "client_idle"), &tcpClassifyContext{
 		OrigIP:      upstreamAddr.IP,
 		OrigPort:    upstreamAddr.Port,
 		HeaderLimit: 1024,
 	})
+	if err != nil {
+		t.Fatalf("probeServerFirstSSH() error = %v", err)
+	}
 	if classification.Protocol != "ssh" {
 		t.Fatalf("protocol = %q, want ssh", classification.Protocol)
 	}
@@ -235,6 +245,42 @@ func TestProbeServerFirstSSHReclassifiesUnknownTraffic(t *testing.T) {
 	}
 	if got := <-upstreamDone; !bytes.Equal(got, []byte("SSH-2.0-TestClient\r\n")) {
 		t.Fatalf("upstream received = %q", got)
+	}
+}
+
+func TestProbeServerFirstSSHDoesNotDialBeforeCanonicalAudit(t *testing.T) {
+	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenTCP() error = %v", err)
+	}
+	defer listener.Close()
+	address := listener.Addr().(*net.TCPAddr)
+	server := &Server{
+		cfg:     &config.NetdConfig{ProxyUpstreamTimeout: metav1.Duration{Duration: time.Second}, ProxyHeaderLimit: 1024},
+		auditor: &auditLogger{sink: failingAuditSink{}, now: func() time.Time { return time.Now().UTC() }},
+	}
+	req := &adapterRequest{
+		Compiled: &policy.CompiledPolicy{Mode: v1alpha1.NetworkModeBlockAll, Egress: policy.CompiledRuleSet{
+			TrafficRules: []policy.CompiledTrafficRule{{Name: "allow-ssh", Action: v1alpha1.TrafficRuleActionAllow, AppProtocols: []string{"ssh"}}},
+		}},
+		DestIP: address.IP, DestPort: address.Port,
+	}
+	_, err = server.probeServerFirstSSH(req, classifyUnknownTraffic("tcp", "unknown", address.IP, address.Port, "client_idle"), &tcpClassifyContext{
+		OrigIP: address.IP, OrigPort: address.Port, HeaderLimit: 1024,
+	})
+	if err == nil {
+		t.Fatal("probeServerFirstSSH() error = nil, want audit failure")
+	}
+	if err := listener.SetDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		t.Fatalf("SetDeadline() error = %v", err)
+	}
+	conn, acceptErr := listener.AcceptTCP()
+	if conn != nil {
+		_ = conn.Close()
+		t.Fatal("SSH upstream was dialed before canonical audit ACK")
+	}
+	if timeout, ok := acceptErr.(net.Error); !ok || !timeout.Timeout() {
+		t.Fatalf("AcceptTCP() error = %v, want timeout without a connection", acceptErr)
 	}
 }
 

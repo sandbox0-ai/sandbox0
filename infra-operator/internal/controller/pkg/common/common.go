@@ -104,6 +104,7 @@ type ServiceDefinition struct {
 	ReadinessProbe     *corev1.Probe
 	ServiceAccountName string
 	Resources          *corev1.ResourceRequirements
+	DeploymentStrategy *appsv1.DeploymentStrategy
 }
 
 type ServiceConfigRef struct {
@@ -182,6 +183,9 @@ func (r *ResourceManager) ReconcileDeploymentWithScope(ctx context.Context, scop
 			},
 		},
 	}
+	if def.DeploymentStrategy != nil {
+		desiredDeploy.Spec.Strategy = *def.DeploymentStrategy.DeepCopy()
+	}
 
 	if err := scope.SetControllerReference(desiredDeploy, r.Scheme); err != nil {
 		return err
@@ -197,6 +201,9 @@ func (r *ResourceManager) ReconcileDeploymentWithScope(ctx context.Context, scop
 		deploy.Spec.Replicas = desiredDeploy.Spec.Replicas
 		deploy.Spec.Selector = desiredDeploy.Spec.Selector
 		deploy.Spec.Template = desiredDeploy.Spec.Template
+		if def.DeploymentStrategy != nil {
+			deploy.Spec.Strategy = desiredDeploy.Spec.Strategy
+		}
 	})
 }
 

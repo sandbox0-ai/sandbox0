@@ -38,6 +38,8 @@ import (
 const (
 	controlPlaneKeySecretName = "sandbox0-internal-jwt-control-plane"
 	dataPlaneKeySecretName    = "sandbox0-internal-jwt-data-plane"
+	auditNetdKeySecretName    = "sandbox0-audit-netd-jwt"
+	auditSigningKeySecretName = "sandbox0-audit-signing"
 )
 
 type Reconciler struct {
@@ -65,6 +67,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 	if enableDataPlane {
 		if err := r.reconcileDataPlaneKeys(ctx, infra); err != nil {
+			return err
+		}
+	}
+	if infrav1alpha1.IsSandboxAuditEnabled(infra) {
+		netdSecretName, _, _ := GetAuditNetdKeyRefs(infra)
+		if err := r.createKeyPairSecret(ctx, infra, netdSecretName); err != nil {
+			return err
+		}
+		signingSecretName, _, _ := GetAuditSigningKeyRefs(infra)
+		if err := r.createKeyPairSecret(ctx, infra, signingSecretName); err != nil {
 			return err
 		}
 	}
@@ -266,6 +278,19 @@ func GetDataPlaneKeyRefs(infra *infrav1alpha1.Sandbox0Infra) (secretName, privat
 	}
 
 	return secretName, privateKeyKey, publicKeyKey
+}
+
+// GetAuditNetdKeyRefs returns the dedicated audit producer key pair. The
+// private key is mounted only into netd and the public key only into
+// cluster-gateway, so other data-plane services cannot impersonate netd.
+func GetAuditNetdKeyRefs(infra *infrav1alpha1.Sandbox0Infra) (secretName, privateKeyKey, publicKeyKey string) {
+	return fmt.Sprintf("%s-%s", infra.Name, auditNetdKeySecretName), "private.key", "public.key"
+}
+
+// GetAuditSigningKeyRefs returns the event signing key pair. Its private key
+// is mounted only into cluster-gateway and is not an internal-auth trust root.
+func GetAuditSigningKeyRefs(infra *infrav1alpha1.Sandbox0Infra) (secretName, privateKeyKey, publicKeyKey string) {
+	return fmt.Sprintf("%s-%s", infra.Name, auditSigningKeySecretName), "private.key", "public.key"
 }
 
 func GetControlPlanePublicKeyRef(infra *infrav1alpha1.Sandbox0Infra) (secretName, publicKeyKey string) {

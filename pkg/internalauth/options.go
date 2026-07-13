@@ -86,6 +86,10 @@ type GenerateOptions struct {
 	// TTL is the token time-to-live.
 	// If zero, the generator's default TTL is used.
 	TTL time.Duration
+
+	// Audit preserves the original authenticated principal and correlation IDs
+	// across trusted service hops. It does not grant authorization.
+	Audit *AuditContext
 }
 
 // ValidateOptions holds optional parameters for token validation.

@@ -7,6 +7,7 @@ import (
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
+	sandboxobstypes "github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -80,7 +81,11 @@ func TestApplyNetdConfigInjectsAuditIngestURLOnlyWhenLicensedAuditIsEnabled(t *t
 			SandboxObservability: &infrav1alpha1.SandboxObservabilityConfig{
 				Enabled: &enabled,
 				Backend: infrav1alpha1.SandboxObservabilityBackendClickHouse,
-				Audit:   &infrav1alpha1.SandboxObservabilityAuditConfig{Enabled: true},
+				Type:    infrav1alpha1.SandboxObservabilityTypeExternal,
+				Audit: &infrav1alpha1.SandboxObservabilityAuditConfig{
+					Enabled:      true,
+					DeliveryMode: sandboxobstypes.AuditDeliveryModeCanonicalSync,
+				},
 			},
 		},
 	}
@@ -97,11 +102,14 @@ func TestApplyNetdConfigInjectsAuditIngestURLOnlyWhenLicensedAuditIsEnabled(t *t
 
 	require.NoError(t, err)
 	assert.Equal(t, "http://cluster-gateway.svc/internal/v1/sandbox-observability/events", cfg.SandboxObservabilityIngestURL)
+	assert.Equal(t, sandboxobstypes.AuditDeliveryModeCanonicalSync, cfg.SandboxObservabilityAuditDeliveryMode)
 
 	infra.Spec.SandboxObservability.Audit.Enabled = false
 	err = ApplyNetdConfig(context.Background(), client, infra, "http://cluster-gateway.svc/", cfg)
 	require.NoError(t, err)
 	assert.Empty(t, cfg.SandboxObservabilityIngestURL)
+	assert.Empty(t, cfg.SandboxObservabilityAuditSpoolDir)
+	assert.Empty(t, cfg.SandboxObservabilityAuditDeliveryMode)
 }
 
 func TestApplyManagerConfigClearsIngestURLsWhenDisabled(t *testing.T) {
@@ -219,5 +227,45 @@ func TestGetRuntimeConfigUsesRegionClickHouse(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "clickhouse://sandbox0:password@clickhouse:9000/sandbox0_obs", cfg.DSN)
 	assert.Equal(t, "sandbox0_obs", cfg.Database)
-	assert.Equal(t, "sandbox_events", cfg.EventsTable)
+	assert.Equal(t, "sandbox_audit_events", cfg.EventsTable)
+	assert.Equal(t, sandboxobstypes.AuditDeliveryModeDurableAsync, cfg.AuditDeliveryMode)
+}
+
+func TestGetRuntimeConfigMovesPersistedLegacyAuditDefaultToCanonicalTable(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, infrav1alpha1.AddToScheme(scheme))
+	enabled := true
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox0", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			ClickHouse: &infrav1alpha1.ClickHouseConfig{
+				Type: infrav1alpha1.ClickHouseTypeExternal,
+				External: &infrav1alpha1.ExternalClickHouseConfig{
+					DSNSecret: infrav1alpha1.ClickHouseDSNSecretRef{Name: "clickhouse-dsn"},
+				},
+			},
+			SandboxObservability: &infrav1alpha1.SandboxObservabilityConfig{
+				Enabled: &enabled,
+				Backend: infrav1alpha1.SandboxObservabilityBackendClickHouse,
+				Type:    infrav1alpha1.SandboxObservabilityTypeExternal,
+				Audit:   &infrav1alpha1.SandboxObservabilityAuditConfig{Enabled: true},
+				External: &infrav1alpha1.ExternalSandboxObservabilityConfig{
+					ClickHouse: infrav1alpha1.ExternalSandboxObservabilityClickHouseConfig{
+						DSNSecret:   infrav1alpha1.SandboxObservabilityClickHouseDSNSecretRef{Name: "clickhouse-dsn"},
+						EventsTable: "sandbox_events",
+					},
+				},
+			},
+		},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		infra,
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "clickhouse-dsn", Namespace: infra.Namespace}, Data: map[string][]byte{"dsn": []byte("clickhouse://sandbox0@clickhouse:9000/default")}},
+	).Build()
+
+	cfg, ok, err := GetRuntimeConfig(context.Background(), client, infra)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "sandbox_audit_events", cfg.EventsTable)
 }

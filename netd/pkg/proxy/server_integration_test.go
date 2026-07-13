@@ -11,6 +11,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	"go.uber.org/zap"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -92,7 +93,11 @@ func TestHandleTCPDecisionPassThroughRelaysAndAudits(t *testing.T) {
 		t.Fatalf("upstream received = %q, want %q", got, want)
 	}
 
-	event := decodeSingleAuditEvent(t, auditBuf.Bytes())
+	events := decodeAuditEvents(t, auditBuf.Bytes())
+	if len(events) != 2 || events[0].Phase != string(sandboxobservability.EventPhaseAttempt) || events[1].Phase != string(sandboxobservability.EventPhaseResult) {
+		t.Fatalf("audit phases = %+v, want attempt and result", events)
+	}
+	event := events[1]
 	if event.Action != string(decisionActionPassThrough) || event.ClassifierResult != "unknown" {
 		t.Fatalf("unexpected audit decision: %+v", event)
 	}
@@ -190,7 +195,11 @@ func TestHandleUDPDecisionPassThroughRelaysAndAudits(t *testing.T) {
 	}
 
 	server.closeUDPSessions()
-	event := decodeSingleAuditEvent(t, auditBuf.Bytes())
+	events := decodeAuditEvents(t, auditBuf.Bytes())
+	if len(events) != 2 || events[0].Phase != string(sandboxobservability.EventPhaseAttempt) || events[1].Phase != string(sandboxobservability.EventPhaseResult) {
+		t.Fatalf("audit phases = %+v, want attempt and result", events)
+	}
+	event := events[1]
 	if event.Action != string(decisionActionPassThrough) || event.Adapter != "udp-pass-through" {
 		t.Fatalf("unexpected udp audit event: %+v", event)
 	}
@@ -297,15 +306,18 @@ func TestHandleUDPDecisionPassThroughReusesUDPSession(t *testing.T) {
 
 	server.closeUDPSessions()
 	events := decodeAuditEvents(t, auditBuf.Bytes())
-	if len(events) != 1 {
-		t.Fatalf("audit event count = %d, want 1", len(events))
+	if len(events) != 2 {
+		t.Fatalf("audit event count = %d, want 2", len(events))
 	}
 	wantBytes := int64(len(payloads[0]) + len(payloads[1]))
-	if events[0].FlowID == "" {
-		t.Fatalf("expected udp flow id, got %+v", events[0])
+	if events[0].Phase != string(sandboxobservability.EventPhaseAttempt) || events[1].Phase != string(sandboxobservability.EventPhaseResult) {
+		t.Fatalf("unexpected udp audit phases: %+v", events)
 	}
-	if events[0].EgressBytes != wantBytes || events[0].IngressBytes != wantBytes {
-		t.Fatalf("unexpected aggregated udp bytes: %+v", events[0])
+	if events[1].FlowID == "" {
+		t.Fatalf("expected udp flow id, got %+v", events[1])
+	}
+	if events[1].EgressBytes != wantBytes || events[1].IngressBytes != wantBytes {
+		t.Fatalf("unexpected aggregated udp bytes: %+v", events[1])
 	}
 }
 
@@ -405,15 +417,6 @@ func startTCPEchoServer(t *testing.T, expectedBytes int) (*net.TCPAddr, <-chan [
 		}
 	}()
 	return listener.Addr().(*net.TCPAddr), done
-}
-
-func decodeSingleAuditEvent(t *testing.T, data []byte) auditEvent {
-	t.Helper()
-	var event auditEvent
-	if err := json.Unmarshal(data, &event); err != nil {
-		t.Fatalf("decode audit event: %v", err)
-	}
-	return event
 }
 
 func decodeAuditEvents(t *testing.T, data []byte) []auditEvent {

@@ -1453,13 +1453,14 @@ paths:
   /api/v1/sandboxes/{id}/observability/events:
     get:
       tags: [observability]
-      summary: Query historical sandbox observability events
+      summary: Query canonical signed sandbox observability events
       description: |
-        Queries the licensed asynchronous per-sandbox audit projection. The current producer
-        publishes network audit events. This endpoint requires the enterprise sandbox_audit
-        feature, does not expose backend SQL, and reads tables that are separate from the
-        metering usage ledger.
+        Queries canonical signed per-sandbox audit facts from ClickHouse. Every returned
+        event includes an inline signature verification status, while event-ID payload
+        conflicts are reported independently. Access requires the enterprise sandbox_audit
+        feature and the sandboxaudit:read permission.
       x-enterprise-feature: sandbox_audit
+      x-required-permission: sandboxaudit:read
       security:
         - bearerAuth: []
       x-upstream-service: cluster-gateway
@@ -1479,7 +1480,7 @@ paths:
             format: date-time
         - name: limit
           in: query
-          description: Maximum number of events to return. Values above 1000 are capped.
+          description: Maximum number of events to return. Values above 1000 are capped. Exact event_id mode ignores this value and returns at most two payload variants.
           schema:
             type: integer
             default: 100
@@ -1508,9 +1509,35 @@ paths:
           in: query
           schema:
             $ref: "#/components/schemas/SandboxObservabilityOutcome"
+        - name: actor_kind
+          in: query
+          schema:
+            $ref: "#/components/schemas/SandboxAuditActorKind"
+        - name: actor_id
+          in: query
+          schema:
+            type: string
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: resource_type
+          in: query
+          schema:
+            type: string
+        - name: operation_id
+          in: query
+          schema:
+            type: string
+        - name: event_id
+          in: query
+          description: Exact lookup mode for one stable audit event ID. It cannot be combined with time, cursor, watch, or other event filters and returns one canonical row or two conflicting payload variants.
+          schema:
+            type: string
+            format: uuid
       responses:
         "200":
-          description: Historical sandbox observability events
+          description: Canonical signed sandbox observability events
           content:
             application/json:
               schema:
@@ -1531,7 +1558,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "503":
-          description: Historical observability backend disabled or unavailable
+          description: Sandbox observability backend disabled or unavailable
           content:
             application/json:
               schema:
@@ -5282,16 +5309,104 @@ components:
             $ref: "#/components/schemas/ContextResourceUsage"
     ObservabilityEventSource:
       type: string
-      enum: [manager, netd, procd]
+      enum: [cluster_gateway, manager, netd, procd, ctld, storage_proxy]
     SandboxObservabilityEventType:
       type: string
-      enum: [lifecycle, network_audit, runtime_stats]
+      enum: [lifecycle, network_audit, runtime_stats, api_access, process, file]
     SandboxObservabilityOutcome:
       type: string
-      enum: [completed, denied, error, succeeded, failed]
+      enum: [completed, denied, error, succeeded, failed, accepted, unknown]
+    SandboxAuditEventPhase:
+      type: string
+      enum: [attempt, result, effect]
+    SandboxAuditActorKind:
+      type: string
+      enum: [human, api_key, service, sandbox_workload, ssh_user, exposure_credential, anonymous]
+    SandboxAuditActor:
+      type: object
+      properties:
+        kind:
+          $ref: "#/components/schemas/SandboxAuditActorKind"
+        id:
+          type: string
+        user_id:
+          type: string
+        api_key_id:
+          type: string
+        auth_method:
+          type: string
+      required: [kind]
+    SandboxAuditResource:
+      type: object
+      properties:
+        type:
+          type: string
+        id:
+          type: string
+        subresource:
+          type: string
+      required: [type, id]
+    SandboxAuditRequest:
+      type: object
+      properties:
+        request_id:
+          type: string
+        trace_id:
+          type: string
+        source_ip:
+          type: string
+        user_agent:
+          type: string
+        http_method:
+          type: string
+        route:
+          type: string
+        status_code:
+          type: integer
+          minimum: 0
+          maximum: 65535
+    SandboxAuditProducer:
+      type: object
+      properties:
+        service:
+          type: string
+        instance:
+          type: string
+        sequence:
+          type: integer
+          format: int64
+          minimum: 0
+      required: [service]
+    SandboxAuditIntegrity:
+      type: object
+      properties:
+        algorithm:
+          type: string
+          enum: [ed25519-sha256-v1]
+        payload_hash:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        signature:
+          type: string
+        signing_key_id:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        signature_status:
+          type: string
+          enum: [verified, invalid, unavailable]
+        event_id_conflict:
+          type: boolean
+          description: True when the query observed the same event ID with a different canonical payload hash.
+      required: [algorithm, payload_hash, signature, signing_key_id, signature_status]
     SandboxObservabilityEvent:
       type: object
       properties:
+        event_id:
+          type: string
+          format: uuid
+        schema_version:
+          type: integer
+          enum: [2]
         team_id:
           type: string
         sandbox_id:
@@ -5310,16 +5425,33 @@ components:
           $ref: "#/components/schemas/ObservabilityEventSource"
         event_type:
           $ref: "#/components/schemas/SandboxObservabilityEventType"
+        phase:
+          $ref: "#/components/schemas/SandboxAuditEventPhase"
         outcome:
           $ref: "#/components/schemas/SandboxObservabilityOutcome"
-        cursor:
+        actor:
+          $ref: "#/components/schemas/SandboxAuditActor"
+        action:
           type: string
-        watermark:
+        resource:
+          $ref: "#/components/schemas/SandboxAuditResource"
+        operation_id:
           type: string
+        parent_event_id:
+          type: string
+          format: uuid
+        producer:
+          $ref: "#/components/schemas/SandboxAuditProducer"
+        request:
+          $ref: "#/components/schemas/SandboxAuditRequest"
+        integrity:
+          $ref: "#/components/schemas/SandboxAuditIntegrity"
         attributes:
           type: object
           additionalProperties: true
       required:
+        - event_id
+        - schema_version
         - team_id
         - sandbox_id
         - region_id
@@ -5328,8 +5460,14 @@ components:
         - ingested_at
         - source
         - event_type
-        - cursor
-        - watermark
+        - phase
+        - outcome
+        - actor
+        - action
+        - resource
+        - operation_id
+        - producer
+        - integrity
     SandboxObservabilityEventsResponse:
       type: object
       properties:

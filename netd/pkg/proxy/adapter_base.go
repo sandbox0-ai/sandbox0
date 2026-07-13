@@ -47,14 +47,13 @@ type adapterRequest struct {
 	UDPConn        *net.UDPConn
 	UDPSource      *net.UDPAddr
 	UDPPayload     []byte
-	ProtocolAudit  []protocolOperationAudit
 }
 
 func (r *adapterRequest) appendProtocolAudit(entries ...protocolOperationAudit) {
-	if r == nil || len(entries) == 0 {
+	if r == nil || r.Audit == nil || len(entries) == 0 {
 		return
 	}
-	r.ProtocolAudit = append(r.ProtocolAudit, entries...)
+	r.Audit.appendProtocolOperations(entries...)
 }
 
 type httpAdapter struct{}

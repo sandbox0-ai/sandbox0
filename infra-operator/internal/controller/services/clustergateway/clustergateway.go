@@ -21,7 +21,12 @@ import (
 	"fmt"
 	"strings"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -40,7 +45,12 @@ type Reconciler struct {
 	Resources *common.ResourceManager
 }
 
-const defaultClusterGatewayHTTPPort = 8443
+const (
+	defaultClusterGatewayHTTPPort      = 8443
+	defaultAuditResultSpoolPVCSize     = "1Gi"
+	auditResultSpoolVolumeName         = "audit-result-spool"
+	auditResultSpoolContainerMountPath = "/var/lib/sandbox0/cluster-gateway"
+)
 
 func NewReconciler(resources *common.ResourceManager) *Reconciler {
 	return &Reconciler{Resources: resources}
@@ -73,10 +83,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 
 	labels := common.GetServiceLabels(scope.Name, "cluster-gateway")
 	dataPlaneSecretName, dataPlanePrivateKey, _ := compiledPlan.DataPlaneKeyRefs()
+	auditKeySecretName, _, auditPublicKey := compiledPlan.AuditNetdKeyRefs()
+	auditSigningSecretName, auditSigningPrivateKey, auditSigningPublicKey := compiledPlan.AuditSigningKeyRefs()
 
 	config, err := r.buildConfig(ctx, compiledPlan)
 	if err != nil {
 		return err
+	}
+	if config.SandboxObservability.AuditEnabled {
+		if replicas != 1 {
+			return fmt.Errorf("sandbox audit requires exactly one cluster-gateway replica for exclusive durable delivery replay")
+		}
+		if err := r.reconcileAuditResultSpoolPVC(ctx, scope); err != nil {
+			return fmt.Errorf("reconcile sandbox audit result delivery PVC: %w", err)
+		}
 	}
 	needEnterpriseLicense := compiledPlan.Enterprise.ClusterGateway
 	common.NormalizeEnterpriseLicenseFile(&config.LicenseFile, needEnterpriseLicense)
@@ -138,6 +158,61 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 			},
 		},
 	}
+	if config.SandboxObservability.AuditEnabled {
+		volumeMounts = append(volumeMounts,
+			corev1.VolumeMount{
+				Name:      "audit-jwt-public-key",
+				MountPath: pkginternalauth.DefaultAuditJWTPublicKeyPath,
+				SubPath:   "audit_jwt_public.key",
+				ReadOnly:  true,
+			},
+			corev1.VolumeMount{
+				Name:      "audit-signing-private-key",
+				MountPath: pkginternalauth.DefaultAuditSigningPrivateKeyPath,
+				SubPath:   "audit_signing_private.key",
+				ReadOnly:  true,
+			},
+			corev1.VolumeMount{
+				Name:      "audit-signing-public-key",
+				MountPath: pkginternalauth.DefaultAuditSigningPublicKeyPath,
+				SubPath:   "audit_signing_public.key",
+				ReadOnly:  true,
+			},
+		)
+		volumes = append(volumes,
+			corev1.Volume{
+				Name: auditResultSpoolVolumeName,
+				VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: auditResultSpoolPVCName(scope.Name),
+				}},
+			},
+			corev1.Volume{
+				Name: "audit-jwt-public-key",
+				VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+					SecretName: auditKeySecretName,
+					Items:      []corev1.KeyToPath{{Key: auditPublicKey, Path: "audit_jwt_public.key"}},
+				}},
+			},
+			corev1.Volume{
+				Name: "audit-signing-private-key",
+				VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+					SecretName: auditSigningSecretName,
+					Items:      []corev1.KeyToPath{{Key: auditSigningPrivateKey, Path: "audit_signing_private.key"}},
+				}},
+			},
+			corev1.Volume{
+				Name: "audit-signing-public-key",
+				VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+					SecretName: auditSigningSecretName,
+					Items:      []corev1.KeyToPath{{Key: auditSigningPublicKey, Path: "audit_signing_public.key"}},
+				}},
+			},
+		)
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      auditResultSpoolVolumeName,
+			MountPath: auditResultSpoolContainerMountPath,
+		})
+	}
 	if needsControlPlanePublicKey {
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
 			Name:      "internal-jwt-public-key",
@@ -164,6 +239,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		volumeMounts, volumes = common.AppendEnterpriseLicenseVolumeWithSecretRef(compiledPlan.EnterpriseLicenseSecretRef(), config.LicenseFile, volumeMounts, volumes)
 	}
 
+	var strategy *appsv1.DeploymentStrategy
+	if config.SandboxObservability.AuditEnabled {
+		// A single-writer RWO PVC must be detached before the replacement pod can
+		// mount it on another node. Recreate preserves replay continuity.
+		strategy = &appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
+	}
 	if err := r.Resources.ReconcileDeploymentWithScope(ctx, scope, deploymentName, labels, replicas, common.ServiceDefinition{
 		Name:       "cluster-gateway",
 		Port:       httpPort,
@@ -214,7 +295,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 			InitialDelaySeconds: 5,
 			PeriodSeconds:       5,
 		},
-		Resources: resources,
+		Resources:          resources,
+		DeploymentStrategy: strategy,
 	}); err != nil {
 		return err
 	}
@@ -235,6 +317,52 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 	return nil
 }
 
+func auditResultSpoolPVCName(infraName string) string {
+	return fmt.Sprintf("%s-cluster-gateway-audit-spool", infraName)
+}
+
+func (r *Reconciler) reconcileAuditResultSpoolPVC(ctx context.Context, scope common.ObjectScope) error {
+	name := auditResultSpoolPVCName(scope.Name)
+	current := &corev1.PersistentVolumeClaim{}
+	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: scope.Namespace}, current)
+	if err == nil {
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	size := resource.MustParse(defaultAuditResultSpoolPVCSize)
+	storageClass := ""
+	if owner := scope.Owner(); owner != nil && owner.Spec.SandboxObservability != nil && owner.Spec.SandboxObservability.Audit != nil {
+		if persistence := owner.Spec.SandboxObservability.Audit.DeliveryPersistence; persistence != nil {
+			if !persistence.Size.IsZero() {
+				size = persistence.Size
+			}
+			storageClass = strings.TrimSpace(persistence.StorageClass)
+		}
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: scope.Namespace},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: size},
+			},
+		},
+	}
+	if storageClass != "" {
+		pvc.Spec.StorageClassName = &storageClass
+	}
+	if err := scope.SetControllerReference(pvc, r.Resources.Scheme); err != nil {
+		return err
+	}
+	if err := r.Resources.Client.Create(ctx, pvc); err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	return nil
+}
+
 func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.InfraPlan) (*apiconfig.ClusterGatewayConfig, error) {
 	cfg := &apiconfig.ClusterGatewayConfig{}
 	if compiledPlan != nil && compiledPlan.Components.EnableClusterGateway && compiledPlan.Services.ClusterGateway.Name != "" {
@@ -246,6 +374,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.In
 		return nil, fmt.Errorf("compiled plan is required")
 	}
 	if owner := compiledPlan.Scope.Owner(); owner != nil {
+		cfg.ClusterID = common.ResolveClusterID(owner)
 		if err := meteringsvc.ApplyClusterGatewayConfig(ctx, r.Resources.Client, owner, cfg); err != nil {
 			return nil, fmt.Errorf("apply metering config: %w", err)
 		}

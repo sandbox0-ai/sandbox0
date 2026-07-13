@@ -42,7 +42,8 @@ func initSandboxObservability(ctx context.Context, cfg *config.ClusterGatewayCon
 				LogsRetentionDays:           clickHouseCfg.LogsRetentionDays,
 				RuntimeSamplesRetentionDays: clickHouseCfg.RuntimeSamplesRetentionDays,
 			},
-			Migrate: !clickHouseCfg.SkipSchemaMigration,
+			Migrate:            !clickHouseCfg.SkipSchemaMigration,
+			RequireAuditSchema: sandboxObs.AuditEnabled,
 		})
 		if err != nil {
 			return nil, nil, fmt.Errorf("initialize clickhouse sandbox observability backend: %w", err)

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
@@ -54,6 +55,10 @@ func (s *SandboxService) waitForPodIP(ctx context.Context, namespace, name strin
 }
 
 func (s *SandboxService) waitForPodClaimReady(ctx context.Context, namespace, name string) (*corev1.Pod, error) {
+	return s.waitForPodClaimReadyTracked(ctx, namespace, name, nil)
+}
+
+func (s *SandboxService) waitForPodClaimReadyTracked(ctx context.Context, namespace, name string, lifecycle *podLifecycleStageTracker) (*corev1.Pod, error) {
 	timeout := s.config.ProcdInitTimeout
 	if timeout < defaultPodClaimReadyTimeout {
 		timeout = defaultPodClaimReadyTimeout
@@ -76,9 +81,11 @@ func (s *SandboxService) waitForPodClaimReady(ctx context.Context, namespace, na
 			}
 			return nil, false, fmt.Errorf("get pod for claim readiness: %w", err)
 		}
+		lifecycle.observePod(pod)
 
 		ready, reason := s.isPodClaimReady(readyCtx, pod)
 		if ready {
+			lifecycle.observeClaimReady(pod)
 			return pod, true, nil
 		}
 		if reason != "" {
@@ -120,6 +127,10 @@ func (s *SandboxService) waitForPodClaimReady(ctx context.Context, namespace, na
 }
 
 func (s *SandboxService) waitForPodNetworkIdentity(ctx context.Context, template, namespace, name string) (*corev1.Pod, error) {
+	return s.waitForPodNetworkIdentityTracked(ctx, template, namespace, name, nil)
+}
+
+func (s *SandboxService) waitForPodNetworkIdentityTracked(ctx context.Context, template, namespace, name string, lifecycle *podLifecycleStageTracker) (*corev1.Pod, error) {
 	timeout := s.config.ProcdInitTimeout
 	if timeout < defaultPodClaimReadyTimeout {
 		timeout = defaultPodClaimReadyTimeout
@@ -150,6 +161,7 @@ func (s *SandboxService) waitForPodNetworkIdentity(ctx context.Context, template
 		}
 
 		tracker.observePod(pod)
+		lifecycle.observePod(pod)
 		ready, reason := isPodNetworkIdentityReady(pod)
 		if ready {
 			s.observePodNetworkIdentityCheck(source, "ready", "ready")
@@ -195,6 +207,7 @@ func (s *SandboxService) waitForPodNetworkIdentity(ctx context.Context, template
 		case event := <-events:
 			if event.deleted {
 				tracker.observePod(event.pod)
+				lifecycle.observePod(event.pod)
 				lastReason = "pod is deleting"
 				s.observePodNetworkIdentityCheck("informer", "error", lastReason)
 				tracker.observeFailure("error", lastReason)
@@ -322,6 +335,119 @@ func (t *podNetworkIdentityStageTracker) observeFailure(status, reason string) {
 		started = t.nodeAt
 	}
 	t.service.observePodNetworkIdentityStageDuration(t.template, stage, status, reason, now.Sub(started))
+}
+
+type podLifecycleStageTracker struct {
+	service  *SandboxService
+	template string
+	recorded map[string]struct{}
+}
+
+func newPodLifecycleStageTracker(service *SandboxService, template string) *podLifecycleStageTracker {
+	return &podLifecycleStageTracker{
+		service:  service,
+		template: template,
+		recorded: make(map[string]struct{}),
+	}
+}
+
+// observePod records stages backed by Kubernetes timestamps and the first time
+// manager observes PodIP. PodReadyToStartContainers is the Kubernetes boundary
+// after the CRI pod sandbox and networking are configured; exact CRI operation
+// latency remains available from kubelet runtime operation metrics.
+func (t *podLifecycleStageTracker) observePod(pod *corev1.Pod) {
+	t.observePodAt(pod, time.Now())
+}
+
+func (t *podLifecycleStageTracker) observePodAt(pod *corev1.Pod, observedAt time.Time) {
+	if t == nil || pod == nil {
+		return
+	}
+	createdAt := pod.CreationTimestamp.Time
+	scheduledAt := podConditionTransitionTime(pod, corev1.PodScheduled)
+	sandboxReadyAt := podConditionTransitionTime(pod, corev1.PodReadyToStartContainers)
+	procdStartedAt := podContainerStartedAt(pod, "procd")
+	startupProbeReadyAt := podConditionTransitionTime(pod, v1alpha1.SandboxPodStartupConditionType)
+	readinessProbeReadyAt := podConditionTransitionTime(pod, v1alpha1.SandboxPodReadinessConditionType)
+
+	t.observeStage("created_to_scheduled", createdAt, scheduledAt)
+	t.observeStage("scheduled_to_sandbox_ready", scheduledAt, sandboxReadyAt)
+	t.observeStage("sandbox_ready_to_procd_started", sandboxReadyAt, procdStartedAt)
+	t.observeStage("procd_started_to_sandbox_startup_ready", procdStartedAt, startupProbeReadyAt)
+	t.observeStage("procd_started_to_sandbox_readiness_ready", procdStartedAt, readinessProbeReadyAt)
+	if strings.TrimSpace(pod.Status.PodIP) != "" {
+		t.observeStage("scheduled_to_pod_ip_observed", scheduledAt, observedAt)
+		t.observeStage("sandbox_ready_to_pod_ip_observed", sandboxReadyAt, observedAt)
+	}
+}
+
+func (t *podLifecycleStageTracker) observeClaimReady(pod *corev1.Pod) {
+	t.observeClaimReadyAt(pod, time.Now())
+}
+
+func (t *podLifecycleStageTracker) observeClaimReadyAt(pod *corev1.Pod, observedAt time.Time) {
+	if t == nil || pod == nil {
+		return
+	}
+	t.observePodAt(pod, observedAt)
+	t.observeStage("procd_started_to_claim_ready_observed", podContainerStartedAt(pod, "procd"), observedAt)
+}
+
+func (t *podLifecycleStageTracker) observeStage(stage string, startedAt, finishedAt time.Time) {
+	if t == nil || t.service == nil || startedAt.IsZero() || finishedAt.IsZero() {
+		return
+	}
+	if _, ok := t.recorded[stage]; ok {
+		return
+	}
+	duration := finishedAt.Sub(startedAt)
+	if duration < 0 {
+		duration = 0
+	}
+	t.recorded[stage] = struct{}{}
+	t.service.observePodLifecycleStageDuration(t.template, stage, duration)
+}
+
+func (s *SandboxService) observePodLifecycleStageDuration(template, stage string, duration time.Duration) {
+	if s == nil || s.metrics == nil || s.metrics.PodLifecycleStageDuration == nil {
+		return
+	}
+	if template == "" {
+		template = "unknown"
+	}
+	if stage == "" {
+		stage = "unknown"
+	}
+	if duration < 0 {
+		duration = 0
+	}
+	s.metrics.PodLifecycleStageDuration.WithLabelValues(template, stage).Observe(duration.Seconds())
+}
+
+func podConditionTransitionTime(pod *corev1.Pod, conditionType corev1.PodConditionType) time.Time {
+	if pod == nil {
+		return time.Time{}
+	}
+	for i := range pod.Status.Conditions {
+		condition := &pod.Status.Conditions[i]
+		if condition.Type == conditionType && condition.Status == corev1.ConditionTrue {
+			return condition.LastTransitionTime.Time
+		}
+	}
+	return time.Time{}
+}
+
+func podContainerStartedAt(pod *corev1.Pod, containerName string) time.Time {
+	if pod == nil {
+		return time.Time{}
+	}
+	for i := range pod.Status.ContainerStatuses {
+		status := &pod.Status.ContainerStatuses[i]
+		if status.Name == containerName && status.State.Running != nil {
+			return status.State.Running.StartedAt.Time
+		}
+	}
+	return time.Time{}
 }
 
 func isTerminalPodNetworkIdentityReason(reason string) bool {

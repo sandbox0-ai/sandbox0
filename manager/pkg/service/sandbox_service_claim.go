@@ -467,6 +467,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		return nil, fmt.Errorf("claim idle pod: %w", err)
 	}
 	claimType := "hot"
+	var lifecycleTracker *podLifecycleStageTracker
 
 	// If no idle pod available, create a new one (cold start)
 	if pod == nil {
@@ -496,6 +497,8 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 			}
 			return nil, fmt.Errorf("create new pod: %w", err)
 		}
+		lifecycleTracker = newPodLifecycleStageTracker(s, req.Template)
+		lifecycleTracker.observePod(pod)
 
 		// Note: Network policies are stored in pod annotations.
 		// They are set in claimIdlePod() and createNewPod() methods. Hot claims have
@@ -504,7 +507,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		// patch the applied policy hash.
 		if s.networkProvider != nil {
 			phaseStarted = time.Now()
-			networkPod, err := s.waitForPodNetworkIdentity(ctx, req.Template, pod.Namespace, pod.Name)
+			networkPod, err := s.waitForPodNetworkIdentityTracked(ctx, req.Template, pod.Namespace, pod.Name, lifecycleTracker)
 			s.observeClaimPhase(req.Template, claimType, "wait_for_pod_network_identity", phaseStarted, err)
 			if err != nil {
 				s.requestSandboxDeletionAfterClaimFailure(pod, "network identity readiness failed")
@@ -528,7 +531,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		}
 
 		phaseStarted = time.Now()
-		readyPod, err := s.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
+		readyPod, err := s.waitForPodClaimReadyTracked(ctx, pod.Namespace, pod.Name, lifecycleTracker)
 		s.observeClaimPhase(req.Template, claimType, "wait_for_pod_claim_ready", phaseStarted, err)
 		if err != nil {
 			s.requestSandboxDeletionAfterClaimFailure(pod, "claim readiness failed")

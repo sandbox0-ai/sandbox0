@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -24,6 +25,8 @@ import (
 type recordingAuditWriter struct {
 	events []sandboxobservability.Event
 	err    error
+	calls  int
+	onCall func(int)
 }
 
 type failAfterAuditWriter struct {
@@ -73,6 +76,10 @@ func (*failAfterAuditWriter) InsertRuntimeSamples(context.Context, []sandboxobse
 }
 
 func (w *recordingAuditWriter) InsertEvents(_ context.Context, events []sandboxobservability.Event) error {
+	w.calls++
+	if w.onCall != nil {
+		w.onCall(w.calls)
+	}
 	if w.err != nil {
 		return w.err
 	}
@@ -95,6 +102,50 @@ func mustNewAuditDelivery(t *testing.T, writer sandboxobservability.Writer) *aud
 		t.Fatalf("newAuditDelivery() error = %v", err)
 	}
 	return delivery
+}
+
+func assertFailedAuditAdmissionPair(t *testing.T, key ed25519.PrivateKey, events []sandboxobservability.Event) (sandboxobservability.Event, sandboxobservability.Event) {
+	t.Helper()
+	if len(events) != 2 {
+		t.Fatalf("durable admission events = %#v, want attempt and failed result", events)
+	}
+	byPhase := make(map[sandboxobservability.EventPhase]sandboxobservability.Event, len(events))
+	for _, event := range events {
+		byPhase[event.Phase] = event
+	}
+	attempt, attemptOK := byPhase[sandboxobservability.EventPhaseAttempt]
+	result, resultOK := byPhase[sandboxobservability.EventPhaseResult]
+	if !attemptOK || !resultOK || result.ParentEventID != attempt.EventID {
+		t.Fatalf("durable admission phases = %#v", events)
+	}
+	if result.EventID == attempt.EventID || result.OperationID != attempt.OperationID || result.Action != attempt.Action || result.Resource != attempt.Resource || result.Actor != attempt.Actor {
+		t.Fatalf("failed admission correlation = attempt %#v, result %#v", attempt, result)
+	}
+	if result.TeamID != attempt.TeamID || result.SandboxID != attempt.SandboxID || result.RegionID != attempt.RegionID || result.ClusterID != attempt.ClusterID {
+		t.Fatalf("failed admission scope = attempt %#v, result %#v", attempt, result)
+	}
+	if result.Request.RequestID != attempt.Request.RequestID || result.Request.TraceID != attempt.Request.TraceID || result.Request.SourceIP != attempt.Request.SourceIP || result.Request.UserAgent != attempt.Request.UserAgent || result.Request.HTTPMethod != attempt.Request.HTTPMethod || result.Request.Route != attempt.Request.Route {
+		t.Fatalf("failed admission request correlation = attempt %#v, result %#v", attempt.Request, result.Request)
+	}
+	if result.Outcome != sandboxobservability.OutcomeFailed || result.Request.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("failed admission result = %#v", result)
+	}
+	for attribute, want := range map[string]any{
+		"execution_started":  false,
+		"failure_code":       "canonical_ack_unavailable",
+		"failure_stage":      "canonical_audit_admission",
+		"operation_executed": false,
+	} {
+		if got := result.Attributes[attribute]; got != want {
+			t.Fatalf("result attribute %s = %#v, want %#v", attribute, got, want)
+		}
+	}
+	for _, event := range events {
+		if err := sandboxobservability.VerifyEventIntegrity(event, key.Public().(ed25519.PublicKey)); err != nil {
+			t.Fatalf("VerifyEventIntegrity() error = %v", err)
+		}
+	}
+	return attempt, result
 }
 
 func TestSandboxAuditMiddlewarePersistsTrustedAttemptAndResult(t *testing.T) {
@@ -243,12 +294,13 @@ func TestSandboxAuditMiddlewareMutationRemainsCanonicalWithDefaultMode(t *testin
 	gin.SetMode(gin.TestMode)
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	writer := &recordingAuditWriter{err: errors.New("clickhouse unavailable")}
+	delivery := mustNewAuditDelivery(t, writer)
 	server := &Server{
 		cfg: &config.ClusterGatewayConfig{
 			SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true},
 		},
 		auditSigningKey: key,
-		auditDelivery:   mustNewAuditDelivery(t, writer),
+		auditDelivery:   delivery,
 		logger:          zap.NewNop(),
 	}
 	called := false
@@ -272,6 +324,149 @@ func TestSandboxAuditMiddlewareMutationRemainsCanonicalWithDefaultMode(t *testin
 	}
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", recorder.Code)
+	}
+	events, err := delivery.loadLocked()
+	if err != nil {
+		t.Fatalf("loadLocked() error = %v", err)
+	}
+	attempt, _ := assertFailedAuditAdmissionPair(t, key, events)
+	if writer.calls != 1 {
+		t.Fatalf("canonical writer calls = %d, want only the attempt call", writer.calls)
+	}
+	for _, fragment := range []string{
+		`"audit_attempt":"pending"`,
+		`"audit_result":"captured"`,
+		`"execution_started":false`,
+		`"failure_code":"canonical_ack_unavailable"`,
+		attempt.OperationID,
+	} {
+		if !strings.Contains(recorder.Body.String(), fragment) {
+			t.Fatalf("response body %s missing %q", recorder.Body.String(), fragment)
+		}
+	}
+}
+
+func TestSandboxAuditMiddlewareInitialAttemptUnrecordedDoesNotFabricateResult(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	writer := &recordingAuditWriter{err: errors.New("clickhouse unavailable")}
+	dir := t.TempDir()
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop())
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+	replaceAuditSpoolDirectoryWithFile(t, dir)
+	server := &Server{
+		cfg:             &config.ClusterGatewayConfig{SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true}},
+		auditSigningKey: key, auditDelivery: delivery, logger: zap.NewNop(),
+	}
+	called := false
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Request = c.Request.WithContext(authn.WithAuthContext(c.Request.Context(), &authn.AuthContext{
+			AuthMethod: authn.AuthMethodJWT, TeamID: "team-1", UserID: "user-1",
+		}))
+		c.Next()
+	})
+	router.DELETE("/api/v1/sandboxes/:id", server.auditSandboxRequests(), func(c *gin.Context) {
+		called = true
+		c.Status(http.StatusNoContent)
+	})
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodDelete, "/api/v1/sandboxes/sb-1", nil))
+	if called {
+		t.Fatal("operation handler ran after an unrecorded audit attempt")
+	}
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", recorder.Code)
+	}
+	if writer.calls != 1 {
+		t.Fatalf("canonical writer calls = %d, want only the unrecorded attempt", writer.calls)
+	}
+	for _, fragment := range []string{`"audit_attempt":"unrecorded"`, `"audit_result":"unrecorded"`} {
+		if !strings.Contains(recorder.Body.String(), fragment) {
+			t.Fatalf("response body %s missing %q", recorder.Body.String(), fragment)
+		}
+	}
+}
+
+func TestSandboxAuditMiddlewareAdmissionResultSpoolAndFallbackFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	dir := t.TempDir()
+	backupDir := dir + "-attempt"
+	var hookErr error
+	writer := &recordingAuditWriter{err: errors.New("clickhouse unavailable")}
+	writer.onCall = func(call int) {
+		if call != 1 {
+			return
+		}
+		if hookErr = os.Rename(dir, backupDir); hookErr != nil {
+			return
+		}
+		hookErr = os.WriteFile(dir, []byte("not a directory"), 0o600)
+	}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop())
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+	server := &Server{
+		cfg:             &config.ClusterGatewayConfig{SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true}},
+		auditSigningKey: key, auditDelivery: delivery, logger: zap.NewNop(),
+	}
+	called := false
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Request = c.Request.WithContext(authn.WithAuthContext(c.Request.Context(), &authn.AuthContext{
+			AuthMethod: authn.AuthMethodJWT, TeamID: "team-1", UserID: "user-1",
+		}))
+		c.Next()
+	})
+	router.DELETE("/api/v1/sandboxes/:id", server.auditSandboxRequests(), func(c *gin.Context) {
+		called = true
+		c.Status(http.StatusNoContent)
+	})
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodDelete, "/api/v1/sandboxes/sb-1", nil))
+	if hookErr != nil {
+		t.Fatalf("spool failure hook error = %v", hookErr)
+	}
+	if called {
+		t.Fatal("operation handler ran after the admission result became unrecorded")
+	}
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", recorder.Code)
+	}
+	if writer.calls != 2 {
+		t.Fatalf("canonical writer calls = %d, want attempt and result fallback", writer.calls)
+	}
+	for _, fragment := range []string{`"audit_attempt":"pending"`, `"audit_result":"unrecorded"`} {
+		if !strings.Contains(recorder.Body.String(), fragment) {
+			t.Fatalf("response body %s missing %q", recorder.Body.String(), fragment)
+		}
+	}
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		t.Fatalf("ReadDir(%q) error = %v", backupDir, err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("preserved attempt entries = %d, want 1", len(entries))
+	}
+	raw, err := os.ReadFile(backupDir + "/" + entries[0].Name())
+	if err != nil {
+		t.Fatalf("ReadFile(preserved attempt) error = %v", err)
+	}
+	var attempt sandboxobservability.Event
+	if err := json.Unmarshal(raw, &attempt); err != nil {
+		t.Fatalf("decode preserved attempt: %v", err)
+	}
+	if attempt.Phase != sandboxobservability.EventPhaseAttempt {
+		t.Fatalf("preserved event phase = %q, want attempt", attempt.Phase)
+	}
+	if err := sandboxobservability.VerifyEventIntegrity(attempt, key.Public().(ed25519.PublicKey)); err != nil {
+		t.Fatalf("VerifyEventIntegrity(preserved attempt) error = %v", err)
 	}
 }
 
@@ -346,6 +541,13 @@ func TestSandboxAuditAttemptBoundsBlockingCanonicalWriter(t *testing.T) {
 			}
 			if recorder.Code != http.StatusServiceUnavailable {
 				t.Fatalf("status = %d, want 503", recorder.Code)
+			}
+			if !tc.breakSpool {
+				events, err := delivery.loadLocked()
+				if err != nil {
+					t.Fatalf("loadLocked() error = %v", err)
+				}
+				assertFailedAuditAdmissionPair(t, key, events)
 			}
 		})
 	}
@@ -429,6 +631,14 @@ func TestSandboxAuditMiddlewareGETCanonicalSyncOverrideFailsClosed(t *testing.T)
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("strict GET status = %d, want 503", recorder.Code)
 	}
+	events, err := delivery.loadLocked()
+	if err != nil {
+		t.Fatalf("loadLocked() error = %v", err)
+	}
+	assertFailedAuditAdmissionPair(t, key, events)
+	if writer.calls != 1 {
+		t.Fatalf("canonical writer calls = %d, want only the attempt call", writer.calls)
+	}
 }
 
 func TestPublicExposureAuditUsesDurableAsyncWhenClickHouseIsDown(t *testing.T) {
@@ -467,6 +677,55 @@ func TestPublicExposureAuditUsesDurableAsyncWhenClickHouseIsDown(t *testing.T) {
 	}
 	if len(events) != 2 {
 		t.Fatalf("public exposure durable events = %#v, want attempt and result", events)
+	}
+}
+
+func TestPublicExposureAuditCanonicalSyncFailureRecordsFailedResult(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	writer := &recordingAuditWriter{err: errors.New("clickhouse unavailable")}
+	delivery := mustNewAuditDelivery(t, writer)
+	server := &Server{
+		cfg: &config.ClusterGatewayConfig{
+			GatewayConfig: config.GatewayConfig{RegionID: "region-1"},
+			ClusterID:     "cluster-1",
+			SandboxObservability: config.SandboxObservabilityConfig{
+				AuditEnabled:      true,
+				AuditDeliveryMode: sandboxobservability.AuditDeliveryModeCanonicalSync,
+			},
+		},
+		auditSigningKey: key, auditDelivery: delivery, logger: zap.NewNop(),
+	}
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "http://sandbox.example/api", nil)
+	finish, ok := server.beginExposureAudit(c,
+		&mgr.Sandbox{ID: "sb-1", TeamID: "team-1"},
+		&mgr.SandboxAppService{ID: "service-1"},
+		&mgr.SandboxAppServiceRoute{ID: "route-1", PathPrefix: "/api"},
+	)
+	if ok {
+		t.Fatal("beginExposureAudit() admitted invocation without canonical acknowledgement")
+	}
+	finish()
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("public exposure response = %d %s", recorder.Code, recorder.Body.String())
+	}
+	events, err := delivery.loadLocked()
+	if err != nil {
+		t.Fatalf("loadLocked() error = %v", err)
+	}
+	attempt, result := assertFailedAuditAdmissionPair(t, key, events)
+	if attempt.Action != "sandbox.service.invoke" || result.Resource.Type != "sandbox_service" {
+		t.Fatalf("public exposure admission pair = attempt %#v, result %#v", attempt, result)
+	}
+	if writer.calls != 1 {
+		t.Fatalf("canonical writer calls = %d, want only the attempt call", writer.calls)
+	}
+	for _, fragment := range []string{`"audit_attempt":"pending"`, `"audit_result":"captured"`, attempt.OperationID} {
+		if !strings.Contains(recorder.Body.String(), fragment) {
+			t.Fatalf("response body %s missing %q", recorder.Body.String(), fragment)
+		}
 	}
 }
 

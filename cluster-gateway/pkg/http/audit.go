@@ -119,9 +119,24 @@ func (s *Server) auditSandboxRequests() gin.HandlerFunc {
 			cancel()
 		}
 		if err != nil {
-			s.logger.Error("Failed to persist sandbox audit attempt", zap.String("action", action), zap.Error(err))
-			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox audit is unavailable; operation was not executed")
 			c.Abort()
+			auditAttemptState := "unrecorded"
+			auditResultState := "unrecorded"
+			if errors.Is(err, errAuditDeliveryPending) {
+				auditAttemptState = "pending"
+				if resultErr := s.persistFailedAuditAdmission(c, attempt); resultErr != nil {
+					s.logger.Error("Failed to persist rejected sandbox audit result",
+						zap.String("action", action),
+						zap.String("operation_id", operationID),
+						zap.String("attempt_event_id", attempt.EventID),
+						zap.Error(resultErr),
+					)
+				} else {
+					auditResultState = "captured"
+				}
+			}
+			s.logger.Error("Failed to persist sandbox audit attempt", zap.String("action", action), zap.Error(err))
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox audit is unavailable; operation was not executed", failedAuditAdmissionDetails(operationID, auditAttemptState, auditResultState))
 			return
 		}
 
@@ -254,6 +269,49 @@ func (s *Server) deliverAuditEvent(ctx context.Context, event sandboxobservabili
 		return s.auditDelivery.PersistCanonical(ctx, event)
 	}
 	return s.auditDelivery.EnqueueDurable(ctx, event)
+}
+
+func (s *Server) persistFailedAuditAdmission(c *gin.Context, attempt sandboxobservability.Event) error {
+	now := time.Now().UTC()
+	result := attempt
+	result.EventID = uuid.NewString()
+	result.OccurredAt = now
+	result.IngestedAt = now
+	result.Phase = sandboxobservability.EventPhaseResult
+	result.Outcome = sandboxobservability.OutcomeFailed
+	result.ParentEventID = attempt.EventID
+	result.Request.StatusCode = http.StatusServiceUnavailable
+	result.Cursor = result.EventID
+	result.Watermark = result.EventID
+	result.Attributes = failedAuditAdmissionAttributes()
+	if err := sandboxobservability.SignEvent(&result, s.auditSigningKey); err != nil {
+		return fmt.Errorf("sign failed audit admission result: %w", err)
+	}
+	resultCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), auditCanonicalDeliveryTimeout)
+	defer cancel()
+	return s.auditDelivery.EnqueueDurable(resultCtx, result)
+}
+
+func failedAuditAdmissionAttributes() map[string]any {
+	return map[string]any{
+		"execution_started":  false,
+		"failure_code":       "canonical_ack_unavailable",
+		"failure_stage":      "canonical_audit_admission",
+		"operation_executed": false,
+	}
+}
+
+func failedAuditAdmissionDetails(operationID, auditAttemptState, auditResultState string) gin.H {
+	return gin.H{
+		"audit_attempt":      auditAttemptState,
+		"audit_result":       auditResultState,
+		"execution_started":  false,
+		"failure_code":       "canonical_ack_unavailable",
+		"failure_stage":      "canonical_audit_admission",
+		"operation_executed": false,
+		"operation_id":       operationID,
+		"outcome":            sandboxobservability.OutcomeFailed,
+	}
 }
 
 func (s *Server) newSandboxAPIEvent(c *gin.Context, authCtx *gatewayauthn.AuthContext, action, operationID, parentEventID string, phase sandboxobservability.EventPhase, outcome sandboxobservability.Outcome) (sandboxobservability.Event, error) {
@@ -530,8 +588,23 @@ func (s *Server) beginExposureAudit(c *gin.Context, sandbox *mgr.Sandbox, servic
 		cancel()
 	}
 	if err != nil {
+		c.Abort()
+		auditAttemptState := "unrecorded"
+		auditResultState := "unrecorded"
+		if errors.Is(err, errAuditDeliveryPending) {
+			auditAttemptState = "pending"
+			if resultErr := s.persistFailedAuditAdmission(c, attempt); resultErr != nil {
+				s.logger.Error("Failed to persist rejected public exposure audit result",
+					zap.String("operation_id", operationID),
+					zap.String("attempt_event_id", attempt.EventID),
+					zap.Error(resultErr),
+				)
+			} else {
+				auditResultState = "captured"
+			}
+		}
 		s.logger.Error("Failed to persist public exposure audit attempt", zap.Error(err))
-		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox audit is unavailable; invocation was not executed")
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox audit is unavailable; invocation was not executed", failedAuditAdmissionDetails(operationID, auditAttemptState, auditResultState))
 		return noop, false
 	}
 	return func() {

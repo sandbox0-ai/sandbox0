@@ -11,7 +11,8 @@ of both processes.
 - A portal is HA-ready only after a standby holds a cloned channel for the same
   kernel FUSE connection and the corresponding recovery manifest.
 - The primary is the only process that binds the CSI socket, serves the node
-  control port, heartbeats volume ownership, or opens a writable S0FS engine.
+  control port, exposes the kubelet plugin-registration socket, heartbeats
+  volume ownership, or opens a writable S0FS engine.
 - Promotion starts only after the previous primary has been fenced by release
   of the kernel-backed primary lock.
 - A returning process joins as a standby. Role changes never perform automatic
@@ -22,15 +23,23 @@ of both processes.
 ## Process layout
 
 Two independent DaemonSets, `ctld-a` and `ctld-b`, provide the stable slots.
-Slot A carries the CSI node-driver registrar sidecar; the registrar always
-connects to the node-local CSI socket served by whichever slot is primary. The
-slots share `/var/lib/sandbox0/ctld`, `/var/lib/kubelet`, and the containerd host
-mounts, but have independent Pod lifecycles.
+Both slots run the same single ctld container. The elected primary owns both the
+node-local CSI socket and the kubelet plugin-registration socket; the standby
+owns neither. The slots share `/var/lib/sandbox0/ctld`, `/var/lib/kubelet`, and
+the containerd host mounts, but have independent Pod lifecycles.
 
 Each slot attempts a non-blocking exclusive lock on
 `/var/lib/sandbox0/ctld/ha/primary.lock`. The winner increments the persisted
 epoch and starts active services. A synchronized standby waits for the lock;
 acquiring it is the fencing boundary for promotion.
+
+The primary creates the CSI socket before advertising its registration socket.
+It becomes ready only after kubelet validates the CSI endpoint and reports a
+successful registration. On graceful shutdown it removes the registration
+socket before releasing the primary lease. After a crash, the promoted process
+removes the stale socket after acquiring the lock and registers again. Existing
+mounts continue through the cloned FUSE channels, while new publish operations
+resume through the promoted primary and may need to retry during the handoff.
 
 ## Portal handoff
 
@@ -79,6 +88,11 @@ primary accepts multiple synchronized receivers only during these overlapping
 rollouts; steady state remains one primary and one standby. If multiple
 receivers observe primary loss, the flock and epoch admit one winner while the
 others discard their old clones and resynchronize from the winner.
+
+A sandbox node is advertised as data-plane ready only when both distinct HA
+slots are ready and the node's `CSINode` object contains `volume.sandbox0.ai`.
+This prevents scheduling onto a synchronized standby before the active process
+has completed kubelet registration.
 
 The first upgrade from the historical single-process ctld requires a controlled
 sandbox drain. The old process cannot transfer existing FUSE connections because

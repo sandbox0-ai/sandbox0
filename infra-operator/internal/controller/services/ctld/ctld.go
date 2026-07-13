@@ -24,6 +24,7 @@ import (
 	sandboxobssvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sandboxobservability"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storage"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
+	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 )
@@ -41,8 +42,9 @@ const (
 	ctldTerminationGraceSeconds    = int64(45)
 	ctldCPURequest                 = "250m"
 	ctldMemoryRequest              = "256Mi"
-	ctldHASlotLabel                = "sandbox0.ai/ctld-ha-slot"
 	ctldHAProbeSocket              = "/run/sandbox0/ctld-ha.sock"
+	ctldKubeletRegistrationSocket  = "/var/lib/kubelet/plugins_registry/" + volumeportal.DriverName + "-reg.sock"
+	ctldKubeletCSIEndpoint         = "/var/lib/kubelet/plugins/" + volumeportal.DriverName + "/csi.sock"
 )
 
 func NewReconciler(resources *common.ResourceManager) *Reconciler {
@@ -119,15 +121,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			VolumeSource: corev1.VolumeSource{
 				HostPath: &corev1.HostPathVolumeSource{
 					Path: "/var/lib/kubelet/plugins/volume.sandbox0.ai",
-					Type: &hostPathDirectoryOrCreate,
-				},
-			},
-		},
-		{
-			Name: "plugin-registration",
-			VolumeSource: corev1.VolumeSource{
-				HostPath: &corev1.HostPathVolumeSource{
-					Path: "/var/lib/kubelet/plugins_registry",
 					Type: &hostPathDirectoryOrCreate,
 				},
 			},
@@ -211,7 +204,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if err := r.removeLegacyDaemonSet(ctx, infra, name); err != nil {
 		return err
 	}
-	for _, slot := range []string{"a", "b"} {
+	for _, slot := range []string{dataplane.CtldHASlotA, dataplane.CtldHASlotB} {
 		desired := buildCtldDaemonSet(ctldDaemonSetConfig{
 			Name:                    name,
 			Namespace:               infra.Namespace,
@@ -227,7 +220,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			VolumeMounts:            volumeMounts,
 			Volumes:                 volumes,
 			Infra:                   infra,
-			IncludeRegistrar:        slot == "a",
 		})
 		if err := r.Resources.ApplyDaemonSet(ctx, infra, desired); err != nil {
 			return err
@@ -251,7 +243,6 @@ type ctldDaemonSetConfig struct {
 	VolumeMounts            []corev1.VolumeMount
 	Volumes                 []corev1.Volume
 	Infra                   *infrav1alpha1.Sandbox0Infra
-	IncludeRegistrar        bool
 }
 
 func buildCtldDaemonSet(cfg ctldDaemonSetConfig) *appsv1.DaemonSet {
@@ -259,12 +250,14 @@ func buildCtldDaemonSet(cfg ctldDaemonSetConfig) *appsv1.DaemonSet {
 	for key, value := range cfg.Labels {
 		labels[key] = value
 	}
-	labels[ctldHASlotLabel] = cfg.Slot
+	labels[dataplane.CtldHASlotLabel] = cfg.Slot
 	args := append([]string(nil), cfg.Args...)
 	args = append(args,
 		"-ha-enabled=true",
 		"-ha-slot="+cfg.Slot,
 		"-ha-probe-socket="+ctldHAProbeSocket,
+		"-kubelet-registration-socket="+ctldKubeletRegistrationSocket,
+		"-kubelet-registration-endpoint="+ctldKubeletCSIEndpoint,
 	)
 	probeCommand := func(kind string) []string {
 		return []string{
@@ -312,30 +305,8 @@ func buildCtldDaemonSet(cfg ctldDaemonSetConfig) *appsv1.DaemonSet {
 		}},
 		VolumeMounts: cfg.VolumeMounts,
 	}
-	containers := []corev1.Container{ctldContainer}
-	if cfg.IncludeRegistrar {
-		containers = append(containers, corev1.Container{
-			Name:            "csi-node-driver-registrar",
-			Image:           "registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0",
-			ImagePullPolicy: corev1.PullIfNotPresent,
-			Args: []string{
-				"--csi-address=/csi/csi.sock",
-				"--kubelet-registration-path=/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock",
-			},
-			VolumeMounts: []corev1.VolumeMount{
-				{Name: "csi-plugin", MountPath: "/csi"},
-				{Name: "plugin-registration", MountPath: "/registration"},
-			},
-		})
-	}
 	maxUnavailable := intstr.FromInt(0)
 	maxSurge := intstr.FromInt(1)
-	if cfg.IncludeRegistrar {
-		// The registrar owns one node-global socket. If slot A surges, the old
-		// sidecar can unlink the new sidecar's socket while it terminates.
-		maxUnavailable = intstr.FromInt(1)
-		maxSurge = intstr.FromInt(0)
-	}
 	return &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{Name: cfg.Name + "-" + cfg.Slot, Namespace: cfg.Namespace},
 		Spec: appsv1.DaemonSetSpec{
@@ -358,7 +329,7 @@ func buildCtldDaemonSet(cfg ctldDaemonSetConfig) *appsv1.DaemonSet {
 					HostNetwork:                   true,
 					DNSPolicy:                     corev1.DNSClusterFirstWithHostNet,
 					TerminationGracePeriodSeconds: &cfg.TerminationGraceSeconds,
-					Containers:                    containers,
+					Containers:                    []corev1.Container{ctldContainer},
 					Volumes:                       cfg.Volumes,
 				},
 			},

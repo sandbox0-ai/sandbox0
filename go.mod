@@ -67,7 +67,8 @@ require (
 	k8s.io/api v0.35.0
 	k8s.io/apimachinery v0.35.0
 	k8s.io/client-go v0.35.0
-	k8s.io/cri-api v0.34.1
+	k8s.io/cri-api v0.35.0
+	k8s.io/kubelet v0.35.0
 	sigs.k8s.io/controller-runtime v0.23.0
 	sigs.k8s.io/yaml v1.6.0
 	src.agwa.name/tlshacks v0.0.0-20231008131857-90d701ba3225

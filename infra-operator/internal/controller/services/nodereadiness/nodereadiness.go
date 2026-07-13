@@ -5,12 +5,14 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 )
 
 const (
@@ -56,7 +58,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return fmt.Errorf("list data-plane daemon pods: %w", err)
 	}
 	netdReadyByNode := readyPodsByNode(podList.Items, "netd")
-	ctldReadyByNode := readyPodsByNode(podList.Items, "ctld")
+	ctldReadyByNode := readyCtldPodsByNode(podList.Items)
+	csiRegisteredByNode := make(map[string]bool)
+	if requireCtld {
+		csiNodeList := &storagev1.CSINodeList{}
+		if err := r.Resources.Client.List(ctx, csiNodeList); err != nil {
+			return fmt.Errorf("list CSI nodes: %w", err)
+		}
+		csiRegisteredByNode = registeredCSIDriverByNode(csiNodeList.Items, volumeportal.DriverName)
+	}
 
 	nodeList := &corev1.NodeList{}
 	if err := r.Resources.Client.List(ctx, nodeList); err != nil {
@@ -73,7 +83,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		matchedNodes++
 
 		netdReady := !requireNetd || netdReadyByNode[node.Name]
-		ctldReady := !requireCtld || ctldReadyByNode[node.Name]
+		ctldReady := !requireCtld || (ctldReadyByNode[node.Name] && csiRegisteredByNode[node.Name])
 		ready := netdReady && ctldReady
 		if ready {
 			readyNodes++
@@ -135,6 +145,48 @@ func readyPodsByNode(pods []corev1.Pod, component string) map[string]bool {
 		}
 	}
 	return out
+}
+
+// readyCtldPodsByNode requires one ready pod from each HA slot. A synchronized
+// standby can become ready before the active ctld has completed kubelet CSI
+// registration, so a single ready ctld pod is not a sufficient node signal.
+func readyCtldPodsByNode(pods []corev1.Pod) map[string]bool {
+	readySlotsByNode := make(map[string]map[string]struct{})
+	for i := range pods {
+		pod := &pods[i]
+		if pod.Spec.NodeName == "" || pod.Labels[labelComponent] != "ctld" || !podReady(pod) {
+			continue
+		}
+		slot := pod.Labels[dataplane.CtldHASlotLabel]
+		if slot != dataplane.CtldHASlotA && slot != dataplane.CtldHASlotB {
+			continue
+		}
+		if readySlotsByNode[pod.Spec.NodeName] == nil {
+			readySlotsByNode[pod.Spec.NodeName] = make(map[string]struct{}, 2)
+		}
+		readySlotsByNode[pod.Spec.NodeName][slot] = struct{}{}
+	}
+	readyByNode := make(map[string]bool, len(readySlotsByNode))
+	for nodeName, slots := range readySlotsByNode {
+		_, slotAReady := slots[dataplane.CtldHASlotA]
+		_, slotBReady := slots[dataplane.CtldHASlotB]
+		readyByNode[nodeName] = slotAReady && slotBReady
+	}
+	return readyByNode
+}
+
+func registeredCSIDriverByNode(csiNodes []storagev1.CSINode, driverName string) map[string]bool {
+	registeredByNode := make(map[string]bool)
+	for i := range csiNodes {
+		csiNode := &csiNodes[i]
+		for _, driver := range csiNode.Spec.Drivers {
+			if driver.Name == driverName {
+				registeredByNode[csiNode.Name] = true
+				break
+			}
+		}
+	}
+	return registeredByNode
 }
 
 func podReady(pod *corev1.Pod) bool {

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -16,6 +17,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 )
 
 func TestReconcileLabelsNodesFromComponentReadiness(t *testing.T) {
@@ -28,9 +30,13 @@ func TestReconcileLabelsNodesFromComponentReadiness(t *testing.T) {
 		nodeB,
 		nodeSystem,
 		newNodeReadinessPod(infra.Namespace, infra.Name, "netd", "netd-a", "node-a", true),
-		newNodeReadinessPod(infra.Namespace, infra.Name, "ctld", "ctld-a", "node-a", true),
+		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-a-a", "node-a", dataplane.CtldHASlotA, true),
+		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-a-b", "node-a", dataplane.CtldHASlotB, true),
+		newNodeReadinessCSINode("node-a", true),
 		newNodeReadinessPod(infra.Namespace, infra.Name, "netd", "netd-b", "node-b", true),
-		newNodeReadinessPod(infra.Namespace, infra.Name, "ctld", "ctld-b", "node-b", false),
+		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-b-a", "node-b", dataplane.CtldHASlotA, true),
+		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-b-b", "node-b", dataplane.CtldHASlotB, false),
+		newNodeReadinessCSINode("node-b", true),
 	)
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
 
@@ -82,7 +88,9 @@ func TestReconcileDeletesDisabledComponentReadinessLabels(t *testing.T) {
 	})
 	client, scheme := newNodeReadinessClient(t,
 		node,
-		newNodeReadinessPod(infra.Namespace, infra.Name, "ctld", "ctld-a", "node-a", true),
+		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-a-a", "node-a", dataplane.CtldHASlotA, true),
+		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-a-b", "node-a", dataplane.CtldHASlotB, true),
+		newNodeReadinessCSINode("node-a", true),
 	)
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
 
@@ -99,6 +107,41 @@ func TestReconcileDeletesDisabledComponentReadinessLabels(t *testing.T) {
 	}
 	if got := gotNode.Labels[dataplane.NodeCtldReadyLabel]; got != dataplane.ReadyLabelValue {
 		t.Fatalf("ctld label = %q, want %q", got, dataplane.ReadyLabelValue)
+	}
+}
+
+func TestReconcileRequiresKubeletCSIRegistration(t *testing.T) {
+	infra := newNodeReadinessInfra()
+	node := newNodeReadinessNode("node-a", map[string]string{"sandbox0.ai/node-role": "sandbox"})
+	client, scheme := newNodeReadinessClient(t,
+		node,
+		newNodeReadinessPod(infra.Namespace, infra.Name, "netd", "netd-a", "node-a", true),
+		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-a", "node-a", dataplane.CtldHASlotA, true),
+		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-b", "node-a", dataplane.CtldHASlotB, true),
+		newNodeReadinessCSINode("node-a", false),
+	)
+	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
+
+	if err := reconciler.Reconcile(context.Background(), infra, infraplan.Compile(infra)); err == nil {
+		t.Fatal("Reconcile() error = nil before kubelet CSI registration")
+	}
+	gotNode := getNodeReadinessNode(t, client, "node-a")
+	assertNodeReadinessLabels(t, gotNode, dataplane.NotReadyLabelValue, dataplane.ReadyLabelValue, dataplane.NotReadyLabelValue)
+}
+
+func TestReadyCtldPodsByNodeRequiresDistinctHASlots(t *testing.T) {
+	pods := []corev1.Pod{
+		*newNodeReadinessCtldPod("sandbox0-system", "demo", "ctld-a-1", "node-a", dataplane.CtldHASlotA, true),
+		*newNodeReadinessCtldPod("sandbox0-system", "demo", "ctld-a-2", "node-a", dataplane.CtldHASlotA, true),
+		*newNodeReadinessCtldPod("sandbox0-system", "demo", "ctld-b-a", "node-b", dataplane.CtldHASlotA, true),
+		*newNodeReadinessCtldPod("sandbox0-system", "demo", "ctld-b-b", "node-b", dataplane.CtldHASlotB, true),
+	}
+	readyByNode := readyCtldPodsByNode(pods)
+	if readyByNode["node-a"] {
+		t.Fatal("node-a is ready with two pods from the same ctld HA slot")
+	}
+	if !readyByNode["node-b"] {
+		t.Fatal("node-b is not ready with one ready pod from each ctld HA slot")
 	}
 }
 
@@ -128,6 +171,9 @@ func newNodeReadinessClient(t *testing.T, objects ...ctrlclient.Object) (ctrlcli
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add corev1 scheme: %v", err)
+	}
+	if err := storagev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add storagev1 scheme: %v", err)
 	}
 	if err := infrav1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add infra scheme: %v", err)
@@ -164,6 +210,23 @@ func newNodeReadinessPod(namespace, instance, component, name, nodeName string, 
 			}},
 		},
 	}
+}
+
+func newNodeReadinessCtldPod(namespace, instance, name, nodeName, slot string, ready bool) *corev1.Pod {
+	pod := newNodeReadinessPod(namespace, instance, "ctld", name, nodeName, ready)
+	pod.Labels[dataplane.CtldHASlotLabel] = slot
+	return pod
+}
+
+func newNodeReadinessCSINode(nodeName string, registered bool) *storagev1.CSINode {
+	csiNode := &storagev1.CSINode{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+	if registered {
+		csiNode.Spec.Drivers = []storagev1.CSINodeDriver{{
+			Name:   volumeportal.DriverName,
+			NodeID: nodeName,
+		}}
+	}
+	return csiNode
 }
 
 func getNodeReadinessNode(t *testing.T, client ctrlclient.Client, name string) *corev1.Node {

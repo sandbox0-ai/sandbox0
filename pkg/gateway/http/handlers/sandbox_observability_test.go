@@ -121,7 +121,7 @@ func TestSandboxObservabilityHandlerParsesTypedQuery(t *testing.T) {
 	}
 	handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
 
-	rec := serveSandboxObservabilityRequest(t, handler.ListEvents, "/api/v1/sandboxes/sb-1/observability/events?start_time="+start+"&end_time="+end+"&limit=5000&cursor=abc&source=netd&event_type=network_audit&outcome=denied")
+	rec := serveSandboxObservabilityRequest(t, handler.ListEvents, "/api/v1/sandboxes/sb-1/observability/events?start_time="+start+"&end_time="+end+"&limit=5000&cursor=abc&source=netd&event_type=network_audit&outcome=denied&actor_kind=human&actor_id=user-1&action=sandbox.pause&resource_type=sandbox&operation_id=operation-1")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -138,12 +138,144 @@ func TestSandboxObservabilityHandlerParsesTypedQuery(t *testing.T) {
 	if repo.lastQuery.Cursor != "abc" ||
 		repo.lastQuery.Source != sandboxobservability.SourceNetd ||
 		repo.lastQuery.EventType != sandboxobservability.EventTypeNetworkAudit ||
-		repo.lastQuery.Outcome != sandboxobservability.OutcomeDenied {
+		repo.lastQuery.Outcome != sandboxobservability.OutcomeDenied ||
+		repo.lastQuery.ActorKind != sandboxobservability.ActorKindHuman ||
+		repo.lastQuery.ActorID != "user-1" ||
+		repo.lastQuery.Action != "sandbox.pause" ||
+		repo.lastQuery.ResourceType != "sandbox" ||
+		repo.lastQuery.OperationID != "operation-1" {
 		t.Fatalf("unexpected query filters: %+v", repo.lastQuery)
 	}
 	if repo.lastQuery.StartTime == nil || repo.lastQuery.EndTime == nil {
 		t.Fatalf("expected time filters: %+v", repo.lastQuery)
 	}
+}
+
+func TestSandboxObservabilityHandlerReturnsInlineIntegrityStatus(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	valid := signedSandboxObservabilityTestEvent(t, key, "11111111-1111-4111-8111-111111111111", "sandbox.pause")
+	invalid := signedSandboxObservabilityTestEvent(t, key, "22222222-2222-4222-8222-222222222222", "sandbox.resume")
+	invalid.Action = "sandbox.delete"
+	conflictA := signedSandboxObservabilityTestEvent(t, key, "33333333-3333-4333-8333-333333333333", "sandbox.pause")
+	conflictB := signedSandboxObservabilityTestEvent(t, key, conflictA.EventID, "sandbox.resume")
+
+	repo := &fakeSandboxObservabilityRepo{eventsResult: &sandboxobservability.EventListResult{
+		Events: []sandboxobservability.Event{valid, invalid, conflictA, conflictB},
+	}}
+	handler := NewSandboxObservabilityHandler(repo, zap.NewNop(), WithAuditIngestPolicy(AuditIngestPolicy{
+		VerificationKey: key.Public().(ed25519.PublicKey),
+	}))
+	rec := serveSandboxObservabilityRequest(t, handler.ListEvents, "/api/v1/sandboxes/sb-1/observability/events")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var response struct {
+		Data sandboxobservability.EventListResult `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := response.Data.Events[0].Integrity.Status; got != "verified" {
+		t.Fatalf("valid status = %q, want verified", got)
+	}
+	if got := response.Data.Events[1].Integrity.Status; got != "invalid" {
+		t.Fatalf("tampered status = %q, want invalid", got)
+	}
+	for i := 2; i < 4; i++ {
+		if got := response.Data.Events[i].Integrity.Status; got != "conflict" {
+			t.Fatalf("conflict event %d status = %q, want conflict", i, got)
+		}
+	}
+}
+
+func TestSandboxObservabilityHandlerReportsUnavailableInlineVerification(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	event := signedSandboxObservabilityTestEvent(t, key, "44444444-4444-4444-8444-444444444444", "sandbox.pause")
+	repo := &fakeSandboxObservabilityRepo{eventsResult: &sandboxobservability.EventListResult{
+		Events: []sandboxobservability.Event{event},
+	}}
+	handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
+	rec := serveSandboxObservabilityRequest(t, handler.ListEvents, "/api/v1/sandboxes/sb-1/observability/events")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var response struct {
+		Data sandboxobservability.EventListResult `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := response.Data.Events[0].Integrity.Status; got != "unavailable" {
+		t.Fatalf("status = %q, want unavailable", got)
+	}
+}
+
+func TestSandboxObservabilityWatchReturnsInlineIntegrityStatus(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	event := signedSandboxObservabilityTestEvent(t, key, "55555555-5555-4555-8555-555555555555", "sandbox.pause")
+	handler := NewSandboxObservabilityHandler(&fakeSandboxObservabilityRepo{}, zap.NewNop(), WithAuditIngestPolicy(AuditIngestPolicy{
+		VerificationKey: key.Public().(ed25519.PublicKey),
+	}))
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/sb-1/observability/events?watch=true", nil)
+	result := &sandboxobservability.EventListResult{Events: []sandboxobservability.Event{event}}
+	opts := sandboxobservability.WatchOptions{Limit: 100}
+
+	handler.writeWatchEvents(c, json.NewEncoder(recorder), recorder, result, &opts)
+
+	var line sandboxObservabilityWatchLine
+	decoder := json.NewDecoder(recorder.Body)
+	if err := decoder.Decode(&line); err != nil {
+		t.Fatalf("decode watch event: %v", err)
+	}
+	encoded, err := json.Marshal(line.Data)
+	if err != nil {
+		t.Fatalf("marshal watch event: %v", err)
+	}
+	var watched sandboxobservability.Event
+	if err := json.Unmarshal(encoded, &watched); err != nil {
+		t.Fatalf("decode watched event: %v", err)
+	}
+	if watched.Integrity.Status != "verified" {
+		t.Fatalf("watch integrity status = %q, want verified", watched.Integrity.Status)
+	}
+}
+
+func signedSandboxObservabilityTestEvent(t *testing.T, key ed25519.PrivateKey, eventID, action string) sandboxobservability.Event {
+	t.Helper()
+	event := sandboxobservability.Event{
+		EventID:       eventID,
+		SchemaVersion: sandboxobservability.CurrentEventSchemaVersion,
+		TeamID:        "team-1",
+		SandboxID:     "sb-1",
+		RegionID:      "region-1",
+		ClusterID:     "cluster-1",
+		OccurredAt:    time.Date(2026, 7, 1, 1, 2, 3, 0, time.UTC),
+		IngestedAt:    time.Date(2026, 7, 1, 1, 2, 4, 0, time.UTC),
+		Source:        sandboxobservability.SourceClusterGateway,
+		EventType:     sandboxobservability.EventTypeAPIAccess,
+		Phase:         sandboxobservability.EventPhaseResult,
+		Outcome:       sandboxobservability.OutcomeSucceeded,
+		Actor:         sandboxobservability.AuditActor{Kind: sandboxobservability.ActorKindHuman, ID: "user-1"},
+		Action:        action,
+		Resource:      sandboxobservability.AuditResource{Type: "sandbox", ID: "sb-1"},
+		Producer:      sandboxobservability.AuditProducer{Service: "cluster-gateway"},
+		Cursor:        eventID,
+		Watermark:     eventID,
+	}
+	if err := sandboxobservability.SignEvent(&event, key); err != nil {
+		t.Fatalf("SignEvent() error = %v", err)
+	}
+	return event
 }
 
 func TestSandboxObservabilityHandlerParsesLogQuery(t *testing.T) {
@@ -270,6 +402,70 @@ func TestSandboxObservabilityHandlerRejectsInvalidQuery(t *testing.T) {
 	}
 	if repo.eventsCalled {
 		t.Fatal("repository should not be called for invalid query")
+	}
+}
+
+func TestSandboxObservabilityHandlerRejectsInvalidEventID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	repo := &fakeSandboxObservabilityRepo{}
+	handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
+	rec := serveSandboxObservabilityRequest(t, handler.ListEvents, "/api/v1/sandboxes/sb-1/observability/events?event_id=not-a-uuid")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if repo.eventsCalled {
+		t.Fatal("repository should not be called for an invalid event_id")
+	}
+}
+
+func TestSandboxObservabilityHandlerExactEventLookupUsesBoundedConflictProbe(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	repo := &fakeSandboxObservabilityRepo{eventsResult: &sandboxobservability.EventListResult{NextCursor: "must-not-be-returned"}}
+	handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
+	rec := serveSandboxObservabilityRequest(t, handler.ListEvents, "/api/v1/sandboxes/sb-1/observability/events?event_id=11111111-1111-4111-8111-111111111111&limit=100")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if repo.lastQuery.Limit != 2 {
+		t.Fatalf("limit = %d, want 2 for exact event conflict detection", repo.lastQuery.Limit)
+	}
+	var response struct {
+		Data sandboxobservability.EventListResult `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Data.NextCursor != "" {
+		t.Fatalf("next_cursor = %q, want empty for an exact lookup", response.Data.NextCursor)
+	}
+}
+
+func TestSandboxObservabilityHandlerRejectsAmbiguousExactEventLookup(t *testing.T) {
+	eventID := "11111111-1111-4111-8111-111111111111"
+	tests := []string{
+		"event_id=" + eventID + "&start_time=2026-07-01T01:02:03Z",
+		"event_id=" + eventID + "&cursor=abc",
+		"event_id=" + eventID + "&action=sandbox.pause",
+		"event_id=" + eventID + "&watch=true",
+	}
+	for _, query := range tests {
+		t.Run(query, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			repo := &fakeSandboxObservabilityRepo{}
+			handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
+			rec := serveSandboxObservabilityRequest(t, handler.ListEvents, "/api/v1/sandboxes/sb-1/observability/events?"+query)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+			}
+			if repo.eventsCalled {
+				t.Fatal("repository should not be called for an ambiguous exact lookup")
+			}
+		})
 	}
 }
 

@@ -480,10 +480,7 @@ func (s *Server) setupRoutes() {
 		sandboxes := v1.Group("/sandboxes")
 		{
 			sandboxes.Use(s.auditSandboxRequests())
-			auditRead := []gin.HandlerFunc{s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxAuditRead), licensinghttp.RequireFeature(s.sandboxAuditEntitlements, licensing.FeatureSandboxAudit, s.logger), s.sandboxObservabilityHandler().ListEvents}
-			sandboxes.GET("/:id/audit/events", auditRead...)
-			sandboxes.GET("/:id/observability/events", auditRead...)
-			sandboxes.GET("/:id/audit/events/:event_id/verify", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxAuditRead), licensinghttp.RequireFeature(s.sandboxAuditEntitlements, licensing.FeatureSandboxAudit, s.logger), s.sandboxObservabilityHandler().VerifyEvent)
+			sandboxes.GET("/:id/observability/events", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxAuditRead), licensinghttp.RequireFeature(s.sandboxAuditEntitlements, licensing.FeatureSandboxAudit, s.logger), s.sandboxObservabilityHandler().ListEvents)
 			sandboxes.GET("/:id/observability/logs", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.sandboxObservabilityHandler().ListLogs)
 			sandboxes.GET("/:id/metrics", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.sandboxObservabilityHandler().GetRuntimeMetrics)
 			sandboxes.GET("/:id/metrics/catalog", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.sandboxObservabilityHandler().GetRuntimeMetricsCatalog)

@@ -139,6 +139,8 @@ func TestSetupRoutesDoesNotMountRemovedSandboxEndpoints(t *testing.T) {
 	server.setupRoutes()
 
 	for _, path := range []string{
+		"/api/v1/sandboxes/:id/audit/events",
+		"/api/v1/sandboxes/:id/audit/events/:event_id/verify",
 		"/api/v1/sandboxes/:id/logs",
 		"/api/v1/sandboxes/:id/stats",
 		"/api/v1/sandboxes/:id/contexts/:ctx_id/stats",
@@ -159,7 +161,6 @@ func TestSetupRoutesMountsSandboxObservabilityEndpoints(t *testing.T) {
 	server.setupRoutes()
 
 	for _, path := range []string{
-		"/api/v1/sandboxes/:id/audit/events",
 		"/api/v1/sandboxes/:id/observability/events",
 		"/api/v1/sandboxes/:id/observability/logs",
 		"/api/v1/sandboxes/:id/metrics",

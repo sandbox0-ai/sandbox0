@@ -17,7 +17,6 @@ tags:
   - name: sandboxes
   - name: contexts
   - name: observability
-  - name: audit
   - name: files
   - name: templates
   - name: registry
@@ -1451,182 +1450,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-  /api/v1/sandboxes/{id}/audit/events:
-    get:
-      tags: [audit]
-      summary: Query canonical sandbox audit events
-      description: |
-        Queries canonical, signed per-sandbox audit facts stored in ClickHouse. Access
-        requires the enterprise sandbox_audit feature and the sandboxaudit:read permission.
-        The observability/events route is retained as a compatibility alias.
-      x-enterprise-feature: sandbox_audit
-      x-required-permission: sandboxaudit:read
-      security:
-        - bearerAuth: []
-      x-upstream-service: cluster-gateway
-      parameters:
-        - $ref: "#/components/parameters/SandboxID"
-        - name: start_time
-          in: query
-          schema:
-            type: string
-            format: date-time
-        - name: end_time
-          in: query
-          schema:
-            type: string
-            format: date-time
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            default: 100
-            minimum: 1
-            maximum: 1000
-        - name: cursor
-          in: query
-          schema:
-            type: string
-        - name: watch
-          in: query
-          schema:
-            type: boolean
-            default: false
-        - name: source
-          in: query
-          schema:
-            $ref: "#/components/schemas/ObservabilityEventSource"
-        - name: event_type
-          in: query
-          schema:
-            $ref: "#/components/schemas/SandboxObservabilityEventType"
-        - name: outcome
-          in: query
-          schema:
-            $ref: "#/components/schemas/SandboxObservabilityOutcome"
-        - name: actor_kind
-          in: query
-          schema:
-            $ref: "#/components/schemas/SandboxAuditActorKind"
-        - name: actor_id
-          in: query
-          schema:
-            type: string
-        - name: action
-          in: query
-          schema:
-            type: string
-        - name: resource_type
-          in: query
-          schema:
-            type: string
-        - name: operation_id
-          in: query
-          schema:
-            type: string
-        - name: event_id
-          in: query
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Canonical sandbox audit events
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SuccessSandboxObservabilityEventsResponse"
-            application/x-ndjson:
-              schema:
-                $ref: "#/components/schemas/SandboxObservabilityWatchLine"
-        "400":
-          description: Invalid query parameters
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
-        "403":
-          description: Forbidden or sandbox_audit is not licensed
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
-        "503":
-          description: Audit backend disabled or unavailable
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
-  /api/v1/sandboxes/{id}/audit/events/{event_id}/verify:
-    get:
-      tags: [audit]
-      summary: Verify a canonical sandbox audit event
-      description: Recomputes the canonical payload digest and verifies its gateway signature.
-      x-enterprise-feature: sandbox_audit
-      x-required-permission: sandboxaudit:read
-      security:
-        - bearerAuth: []
-      x-upstream-service: cluster-gateway
-      parameters:
-        - $ref: "#/components/parameters/SandboxID"
-        - name: event_id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Event integrity result
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  success:
-                    type: boolean
-                  data:
-                    type: object
-                    properties:
-                      event_id:
-                        type: string
-                        format: uuid
-                      status:
-                        type: string
-                        enum: [verified, invalid, conflict, unavailable]
-                      payload_hash:
-                        type: string
-                      signing_key_id:
-                        type: string
-                      detail:
-                        type: string
-                    required: [event_id, status, payload_hash, signing_key_id]
-                required: [success, data]
-        "400":
-          description: Invalid event ID
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
-        "403":
-          description: Forbidden or sandbox_audit is not licensed
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
-        "404":
-          description: Audit event not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
   /api/v1/sandboxes/{id}/observability/events:
     get:
-      tags: [audit]
-      summary: Compatibility alias for canonical sandbox audit events
+      tags: [observability]
+      summary: Query canonical signed sandbox observability events
       description: |
-        Compatibility alias for /api/v1/sandboxes/{id}/audit/events. It queries the same
-        canonical signed ClickHouse facts and requires sandboxaudit:read.
+        Queries canonical signed per-sandbox audit facts from ClickHouse. Every returned
+        event includes inline integrity verification status. Access requires the enterprise
+        sandbox_audit feature and the sandboxaudit:read permission.
       x-enterprise-feature: sandbox_audit
       x-required-permission: sandboxaudit:read
       security:
@@ -1648,7 +1479,7 @@ paths:
             format: date-time
         - name: limit
           in: query
-          description: Maximum number of events to return. Values above 1000 are capped.
+          description: Maximum number of events to return. Values above 1000 are capped. Exact event_id mode ignores this value and returns at most two payload variants.
           schema:
             type: integer
             default: 100
@@ -1699,12 +1530,13 @@ paths:
             type: string
         - name: event_id
           in: query
+          description: Exact lookup mode for one stable audit event ID. It cannot be combined with time, cursor, watch, or other event filters and returns one canonical row or two conflicting payload variants.
           schema:
             type: string
             format: uuid
       responses:
         "200":
-          description: Historical sandbox observability events
+          description: Canonical signed sandbox observability events
           content:
             application/json:
               schema:
@@ -1725,7 +1557,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "503":
-          description: Historical observability backend disabled or unavailable
+          description: Sandbox observability backend disabled or unavailable
           content:
             application/json:
               schema:
@@ -5558,7 +5390,7 @@ components:
         status:
           type: string
           enum: [verified, invalid, conflict, unavailable]
-      required: [algorithm, payload_hash, signature, signing_key_id]
+      required: [algorithm, payload_hash, signature, signing_key_id, status]
     SandboxObservabilityEvent:
       type: object
       properties:

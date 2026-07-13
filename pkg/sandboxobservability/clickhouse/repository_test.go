@@ -253,3 +253,41 @@ func TestNormalizeQueryCapsLimitAndRejectsInvalidCursor(t *testing.T) {
 		t.Fatal("normalizeQuery() error = nil, want invalid cursor error")
 	}
 }
+
+func TestNormalizeQueryRejectsEventIDWithOtherFilters(t *testing.T) {
+	_, _, _, err := normalizeQuery(sandboxobservability.EventQuery{
+		TeamID:    "team-1",
+		SandboxID: "sb-1",
+		EventID:   "11111111-1111-4111-8111-111111111111",
+		Action:    "sandbox.pause",
+	})
+	if err == nil || !strings.Contains(err.Error(), "event_id cannot be combined") {
+		t.Fatalf("normalizeQuery() error = %v, want incompatible filter error", err)
+	}
+}
+
+func TestNormalizeQueryBoundsExactEventLookupToTwoPayloadVariants(t *testing.T) {
+	_, limit, _, err := normalizeQuery(sandboxobservability.EventQuery{
+		TeamID:    "team-1",
+		SandboxID: "sb-1",
+		EventID:   "11111111-1111-4111-8111-111111111111",
+		Limit:     100,
+	})
+	if err != nil {
+		t.Fatalf("normalizeQuery() error = %v", err)
+	}
+	if limit != 2 {
+		t.Fatalf("limit = %d, want 2", limit)
+	}
+}
+
+func TestNormalizeWatchEventQueryRejectsEventID(t *testing.T) {
+	_, _, _, err := normalizeWatchEventQuery(sandboxobservability.EventQuery{
+		TeamID:    "team-1",
+		SandboxID: "sb-1",
+		EventID:   "11111111-1111-4111-8111-111111111111",
+	}, sandboxobservability.WatchOptions{})
+	if err == nil || !strings.Contains(err.Error(), "event_id cannot be combined with watch") {
+		t.Fatalf("normalizeWatchEventQuery() error = %v, want exact watch error", err)
+	}
+}

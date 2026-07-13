@@ -177,6 +177,9 @@ func (r *Repository) buildWatchLogsSQL(query sandboxobservability.LogQuery, limi
 }
 
 func normalizeWatchEventQuery(query sandboxobservability.EventQuery, opts sandboxobservability.WatchOptions) (sandboxobservability.EventQuery, int, *tailCursor, error) {
+	if strings.TrimSpace(query.EventID) != "" {
+		return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("event_id cannot be combined with watch")
+	}
 	query.Cursor = ""
 	if opts.Limit > 0 {
 		query.Limit = opts.Limit

@@ -2167,11 +2167,11 @@ type SandboxAuditEventPhase string
 
 // SandboxAuditIntegrity defines model for SandboxAuditIntegrity.
 type SandboxAuditIntegrity struct {
-	Algorithm    string                       `json:"algorithm"`
-	PayloadHash  string                       `json:"payload_hash"`
-	Signature    string                       `json:"signature"`
-	SigningKeyId string                       `json:"signing_key_id"`
-	Status       *SandboxAuditIntegrityStatus `json:"status,omitempty"`
+	Algorithm    string                      `json:"algorithm"`
+	PayloadHash  string                      `json:"payload_hash"`
+	Signature    string                      `json:"signature"`
+	SigningKeyId string                      `json:"signing_key_id"`
+	Status       SandboxAuditIntegrityStatus `json:"status"`
 }
 
 // SandboxAuditIntegrityStatus defines model for SandboxAuditIntegrity.Status.
@@ -3641,24 +3641,6 @@ type GetApiV1SandboxesParams struct {
 	Offset *int `form:"offset,omitempty" json:"offset,omitempty"`
 }
 
-// GetApiV1SandboxesIdAuditEventsParams defines parameters for GetApiV1SandboxesIdAuditEvents.
-type GetApiV1SandboxesIdAuditEventsParams struct {
-	StartTime    *time.Time                     `form:"start_time,omitempty" json:"start_time,omitempty"`
-	EndTime      *time.Time                     `form:"end_time,omitempty" json:"end_time,omitempty"`
-	Limit        *int                           `form:"limit,omitempty" json:"limit,omitempty"`
-	Cursor       *string                        `form:"cursor,omitempty" json:"cursor,omitempty"`
-	Watch        *bool                          `form:"watch,omitempty" json:"watch,omitempty"`
-	Source       *ObservabilityEventSource      `form:"source,omitempty" json:"source,omitempty"`
-	EventType    *SandboxObservabilityEventType `form:"event_type,omitempty" json:"event_type,omitempty"`
-	Outcome      *SandboxObservabilityOutcome   `form:"outcome,omitempty" json:"outcome,omitempty"`
-	ActorKind    *SandboxAuditActorKind         `form:"actor_kind,omitempty" json:"actor_kind,omitempty"`
-	ActorId      *string                        `form:"actor_id,omitempty" json:"actor_id,omitempty"`
-	Action       *string                        `form:"action,omitempty" json:"action,omitempty"`
-	ResourceType *string                        `form:"resource_type,omitempty" json:"resource_type,omitempty"`
-	OperationId  *string                        `form:"operation_id,omitempty" json:"operation_id,omitempty"`
-	EventId      *openapi_types.UUID            `form:"event_id,omitempty" json:"event_id,omitempty"`
-}
-
 // DeleteApiV1SandboxesIdFilesParams defines parameters for DeleteApiV1SandboxesIdFiles.
 type DeleteApiV1SandboxesIdFilesParams struct {
 	Path FilePath `form:"path" json:"path"`
@@ -3715,7 +3697,7 @@ type GetApiV1SandboxesIdObservabilityEventsParams struct {
 	// EndTime Include events that occurred at or before this RFC3339 timestamp.
 	EndTime *time.Time `form:"end_time,omitempty" json:"end_time,omitempty"`
 
-	// Limit Maximum number of events to return. Values above 1000 are capped.
+	// Limit Maximum number of events to return. Values above 1000 are capped. Exact event_id mode ignores this value and returns at most two payload variants.
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 
 	// Cursor Opaque pagination cursor returned by a previous response. When watch is true, this must be a watch resume cursor from an NDJSON watermark line.
@@ -3731,7 +3713,9 @@ type GetApiV1SandboxesIdObservabilityEventsParams struct {
 	Action       *string                        `form:"action,omitempty" json:"action,omitempty"`
 	ResourceType *string                        `form:"resource_type,omitempty" json:"resource_type,omitempty"`
 	OperationId  *string                        `form:"operation_id,omitempty" json:"operation_id,omitempty"`
-	EventId      *openapi_types.UUID            `form:"event_id,omitempty" json:"event_id,omitempty"`
+
+	// EventId Exact lookup mode for one stable audit event ID. It cannot be combined with time, cursor, watch, or other event filters and returns one canonical row or two conflicting payload variants.
+	EventId *openapi_types.UUID `form:"event_id,omitempty" json:"event_id,omitempty"`
 }
 
 // GetApiV1SandboxesIdObservabilityLogsParams defines parameters for GetApiV1SandboxesIdObservabilityLogs.

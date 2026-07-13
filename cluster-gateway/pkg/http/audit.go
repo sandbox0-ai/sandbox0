@@ -27,9 +27,7 @@ const (
 )
 
 var sandboxAuditActions = map[string]string{
-	"GET /api/v1/sandboxes/:id/audit/events":                       "audit.read",
 	"GET /api/v1/sandboxes/:id/observability/events":               "audit.read",
-	"GET /api/v1/sandboxes/:id/audit/events/:event_id/verify":      "audit.verify",
 	"GET /api/v1/sandboxes/:id/observability/logs":                 "logs.read",
 	"GET /api/v1/sandboxes/:id/metrics":                            "metrics.read",
 	"GET /api/v1/sandboxes/:id/metrics/catalog":                    "metrics.catalog.read",

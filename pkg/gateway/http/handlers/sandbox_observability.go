@@ -112,6 +112,10 @@ func (h *SandboxObservabilityHandler) ListEvents(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if watch && query.EventID != "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "event_id cannot be combined with watch")
+		return
+	}
 	if watch {
 		h.watchEvents(c, query)
 		return
@@ -130,61 +134,14 @@ func (h *SandboxObservabilityHandler) ListEvents(c *gin.Context) {
 	if result.Events == nil {
 		result.Events = []sandboxobservability.Event{}
 	}
+	if query.EventID != "" {
+		result.NextCursor = ""
+	}
 	for i := range result.Events {
 		h.verifyEventStatus(&result.Events[i])
 	}
 	markEventConflicts(result.Events)
 	spec.JSONSuccess(c, http.StatusOK, result)
-}
-
-func (h *SandboxObservabilityHandler) VerifyEvent(c *gin.Context) {
-	sandboxID, teamID, ok := parseSandboxAndTeam(c)
-	if !ok {
-		return
-	}
-	eventID := strings.TrimSpace(c.Param("event_id"))
-	if _, err := uuid.Parse(eventID); err != nil {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid event_id")
-		return
-	}
-	result, err := h.repo.ListEvents(c.Request.Context(), sandboxobservability.EventQuery{
-		TeamID: teamID, SandboxID: sandboxID, EventID: eventID, Limit: 2,
-	})
-	if err != nil {
-		h.writeQueryError(c, err, "failed to verify sandbox audit event", zap.String("event_id", eventID))
-		return
-	}
-	if result == nil || len(result.Events) == 0 {
-		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "audit event not found")
-		return
-	}
-	status := "verified"
-	detail := ""
-	if len(result.Events) > 1 {
-		for i := 1; i < len(result.Events); i++ {
-			if result.Events[i].Integrity.PayloadHash != result.Events[0].Integrity.PayloadHash {
-				status = "conflict"
-				detail = "event_id has multiple payload hashes"
-				break
-			}
-		}
-	}
-	if status == "verified" {
-		if h.audit == nil || len(h.audit.VerificationKey) != ed25519.PublicKeySize {
-			status = "unavailable"
-			detail = "audit verification key is unavailable"
-		} else if verifyErr := sandboxobservability.VerifyEventIntegrity(result.Events[0], h.audit.VerificationKey); verifyErr != nil {
-			status = "invalid"
-			detail = verifyErr.Error()
-		}
-	}
-	spec.JSONSuccess(c, http.StatusOK, gin.H{
-		"event_id":       eventID,
-		"status":         status,
-		"payload_hash":   result.Events[0].Integrity.PayloadHash,
-		"signing_key_id": result.Events[0].Integrity.SigningKeyID,
-		"detail":         detail,
-	})
 }
 
 func (h *SandboxObservabilityHandler) verifyEventStatus(event *sandboxobservability.Event) {
@@ -863,6 +820,25 @@ func parseSandboxObservabilityQuery(c *gin.Context) (sandboxobservability.EventQ
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid actor_kind")
 		return sandboxobservability.EventQuery{}, false
 	}
+	cursor := strings.TrimSpace(c.Query("cursor"))
+	actorID := strings.TrimSpace(c.Query("actor_id"))
+	action := strings.TrimSpace(c.Query("action"))
+	resourceType := strings.TrimSpace(c.Query("resource_type"))
+	operationID := strings.TrimSpace(c.Query("operation_id"))
+	eventID := strings.TrimSpace(c.Query("event_id"))
+	if eventID != "" {
+		if _, err := uuid.Parse(eventID); err != nil {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid event_id")
+			return sandboxobservability.EventQuery{}, false
+		}
+		if startTime != nil || endTime != nil || cursor != "" || source != "" || eventType != "" || outcome != "" || actorKind != "" || actorID != "" || action != "" || resourceType != "" || operationID != "" {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "event_id cannot be combined with other event filters or cursor")
+			return sandboxobservability.EventQuery{}, false
+		}
+		// An exact lookup returns at most two payload variants. Two are enough
+		// to prove that the stable ID has conflicting canonical facts.
+		limit = 2
+	}
 
 	return sandboxobservability.EventQuery{
 		TeamID:       teamID,
@@ -870,16 +846,16 @@ func parseSandboxObservabilityQuery(c *gin.Context) (sandboxobservability.EventQ
 		StartTime:    startTime,
 		EndTime:      endTime,
 		Limit:        limit,
-		Cursor:       strings.TrimSpace(c.Query("cursor")),
+		Cursor:       cursor,
 		Source:       source,
 		EventType:    eventType,
 		Outcome:      outcome,
 		ActorKind:    actorKind,
-		ActorID:      strings.TrimSpace(c.Query("actor_id")),
-		Action:       strings.TrimSpace(c.Query("action")),
-		ResourceType: strings.TrimSpace(c.Query("resource_type")),
-		OperationID:  strings.TrimSpace(c.Query("operation_id")),
-		EventID:      strings.TrimSpace(c.Query("event_id")),
+		ActorID:      actorID,
+		Action:       action,
+		ResourceType: resourceType,
+		OperationID:  operationID,
+		EventID:      eventID,
 	}, true
 }
 

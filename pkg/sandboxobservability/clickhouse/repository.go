@@ -339,12 +339,16 @@ func normalizeQuery(query sandboxobservability.EventQuery) (sandboxobservability
 	if query.ActorKind != "" && !sandboxobservability.ValidActorKind(query.ActorKind) {
 		return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("invalid actor_kind")
 	}
+	if query.EventID != "" && (query.StartTime != nil || query.EndTime != nil || query.Cursor != "" || query.Source != "" || query.EventType != "" || query.Outcome != "" || query.ActorKind != "" || query.ActorID != "" || query.Action != "" || query.ResourceType != "" || query.OperationID != "") {
+		return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("event_id cannot be combined with other event filters or cursor")
+	}
 
 	limit := query.Limit
-	if limit <= 0 {
+	if query.EventID != "" {
+		limit = 2
+	} else if limit <= 0 {
 		limit = DefaultQueryLimit
-	}
-	if limit > MaxQueryLimit {
+	} else if limit > MaxQueryLimit {
 		limit = MaxQueryLimit
 	}
 

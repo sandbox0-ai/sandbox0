@@ -288,15 +288,7 @@ console.log('Status:', status.status);`
 
 ## Observability
 
-Sandbox0 exposes chart-ready runtime metrics, historical logs, and a canonical per-sandbox audit ledger. Audit is stored directly in ClickHouse and never wakes a paused sandbox. It is separate from platform service telemetry and the metering usage ledger. Audit ingestion and the query, watch, and verification APIs require the enterprise `sandbox_audit` feature; logs, runtime metrics, and the metric catalog do not.
-
-<Endpoint method="GET">
-/api/v1/sandboxes/{'{id}'}/audit/events
-</Endpoint>
-
-<Endpoint method="GET">
-/api/v1/sandboxes/{'{id}'}/audit/events/{'{event_id}'}/verify
-</Endpoint>
+Sandbox0 exposes chart-ready runtime metrics, historical logs, and a canonical per-sandbox audit ledger. Audit is stored directly in ClickHouse and never wakes a paused sandbox. It is separate from platform service telemetry and the metering usage ledger. Audit ingestion and the observability-event query and watch API require the enterprise `sandbox_audit` feature; logs, runtime metrics, and the metric catalog do not.
 
 <Endpoint method="GET">
 /api/v1/sandboxes/{'{id}'}/observability/events
@@ -365,13 +357,13 @@ const metrics = await client.sandbox("sb_abc123").getMetrics({
 
 ### Logs and audit events
 
-The audit endpoint returns `403 feature_not_licensed` unless audit is explicitly enabled and cluster-gateway has a valid enterprise license containing `sandbox_audit`. The caller also needs the independent `sandboxaudit:read` permission. `/observability/events` remains a compatibility alias for `/audit/events`.
+The upgraded `/observability/events` endpoint is the only public audit-event read API. It returns `403 feature_not_licensed` unless audit is explicitly enabled and cluster-gateway has a valid enterprise license containing `sandbox_audit`. The caller also needs the independent `sandboxaudit:read` permission.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `start_time` | RFC3339 timestamp | Include events that occurred at or after this time |
 | `end_time` | RFC3339 timestamp | Include events that occurred at or before this time |
-| `limit` | integer | Maximum events to return (default: 100, max: 1000) |
+| `limit` | integer | Maximum events to return (default: 100, max: 1000); ignored in exact `event_id` mode, which returns at most two payload variants |
 | `cursor` | string | Opaque cursor from a previous response; in watch mode, use the cursor from a `watermark` line |
 | `watch` | boolean | Stream matching records as `application/x-ndjson` until the client disconnects |
 | `context_id` | string | Log context filter |
@@ -384,11 +376,11 @@ The audit endpoint returns `403 feature_not_licensed` unless audit is explicitly
 | `action` | string | Stable action such as `sandbox.pause`, `process.exec`, `file.write`, or `network.connect` |
 | `resource_type` | string | Resource category such as `sandbox` or `sandbox_network` |
 | `operation_id` | string | Correlates the attempt and result of one operation |
-| `event_id` | UUID | Select one stable audit fact |
+| `event_id` | UUID | Exact lookup mode for one stable audit ID; cannot be combined with time, cursor, watch, or other event filters |
 
-Every audit fact includes a stable `event_id`, schema version, trusted actor, action, resource, producer, operation correlation, outcome, and bounded request metadata. `integrity` contains the canonical SHA-256 payload digest, Ed25519 signature, signing key ID, and verification status. The verify endpoint recomputes the digest from the stored row and checks its signature. It also reports a conflict if one event ID appears with multiple payload hashes.
+Every audit fact includes a stable `event_id`, schema version, trusted actor, action, resource, producer, operation correlation, outcome, and bounded request metadata. `integrity` contains the canonical SHA-256 payload digest, Ed25519 signature, signing key ID, and inline verification status. List and watch responses recompute each returned row's digest and verify its signature. An exact `event_id` lookup fetches enough rows to report `conflict` when the same stable ID appears with multiple payload hashes.
 
-Gateway operations produce an `attempt` before authorization or execution and a `result` after either the downstream response or a failed admission decision. ClickHouse is the only audit read source: the fsync-backed delivery buffer holds pending events for retry, but list, watch, and verification calls cannot see an event until ClickHouse acknowledges it. With the default `durable_async` mode, non-mutating and public-exposure operations may proceed after local durable enqueue, and healthy canonical visibility is normally delayed by the asynchronous delivery path and its default one-second flush/replay cycles. `canonical_sync` instead requires ClickHouse acknowledgement before admission and adds that round trip to the critical path.
+Gateway operations produce an `attempt` before authorization or execution and a `result` after either the downstream response or a failed admission decision. ClickHouse is the only audit read source: the fsync-backed delivery buffer holds pending events for retry, but list and watch reads cannot see an event until ClickHouse acknowledges it. With the default `durable_async` mode, non-mutating and public-exposure operations may proceed after local durable enqueue, and healthy canonical visibility is normally delayed by the asynchronous delivery path and its default one-second flush/replay cycles. `canonical_sync` instead requires ClickHouse acknowledgement before admission and adds that round trip to the critical path.
 
 State-changing Sandbox API operations are always strict, regardless of the configured delivery mode. Cluster-gateway requires ClickHouse to acknowledge the attempt before execution, buffers the HTTP response, and requires ClickHouse acknowledgement for the signed result before returning that response. If canonical admission fails after the attempt is durably buffered, the downstream operation is not executed and cluster-gateway attempts to append a correlated signed `failed` result with HTTP `503`, `execution_started=false`, `operation_executed=false`, `failure_stage=canonical_audit_admission`, and `failure_code=canonical_ack_unavailable` for replay. If terminal-result custody also fails, the response reports `audit_result=unrecorded`; the orphan attempt is an audit-completeness incident, not evidence that the operation ran. If a result from an operation that did execute is only buffered for retry, the caller receives `503` rather than a false success. A `5xx` or panic result after execution is recorded as `unknown`, because the downstream operation may have completed even if the gateway did not receive a definitive response.
 

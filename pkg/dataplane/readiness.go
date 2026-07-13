@@ -6,6 +6,9 @@ const (
 	NodeDataPlaneReadyLabel = "sandbox0.ai/data-plane-ready"
 	NodeNetdReadyLabel      = "sandbox0.ai/netd-ready"
 	NodeCtldReadyLabel      = "sandbox0.ai/ctld-ready"
+	CtldHASlotLabel         = "sandbox0.ai/ctld-ha-slot"
+	CtldHASlotA             = "a"
+	CtldHASlotB             = "b"
 	ReadyLabelValue         = "true"
 	NotReadyLabelValue      = "false"
 )

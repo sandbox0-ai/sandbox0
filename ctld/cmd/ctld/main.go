@@ -17,6 +17,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	ctldha "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/ha"
+	ctldregistration "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/kubeletregistration"
 	ctldportal "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal"
 	ctldpower "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/power"
 	ctldrootfs "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/rootfs"
@@ -28,6 +29,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	storagedb "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	corev1 "k8s.io/api/core/v1"
@@ -51,6 +53,8 @@ var (
 	portalRoot                     = "/var/lib/sandbox0/ctld"
 	kubeletPodsRoot                = "/var/lib/kubelet/pods"
 	csiSocket                      = "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock"
+	kubeletRegistrationSocket      string
+	kubeletRegistrationEndpoint    string
 	rootFSObjectCacheMaxBytes      = "20Gi"
 	rootFSObjectCacheMinFreeBytes  = "0"
 	rootFSObjectCacheMaxAge        time.Duration
@@ -85,6 +89,8 @@ func main() {
 	flag.StringVar(&portalRoot, "volume-portal-root", "/var/lib/sandbox0/ctld", "host-local root for ctld volume portal WAL and cache")
 	flag.StringVar(&kubeletPodsRoot, "kubelet-pods-root", "/var/lib/kubelet/pods", "host kubelet pod directory used to recover stale sandbox0 CSI mounts")
 	flag.StringVar(&csiSocket, "csi-socket", "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock", "CSI endpoint socket for sandbox volume portals")
+	flag.StringVar(&kubeletRegistrationSocket, "kubelet-registration-socket", "", "kubelet plugin-registration socket; empty disables embedded registration")
+	flag.StringVar(&kubeletRegistrationEndpoint, "kubelet-registration-endpoint", "", "host-visible CSI endpoint returned to kubelet; defaults to csi-socket")
 	flag.StringVar(&rootFSObjectCacheMaxBytes, "rootfs-object-cache-max-bytes", "20Gi", "maximum node-local rootfs object cache size; set to 0 to disable")
 	flag.StringVar(&rootFSObjectCacheMinFreeBytes, "rootfs-object-cache-min-free-bytes", "0", "minimum free bytes to preserve on the rootfs object cache filesystem")
 	flag.DurationVar(&rootFSObjectCacheMaxAge, "rootfs-object-cache-max-age", 0, "maximum age for node-local rootfs cache objects; 0 disables age-based eviction")
@@ -240,13 +246,35 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 	cleanupCancel()
 	go portalManager.Run(ctx)
 	csiServer := ctldportal.NewCSIServer(nodeName, portalManager)
-	serviceErrors := make(chan error, 2)
-	go func() {
-		if err := csiServer.Serve(csiSocket); err != nil && ctx.Err() == nil {
-			serviceErrors <- fmt.Errorf("ctld volume portal CSI server: %w", err)
-		}
-	}()
+	csiErrors, err := csiServer.Start(csiSocket)
+	if err != nil {
+		return fmt.Errorf("start ctld volume portal CSI server: %w", err)
+	}
 	defer csiServer.Stop()
+
+	var registrationServer *ctldregistration.Server
+	var registrationErrors <-chan error
+	if strings.TrimSpace(kubeletRegistrationSocket) != "" {
+		registrationEndpoint := strings.TrimSpace(kubeletRegistrationEndpoint)
+		if registrationEndpoint == "" {
+			registrationEndpoint = csiSocket
+		}
+		registrationServer, err = ctldregistration.NewServer(ctldregistration.Config{
+			SocketPath: kubeletRegistrationSocket,
+			DriverName: volumeportal.DriverName,
+			Endpoint:   registrationEndpoint,
+		})
+		if err != nil {
+			return err
+		}
+		if err := registrationServer.Start(); err != nil {
+			return fmt.Errorf("start kubelet CSI registration server: %w", err)
+		}
+		log.Printf("ctld primary kubelet registration server listening on %q for CSI endpoint %q", kubeletRegistrationSocket, registrationEndpoint)
+		defer registrationServer.Stop()
+		registrationErrors = registrationServer.Errors()
+	}
+	serviceErrors := make(chan error, 1)
 
 	podCache := buildNodePodCache(ctx, k8sClient)
 	probeController := buildProbeController(k8sClient, obsProvider, podCache)
@@ -273,7 +301,10 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 	}()
 
 	if options.setReady != nil {
-		options.setReady(portalManager.RecoveryError() == nil)
+		serviceReady := func() bool {
+			return portalManager.RecoveryError() == nil && (registrationServer == nil || registrationServer.Registered())
+		}
+		options.setReady(serviceReady())
 		defer options.setReady(false)
 		go func() {
 			ticker := time.NewTicker(time.Second)
@@ -283,7 +314,7 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					options.setReady(portalManager.RecoveryError() == nil)
+					options.setReady(serviceReady())
 				}
 			}
 		}()
@@ -292,8 +323,17 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 	select {
 	case <-parent.Done():
 		log.Printf("ctld primary shutting down: %v", parent.Err())
+	case err := <-csiErrors:
+		runErr = fmt.Errorf("ctld volume portal CSI server: %w", err)
+		log.Printf("ctld primary service failed: %v", runErr)
+	case err := <-registrationErrors:
+		runErr = fmt.Errorf("ctld kubelet CSI registration server: %w", err)
+		log.Printf("ctld primary service failed: %v", runErr)
 	case runErr = <-serviceErrors:
 		log.Printf("ctld primary service failed: %v", runErr)
+	}
+	if options.setReady != nil {
+		options.setReady(false)
 	}
 	cancel()
 	httpShutdownCtx, httpShutdownCancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
@@ -304,6 +344,9 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 		log.Printf("ctld runtime metric producer shutdown completed with errors: %v", err)
 	}
 	runtimeMetricsShutdownCancel()
+	if registrationServer != nil {
+		registrationServer.Stop()
+	}
 	csiServer.Stop()
 	portalShutdownCtx, portalShutdownCancel := context.WithTimeout(context.Background(), portalShutdownTimeout)
 	if err := portalManager.Shutdown(portalShutdownCtx); err != nil {

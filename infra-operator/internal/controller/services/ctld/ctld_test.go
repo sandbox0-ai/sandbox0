@@ -23,6 +23,7 @@ import (
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 )
 
@@ -164,6 +165,8 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-cri-endpoint=/host-run/containerd/containerd.sock")
 	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-containerd-data-root=/host-var-lib/containerd")
 	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-kubelet-pods-root=/var/lib/kubelet/pods")
+	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-kubelet-registration-socket="+ctldKubeletRegistrationSocket)
+	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-kubelet-registration-endpoint="+ctldKubeletCSIEndpoint)
 	if ds.Spec.Template.Spec.Containers[0].SecurityContext == nil || ds.Spec.Template.Spec.Containers[0].SecurityContext.Privileged == nil || !*ds.Spec.Template.Spec.Containers[0].SecurityContext.Privileged {
 		t.Fatal("expected ctld container to run privileged")
 	}
@@ -173,26 +176,27 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 	if got := ds.Spec.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceMemory]; got.Cmp(resource.MustParse(ctldMemoryRequest)) != 0 {
 		t.Fatalf("expected ctld memory request %s, got %s", ctldMemoryRequest, got.String())
 	}
-	if len(ds.Spec.Template.Spec.Containers) != 2 || ds.Spec.Template.Spec.Containers[1].Name != "csi-node-driver-registrar" {
-		t.Fatalf("expected csi node-driver-registrar sidecar, got %#v", ds.Spec.Template.Spec.Containers)
+	if len(ds.Spec.Template.Spec.Containers) != 1 {
+		t.Fatalf("expected slot A to run only ctld, got %#v", ds.Spec.Template.Spec.Containers)
 	}
 	if len(standby.Spec.Template.Spec.Containers) != 1 {
-		t.Fatalf("expected standby slot to omit the registrar, got %#v", standby.Spec.Template.Spec.Containers)
+		t.Fatalf("expected slot B to run only ctld, got %#v", standby.Spec.Template.Spec.Containers)
 	}
-	if ds.Spec.Template.Labels[ctldHASlotLabel] != "a" || standby.Spec.Template.Labels[ctldHASlotLabel] != "b" {
-		t.Fatalf("unexpected ctld HA slot labels: primary=%q standby=%q", ds.Spec.Template.Labels[ctldHASlotLabel], standby.Spec.Template.Labels[ctldHASlotLabel])
+	if ds.Spec.Template.Labels[dataplane.CtldHASlotLabel] != dataplane.CtldHASlotA || standby.Spec.Template.Labels[dataplane.CtldHASlotLabel] != dataplane.CtldHASlotB {
+		t.Fatalf("unexpected ctld HA slot labels: slot A=%q slot B=%q", ds.Spec.Template.Labels[dataplane.CtldHASlotLabel], standby.Spec.Template.Labels[dataplane.CtldHASlotLabel])
 	}
 	for _, workload := range []*appsv1.DaemonSet{ds, standby} {
 		if len(workload.Spec.Template.Spec.Containers[0].Ports) != 0 {
 			t.Fatalf("ctld hostNetwork pod %s reserves node ports: %#v", workload.Name, workload.Spec.Template.Spec.Containers[0].Ports)
 		}
 	}
-	assertCtldRollingUpdate(t, ds, 1, 0)
+	assertCtldRollingUpdate(t, ds, 0, 1)
 	assertCtldRollingUpdate(t, standby, 0, 1)
 	if len(ds.Spec.Template.Spec.Containers[0].VolumeMounts) < 7 {
 		t.Fatalf("expected ctld config, csi, kubelet, data, containerd socket, and containerd data mounts, got %#v", ds.Spec.Template.Spec.Containers[0].VolumeMounts)
 	}
 	assertContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "containerd-data", "/host-var-lib/containerd")
+	assertNoPodVolume(t, ds.Spec.Template.Spec.Volumes, "plugin-registration")
 	driver := &storagev1.CSIDriver{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: "volume.sandbox0.ai"}, driver); err != nil {
 		t.Fatalf("expected csi driver to be created: %v", err)
@@ -438,6 +442,15 @@ func assertPodVolume(t *testing.T, volumes []corev1.Volume, name string) {
 		}
 	}
 	t.Fatalf("expected volume %q, got %#v", name, volumes)
+}
+
+func assertNoPodVolume(t *testing.T, volumes []corev1.Volume, name string) {
+	t.Helper()
+	for _, volume := range volumes {
+		if volume.Name == name {
+			t.Fatalf("expected volume %q to be absent, got %#v", name, volumes)
+		}
+	}
 }
 
 func assertHostPathVolume(t *testing.T, volumes []corev1.Volume, name, path string) {

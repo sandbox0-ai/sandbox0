@@ -29,20 +29,35 @@ func NewCSIServer(nodeName string, manager *Manager) *CSIServer {
 	return &CSIServer{nodeName: nodeName, manager: manager}
 }
 
-func (s *CSIServer) Serve(socketPath string) error {
+// Start creates the CSI socket synchronously, then serves requests in the
+// background. Creating the socket before returning lets ctld safely expose its
+// kubelet registration socket only after the CSI endpoint is available.
+func (s *CSIServer) Start(socketPath string) (<-chan error, error) {
 	if s.manager == nil {
-		return fmt.Errorf("portal manager is required")
+		return nil, fmt.Errorf("portal manager is required")
 	}
 	listener, err := listenUnix(socketPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	s.listener = listener
 	s.server = grpc.NewServer()
 	csi.RegisterIdentityServer(s.server, s)
 	csi.RegisterControllerServer(s.server, s)
 	csi.RegisterNodeServer(s.server, s)
-	return s.server.Serve(listener)
+	errors := make(chan error, 1)
+	go func() {
+		errors <- s.server.Serve(listener)
+	}()
+	return errors, nil
+}
+
+func (s *CSIServer) Serve(socketPath string) error {
+	errors, err := s.Start(socketPath)
+	if err != nil {
+		return err
+	}
+	return <-errors
 }
 
 func (s *CSIServer) Stop() {

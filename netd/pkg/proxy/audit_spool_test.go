@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
@@ -19,13 +20,17 @@ import (
 )
 
 func TestAuditSpoolPersistsLoadsAndRemoves(t *testing.T) {
-	spool, err := newAuditSpool(t.TempDir())
+	dir := t.TempDir()
+	spool, err := newAuditSpool(dir)
 	if err != nil {
 		t.Fatalf("newAuditSpool() error = %v", err)
 	}
-	event := auditEvent{EventID: "11111111-1111-4111-8111-111111111111", TeamID: "team-1", SandboxID: "sb-1", Timestamp: time.Now().UTC()}
+	event := newAuditDeliveryTestEvent("11111111-1111-4111-8111-111111111111", sandboxobservability.EventPhaseResult)
 	if err := spool.Put(event); err != nil {
 		t.Fatalf("Put() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".sequence")); !os.IsNotExist(err) {
+		t.Fatalf("sequence metadata exists or cannot be inspected: %v", err)
 	}
 	loaded, err := spool.Load(10)
 	if err != nil {
@@ -48,10 +53,9 @@ func TestAuditSpoolConcurrentPutPreservesEventIDCollision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newAuditSpool() error = %v", err)
 	}
-	base := auditEvent{
-		EventID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", TeamID: "team-1", SandboxID: "sb-1",
-		Timestamp: time.Date(2026, 7, 1, 1, 2, 3, 0, time.UTC), Outcome: "completed",
-	}
+	base := newAuditDeliveryTestEvent("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", sandboxobservability.EventPhaseResult)
+	base.Timestamp = time.Date(2026, 7, 1, 1, 2, 3, 0, time.UTC)
+	base.Outcome = "completed"
 	conflicting := base
 	conflicting.Outcome = "error"
 	start := make(chan struct{})
@@ -109,11 +113,9 @@ func TestHTTPAuditSinkReplaysSpoolAfterRestart(t *testing.T) {
 		Endpoint: unavailable.URL, Generator: generator, Spool: spool, QueueSize: 1,
 		BatchSize: 1, FlushInterval: 10 * time.Millisecond, RequestTimeout: time.Second,
 	})
-	if err := first.WriteAuditEvent(auditEvent{
-		EventID: "22222222-2222-4222-8222-222222222222", Timestamp: time.Now().UTC(),
-		TeamID: "team-1", SandboxID: "sb-1", FlowID: "tcp-1", Transport: "tcp",
-		Action: "pass-through", Outcome: "completed", Phase: string(sandboxobservability.EventPhaseResult),
-	}); err != nil {
+	event := newAuditDeliveryTestEvent("22222222-2222-4222-8222-222222222222", sandboxobservability.EventPhaseResult)
+	event.Outcome = "completed"
+	if err := first.WriteAuditEvent(event); err != nil {
 		t.Fatalf("WriteAuditEvent() error = %v", err)
 	}
 	waitForAuditSpoolCount(t, spool, 1)
@@ -169,10 +171,7 @@ func TestHTTPAuditSinkFailsClosedWhenAttemptCannotReachCanonicalStore(t *testing
 		DeliveryMode: sandboxobservability.AuditDeliveryModeCanonicalSync,
 	})
 	defer sink.Close()
-	err = sink.WriteAuditEvent(auditEvent{
-		Timestamp: time.Now().UTC(), TeamID: "team-1", SandboxID: "sb-1", FlowID: "tcp-1",
-		Transport: "tcp", Action: "pass-through", Outcome: "accepted", Phase: string(sandboxobservability.EventPhaseAttempt),
-	})
+	err = sink.WriteAuditEvent(newAuditDeliveryTestEvent("12121212-1212-4212-8212-121212121212", sandboxobservability.EventPhaseAttempt))
 	if err == nil {
 		t.Fatal("WriteAuditEvent() error = nil, want fail-closed error")
 	}
@@ -205,11 +204,8 @@ func TestHTTPAuditSinkFallsBackToCanonicalWhenSpoolPutFails(t *testing.T) {
 			defer server.Close()
 			sink := directHTTPAuditSink(server.URL, server.Client(), spool, zap.NewNop())
 			replaceNetdAuditSpoolDirectoryWithFile(t, dir)
-			event := auditEvent{
-				EventID:   "33333333-3333-4333-8333-333333333333",
-				Timestamp: time.Now().UTC(), TeamID: "team-1", SandboxID: "sb-1", FlowID: "tcp-1",
-				Transport: "tcp", Action: "pass-through", Outcome: "completed", Phase: string(phase),
-			}
+			event := newAuditDeliveryTestEvent("33333333-3333-4333-8333-333333333333", phase)
+			event.Outcome = "completed"
 			if err := sink.WriteAuditEvent(event); err != nil {
 				t.Fatalf("WriteAuditEvent() fallback error = %v", err)
 			}
@@ -242,11 +238,9 @@ func TestHTTPAuditSinkReportsUnrecordedWhenSpoolAndCanonicalFallbackFail(t *test
 			defer server.Close()
 			sink := directHTTPAuditSink(server.URL, server.Client(), spool, zap.NewNop())
 			replaceNetdAuditSpoolDirectoryWithFile(t, dir)
-			err = sink.WriteAuditEvent(auditEvent{
-				EventID:   "44444444-4444-4444-8444-444444444444",
-				Timestamp: time.Now().UTC(), TeamID: "team-1", SandboxID: "sb-1", FlowID: "tcp-1",
-				Transport: "tcp", Action: "pass-through", Outcome: "completed", Phase: string(phase),
-			})
+			event := newAuditDeliveryTestEvent("44444444-4444-4444-8444-444444444444", phase)
+			event.Outcome = "completed"
+			err = sink.WriteAuditEvent(event)
 			if err == nil || !strings.Contains(err.Error(), "audit "+string(phase)+" is unrecorded") || !strings.Contains(err.Error(), "canonical fallback failed") {
 				t.Fatalf("WriteAuditEvent() error = %v, want explicit dual-delivery failure", err)
 			}
@@ -275,11 +269,7 @@ func TestHTTPAuditSinkDoesNotFailAttemptAfterCanonicalACKWhenSpoolCleanupFails(t
 	}))
 	defer server.Close()
 	sink := directHTTPAuditSink(server.URL, server.Client(), spool, logger)
-	if err := sink.WriteAuditEvent(auditEvent{
-		EventID:   "55555555-5555-4555-8555-555555555555",
-		Timestamp: time.Now().UTC(), TeamID: "team-1", SandboxID: "sb-1", FlowID: "tcp-1",
-		Transport: "tcp", Action: "pass-through", Outcome: "accepted", Phase: string(sandboxobservability.EventPhaseAttempt),
-	}); err != nil {
+	if err := sink.WriteAuditEvent(newAuditDeliveryTestEvent("55555555-5555-4555-8555-555555555555", sandboxobservability.EventPhaseAttempt)); err != nil {
 		t.Fatalf("WriteAuditEvent() error after canonical ACK = %v", err)
 	}
 	if observed.FilterMessage("Canonical netd audit attempt was acknowledged but spool cleanup failed").Len() != 1 {
@@ -293,11 +283,8 @@ func TestHTTPAuditSinkLogsResultCleanupFailureAfterCanonicalACK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newAuditSpool() error = %v", err)
 	}
-	event := auditEvent{
-		EventID: "66666666-6666-4666-8666-666666666666", ProducerSequence: 1,
-		Timestamp: time.Now().UTC(), TeamID: "team-1", SandboxID: "sb-1", FlowID: "tcp-1",
-		Transport: "tcp", Action: "pass-through", Outcome: "completed", Phase: string(sandboxobservability.EventPhaseResult),
-	}
+	event := newAuditDeliveryTestEvent("66666666-6666-4666-8666-666666666666", sandboxobservability.EventPhaseResult)
+	event.Outcome = "completed"
 	if err := spool.Put(event); err != nil {
 		t.Fatalf("Put() error = %v", err)
 	}
@@ -316,11 +303,8 @@ func TestHTTPAuditSinkDoesNotFallbackOnSpoolIdentityCollision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newAuditSpool() error = %v", err)
 	}
-	event := auditEvent{
-		EventID: "77777777-7777-4777-8777-777777777777", ProducerSequence: 1,
-		Timestamp: time.Now().UTC(), TeamID: "team-1", SandboxID: "sb-1", FlowID: "tcp-1",
-		Transport: "tcp", Action: "pass-through", Outcome: "completed", Phase: string(sandboxobservability.EventPhaseResult),
-	}
+	event := newAuditDeliveryTestEvent("77777777-7777-4777-8777-777777777777", sandboxobservability.EventPhaseResult)
+	event.Outcome = "completed"
 	if err := spool.Put(event); err != nil {
 		t.Fatalf("Put() error = %v", err)
 	}
@@ -361,6 +345,58 @@ func TestAuditSpoolFailsClosedOnCorruptRecord(t *testing.T) {
 	}
 }
 
+func TestAuditSpoolRejectsMalformedFactsOnEveryReadWritePath(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*auditEvent)
+	}{
+		{name: "missing team", mutate: func(event *auditEvent) { event.TeamID = "" }},
+		{name: "missing sandbox", mutate: func(event *auditEvent) { event.SandboxID = "" }},
+		{name: "non-canonical team", mutate: func(event *auditEvent) { event.TeamID = " team-1 " }},
+		{name: "non-canonical sandbox", mutate: func(event *auditEvent) { event.SandboxID = " sb-1 " }},
+		{name: "non-canonical producer", mutate: func(event *auditEvent) { event.ProducerInstance = " node-a:boot-a " }},
+		{name: "negative producer sequence", mutate: func(event *auditEvent) { event.ProducerSequence = -1 }},
+		{name: "missing timestamp", mutate: func(event *auditEvent) { event.Timestamp = time.Time{} }},
+		{name: "timestamp outside storage range", mutate: func(event *auditEvent) {
+			event.Timestamp = time.Date(1899, time.December, 31, 23, 59, 59, 0, time.UTC)
+		}},
+		{name: "invalid phase", mutate: func(event *auditEvent) { event.Phase = "finished" }},
+		{name: "invalid outcome", mutate: func(event *auditEvent) { event.Outcome = "maybe" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			spool, err := newAuditSpool(dir)
+			if err != nil {
+				t.Fatalf("newAuditSpool() error = %v", err)
+			}
+			event := newAuditDeliveryTestEvent("abababab-abab-4bab-8bab-abababababab", sandboxobservability.EventPhaseResult)
+			tt.mutate(&event)
+			if err := spool.Put(event); err == nil {
+				t.Fatal("Put() error = nil for malformed audit fact")
+			}
+			if _, ok := (&httpAuditSink{}).toObservabilityEvent(event); ok {
+				t.Fatal("toObservabilityEvent() accepted malformed audit fact")
+			}
+
+			payload, err := json.Marshal(event)
+			if err != nil {
+				t.Fatalf("Marshal() error = %v", err)
+			}
+			path := filepath.Join(dir, event.EventID+".json")
+			if err := os.WriteFile(path, payload, 0o600); err != nil {
+				t.Fatalf("WriteFile() error = %v", err)
+			}
+			if events, err := spool.Load(1); err == nil {
+				t.Fatalf("Load() error = nil, events = %#v", events)
+			}
+			if _, err := newAuditSpool(dir); err == nil {
+				t.Fatal("newAuditSpool() error = nil for malformed startup record")
+			}
+		})
+	}
+}
+
 func TestAuditSpoolLoadIgnoresRecordThatVanishedAfterDirectoryListing(t *testing.T) {
 	dir := t.TempDir()
 	spool, err := newAuditSpool(dir)
@@ -377,6 +413,40 @@ func TestAuditSpoolLoadIgnoresRecordThatVanishedAfterDirectoryListing(t *testing
 	}
 	if len(events) != 0 {
 		t.Fatalf("Load() events = %#v, want none", events)
+	}
+}
+
+func TestHTTPAuditSinkInvalidProjectionReleasesReservationAndStopsReplay(t *testing.T) {
+	spool, err := newAuditSpool(t.TempDir())
+	if err != nil {
+		t.Fatalf("newAuditSpool() error = %v", err)
+	}
+	event := newAuditDeliveryTestEvent("89898989-8989-4989-8989-898989898989", sandboxobservability.EventPhaseResult)
+	event.TeamID = ""
+	sink := &httpAuditSink{
+		spool:  spool,
+		queue:  make(chan auditEvent, 1),
+		queued: make(map[string]struct{}),
+		logger: zap.NewNop(),
+	}
+	if !sink.reserveDelivery(event.EventID) {
+		t.Fatal("reserveDelivery() = false, want true")
+	}
+
+	sink.flushBatch(context.Background(), []auditEvent{event})
+
+	sink.queuedMu.Lock()
+	_, stillReserved := sink.queued[event.EventID]
+	sink.queuedMu.Unlock()
+	if stillReserved {
+		t.Fatal("invalid projected event remained reserved")
+	}
+	if !sink.spoolCorrupt.Load() {
+		t.Fatal("invalid projected event did not fail the spool closed")
+	}
+	sink.enqueueSpool()
+	if got := len(sink.queue); got != 0 {
+		t.Fatalf("queue length after corrupt replay = %d, want 0", got)
 	}
 }
 

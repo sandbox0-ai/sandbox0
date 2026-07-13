@@ -28,12 +28,12 @@ type tailCursor struct {
 }
 
 func encodePageCursor(event sandboxobservability.Event) (string, error) {
-	if event.Cursor == "" {
-		return "", fmt.Errorf("event cursor is empty")
+	if event.EventID == "" {
+		return "", fmt.Errorf("event_id is empty")
 	}
 	payload := pageCursor{
 		OccurredAt: event.OccurredAt.UTC(), IngestedAt: event.IngestedAt.UTC(),
-		Source: string(event.Source), EventType: string(event.EventType), Cursor: event.Cursor,
+		Source: string(event.Source), EventType: string(event.EventType), Cursor: event.EventID,
 		PayloadHash: event.Integrity.PayloadHash,
 	}
 	encoded, err := json.Marshal(payload)

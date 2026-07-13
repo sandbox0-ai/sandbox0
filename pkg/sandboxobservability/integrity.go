@@ -11,7 +11,7 @@ import (
 
 const integrityAlgorithm = "ed25519-sha256-v1"
 
-type integrityPayload struct {
+type integrityPayloadV2 struct {
 	EventID       string         `json:"event_id"`
 	SchemaVersion int            `json:"schema_version"`
 	TeamID        string         `json:"team_id"`
@@ -22,11 +22,11 @@ type integrityPayload struct {
 	Source        Source         `json:"source"`
 	EventType     EventType      `json:"event_type"`
 	Phase         EventPhase     `json:"phase"`
-	Outcome       Outcome        `json:"outcome,omitempty"`
+	Outcome       Outcome        `json:"outcome"`
 	Actor         AuditActor     `json:"actor"`
 	Action        string         `json:"action"`
 	Resource      AuditResource  `json:"resource"`
-	OperationID   string         `json:"operation_id,omitempty"`
+	OperationID   string         `json:"operation_id"`
 	ParentEventID string         `json:"parent_event_id,omitempty"`
 	Producer      AuditProducer  `json:"producer"`
 	Request       AuditRequest   `json:"request,omitempty"`
@@ -39,7 +39,10 @@ type integrityPayload struct {
 // gateway receipt timestamp is storage metadata and intentionally excluded so
 // replaying one producer event keeps the same canonical hash.
 func CanonicalEventPayload(event Event) ([]byte, error) {
-	payload := integrityPayload{
+	if event.SchemaVersion != CurrentEventSchemaVersion {
+		return nil, fmt.Errorf("unsupported audit event schema version %d", event.SchemaVersion)
+	}
+	payload := integrityPayloadV2{
 		EventID:       event.EventID,
 		SchemaVersion: event.SchemaVersion,
 		TeamID:        event.TeamID,
@@ -71,19 +74,24 @@ func SignEvent(event *Event, privateKey ed25519.PrivateKey) error {
 	if len(privateKey) != ed25519.PrivateKeySize {
 		return fmt.Errorf("invalid audit signing key")
 	}
+	if err := ValidateEventForSigning(*event); err != nil {
+		return fmt.Errorf("invalid audit event: %w", err)
+	}
 	payload, err := CanonicalEventPayload(*event)
 	if err != nil {
 		return fmt.Errorf("canonicalize audit event: %w", err)
 	}
 	digest := sha256.Sum256(payload)
 	publicKey := privateKey.Public().(ed25519.PublicKey)
-	keyDigest := sha256.Sum256(publicKey)
+	keyID, err := AuditSigningKeyID(publicKey)
+	if err != nil {
+		return err
+	}
 	event.Integrity = AuditIntegrity{
 		Algorithm:    integrityAlgorithm,
 		PayloadHash:  hex.EncodeToString(digest[:]),
 		Signature:    base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, digest[:])),
-		SigningKeyID: hex.EncodeToString(keyDigest[:]),
-		Status:       "verified",
+		SigningKeyID: keyID,
 	}
 	return nil
 }
@@ -91,8 +99,11 @@ func SignEvent(event *Event, privateKey ed25519.PrivateKey) error {
 // VerifyEventIntegrity verifies both the canonical payload digest and its
 // signature against the supplied audit public key.
 func VerifyEventIntegrity(event Event, publicKey ed25519.PublicKey) error {
-	if event.Integrity.Algorithm != integrityAlgorithm {
-		return fmt.Errorf("unsupported integrity algorithm %q", event.Integrity.Algorithm)
+	if len(publicKey) != ed25519.PublicKeySize {
+		return fmt.Errorf("invalid audit public key")
+	}
+	if err := ValidateSignedEvent(event); err != nil {
+		return err
 	}
 	payload, err := CanonicalEventPayload(event)
 	if err != nil {
@@ -109,9 +120,22 @@ func VerifyEventIntegrity(event Event, publicKey ed25519.PublicKey) error {
 	if !ed25519.Verify(publicKey, digest[:], signature) {
 		return fmt.Errorf("invalid audit signature")
 	}
-	keyDigest := sha256.Sum256(publicKey)
-	if event.Integrity.SigningKeyID != hex.EncodeToString(keyDigest[:]) {
+	keyID, err := AuditSigningKeyID(publicKey)
+	if err != nil {
+		return err
+	}
+	if event.Integrity.SigningKeyID != keyID {
 		return fmt.Errorf("audit signing key id mismatch")
 	}
 	return nil
+}
+
+// AuditSigningKeyID returns the stable identifier stored with signatures made
+// by the supplied Ed25519 public key.
+func AuditSigningKeyID(publicKey ed25519.PublicKey) (string, error) {
+	if len(publicKey) != ed25519.PublicKeySize {
+		return "", fmt.Errorf("invalid audit public key")
+	}
+	digest := sha256.Sum256(publicKey)
+	return hex.EncodeToString(digest[:]), nil
 }

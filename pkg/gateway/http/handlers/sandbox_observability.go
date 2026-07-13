@@ -44,12 +44,13 @@ type SandboxObservabilityHandler struct {
 	repo   sandboxobservability.Repository
 	writer sandboxobservability.Writer
 	logger *zap.Logger
-	audit  *AuditIngestPolicy
+	audit  *AuditIntegrityPolicy
 }
 
-// AuditIngestPolicy defines cluster-gateway-owned audit identity and signing.
-// Producer-controlled identity fields are replaced before ClickHouse insert.
-type AuditIngestPolicy struct {
+// AuditIntegrityPolicy defines cluster-gateway-owned audit identity, signing,
+// and query-time verification. Producer-controlled identity fields are
+// replaced before ClickHouse insert.
+type AuditIntegrityPolicy struct {
 	RegionID        string
 	ClusterID       string
 	SigningKey      ed25519.PrivateKey
@@ -68,7 +69,7 @@ func WithSandboxObservabilityWriter(writer sandboxobservability.Writer) SandboxO
 	}
 }
 
-func WithAuditIngestPolicy(policy AuditIngestPolicy) SandboxObservabilityHandlerOption {
+func WithAuditIntegrityPolicy(policy AuditIntegrityPolicy) SandboxObservabilityHandlerOption {
 	return func(h *SandboxObservabilityHandler) {
 		copyPolicy := policy
 		if len(copyPolicy.VerificationKey) != ed25519.PublicKeySize && len(copyPolicy.SigningKey) == ed25519.PrivateKeySize {
@@ -149,15 +150,25 @@ func (h *SandboxObservabilityHandler) verifyEventStatus(event *sandboxobservabil
 		return
 	}
 	if h.audit == nil || len(h.audit.VerificationKey) != ed25519.PublicKeySize {
-		event.Integrity.Status = "unavailable"
+		event.Integrity.SignatureStatus = sandboxobservability.AuditSignatureStatusUnavailable
+		return
+	}
+	if err := sandboxobservability.ValidateSignedEvent(*event); err != nil {
+		event.Integrity.SignatureStatus = sandboxobservability.AuditSignatureStatusInvalid
+		h.logger.Error("Sandbox audit integrity envelope is invalid", zap.String("event_id", event.EventID), zap.Error(err))
+		return
+	}
+	keyID, err := sandboxobservability.AuditSigningKeyID(h.audit.VerificationKey)
+	if err != nil || event.Integrity.SigningKeyID != keyID {
+		event.Integrity.SignatureStatus = sandboxobservability.AuditSignatureStatusUnavailable
 		return
 	}
 	if err := sandboxobservability.VerifyEventIntegrity(*event, h.audit.VerificationKey); err != nil {
-		event.Integrity.Status = "invalid"
+		event.Integrity.SignatureStatus = sandboxobservability.AuditSignatureStatusInvalid
 		h.logger.Error("Sandbox audit integrity verification failed", zap.String("event_id", event.EventID), zap.Error(err))
 		return
 	}
-	event.Integrity.Status = "verified"
+	event.Integrity.SignatureStatus = sandboxobservability.AuditSignatureStatusVerified
 }
 
 func markEventConflicts(events []sandboxobservability.Event) {
@@ -172,7 +183,7 @@ func markEventConflicts(events []sandboxobservability.Event) {
 	}
 	for i := range events {
 		if _, ok := conflicts[events[i].EventID]; ok {
-			events[i].Integrity.Status = "conflict"
+			events[i].Integrity.EventIDConflict = true
 		}
 	}
 }
@@ -311,8 +322,7 @@ func (h *SandboxObservabilityHandler) normalizeAuditEvents(ctx context.Context, 
 	if claims == nil || claims.IsSystem || strings.TrimSpace(claims.TeamID) == "" || strings.TrimSpace(claims.SandboxID) == "" {
 		return fmt.Errorf("audit ingest requires a team and sandbox scoped token")
 	}
-	source, allowedType, ok := auditProducerPolicy(claims.Caller)
-	if !ok {
+	if strings.TrimSpace(claims.Caller) != "netd" {
 		return fmt.Errorf("audit producer is not allowed")
 	}
 	now := h.audit.Now().UTC()
@@ -324,177 +334,39 @@ func (h *SandboxObservabilityHandler) normalizeAuditEvents(ctx context.Context, 
 		if _, err := uuid.Parse(event.EventID); err != nil {
 			return fmt.Errorf("event %d has invalid event_id", i)
 		}
-		if event.EventType != allowedType {
+		if event.EventType != sandboxobservability.EventTypeNetworkAudit {
 			return fmt.Errorf("event %d type is not allowed for producer %s", i, claims.Caller)
 		}
 		if event.OccurredAt.IsZero() || event.OccurredAt.After(now.Add(5*time.Minute)) {
 			return fmt.Errorf("event %d has invalid occurred_at", i)
 		}
+		if !sandboxobservability.ValidEventPhase(event.Phase) {
+			return fmt.Errorf("event %d has invalid phase", i)
+		}
 		event.SchemaVersion = sandboxobservability.CurrentEventSchemaVersion
 		event.RegionID = strings.TrimSpace(h.audit.RegionID)
 		event.ClusterID = strings.TrimSpace(h.audit.ClusterID)
 		event.IngestedAt = now
-		event.Source = source
+		event.Source = sandboxobservability.SourceNetd
 		event.Producer.Service = claims.Caller
-		if source == sandboxobservability.SourceNetd {
-			event.Actor = sandboxobservability.AuditActor{
-				Kind:       sandboxobservability.ActorKindSandboxWorkload,
-				ID:         event.SandboxID,
-				AuthMethod: "workload_token",
-			}
-			event.EventType = sandboxobservability.EventTypeNetworkAudit
-			if !sandboxobservability.ValidEventPhase(event.Phase) {
-				event.Phase = sandboxobservability.EventPhaseEffect
-			}
-			event.Action = networkAuditAction(event.Attributes)
-			event.Resource = sandboxobservability.AuditResource{Type: "sandbox_network", ID: event.SandboxID}
-			event.Attributes = sanitizeNetworkAuditAttributes(event.Attributes)
-		} else {
-			event.Actor = auditActorFromClaims(claims)
+		event.Actor = sandboxobservability.AuditActor{
+			Kind:       sandboxobservability.ActorKindSandboxWorkload,
+			ID:         event.SandboxID,
+			AuthMethod: "workload_token",
 		}
-		event.Cursor = event.EventID
-		event.Watermark = event.EventID
+		event.EventType = sandboxobservability.EventTypeNetworkAudit
+		// netd observes a network flow, not an HTTP API response. Request
+		// metadata is gateway-owned and must not be accepted from this producer.
+		event.Request = sandboxobservability.AuditRequest{}
+		attributes := sandboxobservability.SanitizeNetworkAuditAttributes(event.Attributes)
+		event.Action = sandboxobservability.NetworkAuditAction(attributes)
+		event.Resource = sandboxobservability.AuditResource{Type: "sandbox_network", ID: event.SandboxID}
+		event.Attributes = attributes.CanonicalMap()
 		if err := sandboxobservability.SignEvent(event, h.audit.SigningKey); err != nil {
 			return fmt.Errorf("event %d integrity: %w", i, err)
 		}
 	}
 	return nil
-}
-
-func auditProducerPolicy(caller string) (sandboxobservability.Source, sandboxobservability.EventType, bool) {
-	switch strings.TrimSpace(caller) {
-	case "netd":
-		return sandboxobservability.SourceNetd, sandboxobservability.EventTypeNetworkAudit, true
-	default:
-		return "", "", false
-	}
-}
-
-func auditActorFromClaims(claims *internalauth.Claims) sandboxobservability.AuditActor {
-	if claims != nil && claims.Audit != nil {
-		return sandboxobservability.AuditActor{
-			Kind:       sandboxobservability.ActorKind(claims.Audit.Actor.Kind),
-			ID:         claims.Audit.Actor.ID,
-			UserID:     claims.Audit.Actor.UserID,
-			APIKeyID:   claims.Audit.Actor.APIKeyID,
-			AuthMethod: claims.Audit.Actor.AuthMethod,
-		}
-	}
-	if claims == nil {
-		return sandboxobservability.AuditActor{}
-	}
-	return sandboxobservability.AuditActor{Kind: sandboxobservability.ActorKindService, ID: claims.Caller, AuthMethod: "internal"}
-}
-
-func networkAuditAction(attributes map[string]any) string {
-	if action, _ := attributes["action"].(string); strings.EqualFold(action, "deny") {
-		return "network.deny"
-	}
-	return "network.connect"
-}
-
-var networkAuditStringAttributes = map[string]struct{}{
-	"flow_id": {}, "src_ip": {}, "dest_ip": {}, "transport": {},
-	"protocol": {}, "host": {}, "classifier_result": {}, "action": {},
-	"reason": {}, "outcome": {}, "adapter": {}, "adapter_capability": {},
-	"auth_rule_name": {}, "auth_ref": {}, "auth_failure_policy": {},
-	"auth_bypass_reason": {}, "auth_enforcement": {},
-}
-
-var networkAuditNumberAttributes = map[string]struct{}{
-	"dest_port": {}, "duration_ms": {}, "egress_bytes": {}, "ingress_bytes": {},
-}
-
-var networkAuditBoolAttributes = map[string]struct{}{
-	"auth_bypassed": {}, "auth_resolved": {}, "auth_cache_hit": {},
-}
-
-var networkAuditProtocolOperationFields = map[string]struct{}{
-	"rule_name": {}, "protocol": {}, "operation": {},
-	"object": {}, "action": {}, "reason": {},
-}
-
-func sanitizeNetworkAuditAttributes(attributes map[string]any) map[string]any {
-	sanitized := make(map[string]any, len(attributes))
-	for key, value := range attributes {
-		if _, ok := networkAuditStringAttributes[key]; ok {
-			if text, ok := value.(string); ok {
-				sanitized[key], _ = sandboxobservability.TruncateJSONStringContent(text, sandboxobservability.MaxNetworkAuditScalarFieldEncodedBytes)
-			}
-			continue
-		}
-		if _, ok := networkAuditNumberAttributes[key]; ok {
-			if number, ok := sanitizeAuditNumber(value); ok {
-				sanitized[key] = number
-			}
-			continue
-		}
-		if _, ok := networkAuditBoolAttributes[key]; ok {
-			if flag, ok := value.(bool); ok {
-				sanitized[key] = flag
-			}
-		}
-	}
-	operations, operationsTruncated := sanitizeNetworkAuditProtocolOperations(attributes["protocol_operations"])
-	if len(operations) > 0 {
-		sanitized["protocol_operations"] = operations
-	}
-	explicitTruncation, _ := attributes["protocol_operations_truncated"].(bool)
-	if explicitTruncation || operationsTruncated {
-		sanitized["protocol_operations_truncated"] = true
-	}
-	return sanitized
-}
-
-func sanitizeAuditNumber(value any) (any, bool) {
-	switch value.(type) {
-	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, json.Number:
-		encoded, err := json.Marshal(value)
-		return value, err == nil && len(encoded) <= 32
-	default:
-		return nil, false
-	}
-}
-
-func sanitizeNetworkAuditProtocolOperations(value any) ([]any, bool) {
-	if value == nil {
-		return nil, false
-	}
-	operations, ok := value.([]any)
-	if !ok {
-		return nil, true
-	}
-	limit := len(operations)
-	truncated := false
-	if limit > sandboxobservability.MaxNetworkAuditProtocolOperations {
-		limit = sandboxobservability.MaxNetworkAuditProtocolOperations
-		truncated = true
-	}
-	sanitized := make([]any, 0, limit)
-	for _, rawOperation := range operations[:limit] {
-		operation, ok := rawOperation.(map[string]any)
-		if !ok {
-			truncated = true
-			continue
-		}
-		bounded := make(map[string]any, len(networkAuditProtocolOperationFields))
-		for key, value := range operation {
-			if _, ok := networkAuditProtocolOperationFields[key]; !ok {
-				truncated = true
-				continue
-			}
-			text, ok := value.(string)
-			if !ok {
-				truncated = true
-				continue
-			}
-			boundedText, changed := sandboxobservability.TruncateJSONStringContent(text, sandboxobservability.MaxNetworkAuditProtocolFieldEncodedBytes)
-			truncated = truncated || changed
-			bounded[key] = boundedText
-		}
-		sanitized = append(sanitized, bounded)
-	}
-	return sanitized, truncated
 }
 
 func (h *SandboxObservabilityHandler) IngestLogs(c *gin.Context) {

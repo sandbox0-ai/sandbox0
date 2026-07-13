@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	contract "github.com/sandbox0-ai/sandbox0/pkg/apispec"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -103,6 +104,7 @@ func TestSandboxObservabilityHandlerParsesTypedQuery(t *testing.T) {
 	repo := &fakeSandboxObservabilityRepo{
 		eventsResult: &sandboxobservability.EventListResult{
 			Events: []sandboxobservability.Event{{
+				EventID:    "11111111-1111-4111-8111-111111111111",
 				TeamID:     "team-1",
 				SandboxID:  "sb-1",
 				RegionID:   "aws-us-east-1",
@@ -112,8 +114,6 @@ func TestSandboxObservabilityHandlerParsesTypedQuery(t *testing.T) {
 				Source:     sandboxobservability.SourceNetd,
 				EventType:  sandboxobservability.EventTypeNetworkAudit,
 				Outcome:    sandboxobservability.OutcomeDenied,
-				Cursor:     "netd:10",
-				Watermark:  "netd:10",
 			}},
 			NextCursor: "netd:11",
 			Watermark:  "netd:10",
@@ -160,11 +160,13 @@ func TestSandboxObservabilityHandlerReturnsInlineIntegrityStatus(t *testing.T) {
 	invalid.Action = "sandbox.delete"
 	conflictA := signedSandboxObservabilityTestEvent(t, key, "33333333-3333-4333-8333-333333333333", "sandbox.pause")
 	conflictB := signedSandboxObservabilityTestEvent(t, key, conflictA.EventID, "sandbox.resume")
+	conflictInvalid := signedSandboxObservabilityTestEvent(t, key, conflictA.EventID, "sandbox.delete")
+	conflictInvalid.Action = "sandbox.refresh"
 
 	repo := &fakeSandboxObservabilityRepo{eventsResult: &sandboxobservability.EventListResult{
-		Events: []sandboxobservability.Event{valid, invalid, conflictA, conflictB},
+		Events: []sandboxobservability.Event{valid, invalid, conflictA, conflictB, conflictInvalid},
 	}}
-	handler := NewSandboxObservabilityHandler(repo, zap.NewNop(), WithAuditIngestPolicy(AuditIngestPolicy{
+	handler := NewSandboxObservabilityHandler(repo, zap.NewNop(), WithAuditIntegrityPolicy(AuditIntegrityPolicy{
 		VerificationKey: key.Public().(ed25519.PublicKey),
 	}))
 	rec := serveSandboxObservabilityRequest(t, handler.ListEvents, "/api/v1/sandboxes/sb-1/observability/events")
@@ -173,21 +175,30 @@ func TestSandboxObservabilityHandlerReturnsInlineIntegrityStatus(t *testing.T) {
 		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	var response struct {
-		Data sandboxobservability.EventListResult `json:"data"`
+		Data contract.SandboxObservabilityEventsResponse `json:"data"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if got := response.Data.Events[0].Integrity.Status; got != "verified" {
+	if got := response.Data.Events[0].Integrity.SignatureStatus; got != contract.SandboxAuditIntegritySignatureStatusVerified {
 		t.Fatalf("valid status = %q, want verified", got)
 	}
-	if got := response.Data.Events[1].Integrity.Status; got != "invalid" {
+	if got := response.Data.Events[1].Integrity.SignatureStatus; got != contract.SandboxAuditIntegritySignatureStatusInvalid {
 		t.Fatalf("tampered status = %q, want invalid", got)
 	}
 	for i := 2; i < 4; i++ {
-		if got := response.Data.Events[i].Integrity.Status; got != "conflict" {
-			t.Fatalf("conflict event %d status = %q, want conflict", i, got)
+		if got := response.Data.Events[i].Integrity.SignatureStatus; got != contract.SandboxAuditIntegritySignatureStatusVerified {
+			t.Fatalf("conflict event %d signature status = %q, want verified", i, got)
 		}
+		if response.Data.Events[i].Integrity.EventIdConflict == nil || !*response.Data.Events[i].Integrity.EventIdConflict {
+			t.Fatalf("conflict event %d was not marked", i)
+		}
+	}
+	if got := response.Data.Events[4].Integrity.SignatureStatus; got != contract.SandboxAuditIntegritySignatureStatusInvalid {
+		t.Fatalf("invalid conflict signature status = %q, want invalid", got)
+	}
+	if response.Data.Events[4].Integrity.EventIdConflict == nil || !*response.Data.Events[4].Integrity.EventIdConflict {
+		t.Fatal("invalid conflict event was not marked independently of signature status")
 	}
 }
 
@@ -211,8 +222,38 @@ func TestSandboxObservabilityHandlerReportsUnavailableInlineVerification(t *test
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if got := response.Data.Events[0].Integrity.Status; got != "unavailable" {
+	if got := response.Data.Events[0].Integrity.SignatureStatus; got != sandboxobservability.AuditSignatureStatusUnavailable {
 		t.Fatalf("status = %q, want unavailable", got)
+	}
+}
+
+func TestSandboxObservabilityHandlerReportsHistoricalKeyAsUnavailable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	historicalSeed := make([]byte, ed25519.SeedSize)
+	historicalSeed[0] = 1
+	historicalKey := ed25519.NewKeyFromSeed(historicalSeed)
+	currentKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	event := signedSandboxObservabilityTestEvent(t, historicalKey, "66666666-6666-4666-8666-666666666666", "sandbox.pause")
+	repo := &fakeSandboxObservabilityRepo{eventsResult: &sandboxobservability.EventListResult{
+		Events: []sandboxobservability.Event{event},
+	}}
+	handler := NewSandboxObservabilityHandler(repo, zap.NewNop(), WithAuditIntegrityPolicy(AuditIntegrityPolicy{
+		VerificationKey: currentKey.Public().(ed25519.PublicKey),
+	}))
+	rec := serveSandboxObservabilityRequest(t, handler.ListEvents, "/api/v1/sandboxes/sb-1/observability/events")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var response struct {
+		Data sandboxobservability.EventListResult `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := response.Data.Events[0].Integrity.SignatureStatus; got != sandboxobservability.AuditSignatureStatusUnavailable {
+		t.Fatalf("status = %q, want unavailable for a retained historical signing key", got)
 	}
 }
 
@@ -221,7 +262,7 @@ func TestSandboxObservabilityWatchReturnsInlineIntegrityStatus(t *testing.T) {
 
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	event := signedSandboxObservabilityTestEvent(t, key, "55555555-5555-4555-8555-555555555555", "sandbox.pause")
-	handler := NewSandboxObservabilityHandler(&fakeSandboxObservabilityRepo{}, zap.NewNop(), WithAuditIngestPolicy(AuditIngestPolicy{
+	handler := NewSandboxObservabilityHandler(&fakeSandboxObservabilityRepo{}, zap.NewNop(), WithAuditIntegrityPolicy(AuditIntegrityPolicy{
 		VerificationKey: key.Public().(ed25519.PublicKey),
 	}))
 	recorder := httptest.NewRecorder()
@@ -245,8 +286,8 @@ func TestSandboxObservabilityWatchReturnsInlineIntegrityStatus(t *testing.T) {
 	if err := json.Unmarshal(encoded, &watched); err != nil {
 		t.Fatalf("decode watched event: %v", err)
 	}
-	if watched.Integrity.Status != "verified" {
-		t.Fatalf("watch integrity status = %q, want verified", watched.Integrity.Status)
+	if watched.Integrity.SignatureStatus != sandboxobservability.AuditSignatureStatusVerified {
+		t.Fatalf("watch integrity status = %q, want verified", watched.Integrity.SignatureStatus)
 	}
 }
 
@@ -268,9 +309,8 @@ func signedSandboxObservabilityTestEvent(t *testing.T, key ed25519.PrivateKey, e
 		Actor:         sandboxobservability.AuditActor{Kind: sandboxobservability.ActorKindHuman, ID: "user-1"},
 		Action:        action,
 		Resource:      sandboxobservability.AuditResource{Type: "sandbox", ID: "sb-1"},
+		OperationID:   "operation-" + eventID,
 		Producer:      sandboxobservability.AuditProducer{Service: "cluster-gateway"},
-		Cursor:        eventID,
-		Watermark:     eventID,
 	}
 	if err := sandboxobservability.SignEvent(&event, key); err != nil {
 		t.Fatalf("SignEvent() error = %v", err)
@@ -536,11 +576,11 @@ func TestSandboxObservabilityHandlerIngestEvents(t *testing.T) {
 
 	repo := &fakeSandboxObservabilityRepo{}
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
-	handler := NewSandboxObservabilityHandler(repo, zap.NewNop(), WithAuditIngestPolicy(AuditIngestPolicy{
+	handler := NewSandboxObservabilityHandler(repo, zap.NewNop(), WithAuditIntegrityPolicy(AuditIntegrityPolicy{
 		RegionID: "region-1", ClusterID: "cluster-1", SigningKey: key,
 		Now: func() time.Time { return time.Date(2026, 7, 1, 1, 3, 0, 0, time.UTC) },
 	}))
-	rec := serveSandboxObservabilityIngestRequest(t, "/internal/v1/sandbox-observability/events", handler.IngestEvents, `{"events":[{"event_id":"11111111-1111-4111-8111-111111111111","team_id":"team-1","sandbox_id":"sb-1","occurred_at":"2026-07-01T01:02:03Z","source":"netd","event_type":"network_audit","phase":"effect","outcome":"completed","producer":{"service":"netd"},"attributes":{"action":"use-adapter","protocol_operations_truncated":true,"not_allowed":"drop-me"}}]}`)
+	rec := serveSandboxObservabilityIngestRequest(t, "/internal/v1/sandbox-observability/events", handler.IngestEvents, `{"events":[{"event_id":"11111111-1111-4111-8111-111111111111","team_id":"team-1","sandbox_id":"sb-1","occurred_at":"2026-07-01T01:02:03Z","source":"netd","event_type":"network_audit","phase":"effect","outcome":"completed","operation_id":"99999999-9999-4999-8999-999999999999","producer":{"service":"netd"},"request":{"request_id":"spoofed","http_method":"POST","status_code":200},"attributes":{"action":"use-adapter","protocol_operations_truncated":true,"not_allowed":"drop-me"}}]}`)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusAccepted, rec.Body.String())
@@ -558,6 +598,9 @@ func TestSandboxObservabilityHandlerIngestEvents(t *testing.T) {
 	if _, ok := event.Attributes["not_allowed"]; ok {
 		t.Fatalf("disallowed audit attribute was retained: %#v", event.Attributes)
 	}
+	if event.Request != (sandboxobservability.AuditRequest{}) {
+		t.Fatalf("producer-controlled request metadata was retained: %+v", event.Request)
+	}
 	if err := sandboxobservability.VerifyEventIntegrity(event, key.Public().(ed25519.PublicKey)); err != nil {
 		t.Fatalf("event integrity = %v", err)
 	}
@@ -566,26 +609,33 @@ func TestSandboxObservabilityHandlerIngestEvents(t *testing.T) {
 func TestSanitizeNetworkAuditAttributesBoundsEncodedSize(t *testing.T) {
 	longValue := strings.Repeat("\x01\x02<&/very-long-path-and-reason", 4096)
 	attributes := make(map[string]any)
-	for key := range networkAuditStringAttributes {
+	for _, key := range []string{
+		"flow_id", "src_ip", "dest_ip", "transport", "protocol", "host",
+		"classifier_result", "action", "reason", "outcome", "adapter",
+		"adapter_capability", "auth_rule_name", "auth_ref", "auth_failure_policy",
+		"auth_bypass_reason", "auth_enforcement",
+	} {
 		attributes[key] = longValue
 	}
-	for key := range networkAuditNumberAttributes {
-		attributes[key] = 1.7976931348623157e+308
+	for _, key := range []string{"dest_port", "duration_ms", "egress_bytes", "ingress_bytes"} {
+		attributes[key] = 42
 	}
-	for key := range networkAuditBoolAttributes {
+	for _, key := range []string{"auth_bypassed", "auth_resolved", "auth_cache_hit"} {
 		attributes[key] = true
 	}
 	operations := make([]any, sandboxobservability.MaxNetworkAuditProtocolOperations)
 	for i := range operations {
-		operation := make(map[string]any, len(networkAuditProtocolOperationFields))
-		for key := range networkAuditProtocolOperationFields {
+		operation := make(map[string]any)
+		for _, key := range []string{"rule_name", "protocol", "operation", "object", "action", "reason"} {
 			operation[key] = longValue
 		}
 		operations[i] = operation
 	}
 	attributes["protocol_operations"] = operations
+	attributes["error"] = "must remain local"
+	attributes["auth_resolve_error"] = "must remain local"
 
-	sanitized := sanitizeNetworkAuditAttributes(attributes)
+	sanitized := sandboxobservability.SanitizeNetworkAuditAttributes(attributes).CanonicalMap()
 	truncated, _ := sanitized["protocol_operations_truncated"].(bool)
 	if !truncated {
 		t.Fatal("protocol operation field truncation was not recorded")
@@ -614,12 +664,18 @@ func TestSanitizeNetworkAuditAttributesBoundsEncodedSize(t *testing.T) {
 	if len(encoded) >= 64*1024 {
 		t.Fatalf("sanitized attributes = %d bytes, want less than ClickHouse 64 KiB limit", len(encoded))
 	}
+	if _, ok := sanitized["error"]; ok {
+		t.Fatalf("raw error entered canonical audit attributes: %#v", sanitized)
+	}
+	if _, ok := sanitized["auth_resolve_error"]; ok {
+		t.Fatalf("raw auth resolve error entered canonical audit attributes: %#v", sanitized)
+	}
 }
 
 func TestNormalizeNetdAuditReplayKeepsStableReplacingKey(t *testing.T) {
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	now := time.Date(2026, 7, 1, 1, 3, 0, 0, time.UTC)
-	handler := NewSandboxObservabilityHandler(&fakeSandboxObservabilityRepo{}, zap.NewNop(), WithAuditIngestPolicy(AuditIngestPolicy{
+	handler := NewSandboxObservabilityHandler(&fakeSandboxObservabilityRepo{}, zap.NewNop(), WithAuditIntegrityPolicy(AuditIntegrityPolicy{
 		RegionID: "region-1", ClusterID: "cluster-1", SigningKey: key,
 		Now: func() time.Time { return now },
 	}))
@@ -628,8 +684,9 @@ func TestNormalizeNetdAuditReplayKeepsStableReplacingKey(t *testing.T) {
 		OccurredAt: time.Date(2026, 7, 1, 1, 2, 3, 456789000, time.UTC),
 		EventType:  sandboxobservability.EventTypeNetworkAudit,
 		Phase:      sandboxobservability.EventPhaseAttempt, Outcome: sandboxobservability.OutcomeAccepted,
-		Producer:   sandboxobservability.AuditProducer{Sequence: 42},
-		Attributes: map[string]any{"action": "use-adapter", "host": "example.com"},
+		OperationID: "99999999-9999-4999-8999-999999999999",
+		Producer:    sandboxobservability.AuditProducer{Sequence: 42},
+		Attributes:  map[string]any{"action": "use-adapter", "host": "example.com"},
 	}
 	ctx := internalauth.WithClaims(context.Background(), &internalauth.Claims{Caller: "netd", TeamID: "team-1", SandboxID: "sb-1"})
 	first := []sandboxobservability.Event{raw}
@@ -668,7 +725,7 @@ func TestNormalizeNetdAuditReplayKeepsStableReplacingKey(t *testing.T) {
 
 func TestSandboxObservabilityHandlerRejectsUnscopedOrSpoofedAuditIngest(t *testing.T) {
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
-	handler := NewSandboxObservabilityHandler(&fakeSandboxObservabilityRepo{}, zap.NewNop(), WithAuditIngestPolicy(AuditIngestPolicy{
+	handler := NewSandboxObservabilityHandler(&fakeSandboxObservabilityRepo{}, zap.NewNop(), WithAuditIntegrityPolicy(AuditIntegrityPolicy{
 		RegionID: "region-1", ClusterID: "cluster-1", SigningKey: key,
 		Now: func() time.Time { return time.Date(2026, 7, 1, 1, 3, 0, 0, time.UTC) },
 	}))

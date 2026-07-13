@@ -146,7 +146,15 @@ func TestValidateCanonicalAuditTTLAcceptsClickHouseCanonicalInterval(t *testing.
 }
 
 func canonicalAuditTestMetadata(retentionDays int) (auditTableMetadata, []auditColumnMetadata) {
-	columns := append([]auditColumnMetadata(nil), canonicalAuditColumns...)
+	columns := make([]auditColumnMetadata, 0, len(canonicalAuditEventColumns))
+	for _, column := range canonicalAuditEventColumns {
+		columns = append(columns, auditColumnMetadata{
+			Name:              column.name,
+			Type:              column.typeName,
+			DefaultKind:       column.defaultKind,
+			DefaultExpression: column.defaultExpression,
+		})
+	}
 	return auditTableMetadata{
 		Engine:           "ReplacingMergeTree",
 		EngineFull:       "ReplacingMergeTree(version) PARTITION BY toYYYYMM(occurred_at) ORDER BY (team_id, sandbox_id, occurred_at, event_id, payload_hash)",

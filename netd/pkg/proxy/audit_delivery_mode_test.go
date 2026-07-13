@@ -1,18 +1,19 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 )
 
@@ -79,27 +80,127 @@ func TestHTTPAuditSinkDefaultsAttemptsToDurableAsync(t *testing.T) {
 	}
 }
 
-func TestHTTPAuditSinkSequenceMetadataFailureStillUsesDurableRecord(t *testing.T) {
+func TestAuditLoggerCreatesIdentityBeforeFanout(t *testing.T) {
+	var jsonl bytes.Buffer
+	local := newJSONLAuditSink(nopWriteCloser{Writer: &jsonl})
+	required := &auditSinkStub{}
+	logger := newAuditLoggerWithSink(&multiAuditSink{bestEffort: []auditSink{local}, required: required}, "node-a")
+	req := &adapterRequest{
+		Compiled: &policy.CompiledPolicy{TeamID: "team-1", SandboxID: "sb-1"},
+		Audit:    newFlowAudit("tcp-1", time.Now()),
+	}
+	decision := trafficDecision{Transport: "tcp", Action: decisionActionPassThrough}
+	if err := logger.RecordAttempt(req, decision, nil); err != nil {
+		t.Fatalf("RecordAttempt() error = %v", err)
+	}
+	if err := logger.Record(req, decision, nil, time.Millisecond, nil); err != nil {
+		t.Fatalf("Record() error = %v", err)
+	}
+	localEvents := make([]auditEvent, 2)
+	decoder := json.NewDecoder(bytes.NewReader(jsonl.Bytes()))
+	for i := range localEvents {
+		if err := decoder.Decode(&localEvents[i]); err != nil {
+			t.Fatalf("decode JSONL event %d: %v", i, err)
+		}
+	}
+	if len(required.events) != 2 {
+		t.Fatalf("required fanout events = %d, want 2", len(required.events))
+	}
+	for i := range localEvents {
+		localEvent := localEvents[i]
+		requiredEvent := required.events[i]
+		if localEvent.EventID != requiredEvent.EventID ||
+			localEvent.OperationID != requiredEvent.OperationID ||
+			localEvent.ProducerInstance != requiredEvent.ProducerInstance ||
+			localEvent.ProducerSequence != requiredEvent.ProducerSequence {
+			t.Fatalf("fanout identity mismatch at %d: local=%+v required=%+v", i, localEvent, requiredEvent)
+		}
+		if _, err := uuid.Parse(localEvent.EventID); err != nil {
+			t.Fatalf("event_id %q is not a UUID: %v", localEvent.EventID, err)
+		}
+		if _, err := uuid.Parse(localEvent.OperationID); err != nil {
+			t.Fatalf("operation_id %q is not a UUID: %v", localEvent.OperationID, err)
+		}
+		if localEvent.OperationID != req.Audit.OperationID {
+			t.Fatalf("operation_id = %q, want %q", localEvent.OperationID, req.Audit.OperationID)
+		}
+		if localEvent.ProducerSequence != int64(i+1) {
+			t.Fatalf("producer sequence = %d, want %d", localEvent.ProducerSequence, i+1)
+		}
+	}
+	if localEvents[0].EventID == localEvents[1].EventID {
+		t.Fatal("attempt and result share an event_id")
+	}
+	if !strings.HasPrefix(localEvents[0].ProducerInstance, "node-a:") ||
+		localEvents[0].ProducerInstance != localEvents[1].ProducerInstance {
+		t.Fatalf("producer instances = %q and %q", localEvents[0].ProducerInstance, localEvents[1].ProducerInstance)
+	}
+	secondBoot := newAuditLoggerWithSink(&auditSinkStub{}, "node-a")
+	if secondBoot.producerInstance == logger.producerInstance {
+		t.Fatalf("producer instance was reused across boots: %q", logger.producerInstance)
+	}
+}
+
+func TestHTTPAuditSinkAppliesFactDefaultsBeforeValidation(t *testing.T) {
+	sink := &httpAuditSink{
+		endpoint: "http://unused",
+		queue:    make(chan auditEvent, 1),
+		queued:   make(map[string]struct{}),
+	}
+	event := newAuditDeliveryTestEvent("67676767-6767-4767-8767-676767676767", sandboxobservability.EventPhaseResult)
+	event.Timestamp = time.Time{}
+	event.Phase = ""
+	if err := sink.WriteAuditEvent(event); err != nil {
+		t.Fatalf("WriteAuditEvent() error = %v", err)
+	}
+	queued := <-sink.queue
+	if queued.Timestamp.IsZero() {
+		t.Fatal("queued event timestamp was not defaulted")
+	}
+	if queued.Phase != string(sandboxobservability.EventPhaseResult) {
+		t.Fatalf("queued event phase = %q, want result", queued.Phase)
+	}
+}
+
+func TestMultiAuditSinkKeepsDiagnosticErrorsInJSONLOnly(t *testing.T) {
 	dir := t.TempDir()
 	spool, err := newAuditSpool(dir)
 	if err != nil {
 		t.Fatalf("newAuditSpool() error = %v", err)
 	}
-	if err := os.Mkdir(filepath.Join(dir, ".sequence"), 0o700); err != nil {
-		t.Fatalf("Mkdir(.sequence) error = %v", err)
+	var jsonl bytes.Buffer
+	local := newJSONLAuditSink(nopWriteCloser{Writer: &jsonl})
+	httpSink := &httpAuditSink{
+		endpoint: "http://unused",
+		spool:    spool,
+		queue:    make(chan auditEvent, 1),
+		queued:   make(map[string]struct{}),
 	}
-	sink := &httpAuditSink{
-		endpoint:     "http://unused",
-		spool:        spool,
-		queue:        make(chan auditEvent, 1),
-		queued:       make(map[string]struct{}),
-		deliveryMode: sandboxobservability.AuditDeliveryModeDurableAsync,
-	}
-
-	if err := sink.WriteAuditEvent(newAuditDeliveryTestEvent("66666666-6666-4666-8666-666666666666", sandboxobservability.EventPhaseAttempt)); err != nil {
+	sink := &multiAuditSink{bestEffort: []auditSink{local}, required: httpSink}
+	event := newAuditDeliveryTestEvent("78787878-7878-4787-8787-787878787878", sandboxobservability.EventPhaseResult)
+	event.Error = "upstream diagnostic secret"
+	event.AuthResolveError = "credential diagnostic secret"
+	if err := sink.WriteAuditEvent(event); err != nil {
 		t.Fatalf("WriteAuditEvent() error = %v", err)
 	}
-	waitForAuditSpoolCount(t, spool, 1)
+
+	var localEvent auditEvent
+	if err := json.NewDecoder(bytes.NewReader(jsonl.Bytes())).Decode(&localEvent); err != nil {
+		t.Fatalf("decode JSONL event: %v", err)
+	}
+	if localEvent.Error != event.Error || localEvent.AuthResolveError != event.AuthResolveError {
+		t.Fatalf("JSONL diagnostics = error:%q auth:%q", localEvent.Error, localEvent.AuthResolveError)
+	}
+	spooled, err := spool.Load(1)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(spooled) != 1 {
+		t.Fatalf("spooled events = %d, want 1", len(spooled))
+	}
+	if spooled[0].Error != "" || spooled[0].AuthResolveError != "" {
+		t.Fatalf("canonical spool retained diagnostics: %+v", spooled[0])
+	}
 }
 
 func TestHTTPAuditSinkCanonicalSyncWaitsForAttemptACK(t *testing.T) {
@@ -378,7 +479,9 @@ func (*auditSinkStub) Close() error { return nil }
 
 func newAuditDeliveryTestEvent(id string, phase sandboxobservability.EventPhase) auditEvent {
 	return auditEvent{
-		EventID: id, Timestamp: time.Now().UTC(), TeamID: "team-1", SandboxID: "sb-1", FlowID: "tcp-1",
+		EventID: id, OperationID: "99999999-9999-4999-8999-999999999999",
+		ProducerInstance: "node-a:boot-a", ProducerSequence: 1,
+		Timestamp: time.Now().UTC(), TeamID: "team-1", SandboxID: "sb-1", FlowID: "tcp-1",
 		Transport: "tcp", Action: "pass-through", Outcome: "accepted", Phase: string(phase),
 	}
 }

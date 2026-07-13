@@ -1,6 +1,7 @@
 package http
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -26,58 +27,71 @@ const (
 	auditCanonicalDeliveryTimeout = 5 * time.Second
 )
 
-var sandboxAuditActions = map[string]string{
-	"GET /api/v1/sandboxes/:id/observability/events":               "audit.read",
-	"GET /api/v1/sandboxes/:id/observability/logs":                 "logs.read",
-	"GET /api/v1/sandboxes/:id/metrics":                            "metrics.read",
-	"GET /api/v1/sandboxes/:id/metrics/catalog":                    "metrics.catalog.read",
-	"GET /api/v1/sandboxes":                                        "sandbox.list",
-	"POST /api/v1/sandboxes":                                       "sandbox.create",
-	"GET /api/v1/sandboxes/:id":                                    "sandbox.read",
-	"GET /api/v1/sandboxes/:id/status":                             "sandbox.status.read",
-	"PUT /api/v1/sandboxes/:id":                                    "sandbox.update",
-	"DELETE /api/v1/sandboxes/:id":                                 "sandbox.delete",
-	"POST /api/v1/sandboxes/:id/pause":                             "sandbox.pause",
-	"POST /api/v1/sandboxes/:id/resume":                            "sandbox.resume",
-	"POST /api/v1/sandboxes/:id/refresh":                           "sandbox.refresh",
-	"POST /api/v1/sandboxes/:id/fork":                              "sandbox.fork",
-	"POST /api/v1/sandboxes/:id/snapshots":                         "sandbox.rootfs_snapshot.create",
-	"GET /api/v1/sandboxes/:id/snapshots":                          "sandbox.rootfs_snapshot.list",
-	"POST /api/v1/sandboxes/:id/rootfs/restore":                    "sandbox.rootfs.restore",
-	"GET /api/v1/sandboxes/:id/network":                            "sandbox.network_policy.read",
-	"PUT /api/v1/sandboxes/:id/network":                            "sandbox.network_policy.update",
-	"GET /api/v1/sandboxes/:id/services":                           "sandbox.services.read",
-	"PUT /api/v1/sandboxes/:id/services":                           "sandbox.services.update",
-	"GET /api/v1/sandboxes/:id/sessions":                           "session.list",
-	"POST /api/v1/sandboxes/:id/sessions":                          "session.create",
-	"GET /api/v1/sandboxes/:id/sessions/:session_id":               "session.read",
-	"PUT /api/v1/sandboxes/:id/sessions/:session_id":               "session.update",
-	"DELETE /api/v1/sandboxes/:id/sessions/:session_id":            "session.delete",
-	"PUT /api/v1/sandboxes/:id/sessions/:session_id/desired-state": "session.desired_state.update",
-	"POST /api/v1/sandboxes/:id/sessions/:session_id/attempts":     "session.attempt.create",
-	"POST /api/v1/sandboxes/:id/sessions/:session_id/inputs":       "session.input",
-	"POST /api/v1/sandboxes/:id/sessions/:session_id/signals":      "session.signal",
-	"PUT /api/v1/sandboxes/:id/sessions/:session_id/terminal":      "session.terminal.update",
-	"GET /api/v1/sandboxes/:id/sessions/:session_id/events":        "session.events.read",
-	"GET /api/v1/sandboxes/:id/sessions/:session_id/events/stream": "session.events.stream",
-	"GET /api/v1/sandboxes/:id/sessions/:session_id/ws":            "session.connect",
-	"GET /api/v1/sandboxes/:id/contexts":                           "process.list",
-	"POST /api/v1/sandboxes/:id/contexts":                          "process.create",
-	"GET /api/v1/sandboxes/:id/contexts/:ctx_id":                   "process.read",
-	"DELETE /api/v1/sandboxes/:id/contexts/:ctx_id":                "process.delete",
-	"POST /api/v1/sandboxes/:id/contexts/:ctx_id/restart":          "process.restart",
-	"POST /api/v1/sandboxes/:id/contexts/:ctx_id/input":            "process.input",
-	"POST /api/v1/sandboxes/:id/contexts/:ctx_id/exec":             "process.exec",
-	"POST /api/v1/sandboxes/:id/contexts/:ctx_id/resize":           "process.terminal.resize",
-	"POST /api/v1/sandboxes/:id/contexts/:ctx_id/signal":           "process.signal",
-	"GET /api/v1/sandboxes/:id/contexts/:ctx_id/ws":                "process.connect",
-	"GET /api/v1/sandboxes/:id/files":                              "file.read",
-	"POST /api/v1/sandboxes/:id/files":                             "file.write",
-	"DELETE /api/v1/sandboxes/:id/files":                           "file.delete",
-	"GET /api/v1/sandboxes/:id/files/watch":                        "file.watch",
-	"POST /api/v1/sandboxes/:id/files/move":                        "file.move",
-	"GET /api/v1/sandboxes/:id/files/stat":                         "file.stat",
-	"GET /api/v1/sandboxes/:id/files/list":                         "directory.list",
+type sandboxAuditRoutePolicy struct {
+	Action         string
+	BufferResponse bool
+}
+
+func auditReadRoute(action string) sandboxAuditRoutePolicy {
+	return sandboxAuditRoutePolicy{Action: action}
+}
+
+func auditMutationRoute(action string) sandboxAuditRoutePolicy {
+	return sandboxAuditRoutePolicy{Action: action, BufferResponse: true}
+}
+
+var sandboxAuditRoutePolicies = map[string]sandboxAuditRoutePolicy{
+	"GET /api/v1/sandboxes/:id/observability/events":               auditReadRoute("audit.read"),
+	"GET /api/v1/sandboxes/:id/observability/logs":                 auditReadRoute("logs.read"),
+	"GET /api/v1/sandboxes/:id/metrics":                            auditReadRoute("metrics.read"),
+	"GET /api/v1/sandboxes/:id/metrics/catalog":                    auditReadRoute("metrics.catalog.read"),
+	"GET /api/v1/sandboxes":                                        auditReadRoute("sandbox.list"),
+	"POST /api/v1/sandboxes":                                       auditMutationRoute("sandbox.create"),
+	"GET /api/v1/sandboxes/:id":                                    auditReadRoute("sandbox.read"),
+	"GET /api/v1/sandboxes/:id/status":                             auditReadRoute("sandbox.status.read"),
+	"PUT /api/v1/sandboxes/:id":                                    auditMutationRoute("sandbox.update"),
+	"DELETE /api/v1/sandboxes/:id":                                 auditMutationRoute("sandbox.delete"),
+	"POST /api/v1/sandboxes/:id/pause":                             auditMutationRoute("sandbox.pause"),
+	"POST /api/v1/sandboxes/:id/resume":                            auditMutationRoute("sandbox.resume"),
+	"POST /api/v1/sandboxes/:id/refresh":                           auditMutationRoute("sandbox.refresh"),
+	"POST /api/v1/sandboxes/:id/fork":                              auditMutationRoute("sandbox.fork"),
+	"POST /api/v1/sandboxes/:id/snapshots":                         auditMutationRoute("sandbox.rootfs_snapshot.create"),
+	"GET /api/v1/sandboxes/:id/snapshots":                          auditReadRoute("sandbox.rootfs_snapshot.list"),
+	"POST /api/v1/sandboxes/:id/rootfs/restore":                    auditMutationRoute("sandbox.rootfs.restore"),
+	"GET /api/v1/sandboxes/:id/network":                            auditReadRoute("sandbox.network_policy.read"),
+	"PUT /api/v1/sandboxes/:id/network":                            auditMutationRoute("sandbox.network_policy.update"),
+	"GET /api/v1/sandboxes/:id/services":                           auditReadRoute("sandbox.services.read"),
+	"PUT /api/v1/sandboxes/:id/services":                           auditMutationRoute("sandbox.services.update"),
+	"GET /api/v1/sandboxes/:id/sessions":                           auditReadRoute("session.list"),
+	"POST /api/v1/sandboxes/:id/sessions":                          auditMutationRoute("session.create"),
+	"GET /api/v1/sandboxes/:id/sessions/:session_id":               auditReadRoute("session.read"),
+	"PUT /api/v1/sandboxes/:id/sessions/:session_id":               auditMutationRoute("session.update"),
+	"DELETE /api/v1/sandboxes/:id/sessions/:session_id":            auditMutationRoute("session.delete"),
+	"PUT /api/v1/sandboxes/:id/sessions/:session_id/desired-state": auditMutationRoute("session.desired_state.update"),
+	"POST /api/v1/sandboxes/:id/sessions/:session_id/attempts":     auditMutationRoute("session.attempt.create"),
+	"POST /api/v1/sandboxes/:id/sessions/:session_id/inputs":       auditMutationRoute("session.input"),
+	"POST /api/v1/sandboxes/:id/sessions/:session_id/signals":      auditMutationRoute("session.signal"),
+	"PUT /api/v1/sandboxes/:id/sessions/:session_id/terminal":      auditMutationRoute("session.terminal.update"),
+	"GET /api/v1/sandboxes/:id/sessions/:session_id/events":        auditReadRoute("session.events.read"),
+	"GET /api/v1/sandboxes/:id/sessions/:session_id/events/stream": auditReadRoute("session.events.stream"),
+	"GET /api/v1/sandboxes/:id/sessions/:session_id/ws":            auditReadRoute("session.connect"),
+	"GET /api/v1/sandboxes/:id/contexts":                           auditReadRoute("process.list"),
+	"POST /api/v1/sandboxes/:id/contexts":                          auditMutationRoute("process.create"),
+	"GET /api/v1/sandboxes/:id/contexts/:ctx_id":                   auditReadRoute("process.read"),
+	"DELETE /api/v1/sandboxes/:id/contexts/:ctx_id":                auditMutationRoute("process.delete"),
+	"POST /api/v1/sandboxes/:id/contexts/:ctx_id/restart":          auditMutationRoute("process.restart"),
+	"POST /api/v1/sandboxes/:id/contexts/:ctx_id/input":            auditMutationRoute("process.input"),
+	"POST /api/v1/sandboxes/:id/contexts/:ctx_id/exec":             auditMutationRoute("process.exec"),
+	"POST /api/v1/sandboxes/:id/contexts/:ctx_id/resize":           auditMutationRoute("process.terminal.resize"),
+	"POST /api/v1/sandboxes/:id/contexts/:ctx_id/signal":           auditMutationRoute("process.signal"),
+	"GET /api/v1/sandboxes/:id/contexts/:ctx_id/ws":                auditReadRoute("process.connect"),
+	"GET /api/v1/sandboxes/:id/files":                              auditReadRoute("file.read"),
+	"POST /api/v1/sandboxes/:id/files":                             auditMutationRoute("file.write"),
+	"DELETE /api/v1/sandboxes/:id/files":                           auditMutationRoute("file.delete"),
+	"GET /api/v1/sandboxes/:id/files/watch":                        auditReadRoute("file.watch"),
+	"POST /api/v1/sandboxes/:id/files/move":                        auditMutationRoute("file.move"),
+	"GET /api/v1/sandboxes/:id/files/stat":                         auditReadRoute("file.stat"),
+	"GET /api/v1/sandboxes/:id/files/list":                         auditReadRoute("directory.list"),
 }
 
 func (s *Server) auditSandboxRequests() gin.HandlerFunc {
@@ -86,11 +100,12 @@ func (s *Server) auditSandboxRequests() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		action := sandboxAuditActions[c.Request.Method+" "+c.FullPath()]
-		if action == "" {
+		policy, ok := sandboxAuditRoutePolicies[c.Request.Method+" "+c.FullPath()]
+		if !ok || policy.Action == "" {
 			c.Next()
 			return
 		}
+		action := policy.Action
 		if s.auditDelivery == nil {
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox audit backend is unavailable")
 			c.Abort()
@@ -107,8 +122,8 @@ func (s *Server) auditSandboxRequests() gin.HandlerFunc {
 			operationID = uuid.NewString()
 			authCtx.OperationID = operationID
 		}
-		deliveryMode := s.auditDeliveryModeForRequest(c)
-		attempt, err := s.newSandboxAPIEvent(c, authCtx, action, operationID, "", sandboxobservability.EventPhaseAttempt, sandboxobservability.OutcomeAccepted)
+		deliveryMode := s.auditDeliveryModeForRoute(policy)
+		attempt, err := s.newSandboxAPIEvent(c, authCtx, action, operationID, "", sandboxobservability.EventPhaseAttempt, sandboxobservability.OutcomeAccepted, 0)
 		if err == nil {
 			// The spool fsync itself is not context-cancelable, but any canonical
 			// insert (strict mode or durable fallback) is bounded.
@@ -139,7 +154,7 @@ func (s *Server) auditSandboxRequests() gin.HandlerFunc {
 		}
 
 		var buffered *auditBufferedResponseWriter
-		if auditShouldBufferResponse(c) {
+		if policy.BufferResponse {
 			buffered = newAuditBufferedResponseWriter(c.Writer, maxAuditBufferedResponseBytes)
 			c.Writer = buffered
 		}
@@ -151,10 +166,16 @@ func (s *Server) auditSandboxRequests() gin.HandlerFunc {
 				}
 			}
 			outcome := auditOutcomeForStatus(c.Writer.Status())
+			resultStatusCode := c.Writer.Status()
 			if recovered != nil || (buffered != nil && buffered.err != nil) {
 				outcome = sandboxobservability.OutcomeUnknown
 			}
-			result, resultErr := s.newSandboxAPIEvent(c, authCtx, action, operationID, attempt.EventID, sandboxobservability.EventPhaseResult, outcome)
+			if recovered != nil {
+				resultStatusCode = http.StatusInternalServerError
+			} else if buffered != nil && buffered.err != nil {
+				resultStatusCode = http.StatusServiceUnavailable
+			}
+			result, resultErr := s.newSandboxAPIEvent(c, authCtx, action, operationID, attempt.EventID, sandboxobservability.EventPhaseResult, outcome, resultStatusCode)
 			if resultErr == nil {
 				resultCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), auditCanonicalDeliveryTimeout)
 				resultErr = s.deliverAuditEvent(resultCtx, result, deliveryMode)
@@ -176,24 +197,21 @@ func (s *Server) auditSandboxRequests() gin.HandlerFunc {
 				c.Writer = buffered.ResponseWriter
 				switch {
 				case recovered != nil:
-				// Gin recovery owns the final 500 response. The successful
-				// handler response has never reached the client.
+					// Gin recovery owns the final 500 response. The successful
+					// handler response has never reached the client.
 				case errors.Is(resultErr, errAuditDeliveryPending):
-					buffered.discardHeaders()
 					spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "operation may have completed; canonical audit result is pending", gin.H{
 						"operation_id": operationID,
 						"outcome":      "unknown",
 						"audit_result": "pending",
 					})
 				case resultErr != nil:
-					buffered.discardHeaders()
 					spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "operation may have completed; audit result could not be durably recorded", gin.H{
 						"operation_id": operationID,
 						"outcome":      "unknown",
 						"audit_result": "unrecorded",
 					})
 				case buffered.err != nil:
-					buffered.discardHeaders()
 					s.logger.Error("Sandbox response could not be safely delivered after its audit result was recorded",
 						zap.String("action", action),
 						zap.String("operation_id", operationID),
@@ -218,18 +236,6 @@ func (s *Server) auditSandboxRequests() gin.HandlerFunc {
 	}
 }
 
-func auditShouldBufferResponse(c *gin.Context) bool {
-	if c == nil || c.Request == nil {
-		return false
-	}
-	switch c.Request.Method {
-	case http.MethodGet, http.MethodHead, http.MethodOptions:
-		return false
-	default:
-		return true
-	}
-}
-
 func (s *Server) configuredAuditDeliveryMode() sandboxobservability.AuditDeliveryMode {
 	if s == nil || s.cfg == nil {
 		return sandboxobservability.AuditDeliveryModeDurableAsync
@@ -237,8 +243,8 @@ func (s *Server) configuredAuditDeliveryMode() sandboxobservability.AuditDeliver
 	return sandboxobservability.NormalizeAuditDeliveryMode(s.cfg.SandboxObservability.AuditDeliveryMode)
 }
 
-func (s *Server) auditDeliveryModeForRequest(c *gin.Context) sandboxobservability.AuditDeliveryMode {
-	if auditShouldBufferResponse(c) {
+func (s *Server) auditDeliveryModeForRoute(policy sandboxAuditRoutePolicy) sandboxobservability.AuditDeliveryMode {
+	if policy.BufferResponse {
 		return sandboxobservability.AuditDeliveryModeCanonicalSync
 	}
 	return s.configuredAuditDeliveryMode()
@@ -279,8 +285,6 @@ func (s *Server) persistFailedAuditAdmission(c *gin.Context, attempt sandboxobse
 	result.Outcome = sandboxobservability.OutcomeFailed
 	result.ParentEventID = attempt.EventID
 	result.Request.StatusCode = http.StatusServiceUnavailable
-	result.Cursor = result.EventID
-	result.Watermark = result.EventID
 	result.Attributes = failedAuditAdmissionAttributes()
 	if err := sandboxobservability.SignEvent(&result, s.auditSigningKey); err != nil {
 		return fmt.Errorf("sign failed audit admission result: %w", err)
@@ -312,7 +316,7 @@ func failedAuditAdmissionDetails(operationID, auditAttemptState, auditResultStat
 	}
 }
 
-func (s *Server) newSandboxAPIEvent(c *gin.Context, authCtx *gatewayauthn.AuthContext, action, operationID, parentEventID string, phase sandboxobservability.EventPhase, outcome sandboxobservability.Outcome) (sandboxobservability.Event, error) {
+func (s *Server) newSandboxAPIEvent(c *gin.Context, authCtx *gatewayauthn.AuthContext, action, operationID, parentEventID string, phase sandboxobservability.EventPhase, outcome sandboxobservability.Outcome, resultStatusCode int) (sandboxobservability.Event, error) {
 	now := time.Now().UTC()
 	sandboxID := strings.TrimSpace(c.Param("id"))
 	if phase == sandboxobservability.EventPhaseResult {
@@ -337,7 +341,7 @@ func (s *Server) newSandboxAPIEvent(c *gin.Context, authCtx *gatewayauthn.AuthCo
 	}
 	statusCode := 0
 	if phase == sandboxobservability.EventPhaseResult {
-		statusCode = c.Writer.Status()
+		statusCode = resultStatusCode
 	}
 	event := sandboxobservability.Event{
 		EventID:       uuid.NewString(),
@@ -374,8 +378,6 @@ func (s *Server) newSandboxAPIEvent(c *gin.Context, authCtx *gatewayauthn.AuthCo
 			StatusCode: statusCode,
 		},
 	}
-	event.Cursor = event.EventID
-	event.Watermark = event.EventID
 	if err := sandboxobservability.SignEvent(&event, s.auditSigningKey); err != nil {
 		return sandboxobservability.Event{}, fmt.Errorf("sign audit event: %w", err)
 	}
@@ -416,6 +418,7 @@ func auditResourceForAction(c *gin.Context, action, sandboxID string) sandboxobs
 
 type auditBufferedResponseWriter struct {
 	gin.ResponseWriter
+	header http.Header
 	body   bytes.Buffer
 	limit  int
 	status int
@@ -423,8 +426,15 @@ type auditBufferedResponseWriter struct {
 }
 
 func newAuditBufferedResponseWriter(writer gin.ResponseWriter, limit int) *auditBufferedResponseWriter {
-	return &auditBufferedResponseWriter{ResponseWriter: writer, limit: limit, status: -1}
+	return &auditBufferedResponseWriter{
+		ResponseWriter: writer,
+		header:         writer.Header().Clone(),
+		limit:          limit,
+		status:         -1,
+	}
 }
+
+func (w *auditBufferedResponseWriter) Header() http.Header { return w.header }
 
 func (w *auditBufferedResponseWriter) WriteHeader(statusCode int) {
 	if w.status < 0 {
@@ -454,9 +464,24 @@ func (w *auditBufferedResponseWriter) WriteString(value string) (int, error) {
 	return w.Write([]byte(value))
 }
 
+// Streaming and connection takeover would expose a response before its audit
+// result reaches canonical storage. Record those attempts as delivery errors
+// instead of forwarding them to the underlying writer.
 func (w *auditBufferedResponseWriter) Flush() {
 	w.WriteHeaderNow()
+	w.setUnsupportedError("streaming flush")
 }
+
+func (w *auditBufferedResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	err := w.setUnsupportedError("connection hijacking")
+	return nil, nil, err
+}
+
+func (w *auditBufferedResponseWriter) CloseNotify() <-chan bool {
+	return w.ResponseWriter.CloseNotify()
+}
+
+func (w *auditBufferedResponseWriter) Pusher() http.Pusher { return nil }
 
 func (w *auditBufferedResponseWriter) Status() int {
 	if w.status < 0 {
@@ -470,6 +495,7 @@ func (w *auditBufferedResponseWriter) Size() int { return w.body.Len() }
 func (w *auditBufferedResponseWriter) Written() bool { return w.status >= 0 }
 
 func (w *auditBufferedResponseWriter) commit() error {
+	replaceHTTPHeaders(w.ResponseWriter.Header(), w.header)
 	if w.status >= 0 {
 		w.ResponseWriter.WriteHeader(w.status)
 	}
@@ -480,10 +506,19 @@ func (w *auditBufferedResponseWriter) commit() error {
 	return err
 }
 
-func (w *auditBufferedResponseWriter) discardHeaders() {
-	header := w.Header()
-	for _, name := range []string{"Content-Length", "Content-Encoding", "ETag", "Last-Modified"} {
-		header.Del(name)
+func (w *auditBufferedResponseWriter) setUnsupportedError(operation string) error {
+	if w.err == nil {
+		w.err = fmt.Errorf("audit buffered response does not support %s", operation)
+	}
+	return w.err
+}
+
+func replaceHTTPHeaders(destination, source http.Header) {
+	for name := range destination {
+		delete(destination, name)
+	}
+	for name, values := range source {
+		destination[name] = append([]string(nil), values...)
 	}
 }
 
@@ -570,8 +605,6 @@ func (s *Server) beginExposureAudit(c *gin.Context, sandbox *mgr.Sandbox, servic
 		if phase == sandboxobservability.EventPhaseResult {
 			event.Request.StatusCode = c.Writer.Status()
 		}
-		event.Cursor = event.EventID
-		event.Watermark = event.EventID
 		if err := sandboxobservability.SignEvent(&event, s.auditSigningKey); err != nil {
 			return sandboxobservability.Event{}, err
 		}

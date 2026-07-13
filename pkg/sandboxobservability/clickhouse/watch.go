@@ -67,7 +67,7 @@ func (r *Repository) watchEvents(ctx context.Context, query sandboxobservability
 	nextCursor := ""
 	if len(events) > 0 {
 		last := events[len(events)-1]
-		nextCursor, err = encodeTailCursor(eventTailCursorKind, last.IngestedAt, string(last.Source), string(last.EventType), last.Cursor, last.Integrity.PayloadHash)
+		nextCursor, err = encodeTailCursor(eventTailCursorKind, last.IngestedAt, string(last.Source), string(last.EventType), last.EventID, last.Integrity.PayloadHash)
 		if err != nil {
 			return nil, fmt.Errorf("%w: encode cursor: %v", sandboxobservability.ErrBackendUnavailable, err)
 		}
@@ -82,56 +82,12 @@ func (r *Repository) watchEvents(ctx context.Context, query sandboxobservability
 func (r *Repository) buildWatchEventsSQL(query sandboxobservability.EventQuery, limit int, cursor *tailCursor) (string, []any) {
 	var builder strings.Builder
 	builder.WriteString("SELECT ")
-	builder.WriteString(eventSelectColumns)
+	builder.WriteString(auditEventSelectColumns)
 	builder.WriteString(" FROM ")
 	builder.WriteString(r.eventsTable)
-	builder.WriteString(" FINAL WHERE team_id = ? AND sandbox_id = ?")
+	builder.WriteString(" FINAL WHERE ")
 
-	args := []any{query.TeamID, query.SandboxID}
-	if query.StartTime != nil {
-		builder.WriteString(" AND occurred_at >= " + dateTime64NanoPlaceholder)
-		args = append(args, dateTime64NanoArg(*query.StartTime))
-	}
-	if query.EndTime != nil {
-		builder.WriteString(" AND occurred_at <= " + dateTime64NanoPlaceholder)
-		args = append(args, dateTime64NanoArg(*query.EndTime))
-	}
-	if query.Source != "" {
-		builder.WriteString(" AND source = ?")
-		args = append(args, string(query.Source))
-	}
-	if query.EventType != "" {
-		builder.WriteString(" AND event_type = ?")
-		args = append(args, string(query.EventType))
-	}
-	if query.Outcome != "" {
-		builder.WriteString(" AND outcome = ?")
-		args = append(args, string(query.Outcome))
-	}
-	if query.ActorKind != "" {
-		builder.WriteString(" AND actor_kind = ?")
-		args = append(args, string(query.ActorKind))
-	}
-	if query.ActorID != "" {
-		builder.WriteString(" AND actor_id = ?")
-		args = append(args, query.ActorID)
-	}
-	if query.Action != "" {
-		builder.WriteString(" AND action = ?")
-		args = append(args, query.Action)
-	}
-	if query.ResourceType != "" {
-		builder.WriteString(" AND resource_type = ?")
-		args = append(args, query.ResourceType)
-	}
-	if query.OperationID != "" {
-		builder.WriteString(" AND operation_id = ?")
-		args = append(args, query.OperationID)
-	}
-	if query.EventID != "" {
-		builder.WriteString(" AND event_id = ?")
-		args = append(args, query.EventID)
-	}
+	args := appendEventFilters(&builder, query)
 	if cursor != nil {
 		builder.WriteString(" AND (ingested_at, source, event_type, event_id, payload_hash) > (")
 		builder.WriteString(dateTime64NanoPlaceholder + ", ?, ?, ?, ?)")
@@ -191,6 +147,9 @@ func normalizeWatchEventQuery(query sandboxobservability.EventQuery, opts sandbo
 	cursor, err := normalizeWatchCursor(opts, eventTailCursorKind)
 	if err != nil {
 		return sandboxobservability.EventQuery{}, 0, nil, err
+	}
+	if cursor != nil && !sandboxobservability.ValidDateTime64Nano(cursor.IngestedAt) {
+		return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("%w: timestamp is outside the DateTime64(9) range", sandboxobservability.ErrInvalidCursor)
 	}
 	return normalized, limit, cursor, nil
 }

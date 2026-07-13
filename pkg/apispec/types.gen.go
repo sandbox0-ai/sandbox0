@@ -258,12 +258,16 @@ const (
 	Result  SandboxAuditEventPhase = "result"
 )
 
-// Defines values for SandboxAuditIntegrityStatus.
+// Defines values for SandboxAuditIntegrityAlgorithm.
 const (
-	SandboxAuditIntegrityStatusConflict    SandboxAuditIntegrityStatus = "conflict"
-	SandboxAuditIntegrityStatusInvalid     SandboxAuditIntegrityStatus = "invalid"
-	SandboxAuditIntegrityStatusUnavailable SandboxAuditIntegrityStatus = "unavailable"
-	SandboxAuditIntegrityStatusVerified    SandboxAuditIntegrityStatus = "verified"
+	Ed25519Sha256V1 SandboxAuditIntegrityAlgorithm = "ed25519-sha256-v1"
+)
+
+// Defines values for SandboxAuditIntegritySignatureStatus.
+const (
+	SandboxAuditIntegritySignatureStatusInvalid     SandboxAuditIntegritySignatureStatus = "invalid"
+	SandboxAuditIntegritySignatureStatusUnavailable SandboxAuditIntegritySignatureStatus = "unavailable"
+	SandboxAuditIntegritySignatureStatusVerified    SandboxAuditIntegritySignatureStatus = "verified"
 )
 
 // Defines values for SandboxFunctionRuntime.
@@ -289,6 +293,11 @@ const (
 const (
 	AllowAll SandboxNetworkPolicyMode = "allow-all"
 	BlockAll SandboxNetworkPolicyMode = "block-all"
+)
+
+// Defines values for SandboxObservabilityEventSchemaVersion.
+const (
+	N2 SandboxObservabilityEventSchemaVersion = 2
 )
 
 // Defines values for SandboxObservabilityEventType.
@@ -2167,15 +2176,21 @@ type SandboxAuditEventPhase string
 
 // SandboxAuditIntegrity defines model for SandboxAuditIntegrity.
 type SandboxAuditIntegrity struct {
-	Algorithm    string                      `json:"algorithm"`
-	PayloadHash  string                      `json:"payload_hash"`
-	Signature    string                      `json:"signature"`
-	SigningKeyId string                      `json:"signing_key_id"`
-	Status       SandboxAuditIntegrityStatus `json:"status"`
+	Algorithm SandboxAuditIntegrityAlgorithm `json:"algorithm"`
+
+	// EventIdConflict True when the query observed the same event ID with a different canonical payload hash.
+	EventIdConflict *bool                                `json:"event_id_conflict,omitempty"`
+	PayloadHash     string                               `json:"payload_hash"`
+	Signature       string                               `json:"signature"`
+	SignatureStatus SandboxAuditIntegritySignatureStatus `json:"signature_status"`
+	SigningKeyId    string                               `json:"signing_key_id"`
 }
 
-// SandboxAuditIntegrityStatus defines model for SandboxAuditIntegrity.Status.
-type SandboxAuditIntegrityStatus string
+// SandboxAuditIntegrityAlgorithm defines model for SandboxAuditIntegrity.Algorithm.
+type SandboxAuditIntegrityAlgorithm string
+
+// SandboxAuditIntegritySignatureStatus defines model for SandboxAuditIntegrity.SignatureStatus.
+type SandboxAuditIntegritySignatureStatus string
 
 // SandboxAuditProducer defines model for SandboxAuditProducer.
 type SandboxAuditProducer struct {
@@ -2275,30 +2290,31 @@ type SandboxNetworkPolicyMode string
 
 // SandboxObservabilityEvent defines model for SandboxObservabilityEvent.
 type SandboxObservabilityEvent struct {
-	Action        string                        `json:"action"`
-	Actor         SandboxAuditActor             `json:"actor"`
-	Attributes    *map[string]interface{}       `json:"attributes,omitempty"`
-	ClusterId     string                        `json:"cluster_id"`
-	Cursor        string                        `json:"cursor"`
-	EventId       openapi_types.UUID            `json:"event_id"`
-	EventType     SandboxObservabilityEventType `json:"event_type"`
-	IngestedAt    time.Time                     `json:"ingested_at"`
-	Integrity     SandboxAuditIntegrity         `json:"integrity"`
-	OccurredAt    time.Time                     `json:"occurred_at"`
-	OperationId   *string                       `json:"operation_id,omitempty"`
-	Outcome       SandboxObservabilityOutcome   `json:"outcome"`
-	ParentEventId *openapi_types.UUID           `json:"parent_event_id,omitempty"`
-	Phase         SandboxAuditEventPhase        `json:"phase"`
-	Producer      SandboxAuditProducer          `json:"producer"`
-	RegionId      string                        `json:"region_id"`
-	Request       *SandboxAuditRequest          `json:"request,omitempty"`
-	Resource      SandboxAuditResource          `json:"resource"`
-	SandboxId     string                        `json:"sandbox_id"`
-	SchemaVersion int                           `json:"schema_version"`
-	Source        ObservabilityEventSource      `json:"source"`
-	TeamId        string                        `json:"team_id"`
-	Watermark     string                        `json:"watermark"`
+	Action        string                                 `json:"action"`
+	Actor         SandboxAuditActor                      `json:"actor"`
+	Attributes    *map[string]interface{}                `json:"attributes,omitempty"`
+	ClusterId     string                                 `json:"cluster_id"`
+	EventId       openapi_types.UUID                     `json:"event_id"`
+	EventType     SandboxObservabilityEventType          `json:"event_type"`
+	IngestedAt    time.Time                              `json:"ingested_at"`
+	Integrity     SandboxAuditIntegrity                  `json:"integrity"`
+	OccurredAt    time.Time                              `json:"occurred_at"`
+	OperationId   string                                 `json:"operation_id"`
+	Outcome       SandboxObservabilityOutcome            `json:"outcome"`
+	ParentEventId *openapi_types.UUID                    `json:"parent_event_id,omitempty"`
+	Phase         SandboxAuditEventPhase                 `json:"phase"`
+	Producer      SandboxAuditProducer                   `json:"producer"`
+	RegionId      string                                 `json:"region_id"`
+	Request       *SandboxAuditRequest                   `json:"request,omitempty"`
+	Resource      SandboxAuditResource                   `json:"resource"`
+	SandboxId     string                                 `json:"sandbox_id"`
+	SchemaVersion SandboxObservabilityEventSchemaVersion `json:"schema_version"`
+	Source        ObservabilityEventSource               `json:"source"`
+	TeamId        string                                 `json:"team_id"`
 }
+
+// SandboxObservabilityEventSchemaVersion defines model for SandboxObservabilityEvent.SchemaVersion.
+type SandboxObservabilityEventSchemaVersion int
 
 // SandboxObservabilityEventType defines model for SandboxObservabilityEventType.
 type SandboxObservabilityEventType string

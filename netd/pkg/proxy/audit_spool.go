@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -18,7 +17,6 @@ var errAuditSpoolWrite = errors.New("audit spool write failed")
 
 type auditSpool struct {
 	dir string
-	mu  sync.Mutex
 	// putMu makes the read-before-rename collision check atomic for concurrent
 	// writes of the same event ID without serializing Put behind Load.
 	putMu sync.Mutex
@@ -26,7 +24,6 @@ type auditSpool struct {
 	// Remove, so replay cannot classify a concurrently acknowledged record as
 	// corrupt without adding a full spool scan to admission latency.
 	recordsMu sync.RWMutex
-	sequence  uint64
 }
 
 func newAuditSpool(dir string) (*auditSpool, error) {
@@ -38,60 +35,10 @@ func newAuditSpool(dir string) (*auditSpool, error) {
 		return nil, fmt.Errorf("create audit spool: %w", err)
 	}
 	spool := &auditSpool{dir: dir}
-	if payload, err := os.ReadFile(filepath.Join(dir, ".sequence")); err == nil {
-		sequence, parseErr := strconv.ParseUint(strings.TrimSpace(string(payload)), 10, 64)
-		if parseErr != nil {
-			return nil, fmt.Errorf("parse audit spool sequence: %w", parseErr)
-		}
-		spool.sequence = sequence
-	} else if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("read audit spool sequence: %w", err)
-	}
 	if err := spool.validateRecords(); err != nil {
 		return nil, err
 	}
 	return spool, nil
-}
-
-func (s *auditSpool) NextSequence() (uint64, error) {
-	if s == nil {
-		return 0, nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.sequence == ^uint64(0) {
-		return 0, fmt.Errorf("audit producer sequence exhausted")
-	}
-	next := s.sequence + 1
-	tmp, err := os.CreateTemp(s.dir, ".sequence-*.tmp")
-	if err != nil {
-		return 0, fmt.Errorf("create audit sequence temp file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return 0, fmt.Errorf("chmod audit sequence temp file: %w", err)
-	}
-	if _, err := tmp.WriteString(strconv.FormatUint(next, 10)); err != nil {
-		_ = tmp.Close()
-		return 0, fmt.Errorf("write audit sequence: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return 0, fmt.Errorf("sync audit sequence: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return 0, fmt.Errorf("close audit sequence: %w", err)
-	}
-	if err := os.Rename(tmpPath, filepath.Join(s.dir, ".sequence")); err != nil {
-		return 0, fmt.Errorf("commit audit sequence: %w", err)
-	}
-	if err := syncDirectory(s.dir); err != nil {
-		return 0, err
-	}
-	s.sequence = next
-	return next, nil
 }
 
 func (s *auditSpool) Put(event auditEvent) error {
@@ -102,11 +49,8 @@ func (s *auditSpool) Put(event auditEvent) error {
 	defer s.putMu.Unlock()
 	s.recordsMu.RLock()
 	defer s.recordsMu.RUnlock()
-	if strings.TrimSpace(event.EventID) == "" {
-		return fmt.Errorf("audit event_id is required")
-	}
-	if _, err := uuid.Parse(event.EventID); err != nil {
-		return fmt.Errorf("audit event_id is invalid")
+	if err := validateSpoolAuditEvent(event); err != nil {
+		return err
 	}
 	payload, err := json.Marshal(event)
 	if err != nil {
@@ -193,7 +137,7 @@ func (s *auditSpool) Load(limit int) ([]auditEvent, error) {
 			proxyMetrics.RecordAuditIngestEvents("corrupt", 1)
 			return nil, fmt.Errorf("corrupt audit spool record %s", name)
 		}
-		if _, err := uuid.Parse(event.EventID); err != nil || name != event.EventID+".json" {
+		if validateSpoolAuditEvent(event) != nil || name != event.EventID+".json" {
 			proxyMetrics.RecordAuditIngestEvents("corrupt", 1)
 			return nil, fmt.Errorf("corrupt audit spool identity %s", name)
 		}
@@ -240,7 +184,7 @@ func (s *auditSpool) validateRecords() error {
 		if err := json.Unmarshal(payload, &event); err != nil {
 			return fmt.Errorf("corrupt audit spool record %s", entry.Name())
 		}
-		if _, err := uuid.Parse(event.EventID); err != nil || entry.Name() != event.EventID+".json" {
+		if validateSpoolAuditEvent(event) != nil || entry.Name() != event.EventID+".json" {
 			return fmt.Errorf("corrupt audit spool identity %s", entry.Name())
 		}
 	}

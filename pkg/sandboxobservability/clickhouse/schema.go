@@ -27,53 +27,13 @@ func SchemaStatements(cfg Config) ([]string, error) {
 	return []string{
 		fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", database),
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
-	event_id String,
-	schema_version UInt16,
-	team_id String,
-	sandbox_id String,
-	region_id LowCardinality(String),
-	cluster_id LowCardinality(String),
-	occurred_at DateTime64(9, 'UTC'),
-	ingested_at DateTime64(9, 'UTC'),
-	source LowCardinality(String),
-	event_type LowCardinality(String),
-	phase LowCardinality(String),
-	outcome LowCardinality(String),
-	actor_kind LowCardinality(String),
-	actor_id String,
-	actor_user_id String,
-	actor_api_key_id String,
-	actor_auth_method LowCardinality(String),
-	action LowCardinality(String),
-	resource_type LowCardinality(String),
-	resource_id String,
-	resource_subresource String,
-	operation_id String,
-	parent_event_id String,
-	producer_service LowCardinality(String),
-	producer_instance String,
-	producer_sequence UInt64,
-	request_id String,
-	trace_id String,
-	source_ip String,
-	user_agent String,
-	http_method LowCardinality(String),
-	route String,
-	status_code UInt16,
-	cursor String,
-	watermark String,
-	attributes String,
-	integrity_algorithm LowCardinality(String),
-	payload_hash FixedString(64),
-	signature String,
-	signing_key_id FixedString(64),
-	version UInt64 MATERIALIZED toUnixTimestamp64Nano(ingested_at)
+%s
 )
 	ENGINE = ReplacingMergeTree(version)
 	PARTITION BY toYYYYMM(occurred_at)
 	ORDER BY (team_id, sandbox_id, occurred_at, event_id, payload_hash)
 	TTL %s
-	SETTINGS index_granularity = 8192`, eventsTable, eventsTTL),
+	SETTINGS index_granularity = 8192`, eventsTable, auditEventColumnDefinitions(), eventsTTL),
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 	team_id String,
 	sandbox_id String,

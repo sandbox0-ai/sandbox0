@@ -29,12 +29,16 @@ var (
 	errAuditSpoolWrite      = errors.New("audit spool write failed")
 )
 
+type auditEventInserter interface {
+	InsertEvents(context.Context, []sandboxobservability.Event) error
+}
+
 // auditDelivery is an fsync-backed delivery buffer. ClickHouse remains
 // the sole canonical store; files are removed only after ClickHouse ACKs the
 // exact signed event.
 type auditDelivery struct {
 	dir             string
-	writer          sandboxobservability.Writer
+	writer          auditEventInserter
 	logger          *zap.Logger
 	verificationKey ed25519.PublicKey
 	mu              sync.Mutex
@@ -43,7 +47,7 @@ type auditDelivery struct {
 	canonicalSlot   chan struct{}
 }
 
-func newAuditDelivery(dir string, writer sandboxobservability.Writer, logger *zap.Logger, verificationKeys ...ed25519.PublicKey) (*auditDelivery, error) {
+func newAuditDelivery(dir string, writer auditEventInserter, logger *zap.Logger, verificationKey ed25519.PublicKey) (*auditDelivery, error) {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
 		return nil, fmt.Errorf("audit spool directory is required")
@@ -58,14 +62,12 @@ func newAuditDelivery(dir string, writer sandboxobservability.Writer, logger *za
 		return nil, fmt.Errorf("create audit spool: %w", err)
 	}
 	delivery := &auditDelivery{
-		dir:           dir,
-		writer:        writer,
-		logger:        logger,
-		wake:          make(chan struct{}, 1),
-		canonicalSlot: make(chan struct{}, 1),
-	}
-	if len(verificationKeys) > 0 {
-		delivery.verificationKey = verificationKeys[0]
+		dir:             dir,
+		writer:          writer,
+		logger:          logger,
+		verificationKey: verificationKey,
+		wake:            make(chan struct{}, 1),
+		canonicalSlot:   make(chan struct{}, 1),
 	}
 	if _, err := delivery.loadLocked(); err != nil {
 		return nil, err
@@ -277,11 +279,8 @@ func (d *auditDelivery) pendingLocked(eventID string) (bool, error) {
 }
 
 func (d *auditDelivery) putLocked(event sandboxobservability.Event) error {
-	if strings.TrimSpace(event.EventID) == "" {
-		return fmt.Errorf("audit event_id is required")
-	}
-	if _, err := uuid.Parse(event.EventID); err != nil {
-		return fmt.Errorf("audit event_id is invalid")
+	if err := sandboxobservability.ValidateSignedEvent(event); err != nil {
+		return fmt.Errorf("audit event is invalid: %w", err)
 	}
 	if len(d.verificationKey) == ed25519.PublicKeySize {
 		if err := sandboxobservability.VerifyEventIntegrity(event, d.verificationKey); err != nil {
@@ -368,7 +367,10 @@ func (d *auditDelivery) loadBatchLocked(limit int) ([]sandboxobservability.Event
 		if err := json.Unmarshal(payload, &event); err != nil || strings.TrimSpace(event.EventID) == "" {
 			return nil, fmt.Errorf("corrupt audit spool record %s", name)
 		}
-		if _, err := uuid.Parse(event.EventID); err != nil || name != event.EventID+".json" {
+		if err := sandboxobservability.ValidateSignedEvent(event); err != nil {
+			return nil, fmt.Errorf("invalid audit spool event %s: %w", name, err)
+		}
+		if name != event.EventID+".json" {
 			return nil, fmt.Errorf("corrupt audit spool identity %s", name)
 		}
 		if len(d.verificationKey) == ed25519.PublicKeySize {

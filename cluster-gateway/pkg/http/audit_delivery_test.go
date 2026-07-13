@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,6 +14,35 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	"go.uber.org/zap"
 )
+
+var auditDeliveryTestSigningKey = ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+
+func testAuditDeliveryEvent(t *testing.T, eventID string) sandboxobservability.Event {
+	t.Helper()
+	event := sandboxobservability.Event{
+		EventID:       eventID,
+		SchemaVersion: sandboxobservability.CurrentEventSchemaVersion,
+		TeamID:        "team-1",
+		SandboxID:     "sb-1",
+		RegionID:      "region-1",
+		ClusterID:     "cluster-1",
+		OccurredAt:    time.Date(2026, time.July, 13, 0, 0, 0, 0, time.UTC),
+		IngestedAt:    time.Date(2026, time.July, 13, 0, 0, 0, 0, time.UTC),
+		Source:        sandboxobservability.SourceClusterGateway,
+		EventType:     sandboxobservability.EventTypeAPIAccess,
+		Phase:         sandboxobservability.EventPhaseEffect,
+		Outcome:       sandboxobservability.OutcomeSucceeded,
+		Actor:         sandboxobservability.AuditActor{Kind: sandboxobservability.ActorKindService, ID: "cluster-gateway"},
+		Action:        "audit.delivery.test",
+		Resource:      sandboxobservability.AuditResource{Type: "sandbox", ID: "sb-1"},
+		OperationID:   "operation-1",
+		Producer:      sandboxobservability.AuditProducer{Service: "cluster-gateway"},
+	}
+	if err := sandboxobservability.SignEvent(&event, auditDeliveryTestSigningKey); err != nil {
+		t.Fatalf("SignEvent() error = %v", err)
+	}
+	return event
+}
 
 type auditDeliveryWriter struct {
 	mu       sync.Mutex
@@ -47,14 +77,6 @@ func (w *auditDeliveryWriter) InsertEvents(_ context.Context, events []sandboxob
 	return nil
 }
 
-func (*auditDeliveryWriter) InsertLogs(context.Context, []sandboxobservability.LogEntry) error {
-	return nil
-}
-
-func (*auditDeliveryWriter) InsertRuntimeSamples(context.Context, []sandboxobservability.RuntimeSample) error {
-	return nil
-}
-
 func (w *auditDeliveryWriter) snapshotEvents() []sandboxobservability.Event {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -74,11 +96,11 @@ func (w *auditDeliveryWriter) snapshotBatchSizes() []int {
 func TestAuditDeliveryEnqueueDurableReturnsWithClickHouseDown(t *testing.T) {
 	dir := t.TempDir()
 	writer := &auditDeliveryWriter{err: errors.New("clickhouse unavailable")}
-	delivery, err := newAuditDelivery(dir, writer, zap.NewNop())
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
 	if err != nil {
 		t.Fatalf("newAuditDelivery() error = %v", err)
 	}
-	event := sandboxobservability.Event{EventID: "00000000-0000-4000-8000-000000000001"}
+	event := testAuditDeliveryEvent(t, "00000000-0000-4000-8000-000000000001")
 	if err := delivery.EnqueueDurable(context.Background(), event); err != nil {
 		t.Fatalf("EnqueueDurable() error = %v", err)
 	}
@@ -93,7 +115,7 @@ func TestAuditDeliveryEnqueueDurableReturnsWithClickHouseDown(t *testing.T) {
 func TestAuditDeliveryEnqueueWakesBackgroundReplay(t *testing.T) {
 	dir := t.TempDir()
 	writer := &auditDeliveryWriter{}
-	delivery, err := newAuditDelivery(dir, writer, zap.NewNop())
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
 	if err != nil {
 		t.Fatalf("newAuditDelivery() error = %v", err)
 	}
@@ -104,7 +126,7 @@ func TestAuditDeliveryEnqueueWakesBackgroundReplay(t *testing.T) {
 	// enqueue wake-up rather than the one-second periodic replay.
 	time.Sleep(20 * time.Millisecond)
 
-	event := sandboxobservability.Event{EventID: "00000000-0000-4000-8000-000000000002"}
+	event := testAuditDeliveryEvent(t, "00000000-0000-4000-8000-000000000002")
 	if err := delivery.EnqueueDurable(context.Background(), event); err != nil {
 		t.Fatalf("EnqueueDurable() error = %v", err)
 	}
@@ -123,9 +145,9 @@ func TestAuditDeliveryEnqueueWakesBackgroundReplay(t *testing.T) {
 
 func TestAuditDeliveryPersistsCanonicalBeforeClickHouseAndReplaysAfterRestart(t *testing.T) {
 	dir := t.TempDir()
-	event := sandboxobservability.Event{EventID: "11111111-1111-4111-8111-111111111111"}
+	event := testAuditDeliveryEvent(t, "11111111-1111-4111-8111-111111111111")
 	blocked := &auditDeliveryWriter{started: make(chan struct{}, 1), block: make(chan struct{}), err: errors.New("unavailable")}
-	delivery, err := newAuditDelivery(dir, blocked, zap.NewNop())
+	delivery, err := newAuditDelivery(dir, blocked, zap.NewNop(), nil)
 	if err != nil {
 		t.Fatalf("newAuditDelivery() error = %v", err)
 	}
@@ -145,7 +167,7 @@ func TestAuditDeliveryPersistsCanonicalBeforeClickHouseAndReplaysAfterRestart(t 
 	}
 
 	recovered := &auditDeliveryWriter{}
-	restarted, err := newAuditDelivery(dir, recovered, zap.NewNop())
+	restarted, err := newAuditDelivery(dir, recovered, zap.NewNop(), nil)
 	if err != nil {
 		t.Fatalf("restart delivery error = %v", err)
 	}
@@ -163,12 +185,12 @@ func TestAuditDeliveryPersistsCanonicalBeforeClickHouseAndReplaysAfterRestart(t 
 func TestAuditDeliveryReplayBatchesPendingEvents(t *testing.T) {
 	dir := t.TempDir()
 	writer := &auditDeliveryWriter{}
-	delivery, err := newAuditDelivery(dir, writer, zap.NewNop())
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
 	if err != nil {
 		t.Fatalf("newAuditDelivery() error = %v", err)
 	}
 	for range auditReplayBatchSize + 1 {
-		event := sandboxobservability.Event{EventID: uuid.NewString()}
+		event := testAuditDeliveryEvent(t, uuid.NewString())
 		if err := delivery.EnqueueDurable(context.Background(), event); err != nil {
 			t.Fatalf("EnqueueDurable() error = %v", err)
 		}
@@ -195,11 +217,11 @@ func TestAuditDeliveryReplayBatchesPendingEvents(t *testing.T) {
 func TestAuditDeliveryCanonicalWaitsForInFlightReplayWithoutDuplicate(t *testing.T) {
 	dir := t.TempDir()
 	writer := &auditDeliveryWriter{started: make(chan struct{}, 1), block: make(chan struct{})}
-	delivery, err := newAuditDelivery(dir, writer, zap.NewNop())
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
 	if err != nil {
 		t.Fatalf("newAuditDelivery() error = %v", err)
 	}
-	event := sandboxobservability.Event{EventID: "77777777-7777-4777-8777-777777777777"}
+	event := testAuditDeliveryEvent(t, "77777777-7777-4777-8777-777777777777")
 	if err := delivery.EnqueueDurable(context.Background(), event); err != nil {
 		t.Fatalf("EnqueueDurable() error = %v", err)
 	}
@@ -233,12 +255,12 @@ func TestAuditDeliveryCanonicalWaitsForInFlightReplayWithoutDuplicate(t *testing
 func TestAuditDeliveryFallsBackToCanonicalInsertWhenSpoolWriteFails(t *testing.T) {
 	dir := t.TempDir()
 	writer := &auditDeliveryWriter{}
-	delivery, err := newAuditDelivery(dir, writer, zap.NewNop())
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
 	if err != nil {
 		t.Fatalf("newAuditDelivery() error = %v", err)
 	}
 	replaceAuditSpoolDirectoryWithFile(t, dir)
-	event := sandboxobservability.Event{EventID: "22222222-2222-4222-8222-222222222222"}
+	event := testAuditDeliveryEvent(t, "22222222-2222-4222-8222-222222222222")
 	if err := delivery.EnqueueDurable(context.Background(), event); err != nil {
 		t.Fatalf("EnqueueDurable() fallback error = %v", err)
 	}
@@ -250,12 +272,12 @@ func TestAuditDeliveryFallsBackToCanonicalInsertWhenSpoolWriteFails(t *testing.T
 func TestAuditDeliveryReportsUnrecordedWhenSpoolAndCanonicalInsertFail(t *testing.T) {
 	dir := t.TempDir()
 	writer := &auditDeliveryWriter{err: errors.New("clickhouse unavailable")}
-	delivery, err := newAuditDelivery(dir, writer, zap.NewNop())
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
 	if err != nil {
 		t.Fatalf("newAuditDelivery() error = %v", err)
 	}
 	replaceAuditSpoolDirectoryWithFile(t, dir)
-	err = delivery.EnqueueDurable(context.Background(), sandboxobservability.Event{EventID: "33333333-3333-4333-8333-333333333333"})
+	err = delivery.EnqueueDurable(context.Background(), testAuditDeliveryEvent(t, "33333333-3333-4333-8333-333333333333"))
 	if err == nil || !errors.Is(err, errAuditUnrecorded) {
 		t.Fatalf("EnqueueDurable() error = %v, want unrecorded event", err)
 	}
@@ -264,14 +286,14 @@ func TestAuditDeliveryReportsUnrecordedWhenSpoolAndCanonicalInsertFail(t *testin
 func TestAuditDeliveryDoesNotDowngradeCanonicalACKWhenSpoolCleanupFails(t *testing.T) {
 	dir := t.TempDir()
 	writer := &auditDeliveryWriter{}
-	delivery, err := newAuditDelivery(dir, writer, zap.NewNop())
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
 	if err != nil {
 		t.Fatalf("newAuditDelivery() error = %v", err)
 	}
 	writer.onInsert = func() {
 		replaceAuditSpoolDirectoryWithFile(t, dir)
 	}
-	event := sandboxobservability.Event{EventID: "44444444-4444-4444-8444-444444444444"}
+	event := testAuditDeliveryEvent(t, "44444444-4444-4444-8444-444444444444")
 	if err := delivery.PersistCanonical(context.Background(), event); err != nil {
 		t.Fatalf("PersistCanonical() error after canonical ACK = %v", err)
 	}
@@ -283,7 +305,7 @@ func TestAuditDeliveryDoesNotDowngradeCanonicalACKWhenSpoolCleanupFails(t *testi
 func TestAuditDeliveryRejectsCorruptOrUnsafeIdentity(t *testing.T) {
 	dir := t.TempDir()
 	writer := &auditDeliveryWriter{}
-	delivery, err := newAuditDelivery(dir, writer, zap.NewNop())
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
 	if err != nil {
 		t.Fatalf("newAuditDelivery() error = %v", err)
 	}
@@ -296,8 +318,50 @@ func TestAuditDeliveryRejectsCorruptOrUnsafeIdentity(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "broken.json"), []byte("{"), 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
-	if _, err := newAuditDelivery(dir, writer, zap.NewNop()); err == nil {
+	if _, err := newAuditDelivery(dir, writer, zap.NewNop(), nil); err == nil {
 		t.Fatal("newAuditDelivery() error = nil, want corrupt spool startup failure")
+	}
+}
+
+func TestAuditDeliveryRejectsInvalidSignedEventsBeforeCustody(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), auditDeliveryTestSigningKey.Public().(ed25519.PublicKey))
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+
+	domainInvalid := testAuditDeliveryEvent(t, "55555555-5555-4555-8555-555555555555")
+	domainInvalid.Action = ""
+	structureInvalid := testAuditDeliveryEvent(t, "66666666-6666-4666-8666-666666666666")
+	structureInvalid.Integrity.Signature = "not-an-ed25519-signature"
+	cryptographicallyInvalid := testAuditDeliveryEvent(t, "88888888-8888-4888-8888-888888888888")
+	cryptographicallyInvalid.Action = "audit.delivery.tampered"
+
+	for _, tc := range []struct {
+		name  string
+		event sandboxobservability.Event
+	}{
+		{name: "invalid domain", event: domainInvalid},
+		{name: "invalid signature structure", event: structureInvalid},
+		{name: "invalid signature", event: cryptographicallyInvalid},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := delivery.EnqueueDurable(context.Background(), tc.event); err == nil {
+				t.Fatal("EnqueueDurable() error = nil, want invalid event rejection")
+			}
+		})
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir() error = %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("invalid audit events reached durable spool: %v", entries)
+	}
+	if got := writer.snapshotEvents(); len(got) != 0 {
+		t.Fatalf("invalid audit events reached canonical writer: %#v", got)
 	}
 }
 

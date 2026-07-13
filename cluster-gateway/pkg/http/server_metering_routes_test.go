@@ -178,13 +178,27 @@ func TestEverySandboxRouteHasExplicitAuditAction(t *testing.T) {
 	server.requestLogger = middleware.NewRequestLogger(zap.NewNop())
 	server.obsProvider = newTestMeteringObservability(t)
 	server.setupRoutes()
+	registered := make(map[string]struct{})
 	for _, route := range server.router.Routes() {
 		if !strings.HasPrefix(route.Path, "/api/v1/sandboxes") {
 			continue
 		}
 		key := route.Method + " " + route.Path
-		if sandboxAuditActions[key] == "" {
-			t.Errorf("sandbox route %s has no explicit audit action", key)
+		registered[key] = struct{}{}
+		policy, ok := sandboxAuditRoutePolicies[key]
+		if !ok || policy.Action == "" {
+			t.Errorf("sandbox route %s has no explicit audit policy", key)
+		}
+		if route.Method != http.MethodGet && ok && !policy.BufferResponse {
+			t.Errorf("sandbox mutation route %s does not buffer its response until canonical audit acknowledgement", key)
+		}
+	}
+	for key, policy := range sandboxAuditRoutePolicies {
+		if _, ok := registered[key]; !ok {
+			t.Errorf("audit policy %s does not match a registered sandbox route", key)
+		}
+		if policy.Action == "" {
+			t.Errorf("audit policy %s has no action", key)
 		}
 	}
 }

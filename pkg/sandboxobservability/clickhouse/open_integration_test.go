@@ -78,6 +78,7 @@ func TestCanonicalAuditClickHouseIntegration(t *testing.T) {
 	occurredAt := time.Now().UTC().Add(-2 * time.Second).Truncate(time.Second).Add(123456789 * time.Nanosecond)
 	ingestedAt := occurredAt.Add(987654321 * time.Nanosecond)
 	eventID := "11111111-1111-4111-8111-111111111111"
+	parentEventID := "22222222-2222-4222-8222-222222222222"
 	event := sandboxobservability.Event{
 		EventID:       eventID,
 		SchemaVersion: sandboxobservability.CurrentEventSchemaVersion,
@@ -91,12 +92,28 @@ func TestCanonicalAuditClickHouseIntegration(t *testing.T) {
 		EventType:     sandboxobservability.EventTypeAPIAccess,
 		Phase:         sandboxobservability.EventPhaseResult,
 		Outcome:       sandboxobservability.OutcomeSucceeded,
-		Actor:         sandboxobservability.AuditActor{Kind: sandboxobservability.ActorKindService, ID: "integration-test"},
+		Actor: sandboxobservability.AuditActor{
+			Kind:       sandboxobservability.ActorKindService,
+			ID:         "integration-test",
+			UserID:     "user-integration",
+			APIKeyID:   "key-integration",
+			AuthMethod: "internal_token",
+		},
 		Action:        "sandbox.read",
-		Resource:      sandboxobservability.AuditResource{Type: "sandbox", ID: "sandbox-integration"},
+		Resource:      sandboxobservability.AuditResource{Type: "sandbox", ID: "sandbox-integration", Subresource: "state"},
+		OperationID:   "operation-integration",
+		ParentEventID: parentEventID,
 		Producer:      sandboxobservability.AuditProducer{Service: "cluster-gateway", Instance: "integration-test", Sequence: 1},
-		Cursor:        eventID,
-		Watermark:     eventID,
+		Request: sandboxobservability.AuditRequest{
+			RequestID:  "request-integration",
+			TraceID:    "trace-integration",
+			SourceIP:   "192.0.2.1",
+			UserAgent:  "sandbox0-integration-test",
+			HTTPMethod: "GET",
+			Route:      "/sandboxes/{sandbox_id}",
+			StatusCode: 200,
+		},
+		Attributes: map[string]any{"test": "audit-row-round-trip"},
 	}
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	if err := sandboxobservability.SignEvent(&event, key); err != nil {
@@ -118,5 +135,36 @@ func TestCanonicalAuditClickHouseIntegration(t *testing.T) {
 	}
 	if gotIngestedAt.UnixNano() != ingestedAt.UnixNano() {
 		t.Fatalf("ingested_at UnixNano = %d, want %d", gotIngestedAt.UnixNano(), ingestedAt.UnixNano())
+	}
+
+	result, err := repo.ListEvents(ctx, sandboxobservability.EventQuery{
+		TeamID:    event.TeamID,
+		SandboxID: event.SandboxID,
+		EventID:   eventID,
+	})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if len(result.Events) != 1 {
+		t.Fatalf("ListEvents() event count = %d, want 1", len(result.Events))
+	}
+	got := result.Events[0]
+	if got.EventID != eventID || got.Source != event.Source || got.EventType != event.EventType {
+		t.Fatalf("ListEvents() event identity = %#v, want event_id/source/event_type from inserted event", got)
+	}
+	if got.OccurredAt.UnixNano() != occurredAt.UnixNano() || got.IngestedAt.UnixNano() != ingestedAt.UnixNano() {
+		t.Fatalf("ListEvents() timestamps = (%s, %s), want (%s, %s)", got.OccurredAt, got.IngestedAt, occurredAt, ingestedAt)
+	}
+	if result.Watermark != eventID {
+		t.Fatalf("ListEvents() watermark = %q, want event ID", result.Watermark)
+	}
+	if got.Actor != event.Actor || got.Resource != event.Resource || got.OperationID != event.OperationID || got.ParentEventID != parentEventID {
+		t.Fatalf("ListEvents() actor/resource correlation did not round trip: %#v", got)
+	}
+	if got.Producer != event.Producer || got.Request != event.Request {
+		t.Fatalf("ListEvents() producer/request did not round trip: %#v", got)
+	}
+	if value, ok := got.Attributes["test"].(string); !ok || value != "audit-row-round-trip" {
+		t.Fatalf("ListEvents() attributes = %#v, want test marker", got.Attributes)
 	}
 }

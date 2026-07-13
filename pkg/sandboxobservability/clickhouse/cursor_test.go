@@ -10,11 +10,11 @@ import (
 
 func TestPageCursorRoundTrip(t *testing.T) {
 	event := sandboxobservability.Event{
+		EventID:    "11111111-1111-4111-8111-111111111111",
 		OccurredAt: time.Date(2026, 7, 1, 1, 2, 3, 4, time.FixedZone("offset", 8*60*60)),
 		IngestedAt: time.Date(2026, 7, 1, 1, 2, 4, 5, time.UTC),
 		Source:     sandboxobservability.SourceNetd,
 		EventType:  sandboxobservability.EventTypeNetworkAudit,
-		Cursor:     "netd:cursor:1",
 	}
 
 	encoded, err := encodePageCursor(event)
@@ -29,7 +29,7 @@ func TestPageCursorRoundTrip(t *testing.T) {
 		!decoded.IngestedAt.Equal(event.IngestedAt) ||
 		decoded.Source != string(event.Source) ||
 		decoded.EventType != string(event.EventType) ||
-		decoded.Cursor != event.Cursor {
+		decoded.Cursor != event.EventID {
 		t.Fatalf("decoded cursor = %+v", decoded)
 	}
 	if decoded.OccurredAt.Location() != time.UTC || decoded.IngestedAt.Location() != time.UTC {

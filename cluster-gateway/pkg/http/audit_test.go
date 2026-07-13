@@ -1,6 +1,7 @@
 package http
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -40,19 +41,19 @@ type contextBlockingAuditWriter struct {
 	deadline chan time.Time
 }
 
+func testAuditConfig() *config.ClusterGatewayConfig {
+	return &config.ClusterGatewayConfig{
+		GatewayConfig:        config.GatewayConfig{RegionID: "region-1"},
+		ClusterID:            "cluster-1",
+		SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true},
+	}
+}
+
 func (w *contextBlockingAuditWriter) InsertEvents(ctx context.Context, _ []sandboxobservability.Event) error {
 	deadline, _ := ctx.Deadline()
 	w.deadline <- deadline
 	<-ctx.Done()
 	return ctx.Err()
-}
-
-func (*contextBlockingAuditWriter) InsertLogs(context.Context, []sandboxobservability.LogEntry) error {
-	return nil
-}
-
-func (*contextBlockingAuditWriter) InsertRuntimeSamples(context.Context, []sandboxobservability.RuntimeSample) error {
-	return nil
 }
 
 func (w *failAfterAuditWriter) InsertEvents(_ context.Context, events []sandboxobservability.Event) error {
@@ -64,14 +65,6 @@ func (w *failAfterAuditWriter) InsertEvents(_ context.Context, events []sandboxo
 	if w.onSuccess != nil {
 		w.onSuccess(w.calls)
 	}
-	return nil
-}
-
-func (*failAfterAuditWriter) InsertLogs(context.Context, []sandboxobservability.LogEntry) error {
-	return nil
-}
-
-func (*failAfterAuditWriter) InsertRuntimeSamples(context.Context, []sandboxobservability.RuntimeSample) error {
 	return nil
 }
 
@@ -87,17 +80,9 @@ func (w *recordingAuditWriter) InsertEvents(_ context.Context, events []sandboxo
 	return nil
 }
 
-func (*recordingAuditWriter) InsertLogs(context.Context, []sandboxobservability.LogEntry) error {
-	return nil
-}
-
-func (*recordingAuditWriter) InsertRuntimeSamples(context.Context, []sandboxobservability.RuntimeSample) error {
-	return nil
-}
-
-func mustNewAuditDelivery(t *testing.T, writer sandboxobservability.Writer) *auditDelivery {
+func mustNewAuditDelivery(t *testing.T, writer auditEventInserter) *auditDelivery {
 	t.Helper()
-	delivery, err := newAuditDelivery(t.TempDir(), writer, zap.NewNop())
+	delivery, err := newAuditDelivery(t.TempDir(), writer, zap.NewNop(), nil)
 	if err != nil {
 		t.Fatalf("newAuditDelivery() error = %v", err)
 	}
@@ -206,7 +191,7 @@ func TestSandboxAuditMiddlewareRecordsUnknownResultOnPanic(t *testing.T) {
 	writer := &recordingAuditWriter{}
 	delivery := mustNewAuditDelivery(t, writer)
 	server := &Server{
-		cfg:             &config.ClusterGatewayConfig{SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true}},
+		cfg:             testAuditConfig(),
 		auditSigningKey: key, auditDelivery: delivery, logger: zap.NewNop(),
 	}
 	router := gin.New()
@@ -217,7 +202,10 @@ func TestSandboxAuditMiddlewareRecordsUnknownResultOnPanic(t *testing.T) {
 		}))
 		c.Next()
 	})
-	router.POST("/api/v1/sandboxes/:id/pause", server.auditSandboxRequests(), func(*gin.Context) {
+	router.POST("/api/v1/sandboxes/:id/pause", server.auditSandboxRequests(), func(c *gin.Context) {
+		c.SetCookie("sandbox_session", "created", 60, "/", "", false, true)
+		c.Header("Location", "/api/v1/sandboxes/sb-1")
+		_, _ = c.Writer.WriteString("partial success")
 		panic("boom")
 	})
 
@@ -228,6 +216,132 @@ func TestSandboxAuditMiddlewareRecordsUnknownResultOnPanic(t *testing.T) {
 	}
 	if len(writer.events) != 2 || writer.events[1].Outcome != sandboxobservability.OutcomeUnknown {
 		t.Fatalf("events = %#v, want unknown result after panic", writer.events)
+	}
+	if writer.events[1].Request.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("panic result status = %d, want 500", writer.events[1].Request.StatusCode)
+	}
+	if got := recorder.Header().Values("Set-Cookie"); len(got) != 0 {
+		t.Fatalf("panic response leaked handler Set-Cookie headers: %v", got)
+	}
+	if got := recorder.Header().Get("Location"); got != "" {
+		t.Fatalf("panic response leaked handler Location header %q", got)
+	}
+	if strings.Contains(recorder.Body.String(), "partial success") {
+		t.Fatalf("panic response leaked buffered handler body: %s", recorder.Body.String())
+	}
+}
+
+func TestAuditBufferedResponseWriterCommitsHeadersAtomically(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Header("X-Initial", "preserved")
+
+	buffered := newAuditBufferedResponseWriter(c.Writer, 1024)
+	buffered.Header().Add("Set-Cookie", "sandbox_session=created")
+	buffered.Header().Set("Location", "/api/v1/sandboxes/sb-1")
+	buffered.WriteHeader(http.StatusCreated)
+	if _, err := buffered.WriteString("created"); err != nil {
+		t.Fatalf("WriteString() error = %v", err)
+	}
+
+	if got := recorder.Header().Values("Set-Cookie"); len(got) != 0 {
+		t.Fatalf("uncommitted Set-Cookie headers = %v", got)
+	}
+	if got := recorder.Header().Get("Location"); got != "" {
+		t.Fatalf("uncommitted Location header = %q", got)
+	}
+	if err := buffered.commit(); err != nil {
+		t.Fatalf("commit() error = %v", err)
+	}
+	if recorder.Code != http.StatusCreated || recorder.Body.String() != "created" {
+		t.Fatalf("committed response = %d %q", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("X-Initial"); got != "preserved" {
+		t.Fatalf("initial header = %q, want preserved", got)
+	}
+	if got := recorder.Header().Values("Set-Cookie"); len(got) != 1 || got[0] != "sandbox_session=created" {
+		t.Fatalf("committed Set-Cookie headers = %v", got)
+	}
+	if got := recorder.Header().Get("Location"); got != "/api/v1/sandboxes/sb-1" {
+		t.Fatalf("committed Location header = %q", got)
+	}
+}
+
+func TestAuditBufferedResponseWriterRejectsBypassInterfaces(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("flush", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		buffered := newAuditBufferedResponseWriter(c.Writer, 1024)
+		buffered.Flush()
+		if buffered.err == nil || !strings.Contains(buffered.err.Error(), "streaming flush") {
+			t.Fatalf("Flush() error = %v", buffered.err)
+		}
+		if c.Writer.Written() {
+			t.Fatal("Flush() reached the underlying response writer")
+		}
+	})
+
+	t.Run("hijack and push", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		buffered := newAuditBufferedResponseWriter(c.Writer, 1024)
+		if conn, rw, err := buffered.Hijack(); err == nil || conn != nil || rw != nil {
+			t.Fatalf("Hijack() = (%v, %v, %v), want unsupported", conn, rw, err)
+		}
+		if buffered.Pusher() != nil {
+			t.Fatal("Pusher() exposed the underlying response pusher")
+		}
+		if c.Writer.Written() {
+			t.Fatal("Hijack() reached the underlying response writer")
+		}
+	})
+}
+
+func TestSandboxAuditMiddlewareRejectsOversizedResponseWithoutLeakingHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	writer := &recordingAuditWriter{}
+	server := &Server{
+		cfg:             testAuditConfig(),
+		auditSigningKey: key,
+		auditDelivery:   mustNewAuditDelivery(t, writer),
+		logger:          zap.NewNop(),
+	}
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Request = c.Request.WithContext(authn.WithAuthContext(c.Request.Context(), &authn.AuthContext{
+			AuthMethod: authn.AuthMethodJWT, TeamID: "team-1", UserID: "user-1",
+		}))
+		c.Next()
+	})
+	router.POST("/api/v1/sandboxes/:id/pause", server.auditSandboxRequests(), func(c *gin.Context) {
+		c.SetCookie("sandbox_session", "created", 60, "/", "", false, true)
+		c.Header("Location", "/api/v1/sandboxes/sb-1")
+		_, _ = c.Writer.Write(bytes.Repeat([]byte("x"), maxAuditBufferedResponseBytes+1))
+	})
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sb-1/pause", nil))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503: %s", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Values("Set-Cookie"); len(got) != 0 {
+		t.Fatalf("overflow response leaked handler Set-Cookie headers: %v", got)
+	}
+	if got := recorder.Header().Get("Location"); got != "" {
+		t.Fatalf("overflow response leaked handler Location header %q", got)
+	}
+	if strings.Contains(recorder.Body.String(), "xxx") {
+		t.Fatalf("overflow response leaked buffered handler body: %s", recorder.Body.String())
+	}
+	if len(writer.events) != 2 || writer.events[1].Outcome != sandboxobservability.OutcomeUnknown {
+		t.Fatalf("events = %#v, want recorded unknown result after overflow", writer.events)
+	}
+	if writer.events[1].Request.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("overflow result status = %d, want 503", writer.events[1].Request.StatusCode)
 	}
 }
 
@@ -296,9 +410,7 @@ func TestSandboxAuditMiddlewareMutationRemainsCanonicalWithDefaultMode(t *testin
 	writer := &recordingAuditWriter{err: errors.New("clickhouse unavailable")}
 	delivery := mustNewAuditDelivery(t, writer)
 	server := &Server{
-		cfg: &config.ClusterGatewayConfig{
-			SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true},
-		},
+		cfg:             testAuditConfig(),
 		auditSigningKey: key,
 		auditDelivery:   delivery,
 		logger:          zap.NewNop(),
@@ -351,13 +463,13 @@ func TestSandboxAuditMiddlewareInitialAttemptUnrecordedDoesNotFabricateResult(t 
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	writer := &recordingAuditWriter{err: errors.New("clickhouse unavailable")}
 	dir := t.TempDir()
-	delivery, err := newAuditDelivery(dir, writer, zap.NewNop())
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
 	if err != nil {
 		t.Fatalf("newAuditDelivery() error = %v", err)
 	}
 	replaceAuditSpoolDirectoryWithFile(t, dir)
 	server := &Server{
-		cfg:             &config.ClusterGatewayConfig{SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true}},
+		cfg:             testAuditConfig(),
 		auditSigningKey: key, auditDelivery: delivery, logger: zap.NewNop(),
 	}
 	called := false
@@ -407,12 +519,12 @@ func TestSandboxAuditMiddlewareAdmissionResultSpoolAndFallbackFailure(t *testing
 		}
 		hookErr = os.WriteFile(dir, []byte("not a directory"), 0o600)
 	}
-	delivery, err := newAuditDelivery(dir, writer, zap.NewNop())
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
 	if err != nil {
 		t.Fatalf("newAuditDelivery() error = %v", err)
 	}
 	server := &Server{
-		cfg:             &config.ClusterGatewayConfig{SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true}},
+		cfg:             testAuditConfig(),
 		auditSigningKey: key, auditDelivery: delivery, logger: zap.NewNop(),
 	}
 	called := false
@@ -485,7 +597,7 @@ func TestSandboxAuditAttemptBoundsBlockingCanonicalWriter(t *testing.T) {
 			key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 			writer := &contextBlockingAuditWriter{deadline: make(chan time.Time, 1)}
 			dir := t.TempDir()
-			delivery, err := newAuditDelivery(dir, writer, zap.NewNop())
+			delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
 			if err != nil {
 				t.Fatalf("newAuditDelivery() error = %v", err)
 			}
@@ -493,7 +605,7 @@ func TestSandboxAuditAttemptBoundsBlockingCanonicalWriter(t *testing.T) {
 				replaceAuditSpoolDirectoryWithFile(t, dir)
 			}
 			server := &Server{
-				cfg:             &config.ClusterGatewayConfig{SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true}},
+				cfg:             testAuditConfig(),
 				auditSigningKey: key,
 				auditDelivery:   delivery,
 				logger:          zap.NewNop(),
@@ -559,9 +671,7 @@ func TestSandboxAuditMiddlewareGETUsesDurableAsyncWhenClickHouseIsDown(t *testin
 	writer := &recordingAuditWriter{err: errors.New("clickhouse unavailable")}
 	delivery := mustNewAuditDelivery(t, writer)
 	server := &Server{
-		cfg: &config.ClusterGatewayConfig{
-			SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true},
-		},
+		cfg:             testAuditConfig(),
 		auditSigningKey: key, auditDelivery: delivery, logger: zap.NewNop(),
 	}
 	called := false
@@ -603,11 +713,10 @@ func TestSandboxAuditMiddlewareGETCanonicalSyncOverrideFailsClosed(t *testing.T)
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	writer := &recordingAuditWriter{err: errors.New("clickhouse unavailable")}
 	delivery := mustNewAuditDelivery(t, writer)
+	cfg := testAuditConfig()
+	cfg.SandboxObservability.AuditDeliveryMode = sandboxobservability.AuditDeliveryModeCanonicalSync
 	server := &Server{
-		cfg: &config.ClusterGatewayConfig{SandboxObservability: config.SandboxObservabilityConfig{
-			AuditEnabled:      true,
-			AuditDeliveryMode: sandboxobservability.AuditDeliveryModeCanonicalSync,
-		}},
+		cfg:             cfg,
 		auditSigningKey: key, auditDelivery: delivery, logger: zap.NewNop(),
 	}
 	called := false
@@ -733,12 +842,12 @@ func TestSandboxAuditMiddlewareWithholdsSuccessUntilResultCanonicalACK(t *testin
 	gin.SetMode(gin.TestMode)
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	writer := &failAfterAuditWriter{succeedFor: 1}
-	delivery, err := newAuditDelivery(t.TempDir(), writer, zap.NewNop())
+	delivery, err := newAuditDelivery(t.TempDir(), writer, zap.NewNop(), nil)
 	if err != nil {
 		t.Fatalf("newAuditDelivery() error = %v", err)
 	}
 	server := &Server{
-		cfg:             &config.ClusterGatewayConfig{SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true}},
+		cfg:             testAuditConfig(),
 		auditSigningKey: key, auditDelivery: delivery, logger: zap.NewNop(),
 	}
 	router := gin.New()
@@ -749,6 +858,8 @@ func TestSandboxAuditMiddlewareWithholdsSuccessUntilResultCanonicalACK(t *testin
 		c.Next()
 	})
 	router.POST("/api/v1/sandboxes/:id/pause", server.auditSandboxRequests(), func(c *gin.Context) {
+		c.SetCookie("sandbox_session", "created", 60, "/", "", false, true)
+		c.Header("Location", "/api/v1/sandboxes/sb-1")
 		c.JSON(http.StatusOK, gin.H{"status": "paused"})
 	})
 
@@ -759,6 +870,12 @@ func TestSandboxAuditMiddlewareWithholdsSuccessUntilResultCanonicalACK(t *testin
 	}
 	if body := recorder.Body.String(); !strings.Contains(body, "canonical audit result is pending") || !strings.Contains(body, `"audit_result":"pending"`) {
 		t.Fatalf("pending response body = %s", body)
+	}
+	if got := recorder.Header().Values("Set-Cookie"); len(got) != 0 {
+		t.Fatalf("audit failure leaked handler Set-Cookie headers: %v", got)
+	}
+	if got := recorder.Header().Get("Location"); got != "" {
+		t.Fatalf("audit failure leaked handler Location header %q", got)
 	}
 	entries, err := os.ReadDir(delivery.dir)
 	if err != nil {
@@ -777,13 +894,13 @@ func TestSandboxAuditMiddlewareReportsUnrecordedWhenSpoolAndCanonicalFallbackFai
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	writer := &failAfterAuditWriter{succeedFor: 1}
 	dir := t.TempDir()
-	delivery, err := newAuditDelivery(dir, writer, zap.NewNop())
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
 	if err != nil {
 		t.Fatalf("newAuditDelivery() error = %v", err)
 	}
 	replaceAuditSpoolDirectoryWithFile(t, dir)
 	server := &Server{
-		cfg:             &config.ClusterGatewayConfig{SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true}},
+		cfg:             testAuditConfig(),
 		auditSigningKey: key, auditDelivery: delivery, logger: zap.NewNop(),
 	}
 	router := gin.New()
@@ -821,12 +938,12 @@ func TestSandboxAuditMiddlewareKeepsSuccessAfterCanonicalACKWhenSpoolCleanupFail
 			replaceAuditSpoolDirectoryWithFile(t, dir)
 		}
 	}
-	delivery, err := newAuditDelivery(dir, writer, zap.NewNop())
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
 	if err != nil {
 		t.Fatalf("newAuditDelivery() error = %v", err)
 	}
 	server := &Server{
-		cfg:             &config.ClusterGatewayConfig{SandboxObservability: config.SandboxObservabilityConfig{AuditEnabled: true}},
+		cfg:             testAuditConfig(),
 		auditSigningKey: key, auditDelivery: delivery, logger: zap.NewNop(),
 	}
 	router := gin.New()

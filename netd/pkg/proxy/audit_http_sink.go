@@ -13,7 +13,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -22,44 +21,42 @@ import (
 )
 
 type httpAuditSink struct {
-	endpoint         string
-	regionID         string
-	clusterID        string
-	producerInstance string
-	client           *http.Client
-	generator        *internalauth.Generator
-	logger           *zap.Logger
-	queue            chan auditEvent
-	spool            *auditSpool
-	queuedMu         sync.Mutex
-	queued           map[string]struct{}
-	batchSize        int
-	flushInterval    time.Duration
-	requestTimeout   time.Duration
-	maxRetries       int
-	retryBackoff     time.Duration
-	deliveryMode     sandboxobservability.AuditDeliveryMode
-	cancel           context.CancelFunc
-	done             chan struct{}
-	spoolCorrupt     atomic.Bool
+	endpoint       string
+	regionID       string
+	clusterID      string
+	client         *http.Client
+	generator      *internalauth.Generator
+	logger         *zap.Logger
+	queue          chan auditEvent
+	spool          *auditSpool
+	queuedMu       sync.Mutex
+	queued         map[string]struct{}
+	batchSize      int
+	flushInterval  time.Duration
+	requestTimeout time.Duration
+	maxRetries     int
+	retryBackoff   time.Duration
+	deliveryMode   sandboxobservability.AuditDeliveryMode
+	cancel         context.CancelFunc
+	done           chan struct{}
+	spoolCorrupt   atomic.Bool
 }
 
 type httpAuditSinkOptions struct {
-	Endpoint         string
-	RegionID         string
-	ClusterID        string
-	ProducerInstance string
-	Spool            *auditSpool
-	Client           *http.Client
-	Generator        *internalauth.Generator
-	Logger           *zap.Logger
-	QueueSize        int
-	BatchSize        int
-	FlushInterval    time.Duration
-	RequestTimeout   time.Duration
-	MaxRetries       int
-	RetryBackoff     time.Duration
-	DeliveryMode     sandboxobservability.AuditDeliveryMode
+	Endpoint       string
+	RegionID       string
+	ClusterID      string
+	Spool          *auditSpool
+	Client         *http.Client
+	Generator      *internalauth.Generator
+	Logger         *zap.Logger
+	QueueSize      int
+	BatchSize      int
+	FlushInterval  time.Duration
+	RequestTimeout time.Duration
+	MaxRetries     int
+	RetryBackoff   time.Duration
+	DeliveryMode   sandboxobservability.AuditDeliveryMode
 }
 
 func newHTTPAuditSinkFromConfig(cfg *config.NetdConfig, logger *zap.Logger) (*httpAuditSink, error) {
@@ -83,21 +80,20 @@ func newHTTPAuditSinkFromConfig(cfg *config.NetdConfig, logger *zap.Logger) (*ht
 		return nil, fmt.Errorf("sandbox audit ingest requires a durable spool directory")
 	}
 	return newHTTPAuditSink(httpAuditSinkOptions{
-		Endpoint:         cfg.SandboxObservabilityIngestURL,
-		RegionID:         cfg.RegionID,
-		ClusterID:        cfg.ClusterID,
-		ProducerInstance: cfg.NodeName,
-		Spool:            spool,
-		Client:           &http.Client{},
-		Generator:        generator,
-		Logger:           logger,
-		QueueSize:        cfg.SandboxObservabilityIngestQueueSize,
-		BatchSize:        cfg.SandboxObservabilityIngestBatchSize,
-		FlushInterval:    cfg.SandboxObservabilityIngestFlushInterval.Duration,
-		RequestTimeout:   cfg.SandboxObservabilityIngestRequestTimeout.Duration,
-		MaxRetries:       cfg.SandboxObservabilityIngestMaxRetries,
-		RetryBackoff:     cfg.SandboxObservabilityIngestRetryBackoff.Duration,
-		DeliveryMode:     cfg.SandboxObservabilityAuditDeliveryMode,
+		Endpoint:       cfg.SandboxObservabilityIngestURL,
+		RegionID:       cfg.RegionID,
+		ClusterID:      cfg.ClusterID,
+		Spool:          spool,
+		Client:         &http.Client{},
+		Generator:      generator,
+		Logger:         logger,
+		QueueSize:      cfg.SandboxObservabilityIngestQueueSize,
+		BatchSize:      cfg.SandboxObservabilityIngestBatchSize,
+		FlushInterval:  cfg.SandboxObservabilityIngestFlushInterval.Duration,
+		RequestTimeout: cfg.SandboxObservabilityIngestRequestTimeout.Duration,
+		MaxRetries:     cfg.SandboxObservabilityIngestMaxRetries,
+		RetryBackoff:   cfg.SandboxObservabilityIngestRetryBackoff.Duration,
+		DeliveryMode:   cfg.SandboxObservabilityAuditDeliveryMode,
 	}), nil
 }
 
@@ -132,24 +128,23 @@ func newHTTPAuditSink(opts httpAuditSinkOptions) *httpAuditSink {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	sink := &httpAuditSink{
-		endpoint:         strings.TrimSpace(opts.Endpoint),
-		regionID:         strings.TrimSpace(opts.RegionID),
-		clusterID:        strings.TrimSpace(opts.ClusterID),
-		producerInstance: strings.TrimSpace(opts.ProducerInstance),
-		client:           client,
-		generator:        opts.Generator,
-		logger:           logger,
-		queue:            make(chan auditEvent, queueSize),
-		spool:            opts.Spool,
-		queued:           make(map[string]struct{}),
-		batchSize:        batchSize,
-		flushInterval:    flushInterval,
-		requestTimeout:   requestTimeout,
-		maxRetries:       opts.MaxRetries,
-		retryBackoff:     retryBackoff,
-		deliveryMode:     sandboxobservability.NormalizeAuditDeliveryMode(opts.DeliveryMode),
-		cancel:           cancel,
-		done:             make(chan struct{}),
+		endpoint:       strings.TrimSpace(opts.Endpoint),
+		regionID:       strings.TrimSpace(opts.RegionID),
+		clusterID:      strings.TrimSpace(opts.ClusterID),
+		client:         client,
+		generator:      opts.Generator,
+		logger:         logger,
+		queue:          make(chan auditEvent, queueSize),
+		spool:          opts.Spool,
+		queued:         make(map[string]struct{}),
+		batchSize:      batchSize,
+		flushInterval:  flushInterval,
+		requestTimeout: requestTimeout,
+		maxRetries:     opts.MaxRetries,
+		retryBackoff:   retryBackoff,
+		deliveryMode:   sandboxobservability.NormalizeAuditDeliveryMode(opts.DeliveryMode),
+		cancel:         cancel,
+		done:           make(chan struct{}),
 	}
 	go sink.run(ctx)
 	return sink
@@ -162,19 +157,21 @@ func (s *httpAuditSink) WriteAuditEvent(event auditEvent) error {
 	if s.spoolCorrupt.Load() {
 		return fmt.Errorf("audit spool contains an unreadable record")
 	}
-	if strings.TrimSpace(event.TeamID) == "" || strings.TrimSpace(event.SandboxID) == "" {
-		proxyMetrics.RecordAuditIngestEvents("invalid", 1)
-		return fmt.Errorf("audit event requires team_id and sandbox_id")
-	}
-	if event.EventID == "" {
-		event.EventID = uuid.NewString()
-	}
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}
 	if event.Phase == "" {
 		event.Phase = string(sandboxobservability.EventPhaseResult)
 	}
+	if err := validateSpoolAuditEvent(event); err != nil {
+		proxyMetrics.RecordAuditIngestEvents("invalid", 1)
+		return err
+	}
+	// The best-effort JSONL sink receives its own value copy before this sink.
+	// Raw proxy and credential-resolution errors are local diagnostics and must
+	// not be persisted in the canonical-delivery spool.
+	event.Error = ""
+	event.AuthResolveError = ""
 	strictAttempt := event.Phase == string(sandboxobservability.EventPhaseAttempt) &&
 		sandboxobservability.NormalizeAuditDeliveryMode(s.deliveryMode) == sandboxobservability.AuditDeliveryModeCanonicalSync
 	if event.Phase == string(sandboxobservability.EventPhaseAttempt) && s.spool == nil {
@@ -185,24 +182,6 @@ func (s *httpAuditSink) WriteAuditEvent(event auditEvent) error {
 			return fmt.Errorf("audit event %s is already pending canonical delivery", event.EventID)
 		}
 		defer s.unmarkQueued([]auditEvent{event})
-	}
-	if event.ProducerSequence == 0 {
-		if s.spool != nil {
-			sequence, err := s.spool.NextSequence()
-			if err != nil {
-				proxyMetrics.RecordAuditIngestEvents("persist_failed", 1)
-				event.ProducerSequence = fallbackAuditProducerSequence(event.Timestamp)
-				s.auditLog().Error("Failed to persist netd audit producer sequence; continuing with event timestamp sequence",
-					zap.String("event_id", event.EventID),
-					zap.String("sandbox_id", event.SandboxID),
-					zap.Error(err),
-				)
-			} else {
-				event.ProducerSequence = sequence
-			}
-		} else {
-			event.ProducerSequence = fallbackAuditProducerSequence(event.Timestamp)
-		}
 	}
 	if s.spool != nil {
 		if spoolErr := s.spool.Put(event); spoolErr != nil {
@@ -266,14 +245,6 @@ func (s *httpAuditSink) handleSpoolWriteFailure(event auditEvent, spoolErr error
 		zap.Error(spoolErr),
 	)
 	return nil
-}
-
-func fallbackAuditProducerSequence(timestamp time.Time) uint64 {
-	sequence := uint64(timestamp.UnixNano())
-	if sequence == 0 {
-		return 1
-	}
-	return sequence
 }
 
 func (s *httpAuditSink) deliverAttempt(event auditEvent) error {
@@ -367,7 +338,7 @@ func (s *httpAuditSink) unmarkQueued(events []auditEvent) {
 }
 
 func (s *httpAuditSink) enqueueSpool() {
-	if s.spool == nil {
+	if s.spool == nil || s.spoolCorrupt.Load() {
 		return
 	}
 	events, err := s.spool.Load(cap(s.queue))
@@ -443,6 +414,12 @@ func (s *httpAuditSink) flushBatch(ctx context.Context, batch []auditEvent) {
 		projected, ok := s.toObservabilityEvent(event)
 		if !ok {
 			proxyMetrics.RecordAuditIngestEvents("skipped", 1)
+			s.spoolCorrupt.Store(true)
+			s.unmarkQueued([]auditEvent{event})
+			s.auditLog().Error("Netd audit spool contains an event that cannot be projected",
+				zap.String("event_id", event.EventID),
+				zap.String("sandbox_id", event.SandboxID),
+			)
 			continue
 		}
 		events = append(events, projected)
@@ -547,62 +524,72 @@ func (s *httpAuditSink) postEvents(ctx context.Context, teamID, sandboxID string
 }
 
 func (s *httpAuditSink) toObservabilityEvent(event auditEvent) (sandboxobservability.Event, bool) {
-	if event.TeamID == "" || event.SandboxID == "" {
+	if validateSpoolAuditEvent(event) != nil {
 		return sandboxobservability.Event{}, false
 	}
-	timestamp := event.Timestamp
-	if timestamp.IsZero() {
-		timestamp = time.Now().UTC()
-	}
-	timestamp = timestamp.UTC()
-	eventID := event.EventID
-	if eventID == "" {
-		eventID = uuid.NewString()
-	}
 	outcome := sandboxobservability.Outcome(event.Outcome)
-	if outcome == "" || !sandboxobservability.ValidOutcome(outcome) {
-		outcome = sandboxobservability.OutcomeCompleted
-	}
 	return sandboxobservability.Event{
-		EventID:       eventID,
+		EventID:       event.EventID,
 		SchemaVersion: sandboxobservability.CurrentEventSchemaVersion,
 		TeamID:        event.TeamID,
 		SandboxID:     event.SandboxID,
 		RegionID:      s.regionID,
 		ClusterID:     s.clusterID,
-		OccurredAt:    timestamp,
+		OccurredAt:    event.Timestamp.UTC(),
 		Source:        sandboxobservability.SourceNetd,
 		EventType:     sandboxobservability.EventTypeNetworkAudit,
 		Phase:         sandboxobservability.EventPhase(event.Phase),
 		Outcome:       outcome,
-		OperationID:   "netd:" + event.FlowID,
+		OperationID:   event.OperationID,
 		Producer: sandboxobservability.AuditProducer{
 			Service:  "netd",
-			Instance: s.producerInstance,
+			Instance: event.ProducerInstance,
 			Sequence: event.ProducerSequence,
 		},
-		Cursor:     eventID,
-		Watermark:  eventID,
-		Attributes: auditEventAttributes(event),
+		Attributes: networkAuditAttributes(event).CanonicalMap(),
 	}, true
 }
 
-func auditEventAttributes(event auditEvent) map[string]any {
-	encoded, err := json.Marshal(event)
-	if err != nil {
-		return nil
+func networkAuditAttributes(event auditEvent) sandboxobservability.NetworkAuditAttributes {
+	protocolOperations := make([]sandboxobservability.NetworkProtocolOperation, 0, len(event.ProtocolOperations))
+	for _, operation := range event.ProtocolOperations {
+		protocolOperations = append(protocolOperations, sandboxobservability.NetworkProtocolOperation{
+			RuleName:  operation.RuleName,
+			Protocol:  operation.Protocol,
+			Operation: operation.Operation,
+			Object:    operation.Object,
+			Action:    operation.Action,
+			Reason:    operation.Reason,
+		})
 	}
-	var attributes map[string]any
-	if err := json.Unmarshal(encoded, &attributes); err != nil {
-		return nil
+	return sandboxobservability.NetworkAuditAttributes{
+		FlowID:                      event.FlowID,
+		SourceIP:                    event.SrcIP,
+		DestinationIP:               event.DestIP,
+		DestinationPort:             int64(event.DestPort),
+		Transport:                   event.Transport,
+		Protocol:                    event.Protocol,
+		Host:                        event.Host,
+		ClassifierResult:            event.ClassifierResult,
+		Action:                      event.Action,
+		Reason:                      event.Reason,
+		Outcome:                     event.Outcome,
+		DurationMS:                  event.DurationMS,
+		EgressBytes:                 event.EgressBytes,
+		IngressBytes:                event.IngressBytes,
+		Adapter:                     event.Adapter,
+		AdapterCapability:           event.AdapterCapability,
+		AuthRuleName:                event.AuthRuleName,
+		AuthRef:                     event.AuthRef,
+		AuthFailurePolicy:           event.AuthFailurePolicy,
+		AuthBypassed:                event.AuthBypassed,
+		AuthBypassReason:            event.AuthBypassReason,
+		AuthEnforcement:             event.AuthEnforcement,
+		AuthResolved:                event.AuthResolved,
+		AuthCacheHit:                event.AuthCacheHit,
+		ProtocolOperations:          protocolOperations,
+		ProtocolOperationsTruncated: event.ProtocolOperationsTruncated,
 	}
-	delete(attributes, "timestamp")
-	delete(attributes, "team_id")
-	delete(attributes, "sandbox_id")
-	delete(attributes, "event_id")
-	delete(attributes, "producer_sequence")
-	delete(attributes, "phase")
-	return attributes
 }
 
 func sleepWithContext(ctx context.Context, duration time.Duration) bool {

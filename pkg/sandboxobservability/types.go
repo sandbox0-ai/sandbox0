@@ -38,7 +38,7 @@ var ErrBackendUnavailable = errors.New("sandbox observability backend is unavail
 // ErrInvalidCursor is returned when a query cursor cannot be decoded.
 var ErrInvalidCursor = errors.New("invalid sandbox observability cursor")
 
-// ErrInvalidQuery is returned when a runtime series request is not valid.
+// ErrInvalidQuery is returned when an observability query is not valid.
 var ErrInvalidQuery = errors.New("invalid sandbox observability query")
 
 type Source string
@@ -131,23 +131,33 @@ type AuditRequest struct {
 type AuditProducer struct {
 	Service  string `json:"service"`
 	Instance string `json:"instance,omitempty"`
-	Sequence uint64 `json:"sequence,omitempty"`
+	Sequence int64  `json:"sequence,omitempty"`
 }
+
+// AuditSignatureStatus reports the query-time verification result for an
+// event signature. It is not part of the signed or persisted payload.
+type AuditSignatureStatus string
+
+const (
+	AuditSignatureStatusVerified    AuditSignatureStatus = "verified"
+	AuditSignatureStatusInvalid     AuditSignatureStatus = "invalid"
+	AuditSignatureStatusUnavailable AuditSignatureStatus = "unavailable"
+)
 
 // AuditIntegrity protects the canonical event payload. Signatures are created
 // only after cluster-gateway has replaced producer-controlled identity fields.
 type AuditIntegrity struct {
-	Algorithm    string `json:"algorithm"`
-	PayloadHash  string `json:"payload_hash"`
-	Signature    string `json:"signature"`
-	SigningKeyID string `json:"signing_key_id"`
-	Status       string `json:"status,omitempty"`
+	Algorithm       string               `json:"algorithm"`
+	PayloadHash     string               `json:"payload_hash"`
+	Signature       string               `json:"signature"`
+	SigningKeyID    string               `json:"signing_key_id"`
+	SignatureStatus AuditSignatureStatus `json:"signature_status,omitempty"`
+	EventIDConflict bool                 `json:"event_id_conflict,omitempty"`
 }
 
-// Event is a canonical per-sandbox audit fact stored in ClickHouse. IngestedAt,
-// Cursor, and Watermark are storage/query transport metadata; the semantic
-// event payload is signed independently and cursor fields are derived from
-// EventID when rows are read.
+// Event is a canonical per-sandbox audit fact stored in ClickHouse. IngestedAt
+// is storage metadata; pagination and watch cursors belong to query results,
+// not to the signed event payload.
 type Event struct {
 	EventID       string         `json:"event_id"`
 	SchemaVersion int            `json:"schema_version"`
@@ -160,17 +170,15 @@ type Event struct {
 	Source        Source         `json:"source"`
 	EventType     EventType      `json:"event_type"`
 	Phase         EventPhase     `json:"phase"`
-	Outcome       Outcome        `json:"outcome,omitempty"`
+	Outcome       Outcome        `json:"outcome"`
 	Actor         AuditActor     `json:"actor"`
 	Action        string         `json:"action"`
 	Resource      AuditResource  `json:"resource"`
-	OperationID   string         `json:"operation_id,omitempty"`
+	OperationID   string         `json:"operation_id"`
 	ParentEventID string         `json:"parent_event_id,omitempty"`
 	Producer      AuditProducer  `json:"producer"`
 	Request       AuditRequest   `json:"request,omitempty"`
 	Integrity     AuditIntegrity `json:"integrity"`
-	Cursor        string         `json:"cursor"`
-	Watermark     string         `json:"watermark"`
 	Attributes    map[string]any `json:"attributes,omitempty"`
 }
 

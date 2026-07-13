@@ -32,50 +32,6 @@ type auditColumnMetadata struct {
 	DefaultExpression string
 }
 
-var canonicalAuditColumns = []auditColumnMetadata{
-	{Name: "event_id", Type: "String"},
-	{Name: "schema_version", Type: "UInt16"},
-	{Name: "team_id", Type: "String"},
-	{Name: "sandbox_id", Type: "String"},
-	{Name: "region_id", Type: "LowCardinality(String)"},
-	{Name: "cluster_id", Type: "LowCardinality(String)"},
-	{Name: "occurred_at", Type: "DateTime64(9, 'UTC')"},
-	{Name: "ingested_at", Type: "DateTime64(9, 'UTC')"},
-	{Name: "source", Type: "LowCardinality(String)"},
-	{Name: "event_type", Type: "LowCardinality(String)"},
-	{Name: "phase", Type: "LowCardinality(String)"},
-	{Name: "outcome", Type: "LowCardinality(String)"},
-	{Name: "actor_kind", Type: "LowCardinality(String)"},
-	{Name: "actor_id", Type: "String"},
-	{Name: "actor_user_id", Type: "String"},
-	{Name: "actor_api_key_id", Type: "String"},
-	{Name: "actor_auth_method", Type: "LowCardinality(String)"},
-	{Name: "action", Type: "LowCardinality(String)"},
-	{Name: "resource_type", Type: "LowCardinality(String)"},
-	{Name: "resource_id", Type: "String"},
-	{Name: "resource_subresource", Type: "String"},
-	{Name: "operation_id", Type: "String"},
-	{Name: "parent_event_id", Type: "String"},
-	{Name: "producer_service", Type: "LowCardinality(String)"},
-	{Name: "producer_instance", Type: "String"},
-	{Name: "producer_sequence", Type: "UInt64"},
-	{Name: "request_id", Type: "String"},
-	{Name: "trace_id", Type: "String"},
-	{Name: "source_ip", Type: "String"},
-	{Name: "user_agent", Type: "String"},
-	{Name: "http_method", Type: "LowCardinality(String)"},
-	{Name: "route", Type: "String"},
-	{Name: "status_code", Type: "UInt16"},
-	{Name: "cursor", Type: "String"},
-	{Name: "watermark", Type: "String"},
-	{Name: "attributes", Type: "String"},
-	{Name: "integrity_algorithm", Type: "LowCardinality(String)"},
-	{Name: "payload_hash", Type: "FixedString(64)"},
-	{Name: "signature", Type: "String"},
-	{Name: "signing_key_id", Type: "FixedString(64)"},
-	{Name: "version", Type: "UInt64", DefaultKind: "MATERIALIZED", DefaultExpression: "toUnixTimestamp64Nano(ingested_at)"},
-}
-
 var (
 	auditTTLKeywordPattern      = regexp.MustCompile(`(?i)\bTTL\b`)
 	auditSettingsKeywordPattern = regexp.MustCompile(`(?i)\bSETTINGS\b`)
@@ -139,7 +95,7 @@ func validateAuditEventTable(ctx context.Context, db *sql.DB, cfg Config) error 
 		return fmt.Errorf("inspect ClickHouse audit event columns: %w", err)
 	}
 	defer rows.Close()
-	columns := make([]auditColumnMetadata, 0, len(canonicalAuditColumns))
+	columns := make([]auditColumnMetadata, 0, len(canonicalAuditEventColumns))
 	for rows.Next() {
 		var column auditColumnMetadata
 		if err := rows.Scan(&column.Name, &column.Type, &column.DefaultKind, &column.DefaultExpression); err != nil {
@@ -174,9 +130,9 @@ func validateAuditEventTableMetadata(engine, sortingKey, partitionKey string, co
 	for _, column := range columns {
 		available[column] = struct{}{}
 	}
-	for _, column := range canonicalAuditColumns {
-		if _, ok := available[column.Name]; !ok {
-			return fmt.Errorf("required column %q is missing", column.Name)
+	for _, column := range canonicalAuditEventColumns {
+		if _, ok := available[column.name]; !ok {
+			return fmt.Errorf("required column %q is missing", column.name)
 		}
 	}
 	return nil
@@ -185,9 +141,9 @@ func validateAuditEventTableMetadata(engine, sortingKey, partitionKey string, co
 func validateCanonicalAuditEventTableMetadata(table auditTableMetadata, columns []auditColumnMetadata, retentionDays int) error {
 	names := make([]string, 0, len(columns))
 	available := make(map[string]auditColumnMetadata, len(columns))
-	expectedNames := make(map[string]struct{}, len(canonicalAuditColumns))
-	for _, expected := range canonicalAuditColumns {
-		expectedNames[expected.Name] = struct{}{}
+	expectedNames := make(map[string]struct{}, len(canonicalAuditEventColumns))
+	for _, expected := range canonicalAuditEventColumns {
+		expectedNames[expected.name] = struct{}{}
 	}
 	for _, column := range columns {
 		if _, ok := expectedNames[column.Name]; !ok {
@@ -209,19 +165,19 @@ func validateCanonicalAuditEventTableMetadata(table auditTableMetadata, columns 
 		return fmt.Errorf("engine_full is %q, want ReplacingMergeTree(version)", table.EngineFull)
 	}
 
-	for _, expected := range canonicalAuditColumns {
-		actual, ok := available[expected.Name]
+	for _, expected := range canonicalAuditEventColumns {
+		actual, ok := available[expected.name]
 		if !ok {
 			continue
 		}
-		if normalizeAuditSchemaExpression(actual.Type) != normalizeAuditSchemaExpression(expected.Type) {
-			return fmt.Errorf("column %q type is %q, want %q", expected.Name, actual.Type, expected.Type)
+		if normalizeAuditSchemaExpression(actual.Type) != normalizeAuditSchemaExpression(expected.typeName) {
+			return fmt.Errorf("column %q type is %q, want %q", expected.name, actual.Type, expected.typeName)
 		}
-		if !strings.EqualFold(strings.TrimSpace(actual.DefaultKind), expected.DefaultKind) {
-			return fmt.Errorf("column %q default kind is %q, want %q", expected.Name, actual.DefaultKind, expected.DefaultKind)
+		if !strings.EqualFold(strings.TrimSpace(actual.DefaultKind), expected.defaultKind) {
+			return fmt.Errorf("column %q default kind is %q, want %q", expected.name, actual.DefaultKind, expected.defaultKind)
 		}
-		if normalizeAuditSchemaExpression(actual.DefaultExpression) != normalizeAuditSchemaExpression(expected.DefaultExpression) {
-			return fmt.Errorf("column %q default expression is %q, want %q", expected.Name, actual.DefaultExpression, expected.DefaultExpression)
+		if normalizeAuditSchemaExpression(actual.DefaultExpression) != normalizeAuditSchemaExpression(expected.defaultExpression) {
+			return fmt.Errorf("column %q default expression is %q, want %q", expected.name, actual.DefaultExpression, expected.defaultExpression)
 		}
 	}
 

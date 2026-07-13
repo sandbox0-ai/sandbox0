@@ -1456,8 +1456,9 @@ paths:
       summary: Query canonical signed sandbox observability events
       description: |
         Queries canonical signed per-sandbox audit facts from ClickHouse. Every returned
-        event includes inline integrity verification status. Access requires the enterprise
-        sandbox_audit feature and the sandboxaudit:read permission.
+        event includes an inline signature verification status, while event-ID payload
+        conflicts are reported independently. Access requires the enterprise sandbox_audit
+        feature and the sandboxaudit:read permission.
       x-enterprise-feature: sandbox_audit
       x-required-permission: sandboxaudit:read
       security:
@@ -5362,6 +5363,8 @@ components:
           type: string
         status_code:
           type: integer
+          minimum: 0
+          maximum: 65535
     SandboxAuditProducer:
       type: object
       properties:
@@ -5379,6 +5382,7 @@ components:
       properties:
         algorithm:
           type: string
+          enum: [ed25519-sha256-v1]
         payload_hash:
           type: string
           pattern: "^[0-9a-f]{64}$"
@@ -5387,10 +5391,13 @@ components:
         signing_key_id:
           type: string
           pattern: "^[0-9a-f]{64}$"
-        status:
+        signature_status:
           type: string
-          enum: [verified, invalid, conflict, unavailable]
-      required: [algorithm, payload_hash, signature, signing_key_id, status]
+          enum: [verified, invalid, unavailable]
+        event_id_conflict:
+          type: boolean
+          description: True when the query observed the same event ID with a different canonical payload hash.
+      required: [algorithm, payload_hash, signature, signing_key_id, signature_status]
     SandboxObservabilityEvent:
       type: object
       properties:
@@ -5399,7 +5406,7 @@ components:
           format: uuid
         schema_version:
           type: integer
-          minimum: 1
+          enum: [2]
         team_id:
           type: string
         sandbox_id:
@@ -5439,10 +5446,6 @@ components:
           $ref: "#/components/schemas/SandboxAuditRequest"
         integrity:
           $ref: "#/components/schemas/SandboxAuditIntegrity"
-        cursor:
-          type: string
-        watermark:
-          type: string
         attributes:
           type: object
           additionalProperties: true
@@ -5462,10 +5465,9 @@ components:
         - actor
         - action
         - resource
+        - operation_id
         - producer
         - integrity
-        - cursor
-        - watermark
     SandboxObservabilityEventsResponse:
       type: object
       properties:

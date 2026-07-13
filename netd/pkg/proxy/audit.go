@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	"go.uber.org/zap"
@@ -16,8 +18,12 @@ import (
 )
 
 type auditLogger struct {
-	sink auditSink
-	now  func() time.Time
+	sink             auditSink
+	now              func() time.Time
+	newEventID       func() string
+	producerOnce     sync.Once
+	producerInstance string
+	producerSequence atomic.Int64
 }
 
 type auditSink interface {
@@ -41,7 +47,9 @@ type jsonlAuditSink struct {
 
 type auditEvent struct {
 	EventID            string                   `json:"event_id,omitempty"`
-	ProducerSequence   uint64                   `json:"producer_sequence,omitempty"`
+	OperationID        string                   `json:"operation_id,omitempty"`
+	ProducerInstance   string                   `json:"producer_instance,omitempty"`
+	ProducerSequence   int64                    `json:"producer_sequence,omitempty"`
 	Phase              string                   `json:"phase,omitempty"`
 	Timestamp          time.Time                `json:"timestamp"`
 	FlowID             string                   `json:"flow_id,omitempty"`
@@ -78,8 +86,59 @@ type auditEvent struct {
 	Error                       string `json:"error,omitempty"`
 }
 
+// validateAuditEventIdentity verifies the stable identity assigned before an
+// audit fact is fanned out to local and canonical sinks.
+func validateAuditEventIdentity(event auditEvent) error {
+	eventID, err := uuid.Parse(event.EventID)
+	if err != nil || eventID.String() != event.EventID {
+		return fmt.Errorf("audit event_id is invalid")
+	}
+	operationID, err := uuid.Parse(event.OperationID)
+	if err != nil || operationID.String() != event.OperationID {
+		return fmt.Errorf("audit operation_id is invalid")
+	}
+	if strings.TrimSpace(event.ProducerInstance) == "" {
+		return fmt.Errorf("audit producer_instance is required")
+	}
+	if event.ProducerInstance != strings.TrimSpace(event.ProducerInstance) {
+		return fmt.Errorf("audit producer_instance must not contain surrounding whitespace")
+	}
+	if event.ProducerSequence <= 0 {
+		return fmt.Errorf("audit producer_sequence must be positive")
+	}
+	return nil
+}
+
+// validateSpoolAuditEvent rejects facts that cannot be accepted by the
+// canonical ledger before they enter or leave the durable spool.
+func validateSpoolAuditEvent(event auditEvent) error {
+	if err := validateAuditEventIdentity(event); err != nil {
+		return err
+	}
+	if strings.TrimSpace(event.TeamID) == "" || strings.TrimSpace(event.SandboxID) == "" {
+		return fmt.Errorf("audit event requires team_id and sandbox_id")
+	}
+	if event.TeamID != strings.TrimSpace(event.TeamID) || event.SandboxID != strings.TrimSpace(event.SandboxID) {
+		return fmt.Errorf("audit team_id and sandbox_id must not contain surrounding whitespace")
+	}
+	if event.Timestamp.IsZero() {
+		return fmt.Errorf("audit timestamp is required")
+	}
+	if !sandboxobservability.ValidDateTime64Nano(event.Timestamp) {
+		return fmt.Errorf("audit timestamp is outside the DateTime64(9) range")
+	}
+	if !sandboxobservability.ValidEventPhase(sandboxobservability.EventPhase(event.Phase)) {
+		return fmt.Errorf("audit phase is invalid")
+	}
+	if !sandboxobservability.ValidOutcome(sandboxobservability.Outcome(event.Outcome)) {
+		return fmt.Errorf("audit outcome is invalid")
+	}
+	return nil
+}
+
 type flowAudit struct {
 	ID                 string
+	OperationID        string
 	StartedAt          time.Time
 	egressBytes        int64
 	ingressBytes       int64
@@ -176,12 +235,10 @@ func newAuditLogger(cfg *config.NetdConfig, logger *zap.Logger) (*auditLogger, e
 	if len(localSinks) == 0 && httpSink == nil {
 		return nil, nil
 	}
-	return &auditLogger{
-		sink: &multiAuditSink{bestEffort: localSinks, required: httpSink, logger: logger},
-		now: func() time.Time {
-			return time.Now().UTC()
-		},
-	}, nil
+	return newAuditLoggerWithSink(
+		&multiAuditSink{bestEffort: localSinks, required: httpSink, logger: logger},
+		cfg.NodeName,
+	), nil
 }
 
 func (s *multiAuditSink) WriteAuditEvent(event auditEvent) error {
@@ -242,12 +299,40 @@ func newAuditLoggerFromWriter(writer io.WriteCloser) *auditLogger {
 	if writer == nil {
 		return nil
 	}
-	return &auditLogger{
-		sink: newJSONLAuditSink(writer),
-		now: func() time.Time {
-			return time.Now().UTC()
-		},
+	return newAuditLoggerWithSink(newJSONLAuditSink(writer), "netd-local")
+}
+
+func newAuditLoggerWithSink(sink auditSink, producerBase string) *auditLogger {
+	if sink == nil {
+		return nil
 	}
+	return &auditLogger{
+		sink:             sink,
+		now:              func() time.Time { return time.Now().UTC() },
+		newEventID:       uuid.NewString,
+		producerInstance: newAuditProducerInstance(producerBase),
+	}
+}
+
+func newAuditProducerInstance(base string) string {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		base = "netd"
+	}
+	return base + ":" + uuid.NewString()
+}
+
+func (l *auditLogger) nextEventIdentity() (string, string, int64) {
+	newEventID := l.newEventID
+	if newEventID == nil {
+		newEventID = uuid.NewString
+	}
+	l.producerOnce.Do(func() {
+		if strings.TrimSpace(l.producerInstance) == "" {
+			l.producerInstance = newAuditProducerInstance("")
+		}
+	})
+	return newEventID(), l.producerInstance, l.producerSequence.Add(1)
 }
 
 func newJSONLAuditSink(writer io.WriteCloser) *jsonlAuditSink {
@@ -279,7 +364,19 @@ func (l *auditLogger) recordWithPhase(req *adapterRequest, decision trafficDecis
 	if l == nil {
 		return nil
 	}
+	eventID, producerInstance, producerSequence := l.nextEventIdentity()
+	operationID := ""
+	if req != nil && req.Audit != nil {
+		operationID = req.Audit.OperationID
+	}
+	if operationID == "" {
+		operationID = uuid.NewString()
+	}
 	event := auditEvent{
+		EventID:           eventID,
+		OperationID:       operationID,
+		ProducerInstance:  producerInstance,
+		ProducerSequence:  producerSequence,
 		Phase:             phase,
 		Timestamp:         l.now(),
 		SrcIP:             "",
@@ -361,8 +458,9 @@ func (s *jsonlAuditSink) Close() error {
 
 func newFlowAudit(id string, startedAt time.Time) *flowAudit {
 	return &flowAudit{
-		ID:        id,
-		StartedAt: startedAt.UTC(),
+		ID:          id,
+		OperationID: uuid.NewString(),
+		StartedAt:   startedAt.UTC(),
 	}
 }
 

@@ -168,21 +168,23 @@ func TestHTTPAuditSinkPostsObservabilityEvents(t *testing.T) {
 	})
 	defer sink.Close()
 
-	err = sink.WriteAuditEvent(auditEvent{
-		Timestamp:   time.Date(2026, 7, 1, 1, 2, 3, 0, time.UTC),
-		FlowID:      "tcp-1",
-		TeamID:      "team-1",
-		SandboxID:   "sb-1",
-		DestIP:      "8.8.8.8",
-		DestPort:    443,
-		Transport:   "tcp",
-		Protocol:    "tls",
-		Host:        "example.com",
-		Action:      "use-adapter",
-		Reason:      "allowed",
-		Outcome:     "completed",
-		EgressBytes: 128,
-	})
+	event := newAuditDeliveryTestEvent("23232323-2323-4232-8232-232323232323", sandboxobservability.EventPhaseResult)
+	event.Timestamp = time.Date(2026, 7, 1, 1, 2, 3, 0, time.UTC)
+	event.DestIP = "8.8.8.8"
+	event.DestPort = 443
+	event.Protocol = "tls"
+	event.Host = "example.com"
+	event.Action = "use-adapter"
+	event.Reason = "allowed"
+	event.Outcome = "completed"
+	event.EgressBytes = 128
+	event.Error = "upstream response contained a diagnostic secret"
+	event.AuthResolveError = "credential provider contained a diagnostic secret"
+	event.ProtocolOperations = []protocolOperationAudit{{
+		RuleName: "allow-tools", Protocol: "mcp", Operation: "tools/call",
+		Object: "search", Action: "allow", Reason: "matched",
+	}}
+	err = sink.WriteAuditEvent(event)
 	if err != nil {
 		t.Fatalf("WriteAuditEvent() error = %v", err)
 	}
@@ -202,12 +204,27 @@ func TestHTTPAuditSinkPostsObservabilityEvents(t *testing.T) {
 			event.Phase != sandboxobservability.EventPhaseResult ||
 			event.Outcome != sandboxobservability.OutcomeCompleted ||
 			event.EventID == "" ||
-			event.Cursor != event.EventID ||
-			event.Watermark != event.Cursor {
+			event.OperationID != "99999999-9999-4999-8999-999999999999" ||
+			event.Producer.Instance != "node-a:boot-a" ||
+			event.Producer.Sequence != 1 {
 			t.Fatalf("projected event = %+v", event)
 		}
 		if event.Attributes["host"] != "example.com" || event.Attributes["egress_bytes"].(float64) != 128 {
 			t.Fatalf("attributes = %#v", event.Attributes)
+		}
+		if _, ok := event.Attributes["error"]; ok {
+			t.Fatalf("raw proxy error entered canonical attributes: %#v", event.Attributes)
+		}
+		if _, ok := event.Attributes["auth_resolve_error"]; ok {
+			t.Fatalf("raw auth resolution error entered canonical attributes: %#v", event.Attributes)
+		}
+		operations, ok := event.Attributes["protocol_operations"].([]any)
+		if !ok || len(operations) != 1 {
+			t.Fatalf("protocol_operations = %#v, want one typed operation", event.Attributes["protocol_operations"])
+		}
+		operation, ok := operations[0].(map[string]any)
+		if !ok || operation["operation"] != "tools/call" || operation["object"] != "search" {
+			t.Fatalf("protocol operation = %#v", operations[0])
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for ingest request")

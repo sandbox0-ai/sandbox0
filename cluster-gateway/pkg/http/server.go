@@ -177,6 +177,9 @@ func NewServer(
 	var auditSigningPrivateKey ed25519.PrivateKey
 	var auditSigningPublicKey ed25519.PublicKey
 	if cfg.SandboxObservability.AuditEnabled {
+		if strings.TrimSpace(cfg.RegionID) == "" || strings.TrimSpace(cfg.ClusterID) == "" {
+			return nil, fmt.Errorf("sandbox audit requires region_id and cluster_id")
+		}
 		auditNetdPublicKey, err = internalauth.LoadEd25519PublicKeyFromFile(internalauth.DefaultAuditJWTPublicKeyPath)
 		if err != nil {
 			return nil, fmt.Errorf("load dedicated netd audit JWT public key: %w", err)
@@ -290,7 +293,7 @@ func NewServer(
 	meteringHandler := gatewayhandlers.NewMeteringHandler(options.meteringReader, cfg.RegionID, logger)
 	observabilityOptions := []gatewayhandlers.SandboxObservabilityHandlerOption(nil)
 	if cfg.SandboxObservability.AuditEnabled {
-		observabilityOptions = append(observabilityOptions, gatewayhandlers.WithAuditIngestPolicy(gatewayhandlers.AuditIngestPolicy{
+		observabilityOptions = append(observabilityOptions, gatewayhandlers.WithAuditIntegrityPolicy(gatewayhandlers.AuditIntegrityPolicy{
 			RegionID:        cfg.RegionID,
 			ClusterID:       cfg.ClusterID,
 			SigningKey:      auditSigningPrivateKey,
@@ -298,8 +301,8 @@ func NewServer(
 		}))
 	}
 	observabilityHandler := gatewayhandlers.NewSandboxObservabilityHandler(options.sandboxObservabilityRepo, logger, observabilityOptions...)
-	var auditWriter sandboxobservability.Writer
-	if writer, ok := options.sandboxObservabilityRepo.(sandboxobservability.Writer); ok {
+	var auditWriter auditEventInserter
+	if writer, ok := options.sandboxObservabilityRepo.(auditEventInserter); ok {
 		auditWriter = writer
 	}
 	var delivery *auditDelivery

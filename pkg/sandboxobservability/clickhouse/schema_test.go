@@ -29,6 +29,9 @@ func TestSchemaStatementsUseReplacingMergeTreeAndRetentionTTL(t *testing.T) {
 			t.Fatalf("create events table statement missing %q:\n%s", want, createEventsTable)
 		}
 	}
+	if strings.Contains(createEventsTable, "\n\tcursor ") || strings.Contains(createEventsTable, "\n\twatermark ") {
+		t.Fatalf("create events table must not persist query transport metadata:\n%s", createEventsTable)
+	}
 	createLogsTable := statements[2]
 	for _, want := range []string{
 		"CREATE TABLE IF NOT EXISTS `sandbox0_observability`.`sandbox_logs`",
@@ -109,7 +112,7 @@ func TestValidateAuditEventTableMetadataRejectsLegacySchema(t *testing.T) {
 }
 
 func TestValidateAuditEventTableMetadataAcceptsCanonicalSchema(t *testing.T) {
-	columns := strings.Split("event_id schema_version team_id sandbox_id region_id cluster_id occurred_at ingested_at source event_type phase outcome actor_kind actor_id actor_user_id actor_api_key_id actor_auth_method action resource_type resource_id resource_subresource operation_id parent_event_id producer_service producer_instance producer_sequence request_id trace_id source_ip user_agent http_method route status_code cursor watermark attributes integrity_algorithm payload_hash signature signing_key_id version", " ")
+	columns := strings.Split("event_id schema_version team_id sandbox_id region_id cluster_id occurred_at ingested_at source event_type phase outcome actor_kind actor_id actor_user_id actor_api_key_id actor_auth_method action resource_type resource_id resource_subresource operation_id parent_event_id producer_service producer_instance producer_sequence request_id trace_id source_ip user_agent http_method route status_code attributes integrity_algorithm payload_hash signature signing_key_id version", " ")
 	if err := validateAuditEventTableMetadata(
 		"ReplacingMergeTree",
 		"team_id, sandbox_id, occurred_at, event_id, payload_hash",

@@ -13,11 +13,8 @@ import (
 )
 
 const maxInsertBatchSize = 500
-const maxAuditAttributesBytes = 64 * 1024
 const dateTime64NanoPlaceholder = "toDateTime64(?, 9, 'UTC')"
 const auditInsertReliabilitySettings = " SETTINGS async_insert = 0, wait_for_async_insert = 1"
-
-const eventSelectColumns = "event_id, schema_version, team_id, sandbox_id, region_id, cluster_id, occurred_at, ingested_at, source, event_type, phase, outcome, actor_kind, actor_id, actor_user_id, actor_api_key_id, actor_auth_method, action, resource_type, resource_id, resource_subresource, operation_id, parent_event_id, producer_service, producer_instance, producer_sequence, request_id, trace_id, source_ip, user_agent, http_method, route, status_code, cursor, watermark, attributes, integrity_algorithm, payload_hash, signature, signing_key_id"
 
 type sqlBackend interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
@@ -161,77 +158,29 @@ func (r *Repository) buildInsertSQL(events []sandboxobservability.Event) (string
 	builder.WriteString("INSERT INTO ")
 	builder.WriteString(r.eventsTable)
 	builder.WriteString(" (")
-	builder.WriteString(eventSelectColumns)
+	builder.WriteString(auditEventSelectColumns)
 	builder.WriteString(")")
 	builder.WriteString(auditInsertReliabilitySettings)
 	builder.WriteString(" VALUES ")
 
-	args := make([]any, 0, len(events)*40)
+	columnCount := auditEventInsertColumnCount()
+	args := make([]any, 0, len(events)*columnCount)
 	for i, event := range events {
 		if i > 0 {
 			builder.WriteString(", ")
 		}
 		builder.WriteString("(")
-		for column := 0; column < 40; column++ {
-			if column > 0 {
-				builder.WriteString(", ")
-			}
-			if column == 6 || column == 7 {
-				builder.WriteString(dateTime64NanoPlaceholder)
-			} else {
-				builder.WriteString("?")
-			}
-		}
+		builder.WriteString(auditEventInsertPlaceholders)
 		builder.WriteString(")")
-		attributes, err := encodeAttributes(event.Attributes)
+		row, err := newAuditEventRow(event)
 		if err != nil {
-			return "", nil, fmt.Errorf("encode attributes: %w", err)
+			return "", nil, err
 		}
-		if len(attributes) > maxAuditAttributesBytes {
-			return "", nil, fmt.Errorf("attributes exceed %d bytes", maxAuditAttributesBytes)
+		values := row.insertValues()
+		if len(values) != columnCount {
+			return "", nil, fmt.Errorf("audit event row has %d values for %d insert columns", len(values), columnCount)
 		}
-		args = append(args,
-			event.EventID,
-			event.SchemaVersion,
-			event.TeamID,
-			event.SandboxID,
-			event.RegionID,
-			event.ClusterID,
-			dateTime64NanoArg(event.OccurredAt),
-			dateTime64NanoArg(event.IngestedAt),
-			string(event.Source),
-			string(event.EventType),
-			string(event.Phase),
-			string(event.Outcome),
-			string(event.Actor.Kind),
-			event.Actor.ID,
-			event.Actor.UserID,
-			event.Actor.APIKeyID,
-			event.Actor.AuthMethod,
-			event.Action,
-			event.Resource.Type,
-			event.Resource.ID,
-			event.Resource.Subresource,
-			event.OperationID,
-			event.ParentEventID,
-			event.Producer.Service,
-			event.Producer.Instance,
-			event.Producer.Sequence,
-			event.Request.RequestID,
-			event.Request.TraceID,
-			event.Request.SourceIP,
-			event.Request.UserAgent,
-			event.Request.HTTPMethod,
-			event.Request.Route,
-			event.Request.StatusCode,
-			event.Cursor,
-			event.Watermark,
-			attributes,
-			event.Integrity.Algorithm,
-			event.Integrity.PayloadHash,
-			event.Integrity.Signature,
-			event.Integrity.SigningKeyID,
-		)
+		args = append(args, values...)
 	}
 
 	return builder.String(), args, nil
@@ -240,11 +189,31 @@ func (r *Repository) buildInsertSQL(events []sandboxobservability.Event) (string
 func (r *Repository) buildListSQL(query sandboxobservability.EventQuery, limit int, cursor *pageCursor) (string, []any) {
 	var builder strings.Builder
 	builder.WriteString("SELECT ")
-	builder.WriteString(eventSelectColumns)
+	builder.WriteString(auditEventSelectColumns)
 	builder.WriteString(" FROM ")
 	builder.WriteString(r.eventsTable)
-	builder.WriteString(" FINAL WHERE team_id = ? AND sandbox_id = ?")
+	builder.WriteString(" FINAL WHERE ")
 
+	args := appendEventFilters(&builder, query)
+	if query.EventID != "" {
+		builder.WriteString(" AND event_id = ?")
+		args = append(args, query.EventID)
+	}
+	if cursor != nil {
+		builder.WriteString(" AND (occurred_at, ingested_at, source, event_type, event_id, payload_hash) > (")
+		builder.WriteString(dateTime64NanoPlaceholder + ", " + dateTime64NanoPlaceholder + ", ?, ?, ?, ?)")
+		args = append(args, dateTime64NanoArg(cursor.OccurredAt), dateTime64NanoArg(cursor.IngestedAt), cursor.Source, cursor.EventType, cursor.Cursor, cursor.PayloadHash)
+	}
+
+	builder.WriteString(" ORDER BY occurred_at ASC, ingested_at ASC, source ASC, event_type ASC, event_id ASC, payload_hash ASC")
+	builder.WriteString(fmt.Sprintf(" LIMIT %d", limit))
+	return builder.String(), args
+}
+
+// appendEventFilters writes the filters shared by historical list and watch
+// queries. Exact event ID lookup remains list-only.
+func appendEventFilters(builder *strings.Builder, query sandboxobservability.EventQuery) []any {
+	builder.WriteString("team_id = ? AND sandbox_id = ?")
 	args := []any{query.TeamID, query.SandboxID}
 	if query.StartTime != nil {
 		builder.WriteString(" AND occurred_at >= " + dateTime64NanoPlaceholder)
@@ -286,19 +255,7 @@ func (r *Repository) buildListSQL(query sandboxobservability.EventQuery, limit i
 		builder.WriteString(" AND operation_id = ?")
 		args = append(args, query.OperationID)
 	}
-	if query.EventID != "" {
-		builder.WriteString(" AND event_id = ?")
-		args = append(args, query.EventID)
-	}
-	if cursor != nil {
-		builder.WriteString(" AND (occurred_at, ingested_at, source, event_type, event_id, payload_hash) > (")
-		builder.WriteString(dateTime64NanoPlaceholder + ", " + dateTime64NanoPlaceholder + ", ?, ?, ?, ?)")
-		args = append(args, dateTime64NanoArg(cursor.OccurredAt), dateTime64NanoArg(cursor.IngestedAt), cursor.Source, cursor.EventType, cursor.Cursor, cursor.PayloadHash)
-	}
-
-	builder.WriteString(" ORDER BY occurred_at ASC, ingested_at ASC, source ASC, event_type ASC, event_id ASC, payload_hash ASC")
-	builder.WriteString(fmt.Sprintf(" LIMIT %d", limit))
-	return builder.String(), args
+	return args
 }
 
 func normalizeQuery(query sandboxobservability.EventQuery) (sandboxobservability.EventQuery, int, *pageCursor, error) {
@@ -313,10 +270,16 @@ func normalizeQuery(query sandboxobservability.EventQuery) (sandboxobservability
 	}
 	if query.StartTime != nil {
 		start := query.StartTime.UTC()
+		if !sandboxobservability.ValidDateTime64Nano(start) {
+			return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("%w: start_time is outside the DateTime64(9) range", sandboxobservability.ErrInvalidQuery)
+		}
 		query.StartTime = &start
 	}
 	if query.EndTime != nil {
 		end := query.EndTime.UTC()
+		if !sandboxobservability.ValidDateTime64Nano(end) {
+			return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("%w: end_time is outside the DateTime64(9) range", sandboxobservability.ErrInvalidQuery)
+		}
 		query.EndTime = &end
 	}
 	if query.StartTime != nil && query.EndTime != nil && query.EndTime.Before(*query.StartTime) {
@@ -358,6 +321,9 @@ func normalizeQuery(query sandboxobservability.EventQuery) (sandboxobservability
 		if err != nil {
 			return sandboxobservability.EventQuery{}, 0, nil, err
 		}
+		if !sandboxobservability.ValidDateTime64Nano(decoded.OccurredAt) || !sandboxobservability.ValidDateTime64Nano(decoded.IngestedAt) {
+			return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("%w: timestamp is outside the DateTime64(9) range", sandboxobservability.ErrInvalidCursor)
+		}
 		cursor = decoded
 	}
 
@@ -365,73 +331,8 @@ func normalizeQuery(query sandboxobservability.EventQuery) (sandboxobservability
 }
 
 func normalizeEventForInsert(event sandboxobservability.Event, now time.Time) (sandboxobservability.Event, error) {
-	event.Cursor = strings.TrimSpace(event.Cursor)
-	event.Watermark = strings.TrimSpace(event.Watermark)
-	canonicalFields := []struct {
-		name  string
-		value string
-	}{
-		{name: "event_id", value: event.EventID},
-		{name: "team_id", value: event.TeamID},
-		{name: "sandbox_id", value: event.SandboxID},
-		{name: "region_id", value: event.RegionID},
-		{name: "cluster_id", value: event.ClusterID},
-		{name: "action", value: event.Action},
-		{name: "resource.type", value: event.Resource.Type},
-		{name: "resource.id", value: event.Resource.ID},
-		{name: "producer.service", value: event.Producer.Service},
-	}
-	for _, field := range canonicalFields {
-		if field.value != strings.TrimSpace(field.value) {
-			return sandboxobservability.Event{}, fmt.Errorf("%s must not contain surrounding whitespace", field.name)
-		}
-	}
-
-	if event.EventID == "" {
-		return sandboxobservability.Event{}, fmt.Errorf("event_id is required")
-	}
-	if event.SchemaVersion != sandboxobservability.CurrentEventSchemaVersion {
-		return sandboxobservability.Event{}, fmt.Errorf("schema_version must be %d", sandboxobservability.CurrentEventSchemaVersion)
-	}
-
-	if event.TeamID == "" {
-		return sandboxobservability.Event{}, fmt.Errorf("team_id is required")
-	}
-	if event.SandboxID == "" {
-		return sandboxobservability.Event{}, fmt.Errorf("sandbox_id is required")
-	}
-	if event.OccurredAt.IsZero() {
-		return sandboxobservability.Event{}, fmt.Errorf("occurred_at is required")
-	}
-	if !sandboxobservability.ValidSource(event.Source) {
-		return sandboxobservability.Event{}, fmt.Errorf("invalid source")
-	}
-	if !sandboxobservability.ValidEventType(event.EventType) {
-		return sandboxobservability.Event{}, fmt.Errorf("invalid event_type")
-	}
-	if event.Outcome != "" && !sandboxobservability.ValidOutcome(event.Outcome) {
-		return sandboxobservability.Event{}, fmt.Errorf("invalid outcome")
-	}
-	if !sandboxobservability.ValidEventPhase(event.Phase) {
-		return sandboxobservability.Event{}, fmt.Errorf("invalid phase")
-	}
-	if !sandboxobservability.ValidActorKind(event.Actor.Kind) {
-		return sandboxobservability.Event{}, fmt.Errorf("invalid actor kind")
-	}
-	if event.Action == "" {
-		return sandboxobservability.Event{}, fmt.Errorf("action is required")
-	}
-	if event.Resource.Type == "" || event.Resource.ID == "" {
-		return sandboxobservability.Event{}, fmt.Errorf("resource type and id are required")
-	}
-	if event.Producer.Service == "" {
-		return sandboxobservability.Event{}, fmt.Errorf("producer service is required")
-	}
-	if event.Integrity.Algorithm == "" || len(event.Integrity.PayloadHash) != 64 || event.Integrity.Signature == "" || len(event.Integrity.SigningKeyID) != 64 {
-		return sandboxobservability.Event{}, fmt.Errorf("verified integrity fields are required")
-	}
-	if event.Cursor == "" {
-		return sandboxobservability.Event{}, fmt.Errorf("cursor is required")
+	if err := sandboxobservability.ValidateSignedEvent(event); err != nil {
+		return sandboxobservability.Event{}, err
 	}
 	event.OccurredAt = event.OccurredAt.UTC()
 	if event.IngestedAt.IsZero() {
@@ -452,75 +353,14 @@ func dateTime64NanoArg(value time.Time) string {
 func scanEvents(rows *sql.Rows) ([]sandboxobservability.Event, error) {
 	var events []sandboxobservability.Event
 	for rows.Next() {
-		var (
-			event          sandboxobservability.Event
-			source         string
-			eventType      string
-			outcome        string
-			phase          string
-			actorKind      string
-			attributesJSON string
-		)
-		if err := rows.Scan(
-			&event.EventID,
-			&event.SchemaVersion,
-			&event.TeamID,
-			&event.SandboxID,
-			&event.RegionID,
-			&event.ClusterID,
-			&event.OccurredAt,
-			&event.IngestedAt,
-			&source,
-			&eventType,
-			&phase,
-			&outcome,
-			&actorKind,
-			&event.Actor.ID,
-			&event.Actor.UserID,
-			&event.Actor.APIKeyID,
-			&event.Actor.AuthMethod,
-			&event.Action,
-			&event.Resource.Type,
-			&event.Resource.ID,
-			&event.Resource.Subresource,
-			&event.OperationID,
-			&event.ParentEventID,
-			&event.Producer.Service,
-			&event.Producer.Instance,
-			&event.Producer.Sequence,
-			&event.Request.RequestID,
-			&event.Request.TraceID,
-			&event.Request.SourceIP,
-			&event.Request.UserAgent,
-			&event.Request.HTTPMethod,
-			&event.Request.Route,
-			&event.Request.StatusCode,
-			&event.Cursor,
-			&event.Watermark,
-			&attributesJSON,
-			&event.Integrity.Algorithm,
-			&event.Integrity.PayloadHash,
-			&event.Integrity.Signature,
-			&event.Integrity.SigningKeyID,
-		); err != nil {
+		var row auditEventRow
+		if err := rows.Scan(row.scanDestinations()...); err != nil {
 			return nil, err
 		}
-		attributes, err := decodeAttributes(attributesJSON)
+		event, err := row.toEvent()
 		if err != nil {
 			return nil, err
 		}
-		event.OccurredAt = event.OccurredAt.UTC()
-		event.IngestedAt = event.IngestedAt.UTC()
-		event.Source = sandboxobservability.Source(source)
-		event.EventType = sandboxobservability.EventType(eventType)
-		event.Phase = sandboxobservability.EventPhase(phase)
-		event.Outcome = sandboxobservability.Outcome(outcome)
-		event.Actor.Kind = sandboxobservability.ActorKind(actorKind)
-		// Cursor and watermark are transport projections derived from the signed
-		// event identity; stored values never override the canonical event ID.
-		event.Cursor = event.EventID
-		event.Watermark = event.EventID
-		event.Attributes = attributes
 		events = append(events, event)
 	}
 	if err := rows.Err(); err != nil {
@@ -558,10 +398,8 @@ func decodeAttributes(value string) (map[string]any, error) {
 }
 
 func lastWatermark(events []sandboxobservability.Event) string {
-	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].Watermark != "" {
-			return events[i].Watermark
-		}
+	if len(events) == 0 {
+		return ""
 	}
-	return ""
+	return events[len(events)-1].EventID
 }

@@ -215,7 +215,7 @@ func TestClaimSandboxReturnsUnavailableWhenDataPlaneNotReady(t *testing.T) {
 	}
 }
 
-func TestClaimSandboxReturnsTooManyRequestsWhenClaimStartThrottled(t *testing.T) {
+func TestClaimSandboxReturnsTooManyRequestsWhileWarmPoolReplenishes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	withHTTPTestPublicKey(t)
 	withHTTPTestManagerConfig(t, `sandbox_pod_placement:
@@ -229,7 +229,14 @@ func TestClaimSandboxReturnsTooManyRequestsWhenClaimStartThrottled(t *testing.T)
 	}
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: templateNamespace},
-		Spec:       v1alpha1.SandboxTemplateSpec{MainContainer: v1alpha1.ContainerSpec{Image: "busybox"}},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{Image: "busybox"},
+			Pool:          v1alpha1.PoolStrategy{MinIdle: 1},
+			VolumeMounts: []v1alpha1.VolumeMountSpec{{
+				Name:      "data",
+				MountPath: "/workspace/data",
+			}},
+		},
 	}
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{
@@ -245,11 +252,11 @@ func TestClaimSandboxReturnsTooManyRequestsWhenClaimStartThrottled(t *testing.T)
 	}
 	startingPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "active-starting",
+			Name:      "idle-starting",
 			Namespace: templateNamespace,
 			Labels: map[string]string{
 				controller.LabelTemplateID: template.Name,
-				controller.LabelPoolType:   controller.PoolTypeActive,
+				controller.LabelPoolType:   controller.PoolTypeIdle,
 			},
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodPending},
@@ -257,8 +264,8 @@ func TestClaimSandboxReturnsTooManyRequestsWhenClaimStartThrottled(t *testing.T)
 	k8sClient := fake.NewSimpleClientset(node, startingPod)
 	claimStartLimiter, err := startlimiter.New(context.Background(), startlimiter.Config{
 		K8sClient:      k8sClient,
-		PerSandboxNode: 1,
-		MaxLimit:       1,
+		PerSandboxNode: 2,
+		MaxLimit:       2,
 		SandboxNodeSelector: map[string]string{
 			"sandbox0.ai/data-plane-ready": "true",
 		},
@@ -282,6 +289,7 @@ func TestClaimSandboxReturnsTooManyRequestsWhenClaimStartThrottled(t *testing.T)
 		nil,
 	)
 	sandboxService.SetClaimStartLimiter(claimStartLimiter)
+	sandboxService.SetVolumeMetadataClient(conflictingHTTPVolumeMetadataClient{})
 
 	server := &Server{sandboxService: sandboxService, logger: zap.NewNop()}
 	recorder := httptest.NewRecorder()
@@ -306,6 +314,47 @@ func TestClaimSandboxReturnsTooManyRequestsWhenClaimStartThrottled(t *testing.T)
 	if response.Success || response.Error == nil || response.Error.Code != spec.CodeClaimStartThrottled {
 		t.Fatalf("response = %+v, want claim_start_throttled error", response)
 	}
+	if !strings.Contains(response.Error.Message, "in_flight=1 limit=2") {
+		t.Fatalf("error message = %q, want below-limit warm-pool pressure", response.Error.Message)
+	}
+
+	conflictRecorder := httptest.NewRecorder()
+	conflictCtx, _ := gin.CreateTestContext(conflictRecorder)
+	conflictRequest := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{
+		"template":"default",
+		"mounts":[{"sandboxvolume_id":"vol-1","mount_point":"/workspace/data"}]
+	}`))
+	conflictRequest.Header.Set("Content-Type", "application/json")
+	conflictRequest = conflictRequest.WithContext(internalauth.WithClaims(conflictRequest.Context(), &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
+	conflictCtx.Request = conflictRequest
+
+	server.claimSandbox(conflictCtx)
+
+	if conflictRecorder.Code != http.StatusConflict {
+		t.Fatalf("volume conflict status = %d, want %d; body = %s", conflictRecorder.Code, http.StatusConflict, conflictRecorder.Body.String())
+	}
+	response = spec.Response{}
+	if err := json.Unmarshal(conflictRecorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal conflict response: %v", err)
+	}
+	if response.Success || response.Error == nil || response.Error.Code != spec.CodeConflict {
+		t.Fatalf("conflict response = %+v, want conflict error before claim backpressure", response)
+	}
+}
+
+type conflictingHTTPVolumeMetadataClient struct{}
+
+func (conflictingHTTPVolumeMetadataClient) Get(_ context.Context, teamID, userID, volumeID string) (*service.SandboxVolumeInfo, error) {
+	return &service.SandboxVolumeInfo{
+		ID:         volumeID,
+		TeamID:     teamID,
+		UserID:     userID,
+		AccessMode: "RWO",
+	}, nil
+}
+
+func (conflictingHTTPVolumeMetadataClient) PrepareForVolumePortalBind(context.Context, service.PrepareVolumePortalBindRequest) error {
+	return service.ErrVolumePortalBindConflict
 }
 
 func TestClaimSandboxReturnsNotFoundForMissingTemplate(t *testing.T) {

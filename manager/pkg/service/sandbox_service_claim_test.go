@@ -940,6 +940,120 @@ func TestCreateNewPodAnnotatesClaimStartReservation(t *testing.T) {
 	}
 }
 
+func TestDeferColdClaimWhilePoolReplenishes(t *testing.T) {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a"},
+		Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{
+			Type:   corev1.NodeReady,
+			Status: corev1.ConditionTrue,
+		}}},
+	}
+	startingPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "idle-starting",
+			Namespace: "ns-a",
+			Labels: map[string]string{
+				controller.LabelTemplateID: "template-a",
+				controller.LabelPoolType:   controller.PoolTypeIdle,
+			},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodPending},
+	}
+	client := fake.NewSimpleClientset(node, startingPod)
+	limiter, err := startlimiter.New(context.Background(), startlimiter.Config{
+		ClusterID:      "cluster-a",
+		K8sClient:      client,
+		PerSandboxNode: 2,
+		MaxLimit:       2,
+	})
+	if err != nil {
+		t.Fatalf("create claim start limiter: %v", err)
+	}
+	svc := &SandboxService{claimStartLimiter: limiter}
+	template := &v1alpha1.SandboxTemplate{
+		Spec: v1alpha1.SandboxTemplateSpec{Pool: v1alpha1.PoolStrategy{MinIdle: 1}},
+	}
+
+	err = svc.deferColdClaimWhilePoolReplenishes(context.Background(), template)
+	if !errors.Is(err, ErrClaimStartThrottled) {
+		t.Fatalf("deferColdClaimWhilePoolReplenishes() error = %v, want claim start throttled", err)
+	}
+	var throttled *startlimiter.ThrottledError
+	if !errors.As(err, &throttled) {
+		t.Fatalf("error = %T, want *startlimiter.ThrottledError", err)
+	}
+	if throttled.Snapshot.InFlight != 1 || throttled.Snapshot.Limit != 2 || throttled.Snapshot.Available != 1 {
+		t.Fatalf("snapshot = %+v, want in-flight 1, limit 2, and one nominally available slot", throttled.Snapshot)
+	}
+}
+
+func TestDeferColdClaimAllowsFallbackWithoutPoolPressure(t *testing.T) {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a"},
+		Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{
+			Type:   corev1.NodeReady,
+			Status: corev1.ConditionTrue,
+		}}},
+	}
+	client := fake.NewSimpleClientset(node)
+	limiter, err := startlimiter.New(context.Background(), startlimiter.Config{
+		ClusterID:      "cluster-a",
+		K8sClient:      client,
+		PerSandboxNode: 2,
+		MaxLimit:       2,
+	})
+	if err != nil {
+		t.Fatalf("create claim start limiter: %v", err)
+	}
+	svc := &SandboxService{claimStartLimiter: limiter}
+	template := &v1alpha1.SandboxTemplate{
+		Spec: v1alpha1.SandboxTemplateSpec{Pool: v1alpha1.PoolStrategy{MinIdle: 1}},
+	}
+
+	if err := svc.deferColdClaimWhilePoolReplenishes(context.Background(), template); err != nil {
+		t.Fatalf("deferColdClaimWhilePoolReplenishes() error = %v, want cold fallback allowed", err)
+	}
+}
+
+func TestPreflightClaimVolumePortalBindsPreservesConflictBeforeBackpressure(t *testing.T) {
+	metadata := &fakeVolumeMetadataClient{
+		accessMode: "RWO",
+		prepareErr: ErrVolumePortalBindConflict,
+	}
+	svc := &SandboxService{volumeMetadata: metadata}
+	template := &v1alpha1.SandboxTemplate{
+		Spec: v1alpha1.SandboxTemplateSpec{
+			VolumeMounts: []v1alpha1.VolumeMountSpec{{
+				Name:      "data",
+				MountPath: "/workspace/data",
+			}},
+		},
+	}
+	req := &ClaimRequest{
+		TeamID:    "team-a",
+		UserID:    "user-a",
+		SandboxID: "sandbox-a",
+		Mounts: []ClaimMount{{
+			SandboxVolumeID: "vol-1",
+			MountPoint:      "/workspace/data",
+		}},
+	}
+
+	err := svc.preflightClaimVolumePortalBinds(context.Background(), req, template)
+	if !errors.Is(err, ErrClaimConflict) {
+		t.Fatalf("preflightClaimVolumePortalBinds() error = %v, want claim conflict", err)
+	}
+	if errors.Is(err, ErrClaimStartThrottled) {
+		t.Fatalf("preflightClaimVolumePortalBinds() error = %v, must not mask conflict with backpressure", err)
+	}
+	if len(metadata.prepared) != 1 {
+		t.Fatalf("prepared calls = %d, want 1", len(metadata.prepared))
+	}
+	if metadata.prepared[0] != "team-a:user-a:vol-1:" {
+		t.Fatalf("prepared call = %q, want preflight without pod uid", metadata.prepared[0])
+	}
+}
+
 func TestClaimSandboxDeletesColdPodAfterNetworkApplyFailure(t *testing.T) {
 	withClaimTestPublicKey(t)
 

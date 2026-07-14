@@ -338,6 +338,30 @@ type ClaimResponse struct {
 	BootstrapMounts []BootstrapMountStatus `json:"bootstrap_mounts,omitempty"`
 }
 
+// deferColdClaimWhilePoolReplenishes keeps a depleted warm pool from falling
+// through to a latency-heavy cold create while replacement pods are starting.
+// Cold fallback remains available when the cluster has no start pressure.
+func (s *SandboxService) deferColdClaimWhilePoolReplenishes(ctx context.Context, template *v1alpha1.SandboxTemplate) error {
+	if s == nil || s.claimStartLimiter == nil || template == nil || template.Spec.Pool.MinIdle <= 0 {
+		return nil
+	}
+
+	snapshot, err := s.claimStartLimiter.Snapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("inspect claim start pressure: %w", err)
+	}
+	if snapshot == nil || snapshot.InFlight <= 0 {
+		return nil
+	}
+
+	return &startlimiter.ThrottledError{
+		Reason:     startlimiter.ReasonColdCreate,
+		Units:      1,
+		RetryAfter: time.Second,
+		Snapshot:   *snapshot,
+	}
+}
+
 // ClaimSandbox claims a sandbox from the idle pool or creates a new one
 func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*ClaimResponse, error) {
 	start := time.Now()
@@ -471,6 +495,27 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 
 	// If no idle pod available, create a new one (cold start)
 	if pod == nil {
+		phaseStarted = time.Now()
+		err = s.deferColdClaimWhilePoolReplenishes(ctx, template)
+		s.observeClaimPhase(req.Template, "cold", "guard_cold_fallback", phaseStarted, err)
+		if err != nil {
+			if errors.Is(err, ErrClaimStartThrottled) {
+				phaseStarted = time.Now()
+				preflightErr := s.preflightClaimVolumePortalBinds(ctx, req, template)
+				s.observeClaimPhase(req.Template, "cold", "preflight_volume_portals", phaseStarted, preflightErr)
+				if preflightErr != nil {
+					if metrics != nil {
+						metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+					}
+					return nil, fmt.Errorf("preflight volume portals: %w", preflightErr)
+				}
+			}
+			if metrics != nil {
+				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+			}
+			return nil, fmt.Errorf("guard cold fallback: %w", err)
+		}
+
 		claimType = "cold"
 		s.logger.Info("No idle pod available, creating new pod",
 			zap.String("template", req.Template),
@@ -886,6 +931,35 @@ func (s *SandboxService) validateVolumePortalAccess(ctx context.Context, teamID,
 	}
 }
 
+// preflightClaimVolumePortalBinds preserves deterministic volume errors when a
+// depleted warm pool would otherwise return transient claim backpressure. The
+// actual bind repeats preparation after a pod is selected to close over races.
+func (s *SandboxService) preflightClaimVolumePortalBinds(ctx context.Context, req *ClaimRequest, template *v1alpha1.SandboxTemplate) error {
+	if req == nil || len(req.Mounts) == 0 {
+		return nil
+	}
+	declared := declaredVolumeMountsByPath(template)
+	for _, mount := range req.Mounts {
+		mountPoint := filepath.Clean(mount.MountPoint)
+		decl := declared[mountPoint]
+		if err := s.validateVolumePortalAccess(ctx, req.TeamID, req.UserID, mount.SandboxVolumeID, decl); err != nil {
+			return err
+		}
+		if err := s.prepareVolumePortalBindForClaim(ctx, PrepareVolumePortalBindRequest{
+			TeamID:      req.TeamID,
+			UserID:      req.UserID,
+			VolumeID:    mount.SandboxVolumeID,
+			PortalName:  volumeportal.NormalizePortalName(decl.Name, mountPoint),
+			MountPath:   mountPoint,
+			SandboxID:   req.SandboxID,
+			OwnerTeamID: req.TeamID,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *SandboxService) bindWebhookStatePortal(ctx context.Context, pod *corev1.Pod, req *ClaimRequest) error {
 	if req == nil || s.getWebhookInfo(req) == nil || pod == nil || pod.Annotations == nil {
 		return nil
@@ -909,6 +983,17 @@ func (s *SandboxService) prepareVolumePortalBind(ctx context.Context, req Prepar
 	return preparer.PrepareForVolumePortalBind(ctx, req)
 }
 
+func (s *SandboxService) prepareVolumePortalBindForClaim(ctx context.Context, req PrepareVolumePortalBindRequest) error {
+	err := s.prepareVolumePortalBind(ctx, req)
+	if errors.Is(err, ErrVolumePortalBindConflict) {
+		return fmt.Errorf("%w: %v", ErrClaimConflict, err)
+	}
+	if err != nil {
+		return fmt.Errorf("prepare volume portal bind: %w", err)
+	}
+	return nil
+}
+
 func (s *SandboxService) bindVolumePortal(ctx context.Context, pod *corev1.Pod, teamID, userID, ownerTeamID, volumeID, mountPoint, portalName string) (*ctldapi.BindVolumePortalResponse, error) {
 	if s == nil || s.ctldClient == nil {
 		return nil, fmt.Errorf("ctld client is not configured")
@@ -924,7 +1009,7 @@ func (s *SandboxService) bindVolumePortal(ctx context.Context, pod *corev1.Pod, 
 	if err != nil {
 		return nil, err
 	}
-	if err := s.prepareVolumePortalBind(ctx, PrepareVolumePortalBindRequest{
+	if err := s.prepareVolumePortalBindForClaim(ctx, PrepareVolumePortalBindRequest{
 		TeamID:      teamID,
 		UserID:      userID,
 		VolumeID:    volumeID,
@@ -936,10 +1021,7 @@ func (s *SandboxService) bindVolumePortal(ctx context.Context, pod *corev1.Pod, 
 		SandboxID:   sandboxID,
 		OwnerTeamID: ownerTeamID,
 	}); err != nil {
-		if errors.Is(err, ErrVolumePortalBindConflict) {
-			return nil, fmt.Errorf("%w: %v", ErrClaimConflict, err)
-		}
-		return nil, fmt.Errorf("prepare volume portal bind: %w", err)
+		return nil, err
 	}
 	resp, err := s.bindVolumePortalWithRetry(ctx, ctldAddress, ctldapi.BindVolumePortalRequest{
 		Namespace:       pod.Namespace,

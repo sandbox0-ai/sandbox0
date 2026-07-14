@@ -2,6 +2,7 @@ package cases
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -102,5 +103,22 @@ func claimSandboxEventually(env *framework.ScenarioEnv, session *e2eutils.Sessio
 		resp, err = session.ClaimSandbox(env.TestCtx.Context, GinkgoT(), templateID)
 		return err
 	}).WithTimeout(2 * time.Minute).WithPolling(3 * time.Second).Should(Succeed())
+	return resp
+}
+
+func claimSandboxWithRequestEventually(env *framework.ScenarioEnv, session *e2eutils.Session, req apispec.ClaimRequest) *apispec.ClaimResponse {
+	var resp *apispec.ClaimResponse
+	Eventually(func() error {
+		var status int
+		var err error
+		resp, status, err = session.ClaimSandboxDetailed(env.TestCtx.Context, GinkgoT(), req)
+		if err == nil {
+			return nil
+		}
+		if status == http.StatusTooManyRequests {
+			return TryAgainAfter(time.Second).Wrap(err)
+		}
+		return StopTrying("claim returned a non-retryable response").Wrap(err)
+	}).WithTimeout(2 * time.Minute).WithPolling(time.Second).Should(Succeed())
 	return resp
 }

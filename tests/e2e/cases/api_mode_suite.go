@@ -2944,8 +2944,7 @@ func assertClaimMountedROXVolumeSharedReadOnly(env *framework.ScenarioEnv, sessi
 		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), firstSandboxID)
 	})
 
-	secondClaim, err := session.ClaimSandboxWithRequest(env.TestCtx.Context, GinkgoT(), claimReq)
-	Expect(err).NotTo(HaveOccurred())
+	secondClaim := claimSandboxWithRequestEventually(env, session, claimReq)
 	Expect(secondClaim).NotTo(BeNil())
 	secondSandboxID := secondClaim.SandboxId
 	DeferCleanup(func() {

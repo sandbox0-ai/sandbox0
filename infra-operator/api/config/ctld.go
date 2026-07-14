@@ -19,12 +19,13 @@ type CtldConfig struct {
 	SandboxObservabilityIngestQueueSize         int    `yaml:"sandbox_observability_ingest_queue_size" json:"-"`
 	SandboxObservabilityIngestBatchSize         int    `yaml:"sandbox_observability_ingest_batch_size" json:"-"`
 
-	SandboxObservabilityIngestFlushInterval   metav1.Duration `yaml:"sandbox_observability_ingest_flush_interval" json:"-"`
-	SandboxObservabilityIngestRequestTimeout  metav1.Duration `yaml:"sandbox_observability_ingest_request_timeout" json:"-"`
-	SandboxObservabilityIngestMaxRetries      int             `yaml:"sandbox_observability_ingest_max_retries" json:"-"`
-	SandboxObservabilityIngestRetryBackoff    metav1.Duration `yaml:"sandbox_observability_ingest_retry_backoff" json:"-"`
-	SandboxObservabilityRuntimeSampleInterval metav1.Duration `yaml:"sandbox_observability_runtime_sample_interval" json:"-"`
-	SandboxObservabilityRuntimeSampleJitter   metav1.Duration `yaml:"sandbox_observability_runtime_sample_jitter" json:"-"`
+	SandboxObservabilityIngestFlushInterval         metav1.Duration `yaml:"sandbox_observability_ingest_flush_interval" json:"-"`
+	SandboxObservabilityIngestRequestTimeout        metav1.Duration `yaml:"sandbox_observability_ingest_request_timeout" json:"-"`
+	SandboxObservabilityIngestMaxRetries            int             `yaml:"sandbox_observability_ingest_max_retries" json:"-"`
+	SandboxObservabilityIngestRetryBackoff          metav1.Duration `yaml:"sandbox_observability_ingest_retry_backoff" json:"-"`
+	SandboxObservabilityRuntimeSampleInterval       metav1.Duration `yaml:"sandbox_observability_runtime_sample_interval" json:"-"`
+	SandboxObservabilityRuntimeSampleJitter         metav1.Duration `yaml:"sandbox_observability_runtime_sample_jitter" json:"-"`
+	SandboxObservabilityRuntimeSampleMaxConcurrency int             `yaml:"sandbox_observability_runtime_sample_max_concurrency" json:"-"`
 }
 
 // LoadCtldConfig loads the shared ctld configuration file.
@@ -92,5 +93,8 @@ func applyCtldDefaults(cfg *CtldConfig) {
 	}
 	if cfg.SandboxObservabilityRuntimeSampleJitter.Duration <= 0 {
 		cfg.SandboxObservabilityRuntimeSampleJitter.Duration = sandboxobservability.DefaultRuntimeSampleJitter
+	}
+	if cfg.SandboxObservabilityRuntimeSampleMaxConcurrency <= 0 {
+		cfg.SandboxObservabilityRuntimeSampleMaxConcurrency = sandboxobservability.DefaultRuntimeSampleMaxConcurrency
 	}
 }

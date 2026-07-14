@@ -31,6 +31,7 @@ sandbox_observability_runtime_sample_interval:
   duration: 20s
 sandbox_observability_runtime_sample_jitter:
   duration: 2s
+sandbox_observability_runtime_sample_max_concurrency: 7
 `), 0o600))
 
 	cfg, err := loadCtldConfig(path)
@@ -46,6 +47,7 @@ sandbox_observability_runtime_sample_jitter:
 	assert.Equal(t, 250*time.Millisecond, cfg.SandboxObservabilityIngestRetryBackoff.Duration)
 	assert.Equal(t, 20*time.Second, cfg.SandboxObservabilityRuntimeSampleInterval.Duration)
 	assert.Equal(t, 2*time.Second, cfg.SandboxObservabilityRuntimeSampleJitter.Duration)
+	assert.Equal(t, 7, cfg.SandboxObservabilityRuntimeSampleMaxConcurrency)
 }
 
 func TestLoadCtldConfigAppliesProducerDefaults(t *testing.T) {
@@ -59,6 +61,7 @@ func TestLoadCtldConfigAppliesProducerDefaults(t *testing.T) {
 	assert.Equal(t, 100*time.Millisecond, cfg.SandboxObservabilityIngestRetryBackoff.Duration)
 	assert.Equal(t, sandboxobservability.DefaultRuntimeSampleInterval, cfg.SandboxObservabilityRuntimeSampleInterval.Duration)
 	assert.Equal(t, sandboxobservability.DefaultRuntimeSampleJitter, cfg.SandboxObservabilityRuntimeSampleJitter.Duration)
+	assert.Equal(t, sandboxobservability.DefaultRuntimeSampleMaxConcurrency, cfg.SandboxObservabilityRuntimeSampleMaxConcurrency)
 }
 
 func TestLoadCtldConfigPreservesStorageProxyLoaderValues(t *testing.T) {

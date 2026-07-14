@@ -76,7 +76,7 @@ func startCtldRuntimeMetrics(ctx context.Context, cfg *config.CtldConfig, statsC
 	if closer, ok := statsClient.(interface{ Close() error }); ok {
 		handle.statsClose = closer.Close
 	}
-	log.Printf("ctld runtime metric producer started: sample_interval=%s sample_jitter=%s", cfg.SandboxObservabilityRuntimeSampleInterval.Duration, cfg.SandboxObservabilityRuntimeSampleJitter.Duration)
+	log.Printf("ctld runtime metric producer started: sample_interval=%s sample_jitter=%s max_concurrency=%d", cfg.SandboxObservabilityRuntimeSampleInterval.Duration, cfg.SandboxObservabilityRuntimeSampleJitter.Duration, cfg.SandboxObservabilityRuntimeSampleMaxConcurrency)
 	return handle
 }
 
@@ -169,15 +169,16 @@ func newCtldRuntimeMetricsProducer(cfg *config.CtldConfig, statsClient ctldrunti
 		return nil, fmt.Errorf("create runtime sample worker: %w", err)
 	}
 	collector, err := ctldruntimemetrics.NewCollector(ctldruntimemetrics.CollectorConfig{
-		RegionID:    cfg.RegionID,
-		ClusterID:   cfg.DefaultClusterId,
-		NodeName:    nodeName,
-		Interval:    cfg.SandboxObservabilityRuntimeSampleInterval.Duration,
-		Jitter:      cfg.SandboxObservabilityRuntimeSampleJitter.Duration,
-		Logger:      logger,
-		StatsClient: statsClient,
-		PodLister:   podLister,
-		Sink:        worker,
+		RegionID:       cfg.RegionID,
+		ClusterID:      cfg.DefaultClusterId,
+		NodeName:       nodeName,
+		Interval:       cfg.SandboxObservabilityRuntimeSampleInterval.Duration,
+		Jitter:         cfg.SandboxObservabilityRuntimeSampleJitter.Duration,
+		MaxConcurrency: cfg.SandboxObservabilityRuntimeSampleMaxConcurrency,
+		Logger:         logger,
+		StatsClient:    statsClient,
+		PodLister:      podLister,
+		Sink:           worker,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create runtime metric collector: %w", err)

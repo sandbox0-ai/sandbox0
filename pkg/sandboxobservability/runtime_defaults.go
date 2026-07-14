@@ -7,4 +7,6 @@ const (
 	DefaultRuntimeSampleInterval = 15 * time.Second
 	// DefaultRuntimeSampleJitter spreads node-local CRI collection across the interval.
 	DefaultRuntimeSampleJitter = 1500 * time.Millisecond
+	// DefaultRuntimeSampleMaxConcurrency bounds concurrent CRI stats calls per node.
+	DefaultRuntimeSampleMaxConcurrency = 4
 )

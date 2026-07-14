@@ -42,7 +42,8 @@ const (
 
 type criRuntimeService interface {
 	ListContainers(ctx context.Context, in *runtimeapi.ListContainersRequest, opts ...grpc.CallOption) (*runtimeapi.ListContainersResponse, error)
-	ListPodSandboxStats(ctx context.Context, in *runtimeapi.ListPodSandboxStatsRequest, opts ...grpc.CallOption) (*runtimeapi.ListPodSandboxStatsResponse, error)
+	ListPodSandbox(ctx context.Context, in *runtimeapi.ListPodSandboxRequest, opts ...grpc.CallOption) (*runtimeapi.ListPodSandboxResponse, error)
+	PodSandboxStats(ctx context.Context, in *runtimeapi.PodSandboxStatsRequest, opts ...grpc.CallOption) (*runtimeapi.PodSandboxStatsResponse, error)
 }
 
 type ContainerdRuntimeConfig struct {
@@ -389,15 +390,30 @@ func (r *ContainerdRuntime) resolveContainerID(ctx context.Context, target ctlda
 	return "", "", fmt.Errorf("%w: running container %s in pod %s/%s", ErrNotFound, target.ContainerName, target.Namespace, target.PodName)
 }
 
-// ListPodSandboxStats returns one bulk node-local CRI stats snapshot.
-func (r *ContainerdRuntime) ListPodSandboxStats(ctx context.Context) ([]*runtimeapi.PodSandboxStats, error) {
+// ListPodSandboxes returns the ready node-local CRI pod sandboxes.
+func (r *ContainerdRuntime) ListPodSandboxes(ctx context.Context) ([]*runtimeapi.PodSandbox, error) {
 	client, err := r.runtimeClient(ctx)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := client.ListPodSandboxStats(ctx, &runtimeapi.ListPodSandboxStatsRequest{})
+	resp, err := client.ListPodSandbox(ctx, &runtimeapi.ListPodSandboxRequest{Filter: &runtimeapi.PodSandboxFilter{
+		State: &runtimeapi.PodSandboxStateValue{State: runtimeapi.PodSandboxState_SANDBOX_READY},
+	}})
 	if err != nil {
-		return nil, fmt.Errorf("list CRI pod sandbox stats: %w", err)
+		return nil, fmt.Errorf("list CRI pod sandboxes: %w", err)
+	}
+	return resp.GetItems(), nil
+}
+
+// PodSandboxStats returns one CRI pod sandbox stats sample without node-wide fan-out.
+func (r *ContainerdRuntime) PodSandboxStats(ctx context.Context, sandboxID string) (*runtimeapi.PodSandboxStats, error) {
+	client, err := r.runtimeClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.PodSandboxStats(ctx, &runtimeapi.PodSandboxStatsRequest{PodSandboxId: sandboxID})
+	if err != nil {
+		return nil, fmt.Errorf("get CRI pod sandbox %s stats: %w", sandboxID, err)
 	}
 	return resp.GetStats(), nil
 }

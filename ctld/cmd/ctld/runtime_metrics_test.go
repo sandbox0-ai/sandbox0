@@ -186,11 +186,31 @@ type staticStatsClient struct {
 	onCall chan<- struct{}
 }
 
-func (c staticStatsClient) ListPodSandboxStats(context.Context) ([]*runtimeapi.PodSandboxStats, error) {
+func (c staticStatsClient) ListPodSandboxes(context.Context) ([]*runtimeapi.PodSandbox, error) {
+	items := make([]*runtimeapi.PodSandbox, 0, len(c.stats))
+	for _, stats := range c.stats {
+		if stats == nil || stats.Attributes == nil {
+			continue
+		}
+		items = append(items, &runtimeapi.PodSandbox{
+			Id:       stats.Attributes.Id,
+			Metadata: stats.Attributes.Metadata,
+			State:    runtimeapi.PodSandboxState_SANDBOX_READY,
+		})
+	}
+	return items, nil
+}
+
+func (c staticStatsClient) PodSandboxStats(_ context.Context, id string) (*runtimeapi.PodSandboxStats, error) {
 	if c.onCall != nil {
 		c.onCall <- struct{}{}
 	}
-	return c.stats, nil
+	for _, stats := range c.stats {
+		if stats != nil && stats.Attributes != nil && stats.Attributes.Id == id {
+			return stats, nil
+		}
+	}
+	return nil, nil
 }
 
 var _ ctldruntimemetrics.StatsClient = staticStatsClient{}

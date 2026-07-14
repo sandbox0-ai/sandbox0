@@ -134,8 +134,9 @@ func (pm *PoolManager) SetClaimStartLimiter(limiter *startlimiter.Limiter) {
 	pm.claimStartLimiter = limiter
 }
 
-// ReconcilePool reconciles the idle pool for a template
-func (pm *PoolManager) ReconcilePool(ctx context.Context, template *v1alpha1.SandboxTemplate) error {
+// ReconcilePool reconciles the idle pool for a template. A positive duration
+// requests another reconciliation after a start-limited scale-up.
+func (pm *PoolManager) ReconcilePool(ctx context.Context, template *v1alpha1.SandboxTemplate) (time.Duration, error) {
 	pm.logger.Info("Reconciling pool",
 		zap.String("template", template.Name),
 		zap.String("namespace", template.Namespace),
@@ -144,30 +145,30 @@ func (pm *PoolManager) ReconcilePool(ctx context.Context, template *v1alpha1.San
 
 	desiredTemplateHash, err := TemplateSpecHash(template)
 	if err != nil {
-		return fmt.Errorf("compute template hash: %w", err)
+		return 0, fmt.Errorf("compute template hash: %w", err)
 	}
 
 	// 1. Ensure ReplicaSet exists and is configured correctly
 	rs, err := pm.getOrCreateReplicaSet(ctx, template)
 	if err != nil {
-		return fmt.Errorf("get or create replicaset: %w", err)
+		return 0, fmt.Errorf("get or create replicaset: %w", err)
 	}
 
 	// 2. Ensure newly created pods use the latest template spec hash.
 	rs, err = pm.reconcileReplicaSetTemplate(ctx, template, rs, desiredTemplateHash)
 	if err != nil {
-		return fmt.Errorf("reconcile replicaset template: %w", err)
+		return 0, fmt.Errorf("reconcile replicaset template: %w", err)
 	}
 
 	// 3. Drain stale idle pods atomically with delete preconditions.
 	if err := pm.drainStaleIdlePods(ctx, template, desiredTemplateHash); err != nil {
-		return fmt.Errorf("drain stale idle pods: %w", err)
+		return 0, fmt.Errorf("drain stale idle pods: %w", err)
 	}
 
 	// 4. Repair current-hash idle pods that are stuck and will keep the
 	// ReplicaSet from creating replacements.
 	if err := pm.repairUnhealthyIdlePods(ctx, template, desiredTemplateHash); err != nil {
-		return fmt.Errorf("repair unhealthy idle pods: %w", err)
+		return 0, fmt.Errorf("repair unhealthy idle pods: %w", err)
 	}
 
 	// 5. Keep the warm pool fixed at minIdle. Template autoscaling is disabled
@@ -177,43 +178,114 @@ func (pm *PoolManager) ReconcilePool(ctx context.Context, template *v1alpha1.San
 	currentReplicas := getInt32Value(rs.Spec.Replicas)
 	desiredReplicas := desiredPoolReplicas(template)
 	if rs.Spec.Replicas == nil || currentReplicas != desiredReplicas {
-		pm.logger.Info("Updating ReplicaSet replicas",
-			zap.String("template", template.Name),
-			zap.Int32("current", currentReplicas),
-			zap.Int32("desired", desiredReplicas),
-		)
-
-		updateReplicas := func(updateCtx context.Context) error {
-			_, err = pm.updateReplicaSetReplicas(updateCtx, template.Namespace, rs.Name, desiredReplicas)
-			return err
-		}
-		if desiredReplicas > currentReplicas && pm.claimStartLimiter != nil {
-			_, err = pm.claimStartLimiter.Admit(ctx, startlimiter.ReasonPoolReconcile, desiredReplicas-currentReplicas, updateReplicas)
-			if stderrors.Is(err, startlimiter.ErrThrottled) {
-				pm.logger.Info("Delaying ReplicaSet scale-up due to claim start limit",
-					zap.String("template", template.Name),
-					zap.Int32("current", currentReplicas),
-					zap.Int32("desired", desiredReplicas),
-					zap.Error(err),
-				)
-				pm.recorder.Eventf(template, corev1.EventTypeNormal, "ReplicaSetScaleUpThrottled",
-					"Delayed ReplicaSet scale-up to %d replicas: %v", desiredReplicas, err)
-				return nil
-			}
-		} else {
-			err = updateReplicas(ctx)
-		}
-		if err != nil {
-			pm.recorder.Eventf(template, corev1.EventTypeWarning, "ReplicaSetUpdateFailed",
-				"Failed to update ReplicaSet: %v", err)
-			return fmt.Errorf("update replicaset: %w", err)
-		}
-
-		pm.recorder.Eventf(template, corev1.EventTypeNormal, "ReplicaSetUpdated",
-			"Updated ReplicaSet replicas to %d", desiredReplicas)
+		return pm.reconcileReplicaSetReplicas(ctx, template, rs, desiredReplicas)
 	}
 
-	return nil
+	return 0, nil
+}
+
+// reconcileReplicaSetReplicas updates the warm-pool size without admitting more
+// concurrent starts than the claim start limiter currently allows.
+func (pm *PoolManager) reconcileReplicaSetReplicas(
+	ctx context.Context,
+	template *v1alpha1.SandboxTemplate,
+	rs *appsv1.ReplicaSet,
+	desiredReplicas int32,
+) (time.Duration, error) {
+	liveRS, err := pm.k8sClient.AppsV1().ReplicaSets(rs.Namespace).Get(ctx, rs.Name, metav1.GetOptions{})
+	if err != nil {
+		return 0, fmt.Errorf("get replicaset for scale: %w", err)
+	}
+	currentReplicas := getInt32Value(liveRS.Spec.Replicas)
+	if liveRS.Spec.Replicas != nil && currentReplicas == desiredReplicas {
+		return 0, nil
+	}
+
+	pm.logger.Info("Updating ReplicaSet replicas",
+		zap.String("template", template.Name),
+		zap.Int32("current", currentReplicas),
+		zap.Int32("desired", desiredReplicas),
+	)
+
+	updateReplicas := func(target int32) func(context.Context) error {
+		return func(updateCtx context.Context) error {
+			_, err := pm.updateReplicaSetReplicas(updateCtx, template.Namespace, rs.Name, target)
+			return err
+		}
+	}
+	recordUpdateFailure := func(err error) (time.Duration, error) {
+		pm.recorder.Eventf(template, corev1.EventTypeWarning, "ReplicaSetUpdateFailed",
+			"Failed to update ReplicaSet: %v", err)
+		return 0, fmt.Errorf("update replicaset: %w", err)
+	}
+
+	if desiredReplicas <= currentReplicas || pm.claimStartLimiter == nil {
+		if err := updateReplicas(desiredReplicas)(ctx); err != nil {
+			return recordUpdateFailure(err)
+		}
+		pm.recorder.Eventf(template, corev1.EventTypeNormal, "ReplicaSetUpdated",
+			"Updated ReplicaSet replicas to %d", desiredReplicas)
+		return 0, nil
+	}
+
+	requested := desiredReplicas - currentReplicas
+	_, err = pm.claimStartLimiter.Admit(ctx, startlimiter.ReasonPoolReconcile, requested, updateReplicas(desiredReplicas))
+	if err == nil {
+		pm.recorder.Eventf(template, corev1.EventTypeNormal, "ReplicaSetUpdated",
+			"Updated ReplicaSet replicas to %d", desiredReplicas)
+		return 0, nil
+	}
+	if !stderrors.Is(err, startlimiter.ErrThrottled) {
+		return recordUpdateFailure(err)
+	}
+
+	retryAfter := startlimiter.RetryAfter(err)
+	var throttled *startlimiter.ThrottledError
+	if !stderrors.As(err, &throttled) || throttled.Snapshot.Available <= 0 {
+		pm.recordReplicaSetScaleUpThrottle(template, currentReplicas, desiredReplicas, retryAfter, err)
+		return retryAfter, nil
+	}
+
+	batchSize := min(requested, throttled.Snapshot.Available)
+	batchTarget := currentReplicas + batchSize
+	_, err = pm.claimStartLimiter.Admit(ctx, startlimiter.ReasonPoolReconcile, batchSize, updateReplicas(batchTarget))
+	if err != nil {
+		if stderrors.Is(err, startlimiter.ErrThrottled) {
+			retryAfter = startlimiter.RetryAfter(err)
+			pm.recordReplicaSetScaleUpThrottle(template, currentReplicas, desiredReplicas, retryAfter, err)
+			return retryAfter, nil
+		}
+		return recordUpdateFailure(err)
+	}
+
+	pm.logger.Info("Scaled ReplicaSet within available claim start budget",
+		zap.String("template", template.Name),
+		zap.Int32("current", currentReplicas),
+		zap.Int32("updated", batchTarget),
+		zap.Int32("desired", desiredReplicas),
+		zap.Duration("requeueAfter", retryAfter),
+	)
+	pm.recorder.Eventf(template, corev1.EventTypeNormal, "ReplicaSetScaleUpBatched",
+		"Updated ReplicaSet replicas to %d of desired %d; retrying in %s", batchTarget, desiredReplicas, retryAfter)
+	return retryAfter, nil
+}
+
+func (pm *PoolManager) recordReplicaSetScaleUpThrottle(
+	template *v1alpha1.SandboxTemplate,
+	currentReplicas int32,
+	desiredReplicas int32,
+	retryAfter time.Duration,
+	err error,
+) {
+	pm.logger.Info("Delaying ReplicaSet scale-up due to claim start limit",
+		zap.String("template", template.Name),
+		zap.Int32("current", currentReplicas),
+		zap.Int32("desired", desiredReplicas),
+		zap.Duration("requeueAfter", retryAfter),
+		zap.Error(err),
+	)
+	pm.recorder.Eventf(template, corev1.EventTypeNormal, "ReplicaSetScaleUpThrottled",
+		"Delayed ReplicaSet scale-up to %d replicas for %s: %v", desiredReplicas, retryAfter, err)
 }
 
 func (pm *PoolManager) updateReplicaSetReplicas(ctx context.Context, namespace, name string, replicas int32) (*appsv1.ReplicaSet, error) {

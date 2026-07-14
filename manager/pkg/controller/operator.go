@@ -259,7 +259,8 @@ func (op *Operator) syncHandler(ctx context.Context, key string) error {
 	}
 
 	// Reconcile the pool (ReplicaSet)
-	if err := op.poolManager.ReconcilePool(ctx, template); err != nil {
+	poolRequeueAfter, err := op.poolManager.ReconcilePool(ctx, template)
+	if err != nil {
 		return fmt.Errorf("reconcile pool: %w", err)
 	}
 
@@ -268,8 +269,12 @@ func (op *Operator) syncHandler(ctx context.Context, key string) error {
 	if err != nil {
 		return fmt.Errorf("update status: %w", err)
 	}
-	if needsProbeRequeue {
-		op.workqueue.AddAfter(key, sandboxProbeRequeueAfter)
+	requeueAfter := poolRequeueAfter
+	if needsProbeRequeue && (requeueAfter <= 0 || sandboxProbeRequeueAfter < requeueAfter) {
+		requeueAfter = sandboxProbeRequeueAfter
+	}
+	if requeueAfter > 0 {
+		op.workqueue.AddAfter(key, requeueAfter)
 	}
 
 	return nil

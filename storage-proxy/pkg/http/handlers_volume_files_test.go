@@ -45,6 +45,20 @@ type fakeHTTPVolumeMountManager struct {
 	syncFunc          func(context.Context, string) error
 }
 
+func TestTranslateVolumeRPCErrorUsesStructuredErrno(t *testing.T) {
+	if got := translateVolumeRPCError(fserror.NewErrno(syscall.ENOTEMPTY, "opaque failure")); !errors.Is(got, errDirectoryNotEmpty) {
+		t.Fatalf("translateVolumeRPCError(ENOTEMPTY) = %v, want directory-not-empty", got)
+	}
+	if got := translateVolumeRPCError(fserror.NewErrno(syscall.ENOTDIR, "opaque failure")); !errors.Is(got, errPathNotDir) {
+		t.Fatalf("translateVolumeRPCError(ENOTDIR) = %v, want path-not-directory", got)
+	}
+
+	generic := fserror.New(fserror.FailedPrecondition, "directory not empty")
+	if got := translateVolumeRPCError(generic); got != generic {
+		t.Fatalf("translateVolumeRPCError(generic precondition) = %v, want original error", got)
+	}
+}
+
 type fakeVolumeFilePodResolver struct {
 	urls map[string]string
 }

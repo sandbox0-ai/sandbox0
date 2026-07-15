@@ -197,7 +197,7 @@ func (s *FileSystemServer) syncS0FSHandle(volCtx *volume.VolumeContext, inode ui
 		return nil
 	}
 	if err := volCtx.S0FS.Fsync(inode); err != nil {
-		return mapS0FSError(err)
+		return MapS0FSError(err)
 	}
 	return nil
 }
@@ -417,7 +417,7 @@ func (s *FileSystemServer) GetAttr(ctx context.Context, req *pb.GetAttrRequest) 
 	if isS0FSVolume(volCtx) {
 		node, err := volCtx.S0FS.GetAttr(req.Inode)
 		if err != nil {
-			return nil, mapS0FSError(err)
+			return nil, MapS0FSError(err)
 		}
 		return s0fsAttr(node), nil
 	}
@@ -435,7 +435,7 @@ func (s *FileSystemServer) Lookup(ctx context.Context, req *pb.LookupRequest) (*
 	if isS0FSVolume(volCtx) {
 		node, err := volCtx.S0FS.Lookup(req.Parent, req.Name)
 		if err != nil {
-			return nil, mapS0FSError(err)
+			return nil, MapS0FSError(err)
 		}
 		return s0fsNodeResponse(node, 0), nil
 	}
@@ -473,7 +473,7 @@ func (s *FileSystemServer) Read(ctx context.Context, req *pb.ReadRequest) (*pb.R
 		inode := requestInodeForHandle(volCtx, req.Inode, req.HandleId)
 		data, err := volCtx.S0FS.Read(inode, uint64(req.Offset), uint64(req.Size))
 		if err != nil {
-			return nil, mapS0FSError(err)
+			return nil, MapS0FSError(err)
 		}
 		return &pb.ReadResponse{
 			Data: data,
@@ -490,7 +490,7 @@ func (s *FileSystemServer) Write(ctx context.Context, req *pb.WriteRequest) (*pb
 		if isS0FSVolume(volCtx) {
 			inode := requestInodeForHandle(volCtx, req.Inode, req.HandleId)
 			if _, err := volCtx.S0FS.Write(inode, uint64(req.Offset), req.Data); err != nil {
-				return nil, mapS0FSError(err)
+				return nil, MapS0FSError(err)
 			}
 			s.markDirtyWrite(req.VolumeId, inode, req.HandleId)
 			if s.shouldPublishEvents() {
@@ -536,7 +536,7 @@ func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*
 				node, err = volCtx.S0FS.CreateFile(req.Parent, req.Name, req.Mode)
 			}
 			if err != nil {
-				return nil, mapS0FSError(err)
+				return nil, MapS0FSError(err)
 			}
 			if s.shouldPublishEvents() {
 				path := resolveChildPath(volCtx, req.Parent, req.Name)
@@ -569,7 +569,7 @@ func (s *FileSystemServer) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb
 			}
 			node, err := volCtx.S0FS.Mkdir(req.Parent, req.Name, req.Mode)
 			if err != nil {
-				return nil, mapS0FSError(err)
+				return nil, MapS0FSError(err)
 			}
 			if req.Actor != nil && len(req.Actor.Gids) > 0 {
 				if err := volCtx.S0FS.SetOwner(node.Inode, req.Actor.Uid, req.Actor.Gids[0]); err != nil {
@@ -577,7 +577,7 @@ func (s *FileSystemServer) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb
 				}
 				node, err = volCtx.S0FS.GetAttr(node.Inode)
 				if err != nil {
-					return nil, mapS0FSError(err)
+					return nil, MapS0FSError(err)
 				}
 			}
 			if s.shouldPublishEvents() {
@@ -615,17 +615,17 @@ func (s *FileSystemServer) Mknod(ctx context.Context, req *pb.MknodRequest) (*pb
 func (s *FileSystemServer) openS0FS(ctx context.Context, volCtx *volume.VolumeContext, req *pb.OpenRequest) (*pb.OpenResponse, error) {
 	node, err := volCtx.S0FS.GetAttr(req.Inode)
 	if err != nil {
-		return nil, mapS0FSError(err)
+		return nil, MapS0FSError(err)
 	}
 	if node.Type == s0fs.TypeDirectory {
-		return nil, fserror.New(fserror.FailedPrecondition, "inode is a directory")
+		return nil, fserror.NewErrno(syscall.EISDIR, "inode is a directory")
 	}
 	if err := checkS0FSAccess(node, req.Actor, s0fsOpenAccessMask(req.Flags)); err != nil {
 		return nil, err
 	}
 	if req.Flags&uint32(syscall.O_TRUNC) != 0 {
 		if err := volCtx.S0FS.Truncate(req.Inode, 0); err != nil {
-			return nil, mapS0FSError(err)
+			return nil, MapS0FSError(err)
 		}
 		if s.shouldPublishEvents() {
 			path := resolveInodePath(volCtx, req.Inode)
@@ -650,7 +650,7 @@ func (s *FileSystemServer) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*
 		if isS0FSVolume(volCtx) {
 			inode, err := volCtx.S0FS.UnlinkWithInode(req.Parent, req.Name)
 			if err != nil {
-				return nil, mapS0FSError(err)
+				return nil, MapS0FSError(err)
 			}
 			if !volCtx.MarkUnlinkedFileIfOpen(inode) {
 				_ = volCtx.S0FS.Forget(inode)
@@ -684,7 +684,7 @@ func (s *FileSystemServer) ReadDir(ctx context.Context, req *pb.ReadDirRequest) 
 	if isS0FSVolume(volCtx) {
 		entries, err := volCtx.S0FS.ReadDir(req.Inode)
 		if err != nil {
-			return nil, mapS0FSError(err)
+			return nil, MapS0FSError(err)
 		}
 		start := int(req.Offset)
 		if start < 0 {
@@ -704,7 +704,7 @@ func (s *FileSystemServer) ReadDir(ctx context.Context, req *pb.ReadDirRequest) 
 			if req.Plus {
 				node, err := volCtx.S0FS.GetAttr(entry.Inode)
 				if err != nil {
-					return nil, mapS0FSError(err)
+					return nil, MapS0FSError(err)
 				}
 				item.Attr = s0fsAttr(node)
 			}
@@ -723,8 +723,12 @@ func (s *FileSystemServer) OpenDir(ctx context.Context, req *pb.OpenDirRequest) 
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
-		if _, err := volCtx.S0FS.GetAttr(req.Inode); err != nil {
-			return nil, mapS0FSError(err)
+		node, err := volCtx.S0FS.GetAttr(req.Inode)
+		if err != nil {
+			return nil, MapS0FSError(err)
+		}
+		if node.Type != s0fs.TypeDirectory {
+			return nil, fserror.NewErrno(syscall.ENOTDIR, "inode is not a directory")
 		}
 		return &pb.OpenDirResponse{HandleId: volCtx.OpenDirHandle(req.Inode)}, nil
 	}
@@ -751,7 +755,7 @@ func (s *FileSystemServer) Rename(ctx context.Context, req *pb.RenameRequest) (*
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.Empty, error) {
 		if isS0FSVolume(volCtx) {
 			if err := volCtx.S0FS.Rename(req.OldParent, req.OldName, req.NewParent, req.NewName); err != nil {
-				return nil, mapS0FSError(err)
+				return nil, MapS0FSError(err)
 			}
 			if s.shouldPublishEvents() {
 				oldPath := resolveChildPath(volCtx, req.OldParent, req.OldName)
@@ -783,13 +787,13 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 			}
 			if req.Valid&uint32(fsmeta.SetAttrMode) != 0 {
 				if err := volCtx.S0FS.SetMode(req.Inode, attr.Mode&0o7777); err != nil {
-					return nil, mapS0FSError(err)
+					return nil, MapS0FSError(err)
 				}
 			}
 			if req.Valid&(uint32(fsmeta.SetAttrUID)|uint32(fsmeta.SetAttrGID)) != 0 {
 				current, err := volCtx.S0FS.GetAttr(req.Inode)
 				if err != nil {
-					return nil, mapS0FSError(err)
+					return nil, MapS0FSError(err)
 				}
 				uid := current.UID
 				gid := current.GID
@@ -800,17 +804,17 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 					gid = attr.Gid
 				}
 				if err := volCtx.S0FS.SetOwner(req.Inode, uid, gid); err != nil {
-					return nil, mapS0FSError(err)
+					return nil, MapS0FSError(err)
 				}
 			}
 			if req.Valid&uint32(fsmeta.SetAttrSize) != 0 {
 				if err := volCtx.S0FS.Truncate(req.Inode, attr.Size); err != nil {
-					return nil, mapS0FSError(err)
+					return nil, MapS0FSError(err)
 				}
 			}
 			updated, err := volCtx.S0FS.GetAttr(req.Inode)
 			if err != nil {
-				return nil, mapS0FSError(err)
+				return nil, MapS0FSError(err)
 			}
 			if s.shouldPublishEvents() {
 				path := resolveInodePath(volCtx, req.Inode)
@@ -910,7 +914,7 @@ func (s *FileSystemServer) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.Empty, error) {
 		if isS0FSVolume(volCtx) {
 			if err := volCtx.S0FS.RemoveDir(req.Parent, req.Name); err != nil {
-				return nil, mapS0FSError(err)
+				return nil, MapS0FSError(err)
 			}
 			if s.shouldPublishEvents() {
 				path := resolveChildPath(volCtx, req.Parent, req.Name)
@@ -961,7 +965,7 @@ func (s *FileSystemServer) Symlink(ctx context.Context, req *pb.SymlinkRequest) 
 			}
 			node, err := volCtx.S0FS.Symlink(req.Parent, req.Name, req.Target, 0o777)
 			if err != nil {
-				return nil, mapS0FSError(err)
+				return nil, MapS0FSError(err)
 			}
 			if req.Actor != nil && len(req.Actor.Gids) > 0 {
 				if err := volCtx.S0FS.SetOwner(node.Inode, req.Actor.Uid, req.Actor.Gids[0]); err != nil {
@@ -969,7 +973,7 @@ func (s *FileSystemServer) Symlink(ctx context.Context, req *pb.SymlinkRequest) 
 				}
 				node, err = volCtx.S0FS.GetAttr(node.Inode)
 				if err != nil {
-					return nil, mapS0FSError(err)
+					return nil, MapS0FSError(err)
 				}
 			}
 			if s.shouldPublishEvents() {
@@ -1003,10 +1007,10 @@ func (s *FileSystemServer) Readlink(ctx context.Context, req *pb.ReadlinkRequest
 	if isS0FSVolume(volCtx) {
 		node, err := volCtx.S0FS.GetAttr(req.Inode)
 		if err != nil {
-			return nil, mapS0FSError(err)
+			return nil, MapS0FSError(err)
 		}
 		if node.Type != s0fs.TypeSymlink {
-			return nil, fserror.New(fserror.FailedPrecondition, "inode is not a symbolic link")
+			return nil, fserror.NewErrno(syscall.EINVAL, "inode is not a symbolic link")
 		}
 		return &pb.ReadlinkResponse{Target: node.Target}, nil
 	}
@@ -1020,7 +1024,10 @@ func (s *FileSystemServer) Link(ctx context.Context, req *pb.LinkRequest) (*pb.N
 		if isS0FSVolume(volCtx) {
 			node, err := volCtx.S0FS.Link(req.Inode, req.NewParent, req.NewName)
 			if err != nil {
-				return nil, mapS0FSError(err)
+				if errors.Is(err, s0fs.ErrIsDir) {
+					return nil, fserror.NewErrno(syscall.EPERM, err.Error())
+				}
+				return nil, MapS0FSError(err)
 			}
 			if s.shouldPublishEvents() {
 				path := resolveChildPath(volCtx, req.NewParent, req.NewName)
@@ -1050,7 +1057,7 @@ func (s *FileSystemServer) Access(ctx context.Context, req *pb.AccessRequest) (*
 	if isS0FSVolume(volCtx) {
 		node, err := volCtx.S0FS.GetAttr(req.Inode)
 		if err != nil {
-			return nil, mapS0FSError(err)
+			return nil, MapS0FSError(err)
 		}
 		if err := checkS0FSAccess(node, accessActor(req), req.Mask); err != nil {
 			return nil, err
@@ -1358,20 +1365,26 @@ func s0fsTypeNumber(typ s0fs.FileType) uint32 {
 	}
 }
 
-func mapS0FSError(err error) error {
+// MapS0FSError translates S0FS engine errors without discarding their POSIX
+// filesystem semantics.
+func MapS0FSError(err error) error {
 	switch {
 	case err == nil:
 		return nil
 	case errors.Is(err, s0fs.ErrNotFound):
-		return fserror.New(fserror.NotFound, err.Error())
+		return fserror.NewErrno(syscall.ENOENT, err.Error())
 	case errors.Is(err, s0fs.ErrExists):
-		return fserror.New(fserror.AlreadyExists, err.Error())
-	case errors.Is(err, s0fs.ErrNotEmpty), errors.Is(err, s0fs.ErrIsDir):
-		return fserror.New(fserror.FailedPrecondition, err.Error())
-	case errors.Is(err, s0fs.ErrInvalidInput), errors.Is(err, s0fs.ErrNotDir):
-		return fserror.New(fserror.InvalidArgument, err.Error())
+		return fserror.NewErrno(syscall.EEXIST, err.Error())
+	case errors.Is(err, s0fs.ErrNotEmpty):
+		return fserror.NewErrno(syscall.ENOTEMPTY, err.Error())
+	case errors.Is(err, s0fs.ErrIsDir):
+		return fserror.NewErrno(syscall.EISDIR, err.Error())
+	case errors.Is(err, s0fs.ErrNotDir):
+		return fserror.NewErrno(syscall.ENOTDIR, err.Error())
+	case errors.Is(err, s0fs.ErrInvalidInput):
+		return fserror.NewErrno(syscall.EINVAL, err.Error())
 	case errors.Is(err, s0fs.ErrNoSpace):
-		return fserror.New(fserror.ResourceExhausted, err.Error())
+		return fserror.NewErrno(syscall.ENOSPC, err.Error())
 	case errors.Is(err, s0fs.ErrClosed):
 		return fserror.New(fserror.FailedPrecondition, err.Error())
 	default:

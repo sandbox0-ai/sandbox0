@@ -1074,6 +1074,9 @@ func statusToFuse(err error) fuse.Status {
 	if err == context.DeadlineExceeded {
 		return fuse.EIO
 	}
+	if errno, ok := fserror.ErrnoOf(err); ok {
+		return fuse.Status(errno)
+	}
 	var fsErr *fserror.Error
 	if errors.As(err, &fsErr) {
 		switch fsErr.Code() {
@@ -1094,9 +1097,6 @@ func statusToFuse(err error) fuse.Status {
 		default:
 			return fuse.EIO
 		}
-	}
-	if errno, ok := err.(syscall.Errno); ok {
-		return fuse.Status(errno)
 	}
 	return fuse.EIO
 }

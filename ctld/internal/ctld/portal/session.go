@@ -2,7 +2,6 @@ package portal
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -567,7 +566,7 @@ func (s *localSession) ReadInto(ctx context.Context, req *pb.ReadRequest, dest [
 	}
 	n, err := volCtx.S0FS.ReadInto(req.Inode, uint64(req.Offset), dest)
 	if err != nil {
-		return 0, false, mapLocalS0FSError(err)
+		return 0, false, fsserver.MapS0FSError(err)
 	}
 	if n <= len(dest) && n <= maxLocalReadCacheFileSize && n < len(dest) && req.Offset == 0 {
 		s.storeCompleteReadCache(volCtx, req.Inode, dest[:n])
@@ -977,27 +976,6 @@ func (s *localSession) putReadCacheLocked(key string, data []byte) {
 	}
 	s.readCache[key] = data
 	s.readCacheBytes += len(data) - oldLen
-}
-
-func mapLocalS0FSError(err error) error {
-	switch {
-	case err == nil:
-		return nil
-	case errors.Is(err, s0fs.ErrNotFound):
-		return fserror.New(fserror.NotFound, err.Error())
-	case errors.Is(err, s0fs.ErrExists):
-		return fserror.New(fserror.AlreadyExists, err.Error())
-	case errors.Is(err, s0fs.ErrNotEmpty), errors.Is(err, s0fs.ErrIsDir):
-		return fserror.New(fserror.FailedPrecondition, err.Error())
-	case errors.Is(err, s0fs.ErrInvalidInput), errors.Is(err, s0fs.ErrNotDir):
-		return fserror.New(fserror.InvalidArgument, err.Error())
-	case errors.Is(err, s0fs.ErrNoSpace):
-		return fserror.New(fserror.ResourceExhausted, err.Error())
-	case errors.Is(err, s0fs.ErrClosed):
-		return fserror.New(fserror.FailedPrecondition, err.Error())
-	default:
-		return fserror.New(fserror.Internal, err.Error())
-	}
 }
 
 type unboundSession struct{}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
@@ -64,6 +65,61 @@ func TestRootFSBackedSessionWritesThroughBackingDir(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, list.Entries, 1)
 	assert.Equal(t, "state.txt", list.Entries[0].Name)
+}
+
+func TestRootFSBackedSessionPreservesRemoveErrnos(t *testing.T) {
+	backing := t.TempDir()
+	session := newRootFSBackedSession(backing)
+	defer session.Close()
+	ctx := context.Background()
+
+	nonEmpty, err := session.Mkdir(ctx, &pb.MkdirRequest{
+		Parent: s0fs.RootInode,
+		Name:   "non-empty",
+		Mode:   0o755,
+	})
+	require.NoError(t, err)
+	child, err := session.Create(ctx, &pb.CreateRequest{
+		Parent: nonEmpty.Inode,
+		Name:   "child",
+		Mode:   0o644,
+		Flags:  uint32(os.O_RDWR),
+	})
+	require.NoError(t, err)
+	_, err = session.Release(ctx, &pb.ReleaseRequest{HandleId: child.HandleId})
+	require.NoError(t, err)
+
+	_, err = session.Rmdir(ctx, &pb.RmdirRequest{Parent: s0fs.RootInode, Name: "non-empty"})
+	require.ErrorIs(t, err, syscall.ENOTEMPTY)
+	_, statErr := os.Stat(filepath.Join(backing, "non-empty", "child"))
+	require.NoError(t, statErr)
+
+	_, err = session.Mkdir(ctx, &pb.MkdirRequest{
+		Parent: s0fs.RootInode,
+		Name:   "empty-dir",
+		Mode:   0o755,
+	})
+	require.NoError(t, err)
+	_, err = session.Unlink(ctx, &pb.UnlinkRequest{Parent: s0fs.RootInode, Name: "empty-dir"})
+	require.ErrorIs(t, err, syscall.EISDIR)
+	info, statErr := os.Stat(filepath.Join(backing, "empty-dir"))
+	require.NoError(t, statErr)
+	require.True(t, info.IsDir())
+
+	file, err := session.Create(ctx, &pb.CreateRequest{
+		Parent: s0fs.RootInode,
+		Name:   "regular-file",
+		Mode:   0o644,
+		Flags:  uint32(os.O_RDWR),
+	})
+	require.NoError(t, err)
+	_, err = session.Release(ctx, &pb.ReleaseRequest{HandleId: file.HandleId})
+	require.NoError(t, err)
+	_, err = session.Rmdir(ctx, &pb.RmdirRequest{Parent: s0fs.RootInode, Name: "regular-file"})
+	require.ErrorIs(t, err, syscall.ENOTDIR)
+	info, statErr = os.Stat(filepath.Join(backing, "regular-file"))
+	require.NoError(t, statErr)
+	require.False(t, info.IsDir())
 }
 
 func TestRootFSBackedSessionRestoresKernelInodeMapping(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -110,6 +111,45 @@ func TestLocalSessionReadIntoUsesMountedS0FS(t *testing.T) {
 	}
 	if !bytes.Equal(buf[3:], bytes.Repeat([]byte{0xff}, 5)) {
 		t.Fatalf("ReadInto() modified bytes past requested size: %#v", buf)
+	}
+}
+
+func TestLocalSessionRmdirPreservesENOTEMPTY(t *testing.T) {
+	engine, err := s0fs.Open(context.Background(), s0fs.Config{
+		VolumeID: "vol-errno",
+		WALPath:  filepath.Join(t.TempDir(), "volume.wal"),
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+	dir, err := engine.Mkdir(s0fs.RootInode, "non-empty", 0o755)
+	if err != nil {
+		t.Fatalf("Mkdir() error = %v", err)
+	}
+	if _, err := engine.CreateFile(dir.Inode, "child", 0o644); err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+
+	mgr := newLocalVolumeManager()
+	mgr.add(&volume.VolumeContext{
+		VolumeID:  "vol-errno",
+		TeamID:    "team-a",
+		Backend:   volume.BackendS0FS,
+		S0FS:      engine,
+		Access:    volume.AccessModeRWO,
+		MountedAt: time.Now().UTC(),
+		RootInode: 1,
+		RootPath:  "/",
+	})
+	session := newLocalSession("vol-errno", mgr, nil)
+
+	_, err = session.Rmdir(context.Background(), &pb.RmdirRequest{
+		Parent: s0fs.RootInode,
+		Name:   "non-empty",
+	})
+	if !errors.Is(err, syscall.ENOTEMPTY) {
+		t.Fatalf("Rmdir(non-empty) error = %v, want ENOTEMPTY", err)
 	}
 }
 

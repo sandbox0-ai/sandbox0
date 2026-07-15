@@ -3,6 +3,7 @@ package fsserver
 import (
 	"bytes"
 	"context"
+	"errors"
 	"path/filepath"
 	"sync/atomic"
 	"syscall"
@@ -103,6 +104,78 @@ func TestS0FSFileLifecycle(t *testing.T) {
 		HandleId: createResp.HandleId,
 	}); err != nil {
 		t.Fatalf("Release() error = %v", err)
+	}
+}
+
+func TestS0FSOperationsPreservePOSIXErrnos(t *testing.T) {
+	t.Parallel()
+
+	volCtx := newMountedS0FSVolumeContext(t, "vol-errno", "team-a")
+	server := newTestFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-errno": volCtx,
+		},
+	}, nil, nil)
+	ctx := authContext("team-a", "")
+
+	nonEmpty, err := volCtx.S0FS.Mkdir(s0fs.RootInode, "non-empty", 0o755)
+	if err != nil {
+		t.Fatalf("Mkdir(non-empty) error = %v", err)
+	}
+	if _, err := volCtx.S0FS.CreateFile(nonEmpty.Inode, "child", 0o644); err != nil {
+		t.Fatalf("CreateFile(child) error = %v", err)
+	}
+	_, err = server.Rmdir(ctx, &pb.RmdirRequest{VolumeId: "vol-errno", Parent: s0fs.RootInode, Name: "non-empty"})
+	if !errors.Is(err, syscall.ENOTEMPTY) {
+		t.Fatalf("Rmdir(non-empty) error = %v, want ENOTEMPTY", err)
+	}
+	if got := fserror.CodeOf(err); got != fserror.FailedPrecondition {
+		t.Fatalf("Rmdir(non-empty) code = %v, want FailedPrecondition", got)
+	}
+
+	empty, err := volCtx.S0FS.Mkdir(s0fs.RootInode, "empty", 0o755)
+	if err != nil {
+		t.Fatalf("Mkdir(empty) error = %v", err)
+	}
+	_, err = server.Unlink(ctx, &pb.UnlinkRequest{VolumeId: "vol-errno", Parent: s0fs.RootInode, Name: "empty"})
+	if !errors.Is(err, syscall.EISDIR) {
+		t.Fatalf("Unlink(empty directory) error = %v, want EISDIR", err)
+	}
+	if _, err := volCtx.S0FS.GetAttr(empty.Inode); err != nil {
+		t.Fatalf("GetAttr(empty directory) error = %v after failed unlink", err)
+	}
+
+	file, err := volCtx.S0FS.CreateFile(s0fs.RootInode, "regular-file", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile(regular-file) error = %v", err)
+	}
+	_, err = server.Rmdir(ctx, &pb.RmdirRequest{VolumeId: "vol-errno", Parent: s0fs.RootInode, Name: "regular-file"})
+	if !errors.Is(err, syscall.ENOTDIR) {
+		t.Fatalf("Rmdir(regular-file) error = %v, want ENOTDIR", err)
+	}
+	if _, err := volCtx.S0FS.GetAttr(file.Inode); err != nil {
+		t.Fatalf("GetAttr(regular-file) error = %v after failed rmdir", err)
+	}
+
+	if _, err := server.Open(ctx, &pb.OpenRequest{VolumeId: "vol-errno", Inode: empty.Inode}); !errors.Is(err, syscall.EISDIR) {
+		t.Fatalf("Open(directory) error = %v, want EISDIR", err)
+	}
+	if _, err := server.Readlink(ctx, &pb.ReadlinkRequest{VolumeId: "vol-errno", Inode: file.Inode}); !errors.Is(err, syscall.EINVAL) {
+		t.Fatalf("Readlink(regular-file) error = %v, want EINVAL", err)
+	}
+	if _, err := server.OpenDir(ctx, &pb.OpenDirRequest{VolumeId: "vol-errno", Inode: file.Inode}); !errors.Is(err, syscall.ENOTDIR) {
+		t.Fatalf("OpenDir(regular-file) error = %v, want ENOTDIR", err)
+	}
+	if _, err := server.ReadDir(ctx, &pb.ReadDirRequest{VolumeId: "vol-errno", Inode: file.Inode}); !errors.Is(err, syscall.ENOTDIR) {
+		t.Fatalf("ReadDir(regular-file) error = %v, want ENOTDIR", err)
+	}
+	if _, err := server.Link(ctx, &pb.LinkRequest{
+		VolumeId:  "vol-errno",
+		Inode:     empty.Inode,
+		NewParent: s0fs.RootInode,
+		NewName:   "directory-link",
+	}); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("Link(directory) error = %v, want EPERM", err)
 	}
 }
 

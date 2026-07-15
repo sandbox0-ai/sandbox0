@@ -1467,6 +1467,12 @@ func translateVolumeRPCError(err error) error {
 	if err == nil {
 		return nil
 	}
+	if errors.Is(err, syscall.ENOTEMPTY) {
+		return errDirectoryNotEmpty
+	}
+	if errors.Is(err, syscall.ENOTDIR) {
+		return errPathNotDir
+	}
 	switch fserror.CodeOf(err) {
 	case fserror.NotFound:
 		return errFileNotFound
@@ -1474,11 +1480,6 @@ func translateVolumeRPCError(err error) error {
 		return errPermissionDenied
 	case fserror.AlreadyExists:
 		return errPathAlreadyExists
-	case fserror.FailedPrecondition:
-		if strings.Contains(strings.ToLower(err.Error()), "not empty") {
-			return errDirectoryNotEmpty
-		}
-		return err
 	default:
 		return err
 	}

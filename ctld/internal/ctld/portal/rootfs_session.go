@@ -267,7 +267,7 @@ func (s *rootFSBackedSession) Unlink(_ context.Context, req *pb.UnlinkRequest) (
 	} else if preserved {
 		return &pb.Empty{}, nil
 	}
-	if err := os.Remove(s.hostPath(rel)); err != nil {
+	if err := unix.Unlink(s.hostPath(rel)); err != nil {
 		return nil, mapRootFSBackedError(err)
 	}
 	s.dropPath(rel)
@@ -283,7 +283,7 @@ func (s *rootFSBackedSession) Rmdir(_ context.Context, req *pb.RmdirRequest) (*p
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Remove(s.hostPath(rel)); err != nil {
+	if err := unix.Rmdir(s.hostPath(rel)); err != nil {
 		return nil, mapRootFSBackedError(err)
 	}
 	s.dropPathTree(rel)
@@ -1088,21 +1088,19 @@ func actorPrimaryGID(actor *pb.PosixActor) int {
 }
 
 func mapRootFSBackedError(err error) error {
-	switch {
-	case err == nil:
+	if err == nil {
 		return nil
+	}
+	if errno, ok := fserror.ErrnoOf(err); ok {
+		return fserror.NewErrno(errno, err.Error())
+	}
+	switch {
 	case errors.Is(err, os.ErrNotExist):
-		return fserror.New(fserror.NotFound, err.Error())
+		return fserror.NewErrno(syscall.ENOENT, err.Error())
 	case errors.Is(err, os.ErrExist):
-		return fserror.New(fserror.AlreadyExists, err.Error())
+		return fserror.NewErrno(syscall.EEXIST, err.Error())
 	case errors.Is(err, os.ErrPermission):
-		return fserror.New(fserror.PermissionDenied, err.Error())
-	case errors.Is(err, syscall.ENOTEMPTY), errors.Is(err, syscall.EISDIR):
-		return fserror.New(fserror.FailedPrecondition, err.Error())
-	case errors.Is(err, syscall.ENOTDIR), errors.Is(err, syscall.EINVAL):
-		return fserror.New(fserror.InvalidArgument, err.Error())
-	case errors.Is(err, syscall.ENOSPC):
-		return fserror.New(fserror.ResourceExhausted, err.Error())
+		return fserror.NewErrno(syscall.EACCES, err.Error())
 	default:
 		return err
 	}

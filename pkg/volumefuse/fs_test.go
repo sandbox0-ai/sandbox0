@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 )
 
@@ -85,5 +88,47 @@ func TestOpenUsesSessionOpenFlags(t *testing.T) {
 	}
 	if out.OpenFlags != fuse.FOPEN_DIRECT_IO {
 		t.Fatalf("Open() flags = %#x, want DIRECT_IO", out.OpenFlags)
+	}
+}
+
+func TestStatusToFusePreservesPOSIXErrno(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want fuse.Status
+	}{
+		{
+			name: "structured not empty",
+			err:  fserror.NewErrno(syscall.ENOTEMPTY, "directory not empty"),
+			want: fuse.Status(syscall.ENOTEMPTY),
+		},
+		{
+			name: "structured is directory",
+			err:  fserror.NewErrno(syscall.EISDIR, "is a directory"),
+			want: fuse.Status(syscall.EISDIR),
+		},
+		{
+			name: "wrapped raw not directory",
+			err:  fmt.Errorf("readdir: %w", syscall.ENOTDIR),
+			want: fuse.Status(syscall.ENOTDIR),
+		},
+		{
+			name: "generic failed precondition",
+			err:  fserror.New(fserror.FailedPrecondition, "portal is not bound"),
+			want: fuse.EIO,
+		},
+		{
+			name: "internal error",
+			err:  fserror.New(fserror.Internal, "storage failure"),
+			want: fuse.EIO,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := statusToFuse(tt.err); got != tt.want {
+				t.Fatalf("statusToFuse() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

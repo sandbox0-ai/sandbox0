@@ -2,6 +2,7 @@ package fserror
 
 import (
 	"errors"
+	"syscall"
 
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 )
@@ -32,10 +33,50 @@ type Error struct {
 	code     Code
 	message  string
 	redirect *pb.PrimaryRedirect
+	cause    error
 }
 
 func New(code Code, message string) error {
 	return &Error{code: code, message: message}
+}
+
+// NewErrno creates a filesystem error that retains its POSIX errno while also
+// exposing the closest high-level error code to non-FUSE callers.
+func NewErrno(errno syscall.Errno, message string) error {
+	return &Error{code: codeForErrno(errno), message: message, cause: errno}
+}
+
+// ErrnoOf returns the POSIX errno carried by err, including wrapped errors.
+func ErrnoOf(err error) (syscall.Errno, bool) {
+	if err == nil {
+		return 0, false
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return errno, true
+	}
+	return 0, false
+}
+
+func codeForErrno(errno syscall.Errno) Code {
+	switch errno {
+	case syscall.ENOENT:
+		return NotFound
+	case syscall.EEXIST:
+		return AlreadyExists
+	case syscall.EACCES, syscall.EPERM:
+		return PermissionDenied
+	case syscall.ENOSPC, syscall.EDQUOT:
+		return ResourceExhausted
+	case syscall.EINVAL, syscall.ENOTDIR:
+		return InvalidArgument
+	case syscall.ENOSYS, syscall.EOPNOTSUPP:
+		return Unimplemented
+	case syscall.ENOTEMPTY, syscall.EISDIR:
+		return FailedPrecondition
+	default:
+		return Internal
+	}
 }
 
 func WithRedirect(err error, redirect *pb.PrimaryRedirect) error {
@@ -94,6 +135,13 @@ func (e *Error) Error() string {
 		return ""
 	}
 	return e.message
+}
+
+func (e *Error) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
 }
 
 func (e *Error) Code() Code {

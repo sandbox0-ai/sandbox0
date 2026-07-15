@@ -1,13 +1,14 @@
-package sshgateway
+package http
 
 import (
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
+	sharedssh "github.com/sandbox0-ai/sandbox0/pkg/sshgateway"
 )
 
-// SandboxToAPI converts a manager sandbox record into the public API payload
-// shape and optionally attaches SSH connection information.
-func SandboxToAPI(sandbox *mgr.Sandbox, sshInfo *ConnectionInfo) *apispec.Sandbox {
+// sandboxToAPI removes manager-only runtime fields while preserving the public
+// sandbox detail contract and optionally attaching cluster-scoped SSH details.
+func sandboxToAPI(sandbox *mgr.Sandbox, sshInfo *sharedssh.ConnectionInfo) *apispec.Sandbox {
 	if sandbox == nil {
 		return nil
 	}
@@ -33,6 +34,16 @@ func SandboxToAPI(sandbox *mgr.Sandbox, sshInfo *ConnectionInfo) *apispec.Sandbo
 	if sandbox.Resources != nil && sandbox.Resources.Memory != "" {
 		memory := sandbox.Resources.Memory
 		payload.Resources = &apispec.SandboxResourceConfig{Memory: &memory}
+	}
+	if sandbox.Mounts != nil {
+		mounts := make([]apispec.ClaimMountRequest, len(sandbox.Mounts))
+		for i, mount := range sandbox.Mounts {
+			mounts[i] = apispec.ClaimMountRequest{
+				MountPoint:      mount.MountPoint,
+				SandboxvolumeId: mount.SandboxVolumeID,
+			}
+		}
+		payload.Mounts = &mounts
 	}
 	if sshInfo != nil {
 		payload.Ssh = &apispec.SandboxSSHConnection{

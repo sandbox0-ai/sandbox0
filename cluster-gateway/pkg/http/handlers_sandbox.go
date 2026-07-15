@@ -86,7 +86,7 @@ func (s *Server) getSandbox(c *gin.Context) {
 		return
 	}
 
-	payload := sharedssh.SandboxToAPI(sandbox, sharedssh.BuildConnectionInfo(s.cfg.SSHEndpointHost, s.cfg.SSHEndpointPort, sandbox.ID))
+	payload := sandboxToAPI(sandbox, sharedssh.BuildConnectionInfo(s.cfg.SSHEndpointHost, s.cfg.SSHEndpointPort, sandbox.ID))
 	spec.JSONSuccess(c, http.StatusOK, payload)
 }
 

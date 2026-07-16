@@ -43,7 +43,7 @@ type netdHTTPFixture struct {
 }
 
 func assertNetdTransparentEgressPolicy(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {
-	assertEmbeddedNetdCtldRollout(env)
+	assertCtldNetworkRuntimeRollout(env)
 	Expect(sandboxID).NotTo(BeEmpty())
 
 	sandbox, status, err := session.GetSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
@@ -81,7 +81,7 @@ func assertNetdTransparentEgressPolicy(env *framework.ScenarioEnv, session *e2eu
 }
 
 func assertNetdClusterDNSUDP(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {
-	assertEmbeddedNetdCtldRollout(env)
+	assertCtldNetworkRuntimeRollout(env)
 	Expect(sandboxID).NotTo(BeEmpty())
 
 	sandbox, status, err := session.GetSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
@@ -113,9 +113,9 @@ func assertNetdClusterDNSUDP(env *framework.ScenarioEnv, session *e2eutils.Sessi
 }
 
 func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eutils.Session, adminPassword string) {
-	assertEmbeddedNetdCtldRollout(env)
+	assertCtldNetworkRuntimeRollout(env)
 	if !netdRedisTeamBandwidthConfigured(env) {
-		Skip("netd Redis team bandwidth limit is not configured for this scenario")
+		Skip("ctld network-runtime team bandwidth limit is not configured for this scenario")
 	}
 
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
@@ -250,7 +250,7 @@ func netdRedisTeamBandwidthConfig(env *framework.ScenarioEnv) (*apiconfig.NetdCo
 	return &cfg, true
 }
 
-func assertEmbeddedNetdCtldRollout(env *framework.ScenarioEnv) {
+func assertCtldNetworkRuntimeRollout(env *framework.ScenarioEnv) {
 	Expect(env).NotTo(BeNil())
 	for _, slot := range []string{"a", "b"} {
 		name := env.Infra.Name + "-ctld-" + slot
@@ -261,18 +261,8 @@ func assertEmbeddedNetdCtldRollout(env *framework.ScenarioEnv) {
 			"daemonset/"+name,
 			"5m",
 		)
-		Expect(err).NotTo(HaveOccurred(), "embedded netd ctld slot %s did not finish rolling out", slot)
+		Expect(err).NotTo(HaveOccurred(), "ctld network-runtime slot %s did not finish rolling out", slot)
 	}
-	legacy, err := framework.KubectlOutput(
-		env.TestCtx.Context,
-		env.Config.Kubeconfig,
-		"get", "daemonset", env.Infra.Name+"-netd",
-		"--namespace", env.Infra.Namespace,
-		"--ignore-not-found",
-		"-o", "name",
-	)
-	Expect(err).NotTo(HaveOccurred())
-	Expect(strings.TrimSpace(legacy)).To(BeEmpty(), "standalone netd DaemonSet must be removed after ctld takes ownership")
 }
 
 func clearNetdRedisTeamBandwidthKeys(env *framework.ScenarioEnv, teamID string) error {

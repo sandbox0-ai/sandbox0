@@ -40,8 +40,8 @@ flowchart LR
     procd --> work["cmd, REPL, files, services"]
     sandbox --> rootfs["Rootfs checkpoint"]
     runtime --> volume["SandboxVolume"]
-    runtime --> netd["netd egress policy"]
-    netd --> external["Allowed external systems"]
+    runtime --> network["ctld network policy runtime"]
+    network --> external["Allowed external systems"]
     rootfs --> object["S3-compatible storage"]
     volume --> object["S3-compatible storage"]
 ```
@@ -151,7 +151,7 @@ More examples:
 Sandbox0 is designed for workloads that execute code the host should not trust.
 
 - Network policy can default to block-all and allow only explicit destinations.
-- `netd` enforces data-plane egress rules and protocol controls.
+- The active `ctld` process enforces data-plane egress rules and protocol controls.
 - Egress auth can project credentials at the network boundary instead of placing raw production keys in sandbox files or environment variables.
 - SSH egress auth can proxy Git-over-SSH without writing the upstream private key into the sandbox.
 - Sandbox Services enforce route auth, CORS, rate limits, timeouts, and path policy before public traffic reaches the sandbox.
@@ -163,10 +163,10 @@ Sandboxing reduces blast radius and gives policy a real enforcement point. It do
 ```mermaid
 flowchart TB
     client["Client, SDK, CLI, or agent platform"] --> cgw["cluster-gateway"]
-    cgw --> mgr["manager<br/>lifecycle + storage-proxy runtime"]
+    cgw --> mgr["manager<br/>lifecycle + storage runtime"]
     cgw --> pod["sandbox pod with procd"]
     mgr --> pod
-    mgr --> ctld["ctld HA pair (node-local)<br/>active process runs netd"]
+    mgr --> ctld["ctld HA pair (node-local)<br/>storage portal + network runtime"]
     pod --> ctld
     mgr --> pg[("PostgreSQL")]
     mgr --> s3[("S3-compatible storage")]
@@ -175,12 +175,12 @@ flowchart TB
 
 Sandbox0 separates region-scoped control-plane services from cluster-scoped data-plane services. In single-cluster mode, `cluster-gateway` can act as the entrypoint. In multi-cluster mode, `regional-gateway` and `scheduler` select and route to one of the data-plane clusters in the same region.
 
-The operator keeps `storage-proxy` and `netd` as logical feature and configuration names, but it does not deploy separate workloads for them. The storage-proxy API runtime runs inside `manager`; its existing routes, internal-auth audience, and compatibility Service remain unchanged. Each sandbox node runs `ctld-a` and `ctld-b`; only the elected primary runs the embedded netd runtime, and the standby starts it when promoted.
+`manager` owns sandbox lifecycle and the storage API runtime. Each sandbox node runs the `ctld-a` and `ctld-b` HA pair; the elected primary owns the volume portal, rootfs persistence, and network policy runtime, while the synchronized standby takes over those responsibilities after promotion.
 
 | Layer | Components | Responsibility |
 | --- | --- | --- |
 | Control plane | Optional `regional-gateway`, optional `scheduler` | Tenant/API key management, cluster selection, internal routing, template distribution |
-| Data plane | `cluster-gateway`, `manager` (including storage-proxy), `ctld-a` / `ctld-b` (active includes netd) | Sandbox lifecycle, rootfs checkpoints, process/file APIs, volume storage, network enforcement |
+| Data plane | `cluster-gateway`, `manager`, `ctld-a` / `ctld-b` | Sandbox lifecycle, rootfs checkpoints, process/file APIs, volume storage, network enforcement |
 | In-pod runtime | `procd` | PID 1 inside each sandbox pod, process abstraction, file I/O, volume mount operations |
 | Storage | PostgreSQL, ClickHouse, and S3-compatible object storage | Transactional metadata and metering delivery, long-term usage truth, rootfs/volume data |
 
@@ -217,6 +217,6 @@ For API changes, `pkg/apispec/openapi.yaml` is the source of truth. Generated SD
 
 ## Contributing
 
-Bug reports should include a minimal reproduction, relevant logs, Sandbox0 version or deployment mode, and whether the issue is on Cloud or self-hosted. Remove API keys, tokens, kubeconfigs, private repository URLs, customer data, and any other sensitive information before sharing logs.
+Bug reports should include a minimal reproduction, relevant logs, Sandbox0 version or deployment topology, and whether the issue is on Cloud or self-hosted. Remove API keys, tokens, kubeconfigs, private repository URLs, customer data, and any other sensitive information before sharing logs.
 
 Sandbox0 is Apache-2.0 licensed. See [LICENSE](./LICENSE).

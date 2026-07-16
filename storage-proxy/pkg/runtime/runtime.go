@@ -1,5 +1,4 @@
-// Package runtime assembles and runs the storage-proxy service. It is shared by
-// the standalone storage-proxy command and processes embedding the service.
+// Package runtime assembles and runs manager's storage API runtime.
 package runtime
 
 import (
@@ -46,7 +45,7 @@ import (
 
 const defaultShutdownTimeout = 30 * time.Second
 
-// Options provides process-owned dependencies to a storage-proxy Runtime.
+// Options provides process-owned dependencies to a manager storage Runtime.
 // The runtime owns resources it creates, but never closes the supplied loggers,
 // observability provider, or Kubernetes client.
 type Options struct {
@@ -58,7 +57,7 @@ type Options struct {
 	Listen        func(network, address string) (net.Listener, error)
 }
 
-// Runtime owns one storage-proxy HTTP endpoint and all of its background
+// Runtime owns one manager storage HTTP endpoint and all of its background
 // workers. Runtime is safe to embed in another process.
 type Runtime struct {
 	cfg           *config.StorageProxyConfig
@@ -95,16 +94,16 @@ type Runtime struct {
 // after the parent process has finished assembling its own dependencies.
 func New(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 	if opts.Config == nil {
-		return nil, fmt.Errorf("storage-proxy config is required")
+		return nil, fmt.Errorf("manager storage config is required")
 	}
 	if err := opts.Config.Validate(); err != nil {
-		return nil, fmt.Errorf("validate storage-proxy config: %w", err)
+		return nil, fmt.Errorf("validate manager storage config: %w", err)
 	}
 	if opts.Logger == nil {
-		return nil, fmt.Errorf("storage-proxy zap logger is required")
+		return nil, fmt.Errorf("manager storage zap logger is required")
 	}
 	if opts.LogrusLogger == nil {
-		return nil, fmt.Errorf("storage-proxy logrus logger is required")
+		return nil, fmt.Errorf("manager storage logrus logger is required")
 	}
 	listen := opts.Listen
 	if listen == nil {
@@ -138,7 +137,7 @@ func New(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 	if r.cfg.DatabaseURL != "" {
 		pool, err := initDatabase(ctx, r.cfg.DatabaseURL, r.cfg, r.logger, r.observability)
 		if err != nil {
-			return nil, fmt.Errorf("connect storage-proxy database: %w", err)
+			return nil, fmt.Errorf("connect manager storage database: %w", err)
 		}
 		r.pool = pool
 
@@ -146,12 +145,12 @@ func New(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 			clock.WithLogger(&zapClockLogger{logger: r.logger}),
 		)
 		if err != nil {
-			return nil, fmt.Errorf("initialize storage-proxy shared clock: %w", err)
+			return nil, fmt.Errorf("initialize manager storage shared clock: %w", err)
 		}
 		r.sharedClock = sharedClock
 
 		if err := runMigrations(ctx, pool, r.cfg.DatabaseSchema, r.logger); err != nil {
-			return nil, fmt.Errorf("run storage-proxy migrations: %w", err)
+			return nil, fmt.Errorf("run manager storage migrations: %w", err)
 		}
 		if r.cfg.Metering.Enabled {
 			if err := quota.RunMigrations(ctx, pool, observability.NewMigrateLogger(r.logger)); err != nil {
@@ -168,7 +167,7 @@ func New(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 			meteringRepo = meteringoutbox.NewRepository(pool)
 		}
 	} else {
-		r.logger.Warn("DATABASE_URL not set, running storage-proxy without database persistence")
+		r.logger.Warn("DATABASE_URL not set, running manager storage without database persistence")
 	}
 	if r.cfg.Metering.Enabled && r.pool == nil {
 		return nil, fmt.Errorf("DATABASE_URL is required when storage metering is enabled")
@@ -222,7 +221,7 @@ func New(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 	if r.k8sClient == nil {
 		client, err := k8s.NewClientWithObservability(r.cfg.KubeconfigPath, r.observability)
 		if err != nil {
-			r.logger.Warn("Failed to create storage-proxy Kubernetes client", zap.Error(err))
+			r.logger.Warn("Failed to create manager storage Kubernetes client", zap.Error(err))
 		} else {
 			r.k8sClient = client
 		}
@@ -239,7 +238,7 @@ func New(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 
 	publicKey, err := internalauth.LoadEd25519PublicKeyFromFile(internalauth.DefaultInternalJWTPublicKeyPath)
 	if err != nil {
-		return nil, fmt.Errorf("load storage-proxy internal auth public key from %s: %w", internalauth.DefaultInternalJWTPublicKeyPath, err)
+		return nil, fmt.Errorf("load manager storage internal auth public key from %s: %w", internalauth.DefaultInternalJWTPublicKeyPath, err)
 	}
 	validator := internalauth.NewValidator(internalauth.ValidatorConfig{
 		Target:                 internalauth.ServiceManagerStorage,
@@ -300,7 +299,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 	r.mu.Lock()
 	if r.stopped {
 		r.mu.Unlock()
-		return fmt.Errorf("storage-proxy runtime is stopped")
+		return fmt.Errorf("manager storage runtime is stopped")
 	}
 	if r.started {
 		r.mu.Unlock()
@@ -309,7 +308,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 	listener, err := r.listen("tcp", r.httpServer.Addr)
 	if err != nil {
 		r.mu.Unlock()
-		return fmt.Errorf("listen on storage-proxy address %s: %w", r.httpServer.Addr, err)
+		return fmt.Errorf("listen on manager storage address %s: %w", r.httpServer.Addr, err)
 	}
 	r.listener = listener
 	runCtx, runCancel := context.WithCancel(ctx)
@@ -324,7 +323,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), defaultShutdownTimeout)
 			defer cancel()
 			_ = r.Shutdown(shutdownCtx)
-			return fmt.Errorf("start storage-proxy coordinator: %w", err)
+			return fmt.Errorf("start manager storage coordinator: %w", err)
 		}
 		r.coordinatorStarted = true
 		r.logger.Info("Distributed storage coordinator started", zap.String("instance_id", r.coordinator.GetInstanceID()))
@@ -356,7 +355,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 	go func() {
 		err := r.httpServer.Serve(listener)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			wrapped := fmt.Errorf("serve storage-proxy HTTP: %w", err)
+			wrapped := fmt.Errorf("serve manager storage HTTP: %w", err)
 			select {
 			case r.errors <- wrapped:
 			default:
@@ -380,7 +379,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 	return nil
 }
 
-// Handler returns the authenticated storage-proxy HTTP handler. It is useful
+// Handler returns the authenticated manager storage HTTP handler. It is useful
 // for trusted in-process callers that still need the exact wire semantics.
 func (r *Runtime) Handler() http.Handler {
 	if r == nil {
@@ -499,7 +498,7 @@ func (r *Runtime) waitForInternalHTTP(ctx context.Context) error {
 	case <-done:
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf("wait for storage-proxy internal HTTP requests: %w", ctx.Err())
+		return fmt.Errorf("wait for manager storage internal HTTP requests: %w", ctx.Err())
 	}
 }
 
@@ -513,7 +512,7 @@ func (r *Runtime) waitForWorkers(ctx context.Context) error {
 	case <-done:
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf("wait for storage-proxy workers: %w", ctx.Err())
+		return fmt.Errorf("wait for manager storage workers: %w", ctx.Err())
 	}
 }
 
@@ -718,7 +717,7 @@ type handlerRoundTripper struct{ runtime *Runtime }
 
 func (t *handlerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	if t == nil || t.runtime == nil || t.runtime.Handler() == nil {
-		return nil, fmt.Errorf("storage-proxy in-process handler is not configured")
+		return nil, fmt.Errorf("manager storage in-process handler is not configured")
 	}
 	if err := req.Context().Err(); err != nil {
 		return nil, err
@@ -726,7 +725,7 @@ func (t *handlerRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 	t.runtime.mu.Lock()
 	if !t.runtime.started || t.runtime.stopped {
 		t.runtime.mu.Unlock()
-		return nil, fmt.Errorf("storage-proxy runtime is not accepting internal requests")
+		return nil, fmt.Errorf("manager storage runtime is not accepting internal requests")
 	}
 	t.runtime.internalHTTP.Add(1)
 	t.runtime.mu.Unlock()

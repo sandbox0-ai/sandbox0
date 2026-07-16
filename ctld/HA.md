@@ -12,8 +12,7 @@ of both processes.
   kernel FUSE connection and the corresponding recovery manifest.
 - The primary is the only process that binds the CSI socket, serves the node
   control port, exposes the kubelet plugin-registration socket, heartbeats
-  volume ownership, opens a writable S0FS engine, or runs the embedded netd
-  daemon.
+  volume ownership, opens a writable S0FS engine, or runs the network runtime.
 - Promotion starts only after the previous primary has been fenced by release
   of the kernel-backed primary lock.
 - A returning process joins as a standby. Role changes never perform automatic
@@ -34,25 +33,18 @@ Each slot attempts a non-blocking exclusive lock on
 epoch and starts active services. A synchronized standby waits for the lock;
 acquiring it is the fencing boundary for promotion.
 
-During the one-time migration from standalone netd, the legacy DaemonSet and
-embedded runtime use a second node-local flock scoped by namespace and infra
-name. The operator first validates the guarded legacy runtime with its normal
-health probes, then rolls that exact Pod template into a delayed-lock fallback.
-The fallback stays until embedded netd is Ready. If it must serve after an
-embedded startup failure, it releases the lock every two minutes and yields
-briefly so a recovered ctld primary can retry without operator or user action.
-
 The primary creates the CSI socket before advertising its registration socket.
 It becomes ready only after kubelet validates the CSI endpoint and reports a
-successful registration, and after embedded netd completes its first redirect
-rule synchronization. On graceful shutdown it stops netd and removes the
-registration socket before releasing the primary lease. A fatal netd error is
-treated as a primary service failure, so the process shuts down and releases
-the same kernel-backed lease used for ctld promotion. After a crash, the
-promoted process removes the stale socket after acquiring the lock, registers
-again, and starts a fresh netd runtime. Existing mounts continue through the
-cloned FUSE channels, while new publish operations resume through the promoted
-primary and may need to retry during the handoff.
+successful registration, and after the network runtime completes its first
+redirect-rule synchronization. On graceful shutdown it stops the network
+runtime and removes the registration socket before releasing the primary
+lease. A fatal network-runtime error is treated as a primary service failure,
+so the process shuts down and releases the same kernel-backed lease used for
+ctld promotion. After a crash, the promoted process removes the stale socket
+after acquiring the lock, registers again, and starts a fresh network runtime.
+Existing mounts continue through the cloned FUSE channels, while new publish
+operations resume through the promoted primary and may need to retry during the
+handoff.
 
 ## Portal handoff
 
@@ -96,7 +88,7 @@ for the previous Pod heartbeat to expire.
 
 Both slot DaemonSets use `maxSurge: 1` and `maxUnavailable: 0`. A replacement
 Pod is ready only after it has synchronized all current portals, allowing
-Kubernetes to delete the old slot without removing the last standby. The
+Kubernetes to delete the replaced slot without removing the last standby. The
 primary accepts multiple synchronized receivers only during these overlapping
 rollouts; steady state remains one primary and one standby. If multiple
 receivers observe primary loss, the flock and epoch admit one winner while the
@@ -106,8 +98,3 @@ A sandbox node is advertised as data-plane ready only when both distinct HA
 slots are ready and the node's `CSINode` object contains `volume.sandbox0.ai`.
 This prevents scheduling onto a synchronized standby before the active process
 has completed kubelet registration.
-
-The first upgrade from the historical single-process ctld requires a controlled
-sandbox drain. The old process cannot transfer existing FUSE connections because
-it predates this protocol. Subsequent upgrades use normal standby-first role
-transfer and do not require sandbox recreation.

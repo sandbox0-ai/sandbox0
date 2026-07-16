@@ -136,7 +136,7 @@ func RegisterInfraOperatorLifecycleSuite(envProvider func() *framework.ScenarioE
 			})
 		})
 
-		It("disables builtin database and deletes builtin database stateful resources", func() {
+		It("deletes retained builtin database stateful resources when policy changes to Delete", func() {
 			env := shouldRunApiScenario(envProvider, "fullmode")
 
 			ctx := env.TestCtx.Context
@@ -144,8 +144,6 @@ func RegisterInfraOperatorLifecycleSuite(envProvider func() *framework.ScenarioE
 			namespace := env.Infra.Namespace
 			infraName := env.Infra.Name
 
-			Expect(framework.Kubectl(ctx, kubeconfig, "get", "statefulset", infraName+"-postgres", "--namespace", namespace)).To(Succeed())
-			Expect(framework.Kubectl(ctx, kubeconfig, "get", "service", infraName+"-postgres", "--namespace", namespace)).To(Succeed())
 			Expect(framework.Kubectl(ctx, kubeconfig, "get", "secret", infraName+"-sandbox0-database-credentials", "--namespace", namespace)).To(Succeed())
 			Expect(framework.Kubectl(ctx, kubeconfig, "get", "pvc", infraName+"-postgres-data", "--namespace", namespace)).To(Succeed())
 

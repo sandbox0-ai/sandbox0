@@ -1,7 +1,7 @@
 package volumeportal
 
-// PrepareBindRequest is the manager-to-storage-proxy request used before
-// binding a sandbox volume portal to a ctld.
+// PrepareBindRequest carries the metadata needed to prepare a sandbox volume
+// before ctld binds its portal.
 type PrepareBindRequest struct {
 	TeamID      string `json:"team_id"`
 	UserID      string `json:"user_id"`

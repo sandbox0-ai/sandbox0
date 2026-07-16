@@ -34,7 +34,7 @@ func NewGenerator(config GeneratorConfig) *Generator {
 // Generate creates a new JWT token for the specified target service.
 //
 // Parameters:
-//   - target: The service being called (e.g., "storage-proxy", "procd")
+//   - target: The service being called (e.g., "manager-storage", "procd")
 //   - teamID: The team ID for authorization context
 //   - userID: Optional user ID for audit logging
 //   - opts: Optional parameters (permissions, custom TTL, etc.)
@@ -100,7 +100,7 @@ func (g *Generator) MustGenerate(target, teamID, userID string, opts GenerateOpt
 // System tokens are not bound to a specific team and have full access.
 //
 // Parameters:
-//   - target: The service being called (e.g., "manager", "storage-proxy")
+//   - target: The service being called (e.g., "manager", "manager-storage")
 //   - opts: Optional parameters (permissions, custom TTL, etc.)
 //
 // Returns a signed JWT token string.

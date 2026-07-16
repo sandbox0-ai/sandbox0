@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package storageproxy
+package storageruntime
 
 import (
 	"context"
@@ -39,8 +39,7 @@ const (
 	defaultLogSizeLimit           = "1Gi"
 )
 
-// RuntimeVolumeOptions customizes storage runtime volume names when the
-// runtime is embedded in another workload.
+// RuntimeVolumeOptions customizes manager storage runtime volume names.
 type RuntimeVolumeOptions struct {
 	ConfigMapName          string
 	ConfigVolumeName       string
@@ -50,9 +49,7 @@ type RuntimeVolumeOptions struct {
 	IncludeCredentialStore bool
 }
 
-// BuildRuntimeConfig resolves the storage-proxy config without creating a
-// workload. Manager embedding uses it while preserving the logical
-// storage-proxy configuration contract.
+// BuildRuntimeConfig resolves manager's storage runtime configuration.
 func BuildRuntimeConfig(ctx context.Context, resources *common.ResourceManager, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.StorageProxyConfig, error) {
 	if resources == nil {
 		return nil, fmt.Errorf("resource manager is required")
@@ -110,20 +107,20 @@ func BuildRuntimeConfig(ctx context.Context, resources *common.ResourceManager, 
 // credential, and encryption mounts without creating a workload.
 func BuildRuntimeVolumes(scope common.ObjectScope, cfg *apiconfig.StorageProxyConfig, opts RuntimeVolumeOptions) ([]corev1.VolumeMount, []corev1.Volume, error) {
 	if cfg == nil {
-		return nil, nil, fmt.Errorf("storage-proxy config is required")
+		return nil, nil, fmt.Errorf("storage runtime config is required")
 	}
 	if opts.ConfigMapName == "" {
-		return nil, nil, fmt.Errorf("storage-proxy config map name is required")
+		return nil, nil, fmt.Errorf("storage runtime config map name is required")
 	}
 	configVolumeName := valueOrDefault(opts.ConfigVolumeName, "config")
 	configMountPath := valueOrDefault(opts.ConfigMountPath, "/config/config.yaml")
 	cacheVolumeName := valueOrDefault(opts.CacheVolumeName, "cache")
 	logVolumeName := valueOrDefault(opts.LogVolumeName, "logs")
-	cacheSizeLimit, err := parseSizeLimit(cfg.CacheSizeLimit, defaultCacheSizeLimit, "storage-proxy cache size limit")
+	cacheSizeLimit, err := parseSizeLimit(cfg.CacheSizeLimit, defaultCacheSizeLimit, "storage runtime cache size limit")
 	if err != nil {
 		return nil, nil, err
 	}
-	logSizeLimit, err := parseSizeLimit(cfg.LogSizeLimit, defaultLogSizeLimit, "storage-proxy log size limit")
+	logSizeLimit, err := parseSizeLimit(cfg.LogSizeLimit, defaultLogSizeLimit, "storage runtime log size limit")
 	if err != nil {
 		return nil, nil, err
 	}

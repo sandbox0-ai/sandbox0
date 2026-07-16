@@ -41,7 +41,7 @@ func newMountedVolumeAPIHandler(storageCfg *apiconfig.StorageProxyConfig, repo *
 		}
 
 		claims := &internalauth.Claims{
-			Caller:   internalauth.ServiceStorageProxy,
+			Caller:   internalauth.ServiceManagerStorage,
 			Target:   internalauth.ServiceCtld,
 			TeamID:   teamID,
 			IsSystem: true,

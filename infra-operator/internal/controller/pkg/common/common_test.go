@@ -192,46 +192,6 @@ func TestAppendObservabilityEnvVarsUsesExternalExistingCollectorSecretHeaders(t 
 	}
 }
 
-func TestResolveSandboxNodePlacementFallsBackToNetdPlacement(t *testing.T) {
-	infra := &infrav1alpha1.Sandbox0Infra{
-		Spec: infrav1alpha1.Sandbox0InfraSpec{
-			Services: &infrav1alpha1.ServicesConfig{
-				Netd: &infrav1alpha1.NetdServiceConfig{
-					NodeSelector: map[string]string{
-						"sandbox0.ai/node-role": "sandbox",
-					},
-					Tolerations: []corev1.Toleration{
-						{
-							Key:      "sandbox.gke.io/runtime",
-							Operator: corev1.TolerationOpEqual,
-							Value:    "gvisor",
-							Effect:   corev1.TaintEffectNoSchedule,
-						},
-					},
-				},
-			},
-		},
-	}
-
-	nodeSelector, tolerations := ResolveSandboxNodePlacement(infra)
-	if got := nodeSelector["sandbox0.ai/node-role"]; got != "sandbox" {
-		t.Fatalf("expected sandbox node selector, got %q", got)
-	}
-	if len(tolerations) != 1 || tolerations[0].Key != "sandbox.gke.io/runtime" {
-		t.Fatalf("expected copied toleration, got %#v", tolerations)
-	}
-
-	infra.Spec.Services.Netd.NodeSelector["sandbox0.ai/node-role"] = "system"
-	infra.Spec.Services.Netd.Tolerations[0].Value = "runc"
-
-	if got := nodeSelector["sandbox0.ai/node-role"]; got != "sandbox" {
-		t.Fatalf("expected copied node selector to remain unchanged, got %q", got)
-	}
-	if got := tolerations[0].Value; got != "gvisor" {
-		t.Fatalf("expected copied toleration to remain unchanged, got %q", got)
-	}
-}
-
 func TestResolveSSHEndpointUsesEndpointPortOverride(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
@@ -300,7 +260,7 @@ func TestResolveSSHEndpointFallsBackToServicePort(t *testing.T) {
 	}
 }
 
-func TestResolveSandboxNodePlacementPrefersSharedPlacement(t *testing.T) {
+func TestResolveSandboxNodePlacementUsesSharedPlacement(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
 			SandboxNodePlacement: &infrav1alpha1.SandboxNodePlacementConfig{
@@ -316,65 +276,15 @@ func TestResolveSandboxNodePlacementPrefersSharedPlacement(t *testing.T) {
 					},
 				},
 			},
-			Services: &infrav1alpha1.ServicesConfig{
-				Netd: &infrav1alpha1.NetdServiceConfig{
-					NodeSelector: map[string]string{
-						"sandbox0.ai/node-role": "legacy",
-					},
-					Tolerations: []corev1.Toleration{
-						{
-							Key:      "sandbox.gke.io/runtime",
-							Operator: corev1.TolerationOpEqual,
-							Value:    "gvisor",
-							Effect:   corev1.TaintEffectNoSchedule,
-						},
-					},
-				},
-			},
 		},
 	}
 
 	nodeSelector, tolerations := ResolveSandboxNodePlacement(infra)
 	if got := nodeSelector["sandbox0.ai/node-role"]; got != "shared" {
-		t.Fatalf("expected shared node selector to win, got %q", got)
+		t.Fatalf("expected shared node selector, got %q", got)
 	}
 	if len(tolerations) != 1 || tolerations[0].Key != "sandbox0.ai/sandbox" {
-		t.Fatalf("expected shared tolerations to win, got %#v", tolerations)
-	}
-}
-
-func TestResolveSandboxNodePlacementFallsBackPerField(t *testing.T) {
-	infra := &infrav1alpha1.Sandbox0Infra{
-		Spec: infrav1alpha1.Sandbox0InfraSpec{
-			SandboxNodePlacement: &infrav1alpha1.SandboxNodePlacementConfig{
-				NodeSelector: map[string]string{
-					"sandbox0.ai/node-role": "shared",
-				},
-			},
-			Services: &infrav1alpha1.ServicesConfig{
-				Netd: &infrav1alpha1.NetdServiceConfig{
-					NodeSelector: map[string]string{
-						"sandbox0.ai/node-role": "legacy",
-					},
-					Tolerations: []corev1.Toleration{
-						{
-							Key:      "sandbox.gke.io/runtime",
-							Operator: corev1.TolerationOpEqual,
-							Value:    "gvisor",
-							Effect:   corev1.TaintEffectNoSchedule,
-						},
-					},
-				},
-			},
-		},
-	}
-
-	nodeSelector, tolerations := ResolveSandboxNodePlacement(infra)
-	if got := nodeSelector["sandbox0.ai/node-role"]; got != "shared" {
-		t.Fatalf("expected shared node selector to win, got %q", got)
-	}
-	if len(tolerations) != 1 || tolerations[0].Key != "sandbox.gke.io/runtime" {
-		t.Fatalf("expected legacy tolerations fallback, got %#v", tolerations)
+		t.Fatalf("expected shared tolerations, got %#v", tolerations)
 	}
 }
 
@@ -731,13 +641,13 @@ func TestApplyDaemonSetSkipsNoopUpdate(t *testing.T) {
 		},
 	}, infra.DeepCopy())
 	desired := &appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-netd", Namespace: infra.Namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-ctld", Namespace: infra.Namespace},
 		Spec: appsv1.DaemonSetSpec{
-			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "netd"}},
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "ctld"}},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "netd"}},
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "ctld"}},
 				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "netd", Image: "sandbox0ai/infra:test"}},
+					Containers: []corev1.Container{{Name: "ctld", Image: "sandbox0ai/infra:test"}},
 				},
 			},
 		},
@@ -775,7 +685,7 @@ func TestApplyDaemonSetUpdatesExistingObject(t *testing.T) {
 	}
 	existing := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "demo-netd",
+			Name:      "demo-ctld",
 			Namespace: infra.Namespace,
 			Labels: map[string]string{
 				"old": "label",
@@ -810,7 +720,7 @@ func TestApplyDaemonSetUpdatesExistingObject(t *testing.T) {
 			Name:      existing.Name,
 			Namespace: existing.Namespace,
 			Labels: map[string]string{
-				"app.kubernetes.io/name": "demo-netd",
+				"app.kubernetes.io/name": "demo-ctld",
 			},
 		},
 		Spec: appsv1.DaemonSetSpec{
@@ -823,7 +733,7 @@ func TestApplyDaemonSetUpdatesExistingObject(t *testing.T) {
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{
-						Name:  "netd",
+						Name:  "ctld",
 						Image: "sandbox0ai/infra:0.2.0-rc.7",
 					}},
 				},
@@ -842,10 +752,10 @@ func TestApplyDaemonSetUpdatesExistingObject(t *testing.T) {
 	if got.Spec.Template.Spec.Containers[0].Image != "sandbox0ai/infra:0.2.0-rc.7" {
 		t.Fatalf("expected updated image, got %q", got.Spec.Template.Spec.Containers[0].Image)
 	}
-	if got.Spec.Template.Spec.Containers[0].Name != "netd" {
+	if got.Spec.Template.Spec.Containers[0].Name != "ctld" {
 		t.Fatalf("expected updated container, got %q", got.Spec.Template.Spec.Containers[0].Name)
 	}
-	if got.Labels["app.kubernetes.io/name"] != "demo-netd" {
+	if got.Labels["app.kubernetes.io/name"] != "demo-ctld" {
 		t.Fatalf("expected updated labels, got %#v", got.Labels)
 	}
 	if len(got.OwnerReferences) != 1 || got.OwnerReferences[0].Name != infra.Name {

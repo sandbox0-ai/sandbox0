@@ -63,21 +63,14 @@ kubectl get pods -n sandbox0-system
 kubectl get crd sandbox0infras.infra.sandbox0.ai
 ```
 
-## 2) Choose a Deployment Mode and Apply a Sample
+## 2) Apply the Fullmode Sample
 
-Pick one official sample from source based on your target mode:
+Use the fullmode sample for a complete single-cluster data plane:
 
-- <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/single-cluster/minimal.yaml">single-cluster/minimal.yaml</GitHubRawLink>
-- <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/single-cluster/volumes.yaml">single-cluster/volumes.yaml</GitHubRawLink>
-- <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/single-cluster/network-policy.yaml">single-cluster/network-policy.yaml</GitHubRawLink>
 - <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/single-cluster/fullmode.yaml">single-cluster/fullmode.yaml</GitHubRawLink>
-- <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/multi-cluster/control-plane.yaml">multi-cluster/control-plane.yaml</GitHubRawLink>
-- <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/multi-cluster/data-plane.yaml">multi-cluster/data-plane.yaml</GitHubRawLink>
-
-Apply the one you selected:
 
 <Callout variant="info">
-Default recommended mode: `fullmode` (Linux nodes only). For local macOS/Windows testing, use `single-cluster/minimal.yaml` instead.
+Fullmode requires Linux Kubernetes nodes because ctld uses host networking, FUSE, and node-local runtime access.
 </Callout>
 
 <GitHubApplyCommand repo="sandbox0" path="infra-operator/chart/samples/single-cluster/fullmode.yaml" />
@@ -210,7 +203,7 @@ gcloud container clusters get-credentials sandbox0-gke-gvisor --region us-east1
 kubectl get nodes -o wide
 ```
 
-Keep a regular node pool for core system services. In the current GKE `gVisor` sample, components such as `cluster-gateway`, `manager` (including the storage-proxy runtime), PostgreSQL, and the builtin registry run on the regular pool. The ctld HA pair, including netd in its active process, and sandbox workloads run on the `gVisor` node pool while using the host-compatible runtime where required.
+Keep a regular node pool for core system services. In the GKE `gVisor` sample, `cluster-gateway`, `manager` and its storage runtime, PostgreSQL, and the builtin registry run on the regular pool. The ctld HA pair and sandbox workloads run on the `gVisor` node pool, while ctld itself uses the node's host-compatible runtime.
 
 ### 3) Add a `gVisor` Node Pool
 
@@ -277,16 +270,10 @@ Expected result:
 
 1. `Sandbox0Infra` becomes `Ready`
 2. `fullmode-cluster-gateway` is exposed as `LoadBalancer` on port `80`
-3. `fullmode-ctld-a` and `fullmode-ctld-b` run on `gvisor-lite`; the elected primary runs netd in-process
+3. `fullmode-ctld-a` and `fullmode-ctld-b` run on `gvisor-lite`; the elected primary owns rootfs, volume portal, and network runtime responsibilities
 4. sandbox pods in `tpl-default` run on `gvisor-lite`
 
-There is no separate `fullmode-netd` DaemonSet or `fullmode-storage-proxy` Deployment. The compatibility storage-proxy Service routes to the storage runtime in `fullmode-manager`.
-
-When upgrading an installation that still has the standalone workloads, infra-operator first upgrades the old netd DaemonSet to the new image and proves it Ready while it owns a shared node-local active lock. After both current ctld HA templates are running, that exact validated legacy template rolls into a delayed-lock fallback. The elected ctld primary gets the first opportunity to acquire the lock and initialize embedded netd. The fallback remains present until ctld recovery, kubelet registration, and netd's initial policy sync are all Ready; if embedded initialization fails, it temporarily reacquires the lock and periodically yields it for automatic ctld retry. Only then does the operator remove the standalone DaemonSet and its legacy RBAC. This prevents two netd runtimes from programming the same node concurrently without making the cutover destructive.
-
-For storage, the operator starts the embedded runtime in manager and waits for its rollout before repointing the compatibility storage-proxy Service and removing the old Deployment. Existing API paths, the `storage-proxy` internal-auth audience, and `services.storageProxy` configuration do not change. Existing manager/storage replica differences are normalized to the larger replica count for the shared Deployment, and a storage listen-port collision is remapped only inside the Pod; the compatibility Service keeps its configured port. Storage-only installations use the manager Deployment as the runtime host without enabling ctld or manager node-readiness gates.
-
-Rolling back to a release from before process consolidation is a maintenance operation, not a one-step image rollback. First stop new claims and drain sandbox workloads from the affected nodes. With infra-operator paused, roll both ctld slots to the old template and wait for embedded netd to stop before starting the old unguarded netd DaemonSet. Start and verify the old storage-proxy Deployment before switching its compatibility Service away from manager, then roll manager back and resume the old operator. Re-enabling an old operator before those workload transitions can overlap guarded embedded netd with an unguarded legacy process. Forward upgrades and rollbacks between releases that both contain process consolidation use the normal HA rollout.
+`fullmode-manager` serves lifecycle and storage APIs. On every sandbox node, the elected ctld primary owns rootfs persistence, volume portals, kubelet registration, and network enforcement; the synchronized standby takes over after promotion.
 
 This sample uses the native GKE node label `sandbox.gke.io/runtime=gvisor` for sandbox placement. You do not need to add a separate custom node label just to target `gVisor` nodes.
 
@@ -337,7 +324,7 @@ spec:
                 sandboxRuntimeClassName: gvisor-rootfs
 ```
 
-Do not set `services.netd.runtimeClassName` to `gvisor`, `gvisor-rootfs`, or `kata`. The field remains for configuration compatibility, but netd runs inside the elected ctld process and therefore uses the same host-compatible Pod runtime as ctld.
+The sandbox `RuntimeClass` does not apply to ctld. Keep ctld on the node's host-compatible runtime; it must not run under `gvisor`, `gvisor-rootfs`, or `kata`.
 
 `ctld` assumes the node's containerd data root is `/var/lib/containerd` by default. If your node bootstrap stores containerd data somewhere else, set `services.ctld.containerdHostDataRoot` to the actual host path:
 
@@ -414,19 +401,17 @@ If `s0 sandbox create` returns a sandbox ID and the sandbox reaches `running`, t
 
 - Sandbox0 requires different runtime behavior for different components. On GKE, keep a regular node pool for system services and a `gVisor` node pool for sandbox workloads.
 - Sandbox workload runtime selection should be handled by cluster defaults or administrator-managed service configuration, and the GCP `gVisor` sample places sandbox workloads onto nodes labeled `sandbox.gke.io/runtime=gvisor`.
-- Use `sandboxNodePlacement` to place sandbox workloads and the ctld HA pair, including its embedded netd runtime, onto the same sandbox node pool.
-- Do not set `services.netd.runtimeClassName: gvisor`; it must remain compatible with the ctld Pod runtime.
+- Use `sandboxNodePlacement` to place sandbox workloads and the ctld HA pair onto the same sandbox node pool.
 - `infra-operator` does not install containerd runtime handlers. Install `runsc`/`containerd-shim-runsc-v1`, configure the handler, restart containerd, and create the `RuntimeClass` before using a custom `sandboxRuntimeClassName`.
 - If containerd uses a non-default data root, set `services.ctld.containerdHostDataRoot` to that host path so rootfs pause/resume can use the overlayfs fast path.
-- `infra-operator` runs two independent ctld DaemonSets per sandbox node, with one ctld container in each Pod. The elected primary owns the CSI endpoint, kubelet registration, FUSE request channels, and the embedded netd runtime. The synchronized standby preserves existing mounts across a single ctld process or Pod failure, then starts netd as part of promotion. Registration and network enforcement follow the primary automatically. A filesystem, mount, or newly established network flow in progress during handoff can return an error and should be retried. Node reboot, kernel failure, and simultaneous loss of both ctld Pods remain outside this protection boundary.
-- Before the first upgrade from the historical single-DaemonSet ctld deployment, drain running Sandboxes from the affected nodes. The legacy process cannot transfer FUSE connections created before the primary/standby protocol. Later image rollouts use surge-before-delete standby synchronization and do not require this drain.
-- `ctld` and its embedded netd runtime depend on host features such as `hostNetwork` and `hostPath`. This is why GKE Autopilot is not a good fit for full Sandbox0 deployments.
-- Even when ctld is scheduled onto `gVisor` nodes, its Pod still uses the node's default host runtime; the compatibility `services.netd.runtimeClassName` setting remains unset.
+- `infra-operator` runs two independent ctld DaemonSets per sandbox node, with one ctld container in each Pod. The elected primary owns the CSI endpoint, kubelet registration, FUSE request channels, and network runtime. The synchronized standby preserves existing mounts across a single ctld process or Pod failure and assumes all node-local responsibilities during promotion. A filesystem, mount, or newly established network flow in progress during handoff can return an error and should be retried. Node reboot, kernel failure, and simultaneous loss of both ctld Pods remain outside this protection boundary.
+- `ctld` depends on host features such as `hostNetwork` and `hostPath`. This is why GKE Autopilot is not a good fit for full Sandbox0 deployments.
+- Even when ctld is scheduled onto `gVisor` nodes, its Pod uses the node's default host runtime.
 - If you hit GCP `SSD_TOTAL_GB` quota limits while creating node pools, reduce `--disk-size` explicitly instead of relying on the larger default boot disk size.
 
 ### Why Not Autopilot
 
-Autopilot is not suitable for the full `fullmode` deployment because Sandbox0 host-level components need capabilities that Autopilot restricts. In practice, ctld and its embedded netd runtime need node-level access, while template sandbox pods run on the `gVisor` pool.
+Autopilot is not suitable for fullmode because Sandbox0 host-level components need capabilities that Autopilot restricts. Ctld needs node-level access, while template sandbox pods run on the `gVisor` pool.
 
 ## Next Steps
 

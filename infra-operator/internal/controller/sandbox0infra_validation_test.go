@@ -19,24 +19,11 @@ import (
 )
 
 func TestServiceConfigCapabilitiesExposeOnlySupportedFields(t *testing.T) {
-	t.Run("netd schema omits unsupported workload fields", func(t *testing.T) {
-		typ := reflect.TypeOf(infrav1alpha1.NetdServiceConfig{})
-		for _, fieldName := range []string{"Replicas", "Resources", "Service", "Ingress"} {
-			if _, ok := typ.FieldByName(fieldName); ok {
-				t.Fatalf("expected NetdServiceConfig to omit field %q", fieldName)
-			}
-		}
-		if _, ok := typ.FieldByName("Enabled"); !ok {
-			t.Fatal("expected NetdServiceConfig to expose Enabled")
-		}
-	})
-
 	t.Run("scheduler and dataplane services omit ingress", func(t *testing.T) {
 		for name, typ := range map[string]reflect.Type{
 			"scheduler":      reflect.TypeOf(infrav1alpha1.SchedulerServiceConfig{}),
 			"clusterGateway": reflect.TypeOf(infrav1alpha1.ClusterGatewayServiceConfig{}),
 			"manager":        reflect.TypeOf(infrav1alpha1.ManagerServiceConfig{}),
-			"storageProxy":   reflect.TypeOf(infrav1alpha1.StorageProxyServiceConfig{}),
 		} {
 			if _, ok := typ.FieldByName("Ingress"); ok {
 				t.Fatalf("expected %s service config to omit Ingress", name)

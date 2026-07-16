@@ -10,16 +10,15 @@ import (
 	"go.uber.org/zap"
 )
 
-// === Sandbox Volume Management Handlers (→ Storage Proxy) ===
+// === Sandbox Volume Management Handlers (→ Manager Storage) ===
 
-// proxyToStorageProxy proxies a request to storage-proxy with internal authentication
-func (s *Server) proxyToStorageProxy(c *gin.Context) {
+// proxyToManagerStorage forwards a volume request to manager storage.
+func (s *Server) proxyToManagerStorage(c *gin.Context) {
 	authCtx := middleware.GetAuthContext(c)
 
-	// Generate internal token for storage-proxy
-	internalToken, err := s.internalAuthGen.Generate("storage-proxy", authCtx.TeamID, authCtx.UserID, internalauth.GenerateOptions{})
+	internalToken, err := s.internalAuthGen.Generate(internalauth.ServiceManagerStorage, authCtx.TeamID, authCtx.UserID, internalauth.GenerateOptions{})
 	if err != nil {
-		s.logger.Error("Failed to generate internal token for storage-proxy",
+		s.logger.Error("Failed to generate internal token for manager storage",
 			zap.String("team_id", authCtx.TeamID),
 			zap.Error(err),
 		)
@@ -31,8 +30,8 @@ func (s *Server) proxyToStorageProxy(c *gin.Context) {
 	c.Request.Header.Set(internalauth.TeamIDHeader, authCtx.TeamID)
 	c.Request.Header.Set(internalauth.DefaultTokenHeader, internalToken)
 
-	// Forward to storage-proxy
-	s.proxy2sp.ProxyToTarget(c)
+	// Forward to manager storage.
+	s.proxy2ManagerStorage.ProxyToTarget(c)
 }
 
 func requireVolumeID(c *gin.Context) (string, bool) {
@@ -47,13 +46,13 @@ func requireVolumeID(c *gin.Context) (string, bool) {
 // createSandboxVolume creates a new sandbox volume
 func (s *Server) createSandboxVolume(c *gin.Context) {
 	c.Request.URL.Path = "/sandboxvolumes"
-	s.proxyToStorageProxy(c)
+	s.proxyToManagerStorage(c)
 }
 
 // listSandboxVolumes lists sandbox volumes for the authenticated team
 func (s *Server) listSandboxVolumes(c *gin.Context) {
 	c.Request.URL.Path = "/sandboxvolumes"
-	s.proxyToStorageProxy(c)
+	s.proxyToManagerStorage(c)
 }
 
 // getSandboxVolume gets a sandbox volume by ID
@@ -64,7 +63,7 @@ func (s *Server) getSandboxVolume(c *gin.Context) {
 	}
 
 	c.Request.URL.Path = "/sandboxvolumes/" + id
-	s.proxyToStorageProxy(c)
+	s.proxyToManagerStorage(c)
 }
 
 // deleteSandboxVolume deletes a sandbox volume
@@ -75,7 +74,7 @@ func (s *Server) deleteSandboxVolume(c *gin.Context) {
 	}
 
 	c.Request.URL.Path = "/sandboxvolumes/" + id
-	s.proxyToStorageProxy(c)
+	s.proxyToManagerStorage(c)
 }
 
 // forkSandboxVolume forks a sandbox volume
@@ -86,7 +85,7 @@ func (s *Server) forkSandboxVolume(c *gin.Context) {
 	}
 
 	c.Request.URL.Path = "/sandboxvolumes/" + id + "/fork"
-	s.proxyToStorageProxy(c)
+	s.proxyToManagerStorage(c)
 }
 
 // createSandboxVolumeSnapshot creates a snapshot of a volume
@@ -96,7 +95,7 @@ func (s *Server) createSandboxVolumeSnapshot(c *gin.Context) {
 		return
 	}
 	c.Request.URL.Path = "/sandboxvolumes/" + id + "/snapshots"
-	s.proxyToStorageProxy(c)
+	s.proxyToManagerStorage(c)
 }
 
 // listSandboxVolumeSnapshots lists snapshots of a volume
@@ -106,7 +105,7 @@ func (s *Server) listSandboxVolumeSnapshots(c *gin.Context) {
 		return
 	}
 	c.Request.URL.Path = "/sandboxvolumes/" + id + "/snapshots"
-	s.proxyToStorageProxy(c)
+	s.proxyToManagerStorage(c)
 }
 
 // getSandboxVolumeSnapshot gets a snapshot by ID
@@ -121,7 +120,7 @@ func (s *Server) getSandboxVolumeSnapshot(c *gin.Context) {
 		return
 	}
 	c.Request.URL.Path = "/sandboxvolumes/" + id + "/snapshots/" + snapshotID
-	s.proxyToStorageProxy(c)
+	s.proxyToManagerStorage(c)
 }
 
 // restoreSandboxVolumeSnapshot restores a volume to a snapshot
@@ -136,7 +135,7 @@ func (s *Server) restoreSandboxVolumeSnapshot(c *gin.Context) {
 		return
 	}
 	c.Request.URL.Path = "/sandboxvolumes/" + id + "/snapshots/" + snapshotID + "/restore"
-	s.proxyToStorageProxy(c)
+	s.proxyToManagerStorage(c)
 }
 
 // deleteSandboxVolumeSnapshot deletes a snapshot
@@ -151,5 +150,5 @@ func (s *Server) deleteSandboxVolumeSnapshot(c *gin.Context) {
 		return
 	}
 	c.Request.URL.Path = "/sandboxvolumes/" + id + "/snapshots/" + snapshotID
-	s.proxyToStorageProxy(c)
+	s.proxyToManagerStorage(c)
 }

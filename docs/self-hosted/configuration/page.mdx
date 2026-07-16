@@ -6,13 +6,14 @@ The goal is to keep the page readable for operators while still exposing the ful
 
 ## How to Read `Sandbox0Infra`
 
-A `Sandbox0Infra` spec is easier to reason about when you split it into five layers:
+A `Sandbox0Infra` spec is easier to reason about when you split it into six layers:
 
 | Layer | Main fields | What it controls |
 |---|---|---|
 | Platform release | `infra-operator` chart / image version | Which sandbox0 component version to deploy |
 | Core dependencies | `spec.database`, `spec.metadataDatabase`, `spec.storage`, `spec.redis`, `spec.registry` | PostgreSQL, s0fs metadata, object storage, gateway rate-limit Redis, registry integration |
 | Topology | `spec.services.*`, `spec.controlPlane`, `spec.cluster`, `spec.region` | Single-cluster vs multi-cluster shape and service placement |
+| Data-plane runtimes | `spec.storage.runtime`, `spec.network`, `spec.sandboxNodePlacement` | Manager storage behavior and node-local ctld networking and placement |
 | Public routing | `spec.publicExposure`, `spec.internalAuth` | Public sandbox URLs and inter-service trust |
 | Runtime bootstrap | `spec.builtinTemplates`, `spec.initUser` | Default templates, warm pools, initial admin bootstrap |
 
@@ -22,7 +23,7 @@ A `Sandbox0Infra` spec is easier to reason about when you split it into five lay
 2. Decide whether database/storage/Redis/registry stay `builtin` or move external.
 3. Configure public exposure and cluster identity.
 4. Seed templates and initial admin user.
-5. Only then tune per-service `config` blocks.
+5. Only then tune service and data-plane runtime configuration.
 
 `spec.initUser` is consumed by the gateway runtime, not created by the operator itself.
 In local-password mode it bootstraps the first admin credentials; in OIDC-only mode it pre-creates the admin user and initial team so the first OIDC login with the same email lands on the intended admin account.
@@ -53,16 +54,15 @@ Pinning makes the runtime version deterministic; it does not eliminate the first
 
 Sandbox0 Cloud handles the mutable-tag policy at the platform layer: managed-region configuration pins these images by digest and rolls upstream digest changes through deployment automation. Cloud users therefore do not maintain these pins themselves. A genuinely cold node can still need a missing pinned image, but cache and prewarming operations remain the managed platform's responsibility rather than part of the customer template configuration.
 
-## Deployment Profiles
+## Supported Topologies
 
-| Profile | Typical fields | Use when |
+| Topology | Typical fields | Use when |
 |---|---|---|
-| Minimal single-cluster | `services.clusterGateway`, `services.manager` | Local eval, API validation, fast first install |
-| Full single-cluster | Add `storage`, `registry`, `services.storageProxy`, `services.netd` | You need persistent volumes, snapshots, or network controls |
+| Single-cluster fullmode | `storage`, `network`, `registry`, `services.clusterGateway`, `services.manager` | You deploy one complete data-plane cluster |
 | Multi-cluster control plane | `services.regionalGateway`, `services.scheduler` | You coordinate multiple data-plane clusters in one region |
-| Multi-cluster data plane | `controlPlane`, `cluster`, `services.clusterGateway`, `services.manager`, optional `storageProxy`/`netd` | You attach a cluster to an external control plane |
+| Multi-cluster data plane | `controlPlane`, `cluster`, `storage`, `network`, `services.clusterGateway`, `services.manager` | You attach a complete data-plane cluster to an external control plane |
 
-`services.storageProxy` and `services.netd` are stable logical configuration surfaces, not separate workload selectors. When storage-proxy is enabled, its API runtime and storage cache run in the manager Deployment; the operator preserves the storage-proxy Service and internal-auth audience for compatible routing. Existing independent replica settings remain upgrade-compatible: the shared manager Deployment uses the larger of `services.manager.replicas` and `services.storageProxy.replicas`. A storage-only profile also creates that Deployment as the process host without implicitly enabling ctld or manager-dependent node readiness. If the old storage-proxy listen port collides with a manager listener, the operator chooses a private in-Pod target port while keeping the configured storage-proxy Service port unchanged. When netd is enabled, its runtime runs only in the elected primary of the node's `ctld-a` / `ctld-b` pair. A promoted standby starts netd as part of becoming primary. A full data-plane installation therefore uses the manager Deployment plus the two ctld DaemonSets for these formerly separate service workloads.
+The single-cluster sample is always fullmode. `manager` hosts lifecycle control and the storage API runtime. Each sandbox node runs the `ctld-a` and `ctld-b` DaemonSets; the elected primary owns rootfs persistence, volume portals, and the network runtime, and the synchronized standby takes over after promotion. Configure storage behavior under `spec.storage.runtime`, network behavior under `spec.network`, and shared sandbox-node placement under `spec.sandboxNodePlacement`.
 
 ## Cold Claim Admission
 
@@ -76,7 +76,7 @@ Schedulers consume the manager cluster summary fields `claim_start_limit`, `clai
 
 Sandbox0 records usage truth in the region usage ledger and exports it from the region-scoped metering endpoints. Metering is disabled by default. When `spec.metering.enabled` is `true`, metering requires `spec.clickHouse.type` to be `builtin` or `external`. ClickHouse is the long-term usage ledger and the only metering query/export backend. PostgreSQL holds only a compact transactional delivery outbox and producer projection state; it is not a second queryable usage ledger. Producers capture stable, idempotent ClickHouse operations in that outbox, storage mutations use the same PostgreSQL business transaction, and manager retries the oldest transaction batch until ClickHouse accepts it.
 
-Metering export is therefore eventually consistent. Manager lifecycle events and storage mutations are normally visible after the projector poll (about two seconds). Netd byte windows add `meteringReportInterval` (10 seconds by default), while periodic storage byte-hour windows add up to one minute. A ClickHouse outage increases this delay without discarding committed outbox operations; after the one-time projection-state bootstrap has completed, producers can also restart while ClickHouse is unavailable. The outbox is globally ordered, so the exported `complete_before` value is the greatest producer watermark that has reached ClickHouse; projecting it proves that every older committed batch has also been delivered, and historical producer instances do not pin the frontier. Monitor `manager_metering_outbox_pending_operations` and `manager_metering_outbox_oldest_pending_age_seconds` for delivery backlog. Billing systems should consume the exported watermark and rate usage windows outside the open-source data plane.
+Metering export is therefore eventually consistent. Manager lifecycle events and storage mutations are normally visible after the projector poll (about two seconds). Network byte windows from ctld add `meteringReportInterval` (10 seconds by default), while periodic storage byte-hour windows add up to one minute. A ClickHouse outage increases this delay without discarding committed outbox operations; after the one-time projection-state bootstrap has completed, producers can also restart while ClickHouse is unavailable. The outbox is globally ordered, so the exported `complete_before` value is the greatest producer watermark that has reached ClickHouse; projecting it proves that every older committed batch has also been delivered, and historical producer instances do not pin the frontier. Monitor `manager_metering_outbox_pending_operations` and `manager_metering_outbox_oldest_pending_age_seconds` for delivery backlog. Billing systems should consume the exported watermark and rate usage windows outside the open-source data plane.
 
 New event and window rows expose their PostgreSQL outbox operation sequence. Rows projected before the sequence column was introduced retain `sequence: 0`; cursor-based pagination is the canonical export contract across upgrades. Metering timestamps are written to ClickHouse as signed Unix nanoseconds so `DateTime64(9)` window boundaries and cursors preserve their full precision.
 
@@ -85,8 +85,8 @@ Sandbox compute uses a serverless-style contract:
 | Window type | Unit | Meaning |
 |---|---|---|
 | `sandbox.runtime_mib_milliseconds` | `mib_milliseconds` | Active sandbox runtime and team-owned warm pool runtime multiplied by allocated memory |
-| `sandbox.egress_bytes` | `bytes` | Egress traffic observed by `netd` |
-| `sandbox.ingress_bytes` | `bytes` | Ingress traffic observed by `netd` |
+| `sandbox.egress_bytes` | `bytes` | Egress traffic observed by the ctld network runtime |
+| `sandbox.ingress_bytes` | `bytes` | Ingress traffic observed by the ctld network runtime |
 | `sandbox.volume_byte_hours` | `byte_hours` | Persisted volume and volume snapshot storage over time. Snapshot rows keep `subject_type=snapshot` |
 | `sandbox.rootfs_byte_hours` | `byte_hours` | Persisted sandbox rootfs COW object storage over time |
 
@@ -100,11 +100,11 @@ Platform telemetry export is disabled by default. The operator owns collection a
 
 For cold-start diagnosis, manager exposes `manager_pod_lifecycle_stage_duration_seconds`. Its `stage` label separates scheduling, the `PodReadyToStartContainers` sandbox/network boundary, procd container start, first PodIP observation, and Sandbox0 startup/readiness probe completion. The sandbox boundary is a Kubernetes lifecycle timestamp, not the duration of an individual CRI call. Collect kubelet `kubelet_runtime_operations_duration_seconds{operation_type=~"run_podsandbox|create_container|start_container"}` when exact node-level CRI operation latency is required.
 
-ClickHouse is configured once on the `Sandbox0Infra` CR under `spec.clickHouse`. The infra-operator owns builtin provisioning or external DSN resolution, the same way it owns built-in or external PostgreSQL and Redis wiring. Feature configs such as `spec.sandboxObservability` and `spec.metering` consume this region component. Do not configure the ClickHouse backend separately on cluster-gateway, ctld, manager, or the logical storage-proxy and netd service configs when deploying through `Sandbox0Infra`.
+ClickHouse is configured once on the `Sandbox0Infra` CR under `spec.clickHouse`. The infra-operator owns builtin provisioning or external DSN resolution, the same way it owns built-in or external PostgreSQL and Redis wiring. Feature configs such as `spec.sandboxObservability` and `spec.metering` consume this region component. Do not configure separate ClickHouse backends on cluster-gateway, manager, or ctld when deploying through `Sandbox0Infra`.
 
 Historical logs and runtime metrics are available whenever sandbox observability is enabled. Centralized sandbox audit is an enterprise feature: set `spec.sandboxObservability.audit.enabled` to `true` and provide a signed enterprise license containing the `sandbox_audit` feature. The license is mounted only into cluster-gateway, which authorizes audit ingestion and the public observability-event query and watch API.
 
-ClickHouse is the canonical audit store. Audit facts are written to `sandbox_audit_events` with stable event IDs, trusted actor and producer identity, a canonical payload digest, and an Ed25519 gateway signature. PostgreSQL is not a second audit store. The infra-operator creates separate netd producer and audit-signing key pairs: the netd runtime in active ctld receives only the producer private key, while cluster-gateway receives its public key and the independent signing key. Fsync-backed buffers are delivery state, not competing audit ledgers or query sources; the public observability-event list and watch responses read only canonical ClickHouse rows and include `signature_status`, with event-ID payload conflicts reported separately as `event_id_conflict`. A buffered event is therefore not visible to audit readers until ClickHouse acknowledges it. Cluster-gateway uses a persistent volume claim for pending audit events, while each node-local netd runtime keeps its flow buffer on that node. Delivery records are deleted only after ClickHouse acknowledges the exact event.
+ClickHouse is the canonical audit store. Audit facts are written to `sandbox_audit_events` with stable event IDs, trusted actor and producer identity, a canonical payload digest, and an Ed25519 gateway signature. PostgreSQL is not a second audit store. The infra-operator creates separate network-producer and audit-signing key pairs: the active ctld process receives only the producer private key, while cluster-gateway receives its public key and the independent signing key. Fsync-backed buffers are delivery state, not competing audit ledgers or query sources; the public observability-event list and watch responses read only canonical ClickHouse rows and include `signature_status`, with event-ID payload conflicts reported separately as `event_id_conflict`. A buffered event is therefore not visible to audit readers until ClickHouse acknowledges it. Cluster-gateway uses a persistent volume claim for pending audit events, while each node-local ctld network runtime keeps its flow buffer on that node. Delivery records are deleted only after ClickHouse acknowledges the exact event.
 
 The v2 audit schema deliberately uses a new `sandbox_audit_events` table. Older `sandbox_events` rows do not have trustworthy actor or signature data and are retained as legacy observability history rather than being retroactively signed. Existing CRs whose persisted table value is the old default are routed to the new canonical table. At startup, audit-enabled cluster-gateway validates the actual ClickHouse engine, partition key, sorting key, and required columns, and refuses to serve audit operations against an old or incompatible custom table.
 
@@ -161,7 +161,7 @@ spec:
 
 Audit retention is measured from the cluster-gateway-owned `ingested_at` timestamp, not the producer's potentially delayed `occurred_at`. This timestamp marks when cluster-gateway creates or normalizes the canonical event; it is not a ClickHouse acknowledgement timestamp. An event delayed in a delivery buffer may therefore have less than the configured retention period remaining when it becomes query-visible.
 
-`spec.sandboxObservability.audit.deliveryMode` selects the admission boundary for non-mutating Sandbox API requests, public-exposure requests, and new netd flows:
+`spec.sandboxObservability.audit.deliveryMode` selects the admission boundary for non-mutating Sandbox API requests, public-exposure requests, and new network flows handled by ctld:
 
 - `durable_async` is the default. The operation may proceed after its attempt or event is fsynced to the local delivery buffer; ClickHouse ingestion and audit-query visibility follow asynchronously. On a healthy deployment, visibility is driven by immediate delivery wakeups plus the default one-second flush/replay cycles, so it is not a read-after-write guarantee.
 - `canonical_sync` waits for ClickHouse to acknowledge the admission event before the operation or flow proceeds. This puts a ClickHouse round trip on the critical path and fails closed when canonical acknowledgement is unavailable.
@@ -207,11 +207,11 @@ spec:
 
 Set `spec.sandboxObservability.enabled` to `false` or omit the field to keep all historical APIs disabled. Leave `spec.sandboxObservability.audit.enabled` unset or `false` to keep canonical audit ingestion and event queries disabled while retaining historical logs and runtime metrics. Set `spec.metering.enabled` to `false` or omit `spec.metering` to keep metering producers, quota usage reads, and metering export readers disabled. Legacy `spec.sandboxObservability.type` fields are still accepted for compatibility, but new installs should use `spec.clickHouse` for ClickHouse provisioning. Disabling audit stops new facts but does not delete existing rows. `retention.auditDays` is the retention policy for the canonical ClickHouse audit table; set it to the period required by your organization before enabling audit in production. Metering remains a separate ledger.
 
-When the backend is enabled, infra-operator injects bounded internal ingest endpoints into ctld for sandbox-wide CRI runtime samples and manager for historical logs. When licensed audit is also enabled, it injects the selected delivery mode and durable event-buffer configuration into cluster-gateway and netd. In `durable_async`, netd opens an allowed upstream connection after its producer attempt is fsynced locally; cluster-gateway later normalizes and signs that event during canonical ingestion. In `canonical_sync`, netd waits for cluster-gateway and ClickHouse to acknowledge the attempt. Gateway mutation responses are always held until their signed result is acknowledged; pending results return `503` and replay from disk.
+When the backend is enabled, infra-operator injects bounded internal ingest endpoints into ctld for sandbox-wide CRI runtime samples and manager for historical logs. When licensed audit is also enabled, it injects the selected delivery mode and durable event-buffer configuration into cluster-gateway and the ctld network runtime. In `durable_async`, ctld opens an allowed upstream connection after its producer attempt is fsynced locally; cluster-gateway later normalizes and signs that event during canonical ingestion. In `canonical_sync`, ctld waits for cluster-gateway and ClickHouse to acknowledge the attempt. Gateway mutation responses are always held until their signed result is acknowledged; pending results return `503` and replay from disk.
 
-Audit currently requires `spec.services.clusterGateway.replicas: 1`. Infra-operator mounts a `ReadWriteOnce` audit-event delivery PVC and uses the `Recreate` deployment strategy so the same buffer is detached and reattached before a replacement gateway starts. In production, set `audit.deliveryPersistence.storageClass` to durable, encrypted storage that supports cross-node volume reattachment; the cluster default is used when it is omitted. Netd flow buffers remain node-local and survive same-node Pod restarts, but not permanent node loss. All delivery records are removed only after ClickHouse acknowledgement. Preserve the generated audit-signing Secret for the full retention period. Inline verification currently uses only the active public key, so events signed by a retained historical key report `signature_status=unavailable`; destructive key replacement therefore requires retaining previous public keys outside the cluster for historical offline verification.
+Audit currently requires `spec.services.clusterGateway.replicas: 1`. Infra-operator mounts a `ReadWriteOnce` audit-event delivery PVC and uses the `Recreate` deployment strategy so the same buffer is detached and reattached before a replacement gateway starts. In production, set `audit.deliveryPersistence.storageClass` to durable, encrypted storage that supports cross-node volume reattachment; the cluster default is used when it is omitted. Ctld network flow buffers remain node-local and survive same-node Pod restarts, but not permanent node loss. All delivery records are removed only after ClickHouse acknowledgement. Preserve the generated audit-signing Secret for the full retention period. Inline verification currently uses only the active public key, so events signed by a retained historical key report `signature_status=unavailable`; destructive key replacement therefore requires retaining previous public keys outside the cluster for historical offline verification.
 
-Netd exports `sandbox0_netd_audit_ingest_events_total` and `sandbox0_netd_audit_ingest_batches_total`; alert on `persist_failed`, `corrupt`, `retrying`, `replay_failed`, and `ack_failed` results. Only `canonical_sync` admission adds a ClickHouse round trip to each new audited flow; the default `durable_async` path pays for local fsync and gains ClickHouse visibility asynchronously. HTTP requests multiplexed over one existing connection remain protocol operations beneath that flow rather than independent network connections.
+The ctld network runtime exports `sandbox0_netd_audit_ingest_events_total` and `sandbox0_netd_audit_ingest_batches_total`; alert on `persist_failed`, `corrupt`, `retrying`, `replay_failed`, and `ack_failed` results. Only `canonical_sync` admission adds a ClickHouse round trip to each new audited flow; the default `durable_async` path pays for local fsync and gains ClickHouse visibility asynchronously. HTTP requests multiplexed over one existing connection remain protocol operations beneath that flow rather than independent network connections.
 
 The built-in controls provide durable delivery, authenticated producer identity, tenant scoping, append-only application behavior, and tamper-evident row signatures. Regulatory certification still depends on deployment controls outside the process: highly available ClickHouse storage, restricted ClickHouse mutation credentials, encrypted backups, tested restore procedures, retention and legal-hold policy, clock synchronization, and independent preservation of signing public keys or exported checkpoints. A database administrator who can rewrite the complete table and its backups is outside the protection of a per-row signature alone.
 
@@ -275,10 +275,8 @@ When traces are not enabled through `collection.traces` or the legacy `traces` b
 
 Official sample manifests:
 
-- <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/single-cluster/minimal.yaml">single-cluster/minimal.yaml</GitHubRawLink>
 - <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/single-cluster/fullmode.yaml">single-cluster/fullmode.yaml</GitHubRawLink>
-- <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/single-cluster/volumes.yaml">single-cluster/volumes.yaml</GitHubRawLink>
-- <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/single-cluster/network-policy.yaml">single-cluster/network-policy.yaml</GitHubRawLink>
+- <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/single-cluster/fullmode-gke-gvisor.yaml">single-cluster/fullmode-gke-gvisor.yaml</GitHubRawLink>
 - <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/multi-cluster/control-plane.yaml">multi-cluster/control-plane.yaml</GitHubRawLink>
 - <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/multi-cluster/data-plane.yaml">multi-cluster/data-plane.yaml</GitHubRawLink>
 
@@ -304,7 +302,7 @@ spec:
 
 ### S3 or OSS Backing Storage
 
-If you need persistent volume features in production, configure `spec.storage` and enable `services.storageProxy`.
+Configure the object-storage backend and manager storage runtime together under `spec.storage`.
 
 ```yaml
 spec:
@@ -318,9 +316,8 @@ spec:
                 name: aws-credentials
                 accessKeyKey: accessKeyId
                 secretKeyKey: secretAccessKey
-    services:
-        storageProxy:
-            enabled: true
+        runtime:
+            objectEncryptionEnabled: true
 ```
 
 ### Sandbox RuntimeClass
@@ -404,7 +401,7 @@ metadata:
 handler: gvisor-rootfs
 ```
 
-Keep `services.netd.runtimeClassName` unset, or set it only to the same host-compatible runtime used by ctld, such as `runc`. This field remains a compatibility setting; netd runs inside the elected ctld process and cannot use a different Pod runtime. Neither ctld nor its netd runtime should run under `gvisor`, `gvisor-rootfs`, or `kata`.
+`sandboxRuntimeClassName` applies only to sandbox Pods. Ctld is a node-local host component and must use a runtime that supports its required `hostNetwork`, `hostPath`, FUSE, and network-programming access; do not run ctld under `gvisor`, `gvisor-rootfs`, or `kata`.
 
 `ctld` assumes the node's containerd data root is `/var/lib/containerd` by default. If your nodes move containerd data to another host path, configure the same path so rootfs pause/resume can use the overlayfs fast path:
 
@@ -431,7 +428,7 @@ Cache contents are safe to delete. If a cached object is missing, corrupt, too o
 
 ### Shared Redis Rate Limiting
 
-Gateway request rate limiting defaults to process-local memory. Configure `spec.redis` when gateway replicas need a shared Redis backend. The same Redis backend is also used by `netd` when cluster-scoped team bandwidth limits are configured.
+Gateway request rate limiting defaults to process-local memory. Configure `spec.redis` when gateway replicas need a shared Redis backend. The ctld network runtime uses the same Redis backend when cluster-scoped team bandwidth limits are configured.
 
 ```yaml
 spec:
@@ -517,7 +514,7 @@ When `spec.credentialVault` is enabled, manager stores newly written credential 
 
 ### Egress Auth Resolve TTL
 
-netd caches resolved egress auth material until the `expiresAt` timestamp returned by manager. Manager does not keep an additional resolved-material cache. Credential source rotation actively invalidates affected netd cache entries, so already-claimed sandboxes normally use the rotated source on their next matching egress resolve. The default lifetime is 5 minutes, and the TTL remains the fallback consistency bound if realtime invalidation delivery is interrupted.
+The ctld network runtime caches resolved egress auth material until the `expiresAt` timestamp returned by manager. Manager does not keep an additional resolved-material cache. Credential source rotation actively invalidates affected ctld cache entries, so already-claimed sandboxes normally use the rotated source on their next matching egress resolve. The default lifetime is 5 minutes, and the TTL remains the fallback consistency bound if realtime invalidation delivery is interrupted.
 
 Set `spec.services.manager.config.egressAuthDefaultResolveTtl` when you want a different platform default. Individual bindings can override it with `network.credentialBindings[*].cachePolicy.ttl`.
 
@@ -633,26 +630,26 @@ spec:
             enabled: true
 ```
 
-## Service-Level Config
+## Service and Runtime Config
 
-`spec.services.<service>.config` is where you tune component-specific behavior after the topology is already correct.
+Use `spec.services.<service>.config` for deployable services, `spec.storage.runtime` for manager storage behavior, and `spec.network.config` for the network runtime in ctld.
 
 Examples:
 
 - `services.clusterGateway.config.authMode` switches between `public`, `internal`, and `both`
-- `services.manager.config.autoscaler.*` is preserved for config compatibility; the current manager keeps warm pools at `minIdle`
+- `services.manager.config.autoscaler.*` controls warm-pool scaling behavior
 - `services.manager.config.k8sClientQps` and `k8sClientBurst` tune the manager Kubernetes client token bucket rate limit; defaults are `50` and `100`
 - `services.manager.config.sandboxMaxMemory` caps per-sandbox memory overrides; the default is `32Gi`
 - `services.manager.config.procdBinImageRef` overrides the derived procd artifact image used by sandbox Pods
 - `services.manager.config.allowColdStartWithoutReadyDataPlane` lets cold claims create Pending pods for external node autoscaler scale-from-zero deployments; keep it disabled unless the cluster autoscaler can provision matching sandbox nodes
-- `services.storageProxy.config.filesystem*` tunes the storage-proxy runtime hosted by manager; `services.manager.config.procdConfig.volume*` tunes mounted volume cache sizing
-- `services.storageProxy.config.s0fsSegmentTargetSize` sets the target S0FS segment size for materialized volume data; the default is `4Mi`
-- `services.storageProxy.config.s0fsCompaction*` tunes background S0FS compaction for RWO volume owners; `s0fsCompactionInterval` accepts `0`, `off`, or `disabled` to turn it off
-- `services.storageProxy.config.cacheSizeLimit` and `logSizeLimit` cap storage-proxy cache and logs in the manager Pod; `volumePortalCacheSizeLimit` and `volumePortalRootMinFree` tune the volume portals used by ctld
-- `services.storageProxy.config.objectEncryptionEnabled` controls application-layer encryption for S0FS object storage and node-local volume cache files; it is enabled by default
-- `services.netd.config.egressBandwidthBytesPerSecond`, `ingressBandwidthBytesPerSecond`, and `bandwidthBurstBytes` apply per-sandbox bandwidth throttling when set above zero
-- `services.netd.config.teamEgressBandwidthBytesPerSecond`, `teamIngressBandwidthBytesPerSecond`, and `teamBandwidthBurstBytes` apply cluster-scoped per-team aggregate throttling when set above zero and `spec.redis` is configured
-- `services.netd.config.*` also controls proxy ports, policy enforcement, and node-level networking behavior
+- `storage.runtime.filesystem*` tunes the manager storage runtime; `services.manager.config.procdConfig.volume*` tunes mounted volume cache sizing
+- `storage.runtime.s0fsSegmentTargetSize` sets the target S0FS segment size for materialized volume data; the default is `4Mi`
+- `storage.runtime.s0fsCompaction*` tunes background S0FS compaction for RWO volume owners; `s0fsCompactionInterval` accepts `0`, `off`, or `disabled` to turn it off
+- `storage.runtime.cacheSizeLimit` and `logSizeLimit` cap storage cache and logs in the manager Pod; `volumePortalCacheSizeLimit` and `volumePortalRootMinFree` tune the volume portals used by ctld
+- `storage.runtime.objectEncryptionEnabled` controls application-layer encryption for S0FS object storage and node-local volume cache files; it is enabled by default
+- `network.config.egressBandwidthBytesPerSecond`, `ingressBandwidthBytesPerSecond`, and `bandwidthBurstBytes` apply per-sandbox bandwidth throttling when set above zero
+- `network.config.teamEgressBandwidthBytesPerSecond`, `teamIngressBandwidthBytesPerSecond`, and `teamBandwidthBurstBytes` apply cluster-scoped per-team aggregate throttling when set above zero and `spec.redis` is configured
+- `network.config.*` also controls proxy ports, policy enforcement, and node-level networking behavior
 
 ```yaml
 spec:
@@ -660,35 +657,34 @@ spec:
         type: builtin
         builtin:
             enabled: true
-    services:
-        storageProxy:
-            config:
-                cacheSizeLimit: 20Gi
-                logSizeLimit: 1Gi
-                s0fsSegmentTargetSize: 4Mi
-                s0fsCompactionInterval: 1m
-                s0fsCompactionMinDeadRatio: "0.5"
-                s0fsCompactionMinReclaimSize: 1Mi
-                volumePortalCacheSizeLimit: 20Gi
-                volumePortalRootMinFree: 5Gi
-        netd:
-            config:
-                egressBandwidthBytesPerSecond: 10485760
-                ingressBandwidthBytesPerSecond: 10485760
-                bandwidthBurstBytes: 10485760
-                teamEgressBandwidthBytesPerSecond: 104857600
-                teamIngressBandwidthBytesPerSecond: 104857600
-                teamBandwidthBurstBytes: 104857600
+    storage:
+        runtime:
+            cacheSizeLimit: 20Gi
+            logSizeLimit: 1Gi
+            s0fsSegmentTargetSize: 4Mi
+            s0fsCompactionInterval: 1m
+            s0fsCompactionMinDeadRatio: "0.5"
+            s0fsCompactionMinReclaimSize: 1Mi
+            volumePortalCacheSizeLimit: 20Gi
+            volumePortalRootMinFree: 5Gi
+    network:
+        config:
+            egressBandwidthBytesPerSecond: 10485760
+            ingressBandwidthBytesPerSecond: 10485760
+            bandwidthBurstBytes: 10485760
+            teamEgressBandwidthBytesPerSecond: 104857600
+            teamIngressBandwidthBytesPerSecond: 104857600
+            teamBandwidthBurstBytes: 104857600
 ```
 
-Use `spec.sandboxNodePlacement` for the shared node placement consumed by sandbox template Pods and ctld, including its embedded netd runtime. `infra-operator` owns `sandbox0.ai/data-plane-ready` and adds it to sandbox Pod placement after the required node-local components are Ready. The older `services.netd.nodeSelector` and `services.netd.tolerations` fields remain as compatibility aliases when the shared placement is unset.
+Use `spec.sandboxNodePlacement` for the shared node placement consumed by sandbox template Pods and the ctld HA pair. `infra-operator` owns `sandbox0.ai/data-plane-ready` and adds it to sandbox Pod placement after the required node-local components are Ready.
 
 <Callout variant="info">
 Use the generated reference below for exact field names, defaults, enums, and required flags. Use the sample manifests for operator-friendly starting points.
 </Callout>
 
 <Callout variant="warning">
-Not every operational rule is expressible in CRD schema. Some defaults are applied inside the embedded runtimes, and some validations are conditional. Examples include netd runtime defaults and conditional checks such as storage-proxy encryption requiring a key path.
+Not every operational rule is expressible in CRD schema. Some defaults are applied inside manager and ctld, and some validations are conditional. Examples include network runtime defaults and storage encryption requiring a key path.
 </Callout>
 
 ## Full Reference
@@ -701,11 +697,11 @@ The reference below is generated from the `Sandbox0Infra` CRD schema produced by
 
 - Pin the `infra-operator` chart version in production instead of relying on floating tags.
 - Prefer external PostgreSQL and external object storage for serious deployments.
-- Enable the logical `storageProxy` feature only when you need volume and snapshot features; it does not create a separate Deployment.
-- Enable the logical `netd` feature only on Linux nodes and only when you need network policy enforcement; it runs in the active ctld process.
+- Configure `spec.storage` and `spec.storage.runtime` for volume and snapshot features.
+- Configure `spec.network` for sandbox network policy; enforcement runs in the active ctld process on Linux nodes.
 - Use `sandboxNodePlacement` to keep sandbox workloads and the node-local ctld pair on the same node set.
 - Treat `sandbox0.ai/data-plane-ready` as operator-owned; use your own labels under `sandboxNodePlacement` and let `infra-operator` manage readiness.
-- If sandbox workloads use `gvisor` or `kata`, keep ctld and the compatible `services.netd.runtimeClassName` setting on a host-compatible runtime such as the cluster default runtime.
+- If sandbox workloads use `gvisor` or `kata`, keep ctld on a host-compatible runtime such as the cluster default runtime.
 - `services.manager.config.sandboxRuntimeClassName` references an existing Kubernetes `RuntimeClass`; it does not install the node-level containerd handler.
 - Keep control-plane and data-plane components in the same storage and latency domain for a given region.
 

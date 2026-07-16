@@ -1,4 +1,4 @@
-package storageproxy
+package storageruntime
 
 import (
 	"context"
@@ -83,14 +83,14 @@ func TestBuildRuntimeVolumesSetsLimitsAndEncryptionMount(t *testing.T) {
 	mounts, volumes, err := BuildRuntimeVolumes(scope, cfg, RuntimeVolumeOptions{
 		ConfigMapName:    "demo-manager-storage-config",
 		ConfigVolumeName: "storage-config",
-		ConfigMountPath:  "/config/storage-proxy.yaml",
+		ConfigMountPath:  "/config/storage-runtime.yaml",
 		CacheVolumeName:  "storage-cache",
 		LogVolumeName:    "storage-logs",
 	})
 	if err != nil {
 		t.Fatalf("BuildRuntimeVolumes() error = %v", err)
 	}
-	assertVolumeMount(t, mounts, "storage-config", "/config/storage-proxy.yaml")
+	assertVolumeMount(t, mounts, "storage-config", "/config/storage-runtime.yaml")
 	assertVolumeMount(t, mounts, "storage-cache", "/var/lib/storage-proxy/cache")
 	assertVolumeMount(t, mounts, "storage-logs", "/var/log/storage-proxy")
 	assertVolumeMount(t, mounts, "object-encryption-key", common.ObjectEncryptionMountDir)

@@ -19,11 +19,11 @@ Sandbox0 follows a control plane / data plane architecture:
 | Layer | Components | Purpose |
 |-------|------------|---------|
 | **Control Plane** | regional-gateway, scheduler | Multi-cluster routing, tenant management, request forwarding |
-| **Data Plane** | cluster-gateway, manager (including storage-proxy), ctld HA pair (active includes netd) | Sandbox lifecycle, process execution, file operations, storage, network enforcement |
+| **Data Plane** | cluster-gateway, manager, ctld HA pair | Sandbox lifecycle, process execution, file operations, storage, network enforcement |
 
 Each provider/region (e.g., `aws-us-east-1`) has an independent data plane and control plane deployment with dedicated PostgreSQL and S3 storage.
 
-`storage-proxy` and `netd` remain logical feature and configuration names. The storage API runtime is hosted by `manager`, while only the active process in each node's `ctld` HA pair runs netd. This keeps existing storage routes and internal service authentication compatible without separate storage-proxy or netd workloads.
+`manager` hosts the storage API runtime. On each sandbox node, the active process in the `ctld` HA pair owns rootfs persistence, volume portals, and the network policy runtime; the standby takes over those responsibilities after promotion.
 
 ---
 

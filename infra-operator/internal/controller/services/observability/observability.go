@@ -338,7 +338,7 @@ func otlpReceiverConfig() map[string]any {
 }
 
 func prometheusReceiverConfig(infra *infrav1alpha1.Sandbox0Infra) map[string]any {
-	components := "global-gateway|regional-gateway|ssh-gateway|scheduler|cluster-gateway|manager|storage-proxy|netd|ctld"
+	components := "global-gateway|regional-gateway|ssh-gateway|scheduler|cluster-gateway|manager|ctld"
 	return map[string]any{
 		"config": map[string]any{
 			"scrape_configs": []map[string]any{

@@ -32,11 +32,11 @@ func ExampleGenerator() {
 		TTL:        30 * time.Second,
 	})
 
-	// Generate a token for calling storage-proxy
+	// Generate a token for calling manager's storage endpoint.
 	token, err := generator.Generate(
-		"storage-proxy", // target
-		"team-123",      // team ID
-		"user-456",      // user ID
+		"manager-storage", // target
+		"team-123",        // team ID
+		"user-456",        // user ID
 		internalauth.GenerateOptions{ // options
 			Permissions: []string{"sandboxvolume:read", "sandboxvolume:write"},
 			UserID:      "user-456",
@@ -58,14 +58,14 @@ func ExampleValidator() {
 		Caller:     "cluster-gateway",
 		PrivateKey: examplePrivateKey,
 	})
-	token, _ := generator.Generate("storage-proxy", "team-123", "user-456",
+	token, _ := generator.Generate("manager-storage", "team-123", "user-456",
 		internalauth.GenerateOptions{
 			Permissions: []string{"sandboxvolume:read", "sandboxvolume:write"},
 		})
 
 	// Create a validator for the target service
 	validator := internalauth.NewValidator(internalauth.ValidatorConfig{
-		Target:    "storage-proxy",
+		Target:    "manager-storage",
 		PublicKey: examplePublicKey,
 	})
 
@@ -83,7 +83,7 @@ func ExampleValidator() {
 func ExampleAuthMiddleware() {
 	// Create validator
 	validator := internalauth.NewValidator(internalauth.ValidatorConfig{
-		Target:    "storage-proxy",
+		Target:    "manager-storage",
 		PublicKey: examplePublicKey,
 	})
 
@@ -120,10 +120,10 @@ func Example_authenticatedClient() {
 	})
 
 	// Create an auto-authenticating HTTP client
-	client := internalauth.NewAuthenticatedClient(generator, "storage-proxy")
+	client := internalauth.NewAuthenticatedClient(generator, "manager-storage")
 
 	// Make a request with team context
-	req, _ := http.NewRequest("GET", "http://storage-proxy:8081/api/v1/volumes", nil)
+	req, _ := http.NewRequest("GET", "http://manager:8081/api/v1/volumes", nil)
 	req = req.WithContext(internalauth.ContextWithTeam(req.Context(), "team-123"))
 
 	// Token is automatically added to the request

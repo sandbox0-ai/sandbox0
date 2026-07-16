@@ -42,8 +42,6 @@ type apiModeSuiteOptions struct {
 	includeRootFSPauseResume    bool
 	includeMeteringAssertions   bool
 	includeUsageQuotaAssertions bool
-	expectStorageUnavailable    bool
-	expectNetworkUnavailable    bool
 }
 
 const (
@@ -267,15 +265,15 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertSandboxEgressProxy(env, session, sandboxID)
 				})
 
-				It("enforces transparent TCP egress through netd", func() {
+				It("enforces transparent TCP egress through the ctld network runtime", func() {
 					assertNetdTransparentEgressPolicy(env, session, sandboxID)
 				})
 
-				It("resolves cluster DNS over UDP with netd active", func() {
+				It("resolves cluster DNS over UDP with the ctld network runtime active", func() {
 					assertNetdClusterDNSUDP(env, session, sandboxID)
 				})
 
-				It("enforces Redis-backed team bandwidth through netd", func() {
+				It("enforces Redis-backed team bandwidth through the ctld network runtime", func() {
 					assertNetdRedisTeamBandwidthLimit(env, session, adminPassword)
 				})
 
@@ -369,24 +367,6 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 			Context("sandbox webhooks", func() {
 				It("delivers lifecycle events through durable state volume and pod deletion", func() {
 					assertSandboxWebhookDurabilityLifecycle(env, session)
-				})
-			})
-		}
-
-		if opts.expectStorageUnavailable || opts.expectNetworkUnavailable {
-			Context("missing services", func() {
-				It("returns expected degraded-mode errors", func() {
-					Expect(sandboxID).NotTo(BeEmpty())
-					if opts.expectStorageUnavailable {
-						_, status, _, err := session.ListSandboxVolumes(env.TestCtx.Context, GinkgoT())
-						Expect(err).NotTo(HaveOccurred())
-						Expect(status).To(Equal(http.StatusServiceUnavailable))
-					}
-					if opts.expectNetworkUnavailable {
-						_, status, _, err := session.GetNetworkPolicy(env.TestCtx.Context, GinkgoT(), sandboxID)
-						Expect(err).NotTo(HaveOccurred())
-						Expect(status).To(BeNumerically(">=", http.StatusBadRequest))
-					}
 				})
 			})
 		}

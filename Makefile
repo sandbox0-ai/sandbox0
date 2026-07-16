@@ -1,4 +1,4 @@
-.PHONY: all build test test-all test-integration test-integration-verbose test-e2e test-e2e-kind test-e2e-destroy test-e2e-load-images test-e2e-prepare-kind test-e2e-setup-gvisor-rootfs test-e2e-specific test-e2e-mountpoint-s3-compat test-e2e-s0fs-posix test-e2e-s0fs-posix-prepare test-e2e-netd-cni lint tidy vendor clean helm-update helm-configs release docker-build docker-build-local build-local-all docker-push proto manifests apispec oapi-codegen
+.PHONY: all build test test-all test-integration test-integration-verbose test-e2e test-e2e-kind test-e2e-destroy test-e2e-load-images test-e2e-prepare-kind test-e2e-setup-gvisor-rootfs test-e2e-specific test-e2e-mountpoint-s3-compat test-e2e-s0fs-posix test-e2e-s0fs-posix-prepare test-e2e-network-cni lint tidy vendor clean helm-update helm-configs release docker-build docker-build-local build-local-all docker-push proto manifests apispec oapi-codegen
 
 # Tool Binaries
 LOCALBIN ?= $(shell pwd)/bin
@@ -14,7 +14,8 @@ OAPI_CODEGEN_VERSION ?= v2.4.1
 PROTOC ?= protoc
 GO ?= env GOWORK=off go
 
-SERVICES := regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld procd netd infra-operator
+BINARIES := regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler ctld procd infra-operator
+TEST_SUITES := $(BINARIES) storage-proxy netd
 E2E_SSH_FIXTURE_SOURCE_IMAGE := lscr.io/linuxserver/openssh-server@sha256:68b605929e83b2efe000da09269688f6d82a44579e8a18e2d9e8c8d272917cf7
 E2E_SSH_FIXTURE_IMAGE := sandbox0ai/e2e-openssh-server:68b605929e83
 E2E_DEPENDENCY_IMAGES := postgres:16-alpine rustfs/rustfs:1.0.0-alpha.79 registry:2.8.3 sandbox0ai/otemplates:default-v0.2.0 $(E2E_SSH_FIXTURE_IMAGE)
@@ -47,7 +48,7 @@ CYAN   := \033[1;36m
 RESET  := \033[0m
 
 all: manifests proto apispec
-	@for service in $(SERVICES); do \
+	@for service in $(BINARIES); do \
 		$(MAKE) build SERVICE=$$service GOOS=$(GOOS); \
 	done
 
@@ -56,7 +57,7 @@ build: manifests proto apispec
 	@service="$(filter-out build test test-all lint tidy vendor clean helm-update docker-build docker-build-local build-local-all docker-push,$(MAKECMDGOALS))"; \
 	[ -z "$$service" ] && service="$(SERVICE)"; \
 	for s in $$service; do \
-		if ! echo "$(SERVICES)" | grep -qw "$$s"; then \
+		if ! echo "$(BINARIES)" | grep -qw "$$s"; then \
 			echo "Error: Unknown service '$$s'"; exit 1; \
 		fi; \
 		printf "$(GREEN)Building $$s...$(RESET)\n"; \
@@ -76,7 +77,7 @@ build: manifests proto apispec
 			mkdir -p $$dir/bin; \
 			out="$$dir/bin/$$bin"; \
 		fi; \
-		if [ "$$s" = "storage-proxy" ] || [ "$$s" = "infra-operator" ]; then \
+		if [ "$$s" = "infra-operator" ]; then \
 			host_os="$$(uname -s)"; \
 			if [ "$$host_os" != "Linux" ] && [ "$(GOOS)" = "linux" ]; then \
 				printf "$(YELLOW)Skipping $$s: requires Linux host and GOOS=linux$(RESET)\n"; \
@@ -104,7 +105,7 @@ docker-push:
 	docker push sandbox0ai/infra:$(PROCD_BIN_TAG)
 
 build-local-all: manifests proto apispec
-	@for service in $(SERVICES); do \
+	@for service in $(BINARIES); do \
 		$(MAKE) build SERVICE=$$service BIN_DIR=$(shell pwd)/bin GOOS=linux; \
 	done
 
@@ -116,10 +117,10 @@ docker-build-local: build-local-all
 test:
 	@service="$(filter-out build test test-all lint tidy vendor clean helm-update,$(MAKECMDGOALS))"; \
 	if [ -z "$$service" ]; then \
-		echo "Available services: $(SERVICES)"; \
+		echo "Available test suites: $(TEST_SUITES)"; \
 		echo "Usage: make test <service> or make test-all"; \
 		exit 1; \
-	elif echo "$(SERVICES)" | grep -qw "$$service"; then \
+	elif echo "$(TEST_SUITES)" | grep -qw "$$service"; then \
 		printf "$(CYAN)Testing $$service...$(RESET)\n"; \
 		if [ "$$service" = "regional-gateway" ]; then \
 			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./regional-gateway/...; \
@@ -146,12 +147,12 @@ test:
 		fi; \
 	else \
 		echo "Error: Unknown service '$$service'"; \
-		echo "Available services: $(SERVICES)"; \
+		echo "Available test suites: $(TEST_SUITES)"; \
 		exit 1; \
 	fi
 
 test-all:
-	@for service in $(SERVICES); do \
+	@for service in $(TEST_SUITES); do \
 		printf "$(CYAN)Testing $$service...$(RESET)\n"; \
 		$(MAKE) test $$service || exit 1; \
 		GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./pkg/...; \
@@ -237,12 +238,12 @@ test-e2e-specific:
 test-e2e-mountpoint-s3-compat:
 	@printf "$(CYAN)Running mountpoint-s3 compatibility E2E suite...$(RESET)\n"
 	unset http_proxy && unset https_proxy && unset all_proxy && \
-		E2E_SINGLE_CLUSTER_SCENARIOS=volumes \
+		E2E_SINGLE_CLUSTER_SCENARIOS=fullmode \
 		E2E_MOUNTPOINT_S3_COMPAT=true \
 		E2E_USE_EXISTING_CLUSTER=true \
 		$(GO) test -v -count=1 ./tests/e2e/scenarios/single-cluster \
 		-run TestSingleCluster \
-		-ginkgo.focus="API volumes mode.*mountpoint-s3 general bucket compatibility semantics" \
+		-ginkgo.focus="API fullmode.*mountpoint-s3 general bucket compatibility semantics" \
 		-timeout=30m
 
 test-e2e-s0fs-posix-prepare:
@@ -282,9 +283,9 @@ test-e2e-s0fs-posix:
 		--fsstress-operations "$(S0FS_POSIX_CI_FSSTRESS_OPERATIONS)" \
 		--fsstress-processes "$(S0FS_POSIX_CI_FSSTRESS_PROCESSES)"
 
-test-e2e-netd-cni:
-	@printf "$(CYAN)Running netd CNI E2E tests...$(RESET)\n"
-	unset http_proxy && unset https_proxy && unset all_proxy && E2E_SINGLE_CLUSTER_SCENARIOS=network-policy $(GO) test -v -count=1 ./tests/e2e/scenarios/single-cluster -run TestSingleCluster -ginkgo.focus="API network policy mode.*(enforces transparent TCP egress through netd|resolves cluster DNS over UDP with netd active|blocks private sandbox traffic while preserving public exposure and cluster service access)" -timeout=30m
+test-e2e-network-cni:
+	@printf "$(CYAN)Running network CNI E2E tests...$(RESET)\n"
+	unset http_proxy && unset https_proxy && unset all_proxy && E2E_SINGLE_CLUSTER_SCENARIOS=fullmode $(GO) test -v -count=1 ./tests/e2e/scenarios/single-cluster -run TestSingleCluster -ginkgo.focus="API fullmode.*(enforces transparent TCP egress through the ctld network runtime|resolves cluster DNS over UDP with the ctld network runtime active|blocks private sandbox traffic while preserving public exposure and cluster service access)" -timeout=30m
 
 # Prevent make from treating service names as targets
 regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld procd netd infra-operator:
@@ -300,7 +301,7 @@ vendor:
 	$(GO) mod vendor
 
 clean:
-	@for service in $(SERVICES); do \
+	@for service in $(BINARIES); do \
 		printf "$(YELLOW)Cleaning $$service...$(RESET)\n"; \
 		if [ "$$service" = "procd" ]; then \
 			rm -rf manager/bin/procd manager/bin/python-runner; \
@@ -317,7 +318,7 @@ app-configs:
 	@CONFIG_PATH=/dev/null $(GO) run ./tools/configdump
 
 proto: protoc
-	@printf "$(CYAN)Generating storage-proxy protobufs...$(RESET)\n"
+	@printf "$(CYAN)Generating storage runtime protobufs...$(RESET)\n"
 	@rm -f storage-proxy/proto/*.pb.go storage-proxy/proto/fs/*.pb.go
 	@mkdir -p storage-proxy/proto/fs
 	@PATH="$(LOCALBIN):$(PATH)" $(PROTOC) --go_out=. --go_opt=paths=source_relative \

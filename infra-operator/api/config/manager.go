@@ -170,11 +170,9 @@ type ManagerConfig struct {
 	// Procd config injected into sandbox pods
 	// +optional
 	// +kubebuilder:default={}
-	ProcdConfig          ProcdConfig               `yaml:"procd_config" json:"procdConfig"`
-	StorageProxyBaseURL  string                    `yaml:"storage_proxy_base_url" json:"-"`
-	StorageProxyHTTPPort int                       `yaml:"storage_proxy_http_port" json:"-"`
-	RootFSMaintenance    RootFSMaintenanceConfig   `yaml:"rootfs_maintenance" json:"-"`
-	RootFSObjectStorage  RootFSObjectStorageConfig `yaml:"rootfs_object_storage" json:"-"`
+	ProcdConfig         ProcdConfig               `yaml:"procd_config" json:"procdConfig"`
+	RootFSMaintenance   RootFSMaintenanceConfig   `yaml:"rootfs_maintenance" json:"-"`
+	RootFSObjectStorage RootFSObjectStorageConfig `yaml:"rootfs_object_storage" json:"-"`
 
 	// SandboxObservabilityLogsIngestURL is the cluster-gateway internal logs ingest endpoint.
 	// It is injected by infra-operator from spec.sandboxObservability.
@@ -211,7 +209,7 @@ type ManagerConfig struct {
 	PublicRegionID string `yaml:"public_region_id" json:"-"`
 
 	// Runtime egress auth resolver settings injected by infra-operator.
-	// Resolution now runs inside manager rather than a standalone service.
+	// Manager resolves matching egress authentication rules at runtime.
 	// +optional
 	EgressAuthDefaultResolveTTL metav1.Duration `yaml:"egress_auth_default_resolve_ttl" json:"-"`
 	// +optional

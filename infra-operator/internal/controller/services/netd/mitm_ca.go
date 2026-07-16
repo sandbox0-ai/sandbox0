@@ -42,10 +42,6 @@ func ResolveMITMCASecretName(infra *infrav1alpha1.Sandbox0Infra) string {
 		if secretName := strings.TrimSpace(infra.Spec.Network.MITMCASecretName); secretName != "" {
 			return secretName
 		}
-	} else if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
-		if secretName := strings.TrimSpace(infra.Spec.Services.Netd.MITMCASecretName); secretName != "" {
-			return secretName
-		}
 	}
 	if infra.Name == "" {
 		return ""
@@ -61,7 +57,7 @@ func EnsureMITMCASecret(ctx context.Context, resources *common.ResourceManager, 
 }
 
 func EnsureMITMCASecretWithScope(ctx context.Context, resources *common.ResourceManager, scope common.ObjectScope, compiledPlan *plan.InfraPlan, labels map[string]string) (string, error) {
-	if compiledPlan == nil || !compiledPlan.Netd.Enabled {
+	if compiledPlan == nil || !compiledPlan.Network.Enabled {
 		return "", nil
 	}
 	if resources == nil || resources.Client == nil || resources.Scheme == nil {

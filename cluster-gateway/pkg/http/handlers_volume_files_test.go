@@ -54,16 +54,16 @@ func newVolumeFileRouteTestServer(t *testing.T) (string, *internalauth.Generator
 
 	logger := zap.NewNop()
 	storageSpy := &volumeFileRequestSpy{}
-	storageProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	managerStorage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		storageSpy.record(r)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"success":true}`))
 	}))
 
-	proxy2sp, err := proxy.NewRouter(storageProxy.URL, logger, time.Second)
+	proxy2ManagerStorage, err := proxy.NewRouter(managerStorage.URL, logger, time.Second)
 	if err != nil {
-		storageProxy.Close()
-		t.Fatalf("create storage-proxy proxy: %v", err)
+		managerStorage.Close()
+		t.Fatalf("create manager storage endpoint: %v", err)
 	}
 
 	validator := internalauth.NewValidator(internalauth.ValidatorConfig{
@@ -78,17 +78,17 @@ func newVolumeFileRouteTestServer(t *testing.T) (string, *internalauth.Generator
 		TTL:        time.Minute,
 	})
 	server := &Server{
-		cfg:             &config.ClusterGatewayConfig{AuthMode: authModeInternal, StorageProxyURL: storageProxy.URL},
-		proxy2sp:        proxy2sp,
-		authMiddleware:  middleware.NewInternalAuthMiddleware(validator, logger),
-		logger:          logger,
-		internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{Caller: "cluster-gateway", PrivateKey: privateKey, TTL: time.Minute}),
+		cfg:                  &config.ClusterGatewayConfig{AuthMode: authModeInternal, ManagerStorageURL: managerStorage.URL},
+		proxy2ManagerStorage: proxy2ManagerStorage,
+		authMiddleware:       middleware.NewInternalAuthMiddleware(validator, logger),
+		logger:               logger,
+		internalAuthGen:      internalauth.NewGenerator(internalauth.GeneratorConfig{Caller: "cluster-gateway", PrivateKey: privateKey, TTL: time.Minute}),
 	}
 	server.router = gin.New()
 	v1 := server.router.Group("/api/v1")
 	v1.Use(server.authMiddleware.Authenticate())
 	sandboxvolumes := v1.Group("/sandboxvolumes")
-	sandboxvolumes.Use(server.storageProxyUpstreamMiddleware())
+	sandboxvolumes.Use(server.managerStorageUpstreamMiddleware())
 	{
 		files := sandboxvolumes.Group("/:id/files")
 		{
@@ -106,12 +106,12 @@ func newVolumeFileRouteTestServer(t *testing.T) (string, *internalauth.Generator
 	gateway := httptest.NewServer(server.router)
 	cleanup := func() {
 		gateway.Close()
-		storageProxy.Close()
+		managerStorage.Close()
 	}
 	return gateway.URL, incomingGen, storageSpy, cleanup
 }
 
-func newStorageProxyRouteInternalToken(t *testing.T, gen *internalauth.Generator, permissions ...string) string {
+func newManagerStorageRouteInternalToken(t *testing.T, gen *internalauth.Generator, permissions ...string) string {
 	t.Helper()
 
 	token, err := gen.Generate("cluster-gateway", "team-1", "user-1", internalauth.GenerateOptions{
@@ -123,7 +123,7 @@ func newStorageProxyRouteInternalToken(t *testing.T, gen *internalauth.Generator
 	return token
 }
 
-func TestVolumeFileRoutesProxyToStorageProxy(t *testing.T) {
+func TestVolumeFileRoutesProxyToManagerStorage(t *testing.T) {
 	gatewayURL, incomingGen, storageSpy, cleanup := newVolumeFileRouteTestServer(t)
 	defer cleanup()
 
@@ -217,7 +217,7 @@ func TestVolumeFileRoutesProxyToStorageProxy(t *testing.T) {
 			if tt.body != "" {
 				req.Header.Set("Content-Type", "application/json")
 			}
-			req.Header.Set(internalauth.DefaultTokenHeader, newStorageProxyRouteInternalToken(t, incomingGen, tt.permission))
+			req.Header.Set(internalauth.DefaultTokenHeader, newManagerStorageRouteInternalToken(t, incomingGen, tt.permission))
 
 			resp, err := client.Do(req)
 			if err != nil {
@@ -241,7 +241,7 @@ func TestVolumeFileRoutesProxyToStorageProxy(t *testing.T) {
 				t.Fatalf("team id = %q, want team-1", storageSpy.teamID)
 			}
 			if storageSpy.token == "" {
-				t.Fatal("expected internal storage-proxy token")
+				t.Fatal("expected internal manager storage token")
 			}
 			if tt.wantBodyPart != "" && !strings.Contains(storageSpy.body, tt.wantBodyPart) {
 				t.Fatalf("body = %q, want substring %q", storageSpy.body, tt.wantBodyPart)

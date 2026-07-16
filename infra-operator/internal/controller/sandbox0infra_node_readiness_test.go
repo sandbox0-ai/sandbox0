@@ -50,7 +50,7 @@ func TestRunStepsRefreshesNodeReadinessAfterEarlierFailure(t *testing.T) {
 			ErrorReason:   "CtldFailed",
 		},
 		{
-			Name: "netd-ready",
+			Name: "network-ready",
 			Run: func(context.Context) error {
 				laterStepRan = true
 				return nil
@@ -74,7 +74,9 @@ func TestRunStepsRefreshesNodeReadinessAfterEarlierFailure(t *testing.T) {
 		t.Fatalf("get refreshed node: %v", err)
 	}
 	assertWorkflowNodeLabel(t, got, dataplane.NodeDataPlaneReadyLabel, dataplane.NotReadyLabelValue)
-	assertWorkflowNodeLabel(t, got, dataplane.NodeNetdReadyLabel, dataplane.NotReadyLabelValue)
+	if value, ok := got.Labels[dataplane.NodeNetdReadyLabel]; ok {
+		t.Fatalf("node %s superseded network label = %q, want absent", got.Name, value)
+	}
 	assertWorkflowNodeLabel(t, got, dataplane.NodeCtldReadyLabel, dataplane.NotReadyLabelValue)
 }
 
@@ -150,6 +152,7 @@ func newWorkflowNodeReadinessInfra() *infrav1alpha1.Sandbox0Infra {
 	return &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Network: &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetdConfig{}},
 			SandboxNodePlacement: &infrav1alpha1.SandboxNodePlacementConfig{
 				NodeSelector: map[string]string{"sandbox0.ai/node-role": "sandbox"},
 			},
@@ -157,7 +160,6 @@ func newWorkflowNodeReadinessInfra() *infrav1alpha1.Sandbox0Infra {
 				Manager: &infrav1alpha1.ManagerServiceConfig{WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
 					EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
 				}},
-				Netd: &infrav1alpha1.NetdServiceConfig{EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true}},
 			},
 		},
 	}

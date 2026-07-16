@@ -286,10 +286,6 @@ func (p *InfraPlan) ResolveNetdMITMCASecretName() string {
 		if secretName := strings.TrimSpace(p.infra.Spec.Network.MITMCASecretName); secretName != "" {
 			return secretName
 		}
-	} else if p.infra.Spec.Services != nil && p.infra.Spec.Services.Netd != nil {
-		if secretName := strings.TrimSpace(p.infra.Spec.Services.Netd.MITMCASecretName); secretName != "" {
-			return secretName
-		}
 	}
 	if p.Scope.Name == "" {
 		return ""

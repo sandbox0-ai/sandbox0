@@ -36,7 +36,7 @@ func main() {
 	logger.Info("Starting cluster-gateway",
 		zap.Int("port", cfg.HTTPPort),
 		zap.String("manager_url", cfg.ManagerURL),
-		zap.String("storage_proxy_url", cfg.StorageProxyURL),
+		zap.String("manager_storage_url", cfg.ManagerStorageURL),
 	)
 
 	// Create context with cancellation

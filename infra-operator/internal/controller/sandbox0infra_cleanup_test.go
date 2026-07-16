@@ -107,6 +107,22 @@ func TestCleanupDisabledServiceResourcesCleansBuiltinDependencies(t *testing.T) 
 		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "demo-manager", Namespace: "sandbox0-system"}},
 		&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "demo-manager"}},
 		&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "demo-manager"}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "demo-ctld-network-metrics", Namespace: "sandbox0-system"}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "demo-netd-metrics", Namespace: "sandbox0-system"}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo-ctld-config-abc123",
+			Namespace: "sandbox0-system",
+			Annotations: map[string]string{
+				common.ServiceConfigBaseNameAnnotation: "demo-ctld",
+			},
+		}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo-netd-config-def456",
+			Namespace: "sandbox0-system",
+			Annotations: map[string]string{
+				common.ServiceConfigBaseNameAnnotation: "demo-netd",
+			},
+		}},
 		&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "demo-sandbox-observability-clickhouse", Namespace: "sandbox0-system"}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "demo-sandbox-observability-clickhouse", Namespace: "sandbox0-system"}},
 		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "demo-sandbox-observability-clickhouse-credentials", Namespace: "sandbox0-system"}},
@@ -157,6 +173,10 @@ func TestCleanupDisabledServiceResourcesCleansBuiltinDependencies(t *testing.T) 
 	assertClientObjectMissing(t, client, types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-manager"}, &corev1.ServiceAccount{})
 	assertClientObjectMissing(t, client, types.NamespacedName{Name: "demo-manager"}, &rbacv1.ClusterRole{})
 	assertClientObjectMissing(t, client, types.NamespacedName{Name: "demo-manager"}, &rbacv1.ClusterRoleBinding{})
+	assertClientObjectMissing(t, client, types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-ctld-network-metrics"}, &corev1.Service{})
+	assertClientObjectMissing(t, client, types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-netd-metrics"}, &corev1.Service{})
+	assertClientObjectMissing(t, client, types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-ctld-config-abc123"}, &corev1.ConfigMap{})
+	assertClientObjectMissing(t, client, types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-netd-config-def456"}, &corev1.ConfigMap{})
 
 	assertClientObjectMissing(t, client, types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-sandbox-observability-clickhouse"}, &appsv1.StatefulSet{})
 	assertClientObjectMissing(t, client, types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-sandbox-observability-clickhouse"}, &corev1.Service{})

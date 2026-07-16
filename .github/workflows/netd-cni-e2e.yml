@@ -72,7 +72,7 @@ jobs:
         env:
           E2E_USE_EXISTING_CLUSTER: "true"
           E2E_CLUSTER_NAME: ${{ env.KIND_CLUSTER_NAME }}
-        run: make test-e2e-netd-cni
+        run: make test-e2e-network-cni
 
       - name: Dump cluster state on failure
         if: failure()

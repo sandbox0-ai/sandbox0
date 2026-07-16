@@ -1,4 +1,4 @@
-# Example: Single-cluster full mode on GKE with gVisor sandbox nodes
+# Example: Single-cluster fullmode deployment on GKE with gVisor sandbox nodes
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -72,8 +72,7 @@ spec:
       pool:
         minIdle: 0
         maxIdle: 2
-  # Shared placement for sandbox template Pods plus node-local helpers such as
-  # netd and ctld.
+  # Shared placement for sandbox template Pods and the node-local ctld runtime.
   sandboxNodePlacement:
     # Reuse the native GKE Sandbox node label so sandbox placement does not
     # depend on an extra custom node label.

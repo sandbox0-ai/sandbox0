@@ -49,21 +49,21 @@ type SandboxVolumePortalPreparationClient interface {
 // wire type lives in the shared volumeportal package.
 type PrepareVolumePortalBindRequest = volumeportal.PrepareBindRequest
 
-type StorageProxyVolumeClient struct {
+type ManagerStorageVolumeClient struct {
 	baseURL        string
 	httpClient     *http.Client
 	tokenGenerator TokenGenerator
 	clusterID      string
 }
 
-type StorageProxyVolumeClientConfig struct {
+type ManagerStorageVolumeClientConfig struct {
 	BaseURL        string
 	HTTPClient     *http.Client
 	TokenGenerator TokenGenerator
 	ClusterID      string
 }
 
-func NewStorageProxyVolumeClient(cfg StorageProxyVolumeClientConfig) *StorageProxyVolumeClient {
+func NewManagerStorageVolumeClient(cfg ManagerStorageVolumeClientConfig) *ManagerStorageVolumeClient {
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 10 * time.Second}
@@ -72,7 +72,7 @@ func NewStorageProxyVolumeClient(cfg StorageProxyVolumeClientConfig) *StoragePro
 	if clusterID == "" {
 		clusterID = naming.DefaultClusterID
 	}
-	return &StorageProxyVolumeClient{
+	return &ManagerStorageVolumeClient{
 		baseURL:        strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/"),
 		httpClient:     httpClient,
 		tokenGenerator: cfg.TokenGenerator,
@@ -98,12 +98,12 @@ type SandboxVolumeInfo struct {
 	Backend    string `json:"backend,omitempty"`
 }
 
-func (c *StorageProxyVolumeClient) Create(ctx context.Context, teamID, userID, sandboxID, purpose string) (string, error) {
+func (c *ManagerStorageVolumeClient) Create(ctx context.Context, teamID, userID, sandboxID, purpose string) (string, error) {
 	if c == nil || c.baseURL == "" {
-		return "", fmt.Errorf("storage-proxy volume client is not configured")
+		return "", fmt.Errorf("manager storage volume client is not configured")
 	}
 	if c.clusterID == "" {
-		return "", fmt.Errorf("storage-proxy volume client cluster id is not configured")
+		return "", fmt.Errorf("manager storage volume client cluster id is not configured")
 	}
 	token, err := c.generateToken(teamID, userID, sandboxID)
 	if err != nil {
@@ -156,9 +156,9 @@ func (c *StorageProxyVolumeClient) Create(ctx context.Context, teamID, userID, s
 	return owned.Volume.ID, nil
 }
 
-func (c *StorageProxyVolumeClient) Get(ctx context.Context, teamID, userID, volumeID string) (*SandboxVolumeInfo, error) {
+func (c *ManagerStorageVolumeClient) Get(ctx context.Context, teamID, userID, volumeID string) (*SandboxVolumeInfo, error) {
 	if c == nil || c.baseURL == "" {
-		return nil, fmt.Errorf("storage-proxy volume client is not configured")
+		return nil, fmt.Errorf("manager storage volume client is not configured")
 	}
 	volumeID = strings.TrimSpace(volumeID)
 	if volumeID == "" {
@@ -199,9 +199,9 @@ func (c *StorageProxyVolumeClient) Get(ctx context.Context, teamID, userID, volu
 	return volume, nil
 }
 
-func (c *StorageProxyVolumeClient) PrepareForVolumePortalBind(ctx context.Context, req PrepareVolumePortalBindRequest) error {
+func (c *ManagerStorageVolumeClient) PrepareForVolumePortalBind(ctx context.Context, req PrepareVolumePortalBindRequest) error {
 	if c == nil || c.baseURL == "" {
-		return fmt.Errorf("storage-proxy volume client is not configured")
+		return fmt.Errorf("manager storage volume client is not configured")
 	}
 	volumeID := strings.TrimSpace(req.VolumeID)
 	if volumeID == "" {
@@ -244,12 +244,12 @@ func (c *StorageProxyVolumeClient) PrepareForVolumePortalBind(ctx context.Contex
 	return fmt.Errorf("prepare sandbox volume for portal bind failed with status %d", resp.StatusCode)
 }
 
-func (c *StorageProxyVolumeClient) MarkSandboxForCleanup(ctx context.Context, teamID, userID, sandboxID, reason string) error {
+func (c *ManagerStorageVolumeClient) MarkSandboxForCleanup(ctx context.Context, teamID, userID, sandboxID, reason string) error {
 	if c == nil || c.baseURL == "" {
 		return nil
 	}
 	if c.clusterID == "" {
-		return fmt.Errorf("storage-proxy volume client cluster id is not configured")
+		return fmt.Errorf("manager storage volume client cluster id is not configured")
 	}
 	token, err := c.generateToken(teamID, userID, sandboxID)
 	if err != nil {
@@ -286,7 +286,7 @@ func (c *StorageProxyVolumeClient) MarkSandboxForCleanup(ctx context.Context, te
 	return fmt.Errorf("mark sandbox system volumes for cleanup failed with status %d", resp.StatusCode)
 }
 
-func (c *StorageProxyVolumeClient) Delete(ctx context.Context, teamID, userID, sandboxID, volumeID string) error {
+func (c *ManagerStorageVolumeClient) Delete(ctx context.Context, teamID, userID, sandboxID, volumeID string) error {
 	if c == nil || c.baseURL == "" || strings.TrimSpace(volumeID) == "" {
 		return nil
 	}
@@ -315,12 +315,12 @@ func (c *StorageProxyVolumeClient) Delete(ctx context.Context, teamID, userID, s
 	return fmt.Errorf("delete webhook state volume failed with status %d", resp.StatusCode)
 }
 
-func (c *StorageProxyVolumeClient) List(ctx context.Context) ([]SandboxSystemVolume, error) {
+func (c *ManagerStorageVolumeClient) List(ctx context.Context) ([]SandboxSystemVolume, error) {
 	if c == nil || c.baseURL == "" {
-		return nil, fmt.Errorf("storage-proxy volume client is not configured")
+		return nil, fmt.Errorf("manager storage volume client is not configured")
 	}
 	if c.clusterID == "" {
-		return nil, fmt.Errorf("storage-proxy volume client cluster id is not configured")
+		return nil, fmt.Errorf("manager storage volume client cluster id is not configured")
 	}
 	token, err := c.generateToken("", "", "")
 	if err != nil {
@@ -380,9 +380,9 @@ func (c *StorageProxyVolumeClient) List(ctx context.Context) ([]SandboxSystemVol
 	return out, nil
 }
 
-func (c *StorageProxyVolumeClient) generateToken(teamID, userID, sandboxID string) (string, error) {
+func (c *ManagerStorageVolumeClient) generateToken(teamID, userID, sandboxID string) (string, error) {
 	if c.tokenGenerator == nil {
-		return "", fmt.Errorf("storage-proxy token generator not configured")
+		return "", fmt.Errorf("manager storage token generator not configured")
 	}
 	return c.tokenGenerator.GenerateToken(teamID, userID, sandboxID)
 }

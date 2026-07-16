@@ -147,7 +147,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 // Helper functions for common Transport configurations
 
 // TargetFromRequest extracts the target from the request host.
-// Example: "storage-proxy.sandbox0-system.svc.cluster.local" -> "storage-proxy"
+// Example: "manager.sandbox0-system.svc.cluster.local" -> "manager"
 func TargetFromRequest(req *http.Request) string {
 	host := req.URL.Host
 	if host == "" {
@@ -185,8 +185,8 @@ func PermissionsFromContext(req *http.Request) []string {
 //
 // Example:
 //
-//	client := internalauth.NewAuthenticatedClient(generator, "storage-proxy")
-//	resp, err := client.Get("http://storage-proxy:8081/api/v1/sandboxvolumes")
+//	client := internalauth.NewAuthenticatedClient(generator, "manager-storage")
+//	resp, err := client.Get("http://manager:8081/api/v1/sandboxvolumes")
 func NewAuthenticatedClient(generator *Generator, target string) *http.Client {
 	return &http.Client{
 		Transport: NewTransport(generator,

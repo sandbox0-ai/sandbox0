@@ -3014,7 +3014,7 @@ func hasMeteringEvent(events []*metering.Event, eventType, subjectType, subjectI
 		if event == nil {
 			continue
 		}
-		if event.EventType == eventType && event.SubjectType == subjectType && event.SubjectID == subjectID {
+		if event.EventType == eventType && event.SubjectType == subjectType && event.SubjectID == subjectID && event.Sequence > 0 {
 			return true
 		}
 	}
@@ -3045,7 +3045,7 @@ func hasMeteringWindow(windows []*metering.Window, windowType, sandboxID string)
 		if window == nil {
 			continue
 		}
-		if window.WindowType == windowType && window.SandboxID == sandboxID {
+		if window.WindowType == windowType && window.SandboxID == sandboxID && window.Sequence > 0 {
 			return true
 		}
 	}

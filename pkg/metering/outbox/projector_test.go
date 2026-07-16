@@ -140,7 +140,7 @@ func TestProjectorRetriesTheExactTransactionBatch(t *testing.T) {
 	if store.failed != 1 || !store.retryAt.Equal(now.Add(time.Second)) {
 		t.Fatalf("failed batch retry = (%d, %v), want one retry at %v", store.failed, store.retryAt, now.Add(time.Second))
 	}
-	if len(sink.events) != 1 || sink.events[0].EventID != event.EventID {
+	if len(sink.events) != 1 || sink.events[0].EventID != event.EventID || sink.events[0].Sequence != 1 {
 		t.Fatalf("first event applications = %#v", sink.events)
 	}
 
@@ -151,10 +151,10 @@ func TestProjectorRetriesTheExactTransactionBatch(t *testing.T) {
 	if !store.delivered {
 		t.Fatal("batch was not marked delivered")
 	}
-	if len(sink.events) != 2 || sink.events[0].EventID != sink.events[1].EventID {
+	if len(sink.events) != 2 || sink.events[0].EventID != sink.events[1].EventID || sink.events[1].Sequence != 1 {
 		t.Fatalf("event retry did not preserve identity: %#v", sink.events)
 	}
-	if len(sink.windows) != 1 || sink.windows[0].WindowID != window.WindowID || !sink.windows[0].RecordedAt.Equal(now) {
+	if len(sink.windows) != 1 || sink.windows[0].WindowID != window.WindowID || sink.windows[0].Sequence != 2 || !sink.windows[0].RecordedAt.Equal(now) {
 		t.Fatalf("window retry changed payload: %#v", sink.windows)
 	}
 }

@@ -632,6 +632,27 @@ func PodMatchesCurrentTemplate(pod *corev1.Pod, ds *appsv1.DaemonSet) bool {
 	return CtldContainerRunning(pod)
 }
 
+// DaemonSetEmbedsNetd verifies the guarded netd runtime contract required
+// before the standalone netd DaemonSet may yield its active lock.
+func DaemonSetEmbedsNetd(ds *appsv1.DaemonSet, activeLockPath string) bool {
+	if ds == nil || ds.Spec.Template.Annotations[netdsvc.ConfigHashAnnotation] == "" {
+		return false
+	}
+	container := containerByName(ds.Spec.Template.Spec.Containers, "ctld")
+	if container == nil {
+		return false
+	}
+	configPath, hasConfigPath := envValue(container.Env, "NETD_CONFIG_PATH")
+	lockPath, hasLockPath := envValue(container.Env, netdsvc.ActiveLockEnv)
+	if !hasConfigPath || configPath != netdsvc.ConfigPath || !hasLockPath || lockPath != activeLockPath {
+		return false
+	}
+	configMount, hasConfigMount := volumeMountByName(container.VolumeMounts, netdsvc.ConfigVolumeName)
+	lockMount, hasLockMount := volumeMountByName(container.VolumeMounts, netdsvc.ActiveLockVolumeName)
+	return hasConfigMount && configMount.MountPath == netdsvc.ConfigPath &&
+		hasLockMount && lockMount.MountPath == netdsvc.ActiveLockMountDirectory
+}
+
 // CtldContainerRunning reports whether a Pod can still own the node-local HA
 // primary lock. A terminating predecessor remains relevant until its process
 // has actually stopped.

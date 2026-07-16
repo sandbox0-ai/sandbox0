@@ -693,6 +693,9 @@ func (r *Sandbox0InfraReconciler) ctldHandoffCandidatesRunning(ctx context.Conte
 			}
 			return false, err
 		}
+		if !ctldsvc.DaemonSetEmbedsNetd(ds, netd.ScopedActiveLockPath(infra.Namespace, infra.Name)) {
+			return false, nil
+		}
 		if ds.Status.DesiredNumberScheduled == 0 ||
 			ds.Status.ObservedGeneration < ds.Generation ||
 			ds.Status.UpdatedNumberScheduled != ds.Status.DesiredNumberScheduled ||

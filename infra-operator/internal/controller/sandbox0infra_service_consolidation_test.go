@@ -124,8 +124,8 @@ func TestCtldHandoffCandidatesRequireCurrentTemplateAndReadySlot(t *testing.T) {
 		labels := common.CloneStringMap(ctldLabels)
 		labels[dataplane.CtldHASlotLabel] = slot
 		ds := readyDaemonSet(infra.Name+"-ctld-"+slot, infra.Namespace, labels)
-		ds.Spec.Template.Annotations = map[string]string{netd.ConfigHashAnnotation: "netd-config-v2"}
 		ds.Spec.Template.Spec.Containers = []corev1.Container{{Name: "ctld", Image: "sandbox0ai/infra:v2"}}
+		configureCtldEmbeddedNetd(ds, infra)
 		ctldDaemonSets[slot] = ds
 		objects = append(objects, ds, &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Name: "old-ctld-" + slot, Namespace: infra.Namespace, Labels: labels, Finalizers: []string{"test.sandbox0.ai/hold"}},
@@ -218,7 +218,7 @@ func TestCtldHandoffCandidatesRequireCurrentTemplateAndReadySlot(t *testing.T) {
 	}
 }
 
-func TestCtldHandoffCandidatesAllowStagedBWithReadyA(t *testing.T) {
+func TestCtldHandoffCandidatesRejectSlotWithoutEmbeddedNetd(t *testing.T) {
 	ctx := context.Background()
 	infra := &infrav1alpha1.Sandbox0Infra{ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"}}
 	baseLabels := common.GetServiceLabels(infra.Name, "ctld")
@@ -232,8 +232,8 @@ func TestCtldHandoffCandidatesAllowStagedBWithReadyA(t *testing.T) {
 	labelsB := common.CloneStringMap(baseLabels)
 	labelsB[dataplane.CtldHASlotLabel] = dataplane.CtldHASlotB
 	slotB := readyDaemonSet(infra.Name+"-ctld-b", infra.Namespace, labelsB)
-	slotB.Spec.Template.Annotations = map[string]string{netd.ConfigHashAnnotation: "netd-config-v2"}
 	slotB.Spec.Template.Spec.Containers = []corev1.Container{{Name: "ctld", Image: "sandbox0ai/infra:v2"}}
+	configureCtldEmbeddedNetd(slotB, infra)
 	slotB.Status.NumberReady = 0
 	slotB.Status.NumberAvailable = 0
 	slotB.Status.NumberUnavailable = 1
@@ -242,11 +242,60 @@ func TestCtldHandoffCandidatesAllowStagedBWithReadyA(t *testing.T) {
 	reconciler, _, _ := newCleanupTestReconciler(t, slotA, podA, slotB, podB)
 	ready, err := reconciler.ctldHandoffCandidatesRunning(ctx, infra)
 	if err != nil {
-		t.Fatalf("check staged handoff candidates: %v", err)
+		t.Fatalf("check mixed-runtime handoff candidates: %v", err)
+	}
+	if ready {
+		t.Fatal("handoff accepted a slot that did not embed guarded netd")
+	}
+}
+
+func TestCtldHandoffCandidatesAllowReadyAWithWaitingB(t *testing.T) {
+	ctx := context.Background()
+	infra := &infrav1alpha1.Sandbox0Infra{ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"}}
+	baseLabels := common.GetServiceLabels(infra.Name, "ctld")
+
+	labelsA := common.CloneStringMap(baseLabels)
+	labelsA[dataplane.CtldHASlotLabel] = dataplane.CtldHASlotA
+	slotA := readyDaemonSet(infra.Name+"-ctld-a", infra.Namespace, labelsA)
+	slotA.Spec.Template.Spec.Containers = []corev1.Container{{Name: "ctld", Image: "sandbox0ai/infra:v2"}}
+	configureCtldEmbeddedNetd(slotA, infra)
+	podA := currentCtldHandoffPod(slotA, "new-ready-ctld-a", "node-a", true)
+
+	labelsB := common.CloneStringMap(baseLabels)
+	labelsB[dataplane.CtldHASlotLabel] = dataplane.CtldHASlotB
+	slotB := readyDaemonSet(infra.Name+"-ctld-b", infra.Namespace, labelsB)
+	slotB.Spec.Template.Spec.Containers = []corev1.Container{{Name: "ctld", Image: "sandbox0ai/infra:v2"}}
+	configureCtldEmbeddedNetd(slotB, infra)
+	slotB.Status.NumberReady = 0
+	slotB.Status.NumberAvailable = 0
+	slotB.Status.NumberUnavailable = 1
+	podB := currentCtldHandoffPod(slotB, "new-ctld-b-waiting-for-netd-lock", "node-a", false)
+
+	reconciler, _, _ := newCleanupTestReconciler(t, slotA, podA, slotB, podB)
+	ready, err := reconciler.ctldHandoffCandidatesRunning(ctx, infra)
+	if err != nil {
+		t.Fatalf("check guarded handoff candidates: %v", err)
 	}
 	if !ready {
-		t.Fatal("ready old slot A plus running current slot B did not satisfy the staged handoff gate")
+		t.Fatal("ready embedded slot A plus running embedded slot B did not satisfy the handoff gate")
 	}
+}
+
+func configureCtldEmbeddedNetd(ds *appsv1.DaemonSet, infra *infrav1alpha1.Sandbox0Infra) {
+	ds.Spec.Template.Annotations = common.CloneStringMap(ds.Spec.Template.Annotations)
+	if ds.Spec.Template.Annotations == nil {
+		ds.Spec.Template.Annotations = map[string]string{}
+	}
+	ds.Spec.Template.Annotations[netd.ConfigHashAnnotation] = "netd-config-v2"
+	container := &ds.Spec.Template.Spec.Containers[0]
+	container.Env = append(container.Env,
+		corev1.EnvVar{Name: "NETD_CONFIG_PATH", Value: netd.ConfigPath},
+		corev1.EnvVar{Name: netd.ActiveLockEnv, Value: netd.ScopedActiveLockPath(infra.Namespace, infra.Name)},
+	)
+	container.VolumeMounts = append(container.VolumeMounts,
+		corev1.VolumeMount{Name: netd.ConfigVolumeName, MountPath: netd.ConfigPath},
+		corev1.VolumeMount{Name: netd.ActiveLockVolumeName, MountPath: netd.ActiveLockMountDirectory},
+	)
 }
 
 func currentCtldHandoffPod(ds *appsv1.DaemonSet, name, node string, ready bool) *corev1.Pod {

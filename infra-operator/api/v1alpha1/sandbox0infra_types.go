@@ -143,6 +143,10 @@ type Sandbox0InfraSpec struct {
 	// +optional
 	Storage *StorageConfig `json:"storage,omitempty"`
 
+	// Network configures the node-local sandbox network runtime hosted by ctld.
+	// +optional
+	Network *NetworkConfig `json:"network,omitempty"`
+
 	// Redis configures a region-level Redis backend for shared services such as
 	// distributed gateway rate limiting. When omitted, gateway rate limiting
 	// uses process-local memory.
@@ -720,6 +724,24 @@ type StorageConfig struct {
 	// GCS configures Google Cloud Storage using native GCS credentials.
 	// +optional
 	GCS *GCSStorageConfig `json:"gcs,omitempty"`
+
+	// Runtime configures the sandbox volume runtime hosted by manager and ctld.
+	// +optional
+	Runtime *StorageProxyConfig `json:"runtime,omitempty"`
+}
+
+// NetworkConfig defines the node-local sandbox network runtime configuration.
+type NetworkConfig struct {
+	// MITMCASecretName overrides the operator-managed cluster-local MITM CA
+	// secret for HTTPS interception. Expected keys are ca.crt and ca.key. When
+	// unset, infra-operator generates and reuses a managed secret.
+	// +optional
+	MITMCASecretName string `json:"mitmCaSecretName,omitempty"`
+
+	// Config contains network runtime configuration.
+	// +optional
+	// +kubebuilder:default={}
+	Config *NetdConfig `json:"config,omitempty"`
 }
 
 // BuiltinStorageConfig defines built-in storage configuration
@@ -1243,14 +1265,14 @@ type ServicesConfig struct {
 	// +kubebuilder:default={}
 	Ctld *CtldServiceConfig `json:"ctld,omitempty"`
 
-	// StorageProxy configures the storage-proxy service (data plane)
+	// StorageProxy is the deprecated configuration for the storage runtime now
+	// hosted by manager and ctld. Use spec.storage.runtime instead.
 	// +optional
-	// +kubebuilder:default={}
 	StorageProxy *StorageProxyServiceConfig `json:"storageProxy,omitempty"`
 
-	// Netd configures the netd service (data plane)
+	// Netd is the deprecated configuration for the network runtime now hosted by
+	// ctld. Use spec.network instead.
 	// +optional
-	// +kubebuilder:default={}
 	Netd *NetdServiceConfig `json:"netd,omitempty"`
 }
 
@@ -1473,7 +1495,64 @@ func IsManagerEnabled(infra *Sandbox0Infra) bool {
 	return infra.Spec.Services.Manager.Enabled
 }
 
-// IsStorageProxyEnabled returns true when storage-proxy is enabled.
+// IsStorageRuntimeEnabled returns true when the storage runtime should be
+// hosted by manager. The deprecated services.storageProxy field is used only
+// when storage.runtime is absent.
+func IsStorageRuntimeEnabled(infra *Sandbox0Infra) bool {
+	if infra == nil {
+		return false
+	}
+	if infra.Spec.Storage != nil && infra.Spec.Storage.Runtime != nil {
+		return true
+	}
+	return IsStorageProxyEnabled(infra)
+}
+
+// ResolveStorageRuntimeConfig returns the canonical storage runtime config,
+// falling back to the deprecated services.storageProxy config when necessary.
+func ResolveStorageRuntimeConfig(infra *Sandbox0Infra) *StorageProxyConfig {
+	if infra == nil {
+		return nil
+	}
+	if infra.Spec.Storage != nil && infra.Spec.Storage.Runtime != nil {
+		return infra.Spec.Storage.Runtime
+	}
+	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
+		return infra.Spec.Services.StorageProxy.Config
+	}
+	return nil
+}
+
+// IsNetworkEnabled returns true when the network runtime should be hosted by
+// ctld. The deprecated services.netd field is used only when network is absent.
+func IsNetworkEnabled(infra *Sandbox0Infra) bool {
+	if infra == nil {
+		return false
+	}
+	if infra.Spec.Network != nil {
+		return true
+	}
+	return IsNetdEnabled(infra)
+}
+
+// ResolveNetworkRuntimeConfig returns the canonical network runtime config,
+// falling back to the deprecated services.netd config when necessary.
+func ResolveNetworkRuntimeConfig(infra *Sandbox0Infra) *NetdConfig {
+	if infra == nil {
+		return nil
+	}
+	if infra.Spec.Network != nil {
+		return infra.Spec.Network.Config
+	}
+	if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
+		return infra.Spec.Services.Netd.Config
+	}
+	return nil
+}
+
+// IsStorageProxyEnabled returns true when the deprecated storage-proxy service
+// configuration is enabled.
+// Deprecated: use IsStorageRuntimeEnabled.
 func IsStorageProxyEnabled(infra *Sandbox0Infra) bool {
 	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.StorageProxy == nil {
 		return false
@@ -1481,7 +1560,9 @@ func IsStorageProxyEnabled(infra *Sandbox0Infra) bool {
 	return infra.Spec.Services.StorageProxy.Enabled
 }
 
-// IsNetdEnabled returns true when netd is enabled.
+// IsNetdEnabled returns true when the deprecated netd service configuration is
+// enabled.
+// Deprecated: use IsNetworkEnabled.
 func IsNetdEnabled(infra *Sandbox0Infra) bool {
 	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.Netd == nil {
 		return false
@@ -1673,7 +1754,7 @@ func HasControlPlaneServices(infra *Sandbox0Infra) bool {
 
 // HasDataPlaneServices returns true when any data-plane service is enabled.
 func HasDataPlaneServices(infra *Sandbox0Infra) bool {
-	return IsClusterGatewayEnabled(infra) || IsManagerEnabled(infra) || IsStorageProxyEnabled(infra) || IsNetdEnabled(infra)
+	return IsClusterGatewayEnabled(infra) || IsManagerEnabled(infra) || IsStorageRuntimeEnabled(infra) || IsNetworkEnabled(infra)
 }
 
 // HasAnyServiceEnabled returns true when at least one service is enabled.

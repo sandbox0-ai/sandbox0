@@ -26,6 +26,8 @@ spec:
       enabled: true
       persistence:
         size: "20Gi"
+    runtime:
+      objectEncryptionEnabled: false
   registry:
     provider: builtin
     builtin:
@@ -86,6 +88,10 @@ spec:
         operator: Equal
         value: gvisor
         effect: NoSchedule
+  network:
+    config:
+      egressAuthEnabled: true
+      egressAuthFailurePolicy: fail-closed
   services:
     clusterGateway:
       enabled: true
@@ -95,21 +101,10 @@ spec:
         port: 30080
       config:
         authMode: public
-    netd:
-      enabled: true
-      # Keep netd on the default host runtime; do not set runtimeClassName=gvisor.
-      config:
-        egressAuthEnabled: true
-        egressAuthFailurePolicy: fail-closed
     manager:
       enabled: true
       replicas: 1
       config:
         sandboxRuntimeClassName: gvisor
-    storageProxy:
-      enabled: true
-      replicas: 1
-      config:
-        objectEncryptionEnabled: false
   initUser:
     email: "admin@example.com"

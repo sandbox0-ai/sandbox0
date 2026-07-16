@@ -1797,6 +1797,162 @@ spec:
                       metering. Metering is disabled by default.
                     type: boolean
                 type: object
+              network:
+                description: Network configures the node-local sandbox network runtime
+                  hosted by ctld.
+                properties:
+                  config:
+                    default: {}
+                    description: Config contains network runtime configuration.
+                    properties:
+                      auditLogMaxBackups:
+                        default: 5
+                        type: integer
+                      auditLogMaxBytes:
+                        default: 104857600
+                        format: int64
+                        type: integer
+                      auditLogPath:
+                        type: string
+                      bandwidthBurstBytes:
+                        description: Token bucket burst in bytes for bandwidth limiting.
+                          Zero uses one second of the configured rate.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      bpfFsPath:
+                        type: string
+                      bpfPinPath:
+                        type: string
+                      burstRatio:
+                        default: "0.125"
+                        type: string
+                      dnsPort:
+                        default: 53
+                        type: integer
+                      edtHorizon:
+                        default: 200ms
+                        type: string
+                      egressAuthEnabled:
+                        default: false
+                        type: boolean
+                      egressAuthFailurePolicy:
+                        default: fail-closed
+                        type: string
+                      egressAuthResolverTimeout:
+                        default: 2s
+                        type: string
+                      egressAuthResolverUrl:
+                        type: string
+                      egressBandwidthBytesPerSecond:
+                        description: Per-sandbox egress bandwidth limit in bytes per
+                          second. Zero disables throttling.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      failClosed:
+                        default: true
+                        type: boolean
+                      healthPort:
+                        default: 8081
+                        type: integer
+                      ingressBandwidthBytesPerSecond:
+                        description: Per-sandbox ingress bandwidth limit in bytes
+                          per second. Zero disables throttling.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      logLevel:
+                        default: info
+                        type: string
+                      meteringReportInterval:
+                        default: 10s
+                        type: string
+                      metricsPort:
+                        default: 9091
+                        type: integer
+                      metricsReportInterval:
+                        default: 10s
+                        type: string
+                      mitmLeafTtl:
+                        default: 1h
+                        type: string
+                      nodeName:
+                        type: string
+                      platformAllowedCidrs:
+                        items:
+                          type: string
+                        type: array
+                      platformAllowedDomains:
+                        items:
+                          type: string
+                        type: array
+                      platformDeniedCidrs:
+                        items:
+                          type: string
+                        type: array
+                      platformDeniedDomains:
+                        items:
+                          type: string
+                        type: array
+                      preferNft:
+                        default: true
+                        type: boolean
+                      proxyHeaderLimit:
+                        format: int64
+                        type: integer
+                      proxyHttpPort:
+                        default: 18080
+                        type: integer
+                      proxyHttpsPort:
+                        default: 18443
+                        type: integer
+                      proxyListenAddr:
+                        default: 0.0.0.0
+                        type: string
+                      proxyUpstreamTimeout:
+                        default: 30s
+                        type: string
+                      resyncPeriod:
+                        default: 30s
+                        type: string
+                      shutdownDelay:
+                        default: 2s
+                        type: string
+                      teamBandwidthBurstBytes:
+                        description: Token bucket burst in bytes for team bandwidth
+                          limiting. Zero uses one second of the configured rate.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      teamEgressBandwidthBytesPerSecond:
+                        description: Cluster-scoped per-team egress bandwidth limit
+                          in bytes per second. Requires spec.redis. Zero disables
+                          throttling.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      teamIngressBandwidthBytesPerSecond:
+                        description: Cluster-scoped per-team ingress bandwidth limit
+                          in bytes per second. Requires spec.redis. Zero disables
+                          throttling.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      useEbpf:
+                        type: boolean
+                      useEdt:
+                        type: boolean
+                      vethPrefix:
+                        type: string
+                    type: object
+                  mitmCaSecretName:
+                    description: |-
+                      MITMCASecretName overrides the operator-managed cluster-local MITM CA
+                      secret for HTTPS interception. Expected keys are ca.crt and ca.key. When
+                      unset, infra-operator generates and reuses a managed secret.
+                    type: string
+                type: object
               observability:
                 description: |-
                   Observability configures standard telemetry collection and export for
@@ -3786,8 +3942,9 @@ spec:
                             >= 30000 && self.port <= 32767)
                     type: object
                   netd:
-                    default: {}
-                    description: Netd configures the netd service (data plane)
+                    description: |-
+                      Netd is the deprecated configuration for the network runtime now hosted by
+                      ctld. Use spec.network instead.
                     properties:
                       config:
                         default: {}
@@ -4616,9 +4773,9 @@ spec:
                             >= 30000 && self.port <= 32767)
                     type: object
                   storageProxy:
-                    default: {}
-                    description: StorageProxy configures the storage-proxy service
-                      (data plane)
+                    description: |-
+                      StorageProxy is the deprecated configuration for the storage runtime now
+                      hosted by manager and ctld. Use spec.storage.runtime instead.
                     properties:
                       config:
                         default: {}
@@ -5010,6 +5167,145 @@ spec:
                     - credentialsSecret
                     - endpoint
                     - region
+                    type: object
+                  runtime:
+                    description: Runtime configures the sandbox volume runtime hosted
+                      by manager and ctld.
+                    properties:
+                      auditFile:
+                        default: /var/log/storage-proxy/audit.log
+                        type: string
+                      auditLog:
+                        default: true
+                        type: boolean
+                      cacheDir:
+                        default: /var/lib/storage-proxy/cache
+                        type: string
+                      cacheSizeLimit:
+                        default: 20Gi
+                        type: string
+                      cleanupInterval:
+                        default: 60s
+                        type: string
+                      databaseMaxConns:
+                        default: 30
+                        type: integer
+                      databaseMinConns:
+                        default: 5
+                        type: integer
+                      databaseSchema:
+                        default: storage_proxy
+                        type: string
+                      directVolumeFileIdleTTL:
+                        default: 30s
+                        type: string
+                      filesystemAttrTimeout:
+                        default: 1s
+                        type: string
+                      filesystemBlockSize:
+                        default: 4096
+                        type: integer
+                      filesystemCompression:
+                        default: lz4
+                        type: string
+                      filesystemDirEntryTimeout:
+                        default: 1s
+                        type: string
+                      filesystemEntryTimeout:
+                        default: 1s
+                        type: string
+                      filesystemMaxUpload:
+                        default: 20
+                        type: integer
+                      filesystemMetaRetries:
+                        default: 10
+                        type: integer
+                      filesystemName:
+                        default: sandbox0
+                        type: string
+                      filesystemTrashDays:
+                        default: 1
+                        type: integer
+                      flushTimeout:
+                        default: 30s
+                        type: string
+                      heartbeatInterval:
+                        default: 5s
+                        type: string
+                      heartbeatTimeout:
+                        default: 15
+                        type: integer
+                      httpAddr:
+                        default: 0.0.0.0
+                        type: string
+                      httpIdleTimeout:
+                        default: 60s
+                        type: string
+                      httpPort:
+                        default: 8081
+                        type: integer
+                      httpReadTimeout:
+                        default: 15s
+                        type: string
+                      httpWriteTimeout:
+                        default: 15s
+                        type: string
+                      kubeconfigPath:
+                        type: string
+                      logLevel:
+                        default: info
+                        type: string
+                      logSizeLimit:
+                        default: 1Gi
+                        type: string
+                      maxBytesPerSecond:
+                        default: 1073741824
+                        format: int64
+                        type: integer
+                      maxOpsPerSecond:
+                        default: 10000
+                        type: integer
+                      metricsEnabled:
+                        default: true
+                        type: boolean
+                      metricsPort:
+                        default: 9090
+                        type: integer
+                      objectEncryptionAlgo:
+                        default: aes256gcm-rsa
+                        type: string
+                      objectEncryptionEnabled:
+                        default: true
+                        type: boolean
+                      objectEncryptionPassphrase:
+                        type: string
+                      restoreRemountTimeout:
+                        default: 30s
+                        type: string
+                      s0fsCompactionInterval:
+                        default: 1m
+                        type: string
+                      s0fsCompactionMinDeadRatio:
+                        default: "0.5"
+                        type: string
+                      s0fsCompactionMinReclaimSize:
+                        default: 1Mi
+                        type: string
+                      s0fsSegmentTargetSize:
+                        default: 4Mi
+                        type: string
+                      volumePortalCacheSizeLimit:
+                        default: 20Gi
+                        type: string
+                      volumePortalRootMinFree:
+                        default: 5Gi
+                        type: string
+                      watchEventQueueSize:
+                        default: 256
+                        type: integer
+                      watchEventsEnabled:
+                        default: true
+                        type: boolean
                     type: object
                   s3:
                     description: S3 configures S3 or S3-compatible storage

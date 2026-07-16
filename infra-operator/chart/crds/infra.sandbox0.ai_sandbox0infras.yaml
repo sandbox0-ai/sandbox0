@@ -310,9 +310,9 @@ spec:
                                               type: string
                                             type: array
                                           upstreamUsername:
-                                            description: UpstreamUsername is the username
-                                              netd uses when authenticating to the
-                                              upstream SSH server.
+                                            description: |-
+                                              UpstreamUsername is the username the ctld network runtime uses when
+                                              authenticating to the upstream SSH server.
                                             type: string
                                         type: object
                                       tlsClientCertificate:
@@ -398,9 +398,9 @@ spec:
                                           type: string
                                         type: array
                                       failurePolicy:
-                                        description: FailurePolicy controls whether
-                                          netd should fail-open or fail-closed when
-                                          auth material cannot be enforced.
+                                        description: |-
+                                          FailurePolicy controls whether the ctld network runtime should fail-open or
+                                          fail-closed when auth material cannot be enforced.
                                         type: string
                                       httpMatch:
                                         description: HTTPMatch constrains HTTP-family
@@ -511,8 +511,9 @@ spec:
                                           rule is active. Empty defaults to enabled.
                                         type: string
                                       tlsMode:
-                                        description: TLSMode indicates whether netd
-                                          should intercept TLS for matching flows.
+                                        description: |-
+                                          TLSMode indicates whether the ctld network runtime should intercept TLS for
+                                          matching flows.
                                         type: string
                                     required:
                                     - credentialRef
@@ -738,8 +739,9 @@ spec:
                                           adapter for this rule.
                                         type: string
                                       tlsMode:
-                                        description: TLSMode controls whether netd
-                                          must terminate TLS to inspect this protocol.
+                                        description: |-
+                                          TLSMode controls whether the ctld network runtime must terminate TLS to
+                                          inspect this protocol.
                                         type: string
                                     required:
                                     - protocol
@@ -2773,8 +2775,9 @@ spec:
                         default: durable_async
                         description: |-
                           DeliveryMode controls admission for non-mutating API requests, public
-                          exposure requests, and netd flows. ClickHouse remains the only canonical
-                          audit store in both modes. Mutating APIs always use canonical_sync.
+                          exposure requests, and flows observed by the ctld network runtime.
+                          ClickHouse remains the only canonical audit store in both modes. Mutating
+                          APIs always use canonical_sync.
                         enum:
                         - durable_async
                         - canonical_sync
@@ -3729,8 +3732,8 @@ spec:
                             default: 5m
                             description: |-
                               EgressAuthDefaultResolveTTL controls the default lifetime of resolved
-                              egress auth material cached by netd when a binding does not set
-                              cachePolicy.ttl.
+                              egress auth material cached by the ctld network runtime when a binding does
+                              not set cachePolicy.ttl.
                             type: string
                           httpPort:
                             default: 8080

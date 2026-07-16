@@ -57,9 +57,9 @@ func main() {
 		zap.String("root_path", cfg.RootPath),
 	)
 	if bundlePath, err := trust.ConfigureNetdMITMCATrust(); err != nil {
-		logger.Warn("Failed to configure netd MITM CA trust", zap.Error(err))
+		logger.Warn("Failed to configure network-runtime MITM CA trust", zap.Error(err))
 	} else if bundlePath != "" {
-		logger.Info("Configured netd MITM CA trust", zap.String("bundle_path", bundlePath))
+		logger.Info("Configured network-runtime MITM CA trust", zap.String("bundle_path", bundlePath))
 	}
 
 	// Initialize observability provider
@@ -165,7 +165,7 @@ func main() {
 		zap.Strings("allowed_callers", validatorConfig.AllowedCallers),
 	)
 
-	// Note: Network isolation is handled by netd via pod annotations.
+	// Note: Network isolation is handled by the ctld network runtime through pod annotations.
 	// Procd no longer manages network policies.
 
 	// Create and start HTTP server

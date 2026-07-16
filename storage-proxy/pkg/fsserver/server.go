@@ -22,7 +22,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// FileSystemServer implements storage-proxy filesystem operations.
+// FileSystemServer implements manager storage filesystem operations.
 type FileSystemServer struct {
 	volMgr            volumeManager
 	volumeRepo        VolumeRepository

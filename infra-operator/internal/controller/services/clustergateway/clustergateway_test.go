@@ -454,7 +454,7 @@ func TestReconcileAuditMountsSeparatedKeysAndResultSpool(t *testing.T) {
 		}
 	}
 	if hasVolume(deployment.Spec.Template.Spec.Volumes, "audit-jwt-private-key") {
-		t.Fatal("cluster-gateway must not receive the netd audit producer private key")
+		t.Fatal("cluster-gateway must not receive the network audit producer private key")
 	}
 	if deployment.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
 		t.Fatalf("deployment strategy = %q, want Recreate for single-writer audit delivery PVC", deployment.Spec.Strategy.Type)

@@ -120,7 +120,7 @@ type ManagerConfig struct {
 	// +kubebuilder:default="noop"
 	NetworkPolicyProvider string `yaml:"network_policy_provider" json:"-"`
 
-	// Netd apply wait
+	// Network policy apply wait
 	// +optional
 	// +kubebuilder:default="30s"
 	NetdPolicyApplyTimeout metav1.Duration `yaml:"netd_policy_apply_timeout" json:"netdPolicyApplyTimeout"`
@@ -225,7 +225,7 @@ type ManagerConfig struct {
 	// SandboxPodPlacement configures default scheduling constraints injected into
 	// sandbox/template pool pods by the manager. This is operator-populated and
 	// hidden from the public CRD surface so placement can follow data-plane
-	// topology without requiring users to duplicate netd settings per template.
+	// topology without requiring users to duplicate network runtime settings per template.
 	// +optional
 	SandboxPodPlacement SandboxPodPlacementConfig `yaml:"sandbox_pod_placement" json:"-"`
 	// ClaimStartLimiter configures cluster-wide admission for claim and pool

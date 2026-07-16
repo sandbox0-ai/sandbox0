@@ -83,7 +83,7 @@ func New(cfg *config.NetdConfig, logger *zap.Logger, obsProvider *observability.
 
 func (d *Daemon) Run(ctx context.Context) error {
 	if d.cfg == nil {
-		return fmt.Errorf("netd config is nil")
+		return fmt.Errorf("ctld network runtime config is nil")
 	}
 	d.ready.Store(false)
 	defer d.ready.Store(false)
@@ -126,8 +126,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 	return shutdownErr
 }
 
-// Ready reports whether netd has successfully synchronized node redirect
-// state. Embedded runtimes use it to include netd in their own readiness gate.
+// Ready reports whether the ctld network runtime has successfully synchronized
+// node redirect state. Ctld uses it as part of the primary readiness gate.
 func (d *Daemon) Ready() bool {
 	return d != nil && d.ready.Load()
 }
@@ -189,7 +189,7 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 			ConfigModifier:  d.dbConfigModifier(),
 		})
 		if err != nil {
-			return fmt.Errorf("create netd database pool: %w", err)
+			return fmt.Errorf("create ctld network runtime database pool: %w", err)
 		}
 		databasePool = pool
 		if err := quota.RunMigrations(ctx, databasePool, observability.NewMigrateLogger(d.logger)); err != nil {
@@ -263,7 +263,7 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 	if d.cfg.EgressAuthResolverURL != "" {
 		privateKey, keyErr := internalauth.LoadEd25519PrivateKeyFromFile(internalauth.DefaultInternalJWTPrivateKeyPath)
 		if keyErr != nil {
-			return fmt.Errorf("load netd internal auth private key: %w", keyErr)
+			return fmt.Errorf("load ctld network runtime internal auth private key: %w", keyErr)
 		}
 		tokenGenerator := internalauth.NewGenerator(internalauth.GeneratorConfig{
 			Caller:     "netd",
@@ -447,12 +447,12 @@ func (d *Daemon) runMeteringFlushLoop(ctx context.Context, aggregator *netdmeter
 		select {
 		case <-ctx.Done():
 			if err := aggregator.Flush(context.Background()); err != nil {
-				d.logger.Error("Failed to flush netd metering windows during shutdown", zap.Error(err))
+				d.logger.Error("Failed to flush ctld network runtime metering windows during shutdown", zap.Error(err))
 			}
 			return
 		case <-ticker.C:
 			if err := aggregator.Flush(ctx); err != nil {
-				d.logger.Error("Failed to flush netd metering windows", zap.Error(err))
+				d.logger.Error("Failed to flush ctld network runtime metering windows", zap.Error(err))
 			}
 		}
 	}
@@ -487,7 +487,7 @@ func (d *Daemon) waitForMeteringFlushLoop(ctx context.Context) {
 	select {
 	case <-done:
 	case <-ctx.Done():
-		d.logger.Warn("Timed out waiting for netd metering flush loop to stop", zap.Error(ctx.Err()))
+		d.logger.Warn("Timed out waiting for ctld network runtime metering flush loop to stop", zap.Error(ctx.Err()))
 	}
 }
 

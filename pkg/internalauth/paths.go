@@ -20,7 +20,7 @@ var (
 
 	// DefaultAuditJWTPublicKeyPath is mounted only into cluster-gateway.
 	DefaultAuditJWTPublicKeyPath = getEnv("AUDIT_JWT_PUBLIC_KEY_PATH", "/config/audit_jwt_public.key")
-	// DefaultAuditJWTPrivateKeyPath is mounted only into netd.
+	// DefaultAuditJWTPrivateKeyPath is mounted only into the ctld network runtime.
 	DefaultAuditJWTPrivateKeyPath = getEnv("AUDIT_JWT_PRIVATE_KEY_PATH", "/secrets/audit_jwt_private.key")
 
 	// DefaultAuditSigningPrivateKeyPath is mounted only into cluster-gateway and

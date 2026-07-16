@@ -44,19 +44,19 @@ func newProxyMetricsRegistry() *proxyMetricsRegistry {
 			Namespace: "sandbox0",
 			Subsystem: "netd",
 			Name:      "egress_auth_cache_entries",
-			Help:      "Current number of cached egress auth entries in netd.",
+			Help:      "Current number of cached egress auth entries in the ctld network runtime.",
 		}),
 		auditIngestEventsTotal: promauto.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "sandbox0",
 			Subsystem: "netd",
 			Name:      "audit_ingest_events_total",
-			Help:      "Total number of netd audit events handled by the sandbox observability ingest sink.",
+			Help:      "Total number of network audit events handled by the sandbox observability ingest sink.",
 		}, []string{"result"}),
 		auditIngestBatchesTotal: promauto.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "sandbox0",
 			Subsystem: "netd",
 			Name:      "audit_ingest_batches_total",
-			Help:      "Total number of netd audit ingest batches by result.",
+			Help:      "Total number of network audit ingest batches by result.",
 		}, []string{"result"}),
 		proxyConnectionsActive: promauto.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "netd_proxy_connections_active",

@@ -964,8 +964,6 @@ func (r *Sandbox0InfraReconciler) projectClusterForPlan(infra *infrav1alpha1.San
 
 func managedConditionTypeSet() map[string]struct{} {
 	return map[string]struct{}{
-		"StorageProxyReady":                             {},
-		"NetdReady":                                     {},
 		infrav1alpha1.ConditionTypeReady:                {},
 		infrav1alpha1.ConditionTypeInternalAuthReady:    {},
 		infrav1alpha1.ConditionTypeDatabaseReady:        {},

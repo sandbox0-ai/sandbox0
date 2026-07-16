@@ -53,15 +53,13 @@ func TestReconcileUsesSharedSandboxNodePlacement(t *testing.T) {
 	}
 }
 
-func TestReconcileEmbedsNetdRuntimeAssetsInBothHASlots(t *testing.T) {
+func TestReconcileConfiguresNetworkRuntimeInBothHASlots(t *testing.T) {
 	infra := newCtldTestInfra()
 	infra.Spec.Network = &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetdConfig{MetricsPort: 9191}}
 
 	primary, client := reconcileCtldResources(t, infra, &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "kube-dns", Namespace: "kube-system"},
 		Spec:       corev1.ServiceSpec{ClusterIP: "10.96.0.10"},
-	}, &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: infra.Name + legacyNetdMetricsServiceSuffix, Namespace: infra.Namespace},
 	})
 	standby := &appsv1.DaemonSet{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: infra.Name + "-ctld-b", Namespace: infra.Namespace}, standby); err != nil {
@@ -106,11 +104,6 @@ func TestReconcileEmbedsNetdRuntimeAssetsInBothHASlots(t *testing.T) {
 	metricsServicePort := metricsService.Spec.Ports[0]
 	if metricsServicePort.Name != "metrics" || metricsServicePort.Port != 9191 || metricsServicePort.TargetPort.IntVal != 9191 {
 		t.Fatalf("network metrics service port = %#v, want named numeric port 9191", metricsServicePort)
-	}
-	legacyService := &corev1.Service{}
-	err := client.Get(context.Background(), types.NamespacedName{Name: infra.Name + legacyNetdMetricsServiceSuffix, Namespace: infra.Namespace}, legacyService)
-	if !apierrors.IsNotFound(err) {
-		t.Fatalf("legacy network metrics service was not removed: %v", err)
 	}
 }
 
@@ -448,8 +441,8 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 	wantCPU := resource.MustParse(ctldCPURequest)
 	wantMemory := resource.MustParse(ctldMemoryRequest)
 	if infraplan.Compile(infra).Network.Enabled {
-		wantCPU.Add(resource.MustParse(embeddedNetdCPURequest))
-		wantMemory.Add(resource.MustParse(embeddedNetdMemoryRequest))
+		wantCPU.Add(resource.MustParse(networkRuntimeCPURequest))
+		wantMemory.Add(resource.MustParse(networkRuntimeMemoryRequest))
 	}
 	if got := ds.Spec.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]; got.Cmp(wantCPU) != 0 {
 		t.Fatalf("expected ctld cpu request %s, got %s", wantCPU.String(), got.String())

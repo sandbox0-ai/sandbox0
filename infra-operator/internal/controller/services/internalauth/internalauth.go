@@ -280,9 +280,10 @@ func GetDataPlaneKeyRefs(infra *infrav1alpha1.Sandbox0Infra) (secretName, privat
 	return secretName, privateKeyKey, publicKeyKey
 }
 
-// GetAuditNetdKeyRefs returns the dedicated audit producer key pair. The
-// private key is mounted only into netd and the public key only into
-// cluster-gateway, so other data-plane services cannot impersonate netd.
+// GetAuditNetdKeyRefs returns the dedicated network audit producer key pair.
+// The private key is mounted only into the ctld network runtime and the public
+// key only into cluster-gateway, so other data-plane services cannot impersonate
+// the network audit producer.
 func GetAuditNetdKeyRefs(infra *infrav1alpha1.Sandbox0Infra) (secretName, privateKeyKey, publicKeyKey string) {
 	return fmt.Sprintf("%s-%s", infra.Name, auditNetdKeySecretName), "private.key", "public.key"
 }

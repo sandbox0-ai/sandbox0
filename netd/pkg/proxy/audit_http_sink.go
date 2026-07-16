@@ -65,7 +65,7 @@ func newHTTPAuditSinkFromConfig(cfg *config.NetdConfig, logger *zap.Logger) (*ht
 	}
 	privateKey, err := internalauth.LoadEd25519PrivateKeyFromFile(internalauth.DefaultAuditJWTPrivateKeyPath)
 	if err != nil {
-		return nil, fmt.Errorf("load netd internal jwt private key: %w", err)
+		return nil, fmt.Errorf("load network audit producer internal JWT private key: %w", err)
 	}
 	generator := internalauth.NewGenerator(internalauth.GeneratorConfig{
 		Caller:     "netd",
@@ -227,7 +227,7 @@ func (s *httpAuditSink) handleSpoolWriteFailure(event auditEvent, spoolErr error
 	if canonicalErr != nil {
 		proxyMetrics.RecordAuditIngestBatch("failed")
 		proxyMetrics.RecordAuditIngestEvents("unrecorded", 1)
-		s.auditLog().Error("Netd audit event is unrecorded after spool and canonical delivery both failed",
+		s.auditLog().Error("Network audit event is unrecorded after spool and canonical delivery both failed",
 			zap.String("event_id", event.EventID),
 			zap.String("sandbox_id", event.SandboxID),
 			zap.String("phase", event.Phase),
@@ -238,7 +238,7 @@ func (s *httpAuditSink) handleSpoolWriteFailure(event auditEvent, spoolErr error
 	}
 	proxyMetrics.RecordAuditIngestBatch("fallback_sent")
 	proxyMetrics.RecordAuditIngestEvents("fallback_sent", 1)
-	s.auditLog().Warn("Netd audit event reached the canonical store through the synchronous spool fallback",
+	s.auditLog().Warn("Network audit event reached the canonical store through the synchronous spool fallback",
 		zap.String("event_id", event.EventID),
 		zap.String("sandbox_id", event.SandboxID),
 		zap.String("phase", event.Phase),
@@ -256,7 +256,7 @@ func (s *httpAuditSink) deliverAttempt(event auditEvent) error {
 		// record for idempotent replay, but do not block the connection with a
 		// false delivery failure.
 		proxyMetrics.RecordAuditIngestEvents("ack_failed", 1)
-		s.auditLog().Error("Canonical netd audit attempt was acknowledged but spool cleanup failed",
+		s.auditLog().Error("Canonical network audit attempt was acknowledged but spool cleanup failed",
 			zap.String("event_id", event.EventID),
 			zap.String("sandbox_id", event.SandboxID),
 			zap.Error(err),
@@ -416,7 +416,7 @@ func (s *httpAuditSink) flushBatch(ctx context.Context, batch []auditEvent) {
 			proxyMetrics.RecordAuditIngestEvents("skipped", 1)
 			s.spoolCorrupt.Store(true)
 			s.unmarkQueued([]auditEvent{event})
-			s.auditLog().Error("Netd audit spool contains an event that cannot be projected",
+			s.auditLog().Error("Network audit spool contains an event that cannot be projected",
 				zap.String("event_id", event.EventID),
 				zap.String("sandbox_id", event.SandboxID),
 			)
@@ -483,7 +483,7 @@ func (s *httpAuditSink) completeAuditGroup(events []auditEvent, delivered bool) 
 	}
 	if err := s.spool.Remove(ids...); err != nil {
 		proxyMetrics.RecordAuditIngestEvents("ack_failed", len(events))
-		s.auditLog().Error("Canonical netd audit results were acknowledged but spool cleanup failed",
+		s.auditLog().Error("Canonical network audit results were acknowledged but spool cleanup failed",
 			zap.Int("event_count", len(events)),
 			zap.Strings("event_ids", ids),
 			zap.Error(err),

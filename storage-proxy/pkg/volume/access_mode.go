@@ -5,11 +5,11 @@ import (
 	"strings"
 )
 
-// AccessMode describes how a volume can be mounted across storage-proxy instances.
+// AccessMode describes how a volume can be mounted across manager storage runtime instances.
 type AccessMode string
 
 const (
-	// AccessModeRWO allows read-write mounts on a single storage-proxy instance.
+	// AccessModeRWO allows read-write mounts on a single manager storage runtime instance.
 	AccessModeRWO AccessMode = "RWO"
 	// AccessModeROX allows read-only mounts across multiple instances.
 	AccessModeROX AccessMode = "ROX"

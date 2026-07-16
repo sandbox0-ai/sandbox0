@@ -168,7 +168,7 @@ func TestReconcileCtldRBACIncludesPodReadPermissions(t *testing.T) {
 		assert.ElementsMatch(t, []string{"get", "list", "watch"}, rule.Verbs)
 		found = true
 	}
-	assert.True(t, found, "expected embedded netd discovery resources to remain read-only")
+	assert.True(t, found, "expected ctld network discovery resources to remain read-only")
 
 	found = false
 	for _, rule := range role.Rules {
@@ -188,7 +188,7 @@ func TestReconcileCtldRBACIncludesPodReadPermissions(t *testing.T) {
 		assert.ElementsMatch(t, []string{"get", "list", "watch"}, rule.Verbs)
 		found = true
 	}
-	assert.True(t, found, "expected ctld cluster role to include embedded netd endpoint slice permissions")
+	assert.True(t, found, "expected ctld cluster role to include network runtime endpoint slice permissions")
 }
 
 func TestReconcileConsolidatedStorageClientsAppliesGCSWorkloadIdentity(t *testing.T) {

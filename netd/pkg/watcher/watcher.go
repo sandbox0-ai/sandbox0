@@ -185,7 +185,7 @@ func (w *Watcher) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to sync informer cache")
 	}
 
-	w.logger.Info("netd watcher started and cache synced")
+	w.logger.Info("ctld network runtime watcher started and cache synced")
 	return nil
 }
 

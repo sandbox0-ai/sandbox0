@@ -32,7 +32,7 @@ var systemCABundleCandidates = []string{
 	"/etc/ssl/cert.pem",
 }
 
-// ConfigureNetdMITMCATrust exposes the netd MITM CA through common TLS env vars.
+// ConfigureNetdMITMCATrust exposes the network-runtime MITM CA through common TLS environment variables.
 func ConfigureNetdMITMCATrust() (string, error) {
 	mitmCAPath := strings.TrimSpace(os.Getenv(NetdMITMCAFileEnv))
 	if mitmCAPath == "" {
@@ -40,7 +40,7 @@ func ConfigureNetdMITMCATrust() (string, error) {
 	}
 	mitmCA, err := os.ReadFile(mitmCAPath)
 	if err != nil {
-		return "", fmt.Errorf("read netd MITM CA %s: %w", mitmCAPath, err)
+		return "", fmt.Errorf("read network-runtime MITM CA %s: %w", mitmCAPath, err)
 	}
 	bundlePath := strings.TrimSpace(os.Getenv(NetdMITMCABundleEnv))
 	if bundlePath == "" {
@@ -48,10 +48,10 @@ func ConfigureNetdMITMCATrust() (string, error) {
 	}
 	bundle := buildBundle(mitmCA)
 	if err := os.MkdirAll(filepath.Dir(bundlePath), 0755); err != nil {
-		return "", fmt.Errorf("create netd CA bundle directory: %w", err)
+		return "", fmt.Errorf("create network-runtime CA bundle directory: %w", err)
 	}
 	if err := os.WriteFile(bundlePath, bundle, defaultBundleFileMod); err != nil {
-		return "", fmt.Errorf("write netd CA bundle %s: %w", bundlePath, err)
+		return "", fmt.Errorf("write network-runtime CA bundle %s: %w", bundlePath, err)
 	}
 	_ = os.Setenv(NetdMITMCABundleEnv, bundlePath)
 	for _, name := range tlsBundleEnvVars {

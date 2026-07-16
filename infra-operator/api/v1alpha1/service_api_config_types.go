@@ -397,8 +397,9 @@ type SandboxObservabilityAuditConfig struct {
 	Enabled bool `json:"enabled,omitempty"`
 
 	// DeliveryMode controls admission for non-mutating API requests, public
-	// exposure requests, and netd flows. ClickHouse remains the only canonical
-	// audit store in both modes. Mutating APIs always use canonical_sync.
+	// exposure requests, and flows observed by the ctld network runtime.
+	// ClickHouse remains the only canonical audit store in both modes. Mutating
+	// APIs always use canonical_sync.
 	// +optional
 	// +kubebuilder:validation:Enum=durable_async;canonical_sync
 	// +kubebuilder:default=durable_async
@@ -919,8 +920,8 @@ type ManagerConfig struct {
 	// +kubebuilder:default="500ms"
 	NetdPolicyApplyPollInterval metav1.Duration `json:"netdPolicyApplyPollInterval,omitempty"`
 	// EgressAuthDefaultResolveTTL controls the default lifetime of resolved
-	// egress auth material cached by netd when a binding does not set
-	// cachePolicy.ttl.
+	// egress auth material cached by the ctld network runtime when a binding does
+	// not set cachePolicy.ttl.
 	// +optional
 	// +kubebuilder:default="5m"
 	EgressAuthDefaultResolveTTL metav1.Duration `json:"egressAuthDefaultResolveTtl,omitempty"`

@@ -503,8 +503,8 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		// Note: Network policies are stored in pod annotations.
 		// They are set in claimIdlePod() and createNewPod() methods. Hot claims have
 		// already selected a Kubernetes-ready idle pod. Cold claims must wait until
-		// the pod has the network identity netd watches before waiting for netd to
-		// patch the applied policy hash.
+		// the pod has the network identity watched by the ctld network runtime before
+		// waiting for it to patch the applied policy hash.
 		if s.networkProvider != nil {
 			phaseStarted = time.Now()
 			networkPod, err := s.waitForPodNetworkIdentityTracked(ctx, req.Template, pod.Namespace, pod.Name, lifecycleTracker)
@@ -1368,7 +1368,7 @@ func (s *SandboxService) createNewPodWithReservation(ctx context.Context, templa
 		return nil, fmt.Errorf("ensure procd config secret: %w", err)
 	}
 	if err := controller.EnsureNetdMITMCASecret(ctx, s.k8sClient, s.secretLister, template.Namespace); err != nil {
-		return nil, fmt.Errorf("ensure netd MITM CA secret: %w", err)
+		return nil, fmt.Errorf("ensure network-runtime MITM CA secret: %w", err)
 	}
 
 	annotations := controller.ClaimedSandboxPodAnnotations(map[string]string{

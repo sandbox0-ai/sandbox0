@@ -241,7 +241,7 @@ func (a *Aggregator) Flush(ctx context.Context) error {
 			return tx.UpsertProducerWatermark(ctx, a.producer, a.regionID, batch.end)
 		})
 		if err != nil {
-			a.logger.Error("Failed to flush netd metering windows",
+			a.logger.Error("Failed to flush ctld network runtime metering windows",
 				zap.String("producer", a.producer),
 				zap.Time("window_start", batch.start),
 				zap.Time("window_end", batch.end),

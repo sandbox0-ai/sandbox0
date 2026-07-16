@@ -11,7 +11,6 @@ const (
 	ServiceRegionalGateway = "regional-gateway"
 	ServiceScheduler       = "scheduler"
 	ServiceSSHGateway      = "ssh-gateway"
-	ServiceStorageProxy    = "storage-proxy"
 )
 
 // ManagerAllowedCallers returns the services allowed to call manager's

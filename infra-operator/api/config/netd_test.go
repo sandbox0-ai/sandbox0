@@ -77,6 +77,6 @@ func TestNetdConfigValidateListenerPorts(t *testing.T) {
 	}
 	cfg.HealthPort = 9091
 	if err := cfg.ValidateListenerPorts(nil); err == nil {
-		t.Fatal("netd listener collision accepted")
+		t.Fatal("network runtime listener collision accepted")
 	}
 }

@@ -18,7 +18,7 @@ func DefaultBackendType() string {
 	return BackendS0FS
 }
 
-// Backend is the storage engine boundary behind storage-proxy volumes.
+// Backend is the storage engine boundary behind manager storage runtime volumes.
 // Implementations own filesystem metadata, file data, durability, and backend
 // cleanup for mounted volumes.
 type Backend interface {

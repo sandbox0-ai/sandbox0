@@ -7,7 +7,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-// StorageProxyMetrics holds Prometheus metrics for the storage-proxy service.
+// StorageProxyMetrics holds Prometheus metrics for the manager storage runtime.
 type StorageProxyMetrics struct {
 	VolumesTotal       prometheus.Gauge
 	VolumesMounted     prometheus.Gauge
@@ -60,7 +60,7 @@ type StorageProxyMetrics struct {
 	HTTPResponseSize    *prometheus.HistogramVec
 }
 
-// NewStorageProxy registers and returns storage-proxy metrics.
+// NewStorageProxy registers and returns manager storage runtime metrics.
 // Returns nil when registry is nil.
 func NewStorageProxy(registry prometheus.Registerer) *StorageProxyMetrics {
 	if registry == nil {
@@ -122,16 +122,16 @@ func NewStorageProxy(registry prometheus.Registerer) *StorageProxyMetrics {
 		}, []string{"operation", "volume_id"}),
 		ObjectStoreRequestsTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "storage_proxy_object_store_requests_total",
-			Help: "Total number of object store provider requests made by storage-proxy",
+			Help: "Total number of object store provider requests made by the manager storage runtime",
 		}, []string{"provider", "bucket", "prefix_class", "operation", "status"}),
 		ObjectStoreRequestDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "storage_proxy_object_store_request_duration_seconds",
-			Help:    "Duration of object store provider requests made by storage-proxy",
+			Help:    "Duration of object store provider requests made by the manager storage runtime",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"provider", "bucket", "prefix_class", "operation", "status"}),
 		ObjectStoreBytesTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "storage_proxy_object_store_bytes_total",
-			Help: "Total bytes transferred through object store provider requests made by storage-proxy",
+			Help: "Total bytes transferred through object store provider requests made by the manager storage runtime",
 		}, []string{"provider", "bucket", "prefix_class", "operation", "direction"}),
 		AuthenticationTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "storage_proxy_authentication_total",

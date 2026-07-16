@@ -65,7 +65,7 @@ var (
 	haSlot                         = os.Getenv("CTLD_HA_SLOT")
 	haProbe                        string
 	haProbeSocket                  = "/run/sandbox0/ctld-ha.sock"
-	netdConfigPath                 = strings.TrimSpace(os.Getenv("NETD_CONFIG_PATH"))
+	networkRuntimeConfigPath       = strings.TrimSpace(os.Getenv("NETD_CONFIG_PATH"))
 )
 
 const (
@@ -100,7 +100,7 @@ func main() {
 	flag.StringVar(&haSlot, "ha-slot", os.Getenv("CTLD_HA_SLOT"), "stable ctld HA deployment slot")
 	flag.StringVar(&haProbe, "ha-probe", "", "run one ctld HA probe (live or ready) and exit")
 	flag.StringVar(&haProbeSocket, "ha-probe-socket", "/run/sandbox0/ctld-ha.sock", "container-local ctld HA probe socket")
-	flag.StringVar(&netdConfigPath, "netd-config-path", strings.TrimSpace(os.Getenv("NETD_CONFIG_PATH")), "explicit netd config path; empty disables embedded netd")
+	flag.StringVar(&networkRuntimeConfigPath, "netd-config-path", strings.TrimSpace(os.Getenv("NETD_CONFIG_PATH")), "explicit ctld network runtime config path; empty disables network policy enforcement")
 	flag.Parse()
 
 	log.Println("Starting ctld")
@@ -118,12 +118,12 @@ func run() error {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	defer cancel()
-	netdFactory, err := configuredEmbeddedNetdFactory(netdConfigPath, httpAddr)
+	networkFactory, err := configuredNetworkRuntimeFactory(networkRuntimeConfigPath, httpAddr)
 	if err != nil {
-		return fmt.Errorf("validate embedded netd config: %w", err)
+		return fmt.Errorf("validate ctld network runtime config: %w", err)
 	}
 	if !haEnabled {
-		return runPrimary(ctx, primaryRunOptions{netdFactory: netdFactory})
+		return runPrimary(ctx, primaryRunOptions{networkFactory: networkFactory})
 	}
 	coordinator, err := ctldha.NewCoordinator(ctldha.Config{RootDir: portalRoot, Slot: haSlot})
 	if err != nil {
@@ -134,7 +134,7 @@ func run() error {
 		return err
 	}
 	defer probeServer.Close()
-	return runHAPrimary(ctx, coordinator, probeServer.SetServiceReady, netdFactory, runPrimary)
+	return runHAPrimary(ctx, coordinator, probeServer.SetServiceReady, networkFactory, runPrimary)
 }
 
 type primaryRunner func(context.Context, primaryRunOptions) error
@@ -143,7 +143,7 @@ func runHAPrimary(
 	ctx context.Context,
 	coordinator *ctldha.Coordinator,
 	setReady func(bool),
-	netdFactory primaryServiceFactory,
+	networkFactory primaryServiceFactory,
 	runPrimaryFn primaryRunner,
 ) error {
 	lease, err := coordinator.WaitForPrimary(ctx)
@@ -164,7 +164,7 @@ func runHAPrimary(
 		ownerID:        ownerID,
 		recovery:       lease.Recovery,
 		setReady:       setReady,
-		netdFactory:    netdFactory,
+		networkFactory: networkFactory,
 	})
 }
 
@@ -174,7 +174,7 @@ type primaryRunOptions struct {
 	ownerID        string
 	recovery       []ctldha.RecoveredPortal
 	setReady       func(bool)
-	netdFactory    primaryServiceFactory
+	networkFactory primaryServiceFactory
 }
 
 func runPrimary(parent context.Context, options primaryRunOptions) error {
@@ -295,12 +295,12 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 		registrationErrors = registrationServer.Errors()
 	}
 	serviceErrors := make(chan error, 1)
-	netdRequired := options.netdFactory != nil
-	var netdHandle *primaryServiceHandle
+	networkRequired := options.networkFactory != nil
+	var networkHandle *primaryServiceHandle
 	serviceReady := func() bool {
 		return ctx.Err() == nil && portalManager.RecoveryError() == nil &&
 			(registrationServer == nil || registrationServer.Registered()) &&
-			(!netdRequired || (netdHandle != nil && netdHandle.Ready()))
+			(!networkRequired || (networkHandle != nil && networkHandle.Ready()))
 	}
 
 	podCache := buildNodePodCache(ctx, k8sClient)
@@ -322,18 +322,18 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 	if err != nil {
 		return fmt.Errorf("listen for ctld HTTP server: %w", err)
 	}
-	if options.netdFactory != nil {
-		netdService, err := options.netdFactory()
+	if options.networkFactory != nil {
+		networkService, err := options.networkFactory()
 		if err != nil {
 			_ = httpListener.Close()
-			return fmt.Errorf("initialize embedded netd: %w", err)
+			return fmt.Errorf("initialize ctld network runtime: %w", err)
 		}
-		if netdService == nil {
+		if networkService == nil {
 			_ = httpListener.Close()
-			return fmt.Errorf("initialize embedded netd: factory returned a nil service")
+			return fmt.Errorf("initialize ctld network runtime: factory returned a nil service")
 		}
-		netdHandle = startPrimaryService(ctx, netdService)
-		log.Printf("ctld primary started embedded netd")
+		networkHandle = startPrimaryService(ctx, networkService)
+		log.Printf("ctld primary started network runtime")
 	}
 	go func() {
 		if err := httpServer.Serve(httpListener); err != nil && !errors.Is(err, http.ErrServerClosed) && ctx.Err() == nil {
@@ -357,12 +357,12 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 			}
 		}()
 	}
-	var netdErrors <-chan error
-	if netdHandle != nil {
-		netdErrors = netdHandle.Errors()
+	var networkErrors <-chan error
+	if networkHandle != nil {
+		networkErrors = networkHandle.Errors()
 	}
 	var runErr error
-	netdFailed := false
+	networkFailed := false
 	select {
 	case <-parent.Done():
 		log.Printf("ctld primary shutting down: %v", parent.Err())
@@ -374,12 +374,12 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 		log.Printf("ctld primary service failed: %v", runErr)
 	case runErr = <-serviceErrors:
 		log.Printf("ctld primary service failed: %v", runErr)
-	case err := <-netdErrors:
-		if netdRunErr, failed := embeddedNetdExitError(parent.Err(), err); !failed {
+	case err := <-networkErrors:
+		if networkRunErr, failed := networkRuntimeExitError(parent.Err(), err); !failed {
 			log.Printf("ctld primary shutting down: %v", parent.Err())
 		} else {
-			netdFailed = true
-			runErr = netdRunErr
+			networkFailed = true
+			runErr = networkRunErr
 			log.Printf("ctld primary service failed: %v", runErr)
 		}
 	}
@@ -387,11 +387,11 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 	if options.setReady != nil {
 		options.setReady(false)
 	}
-	var netdShutdownCtx context.Context
-	var netdShutdownCancel context.CancelFunc
-	if netdHandle != nil {
-		netdShutdownCtx, netdShutdownCancel = context.WithTimeout(context.Background(), embeddedNetdShutdownTimeout)
-		defer netdShutdownCancel()
+	var networkShutdownCtx context.Context
+	var networkShutdownCancel context.CancelFunc
+	if networkHandle != nil {
+		networkShutdownCtx, networkShutdownCancel = context.WithTimeout(context.Background(), networkRuntimeShutdownTimeout)
+		defer networkShutdownCancel()
 	}
 	httpShutdownCtx, httpShutdownCancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
 	_ = httpServer.Shutdown(httpShutdownCtx)
@@ -410,22 +410,22 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 		log.Printf("ctld volume portal shutdown completed with errors: %v", err)
 	}
 	portalShutdownCancel()
-	if netdHandle != nil {
-		if err := netdHandle.Wait(netdShutdownCtx); err != nil && !netdFailed {
-			runErr = errors.Join(runErr, fmt.Errorf("shutdown embedded netd: %w", err))
+	if networkHandle != nil {
+		if err := networkHandle.Wait(networkShutdownCtx); err != nil && !networkFailed {
+			runErr = errors.Join(runErr, fmt.Errorf("shutdown ctld network runtime: %w", err))
 		}
 	}
 	return runErr
 }
 
-func embeddedNetdExitError(parentErr, netdErr error) (error, bool) {
-	if parentErr != nil && (netdErr == nil || errors.Is(netdErr, context.Canceled)) {
+func networkRuntimeExitError(parentErr, networkErr error) (error, bool) {
+	if parentErr != nil && (networkErr == nil || errors.Is(networkErr, context.Canceled)) {
 		return nil, false
 	}
-	if netdErr == nil {
-		netdErr = fmt.Errorf("service stopped unexpectedly")
+	if networkErr == nil {
+		networkErr = fmt.Errorf("service stopped unexpectedly")
 	}
-	return fmt.Errorf("embedded netd: %w", netdErr), true
+	return fmt.Errorf("ctld network runtime: %w", networkErr), true
 }
 
 func newHTTPServer(addr string, controller ctldserver.Controller) *http.Server {

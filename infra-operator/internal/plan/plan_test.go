@@ -98,13 +98,13 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 		t.Fatalf("expected template store to be enabled")
 	}
 	if got := compiled.Manager.NetworkPolicyProvider; got != "netd" {
-		t.Fatalf("expected netd network policy provider, got %q", got)
+		t.Fatalf("expected ctld network runtime provider, got %q", got)
 	}
 	if got := compiled.Services.Manager.URL; got != "http://demo-manager.sandbox0-system.svc.cluster.local:18080" {
 		t.Fatalf("unexpected manager service URL: %q", got)
 	}
 	if got := compiled.Network.EgressAuthResolverURL; got != compiled.Services.Manager.URL {
-		t.Fatalf("expected netd resolver URL to match manager service URL, got %q", got)
+		t.Fatalf("expected network runtime resolver URL to match manager service URL, got %q", got)
 	}
 	if got := compiled.RegionalGateway.DefaultClusterGatewayURL; got != "http://demo-cluster-gateway:9443" {
 		t.Fatalf("unexpected cluster gateway URL: %q", got)
@@ -128,7 +128,7 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 		t.Fatal("expected scheduler plan to be enabled")
 	}
 	if compiled.Scheduler.Config == nil || compiled.Network.Config == nil {
-		t.Fatal("expected scheduler and netd configs to be compiled")
+		t.Fatal("expected scheduler and network runtime configs to be compiled")
 	}
 	if compiled.Scheduler.HomeCluster == nil || compiled.Scheduler.HomeCluster.ClusterID != "cluster-a" {
 		t.Fatalf("expected scheduler home cluster to be compiled, got %#v", compiled.Scheduler.HomeCluster)
@@ -337,10 +337,10 @@ func TestCompileDefaultsDataPlaneIdentityFromPublicExposure(t *testing.T) {
 		t.Fatalf("manager config default cluster ID = %q, want %q", got, naming.DefaultClusterID)
 	}
 	if got := compiled.Network.RegionID; got != "aws-us-east-1" {
-		t.Fatalf("netd region ID = %q, want aws-us-east-1", got)
+		t.Fatalf("network runtime region ID = %q, want aws-us-east-1", got)
 	}
 	if got := compiled.Network.ClusterID; got != naming.DefaultClusterID {
-		t.Fatalf("netd cluster ID = %q, want %q", got, naming.DefaultClusterID)
+		t.Fatalf("network runtime cluster ID = %q, want %q", got, naming.DefaultClusterID)
 	}
 }
 
@@ -1359,7 +1359,6 @@ func TestCompileTracksCleanupPlan(t *testing.T) {
 		{Kind: "DaemonSet", Namespace: "sandbox0-system", Name: "demo-ctld-a"},
 		{Kind: "DaemonSet", Namespace: "sandbox0-system", Name: "demo-ctld-b"},
 		{Kind: "Service", Namespace: "sandbox0-system", Name: "demo-ctld-network-metrics"},
-		{Kind: "Service", Namespace: "sandbox0-system", Name: "demo-netd-metrics"},
 		{Kind: "ConfigMap", Namespace: "sandbox0-system", Name: "demo-ctld"},
 		{Kind: "ConfigMap", Namespace: "sandbox0-system", Name: "demo-netd"},
 		{Kind: "StatefulSet", Namespace: "sandbox0-system", Name: "demo-postgres"},

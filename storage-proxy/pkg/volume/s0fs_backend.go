@@ -43,7 +43,7 @@ func (b *S0FSBackend) MountVolume(ctx context.Context, req BackendMountRequest) 
 		return nil, fmt.Errorf("missing team id for volume mount")
 	}
 	if b == nil || b.config == nil {
-		return nil, fmt.Errorf("storage proxy config is not available")
+		return nil, fmt.Errorf("manager storage runtime config is not available")
 	}
 	cacheDir := filepath.Join(b.config.CacheDir, "s0fs", req.VolumeID)
 	remoteStore, err := b.createObjectStorage(req)

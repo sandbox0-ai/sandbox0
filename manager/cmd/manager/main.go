@@ -343,7 +343,7 @@ func main() {
 			ApplyTimeout: cfg.NetdPolicyApplyTimeout.Duration,
 			PollInterval: cfg.NetdPolicyApplyPollInterval.Duration,
 		}, logger)
-		logger.Info("Network provider set to netd",
+		logger.Info("Network provider set to ctld network runtime",
 			zap.Duration("applyTimeout", cfg.NetdPolicyApplyTimeout.Duration),
 			zap.Duration("pollInterval", cfg.NetdPolicyApplyPollInterval.Duration),
 		)

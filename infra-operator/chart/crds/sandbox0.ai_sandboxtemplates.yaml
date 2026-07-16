@@ -255,8 +255,9 @@ spec:
                                     type: string
                                   type: array
                                 upstreamUsername:
-                                  description: UpstreamUsername is the username netd
-                                    uses when authenticating to the upstream SSH server.
+                                  description: |-
+                                    UpstreamUsername is the username the ctld network runtime uses when
+                                    authenticating to the upstream SSH server.
                                   type: string
                               type: object
                             tlsClientCertificate:
@@ -339,9 +340,9 @@ spec:
                                 type: string
                               type: array
                             failurePolicy:
-                              description: FailurePolicy controls whether netd should
-                                fail-open or fail-closed when auth material cannot
-                                be enforced.
+                              description: |-
+                                FailurePolicy controls whether the ctld network runtime should fail-open or
+                                fail-closed when auth material cannot be enforced.
                               type: string
                             httpMatch:
                               description: HTTPMatch constrains HTTP-family credential
@@ -445,8 +446,9 @@ spec:
                                 Empty defaults to enabled.
                               type: string
                             tlsMode:
-                              description: TLSMode indicates whether netd should intercept
-                                TLS for matching flows.
+                              description: |-
+                                TLSMode indicates whether the ctld network runtime should intercept TLS for
+                                matching flows.
                               type: string
                           required:
                           - credentialRef
@@ -661,8 +663,9 @@ spec:
                                 this rule.
                               type: string
                             tlsMode:
-                              description: TLSMode controls whether netd must terminate
-                                TLS to inspect this protocol.
+                              description: |-
+                                TLSMode controls whether the ctld network runtime must terminate TLS to
+                                inspect this protocol.
                               type: string
                           required:
                           - protocol

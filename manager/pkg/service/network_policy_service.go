@@ -39,12 +39,12 @@ func (s *NetworkPolicyService) BuildNetworkPolicyAnnotation(req *BuildNetworkPol
 	return v1alpha1.NetworkPolicyToAnnotation(result.PolicySpec)
 }
 
-// BuildNetworkPolicySpec builds only the netd-consumed policy spec.
+// BuildNetworkPolicySpec builds only the ctld network runtime policy spec.
 func (s *NetworkPolicyService) BuildNetworkPolicySpec(req *BuildNetworkPolicyRequest) *v1alpha1.NetworkPolicySpec {
 	return s.BuildNetworkPolicyState(req).PolicySpec
 }
 
-// BuildNetworkPolicyState builds the split runtime state used by netd and the manager runtime resolver.
+// BuildNetworkPolicyState builds the state used by the ctld network runtime and manager runtime resolver.
 func (s *NetworkPolicyService) BuildNetworkPolicyState(req *BuildNetworkPolicyRequest) *BuildNetworkPolicyResult {
 	mergedSpec := s.mergeNetworkPolicies(req.TemplateSpec, req.RequestSpec)
 	if mergedSpec == nil {

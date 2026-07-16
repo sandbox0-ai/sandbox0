@@ -66,7 +66,7 @@ type UsageQuotaChecker interface {
 
 func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.Tracker, usageRecorder UsageRecorder, logger *zap.Logger, opts ...ServerOption) (*Server, error) {
 	if cfg == nil {
-		return nil, fmt.Errorf("netd config is nil")
+		return nil, fmt.Errorf("ctld network runtime config is nil")
 	}
 	if store == nil {
 		return nil, fmt.Errorf("policy store is nil")

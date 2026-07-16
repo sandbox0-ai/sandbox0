@@ -88,7 +88,7 @@ func normalizeSandboxVolumeBackend(v *SandboxVolume) {
 	v.BackendConfig = coalesceVolumeBackendConfig(v.BackendConfig)
 }
 
-// Repository provides database access for storage-proxy
+// Repository provides database access for the manager storage runtime.
 type Repository struct {
 	pool *pgxpool.Pool
 }

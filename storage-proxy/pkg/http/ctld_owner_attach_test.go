@@ -139,7 +139,7 @@ func TestKubernetesVolumeCtldResolverUsesOwnerNode(t *testing.T) {
 	client := fake.NewSimpleClientset(
 		&corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      "storage-proxy-a",
+				Name:      "manager-a",
 				Namespace: "sandbox0-system",
 				Labels:    map[string]string{ctldInstanceLabel: "fullmode"},
 			},
@@ -165,7 +165,7 @@ func TestKubernetesVolumeCtldResolverUsesOwnerNode(t *testing.T) {
 			},
 		},
 	)
-	resolver := newKubernetesVolumeCtldResolver(client, "sandbox0-system/storage-proxy-a")
+	resolver := newKubernetesVolumeCtldResolver(client, "sandbox0-system/manager-a")
 
 	got, err := resolver.ResolveCtldURL(context.Background(), "node-b", "sandbox0-system")
 	if err != nil {

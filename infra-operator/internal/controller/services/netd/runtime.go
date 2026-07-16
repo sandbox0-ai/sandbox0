@@ -86,7 +86,7 @@ func (r *Reconciler) BuildRuntimeAssets(ctx context.Context, compiledPlan *infra
 		return nil, nil
 	}
 	if r == nil || r.Resources == nil || r.Resources.Client == nil {
-		return nil, fmt.Errorf("netd resource manager is required")
+		return nil, fmt.Errorf("ctld network runtime resource manager is required")
 	}
 	scope := compiledPlan.Scope
 	name := fmt.Sprintf("%s-netd", scope.Name)

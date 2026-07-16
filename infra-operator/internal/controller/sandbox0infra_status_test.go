@@ -653,6 +653,39 @@ func TestUpdateValidationFailureStatusMarksReadyFalse(t *testing.T) {
 	}
 }
 
+func TestPruneManagedConditionsRemovesSupersededRuntimeConditions(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{Status: infrav1alpha1.Sandbox0InfraStatus{
+		Conditions: []metav1.Condition{
+			{Type: "StorageProxyReady", Status: metav1.ConditionTrue},
+			{Type: "NetdReady", Status: metav1.ConditionTrue},
+			{Type: infrav1alpha1.ConditionTypeStorageRuntimeReady, Status: metav1.ConditionTrue},
+			{Type: infrav1alpha1.ConditionTypeNetworkReady, Status: metav1.ConditionTrue},
+			{Type: "ExternalControllerReady", Status: metav1.ConditionTrue},
+		},
+	}}
+
+	reconciler := &Sandbox0InfraReconciler{}
+	reconciler.pruneManagedConditions(infra, []string{
+		infrav1alpha1.ConditionTypeStorageRuntimeReady,
+		infrav1alpha1.ConditionTypeNetworkReady,
+	})
+
+	for _, removed := range []string{"StorageProxyReady", "NetdReady"} {
+		if condition := findCondition(infra.Status.Conditions, removed); condition != nil {
+			t.Fatalf("superseded condition %q was not removed", removed)
+		}
+	}
+	for _, kept := range []string{
+		infrav1alpha1.ConditionTypeStorageRuntimeReady,
+		infrav1alpha1.ConditionTypeNetworkReady,
+		"ExternalControllerReady",
+	} {
+		if condition := findCondition(infra.Status.Conditions, kept); condition == nil {
+			t.Fatalf("condition %q was unexpectedly removed", kept)
+		}
+	}
+}
+
 func newStatusTestReconciler(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, objects ...ctrlclient.Object) (*Sandbox0InfraReconciler, ctrlclient.Client) {
 	t.Helper()
 	return newStatusTestReconcilerWithInterceptors(t, infra, interceptor.Funcs{}, objects...)

@@ -527,7 +527,7 @@ func hasContainerPort(ports []corev1.ContainerPort, name string, port int32) boo
 	return false
 }
 
-func TestBuildConfigUsesStorageProxyServicePortForDerivedURL(t *testing.T) {
+func TestBuildConfigUsesManagerStorageEndpoint(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add core scheme: %v", err)
@@ -552,18 +552,14 @@ func TestBuildConfigUsesStorageProxyServicePortForDerivedURL(t *testing.T) {
 					SSLMode:  "disable",
 				},
 			},
+			Storage: &infrav1alpha1.StorageConfig{
+				Runtime: &infrav1alpha1.StorageProxyConfig{HTTPPort: 18083},
+			},
 			Services: &infrav1alpha1.ServicesConfig{
-				StorageProxy: &infrav1alpha1.StorageProxyServiceConfig{
+				Manager: &infrav1alpha1.ManagerServiceConfig{
 					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
 						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
-					},
-					ServiceExposureConfig: infrav1alpha1.ServiceExposureConfig{
-						Service: &infrav1alpha1.ServiceNetworkConfig{
-							Port: 18083,
-						},
-					},
-					Config: &infrav1alpha1.StorageProxyConfig{
-						HTTPPort: 8081,
+						Replicas:             1,
 					},
 				},
 			},
@@ -595,8 +591,8 @@ func TestBuildConfigUsesStorageProxyServicePortForDerivedURL(t *testing.T) {
 		t.Fatalf("buildConfig returned error: %v", err)
 	}
 
-	if cfg.StorageProxyURL != "http://demo-storage-proxy:18083" {
-		t.Fatalf("expected storage proxy url to use service port, got %q", cfg.StorageProxyURL)
+	if cfg.ManagerStorageURL != "http://demo-manager.sandbox0-system.svc.cluster.local:18083" {
+		t.Fatalf("manager storage URL = %q", cfg.ManagerStorageURL)
 	}
 }
 

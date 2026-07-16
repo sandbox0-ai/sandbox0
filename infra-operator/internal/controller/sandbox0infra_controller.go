@@ -56,7 +56,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/manager"
 	meteringsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/metering"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/netd"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/nodereadiness"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/observability"
 	redissvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/redis"
@@ -67,7 +66,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sshgateway"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storage"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
-	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 )
 
@@ -264,7 +262,6 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	clusterGatewayReconciler := clustergateway.NewReconciler(resources)
 	managerReconciler := manager.NewReconciler(resources)
 	ctldReconciler := ctldsvc.NewReconciler(resources)
-	netdReconciler := netd.NewReconciler(resources)
 	nodeReadinessReconciler := nodereadiness.NewReconciler(resources)
 	rbacReconciler := rbac.NewReconciler(resources)
 
@@ -272,7 +269,7 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 		return ctrl.Result{RequeueAfter: requeueInterval}, err
 	}
 
-	steps, err := r.bindWorkflowSteps(infra, compiledPlan, resources, imageRepo, imageTag, authReconciler, dbReconciler, redisReconciler, credentialStoreReconciler, storageReconciler, registryReconciler, observabilityReconciler, clickHouseReconciler, meteringReconciler, sandboxObservabilityReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
+	steps, err := r.bindWorkflowSteps(infra, compiledPlan, resources, imageRepo, imageTag, authReconciler, dbReconciler, redisReconciler, credentialStoreReconciler, storageReconciler, registryReconciler, observabilityReconciler, clickHouseReconciler, meteringReconciler, sandboxObservabilityReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, ctldReconciler, nodeReadinessReconciler, rbacReconciler)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -280,7 +277,7 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 }
 
 // runStepsWithNodeReadinessRefresh updates the safety labels after every
-// workflow attempt, including attempts stopped by an earlier ctld or netd
+// workflow attempt, including attempts stopped by an earlier ctld or network
 // step. Refresh failures are logged but never replace the workflow result;
 // the normal node-readiness Check remains the gating step on the success path.
 func (r *Sandbox0InfraReconciler) runStepsWithNodeReadinessRefresh(
@@ -333,13 +330,12 @@ func (r *Sandbox0InfraReconciler) bindWorkflowSteps(
 	clusterGatewayReconciler *clustergateway.Reconciler,
 	managerReconciler *manager.Reconciler,
 	ctldReconciler *ctldsvc.Reconciler,
-	netdReconciler *netd.Reconciler,
 	nodeReadinessReconciler *nodereadiness.Reconciler,
 	rbacReconciler *rbac.Reconciler,
 ) ([]reconcileStep, error) {
 	steps := make([]reconcileStep, 0, len(compiledPlan.Workflow.Steps))
 	for _, planned := range compiledPlan.Workflow.Steps {
-		run, err := r.workflowStepRunner(infra, compiledPlan, resources, imageRepo, imageTag, planned.Name, authReconciler, dbReconciler, redisReconciler, credentialStoreReconciler, storageReconciler, registryReconciler, observabilityReconciler, clickHouseReconciler, meteringReconciler, sandboxObservabilityReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
+		run, err := r.workflowStepRunner(infra, compiledPlan, resources, imageRepo, imageTag, planned.Name, authReconciler, dbReconciler, redisReconciler, credentialStoreReconciler, storageReconciler, registryReconciler, observabilityReconciler, clickHouseReconciler, meteringReconciler, sandboxObservabilityReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, ctldReconciler, nodeReadinessReconciler, rbacReconciler)
 		if err != nil {
 			return nil, err
 		}
@@ -378,7 +374,6 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 	clusterGatewayReconciler *clustergateway.Reconciler,
 	managerReconciler *manager.Reconciler,
 	ctldReconciler *ctldsvc.Reconciler,
-	netdReconciler *netd.Reconciler,
 	nodeReadinessReconciler *nodereadiness.Reconciler,
 	rbacReconciler *rbac.Reconciler,
 ) (func(context.Context) error, error) {
@@ -481,117 +476,30 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 		}, nil
 	case "builtin-template-pods":
 		return func(ctx context.Context) error { return r.waitBuiltinTemplatePodsReady(ctx, infra, compiledPlan) }, nil
-	case "legacy-netd-handoff":
+	case "network-ready":
 		return func(ctx context.Context) error {
-			return r.prepareLegacyNetdHandoff(ctx, infra, imageRepo, imageTag, compiledPlan, netdReconciler, rbacReconciler)
-		}, nil
-	case "legacy-netd-standby":
-		return func(ctx context.Context) error {
-			return r.prepareLegacyNetdStandby(ctx, infra, compiledPlan, netdReconciler)
-		}, nil
-	case "netd-ready":
-		return func(ctx context.Context) error {
-			ready, err := ctldReconciler.EmbeddedNetdReady(ctx, infra)
+			ready, err := ctldReconciler.NetworkReady(ctx, infra)
 			if err != nil {
 				return err
 			}
 			if !ready {
-				return fmt.Errorf("embedded netd is not ready")
+				return fmt.Errorf("ctld network runtime is not ready")
 			}
 			return nil
-		}, nil
-	case "legacy-netd-cleanup":
-		return func(ctx context.Context) error {
-			return r.cleanupLegacyNetd(ctx, infra, compiledPlan, netdReconciler)
 		}, nil
 	case "data-plane-node-readiness":
 		return func(ctx context.Context) error {
 			return nodeReadinessReconciler.Check(ctx, infra, compiledPlan)
 		}, nil
-	case "storage-proxy":
+	case "storage-runtime-ready":
 		return func(ctx context.Context) error {
-			return r.cleanupLegacyStorageProxy(ctx, infra)
+			return r.ensureManagerStorageRuntimeReady(ctx, infra, common.GetServiceLabels(infra.Name, "manager"))
 		}, nil
 	case "register-cluster":
 		return func(ctx context.Context) error { return r.registerCluster(ctx, infra) }, nil
 	default:
 		return nil, fmt.Errorf("unsupported workflow step %q", name)
 	}
-}
-
-// cleanupLegacyStorageProxy removes only the standalone storage-proxy runtime.
-// Canonical configurations prove the manager storage endpoint is ready. Legacy
-// configurations retain the compatibility Service and prove it selects manager
-// pods before the old Deployment is allowed to terminate.
-func (r *Sandbox0InfraReconciler) cleanupLegacyStorageProxy(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
-	if infra == nil {
-		return fmt.Errorf("sandbox0infra is required")
-	}
-	name := fmt.Sprintf("%s-storage-proxy", infra.Name)
-	managerLabels := common.GetServiceLabels(infra.Name, "manager")
-	if infra.Spec.Storage != nil && infra.Spec.Storage.Runtime != nil {
-		if err := r.ensureManagerStorageRuntimeReady(ctx, infra, managerLabels); err != nil {
-			return err
-		}
-	} else {
-		alias := &corev1.Service{}
-		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, alias); err != nil {
-			if apierrors.IsNotFound(err) {
-				return fmt.Errorf("storage-proxy compatibility service %q is not ready", name)
-			}
-			return err
-		}
-		for key, expected := range managerLabels {
-			if alias.Spec.Selector[key] != expected {
-				return fmt.Errorf("storage-proxy compatibility service %q does not select manager pods", name)
-			}
-		}
-		endpointsReady, err := r.storageProxyAliasEndpointsReady(ctx, infra, name, managerLabels)
-		if err != nil {
-			return err
-		}
-		if !endpointsReady {
-			return fmt.Errorf("storage-proxy compatibility service %q endpoints have not converged on manager pods", name)
-		}
-	}
-
-	deployment := &appsv1.Deployment{}
-	key := types.NamespacedName{Name: name, Namespace: infra.Namespace}
-	if err := r.Get(ctx, key, deployment); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return err
-		}
-	} else if deployment.DeletionTimestamp.IsZero() {
-		propagation := metav1.DeletePropagationForeground
-		if err := r.Delete(ctx, deployment, &client.DeleteOptions{PropagationPolicy: &propagation}); err != nil && !apierrors.IsNotFound(err) {
-			return err
-		}
-	}
-
-	pods := &corev1.PodList{}
-	if err := r.List(ctx, pods,
-		client.InNamespace(infra.Namespace),
-		client.MatchingLabels(common.GetServiceLabels(infra.Name, "storage-proxy")),
-	); err != nil {
-		return err
-	}
-	if len(pods.Items) > 0 {
-		return fmt.Errorf("legacy storage-proxy pods are still terminating")
-	}
-
-	if err := r.deleteObjectIfExists(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, &corev1.ServiceAccount{}); err != nil {
-		return err
-	}
-	if err := r.deleteObjectIfExists(ctx, types.NamespacedName{Name: name}, &rbacv1.ClusterRoleBinding{}); err != nil {
-		return err
-	}
-	if err := r.deleteObjectIfExists(ctx, types.NamespacedName{Name: name}, &rbacv1.ClusterRole{}); err != nil {
-		return err
-	}
-	if err := r.deleteObjectIfExists(ctx, key, &corev1.ConfigMap{}); err != nil {
-		return err
-	}
-	return r.deleteHashedServiceConfigMaps(ctx, infra.Namespace, name)
 }
 
 func (r *Sandbox0InfraReconciler) ensureManagerStorageRuntimeReady(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, managerLabels map[string]string) error {
@@ -618,7 +526,7 @@ func (r *Sandbox0InfraReconciler) ensureManagerStorageRuntimeReady(ctx context.C
 	if !storagePortReady {
 		return fmt.Errorf("manager storage service %q has no storage-http port", name)
 	}
-	endpointsReady, err := r.storageProxyAliasEndpointsReady(ctx, infra, name, managerLabels)
+	endpointsReady, err := r.serviceEndpointsReady(ctx, infra, name, managerLabels)
 	if err != nil {
 		return err
 	}
@@ -628,11 +536,9 @@ func (r *Sandbox0InfraReconciler) ensureManagerStorageRuntimeReady(ctx context.C
 	return nil
 }
 
-// storageProxyAliasEndpointsReady prevents a selector update from racing the
-// EndpointSlice controller. The old workload remains alive until the alias has
-// at least one ready manager endpoint and no endpoint still references a
-// non-manager pod.
-func (r *Sandbox0InfraReconciler) storageProxyAliasEndpointsReady(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, serviceName string, managerLabels map[string]string) (bool, error) {
+// serviceEndpointsReady verifies that every published endpoint belongs to a
+// current manager Pod and that at least one endpoint is ready.
+func (r *Sandbox0InfraReconciler) serviceEndpointsReady(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, serviceName string, managerLabels map[string]string) (bool, error) {
 	if infra == nil {
 		return false, fmt.Errorf("sandbox0infra is required")
 	}
@@ -679,225 +585,6 @@ func labelsContain(actual, expected map[string]string) bool {
 		}
 	}
 	return true
-}
-
-// legacyNetdDaemonSetExists returns true only while an existing standalone
-// netd workload can still own a node lock. A fresh install can proceed without
-// waiting for migration candidates.
-func (r *Sandbox0InfraReconciler) legacyNetdDaemonSetExists(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (bool, error) {
-	if infra == nil {
-		return false, fmt.Errorf("sandbox0infra is required")
-	}
-	ds := &appsv1.DaemonSet{}
-	key := types.NamespacedName{Name: fmt.Sprintf("%s-netd", infra.Name), Namespace: infra.Namespace}
-	if err := r.Get(ctx, key, ds); err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	if ds.Status.DesiredNumberScheduled > 0 {
-		return true, nil
-	}
-	pods := &corev1.PodList{}
-	if err := r.List(ctx, pods,
-		client.InNamespace(infra.Namespace),
-		client.MatchingLabels(common.GetServiceLabels(infra.Name, "netd")),
-	); err != nil {
-		return false, err
-	}
-	for i := range pods.Items {
-		if pods.Items[i].DeletionTimestamp.IsZero() {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// ctldHandoffCandidatesRunning waits for both HA slot DaemonSets to have a
-// running replacement pod on every desired node. At least one current-template
-// slot must also be PodReady on each node, proving the HA standby synchronized
-// before the legacy netd is asked to yield its active lock.
-func (r *Sandbox0InfraReconciler) ctldHandoffCandidatesRunning(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (bool, error) {
-	if infra == nil {
-		return false, fmt.Errorf("sandbox0infra is required")
-	}
-	baseLabels := common.GetServiceLabels(infra.Name, "ctld")
-	var desiredNodes map[string]struct{}
-	readyNodes := map[string]struct{}{}
-	for _, slot := range []string{dataplane.CtldHASlotA, dataplane.CtldHASlotB} {
-		ds := &appsv1.DaemonSet{}
-		key := types.NamespacedName{Name: fmt.Sprintf("%s-ctld-%s", infra.Name, slot), Namespace: infra.Namespace}
-		if err := r.Get(ctx, key, ds); err != nil {
-			if apierrors.IsNotFound(err) {
-				return false, nil
-			}
-			return false, err
-		}
-		if !ctldsvc.DaemonSetEmbedsNetd(ds, netd.ScopedActiveLockPath(infra.Namespace, infra.Name)) {
-			return false, nil
-		}
-		if ds.Status.DesiredNumberScheduled == 0 ||
-			ds.Status.ObservedGeneration < ds.Generation ||
-			ds.Status.UpdatedNumberScheduled != ds.Status.DesiredNumberScheduled ||
-			ds.Status.CurrentNumberScheduled != ds.Status.DesiredNumberScheduled {
-			return false, nil
-		}
-
-		labels := common.CloneStringMap(baseLabels)
-		labels[dataplane.CtldHASlotLabel] = slot
-		pods := &corev1.PodList{}
-		if err := r.List(ctx, pods, client.InNamespace(infra.Namespace), client.MatchingLabels(labels)); err != nil {
-			return false, err
-		}
-		slotNodes := map[string]struct{}{}
-		for i := range pods.Items {
-			pod := &pods.Items[i]
-			if pod.Spec.NodeName != "" && ctldsvc.CtldContainerRunning(pod) && !ctldsvc.PodMatchesCurrentTemplate(pod, ds) {
-				return false, nil
-			}
-			if pod.DeletionTimestamp.IsZero() && pod.Spec.NodeName != "" && ctldsvc.PodMatchesCurrentTemplate(pod, ds) {
-				slotNodes[pod.Spec.NodeName] = struct{}{}
-				if ctldsvc.PodReadyForCurrentTemplate(pod, ds) {
-					readyNodes[pod.Spec.NodeName] = struct{}{}
-				}
-			}
-		}
-		if int32(len(slotNodes)) < ds.Status.DesiredNumberScheduled {
-			return false, nil
-		}
-		if desiredNodes == nil {
-			desiredNodes = slotNodes
-		} else if !sameStringSet(desiredNodes, slotNodes) {
-			return false, nil
-		}
-	}
-	for node := range desiredNodes {
-		if _, ok := readyNodes[node]; !ok {
-			return false, nil
-		}
-	}
-	return len(desiredNodes) > 0, nil
-}
-
-func sameStringSet(left, right map[string]struct{}) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for value := range left {
-		if _, ok := right[value]; !ok {
-			return false
-		}
-	}
-	return true
-}
-
-func (r *Sandbox0InfraReconciler) prepareLegacyNetdHandoff(
-	ctx context.Context,
-	infra *infrav1alpha1.Sandbox0Infra,
-	imageRepo, imageTag string,
-	compiledPlan *infraplan.InfraPlan,
-	netdReconciler *netd.Reconciler,
-	rbacReconciler *rbac.Reconciler,
-) error {
-	if netdReconciler == nil {
-		return fmt.Errorf("netd reconciler is required")
-	}
-	legacyExists, err := r.legacyNetdDaemonSetExists(ctx, infra)
-	if err != nil {
-		return err
-	}
-	if legacyExists {
-		if rbacReconciler == nil {
-			return fmt.Errorf("rbac reconciler is required")
-		}
-		if err := rbacReconciler.ReconcileNetdRBAC(ctx, infra); err != nil {
-			return err
-		}
-		if err := netdReconciler.PrepareLegacyHandoff(ctx, imageRepo, imageTag, compiledPlan); err != nil {
-			return err
-		}
-	}
-	ready, err := netdReconciler.LegacyHandoffReady(ctx, compiledPlan)
-	if err != nil {
-		return err
-	}
-	if !ready {
-		return fmt.Errorf("legacy netd handoff is not ready")
-	}
-	return nil
-}
-
-func (r *Sandbox0InfraReconciler) prepareLegacyNetdStandby(
-	ctx context.Context,
-	infra *infrav1alpha1.Sandbox0Infra,
-	compiledPlan *infraplan.InfraPlan,
-	netdReconciler *netd.Reconciler,
-) error {
-	if netdReconciler == nil {
-		return fmt.Errorf("netd reconciler is required")
-	}
-	legacyExists, err := r.legacyNetdDaemonSetExists(ctx, infra)
-	if err != nil {
-		return err
-	}
-	if legacyExists {
-		ready, err := r.ctldHandoffCandidatesRunning(ctx, infra)
-		if err != nil {
-			return err
-		}
-		if !ready {
-			return fmt.Errorf("embedded ctld netd candidates are not running")
-		}
-	}
-	if err := netdReconciler.PrepareLegacyStandby(ctx, compiledPlan); err != nil {
-		return err
-	}
-	ready, err := netdReconciler.LegacyStandbyReady(ctx, compiledPlan)
-	if err != nil {
-		return err
-	}
-	if !ready {
-		return fmt.Errorf("legacy netd standby rollout is not ready")
-	}
-	return nil
-}
-
-func (r *Sandbox0InfraReconciler) cleanupLegacyNetd(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan, netdReconciler *netd.Reconciler) error {
-	if netdReconciler == nil {
-		return fmt.Errorf("netd reconciler is required")
-	}
-	if err := netdReconciler.CleanupLegacyDaemonSet(ctx, compiledPlan); err != nil {
-		return err
-	}
-	return r.cleanupLegacyNetdAccess(ctx, infra)
-}
-
-func (r *Sandbox0InfraReconciler) cleanupLegacyNetdAccess(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
-	if infra == nil {
-		return fmt.Errorf("sandbox0infra is required")
-	}
-	name := fmt.Sprintf("%s-netd", infra.Name)
-	if err := r.deleteObjectIfExists(ctx, types.NamespacedName{Name: name}, &rbacv1.ClusterRoleBinding{}); err != nil {
-		return err
-	}
-	if err := r.deleteObjectIfExists(ctx, types.NamespacedName{Name: name}, &rbacv1.ClusterRole{}); err != nil {
-		return err
-	}
-	return r.deleteObjectIfExists(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, &corev1.ServiceAccount{})
-}
-
-func (r *Sandbox0InfraReconciler) deleteObjectIfExists(ctx context.Context, key types.NamespacedName, obj client.Object) error {
-	if err := r.Get(ctx, key, obj); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		return err
-	}
-	if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
-		return err
-	}
-	return nil
 }
 
 func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(
@@ -1277,6 +964,8 @@ func (r *Sandbox0InfraReconciler) projectClusterForPlan(infra *infrav1alpha1.San
 
 func managedConditionTypeSet() map[string]struct{} {
 	return map[string]struct{}{
+		"StorageProxyReady":                             {},
+		"NetdReady":                                     {},
 		infrav1alpha1.ConditionTypeReady:                {},
 		infrav1alpha1.ConditionTypeInternalAuthReady:    {},
 		infrav1alpha1.ConditionTypeDatabaseReady:        {},
@@ -1289,8 +978,8 @@ func managedConditionTypeSet() map[string]struct{} {
 		infrav1alpha1.ConditionTypeSchedulerReady:       {},
 		infrav1alpha1.ConditionTypeClusterGatewayReady:  {},
 		infrav1alpha1.ConditionTypeManagerReady:         {},
-		infrav1alpha1.ConditionTypeStorageProxyReady:    {},
-		infrav1alpha1.ConditionTypeNetdReady:            {},
+		infrav1alpha1.ConditionTypeStorageRuntimeReady:  {},
+		infrav1alpha1.ConditionTypeNetworkReady:         {},
 		infrav1alpha1.ConditionTypeCtldReady:            {},
 		infrav1alpha1.ConditionTypeClusterRegistered:    {},
 		infrav1alpha1.ConditionTypeSecretsGenerated:     {},
@@ -1546,7 +1235,7 @@ func (r *Sandbox0InfraReconciler) requestsForManagedDataPlanePod(_ context.Conte
 		return nil
 	}
 	component := labels["app.kubernetes.io/component"]
-	if component != "netd" && component != "ctld" {
+	if component != "ctld" {
 		return nil
 	}
 	instance := labels["app.kubernetes.io/instance"]

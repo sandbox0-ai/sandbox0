@@ -84,12 +84,12 @@ func (r *Reconciler) Refresh(ctx context.Context, infra *infrav1alpha1.Sandbox0I
 
 	nodeSelector, _ := common.ResolveSandboxNodePlacement(infra)
 	managerEnabled := compiledPlan.Components.EnableManager
-	requireNetd := compiledPlan.Components.EnableNetd
+	requireNetwork := compiledPlan.Components.EnableNetwork
 	requireCtld := compiledPlan.Components.EnableCtld
 
 	ctldReadyByNode := make(map[string]bool)
 	csiRegisteredByNode := make(map[string]bool)
-	if managerEnabled && (requireCtld || requireNetd) {
+	if managerEnabled && (requireCtld || requireNetwork) {
 		podList := &corev1.PodList{}
 		if err := r.Resources.Client.List(ctx, podList,
 			client.InNamespace(compiledPlan.Scope.Namespace),
@@ -104,7 +104,7 @@ func (r *Reconciler) Refresh(ctx context.Context, infra *infrav1alpha1.Sandbox0I
 		if err != nil {
 			return summary, err
 		}
-		ctldReadyByNode = readyCtldPodsByNode(podList.Items, ctldDaemonSets, requireNetd)
+		ctldReadyByNode = readyCtldPodsByNode(podList.Items, ctldDaemonSets, requireNetwork)
 	}
 	if managerEnabled && requireCtld {
 		csiNodeList := &storagev1.CSINodeList{}
@@ -134,16 +134,15 @@ func (r *Reconciler) Refresh(ctx context.Context, infra *infrav1alpha1.Sandbox0I
 		}
 
 		ctldReady := !requireCtld || (ctldReadyByNode[node.Name] && csiRegisteredByNode[node.Name])
-		// netd runs only in the active ctld process. The active ctld readiness
-		// includes netd and the standby readiness requires HA synchronization, so
-		// the two-slot ctld signal is also the node-scoped netd signal.
-		netdReady := !requireNetd || ctldReady
-		ready := netdReady && ctldReady
+		// Active ctld readiness includes the network runtime, while standby
+		// readiness proves that the HA peer can take over.
+		networkReady := !requireNetwork || ctldReady
+		ready := networkReady && ctldReady
 		if ready {
 			summary.ReadyNodes++
 		}
 
-		if err := r.patchNodeReadiness(ctx, node, ready, requireNetd, netdReady, requireCtld, ctldReady); err != nil {
+		if err := r.patchNodeReadiness(ctx, node, ready, requireCtld, ctldReady); err != nil {
 			return summary, err
 		}
 	}
@@ -175,6 +174,8 @@ func (r *Reconciler) clearNodeReadiness(ctx context.Context, node *corev1.Node) 
 	}
 	original := node.DeepCopy()
 	delete(node.Labels, dataplane.NodeDataPlaneReadyLabel)
+	// Remove the superseded per-engine label while converging nodes on the
+	// data-plane and ctld readiness signals.
 	delete(node.Labels, dataplane.NodeNetdReadyLabel)
 	delete(node.Labels, dataplane.NodeCtldReadyLabel)
 	if labelsEqual(original.Labels, node.Labels) {
@@ -190,8 +191,6 @@ func (r *Reconciler) patchNodeReadiness(
 	ctx context.Context,
 	node *corev1.Node,
 	dataPlaneReady bool,
-	requireNetd bool,
-	netdReady bool,
 	requireCtld bool,
 	ctldReady bool,
 ) error {
@@ -204,7 +203,7 @@ func (r *Reconciler) patchNodeReadiness(
 	}
 
 	setBoolLabel(node.Labels, dataplane.NodeDataPlaneReadyLabel, dataPlaneReady)
-	setOptionalBoolLabel(node.Labels, dataplane.NodeNetdReadyLabel, requireNetd, netdReady)
+	delete(node.Labels, dataplane.NodeNetdReadyLabel)
 	setOptionalBoolLabel(node.Labels, dataplane.NodeCtldReadyLabel, requireCtld, ctldReady)
 
 	if labelsEqual(original.Labels, node.Labels) {

@@ -1,4 +1,4 @@
-# Example: Multi-cluster data plane (cluster-gateway + manager-hosted storage + ctld)
+# Example: Multi-cluster data plane (cluster-gateway + manager + ctld)
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -115,8 +115,8 @@ spec:
       pool:
         minIdle: 0
         maxIdle: 2
-  # Shared placement for sandbox template Pods plus node-local helpers such as
-  # netd and ctld. In production, point this at your dedicated sandbox
+  # Shared placement for sandbox template Pods and the node-local ctld runtime.
+  # In production, point this at your dedicated sandbox
   # node pool and pair it with services.manager.config.sandboxRuntimeClassName.
   # infra-operator manages sandbox0.ai/data-plane-ready; do not include it here.
   # The example below targets a Kata node pool; adjust labels and tolerations

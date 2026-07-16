@@ -355,11 +355,11 @@ func main() {
 
 	// Initialize internal auth generator for procd communication
 	var internalTokenGenerator service.TokenGenerator
-	var storageProxyAdminTokenGenerator service.TokenGenerator
+	var managerStorageTokenGenerator service.TokenGenerator
 	var internalAuthGen *internalauth.Generator
 	privateKey, err := internalauth.LoadEd25519PrivateKeyFromFile(internalauth.DefaultInternalJWTPrivateKeyPath)
 	if err != nil {
-		logger.Warn("Failed to load internal auth private key, procd and storage-proxy calls will not work",
+		logger.Warn("Failed to load internal auth private key, procd and manager storage calls will not work",
 			zap.String("path", internalauth.DefaultInternalJWTPrivateKeyPath),
 			zap.Error(err),
 		)
@@ -370,18 +370,18 @@ func main() {
 			TTL:        30 * time.Second,
 		})
 		internalTokenGenerator = service.NewInternalTokenGenerator(internalAuthGen)
-		storageProxyAdminTokenGenerator = service.NewStorageProxyAdminTokenGenerator(internalAuthGen)
-		logger.Info("Internal auth generators initialized for procd and storage-proxy communication")
+		managerStorageTokenGenerator = service.NewManagerStorageAdminTokenGenerator(internalAuthGen)
+		logger.Info("Internal auth generators initialized for procd and manager storage communication")
 	}
 
-	// The embedded storage runtime has an independent config file because the
-	// manager and storage-proxy schemas contain overlapping keys such as
+	// The storage runtime has an independent config file because its schema and
+	// the manager schema contain overlapping keys such as
 	// http_port and database_schema.
-	var embeddedStorageRuntime *storageproxyruntime.Runtime
-	if storageConfigPath := strings.TrimSpace(os.Getenv("STORAGE_PROXY_CONFIG_PATH")); storageConfigPath != "" {
+	var managerStorageRuntime *storageproxyruntime.Runtime
+	if storageConfigPath := strings.TrimSpace(os.Getenv("STORAGE_RUNTIME_CONFIG_PATH")); storageConfigPath != "" {
 		storageCfg, loadErr := config.ReadStorageProxyConfig(storageConfigPath)
 		if loadErr != nil {
-			logger.Fatal("Failed to load embedded storage-proxy config",
+			logger.Fatal("Failed to load manager storage config",
 				zap.String("path", storageConfigPath),
 				zap.Error(loadErr),
 			)
@@ -395,7 +395,7 @@ func main() {
 		}
 		storageLogrusLogger.SetLevel(storageLogLevel)
 
-		embeddedStorageRuntime, err = storageproxyruntime.New(ctx, storageproxyruntime.Options{
+		managerStorageRuntime, err = storageproxyruntime.New(ctx, storageproxyruntime.Options{
 			Config:        storageCfg,
 			Logger:        logger,
 			LogrusLogger:  storageLogrusLogger,
@@ -403,25 +403,25 @@ func main() {
 			K8sClient:     k8sClient,
 		})
 		if err != nil {
-			logger.Fatal("Failed to initialize embedded storage-proxy runtime", zap.Error(err))
+			logger.Fatal("Failed to initialize manager storage runtime", zap.Error(err))
 		}
-		if err := embeddedStorageRuntime.Start(ctx); err != nil {
-			logger.Fatal("Failed to start embedded storage-proxy runtime", zap.Error(err))
+		if err := managerStorageRuntime.Start(ctx); err != nil {
+			logger.Fatal("Failed to start manager storage runtime", zap.Error(err))
 		}
 		go func() {
 			select {
-			case runtimeErr := <-embeddedStorageRuntime.Errors():
-				logger.Error("Embedded storage-proxy runtime failed", zap.Error(runtimeErr))
+			case runtimeErr := <-managerStorageRuntime.Errors():
+				logger.Error("Manager storage runtime failed", zap.Error(runtimeErr))
 				cancel()
 			case <-ctx.Done():
 			}
 		}()
-		logger.Info("Embedded storage-proxy runtime started",
+		logger.Info("Manager storage runtime started",
 			zap.String("configPath", storageConfigPath),
-			zap.String("address", embeddedStorageRuntime.Address()),
+			zap.String("address", managerStorageRuntime.Address()),
 		)
 	} else {
-		logger.Info("Embedded storage-proxy runtime disabled; STORAGE_PROXY_CONFIG_PATH is not set")
+		logger.Info("Manager storage runtime disabled; STORAGE_RUNTIME_CONFIG_PATH is not set")
 	}
 
 	// Parse ratios
@@ -489,27 +489,18 @@ func main() {
 	} else if rootFSObjectStore != nil {
 		sandboxService.SetRootFSObjectDeleter(rootFSObjectStore)
 	}
-	if embeddedStorageRuntime != nil && storageProxyAdminTokenGenerator != nil {
-		internalHTTPClient := embeddedStorageRuntime.InternalHTTPClient()
+	if managerStorageRuntime != nil && managerStorageTokenGenerator != nil {
+		internalHTTPClient := managerStorageRuntime.InternalHTTPClient()
 		internalHTTPClient.Timeout = cfg.ProcdClientTimeout.Duration
-		sandboxService.SetWebhookStateVolumeClient(service.NewStorageProxyVolumeClient(service.StorageProxyVolumeClientConfig{
-			BaseURL:        "http://storage-proxy",
+		sandboxService.SetWebhookStateVolumeClient(service.NewManagerStorageVolumeClient(service.ManagerStorageVolumeClientConfig{
+			BaseURL:        "http://manager-storage",
 			HTTPClient:     internalHTTPClient,
-			TokenGenerator: storageProxyAdminTokenGenerator,
+			TokenGenerator: managerStorageTokenGenerator,
 			ClusterID:      cfg.DefaultClusterId,
 		}))
-		logger.Info("Webhook state volumes use the embedded storage-proxy runtime")
-	} else if cfg.StorageProxyBaseURL != "" && cfg.StorageProxyHTTPPort > 0 && storageProxyAdminTokenGenerator != nil {
-		storageProxyBaseURL := fmt.Sprintf("http://%s:%d", strings.TrimSpace(cfg.StorageProxyBaseURL), cfg.StorageProxyHTTPPort)
-		sandboxService.SetWebhookStateVolumeClient(service.NewStorageProxyVolumeClient(service.StorageProxyVolumeClientConfig{
-			BaseURL:        storageProxyBaseURL,
-			HTTPClient:     obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration}),
-			TokenGenerator: storageProxyAdminTokenGenerator,
-			ClusterID:      cfg.DefaultClusterId,
-		}))
-		logger.Info("Webhook state volumes enabled", zap.String("storageProxyBaseURL", storageProxyBaseURL))
+		logger.Info("Webhook state volumes use the manager storage runtime")
 	} else {
-		logger.Warn("Webhook state volumes disabled; sandbox claims with webhooks will fail until storage-proxy is configured")
+		logger.Warn("Webhook state volumes disabled; sandbox claims with webhooks require storage.runtime")
 	}
 	sandboxService.SetDeletionWebhookEmitter(service.NewHTTPSandboxDeletionWebhookEmitter(obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration})))
 	podInformer.Informer().AddEventHandler(sandboxService.PodEventHandler())
@@ -737,10 +728,10 @@ func main() {
 	// Wait for termination signal
 	<-ctx.Done()
 	logger.Info("Shutting down gracefully")
-	if embeddedStorageRuntime != nil {
+	if managerStorageRuntime != nil {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		if err := embeddedStorageRuntime.Shutdown(shutdownCtx); err != nil {
-			logger.Error("Embedded storage-proxy shutdown reported errors", zap.Error(err))
+		if err := managerStorageRuntime.Shutdown(shutdownCtx); err != nil {
+			logger.Error("Manager storage shutdown reported errors", zap.Error(err))
 		}
 		shutdownCancel()
 	}

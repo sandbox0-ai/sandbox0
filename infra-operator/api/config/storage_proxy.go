@@ -8,7 +8,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// StorageProxyConfig holds the server configuration.
+// StorageProxyConfig holds the storage runtime configuration.
 type StorageProxyConfig struct {
 	// HTTP Management API
 	// +optional
@@ -190,7 +190,7 @@ type StorageProxyConfig struct {
 	KubeconfigPath string `yaml:"kubeconfig_path" json:"kubeconfigPath"` // Path to kubeconfig file (empty for in-cluster config)
 }
 
-// LoadStorageProxyConfig returns the storage-proxy configuration.
+// LoadStorageProxyConfig returns the storage runtime configuration.
 func LoadStorageProxyConfig() *StorageProxyConfig {
 	path := os.Getenv("CONFIG_PATH")
 	if path == "" {
@@ -204,7 +204,7 @@ func LoadStorageProxyConfig() *StorageProxyConfig {
 	return cfg
 }
 
-// ReadStorageProxyConfig loads storage-proxy configuration from an explicit
+// ReadStorageProxyConfig loads storage runtime configuration from an explicit
 // path and returns parsing errors to the embedding process.
 func ReadStorageProxyConfig(path string) (*StorageProxyConfig, error) {
 	return loadStorageProxyConfig(path)

@@ -42,7 +42,7 @@
 //	    PrivateKey: privateKey,
 //	})
 //
-//	token, err := generator.Generate("storage-proxy", "team-123", "user-456",
+//	token, err := generator.Generate("manager-storage", "team-123", "user-456",
 //	    internalauth.GenerateOptions{
 //	        Permissions: []string{"sandboxvolume:read", "sandboxvolume:write"},
 //	    })
@@ -52,10 +52,10 @@
 //	req.Header.Set("X-Internal-Token", token)
 //	client.Do(req)
 //
-//	// Step 3: Validator (storage-proxy/procd) - load public key and verify
+//	// Step 3: Validator (manager storage/procd) - load public key and verify
 //	publicKey, _ := internalauth.LoadEd25519PublicKeyFromFile("/config/internal_jwt_public.key")
 //	validator := internalauth.NewValidator(internalauth.ValidatorConfig{
-//	    Target:    "storage-proxy",
+//	    Target:    "manager-storage",
 //	    PublicKey: publicKey,
 //	})
 //
@@ -65,10 +65,10 @@
 // # HTTP Client with Automatic Token Injection
 //
 //	// Create an auto-authenticating HTTP client
-//	client := internalauth.NewAuthenticatedClient(generator, "storage-proxy")
+//	client := internalauth.NewAuthenticatedClient(generator, "manager-storage")
 //
 //	// Add team context to request
-//	req, _ := http.NewRequest("GET", "http://storage-proxy:8081/api/v1/volumes", nil)
+//	req, _ := http.NewRequest("GET", "http://manager:8081/api/v1/volumes", nil)
 //	req = req.WithContext(internalauth.ContextWithTeam(req.Context(), "team-123"))
 //
 //	// Token is automatically added
@@ -113,12 +113,12 @@
 //	{
 //	  "iss": "cluster-gateway",      // Issuer (caller service)
 //	  "sub": "team-123",              // Subject (team ID)
-//	  "aud": "storage-proxy",         // Audience (target service)
+//	  "aud": "manager-storage",       // Audience (target service)
 //	  "iat": 1706745600,              // Issued at
 //	  "exp": 1706745630,              // Expires at (30s default)
 //	  "jti": "unique-id",             // JWT ID (for replay detection)
 //	  "caller": "cluster-gateway",   // Caller service
-//	  "target": "storage-proxy",      // Target service
+//	  "target": "manager-storage",    // Target service
 //	  "team_id": "team-123",          // Team ID
 //	  "user_id": "user-456",          // User ID (optional)
 //	  "permissions": ["..."]          // Granted permissions
@@ -164,6 +164,6 @@
 //   - "cluster-gateway"  - API gateway and router
 //   - "manager"           - Template and sandbox management
 //   - "procd"             - Sandbox process manager (untrusted, uses public key only)
-//   - "storage-proxy"     - Storage and volume management
+//   - "manager-storage"   - Manager storage and volume endpoint
 //   - "e2b-gateway"       - E2B compatibility layer
 package internalauth

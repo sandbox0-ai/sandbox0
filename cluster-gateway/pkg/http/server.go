@@ -60,7 +60,7 @@ type Server struct {
 	router                                   *gin.Engine
 	cfg                                      *config.ClusterGatewayConfig
 	proxy2Mgr                                *proxy.Router
-	proxy2sp                                 *proxy.Router
+	proxy2ManagerStorage                     *proxy.Router
 	managerClient                            *client.ManagerClient
 	authMiddleware                           *middleware.InternalAuthMiddleware
 	sandboxAuditIngestAuthMiddleware         *middleware.InternalAuthMiddleware
@@ -135,17 +135,17 @@ func NewServer(
 		}
 	}
 
-	var proxy2sp *proxy.Router
-	if strings.TrimSpace(cfg.StorageProxyURL) != "" {
+	var proxy2ManagerStorage *proxy.Router
+	if strings.TrimSpace(cfg.ManagerStorageURL) != "" {
 		var err error
-		proxy2sp, err = proxy.NewRouter(
-			cfg.StorageProxyURL,
+		proxy2ManagerStorage, err = proxy.NewRouter(
+			cfg.ManagerStorageURL,
 			logger,
 			proxyTimeout,
 			proxy.WithHTTPClient(httpClient),
 		)
 		if err != nil {
-			return nil, fmt.Errorf("create storage-proxy proxy router: %w", err)
+			return nil, fmt.Errorf("create manager storage upstream router: %w", err)
 		}
 	}
 
@@ -328,7 +328,7 @@ func NewServer(
 		router:                                   router,
 		cfg:                                      cfg,
 		proxy2Mgr:                                proxy2Mgr,
-		proxy2sp:                                 proxy2sp,
+		proxy2ManagerStorage:                     proxy2ManagerStorage,
 		managerClient:                            managerClient,
 		authMiddleware:                           authMiddleware,
 		sandboxAuditIngestAuthMiddleware:         sandboxAuditIngestAuthMiddleware,
@@ -554,9 +554,9 @@ func (s *Server) setupRoutes() {
 			rootFSSnapshots.DELETE("/:snapshot_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.proxyManagerPathParam("/api/v1/sandbox-rootfs-snapshots/", "snapshot_id", "snapshot_id"))
 		}
 
-		// === SandboxVolume Management (→ Storage Proxy) ===
+		// === SandboxVolume Management (→ Manager Storage) ===
 		sandboxvolumes := v1.Group("/sandboxvolumes")
-		sandboxvolumes.Use(s.storageProxyUpstreamMiddleware())
+		sandboxvolumes.Use(s.managerStorageUpstreamMiddleware())
 		{
 			sandboxvolumes.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeCreate), s.createSandboxVolume)
 			sandboxvolumes.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), s.listSandboxVolumes)
@@ -574,7 +574,7 @@ func (s *Server) setupRoutes() {
 				files.GET("/stat", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), s.handleVolumeFileStat)
 				files.GET("/list", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), s.handleVolumeFileList)
 			}
-			// Snapshot/Restore (→ Storage Proxy)
+			// Snapshot/Restore (→ Manager Storage)
 			snapshots := sandboxvolumes.Group("/:id/snapshots")
 			{
 				snapshots.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), s.createSandboxVolumeSnapshot)
@@ -817,17 +817,17 @@ func (s *Server) managerUpstreamMiddleware() gin.HandlerFunc {
 	)
 }
 
-func (s *Server) storageProxyUpstreamMiddleware() gin.HandlerFunc {
+func (s *Server) managerStorageUpstreamMiddleware() gin.HandlerFunc {
 	return s.requireUpstream(
 		func() bool {
-			return strings.TrimSpace(s.cfg.StorageProxyURL) != "" && s.proxy2sp != nil
+			return strings.TrimSpace(s.cfg.ManagerStorageURL) != "" && s.proxy2ManagerStorage != nil
 		},
 		func() []zap.Field {
-			return []zap.Field{zap.String("storage_proxy_url", s.cfg.StorageProxyURL)}
+			return []zap.Field{zap.String("manager_storage_url", s.cfg.ManagerStorageURL)}
 		},
-		"Storage-proxy upstream not configured",
-		"storage-proxy upstream not configured",
-		"storage_proxy_url is empty",
+		"Manager storage upstream not configured",
+		"manager storage upstream not configured",
+		"manager_storage_url is empty",
 	)
 }
 

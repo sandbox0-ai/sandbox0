@@ -13,9 +13,6 @@ const singleClusterScenariosEnvVar = "E2E_SINGLE_CLUSTER_SCENARIOS"
 
 var scenarioManifestPaths = []string{
 	"single-cluster/fullmode.yaml",
-	"single-cluster/minimal.yaml",
-	"single-cluster/network-policy.yaml",
-	"single-cluster/volumes.yaml",
 }
 
 // LoadScenarios builds single-cluster scenarios from a fixed manifest allowlist.

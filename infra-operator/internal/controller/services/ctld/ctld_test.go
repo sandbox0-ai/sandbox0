@@ -2,7 +2,6 @@ package ctld
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -45,10 +44,6 @@ func TestReconcileUsesSharedSandboxNodePlacement(t *testing.T) {
 			},
 		},
 	}
-	infra.Spec.Services.Netd.NodeSelector = map[string]string{
-		"sandbox0.ai/node-role": "legacy",
-	}
-
 	ds := reconcileCtldDaemonSet(t, infra)
 	if got := ds.Spec.Template.Spec.NodeSelector["sandbox0.ai/node-role"]; got != "shared" {
 		t.Fatalf("expected shared node selector, got %q", got)
@@ -58,61 +53,31 @@ func TestReconcileUsesSharedSandboxNodePlacement(t *testing.T) {
 	}
 }
 
-func TestReconcileFallsBackToLegacyNetdPlacement(t *testing.T) {
-	infra := newCtldTestInfra()
-	infra.Spec.Services.Netd.NodeSelector = map[string]string{
-		"sandbox0.ai/node-role": "legacy",
-	}
-	infra.Spec.Services.Netd.Tolerations = []corev1.Toleration{
-		{
-			Key:      "sandbox.gke.io/runtime",
-			Operator: corev1.TolerationOpEqual,
-			Value:    "gvisor",
-			Effect:   corev1.TaintEffectNoSchedule,
-		},
-	}
-
-	ds := reconcileCtldDaemonSet(t, infra)
-	if got := ds.Spec.Template.Spec.NodeSelector["sandbox0.ai/node-role"]; got != "legacy" {
-		t.Fatalf("expected legacy node selector fallback, got %q", got)
-	}
-	if len(ds.Spec.Template.Spec.Tolerations) != 1 || ds.Spec.Template.Spec.Tolerations[0].Value != "gvisor" {
-		t.Fatalf("expected legacy toleration fallback, got %#v", ds.Spec.Template.Spec.Tolerations)
-	}
-}
-
 func TestReconcileEmbedsNetdRuntimeAssetsInBothHASlots(t *testing.T) {
 	infra := newCtldTestInfra()
-	runtimeClass := "runc"
-	infra.Spec.Services.Netd.Enabled = true
-	infra.Spec.Services.Netd.RuntimeClassName = &runtimeClass
-	infra.Spec.Services.Netd.Config = &infrav1alpha1.NetdConfig{MetricsPort: 9191}
+	infra.Spec.Network = &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetdConfig{MetricsPort: 9191}}
 
 	primary, client := reconcileCtldResources(t, infra, &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "kube-dns", Namespace: "kube-system"},
 		Spec:       corev1.ServiceSpec{ClusterIP: "10.96.0.10"},
+	}, &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: infra.Name + legacyNetdMetricsServiceSuffix, Namespace: infra.Namespace},
 	})
 	standby := &appsv1.DaemonSet{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: infra.Name + "-ctld-b", Namespace: infra.Namespace}, standby); err != nil {
 		t.Fatalf("get standby ctld: %v", err)
 	}
-	wantLockPath := filepath.Join(netdsvc.ActiveLockMountDirectory, infra.Namespace, infra.Name, "netd.lock")
 	for _, ds := range []*appsv1.DaemonSet{primary, standby} {
 		container := ds.Spec.Template.Spec.Containers[0]
 		if ds.Spec.Template.Annotations[ctldRolloutRevisionAnnotation] == "" {
 			t.Fatalf("%s is missing the staged rollout revision", ds.Name)
 		}
 		assertContainerEnv(t, container.Env, "NETD_CONFIG_PATH", netdsvc.ConfigPath)
-		assertContainerEnv(t, container.Env, netdsvc.ActiveLockEnv, wantLockPath)
-		if ds.Spec.Template.Spec.RuntimeClassName == nil || *ds.Spec.Template.Spec.RuntimeClassName != runtimeClass {
-			t.Fatalf("%s runtimeClassName = %#v, want %q", ds.Name, ds.Spec.Template.Spec.RuntimeClassName, runtimeClass)
-		}
 		assertContainerVolumeMount(t, container.VolumeMounts, netdsvc.ConfigVolumeName, netdsvc.ConfigPath)
 		assertContainerVolumeMount(t, container.VolumeMounts, "bpf-fs", "/sys/fs/bpf")
 		assertContainerVolumeMount(t, container.VolumeMounts, "modules", "/lib/modules")
 		assertContainerVolumeMount(t, container.VolumeMounts, "internal-jwt-private-key", "/secrets/internal_jwt_private.key")
 		assertContainerVolumeMount(t, container.VolumeMounts, "mitm-ca", "/tls")
-		assertContainerVolumeMount(t, container.VolumeMounts, netdsvc.ActiveLockVolumeName, netdsvc.ActiveLockMountDirectory)
 		if got := container.Resources.Requests[corev1.ResourceCPU]; got.Cmp(resource.MustParse("350m")) != 0 {
 			t.Fatalf("%s embedded cpu request = %s, want 350m", ds.Name, got.String())
 		}
@@ -122,30 +87,30 @@ func TestReconcileEmbedsNetdRuntimeAssetsInBothHASlots(t *testing.T) {
 	}
 	for _, ds := range []*appsv1.DaemonSet{primary, standby} {
 		if len(ds.Spec.Template.Spec.Containers[0].Ports) != 0 {
-			t.Fatalf("%s reserves host-network netd ports during handoff: %#v", ds.Name, ds.Spec.Template.Spec.Containers[0].Ports)
+			t.Fatalf("%s reserves host-network runtime ports: %#v", ds.Name, ds.Spec.Template.Spec.Containers[0].Ports)
 		}
 	}
 	metricsService := &corev1.Service{}
-	if err := client.Get(context.Background(), types.NamespacedName{Name: infra.Name + netdMetricsServiceSuffix, Namespace: infra.Namespace}, metricsService); err != nil {
-		t.Fatalf("get netd metrics service: %v", err)
+	if err := client.Get(context.Background(), types.NamespacedName{Name: infra.Name + networkMetricsServiceSuffix, Namespace: infra.Namespace}, metricsService); err != nil {
+		t.Fatalf("get ctld network metrics service: %v", err)
 	}
-	if got := metricsService.Labels["app.kubernetes.io/component"]; got != "netd" {
-		t.Fatalf("netd metrics service component label = %q, want netd", got)
+	if got := metricsService.Labels["app.kubernetes.io/component"]; got != "ctld" {
+		t.Fatalf("network metrics service component label = %q, want ctld", got)
 	}
 	wantSelector := common.GetServiceLabels(infra.Name, "ctld")
 	wantSelector[dataplane.CtldHASlotLabel] = dataplane.CtldHASlotA
 	assert.Equal(t, wantSelector, metricsService.Spec.Selector)
 	if len(metricsService.Spec.Ports) != 1 {
-		t.Fatalf("netd metrics service ports = %#v, want one port", metricsService.Spec.Ports)
+		t.Fatalf("network metrics service ports = %#v, want one port", metricsService.Spec.Ports)
 	}
 	metricsServicePort := metricsService.Spec.Ports[0]
 	if metricsServicePort.Name != "metrics" || metricsServicePort.Port != 9191 || metricsServicePort.TargetPort.IntVal != 9191 {
-		t.Fatalf("netd metrics service port = %#v, want named numeric port 9191", metricsServicePort)
+		t.Fatalf("network metrics service port = %#v, want named numeric port 9191", metricsServicePort)
 	}
-	legacy := &appsv1.DaemonSet{}
-	err := client.Get(context.Background(), types.NamespacedName{Name: infra.Name + "-netd", Namespace: infra.Namespace}, legacy)
+	legacyService := &corev1.Service{}
+	err := client.Get(context.Background(), types.NamespacedName{Name: infra.Name + legacyNetdMetricsServiceSuffix, Namespace: infra.Namespace}, legacyService)
 	if !apierrors.IsNotFound(err) {
-		t.Fatalf("ctld reconcile created a standalone netd daemonset: %v", err)
+		t.Fatalf("legacy network metrics service was not removed: %v", err)
 	}
 }
 
@@ -158,10 +123,39 @@ func TestCtldTerminationGraceCoversStaticShutdownBudget(t *testing.T) {
 	assert.LessOrEqual(t, shutdownBudgetSeconds+shutdownMarginSeconds, ctldTerminationGraceSeconds)
 }
 
+func TestReconcileRemovesDisabledNetworkRuntimeAssets(t *testing.T) {
+	infra := newCtldTestInfra()
+	infra.Spec.Network = nil
+	staleConfig := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo-netd-config-old",
+			Namespace: infra.Namespace,
+			Annotations: map[string]string{
+				common.ServiceConfigBaseNameAnnotation: infra.Name + "-netd",
+			},
+		},
+	}
+	staleMetrics := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+		Name:      infra.Name + networkMetricsServiceSuffix,
+		Namespace: infra.Namespace,
+	}}
+	_, client := reconcileCtldResources(t, infra, staleConfig, staleMetrics)
+
+	for _, object := range []ctrlclient.Object{
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: staleConfig.Name, Namespace: staleConfig.Namespace}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: staleMetrics.Name, Namespace: staleMetrics.Namespace}},
+	} {
+		err := client.Get(context.Background(), ctrlclient.ObjectKeyFromObject(object), object)
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("disabled network asset %T/%s was not removed: %v", object, object.GetName(), err)
+		}
+	}
+}
+
 func TestReconcileStagesHASlotRolloutBThenA(t *testing.T) {
 	ctx := context.Background()
 	infra := newCtldTestInfra()
-	infra.Spec.Services.Netd.Enabled = true
+	infra.Spec.Network = &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetdConfig{}}
 	primary, client := reconcileCtldResources(t, infra, &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "kube-dns", Namespace: "kube-system"},
 		Spec:       corev1.ServiceSpec{ClusterIP: "10.96.0.10"},
@@ -197,6 +191,29 @@ func TestReconcileStagesHASlotRolloutBThenA(t *testing.T) {
 	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "http://demo-cluster-gateway:8443"))
 	primary = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotA)
 	assert.Equal(t, "ghcr.io/sandbox0-ai/sandbox0:next", primary.Spec.Template.Spec.Containers[0].Image)
+}
+
+func TestReadyRejectsHealthyPreviousRevisionDuringNetworkDisableRollout(t *testing.T) {
+	ctx := context.Background()
+	infra := newCtldTestInfra()
+	infra.Spec.Network = &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetdConfig{}}
+	primary, client := reconcileCtldResources(t, infra, &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "kube-dns", Namespace: "kube-system"},
+		Spec:       corev1.ServiceSpec{ClusterIP: "10.96.0.10"},
+	})
+	standby := getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotB)
+	markCtldDaemonSetReady(t, ctx, client, primary)
+	markCtldDaemonSetReady(t, ctx, client, standby)
+	require.NoError(t, client.Create(ctx, readyCtldPodForDaemonSet(primary, "ctld-a-network", "node-a")))
+	require.NoError(t, client.Create(ctx, readyCtldPodForDaemonSet(standby, "ctld-b-network", "node-a")))
+
+	infra.Spec.Network = nil
+	reconciler := NewReconciler(common.NewResourceManager(client, newCtldTestScheme(t), nil, common.LocalDevConfig{}))
+	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "latest", "http://demo-cluster-gateway:8443"))
+
+	ready, err := reconciler.Ready(ctx, infra)
+	require.NoError(t, err)
+	assert.False(t, ready, "previous-revision A/B must not satisfy readiness for the new generation")
 }
 
 func TestReconcileRepairsMissingSlotBeforeRollingPeer(t *testing.T) {
@@ -380,17 +397,6 @@ func TestCurrentTemplatePodsReadyRequiresUniqueNonTerminatingNodes(t *testing.T)
 	assert.True(t, ready)
 }
 
-func TestReconcileRemovesLegacySingleDaemonSet(t *testing.T) {
-	infra := newCtldTestInfra()
-	legacy := &appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Name: infra.Name + "-ctld", Namespace: infra.Namespace}}
-	_, client := reconcileCtldResources(t, infra, legacy)
-	got := &appsv1.DaemonSet{}
-	err := client.Get(context.Background(), types.NamespacedName{Name: legacy.Name, Namespace: legacy.Namespace}, got)
-	if !apierrors.IsNotFound(err) {
-		t.Fatalf("legacy daemonset still exists: %v", err)
-	}
-}
-
 func reconcileCtldDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) *appsv1.DaemonSet {
 	t.Helper()
 	ds, _ := reconcileCtldResources(t, infra)
@@ -441,7 +447,7 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 	}
 	wantCPU := resource.MustParse(ctldCPURequest)
 	wantMemory := resource.MustParse(ctldMemoryRequest)
-	if infraplan.Compile(infra).Netd.Enabled {
+	if infraplan.Compile(infra).Network.Enabled {
 		wantCPU.Add(resource.MustParse(embeddedNetdCPURequest))
 		wantMemory.Add(resource.MustParse(embeddedNetdMemoryRequest))
 	}
@@ -461,7 +467,7 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 		t.Fatalf("unexpected ctld HA slot labels: slot A=%q slot B=%q", ds.Spec.Template.Labels[dataplane.CtldHASlotLabel], standby.Spec.Template.Labels[dataplane.CtldHASlotLabel])
 	}
 	for _, workload := range []*appsv1.DaemonSet{ds, standby} {
-		if !infrav1alpha1.IsNetdEnabled(infra) && len(workload.Spec.Template.Spec.Containers[0].Ports) != 0 {
+		if !infrav1alpha1.IsNetworkEnabled(infra) && len(workload.Spec.Template.Spec.Containers[0].Ports) != 0 {
 			t.Fatalf("ctld hostNetwork pod %s reserves node ports: %#v", workload.Name, workload.Spec.Template.Spec.Containers[0].Ports)
 		}
 	}
@@ -653,8 +659,10 @@ func TestReconcileDoesNotPassPauseConfigToCtld(t *testing.T) {
 
 func TestReconcileMountsObjectEncryptionKeyWhenEnabled(t *testing.T) {
 	infra := newCtldTestInfra()
-	infra.Spec.Services.StorageProxy = &infrav1alpha1.StorageProxyServiceConfig{
-		Config: &infrav1alpha1.StorageProxyConfig{
+	infra.Spec.Storage = &infrav1alpha1.StorageConfig{
+		Type: infrav1alpha1.StorageTypeGCS,
+		GCS:  &infrav1alpha1.GCSStorageConfig{Bucket: "sandbox0-test"},
+		Runtime: &infrav1alpha1.StorageProxyConfig{
 			ObjectEncryptionEnabled: true,
 		},
 	}
@@ -855,7 +863,6 @@ func newCtldTestInfra() *infrav1alpha1.Sandbox0Infra {
 					},
 				},
 				Ctld: &infrav1alpha1.CtldServiceConfig{},
-				Netd: &infrav1alpha1.NetdServiceConfig{},
 			},
 		},
 	}

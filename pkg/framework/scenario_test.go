@@ -52,19 +52,19 @@ metadata:
 apiVersion: infra.sandbox0.ai/v1alpha1
 kind: Sandbox0Infra
 metadata:
-  name: minimal
+  name: fullmode-fixture
   namespace: sandbox0-system
 spec:
   services:
     manager:
       enabled: true
 `
-	manifestPath := filepath.Join(t.TempDir(), "minimal.yaml")
+	manifestPath := filepath.Join(t.TempDir(), "fullmode-fixture.yaml")
 	if err := os.WriteFile(manifestPath, []byte(manifest), 0o600); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
 
-	rewrittenPath, cleanup, err := RewriteManifestNamespace(manifestPath, "sandbox0-system-minimal")
+	rewrittenPath, cleanup, err := RewriteManifestNamespace(manifestPath, "sandbox0-system-fullmode")
 	if err != nil {
 		t.Fatalf("RewriteManifestNamespace returned error: %v", err)
 	}
@@ -78,10 +78,10 @@ spec:
 		t.Fatalf("read rewritten manifest: %v", err)
 	}
 	got := string(content)
-	if !strings.Contains(got, "name: sandbox0-system-minimal") {
+	if !strings.Contains(got, "name: sandbox0-system-fullmode") {
 		t.Fatalf("rewritten manifest missing namespace resource rename:\n%s", got)
 	}
-	if !strings.Contains(got, "namespace: sandbox0-system-minimal") {
+	if !strings.Contains(got, "namespace: sandbox0-system-fullmode") {
 		t.Fatalf("rewritten manifest missing metadata namespace rewrite:\n%s", got)
 	}
 	if strings.Contains(got, "sandbox0-system\n") {
@@ -92,19 +92,13 @@ spec:
 func TestBuildScenarioRolloutsUsesConsolidatedDataPlaneWorkloads(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Storage: &infrav1alpha1.StorageConfig{Runtime: &infrav1alpha1.StorageProxyConfig{}},
+			Network: &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetdConfig{}},
 			Services: &infrav1alpha1.ServicesConfig{
 				Manager: &infrav1alpha1.ManagerServiceConfig{
 					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
 						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
 					},
-				},
-				StorageProxy: &infrav1alpha1.StorageProxyServiceConfig{
-					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
-						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
-					},
-				},
-				Netd: &infrav1alpha1.NetdServiceConfig{
-					EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
 				},
 			},
 		},

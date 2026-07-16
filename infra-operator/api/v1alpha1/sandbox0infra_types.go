@@ -1264,16 +1264,6 @@ type ServicesConfig struct {
 	// +optional
 	// +kubebuilder:default={}
 	Ctld *CtldServiceConfig `json:"ctld,omitempty"`
-
-	// StorageProxy is the deprecated configuration for the storage runtime now
-	// hosted by manager and ctld. Use spec.storage.runtime instead.
-	// +optional
-	StorageProxy *StorageProxyServiceConfig `json:"storageProxy,omitempty"`
-
-	// Netd is the deprecated configuration for the network runtime now hosted by
-	// ctld. Use spec.network instead.
-	// +optional
-	Netd *NetdServiceConfig `json:"netd,omitempty"`
 }
 
 // EnabledServiceConfig defines the enabled state shared by all services.
@@ -1378,16 +1368,6 @@ type ManagerServiceConfig struct {
 	Config *ManagerConfig `json:"config,omitempty"`
 }
 
-// StorageProxyServiceConfig defines configuration for storage-proxy service
-type StorageProxyServiceConfig struct {
-	WorkloadServiceConfig `json:",inline"`
-	ServiceExposureConfig `json:",inline"`
-	// Config contains storage-proxy specific configuration
-	// +optional
-	// +kubebuilder:default={}
-	Config *StorageProxyConfig `json:"config,omitempty"`
-}
-
 // CtldServiceConfig defines configuration for the ctld daemonset.
 type CtldServiceConfig struct {
 	// ContainerdHostDataRoot is the containerd data root path on the host.
@@ -1418,33 +1398,6 @@ type CtldServiceConfig struct {
 	// node-local rootfs object cache.
 	// +optional
 	RootFSObjectCacheSweepInterval metav1.Duration `json:"rootfsObjectCacheSweepInterval,omitempty"`
-}
-
-// NetdServiceConfig defines configuration for netd service
-type NetdServiceConfig struct {
-	EnabledServiceConfig `json:",inline"`
-	// MITMCASecretName overrides the operator-managed cluster-local MITM CA secret for HTTPS interception.
-	// Expected keys are ca.crt and ca.key. When unset, infra-operator generates and reuses a managed secret.
-	// +optional
-	MITMCASecretName string `json:"mitmCaSecretName,omitempty"`
-	// RuntimeClassName specifies the Kubernetes runtime class for the netd daemonset.
-	// Use a host-compatible runtime such as runc. Do not run netd on gVisor or Kata.
-	// +optional
-	RuntimeClassName *string `json:"runtimeClassName,omitempty"`
-	// NodeSelector constrains netd onto a specific node set.
-	// Deprecated: use spec.sandboxNodePlacement.nodeSelector instead. This field
-	// remains as a backward-compatible alias when the shared placement is unset.
-	// +optional
-	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
-	// Tolerations allow netd to run on tainted sandbox nodes.
-	// Deprecated: use spec.sandboxNodePlacement.tolerations instead. This field
-	// remains as a backward-compatible alias when the shared placement is unset.
-	// +optional
-	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
-	// Config contains netd specific configuration
-	// +optional
-	// +kubebuilder:default={}
-	Config *NetdConfig `json:"config,omitempty"`
 }
 
 // IsGlobalGatewayEnabled returns true when global-gateway is enabled.
@@ -1495,79 +1448,30 @@ func IsManagerEnabled(infra *Sandbox0Infra) bool {
 	return infra.Spec.Services.Manager.Enabled
 }
 
-// IsStorageRuntimeEnabled returns true when the storage runtime should be
-// hosted by manager. The deprecated services.storageProxy field is used only
-// when storage.runtime is absent.
+// IsStorageRuntimeEnabled returns true when manager should serve volume APIs.
 func IsStorageRuntimeEnabled(infra *Sandbox0Infra) bool {
-	if infra == nil {
-		return false
-	}
-	if infra.Spec.Storage != nil && infra.Spec.Storage.Runtime != nil {
-		return true
-	}
-	return IsStorageProxyEnabled(infra)
+	return infra != nil && infra.Spec.Storage != nil && infra.Spec.Storage.Runtime != nil
 }
 
-// ResolveStorageRuntimeConfig returns the canonical storage runtime config,
-// falling back to the deprecated services.storageProxy config when necessary.
+// ResolveStorageRuntimeConfig returns manager's volume runtime configuration.
 func ResolveStorageRuntimeConfig(infra *Sandbox0Infra) *StorageProxyConfig {
-	if infra == nil {
+	if infra == nil || infra.Spec.Storage == nil {
 		return nil
 	}
-	if infra.Spec.Storage != nil && infra.Spec.Storage.Runtime != nil {
-		return infra.Spec.Storage.Runtime
-	}
-	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
-		return infra.Spec.Services.StorageProxy.Config
-	}
-	return nil
+	return infra.Spec.Storage.Runtime
 }
 
-// IsNetworkEnabled returns true when the network runtime should be hosted by
-// ctld. The deprecated services.netd field is used only when network is absent.
+// IsNetworkEnabled returns true when ctld should enforce sandbox networking.
 func IsNetworkEnabled(infra *Sandbox0Infra) bool {
-	if infra == nil {
-		return false
-	}
-	if infra.Spec.Network != nil {
-		return true
-	}
-	return IsNetdEnabled(infra)
+	return infra != nil && infra.Spec.Network != nil
 }
 
-// ResolveNetworkRuntimeConfig returns the canonical network runtime config,
-// falling back to the deprecated services.netd config when necessary.
+// ResolveNetworkRuntimeConfig returns ctld's network runtime configuration.
 func ResolveNetworkRuntimeConfig(infra *Sandbox0Infra) *NetdConfig {
-	if infra == nil {
+	if infra == nil || infra.Spec.Network == nil {
 		return nil
 	}
-	if infra.Spec.Network != nil {
-		return infra.Spec.Network.Config
-	}
-	if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
-		return infra.Spec.Services.Netd.Config
-	}
-	return nil
-}
-
-// IsStorageProxyEnabled returns true when the deprecated storage-proxy service
-// configuration is enabled.
-// Deprecated: use IsStorageRuntimeEnabled.
-func IsStorageProxyEnabled(infra *Sandbox0Infra) bool {
-	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.StorageProxy == nil {
-		return false
-	}
-	return infra.Spec.Services.StorageProxy.Enabled
-}
-
-// IsNetdEnabled returns true when the deprecated netd service configuration is
-// enabled.
-// Deprecated: use IsNetworkEnabled.
-func IsNetdEnabled(infra *Sandbox0Infra) bool {
-	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.Netd == nil {
-		return false
-	}
-	return infra.Spec.Services.Netd.Enabled
+	return infra.Spec.Network.Config
 }
 
 // IsDatabaseEnabled returns true when database should be reconciled.
@@ -2086,9 +1990,9 @@ const (
 	ConditionTypeSSHGatewayReady           = "SSHGatewayReady"
 	ConditionTypeClusterGatewayReady       = "ClusterGatewayReady"
 	ConditionTypeManagerReady              = "ManagerReady"
-	ConditionTypeStorageProxyReady         = "StorageProxyReady"
+	ConditionTypeStorageRuntimeReady       = "StorageRuntimeReady"
 	ConditionTypeCtldReady                 = "CtldReady"
-	ConditionTypeNetdReady                 = "NetdReady"
+	ConditionTypeNetworkReady              = "NetworkReady"
 	ConditionTypeSchedulerReady            = "SchedulerReady"
 	ConditionTypeInternalAuthReady         = "InternalAuthReady"
 	ConditionTypeCRDsInstalled             = "CRDsInstalled"

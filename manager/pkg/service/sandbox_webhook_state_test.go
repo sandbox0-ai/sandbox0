@@ -12,7 +12,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 )
 
-func TestStorageProxyVolumeClientDefaultsClusterID(t *testing.T) {
+func TestManagerStorageVolumeClientDefaultsClusterID(t *testing.T) {
 	var gotClusterID string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/internal/v1/sandboxvolumes/owned" {
@@ -31,7 +31,7 @@ func TestStorageProxyVolumeClientDefaultsClusterID(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewStorageProxyVolumeClient(StorageProxyVolumeClientConfig{
+	client := NewManagerStorageVolumeClient(ManagerStorageVolumeClientConfig{
 		BaseURL:        server.URL,
 		TokenGenerator: staticTokenGenerator{},
 	})
@@ -73,7 +73,7 @@ func TestPrepareWebhookStateVolumeReusesDurableVolume(t *testing.T) {
 	}
 }
 
-func TestStorageProxyVolumeClientPrepareForPortalBind(t *testing.T) {
+func TestManagerStorageVolumeClientPrepareForPortalBind(t *testing.T) {
 	var gotMethod, gotPath, gotToken string
 	var gotReq PrepareVolumePortalBindRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -87,7 +87,7 @@ func TestStorageProxyVolumeClientPrepareForPortalBind(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewStorageProxyVolumeClient(StorageProxyVolumeClientConfig{
+	client := NewManagerStorageVolumeClient(ManagerStorageVolumeClientConfig{
 		BaseURL:        server.URL,
 		TokenGenerator: staticTokenGenerator{},
 	})
@@ -114,13 +114,13 @@ func TestStorageProxyVolumeClientPrepareForPortalBind(t *testing.T) {
 	}
 }
 
-func TestStorageProxyVolumeClientPrepareForPortalBindConflict(t *testing.T) {
+func TestManagerStorageVolumeClientPrepareForPortalBindConflict(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, "volume has active mounts")
 	}))
 	defer server.Close()
 
-	client := NewStorageProxyVolumeClient(StorageProxyVolumeClientConfig{
+	client := NewManagerStorageVolumeClient(ManagerStorageVolumeClientConfig{
 		BaseURL:        server.URL,
 		TokenGenerator: staticTokenGenerator{},
 	})

@@ -33,7 +33,8 @@ import (
 )
 
 type Reconciler struct {
-	Resources *common.ResourceManager
+	Resources                *common.ResourceManager
+	expectedRolloutRevisions map[string]string
 }
 
 const (
@@ -51,7 +52,8 @@ const (
 	ctldKubeletRegistrationSocket  = "/var/lib/kubelet/plugins_registry/" + volumeportal.DriverName + "-reg.sock"
 	ctldKubeletCSIEndpoint         = "/var/lib/kubelet/plugins/" + volumeportal.DriverName + "/csi.sock"
 	ctldRolloutRevisionAnnotation  = "infra.sandbox0.ai/ctld-rollout-revision"
-	netdMetricsServiceSuffix       = "-netd-metrics"
+	networkMetricsServiceSuffix    = "-ctld-network-metrics"
+	legacyNetdMetricsServiceSuffix = "-netd-metrics"
 )
 
 func NewReconciler(resources *common.ResourceManager) *Reconciler {
@@ -92,7 +94,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	compiledPlan := infraplan.Compile(infra)
 	compiledPlan.Services.ClusterGateway.URL = clusterGatewayURL
 	var netdAssets *netdsvc.RuntimeAssets
-	if compiledPlan.Netd.Enabled {
+	if compiledPlan.Network.Enabled {
 		netdAssets, err = netdsvc.NewReconciler(r.Resources).BuildRuntimeAssets(ctx, compiledPlan)
 		if err != nil {
 			return err
@@ -103,9 +105,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return err
 	}
 	if netdAssets != nil {
-		if err := r.ensureNetdMetricsService(ctx, infra, int32(netdAssets.Config.MetricsPort)); err != nil {
+		if err := r.ensureNetworkMetricsService(ctx, infra, int32(netdAssets.Config.MetricsPort)); err != nil {
 			return err
 		}
+	}
+	if err := r.cleanupNetworkMetricsServices(ctx, infra, netdAssets != nil); err != nil {
+		return err
 	}
 
 	image := fmt.Sprintf("%s:%s", imageRepo, imageTag)
@@ -223,14 +228,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		volumeMounts = appendUniqueVolumeMounts(volumeMounts, netdAssets.VolumeMounts...)
 		volumes = appendUniqueVolumes(volumes, netdAssets.Volumes...)
 	}
-	netdActiveLockPath := ""
-	if netdAssets != nil {
-		netdActiveLockPath = netdAssets.ActiveLockPath
-	}
-
-	if err := r.removeLegacyDaemonSet(ctx, infra, name); err != nil {
-		return err
-	}
 	desiredBySlot := make(map[string]*appsv1.DaemonSet, 2)
 	for _, slot := range []string{dataplane.CtldHASlotA, dataplane.CtldHASlotB} {
 		desired := buildCtldDaemonSet(ctldDaemonSetConfig{
@@ -249,16 +246,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			Volumes:                 volumes,
 			Infra:                   infra,
 			NetdEnabled:             netdAssets != nil,
-			NetdActiveLockPath:      netdActiveLockPath,
 		})
-		if netdAssets != nil {
-			desired.Spec.Template.Spec.RuntimeClassName = netdAssets.RuntimeClassName
-			// Do not declare netd listener ports on host-networked ctld Pods.
-			// Kubernetes reserves every declared container port as a HostPort in
-			// this mode, which prevents a replacement from coexisting with the
-			// guarded legacy netd during handoff. The active lock still guarantees
-			// that exactly one process binds each configured node-local port.
-		}
 		revision, err := common.ConfigHash(desired.Spec)
 		if err != nil {
 			return fmt.Errorf("hash ctld slot %s rollout: %w", slot, err)
@@ -266,7 +254,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		desired.Spec.Template.Annotations[ctldRolloutRevisionAnnotation] = revision
 		desiredBySlot[slot] = desired
 	}
-	return r.reconcileHASlots(ctx, infra, desiredBySlot[dataplane.CtldHASlotA], desiredBySlot[dataplane.CtldHASlotB])
+	r.expectedRolloutRevisions = map[string]string{
+		dataplane.CtldHASlotA: desiredBySlot[dataplane.CtldHASlotA].Spec.Template.Annotations[ctldRolloutRevisionAnnotation],
+		dataplane.CtldHASlotB: desiredBySlot[dataplane.CtldHASlotB].Spec.Template.Annotations[ctldRolloutRevisionAnnotation],
+	}
+	if err := r.reconcileHASlots(ctx, infra, desiredBySlot[dataplane.CtldHASlotA], desiredBySlot[dataplane.CtldHASlotB]); err != nil {
+		return err
+	}
+	if netdAssets == nil {
+		ready, err := r.Ready(ctx, infra)
+		if err != nil {
+			return err
+		}
+		if ready {
+			return r.Resources.CleanupUnusedServiceConfigMapsWithScope(ctx, compiledPlan.Scope, fmt.Sprintf("%s-netd", infra.Name))
+		}
+	}
+	return nil
 }
 
 // reconcileHASlots rolls ctld-b completely before changing ctld-a. Both
@@ -389,7 +393,6 @@ type ctldDaemonSetConfig struct {
 	Volumes                 []corev1.Volume
 	Infra                   *infrav1alpha1.Sandbox0Infra
 	NetdEnabled             bool
-	NetdActiveLockPath      string
 }
 
 func buildCtldDaemonSet(cfg ctldDaemonSetConfig) *appsv1.DaemonSet {
@@ -464,7 +467,6 @@ func buildCtldDaemonSet(cfg ctldDaemonSetConfig) *appsv1.DaemonSet {
 	if cfg.NetdEnabled {
 		ctldContainer.Env = append(ctldContainer.Env,
 			corev1.EnvVar{Name: "NETD_CONFIG_PATH", Value: netdsvc.ConfigPath},
-			corev1.EnvVar{Name: netdsvc.ActiveLockEnv, Value: cfg.NetdActiveLockPath},
 		)
 	}
 	maxUnavailable := intstr.FromInt(1)
@@ -545,6 +547,10 @@ func (r *Reconciler) Ready(ctx context.Context, infra *infrav1alpha1.Sandbox0Inf
 			}
 			return false, err
 		}
+		if expectedRevision := r.expectedRolloutRevisions[slot]; expectedRevision != "" &&
+			ds.Spec.Template.Annotations[ctldRolloutRevisionAnnotation] != expectedRevision {
+			return false, nil
+		}
 		if !daemonSetReady(ds) {
 			return false, nil
 		}
@@ -559,9 +565,8 @@ func (r *Reconciler) Ready(ctx context.Context, infra *infrav1alpha1.Sandbox0Inf
 	return true, nil
 }
 
-// EmbeddedNetdReady reports embedded netd readiness through the ctld primary
-// probe. Standby probes validate FUSE synchronization without starting netd.
-func (r *Reconciler) EmbeddedNetdReady(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (bool, error) {
+// NetworkReady reports network readiness through the ctld HA pair.
+func (r *Reconciler) NetworkReady(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (bool, error) {
 	return r.Ready(ctx, infra)
 }
 
@@ -596,9 +601,8 @@ func (r *Reconciler) currentTemplatePodsReady(ctx context.Context, ds *appsv1.Da
 	return int32(len(readyNodes)) >= ds.Status.DesiredNumberScheduled, nil
 }
 
-// PodMatchesCurrentTemplate rejects a live predecessor and verifies that the
-// ctld container carrying embedded netd is actually running with the desired
-// config, lock, mounts, and image.
+// PodMatchesCurrentTemplate rejects a live predecessor and verifies that ctld
+// is running with the desired network config, HA lock, mounts, and image.
 func PodMatchesCurrentTemplate(pod *corev1.Pod, ds *appsv1.DaemonSet) bool {
 	if pod == nil || ds == nil || !mapContains(pod.Labels, ds.Spec.Template.Labels) || !mapContains(pod.Annotations, ds.Spec.Template.Annotations) {
 		return false
@@ -611,14 +615,14 @@ func PodMatchesCurrentTemplate(pod *corev1.Pod, ds *appsv1.DaemonSet) bool {
 	if desired == nil || actual == nil || desired.Image != actual.Image {
 		return false
 	}
-	for _, name := range []string{"NETD_CONFIG_PATH", netdsvc.ActiveLockEnv} {
+	for _, name := range []string{"NETD_CONFIG_PATH"} {
 		desiredValue, desiredFound := envValue(desired.Env, name)
 		actualValue, actualFound := envValue(actual.Env, name)
 		if desiredFound != actualFound || desiredValue != actualValue {
 			return false
 		}
 	}
-	for _, name := range []string{netdsvc.ConfigVolumeName, netdsvc.ActiveLockVolumeName} {
+	for _, name := range []string{netdsvc.ConfigVolumeName} {
 		desiredMount, desiredFound := volumeMountByName(desired.VolumeMounts, name)
 		actualMount, actualFound := volumeMountByName(actual.VolumeMounts, name)
 		if desiredFound != actualFound || (desiredFound && desiredMount.MountPath != actualMount.MountPath) {
@@ -626,27 +630,6 @@ func PodMatchesCurrentTemplate(pod *corev1.Pod, ds *appsv1.DaemonSet) bool {
 		}
 	}
 	return CtldContainerRunning(pod)
-}
-
-// DaemonSetEmbedsNetd verifies the guarded netd runtime contract required
-// before the standalone netd DaemonSet may yield its active lock.
-func DaemonSetEmbedsNetd(ds *appsv1.DaemonSet, activeLockPath string) bool {
-	if ds == nil || ds.Spec.Template.Annotations[netdsvc.ConfigHashAnnotation] == "" {
-		return false
-	}
-	container := containerByName(ds.Spec.Template.Spec.Containers, "ctld")
-	if container == nil {
-		return false
-	}
-	configPath, hasConfigPath := envValue(container.Env, "NETD_CONFIG_PATH")
-	lockPath, hasLockPath := envValue(container.Env, netdsvc.ActiveLockEnv)
-	if !hasConfigPath || configPath != netdsvc.ConfigPath || !hasLockPath || lockPath != activeLockPath {
-		return false
-	}
-	configMount, hasConfigMount := volumeMountByName(container.VolumeMounts, netdsvc.ConfigVolumeName)
-	lockMount, hasLockMount := volumeMountByName(container.VolumeMounts, netdsvc.ActiveLockVolumeName)
-	return hasConfigMount && configMount.MountPath == netdsvc.ConfigPath &&
-		hasLockMount && lockMount.MountPath == netdsvc.ActiveLockMountDirectory
 }
 
 // CtldContainerRunning reports whether a Pod can still own the node-local HA
@@ -718,18 +701,6 @@ func volumeMountByName(mounts []corev1.VolumeMount, name string) (corev1.VolumeM
 		}
 	}
 	return corev1.VolumeMount{}, false
-}
-
-func (r *Reconciler) removeLegacyDaemonSet(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string) error {
-	legacy := &appsv1.DaemonSet{}
-	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, legacy)
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	return r.Resources.Client.Delete(ctx, legacy)
 }
 
 func ctldArgs(infra *infrav1alpha1.Sandbox0Infra, containerdHostDataRoot string) []string {
@@ -805,18 +776,18 @@ func (r *Reconciler) ensureCSIDriver(ctx context.Context, labels map[string]stri
 	})
 }
 
-// ensureNetdMetricsService preserves named-port endpoint discovery without
-// reserving netd's node-local listener on both host-networked ctld HA Pods.
+// ensureNetworkMetricsService preserves named-port endpoint discovery without
+// reserving the network runtime's node-local listener on both ctld HA Pods.
 // Slot A supplies one endpoint per node; the numeric target reaches whichever
 // lock-fenced ctld peer currently owns the node-local metrics listener.
-func (r *Reconciler) ensureNetdMetricsService(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, metricsPort int32) error {
-	labels := common.GetServiceLabels(infra.Name, "netd")
+func (r *Reconciler) ensureNetworkMetricsService(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, metricsPort int32) error {
+	labels := common.GetServiceLabels(infra.Name, "ctld")
 	selector := common.GetServiceLabels(infra.Name, "ctld")
 	selector[dataplane.CtldHASlotLabel] = dataplane.CtldHASlotA
 	return r.Resources.ReconcileServicePortsWithSpecMutator(
 		ctx,
 		infra,
-		infra.Name+netdMetricsServiceSuffix,
+		infra.Name+networkMetricsServiceSuffix,
 		labels,
 		corev1.ServiceTypeClusterIP,
 		nil,
@@ -825,6 +796,23 @@ func (r *Reconciler) ensureNetdMetricsService(ctx context.Context, infra *infrav
 			spec.Selector = selector
 		},
 	)
+}
+
+func (r *Reconciler) cleanupNetworkMetricsServices(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, networkEnabled bool) error {
+	if infra == nil {
+		return nil
+	}
+	names := []string{infra.Name + legacyNetdMetricsServiceSuffix}
+	if !networkEnabled {
+		names = append(names, infra.Name+networkMetricsServiceSuffix)
+	}
+	for _, name := range names {
+		service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: infra.Namespace}}
+		if err := r.Resources.Client.Delete(ctx, service); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete obsolete network metrics service %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 func (r *Reconciler) buildStorageConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.StorageProxyConfig, error) {

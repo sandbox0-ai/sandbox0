@@ -23,18 +23,18 @@ func (g *InternalTokenGenerator) GenerateToken(teamID, userID, sandboxID string)
 	return g.generator.Generate("procd", teamID, userID, internalauth.GenerateOptions{})
 }
 
-// StorageProxyAdminTokenGenerator generates manager tokens for storage-proxy volume lifecycle calls.
-type StorageProxyAdminTokenGenerator struct {
+// ManagerStorageAdminTokenGenerator generates manager tokens for volume lifecycle calls.
+type ManagerStorageAdminTokenGenerator struct {
 	generator *internalauth.Generator
 }
 
-func NewStorageProxyAdminTokenGenerator(generator *internalauth.Generator) *StorageProxyAdminTokenGenerator {
-	return &StorageProxyAdminTokenGenerator{generator: generator}
+func NewManagerStorageAdminTokenGenerator(generator *internalauth.Generator) *ManagerStorageAdminTokenGenerator {
+	return &ManagerStorageAdminTokenGenerator{generator: generator}
 }
 
-func (g *StorageProxyAdminTokenGenerator) GenerateToken(teamID, userID, sandboxID string) (string, error) {
+func (g *ManagerStorageAdminTokenGenerator) GenerateToken(teamID, userID, sandboxID string) (string, error) {
 	if teamID == "" {
-		return g.generator.GenerateSystem("storage-proxy", internalauth.GenerateOptions{
+		return g.generator.GenerateSystem(internalauth.ServiceManagerStorage, internalauth.GenerateOptions{
 			Permissions: []string{
 				"sandboxvolume:create",
 				"sandboxvolume:read",
@@ -44,7 +44,7 @@ func (g *StorageProxyAdminTokenGenerator) GenerateToken(teamID, userID, sandboxI
 			SandboxID: sandboxID,
 		})
 	}
-	return g.generator.Generate("storage-proxy", teamID, userID, internalauth.GenerateOptions{
+	return g.generator.Generate(internalauth.ServiceManagerStorage, teamID, userID, internalauth.GenerateOptions{
 		Permissions: []string{
 			"sandboxvolume:create",
 			"sandboxvolume:read",

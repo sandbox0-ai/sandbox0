@@ -46,10 +46,10 @@ func TestReconcileLabelsNodesFromComponentReadiness(t *testing.T) {
 	}
 
 	gotNodeA := getNodeReadinessNode(t, client, "node-a")
-	assertNodeReadinessLabels(t, gotNodeA, dataplane.ReadyLabelValue, dataplane.ReadyLabelValue, dataplane.ReadyLabelValue)
+	assertNodeReadinessLabels(t, gotNodeA, dataplane.ReadyLabelValue, dataplane.ReadyLabelValue)
 
 	gotNodeB := getNodeReadinessNode(t, client, "node-b")
-	assertNodeReadinessLabels(t, gotNodeB, dataplane.NotReadyLabelValue, dataplane.NotReadyLabelValue, dataplane.NotReadyLabelValue)
+	assertNodeReadinessLabels(t, gotNodeB, dataplane.NotReadyLabelValue, dataplane.NotReadyLabelValue)
 
 	gotSystem := getNodeReadinessNode(t, client, "node-system")
 	if _, ok := gotSystem.Labels[dataplane.NodeDataPlaneReadyLabel]; ok {
@@ -76,12 +76,12 @@ func TestReconcileReturnsErrorAndClearsReadinessWhenNoNodeReady(t *testing.T) {
 	}
 
 	gotNode := getNodeReadinessNode(t, client, "node-a")
-	assertNodeReadinessLabels(t, gotNode, dataplane.NotReadyLabelValue, dataplane.NotReadyLabelValue, dataplane.NotReadyLabelValue)
+	assertNodeReadinessLabels(t, gotNode, dataplane.NotReadyLabelValue, dataplane.NotReadyLabelValue)
 }
 
-func TestReconcileDeletesDisabledComponentReadinessLabels(t *testing.T) {
+func TestReconcileDeletesSupersededNetworkReadinessLabel(t *testing.T) {
 	infra := newNodeReadinessInfra()
-	infra.Spec.Services.Netd.Enabled = false
+	infra.Spec.Network = nil
 	node := newNodeReadinessNode("node-a", map[string]string{
 		"sandbox0.ai/node-role":           "sandbox",
 		dataplane.NodeDataPlaneReadyLabel: dataplane.NotReadyLabelValue,
@@ -107,7 +107,7 @@ func TestReconcileDeletesDisabledComponentReadinessLabels(t *testing.T) {
 		t.Fatalf("data-plane label = %q, want %q", got, dataplane.ReadyLabelValue)
 	}
 	if _, ok := gotNode.Labels[dataplane.NodeNetdReadyLabel]; ok {
-		t.Fatalf("netd label = %q, want absent when netd is disabled", gotNode.Labels[dataplane.NodeNetdReadyLabel])
+		t.Fatalf("superseded network label = %q, want absent", gotNode.Labels[dataplane.NodeNetdReadyLabel])
 	}
 	if got := gotNode.Labels[dataplane.NodeCtldReadyLabel]; got != dataplane.ReadyLabelValue {
 		t.Fatalf("ctld label = %q, want %q", got, dataplane.ReadyLabelValue)
@@ -131,7 +131,7 @@ func TestReconcileRequiresKubeletCSIRegistration(t *testing.T) {
 		t.Fatal("Reconcile() error = nil before kubelet CSI registration")
 	}
 	gotNode := getNodeReadinessNode(t, client, "node-a")
-	assertNodeReadinessLabels(t, gotNode, dataplane.NotReadyLabelValue, dataplane.NotReadyLabelValue, dataplane.NotReadyLabelValue)
+	assertNodeReadinessLabels(t, gotNode, dataplane.NotReadyLabelValue, dataplane.NotReadyLabelValue)
 }
 
 func TestRefreshRejectsReadySurgePredecessorsWithoutGating(t *testing.T) {
@@ -166,7 +166,7 @@ func TestRefreshRejectsReadySurgePredecessorsWithoutGating(t *testing.T) {
 		t.Fatalf("Refresh() summary = %+v, want 1 matched and 0 ready", summary)
 	}
 	gotNode := getNodeReadinessNode(t, client, node.Name)
-	assertNodeReadinessLabels(t, gotNode, dataplane.NotReadyLabelValue, dataplane.NotReadyLabelValue, dataplane.NotReadyLabelValue)
+	assertNodeReadinessLabels(t, gotNode, dataplane.NotReadyLabelValue, dataplane.NotReadyLabelValue)
 }
 
 func TestRefreshRejectsTerminatingRunningSurgePredecessor(t *testing.T) {
@@ -201,7 +201,7 @@ func TestRefreshRejectsTerminatingRunningSurgePredecessor(t *testing.T) {
 		t.Fatalf("Refresh() summary = %+v, want 1 matched and 0 ready", summary)
 	}
 	gotNode := getNodeReadinessNode(t, client, node.Name)
-	assertNodeReadinessLabels(t, gotNode, dataplane.NotReadyLabelValue, dataplane.NotReadyLabelValue, dataplane.NotReadyLabelValue)
+	assertNodeReadinessLabels(t, gotNode, dataplane.NotReadyLabelValue, dataplane.NotReadyLabelValue)
 }
 
 func TestReadyCtldPodsByNodeRequiresDistinctHASlots(t *testing.T) {
@@ -251,6 +251,7 @@ func newNodeReadinessInfra() *infrav1alpha1.Sandbox0Infra {
 	return &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Network: &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetdConfig{}},
 			SandboxNodePlacement: &infrav1alpha1.SandboxNodePlacementConfig{
 				NodeSelector: map[string]string{"sandbox0.ai/node-role": "sandbox"},
 			},
@@ -259,9 +260,6 @@ func newNodeReadinessInfra() *infrav1alpha1.Sandbox0Infra {
 					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
 						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
 					},
-				},
-				Netd: &infrav1alpha1.NetdServiceConfig{
-					EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
 				},
 			},
 		},
@@ -385,13 +383,13 @@ func getNodeReadinessNode(t *testing.T, client ctrlclient.Client, name string) *
 	return node
 }
 
-func assertNodeReadinessLabels(t *testing.T, node *corev1.Node, dataPlane, netd, ctld string) {
+func assertNodeReadinessLabels(t *testing.T, node *corev1.Node, dataPlane, ctld string) {
 	t.Helper()
 	if got := node.Labels[dataplane.NodeDataPlaneReadyLabel]; got != dataPlane {
 		t.Fatalf("node %s data-plane label = %q, want %q", node.Name, got, dataPlane)
 	}
-	if got := node.Labels[dataplane.NodeNetdReadyLabel]; got != netd {
-		t.Fatalf("node %s netd label = %q, want %q", node.Name, got, netd)
+	if got, ok := node.Labels[dataplane.NodeNetdReadyLabel]; ok {
+		t.Fatalf("node %s superseded network label = %q, want absent", node.Name, got)
 	}
 	if got := node.Labels[dataplane.NodeCtldReadyLabel]; got != ctld {
 		t.Fatalf("node %s ctld label = %q, want %q", node.Name, got, ctld)

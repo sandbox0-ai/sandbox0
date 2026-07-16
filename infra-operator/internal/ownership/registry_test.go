@@ -35,12 +35,12 @@ func TestLookupReturnsPrefixCoverageForSubtreeLeaves(t *testing.T) {
 	if entry.Path != "spec.storage.s3" {
 		t.Fatalf("expected storage.s3 prefix owner, got %q", entry.Path)
 	}
-	if entry.Owner != "storage-proxy" {
-		t.Fatalf("expected storage-proxy owner, got %q", entry.Owner)
+	if entry.Owner != "manager" {
+		t.Fatalf("expected manager owner, got %q", entry.Owner)
 	}
 }
 
-func TestRuntimeOwnershipPrefersCanonicalPathsAndMarksAliasesDeprecated(t *testing.T) {
+func TestRuntimeOwnershipContainsOnlyCanonicalPaths(t *testing.T) {
 	for _, path := range []string{"spec.storage.runtime.cacheSizeLimit", "spec.network.config.metricsPort"} {
 		entry, ok := Lookup(path)
 		if !ok {
@@ -51,15 +51,6 @@ func TestRuntimeOwnershipPrefersCanonicalPathsAndMarksAliasesDeprecated(t *testi
 		}
 	}
 
-	for _, path := range []string{"spec.services.storageProxy.config.cacheSizeLimit", "spec.services.netd.config.metricsPort"} {
-		entry, ok := Lookup(path)
-		if !ok {
-			t.Fatalf("expected deprecated ownership entry for %s", path)
-		}
-		if entry.UpdateSemantics != UpdateSemanticsDeprecatedAlias {
-			t.Fatalf("deprecated path %s semantics = %q, want deprecated alias", path, entry.UpdateSemantics)
-		}
-	}
 }
 
 func TestLookupTracksCrossServiceDerivedFields(t *testing.T) {
@@ -76,7 +67,7 @@ func TestLookupTracksCrossServiceDerivedFields(t *testing.T) {
 		{
 			path:      "spec.services.manager.config.httpPort",
 			owner:     "plan",
-			consumers: []string{"manager", "netd"},
+			consumers: []string{"manager", "ctld"},
 		},
 		{
 			path:      "spec.publicExposure.rootDomain",
@@ -86,7 +77,7 @@ func TestLookupTracksCrossServiceDerivedFields(t *testing.T) {
 		{
 			path:      "spec.sandboxObservability.ingest.queueSize",
 			owner:     "sandbox-observability",
-			consumers: []string{"ctld", "manager", "netd"},
+			consumers: []string{"ctld", "manager"},
 		},
 		{
 			path:      "spec.internalAuth.dataPlane.secretRef.name",

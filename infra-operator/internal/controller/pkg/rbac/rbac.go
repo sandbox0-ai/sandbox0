@@ -101,39 +101,6 @@ func (r *Reconciler) ReconcileManagerRBAC(ctx context.Context, infra *infrav1alp
 	return r.reconcileClusterRoleBinding(ctx, infra, name, labels, name, name)
 }
 
-// ReconcileNetdRBAC reconciles RBAC for the netd service.
-func (r *Reconciler) ReconcileNetdRBAC(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
-	name := fmt.Sprintf("%s-netd", infra.Name)
-	labels := map[string]string{
-		"app.kubernetes.io/name":       "netd",
-		"app.kubernetes.io/instance":   infra.Name,
-		"app.kubernetes.io/managed-by": "sandbox0infra-operator",
-	}
-
-	if err := r.reconcileServiceAccount(ctx, infra, name, labels, nil); err != nil {
-		return err
-	}
-
-	rules := []rbacv1.PolicyRule{
-		{
-			APIGroups: []string{""},
-			Resources: []string{"pods", "pods/status", "nodes", "services", "endpoints"},
-			Verbs:     []string{"get", "list", "watch", "patch"},
-		},
-		{
-			APIGroups: []string{"discovery.k8s.io"},
-			Resources: []string{"endpointslices"},
-			Verbs:     []string{"get", "list", "watch"},
-		},
-	}
-
-	if err := r.reconcileClusterRole(ctx, name, labels, rules); err != nil {
-		return err
-	}
-
-	return r.reconcileClusterRoleBinding(ctx, infra, name, labels, name, name)
-}
-
 // ReconcileSchedulerRBAC reconciles RBAC for the scheduler service.
 func (r *Reconciler) ReconcileSchedulerRBAC(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
 	name := fmt.Sprintf("%s-scheduler", infra.Name)

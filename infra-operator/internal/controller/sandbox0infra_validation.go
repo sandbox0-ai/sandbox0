@@ -87,10 +87,6 @@ func validateServiceSemantics(infra *infrav1alpha1.Sandbox0Infra) []error {
 	if services.Manager != nil {
 		errs = append(errs, validateServiceNetworkConfig("spec.services.manager.service", services.Manager.Service)...)
 	}
-	if services.StorageProxy != nil {
-		errs = append(errs, validateServiceNetworkConfig("spec.services.storageProxy.service", services.StorageProxy.Service)...)
-	}
-
 	return errs
 }
 

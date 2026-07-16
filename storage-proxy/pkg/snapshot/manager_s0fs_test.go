@@ -137,8 +137,8 @@ func TestS0FSSnapshotRestoreSurvivesCacheReplacement(t *testing.T) {
 		t.Fatalf("SyncMaterialize() before cache replacement error = %v", err)
 	}
 
-	// The manager cache is an EmptyDir in Kubernetes. Replacing it models the
-	// standalone storage-proxy Pod being removed during service consolidation.
+	// The manager cache is an EmptyDir in Kubernetes. Replacing it models a
+	// manager Pod restart with an empty local cache.
 	mgr.config.CacheDir = t.TempDir()
 	mgr.volMgr = nil
 	if err := mgr.RestoreSnapshot(context.Background(), &RestoreSnapshotRequest{

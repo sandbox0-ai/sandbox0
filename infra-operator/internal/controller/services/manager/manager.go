@@ -26,14 +26,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	credentialstoresvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/credentialstore"
 	meteringsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/metering"
 	netdservice "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/netd"
 	redissvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/redis"
 	sandboxobssvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sandboxobservability"
-	storageproxysvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storageproxy"
+	storageruntimesvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storageruntime"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
@@ -44,10 +43,10 @@ type Reconciler struct {
 
 const (
 	registryCredentialsPath     = "/etc/sandbox0/registry/.dockerconfigjson"
-	embeddedStorageConfigPath   = "/config/storage-proxy.yaml"
+	storageRuntimeConfigPath    = "/config/storage-runtime.yaml"
 	managerConfigHashAnnotation = "infra.sandbox0.ai/manager-config-hash"
 	storageConfigHashAnnotation = "infra.sandbox0.ai/storage-config-hash"
-	embeddedStorageFallbackPort = int32(18081)
+	storageRuntimeFallbackPort  = int32(18081)
 )
 
 func NewReconciler(resources *common.ResourceManager) *Reconciler {
@@ -61,29 +60,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		return fmt.Errorf("compiled plan is required")
 	}
 
-	// Storage-only installations still need the manager Deployment as the
-	// process host, without enabling the logical manager feature elsewhere in
-	// the compiled plan.
-	if !compiledPlan.Components.EnableManagerHost {
-		logger.Info("Manager host is disabled, skipping")
+	if !compiledPlan.Components.EnableManager {
+		logger.Info("Manager is disabled, skipping")
 		return nil
 	}
 
 	scope := compiledPlan.Scope
 	deploymentName := fmt.Sprintf("%s-manager", scope.Name)
 	replicas := compiledPlan.Manager.Replicas
-	canonicalStorageRuntime := scope.Owner() != nil && scope.Owner().Spec.Storage != nil && scope.Owner().Spec.Storage.Runtime != nil
-	legacyStorageRuntime := compiledPlan.Components.EnableStorageProxy && !canonicalStorageRuntime
-	var storageResources *corev1.ResourceRequirements
-	if legacyStorageRuntime && scope.Owner() != nil &&
-		scope.Owner().Spec.Services != nil && scope.Owner().Spec.Services.StorageProxy != nil {
-		storageService := scope.Owner().Spec.Services.StorageProxy
-		if replicas < 1 {
-			return fmt.Errorf("embedded storage-proxy requires at least one manager host replica")
-		}
-		storageResources = storageService.Resources
-	}
-
 	labels := common.GetServiceLabels(scope.Name, "manager")
 	keySecretName, privateKeyKey, publicKeyKey := compiledPlan.DataPlaneKeyRefs()
 
@@ -102,16 +86,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 	var storageConfig *apiconfig.StorageProxyConfig
 	var storageConfigRef common.ServiceConfigRef
 	var storageServiceHTTPPort int32
-	if compiledPlan.Components.EnableStorageProxy {
+	if compiledPlan.Components.EnableStorageRuntime {
 		if scope.Owner() == nil {
-			return fmt.Errorf("infra owner is required to embed storage-proxy")
+			return fmt.Errorf("infra owner is required for manager storage")
 		}
-		storageConfig, err = storageproxysvc.BuildRuntimeConfig(ctx, r.Resources, scope.Owner())
+		storageConfig, err = storageruntimesvc.BuildRuntimeConfig(ctx, r.Resources, scope.Owner())
 		if err != nil {
-			return fmt.Errorf("build embedded storage-proxy config: %w", err)
+			return fmt.Errorf("build manager storage config: %w", err)
 		}
 		storageServiceHTTPPort = int32(storageConfig.HTTPPort)
-		storageConfig.HTTPPort, err = resolveEmbeddedStorageHTTPPort(storageServiceHTTPPort, httpPort, metricsPort, webhookPort)
+		storageConfig.HTTPPort, err = resolveStorageRuntimeHTTPPort(storageServiceHTTPPort, httpPort, metricsPort, webhookPort)
 		if err != nil {
 			return err
 		}
@@ -119,7 +103,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 			ctx,
 			scope,
 			deploymentName+"-storage",
-			common.GetServiceLabels(scope.Name, "storage-proxy"),
+			common.GetServiceLabels(scope.Name, "manager-storage"),
 			storageConfig,
 		)
 		if err != nil {
@@ -133,7 +117,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 	}
 
 	resources := compiledPlan.Manager.Resources
-	resources = resolveManagerResources(resources, storageResources, canonicalStorageRuntime, legacyStorageRuntime)
 	serviceConfig := compiledPlan.Manager.ServiceConfig
 
 	volumeMounts := []corev1.VolumeMount{
@@ -196,10 +179,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		},
 	}
 	if storageConfig != nil {
-		storageMounts, storageVolumes, err := storageproxysvc.BuildRuntimeVolumes(scope, storageConfig, storageproxysvc.RuntimeVolumeOptions{
+		storageMounts, storageVolumes, err := storageruntimesvc.BuildRuntimeVolumes(scope, storageConfig, storageruntimesvc.RuntimeVolumeOptions{
 			ConfigMapName:    storageConfigRef.ConfigMapName,
 			ConfigVolumeName: "storage-config",
-			ConfigMountPath:  embeddedStorageConfigPath,
+			ConfigMountPath:  storageRuntimeConfigPath,
 			CacheVolumeName:  "storage-cache",
 			LogVolumeName:    "storage-logs",
 		})
@@ -252,7 +235,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		containerPorts = append(containerPorts,
 			corev1.ContainerPort{Name: "storage-http", ContainerPort: storageHTTPPort},
 		)
-		envVars = append(envVars, corev1.EnvVar{Name: "STORAGE_PROXY_CONFIG_PATH", Value: embeddedStorageConfigPath})
+		envVars = append(envVars, corev1.EnvVar{Name: "STORAGE_RUNTIME_CONFIG_PATH", Value: storageRuntimeConfigPath})
 	}
 
 	// Create deployment
@@ -305,8 +288,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		common.BuildServicePort("metrics", metricsPort, metricsPort, serviceType),
 		common.BuildServicePort("webhook", webhookPort, webhookPort, serviceType),
 	}
-	if canonicalStorageRuntime && storageConfig != nil {
+	if storageConfig != nil {
 		servicePorts = append(servicePorts, common.BuildServicePort("storage-http", storageServiceHTTPPort, int32(storageConfig.HTTPPort), serviceType))
+	}
+	if err := validateManagerServicePorts(servicePorts); err != nil {
+		return err
 	}
 	if err := r.Resources.ReconcileServicePortsWithScope(ctx, scope, deploymentName, labels, serviceType, serviceAnnotations, servicePorts); err != nil {
 		return err
@@ -315,15 +301,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 	if err := r.Resources.EnsureDeploymentReadyWithScope(ctx, scope, deploymentName, replicas); err != nil {
 		return err
 	}
-	if storageConfig != nil {
-		if err := r.Resources.EnsureDeploymentRolloutComplete(ctx, scope, deploymentName, replicas); err != nil {
-			return err
-		}
-		if !canonicalStorageRuntime {
-			if err := r.reconcileStorageProxyAliasService(ctx, compiledPlan, storageConfig, storageServiceHTTPPort, metricsPort, labels); err != nil {
-				return err
-			}
-		}
+	if err := r.Resources.EnsureDeploymentRolloutComplete(ctx, scope, deploymentName, replicas); err != nil {
+		return err
 	}
 
 	// Reconcile runtime resources first so dependent services do not observe a
@@ -343,9 +322,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 	return nil
 }
 
-func resolveEmbeddedStorageHTTPPort(requested int32, reserved ...int32) (int, error) {
+func validateManagerServicePorts(ports []corev1.ServicePort) error {
+	seen := make(map[int32]string, len(ports))
+	for _, servicePort := range ports {
+		if previous, exists := seen[servicePort.Port]; exists {
+			return fmt.Errorf("manager Service port %d is used by both %s and %s", servicePort.Port, previous, servicePort.Name)
+		}
+		seen[servicePort.Port] = servicePort.Name
+	}
+	return nil
+}
+
+func resolveStorageRuntimeHTTPPort(requested int32, reserved ...int32) (int, error) {
 	if requested < 1 || requested > 65535 {
-		return 0, fmt.Errorf("embedded storage-proxy HTTP port %d is outside 1-65535", requested)
+		return 0, fmt.Errorf("storage runtime HTTP port %d is outside 1-65535", requested)
 	}
 	available := func(candidate int32) bool {
 		for _, port := range reserved {
@@ -358,78 +348,17 @@ func resolveEmbeddedStorageHTTPPort(requested int32, reserved ...int32) (int, er
 	if available(requested) {
 		return int(requested), nil
 	}
-	for candidate := embeddedStorageFallbackPort; candidate <= 65535; candidate++ {
+	for candidate := storageRuntimeFallbackPort; candidate <= 65535; candidate++ {
 		if available(candidate) {
 			return int(candidate), nil
 		}
 	}
-	for candidate := int32(1024); candidate < embeddedStorageFallbackPort; candidate++ {
+	for candidate := int32(1024); candidate < storageRuntimeFallbackPort; candidate++ {
 		if available(candidate) {
 			return int(candidate), nil
 		}
 	}
-	return 0, fmt.Errorf("no available HTTP port for embedded storage-proxy")
-}
-
-func mergeEmbeddedServiceResources(managerResources, storageResources *corev1.ResourceRequirements) *corev1.ResourceRequirements {
-	managerResolved := common.ResolveDeploymentResources(managerResources)
-	storageResolved := common.ResolveDeploymentResources(storageResources)
-	return &corev1.ResourceRequirements{
-		Requests: addResourceLists(managerResolved.Requests, storageResolved.Requests),
-		Limits:   addResourceLists(managerResolved.Limits, storageResolved.Limits),
-		Claims:   append(append([]corev1.ResourceClaim(nil), managerResolved.Claims...), storageResolved.Claims...),
-	}
-}
-
-func resolveManagerResources(managerResources, storageResources *corev1.ResourceRequirements, canonicalStorageRuntime, legacyStorageRuntime bool) *corev1.ResourceRequirements {
-	if legacyStorageRuntime || (canonicalStorageRuntime && managerResources == nil) {
-		return mergeEmbeddedServiceResources(managerResources, storageResources)
-	}
-	return managerResources
-}
-
-func addResourceLists(left, right corev1.ResourceList) corev1.ResourceList {
-	out := make(corev1.ResourceList, len(left)+len(right))
-	for name, quantity := range left {
-		out[name] = quantity.DeepCopy()
-	}
-	for name, quantity := range right {
-		current := out[name]
-		current.Add(quantity)
-		out[name] = current
-	}
-	return out
-}
-
-func (r *Reconciler) reconcileStorageProxyAliasService(ctx context.Context, compiledPlan *infraplan.InfraPlan, storageConfig *apiconfig.StorageProxyConfig, storageServiceHTTPPort, managerMetricsPort int32, managerLabels map[string]string) error {
-	infra := compiledPlan.Scope.Owner()
-	if infra == nil || storageConfig == nil {
-		return fmt.Errorf("infra and storage-proxy config are required")
-	}
-	var serviceConfig *infrav1alpha1.ServiceNetworkConfig
-	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
-		serviceConfig = infra.Spec.Services.StorageProxy.Service
-	}
-	serviceType := common.ResolveServiceType(serviceConfig)
-	httpServicePort := common.ResolveServicePort(serviceConfig, storageServiceHTTPPort)
-	serviceAnnotations := common.ResolveServiceAnnotations(serviceConfig)
-	aliasName := fmt.Sprintf("%s-storage-proxy", compiledPlan.Scope.Name)
-	storageLabels := common.GetServiceLabels(compiledPlan.Scope.Name, "storage-proxy")
-	return r.Resources.ReconcileServicePortsWithScopeAndSpecMutator(
-		ctx,
-		compiledPlan.Scope,
-		aliasName,
-		storageLabels,
-		serviceType,
-		serviceAnnotations,
-		[]corev1.ServicePort{
-			common.BuildServicePort("http", httpServicePort, int32(storageConfig.HTTPPort), serviceType),
-			common.BuildServicePort("metrics", int32(storageConfig.MetricsPort), managerMetricsPort, serviceType),
-		},
-		func(spec *corev1.ServiceSpec) {
-			spec.Selector = common.CloneStringMap(managerLabels)
-		},
-	)
+	return 0, fmt.Errorf("no available HTTP port for manager storage runtime")
 }
 
 func (r *Reconciler) buildConfig(ctx context.Context, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) (*apiconfig.ManagerConfig, error) {

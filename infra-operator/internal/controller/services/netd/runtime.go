@@ -3,9 +3,13 @@ package netd
 import (
 	"context"
 	"fmt"
+	"net"
 	"path/filepath"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
@@ -14,48 +18,72 @@ import (
 	redissvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/redis"
 	sandboxobssvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sandboxobservability"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
-	"github.com/sandbox0-ai/sandbox0/netd/pkg/activeguard"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
 const (
-	ConfigPath               = "/config/netd.yaml"
-	ConfigVolumeName         = "netd-config"
-	ActiveLockEnv            = activeguard.EnvPath
-	ActiveLockVolumeName     = "netd-active-lock"
-	ActiveLockHostDirectory  = "/var/lib/sandbox0/netd-locks"
-	ActiveLockMountDirectory = "/var/lib/sandbox0/netd-locks"
-	RunVolumeName            = "netd-run"
-	RunMountDirectory        = "/run"
-	ConfigHashAnnotation     = "infra.sandbox0.ai/netd-config-hash"
+	ConfigPath           = "/config/netd.yaml"
+	ConfigVolumeName     = "netd-config"
+	RunVolumeName        = "netd-run"
+	RunMountDirectory    = "/run"
+	ConfigHashAnnotation = "infra.sandbox0.ai/netd-config-hash"
 )
 
-// RuntimeAssets are the config, host access, secrets, and placement required
-// to run netd either as a legacy DaemonSet or inside the ctld process.
+// Reconciler builds the network runtime assets consumed by ctld.
+type Reconciler struct {
+	Resources *common.ResourceManager
+}
+
+func NewReconciler(resources *common.ResourceManager) *Reconciler {
+	return &Reconciler{Resources: resources}
+}
+
+func (r *Reconciler) resolveMITMCASecretName(ctx context.Context, compiledPlan *infraplan.InfraPlan, labels map[string]string) (string, error) {
+	return EnsureMITMCASecretWithScope(ctx, r.Resources, compiledPlan.Scope, compiledPlan, labels)
+}
+
+func resolveClusterDNSCIDR(ctx context.Context, client ctrlclient.Client, _ logr.Logger) (string, error) {
+	if client == nil {
+		return "", fmt.Errorf("client is nil")
+	}
+	for _, name := range []string{"kube-dns", "coredns"} {
+		svc := &corev1.Service{}
+		if err := client.Get(ctx, types.NamespacedName{Name: name, Namespace: "kube-system"}, svc); err != nil {
+			continue
+		}
+		if svc.Spec.ClusterIP == "" || svc.Spec.ClusterIP == "None" {
+			continue
+		}
+		ip := net.ParseIP(svc.Spec.ClusterIP)
+		if ip == nil {
+			continue
+		}
+		if ip.To4() != nil {
+			return ip.String() + "/32", nil
+		}
+		return ip.String() + "/128", nil
+	}
+	return "", fmt.Errorf("failed to resolve cluster DNS CIDR; set network.config.clusterDnsCidr explicitly")
+}
+
+// RuntimeAssets are the config, host access, and secrets required by ctld's
+// network runtime.
 type RuntimeAssets struct {
-	Config           *apiconfig.NetdConfig
-	ConfigRef        common.ServiceConfigRef
-	PodAnnotations   map[string]string
-	Volumes          []corev1.Volume
-	VolumeMounts     []corev1.VolumeMount
-	Ports            []corev1.ContainerPort
-	RuntimeClassName *string
-	NodeSelector     map[string]string
-	Tolerations      []corev1.Toleration
-	ActiveLockPath   string
+	Config         *apiconfig.NetdConfig
+	ConfigRef      common.ServiceConfigRef
+	PodAnnotations map[string]string
+	Volumes        []corev1.Volume
+	VolumeMounts   []corev1.VolumeMount
+	Ports          []corev1.ContainerPort
 }
 
-// ScopedActiveLockPath isolates netd fencing between Sandbox0Infra instances
-// that share a Kubernetes node.
-func ScopedActiveLockPath(namespace, name string) string {
-	return filepath.Join(ActiveLockMountDirectory, namespace, name, "netd.lock")
-}
-
-// BuildRuntimeAssets materializes the single netd config and workload assets
-// shared by legacy handoff and embedded ctld runtimes.
+// BuildRuntimeAssets materializes ctld's network config and workload assets.
 func (r *Reconciler) BuildRuntimeAssets(ctx context.Context, compiledPlan *infraplan.InfraPlan) (*RuntimeAssets, error) {
 	if compiledPlan == nil {
 		return nil, fmt.Errorf("compiled plan is required")
+	}
+	if !compiledPlan.Network.Enabled {
+		return nil, nil
 	}
 	if r == nil || r.Resources == nil || r.Resources.Client == nil {
 		return nil, fmt.Errorf("netd resource manager is required")
@@ -64,8 +92,8 @@ func (r *Reconciler) BuildRuntimeAssets(ctx context.Context, compiledPlan *infra
 	name := fmt.Sprintf("%s-netd", scope.Name)
 	labels := common.GetServiceLabels(scope.Name, "netd")
 	config := &apiconfig.NetdConfig{}
-	if compiledPlan.Netd.Config != nil {
-		config = compiledPlan.Netd.Config.DeepCopy()
+	if compiledPlan.Network.Config != nil {
+		config = compiledPlan.Network.Config.DeepCopy()
 	}
 	if config.NodeName == "" {
 		config.NodeName = "${NODE_NAME}"
@@ -98,13 +126,13 @@ func (r *Reconciler) BuildRuntimeAssets(ctx context.Context, compiledPlan *infra
 	if dsn, err := compiledPlan.DatabaseDSN(ctx, r.Resources.Client); err == nil {
 		config.DatabaseURL = dsn
 	}
-	config.RegionID = compiledPlan.Netd.RegionID
-	config.ClusterID = compiledPlan.Netd.ClusterID
+	config.RegionID = compiledPlan.Network.RegionID
+	config.ClusterID = compiledPlan.Network.ClusterID
 	if err := meteringsvc.ApplyNetdConfig(ctx, r.Resources.Client, scope.Owner(), config); err != nil {
 		return nil, err
 	}
 	if config.EgressAuthResolverURL == "" {
-		config.EgressAuthResolverURL = compiledPlan.Netd.EgressAuthResolverURL
+		config.EgressAuthResolverURL = compiledPlan.Network.EgressAuthResolverURL
 	}
 	if err := sandboxobssvc.ApplyNetdConfig(ctx, r.Resources.Client, scope.Owner(), compiledPlan.Services.ClusterGateway.URL, config); err != nil {
 		return nil, err
@@ -149,12 +177,6 @@ func (r *Reconciler) BuildRuntimeAssets(ctx context.Context, compiledPlan *infra
 		},
 		{Name: RunVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 		{
-			Name: ActiveLockVolumeName,
-			VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
-				Path: ActiveLockHostDirectory, Type: &directoryOrCreate,
-			}},
-		},
-		{
 			Name: "internal-jwt-private-key",
 			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
 				SecretName: keySecretName,
@@ -167,7 +189,6 @@ func (r *Reconciler) BuildRuntimeAssets(ctx context.Context, compiledPlan *infra
 		{Name: "bpf-fs", MountPath: "/sys/fs/bpf"},
 		{Name: "modules", MountPath: "/lib/modules", ReadOnly: true},
 		{Name: RunVolumeName, MountPath: RunMountDirectory},
-		{Name: ActiveLockVolumeName, MountPath: ActiveLockMountDirectory},
 		{Name: "internal-jwt-private-key", MountPath: pkginternalauth.DefaultInternalJWTPrivateKeyPath, SubPath: "internal_jwt_private.key", ReadOnly: true},
 	}
 	if config.SandboxObservabilityIngestURL != "" {
@@ -208,9 +229,5 @@ func (r *Reconciler) BuildRuntimeAssets(ctx context.Context, compiledPlan *infra
 			{Name: "metrics", ContainerPort: int32(config.MetricsPort)},
 			{Name: "health", ContainerPort: int32(config.HealthPort)},
 		},
-		RuntimeClassName: compiledPlan.Netd.RuntimeClassName,
-		NodeSelector:     compiledPlan.Netd.NodeSelector,
-		Tolerations:      compiledPlan.Netd.Tolerations,
-		ActiveLockPath:   ScopedActiveLockPath(scope.Namespace, scope.Name),
 	}, nil
 }

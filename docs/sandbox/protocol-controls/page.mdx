@@ -12,7 +12,7 @@ Use it when a sandbox must reach a broad protocol endpoint but only a subset of 
 | `protocolRules` | Parse an allowed protocol request and allow, deny, or audit protocol operations |
 | `credentialRules` | Resolve and inject outbound credentials for matching traffic |
 
-Protocol controls are enforced in the data plane by `netd`. Regional control plane services store and distribute policy; they are not in the per-request data path.
+Protocol controls are enforced in the data plane by the ctld network runtime. Regional control plane services store and distribute policy; they are not in the per-request data path.
 
 ## HTTP Request Policy
 
@@ -54,11 +54,11 @@ egress:
                       - /v1/read/private
 ```
 
-When an HTTP request is denied, netd does not forward it upstream. It returns `403 Forbidden` to the sandbox process and writes the protocol decision to the netd audit event.
+When an HTTP request is denied, the ctld network runtime does not forward it upstream. It returns `403 Forbidden` to the sandbox process and writes the protocol decision to the network audit event.
 
 ## MCP Tool Policy
 
-MCP protocol rules inspect HTTP-carried JSON-RPC requests. For `tools/call`, netd reads `params.name` and evaluates the configured tool policy.
+MCP protocol rules inspect HTTP-carried JSON-RPC requests. For `tools/call`, the ctld network runtime reads `params.name` and evaluates the configured tool policy.
 
 ```yaml
 mode: block-all
@@ -96,9 +96,9 @@ egress:
 
 `denied` is evaluated before `allowed`. If `allowed` is empty, tools are allowed unless they are listed in `denied`. If `allowed` is non-empty, only listed tools are allowed.
 
-When a tool call is denied, netd does not forward the request upstream. It returns a JSON-RPC error response to the sandbox process and writes the protocol decision to the netd audit event.
+When a tool call is denied, the ctld network runtime does not forward the request upstream. It returns a JSON-RPC error response to the sandbox process and writes the protocol decision to the network audit event.
 
-MCP request bodies must be bounded and inspectable. If netd cannot safely read the JSON-RPC request body, the protocol rule fails closed and returns a JSON-RPC policy error.
+MCP request bodies must be bounded and inspectable. If the ctld network runtime cannot safely read the JSON-RPC request body, the protocol rule fails closed and returns a JSON-RPC policy error.
 
 ## Update Examples
 
@@ -293,9 +293,9 @@ main().catch((error) => {
 
 ## HTTPS Inspection
 
-For HTTPS HTTP and MCP protocol rules, set `tlsMode: terminate-reoriginate` on the protocol rule. Sandbox0 then uses the netd MITM CA already exposed to procd-managed processes.
+For HTTPS HTTP and MCP protocol rules, set `tlsMode: terminate-reoriginate` on the protocol rule. Sandbox0 then uses the ctld network runtime's MITM CA already exposed to procd-managed processes.
 
-Without TLS termination, netd can still apply destination-level `trafficRules`, but it cannot read HTTPS request contents or enforce request-level protocol policy.
+Without TLS termination, the ctld network runtime can still apply destination-level `trafficRules`, but it cannot read HTTPS request contents or enforce request-level protocol policy.
 
 ## Current Scope
 
@@ -306,7 +306,7 @@ MCP protocol controls target remote MCP over HTTP/HTTPS Streamable HTTP style re
 - `tools/call` is enforced by tool name.
 - `tools/list` is audited but not filtered.
 - HTTP/1.1 and HTTP/2 HTTPS requests can be inspected when TLS termination is enabled.
-- Local `stdio` MCP does not traverse netd and must be controlled by a tool runner or procd-level policy.
+- Local `stdio` MCP does not traverse the ctld network runtime and must be controlled by a tool runner or procd-level policy.
 - Tool argument semantics are server-specific. Use tool-name allowlists as the strong boundary; treat argument-level checks as future protocol-adapter extensions.
 
 ## Next Steps

@@ -196,8 +196,8 @@ func (r *ResourceManager) ReconcileDeploymentWithScope(ctx context.Context, scop
 }
 
 // ResolveDeploymentResources returns the effective resources used by a
-// deployment container. Callers embedding a former standalone workload can
-// use it before summing both workloads' effective requests and limits.
+// deployment container. Callers combining multiple runtime containers can use
+// it before summing their effective requests and limits.
 func ResolveDeploymentResources(explicit *corev1.ResourceRequirements) corev1.ResourceRequirements {
 	defaults := corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
@@ -244,9 +244,7 @@ func (r *ResourceManager) EnsureDeploymentReadyWithScope(ctx context.Context, sc
 }
 
 // EnsureDeploymentRolloutComplete validates that every desired replica is from
-// the current Deployment generation and is both ready and available. This is
-// stronger than EnsureDeploymentReady and is required before switching a
-// compatibility Service to a newly added listener in an existing process.
+// the current Deployment generation and is both ready and available.
 func (r *ResourceManager) EnsureDeploymentRolloutComplete(ctx context.Context, scope ObjectScope, name string, replicas int32) error {
 	if replicas == 0 {
 		return nil
@@ -958,6 +956,13 @@ func (r *ResourceManager) cleanupUnusedServiceConfigMaps(ctx context.Context, sc
 	return nil
 }
 
+// CleanupUnusedServiceConfigMapsWithScope removes content-addressed configs
+// for a runtime that no longer has a desired config. ConfigMaps still mounted
+// by any Pod are retained until that Pod is gone.
+func (r *ResourceManager) CleanupUnusedServiceConfigMapsWithScope(ctx context.Context, scope ObjectScope, baseName string) error {
+	return r.cleanupUnusedServiceConfigMaps(ctx, scope, baseName, "")
+}
+
 // ReconcileNamespace creates a namespace if it does not exist.
 // It ignores errors if the operator does not have permission to create the namespace.
 func (r *ResourceManager) ReconcileNamespace(ctx context.Context, name string) error {
@@ -1180,29 +1185,19 @@ func BoolPtr(b bool) *bool {
 }
 
 // ResolveSandboxNodePlacement derives the shared scheduling constraints for
-// sandbox workloads and node-local sandbox services. The shared spec-level
-// placement takes precedence, with netd placement kept as a compatibility
-// fallback for older manifests.
+// sandbox workloads and node-local data-plane services.
 func ResolveSandboxNodePlacement(infra *infrav1alpha1.Sandbox0Infra) (map[string]string, []corev1.Toleration) {
 	if infra == nil {
 		return nil, nil
 	}
 
-	var nodeSelector map[string]string
 	if infra.Spec.SandboxNodePlacement != nil && len(infra.Spec.SandboxNodePlacement.NodeSelector) > 0 {
-		nodeSelector = cloneNodeSelector(infra.Spec.SandboxNodePlacement.NodeSelector)
-	} else if infra.Spec.Network == nil && infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
-		nodeSelector = cloneNodeSelector(infra.Spec.Services.Netd.NodeSelector)
+		return cloneNodeSelector(infra.Spec.SandboxNodePlacement.NodeSelector), cloneTolerations(infra.Spec.SandboxNodePlacement.Tolerations)
 	}
-
-	var tolerations []corev1.Toleration
-	if infra.Spec.SandboxNodePlacement != nil && len(infra.Spec.SandboxNodePlacement.Tolerations) > 0 {
-		tolerations = cloneTolerations(infra.Spec.SandboxNodePlacement.Tolerations)
-	} else if infra.Spec.Network == nil && infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
-		tolerations = cloneTolerations(infra.Spec.Services.Netd.Tolerations)
+	if infra.Spec.SandboxNodePlacement != nil {
+		return nil, cloneTolerations(infra.Spec.SandboxNodePlacement.Tolerations)
 	}
-
-	return nodeSelector, tolerations
+	return nil, nil
 }
 
 func cloneNodeSelector(src map[string]string) map[string]string {

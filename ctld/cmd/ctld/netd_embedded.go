@@ -5,14 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	"github.com/sandbox0-ai/sandbox0/netd/pkg/activeguard"
 	netddaemon "github.com/sandbox0-ai/sandbox0/netd/pkg/daemon"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	"go.uber.org/zap"
@@ -186,19 +184,6 @@ func (s *embeddedNetdService) Run(ctx context.Context) (runErr error) {
 			_ = s.logger.Sync()
 		}
 	}()
-	if lockPath := strings.TrimSpace(os.Getenv(activeguard.EnvPath)); lockPath != "" {
-		if s.logger != nil {
-			s.logger.Info("Waiting for node-local netd active lock", zap.String("path", lockPath))
-		}
-		guard, err := activeguard.Acquire(ctx, lockPath)
-		if err != nil {
-			return err
-		}
-		defer guard.Close()
-		if s.logger != nil {
-			s.logger.Info("Acquired node-local netd active lock", zap.String("path", lockPath))
-		}
-	}
 	return s.runDaemonWithStartupDeadline(ctx)
 }
 

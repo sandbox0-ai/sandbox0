@@ -32,7 +32,7 @@ Use `trafficRules` for new policies. Legacy `allowed*` and `denied*` fields stil
 </Callout>
 
 <Callout variant="info">
-If a credential rule uses `tlsMode: terminate-reoriginate`, Sandbox0 exposes the netd MITM CA as `SANDBOX0_NETD_MITM_CA_FILE` and configures procd-managed processes with a combined CA bundle through common TLS environment variables.
+If a credential rule uses `tlsMode: terminate-reoriginate`, Sandbox0 exposes the ctld network runtime's MITM CA as `SANDBOX0_NETD_MITM_CA_FILE` and configures procd-managed processes with a combined CA bundle through common TLS environment variables.
 </Callout>
 
 ## Traffic Rule Fields
@@ -48,15 +48,15 @@ If a credential rule uses `tlsMode: terminate-reoriginate`, Sandbox0 exposes the
 
 ## HTTP Request Matchers
 
-`credentialRules[*].httpMatch` narrows credential injection for HTTP-family rules after the HTTP request is visible to netd. It can match methods, exact paths, path prefixes, query parameters, and headers.
+`credentialRules[*].httpMatch` narrows credential injection for HTTP-family rules after the HTTP request is visible to the ctld network runtime. It can match methods, exact paths, path prefixes, query parameters, and headers.
 
-For HTTPS and gRPC rules, request matching requires `tlsMode: terminate-reoriginate` so netd can read the request before injecting credentials.
+For HTTPS and gRPC rules, request matching requires `tlsMode: terminate-reoriginate` so the ctld network runtime can read the request before injecting credentials.
 
 ## Protocol Rules
 
 `protocolRules` run after traffic is allowed. HTTP rules can limit request methods and paths; MCP rules can limit remote MCP tool calls by tool name.
 
-For HTTPS HTTP or MCP rules, set `tlsMode: terminate-reoriginate` on the protocol rule so netd can inspect request contents.
+For HTTPS HTTP or MCP rules, set `tlsMode: terminate-reoriginate` on the protocol rule so the ctld network runtime can inspect request contents.
 
 ## Get Network Policy
 

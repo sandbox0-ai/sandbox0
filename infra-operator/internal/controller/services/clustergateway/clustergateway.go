@@ -411,10 +411,10 @@ func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.In
 		cfg.ManagerURL = ""
 	}
 
-	if compiledPlan.Components.EnableStorageProxy {
-		cfg.StorageProxyURL = compiledPlan.Services.StorageProxy.URL
+	if compiledPlan.Components.EnableStorageRuntime {
+		cfg.ManagerStorageURL = compiledPlan.Services.ManagerStorage.URL
 	} else {
-		cfg.StorageProxyURL = ""
+		cfg.ManagerStorageURL = ""
 	}
 
 	if initUser := compiledPlan.InitUser(); initUser != nil && clusterGatewayPublicAuthEnabled(cfg.AuthMode) {

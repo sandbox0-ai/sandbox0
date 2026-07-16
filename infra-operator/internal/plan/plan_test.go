@@ -14,14 +14,14 @@ import (
 )
 
 func TestCompileDerivesCrossServiceReferences(t *testing.T) {
-	sharedRuntime := "shared"
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "demo",
 			Namespace: "sandbox0-system",
 		},
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
-			Region: "aws-us-east-1",
+			Region:  "aws-us-east-1",
+			Network: &infrav1alpha1.NetworkConfig{},
 			Cluster: &infrav1alpha1.ClusterConfig{
 				ID: "cluster-a",
 			},
@@ -85,20 +85,14 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 						},
 					},
 				},
-				Netd: &infrav1alpha1.NetdServiceConfig{
-					EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{
-						Enabled: true,
-					},
-					RuntimeClassName: &sharedRuntime,
-				},
 			},
 		},
 	}
 
 	compiled := Compile(infra)
 
-	if !compiled.Components.EnableManager || !compiled.Components.EnableClusterGateway || !compiled.Components.EnableNetd {
-		t.Fatalf("expected manager, cluster-gateway, and netd to be enabled: %#v", compiled.Components)
+	if !compiled.Components.EnableManager || !compiled.Components.EnableClusterGateway || !compiled.Components.EnableNetwork {
+		t.Fatalf("expected manager, cluster-gateway, and network runtime to be enabled: %#v", compiled.Components)
 	}
 	if !compiled.Manager.TemplateStoreEnabled {
 		t.Fatalf("expected template store to be enabled")
@@ -109,7 +103,7 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 	if got := compiled.Services.Manager.URL; got != "http://demo-manager.sandbox0-system.svc.cluster.local:18080" {
 		t.Fatalf("unexpected manager service URL: %q", got)
 	}
-	if got := compiled.Netd.EgressAuthResolverURL; got != compiled.Services.Manager.URL {
+	if got := compiled.Network.EgressAuthResolverURL; got != compiled.Services.Manager.URL {
 		t.Fatalf("expected netd resolver URL to match manager service URL, got %q", got)
 	}
 	if got := compiled.RegionalGateway.DefaultClusterGatewayURL; got != "http://demo-cluster-gateway:9443" {
@@ -127,23 +121,17 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 	if got := compiled.Manager.SandboxPodPlacement.NodeSelector[dataplane.NodeDataPlaneReadyLabel]; got != dataplane.ReadyLabelValue {
 		t.Fatalf("expected manager sandbox placement to require data-plane-ready nodes, got %q", got)
 	}
-	if _, ok := compiled.Netd.NodeSelector[dataplane.NodeDataPlaneReadyLabel]; ok {
-		t.Fatalf("expected netd placement not to require data-plane-ready nodes, got %#v", compiled.Netd.NodeSelector)
-	}
-	if len(compiled.Netd.Tolerations) != 1 || compiled.Netd.Tolerations[0].Key != "sandbox0.ai/sandbox" {
-		t.Fatalf("expected shared netd tolerations, got %#v", compiled.Netd.Tolerations)
+	if len(compiled.Manager.SandboxPodPlacement.Tolerations) != 1 || compiled.Manager.SandboxPodPlacement.Tolerations[0].Key != "sandbox0.ai/sandbox" {
+		t.Fatalf("expected shared manager sandbox tolerations, got %#v", compiled.Manager.SandboxPodPlacement.Tolerations)
 	}
 	if !compiled.Scheduler.Enabled {
 		t.Fatal("expected scheduler plan to be enabled")
 	}
-	if compiled.Scheduler.Config == nil || compiled.Netd.Config == nil {
+	if compiled.Scheduler.Config == nil || compiled.Network.Config == nil {
 		t.Fatal("expected scheduler and netd configs to be compiled")
 	}
 	if compiled.Scheduler.HomeCluster == nil || compiled.Scheduler.HomeCluster.ClusterID != "cluster-a" {
 		t.Fatalf("expected scheduler home cluster to be compiled, got %#v", compiled.Scheduler.HomeCluster)
-	}
-	if compiled.Netd.RuntimeClassName == nil || *compiled.Netd.RuntimeClassName != sharedRuntime {
-		t.Fatalf("expected netd runtime class name %q, got %#v", sharedRuntime, compiled.Netd.RuntimeClassName)
 	}
 	if !compiled.RegionalGateway.Enabled || compiled.RegionalGateway.Replicas != 2 {
 		t.Fatalf("expected regional gateway plan to carry enablement and replicas, got %#v", compiled.RegionalGateway)
@@ -323,14 +311,12 @@ func TestCompileDefaultsDataPlaneIdentityFromPublicExposure(t *testing.T) {
 			PublicExposure: &infrav1alpha1.PublicExposureConfig{
 				RegionID: "aws-us-east-1",
 			},
+			Network: &infrav1alpha1.NetworkConfig{},
 			Services: &infrav1alpha1.ServicesConfig{
 				Manager: &infrav1alpha1.ManagerServiceConfig{
 					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
 						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
 					},
-				},
-				Netd: &infrav1alpha1.NetdServiceConfig{
-					EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
 				},
 			},
 		},
@@ -350,54 +336,15 @@ func TestCompileDefaultsDataPlaneIdentityFromPublicExposure(t *testing.T) {
 	if got := compiled.Manager.Config.DefaultClusterId; got != naming.DefaultClusterID {
 		t.Fatalf("manager config default cluster ID = %q, want %q", got, naming.DefaultClusterID)
 	}
-	if got := compiled.Netd.RegionID; got != "aws-us-east-1" {
+	if got := compiled.Network.RegionID; got != "aws-us-east-1" {
 		t.Fatalf("netd region ID = %q, want aws-us-east-1", got)
 	}
-	if got := compiled.Netd.ClusterID; got != naming.DefaultClusterID {
+	if got := compiled.Network.ClusterID; got != naming.DefaultClusterID {
 		t.Fatalf("netd cluster ID = %q, want %q", got, naming.DefaultClusterID)
 	}
 }
 
-func TestCompileExposesStorageProxyHTTPToManager(t *testing.T) {
-	infra := &infrav1alpha1.Sandbox0Infra{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "demo",
-			Namespace: "sandbox0-system",
-		},
-		Spec: infrav1alpha1.Sandbox0InfraSpec{
-			Services: &infrav1alpha1.ServicesConfig{
-				Manager: &infrav1alpha1.ManagerServiceConfig{
-					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
-						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
-					},
-				},
-				StorageProxy: &infrav1alpha1.StorageProxyServiceConfig{
-					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
-						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
-					},
-					ServiceExposureConfig: infrav1alpha1.ServiceExposureConfig{
-						Service: &infrav1alpha1.ServiceNetworkConfig{Port: 18083},
-					},
-					Config: &infrav1alpha1.StorageProxyConfig{
-						HTTPPort: 8081,
-					},
-				},
-			},
-		},
-	}
-
-	compiled := Compile(infra)
-
-	if got := compiled.Manager.Config.StorageProxyBaseURL; got != "demo-storage-proxy.sandbox0-system.svc.cluster.local" {
-		t.Fatalf("unexpected manager storage-proxy base URL: %q", got)
-	}
-	if got := compiled.Manager.Config.StorageProxyHTTPPort; got != 8081 {
-		t.Fatalf("expected HTTP port to stay 8081, got %d", got)
-	}
-}
-
-func TestCompilePrefersCanonicalStorageAndNetworkRuntimeConfig(t *testing.T) {
-	legacyRuntimeClass := "legacy-runc"
+func TestCompileStorageAndNetworkRuntimeConfig(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
@@ -416,59 +363,32 @@ func TestCompilePrefersCanonicalStorageAndNetworkRuntimeConfig(t *testing.T) {
 					EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
 					Replicas:             2,
 				}},
-				StorageProxy: &infrav1alpha1.StorageProxyServiceConfig{
-					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
-						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
-						Replicas:             4,
-					},
-					ServiceExposureConfig: infrav1alpha1.ServiceExposureConfig{Service: &infrav1alpha1.ServiceNetworkConfig{Port: 18083}},
-					Config:                &infrav1alpha1.StorageProxyConfig{HTTPPort: 18084, CacheSizeLimit: "8Gi"},
-				},
-				Netd: &infrav1alpha1.NetdServiceConfig{
-					EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
-					MITMCASecretName:     "legacy-mitm-ca",
-					RuntimeClassName:     &legacyRuntimeClass,
-					NodeSelector:         map[string]string{"sandbox0.ai/node-role": "legacy"},
-					Config: &infrav1alpha1.NetdConfig{
-						EgressAuthResolverURL: "http://legacy-resolver:9000",
-						MetricsPort:           29091,
-					},
-				},
 			},
 		},
 	}
 
 	compiled := Compile(infra)
 
-	if !compiled.Components.EnableStorageProxy || !compiled.Components.EnableNetd {
-		t.Fatalf("canonical runtimes were not enabled: %#v", compiled.Components)
+	if !compiled.Components.EnableStorageRuntime || !compiled.Components.EnableNetwork {
+		t.Fatalf("storage and network runtimes were not enabled: %#v", compiled.Components)
 	}
 	if compiled.Manager.Replicas != 2 {
 		t.Fatalf("manager replicas = %d, want canonical process replicas 2", compiled.Manager.Replicas)
 	}
-	if got := compiled.Services.StorageProxy.Name; got != "demo-manager" {
+	if got := compiled.Services.ManagerStorage.Name; got != "demo-manager" {
 		t.Fatalf("storage runtime service name = %q, want manager", got)
 	}
-	if got := compiled.Services.StorageProxy.URL; got != "http://demo-manager.sandbox0-system.svc.cluster.local:18082" {
+	if got := compiled.Services.ManagerStorage.URL; got != "http://demo-manager.sandbox0-system.svc.cluster.local:18082" {
 		t.Fatalf("storage runtime URL = %q, want manager storage port", got)
 	}
-	if got := compiled.Manager.Config.StorageProxyBaseURL; got != "demo-manager.sandbox0-system.svc.cluster.local" {
-		t.Fatalf("manager storage runtime base URL = %q, want manager service", got)
-	}
-	if got := compiled.Manager.Config.StorageProxyHTTPPort; got != 18082 {
+	if got := compiled.Services.ManagerStorage.Port; got != 18082 {
 		t.Fatalf("manager storage runtime port = %d, want 18082", got)
 	}
-	if got := compiled.Netd.Config.EgressAuthResolverURL; got != "http://canonical-resolver:9000" {
+	if got := compiled.Network.Config.EgressAuthResolverURL; got != "http://canonical-resolver:9000" {
 		t.Fatalf("network resolver URL = %q, want canonical config", got)
 	}
-	if got := compiled.Netd.Config.MetricsPort; got != 19091 {
+	if got := compiled.Network.Config.MetricsPort; got != 19091 {
 		t.Fatalf("network metrics port = %d, want canonical config", got)
-	}
-	if compiled.Netd.RuntimeClassName != nil {
-		t.Fatalf("canonical network inherited deprecated runtimeClassName: %#v", compiled.Netd.RuntimeClassName)
-	}
-	if len(compiled.Netd.NodeSelector) != 0 {
-		t.Fatalf("canonical network inherited deprecated node selector: %#v", compiled.Netd.NodeSelector)
 	}
 	if got := compiled.ResolveNetdMITMCASecretName(); got != "canonical-mitm-ca" {
 		t.Fatalf("network MITM CA secret = %q, want canonical-mitm-ca", got)
@@ -499,25 +419,22 @@ func TestCompileRejectsInvalidClusterID(t *testing.T) {
 	}
 }
 
-func TestCompilePreservesExplicitNetdResolverURL(t *testing.T) {
+func TestCompilePreservesExplicitNetworkResolverURL(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "demo",
 			Namespace: "sandbox0-system",
 		},
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Network: &infrav1alpha1.NetworkConfig{
+				Config: &infrav1alpha1.NetdConfig{
+					EgressAuthResolverURL: "http://explicit-resolver:9000",
+				},
+			},
 			Services: &infrav1alpha1.ServicesConfig{
 				Manager: &infrav1alpha1.ManagerServiceConfig{
 					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
 						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
-					},
-				},
-				Netd: &infrav1alpha1.NetdServiceConfig{
-					EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{
-						Enabled: true,
-					},
-					Config: &infrav1alpha1.NetdConfig{
-						EgressAuthResolverURL: "http://explicit-resolver:9000",
 					},
 				},
 			},
@@ -526,7 +443,7 @@ func TestCompilePreservesExplicitNetdResolverURL(t *testing.T) {
 
 	compiled := Compile(infra)
 
-	if got := compiled.Netd.EgressAuthResolverURL; got != "http://explicit-resolver:9000" {
+	if got := compiled.Network.EgressAuthResolverURL; got != "http://explicit-resolver:9000" {
 		t.Fatalf("expected explicit resolver URL to win, got %q", got)
 	}
 }
@@ -1071,34 +988,34 @@ func TestCompileTracksValidationRequirements(t *testing.T) {
 		}
 	})
 
-	t.Run("netd without ctld is invalid and egress auth still requires manager", func(t *testing.T) {
+	t.Run("network without manager is invalid", func(t *testing.T) {
 		infra := &infrav1alpha1.Sandbox0Infra{
 			Spec: infrav1alpha1.Sandbox0InfraSpec{
-				Services: &infrav1alpha1.ServicesConfig{
-					Netd: &infrav1alpha1.NetdServiceConfig{
-						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
-						Config: &infrav1alpha1.NetdConfig{
-							EgressAuthEnabled: true,
-						},
+				Network: &infrav1alpha1.NetworkConfig{
+					Config: &infrav1alpha1.NetdConfig{
+						EgressAuthEnabled: true,
 					},
 				},
 			},
 		}
 
 		compiled := Compile(infra)
-		if !containsString(compiled.Validation.FatalErrors, "netd requires ctld to be enabled because its runtime is embedded in ctld") {
-			t.Fatalf("expected netd/ctld validation error, got %#v", compiled.Validation.FatalErrors)
+		if !containsString(compiled.Validation.FatalErrors, "network requires services.manager to be enabled") {
+			t.Fatalf("expected network/manager validation error, got %#v", compiled.Validation.FatalErrors)
 		}
-		if !containsString(compiled.Validation.FatalErrors, "netd egress auth requires manager to be enabled") {
-			t.Fatalf("expected netd egress-auth/manager validation error, got %#v", compiled.Validation.FatalErrors)
+		if !containsString(compiled.Validation.FatalErrors, "network egress auth requires manager to be enabled") {
+			t.Fatalf("expected network egress-auth/manager validation error, got %#v", compiled.Validation.FatalErrors)
 		}
 	})
 
-	t.Run("storage proxy requires at least one manager host replica", func(t *testing.T) {
+	t.Run("storage runtime requires at least one manager replica", func(t *testing.T) {
 		infra := &infrav1alpha1.Sandbox0Infra{
 			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				Storage: &infrav1alpha1.StorageConfig{
+					Runtime: &infrav1alpha1.StorageProxyConfig{},
+				},
 				Services: &infrav1alpha1.ServicesConfig{
-					StorageProxy: &infrav1alpha1.StorageProxyServiceConfig{
+					Manager: &infrav1alpha1.ManagerServiceConfig{
 						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
 							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
 							Replicas:             0,
@@ -1109,8 +1026,32 @@ func TestCompileTracksValidationRequirements(t *testing.T) {
 		}
 
 		compiled := Compile(infra)
-		if !containsString(compiled.Validation.FatalErrors, "manager host replicas must be at least 1 when the storage API is enabled") {
-			t.Fatalf("expected manager-host replica validation error, got %#v", compiled.Validation.FatalErrors)
+		if !containsString(compiled.Validation.FatalErrors, "manager replicas must be at least 1 when the storage API is enabled") {
+			t.Fatalf("expected manager replica validation error, got %#v", compiled.Validation.FatalErrors)
+		}
+	})
+
+	t.Run("manager service ports must be distinct", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				Storage: &infrav1alpha1.StorageConfig{
+					Runtime: &infrav1alpha1.StorageProxyConfig{HTTPPort: 9090},
+				},
+				Services: &infrav1alpha1.ServicesConfig{
+					Manager: &infrav1alpha1.ManagerServiceConfig{
+						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+							Replicas:             1,
+						},
+					},
+				},
+			},
+		}
+
+		compiled := Compile(infra)
+		want := "manager Service port 9090 is configured by both services.manager.config.metricsPort and storage.runtime.httpPort; use distinct ports"
+		if !containsString(compiled.Validation.FatalErrors, want) {
+			t.Fatalf("expected manager Service port validation error, got %#v", compiled.Validation.FatalErrors)
 		}
 	})
 
@@ -1173,119 +1114,6 @@ func TestCompileTracksValidationRequirements(t *testing.T) {
 	})
 }
 
-func TestCompileStorageOnlyUsesManagerHost(t *testing.T) {
-	infra := &infrav1alpha1.Sandbox0Infra{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
-		Spec: infrav1alpha1.Sandbox0InfraSpec{
-			Services: &infrav1alpha1.ServicesConfig{
-				Manager: &infrav1alpha1.ManagerServiceConfig{
-					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
-						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: false},
-						Replicas:             9,
-					},
-				},
-				StorageProxy: &infrav1alpha1.StorageProxyServiceConfig{
-					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
-						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
-						Replicas:             2,
-					},
-				},
-			},
-		},
-	}
-
-	compiled := Compile(infra)
-
-	if compiled.Components.EnableManager {
-		t.Fatal("storage-only compatibility must not enable the full manager component")
-	}
-	if !compiled.Components.EnableManagerHost || !compiled.Manager.Enabled {
-		t.Fatalf("expected storage-only compatibility to enable the manager host: components=%#v manager=%#v", compiled.Components, compiled.Manager)
-	}
-	if compiled.Manager.Replicas != 2 {
-		t.Fatalf("manager host replicas = %d, want storage replicas 2", compiled.Manager.Replicas)
-	}
-	if compiled.Components.EnableCtld || compiled.Manager.Config.CtldEnabled {
-		t.Fatalf("storage-only compatibility must not enable ctld: components=%#v config=%#v", compiled.Components, compiled.Manager.Config)
-	}
-	if _, ok := compiled.Manager.SandboxPodPlacement.NodeSelector[dataplane.NodeDataPlaneReadyLabel]; ok {
-		t.Fatalf("storage-only compatibility must not require data-plane-ready nodes: %#v", compiled.Manager.SandboxPodPlacement.NodeSelector)
-	}
-	if containsString(compiled.Status.ExpectedConditions, infrav1alpha1.ConditionTypeManagerReady) {
-		t.Fatalf("storage-only compatibility must not expose ManagerReady: %#v", compiled.Status.ExpectedConditions)
-	}
-	if !containsString(compiled.Status.ExpectedConditions, infrav1alpha1.ConditionTypeStorageProxyReady) {
-		t.Fatalf("expected StorageProxyReady condition: %#v", compiled.Status.ExpectedConditions)
-	}
-
-	for _, name := range []string{"manager-rbac", "manager", "storage-proxy"} {
-		step, ok := findWorkflowStep(compiled.Workflow.Steps, name)
-		if !ok {
-			t.Fatalf("expected %q workflow step: %#v", name, compiled.Workflow.Steps)
-		}
-		if step.ConditionType != infrav1alpha1.ConditionTypeStorageProxyReady {
-			t.Fatalf("%s condition = %q, want %q", name, step.ConditionType, infrav1alpha1.ConditionTypeStorageProxyReady)
-		}
-		if name == "manager" && step.SuccessReason != "ManagerHostReady" {
-			t.Fatalf("manager host success reason = %q, want ManagerHostReady", step.SuccessReason)
-		}
-	}
-	for _, name := range []string{"ctld", "ctld-ready", "data-plane-node-readiness", "builtin-template-pods"} {
-		if _, ok := findWorkflowStep(compiled.Workflow.Steps, name); ok {
-			t.Fatalf("storage-only compatibility must not add %q: %#v", name, compiled.Workflow.Steps)
-		}
-	}
-
-	for _, retained := range []ResourceRef{
-		{Kind: "Deployment", Namespace: infra.Namespace, Name: "demo-manager"},
-		{Kind: "Service", Namespace: infra.Namespace, Name: "demo-manager"},
-		{Kind: "ClusterRole", Name: "demo-manager"},
-	} {
-		if containsResourceRef(compiled.Cleanup.DeleteNamespaced, compiled.Cleanup.DeleteClusterScoped, retained) {
-			t.Fatalf("manager host resource should be retained for storage-only compatibility: %#v", retained)
-		}
-	}
-}
-
-func TestCompileManagerHostUsesMaximumEnabledReplicaCount(t *testing.T) {
-	infra := &infrav1alpha1.Sandbox0Infra{
-		Spec: infrav1alpha1.Sandbox0InfraSpec{
-			Services: &infrav1alpha1.ServicesConfig{
-				Manager: &infrav1alpha1.ManagerServiceConfig{
-					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
-						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
-						Replicas:             2,
-					},
-				},
-				StorageProxy: &infrav1alpha1.StorageProxyServiceConfig{
-					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
-						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
-						Replicas:             3,
-					},
-				},
-			},
-		},
-	}
-
-	compiled := Compile(infra)
-
-	if compiled.Manager.Replicas != 3 {
-		t.Fatalf("manager host replicas = %d, want max(manager=2, storage=3)=3", compiled.Manager.Replicas)
-	}
-	if len(compiled.Validation.FatalErrors) != 0 {
-		t.Fatalf("replica normalization should not be fatal: %#v", compiled.Validation.FatalErrors)
-	}
-	for _, name := range []string{"manager-rbac", "manager"} {
-		step, ok := findWorkflowStep(compiled.Workflow.Steps, name)
-		if !ok || step.ConditionType != infrav1alpha1.ConditionTypeManagerReady {
-			t.Fatalf("full manager workflow step %q should use ManagerReady: %#v", name, step)
-		}
-		if name == "manager" && step.SuccessReason != "ManagerReady" {
-			t.Fatalf("full manager success reason = %q, want ManagerReady", step.SuccessReason)
-		}
-	}
-}
-
 func TestCompileTracksWorkflowRequirements(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1312,6 +1140,10 @@ func TestCompileTracksWorkflowRequirements(t *testing.T) {
 					Username: "sandbox0",
 				},
 			},
+			Storage: &infrav1alpha1.StorageConfig{
+				Runtime: &infrav1alpha1.StorageProxyConfig{},
+			},
+			Network: &infrav1alpha1.NetworkConfig{},
 			Services: &infrav1alpha1.ServicesConfig{
 				GlobalGateway: &infrav1alpha1.GlobalGatewayServiceConfig{
 					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
@@ -1357,14 +1189,6 @@ func TestCompileTracksWorkflowRequirements(t *testing.T) {
 						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
 					},
 				},
-				Netd: &infrav1alpha1.NetdServiceConfig{
-					EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
-				},
-				StorageProxy: &infrav1alpha1.StorageProxyServiceConfig{
-					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
-						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
-					},
-				},
 			},
 		},
 	}
@@ -1376,6 +1200,7 @@ func TestCompileTracksWorkflowRequirements(t *testing.T) {
 		"control-plane-public-key",
 		"internal-auth",
 		"database",
+		"storage",
 		"global-gateway-enterprise-license",
 		"global-gateway",
 		"init-user-secret",
@@ -1388,13 +1213,10 @@ func TestCompileTracksWorkflowRequirements(t *testing.T) {
 		"manager",
 		"cluster-gateway-enterprise-license",
 		"cluster-gateway",
-		"storage-proxy",
-		"legacy-netd-handoff",
+		"storage-runtime-ready",
 		"ctld",
-		"legacy-netd-standby",
 		"ctld-ready",
-		"netd-ready",
-		"legacy-netd-cleanup",
+		"network-ready",
 		"data-plane-node-readiness",
 		"builtin-template-pods",
 		"register-cluster",
@@ -1515,9 +1337,6 @@ func TestCompileTracksCleanupPlan(t *testing.T) {
 						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: false},
 					},
 				},
-				Netd: &infrav1alpha1.NetdServiceConfig{
-					EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: false},
-				},
 			},
 		},
 	}
@@ -1537,13 +1356,16 @@ func TestCompileTracksCleanupPlan(t *testing.T) {
 	for _, want := range []ResourceRef{
 		{Kind: "Deployment", Namespace: "sandbox0-system", Name: "demo-global-gateway"},
 		{Kind: "Deployment", Namespace: "sandbox0-system", Name: "demo-manager"},
-		{Kind: "DaemonSet", Namespace: "sandbox0-system", Name: "demo-netd"},
+		{Kind: "DaemonSet", Namespace: "sandbox0-system", Name: "demo-ctld-a"},
+		{Kind: "DaemonSet", Namespace: "sandbox0-system", Name: "demo-ctld-b"},
+		{Kind: "Service", Namespace: "sandbox0-system", Name: "demo-ctld-network-metrics"},
 		{Kind: "Service", Namespace: "sandbox0-system", Name: "demo-netd-metrics"},
+		{Kind: "ConfigMap", Namespace: "sandbox0-system", Name: "demo-ctld"},
+		{Kind: "ConfigMap", Namespace: "sandbox0-system", Name: "demo-netd"},
 		{Kind: "StatefulSet", Namespace: "sandbox0-system", Name: "demo-postgres"},
 		{Kind: "Deployment", Namespace: "sandbox0-system", Name: "demo-egress-broker"},
 		{Kind: "ClusterRole", Name: "demo-manager"},
-		{Kind: "ClusterRoleBinding", Name: "demo-netd"},
-		{Kind: "ConfigMap", Namespace: "sandbox0-system", Name: "demo-manager-storage"},
+		{Kind: "ClusterRoleBinding", Name: "demo-ctld"},
 	} {
 		if !containsResourceRef(compiled.Cleanup.DeleteNamespaced, compiled.Cleanup.DeleteClusterScoped, want) {
 			t.Fatalf("expected cleanup target %#v, got namespaced=%#v cluster=%#v", want, compiled.Cleanup.DeleteNamespaced, compiled.Cleanup.DeleteClusterScoped)
@@ -1579,13 +1401,4 @@ func workflowStepNames(steps []WorkflowStepPlan) []string {
 		names = append(names, step.Name)
 	}
 	return names
-}
-
-func findWorkflowStep(steps []WorkflowStepPlan, name string) (WorkflowStepPlan, bool) {
-	for _, step := range steps {
-		if step.Name == name {
-			return step, true
-		}
-	}
-	return WorkflowStepPlan{}, false
 }

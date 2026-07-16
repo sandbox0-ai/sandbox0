@@ -7,7 +7,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 )
 
-// === Volume File System Handlers (→ Storage Proxy) ===
+// === Volume File System Handlers (→ Manager Storage) ===
 
 // handleVolumeFileOperation handles volume file operations (GET, POST, DELETE).
 // Route: /api/v1/sandboxvolumes/:id/files
@@ -22,7 +22,7 @@ func (s *Server) handleVolumeFileOperation(c *gin.Context) {
 	}
 
 	c.Request.URL.Path = "/sandboxvolumes/" + id + "/files"
-	s.proxyToStorageProxy(c)
+	s.proxyToManagerStorage(c)
 }
 
 // handleVolumeFileWatch handles volume file watch websocket proxying.
@@ -34,7 +34,7 @@ func (s *Server) handleVolumeFileWatch(c *gin.Context) {
 	}
 
 	c.Request.URL.Path = "/sandboxvolumes/" + id + "/files/watch"
-	s.proxyToStorageProxy(c)
+	s.proxyToManagerStorage(c)
 }
 
 // handleVolumeFileArchiveImport handles volume tar archive imports.
@@ -50,7 +50,7 @@ func (s *Server) handleVolumeFileArchiveImport(c *gin.Context) {
 	}
 
 	c.Request.URL.Path = "/sandboxvolumes/" + id + "/files/archive"
-	s.proxyToStorageProxy(c)
+	s.proxyToManagerStorage(c)
 }
 
 // handleVolumeFileMove handles volume file move operations.
@@ -62,7 +62,7 @@ func (s *Server) handleVolumeFileMove(c *gin.Context) {
 	}
 
 	c.Request.URL.Path = "/sandboxvolumes/" + id + "/files/move"
-	s.proxyToStorageProxy(c)
+	s.proxyToManagerStorage(c)
 }
 
 // handleVolumeFileStat handles volume file stat operations.
@@ -78,7 +78,7 @@ func (s *Server) handleVolumeFileStat(c *gin.Context) {
 	}
 
 	c.Request.URL.Path = "/sandboxvolumes/" + id + "/files/stat"
-	s.proxyToStorageProxy(c)
+	s.proxyToManagerStorage(c)
 }
 
 // handleVolumeFileList handles volume directory listing operations.
@@ -94,5 +94,5 @@ func (s *Server) handleVolumeFileList(c *gin.Context) {
 	}
 
 	c.Request.URL.Path = "/sandboxvolumes/" + id + "/files/list"
-	s.proxyToStorageProxy(c)
+	s.proxyToManagerStorage(c)
 }

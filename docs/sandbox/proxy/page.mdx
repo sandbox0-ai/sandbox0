@@ -13,7 +13,7 @@ Use it when a sandbox needs a customer-controlled egress IP, customer-side audit
 - UDP, QUIC, HTTP proxy, and VPN tunnels are not part of this feature.
 
 <Callout variant="info">
-For domain-classified TCP traffic, netd sends the hostname to the SOCKS5 proxy so the proxy can resolve it from the customer network side. The sandbox process still needs to open a TCP connection first, so make sure the application can resolve or otherwise reach the initial destination address.
+For domain-classified TCP traffic, the ctld network runtime sends the hostname to the SOCKS5 proxy so the proxy can resolve it from the customer network side. The sandbox process still needs to open a TCP connection first, so make sure the application can resolve or otherwise reach the initial destination address.
 </Callout>
 
 ## Configure Proxy

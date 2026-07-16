@@ -15,31 +15,31 @@ Sandbox0 self-hosted is **operator-first**.
 ### Planes and Core Services
 
 - **Control plane** (optional in single-cluster): `regional-gateway`, `scheduler`
-- **Data plane** (runtime): `cluster-gateway`, `manager` with the optional storage-proxy runtime, and a node-local `ctld` HA pair whose active process can run netd
+- **Data plane** (runtime): `cluster-gateway`, `manager` with the storage API runtime, and a node-local `ctld` HA pair for rootfs, volume portals, and network policy
 - **In-pod runtime**: `procd` runs inside each sandbox pod and handles process/files/volume mount operations
 
 ### Single-Cluster vs Multi-Cluster
 
 | Mode | Required services | Typical use |
 |---|---|---|
-| Single-cluster | `cluster-gateway` + `manager` | Most users, fastest path |
+| Single-cluster | `cluster-gateway` + `manager` + node-local `ctld` HA pair | Most users, fastest path |
 | Multi-cluster | control plane (`regional-gateway` + `scheduler`) + one or more data planes | Regional scale-out |
 
-### Full Mode Single-Cluster
+### Fullmode Single-Cluster
 
 ```mermaid
 flowchart TD
     client[Client / API SDK] --> igw[cluster-gateway]
 
-    subgraph cluster[Kubernetes Cluster - single cluster full mode]
+    subgraph cluster[Kubernetes Cluster - single cluster fullmode]
         direction TB
 
         subgraph s0[Sandbox0 Services]
             direction LR
-            igw --> mgr[manager - lifecycle and storage-proxy API]
+            igw --> mgr[manager - lifecycle and storage API]
             igw --> pods[Sandbox Pods - procd inside]
             mgr --> pods
-            mgr --> ctld[ctld-a / ctld-b - active runs netd]
+            mgr --> ctld[ctld-a / ctld-b - storage portal and network runtime]
             pods --> ctld
         end
 
@@ -58,14 +58,14 @@ flowchart TD
     end
 ```
 
-In full mode single-cluster, `storage-proxy` and `netd` remain logical Sandbox0 components, but they are not separate workloads. The storage-proxy API runtime runs in the `manager` Deployment. Each sandbox node has `ctld-a` and `ctld-b` DaemonSet Pods; only the elected primary runs netd, and the synchronized standby starts it after promotion. The existing storage API paths, storage-proxy internal-auth audience, compatibility Service, and `services.storageProxy` / `services.netd` configuration blocks remain stable. PostgreSQL, S3/OSS, and the optional image registry are middleware dependencies.
+In single-cluster fullmode, the storage API runtime runs in the `manager` Deployment. Each sandbox node has `ctld-a` and `ctld-b` DaemonSet Pods; the elected primary owns rootfs persistence, volume portals, and network policy, and the synchronized standby assumes those responsibilities after promotion. PostgreSQL, S3/OSS, and the optional image registry are middleware dependencies.
 
 ### Request Flow
 
 - **Single-cluster (typical)**: client -> `cluster-gateway` -> `manager` -> sandbox pod (`procd`)
 - **Single-cluster (direct pod path)**: client -> `cluster-gateway` -> sandbox pod (`procd`) (for applicable traffic paths)
-- **Volume API**: client -> `cluster-gateway` -> storage-proxy compatibility Service -> embedded runtime in `manager` -> object storage or the active ctld mount owner
-- **Sandbox network**: sandbox pod -> embedded netd runtime in the active `ctld` process -> allowed upstream
+- **Volume API**: client -> `cluster-gateway` -> storage runtime in `manager` -> object storage or the active ctld mount owner
+- **Sandbox network**: sandbox pod -> network runtime in the active `ctld` process -> allowed upstream
 - **Multi-cluster**: client -> `regional-gateway` -> `scheduler` -> target cluster `cluster-gateway` -> `manager`
 
 ### Regional Boundary
@@ -77,7 +77,8 @@ One region should keep control plane and its managed data-plane clusters aligned
 - `spec.database` (builtin for quick start, external for production)
 - `spec.storage` (builtin for quick start, S3/OSS for production)
 - `spec.registry`
-- `spec.services.*.enabled`
+- `spec.services.clusterGateway` and `spec.services.manager`
+- `spec.storage.runtime` and `spec.network`
 - `spec.publicExposure`
 
 ## Next Steps

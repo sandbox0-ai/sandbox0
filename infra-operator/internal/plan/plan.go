@@ -18,11 +18,13 @@ import (
 
 const (
 	defaultManagerHTTPPort         = 8080
+	defaultManagerMetricsPort      = 9090
+	defaultManagerWebhookPort      = 9443
 	defaultClusterGatewayHTTPPort  = 8443
 	defaultClusterGatewayAuthMode  = "internal"
 	defaultRegionalGatewayAuthMode = "self_hosted"
 	defaultSSHGatewayPort          = 2222
-	defaultStorageProxyHTTPPort    = 8081
+	defaultStorageRuntimeHTTPPort  = 8081
 	registryCredentialsPath        = "/etc/sandbox0/registry/.dockerconfigjson"
 )
 
@@ -32,7 +34,7 @@ type InfraPlan struct {
 	Services        ServicePlan
 	Scheduler       SchedulerPlan
 	Manager         ManagerPlan
-	Netd            NetdPlan
+	Network         NetworkPlan
 	RegionalGateway RegionalGatewayPlan
 	Enterprise      EnterpriseLicensePlan
 	Validation      ValidationPlan
@@ -43,20 +45,17 @@ type InfraPlan struct {
 }
 
 type ComponentPlan struct {
-	EnableGlobalGateway   bool
-	HasControlPlane       bool
-	HasDataPlane          bool
-	EnableRegionalGateway bool
-	EnableSSHGateway      bool
-	EnableScheduler       bool
-	EnableClusterGateway  bool
-	// EnableManager tracks the user-facing manager service, while EnableManagerHost
-	// also covers the compatibility case where the manager workload hosts storage only.
+	EnableGlobalGateway        bool
+	HasControlPlane            bool
+	HasDataPlane               bool
+	EnableRegionalGateway      bool
+	EnableSSHGateway           bool
+	EnableScheduler            bool
+	EnableClusterGateway       bool
 	EnableManager              bool
-	EnableManagerHost          bool
-	EnableStorageProxy         bool
+	EnableStorageRuntime       bool
 	EnableCtld                 bool
-	EnableNetd                 bool
+	EnableNetwork              bool
 	EnableInternalAuth         bool
 	EnableDatabase             bool
 	EnableRedis                bool
@@ -97,7 +96,7 @@ type ServicePlan struct {
 	Manager        ServiceReference
 	Scheduler      ServiceReference
 	ClusterGateway ServiceReference
-	StorageProxy   ServiceReference
+	ManagerStorage ServiceReference
 }
 
 type ServiceReference struct {
@@ -128,15 +127,12 @@ type ManagerPlan struct {
 	RegionID              string
 }
 
-type NetdPlan struct {
+type NetworkPlan struct {
 	Enabled               bool
-	RuntimeClassName      *string
 	Config                *apiconfig.NetdConfig
 	EgressAuthResolverURL string
 	RegionID              string
 	ClusterID             string
-	NodeSelector          map[string]string
-	Tolerations           []corev1.Toleration
 }
 
 type RegionalGatewayPlan struct {
@@ -194,7 +190,7 @@ func Compile(infra *infrav1alpha1.Sandbox0Infra) *InfraPlan {
 	compiled.Services = compileServices(infra)
 	compiled.Scheduler = compileSchedulerPlan(infra, compiled)
 	compiled.Manager = compileManagerPlan(infra, compiled)
-	compiled.Netd = compileNetdPlan(infra, compiled)
+	compiled.Network = compileNetworkPlan(infra, compiled)
 	compiled.RegionalGateway = compileRegionalGatewayPlan(infra, compiled)
 	compiled.Enterprise = compileEnterpriseLicensePlan(infra, compiled)
 	compiled.Validation = compileValidationPlan(infra, compiled)
@@ -211,14 +207,13 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 	enableScheduler := infrav1alpha1.IsSchedulerEnabled(infra)
 	enableClusterGateway := infrav1alpha1.IsClusterGatewayEnabled(infra)
 	enableManager := infrav1alpha1.IsManagerEnabled(infra)
-	enableStorageProxy := infrav1alpha1.IsStorageRuntimeEnabled(infra)
-	enableManagerHost := enableManager || enableStorageProxy
+	enableStorageRuntime := infrav1alpha1.IsStorageRuntimeEnabled(infra)
 	enableDatabase := infrav1alpha1.IsDatabaseEnabled(infra)
 	enableRedis := infrav1alpha1.IsRedisEnabled(infra)
 	enableCredentialVault := infrav1alpha1.IsCredentialVaultEnabled(infra)
 
 	hasControlPlane := enableRegionalGateway || enableSSHGateway || enableScheduler
-	hasDataPlane := enableClusterGateway || enableManagerHost
+	hasDataPlane := enableClusterGateway || enableManager
 
 	return ComponentPlan{
 		EnableGlobalGateway:        enableGlobalGateway,
@@ -229,10 +224,9 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 		EnableScheduler:            enableScheduler,
 		EnableClusterGateway:       enableClusterGateway,
 		EnableManager:              enableManager,
-		EnableManagerHost:          enableManagerHost,
-		EnableStorageProxy:         enableStorageProxy,
+		EnableStorageRuntime:       enableStorageRuntime,
 		EnableCtld:                 enableManager,
-		EnableNetd:                 infrav1alpha1.IsNetworkEnabled(infra),
+		EnableNetwork:              infrav1alpha1.IsNetworkEnabled(infra),
 		EnableInternalAuth:         hasControlPlane || hasDataPlane,
 		EnableDatabase:             enableDatabase,
 		EnableRedis:                enableRedis,
@@ -253,7 +247,7 @@ func compileServices(infra *infrav1alpha1.Sandbox0Infra) ServicePlan {
 		Manager:        compileManagerServiceReference(infra),
 		Scheduler:      compileSchedulerServiceReference(infra),
 		ClusterGateway: compileClusterGatewayServiceReference(infra),
-		StorageProxy:   compileStorageProxyServiceReference(infra),
+		ManagerStorage: compileManagerStorageServiceReference(infra),
 	}
 }
 
@@ -302,26 +296,18 @@ func compileClusterGatewayServiceReference(infra *infrav1alpha1.Sandbox0Infra) S
 	}
 }
 
-func compileStorageProxyServiceReference(infra *infrav1alpha1.Sandbox0Infra) ServiceReference {
+func compileManagerStorageServiceReference(infra *infrav1alpha1.Sandbox0Infra) ServiceReference {
 	if infra == nil || infra.Name == "" || !infrav1alpha1.IsStorageRuntimeEnabled(infra) {
 		return ServiceReference{}
 	}
 
-	port := common.ResolveServicePort(storageProxyServiceConfig(infra), int32(storageProxyHTTPPort(infra)))
-	if infra.Spec.Storage != nil && infra.Spec.Storage.Runtime != nil {
-		name := fmt.Sprintf("%s-manager", infra.Name)
-		return ServiceReference{
-			Name: name,
-			Port: int32(storageProxyHTTPPort(infra)),
-			URL:  fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", name, infra.Namespace, storageProxyHTTPPort(infra)),
-		}
-	}
-	name := fmt.Sprintf("%s-storage-proxy", infra.Name)
+	port := int32(storageRuntimeHTTPPort(infra))
+	name := fmt.Sprintf("%s-manager", infra.Name)
 
 	return ServiceReference{
 		Name: name,
 		Port: port,
-		URL:  fmt.Sprintf("http://%s:%d", name, port),
+		URL:  fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", name, infra.Namespace, port),
 	}
 }
 
@@ -387,7 +373,7 @@ func compileManagerPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 	}
 
 	managerPlan := ManagerPlan{
-		Enabled:               compiled != nil && compiled.Components.EnableManagerHost,
+		Enabled:               compiled != nil && compiled.Components.EnableManager,
 		Config:                &apiconfig.ManagerConfig{},
 		TemplateStoreEnabled:  templateStoreEnabled,
 		NetworkPolicyProvider: "noop",
@@ -397,7 +383,7 @@ func compileManagerPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 		},
 	}
 
-	if compiled != nil && compiled.Components.EnableNetd {
+	if compiled != nil && compiled.Components.EnableNetwork {
 		managerPlan.NetworkPolicyProvider = "netd"
 	}
 	if infra != nil {
@@ -415,30 +401,18 @@ func compileManagerPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 				managerPlan.Config = runtimeconfig.ToManager(svc.Config)
 			}
 		}
-		managerPlan.Replicas = managerHostReplicas(infra)
+		managerPlan.Replicas = managerReplicas(infra)
 		compileManagerRuntimeConfig(&managerPlan, infra)
 	}
 
 	return managerPlan
 }
 
-func managerHostReplicas(infra *infrav1alpha1.Sandbox0Infra) int32 {
-	if infra == nil || infra.Spec.Services == nil {
+func managerReplicas(infra *infrav1alpha1.Sandbox0Infra) int32 {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.Manager == nil || !infrav1alpha1.IsManagerEnabled(infra) {
 		return 0
 	}
-
-	var replicas int32
-	if infrav1alpha1.IsManagerEnabled(infra) && infra.Spec.Services.Manager != nil {
-		replicas = infra.Spec.Services.Manager.Replicas
-	}
-	if infra.Spec.Storage != nil && infra.Spec.Storage.Runtime != nil {
-		return replicas
-	}
-	if infrav1alpha1.IsStorageProxyEnabled(infra) && infra.Spec.Services.StorageProxy != nil &&
-		infra.Spec.Services.StorageProxy.Replicas > replicas {
-		replicas = infra.Spec.Services.StorageProxy.Replicas
-	}
-	return replicas
+	return infra.Spec.Services.Manager.Replicas
 }
 
 func withDataPlaneReadyNodeSelector(selector map[string]string, compiled *InfraPlan) map[string]string {
@@ -560,52 +534,35 @@ func compileManagerRuntimeConfig(managerPlan *ManagerPlan, infra *infrav1alpha1.
 		}
 	}
 
-	if infrav1alpha1.IsStorageRuntimeEnabled(infra) {
-		storageRuntimeHost := fmt.Sprintf("%s-storage-proxy", infra.Name)
-		if infra.Spec.Storage != nil && infra.Spec.Storage.Runtime != nil {
-			storageRuntimeHost = fmt.Sprintf("%s-manager", infra.Name)
-		}
-		cfg.StorageProxyBaseURL = fmt.Sprintf("%s.%s.svc.cluster.local", storageRuntimeHost, infra.Namespace)
-		cfg.StorageProxyHTTPPort = storageProxyHTTPPort(infra)
-	} else {
-		cfg.StorageProxyBaseURL = ""
-		cfg.StorageProxyHTTPPort = 0
-	}
 	if infra.Spec.PublicExposure != nil {
 		cfg.PublicRootDomain = infra.Spec.PublicExposure.RootDomain
 		cfg.PublicRegionID = infra.Spec.PublicExposure.RegionID
 	}
 }
 
-func compileNetdPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) NetdPlan {
-	nodeSelector, tolerations := common.ResolveSandboxNodePlacement(infra)
-	netdPlan := NetdPlan{
-		Enabled:      infrav1alpha1.IsNetworkEnabled(infra),
-		NodeSelector: nodeSelector,
-		Tolerations:  tolerations,
-		Config:       &apiconfig.NetdConfig{},
+func compileNetworkPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) NetworkPlan {
+	networkPlan := NetworkPlan{
+		Enabled: infrav1alpha1.IsNetworkEnabled(infra),
+		Config:  &apiconfig.NetdConfig{},
 	}
 
 	if infra != nil {
-		netdPlan.RegionID = common.ResolveRegionID(infra)
-		netdPlan.ClusterID = common.ResolveClusterID(infra)
+		networkPlan.RegionID = common.ResolveRegionID(infra)
+		networkPlan.ClusterID = common.ResolveClusterID(infra)
 		if runtimeConfig := infrav1alpha1.ResolveNetworkRuntimeConfig(infra); runtimeConfig != nil {
-			netdPlan.Config = runtimeconfig.ToNetd(runtimeConfig)
-		}
-		if infra.Spec.Network == nil && infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
-			netdPlan.RuntimeClassName = infra.Spec.Services.Netd.RuntimeClassName
+			networkPlan.Config = runtimeconfig.ToNetd(runtimeConfig)
 		}
 	}
 
 	if explicit := netdEgressAuthResolverURL(infra); explicit != "" {
-		netdPlan.EgressAuthResolverURL = explicit
-		return netdPlan
+		networkPlan.EgressAuthResolverURL = explicit
+		return networkPlan
 	}
 	if compiled != nil && compiled.Components.EnableManager {
-		netdPlan.EgressAuthResolverURL = compiled.Services.Manager.URL
+		networkPlan.EgressAuthResolverURL = compiled.Services.Manager.URL
 	}
 
-	return netdPlan
+	return networkPlan
 }
 
 func compileRegionalGatewayPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) RegionalGatewayPlan {
@@ -717,14 +674,20 @@ func compileValidationPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPl
 			plan.FatalErrors = append(plan.FatalErrors, "cluster configuration requires at least one data-plane service")
 		}
 	}
-	if compiled != nil && compiled.Components.EnableStorageProxy && compiled.Manager.Replicas < 1 {
-		plan.FatalErrors = append(plan.FatalErrors, "manager host replicas must be at least 1 when the storage API is enabled")
+	if compiled != nil && compiled.Components.EnableStorageRuntime && !compiled.Components.EnableManager {
+		plan.FatalErrors = append(plan.FatalErrors, "storage.runtime requires services.manager to be enabled")
 	}
-	if compiled != nil && compiled.Components.EnableNetd && !compiled.Components.EnableCtld {
-		plan.FatalErrors = append(plan.FatalErrors, "netd requires ctld to be enabled because its runtime is embedded in ctld")
+	if compiled != nil && compiled.Components.EnableStorageRuntime && compiled.Manager.Replicas < 1 {
+		plan.FatalErrors = append(plan.FatalErrors, "manager replicas must be at least 1 when the storage API is enabled")
 	}
-	if compiled != nil && compiled.Components.EnableNetd && netdEgressAuthEnabled(infra) && !compiled.Components.EnableManager {
-		plan.FatalErrors = append(plan.FatalErrors, "netd egress auth requires manager to be enabled")
+	if compiled != nil {
+		plan.FatalErrors = append(plan.FatalErrors, managerServicePortValidationErrors(infra, compiled)...)
+	}
+	if compiled != nil && compiled.Components.EnableNetwork && !compiled.Components.EnableCtld {
+		plan.FatalErrors = append(plan.FatalErrors, "network requires services.manager to be enabled")
+	}
+	if compiled != nil && compiled.Components.EnableNetwork && netdEgressAuthEnabled(infra) && !compiled.Components.EnableManager {
+		plan.FatalErrors = append(plan.FatalErrors, "network egress auth requires manager to be enabled")
 	}
 	if compiled != nil && compiled.Components.EnableSandboxObservability && !compiled.Components.EnableClickHouse {
 		plan.FatalErrors = append(plan.FatalErrors, "sandboxObservability backend clickhouse requires spec.clickHouse type builtin or external")
@@ -739,6 +702,38 @@ func compileValidationPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPl
 	}
 
 	return plan
+}
+
+func managerServicePortValidationErrors(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) []string {
+	if infra == nil || compiled == nil || !compiled.Components.EnableManager {
+		return nil
+	}
+
+	ports := []struct {
+		field string
+		port  int32
+	}{
+		{field: "services.manager.service.port", port: common.ResolveServicePort(managerServiceConfig(infra), int32(managerHTTPPort(infra)))},
+		{field: "services.manager.config.metricsPort", port: int32(managerMetricsPort(infra))},
+		{field: "services.manager.config.webhookPort", port: int32(managerWebhookPort(infra))},
+	}
+	if compiled.Components.EnableStorageRuntime {
+		ports = append(ports, struct {
+			field string
+			port  int32
+		}{field: "storage.runtime.httpPort", port: int32(storageRuntimeHTTPPort(infra))})
+	}
+
+	seen := make(map[int32]string, len(ports))
+	errors := make([]string, 0)
+	for _, entry := range ports {
+		if previous, exists := seen[entry.port]; exists {
+			errors = append(errors, fmt.Sprintf("manager Service port %d is configured by both %s and %s; use distinct ports", entry.port, previous, entry.field))
+			continue
+		}
+		seen[entry.port] = entry.field
+	}
+	return errors
 }
 
 func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) CleanupPlan {
@@ -799,11 +794,12 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-cluster-gateway", infra.Name)),
 		)
 	}
-	if !compiled.Components.EnableManagerHost {
+	if !compiled.Components.EnableManager {
 		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
 			namespacedRef("Deployment", infra.Namespace, fmt.Sprintf("%s-manager", infra.Name)),
 			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-manager", infra.Name)),
 			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-manager", infra.Name)),
+			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-manager-storage", infra.Name)),
 			namespacedRef("ServiceAccount", infra.Namespace, fmt.Sprintf("%s-manager", infra.Name)),
 		)
 		cleanup.DeleteClusterScoped = append(cleanup.DeleteClusterScoped,
@@ -811,43 +807,20 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 			clusterScopedRef("ClusterRoleBinding", fmt.Sprintf("%s-manager", infra.Name)),
 		)
 	}
-	if !compiled.Components.EnableStorageProxy {
-		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
-			namespacedRef("Deployment", infra.Namespace, fmt.Sprintf("%s-storage-proxy", infra.Name)),
-			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-storage-proxy", infra.Name)),
-			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-storage-proxy", infra.Name)),
-			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-manager-storage", infra.Name)),
-			namespacedRef("ServiceAccount", infra.Namespace, fmt.Sprintf("%s-storage-proxy", infra.Name)),
-		)
-		cleanup.DeleteClusterScoped = append(cleanup.DeleteClusterScoped,
-			clusterScopedRef("ClusterRole", fmt.Sprintf("%s-storage-proxy", infra.Name)),
-			clusterScopedRef("ClusterRoleBinding", fmt.Sprintf("%s-storage-proxy", infra.Name)),
-		)
-	}
-
 	cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
 		namespacedRef("Deployment", infra.Namespace, fmt.Sprintf("%s-egress-broker", infra.Name)),
 		namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-egress-broker", infra.Name)),
 		namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-egress-broker", infra.Name)),
 	)
 
-	if !compiled.Components.EnableNetd {
-		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
-			namespacedRef("DaemonSet", infra.Namespace, fmt.Sprintf("%s-netd", infra.Name)),
-			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-netd-metrics", infra.Name)),
-			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-netd", infra.Name)),
-			namespacedRef("ServiceAccount", infra.Namespace, fmt.Sprintf("%s-netd", infra.Name)),
-		)
-		cleanup.DeleteClusterScoped = append(cleanup.DeleteClusterScoped,
-			clusterScopedRef("ClusterRole", fmt.Sprintf("%s-netd", infra.Name)),
-			clusterScopedRef("ClusterRoleBinding", fmt.Sprintf("%s-netd", infra.Name)),
-		)
-	}
 	if !compiled.Components.EnableCtld {
 		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
-			namespacedRef("DaemonSet", infra.Namespace, fmt.Sprintf("%s-ctld", infra.Name)),
 			namespacedRef("DaemonSet", infra.Namespace, fmt.Sprintf("%s-ctld-a", infra.Name)),
 			namespacedRef("DaemonSet", infra.Namespace, fmt.Sprintf("%s-ctld-b", infra.Name)),
+			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-ctld-network-metrics", infra.Name)),
+			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-netd-metrics", infra.Name)),
+			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-ctld", infra.Name)),
+			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-netd", infra.Name)),
 			namespacedRef("ServiceAccount", infra.Namespace, fmt.Sprintf("%s-ctld", infra.Name)),
 		)
 		cleanup.DeleteClusterScoped = append(cleanup.DeleteClusterScoped,
@@ -963,11 +936,11 @@ func compileStatusPlan(compiled *InfraPlan) StatusPlan {
 	if components.EnableManager {
 		expected = append(expected, infrav1alpha1.ConditionTypeManagerReady)
 	}
-	if components.EnableStorageProxy {
-		expected = append(expected, infrav1alpha1.ConditionTypeStorageProxyReady)
+	if components.EnableStorageRuntime {
+		expected = append(expected, infrav1alpha1.ConditionTypeStorageRuntimeReady)
 	}
-	if components.EnableNetd {
-		expected = append(expected, infrav1alpha1.ConditionTypeNetdReady)
+	if components.EnableNetwork {
+		expected = append(expected, infrav1alpha1.ConditionTypeNetworkReady)
 	}
 	if components.EnableCtld {
 		expected = append(expected, infrav1alpha1.ConditionTypeCtldReady)
@@ -1066,17 +1039,9 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 		appendCheckStep("scheduler-rbac", infrav1alpha1.ConditionTypeSchedulerReady, "SchedulerRBACFailed")
 		appendSuccessStep("scheduler", infrav1alpha1.ConditionTypeSchedulerReady, "SchedulerReady", "Scheduler is ready", "SchedulerFailed")
 	}
-	if compiled.Components.EnableManagerHost {
-		conditionType := infrav1alpha1.ConditionTypeStorageProxyReady
-		successReason := "ManagerHostReady"
-		successMessage := "Manager host is ready"
-		if compiled.Components.EnableManager {
-			conditionType = infrav1alpha1.ConditionTypeManagerReady
-			successReason = "ManagerReady"
-			successMessage = "Manager is ready"
-		}
-		appendCheckStep("manager-rbac", conditionType, "ManagerRBACFailed")
-		appendSuccessStep("manager", conditionType, successReason, successMessage, "ManagerFailed")
+	if compiled.Components.EnableManager {
+		appendCheckStep("manager-rbac", infrav1alpha1.ConditionTypeManagerReady, "ManagerRBACFailed")
+		appendSuccessStep("manager", infrav1alpha1.ConditionTypeManagerReady, "ManagerReady", "Manager is ready", "ManagerFailed")
 	}
 	if compiled.Components.EnableClusterGateway && compiled.Enterprise.ClusterGateway {
 		appendCheckStep("cluster-gateway-enterprise-license", infrav1alpha1.ConditionTypeClusterGatewayReady, "EnterpriseLicenseMissing")
@@ -1084,24 +1049,17 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 	if compiled.Components.EnableClusterGateway {
 		appendSuccessStep("cluster-gateway", infrav1alpha1.ConditionTypeClusterGatewayReady, "ClusterGatewayReady", "Internal gateway is ready", "ClusterGatewayFailed")
 	}
-	if compiled.Components.EnableStorageProxy {
-		appendSuccessStep("storage-proxy", infrav1alpha1.ConditionTypeStorageProxyReady, "StorageProxyReady", "Storage API is ready in manager", "StorageProxyFailed")
-	}
-	if compiled.Components.EnableNetd {
-		appendCheckStep("legacy-netd-handoff", infrav1alpha1.ConditionTypeNetdReady, "NetdHandoffPrepareFailed")
+	if compiled.Components.EnableStorageRuntime {
+		appendSuccessStep("storage-runtime-ready", infrav1alpha1.ConditionTypeStorageRuntimeReady, "StorageRuntimeReady", "Manager storage API is ready", "StorageRuntimeFailed")
 	}
 	if compiled.Components.EnableCtld {
 		appendCheckStep("ctld", infrav1alpha1.ConditionTypeCtldReady, "CtldFailed")
 	}
-	if compiled.Components.EnableNetd {
-		appendCheckStep("legacy-netd-standby", infrav1alpha1.ConditionTypeNetdReady, "NetdHandoffFailed")
-	}
 	if compiled.Components.EnableCtld {
 		appendSuccessStep("ctld-ready", infrav1alpha1.ConditionTypeCtldReady, "CtldReady", "ctld is ready", "CtldFailed")
 	}
-	if compiled.Components.EnableNetd {
-		appendSuccessStep("netd-ready", infrav1alpha1.ConditionTypeNetdReady, "NetdReady", "netd is ready in the active ctld", "NetdFailed")
-		appendCheckStep("legacy-netd-cleanup", infrav1alpha1.ConditionTypeNetdReady, "NetdCleanupFailed")
+	if compiled.Components.EnableNetwork {
+		appendSuccessStep("network-ready", infrav1alpha1.ConditionTypeNetworkReady, "NetworkReady", "ctld network runtime is ready", "NetworkFailed")
 	}
 	if compiled.Components.EnableManager {
 		appendCheckStep("data-plane-node-readiness", infrav1alpha1.ConditionTypeManagerReady, "DataPlaneNodesNotReady")
@@ -1192,6 +1150,22 @@ func managerHTTPPort(infra *infrav1alpha1.Sandbox0Infra) int {
 	return defaultManagerHTTPPort
 }
 
+func managerMetricsPort(infra *infrav1alpha1.Sandbox0Infra) int {
+	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.Manager != nil &&
+		infra.Spec.Services.Manager.Config != nil && infra.Spec.Services.Manager.Config.MetricsPort > 0 {
+		return infra.Spec.Services.Manager.Config.MetricsPort
+	}
+	return defaultManagerMetricsPort
+}
+
+func managerWebhookPort(infra *infrav1alpha1.Sandbox0Infra) int {
+	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.Manager != nil &&
+		infra.Spec.Services.Manager.Config != nil && infra.Spec.Services.Manager.Config.WebhookPort > 0 {
+		return infra.Spec.Services.Manager.Config.WebhookPort
+	}
+	return defaultManagerWebhookPort
+}
+
 func managerServiceConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alpha1.ServiceNetworkConfig {
 	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.Manager != nil {
 		return infra.Spec.Services.Manager.Service
@@ -1229,25 +1203,14 @@ func schedulerServiceConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alpha1.S
 	return nil
 }
 
-func storageProxyHTTPPort(infra *infrav1alpha1.Sandbox0Infra) int {
+func storageRuntimeHTTPPort(infra *infrav1alpha1.Sandbox0Infra) int {
 	if infra != nil && infra.Spec.Storage != nil && infra.Spec.Storage.Runtime != nil {
 		if infra.Spec.Storage.Runtime.HTTPPort > 0 {
 			return infra.Spec.Storage.Runtime.HTTPPort
 		}
-		return defaultStorageProxyHTTPPort
+		return defaultStorageRuntimeHTTPPort
 	}
-	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil &&
-		infra.Spec.Services.StorageProxy.Config != nil && infra.Spec.Services.StorageProxy.Config.HTTPPort > 0 {
-		return infra.Spec.Services.StorageProxy.Config.HTTPPort
-	}
-	return defaultStorageProxyHTTPPort
-}
-
-func storageProxyServiceConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alpha1.ServiceNetworkConfig {
-	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
-		return infra.Spec.Services.StorageProxy.Service
-	}
-	return nil
+	return defaultStorageRuntimeHTTPPort
 }
 
 func globalGatewayServiceConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alpha1.ServiceNetworkConfig {

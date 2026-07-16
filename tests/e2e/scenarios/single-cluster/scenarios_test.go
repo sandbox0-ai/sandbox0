@@ -9,17 +9,14 @@ import (
 )
 
 func TestSelectScenarioManifestPaths(t *testing.T) {
-	t.Setenv(singleClusterScenariosEnvVar, "network-policy, fullmode")
+	t.Setenv(singleClusterScenariosEnvVar, "fullmode")
 
 	got, err := selectScenarioManifestPaths()
 	if err != nil {
 		t.Fatalf("selectScenarioManifestPaths returned error: %v", err)
 	}
 
-	want := []string{
-		"single-cluster/fullmode.yaml",
-		"single-cluster/network-policy.yaml",
-	}
+	want := []string{"single-cluster/fullmode.yaml"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("selectScenarioManifestPaths = %v, want %v", got, want)
 	}
@@ -34,7 +31,7 @@ func TestSelectScenarioManifestPathsReturnsErrorForNoMatches(t *testing.T) {
 }
 
 func TestLoadScenariosUsesManifestInfraNamespace(t *testing.T) {
-	t.Setenv(singleClusterScenariosEnvVar, "minimal,volumes")
+	t.Setenv(singleClusterScenariosEnvVar, "fullmode")
 
 	cfg := framework.Config{
 		OperatorChartPath: filepath.Join("..", "..", "..", "..", "infra-operator", "chart"),
@@ -44,8 +41,8 @@ func TestLoadScenariosUsesManifestInfraNamespace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadScenarios returned error: %v", err)
 	}
-	if len(scenarios) != 2 {
-		t.Fatalf("expected 2 scenarios, got %d", len(scenarios))
+	if len(scenarios) != 1 {
+		t.Fatalf("expected 1 scenario, got %d", len(scenarios))
 	}
 
 	for i, scenario := range scenarios {

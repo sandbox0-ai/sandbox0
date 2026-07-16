@@ -19,11 +19,11 @@
 //	    Caller:     "cluster-gateway",
 //	    PrivateKey: privateKey,
 //	})
-//	token, err := generator.Generate("storage-proxy", "team-123", "user-456", internalauth.GenerateOptions{})
+//	token, err := generator.Generate("manager-storage", "team-123", "user-456", internalauth.GenerateOptions{})
 //
 //	// Validate a token
 //	validator := internalauth.NewValidator(internalauth.ValidatorConfig{
-//	    Target:    "storage-proxy",
+//	    Target:    "manager-storage",
 //	    PublicKey: publicKey,
 //	})
 //	claims, err := validator.Validate(token)

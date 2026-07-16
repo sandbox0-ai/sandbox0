@@ -962,7 +962,7 @@ type TeamQuotaLimitConfig struct {
 	LimitValue int64 `json:"limitValue"`
 }
 
-// StorageProxyConfig defines user-facing configuration for storage-proxy.
+// StorageProxyConfig defines user-facing configuration for the manager storage runtime.
 type StorageProxyConfig struct {
 	// +optional
 	// +kubebuilder:default="0.0.0.0"
@@ -1099,7 +1099,7 @@ type StorageProxyConfig struct {
 	KubeconfigPath string `json:"kubeconfigPath,omitempty"`
 }
 
-// NetdConfig defines user-facing configuration for netd.
+// NetdConfig defines user-facing configuration for the ctld network runtime.
 type NetdConfig struct {
 	// +optional
 	// +kubebuilder:default="info"

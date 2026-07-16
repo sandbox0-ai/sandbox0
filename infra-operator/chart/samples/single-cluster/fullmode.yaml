@@ -1,4 +1,4 @@
-# Example: Single-cluster full mode (cluster-gateway + manager + storage + network)
+# Example: Single-cluster fullmode deployment
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -74,12 +74,11 @@ spec:
   #       secretKeyKey: secretAccessKey
   #   runtime:
   #     objectEncryptionEnabled: true
-  # Optional region-level Redis for shared gateway rate limits. When omitted,
-  # gateways use process-local memory for simple onboarding.
-  # redis:
-  #   type: builtin
-  #   builtin:
-  #     enabled: true
+  # Builtin Redis backs shared gateway rate limits and per-team network limits.
+  redis:
+    type: builtin
+    builtin:
+      enabled: true
   registry:
     # Builtin registry is for quick start; external registries use provider config.
     provider: builtin
@@ -144,8 +143,7 @@ spec:
       pool:
         minIdle: 0
         maxIdle: 2
-  # Shared placement for sandbox template Pods plus node-local helpers such as
-  # netd and ctld.
+  # Shared placement for sandbox template Pods and the node-local ctld runtime.
   # infra-operator manages sandbox0.ai/data-plane-ready; do not include it here.
   #sandboxNodePlacement:
   #  nodeSelector:
@@ -165,6 +163,8 @@ spec:
     config:
       egressAuthEnabled: true
       egressAuthFailurePolicy: fail-closed
+      teamIngressBandwidthBytesPerSecond: 65536
+      teamBandwidthBurstBytes: 65536
   services:
     clusterGateway:
       enabled: true

@@ -819,6 +819,7 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 	if !compiled.Components.EnableNetd {
 		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
 			namespacedRef("DaemonSet", infra.Namespace, fmt.Sprintf("%s-netd", infra.Name)),
+			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-netd-metrics", infra.Name)),
 			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-netd", infra.Name)),
 			namespacedRef("ServiceAccount", infra.Namespace, fmt.Sprintf("%s-netd", infra.Name)),
 		)

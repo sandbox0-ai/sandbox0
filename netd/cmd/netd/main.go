@@ -62,19 +62,20 @@ func main() {
 
 	runnerFactory := func() netdRunner { return daemon.New(cfg, logger, obsProvider) }
 	lockPath := strings.TrimSpace(os.Getenv(activeguard.EnvPath))
+	var runErr error
 	if lockPath != "" {
-		initialDelay, err := parseActiveLockInitialDelay(os.Getenv(activeguard.EnvInitialDelay))
-		if err != nil {
-			logger.Fatal("Invalid node-local netd active lock initial delay", zap.Error(err))
+		initialDelay, parseErr := parseActiveLockInitialDelay(os.Getenv(activeguard.EnvInitialDelay))
+		if parseErr != nil {
+			logger.Fatal("Invalid node-local netd active lock initial delay", zap.Error(parseErr))
 		}
-		maxHold, err := parseActiveLockDuration(activeguard.EnvMaxHold, os.Getenv(activeguard.EnvMaxHold))
-		if err != nil {
-			logger.Fatal("Invalid node-local netd active lock maximum hold", zap.Error(err))
+		maxHold, parseErr := parseActiveLockDuration(activeguard.EnvMaxHold, os.Getenv(activeguard.EnvMaxHold))
+		if parseErr != nil {
+			logger.Fatal("Invalid node-local netd active lock maximum hold", zap.Error(parseErr))
 		}
 		if maxHold > 0 {
 			logger.Info("Configured bounded node-local netd active lock hold", zap.Duration("max_hold", maxHold))
 		}
-		err = runGuardedNetd(
+		runErr = runGuardedNetd(
 			ctx,
 			lockPath,
 			initialDelay,
@@ -94,10 +95,10 @@ func main() {
 			},
 		)
 	} else {
-		err = runnerFactory().Run(ctx)
+		runErr = runnerFactory().Run(ctx)
 	}
-	if err != nil && !errors.Is(err, context.Canceled) {
-		logger.Fatal("netd exited with error", zap.Error(err))
+	if runErr != nil && !errors.Is(runErr, context.Canceled) {
+		logger.Fatal("netd exited with error", zap.Error(runErr))
 	}
 }
 

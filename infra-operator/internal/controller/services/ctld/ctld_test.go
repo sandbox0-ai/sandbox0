@@ -86,6 +86,7 @@ func TestReconcileEmbedsNetdRuntimeAssetsInBothHASlots(t *testing.T) {
 	runtimeClass := "runc"
 	infra.Spec.Services.Netd.Enabled = true
 	infra.Spec.Services.Netd.RuntimeClassName = &runtimeClass
+	infra.Spec.Services.Netd.Config = &infrav1alpha1.NetdConfig{MetricsPort: 9191}
 
 	primary, client := reconcileCtldResources(t, infra, &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "kube-dns", Namespace: "kube-system"},
@@ -119,11 +120,27 @@ func TestReconcileEmbedsNetdRuntimeAssetsInBothHASlots(t *testing.T) {
 			t.Fatalf("%s embedded memory request = %s, want 384Mi", ds.Name, got.String())
 		}
 	}
-	if !hasContainerPort(primary.Spec.Template.Spec.Containers[0].Ports, "metrics", 9091) {
-		t.Fatalf("slot A netd metrics discovery port = %#v", primary.Spec.Template.Spec.Containers[0].Ports)
+	for _, ds := range []*appsv1.DaemonSet{primary, standby} {
+		if len(ds.Spec.Template.Spec.Containers[0].Ports) != 0 {
+			t.Fatalf("%s reserves host-network netd ports during handoff: %#v", ds.Name, ds.Spec.Template.Spec.Containers[0].Ports)
+		}
 	}
-	if len(standby.Spec.Template.Spec.Containers[0].Ports) != 0 {
-		t.Fatalf("slot B duplicates the node-local metrics target: %#v", standby.Spec.Template.Spec.Containers[0].Ports)
+	metricsService := &corev1.Service{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: infra.Name + netdMetricsServiceSuffix, Namespace: infra.Namespace}, metricsService); err != nil {
+		t.Fatalf("get netd metrics service: %v", err)
+	}
+	if got := metricsService.Labels["app.kubernetes.io/component"]; got != "netd" {
+		t.Fatalf("netd metrics service component label = %q, want netd", got)
+	}
+	wantSelector := common.GetServiceLabels(infra.Name, "ctld")
+	wantSelector[dataplane.CtldHASlotLabel] = dataplane.CtldHASlotA
+	assert.Equal(t, wantSelector, metricsService.Spec.Selector)
+	if len(metricsService.Spec.Ports) != 1 {
+		t.Fatalf("netd metrics service ports = %#v, want one port", metricsService.Spec.Ports)
+	}
+	metricsServicePort := metricsService.Spec.Ports[0]
+	if metricsServicePort.Name != "metrics" || metricsServicePort.Port != 9191 || metricsServicePort.TargetPort.IntVal != 9191 {
+		t.Fatalf("netd metrics service port = %#v, want named numeric port 9191", metricsServicePort)
 	}
 	legacy := &appsv1.DaemonSet{}
 	err := client.Get(context.Background(), types.NamespacedName{Name: infra.Name + "-netd", Namespace: infra.Namespace}, legacy)
@@ -763,15 +780,6 @@ func assertContainerEnv(t *testing.T, env []corev1.EnvVar, name, value string) {
 		return
 	}
 	t.Fatalf("expected environment %q, got %#v", name, env)
-}
-
-func hasContainerPort(ports []corev1.ContainerPort, name string, port int32) bool {
-	for i := range ports {
-		if ports[i].Name == name && ports[i].ContainerPort == port {
-			return true
-		}
-	}
-	return false
 }
 
 func assertNoContainerVolumeMount(t *testing.T, mounts []corev1.VolumeMount, name string) {

@@ -288,6 +288,9 @@ func TestPrepareLegacyStandbyPreservesFallbackUntilReady(t *testing.T) {
 	if got := netdConfigMapName(t, ds); got != activeConfigMap {
 		t.Fatalf("standby config = %q, want validated active config %q", got, activeConfigMap)
 	}
+	if len(ds.Spec.Template.Spec.Containers[0].Ports) != 0 {
+		t.Fatalf("standby reserves active host-network ports: %#v", ds.Spec.Template.Spec.Containers[0].Ports)
+	}
 	rolling := ds.Spec.UpdateStrategy.RollingUpdate
 	if ds.Spec.UpdateStrategy.Type != appsv1.RollingUpdateDaemonSetStrategyType || rolling == nil ||
 		rolling.MaxSurge == nil || rolling.MaxSurge.IntValue() != 1 ||

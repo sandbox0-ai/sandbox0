@@ -72,7 +72,7 @@ func (r *Reconciler) PrepareLegacyHandoff(ctx context.Context, imageRepo, imageT
 	if legacyHandoffState(existing) == LegacyHandoffStateStandby {
 		return nil
 	}
-	return r.applyLegacyDaemonSet(ctx, imageRepo, imageTag, compiledPlan, false)
+	return r.applyLegacyDaemonSet(ctx, imageRepo, imageTag, compiledPlan)
 }
 
 // PrepareLegacyStandby keeps the guarded legacy DaemonSet as a delayed lock
@@ -92,8 +92,9 @@ func (r *Reconciler) PrepareLegacyStandby(ctx context.Context, compiledPlan *inf
 		return err
 	}
 	// Preserve the exact image, config, mounts, and security context that passed
-	// the active handoff probes. Only lock acquisition and probes differ in the
-	// standby template, so the fallback runtime was already exercised end to end.
+	// the active handoff probes. Only lock acquisition behavior, probes, and
+	// declarative port reservations differ in the standby template, so the
+	// fallback runtime was already exercised end to end.
 	desired := existing.DeepCopy()
 	desired.Annotations = common.CloneStringMap(desired.Annotations)
 	desired.Annotations[LegacyHandoffStateAnnotation] = LegacyHandoffStateStandby
@@ -105,6 +106,10 @@ func (r *Reconciler) PrepareLegacyStandby(ctx context.Context, compiledPlan *inf
 	container := &desired.Spec.Template.Spec.Containers[0]
 	container.LivenessProbe = nil
 	container.ReadinessProbe = nil
+	// A standby does not bind listeners until after its delay and active-lock
+	// acquisition. Omitting host-network container ports lets it surge beside
+	// the still-active predecessor without creating HostPort conflicts.
+	container.Ports = nil
 	container.Env = setContainerEnv(container.Env, activeguard.EnvInitialDelay, LegacyStandbyInitialDelay)
 	container.Env = setContainerEnv(container.Env, activeguard.EnvMaxHold, LegacyStandbyMaxHold)
 	maxSurge := intstr.FromInt(1)
@@ -119,7 +124,7 @@ func (r *Reconciler) PrepareLegacyStandby(ctx context.Context, compiledPlan *inf
 	return r.Resources.ApplyDaemonSetWithScope(ctx, scope, desired)
 }
 
-func (r *Reconciler) applyLegacyDaemonSet(ctx context.Context, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan, standby bool) error {
+func (r *Reconciler) applyLegacyDaemonSet(ctx context.Context, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) error {
 	scope := compiledPlan.Scope
 	name := fmt.Sprintf("%s-netd", scope.Name)
 	labels := common.GetServiceLabels(scope.Name, "netd")
@@ -142,7 +147,6 @@ func (r *Reconciler) applyLegacyDaemonSet(ctx context.Context, imageRepo, imageT
 		PullPolicy: pullPolicy,
 		Assets:     assets,
 		Plan:       compiledPlan,
-		Standby:    standby,
 	})
 	return r.Resources.ApplyDaemonSetWithScope(ctx, scope, desired)
 }
@@ -155,17 +159,12 @@ type legacyDaemonSetConfig struct {
 	PullPolicy corev1.PullPolicy
 	Assets     *RuntimeAssets
 	Plan       *infraplan.InfraPlan
-	Standby    bool
 }
 
 func buildLegacyDaemonSet(cfg legacyDaemonSetConfig) *appsv1.DaemonSet {
 	assets := cfg.Assets
-	state := LegacyHandoffStateActive
-	if cfg.Standby {
-		state = LegacyHandoffStateStandby
-	}
 	podAnnotations := common.EnsurePodTemplateAnnotations(assets.PodAnnotations)
-	podAnnotations[LegacyHandoffStateAnnotation] = state
+	podAnnotations[LegacyHandoffStateAnnotation] = LegacyHandoffStateActive
 	env := []corev1.EnvVar{
 		{Name: "SERVICE", Value: "netd"},
 		{Name: "CONFIG_PATH", Value: ConfigPath},
@@ -176,12 +175,6 @@ func buildLegacyDaemonSet(cfg legacyDaemonSetConfig) *appsv1.DaemonSet {
 				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"},
 			},
 		},
-	}
-	if cfg.Standby {
-		env = append(env,
-			corev1.EnvVar{Name: activeguard.EnvInitialDelay, Value: LegacyStandbyInitialDelay},
-			corev1.EnvVar{Name: activeguard.EnvMaxHold, Value: LegacyStandbyMaxHold},
-		)
 	}
 	container := corev1.Container{
 		Name:            "netd",
@@ -202,24 +195,22 @@ func buildLegacyDaemonSet(cfg legacyDaemonSetConfig) *appsv1.DaemonSet {
 		},
 		VolumeMounts: assets.VolumeMounts,
 	}
-	if !cfg.Standby {
-		container.LivenessProbe = &corev1.Probe{
-			ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromString("health")}},
-			InitialDelaySeconds: 10,
-			PeriodSeconds:       10,
-		}
-		container.ReadinessProbe = &corev1.Probe{
-			ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/readyz", Port: intstr.FromString("health")}},
-			InitialDelaySeconds: 5,
-			PeriodSeconds:       5,
-		}
+	container.LivenessProbe = &corev1.Probe{
+		ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromString("health")}},
+		InitialDelaySeconds: 10,
+		PeriodSeconds:       10,
+	}
+	container.ReadinessProbe = &corev1.Probe{
+		ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/readyz", Port: intstr.FromString("health")}},
+		InitialDelaySeconds: 5,
+		PeriodSeconds:       5,
 	}
 	return &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cfg.Name,
 			Namespace: cfg.Namespace,
 			Annotations: map[string]string{
-				LegacyHandoffStateAnnotation: state,
+				LegacyHandoffStateAnnotation: LegacyHandoffStateActive,
 			},
 		},
 		Spec: appsv1.DaemonSetSpec{
@@ -315,6 +306,9 @@ func legacyDaemonSetIsStandby(ds *appsv1.DaemonSet) bool {
 		return false
 	}
 	container := ds.Spec.Template.Spec.Containers[0]
+	if len(container.Ports) != 0 {
+		return false
+	}
 	if container.LivenessProbe != nil || container.ReadinessProbe != nil {
 		return false
 	}

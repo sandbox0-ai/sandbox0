@@ -51,6 +51,7 @@ const (
 	ctldKubeletRegistrationSocket  = "/var/lib/kubelet/plugins_registry/" + volumeportal.DriverName + "-reg.sock"
 	ctldKubeletCSIEndpoint         = "/var/lib/kubelet/plugins/" + volumeportal.DriverName + "/csi.sock"
 	ctldRolloutRevisionAnnotation  = "infra.sandbox0.ai/ctld-rollout-revision"
+	netdMetricsServiceSuffix       = "-netd-metrics"
 )
 
 func NewReconciler(resources *common.ResourceManager) *Reconciler {
@@ -100,6 +101,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 	if err := r.ensureCSIDriver(ctx, labels); err != nil {
 		return err
+	}
+	if netdAssets != nil {
+		if err := r.ensureNetdMetricsService(ctx, infra, int32(netdAssets.Config.MetricsPort)); err != nil {
+			return err
+		}
 	}
 
 	image := fmt.Sprintf("%s:%s", imageRepo, imageTag)
@@ -247,12 +253,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		})
 		if netdAssets != nil {
 			desired.Spec.Template.Spec.RuntimeClassName = netdAssets.RuntimeClassName
-			// One slot supplies the stable Prometheus discovery target. Both HA
-			// processes share the node IP, so declaring the metrics port twice
-			// would scrape the active listener twice.
-			if slot == dataplane.CtldHASlotA {
-				desired.Spec.Template.Spec.Containers[0].Ports = netdMetricsDiscoveryPort(netdAssets.Ports)
-			}
+			// Do not declare netd listener ports on host-networked ctld Pods.
+			// Kubernetes reserves every declared container port as a HostPort in
+			// this mode, which prevents a replacement from coexisting with the
+			// guarded legacy netd during handoff. The active lock still guarantees
+			// that exactly one process binds each configured node-local port.
 		}
 		revision, err := common.ConfigHash(desired.Spec)
 		if err != nil {
@@ -492,15 +497,6 @@ func buildCtldDaemonSet(cfg ctldDaemonSetConfig) *appsv1.DaemonSet {
 			},
 		},
 	}
-}
-
-func netdMetricsDiscoveryPort(ports []corev1.ContainerPort) []corev1.ContainerPort {
-	for i := range ports {
-		if ports[i].Name == "metrics" {
-			return []corev1.ContainerPort{ports[i]}
-		}
-	}
-	return nil
 }
 
 func appendUniqueVolumes(existing []corev1.Volume, additions ...corev1.Volume) []corev1.Volume {
@@ -807,6 +803,28 @@ func (r *Reconciler) ensureCSIDriver(ctx context.Context, labels map[string]stri
 		current.Labels = desired.Labels
 		current.Spec = desired.Spec
 	})
+}
+
+// ensureNetdMetricsService preserves named-port endpoint discovery without
+// reserving netd's node-local listener on both host-networked ctld HA Pods.
+// Slot A supplies one endpoint per node; the numeric target reaches whichever
+// lock-fenced ctld peer currently owns the node-local metrics listener.
+func (r *Reconciler) ensureNetdMetricsService(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, metricsPort int32) error {
+	labels := common.GetServiceLabels(infra.Name, "netd")
+	selector := common.GetServiceLabels(infra.Name, "ctld")
+	selector[dataplane.CtldHASlotLabel] = dataplane.CtldHASlotA
+	return r.Resources.ReconcileServicePortsWithSpecMutator(
+		ctx,
+		infra,
+		infra.Name+netdMetricsServiceSuffix,
+		labels,
+		corev1.ServiceTypeClusterIP,
+		nil,
+		[]corev1.ServicePort{common.BuildServicePort("metrics", metricsPort, metricsPort, corev1.ServiceTypeClusterIP)},
+		func(spec *corev1.ServiceSpec) {
+			spec.Selector = selector
+		},
+	)
 }
 
 func (r *Reconciler) buildStorageConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.StorageProxyConfig, error) {

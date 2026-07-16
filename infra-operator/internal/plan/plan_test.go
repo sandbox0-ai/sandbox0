@@ -1459,6 +1459,7 @@ func TestCompileTracksCleanupPlan(t *testing.T) {
 		{Kind: "Deployment", Namespace: "sandbox0-system", Name: "demo-global-gateway"},
 		{Kind: "Deployment", Namespace: "sandbox0-system", Name: "demo-manager"},
 		{Kind: "DaemonSet", Namespace: "sandbox0-system", Name: "demo-netd"},
+		{Kind: "Service", Namespace: "sandbox0-system", Name: "demo-netd-metrics"},
 		{Kind: "StatefulSet", Namespace: "sandbox0-system", Name: "demo-postgres"},
 		{Kind: "Deployment", Namespace: "sandbox0-system", Name: "demo-egress-broker"},
 		{Kind: "ClusterRole", Name: "demo-manager"},

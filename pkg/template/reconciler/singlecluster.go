@@ -25,6 +25,11 @@ type SingleClusterReconciler struct {
 	lastReconcileAt  time.Time
 	lastReconcileErr error
 	statusMu         sync.RWMutex
+
+	lifecycleMu sync.Mutex
+	quiesced    bool
+	inFlight    sync.WaitGroup
+	quiesceCh   chan struct{}
 }
 
 const singleClusterManagedByLabel = "sandbox0.ai/template-managed-by"
@@ -49,6 +54,7 @@ func NewSingleClusterReconciler(
 		interval:      interval,
 		clock:         clk,
 		logger:        logger,
+		quiesceCh:     make(chan struct{}),
 	}
 }
 
@@ -57,22 +63,49 @@ func (r *SingleClusterReconciler) Start(ctx context.Context) {
 	ticker := time.NewTicker(r.interval)
 	defer ticker.Stop()
 
-	r.reconcile(ctx)
+	r.runReconcile(ctx)
 
 	for {
 		select {
 		case <-ctx.Done():
 			r.logger.Info("Reconciler stopped")
 			return
+		case <-r.quiesceCh:
+			r.logger.Info("Reconciler quiesced")
+			return
 		case <-ticker.C:
-			r.reconcile(ctx)
+			r.runReconcile(ctx)
 		}
 	}
 }
 
 // TriggerReconcile triggers an immediate reconciliation.
 func (r *SingleClusterReconciler) TriggerReconcile(ctx context.Context) {
-	go r.reconcile(ctx)
+	go r.runReconcile(ctx)
+}
+
+// Quiesce permanently stops new reconciliation and waits for in-flight work.
+// The manager keeps serving its HTTP and embedded storage APIs while quiesced.
+func (r *SingleClusterReconciler) Quiesce(ctx context.Context) error {
+	r.lifecycleMu.Lock()
+	if !r.quiesced {
+		r.quiesced = true
+		close(r.quiesceCh)
+	}
+	r.lifecycleMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		r.inFlight.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // GetStatus returns the current reconciler status.
@@ -87,6 +120,19 @@ func (r *SingleClusterReconciler) now() time.Time {
 		return r.clock.Now()
 	}
 	return time.Now()
+}
+
+func (r *SingleClusterReconciler) runReconcile(ctx context.Context) {
+	r.lifecycleMu.Lock()
+	if r.quiesced {
+		r.lifecycleMu.Unlock()
+		return
+	}
+	r.inFlight.Add(1)
+	r.lifecycleMu.Unlock()
+
+	defer r.inFlight.Done()
+	r.reconcile(ctx)
 }
 
 func (r *SingleClusterReconciler) reconcile(ctx context.Context) {

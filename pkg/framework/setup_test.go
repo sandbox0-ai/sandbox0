@@ -11,6 +11,10 @@ func TestCleanupManagerNamespacesBeforeStoppingManagerPreservesStorageUntilClean
 
 	namespaceCleanupErr, managerStopErr := cleanupManagerNamespacesBeforeStoppingManager(
 		func() error {
+			calls = append(calls, "quiesce-manager")
+			return nil
+		},
+		func() error {
 			calls = append(calls, "cleanup-namespaces")
 			return nil
 		},
@@ -26,7 +30,7 @@ func TestCleanupManagerNamespacesBeforeStoppingManagerPreservesStorageUntilClean
 	if managerStopErr != nil {
 		t.Fatalf("manager stop returned error: %v", managerStopErr)
 	}
-	wantCalls := []string{"cleanup-namespaces", "stop-manager"}
+	wantCalls := []string{"quiesce-manager", "cleanup-namespaces", "stop-manager"}
 	if !reflect.DeepEqual(calls, wantCalls) {
 		t.Fatalf("cleanup order = %v, want %v", calls, wantCalls)
 	}
@@ -37,6 +41,7 @@ func TestCleanupManagerNamespacesBeforeStoppingManagerKeepsManagerRunningOnClean
 	managerStopped := false
 
 	namespaceCleanupErr, managerStopErr := cleanupManagerNamespacesBeforeStoppingManager(
+		func() error { return nil },
 		func() error { return wantErr },
 		func() error {
 			managerStopped = true
@@ -60,6 +65,7 @@ func TestCleanupManagerNamespacesBeforeStoppingManagerReportsStopFailureAfterCle
 
 	namespaceCleanupErr, managerStopErr := cleanupManagerNamespacesBeforeStoppingManager(
 		func() error { return nil },
+		func() error { return nil },
 		func() error { return wantErr },
 	)
 
@@ -68,5 +74,33 @@ func TestCleanupManagerNamespacesBeforeStoppingManagerReportsStopFailureAfterCle
 	}
 	if !errors.Is(managerStopErr, wantErr) {
 		t.Fatalf("manager stop error = %v, want %v", managerStopErr, wantErr)
+	}
+}
+
+func TestCleanupManagerNamespacesBeforeStoppingManagerDoesNotDeleteWhenQuiesceFails(t *testing.T) {
+	wantErr := errors.New("signal failed")
+	cleanupCalled := false
+	stopCalled := false
+
+	namespaceCleanupErr, managerStopErr := cleanupManagerNamespacesBeforeStoppingManager(
+		func() error { return wantErr },
+		func() error {
+			cleanupCalled = true
+			return nil
+		},
+		func() error {
+			stopCalled = true
+			return nil
+		},
+	)
+
+	if !errors.Is(namespaceCleanupErr, wantErr) {
+		t.Fatalf("namespace cleanup error = %v, want wrapped %v", namespaceCleanupErr, wantErr)
+	}
+	if managerStopErr != nil {
+		t.Fatalf("manager stop error = %v", managerStopErr)
+	}
+	if cleanupCalled || stopCalled {
+		t.Fatalf("cleanup called = %t, stop called = %t", cleanupCalled, stopCalled)
 	}
 }

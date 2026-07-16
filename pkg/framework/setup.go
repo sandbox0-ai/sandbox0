@@ -91,6 +91,9 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 
 	namespaceCleanupErr, managerStopErr := cleanupManagerNamespacesBeforeStoppingManager(
 		func() error {
+			return KubectlQuiesceManagerTemplateReconcilers(testCtx.Context, workingCfg.Kubeconfig, scenario.InfraNamespace, "30s")
+		},
+		func() error {
 			return CleanupManagerOwnedNamespaces(testCtx.Context, workingCfg.Kubeconfig, managerOwnedNamespaceCleanupTimeout)
 		},
 		func() error {
@@ -188,9 +191,12 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 	} else {
 		appendCleanup(func() {
 			// Pods can mount sandbox0 CSI volumes. Keep manager and its embedded storage
-			// API running until namespace deletion completes kubelet unpublish, then stop
-			// manager reconciliation before removing the infra manifest.
+			// API running until namespace deletion completes kubelet unpublish. Quiesce
+			// template syncing first so it cannot recreate namespaces during teardown.
 			namespaceCleanupErr, managerStopErr := cleanupManagerNamespacesBeforeStoppingManager(
+				func() error {
+					return KubectlQuiesceManagerTemplateReconcilers(testCtx.Context, workingCfg.Kubeconfig, scenario.InfraNamespace, "30s")
+				},
 				func() error {
 					return CleanupManagerOwnedNamespaces(testCtx.Context, workingCfg.Kubeconfig, managerOwnedNamespaceCleanupTimeout)
 				},
@@ -219,11 +225,14 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 	return env, cleanup, nil
 }
 
-// cleanupManagerNamespacesBeforeStoppingManager preserves manager-hosted storage until
-// namespace deletion has completed all kubelet unpublish operations. If namespace
-// cleanup fails, stopManager is deliberately not called so a later cleanup pass can
-// continue using the storage API.
-func cleanupManagerNamespacesBeforeStoppingManager(cleanupNamespaces, stopManager func() error) (namespaceCleanupErr, managerStopErr error) {
+// cleanupManagerNamespacesBeforeStoppingManager quiesces template syncing while
+// preserving manager-hosted storage until kubelet unpublish operations complete.
+// If namespace cleanup fails, stopManager is deliberately not called so a later
+// cleanup pass can continue using the storage API.
+func cleanupManagerNamespacesBeforeStoppingManager(quiesceManager, cleanupNamespaces, stopManager func() error) (namespaceCleanupErr, managerStopErr error) {
+	if err := quiesceManager(); err != nil {
+		return fmt.Errorf("quiesce manager template reconciliation: %w", err), nil
+	}
 	if err := cleanupNamespaces(); err != nil {
 		return err, nil
 	}

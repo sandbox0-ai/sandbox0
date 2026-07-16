@@ -84,6 +84,9 @@ func main() {
 	// Create context that cancels on signal
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+	templateReconcilerQuiesceSignals := make(chan os.Signal, 1)
+	signal.Notify(templateReconcilerQuiesceSignals, syscall.SIGUSR1)
+	defer signal.Stop(templateReconcilerQuiesceSignals)
 
 	// Initialize observability provider
 	obsProvider, err := observability.New(observability.ConfigFromEnv("manager", logger))
@@ -572,6 +575,14 @@ func main() {
 	} else {
 		logger.Info("Template store disabled; manager will apply templates directly")
 	}
+	go serveTemplateReconcilerQuiesceSignals(
+		ctx,
+		templateReconcilerQuiesceSignals,
+		templateReconciler,
+		defaultTemplateReconcilerQuiesceSupportedMarkerPath,
+		defaultTemplateReconcilerQuiescedMarkerPath,
+		logger,
+	)
 
 	// Create cluster service (for scheduler)
 	clusterService := service.NewClusterService(
@@ -738,6 +749,57 @@ func main() {
 	time.Sleep(2 * time.Second)
 
 	logger.Info("Manager stopped")
+}
+
+type templateReconcilerQuiescer interface {
+	Quiesce(context.Context) error
+}
+
+const (
+	defaultTemplateReconcilerQuiesceSupportedMarkerPath = "/tmp/sandbox0-manager-template-reconciler-quiesce-supported"
+	defaultTemplateReconcilerQuiescedMarkerPath         = "/tmp/sandbox0-manager-template-reconciler-quiesced"
+)
+
+// serveTemplateReconcilerQuiesceSignals exposes a process-local maintenance
+// barrier without stopping the manager APIs needed to drain sandbox volumes.
+func serveTemplateReconcilerQuiesceSignals(
+	ctx context.Context,
+	signals <-chan os.Signal,
+	reconciler templateReconcilerQuiescer,
+	supportedMarkerPath string,
+	quiescedMarkerPath string,
+	logger *zap.Logger,
+) {
+	if err := os.Remove(quiescedMarkerPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		logger.Error("Failed to clear stale template reconciliation quiesce acknowledgement", zap.Error(err))
+		return
+	}
+	if err := os.WriteFile(supportedMarkerPath, nil, 0o600); err != nil {
+		logger.Error("Failed to publish template reconciliation quiesce support", zap.Error(err))
+	} else {
+		logger.Info("Template reconciliation quiesce signal enabled")
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-signals:
+			if reconciler != nil {
+				quiesceCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				err := reconciler.Quiesce(quiesceCtx)
+				cancel()
+				if err != nil {
+					logger.Error("Failed to quiesce template reconciliation", zap.Error(err))
+					continue
+				}
+			}
+			if err := os.WriteFile(quiescedMarkerPath, nil, 0o600); err != nil {
+				logger.Error("Failed to acknowledge quiesced template reconciliation", zap.Error(err))
+				continue
+			}
+			logger.Info("Template reconciliation quiesced")
+		}
+	}
 }
 
 // buildKubeConfig builds Kubernetes config

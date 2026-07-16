@@ -50,6 +50,7 @@ const (
 	ctldHAProbeSocket              = "/run/sandbox0/ctld-ha.sock"
 	ctldKubeletRegistrationSocket  = "/var/lib/kubelet/plugins_registry/" + volumeportal.DriverName + "-reg.sock"
 	ctldKubeletCSIEndpoint         = "/var/lib/kubelet/plugins/" + volumeportal.DriverName + "/csi.sock"
+	ctldRolloutRevisionAnnotation  = "infra.sandbox0.ai/ctld-rollout-revision"
 )
 
 func NewReconciler(resources *common.ResourceManager) *Reconciler {
@@ -224,6 +225,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if err := r.removeLegacyDaemonSet(ctx, infra, name); err != nil {
 		return err
 	}
+	desiredBySlot := make(map[string]*appsv1.DaemonSet, 2)
 	for _, slot := range []string{dataplane.CtldHASlotA, dataplane.CtldHASlotB} {
 		desired := buildCtldDaemonSet(ctldDaemonSetConfig{
 			Name:                    name,
@@ -252,11 +254,118 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 				desired.Spec.Template.Spec.Containers[0].Ports = netdMetricsDiscoveryPort(netdAssets.Ports)
 			}
 		}
-		if err := r.Resources.ApplyDaemonSet(ctx, infra, desired); err != nil {
+		revision, err := common.ConfigHash(desired.Spec)
+		if err != nil {
+			return fmt.Errorf("hash ctld slot %s rollout: %w", slot, err)
+		}
+		desired.Spec.Template.Annotations[ctldRolloutRevisionAnnotation] = revision
+		desiredBySlot[slot] = desired
+	}
+	return r.reconcileHASlots(ctx, infra, desiredBySlot[dataplane.CtldHASlotA], desiredBySlot[dataplane.CtldHASlotB])
+}
+
+// reconcileHASlots rolls ctld-b completely before changing ctld-a. Both
+// DaemonSets use host networking, so a same-slot surge can conflict with the
+// predecessor's listening ports. Serializing the slots keeps one HA peer
+// running on every node while the other slot is replaced in place.
+func (r *Reconciler) reconcileHASlots(
+	ctx context.Context,
+	infra *infrav1alpha1.Sandbox0Infra,
+	desiredA, desiredB *appsv1.DaemonSet,
+) error {
+	currentA, aExists, err := r.getDaemonSet(ctx, desiredA)
+	if err != nil {
+		return err
+	}
+	currentB, bExists, err := r.getDaemonSet(ctx, desiredB)
+	if err != nil {
+		return err
+	}
+
+	// A fresh install has no availability to preserve, so create both peers in
+	// one pass. If only one peer is missing, repair it without mutating the
+	// surviving peer during the same reconciliation.
+	if !aExists && !bExists {
+		if err := r.Resources.ApplyDaemonSet(ctx, infra, desiredA); err != nil {
 			return err
 		}
+		return r.Resources.ApplyDaemonSet(ctx, infra, desiredB)
 	}
-	return nil
+	if !aExists {
+		return r.Resources.ApplyDaemonSet(ctx, infra, desiredA)
+	}
+	if !bExists {
+		return r.Resources.ApplyDaemonSet(ctx, infra, desiredB)
+	}
+
+	aReady, err := r.daemonSetCurrentPodsReady(ctx, currentA)
+	if err != nil {
+		return err
+	}
+	bReady, err := r.daemonSetCurrentPodsReady(ctx, currentB)
+	if err != nil {
+		return err
+	}
+	aDesired := daemonSetHasDesiredRevision(currentA, desiredA)
+	bDesired := daemonSetHasDesiredRevision(currentB, desiredB)
+
+	if !bDesired {
+		if aReady {
+			// A healthy peer protects every node while B rolls. Return after the
+			// write because controller-runtime cached reads are not read-your-writes.
+			return r.Resources.ApplyDaemonSet(ctx, infra, desiredB)
+		}
+		if bReady {
+			// Recover a degraded or stalled A under the still-healthy old B before
+			// resuming the normal B-then-A order.
+			return r.Resources.ApplyDaemonSet(ctx, infra, desiredA)
+		}
+		// Neither peer can currently protect the other. Leave both processes in
+		// place and let their existing controllers recover readiness first.
+		return nil
+	}
+	if !bReady {
+		// B already carries the desired revision; wait for its DaemonSet and
+		// current-template Pods to converge before touching A.
+		return nil
+	}
+	if !aDesired || !aReady {
+		return r.Resources.ApplyDaemonSet(ctx, infra, desiredA)
+	}
+
+	// Both slots are current and healthy. These calls are normally no-ops and
+	// keep non-rollout metadata or strategy drift reconciled.
+	if err := r.Resources.ApplyDaemonSet(ctx, infra, desiredB); err != nil {
+		return err
+	}
+	return r.Resources.ApplyDaemonSet(ctx, infra, desiredA)
+}
+
+func daemonSetHasDesiredRevision(current, desired *appsv1.DaemonSet) bool {
+	if current == nil || desired == nil {
+		return false
+	}
+	desiredRevision := desired.Spec.Template.Annotations[ctldRolloutRevisionAnnotation]
+	return desiredRevision != "" && current.Spec.Template.Annotations[ctldRolloutRevisionAnnotation] == desiredRevision
+}
+
+func (r *Reconciler) daemonSetCurrentPodsReady(ctx context.Context, ds *appsv1.DaemonSet) (bool, error) {
+	if !daemonSetReady(ds) {
+		return false, nil
+	}
+	return r.currentTemplatePodsReady(ctx, ds)
+}
+
+func (r *Reconciler) getDaemonSet(ctx context.Context, desired *appsv1.DaemonSet) (*appsv1.DaemonSet, bool, error) {
+	current := &appsv1.DaemonSet{}
+	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, current)
+	if apierrors.IsNotFound(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return current, true, nil
 }
 
 type ctldDaemonSetConfig struct {
@@ -353,8 +462,8 @@ func buildCtldDaemonSet(cfg ctldDaemonSetConfig) *appsv1.DaemonSet {
 			corev1.EnvVar{Name: netdsvc.ActiveLockEnv, Value: cfg.NetdActiveLockPath},
 		)
 	}
-	maxUnavailable := intstr.FromInt(0)
-	maxSurge := intstr.FromInt(1)
+	maxUnavailable := intstr.FromInt(1)
+	maxSurge := intstr.FromInt(0)
 	return &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{Name: cfg.Name + "-" + cfg.Slot, Namespace: cfg.Namespace},
 		Spec: appsv1.DaemonSetSpec{
@@ -479,19 +588,19 @@ func (r *Reconciler) currentTemplatePodsReady(ctx context.Context, ds *appsv1.Da
 	); err != nil {
 		return false, err
 	}
-	ready := int32(0)
+	readyNodes := make(map[string]struct{}, ds.Status.DesiredNumberScheduled)
 	for i := range pods.Items {
 		if CtldContainerRunning(&pods.Items[i]) && !PodMatchesCurrentTemplate(&pods.Items[i], ds) {
 			return false, nil
 		}
-		if PodReadyForCurrentTemplate(&pods.Items[i], ds) {
-			ready++
+		if pods.Items[i].DeletionTimestamp.IsZero() && pods.Items[i].Spec.NodeName != "" && PodReadyForCurrentTemplate(&pods.Items[i], ds) {
+			readyNodes[pods.Items[i].Spec.NodeName] = struct{}{}
 		}
 	}
-	return ready >= ds.Status.DesiredNumberScheduled, nil
+	return int32(len(readyNodes)) >= ds.Status.DesiredNumberScheduled, nil
 }
 
-// PodMatchesCurrentTemplate rejects a surge predecessor and verifies that the
+// PodMatchesCurrentTemplate rejects a live predecessor and verifies that the
 // ctld container carrying embedded netd is actually running with the desired
 // config, lock, mounts, and image.
 func PodMatchesCurrentTemplate(pod *corev1.Pod, ds *appsv1.DaemonSet) bool {

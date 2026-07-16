@@ -35,6 +35,7 @@ import (
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -2226,6 +2227,14 @@ func newClaimTestPod(namespace, name, templateID string, ready bool) *corev1.Pod
 				controller.AnnotationTemplateSpecHash: claimTestTemplateHash(templateID),
 			},
 			ResourceVersion: "1",
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name: "procd",
+				Resources: v1alpha1.BuildResourceRequirements(v1alpha1.ResourceQuota{
+					CPU: resource.MustParse("150m"),
+				}),
+			}},
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,

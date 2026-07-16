@@ -24,15 +24,18 @@ func (s *SandboxService) effectiveSandboxResourceQuota(template *v1alpha1.Sandbo
 		return v1alpha1.ResourceQuota{}, fmt.Errorf("%w: template is required", ErrInvalidClaimRequest)
 	}
 	quota := *template.Spec.MainContainer.Resources.DeepCopy()
-	if cfg == nil || cfg.Resources == nil {
-		return quota, nil
+	if cfg != nil && cfg.Resources != nil {
+		memory, err := s.validateSandboxMemory(cfg.Resources.Memory)
+		if err != nil {
+			return v1alpha1.ResourceQuota{}, err
+		}
+		quota.Memory = memory
+		quota.CPU = s0template.CPUForMemory(memory, s.sandboxMemoryPerCPU())
 	}
-	memory, err := s.validateSandboxMemory(cfg.Resources.Memory)
-	if err != nil {
-		return v1alpha1.ResourceQuota{}, err
+	minCPU := *resource.NewMilliQuantity(v1alpha1.MinimumClaimedSandboxCPULimitMilli, resource.DecimalSI)
+	if quota.CPU.Cmp(minCPU) < 0 {
+		quota.CPU = minCPU
 	}
-	quota.Memory = memory
-	quota.CPU = s0template.CPUForMemory(memory, s.sandboxMemoryPerCPU())
 	return quota, nil
 }
 

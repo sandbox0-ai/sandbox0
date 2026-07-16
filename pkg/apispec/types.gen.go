@@ -2036,7 +2036,7 @@ type Sandbox struct {
 	Paused  bool   `json:"paused"`
 	PodName string `json:"pod_name"`
 
-	// Resources Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio.
+	// Resources Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio, with a minimum CPU limit of 150m.
 	Resources *SandboxResourceConfig `json:"resources,omitempty"`
 
 	// RuntimeGeneration Monotonically increasing runtime generation. Resume starts a new generation.
@@ -2228,7 +2228,7 @@ type SandboxConfig struct {
 	HardTtl *int32                `json:"hard_ttl,omitempty"`
 	Network *SandboxNetworkPolicy `json:"network,omitempty"`
 
-	// Resources Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio.
+	// Resources Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio, with a minimum CPU limit of 150m.
 	Resources *SandboxResourceConfig `json:"resources,omitempty"`
 	Services  *[]SandboxAppService   `json:"services,omitempty"`
 
@@ -2386,7 +2386,7 @@ type SandboxRefreshRequest struct {
 	Duration *int32 `json:"duration,omitempty"`
 }
 
-// SandboxResourceConfig Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio.
+// SandboxResourceConfig Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio, with a minimum CPU limit of 150m.
 type SandboxResourceConfig struct {
 	// Memory Sandbox memory limit. Must be at least 128Mi and no more than the platform sandbox maximum, which defaults to 32Gi.
 	Memory *string `json:"memory,omitempty"`
@@ -2603,7 +2603,7 @@ type SandboxUpdateConfig struct {
 	HardTtl *int32                `json:"hard_ttl,omitempty"`
 	Network *SandboxNetworkPolicy `json:"network,omitempty"`
 
-	// Resources Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio.
+	// Resources Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio, with a minimum CPU limit of 150m.
 	Resources *SandboxResourceConfig `json:"resources,omitempty"`
 	Services  *[]SandboxAppService   `json:"services,omitempty"`
 

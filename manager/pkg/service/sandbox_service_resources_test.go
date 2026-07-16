@@ -25,7 +25,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
-func TestEffectiveSandboxResourceQuotaDerivesCPUFromMemory(t *testing.T) {
+func TestEffectiveSandboxResourceQuotaAppliesMinimumCPUToMemoryOverride(t *testing.T) {
 	svc := &SandboxService{config: SandboxServiceConfig{SandboxMemoryPerCPU: "4Gi"}}
 	template := newSandboxResourceTestTemplate(t)
 
@@ -36,7 +36,34 @@ func TestEffectiveSandboxResourceQuotaDerivesCPUFromMemory(t *testing.T) {
 		t.Fatalf("effectiveSandboxResourceQuota() error = %v", err)
 	}
 	assertQuantity(t, quota.Memory, "128Mi")
-	assertQuantity(t, quota.CPU, "32m")
+	assertQuantity(t, quota.CPU, "150m")
+}
+
+func TestEffectiveSandboxResourceQuotaAppliesMinimumCPUToTemplateResources(t *testing.T) {
+	svc := &SandboxService{config: SandboxServiceConfig{SandboxMemoryPerCPU: "4Gi"}}
+	template := newSandboxResourceTestTemplate(t)
+	template.Spec.MainContainer.Resources.CPU = resource.MustParse("125m")
+	template.Spec.MainContainer.Resources.Memory = resource.MustParse("512Mi")
+
+	quota, err := svc.effectiveSandboxResourceQuota(template, nil)
+	if err != nil {
+		t.Fatalf("effectiveSandboxResourceQuota() error = %v", err)
+	}
+	assertQuantity(t, quota.Memory, "512Mi")
+	assertQuantity(t, quota.CPU, "150m")
+}
+
+func TestEffectiveSandboxResourceQuotaAppliesMinimumCPUToTemplateWithoutCPU(t *testing.T) {
+	svc := &SandboxService{config: SandboxServiceConfig{SandboxMemoryPerCPU: "4Gi"}}
+	template := newSandboxResourceTestTemplate(t)
+	template.Spec.MainContainer.Resources.CPU = resource.Quantity{}
+
+	quota, err := svc.effectiveSandboxResourceQuota(template, nil)
+	if err != nil {
+		t.Fatalf("effectiveSandboxResourceQuota() error = %v", err)
+	}
+	assertQuantity(t, quota.Memory, "1Gi")
+	assertQuantity(t, quota.CPU, "150m")
 }
 
 func TestValidateSandboxMemoryBounds(t *testing.T) {
@@ -104,6 +131,35 @@ func TestCreateNewPodAppliesClaimMemoryResources(t *testing.T) {
 	assertResizePolicy(t, container.ResizePolicy, corev1.ResourceMemory, corev1.NotRequired)
 }
 
+func TestCreateNewPodAppliesMinimumCPUResources(t *testing.T) {
+	withClaimTestPublicKey(t)
+	template := newSandboxResourceTestTemplate(t)
+	client := fake.NewSimpleClientset()
+	svc := &SandboxService{
+		k8sClient:    client,
+		secretLister: newClaimTestSecretLister(t),
+		clock:        systemTime{},
+		config:       SandboxServiceConfig{SandboxMemoryPerCPU: "4Gi"},
+		logger:       zap.NewNop(),
+	}
+
+	pod, err := svc.createNewPod(context.Background(), template, &ClaimRequest{
+		TeamID: "team-a",
+		UserID: "user-a",
+		Config: &SandboxConfig{
+			Resources: &SandboxResourceConfig{Memory: "128Mi"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("createNewPod() error = %v", err)
+	}
+	container := sandboxRuntimeContainer(t, pod)
+	assertQuantity(t, container.Resources.Limits[corev1.ResourceMemory], "128Mi")
+	assertQuantity(t, container.Resources.Limits[corev1.ResourceCPU], "150m")
+	assertQuantity(t, container.Resources.Requests[corev1.ResourceMemory], "64Mi")
+	assertQuantity(t, container.Resources.Requests[corev1.ResourceCPU], "10m")
+}
+
 func TestCreateNewPodAppliesTemplateResourcesByDefault(t *testing.T) {
 	withClaimTestPublicKey(t)
 	template := newSandboxResourceTestTemplate(t)
@@ -158,6 +214,38 @@ func TestClaimIdlePodAppliesTemplateResourcesByDefault(t *testing.T) {
 	assertQuantity(t, container.Resources.Limits[corev1.ResourceCPU], "250m")
 	assertQuantity(t, container.Resources.Requests[corev1.ResourceMemory], "256Mi")
 	assertQuantity(t, container.Resources.Requests[corev1.ResourceCPU], "25m")
+	assertResizeSubresourceUpdate(t, client.Actions())
+}
+
+func TestClaimIdlePodAppliesMinimumCPUToTemplateResources(t *testing.T) {
+	template := newSandboxResourceTestTemplate(t)
+	template.Spec.MainContainer.Resources.CPU = resource.MustParse("125m")
+	template.Spec.MainContainer.Resources.Memory = resource.MustParse("512Mi")
+	idlePod := newSandboxResourceTestIdlePod(t, template, "idle-ready")
+	node := newClaimTestNode("node-a", "10.0.0.1")
+	node.Labels = map[string]string{dataplane.NodeDataPlaneReadyLabel: dataplane.ReadyLabelValue}
+	idlePod.Spec.NodeName = node.Name
+	client := fake.NewSimpleClientset(idlePod.DeepCopy(), node.DeepCopy())
+	svc := &SandboxService{
+		k8sClient:  client,
+		podLister:  newClaimTestPodLister(t, idlePod),
+		nodeLister: newClaimTestNodeLister(t, node),
+		clock:      systemTime{},
+		config:     SandboxServiceConfig{SandboxMemoryPerCPU: "4Gi"},
+		logger:     zap.NewNop(),
+	}
+
+	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{
+		TeamID: "team-a",
+		UserID: "user-a",
+	})
+	if err != nil {
+		t.Fatalf("claimIdlePod() error = %v", err)
+	}
+	container := sandboxRuntimeContainer(t, pod)
+	assertQuantity(t, container.Resources.Limits[corev1.ResourceMemory], "512Mi")
+	assertQuantity(t, container.Resources.Limits[corev1.ResourceCPU], "150m")
+	assertQuantity(t, container.Resources.Requests[corev1.ResourceCPU], "10m")
 	assertResizeSubresourceUpdate(t, client.Actions())
 }
 
@@ -291,7 +379,7 @@ func TestClaimIdlePodRestoresIdlePodAfterResizeConflict(t *testing.T) {
 	}
 }
 
-func TestUpdateSandboxAppliesMemoryResourcesAndPersistsConfig(t *testing.T) {
+func TestUpdateSandboxAppliesMinimumCPUResourcesAndPersistsConfig(t *testing.T) {
 	template := newSandboxResourceTestTemplate(t)
 	pod := newSandboxResourceTestActivePod(t, template, "sandbox-1")
 	client := fake.NewSimpleClientset(pod.DeepCopy())
@@ -311,22 +399,23 @@ func TestUpdateSandboxAppliesMemoryResourcesAndPersistsConfig(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	updated, err := svc.UpdateSandbox(ctx, "sandbox-1", &SandboxUpdateConfig{
-		Resources: &SandboxResourceConfig{Memory: "2Gi"},
+		Resources: &SandboxResourceConfig{Memory: "128Mi"},
 	})
 	if err != nil {
 		t.Fatalf("UpdateSandbox() error = %v", err)
 	}
-	if updated.Resources == nil || updated.Resources.Memory != "2Gi" {
-		t.Fatalf("updated resources = %#v, want memory 2Gi", updated.Resources)
+	if updated.Resources == nil || updated.Resources.Memory != "128Mi" {
+		t.Fatalf("updated resources = %#v, want memory 128Mi", updated.Resources)
 	}
 	stored, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get pod: %v", err)
 	}
 	container := sandboxRuntimeContainer(t, stored)
-	assertQuantity(t, container.Resources.Limits[corev1.ResourceMemory], "2Gi")
-	assertQuantity(t, container.Resources.Limits[corev1.ResourceCPU], "500m")
-	if got := stored.Annotations[controller.AnnotationConfig]; !contains(got, `"resources":{"memory":"2Gi"}`) {
+	assertQuantity(t, container.Resources.Limits[corev1.ResourceMemory], "128Mi")
+	assertQuantity(t, container.Resources.Limits[corev1.ResourceCPU], "150m")
+	assertQuantity(t, container.Resources.Requests[corev1.ResourceCPU], "10m")
+	if got := stored.Annotations[controller.AnnotationConfig]; !contains(got, `"resources":{"memory":"128Mi"}`) {
 		t.Fatalf("config annotation = %s, want resources memory", got)
 	}
 	assertResizeSubresourceUpdate(t, client.Actions())

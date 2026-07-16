@@ -432,6 +432,18 @@ manager_image: sandbox0/manager:test
 	assertResourceQuantity(t, resources.Limits[corev1.ResourceEphemeralStorage], "8Gi")
 }
 
+func TestBuildResourceRequirementsKeepsMinimumCPURequestDense(t *testing.T) {
+	resources := BuildResourceRequirements(ResourceQuota{
+		CPU:    resource.MustParse("150m"),
+		Memory: resource.MustParse("128Mi"),
+	})
+
+	assertResourceQuantity(t, resources.Requests[corev1.ResourceCPU], "10m")
+	assertResourceQuantity(t, resources.Limits[corev1.ResourceCPU], "150m")
+	assertResourceQuantity(t, resources.Requests[corev1.ResourceMemory], "64Mi")
+	assertResourceQuantity(t, resources.Limits[corev1.ResourceMemory], "128Mi")
+}
+
 func TestBuildIdlePodSpecUsesLowCPUAndMemoryLimits(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test

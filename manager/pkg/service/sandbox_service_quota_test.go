@@ -170,6 +170,20 @@ func TestEnforceSandboxCPUQuotaAllowsBelowLimit(t *testing.T) {
 	}
 }
 
+func TestEnforceSandboxResourceQuotaCountsMinimumCPULimit(t *testing.T) {
+	svc := &SandboxService{
+		quotaStore: fakeQuotaLimitStore{
+			limit: &quota.Limit{TeamID: "team-1", Dimension: quota.DimensionCPU, LimitValue: 149},
+		},
+	}
+	template := newQuotaTestTemplate("default", "125m", "512Mi")
+
+	err := svc.enforceSandboxResourceQuota(context.Background(), "team-1", template, nil)
+	if !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("enforceSandboxResourceQuota() error = %v, want ErrQuotaExceeded", err)
+	}
+}
+
 func TestEnforceSandboxCPUQuotaUsesLivePodsWhenUsageStoreDisabled(t *testing.T) {
 	svc := newQuotaTestServiceWithPods(
 		fakeQuotaLimitStore{

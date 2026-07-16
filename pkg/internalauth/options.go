@@ -39,6 +39,10 @@ type ValidatorConfig struct {
 	// Tokens must have aud == Target to be valid.
 	Target string
 
+	// AdditionalTargets contains other audiences accepted by a shared or
+	// transitioning endpoint. Target remains the canonical audience.
+	AdditionalTargets []string
+
 	// PublicKey is the Ed25519 public key used for verifying tokens.
 	// Required.
 	PublicKey ed25519.PublicKey
@@ -64,6 +68,7 @@ type ValidatorConfig struct {
 func DefaultValidatorConfig(target string, publicKey ed25519.PublicKey) ValidatorConfig {
 	return ValidatorConfig{
 		Target:                 target,
+		AdditionalTargets:      nil,
 		PublicKey:              publicKey,
 		AllowedCallers:         nil, // Allow all
 		ClockSkewTolerance:     5 * time.Second,

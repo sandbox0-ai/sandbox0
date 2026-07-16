@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
@@ -81,6 +82,181 @@ func TestS0FSSnapshotCreateRestoreAndDelete(t *testing.T) {
 	}
 	if len(repo.deleted) != 1 || repo.deleted[0] != snap.ID {
 		t.Fatalf("deleted snapshots = %v", repo.deleted)
+	}
+}
+
+func TestS0FSSnapshotDeleteCleansCanonicalObjectAfterRequestCancellation(t *testing.T) {
+	t.Parallel()
+
+	mgr, repo, _, engine := newS0FSSnapshotTestManager(t, "vol-delete-canceled")
+	writeS0FSFile(t, engine, "state.txt", "payload")
+	snap, err := mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
+		VolumeID: "vol-delete-canceled",
+		Name:     "snap-delete-canceled",
+		TeamID:   "team-1",
+		UserID:   "user-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateSnapshot() error = %v", err)
+	}
+	cfg, err := mgr.s0fsConfig("team-1", "vol-delete-canceled")
+	if err != nil {
+		t.Fatalf("s0fsConfig() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	mgr.repo = &cancelAfterTxRepo{fakeRepo: repo, cancel: cancel}
+	if err := mgr.DeleteSnapshot(ctx, "vol-delete-canceled", snap.ID, "team-1"); err != nil {
+		t.Fatalf("DeleteSnapshot() error = %v", err)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("delete request context was not canceled after transaction")
+	}
+	if _, err := s0fs.LoadSnapshot(context.Background(), cfg, snap.ID); !errors.Is(err, s0fs.ErrSnapshotNotFound) {
+		t.Fatalf("LoadSnapshot() after canceled delete error = %v, want ErrSnapshotNotFound", err)
+	}
+}
+
+func TestS0FSSnapshotRestoreSurvivesCacheReplacement(t *testing.T) {
+	t.Parallel()
+
+	mgr, _, _, engine := newS0FSSnapshotTestManager(t, "vol-restart")
+	writeS0FSFile(t, engine, "state.txt", "alpha")
+
+	snap, err := mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
+		VolumeID: "vol-restart",
+		Name:     "snap-restart",
+		TeamID:   "team-1",
+		UserID:   "user-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateSnapshot() error = %v", err)
+	}
+	writeS0FSFile(t, engine, "state.txt", "beta")
+	if _, err := engine.SyncMaterialize(context.Background()); err != nil {
+		t.Fatalf("SyncMaterialize() before cache replacement error = %v", err)
+	}
+
+	// The manager cache is an EmptyDir in Kubernetes. Replacing it models the
+	// standalone storage-proxy Pod being removed during service consolidation.
+	mgr.config.CacheDir = t.TempDir()
+	mgr.volMgr = nil
+	if err := mgr.RestoreSnapshot(context.Background(), &RestoreSnapshotRequest{
+		VolumeID:   "vol-restart",
+		SnapshotID: snap.ID,
+		TeamID:     "team-1",
+		UserID:     "user-1",
+	}); err != nil {
+		t.Fatalf("RestoreSnapshot() after cache replacement error = %v", err)
+	}
+
+	fresh := openFreshS0FSEngine(t, mgr, "team-1", "vol-restart")
+	defer fresh.Close()
+	if got := readS0FSFile(t, fresh, "state.txt"); got != "alpha" {
+		t.Fatalf("fresh engine read after restore = %q, want alpha", got)
+	}
+}
+
+func TestS0FSLegacySnapshotRecoversFromMatchingManifest(t *testing.T) {
+	t.Parallel()
+
+	mgr, _, _, engine := newS0FSSnapshotTestManager(t, "vol-legacy-recovery")
+	writeS0FSFile(t, engine, "state.txt", "alpha")
+	snap, err := mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
+		VolumeID: "vol-legacy-recovery",
+		Name:     "snap-legacy",
+		TeamID:   "team-1",
+		UserID:   "user-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateSnapshot() error = %v", err)
+	}
+
+	writeS0FSFile(t, engine, "state.txt", "beta")
+	if _, err := engine.SyncMaterialize(context.Background()); err != nil {
+		t.Fatalf("SyncMaterialize() after snapshot error = %v", err)
+	}
+	legacyCfg, err := mgr.s0fsConfig("team-1", "vol-legacy-recovery")
+	if err != nil {
+		t.Fatalf("s0fsConfig() error = %v", err)
+	}
+	if err := s0fs.DeleteSnapshot(context.Background(), legacyCfg, snap.ID); err != nil {
+		t.Fatalf("DeleteSnapshotState() error = %v", err)
+	}
+
+	mgr.config.CacheDir = t.TempDir()
+	mgr.volMgr = nil
+	if err := mgr.RestoreSnapshot(context.Background(), &RestoreSnapshotRequest{
+		VolumeID:   "vol-legacy-recovery",
+		SnapshotID: snap.ID,
+		TeamID:     "team-1",
+		UserID:     "user-1",
+	}); err != nil {
+		t.Fatalf("RestoreSnapshot() with legacy manifest recovery error = %v", err)
+	}
+
+	fresh := openFreshS0FSEngine(t, mgr, "team-1", "vol-legacy-recovery")
+	defer fresh.Close()
+	if got := readS0FSFile(t, fresh, "state.txt"); got != "alpha" {
+		t.Fatalf("fresh engine read after legacy recovery = %q, want alpha", got)
+	}
+
+	// A second cache replacement must use the backfilled durable snapshot
+	// object, without depending on the historical manifest fallback again.
+	mgr.config.CacheDir = t.TempDir()
+	backfilledCfg, err := mgr.s0fsConfig("team-1", "vol-legacy-recovery")
+	if err != nil {
+		t.Fatalf("s0fsConfig(backfilled) error = %v", err)
+	}
+	state, err := s0fs.LoadSnapshot(context.Background(), backfilledCfg, snap.ID)
+	if err != nil {
+		t.Fatalf("LoadSnapshot() after recovery backfill error = %v", err)
+	}
+	if got := snapshotSizeBytes(state); got != snap.SizeBytes {
+		t.Fatalf("backfilled snapshot size = %d, want %d", got, snap.SizeBytes)
+	}
+}
+
+func TestS0FSLegacySnapshotRejectsManifestSizeMismatch(t *testing.T) {
+	t.Parallel()
+
+	mgr, repo, _, engine := newS0FSSnapshotTestManager(t, "vol-legacy-mismatch")
+	writeS0FSFile(t, engine, "state.txt", "alpha")
+	snap, err := mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
+		VolumeID: "vol-legacy-mismatch",
+		Name:     "snap-legacy-mismatch",
+		TeamID:   "team-1",
+		UserID:   "user-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateSnapshot() error = %v", err)
+	}
+	cfg, err := mgr.s0fsConfig("team-1", "vol-legacy-mismatch")
+	if err != nil {
+		t.Fatalf("s0fsConfig() error = %v", err)
+	}
+	if err := s0fs.DeleteSnapshot(context.Background(), cfg, snap.ID); err != nil {
+		t.Fatalf("DeleteSnapshotState() error = %v", err)
+	}
+	repo.snapshots[snap.ID].SizeBytes++
+
+	mgr.config.CacheDir = t.TempDir()
+	mgr.volMgr = nil
+	err = mgr.RestoreSnapshot(context.Background(), &RestoreSnapshotRequest{
+		VolumeID:   "vol-legacy-mismatch",
+		SnapshotID: snap.ID,
+		TeamID:     "team-1",
+		UserID:     "user-1",
+	})
+	if !errors.Is(err, s0fs.ErrSnapshotNotFound) {
+		t.Fatalf("RestoreSnapshot() error = %v, want ErrSnapshotNotFound", err)
+	}
+	newCfg, cfgErr := mgr.s0fsConfig("team-1", "vol-legacy-mismatch")
+	if cfgErr != nil {
+		t.Fatalf("s0fsConfig(new cache) error = %v", cfgErr)
+	}
+	if _, loadErr := s0fs.LoadSnapshot(context.Background(), newCfg, snap.ID); !errors.Is(loadErr, s0fs.ErrSnapshotNotFound) {
+		t.Fatalf("LoadSnapshot() after rejected recovery error = %v, want ErrSnapshotNotFound", loadErr)
 	}
 }
 
@@ -233,6 +409,7 @@ func TestS0FSCreateVolumeFromSnapshotUsesCopyOnWriteState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSnapshot() error = %v", err)
 	}
+	mgr.config.CacheDir = t.TempDir()
 
 	child, err := mgr.CreateVolumeFromSnapshot(context.Background(), &CreateVolumeFromSnapshotRequest{
 		SnapshotID: snap.ID,
@@ -428,6 +605,7 @@ func TestExportSnapshotArchiveS0FS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSnapshot() error = %v", err)
 	}
+	mgr.config.CacheDir = t.TempDir()
 
 	var archive bytes.Buffer
 	if err := mgr.ExportSnapshotArchive(context.Background(), &ExportSnapshotRequest{
@@ -441,6 +619,45 @@ func TestExportSnapshotArchiveS0FS(t *testing.T) {
 	files := untarSnapshotArchive(t, archive.Bytes())
 	if got := string(files["dir/hello.txt"]); got != "archive-body" {
 		t.Fatalf("archive file = %q, want archive-body", got)
+	}
+}
+
+func TestExportSnapshotArchiveS0FSMissingLegacyStateRemainsNotFound(t *testing.T) {
+	t.Parallel()
+
+	mgr, _, _, engine := newS0FSSnapshotTestManager(t, "vol-missing-legacy")
+	writeS0FSFile(t, engine, "state.txt", "payload")
+	snap, err := mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
+		VolumeID: "vol-missing-legacy",
+		Name:     "snap-missing-legacy",
+		TeamID:   "team-1",
+		UserID:   "user-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateSnapshot() error = %v", err)
+	}
+	cfg, err := mgr.s0fsConfig("team-1", "vol-missing-legacy")
+	if err != nil {
+		t.Fatalf("s0fsConfig() error = %v", err)
+	}
+	if err := s0fs.DeleteSnapshot(context.Background(), cfg, snap.ID); err != nil {
+		t.Fatalf("DeleteSnapshotState() error = %v", err)
+	}
+	for _, key := range listS0FSKeys(t, cfg.ObjectStore, "manifests/") {
+		if err := cfg.ObjectStore.Delete(key); err != nil {
+			t.Fatalf("Delete(%q) error = %v", key, err)
+		}
+	}
+	mgr.config.CacheDir = t.TempDir()
+
+	var archive bytes.Buffer
+	err = mgr.ExportSnapshotArchive(context.Background(), &ExportSnapshotRequest{
+		VolumeID:   "vol-missing-legacy",
+		SnapshotID: snap.ID,
+		TeamID:     "team-1",
+	}, &archive)
+	if !errors.Is(err, ErrSnapshotNotFound) {
+		t.Fatalf("ExportSnapshotArchive() error = %v, want ErrSnapshotNotFound", err)
 	}
 }
 
@@ -610,4 +827,15 @@ func sameStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+type cancelAfterTxRepo struct {
+	*fakeRepo
+	cancel context.CancelFunc
+}
+
+func (r *cancelAfterTxRepo) WithTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
+	err := fn(nil)
+	r.cancel()
+	return err
 }

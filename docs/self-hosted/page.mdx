@@ -15,7 +15,7 @@ Sandbox0 self-hosted is **operator-first**.
 ### Planes and Core Services
 
 - **Control plane** (optional in single-cluster): `regional-gateway`, `scheduler`
-- **Data plane** (runtime): `cluster-gateway`, `manager`, optional `storage-proxy`, optional `netd`
+- **Data plane** (runtime): `cluster-gateway`, `manager` with the optional storage-proxy runtime, and a node-local `ctld` HA pair whose active process can run netd
 - **In-pod runtime**: `procd` runs inside each sandbox pod and handles process/files/volume mount operations
 
 ### Single-Cluster vs Multi-Cluster
@@ -36,12 +36,11 @@ flowchart TD
 
         subgraph s0[Sandbox0 Services]
             direction LR
-            igw --> mgr[manager]
+            igw --> mgr[manager - lifecycle and storage-proxy API]
             igw --> pods[Sandbox Pods - procd inside]
             mgr --> pods
-            mgr --> netd[netd]
-            netd --> mgr
-            mgr --> sp[storage-proxy]
+            mgr --> ctld[ctld-a / ctld-b - active runs netd]
+            pods --> ctld
         end
 
         subgraph mw[Middleware Dependencies]
@@ -52,18 +51,21 @@ flowchart TD
         end
 
         igw --> pg
-        sp --> pg
-        sp --> s3
+        mgr --> pg
+        mgr --> s3
+        ctld --> s3
         mgr --> reg
     end
 ```
 
-In full mode single-cluster, `cluster-gateway`, `manager`, `storage-proxy`, and `netd` are Sandbox0 services. PostgreSQL, S3/OSS, and optional image registry are middleware dependencies.
+In full mode single-cluster, `storage-proxy` and `netd` remain logical Sandbox0 components, but they are not separate workloads. The storage-proxy API runtime runs in the `manager` Deployment. Each sandbox node has `ctld-a` and `ctld-b` DaemonSet Pods; only the elected primary runs netd, and the synchronized standby starts it after promotion. The existing storage API paths, storage-proxy internal-auth audience, compatibility Service, and `services.storageProxy` / `services.netd` configuration blocks remain stable. PostgreSQL, S3/OSS, and the optional image registry are middleware dependencies.
 
 ### Request Flow
 
 - **Single-cluster (typical)**: client -> `cluster-gateway` -> `manager` -> sandbox pod (`procd`)
 - **Single-cluster (direct pod path)**: client -> `cluster-gateway` -> sandbox pod (`procd`) (for applicable traffic paths)
+- **Volume API**: client -> `cluster-gateway` -> storage-proxy compatibility Service -> embedded runtime in `manager` -> object storage or the active ctld mount owner
+- **Sandbox network**: sandbox pod -> embedded netd runtime in the active `ctld` process -> allowed upstream
 - **Multi-cluster**: client -> `regional-gateway` -> `scheduler` -> target cluster `cluster-gateway` -> `manager`
 
 ### Regional Boundary

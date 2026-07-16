@@ -734,8 +734,8 @@ func (e *Engine) CreateSnapshot(snapshotID string) (*SnapshotState, error) {
 	if err := e.checkOpen(); err != nil {
 		return nil, err
 	}
-	if snapshotID == "" {
-		return nil, fmt.Errorf("%w: snapshot id is required", ErrInvalidInput)
+	if err := validateSnapshotID(snapshotID); err != nil {
+		return nil, err
 	}
 	state := e.snapshotStateLocked()
 	if err := e.reserveLocalDiskLocked(estimatedStateBytes(state)); err != nil {
@@ -749,6 +749,9 @@ func (e *Engine) CreateSnapshot(snapshotID string) (*SnapshotState, error) {
 }
 
 func (e *Engine) RestoreSnapshot(snapshotID string) error {
+	if err := validateSnapshotID(snapshotID); err != nil {
+		return err
+	}
 	e.mutationMu.Lock()
 	defer e.mutationMu.Unlock()
 
@@ -761,6 +764,30 @@ func (e *Engine) RestoreSnapshot(snapshotID string) error {
 	if err != nil {
 		return err
 	}
+	return e.restoreStateLocked(state)
+}
+
+// RestoreState replaces the current filesystem state with an immutable
+// snapshot loaded independently from local engine storage.
+func (e *Engine) RestoreState(state *SnapshotState) error {
+	if state == nil {
+		return fmt.Errorf("%w: snapshot state is required", ErrInvalidInput)
+	}
+	state = cloneState(state)
+	normalizeState(state)
+
+	e.mutationMu.Lock()
+	defer e.mutationMu.Unlock()
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.checkOpen(); err != nil {
+		return err
+	}
+	return e.restoreStateLocked(state)
+}
+
+func (e *Engine) restoreStateLocked(state *SnapshotState) error {
 	minNextSeq := e.nextSeq + 1
 	if committedNext := e.lastCommittedManifest + 2; committedNext > minNextSeq {
 		minNextSeq = committedNext
@@ -813,8 +840,8 @@ func (e *Engine) DeleteSnapshot(snapshotID string) error {
 	if err := e.checkOpen(); err != nil {
 		return err
 	}
-	if snapshotID == "" {
-		return fmt.Errorf("%w: snapshot id is required", ErrInvalidInput)
+	if err := validateSnapshotID(snapshotID); err != nil {
+		return err
 	}
 	if err := os.Remove(snapshotFilePath(e.wal.path, snapshotID)); err != nil {
 		if os.IsNotExist(err) {

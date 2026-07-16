@@ -27,6 +27,27 @@ sandbox_observability_audit_delivery_mode: canonical_sync
 	}
 }
 
+func TestLoadNetdConfigFromPathAppliesDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "netd.yaml")
+	if err := os.WriteFile(path, []byte("node_name: node-a\nhealth_port: 18081\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadNetdConfigFromPath(path)
+	if err != nil {
+		t.Fatalf("LoadNetdConfigFromPath() error = %v", err)
+	}
+	if cfg.NodeName != "node-a" {
+		t.Fatalf("node name = %q, want node-a", cfg.NodeName)
+	}
+	if cfg.HealthPort != 18081 {
+		t.Fatalf("health port = %d, want 18081", cfg.HealthPort)
+	}
+	if cfg.MetricsPort != 9091 {
+		t.Fatalf("metrics port = %d, want default 9091", cfg.MetricsPort)
+	}
+}
+
 func TestApplyNetdDefaultsAuditDeliveryMode(t *testing.T) {
 	t.Run("empty defaults to durable async", func(t *testing.T) {
 		cfg := &NetdConfig{}
@@ -43,4 +64,19 @@ func TestApplyNetdDefaultsAuditDeliveryMode(t *testing.T) {
 			t.Fatalf("audit delivery mode = %q, want canonical_sync", cfg.SandboxObservabilityAuditDeliveryMode)
 		}
 	})
+}
+
+func TestNetdConfigValidateListenerPorts(t *testing.T) {
+	cfg := &NetdConfig{HealthPort: 8081, MetricsPort: 9091, ProxyHTTPPort: 18080, ProxyHTTPSPort: 18443}
+	if err := cfg.ValidateListenerPorts(map[int]string{8095: "ctld HTTP port"}); err != nil {
+		t.Fatalf("valid ports rejected: %v", err)
+	}
+	cfg.HealthPort = 8095
+	if err := cfg.ValidateListenerPorts(map[int]string{8095: "ctld HTTP port"}); err == nil {
+		t.Fatal("reserved ctld port collision accepted")
+	}
+	cfg.HealthPort = 9091
+	if err := cfg.ValidateListenerPorts(nil); err == nil {
+		t.Fatal("netd listener collision accepted")
+	}
 }

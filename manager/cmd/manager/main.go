@@ -45,6 +45,8 @@ import (
 	templreconciler "github.com/sandbox0-ai/sandbox0/pkg/template/reconciler"
 	templstorepg "github.com/sandbox0-ai/sandbox0/pkg/template/store/pg"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
+	storageproxyruntime "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/runtime"
+	"github.com/sirupsen/logrus"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
@@ -82,6 +84,9 @@ func main() {
 	// Create context that cancels on signal
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+	templateReconcilerQuiesceSignals := make(chan os.Signal, 1)
+	signal.Notify(templateReconcilerQuiesceSignals, syscall.SIGUSR1)
+	defer signal.Stop(templateReconcilerQuiesceSignals)
 
 	// Initialize observability provider
 	obsProvider, err := observability.New(observability.ConfigFromEnv("manager", logger))
@@ -369,6 +374,56 @@ func main() {
 		logger.Info("Internal auth generators initialized for procd and storage-proxy communication")
 	}
 
+	// The embedded storage runtime has an independent config file because the
+	// manager and storage-proxy schemas contain overlapping keys such as
+	// http_port and database_schema.
+	var embeddedStorageRuntime *storageproxyruntime.Runtime
+	if storageConfigPath := strings.TrimSpace(os.Getenv("STORAGE_PROXY_CONFIG_PATH")); storageConfigPath != "" {
+		storageCfg, loadErr := config.ReadStorageProxyConfig(storageConfigPath)
+		if loadErr != nil {
+			logger.Fatal("Failed to load embedded storage-proxy config",
+				zap.String("path", storageConfigPath),
+				zap.Error(loadErr),
+			)
+		}
+		storageLogrusLogger := logrus.New()
+		storageLogrusLogger.SetFormatter(&logrus.JSONFormatter{})
+		storageLogrusLogger.SetOutput(os.Stdout)
+		storageLogLevel, parseErr := logrus.ParseLevel(storageCfg.LogLevel)
+		if parseErr != nil {
+			storageLogLevel = logrus.InfoLevel
+		}
+		storageLogrusLogger.SetLevel(storageLogLevel)
+
+		embeddedStorageRuntime, err = storageproxyruntime.New(ctx, storageproxyruntime.Options{
+			Config:        storageCfg,
+			Logger:        logger,
+			LogrusLogger:  storageLogrusLogger,
+			Observability: obsProvider,
+			K8sClient:     k8sClient,
+		})
+		if err != nil {
+			logger.Fatal("Failed to initialize embedded storage-proxy runtime", zap.Error(err))
+		}
+		if err := embeddedStorageRuntime.Start(ctx); err != nil {
+			logger.Fatal("Failed to start embedded storage-proxy runtime", zap.Error(err))
+		}
+		go func() {
+			select {
+			case runtimeErr := <-embeddedStorageRuntime.Errors():
+				logger.Error("Embedded storage-proxy runtime failed", zap.Error(runtimeErr))
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+		logger.Info("Embedded storage-proxy runtime started",
+			zap.String("configPath", storageConfigPath),
+			zap.String("address", embeddedStorageRuntime.Address()),
+		)
+	} else {
+		logger.Info("Embedded storage-proxy runtime disabled; STORAGE_PROXY_CONFIG_PATH is not set")
+	}
+
 	// Parse ratios
 	pauseMemoryBufferRatio, err := strconv.ParseFloat(cfg.PauseMemoryBufferRatio, 64)
 	if err != nil {
@@ -434,7 +489,17 @@ func main() {
 	} else if rootFSObjectStore != nil {
 		sandboxService.SetRootFSObjectDeleter(rootFSObjectStore)
 	}
-	if cfg.StorageProxyBaseURL != "" && cfg.StorageProxyHTTPPort > 0 && storageProxyAdminTokenGenerator != nil {
+	if embeddedStorageRuntime != nil && storageProxyAdminTokenGenerator != nil {
+		internalHTTPClient := embeddedStorageRuntime.InternalHTTPClient()
+		internalHTTPClient.Timeout = cfg.ProcdClientTimeout.Duration
+		sandboxService.SetWebhookStateVolumeClient(service.NewStorageProxyVolumeClient(service.StorageProxyVolumeClientConfig{
+			BaseURL:        "http://storage-proxy",
+			HTTPClient:     internalHTTPClient,
+			TokenGenerator: storageProxyAdminTokenGenerator,
+			ClusterID:      cfg.DefaultClusterId,
+		}))
+		logger.Info("Webhook state volumes use the embedded storage-proxy runtime")
+	} else if cfg.StorageProxyBaseURL != "" && cfg.StorageProxyHTTPPort > 0 && storageProxyAdminTokenGenerator != nil {
 		storageProxyBaseURL := fmt.Sprintf("http://%s:%d", strings.TrimSpace(cfg.StorageProxyBaseURL), cfg.StorageProxyHTTPPort)
 		sandboxService.SetWebhookStateVolumeClient(service.NewStorageProxyVolumeClient(service.StorageProxyVolumeClientConfig{
 			BaseURL:        storageProxyBaseURL,
@@ -510,6 +575,14 @@ func main() {
 	} else {
 		logger.Info("Template store disabled; manager will apply templates directly")
 	}
+	go serveTemplateReconcilerQuiesceSignals(
+		ctx,
+		templateReconcilerQuiesceSignals,
+		templateReconciler,
+		defaultTemplateReconcilerQuiesceSupportedMarkerPath,
+		defaultTemplateReconcilerQuiescedMarkerPath,
+		logger,
+	)
 
 	// Create cluster service (for scheduler)
 	clusterService := service.NewClusterService(
@@ -664,11 +737,69 @@ func main() {
 	// Wait for termination signal
 	<-ctx.Done()
 	logger.Info("Shutting down gracefully")
+	if embeddedStorageRuntime != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := embeddedStorageRuntime.Shutdown(shutdownCtx); err != nil {
+			logger.Error("Embedded storage-proxy shutdown reported errors", zap.Error(err))
+		}
+		shutdownCancel()
+	}
 
 	// Give components time to shut down
 	time.Sleep(2 * time.Second)
 
 	logger.Info("Manager stopped")
+}
+
+type templateReconcilerQuiescer interface {
+	Quiesce(context.Context) error
+}
+
+const (
+	defaultTemplateReconcilerQuiesceSupportedMarkerPath = "/tmp/sandbox0-manager-template-reconciler-quiesce-supported"
+	defaultTemplateReconcilerQuiescedMarkerPath         = "/tmp/sandbox0-manager-template-reconciler-quiesced"
+)
+
+// serveTemplateReconcilerQuiesceSignals exposes a process-local maintenance
+// barrier without stopping the manager APIs needed to drain sandbox volumes.
+func serveTemplateReconcilerQuiesceSignals(
+	ctx context.Context,
+	signals <-chan os.Signal,
+	reconciler templateReconcilerQuiescer,
+	supportedMarkerPath string,
+	quiescedMarkerPath string,
+	logger *zap.Logger,
+) {
+	if err := os.Remove(quiescedMarkerPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		logger.Error("Failed to clear stale template reconciliation quiesce acknowledgement", zap.Error(err))
+		return
+	}
+	if err := os.WriteFile(supportedMarkerPath, nil, 0o600); err != nil {
+		logger.Error("Failed to publish template reconciliation quiesce support", zap.Error(err))
+	} else {
+		logger.Info("Template reconciliation quiesce signal enabled")
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-signals:
+			if reconciler != nil {
+				quiesceCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				err := reconciler.Quiesce(quiesceCtx)
+				cancel()
+				if err != nil {
+					logger.Error("Failed to quiesce template reconciliation", zap.Error(err))
+					continue
+				}
+			}
+			if err := os.WriteFile(quiescedMarkerPath, nil, 0o600); err != nil {
+				logger.Error("Failed to acknowledge quiesced template reconciliation", zap.Error(err))
+				continue
+			}
+			logger.Info("Template reconciliation quiesced")
+		}
+	}
 }
 
 // buildKubeConfig builds Kubernetes config

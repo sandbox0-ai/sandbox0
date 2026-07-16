@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 )
 
 func TestBuildScenarioFromManifestIncludesGlobalGatewayRolloutAndSecrets(t *testing.T) {
@@ -84,5 +86,42 @@ spec:
 	}
 	if strings.Contains(got, "sandbox0-system\n") {
 		t.Fatalf("rewritten manifest still contains source namespace:\n%s", got)
+	}
+}
+
+func TestBuildScenarioRolloutsUsesConsolidatedDataPlaneWorkloads(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Services: &infrav1alpha1.ServicesConfig{
+				Manager: &infrav1alpha1.ManagerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+				StorageProxy: &infrav1alpha1.StorageProxyServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+				Netd: &infrav1alpha1.NetdServiceConfig{
+					EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+				},
+			},
+		},
+	}
+
+	got := buildScenarioRollouts(infra, "s0", "sandbox0-system")
+	want := []RolloutTarget{
+		{Kind: "deployment", Name: "s0-manager", Namespace: "sandbox0-system", Timeout: "5m"},
+		{Kind: "daemonset", Name: "s0-ctld-a", Namespace: "sandbox0-system", Timeout: "5m"},
+		{Kind: "daemonset", Name: "s0-ctld-b", Namespace: "sandbox0-system", Timeout: "5m"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("unexpected rollout count: got %d, want %d: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("unexpected rollout %d: got %#v, want %#v", i, got[i], want[i])
+		}
 	}
 }

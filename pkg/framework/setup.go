@@ -89,12 +89,23 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 		})
 	}
 
-	if err := ScaleScenarioManagerToZero(testCtx.Context, workingCfg.Kubeconfig, env.Infra); err != nil {
-		fmt.Printf("Failed to scale scenario manager down before setup cleanup: %v\n", err)
+	namespaceCleanupErr, managerStopErr := cleanupManagerNamespacesBeforeStoppingManager(
+		func() error {
+			return KubectlQuiesceManagerTemplateReconcilers(testCtx.Context, workingCfg.Kubeconfig, scenario.InfraNamespace, "30s")
+		},
+		func() error {
+			return CleanupManagerOwnedNamespaces(testCtx.Context, workingCfg.Kubeconfig, managerOwnedNamespaceCleanupTimeout)
+		},
+		func() error {
+			return ScaleScenarioManagerToZero(testCtx.Context, workingCfg.Kubeconfig, env.Infra)
+		},
+	)
+	if managerStopErr != nil {
+		fmt.Printf("Failed to scale scenario manager down after setup namespace cleanup: %v\n", managerStopErr)
 	}
-	if err := CleanupManagerOwnedNamespaces(testCtx.Context, workingCfg.Kubeconfig, managerOwnedNamespaceCleanupTimeout); err != nil {
+	if namespaceCleanupErr != nil {
 		cleanup()
-		return nil, nil, err
+		return nil, nil, namespaceCleanupErr
 	}
 	if err := CleanupNamespace(testCtx.Context, workingCfg.Kubeconfig, scenario.InfraNamespace, "3m"); err != nil {
 		cleanup()
@@ -179,14 +190,26 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 		fmt.Printf("Preserving scenario %q for follow-up tests.\n", scenario.Name)
 	} else {
 		appendCleanup(func() {
-			// Pods can mount sandbox0 CSI volumes. Delete sandbox namespaces before the
-			// infra manifest so storage-proxy is still available for kubelet unpublish.
-			if err := ScaleScenarioManagerToZero(testCtx.Context, workingCfg.Kubeconfig, env.Infra); err != nil {
-				fmt.Printf("Failed to scale scenario manager down before namespace cleanup: %v\n", err)
+			// Pods can mount sandbox0 CSI volumes. Keep manager and its embedded storage
+			// API running until namespace deletion completes kubelet unpublish. Quiesce
+			// template syncing first so it cannot recreate namespaces during teardown.
+			namespaceCleanupErr, managerStopErr := cleanupManagerNamespacesBeforeStoppingManager(
+				func() error {
+					return KubectlQuiesceManagerTemplateReconcilers(testCtx.Context, workingCfg.Kubeconfig, scenario.InfraNamespace, "30s")
+				},
+				func() error {
+					return CleanupManagerOwnedNamespaces(testCtx.Context, workingCfg.Kubeconfig, managerOwnedNamespaceCleanupTimeout)
+				},
+				func() error {
+					return ScaleScenarioManagerToZero(testCtx.Context, workingCfg.Kubeconfig, env.Infra)
+				},
+			)
+			if managerStopErr != nil {
+				fmt.Printf("Failed to scale scenario manager down after namespace cleanup: %v\n", managerStopErr)
 			}
-			if err := CleanupManagerOwnedNamespaces(testCtx.Context, workingCfg.Kubeconfig, managerOwnedNamespaceCleanupTimeout); err != nil {
+			if namespaceCleanupErr != nil {
 				preserveInfraForNamespaceCleanup = true
-				fmt.Printf("Failed to clean up manager-owned namespaces: %v\n", err)
+				fmt.Printf("Failed to clean up manager-owned namespaces: %v\n", namespaceCleanupErr)
 				fmt.Printf("Preserving scenario infra so CSI drivers remain available for the next cleanup pass.\n")
 				return
 			}
@@ -202,7 +225,22 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 	return env, cleanup, nil
 }
 
-// ScaleScenarioManagerToZero stops manager reconciliation while preserving CSI components.
+// cleanupManagerNamespacesBeforeStoppingManager quiesces template syncing while
+// preserving manager-hosted storage until kubelet unpublish operations complete.
+// If namespace cleanup fails, stopManager is deliberately not called so a later
+// cleanup pass can continue using the storage API.
+func cleanupManagerNamespacesBeforeStoppingManager(quiesceManager, cleanupNamespaces, stopManager func() error) (namespaceCleanupErr, managerStopErr error) {
+	if err := quiesceManager(); err != nil {
+		return fmt.Errorf("quiesce manager template reconciliation: %w", err), nil
+	}
+	if err := cleanupNamespaces(); err != nil {
+		return err, nil
+	}
+	return nil, stopManager()
+}
+
+// ScaleScenarioManagerToZero stops manager reconciliation and its embedded storage API.
+// Call it only after manager-owned namespaces have finished terminating.
 func ScaleScenarioManagerToZero(ctx context.Context, kubeconfig string, infra InfraConfig) error {
 	if ctx == nil {
 		return fmt.Errorf("context is required")

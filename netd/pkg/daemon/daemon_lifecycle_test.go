@@ -58,6 +58,23 @@ func TestShutdownClosesRuntimeResourcesAfterMeteringLoopStops(t *testing.T) {
 	}
 }
 
+func TestReadyReflectsSynchronizedRuntimeState(t *testing.T) {
+	d := &Daemon{}
+	if d.Ready() {
+		t.Fatal("new daemon is ready")
+	}
+
+	d.ready.Store(true)
+	if !d.Ready() {
+		t.Fatal("daemon did not report synchronized state")
+	}
+
+	d.ready.Store(false)
+	if d.Ready() {
+		t.Fatal("daemon remained ready after synchronization was lost")
+	}
+}
+
 func TestRedirectBypassCIDRsIncludesClusterDNSCIDRs(t *testing.T) {
 	got := redirectBypassCIDRs(
 		[]string{"10.96.0.10", "10.244.0.53"},

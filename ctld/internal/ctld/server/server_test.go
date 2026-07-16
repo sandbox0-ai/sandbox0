@@ -114,6 +114,32 @@ func TestNewMuxDefaultsToNotImplementedController(t *testing.T) {
 	assert.False(t, resp.Paused)
 }
 
+func TestNewMuxReadinessIncludesControllerState(t *testing.T) {
+	controller := &readinessTestController{}
+	handler := NewMux(controller)
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("not-ready status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+
+	controller.ready = true
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ready status = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+type readinessTestController struct {
+	NotImplementedController
+	ready bool
+}
+
+func (c *readinessTestController) Ready() bool { return c.ready }
+
 func TestNewMuxRoutesRootFS(t *testing.T) {
 	controller := &recordingController{}
 	handler := NewMux(controller)

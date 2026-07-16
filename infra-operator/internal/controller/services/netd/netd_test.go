@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -231,8 +232,160 @@ func reconcileNetdDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) *a
 	}, ds); err != nil {
 		t.Fatalf("expected daemonset to be created: %v", err)
 	}
+	wantLockPath := filepath.Join(ActiveLockMountDirectory, infra.Namespace, infra.Name, "netd.lock")
+	if got := containerEnvValue(ds.Spec.Template.Spec.Containers[0], ActiveLockEnv); got != wantLockPath {
+		t.Fatalf("active lock path = %q, want %q", got, wantLockPath)
+	}
+	if !netdHasVolume(ds, ActiveLockVolumeName) || !netdHasMount(ds, ActiveLockVolumeName) {
+		t.Fatalf("legacy handoff lock volume is missing: volumes=%#v mounts=%#v", ds.Spec.Template.Spec.Volumes, ds.Spec.Template.Spec.Containers[0].VolumeMounts)
+	}
+	if got := ds.Annotations[LegacyHandoffStateAnnotation]; got != LegacyHandoffStateActive {
+		t.Fatalf("legacy handoff state = %q, want %q", got, LegacyHandoffStateActive)
+	}
+	container := ds.Spec.Template.Spec.Containers[0]
+	if container.LivenessProbe == nil || container.ReadinessProbe == nil ||
+		container.LivenessProbe.HTTPGet == nil || container.ReadinessProbe.HTTPGet == nil ||
+		container.LivenessProbe.HTTPGet.Port.StrVal != "health" || container.ReadinessProbe.HTTPGet.Port.StrVal != "health" {
+		t.Fatalf("legacy active probes do not target the named health port: %#v %#v", container.LivenessProbe, container.ReadinessProbe)
+	}
 
 	return ds
+}
+
+func TestPrepareLegacyStandbyPreservesFallbackUntilReady(t *testing.T) {
+	ctx := context.Background()
+	infra := newNetdTestInfra()
+	client, scheme := newNetdTestClient(t, infra.DeepCopy())
+	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
+	compiled := infraplan.Compile(infra)
+	if err := reconciler.PrepareLegacyHandoff(ctx, "ghcr.io/sandbox0-ai/sandbox0", "v2", compiled); err != nil {
+		t.Fatalf("PrepareLegacyHandoff() error = %v", err)
+	}
+	key := types.NamespacedName{Name: infra.Name + "-netd", Namespace: infra.Namespace}
+	active := &appsv1.DaemonSet{}
+	if err := client.Get(ctx, key, active); err != nil {
+		t.Fatalf("get validated active daemonset: %v", err)
+	}
+	activeImage := active.Spec.Template.Spec.Containers[0].Image
+	activeConfigMap := netdConfigMapName(t, active)
+	if err := reconciler.PrepareLegacyStandby(ctx, compiled); err != nil {
+		t.Fatalf("PrepareLegacyStandby() error = %v", err)
+	}
+
+	ds := &appsv1.DaemonSet{}
+	if err := client.Get(ctx, key, ds); err != nil {
+		t.Fatalf("get standby daemonset: %v", err)
+	}
+	if !legacyDaemonSetIsStandby(ds) {
+		t.Fatalf("legacy daemonset is not a delayed-lock standby: %#v", ds.Spec.Template.Spec.Containers[0])
+	}
+	if got := ds.Spec.Template.Annotations[LegacyHandoffStateAnnotation]; got != LegacyHandoffStateStandby {
+		t.Fatalf("standby pod state annotation = %q", got)
+	}
+	if got := ds.Spec.Template.Spec.Containers[0].Image; got != activeImage {
+		t.Fatalf("standby image = %q, want validated active image %q", got, activeImage)
+	}
+	if got := netdConfigMapName(t, ds); got != activeConfigMap {
+		t.Fatalf("standby config = %q, want validated active config %q", got, activeConfigMap)
+	}
+	if len(ds.Spec.Template.Spec.Containers[0].Ports) != 0 {
+		t.Fatalf("standby reserves active host-network ports: %#v", ds.Spec.Template.Spec.Containers[0].Ports)
+	}
+	rolling := ds.Spec.UpdateStrategy.RollingUpdate
+	if ds.Spec.UpdateStrategy.Type != appsv1.RollingUpdateDaemonSetStrategyType || rolling == nil ||
+		rolling.MaxSurge == nil || rolling.MaxSurge.IntValue() != 1 ||
+		rolling.MaxUnavailable == nil || rolling.MaxUnavailable.IntValue() != 0 {
+		t.Fatalf("standby rollout does not start before stopping active: %#v", ds.Spec.UpdateStrategy)
+	}
+	ds.Status.ObservedGeneration = ds.Generation
+	ds.Status.DesiredNumberScheduled = 1
+	ds.Status.CurrentNumberScheduled = 1
+	ds.Status.UpdatedNumberScheduled = 0
+	ds.Status.NumberReady = 1
+	ds.Status.NumberAvailable = 1
+	if err := client.Status().Update(ctx, ds); err != nil {
+		t.Fatalf("update pending standby rollout status: %v", err)
+	}
+	if ready, err := reconciler.LegacyStandbyReady(ctx, compiled); err != nil || ready {
+		t.Fatalf("LegacyStandbyReady() before rollout = %v, %v; want false, nil", ready, err)
+	}
+
+	// The next full reconcile must not reactivate the fallback while embedded
+	// netd is still proving readiness.
+	if err := reconciler.PrepareLegacyHandoff(ctx, "ghcr.io/sandbox0-ai/sandbox0", "v2", compiled); err != nil {
+		t.Fatalf("repeated PrepareLegacyHandoff() error = %v", err)
+	}
+	if err := client.Get(ctx, key, ds); err != nil {
+		t.Fatalf("get standby after repeated handoff: %v", err)
+	}
+	if !legacyDaemonSetIsStandby(ds) {
+		t.Fatal("repeated handoff reactivated the legacy daemonset")
+	}
+
+	ds.Status.ObservedGeneration = ds.Generation
+	ds.Status.DesiredNumberScheduled = 1
+	ds.Status.UpdatedNumberScheduled = 1
+	ds.Status.CurrentNumberScheduled = 1
+	ds.Status.NumberReady = 1
+	ds.Status.NumberAvailable = 1
+	ds.Status.NumberUnavailable = 0
+	if err := client.Status().Update(ctx, ds); err != nil {
+		t.Fatalf("update standby rollout status: %v", err)
+	}
+	if ready, err := reconciler.LegacyStandbyReady(ctx, compiled); err != nil || !ready {
+		t.Fatalf("LegacyStandbyReady() = %v, %v; want true, nil", ready, err)
+	}
+}
+
+func TestReconcileDoesNotCreateLegacyDaemonSetOnFreshInstall(t *testing.T) {
+	infra := newNetdTestInfra()
+	client, scheme := newNetdTestClientWithLegacy(t, false, infra.DeepCopy())
+	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
+	if err := reconciler.Reconcile(context.Background(), "ghcr.io/sandbox0-ai/sandbox0", "latest", infraplan.Compile(infra)); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	ds := &appsv1.DaemonSet{}
+	err := client.Get(context.Background(), types.NamespacedName{Name: infra.Name + "-netd", Namespace: infra.Namespace}, ds)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("fresh reconcile created legacy netd: %v", err)
+	}
+}
+
+func TestScopedActiveLockPathIsolatesInfraInstances(t *testing.T) {
+	first := ScopedActiveLockPath("sandbox0-system", "first")
+	second := ScopedActiveLockPath("sandbox0-system", "second")
+	otherNamespace := ScopedActiveLockPath("tenant-system", "first")
+	if first == second || first == otherNamespace || second == otherNamespace {
+		t.Fatalf("active lock paths are not scope-specific: %q %q %q", first, second, otherNamespace)
+	}
+}
+
+func TestCleanupLegacyDaemonSetWaitsForPodsToDisappear(t *testing.T) {
+	infra := newNetdTestInfra()
+	labels := common.GetServiceLabels(infra.Name, "netd")
+	legacyPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "legacy-netd-pod", Namespace: infra.Namespace, Labels: labels}}
+	client, scheme := newNetdTestClient(t, infra.DeepCopy(), legacyPod)
+	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
+	compiled := infraplan.Compile(infra)
+
+	if err := reconciler.CleanupLegacyDaemonSet(context.Background(), compiled); err == nil {
+		t.Fatal("CleanupLegacyDaemonSet() succeeded while a legacy pod remained")
+	}
+	if err := client.Delete(context.Background(), legacyPod); err != nil {
+		t.Fatalf("delete legacy pod: %v", err)
+	}
+	if err := reconciler.CleanupLegacyDaemonSet(context.Background(), compiled); err != nil {
+		t.Fatalf("CleanupLegacyDaemonSet() after pod deletion = %v", err)
+	}
+}
+
+func containerEnvValue(container corev1.Container, name string) string {
+	for i := range container.Env {
+		if container.Env[i].Name == name {
+			return container.Env[i].Value
+		}
+	}
+	return ""
 }
 
 func TestReconcileUsesCompiledPlanForEgressAuthResolverURL(t *testing.T) {
@@ -425,6 +578,10 @@ func getReconciledNetdConfig(t *testing.T, client ctrlclient.Client, infra *infr
 }
 
 func newNetdTestClient(t *testing.T, objects ...ctrlclient.Object) (ctrlclient.Client, *runtime.Scheme) {
+	return newNetdTestClientWithLegacy(t, true, objects...)
+}
+
+func newNetdTestClientWithLegacy(t *testing.T, includeLegacy bool, objects ...ctrlclient.Object) (ctrlclient.Client, *runtime.Scheme) {
 	t.Helper()
 
 	scheme := runtime.NewScheme()
@@ -447,6 +604,23 @@ func newNetdTestClient(t *testing.T, objects ...ctrlclient.Object) (ctrlclient.C
 			ClusterIP: "10.96.0.10",
 		},
 	})
+	if includeLegacy {
+		for _, object := range objects {
+			infra, ok := object.(*infrav1alpha1.Sandbox0Infra)
+			if !ok {
+				continue
+			}
+			labels := common.GetServiceLabels(infra.Name, "netd")
+			objects = append(objects, &appsv1.DaemonSet{
+				ObjectMeta: metav1.ObjectMeta{Name: infra.Name + "-netd", Namespace: infra.Namespace},
+				Spec: appsv1.DaemonSetSpec{
+					Selector: &metav1.LabelSelector{MatchLabels: labels},
+					Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: labels}},
+				},
+			})
+			break
+		}
+	}
 
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -497,7 +671,7 @@ func assertNetdMITMSecretMounted(t *testing.T, client ctrlclient.Client, infra *
 func netdConfigMapName(t *testing.T, ds *appsv1.DaemonSet) string {
 	t.Helper()
 	for _, volume := range ds.Spec.Template.Spec.Volumes {
-		if volume.Name == "config" && volume.ConfigMap != nil {
+		if volume.Name == ConfigVolumeName && volume.ConfigMap != nil {
 			return volume.ConfigMap.Name
 		}
 	}

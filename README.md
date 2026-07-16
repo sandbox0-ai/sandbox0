@@ -163,26 +163,24 @@ Sandboxing reduces blast radius and gives policy a real enforcement point. It do
 ```mermaid
 flowchart TB
     client["Client, SDK, CLI, or agent platform"] --> cgw["cluster-gateway"]
-    cgw --> mgr["manager"]
+    cgw --> mgr["manager<br/>lifecycle + storage-proxy runtime"]
     cgw --> pod["sandbox pod with procd"]
     mgr --> pod
-    mgr --> ctld["ctld (node-local)"]
-    mgr <--> netd["netd (optional)"]
+    mgr --> ctld["ctld HA pair (node-local)<br/>active process runs netd"]
     pod --> ctld
-    pod --> sp["storage-proxy (optional)"]
     mgr --> pg[("PostgreSQL")]
     mgr --> s3[("S3-compatible storage")]
     ctld --> s3
-    sp --> pg
-    sp --> s3
 ```
 
 Sandbox0 separates region-scoped control-plane services from cluster-scoped data-plane services. In single-cluster mode, `cluster-gateway` can act as the entrypoint. In multi-cluster mode, `regional-gateway` and `scheduler` select and route to one of the data-plane clusters in the same region.
 
+The operator keeps `storage-proxy` and `netd` as logical feature and configuration names, but it does not deploy separate workloads for them. The storage-proxy API runtime runs inside `manager`; its existing routes, internal-auth audience, and compatibility Service remain unchanged. Each sandbox node runs `ctld-a` and `ctld-b`; only the elected primary runs the embedded netd runtime, and the standby starts it when promoted.
+
 | Layer | Components | Responsibility |
 | --- | --- | --- |
 | Control plane | Optional `regional-gateway`, optional `scheduler` | Tenant/API key management, cluster selection, internal routing, template distribution |
-| Data plane | `cluster-gateway`, `manager`, `ctld`, optional `storage-proxy`, optional `netd` | Sandbox lifecycle, rootfs checkpoints, process/file APIs, volume storage, network enforcement |
+| Data plane | `cluster-gateway`, `manager` (including storage-proxy), `ctld-a` / `ctld-b` (active includes netd) | Sandbox lifecycle, rootfs checkpoints, process/file APIs, volume storage, network enforcement |
 | In-pod runtime | `procd` | PID 1 inside each sandbox pod, process abstraction, file I/O, volume mount operations |
 | Storage | PostgreSQL, ClickHouse, and S3-compatible object storage | Transactional metadata and metering delivery, long-term usage truth, rootfs/volume data |
 

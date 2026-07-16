@@ -12,7 +12,8 @@ of both processes.
   kernel FUSE connection and the corresponding recovery manifest.
 - The primary is the only process that binds the CSI socket, serves the node
   control port, exposes the kubelet plugin-registration socket, heartbeats
-  volume ownership, or opens a writable S0FS engine.
+  volume ownership, opens a writable S0FS engine, or runs the embedded netd
+  daemon.
 - Promotion starts only after the previous primary has been fenced by release
   of the kernel-backed primary lock.
 - A returning process joins as a standby. Role changes never perform automatic
@@ -33,13 +34,25 @@ Each slot attempts a non-blocking exclusive lock on
 epoch and starts active services. A synchronized standby waits for the lock;
 acquiring it is the fencing boundary for promotion.
 
+During the one-time migration from standalone netd, the legacy DaemonSet and
+embedded runtime use a second node-local flock scoped by namespace and infra
+name. The operator first validates the guarded legacy runtime with its normal
+health probes, then rolls that exact Pod template into a delayed-lock fallback.
+The fallback stays until embedded netd is Ready. If it must serve after an
+embedded startup failure, it releases the lock every two minutes and yields
+briefly so a recovered ctld primary can retry without operator or user action.
+
 The primary creates the CSI socket before advertising its registration socket.
 It becomes ready only after kubelet validates the CSI endpoint and reports a
-successful registration. On graceful shutdown it removes the registration
-socket before releasing the primary lease. After a crash, the promoted process
-removes the stale socket after acquiring the lock and registers again. Existing
-mounts continue through the cloned FUSE channels, while new publish operations
-resume through the promoted primary and may need to retry during the handoff.
+successful registration, and after embedded netd completes its first redirect
+rule synchronization. On graceful shutdown it stops netd and removes the
+registration socket before releasing the primary lease. A fatal netd error is
+treated as a primary service failure, so the process shuts down and releases
+the same kernel-backed lease used for ctld promotion. After a crash, the
+promoted process removes the stale socket after acquiring the lock, registers
+again, and starts a fresh netd runtime. Existing mounts continue through the
+cloned FUSE channels, while new publish operations resume through the promoted
+primary and may need to retry during the handoff.
 
 ## Portal handoff
 

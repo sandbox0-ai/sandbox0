@@ -85,14 +85,22 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if d.cfg == nil {
 		return fmt.Errorf("netd config is nil")
 	}
+	d.ready.Store(false)
+	defer d.ready.Store(false)
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	if err := d.startServers(); err != nil {
+	serverExitCh := make(chan error, 2)
+	if err := d.startServers(serverExitCh); err != nil {
+		shutdownCtx, shutdownCancel := d.shutdownContext()
+		defer shutdownCancel()
+		_ = d.shutdown(shutdownCtx)
 		return err
 	}
 	proxyExitCh := make(chan error, 1)
 	if err := d.runNetd(runCtx, cancel, proxyExitCh); err != nil {
-		return err
+		shutdownCtx, shutdownCancel := d.shutdownContext()
+		defer shutdownCancel()
+		return errors.Join(err, d.shutdown(shutdownCtx))
 	}
 
 	var runErr error
@@ -100,16 +108,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 	case <-ctx.Done():
 	case runErr = <-proxyExitCh:
 		cancel()
+	case runErr = <-serverExitCh:
+		cancel()
 	}
 
 	<-runCtx.Done()
 
-	shutdownCtx := context.Background()
-	if d.cfg.ShutdownDelay.Duration > 0 {
-		var cancel context.CancelFunc
-		shutdownCtx, cancel = context.WithTimeout(context.Background(), d.cfg.ShutdownDelay.Duration)
-		defer cancel()
-	}
+	shutdownCtx, shutdownCancel := d.shutdownContext()
+	defer shutdownCancel()
 	shutdownErr := d.shutdown(shutdownCtx)
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		if shutdownErr != nil {
@@ -118,6 +124,19 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return runErr
 	}
 	return shutdownErr
+}
+
+// Ready reports whether netd has successfully synchronized node redirect
+// state. Embedded runtimes use it to include netd in their own readiness gate.
+func (d *Daemon) Ready() bool {
+	return d != nil && d.ready.Load()
+}
+
+func (d *Daemon) shutdownContext() (context.Context, context.CancelFunc) {
+	if d.cfg != nil && d.cfg.ShutdownDelay.Duration > 0 {
+		return context.WithTimeout(context.Background(), d.cfg.ShutdownDelay.Duration)
+	}
+	return context.WithCancel(context.Background())
 }
 
 func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyExitCh chan<- error) error {
@@ -702,7 +721,7 @@ func cleanupDeniedTrackedFlows(
 	return len(flowsToKill)
 }
 
-func (d *Daemon) startServers() error {
+func (d *Daemon) startServers(serverErrors chan<- error) error {
 	healthMux := http.NewServeMux()
 	healthMux.HandleFunc("/healthz", d.handleHealth)
 	healthMux.HandleFunc("/readyz", d.handleReady)
@@ -721,17 +740,17 @@ func (d *Daemon) startServers() error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	if err := d.listenAndServe(d.healthServer, "health"); err != nil {
+	if err := d.listenAndServe(d.healthServer, "health", serverErrors); err != nil {
 		return err
 	}
-	if err := d.listenAndServe(d.metricsServer, "metrics"); err != nil {
+	if err := d.listenAndServe(d.metricsServer, "metrics", serverErrors); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (d *Daemon) listenAndServe(server *http.Server, name string) error {
+func (d *Daemon) listenAndServe(server *http.Server, name string, serverErrors chan<- error) error {
 	if server == nil {
 		return fmt.Errorf("server %s is nil", name)
 	}
@@ -746,16 +765,22 @@ func (d *Daemon) listenAndServe(server *http.Server, name string) error {
 
 	go func() {
 		if err := server.Serve(ln); err != nil && err != http.ErrServerClosed {
+			wrapped := fmt.Errorf("%s HTTP server: %w", name, err)
 			d.logger.Error("HTTP server error",
 				zap.String("name", name),
 				zap.Error(err),
 			)
+			select {
+			case serverErrors <- wrapped:
+			default:
+			}
 		}
 	}()
 	return nil
 }
 
 func (d *Daemon) shutdown(ctx context.Context) error {
+	d.ready.Store(false)
 	var shutdownErr error
 	if d.proxyServer != nil {
 		if err := d.proxyServer.Shutdown(ctx); err != nil {

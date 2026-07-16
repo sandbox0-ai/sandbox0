@@ -173,10 +173,11 @@ func buildScenarioRollouts(infra *infrav1alpha1.Sandbox0Infra, infraName, namesp
 		rollouts = append(rollouts, RolloutTarget{Kind: "deployment", Name: infraName + "-cluster-gateway", Namespace: namespace, Timeout: "5m"})
 	}
 	if infrav1alpha1.IsManagerEnabled(infra) {
-		rollouts = append(rollouts, RolloutTarget{Kind: "deployment", Name: infraName + "-manager", Namespace: namespace, Timeout: "5m"})
-	}
-	if infrav1alpha1.IsStorageProxyEnabled(infra) {
-		rollouts = append(rollouts, RolloutTarget{Kind: "deployment", Name: infraName + "-storage-proxy", Namespace: namespace, Timeout: "5m"})
+		rollouts = append(rollouts,
+			RolloutTarget{Kind: "deployment", Name: infraName + "-manager", Namespace: namespace, Timeout: "5m"},
+			RolloutTarget{Kind: "daemonset", Name: infraName + "-ctld-a", Namespace: namespace, Timeout: "5m"},
+			RolloutTarget{Kind: "daemonset", Name: infraName + "-ctld-b", Namespace: namespace, Timeout: "5m"},
+		)
 	}
 	return rollouts
 }

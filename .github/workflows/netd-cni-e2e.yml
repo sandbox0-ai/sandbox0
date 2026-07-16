@@ -8,9 +8,12 @@ on:
       - "Dockerfile"
       - "Dockerfile.local"
       - "Makefile"
+      - "ctld/**"
+      - "infra-operator/**"
       - "manager/**"
       - "netd/**"
       - "pkg/**"
+      - "storage-proxy/**"
       - "tests/e2e/**"
       - "go.mod"
       - "go.sum"
@@ -79,8 +82,10 @@ jobs:
           kubectl get nodes -o wide || true
           echo "=== pods ==="
           kubectl get pods -A -o wide || true
-          echo "=== netd logs ==="
-          kubectl -n sandbox0-system logs -l app.kubernetes.io/name=netd --all-containers --tail=-1 || true
+          echo "=== consolidated workloads ==="
+          kubectl -n sandbox0-system get deployments,daemonsets,services -o wide || true
+          echo "=== ctld/netd logs ==="
+          kubectl -n sandbox0-system logs -l app.kubernetes.io/component=ctld --all-containers --tail=-1 || true
           echo "=== sandbox0-system events ==="
           kubectl -n sandbox0-system get events --sort-by=.lastTimestamp || true
           kind export logs "${RUNNER_TEMP}/kind-logs-${{ matrix.short }}" --name "${KIND_CLUSTER_NAME}" || true

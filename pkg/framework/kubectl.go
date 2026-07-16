@@ -224,6 +224,251 @@ func KubectlDeleteNamespace(ctx context.Context, kubeconfig, namespace string) e
 	return Kubectl(ctx, kubeconfig, "delete", "namespace", namespace, "--ignore-not-found=true", "--wait=false")
 }
 
+const (
+	managerTemplateReconcilerQuiesceSupportedMarkerPath = "/tmp/sandbox0-manager-template-reconciler-quiesce-supported"
+	managerTemplateReconcilerQuiescedMarkerPath         = "/tmp/sandbox0-manager-template-reconciler-quiesced"
+)
+
+// KubectlQuiesceManagerTemplateReconcilers stops background template syncing in
+// every running manager Pod while leaving manager-hosted storage available.
+func KubectlQuiesceManagerTemplateReconcilers(ctx context.Context, kubeconfig, namespace, timeout string) error {
+	if ctx == nil {
+		return fmt.Errorf("context is required")
+	}
+	if namespace == "" {
+		return fmt.Errorf("namespace is required")
+	}
+	timeoutDuration, err := time.ParseDuration(timeout)
+	if err != nil {
+		return fmt.Errorf("parse timeout %q: %w", timeout, err)
+	}
+	namespaceResource, err := KubectlOutput(
+		ctx,
+		kubeconfig,
+		"get",
+		"namespace",
+		namespace,
+		"--ignore-not-found=true",
+		"-o",
+		"name",
+	)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(namespaceResource) == "" {
+		return nil
+	}
+
+	deadline := time.Now().Add(timeoutDuration)
+	quiescedPods := make(map[string]struct{})
+	for {
+		runningPods, ready, err := kubectlReadyManagerPods(ctx, kubeconfig, namespace)
+		if err != nil {
+			return err
+		}
+		if !ready {
+			if err := waitForManagerQuiesceRetry(ctx, deadline, namespace); err != nil {
+				return err
+			}
+			continue
+		}
+
+		newPods := make([]managerPodRef, 0, len(runningPods))
+		for _, pod := range runningPods {
+			if _, ok := quiescedPods[pod.Identity]; ok {
+				continue
+			}
+			if _, err := KubectlExecContainerOutput(
+				ctx,
+				kubeconfig,
+				namespace,
+				pod.Name,
+				"manager",
+				"/bin/sh",
+				"-c",
+				"test -f "+managerTemplateReconcilerQuiesceSupportedMarkerPath,
+			); err != nil {
+				return fmt.Errorf("manager Pod %s/%s does not advertise template reconciliation quiesce support", namespace, pod.Name)
+			}
+			newPods = append(newPods, pod)
+		}
+		for _, pod := range newPods {
+			if _, err := KubectlExecContainerOutput(
+				ctx,
+				kubeconfig,
+				namespace,
+				pod.Name,
+				"manager",
+				"/bin/sh",
+				"-c",
+				"kill -USR1 1",
+			); err != nil {
+				return fmt.Errorf("quiesce manager Pod %s/%s: %w", namespace, pod.Name, err)
+			}
+		}
+		for _, pod := range newPods {
+			if err := kubectlWaitForManagerQuiesceAck(ctx, kubeconfig, namespace, pod.Name, deadline); err != nil {
+				return err
+			}
+			quiescedPods[pod.Identity] = struct{}{}
+		}
+
+		confirmedPods, ready, err := kubectlReadyManagerPods(ctx, kubeconfig, namespace)
+		if err != nil {
+			return err
+		}
+		if ready && sameManagerPodSet(runningPods, confirmedPods) {
+			return nil
+		}
+		if err := waitForManagerQuiesceRetry(ctx, deadline, namespace); err != nil {
+			return err
+		}
+	}
+}
+
+type managerPodRef struct {
+	Name     string
+	Identity string
+}
+
+func kubectlReadyManagerPods(ctx context.Context, kubeconfig, namespace string) ([]managerPodRef, bool, error) {
+	output, err := KubectlOutput(
+		ctx,
+		kubeconfig,
+		"get",
+		"pods",
+		"--namespace",
+		namespace,
+		"-l",
+		"app.kubernetes.io/component=manager",
+		"-o",
+		"json",
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	var pods podList
+	if err := json.Unmarshal([]byte(output), &pods); err != nil {
+		return nil, false, fmt.Errorf("decode manager Pods: %w", err)
+	}
+	deploymentsOutput, err := KubectlOutput(
+		ctx,
+		kubeconfig,
+		"get",
+		"deployments",
+		"--namespace",
+		namespace,
+		"-l",
+		"app.kubernetes.io/component=manager",
+		"-o",
+		"json",
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	var deployments deploymentList
+	if err := json.Unmarshal([]byte(deploymentsOutput), &deployments); err != nil {
+		return nil, false, fmt.Errorf("decode manager Deployments: %w", err)
+	}
+	desiredReplicas := int32(0)
+	for _, deployment := range deployments.Items {
+		if deployment.Spec.Replicas == nil {
+			desiredReplicas++
+		} else {
+			desiredReplicas += *deployment.Spec.Replicas
+		}
+	}
+
+	runningPods := make([]managerPodRef, 0, len(pods.Items))
+	unreadyPods := make([]string, 0)
+	for _, pod := range pods.Items {
+		managerStatus, found := containerStatusByName(pod.Status.ContainerStatuses, "manager")
+		if pod.Status.Phase != "Running" || pod.Metadata.DeletionTimestamp != "" || !found || !managerStatus.Ready {
+			unreadyPods = append(unreadyPods, pod.Metadata.Name+"("+pod.Status.Phase+")")
+			continue
+		}
+		runningPods = append(runningPods, managerPodRef{
+			Name: pod.Metadata.Name,
+			Identity: fmt.Sprintf(
+				"%s/%s/%s/%d",
+				pod.Metadata.UID,
+				pod.Metadata.Name,
+				managerStatus.ContainerID,
+				managerStatus.RestartCount,
+			),
+		})
+	}
+	if len(unreadyPods) > 0 || int32(len(runningPods)) < desiredReplicas {
+		fmt.Printf(
+			"Waiting for manager Pods to stabilize before quiescing: running=%d desired=%d unready=%s\n",
+			len(runningPods),
+			desiredReplicas,
+			strings.Join(unreadyPods, ", "),
+		)
+		return runningPods, false, nil
+	}
+	return runningPods, true, nil
+}
+
+func kubectlWaitForManagerQuiesceAck(ctx context.Context, kubeconfig, namespace, pod string, deadline time.Time) error {
+	var lastErr error
+	for {
+		_, err := KubectlExecContainerOutput(
+			ctx,
+			kubeconfig,
+			namespace,
+			pod,
+			"manager",
+			"/bin/sh",
+			"-c",
+			"test -f "+managerTemplateReconcilerQuiescedMarkerPath,
+		)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			if lastErr != nil {
+				return fmt.Errorf("wait for manager Pod %s/%s to quiesce: %w", namespace, pod, lastErr)
+			}
+			return fmt.Errorf("timeout waiting for manager Pod %s/%s to quiesce", namespace, pod)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+func waitForManagerQuiesceRetry(ctx context.Context, deadline time.Time, namespace string) error {
+	if time.Now().After(deadline) {
+		return fmt.Errorf("timeout waiting for manager Pods in namespace %s to stabilize", namespace)
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(500 * time.Millisecond):
+		return nil
+	}
+}
+
+func sameManagerPodSet(left, right []managerPodRef) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	values := make(map[string]struct{}, len(left))
+	for _, value := range left {
+		values[value.Identity] = struct{}{}
+	}
+	for _, value := range right {
+		if _, ok := values[value.Identity]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func withNamespace(namespace string) []string {
 	if namespace == "" {
 		return nil
@@ -263,7 +508,9 @@ type pod struct {
 }
 
 type podMetadata struct {
-	Name string `json:"name"`
+	Name              string `json:"name"`
+	UID               string `json:"uid"`
+	DeletionTimestamp string `json:"deletionTimestamp"`
 }
 
 type podStatus struct {
@@ -272,6 +519,18 @@ type podStatus struct {
 	Message               string            `json:"message"`
 	ContainerStatuses     []containerStatus `json:"containerStatuses"`
 	InitContainerStatuses []containerStatus `json:"initContainerStatuses"`
+}
+
+type deploymentList struct {
+	Items []deployment `json:"items"`
+}
+
+type deployment struct {
+	Spec deploymentSpec `json:"spec"`
+}
+
+type deploymentSpec struct {
+	Replicas *int32 `json:"replicas"`
 }
 
 type namespaceList struct {
@@ -375,9 +634,21 @@ func namespacePhaseDescriptions(items []namespace) []string {
 }
 
 type containerStatus struct {
-	Name      string         `json:"name"`
-	State     containerState `json:"state"`
-	LastState containerState `json:"lastState"`
+	Name         string         `json:"name"`
+	Ready        bool           `json:"ready"`
+	RestartCount int32          `json:"restartCount"`
+	ContainerID  string         `json:"containerID"`
+	State        containerState `json:"state"`
+	LastState    containerState `json:"lastState"`
+}
+
+func containerStatusByName(statuses []containerStatus, name string) (containerStatus, bool) {
+	for _, status := range statuses {
+		if status.Name == name {
+			return status, true
+		}
+	}
+	return containerStatus{}, false
 }
 
 type containerState struct {

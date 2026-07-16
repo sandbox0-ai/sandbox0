@@ -218,6 +218,60 @@ func TestCtldHandoffCandidatesRequireCurrentTemplateAndReadySlot(t *testing.T) {
 	}
 }
 
+func TestCtldHandoffCandidatesAllowStagedBWithReadyA(t *testing.T) {
+	ctx := context.Background()
+	infra := &infrav1alpha1.Sandbox0Infra{ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"}}
+	baseLabels := common.GetServiceLabels(infra.Name, "ctld")
+
+	labelsA := common.CloneStringMap(baseLabels)
+	labelsA[dataplane.CtldHASlotLabel] = dataplane.CtldHASlotA
+	slotA := readyDaemonSet(infra.Name+"-ctld-a", infra.Namespace, labelsA)
+	slotA.Spec.Template.Spec.Containers = []corev1.Container{{Name: "ctld", Image: "sandbox0ai/infra:v1"}}
+	podA := currentCtldHandoffPod(slotA, "old-ready-ctld-a", "node-a", true)
+
+	labelsB := common.CloneStringMap(baseLabels)
+	labelsB[dataplane.CtldHASlotLabel] = dataplane.CtldHASlotB
+	slotB := readyDaemonSet(infra.Name+"-ctld-b", infra.Namespace, labelsB)
+	slotB.Spec.Template.Annotations = map[string]string{netd.ConfigHashAnnotation: "netd-config-v2"}
+	slotB.Spec.Template.Spec.Containers = []corev1.Container{{Name: "ctld", Image: "sandbox0ai/infra:v2"}}
+	slotB.Status.NumberReady = 0
+	slotB.Status.NumberAvailable = 0
+	slotB.Status.NumberUnavailable = 1
+	podB := currentCtldHandoffPod(slotB, "new-running-ctld-b", "node-a", false)
+
+	reconciler, _, _ := newCleanupTestReconciler(t, slotA, podA, slotB, podB)
+	ready, err := reconciler.ctldHandoffCandidatesRunning(ctx, infra)
+	if err != nil {
+		t.Fatalf("check staged handoff candidates: %v", err)
+	}
+	if !ready {
+		t.Fatal("ready old slot A plus running current slot B did not satisfy the staged handoff gate")
+	}
+}
+
+func currentCtldHandoffPod(ds *appsv1.DaemonSet, name, node string, ready bool) *corev1.Pod {
+	conditions := []corev1.PodCondition(nil)
+	if ready {
+		conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   ds.Namespace,
+			Labels:      common.CloneStringMap(ds.Spec.Template.Labels),
+			Annotations: common.CloneStringMap(ds.Spec.Template.Annotations),
+		},
+		Spec: *ds.Spec.Template.Spec.DeepCopy(),
+		Status: corev1.PodStatus{
+			Phase:             corev1.PodRunning,
+			Conditions:        conditions,
+			ContainerStatuses: []corev1.ContainerStatus{{Name: "ctld", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}},
+		},
+	}
+	pod.Spec.NodeName = node
+	return pod
+}
+
 func TestFreshLegacyNetdHandoffDoesNotChurnRBAC(t *testing.T) {
 	ctx := context.Background()
 	infra := &infrav1alpha1.Sandbox0Infra{ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"}}

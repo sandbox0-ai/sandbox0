@@ -32,6 +32,7 @@ func schemaStatements(cfg Config) []string {
 		fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", quoteIdentifier(cfg.Database)),
 		fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s (
+    sequence Int64 DEFAULT 0,
     event_id String,
     producer String,
     region_id String,
@@ -51,9 +52,10 @@ CREATE TABLE IF NOT EXISTS %s (
     data String
 ) ENGINE = ReplacingMergeTree(version)
 ORDER BY (region_id, producer, event_id)
-`, events),
+	`, events),
 		fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s (
+    sequence Int64 DEFAULT 0,
     window_id String,
     producer String,
     region_id String,
@@ -77,6 +79,8 @@ CREATE TABLE IF NOT EXISTS %s (
 ) ENGINE = ReplacingMergeTree(version)
 ORDER BY (region_id, producer, window_id)
 `, windows),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS sequence Int64 DEFAULT 0", events),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS sequence Int64 DEFAULT 0", windows),
 		fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s (
     producer String,

@@ -11,6 +11,11 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 )
 
+const (
+	dateTime64NanoPlaceholder         = "fromUnixTimestamp64Nano(?, 'UTC')"
+	nullableDateTime64NanoPlaceholder = "if(toUInt8(?), fromUnixTimestamp64Nano(?, 'UTC'), NULL)"
+)
+
 type Repository struct {
 	db  *sql.DB
 	cfg Config
@@ -42,6 +47,9 @@ func (r *Repository) appendEvent(ctx context.Context, event *metering.Event) err
 	if event.EventID == "" {
 		return fmt.Errorf("event_id is required")
 	}
+	if event.Sequence <= 0 {
+		return fmt.Errorf("sequence is required")
+	}
 	if event.Producer == "" {
 		return fmt.Errorf("producer is required")
 	}
@@ -64,20 +72,20 @@ func (r *Repository) appendEvent(ctx context.Context, event *metering.Event) err
 	}
 	_, err := r.db.ExecContext(ctx, fmt.Sprintf(`
 INSERT INTO %s (
-    event_id, producer, region_id, event_type,
+    sequence, event_id, producer, region_id, event_type,
     subject_type, subject_id,
     team_id, user_id,
     sandbox_id, volume_id, snapshot_id,
     template_id, cluster_id,
     occurred_at, recorded_at, version, data
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, qualified(r.cfg.Database, r.cfg.EventsTable)),
-		event.EventID, event.Producer, event.RegionID, event.EventType,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, %s, %s, ?, ?)
+`, qualified(r.cfg.Database, r.cfg.EventsTable), dateTime64NanoPlaceholder, dateTime64NanoPlaceholder),
+		event.Sequence, event.EventID, event.Producer, event.RegionID, event.EventType,
 		event.SubjectType, event.SubjectID,
 		event.TeamID, event.UserID,
 		event.SandboxID, event.VolumeID, event.SnapshotID,
 		event.TemplateID, event.ClusterID,
-		event.OccurredAt.UTC(), recordedAt.UTC(), versionFrom(recordedAt), string(data),
+		dateTime64NanoArg(event.OccurredAt), dateTime64NanoArg(recordedAt), versionFrom(recordedAt), string(data),
 	)
 	if err != nil {
 		return fmt.Errorf("insert usage event: %w", err)
@@ -98,6 +106,9 @@ func (r *Repository) appendWindow(ctx context.Context, window *metering.Window) 
 	}
 	if window.WindowID == "" {
 		return fmt.Errorf("window_id is required")
+	}
+	if window.Sequence <= 0 {
+		return fmt.Errorf("sequence is required")
 	}
 	if window.Producer == "" {
 		return fmt.Errorf("producer is required")
@@ -130,22 +141,22 @@ func (r *Repository) appendWindow(ctx context.Context, window *metering.Window) 
 	}
 	_, err := r.db.ExecContext(ctx, fmt.Sprintf(`
 INSERT INTO %s (
-    window_id, producer, region_id, window_type,
+    sequence, window_id, producer, region_id, window_type,
     subject_type, subject_id,
     team_id, user_id,
     sandbox_id, volume_id, snapshot_id,
     template_id, cluster_id,
     window_start, window_end,
     value, unit, recorded_at, version, data
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, qualified(r.cfg.Database, r.cfg.WindowsTable)),
-		window.WindowID, window.Producer, window.RegionID, window.WindowType,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, %s, %s, ?, ?, %s, ?, ?)
+`, qualified(r.cfg.Database, r.cfg.WindowsTable), dateTime64NanoPlaceholder, dateTime64NanoPlaceholder, dateTime64NanoPlaceholder),
+		window.Sequence, window.WindowID, window.Producer, window.RegionID, window.WindowType,
 		window.SubjectType, window.SubjectID,
 		window.TeamID, window.UserID,
 		window.SandboxID, window.VolumeID, window.SnapshotID,
 		window.TemplateID, window.ClusterID,
-		window.WindowStart.UTC(), window.WindowEnd.UTC(),
-		window.Value, window.Unit, recordedAt.UTC(), versionFrom(recordedAt), string(data),
+		dateTime64NanoArg(window.WindowStart), dateTime64NanoArg(window.WindowEnd),
+		window.Value, window.Unit, dateTime64NanoArg(recordedAt), versionFrom(recordedAt), string(data),
 	)
 	if err != nil {
 		return fmt.Errorf("insert usage window: %w", err)
@@ -167,11 +178,12 @@ func (r *Repository) upsertProducerWatermark(ctx context.Context, producer strin
 	if completeBefore.IsZero() {
 		return fmt.Errorf("complete_before is required")
 	}
+	updatedAt := r.now()
 	_, err := r.db.ExecContext(ctx, fmt.Sprintf(`
 INSERT INTO %s (producer, region_id, complete_before, updated_at, version)
-VALUES (?, ?, ?, ?, ?)
-`, qualified(r.cfg.Database, r.cfg.WatermarksTable)),
-		producer, regionID, completeBefore.UTC(), r.now(), versionFrom(completeBefore),
+VALUES (?, ?, %s, %s, ?)
+`, qualified(r.cfg.Database, r.cfg.WatermarksTable), dateTime64NanoPlaceholder, dateTime64NanoPlaceholder),
+		producer, regionID, dateTime64NanoArg(completeBefore), dateTime64NanoArg(updatedAt), versionFrom(completeBefore),
 	)
 	if err != nil {
 		return fmt.Errorf("upsert producer watermark: %w", err)
@@ -181,6 +193,18 @@ VALUES (?, ?, ?, ?, ?)
 
 func (r *Repository) GetStatus(ctx context.Context, fallbackRegionID string) (*metering.Status, error) {
 	status := &metering.Status{RegionID: fallbackRegionID}
+	if err := r.db.QueryRowContext(ctx, fmt.Sprintf(`
+SELECT COALESCE(MAX(sequence), 0)
+FROM %s FINAL
+`, qualified(r.cfg.Database, r.cfg.EventsTable))).Scan(&status.LatestEventSequence); err != nil {
+		return nil, fmt.Errorf("query latest event sequence: %w", err)
+	}
+	if err := r.db.QueryRowContext(ctx, fmt.Sprintf(`
+SELECT COALESCE(MAX(sequence), 0)
+FROM %s FINAL
+`, qualified(r.cfg.Database, r.cfg.WindowsTable))).Scan(&status.LatestWindowSequence); err != nil {
+		return nil, fmt.Errorf("query latest window sequence: %w", err)
+	}
 	if cursor, err := r.latestEventCursor(ctx); err != nil {
 		return nil, err
 	} else {
@@ -195,10 +219,7 @@ func (r *Repository) GetStatus(ctx context.Context, fallbackRegionID string) (*m
 	var completeBefore sql.NullTime
 	var producerCount uint64
 	var regionID string
-	err := r.db.QueryRowContext(ctx, fmt.Sprintf(`
-SELECT MIN(complete_before), COUNT(), any(region_id)
-FROM %s FINAL
-`, qualified(r.cfg.Database, r.cfg.WatermarksTable))).Scan(&completeBefore, &producerCount, &regionID)
+	err := r.db.QueryRowContext(ctx, watermarkStatusQuery(qualified(r.cfg.Database, r.cfg.WatermarksTable))).Scan(&completeBefore, &producerCount, &regionID)
 	if err != nil {
 		return nil, fmt.Errorf("query producer watermarks: %w", err)
 	}
@@ -211,6 +232,16 @@ FROM %s FINAL
 		status.RegionID = regionID
 	}
 	return status, nil
+}
+
+func watermarkStatusQuery(table string) string {
+	// The PostgreSQL projector delivers one globally ordered outbox. A
+	// projected watermark therefore proves that every older committed batch
+	// has reached ClickHouse, regardless of which producer emitted it.
+	return fmt.Sprintf(`
+SELECT MAX(complete_before), COUNT(), any(region_id)
+FROM %s FINAL
+`, table)
 }
 
 func (r *Repository) latestEventCursor(ctx context.Context) (string, error) {
@@ -261,7 +292,7 @@ func (r *Repository) ListEvents(ctx context.Context, cursor string, limit int) (
 	args = append(args, limit)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
 SELECT
-    event_id, producer, region_id, event_type,
+    sequence, event_id, producer, region_id, event_type,
     subject_type, subject_id,
     team_id, user_id,
     sandbox_id, volume_id, snapshot_id,
@@ -282,7 +313,7 @@ LIMIT ?
 		event := &metering.Event{}
 		var data string
 		if err := rows.Scan(
-			&event.EventID, &event.Producer, &event.RegionID, &event.EventType,
+			&event.Sequence, &event.EventID, &event.Producer, &event.RegionID, &event.EventType,
 			&event.SubjectType, &event.SubjectID,
 			&event.TeamID, &event.UserID,
 			&event.SandboxID, &event.VolumeID, &event.SnapshotID,
@@ -316,7 +347,7 @@ func (r *Repository) ListWindows(ctx context.Context, cursor string, limit int) 
 	args = append(args, limit)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
 SELECT
-    window_id, producer, region_id, window_type,
+    sequence, window_id, producer, region_id, window_type,
     subject_type, subject_id,
     team_id, user_id,
     sandbox_id, volume_id, snapshot_id,
@@ -338,7 +369,7 @@ LIMIT ?
 		window := &metering.Window{}
 		var data string
 		if err := rows.Scan(
-			&window.WindowID, &window.Producer, &window.RegionID, &window.WindowType,
+			&window.Sequence, &window.WindowID, &window.Producer, &window.RegionID, &window.WindowType,
 			&window.SubjectType, &window.SubjectID,
 			&window.TeamID, &window.UserID,
 			&window.SandboxID, &window.VolumeID, &window.SnapshotID,
@@ -387,7 +418,7 @@ func cursorWhere(cursor *pageCursor, idColumn string) (string, []any) {
 	if cursor == nil {
 		return "", nil
 	}
-	return fmt.Sprintf("WHERE (recorded_at, producer, %s) > (?, ?, ?)", idColumn), []any{cursor.RecordedAt, cursor.Producer, cursor.ID}
+	return fmt.Sprintf("WHERE (recorded_at, producer, %s) > (%s, ?, ?)", idColumn, dateTime64NanoPlaceholder), []any{dateTime64NanoArg(cursor.RecordedAt), cursor.Producer, cursor.ID}
 }
 
 func (r *Repository) GetSandboxProjectionState(ctx context.Context, sandboxID string) (*metering.SandboxProjectionState, error) {
@@ -485,18 +516,33 @@ func (r *Repository) upsertSandboxProjectionState(ctx context.Context, state *me
 	if state.LastObservedAt.IsZero() {
 		state.LastObservedAt = r.now()
 	}
+	claimedAtPresent, claimedAtNanos := nullableDateTime64NanoArgs(state.ClaimedAt)
+	activeSincePresent, activeSinceNanos := nullableDateTime64NanoArgs(state.ActiveSince)
+	pausedAtPresent, pausedAtNanos := nullableDateTime64NanoArgs(state.PausedAt)
+	terminatedAtPresent, terminatedAtNanos := nullableDateTime64NanoArgs(state.TerminatedAt)
 	_, err := r.db.ExecContext(ctx, fmt.Sprintf(`
 INSERT INTO %s (
     sandbox_id, namespace, team_id, user_id, template_id, cluster_id,
     owner_kind, resource_millicpu, resource_memory_mib,
     claimed_at, active_since, paused, paused_at, terminated_at,
     last_observed_at, last_resource_version, version
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, qualified(r.cfg.Database, r.cfg.SandboxStateTable)),
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, %s, %s, ?, %s, %s, %s, ?, ?)
+`,
+		qualified(r.cfg.Database, r.cfg.SandboxStateTable),
+		nullableDateTime64NanoPlaceholder,
+		nullableDateTime64NanoPlaceholder,
+		nullableDateTime64NanoPlaceholder,
+		nullableDateTime64NanoPlaceholder,
+		dateTime64NanoPlaceholder,
+	),
 		state.SandboxID, state.Namespace, state.TeamID, state.UserID, state.TemplateID, state.ClusterID,
 		state.OwnerKind, state.ResourceMillicpu, state.ResourceMemoryMiB,
-		nullableTimeArg(state.ClaimedAt), nullableTimeArg(state.ActiveSince), boolUInt8(state.Paused), nullableTimeArg(state.PausedAt), nullableTimeArg(state.TerminatedAt),
-		state.LastObservedAt.UTC(), state.LastResourceVer, versionFrom(state.LastObservedAt),
+		claimedAtPresent, claimedAtNanos,
+		activeSincePresent, activeSinceNanos,
+		boolUInt8(state.Paused),
+		pausedAtPresent, pausedAtNanos,
+		terminatedAtPresent, terminatedAtNanos,
+		dateTime64NanoArg(state.LastObservedAt), state.LastResourceVer, versionFrom(state.LastObservedAt),
 	)
 	if err != nil {
 		return fmt.Errorf("upsert sandbox projection state: %w", err)
@@ -511,11 +557,11 @@ INSERT INTO %s (
     team_id, user_id, sandbox_id, volume_id, snapshot_id,
     cluster_id, region_id, size_bytes, observed_at, unbilled_byte_nanoseconds,
     deleted, version
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
-`, qualified(r.cfg.Database, r.cfg.StorageStateTable)),
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, %s, ?, 0, ?)
+`, qualified(r.cfg.Database, r.cfg.StorageStateTable), dateTime64NanoPlaceholder),
 		state.SubjectType, state.SubjectID, state.Product, state.OwnerKind,
 		state.TeamID, state.UserID, state.SandboxID, state.VolumeID, state.SnapshotID,
-		state.ClusterID, state.RegionID, state.SizeBytes, state.ObservedAt.UTC(), state.UnbilledByteNanoseconds,
+		state.ClusterID, state.RegionID, state.SizeBytes, dateTime64NanoArg(state.ObservedAt), state.UnbilledByteNanoseconds,
 		versionFrom(state.ObservedAt),
 	)
 	if err != nil {
@@ -578,11 +624,11 @@ INSERT INTO %s (
     team_id, user_id, sandbox_id, volume_id, snapshot_id,
     cluster_id, region_id, size_bytes, observed_at, unbilled_byte_nanoseconds,
     deleted, version
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-`, qualified(r.cfg.Database, r.cfg.StorageStateTable)),
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, %s, ?, 1, ?)
+`, qualified(r.cfg.Database, r.cfg.StorageStateTable), dateTime64NanoPlaceholder),
 		state.SubjectType, state.SubjectID, state.Product, state.OwnerKind,
 		state.TeamID, state.UserID, state.SandboxID, state.VolumeID, state.SnapshotID,
-		state.ClusterID, state.RegionID, state.SizeBytes, deletedAt.UTC(), state.UnbilledByteNanoseconds,
+		state.ClusterID, state.RegionID, state.SizeBytes, dateTime64NanoArg(deletedAt), state.UnbilledByteNanoseconds,
 		versionFrom(deletedAt),
 	)
 	if err != nil {
@@ -718,11 +764,15 @@ func storageDimensionMatchesSubjectType(dimension quota.Dimension, subjectType s
 	}
 }
 
-func nullableTimeArg(value *time.Time) any {
+func dateTime64NanoArg(value time.Time) int64 {
+	return value.UTC().UnixNano()
+}
+
+func nullableDateTime64NanoArgs(value *time.Time) (uint8, int64) {
 	if value == nil || value.IsZero() {
-		return nil
+		return 0, 0
 	}
-	return value.UTC()
+	return 1, dateTime64NanoArg(*value)
 }
 
 func nullableTimePtr(value sql.NullTime) *time.Time {

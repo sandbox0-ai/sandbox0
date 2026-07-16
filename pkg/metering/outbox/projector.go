@@ -167,12 +167,14 @@ func (p *Projector) apply(ctx context.Context, operation *Operation) error {
 		if err := json.Unmarshal(operation.Payload, value); err != nil {
 			return fmt.Errorf("decode event operation: %w", err)
 		}
+		value.Sequence = operation.Sequence
 		return p.sink.AppendEvent(ctx, value)
 	case OperationWindow:
 		value := &metering.Window{}
 		if err := json.Unmarshal(operation.Payload, value); err != nil {
 			return fmt.Errorf("decode window operation: %w", err)
 		}
+		value.Sequence = operation.Sequence
 		return p.sink.AppendWindow(ctx, value)
 	case OperationWatermark:
 		value := &WatermarkOperation{}

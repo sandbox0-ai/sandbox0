@@ -57,7 +57,7 @@ For mounted `RWO` volumes, Sandbox0 keeps one active writable owner at a time.
 
 - when a sandbox mounts an `RWO` volume, the node-local mount owner becomes authoritative for reads and writes
 - direct volume file API requests are routed to that mounted owner instead of opening a second writable mount
-- for `s0fs` volumes that are not mounted into a sandbox, `storage-proxy` serves direct file API requests itself
+- for `s0fs` volumes that are not mounted into a sandbox, the storage-proxy runtime embedded in manager serves direct file API requests itself
 
 This keeps the mounted filesystem view and the direct volume API view consistent in both directions. For `s3` backend Volumes, direct file API requests require an active ctld mount owner; otherwise use S3 APIs directly or mount the Volume into a Sandbox first.
 
@@ -68,10 +68,10 @@ Sandbox0 encrypts persisted S0FS volume data at the application layer before it 
 Manifest objects are encrypted as full blobs. Segment objects are encrypted in independently authenticated chunks, so cold file reads can still fetch only the ciphertext chunks needed for the requested byte range. Node-local cache files, including the S0FS WAL, head state, and snapshot state, are also encrypted before they are written to disk.
 
 <Callout variant="info">
-This is service-side application-layer encryption. `storage-proxy` and `ctld` hold the volume encryption key so they can serve normal POSIX filesystem reads and writes. It is not end-to-end encryption where Sandbox0 services cannot decrypt volume data.
+This is service-side application-layer encryption. The storage-proxy runtime in manager and the active ctld process hold the volume encryption key so they can serve normal POSIX filesystem reads and writes. It is not end-to-end encryption where Sandbox0 services cannot decrypt volume data.
 </Callout>
 
-For self-hosted deployments, see [Self-hosted Configuration](/docs/sandbox/self-hosted/configuration) for the storage-proxy encryption setting.
+For self-hosted deployments, see [Self-hosted Configuration](/docs/sandbox/self-hosted/configuration) for the `services.storageProxy` encryption setting. The configuration name is retained even though the runtime is hosted by manager.
 
 ## Direct File Operations
 
@@ -80,7 +80,7 @@ For `s0fs` Volumes, you can operate on files directly by Volume ID without mount
 This is useful for SDK workflows, developer tooling, and small control-plane style file tasks where starting or reusing a Sandbox would only add latency.
 
 <Callout variant="info">
-Direct volume file APIs still go through the normal gateway chain and team-scoped auth. When an `s0fs` volume is already mounted into a sandbox, the API request is served by that mounted owner. When it is not mounted, `storage-proxy` lazily attaches the volume on demand and reclaims idle direct mounts later. `s3` backend Volumes require an active mounted owner for direct file API requests.
+Direct volume file APIs still go through the normal gateway chain and team-scoped auth. When an `s0fs` volume is already mounted into a sandbox, the API request is served by that mounted owner. When it is not mounted, the storage-proxy runtime in manager lazily attaches the volume on demand and reclaims idle direct mounts later. The API routes and storage-proxy internal-auth audience are unchanged. `s3` backend Volumes require an active mounted owner for direct file API requests.
 </Callout>
 
 The direct file API surface mirrors the Sandbox file API:

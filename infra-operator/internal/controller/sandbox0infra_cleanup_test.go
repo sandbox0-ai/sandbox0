@@ -6,6 +6,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -96,6 +97,13 @@ func TestCleanupDisabledServiceResourcesCleansBuiltinDependencies(t *testing.T) 
 				common.ServiceConfigBaseNameAnnotation: "demo-manager",
 			},
 		}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo-manager-storage-config-def456",
+			Namespace: "sandbox0-system",
+			Annotations: map[string]string{
+				common.ServiceConfigBaseNameAnnotation: "demo-manager-storage",
+			},
+		}},
 		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "demo-manager", Namespace: "sandbox0-system"}},
 		&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "demo-manager"}},
 		&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "demo-manager"}},
@@ -145,6 +153,7 @@ func TestCleanupDisabledServiceResourcesCleansBuiltinDependencies(t *testing.T) 
 	assertClientObjectMissing(t, client, types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-manager"}, &corev1.Service{})
 	assertClientObjectMissing(t, client, types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-manager"}, &corev1.ConfigMap{})
 	assertClientObjectMissing(t, client, types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-manager-config-abc123"}, &corev1.ConfigMap{})
+	assertClientObjectMissing(t, client, types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-manager-storage-config-def456"}, &corev1.ConfigMap{})
 	assertClientObjectMissing(t, client, types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-manager"}, &corev1.ServiceAccount{})
 	assertClientObjectMissing(t, client, types.NamespacedName{Name: "demo-manager"}, &rbacv1.ClusterRole{})
 	assertClientObjectMissing(t, client, types.NamespacedName{Name: "demo-manager"}, &rbacv1.ClusterRoleBinding{})
@@ -201,6 +210,9 @@ func newCleanupTestReconciler(t *testing.T, objects ...ctrlclient.Object) (*Sand
 	}
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := discoveryv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add discovery scheme: %v", err)
 	}
 	if err := networkingv1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add networking scheme: %v", err)

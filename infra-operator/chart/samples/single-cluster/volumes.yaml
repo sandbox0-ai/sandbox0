@@ -1,4 +1,4 @@
-# Example: Single-cluster volumes mode (minimal + storage-proxy)
+# Example: Single-cluster volumes mode (manager-hosted storage API)
 apiVersion: v1
 kind: Namespace
 metadata:

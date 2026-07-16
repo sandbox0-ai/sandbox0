@@ -2,6 +2,7 @@ package ctld
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,8 @@ import (
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	netdsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/netd"
+	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 )
@@ -78,6 +81,54 @@ func TestReconcileFallsBackToLegacyNetdPlacement(t *testing.T) {
 	}
 }
 
+func TestReconcileEmbedsNetdRuntimeAssetsInBothHASlots(t *testing.T) {
+	infra := newCtldTestInfra()
+	runtimeClass := "runc"
+	infra.Spec.Services.Netd.Enabled = true
+	infra.Spec.Services.Netd.RuntimeClassName = &runtimeClass
+
+	primary, client := reconcileCtldResources(t, infra, &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "kube-dns", Namespace: "kube-system"},
+		Spec:       corev1.ServiceSpec{ClusterIP: "10.96.0.10"},
+	})
+	standby := &appsv1.DaemonSet{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: infra.Name + "-ctld-b", Namespace: infra.Namespace}, standby); err != nil {
+		t.Fatalf("get standby ctld: %v", err)
+	}
+	wantLockPath := filepath.Join(netdsvc.ActiveLockMountDirectory, infra.Namespace, infra.Name, "netd.lock")
+	for _, ds := range []*appsv1.DaemonSet{primary, standby} {
+		container := ds.Spec.Template.Spec.Containers[0]
+		assertContainerEnv(t, container.Env, "NETD_CONFIG_PATH", netdsvc.ConfigPath)
+		assertContainerEnv(t, container.Env, netdsvc.ActiveLockEnv, wantLockPath)
+		if ds.Spec.Template.Spec.RuntimeClassName == nil || *ds.Spec.Template.Spec.RuntimeClassName != runtimeClass {
+			t.Fatalf("%s runtimeClassName = %#v, want %q", ds.Name, ds.Spec.Template.Spec.RuntimeClassName, runtimeClass)
+		}
+		assertContainerVolumeMount(t, container.VolumeMounts, netdsvc.ConfigVolumeName, netdsvc.ConfigPath)
+		assertContainerVolumeMount(t, container.VolumeMounts, "bpf-fs", "/sys/fs/bpf")
+		assertContainerVolumeMount(t, container.VolumeMounts, "modules", "/lib/modules")
+		assertContainerVolumeMount(t, container.VolumeMounts, "internal-jwt-private-key", "/secrets/internal_jwt_private.key")
+		assertContainerVolumeMount(t, container.VolumeMounts, "mitm-ca", "/tls")
+		assertContainerVolumeMount(t, container.VolumeMounts, netdsvc.ActiveLockVolumeName, netdsvc.ActiveLockMountDirectory)
+		if got := container.Resources.Requests[corev1.ResourceCPU]; got.Cmp(resource.MustParse("350m")) != 0 {
+			t.Fatalf("%s embedded cpu request = %s, want 350m", ds.Name, got.String())
+		}
+		if got := container.Resources.Requests[corev1.ResourceMemory]; got.Cmp(resource.MustParse("384Mi")) != 0 {
+			t.Fatalf("%s embedded memory request = %s, want 384Mi", ds.Name, got.String())
+		}
+	}
+	if !hasContainerPort(primary.Spec.Template.Spec.Containers[0].Ports, "metrics", 9091) {
+		t.Fatalf("slot A netd metrics discovery port = %#v", primary.Spec.Template.Spec.Containers[0].Ports)
+	}
+	if len(standby.Spec.Template.Spec.Containers[0].Ports) != 0 {
+		t.Fatalf("slot B duplicates the node-local metrics target: %#v", standby.Spec.Template.Spec.Containers[0].Ports)
+	}
+	legacy := &appsv1.DaemonSet{}
+	err := client.Get(context.Background(), types.NamespacedName{Name: infra.Name + "-netd", Namespace: infra.Namespace}, legacy)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("ctld reconcile created a standalone netd daemonset: %v", err)
+	}
+}
+
 func TestCtldTerminationGraceCoversStaticShutdownBudget(t *testing.T) {
 	const (
 		shutdownBudgetSeconds = int64(5 + 7 + 25)
@@ -85,6 +136,93 @@ func TestCtldTerminationGraceCoversStaticShutdownBudget(t *testing.T) {
 	)
 
 	assert.LessOrEqual(t, shutdownBudgetSeconds+shutdownMarginSeconds, ctldTerminationGraceSeconds)
+}
+
+func TestDaemonSetReadyRequiresObservedFullyReadyRollout(t *testing.T) {
+	ds := &appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{Generation: 2},
+		Status: appsv1.DaemonSetStatus{
+			ObservedGeneration:     2,
+			DesiredNumberScheduled: 3,
+			UpdatedNumberScheduled: 3,
+			NumberReady:            3,
+		},
+	}
+	if !daemonSetReady(ds) {
+		t.Fatal("fully rolled daemonset is not ready")
+	}
+	ds.Status.NumberReady = 2
+	ds.Status.NumberUnavailable = 1
+	if daemonSetReady(ds) {
+		t.Fatal("partially ready daemonset is ready")
+	}
+}
+
+func TestReadyRejectsLiveSurgePredecessor(t *testing.T) {
+	ctx := context.Background()
+	infra := newCtldTestInfra()
+	primary, client := reconcileCtldResources(t, infra, &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "kube-dns", Namespace: "kube-system"},
+		Spec:       corev1.ServiceSpec{ClusterIP: "10.96.0.10"},
+	})
+	sets := []*appsv1.DaemonSet{primary, &appsv1.DaemonSet{}}
+	if err := client.Get(ctx, types.NamespacedName{Name: infra.Name + "-ctld-b", Namespace: infra.Namespace}, sets[1]); err != nil {
+		t.Fatalf("get slot B daemonset: %v", err)
+	}
+	for _, ds := range sets {
+		ds.Status.ObservedGeneration = ds.Generation
+		ds.Status.DesiredNumberScheduled = 1
+		ds.Status.CurrentNumberScheduled = 1
+		ds.Status.UpdatedNumberScheduled = 1
+		ds.Status.NumberReady = 1
+		ds.Status.NumberAvailable = 1
+		if err := client.Status().Update(ctx, ds); err != nil {
+			t.Fatalf("update %s status: %v", ds.Name, err)
+		}
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        ds.Name + "-current",
+				Namespace:   ds.Namespace,
+				Labels:      common.CloneStringMap(ds.Spec.Template.Labels),
+				Annotations: common.CloneStringMap(ds.Spec.Template.Annotations),
+			},
+			Spec: *ds.Spec.Template.Spec.DeepCopy(),
+			Status: corev1.PodStatus{
+				Phase:             corev1.PodRunning,
+				Conditions:        []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+				ContainerStatuses: []corev1.ContainerStatus{{Name: "ctld", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}},
+			},
+		}
+		pod.Spec.NodeName = "node-a"
+		if err := client.Create(ctx, pod); err != nil {
+			t.Fatalf("create current %s pod: %v", ds.Name, err)
+		}
+	}
+	reconciler := NewReconciler(common.NewResourceManager(client, nil, nil, common.LocalDevConfig{}))
+	if ready, err := reconciler.Ready(ctx, infra); err != nil || !ready {
+		t.Fatalf("Ready() before predecessor = %v, %v; want true, nil", ready, err)
+	}
+	predecessor := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      primary.Name + "-previous",
+			Namespace: primary.Namespace,
+			Labels:    common.CloneStringMap(primary.Spec.Template.Labels),
+		},
+		Spec: corev1.PodSpec{
+			NodeName:   "node-a",
+			Containers: []corev1.Container{{Name: "ctld", Image: "sandbox0ai/infra:previous"}},
+		},
+		Status: corev1.PodStatus{
+			Phase:             corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{Name: "ctld", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}},
+		},
+	}
+	if err := client.Create(ctx, predecessor); err != nil {
+		t.Fatalf("create live predecessor: %v", err)
+	}
+	if ready, err := reconciler.Ready(ctx, infra); err != nil || ready {
+		t.Fatalf("Ready() with live predecessor = %v, %v; want false, nil", ready, err)
+	}
 }
 
 func TestReconcileRemovesLegacySingleDaemonSet(t *testing.T) {
@@ -170,11 +308,17 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 	if ds.Spec.Template.Spec.Containers[0].SecurityContext == nil || ds.Spec.Template.Spec.Containers[0].SecurityContext.Privileged == nil || !*ds.Spec.Template.Spec.Containers[0].SecurityContext.Privileged {
 		t.Fatal("expected ctld container to run privileged")
 	}
-	if got := ds.Spec.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]; got.Cmp(resource.MustParse(ctldCPURequest)) != 0 {
-		t.Fatalf("expected ctld cpu request %s, got %s", ctldCPURequest, got.String())
+	wantCPU := resource.MustParse(ctldCPURequest)
+	wantMemory := resource.MustParse(ctldMemoryRequest)
+	if infraplan.Compile(infra).Netd.Enabled {
+		wantCPU.Add(resource.MustParse(embeddedNetdCPURequest))
+		wantMemory.Add(resource.MustParse(embeddedNetdMemoryRequest))
 	}
-	if got := ds.Spec.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceMemory]; got.Cmp(resource.MustParse(ctldMemoryRequest)) != 0 {
-		t.Fatalf("expected ctld memory request %s, got %s", ctldMemoryRequest, got.String())
+	if got := ds.Spec.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]; got.Cmp(wantCPU) != 0 {
+		t.Fatalf("expected ctld cpu request %s, got %s", wantCPU.String(), got.String())
+	}
+	if got := ds.Spec.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceMemory]; got.Cmp(wantMemory) != 0 {
+		t.Fatalf("expected ctld memory request %s, got %s", wantMemory.String(), got.String())
 	}
 	if len(ds.Spec.Template.Spec.Containers) != 1 {
 		t.Fatalf("expected slot A to run only ctld, got %#v", ds.Spec.Template.Spec.Containers)
@@ -186,7 +330,7 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 		t.Fatalf("unexpected ctld HA slot labels: slot A=%q slot B=%q", ds.Spec.Template.Labels[dataplane.CtldHASlotLabel], standby.Spec.Template.Labels[dataplane.CtldHASlotLabel])
 	}
 	for _, workload := range []*appsv1.DaemonSet{ds, standby} {
-		if len(workload.Spec.Template.Spec.Containers[0].Ports) != 0 {
+		if !infrav1alpha1.IsNetdEnabled(infra) && len(workload.Spec.Template.Spec.Containers[0].Ports) != 0 {
 			t.Fatalf("ctld hostNetwork pod %s reserves node ports: %#v", workload.Name, workload.Spec.Template.Spec.Containers[0].Ports)
 		}
 	}
@@ -423,6 +567,29 @@ func assertContainerVolumeMount(t *testing.T, mounts []corev1.VolumeMount, name,
 		}
 	}
 	t.Fatalf("expected volume mount %q, got %#v", name, mounts)
+}
+
+func assertContainerEnv(t *testing.T, env []corev1.EnvVar, name, value string) {
+	t.Helper()
+	for i := range env {
+		if env[i].Name != name {
+			continue
+		}
+		if env[i].Value != value {
+			t.Fatalf("environment %q = %q, want %q", name, env[i].Value, value)
+		}
+		return
+	}
+	t.Fatalf("expected environment %q, got %#v", name, env)
+}
+
+func hasContainerPort(ports []corev1.ContainerPort, name string, port int32) bool {
+	for i := range ports {
+		if ports[i].Name == name && ports[i].ContainerPort == port {
+			return true
+		}
+	}
+	return false
 }
 
 func assertNoContainerVolumeMount(t *testing.T, mounts []corev1.VolumeMount, name string) {

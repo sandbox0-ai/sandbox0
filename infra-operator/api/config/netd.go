@@ -219,14 +219,26 @@ func LoadNetdConfig() *NetdConfig {
 		path = "/config/config.yaml"
 	}
 
-	cfg, err := loadNetdConfig(path)
+	cfg, err := LoadNetdConfigFromPath(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config from %s: %v, using defaults\n", path, err)
 		cfg = &NetdConfig{}
+		applyNetdDefaults(cfg)
 	}
-
-	applyNetdDefaults(cfg)
 	return cfg
+}
+
+// LoadNetdConfigFromPath loads netd configuration from an explicit path. It
+// allows another binary, such as ctld, to embed netd without sharing its own
+// CONFIG_PATH or silently falling back to defaults when the netd config is
+// invalid.
+func LoadNetdConfigFromPath(path string) (*NetdConfig, error) {
+	cfg, err := loadNetdConfig(path)
+	if err != nil {
+		return nil, err
+	}
+	applyNetdDefaults(cfg)
+	return cfg, nil
 }
 
 func loadNetdConfig(path string) (*NetdConfig, error) {
@@ -248,6 +260,37 @@ func loadNetdConfig(path string) (*NetdConfig, error) {
 	}
 
 	return cfg, nil
+}
+
+// ValidateListenerPorts rejects listener collisions inside netd and with
+// ports reserved by an embedding process such as ctld.
+func (c *NetdConfig) ValidateListenerPorts(reserved map[int]string) error {
+	if c == nil {
+		return fmt.Errorf("netd config is required")
+	}
+	listeners := []struct {
+		name string
+		port int
+	}{
+		{name: "health", port: c.HealthPort},
+		{name: "metrics", port: c.MetricsPort},
+		{name: "HTTP proxy", port: c.ProxyHTTPPort},
+		{name: "HTTPS proxy", port: c.ProxyHTTPSPort},
+	}
+	seen := make(map[int]string, len(listeners))
+	for _, listener := range listeners {
+		if listener.port <= 0 || listener.port > 65535 {
+			return fmt.Errorf("netd %s port %d is outside 1-65535", listener.name, listener.port)
+		}
+		if previous := seen[listener.port]; previous != "" {
+			return fmt.Errorf("netd %s port %d conflicts with netd %s port", listener.name, listener.port, previous)
+		}
+		if owner := reserved[listener.port]; owner != "" {
+			return fmt.Errorf("netd %s port %d conflicts with %s", listener.name, listener.port, owner)
+		}
+		seen[listener.port] = listener.name
+	}
+	return nil
 }
 
 func applyNetdDefaults(cfg *NetdConfig) {

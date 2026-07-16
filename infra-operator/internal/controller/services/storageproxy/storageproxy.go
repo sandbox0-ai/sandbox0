@@ -22,19 +22,15 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/util/intstr"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	credentialstoresvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/credentialstore"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	meteringsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/metering"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storage"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
-	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
 const (
@@ -43,254 +39,47 @@ const (
 	defaultLogSizeLimit           = "1Gi"
 )
 
-type Reconciler struct {
-	Resources *common.ResourceManager
+// RuntimeVolumeOptions customizes storage runtime volume names when the
+// runtime is embedded in another workload.
+type RuntimeVolumeOptions struct {
+	ConfigMapName          string
+	ConfigVolumeName       string
+	ConfigMountPath        string
+	CacheVolumeName        string
+	LogVolumeName          string
+	IncludeCredentialStore bool
 }
 
-func NewReconciler(resources *common.ResourceManager) *Reconciler {
-	return &Reconciler{Resources: resources}
-}
-
-// Reconcile reconciles the storage-proxy deployment.
-func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, imageRepo, imageTag string) error {
-	logger := log.FromContext(ctx)
-
-	// Skip if not enabled
-	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil && !infra.Spec.Services.StorageProxy.Enabled {
-		logger.Info("Storage proxy is disabled, skipping")
-		return nil
+// BuildRuntimeConfig resolves the storage-proxy config without creating a
+// workload. Manager embedding uses it while preserving the logical
+// storage-proxy configuration contract.
+func BuildRuntimeConfig(ctx context.Context, resources *common.ResourceManager, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.StorageProxyConfig, error) {
+	if resources == nil {
+		return nil, fmt.Errorf("resource manager is required")
 	}
-
-	deploymentName := fmt.Sprintf("%s-storage-proxy", infra.Name)
-	serviceName := deploymentName
-
-	replicas := int32(1)
-	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
-		replicas = infra.Spec.Services.StorageProxy.Replicas
+	if infra == nil {
+		return nil, fmt.Errorf("infra is required")
 	}
-
-	labels := common.GetServiceLabels(infra.Name, "storage-proxy")
-	keySecretName, _, publicKeyKey := internalauth.GetDataPlaneKeyRefs(infra)
-
-	config, err := r.buildConfig(ctx, infra)
-	if err != nil {
-		return err
-	}
-	if config.ObjectEncryptionEnabled {
-		if err := common.EnsureObjectEncryptionKeySecret(ctx, r.Resources, infra); err != nil {
-			return err
-		}
-		config.ObjectEncryptionKeyPath = common.ObjectEncryptionKeyPath
-	}
-	if err := credentialstoresvc.ApplyEncryptedPGCredentialStoreConfig(ctx, r.Resources, common.NewObjectScope(infra), &config.CredentialStore); err != nil {
-		return err
-	}
-	cacheSizeLimit, err := parseSizeLimit(config.CacheSizeLimit, defaultCacheSizeLimit, "storage-proxy cache size limit")
-	if err != nil {
-		return err
-	}
-	logSizeLimit, err := parseSizeLimit(config.LogSizeLimit, defaultLogSizeLimit, "storage-proxy log size limit")
-	if err != nil {
-		return err
-	}
-	configRef, err := r.Resources.ReconcileHashedServiceConfigMap(ctx, infra, deploymentName, labels, config)
-	if err != nil {
-		return err
-	}
-	podAnnotations := configRef.PodAnnotations()
-
-	httpPort := int32(config.HTTPPort)
-	metricsPort := int32(config.MetricsPort)
-
-	var resources *corev1.ResourceRequirements
-	serviceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
-	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
-		resources = infra.Spec.Services.StorageProxy.Resources
-		serviceConfig = infra.Spec.Services.StorageProxy.Service
-	}
-
-	volumeMounts := []corev1.VolumeMount{
-		{
-			Name:      "config",
-			MountPath: "/config/config.yaml",
-			SubPath:   "config.yaml",
-			ReadOnly:  true,
-		},
-		{
-			Name:      "internal-jwt-public-key",
-			MountPath: pkginternalauth.DefaultInternalJWTPublicKeyPath,
-			SubPath:   "internal_jwt_public.key",
-			ReadOnly:  true,
-		},
-		{
-			Name:      "cache",
-			MountPath: "/var/lib/storage-proxy/cache",
-		},
-		{
-			Name:      "logs",
-			MountPath: "/var/log/storage-proxy",
-		},
-	}
-	volumes := []corev1.Volume{
-		{
-			Name: "config",
-			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: configRef.ConfigMapName},
-				},
-			},
-		},
-		{
-			Name: "internal-jwt-public-key",
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: keySecretName,
-					Items: []corev1.KeyToPath{
-						{
-							Key:  publicKeyKey,
-							Path: "internal_jwt_public.key",
-						},
-					},
-				},
-			},
-		},
-		{
-			Name: "cache",
-			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: cacheSizeLimit},
-			},
-		},
-		{
-			Name: "logs",
-			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: logSizeLimit},
-			},
-		},
-	}
-	credentialStoreMounts, credentialStoreVolumes := credentialstoresvc.CredentialStoreVolumes(common.NewObjectScope(infra), &config.CredentialStore)
-	volumeMounts = append(volumeMounts, credentialStoreMounts...)
-	volumes = append(volumes, credentialStoreVolumes...)
-	if config.ObjectEncryptionEnabled {
-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      "object-encryption-key",
-			MountPath: common.ObjectEncryptionMountDir,
-			ReadOnly:  true,
-		})
-		volumes = append(volumes, corev1.Volume{
-			Name: "object-encryption-key",
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: common.ObjectEncryptionSecretName(infra.Name),
-					Items: []corev1.KeyToPath{
-						{
-							Key:  common.ObjectEncryptionSecretKey,
-							Path: common.ObjectEncryptionKeyFilename,
-						},
-					},
-				},
-			},
-		})
-	}
-
-	// Create deployment
-	if err := r.Resources.ReconcileDeployment(ctx, infra, deploymentName, labels, replicas, common.ServiceDefinition{
-		Name:               "storage-proxy",
-		Port:               httpPort,
-		TargetPort:         httpPort,
-		ServiceAccountName: fmt.Sprintf("%s-storage-proxy", infra.Name),
-		Ports: []corev1.ContainerPort{
-			{
-				Name:          "http",
-				ContainerPort: httpPort,
-			},
-			{
-				Name:          "metrics",
-				ContainerPort: metricsPort,
-			},
-		},
-		Image: fmt.Sprintf("%s:%s", imageRepo, imageTag),
-		EnvVars: common.AppendObservabilityEnvVars([]corev1.EnvVar{
-			{
-				Name:  "SERVICE",
-				Value: "storage-proxy",
-			},
-			{
-				Name:  "CONFIG_PATH",
-				Value: "/config/config.yaml",
-			},
-		}, infra, common.ObservabilityEnvConfig{
-			ServiceName: "storage-proxy",
-			RegionID:    common.ResolveRegionID(infra),
-			ClusterID:   common.ResolveClusterID(infra),
-		}),
-		VolumeMounts:   volumeMounts,
-		Volumes:        volumes,
-		PodAnnotations: podAnnotations,
-		LivenessProbe: &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				HTTPGet: &corev1.HTTPGetAction{
-					Path: "/healthz",
-					Port: intstr.FromString("http"),
-				},
-			},
-			InitialDelaySeconds: 10,
-			PeriodSeconds:       10,
-		},
-		ReadinessProbe: &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				HTTPGet: &corev1.HTTPGetAction{
-					Path: "/readyz",
-					Port: intstr.FromString("http"),
-				},
-			},
-			InitialDelaySeconds: 5,
-			PeriodSeconds:       5,
-		},
-		Resources: resources,
-	}); err != nil {
-		return err
-	}
-
-	// Create service.
-	serviceType := common.ResolveServiceType(serviceConfig)
-	httpServicePort := common.ResolveServicePort(serviceConfig, httpPort)
-	serviceAnnotations := common.ResolveServiceAnnotations(serviceConfig)
-	if err := r.Resources.ReconcileServicePorts(ctx, infra, serviceName, labels, serviceType, serviceAnnotations, []corev1.ServicePort{
-		common.BuildServicePort("http", httpServicePort, httpPort, serviceType),
-		common.BuildServicePort("metrics", metricsPort, metricsPort, serviceType),
-	}); err != nil {
-		return err
-	}
-
-	if err := r.Resources.EnsureDeploymentReady(ctx, infra, deploymentName, replicas); err != nil {
-		return err
-	}
-
-	logger.Info("Storage proxy reconciled successfully")
-	return nil
-}
-
-func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.StorageProxyConfig, error) {
 	cfg := &apiconfig.StorageProxyConfig{}
 	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
 		cfg = runtimeconfig.ToStorageProxy(infra.Spec.Services.StorageProxy.Config)
 	}
 
-	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
+	if dsn, err := database.GetDatabaseDSN(ctx, resources.Client, infra); err == nil {
 		cfg.DatabaseURL = dsn
 	}
 
-	metaURL, err := database.GetStorageMetadataDSN(ctx, r.Resources.Client, infra)
+	metaURL, err := database.GetStorageMetadataDSN(ctx, resources.Client, infra)
 	if err != nil {
 		return nil, err
 	}
 	cfg.MetaURL = metaURL
 	cfg.RegionID = common.ResolveRegionID(infra)
-	if err := meteringsvc.ApplyStorageProxyConfig(ctx, r.Resources.Client, infra, cfg); err != nil {
+	if err := meteringsvc.ApplyStorageProxyConfig(ctx, resources.Client, infra, cfg); err != nil {
 		return nil, fmt.Errorf("apply metering config: %w", err)
 	}
 
-	storageConfig, err := storage.GetStorageConfig(ctx, r.Resources.Client, infra)
+	storageConfig, err := storage.GetStorageConfig(ctx, resources.Client, infra)
 	if err != nil {
 		return nil, err
 	}
@@ -304,8 +93,79 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	cfg.S3SessionToken = storageConfig.SessionToken
 
 	cfg.DefaultClusterId = common.ResolveClusterID(infra)
+	if cfg.ObjectEncryptionEnabled {
+		if err := common.EnsureObjectEncryptionKeySecret(ctx, resources, infra); err != nil {
+			return nil, err
+		}
+		cfg.ObjectEncryptionKeyPath = common.ObjectEncryptionKeyPath
+	}
+	if err := credentialstoresvc.ApplyEncryptedPGCredentialStoreConfig(ctx, resources, common.NewObjectScope(infra), &cfg.CredentialStore); err != nil {
+		return nil, err
+	}
 
 	return cfg, nil
+}
+
+// BuildRuntimeVolumes returns the storage runtime's config, cache, log,
+// credential, and encryption mounts without creating a workload.
+func BuildRuntimeVolumes(scope common.ObjectScope, cfg *apiconfig.StorageProxyConfig, opts RuntimeVolumeOptions) ([]corev1.VolumeMount, []corev1.Volume, error) {
+	if cfg == nil {
+		return nil, nil, fmt.Errorf("storage-proxy config is required")
+	}
+	if opts.ConfigMapName == "" {
+		return nil, nil, fmt.Errorf("storage-proxy config map name is required")
+	}
+	configVolumeName := valueOrDefault(opts.ConfigVolumeName, "config")
+	configMountPath := valueOrDefault(opts.ConfigMountPath, "/config/config.yaml")
+	cacheVolumeName := valueOrDefault(opts.CacheVolumeName, "cache")
+	logVolumeName := valueOrDefault(opts.LogVolumeName, "logs")
+	cacheSizeLimit, err := parseSizeLimit(cfg.CacheSizeLimit, defaultCacheSizeLimit, "storage-proxy cache size limit")
+	if err != nil {
+		return nil, nil, err
+	}
+	logSizeLimit, err := parseSizeLimit(cfg.LogSizeLimit, defaultLogSizeLimit, "storage-proxy log size limit")
+	if err != nil {
+		return nil, nil, err
+	}
+
+	mounts := []corev1.VolumeMount{
+		{Name: configVolumeName, MountPath: configMountPath, SubPath: "config.yaml", ReadOnly: true},
+		{Name: cacheVolumeName, MountPath: "/var/lib/storage-proxy/cache"},
+		{Name: logVolumeName, MountPath: "/var/log/storage-proxy"},
+	}
+	volumes := []corev1.Volume{
+		{
+			Name: configVolumeName,
+			VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: opts.ConfigMapName},
+			}},
+		},
+		{Name: cacheVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: cacheSizeLimit}}},
+		{Name: logVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: logSizeLimit}}},
+	}
+	if opts.IncludeCredentialStore {
+		credentialMounts, credentialVolumes := credentialstoresvc.CredentialStoreVolumes(scope, &cfg.CredentialStore)
+		mounts = append(mounts, credentialMounts...)
+		volumes = append(volumes, credentialVolumes...)
+	}
+	if cfg.ObjectEncryptionEnabled {
+		mounts = append(mounts, corev1.VolumeMount{Name: "object-encryption-key", MountPath: common.ObjectEncryptionMountDir, ReadOnly: true})
+		volumes = append(volumes, corev1.Volume{
+			Name: "object-encryption-key",
+			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName: common.ObjectEncryptionSecretName(scope.Name),
+				Items:      []corev1.KeyToPath{{Key: common.ObjectEncryptionSecretKey, Path: common.ObjectEncryptionKeyFilename}},
+			}},
+		})
+	}
+	return mounts, volumes, nil
+}
+
+func valueOrDefault(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 func normalizeObjectStorageType(storageType infrav1alpha1.StorageType) string {

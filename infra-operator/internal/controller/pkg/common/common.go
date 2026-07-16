@@ -130,19 +130,7 @@ func (r *ResourceManager) ReconcileDeploymentWithScope(ctx context.Context, scop
 		return err
 	}
 
-	defaultResources := corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("100m"),
-			corev1.ResourceMemory: resource.MustParse("256Mi"),
-		},
-		Limits: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("500m"),
-			corev1.ResourceMemory: resource.MustParse("512Mi"),
-		},
-	}
-	if def.Resources != nil {
-		defaultResources = *def.Resources
-	}
+	resolvedResources := ResolveDeploymentResources(def.Resources)
 
 	desiredLabels := EnsureManagedLabels(labels, name)
 	desiredDeploy := &appsv1.Deployment{
@@ -173,7 +161,7 @@ func (r *ResourceManager) ReconcileDeploymentWithScope(ctx context.Context, scop
 							Env:             def.EnvVars,
 							VolumeMounts:    def.VolumeMounts,
 							Ports:           ResolveContainerPorts(def),
-							Resources:       defaultResources,
+							Resources:       resolvedResources,
 							LivenessProbe:   def.LivenessProbe,
 							ReadinessProbe:  def.ReadinessProbe,
 						},
@@ -207,6 +195,26 @@ func (r *ResourceManager) ReconcileDeploymentWithScope(ctx context.Context, scop
 	})
 }
 
+// ResolveDeploymentResources returns the effective resources used by a
+// deployment container. Callers embedding a former standalone workload can
+// use it before summing both workloads' effective requests and limits.
+func ResolveDeploymentResources(explicit *corev1.ResourceRequirements) corev1.ResourceRequirements {
+	defaults := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("100m"),
+			corev1.ResourceMemory: resource.MustParse("256Mi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("500m"),
+			corev1.ResourceMemory: resource.MustParse("512Mi"),
+		},
+	}
+	if explicit == nil {
+		return defaults
+	}
+	return *explicit.DeepCopy()
+}
+
 // EnsureDeploymentReady validates deployment readiness before reporting success.
 func (r *ResourceManager) EnsureDeploymentReady(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, replicas int32) error {
 	return r.EnsureDeploymentReadyWithScope(ctx, NewObjectScope(infra), name, replicas)
@@ -231,6 +239,45 @@ func (r *ResourceManager) EnsureDeploymentReadyWithScope(ctx context.Context, sc
 	}
 	if deploy.Status.ReadyReplicas < desired {
 		return fmt.Errorf("deployment %q not ready: %d/%d ready", name, deploy.Status.ReadyReplicas, desired)
+	}
+	return nil
+}
+
+// EnsureDeploymentRolloutComplete validates that every desired replica is from
+// the current Deployment generation and is both ready and available. This is
+// stronger than EnsureDeploymentReady and is required before switching a
+// compatibility Service to a newly added listener in an existing process.
+func (r *ResourceManager) EnsureDeploymentRolloutComplete(ctx context.Context, scope ObjectScope, name string, replicas int32) error {
+	if replicas == 0 {
+		return nil
+	}
+
+	deploy := &appsv1.Deployment{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: scope.Namespace}, deploy); err != nil {
+		return err
+	}
+
+	desired := replicas
+	if deploy.Spec.Replicas != nil {
+		desired = *deploy.Spec.Replicas
+	}
+	if desired == 0 {
+		return nil
+	}
+	if deploy.Status.ObservedGeneration < deploy.Generation {
+		return fmt.Errorf("deployment %q rollout pending: observed generation %d, desired generation %d", name, deploy.Status.ObservedGeneration, deploy.Generation)
+	}
+	if deploy.Status.Replicas != desired || deploy.Status.UpdatedReplicas != desired || deploy.Status.ReadyReplicas != desired || deploy.Status.AvailableReplicas != desired || deploy.Status.UnavailableReplicas != 0 {
+		return fmt.Errorf(
+			"deployment %q rollout pending: replicas=%d updated=%d ready=%d available=%d unavailable=%d desired=%d",
+			name,
+			deploy.Status.Replicas,
+			deploy.Status.UpdatedReplicas,
+			deploy.Status.ReadyReplicas,
+			deploy.Status.AvailableReplicas,
+			deploy.Status.UnavailableReplicas,
+			desired,
+		)
 	}
 	return nil
 }

@@ -4,35 +4,46 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"path/filepath"
 
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
-	meteringsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/metering"
-	redissvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/redis"
-	sandboxobssvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sandboxobservability"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
-	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/netd/pkg/activeguard"
 )
 
 type Reconciler struct {
 	Resources *common.ResourceManager
 }
 
+const (
+	LegacyHandoffStateAnnotation = "infra.sandbox0.ai/netd-handoff-state"
+	LegacyHandoffStateActive     = "active"
+	LegacyHandoffStateStandby    = "standby"
+	LegacyStandbyInitialDelay    = "30s"
+	LegacyStandbyMaxHold         = "2m"
+)
+
 func NewReconciler(resources *common.ResourceManager) *Reconciler {
 	return &Reconciler{Resources: resources}
 }
 
 func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) error {
+	return r.PrepareLegacyHandoff(ctx, imageRepo, imageTag, compiledPlan)
+}
+
+// PrepareLegacyHandoff upgrades an existing standalone netd DaemonSet to use
+// the shared active lock. It intentionally does not create a DaemonSet on new
+// installations, where ctld is the only netd workload.
+func (r *Reconciler) PrepareLegacyHandoff(ctx context.Context, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) error {
 	logger := log.FromContext(ctx)
 	if compiledPlan == nil {
 		return fmt.Errorf("compiled plan is required")
@@ -48,6 +59,69 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 
 	scope := compiledPlan.Scope
 	name := fmt.Sprintf("%s-netd", scope.Name)
+	existing := &appsv1.DaemonSet{}
+	if err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: scope.Namespace}, existing); err != nil {
+		if apierrors.IsNotFound(err) {
+			logger.Info("legacy netd daemonset is absent; embedded ctld owns netd")
+			return nil
+		}
+		return err
+	}
+	// Once the legacy workload has entered standby, subsequent reconciles must
+	// not turn it active again while ctld is still proving embedded netd ready.
+	if legacyHandoffState(existing) == LegacyHandoffStateStandby {
+		return nil
+	}
+	return r.applyLegacyDaemonSet(ctx, imageRepo, imageTag, compiledPlan, false)
+}
+
+// PrepareLegacyStandby keeps the guarded legacy DaemonSet as a delayed lock
+// contender while embedded netd starts. If embedded initialization fails, the
+// standby acquires the lock and restores the previous node-local runtime.
+func (r *Reconciler) PrepareLegacyStandby(ctx context.Context, compiledPlan *infraplan.InfraPlan) error {
+	if compiledPlan == nil {
+		return fmt.Errorf("compiled plan is required")
+	}
+	scope := compiledPlan.Scope
+	name := fmt.Sprintf("%s-netd", scope.Name)
+	existing := &appsv1.DaemonSet{}
+	if err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: scope.Namespace}, existing); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	// Preserve the exact image, config, mounts, and security context that passed
+	// the active handoff probes. Only lock acquisition and probes differ in the
+	// standby template, so the fallback runtime was already exercised end to end.
+	desired := existing.DeepCopy()
+	desired.Annotations = common.CloneStringMap(desired.Annotations)
+	desired.Annotations[LegacyHandoffStateAnnotation] = LegacyHandoffStateStandby
+	desired.Spec.Template.Annotations = common.CloneStringMap(desired.Spec.Template.Annotations)
+	desired.Spec.Template.Annotations[LegacyHandoffStateAnnotation] = LegacyHandoffStateStandby
+	if len(desired.Spec.Template.Spec.Containers) == 0 {
+		return fmt.Errorf("legacy netd daemonset has no container")
+	}
+	container := &desired.Spec.Template.Spec.Containers[0]
+	container.LivenessProbe = nil
+	container.ReadinessProbe = nil
+	container.Env = setContainerEnv(container.Env, activeguard.EnvInitialDelay, LegacyStandbyInitialDelay)
+	container.Env = setContainerEnv(container.Env, activeguard.EnvMaxHold, LegacyStandbyMaxHold)
+	maxSurge := intstr.FromInt(1)
+	maxUnavailable := intstr.FromInt(0)
+	desired.Spec.UpdateStrategy = appsv1.DaemonSetUpdateStrategy{
+		Type: appsv1.RollingUpdateDaemonSetStrategyType,
+		RollingUpdate: &appsv1.RollingUpdateDaemonSet{
+			MaxSurge:       &maxSurge,
+			MaxUnavailable: &maxUnavailable,
+		},
+	}
+	return r.Resources.ApplyDaemonSetWithScope(ctx, scope, desired)
+}
+
+func (r *Reconciler) applyLegacyDaemonSet(ctx context.Context, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan, standby bool) error {
+	scope := compiledPlan.Scope
+	name := fmt.Sprintf("%s-netd", scope.Name)
 	labels := common.GetServiceLabels(scope.Name, "netd")
 	image := fmt.Sprintf("%s:%s", imageRepo, imageTag)
 	pullPolicy := corev1.PullIfNotPresent
@@ -55,279 +129,267 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		pullPolicy = *r.Resources.ImagePullPolicy
 	}
 
-	config := &apiconfig.NetdConfig{}
-	if compiledPlan.Netd.Config != nil {
-		config = compiledPlan.Netd.Config.DeepCopy()
-	}
-	runtimeClassName := compiledPlan.Netd.RuntimeClassName
-	nodeSelector := compiledPlan.Netd.NodeSelector
-	tolerations := compiledPlan.Netd.Tolerations
-	if config.NodeName == "" {
-		config.NodeName = "${NODE_NAME}"
-	}
-	if config.MetricsPort == 0 {
-		config.MetricsPort = 9091
-	}
-	if config.HealthPort == 0 {
-		config.HealthPort = 8081
-	}
-	if config.ClusterDNSCIDR == "" {
-		cidr, err := resolveClusterDNSCIDR(ctx, r.Resources.Client, logger)
-		if err != nil {
-			return err
-		}
-		config.ClusterDNSCIDR = cidr
-	}
-	if err := redissvc.ApplyNetdRedisConfig(ctx, r.Resources.Client, compiledPlan.Scope.Owner(), config); err != nil {
-		return err
-	}
-	if dsn, err := compiledPlan.DatabaseDSN(ctx, r.Resources.Client); err == nil {
-		config.DatabaseURL = dsn
-	}
-	config.RegionID = compiledPlan.Netd.RegionID
-	config.ClusterID = compiledPlan.Netd.ClusterID
-	if err := meteringsvc.ApplyNetdConfig(ctx, r.Resources.Client, compiledPlan.Scope.Owner(), config); err != nil {
-		return err
-	}
-	if config.EgressAuthResolverURL == "" {
-		config.EgressAuthResolverURL = compiledPlan.Netd.EgressAuthResolverURL
-	}
-	if err := sandboxobssvc.ApplyNetdConfig(ctx, r.Resources.Client, compiledPlan.Scope.Owner(), compiledPlan.Services.ClusterGateway.URL, config); err != nil {
-		return err
-	}
-	mitmCASecretName, err := r.resolveMITMCASecretName(ctx, compiledPlan, labels)
+	assets, err := r.BuildRuntimeAssets(ctx, compiledPlan)
 	if err != nil {
 		return err
 	}
-	keySecretName, privateKeyKey, _ := compiledPlan.DataPlaneKeyRefs()
-	auditKeySecretName, auditPrivateKeyKey, _ := compiledPlan.AuditNetdKeyRefs()
-	if mitmCASecretName != "" {
-		if config.MITMCACertPath == "" {
-			config.MITMCACertPath = "/tls/ca.crt"
-		}
-		if config.MITMCAKeyPath == "" {
-			config.MITMCAKeyPath = "/tls/ca.key"
-		}
-	}
-	configRef, err := r.Resources.ReconcileHashedServiceConfigMapWithScope(ctx, scope, name, labels, config)
-	if err != nil {
-		return err
-	}
-	podAnnotations := configRef.PodAnnotations()
 
-	volumes := []corev1.Volume{
+	desired := buildLegacyDaemonSet(legacyDaemonSetConfig{
+		Name:       name,
+		Namespace:  scope.Namespace,
+		Labels:     labels,
+		Image:      image,
+		PullPolicy: pullPolicy,
+		Assets:     assets,
+		Plan:       compiledPlan,
+		Standby:    standby,
+	})
+	return r.Resources.ApplyDaemonSetWithScope(ctx, scope, desired)
+}
+
+type legacyDaemonSetConfig struct {
+	Name       string
+	Namespace  string
+	Labels     map[string]string
+	Image      string
+	PullPolicy corev1.PullPolicy
+	Assets     *RuntimeAssets
+	Plan       *infraplan.InfraPlan
+	Standby    bool
+}
+
+func buildLegacyDaemonSet(cfg legacyDaemonSetConfig) *appsv1.DaemonSet {
+	assets := cfg.Assets
+	state := LegacyHandoffStateActive
+	if cfg.Standby {
+		state = LegacyHandoffStateStandby
+	}
+	podAnnotations := common.EnsurePodTemplateAnnotations(assets.PodAnnotations)
+	podAnnotations[LegacyHandoffStateAnnotation] = state
+	env := []corev1.EnvVar{
+		{Name: "SERVICE", Value: "netd"},
+		{Name: "CONFIG_PATH", Value: ConfigPath},
+		{Name: activeguard.EnvPath, Value: assets.ActiveLockPath},
 		{
-			Name: "config",
-			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: configRef.ConfigMapName},
-				},
-			},
-		},
-		{
-			Name: "bpf-fs",
-			VolumeSource: corev1.VolumeSource{
-				HostPath: &corev1.HostPathVolumeSource{
-					Path: "/sys/fs/bpf",
-					Type: func() *corev1.HostPathType { t := corev1.HostPathDirectoryOrCreate; return &t }(),
-				},
-			},
-		},
-		{
-			Name: "modules",
-			VolumeSource: corev1.VolumeSource{
-				HostPath: &corev1.HostPathVolumeSource{
-					Path: "/lib/modules",
-					Type: func() *corev1.HostPathType { t := corev1.HostPathDirectoryOrCreate; return &t }(),
-				},
-			},
-		},
-		{
-			Name: "run",
-			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
-			},
-		},
-		{
-			Name: "internal-jwt-private-key",
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: keySecretName,
-					Items: []corev1.KeyToPath{{
-						Key:  privateKeyKey,
-						Path: "internal_jwt_private.key",
-					}},
-				},
+			Name: "NODE_NAME",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"},
 			},
 		},
 	}
-	if config.SandboxObservabilityIngestURL != "" {
-		volumes = append(volumes,
-			corev1.Volume{
-				Name: "audit-spool",
-				VolumeSource: corev1.VolumeSource{
-					HostPath: &corev1.HostPathVolumeSource{
-						Path: filepath.Join("/var/lib/sandbox0/netd", scope.Namespace, scope.Name),
-						Type: func() *corev1.HostPathType { t := corev1.HostPathDirectoryOrCreate; return &t }(),
-					},
-				},
-			},
-			corev1.Volume{
-				Name: "audit-jwt-private-key",
-				VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-					SecretName: auditKeySecretName,
-					Items:      []corev1.KeyToPath{{Key: auditPrivateKeyKey, Path: "audit_jwt_private.key"}},
-				}},
-			},
+	if cfg.Standby {
+		env = append(env,
+			corev1.EnvVar{Name: activeguard.EnvInitialDelay, Value: LegacyStandbyInitialDelay},
+			corev1.EnvVar{Name: activeguard.EnvMaxHold, Value: LegacyStandbyMaxHold},
 		)
 	}
-	if mitmCASecretName != "" {
-		volumes = append(volumes, corev1.Volume{
-			Name: "mitm-ca",
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: mitmCASecretName,
-				},
+	container := corev1.Container{
+		Name:            "netd",
+		Image:           cfg.Image,
+		ImagePullPolicy: cfg.PullPolicy,
+		Env: common.AppendObservabilityEnvVars(env, cfg.Plan.Scope.Owner(), common.ObservabilityEnvConfig{
+			ServiceName: "netd",
+			RegionID:    cfg.Plan.Netd.RegionID,
+			ClusterID:   cfg.Plan.Netd.ClusterID,
+		}),
+		Ports: assets.Ports,
+		SecurityContext: &corev1.SecurityContext{
+			AllowPrivilegeEscalation: common.BoolPtr(false),
+			Privileged:               common.BoolPtr(false),
+			Capabilities: &corev1.Capabilities{
+				Add: []corev1.Capability{"NET_ADMIN", "NET_RAW"},
 			},
-		})
+		},
+		VolumeMounts: assets.VolumeMounts,
 	}
-
-	volumeMounts := []corev1.VolumeMount{
-		{
-			Name:      "config",
-			MountPath: "/config/config.yaml",
-			SubPath:   "config.yaml",
-			ReadOnly:  true,
-		},
-		{
-			Name:      "bpf-fs",
-			MountPath: "/sys/fs/bpf",
-		},
-		{
-			Name:      "modules",
-			MountPath: "/lib/modules",
-			ReadOnly:  true,
-		},
-		{
-			Name:      "run",
-			MountPath: "/run",
-		},
-		{
-			Name:      "internal-jwt-private-key",
-			MountPath: pkginternalauth.DefaultInternalJWTPrivateKeyPath,
-			SubPath:   "internal_jwt_private.key",
-			ReadOnly:  true,
-		},
+	if !cfg.Standby {
+		container.LivenessProbe = &corev1.Probe{
+			ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromString("health")}},
+			InitialDelaySeconds: 10,
+			PeriodSeconds:       10,
+		}
+		container.ReadinessProbe = &corev1.Probe{
+			ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/readyz", Port: intstr.FromString("health")}},
+			InitialDelaySeconds: 5,
+			PeriodSeconds:       5,
+		}
 	}
-	if config.SandboxObservabilityIngestURL != "" {
-		volumeMounts = append(volumeMounts,
-			corev1.VolumeMount{
-				Name:      "audit-spool",
-				MountPath: "/var/lib/sandbox0/netd",
-			},
-			corev1.VolumeMount{
-				Name:      "audit-jwt-private-key",
-				MountPath: pkginternalauth.DefaultAuditJWTPrivateKeyPath,
-				SubPath:   "audit_jwt_private.key",
-				ReadOnly:  true,
-			},
-		)
-	}
-	if mitmCASecretName != "" {
-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      "mitm-ca",
-			MountPath: "/tls",
-			ReadOnly:  true,
-		})
-	}
-
-	desired := &appsv1.DaemonSet{
+	return &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: scope.Namespace,
+			Name:      cfg.Name,
+			Namespace: cfg.Namespace,
+			Annotations: map[string]string{
+				LegacyHandoffStateAnnotation: state,
+			},
 		},
 		Spec: appsv1.DaemonSetSpec{
 			Selector: &metav1.LabelSelector{
-				MatchLabels: labels,
+				MatchLabels: cfg.Labels,
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels:      labels,
-					Annotations: common.EnsurePodTemplateAnnotations(podAnnotations),
+					Labels:      cfg.Labels,
+					Annotations: podAnnotations,
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: name,
-					RuntimeClassName:   runtimeClassName,
+					ServiceAccountName: cfg.Name,
+					RuntimeClassName:   assets.RuntimeClassName,
 					HostNetwork:        true,
 					DNSPolicy:          corev1.DNSClusterFirstWithHostNet,
-					NodeSelector:       nodeSelector,
-					Tolerations:        tolerations,
-					Containers: []corev1.Container{
-						{
-							Name:            "netd",
-							Image:           image,
-							ImagePullPolicy: pullPolicy,
-							Env: common.AppendObservabilityEnvVars([]corev1.EnvVar{
-								{
-									Name:  "SERVICE",
-									Value: "netd",
-								},
-								{
-									Name:  "CONFIG_PATH",
-									Value: "/config/config.yaml",
-								},
-								{
-									Name: "NODE_NAME",
-									ValueFrom: &corev1.EnvVarSource{
-										FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"},
-									},
-								},
-							}, scope.Owner(), common.ObservabilityEnvConfig{
-								ServiceName: "netd",
-								RegionID:    compiledPlan.Netd.RegionID,
-								ClusterID:   compiledPlan.Netd.ClusterID,
-							}),
-							Ports: []corev1.ContainerPort{
-								{Name: "metrics", ContainerPort: int32(config.MetricsPort)},
-								{Name: "health", ContainerPort: int32(config.HealthPort)},
-							},
-							SecurityContext: &corev1.SecurityContext{
-								AllowPrivilegeEscalation: common.BoolPtr(false),
-								Privileged:               common.BoolPtr(false),
-								Capabilities: &corev1.Capabilities{
-									Add: []corev1.Capability{"NET_ADMIN", "NET_RAW"},
-								},
-							},
-							LivenessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									HTTPGet: &corev1.HTTPGetAction{
-										Path: "/healthz",
-										Port: intstr.FromString("health"),
-									},
-								},
-								InitialDelaySeconds: 10,
-								PeriodSeconds:       10,
-							},
-							ReadinessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									HTTPGet: &corev1.HTTPGetAction{
-										Path: "/readyz",
-										Port: intstr.FromString("health"),
-									},
-								},
-								InitialDelaySeconds: 5,
-								PeriodSeconds:       5,
-							},
-							VolumeMounts: volumeMounts,
-						},
-					},
-					Volumes: volumes,
+					NodeSelector:       assets.NodeSelector,
+					Tolerations:        assets.Tolerations,
+					Containers:         []corev1.Container{container},
+					Volumes:            assets.Volumes,
 				},
 			},
 		},
 	}
+}
 
-	return r.Resources.ApplyDaemonSetWithScope(ctx, scope, desired)
+// LegacyHandoffReady reports whether an existing guarded legacy DaemonSet has
+// completed its rollout. An absent DaemonSet is ready on fresh installations.
+func (r *Reconciler) LegacyHandoffReady(ctx context.Context, compiledPlan *infraplan.InfraPlan) (bool, error) {
+	if compiledPlan == nil {
+		return false, fmt.Errorf("compiled plan is required")
+	}
+	ds := &appsv1.DaemonSet{}
+	key := types.NamespacedName{Name: fmt.Sprintf("%s-netd", compiledPlan.Scope.Name), Namespace: compiledPlan.Scope.Namespace}
+	if err := r.Resources.Client.Get(ctx, key, ds); err != nil {
+		if apierrors.IsNotFound(err) {
+			return r.legacyPodsGone(ctx, compiledPlan)
+		}
+		return false, err
+	}
+	if ds.Status.DesiredNumberScheduled == 0 {
+		return r.legacyPodsGone(ctx, compiledPlan)
+	}
+	if legacyHandoffState(ds) == LegacyHandoffStateStandby {
+		return legacyDaemonSetRolloutReady(ds) && legacyDaemonSetIsStandby(ds) &&
+			legacyDaemonSetUsesActiveLock(ds, ScopedActiveLockPath(compiledPlan.Scope.Namespace, compiledPlan.Scope.Name)), nil
+	}
+	ready := legacyDaemonSetRolloutReady(ds) &&
+		legacyDaemonSetUsesActiveLock(ds, ScopedActiveLockPath(compiledPlan.Scope.Namespace, compiledPlan.Scope.Name))
+	return ready, nil
+}
+
+// LegacyStandbyReady reports whether the delayed-lock standby template has a
+// ready successor on every desired node. With maxSurge enabled, the previous
+// active pods may still be running until their successors become ready.
+func (r *Reconciler) LegacyStandbyReady(ctx context.Context, compiledPlan *infraplan.InfraPlan) (bool, error) {
+	if compiledPlan == nil {
+		return false, fmt.Errorf("compiled plan is required")
+	}
+	ds := &appsv1.DaemonSet{}
+	key := types.NamespacedName{Name: fmt.Sprintf("%s-netd", compiledPlan.Scope.Name), Namespace: compiledPlan.Scope.Namespace}
+	if err := r.Resources.Client.Get(ctx, key, ds); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	if ds.Status.DesiredNumberScheduled == 0 {
+		return r.legacyPodsGone(ctx, compiledPlan)
+	}
+	return legacyDaemonSetRolloutReady(ds) && legacyDaemonSetIsStandby(ds) &&
+		legacyDaemonSetUsesActiveLock(ds, ScopedActiveLockPath(compiledPlan.Scope.Namespace, compiledPlan.Scope.Name)), nil
+}
+
+func legacyDaemonSetRolloutReady(ds *appsv1.DaemonSet) bool {
+	return ds != nil && ds.Status.ObservedGeneration >= ds.Generation &&
+		ds.Status.DesiredNumberScheduled > 0 &&
+		ds.Status.UpdatedNumberScheduled == ds.Status.DesiredNumberScheduled &&
+		ds.Status.NumberReady == ds.Status.DesiredNumberScheduled &&
+		ds.Status.NumberAvailable == ds.Status.DesiredNumberScheduled &&
+		ds.Status.NumberUnavailable == 0
+}
+
+func legacyHandoffState(ds *appsv1.DaemonSet) string {
+	if ds == nil {
+		return ""
+	}
+	return ds.Annotations[LegacyHandoffStateAnnotation]
+}
+
+func legacyDaemonSetIsStandby(ds *appsv1.DaemonSet) bool {
+	if ds == nil || legacyHandoffState(ds) != LegacyHandoffStateStandby || len(ds.Spec.Template.Spec.Containers) == 0 {
+		return false
+	}
+	container := ds.Spec.Template.Spec.Containers[0]
+	if container.LivenessProbe != nil || container.ReadinessProbe != nil {
+		return false
+	}
+	return containerEnvEquals(container.Env, activeguard.EnvInitialDelay, LegacyStandbyInitialDelay) &&
+		containerEnvEquals(container.Env, activeguard.EnvMaxHold, LegacyStandbyMaxHold)
+}
+
+func containerEnvEquals(envs []corev1.EnvVar, name, value string) bool {
+	for i := range envs {
+		if envs[i].Name == name {
+			return envs[i].Value == value
+		}
+	}
+	return false
+}
+
+func setContainerEnv(envs []corev1.EnvVar, name, value string) []corev1.EnvVar {
+	for i := range envs {
+		if envs[i].Name == name {
+			envs[i].Value = value
+			envs[i].ValueFrom = nil
+			return envs
+		}
+	}
+	return append(envs, corev1.EnvVar{Name: name, Value: value})
+}
+
+func legacyDaemonSetUsesActiveLock(ds *appsv1.DaemonSet, wantPath string) bool {
+	if ds == nil || len(ds.Spec.Template.Spec.Containers) == 0 {
+		return false
+	}
+	for i := range ds.Spec.Template.Spec.Containers[0].Env {
+		env := ds.Spec.Template.Spec.Containers[0].Env[i]
+		if env.Name == activeguard.EnvPath {
+			return env.Value == wantPath
+		}
+	}
+	return false
+}
+
+// CleanupLegacyDaemonSet removes the standalone netd workload after embedded
+// ctld netd is ready to acquire the shared active lock.
+func (r *Reconciler) CleanupLegacyDaemonSet(ctx context.Context, compiledPlan *infraplan.InfraPlan) error {
+	if compiledPlan == nil {
+		return fmt.Errorf("compiled plan is required")
+	}
+	ds := &appsv1.DaemonSet{}
+	key := types.NamespacedName{Name: fmt.Sprintf("%s-netd", compiledPlan.Scope.Name), Namespace: compiledPlan.Scope.Namespace}
+	if err := r.Resources.Client.Get(ctx, key, ds); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return err
+		}
+	} else if ds.DeletionTimestamp == nil {
+		propagation := metav1.DeletePropagationForeground
+		if err := r.Resources.Client.Delete(ctx, ds, &ctrlclient.DeleteOptions{PropagationPolicy: &propagation}); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	gone, err := r.legacyPodsGone(ctx, compiledPlan)
+	if err != nil {
+		return err
+	}
+	if !gone {
+		return fmt.Errorf("legacy netd pods are still terminating")
+	}
+	return nil
+}
+
+func (r *Reconciler) legacyPodsGone(ctx context.Context, compiledPlan *infraplan.InfraPlan) (bool, error) {
+	pods := &corev1.PodList{}
+	labels := common.GetServiceLabels(compiledPlan.Scope.Name, "netd")
+	if err := r.Resources.Client.List(ctx, pods, ctrlclient.InNamespace(compiledPlan.Scope.Namespace), ctrlclient.MatchingLabels(labels)); err != nil {
+		return false, err
+	}
+	return len(pods.Items) == 0, nil
 }
 
 func (r *Reconciler) resolveMITMCASecretName(ctx context.Context, compiledPlan *infraplan.InfraPlan, labels map[string]string) (string, error) {

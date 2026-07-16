@@ -992,7 +992,7 @@ func TestCompileTracksValidationRequirements(t *testing.T) {
 		}
 	})
 
-	t.Run("netd egress auth without manager is invalid", func(t *testing.T) {
+	t.Run("netd without ctld is invalid and egress auth still requires manager", func(t *testing.T) {
 		infra := &infrav1alpha1.Sandbox0Infra{
 			Spec: infrav1alpha1.Sandbox0InfraSpec{
 				Services: &infrav1alpha1.ServicesConfig{
@@ -1007,8 +1007,31 @@ func TestCompileTracksValidationRequirements(t *testing.T) {
 		}
 
 		compiled := Compile(infra)
+		if !containsString(compiled.Validation.FatalErrors, "netd requires ctld to be enabled because its runtime is embedded in ctld") {
+			t.Fatalf("expected netd/ctld validation error, got %#v", compiled.Validation.FatalErrors)
+		}
 		if !containsString(compiled.Validation.FatalErrors, "netd egress auth requires manager to be enabled") {
-			t.Fatalf("expected netd/manager validation error, got %#v", compiled.Validation.FatalErrors)
+			t.Fatalf("expected netd egress-auth/manager validation error, got %#v", compiled.Validation.FatalErrors)
+		}
+	})
+
+	t.Run("storage proxy requires at least one manager host replica", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				Services: &infrav1alpha1.ServicesConfig{
+					StorageProxy: &infrav1alpha1.StorageProxyServiceConfig{
+						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+							Replicas:             0,
+						},
+					},
+				},
+			},
+		}
+
+		compiled := Compile(infra)
+		if !containsString(compiled.Validation.FatalErrors, "manager host replicas must be at least 1 when the storage API is enabled") {
+			t.Fatalf("expected manager-host replica validation error, got %#v", compiled.Validation.FatalErrors)
 		}
 	})
 
@@ -1069,6 +1092,119 @@ func TestCompileTracksValidationRequirements(t *testing.T) {
 			t.Fatalf("expected regional/cluster auth mode validation error, got %#v", compiled.Validation.FatalErrors)
 		}
 	})
+}
+
+func TestCompileStorageOnlyUsesManagerHost(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Services: &infrav1alpha1.ServicesConfig{
+				Manager: &infrav1alpha1.ManagerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: false},
+						Replicas:             9,
+					},
+				},
+				StorageProxy: &infrav1alpha1.StorageProxyServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						Replicas:             2,
+					},
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+
+	if compiled.Components.EnableManager {
+		t.Fatal("storage-only compatibility must not enable the full manager component")
+	}
+	if !compiled.Components.EnableManagerHost || !compiled.Manager.Enabled {
+		t.Fatalf("expected storage-only compatibility to enable the manager host: components=%#v manager=%#v", compiled.Components, compiled.Manager)
+	}
+	if compiled.Manager.Replicas != 2 {
+		t.Fatalf("manager host replicas = %d, want storage replicas 2", compiled.Manager.Replicas)
+	}
+	if compiled.Components.EnableCtld || compiled.Manager.Config.CtldEnabled {
+		t.Fatalf("storage-only compatibility must not enable ctld: components=%#v config=%#v", compiled.Components, compiled.Manager.Config)
+	}
+	if _, ok := compiled.Manager.SandboxPodPlacement.NodeSelector[dataplane.NodeDataPlaneReadyLabel]; ok {
+		t.Fatalf("storage-only compatibility must not require data-plane-ready nodes: %#v", compiled.Manager.SandboxPodPlacement.NodeSelector)
+	}
+	if containsString(compiled.Status.ExpectedConditions, infrav1alpha1.ConditionTypeManagerReady) {
+		t.Fatalf("storage-only compatibility must not expose ManagerReady: %#v", compiled.Status.ExpectedConditions)
+	}
+	if !containsString(compiled.Status.ExpectedConditions, infrav1alpha1.ConditionTypeStorageProxyReady) {
+		t.Fatalf("expected StorageProxyReady condition: %#v", compiled.Status.ExpectedConditions)
+	}
+
+	for _, name := range []string{"manager-rbac", "manager", "storage-proxy"} {
+		step, ok := findWorkflowStep(compiled.Workflow.Steps, name)
+		if !ok {
+			t.Fatalf("expected %q workflow step: %#v", name, compiled.Workflow.Steps)
+		}
+		if step.ConditionType != infrav1alpha1.ConditionTypeStorageProxyReady {
+			t.Fatalf("%s condition = %q, want %q", name, step.ConditionType, infrav1alpha1.ConditionTypeStorageProxyReady)
+		}
+		if name == "manager" && step.SuccessReason != "ManagerHostReady" {
+			t.Fatalf("manager host success reason = %q, want ManagerHostReady", step.SuccessReason)
+		}
+	}
+	for _, name := range []string{"ctld", "ctld-ready", "data-plane-node-readiness", "builtin-template-pods"} {
+		if _, ok := findWorkflowStep(compiled.Workflow.Steps, name); ok {
+			t.Fatalf("storage-only compatibility must not add %q: %#v", name, compiled.Workflow.Steps)
+		}
+	}
+
+	for _, retained := range []ResourceRef{
+		{Kind: "Deployment", Namespace: infra.Namespace, Name: "demo-manager"},
+		{Kind: "Service", Namespace: infra.Namespace, Name: "demo-manager"},
+		{Kind: "ClusterRole", Name: "demo-manager"},
+	} {
+		if containsResourceRef(compiled.Cleanup.DeleteNamespaced, compiled.Cleanup.DeleteClusterScoped, retained) {
+			t.Fatalf("manager host resource should be retained for storage-only compatibility: %#v", retained)
+		}
+	}
+}
+
+func TestCompileManagerHostUsesMaximumEnabledReplicaCount(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Services: &infrav1alpha1.ServicesConfig{
+				Manager: &infrav1alpha1.ManagerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						Replicas:             2,
+					},
+				},
+				StorageProxy: &infrav1alpha1.StorageProxyServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						Replicas:             3,
+					},
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+
+	if compiled.Manager.Replicas != 3 {
+		t.Fatalf("manager host replicas = %d, want max(manager=2, storage=3)=3", compiled.Manager.Replicas)
+	}
+	if len(compiled.Validation.FatalErrors) != 0 {
+		t.Fatalf("replica normalization should not be fatal: %#v", compiled.Validation.FatalErrors)
+	}
+	for _, name := range []string{"manager-rbac", "manager"} {
+		step, ok := findWorkflowStep(compiled.Workflow.Steps, name)
+		if !ok || step.ConditionType != infrav1alpha1.ConditionTypeManagerReady {
+			t.Fatalf("full manager workflow step %q should use ManagerReady: %#v", name, step)
+		}
+		if name == "manager" && step.SuccessReason != "ManagerReady" {
+			t.Fatalf("full manager success reason = %q, want ManagerReady", step.SuccessReason)
+		}
+	}
 }
 
 func TestCompileTracksWorkflowRequirements(t *testing.T) {
@@ -1169,17 +1305,19 @@ func TestCompileTracksWorkflowRequirements(t *testing.T) {
 		"scheduler-enterprise-license",
 		"scheduler-rbac",
 		"scheduler",
-		"cluster-gateway-enterprise-license",
-		"cluster-gateway",
-		"ctld",
 		"manager-rbac",
 		"manager",
-		"netd-rbac",
-		"netd",
+		"cluster-gateway-enterprise-license",
+		"cluster-gateway",
+		"storage-proxy",
+		"legacy-netd-handoff",
+		"ctld",
+		"legacy-netd-standby",
+		"ctld-ready",
+		"netd-ready",
+		"legacy-netd-cleanup",
 		"data-plane-node-readiness",
 		"builtin-template-pods",
-		"storage-proxy-rbac",
-		"storage-proxy",
 		"register-cluster",
 	}
 	if len(got) != len(want) {
@@ -1325,6 +1463,7 @@ func TestCompileTracksCleanupPlan(t *testing.T) {
 		{Kind: "Deployment", Namespace: "sandbox0-system", Name: "demo-egress-broker"},
 		{Kind: "ClusterRole", Name: "demo-manager"},
 		{Kind: "ClusterRoleBinding", Name: "demo-netd"},
+		{Kind: "ConfigMap", Namespace: "sandbox0-system", Name: "demo-manager-storage"},
 	} {
 		if !containsResourceRef(compiled.Cleanup.DeleteNamespaced, compiled.Cleanup.DeleteClusterScoped, want) {
 			t.Fatalf("expected cleanup target %#v, got namespaced=%#v cluster=%#v", want, compiled.Cleanup.DeleteNamespaced, compiled.Cleanup.DeleteClusterScoped)
@@ -1360,4 +1499,13 @@ func workflowStepNames(steps []WorkflowStepPlan) []string {
 		names = append(names, step.Name)
 	}
 	return names
+}
+
+func findWorkflowStep(steps []WorkflowStepPlan, name string) (WorkflowStepPlan, bool) {
+	for _, step := range steps {
+		if step.Name == name {
+			return step, true
+		}
+	}
+	return WorkflowStepPlan{}, false
 }

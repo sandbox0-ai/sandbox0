@@ -43,14 +43,17 @@ type InfraPlan struct {
 }
 
 type ComponentPlan struct {
-	EnableGlobalGateway        bool
-	HasControlPlane            bool
-	HasDataPlane               bool
-	EnableRegionalGateway      bool
-	EnableSSHGateway           bool
-	EnableScheduler            bool
-	EnableClusterGateway       bool
+	EnableGlobalGateway   bool
+	HasControlPlane       bool
+	HasDataPlane          bool
+	EnableRegionalGateway bool
+	EnableSSHGateway      bool
+	EnableScheduler       bool
+	EnableClusterGateway  bool
+	// EnableManager tracks the user-facing manager service, while EnableManagerHost
+	// also covers the compatibility case where the manager workload hosts storage only.
 	EnableManager              bool
+	EnableManagerHost          bool
 	EnableStorageProxy         bool
 	EnableCtld                 bool
 	EnableNetd                 bool
@@ -209,12 +212,13 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 	enableClusterGateway := infrav1alpha1.IsClusterGatewayEnabled(infra)
 	enableManager := infrav1alpha1.IsManagerEnabled(infra)
 	enableStorageProxy := infrav1alpha1.IsStorageProxyEnabled(infra)
+	enableManagerHost := enableManager || enableStorageProxy
 	enableDatabase := infrav1alpha1.IsDatabaseEnabled(infra)
 	enableRedis := infrav1alpha1.IsRedisEnabled(infra)
 	enableCredentialVault := infrav1alpha1.IsCredentialVaultEnabled(infra)
 
 	hasControlPlane := enableRegionalGateway || enableSSHGateway || enableScheduler
-	hasDataPlane := enableClusterGateway || enableManager || enableStorageProxy
+	hasDataPlane := enableClusterGateway || enableManagerHost
 
 	return ComponentPlan{
 		EnableGlobalGateway:        enableGlobalGateway,
@@ -225,6 +229,7 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 		EnableScheduler:            enableScheduler,
 		EnableClusterGateway:       enableClusterGateway,
 		EnableManager:              enableManager,
+		EnableManagerHost:          enableManagerHost,
 		EnableStorageProxy:         enableStorageProxy,
 		EnableCtld:                 enableManager,
 		EnableNetd:                 infrav1alpha1.IsNetdEnabled(infra),
@@ -374,7 +379,7 @@ func compileManagerPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 	}
 
 	managerPlan := ManagerPlan{
-		Enabled:               infrav1alpha1.IsManagerEnabled(infra),
+		Enabled:               compiled != nil && compiled.Components.EnableManagerHost,
 		Config:                &apiconfig.ManagerConfig{},
 		TemplateStoreEnabled:  templateStoreEnabled,
 		NetworkPolicyProvider: "noop",
@@ -392,7 +397,6 @@ func compileManagerPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 		managerPlan.DefaultClusterID = common.ResolveClusterID(infra)
 		if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil {
 			svc := infra.Spec.Services.Manager
-			managerPlan.Replicas = svc.Replicas
 			if svc.Resources != nil {
 				managerPlan.Resources = svc.Resources.DeepCopy()
 			}
@@ -403,10 +407,27 @@ func compileManagerPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 				managerPlan.Config = runtimeconfig.ToManager(svc.Config)
 			}
 		}
+		managerPlan.Replicas = managerHostReplicas(infra)
 		compileManagerRuntimeConfig(&managerPlan, infra)
 	}
 
 	return managerPlan
+}
+
+func managerHostReplicas(infra *infrav1alpha1.Sandbox0Infra) int32 {
+	if infra == nil || infra.Spec.Services == nil {
+		return 0
+	}
+
+	var replicas int32
+	if infrav1alpha1.IsManagerEnabled(infra) && infra.Spec.Services.Manager != nil {
+		replicas = infra.Spec.Services.Manager.Replicas
+	}
+	if infrav1alpha1.IsStorageProxyEnabled(infra) && infra.Spec.Services.StorageProxy != nil &&
+		infra.Spec.Services.StorageProxy.Replicas > replicas {
+		replicas = infra.Spec.Services.StorageProxy.Replicas
+	}
+	return replicas
 }
 
 func withDataPlaneReadyNodeSelector(selector map[string]string, compiled *InfraPlan) map[string]string {
@@ -447,7 +468,7 @@ func compileManagerRuntimeConfig(managerPlan *ManagerPlan, infra *infrav1alpha1.
 	cfg.SandboxPodPlacement = managerPlan.SandboxPodPlacement
 	cfg.DefaultClusterId = managerPlan.DefaultClusterID
 	cfg.RegionID = managerPlan.RegionID
-	cfg.CtldEnabled = managerPlan.Enabled
+	cfg.CtldEnabled = infrav1alpha1.IsManagerEnabled(infra)
 	if cfg.CtldEnabled && cfg.CtldPort == 0 {
 		cfg.CtldPort = 8095
 	}
@@ -681,6 +702,12 @@ func compileValidationPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPl
 			plan.FatalErrors = append(plan.FatalErrors, "cluster configuration requires at least one data-plane service")
 		}
 	}
+	if compiled != nil && compiled.Components.EnableStorageProxy && compiled.Manager.Replicas < 1 {
+		plan.FatalErrors = append(plan.FatalErrors, "manager host replicas must be at least 1 when the storage API is enabled")
+	}
+	if compiled != nil && compiled.Components.EnableNetd && !compiled.Components.EnableCtld {
+		plan.FatalErrors = append(plan.FatalErrors, "netd requires ctld to be enabled because its runtime is embedded in ctld")
+	}
 	if compiled != nil && compiled.Components.EnableNetd && netdEgressAuthEnabled(infra) && !compiled.Components.EnableManager {
 		plan.FatalErrors = append(plan.FatalErrors, "netd egress auth requires manager to be enabled")
 	}
@@ -757,7 +784,7 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-cluster-gateway", infra.Name)),
 		)
 	}
-	if !compiled.Components.EnableManager {
+	if !compiled.Components.EnableManagerHost {
 		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
 			namespacedRef("Deployment", infra.Namespace, fmt.Sprintf("%s-manager", infra.Name)),
 			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-manager", infra.Name)),
@@ -774,6 +801,7 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 			namespacedRef("Deployment", infra.Namespace, fmt.Sprintf("%s-storage-proxy", infra.Name)),
 			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-storage-proxy", infra.Name)),
 			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-storage-proxy", infra.Name)),
+			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-manager-storage", infra.Name)),
 			namespacedRef("ServiceAccount", infra.Namespace, fmt.Sprintf("%s-storage-proxy", infra.Name)),
 		)
 		cleanup.DeleteClusterScoped = append(cleanup.DeleteClusterScoped,
@@ -1022,30 +1050,46 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 		appendCheckStep("scheduler-rbac", infrav1alpha1.ConditionTypeSchedulerReady, "SchedulerRBACFailed")
 		appendSuccessStep("scheduler", infrav1alpha1.ConditionTypeSchedulerReady, "SchedulerReady", "Scheduler is ready", "SchedulerFailed")
 	}
+	if compiled.Components.EnableManagerHost {
+		conditionType := infrav1alpha1.ConditionTypeStorageProxyReady
+		successReason := "ManagerHostReady"
+		successMessage := "Manager host is ready"
+		if compiled.Components.EnableManager {
+			conditionType = infrav1alpha1.ConditionTypeManagerReady
+			successReason = "ManagerReady"
+			successMessage = "Manager is ready"
+		}
+		appendCheckStep("manager-rbac", conditionType, "ManagerRBACFailed")
+		appendSuccessStep("manager", conditionType, successReason, successMessage, "ManagerFailed")
+	}
 	if compiled.Components.EnableClusterGateway && compiled.Enterprise.ClusterGateway {
 		appendCheckStep("cluster-gateway-enterprise-license", infrav1alpha1.ConditionTypeClusterGatewayReady, "EnterpriseLicenseMissing")
 	}
 	if compiled.Components.EnableClusterGateway {
 		appendSuccessStep("cluster-gateway", infrav1alpha1.ConditionTypeClusterGatewayReady, "ClusterGatewayReady", "Internal gateway is ready", "ClusterGatewayFailed")
 	}
-	if compiled.Components.EnableCtld {
-		appendSuccessStep("ctld", infrav1alpha1.ConditionTypeCtldReady, "CtldReady", "ctld is ready", "CtldFailed")
-	}
-	if compiled.Components.EnableManager {
-		appendCheckStep("manager-rbac", infrav1alpha1.ConditionTypeManagerReady, "ManagerRBACFailed")
-		appendSuccessStep("manager", infrav1alpha1.ConditionTypeManagerReady, "ManagerReady", "Manager is ready", "ManagerFailed")
+	if compiled.Components.EnableStorageProxy {
+		appendSuccessStep("storage-proxy", infrav1alpha1.ConditionTypeStorageProxyReady, "StorageProxyReady", "Storage API is ready in manager", "StorageProxyFailed")
 	}
 	if compiled.Components.EnableNetd {
-		appendCheckStep("netd-rbac", infrav1alpha1.ConditionTypeNetdReady, "NetdRBACFailed")
-		appendSuccessStep("netd", infrav1alpha1.ConditionTypeNetdReady, "NetdReady", "netd is ready", "NetdFailed")
+		appendCheckStep("legacy-netd-handoff", infrav1alpha1.ConditionTypeNetdReady, "NetdHandoffPrepareFailed")
+	}
+	if compiled.Components.EnableCtld {
+		appendCheckStep("ctld", infrav1alpha1.ConditionTypeCtldReady, "CtldFailed")
+	}
+	if compiled.Components.EnableNetd {
+		appendCheckStep("legacy-netd-standby", infrav1alpha1.ConditionTypeNetdReady, "NetdHandoffFailed")
+	}
+	if compiled.Components.EnableCtld {
+		appendSuccessStep("ctld-ready", infrav1alpha1.ConditionTypeCtldReady, "CtldReady", "ctld is ready", "CtldFailed")
+	}
+	if compiled.Components.EnableNetd {
+		appendSuccessStep("netd-ready", infrav1alpha1.ConditionTypeNetdReady, "NetdReady", "netd is ready in the active ctld", "NetdFailed")
+		appendCheckStep("legacy-netd-cleanup", infrav1alpha1.ConditionTypeNetdReady, "NetdCleanupFailed")
 	}
 	if compiled.Components.EnableManager {
 		appendCheckStep("data-plane-node-readiness", infrav1alpha1.ConditionTypeManagerReady, "DataPlaneNodesNotReady")
 		appendCheckStep("builtin-template-pods", infrav1alpha1.ConditionTypeManagerReady, "BuiltinTemplatePodsNotReady")
-	}
-	if compiled.Components.EnableStorageProxy {
-		appendCheckStep("storage-proxy-rbac", infrav1alpha1.ConditionTypeStorageProxyReady, "StorageProxyRBACFailed")
-		appendSuccessStep("storage-proxy", infrav1alpha1.ConditionTypeStorageProxyReady, "StorageProxyReady", "Storage proxy is ready", "StorageProxyFailed")
 	}
 	if compiled.Components.EnableClusterRegistration {
 		appendSuccessStep("register-cluster", infrav1alpha1.ConditionTypeClusterRegistered, "ClusterRegistered", "Cluster registration completed", "ClusterRegistrationFailed")

@@ -196,13 +196,18 @@ func LoadStorageProxyConfig() *StorageProxyConfig {
 	if path == "" {
 		path = "/config/config.yaml"
 	}
-
 	cfg, err := loadStorageProxyConfig(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config from %s: %v, using empty config\n", path, err)
 		cfg = &StorageProxyConfig{}
 	}
 	return cfg
+}
+
+// ReadStorageProxyConfig loads storage-proxy configuration from an explicit
+// path and returns parsing errors to the embedding process.
+func ReadStorageProxyConfig(path string) (*StorageProxyConfig, error) {
+	return loadStorageProxyConfig(path)
 }
 
 func loadStorageProxyConfig(path string) (*StorageProxyConfig, error) {

@@ -44,6 +44,12 @@ type MountedVolumeController interface {
 	MountedVolumeHandler() http.Handler
 }
 
+// ReadinessController contributes primary service state to the ctld ready
+// endpoint.
+type ReadinessController interface {
+	Ready() bool
+}
+
 type NotImplementedController struct{}
 
 func (NotImplementedController) Pause(_ *http.Request, _ string) (ctldapi.PauseResponse, int) {
@@ -96,6 +102,11 @@ func NewMux(controller Controller) http.Handler {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if readinessController, ok := controller.(ReadinessController); ok && !readinessController.Ready() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("not ready"))
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})

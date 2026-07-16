@@ -868,6 +868,56 @@ func newCommonTestScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
+func TestEnsureDeploymentRolloutCompleteRejectsReadyOldReplica(t *testing.T) {
+	testCases := []struct {
+		name    string
+		status  appsv1.DeploymentStatus
+		wantErr bool
+	}{
+		{
+			name: "old replica is still serving",
+			status: appsv1.DeploymentStatus{
+				ObservedGeneration: 2,
+				Replicas:           2,
+				UpdatedReplicas:    1,
+				ReadyReplicas:      2,
+				AvailableReplicas:  2,
+			},
+			wantErr: true,
+		},
+		{
+			name: "current replica is ready and available",
+			status: appsv1.DeploymentStatus{
+				ObservedGeneration: 2,
+				Replicas:           1,
+				UpdatedReplicas:    1,
+				ReadyReplicas:      1,
+				AvailableReplicas:  1,
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			infra := newCommonTestInfra()
+			replicas := int32(1)
+			deployment := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "demo-manager", Namespace: infra.Namespace, Generation: 2},
+				Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
+				Status:     testCase.status,
+			}
+			resources, _ := newCommonTestResourceManager(t, interceptor.Funcs{}, deployment)
+			err := resources.EnsureDeploymentRolloutComplete(context.Background(), NewObjectScope(infra), deployment.Name, replicas)
+			if testCase.wantErr && err == nil {
+				t.Fatal("EnsureDeploymentRolloutComplete() error = nil, want rollout pending")
+			}
+			if !testCase.wantErr && err != nil {
+				t.Fatalf("EnsureDeploymentRolloutComplete() error = %v", err)
+			}
+		})
+	}
+}
+
 func newCommonTestInfra() *infrav1alpha1.Sandbox0Infra {
 	return &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{

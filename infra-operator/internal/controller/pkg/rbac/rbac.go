@@ -52,7 +52,7 @@ func (r *Reconciler) ReconcileManagerRBAC(ctx context.Context, infra *infrav1alp
 		"app.kubernetes.io/managed-by": "sandbox0infra-operator",
 	}
 
-	if err := r.reconcileServiceAccount(ctx, infra, name, labels, nil); err != nil {
+	if err := r.reconcileServiceAccount(ctx, infra, name, labels, storageWorkloadIdentityAnnotations(infra)); err != nil {
 		return err
 	}
 
@@ -146,39 +146,6 @@ func (r *Reconciler) ReconcileSchedulerRBAC(ctx context.Context, infra *infrav1a
 	return r.reconcileServiceAccount(ctx, infra, name, labels, nil)
 }
 
-// ReconcileStorageProxyRBAC reconciles RBAC for the storage-proxy service.
-func (r *Reconciler) ReconcileStorageProxyRBAC(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
-	name := fmt.Sprintf("%s-storage-proxy", infra.Name)
-	labels := map[string]string{
-		"app.kubernetes.io/name":       "storage-proxy",
-		"app.kubernetes.io/instance":   infra.Name,
-		"app.kubernetes.io/managed-by": "sandbox0infra-operator",
-	}
-
-	if err := r.reconcileServiceAccount(ctx, infra, name, labels, storageWorkloadIdentityAnnotations(infra)); err != nil {
-		return err
-	}
-
-	rules := []rbacv1.PolicyRule{
-		{
-			APIGroups: []string{""},
-			Resources: []string{"pods", "events"},
-			Verbs:     []string{"get", "list", "watch", "create", "patch"},
-		},
-		{
-			APIGroups: []string{""},
-			Resources: []string{"nodes"},
-			Verbs:     []string{"get"},
-		},
-	}
-
-	if err := r.reconcileClusterRole(ctx, name, labels, rules); err != nil {
-		return err
-	}
-
-	return r.reconcileClusterRoleBinding(ctx, infra, name, labels, name, name)
-}
-
 // ReconcileCtldRBAC reconciles RBAC for the ctld daemonset.
 func (r *Reconciler) ReconcileCtldRBAC(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
 	name := fmt.Sprintf("%s-ctld", infra.Name)
@@ -195,13 +162,23 @@ func (r *Reconciler) ReconcileCtldRBAC(ctx context.Context, infra *infrav1alpha1
 	rules := []rbacv1.PolicyRule{
 		{
 			APIGroups: []string{""},
-			Resources: []string{"pods"},
+			Resources: []string{"pods", "pods/status"},
 			Verbs:     []string{"get", "list", "watch", "update", "patch"},
+		},
+		{
+			APIGroups: []string{""},
+			Resources: []string{"nodes", "services", "endpoints"},
+			Verbs:     []string{"get", "list", "watch"},
 		},
 		{
 			APIGroups: []string{""},
 			Resources: []string{"pods/resize"},
 			Verbs:     []string{"update", "patch"},
+		},
+		{
+			APIGroups: []string{"discovery.k8s.io"},
+			Resources: []string{"endpointslices"},
+			Verbs:     []string{"get", "list", "watch"},
 		},
 	}
 

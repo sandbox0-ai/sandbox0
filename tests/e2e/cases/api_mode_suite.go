@@ -2406,9 +2406,10 @@ func assertObjectEncryptionLifecycle(env *framework.ScenarioEnv, session *e2euti
 	privateKey := getSecretValueWithEscapedKey(env, secretName, "private\\.key")
 	Expect(privateKey).To(ContainSubstring("BEGIN"))
 
-	assertWorkloadConfigMapContains(env, "deployment", env.Infra.Name+"-storage-proxy", "object_encryption_enabled: true")
+	assertWorkloadConfigMapContains(env, "deployment", env.Infra.Name+"-manager", "storage-config", "object_encryption_enabled: true")
+	assertServiceSelectsComponent(env, env.Infra.Name+"-storage-proxy", "manager")
 	for _, slot := range []string{"a", "b"} {
-		assertWorkloadConfigMapContains(env, "daemonset", env.Infra.Name+"-ctld-"+slot, "object_encryption_enabled: true")
+		assertWorkloadConfigMapContains(env, "daemonset", env.Infra.Name+"-ctld-"+slot, "config", "object_encryption_enabled: true")
 	}
 
 	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{})
@@ -2436,7 +2437,7 @@ func assertObjectEncryptionLifecycle(env *framework.ScenarioEnv, session *e2euti
 	Expect(status).To(Equal(http.StatusOK))
 	Expect(body).To(Equal(beforeContent))
 
-	assertNoPlaintextInStorage(env, "deploy/"+env.Infra.Name+"-storage-proxy", "/var/lib/storage-proxy/cache", sentinel)
+	assertNoPlaintextInStorage(env, "deploy/"+env.Infra.Name+"-manager", "/var/lib/storage-proxy/cache", sentinel)
 
 	snapshot := createSnapshotEventually(env, session, volumeID, "object-encryption-e2e")
 	Expect(snapshot).NotTo(BeNil())
@@ -2458,7 +2459,7 @@ func assertObjectEncryptionLifecycle(env *framework.ScenarioEnv, session *e2euti
 	Expect(status).To(Equal(http.StatusOK))
 	Expect(body).To(Equal(beforeContent))
 
-	assertNoPlaintextInStorage(env, "deploy/"+env.Infra.Name+"-storage-proxy", "/var/lib/storage-proxy/cache", sentinel)
+	assertNoPlaintextInStorage(env, "deploy/"+env.Infra.Name+"-manager", "/var/lib/storage-proxy/cache", sentinel)
 	assertNoPlaintextInStorage(env, "pod/"+env.Infra.Name+"-rustfs-0", "/data", sentinel)
 }
 
@@ -2527,12 +2528,12 @@ func assertConfigMapContains(env *framework.ScenarioEnv, configMapName, expected
 	Expect(output).To(ContainSubstring(expected))
 }
 
-func assertWorkloadConfigMapContains(env *framework.ScenarioEnv, workloadKind, workloadName, expected string) {
-	configMapName := workloadConfigMapName(env, workloadKind, workloadName)
+func assertWorkloadConfigMapContains(env *framework.ScenarioEnv, workloadKind, workloadName, volumeName, expected string) {
+	configMapName := workloadConfigMapName(env, workloadKind, workloadName, volumeName)
 	assertConfigMapContains(env, configMapName, expected)
 }
 
-func workloadConfigMapName(env *framework.ScenarioEnv, workloadKind, workloadName string) string {
+func workloadConfigMapName(env *framework.ScenarioEnv, workloadKind, workloadName, volumeName string) string {
 	output, err := framework.KubectlOutput(
 		env.TestCtx.Context,
 		env.Config.Kubeconfig,
@@ -2540,7 +2541,7 @@ func workloadConfigMapName(env *framework.ScenarioEnv, workloadKind, workloadNam
 		workloadKind,
 		workloadName,
 		"-o",
-		`jsonpath={.spec.template.spec.volumes[?(@.name=="config")].configMap.name}`,
+		fmt.Sprintf(`jsonpath={.spec.template.spec.volumes[?(@.name=="%s")].configMap.name}`, volumeName),
 		"--namespace",
 		env.Infra.Namespace,
 	)
@@ -2548,6 +2549,22 @@ func workloadConfigMapName(env *framework.ScenarioEnv, workloadKind, workloadNam
 	name := strings.TrimSpace(output)
 	Expect(name).NotTo(BeEmpty())
 	return name
+}
+
+func assertServiceSelectsComponent(env *framework.ScenarioEnv, serviceName, component string) {
+	output, err := framework.KubectlOutput(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		"get",
+		"service",
+		serviceName,
+		"-o",
+		`jsonpath={.spec.selector.app\.kubernetes\.io/component}`,
+		"--namespace",
+		env.Infra.Namespace,
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(strings.TrimSpace(output)).To(Equal(component))
 }
 
 func assertNoPlaintextInStorage(env *framework.ScenarioEnv, target, root, sentinel string) {

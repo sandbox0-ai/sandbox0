@@ -43,6 +43,18 @@ func loadS0FSHandleState(path, volumeID string) (volume.HandleState, error) {
 }
 
 func persistS0FSHandleState(path, volumeID string, handles volume.HandleState) error {
+	return persistS0FSHandleStateWithDurability(path, volumeID, handles, true)
+}
+
+// persistProcessLocalS0FSHandleState makes the latest handle snapshot visible
+// to a standby process without forcing it to stable storage. S0FS portal HA
+// protects against a process or Pod failure on the same node, so the shared
+// kernel page cache remains available to the promoted process.
+func persistProcessLocalS0FSHandleState(path, volumeID string, handles volume.HandleState) error {
+	return persistS0FSHandleStateWithDurability(path, volumeID, handles, false)
+}
+
+func persistS0FSHandleStateWithDurability(path, volumeID string, handles volume.HandleState, durable bool) error {
 	if strings.TrimSpace(path) == "" {
 		return nil
 	}
@@ -54,7 +66,7 @@ func persistS0FSHandleState(path, volumeID string, handles volume.HandleState) e
 	if err != nil {
 		return err
 	}
-	return writeAtomicRecoveryState(path, ".s0fs-*.tmp", payload)
+	return writeAtomicRecoveryStateWithDurability(path, ".s0fs-*.tmp", payload, durable)
 }
 
 func retainedUnlinkedInodes(state volume.HandleState) map[uint64]struct{} {

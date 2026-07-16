@@ -329,10 +329,10 @@ func newLocalSession(volumeID string, mgr *localVolumeManager, logger *logrus.Lo
 	}
 }
 
-func (s *localSession) Close() { _ = s.persistRecoveryState() }
+func (s *localSession) Close() { _ = s.persistDurableRecoveryState() }
 
 func (s *localSession) Handoff() error {
-	return s.persistRecoveryState()
+	return s.persistDurableRecoveryState()
 }
 
 func (s *localSession) RecoveryError() error {
@@ -345,6 +345,14 @@ func (s *localSession) RecoveryError() error {
 }
 
 func (s *localSession) persistRecoveryState() error {
+	return s.persistRecoveryStateWithDurability(false)
+}
+
+func (s *localSession) persistDurableRecoveryState() error {
+	return s.persistRecoveryStateWithDurability(true)
+}
+
+func (s *localSession) persistRecoveryStateWithDurability(durable bool) error {
 	if s == nil || strings.TrimSpace(s.statePath) == "" || s.mgr == nil {
 		return nil
 	}
@@ -357,7 +365,12 @@ func (s *localSession) persistRecoveryState() error {
 	}
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
-	err = persistS0FSHandleState(s.statePath, s.volumeID, volCtx.SnapshotHandleState())
+	handles := volCtx.SnapshotHandleState()
+	if durable {
+		err = persistS0FSHandleState(s.statePath, s.volumeID, handles)
+	} else {
+		err = persistProcessLocalS0FSHandleState(s.statePath, s.volumeID, handles)
+	}
 	s.stateErr = err
 	return err
 }

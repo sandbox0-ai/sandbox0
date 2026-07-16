@@ -272,7 +272,7 @@ func TestHTTPAuditSinkDoesNotFailAttemptAfterCanonicalACKWhenSpoolCleanupFails(t
 	if err := sink.WriteAuditEvent(newAuditDeliveryTestEvent("55555555-5555-4555-8555-555555555555", sandboxobservability.EventPhaseAttempt)); err != nil {
 		t.Fatalf("WriteAuditEvent() error after canonical ACK = %v", err)
 	}
-	if observed.FilterMessage("Canonical netd audit attempt was acknowledged but spool cleanup failed").Len() != 1 {
+	if observed.FilterMessage("Canonical network audit attempt was acknowledged but spool cleanup failed").Len() != 1 {
 		t.Fatalf("cleanup failure logs = %#v", observed.All())
 	}
 }
@@ -292,7 +292,7 @@ func TestHTTPAuditSinkLogsResultCleanupFailureAfterCanonicalACK(t *testing.T) {
 	sink := directHTTPAuditSink("http://unused", http.DefaultClient, spool, zap.New(core))
 	replaceNetdAuditSpoolDirectoryWithFile(t, dir)
 	sink.completeAuditGroup([]auditEvent{event}, true)
-	if observed.FilterMessage("Canonical netd audit results were acknowledged but spool cleanup failed").Len() != 1 {
+	if observed.FilterMessage("Canonical network audit results were acknowledged but spool cleanup failed").Len() != 1 {
 		t.Fatalf("cleanup failure logs = %#v", observed.All())
 	}
 }

@@ -355,7 +355,7 @@ func (h *SandboxObservabilityHandler) normalizeAuditEvents(ctx context.Context, 
 			AuthMethod: "workload_token",
 		}
 		event.EventType = sandboxobservability.EventTypeNetworkAudit
-		// netd observes a network flow, not an HTTP API response. Request
+		// The ctld network runtime observes a network flow, not an HTTP API response. Request
 		// metadata is gateway-owned and must not be accepted from this producer.
 		event.Request = sandboxobservability.AuditRequest{}
 		attributes := sandboxobservability.SanitizeNetworkAuditAttributes(event.Attributes)

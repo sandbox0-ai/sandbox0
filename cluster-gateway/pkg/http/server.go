@@ -182,7 +182,7 @@ func NewServer(
 		}
 		auditNetdPublicKey, err = internalauth.LoadEd25519PublicKeyFromFile(internalauth.DefaultAuditJWTPublicKeyPath)
 		if err != nil {
-			return nil, fmt.Errorf("load dedicated netd audit JWT public key: %w", err)
+			return nil, fmt.Errorf("load dedicated network audit producer JWT public key: %w", err)
 		}
 		auditSigningPrivateKey, err = internalauth.LoadEd25519PrivateKeyFromFile(internalauth.DefaultAuditSigningPrivateKeyPath)
 		if err != nil {
@@ -200,7 +200,11 @@ func NewServer(
 	// Create internal auth validator (for validating tokens from regional-gateway and optionally scheduler)
 	allowedCallers := cfg.AllowedCallers
 	if len(allowedCallers) == 0 {
-		allowedCallers = []string{"regional-gateway", "scheduler", "cluster-gateway"}
+		allowedCallers = []string{
+			internalauth.ServiceRegionalGateway,
+			internalauth.ServiceScheduler,
+			internalauth.ServiceClusterGateway,
+		}
 	}
 	validator, sandboxObservabilityIngestValidator, sandboxAuditIngestValidator := newInternalAuthValidators(
 		cfg.AuthMode,
@@ -218,7 +222,7 @@ func NewServer(
 
 	// Initialize internal auth generator (for downstream services)
 	internalAuthGen := internalauth.NewGenerator(internalauth.GeneratorConfig{
-		Caller:     "cluster-gateway",
+		Caller:     internalauth.ServiceClusterGateway,
 		PrivateKey: privateKey,
 		TTL:        10 * time.Second,
 	})
@@ -866,24 +870,28 @@ func newInternalAuthValidators(
 	var controlPlaneValidator *internalauth.Validator
 	if authModeEnabled(authMode, authModeInternal) {
 		controlPlaneValidator = internalauth.NewValidator(internalauth.ValidatorConfig{
-			Target:             "cluster-gateway",
+			Target:             internalauth.ServiceClusterGateway,
 			PublicKey:          controlPlanePublicKey,
 			AllowedCallers:     allowedControlPlaneCallers,
 			ClockSkewTolerance: 10 * time.Second,
 		})
 	}
 	dataPlaneIngestValidator := internalauth.NewValidator(internalauth.ValidatorConfig{
-		Target:             "cluster-gateway",
-		PublicKey:          dataPlanePublicKey,
-		AllowedCallers:     []string{"ctld", "manager", "procd", "storage-proxy"},
+		Target:    internalauth.ServiceClusterGateway,
+		PublicKey: dataPlanePublicKey,
+		AllowedCallers: []string{
+			internalauth.ServiceCtld,
+			internalauth.ServiceManager,
+			internalauth.ServiceProcd,
+		},
 		ClockSkewTolerance: 10 * time.Second,
 	})
 	var auditIngestValidator *internalauth.Validator
 	if len(auditNetdPublicKey) == ed25519.PublicKeySize {
 		auditIngestValidator = internalauth.NewValidator(internalauth.ValidatorConfig{
-			Target:             "cluster-gateway",
+			Target:             internalauth.ServiceClusterGateway,
 			PublicKey:          auditNetdPublicKey,
-			AllowedCallers:     []string{"netd"},
+			AllowedCallers:     []string{internalauth.ServiceNetd},
 			ClockSkewTolerance: 10 * time.Second,
 		})
 	}

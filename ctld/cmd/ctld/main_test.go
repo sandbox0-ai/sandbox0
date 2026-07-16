@@ -21,7 +21,7 @@ func TestCtldShutdownBudgetFitsDeploymentGracePeriod(t *testing.T) {
 
 	shutdownBudget := httpShutdownTimeout + runtimeMetricsShutdownTimeout + portalShutdownTimeout
 	assert.LessOrEqual(t, shutdownBudget+shutdownGraceMargin, deployedTerminationGrace)
-	assert.LessOrEqual(t, max(shutdownBudget, embeddedNetdShutdownTimeout)+shutdownGraceMargin, deployedTerminationGrace)
+	assert.LessOrEqual(t, max(shutdownBudget, networkRuntimeShutdownTimeout)+shutdownGraceMargin, deployedTerminationGrace)
 	assert.Equal(t, minimumTerminationGrace, shutdownBudget+shutdownGraceMargin)
 }
 

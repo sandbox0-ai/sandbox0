@@ -68,7 +68,7 @@ jobs:
           kubectl -n sandbox0-system get deployments,daemonsets,services -o wide || true
           echo "=== manager/storage logs ==="
           kubectl -n sandbox0-system logs -l app.kubernetes.io/component=manager --all-containers --tail=-1 || true
-          echo "=== ctld/netd logs ==="
+          echo "=== ctld network runtime logs ==="
           kubectl -n sandbox0-system logs -l app.kubernetes.io/component=ctld --all-containers --tail=-1 || true
           echo "=== sandbox0-system events ==="
           kubectl -n sandbox0-system get events --sort-by=.lastTimestamp || true

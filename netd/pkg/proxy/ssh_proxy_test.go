@@ -31,7 +31,7 @@ func TestProxySSHSessionReoriginatesWithPlatformCredential(t *testing.T) {
 
 	netdLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("listen netd: %v", err)
+		t.Fatalf("listen for network runtime: %v", err)
 	}
 	defer netdLn.Close()
 
@@ -70,7 +70,7 @@ func TestProxySSHSessionReoriginatesWithPlatformCredential(t *testing.T) {
 		Timeout:         5 * time.Second,
 	})
 	if err != nil {
-		t.Fatalf("dial netd ssh proxy: %v", err)
+		t.Fatalf("dial network runtime SSH proxy: %v", err)
 	}
 	defer client.Close()
 

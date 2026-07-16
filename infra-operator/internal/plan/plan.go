@@ -818,7 +818,6 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 			namespacedRef("DaemonSet", infra.Namespace, fmt.Sprintf("%s-ctld-a", infra.Name)),
 			namespacedRef("DaemonSet", infra.Namespace, fmt.Sprintf("%s-ctld-b", infra.Name)),
 			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-ctld-network-metrics", infra.Name)),
-			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-netd-metrics", infra.Name)),
 			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-ctld", infra.Name)),
 			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-netd", infra.Name)),
 			namespacedRef("ServiceAccount", infra.Namespace, fmt.Sprintf("%s-ctld", infra.Name)),

@@ -20,21 +20,21 @@ func newDaemonMetricsRegistry() *daemonMetricsRegistry {
 	return &daemonMetricsRegistry{
 		redirectSyncTotal: promauto.NewCounterVec(prometheus.CounterOpts{
 			Name: "netd_redirect_sync_total",
-			Help: "Total number of netd redirect sync attempts by result",
+			Help: "Total number of ctld network runtime redirect synchronization attempts by result",
 		}, []string{"result"}),
 		redirectSyncDuration: promauto.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "netd_redirect_sync_duration_seconds",
-			Help:    "Duration of netd redirect sync attempts by result",
+			Help:    "Duration of ctld network runtime redirect synchronization attempts by result",
 			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30},
 		}, []string{"result"}),
 		redirectSyncStageDuration: promauto.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "netd_redirect_sync_stage_duration_seconds",
-			Help:    "Duration of netd redirect sync stages by stage and result",
+			Help:    "Duration of ctld network runtime redirect synchronization stages by stage and result",
 			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30},
 		}, []string{"stage", "result"}),
 		redirectSyncObjects: promauto.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "netd_redirect_sync_objects",
-			Help: "Object counts from the most recent netd redirect sync by kind",
+			Help: "Object counts from the most recent ctld network runtime redirect synchronization by kind",
 		}, []string{"kind"}),
 	}
 }

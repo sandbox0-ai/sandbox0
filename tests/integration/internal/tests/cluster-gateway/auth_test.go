@@ -24,7 +24,7 @@ func TestClusterGatewayIntegration_AuthRequired(t *testing.T) {
 	t.Cleanup(managerServer.Close)
 
 	storageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatalf("unexpected storage-proxy request: %s", r.URL.Path)
+		t.Fatalf("unexpected manager storage API request: %s", r.URL.Path)
 	}))
 	t.Cleanup(storageServer.Close)
 
@@ -46,7 +46,7 @@ func TestClusterGatewayIntegration_PermissionDenied(t *testing.T) {
 	t.Cleanup(managerServer.Close)
 
 	storageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatalf("unexpected storage-proxy request: %s", r.URL.Path)
+		t.Fatalf("unexpected manager storage API request: %s", r.URL.Path)
 	}))
 	t.Cleanup(storageServer.Close)
 
@@ -69,7 +69,7 @@ func TestClusterGatewayIntegration_VolumeEndpointsRequirePermissions(t *testing.
 	t.Cleanup(managerServer.Close)
 
 	storageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatalf("unexpected storage-proxy request: %s", r.URL.Path)
+		t.Fatalf("unexpected manager storage API request: %s", r.URL.Path)
 	}))
 	t.Cleanup(storageServer.Close)
 
@@ -111,7 +111,7 @@ func TestClusterGatewayIntegration_RootFSEndpointsProxyToManager(t *testing.T) {
 	t.Cleanup(managerServer.Close)
 
 	storageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatalf("unexpected storage-proxy request: %s", r.URL.Path)
+		t.Fatalf("unexpected manager storage API request: %s", r.URL.Path)
 	}))
 	t.Cleanup(storageServer.Close)
 

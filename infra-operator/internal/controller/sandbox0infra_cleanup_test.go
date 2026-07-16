@@ -108,7 +108,6 @@ func TestCleanupDisabledServiceResourcesCleansBuiltinDependencies(t *testing.T) 
 		&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "demo-manager"}},
 		&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "demo-manager"}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "demo-ctld-network-metrics", Namespace: "sandbox0-system"}},
-		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "demo-netd-metrics", Namespace: "sandbox0-system"}},
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
 			Name:      "demo-ctld-config-abc123",
 			Namespace: "sandbox0-system",
@@ -174,7 +173,6 @@ func TestCleanupDisabledServiceResourcesCleansBuiltinDependencies(t *testing.T) 
 	assertClientObjectMissing(t, client, types.NamespacedName{Name: "demo-manager"}, &rbacv1.ClusterRole{})
 	assertClientObjectMissing(t, client, types.NamespacedName{Name: "demo-manager"}, &rbacv1.ClusterRoleBinding{})
 	assertClientObjectMissing(t, client, types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-ctld-network-metrics"}, &corev1.Service{})
-	assertClientObjectMissing(t, client, types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-netd-metrics"}, &corev1.Service{})
 	assertClientObjectMissing(t, client, types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-ctld-config-abc123"}, &corev1.ConfigMap{})
 	assertClientObjectMissing(t, client, types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-netd-config-def456"}, &corev1.ConfigMap{})
 

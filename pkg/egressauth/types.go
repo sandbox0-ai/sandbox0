@@ -26,7 +26,7 @@ type ResolveResponse struct {
 
 	// Headers is an in-memory compatibility view derived from `directives`.
 	// It is intentionally excluded from the wire format so the broker protocol
-	// can move to typed directives before netd adapters are rewritten.
+	// can move to typed directives before the ctld network runtime adapters are rewritten.
 	Headers map[string]string `json:"-"`
 }
 

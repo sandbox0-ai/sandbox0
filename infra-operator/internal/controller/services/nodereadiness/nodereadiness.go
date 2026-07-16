@@ -20,10 +20,10 @@ import (
 )
 
 const (
-	labelManagedBy        = "app.kubernetes.io/managed-by"
-	labelInstance         = "app.kubernetes.io/instance"
-	labelComponent        = "app.kubernetes.io/component"
-	embeddedNetdConfigEnv = "NETD_CONFIG_PATH"
+	labelManagedBy          = "app.kubernetes.io/managed-by"
+	labelInstance           = "app.kubernetes.io/instance"
+	labelComponent          = "app.kubernetes.io/component"
+	networkRuntimeConfigEnv = "NETD_CONFIG_PATH"
 )
 
 type Reconciler struct {
@@ -174,9 +174,6 @@ func (r *Reconciler) clearNodeReadiness(ctx context.Context, node *corev1.Node) 
 	}
 	original := node.DeepCopy()
 	delete(node.Labels, dataplane.NodeDataPlaneReadyLabel)
-	// Remove the superseded per-engine label while converging nodes on the
-	// data-plane and ctld readiness signals.
-	delete(node.Labels, dataplane.NodeNetdReadyLabel)
 	delete(node.Labels, dataplane.NodeCtldReadyLabel)
 	if labelsEqual(original.Labels, node.Labels) {
 		return nil
@@ -203,7 +200,6 @@ func (r *Reconciler) patchNodeReadiness(
 	}
 
 	setBoolLabel(node.Labels, dataplane.NodeDataPlaneReadyLabel, dataPlaneReady)
-	delete(node.Labels, dataplane.NodeNetdReadyLabel)
 	setOptionalBoolLabel(node.Labels, dataplane.NodeCtldReadyLabel, requireCtld, ctldReady)
 
 	if labelsEqual(original.Labels, node.Labels) {
@@ -218,7 +214,7 @@ func (r *Reconciler) patchNodeReadiness(
 // readyCtldPodsByNode requires one ready pod from each HA slot. A synchronized
 // standby can become ready before the active ctld has completed kubelet CSI
 // registration, so a single ready ctld pod is not a sufficient node signal.
-func readyCtldPodsByNode(pods []corev1.Pod, daemonSets map[string]*appsv1.DaemonSet, requireEmbeddedNetd bool) map[string]bool {
+func readyCtldPodsByNode(pods []corev1.Pod, daemonSets map[string]*appsv1.DaemonSet, requireNetworkRuntime bool) map[string]bool {
 	readySlotsByNode := make(map[string]map[string]struct{})
 	blockedByPredecessor := make(map[string]bool)
 	for i := range pods {
@@ -231,7 +227,7 @@ func readyCtldPodsByNode(pods []corev1.Pod, daemonSets map[string]*appsv1.Daemon
 			continue
 		}
 		ds := daemonSets[slot]
-		if requireEmbeddedNetd && !daemonSetEmbedsNetd(ds) {
+		if requireNetworkRuntime && !daemonSetHasNetworkRuntime(ds) {
 			continue
 		}
 		if ctldsvc.CtldContainerRunning(pod) && !ctldsvc.PodMatchesCurrentTemplate(pod, ds) {
@@ -258,7 +254,7 @@ func readyCtldPodsByNode(pods []corev1.Pod, daemonSets map[string]*appsv1.Daemon
 	return readyByNode
 }
 
-func daemonSetEmbedsNetd(ds *appsv1.DaemonSet) bool {
+func daemonSetHasNetworkRuntime(ds *appsv1.DaemonSet) bool {
 	if ds == nil {
 		return false
 	}
@@ -268,7 +264,7 @@ func daemonSetEmbedsNetd(ds *appsv1.DaemonSet) bool {
 			continue
 		}
 		for _, env := range container.Env {
-			if env.Name == embeddedNetdConfigEnv && env.Value != "" {
+			if env.Name == networkRuntimeConfigEnv && env.Value != "" {
 				return true
 			}
 		}

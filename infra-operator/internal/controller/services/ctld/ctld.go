@@ -46,14 +46,13 @@ const (
 	ctldTerminationGraceSeconds    = int64(45)
 	ctldCPURequest                 = "250m"
 	ctldMemoryRequest              = "256Mi"
-	embeddedNetdCPURequest         = "100m"
-	embeddedNetdMemoryRequest      = "128Mi"
+	networkRuntimeCPURequest       = "100m"
+	networkRuntimeMemoryRequest    = "128Mi"
 	ctldHAProbeSocket              = "/run/sandbox0/ctld-ha.sock"
 	ctldKubeletRegistrationSocket  = "/var/lib/kubelet/plugins_registry/" + volumeportal.DriverName + "-reg.sock"
 	ctldKubeletCSIEndpoint         = "/var/lib/kubelet/plugins/" + volumeportal.DriverName + "/csi.sock"
 	ctldRolloutRevisionAnnotation  = "infra.sandbox0.ai/ctld-rollout-revision"
 	networkMetricsServiceSuffix    = "-ctld-network-metrics"
-	legacyNetdMetricsServiceSuffix = "-netd-metrics"
 )
 
 func NewReconciler(resources *common.ResourceManager) *Reconciler {
@@ -109,7 +108,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			return err
 		}
 	}
-	if err := r.cleanupNetworkMetricsServices(ctx, infra, netdAssets != nil); err != nil {
+	if err := r.cleanupNetworkMetricsService(ctx, infra, netdAssets != nil); err != nil {
 		return err
 	}
 
@@ -423,10 +422,10 @@ func buildCtldDaemonSet(cfg ctldDaemonSetConfig) *appsv1.DaemonSet {
 	}
 	if cfg.NetdEnabled {
 		cpu := requests[corev1.ResourceCPU]
-		cpu.Add(resource.MustParse(embeddedNetdCPURequest))
+		cpu.Add(resource.MustParse(networkRuntimeCPURequest))
 		requests[corev1.ResourceCPU] = cpu
 		memory := requests[corev1.ResourceMemory]
-		memory.Add(resource.MustParse(embeddedNetdMemoryRequest))
+		memory.Add(resource.MustParse(networkRuntimeMemoryRequest))
 		requests[corev1.ResourceMemory] = memory
 	}
 	ctldContainer := corev1.Container{
@@ -798,19 +797,14 @@ func (r *Reconciler) ensureNetworkMetricsService(ctx context.Context, infra *inf
 	)
 }
 
-func (r *Reconciler) cleanupNetworkMetricsServices(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, networkEnabled bool) error {
-	if infra == nil {
+func (r *Reconciler) cleanupNetworkMetricsService(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, networkEnabled bool) error {
+	if infra == nil || networkEnabled {
 		return nil
 	}
-	names := []string{infra.Name + legacyNetdMetricsServiceSuffix}
-	if !networkEnabled {
-		names = append(names, infra.Name+networkMetricsServiceSuffix)
-	}
-	for _, name := range names {
-		service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: infra.Namespace}}
-		if err := r.Resources.Client.Delete(ctx, service); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("delete obsolete network metrics service %s: %w", name, err)
-		}
+	name := infra.Name + networkMetricsServiceSuffix
+	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: infra.Namespace}}
+	if err := r.Resources.Client.Delete(ctx, service); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete disabled network metrics service %s: %w", name, err)
 	}
 	return nil
 }

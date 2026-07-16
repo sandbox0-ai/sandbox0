@@ -382,7 +382,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, imageRepo, imageTag string
 	if cfg.NetworkPolicyProvider == "netd" {
 		secretName, err := netdservice.EnsureMITMCASecretWithScope(ctx, r.Resources, compiledPlan.Scope, compiledPlan, common.GetServiceLabels(compiledPlan.Scope.Name, "netd"))
 		if err != nil {
-			return nil, fmt.Errorf("ensure netd MITM CA secret: %w", err)
+			return nil, fmt.Errorf("ensure network-runtime MITM CA secret: %w", err)
 		}
 		cfg.NetdMITMCASecretName = secretName
 		cfg.NetdMITMCASecretNamespace = compiledPlan.Scope.Namespace

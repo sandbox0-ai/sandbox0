@@ -74,7 +74,7 @@ func configuredMeteringRecorder(recorder meteringRecorder) (meteringRecorder, bo
 	return recorder, true
 }
 
-// FlushCoordinator handles distributed flush coordination across storage-proxy instances
+// FlushCoordinator handles distributed flush coordination across manager storage runtime instances
 type FlushCoordinator interface {
 	// CoordinateFlush coordinates a flush across all instances that have the volume mounted.
 	// Returns when all instances have flushed or timeout occurs.
@@ -317,7 +317,7 @@ func (m *Manager) CreateSnapshot(ctx context.Context, req *CreateSnapshotRequest
 	}
 
 	// 0. Distributed flush coordination (if coordinator is set)
-	// This ensures all storage-proxy instances that have this volume mounted
+	// This ensures all manager storage runtime instances that have this volume mounted
 	// flush their local caches to S3 before we create the snapshot.
 	m.mu.RLock()
 	coordinator := m.coordinator

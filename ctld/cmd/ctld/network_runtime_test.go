@@ -100,37 +100,37 @@ func TestPrimaryServiceHandleWaitsForGracefulShutdown(t *testing.T) {
 	}
 }
 
-func TestEmbeddedNetdExitErrorTreatsCanceledParentAsGraceful(t *testing.T) {
-	for _, netdErr := range []error{nil, context.Canceled} {
-		if err, failed := embeddedNetdExitError(context.Canceled, netdErr); err != nil || failed {
-			t.Fatalf("embeddedNetdExitError(parent canceled, %v) = (%v, %t), want (nil, false)", netdErr, err, failed)
+func TestNetworkRuntimeExitErrorTreatsCanceledParentAsGraceful(t *testing.T) {
+	for _, networkErr := range []error{nil, context.Canceled} {
+		if err, failed := networkRuntimeExitError(context.Canceled, networkErr); err != nil || failed {
+			t.Fatalf("networkRuntimeExitError(parent canceled, %v) = (%v, %t), want (nil, false)", networkErr, err, failed)
 		}
 	}
-	if err, failed := embeddedNetdExitError(nil, nil); err == nil || !failed {
-		t.Fatalf("embeddedNetdExitError(active parent, nil) = (%v, %t), want failure", err, failed)
+	if err, failed := networkRuntimeExitError(nil, nil); err == nil || !failed {
+		t.Fatalf("networkRuntimeExitError(active parent, nil) = (%v, %t), want failure", err, failed)
 	}
 }
 
-func TestConfiguredEmbeddedNetdFactoryValidatesBeforePrimaryElection(t *testing.T) {
-	factory, err := configuredEmbeddedNetdFactory("", ":8095")
+func TestConfiguredNetworkRuntimeFactoryValidatesBeforePrimaryElection(t *testing.T) {
+	factory, err := configuredNetworkRuntimeFactory("", ":8095")
 	if err != nil || factory != nil {
-		t.Fatalf("configuredEmbeddedNetdFactory(empty) = (%v, %v), want (nil, nil)", factory, err)
+		t.Fatalf("configuredNetworkRuntimeFactory(empty) = (%v, %v), want (nil, nil)", factory, err)
 	}
 
-	if _, err := configuredEmbeddedNetdFactory(t.TempDir()+"/missing.yaml", ":8095"); err == nil {
-		t.Fatal("configuredEmbeddedNetdFactory(missing) succeeded, want validation error")
+	if _, err := configuredNetworkRuntimeFactory(t.TempDir()+"/missing.yaml", ":8095"); err == nil {
+		t.Fatal("configuredNetworkRuntimeFactory(missing) succeeded, want validation error")
 	}
 
-	path := filepath.Join(t.TempDir(), "netd.yaml")
-	if err := os.WriteFile(path, []byte("node_name: node-a\nhealth_port: 8095\n"), 0o600); err != nil {
-		t.Fatalf("write netd config: %v", err)
+	configPath := filepath.Join(t.TempDir(), "netd.yaml")
+	if err := os.WriteFile(configPath, []byte("node_name: node-a\nhealth_port: 8095\n"), 0o600); err != nil {
+		t.Fatalf("write network runtime config: %v", err)
 	}
-	if _, err := configuredEmbeddedNetdFactory(path, ":8095"); err == nil {
-		t.Fatal("configuredEmbeddedNetdFactory accepted a ctld port collision")
+	if _, err := configuredNetworkRuntimeFactory(configPath, ":8095"); err == nil {
+		t.Fatal("configuredNetworkRuntimeFactory accepted a ctld port collision")
 	}
 }
 
-func TestRunHAPrimaryReleasesLeaseAfterEmbeddedNetdFailure(t *testing.T) {
+func TestRunHAPrimaryReleasesLeaseAfterNetworkRuntimeFailure(t *testing.T) {
 	root := t.TempDir()
 	primaryCoordinator, err := ctldha.NewCoordinator(ctldha.Config{RootDir: root, Slot: "a"})
 	if err != nil {
@@ -145,7 +145,7 @@ func TestRunHAPrimaryReleasesLeaseAfterEmbeddedNetdFailure(t *testing.T) {
 	defer cancel()
 	replicatorReady := make(chan *ctldha.Replicator, 1)
 	failPrimary := make(chan struct{})
-	wantErr := errors.New("embedded netd failed")
+	wantErr := errors.New("network runtime failed")
 	primaryResult := make(chan error, 1)
 	go func() {
 		primaryResult <- runHAPrimary(ctx, primaryCoordinator, nil, nil, func(_ context.Context, options primaryRunOptions) error {
@@ -187,7 +187,7 @@ func TestRunHAPrimaryReleasesLeaseAfterEmbeddedNetdFailure(t *testing.T) {
 	case err := <-standbyErrors:
 		t.Fatalf("standby promotion error = %v", err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("standby was not promoted after primary netd failure")
+		t.Fatal("standby was not promoted after primary network runtime failure")
 	}
 }
 

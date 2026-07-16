@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"io"
 	"net"
@@ -11,8 +12,34 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
 )
+
+func TestStorageAuthValidatorRejectsLegacyAudience(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	validator := newStorageAuthValidator(publicKey)
+	generator := internalauth.NewGenerator(internalauth.DefaultGeneratorConfig(internalauth.ServiceClusterGateway, privateKey))
+
+	canonicalToken, err := generator.Generate(internalauth.ServiceManagerStorage, "team-1", "user-1", internalauth.GenerateOptions{})
+	if err != nil {
+		t.Fatalf("generate canonical token: %v", err)
+	}
+	if _, err := validator.Validate(canonicalToken); err != nil {
+		t.Fatalf("validate canonical manager-storage token: %v", err)
+	}
+
+	legacyToken, err := generator.Generate("storage-proxy", "team-1", "user-1", internalauth.GenerateOptions{})
+	if err != nil {
+		t.Fatalf("generate legacy token: %v", err)
+	}
+	if _, err := validator.Validate(legacyToken); !errors.Is(err, internalauth.ErrInvalidTarget) {
+		t.Fatalf("validate legacy storage-proxy audience error = %v, want ErrInvalidTarget", err)
+	}
+}
 
 func TestInternalHTTPClientUsesRuntimeHandlerWithoutSocket(t *testing.T) {
 	r := &Runtime{

@@ -17,11 +17,13 @@ import (
 )
 
 const (
-	embeddedNetdShutdownTimeout      = 7 * time.Second
-	embeddedNetdTelemetryStopTimeout = 5 * time.Second
-	embeddedNetdStartupTimeout       = 45 * time.Second
+	networkRuntimeShutdownTimeout      = 7 * time.Second
+	networkRuntimeTelemetryStopTimeout = 5 * time.Second
+	networkRuntimeStartupTimeout       = 45 * time.Second
 )
 
+// primaryService is a ctld subsystem that runs only while this process owns
+// the node-local HA primary lease.
 type primaryService interface {
 	Run(context.Context) error
 	Ready() bool
@@ -93,12 +95,12 @@ func (h *primaryServiceHandle) Wait(ctx context.Context) error {
 	}
 }
 
-func configuredEmbeddedNetdFactory(path, ctldHTTPAddr string) (primaryServiceFactory, error) {
+func configuredNetworkRuntimeFactory(path, ctldHTTPAddr string) (primaryServiceFactory, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil, nil
 	}
-	cfg, err := loadEmbeddedNetdConfig(path)
+	cfg, err := loadNetworkRuntimeConfig(path)
 	if err != nil {
 		return nil, err
 	}
@@ -114,17 +116,17 @@ func configuredEmbeddedNetdFactory(path, ctldHTTPAddr string) (primaryServiceFac
 		return nil, err
 	}
 	return func() (primaryService, error) {
-		return newEmbeddedNetdService(cfg.DeepCopy())
+		return newNetworkRuntimeService(cfg.DeepCopy())
 	}, nil
 }
 
-type embeddedNetdService struct {
+type networkRuntimeService struct {
 	daemon        *netddaemon.Daemon
 	logger        *zap.Logger
 	observability *observability.Provider
 }
 
-func loadEmbeddedNetdConfig(configPath string) (*apiconfig.NetdConfig, error) {
+func loadNetworkRuntimeConfig(configPath string) (*apiconfig.NetdConfig, error) {
 	cfg, err := apiconfig.LoadNetdConfigFromPath(configPath)
 	if err != nil {
 		return nil, err
@@ -134,65 +136,65 @@ func loadEmbeddedNetdConfig(configPath string) (*apiconfig.NetdConfig, error) {
 		cfg.NodeName = strings.TrimSpace(nodeName)
 	}
 	if expected := strings.TrimSpace(nodeName); expected != "" && cfg.NodeName != expected {
-		return nil, fmt.Errorf("netd node name %q does not match ctld node name %q", cfg.NodeName, expected)
+		return nil, fmt.Errorf("network runtime node name %q does not match ctld node name %q", cfg.NodeName, expected)
 	}
 	return cfg, nil
 }
 
-func newEmbeddedNetdService(cfg *apiconfig.NetdConfig) (*embeddedNetdService, error) {
+func newNetworkRuntimeService(cfg *apiconfig.NetdConfig) (*networkRuntimeService, error) {
 	if cfg == nil {
-		return nil, fmt.Errorf("netd config is nil")
+		return nil, fmt.Errorf("network runtime config is nil")
 	}
 	logger, err := observability.NewLogger(observability.LoggerConfig{
 		ServiceName: "netd",
 		Level:       cfg.LogLevel,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create netd logger: %w", err)
+		return nil, fmt.Errorf("create network runtime logger: %w", err)
 	}
 	provider, err := observability.New(observability.ConfigFromEnv("netd", logger))
 	if err != nil {
 		_ = logger.Sync()
-		return nil, fmt.Errorf("create netd observability: %w", err)
+		return nil, fmt.Errorf("create network runtime observability: %w", err)
 	}
-	logger.Info("Starting embedded netd",
+	logger.Info("Starting ctld network runtime",
 		zap.String("node", cfg.NodeName),
 		zap.Int("health_port", cfg.HealthPort),
 		zap.Int("metrics_port", cfg.MetricsPort),
 		zap.Int("proxy_http_port", cfg.ProxyHTTPPort),
 		zap.Int("proxy_https_port", cfg.ProxyHTTPSPort),
 	)
-	return &embeddedNetdService{
+	return &networkRuntimeService{
 		daemon:        netddaemon.New(cfg, logger, provider),
 		logger:        logger,
 		observability: provider,
 	}, nil
 }
 
-func (s *embeddedNetdService) Run(ctx context.Context) (runErr error) {
+func (s *networkRuntimeService) Run(ctx context.Context) (runErr error) {
 	if s == nil || s.daemon == nil {
-		return fmt.Errorf("embedded netd is not initialized")
+		return fmt.Errorf("ctld network runtime is not initialized")
 	}
 	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), embeddedNetdTelemetryStopTimeout)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), networkRuntimeTelemetryStopTimeout)
 		defer cancel()
 		if s.observability != nil {
 			runErr = errors.Join(runErr, s.observability.Shutdown(shutdownCtx))
 		}
 		if s.logger != nil {
-			s.logger.Info("Stopped embedded netd")
+			s.logger.Info("Stopped ctld network runtime")
 			_ = s.logger.Sync()
 		}
 	}()
 	return s.runDaemonWithStartupDeadline(ctx)
 }
 
-func (s *embeddedNetdService) runDaemonWithStartupDeadline(ctx context.Context) error {
+func (s *networkRuntimeService) runDaemonWithStartupDeadline(ctx context.Context) error {
 	daemonCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- s.daemon.Run(daemonCtx) }()
-	timer := time.NewTimer(embeddedNetdStartupTimeout)
+	timer := time.NewTimer(networkRuntimeStartupTimeout)
 	defer timer.Stop()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
@@ -210,11 +212,11 @@ func (s *embeddedNetdService) runDaemonWithStartupDeadline(ctx context.Context) 
 		case <-timer.C:
 			cancel()
 			err := <-done
-			return errors.Join(fmt.Errorf("embedded netd did not become ready within %s", embeddedNetdStartupTimeout), err)
+			return errors.Join(fmt.Errorf("ctld network runtime did not become ready within %s", networkRuntimeStartupTimeout), err)
 		}
 	}
 }
 
-func (s *embeddedNetdService) Ready() bool {
+func (s *networkRuntimeService) Ready() bool {
 	return s != nil && s.daemon != nil && s.daemon.Ready()
 }

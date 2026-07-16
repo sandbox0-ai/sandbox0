@@ -99,7 +99,7 @@ func newRedisTeamBandwidthLimiter(ctx context.Context, cfg *config.NetdConfig) (
 		FailOpen:  cfg.RedisFailOpen,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create netd redis bandwidth limiter: %w", err)
+		return nil, fmt.Errorf("create ctld network runtime Redis bandwidth limiter: %w", err)
 	}
 	return &redisTeamBandwidthLimiter{
 		client:      client,

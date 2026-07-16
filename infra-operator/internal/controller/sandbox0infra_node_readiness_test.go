@@ -30,7 +30,6 @@ func TestRunStepsRefreshesNodeReadinessAfterEarlierFailure(t *testing.T) {
 		Labels: map[string]string{
 			"sandbox0.ai/node-role":           "sandbox",
 			dataplane.NodeDataPlaneReadyLabel: dataplane.ReadyLabelValue,
-			dataplane.NodeNetdReadyLabel:      dataplane.ReadyLabelValue,
 			dataplane.NodeCtldReadyLabel:      dataplane.ReadyLabelValue,
 		},
 	}}
@@ -74,9 +73,6 @@ func TestRunStepsRefreshesNodeReadinessAfterEarlierFailure(t *testing.T) {
 		t.Fatalf("get refreshed node: %v", err)
 	}
 	assertWorkflowNodeLabel(t, got, dataplane.NodeDataPlaneReadyLabel, dataplane.NotReadyLabelValue)
-	if value, ok := got.Labels[dataplane.NodeNetdReadyLabel]; ok {
-		t.Fatalf("node %s superseded network label = %q, want absent", got.Name, value)
-	}
 	assertWorkflowNodeLabel(t, got, dataplane.NodeCtldReadyLabel, dataplane.NotReadyLabelValue)
 }
 

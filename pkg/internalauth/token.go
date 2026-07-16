@@ -239,7 +239,7 @@ func (v *Validator) ValidateWithOptions(tokenString string, opts ValidateOptions
 
 	// Validate target (audience)
 	if !opts.SkipTargetCheck {
-		if !v.acceptsTarget(claims.Audience) {
+		if claims.Audience != v.config.Target {
 			return nil, fmt.Errorf("%w: expected %s, got %s", ErrInvalidTarget, v.config.Target, claims.Audience)
 		}
 	}
@@ -285,18 +285,6 @@ func (v *Validator) ValidateWithOptions(tokenString string, opts ValidateOptions
 	}
 
 	return claims, nil
-}
-
-func (v *Validator) acceptsTarget(target string) bool {
-	if target == v.config.Target {
-		return true
-	}
-	for _, additionalTarget := range v.config.AdditionalTargets {
-		if target == additionalTarget {
-			return true
-		}
-	}
-	return false
 }
 
 // isReplay checks if the JTI has been used before.

@@ -79,41 +79,6 @@ func TestReconcileReturnsErrorAndClearsReadinessWhenNoNodeReady(t *testing.T) {
 	assertNodeReadinessLabels(t, gotNode, dataplane.NotReadyLabelValue, dataplane.NotReadyLabelValue)
 }
 
-func TestReconcileDeletesSupersededNetworkReadinessLabel(t *testing.T) {
-	infra := newNodeReadinessInfra()
-	infra.Spec.Network = nil
-	node := newNodeReadinessNode("node-a", map[string]string{
-		"sandbox0.ai/node-role":           "sandbox",
-		dataplane.NodeDataPlaneReadyLabel: dataplane.NotReadyLabelValue,
-		dataplane.NodeNetdReadyLabel:      dataplane.ReadyLabelValue,
-		dataplane.NodeCtldReadyLabel:      dataplane.NotReadyLabelValue,
-	})
-	client, scheme := newNodeReadinessClient(t,
-		node,
-		newNodeReadinessCtldDaemonSet(infra.Namespace, infra.Name, dataplane.CtldHASlotA),
-		newNodeReadinessCtldDaemonSet(infra.Namespace, infra.Name, dataplane.CtldHASlotB),
-		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-a-a", "node-a", dataplane.CtldHASlotA, true),
-		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-a-b", "node-a", dataplane.CtldHASlotB, true),
-		newNodeReadinessCSINode("node-a", true),
-	)
-	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
-
-	if err := reconciler.Reconcile(context.Background(), infra, infraplan.Compile(infra)); err != nil {
-		t.Fatalf("Reconcile() error = %v", err)
-	}
-
-	gotNode := getNodeReadinessNode(t, client, "node-a")
-	if got := gotNode.Labels[dataplane.NodeDataPlaneReadyLabel]; got != dataplane.ReadyLabelValue {
-		t.Fatalf("data-plane label = %q, want %q", got, dataplane.ReadyLabelValue)
-	}
-	if _, ok := gotNode.Labels[dataplane.NodeNetdReadyLabel]; ok {
-		t.Fatalf("superseded network label = %q, want absent", gotNode.Labels[dataplane.NodeNetdReadyLabel])
-	}
-	if got := gotNode.Labels[dataplane.NodeCtldReadyLabel]; got != dataplane.ReadyLabelValue {
-		t.Fatalf("ctld label = %q, want %q", got, dataplane.ReadyLabelValue)
-	}
-}
-
 func TestReconcileRequiresKubeletCSIRegistration(t *testing.T) {
 	infra := newNodeReadinessInfra()
 	node := newNodeReadinessNode("node-a", map[string]string{"sandbox0.ai/node-role": "sandbox"})
@@ -139,7 +104,6 @@ func TestRefreshRejectsReadySurgePredecessorsWithoutGating(t *testing.T) {
 	node := newNodeReadinessNode("node-a", map[string]string{
 		"sandbox0.ai/node-role":           "sandbox",
 		dataplane.NodeDataPlaneReadyLabel: dataplane.ReadyLabelValue,
-		dataplane.NodeNetdReadyLabel:      dataplane.ReadyLabelValue,
 		dataplane.NodeCtldReadyLabel:      dataplane.ReadyLabelValue,
 	})
 	oldSlotA := newNodeReadinessCtldPod(infra.Namespace, infra.Name, "old-ctld-a", node.Name, dataplane.CtldHASlotA, true)
@@ -174,7 +138,6 @@ func TestRefreshRejectsTerminatingRunningSurgePredecessor(t *testing.T) {
 	node := newNodeReadinessNode("node-a", map[string]string{
 		"sandbox0.ai/node-role":           "sandbox",
 		dataplane.NodeDataPlaneReadyLabel: dataplane.ReadyLabelValue,
-		dataplane.NodeNetdReadyLabel:      dataplane.ReadyLabelValue,
 		dataplane.NodeCtldReadyLabel:      dataplane.ReadyLabelValue,
 	})
 	predecessor := newNodeReadinessCtldPod(infra.Namespace, infra.Name, "old-ctld-a", node.Name, dataplane.CtldHASlotA, true)
@@ -223,7 +186,7 @@ func TestReadyCtldPodsByNodeRequiresDistinctHASlots(t *testing.T) {
 	}
 }
 
-func TestReadyCtldPodsByNodeRequiresEmbeddedNetdTemplate(t *testing.T) {
+func TestReadyCtldPodsByNodeRequiresNetworkRuntimeTemplate(t *testing.T) {
 	sets := map[string]*appsv1.DaemonSet{
 		dataplane.CtldHASlotA: newNodeReadinessCtldDaemonSet("sandbox0-system", "demo", dataplane.CtldHASlotA),
 		dataplane.CtldHASlotB: newNodeReadinessCtldDaemonSet("sandbox0-system", "demo", dataplane.CtldHASlotB),
@@ -240,10 +203,10 @@ func TestReadyCtldPodsByNodeRequiresEmbeddedNetdTemplate(t *testing.T) {
 	}
 
 	if readyCtldPodsByNode(pods, sets, true)["node-a"] {
-		t.Fatal("node-a is netd-ready before the current ctld template embeds netd")
+		t.Fatal("node-a is network-ready before the current ctld template enables the network runtime")
 	}
 	if !readyCtldPodsByNode(pods, sets, false)["node-a"] {
-		t.Fatal("node-a is not ctld-ready when embedded netd is not required")
+		t.Fatal("node-a is not ctld-ready when the network runtime is not required")
 	}
 }
 
@@ -348,7 +311,7 @@ func newNodeReadinessCtldDaemonSet(namespace, instance, slot string) *appsv1.Dae
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{
 					Name:  "ctld",
 					Image: "ctld:test",
-					Env:   []corev1.EnvVar{{Name: embeddedNetdConfigEnv, Value: "/config/netd.yaml"}},
+					Env:   []corev1.EnvVar{{Name: networkRuntimeConfigEnv, Value: "/config/netd.yaml"}},
 				}}},
 			},
 		},
@@ -387,9 +350,6 @@ func assertNodeReadinessLabels(t *testing.T, node *corev1.Node, dataPlane, ctld 
 	t.Helper()
 	if got := node.Labels[dataplane.NodeDataPlaneReadyLabel]; got != dataPlane {
 		t.Fatalf("node %s data-plane label = %q, want %q", node.Name, got, dataPlane)
-	}
-	if got, ok := node.Labels[dataplane.NodeNetdReadyLabel]; ok {
-		t.Fatalf("node %s superseded network label = %q, want absent", node.Name, got)
 	}
 	if got := node.Labels[dataplane.NodeCtldReadyLabel]; got != ctld {
 		t.Fatalf("node %s ctld label = %q, want %q", node.Name, got, ctld)

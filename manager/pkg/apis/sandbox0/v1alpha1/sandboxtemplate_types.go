@@ -356,7 +356,8 @@ type ProtocolRule struct {
 	// Ports constrains the rule to specific ports/protocols.
 	Ports []PortSpec `json:"ports,omitempty"`
 
-	// TLSMode controls whether netd must terminate TLS to inspect this protocol.
+	// TLSMode controls whether the ctld network runtime must terminate TLS to
+	// inspect this protocol.
 	TLSMode EgressTLSMode `json:"tlsMode,omitempty"`
 
 	// HTTPMatch constrains HTTP-carried protocol rules to request attributes.
@@ -442,10 +443,12 @@ type EgressCredentialRule struct {
 	// Protocol is the intended application protocol for the rule.
 	Protocol EgressAuthProtocol `json:"protocol,omitempty"`
 
-	// TLSMode indicates whether netd should intercept TLS for matching flows.
+	// TLSMode indicates whether the ctld network runtime should intercept TLS for
+	// matching flows.
 	TLSMode EgressTLSMode `json:"tlsMode,omitempty"`
 
-	// FailurePolicy controls whether netd should fail-open or fail-closed when auth material cannot be enforced.
+	// FailurePolicy controls whether the ctld network runtime should fail-open or
+	// fail-closed when auth material cannot be enforced.
 	FailurePolicy EgressAuthFailurePolicy `json:"failurePolicy,omitempty"`
 
 	// Domains matches outbound destinations by DNS name or wildcard suffix.
@@ -569,7 +572,8 @@ type UsernamePasswordProjection struct{}
 type SSHProxyProjection struct {
 	// SandboxPublicKeys are fake public keys accepted from sandbox-side SSH clients.
 	SandboxPublicKeys []string `json:"sandboxPublicKeys,omitempty"`
-	// UpstreamUsername is the username netd uses when authenticating to the upstream SSH server.
+	// UpstreamUsername is the username the ctld network runtime uses when
+	// authenticating to the upstream SSH server.
 	UpstreamUsername string `json:"upstreamUsername,omitempty"`
 	// KnownHosts contains OpenSSH known_hosts entries used to verify upstream host keys.
 	KnownHosts []string `json:"knownHosts,omitempty"`
@@ -611,7 +615,8 @@ const (
 	EgressAuthRolloutDisabled EgressAuthRolloutMode = "disabled"
 )
 
-// EgressTLSMode defines how netd should handle TLS for auth-enabled egress traffic.
+// EgressTLSMode defines how the ctld network runtime should handle TLS for
+// auth-enabled egress traffic.
 type EgressTLSMode string
 
 const (
@@ -619,7 +624,7 @@ const (
 	EgressTLSModeTerminateReoriginate EgressTLSMode = "terminate-reoriginate"
 )
 
-// EgressAuthFailurePolicy defines netd behavior when auth cannot be enforced.
+// EgressAuthFailurePolicy defines ctld network runtime behavior when auth cannot be enforced.
 type EgressAuthFailurePolicy string
 
 const (

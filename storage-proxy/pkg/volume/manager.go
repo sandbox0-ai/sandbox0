@@ -141,7 +141,7 @@ func (m *Manager) SetMetrics(metrics *obsmetrics.StorageProxyMetrics) {
 }
 
 // MountVolume mounts a volume using the configured storage backend.
-// AccessMode is enforced per storage-proxy instance (not per sandbox).
+// AccessMode is enforced per manager storage runtime instance (not per sandbox).
 func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID string, accessMode AccessMode) (string, time.Time, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

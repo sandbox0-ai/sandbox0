@@ -4,7 +4,6 @@ import corev1 "k8s.io/api/core/v1"
 
 const (
 	NodeDataPlaneReadyLabel = "sandbox0.ai/data-plane-ready"
-	NodeNetdReadyLabel      = "sandbox0.ai/netd-ready"
 	NodeCtldReadyLabel      = "sandbox0.ai/ctld-ready"
 	CtldHASlotLabel         = "sandbox0.ai/ctld-ha-slot"
 	CtldHASlotA             = "a"

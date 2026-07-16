@@ -11,7 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// NetdConfig holds configuration for netd.
+// NetdConfig holds configuration for the ctld network runtime.
 type NetdConfig struct {
 	// +optional
 	// +kubebuilder:default="info"
@@ -117,7 +117,7 @@ type NetdConfig struct {
 	// RedisURL configures the Redis backend used by cluster-scoped team bandwidth limiting.
 	RedisURL string `yaml:"redis_url" json:"-"`
 	// +optional
-	// RedisKeyPrefix prefixes Redis keys used by netd.
+	// RedisKeyPrefix prefixes Redis keys used by the network runtime.
 	RedisKeyPrefix string `yaml:"redis_key_prefix" json:"-"`
 	// +optional
 	// RedisTimeout bounds each Redis operation.
@@ -212,7 +212,7 @@ type NetdConfig struct {
 	ShutdownDelay metav1.Duration `yaml:"shutdown_delay" json:"shutdownDelay"`
 }
 
-// LoadNetdConfig returns the netd configuration.
+// LoadNetdConfig returns the ctld network runtime configuration.
 func LoadNetdConfig() *NetdConfig {
 	path := os.Getenv("CONFIG_PATH")
 	if path == "" {
@@ -228,9 +228,9 @@ func LoadNetdConfig() *NetdConfig {
 	return cfg
 }
 
-// LoadNetdConfigFromPath loads netd configuration from an explicit path. It
-// allows another binary, such as ctld, to embed netd without sharing its own
-// CONFIG_PATH or silently falling back to defaults when the netd config is
+// LoadNetdConfigFromPath loads network runtime configuration from an explicit path.
+// It lets ctld load this configuration without sharing its own CONFIG_PATH or
+// silently falling back to defaults when the network runtime configuration is
 // invalid.
 func LoadNetdConfigFromPath(path string) (*NetdConfig, error) {
 	cfg, err := loadNetdConfig(path)
@@ -262,11 +262,11 @@ func loadNetdConfig(path string) (*NetdConfig, error) {
 	return cfg, nil
 }
 
-// ValidateListenerPorts rejects listener collisions inside netd and with
-// ports reserved by an embedding process such as ctld.
+// ValidateListenerPorts rejects collisions between network runtime listeners
+// and ports reserved by other ctld subsystems.
 func (c *NetdConfig) ValidateListenerPorts(reserved map[int]string) error {
 	if c == nil {
-		return fmt.Errorf("netd config is required")
+		return fmt.Errorf("network runtime config is required")
 	}
 	listeners := []struct {
 		name string
@@ -280,13 +280,13 @@ func (c *NetdConfig) ValidateListenerPorts(reserved map[int]string) error {
 	seen := make(map[int]string, len(listeners))
 	for _, listener := range listeners {
 		if listener.port <= 0 || listener.port > 65535 {
-			return fmt.Errorf("netd %s port %d is outside 1-65535", listener.name, listener.port)
+			return fmt.Errorf("network runtime %s port %d is outside 1-65535", listener.name, listener.port)
 		}
 		if previous := seen[listener.port]; previous != "" {
-			return fmt.Errorf("netd %s port %d conflicts with netd %s port", listener.name, listener.port, previous)
+			return fmt.Errorf("network runtime %s port %d conflicts with %s port", listener.name, listener.port, previous)
 		}
 		if owner := reserved[listener.port]; owner != "" {
-			return fmt.Errorf("netd %s port %d conflicts with %s", listener.name, listener.port, owner)
+			return fmt.Errorf("network runtime %s port %d conflicts with %s", listener.name, listener.port, owner)
 		}
 		seen[listener.port] = listener.name
 	}

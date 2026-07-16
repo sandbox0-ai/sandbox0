@@ -96,7 +96,7 @@ func TestToNetdLeavesSandboxObservabilityIngestUnset(t *testing.T) {
 		cfg.SandboxObservabilityIngestRequestTimeout.Duration != 0 ||
 		cfg.SandboxObservabilityIngestMaxRetries != 0 ||
 		cfg.SandboxObservabilityIngestRetryBackoff.Duration != 0 {
-		t.Fatalf("netd sandbox observability ingest config should be operator-derived, got %#v", cfg)
+		t.Fatalf("network runtime observability ingest config should be operator-derived, got %#v", cfg)
 	}
 }
 

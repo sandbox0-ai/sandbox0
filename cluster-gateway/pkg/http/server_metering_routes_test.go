@@ -3,6 +3,7 @@ package http
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -384,6 +385,32 @@ func TestInternalAuthValidatorsKeepControlAndDataPlaneTrustRootsSeparate(t *test
 	}
 	if _, err := controlValidator.Validate(ctldToken); err == nil {
 		t.Fatal("control-plane validator accepted data-plane token")
+	}
+}
+
+func TestInternalAuthValidatorsRejectLegacyStorageProxyCaller(t *testing.T) {
+	dataPublicKey, dataPrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate data-plane key: %v", err)
+	}
+	_, ingestValidator, _ := newInternalAuthValidators(authModePublic, nil, nil, dataPublicKey, nil)
+	legacyGenerator := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller:     "storage-proxy",
+		PrivateKey: dataPrivateKey,
+		TTL:        time.Minute,
+	})
+	legacyToken, err := legacyGenerator.Generate(
+		internalauth.ServiceClusterGateway,
+		"team-1",
+		"storage-proxy",
+		internalauth.GenerateOptions{Permissions: []string{authn.PermSandboxObservabilityWrite}},
+	)
+	if err != nil {
+		t.Fatalf("generate legacy storage-proxy token: %v", err)
+	}
+
+	if _, err := ingestValidator.Validate(legacyToken); !errors.Is(err, internalauth.ErrInvalidCaller) {
+		t.Fatalf("validate legacy storage-proxy caller error = %v, want ErrInvalidCaller", err)
 	}
 }
 

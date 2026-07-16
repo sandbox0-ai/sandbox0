@@ -1,3 +1,3 @@
 package storageproxy
 
-// Package storageproxy contains integration tests for storage-proxy.
+// Package storageproxy contains integration tests for the manager storage runtime.

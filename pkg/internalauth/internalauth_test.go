@@ -106,30 +106,27 @@ func TestValidatorInvalidTarget(t *testing.T) {
 	}
 }
 
-func TestValidatorAcceptsAdditionalTarget(t *testing.T) {
+func TestValidatorRejectsLegacyStorageProxyTarget(t *testing.T) {
 	generator := NewGenerator(DefaultGeneratorConfig(ServiceClusterGateway, testPrivateKey))
 	validator := NewValidator(ValidatorConfig{
-		Target:            ServiceManagerStorage,
-		AdditionalTargets: []string{ServiceStorageProxy},
-		PublicKey:         testPublicKey,
+		Target:    ServiceManagerStorage,
+		PublicKey: testPublicKey,
 	})
 
-	for _, target := range []string{ServiceManagerStorage, ServiceStorageProxy} {
-		token, err := generator.Generate(target, "team-123", "user-456", GenerateOptions{})
-		if err != nil {
-			t.Fatalf("generate token for %s: %v", target, err)
-		}
-		if _, err := validator.Validate(token); err != nil {
-			t.Fatalf("validate token for %s: %v", target, err)
-		}
+	canonicalToken, err := generator.Generate(ServiceManagerStorage, "team-123", "user-456", GenerateOptions{})
+	if err != nil {
+		t.Fatalf("generate canonical token: %v", err)
+	}
+	if _, err := validator.Validate(canonicalToken); err != nil {
+		t.Fatalf("validate canonical token: %v", err)
 	}
 
-	token, err := generator.Generate(ServiceManager, "team-123", "user-456", GenerateOptions{})
+	legacyToken, err := generator.Generate("storage-proxy", "team-123", "user-456", GenerateOptions{})
 	if err != nil {
-		t.Fatalf("generate token for rejected target: %v", err)
+		t.Fatalf("generate legacy token: %v", err)
 	}
-	if _, err := validator.Validate(token); !errors.Is(err, ErrInvalidTarget) {
-		t.Fatalf("validate rejected target error = %v, want ErrInvalidTarget", err)
+	if _, err := validator.Validate(legacyToken); !errors.Is(err, ErrInvalidTarget) {
+		t.Fatalf("validate legacy storage-proxy target error = %v, want ErrInvalidTarget", err)
 	}
 }
 

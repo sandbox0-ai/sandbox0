@@ -21,7 +21,7 @@ const (
 	defaultNetdApplyTimeout = 5 * time.Second
 )
 
-// NetdProviderConfig configures the netd provider behavior.
+// NetdProviderConfig configures policy-apply waits for the ctld network runtime.
 type NetdProviderConfig struct {
 	ApplyTimeout time.Duration
 	PollInterval time.Duration
@@ -33,7 +33,7 @@ type policyWaiter struct {
 	once                sync.Once
 }
 
-// NetdProvider waits for netd to apply policies.
+// NetdProvider waits for the ctld network runtime to apply policies.
 type NetdProvider struct {
 	podLister    corelisters.PodLister
 	podInformer  cache.SharedIndexInformer
@@ -44,7 +44,7 @@ type NetdProvider struct {
 	waiters      map[string]map[*policyWaiter]struct{}
 }
 
-// NewNetdProvider creates a netd-backed Provider.
+// NewNetdProvider creates a Provider backed by the ctld network runtime.
 func NewNetdProvider(
 	podInformer coreinformers.PodInformer,
 	podLister corelisters.PodLister,
@@ -79,13 +79,13 @@ func (p *NetdProvider) EnsureBaseline(ctx context.Context, namespace string) err
 
 func (p *NetdProvider) ApplySandboxPolicy(ctx context.Context, input SandboxPolicyInput) error {
 	if p.podLister == nil {
-		return fmt.Errorf("netd provider missing pod lister")
+		return fmt.Errorf("ctld network runtime provider missing pod lister")
 	}
 	if p.podInformer == nil {
-		return fmt.Errorf("netd provider missing pod informer")
+		return fmt.Errorf("ctld network runtime provider missing pod informer")
 	}
 	if input.Namespace == "" || input.PodName == "" {
-		return fmt.Errorf("netd provider missing pod identity")
+		return fmt.Errorf("ctld network runtime provider missing pod identity")
 	}
 
 	networkHash, err := p.networkPolicyHash(input.NetworkPolicy)
@@ -140,7 +140,7 @@ func (p *NetdProvider) waitForAppliedHashes(
 		case <-waiter.done:
 			return nil
 		case <-ctx.Done():
-			return fmt.Errorf("%w: timeout waiting for netd policy apply for pod %s/%s", ErrPolicyApplyTimeout, namespace, podName)
+			return fmt.Errorf("%w: timeout waiting for ctld network runtime policy apply for pod %s/%s", ErrPolicyApplyTimeout, namespace, podName)
 		case <-p.tick(ticker):
 			if p.isApplied(namespace, podName, expectedNetworkHash) {
 				p.completeWaiter(key, waiter)

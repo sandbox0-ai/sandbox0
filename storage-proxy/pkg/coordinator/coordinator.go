@@ -1,7 +1,7 @@
 // Package coordinator handles distributed coordination for snapshot operations
-// across multiple storage-proxy instances using PostgreSQL LISTEN/NOTIFY.
+// across multiple manager storage runtime instances using PostgreSQL LISTEN/NOTIFY.
 //
-// Key concept: Each storage-proxy instance (identified by cluster_id + pod_id)
+// Key concept: Each manager storage runtime instance (identified by cluster_id + pod_id)
 // is an independent coordination unit. This is a multi-replica problem, not
 // a cross-cluster problem - even replicas within the same cluster need coordination.
 package coordinator
@@ -313,7 +313,7 @@ func (c *Coordinator) RegisterMount(ctx context.Context, volumeID string, option
 	return nil
 }
 
-// ValidateMount enforces access mode constraints across storage-proxy instances.
+// ValidateMount enforces access mode constraints across manager storage runtime instances.
 func (c *Coordinator) ValidateMount(ctx context.Context, volumeID string, accessMode volume.AccessMode) error {
 	accessMode = volume.NormalizeAccessMode(string(accessMode))
 

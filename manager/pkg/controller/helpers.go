@@ -306,7 +306,7 @@ func setPodCondition(conditions *[]corev1.PodCondition, condition corev1.PodCond
 	*conditions = append(*conditions, condition)
 }
 
-// EnsureNetdMITMCASecret copies the manager-local netd MITM CA cert into the template namespace.
+// EnsureNetdMITMCASecret copies the manager-local network-runtime MITM CA certificate into the template namespace.
 func EnsureNetdMITMCASecret(
 	ctx context.Context,
 	client kubernetes.Interface,
@@ -318,7 +318,7 @@ func EnsureNetdMITMCASecret(
 		return nil
 	}
 	if templateNamespace == "" {
-		return fmt.Errorf("template namespace is required to ensure netd MITM CA secret")
+		return fmt.Errorf("template namespace is required to ensure network-runtime MITM CA secret")
 	}
 
 	sourceNamespace, err := resolveNetdMITMCASecretNamespace(cfg)
@@ -328,12 +328,12 @@ func EnsureNetdMITMCASecret(
 
 	source, err := getSecret(ctx, client, secretLister, sourceNamespace, cfg.NetdMITMCASecretName)
 	if err != nil {
-		return fmt.Errorf("get netd MITM CA secret %s/%s: %w", sourceNamespace, cfg.NetdMITMCASecretName, err)
+		return fmt.Errorf("get network-runtime MITM CA secret %s/%s: %w", sourceNamespace, cfg.NetdMITMCASecretName, err)
 	}
 
 	certPEM := source.Data[netdMITMCACertKey]
 	if len(certPEM) == 0 {
-		return fmt.Errorf("netd MITM CA secret %s/%s missing %q", sourceNamespace, cfg.NetdMITMCASecretName, netdMITMCACertKey)
+		return fmt.Errorf("network-runtime MITM CA secret %s/%s missing %q", sourceNamespace, cfg.NetdMITMCASecretName, netdMITMCACertKey)
 	}
 
 	desired := &corev1.Secret{
@@ -356,11 +356,11 @@ func EnsureNetdMITMCASecret(
 	}
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("get target netd MITM CA secret: %w", err)
+			return fmt.Errorf("get target network-runtime MITM CA secret: %w", err)
 		}
 		if _, err := client.CoreV1().Secrets(templateNamespace).Create(ctx, desired, metav1.CreateOptions{}); err != nil {
 			if !apierrors.IsAlreadyExists(err) {
-				return fmt.Errorf("create target netd MITM CA secret: %w", err)
+				return fmt.Errorf("create target network-runtime MITM CA secret: %w", err)
 			}
 		} else {
 			return nil
@@ -386,7 +386,7 @@ func EnsureNetdMITMCASecret(
 		return err
 	})
 	if err != nil {
-		return fmt.Errorf("update target netd MITM CA secret: %w", err)
+		return fmt.Errorf("update target network-runtime MITM CA secret: %w", err)
 	}
 	return nil
 }
@@ -429,5 +429,5 @@ func resolveNetdMITMCASecretNamespace(cfg *config.ManagerConfig) (string, error)
 	if err != nil && !os.IsNotExist(err) {
 		return "", fmt.Errorf("read service account namespace: %w", err)
 	}
-	return "", fmt.Errorf("resolve netd MITM CA source namespace")
+	return "", fmt.Errorf("resolve network-runtime MITM CA source namespace")
 }

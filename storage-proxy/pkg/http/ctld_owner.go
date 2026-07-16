@@ -56,10 +56,10 @@ func (r *kubernetesVolumeCtldResolver) ResolveLocalCtldURL(ctx context.Context) 
 		return "", err
 	}
 	if selfPod == nil {
-		return "", fmt.Errorf("storage-proxy pod %q not found", r.selfPodID)
+		return "", fmt.Errorf("manager pod %q not found", r.selfPodID)
 	}
 	if selfPod.Spec.NodeName == "" {
-		return "", fmt.Errorf("storage-proxy pod %q is not scheduled", r.selfPodID)
+		return "", fmt.Errorf("manager pod %q is not scheduled", r.selfPodID)
 	}
 
 	return r.resolveCtldURL(ctx, selfPod, selfPod.Spec.NodeName, selfPod.Namespace, true)
@@ -78,7 +78,7 @@ func (r *kubernetesVolumeCtldResolver) ResolveCtldURL(ctx context.Context, nodeN
 		return "", err
 	}
 	if selfPod == nil {
-		return "", fmt.Errorf("storage-proxy pod %q not found", r.selfPodID)
+		return "", fmt.Errorf("manager pod %q not found", r.selfPodID)
 	}
 	podNamespace = strings.TrimSpace(podNamespace)
 	if podNamespace == "" {
@@ -113,7 +113,7 @@ func (r *kubernetesVolumeCtldResolver) resolveCtldURL(
 			return addr, nil
 		}
 	}
-	return "", fmt.Errorf("no ready ctld pod available for storage-proxy pod %q", r.selfPodID)
+	return "", fmt.Errorf("no ready ctld pod available for manager pod %q", r.selfPodID)
 }
 
 func resolveKubernetesPod(ctx context.Context, client kubernetes.Interface, podID string) (*corev1.Pod, error) {

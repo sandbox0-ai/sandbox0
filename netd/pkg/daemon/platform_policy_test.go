@@ -13,6 +13,31 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
+func TestPlatformServiceAllowlistExcludesLegacyStorageProxy(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{name: "cluster-gateway", want: true},
+		{name: "manager", want: true},
+		{name: "storage-proxy", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service := &watcher.ServiceInfo{
+				Namespace: "sandbox0-system",
+				Name:      "fullmode-" + tc.name,
+				Labels: map[string]string{
+					"app.kubernetes.io/managed-by": "sandbox0infra-operator",
+					"app.kubernetes.io/name":       tc.name,
+				},
+			}
+			if got := isPlatformService(service); got != tc.want {
+				t.Fatalf("isPlatformService() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPlatformPolicyStateTracksSandboxPodIPs(t *testing.T) {
 	store := policypkg.NewStore(zap.NewNop())
 	source := &watcher.SandboxInfo{

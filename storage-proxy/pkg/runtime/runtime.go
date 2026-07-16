@@ -4,6 +4,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -240,14 +241,7 @@ func New(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 	if err != nil {
 		return nil, fmt.Errorf("load manager storage internal auth public key from %s: %w", internalauth.DefaultInternalJWTPublicKeyPath, err)
 	}
-	validator := internalauth.NewValidator(internalauth.ValidatorConfig{
-		Target:                 internalauth.ServiceManagerStorage,
-		AdditionalTargets:      []string{internalauth.ServiceStorageProxy},
-		PublicKey:              publicKey,
-		AllowedCallers:         []string{internalauth.ServiceClusterGateway, internalauth.ServiceManager},
-		ClockSkewTolerance:     5 * time.Second,
-		ReplayDetectionEnabled: false,
-	})
+	validator := newStorageAuthValidator(publicKey)
 	httpAuthenticator := auth.NewHTTPAuthenticator(validator, r.logger)
 
 	fsServer := fsserver.NewFileSystemServer(r.volMgr, repo, eventHub, eventBroadcaster, r.logrusLogger, volumeBarrier)
@@ -288,6 +282,16 @@ func New(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 	r.meteringRepo = meteringRepo
 
 	return r, nil
+}
+
+func newStorageAuthValidator(publicKey ed25519.PublicKey) *internalauth.Validator {
+	return internalauth.NewValidator(internalauth.ValidatorConfig{
+		Target:                 internalauth.ServiceManagerStorage,
+		PublicKey:              publicKey,
+		AllowedCallers:         []string{internalauth.ServiceClusterGateway, internalauth.ServiceManager},
+		ClockSkewTolerance:     5 * time.Second,
+		ReplayDetectionEnabled: false,
+	})
 }
 
 // Start begins accepting HTTP traffic and runs background workers until ctx is
@@ -375,7 +379,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 		}
 	}()
 
-	r.logger.Info("Storage-proxy runtime started", zap.String("address", listener.Addr().String()))
+	r.logger.Info("Manager storage runtime started", zap.String("address", listener.Addr().String()))
 	return nil
 }
 
@@ -561,7 +565,7 @@ func initDatabase(ctx context.Context, databaseURL string, cfg *config.StoragePr
 	if err != nil {
 		return nil, err
 	}
-	logger.Info("Storage-proxy database connection established",
+	logger.Info("Manager storage database connection established",
 		zap.Int32("max_conns", pool.Config().MaxConns),
 		zap.Int32("min_conns", pool.Config().MinConns),
 	)

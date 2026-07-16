@@ -2407,7 +2407,7 @@ func assertObjectEncryptionLifecycle(env *framework.ScenarioEnv, session *e2euti
 	Expect(privateKey).To(ContainSubstring("BEGIN"))
 
 	assertWorkloadConfigMapContains(env, "deployment", env.Infra.Name+"-manager", "storage-config", "object_encryption_enabled: true")
-	assertServiceSelectsComponent(env, env.Infra.Name+"-storage-proxy", "manager")
+	assertManagerStorageService(env)
 	for _, slot := range []string{"a", "b"} {
 		assertWorkloadConfigMapContains(env, "daemonset", env.Infra.Name+"-ctld-"+slot, "config", "object_encryption_enabled: true")
 	}
@@ -2551,7 +2551,8 @@ func workloadConfigMapName(env *framework.ScenarioEnv, workloadKind, workloadNam
 	return name
 }
 
-func assertServiceSelectsComponent(env *framework.ScenarioEnv, serviceName, component string) {
+func assertManagerStorageService(env *framework.ScenarioEnv) {
+	serviceName := env.Infra.Name + "-manager"
 	output, err := framework.KubectlOutput(
 		env.TestCtx.Context,
 		env.Config.Kubeconfig,
@@ -2559,12 +2560,15 @@ func assertServiceSelectsComponent(env *framework.ScenarioEnv, serviceName, comp
 		"service",
 		serviceName,
 		"-o",
-		`jsonpath={.spec.selector.app\.kubernetes\.io/component}`,
+		`jsonpath={.spec.selector.app\.kubernetes\.io/component}{"\n"}{.spec.ports[?(@.name=="storage-http")].port}`,
 		"--namespace",
 		env.Infra.Namespace,
 	)
 	Expect(err).NotTo(HaveOccurred())
-	Expect(strings.TrimSpace(output)).To(Equal(component))
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	Expect(lines).To(HaveLen(2))
+	Expect(lines[0]).To(Equal("manager"))
+	Expect(lines[1]).NotTo(BeEmpty())
 }
 
 func assertNoPlaintextInStorage(env *framework.ScenarioEnv, target, root, sentinel string) {

@@ -242,7 +242,8 @@ func New(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		return nil, fmt.Errorf("load storage-proxy internal auth public key from %s: %w", internalauth.DefaultInternalJWTPublicKeyPath, err)
 	}
 	validator := internalauth.NewValidator(internalauth.ValidatorConfig{
-		Target:                 internalauth.ServiceStorageProxy,
+		Target:                 internalauth.ServiceManagerStorage,
+		AdditionalTargets:      []string{internalauth.ServiceStorageProxy},
 		PublicKey:              publicKey,
 		AllowedCallers:         []string{internalauth.ServiceClusterGateway, internalauth.ServiceManager},
 		ClockSkewTolerance:     5 * time.Second,

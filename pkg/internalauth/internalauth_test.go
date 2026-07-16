@@ -106,6 +106,33 @@ func TestValidatorInvalidTarget(t *testing.T) {
 	}
 }
 
+func TestValidatorAcceptsAdditionalTarget(t *testing.T) {
+	generator := NewGenerator(DefaultGeneratorConfig(ServiceClusterGateway, testPrivateKey))
+	validator := NewValidator(ValidatorConfig{
+		Target:            ServiceManagerStorage,
+		AdditionalTargets: []string{ServiceStorageProxy},
+		PublicKey:         testPublicKey,
+	})
+
+	for _, target := range []string{ServiceManagerStorage, ServiceStorageProxy} {
+		token, err := generator.Generate(target, "team-123", "user-456", GenerateOptions{})
+		if err != nil {
+			t.Fatalf("generate token for %s: %v", target, err)
+		}
+		if _, err := validator.Validate(token); err != nil {
+			t.Fatalf("validate token for %s: %v", target, err)
+		}
+	}
+
+	token, err := generator.Generate(ServiceManager, "team-123", "user-456", GenerateOptions{})
+	if err != nil {
+		t.Fatalf("generate token for rejected target: %v", err)
+	}
+	if _, err := validator.Validate(token); !errors.Is(err, ErrInvalidTarget) {
+		t.Fatalf("validate rejected target error = %v, want ErrInvalidTarget", err)
+	}
+}
+
 func TestValidatorInvalidSignature(t *testing.T) {
 	// Generate a different key pair for signing
 	otherPublicKey, otherPrivateKey, err := ed25519.GenerateKey(nil)

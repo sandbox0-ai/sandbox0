@@ -114,6 +114,54 @@ func TestCleanupLegacyStorageProxyWaitsForManagerAliasAndPods(t *testing.T) {
 	assertClientObjectPresent(t, client, types.NamespacedName{Name: infra.Name + "-manager-storage-config-current", Namespace: infra.Namespace}, &corev1.ConfigMap{})
 }
 
+func TestCleanupLegacyStorageProxyUsesCanonicalManagerEndpointWithoutAlias(t *testing.T) {
+	ctx := context.Background()
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{Storage: &infrav1alpha1.StorageConfig{
+			Runtime: &infrav1alpha1.StorageProxyConfig{},
+		}},
+	}
+	legacyName := infra.Name + "-storage-proxy"
+	managerName := infra.Name + "-manager"
+	managerLabels := common.GetServiceLabels(infra.Name, "manager")
+	ready := true
+	reconciler, client, _ := newCleanupTestReconciler(t,
+		&corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: managerName, Namespace: infra.Namespace},
+			Spec: corev1.ServiceSpec{
+				Selector: managerLabels,
+				Ports:    []corev1.ServicePort{{Name: "storage-http", Port: 8081}},
+			},
+		},
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "manager-0", Namespace: infra.Namespace, Labels: managerLabels}},
+		&discoveryv1.EndpointSlice{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      managerName + "-endpoint",
+				Namespace: infra.Namespace,
+				Labels:    map[string]string{discoveryv1.LabelServiceName: managerName},
+			},
+			AddressType: discoveryv1.AddressTypeIPv4,
+			Endpoints: []discoveryv1.Endpoint{{
+				Addresses:  []string{"10.0.0.10"},
+				Conditions: discoveryv1.EndpointConditions{Ready: &ready},
+				TargetRef:  &corev1.ObjectReference{Kind: "Pod", Namespace: infra.Namespace, Name: "manager-0"},
+			}},
+		},
+		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: legacyName, Namespace: infra.Namespace}},
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: legacyName, Namespace: infra.Namespace}},
+	)
+
+	if err := reconciler.cleanupLegacyStorageProxy(ctx, infra); err != nil {
+		t.Fatalf("canonical cleanup: %v", err)
+	}
+
+	assertClientObjectMissing(t, client, types.NamespacedName{Name: legacyName, Namespace: infra.Namespace}, &appsv1.Deployment{})
+	assertClientObjectMissing(t, client, types.NamespacedName{Name: legacyName, Namespace: infra.Namespace}, &corev1.ServiceAccount{})
+	assertClientObjectMissing(t, client, types.NamespacedName{Name: legacyName, Namespace: infra.Namespace}, &corev1.Service{})
+	assertClientObjectPresent(t, client, types.NamespacedName{Name: managerName, Namespace: infra.Namespace}, &corev1.Service{})
+}
+
 func TestCtldHandoffCandidatesRequireCurrentTemplateAndReadySlot(t *testing.T) {
 	ctx := context.Background()
 	infra := &infrav1alpha1.Sandbox0Infra{ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"}}

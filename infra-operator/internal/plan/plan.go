@@ -211,7 +211,7 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 	enableScheduler := infrav1alpha1.IsSchedulerEnabled(infra)
 	enableClusterGateway := infrav1alpha1.IsClusterGatewayEnabled(infra)
 	enableManager := infrav1alpha1.IsManagerEnabled(infra)
-	enableStorageProxy := infrav1alpha1.IsStorageProxyEnabled(infra)
+	enableStorageProxy := infrav1alpha1.IsStorageRuntimeEnabled(infra)
 	enableManagerHost := enableManager || enableStorageProxy
 	enableDatabase := infrav1alpha1.IsDatabaseEnabled(infra)
 	enableRedis := infrav1alpha1.IsRedisEnabled(infra)
@@ -232,7 +232,7 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 		EnableManagerHost:          enableManagerHost,
 		EnableStorageProxy:         enableStorageProxy,
 		EnableCtld:                 enableManager,
-		EnableNetd:                 infrav1alpha1.IsNetdEnabled(infra),
+		EnableNetd:                 infrav1alpha1.IsNetworkEnabled(infra),
 		EnableInternalAuth:         hasControlPlane || hasDataPlane,
 		EnableDatabase:             enableDatabase,
 		EnableRedis:                enableRedis,
@@ -303,11 +303,19 @@ func compileClusterGatewayServiceReference(infra *infrav1alpha1.Sandbox0Infra) S
 }
 
 func compileStorageProxyServiceReference(infra *infrav1alpha1.Sandbox0Infra) ServiceReference {
-	if infra == nil || infra.Name == "" || !infrav1alpha1.IsStorageProxyEnabled(infra) {
+	if infra == nil || infra.Name == "" || !infrav1alpha1.IsStorageRuntimeEnabled(infra) {
 		return ServiceReference{}
 	}
 
 	port := common.ResolveServicePort(storageProxyServiceConfig(infra), int32(storageProxyHTTPPort(infra)))
+	if infra.Spec.Storage != nil && infra.Spec.Storage.Runtime != nil {
+		name := fmt.Sprintf("%s-manager", infra.Name)
+		return ServiceReference{
+			Name: name,
+			Port: int32(storageProxyHTTPPort(infra)),
+			URL:  fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", name, infra.Namespace, storageProxyHTTPPort(infra)),
+		}
+	}
 	name := fmt.Sprintf("%s-storage-proxy", infra.Name)
 
 	return ServiceReference{
@@ -422,6 +430,9 @@ func managerHostReplicas(infra *infrav1alpha1.Sandbox0Infra) int32 {
 	var replicas int32
 	if infrav1alpha1.IsManagerEnabled(infra) && infra.Spec.Services.Manager != nil {
 		replicas = infra.Spec.Services.Manager.Replicas
+	}
+	if infra.Spec.Storage != nil && infra.Spec.Storage.Runtime != nil {
+		return replicas
 	}
 	if infrav1alpha1.IsStorageProxyEnabled(infra) && infra.Spec.Services.StorageProxy != nil &&
 		infra.Spec.Services.StorageProxy.Replicas > replicas {
@@ -549,8 +560,12 @@ func compileManagerRuntimeConfig(managerPlan *ManagerPlan, infra *infrav1alpha1.
 		}
 	}
 
-	if infrav1alpha1.IsStorageProxyEnabled(infra) {
-		cfg.StorageProxyBaseURL = fmt.Sprintf("%s-storage-proxy.%s.svc.cluster.local", infra.Name, infra.Namespace)
+	if infrav1alpha1.IsStorageRuntimeEnabled(infra) {
+		storageRuntimeHost := fmt.Sprintf("%s-storage-proxy", infra.Name)
+		if infra.Spec.Storage != nil && infra.Spec.Storage.Runtime != nil {
+			storageRuntimeHost = fmt.Sprintf("%s-manager", infra.Name)
+		}
+		cfg.StorageProxyBaseURL = fmt.Sprintf("%s.%s.svc.cluster.local", storageRuntimeHost, infra.Namespace)
 		cfg.StorageProxyHTTPPort = storageProxyHTTPPort(infra)
 	} else {
 		cfg.StorageProxyBaseURL = ""
@@ -565,7 +580,7 @@ func compileManagerRuntimeConfig(managerPlan *ManagerPlan, infra *infrav1alpha1.
 func compileNetdPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) NetdPlan {
 	nodeSelector, tolerations := common.ResolveSandboxNodePlacement(infra)
 	netdPlan := NetdPlan{
-		Enabled:      infrav1alpha1.IsNetdEnabled(infra),
+		Enabled:      infrav1alpha1.IsNetworkEnabled(infra),
 		NodeSelector: nodeSelector,
 		Tolerations:  tolerations,
 		Config:       &apiconfig.NetdConfig{},
@@ -574,10 +589,10 @@ func compileNetdPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) Ne
 	if infra != nil {
 		netdPlan.RegionID = common.ResolveRegionID(infra)
 		netdPlan.ClusterID = common.ResolveClusterID(infra)
-		if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
-			if infra.Spec.Services.Netd.Config != nil {
-				netdPlan.Config = runtimeconfig.ToNetd(infra.Spec.Services.Netd.Config)
-			}
+		if runtimeConfig := infrav1alpha1.ResolveNetworkRuntimeConfig(infra); runtimeConfig != nil {
+			netdPlan.Config = runtimeconfig.ToNetd(runtimeConfig)
+		}
+		if infra.Spec.Network == nil && infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
 			netdPlan.RuntimeClassName = infra.Spec.Services.Netd.RuntimeClassName
 		}
 	}
@@ -1215,6 +1230,12 @@ func schedulerServiceConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alpha1.S
 }
 
 func storageProxyHTTPPort(infra *infrav1alpha1.Sandbox0Infra) int {
+	if infra != nil && infra.Spec.Storage != nil && infra.Spec.Storage.Runtime != nil {
+		if infra.Spec.Storage.Runtime.HTTPPort > 0 {
+			return infra.Spec.Storage.Runtime.HTTPPort
+		}
+		return defaultStorageProxyHTTPPort
+	}
 	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil &&
 		infra.Spec.Services.StorageProxy.Config != nil && infra.Spec.Services.StorageProxy.Config.HTTPPort > 0 {
 		return infra.Spec.Services.StorageProxy.Config.HTTPPort
@@ -1489,17 +1510,19 @@ func hasEnabledOIDCProviders(providers []infrav1alpha1.OIDCProviderConfig) bool 
 }
 
 func netdEgressAuthResolverURL(infra *infrav1alpha1.Sandbox0Infra) string {
-	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.Netd == nil || infra.Spec.Services.Netd.Config == nil {
+	cfg := infrav1alpha1.ResolveNetworkRuntimeConfig(infra)
+	if cfg == nil {
 		return ""
 	}
-	return infra.Spec.Services.Netd.Config.EgressAuthResolverURL
+	return cfg.EgressAuthResolverURL
 }
 
 func netdEgressAuthEnabled(infra *infrav1alpha1.Sandbox0Infra) bool {
-	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.Netd == nil || infra.Spec.Services.Netd.Config == nil {
+	cfg := infrav1alpha1.ResolveNetworkRuntimeConfig(infra)
+	if cfg == nil {
 		return false
 	}
-	return infra.Spec.Services.Netd.Config.EgressAuthEnabled
+	return cfg.EgressAuthEnabled
 }
 
 func builtinDatabaseActive(infra *infrav1alpha1.Sandbox0Infra) bool {

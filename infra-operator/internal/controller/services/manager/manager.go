@@ -72,8 +72,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 	scope := compiledPlan.Scope
 	deploymentName := fmt.Sprintf("%s-manager", scope.Name)
 	replicas := compiledPlan.Manager.Replicas
+	canonicalStorageRuntime := scope.Owner() != nil && scope.Owner().Spec.Storage != nil && scope.Owner().Spec.Storage.Runtime != nil
+	legacyStorageRuntime := compiledPlan.Components.EnableStorageProxy && !canonicalStorageRuntime
 	var storageResources *corev1.ResourceRequirements
-	if compiledPlan.Components.EnableStorageProxy && scope.Owner() != nil && scope.Owner().Spec.Services != nil && scope.Owner().Spec.Services.StorageProxy != nil {
+	if legacyStorageRuntime && scope.Owner() != nil &&
+		scope.Owner().Spec.Services != nil && scope.Owner().Spec.Services.StorageProxy != nil {
 		storageService := scope.Owner().Spec.Services.StorageProxy
 		if replicas < 1 {
 			return fmt.Errorf("embedded storage-proxy requires at least one manager host replica")
@@ -130,9 +133,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 	}
 
 	resources := compiledPlan.Manager.Resources
-	if storageConfig != nil {
-		resources = mergeEmbeddedServiceResources(resources, storageResources)
-	}
+	resources = resolveManagerResources(resources, storageResources, canonicalStorageRuntime, legacyStorageRuntime)
 	serviceConfig := compiledPlan.Manager.ServiceConfig
 
 	volumeMounts := []corev1.VolumeMount{
@@ -299,11 +300,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 	serviceType := common.ResolveServiceType(serviceConfig)
 	servicePort := common.ResolveServicePort(serviceConfig, httpPort)
 	serviceAnnotations := common.ResolveServiceAnnotations(serviceConfig)
-	if err := r.Resources.ReconcileServicePortsWithScope(ctx, scope, deploymentName, labels, serviceType, serviceAnnotations, []corev1.ServicePort{
+	servicePorts := []corev1.ServicePort{
 		common.BuildServicePort("http", servicePort, httpPort, serviceType),
 		common.BuildServicePort("metrics", metricsPort, metricsPort, serviceType),
 		common.BuildServicePort("webhook", webhookPort, webhookPort, serviceType),
-	}); err != nil {
+	}
+	if canonicalStorageRuntime && storageConfig != nil {
+		servicePorts = append(servicePorts, common.BuildServicePort("storage-http", storageServiceHTTPPort, int32(storageConfig.HTTPPort), serviceType))
+	}
+	if err := r.Resources.ReconcileServicePortsWithScope(ctx, scope, deploymentName, labels, serviceType, serviceAnnotations, servicePorts); err != nil {
 		return err
 	}
 
@@ -314,8 +319,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		if err := r.Resources.EnsureDeploymentRolloutComplete(ctx, scope, deploymentName, replicas); err != nil {
 			return err
 		}
-		if err := r.reconcileStorageProxyAliasService(ctx, compiledPlan, storageConfig, storageServiceHTTPPort, metricsPort, labels); err != nil {
-			return err
+		if !canonicalStorageRuntime {
+			if err := r.reconcileStorageProxyAliasService(ctx, compiledPlan, storageConfig, storageServiceHTTPPort, metricsPort, labels); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -372,6 +379,13 @@ func mergeEmbeddedServiceResources(managerResources, storageResources *corev1.Re
 		Limits:   addResourceLists(managerResolved.Limits, storageResolved.Limits),
 		Claims:   append(append([]corev1.ResourceClaim(nil), managerResolved.Claims...), storageResolved.Claims...),
 	}
+}
+
+func resolveManagerResources(managerResources, storageResources *corev1.ResourceRequirements, canonicalStorageRuntime, legacyStorageRuntime bool) *corev1.ResourceRequirements {
+	if legacyStorageRuntime || (canonicalStorageRuntime && managerResources == nil) {
+		return mergeEmbeddedServiceResources(managerResources, storageResources)
+	}
+	return managerResources
 }
 
 func addResourceLists(left, right corev1.ResourceList) corev1.ResourceList {

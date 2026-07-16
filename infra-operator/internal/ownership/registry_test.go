@@ -40,6 +40,28 @@ func TestLookupReturnsPrefixCoverageForSubtreeLeaves(t *testing.T) {
 	}
 }
 
+func TestRuntimeOwnershipPrefersCanonicalPathsAndMarksAliasesDeprecated(t *testing.T) {
+	for _, path := range []string{"spec.storage.runtime.cacheSizeLimit", "spec.network.config.metricsPort"} {
+		entry, ok := Lookup(path)
+		if !ok {
+			t.Fatalf("expected canonical ownership entry for %s", path)
+		}
+		if entry.UpdateSemantics != UpdateSemanticsDeclarative {
+			t.Fatalf("canonical path %s semantics = %q, want declarative", path, entry.UpdateSemantics)
+		}
+	}
+
+	for _, path := range []string{"spec.services.storageProxy.config.cacheSizeLimit", "spec.services.netd.config.metricsPort"} {
+		entry, ok := Lookup(path)
+		if !ok {
+			t.Fatalf("expected deprecated ownership entry for %s", path)
+		}
+		if entry.UpdateSemantics != UpdateSemanticsDeprecatedAlias {
+			t.Fatalf("deprecated path %s semantics = %q, want deprecated alias", path, entry.UpdateSemantics)
+		}
+	}
+}
+
 func TestLookupTracksCrossServiceDerivedFields(t *testing.T) {
 	cases := []struct {
 		path      string

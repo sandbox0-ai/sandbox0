@@ -44,6 +44,9 @@ func Registry() []Entry {
 		prefix("spec.storage.s3", "storage-proxy", []string{"storage", "storage-proxy"}, nil, UpdateSemanticsDeclarative, "External S3 settings are converted into storage and storage-proxy runtime config."),
 		prefix("spec.storage.gcs", "storage-proxy", []string{"storage", "storage-proxy", "ctld"}, nil, UpdateSemanticsDeclarative, "External GCS settings are converted into storage runtime config and storage client service accounts."),
 		prefix("spec.storage.oss", "storage-proxy", []string{"storage", "storage-proxy"}, nil, UpdateSemanticsDeclarative, "External OSS settings are converted into storage and storage-proxy runtime config."),
+		prefix("spec.storage.runtime", "manager", []string{"manager", "ctld", "cluster-gateway", "status"}, []string{"InfraPlan.Components.EnableStorageProxy", "InfraPlan.Services.StorageProxy"}, UpdateSemanticsDeclarative, "Canonical configuration for the storage runtime hosted by manager and ctld."),
+
+		prefix("spec.network", "ctld", []string{"ctld", "manager", "status"}, []string{"InfraPlan.Components.EnableNetd", "InfraPlan.Netd"}, UpdateSemanticsDeclarative, "Canonical configuration for the network runtime hosted by ctld."),
 
 		exact("spec.redis.type", "plan", []string{"redis", "global-gateway", "regional-gateway", "cluster-gateway", "netd"}, []string{"InfraPlan.Components.EnableRedis"}, UpdateSemanticsDeclarative, "Selects builtin versus external Redis reconciliation and Redis-capable service config injection."),
 		prefix("spec.redis.builtin", "redis", []string{"redis", "global-gateway", "regional-gateway", "cluster-gateway", "netd"}, nil, UpdateSemanticsDeclarative, "Builtin Redis fields are reconciled by the Redis service and injected into Redis-capable service config."),
@@ -96,8 +99,8 @@ func Registry() []Entry {
 		prefix("spec.services.clusterGateway", "cluster-gateway", []string{"cluster-gateway", "status"}, nil, UpdateSemanticsDeclarative, "Direct runtime configuration for cluster-gateway."),
 		prefix("spec.services.manager", "manager", []string{"manager", "status"}, nil, UpdateSemanticsDeclarative, "Direct runtime configuration for manager."),
 		prefix("spec.services.ctld", "ctld", []string{"ctld", "status"}, nil, UpdateSemanticsDeclarative, "Direct runtime configuration for ctld."),
-		prefix("spec.services.storageProxy", "storage-proxy", []string{"storage-proxy", "status"}, nil, UpdateSemanticsDeclarative, "Direct runtime configuration for storage-proxy."),
-		prefix("spec.services.netd", "netd", []string{"netd", "status"}, nil, UpdateSemanticsDeclarative, "Direct runtime configuration for netd."),
+		prefix("spec.services.storageProxy", "storage-proxy", []string{"manager", "ctld", "status"}, nil, UpdateSemanticsDeprecatedAlias, "Deprecated alias for spec.storage.runtime."),
+		prefix("spec.services.netd", "netd", []string{"ctld", "manager", "status"}, nil, UpdateSemanticsDeprecatedAlias, "Deprecated alias for spec.network."),
 
 		exact("spec.services.clusterGateway.config.authMode", "plan", []string{"cluster-gateway", "manager"}, []string{"InfraPlan.Manager.TemplateStoreEnabled", "InfraPlan.Enterprise.ClusterGateway"}, UpdateSemanticsDeclarative, "Auth mode affects manager template-store behavior and enterprise-license requirements."),
 		exact("spec.services.clusterGateway.config.oidcProviders", "plan", []string{"cluster-gateway"}, []string{"InfraPlan.Enterprise.ClusterGateway"}, UpdateSemanticsDeclarative, "Enabled OIDC providers drive cluster-gateway enterprise-license requirements."),
@@ -108,10 +111,13 @@ func Registry() []Entry {
 		exact("spec.services.manager.config.httpPort", "plan", []string{"manager", "netd"}, []string{"InfraPlan.Services.Manager.URL", "InfraPlan.Netd.EgressAuthResolverURL"}, UpdateSemanticsDeclarative, "Manager HTTP port feeds the manager runtime config and netd derived resolver URL."),
 		exact("spec.services.manager.service.port", "plan", []string{"manager", "cluster-gateway", "netd"}, []string{"InfraPlan.Services.Manager.Port", "InfraPlan.Services.Manager.URL", "InfraPlan.Netd.EgressAuthResolverURL"}, UpdateSemanticsDeclarative, "Manager service exposure port is consumed by cluster-gateway and netd."),
 
-		exact("spec.services.storageProxy.config.httpPort", "plan", []string{"storage-proxy", "cluster-gateway"}, nil, UpdateSemanticsDeclarative, "Storage-proxy HTTP port is consumed by cluster-gateway runtime config."),
-		exact("spec.services.storageProxy.service.port", "plan", []string{"storage-proxy", "cluster-gateway"}, nil, UpdateSemanticsDeclarative, "Storage-proxy service exposure port is consumed by cluster-gateway runtime config."),
+		exact("spec.storage.runtime.httpPort", "plan", []string{"manager", "cluster-gateway"}, []string{"InfraPlan.Services.StorageProxy"}, UpdateSemanticsDeclarative, "Storage runtime HTTP port is exposed by the manager Service and consumed by cluster-gateway."),
+		exact("spec.network.config.egressAuthResolverUrl", "plan", []string{"ctld"}, []string{"InfraPlan.Netd.EgressAuthResolverURL"}, UpdateSemanticsDeclarative, "Explicit resolver URL overrides the manager-derived default."),
 
-		exact("spec.services.netd.config.egressAuthResolverUrl", "plan", []string{"netd"}, []string{"InfraPlan.Netd.EgressAuthResolverURL"}, UpdateSemanticsDeclarative, "Explicit resolver URL overrides the manager-derived default."),
+		exact("spec.services.storageProxy.config.httpPort", "plan", []string{"manager", "cluster-gateway"}, nil, UpdateSemanticsDeprecatedAlias, "Deprecated alias for spec.storage.runtime.httpPort."),
+		exact("spec.services.storageProxy.service.port", "plan", []string{"manager", "cluster-gateway"}, nil, UpdateSemanticsDeprecatedAlias, "Deprecated storage Service exposure used only by legacy configurations."),
+
+		exact("spec.services.netd.config.egressAuthResolverUrl", "plan", []string{"ctld"}, []string{"InfraPlan.Netd.EgressAuthResolverURL"}, UpdateSemanticsDeprecatedAlias, "Deprecated alias for spec.network.config.egressAuthResolverUrl."),
 		exact("spec.services.netd.nodeSelector", "netd", []string{"netd"}, nil, UpdateSemanticsDeprecatedAlias, "Deprecated alias for spec.sandboxNodePlacement.nodeSelector."),
 		exact("spec.services.netd.tolerations", "netd", []string{"netd"}, nil, UpdateSemanticsDeprecatedAlias, "Deprecated alias for spec.sandboxNodePlacement.tolerations."),
 

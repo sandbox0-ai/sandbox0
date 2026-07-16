@@ -396,6 +396,85 @@ func TestCompileExposesStorageProxyHTTPToManager(t *testing.T) {
 	}
 }
 
+func TestCompilePrefersCanonicalStorageAndNetworkRuntimeConfig(t *testing.T) {
+	legacyRuntimeClass := "legacy-runc"
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Storage: &infrav1alpha1.StorageConfig{
+				Runtime: &infrav1alpha1.StorageProxyConfig{HTTPPort: 18082, CacheSizeLimit: "2Gi"},
+			},
+			Network: &infrav1alpha1.NetworkConfig{
+				MITMCASecretName: "canonical-mitm-ca",
+				Config: &infrav1alpha1.NetdConfig{
+					EgressAuthResolverURL: "http://canonical-resolver:9000",
+					MetricsPort:           19091,
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				Manager: &infrav1alpha1.ManagerServiceConfig{WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+					EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					Replicas:             2,
+				}},
+				StorageProxy: &infrav1alpha1.StorageProxyServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						Replicas:             4,
+					},
+					ServiceExposureConfig: infrav1alpha1.ServiceExposureConfig{Service: &infrav1alpha1.ServiceNetworkConfig{Port: 18083}},
+					Config:                &infrav1alpha1.StorageProxyConfig{HTTPPort: 18084, CacheSizeLimit: "8Gi"},
+				},
+				Netd: &infrav1alpha1.NetdServiceConfig{
+					EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					MITMCASecretName:     "legacy-mitm-ca",
+					RuntimeClassName:     &legacyRuntimeClass,
+					NodeSelector:         map[string]string{"sandbox0.ai/node-role": "legacy"},
+					Config: &infrav1alpha1.NetdConfig{
+						EgressAuthResolverURL: "http://legacy-resolver:9000",
+						MetricsPort:           29091,
+					},
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+
+	if !compiled.Components.EnableStorageProxy || !compiled.Components.EnableNetd {
+		t.Fatalf("canonical runtimes were not enabled: %#v", compiled.Components)
+	}
+	if compiled.Manager.Replicas != 2 {
+		t.Fatalf("manager replicas = %d, want canonical process replicas 2", compiled.Manager.Replicas)
+	}
+	if got := compiled.Services.StorageProxy.Name; got != "demo-manager" {
+		t.Fatalf("storage runtime service name = %q, want manager", got)
+	}
+	if got := compiled.Services.StorageProxy.URL; got != "http://demo-manager.sandbox0-system.svc.cluster.local:18082" {
+		t.Fatalf("storage runtime URL = %q, want manager storage port", got)
+	}
+	if got := compiled.Manager.Config.StorageProxyBaseURL; got != "demo-manager.sandbox0-system.svc.cluster.local" {
+		t.Fatalf("manager storage runtime base URL = %q, want manager service", got)
+	}
+	if got := compiled.Manager.Config.StorageProxyHTTPPort; got != 18082 {
+		t.Fatalf("manager storage runtime port = %d, want 18082", got)
+	}
+	if got := compiled.Netd.Config.EgressAuthResolverURL; got != "http://canonical-resolver:9000" {
+		t.Fatalf("network resolver URL = %q, want canonical config", got)
+	}
+	if got := compiled.Netd.Config.MetricsPort; got != 19091 {
+		t.Fatalf("network metrics port = %d, want canonical config", got)
+	}
+	if compiled.Netd.RuntimeClassName != nil {
+		t.Fatalf("canonical network inherited deprecated runtimeClassName: %#v", compiled.Netd.RuntimeClassName)
+	}
+	if len(compiled.Netd.NodeSelector) != 0 {
+		t.Fatalf("canonical network inherited deprecated node selector: %#v", compiled.Netd.NodeSelector)
+	}
+	if got := compiled.ResolveNetdMITMCASecretName(); got != "canonical-mitm-ca" {
+		t.Fatalf("network MITM CA secret = %q, want canonical-mitm-ca", got)
+	}
+}
+
 func TestCompileRejectsInvalidClusterID(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},

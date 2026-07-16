@@ -14,6 +14,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -560,6 +561,105 @@ func TestReconcileStorageOnlyUsesManagerHostAndSwitchesAliasAfterFullRollout(t *
 	assertManagerServicePort(t, alias, "metrics", 19090, 9090)
 }
 
+func TestReconcileCanonicalStorageUsesManagerBudgetAndService(t *testing.T) {
+	reconciler := newManagerTestReconciler(t)
+	ctx := context.Background()
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system", UID: types.UID("demo-uid")},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
+					Enabled: true, Port: 5432, Username: "sandbox0", Database: "sandbox0", SSLMode: "disable",
+				},
+			},
+			Storage: &infrav1alpha1.StorageConfig{
+				Type: infrav1alpha1.StorageTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinStorageConfig{
+					Enabled: true, Bucket: "sandbox0", Region: "us-east-1",
+				},
+				Runtime: &infrav1alpha1.StorageProxyConfig{
+					HTTPPort: 8081, CacheSizeLimit: "512Mi", LogSizeLimit: "64Mi",
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				Manager: &infrav1alpha1.ManagerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						Replicas:             1,
+						Resources: &corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("75m"),
+								corev1.ResourceMemory: resource.MustParse("192Mi"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("1"),
+								corev1.ResourceMemory: resource.MustParse("1Gi"),
+							},
+						},
+					},
+					Config: &infrav1alpha1.ManagerConfig{HTTPPort: 8080, MetricsPort: 9090},
+				},
+				StorageProxy: &infrav1alpha1.StorageProxyServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						Replicas:             4,
+						Resources: &corev1.ResourceRequirements{Requests: corev1.ResourceList{
+							corev1.ResourceCPU: resource.MustParse("900m"),
+						}},
+					},
+					Config: &infrav1alpha1.StorageProxyConfig{HTTPPort: 18081},
+				},
+			},
+		},
+	}
+	if err := reconciler.Resources.Client.Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-sandbox0-rustfs-credentials", Namespace: infra.Namespace},
+		Data: map[string][]byte{
+			"endpoint":          []byte("http://demo-rustfs.sandbox0-system.svc:9000"),
+			"RUSTFS_ACCESS_KEY": []byte("access-key"),
+			"RUSTFS_SECRET_KEY": []byte("secret-key"),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	compiled := infraplan.Compile(infra)
+	if err := reconciler.Reconcile(ctx, "sandbox0ai/infra", "test", compiled); err == nil || !strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("first Reconcile() error = %v, want rollout not ready", err)
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err := reconciler.Resources.Client.Get(ctx, types.NamespacedName{Name: "demo-manager", Namespace: infra.Namespace}, deployment); err != nil {
+		t.Fatal(err)
+	}
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 1 {
+		t.Fatalf("manager replicas = %v, want 1", deployment.Spec.Replicas)
+	}
+	resources := deployment.Spec.Template.Spec.Containers[0].Resources
+	if got := resources.Requests.Cpu().String(); got != "75m" {
+		t.Fatalf("manager CPU request = %q, want 75m", got)
+	}
+	if got := resources.Requests.Memory().String(); got != "192Mi" {
+		t.Fatalf("manager memory request = %q, want 192Mi", got)
+	}
+	if got := resources.Limits.Cpu().String(); got != "1" {
+		t.Fatalf("manager CPU limit = %q, want 1", got)
+	}
+	if got := resources.Limits.Memory().String(); got != "1Gi" {
+		t.Fatalf("manager memory limit = %q, want 1Gi", got)
+	}
+
+	service := &corev1.Service{}
+	if err := reconciler.Resources.Client.Get(ctx, types.NamespacedName{Name: "demo-manager", Namespace: infra.Namespace}, service); err != nil {
+		t.Fatal(err)
+	}
+	assertManagerServicePort(t, service, "storage-http", 8081, 8081)
+	if err := reconciler.Resources.Client.Get(ctx, types.NamespacedName{Name: "demo-storage-proxy", Namespace: infra.Namespace}, &corev1.Service{}); err == nil {
+		t.Fatal("canonical storage runtime unexpectedly created the deprecated alias Service")
+	}
+}
+
 func TestResolveEmbeddedStorageHTTPPortRemapsManagerListeners(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -586,6 +686,40 @@ func TestResolveEmbeddedStorageHTTPPortRemapsManagerListeners(t *testing.T) {
 	got, err = resolveEmbeddedStorageHTTPPort(8080, 8080, 9090, 9443, embeddedStorageFallbackPort)
 	if err != nil || got != int(embeddedStorageFallbackPort+1) {
 		t.Fatalf("occupied fallback port = %d, %v; want %d, nil", got, err, embeddedStorageFallbackPort+1)
+	}
+}
+
+func TestResolveManagerResourcesPreservesCanonicalProcessBudget(t *testing.T) {
+	explicit := &corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("75m"),
+			corev1.ResourceMemory: resource.MustParse("192Mi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("1"),
+			corev1.ResourceMemory: resource.MustParse("1Gi"),
+		},
+	}
+	resolved := resolveManagerResources(explicit, nil, true, false)
+	if got := resolved.Requests.Cpu().String(); got != "75m" {
+		t.Fatalf("explicit canonical CPU request = %q, want 75m", got)
+	}
+	if got := resolved.Requests.Memory().String(); got != "192Mi" {
+		t.Fatalf("explicit canonical memory request = %q, want 192Mi", got)
+	}
+
+	resolved = resolveManagerResources(nil, nil, true, false)
+	if got := resolved.Requests.Cpu().String(); got != "200m" {
+		t.Fatalf("default canonical CPU request = %q, want legacy-equivalent 200m", got)
+	}
+	if got := resolved.Requests.Memory().String(); got != "512Mi" {
+		t.Fatalf("default canonical memory request = %q, want legacy-equivalent 512Mi", got)
+	}
+	if got := resolved.Limits.Cpu().String(); got != "1" {
+		t.Fatalf("default canonical CPU limit = %q, want legacy-equivalent 1", got)
+	}
+	if got := resolved.Limits.Memory().String(); got != "1Gi" {
+		t.Fatalf("default canonical memory limit = %q, want legacy-equivalent 1Gi", got)
 	}
 }
 

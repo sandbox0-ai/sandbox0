@@ -520,32 +520,39 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 }
 
 // cleanupLegacyStorageProxy removes only the standalone storage-proxy runtime.
-// The compatibility Service is deliberately retained and must already select
-// manager pods before the old Deployment is allowed to terminate.
+// Canonical configurations prove the manager storage endpoint is ready. Legacy
+// configurations retain the compatibility Service and prove it selects manager
+// pods before the old Deployment is allowed to terminate.
 func (r *Sandbox0InfraReconciler) cleanupLegacyStorageProxy(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
 	if infra == nil {
 		return fmt.Errorf("sandbox0infra is required")
 	}
 	name := fmt.Sprintf("%s-storage-proxy", infra.Name)
-	alias := &corev1.Service{}
-	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, alias); err != nil {
-		if apierrors.IsNotFound(err) {
-			return fmt.Errorf("storage-proxy compatibility service %q is not ready", name)
-		}
-		return err
-	}
 	managerLabels := common.GetServiceLabels(infra.Name, "manager")
-	for key, expected := range managerLabels {
-		if alias.Spec.Selector[key] != expected {
-			return fmt.Errorf("storage-proxy compatibility service %q does not select manager pods", name)
+	if infra.Spec.Storage != nil && infra.Spec.Storage.Runtime != nil {
+		if err := r.ensureManagerStorageRuntimeReady(ctx, infra, managerLabels); err != nil {
+			return err
 		}
-	}
-	endpointsReady, err := r.storageProxyAliasEndpointsReady(ctx, infra, name, managerLabels)
-	if err != nil {
-		return err
-	}
-	if !endpointsReady {
-		return fmt.Errorf("storage-proxy compatibility service %q endpoints have not converged on manager pods", name)
+	} else {
+		alias := &corev1.Service{}
+		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, alias); err != nil {
+			if apierrors.IsNotFound(err) {
+				return fmt.Errorf("storage-proxy compatibility service %q is not ready", name)
+			}
+			return err
+		}
+		for key, expected := range managerLabels {
+			if alias.Spec.Selector[key] != expected {
+				return fmt.Errorf("storage-proxy compatibility service %q does not select manager pods", name)
+			}
+		}
+		endpointsReady, err := r.storageProxyAliasEndpointsReady(ctx, infra, name, managerLabels)
+		if err != nil {
+			return err
+		}
+		if !endpointsReady {
+			return fmt.Errorf("storage-proxy compatibility service %q endpoints have not converged on manager pods", name)
+		}
 	}
 
 	deployment := &appsv1.Deployment{}
@@ -585,6 +592,40 @@ func (r *Sandbox0InfraReconciler) cleanupLegacyStorageProxy(ctx context.Context,
 		return err
 	}
 	return r.deleteHashedServiceConfigMaps(ctx, infra.Namespace, name)
+}
+
+func (r *Sandbox0InfraReconciler) ensureManagerStorageRuntimeReady(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, managerLabels map[string]string) error {
+	name := fmt.Sprintf("%s-manager", infra.Name)
+	service := &corev1.Service{}
+	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, service); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("manager storage service %q is not ready", name)
+		}
+		return err
+	}
+	for key, expected := range managerLabels {
+		if service.Spec.Selector[key] != expected {
+			return fmt.Errorf("manager storage service %q does not select manager pods", name)
+		}
+	}
+	storagePortReady := false
+	for _, port := range service.Spec.Ports {
+		if port.Name == "storage-http" && port.Port > 0 {
+			storagePortReady = true
+			break
+		}
+	}
+	if !storagePortReady {
+		return fmt.Errorf("manager storage service %q has no storage-http port", name)
+	}
+	endpointsReady, err := r.storageProxyAliasEndpointsReady(ctx, infra, name, managerLabels)
+	if err != nil {
+		return err
+	}
+	if !endpointsReady {
+		return fmt.Errorf("manager storage service %q endpoints are not ready", name)
+	}
+	return nil
 }
 
 // storageProxyAliasEndpointsReady prevents a selector update from racing the

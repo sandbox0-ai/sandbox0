@@ -1191,14 +1191,14 @@ func ResolveSandboxNodePlacement(infra *infrav1alpha1.Sandbox0Infra) (map[string
 	var nodeSelector map[string]string
 	if infra.Spec.SandboxNodePlacement != nil && len(infra.Spec.SandboxNodePlacement.NodeSelector) > 0 {
 		nodeSelector = cloneNodeSelector(infra.Spec.SandboxNodePlacement.NodeSelector)
-	} else if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
+	} else if infra.Spec.Network == nil && infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
 		nodeSelector = cloneNodeSelector(infra.Spec.Services.Netd.NodeSelector)
 	}
 
 	var tolerations []corev1.Toleration
 	if infra.Spec.SandboxNodePlacement != nil && len(infra.Spec.SandboxNodePlacement.Tolerations) > 0 {
 		tolerations = cloneTolerations(infra.Spec.SandboxNodePlacement.Tolerations)
-	} else if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
+	} else if infra.Spec.Network == nil && infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
 		tolerations = cloneTolerations(infra.Spec.Services.Netd.Tolerations)
 	}
 

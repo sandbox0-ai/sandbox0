@@ -38,7 +38,11 @@ func ResolveMITMCASecretName(infra *infrav1alpha1.Sandbox0Infra) string {
 	if infra == nil {
 		return ""
 	}
-	if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
+	if infra.Spec.Network != nil {
+		if secretName := strings.TrimSpace(infra.Spec.Network.MITMCASecretName); secretName != "" {
+			return secretName
+		}
+	} else if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
 		if secretName := strings.TrimSpace(infra.Spec.Services.Netd.MITMCASecretName); secretName != "" {
 			return secretName
 		}

@@ -59,6 +59,8 @@ spec:
       enabled: true
       persistence:
         size: "20Gi"
+    runtime:
+      objectEncryptionEnabled: true
   # Example S3 storage:
   # storage:
   #   type: s3
@@ -70,6 +72,8 @@ spec:
   #       name: aws-credentials
   #       accessKeyKey: accessKeyId
   #       secretKeyKey: secretAccessKey
+  #   runtime:
+  #     objectEncryptionEnabled: true
   # Optional region-level Redis for shared gateway rate limits. When omitted,
   # gateways use process-local memory for simple onboarding.
   # redis:
@@ -155,6 +159,12 @@ spec:
   #      operator: Equal
   #      value: gvisor
   #      effect: NoSchedule
+  network:
+    # By default infra-operator manages a cluster-local MITM CA secret for HTTPS auth injection.
+    # Set mitmCaSecretName only when you provide a secret containing ca.crt and ca.key.
+    config:
+      egressAuthEnabled: true
+      egressAuthFailurePolicy: fail-closed
   services:
     clusterGateway:
       enabled: true
@@ -167,23 +177,8 @@ spec:
         port: 30080
       config:
         authMode: public
-    netd:
-      enabled: true
-      # Keep netd on a regular host runtime such as runc; do not run netd on gVisor or Kata.
-      # runtimeClassName: runc
-      # By default infra-operator manages a cluster-local MITM CA secret for HTTPS auth injection.
-      # Set this only when you want to provide your own secret containing ca.crt and ca.key.
-      # mitmCaSecretName: netd-mitm-ca
-      config:
-        egressAuthEnabled: true
-        egressAuthFailurePolicy: fail-closed
     manager:
       enabled: true
       replicas: 1
-    storageProxy:
-      enabled: true
-      replicas: 1
-      config:
-        objectEncryptionEnabled: true
   initUser:
     email: "admin@example.com"

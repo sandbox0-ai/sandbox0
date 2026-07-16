@@ -61,8 +61,8 @@ func BuildRuntimeConfig(ctx context.Context, resources *common.ResourceManager, 
 		return nil, fmt.Errorf("infra is required")
 	}
 	cfg := &apiconfig.StorageProxyConfig{}
-	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
-		cfg = runtimeconfig.ToStorageProxy(infra.Spec.Services.StorageProxy.Config)
+	if runtimeConfig := infrav1alpha1.ResolveStorageRuntimeConfig(infra); runtimeConfig != nil {
+		cfg = runtimeconfig.ToStorageProxy(runtimeConfig)
 	}
 
 	if dsn, err := database.GetDatabaseDSN(ctx, resources.Client, infra); err == nil {

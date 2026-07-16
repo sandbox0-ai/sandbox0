@@ -42,6 +42,7 @@ spec:
         name: aws-credentials
         accessKeyKey: accessKeyId
         secretKeyKey: secretAccessKey
+    runtime: {}
   # Example OSS storage:
   # storage:
   #   type: oss
@@ -53,6 +54,7 @@ spec:
   #       name: oss-credentials
   #       accessKeyKey: accessKeyId
   #       secretKeyKey: accessKeySecret
+  #   runtime: {}
   controlPlane:
     url: https://api.sandbox0.ai
     internalAuthPublicKeySecret:
@@ -127,6 +129,7 @@ spec:
   #      operator: Equal
   #      value: kata
   #      effect: NoSchedule
+  network: {}
   services:
     clusterGateway:
       enabled: true
@@ -144,10 +147,3 @@ spec:
       replicas: 1
       # config:
       #   sandboxRuntimeClassName: kata
-    storageProxy:
-      enabled: true
-      replicas: 1
-    netd:
-      enabled: true
-      # Keep netd on a regular host runtime such as runc; do not run netd on gVisor or Kata.
-      # runtimeClassName: runc

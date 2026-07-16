@@ -829,8 +829,8 @@ func (r *Reconciler) ensureNetdMetricsService(ctx context.Context, infra *infrav
 
 func (r *Reconciler) buildStorageConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.StorageProxyConfig, error) {
 	cfg := &apiconfig.StorageProxyConfig{}
-	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
-		cfg = runtimeconfig.ToStorageProxy(infra.Spec.Services.StorageProxy.Config)
+	if runtimeConfig := infrav1alpha1.ResolveStorageRuntimeConfig(infra); runtimeConfig != nil {
+		cfg = runtimeconfig.ToStorageProxy(runtimeConfig)
 	}
 	cfg.RegionID = common.ResolveRegionID(infra)
 	cfg.DefaultClusterId = common.ResolveClusterID(infra)

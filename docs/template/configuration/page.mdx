@@ -68,7 +68,7 @@ The main sandbox container configuration.
 | `env` | array | `[]` | Per-container environment variables. Each entry has `name` and `value`. |
 
 <Callout variant="info">
-`mainContainer.image`, `mainContainer.resources.cpu`, `mainContainer.resources.memory`, and `mainContainer.resources.ephemeralStorage` are strictly validated by the API when creating or updating templates. Template resources are the default for claimed sandboxes; warm-pool idle pods may run with lower internal CPU and memory until claim. `config.resources.memory` can override the sandbox memory limit at claim time or runtime.
+`mainContainer.image`, `mainContainer.resources.cpu`, `mainContainer.resources.memory`, and `mainContainer.resources.ephemeralStorage` are strictly validated by the API when creating or updating templates. Template resources are the default for claimed sandboxes, with an effective minimum CPU limit of `150m`; warm-pool idle pods may run with lower internal CPU and memory until claim. `config.resources.memory` can override the sandbox memory limit at claim time or runtime.
 </Callout>
 
 ---

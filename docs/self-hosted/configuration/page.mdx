@@ -357,7 +357,9 @@ Kubernetes image volume support is part of the Sandbox0 cluster baseline. Unsupp
 
 ### Sandbox Memory Limits
 
-Sandbox claims and runtime updates can set `config.resources.memory`. The minimum accepted value is `128Mi`. The platform maximum defaults to `32Gi`.
+Sandbox claims and runtime updates can set `config.resources.memory`. The minimum accepted value is `128Mi`. The platform maximum defaults to `32Gi`. Manager derives CPU from the configured memory-per-CPU ratio and enforces a minimum CPU limit of `150m` for claimed sandboxes.
+
+The minimum applies when a sandbox is claimed, resumed, or resized. Upgrading manager does not resize sandbox pods that were already running before the upgrade.
 
 Use `services.manager.config.sandboxMaxMemory` to lower or raise the platform maximum:
 

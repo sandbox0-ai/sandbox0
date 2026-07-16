@@ -84,7 +84,7 @@ Warm-pool capacity is counted from idle pods that are ready for claiming.
 | Single-user tool | 1 |
 
 <Callout variant="warning">
-Idle pods use a fixed low CPU and memory allocation while they wait in the warm pool. `mainContainer.resources` remains the default sandbox resource contract; if `config.resources` is omitted during claim, Sandbox0 resizes the hot-claimed pod to the template's `mainContainer.resources`. Claim-time `config.resources.memory` overrides that default and Sandbox0 derives CPU from the platform memory-per-CPU ratio. Setting `minIdle` too high still consumes cluster capacity, image cache, ephemeral-storage headroom, and runtime overhead. Monitor your claim rate and set `minIdle` to match your typical concurrency.
+Idle pods use a fixed low CPU and memory allocation while they wait in the warm pool. `mainContainer.resources` remains the default sandbox resource contract; if `config.resources` is omitted during claim, Sandbox0 resizes the hot-claimed pod to the template's `mainContainer.resources`, subject to the `150m` minimum CPU limit. Claim-time `config.resources.memory` overrides that default and Sandbox0 derives CPU from the platform memory-per-CPU ratio with the same minimum. At the minimum limit, the CPU request remains `10m` to preserve sandbox density. Setting `minIdle` too high still consumes cluster capacity, image cache, ephemeral-storage headroom, and runtime overhead. Monitor your claim rate and set `minIdle` to match your typical concurrency.
 </Callout>
 
 ---

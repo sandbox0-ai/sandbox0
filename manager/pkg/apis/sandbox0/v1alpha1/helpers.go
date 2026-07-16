@@ -34,6 +34,9 @@ const (
 	minSandboxMemoryRequestBytes                     = int64(64 * 1024 * 1024)
 	minSandboxEphemeralStorageRequestBytes           = int64(64 * 1024 * 1024)
 	defaultIdleSandboxMemoryLimitBytes               = int64(128 * 1024 * 1024)
+
+	// MinimumClaimedSandboxCPULimitMilli is the CPU limit floor for claimed sandboxes.
+	MinimumClaimedSandboxCPULimitMilli = int64(150)
 )
 
 // BuildPodSpec builds a pod spec with every template-declared user volume portal.
@@ -449,6 +452,11 @@ func BuildResourceRequirements(quota ResourceQuota) corev1.ResourceRequirements 
 
 func scaledCPURequest(limit resource.Quantity) resource.Quantity {
 	limitMilli := limit.MilliValue()
+	// Keep the scheduler reservation at its existing floor when manager raises
+	// a small claimed sandbox to the CPU limit floor.
+	if limitMilli == MinimumClaimedSandboxCPULimitMilli {
+		return *resource.NewMilliQuantity(minSandboxCPURequestMilli, resource.DecimalSI)
+	}
 	requestMilli := scaleResource(limitMilli, defaultSandboxCPURequestRatioMillis, minSandboxCPURequestMilli)
 	return *resource.NewMilliQuantity(requestMilli, resource.DecimalSI)
 }

@@ -71,7 +71,7 @@ Claim a sandbox from a template. The sandbox is created from a pre-warmed pool f
 | `env_vars` | object | Sandbox-level default environment variables for new procd-managed processes |
 | `ttl` | integer | Time to live in seconds (soft limit, triggers auto-pause; default: `0`, disabled) |
 | `hard_ttl` | integer | Hard sandbox lifetime in seconds (deletes identity and durable state; default: `0`, disabled) |
-| `resources` | object | Optional per-sandbox resource override. Only `resources.memory` is accepted; CPU is derived from the platform memory-per-CPU ratio. |
+| `resources` | object | Optional per-sandbox resource override. Only `resources.memory` is accepted; CPU is derived from the platform memory-per-CPU ratio with a `150m` minimum limit. |
 | `network` | object | `SandboxNetworkPolicy`. Controls traffic rules, protocol controls, credential bindings, and destination-scoped egress auth |
 | `webhook` | object | Webhook configuration |
 | `auto_resume` | boolean | Auto-resume when accessed (default: true) |
@@ -87,7 +87,7 @@ Sandbox `env_vars` override template/container environment variables for new con
 
 Set `config.resources.memory` when one sandbox needs a different memory limit from its template. The minimum is `128Mi`. The platform maximum defaults to `32Gi` and can be changed by the operator with `services.manager.config.sandboxMaxMemory`.
 
-Sandbox0 keeps CPU and memory in the platform-defined ratio. The request only accepts memory; manager derives CPU from `services.manager.config.teamTemplateMemoryPerCpu` and applies the result to the sandbox runtime container. Existing running sandboxes can update memory with the Update Sandbox API.
+The request only accepts memory. Manager derives CPU from `services.manager.config.teamTemplateMemoryPerCpu` and applies the larger of that value and the `150m` minimum CPU limit to the sandbox runtime container. Existing running sandboxes can update memory with the Update Sandbox API.
 
 SDK helpers expose this as `WithSandboxMemory` / `UpdateSandboxMemory` in Go, `memory` / `updateMemory` in TypeScript, `memory` / `update_memory` in Python, and `--memory` in the `s0` CLI.
 

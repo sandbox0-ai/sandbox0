@@ -105,7 +105,7 @@ type SandboxUpdateConfig struct {
 }
 
 // SandboxResourceConfig is an instance-level resource override. Only memory is
-// accepted; CPU is derived from the platform memory-per-CPU ratio.
+// accepted; CPU is derived from the platform memory-per-CPU ratio with a 150m minimum.
 type SandboxResourceConfig struct {
 	Memory string `json:"memory,omitempty"`
 }

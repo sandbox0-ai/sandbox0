@@ -126,7 +126,7 @@ func (m *Manager) openSnapshotArchiveSession(
 		return volume, snap, session, rootInode, rootAttr, nil
 	}
 
-	session, rootInode, rootAttr, err := m.openS0FSSnapshotArchiveSession(ctx, volumeID, snapshotID)
+	session, rootInode, rootAttr, err := m.openS0FSSnapshotArchiveSession(ctx, volumeID, snap)
 	if err != nil {
 		if errors.Is(err, s0fs.ErrSnapshotNotFound) {
 			return nil, nil, nil, 0, nil, ErrSnapshotNotFound

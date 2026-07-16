@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -278,6 +279,214 @@ func (m *Materializer) LoadLatestState(ctx context.Context) (*SnapshotState, *Ma
 	return state, manifest, nil
 }
 
+func (m *Materializer) persistSnapshot(ctx context.Context, snapshotID string, state *SnapshotState) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !m.Enabled() {
+		return fmt.Errorf("%w: materializer is not configured", ErrInvalidInput)
+	}
+	if err := validateSnapshotID(snapshotID); err != nil {
+		return err
+	}
+	if state == nil {
+		return fmt.Errorf("%w: snapshot state is required", ErrInvalidInput)
+	}
+	return m.putJSON(ctx, snapshotObjectKey(snapshotID), state)
+}
+
+func (m *Materializer) loadSnapshot(ctx context.Context, snapshotID string) (*SnapshotState, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !m.Enabled() {
+		return nil, ErrSnapshotNotFound
+	}
+	if err := validateSnapshotID(snapshotID); err != nil {
+		return nil, err
+	}
+	var state SnapshotState
+	if err := m.getJSON(ctx, snapshotObjectKey(snapshotID), &state); err != nil {
+		if objectstore.IsNotFound(err) {
+			return nil, ErrSnapshotNotFound
+		}
+		return nil, fmt.Errorf("load snapshot object %s: %w", snapshotID, err)
+	}
+	normalizeState(&state)
+	defaultSegmentVolumeIDs(&state, m.volumeID)
+	return &state, nil
+}
+
+func (m *Materializer) deleteSnapshot(ctx context.Context, snapshotID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !m.Enabled() {
+		return nil
+	}
+	if err := validateSnapshotID(snapshotID); err != nil {
+		return err
+	}
+	if err := m.store.Delete(snapshotObjectKey(snapshotID)); err != nil && !objectstore.IsNotFound(err) {
+		return fmt.Errorf("delete snapshot object %s: %w", snapshotID, err)
+	}
+	return nil
+}
+
+func (m *Materializer) loadUniqueManifestAtOrBefore(ctx context.Context, cutoff time.Time, expectedSizeBytes int64) (*Manifest, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !m.Enabled() {
+		return nil, ErrMaterializedManifestNotFound
+	}
+	if cutoff.IsZero() {
+		return nil, fmt.Errorf("%w: manifest cutoff is required", ErrInvalidInput)
+	}
+	if expectedSizeBytes < 0 {
+		return nil, fmt.Errorf("%w: expected snapshot size must be non-negative", ErrInvalidInput)
+	}
+	headBefore, err := m.loadRecoveryHead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	keys, err := listObjectKeys(ctx, m.store, manifestDir+"/")
+	if err != nil {
+		return nil, err
+	}
+
+	var candidates []*Manifest
+	for _, key := range keys {
+		keySequence, ok := immutableManifestSequence(key)
+		if !ok || keySequence > headBefore.ManifestSeq {
+			continue
+		}
+		manifest, err := m.loadManifestByKey(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		if err := m.validateRecoveryManifest(key, keySequence, manifest); err != nil {
+			return nil, err
+		}
+		if manifest.CreatedAt.After(cutoff) || StateStorageBytes(manifest.State) != expectedSizeBytes {
+			continue
+		}
+		candidates = append(candidates, manifest)
+	}
+	if len(candidates) == 0 {
+		return nil, ErrMaterializedManifestNotFound
+	}
+	if len(candidates) != 1 {
+		return nil, fmt.Errorf("%w: %d immutable manifests match legacy snapshot metadata", ErrInvalidInput, len(candidates))
+	}
+	if err := m.validateRecoverySegments(ctx, candidates[0].State); err != nil {
+		return nil, err
+	}
+	headAfter, err := m.loadRecoveryHead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if headBefore.ManifestSeq != headAfter.ManifestSeq || headBefore.ManifestKey != headAfter.ManifestKey {
+		return nil, fmt.Errorf("%w: committed head changed during legacy snapshot recovery", ErrCommittedHeadConflict)
+	}
+	return candidates[0], nil
+}
+
+func (m *Materializer) loadRecoveryHead(ctx context.Context) (*CommittedHead, error) {
+	if m.headStore != nil {
+		head, err := m.headStore.LoadCommittedHead(ctx, m.volumeID)
+		if err != nil {
+			if errors.Is(err, ErrCommittedHeadNotFound) {
+				return nil, ErrMaterializedManifestNotFound
+			}
+			return nil, err
+		}
+		if head == nil || head.VolumeID != m.volumeID || head.ManifestSeq == 0 ||
+			head.CheckpointSeq != head.ManifestSeq || head.ManifestKey != manifestKey(head.ManifestSeq) {
+			return nil, fmt.Errorf("%w: invalid committed head for volume %s", ErrInvalidInput, m.volumeID)
+		}
+		copy := *head
+		return &copy, nil
+	}
+
+	manifest, err := m.loadLegacyLatestManifest(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.validateRecoveryManifest(manifestKey(manifest.ManifestSeq), manifest.ManifestSeq, manifest); err != nil {
+		return nil, err
+	}
+	return &CommittedHead{
+		VolumeID:      manifest.VolumeID,
+		ManifestSeq:   manifest.ManifestSeq,
+		CheckpointSeq: manifest.CheckpointSeq,
+		ManifestKey:   manifestKey(manifest.ManifestSeq),
+		UpdatedAt:     manifest.CreatedAt,
+	}, nil
+}
+
+func (m *Materializer) validateRecoveryManifest(key string, keySequence uint64, manifest *Manifest) error {
+	if manifest == nil || manifest.State == nil {
+		return fmt.Errorf("%w: manifest %s has no state", ErrInvalidInput, key)
+	}
+	if manifest.Version != 1 {
+		return fmt.Errorf("%w: manifest %s has unsupported version %d", ErrInvalidInput, key, manifest.Version)
+	}
+	if manifest.VolumeID != m.volumeID {
+		return fmt.Errorf("%w: manifest %s belongs to volume %s", ErrInvalidInput, key, manifest.VolumeID)
+	}
+	if manifest.ManifestSeq != keySequence || manifest.CheckpointSeq != keySequence || checkpointSequence(manifest.State) != keySequence {
+		return fmt.Errorf("%w: manifest %s has inconsistent sequence metadata", ErrInvalidInput, key)
+	}
+	if manifest.CreatedAt.IsZero() {
+		return fmt.Errorf("%w: manifest %s has no creation time", ErrInvalidInput, key)
+	}
+	root := manifest.State.Nodes[RootInode]
+	if root == nil || root.Type != TypeDirectory {
+		return fmt.Errorf("%w: manifest %s has no valid root inode", ErrInvalidInput, key)
+	}
+	return nil
+}
+
+func (m *Materializer) validateRecoverySegments(ctx context.Context, state *SnapshotState) error {
+	seen := make(map[string]struct{})
+	for _, extents := range state.ColdFiles {
+		for _, extent := range extents {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if extent.SegmentID == "" {
+				continue
+			}
+			segment := state.Segments[extent.SegmentID]
+			if segment == nil || segment.ID != extent.SegmentID {
+				return fmt.Errorf("%w: recovery state is missing segment %s", ErrInvalidInput, extent.SegmentID)
+			}
+			if extent.Offset > segment.Length || extent.Length > segment.Length-extent.Offset {
+				return fmt.Errorf("%w: recovery extent exceeds segment %s", ErrInvalidInput, extent.SegmentID)
+			}
+			if _, ok := seen[extent.SegmentID]; ok {
+				continue
+			}
+			seen[extent.SegmentID] = struct{}{}
+			if isInlineSegment(segment) {
+				continue
+			}
+			if strings.TrimSpace(segment.Key) == "" {
+				return fmt.Errorf("%w: recovery segment %s has no object key", ErrInvalidInput, segment.ID)
+			}
+			_, store, err := m.storeForSegment(segment)
+			if err != nil {
+				return err
+			}
+			if _, err := store.Head(segment.Key); err != nil {
+				return fmt.Errorf("validate recovery segment %s: %w", segment.ID, err)
+			}
+		}
+	}
+	return nil
+}
+
 type materializedSegment struct {
 	ID         string
 	VolumeID   string
@@ -476,6 +685,27 @@ func (b *segmentBuilder) finish() []*materializedSegment {
 
 func manifestKey(seq uint64) string {
 	return fmt.Sprintf("%s/%020d.json", manifestDir, seq)
+}
+
+func snapshotObjectKey(snapshotID string) string {
+	return fmt.Sprintf("snapshots/%s.json", snapshotID)
+}
+
+func immutableManifestSequence(key string) (uint64, bool) {
+	const suffix = ".json"
+	name := strings.TrimPrefix(key, manifestDir+"/")
+	if name == key || !strings.HasSuffix(name, suffix) {
+		return 0, false
+	}
+	digits := strings.TrimSuffix(name, suffix)
+	if len(digits) != 20 {
+		return 0, false
+	}
+	sequence, err := strconv.ParseUint(digits, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return sequence, true
 }
 
 func checkpointSequence(state *SnapshotState) uint64 {

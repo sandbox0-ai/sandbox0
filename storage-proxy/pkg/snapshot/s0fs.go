@@ -20,6 +20,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
+	"github.com/sirupsen/logrus"
 )
 
 type s0fsHeadRepository interface {
@@ -103,6 +104,49 @@ func (m *Manager) s0fsConfig(teamID, volumeID string) (s0fs.Config, error) {
 		return m.s0fsObjectStore(teamID, sourceVolumeID)
 	}
 	return cfg, nil
+}
+
+// loadS0FSSnapshotState loads the durable snapshot object and performs a
+// guarded, one-time recovery for snapshots created before snapshot state was
+// persisted to object storage. The manifest fallback is deliberately narrow:
+// the committed head and manifest structure must be stable, and exactly one
+// state may match the PostgreSQL snapshot timestamp and storage size.
+func (m *Manager) loadS0FSSnapshotState(ctx context.Context, cfg s0fs.Config, snapshot *db.Snapshot) (*s0fs.SnapshotState, error) {
+	if snapshot == nil {
+		return nil, fmt.Errorf("snapshot is required")
+	}
+	state, err := s0fs.LoadSnapshot(ctx, cfg, snapshot.ID)
+	if err == nil {
+		return state, nil
+	}
+	if !errors.Is(err, s0fs.ErrSnapshotNotFound) {
+		return nil, err
+	}
+
+	state, manifest, err := s0fs.RecoverSnapshotFromManifest(ctx, cfg, snapshot.CreatedAt, snapshot.SizeBytes)
+	if err != nil {
+		if errors.Is(err, s0fs.ErrMaterializedManifestNotFound) {
+			return nil, fmt.Errorf("%w: no durable state or eligible legacy manifest", s0fs.ErrSnapshotNotFound)
+		}
+		return nil, err
+	}
+	if got := snapshotSizeBytes(state); got != snapshot.SizeBytes {
+		return nil, fmt.Errorf(
+			"%w: recovered manifest storage size %d does not match snapshot catalog size %d",
+			s0fs.ErrSnapshotNotFound,
+			got,
+			snapshot.SizeBytes,
+		)
+	}
+	if err := s0fs.PersistSnapshot(ctx, cfg, snapshot.ID, state); err != nil {
+		return nil, fmt.Errorf("persist recovered snapshot state: %w", err)
+	}
+	m.logger.WithFields(logrus.Fields{
+		"volume_id":    snapshot.VolumeID,
+		"snapshot_id":  snapshot.ID,
+		"manifest_seq": manifest.ManifestSeq,
+	}).Warn("Recovered legacy s0fs snapshot state from an immutable manifest")
+	return state, nil
 }
 
 func (m *Manager) hasMountedCtldOwner(ctx context.Context, volumeID string) (bool, error) {
@@ -360,7 +404,10 @@ func (m *Manager) resolveS0FSForkState(ctx context.Context, teamID, sourceVolume
 	return s0fs.PrepareForkState(state, sourceVolumeID)
 }
 
-func (m *Manager) openS0FSSnapshotArchiveSession(ctx context.Context, volumeID, snapshotID string) (*snapshotArchiveSession, fsmeta.Ino, *fsmeta.Attr, error) {
+func (m *Manager) openS0FSSnapshotArchiveSession(ctx context.Context, volumeID string, snapshot *db.Snapshot) (*snapshotArchiveSession, fsmeta.Ino, *fsmeta.Attr, error) {
+	if snapshot == nil {
+		return nil, 0, nil, fmt.Errorf("snapshot is required")
+	}
 	volumeRecord, err := m.repo.GetSandboxVolume(ctx, volumeID)
 	if err != nil {
 		return nil, 0, nil, err
@@ -369,7 +416,7 @@ func (m *Manager) openS0FSSnapshotArchiveSession(ctx context.Context, volumeID, 
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	state, err := s0fs.LoadSnapshot(ctx, cfg, snapshotID)
+	state, err := m.loadS0FSSnapshotState(ctx, cfg, snapshot)
 	if err != nil {
 		return nil, 0, nil, err
 	}
@@ -418,6 +465,20 @@ func (m *Manager) createS0FSSnapshot(ctx context.Context, req *CreateSnapshotReq
 	if err != nil {
 		return nil, err
 	}
+	cfg, err := m.s0fsConfig(vol.TeamID, req.VolumeID)
+	if err != nil {
+		_ = engine.DeleteSnapshot(snapshotID)
+		return nil, err
+	}
+	cleanupSnapshotState := func() {
+		if cleanupErr := s0fs.DeleteSnapshot(context.Background(), cfg, snapshotID); cleanupErr != nil && !errors.Is(cleanupErr, s0fs.ErrSnapshotNotFound) {
+			m.logger.WithError(cleanupErr).Warn("Failed to clean up uncommitted s0fs snapshot state")
+		}
+	}
+	if err := s0fs.PersistSnapshot(ctx, cfg, snapshotID, state); err != nil {
+		cleanupSnapshotState()
+		return nil, fmt.Errorf("persist snapshot state: %w", err)
+	}
 	snapshot := &db.Snapshot{
 		ID:          snapshotID,
 		VolumeID:    req.VolumeID,
@@ -434,11 +495,11 @@ func (m *Manager) createS0FSSnapshot(ctx context.Context, req *CreateSnapshotReq
 		m.snapshotStorageObservation(ctx, snapshot, snapshot.CreatedAt),
 		req.StorageMetadata,
 	)); err != nil {
-		_ = engine.DeleteSnapshot(snapshotID)
+		cleanupSnapshotState()
 		return nil, err
 	}
 	if err := m.repo.CreateSnapshot(ctx, snapshot); err != nil {
-		_ = engine.DeleteSnapshot(snapshotID)
+		cleanupSnapshotState()
 		return nil, err
 	}
 	if err := m.recordVolumeStorageState(ctx, vol, state, snapshot.CreatedAt); err != nil {
@@ -627,7 +688,7 @@ func (m *Manager) createS0FSVolumeFromSnapshot(ctx context.Context, req *CreateV
 	if err != nil {
 		return nil, err
 	}
-	state, err := s0fs.LoadSnapshot(ctx, cfg, snapshotRecord.ID)
+	state, err := m.loadS0FSSnapshotState(ctx, cfg, snapshotRecord)
 	if err != nil {
 		return nil, err
 	}
@@ -712,13 +773,21 @@ func (m *Manager) createS0FSVolumeFromSnapshot(ctx context.Context, req *CreateV
 }
 
 func (m *Manager) restoreS0FSSnapshot(ctx context.Context, req *RestoreSnapshotRequest, snapshot *db.Snapshot) error {
+	cfg, err := m.s0fsConfig(snapshot.TeamID, req.VolumeID)
+	if err != nil {
+		return err
+	}
+	state, err := m.loadS0FSSnapshotState(ctx, cfg, snapshot)
+	if err != nil {
+		return err
+	}
 	engine, closeFn, err := m.openS0FSEngine(ctx, snapshot.TeamID, req.VolumeID)
 	if err != nil {
 		return err
 	}
 	defer closeFn()
 
-	if err := engine.RestoreSnapshot(req.SnapshotID); err != nil {
+	if err := engine.RestoreState(state); err != nil {
 		return err
 	}
 	manifest, err := engine.SyncMaterialize(ctx)
@@ -769,12 +838,11 @@ func (m *Manager) deleteS0FSSnapshot(ctx context.Context, volumeID, snapshotID s
 	if err != nil {
 		return err
 	}
-	engine, closeFn, err := m.openS0FSEngine(ctx, volumeRecord.TeamID, volumeID)
+	cfg, err := m.s0fsConfig(volumeRecord.TeamID, volumeID)
 	if err != nil {
 		return err
 	}
-	defer closeFn()
-	if err := engine.DeleteSnapshot(snapshotID); err != nil && !errors.Is(err, s0fs.ErrSnapshotNotFound) {
+	if err := s0fs.DeleteSnapshot(ctx, cfg, snapshotID); err != nil && !errors.Is(err, s0fs.ErrSnapshotNotFound) {
 		return err
 	}
 	return nil
@@ -850,7 +918,7 @@ func (m *Manager) garbageCollectS0FSVolumeObjects(ctx context.Context, volumeID,
 		return nil, err
 	}
 	for _, snapshot := range snapshots {
-		state, err := s0fs.LoadSnapshot(ctx, cfg, snapshot.ID)
+		state, err := m.loadS0FSSnapshotState(ctx, cfg, snapshot)
 		if err != nil {
 			if errors.Is(err, s0fs.ErrSnapshotNotFound) {
 				return nil, nil

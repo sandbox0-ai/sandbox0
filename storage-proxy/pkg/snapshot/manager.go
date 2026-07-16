@@ -597,10 +597,14 @@ func (m *Manager) DeleteSnapshot(ctx context.Context, volumeID, snapshotID, team
 
 	// 3. Clean up snapshot state outside the transaction.
 	// This is done after the DB transaction to avoid long-running transactions.
-	if cleanupErr := m.deleteS0FSSnapshot(ctx, volumeID, snapshotID); cleanupErr != nil {
+	// Once the catalog deletion commits, cleanup must not inherit a canceled
+	// client request or it can permanently strand the canonical object.
+	cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancelCleanup()
+	if cleanupErr := m.deleteS0FSSnapshot(cleanupCtx, volumeID, snapshotID); cleanupErr != nil {
 		m.logger.WithError(cleanupErr).Warn("Failed to delete s0fs snapshot state")
 	}
-	if gcResult, gcErr := m.garbageCollectS0FSVolumeObjects(ctx, volumeID, teamID); gcErr != nil {
+	if gcResult, gcErr := m.garbageCollectS0FSVolumeObjects(cleanupCtx, volumeID, teamID); gcErr != nil {
 		m.logger.WithError(gcErr).Warn("Failed to garbage collect unreferenced s0fs objects")
 	} else if gcResult != nil && (len(gcResult.DeletedSegments) > 0 || len(gcResult.DeletedManifests) > 0) {
 		m.logger.WithFields(logrus.Fields{

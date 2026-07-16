@@ -9,15 +9,160 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 )
 
 var ErrSnapshotNotFound = fmt.Errorf("%w: snapshot not found", ErrNotFound)
 
-func LoadSnapshot(_ context.Context, cfg Config, snapshotID string) (*SnapshotState, error) {
-	if cfg.WALPath == "" {
-		return nil, fmt.Errorf("%w: wal path is required", ErrInvalidInput)
+// PersistSnapshot stores immutable snapshot state in object storage and keeps
+// a local copy as a disposable cache. Object storage is the canonical copy
+// whenever it is configured.
+func PersistSnapshot(ctx context.Context, cfg Config, snapshotID string, state *SnapshotState) error {
+	if err := validateSnapshotConfig(cfg, snapshotID); err != nil {
+		return err
 	}
+	if state == nil {
+		return fmt.Errorf("%w: snapshot state is required", ErrInvalidInput)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	if materializer := snapshotMaterializer(cfg); materializer != nil {
+		if err := materializer.persistSnapshot(ctx, snapshotID, state); err != nil {
+			return err
+		}
+		// The object is canonical. Failure to refresh the disposable local
+		// cache must not turn a durable snapshot into a failed operation.
+		_ = saveSnapshotState(snapshotFilePath(cfg.WALPath, snapshotID), cfg.VolumeID, "snapshot:"+snapshotID, state, cfg.Encryption)
+		return nil
+	}
+	return saveSnapshotState(snapshotFilePath(cfg.WALPath, snapshotID), cfg.VolumeID, "snapshot:"+snapshotID, state, cfg.Encryption)
+}
+
+// LoadSnapshot loads canonical snapshot state from object storage. When only a
+// legacy local snapshot exists, it is durably backfilled before being returned.
+func LoadSnapshot(ctx context.Context, cfg Config, snapshotID string) (*SnapshotState, error) {
+	if err := validateSnapshotConfig(cfg, snapshotID); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	if materializer := snapshotMaterializer(cfg); materializer != nil {
+		state, err := materializer.loadSnapshot(ctx, snapshotID)
+		if err == nil {
+			// A local cache write must not make a durable snapshot unavailable.
+			_ = saveSnapshotState(snapshotFilePath(cfg.WALPath, snapshotID), cfg.VolumeID, "snapshot:"+snapshotID, state, cfg.Encryption)
+			return state, nil
+		}
+		if !errors.Is(err, ErrSnapshotNotFound) {
+			return nil, err
+		}
+
+		state, localErr := loadLocalSnapshot(cfg, snapshotID)
+		if localErr != nil {
+			return nil, localErr
+		}
+		if err := materializer.persistSnapshot(ctx, snapshotID, state); err != nil {
+			return nil, fmt.Errorf("backfill legacy snapshot %s: %w", snapshotID, err)
+		}
+		return state, nil
+	}
+
+	return loadLocalSnapshot(cfg, snapshotID)
+}
+
+// DeleteSnapshot removes both the canonical object and the disposable local
+// cache. Missing copies are treated as already deleted.
+func DeleteSnapshot(ctx context.Context, cfg Config, snapshotID string) error {
+	if err := validateSnapshotConfig(cfg, snapshotID); err != nil {
+		return err
+	}
+	var errs []error
+	if materializer := snapshotMaterializer(cfg); materializer != nil {
+		if err := materializer.deleteSnapshot(ctx, snapshotID); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if err := deleteLocalSnapshot(cfg, snapshotID); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+// RecoverSnapshotFromManifest returns the only committed-head-bounded
+// materialized state that matches the legacy snapshot time and size metadata.
+// It is a fail-closed, best-effort migration primitive for snapshots whose
+// local-only state has already disappeared.
+func RecoverSnapshotFromManifest(ctx context.Context, cfg Config, cutoff time.Time, expectedSizeBytes int64) (*SnapshotState, *Manifest, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	if strings.TrimSpace(cfg.VolumeID) == "" {
+		return nil, nil, fmt.Errorf("%w: volume id is required", ErrInvalidInput)
+	}
+	if cutoff.IsZero() {
+		return nil, nil, fmt.Errorf("%w: manifest cutoff is required", ErrInvalidInput)
+	}
+	if expectedSizeBytes < 0 {
+		return nil, nil, fmt.Errorf("%w: expected snapshot size must be non-negative", ErrInvalidInput)
+	}
+	materializer := snapshotMaterializer(cfg)
+	if materializer == nil {
+		return nil, nil, ErrMaterializedManifestNotFound
+	}
+	manifest, err := materializer.loadUniqueManifestAtOrBefore(ctx, cutoff, expectedSizeBytes)
+	if err != nil {
+		return nil, nil, err
+	}
+	return cloneState(manifest.State), manifest, nil
+}
+
+func validateSnapshotConfig(cfg Config, snapshotID string) error {
+	if cfg.WALPath == "" {
+		return fmt.Errorf("%w: wal path is required", ErrInvalidInput)
+	}
+	if err := validateSnapshotID(snapshotID); err != nil {
+		return err
+	}
+	if cfg.ObjectStore != nil && strings.TrimSpace(cfg.VolumeID) == "" {
+		return fmt.Errorf("%w: volume id is required", ErrInvalidInput)
+	}
+	return nil
+}
+
+func validateSnapshotID(snapshotID string) error {
+	if strings.TrimSpace(snapshotID) == "" {
+		return fmt.Errorf("%w: snapshot id is required", ErrInvalidInput)
+	}
+	if snapshotID != strings.TrimSpace(snapshotID) || snapshotID == "." || snapshotID == ".." || strings.ContainsAny(snapshotID, `/\`) {
+		return fmt.Errorf("%w: snapshot id must be a single path-safe segment", ErrInvalidInput)
+	}
+	return nil
+}
+
+func snapshotMaterializer(cfg Config) *Materializer {
+	materializer := NewMaterializer(cfg.VolumeID, cfg.ObjectStore, cfg.HeadStore, cfg.ObjectStoreForVolume)
+	if materializer != nil {
+		materializer.SetEncryption(cfg.Encryption)
+	}
+	return materializer
+}
+
+func loadLocalSnapshot(cfg Config, snapshotID string) (*SnapshotState, error) {
 	return loadSnapshotState(snapshotFilePath(cfg.WALPath, snapshotID), cfg.VolumeID, "snapshot:"+snapshotID, cfg.Encryption)
+}
+
+func deleteLocalSnapshot(cfg Config, snapshotID string) error {
+	if err := os.Remove(snapshotFilePath(cfg.WALPath, snapshotID)); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("delete local snapshot state: %w", err)
+	}
+	return nil
 }
 
 func LoadLocalSnapshots(ctx context.Context, cfg Config) ([]*SnapshotState, error) {

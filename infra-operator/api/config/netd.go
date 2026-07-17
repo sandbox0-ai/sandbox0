@@ -212,26 +212,8 @@ type NetdConfig struct {
 	ShutdownDelay metav1.Duration `yaml:"shutdown_delay" json:"shutdownDelay"`
 }
 
-// LoadNetdConfig returns the ctld network runtime configuration.
-func LoadNetdConfig() *NetdConfig {
-	path := os.Getenv("CONFIG_PATH")
-	if path == "" {
-		path = "/config/config.yaml"
-	}
-
-	cfg, err := LoadNetdConfigFromPath(path)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to load config from %s: %v, using defaults\n", path, err)
-		cfg = &NetdConfig{}
-		applyNetdDefaults(cfg)
-	}
-	return cfg
-}
-
 // LoadNetdConfigFromPath loads network runtime configuration from an explicit path.
-// It lets ctld load this configuration without sharing its own CONFIG_PATH or
-// silently falling back to defaults when the network runtime configuration is
-// invalid.
+// The embedding ctld process owns path selection and error handling.
 func LoadNetdConfigFromPath(path string) (*NetdConfig, error) {
 	cfg, err := loadNetdConfig(path)
 	if err != nil {

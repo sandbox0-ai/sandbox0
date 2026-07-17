@@ -53,7 +53,7 @@ func TestInternalHTTPClientUsesRuntimeHandlerWithoutSocket(t *testing.T) {
 		}),
 		started: true,
 	}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://storage-proxy/internal", strings.NewReader("body"))
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://manager-storage/internal", strings.NewReader("body"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestShutdownDrainsInternalHTTPRequestsAndRejectsNewOnes(t *testing.T) {
 
 	requestDone := make(chan error, 1)
 	go func() {
-		resp, err := r.InternalHTTPClient().Get("http://storage-proxy/internal")
+		resp, err := r.InternalHTTPClient().Get("http://manager-storage/internal")
 		if resp != nil {
 			_ = resp.Body.Close()
 		}
@@ -119,7 +119,7 @@ func TestShutdownDrainsInternalHTTPRequestsAndRejectsNewOnes(t *testing.T) {
 	if err := <-shutdownDone; err != nil {
 		t.Fatalf("Shutdown() error = %v", err)
 	}
-	if _, err := r.InternalHTTPClient().Get("http://storage-proxy/after-shutdown"); err == nil {
+	if _, err := r.InternalHTTPClient().Get("http://manager-storage/after-shutdown"); err == nil {
 		t.Fatal("internal request after shutdown succeeded")
 	}
 }

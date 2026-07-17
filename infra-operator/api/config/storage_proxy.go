@@ -190,20 +190,6 @@ type StorageProxyConfig struct {
 	KubeconfigPath string `yaml:"kubeconfig_path" json:"kubeconfigPath"` // Path to kubeconfig file (empty for in-cluster config)
 }
 
-// LoadStorageProxyConfig returns the storage runtime configuration.
-func LoadStorageProxyConfig() *StorageProxyConfig {
-	path := os.Getenv("CONFIG_PATH")
-	if path == "" {
-		path = "/config/config.yaml"
-	}
-	cfg, err := loadStorageProxyConfig(path)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to load config from %s: %v, using empty config\n", path, err)
-		cfg = &StorageProxyConfig{}
-	}
-	return cfg
-}
-
 // ReadStorageProxyConfig loads storage runtime configuration from an explicit
 // path and returns parsing errors to the embedding process.
 func ReadStorageProxyConfig(path string) (*StorageProxyConfig, error) {

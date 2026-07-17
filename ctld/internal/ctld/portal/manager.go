@@ -153,7 +153,7 @@ func NewManager(cfg Config) *Manager {
 	l.SetOutput(os.Stderr)
 	storageConfig := cfg.StorageConfig
 	if storageConfig == nil {
-		storageConfig = apiconfig.LoadStorageProxyConfig()
+		storageConfig = &apiconfig.StorageProxyConfig{}
 	}
 	s3CredentialCodec, s3CredentialCodecErr := volume.NewS3BackendCredentialCodecFromConfig(storageConfig)
 	heartbeatInterval, _ := time.ParseDuration(storageConfig.HeartbeatInterval)

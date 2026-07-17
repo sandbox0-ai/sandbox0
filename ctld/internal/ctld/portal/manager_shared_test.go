@@ -375,10 +375,17 @@ func TestReleaseOwnerReturnsBusyForInFlightDirectRequest(t *testing.T) {
 }
 
 func TestNewManagerDefaultsClusterID(t *testing.T) {
-	mgr := NewManager(Config{
-		StorageConfig: &apiconfig.StorageProxyConfig{},
-	})
+	processConfigPath := filepath.Join(t.TempDir(), "ctld.yaml")
+	if err := os.WriteFile(processConfigPath, []byte("default_cluster_id: unrelated\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	t.Setenv("CONFIG_PATH", processConfigPath)
+
+	mgr := NewManager(Config{})
 	if mgr.clusterID != naming.DefaultClusterID {
 		t.Fatalf("clusterID = %q, want %q", mgr.clusterID, naming.DefaultClusterID)
+	}
+	if mgr.storage.DefaultClusterId != "" {
+		t.Fatalf("storage default cluster ID = %q, want empty explicit default", mgr.storage.DefaultClusterId)
 	}
 }

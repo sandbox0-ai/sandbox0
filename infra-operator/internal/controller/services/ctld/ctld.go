@@ -402,7 +402,6 @@ func buildCtldDaemonSet(cfg ctldDaemonSetConfig) *appsv1.DaemonSet {
 	labels[dataplane.CtldHASlotLabel] = cfg.Slot
 	args := append([]string(nil), cfg.Args...)
 	args = append(args,
-		"-ha-enabled=true",
 		"-ha-slot="+cfg.Slot,
 		"-ha-probe-socket="+ctldHAProbeSocket,
 		"-kubelet-registration-socket="+ctldKubeletRegistrationSocket,

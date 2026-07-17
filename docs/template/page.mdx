@@ -89,7 +89,7 @@ spec:
         MainContainer: apispec.NewOptContainerSpec(apispec.ContainerSpec{
             Image: "python:3.12-slim",
             Resources: apispec.ResourceQuota{
-                Memory:           apispec.NewOptString("4Gi"),
+                Memory:           "4Gi",
                 EphemeralStorage: apispec.NewOptString("8Gi"),
             },
         }),
@@ -258,7 +258,7 @@ Updating a template does not affect already-running Sandboxes. New Sandboxes cla
         MainContainer: apispec.NewOptContainerSpec(apispec.ContainerSpec{
             Image: "python:3.12-slim",
             Resources: apispec.ResourceQuota{
-                Memory:           apispec.NewOptString("8Gi"),
+                Memory:           "8Gi",
                 EphemeralStorage: apispec.NewOptString("8Gi"),
             },
         }),

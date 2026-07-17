@@ -12,6 +12,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 )
 
 type proxyAdapter interface {
@@ -37,6 +38,7 @@ type adapterRequest struct {
 	EgressAuth     *egressAuthContext
 	UDPSession     *udpSession
 	SrcIP          string
+	SourcePort     int
 	DestIP         net.IP
 	DestPort       int
 	Host           string
@@ -47,6 +49,7 @@ type adapterRequest struct {
 	UDPConn        *net.UDPConn
 	UDPSource      *net.UDPAddr
 	UDPPayload     []byte
+	ExecutionScope *sandboxobservability.ExecutionScope
 }
 
 func (r *adapterRequest) appendProtocolAudit(entries ...protocolOperationAudit) {

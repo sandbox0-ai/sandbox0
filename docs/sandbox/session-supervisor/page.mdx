@@ -158,6 +158,26 @@ printf 'Session ID: %s\\n' "$SESSION_ID"`
 
 Creation defaults to `desired_state: running`, so the first attempt starts immediately. An `Idempotency-Key` lets a client safely retry the same creation request: the same key and normalized specification return the existing session, while reusing the key with a different specification returns a conflict.
 
+## Attribute Descendant Activity To A Logical Scope
+
+An application server can host several native agent sessions inside one supervised process. Set `execution_scope` when its tool subprocesses inherit a native session ID through an environment variable:
+
+```typescript
+const session = await sandbox.createSession({
+    name: "shared-agent-server",
+    command: ["agent-server", "--stdio"],
+    executionScope: {
+        namespace: "codex",
+        kind: "native_session",
+        idEnvironmentVariable: "CODEX_THREAD_ID",
+    },
+});
+```
+
+Sandbox0 trusts the supervised process only as the root within which markers may be resolved. For each new network flow it finds the owning descendant process, walks its ancestry up to that root, and reads only the configured variable. Hot UDP tuples are revalidated at most once per second; a transient lookup failure can retain the last confirmed scope for no more than five seconds before the flow becomes unattributed. A resolved scope is included in the signed audit event and can be queried with `execution_scope_namespace`, `execution_scope_kind`, and `execution_scope_id`. Event list and watch clients can set `max_schema_version=3`; when it is omitted, supplying one of these filters implicitly negotiates v3. The compatibility default for an unfiltered request remains v2.
+
+This is best-effort `process_environment` attribution, not authentication. A sandbox workload can alter its own environment, ambiguous ownership stays unattributed, and traffic opened directly by a shared application-server process has no native session marker. Use the scope to partition agent activity in product views; do not use it as an authorization boundary.
+
 ## Follow Output And Reconnect
 
 Use the SDK event stream for one-way output consumption. The stream first replays retained events after the requested cursor and then continues with live events.

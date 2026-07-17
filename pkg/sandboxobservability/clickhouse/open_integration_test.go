@@ -99,6 +99,12 @@ func TestCanonicalAuditClickHouseIntegration(t *testing.T) {
 			APIKeyID:   "key-integration",
 			AuthMethod: "internal_token",
 		},
+		ExecutionScope: &sandboxobservability.ExecutionScope{
+			Namespace:   "codex",
+			Kind:        "native_session",
+			ID:          "thread-integration",
+			Attribution: sandboxobservability.ExecutionScopeAttributionProcessEnvironment,
+		},
 		Action:        "sandbox.read",
 		Resource:      sandboxobservability.AuditResource{Type: "sandbox", ID: "sandbox-integration", Subresource: "state"},
 		OperationID:   "operation-integration",
@@ -140,10 +146,15 @@ func TestCanonicalAuditClickHouseIntegration(t *testing.T) {
 	startTime := occurredAt.Add(-time.Nanosecond)
 	endTime := occurredAt.Add(time.Nanosecond)
 	result, err := repo.ListEvents(ctx, sandboxobservability.EventQuery{
-		TeamID:    event.TeamID,
-		SandboxID: event.SandboxID,
-		StartTime: &startTime,
-		EndTime:   &endTime,
+		TeamID:                    event.TeamID,
+		SandboxID:                 event.SandboxID,
+		MaxSchemaVersion:          sandboxobservability.CurrentEventSchemaVersion,
+		StartTime:                 &startTime,
+		EndTime:                   &endTime,
+		ExecutionScopeNamespace:   "codex",
+		ExecutionScopeKind:        "native_session",
+		ExecutionScopeID:          "thread-integration",
+		ExecutionScopeAttribution: sandboxobservability.ExecutionScopeAttributionProcessEnvironment,
 	})
 	if err != nil {
 		t.Fatalf("ListEvents() error = %v", err)
@@ -163,6 +174,9 @@ func TestCanonicalAuditClickHouseIntegration(t *testing.T) {
 	}
 	if got.Actor != event.Actor || got.Resource != event.Resource || got.OperationID != event.OperationID || got.ParentEventID != parentEventID {
 		t.Fatalf("ListEvents() actor/resource correlation did not round trip: %#v", got)
+	}
+	if got.ExecutionScope == nil || *got.ExecutionScope != *event.ExecutionScope {
+		t.Fatalf("ListEvents() execution scope = %#v, want %#v", got.ExecutionScope, event.ExecutionScope)
 	}
 	if got.Producer != event.Producer || got.Request != event.Request {
 		t.Fatalf("ListEvents() producer/request did not round trip: %#v", got)

@@ -24,15 +24,16 @@ import (
 const maxInputReceipts = 1024
 
 type attemptRuntime struct {
-	attemptID       string
-	proc            process.Process
-	exitEvents      chan process.ExitEvent
-	done            chan struct{}
-	doneOnce        sync.Once
-	ready           bool
-	outputTail      []byte
-	exitReason      string
-	suppressRestart bool
+	attemptID             string
+	proc                  process.Process
+	processStartTimeTicks uint64
+	exitEvents            chan process.ExitEvent
+	done                  chan struct{}
+	doneOnce              sync.Once
+	ready                 bool
+	outputTail            []byte
+	exitReason            string
+	suppressRestart       bool
 }
 
 type managedSession struct {
@@ -60,6 +61,14 @@ type Supervisor struct {
 	ctx               context.Context
 	cancel            context.CancelFunc
 	logger            *zap.Logger
+}
+
+// ExecutionScopeRoot is a trusted supervisor-owned process root whose
+// descendants can carry logical execution-scope identifiers.
+type ExecutionScopeRoot struct {
+	PID                   int
+	ProcessStartTimeTicks uint64
+	Spec                  ExecutionScopeSpec
 }
 
 func NewSupervisor(store *FileStore, logger *zap.Logger) (*Supervisor, error) {
@@ -243,6 +252,16 @@ func (s *Supervisor) SetSandboxEnvVars(sandboxEnv map[string]string) {
 	s.mu.Lock()
 	s.sandboxEnv = process.CloneEnvVars(sandboxEnv)
 	s.mu.Unlock()
+}
+
+// SandboxID returns the runtime identity currently bound to this supervisor.
+func (s *Supervisor) SandboxID() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.sandboxID
 }
 
 func (s *Supervisor) Create(spec SessionSpec, creationKey string) (*Session, bool, error) {
@@ -790,6 +809,40 @@ func (s *Supervisor) Flush() error {
 	return errors.Join(errs...)
 }
 
+// ExecutionScopeRoots returns running supervised roots that opted into
+// descendant execution attribution. Callers must still verify process ancestry
+// before accepting a descendant-provided scope identifier.
+func (s *Supervisor) ExecutionScopeRoots() []ExecutionScopeRoot {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	sessions := make([]*managedSession, 0, len(s.sessions))
+	for _, managed := range s.sessions {
+		sessions = append(sessions, managed)
+	}
+	s.mu.RUnlock()
+
+	roots := make([]ExecutionScopeRoot, 0, len(sessions))
+	for _, managed := range sessions {
+		managed.mu.Lock()
+		if managed.record.Spec.ExecutionScope != nil &&
+			managed.record.Attempt != nil &&
+			managed.record.Attempt.PID > 0 &&
+			managed.runtime != nil &&
+			managed.runtime.attemptID == managed.record.Attempt.ID &&
+			managed.runtime.processStartTimeTicks > 0 {
+			roots = append(roots, ExecutionScopeRoot{
+				PID:                   managed.record.Attempt.PID,
+				ProcessStartTimeTicks: managed.runtime.processStartTimeTicks,
+				Spec:                  *managed.record.Spec.ExecutionScope,
+			})
+		}
+		managed.mu.Unlock()
+	}
+	return roots
+}
+
 func (s *Supervisor) Close() error {
 	s.cancel()
 	s.mu.RLock()
@@ -899,6 +952,16 @@ func (s *Supervisor) startAttempt(managed *managedSession, reason string) error 
 		s.handleStartFailure(managed, runtime, err)
 		return err
 	}
+	pid := proc.PID()
+	processStartTimeTicks, identityErr := readProcessStartTimeTicks("/proc", pid)
+	if identityErr != nil {
+		s.logger.Warn("Failed to capture session process identity",
+			zap.String("session_id", managed.record.ID),
+			zap.String("attempt_id", attemptID),
+			zap.Int("pid", pid),
+			zap.Error(identityErr),
+		)
+	}
 	go s.pumpOutput(managed, runtime, output)
 
 	managed.mu.Lock()
@@ -907,7 +970,8 @@ func (s *Supervisor) startAttempt(managed *managedSession, reason string) error 
 		return nil
 	}
 	now := time.Now().UTC()
-	managed.record.Attempt.PID = proc.PID()
+	runtime.processStartTimeTicks = processStartTimeTicks
+	managed.record.Attempt.PID = pid
 	managed.record.Attempt.StartedAt = &now
 	managed.record.UpdatedAt = now
 	_, _ = s.appendEventLocked(managed, Event{Type: "attempt.started", AttemptID: attemptID})

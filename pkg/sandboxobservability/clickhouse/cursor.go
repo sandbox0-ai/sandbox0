@@ -10,31 +10,33 @@ import (
 )
 
 type pageCursor struct {
-	OccurredAt  time.Time `json:"occurred_at"`
-	IngestedAt  time.Time `json:"ingested_at"`
-	Source      string    `json:"source"`
-	EventType   string    `json:"event_type"`
-	Cursor      string    `json:"cursor"`
-	PayloadHash string    `json:"payload_hash,omitempty"`
+	OccurredAt       time.Time `json:"occurred_at"`
+	IngestedAt       time.Time `json:"ingested_at"`
+	Source           string    `json:"source"`
+	EventType        string    `json:"event_type"`
+	Cursor           string    `json:"cursor"`
+	PayloadHash      string    `json:"payload_hash,omitempty"`
+	MaxSchemaVersion int       `json:"max_schema_version,omitempty"`
 }
 
 type tailCursor struct {
-	Kind        string    `json:"kind"`
-	IngestedAt  time.Time `json:"ingested_at"`
-	Source      string    `json:"source"`
-	EventType   string    `json:"event_type,omitempty"`
-	Cursor      string    `json:"cursor"`
-	PayloadHash string    `json:"payload_hash,omitempty"`
+	Kind             string    `json:"kind"`
+	IngestedAt       time.Time `json:"ingested_at"`
+	Source           string    `json:"source"`
+	EventType        string    `json:"event_type,omitempty"`
+	Cursor           string    `json:"cursor"`
+	PayloadHash      string    `json:"payload_hash,omitempty"`
+	MaxSchemaVersion int       `json:"max_schema_version,omitempty"`
 }
 
-func encodePageCursor(event sandboxobservability.Event) (string, error) {
+func encodePageCursor(event sandboxobservability.Event, maxSchemaVersion int) (string, error) {
 	if event.EventID == "" {
 		return "", fmt.Errorf("event_id is empty")
 	}
 	payload := pageCursor{
 		OccurredAt: event.OccurredAt.UTC(), IngestedAt: event.IngestedAt.UTC(),
 		Source: string(event.Source), EventType: string(event.EventType), Cursor: event.EventID,
-		PayloadHash: event.Integrity.PayloadHash,
+		PayloadHash: event.Integrity.PayloadHash, MaxSchemaVersion: maxSchemaVersion,
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -78,7 +80,7 @@ func decodePageCursor(value string) (*pageCursor, error) {
 	return &cursor, nil
 }
 
-func encodeTailCursor(kind string, ingestedAt time.Time, source, eventType, cursor, payloadHash string) (string, error) {
+func encodeTailCursor(kind string, ingestedAt time.Time, source, eventType, cursor, payloadHash string, maxSchemaVersion int) (string, error) {
 	if kind == "" {
 		return "", fmt.Errorf("cursor kind is empty")
 	}
@@ -89,12 +91,13 @@ func encodeTailCursor(kind string, ingestedAt time.Time, source, eventType, curs
 		return "", fmt.Errorf("cursor is empty")
 	}
 	payload := tailCursor{
-		Kind:        kind,
-		IngestedAt:  ingestedAt.UTC(),
-		Source:      source,
-		EventType:   eventType,
-		Cursor:      cursor,
-		PayloadHash: payloadHash,
+		Kind:             kind,
+		IngestedAt:       ingestedAt.UTC(),
+		Source:           source,
+		EventType:        eventType,
+		Cursor:           cursor,
+		PayloadHash:      payloadHash,
+		MaxSchemaVersion: maxSchemaVersion,
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

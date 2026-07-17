@@ -36,8 +36,8 @@ func TestAuditEventColumnSpecMatchesExplicitRowAdapters(t *testing.T) {
 			wantBindingNames = append(wantBindingNames, column.name)
 		}
 	}
-	if wantCount != 38 {
-		t.Fatalf("insertable audit column count = %d, want 38", wantCount)
+	if wantCount != 42 {
+		t.Fatalf("insertable audit column count = %d, want 42", wantCount)
 	}
 	bindings := row.columnBindings()
 	gotBindingNames := make([]string, len(bindings))
@@ -72,27 +72,65 @@ func TestAuditEventColumnSpecMatchesExplicitRowAdapters(t *testing.T) {
 	}
 }
 
+func TestAuditEventRowExecutionScopeRoundTrip(t *testing.T) {
+	event := sandboxobservability.Event{
+		ExecutionScope: &sandboxobservability.ExecutionScope{
+			Namespace:   "codex",
+			Kind:        "native_session",
+			ID:          "thread-1",
+			Attribution: sandboxobservability.ExecutionScopeAttributionProcessEnvironment,
+		},
+	}
+	row, err := newAuditEventRow(event)
+	if err != nil {
+		t.Fatalf("newAuditEventRow() error = %v", err)
+	}
+	got, err := row.toEvent()
+	if err != nil {
+		t.Fatalf("toEvent() error = %v", err)
+	}
+	if got.ExecutionScope == nil || *got.ExecutionScope != *event.ExecutionScope {
+		t.Fatalf("execution scope = %#v, want %#v", got.ExecutionScope, event.ExecutionScope)
+	}
+
+	legacy, err := (auditEventRow{event: sandboxobservability.Event{SchemaVersion: sandboxobservability.LegacyEventSchemaVersion}}).toEvent()
+	if err != nil {
+		t.Fatalf("legacy toEvent() error = %v", err)
+	}
+	if legacy.ExecutionScope != nil {
+		t.Fatalf("legacy execution scope = %#v, want nil", legacy.ExecutionScope)
+	}
+	if legacy.SchemaVersion != sandboxobservability.LegacyEventSchemaVersion {
+		t.Fatalf("legacy schema version = %d, want %d", legacy.SchemaVersion, sandboxobservability.LegacyEventSchemaVersion)
+	}
+}
+
 func TestAppendEventFiltersBuildsCanonicalSharedFilters(t *testing.T) {
 	start := time.Date(2026, 7, 1, 1, 2, 3, 4, time.FixedZone("start", 8*60*60))
 	end := time.Date(2026, 7, 1, 2, 3, 4, 5, time.FixedZone("end", -5*60*60))
 	query := sandboxobservability.EventQuery{
-		TeamID:       "team-1",
-		SandboxID:    "sandbox-1",
-		StartTime:    &start,
-		EndTime:      &end,
-		Source:       sandboxobservability.SourceNetd,
-		EventType:    sandboxobservability.EventTypeNetworkAudit,
-		Outcome:      sandboxobservability.OutcomeDenied,
-		ActorKind:    sandboxobservability.ActorKindSandboxWorkload,
-		ActorID:      "actor-1",
-		Action:       "network.deny",
-		ResourceType: "sandbox_network",
-		OperationID:  "operation-1",
+		TeamID:                    "team-1",
+		SandboxID:                 "sandbox-1",
+		MaxSchemaVersion:          sandboxobservability.CurrentEventSchemaVersion,
+		StartTime:                 &start,
+		EndTime:                   &end,
+		Source:                    sandboxobservability.SourceNetd,
+		EventType:                 sandboxobservability.EventTypeNetworkAudit,
+		Outcome:                   sandboxobservability.OutcomeDenied,
+		ActorKind:                 sandboxobservability.ActorKindSandboxWorkload,
+		ActorID:                   "actor-1",
+		ExecutionScopeNamespace:   "codex",
+		ExecutionScopeKind:        "native_session",
+		ExecutionScopeID:          "thread-1",
+		ExecutionScopeAttribution: sandboxobservability.ExecutionScopeAttributionProcessEnvironment,
+		Action:                    "network.deny",
+		ResourceType:              "sandbox_network",
+		OperationID:               "operation-1",
 	}
 
 	var builder strings.Builder
 	args := appendEventFilters(&builder, query)
-	wantSQL := "team_id = ? AND sandbox_id = ?" +
+	wantSQL := "team_id = ? AND sandbox_id = ? AND schema_version <= ?" +
 		" AND occurred_at >= " + dateTime64NanoPlaceholder +
 		" AND occurred_at <= " + dateTime64NanoPlaceholder +
 		" AND source = ?" +
@@ -100,6 +138,10 @@ func TestAppendEventFiltersBuildsCanonicalSharedFilters(t *testing.T) {
 		" AND outcome = ?" +
 		" AND actor_kind = ?" +
 		" AND actor_id = ?" +
+		" AND execution_scope_namespace = ?" +
+		" AND execution_scope_kind = ?" +
+		" AND execution_scope_id = ?" +
+		" AND execution_scope_attribution = ?" +
 		" AND action = ?" +
 		" AND resource_type = ?" +
 		" AND operation_id = ?"
@@ -109,6 +151,7 @@ func TestAppendEventFiltersBuildsCanonicalSharedFilters(t *testing.T) {
 	wantArgs := []any{
 		"team-1",
 		"sandbox-1",
+		sandboxobservability.CurrentEventSchemaVersion,
 		dateTime64NanoArg(start),
 		dateTime64NanoArg(end),
 		string(sandboxobservability.SourceNetd),
@@ -116,6 +159,10 @@ func TestAppendEventFiltersBuildsCanonicalSharedFilters(t *testing.T) {
 		string(sandboxobservability.OutcomeDenied),
 		string(sandboxobservability.ActorKindSandboxWorkload),
 		"actor-1",
+		"codex",
+		"native_session",
+		"thread-1",
+		string(sandboxobservability.ExecutionScopeAttributionProcessEnvironment),
 		"network.deny",
 		"sandbox_network",
 		"operation-1",

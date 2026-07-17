@@ -31,12 +31,13 @@ const (
 )
 
 type sandboxObservabilityWatchLine struct {
-	Type      string `json:"type"`
-	Data      any    `json:"data,omitempty"`
-	Cursor    string `json:"cursor,omitempty"`
-	Watermark string `json:"watermark,omitempty"`
-	Time      string `json:"time,omitempty"`
-	Error     string `json:"error,omitempty"`
+	Type           string                                    `json:"type"`
+	Data           any                                       `json:"data,omitempty"`
+	EffectiveQuery *sandboxobservability.EventEffectiveQuery `json:"effective_query,omitempty"`
+	Cursor         string                                    `json:"cursor,omitempty"`
+	Watermark      string                                    `json:"watermark,omitempty"`
+	Time           string                                    `json:"time,omitempty"`
+	Error          string                                    `json:"error,omitempty"`
 }
 
 // SandboxObservabilityHandler serves historical per-sandbox observability queries.
@@ -135,6 +136,9 @@ func (h *SandboxObservabilityHandler) ListEvents(c *gin.Context) {
 	if result.Events == nil {
 		result.Events = []sandboxobservability.Event{}
 	}
+	// The applied query is response capability metadata. Populate it from the
+	// normalized request so an empty result still proves scope enforcement.
+	result.EffectiveQuery = sandboxobservability.EffectiveEventQuery(query)
 	if query.EventID != "" {
 		result.NextCursor = ""
 	}
@@ -343,7 +347,16 @@ func (h *SandboxObservabilityHandler) normalizeAuditEvents(ctx context.Context, 
 		if !sandboxobservability.ValidEventPhase(event.Phase) {
 			return fmt.Errorf("event %d has invalid phase", i)
 		}
-		event.SchemaVersion = sandboxobservability.CurrentEventSchemaVersion
+		if event.SchemaVersion == 0 {
+			event.SchemaVersion = sandboxobservability.LegacyEventSchemaVersion
+			if event.ExecutionScope != nil {
+				event.SchemaVersion = sandboxobservability.CurrentEventSchemaVersion
+			}
+		}
+		if event.SchemaVersion != sandboxobservability.LegacyEventSchemaVersion &&
+			event.SchemaVersion != sandboxobservability.CurrentEventSchemaVersion {
+			return fmt.Errorf("event %d has unsupported schema_version %d", i, event.SchemaVersion)
+		}
 		event.RegionID = strings.TrimSpace(h.audit.RegionID)
 		event.ClusterID = strings.TrimSpace(h.audit.ClusterID)
 		event.IngestedAt = now
@@ -440,6 +453,14 @@ func (h *SandboxObservabilityHandler) watchEvents(c *gin.Context, query sandboxo
 	if !ok {
 		return
 	}
+	if query.MaxSchemaVersion >= sandboxobservability.CurrentEventSchemaVersion {
+		if !h.writeWatchLine(c, encoder, flusher, sandboxObservabilityWatchLine{
+			Type:           "ready",
+			EffectiveQuery: eventEffectiveQueryPointer(query),
+		}) {
+			return
+		}
+	}
 	lastHeartbeat := time.Now().UTC()
 	for {
 		fullBatch := h.writeWatchEvents(c, encoder, flusher, result, &opts)
@@ -454,6 +475,11 @@ func (h *SandboxObservabilityHandler) watchEvents(c *gin.Context, query sandboxo
 			return
 		}
 	}
+}
+
+func eventEffectiveQueryPointer(query sandboxobservability.EventQuery) *sandboxobservability.EventEffectiveQuery {
+	effective := sandboxobservability.EffectiveEventQuery(query)
+	return &effective
 }
 
 func (h *SandboxObservabilityHandler) watchLogs(c *gin.Context, query sandboxobservability.LogQuery) {
@@ -674,6 +700,10 @@ func parseSandboxObservabilityQuery(c *gin.Context) (sandboxobservability.EventQ
 	if !ok {
 		return sandboxobservability.EventQuery{}, false
 	}
+	maxSchemaVersion, maxSchemaVersionSpecified, ok := parseSandboxObservabilityMaxSchemaVersion(c)
+	if !ok {
+		return sandboxobservability.EventQuery{}, false
+	}
 
 	source, ok := parseOptionalSourceQuery(c)
 	if !ok {
@@ -694,6 +724,23 @@ func parseSandboxObservabilityQuery(c *gin.Context) (sandboxobservability.EventQ
 	}
 	cursor := strings.TrimSpace(c.Query("cursor"))
 	actorID := strings.TrimSpace(c.Query("actor_id"))
+	executionScopeNamespace := strings.TrimSpace(c.Query("execution_scope_namespace"))
+	executionScopeKind := strings.TrimSpace(c.Query("execution_scope_kind"))
+	executionScopeID := strings.TrimSpace(c.Query("execution_scope_id"))
+	executionScopeAttribution := sandboxobservability.ExecutionScopeAttribution(strings.TrimSpace(c.Query("execution_scope_attribution")))
+	if err := sandboxobservability.ValidateExecutionScopeFilter(executionScopeNamespace, executionScopeKind, executionScopeID, executionScopeAttribution); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid execution scope filter")
+		return sandboxobservability.EventQuery{}, false
+	}
+	hasScopeFilter := hasExecutionScopeFilter(executionScopeNamespace, executionScopeKind, executionScopeID, executionScopeAttribution)
+	if hasScopeFilter && !maxSchemaVersionSpecified {
+		maxSchemaVersion = sandboxobservability.CurrentEventSchemaVersion
+	}
+	if hasScopeFilter &&
+		maxSchemaVersion != sandboxobservability.CurrentEventSchemaVersion {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "execution scope filters require max_schema_version=3")
+		return sandboxobservability.EventQuery{}, false
+	}
 	action := strings.TrimSpace(c.Query("action"))
 	resourceType := strings.TrimSpace(c.Query("resource_type"))
 	operationID := strings.TrimSpace(c.Query("operation_id"))
@@ -703,7 +750,7 @@ func parseSandboxObservabilityQuery(c *gin.Context) (sandboxobservability.EventQ
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid event_id")
 			return sandboxobservability.EventQuery{}, false
 		}
-		if startTime != nil || endTime != nil || cursor != "" || source != "" || eventType != "" || outcome != "" || actorKind != "" || actorID != "" || action != "" || resourceType != "" || operationID != "" {
+		if startTime != nil || endTime != nil || cursor != "" || source != "" || eventType != "" || outcome != "" || actorKind != "" || actorID != "" || executionScopeNamespace != "" || executionScopeKind != "" || executionScopeID != "" || executionScopeAttribution != "" || action != "" || resourceType != "" || operationID != "" {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "event_id cannot be combined with other event filters or cursor")
 			return sandboxobservability.EventQuery{}, false
 		}
@@ -713,22 +760,49 @@ func parseSandboxObservabilityQuery(c *gin.Context) (sandboxobservability.EventQ
 	}
 
 	return sandboxobservability.EventQuery{
-		TeamID:       teamID,
-		SandboxID:    sandboxID,
-		StartTime:    startTime,
-		EndTime:      endTime,
-		Limit:        limit,
-		Cursor:       cursor,
-		Source:       source,
-		EventType:    eventType,
-		Outcome:      outcome,
-		ActorKind:    actorKind,
-		ActorID:      actorID,
-		Action:       action,
-		ResourceType: resourceType,
-		OperationID:  operationID,
-		EventID:      eventID,
+		TeamID:                    teamID,
+		SandboxID:                 sandboxID,
+		MaxSchemaVersion:          maxSchemaVersion,
+		StartTime:                 startTime,
+		EndTime:                   endTime,
+		Limit:                     limit,
+		Cursor:                    cursor,
+		Source:                    source,
+		EventType:                 eventType,
+		Outcome:                   outcome,
+		ActorKind:                 actorKind,
+		ActorID:                   actorID,
+		ExecutionScopeNamespace:   executionScopeNamespace,
+		ExecutionScopeKind:        executionScopeKind,
+		ExecutionScopeID:          executionScopeID,
+		ExecutionScopeAttribution: executionScopeAttribution,
+		Action:                    action,
+		ResourceType:              resourceType,
+		OperationID:               operationID,
+		EventID:                   eventID,
 	}, true
+}
+
+func parseSandboxObservabilityMaxSchemaVersion(c *gin.Context) (int, bool, bool) {
+	value := strings.TrimSpace(c.Query("max_schema_version"))
+	if value == "" {
+		return sandboxobservability.DefaultEventMaxSchemaVersion, false, true
+	}
+	version, err := strconv.Atoi(value)
+	if err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "max_schema_version must be an integer greater than or equal to 2")
+		return 0, true, false
+	}
+	effective, ok := sandboxobservability.NormalizeEventMaxSchemaVersion(version)
+	if !ok {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "max_schema_version must be greater than or equal to 2")
+		return 0, true, false
+	}
+	return effective, true, true
+}
+
+func hasExecutionScopeFilter(namespace, kind, id string, attribution sandboxobservability.ExecutionScopeAttribution) bool {
+	return namespace != "" || kind != "" || id != "" || attribution != ""
 }
 
 func parseSandboxLogQuery(c *gin.Context) (sandboxobservability.LogQuery, bool) {

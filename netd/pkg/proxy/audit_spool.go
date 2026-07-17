@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 )
 
 var errAuditSpoolWrite = errors.New("audit spool write failed")
@@ -137,6 +138,7 @@ func (s *auditSpool) Load(limit int) ([]auditEvent, error) {
 			proxyMetrics.RecordAuditIngestEvents("corrupt", 1)
 			return nil, fmt.Errorf("corrupt audit spool record %s", name)
 		}
+		event = normalizeLoadedAuditEvent(event)
 		if validateSpoolAuditEvent(event) != nil || name != event.EventID+".json" {
 			proxyMetrics.RecordAuditIngestEvents("corrupt", 1)
 			return nil, fmt.Errorf("corrupt audit spool identity %s", name)
@@ -184,11 +186,19 @@ func (s *auditSpool) validateRecords() error {
 		if err := json.Unmarshal(payload, &event); err != nil {
 			return fmt.Errorf("corrupt audit spool record %s", entry.Name())
 		}
+		event = normalizeLoadedAuditEvent(event)
 		if validateSpoolAuditEvent(event) != nil || entry.Name() != event.EventID+".json" {
 			return fmt.Errorf("corrupt audit spool identity %s", entry.Name())
 		}
 	}
 	return nil
+}
+
+func normalizeLoadedAuditEvent(event auditEvent) auditEvent {
+	if event.SchemaVersion == 0 {
+		event.SchemaVersion = sandboxobservability.LegacyEventSchemaVersion
+	}
+	return event
 }
 
 func syncDirectory(path string) error {

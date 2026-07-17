@@ -479,7 +479,8 @@ func (*auditSinkStub) Close() error { return nil }
 
 func newAuditDeliveryTestEvent(id string, phase sandboxobservability.EventPhase) auditEvent {
 	return auditEvent{
-		EventID: id, OperationID: "99999999-9999-4999-8999-999999999999",
+		EventID: id, SchemaVersion: sandboxobservability.LegacyEventSchemaVersion,
+		OperationID:      "99999999-9999-4999-8999-999999999999",
 		ProducerInstance: "node-a:boot-a", ProducerSequence: 1,
 		Timestamp: time.Now().UTC(), TeamID: "team-1", SandboxID: "sb-1", FlowID: "tcp-1",
 		Transport: "tcp", Action: "pass-through", Outcome: "accepted", Phase: string(phase),

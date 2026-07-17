@@ -46,40 +46,42 @@ type jsonlAuditSink struct {
 }
 
 type auditEvent struct {
-	EventID            string                   `json:"event_id,omitempty"`
-	OperationID        string                   `json:"operation_id,omitempty"`
-	ProducerInstance   string                   `json:"producer_instance,omitempty"`
-	ProducerSequence   int64                    `json:"producer_sequence,omitempty"`
-	Phase              string                   `json:"phase,omitempty"`
-	Timestamp          time.Time                `json:"timestamp"`
-	FlowID             string                   `json:"flow_id,omitempty"`
-	SandboxID          string                   `json:"sandbox_id,omitempty"`
-	TeamID             string                   `json:"team_id,omitempty"`
-	SrcIP              string                   `json:"src_ip,omitempty"`
-	DestIP             string                   `json:"dest_ip,omitempty"`
-	DestPort           int                      `json:"dest_port,omitempty"`
-	Transport          string                   `json:"transport,omitempty"`
-	Protocol           string                   `json:"protocol,omitempty"`
-	Host               string                   `json:"host,omitempty"`
-	ClassifierResult   string                   `json:"classifier_result,omitempty"`
-	Action             string                   `json:"action,omitempty"`
-	Reason             string                   `json:"reason,omitempty"`
-	Outcome            string                   `json:"outcome,omitempty"`
-	DurationMS         int64                    `json:"duration_ms,omitempty"`
-	EgressBytes        int64                    `json:"egress_bytes,omitempty"`
-	IngressBytes       int64                    `json:"ingress_bytes,omitempty"`
-	Adapter            string                   `json:"adapter,omitempty"`
-	AdapterCapability  string                   `json:"adapter_capability,omitempty"`
-	AuthRuleName       string                   `json:"auth_rule_name,omitempty"`
-	AuthRef            string                   `json:"auth_ref,omitempty"`
-	AuthFailurePolicy  string                   `json:"auth_failure_policy,omitempty"`
-	AuthBypassed       bool                     `json:"auth_bypassed,omitempty"`
-	AuthBypassReason   string                   `json:"auth_bypass_reason,omitempty"`
-	AuthEnforcement    string                   `json:"auth_enforcement,omitempty"`
-	AuthResolved       bool                     `json:"auth_resolved,omitempty"`
-	AuthCacheHit       bool                     `json:"auth_cache_hit,omitempty"`
-	AuthResolveError   string                   `json:"auth_resolve_error,omitempty"`
-	ProtocolOperations []protocolOperationAudit `json:"protocol_operations,omitempty"`
+	EventID            string                               `json:"event_id,omitempty"`
+	SchemaVersion      int                                  `json:"schema_version,omitempty"`
+	OperationID        string                               `json:"operation_id,omitempty"`
+	ProducerInstance   string                               `json:"producer_instance,omitempty"`
+	ProducerSequence   int64                                `json:"producer_sequence,omitempty"`
+	Phase              string                               `json:"phase,omitempty"`
+	Timestamp          time.Time                            `json:"timestamp"`
+	FlowID             string                               `json:"flow_id,omitempty"`
+	SandboxID          string                               `json:"sandbox_id,omitempty"`
+	TeamID             string                               `json:"team_id,omitempty"`
+	ExecutionScope     *sandboxobservability.ExecutionScope `json:"execution_scope,omitempty"`
+	SrcIP              string                               `json:"src_ip,omitempty"`
+	DestIP             string                               `json:"dest_ip,omitempty"`
+	DestPort           int                                  `json:"dest_port,omitempty"`
+	Transport          string                               `json:"transport,omitempty"`
+	Protocol           string                               `json:"protocol,omitempty"`
+	Host               string                               `json:"host,omitempty"`
+	ClassifierResult   string                               `json:"classifier_result,omitempty"`
+	Action             string                               `json:"action,omitempty"`
+	Reason             string                               `json:"reason,omitempty"`
+	Outcome            string                               `json:"outcome,omitempty"`
+	DurationMS         int64                                `json:"duration_ms,omitempty"`
+	EgressBytes        int64                                `json:"egress_bytes,omitempty"`
+	IngressBytes       int64                                `json:"ingress_bytes,omitempty"`
+	Adapter            string                               `json:"adapter,omitempty"`
+	AdapterCapability  string                               `json:"adapter_capability,omitempty"`
+	AuthRuleName       string                               `json:"auth_rule_name,omitempty"`
+	AuthRef            string                               `json:"auth_ref,omitempty"`
+	AuthFailurePolicy  string                               `json:"auth_failure_policy,omitempty"`
+	AuthBypassed       bool                                 `json:"auth_bypassed,omitempty"`
+	AuthBypassReason   string                               `json:"auth_bypass_reason,omitempty"`
+	AuthEnforcement    string                               `json:"auth_enforcement,omitempty"`
+	AuthResolved       bool                                 `json:"auth_resolved,omitempty"`
+	AuthCacheHit       bool                                 `json:"auth_cache_hit,omitempty"`
+	AuthResolveError   string                               `json:"auth_resolve_error,omitempty"`
+	ProtocolOperations []protocolOperationAudit             `json:"protocol_operations,omitempty"`
 	// ProtocolOperationsTruncated records that the bounded protocol-operation
 	// snapshot omitted operations or field content.
 	ProtocolOperationsTruncated bool   `json:"protocol_operations_truncated,omitempty"`
@@ -132,6 +134,23 @@ func validateSpoolAuditEvent(event auditEvent) error {
 	}
 	if !sandboxobservability.ValidOutcome(sandboxobservability.Outcome(event.Outcome)) {
 		return fmt.Errorf("audit outcome is invalid")
+	}
+	switch event.SchemaVersion {
+	case sandboxobservability.LegacyEventSchemaVersion:
+		if event.ExecutionScope != nil {
+			return fmt.Errorf("audit schema version %d does not support execution scope", event.SchemaVersion)
+		}
+	case sandboxobservability.CurrentEventSchemaVersion:
+		if event.ExecutionScope == nil {
+			return fmt.Errorf("audit schema version %d requires execution scope", event.SchemaVersion)
+		}
+	default:
+		return fmt.Errorf("audit schema version is invalid")
+	}
+	if event.ExecutionScope != nil {
+		if err := sandboxobservability.ValidateExecutionScope(*event.ExecutionScope); err != nil {
+			return fmt.Errorf("audit execution scope is invalid: %w", err)
+		}
 	}
 	return nil
 }
@@ -411,6 +430,7 @@ func (l *auditLogger) recordWithPhase(req *adapterRequest, decision trafficDecis
 			event.SandboxID = req.Compiled.SandboxID
 			event.TeamID = req.Compiled.TeamID
 		}
+		event.ExecutionScope = cloneExecutionScope(req.ExecutionScope)
 		if req.EgressAuth != nil {
 			if req.EgressAuth.Rule != nil {
 				event.AuthRuleName = req.EgressAuth.Rule.Name

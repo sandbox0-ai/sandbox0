@@ -195,9 +195,6 @@ func (r *Reconciler) desiredSystemIngressRules() []networkingv1.NetworkPolicyIng
 	specs := []systemIngressRule{
 		{component: internalauth.ServiceManager, procdOnly: true},
 		{component: internalauth.ServiceSSHGateway, procdOnly: true},
-		// The network runtime runs inside the ctld DaemonSet but authenticates
-		// to procd with the narrower logical caller identity "netd".
-		{component: internalauth.ServiceCtld, procdOnly: true},
 		{component: internalauth.ServiceClusterGateway},
 	}
 

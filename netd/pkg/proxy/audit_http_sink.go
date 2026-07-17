@@ -163,13 +163,6 @@ func (s *httpAuditSink) WriteAuditEvent(event auditEvent) error {
 	if event.Phase == "" {
 		event.Phase = string(sandboxobservability.EventPhaseResult)
 	}
-	// Freeze the canonical schema before persistence. Unscoped facts remain v2
-	// for clients generated before execution scopes; only scoped facts use v3.
-	// Records written by older versions omitted this field and are normalized
-	// to v2 only while loading the durable spool.
-	if event.SchemaVersion == 0 {
-		event.SchemaVersion = auditSchemaVersion(event)
-	}
 	if err := validateSpoolAuditEvent(event); err != nil {
 		proxyMetrics.RecordAuditIngestEvents("invalid", 1)
 		return err
@@ -212,13 +205,6 @@ func (s *httpAuditSink) WriteAuditEvent(event auditEvent) error {
 		}
 	}
 	return s.enqueueDurableEvent(event)
-}
-
-func auditSchemaVersion(event auditEvent) int {
-	if event.ExecutionScope != nil {
-		return sandboxobservability.CurrentEventSchemaVersion
-	}
-	return sandboxobservability.LegacyEventSchemaVersion
 }
 
 func (s *httpAuditSink) enqueueDurableEvent(event auditEvent) error {
@@ -543,19 +529,18 @@ func (s *httpAuditSink) toObservabilityEvent(event auditEvent) (sandboxobservabi
 	}
 	outcome := sandboxobservability.Outcome(event.Outcome)
 	return sandboxobservability.Event{
-		EventID:        event.EventID,
-		SchemaVersion:  event.SchemaVersion,
-		TeamID:         event.TeamID,
-		SandboxID:      event.SandboxID,
-		RegionID:       s.regionID,
-		ClusterID:      s.clusterID,
-		OccurredAt:     event.Timestamp.UTC(),
-		Source:         sandboxobservability.SourceNetd,
-		EventType:      sandboxobservability.EventTypeNetworkAudit,
-		Phase:          sandboxobservability.EventPhase(event.Phase),
-		Outcome:        outcome,
-		ExecutionScope: event.ExecutionScope,
-		OperationID:    event.OperationID,
+		EventID:       event.EventID,
+		SchemaVersion: sandboxobservability.CurrentEventSchemaVersion,
+		TeamID:        event.TeamID,
+		SandboxID:     event.SandboxID,
+		RegionID:      s.regionID,
+		ClusterID:     s.clusterID,
+		OccurredAt:    event.Timestamp.UTC(),
+		Source:        sandboxobservability.SourceNetd,
+		EventType:     sandboxobservability.EventTypeNetworkAudit,
+		Phase:         sandboxobservability.EventPhase(event.Phase),
+		Outcome:       outcome,
+		OperationID:   event.OperationID,
 		Producer: sandboxobservability.AuditProducer{
 			Service:  "netd",
 			Instance: event.ProducerInstance,

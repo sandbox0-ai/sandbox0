@@ -258,11 +258,6 @@ const (
 	Result  SandboxAuditEventPhase = "result"
 )
 
-// Defines values for SandboxAuditExecutionScopeAttribution.
-const (
-	ProcessEnvironment SandboxAuditExecutionScopeAttribution = "process_environment"
-)
-
 // Defines values for SandboxAuditIntegrityAlgorithm.
 const (
 	Ed25519Sha256V1 SandboxAuditIntegrityAlgorithm = "ed25519-sha256-v1"
@@ -303,7 +298,6 @@ const (
 // Defines values for SandboxObservabilityEventSchemaVersion.
 const (
 	N2 SandboxObservabilityEventSchemaVersion = 2
-	N3 SandboxObservabilityEventSchemaVersion = 3
 )
 
 // Defines values for SandboxObservabilityEventType.
@@ -340,7 +334,6 @@ const (
 	SandboxObservabilityWatchLineTypeEvent     SandboxObservabilityWatchLineType = "event"
 	SandboxObservabilityWatchLineTypeHeartbeat SandboxObservabilityWatchLineType = "heartbeat"
 	SandboxObservabilityWatchLineTypeLog       SandboxObservabilityWatchLineType = "log"
-	SandboxObservabilityWatchLineTypeReady     SandboxObservabilityWatchLineType = "ready"
 	SandboxObservabilityWatchLineTypeWatermark SandboxObservabilityWatchLineType = "watermark"
 )
 
@@ -1422,20 +1415,6 @@ type ExecutionSessionRestartSpec struct {
 // ExecutionSessionRuntimeRecoveryPolicy defines model for ExecutionSessionRuntimeRecoveryPolicy.
 type ExecutionSessionRuntimeRecoveryPolicy string
 
-// ExecutionSessionScopeSpec Declares how descendants of this trusted supervisor process expose a
-// logical execution scope. The runtime reads only the named environment
-// variable and never exports the descendant process environment.
-type ExecutionSessionScopeSpec struct {
-	// IdEnvironmentVariable Environment variable carrying the native scope identifier in descendant processes.
-	IdEnvironmentVariable string `json:"id_environment_variable"`
-
-	// Kind Native scope kind, for example native_session.
-	Kind string `json:"kind"`
-
-	// Namespace Producer namespace for the logical scope, for example codex.
-	Namespace string `json:"namespace"`
-}
-
 // ExecutionSessionSignalRequest defines model for ExecutionSessionSignalRequest.
 type ExecutionSessionSignalRequest struct {
 	ExpectedAttemptId *string `json:"expected_attempt_id,omitempty"`
@@ -1448,15 +1427,10 @@ type ExecutionSessionSpec struct {
 	Cwd            *string                             `json:"cwd,omitempty"`
 	Env            *map[string]string                  `json:"env,omitempty"`
 	EventRetention *ExecutionSessionEventRetentionSpec `json:"event_retention,omitempty"`
-
-	// ExecutionScope Declares how descendants of this trusted supervisor process expose a
-	// logical execution scope. The runtime reads only the named environment
-	// variable and never exports the descendant process environment.
-	ExecutionScope *ExecutionSessionScopeSpec     `json:"execution_scope,omitempty"`
-	Io             *ExecutionSessionIOSpec        `json:"io,omitempty"`
-	Lifecycle      *ExecutionSessionLifecycleSpec `json:"lifecycle,omitempty"`
-	Name           *string                        `json:"name,omitempty"`
-	Readiness      *ExecutionSessionReadinessSpec `json:"readiness,omitempty"`
+	Io             *ExecutionSessionIOSpec             `json:"io,omitempty"`
+	Lifecycle      *ExecutionSessionLifecycleSpec      `json:"lifecycle,omitempty"`
+	Name           *string                             `json:"name,omitempty"`
+	Readiness      *ExecutionSessionReadinessSpec      `json:"readiness,omitempty"`
 }
 
 // ExecutionSessionTerminalResizeRequest defines model for ExecutionSessionTerminalResizeRequest.
@@ -2200,18 +2174,6 @@ type SandboxAuditActorKind string
 // SandboxAuditEventPhase defines model for SandboxAuditEventPhase.
 type SandboxAuditEventPhase string
 
-// SandboxAuditExecutionScope Attributes sandbox workload activity to one native harness execution
-// scope. The sandbox workload remains the audit actor.
-type SandboxAuditExecutionScope struct {
-	Attribution SandboxAuditExecutionScopeAttribution `json:"attribution"`
-	Id          string                                `json:"id"`
-	Kind        string                                `json:"kind"`
-	Namespace   string                                `json:"namespace"`
-}
-
-// SandboxAuditExecutionScopeAttribution defines model for SandboxAuditExecutionScopeAttribution.
-type SandboxAuditExecutionScopeAttribution string
-
 // SandboxAuditIntegrity defines model for SandboxAuditIntegrity.
 type SandboxAuditIntegrity struct {
 	Algorithm SandboxAuditIntegrityAlgorithm `json:"algorithm"`
@@ -2326,48 +2288,32 @@ type SandboxNetworkPolicy struct {
 // SandboxNetworkPolicyMode defines model for SandboxNetworkPolicy.Mode.
 type SandboxNetworkPolicyMode string
 
-// SandboxObservabilityEffectiveEventQuery Normalized schema ceiling and execution-scope filters applied by the
-// server. This metadata is returned even when no events match.
-type SandboxObservabilityEffectiveEventQuery struct {
-	ExecutionScopeAttribution *SandboxAuditExecutionScopeAttribution `json:"execution_scope_attribution,omitempty"`
-	ExecutionScopeId          *string                                `json:"execution_scope_id,omitempty"`
-	ExecutionScopeKind        *string                                `json:"execution_scope_kind,omitempty"`
-	ExecutionScopeNamespace   *string                                `json:"execution_scope_namespace,omitempty"`
-	MaxSchemaVersion          int                                    `json:"max_schema_version"`
-}
-
 // SandboxObservabilityEvent defines model for SandboxObservabilityEvent.
 type SandboxObservabilityEvent struct {
-	Action     string                        `json:"action"`
-	Actor      SandboxAuditActor             `json:"actor"`
-	Attributes *map[string]interface{}       `json:"attributes,omitempty"`
-	ClusterId  string                        `json:"cluster_id"`
-	EventId    openapi_types.UUID            `json:"event_id"`
-	EventType  SandboxObservabilityEventType `json:"event_type"`
-
-	// ExecutionScope Attributes sandbox workload activity to one native harness execution
-	// scope. The sandbox workload remains the audit actor.
-	ExecutionScope *SandboxAuditExecutionScope `json:"execution_scope,omitempty"`
-	IngestedAt     time.Time                   `json:"ingested_at"`
-	Integrity      SandboxAuditIntegrity       `json:"integrity"`
-	OccurredAt     time.Time                   `json:"occurred_at"`
-	OperationId    string                      `json:"operation_id"`
-	Outcome        SandboxObservabilityOutcome `json:"outcome"`
-	ParentEventId  *openapi_types.UUID         `json:"parent_event_id,omitempty"`
-	Phase          SandboxAuditEventPhase      `json:"phase"`
-	Producer       SandboxAuditProducer        `json:"producer"`
-	RegionId       string                      `json:"region_id"`
-	Request        *SandboxAuditRequest        `json:"request,omitempty"`
-	Resource       SandboxAuditResource        `json:"resource"`
-	SandboxId      string                      `json:"sandbox_id"`
-
-	// SchemaVersion Schema v2 is used for unscoped facts; schema v3 requires execution_scope.
+	Action        string                                 `json:"action"`
+	Actor         SandboxAuditActor                      `json:"actor"`
+	Attributes    *map[string]interface{}                `json:"attributes,omitempty"`
+	ClusterId     string                                 `json:"cluster_id"`
+	EventId       openapi_types.UUID                     `json:"event_id"`
+	EventType     SandboxObservabilityEventType          `json:"event_type"`
+	IngestedAt    time.Time                              `json:"ingested_at"`
+	Integrity     SandboxAuditIntegrity                  `json:"integrity"`
+	OccurredAt    time.Time                              `json:"occurred_at"`
+	OperationId   string                                 `json:"operation_id"`
+	Outcome       SandboxObservabilityOutcome            `json:"outcome"`
+	ParentEventId *openapi_types.UUID                    `json:"parent_event_id,omitempty"`
+	Phase         SandboxAuditEventPhase                 `json:"phase"`
+	Producer      SandboxAuditProducer                   `json:"producer"`
+	RegionId      string                                 `json:"region_id"`
+	Request       *SandboxAuditRequest                   `json:"request,omitempty"`
+	Resource      SandboxAuditResource                   `json:"resource"`
+	SandboxId     string                                 `json:"sandbox_id"`
 	SchemaVersion SandboxObservabilityEventSchemaVersion `json:"schema_version"`
 	Source        ObservabilityEventSource               `json:"source"`
 	TeamId        string                                 `json:"team_id"`
 }
 
-// SandboxObservabilityEventSchemaVersion Schema v2 is used for unscoped facts; schema v3 requires execution_scope.
+// SandboxObservabilityEventSchemaVersion defines model for SandboxObservabilityEvent.SchemaVersion.
 type SandboxObservabilityEventSchemaVersion int
 
 // SandboxObservabilityEventType defines model for SandboxObservabilityEventType.
@@ -2375,12 +2321,9 @@ type SandboxObservabilityEventType string
 
 // SandboxObservabilityEventsResponse defines model for SandboxObservabilityEventsResponse.
 type SandboxObservabilityEventsResponse struct {
-	// EffectiveQuery Normalized schema ceiling and execution-scope filters applied by the
-	// server. This metadata is returned even when no events match.
-	EffectiveQuery SandboxObservabilityEffectiveEventQuery `json:"effective_query"`
-	Events         []SandboxObservabilityEvent             `json:"events"`
-	NextCursor     *string                                 `json:"next_cursor,omitempty"`
-	Watermark      *string                                 `json:"watermark,omitempty"`
+	Events     []SandboxObservabilityEvent `json:"events"`
+	NextCursor *string                     `json:"next_cursor,omitempty"`
+	Watermark  *string                     `json:"watermark,omitempty"`
 }
 
 // SandboxObservabilityLogEntry defines model for SandboxObservabilityLogEntry.
@@ -2417,10 +2360,6 @@ type SandboxObservabilityWatchLine struct {
 	// Cursor Watch resume cursor. Present on watermark lines.
 	Cursor *string                             `json:"cursor,omitempty"`
 	Data   *SandboxObservabilityWatchLine_Data `json:"data,omitempty"`
-
-	// EffectiveQuery Normalized schema ceiling and execution-scope filters applied by the
-	// server. This metadata is returned even when no events match.
-	EffectiveQuery *SandboxObservabilityEffectiveEventQuery `json:"effective_query,omitempty"`
 
 	// Error Stream error message.
 	Error *string `json:"error,omitempty"`
@@ -3781,35 +3720,15 @@ type GetApiV1SandboxesIdObservabilityEventsParams struct {
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 
 	// Watch Stream matching records as application/x-ndjson in ingestion order until the client disconnects. When watch is true, end_time is not supported. Without cursor or start_time, streaming starts at request time.
-	Watch *bool `form:"watch,omitempty" json:"watch,omitempty"`
-
-	// MaxSchemaVersion Highest audit-event schema the client can decode. The default is 2
-	// so clients generated before execution-scope support never receive
-	// schema v3. Values newer than this server supports are capped to its
-	// current schema. Omitting this parameter while using any
-	// execution_scope filter implicitly negotiates schema v3; explicitly
-	// requesting schema v2 with such a filter is invalid.
-	MaxSchemaVersion *int                           `form:"max_schema_version,omitempty" json:"max_schema_version,omitempty"`
-	Source           *ObservabilityEventSource      `form:"source,omitempty" json:"source,omitempty"`
-	EventType        *SandboxObservabilityEventType `form:"event_type,omitempty" json:"event_type,omitempty"`
-	Outcome          *SandboxObservabilityOutcome   `form:"outcome,omitempty" json:"outcome,omitempty"`
-	ActorKind        *SandboxAuditActorKind         `form:"actor_kind,omitempty" json:"actor_kind,omitempty"`
-	ActorId          *string                        `form:"actor_id,omitempty" json:"actor_id,omitempty"`
-
-	// ExecutionScopeNamespace Restrict results to an exact execution-scope namespace such as codex.
-	ExecutionScopeNamespace *string `form:"execution_scope_namespace,omitempty" json:"execution_scope_namespace,omitempty"`
-
-	// ExecutionScopeKind Restrict results to an exact execution-scope kind such as native_session.
-	ExecutionScopeKind *string `form:"execution_scope_kind,omitempty" json:"execution_scope_kind,omitempty"`
-
-	// ExecutionScopeId Restrict results to an exact native execution-scope identifier.
-	ExecutionScopeId *string `form:"execution_scope_id,omitempty" json:"execution_scope_id,omitempty"`
-
-	// ExecutionScopeAttribution Restrict results to the runtime signal used to attribute the execution scope.
-	ExecutionScopeAttribution *SandboxAuditExecutionScopeAttribution `form:"execution_scope_attribution,omitempty" json:"execution_scope_attribution,omitempty"`
-	Action                    *string                                `form:"action,omitempty" json:"action,omitempty"`
-	ResourceType              *string                                `form:"resource_type,omitempty" json:"resource_type,omitempty"`
-	OperationId               *string                                `form:"operation_id,omitempty" json:"operation_id,omitempty"`
+	Watch        *bool                          `form:"watch,omitempty" json:"watch,omitempty"`
+	Source       *ObservabilityEventSource      `form:"source,omitempty" json:"source,omitempty"`
+	EventType    *SandboxObservabilityEventType `form:"event_type,omitempty" json:"event_type,omitempty"`
+	Outcome      *SandboxObservabilityOutcome   `form:"outcome,omitempty" json:"outcome,omitempty"`
+	ActorKind    *SandboxAuditActorKind         `form:"actor_kind,omitempty" json:"actor_kind,omitempty"`
+	ActorId      *string                        `form:"actor_id,omitempty" json:"actor_id,omitempty"`
+	Action       *string                        `form:"action,omitempty" json:"action,omitempty"`
+	ResourceType *string                        `form:"resource_type,omitempty" json:"resource_type,omitempty"`
+	OperationId  *string                        `form:"operation_id,omitempty" json:"operation_id,omitempty"`
 
 	// EventId Exact lookup mode for one stable audit event ID. It cannot be combined with time, cursor, watch, or other event filters and returns one canonical row or two conflicting payload variants.
 	EventId *openapi_types.UUID `form:"event_id,omitempty" json:"event_id,omitempty"`

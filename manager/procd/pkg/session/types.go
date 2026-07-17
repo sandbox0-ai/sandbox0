@@ -120,25 +120,15 @@ type EventRetentionSpec struct {
 	MaxAgeSeconds int64 `json:"max_age_seconds,omitempty"`
 }
 
-// ExecutionScopeSpec declares how descendant processes expose a logical
-// execution scope. The supervisor owns the trusted root process while the
-// configured environment variable is resolved from descendants at runtime.
-type ExecutionScopeSpec struct {
-	Namespace             string `json:"namespace"`
-	Kind                  string `json:"kind"`
-	IDEnvironmentVariable string `json:"id_environment_variable"`
-}
-
 type SessionSpec struct {
-	Name           string              `json:"name,omitempty"`
-	Command        []string            `json:"command"`
-	CWD            string              `json:"cwd,omitempty"`
-	Env            map[string]string   `json:"env,omitempty"`
-	IO             IOSpec              `json:"io"`
-	Lifecycle      LifecycleSpec       `json:"lifecycle"`
-	Readiness      ReadinessSpec       `json:"readiness"`
-	EventRetention EventRetentionSpec  `json:"event_retention"`
-	ExecutionScope *ExecutionScopeSpec `json:"execution_scope,omitempty"`
+	Name           string             `json:"name,omitempty"`
+	Command        []string           `json:"command"`
+	CWD            string             `json:"cwd,omitempty"`
+	Env            map[string]string  `json:"env,omitempty"`
+	IO             IOSpec             `json:"io"`
+	Lifecycle      LifecycleSpec      `json:"lifecycle"`
+	Readiness      ReadinessSpec      `json:"readiness"`
+	EventRetention EventRetentionSpec `json:"event_retention"`
 }
 
 type Attempt struct {
@@ -246,13 +236,6 @@ func (e *CursorExpiredError) Unwrap() error {
 func normalizeSpec(spec SessionSpec) SessionSpec {
 	spec.Name = strings.TrimSpace(spec.Name)
 	spec.Command = append([]string(nil), spec.Command...)
-	if spec.ExecutionScope != nil {
-		executionScope := *spec.ExecutionScope
-		executionScope.Namespace = strings.TrimSpace(executionScope.Namespace)
-		executionScope.Kind = strings.TrimSpace(executionScope.Kind)
-		executionScope.IDEnvironmentVariable = strings.TrimSpace(executionScope.IDEnvironmentVariable)
-		spec.ExecutionScope = &executionScope
-	}
 	if spec.Env == nil {
 		spec.Env = map[string]string{}
 	} else {
@@ -369,30 +352,6 @@ func validateSpec(spec SessionSpec) error {
 	}
 	if spec.EventRetention.MaxBytes < 0 || spec.EventRetention.MaxAgeSeconds < 0 {
 		return errors.New("event retention limits must be non-negative")
-	}
-	if spec.ExecutionScope != nil {
-		if spec.ExecutionScope.Namespace == "" {
-			return errors.New("execution_scope.namespace is required")
-		}
-		if spec.ExecutionScope.Kind == "" {
-			return errors.New("execution_scope.kind is required")
-		}
-		if spec.ExecutionScope.IDEnvironmentVariable == "" {
-			return errors.New("execution_scope.id_environment_variable is required")
-		}
-		if len(spec.ExecutionScope.Namespace) > 64 || len(spec.ExecutionScope.Kind) > 64 {
-			return errors.New("execution_scope namespace and kind must not exceed 64 bytes")
-		}
-		if len(spec.ExecutionScope.IDEnvironmentVariable) > 128 {
-			return errors.New("execution_scope.id_environment_variable must not exceed 128 bytes")
-		}
-		for i, r := range spec.ExecutionScope.IDEnvironmentVariable {
-			isUppercaseLetter := r >= 'A' && r <= 'Z'
-			isDigitAfterFirst := i > 0 && r >= '0' && r <= '9'
-			if r != '_' && !isUppercaseLetter && !isDigitAfterFirst {
-				return errors.New("execution_scope.id_environment_variable must be an uppercase environment variable name")
-			}
-		}
 	}
 	return nil
 }

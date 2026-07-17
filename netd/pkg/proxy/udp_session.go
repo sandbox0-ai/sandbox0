@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
-	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	"go.uber.org/zap"
 )
 
@@ -20,35 +19,27 @@ type udpSessionKey struct {
 	DestPort int
 }
 
-const (
-	udpExecutionScopeRevalidateInterval = time.Second
-	udpExecutionScopeMaxStale           = 5 * time.Second
-)
-
 type udpSession struct {
 	server *Server
 	key    udpSessionKey
 
-	mu             sync.Mutex
-	compiled       *policy.CompiledPolicy
-	audit          *flowAudit
-	executionScope *sandboxobservability.ExecutionScope
-	clientConn     *net.UDPConn
-	clientAddr     *net.UDPAddr
-	destIP         net.IP
-	destPort       int
-	upstream       *net.UDPConn
-	downstream     udpReplyConn
-	closed         bool
-	auditReq       *adapterRequest
-	decision       trafficDecision
-	adapter        proxyAdapter
-	terminalErr    error
+	mu          sync.Mutex
+	compiled    *policy.CompiledPolicy
+	audit       *flowAudit
+	clientConn  *net.UDPConn
+	clientAddr  *net.UDPAddr
+	destIP      net.IP
+	destPort    int
+	upstream    *net.UDPConn
+	downstream  udpReplyConn
+	closed      bool
+	auditReq    *adapterRequest
+	decision    trafficDecision
+	adapter     proxyAdapter
+	terminalErr error
 
-	executionScopeResolvedAt  time.Time
-	executionScopeNextResolve time.Time
-	lastSeenUnixNano          int64
-	closeOnce                 sync.Once
+	lastSeenUnixNano int64
+	closeOnce        sync.Once
 }
 
 type udpReplyConn interface {
@@ -75,19 +66,15 @@ func newUDPSession(server *Server, key udpSessionKey, req *adapterRequest) *udpS
 	if audit == nil && server != nil {
 		audit = server.newFlowAudit("udp")
 	}
-	now := time.Now()
 	session := &udpSession{
-		server:                    server,
-		key:                       key,
-		compiled:                  req.Compiled,
-		audit:                     audit,
-		executionScope:            cloneExecutionScope(req.ExecutionScope),
-		clientConn:                req.UDPConn,
-		clientAddr:                cloneUDPAddr(req.UDPSource),
-		destIP:                    cloneIP(req.DestIP),
-		destPort:                  req.DestPort,
-		executionScopeResolvedAt:  now,
-		executionScopeNextResolve: now.Add(udpExecutionScopeRevalidateInterval),
+		server:     server,
+		key:        key,
+		compiled:   req.Compiled,
+		audit:      audit,
+		clientConn: req.UDPConn,
+		clientAddr: cloneUDPAddr(req.UDPSource),
+		destIP:     cloneIP(req.DestIP),
+		destPort:   req.DestPort,
 	}
 	session.touch()
 	return session
@@ -101,61 +88,16 @@ func (s *Server) ensureUDPSession(req *adapterRequest) (*udpSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	// UDP source ports can be reused by another process before an existing
-	// proxy-side session reaches its idle timeout. Revalidate a hot tuple at a
-	// bounded cadence instead of putting every datagram on the procd HTTP path.
-	// One caller claims each interval while concurrent datagrams keep using the
-	// last confirmed result.
-	now := time.Now()
-	s.udpSessionMu.Lock()
-	current := s.udpSessions[key]
-	revalidate := current == nil ||
-		current.isClosed() ||
-		current.claimExecutionScopeRevalidation(now)
-	s.udpSessionMu.Unlock()
-	if !revalidate {
-		current.update(req)
-		return current, nil
-	}
-	resolved := s.resolveRequestExecutionScope(req, "udp")
-
-	var replaced *udpSession
 	s.udpSessionMu.Lock()
 	if s.udpSessions == nil {
 		s.udpSessions = make(map[udpSessionKey]*udpSession)
 	}
 	session := s.udpSessions[key]
-	if session != nil && !session.isClosed() && !resolved {
-		// A timeout or saturated resolver is not evidence that ownership became
-		// ambiguous. Preserve a recent confirmed scope, but never indefinitely:
-		// after the bounded stale window the replacement flow is unattributed.
-		if !session.executionScopeIsStale(now) {
-			s.udpSessionMu.Unlock()
-			session.update(req)
-			return session, nil
-		}
-		req.ExecutionScope = nil
-	}
-	if session != nil && !session.isClosed() && resolved &&
-		equalExecutionScopes(session.ExecutionScope(), req.ExecutionScope) {
-		session.markExecutionScopeResolved(now)
-		s.udpSessionMu.Unlock()
-		session.update(req)
-		return session, nil
-	}
-	if session != nil && !session.isClosed() &&
-		!equalExecutionScopes(session.ExecutionScope(), req.ExecutionScope) {
-		replaced = session
-		session = nil
-	}
 	if session == nil || session.isClosed() {
 		session = newUDPSession(s, key, req)
 		s.udpSessions[key] = session
 	}
 	s.udpSessionMu.Unlock()
-	if replaced != nil {
-		replaced.close()
-	}
 	session.update(req)
 	return session, nil
 }
@@ -214,58 +156,6 @@ func (session *udpSession) Audit() *flowAudit {
 	return session.audit
 }
 
-func (session *udpSession) ExecutionScope() *sandboxobservability.ExecutionScope {
-	if session == nil {
-		return nil
-	}
-	session.mu.Lock()
-	defer session.mu.Unlock()
-	if session.executionScope == nil {
-		return nil
-	}
-	scope := *session.executionScope
-	return &scope
-}
-
-func (session *udpSession) claimExecutionScopeRevalidation(now time.Time) bool {
-	if session == nil {
-		return true
-	}
-	session.mu.Lock()
-	defer session.mu.Unlock()
-	if session.closed {
-		return true
-	}
-	if !session.executionScopeNextResolve.IsZero() && now.Before(session.executionScopeNextResolve) {
-		return false
-	}
-	session.executionScopeNextResolve = now.Add(udpExecutionScopeRevalidateInterval)
-	return true
-}
-
-func (session *udpSession) markExecutionScopeResolved(now time.Time) {
-	if session == nil {
-		return
-	}
-	session.mu.Lock()
-	defer session.mu.Unlock()
-	session.executionScopeResolvedAt = now
-	session.executionScopeNextResolve = now.Add(udpExecutionScopeRevalidateInterval)
-}
-
-func (session *udpSession) executionScopeIsStale(now time.Time) bool {
-	if session == nil {
-		return true
-	}
-	session.mu.Lock()
-	defer session.mu.Unlock()
-	if session.executionScope == nil {
-		return false
-	}
-	return session.executionScopeResolvedAt.IsZero() ||
-		now.Sub(session.executionScopeResolvedAt) >= udpExecutionScopeMaxStale
-}
-
 func (session *udpSession) Forward(payload []byte) error {
 	if session == nil {
 		return fmt.Errorf("udp session is nil")
@@ -304,13 +194,12 @@ func (session *udpSession) bindAudit(req *adapterRequest, decision trafficDecisi
 	session.decision = decision
 	session.adapter = adapter
 	session.auditReq = &adapterRequest{
-		Compiled:       req.Compiled,
-		Audit:          session.audit,
-		SrcIP:          req.SrcIP,
-		DestIP:         cloneIP(req.DestIP),
-		DestPort:       req.DestPort,
-		Host:           req.Host,
-		ExecutionScope: cloneExecutionScope(session.executionScope),
+		Compiled: req.Compiled,
+		Audit:    session.audit,
+		SrcIP:    req.SrcIP,
+		DestIP:   cloneIP(req.DestIP),
+		DestPort: req.DestPort,
+		Host:     req.Host,
 	}
 }
 

@@ -14,7 +14,6 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
-	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/execution"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/http/handlers"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/session"
@@ -143,12 +142,6 @@ func (s *Server) setupRoutes() {
 		api.HandleFunc("/sessions/{id}/events", sessionHandler.Events).Methods("GET")
 		api.HandleFunc("/sessions/{id}/events/stream", sessionHandler.EventStream).Methods("GET")
 		api.HandleFunc("/sessions/{id}/ws", sessionHandler.WebSocket).Methods("GET")
-
-		executionScopeHandler := handlers.NewExecutionScopeHandler(
-			execution.NewResolver("/proc", s.sessionSupervisor.ExecutionScopeRoots),
-			s.sessionSupervisor.SandboxID,
-		)
-		api.HandleFunc("/execution-scopes/resolve", executionScopeHandler.Resolve).Methods("GET")
 	}
 
 	functionHandler := handlers.NewFunctionHandler(s.logger)

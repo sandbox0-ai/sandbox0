@@ -32,62 +32,6 @@ func TestValidateSignedEventRejectsInvalidDomainBeforeCustody(t *testing.T) {
 		{name: "status code below storage range", mutate: func(event *Event) { event.Request.StatusCode = -1 }, want: "status_code must be between"},
 		{name: "status code above storage range", mutate: func(event *Event) { event.Request.StatusCode = 65536 }, want: "status_code must be between"},
 		{name: "negative producer sequence", mutate: func(event *Event) { event.Producer.Sequence = -1 }, want: "producer sequence must not be negative"},
-		{name: "partial execution scope", mutate: func(event *Event) {
-			event.ExecutionScope = &ExecutionScope{Namespace: "codex"}
-		}, want: "execution_scope: kind is required"},
-		{name: "execution scope whitespace", mutate: func(event *Event) {
-			event.ExecutionScope = &ExecutionScope{
-				Namespace:   " codex",
-				Kind:        "native_session",
-				ID:          "thread-1",
-				Attribution: ExecutionScopeAttributionProcessEnvironment,
-			}
-		}, want: "execution_scope: namespace must not contain surrounding whitespace"},
-		{name: "invalid execution scope attribution", mutate: func(event *Event) {
-			event.ExecutionScope = &ExecutionScope{
-				Namespace:   "codex",
-				Kind:        "native_session",
-				ID:          "thread-1",
-				Attribution: "unknown",
-			}
-		}, want: "execution_scope: invalid attribution"},
-		{name: "oversized execution scope namespace", mutate: func(event *Event) {
-			event.ExecutionScope = &ExecutionScope{
-				Namespace:   strings.Repeat("n", MaxExecutionScopeNamespaceBytes+1),
-				Kind:        "native_session",
-				ID:          "thread-1",
-				Attribution: ExecutionScopeAttributionProcessEnvironment,
-			}
-		}, want: "execution_scope: namespace exceeds"},
-		{name: "oversized execution scope kind", mutate: func(event *Event) {
-			event.ExecutionScope = &ExecutionScope{
-				Namespace:   "codex",
-				Kind:        strings.Repeat("k", MaxExecutionScopeKindBytes+1),
-				ID:          "thread-1",
-				Attribution: ExecutionScopeAttributionProcessEnvironment,
-			}
-		}, want: "execution_scope: kind exceeds"},
-		{name: "oversized execution scope id", mutate: func(event *Event) {
-			event.ExecutionScope = &ExecutionScope{
-				Namespace:   "codex",
-				Kind:        "native_session",
-				ID:          strings.Repeat("i", MaxExecutionScopeIDBytes+1),
-				Attribution: ExecutionScopeAttributionProcessEnvironment,
-			}
-		}, want: "execution_scope: id exceeds"},
-		{name: "v2 execution scope", mutate: func(event *Event) {
-			event.SchemaVersion = LegacyEventSchemaVersion
-			event.ExecutionScope = &ExecutionScope{
-				Namespace:   "codex",
-				Kind:        "native_session",
-				ID:          "thread-1",
-				Attribution: ExecutionScopeAttributionProcessEnvironment,
-			}
-		}, want: "does not support execution_scope"},
-		{name: "v3 without execution scope", mutate: func(event *Event) {
-			event.SchemaVersion = CurrentEventSchemaVersion
-			event.ExecutionScope = nil
-		}, want: "requires execution_scope"},
 		{name: "oversized attributes", mutate: func(event *Event) {
 			event.Attributes = map[string]any{"value": strings.Repeat("x", MaxAuditAttributesBytes)}
 		}, want: "attributes exceed"},
@@ -101,24 +45,6 @@ func TestValidateSignedEventRejectsInvalidDomainBeforeCustody(t *testing.T) {
 				t.Fatalf("ValidateSignedEvent() error = %v, want %q", err, tt.want)
 			}
 		})
-	}
-}
-
-func TestValidExecutionScope(t *testing.T) {
-	scope := ExecutionScope{
-		Namespace:   "codex",
-		Kind:        "native_session",
-		ID:          "thread-1",
-		Attribution: ExecutionScopeAttributionProcessEnvironment,
-	}
-	if scope.IsZero() {
-		t.Fatal("ExecutionScope.IsZero() = true for populated scope")
-	}
-	if !ValidExecutionScope(scope) {
-		t.Fatalf("ValidExecutionScope(%+v) = false", scope)
-	}
-	if ValidExecutionScope(ExecutionScope{}) {
-		t.Fatal("ValidExecutionScope() = true for zero scope")
 	}
 }
 
@@ -168,15 +94,9 @@ func validAuditValidationEvent() Event {
 		Phase:         EventPhaseAttempt,
 		Outcome:       OutcomeAccepted,
 		Actor:         AuditActor{Kind: ActorKindHuman, ID: "user-1"},
-		ExecutionScope: &ExecutionScope{
-			Namespace:   "codex",
-			Kind:        "native_session",
-			ID:          "thread-1",
-			Attribution: ExecutionScopeAttributionProcessEnvironment,
-		},
-		Action:      "sandbox.read",
-		Resource:    AuditResource{Type: "sandbox", ID: "sandbox-1"},
-		OperationID: "operation-1",
-		Producer:    AuditProducer{Service: "cluster-gateway"},
+		Action:        "sandbox.read",
+		Resource:      AuditResource{Type: "sandbox", ID: "sandbox-1"},
+		OperationID:   "operation-1",
+		Producer:      AuditProducer{Service: "cluster-gateway"},
 	}
 }

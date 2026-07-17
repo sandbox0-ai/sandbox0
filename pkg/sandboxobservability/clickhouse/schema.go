@@ -87,10 +87,6 @@ PARTITION BY toYYYYMM(observed_at)
 ORDER BY (team_id, sandbox_id, observed_at, runtime_generation, series_epoch, sample_id)
 TTL %s
 SETTINGS index_granularity = 8192`, runtimeSamplesTable, runtimeSamplesTTL),
-		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS execution_scope_namespace LowCardinality(String) AFTER outcome", eventsTable),
-		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS execution_scope_kind LowCardinality(String) AFTER execution_scope_namespace", eventsTable),
-		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS execution_scope_id String AFTER execution_scope_kind", eventsTable),
-		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS execution_scope_attribution LowCardinality(String) AFTER execution_scope_id", eventsTable),
 		fmt.Sprintf("ALTER TABLE %s MODIFY TTL %s", eventsTable, eventsTTL),
 		fmt.Sprintf("ALTER TABLE %s MODIFY TTL %s", logsTable, logsTTL),
 		fmt.Sprintf("ALTER TABLE %s MODIFY TTL %s", runtimeSamplesTable, runtimeSamplesTTL),

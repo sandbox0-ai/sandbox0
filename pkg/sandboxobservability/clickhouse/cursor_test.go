@@ -17,7 +17,7 @@ func TestPageCursorRoundTrip(t *testing.T) {
 		EventType:  sandboxobservability.EventTypeNetworkAudit,
 	}
 
-	encoded, err := encodePageCursor(event, sandboxobservability.CurrentEventSchemaVersion)
+	encoded, err := encodePageCursor(event)
 	if err != nil {
 		t.Fatalf("encodePageCursor() error = %v", err)
 	}
@@ -29,8 +29,7 @@ func TestPageCursorRoundTrip(t *testing.T) {
 		!decoded.IngestedAt.Equal(event.IngestedAt) ||
 		decoded.Source != string(event.Source) ||
 		decoded.EventType != string(event.EventType) ||
-		decoded.Cursor != event.EventID ||
-		decoded.MaxSchemaVersion != sandboxobservability.CurrentEventSchemaVersion {
+		decoded.Cursor != event.EventID {
 		t.Fatalf("decoded cursor = %+v", decoded)
 	}
 	if decoded.OccurredAt.Location() != time.UTC || decoded.IngestedAt.Location() != time.UTC {
@@ -47,7 +46,7 @@ func TestPageCursorRejectsInvalidValue(t *testing.T) {
 
 func TestTailCursorRoundTripAndRejectsWrongKind(t *testing.T) {
 	ingestedAt := time.Date(2026, 7, 1, 1, 2, 4, 5, time.FixedZone("offset", 8*60*60))
-	encoded, err := encodeTailCursor(eventTailCursorKind, ingestedAt, string(sandboxobservability.SourceNetd), string(sandboxobservability.EventTypeNetworkAudit), "netd:cursor:1", "hash-1", sandboxobservability.CurrentEventSchemaVersion)
+	encoded, err := encodeTailCursor(eventTailCursorKind, ingestedAt, string(sandboxobservability.SourceNetd), string(sandboxobservability.EventTypeNetworkAudit), "netd:cursor:1", "hash-1")
 	if err != nil {
 		t.Fatalf("encodeTailCursor() error = %v", err)
 	}
@@ -59,8 +58,7 @@ func TestTailCursorRoundTripAndRejectsWrongKind(t *testing.T) {
 		!decoded.IngestedAt.Equal(ingestedAt) ||
 		decoded.Source != string(sandboxobservability.SourceNetd) ||
 		decoded.EventType != string(sandboxobservability.EventTypeNetworkAudit) ||
-		decoded.Cursor != "netd:cursor:1" ||
-		decoded.MaxSchemaVersion != sandboxobservability.CurrentEventSchemaVersion {
+		decoded.Cursor != "netd:cursor:1" {
 		t.Fatalf("decoded cursor = %+v", decoded)
 	}
 	if decoded.IngestedAt.Location() != time.UTC {

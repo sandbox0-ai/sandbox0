@@ -14,8 +14,8 @@ func TestSchemaStatementsUseReplacingMergeTreeAndRetentionTTL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaStatements() error = %v", err)
 	}
-	if len(statements) != 11 {
-		t.Fatalf("statement count = %d, want 11", len(statements))
+	if len(statements) != 7 {
+		t.Fatalf("statement count = %d, want 7", len(statements))
 	}
 	createEventsTable := statements[1]
 	for _, want := range []string{
@@ -59,24 +59,14 @@ func TestSchemaStatementsUseReplacingMergeTreeAndRetentionTTL(t *testing.T) {
 			t.Fatalf("create runtime samples table statement missing %q:\n%s", want, createRuntimeSamplesTable)
 		}
 	}
-	for index, want := range []string{
-		"ADD COLUMN IF NOT EXISTS execution_scope_namespace LowCardinality(String) AFTER outcome",
-		"ADD COLUMN IF NOT EXISTS execution_scope_kind LowCardinality(String) AFTER execution_scope_namespace",
-		"ADD COLUMN IF NOT EXISTS execution_scope_id String AFTER execution_scope_kind",
-		"ADD COLUMN IF NOT EXISTS execution_scope_attribution LowCardinality(String) AFTER execution_scope_id",
-	} {
-		if !strings.Contains(statements[4+index], want) {
-			t.Fatalf("execution scope migration statement %d = %q, want %q", index, statements[4+index], want)
-		}
+	if !strings.Contains(statements[4], "ALTER TABLE `sandbox0_observability`.`sandbox_audit_events` MODIFY TTL toDateTime(ingested_at) + INTERVAL 7 DAY DELETE") {
+		t.Fatalf("events alter ttl statement = %q", statements[4])
 	}
-	if !strings.Contains(statements[8], "ALTER TABLE `sandbox0_observability`.`sandbox_audit_events` MODIFY TTL toDateTime(ingested_at) + INTERVAL 7 DAY DELETE") {
-		t.Fatalf("events alter ttl statement = %q", statements[8])
+	if !strings.Contains(statements[5], "ALTER TABLE `sandbox0_observability`.`sandbox_logs` MODIFY TTL toDateTime(occurred_at) + INTERVAL 3 DAY DELETE") {
+		t.Fatalf("logs alter ttl statement = %q", statements[5])
 	}
-	if !strings.Contains(statements[9], "ALTER TABLE `sandbox0_observability`.`sandbox_logs` MODIFY TTL toDateTime(occurred_at) + INTERVAL 3 DAY DELETE") {
-		t.Fatalf("logs alter ttl statement = %q", statements[9])
-	}
-	if !strings.Contains(statements[10], "ALTER TABLE `sandbox0_observability`.`sandbox_runtime_samples` MODIFY TTL toDateTime(observed_at) + INTERVAL 14 DAY DELETE") {
-		t.Fatalf("runtime samples alter ttl statement = %q", statements[10])
+	if !strings.Contains(statements[6], "ALTER TABLE `sandbox0_observability`.`sandbox_runtime_samples` MODIFY TTL toDateTime(observed_at) + INTERVAL 14 DAY DELETE") {
+		t.Fatalf("runtime samples alter ttl statement = %q", statements[6])
 	}
 }
 
@@ -122,7 +112,7 @@ func TestValidateAuditEventTableMetadataRejectsLegacySchema(t *testing.T) {
 }
 
 func TestValidateAuditEventTableMetadataAcceptsCanonicalSchema(t *testing.T) {
-	columns := strings.Split("event_id schema_version team_id sandbox_id region_id cluster_id occurred_at ingested_at source event_type phase outcome execution_scope_namespace execution_scope_kind execution_scope_id execution_scope_attribution actor_kind actor_id actor_user_id actor_api_key_id actor_auth_method action resource_type resource_id resource_subresource operation_id parent_event_id producer_service producer_instance producer_sequence request_id trace_id source_ip user_agent http_method route status_code attributes integrity_algorithm payload_hash signature signing_key_id version", " ")
+	columns := strings.Split("event_id schema_version team_id sandbox_id region_id cluster_id occurred_at ingested_at source event_type phase outcome actor_kind actor_id actor_user_id actor_api_key_id actor_auth_method action resource_type resource_id resource_subresource operation_id parent_event_id producer_service producer_instance producer_sequence request_id trace_id source_ip user_agent http_method route status_code attributes integrity_algorithm payload_hash signature signing_key_id version", " ")
 	if err := validateAuditEventTableMetadata(
 		"ReplacingMergeTree",
 		"team_id, sandbox_id, occurred_at, event_id, payload_hash",

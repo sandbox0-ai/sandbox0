@@ -1497,19 +1497,6 @@ paths:
           schema:
             type: boolean
             default: false
-        - name: max_schema_version
-          in: query
-          description: |
-            Highest audit-event schema the client can decode. The default is 2
-            so clients generated before execution-scope support never receive
-            schema v3. Values newer than this server supports are capped to its
-            current schema. Omitting this parameter while using any
-            execution_scope filter implicitly negotiates schema v3; explicitly
-            requesting schema v2 with such a filter is invalid.
-          schema:
-            type: integer
-            minimum: 2
-            default: 2
         - name: source
           in: query
           schema:
@@ -1530,32 +1517,6 @@ paths:
           in: query
           schema:
             type: string
-        - name: execution_scope_namespace
-          in: query
-          description: Restrict results to an exact execution-scope namespace such as codex.
-          schema:
-            type: string
-            minLength: 1
-            maxLength: 64
-        - name: execution_scope_kind
-          in: query
-          description: Restrict results to an exact execution-scope kind such as native_session.
-          schema:
-            type: string
-            minLength: 1
-            maxLength: 64
-        - name: execution_scope_id
-          in: query
-          description: Restrict results to an exact native execution-scope identifier.
-          schema:
-            type: string
-            minLength: 1
-            maxLength: 256
-        - name: execution_scope_attribution
-          in: query
-          description: Restrict results to the runtime signal used to attribute the execution scope.
-          schema:
-            $ref: "#/components/schemas/SandboxAuditExecutionScopeAttribution"
         - name: action
           in: query
           schema:
@@ -5375,30 +5336,6 @@ components:
         auth_method:
           type: string
       required: [kind]
-    SandboxAuditExecutionScopeAttribution:
-      type: string
-      enum: [process_environment]
-    SandboxAuditExecutionScope:
-      type: object
-      description: |
-        Attributes sandbox workload activity to one native harness execution
-        scope. The sandbox workload remains the audit actor.
-      properties:
-        namespace:
-          type: string
-          minLength: 1
-          maxLength: 64
-        kind:
-          type: string
-          minLength: 1
-          maxLength: 64
-        id:
-          type: string
-          minLength: 1
-          maxLength: 256
-        attribution:
-          $ref: "#/components/schemas/SandboxAuditExecutionScopeAttribution"
-      required: [namespace, kind, id, attribution]
     SandboxAuditResource:
       type: object
       properties:
@@ -5469,8 +5406,7 @@ components:
           format: uuid
         schema_version:
           type: integer
-          enum: [2, 3]
-          description: Schema v2 is used for unscoped facts; schema v3 requires execution_scope.
+          enum: [2]
         team_id:
           type: string
         sandbox_id:
@@ -5495,8 +5431,6 @@ components:
           $ref: "#/components/schemas/SandboxObservabilityOutcome"
         actor:
           $ref: "#/components/schemas/SandboxAuditActor"
-        execution_scope:
-          $ref: "#/components/schemas/SandboxAuditExecutionScope"
         action:
           type: string
         resource:
@@ -5534,30 +5468,6 @@ components:
         - operation_id
         - producer
         - integrity
-    SandboxObservabilityEffectiveEventQuery:
-      type: object
-      description: |
-        Normalized schema ceiling and execution-scope filters applied by the
-        server. This metadata is returned even when no events match.
-      properties:
-        max_schema_version:
-          type: integer
-          minimum: 2
-        execution_scope_namespace:
-          type: string
-          minLength: 1
-          maxLength: 64
-        execution_scope_kind:
-          type: string
-          minLength: 1
-          maxLength: 64
-        execution_scope_id:
-          type: string
-          minLength: 1
-          maxLength: 256
-        execution_scope_attribution:
-          $ref: "#/components/schemas/SandboxAuditExecutionScopeAttribution"
-      required: [max_schema_version]
     SandboxObservabilityEventsResponse:
       type: object
       properties:
@@ -5569,9 +5479,7 @@ components:
           type: string
         watermark:
           type: string
-        effective_query:
-          $ref: "#/components/schemas/SandboxObservabilityEffectiveEventQuery"
-      required: [events, effective_query]
+      required: [events]
     SandboxObservabilityLogStream:
       type: string
       enum: [stdout, stderr, pty]
@@ -5784,17 +5692,11 @@ components:
       properties:
         type:
           type: string
-          enum: [ready, event, log, watermark, heartbeat, error]
+          enum: [event, log, watermark, heartbeat, error]
         data:
           oneOf:
             - $ref: "#/components/schemas/SandboxObservabilityEvent"
             - $ref: "#/components/schemas/SandboxObservabilityLogEntry"
-        effective_query:
-          $ref: "#/components/schemas/SandboxObservabilityEffectiveEventQuery"
-          description: |
-            Present on the first ready line of an audit-event watch negotiated
-            at schema v3 or newer. Schema v2 watches retain the legacy frame
-            sequence and do not emit ready.
         cursor:
           type: string
           description: Watch resume cursor. Present on watermark lines.
@@ -6037,29 +5939,6 @@ components:
           format: int64
           minimum: 0
           default: 86400
-    ExecutionSessionScopeSpec:
-      type: object
-      description: |
-        Declares how descendants of this trusted supervisor process expose a
-        logical execution scope. The runtime reads only the named environment
-        variable and never exports the descendant process environment.
-      properties:
-        namespace:
-          type: string
-          minLength: 1
-          maxLength: 64
-          description: Producer namespace for the logical scope, for example codex.
-        kind:
-          type: string
-          minLength: 1
-          maxLength: 64
-          description: Native scope kind, for example native_session.
-        id_environment_variable:
-          type: string
-          maxLength: 128
-          pattern: "^[A-Z_][A-Z0-9_]*$"
-          description: Environment variable carrying the native scope identifier in descendant processes.
-      required: [namespace, kind, id_environment_variable]
     ExecutionSessionSpec:
       type: object
       description: Generic process-backed session specification. The supervisor does not interpret application protocols.
@@ -6085,8 +5964,6 @@ components:
           $ref: "#/components/schemas/ExecutionSessionReadinessSpec"
         event_retention:
           $ref: "#/components/schemas/ExecutionSessionEventRetentionSpec"
-        execution_scope:
-          $ref: "#/components/schemas/ExecutionSessionScopeSpec"
       required: [command]
     ExecutionSessionAttempt:
       type: object

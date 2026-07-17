@@ -41,6 +41,12 @@ func TestAuditLoggerRecord(t *testing.T) {
 		DestIP:   net.IPv4(8, 8, 8, 8),
 		DestPort: 443,
 		Host:     "example.com",
+		ExecutionScope: &sandboxobservability.ExecutionScope{
+			Namespace:   "codex",
+			Kind:        "native_session",
+			ID:          "thread-1",
+			Attribution: sandboxobservability.ExecutionScopeAttributionProcessEnvironment,
+		},
 	}
 	req.Audit.RecordEgress(128)
 	req.Audit.RecordIngress(64)
@@ -77,6 +83,9 @@ func TestAuditLoggerRecord(t *testing.T) {
 	}
 	if event.ClassifierResult != "known" || event.Action != "use-adapter" {
 		t.Fatalf("unexpected decision fields: %+v", event)
+	}
+	if event.ExecutionScope == nil || event.ExecutionScope.ID != "thread-1" {
+		t.Fatalf("unexpected execution scope: %+v", event.ExecutionScope)
 	}
 }
 

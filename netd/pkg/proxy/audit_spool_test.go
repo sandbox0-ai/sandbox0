@@ -36,7 +36,9 @@ func TestAuditSpoolPersistsLoadsAndRemoves(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if len(loaded) != 1 || loaded[0].EventID != event.EventID {
+	if len(loaded) != 1 ||
+		loaded[0].EventID != event.EventID ||
+		loaded[0].SchemaVersion != sandboxobservability.LegacyEventSchemaVersion {
 		t.Fatalf("loaded = %#v", loaded)
 	}
 	if err := spool.Remove(event.EventID); err != nil {
@@ -45,6 +47,59 @@ func TestAuditSpoolPersistsLoadsAndRemoves(t *testing.T) {
 	loaded, err = spool.Load(10)
 	if err != nil || len(loaded) != 0 {
 		t.Fatalf("loaded after remove = %#v, %v", loaded, err)
+	}
+}
+
+func TestAuditSchemaVersionOnlyAdvancesForExecutionScope(t *testing.T) {
+	unscoped := auditEvent{}
+	if got := auditSchemaVersion(unscoped); got != sandboxobservability.LegacyEventSchemaVersion {
+		t.Fatalf("unscoped schema version = %d, want %d", got, sandboxobservability.LegacyEventSchemaVersion)
+	}
+	scoped := auditEvent{ExecutionScope: &sandboxobservability.ExecutionScope{
+		Namespace:   "codex",
+		Kind:        "native_session",
+		ID:          "thread-1",
+		Attribution: sandboxobservability.ExecutionScopeAttributionProcessEnvironment,
+	}}
+	if got := auditSchemaVersion(scoped); got != sandboxobservability.CurrentEventSchemaVersion {
+		t.Fatalf("scoped schema version = %d, want %d", got, sandboxobservability.CurrentEventSchemaVersion)
+	}
+}
+
+func TestAuditSpoolLoadsPreV3RecordAsLegacySchema(t *testing.T) {
+	dir := t.TempDir()
+	event := newAuditDeliveryTestEvent(
+		"19191919-1919-4919-8919-191919191919",
+		sandboxobservability.EventPhaseResult,
+	)
+	event.SchemaVersion = 0
+	payload, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(dir, event.EventID+".json"),
+		payload,
+		0o600,
+	); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	spool, err := newAuditSpool(dir)
+	if err != nil {
+		t.Fatalf("newAuditSpool() legacy error = %v", err)
+	}
+	events, err := spool.Load(1)
+	if err != nil {
+		t.Fatalf("Load() legacy error = %v", err)
+	}
+	if len(events) != 1 ||
+		events[0].SchemaVersion != sandboxobservability.LegacyEventSchemaVersion {
+		t.Fatalf("legacy spool events = %#v", events)
+	}
+	projected, ok := (&httpAuditSink{}).toObservabilityEvent(events[0])
+	if !ok || projected.SchemaVersion != sandboxobservability.LegacyEventSchemaVersion {
+		t.Fatalf("legacy projection = %#v, ok = %v", projected, ok)
 	}
 }
 

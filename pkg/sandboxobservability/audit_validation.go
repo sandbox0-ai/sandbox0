@@ -23,6 +23,10 @@ var (
 // ValidateEventForSigning verifies the canonical fields that every audit
 // producer must set before the gateway signs and accepts the event.
 func ValidateEventForSigning(event Event) error {
+	return validateEvent(event)
+}
+
+func validateEvent(event Event) error {
 	canonicalFields := []struct {
 		name     string
 		value    string
@@ -61,8 +65,22 @@ func ValidateEventForSigning(event Event) error {
 			return fmt.Errorf("parent_event_id must be a UUID")
 		}
 	}
-	if event.SchemaVersion != CurrentEventSchemaVersion {
-		return fmt.Errorf("schema_version must be %d", CurrentEventSchemaVersion)
+	switch event.SchemaVersion {
+	case LegacyEventSchemaVersion:
+		if event.ExecutionScope != nil {
+			return fmt.Errorf("schema_version %d does not support execution_scope", LegacyEventSchemaVersion)
+		}
+	case CurrentEventSchemaVersion:
+		if event.ExecutionScope == nil {
+			return fmt.Errorf("schema_version %d requires execution_scope", CurrentEventSchemaVersion)
+		}
+	default:
+		return fmt.Errorf("unsupported schema_version %d", event.SchemaVersion)
+	}
+	if event.ExecutionScope != nil {
+		if err := ValidateExecutionScope(*event.ExecutionScope); err != nil {
+			return fmt.Errorf("execution_scope: %w", err)
+		}
 	}
 	if event.OccurredAt.IsZero() {
 		return fmt.Errorf("occurred_at is required")
@@ -105,6 +123,86 @@ func ValidateEventForSigning(event Event) error {
 	return nil
 }
 
+// ValidEventMaxSchemaVersion reports whether a requested response schema can
+// be negotiated. Versions newer than this server are accepted and capped to
+// the current schema.
+func ValidEventMaxSchemaVersion(version int) bool {
+	return version >= LegacyEventSchemaVersion
+}
+
+// NormalizeEventMaxSchemaVersion returns the effective schema supported by
+// this server. Zero represents an omitted query parameter.
+func NormalizeEventMaxSchemaVersion(version int) (int, bool) {
+	if version == 0 {
+		return DefaultEventMaxSchemaVersion, true
+	}
+	if !ValidEventMaxSchemaVersion(version) {
+		return 0, false
+	}
+	if version > CurrentEventSchemaVersion {
+		return CurrentEventSchemaVersion, true
+	}
+	return version, true
+}
+
+// ValidateExecutionScope verifies that a present execution scope is complete
+// and canonical before it enters the signed audit payload.
+func ValidateExecutionScope(scope ExecutionScope) error {
+	if err := ValidateExecutionScopeFilter(scope.Namespace, scope.Kind, scope.ID, scope.Attribution); err != nil {
+		return err
+	}
+	fields := []struct {
+		name  string
+		value string
+	}{
+		{name: "namespace", value: scope.Namespace},
+		{name: "kind", value: scope.Kind},
+		{name: "id", value: scope.ID},
+		{name: "attribution", value: string(scope.Attribution)},
+	}
+	for _, field := range fields {
+		if field.value == "" {
+			return fmt.Errorf("%s is required", field.name)
+		}
+	}
+	return nil
+}
+
+// ValidateExecutionScopeFilter validates optional exact-match query fields.
+func ValidateExecutionScopeFilter(namespace, kind, id string, attribution ExecutionScopeAttribution) error {
+	fields := []struct {
+		name     string
+		value    string
+		maxBytes int
+	}{
+		{name: "namespace", value: namespace, maxBytes: MaxExecutionScopeNamespaceBytes},
+		{name: "kind", value: kind, maxBytes: MaxExecutionScopeKindBytes},
+		{name: "id", value: id, maxBytes: MaxExecutionScopeIDBytes},
+	}
+	for _, field := range fields {
+		if field.value != strings.TrimSpace(field.value) {
+			return fmt.Errorf("%s must not contain surrounding whitespace", field.name)
+		}
+		if len(field.value) > field.maxBytes {
+			return fmt.Errorf("%s exceeds %d bytes", field.name, field.maxBytes)
+		}
+	}
+	attributionValue := string(attribution)
+	if attributionValue != strings.TrimSpace(attributionValue) {
+		return fmt.Errorf("attribution must not contain surrounding whitespace")
+	}
+	if attribution != "" && !ValidExecutionScopeAttribution(attribution) {
+		return fmt.Errorf("invalid attribution")
+	}
+	return nil
+}
+
+// ValidExecutionScope reports whether a present execution scope is complete
+// and canonical.
+func ValidExecutionScope(scope ExecutionScope) bool {
+	return ValidateExecutionScope(scope) == nil
+}
+
 // ValidDateTime64Nano reports whether value can be represented by the
 // ClickHouse DateTime64(9) columns used by the canonical audit ledger.
 func ValidDateTime64Nano(value time.Time) bool {
@@ -116,7 +214,7 @@ func ValidDateTime64Nano(value time.Time) bool {
 // envelope. Cryptographic verification remains the responsibility of
 // VerifyEventIntegrity because readers may resolve keys independently.
 func ValidateSignedEvent(event Event) error {
-	if err := ValidateEventForSigning(event); err != nil {
+	if err := validateEvent(event); err != nil {
 		return err
 	}
 	if event.Integrity.Algorithm != integrityAlgorithm {

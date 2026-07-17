@@ -107,7 +107,7 @@ func validateAuditEventTable(ctx context.Context, db *sql.DB, cfg Config) error 
 		return fmt.Errorf("scan ClickHouse audit event columns: %w", err)
 	}
 	if err := validateCanonicalAuditEventTableMetadata(table, columns, normalized.RetentionDays); err != nil {
-		return fmt.Errorf("ClickHouse table %s.%s is not the canonical audit v2 schema: %w", normalized.Database, normalized.EventsTable, err)
+		return fmt.Errorf("ClickHouse table %s.%s is not the canonical audit schema: %w", normalized.Database, normalized.EventsTable, err)
 	}
 	return nil
 }

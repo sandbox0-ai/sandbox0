@@ -22,5 +22,5 @@ func ManagerAllowedCallers() []string {
 // ProcdAllowedCallers returns the services allowed to call procd's internal
 // HTTP surface.
 func ProcdAllowedCallers() []string {
-	return []string{ServiceClusterGateway, ServiceManager, ServiceSSHGateway}
+	return []string{ServiceClusterGateway, ServiceManager, ServiceNetd, ServiceSSHGateway}
 }

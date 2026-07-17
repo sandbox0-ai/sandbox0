@@ -260,22 +260,31 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 	}
 
 	proxyOpts := []proxy.ServerOption{}
-	if d.cfg.EgressAuthResolverURL != "" {
+	auditEnabled := d.cfg.AuditLogPath != "" || d.cfg.SandboxObservabilityIngestURL != ""
+	var netdTokenGenerator *internalauth.Generator
+	if d.cfg.EgressAuthResolverURL != "" || auditEnabled {
 		privateKey, keyErr := internalauth.LoadEd25519PrivateKeyFromFile(internalauth.DefaultInternalJWTPrivateKeyPath)
 		if keyErr != nil {
 			return fmt.Errorf("load ctld network runtime internal auth private key: %w", keyErr)
 		}
-		tokenGenerator := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		netdTokenGenerator = internalauth.NewGenerator(internalauth.GeneratorConfig{
 			Caller:     "netd",
 			PrivateKey: privateKey,
 			TTL:        30 * time.Second,
 		})
+	}
+	if d.cfg.EgressAuthResolverURL != "" {
 		proxyOpts = append(proxyOpts, proxy.WithEgressAuthResolver(proxy.NewHTTPEgressAuthResolverWithHTTPClient(
 			d.cfg.EgressAuthResolverURL,
 			d.cfg.EgressAuthResolverTimeout.Duration,
-			netdEgressAuthTokenProvider{generator: tokenGenerator},
+			netdEgressAuthTokenProvider{generator: netdTokenGenerator},
 			d.egressAuthHTTPClient(),
 		)))
+	}
+	if auditEnabled {
+		proxyOpts = append(proxyOpts, proxy.WithExecutionScopeResolver(
+			proxy.NewHTTPExecutionScopeResolver(d.cfg.ProcdPort, netdTokenGenerator, nil),
+		))
 	}
 	proxyServer, err := proxy.NewServer(d.cfg, policyStore, tracker, usageAggregator, d.logger, proxyOpts...)
 	if err != nil {

@@ -33,37 +33,86 @@ type integrityPayloadV2 struct {
 	Attributes    map[string]any `json:"attributes,omitempty"`
 }
 
+type integrityPayloadV3 struct {
+	EventID        string          `json:"event_id"`
+	SchemaVersion  int             `json:"schema_version"`
+	TeamID         string          `json:"team_id"`
+	SandboxID      string          `json:"sandbox_id"`
+	RegionID       string          `json:"region_id"`
+	ClusterID      string          `json:"cluster_id"`
+	OccurredAt     string          `json:"occurred_at"`
+	Source         Source          `json:"source"`
+	EventType      EventType       `json:"event_type"`
+	Phase          EventPhase      `json:"phase"`
+	Outcome        Outcome         `json:"outcome"`
+	Actor          AuditActor      `json:"actor"`
+	ExecutionScope *ExecutionScope `json:"execution_scope,omitempty"`
+	Action         string          `json:"action"`
+	Resource       AuditResource   `json:"resource"`
+	OperationID    string          `json:"operation_id"`
+	ParentEventID  string          `json:"parent_event_id,omitempty"`
+	Producer       AuditProducer   `json:"producer"`
+	Request        AuditRequest    `json:"request,omitempty"`
+	Attributes     map[string]any  `json:"attributes,omitempty"`
+}
+
 // CanonicalEventPayload returns the stable bytes protected by an event
 // signature. encoding/json sorts map keys, and the producer timestamp is
 // normalized to RFC3339Nano UTC so retries produce identical payloads. The
 // gateway receipt timestamp is storage metadata and intentionally excluded so
 // replaying one producer event keeps the same canonical hash.
 func CanonicalEventPayload(event Event) ([]byte, error) {
-	if event.SchemaVersion != CurrentEventSchemaVersion {
+	switch event.SchemaVersion {
+	case LegacyEventSchemaVersion:
+		payload := integrityPayloadV2{
+			EventID:       event.EventID,
+			SchemaVersion: event.SchemaVersion,
+			TeamID:        event.TeamID,
+			SandboxID:     event.SandboxID,
+			RegionID:      event.RegionID,
+			ClusterID:     event.ClusterID,
+			OccurredAt:    event.OccurredAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
+			Source:        event.Source,
+			EventType:     event.EventType,
+			Phase:         event.Phase,
+			Outcome:       event.Outcome,
+			Actor:         event.Actor,
+			Action:        event.Action,
+			Resource:      event.Resource,
+			OperationID:   event.OperationID,
+			ParentEventID: event.ParentEventID,
+			Producer:      event.Producer,
+			Request:       event.Request,
+			Attributes:    event.Attributes,
+		}
+		return json.Marshal(payload)
+	case CurrentEventSchemaVersion:
+		payload := integrityPayloadV3{
+			EventID:        event.EventID,
+			SchemaVersion:  event.SchemaVersion,
+			TeamID:         event.TeamID,
+			SandboxID:      event.SandboxID,
+			RegionID:       event.RegionID,
+			ClusterID:      event.ClusterID,
+			OccurredAt:     event.OccurredAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
+			Source:         event.Source,
+			EventType:      event.EventType,
+			Phase:          event.Phase,
+			Outcome:        event.Outcome,
+			Actor:          event.Actor,
+			ExecutionScope: event.ExecutionScope,
+			Action:         event.Action,
+			Resource:       event.Resource,
+			OperationID:    event.OperationID,
+			ParentEventID:  event.ParentEventID,
+			Producer:       event.Producer,
+			Request:        event.Request,
+			Attributes:     event.Attributes,
+		}
+		return json.Marshal(payload)
+	default:
 		return nil, fmt.Errorf("unsupported audit event schema version %d", event.SchemaVersion)
 	}
-	payload := integrityPayloadV2{
-		EventID:       event.EventID,
-		SchemaVersion: event.SchemaVersion,
-		TeamID:        event.TeamID,
-		SandboxID:     event.SandboxID,
-		RegionID:      event.RegionID,
-		ClusterID:     event.ClusterID,
-		OccurredAt:    event.OccurredAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
-		Source:        event.Source,
-		EventType:     event.EventType,
-		Phase:         event.Phase,
-		Outcome:       event.Outcome,
-		Actor:         event.Actor,
-		Action:        event.Action,
-		Resource:      event.Resource,
-		OperationID:   event.OperationID,
-		ParentEventID: event.ParentEventID,
-		Producer:      event.Producer,
-		Request:       event.Request,
-		Attributes:    event.Attributes,
-	}
-	return json.Marshal(payload)
 }
 
 // SignEvent computes and attaches the canonical digest and Ed25519 signature.

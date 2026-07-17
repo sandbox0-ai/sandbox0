@@ -30,6 +30,10 @@ var canonicalAuditEventColumns = []auditEventColumnSpec{
 	{name: "event_type", typeName: "LowCardinality(String)", insertPlaceholder: "?"},
 	{name: "phase", typeName: "LowCardinality(String)", insertPlaceholder: "?"},
 	{name: "outcome", typeName: "LowCardinality(String)", insertPlaceholder: "?"},
+	{name: "execution_scope_namespace", typeName: "LowCardinality(String)", insertPlaceholder: "?"},
+	{name: "execution_scope_kind", typeName: "LowCardinality(String)", insertPlaceholder: "?"},
+	{name: "execution_scope_id", typeName: "String", insertPlaceholder: "?"},
+	{name: "execution_scope_attribution", typeName: "LowCardinality(String)", insertPlaceholder: "?"},
 	{name: "actor_kind", typeName: "LowCardinality(String)", insertPlaceholder: "?"},
 	{name: "actor_id", typeName: "String", insertPlaceholder: "?"},
 	{name: "actor_user_id", typeName: "String", insertPlaceholder: "?"},
@@ -124,13 +128,17 @@ func auditEventColumnDefinitions() string {
 // auditEventRow keeps the SQL representation separate from the public event
 // model while retaining an explicit, reviewable field order in both directions.
 type auditEventRow struct {
-	event          sandboxobservability.Event
-	source         string
-	eventType      string
-	phase          string
-	outcome        string
-	actorKind      string
-	attributesJSON string
+	event                     sandboxobservability.Event
+	source                    string
+	eventType                 string
+	phase                     string
+	outcome                   string
+	executionScopeNamespace   string
+	executionScopeKind        string
+	executionScopeID          string
+	executionScopeAttribution string
+	actorKind                 string
+	attributesJSON            string
 }
 
 // auditEventColumnBinding couples the read and write adapters for one storage
@@ -147,7 +155,7 @@ func newAuditEventRow(event sandboxobservability.Event) (auditEventRow, error) {
 	if err != nil {
 		return auditEventRow{}, fmt.Errorf("encode attributes: %w", err)
 	}
-	return auditEventRow{
+	row := auditEventRow{
 		event:          event,
 		source:         string(event.Source),
 		eventType:      string(event.EventType),
@@ -155,7 +163,14 @@ func newAuditEventRow(event sandboxobservability.Event) (auditEventRow, error) {
 		outcome:        string(event.Outcome),
 		actorKind:      string(event.Actor.Kind),
 		attributesJSON: attributes,
-	}, nil
+	}
+	if event.ExecutionScope != nil {
+		row.executionScopeNamespace = event.ExecutionScope.Namespace
+		row.executionScopeKind = event.ExecutionScope.Kind
+		row.executionScopeID = event.ExecutionScope.ID
+		row.executionScopeAttribution = string(event.ExecutionScope.Attribution)
+	}
+	return row, nil
 }
 
 func (row *auditEventRow) columnBindings() []auditEventColumnBinding {
@@ -172,6 +187,10 @@ func (row *auditEventRow) columnBindings() []auditEventColumnBinding {
 		{name: "event_type", scanDestination: &row.eventType, insertValue: row.eventType},
 		{name: "phase", scanDestination: &row.phase, insertValue: row.phase},
 		{name: "outcome", scanDestination: &row.outcome, insertValue: row.outcome},
+		{name: "execution_scope_namespace", scanDestination: &row.executionScopeNamespace, insertValue: row.executionScopeNamespace},
+		{name: "execution_scope_kind", scanDestination: &row.executionScopeKind, insertValue: row.executionScopeKind},
+		{name: "execution_scope_id", scanDestination: &row.executionScopeID, insertValue: row.executionScopeID},
+		{name: "execution_scope_attribution", scanDestination: &row.executionScopeAttribution, insertValue: row.executionScopeAttribution},
 		{name: "actor_kind", scanDestination: &row.actorKind, insertValue: row.actorKind},
 		{name: "actor_id", scanDestination: &row.event.Actor.ID, insertValue: row.event.Actor.ID},
 		{name: "actor_user_id", scanDestination: &row.event.Actor.UserID, insertValue: row.event.Actor.UserID},
@@ -231,6 +250,16 @@ func (row auditEventRow) toEvent() (sandboxobservability.Event, error) {
 	event.EventType = sandboxobservability.EventType(row.eventType)
 	event.Phase = sandboxobservability.EventPhase(row.phase)
 	event.Outcome = sandboxobservability.Outcome(row.outcome)
+	if row.executionScopeNamespace != "" || row.executionScopeKind != "" || row.executionScopeID != "" || row.executionScopeAttribution != "" {
+		event.ExecutionScope = &sandboxobservability.ExecutionScope{
+			Namespace:   row.executionScopeNamespace,
+			Kind:        row.executionScopeKind,
+			ID:          row.executionScopeID,
+			Attribution: sandboxobservability.ExecutionScopeAttribution(row.executionScopeAttribution),
+		}
+	} else {
+		event.ExecutionScope = nil
+	}
 	event.Actor.Kind = sandboxobservability.ActorKind(row.actorKind)
 	event.Attributes = attributes
 	return event, nil

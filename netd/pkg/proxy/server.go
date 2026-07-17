@@ -24,34 +24,35 @@ import (
 )
 
 type Server struct {
-	cfg               *config.NetdConfig
-	store             *policy.Store
-	tracker           *conntrack.Tracker
-	usageRecorder     UsageRecorder
-	logger            *zap.Logger
-	hostVerifier      hostVerifier
-	httpListener      net.Listener
-	httpsListener     net.Listener
-	udpHTTPConn       *net.UDPConn
-	udpHTTPSConn      *net.UDPConn
-	reassembler       *quicReassembler
-	tcpClassifiers    []tcpClassifier
-	udpClassifiers    []udpClassifier
-	adapters          *adapterRegistry
-	authResolver      egressAuthResolver
-	authCache         egressAuthCache
-	dnsCache          *dnsHostCache
-	udpReplyDialer    udpReplyDialer
-	tlsAuthority      tlsInterceptAuthority
-	upstreamTLSConfig *tls.Config
-	auditor           *auditLogger
-	bandwidthLimiter  *bandwidthLimiter
-	metrics           *proxyMetricsRegistry
-	auditSeq          uint64
-	udpSessionMu      sync.Mutex
-	udpSessions       map[udpSessionKey]*udpSession
-	exitCh            chan error
-	exitOnce          sync.Once
+	cfg                    *config.NetdConfig
+	store                  *policy.Store
+	tracker                *conntrack.Tracker
+	usageRecorder          UsageRecorder
+	logger                 *zap.Logger
+	hostVerifier           hostVerifier
+	httpListener           net.Listener
+	httpsListener          net.Listener
+	udpHTTPConn            *net.UDPConn
+	udpHTTPSConn           *net.UDPConn
+	reassembler            *quicReassembler
+	tcpClassifiers         []tcpClassifier
+	udpClassifiers         []udpClassifier
+	adapters               *adapterRegistry
+	authResolver           egressAuthResolver
+	authCache              egressAuthCache
+	executionScopeResolver executionScopeResolver
+	dnsCache               *dnsHostCache
+	udpReplyDialer         udpReplyDialer
+	tlsAuthority           tlsInterceptAuthority
+	upstreamTLSConfig      *tls.Config
+	auditor                *auditLogger
+	bandwidthLimiter       *bandwidthLimiter
+	metrics                *proxyMetricsRegistry
+	auditSeq               uint64
+	udpSessionMu           sync.Mutex
+	udpSessions            map[udpSessionKey]*udpSession
+	exitCh                 chan error
+	exitOnce               sync.Once
 }
 
 type UsageRecorder interface {
@@ -355,14 +356,16 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 		return
 	}
 	req := &adapterRequest{
-		Server:   s,
-		Compiled: p,
-		SrcIP:    srcIP,
-		DestIP:   origIP,
-		DestPort: origPort,
-		Conn:     conn,
-		Host:     result.Host,
+		Server:     s,
+		Compiled:   p,
+		SrcIP:      srcIP,
+		SourcePort: remotePort(conn.RemoteAddr()),
+		DestIP:     origIP,
+		DestPort:   origPort,
+		Conn:       conn,
+		Host:       result.Host,
 	}
+	s.resolveRequestExecutionScope(req, "tcp")
 	if result.Apply != nil {
 		result.Apply(req)
 	}
@@ -435,6 +438,7 @@ func (s *Server) handleUDPDatagram(conn *net.UDPConn, src *net.UDPAddr, payload 
 		Server:     s,
 		Compiled:   p,
 		SrcIP:      srcIP,
+		SourcePort: src.Port,
 		DestIP:     destIP,
 		DestPort:   destPort,
 		Host:       result.Host,
@@ -876,6 +880,9 @@ func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision
 	if req == nil || req.UDPSource == nil {
 		return
 	}
+	if decision.Action == decisionActionDeny {
+		s.resolveRequestExecutionScope(req, "udp")
+	}
 	if decision.Action != decisionActionDeny && req.DestIP != nil && req.DestPort > 0 {
 		session, err := s.ensureUDPSession(req)
 		if err != nil {
@@ -894,6 +901,7 @@ func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision
 		}
 		req.UDPSession = session
 		req.Audit = session.Audit()
+		req.ExecutionScope = session.ExecutionScope()
 	}
 	fields := []zap.Field{
 		zap.String("src_ip", req.UDPSource.IP.String()),
@@ -1329,6 +1337,38 @@ func (s *Server) newFlowAudit(transport string) *flowAudit {
 		prefix = "flow"
 	}
 	return newFlowAudit(fmt.Sprintf("%s-%d", prefix, sequence), time.Now())
+}
+
+func (s *Server) resolveRequestExecutionScope(req *adapterRequest, transport string) bool {
+	if req != nil {
+		// A failed lookup must not retain a scope previously stored on a reused
+		// request value.
+		req.ExecutionScope = nil
+	}
+	if s == nil || s.auditor == nil || s.executionScopeResolver == nil || req == nil || req.Compiled == nil || req.SourcePort <= 0 {
+		return false
+	}
+	scope, err := s.executionScopeResolver.Resolve(context.Background(), executionScopeResolveRequest{
+		SandboxIP:  req.SrcIP,
+		TeamID:     req.Compiled.TeamID,
+		SandboxID:  req.Compiled.SandboxID,
+		Transport:  transport,
+		LocalIP:    req.SrcIP,
+		LocalPort:  req.SourcePort,
+		RemoteIP:   ipString(req.DestIP),
+		RemotePort: req.DestPort,
+	})
+	if err != nil {
+		s.logger.Debug("Failed to resolve network execution scope",
+			zap.String("sandbox_id", req.Compiled.SandboxID),
+			zap.String("transport", transport),
+			zap.Int("source_port", req.SourcePort),
+			zap.Error(err),
+		)
+		return false
+	}
+	req.ExecutionScope = scope
+	return true
 }
 
 func (s *Server) closeUDPSessions() {

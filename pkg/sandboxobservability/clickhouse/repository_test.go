@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"database/sql"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -56,11 +57,17 @@ func TestInsertEventsBuildsBatchInsertAndSerializesAttributes(t *testing.T) {
 		Phase:         sandboxobservability.EventPhaseEffect,
 		Outcome:       sandboxobservability.OutcomeDenied,
 		Actor:         sandboxobservability.AuditActor{Kind: sandboxobservability.ActorKindSandboxWorkload, ID: "sb-1"},
-		Action:        "network.deny",
-		Resource:      sandboxobservability.AuditResource{Type: "sandbox_network", ID: "sb-1"},
-		OperationID:   "operation-1",
-		Producer:      sandboxobservability.AuditProducer{Service: "netd", Instance: "node-1", Sequence: 1},
-		Attributes:    map[string]any{"destination": "example.com"},
+		ExecutionScope: &sandboxobservability.ExecutionScope{
+			Namespace:   "codex",
+			Kind:        "native_session",
+			ID:          "thread-1",
+			Attribution: sandboxobservability.ExecutionScopeAttributionProcessEnvironment,
+		},
+		Action:      "network.deny",
+		Resource:    sandboxobservability.AuditResource{Type: "sandbox_network", ID: "sb-1"},
+		OperationID: "operation-1",
+		Producer:    sandboxobservability.AuditProducer{Service: "netd", Instance: "node-1", Sequence: 1},
+		Attributes:  map[string]any{"destination": "example.com"},
 	}
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	if err := sandboxobservability.SignEvent(&event, key); err != nil {
@@ -79,8 +86,8 @@ func TestInsertEventsBuildsBatchInsertAndSerializesAttributes(t *testing.T) {
 	if strings.Count(db.execQuery, dateTime64NanoPlaceholder) != 2 {
 		t.Fatalf("exec query must preserve both DateTime64 values at nanosecond precision: %s", db.execQuery)
 	}
-	if len(db.execArgs) != 38 {
-		t.Fatalf("exec args count = %d, want 38", len(db.execArgs))
+	if len(db.execArgs) != 42 {
+		t.Fatalf("exec args count = %d, want 42", len(db.execArgs))
 	}
 	if db.execArgs[2] != "team-1" || db.execArgs[3] != "sb-1" {
 		t.Fatalf("identity args = %#v", db.execArgs[2:4])
@@ -91,8 +98,11 @@ func TestInsertEventsBuildsBatchInsertAndSerializesAttributes(t *testing.T) {
 	if got := db.execArgs[7]; got != dateTime64NanoArg(now) {
 		t.Fatalf("ingested_at arg = %#v, want Unix nanoseconds", got)
 	}
-	if attributes, ok := db.execArgs[33].(string); !ok || !strings.Contains(attributes, `"destination":"example.com"`) {
-		t.Fatalf("attributes arg = %#v", db.execArgs[33])
+	if got := db.execArgs[12:16]; !reflect.DeepEqual(got, []any{"codex", "native_session", "thread-1", string(sandboxobservability.ExecutionScopeAttributionProcessEnvironment)}) {
+		t.Fatalf("execution scope args = %#v", got)
+	}
+	if attributes, ok := db.execArgs[37].(string); !ok || !strings.Contains(attributes, `"destination":"example.com"`) {
+		t.Fatalf("attributes arg = %#v", db.execArgs[37])
 	}
 	if strings.Contains(auditEventSelectColumns, "cursor") || strings.Contains(auditEventSelectColumns, "watermark") {
 		t.Fatalf("audit event storage columns contain query transport fields: %s", auditEventSelectColumns)
@@ -113,7 +123,7 @@ func TestInsertEventsRejectsMutationOfSignedIdentityWhitespace(t *testing.T) {
 	repo, db := mustRepository(t)
 	event := sandboxobservability.Event{
 		EventID:       "11111111-1111-4111-8111-111111111111",
-		SchemaVersion: sandboxobservability.CurrentEventSchemaVersion,
+		SchemaVersion: sandboxobservability.LegacyEventSchemaVersion,
 		TeamID:        " team-1",
 		SandboxID:     "sb-1",
 		OccurredAt:    time.Now().UTC(),
@@ -144,21 +154,26 @@ func TestBuildListSQLAppliesTypedFiltersAndCursor(t *testing.T) {
 		Source:     sandboxobservability.SourceNetd,
 		EventType:  sandboxobservability.EventTypeNetworkAudit,
 		Integrity:  sandboxobservability.AuditIntegrity{PayloadHash: strings.Repeat("a", 64)},
-	})
+	}, sandboxobservability.CurrentEventSchemaVersion)
 	if err != nil {
 		t.Fatalf("encodePageCursor() error = %v", err)
 	}
 
 	query, limit, cursor, err := normalizeQuery(sandboxobservability.EventQuery{
-		TeamID:    "team-1",
-		SandboxID: "sb-1",
-		StartTime: &start,
-		EndTime:   &end,
-		Limit:     10,
-		Cursor:    cursorValue,
-		Source:    sandboxobservability.SourceNetd,
-		EventType: sandboxobservability.EventTypeNetworkAudit,
-		Outcome:   sandboxobservability.OutcomeDenied,
+		TeamID:                    "team-1",
+		SandboxID:                 "sb-1",
+		MaxSchemaVersion:          sandboxobservability.CurrentEventSchemaVersion,
+		StartTime:                 &start,
+		EndTime:                   &end,
+		Limit:                     10,
+		Cursor:                    cursorValue,
+		Source:                    sandboxobservability.SourceNetd,
+		EventType:                 sandboxobservability.EventTypeNetworkAudit,
+		Outcome:                   sandboxobservability.OutcomeDenied,
+		ExecutionScopeNamespace:   "codex",
+		ExecutionScopeKind:        "native_session",
+		ExecutionScopeID:          "thread-1",
+		ExecutionScopeAttribution: sandboxobservability.ExecutionScopeAttributionProcessEnvironment,
 	})
 	if err != nil {
 		t.Fatalf("normalizeQuery() error = %v", err)
@@ -166,10 +181,14 @@ func TestBuildListSQLAppliesTypedFiltersAndCursor(t *testing.T) {
 
 	sqlQuery, args := repo.buildListSQL(query, limit+1, cursor)
 	for _, want := range []string{
-		"FROM `sandbox0_observability`.`sandbox_audit_events` FINAL WHERE team_id = ? AND sandbox_id = ?",
+		"FROM `sandbox0_observability`.`sandbox_audit_events` FINAL WHERE team_id = ? AND sandbox_id = ? AND schema_version <= ?",
 		"source = ?",
 		"outcome = ?",
 		"event_type = ?",
+		"execution_scope_namespace = ?",
+		"execution_scope_kind = ?",
+		"execution_scope_id = ?",
+		"execution_scope_attribution = ?",
 		"(occurred_at, ingested_at, source, event_type, event_id, payload_hash) > (" + dateTime64NanoPlaceholder + ", " + dateTime64NanoPlaceholder + ", ?, ?, ?, ?)",
 		"ORDER BY occurred_at ASC, ingested_at ASC, source ASC, event_type ASC, event_id ASC, payload_hash ASC LIMIT 11",
 	} {
@@ -177,11 +196,14 @@ func TestBuildListSQLAppliesTypedFiltersAndCursor(t *testing.T) {
 			t.Fatalf("query missing %q:\n%s", want, sqlQuery)
 		}
 	}
-	if len(args) != 13 {
-		t.Fatalf("args count = %d, want 13: %#v", len(args), args)
+	if len(args) != 18 {
+		t.Fatalf("args count = %d, want 18: %#v", len(args), args)
 	}
-	if args[5] != string(sandboxobservability.EventTypeNetworkAudit) {
-		t.Fatalf("event_type arg = %#v, want network_audit", args[5])
+	if args[2] != sandboxobservability.CurrentEventSchemaVersion {
+		t.Fatalf("max_schema_version arg = %#v, want 3", args[2])
+	}
+	if args[6] != string(sandboxobservability.EventTypeNetworkAudit) {
+		t.Fatalf("event_type arg = %#v, want network_audit", args[6])
 	}
 }
 
@@ -190,12 +212,17 @@ func TestBuildWatchEventsSQLUsesIngestionOrderCursor(t *testing.T) {
 	start := time.Date(2026, 7, 1, 1, 0, 0, 0, time.UTC)
 	after := time.Date(2026, 7, 1, 1, 30, 1, 0, time.UTC)
 	query, limit, cursor, err := normalizeWatchEventQuery(sandboxobservability.EventQuery{
-		TeamID:    "team-1",
-		SandboxID: "sb-1",
-		StartTime: &start,
-		Limit:     10,
-		Source:    sandboxobservability.SourceNetd,
-		EventType: sandboxobservability.EventTypeNetworkAudit,
+		TeamID:                    "team-1",
+		SandboxID:                 "sb-1",
+		MaxSchemaVersion:          sandboxobservability.CurrentEventSchemaVersion,
+		StartTime:                 &start,
+		Limit:                     10,
+		Source:                    sandboxobservability.SourceNetd,
+		EventType:                 sandboxobservability.EventTypeNetworkAudit,
+		ExecutionScopeNamespace:   "codex",
+		ExecutionScopeKind:        "native_session",
+		ExecutionScopeID:          "thread-1",
+		ExecutionScopeAttribution: sandboxobservability.ExecutionScopeAttributionProcessEnvironment,
 	}, sandboxobservability.WatchOptions{
 		AfterIngestedAt: &after,
 	})
@@ -205,9 +232,14 @@ func TestBuildWatchEventsSQLUsesIngestionOrderCursor(t *testing.T) {
 
 	sqlQuery, args := repo.buildWatchEventsSQL(query, limit, cursor)
 	for _, want := range []string{
+		"schema_version <= ?",
 		"occurred_at >= " + dateTime64NanoPlaceholder,
 		"source = ?",
 		"event_type = ?",
+		"execution_scope_namespace = ?",
+		"execution_scope_kind = ?",
+		"execution_scope_id = ?",
+		"execution_scope_attribution = ?",
 		"(ingested_at, source, event_type, event_id, payload_hash) > (" + dateTime64NanoPlaceholder + ", ?, ?, ?, ?)",
 		"ORDER BY ingested_at ASC, source ASC, event_type ASC, event_id ASC, payload_hash ASC LIMIT 10",
 	} {
@@ -217,6 +249,9 @@ func TestBuildWatchEventsSQLUsesIngestionOrderCursor(t *testing.T) {
 	}
 	if strings.Contains(sqlQuery, "ORDER BY occurred_at") {
 		t.Fatalf("watch query must not order by occurred_at:\n%s", sqlQuery)
+	}
+	if got := args[2]; got != sandboxobservability.CurrentEventSchemaVersion {
+		t.Fatalf("watch max_schema_version arg = %#v, want 3", got)
 	}
 	if got := args[len(args)-5]; got != dateTime64NanoArg(after) {
 		t.Fatalf("tail ingested_at arg = %#v, want %s", args[len(args)-5], after)
@@ -235,6 +270,9 @@ func TestNormalizeQueryCapsLimitAndRejectsInvalidCursor(t *testing.T) {
 	if query.Limit != 5000 {
 		t.Fatalf("query limit should remain caller value for observability, got %d", query.Limit)
 	}
+	if query.MaxSchemaVersion != sandboxobservability.LegacyEventSchemaVersion {
+		t.Fatalf("max_schema_version = %d, want default v2", query.MaxSchemaVersion)
+	}
 	if limit != MaxQueryLimit {
 		t.Fatalf("limit = %d, want %d", limit, MaxQueryLimit)
 	}
@@ -245,6 +283,99 @@ func TestNormalizeQueryCapsLimitAndRejectsInvalidCursor(t *testing.T) {
 		Cursor:    "bad",
 	}); err == nil {
 		t.Fatal("normalizeQuery() error = nil, want invalid cursor error")
+	}
+}
+
+func TestListAndWatchQueriesDefaultToSchemaV2(t *testing.T) {
+	repo, _ := mustRepository(t)
+	query, limit, cursor, err := normalizeQuery(sandboxobservability.EventQuery{
+		TeamID:    "team-1",
+		SandboxID: "sb-1",
+	})
+	if err != nil {
+		t.Fatalf("normalizeQuery() error = %v", err)
+	}
+	listSQL, listArgs := repo.buildListSQL(query, limit, cursor)
+	if !strings.Contains(listSQL, "schema_version <= ?") ||
+		listArgs[2] != sandboxobservability.LegacyEventSchemaVersion {
+		t.Fatalf("default list schema negotiation = %q, %#v", listSQL, listArgs)
+	}
+
+	watchQuery, watchLimit, watchCursor, err := normalizeWatchEventQuery(
+		sandboxobservability.EventQuery{TeamID: "team-1", SandboxID: "sb-1"},
+		sandboxobservability.WatchOptions{},
+	)
+	if err != nil {
+		t.Fatalf("normalizeWatchEventQuery() error = %v", err)
+	}
+	watchSQL, watchArgs := repo.buildWatchEventsSQL(watchQuery, watchLimit, watchCursor)
+	if !strings.Contains(watchSQL, "schema_version <= ?") ||
+		watchArgs[2] != sandboxobservability.LegacyEventSchemaVersion {
+		t.Fatalf("default watch schema negotiation = %q, %#v", watchSQL, watchArgs)
+	}
+}
+
+func TestEventCursorsBindEffectiveMaxSchemaVersion(t *testing.T) {
+	event := sandboxobservability.Event{
+		EventID:    "11111111-1111-4111-8111-111111111111",
+		OccurredAt: time.Date(2026, time.July, 1, 1, 0, 0, 0, time.UTC),
+		IngestedAt: time.Date(2026, time.July, 1, 1, 0, 1, 0, time.UTC),
+		Source:     sandboxobservability.SourceNetd,
+		EventType:  sandboxobservability.EventTypeNetworkAudit,
+	}
+	legacyPage, err := encodePageCursor(event, 0)
+	if err != nil {
+		t.Fatalf("encodePageCursor() legacy error = %v", err)
+	}
+	if query, _, _, err := normalizeQuery(sandboxobservability.EventQuery{
+		TeamID: "team-1", SandboxID: "sb-1", Cursor: legacyPage,
+	}); err != nil || query.MaxSchemaVersion != sandboxobservability.LegacyEventSchemaVersion {
+		t.Fatalf("legacy page cursor query = %+v, error = %v", query, err)
+	}
+	if _, _, _, err := normalizeQuery(sandboxobservability.EventQuery{
+		TeamID: "team-1", SandboxID: "sb-1",
+		MaxSchemaVersion: sandboxobservability.CurrentEventSchemaVersion,
+		Cursor:           legacyPage,
+	}); !errors.Is(err, sandboxobservability.ErrInvalidCursor) {
+		t.Fatalf("v3 query with legacy page cursor error = %v, want ErrInvalidCursor", err)
+	}
+
+	v3Page, err := encodePageCursor(event, sandboxobservability.CurrentEventSchemaVersion)
+	if err != nil {
+		t.Fatalf("encodePageCursor() v3 error = %v", err)
+	}
+	if query, _, _, err := normalizeQuery(sandboxobservability.EventQuery{
+		TeamID: "team-1", SandboxID: "sb-1", MaxSchemaVersion: 99, Cursor: v3Page,
+	}); err != nil || query.MaxSchemaVersion != sandboxobservability.CurrentEventSchemaVersion {
+		t.Fatalf("future page cursor query = %+v, error = %v", query, err)
+	}
+
+	legacyTail, err := encodeTailCursor(
+		eventTailCursorKind,
+		event.IngestedAt,
+		string(event.Source),
+		string(event.EventType),
+		event.EventID,
+		"",
+		0,
+	)
+	if err != nil {
+		t.Fatalf("encodeTailCursor() legacy error = %v", err)
+	}
+	if query, _, _, err := normalizeWatchEventQuery(
+		sandboxobservability.EventQuery{TeamID: "team-1", SandboxID: "sb-1"},
+		sandboxobservability.WatchOptions{Cursor: legacyTail},
+	); err != nil || query.MaxSchemaVersion != sandboxobservability.LegacyEventSchemaVersion {
+		t.Fatalf("legacy tail cursor query = %+v, error = %v", query, err)
+	}
+	if _, _, _, err := normalizeWatchEventQuery(
+		sandboxobservability.EventQuery{
+			TeamID: "team-1", SandboxID: "sb-1",
+			MaxSchemaVersion: sandboxobservability.CurrentEventSchemaVersion,
+		},
+		sandboxobservability.WatchOptions{Cursor: legacyTail},
+	); !errors.Is(err, sandboxobservability.ErrInvalidCursor) {
+		t.Fatalf("v3 query with legacy tail cursor error = %v, want ErrInvalidCursor", err)
 	}
 }
 
@@ -289,7 +420,7 @@ func TestNormalizeEventCursorsRejectDateTime64NanoOverflow(t *testing.T) {
 		IngestedAt: time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC),
 		Source:     sandboxobservability.SourceNetd,
 		EventType:  sandboxobservability.EventTypeNetworkAudit,
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("encodePageCursor() error = %v", err)
 	}
@@ -300,7 +431,7 @@ func TestNormalizeEventCursorsRejectDateTime64NanoOverflow(t *testing.T) {
 		t.Fatalf("normalizeQuery() error = %v, want ErrInvalidCursor", err)
 	}
 
-	tail, err := encodeTailCursor(eventTailCursorKind, outside, string(sandboxobservability.SourceNetd), string(sandboxobservability.EventTypeNetworkAudit), "11111111-1111-4111-8111-111111111111", "")
+	tail, err := encodeTailCursor(eventTailCursorKind, outside, string(sandboxobservability.SourceNetd), string(sandboxobservability.EventTypeNetworkAudit), "11111111-1111-4111-8111-111111111111", "", 0)
 	if err != nil {
 		t.Fatalf("encodeTailCursor() error = %v", err)
 	}
@@ -325,6 +456,78 @@ func TestNormalizeQueryRejectsEventIDWithOtherFilters(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "event_id cannot be combined") {
 		t.Fatalf("normalizeQuery() error = %v, want incompatible filter error", err)
+	}
+}
+
+func TestNormalizeQueryRejectsInvalidExecutionScopeAttribution(t *testing.T) {
+	_, _, _, err := normalizeQuery(sandboxobservability.EventQuery{
+		TeamID:                    "team-1",
+		SandboxID:                 "sb-1",
+		ExecutionScopeAttribution: "unknown",
+	})
+	if !errors.Is(err, sandboxobservability.ErrInvalidQuery) || !strings.Contains(err.Error(), "invalid attribution") {
+		t.Fatalf("normalizeQuery() error = %v, want invalid execution scope attribution", err)
+	}
+}
+
+func TestNormalizeQueryRejectsOversizedExecutionScopeFilter(t *testing.T) {
+	_, _, _, err := normalizeQuery(sandboxobservability.EventQuery{
+		TeamID:                  "team-1",
+		SandboxID:               "sb-1",
+		ExecutionScopeNamespace: strings.Repeat("n", sandboxobservability.MaxExecutionScopeNamespaceBytes+1),
+	})
+	if !errors.Is(err, sandboxobservability.ErrInvalidQuery) || !strings.Contains(err.Error(), "namespace exceeds") {
+		t.Fatalf("normalizeQuery() error = %v, want oversized execution scope filter", err)
+	}
+}
+
+func TestNormalizeQueryRejectsEventIDWithExecutionScopeFilter(t *testing.T) {
+	_, _, _, err := normalizeQuery(sandboxobservability.EventQuery{
+		TeamID:                  "team-1",
+		SandboxID:               "sb-1",
+		MaxSchemaVersion:        sandboxobservability.CurrentEventSchemaVersion,
+		EventID:                 "11111111-1111-4111-8111-111111111111",
+		ExecutionScopeNamespace: "codex",
+	})
+	if err == nil || !strings.Contains(err.Error(), "event_id cannot be combined") {
+		t.Fatalf("normalizeQuery() error = %v, want incompatible execution scope filter error", err)
+	}
+}
+
+func TestNormalizeQueryRejectsUnsupportedMaxSchemaVersion(t *testing.T) {
+	_, _, _, err := normalizeQuery(sandboxobservability.EventQuery{
+		TeamID:           "team-1",
+		SandboxID:        "sb-1",
+		MaxSchemaVersion: 1,
+	})
+	if !errors.Is(err, sandboxobservability.ErrInvalidQuery) || !strings.Contains(err.Error(), "max_schema_version") {
+		t.Fatalf("normalizeQuery() error = %v, want invalid max_schema_version", err)
+	}
+}
+
+func TestNormalizeQueryInfersSchemaV3ForExecutionScopeFilter(t *testing.T) {
+	query, _, _, err := normalizeQuery(sandboxobservability.EventQuery{
+		TeamID:                  "team-1",
+		SandboxID:               "sb-1",
+		ExecutionScopeNamespace: "codex",
+	})
+	if err != nil {
+		t.Fatalf("normalizeQuery() error = %v", err)
+	}
+	if query.MaxSchemaVersion != sandboxobservability.CurrentEventSchemaVersion {
+		t.Fatalf("max_schema_version = %d, want inferred v3", query.MaxSchemaVersion)
+	}
+}
+
+func TestNormalizeQueryRejectsExplicitSchemaV2ForExecutionScopeFilter(t *testing.T) {
+	_, _, _, err := normalizeQuery(sandboxobservability.EventQuery{
+		TeamID:                  "team-1",
+		SandboxID:               "sb-1",
+		MaxSchemaVersion:        sandboxobservability.LegacyEventSchemaVersion,
+		ExecutionScopeNamespace: "codex",
+	})
+	if !errors.Is(err, sandboxobservability.ErrInvalidQuery) || !strings.Contains(err.Error(), "require max_schema_version=3") {
+		t.Fatalf("normalizeQuery() error = %v, want explicit v2 scope negotiation error", err)
 	}
 }
 

@@ -6,7 +6,13 @@ import (
 	"time"
 )
 
-const CurrentEventSchemaVersion = 2
+const (
+	LegacyEventSchemaVersion  = 2
+	CurrentEventSchemaVersion = 3
+	// DefaultEventMaxSchemaVersion preserves response compatibility for
+	// clients generated before execution scopes introduced schema v3.
+	DefaultEventMaxSchemaVersion = LegacyEventSchemaVersion
+)
 
 // AuditDeliveryMode controls when an audited operation may proceed. ClickHouse
 // remains canonical in every mode; durable_async only acknowledges the local
@@ -108,6 +114,35 @@ type AuditActor struct {
 	AuthMethod string    `json:"auth_method,omitempty"`
 }
 
+// ExecutionScope attributes sandbox workload activity to one native harness
+// execution scope. It is separate from AuditActor because the sandbox workload
+// remains the trusted actor even when multiple agent sessions share it.
+type ExecutionScope struct {
+	Namespace   string                    `json:"namespace"`
+	Kind        string                    `json:"kind"`
+	ID          string                    `json:"id"`
+	Attribution ExecutionScopeAttribution `json:"attribution"`
+}
+
+const (
+	MaxExecutionScopeNamespaceBytes = 64
+	MaxExecutionScopeKindBytes      = 64
+	MaxExecutionScopeIDBytes        = 256
+)
+
+// IsZero reports whether the execution scope is absent.
+func (s ExecutionScope) IsZero() bool {
+	return s.Namespace == "" && s.Kind == "" && s.ID == "" && s.Attribution == ""
+}
+
+// ExecutionScopeAttribution identifies the trusted runtime signal used to
+// associate a process tree with an execution scope.
+type ExecutionScopeAttribution string
+
+const (
+	ExecutionScopeAttributionProcessEnvironment ExecutionScopeAttribution = "process_environment"
+)
+
 // AuditResource identifies the object affected by an audit action.
 type AuditResource struct {
 	Type        string `json:"type"`
@@ -159,52 +194,82 @@ type AuditIntegrity struct {
 // is storage metadata; pagination and watch cursors belong to query results,
 // not to the signed event payload.
 type Event struct {
-	EventID       string         `json:"event_id"`
-	SchemaVersion int            `json:"schema_version"`
-	TeamID        string         `json:"team_id"`
-	SandboxID     string         `json:"sandbox_id"`
-	RegionID      string         `json:"region_id"`
-	ClusterID     string         `json:"cluster_id"`
-	OccurredAt    time.Time      `json:"occurred_at"`
-	IngestedAt    time.Time      `json:"ingested_at"`
-	Source        Source         `json:"source"`
-	EventType     EventType      `json:"event_type"`
-	Phase         EventPhase     `json:"phase"`
-	Outcome       Outcome        `json:"outcome"`
-	Actor         AuditActor     `json:"actor"`
-	Action        string         `json:"action"`
-	Resource      AuditResource  `json:"resource"`
-	OperationID   string         `json:"operation_id"`
-	ParentEventID string         `json:"parent_event_id,omitempty"`
-	Producer      AuditProducer  `json:"producer"`
-	Request       AuditRequest   `json:"request,omitempty"`
-	Integrity     AuditIntegrity `json:"integrity"`
-	Attributes    map[string]any `json:"attributes,omitempty"`
+	EventID        string          `json:"event_id"`
+	SchemaVersion  int             `json:"schema_version"`
+	TeamID         string          `json:"team_id"`
+	SandboxID      string          `json:"sandbox_id"`
+	RegionID       string          `json:"region_id"`
+	ClusterID      string          `json:"cluster_id"`
+	OccurredAt     time.Time       `json:"occurred_at"`
+	IngestedAt     time.Time       `json:"ingested_at"`
+	Source         Source          `json:"source"`
+	EventType      EventType       `json:"event_type"`
+	Phase          EventPhase      `json:"phase"`
+	Outcome        Outcome         `json:"outcome"`
+	Actor          AuditActor      `json:"actor"`
+	ExecutionScope *ExecutionScope `json:"execution_scope,omitempty"`
+	Action         string          `json:"action"`
+	Resource       AuditResource   `json:"resource"`
+	OperationID    string          `json:"operation_id"`
+	ParentEventID  string          `json:"parent_event_id,omitempty"`
+	Producer       AuditProducer   `json:"producer"`
+	Request        AuditRequest    `json:"request,omitempty"`
+	Integrity      AuditIntegrity  `json:"integrity"`
+	Attributes     map[string]any  `json:"attributes,omitempty"`
 }
 
 // EventQuery describes typed filters accepted by the public historical query API.
 type EventQuery struct {
-	TeamID       string
-	SandboxID    string
-	StartTime    *time.Time
-	EndTime      *time.Time
-	Limit        int
-	Cursor       string
-	Source       Source
-	EventType    EventType
-	Outcome      Outcome
-	ActorKind    ActorKind
-	ActorID      string
-	Action       string
-	ResourceType string
-	OperationID  string
-	EventID      string
+	TeamID                    string
+	SandboxID                 string
+	MaxSchemaVersion          int
+	StartTime                 *time.Time
+	EndTime                   *time.Time
+	Limit                     int
+	Cursor                    string
+	Source                    Source
+	EventType                 EventType
+	Outcome                   Outcome
+	ActorKind                 ActorKind
+	ActorID                   string
+	ExecutionScopeNamespace   string
+	ExecutionScopeKind        string
+	ExecutionScopeID          string
+	ExecutionScopeAttribution ExecutionScopeAttribution
+	Action                    string
+	ResourceType              string
+	OperationID               string
+	EventID                   string
+}
+
+// EventEffectiveQuery reports the normalized compatibility and execution-scope
+// filters applied by the server. It is response metadata so clients can fail
+// closed even when a query returns no events.
+type EventEffectiveQuery struct {
+	MaxSchemaVersion          int                       `json:"max_schema_version"`
+	ExecutionScopeNamespace   string                    `json:"execution_scope_namespace,omitempty"`
+	ExecutionScopeKind        string                    `json:"execution_scope_kind,omitempty"`
+	ExecutionScopeID          string                    `json:"execution_scope_id,omitempty"`
+	ExecutionScopeAttribution ExecutionScopeAttribution `json:"execution_scope_attribution,omitempty"`
+}
+
+// EffectiveEventQuery projects a normalized event query into public response
+// metadata without exposing tenant identity or pagination state.
+func EffectiveEventQuery(query EventQuery) EventEffectiveQuery {
+	return EventEffectiveQuery{
+		MaxSchemaVersion:          query.MaxSchemaVersion,
+		ExecutionScopeNamespace:   query.ExecutionScopeNamespace,
+		ExecutionScopeKind:        query.ExecutionScopeKind,
+		ExecutionScopeID:          query.ExecutionScopeID,
+		ExecutionScopeAttribution: query.ExecutionScopeAttribution,
+	}
 }
 
 type EventListResult struct {
-	Events     []Event `json:"events"`
-	NextCursor string  `json:"next_cursor,omitempty"`
-	Watermark  string  `json:"watermark,omitempty"`
+	Events         []Event             `json:"events"`
+	NextCursor     string              `json:"next_cursor,omitempty"`
+	Watermark      string              `json:"watermark,omitempty"`
+	EffectiveQuery EventEffectiveQuery `json:"effective_query"`
 }
 
 type LogStream string
@@ -573,6 +638,15 @@ func ValidActorKind(kind ActorKind) bool {
 	switch kind {
 	case ActorKindHuman, ActorKindAPIKey, ActorKindService, ActorKindSandboxWorkload,
 		ActorKindSSHUser, ActorKindExposureCredential, ActorKindAnonymous:
+		return true
+	default:
+		return false
+	}
+}
+
+func ValidExecutionScopeAttribution(attribution ExecutionScopeAttribution) bool {
+	switch attribution {
+	case ExecutionScopeAttributionProcessEnvironment:
 		return true
 	default:
 		return false

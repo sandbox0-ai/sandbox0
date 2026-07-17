@@ -345,7 +345,7 @@ func (s *Server) newSandboxAPIEvent(c *gin.Context, authCtx *gatewayauthn.AuthCo
 	}
 	event := sandboxobservability.Event{
 		EventID:       uuid.NewString(),
-		SchemaVersion: sandboxobservability.CurrentEventSchemaVersion,
+		SchemaVersion: sandboxobservability.LegacyEventSchemaVersion,
 		TeamID:        authCtx.TeamID,
 		SandboxID:     sandboxID,
 		RegionID:      s.cfg.RegionID,
@@ -577,7 +577,7 @@ func (s *Server) beginExposureAudit(c *gin.Context, sandbox *mgr.Sandbox, servic
 		now := time.Now().UTC()
 		event := sandboxobservability.Event{
 			EventID:       uuid.NewString(),
-			SchemaVersion: sandboxobservability.CurrentEventSchemaVersion,
+			SchemaVersion: sandboxobservability.LegacyEventSchemaVersion,
 			TeamID:        sandbox.TeamID,
 			SandboxID:     sandbox.ID,
 			RegionID:      s.cfg.RegionID,

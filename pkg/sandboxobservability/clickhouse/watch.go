@@ -36,7 +36,7 @@ func (r *Repository) WatchLogs(ctx context.Context, query sandboxobservability.L
 	nextCursor := ""
 	if len(logs) > 0 {
 		last := logs[len(logs)-1]
-		nextCursor, err = encodeTailCursor(logTailCursorKind, last.IngestedAt, string(last.Stream), "", last.Cursor, "", 0)
+		nextCursor, err = encodeTailCursor(logTailCursorKind, last.IngestedAt, string(last.Stream), "", last.Cursor, "")
 		if err != nil {
 			return nil, fmt.Errorf("%w: encode cursor: %v", sandboxobservability.ErrBackendUnavailable, err)
 		}
@@ -67,16 +67,15 @@ func (r *Repository) watchEvents(ctx context.Context, query sandboxobservability
 	nextCursor := ""
 	if len(events) > 0 {
 		last := events[len(events)-1]
-		nextCursor, err = encodeTailCursor(eventTailCursorKind, last.IngestedAt, string(last.Source), string(last.EventType), last.EventID, last.Integrity.PayloadHash, normalized.MaxSchemaVersion)
+		nextCursor, err = encodeTailCursor(eventTailCursorKind, last.IngestedAt, string(last.Source), string(last.EventType), last.EventID, last.Integrity.PayloadHash)
 		if err != nil {
 			return nil, fmt.Errorf("%w: encode cursor: %v", sandboxobservability.ErrBackendUnavailable, err)
 		}
 	}
 	return &sandboxobservability.EventListResult{
-		Events:         events,
-		NextCursor:     nextCursor,
-		Watermark:      lastWatermark(events),
-		EffectiveQuery: sandboxobservability.EffectiveEventQuery(normalized),
+		Events:     events,
+		NextCursor: nextCursor,
+		Watermark:  lastWatermark(events),
 	}, nil
 }
 
@@ -148,19 +147,6 @@ func normalizeWatchEventQuery(query sandboxobservability.EventQuery, opts sandbo
 	cursor, err := normalizeWatchCursor(opts, eventTailCursorKind)
 	if err != nil {
 		return sandboxobservability.EventQuery{}, 0, nil, err
-	}
-	if cursor != nil {
-		if strings.TrimSpace(opts.Cursor) == "" {
-			cursor.MaxSchemaVersion = normalized.MaxSchemaVersion
-		} else {
-			cursorMaxSchemaVersion := cursor.MaxSchemaVersion
-			if cursorMaxSchemaVersion == 0 {
-				cursorMaxSchemaVersion = sandboxobservability.LegacyEventSchemaVersion
-			}
-			if cursorMaxSchemaVersion != normalized.MaxSchemaVersion {
-				return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("%w: max_schema_version does not match cursor", sandboxobservability.ErrInvalidCursor)
-			}
-		}
 	}
 	if cursor != nil && !sandboxobservability.ValidDateTime64Nano(cursor.IngestedAt) {
 		return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("%w: timestamp is outside the DateTime64(9) range", sandboxobservability.ErrInvalidCursor)

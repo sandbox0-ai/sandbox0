@@ -22,17 +22,11 @@ func TestEventIntegrityIsCanonicalAndDetectsTampering(t *testing.T) {
 		Phase:         EventPhaseResult,
 		Outcome:       OutcomeCompleted,
 		Actor:         AuditActor{Kind: ActorKindSandboxWorkload, ID: "sb-1"},
-		ExecutionScope: &ExecutionScope{
-			Namespace:   "codex",
-			Kind:        "native_session",
-			ID:          "thread-1",
-			Attribution: ExecutionScopeAttributionProcessEnvironment,
-		},
-		Action:      "network.connect",
-		Resource:    AuditResource{Type: "sandbox_network", ID: "sb-1"},
-		OperationID: "operation-1",
-		Producer:    AuditProducer{Service: "netd", Instance: "node-1", Sequence: 42},
-		Attributes:  map[string]any{"z": "last", "a": "first"},
+		Action:        "network.connect",
+		Resource:      AuditResource{Type: "sandbox_network", ID: "sb-1"},
+		OperationID:   "operation-1",
+		Producer:      AuditProducer{Service: "netd", Instance: "node-1", Sequence: 42},
+		Attributes:    map[string]any{"z": "last", "a": "first"},
 	}
 	if err := SignEvent(&event, key); err != nil {
 		t.Fatalf("SignEvent() error = %v", err)
@@ -52,50 +46,13 @@ func TestEventIntegrityIsCanonicalAndDetectsTampering(t *testing.T) {
 	if err := VerifyEventIntegrity(tampered, key.Public().(ed25519.PublicKey)); err == nil {
 		t.Fatal("VerifyEventIntegrity() error = nil after protected field mutation")
 	}
-
-	tamperedScope := event
-	scope := *event.ExecutionScope
-	scope.ID = "thread-2"
-	tamperedScope.ExecutionScope = &scope
-	if err := VerifyEventIntegrity(tamperedScope, key.Public().(ed25519.PublicKey)); err == nil {
-		t.Fatal("VerifyEventIntegrity() error = nil after execution scope mutation")
-	}
-}
-
-func TestEventIntegritySignsAndVerifiesV2Event(t *testing.T) {
-	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
-	event := Event{
-		EventID:       "11111111-1111-4111-8111-111111111111",
-		SchemaVersion: LegacyEventSchemaVersion,
-		TeamID:        "team-1",
-		SandboxID:     "sb-1",
-		RegionID:      "region-1",
-		ClusterID:     "cluster-1",
-		OccurredAt:    time.Date(2026, 7, 13, 1, 2, 3, 4, time.UTC),
-		Source:        SourceNetd,
-		EventType:     EventTypeNetworkAudit,
-		Phase:         EventPhaseEffect,
-		Outcome:       OutcomeCompleted,
-		Actor:         AuditActor{Kind: ActorKindSandboxWorkload, ID: "sb-1"},
-		Action:        "network.connect",
-		Resource:      AuditResource{Type: "sandbox_network", ID: "sb-1"},
-		OperationID:   "operation-1",
-		Producer:      AuditProducer{Service: "netd", Instance: "node-1", Sequence: 42},
-		Attributes:    map[string]any{"host": "example.com"},
-	}
-	if err := SignEvent(&event, key); err != nil {
-		t.Fatalf("SignEvent() v2 error = %v", err)
-	}
-	if err := VerifyEventIntegrity(event, key.Public().(ed25519.PublicKey)); err != nil {
-		t.Fatalf("VerifyEventIntegrity() v2 error = %v", err)
-	}
 }
 
 func TestVerifyEventIntegrityRejectsMalformedPublicKey(t *testing.T) {
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	event := Event{
 		EventID:       "11111111-1111-4111-8111-111111111111",
-		SchemaVersion: LegacyEventSchemaVersion,
+		SchemaVersion: CurrentEventSchemaVersion,
 		TeamID:        "team-1",
 		SandboxID:     "sb-1",
 		RegionID:      "region-1",

@@ -138,7 +138,7 @@ func (r *Repository) listEvents(ctx context.Context, query sandboxobservability.
 
 	nextCursor := ""
 	if len(events) > limit {
-		nextCursor, err = encodePageCursor(events[limit-1], normalized.MaxSchemaVersion)
+		nextCursor, err = encodePageCursor(events[limit-1])
 		if err != nil {
 			return nil, fmt.Errorf("%w: encode cursor: %v", sandboxobservability.ErrBackendUnavailable, err)
 		}
@@ -146,10 +146,9 @@ func (r *Repository) listEvents(ctx context.Context, query sandboxobservability.
 	}
 
 	return &sandboxobservability.EventListResult{
-		Events:         events,
-		NextCursor:     nextCursor,
-		Watermark:      lastWatermark(events),
-		EffectiveQuery: sandboxobservability.EffectiveEventQuery(normalized),
+		Events:     events,
+		NextCursor: nextCursor,
+		Watermark:  lastWatermark(events),
 	}, nil
 }
 
@@ -213,8 +212,8 @@ func (r *Repository) buildListSQL(query sandboxobservability.EventQuery, limit i
 // appendEventFilters writes the filters shared by historical list and watch
 // queries. Exact event ID lookup remains list-only.
 func appendEventFilters(builder *strings.Builder, query sandboxobservability.EventQuery) []any {
-	builder.WriteString("team_id = ? AND sandbox_id = ? AND schema_version <= ?")
-	args := []any{query.TeamID, query.SandboxID, query.MaxSchemaVersion}
+	builder.WriteString("team_id = ? AND sandbox_id = ?")
+	args := []any{query.TeamID, query.SandboxID}
 	if query.StartTime != nil {
 		builder.WriteString(" AND occurred_at >= " + dateTime64NanoPlaceholder)
 		args = append(args, dateTime64NanoArg(*query.StartTime))
@@ -243,22 +242,6 @@ func appendEventFilters(builder *strings.Builder, query sandboxobservability.Eve
 		builder.WriteString(" AND actor_id = ?")
 		args = append(args, query.ActorID)
 	}
-	if query.ExecutionScopeNamespace != "" {
-		builder.WriteString(" AND execution_scope_namespace = ?")
-		args = append(args, query.ExecutionScopeNamespace)
-	}
-	if query.ExecutionScopeKind != "" {
-		builder.WriteString(" AND execution_scope_kind = ?")
-		args = append(args, query.ExecutionScopeKind)
-	}
-	if query.ExecutionScopeID != "" {
-		builder.WriteString(" AND execution_scope_id = ?")
-		args = append(args, query.ExecutionScopeID)
-	}
-	if query.ExecutionScopeAttribution != "" {
-		builder.WriteString(" AND execution_scope_attribution = ?")
-		args = append(args, string(query.ExecutionScopeAttribution))
-	}
 	if query.Action != "" {
 		builder.WriteString(" AND action = ?")
 		args = append(args, query.Action)
@@ -278,18 +261,12 @@ func normalizeQuery(query sandboxobservability.EventQuery) (sandboxobservability
 	query.TeamID = strings.TrimSpace(query.TeamID)
 	query.SandboxID = strings.TrimSpace(query.SandboxID)
 	query.Cursor = strings.TrimSpace(query.Cursor)
-	maxSchemaVersionSpecified := query.MaxSchemaVersion != 0
 	if query.TeamID == "" {
 		return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("team_id is required")
 	}
 	if query.SandboxID == "" {
 		return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("sandbox_id is required")
 	}
-	effectiveMaxSchemaVersion, ok := sandboxobservability.NormalizeEventMaxSchemaVersion(query.MaxSchemaVersion)
-	if !ok {
-		return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("%w: max_schema_version must be greater than or equal to 2", sandboxobservability.ErrInvalidQuery)
-	}
-	query.MaxSchemaVersion = effectiveMaxSchemaVersion
 	if query.StartTime != nil {
 		start := query.StartTime.UTC()
 		if !sandboxobservability.ValidDateTime64Nano(start) {
@@ -317,10 +294,6 @@ func normalizeQuery(query sandboxobservability.EventQuery) (sandboxobservability
 		return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("invalid outcome")
 	}
 	query.ActorID = strings.TrimSpace(query.ActorID)
-	query.ExecutionScopeNamespace = strings.TrimSpace(query.ExecutionScopeNamespace)
-	query.ExecutionScopeKind = strings.TrimSpace(query.ExecutionScopeKind)
-	query.ExecutionScopeID = strings.TrimSpace(query.ExecutionScopeID)
-	query.ExecutionScopeAttribution = sandboxobservability.ExecutionScopeAttribution(strings.TrimSpace(string(query.ExecutionScopeAttribution)))
 	query.Action = strings.TrimSpace(query.Action)
 	query.ResourceType = strings.TrimSpace(query.ResourceType)
 	query.OperationID = strings.TrimSpace(query.OperationID)
@@ -328,16 +301,7 @@ func normalizeQuery(query sandboxobservability.EventQuery) (sandboxobservability
 	if query.ActorKind != "" && !sandboxobservability.ValidActorKind(query.ActorKind) {
 		return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("invalid actor_kind")
 	}
-	if err := sandboxobservability.ValidateExecutionScopeFilter(query.ExecutionScopeNamespace, query.ExecutionScopeKind, query.ExecutionScopeID, query.ExecutionScopeAttribution); err != nil {
-		return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("%w: invalid execution scope filter: %v", sandboxobservability.ErrInvalidQuery, err)
-	}
-	if hasExecutionScopeQueryFilter(query) && !maxSchemaVersionSpecified {
-		query.MaxSchemaVersion = sandboxobservability.CurrentEventSchemaVersion
-	}
-	if hasExecutionScopeQueryFilter(query) && query.MaxSchemaVersion != sandboxobservability.CurrentEventSchemaVersion {
-		return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("%w: execution scope filters require max_schema_version=3", sandboxobservability.ErrInvalidQuery)
-	}
-	if query.EventID != "" && (query.StartTime != nil || query.EndTime != nil || query.Cursor != "" || query.Source != "" || query.EventType != "" || query.Outcome != "" || query.ActorKind != "" || query.ActorID != "" || query.ExecutionScopeNamespace != "" || query.ExecutionScopeKind != "" || query.ExecutionScopeID != "" || query.ExecutionScopeAttribution != "" || query.Action != "" || query.ResourceType != "" || query.OperationID != "") {
+	if query.EventID != "" && (query.StartTime != nil || query.EndTime != nil || query.Cursor != "" || query.Source != "" || query.EventType != "" || query.Outcome != "" || query.ActorKind != "" || query.ActorID != "" || query.Action != "" || query.ResourceType != "" || query.OperationID != "") {
 		return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("event_id cannot be combined with other event filters or cursor")
 	}
 
@@ -359,24 +323,10 @@ func normalizeQuery(query sandboxobservability.EventQuery) (sandboxobservability
 		if !sandboxobservability.ValidDateTime64Nano(decoded.OccurredAt) || !sandboxobservability.ValidDateTime64Nano(decoded.IngestedAt) {
 			return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("%w: timestamp is outside the DateTime64(9) range", sandboxobservability.ErrInvalidCursor)
 		}
-		cursorMaxSchemaVersion := decoded.MaxSchemaVersion
-		if cursorMaxSchemaVersion == 0 {
-			cursorMaxSchemaVersion = sandboxobservability.LegacyEventSchemaVersion
-		}
-		if cursorMaxSchemaVersion != query.MaxSchemaVersion {
-			return sandboxobservability.EventQuery{}, 0, nil, fmt.Errorf("%w: max_schema_version does not match cursor", sandboxobservability.ErrInvalidCursor)
-		}
 		cursor = decoded
 	}
 
 	return query, limit, cursor, nil
-}
-
-func hasExecutionScopeQueryFilter(query sandboxobservability.EventQuery) bool {
-	return query.ExecutionScopeNamespace != "" ||
-		query.ExecutionScopeKind != "" ||
-		query.ExecutionScopeID != "" ||
-		query.ExecutionScopeAttribution != ""
 }
 
 func normalizeEventForInsert(event sandboxobservability.Event, now time.Time) (sandboxobservability.Event, error) {

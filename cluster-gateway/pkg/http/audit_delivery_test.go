@@ -21,7 +21,7 @@ func testAuditDeliveryEvent(t *testing.T, eventID string) sandboxobservability.E
 	t.Helper()
 	event := sandboxobservability.Event{
 		EventID:       eventID,
-		SchemaVersion: sandboxobservability.LegacyEventSchemaVersion,
+		SchemaVersion: sandboxobservability.CurrentEventSchemaVersion,
 		TeamID:        "team-1",
 		SandboxID:     "sb-1",
 		RegionID:      "region-1",

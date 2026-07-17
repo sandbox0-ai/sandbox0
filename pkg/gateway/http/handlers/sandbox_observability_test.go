@@ -42,32 +42,6 @@ type fakeSandboxObservabilityRepo struct {
 	ingestRuntimeCalled bool
 }
 
-type fakeSandboxObservabilityWatchRepo struct {
-	*fakeSandboxObservabilityRepo
-	cancel           context.CancelFunc
-	eventsResult     *sandboxobservability.EventListResult
-	eventWatchCalls  int
-	lastEventQuery   sandboxobservability.EventQuery
-	lastWatchOptions sandboxobservability.WatchOptions
-}
-
-func (f *fakeSandboxObservabilityWatchRepo) WatchEvents(_ context.Context, query sandboxobservability.EventQuery, opts sandboxobservability.WatchOptions) (*sandboxobservability.EventListResult, error) {
-	f.eventWatchCalls++
-	f.lastEventQuery = query
-	f.lastWatchOptions = opts
-	if f.eventWatchCalls == 1 {
-		return f.eventsResult, nil
-	}
-	if f.cancel != nil {
-		f.cancel()
-	}
-	return nil, nil
-}
-
-func (f *fakeSandboxObservabilityWatchRepo) WatchLogs(context.Context, sandboxobservability.LogQuery, sandboxobservability.WatchOptions) (*sandboxobservability.LogListResult, error) {
-	return &sandboxobservability.LogListResult{Logs: []sandboxobservability.LogEntry{}}, nil
-}
-
 func (f *fakeSandboxObservabilityRepo) ListEvents(_ context.Context, query sandboxobservability.EventQuery) (*sandboxobservability.EventListResult, error) {
 	f.eventsCalled = true
 	f.lastQuery = query
@@ -147,7 +121,7 @@ func TestSandboxObservabilityHandlerParsesTypedQuery(t *testing.T) {
 	}
 	handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
 
-	rec := serveSandboxObservabilityRequest(t, handler.ListEvents, "/api/v1/sandboxes/sb-1/observability/events?start_time="+start+"&end_time="+end+"&limit=5000&cursor=abc&max_schema_version=3&source=netd&event_type=network_audit&outcome=denied&actor_kind=human&actor_id=user-1&execution_scope_namespace=codex&execution_scope_kind=native_session&execution_scope_id=thread-1&execution_scope_attribution=process_environment&action=sandbox.pause&resource_type=sandbox&operation_id=operation-1")
+	rec := serveSandboxObservabilityRequest(t, handler.ListEvents, "/api/v1/sandboxes/sb-1/observability/events?start_time="+start+"&end_time="+end+"&limit=5000&cursor=abc&source=netd&event_type=network_audit&outcome=denied&actor_kind=human&actor_id=user-1&action=sandbox.pause&resource_type=sandbox&operation_id=operation-1")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -162,16 +136,11 @@ func TestSandboxObservabilityHandlerParsesTypedQuery(t *testing.T) {
 		t.Fatalf("limit = %d, want %d", repo.lastQuery.Limit, maxSandboxObservabilityLimit)
 	}
 	if repo.lastQuery.Cursor != "abc" ||
-		repo.lastQuery.MaxSchemaVersion != sandboxobservability.CurrentEventSchemaVersion ||
 		repo.lastQuery.Source != sandboxobservability.SourceNetd ||
 		repo.lastQuery.EventType != sandboxobservability.EventTypeNetworkAudit ||
 		repo.lastQuery.Outcome != sandboxobservability.OutcomeDenied ||
 		repo.lastQuery.ActorKind != sandboxobservability.ActorKindHuman ||
 		repo.lastQuery.ActorID != "user-1" ||
-		repo.lastQuery.ExecutionScopeNamespace != "codex" ||
-		repo.lastQuery.ExecutionScopeKind != "native_session" ||
-		repo.lastQuery.ExecutionScopeID != "thread-1" ||
-		repo.lastQuery.ExecutionScopeAttribution != sandboxobservability.ExecutionScopeAttributionProcessEnvironment ||
 		repo.lastQuery.Action != "sandbox.pause" ||
 		repo.lastQuery.ResourceType != "sandbox" ||
 		repo.lastQuery.OperationID != "operation-1" {
@@ -326,7 +295,7 @@ func signedSandboxObservabilityTestEvent(t *testing.T, key ed25519.PrivateKey, e
 	t.Helper()
 	event := sandboxobservability.Event{
 		EventID:       eventID,
-		SchemaVersion: sandboxobservability.LegacyEventSchemaVersion,
+		SchemaVersion: sandboxobservability.CurrentEventSchemaVersion,
 		TeamID:        "team-1",
 		SandboxID:     "sb-1",
 		RegionID:      "region-1",
@@ -476,168 +445,6 @@ func TestSandboxObservabilityHandlerRejectsInvalidQuery(t *testing.T) {
 	}
 }
 
-func TestSandboxObservabilityHandlerDefaultsToSchemaV2(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	repo := &fakeSandboxObservabilityRepo{
-		eventsResult: &sandboxobservability.EventListResult{Events: []sandboxobservability.Event{}},
-	}
-	handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
-	rec := serveSandboxObservabilityRequest(t, handler.ListEvents, "/api/v1/sandboxes/sb-1/observability/events")
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-	if repo.lastQuery.MaxSchemaVersion != sandboxobservability.LegacyEventSchemaVersion {
-		t.Fatalf("max_schema_version = %d, want %d", repo.lastQuery.MaxSchemaVersion, sandboxobservability.LegacyEventSchemaVersion)
-	}
-	var response struct {
-		Data sandboxobservability.EventListResult `json:"data"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if response.Data.EffectiveQuery.MaxSchemaVersion != sandboxobservability.LegacyEventSchemaVersion {
-		t.Fatalf("effective max_schema_version = %d, want %d", response.Data.EffectiveQuery.MaxSchemaVersion, sandboxobservability.LegacyEventSchemaVersion)
-	}
-}
-
-func TestSandboxObservabilityHandlerRejectsMaxSchemaVersionBelowV2(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	repo := &fakeSandboxObservabilityRepo{}
-	handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
-	rec := serveSandboxObservabilityRequest(t, handler.ListEvents, "/api/v1/sandboxes/sb-1/observability/events?max_schema_version=1")
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
-	}
-	if repo.eventsCalled {
-		t.Fatal("repository should not be called for an invalid max_schema_version")
-	}
-}
-
-func TestSandboxObservabilityHandlerInfersSchemaV3ForExecutionScopeFilter(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	repo := &fakeSandboxObservabilityRepo{
-		eventsResult: &sandboxobservability.EventListResult{Events: []sandboxobservability.Event{}},
-	}
-	handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
-	rec := serveSandboxObservabilityRequest(t, handler.ListEvents, "/api/v1/sandboxes/sb-1/observability/events?execution_scope_id=thread-1")
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-	if repo.lastQuery.MaxSchemaVersion != sandboxobservability.CurrentEventSchemaVersion {
-		t.Fatalf("max_schema_version = %d, want inferred v3", repo.lastQuery.MaxSchemaVersion)
-	}
-}
-
-func TestSandboxObservabilityHandlerReturnsEffectiveScopedQueryWhenNoEventsMatch(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	repo := &fakeSandboxObservabilityRepo{
-		eventsResult: &sandboxobservability.EventListResult{Events: []sandboxobservability.Event{}},
-	}
-	handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
-	rec := serveSandboxObservabilityRequest(t, handler.ListEvents, "/api/v1/sandboxes/sb-1/observability/events?execution_scope_namespace=codex&execution_scope_kind=native_session&execution_scope_id=thread-1&execution_scope_attribution=process_environment")
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-	var response struct {
-		Data sandboxobservability.EventListResult `json:"data"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	want := sandboxobservability.EventEffectiveQuery{
-		MaxSchemaVersion:          sandboxobservability.CurrentEventSchemaVersion,
-		ExecutionScopeNamespace:   "codex",
-		ExecutionScopeKind:        "native_session",
-		ExecutionScopeID:          "thread-1",
-		ExecutionScopeAttribution: sandboxobservability.ExecutionScopeAttributionProcessEnvironment,
-	}
-	if response.Data.EffectiveQuery != want {
-		t.Fatalf("effective_query = %#v, want %#v", response.Data.EffectiveQuery, want)
-	}
-	if len(response.Data.Events) != 0 {
-		t.Fatalf("events = %#v, want empty", response.Data.Events)
-	}
-}
-
-func TestSandboxObservabilityHandlerRejectsExplicitSchemaV2ForExecutionScopeFilter(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	repo := &fakeSandboxObservabilityRepo{}
-	handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
-	rec := serveSandboxObservabilityRequest(t, handler.ListEvents, "/api/v1/sandboxes/sb-1/observability/events?max_schema_version=2&execution_scope_id=thread-1")
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
-	}
-	if repo.eventsCalled {
-		t.Fatal("repository should not be called for explicit v2 with a scope filter")
-	}
-}
-
-func TestSandboxObservabilityHandlerCapsFutureMaxSchemaVersion(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	repo := &fakeSandboxObservabilityRepo{
-		eventsResult: &sandboxobservability.EventListResult{Events: []sandboxobservability.Event{}},
-	}
-	handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
-	rec := serveSandboxObservabilityRequest(t, handler.ListEvents, "/api/v1/sandboxes/sb-1/observability/events?max_schema_version=99")
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-	if repo.lastQuery.MaxSchemaVersion != sandboxobservability.CurrentEventSchemaVersion {
-		t.Fatalf("max_schema_version = %d, want capped v3", repo.lastQuery.MaxSchemaVersion)
-	}
-	var response struct {
-		Data sandboxobservability.EventListResult `json:"data"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if response.Data.EffectiveQuery.MaxSchemaVersion != sandboxobservability.CurrentEventSchemaVersion {
-		t.Fatalf("effective max_schema_version = %d, want capped v3", response.Data.EffectiveQuery.MaxSchemaVersion)
-	}
-}
-
-func TestSandboxObservabilityHandlerRejectsInvalidExecutionScopeAttribution(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	repo := &fakeSandboxObservabilityRepo{}
-	handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
-	rec := serveSandboxObservabilityRequest(t, handler.ListEvents, "/api/v1/sandboxes/sb-1/observability/events?max_schema_version=3&execution_scope_attribution=unknown")
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
-	}
-	if repo.eventsCalled {
-		t.Fatal("repository should not be called for invalid execution scope attribution")
-	}
-}
-
-func TestSandboxObservabilityHandlerRejectsOversizedExecutionScopeFilter(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	repo := &fakeSandboxObservabilityRepo{}
-	handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
-	rec := serveSandboxObservabilityRequest(t, handler.ListEvents, "/api/v1/sandboxes/sb-1/observability/events?max_schema_version=3&execution_scope_id="+strings.Repeat("i", sandboxobservability.MaxExecutionScopeIDBytes+1))
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
-	}
-	if repo.eventsCalled {
-		t.Fatal("repository should not be called for oversized execution scope filter")
-	}
-}
-
 func TestSandboxObservabilityHandlerRejectsInvalidEventID(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -683,7 +490,6 @@ func TestSandboxObservabilityHandlerRejectsAmbiguousExactEventLookup(t *testing.
 		"event_id=" + eventID + "&start_time=2026-07-01T01:02:03Z",
 		"event_id=" + eventID + "&cursor=abc",
 		"event_id=" + eventID + "&action=sandbox.pause",
-		"event_id=" + eventID + "&max_schema_version=3&execution_scope_id=thread-1",
 		"event_id=" + eventID + "&watch=true",
 	}
 	for _, query := range tests {
@@ -726,87 +532,6 @@ func TestSandboxObservabilityHandlerWatchRejectsEndTime(t *testing.T) {
 	}
 	if repo.eventsCalled {
 		t.Fatal("repository should not be called for invalid watch query")
-	}
-}
-
-func TestSandboxObservabilityEventWatchCapabilityFrames(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	tests := []struct {
-		name               string
-		target             string
-		wantReady          bool
-		wantEffectiveQuery sandboxobservability.EventEffectiveQuery
-	}{
-		{
-			name:      "v3 scope watch acknowledges effective query",
-			target:    "/api/v1/sandboxes/sb-1/observability/events?watch=true&limit=1&execution_scope_namespace=codex&execution_scope_kind=native_session&execution_scope_id=thread-1&execution_scope_attribution=process_environment",
-			wantReady: true,
-			wantEffectiveQuery: sandboxobservability.EventEffectiveQuery{
-				MaxSchemaVersion:          sandboxobservability.CurrentEventSchemaVersion,
-				ExecutionScopeNamespace:   "codex",
-				ExecutionScopeKind:        "native_session",
-				ExecutionScopeID:          "thread-1",
-				ExecutionScopeAttribution: sandboxobservability.ExecutionScopeAttributionProcessEnvironment,
-			},
-		},
-		{
-			name:      "default v2 watch preserves legacy first frame",
-			target:    "/api/v1/sandboxes/sb-1/observability/events?watch=true&limit=1",
-			wantReady: false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			event := signedSandboxObservabilityTestEvent(
-				t,
-				ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize)),
-				"77777777-7777-4777-8777-777777777777",
-				"network.connect",
-			)
-			repo := &fakeSandboxObservabilityWatchRepo{
-				fakeSandboxObservabilityRepo: &fakeSandboxObservabilityRepo{},
-				cancel:                       cancel,
-				eventsResult: &sandboxobservability.EventListResult{
-					Events: []sandboxobservability.Event{event},
-				},
-			}
-			handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
-			router := gin.New()
-			router.GET("/api/v1/sandboxes/:id/observability/events", withTestAuth(handler.ListEvents))
-			req := httptest.NewRequest(http.MethodGet, tt.target, nil).WithContext(ctx)
-			rec := httptest.NewRecorder()
-
-			router.ServeHTTP(rec, req)
-
-			if rec.Code != http.StatusOK {
-				t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
-			}
-			decoder := json.NewDecoder(rec.Body)
-			var first sandboxObservabilityWatchLine
-			if err := decoder.Decode(&first); err != nil {
-				t.Fatalf("decode first line: %v", err)
-			}
-			if tt.wantReady {
-				if first.Type != "ready" || first.EffectiveQuery == nil {
-					t.Fatalf("first line = %#v, want ready with effective_query", first)
-				}
-				if *first.EffectiveQuery != tt.wantEffectiveQuery {
-					t.Fatalf("ready effective_query = %#v, want %#v", *first.EffectiveQuery, tt.wantEffectiveQuery)
-				}
-				if err := decoder.Decode(&first); err != nil {
-					t.Fatalf("decode event line: %v", err)
-				}
-			}
-			if first.Type != "event" {
-				t.Fatalf("first legacy/event line type = %q, want event", first.Type)
-			}
-			if repo.eventWatchCalls != 2 {
-				t.Fatalf("watch calls = %d, want 2", repo.eventWatchCalls)
-			}
-		})
 	}
 }
 
@@ -855,7 +580,7 @@ func TestSandboxObservabilityHandlerIngestEvents(t *testing.T) {
 		RegionID: "region-1", ClusterID: "cluster-1", SigningKey: key,
 		Now: func() time.Time { return time.Date(2026, 7, 1, 1, 3, 0, 0, time.UTC) },
 	}))
-	rec := serveSandboxObservabilityIngestRequest(t, "/internal/v1/sandbox-observability/events", handler.IngestEvents, `{"events":[{"event_id":"11111111-1111-4111-8111-111111111111","team_id":"team-1","sandbox_id":"sb-1","occurred_at":"2026-07-01T01:02:03Z","source":"netd","event_type":"network_audit","phase":"effect","outcome":"completed","execution_scope":{"namespace":"codex","kind":"native_session","id":"thread-1","attribution":"process_environment"},"operation_id":"99999999-9999-4999-8999-999999999999","producer":{"service":"netd"},"request":{"request_id":"spoofed","http_method":"POST","status_code":200},"attributes":{"action":"use-adapter","protocol_operations_truncated":true,"not_allowed":"drop-me"}}]}`)
+	rec := serveSandboxObservabilityIngestRequest(t, "/internal/v1/sandbox-observability/events", handler.IngestEvents, `{"events":[{"event_id":"11111111-1111-4111-8111-111111111111","team_id":"team-1","sandbox_id":"sb-1","occurred_at":"2026-07-01T01:02:03Z","source":"netd","event_type":"network_audit","phase":"effect","outcome":"completed","operation_id":"99999999-9999-4999-8999-999999999999","producer":{"service":"netd"},"request":{"request_id":"spoofed","http_method":"POST","status_code":200},"attributes":{"action":"use-adapter","protocol_operations_truncated":true,"not_allowed":"drop-me"}}]}`)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusAccepted, rec.Body.String())
@@ -866,17 +591,6 @@ func TestSandboxObservabilityHandlerIngestEvents(t *testing.T) {
 	event := repo.ingestEvents[0]
 	if event.Source != sandboxobservability.SourceNetd || event.Actor.Kind != sandboxobservability.ActorKindSandboxWorkload || event.Action != "network.connect" {
 		t.Fatalf("normalized event = %+v", event)
-	}
-	if event.SchemaVersion != sandboxobservability.CurrentEventSchemaVersion {
-		t.Fatalf("schema_version = %d, want %d", event.SchemaVersion, sandboxobservability.CurrentEventSchemaVersion)
-	}
-	if event.ExecutionScope == nil || *event.ExecutionScope != (sandboxobservability.ExecutionScope{
-		Namespace:   "codex",
-		Kind:        "native_session",
-		ID:          "thread-1",
-		Attribution: sandboxobservability.ExecutionScopeAttributionProcessEnvironment,
-	}) {
-		t.Fatalf("execution_scope = %#v", event.ExecutionScope)
 	}
 	if truncated, _ := event.Attributes["protocol_operations_truncated"].(bool); !truncated {
 		t.Fatalf("protocol_operations_truncated = %#v, want true", event.Attributes["protocol_operations_truncated"])
@@ -988,10 +702,6 @@ func TestNormalizeNetdAuditReplayKeepsStableReplacingKey(t *testing.T) {
 	if first[0].IngestedAt.Equal(second[0].IngestedAt) {
 		t.Fatalf("gateway receipt versions unexpectedly match: %s", first[0].IngestedAt)
 	}
-	if first[0].SchemaVersion != sandboxobservability.LegacyEventSchemaVersion ||
-		second[0].SchemaVersion != sandboxobservability.LegacyEventSchemaVersion {
-		t.Fatalf("unscoped replay schema versions = %d, %d; want v2", first[0].SchemaVersion, second[0].SchemaVersion)
-	}
 	if first[0].Integrity.PayloadHash != second[0].Integrity.PayloadHash {
 		t.Fatalf("payload hashes differ: %q != %q", first[0].Integrity.PayloadHash, second[0].Integrity.PayloadHash)
 	}
@@ -1010,63 +720,6 @@ func TestNormalizeNetdAuditReplayKeepsStableReplacingKey(t *testing.T) {
 	}
 	if keyFor(first[0]) != keyFor(second[0]) {
 		t.Fatalf("ReplacingMergeTree keys differ: %#v != %#v", keyFor(first[0]), keyFor(second[0]))
-	}
-}
-
-func TestNormalizeNetdAuditReplayPreservesLegacySchema(t *testing.T) {
-	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
-	handler := NewSandboxObservabilityHandler(
-		&fakeSandboxObservabilityRepo{},
-		zap.NewNop(),
-		WithAuditIntegrityPolicy(AuditIntegrityPolicy{
-			RegionID:   "region-1",
-			ClusterID:  "cluster-1",
-			SigningKey: key,
-			Now: func() time.Time {
-				return time.Date(2026, 7, 1, 1, 3, 0, 0, time.UTC)
-			},
-		}),
-	)
-	events := []sandboxobservability.Event{{
-		EventID:       "89898989-8989-4989-8989-898989898989",
-		SchemaVersion: sandboxobservability.LegacyEventSchemaVersion,
-		TeamID:        "team-1",
-		SandboxID:     "sb-1",
-		OccurredAt:    time.Date(2026, 7, 1, 1, 2, 3, 0, time.UTC),
-		EventType:     sandboxobservability.EventTypeNetworkAudit,
-		Phase:         sandboxobservability.EventPhaseResult,
-		Outcome:       sandboxobservability.OutcomeCompleted,
-		OperationID:   "99999999-9999-4999-8999-999999999999",
-		Producer: sandboxobservability.AuditProducer{
-			Instance: "node-a:boot-a",
-			Sequence: 7,
-		},
-		Attributes: map[string]any{"action": "pass-through"},
-	}}
-	ctx := internalauth.WithClaims(
-		context.Background(),
-		&internalauth.Claims{
-			Caller:    "netd",
-			TeamID:    "team-1",
-			SandboxID: "sb-1",
-		},
-	)
-
-	if err := handler.normalizeAuditEvents(ctx, events); err != nil {
-		t.Fatalf("normalizeAuditEvents() legacy error = %v", err)
-	}
-	if events[0].SchemaVersion != sandboxobservability.LegacyEventSchemaVersion {
-		t.Fatalf(
-			"schema_version = %d, want %d",
-			events[0].SchemaVersion,
-			sandboxobservability.LegacyEventSchemaVersion,
-		)
-	}
-	if err := sandboxobservability.VerifyEventIntegrity(
-		events[0],
-		key.Public().(ed25519.PublicKey),
-	); err != nil {
-		t.Fatalf("legacy replay integrity = %v", err)
 	}
 }
 
@@ -1098,27 +751,6 @@ func TestSandboxObservabilityHandlerRejectsUnscopedOrSpoofedAuditIngest(t *testi
 				t.Fatal("normalizeAuditEvents() error = nil")
 			}
 		})
-	}
-}
-
-func TestSandboxObservabilityHandlerRejectsInvalidExecutionScopeIngest(t *testing.T) {
-	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
-	handler := NewSandboxObservabilityHandler(&fakeSandboxObservabilityRepo{}, zap.NewNop(), WithAuditIntegrityPolicy(AuditIntegrityPolicy{
-		RegionID: "region-1", ClusterID: "cluster-1", SigningKey: key,
-		Now: func() time.Time { return time.Date(2026, 7, 1, 1, 3, 0, 0, time.UTC) },
-	}))
-	event := sandboxobservability.Event{
-		EventID: "11111111-1111-4111-8111-111111111111", TeamID: "team-1", SandboxID: "sb-1",
-		OccurredAt: time.Date(2026, 7, 1, 1, 2, 3, 0, time.UTC), EventType: sandboxobservability.EventTypeNetworkAudit,
-		Phase: sandboxobservability.EventPhaseEffect, Outcome: sandboxobservability.OutcomeCompleted,
-		ExecutionScope: &sandboxobservability.ExecutionScope{Namespace: "codex"},
-		OperationID:    "99999999-9999-4999-8999-999999999999",
-		Producer:       sandboxobservability.AuditProducer{Service: "netd"},
-	}
-	ctx := internalauth.WithClaims(context.Background(), &internalauth.Claims{Caller: "netd", TeamID: "team-1", SandboxID: "sb-1"})
-	err := handler.normalizeAuditEvents(ctx, []sandboxobservability.Event{event})
-	if err == nil || !strings.Contains(err.Error(), "execution_scope") {
-		t.Fatalf("normalizeAuditEvents() error = %v, want invalid execution scope", err)
 	}
 }
 

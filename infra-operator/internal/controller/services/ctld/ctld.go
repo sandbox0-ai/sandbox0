@@ -20,13 +20,11 @@ import (
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	credentialstoresvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/credentialstore"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	internalauthsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	netdsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/netd"
 	sandboxobssvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sandboxobservability"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storage"
+	storageruntimesvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storageruntime"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
@@ -70,15 +68,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	labels := common.GetServiceLabels(infra.Name, "ctld")
 	storageConfig, err := r.buildStorageConfig(ctx, infra)
 	if err != nil {
-		return err
-	}
-	if storageConfig.ObjectEncryptionEnabled {
-		if err := common.EnsureObjectEncryptionKeySecret(ctx, r.Resources, infra); err != nil {
-			return err
-		}
-		storageConfig.ObjectEncryptionKeyPath = common.ObjectEncryptionKeyPath
-	}
-	if err := credentialstoresvc.ApplyEncryptedPGCredentialStoreConfig(ctx, r.Resources, common.NewObjectScope(infra), &storageConfig.CredentialStore); err != nil {
 		return err
 	}
 	config := &apiconfig.CtldConfig{StorageProxyConfig: *storageConfig}
@@ -809,37 +798,8 @@ func (r *Reconciler) cleanupNetworkMetricsService(ctx context.Context, infra *in
 }
 
 func (r *Reconciler) buildStorageConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.StorageProxyConfig, error) {
-	cfg := &apiconfig.StorageProxyConfig{}
-	if runtimeConfig := infrav1alpha1.ResolveStorageRuntimeConfig(infra); runtimeConfig != nil {
-		cfg = runtimeconfig.ToStorageProxy(runtimeConfig)
+	if r == nil {
+		return nil, fmt.Errorf("ctld reconciler is required")
 	}
-	cfg.RegionID = common.ResolveRegionID(infra)
-	cfg.DefaultClusterId = common.ResolveClusterID(infra)
-	if infra != nil && infra.Spec.Database != nil && r != nil && r.Resources != nil && r.Resources.Client != nil {
-		if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
-			cfg.DatabaseURL = dsn
-		}
-	}
-	if infra == nil || infra.Spec.Storage == nil {
-		return cfg, nil
-	}
-	storageConfig, err := storage.GetStorageConfig(ctx, r.Resources.Client, infra)
-	if err != nil {
-		return nil, err
-	}
-	cfg.ObjectStorageType = normalizeObjectStorageType(storageConfig.Type)
-	cfg.S3Bucket = storageConfig.Bucket
-	cfg.S3Region = storageConfig.Region
-	cfg.S3Endpoint = storageConfig.Endpoint
-	cfg.S3AccessKey = storageConfig.AccessKey
-	cfg.S3SecretKey = storageConfig.SecretKey
-	cfg.S3SessionToken = storageConfig.SessionToken
-	return cfg, nil
-}
-
-func normalizeObjectStorageType(storageType infrav1alpha1.StorageType) string {
-	if storageType == infrav1alpha1.StorageTypeBuiltin {
-		return "s3"
-	}
-	return string(storageType)
+	return storageruntimesvc.BuildRuntimeConfig(ctx, r.Resources, infra)
 }

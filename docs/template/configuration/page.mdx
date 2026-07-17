@@ -15,7 +15,6 @@ spec:
     mainContainer:
         image: registry.sandbox0-system.svc.cluster.local:5000/my-ds-env:v2.0
         resources:
-            cpu: "2"
             memory: 8Gi
             ephemeralStorage: 8Gi
         env:
@@ -62,13 +61,12 @@ The main sandbox container configuration.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `image` | string | — | Container image reference. Use a public image (e.g., `python:3.12-slim`) or the `Template image reference` returned by `s0 template image push` for private images. |
-| `resources.cpu` | string | — | CPU limit for the sandbox (e.g., `"1"`, `"2"`, `"500m"`). |
-| `resources.memory` | string | — | Memory limit for the sandbox (e.g., `"2Gi"`, `"512Mi"`). |
+| `resources.memory` | string | — | Memory limit for the sandbox (e.g., `"2Gi"`, `"512Mi"`). This is the default when a claim does not provide `config.resources.memory`; Sandbox0 manages CPU from platform configuration. |
 | `resources.ephemeralStorage` | string | `8Gi` | Writable-layer and container-log storage for the sandbox runtime. Checkpointed pause/resume saves and restores the writable root filesystem, but this quota still bounds writes to `/tmp` or image-local paths. Use rootfs snapshots and claim-time `snapshot_id` to version initialized sandbox files, and use Sandbox Volumes for sharing or long-lived durable data independent of sandbox identity. |
 | `env` | array | `[]` | Per-container environment variables. Each entry has `name` and `value`. |
 
 <Callout variant="info">
-`mainContainer.image`, `mainContainer.resources.cpu`, `mainContainer.resources.memory`, and `mainContainer.resources.ephemeralStorage` are strictly validated by the API when creating or updating templates. Template resources are the default for claimed sandboxes, with an effective minimum CPU limit of `150m`; warm-pool idle pods may run with lower internal CPU and memory until claim. `config.resources.memory` can override the sandbox memory limit at claim time or runtime.
+Set only `mainContainer.resources.memory`; CPU is platform-managed and is not part of the template API. The memory value becomes the default for claimed sandboxes, while `config.resources.memory` can override it at claim time or runtime. Warm-pool pods wait with a `128Mi` memory limit to reduce idle cost, then resize to the template default when claimed.
 </Callout>
 
 ---

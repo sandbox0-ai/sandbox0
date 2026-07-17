@@ -24,7 +24,6 @@ spec:
     mainContainer:
         image: python:3.12-slim
         resources:
-            cpu: "0.5"
             memory: 2Gi
     pool:
         minIdle: 2
@@ -116,7 +115,6 @@ spec:
     mainContainer:
         image: registry.sandbox0-system.svc.cluster.local:5000/t-<team-key>/my-app:v1.2.3
         resources:
-            cpu: "2"
             memory: 8Gi
     pool:
         minIdle: 2
@@ -149,7 +147,6 @@ spec:
     mainContainer:
         image: registry.sandbox0-system.svc.cluster.local:5000/t-<team-key>/my-app:v1.2.3
         resources:
-            cpu: "2"
             memory: 8Gi
     pool:
         minIdle: 2

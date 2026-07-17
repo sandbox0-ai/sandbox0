@@ -34,16 +34,6 @@ func TestMemoryPerCPUOrDefault(t *testing.T) {
 	}
 }
 
-func TestMemoryForCPU(t *testing.T) {
-	t.Parallel()
-
-	got := MemoryForCPU(resource.MustParse("500m"), resource.MustParse("4Gi"))
-	want := resource.MustParse("2Gi")
-	if got.Cmp(want) != 0 {
-		t.Fatalf("MemoryForCPU = %s, want %s", got.String(), want.String())
-	}
-}
-
 func TestCPUForMemory(t *testing.T) {
 	t.Parallel()
 
@@ -85,12 +75,19 @@ func TestValidateResourceRatio(t *testing.T) {
 		t.Fatalf("expected ratio to pass, got %v", err)
 	}
 
+	spec.MainContainer.Resources.CPU = resource.MustParse("32m")
+	spec.MainContainer.Resources.Memory = resource.MustParse("129Mi")
+	if err := ValidateResourceRatio(spec, resource.MustParse("4Gi"), "rounded template"); err != nil {
+		t.Fatalf("expected rounded memory-derived cpu to pass, got %v", err)
+	}
+
+	spec.MainContainer.Resources.CPU = resource.MustParse("1")
 	spec.MainContainer.Resources.Memory = resource.MustParse("1Gi")
 	err := ValidateResourceRatio(spec, resource.MustParse("4Gi"), "builtin template default")
 	if err == nil {
 		t.Fatal("expected ratio validation to fail")
 	}
-	if got := err.Error(); !strings.Contains(got, "builtin template default total memory must equal total cpu * 4Gi") {
+	if got := err.Error(); !strings.Contains(got, "builtin template default total cpu must match the value derived from memory") {
 		t.Fatalf("unexpected error %q", got)
 	}
 }

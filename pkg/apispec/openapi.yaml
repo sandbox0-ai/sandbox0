@@ -7093,13 +7093,13 @@ components:
     ResourceQuota:
       type: object
       properties:
-        cpu:
-          type: string
         memory:
           type: string
+          description: Memory limit used by default when a sandbox claim does not provide a memory override. Sandbox0 derives the internal CPU limit from platform configuration.
         ephemeralStorage:
           type: string
           description: Ephemeral storage limit for the sandbox writable layer and container logs. Defaults to 8Gi when omitted.
+      required: [memory]
     SecurityContext:
       type: object
       properties:

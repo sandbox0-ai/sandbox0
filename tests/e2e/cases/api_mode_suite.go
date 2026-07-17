@@ -744,8 +744,7 @@ func assertTemplatePoolReadinessGate(env *framework.ScenarioEnv, session *e2euti
 	Expect(templateReq.Spec.Pool).NotTo(BeNil())
 	Expect(templateReq.Spec.MainContainer).NotTo(BeNil())
 	templateReq.Spec.MainContainer.Resources = apispec.ResourceQuota{
-		Cpu:    ptr("500m"),
-		Memory: ptr("2Gi"),
+		Memory: "2Gi",
 	}
 	templateReq.Spec.Pool.MinIdle = 1
 	templateReq.Spec.Pool.MaxIdle = 1
@@ -822,8 +821,7 @@ func assertTemplateRolloutClaimFallsBackToColdStart(env *framework.ScenarioEnv, 
 	Expect(templateReq.Spec.Pool).NotTo(BeNil())
 	Expect(templateReq.Spec.MainContainer).NotTo(BeNil())
 	templateReq.Spec.MainContainer.Resources = apispec.ResourceQuota{
-		Cpu:    ptr("500m"),
-		Memory: ptr("2Gi"),
+		Memory: "2Gi",
 	}
 	templateReq.Spec.Pool.MinIdle = 1
 	templateReq.Spec.Pool.MaxIdle = 1

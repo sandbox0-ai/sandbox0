@@ -122,7 +122,6 @@ spec:
     mainContainer:
         image: registry.sandbox0-system.svc.cluster.local:5000/t-<team-key>/my-app:${GITHUB_SHA}
         resources:
-            cpu: "2"
             memory: 8Gi
     pool:
         minIdle: 1

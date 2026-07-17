@@ -108,7 +108,7 @@ func TestCreateTemplate_RejectsPrivilegedFieldsForRegularTeam(t *testing.T) {
 	body := []byte(`{
 		"template_id":"demo",
 		"spec":{
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"memory":"4Gi"}},
 			"pool":{"minIdle":0,"maxIdle":1},
 			"pod":{"serviceAccountName":"custom-sa"}
 		}
@@ -145,7 +145,7 @@ func TestCreateTemplate_RejectsImagePullPolicyForRegularTeam(t *testing.T) {
 			"mainContainer":{
 				"image":"ubuntu:22.04",
 				"imagePullPolicy":"Always",
-				"resources":{"cpu":"1","memory":"4Gi"}
+				"resources":{"memory":"4Gi"}
 			},
 			"pool":{"minIdle":0,"maxIdle":1}
 		}
@@ -183,7 +183,7 @@ func TestCreateTemplate_RejectsPrivateImageFromDifferentTeam(t *testing.T) {
 	body := []byte(`{
 		"template_id":"demo",
 		"spec":{
-			"mainContainer":{"image":"registry.internal.svc:5000/t-other/my-app:v1","resources":{"cpu":"1","memory":"4Gi"}},
+			"mainContainer":{"image":"registry.internal.svc:5000/t-other/my-app:v1","resources":{"memory":"4Gi"}},
 			"pool":{"minIdle":0,"maxIdle":1}
 		}
 	}`)
@@ -225,7 +225,7 @@ func TestCreateTemplate_AllowsTeamScopedPrivateImage(t *testing.T) {
 	body := []byte(`{
 		"template_id":"demo",
 		"spec":{
-			"mainContainer":{"image":"registry.internal.svc:5000/` + prefix + `/my-app:v1","resources":{"cpu":"1","memory":"4Gi"}},
+			"mainContainer":{"image":"registry.internal.svc:5000/` + prefix + `/my-app:v1","resources":{"memory":"4Gi"}},
 			"pool":{"minIdle":0,"maxIdle":1}
 		}
 	}`)
@@ -262,7 +262,7 @@ func TestCreateTemplate_AllowsNetworkForRegularTeam(t *testing.T) {
 	body := []byte(`{
 		"template_id":"demo",
 		"spec":{
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"memory":"4Gi"}},
 			"pool":{"minIdle":0,"maxIdle":1},
 			"network":{"mode":"block-all"}
 		}
@@ -300,7 +300,7 @@ func TestCreateTemplate_PreservesEphemeralStorage(t *testing.T) {
 	body := []byte(`{
 		"template_id":"demo",
 		"spec":{
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi","ephemeralStorage":"768Mi"}},
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"memory":"4Gi","ephemeralStorage":"768Mi"}},
 			"pool":{"minIdle":0,"maxIdle":1}
 		}
 	}`)
@@ -318,6 +318,110 @@ func TestCreateTemplate_PreservesEphemeralStorage(t *testing.T) {
 	got := store.createdOrUpdatedSpec.MainContainer.Resources.EphemeralStorage
 	if got.Cmp(resource.MustParse("768Mi")) != 0 {
 		t.Fatalf("ephemeralStorage = %s, want 768Mi", got.String())
+	}
+}
+
+func TestCreateTemplate_DerivesCPUWhenOmitted(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{
+		getTemplateFn: func(context.Context, string, string, string) (*template.Template, error) {
+			return nil, nil
+		},
+	}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	router.POST("/api/v1/templates", h.CreateTemplate)
+
+	body := []byte(`{
+		"template_id":"demo",
+		"spec":{
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"memory":"129Mi"}},
+			"pool":{"minIdle":0,"maxIdle":1}
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
+	}
+	if !store.createCalled {
+		t.Fatal("expected create to be called")
+	}
+	got := store.createdOrUpdatedSpec.MainContainer.Resources.CPU
+	if got.Cmp(resource.MustParse("32m")) != 0 {
+		t.Fatalf("cpu = %s, want 32m", got.String())
+	}
+	assertTemplateResponseOmitsCPU(t, rec.Body.Bytes())
+}
+
+func TestDeriveTemplateCPUUsesConfiguredMemoryPerCPU(t *testing.T) {
+	t.Parallel()
+
+	raw := json.RawMessage(`{
+		"mainContainer":{"image":"ubuntu:22.04","resources":{"memory":"2Gi"}},
+		"pool":{"minIdle":0,"maxIdle":1}
+	}`)
+	spec, err := decodeTemplateRequestSpec(raw)
+	if err != nil {
+		t.Fatalf("decodeTemplateRequestSpec() error = %v", err)
+	}
+	deriveTemplateCPU(&spec, resource.MustParse("8Gi"))
+	got := spec.MainContainer.Resources.CPU
+	if got.Cmp(resource.MustParse("250m")) != 0 {
+		t.Fatalf("cpu = %s, want 250m", got.String())
+	}
+}
+
+func TestCreateTemplate_RejectsExplicitCPU(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	router.POST("/api/v1/templates", h.CreateTemplate)
+
+	body := []byte(`{
+		"template_id":"demo",
+		"spec":{
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"2Gi"}},
+			"pool":{"minIdle":0,"maxIdle":1}
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Error.Message != "spec.mainContainer.resources.cpu is not supported; set memory only" {
+		t.Fatalf("error message = %q, want unsupported cpu error", response.Error.Message)
+	}
+	if store.createCalled {
+		t.Fatal("expected create not called for invalid request")
 	}
 }
 
@@ -344,7 +448,7 @@ func TestCreateTemplate_AllowsPrivilegedFieldForSystemToken(t *testing.T) {
 		"spec":{
 			"mainContainer":{
 				"image":"ubuntu:22.04",
-				"resources":{"cpu":"1","memory":"4Gi"},
+				"resources":{"memory":"4Gi"},
 				"securityContext":{"runAsUser":1000}
 			},
 			"pool":{"minIdle":0,"maxIdle":1}
@@ -386,7 +490,7 @@ func TestCreateTemplate_SystemWithoutTeamCreatesPublicTemplate(t *testing.T) {
 	body := []byte(`{
 		"template_id":"demo",
 		"spec":{
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"memory":"4Gi"}},
 			"pool":{"minIdle":0,"maxIdle":1}
 		}
 	}`)
@@ -600,7 +704,7 @@ func TestCreateTemplate_RejectsMissingMainContainerImage(t *testing.T) {
 	body := []byte(`{
 		"template_id":"demo",
 		"spec":{
-			"mainContainer":{"resources":{"cpu":"1","memory":"4Gi"}},
+			"mainContainer":{"resources":{"memory":"4Gi"}},
 			"pool":{"minIdle":0,"maxIdle":1}
 		}
 	}`)
@@ -647,7 +751,7 @@ func TestCreateTemplate_RejectsUnsupportedDocumentedSpecFields(t *testing.T) {
 			body := []byte(`{
 				"template_id":"demo",
 				"spec":{
-					"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
+					"mainContainer":{"image":"ubuntu:22.04","resources":{"memory":"4Gi"}},
 					"pool":{"minIdle":0,"maxIdle":1},
 					` + fieldJSON + `
 				}
@@ -668,6 +772,52 @@ func TestCreateTemplate_RejectsUnsupportedDocumentedSpecFields(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestUpdateTemplate_DerivesCPUWhenOmitted(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{
+		getTemplateFn: func(context.Context, string, string, string) (*template.Template, error) {
+			return &template.Template{
+				TemplateID: "demo",
+				Scope:      "team",
+				TeamID:     "team-1",
+				Spec:       validTemplateSpec(),
+			}, nil
+		},
+	}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	router.PUT("/api/v1/templates/:id", h.UpdateTemplate)
+
+	body := []byte(`{
+		"spec":{
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"memory":"8Gi"}},
+			"pool":{"minIdle":0,"maxIdle":1}
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/demo", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	if !store.updateCalled {
+		t.Fatal("expected update to be called")
+	}
+	got := store.createdOrUpdatedSpec.MainContainer.Resources.CPU
+	if got.Cmp(resource.MustParse("2")) != 0 {
+		t.Fatalf("cpu = %s, want 2", got.String())
+	}
+	assertTemplateResponseOmitsCPU(t, rec.Body.Bytes())
 }
 
 func TestUpdateTemplate_RejectsInvalidPoolRange(t *testing.T) {
@@ -703,7 +853,7 @@ func TestUpdateTemplate_RejectsInvalidPoolRange(t *testing.T) {
 
 	body := []byte(`{
 		"spec":{
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"memory":"4Gi"}},
 			"pool":{"minIdle":2,"maxIdle":1}
 		}
 	}`)
@@ -739,7 +889,7 @@ func TestUpdateTemplate_RejectsUnsupportedDocumentedSpecFields(t *testing.T) {
 
 	body := []byte(`{
 		"spec":{
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"memory":"4Gi"}},
 			"pool":{"minIdle":0,"maxIdle":1},
 			"allowedTeams":["team-1"]
 		}
@@ -782,7 +932,7 @@ func TestUpdateTemplate_SystemWithoutTeamUpdatesPublicTemplate(t *testing.T) {
 
 	body := []byte(`{
 		"spec":{
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"memory":"4Gi"}},
 			"pool":{"minIdle":0,"maxIdle":1}
 		}
 	}`)
@@ -838,7 +988,7 @@ func TestUpdateTemplate_RejectsImagePullPolicyForRegularTeam(t *testing.T) {
 			"mainContainer":{
 				"image":"ubuntu:22.04",
 				"imagePullPolicy":"Always",
-				"resources":{"cpu":"1","memory":"4Gi"}
+				"resources":{"memory":"4Gi"}
 			},
 			"pool":{"minIdle":0,"maxIdle":1}
 		}
@@ -871,7 +1021,7 @@ func TestCreateTemplate_RejectsUnclaimableNameBudget(t *testing.T) {
 		"template_id":"demo",
 		"spec":{
 			"clusterId":"` + clusterID + `",
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"memory":"4Gi"}},
 			"pool":{"minIdle":0,"maxIdle":1}
 		}
 	}`)
@@ -962,11 +1112,11 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name: "reject missing cpu",
+			name: "reject missing derived cpu",
 			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
 				s.MainContainer.Resources.CPU = resource.MustParse("0")
 			},
-			wantErr: "spec.mainContainer.resources.cpu must be > 0",
+			wantErr: "derived spec.mainContainer.resources.cpu must be > 0",
 		},
 		{
 			name: "reject negative ephemeral storage",
@@ -1250,7 +1400,7 @@ func TestValidateTemplateSpecForClaims_RejectsMismatchedMainResources(t *testing
 	if err == nil {
 		t.Fatal("expected aggregate resource ratio to be rejected")
 	}
-	if got := err.Error(); !strings.Contains(got, "team-owned template total memory must equal total cpu") {
+	if got := err.Error(); !strings.Contains(got, "team-owned template total cpu must match the value derived from memory") {
 		t.Fatalf("unexpected error %q", got)
 	}
 }
@@ -1274,7 +1424,7 @@ func TestValidateTemplateSpecForClaims_RejectsSystemOwnedMismatchedMainResources
 	if err == nil {
 		t.Fatal("expected system token to reject resource ratio mismatch")
 	}
-	if got := err.Error(); !strings.Contains(got, "system template total memory must equal total cpu") {
+	if got := err.Error(); !strings.Contains(got, "system template total cpu must match the value derived from memory") {
 		t.Fatalf("unexpected error %q", got)
 	}
 }
@@ -1401,6 +1551,25 @@ func assertSystemOnlyFieldsStripped(t *testing.T, spec v1alpha1.SandboxTemplateS
 	}
 	if spec.ClusterId != nil {
 		t.Fatalf("clusterId = %#v, want nil", spec.ClusterId)
+	}
+}
+
+func assertTemplateResponseOmitsCPU(t *testing.T, body []byte) {
+	t.Helper()
+	var response struct {
+		Data struct {
+			Spec struct {
+				MainContainer struct {
+					Resources map[string]json.RawMessage `json:"resources"`
+				} `json:"mainContainer"`
+			} `json:"spec"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		t.Fatalf("decode template response: %v", err)
+	}
+	if _, ok := response.Data.Spec.MainContainer.Resources["cpu"]; ok {
+		t.Fatalf("template response exposes platform-derived cpu: %s", body)
 	}
 }
 

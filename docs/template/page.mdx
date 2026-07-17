@@ -71,7 +71,6 @@ spec:
     mainContainer:
         image: python:3.12-slim
         resources:
-            cpu: "1"
             memory: 4Gi
             ephemeralStorage: 8Gi
     pool:
@@ -90,7 +89,6 @@ spec:
         MainContainer: apispec.NewOptContainerSpec(apispec.ContainerSpec{
             Image: "python:3.12-slim",
             Resources: apispec.ResourceQuota{
-                CPU:              apispec.NewOptString("1"),
                 Memory:           apispec.NewOptString("4Gi"),
                 EphemeralStorage: apispec.NewOptString("8Gi"),
             },
@@ -117,7 +115,7 @@ tpl = client.create_template(TemplateCreateRequest(
     spec=SandboxTemplateSpec.from_dict({
         "mainContainer": {
             "image": "python:3.12-slim",
-            "resources": {"cpu": "1", "memory": "4Gi", "ephemeralStorage": "8Gi"},
+            "resources": {"memory": "4Gi", "ephemeralStorage": "8Gi"},
         },
         "pool": {"minIdle": 2, "maxIdle": 10},
     }),
@@ -132,7 +130,7 @@ print(f"Template created: {tpl.template_id}")`
     spec: {
         mainContainer: {
             image: "python:3.12-slim",
-            resources: { cpu: "1", memory: "4Gi", ephemeralStorage: "8Gi" },
+            resources: { memory: "4Gi", ephemeralStorage: "8Gi" },
         },
         pool: { minIdle: 2, maxIdle: 10 },
     },
@@ -260,7 +258,6 @@ Updating a template does not affect already-running Sandboxes. New Sandboxes cla
         MainContainer: apispec.NewOptContainerSpec(apispec.ContainerSpec{
             Image: "python:3.12-slim",
             Resources: apispec.ResourceQuota{
-                CPU:              apispec.NewOptString("2"),
                 Memory:           apispec.NewOptString("8Gi"),
                 EphemeralStorage: apispec.NewOptString("8Gi"),
             },
@@ -288,7 +285,7 @@ tpl = client.update_template(
         spec=SandboxTemplateSpec.from_dict({
             "mainContainer": {
                 "image": "python:3.12-slim",
-                "resources": {"cpu": "2", "memory": "8Gi", "ephemeralStorage": "8Gi"},
+                "resources": {"memory": "8Gi", "ephemeralStorage": "8Gi"},
             },
             "pool": {"minIdle": 3, "maxIdle": 10},
         }),
@@ -303,7 +300,7 @@ print(f"Template updated: {tpl.template_id}")`
     spec: {
         mainContainer: {
             image: "python:3.12-slim",
-            resources: { cpu: "2", memory: "8Gi", ephemeralStorage: "8Gi" },
+            resources: { memory: "8Gi", ephemeralStorage: "8Gi" },
         },
         pool: { minIdle: 3, maxIdle: 10 },
     },

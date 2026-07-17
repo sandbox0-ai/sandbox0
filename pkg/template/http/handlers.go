@@ -10,12 +10,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	"github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"go.uber.org/zap"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // ClusterStore provides cluster lookup for delete warnings.
@@ -82,9 +84,15 @@ func (h *Handler) ListTemplates(c *gin.Context) {
 		return
 	}
 	h.enrichTemplatesStatus(c.Request.Context(), templates)
+	responseTemplates, err := templatesForResponse(templates, claims)
+	if err != nil {
+		h.Logger.Error("Failed to project template response", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to list templates")
+		return
+	}
 
 	spec.JSONSuccess(c, http.StatusOK, gin.H{
-		"templates": templatesForResponse(templates, claims),
+		"templates": responseTemplates,
 		"count":     len(templates),
 	})
 }
@@ -132,7 +140,13 @@ func (h *Handler) GetTemplate(c *gin.Context) {
 	}
 	h.enrichTemplatesStatus(c.Request.Context(), []*template.Template{tpl})
 
-	spec.JSONSuccess(c, http.StatusOK, templateForResponse(tpl, claims))
+	responseTemplate, err := templateForResponse(tpl, claims)
+	if err != nil {
+		h.Logger.Error("Failed to project template response", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get template")
+		return
+	}
+	spec.JSONSuccess(c, http.StatusOK, responseTemplate)
 }
 
 func (h *Handler) enrichTemplatesStatus(ctx context.Context, templates []*template.Template) {
@@ -188,17 +202,23 @@ func templateStatKey(namespace, templateID string) string {
 	return namespace + "\x00" + templateID
 }
 
-func templatesForResponse(templates []*template.Template, claims *internalauth.Claims) []*template.Template {
-	out := make([]*template.Template, 0, len(templates))
+func templatesForResponse(templates []*template.Template, claims *internalauth.Claims) ([]*apispec.Template, error) {
+	out := make([]*apispec.Template, 0, len(templates))
 	for _, tpl := range templates {
-		out = append(out, templateForResponse(tpl, claims))
+		projected, err := templateForResponse(tpl, claims)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, projected)
 	}
-	return out
+	return out, nil
 }
 
-func templateForResponse(tpl *template.Template, claims *internalauth.Claims) *template.Template {
+// templateForResponse projects the internal template model through the generated
+// public API type so internal fields such as the platform-derived CPU are omitted.
+func templateForResponse(tpl *template.Template, claims *internalauth.Claims) (*apispec.Template, error) {
 	if tpl == nil {
-		return nil
+		return nil, nil
 	}
 	out := *tpl
 	out.Spec = *tpl.Spec.DeepCopy()
@@ -211,7 +231,15 @@ func templateForResponse(tpl *template.Template, claims *internalauth.Claims) *t
 		out.Spec.MainContainer.ImagePullPolicy = ""
 		out.Spec.ClusterId = nil
 	}
-	return &out
+	raw, err := json.Marshal(&out)
+	if err != nil {
+		return nil, fmt.Errorf("marshal internal template: %w", err)
+	}
+	var projected apispec.Template
+	if err := json.Unmarshal(raw, &projected); err != nil {
+		return nil, fmt.Errorf("decode public template: %w", err)
+	}
+	return &projected, nil
 }
 
 func templateScopeForClaims(claims *internalauth.Claims) (string, string, error) {
@@ -241,6 +269,17 @@ func decodeTemplateRequestSpec(raw json.RawMessage) (v1alpha1.SandboxTemplateSpe
 	return out, nil
 }
 
+// deriveTemplateCPU materializes the platform-managed CPU before persistence.
+func deriveTemplateCPU(spec *v1alpha1.SandboxTemplateSpec, memoryPerCPU resource.Quantity) {
+	if spec == nil || spec.MainContainer.Resources.Memory.Sign() <= 0 {
+		return
+	}
+	spec.MainContainer.Resources.CPU = template.CPUForMemory(
+		spec.MainContainer.Resources.Memory,
+		memoryPerCPU,
+	)
+}
+
 func rejectUnsupportedTemplateSpecFields(raw json.RawMessage) error {
 	if strings.TrimSpace(string(raw)) == "null" {
 		return nil
@@ -252,6 +291,19 @@ func rejectUnsupportedTemplateSpecFields(raw json.RawMessage) error {
 	for _, field := range []string{"lifecycle", "public", "allowedTeams"} {
 		if _, ok := fields[field]; ok {
 			return fmt.Errorf("spec.%s is not supported", field)
+		}
+	}
+	var mainContainerFields map[string]json.RawMessage
+	if err := json.Unmarshal(fields["mainContainer"], &mainContainerFields); err != nil {
+		return nil
+	}
+	var resourceFields map[string]json.RawMessage
+	if err := json.Unmarshal(mainContainerFields["resources"], &resourceFields); err != nil {
+		return nil
+	}
+	for field := range resourceFields {
+		if strings.EqualFold(field, "cpu") {
+			return fmt.Errorf("spec.mainContainer.resources.cpu is not supported; set memory only")
 		}
 	}
 	return nil
@@ -291,11 +343,13 @@ func (h *Handler) CreateTemplate(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
+	memoryPerCPU := configuredTemplateMemoryPerCPU()
+	deriveTemplateCPU(&templateSpec, memoryPerCPU)
 	if err := validateTemplateSpec(templateSpec); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
-	if err := validateTemplateSpecForClaims(templateSpec, claims); err != nil {
+	if err := validateTemplateSpecForClaimsWithMemoryPerCPU(templateSpec, claims, memoryPerCPU); err != nil {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, err.Error())
 		return
 	}
@@ -344,11 +398,16 @@ func (h *Handler) CreateTemplate(c *gin.Context) {
 	h.triggerReconcile()
 
 	created, _ := h.Store.GetTemplate(c.Request.Context(), scope, teamID, templateID)
-	if created != nil {
-		spec.JSONSuccess(c, http.StatusCreated, created)
-	} else {
-		spec.JSONSuccess(c, http.StatusCreated, tpl)
+	if created == nil {
+		created = tpl
 	}
+	responseTemplate, err := templateForResponse(created, claims)
+	if err != nil {
+		h.Logger.Error("Failed to project template response", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create template")
+		return
+	}
+	spec.JSONSuccess(c, http.StatusCreated, responseTemplate)
 }
 
 // UpdateTemplate updates an existing template.
@@ -385,11 +444,13 @@ func (h *Handler) UpdateTemplate(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
+	memoryPerCPU := configuredTemplateMemoryPerCPU()
+	deriveTemplateCPU(&templateSpec, memoryPerCPU)
 	if err := validateTemplateSpec(templateSpec); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
-	if err := validateTemplateSpecForClaims(templateSpec, claims); err != nil {
+	if err := validateTemplateSpecForClaimsWithMemoryPerCPU(templateSpec, claims, memoryPerCPU); err != nil {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, err.Error())
 		return
 	}
@@ -436,11 +497,16 @@ func (h *Handler) UpdateTemplate(c *gin.Context) {
 	h.triggerReconcile()
 
 	updated, _ := h.Store.GetTemplate(c.Request.Context(), scope, teamID, templateID)
-	if updated != nil {
-		spec.JSONSuccess(c, http.StatusOK, updated)
-	} else {
-		spec.JSONSuccess(c, http.StatusOK, tpl)
+	if updated == nil {
+		updated = tpl
 	}
+	responseTemplate, err := templateForResponse(updated, claims)
+	if err != nil {
+		h.Logger.Error("Failed to project template response", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to update template")
+		return
+	}
+	spec.JSONSuccess(c, http.StatusOK, responseTemplate)
 }
 
 // DeleteTemplate deletes a template.

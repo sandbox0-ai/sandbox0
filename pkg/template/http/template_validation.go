@@ -16,6 +16,14 @@ import (
 )
 
 func validateTemplateSpecForClaims(spec v1alpha1.SandboxTemplateSpec, claims *internalauth.Claims) error {
+	return validateTemplateSpecForClaimsWithMemoryPerCPU(spec, claims, configuredTemplateMemoryPerCPU())
+}
+
+func validateTemplateSpecForClaimsWithMemoryPerCPU(
+	spec v1alpha1.SandboxTemplateSpec,
+	claims *internalauth.Claims,
+	memoryPerCPU resource.Quantity,
+) error {
 	isSystem := claims != nil && claims.IsSystemToken()
 	if !isSystem {
 		if spec.Pod != nil {
@@ -36,7 +44,7 @@ func validateTemplateSpecForClaims(spec v1alpha1.SandboxTemplateSpec, claims *in
 	if isSystem {
 		subject = "system template"
 	}
-	if err := validateTemplateResourceRatio(spec, subject); err != nil {
+	if err := s0template.ValidateResourceRatio(spec, memoryPerCPU, subject); err != nil {
 		return err
 	}
 	return nil
@@ -63,11 +71,11 @@ func validateTemplateSpec(spec v1alpha1.SandboxTemplateSpec) error {
 	if strings.TrimSpace(spec.MainContainer.Image) == "" {
 		return fmt.Errorf("spec.mainContainer.image is required")
 	}
-	if spec.MainContainer.Resources.CPU.Sign() <= 0 {
-		return fmt.Errorf("spec.mainContainer.resources.cpu must be > 0")
-	}
 	if spec.MainContainer.Resources.Memory.Sign() <= 0 {
 		return fmt.Errorf("spec.mainContainer.resources.memory must be > 0")
+	}
+	if spec.MainContainer.Resources.CPU.Sign() <= 0 {
+		return fmt.Errorf("derived spec.mainContainer.resources.cpu must be > 0")
 	}
 	if spec.MainContainer.Resources.EphemeralStorage.Sign() < 0 {
 		return fmt.Errorf("spec.mainContainer.resources.ephemeralStorage must be >= 0")
@@ -275,10 +283,6 @@ func validateReservedMountPath(path, field string) error {
 		}
 	}
 	return nil
-}
-
-func validateTemplateResourceRatio(spec v1alpha1.SandboxTemplateSpec, subject string) error {
-	return s0template.ValidateResourceRatio(spec, configuredTemplateMemoryPerCPU(), subject)
 }
 
 func configuredTemplateMemoryPerCPU() resource.Quantity {

@@ -357,7 +357,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def run_command(args: list[str], *, check: bool = True) -> str:
-    completed = subprocess.run(args, check=check, text=True, capture_output=True)
+    completed = subprocess.run(args, check=False, text=True, capture_output=True)
+    if check and completed.returncode != 0:
+        raise RuntimeError(
+            f"command failed with exit code {completed.returncode}: {args!r}\n"
+            f"stdout:\n{completed.stdout}\n"
+            f"stderr:\n{completed.stderr}"
+        )
     return completed.stdout.strip()
 
 

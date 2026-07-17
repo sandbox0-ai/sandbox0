@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -786,6 +788,133 @@ func TestLocalSessionRestoresOpenUnlinkedS0FSHandle(t *testing.T) {
 	if _, err := secondEngine.GetAttr(created.Inode); !errors.Is(err, s0fs.ErrNotFound) {
 		t.Fatalf("GetAttr(released unlinked inode) error = %v, want ErrNotFound", err)
 	}
+}
+
+func TestLocalSessionRestoresOpenUnlinkedS0FSHandleAfterProcessKill(t *testing.T) {
+	dir := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestLocalSessionS0FSProcessKillHelper$")
+	cmd.Env = append(os.Environ(), "S0FS_PROCESS_KILL_DIR="+dir)
+	output, err := cmd.CombinedOutput()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("process-kill helper error = %v, want signal exit\n%s", err, output)
+	}
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+		t.Fatalf("process-kill helper status = %v, want SIGKILL\n%s", exitErr.Sys(), output)
+	}
+
+	statePath := filepath.Join(dir, "handles.json")
+	handleState, err := loadS0FSHandleState(statePath, "vol-1")
+	if err != nil {
+		t.Fatalf("loadS0FSHandleState() error = %v", err)
+	}
+	if len(handleState.FileHandles) != 2 || len(handleState.UnlinkedFiles) != 1 {
+		t.Fatalf("recovered handle state = %#v, want two handles for one open-unlinked file", handleState)
+	}
+	handleIDs := make([]uint64, 0, len(handleState.FileHandles))
+	var inode uint64
+	for handleID, handleInode := range handleState.FileHandles {
+		if inode != 0 && inode != handleInode {
+			t.Fatalf("recovered handles reference different inodes: %#v", handleState.FileHandles)
+		}
+		inode = handleInode
+		handleIDs = append(handleIDs, handleID)
+	}
+	sort.Slice(handleIDs, func(i, j int) bool { return handleIDs[i] < handleIDs[j] })
+
+	engine, err := s0fs.Open(context.Background(), s0fs.Config{
+		VolumeID:       "vol-1",
+		WALPath:        filepath.Join(dir, "engine.wal"),
+		RetainUnlinked: true,
+	})
+	if err != nil {
+		t.Fatalf("Open(recovered) error = %v", err)
+	}
+	defer engine.Close()
+	volCtx := &volume.VolumeContext{
+		VolumeID: "vol-1", TeamID: "team-a", Backend: volume.BackendS0FS,
+		S0FS: engine, Access: volume.AccessModeRWO, RootInode: 1, RootPath: "/", CacheDir: dir,
+	}
+	volCtx.RestoreHandleState(handleState)
+	engine.PruneUnlinked(retainedUnlinkedInodes(handleState))
+	mgr := newLocalVolumeManager()
+	mgr.add(volCtx)
+	session := newLocalSession("vol-1", mgr, nil)
+	session.statePath = statePath
+
+	read, err := session.Read(context.Background(), &pb.ReadRequest{
+		Inode: inode, HandleId: handleIDs[0], Size: 64,
+	})
+	if err != nil {
+		t.Fatalf("Read(recovered handle) error = %v", err)
+	}
+	if string(read.Data) != "survives" {
+		t.Fatalf("Read(recovered handle) = %q, want survives", read.Data)
+	}
+	if _, err := session.Release(context.Background(), &pb.ReleaseRequest{
+		Inode: inode, HandleId: handleIDs[0],
+	}); err != nil {
+		t.Fatalf("Release(first recovered handle) error = %v", err)
+	}
+	if _, err := engine.GetAttr(inode); err != nil {
+		t.Fatalf("GetAttr(after first release) error = %v, want retained inode", err)
+	}
+	if _, err := session.Release(context.Background(), &pb.ReleaseRequest{
+		Inode: inode, HandleId: handleIDs[1],
+	}); err != nil {
+		t.Fatalf("Release(final recovered handle) error = %v", err)
+	}
+	if _, err := engine.GetAttr(inode); !errors.Is(err, s0fs.ErrNotFound) {
+		t.Fatalf("GetAttr(released unlinked inode) error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestLocalSessionS0FSProcessKillHelper(t *testing.T) {
+	dir := os.Getenv("S0FS_PROCESS_KILL_DIR")
+	if dir == "" {
+		t.Skip("process-kill helper")
+	}
+	engine, err := s0fs.Open(context.Background(), s0fs.Config{
+		VolumeID:       "vol-1",
+		WALPath:        filepath.Join(dir, "engine.wal"),
+		RetainUnlinked: true,
+	})
+	if err != nil {
+		t.Fatalf("Open(primary) error = %v", err)
+	}
+	mgr := newLocalVolumeManager()
+	mgr.add(&volume.VolumeContext{
+		VolumeID: "vol-1", TeamID: "team-a", Backend: volume.BackendS0FS,
+		S0FS: engine, Access: volume.AccessModeRWO, RootInode: 1, RootPath: "/", CacheDir: dir,
+	})
+	session := newLocalSession("vol-1", mgr, nil)
+	session.statePath = filepath.Join(dir, "handles.json")
+	created, err := session.Create(context.Background(), &pb.CreateRequest{
+		Parent: s0fs.RootInode, Name: "transient.txt", Mode: 0o644,
+	})
+	if err != nil {
+		t.Fatalf("Create(transient.txt) error = %v", err)
+	}
+	if _, err := session.Write(context.Background(), &pb.WriteRequest{
+		Inode: created.Inode, HandleId: created.HandleId, Data: []byte("survives"),
+	}); err != nil {
+		t.Fatalf("Write(transient.txt) error = %v", err)
+	}
+	if _, err := session.Open(context.Background(), &pb.OpenRequest{
+		Inode: created.Inode, Flags: syscall.O_RDONLY,
+	}); err != nil {
+		t.Fatalf("Open(second handle) error = %v", err)
+	}
+	if _, err := session.Unlink(context.Background(), &pb.UnlinkRequest{
+		Parent: s0fs.RootInode, Name: "transient.txt",
+	}); err != nil {
+		t.Fatalf("Unlink(transient.txt) error = %v", err)
+	}
+	if err := syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {
+		t.Fatalf("Kill(self) error = %v", err)
+	}
+	t.Fatal("process survived SIGKILL")
 }
 
 func TestLocalVolumeManagerHandoffPreservesS0FSCache(t *testing.T) {

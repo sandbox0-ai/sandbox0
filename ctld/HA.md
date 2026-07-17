@@ -70,7 +70,10 @@ input. Runtime state uses backend-specific recovery:
 
 - S0FS reopens its node-local WAL only after promotion. Kernel inode IDs remain
   stable because S0FS persists them, and a separate handle state preserves
-  open and open-unlinked inode references.
+  open and open-unlinked inode references. Handle updates use atomic renames so
+  they are visible to the same-node standby before the FUSE operation returns;
+  graceful handoff additionally syncs the final snapshot file before replacing
+  the previous state.
 - Rootfs-backed portals persist their inode-to-path and handle journal.
   Open-unlinked files move into a hidden orphan directory until the restored
   final handle is released.

@@ -338,6 +338,10 @@ func loadS3RecoveryState(path string) (*s3RecoveryState, error) {
 }
 
 func writeAtomicRecoveryState(path, pattern string, payload []byte) error {
+	return writeAtomicRecoveryStateWithDurability(path, pattern, payload, true)
+}
+
+func writeAtomicRecoveryStateWithDurability(path, pattern string, payload []byte, durable bool) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create recovery state directory: %w", err)
 	}
@@ -355,9 +359,11 @@ func writeAtomicRecoveryState(path, pattern string, payload []byte) error {
 		_ = tmp.Close()
 		return err
 	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
+	if durable {
+		if err := tmp.Sync(); err != nil {
+			_ = tmp.Close()
+			return err
+		}
 	}
 	if err := tmp.Close(); err != nil {
 		return err

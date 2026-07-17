@@ -113,6 +113,7 @@ type Manager struct {
 	meteringRepo      meteringRecorder
 	quotaRepo         *quota.Repository
 	metrics           *obsmetrics.StorageProxyMetrics
+	volumeObserver    *volume.VolumeStorageObserver
 }
 
 // NewManager creates a new snapshot manager
@@ -123,7 +124,7 @@ func NewManager(
 	logger *logrus.Logger,
 	metrics *obsmetrics.StorageProxyMetrics,
 ) (*Manager, error) {
-	return &Manager{
+	manager := &Manager{
 		locks:     make(map[string]time.Time),
 		repo:      repo,
 		volMgr:    volMgr,
@@ -132,7 +133,14 @@ func NewManager(
 		clusterID: cfg.DefaultClusterId,
 		podID:     uuid.New().String(), // Unique pod identifier
 		metrics:   metrics,
-	}, nil
+	}
+	manager.volumeObserver = volume.NewVolumeStorageObserver(
+		repo,
+		cfg.RegionID,
+		manager.clusterID,
+		manager.appendStorageObservation,
+	)
+	return manager, nil
 }
 
 // SetEventPublisher wires a watcher event publisher (optional).
@@ -184,10 +192,7 @@ func (m *Manager) appendStorageObservation(ctx context.Context, observation *met
 	if err := m.enforceStorageObservationQuota(ctx, observation); err != nil {
 		return err
 	}
-	if err := recorder.RecordStorageObservation(ctx, observation); err != nil {
-		return err
-	}
-	return recorder.UpsertProducerWatermark(ctx, meteringpkg.ProducerStorage, observation.RegionID, observation.ObservedAt)
+	return volume.RecordStorageObservation(ctx, recorder, observation)
 }
 
 func (m *Manager) appendStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *meteringpkg.StorageObservation) error {

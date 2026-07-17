@@ -543,14 +543,12 @@ func (m *Manager) forkS0FSVolume(ctx context.Context, req *ForkVolumeRequest) (*
 		if volCtx, getErr := m.volMgr.GetVolume(req.SourceVolumeID); getErr == nil && volCtx != nil {
 			_ = volCtx.FlushAll("")
 			if volCtx.IsS0FS() {
-				manifest, err := volCtx.S0FS.SyncMaterialize(ctx)
+				materialization, err := volCtx.SyncMaterialize(ctx)
 				if err != nil {
 					return nil, err
 				}
-				if manifest != nil && manifest.State != nil {
-					if err := m.recordVolumeStorageState(ctx, sourceVol, manifest.State, time.Now().UTC()); err != nil {
-						return nil, err
-					}
+				if materialization.ObservationError != nil {
+					return nil, materialization.ObservationError
 				}
 			}
 		}

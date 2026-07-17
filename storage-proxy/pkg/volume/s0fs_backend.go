@@ -176,12 +176,12 @@ func (b *S0FSBackend) UnmountVolume(ctx context.Context, volCtx *VolumeContext) 
 			<-volCtx.materializeDone
 		}
 	}
-	manifest, err := volCtx.S0FS.SyncMaterialize(ctx)
+	result, err := volCtx.SyncMaterialize(ctx)
 	if err != nil {
 		return fmt.Errorf("materialize s0fs volume: %w", err)
 	}
-	b.observeMaterializedManifest(ctx, volCtx, manifest)
-	b.garbageCollectRWO(ctx, volCtx, manifest)
+	b.logObservationError(volCtx.VolumeID, result.ObservationError)
+	b.garbageCollectRWO(ctx, volCtx, result.Manifest)
 	return volCtx.S0FS.Close()
 }
 
@@ -258,15 +258,15 @@ func (b *S0FSBackend) startMaterializer(volCtx *VolumeContext) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				manifest, err := volCtx.S0FS.SyncMaterialize(ctx)
+				result, err := volCtx.SyncMaterialize(ctx)
 				if err != nil {
 					b.logger.WithError(err).WithField("volume_id", volCtx.VolumeID).Warn("Failed to materialize s0fs volume")
 					continue
 				}
-				b.observeMaterializedManifest(ctx, volCtx, manifest)
-				b.garbageCollectRWO(ctx, volCtx, manifest)
+				b.logObservationError(volCtx.VolumeID, result.ObservationError)
+				b.garbageCollectRWO(ctx, volCtx, result.Manifest)
 			case <-compactionC:
-				manifest, result, err := volCtx.S0FS.Compact(ctx, compactionOptions)
+				materialization, result, err := volCtx.Compact(ctx, compactionOptions)
 				if err != nil {
 					b.logger.WithError(err).WithField("volume_id", volCtx.VolumeID).Warn("Failed to compact s0fs volume")
 					continue
@@ -279,20 +279,18 @@ func (b *S0FSBackend) startMaterializer(volCtx *VolumeContext) {
 						"reclaimable_bytes": result.ReclaimableBytes,
 					}).Info("Compacted s0fs volume")
 				}
-				b.observeMaterializedManifest(ctx, volCtx, manifest)
-				b.garbageCollectRWO(ctx, volCtx, manifest)
+				b.logObservationError(volCtx.VolumeID, materialization.ObservationError)
+				b.garbageCollectRWO(ctx, volCtx, materialization.Manifest)
 			}
 		}
 	}()
 }
 
-func (b *S0FSBackend) observeMaterializedManifest(ctx context.Context, volCtx *VolumeContext, manifest *s0fs.Manifest) {
-	if volCtx == nil || volCtx.Observer == nil || manifest == nil || manifest.State == nil {
+func (b *S0FSBackend) logObservationError(volumeID string, err error) {
+	if err == nil {
 		return
 	}
-	if err := volCtx.Observer.ObserveVolumeState(ctx, volCtx.VolumeID, volCtx.TeamID, manifest.State, time.Now().UTC()); err != nil {
-		b.logger.WithError(err).WithField("volume_id", volCtx.VolumeID).Warn("Failed to record volume storage observation")
-	}
+	b.logger.WithError(err).WithField("volume_id", volumeID).Warn("Failed to record volume storage observation")
 }
 
 func (b *S0FSBackend) garbageCollectRWO(ctx context.Context, volCtx *VolumeContext, manifest *s0fs.Manifest) {

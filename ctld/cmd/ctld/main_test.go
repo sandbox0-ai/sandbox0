@@ -10,8 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	ctldserver "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/server"
+	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	storagedb "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -23,6 +26,23 @@ func TestCtldShutdownBudgetFitsDeploymentGracePeriod(t *testing.T) {
 	assert.LessOrEqual(t, shutdownBudget+shutdownGraceMargin, deployedTerminationGrace)
 	assert.LessOrEqual(t, max(shutdownBudget, networkRuntimeShutdownTimeout)+shutdownGraceMargin, deployedTerminationGrace)
 	assert.Equal(t, minimumTerminationGrace, shutdownBudget+shutdownGraceMargin)
+}
+
+func TestNewPortalStorageObserverRequiresEnabledMeteringDependencies(t *testing.T) {
+	var pool pgxpool.Pool
+	repo := storagedb.NewRepository(&pool)
+
+	assert.Nil(t, newPortalStorageObserver(&apiconfig.StorageProxyConfig{}, repo, &pool))
+	assert.Nil(t, newPortalStorageObserver(&apiconfig.StorageProxyConfig{
+		Metering: apiconfig.MeteringConfig{Enabled: true},
+	}, nil, &pool))
+
+	observer := newPortalStorageObserver(&apiconfig.StorageProxyConfig{
+		RegionID:         "region-1",
+		DefaultClusterId: "cluster-1",
+		Metering:         apiconfig.MeteringConfig{Enabled: true},
+	}, repo, &pool)
+	assert.NotNil(t, observer)
 }
 
 func TestCtldHealthEndpoints(t *testing.T) {

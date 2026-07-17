@@ -26,12 +26,15 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/k8s"
+	meteringoutbox "github.com/sandbox0-ai/sandbox0/pkg/metering/outbox"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	storagedb "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
+	storagevolume "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -221,6 +224,7 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 		KubeletPodsRoot:    kubeletPodsRoot,
 		Logger:             zapLogger,
 		StorageConfig:      storageCfg,
+		StorageObserver:    newPortalStorageObserver(storageCfg, repo, dbPool),
 		Repository:         repo,
 		PodName:            podName,
 		PodNamespace:       podNamespace,
@@ -618,6 +622,22 @@ func initPortalDatabase(ctx context.Context, cfg *apiconfig.StorageProxyConfig, 
 		Schema:          schema,
 		ConfigModifier:  modifier,
 	})
+}
+
+func newPortalStorageObserver(
+	cfg *apiconfig.StorageProxyConfig,
+	repo *storagedb.Repository,
+	pool *pgxpool.Pool,
+) storagevolume.StorageObserver {
+	if cfg == nil || !cfg.Metering.Enabled || repo == nil || pool == nil {
+		return nil
+	}
+	return storagevolume.NewVolumeStorageObserverWithRecorder(
+		repo,
+		meteringoutbox.NewRepository(pool),
+		cfg.RegionID,
+		naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
+	)
 }
 
 type combinedController struct {

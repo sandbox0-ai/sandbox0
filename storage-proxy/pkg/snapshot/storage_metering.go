@@ -2,29 +2,19 @@ package snapshot
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 )
 
 func (m *Manager) ObserveVolumeState(ctx context.Context, volumeID, teamID string, state *s0fs.SnapshotState, observedAt time.Time) error {
-	if m == nil || state == nil || volumeID == "" {
+	if m == nil || m.volumeObserver == nil {
 		return nil
 	}
-	vol, err := m.repo.GetSandboxVolume(ctx, volumeID)
-	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			return nil
-		}
-		return err
-	}
-	if teamID != "" && vol.TeamID != teamID {
-		return nil
-	}
-	return m.appendStorageObservation(ctx, m.volumeStorageObservation(ctx, vol, s0fs.StateStorageBytes(state), observedAt))
+	return m.volumeObserver.ObserveVolumeState(ctx, volumeID, teamID, state, observedAt)
 }
 
 func (m *Manager) recordVolumeStorageState(ctx context.Context, vol *db.SandboxVolume, state *s0fs.SnapshotState, observedAt time.Time) error {
@@ -52,30 +42,7 @@ func (m *Manager) recordSnapshotStorageWithMetadata(ctx context.Context, snapsho
 }
 
 func (m *Manager) volumeStorageObservation(ctx context.Context, vol *db.SandboxVolume, sizeBytes int64, observedAt time.Time) *meteringpkg.StorageObservation {
-	if observedAt.IsZero() {
-		observedAt = time.Now().UTC()
-	}
-	obs := &meteringpkg.StorageObservation{
-		SubjectType:       meteringpkg.SubjectTypeVolume,
-		SubjectID:         vol.ID,
-		Product:           meteringpkg.ProductSandbox,
-		TeamID:            vol.TeamID,
-		UserID:            vol.UserID,
-		VolumeID:          vol.ID,
-		RegionID:          m.regionID(),
-		ClusterID:         m.clusterID,
-		SizeBytes:         sizeBytes,
-		ResourceCreatedAt: vol.CreatedAt,
-		ObservedAt:        observedAt,
-	}
-	if owner, err := m.repo.GetSandboxVolumeOwner(ctx, vol.ID); err == nil && owner != nil {
-		obs.OwnerKind = owner.OwnerKind
-		obs.SandboxID = owner.OwnerSandboxID
-		if owner.OwnerClusterID != "" {
-			obs.ClusterID = owner.OwnerClusterID
-		}
-	}
-	return obs
+	return volume.VolumeStorageObservation(ctx, m.repo, vol, m.regionID(), m.clusterID, sizeBytes, observedAt)
 }
 
 func applyStorageObservationMetadata(obs *meteringpkg.StorageObservation, metadata *meteringpkg.StorageObservation) *meteringpkg.StorageObservation {

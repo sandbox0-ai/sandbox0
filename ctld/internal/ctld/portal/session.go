@@ -220,7 +220,7 @@ func (m *localVolumeManager) UnmountVolume(ctx context.Context, volumeID, _ stri
 		m.remove(volumeID)
 		return nil
 	}
-	if _, err := volCtx.S0FS.SyncMaterialize(ctx); err != nil {
+	if _, err := volCtx.SyncMaterialize(ctx); err != nil {
 		return err
 	}
 	if err := volCtx.S0FS.Close(); err != nil {
@@ -282,7 +282,7 @@ func (m *localVolumeManager) SyncDirectVolumeFileMount(_ context.Context, volume
 	if volCtx == nil || volCtx.S0FS == nil {
 		return fmt.Errorf("volume %s not mounted", volumeID)
 	}
-	_, err := volCtx.S0FS.SyncMaterialize(context.Background())
+	_, err := volCtx.SyncMaterialize(context.Background())
 	return err
 }
 

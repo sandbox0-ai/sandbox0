@@ -7,8 +7,6 @@ import (
 	"net/http"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
-	s0template "github.com/sandbox0-ai/sandbox0/pkg/template"
-	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func (s *Session) ListTemplates(ctx context.Context, t ContractT) ([]apispec.Template, error) {
@@ -117,48 +115,6 @@ func (s *Session) DeleteTemplate(ctx context.Context, t ContractT, templateID st
 func CloneTemplateForCreate(base apispec.Template, name string) apispec.TemplateCreateRequest {
 	return apispec.TemplateCreateRequest{
 		TemplateId: name,
-		Spec:       cloneSandboxTemplateSpec(base.Spec),
+		Spec:       base.Spec,
 	}
-}
-
-func cloneSandboxTemplateSpec(base apispec.SandboxTemplateSpec) apispec.SandboxTemplateSpec {
-	spec := base
-	normalizeTeamTemplateResourceRatioForCreate(&spec)
-	return spec
-}
-
-func normalizeTeamTemplateResourceRatioForCreate(spec *apispec.SandboxTemplateSpec) {
-	if spec == nil || spec.MainContainer == nil {
-		return
-	}
-
-	mainCPU, ok := parseQuotaQuantity(spec.MainContainer.Resources.Cpu)
-	if !ok {
-		return
-	}
-	mainMemory, ok := parseQuotaQuantity(spec.MainContainer.Resources.Memory)
-	if !ok {
-		return
-	}
-
-	requiredMemory := s0template.MemoryForCPU(mainCPU, s0template.MemoryPerCPUOrDefault(""))
-	if mainMemory.Cmp(requiredMemory) == 0 {
-		return
-	}
-	spec.MainContainer.Resources.Memory = ptr(requiredMemory.String())
-}
-
-func parseQuotaQuantity(value *string) (resource.Quantity, bool) {
-	if value == nil || *value == "" {
-		return resource.Quantity{}, false
-	}
-	parsed, err := resource.ParseQuantity(*value)
-	if err != nil {
-		return resource.Quantity{}, false
-	}
-	return parsed, true
-}
-
-func ptr[T any](value T) *T {
-	return &value
 }

@@ -20,15 +20,6 @@ func MemoryPerCPUOrDefault(value string) resource.Quantity {
 	return parsed
 }
 
-// MemoryForCPU returns the memory limit required for a CPU limit at the given memory-per-CPU ratio.
-func MemoryForCPU(cpu, memoryPerCPU resource.Quantity) resource.Quantity {
-	if cpu.Sign() <= 0 || memoryPerCPU.Sign() <= 0 {
-		return resource.Quantity{}
-	}
-	requiredBytes := cpu.MilliValue() * memoryPerCPU.Value() / 1000
-	return *resource.NewQuantity(requiredBytes, resource.BinarySI)
-}
-
 // CPUForMemory returns the CPU limit required for a memory limit at the given
 // memory-per-CPU ratio, rounded up to Kubernetes millicpu precision.
 func CPUForMemory(memory, memoryPerCPU resource.Quantity) resource.Quantity {
@@ -48,7 +39,7 @@ func CPUForMemory(memory, memoryPerCPU resource.Quantity) resource.Quantity {
 	return *resource.NewMilliQuantity(quotient.Int64(), resource.DecimalSI)
 }
 
-// ValidateResourceRatio enforces the platform CPU-to-memory resource shape for template specs.
+// ValidateResourceRatio enforces the platform memory-derived CPU shape for template specs.
 func ValidateResourceRatio(spec v1alpha1.SandboxTemplateSpec, memoryPerCPU resource.Quantity, subject string) error {
 	if subject == "" {
 		subject = "template"
@@ -58,15 +49,14 @@ func ValidateResourceRatio(spec v1alpha1.SandboxTemplateSpec, memoryPerCPU resou
 	}
 	totalCPU := spec.MainContainer.Resources.CPU.DeepCopy()
 	totalMemory := spec.MainContainer.Resources.Memory.DeepCopy()
-	requiredMemory := MemoryForCPU(totalCPU, memoryPerCPU)
-	if totalMemory.Cmp(requiredMemory) != 0 {
+	requiredCPU := CPUForMemory(totalMemory, memoryPerCPU)
+	if totalCPU.Cmp(requiredCPU) != 0 {
 		return fmt.Errorf(
-			"%s total memory must equal total cpu * %s (got cpu=%s memory=%s expectedMemory=%s)",
+			"%s total cpu must match the value derived from memory (got cpu=%s memory=%s expectedCPU=%s)",
 			subject,
-			memoryPerCPU.String(),
 			totalCPU.String(),
 			totalMemory.String(),
-			requiredMemory.String(),
+			requiredCPU.String(),
 		)
 	}
 	return nil

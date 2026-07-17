@@ -24,6 +24,9 @@ components/*/dist/
 coverage.txt
 coverage.html
 
+# Generated storage runtime protobufs
+storage-proxy/proto/fs/*.pb.go
+
 # Go workspace file
 go.work
 go.work.sum

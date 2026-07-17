@@ -89,13 +89,18 @@ for the previous Pod heartbeat to expire.
 
 ## Rollout
 
-Both slot DaemonSets use `maxSurge: 1` and `maxUnavailable: 0`. A replacement
-Pod is ready only after it has synchronized all current portals, allowing
-Kubernetes to delete the replaced slot without removing the last standby. The
-primary accepts multiple synchronized receivers only during these overlapping
-rollouts; steady state remains one primary and one standby. If multiple
-receivers observe primary loss, the flock and epoch admit one winner while the
-others discard their old clones and resynchronize from the winner.
+Both slot DaemonSets use `maxSurge: 0` and `maxUnavailable: 1` because their
+host-network listeners prevent a replacement from overlapping its same-slot
+predecessor on a node. The operator rolls `ctld-b` completely and waits for it
+to become current and ready before changing `ctld-a`. This keeps the unchanged
+peer available while the other slot is replaced in place.
+
+A replacement Pod becomes ready only after it has synchronized all current
+portals as the standby, or, if it becomes primary, after its services have
+started and at least one standby is synchronized. If the replaced slot was
+primary, the unchanged peer promotes through the flock and epoch fencing
+boundary; the returning replacement joins as standby without causing automatic
+failback.
 
 A sandbox node is advertised as data-plane ready only when both distinct HA
 slots are ready and the node's `CSINode` object contains `volume.sandbox0.ai`.

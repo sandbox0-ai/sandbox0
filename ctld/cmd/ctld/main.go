@@ -61,7 +61,6 @@ var (
 	rootFSObjectCacheSweepInterval = time.Minute
 	podName                        = os.Getenv("POD_NAME")
 	podNamespace                   = os.Getenv("POD_NAMESPACE")
-	haEnabled                      bool
 	haSlot                         = os.Getenv("CTLD_HA_SLOT")
 	haProbe                        string
 	haProbeSocket                  = "/run/sandbox0/ctld-ha.sock"
@@ -96,7 +95,6 @@ func main() {
 	flag.StringVar(&rootFSObjectCacheMinFreeBytes, "rootfs-object-cache-min-free-bytes", "0", "minimum free bytes to preserve on the rootfs object cache filesystem")
 	flag.DurationVar(&rootFSObjectCacheMaxAge, "rootfs-object-cache-max-age", 0, "maximum age for node-local rootfs cache objects; 0 disables age-based eviction")
 	flag.DurationVar(&rootFSObjectCacheSweepInterval, "rootfs-object-cache-sweep-interval", time.Minute, "interval for node-local rootfs object cache garbage collection")
-	flag.BoolVar(&haEnabled, "ha-enabled", false, "enable node-local primary/standby ctld coordination")
 	flag.StringVar(&haSlot, "ha-slot", os.Getenv("CTLD_HA_SLOT"), "stable ctld HA deployment slot")
 	flag.StringVar(&haProbe, "ha-probe", "", "run one ctld HA probe (live or ready) and exit")
 	flag.StringVar(&haProbeSocket, "ha-probe-socket", "/run/sandbox0/ctld-ha.sock", "container-local ctld HA probe socket")
@@ -121,9 +119,6 @@ func run() error {
 	networkFactory, err := configuredNetworkRuntimeFactory(networkRuntimeConfigPath, httpAddr)
 	if err != nil {
 		return fmt.Errorf("validate ctld network runtime config: %w", err)
-	}
-	if !haEnabled {
-		return runPrimary(ctx, primaryRunOptions{networkFactory: networkFactory})
 	}
 	coordinator, err := ctldha.NewCoordinator(ctldha.Config{RootDir: portalRoot, Slot: haSlot})
 	if err != nil {
@@ -160,7 +155,6 @@ func runHAPrimary(
 	}
 	return runPrimaryFn(ctx, primaryRunOptions{
 		replicator:     lease.Replicator,
-		requireStandby: true,
 		ownerID:        ownerID,
 		recovery:       lease.Recovery,
 		setReady:       setReady,
@@ -170,7 +164,6 @@ func runHAPrimary(
 
 type primaryRunOptions struct {
 	replicator     *ctldha.Replicator
-	requireStandby bool
 	ownerID        string
 	recovery       []ctldha.RecoveredPortal
 	setReady       func(bool)
@@ -234,7 +227,7 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 		OwnerID:            options.ownerID,
 		ActivePodUIDLister: podUIDLister,
 		Replicator:         options.replicator,
-		RequireStandby:     options.requireStandby,
+		RequireStandby:     true,
 	})
 	for i := range options.recovery {
 		recovered := &options.recovery[i]

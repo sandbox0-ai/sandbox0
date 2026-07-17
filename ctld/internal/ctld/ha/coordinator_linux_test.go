@@ -14,6 +14,12 @@ import (
 	ctldportal "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal"
 )
 
+func TestNewCoordinatorRequiresSlot(t *testing.T) {
+	if _, err := NewCoordinator(Config{RootDir: t.TempDir()}); err == nil {
+		t.Fatal("NewCoordinator() error = nil, want missing slot error")
+	}
+}
+
 func TestCoordinatorTransfersPortalAndPromotesStandby(t *testing.T) {
 	root := t.TempDir()
 	primaryCoordinator := newTestCoordinator(t, root, "a")

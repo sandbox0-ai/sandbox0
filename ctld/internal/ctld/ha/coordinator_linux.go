@@ -80,6 +80,10 @@ func NewCoordinator(cfg Config) (*Coordinator, error) {
 	if rootDir == "" {
 		return nil, fmt.Errorf("ctld HA root directory is required")
 	}
+	slot := strings.TrimSpace(cfg.Slot)
+	if slot == "" {
+		return nil, fmt.Errorf("ctld HA slot is required")
+	}
 	if err := os.MkdirAll(filepath.Join(rootDir, "ha"), 0o700); err != nil {
 		return nil, fmt.Errorf("create ctld HA directory: %w", err)
 	}
@@ -89,7 +93,7 @@ func NewCoordinator(cfg Config) (*Coordinator, error) {
 	}
 	coordinator := &Coordinator{
 		rootDir: rootDir,
-		slot:    strings.TrimSpace(cfg.Slot),
+		slot:    slot,
 		logger:  logger,
 		state:   State{Role: RoleStarting},
 	}

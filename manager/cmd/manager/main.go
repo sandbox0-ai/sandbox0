@@ -61,6 +61,14 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == volumeStorageMeteringReconcileCommand {
+		if err := runVolumeStorageMeteringReconcile(os.Args[2:], os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintf(os.Stderr, "Volume storage metering reconciliation failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// Load configuration
 	cfg := config.LoadManagerConfig()
 

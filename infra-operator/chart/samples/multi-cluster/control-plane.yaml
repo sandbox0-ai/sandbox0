@@ -33,31 +33,22 @@ spec:
     rootDomain: sandbox0.app
     regionId: aws-us-east-1
   registry:
-     # Builtin registry defaults to NodePort for easy kind debugging.
-     provider: builtin
-     builtin:
-       enabled: true
-       service:
-         type: NodePort
-         port: 30500
-       # For local kind debug, s0 CLI can push via this endpoint.
-       pushEndpoint: 127.0.0.1:30500
-    ## Shared regional registry for all data-plane clusters in this region.
-    ## regional-gateway issues upload credentials from this config.
-    #provider: aws
-    #imagePullSecretName: sandbox0-registry-pull
-    #aws:
-    #  region: us-east-1
-    #  registryId: "123456789012"
-    #  # Optional when registryId+region are set, but explicit host is clearer.
-    #  registry: 123456789012.dkr.ecr.us-east-1.amazonaws.com
-    #  pullSecret:
-    #    name: ecr-pull-secret
-    #    key: .dockerconfigjson
-    #  credentialsSecret:
-    #    name: aws-credentials
-    #    accessKeyKey: accessKeyId
-    #    secretKeyKey: secretAccessKey
+    # Must match the data-plane registry config in this region.
+    # regional-gateway issues upload credentials from this config.
+    provider: aws
+    imagePullSecretName: sandbox0-registry-pull
+    aws:
+      region: us-east-1
+      registryId: "123456789012"
+      # Optional when registryId+region are set, but explicit host is clearer.
+      registry: 123456789012.dkr.ecr.us-east-1.amazonaws.com
+      pullSecret:
+        name: ecr-pull-secret
+        key: .dockerconfigjson
+      credentialsSecret:
+        name: aws-credentials
+        accessKeyKey: accessKeyId
+        secretKeyKey: secretAccessKey
   services:
     regionalGateway:
       enabled: true

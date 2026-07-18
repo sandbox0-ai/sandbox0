@@ -127,7 +127,11 @@ func (p *Publisher) Publish(ctx context.Context, req BuildRequest) (*Result, err
 		return nil, fmt.Errorf("registry credential provider returned no credentials")
 	}
 
-	pushRegistry, pullRegistry, plainHTTP, err := publicationEndpoints(credential)
+	pushRegistry, pullRegistry, plainHTTP, err := publicationEndpoints(
+		credential,
+		p.registry.InternalRegistry,
+		req.TeamID,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -152,13 +156,24 @@ func (p *Publisher) Publish(ctx context.Context, req BuildRequest) (*Result, err
 	if err != nil {
 		return nil, err
 	}
-	sourceAuth, err := p.sourceCredentials(baseHost, credential)
+	baseRef, baseHost, baseRepository, sourcePlainHTTP, err := publicationSourceReference(
+		baseRef,
+		baseHost,
+		baseRepository,
+		credential,
+		pushRegistry,
+		plainHTTP,
+	)
+	if err != nil {
+		return nil, err
+	}
+	sourceAuth, err := p.sourceCredentials(baseHost, credential, pushRegistry)
 	if err != nil {
 		return nil, err
 	}
 	sourceResolver := p.newResolver(resolverOptions{
 		purpose:     resolverPurposeSource,
-		plainHTTP:   plainHTTP && sameRegistryHost(baseHost, pushRegistry),
+		plainHTTP:   sourcePlainHTTP,
 		credentials: sourceAuth,
 	})
 	base, err := resolveBase(ctx, sourceResolver, baseRef, baseHost, baseRepository, req.Platform)
@@ -215,17 +230,25 @@ func (p *Publisher) Publish(ctx context.Context, req BuildRequest) (*Result, err
 	}, nil
 }
 
-func publicationEndpoints(credential *managerregistry.Credential) (push, pull string, plainHTTP bool, err error) {
+func publicationEndpoints(
+	credential *managerregistry.Credential,
+	internalRegistry string,
+	teamID string,
+) (push, pull string, plainHTTP bool, err error) {
 	push = strings.Trim(naming.NormalizeRegistryHost(credential.PushRegistry), "/")
 	pull = strings.Trim(naming.NormalizeRegistryHost(credential.PullRegistry), "/")
 	if pull == "" {
 		pull = push
 	}
 	if strings.EqualFold(strings.TrimSpace(credential.Provider), "builtin") {
-		// The externally advertised builtin push endpoint may resolve to
-		// localhost from manager. The in-cluster pull endpoint is also the
-		// server-side push endpoint.
-		push = pull
+		serverRegistry := strings.Trim(naming.NormalizeRegistryHost(internalRegistry), "/")
+		if serverRegistry != "" {
+			push = naming.TeamScopedImageRegistry(serverRegistry, teamID)
+		} else {
+			// Preserve compatibility with configs where PullRegistry carried
+			// the builtin service endpoint.
+			push = pull
+		}
 		plainHTTP = true
 	}
 	if push == "" {
@@ -235,6 +258,58 @@ func publicationEndpoints(credential *managerregistry.Credential) (push, pull st
 		return "", "", false, fmt.Errorf("registry pull endpoint is required")
 	}
 	return push, pull, plainHTTP, nil
+}
+
+// publicationSourceReference maps a previously advertised builtin image back
+// to manager's authenticated internal registry alias for recursive builds.
+func publicationSourceReference(
+	ref string,
+	host string,
+	repository string,
+	credential *managerregistry.Credential,
+	serverPushRegistry string,
+	plainHTTP bool,
+) (string, string, string, bool, error) {
+	sourcePlainHTTP := plainHTTP && sameRegistryHost(host, serverPushRegistry)
+	if credential == nil ||
+		!strings.EqualFold(strings.TrimSpace(credential.Provider), "builtin") ||
+		(!sameRegistryHost(host, credential.PushRegistry) && !sameRegistryHost(host, credential.PullRegistry)) ||
+		sameRegistryHost(host, serverPushRegistry) {
+		return ref, host, repository, sourcePlainHTTP, nil
+	}
+
+	advertisedPrefix := ""
+	relativeRepository := ""
+	matchedAdvertisedPrefix := false
+	for _, advertisedRegistry := range []string{credential.PullRegistry, credential.PushRegistry} {
+		if !sameRegistryHost(host, advertisedRegistry) {
+			continue
+		}
+		prefix := registryRepositoryPrefix(advertisedRegistry)
+		relative, ok := trimRepositoryPrefix(repository, prefix)
+		if ok && (!matchedAdvertisedPrefix || len(prefix) >= len(advertisedPrefix)) {
+			matchedAdvertisedPrefix = true
+			advertisedPrefix = prefix
+			relativeRepository = relative
+		}
+	}
+	if !matchedAdvertisedPrefix {
+		return ref, host, repository, sourcePlainHTTP, nil
+	}
+
+	authority := registryAuthority(serverPushRegistry)
+	if authority == "" {
+		return "", "", "", false, fmt.Errorf("builtin server-side registry endpoint is invalid")
+	}
+	_, pinnedDigest, ok := strings.Cut(ref, "@")
+	if !ok || strings.TrimSpace(pinnedDigest) == "" {
+		return "", "", "", false, fmt.Errorf("pinned base image reference is invalid")
+	}
+	internalRepository := joinRepositoryPath(registryRepositoryPrefix(serverPushRegistry), relativeRepository)
+	if internalRepository == "" {
+		return "", "", "", false, fmt.Errorf("builtin server-side repository is invalid")
+	}
+	return authority + "/" + internalRepository + "@" + pinnedDigest, authority, internalRepository, plainHTTP, nil
 }
 
 func outputRepository(templateID string) string {
@@ -668,7 +743,7 @@ func staticCredentials(expectedHost, username, password string) func(string) (st
 	}
 }
 
-func (p *Publisher) sourceCredentials(baseHost string, target *managerregistry.Credential) (func(string) (string, string, error), error) {
+func (p *Publisher) sourceCredentials(baseHost string, target *managerregistry.Credential, registryAliases ...string) (func(string) (string, string, error), error) {
 	auths := map[string]dockerAuth{}
 	if path := strings.TrimSpace(p.registry.PullCredentialsFile); path != "" {
 		payload, err := p.readFile(path)
@@ -691,6 +766,11 @@ func (p *Publisher) sourceCredentials(baseHost string, target *managerregistry.C
 		}
 		if sameRegistryHost(host, target.PushRegistry) || sameRegistryHost(host, target.PullRegistry) {
 			return target.Username, target.Password, nil
+		}
+		for _, alias := range registryAliases {
+			if sameRegistryHost(host, alias) {
+				return target.Username, target.Password, nil
+			}
 		}
 		if sameRegistryHost(host, baseHost) {
 			return "", "", nil
@@ -769,6 +849,42 @@ func registryAuthority(raw string) string {
 		return ""
 	}
 	return strings.ToLower(parsed.Host)
+}
+
+func registryRepositoryPrefix(raw string) string {
+	parsed, err := parseRegistryURL(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.Trim(parsed.Path, "/")
+}
+
+func trimRepositoryPrefix(repository, prefix string) (string, bool) {
+	repository = strings.Trim(repository, "/")
+	prefix = strings.Trim(prefix, "/")
+	if prefix == "" {
+		return repository, true
+	}
+	if repository == prefix {
+		return "", true
+	}
+	if strings.HasPrefix(repository, prefix+"/") {
+		return strings.TrimPrefix(repository, prefix+"/"), true
+	}
+	return "", false
+}
+
+func joinRepositoryPath(prefix, repository string) string {
+	prefix = strings.Trim(prefix, "/")
+	repository = strings.Trim(repository, "/")
+	switch {
+	case prefix == "":
+		return repository
+	case repository == "":
+		return prefix
+	default:
+		return prefix + "/" + repository
+	}
 }
 
 func registryHostname(raw string) string {

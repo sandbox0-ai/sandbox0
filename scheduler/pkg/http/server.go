@@ -123,14 +123,18 @@ func NewServer(
 	}
 	buildStore, _ := templateStore.(store.TemplateBuildStore)
 	server.templateHandler = &templatehttp.Handler{
-		Store:                templateStore,
-		BuildStore:           buildStore,
-		SourceResolver:       sourceResolver,
-		AllocationStore:      allocationStore,
-		ClusterStore:         repo,
-		Reconciler:           reconciler,
-		PrivateRegistryHosts: privateRegistryHosts(cfg.RegistryPushRegistry, cfg.RegistryPullRegistry),
-		Logger:               logger,
+		Store:           templateStore,
+		BuildStore:      buildStore,
+		SourceResolver:  sourceResolver,
+		AllocationStore: allocationStore,
+		ClusterStore:    repo,
+		Reconciler:      reconciler,
+		PrivateRegistryHosts: privateRegistryHosts(
+			cfg.RegistryPushRegistry,
+			cfg.RegistryPullRegistry,
+			cfg.RegistryInternalRegistry,
+		),
+		Logger: logger,
 	}
 
 	server.setupRoutes()

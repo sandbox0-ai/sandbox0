@@ -106,14 +106,19 @@ func TestPublisherPublishComposesPlatformImageAndStreamsRootFSLayers(t *testing.
 	}
 	targetPusher := newFakePusher()
 	target := &fakeResolver{pusher: targetPusher}
+	teamID := "team-1"
+	teamPrefix := naming.TeamImageRepositoryPrefix(teamID)
 	credentialProvider := &fakeCredentialProvider{credential: &managerregistry.Credential{
 		Provider:     "builtin",
-		PushRegistry: "127.0.0.1:30500/t-team",
-		PullRegistry: "registry.manager.svc:5000/t-team",
+		PushRegistry: "127.0.0.1:30500/" + teamPrefix,
+		PullRegistry: "127.0.0.1:30500/" + teamPrefix,
 		Username:     "builder",
 		Password:     "secret",
 	}}
-	publisher, err := NewPublisher(objects, credentialProvider, managerconfig.RegistryConfig{Provider: "builtin"})
+	publisher, err := NewPublisher(objects, credentialProvider, managerconfig.RegistryConfig{
+		Provider:         "builtin",
+		InternalRegistry: "registry.manager.svc:5000",
+	})
 	if err != nil {
 		t.Fatalf("NewPublisher() error = %v", err)
 	}
@@ -129,7 +134,7 @@ func TestPublisherPublishComposesPlatformImageAndStreamsRootFSLayers(t *testing.
 	createdAt := time.Date(2026, 7, 18, 1, 2, 3, 0, time.UTC)
 	req := BuildRequest{
 		BuildID:         "20D888E6-EAED-4E83-9A76-270BC3BF1503",
-		TeamID:          "team-1",
+		TeamID:          teamID,
 		TemplateID:      "Development Workspace",
 		SourceSandboxID: "sandbox-1",
 		BaseImageRef:    "base-image:latest",
@@ -179,15 +184,15 @@ func TestPublisherPublishComposesPlatformImageAndStreamsRootFSLayers(t *testing.
 	if strings.Contains(targetPusher.reference, "127.0.0.1") {
 		t.Fatalf("server-side push used external localhost endpoint: %s", targetPusher.reference)
 	}
-	if !strings.HasPrefix(targetPusher.reference, "registry.manager.svc:5000/t-team/") {
+	if !strings.HasPrefix(targetPusher.reference, "registry.manager.svc:5000/"+teamPrefix+"/") {
 		t.Fatalf("target pusher reference = %q", targetPusher.reference)
 	}
 	if !strings.Contains(targetPusher.reference, ":build-20d888e6-eaed-4e83-9a76-270bc3bf1503") {
 		t.Fatalf("target pusher reference does not use stable build tag: %q", targetPusher.reference)
 	}
-	if !strings.HasPrefix(result.PullReference, "registry.manager.svc:5000/t-team/") ||
+	if !strings.HasPrefix(result.PullReference, "127.0.0.1:30500/"+teamPrefix+"/") ||
 		!strings.HasSuffix(result.PullReference, "@"+result.ManifestDigest.String()) {
-		t.Fatalf("PullReference = %q, want internal digest-pinned reference", result.PullReference)
+		t.Fatalf("PullReference = %q, want node-reachable digest-pinned reference", result.PullReference)
 	}
 
 	if len(targetPusher.order) == 0 || targetPusher.order[len(targetPusher.order)-1] != result.ManifestDigest {
@@ -273,9 +278,10 @@ func TestPublisherUsesRealProviderTeamScopeExactlyOnce(t *testing.T) {
 
 	teamID := "team-contract"
 	registryConfig := managerconfig.RegistryConfig{
-		Provider:     "builtin",
-		PushRegistry: "registry.public.example.com",
-		PullRegistry: "registry.manager.svc:5000",
+		Provider:         "builtin",
+		PushRegistry:     "registry.public.example.com",
+		PullRegistry:     "registry.public.example.com",
+		InternalRegistry: "registry.manager.svc:5000",
 		Builtin: &managerconfig.RegistryBuiltinConfig{
 			Username: "builder",
 			Password: "secret",
@@ -349,12 +355,144 @@ func TestPublisherUsesRealProviderTeamScopeExactlyOnce(t *testing.T) {
 	if targetPusher.reference != wantPushTag {
 		t.Fatalf("pusher reference = %q, want %q", targetPusher.reference, wantPushTag)
 	}
-	wantPullReference := wantRepository + "@" + result.ManifestDigest.String()
+	wantPullReference := "registry.public.example.com/" + teamPrefix + "/template-contract@" + result.ManifestDigest.String()
 	if result.PullReference != wantPullReference {
 		t.Fatalf("PullReference = %q, want %q", result.PullReference, wantPullReference)
 	}
 	if strings.Count(targetPusher.reference, "/"+teamPrefix+"/") != 1 {
 		t.Fatalf("pusher reference has duplicated or missing team scope: %q", targetPusher.reference)
+	}
+}
+
+func TestPublisherPublishRewritesAdvertisedBuiltinBaseToInternalRegistry(t *testing.T) {
+	t.Parallel()
+
+	teamID := "team-recursive"
+	teamPrefix := naming.TeamImageRepositoryPrefix(teamID)
+	advertisedRegistry := "public.example.com/tenant/" + teamPrefix
+	internalRegistry := "registry.manager.svc:5000"
+
+	baseLayer := []byte("recursive base layer")
+	baseLayerDesc := descriptorFromBytes(ocispec.MediaTypeImageLayer, baseLayer)
+	baseConfig := ocispec.Image{
+		Platform: ocispec.Platform{OS: "linux", Architecture: "amd64"},
+		RootFS: ocispec.RootFS{
+			Type:    "layers",
+			DiffIDs: []digest.Digest{baseLayerDesc.Digest},
+		},
+	}
+	baseConfigBytes := mustJSON(t, baseConfig)
+	baseConfigDesc := descriptorFromBytes(ocispec.MediaTypeImageConfig, baseConfigBytes)
+	baseManifest := ocispec.Manifest{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageManifest,
+		Config:    baseConfigDesc,
+		Layers:    []ocispec.Descriptor{baseLayerDesc},
+	}
+	baseManifestBytes := mustJSON(t, baseManifest)
+	baseManifestDesc := descriptorFromBytes(ocispec.MediaTypeImageManifest, baseManifestBytes)
+	advertisedBaseRef := advertisedRegistry + "/template-base@" + baseManifestDesc.Digest.String()
+
+	source := &fakeResolver{
+		root: baseManifestDesc,
+		fetcher: &fakeFetcher{blobs: map[digest.Digest][]byte{
+			baseManifestDesc.Digest: baseManifestBytes,
+			baseConfigDesc.Digest:   baseConfigBytes,
+			baseLayerDesc.Digest:    baseLayer,
+		}},
+	}
+	targetPusher := newFakePusher()
+	target := &fakeResolver{pusher: targetPusher}
+	rootFSLayer := []byte("recursive rootfs layer")
+	objects := &fakeObjectReader{objects: map[string][]byte{
+		"rootfs/layer": rootFSLayer,
+	}}
+	credentialProvider := &fakeCredentialProvider{credential: &managerregistry.Credential{
+		Provider:     "builtin",
+		PushRegistry: advertisedRegistry,
+		PullRegistry: advertisedRegistry,
+		Username:     "builder",
+		Password:     "secret",
+	}}
+	publisher, err := NewPublisher(objects, credentialProvider, managerconfig.RegistryConfig{
+		Provider:         "builtin",
+		InternalRegistry: internalRegistry,
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher() error = %v", err)
+	}
+	var sourceOptions resolverOptions
+	var sourceResolverCreated bool
+	publisher.newResolver = func(opts resolverOptions) remotes.Resolver {
+		if opts.purpose == resolverPurposeTarget {
+			return target
+		}
+		sourceOptions = opts
+		sourceResolverCreated = true
+		return source
+	}
+
+	result, err := publisher.Publish(context.Background(), BuildRequest{
+		BuildID:         "20d888e6-eaed-4e83-9a76-270bc3bf1504",
+		TeamID:          teamID,
+		TemplateID:      "recursive",
+		SourceSandboxID: "sandbox-recursive",
+		BaseImageRef:    advertisedBaseRef,
+		BaseImageDigest: baseManifestDesc.Digest.String(),
+		Platform:        ocispec.Platform{OS: "linux", Architecture: "amd64"},
+		Layers: []Layer{{
+			ID:        "layer-1",
+			ObjectKey: "rootfs/layer",
+			MediaType: ocispec.MediaTypeImageLayer,
+			Digest:    digest.FromBytes(rootFSLayer).String(),
+			DiffID:    digest.FromBytes(rootFSLayer).String(),
+			Size:      int64(len(rootFSLayer)),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	wantSourceRef := internalRegistry + "/" + teamPrefix + "/template-base@" + baseManifestDesc.Digest.String()
+	if source.resolvedRef != wantSourceRef {
+		t.Fatalf("source Resolve() ref = %q, want %q", source.resolvedRef, wantSourceRef)
+	}
+	if !sourceResolverCreated {
+		t.Fatal("source resolver was not created")
+	}
+	if sourceOptions.purpose != resolverPurposeSource {
+		t.Fatalf("source resolver purpose = %q, want %q", sourceOptions.purpose, resolverPurposeSource)
+	}
+	if !sourceOptions.plainHTTP {
+		t.Fatal("source resolver for builtin internal registry did not use PlainHTTP")
+	}
+	if sourceOptions.credentials == nil {
+		t.Fatal("source resolver credentials callback is nil")
+	}
+	username, password, err := sourceOptions.credentials(internalRegistry)
+	if err != nil {
+		t.Fatalf("source credentials callback error = %v", err)
+	}
+	if username != "builder" || password != "secret" {
+		t.Fatalf("source credentials = %q/%q, want target credentials", username, password)
+	}
+
+	pushedBaseDesc, ok := targetPusher.descriptors[baseLayerDesc.Digest]
+	if !ok {
+		t.Fatalf("pushed base descriptor %s not found", baseLayerDesc.Digest)
+	}
+	sourceLabel := distributionSourceLabel + ".registry.manager.svc"
+	if got, want := pushedBaseDesc.Annotations[sourceLabel], teamPrefix+"/template-base"; got != want {
+		t.Fatalf("cross-mount repository = %q, want %q", got, want)
+	}
+
+	wantPullReference := advertisedRegistry + "/template-recursive@" + result.ManifestDigest.String()
+	if result.PullReference != wantPullReference {
+		t.Fatalf("PullReference = %q, want %q", result.PullReference, wantPullReference)
+	}
+	wantPushReference := internalRegistry + "/" + teamPrefix + "/template-recursive@" + result.ManifestDigest.String()
+	if result.PushReference != wantPushReference {
+		t.Fatalf("PushReference = %q, want %q", result.PushReference, wantPushReference)
 	}
 }
 
@@ -477,11 +615,15 @@ func TestValidateBaseConfigRejectsPlatformVariantMismatch(t *testing.T) {
 func TestPublicationEndpointsExternalUsesPushAndPullEndpoints(t *testing.T) {
 	t.Parallel()
 
-	push, pull, plainHTTP, err := publicationEndpoints(&managerregistry.Credential{
-		Provider:     "aws",
-		PushRegistry: "123.dkr.ecr.example.com/t-team",
-		PullRegistry: "mirror.internal.example.com/t-team",
-	})
+	push, pull, plainHTTP, err := publicationEndpoints(
+		&managerregistry.Credential{
+			Provider:     "aws",
+			PushRegistry: "123.dkr.ecr.example.com/t-team",
+			PullRegistry: "mirror.internal.example.com/t-team",
+		},
+		"",
+		"",
+	)
 	if err != nil {
 		t.Fatalf("publicationEndpoints() error = %v", err)
 	}
@@ -493,18 +635,26 @@ func TestPublicationEndpointsExternalUsesPushAndPullEndpoints(t *testing.T) {
 func TestRegistryEndpointsWithPathsPreserveRepositoryAndCompareByAuthority(t *testing.T) {
 	t.Parallel()
 
-	push, pull, plainHTTP, err := publicationEndpoints(&managerregistry.Credential{
-		Provider:     "builtin",
-		PushRegistry: "https://public.example.com/tenant/",
-		PullRegistry: "http://registry.manager.svc:5000/t-team/",
-	})
+	teamID := "team-1"
+	teamPrefix := naming.TeamImageRepositoryPrefix(teamID)
+	push, pull, plainHTTP, err := publicationEndpoints(
+		&managerregistry.Credential{
+			Provider:     "builtin",
+			PushRegistry: "https://public.example.com/tenant/" + teamPrefix,
+			PullRegistry: "https://public.example.com/tenant/" + teamPrefix,
+		},
+		"http://registry.manager.svc:5000",
+		teamID,
+	)
 	if err != nil {
 		t.Fatalf("publicationEndpoints() error = %v", err)
 	}
-	if push != "registry.manager.svc:5000/t-team" || pull != push || !plainHTTP {
+	if push != "registry.manager.svc:5000/"+teamPrefix ||
+		pull != "public.example.com/tenant/"+teamPrefix ||
+		!plainHTTP {
 		t.Fatalf("publicationEndpoints() = %q, %q, %v", push, pull, plainHTTP)
 	}
-	if got, want := joinImageReference(push, "template-a:build-1"), "registry.manager.svc:5000/t-team/template-a:build-1"; got != want {
+	if got, want := joinImageReference(push, "template-a:build-1"), "registry.manager.svc:5000/"+teamPrefix+"/template-a:build-1"; got != want {
 		t.Fatalf("joinImageReference() = %q, want %q", got, want)
 	}
 	if !sameRegistryHost("https://registry.manager.svc:5000/source", push) {
@@ -512,6 +662,65 @@ func TestRegistryEndpointsWithPathsPreserveRepositoryAndCompareByAuthority(t *te
 	}
 	if got, want := registryHostname(push), "registry.manager.svc"; got != want {
 		t.Fatalf("registryHostname() = %q, want %q", got, want)
+	}
+}
+
+func TestPublicationSourceReferenceRewritesBuiltinAdvertisedEndpoint(t *testing.T) {
+	t.Parallel()
+
+	baseDigest := digest.FromString("published base").String()
+	ref := "public.example.com/tenant/t-team/template-base@" + baseDigest
+	rewritten, host, repository, plainHTTP, err := publicationSourceReference(
+		ref,
+		"public.example.com",
+		"tenant/t-team/template-base",
+		&managerregistry.Credential{
+			Provider:     "builtin",
+			PushRegistry: "public.example.com/tenant/t-team",
+			PullRegistry: "public.example.com/tenant/t-team",
+		},
+		"registry.manager.svc:5000/t-team",
+		true,
+	)
+	if err != nil {
+		t.Fatalf("publicationSourceReference() error = %v", err)
+	}
+	if want := "registry.manager.svc:5000/t-team/template-base@" + baseDigest; rewritten != want {
+		t.Fatalf("publicationSourceReference() ref = %q, want %q", rewritten, want)
+	}
+	if host != "registry.manager.svc:5000" || !plainHTTP {
+		t.Fatalf("publicationSourceReference() host/plainHTTP = %q/%v", host, plainHTTP)
+	}
+	if repository != "t-team/template-base" {
+		t.Fatalf("publicationSourceReference() repository = %q", repository)
+	}
+}
+
+func TestSourceCredentialsAuthenticateBuiltinInternalAlias(t *testing.T) {
+	t.Parallel()
+
+	publisher := &Publisher{}
+	target := &managerregistry.Credential{
+		Provider:     "builtin",
+		PushRegistry: "public.example.com/t-team",
+		PullRegistry: "public.example.com/t-team",
+		Username:     "builder",
+		Password:     "secret",
+	}
+	credentials, err := publisher.sourceCredentials(
+		"registry.manager.svc:5000",
+		target,
+		"registry.manager.svc:5000/t-team",
+	)
+	if err != nil {
+		t.Fatalf("sourceCredentials() error = %v", err)
+	}
+	username, password, err := credentials("registry.manager.svc:5000")
+	if err != nil {
+		t.Fatalf("source credentials callback error = %v", err)
+	}
+	if username != "builder" || password != "secret" {
+		t.Fatalf("source credentials = %q/%q", username, password)
 	}
 }
 

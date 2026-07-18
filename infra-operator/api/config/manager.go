@@ -394,9 +394,13 @@ type RegistryConfig struct {
 	// +optional
 	PushRegistry string `yaml:"push_registry" json:"-"`
 
-	// PullRegistry is the registry hostname (host:port) for in-cluster image pull.
+	// PullRegistry is the registry hostname (host:port) reachable by sandbox nodes.
 	// +optional
 	PullRegistry string `yaml:"pull_registry" json:"-"`
+
+	// InternalRegistry is the registry endpoint used by manager for server-side image publication.
+	// +optional
+	InternalRegistry string `yaml:"internal_registry" json:"-"`
 
 	// PullSecretName is the secret name to create in template namespaces.
 	// +optional

@@ -66,6 +66,7 @@ func TestResolveRegistryConfigUsesBuiltinServicePort(t *testing.T) {
 						Type: corev1.ServiceTypeNodePort,
 						Port: 30500,
 					},
+					PushEndpoint: "127.0.0.1:30500",
 				},
 			},
 		},
@@ -77,12 +78,15 @@ func TestResolveRegistryConfigUsesBuiltinServicePort(t *testing.T) {
 	if cfg == nil {
 		t.Fatal("expected resolved registry config")
 	}
-	const want = "demo-registry.sandbox0-system.svc:30500"
+	const want = "127.0.0.1:30500"
 	if cfg.PushRegistry != want {
 		t.Fatalf("unexpected push registry: %q", cfg.PushRegistry)
 	}
 	if cfg.PullRegistry != want {
 		t.Fatalf("unexpected pull registry: %q", cfg.PullRegistry)
+	}
+	if cfg.InternalRegistry != "demo-registry.sandbox0-system.svc:30500" {
+		t.Fatalf("unexpected internal registry: %q", cfg.InternalRegistry)
 	}
 }
 

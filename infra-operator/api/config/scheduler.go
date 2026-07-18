@@ -62,9 +62,13 @@ type SchedulerConfig struct {
 	// +optional
 	RegistryPushRegistry string `yaml:"registry_push_registry" json:"-"`
 
-	// RegistryPullRegistry is the in-cluster registry hostname used for image pulls.
+	// RegistryPullRegistry is the registry hostname reachable by sandbox nodes.
 	// +optional
 	RegistryPullRegistry string `yaml:"registry_pull_registry" json:"-"`
+
+	// RegistryInternalRegistry is the registry service endpoint reserved for server-side access.
+	// +optional
+	RegistryInternalRegistry string `yaml:"registry_internal_registry" json:"-"`
 }
 
 type DatabasePoolConfig struct {

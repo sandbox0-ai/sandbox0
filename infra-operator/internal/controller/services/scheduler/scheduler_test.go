@@ -147,8 +147,9 @@ func TestBuildConfigPropagatesRegistryHosts(t *testing.T) {
 			Registry: &infrav1alpha1.RegistryConfig{
 				Provider: infrav1alpha1.RegistryProviderBuiltin,
 				Builtin: &infrav1alpha1.BuiltinRegistryConfig{
-					Enabled: true,
-					Port:    5000,
+					Enabled:      true,
+					Port:         5000,
+					PushEndpoint: "127.0.0.1:30500",
 				},
 			},
 			Services: &infrav1alpha1.ServicesConfig{
@@ -165,10 +166,13 @@ func TestBuildConfigPropagatesRegistryHosts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildConfig returned error: %v", err)
 	}
-	if cfg.RegistryPullRegistry != "demo-registry.sandbox0-system.svc:5000" {
+	if cfg.RegistryPullRegistry != "127.0.0.1:30500" {
 		t.Fatalf("unexpected pull registry %q", cfg.RegistryPullRegistry)
 	}
-	if cfg.RegistryPushRegistry != "demo-registry.sandbox0-system.svc:5000" {
+	if cfg.RegistryPushRegistry != "127.0.0.1:30500" {
 		t.Fatalf("unexpected push registry %q", cfg.RegistryPushRegistry)
+	}
+	if cfg.RegistryInternalRegistry != "demo-registry.sandbox0-system.svc:5000" {
+		t.Fatalf("unexpected internal registry %q", cfg.RegistryInternalRegistry)
 	}
 }

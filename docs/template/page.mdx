@@ -176,6 +176,10 @@ You do not provide an image repository or registry credentials. Sandbox0 publish
 </Callout>
 
 <Callout variant="warning">
+The configured registry pull address must be reachable by every sandbox node. For the built-in registry, operators should set `spec.registry.builtin.pushEndpoint` or Ingress to a node-reachable address. Sandbox0 uses the Kubernetes Service address only for manager's internal publication path.
+</Callout>
+
+<Callout variant="warning">
 The source template image must remain resolvable by digest from its original registry while the build is publishing. A node-local or preloaded image with no matching registry manifest cannot currently be used as the source; publish that base image to a registry and update the source template first.
 </Callout>
 

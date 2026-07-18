@@ -113,6 +113,7 @@ func TestReconcileCreatesRuntimeResourcesBeforeDeploymentReady(t *testing.T) {
 						Type: corev1.ServiceTypeNodePort,
 						Port: 30500,
 					},
+					PushEndpoint: "127.0.0.1:30500",
 				},
 			},
 		},
@@ -151,8 +152,10 @@ func TestReconcileCreatesRuntimeResourcesBeforeDeploymentReady(t *testing.T) {
 	if err := json.Unmarshal(pullSecret.Data[corev1.DockerConfigJsonKey], &dockerConfig); err != nil {
 		t.Fatalf("decode registry pull secret: %v", err)
 	}
-	if _, ok := dockerConfig.Auths["demo-registry.sandbox0-system.svc:30500"]; !ok {
-		t.Fatalf("expected pull credentials for service port, got %#v", dockerConfig.Auths)
+	for _, registryHost := range []string{"127.0.0.1:30500", "demo-registry.sandbox0-system.svc:30500"} {
+		if _, ok := dockerConfig.Auths[registryHost]; !ok {
+			t.Fatalf("expected pull credentials for %q, got %#v", registryHost, dockerConfig.Auths)
+		}
 	}
 }
 

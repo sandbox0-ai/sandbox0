@@ -96,7 +96,7 @@ func ResolveRegistryConfig(infra *infrav1alpha1.Sandbox0Infra) *ResolvedRegistry
 			return nil
 		}
 		pushRegistry := builtinPushRegistry(infra, builtin)
-		pullRegistry := builtinPullRegistry(infra, builtin.Port)
+		pullRegistry := builtinPullRegistry(infra, builtin)
 		return &ResolvedRegistryConfig{
 			Provider:         provider,
 			PushRegistry:     pushRegistry,
@@ -461,7 +461,7 @@ func (r *Reconciler) reconcileRegistryAuthSecret(ctx context.Context, infra *inf
 
 func (r *Reconciler) reconcileRegistryPullSecret(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, builtin infrav1alpha1.BuiltinRegistryConfig, username, password string) error {
 	secretName := fmt.Sprintf("%s-%s", infra.Name, registryPullSecretSuffix)
-	pullRegistry := builtinPullRegistry(infra, builtin.Port)
+	pullRegistry := builtinPullRegistry(infra, builtin)
 	dockerConfig, err := buildDockerConfigJSON(pullRegistry, username, password)
 	if err != nil {
 		return err
@@ -731,10 +731,11 @@ func builtinPushRegistry(infra *infrav1alpha1.Sandbox0Infra, builtin infrav1alph
 	if builtin.Ingress != nil && builtin.Ingress.Enabled && builtin.Ingress.Host != "" {
 		return normalizeRegistryHost(builtin.Ingress.Host)
 	}
-	return builtinPullRegistry(infra, builtin.Port)
+	return builtinPullRegistry(infra, builtin)
 }
 
-func builtinPullRegistry(infra *infrav1alpha1.Sandbox0Infra, port int32) string {
+func builtinPullRegistry(infra *infrav1alpha1.Sandbox0Infra, builtin infrav1alpha1.BuiltinRegistryConfig) string {
+	port := common.ResolveServicePort(builtin.Service, builtin.Port)
 	return fmt.Sprintf("%s-registry.%s.svc:%d", infra.Name, infra.Namespace, port)
 }
 

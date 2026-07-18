@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 )
 
 func TestResolveRegistryConfigReturnsNilWhenRegistryIsNotDeclared(t *testing.T) {
@@ -50,6 +51,38 @@ func TestResolveBuiltinRegistryConfigDefaultsToEnabledWhenProviderIsOmitted(t *t
 	cfg := resolveBuiltinRegistryConfig(infra)
 	if !cfg.Enabled {
 		t.Fatal("expected builtin registry to default to enabled when provider is omitted")
+	}
+}
+
+func TestResolveRegistryConfigUsesBuiltinServicePort(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Registry: &infrav1alpha1.RegistryConfig{
+				Provider: infrav1alpha1.RegistryProviderBuiltin,
+				Builtin: &infrav1alpha1.BuiltinRegistryConfig{
+					Enabled: true,
+					Port:    5000,
+					Service: &infrav1alpha1.ServiceNetworkConfig{
+						Type: corev1.ServiceTypeNodePort,
+						Port: 30500,
+					},
+				},
+			},
+		},
+	}
+	infra.Name = "demo"
+	infra.Namespace = "sandbox0-system"
+
+	cfg := ResolveRegistryConfig(infra)
+	if cfg == nil {
+		t.Fatal("expected resolved registry config")
+	}
+	const want = "demo-registry.sandbox0-system.svc:30500"
+	if cfg.PushRegistry != want {
+		t.Fatalf("unexpected push registry: %q", cfg.PushRegistry)
+	}
+	if cfg.PullRegistry != want {
+		t.Fatalf("unexpected pull registry: %q", cfg.PullRegistry)
 	}
 }
 

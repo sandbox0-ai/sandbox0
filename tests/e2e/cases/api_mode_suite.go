@@ -1414,21 +1414,41 @@ test "$(stat -c %%a %s)" = 751
 }
 
 func assertTemplateFromSandboxLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session, templateNamePrefix string) {
-	sourceClaim := claimSandboxEventually(env, session, "default")
-	sourceSandboxID := sourceClaim.SandboxId
-	Expect(sourceSandboxID).NotTo(BeEmpty())
-	derivedSandboxID := ""
 	derivedTemplateID := fmt.Sprintf("%s-from-sandbox-%d", templateNamePrefix, time.Now().UnixNano()%1_000_000_000)
+	sourceTemplateID := derivedTemplateID + "-source"
+	sourceSandboxID := ""
+	derivedSandboxID := ""
 	DeferCleanup(func() {
 		if derivedSandboxID != "" {
 			_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), derivedSandboxID)
 		}
 		_ = session.DeleteTemplate(env.TestCtx.Context, GinkgoT(), derivedTemplateID)
-		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sourceSandboxID)
+		if sourceSandboxID != "" {
+			_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sourceSandboxID)
+		}
+		_ = session.DeleteTemplate(env.TestCtx.Context, GinkgoT(), sourceTemplateID)
 	})
 
-	sourceNamespace, err := naming.TemplateNamespaceForBuiltin("default")
+	base, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), "default")
 	Expect(err).NotTo(HaveOccurred())
+	sourceTemplateRequest := e2eutils.CloneTemplateForCreate(*base, sourceTemplateID)
+	Expect(sourceTemplateRequest.Spec.MainContainer).NotTo(BeNil())
+	Expect(sourceTemplateRequest.Spec.Pool).NotTo(BeNil())
+	// The default image is loaded into kind from a Docker archive for most
+	// tests. Force this source pod to resolve the registry manifest so the
+	// captured base digest remains remotely fetchable by the image publisher.
+	sourceTemplateRequest.Spec.MainContainer.ImagePullPolicy = ptr("Always")
+	sourceTemplateRequest.Spec.Pool.MinIdle = 0
+	sourceTemplateRequest.Spec.Pool.MaxIdle = 0
+	sourceTemplate, err := session.CreateTemplate(env.TestCtx.Context, GinkgoT(), sourceTemplateRequest)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(sourceTemplate).NotTo(BeNil())
+
+	sourceNamespace, err := naming.TemplateNamespaceForTeam(expectStringPtr(sourceTemplate.TeamId, "source team id"))
+	Expect(err).NotTo(HaveOccurred())
+	sourceClaim := claimSandboxEventually(env, session, sourceTemplateID)
+	sourceSandboxID = sourceClaim.SandboxId
+	Expect(sourceSandboxID).NotTo(BeEmpty())
 	source := waitForSandboxPodReadyEventually(env, session, sourceSandboxID, sourceNamespace)
 
 	marker := fmt.Sprintf("sandbox-template-marker-%d", time.Now().UnixNano())

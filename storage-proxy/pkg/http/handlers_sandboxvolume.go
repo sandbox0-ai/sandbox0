@@ -309,6 +309,7 @@ func (s *Server) listSandboxVolumes(w http.ResponseWriter, r *http.Request) {
 	if volumes == nil {
 		volumes = []*db.SandboxVolume{}
 	}
+	s.populateSandboxVolumeStorageUsage(r.Context(), teamID, volumes)
 
 	_ = spec.WriteSuccess(w, http.StatusOK, volumes)
 }
@@ -350,7 +351,83 @@ func (s *Server) getSandboxVolume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.populateSingleSandboxVolumeStorageUsage(r.Context(), vol)
 	_ = spec.WriteSuccess(w, http.StatusOK, vol)
+}
+
+func (s *Server) populateSandboxVolumeStorageUsage(ctx context.Context, teamID string, volumes []*db.SandboxVolume) {
+	for _, vol := range volumes {
+		clearSandboxVolumeStorageUsage(vol)
+	}
+	repo, ok := configuredMeteringRepository(s.meteringRepo)
+	if !ok || len(volumes) == 0 {
+		return
+	}
+	states, err := repo.ListStorageProjectionStatesByTeam(ctx, meteringpkg.SubjectTypeVolume, teamID)
+	if err != nil {
+		s.logger.WithError(err).WithField("team_id", teamID).Warn("Failed to read metered sandbox volume storage usage")
+		return
+	}
+	statesByVolumeID := make(map[string]*meteringpkg.StorageProjectionState, len(states))
+	for _, state := range states {
+		if state != nil {
+			statesByVolumeID[state.SubjectID] = state
+		}
+	}
+	for _, vol := range volumes {
+		if vol == nil {
+			continue
+		}
+		applySandboxVolumeStorageUsage(vol, statesByVolumeID[vol.ID])
+	}
+}
+
+func (s *Server) populateSingleSandboxVolumeStorageUsage(ctx context.Context, vol *db.SandboxVolume) {
+	clearSandboxVolumeStorageUsage(vol)
+	if !isS0FSVolume(vol) {
+		return
+	}
+	repo, ok := configuredMeteringRepository(s.meteringRepo)
+	if !ok {
+		return
+	}
+	state, err := repo.GetStorageProjectionState(ctx, meteringpkg.SubjectTypeVolume, vol.ID)
+	if err != nil {
+		s.logger.WithError(err).WithField("volume_id", vol.ID).Warn("Failed to read metered sandbox volume storage usage")
+		return
+	}
+	applySandboxVolumeStorageUsage(vol, state)
+}
+
+func applySandboxVolumeStorageUsage(vol *db.SandboxVolume, state *meteringpkg.StorageProjectionState) {
+	if !isS0FSVolume(vol) || state == nil ||
+		state.SubjectType != meteringpkg.SubjectTypeVolume ||
+		state.SubjectID != vol.ID ||
+		state.TeamID != vol.TeamID ||
+		state.SizeBytes < 0 ||
+		state.ObservedAt.IsZero() {
+		return
+	}
+	sizeBytes := state.SizeBytes
+	observedAt := state.ObservedAt.UTC()
+	vol.MeteredStorageBytes = &sizeBytes
+	vol.StorageObservedAt = &observedAt
+}
+
+func clearSandboxVolumeStorageUsage(vol *db.SandboxVolume) {
+	if vol == nil {
+		return
+	}
+	vol.MeteredStorageBytes = nil
+	vol.StorageObservedAt = nil
+}
+
+func isS0FSVolume(vol *db.SandboxVolume) bool {
+	if vol == nil {
+		return false
+	}
+	backend := strings.TrimSpace(vol.Backend)
+	return backend == "" || backend == "s0fs"
 }
 
 func (s *Server) deleteSandboxVolume(w http.ResponseWriter, r *http.Request) {

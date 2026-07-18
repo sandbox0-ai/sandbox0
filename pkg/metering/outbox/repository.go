@@ -225,6 +225,52 @@ func (r *Repository) RecordStorageObservation(ctx context.Context, observation *
 	})
 }
 
+func (r *Repository) GetStorageProjectionState(ctx context.Context, subjectType, subjectID string) (*metering.StorageProjectionState, error) {
+	if r == nil || r.pool == nil {
+		return nil, fmt.Errorf("metering outbox pool is not configured")
+	}
+	return getStorageProjectionState(ctx, r.pool, subjectType, subjectID, false)
+}
+
+func (r *Repository) ListStorageProjectionStatesByTeam(ctx context.Context, subjectType, teamID string) ([]*metering.StorageProjectionState, error) {
+	if r == nil || r.pool == nil {
+		return nil, fmt.Errorf("metering outbox pool is not configured")
+	}
+	if strings.TrimSpace(subjectType) == "" {
+		return nil, fmt.Errorf("storage subject_type is required")
+	}
+	if strings.TrimSpace(teamID) == "" {
+		return nil, fmt.Errorf("team_id is required")
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT
+			subject_type, subject_id, product, owner_kind,
+			team_id, user_id, COALESCE(sandbox_id, ''), COALESCE(volume_id, ''),
+			COALESCE(snapshot_id, ''), COALESCE(cluster_id, ''), region_id,
+			size_bytes, observed_at, unbilled_byte_nanoseconds
+		FROM metering.storage_projection_state
+		WHERE subject_type = $1 AND team_id = $2
+		ORDER BY subject_id
+	`, subjectType, teamID)
+	if err != nil {
+		return nil, fmt.Errorf("query storage projection states by team: %w", err)
+	}
+	defer rows.Close()
+
+	states := make([]*metering.StorageProjectionState, 0)
+	for rows.Next() {
+		state := &metering.StorageProjectionState{}
+		if err := scanStorageState(rows, state); err != nil {
+			return nil, fmt.Errorf("scan storage projection state: %w", err)
+		}
+		states = append(states, state)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate storage projection states: %w", err)
+	}
+	return states, nil
+}
+
 func (r *Repository) RecordStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *metering.StorageObservation) error {
 	if tx == nil {
 		return fmt.Errorf("metering storage observation transaction is nil")
@@ -233,7 +279,7 @@ func (r *Repository) RecordStorageObservationTx(ctx context.Context, tx pgx.Tx, 
 	if err != nil {
 		return err
 	}
-	previous, err := getStorageProjectionStateForUpdate(ctx, tx, state.SubjectType, state.SubjectID)
+	previous, err := getStorageProjectionState(ctx, tx, state.SubjectType, state.SubjectID, true)
 	if err != nil {
 		return err
 	}
@@ -266,7 +312,7 @@ func (r *Repository) CloseStorageObservationTx(ctx context.Context, tx pgx.Tx, o
 	if err != nil {
 		return err
 	}
-	previous, err := getStorageProjectionStateForUpdate(ctx, tx, state.SubjectType, state.SubjectID)
+	previous, err := getStorageProjectionState(ctx, tx, state.SubjectType, state.SubjectID, true)
 	if err != nil {
 		return err
 	}
@@ -654,9 +700,11 @@ func getSandboxProjectionState(ctx context.Context, source db, sandboxID string,
 	return state, nil
 }
 
-func getStorageProjectionStateForUpdate(ctx context.Context, tx pgx.Tx, subjectType, subjectID string) (*metering.StorageProjectionState, error) {
-	state := &metering.StorageProjectionState{}
-	err := tx.QueryRow(ctx, `
+func getStorageProjectionState(ctx context.Context, source db, subjectType, subjectID string, forUpdate bool) (*metering.StorageProjectionState, error) {
+	if strings.TrimSpace(subjectType) == "" || strings.TrimSpace(subjectID) == "" {
+		return nil, fmt.Errorf("storage subject_type and subject_id are required")
+	}
+	query := `
 		SELECT
 			subject_type, subject_id, product, owner_kind,
 			team_id, user_id, COALESCE(sandbox_id, ''), COALESCE(volume_id, ''),
@@ -664,13 +712,12 @@ func getStorageProjectionStateForUpdate(ctx context.Context, tx pgx.Tx, subjectT
 			size_bytes, observed_at, unbilled_byte_nanoseconds
 		FROM metering.storage_projection_state
 		WHERE subject_type = $1 AND subject_id = $2
-		FOR UPDATE
-	`, subjectType, subjectID).Scan(
-		&state.SubjectType, &state.SubjectID, &state.Product, &state.OwnerKind,
-		&state.TeamID, &state.UserID, &state.SandboxID, &state.VolumeID,
-		&state.SnapshotID, &state.ClusterID, &state.RegionID,
-		&state.SizeBytes, &state.ObservedAt, &state.UnbilledByteNanoseconds,
-	)
+	`
+	if forUpdate {
+		query += " FOR UPDATE"
+	}
+	state := &metering.StorageProjectionState{}
+	err := scanStorageState(source.QueryRow(ctx, query, subjectType, subjectID), state)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}

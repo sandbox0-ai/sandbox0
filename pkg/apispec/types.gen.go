@@ -2624,16 +2624,22 @@ type SandboxVolume struct {
 	AccessMode *VolumeAccessMode `json:"access_mode,omitempty"`
 
 	// Backend Storage backend for a SandboxVolume. s0fs is the default durable Sandbox0 volume backend. s3 mounts an existing S3-compatible prefix through the volume portal and supports mount-s3-like object projection.
-	Backend         VolumeBackend          `json:"backend"`
-	CreatedAt       time.Time              `json:"created_at"`
-	DefaultPosixGid *int64                 `json:"default_posix_gid"`
-	DefaultPosixUid *int64                 `json:"default_posix_uid"`
-	Id              string                 `json:"id"`
-	S3              *SandboxVolumeS3Config `json:"s3,omitempty"`
-	SourceVolumeId  *string                `json:"source_volume_id"`
-	TeamId          string                 `json:"team_id"`
-	UpdatedAt       time.Time              `json:"updated_at"`
-	UserId          string                 `json:"user_id"`
+	Backend         VolumeBackend `json:"backend"`
+	CreatedAt       time.Time     `json:"created_at"`
+	DefaultPosixGid *int64        `json:"default_posix_gid"`
+	DefaultPosixUid *int64        `json:"default_posix_uid"`
+	Id              string        `json:"id"`
+
+	// MeteredStorageBytes Latest metered logical payload bytes stored by this S0FS volume. Null for external backends or when metering state is unavailable.
+	MeteredStorageBytes *int64                 `json:"metered_storage_bytes"`
+	S3                  *SandboxVolumeS3Config `json:"s3,omitempty"`
+	SourceVolumeId      *string                `json:"source_volume_id"`
+
+	// StorageObservedAt Time when metered_storage_bytes was last observed. Null for external backends or when metering state is unavailable.
+	StorageObservedAt *time.Time `json:"storage_observed_at"`
+	TeamId            string     `json:"team_id"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	UserId            string     `json:"user_id"`
 }
 
 // SandboxVolumeS3Config defines model for SandboxVolumeS3Config.

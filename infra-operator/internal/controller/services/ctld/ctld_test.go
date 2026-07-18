@@ -401,7 +401,26 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 
 	scheme := newCtldTestScheme(t)
 
-	objects := []ctrlclient.Object{infra.DeepCopy()}
+	objects := []ctrlclient.Object{
+		infra.DeepCopy(),
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: infra.Name + "-sandbox0-database-credentials", Namespace: infra.Namespace},
+			Data: map[string][]byte{
+				"username": []byte("sandbox0"),
+				"password": []byte("db-password"),
+				"database": []byte("sandbox0"),
+				"port":     []byte("5432"),
+			},
+		},
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: infra.Name + "-sandbox0-rustfs-credentials", Namespace: infra.Namespace},
+			Data: map[string][]byte{
+				"endpoint":          []byte("http://demo-rustfs.sandbox0-system.svc:9000"),
+				"RUSTFS_ACCESS_KEY": []byte("access-key"),
+				"RUSTFS_SECRET_KEY": []byte("secret-key"),
+			},
+		},
+	}
 	objects = append(objects, extraObjects...)
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -718,13 +737,49 @@ func TestReconcileInjectsRuntimeSampleProducerConfigAndJWTKey(t *testing.T) {
 	assert.Equal(t, 3*time.Second, cfg.SandboxObservabilityIngestRequestTimeout.Duration)
 }
 
+func TestReconcileInjectsMeteringIntoCtldStorageConfig(t *testing.T) {
+	infra := newCtldTestInfra()
+	enabled := true
+	infra.Spec.ClickHouse = &infrav1alpha1.ClickHouseConfig{
+		Type: infrav1alpha1.ClickHouseTypeExternal,
+		External: &infrav1alpha1.ExternalClickHouseConfig{
+			DSNSecret: infrav1alpha1.ClickHouseDSNSecretRef{Name: "metering-clickhouse", Key: "dsn"},
+		},
+	}
+	infra.Spec.Metering = &infrav1alpha1.MeteringConfig{Enabled: &enabled}
+	dsn := "clickhouse://sandbox0:password@clickhouse:9000/sandbox0_metering"
+	dsnSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "metering-clickhouse", Namespace: infra.Namespace},
+		Data:       map[string][]byte{"dsn": []byte(dsn)},
+	}
+
+	ds, client := reconcileCtldResources(t, infra, dsnSecret)
+	configMapName := ""
+	for _, volume := range ds.Spec.Template.Spec.Volumes {
+		if volume.Name == "config" && volume.ConfigMap != nil {
+			configMapName = volume.ConfigMap.Name
+			break
+		}
+	}
+	require.NotEmpty(t, configMapName)
+	configMap := &corev1.ConfigMap{}
+	require.NoError(t, client.Get(context.Background(), types.NamespacedName{Name: configMapName, Namespace: infra.Namespace}, configMap))
+	cfg := &apiconfig.CtldConfig{}
+	require.NoError(t, yaml.Unmarshal([]byte(configMap.Data["config.yaml"]), cfg))
+	assert.True(t, cfg.Metering.Enabled)
+	assert.Equal(t, dsn, cfg.Metering.ClickHouse.DSN)
+	assert.Equal(t, "sandbox0_metering", cfg.Metering.ClickHouse.Database)
+	assert.Equal(t, "storage_projection_state", cfg.Metering.ClickHouse.StorageStateTable)
+}
+
 func TestBuildStorageConfigDefaultsDataPlaneIdentity(t *testing.T) {
 	infra := newCtldTestInfra()
 	infra.Spec.PublicExposure = &infrav1alpha1.PublicExposureConfig{
 		RegionID: "aws-us-east-1",
 	}
 
-	reconciler := NewReconciler(common.NewResourceManager(nil, nil, nil, common.LocalDevConfig{}))
+	_, client := reconcileCtldResources(t, infra)
+	reconciler := NewReconciler(common.NewResourceManager(client, newCtldTestScheme(t), nil, common.LocalDevConfig{}))
 	cfg, err := reconciler.buildStorageConfig(context.Background(), infra)
 	if err != nil {
 		t.Fatalf("buildStorageConfig returned error: %v", err)
@@ -849,6 +904,18 @@ func newCtldTestInfra() *infrav1alpha1.Sandbox0Infra {
 			Namespace: "sandbox0-system",
 		},
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
+					Enabled: true, Port: 5432, Username: "sandbox0", Database: "sandbox0", SSLMode: "disable",
+				},
+			},
+			Storage: &infrav1alpha1.StorageConfig{
+				Type: infrav1alpha1.StorageTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinStorageConfig{
+					Enabled: true, Bucket: "sandbox0", Region: "us-east-1",
+				},
+			},
 			Services: &infrav1alpha1.ServicesConfig{
 				Manager: &infrav1alpha1.ManagerServiceConfig{
 					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{

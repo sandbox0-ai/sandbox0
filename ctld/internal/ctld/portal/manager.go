@@ -45,6 +45,7 @@ type Manager struct {
 	logger                 *zap.Logger
 	logrus                 *logrus.Logger
 	storage                *apiconfig.StorageProxyConfig
+	storageObserver        volume.StorageObserver
 	s3CredentialCodec      *volume.S3BackendCredentialCodec
 	s3CredentialCodecErr   error
 	repo                   *db.Repository
@@ -124,6 +125,7 @@ type Config struct {
 	KubeletPodsRoot         string
 	Logger                  *zap.Logger
 	StorageConfig           *apiconfig.StorageProxyConfig
+	StorageObserver         volume.StorageObserver
 	Repository              *db.Repository
 	PodName                 string
 	PodNamespace            string
@@ -182,6 +184,7 @@ func NewManager(cfg Config) *Manager {
 		logger:                 logger,
 		logrus:                 l,
 		storage:                storageConfig,
+		storageObserver:        cfg.StorageObserver,
 		s3CredentialCodec:      s3CredentialCodec,
 		s3CredentialCodecErr:   s3CredentialCodecErr,
 		repo:                   cfg.Repository,
@@ -1004,17 +1007,7 @@ func (m *Manager) openS0FSBoundVolume(ctx context.Context, req ctldapi.BindVolum
 	if err != nil {
 		return nil, nil, fmt.Errorf("open local s0fs engine: %w", err)
 	}
-	volCtx := &volume.VolumeContext{
-		VolumeID:  req.SandboxVolumeID,
-		TeamID:    volumeRecord.TeamID,
-		Backend:   volume.BackendS0FS,
-		S0FS:      engine,
-		Access:    accessMode,
-		MountedAt: mountedAt,
-		RootInode: 1,
-		RootPath:  "/",
-		CacheDir:  cacheDir,
-	}
+	volCtx := m.newS0FSVolumeContext(req.SandboxVolumeID, volumeRecord.TeamID, engine, accessMode, mountedAt, cacheDir)
 	volCtx.RestoreHandleState(handleState)
 	engine.PruneUnlinked(retainedUnlinkedInodes(handleState))
 	session := newLocalSession(req.SandboxVolumeID, m.volumes, m.logrus)
@@ -1034,6 +1027,27 @@ func (m *Manager) openS0FSBoundVolume(ctx context.Context, req ctldapi.BindVolum
 		statePath: statePath,
 	}
 	return bound, func() { _ = engine.Close() }, nil
+}
+
+func (m *Manager) newS0FSVolumeContext(
+	volumeID, teamID string,
+	engine *s0fs.Engine,
+	accessMode volume.AccessMode,
+	mountedAt time.Time,
+	cacheDir string,
+) *volume.VolumeContext {
+	return &volume.VolumeContext{
+		VolumeID:  volumeID,
+		TeamID:    teamID,
+		Backend:   volume.BackendS0FS,
+		S0FS:      engine,
+		Access:    accessMode,
+		MountedAt: mountedAt,
+		RootInode: 1,
+		RootPath:  "/",
+		CacheDir:  cacheDir,
+		Observer:  m.storageObserver,
+	}
 }
 
 func (m *Manager) openS3BoundVolume(req ctldapi.BindVolumePortalRequest, volumeRecord *db.SandboxVolume, accessMode volume.AccessMode, mountedAt time.Time) (*boundVolume, func(), error) {
@@ -1204,17 +1218,7 @@ func (m *Manager) AttachOwner(ctx context.Context, req ctldapi.AttachVolumeOwner
 	if err != nil {
 		return ctldapi.AttachVolumeOwnerResponse{}, fmt.Errorf("open local s0fs engine: %w", err)
 	}
-	volCtx := &volume.VolumeContext{
-		VolumeID:  req.SandboxVolumeID,
-		TeamID:    volumeRecord.TeamID,
-		Backend:   volume.BackendS0FS,
-		S0FS:      engine,
-		Access:    accessMode,
-		MountedAt: mountedAt,
-		RootInode: 1,
-		RootPath:  "/",
-		CacheDir:  cacheDir,
-	}
+	volCtx := m.newS0FSVolumeContext(req.SandboxVolumeID, volumeRecord.TeamID, engine, accessMode, mountedAt, cacheDir)
 
 	m.mu.Lock()
 	if bound := m.boundVolumes[req.SandboxVolumeID]; bound != nil {
@@ -1307,10 +1311,12 @@ func (m *Manager) PrepareSnapshotCheckpoint(ctx context.Context, req ctldapi.Pre
 	if err := m.volumes.prepareSnapshotCheckpoint(ctx, volumeID); err != nil {
 		return ctldapi.PrepareVolumeSnapshotCheckpointResponse{}, err
 	}
-	if _, err := bound.volCtx.S0FS.SyncMaterialize(ctx); err != nil {
+	materialization, err := bound.volCtx.SyncMaterialize(ctx)
+	if err != nil {
 		m.volumes.completeSnapshotCheckpoint(volumeID)
 		return ctldapi.PrepareVolumeSnapshotCheckpointResponse{}, err
 	}
+	m.logStorageObservationError(volumeID, materialization.ObservationError)
 	return ctldapi.PrepareVolumeSnapshotCheckpointResponse{Prepared: true}, nil
 }
 
@@ -1605,11 +1611,12 @@ func (m *Manager) startMaterializer(bound *boundVolume) {
 				return
 			case <-ticker.C:
 				ran, err := m.tryRunMaterializer(ctx, func() error {
-					manifest, err := bound.volCtx.S0FS.SyncMaterialize(ctx)
+					materialization, err := bound.volCtx.SyncMaterialize(ctx)
 					if err != nil {
 						return err
 					}
-					m.garbageCollectBoundS0FS(ctx, bound, manifest)
+					m.logStorageObservationError(volumeID, materialization.ObservationError)
+					m.garbageCollectBoundS0FS(ctx, bound, materialization.Manifest)
 					return nil
 				})
 				if !ran {
@@ -1621,13 +1628,14 @@ func (m *Manager) startMaterializer(bound *boundVolume) {
 			case <-compactionC:
 				var result *s0fs.CompactionResult
 				ran, err := m.tryRunMaterializer(ctx, func() error {
-					var resultManifest *s0fs.Manifest
+					var materialization volume.MaterializationResult
 					var compactErr error
-					resultManifest, result, compactErr = bound.volCtx.S0FS.Compact(ctx, compactionOptions)
+					materialization, result, compactErr = bound.volCtx.Compact(ctx, compactionOptions)
 					if compactErr != nil {
 						return compactErr
 					}
-					m.garbageCollectBoundS0FS(ctx, bound, resultManifest)
+					m.logStorageObservationError(volumeID, materialization.ObservationError)
+					m.garbageCollectBoundS0FS(ctx, bound, materialization.Manifest)
 					return nil
 				})
 				if !ran {
@@ -1648,6 +1656,13 @@ func (m *Manager) startMaterializer(bound *boundVolume) {
 			}
 		}
 	}(bound.volumeID)
+}
+
+func (m *Manager) logStorageObservationError(volumeID string, err error) {
+	if err == nil || m == nil || m.logger == nil {
+		return
+	}
+	m.logger.Warn("ctld volume storage observation failed", zap.String("volume_id", volumeID), zap.Error(err))
 }
 
 func (m *Manager) tryRunMaterializer(ctx context.Context, fn func() error) (bool, error) {

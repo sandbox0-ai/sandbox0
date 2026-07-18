@@ -13,13 +13,40 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 )
+
+type testStorageObserver struct{}
+
+func (*testStorageObserver) ObserveVolumeState(context.Context, string, string, *s0fs.SnapshotState, time.Time) error {
+	return nil
+}
 
 func TestPortalMountOptionsDisableUnsupportedIDMapCapability(t *testing.T) {
 	opts := portalMountOptions()
 	if opts.DisabledCapabilities&fuse.CAP_ALLOW_IDMAP == 0 {
 		t.Fatal("portal mount options enable FUSE_ALLOW_IDMAP without default_permissions")
+	}
+}
+
+func TestNewS0FSVolumeContextWiresStorageObserver(t *testing.T) {
+	observer := &testStorageObserver{}
+	mgr := NewManager(Config{
+		RootDir:         t.TempDir(),
+		StorageObserver: observer,
+	})
+	mountedAt := time.Now().UTC()
+	volCtx := mgr.newS0FSVolumeContext("vol-1", "team-1", nil, volume.AccessModeRWO, mountedAt, "/cache")
+
+	if volCtx.Observer != observer {
+		t.Fatal("newS0FSVolumeContext() did not wire the configured storage observer")
+	}
+	if volCtx.VolumeID != "vol-1" || volCtx.TeamID != "team-1" || volCtx.Backend != volume.BackendS0FS {
+		t.Fatalf("newS0FSVolumeContext() identity = %#v", volCtx)
+	}
+	if volCtx.Access != volume.AccessModeRWO || !volCtx.MountedAt.Equal(mountedAt) || volCtx.CacheDir != "/cache" {
+		t.Fatalf("newS0FSVolumeContext() mount metadata = %#v", volCtx)
 	}
 }
 

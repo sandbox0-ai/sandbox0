@@ -175,6 +175,10 @@ The source sandbox may be running or paused. Because capture is asynchronous, re
 You do not provide an image repository or registry credentials. Sandbox0 publishes to the registry configured by the platform operator and stores a digest-pinned image reference in the completed template.
 </Callout>
 
+<Callout variant="warning">
+The source template image must remain resolvable by digest from its original registry while the build is publishing. A node-local or preloaded image with no matching registry manifest cannot currently be used as the source; publish that base image to a registry and update the source template first.
+</Callout>
+
 The caller needs both `template:create` and `sandbox:read` permissions.
 
 To retry safely after a network error, send the same `Idempotency-Key` header with the same request body. The key remains bound to that create request while the template exists, even if the ready template is later updated; a replay returns the template's current representation. Reusing the key with a different request returns a conflict. Deleting the template releases the key.

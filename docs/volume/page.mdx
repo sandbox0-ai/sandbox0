@@ -51,6 +51,15 @@ Backend choice controls which operations are available. `s0fs` supports snapshot
 
 For the full compatibility matrix and S3 backend examples, see [Volume Backends](/docs/sandbox/volume/backends).
 
+## Metered Storage Usage
+
+Volume detail and list responses expose the latest storage observation for `s0fs` volumes:
+
+- `metered_storage_bytes` is the metered logical payload size in bytes
+- `storage_observed_at` is the time that size was observed
+
+Both fields are `null` for external `s3` volumes and when a current metering projection is unavailable. These fields describe the latest current size; they are separate from historical `sandbox.volume_byte_hours` usage windows.
+
 ## Correctness Model
 
 For mounted `RWO` volumes, Sandbox0 keeps one active writable owner at a time.

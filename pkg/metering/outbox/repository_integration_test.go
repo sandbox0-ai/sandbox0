@@ -172,6 +172,28 @@ func TestRepositoryStorageProjectionIsAtomicWithCallerTransaction(t *testing.T) 
 	assertCount(t, pool, `SELECT COUNT(*) FROM metering.storage_projection_state`, 1)
 	assertCount(t, pool, `SELECT COUNT(*) FROM metering.projection_outbox WHERE operation_type = 'window'`, 1)
 	assertCount(t, pool, `SELECT COUNT(*) FROM metering.projection_outbox WHERE operation_type = 'storage_state'`, 2)
+
+	state, err := repo.GetStorageProjectionState(ctx, metering.SubjectTypeVolume, "volume-1")
+	if err != nil {
+		t.Fatalf("get storage projection state: %v", err)
+	}
+	if state == nil || state.SizeBytes != 1024 || !state.ObservedAt.Equal(start.Add(time.Hour)) {
+		t.Fatalf("storage projection state = %+v, want size 1024 observed at %s", state, start.Add(time.Hour))
+	}
+	states, err := repo.ListStorageProjectionStatesByTeam(ctx, metering.SubjectTypeVolume, "team-1")
+	if err != nil {
+		t.Fatalf("list storage projection states: %v", err)
+	}
+	if len(states) != 1 || states[0].SubjectID != "volume-1" {
+		t.Fatalf("storage projection states = %+v, want volume-1", states)
+	}
+	otherTeamStates, err := repo.ListStorageProjectionStatesByTeam(ctx, metering.SubjectTypeVolume, "team-2")
+	if err != nil {
+		t.Fatalf("list other team storage projection states: %v", err)
+	}
+	if len(otherTeamStates) != 0 {
+		t.Fatalf("other team storage projection states = %+v, want empty", otherTeamStates)
+	}
 }
 
 func TestMigrationsUpgradeLegacyVersionFiveSchema(t *testing.T) {

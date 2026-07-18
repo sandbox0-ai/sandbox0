@@ -23,22 +23,29 @@ type SandboxVolume struct {
 	// omitted from JSON responses because S3 configs may contain credentials.
 	BackendConfig json.RawMessage `json:"-"`
 
+	// MeteredStorageBytes and StorageObservedAt are populated from the metering
+	// projection when volumes are returned by the public API.
+	MeteredStorageBytes *int64     `json:"metered_storage_bytes"`
+	StorageObservedAt   *time.Time `json:"storage_observed_at"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type sandboxVolumeJSON struct {
-	ID              string                     `json:"id"`
-	TeamID          string                     `json:"team_id"`
-	UserID          string                     `json:"user_id"`
-	SourceVolumeID  *string                    `json:"source_volume_id,omitempty"`
-	DefaultPosixUID *int64                     `json:"default_posix_uid,omitempty"`
-	DefaultPosixGID *int64                     `json:"default_posix_gid,omitempty"`
-	AccessMode      string                     `json:"access_mode"`
-	Backend         string                     `json:"backend"`
-	S3              *sandboxVolumeS3PublicJSON `json:"s3,omitempty"`
-	CreatedAt       time.Time                  `json:"created_at"`
-	UpdatedAt       time.Time                  `json:"updated_at"`
+	ID                  string                     `json:"id"`
+	TeamID              string                     `json:"team_id"`
+	UserID              string                     `json:"user_id"`
+	SourceVolumeID      *string                    `json:"source_volume_id,omitempty"`
+	DefaultPosixUID     *int64                     `json:"default_posix_uid,omitempty"`
+	DefaultPosixGID     *int64                     `json:"default_posix_gid,omitempty"`
+	AccessMode          string                     `json:"access_mode"`
+	Backend             string                     `json:"backend"`
+	S3                  *sandboxVolumeS3PublicJSON `json:"s3,omitempty"`
+	MeteredStorageBytes *int64                     `json:"metered_storage_bytes"`
+	StorageObservedAt   *time.Time                 `json:"storage_observed_at"`
+	CreatedAt           time.Time                  `json:"created_at"`
+	UpdatedAt           time.Time                  `json:"updated_at"`
 }
 
 type sandboxVolumeS3PublicJSON struct {
@@ -55,16 +62,18 @@ func (v SandboxVolume) MarshalJSON() ([]byte, error) {
 		backend = "s0fs"
 	}
 	out := sandboxVolumeJSON{
-		ID:              v.ID,
-		TeamID:          v.TeamID,
-		UserID:          v.UserID,
-		SourceVolumeID:  v.SourceVolumeID,
-		DefaultPosixUID: v.DefaultPosixUID,
-		DefaultPosixGID: v.DefaultPosixGID,
-		AccessMode:      v.AccessMode,
-		Backend:         backend,
-		CreatedAt:       v.CreatedAt,
-		UpdatedAt:       v.UpdatedAt,
+		ID:                  v.ID,
+		TeamID:              v.TeamID,
+		UserID:              v.UserID,
+		SourceVolumeID:      v.SourceVolumeID,
+		DefaultPosixUID:     v.DefaultPosixUID,
+		DefaultPosixGID:     v.DefaultPosixGID,
+		AccessMode:          v.AccessMode,
+		Backend:             backend,
+		MeteredStorageBytes: v.MeteredStorageBytes,
+		StorageObservedAt:   v.StorageObservedAt,
+		CreatedAt:           v.CreatedAt,
+		UpdatedAt:           v.UpdatedAt,
 	}
 	if backend == "s3" && len(v.BackendConfig) > 0 {
 		var cfg struct {

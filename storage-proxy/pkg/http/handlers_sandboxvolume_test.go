@@ -4,15 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
@@ -42,7 +46,7 @@ func TestCreateSandboxVolumeStoresDefaultPosixIdentity(t *testing.T) {
 	server := &Server{
 		logger:       logrus.New(),
 		repo:         repo,
-		meteringRepo: &fakeHTTPMeteringWriter{},
+		meteringRepo: &fakeHTTPMeteringRepository{},
 		snapshotMgr:  &fakeHTTPSnapshotManager{},
 	}
 
@@ -87,7 +91,7 @@ func TestCreateSandboxVolumeDefaultsPosixIdentityToRoot(t *testing.T) {
 	server := &Server{
 		logger:       logrus.New(),
 		repo:         repo,
-		meteringRepo: &fakeHTTPMeteringWriter{},
+		meteringRepo: &fakeHTTPMeteringRepository{},
 		snapshotMgr:  &fakeHTTPSnapshotManager{},
 	}
 
@@ -117,7 +121,7 @@ func TestCreateSandboxVolumeStoresS3BackendConfigAndRedactsResponse(t *testing.T
 	server := &Server{
 		logger:            logrus.New(),
 		repo:              repo,
-		meteringRepo:      &fakeHTTPMeteringWriter{},
+		meteringRepo:      &fakeHTTPMeteringRepository{},
 		snapshotMgr:       &fakeHTTPSnapshotManager{},
 		s3CredentialCodec: testHTTPS3BackendCredentialCodec(t),
 	}
@@ -261,7 +265,7 @@ func TestCreateSandboxVolumeRejectsUnsupportedS3Combinations(t *testing.T) {
 			server := &Server{
 				logger:       logrus.New(),
 				repo:         repo,
-				meteringRepo: &fakeHTTPMeteringWriter{},
+				meteringRepo: &fakeHTTPMeteringRepository{},
 				snapshotMgr:  &fakeHTTPSnapshotManager{},
 			}
 
@@ -286,7 +290,7 @@ func TestCreateSandboxVolumeRejectsS3BackendWithoutCredentialCodec(t *testing.T)
 	server := &Server{
 		logger:       logrus.New(),
 		repo:         repo,
-		meteringRepo: &fakeHTTPMeteringWriter{},
+		meteringRepo: &fakeHTTPMeteringRepository{},
 		snapshotMgr:  &fakeHTTPSnapshotManager{},
 	}
 
@@ -330,7 +334,7 @@ func TestCreateSandboxVolumeRejectsNullOrBlankSnapshotID(t *testing.T) {
 			server := &Server{
 				logger:       logrus.New(),
 				repo:         repo,
-				meteringRepo: &fakeHTTPMeteringWriter{},
+				meteringRepo: &fakeHTTPMeteringRepository{},
 				snapshotMgr:  snapshotMgr,
 			}
 
@@ -380,6 +384,168 @@ func TestListSandboxVolumesReturnsEmptyArray(t *testing.T) {
 	}
 	if len(*resp) != 0 {
 		t.Fatalf("volumes = %d, want 0", len(*resp))
+	}
+}
+
+func TestListSandboxVolumesIncludesMeteredS0FSStorageUsage(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	repo.volumes["vol-s0fs"] = &db.SandboxVolume{
+		ID:      "vol-s0fs",
+		TeamID:  "team-1",
+		UserID:  "user-1",
+		Backend: "s0fs",
+	}
+	repo.volumes["vol-s3"] = &db.SandboxVolume{
+		ID:      "vol-s3",
+		TeamID:  "team-1",
+		UserID:  "user-1",
+		Backend: "s3",
+	}
+	observedAt := time.Date(2026, 7, 18, 8, 30, 0, 0, time.UTC)
+	meteringRepo := &fakeHTTPMeteringRepository{
+		storageStates: map[string]*metering.StorageProjectionState{
+			metering.SubjectTypeVolume + "/vol-s0fs": {
+				SubjectType: metering.SubjectTypeVolume,
+				SubjectID:   "vol-s0fs",
+				TeamID:      "team-1",
+				SizeBytes:   12345,
+				ObservedAt:  observedAt,
+			},
+			metering.SubjectTypeVolume + "/vol-s3": {
+				SubjectType: metering.SubjectTypeVolume,
+				SubjectID:   "vol-s3",
+				TeamID:      "team-1",
+				SizeBytes:   99999,
+				ObservedAt:  observedAt,
+			},
+		},
+	}
+	server := &Server{
+		logger:       logrus.New(),
+		repo:         repo,
+		meteringRepo: meteringRepo,
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/sandboxvolumes", nil)
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
+	recorder := httptest.NewRecorder()
+
+	server.listSandboxVolumes(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	responseBody := recorder.Body.String()
+	resp, apiErr, err := spec.DecodeResponse[[]db.SandboxVolume](recorder.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr != nil {
+		t.Fatalf("unexpected api error: %+v", apiErr)
+	}
+	volumesByID := make(map[string]db.SandboxVolume, len(*resp))
+	for _, vol := range *resp {
+		volumesByID[vol.ID] = vol
+	}
+	s0fs := volumesByID["vol-s0fs"]
+	if s0fs.MeteredStorageBytes == nil || *s0fs.MeteredStorageBytes != 12345 {
+		t.Fatalf("s0fs metered_storage_bytes = %v, want 12345", s0fs.MeteredStorageBytes)
+	}
+	if s0fs.StorageObservedAt == nil || !s0fs.StorageObservedAt.Equal(observedAt) {
+		t.Fatalf("s0fs storage_observed_at = %v, want %s", s0fs.StorageObservedAt, observedAt)
+	}
+	s3 := volumesByID["vol-s3"]
+	if s3.MeteredStorageBytes != nil || s3.StorageObservedAt != nil {
+		t.Fatalf("external volume storage usage = (%v, %v), want null", s3.MeteredStorageBytes, s3.StorageObservedAt)
+	}
+	if !strings.Contains(responseBody, `"metered_storage_bytes":null`) {
+		t.Fatalf("response does not expose unavailable storage as null: %s", responseBody)
+	}
+}
+
+func TestGetSandboxVolumeIncludesMeteredStorageUsage(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{
+		ID:     "vol-1",
+		TeamID: "team-1",
+		UserID: "user-1",
+	}
+	observedAt := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
+	server := &Server{
+		logger: logrus.New(),
+		repo:   repo,
+		meteringRepo: &fakeHTTPMeteringRepository{
+			storageStates: map[string]*metering.StorageProjectionState{
+				metering.SubjectTypeVolume + "/vol-1": {
+					SubjectType: metering.SubjectTypeVolume,
+					SubjectID:   "vol-1",
+					TeamID:      "team-1",
+					SizeBytes:   67890,
+					ObservedAt:  observedAt,
+				},
+			},
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/sandboxvolumes/vol-1", nil)
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
+	recorder := httptest.NewRecorder()
+
+	server.getSandboxVolume(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	resp, apiErr, err := spec.DecodeResponse[db.SandboxVolume](recorder.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr != nil {
+		t.Fatalf("unexpected api error: %+v", apiErr)
+	}
+	if resp.MeteredStorageBytes == nil || *resp.MeteredStorageBytes != 67890 {
+		t.Fatalf("metered_storage_bytes = %v, want 67890", resp.MeteredStorageBytes)
+	}
+	if resp.StorageObservedAt == nil || !resp.StorageObservedAt.Equal(observedAt) {
+		t.Fatalf("storage_observed_at = %v, want %s", resp.StorageObservedAt, observedAt)
+	}
+}
+
+func TestGetSandboxVolumeToleratesUnavailableMeteringState(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{
+		ID:     "vol-1",
+		TeamID: "team-1",
+		UserID: "user-1",
+	}
+	server := &Server{
+		logger: logrus.New(),
+		repo:   repo,
+		meteringRepo: &fakeHTTPMeteringRepository{
+			storageReadErr: errors.New("metering unavailable"),
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/sandboxvolumes/vol-1", nil)
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
+	recorder := httptest.NewRecorder()
+
+	server.getSandboxVolume(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	resp, apiErr, err := spec.DecodeResponse[db.SandboxVolume](recorder.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr != nil {
+		t.Fatalf("unexpected api error: %+v", apiErr)
+	}
+	if resp.MeteredStorageBytes != nil || resp.StorageObservedAt != nil {
+		t.Fatalf("unavailable metering state = (%v, %v), want null", resp.MeteredStorageBytes, resp.StorageObservedAt)
 	}
 }
 
@@ -452,7 +618,7 @@ func TestCreateSandboxVolumeRejectsPartialDefaultPosixIdentity(t *testing.T) {
 	server := &Server{
 		logger:       logrus.New(),
 		repo:         newFakeHTTPRepo(),
-		meteringRepo: &fakeHTTPMeteringWriter{},
+		meteringRepo: &fakeHTTPMeteringRepository{},
 		snapshotMgr:  &fakeHTTPSnapshotManager{},
 	}
 
@@ -472,7 +638,7 @@ func TestCreateOwnedSandboxVolumeStoresOwnerMetadata(t *testing.T) {
 	server := &Server{
 		logger:       logrus.New(),
 		repo:         repo,
-		meteringRepo: &fakeHTTPMeteringWriter{},
+		meteringRepo: &fakeHTTPMeteringRepository{},
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/internal/v1/sandboxvolumes/owned", bytes.NewReader([]byte(`{"sandbox_id":"sandbox-a","cluster_id":"cluster-a","purpose":"webhook-state"}`)))

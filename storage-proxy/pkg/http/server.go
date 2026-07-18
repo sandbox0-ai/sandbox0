@@ -46,25 +46,27 @@ type volumeRepository interface {
 	MarkOwnedSandboxVolumeCleanupAttempt(ctx context.Context, volumeID string, cleanupErr error) error
 }
 
-type meteringWriter interface {
+type meteringRepository interface {
 	AppendEventTx(ctx context.Context, tx pgx.Tx, event *meteringpkg.Event) error
 	RecordStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *meteringpkg.StorageObservation) error
 	CloseStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *meteringpkg.StorageObservation) error
 	UpsertProducerWatermarkTx(ctx context.Context, tx pgx.Tx, producer string, regionID string, completeBefore time.Time) error
+	GetStorageProjectionState(ctx context.Context, subjectType, subjectID string) (*meteringpkg.StorageProjectionState, error)
+	ListStorageProjectionStatesByTeam(ctx context.Context, subjectType, teamID string) ([]*meteringpkg.StorageProjectionState, error)
 }
 
-func configuredMeteringWriter(writer meteringWriter) (meteringWriter, bool) {
-	if writer == nil {
+func configuredMeteringRepository(repo meteringRepository) (meteringRepository, bool) {
+	if repo == nil {
 		return nil, false
 	}
-	value := reflect.ValueOf(writer)
+	value := reflect.ValueOf(repo)
 	switch value.Kind() {
 	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
 		if value.IsNil() {
 			return nil, false
 		}
 	}
-	return writer, true
+	return repo, true
 }
 
 type snapshotManager interface {
@@ -126,7 +128,7 @@ type Server struct {
 	mux                  *http.ServeMux
 	cfg                  *config.StorageProxyConfig
 	repo                 volumeRepository
-	meteringRepo         meteringWriter
+	meteringRepo         meteringRepository
 	quotaRepo            *quota.Repository
 	regionID             string
 	authenticator        *auth.HTTPAuthenticator
@@ -149,7 +151,7 @@ func (s *Server) SetQuotaRepository(repo *quota.Repository) {
 }
 
 // NewServer creates a new HTTP server
-func NewServer(logger *logrus.Logger, cfg *config.StorageProxyConfig, k8sClient kubernetes.Interface, repo volumeRepository, meteringRepo meteringWriter, regionID string, authenticator *auth.HTTPAuthenticator, snapshotMgr snapshotManager, barrier volumeMutationBarrier, volMgr volumeMountManager, fileRPC volumeFileRPC, eventHub *notify.Hub) *Server {
+func NewServer(logger *logrus.Logger, cfg *config.StorageProxyConfig, k8sClient kubernetes.Interface, repo volumeRepository, meteringRepo meteringRepository, regionID string, authenticator *auth.HTTPAuthenticator, snapshotMgr snapshotManager, barrier volumeMutationBarrier, volMgr volumeMountManager, fileRPC volumeFileRPC, eventHub *notify.Hub) *Server {
 	selfPodID, err := os.Hostname()
 	if err != nil {
 		selfPodID = ""
@@ -310,7 +312,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) appendMeteringEventTx(ctx context.Context, tx pgx.Tx, event *meteringpkg.Event) error {
-	writer, ok := configuredMeteringWriter(s.meteringRepo)
+	writer, ok := configuredMeteringRepository(s.meteringRepo)
 	if !ok || event == nil {
 		return nil
 	}
@@ -321,7 +323,7 @@ func (s *Server) appendMeteringEventTx(ctx context.Context, tx pgx.Tx, event *me
 }
 
 func (s *Server) appendStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *meteringpkg.StorageObservation) error {
-	writer, ok := configuredMeteringWriter(s.meteringRepo)
+	writer, ok := configuredMeteringRepository(s.meteringRepo)
 	if !ok || observation == nil {
 		return nil
 	}
@@ -335,7 +337,7 @@ func (s *Server) appendStorageObservationTx(ctx context.Context, tx pgx.Tx, obse
 }
 
 func (s *Server) closeStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *meteringpkg.StorageObservation) error {
-	writer, ok := configuredMeteringWriter(s.meteringRepo)
+	writer, ok := configuredMeteringRepository(s.meteringRepo)
 	if !ok || observation == nil {
 		return nil
 	}

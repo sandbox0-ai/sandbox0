@@ -6865,6 +6865,17 @@ components:
         s3:
           $ref: "#/components/schemas/SandboxVolumeS3Config"
           description: Public S3-compatible backend metadata. Credentials are never returned.
+        metered_storage_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          nullable: true
+          description: Latest metered logical payload bytes stored by this S0FS volume. Null for external backends or when metering state is unavailable.
+        storage_observed_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Time when metered_storage_bytes was last observed. Null for external backends or when metering state is unavailable.
         created_at:
           type: string
           format: date-time

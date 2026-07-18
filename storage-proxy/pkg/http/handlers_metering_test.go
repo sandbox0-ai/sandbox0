@@ -164,35 +164,57 @@ func (r *fakeHTTPRepo) MarkOwnedSandboxVolumeCleanupAttempt(ctx context.Context,
 	return nil
 }
 
-type fakeHTTPMeteringWriter struct {
+type fakeHTTPMeteringRepository struct {
 	events              []*metering.Event
 	storageObservations []*metering.StorageObservation
 	closedStorage       []*metering.StorageObservation
 	watermarks          []metering.ProducerWatermark
+	storageStates       map[string]*metering.StorageProjectionState
+	storageReadErr      error
 }
 
-func (f *fakeHTTPMeteringWriter) AppendEventTx(ctx context.Context, tx pgx.Tx, event *metering.Event) error {
+func (f *fakeHTTPMeteringRepository) AppendEventTx(ctx context.Context, tx pgx.Tx, event *metering.Event) error {
 	f.events = append(f.events, event)
 	return nil
 }
 
-func (f *fakeHTTPMeteringWriter) RecordStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *metering.StorageObservation) error {
+func (f *fakeHTTPMeteringRepository) RecordStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *metering.StorageObservation) error {
 	f.storageObservations = append(f.storageObservations, observation)
 	return nil
 }
 
-func (f *fakeHTTPMeteringWriter) CloseStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *metering.StorageObservation) error {
+func (f *fakeHTTPMeteringRepository) CloseStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *metering.StorageObservation) error {
 	f.closedStorage = append(f.closedStorage, observation)
 	return nil
 }
 
-func (f *fakeHTTPMeteringWriter) UpsertProducerWatermarkTx(ctx context.Context, tx pgx.Tx, producer string, regionID string, completeBefore time.Time) error {
+func (f *fakeHTTPMeteringRepository) UpsertProducerWatermarkTx(ctx context.Context, tx pgx.Tx, producer string, regionID string, completeBefore time.Time) error {
 	f.watermarks = append(f.watermarks, metering.ProducerWatermark{
 		Producer:       producer,
 		RegionID:       regionID,
 		CompleteBefore: completeBefore,
 	})
 	return nil
+}
+
+func (f *fakeHTTPMeteringRepository) GetStorageProjectionState(ctx context.Context, subjectType, subjectID string) (*metering.StorageProjectionState, error) {
+	if f.storageReadErr != nil {
+		return nil, f.storageReadErr
+	}
+	return f.storageStates[subjectType+"/"+subjectID], nil
+}
+
+func (f *fakeHTTPMeteringRepository) ListStorageProjectionStatesByTeam(ctx context.Context, subjectType, teamID string) ([]*metering.StorageProjectionState, error) {
+	if f.storageReadErr != nil {
+		return nil, f.storageReadErr
+	}
+	states := make([]*metering.StorageProjectionState, 0)
+	for _, state := range f.storageStates {
+		if state.SubjectType == subjectType && state.TeamID == teamID {
+			states = append(states, state)
+		}
+	}
+	return states, nil
 }
 
 type fakeHTTPSnapshotManager struct {
@@ -293,7 +315,7 @@ func (f *fakeHTTPSnapshotManager) CreateVolumeFromSnapshot(ctx context.Context, 
 
 func TestCreateSandboxVolumeRecordsMetering(t *testing.T) {
 	repo := newFakeHTTPRepo()
-	meteringWriter := &fakeHTTPMeteringWriter{}
+	meteringWriter := &fakeHTTPMeteringRepository{}
 	snapshotMgr := &fakeHTTPSnapshotManager{}
 	server := &Server{
 		logger:       logrus.New(),
@@ -370,7 +392,7 @@ func TestDeleteSandboxVolumeForceRecordsMetering(t *testing.T) {
 		ClusterID: "cluster-a",
 		PodID:     "pod-a",
 	}}
-	meteringWriter := &fakeHTTPMeteringWriter{}
+	meteringWriter := &fakeHTTPMeteringRepository{}
 	snapshotMgr := &fakeHTTPSnapshotManager{}
 	server := &Server{
 		logger:       logrus.New(),
@@ -451,7 +473,7 @@ func TestDeleteSandboxVolumeCleansIdleDirectMountBeforeDelete(t *testing.T) {
 			return true, nil
 		},
 	}
-	meteringWriter := &fakeHTTPMeteringWriter{}
+	meteringWriter := &fakeHTTPMeteringRepository{}
 	server := &Server{
 		logger:       logrus.New(),
 		repo:         repo,
@@ -526,15 +548,15 @@ func TestDeleteSandboxVolumeReturnsConflictWhenDirectMountStillInflight(t *testi
 	}
 }
 
-func TestConfiguredMeteringWriterRejectsTypedNil(t *testing.T) {
-	var writer *fakeHTTPMeteringWriter
-	if _, ok := configuredMeteringWriter(writer); ok {
-		t.Fatal("typed-nil metering writer should be treated as disabled")
+func TestConfiguredMeteringRepositoryRejectsTypedNil(t *testing.T) {
+	var writer *fakeHTTPMeteringRepository
+	if _, ok := configuredMeteringRepository(writer); ok {
+		t.Fatal("typed-nil metering repository should be treated as disabled")
 	}
 }
 
 func TestAppendStorageObservationTxIgnoresTypedNilMeteringWriter(t *testing.T) {
-	var writer *fakeHTTPMeteringWriter
+	var writer *fakeHTTPMeteringRepository
 	server := &Server{meteringRepo: writer}
 
 	err := server.appendStorageObservationTx(context.Background(), nil, &metering.StorageObservation{})

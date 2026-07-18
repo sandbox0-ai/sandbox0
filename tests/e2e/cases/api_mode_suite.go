@@ -1426,7 +1426,7 @@ func assertTemplateFromSandboxLifecycle(env *framework.ScenarioEnv, session *e2e
 		if sourceSandboxID != "" {
 			_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sourceSandboxID)
 		}
-		_ = session.DeleteTemplate(env.TestCtx.Context, GinkgoT(), sourceTemplateID)
+		_ = session.DeleteSystemTemplate(env.TestCtx.Context, env, sourceTemplateID)
 	})
 
 	base, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), "default")
@@ -1440,11 +1440,11 @@ func assertTemplateFromSandboxLifecycle(env *framework.ScenarioEnv, session *e2e
 	sourceTemplateRequest.Spec.MainContainer.ImagePullPolicy = ptr("Always")
 	sourceTemplateRequest.Spec.Pool.MinIdle = 0
 	sourceTemplateRequest.Spec.Pool.MaxIdle = 0
-	sourceTemplate, err := session.CreateTemplate(env.TestCtx.Context, GinkgoT(), sourceTemplateRequest)
+	sourceTemplate, err := session.CreateSystemTemplate(env.TestCtx.Context, env, sourceTemplateRequest)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(sourceTemplate).NotTo(BeNil())
 
-	sourceNamespace, err := naming.TemplateNamespaceForTeam(expectStringPtr(sourceTemplate.TeamId, "source team id"))
+	sourceNamespace, err := naming.TemplateNamespaceForBuiltin(sourceTemplateID)
 	Expect(err).NotTo(HaveOccurred())
 	sourceClaim := claimSandboxEventually(env, session, sourceTemplateID)
 	sourceSandboxID = sourceClaim.SandboxId

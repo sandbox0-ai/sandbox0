@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
+	"github.com/sandbox0-ai/sandbox0/pkg/framework"
 )
 
 type TemplateFromSandboxCreateRequest struct {
@@ -117,6 +118,28 @@ func (s *Session) CreateTemplate(ctx context.Context, t ContractT, template apis
 	return resp, err
 }
 
+func (s *Session) CreateSystemTemplate(
+	ctx context.Context,
+	env *framework.ScenarioEnv,
+	template apispec.TemplateCreateRequest,
+) (*apispec.Template, error) {
+	status, body, err := s.doInternalSystemJSONRequest(ctx, env, http.MethodPost, "/api/v1/templates", template)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusCreated {
+		return nil, fmt.Errorf("create system template failed with status %d: %s", status, formatAPIError(body))
+	}
+	var response apispec.SuccessTemplateResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, err
+	}
+	if !response.Success || response.Data == nil {
+		return nil, fmt.Errorf("create system template response missing data")
+	}
+	return response.Data, nil
+}
+
 func (s *Session) CreateTemplateDetailed(ctx context.Context, t ContractT, template apispec.TemplateCreateRequest) (*apispec.Template, int, error) {
 	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodPost, "/api/v1/templates", "/api/v1/templates", template, true)
 	if err != nil {
@@ -193,6 +216,26 @@ func (s *Session) DeleteTemplate(ctx context.Context, t ContractT, templateID st
 	}
 	if status != http.StatusOK && status != http.StatusNotFound {
 		return fmt.Errorf("delete template failed with status %d: %s", status, formatAPIError(body))
+	}
+	return nil
+}
+
+func (s *Session) DeleteSystemTemplate(ctx context.Context, env *framework.ScenarioEnv, templateID string) error {
+	if templateID == "" {
+		return fmt.Errorf("template id is required")
+	}
+	status, body, err := s.doInternalSystemJSONRequest(
+		ctx,
+		env,
+		http.MethodDelete,
+		"/api/v1/templates/"+templateID,
+		nil,
+	)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK && status != http.StatusNotFound {
+		return fmt.Errorf("delete system template failed with status %d: %s", status, formatAPIError(body))
 	}
 	return nil
 }

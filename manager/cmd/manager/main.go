@@ -380,6 +380,7 @@ func main() {
 	// the manager schema contain overlapping keys such as
 	// http_port and database_schema.
 	var managerStorageRuntime *storageproxyruntime.Runtime
+	var managerStorageConfig *config.StorageProxyConfig
 	if storageConfigPath := strings.TrimSpace(os.Getenv("STORAGE_RUNTIME_CONFIG_PATH")); storageConfigPath != "" {
 		storageCfg, loadErr := config.ReadStorageProxyConfig(storageConfigPath)
 		if loadErr != nil {
@@ -388,6 +389,7 @@ func main() {
 				zap.Error(loadErr),
 			)
 		}
+		managerStorageConfig = storageCfg
 		storageLogrusLogger := logrus.New()
 		storageLogrusLogger.SetFormatter(&logrus.JSONFormatter{})
 		storageLogrusLogger.SetOutput(os.Stdout)
@@ -486,7 +488,7 @@ func main() {
 	sandboxService.SetQuotaStore(quotaRepo)
 	sandboxService.SetSandboxStore(sandboxStore)
 	sandboxService.SetClaimStartLimiter(claimStartLimiter)
-	rootFSObjectStore, rootFSObjectStoreErr := buildRootFSObjectStore(cfg)
+	rootFSObjectStore, rootFSObjectStoreErr := buildRootFSObjectStore(cfg, managerStorageConfig)
 	if rootFSObjectStoreErr != nil {
 		logger.Warn("Rootfs object cleanup disabled; object store is not configured", zap.Error(rootFSObjectStoreErr))
 	} else if rootFSObjectStore != nil {
@@ -997,27 +999,46 @@ func defaultTeamQuotaLimits(cfg *config.ManagerConfig) []quota.DefaultLimit {
 	return limits
 }
 
-func buildRootFSObjectStore(cfg *config.ManagerConfig) (objectstore.Store, error) {
+func buildRootFSObjectStore(cfg *config.ManagerConfig, storageRuntimeCfg *config.StorageProxyConfig) (objectstore.Store, error) {
 	if cfg == nil {
 		return nil, nil
 	}
-	storageCfg := cfg.RootFSObjectStorage
-	if strings.TrimSpace(storageCfg.Type) == "" && strings.TrimSpace(storageCfg.Bucket) == "" {
+	objectStorageCfg := cfg.RootFSObjectStorage
+	if strings.TrimSpace(objectStorageCfg.Type) == "" && strings.TrimSpace(objectStorageCfg.Bucket) == "" {
 		return nil, nil
 	}
 	store, err := objectstore.Create(objectstore.Config{
-		Type:         storageCfg.Type,
-		Bucket:       storageCfg.Bucket,
-		Region:       storageCfg.Region,
-		Endpoint:     storageCfg.Endpoint,
-		AccessKey:    storageCfg.AccessKey,
-		SecretKey:    storageCfg.SecretKey,
-		SessionToken: storageCfg.SessionToken,
+		Type:         objectStorageCfg.Type,
+		Bucket:       objectStorageCfg.Bucket,
+		Region:       objectStorageCfg.Region,
+		Endpoint:     objectStorageCfg.Endpoint,
+		AccessKey:    objectStorageCfg.AccessKey,
+		SecretKey:    objectStorageCfg.SecretKey,
+		SessionToken: objectStorageCfg.SessionToken,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return store, nil
+	return wrapRootFSObjectStoreEncryption(store, storageRuntimeCfg)
+}
+
+func wrapRootFSObjectStoreEncryption(store objectstore.Store, storageRuntimeCfg *config.StorageProxyConfig) (objectstore.Store, error) {
+	if store == nil || storageRuntimeCfg == nil || !storageRuntimeCfg.ObjectEncryptionEnabled {
+		return store, nil
+	}
+	keyPEM, err := objectstore.LoadEncryptionKey(storageRuntimeCfg.ObjectEncryptionKeyPath)
+	if err != nil {
+		return nil, err
+	}
+	keyEncryptor, err := objectstore.NewKeyEncryptor(keyPEM, storageRuntimeCfg.ObjectEncryptionPassphrase)
+	if err != nil {
+		return nil, err
+	}
+	return objectstore.Encrypting(store, objectstore.EncryptionConfig{
+		Enabled:      true,
+		Algorithm:    storageRuntimeCfg.ObjectEncryptionAlgo,
+		KeyEncryptor: keyEncryptor,
+	}), nil
 }
 
 type rootFSObjectStoreInspector struct {

@@ -49,6 +49,61 @@ func TestSandboxRootFSProductRequiresPausedSandboxForRestore(t *testing.T) {
 	require.ErrorIs(t, err, ErrSandboxCheckpointRequiresCtld)
 }
 
+func TestSandboxRootFSProductHidesInternalTemplateBuildSnapshots(t *testing.T) {
+	now := time.Now().UTC()
+	internalSnapshotID := "template-build-123456"
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{
+			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusPaused, now),
+		},
+		rootFSStates: map[string]*SandboxRootFSState{
+			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-1"),
+		},
+		rootFSSnapshots: map[string]*RootFSSnapshot{
+			"snapshot-public": {
+				ID:              "snapshot-public",
+				FilesystemID:    "sandbox-1",
+				TeamID:          "team-1",
+				SourceSandboxID: "sandbox-1",
+				HeadLayerID:     "layer-1",
+				CreatedAt:       now,
+			},
+			internalSnapshotID: {
+				ID:              internalSnapshotID,
+				FilesystemID:    "sandbox-1",
+				TeamID:          "team-1",
+				SourceSandboxID: "sandbox-1",
+				HeadLayerID:     "layer-1",
+				CreatedAt:       now,
+			},
+		},
+	}
+	svc := rootFSProductTestService(store)
+
+	list, err := svc.ListSandboxRootFSSnapshots(context.Background(), "sandbox-1", "team-1")
+	require.NoError(t, err)
+	require.Len(t, list.Snapshots, 1)
+	assert.Equal(t, "snapshot-public", list.Snapshots[0].ID)
+	assert.Equal(t, 1, list.Count)
+
+	_, err = svc.GetSandboxRootFSSnapshot(context.Background(), internalSnapshotID, "team-1")
+	require.ErrorIs(t, err, ErrRootFSSnapshotNotFound)
+	err = svc.DeleteSandboxRootFSSnapshot(context.Background(), internalSnapshotID, "team-1")
+	require.ErrorIs(t, err, ErrRootFSSnapshotNotFound)
+	_, err = svc.RestoreSandboxRootFS(
+		context.Background(),
+		"sandbox-1",
+		"team-1",
+		&RestoreSandboxRootFSRequest{SnapshotID: internalSnapshotID},
+	)
+	require.ErrorIs(t, err, ErrRootFSSnapshotNotFound)
+	assert.Contains(t, store.rootFSSnapshots, internalSnapshotID, "public delete must retain internal build snapshot")
+
+	internal, err := store.GetRootFSSnapshot(context.Background(), internalSnapshotID, "team-1")
+	require.NoError(t, err)
+	assert.Equal(t, internalSnapshotID, internal.ID, "internal store access remains available to the build worker")
+}
+
 func TestSandboxRootFSProductSnapshotsRestoresAndForksPausedSandbox(t *testing.T) {
 	now := time.Now().UTC()
 	autoResume := true

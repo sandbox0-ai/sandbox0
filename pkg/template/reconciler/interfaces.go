@@ -2,6 +2,7 @@ package reconciler
 
 import (
 	"context"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
@@ -10,6 +11,11 @@ import (
 // TemplateStore provides read access to templates for reconciliation.
 type TemplateStore interface {
 	ListTemplates(ctx context.Context) ([]*template.Template, error)
+}
+
+// TemplateCreationStore finalizes asynchronous creation after reconciliation.
+type TemplateCreationStore interface {
+	MarkTemplateCreationReady(ctx context.Context, scope, teamID, templateID, buildID string, completedAt time.Time) (bool, error)
 }
 
 // AllocationStore provides allocation updates for reconciliation.

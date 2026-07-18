@@ -7,11 +7,16 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	"go.uber.org/zap"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
@@ -39,6 +44,27 @@ func (s *Server) claimSandbox(c *gin.Context) {
 	if req.Template == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "template is required")
 		return
+	}
+	canonicalTemplateID, err := naming.CanonicalTemplateID(req.Template)
+	if err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+	req.Template = canonicalTemplateID
+	if s.templateStoreEnabled && s.templateStore != nil {
+		tpl, err := s.templateStore.GetTemplateForTeam(c.Request.Context(), claims.TeamID, req.Template)
+		if err != nil {
+			s.logger.Error("Failed to check template creation status",
+				zap.String("template", req.Template),
+				zap.Error(err),
+			)
+			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to check template status")
+			return
+		}
+		if tpl != nil && !tpl.ReadyForClaim() {
+			writeManagerTemplateNotReady(c, tpl)
+			return
+		}
 	}
 
 	resp, err := s.sandboxService.ClaimSandbox(c.Request.Context(), &req)
@@ -83,6 +109,20 @@ func (s *Server) claimSandbox(c *gin.Context) {
 	}
 
 	spec.JSONSuccess(c, http.StatusCreated, resp)
+}
+
+func writeManagerTemplateNotReady(c *gin.Context, tpl *template.Template) {
+	message := template.ErrTemplateNotReady.Error()
+	if tpl != nil && tpl.Status != nil && tpl.Status.Creation != nil {
+		switch tpl.Status.Creation.State {
+		case v1alpha1.TemplateCreationStateCreating:
+			c.Header("Retry-After", "1")
+			message = "template creation is still in progress"
+		case v1alpha1.TemplateCreationStateFailed:
+			message = "template creation failed; delete and recreate the template"
+		}
+	}
+	spec.JSONError(c, http.StatusConflict, spec.CodeTemplateNotReady, message)
 }
 
 // listSandboxes lists all sandboxes for the authenticated team
@@ -220,6 +260,51 @@ func (s *Server) getSandboxInternal(c *gin.Context) {
 		return
 	}
 	spec.JSONSuccess(c, http.StatusOK, sandbox)
+}
+
+// getSandboxTemplateSourceInternal returns the durable source template context
+// to a trusted scheduler or cluster-gateway caller.
+func (s *Server) getSandboxTemplateSourceInternal(c *gin.Context) {
+	sandboxID := c.Param("id")
+	if sandboxID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+		return
+	}
+	claims := internalauth.ClaimsFromContext(c.Request.Context())
+	if claims == nil || strings.TrimSpace(claims.TeamID) == "" {
+		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing team authentication")
+		return
+	}
+	if !claims.IsSystemToken() &&
+		!internalauth.HasPermission(c.Request.Context(), gatewayauthn.PermSandboxRead) &&
+		!hasInternalGatewayWildcard(claims.Permissions) {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox:read permission is required")
+		return
+	}
+	source, err := s.sandboxService.ResolveSandboxTemplateSource(c.Request.Context(), sandboxID, claims.TeamID)
+	if err != nil {
+		switch {
+		case errors.Is(err, template.ErrTemplateSourceNotFound):
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, err.Error())
+		case errors.Is(err, template.ErrTemplateSourceForbidden):
+			spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, err.Error())
+		case errors.Is(err, template.ErrTemplateSourceNotReady):
+			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
+		default:
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
+		}
+		return
+	}
+	spec.JSONSuccess(c, http.StatusOK, source)
+}
+
+func hasInternalGatewayWildcard(permissions []string) bool {
+	for _, permission := range permissions {
+		if permission == "*:*" {
+			return true
+		}
+	}
+	return false
 }
 
 // updateSandbox updates sandbox configuration

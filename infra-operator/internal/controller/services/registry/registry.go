@@ -67,6 +67,7 @@ type ResolvedRegistryConfig struct {
 	Provider         infrav1alpha1.RegistryProvider
 	PushRegistry     string
 	PullRegistry     string
+	InternalRegistry string
 	SourceSecretName string
 	SourceSecretKey  string
 	TargetSecretName string
@@ -96,11 +97,12 @@ func ResolveRegistryConfig(infra *infrav1alpha1.Sandbox0Infra) *ResolvedRegistry
 			return nil
 		}
 		pushRegistry := builtinPushRegistry(infra, builtin)
-		pullRegistry := builtinPullRegistry(infra, builtin.Port)
+		internalRegistry := builtinInternalRegistry(infra, builtin)
 		return &ResolvedRegistryConfig{
 			Provider:         provider,
 			PushRegistry:     pushRegistry,
-			PullRegistry:     pullRegistry,
+			PullRegistry:     pushRegistry,
+			InternalRegistry: internalRegistry,
 			SourceSecretName: fmt.Sprintf("%s-%s", infra.Name, registryPullSecretSuffix),
 			SourceSecretKey:  ".dockerconfigjson",
 			TargetSecretName: targetSecretName,
@@ -461,8 +463,9 @@ func (r *Reconciler) reconcileRegistryAuthSecret(ctx context.Context, infra *inf
 
 func (r *Reconciler) reconcileRegistryPullSecret(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, builtin infrav1alpha1.BuiltinRegistryConfig, username, password string) error {
 	secretName := fmt.Sprintf("%s-%s", infra.Name, registryPullSecretSuffix)
-	pullRegistry := builtinPullRegistry(infra, builtin.Port)
-	dockerConfig, err := buildDockerConfigJSON(pullRegistry, username, password)
+	pullRegistry := builtinPushRegistry(infra, builtin)
+	internalRegistry := builtinInternalRegistry(infra, builtin)
+	dockerConfig, err := buildDockerConfigJSON([]string{pullRegistry, internalRegistry}, username, password)
 	if err != nil {
 		return err
 	}
@@ -731,10 +734,11 @@ func builtinPushRegistry(infra *infrav1alpha1.Sandbox0Infra, builtin infrav1alph
 	if builtin.Ingress != nil && builtin.Ingress.Enabled && builtin.Ingress.Host != "" {
 		return normalizeRegistryHost(builtin.Ingress.Host)
 	}
-	return builtinPullRegistry(infra, builtin.Port)
+	return builtinInternalRegistry(infra, builtin)
 }
 
-func builtinPullRegistry(infra *infrav1alpha1.Sandbox0Infra, port int32) string {
+func builtinInternalRegistry(infra *infrav1alpha1.Sandbox0Infra, builtin infrav1alpha1.BuiltinRegistryConfig) string {
+	port := common.ResolveServicePort(builtin.Service, builtin.Port)
 	return fmt.Sprintf("%s-registry.%s.svc:%d", infra.Name, infra.Namespace, port)
 }
 
@@ -800,6 +804,7 @@ func resolveExternalRegistry(provider infrav1alpha1.RegistryProvider, cfg interf
 		Provider:         provider,
 		PushRegistry:     resolved.Registry,
 		PullRegistry:     resolved.Registry,
+		InternalRegistry: resolved.Registry,
 		SourceSecretName: secretName,
 		SourceSecretKey:  secretKey,
 		TargetSecretName: targetSecretName,
@@ -842,16 +847,25 @@ func registryHtpasswdMatches(line, username, password string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(parts[1]), []byte(password)) == nil
 }
 
-func buildDockerConfigJSON(registry, username, password string) ([]byte, error) {
+func buildDockerConfigJSON(registries []string, username, password string) ([]byte, error) {
 	auth := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", username, password)))
+	auths := make(map[string]map[string]string, len(registries))
+	for _, registry := range registries {
+		registry = normalizeRegistryHost(registry)
+		if registry == "" {
+			continue
+		}
+		auths[registry] = map[string]string{
+			"username": username,
+			"password": password,
+			"auth":     auth,
+		}
+	}
+	if len(auths) == 0 {
+		return nil, fmt.Errorf("registry host is required")
+	}
 	payload := map[string]map[string]map[string]string{
-		"auths": {
-			registry: {
-				"username": username,
-				"password": password,
-				"auth":     auth,
-			},
-		},
+		"auths": auths,
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {

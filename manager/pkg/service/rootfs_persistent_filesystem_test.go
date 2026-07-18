@@ -22,6 +22,9 @@ func TestSaveRootFSStateWritesLayerAndFilesystemHeadOnly(t *testing.T) {
 	}
 	state := rootFSTestState()
 	state.LayerID = "layer-1"
+	state.PlatformOS = "linux"
+	state.PlatformArchitecture = "arm64"
+	state.PlatformVariant = "v8"
 
 	err := saveRootFSState(context.Background(), exec, state)
 
@@ -35,6 +38,10 @@ func TestSaveRootFSStateWritesLayerAndFilesystemHeadOnly(t *testing.T) {
 		assert.NotContains(t, sql, "INSERT INTO manager.sandbox_rootfs_states")
 		assert.NotContains(t, sql, "INSERT INTO manager.sandbox_rootfs_heads")
 	}
+	assert.Equal(t, state.DiffID, exec.args[2][13])
+	assert.Equal(t, state.PlatformOS, exec.args[2][17])
+	assert.Equal(t, state.PlatformArchitecture, exec.args[2][18])
+	assert.Equal(t, state.PlatformVariant, exec.args[2][19])
 }
 
 func TestSaveRootFSStateRequiresLayerID(t *testing.T) {

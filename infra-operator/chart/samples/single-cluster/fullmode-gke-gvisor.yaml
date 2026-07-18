@@ -35,6 +35,7 @@ spec:
       service:
         type: NodePort
         port: 30500
+      # Replace this with a TLS/LB address reachable by every sandbox node.
       pushEndpoint: 127.0.0.1:30500
   builtinTemplates:
     - templateId: default

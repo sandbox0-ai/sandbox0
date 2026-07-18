@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	"go.uber.org/zap"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -90,10 +91,6 @@ type ForkSandboxResponse struct {
 }
 
 func (s *SandboxService) CreateSandboxRootFSSnapshot(ctx context.Context, sandboxID, teamID string, req *CreateSandboxRootFSSnapshotRequest) (*SandboxRootFSSnapshot, error) {
-	store, err := s.rootFSProductStore()
-	if err != nil {
-		return nil, err
-	}
 	if req == nil {
 		req = &CreateSandboxRootFSSnapshotRequest{}
 	}
@@ -108,9 +105,36 @@ func (s *SandboxService) CreateSandboxRootFSSnapshot(ctx context.Context, sandbo
 	if !req.ExpiresAt.IsZero() && !req.ExpiresAt.After(s.now().UTC()) {
 		return nil, ErrRootFSSnapshotExpired
 	}
-	snapshotID := generateRootFSSnapshotID()
-	name := strings.TrimSpace(req.Name)
-	description := strings.TrimSpace(req.Description)
+	return s.createSandboxRootFSSnapshotWithID(
+		ctx,
+		sandboxID,
+		teamID,
+		generateRootFSSnapshotID(),
+		strings.TrimSpace(req.Name),
+		strings.TrimSpace(req.Description),
+		req.ExpiresAt,
+	)
+}
+
+func (s *SandboxService) createSandboxRootFSSnapshotWithID(ctx context.Context, sandboxID, teamID, snapshotID, name, description string, expiresAt time.Time) (*SandboxRootFSSnapshot, error) {
+	store, err := s.rootFSProductStore()
+	if err != nil {
+		return nil, err
+	}
+	sandboxID = strings.TrimSpace(sandboxID)
+	teamID = strings.TrimSpace(teamID)
+	snapshotID = strings.TrimSpace(snapshotID)
+	if sandboxID == "" {
+		return nil, fmt.Errorf("sandbox_id is required")
+	}
+	if teamID == "" {
+		return nil, fmt.Errorf("team_id is required")
+	}
+	if snapshotID == "" {
+		return nil, fmt.Errorf("snapshot_id is required")
+	}
+	name = strings.TrimSpace(name)
+	description = strings.TrimSpace(description)
 	var checkpoint *rootFSSourceCheckpoint
 	for {
 		_, checkpoint, err = s.prepareRootFSSourceCheckpoint(ctx, sandboxID, teamID, SandboxLifecycleKindSnapshot)
@@ -135,7 +159,7 @@ func (s *SandboxService) CreateSandboxRootFSSnapshot(ctx context.Context, sandbo
 			checkpoint.close(s, checkpointCommitted)
 		}()
 	}
-	snapshot, err := s.commitRootFSSnapshot(ctx, store, sandboxID, teamID, snapshotID, name, description, req.ExpiresAt, checkpoint)
+	snapshot, err := s.commitRootFSSnapshot(ctx, store, sandboxID, teamID, snapshotID, strings.TrimSpace(name), strings.TrimSpace(description), expiresAt, checkpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -168,6 +192,9 @@ func (s *SandboxService) ListSandboxRootFSSnapshots(ctx context.Context, sandbox
 	}
 	out := make([]*SandboxRootFSSnapshot, 0, len(snapshots))
 	for _, snapshot := range snapshots {
+		if snapshot == nil || template.IsBuildSnapshotID(snapshot.ID) {
+			continue
+		}
 		out = append(out, sandboxRootFSSnapshotFromStore(snapshot))
 	}
 	return &ListSandboxRootFSSnapshotsResponse{
@@ -177,11 +204,15 @@ func (s *SandboxService) ListSandboxRootFSSnapshots(ctx context.Context, sandbox
 }
 
 func (s *SandboxService) GetSandboxRootFSSnapshot(ctx context.Context, snapshotID, teamID string) (*SandboxRootFSSnapshot, error) {
+	snapshotID = strings.TrimSpace(snapshotID)
+	if template.IsBuildSnapshotID(snapshotID) {
+		return nil, ErrRootFSSnapshotNotFound
+	}
 	store, err := s.rootFSProductStore()
 	if err != nil {
 		return nil, err
 	}
-	snapshot, err := store.GetRootFSSnapshot(ctx, strings.TrimSpace(snapshotID), strings.TrimSpace(teamID))
+	snapshot, err := store.GetRootFSSnapshot(ctx, snapshotID, strings.TrimSpace(teamID))
 	if err != nil {
 		return nil, err
 	}
@@ -189,11 +220,15 @@ func (s *SandboxService) GetSandboxRootFSSnapshot(ctx context.Context, snapshotI
 }
 
 func (s *SandboxService) DeleteSandboxRootFSSnapshot(ctx context.Context, snapshotID, teamID string) error {
+	snapshotID = strings.TrimSpace(snapshotID)
+	if template.IsBuildSnapshotID(snapshotID) {
+		return ErrRootFSSnapshotNotFound
+	}
 	store, err := s.rootFSProductStore()
 	if err != nil {
 		return err
 	}
-	return store.DeleteRootFSSnapshot(ctx, strings.TrimSpace(snapshotID), strings.TrimSpace(teamID))
+	return store.DeleteRootFSSnapshot(ctx, snapshotID, strings.TrimSpace(teamID))
 }
 
 func (s *SandboxService) RestoreSandboxRootFS(ctx context.Context, sandboxID, teamID string, req *RestoreSandboxRootFSRequest) (*RestoreSandboxRootFSResponse, error) {
@@ -215,6 +250,9 @@ func (s *SandboxService) RestoreSandboxRootFS(ctx context.Context, sandboxID, te
 	}
 	if snapshotID == "" {
 		return nil, fmt.Errorf("snapshot_id is required")
+	}
+	if template.IsBuildSnapshotID(snapshotID) {
+		return nil, ErrRootFSSnapshotNotFound
 	}
 	if _, err := store.GetRootFSSnapshot(ctx, snapshotID, teamID); err != nil {
 		return nil, err

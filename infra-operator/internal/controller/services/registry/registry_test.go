@@ -21,8 +21,14 @@ func TestBuiltinPushRegistryUsesServiceEndpointByDefault(t *testing.T) {
 	infra.Name = "demo"
 	infra.Namespace = "sandbox0-system"
 
-	host := builtinPushRegistry(infra, infrav1alpha1.BuiltinRegistryConfig{Port: 5000})
-	if host != "demo-registry.sandbox0-system.svc:5000" {
+	host := builtinPushRegistry(infra, infrav1alpha1.BuiltinRegistryConfig{
+		Port: 5000,
+		Service: &infrav1alpha1.ServiceNetworkConfig{
+			Type: corev1.ServiceTypeNodePort,
+			Port: 30500,
+		},
+	})
+	if host != "demo-registry.sandbox0-system.svc:30500" {
 		t.Fatalf("unexpected registry host: %q", host)
 	}
 }

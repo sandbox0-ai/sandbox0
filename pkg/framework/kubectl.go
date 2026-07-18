@@ -11,19 +11,24 @@ import (
 // Kubectl runs a kubectl command with optional kubeconfig.
 func Kubectl(ctx context.Context, kubeconfig string, args ...string) error {
 	fmt.Printf("Running kubectl command: %s %v\n", "kubectl", args)
-	if kubeconfig != "" {
-		args = append(args, "--kubeconfig", kubeconfig)
-	}
+	args = kubectlArgs(kubeconfig, args)
 	return RunCommand(ctx, "kubectl", args...)
 }
 
 // KubectlOutput runs a kubectl command and returns output.
 func KubectlOutput(ctx context.Context, kubeconfig string, args ...string) (string, error) {
 	fmt.Printf("Running kubectl command: %s %v\n", "kubectl", args)
-	if kubeconfig != "" {
-		args = append(args, "--kubeconfig", kubeconfig)
-	}
+	args = kubectlArgs(kubeconfig, args)
 	return RunCommandOutput(ctx, "kubectl", args...)
+}
+
+func kubectlArgs(kubeconfig string, args []string) []string {
+	if kubeconfig == "" {
+		return args
+	}
+	result := make([]string, 0, len(args)+2)
+	result = append(result, "--kubeconfig", kubeconfig)
+	return append(result, args...)
 }
 
 // KubectlExecOutput runs kubectl exec and returns output.

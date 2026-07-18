@@ -34,6 +34,19 @@ type recordingTemplateNamespacePolicy struct {
 	err   error
 }
 
+func TestTemplateServiceRegistryHostsIncludesInternalAlias(t *testing.T) {
+	service := &TemplateService{registry: config.RegistryConfig{
+		PushRegistry:     "registry.example.com",
+		PullRegistry:     "registry.example.com",
+		InternalRegistry: "registry.sandbox0-system.svc:5000",
+	}}
+
+	assert.Equal(t, []string{
+		"registry.example.com",
+		"registry.sandbox0-system.svc:5000",
+	}, service.RegistryHosts())
+}
+
 func (r *recordingTemplateNamespacePolicy) EnsureBaseline(_ context.Context, namespace string) error {
 	r.calls = append(r.calls, namespace)
 	return r.err

@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
@@ -107,6 +108,12 @@ func TestReconcileCreatesRuntimeResourcesBeforeDeploymentReady(t *testing.T) {
 				Provider: infrav1alpha1.RegistryProviderBuiltin,
 				Builtin: &infrav1alpha1.BuiltinRegistryConfig{
 					Enabled: true,
+					Port:    5000,
+					Service: &infrav1alpha1.ServiceNetworkConfig{
+						Type: corev1.ServiceTypeNodePort,
+						Port: 30500,
+					},
+					PushEndpoint: "127.0.0.1:30500",
 				},
 			},
 		},
@@ -122,6 +129,34 @@ func TestReconcileCreatesRuntimeResourcesBeforeDeploymentReady(t *testing.T) {
 	assertRegistryPresentObject(t, client, &corev1.Secret{}, "sandbox0-system", "demo-registry-auth")
 	assertRegistryPresentObject(t, client, &corev1.Secret{}, "sandbox0-system", "demo-registry-pull")
 	assertRegistryPresentObject(t, client, &corev1.PersistentVolumeClaim{}, "sandbox0-system", "demo-registry-data")
+
+	service := &corev1.Service{}
+	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-registry"}, service); err != nil {
+		t.Fatalf("get registry service: %v", err)
+	}
+	if len(service.Spec.Ports) != 1 {
+		t.Fatalf("expected one registry service port, got %#v", service.Spec.Ports)
+	}
+	port := service.Spec.Ports[0]
+	if port.Port != 30500 || port.NodePort != 30500 || port.TargetPort.IntVal != 5000 {
+		t.Fatalf("unexpected registry service port: %#v", port)
+	}
+
+	pullSecret := &corev1.Secret{}
+	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-registry-pull"}, pullSecret); err != nil {
+		t.Fatalf("get registry pull secret: %v", err)
+	}
+	var dockerConfig struct {
+		Auths map[string]json.RawMessage `json:"auths"`
+	}
+	if err := json.Unmarshal(pullSecret.Data[corev1.DockerConfigJsonKey], &dockerConfig); err != nil {
+		t.Fatalf("decode registry pull secret: %v", err)
+	}
+	for _, registryHost := range []string{"127.0.0.1:30500", "demo-registry.sandbox0-system.svc:30500"} {
+		if _, ok := dockerConfig.Auths[registryHost]; !ok {
+			t.Fatalf("expected pull credentials for %q, got %#v", registryHost, dockerConfig.Auths)
+		}
+	}
 }
 
 func newRegistryLifecycleTestReconciler(t *testing.T, objects ...runtime.Object) (*Reconciler, ctrlclient.Client) {

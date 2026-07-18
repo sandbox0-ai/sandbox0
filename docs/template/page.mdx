@@ -19,11 +19,20 @@ Builtin templates use curated public images and are ready to use immediately. Cu
 
 ---
 
-## Custom Template Or Rootfs Snapshot
+## Choose A Creation Method
 
-You do not need a custom template for every initialized environment. If the base image, default resources, network policy, and mount declarations already fit, you can claim a sandbox from a builtin template, install dependencies or clone repositories inside the writable root filesystem, create a rootfs snapshot, then claim future sandboxes with that `snapshot_id`.
+Sandbox0 supports three ways to reuse an environment:
 
-This is useful for dependency-heavy agent workspaces:
+| Need | Prefer |
+|------|--------|
+| A reproducible, source-controlled image build or a different base image | Create a custom template from an image |
+| A reusable template ID backed by the current root filesystem of an initialized sandbox | Create a custom template from a sandbox |
+| Fast reuse of initialized rootfs state with the same existing template | Rootfs snapshot and claim with `snapshot_id` |
+| Data that must outlive sandbox identity, be mounted by multiple sandboxes, or be accessed through direct storage APIs | Sandbox Volume |
+
+Creating a template from a sandbox captures its current writable root filesystem, publishes an OCI image to the registry configured for the team, and changes the template to use a digest-pinned image. This is useful when initialization is interactive or agent-driven and you want the result to become a normal template that can be listed, shared within the team, reconciled across clusters, and assigned its own warm pool.
+
+You do not need a new template ID for every initialized environment. If the base image, default resources, network policy, and mount declarations already fit, create a rootfs snapshot and pass its `snapshot_id` when claiming future sandboxes:
 
 1. claim a sandbox from a platform-owned builtin template such as `default`
 2. install packages, populate caches, clone repositories, or write tool configuration
@@ -32,12 +41,6 @@ This is useful for dependency-heavy agent workspaces:
 5. claim each task sandbox with the same template and `snapshot_id`
 
 For platform-owned builtin templates, the operator manages the warm pool. That lets teams reuse warm builtin capacity and store only the initialized rootfs state for their own dependency set instead of maintaining a separate custom template pool for each variation.
-
-| Need | Prefer |
-|------|--------|
-| Different base image, default resource envelope, default environment, mount paths, network defaults, or privileged runtime fields | Custom template |
-| User-space dependencies, repository checkout, package cache, generated files, or per-project tool configuration on an existing base image | Builtin template plus rootfs snapshot and claim with `snapshot_id` |
-| Data that must outlive sandbox identity, be mounted by multiple sandboxes, or be accessed through direct storage APIs | Sandbox Volume |
 
 Rootfs snapshots do not create template IDs and do not appear in `s0 template list`. Claiming with `snapshot_id` creates a new running sandbox from the selected rootfs snapshot while the requested template still controls image, default resources, mounts, services, and network defaults. A claim or runtime update can override only the sandbox memory limit; CPU is derived from the platform memory-per-CPU ratio with a `150m` minimum limit. Snapshot and fork accept a running or paused source sandbox. Restore remains useful for rolling back an existing paused sandbox. See [Snapshot And Restore](/docs/sandbox/snapshot-restore) for the lifecycle requirements and API workflow, or read [Initialize Once, Claim Many](/blog/2026-06/initialize-once-fork-many-custom-ai-agent-sandboxes) for the custom-rootfs pattern.
 
@@ -145,6 +148,181 @@ s0 template create --id my-python-env --spec-file template.yaml`
     }
   ]}
 />
+
+---
+
+## Create Template From A Sandbox
+
+Create a custom template from the current root filesystem of an existing sandbox. Sandbox0 captures and publishes the image asynchronously, so the endpoint returns `202 Accepted` with a template whose `status.creation.state` is `creating`.
+
+<Endpoint method="POST">
+/api/v1/templates/from-sandbox
+</Endpoint>
+
+### Request Body
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `template_id` | string | Unique ID for the new team-owned template |
+| `sandbox_id` | string | Source sandbox whose current root filesystem will be captured |
+| `spec_overrides` | object | Optional safe overrides: `description`, `displayName`, `tags`, and `pool` |
+
+The new template inherits safe settings from the source sandbox's template. Sandbox0 does not copy sandbox identity, active processes, memory contents, sessions, claim-time environment or network overrides, attached Sandbox Volumes, services, or privileged pod and security fields. If `pool` is omitted, it defaults to `minIdle: 0` and `maxIdle: 0`.
+
+The source sandbox may be running or paused. Because capture is asynchronous, request acceptance is not the rootfs capture point. Keep the source sandbox available and avoid rootfs writes while the template is in the `capturing` stage. Sandbox0 briefly barriers and checkpoints a running source, then records the exact capture point in `status.creation.capturedAt`; after that, the source can continue changing or be deleted without changing the image build.
+
+<Callout variant="info">
+You do not provide an image repository or registry credentials. Sandbox0 publishes to the registry configured by the platform operator and stores a digest-pinned image reference in the completed template.
+</Callout>
+
+<Callout variant="warning">
+The configured registry pull address must be reachable by every sandbox node. For the built-in registry, operators should set `spec.registry.builtin.pushEndpoint` or Ingress to a node-reachable address. Sandbox0 uses the Kubernetes Service address only for manager's internal publication path.
+</Callout>
+
+<Callout variant="warning">
+The source template image must remain resolvable by digest from its original registry while the build is publishing. A node-local or preloaded image with no matching registry manifest cannot currently be used as the source; publish that base image to a registry and update the source template first.
+</Callout>
+
+The caller needs both `template:create` and `sandbox:read` permissions.
+
+To retry safely after a network error, send the same `Idempotency-Key` header with the same request body. The key remains bound to that create request while the template exists, even if the ready template is later updated; a replay returns the template's current representation. Reusing the key with a different request returns a conflict. Deleting the template releases the key.
+
+**Optional overrides file (`template-overrides.yaml`):**
+
+```yaml
+displayName: Python workspace
+description: Preinstalled Python dependencies and repository checkout
+tags:
+    - python
+    - initialized
+pool:
+    minIdle: 1
+    maxIdle: 3
+```
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `req := sandbox0.NewTemplateFromSandboxCreateRequest(
+    "python-workspace",
+    sourceSandbox.ID,
+    &apispec.TemplateFromSandboxSpecOverrides{
+        DisplayName: apispec.NewOptString("Python workspace"),
+        Pool: apispec.NewOptPoolStrategy(apispec.PoolStrategy{
+            MinIdle: 1,
+            MaxIdle: 3,
+        }),
+    },
+)
+
+tpl, err := client.CreateTemplateFromSandbox(ctx, req, &sandbox0.CreateTemplateFromSandboxOptions{
+    IdempotencyKey: "python-workspace-v1",
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+tpl, err = client.WaitTemplateReady(ctx, tpl.TemplateID, nil)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("Template ready: %s\\n", tpl.TemplateID)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0 import CreateTemplateFromSandboxOptions
+from sandbox0.apispec.models.template_from_sandbox_create_request import (
+    TemplateFromSandboxCreateRequest,
+)
+from sandbox0.apispec.models.template_from_sandbox_spec_overrides import (
+    TemplateFromSandboxSpecOverrides,
+)
+
+tpl = client.create_template_from_sandbox(
+    TemplateFromSandboxCreateRequest(
+        template_id="python-workspace",
+        sandbox_id=source_sandbox.id,
+        spec_overrides=TemplateFromSandboxSpecOverrides(
+            display_name="Python workspace",
+        ),
+    ),
+    CreateTemplateFromSandboxOptions(
+        idempotency_key="python-workspace-v1",
+        wait=True,
+        timeout_sec=600,
+    ),
+)
+print(f"Template ready: {tpl.template_id}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const tpl = await client.templates.createFromSandbox(
+    {
+        templateId: "python-workspace",
+        sandboxId: sourceSandbox.id,
+        specOverrides: {
+            displayName: "Python workspace",
+            pool: { minIdle: 1, maxIdle: 3 },
+        },
+    },
+    {
+        idempotencyKey: "python-workspace-v1",
+        wait: true,
+        timeoutMs: 10 * 60_000,
+    },
+);
+console.log("Template ready:", tpl.templateId);`
+    },
+    {
+      label: "HTTP",
+      language: "bash",
+      code: `curl -X POST "$SANDBOX0_BASE_URL/api/v1/templates/from-sandbox" \\
+    -H "Authorization: Bearer $SANDBOX0_TOKEN" \\
+    -H "Content-Type: application/json" \\
+    -H "Idempotency-Key: python-workspace-v1" \\
+    -d '{
+        "template_id": "python-workspace",
+        "sandbox_id": "SOURCE_SANDBOX_ID",
+        "spec_overrides": {
+            "displayName": "Python workspace",
+            "pool": {"minIdle": 1, "maxIdle": 3}
+        }
+    }'`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 template create \\
+    --id python-workspace \\
+    --from-sandbox "$SOURCE_SANDBOX_ID" \\
+    --overrides-file template-overrides.yaml \\
+    --idempotency-key python-workspace-v1 \\
+    --wait`
+    }
+  ]}
+/>
+
+Creation progresses through these stages:
+
+| State | Stage | Meaning |
+|-------|-------|---------|
+| `creating` | `capturing` | Sandbox0 is taking a point-in-time rootfs snapshot |
+| `creating` | `publishing` | The OCI image is being assembled and pushed |
+| `creating` | `reconciling` | The digest-pinned template is being distributed to data-plane clusters |
+| `ready` | `reconciling` | The template is visible in a data-plane cluster and the claim API accepts it |
+| `failed` | Last active stage | Creation stopped; inspect `reason` and `message` |
+
+`GET /api/v1/templates/{'{id}'}` and template list responses include templates in all three states. A traditional image-based template has no `status.creation` object and is ready immediately. While a template is creating or failed, it cannot be updated or used to claim a sandbox. It can still be deleted; deleting it also cancels any unfinished build work.
+
+With a zero-sized pool, `ready` does not mean the image has already been pulled into a sandbox node. The first claim still performs the normal image pull and sandbox startup.
+
+Deleting or cancelling a template releases Sandbox0's internal rootfs snapshot pin and build records. It does not synchronously delete OCI tags or blobs that may already have reached the configured registry. Operators should apply an appropriate retention or lifecycle policy to Sandbox0's team-scoped template repositories.
+
+SDK wait helpers only stop client-side polling when their context, abort signal, timeout, or caller interruption ends. They do not cancel the server-side build.
 
 ---
 

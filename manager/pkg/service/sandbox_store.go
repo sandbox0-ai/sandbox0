@@ -57,46 +57,53 @@ type SandboxRootFSState struct {
 	LayerID       string
 	ParentLayerID string
 	// ExpectedHeadLayerID overrides ParentLayerID as the head CAS precondition.
-	ExpectedHeadLayerID string
-	SandboxID           string
-	TeamID              string
-	RuntimeGeneration   int64
-	Runtime             string
-	RuntimeHandler      string
-	BaseImageRef        string
-	BaseImageDigest     string
-	Snapshotter         string
-	SnapshotParent      string
-	SnapshotParentChain []string
-	DiffDigest          string
-	DiffMediaType       string
-	DiffSize            int64
-	DiffObjectKey       string
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
-	LayerChain          []*SandboxRootFSLayer
+	ExpectedHeadLayerID  string
+	SandboxID            string
+	TeamID               string
+	RuntimeGeneration    int64
+	Runtime              string
+	RuntimeHandler       string
+	BaseImageRef         string
+	BaseImageDigest      string
+	PlatformOS           string
+	PlatformArchitecture string
+	PlatformVariant      string
+	Snapshotter          string
+	SnapshotParent       string
+	SnapshotParentChain  []string
+	DiffDigest           string
+	DiffID               string
+	DiffMediaType        string
+	DiffSize             int64
+	DiffObjectKey        string
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+	LayerChain           []*SandboxRootFSLayer
 }
 
 // SandboxRootFSLayer is one immutable OCI diff layer in a sandbox rootfs chain.
 type SandboxRootFSLayer struct {
-	ID                  string
-	ParentLayerID       string
-	SourceSandboxID     string
-	TeamID              string
-	RuntimeGeneration   int64
-	Runtime             string
-	RuntimeHandler      string
-	BaseImageRef        string
-	BaseImageDigest     string
-	Snapshotter         string
-	SnapshotParent      string
-	SnapshotParentChain []string
-	DiffDigest          string
-	DiffID              string
-	DiffMediaType       string
-	DiffSize            int64
-	DiffObjectKey       string
-	CreatedAt           time.Time
+	ID                   string
+	ParentLayerID        string
+	SourceSandboxID      string
+	TeamID               string
+	RuntimeGeneration    int64
+	Runtime              string
+	RuntimeHandler       string
+	BaseImageRef         string
+	BaseImageDigest      string
+	PlatformOS           string
+	PlatformArchitecture string
+	PlatformVariant      string
+	Snapshotter          string
+	SnapshotParent       string
+	SnapshotParentChain  []string
+	DiffDigest           string
+	DiffID               string
+	DiffMediaType        string
+	DiffSize             int64
+	DiffObjectKey        string
+	CreatedAt            time.Time
 }
 
 const (
@@ -487,6 +494,24 @@ func (s *PGSandboxStore) GetRootFSLayerChain(ctx context.Context, sandboxID stri
 	if err != nil {
 		return nil, fmt.Errorf("get rootfs layer chain: %w", err)
 	}
+	return scanRootFSLayerChain(rows)
+}
+
+// GetRootFSLayerChainByHead returns the immutable ancestor chain ending at
+// headLayerID. It is used by point-in-time products that must not follow a
+// sandbox head after the source sandbox continues running.
+func (s *PGSandboxStore) GetRootFSLayerChainByHead(ctx context.Context, teamID, headLayerID string) ([]*SandboxRootFSLayer, error) {
+	if s == nil || s.pool == nil || strings.TrimSpace(headLayerID) == "" {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx, rootFSLayerChainByHeadSQL(), strings.TrimSpace(headLayerID), strings.TrimSpace(teamID))
+	if err != nil {
+		return nil, fmt.Errorf("get rootfs layer chain by head: %w", err)
+	}
+	return scanRootFSLayerChain(rows)
+}
+
+func scanRootFSLayerChain(rows pgx.Rows) ([]*SandboxRootFSLayer, error) {
 	defer rows.Close()
 	var layers []*SandboxRootFSLayer
 	for rows.Next() {
@@ -885,14 +910,16 @@ func saveRootFSLayer(ctx context.Context, exec rootFSStateExecutor, state *Sandb
 			layer_id, parent_layer_id, source_sandbox_id, team_id, runtime_generation,
 			runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,
 			snapshot_parent, snapshot_parent_chain, diff_digest, diff_id, diff_media_type,
-			diff_size, diff_object_key, created_at
+			diff_size, diff_object_key, platform_os, platform_architecture,
+			platform_variant, created_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, COALESCE($18, NOW()))
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, COALESCE($21, NOW()))
 		ON CONFLICT (layer_id) DO NOTHING
 	`, state.LayerID, parentLayerID, state.SandboxID, state.TeamID, state.RuntimeGeneration,
 		state.Runtime, state.RuntimeHandler, state.BaseImageRef, state.BaseImageDigest, state.Snapshotter,
-		state.SnapshotParent, parentChainJSON, state.DiffDigest, "", state.DiffMediaType,
-		state.DiffSize, state.DiffObjectKey, nullableTime(state.CreatedAt))
+		state.SnapshotParent, parentChainJSON, state.DiffDigest, state.DiffID, state.DiffMediaType,
+		state.DiffSize, state.DiffObjectKey, state.PlatformOS, state.PlatformArchitecture,
+		state.PlatformVariant, nullableTime(state.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("save rootfs layer: %w", err)
 	}
@@ -1041,7 +1068,8 @@ func rootFSLayerChainSQL() string {
 				l.runtime_generation, l.runtime, l.runtime_handler, l.base_image_ref,
 				l.base_image_digest, l.snapshotter, l.snapshot_parent,
 				l.snapshot_parent_chain, l.diff_digest, l.diff_id, l.diff_media_type,
-				l.diff_size, l.diff_object_key, l.created_at, 0 AS depth
+				l.diff_size, l.diff_object_key, l.platform_os, l.platform_architecture,
+				l.platform_variant, l.created_at, 0 AS depth
 			FROM head h
 			JOIN manager.rootfs_layers l ON l.layer_id = h.head_layer_id
 			UNION ALL
@@ -1050,14 +1078,49 @@ func rootFSLayerChainSQL() string {
 				p.runtime_generation, p.runtime, p.runtime_handler, p.base_image_ref,
 				p.base_image_digest, p.snapshotter, p.snapshot_parent,
 				p.snapshot_parent_chain, p.diff_digest, p.diff_id, p.diff_media_type,
-				p.diff_size, p.diff_object_key, p.created_at, c.depth + 1 AS depth
+				p.diff_size, p.diff_object_key, p.platform_os, p.platform_architecture,
+				p.platform_variant, p.created_at, c.depth + 1 AS depth
 			FROM manager.rootfs_layers p
 			JOIN chain c ON p.layer_id = c.parent_layer_id
 		)
 		SELECT layer_id, parent_layer_id, source_sandbox_id, team_id, runtime_generation,
 			runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,
 			snapshot_parent, snapshot_parent_chain, diff_digest, diff_id, diff_media_type,
-			diff_size, diff_object_key, created_at
+			diff_size, diff_object_key, platform_os, platform_architecture,
+			platform_variant, created_at
+		FROM chain
+		ORDER BY depth DESC`
+}
+
+func rootFSLayerChainByHeadSQL() string {
+	return `WITH RECURSIVE chain AS (
+			SELECT
+				l.layer_id, l.parent_layer_id, l.source_sandbox_id, l.team_id,
+				l.runtime_generation, l.runtime, l.runtime_handler, l.base_image_ref,
+				l.base_image_digest, l.snapshotter, l.snapshot_parent,
+				l.snapshot_parent_chain, l.diff_digest, l.diff_id, l.diff_media_type,
+				l.diff_size, l.diff_object_key, l.platform_os, l.platform_architecture,
+				l.platform_variant, l.created_at, 0 AS depth
+			FROM manager.rootfs_layers l
+			WHERE l.layer_id = $1
+				AND ($2 = '' OR l.team_id = $2)
+			UNION ALL
+			SELECT
+				p.layer_id, p.parent_layer_id, p.source_sandbox_id, p.team_id,
+				p.runtime_generation, p.runtime, p.runtime_handler, p.base_image_ref,
+				p.base_image_digest, p.snapshotter, p.snapshot_parent,
+				p.snapshot_parent_chain, p.diff_digest, p.diff_id, p.diff_media_type,
+				p.diff_size, p.diff_object_key, p.platform_os, p.platform_architecture,
+				p.platform_variant, p.created_at, c.depth + 1 AS depth
+			FROM manager.rootfs_layers p
+			JOIN chain c ON p.layer_id = c.parent_layer_id
+				AND p.team_id = c.team_id
+		)
+		SELECT layer_id, parent_layer_id, source_sandbox_id, team_id, runtime_generation,
+			runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,
+			snapshot_parent, snapshot_parent_chain, diff_digest, diff_id, diff_media_type,
+			diff_size, diff_object_key, platform_os, platform_architecture,
+			platform_variant, created_at
 		FROM chain
 		ORDER BY depth DESC`
 }
@@ -1070,7 +1133,8 @@ func scanRootFSLayerRows(rows pgx.Rows) (*SandboxRootFSLayer, error) {
 		&layer.ID, &parentLayerID, &layer.SourceSandboxID, &layer.TeamID, &layer.RuntimeGeneration,
 		&layer.Runtime, &layer.RuntimeHandler, &layer.BaseImageRef, &layer.BaseImageDigest, &layer.Snapshotter,
 		&layer.SnapshotParent, &parentChainJSON, &layer.DiffDigest, &layer.DiffID, &layer.DiffMediaType,
-		&layer.DiffSize, &layer.DiffObjectKey, &layer.CreatedAt,
+		&layer.DiffSize, &layer.DiffObjectKey, &layer.PlatformOS, &layer.PlatformArchitecture,
+		&layer.PlatformVariant, &layer.CreatedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -1091,24 +1155,28 @@ func rootFSStateFromLayerChain(sandboxID string, chain []*SandboxRootFSLayer) *S
 	}
 	head := chain[len(chain)-1]
 	return &SandboxRootFSState{
-		LayerID:             head.ID,
-		ParentLayerID:       head.ParentLayerID,
-		SandboxID:           sandboxID,
-		TeamID:              head.TeamID,
-		RuntimeGeneration:   head.RuntimeGeneration,
-		Runtime:             head.Runtime,
-		RuntimeHandler:      head.RuntimeHandler,
-		BaseImageRef:        head.BaseImageRef,
-		BaseImageDigest:     head.BaseImageDigest,
-		Snapshotter:         head.Snapshotter,
-		SnapshotParent:      head.SnapshotParent,
-		SnapshotParentChain: append([]string(nil), head.SnapshotParentChain...),
-		DiffDigest:          head.DiffDigest,
-		DiffMediaType:       head.DiffMediaType,
-		DiffSize:            head.DiffSize,
-		DiffObjectKey:       head.DiffObjectKey,
-		CreatedAt:           head.CreatedAt,
-		LayerChain:          cloneSandboxRootFSLayers(chain),
+		LayerID:              head.ID,
+		ParentLayerID:        head.ParentLayerID,
+		SandboxID:            sandboxID,
+		TeamID:               head.TeamID,
+		RuntimeGeneration:    head.RuntimeGeneration,
+		Runtime:              head.Runtime,
+		RuntimeHandler:       head.RuntimeHandler,
+		BaseImageRef:         head.BaseImageRef,
+		BaseImageDigest:      head.BaseImageDigest,
+		PlatformOS:           head.PlatformOS,
+		PlatformArchitecture: head.PlatformArchitecture,
+		PlatformVariant:      head.PlatformVariant,
+		Snapshotter:          head.Snapshotter,
+		SnapshotParent:       head.SnapshotParent,
+		SnapshotParentChain:  append([]string(nil), head.SnapshotParentChain...),
+		DiffDigest:           head.DiffDigest,
+		DiffID:               head.DiffID,
+		DiffMediaType:        head.DiffMediaType,
+		DiffSize:             head.DiffSize,
+		DiffObjectKey:        head.DiffObjectKey,
+		CreatedAt:            head.CreatedAt,
+		LayerChain:           cloneSandboxRootFSLayers(chain),
 	}
 }
 

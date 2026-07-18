@@ -17,11 +17,15 @@ import (
 
 // proxyToManager proxies a request to manager with internal authentication
 func (s *Server) proxyToManager(c *gin.Context) {
+	s.proxyToManagerWithPermissions(c, nil)
+}
+
+func (s *Server) proxyToManagerWithPermissions(c *gin.Context, permissions []string) {
 	authCtx := middleware.GetAuthContext(c)
 	claims := internalauth.ClaimsFromContext(c.Request.Context())
 
 	// Generate internal token for manager
-	internalToken, err := s.generateManagerToken(authCtx, claims, nil)
+	internalToken, err := s.generateManagerToken(authCtx, claims, permissions)
 	if err != nil {
 		s.logger.Error("Failed to generate internal token for manager",
 			zap.String("team_id", authCtx.TeamID),

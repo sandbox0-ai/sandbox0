@@ -87,7 +87,7 @@ spec:
       service:
         type: NodePort
         port: 30500
-      # For local kind debug, s0 CLI can push via this endpoint.
+      # The CLI pushes here and kind sandbox nodes pull generated template images here.
       pushEndpoint: 127.0.0.1:30500
       # ingress:
       #   enabled: true

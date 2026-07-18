@@ -80,9 +80,9 @@ func (s *TemplateService) SetNamespacePolicyReconciler(reconciler namespacepolic
 
 // RegistryHosts returns registry hosts reserved for platform-scoped private images.
 func (s *TemplateService) RegistryHosts() []string {
-	hosts := make([]string, 0, 2)
-	seen := make(map[string]struct{}, 2)
-	for _, value := range []string{s.registry.PushRegistry, s.registry.PullRegistry} {
+	hosts := make([]string, 0, 3)
+	seen := make(map[string]struct{}, 3)
+	for _, value := range []string{s.registry.PushRegistry, s.registry.PullRegistry, s.registry.InternalRegistry} {
 		host := strings.TrimSpace(value)
 		if host == "" {
 			continue

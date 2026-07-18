@@ -104,34 +104,36 @@ type SandboxServiceConfig struct {
 
 // SandboxService handles sandbox operations
 type SandboxService struct {
-	k8sClient              kubernetes.Interface
-	podLister              corelisters.PodLister
-	nodeLister             corelisters.NodeLister
-	sandboxIndex           *SandboxIndex
-	secretLister           corelisters.SecretLister
-	templateLister         controller.TemplateLister
-	NetworkPolicyService   *NetworkPolicyService
-	networkProvider        network.Provider
-	procdClient            *ProcdClient
-	ctldClient             *CtldClient
-	internalTokenGenerator TokenGenerator
-	clock                  TimeProvider
-	config                 SandboxServiceConfig
-	logger                 *zap.Logger
-	metrics                *obsmetrics.ManagerMetrics
-	pauseEnqueuer          SandboxPauseEnqueuer
-	credentialStore        egressauth.BindingStore
-	webhookStateVolumes    SandboxSystemVolumeClient
-	volumeMetadata         SandboxVolumeMetadataClient
-	deletionWebhookEmitter SandboxDeletionWebhookEmitter
-	quotaStore             TeamQuotaLimitStore
-	sandboxStore           SandboxStore
-	rootFSObjectDeleter    RootFSObjectDeleter
-	claimStartLimiter      *startlimiter.Limiter
-	resumeGroup            singleflight.Group
-	idlePodReservations    *idlePodReservations
-	podWaiterMu            sync.Mutex
-	podWaiter              *podEventWaiter
+	k8sClient                              kubernetes.Interface
+	podLister                              corelisters.PodLister
+	nodeLister                             corelisters.NodeLister
+	sandboxIndex                           *SandboxIndex
+	secretLister                           corelisters.SecretLister
+	templateLister                         controller.TemplateLister
+	NetworkPolicyService                   *NetworkPolicyService
+	networkProvider                        network.Provider
+	procdClient                            *ProcdClient
+	ctldClient                             *CtldClient
+	internalTokenGenerator                 TokenGenerator
+	clock                                  TimeProvider
+	config                                 SandboxServiceConfig
+	logger                                 *zap.Logger
+	metrics                                *obsmetrics.ManagerMetrics
+	pauseEnqueuer                          SandboxPauseEnqueuer
+	credentialStore                        egressauth.BindingStore
+	webhookStateVolumes                    SandboxSystemVolumeClient
+	volumeMetadata                         SandboxVolumeMetadataClient
+	deletionWebhookEmitter                 SandboxDeletionWebhookEmitter
+	quotaStore                             TeamQuotaLimitStore
+	sandboxStore                           SandboxStore
+	rootFSObjectDeleter                    RootFSObjectDeleter
+	templateImageBuildCapabilityConfigured bool
+	templateImageBuildAvailable            bool
+	claimStartLimiter                      *startlimiter.Limiter
+	resumeGroup                            singleflight.Group
+	idlePodReservations                    *idlePodReservations
+	podWaiterMu                            sync.Mutex
+	podWaiter                              *podEventWaiter
 }
 
 type TeamQuotaLimitStore interface {
@@ -320,4 +322,14 @@ func (s *SandboxService) SetSandboxStore(store SandboxStore) {
 // rootfs diffs that were uploaded but never committed into the DB rootfs head.
 func (s *SandboxService) SetRootFSObjectDeleter(deleter RootFSObjectDeleter) {
 	s.rootFSObjectDeleter = deleter
+}
+
+// SetTemplateImageBuildAvailable controls source capability preflight. It is
+// configured before HTTP serving begins and remains stable for the process.
+func (s *SandboxService) SetTemplateImageBuildAvailable(available bool) {
+	if s == nil {
+		return
+	}
+	s.templateImageBuildCapabilityConfigured = true
+	s.templateImageBuildAvailable = available
 }

@@ -1291,6 +1291,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "409":
+          description: The selected template is still creating or its creation failed
+          headers:
+            Retry-After:
+              description: Suggested retry delay in seconds when template creation is still in progress
+              schema:
+                type: integer
+                minimum: 0
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
         "429":
           description: Team quota exceeded or claim/start admission throttled
           headers:
@@ -2915,6 +2927,97 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessTemplateResponse"
+  /api/v1/templates/from-sandbox:
+    post:
+      tags: [templates]
+      summary: Create template from sandbox
+      description: |
+        Asynchronously captures the sandbox's writable root filesystem,
+        publishes it to the Sandbox0-configured team registry, and creates a
+        digest-pinned template. The capture point is reported by
+        `status.creation.capturedAt`, not by acceptance of this request. Keep
+        the source sandbox available and avoid rootfs writes until capture
+        completes. Poll the returned template with
+        `GET /api/v1/templates/{id}` until `status.creation.state` is `ready`
+        or `failed`. The caller needs both `template:create` and
+        `sandbox:read` permissions.
+      security:
+        - bearerAuth: []
+      x-upstream-service: manager
+      x-upstream-path: /api/v1/templates/from-sandbox
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            maxLength: 255
+          description: Optional key for retrying creation without starting a duplicate image build.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TemplateFromSandboxCreateRequest"
+      responses:
+        "202":
+          description: Template creation accepted
+          headers:
+            Location:
+              description: URL of the accepted template resource.
+              schema:
+                type: string
+            Retry-After:
+              description: Suggested seconds before polling a template that is still creating.
+              schema:
+                type: integer
+                minimum: 0
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessTemplateResponse"
+        "400":
+          description: Invalid template ID, sandbox ID, overrides, or idempotency key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Missing template:create or sandbox:read permission, or source sandbox access is forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Source sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "409":
+          description: Template ID or idempotency key conflict, or source sandbox is not captureable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          description: Source data plane or template image build capability is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
   /api/v1/templates/{id}:
     get:
       tags: [templates]
@@ -2960,6 +3063,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessTemplateResponse"
+        "409":
+          description: The template is still creating or its creation failed
+          headers:
+            Retry-After:
+              description: Suggested retry delay in seconds when template creation is still in progress
+              schema:
+                type: integer
+                minimum: 0
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
     delete:
       tags: [templates]
       summary: Delete template
@@ -6961,6 +7076,36 @@ components:
         spec:
           $ref: "#/components/schemas/SandboxTemplateSpec"
       required: [template_id, spec]
+    TemplateFromSandboxCreateRequest:
+      type: object
+      additionalProperties: false
+      description: Creates a template by capturing the current root filesystem of an existing sandbox.
+      properties:
+        template_id:
+          type: string
+        sandbox_id:
+          type: string
+        spec_overrides:
+          $ref: "#/components/schemas/TemplateFromSandboxSpecOverrides"
+      required: [template_id, sandbox_id]
+    TemplateFromSandboxSpecOverrides:
+      type: object
+      additionalProperties: false
+      description: |
+        Safe template fields that may override values inherited from the source
+        sandbox's originating template. Pool defaults to zero idle sandboxes
+        when omitted.
+      properties:
+        description:
+          type: string
+        displayName:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        pool:
+          $ref: "#/components/schemas/PoolStrategy"
     TemplateUpdateRequest:
       type: object
       properties:
@@ -7969,6 +8114,49 @@ components:
           type: string
           format: date-time
           nullable: true
+        creation:
+          $ref: "#/components/schemas/TemplateCreationStatus"
+    TemplateCreationStatus:
+      type: object
+      description: |
+        Asynchronous creation status for templates built from a sandbox.
+        Traditional image-based templates omit this object and are ready
+        immediately after creation. Ready means the template is visible in at
+        least one data-plane cluster and the claim API accepts it; when the
+        pool is zero, it does not imply that a sandbox image has already been
+        pulled.
+      properties:
+        state:
+          type: string
+          enum: [creating, ready, failed]
+          x-enum-varnames:
+            - TemplateCreationStatusStateCreating
+            - TemplateCreationStatusStateReady
+            - TemplateCreationStatusStateFailed
+        stage:
+          type: string
+          enum: [capturing, publishing, reconciling]
+          x-enum-varnames:
+            - TemplateCreationStatusStageCapturing
+            - TemplateCreationStatusStagePublishing
+            - TemplateCreationStatusStageReconciling
+        startedAt:
+          type: string
+          format: date-time
+        capturedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        outputImage:
+          type: string
+          description: Digest-pinned image reference published to the configured team registry.
+        reason:
+          type: string
+        message:
+          type: string
+      required: [state, stage]
     SandboxTemplateCondition:
       type: object
       properties:

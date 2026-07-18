@@ -5,9 +5,9 @@ Every Template references a container image. Sandbox0 supports two types of imag
 | Type | Description | Example |
 |------|-------------|---------|
 | **Public image** | Any image from a public registry | `python:3.12-slim`, `node:20-alpine` |
-| **Private image** | Your own image pushed to the Sandbox0 registry | `registry.sandbox0-system.svc.cluster.local:5000/t-<team-key>/my-app:v1.2.3` |
+| **Private image** | Your own image pushed to the Sandbox0 registry | `registry.example.com/t-<team-key>/my-app:v1.2.3` |
 
-For private images, Sandbox0 provides a built-in registry and a CLI workflow to build and push images securely. Authentication is handled automatically — your images are protected and only accessible to your team.
+For private images, Sandbox0 provides a built-in registry and a CLI workflow to build and push images securely. Authentication is handled automatically — your images are protected and only accessible to your team. You can also [create a template from an existing sandbox](/docs/sandbox/template#create-template-from-a-sandbox); Sandbox0 captures the root filesystem and publishes the resulting private image without requiring a local Docker daemon.
 
 <Callout variant="info">
 If a template will run [Sandbox Functions](/docs/sandbox/functions), its image must include `python3` in `PATH` and use Python 3.9 or later. Sandbox0 injects the function runner, but the runner executes the Python interpreter from the template image, not from the manager image.
@@ -34,7 +34,11 @@ spec:
 
 ## Using a Private Image
 
-Private images require a two-step workflow using the `s0` CLI:
+When you already have a Dockerfile or another reproducible image build, private images use a two-step workflow with the `s0` CLI:
+
+<Callout variant="info">
+If the desired environment already exists inside a sandbox, use `s0 template create --from-sandbox` instead. The server publishes to the configured team registry and records a digest-pinned image automatically, so you do not run `image build`, `image push`, or choose a repository.
+</Callout>
 
 ### Step 1 — Build Your Image
 
@@ -99,13 +103,14 @@ Credentials are short-lived and fetched automatically each time you push. You do
 ### Step 3 — Reference the Pull Image in Your Template
 
 After `s0 template image push`, use the `Template image reference` value in your template spec.
-This reference is the in-cluster pull address and may differ from the external push address.
+This is the node-reachable pull address configured by the platform operator. It may
+differ from the address manager uses internally to publish images.
 
 ```bash
 $ s0 template image push my-app:v1.2.3 -t my-app:v1.2.3
 ...
 Image pushed successfully: 127.0.0.1:30500/t-<team-key>/my-app:v1.2.3
-Template image reference: registry.sandbox0-system.svc.cluster.local:5000/t-<team-key>/my-app:v1.2.3
+Template image reference: 127.0.0.1:30500/t-<team-key>/my-app:v1.2.3
 ```
 
 Use that `Template image reference` value:
@@ -113,7 +118,7 @@ Use that `Template image reference` value:
 ```yaml
 spec:
     mainContainer:
-        image: registry.sandbox0-system.svc.cluster.local:5000/t-<team-key>/my-app:v1.2.3
+        image: 127.0.0.1:30500/t-<team-key>/my-app:v1.2.3
         resources:
             memory: 8Gi
     pool:
@@ -145,7 +150,7 @@ s0 template image push my-app:v1.2.3 -t my-app:v1.2.3
 cat > template.yaml << 'EOF'
 spec:
     mainContainer:
-        image: registry.sandbox0-system.svc.cluster.local:5000/t-<team-key>/my-app:v1.2.3
+        image: 127.0.0.1:30500/t-<team-key>/my-app:v1.2.3
         resources:
             memory: 8Gi
     pool:
@@ -175,6 +180,13 @@ Sandbox0 supports multiple container registry backends. The registry provider is
 | `harbor` | Harbor | Uses Harbor robot/user credentials from Kubernetes Secret. |
 
 For all providers, the `s0 template image push` command handles credential retrieval transparently — you always use the same CLI command regardless of the backend.
+
+For the `builtin` provider, configure `spec.registry.builtin.pushEndpoint` or
+Ingress with an address that every sandbox node can reach. Sandbox0 uses that
+advertised address in Template image references and keeps the registry Service
+DNS name for manager's server-side publication only. Do not put a Kubernetes
+Service DNS name in a Template image reference: node container runtimes do not
+normally use cluster DNS.
 
 ---
 

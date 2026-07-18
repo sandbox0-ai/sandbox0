@@ -120,7 +120,7 @@ After a successful push, use the printed `Template image reference` value in you
 ```yaml
 spec:
     mainContainer:
-        image: registry.sandbox0-system.svc.cluster.local:5000/t-<team-key>/my-app:${GITHUB_SHA}
+        image: registry.example.com/t-<team-key>/my-app:${GITHUB_SHA}
         resources:
             memory: 8Gi
     pool:

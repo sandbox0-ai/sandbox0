@@ -34,6 +34,7 @@ func TestRepositoryBlockingQueriesCoverTeamScopedStores(t *testing.T) {
 		"ssh_public_keys",
 		"scheduler_templates",
 		"scheduler_template_allocations",
+		"scheduler_template_builds",
 		"credential_sources",
 		"credential_source_versions",
 		"sandbox_egress_credential_bindings",

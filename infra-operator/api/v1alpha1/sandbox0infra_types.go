@@ -968,8 +968,9 @@ type BuiltinRegistryConfig struct {
 	// +optional
 	Service *ServiceNetworkConfig `json:"service,omitempty"`
 
-	// PushEndpoint overrides the external registry endpoint used for image push credentials.
-	// Use host[:port] format, without scheme.
+	// PushEndpoint overrides the externally advertised registry endpoint used
+	// for image pushes and sandbox node image pulls. Every sandbox node must be
+	// able to reach this endpoint. Use host[:port] format, without scheme.
 	// +optional
 	PushEndpoint string `json:"pushEndpoint,omitempty"`
 

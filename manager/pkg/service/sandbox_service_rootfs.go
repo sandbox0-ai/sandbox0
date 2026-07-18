@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	godigest "github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
@@ -71,7 +72,8 @@ func (s *SandboxService) prepareSandboxRootFSCheckpoint(ctx context.Context, pod
 	generation := runtimeGenerationFromPod(pod)
 	parentLayerID := ""
 	expectedHeadLayerID := ""
-	if parentState, err := s.latestRootFSState(ctx, sandboxID); err != nil {
+	var parentState *SandboxRootFSState
+	if parentState, err = s.latestRootFSState(ctx, sandboxID); err != nil {
 		return nil, fmt.Errorf("load current rootfs head: %w", err)
 	} else if parentState != nil {
 		expectedHeadLayerID = strings.TrimSpace(parentState.LayerID)
@@ -109,7 +111,56 @@ func (s *SandboxService) prepareSandboxRootFSCheckpoint(ctx context.Context, pod
 	state.LayerID = layerID
 	state.ParentLayerID = parentLayerID
 	state.ExpectedHeadLayerID = expectedHeadLayerID
+	platform := s.rootFSPlatformForPod(pod)
+	if platform.OS == "" && parentState != nil {
+		platform.OS = parentState.PlatformOS
+	}
+	if platform.Architecture == "" && parentState != nil {
+		platform.Architecture = parentState.PlatformArchitecture
+	}
+	if platform.Variant == "" && parentState != nil {
+		platform.Variant = parentState.PlatformVariant
+	}
+	state.PlatformOS = platform.OS
+	state.PlatformArchitecture = platform.Architecture
+	state.PlatformVariant = platform.Variant
 	return state, nil
+}
+
+const rootFSPlatformVariantLabel = "sandbox0.ai/platform-variant"
+
+// rootFSPlatformForPod captures the platform of the node that actually ran the
+// sandbox. It deliberately does not fall back to manager's own GOOS/GOARCH.
+func (s *SandboxService) rootFSPlatformForPod(pod *corev1.Pod) ocispec.Platform {
+	if pod == nil {
+		return ocispec.Platform{}
+	}
+	platform := ocispec.Platform{
+		OS:           strings.TrimSpace(pod.Spec.NodeSelector[corev1.LabelOSStable]),
+		Architecture: strings.TrimSpace(pod.Spec.NodeSelector[corev1.LabelArchStable]),
+		Variant:      strings.TrimSpace(pod.Spec.NodeSelector[rootFSPlatformVariantLabel]),
+	}
+	if s == nil || s.nodeLister == nil || strings.TrimSpace(pod.Spec.NodeName) == "" {
+		return platform
+	}
+	node, err := s.nodeLister.Get(pod.Spec.NodeName)
+	if err != nil || node == nil {
+		return platform
+	}
+	if value := strings.TrimSpace(node.Labels[corev1.LabelOSStable]); value != "" {
+		platform.OS = value
+	} else if value := strings.TrimSpace(node.Status.NodeInfo.OperatingSystem); value != "" {
+		platform.OS = value
+	}
+	if value := strings.TrimSpace(node.Labels[corev1.LabelArchStable]); value != "" {
+		platform.Architecture = value
+	} else if value := strings.TrimSpace(node.Status.NodeInfo.Architecture); value != "" {
+		platform.Architecture = value
+	}
+	if value := strings.TrimSpace(node.Labels[rootFSPlatformVariantLabel]); value != "" {
+		platform.Variant = value
+	}
+	return platform
 }
 
 func (s *SandboxService) prepareAndPublishSandboxRootFSSnapshot(ctx context.Context, ctldAddress string, prepareReq ctldapi.PrepareRootFSSnapshotRequest, sandboxID, teamID string, generation int64, layerID string) (*ctldapi.SaveRootFSResponse, error) {
@@ -211,6 +262,7 @@ func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *
 		Descriptor: ctldapi.RootFSDiffDescriptor{
 			MediaType: state.DiffMediaType,
 			Digest:    state.DiffDigest,
+			DiffID:    state.DiffID,
 			Size:      state.DiffSize,
 			ObjectKey: state.DiffObjectKey,
 		},
@@ -395,6 +447,7 @@ func rootFSLayerDescriptors(state *SandboxRootFSState) []ctldapi.RootFSLayerDesc
 				Descriptor: ctldapi.RootFSDiffDescriptor{
 					MediaType: layer.DiffMediaType,
 					Digest:    layer.DiffDigest,
+					DiffID:    layer.DiffID,
 					Size:      layer.DiffSize,
 					ObjectKey: layer.DiffObjectKey,
 				},
@@ -413,6 +466,7 @@ func rootFSLayerDescriptors(state *SandboxRootFSState) []ctldapi.RootFSLayerDesc
 		Descriptor: ctldapi.RootFSDiffDescriptor{
 			MediaType: state.DiffMediaType,
 			Digest:    state.DiffDigest,
+			DiffID:    state.DiffID,
 			Size:      state.DiffSize,
 			ObjectKey: state.DiffObjectKey,
 		},
@@ -460,6 +514,7 @@ func rootFSStateFromSaveResponse(sandboxID, teamID string, generation int64, res
 		SnapshotParent:      resp.Info.SnapshotParent,
 		SnapshotParentChain: append([]string(nil), resp.Info.SnapshotParentChain...),
 		DiffDigest:          resp.Descriptor.Digest,
+		DiffID:              resp.Descriptor.DiffID,
 		DiffMediaType:       resp.Descriptor.MediaType,
 		DiffSize:            resp.Descriptor.Size,
 		DiffObjectKey:       resp.Descriptor.ObjectKey,
@@ -483,6 +538,7 @@ func rootFSStateFromPreparedSnapshot(sandboxID, teamID string, generation int64,
 		SnapshotParent:      prepared.Info.SnapshotParent,
 		SnapshotParentChain: append([]string(nil), prepared.Info.SnapshotParentChain...),
 		DiffDigest:          prepared.Descriptor.Digest,
+		DiffID:              prepared.Descriptor.DiffID,
 		DiffMediaType:       prepared.Descriptor.MediaType,
 		DiffSize:            prepared.Descriptor.Size,
 		DiffObjectKey:       objectKey,

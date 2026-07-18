@@ -110,6 +110,12 @@ func TestSetupRoutesMountsControlPlaneEndpointsInInternalMode(t *testing.T) {
 	if !hasRoute(server.router, "POST", "/internal/v1/sandboxes/:id/resume") {
 		t.Fatal("expected internal mode to mount internal sandbox resume route")
 	}
+	if !hasRoute(server.router, "GET", "/internal/v1/sandboxes/:id/template-source") {
+		t.Fatal("expected internal mode to mount sandbox template source route")
+	}
+	if !hasRoute(server.router, "POST", "/api/v1/templates/from-sandbox") {
+		t.Fatal("expected internal mode to mount template-from-sandbox route")
+	}
 	if !hasRoute(server.router, "PUT", "/internal/v1/teams/:team_id/quotas/:dimension") {
 		t.Fatal("expected internal mode to mount internal quota write route")
 	}

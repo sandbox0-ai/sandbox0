@@ -389,7 +389,10 @@ func TestReconcileStorageRuntimeUsesManagerBudgetAndService(t *testing.T) {
 					Enabled: true, Bucket: "sandbox0", Region: "us-east-1",
 				},
 				Runtime: &infrav1alpha1.StorageProxyConfig{
-					HTTPPort: 8081, CacheSizeLimit: "512Mi", LogSizeLimit: "64Mi",
+					HTTPPort:                8081,
+					CacheSizeLimit:          "512Mi",
+					LogSizeLimit:            "64Mi",
+					ObjectEncryptionEnabled: true,
 				},
 			},
 			Services: &infrav1alpha1.ServicesConfig{
@@ -449,12 +452,37 @@ func TestReconcileStorageRuntimeUsesManagerBudgetAndService(t *testing.T) {
 	if got := resources.Limits.Memory().String(); got != "1Gi" {
 		t.Fatalf("manager memory limit = %q, want 1Gi", got)
 	}
+	assertManagerObjectEncryptionMount(t, deployment, infra.Name)
 
 	service := &corev1.Service{}
 	if err := reconciler.Resources.Client.Get(ctx, types.NamespacedName{Name: "demo-manager", Namespace: infra.Namespace}, service); err != nil {
 		t.Fatal(err)
 	}
 	assertManagerServicePort(t, service, "storage-http", 8081, 8081)
+}
+
+func assertManagerObjectEncryptionMount(t *testing.T, deployment *appsv1.Deployment, infraName string) {
+	t.Helper()
+	if deployment == nil || len(deployment.Spec.Template.Spec.Containers) == 0 {
+		t.Fatal("manager deployment has no container")
+	}
+	foundMount := false
+	for _, mount := range deployment.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if mount.Name == "object-encryption-key" && mount.MountPath == common.ObjectEncryptionMountDir && mount.ReadOnly {
+			foundMount = true
+			break
+		}
+	}
+	if !foundMount {
+		t.Fatalf("manager object encryption mount is missing: %#v", deployment.Spec.Template.Spec.Containers[0].VolumeMounts)
+	}
+	for _, volume := range deployment.Spec.Template.Spec.Volumes {
+		if volume.Name == "object-encryption-key" && volume.Secret != nil &&
+			volume.Secret.SecretName == common.ObjectEncryptionSecretName(infraName) {
+			return
+		}
+	}
+	t.Fatalf("manager object encryption volume is missing: %#v", deployment.Spec.Template.Spec.Volumes)
 }
 
 func TestResolveStorageRuntimeHTTPPortRemapsManagerListeners(t *testing.T) {

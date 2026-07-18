@@ -334,6 +334,7 @@ func compileSchedulerPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPla
 	if resolvedRegistry := registry.ResolveRegistryConfig(infra); resolvedRegistry != nil {
 		schedulerPlan.Config.RegistryPushRegistry = resolvedRegistry.PushRegistry
 		schedulerPlan.Config.RegistryPullRegistry = resolvedRegistry.PullRegistry
+		schedulerPlan.Config.RegistryInternalRegistry = resolvedRegistry.InternalRegistry
 	}
 	schedulerPlan.HomeCluster = compileSchedulerHomeCluster(infra, compiled)
 	return schedulerPlan
@@ -462,6 +463,7 @@ func compileManagerRuntimeConfig(managerPlan *ManagerPlan, infra *infrav1alpha1.
 		cfg.Registry.Provider = string(resolvedRegistry.Provider)
 		cfg.Registry.PushRegistry = resolvedRegistry.PushRegistry
 		cfg.Registry.PullRegistry = resolvedRegistry.PullRegistry
+		cfg.Registry.InternalRegistry = resolvedRegistry.InternalRegistry
 		cfg.Registry.PullSecretName = resolvedRegistry.TargetSecretName
 		cfg.Registry.Namespace = infra.Namespace
 		if resolvedRegistry.SourceSecretName != "" {

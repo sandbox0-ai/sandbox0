@@ -27,6 +27,7 @@ import (
 	registryprovider "github.com/sandbox0-ai/sandbox0/manager/pkg/registry"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/startlimiter"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateimage"
 	"github.com/sandbox0-ai/sandbox0/pkg/clock"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
@@ -36,6 +37,7 @@ import (
 	meteringclickhouse "github.com/sandbox0-ai/sandbox0/pkg/metering/clickhouse"
 	meteringoutbox "github.com/sandbox0-ai/sandbox0/pkg/metering/outbox"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
@@ -386,6 +388,7 @@ func main() {
 	// the manager schema contain overlapping keys such as
 	// http_port and database_schema.
 	var managerStorageRuntime *storageproxyruntime.Runtime
+	var managerStorageConfig *config.StorageProxyConfig
 	if storageConfigPath := strings.TrimSpace(os.Getenv("STORAGE_RUNTIME_CONFIG_PATH")); storageConfigPath != "" {
 		storageCfg, loadErr := config.ReadStorageProxyConfig(storageConfigPath)
 		if loadErr != nil {
@@ -394,6 +397,7 @@ func main() {
 				zap.Error(loadErr),
 			)
 		}
+		managerStorageConfig = storageCfg
 		storageLogrusLogger := logrus.New()
 		storageLogrusLogger.SetFormatter(&logrus.JSONFormatter{})
 		storageLogrusLogger.SetOutput(os.Stdout)
@@ -479,6 +483,7 @@ func main() {
 		logger,
 		managerMetrics,
 	)
+	sandboxService.SetTemplateImageBuildAvailable(false)
 	var quotaUsageStore quota.UsageStore
 	if meteringSink != nil {
 		quotaUsageStore = meteringSink
@@ -491,7 +496,7 @@ func main() {
 	sandboxService.SetQuotaStore(quotaRepo)
 	sandboxService.SetSandboxStore(sandboxStore)
 	sandboxService.SetClaimStartLimiter(claimStartLimiter)
-	rootFSObjectStore, rootFSObjectStoreErr := buildRootFSObjectStore(cfg)
+	rootFSObjectStore, rootFSObjectStoreErr := buildRootFSObjectStore(cfg, managerStorageConfig)
 	if rootFSObjectStoreErr != nil {
 		logger.Warn("Rootfs object cleanup disabled; object store is not configured", zap.Error(rootFSObjectStoreErr))
 	} else if rootFSObjectStore != nil {
@@ -553,10 +558,9 @@ func main() {
 		logger.Warn("Registry provider disabled", zap.Error(err))
 	}
 	registryService := service.NewRegistryService(registryProvider, logger)
-	var templateStore *templstorepg.Store
+	templateStore := templstorepg.NewStore(pool)
 	var templateReconciler *templreconciler.SingleClusterReconciler
 	if cfg.TemplateStoreEnabled {
-		templateStore = templstorepg.NewStore(pool)
 		templateApplier := service.NewTemplateApplier(templateService)
 		reconcileInterval := cfg.ResyncPeriod.Duration
 		if reconcileInterval == 0 {
@@ -572,7 +576,37 @@ func main() {
 		)
 		go templateReconciler.Start(ctx)
 	} else {
-		logger.Info("Template store disabled; manager will apply templates directly")
+		logger.Info("Template reconciliation disabled; durable template build queue remains enabled")
+	}
+	var templateBuildWorker *service.TemplateBuildWorker
+	switch {
+	case registryProvider == nil:
+		logger.Warn("Template image build worker disabled; registry provider is not configured")
+	case rootFSObjectStoreErr != nil:
+		logger.Warn("Template image build worker disabled; rootfs object store is unavailable", zap.Error(rootFSObjectStoreErr))
+	case rootFSObjectStore == nil:
+		logger.Warn("Template image build worker disabled; rootfs object store is not configured")
+	default:
+		imagePublisher, publisherErr := templateimage.NewPublisher(rootFSObjectStore, registryProvider, cfg.Registry)
+		if publisherErr != nil {
+			logger.Warn("Template image build worker disabled", zap.Error(publisherErr))
+			break
+		}
+		templateBuildWorker, err = service.NewTemplateBuildWorker(
+			templateStore,
+			sandboxService,
+			imagePublisher,
+			rootFSObjectStore,
+			service.TemplateBuildWorkerConfig{
+				ClusterID: naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
+			},
+			logger,
+		)
+		if err != nil {
+			logger.Warn("Template image build worker disabled", zap.Error(err))
+		} else {
+			sandboxService.SetTemplateImageBuildAvailable(true)
+		}
 	}
 	go serveTemplateReconcilerQuiesceSignals(
 		ctx,
@@ -669,6 +703,17 @@ func main() {
 	}
 
 	startSandboxObservabilityLogProducer(ctx, cfg, k8sClient, podLister, sandboxLogWorker, logger, clk)
+
+	if templateBuildWorker != nil {
+		go func() {
+			if err := templateBuildWorker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("Template image build worker stopped", zap.Error(err))
+			}
+		}()
+		logger.Info("Template image build worker started",
+			zap.String("clusterID", naming.ClusterIDOrDefault(&cfg.DefaultClusterId)),
+		)
+	}
 
 	// Start operator
 	go func() {
@@ -962,27 +1007,46 @@ func defaultTeamQuotaLimits(cfg *config.ManagerConfig) []quota.DefaultLimit {
 	return limits
 }
 
-func buildRootFSObjectStore(cfg *config.ManagerConfig) (objectstore.Store, error) {
+func buildRootFSObjectStore(cfg *config.ManagerConfig, storageRuntimeCfg *config.StorageProxyConfig) (objectstore.Store, error) {
 	if cfg == nil {
 		return nil, nil
 	}
-	storageCfg := cfg.RootFSObjectStorage
-	if strings.TrimSpace(storageCfg.Type) == "" && strings.TrimSpace(storageCfg.Bucket) == "" {
+	objectStorageCfg := cfg.RootFSObjectStorage
+	if strings.TrimSpace(objectStorageCfg.Type) == "" && strings.TrimSpace(objectStorageCfg.Bucket) == "" {
 		return nil, nil
 	}
 	store, err := objectstore.Create(objectstore.Config{
-		Type:         storageCfg.Type,
-		Bucket:       storageCfg.Bucket,
-		Region:       storageCfg.Region,
-		Endpoint:     storageCfg.Endpoint,
-		AccessKey:    storageCfg.AccessKey,
-		SecretKey:    storageCfg.SecretKey,
-		SessionToken: storageCfg.SessionToken,
+		Type:         objectStorageCfg.Type,
+		Bucket:       objectStorageCfg.Bucket,
+		Region:       objectStorageCfg.Region,
+		Endpoint:     objectStorageCfg.Endpoint,
+		AccessKey:    objectStorageCfg.AccessKey,
+		SecretKey:    objectStorageCfg.SecretKey,
+		SessionToken: objectStorageCfg.SessionToken,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return store, nil
+	return wrapRootFSObjectStoreEncryption(store, storageRuntimeCfg)
+}
+
+func wrapRootFSObjectStoreEncryption(store objectstore.Store, storageRuntimeCfg *config.StorageProxyConfig) (objectstore.Store, error) {
+	if store == nil || storageRuntimeCfg == nil || !storageRuntimeCfg.ObjectEncryptionEnabled {
+		return store, nil
+	}
+	keyPEM, err := objectstore.LoadEncryptionKey(storageRuntimeCfg.ObjectEncryptionKeyPath)
+	if err != nil {
+		return nil, err
+	}
+	keyEncryptor, err := objectstore.NewKeyEncryptor(keyPEM, storageRuntimeCfg.ObjectEncryptionPassphrase)
+	if err != nil {
+		return nil, err
+	}
+	return objectstore.Encrypting(store, objectstore.EncryptionConfig{
+		Enabled:      true,
+		Algorithm:    storageRuntimeCfg.ObjectEncryptionAlgo,
+		KeyEncryptor: keyEncryptor,
+	}), nil
 }
 
 type rootFSObjectStoreInspector struct {

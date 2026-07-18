@@ -62,10 +62,23 @@ func (s *Session) doJSONSpecRequest(
 	body any,
 	withAuth bool,
 ) (int, []byte, error) {
+	return s.doJSONSpecRequestWithHeaders(t, ctx, method, specPath, requestPath, body, withAuth, nil)
+}
+
+func (s *Session) doJSONSpecRequestWithHeaders(
+	t ContractT,
+	ctx context.Context,
+	method string,
+	specPath string,
+	requestPath string,
+	body any,
+	withAuth bool,
+	headers http.Header,
+) (int, []byte, error) {
 	if t != nil {
 		ValidateRequestExample(t, method, specPath, defaultContentType, body)
 	}
-	status, respBody, err := s.doJSONRequest(ctx, method, requestPath, body, withAuth)
+	status, respBody, err := s.doJSONRequestWithHeaders(ctx, method, requestPath, body, withAuth, headers)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -100,6 +113,10 @@ func (s *Session) doRawSpecRequest(
 }
 
 func (s *Session) doJSONRequest(ctx context.Context, method, path string, body any, withAuth bool) (int, []byte, error) {
+	return s.doJSONRequestWithHeaders(ctx, method, path, body, withAuth, nil)
+}
+
+func (s *Session) doJSONRequestWithHeaders(ctx context.Context, method, path string, body any, withAuth bool, headers http.Header) (int, []byte, error) {
 	if s == nil {
 		return 0, nil, fmt.Errorf("api session is nil")
 	}
@@ -116,6 +133,11 @@ func (s *Session) doJSONRequest(ctx context.Context, method, path string, body a
 	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
+	}
+	for name, values := range headers {
+		for _, value := range values {
+			req.Header.Add(name, value)
+		}
 	}
 	s.setAuthHeaders(req, withAuth)
 

@@ -751,6 +751,20 @@ const (
 	TeamQuotaUnitMillicpu TeamQuotaUnit = "millicpu"
 )
 
+// Defines values for TemplateCreationStatusStage.
+const (
+	TemplateCreationStatusStageCapturing   TemplateCreationStatusStage = "capturing"
+	TemplateCreationStatusStagePublishing  TemplateCreationStatusStage = "publishing"
+	TemplateCreationStatusStageReconciling TemplateCreationStatusStage = "reconciling"
+)
+
+// Defines values for TemplateCreationStatusState.
+const (
+	TemplateCreationStatusStateCreating TemplateCreationStatusState = "creating"
+	TemplateCreationStatusStateFailed   TemplateCreationStatusState = "failed"
+	TemplateCreationStatusStateReady    TemplateCreationStatusState = "ready"
+)
+
 // Defines values for TrafficRuleAction.
 const (
 	Allow TrafficRuleAction = "allow"
@@ -2581,10 +2595,18 @@ type SandboxTemplateSpec struct {
 
 // SandboxTemplateStatus defines model for SandboxTemplateStatus.
 type SandboxTemplateStatus struct {
-	ActiveCount    *int32                      `json:"activeCount,omitempty"`
-	Conditions     *[]SandboxTemplateCondition `json:"conditions,omitempty"`
-	IdleCount      *int32                      `json:"idleCount,omitempty"`
-	LastUpdateTime *time.Time                  `json:"lastUpdateTime"`
+	ActiveCount *int32                      `json:"activeCount,omitempty"`
+	Conditions  *[]SandboxTemplateCondition `json:"conditions,omitempty"`
+
+	// Creation Asynchronous creation status for templates built from a sandbox.
+	// Traditional image-based templates omit this object and are ready
+	// immediately after creation. Ready means the template is visible in at
+	// least one data-plane cluster and the claim API accepts it; when the
+	// pool is zero, it does not imply that a sandbox image has already been
+	// pulled.
+	Creation       *TemplateCreationStatus `json:"creation,omitempty"`
+	IdleCount      *int32                  `json:"idleCount,omitempty"`
+	LastUpdateTime *time.Time              `json:"lastUpdateTime"`
 }
 
 // SandboxUpdateConfig Subset of SandboxConfig fields that can be updated at runtime without restarting the sandbox.
@@ -3462,6 +3484,52 @@ type TemplateCreateRequest struct {
 	TemplateId string              `json:"template_id"`
 }
 
+// TemplateCreationStatus Asynchronous creation status for templates built from a sandbox.
+// Traditional image-based templates omit this object and are ready
+// immediately after creation. Ready means the template is visible in at
+// least one data-plane cluster and the claim API accepts it; when the
+// pool is zero, it does not imply that a sandbox image has already been
+// pulled.
+type TemplateCreationStatus struct {
+	CapturedAt  *time.Time `json:"capturedAt,omitempty"`
+	CompletedAt *time.Time `json:"completedAt,omitempty"`
+	Message     *string    `json:"message,omitempty"`
+
+	// OutputImage Digest-pinned image reference published to the configured team registry.
+	OutputImage *string                     `json:"outputImage,omitempty"`
+	Reason      *string                     `json:"reason,omitempty"`
+	Stage       TemplateCreationStatusStage `json:"stage"`
+	StartedAt   *time.Time                  `json:"startedAt,omitempty"`
+	State       TemplateCreationStatusState `json:"state"`
+}
+
+// TemplateCreationStatusStage defines model for TemplateCreationStatus.Stage.
+type TemplateCreationStatusStage string
+
+// TemplateCreationStatusState defines model for TemplateCreationStatus.State.
+type TemplateCreationStatusState string
+
+// TemplateFromSandboxCreateRequest Creates a template by capturing the current root filesystem of an existing sandbox.
+type TemplateFromSandboxCreateRequest struct {
+	SandboxId string `json:"sandbox_id"`
+
+	// SpecOverrides Safe template fields that may override values inherited from the source
+	// sandbox's originating template. Pool defaults to zero idle sandboxes
+	// when omitted.
+	SpecOverrides *TemplateFromSandboxSpecOverrides `json:"spec_overrides,omitempty"`
+	TemplateId    string                            `json:"template_id"`
+}
+
+// TemplateFromSandboxSpecOverrides Safe template fields that may override values inherited from the source
+// sandbox's originating template. Pool defaults to zero idle sandboxes
+// when omitted.
+type TemplateFromSandboxSpecOverrides struct {
+	Description *string       `json:"description,omitempty"`
+	DisplayName *string       `json:"displayName,omitempty"`
+	Pool        *PoolStrategy `json:"pool,omitempty"`
+	Tags        *[]string     `json:"tags,omitempty"`
+}
+
 // TemplateUpdateRequest defines model for TemplateUpdateRequest.
 type TemplateUpdateRequest struct {
 	Spec SandboxTemplateSpec `json:"spec"`
@@ -3823,6 +3891,12 @@ type GetApiV1SandboxvolumesIdFilesStatParams struct {
 	Path FilePath `form:"path" json:"path"`
 }
 
+// PostApiV1TemplatesFromSandboxParams defines parameters for PostApiV1TemplatesFromSandbox.
+type PostApiV1TemplatesFromSandboxParams struct {
+	// IdempotencyKey Optional key for retrying creation without starting a duplicate image build.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
+}
+
 // GetAuthOidcProviderCallbackParams defines parameters for GetAuthOidcProviderCallback.
 type GetAuthOidcProviderCallbackParams struct {
 	Code  string `form:"code" json:"code"`
@@ -3932,6 +4006,9 @@ type PostApiV1SandboxvolumesIdSnapshotsJSONRequestBody = CreateSnapshotRequest
 
 // PostApiV1TemplatesJSONRequestBody defines body for PostApiV1Templates for application/json ContentType.
 type PostApiV1TemplatesJSONRequestBody = TemplateCreateRequest
+
+// PostApiV1TemplatesFromSandboxJSONRequestBody defines body for PostApiV1TemplatesFromSandbox for application/json ContentType.
+type PostApiV1TemplatesFromSandboxJSONRequestBody = TemplateFromSandboxCreateRequest
 
 // PutApiV1TemplatesIdJSONRequestBody defines body for PutApiV1TemplatesId for application/json ContentType.
 type PutApiV1TemplatesIdJSONRequestBody = TemplateUpdateRequest

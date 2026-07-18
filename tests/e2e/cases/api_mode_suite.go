@@ -40,6 +40,7 @@ type apiModeSuiteOptions struct {
 	includeObjectEncryption     bool
 	includeWebhookLifecycle     bool
 	includeRootFSPauseResume    bool
+	includeTemplateFromSandbox  bool
 	includeMeteringAssertions   bool
 	includeUsageQuotaAssertions bool
 }
@@ -146,6 +147,12 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 
 				It("falls back to cold start while stale idle pods drain during template rollout", func() {
 					assertTemplateRolloutClaimFallsBackToColdStart(env, session, opts.templateNamePrefix)
+				})
+			}
+
+			if opts.includeTemplateFromSandbox {
+				It("creates a claimable template from a sandbox rootfs", func() {
+					assertTemplateFromSandboxLifecycle(env, session, opts.templateNamePrefix)
 				})
 			}
 		})
@@ -1403,6 +1410,121 @@ test "$(stat -c %%a %s)" = 751
 		shellQuote(rootDir),
 	)
 	_, err = execInSandboxPod(env, templateNamespace, restored.PodName, verifyScript)
+	Expect(err).NotTo(HaveOccurred())
+}
+
+func assertTemplateFromSandboxLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session, templateNamePrefix string) {
+	sourceClaim := claimSandboxEventually(env, session, "default")
+	sourceSandboxID := sourceClaim.SandboxId
+	Expect(sourceSandboxID).NotTo(BeEmpty())
+	derivedSandboxID := ""
+	derivedTemplateID := fmt.Sprintf("%s-from-sandbox-%d", templateNamePrefix, time.Now().UnixNano()%1_000_000_000)
+	DeferCleanup(func() {
+		if derivedSandboxID != "" {
+			_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), derivedSandboxID)
+		}
+		_ = session.DeleteTemplate(env.TestCtx.Context, GinkgoT(), derivedTemplateID)
+		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sourceSandboxID)
+	})
+
+	sourceNamespace, err := naming.TemplateNamespaceForBuiltin("default")
+	Expect(err).NotTo(HaveOccurred())
+	source := waitForSandboxPodReadyEventually(env, session, sourceSandboxID, sourceNamespace)
+
+	marker := fmt.Sprintf("sandbox-template-marker-%d", time.Now().UnixNano())
+	markerPath := "/root/" + marker + ".txt"
+	markerContent := "template-from-sandbox " + marker
+	_, err = execInSandboxPod(env, sourceNamespace, source.PodName, fmt.Sprintf(
+		"set -eu; printf %%s %s > %s; test \"$(cat %s)\" = %s",
+		shellQuote(markerContent),
+		shellQuote(markerPath),
+		shellQuote(markerPath),
+		shellQuote(markerContent),
+	))
+	Expect(err).NotTo(HaveOccurred())
+
+	request := e2eutils.TemplateFromSandboxCreateRequest{
+		TemplateID: derivedTemplateID,
+		SandboxID:  sourceSandboxID,
+	}
+	idempotencyKey := "e2e-template-from-sandbox-" + derivedTemplateID
+	created, status, err := session.CreateTemplateFromSandboxDetailed(
+		env.TestCtx.Context,
+		GinkgoT(),
+		request,
+		idempotencyKey,
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusAccepted))
+	Expect(created).NotTo(BeNil())
+	Expect(created.TemplateID).To(Equal(derivedTemplateID))
+	Expect(created.Status).NotTo(BeNil())
+	Expect(created.Status.Creation).NotTo(BeNil())
+
+	replayed, replayStatus, err := session.CreateTemplateFromSandboxDetailed(
+		env.TestCtx.Context,
+		GinkgoT(),
+		request,
+		idempotencyKey,
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(replayStatus).To(Equal(http.StatusAccepted))
+	Expect(replayed).NotTo(BeNil())
+	Expect(replayed.TemplateID).To(Equal(derivedTemplateID))
+
+	if created.Status.Creation.State == "creating" {
+		_, claimStatus, claimErr := session.ClaimSandboxDetailed(
+			env.TestCtx.Context,
+			GinkgoT(),
+			apispec.ClaimRequest{Template: ptr(derivedTemplateID)},
+		)
+		Expect(claimErr).To(HaveOccurred())
+		Expect(claimStatus).To(Equal(http.StatusConflict))
+	}
+
+	var ready *e2eutils.TemplateFromSandboxView
+	Eventually(func() error {
+		view, getStatus, getErr := session.GetTemplateFromSandboxView(env.TestCtx.Context, GinkgoT(), derivedTemplateID)
+		if getErr != nil {
+			return getErr
+		}
+		if getStatus != http.StatusOK || view == nil || view.Status == nil || view.Status.Creation == nil {
+			return fmt.Errorf("template creation status is unavailable")
+		}
+		switch view.Status.Creation.State {
+		case "ready":
+			ready = view
+			return nil
+		case "failed":
+			return fmt.Errorf(
+				"template creation failed: reason=%s message=%s",
+				view.Status.Creation.Reason,
+				view.Status.Creation.Message,
+			)
+		default:
+			return fmt.Errorf(
+				"template creation is %s/%s",
+				view.Status.Creation.State,
+				view.Status.Creation.Stage,
+			)
+		}
+	}).WithTimeout(5 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
+
+	Expect(ready).NotTo(BeNil())
+	Expect(ready.Status.Creation.OutputImage).To(ContainSubstring("@sha256:"))
+	Expect(ready.TeamID).NotTo(BeNil())
+	derivedNamespace, err := naming.TemplateNamespaceForTeam(expectStringPtr(ready.TeamID, "team id"))
+	Expect(err).NotTo(HaveOccurred())
+
+	derivedClaim := claimSandboxEventually(env, session, derivedTemplateID)
+	derivedSandboxID = derivedClaim.SandboxId
+	Expect(derivedSandboxID).NotTo(BeEmpty())
+	derived := waitForSandboxPodReadyEventually(env, session, derivedSandboxID, derivedNamespace)
+	_, err = execInSandboxPod(env, derivedNamespace, derived.PodName, fmt.Sprintf(
+		"set -eu; test \"$(cat %s)\" = %s",
+		shellQuote(markerPath),
+		shellQuote(markerContent),
+	))
 	Expect(err).NotTo(HaveOccurred())
 }
 

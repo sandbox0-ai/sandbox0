@@ -130,6 +130,7 @@ func (r *Repository) blockingQueries() []countQuery {
 
 	schedulerTemplates := tableRef(r.schemas.Scheduler, "scheduler_templates")
 	schedulerAllocations := tableRef(r.schemas.Scheduler, "scheduler_template_allocations")
+	schedulerTemplateBuilds := tableRef(r.schemas.Scheduler, "scheduler_template_builds")
 	credentialSources := tableRef(r.schemas.Scheduler, "credential_sources")
 	credentialSourceVersions := tableRef(r.schemas.Scheduler, "credential_source_versions")
 	credentialBindings := tableRef(r.schemas.Scheduler, "sandbox_egress_credential_bindings")
@@ -182,6 +183,11 @@ func (r *Repository) blockingQueries() []countQuery {
 			category: "scheduler_template_allocations",
 			table:    schedulerAllocations,
 			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE scope = 'team' AND team_id = $1`, schedulerAllocations),
+		},
+		{
+			category: "scheduler_template_builds",
+			table:    schedulerTemplateBuilds,
+			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE scope = 'team' AND team_id = $1`, schedulerTemplateBuilds),
 		},
 		{
 			category: "credential_sources",

@@ -78,6 +78,12 @@ func (s *Server) getTemplateStats(c *gin.Context) {
 
 // proxyInternalTemplateRequest forwards scheduler template sync requests to manager.
 func (s *Server) proxyInternalTemplateRequest(c *gin.Context) {
+	s.proxyInternalManagerRequest(c)
+}
+
+// proxyInternalManagerRequest forwards a trusted control-plane request to the
+// manager while preserving its internal path and caller team context.
+func (s *Server) proxyInternalManagerRequest(c *gin.Context) {
 	authCtx := middleware.GetAuthContext(c)
 	claims := internalauth.ClaimsFromContext(c.Request.Context())
 
@@ -98,7 +104,7 @@ func (s *Server) proxyInternalTemplateRequest(c *gin.Context) {
 	c.Request.Header.Set(internalauth.TeamIDHeader, authCtx.TeamID)
 	c.Request.Header.Set(internalauth.DefaultTokenHeader, internalToken)
 
-	// Preserve the incoming internal template path and body.
+	// Preserve the incoming internal path and body.
 	s.proxy2Mgr.ProxyToTarget(c)
 }
 

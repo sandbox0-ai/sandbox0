@@ -27,6 +27,7 @@ import (
 	registryprovider "github.com/sandbox0-ai/sandbox0/manager/pkg/registry"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/startlimiter"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateimage"
 	"github.com/sandbox0-ai/sandbox0/pkg/clock"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
@@ -36,6 +37,7 @@ import (
 	meteringclickhouse "github.com/sandbox0-ai/sandbox0/pkg/metering/clickhouse"
 	meteringoutbox "github.com/sandbox0-ai/sandbox0/pkg/metering/outbox"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
@@ -471,6 +473,7 @@ func main() {
 		logger,
 		managerMetrics,
 	)
+	sandboxService.SetTemplateImageBuildAvailable(false)
 	var quotaUsageStore quota.UsageStore
 	if meteringSink != nil {
 		quotaUsageStore = meteringSink
@@ -545,10 +548,9 @@ func main() {
 		logger.Warn("Registry provider disabled", zap.Error(err))
 	}
 	registryService := service.NewRegistryService(registryProvider, logger)
-	var templateStore *templstorepg.Store
+	templateStore := templstorepg.NewStore(pool)
 	var templateReconciler *templreconciler.SingleClusterReconciler
 	if cfg.TemplateStoreEnabled {
-		templateStore = templstorepg.NewStore(pool)
 		templateApplier := service.NewTemplateApplier(templateService)
 		reconcileInterval := cfg.ResyncPeriod.Duration
 		if reconcileInterval == 0 {
@@ -564,7 +566,37 @@ func main() {
 		)
 		go templateReconciler.Start(ctx)
 	} else {
-		logger.Info("Template store disabled; manager will apply templates directly")
+		logger.Info("Template reconciliation disabled; durable template build queue remains enabled")
+	}
+	var templateBuildWorker *service.TemplateBuildWorker
+	switch {
+	case registryProvider == nil:
+		logger.Warn("Template image build worker disabled; registry provider is not configured")
+	case rootFSObjectStoreErr != nil:
+		logger.Warn("Template image build worker disabled; rootfs object store is unavailable", zap.Error(rootFSObjectStoreErr))
+	case rootFSObjectStore == nil:
+		logger.Warn("Template image build worker disabled; rootfs object store is not configured")
+	default:
+		imagePublisher, publisherErr := templateimage.NewPublisher(rootFSObjectStore, registryProvider, cfg.Registry)
+		if publisherErr != nil {
+			logger.Warn("Template image build worker disabled", zap.Error(publisherErr))
+			break
+		}
+		templateBuildWorker, err = service.NewTemplateBuildWorker(
+			templateStore,
+			sandboxService,
+			imagePublisher,
+			rootFSObjectStore,
+			service.TemplateBuildWorkerConfig{
+				ClusterID: naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
+			},
+			logger,
+		)
+		if err != nil {
+			logger.Warn("Template image build worker disabled", zap.Error(err))
+		} else {
+			sandboxService.SetTemplateImageBuildAvailable(true)
+		}
 	}
 	go serveTemplateReconcilerQuiesceSignals(
 		ctx,
@@ -661,6 +693,17 @@ func main() {
 	}
 
 	startSandboxObservabilityLogProducer(ctx, cfg, k8sClient, podLister, sandboxLogWorker, logger, clk)
+
+	if templateBuildWorker != nil {
+		go func() {
+			if err := templateBuildWorker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("Template image build worker stopped", zap.Error(err))
+			}
+		}()
+		logger.Info("Template image build worker started",
+			zap.String("clusterID", naming.ClusterIDOrDefault(&cfg.DefaultClusterId)),
+		)
+	}
 
 	// Start operator
 	go func() {

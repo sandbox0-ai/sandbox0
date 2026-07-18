@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
@@ -15,6 +16,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
+	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	"go.uber.org/zap"
 )
 
@@ -164,6 +166,56 @@ func (c *ClusterGatewayClient) GetTemplateStats(ctx context.Context, baseURL str
 	}
 
 	return stats, nil
+}
+
+// GetSandboxTemplateSource gets durable source template context from the
+// sandbox's owning cluster.
+func (c *ClusterGatewayClient) GetSandboxTemplateSource(
+	ctx context.Context,
+	baseURL, sandboxID, teamID, userID string,
+	permissions []string,
+) (*template.SandboxTemplateSource, error) {
+	token, err := c.internalAuthGen.Generate(
+		internalauth.ServiceClusterGateway,
+		teamID,
+		userID,
+		internalauth.GenerateOptions{Permissions: permissions},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("generate cluster-gateway token: %w", err)
+	}
+	requestURL := fmt.Sprintf("%s/internal/v1/sandboxes/%s/template-source", baseURL, url.PathEscape(sandboxID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create template source request: %w", err)
+	}
+	req.Header.Set(internalauth.DefaultTokenHeader, token)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", template.ErrTemplateSourceUnavailable, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		switch resp.StatusCode {
+		case http.StatusNotFound:
+			return nil, template.ErrTemplateSourceNotFound
+		case http.StatusForbidden:
+			return nil, template.ErrTemplateSourceForbidden
+		case http.StatusConflict:
+			return nil, template.ErrTemplateSourceNotReady
+		default:
+			return nil, fmt.Errorf("%w: %v", template.ErrTemplateSourceUnavailable, clusterGatewayStatusError(resp.StatusCode, body))
+		}
+	}
+	source, apiErr, err := spec.DecodeResponse[template.SandboxTemplateSource](resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("decode template source response: %w", err)
+	}
+	if apiErr != nil {
+		return nil, fmt.Errorf("%w: %s", template.ErrTemplateSourceUnavailable, apiErr.Message)
+	}
+	return source, nil
 }
 
 // CreateOrUpdateTemplate creates or updates a template in a cluster via cluster-gateway.

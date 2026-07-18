@@ -1297,6 +1297,51 @@ func TestClaimSandboxInitializesRootFSFromSnapshotBeforeProcd(t *testing.T) {
 	}
 }
 
+func TestInitializeClaimRootFSFromSnapshotRejectsInternalTemplateBuildSnapshot(t *testing.T) {
+	internalSnapshotID := "template-build-123456"
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{},
+		rootFSSnapshots: map[string]*RootFSSnapshot{
+			internalSnapshotID: {
+				ID:              internalSnapshotID,
+				FilesystemID:    "source-fs",
+				TeamID:          "team-a",
+				SourceSandboxID: "source-sandbox",
+				HeadLayerID:     "layer-v1",
+				CreatedAt:       time.Now().UTC(),
+			},
+		},
+	}
+	svc := &SandboxService{sandboxStore: store}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "claimed-sandbox"}}
+
+	gotPod, persisted, err := svc.initializeClaimRootFSFromSnapshot(
+		context.Background(),
+		pod,
+		&v1alpha1.SandboxTemplate{},
+		&ClaimRequest{
+			SnapshotID: internalSnapshotID,
+			TeamID:     "team-a",
+			UserID:     "user-a",
+		},
+	)
+	if !errors.Is(err, ErrRootFSSnapshotNotFound) {
+		t.Fatalf("initializeClaimRootFSFromSnapshot() error = %v, want ErrRootFSSnapshotNotFound", err)
+	}
+	if gotPod != pod {
+		t.Fatal("initializeClaimRootFSFromSnapshot() replaced pod on rejected snapshot")
+	}
+	if persisted {
+		t.Fatal("initializeClaimRootFSFromSnapshot() persisted state for rejected snapshot")
+	}
+	if len(store.records) != 0 {
+		t.Fatalf("sandbox records = %v, want none", store.records)
+	}
+	if _, ok := store.rootFSSnapshots[internalSnapshotID]; !ok {
+		t.Fatal("internal build snapshot was removed")
+	}
+}
+
 func TestClaimSandboxCleansColdPodWhenClaimReadinessFails(t *testing.T) {
 	withClaimTestPublicKey(t)
 	templateNamespace, err := naming.TemplateNamespaceForBuiltin("managed-agent-claude")

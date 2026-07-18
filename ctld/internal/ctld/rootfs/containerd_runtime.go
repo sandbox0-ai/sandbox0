@@ -319,6 +319,11 @@ func (r *ContainerdRuntime) CaptureBaseline(ctx context.Context, info ctldapi.Ro
 
 func rootFSDiffReaderFromContent(ctx context.Context, client containerdClient, desc ocispec.Descriptor, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, bool, error) {
 	rootDesc := descriptorFromOCI(desc)
+	diffID, err := images.GetDiffID(ctx, client.ContentStore(), desc)
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, nil, false, fmt.Errorf("resolve rootfs diff id: %w", err)
+	}
+	rootDesc.DiffID = diffID.String()
 	reader, err := content.BlobReadSeeker(ctx, client.ContentStore(), desc)
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, nil, false, err

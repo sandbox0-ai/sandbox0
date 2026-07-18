@@ -524,6 +524,12 @@ func (s *Server) setupRoutes() {
 			templates.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateRead), s.proxyManagerPath("/api/v1/templates"))
 			templates.GET("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateRead), s.proxyManagerPathParam("/api/v1/templates/", "id", "template_id"))
 			templates.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateCreate), s.proxyManagerPath("/api/v1/templates"))
+			templates.POST(
+				"/from-sandbox",
+				s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateCreate),
+				s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead),
+				s.proxyTemplateFromSandbox,
+			)
 			templates.PUT("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateWrite), s.proxyManagerPathParam("/api/v1/templates/", "id", "template_id"))
 			templates.DELETE("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateDelete), s.proxyManagerPathParam("/api/v1/templates/", "id", "template_id"))
 		}
@@ -663,6 +669,7 @@ func (s *Server) setupInternalControlPlaneRoutes() {
 
 		// Sandbox metadata and power control (→ Manager)
 		internal.GET("/sandboxes/:id", s.getInternalSandbox)
+		internal.GET("/sandboxes/:id/template-source", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.proxyInternalManagerRequest)
 		internal.DELETE("/sandboxes/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxDelete), s.deleteInternalSandbox)
 		internal.POST("/sandboxes/:id/resume", s.resumeInternalSandbox)
 		// Template management (→ Manager)

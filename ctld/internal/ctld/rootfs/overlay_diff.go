@@ -222,9 +222,11 @@ func writeOverlayDiffTar(source string, filter rootFSPathFilter, walkChanges fun
 	}
 
 	removeOnError = false
+	diffID := digester.Digest().String()
 	return ctldapi.RootFSDiffDescriptor{
 		MediaType: ocispec.MediaTypeImageLayer,
-		Digest:    digester.Digest().String(),
+		Digest:    diffID,
+		DiffID:    diffID,
 		Size:      stat.Size(),
 	}, removeOnCloseFile{File: tmp}, nil
 }
@@ -446,6 +448,7 @@ func filterRootFSDiffTar(desc ctldapi.RootFSDiffDescriptor, reader io.Reader, ex
 	}
 
 	desc.Digest = digester.Digest().String()
+	desc.DiffID = desc.Digest
 	desc.Size = stat.Size()
 	if strings.TrimSpace(desc.MediaType) == "" {
 		desc.MediaType = ocispec.MediaTypeImageLayer
@@ -530,6 +533,7 @@ func filterRootFSDiffTarForApply(desc ctldapi.RootFSDiffDescriptor, reader io.Re
 	}
 
 	desc.Digest = digester.Digest().String()
+	desc.DiffID = desc.Digest
 	desc.Size = stat.Size()
 	if strings.TrimSpace(desc.MediaType) == "" {
 		desc.MediaType = ocispec.MediaTypeImageLayer
@@ -600,6 +604,7 @@ func appendPortalRootFSToDiff(desc ctldapi.RootFSDiffDescriptor, reader io.ReadS
 	}
 
 	desc.Digest = digester.Digest().String()
+	desc.DiffID = desc.Digest
 	desc.Size = stat.Size()
 	if strings.TrimSpace(desc.MediaType) == "" {
 		desc.MediaType = ocispec.MediaTypeImageLayer

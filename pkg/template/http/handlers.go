@@ -2,15 +2,20 @@ package http
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
+	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -18,6 +23,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // ClusterStore provides cluster lookup for delete warnings.
@@ -48,9 +54,17 @@ type TemplateStatsProvider interface {
 	GetTemplateStats(ctx context.Context) (*TemplateStats, error)
 }
 
+// SandboxTemplateSourceResolver resolves durable source sandbox metadata in the
+// sandbox's owning data-plane cluster.
+type SandboxTemplateSourceResolver interface {
+	ResolveSandboxTemplateSource(ctx context.Context, sandboxID, teamID string) (*template.SandboxTemplateSource, error)
+}
+
 // Handler provides template HTTP handlers backed by a template store.
 type Handler struct {
 	Store                store.TemplateStore
+	BuildStore           store.TemplateBuildStore
+	SourceResolver       SandboxTemplateSourceResolver
 	AllocationStore      store.AllocationStore
 	ClusterStore         ClusterStore
 	Reconciler           Reconciler
@@ -62,6 +76,22 @@ type Handler struct {
 // TemplateRequest represents the request body for updating a template.
 type TemplateRequest struct {
 	Spec json.RawMessage `json:"spec"`
+}
+
+// TemplateFromSandboxRequest creates a template from a durable sandbox rootfs.
+type TemplateFromSandboxRequest struct {
+	TemplateID    string                            `json:"template_id"`
+	SandboxID     string                            `json:"sandbox_id"`
+	SpecOverrides *TemplateFromSandboxSpecOverrides `json:"spec_overrides,omitempty"`
+}
+
+// TemplateFromSandboxSpecOverrides contains the safe overrides accepted by the
+// from-sandbox constructor.
+type TemplateFromSandboxSpecOverrides struct {
+	Description *string                `json:"description,omitempty"`
+	DisplayName *string                `json:"displayName,omitempty"`
+	Tags        *[]string              `json:"tags,omitempty"`
+	Pool        *v1alpha1.PoolStrategy `json:"pool,omitempty"`
 }
 
 // ListTemplates lists all templates.
@@ -184,10 +214,11 @@ func (h *Handler) enrichTemplatesStatus(ctx context.Context, templates []*templa
 		if !ok {
 			continue
 		}
-		tpl.Status = &v1alpha1.SandboxTemplateStatus{
-			IdleCount:   stat.IdleCount,
-			ActiveCount: stat.ActiveCount,
+		if tpl.Status == nil {
+			tpl.Status = &v1alpha1.SandboxTemplateStatus{}
 		}
+		tpl.Status.IdleCount = stat.IdleCount
+		tpl.Status.ActiveCount = stat.ActiveCount
 	}
 }
 
@@ -410,6 +441,291 @@ func (h *Handler) CreateTemplate(c *gin.Context) {
 	spec.JSONSuccess(c, http.StatusCreated, responseTemplate)
 }
 
+// CreateTemplateFromSandbox creates a template and enqueues its image build.
+func (h *Handler) CreateTemplateFromSandbox(c *gin.Context) {
+	var req TemplateFromSandboxRequest
+	if err := decodeStrictJSON(c, &req); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	canonicalTemplateID, err := naming.CanonicalTemplateID(req.TemplateID)
+	if err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+	req.TemplateID = canonicalTemplateID
+	req.SandboxID = strings.TrimSpace(req.SandboxID)
+	if req.SandboxID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+		return
+	}
+	if _, err := naming.ParseSandboxName(req.SandboxID); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid sandbox_id")
+		return
+	}
+
+	claims := internalauth.ClaimsFromContext(c.Request.Context())
+	if claims == nil {
+		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
+		return
+	}
+	if !claims.IsSystemToken() && !internalauth.HasAllPermissions(
+		c.Request.Context(),
+		gatewayauthn.PermTemplateCreate,
+		gatewayauthn.PermSandboxRead,
+	) {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "template:create and sandbox:read permissions are required")
+		return
+	}
+	scope, teamID, err := templateScopeForClaims(claims)
+	if err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+	if scope != naming.ScopeTeam || strings.TrimSpace(teamID) == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "team_id is required for templates created from a sandbox")
+		return
+	}
+	if h.BuildStore == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "template image builds are unavailable")
+		return
+	}
+
+	idempotencyKey := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+	if len(idempotencyKey) > 255 {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "Idempotency-Key must be at most 255 characters")
+		return
+	}
+	requestHash, err := templateFromSandboxRequestHash(req)
+	if err != nil {
+		h.Logger.Error("Failed to hash template creation request", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create template")
+		return
+	}
+	if idempotencyKey != "" {
+		existing, err := h.BuildStore.GetTemplateByIdempotencyKey(c.Request.Context(), scope, teamID, idempotencyKey)
+		if err != nil {
+			h.Logger.Error("Failed to resolve template creation idempotency key", zap.Error(err))
+			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create template")
+			return
+		}
+		if existing != nil {
+			if existing.CreationRequestHash != requestHash {
+				spec.JSONError(c, http.StatusConflict, spec.CodeConflict, template.ErrTemplateIdempotencyConflict.Error())
+				return
+			}
+			h.writeAcceptedTemplate(c, existing, claims)
+			return
+		}
+	}
+	if h.Store == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "template store is unavailable")
+		return
+	}
+	existingTemplate, err := h.Store.GetTemplate(c.Request.Context(), scope, teamID, req.TemplateID)
+	if err != nil {
+		h.Logger.Error("Failed to check template ID", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create template")
+		return
+	}
+	if existingTemplate != nil {
+		if idempotencyKey != "" {
+			replayed, err := h.BuildStore.GetTemplateByIdempotencyKey(c.Request.Context(), scope, teamID, idempotencyKey)
+			if err != nil {
+				h.Logger.Error("Failed to recheck template creation idempotency key", zap.Error(err))
+				spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create template")
+				return
+			}
+			if replayed != nil {
+				if replayed.CreationRequestHash != requestHash {
+					spec.JSONError(c, http.StatusConflict, spec.CodeConflict, template.ErrTemplateIdempotencyConflict.Error())
+					return
+				}
+				h.writeAcceptedTemplate(c, replayed, claims)
+				return
+			}
+		}
+		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, template.ErrTemplateAlreadyExists.Error())
+		return
+	}
+	if h.SourceResolver == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "template image builds are unavailable")
+		return
+	}
+
+	source, err := h.SourceResolver.ResolveSandboxTemplateSource(c.Request.Context(), req.SandboxID, teamID)
+	if err != nil {
+		h.writeTemplateSourceError(c, err)
+		return
+	}
+	if source == nil {
+		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "source sandbox not found")
+		return
+	}
+	if source.TeamID != teamID {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "source sandbox belongs to a different team")
+		return
+	}
+	if strings.TrimSpace(source.ClusterID) == "" {
+		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "source sandbox has no owning cluster")
+		return
+	}
+
+	templateSpec := templateSpecFromSandboxSource(source.Spec, req.SpecOverrides)
+	memoryPerCPU := configuredTemplateMemoryPerCPU()
+	templateSpec.MainContainer.Resources.CPU = resource.Quantity{}
+	deriveTemplateCPU(&templateSpec, memoryPerCPU)
+	if err := validateTemplateSpec(templateSpec); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "source template is not reusable: "+err.Error())
+		return
+	}
+	if err := validateTemplateSpecForClaimsWithMemoryPerCPU(templateSpec, claims, memoryPerCPU); err != nil {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, err.Error())
+		return
+	}
+	if err := validateTemplateClaimNameBudget(scope, teamID, req.TemplateID, templateSpec); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+
+	now := time.Now().UTC()
+	buildID := uuid.NewString()
+	startedAt := metav1.NewTime(now)
+	tpl := &template.Template{
+		TemplateID: req.TemplateID,
+		Scope:      scope,
+		TeamID:     teamID,
+		UserID:     claims.UserID,
+		Spec:       templateSpec,
+		Status: &v1alpha1.SandboxTemplateStatus{
+			Creation: &v1alpha1.TemplateCreationStatus{
+				State:     v1alpha1.TemplateCreationStateCreating,
+				Stage:     v1alpha1.TemplateCreationStageCapturing,
+				StartedAt: &startedAt,
+			},
+		},
+		CreatedAt:              now,
+		UpdatedAt:              now,
+		CreationBuildID:        buildID,
+		CreationIdempotencyKey: idempotencyKey,
+		CreationRequestHash:    requestHash,
+	}
+	build := &template.TemplateBuild{
+		BuildID:         buildID,
+		Scope:           scope,
+		TeamID:          teamID,
+		UserID:          claims.UserID,
+		TemplateID:      req.TemplateID,
+		SourceSandboxID: req.SandboxID,
+		TargetClusterID: source.ClusterID,
+		DesiredSpec:     templateSpec,
+		RequestHash:     requestHash,
+		IdempotencyKey:  idempotencyKey,
+		Status:          template.TemplateBuildStatusQueued,
+		Stage:           v1alpha1.TemplateCreationStageCapturing,
+		SnapshotID:      template.BuildSnapshotID(buildID),
+		NextAttemptAt:   now,
+	}
+	created, _, err := h.BuildStore.CreateTemplateBuild(c.Request.Context(), tpl, build)
+	if err != nil {
+		switch {
+		case errors.Is(err, template.ErrTemplateAlreadyExists),
+			errors.Is(err, template.ErrTemplateIdempotencyConflict):
+			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
+		default:
+			h.Logger.Error("Failed to create template build", zap.Error(err))
+			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create template")
+		}
+		return
+	}
+	if created == nil {
+		created = tpl
+	}
+	h.writeAcceptedTemplate(c, created, claims)
+}
+
+func (h *Handler) writeAcceptedTemplate(c *gin.Context, tpl *template.Template, claims *internalauth.Claims) {
+	responseTemplate, err := templateForResponse(tpl, claims)
+	if err != nil {
+		h.Logger.Error("Failed to project template response", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create template")
+		return
+	}
+	c.Header("Location", "/api/v1/templates/"+tpl.TemplateID)
+	if !tpl.ReadyForClaim() && tpl.Status != nil && tpl.Status.Creation != nil &&
+		tpl.Status.Creation.State == v1alpha1.TemplateCreationStateCreating {
+		c.Header("Retry-After", "1")
+	}
+	spec.JSONSuccess(c, http.StatusAccepted, responseTemplate)
+}
+
+func templateSpecFromSandboxSource(source v1alpha1.SandboxTemplateSpec, overrides *TemplateFromSandboxSpecOverrides) v1alpha1.SandboxTemplateSpec {
+	out := *source.DeepCopy()
+	out.Pod = nil
+	out.MainContainer.SecurityContext = nil
+	out.MainContainer.ImagePullPolicy = ""
+	out.ClusterId = nil
+	out.VolumeMounts = nil
+	out.Pool = v1alpha1.PoolStrategy{}
+	if overrides == nil {
+		return out
+	}
+	if overrides.Description != nil {
+		out.Description = *overrides.Description
+	}
+	if overrides.DisplayName != nil {
+		out.DisplayName = *overrides.DisplayName
+	}
+	if overrides.Tags != nil {
+		out.Tags = append([]string(nil), (*overrides.Tags)...)
+	}
+	if overrides.Pool != nil {
+		out.Pool = *overrides.Pool
+	}
+	return out
+}
+
+func templateFromSandboxRequestHash(req TemplateFromSandboxRequest) (string, error) {
+	normalized, err := json.Marshal(req)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(normalized)
+	return fmt.Sprintf("%x", sum[:]), nil
+}
+
+func decodeStrictJSON(c *gin.Context, target any) error {
+	decoder := json.NewDecoder(c.Request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return fmt.Errorf("request body must contain one JSON value")
+		}
+		return err
+	}
+	return nil
+}
+
+func (h *Handler) writeTemplateSourceError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, template.ErrTemplateSourceNotFound):
+		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, err.Error())
+	case errors.Is(err, template.ErrTemplateSourceForbidden):
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, err.Error())
+	case errors.Is(err, template.ErrTemplateSourceNotReady):
+		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
+	case errors.Is(err, template.ErrTemplateSourceUnavailable):
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
+	default:
+		h.Logger.Error("Failed to resolve source sandbox", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to resolve source sandbox")
+	}
+}
+
 // UpdateTemplate updates an existing template.
 func (h *Handler) UpdateTemplate(c *gin.Context) {
 	templateID := c.Param("id")
@@ -432,6 +748,31 @@ func (h *Handler) UpdateTemplate(c *gin.Context) {
 	scope, teamID, err := templateScopeForClaims(claims)
 	if err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+	existing, err := h.Store.GetTemplate(c.Request.Context(), scope, teamID, templateID)
+	if err != nil {
+		h.Logger.Error("Failed to get template", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to update template")
+		return
+	}
+	if existing == nil {
+		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "template not found")
+		return
+	}
+	if !existing.ReadyForClaim() {
+		message := "template is not ready"
+		if existing.Status != nil && existing.Status.Creation != nil {
+			creation := existing.Status.Creation
+			switch creation.State {
+			case v1alpha1.TemplateCreationStateCreating:
+				c.Header("Retry-After", "1")
+				message = "template creation is still in progress"
+			case v1alpha1.TemplateCreationStateFailed:
+				message = "template creation failed; delete and recreate the template"
+			}
+		}
+		spec.JSONError(c, http.StatusConflict, spec.CodeTemplateNotReady, message)
 		return
 	}
 	var req TemplateRequest
@@ -460,17 +801,6 @@ func (h *Handler) UpdateTemplate(c *gin.Context) {
 	}
 	if err := validateTemplateClaimNameBudget(scope, teamID, templateID, templateSpec); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
-		return
-	}
-
-	existing, err := h.Store.GetTemplate(c.Request.Context(), scope, teamID, templateID)
-	if err != nil {
-		h.Logger.Error("Failed to get template", zap.Error(err))
-		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to update template")
-		return
-	}
-	if existing == nil {
-		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "template not found")
 		return
 	}
 
@@ -586,10 +916,18 @@ func (h *Handler) DeleteTemplate(c *gin.Context) {
 		}
 	}
 
-	if err := h.Store.DeleteTemplate(c.Request.Context(), scope, teamID, templateID); err != nil {
-		h.Logger.Error("Failed to delete template", zap.Error(err))
-		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to delete template")
-		return
+	if existing.CreationBuildID != "" && h.BuildStore != nil {
+		if _, err := h.BuildStore.CancelTemplateBuildAndDeleteTemplate(c.Request.Context(), scope, teamID, templateID); err != nil {
+			h.Logger.Error("Failed to cancel template build", zap.Error(err))
+			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to delete template")
+			return
+		}
+	} else {
+		if err := h.Store.DeleteTemplate(c.Request.Context(), scope, teamID, templateID); err != nil {
+			h.Logger.Error("Failed to delete template", zap.Error(err))
+			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to delete template")
+			return
+		}
 	}
 
 	h.Logger.Info("Template deleted from database",

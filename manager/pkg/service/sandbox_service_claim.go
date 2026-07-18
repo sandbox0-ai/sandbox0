@@ -18,6 +18,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -683,11 +684,14 @@ func (s *SandboxService) initializeClaimRootFSFromSnapshot(ctx context.Context, 
 	if req == nil || strings.TrimSpace(req.SnapshotID) == "" {
 		return pod, false, nil
 	}
+	snapshotID := strings.TrimSpace(req.SnapshotID)
+	if templatepkg.IsBuildSnapshotID(snapshotID) {
+		return pod, false, ErrRootFSSnapshotNotFound
+	}
 	store, err := s.rootFSProductStore()
 	if err != nil {
 		return pod, false, err
 	}
-	snapshotID := strings.TrimSpace(req.SnapshotID)
 	if _, err := store.GetRootFSSnapshot(ctx, snapshotID, req.TeamID); err != nil {
 		return pod, false, err
 	}

@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -59,12 +61,16 @@ func (s *Server) createSandbox(c *gin.Context) {
 		return
 	}
 
-	selected, template, selectedBy, err := s.selectClusterForTemplate(c, req.Template, claims.TeamID)
+	selected, tpl, selectedBy, err := s.selectClusterForTemplate(c, req.Template, claims.TeamID)
 	if err != nil {
+		if errors.Is(err, template.ErrTemplateNotReady) {
+			writeTemplateNotReady(c, tpl)
+			return
+		}
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, err.Error())
 		return
 	}
-	if selected == nil || template == nil {
+	if selected == nil || tpl == nil {
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "no clusters available for template")
 		return
 	}
@@ -193,6 +199,9 @@ func (s *Server) selectClusterForTemplate(c *gin.Context, templateID, teamID str
 	}
 	if tpl == nil {
 		return nil, nil, "", nil
+	}
+	if !tpl.ReadyForClaim() {
+		return nil, tpl, "", template.ErrTemplateNotReady
 	}
 
 	allocations, err := s.allocationStore.ListAllocationsByTemplate(c.Request.Context(), tpl.Scope, tpl.TeamID, tpl.TemplateID)
@@ -471,6 +480,21 @@ func (s *Server) selectClusterByFallbackWithAllocations(allocations []*template.
 	}
 
 	return selected
+}
+
+func writeTemplateNotReady(c *gin.Context, tpl *template.Template) {
+	message := template.ErrTemplateNotReady.Error()
+	if tpl != nil && tpl.Status != nil && tpl.Status.Creation != nil {
+		creation := tpl.Status.Creation
+		switch creation.State {
+		case v1alpha1.TemplateCreationStateCreating:
+			c.Header("Retry-After", "1")
+			message = "template creation is still in progress"
+		case v1alpha1.TemplateCreationStateFailed:
+			message = "template creation failed; delete and recreate the template"
+		}
+	}
+	spec.JSONError(c, http.StatusConflict, spec.CodeTemplateNotReady, message)
 }
 
 func (s *Server) clusterAllowedByClaimStart(clusterID string, maxAge time.Duration) (bool, bool) {

@@ -1,11 +1,13 @@
 package http
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	templatestore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"github.com/sandbox0-ai/sandbox0/scheduler/pkg/db"
 	"go.uber.org/zap"
 )
@@ -189,6 +191,17 @@ func (s *Server) updateCluster(c *gin.Context) {
 		Enabled:           req.Enabled,
 	}
 
+	if !req.Enabled {
+		if err := s.failCapturingTemplateBuildsForCluster(c, clusterID, "disabled"); err != nil {
+			s.logger.Error("Failed to terminate uncaptured template builds before disabling cluster",
+				zap.String("cluster_id", clusterID),
+				zap.Error(err),
+			)
+			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to disable cluster")
+			return
+		}
+	}
+
 	if err := s.repo.UpdateCluster(c.Request.Context(), cluster); err != nil {
 		s.logger.Error("Failed to update cluster", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to update cluster")
@@ -234,6 +247,15 @@ func (s *Server) deleteCluster(c *gin.Context) {
 
 	// Note: Allocations will be cascade deleted due to foreign key constraint
 
+	if err := s.failCapturingTemplateBuildsForCluster(c, clusterID, "deleted"); err != nil {
+		s.logger.Error("Failed to terminate uncaptured template builds before deleting cluster",
+			zap.String("cluster_id", clusterID),
+			zap.Error(err),
+		)
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to delete cluster")
+		return
+	}
+
 	if err := s.repo.DeleteCluster(c.Request.Context(), clusterID); err != nil {
 		s.logger.Error("Failed to delete cluster", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to delete cluster")
@@ -243,4 +265,29 @@ func (s *Server) deleteCluster(c *gin.Context) {
 	s.logger.Info("Cluster deleted", zap.String("cluster_id", clusterID))
 
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"message": "cluster deleted"})
+}
+
+func (s *Server) failCapturingTemplateBuildsForCluster(c *gin.Context, clusterID, action string) error {
+	lifecycleStore, ok := s.templateStore.(templatestore.TemplateBuildLifecycleStore)
+	if !ok {
+		return fmt.Errorf("template build lifecycle store is unavailable")
+	}
+	message := fmt.Sprintf("source cluster %q was %s before rootfs capture completed", clusterID, action)
+	failed, err := lifecycleStore.FailCapturingTemplateBuildsForCluster(
+		c.Request.Context(),
+		clusterID,
+		"source_cluster_unavailable",
+		message,
+	)
+	if err != nil {
+		return err
+	}
+	if failed > 0 {
+		s.logger.Warn("Terminated uncaptured template builds for unavailable cluster",
+			zap.String("cluster_id", clusterID),
+			zap.String("action", action),
+			zap.Int64("build_count", failed),
+		)
+	}
+	return nil
 }

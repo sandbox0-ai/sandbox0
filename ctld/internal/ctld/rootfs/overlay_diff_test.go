@@ -37,6 +37,7 @@ func TestWriteOverlayUpperDiffIncludesUpperEntries(t *testing.T) {
 	require.NoError(t, err)
 	defer reader.Close()
 	require.NotEmpty(t, desc.Digest)
+	assert.Equal(t, desc.Digest, desc.DiffID)
 	require.Positive(t, desc.Size)
 
 	entries := readTarEntries(t, reader)
@@ -213,6 +214,7 @@ func TestWriteOverlayUpperDiffFromBaselineAppliesAsChildDelta(t *testing.T) {
 	require.NoError(t, err)
 	defer reader.Close()
 	require.NotEmpty(t, desc.Digest)
+	assert.Equal(t, desc.Digest, desc.DiffID)
 	require.Positive(t, desc.Size)
 
 	applied := t.TempDir()
@@ -298,6 +300,7 @@ func TestFilterRootFSDiffTarExcludesRuntimePaths(t *testing.T) {
 	require.NoError(t, err)
 	defer reader.Close()
 	require.NotEmpty(t, desc.Digest)
+	assert.Equal(t, desc.Digest, desc.DiffID)
 	require.Positive(t, desc.Size)
 
 	entries := readTarEntries(t, reader)

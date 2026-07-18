@@ -1071,6 +1071,40 @@ spec:
                   - type
                   type: object
                 type: array
+              creation:
+                description: Creation reports asynchronous image creation for templates
+                  created from a sandbox.
+                properties:
+                  capturedAt:
+                    format: date-time
+                    type: string
+                  completedAt:
+                    format: date-time
+                    type: string
+                  message:
+                    type: string
+                  outputImage:
+                    description: |-
+                      OutputImage is the immutable image produced by the original
+                      from-sandbox build. A later manual template update does not rewrite it.
+                    type: string
+                  reason:
+                    type: string
+                  stage:
+                    description: TemplateCreationStage is the current asynchronous
+                      template creation stage.
+                    type: string
+                  startedAt:
+                    format: date-time
+                    type: string
+                  state:
+                    description: TemplateCreationState is the externally visible template
+                      creation state.
+                    type: string
+                required:
+                - stage
+                - state
+                type: object
               idleCount:
                 description: Pool statistics
                 format: int32

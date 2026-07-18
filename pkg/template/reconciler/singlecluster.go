@@ -9,6 +9,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/clock"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	"go.uber.org/zap"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -157,6 +158,9 @@ func (r *SingleClusterReconciler) reconcile(ctx context.Context) {
 
 	expected := make(map[string]bool, len(templates))
 	for _, tpl := range templates {
+		if !tpl.ReadyForReconcile() {
+			continue
+		}
 		clusterName := naming.TemplateNameForCluster(tpl.Scope, tpl.TeamID, tpl.TemplateID)
 		expected[clusterName] = true
 
@@ -183,7 +187,8 @@ func (r *SingleClusterReconciler) reconcile(ctx context.Context) {
 			Spec: clusterSpec,
 		}
 
-		if err := r.createOrUpdateTemplate(ctx, crd); err != nil {
+		visible, err := r.createOrUpdateTemplate(ctx, crd)
+		if err != nil {
 			r.logger.Error("Failed to sync template to cluster",
 				zap.String("template_id", tpl.TemplateID),
 				zap.Error(err),
@@ -191,6 +196,29 @@ func (r *SingleClusterReconciler) reconcile(ctx context.Context) {
 			r.statusMu.Lock()
 			r.lastReconcileErr = err
 			r.statusMu.Unlock()
+			continue
+		}
+		if visible && templateCreationAwaitingReconcile(tpl) {
+			creationStore, ok := r.templateStore.(TemplateCreationStore)
+			if !ok {
+				r.logger.Error("Template store cannot finalize template creation",
+					zap.String("template_id", tpl.TemplateID),
+				)
+				continue
+			}
+			if _, err := creationStore.MarkTemplateCreationReady(
+				ctx,
+				tpl.Scope,
+				tpl.TeamID,
+				tpl.TemplateID,
+				tpl.CreationBuildID,
+				r.now(),
+			); err != nil {
+				r.logger.Error("Failed to finalize template creation",
+					zap.String("template_id", tpl.TemplateID),
+					zap.Error(err),
+				)
+			}
 		}
 	}
 
@@ -228,24 +256,33 @@ func (r *SingleClusterReconciler) reconcile(ctx context.Context) {
 	r.statusMu.Unlock()
 }
 
-func (r *SingleClusterReconciler) createOrUpdateTemplate(ctx context.Context, tpl *v1alpha1.SandboxTemplate) error {
+func (r *SingleClusterReconciler) createOrUpdateTemplate(ctx context.Context, tpl *v1alpha1.SandboxTemplate) (bool, error) {
 	existing, err := r.applier.GetTemplate(ctx, tpl.Name)
 	if err == nil && existing != nil {
 		tpl.ResourceVersion = existing.ResourceVersion
 		tpl.Status = existing.Status
 		_, err = r.applier.UpdateTemplate(ctx, tpl)
 		if err != nil {
-			return fmt.Errorf("update template: %w", err)
+			return false, fmt.Errorf("update template: %w", err)
 		}
-		return nil
+		return true, nil
 	}
 
 	if err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("get template: %w", err)
+		return false, fmt.Errorf("get template: %w", err)
 	}
 
 	if _, err := r.applier.CreateTemplate(ctx, tpl); err != nil {
-		return fmt.Errorf("create template: %w", err)
+		return false, fmt.Errorf("create template: %w", err)
 	}
-	return nil
+	return false, nil
+}
+
+func templateCreationAwaitingReconcile(tpl *template.Template) bool {
+	return tpl != nil &&
+		tpl.Status != nil &&
+		tpl.Status.Creation != nil &&
+		tpl.Status.Creation.State == v1alpha1.TemplateCreationStateCreating &&
+		tpl.Status.Creation.Stage == v1alpha1.TemplateCreationStageReconciling &&
+		tpl.CreationBuildID != ""
 }

@@ -114,8 +114,11 @@ func NewServer(
 		if templateService != nil {
 			registryHosts = templateService.RegistryHosts()
 		}
+		buildStore, _ := templateStore.(store.TemplateBuildStore)
 		server.templateHandler = &templatehttp.Handler{
 			Store:                templateStore,
+			BuildStore:           buildStore,
+			SourceResolver:       sandboxService,
 			Reconciler:           templateReconciler,
 			StatsProvider:        &clusterTemplateStatsProvider{clusterService: clusterService},
 			PrivateRegistryHosts: registryHosts,
@@ -175,6 +178,7 @@ func (s *Server) setupRoutes() {
 			templates.GET("", s.listTemplates)
 			templates.GET("/:id", s.getTemplate)
 			templates.POST("", s.createTemplate)
+			templates.POST("/from-sandbox", s.createTemplateFromSandbox)
 			templates.PUT("/:id", s.updateTemplate)
 			templates.DELETE("/:id", s.deleteTemplate)
 		}
@@ -208,6 +212,7 @@ func (s *Server) setupRoutes() {
 		internalSandboxes := internal.Group("/sandboxes")
 		{
 			internalSandboxes.GET("/:id", s.getSandboxInternal)
+			internalSandboxes.GET("/:id/template-source", s.getSandboxTemplateSourceInternal)
 		}
 
 		// Template management (scheduler sync)

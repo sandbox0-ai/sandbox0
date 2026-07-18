@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"go.uber.org/zap"
 )
@@ -13,6 +14,14 @@ func (s *Server) proxyManagerPath(path string) gin.HandlerFunc {
 		c.Request.URL.Path = path
 		s.proxyToManager(c)
 	}
+}
+
+func (s *Server) proxyTemplateFromSandbox(c *gin.Context) {
+	c.Request.URL.Path = "/api/v1/templates/from-sandbox"
+	s.proxyToManagerWithPermissions(c, []string{
+		gatewayauthn.PermTemplateCreate,
+		gatewayauthn.PermSandboxRead,
+	})
 }
 
 func (s *Server) proxyManagerPathParam(prefix, paramName, description string) gin.HandlerFunc {

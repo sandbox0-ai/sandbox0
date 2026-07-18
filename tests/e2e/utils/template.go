@@ -9,6 +9,91 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 )
 
+type TemplateFromSandboxCreateRequest struct {
+	TemplateID string `json:"template_id"`
+	SandboxID  string `json:"sandbox_id"`
+}
+
+type TemplateFromSandboxCreationStatus struct {
+	State       string `json:"state"`
+	Stage       string `json:"stage"`
+	OutputImage string `json:"outputImage,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	Message     string `json:"message,omitempty"`
+}
+
+type TemplateFromSandboxView struct {
+	TemplateID string  `json:"template_id"`
+	TeamID     *string `json:"team_id,omitempty"`
+	Status     *struct {
+		Creation *TemplateFromSandboxCreationStatus `json:"creation,omitempty"`
+	} `json:"status,omitempty"`
+}
+
+type successTemplateFromSandboxResponse struct {
+	Success bool                     `json:"success"`
+	Data    *TemplateFromSandboxView `json:"data"`
+}
+
+func (s *Session) CreateTemplateFromSandboxDetailed(
+	ctx context.Context,
+	t ContractT,
+	request TemplateFromSandboxCreateRequest,
+	idempotencyKey string,
+) (*TemplateFromSandboxView, int, error) {
+	headers := make(http.Header)
+	if idempotencyKey != "" {
+		headers.Set("Idempotency-Key", idempotencyKey)
+	}
+	status, body, err := s.doJSONSpecRequestWithHeaders(
+		t,
+		ctx,
+		http.MethodPost,
+		"/api/v1/templates/from-sandbox",
+		"/api/v1/templates/from-sandbox",
+		request,
+		true,
+		headers,
+	)
+	if err != nil {
+		return nil, status, err
+	}
+	if status != http.StatusAccepted {
+		return nil, status, fmt.Errorf("create template from sandbox failed with status %d: %s", status, formatAPIError(body))
+	}
+	var response successTemplateFromSandboxResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, status, err
+	}
+	if !response.Success || response.Data == nil {
+		return nil, status, fmt.Errorf("create template from sandbox response missing data")
+	}
+	return response.Data, status, nil
+}
+
+func (s *Session) GetTemplateFromSandboxView(ctx context.Context, t ContractT, templateID string) (*TemplateFromSandboxView, int, error) {
+	if templateID == "" {
+		return nil, 0, fmt.Errorf("template id is required")
+	}
+	specPath := "/api/v1/templates/{id}"
+	requestPath := "/api/v1/templates/" + templateID
+	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodGet, specPath, requestPath, nil, true)
+	if err != nil {
+		return nil, status, err
+	}
+	if status != http.StatusOK {
+		return nil, status, fmt.Errorf("get template failed with status %d: %s", status, formatAPIError(body))
+	}
+	var response successTemplateFromSandboxResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, status, err
+	}
+	if !response.Success || response.Data == nil {
+		return nil, status, fmt.Errorf("get template response missing data")
+	}
+	return response.Data, status, nil
+}
+
 func (s *Session) ListTemplates(ctx context.Context, t ContractT) ([]apispec.Template, error) {
 	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodGet, "/api/v1/templates", "/api/v1/templates", nil, true)
 	if err != nil {

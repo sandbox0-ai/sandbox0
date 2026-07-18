@@ -10,8 +10,39 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	templatehttp "github.com/sandbox0-ai/sandbox0/pkg/template/http"
 	"go.uber.org/zap"
 )
+
+func TestSetupRoutesMountsTemplateFromSandboxEndpoints(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	server := &Server{
+		router:          gin.New(),
+		templateHandler: &templatehttp.Handler{},
+	}
+	server.setupRoutes()
+
+	for _, route := range []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodPost, path: "/api/v1/templates/from-sandbox"},
+		{method: http.MethodGet, path: "/internal/v1/sandboxes/:id/template-source"},
+	} {
+		if !managerHasRoute(server.router, route.method, route.path) {
+			t.Fatalf("expected %s %s route", route.method, route.path)
+		}
+	}
+}
+
+func managerHasRoute(router *gin.Engine, method, path string) bool {
+	for _, route := range router.Routes() {
+		if route.Method == method && route.Path == path {
+			return true
+		}
+	}
+	return false
+}
 
 func TestRequireNetworkPolicyCapability(t *testing.T) {
 	server := newTestServerForCapability(t, network.NewNoopProvider())

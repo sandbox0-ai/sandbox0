@@ -262,19 +262,49 @@ func (r *MultiClusterReconciler) reconcile(ctx context.Context) {
 	// Build a set of valid template IDs for orphan detection.
 	validTemplates := make(map[string]bool)
 	for _, tpl := range templates {
+		if !tpl.ReadyForReconcile() {
+			continue
+		}
 		clusterTemplateID := naming.TemplateNameForCluster(tpl.Scope, tpl.TeamID, tpl.TemplateID)
 		validTemplates[clusterTemplateID] = true
 	}
 
 	// 4. For each template, compute allocations and sync to clusters.
 	for _, tpl := range templates {
-		if err := r.reconcileTemplate(ctx, tpl, clusters); err != nil {
+		if !tpl.ReadyForReconcile() {
+			continue
+		}
+		claimable, err := r.reconcileTemplate(ctx, tpl, clusters)
+		if err != nil {
 			r.logger.Error("Failed to reconcile template",
 				zap.String("template_id", tpl.TemplateID),
 				zap.String("scope", tpl.Scope),
 				zap.String("team_id", tpl.TeamID),
 				zap.Error(err),
 			)
+			continue
+		}
+		if claimable && templateCreationAwaitingReconcile(tpl) {
+			creationStore, ok := r.templateStore.(TemplateCreationStore)
+			if !ok {
+				r.logger.Error("Template store cannot finalize template creation",
+					zap.String("template_id", tpl.TemplateID),
+				)
+				continue
+			}
+			if _, err := creationStore.MarkTemplateCreationReady(
+				ctx,
+				tpl.Scope,
+				tpl.TeamID,
+				tpl.TemplateID,
+				tpl.CreationBuildID,
+				r.now(),
+			); err != nil {
+				r.logger.Error("Failed to finalize template creation",
+					zap.String("template_id", tpl.TemplateID),
+					zap.Error(err),
+				)
+			}
 		}
 	}
 
@@ -392,9 +422,10 @@ func (r *MultiClusterReconciler) fetchClusterSummaries(ctx context.Context, clus
 }
 
 // reconcileTemplate reconciles a single template across all clusters.
-func (r *MultiClusterReconciler) reconcileTemplate(ctx context.Context, tpl *template.Template, clusters []*template.Cluster) error {
+func (r *MultiClusterReconciler) reconcileTemplate(ctx context.Context, tpl *template.Template, clusters []*template.Cluster) (bool, error) {
 	allocations := r.computeAllocations(tpl, clusters)
 	metrics := r.metrics
+	claimable := false
 
 	tenantLabel := "public"
 	if tpl.Scope == naming.ScopeTeam {
@@ -440,6 +471,9 @@ func (r *MultiClusterReconciler) reconcileTemplate(ctx context.Context, tpl *tem
 			}
 			continue
 		}
+		if r.templateVisibleInCluster(alloc.ClusterID, clusterTemplateID) {
+			claimable = true
+		}
 
 		alloc.SyncStatus = "synced"
 		if err := r.allocationStore.UpsertAllocation(ctx, alloc); err != nil {
@@ -458,7 +492,18 @@ func (r *MultiClusterReconciler) reconcileTemplate(ctx context.Context, tpl *tem
 		}
 	}
 
-	return nil
+	return claimable, nil
+}
+
+func (r *MultiClusterReconciler) templateVisibleInCluster(clusterID, templateID string) bool {
+	r.statsMu.RLock()
+	defer r.statsMu.RUnlock()
+	statsByTemplate := r.templateStats[clusterID]
+	if statsByTemplate == nil {
+		return false
+	}
+	_, ok := statsByTemplate[templateID]
+	return ok
 }
 
 // computeAllocations computes how to distribute minIdle/maxIdle across clusters.

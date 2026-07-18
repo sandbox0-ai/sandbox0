@@ -79,6 +79,7 @@ func NewServer(
 	repo ClusterRepository,
 	templateStore store.TemplateStore,
 	allocationStore store.AllocationStore,
+	sourceResolver templatehttp.SandboxTemplateSourceResolver,
 	authValidator *internalauth.Validator,
 	internalAuthGen *internalauth.Generator,
 	reconciler Reconciler,
@@ -120,8 +121,11 @@ func NewServer(
 		clusterGatewayProxies: make(map[string]*proxy.Router),
 		clusterCache:          make(map[string]*template.Cluster),
 	}
+	buildStore, _ := templateStore.(store.TemplateBuildStore)
 	server.templateHandler = &templatehttp.Handler{
 		Store:                templateStore,
+		BuildStore:           buildStore,
+		SourceResolver:       sourceResolver,
 		AllocationStore:      allocationStore,
 		ClusterStore:         repo,
 		Reconciler:           reconciler,
@@ -172,6 +176,7 @@ func (s *Server) setupRoutes() {
 			templates.GET("", s.templateHandler.ListTemplates)
 			templates.GET("/:id", s.templateHandler.GetTemplate)
 			templates.POST("", s.templateHandler.CreateTemplate)
+			templates.POST("/from-sandbox", s.templateHandler.CreateTemplateFromSandbox)
 			templates.PUT("/:id", s.templateHandler.UpdateTemplate)
 			templates.DELETE("/:id", s.templateHandler.DeleteTemplate)
 		}

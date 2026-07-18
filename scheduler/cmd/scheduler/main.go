@@ -127,12 +127,13 @@ func main() {
 
 	// Create cluster-gateway client
 	clusterGatewayClient := client.NewClusterGatewayClient(internalAuthGen, logger, obsProvider)
+	templateSourceResolver := httpserver.NewSchedulerSandboxTemplateSourceResolver(repo, clusterGatewayClient)
 
 	// Create reconciler
 	rec := reconciler.NewReconciler(templateStore, templateStore, repo, clusterGatewayClient, cfg.ReconcileInterval.Duration, clk, cfg.PodsPerNode, logger, schedulerMetrics)
 
 	// Create HTTP server
-	httpServer, err := httpserver.NewServer(cfg, repo, templateStore, templateStore, authValidator, internalAuthGen, rec, logger, obsProvider, schedulerMetrics)
+	httpServer, err := httpserver.NewServer(cfg, repo, templateStore, templateStore, templateSourceResolver, authValidator, internalAuthGen, rec, logger, obsProvider, schedulerMetrics)
 	if err != nil {
 		logger.Fatal("Failed to create scheduler HTTP server", zap.Error(err))
 	}

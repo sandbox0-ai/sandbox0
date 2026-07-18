@@ -638,12 +638,49 @@ type SandboxTemplateStatus struct {
 	IdleCount   int32 `json:"idleCount"`
 	ActiveCount int32 `json:"activeCount"`
 
+	// Creation reports asynchronous image creation for templates created from a sandbox.
+	Creation *TemplateCreationStatus `json:"creation,omitempty"`
+
 	// Conditions
 	Conditions []SandboxTemplateCondition `json:"conditions,omitempty"`
 
 	// Last updated time
 	LastUpdateTime metav1.Time `json:"lastUpdateTime,omitempty"`
 }
+
+// TemplateCreationStatus reports asynchronous creation of a template image.
+type TemplateCreationStatus struct {
+	State TemplateCreationState `json:"state"`
+	Stage TemplateCreationStage `json:"stage"`
+
+	StartedAt   *metav1.Time `json:"startedAt,omitempty"`
+	CapturedAt  *metav1.Time `json:"capturedAt,omitempty"`
+	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
+
+	// OutputImage is the immutable image produced by the original
+	// from-sandbox build. A later manual template update does not rewrite it.
+	OutputImage string `json:"outputImage,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	Message     string `json:"message,omitempty"`
+}
+
+// TemplateCreationState is the externally visible template creation state.
+type TemplateCreationState string
+
+const (
+	TemplateCreationStateCreating TemplateCreationState = "creating"
+	TemplateCreationStateReady    TemplateCreationState = "ready"
+	TemplateCreationStateFailed   TemplateCreationState = "failed"
+)
+
+// TemplateCreationStage is the current asynchronous template creation stage.
+type TemplateCreationStage string
+
+const (
+	TemplateCreationStageCapturing   TemplateCreationStage = "capturing"
+	TemplateCreationStagePublishing  TemplateCreationStage = "publishing"
+	TemplateCreationStageReconciling TemplateCreationStage = "reconciling"
+)
 
 // SandboxTemplateCondition defines a condition of SandboxTemplate
 type SandboxTemplateCondition struct {

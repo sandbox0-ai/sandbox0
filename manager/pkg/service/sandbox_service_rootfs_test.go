@@ -1139,6 +1139,7 @@ func rootFSTestState() *SandboxRootFSState {
 		SnapshotParent:      "parent-1",
 		SnapshotParentChain: []string{"parent-1", "parent-0"},
 		DiffDigest:          "sha256:diff",
+		DiffID:              "sha256:diff",
 		DiffMediaType:       "application/vnd.oci.image.layer.v1.tar",
 		DiffSize:            123,
 		DiffObjectKey:       "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar",

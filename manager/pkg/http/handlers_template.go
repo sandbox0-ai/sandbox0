@@ -29,6 +29,11 @@ func (s *Server) createTemplate(c *gin.Context) {
 	s.templateHandler.CreateTemplate(c)
 }
 
+// createTemplateFromSandbox creates a template from a sandbox rootfs.
+func (s *Server) createTemplateFromSandbox(c *gin.Context) {
+	s.templateHandler.CreateTemplateFromSandbox(c)
+}
+
 // updateTemplate updates an existing template.
 func (s *Server) updateTemplate(c *gin.Context) {
 	s.templateHandler.UpdateTemplate(c)

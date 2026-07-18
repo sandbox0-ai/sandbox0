@@ -63,6 +63,7 @@ type RootFSInfo struct {
 type RootFSDiffDescriptor struct {
 	MediaType string `json:"media_type"`
 	Digest    string `json:"digest"`
+	DiffID    string `json:"diff_id,omitempty"`
 	Size      int64  `json:"size"`
 	ObjectKey string `json:"object_key,omitempty"`
 }

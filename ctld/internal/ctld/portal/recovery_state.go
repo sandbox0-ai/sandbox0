@@ -15,6 +15,10 @@ import (
 
 const portalRecoveryVersion = 1
 
+// RecoveryCapabilityS0FSHandleJournal identifies peers that replay incremental
+// S0FS file-handle recovery events in addition to legacy snapshot files.
+const RecoveryCapabilityS0FSHandleJournal = "s0fs_handle_journal_v1"
+
 // RecoveryManifest contains the durable and replicated state needed to attach
 // a standby process to an existing portal's kernel FUSE connection.
 type RecoveryManifest struct {
@@ -44,6 +48,17 @@ type PortalReplicator interface {
 	Publish(context.Context, RecoveryManifest, *os.File) error
 	Update(context.Context, RecoveryManifest) error
 	Remove(context.Context, string) error
+}
+
+// PortalRecoveryCapabilityProvider allows compatible peers to opt into recovery
+// formats without changing the wire protocol used during rolling upgrades.
+type PortalRecoveryCapabilityProvider interface {
+	SupportsRecoveryCapability(string) bool
+}
+
+func supportsRecoveryCapability(replicator PortalReplicator, capability string) bool {
+	provider, ok := replicator.(PortalRecoveryCapabilityProvider)
+	return ok && provider.SupportsRecoveryCapability(capability)
 }
 
 type portalRecoveryStore struct {

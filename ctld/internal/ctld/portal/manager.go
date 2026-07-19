@@ -583,6 +583,11 @@ func (m *Manager) SyncTo(ctx context.Context, target PortalReplicator) error {
 	if m == nil || target == nil || !target.Ready() {
 		return fmt.Errorf("ctld standby is not synchronized")
 	}
+	if !supportsRecoveryCapability(target, RecoveryCapabilityS0FSHandleJournal) {
+		if err := m.compactS0FSHandleRecoveryStates(false); err != nil {
+			return fmt.Errorf("compact S0FS recovery state for legacy standby: %w", err)
+		}
+	}
 	m.mu.Lock()
 	portals := make([]*portalMount, 0, len(m.portals))
 	for _, pm := range m.portals {
@@ -1012,7 +1017,8 @@ func (m *Manager) openS0FSBoundVolume(ctx context.Context, req ctldapi.BindVolum
 	engine.PruneUnlinked(retainedUnlinkedInodes(handleState))
 	session := newLocalSession(req.SandboxVolumeID, m.volumes, m.logrus)
 	session.statePath = statePath
-	if err := persistS0FSHandleState(statePath, req.SandboxVolumeID, volCtx.SnapshotHandleState()); err != nil {
+	session.incrementalReady = m.incrementalS0FSHandleRecoveryReady
+	if err := compactS0FSHandleState(statePath, req.SandboxVolumeID, volCtx.SnapshotHandleState(), true, nil); err != nil {
 		_ = engine.Close()
 		return nil, nil, err
 	}
@@ -1461,7 +1467,7 @@ func (m *Manager) finishBoundVolumeCleanup(ctx context.Context, cleanup *boundVo
 		m.unregisterOwner(cleanup.bound)
 	}
 	if cleanup.bound.statePath != "" {
-		if err := os.Remove(cleanup.bound.statePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := removeS0FSHandleRecoveryState(cleanup.bound.statePath); err != nil {
 			return err
 		}
 	}
@@ -1823,6 +1829,7 @@ func (m *Manager) attachPortalLocked(pm *portalMount, bound *boundVolume, mounte
 			session = newLocalSession(bound.volumeID, m.volumes, m.logrus)
 			if local, ok := session.(*localSession); ok {
 				local.statePath = bound.statePath
+				local.incrementalReady = m.incrementalS0FSHandleRecoveryReady
 			}
 			bound.session = session
 		}
@@ -1855,6 +1862,36 @@ func closeBoundSession(bound *boundVolume) {
 	}
 	bound.session.Close()
 	bound.session = nil
+}
+
+func (m *Manager) incrementalS0FSHandleRecoveryReady() bool {
+	if m == nil || m.replicator == nil {
+		return true
+	}
+	return supportsRecoveryCapability(m.replicator, RecoveryCapabilityS0FSHandleJournal)
+}
+
+func (m *Manager) compactS0FSHandleRecoveryStates(durable bool) error {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	sessions := make([]*localSession, 0, len(m.boundVolumes))
+	for _, bound := range m.boundVolumes {
+		if bound == nil {
+			continue
+		}
+		if session, ok := bound.session.(*localSession); ok {
+			sessions = append(sessions, session)
+		}
+	}
+	m.mu.Unlock()
+	for _, session := range sessions {
+		if err := session.persistRecoveryStateWithDurability(durable); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type handoffSession interface {

@@ -31,8 +31,10 @@ type StorageObserver interface {
 }
 
 type HandleState struct {
-	NextHandleID  uint64            `json:"next_handle_id"`
-	FileHandles   map[uint64]uint64 `json:"file_handles,omitempty"`
+	NextHandleID uint64            `json:"next_handle_id"`
+	FileHandles  map[uint64]uint64 `json:"file_handles,omitempty"`
+	// DirHandles is accepted when loading legacy recovery snapshots. Directory
+	// operations use the request inode and do not need handle recovery.
 	DirHandles    map[uint64]uint64 `json:"dir_handles,omitempty"`
 	UnlinkedFiles []uint64          `json:"unlinked_files,omitempty"`
 }
@@ -78,31 +80,11 @@ func (v *VolumeContext) OpenFileHandle(inode uint64) uint64 {
 	return v.nextHandleID
 }
 
-func (v *VolumeContext) OpenDirHandle(inode uint64) uint64 {
+func (v *VolumeContext) OpenDirHandle(uint64) uint64 {
 	v.handleMu.Lock()
 	defer v.handleMu.Unlock()
 	v.nextHandleID++
-	if v.dirHandleIDs == nil {
-		v.dirHandleIDs = make(map[uint64]uint64)
-	}
-	v.dirHandleIDs[v.nextHandleID] = inode
 	return v.nextHandleID
-}
-
-func (v *VolumeContext) ReleaseHandle(handleID uint64) (uint64, int, bool) {
-	v.handleMu.Lock()
-	defer v.handleMu.Unlock()
-	inode, ok := v.fileHandles[handleID]
-	if ok {
-		if v.openFileCount[inode] > 1 {
-			v.openFileCount[inode]--
-		} else {
-			delete(v.openFileCount, inode)
-		}
-	}
-	delete(v.fileHandles, handleID)
-	delete(v.dirHandleIDs, handleID)
-	return inode, v.openFileCount[inode], ok
 }
 
 func (v *VolumeContext) MarkUnlinkedFileIfOpen(inode uint64) bool {
@@ -160,13 +142,9 @@ func (v *VolumeContext) SnapshotHandleState() HandleState {
 	state := HandleState{
 		NextHandleID: v.nextHandleID,
 		FileHandles:  make(map[uint64]uint64, len(v.fileHandles)),
-		DirHandles:   make(map[uint64]uint64, len(v.dirHandleIDs)),
 	}
 	for handle, inode := range v.fileHandles {
 		state.FileHandles[handle] = inode
-	}
-	for handle, inode := range v.dirHandleIDs {
-		state.DirHandles[handle] = inode
 	}
 	for inode := range v.unlinkedFiles {
 		state.UnlinkedFiles = append(state.UnlinkedFiles, inode)
@@ -182,15 +160,19 @@ func (v *VolumeContext) RestoreHandleState(state HandleState) {
 	defer v.handleMu.Unlock()
 	v.nextHandleID = state.NextHandleID
 	v.fileHandles = make(map[uint64]uint64, len(state.FileHandles))
-	v.dirHandleIDs = make(map[uint64]uint64, len(state.DirHandles))
 	v.openFileCount = make(map[uint64]int)
 	v.unlinkedFiles = make(map[uint64]struct{}, len(state.UnlinkedFiles))
 	for handle, inode := range state.FileHandles {
 		v.fileHandles[handle] = inode
 		v.openFileCount[inode]++
+		if handle > v.nextHandleID {
+			v.nextHandleID = handle
+		}
 	}
-	for handle, inode := range state.DirHandles {
-		v.dirHandleIDs[handle] = inode
+	for handle := range state.DirHandles {
+		if handle > v.nextHandleID {
+			v.nextHandleID = handle
+		}
 	}
 	for _, inode := range state.UnlinkedFiles {
 		v.unlinkedFiles[inode] = struct{}{}

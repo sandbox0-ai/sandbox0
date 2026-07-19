@@ -743,7 +743,6 @@ func (s *FileSystemServer) ReleaseDir(ctx context.Context, req *pb.ReleaseDirReq
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
-		_, _, _ = volCtx.ReleaseHandle(req.HandleId)
 		return &pb.Empty{}, nil
 	}
 

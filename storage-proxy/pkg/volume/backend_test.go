@@ -194,3 +194,36 @@ func TestVolumeContextMarkUnlinkedFileIfOpenReturnsFalseForClosedInode(t *testin
 		t.Fatal("MarkUnlinkedFileIfOpen() after release = true, want false")
 	}
 }
+
+func TestVolumeContextDirectoryHandlesAreStateless(t *testing.T) {
+	volCtx := &VolumeContext{}
+	fileHandle := volCtx.OpenFileHandle(10)
+	dirHandle := volCtx.OpenDirHandle(20)
+	if dirHandle <= fileHandle {
+		t.Fatalf("directory handle = %d, want greater than file handle %d", dirHandle, fileHandle)
+	}
+	state := volCtx.SnapshotHandleState()
+	if len(state.DirHandles) != 0 {
+		t.Fatalf("SnapshotHandleState().DirHandles = %#v, want empty", state.DirHandles)
+	}
+	if state.NextHandleID != dirHandle {
+		t.Fatalf("SnapshotHandleState().NextHandleID = %d, want %d", state.NextHandleID, dirHandle)
+	}
+
+	restored := &VolumeContext{}
+	restored.RestoreHandleState(HandleState{
+		NextHandleID: 1,
+		FileHandles:  map[uint64]uint64{5: 50},
+		DirHandles:   map[uint64]uint64{9: 90},
+	})
+	if next := restored.OpenDirHandle(100); next != 10 {
+		t.Fatalf("OpenDirHandle() after legacy restore = %d, want 10", next)
+	}
+	restoredState := restored.SnapshotHandleState()
+	if len(restoredState.DirHandles) != 0 {
+		t.Fatalf("restored DirHandles = %#v, want empty", restoredState.DirHandles)
+	}
+	if got := restoredState.FileHandles[5]; got != 50 {
+		t.Fatalf("restored file handle inode = %d, want 50", got)
+	}
+}
